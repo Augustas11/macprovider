@@ -1367,8 +1367,10 @@ func TestEncryptedRelayDropsLateEndForRetiredRequest(t *testing.T) {
 	if bytes.Contains(logs.Bytes(), []byte(`"event":"aead_decrypt_failed"`)) {
 		t.Fatalf("late retired end logged AEAD failure: %s", logs.String())
 	}
-	if !bytes.Contains(logs.Bytes(), []byte("late encrypted inference_response_end for retired request dropped")) {
-		t.Fatalf("missing late-drop log: %s", logs.String())
+	// #2084 V-3: a late complete terminal of a buyer-cancelled request reaches
+	// the buyer handler's cancel-terminal waiter instead of being dropped.
+	if end, ok := relay.AwaitCancelTerminal(time.Second); !ok || end.Status != "complete" {
+		t.Fatalf("late encrypted complete terminal not handed to the cancel waiter: %#v ok=%v logs=%s", end, ok, logs.String())
 	}
 }
 

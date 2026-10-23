@@ -1180,6 +1180,7 @@ actor InferenceRelay {
                 ]
                 if let receiptHeader {
                     endFrame["receipt"] = receiptHeader
+                    attachShardGroupAttestation(&endFrame, receipt: receiptHeader, completion: completion, receiptBuilder: receiptBuilder, providerID: receiptProviderID)
                 }
                 if let settlementMetadata {
                     endFrame["receipt_pending_deadline_seconds"] = settlementMetadata.pendingDeadlineSeconds
@@ -1255,6 +1256,7 @@ actor InferenceRelay {
             ]
             if let receiptHeader {
                 endFrame["receipt"] = receiptHeader
+                attachShardGroupAttestation(&endFrame, receipt: receiptHeader, completion: completion, receiptBuilder: receiptBuilder, providerID: receiptProviderID)
             }
             if let settlementMetadata {
                 endFrame["receipt_pending_deadline_seconds"] = settlementMetadata.pendingDeadlineSeconds
@@ -1714,6 +1716,7 @@ actor InferenceRelay {
                     ]
                     if let receiptHeader {
                         endFrame["receipt"] = receiptHeader
+                        attachShardGroupAttestation(&endFrame, receipt: receiptHeader, completion: cancelled, receiptBuilder: receiptBuilder, providerID: receiptProviderID)
                     }
                     if let settlementMetadata {
                         endFrame["receipt_pending_deadline_seconds"] = settlementMetadata.pendingDeadlineSeconds
@@ -1803,6 +1806,7 @@ actor InferenceRelay {
                 )
                 if let receiptHeader {
                     endFrame["receipt"] = receiptHeader
+                    attachShardGroupAttestation(&endFrame, receipt: receiptHeader, completion: completion, receiptBuilder: receiptBuilder, providerID: receiptProviderID)
                 }
                 if let settlementMetadata {
                     endFrame["receipt_pending_deadline_seconds"] = settlementMetadata.pendingDeadlineSeconds
@@ -1884,6 +1888,10 @@ actor InferenceRelay {
         // allow-lists is a money-path violation.
         case "malformed_json_response", "json_schema_validation_failed", "tool_selection_validation_failed", "response_byte_cap_exceeded", "provider_timeout":
             status = error.code
+        // SPEC-051-R021, R022: a shard group head's chain failure. Before the
+        // first chunk it is retryable elsewhere; after it the stream ends here.
+        case "shard_group_failed", "shard_group_unavailable":
+            status = ShardGroupWire.failureStatus
         default:
             status = "error_internal"
         }
@@ -1901,7 +1909,32 @@ actor InferenceRelay {
             error.code == "provider_timeout" {
             frame["retryable"] = (error.envelope["error"] as? [String: Any])?["retryable"] as? Bool
         }
+        if status == ShardGroupWire.failureStatus {
+            frame["retryable"] = chunksSent == 0
+        }
         return frame
+    }
+
+    /// SPEC-051-R019: a shard group head's end frame carries the group attestation
+    /// bound to the receipt it sends. Without one the coordinator drops the receipt,
+    /// so a failure to build it is logged, never hidden.
+    private static func attachShardGroupAttestation(
+        _ frame: inout [String: Any],
+        receipt: String,
+        completion: CompletionResult,
+        receiptBuilder: ReceiptBuilder?,
+        providerID: String?
+    ) {
+        guard let evidence = completion.shardGroupEvidence else { return }
+        do {
+            guard let receiptBuilder, let providerID, let key = try receiptBuilder.keyStore.loadCurrent(providerId: providerID) else {
+                shardGroupLog("group attestation not attached: no current receipt key")
+                return
+            }
+            frame["group_attestation"] = try ShardGroupWire.attestation(receipt: receipt, evidence: evidence, key: key)
+        } catch {
+            shardGroupLog("group attestation not attached: \(error)")
+        }
     }
 
     private static func sendChunk(

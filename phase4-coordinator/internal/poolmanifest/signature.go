@@ -217,7 +217,7 @@ func VerifyPolicyCore(core PolicyCore, sigs []Signature, ss SignerSet) error {
 	if !(ss.NotBeforeUnix <= core.NotBeforeUnix && core.NotBeforeUnix < ss.ExpiresAtUnix) {
 		return errSignerSetInactive
 	}
-	if err := core.ValidateAcceptance(); err != nil {
+	if err := core.ValidateFullAcceptance(); err != nil {
 		return err
 	}
 	// Recompute the digest (also runs slice-1 structural validation of the core).
@@ -244,7 +244,7 @@ func verifyPolicyCoreSignature(core PolicyCore, sigs []Signature, ss SignerSet) 
 	if ss.Version != core.SignerSetVersion {
 		return errSignerSetVersion
 	}
-	if err := core.ValidateAcceptance(); err != nil {
+	if err := core.ValidateFullAcceptance(); err != nil {
 		return err
 	}
 	digest, err := core.ManifestCoreDigest()

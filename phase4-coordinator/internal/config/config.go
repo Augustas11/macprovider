@@ -141,6 +141,8 @@ type Config struct {
 	Providers                    []ProviderConfig             `yaml:"providers"`
 	// ComputeIntegrity is the SPEC-036 §5A cross-provider scoring namespace.
 	ComputeIntegrity ComputeIntegrityConfig `yaml:"compute_integrity"`
+	// ShardGroups is the SPEC-051 §4 multi-Mac shard group namespace.
+	ShardGroups ShardGroupsConfig `yaml:"shard_groups"`
 	// Payout is the SPEC-016 payout-pipeline configuration.
 	// Default Enabled=false ships the schema migrations + handlers
 	// idle; flipping to true activates the §3.3 endpoint (Step 1)
@@ -2259,6 +2261,7 @@ func Default() Config {
 			TrustedProxies: []string{"127.0.0.0/8", "::1/128"},
 		},
 		ComputeIntegrity: DefaultComputeIntegrityConfig(),
+		ShardGroups:      DefaultShardGroupsConfig(),
 		Payout: PayoutConfig{
 			Enabled: false,
 			Security: PayoutSecurityConfig{
@@ -3394,6 +3397,9 @@ func (c Config) Validate() error {
 		return fmt.Errorf("endpoints.provider_earnings.rate_limit_per_minute must be > 0")
 	}
 	if err := c.ComputeIntegrity.validate(); err != nil {
+		return err
+	}
+	if err := c.ShardGroups.validate(); err != nil {
 		return err
 	}
 	if err := c.validateExplorer(); err != nil {

@@ -73,6 +73,9 @@ type StatusPolicy struct {
 	RetentionPolicyFieldCategories  []string `json:"retention_policy_field_categories,omitempty"`
 	// PoolModels is the SPEC-043-R014 enumeration shared with pool_policy.json.
 	PoolModels []PolicyPoolModel `json:"pool_models"`
+	// MultiMacServing is the SPEC-051-R030 disclosure shared with
+	// pool_policy.json.
+	MultiMacServing *PolicyMultiMacServing `json:"multi_mac_serving,omitempty"`
 }
 
 type StatusMembership struct {
@@ -263,6 +266,7 @@ func buildStatusDocumentForPool(state *ReconstructedState, p *ReconstructedPoolS
 			RetentionPolicyGoverningVersion: retention.GoverningPolicyVersion,
 			RetentionPolicyFieldCategories:  retention.FieldCategories,
 			PoolModels:                      policyPoolModels(p),
+			MultiMacServing:                 policyMultiMacServing(p),
 		},
 		Membership: StatusMembership{
 			MinEligibleMembers:           policyMinEligibleMembers(p),
@@ -582,6 +586,16 @@ func policyAttestedMembers(p *ReconstructedPoolState) []poolmanifest.AttestedMem
 		return nil
 	}
 	return poolmanifest.CloneAttestedMembers(p.ManifestAttestedMembers)
+}
+
+// policyShardGroups is the active core's SPEC-051-R028 shard group
+// authorizations. Acceptance admits the extension only under an enforce-mode
+// v2 core, so every other pool yields none.
+func policyShardGroups(p *ReconstructedPoolState) []poolmanifest.PoolShardGroup {
+	if p == nil || !p.ManifestPolicyCoreV2 || p.ManifestSettlementMode != billing.RouteSnapshotModeEnforce {
+		return nil
+	}
+	return poolmanifest.ClonePoolShardGroups(p.ManifestShardGroups)
 }
 
 // policyRuntimeAllowlist is the external runtime_source set the accepted core

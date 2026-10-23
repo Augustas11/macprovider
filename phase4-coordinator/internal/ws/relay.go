@@ -301,10 +301,12 @@ func (a *relayActive) delivered(ctx context.Context) (<-chan InferenceResponseCh
 		}
 		select {
 		case end := <-a.done:
-			select {
-			case outDone <- end:
-			case <-ctx.Done():
-			}
+			// outDone holds exactly one frame, so this never blocks. The
+			// terminal is handed over even after the buyer's context ended: a
+			// buyer that read a stream to its end and left still settles from
+			// it (#2084 VM acceptance V-3); a random pick against ctx.Done
+			// dropped it.
+			outDone <- end
 		default:
 		}
 	}()
@@ -817,10 +819,16 @@ func (ps *providerSession) hasPendingCancelTerminal() bool {
 }
 
 // deliverCancelTerminal hands a retired request's "cancelled" terminal frame
-// to the buyer handler waiting on RelayStream.CancelTerminal. Any other frame,
-// or a second one, is not delivered.
-func (ps *providerSession) deliverCancelTerminal(end InferenceResponseEnd) bool {
-	if end.Status != "cancelled" {
+// to the buyer handler waiting on RelayStream.CancelTerminal. A "complete"
+// terminal is delivered the same way: the provider finished before the cancel
+// reached it (a buyer that closed right after the stream's final [DONE]), and
+// the buyer handler decides what it settles (#2084 VM acceptance V-3). Any
+// other frame, or a second one, is not delivered.
+// prepare runs once the cancelled terminal is claimed for delivery, before the
+// waiter receives it; the shard group attestation check (SPEC-051-R019) runs
+// there so a group head's cancel receipt is verified like any other terminal.
+func (ps *providerSession) deliverCancelTerminal(end InferenceResponseEnd, prepare func(InferenceResponseEnd) InferenceResponseEnd) bool {
+	if end.Status != "cancelled" && end.Status != "complete" {
 		return false
 	}
 	ps.activeMu.Lock()
@@ -833,6 +841,9 @@ func (ps *providerSession) deliverCancelTerminal(end InferenceResponseEnd) bool 
 	retired.cancelTerminal = nil
 	ps.retired[end.RequestID] = retired
 	ps.activeMu.Unlock()
+	if prepare != nil {
+		end = prepare(end)
+	}
 	select {
 	case ch <- end:
 	default:
@@ -2022,7 +2033,9 @@ func (s *Server) handleInferenceEnd(providerID, assignedID string, payload []byt
 				var late InferenceResponseEnd
 				if json.Unmarshal(plaintext, &late) == nil {
 					late.RequestID = requestID
-					if session.deliverCancelTerminal(late) {
+					if session.deliverCancelTerminal(late, func(e InferenceResponseEnd) InferenceResponseEnd {
+						return s.applyShardGroupAttestation(providerID, assignedID, e)
+					}) {
 						return
 					}
 				}
@@ -2082,13 +2095,16 @@ func (s *Server) handleInferenceEnd(providerID, assignedID string, payload []byt
 	}
 	active, ok := session.removeActive(end.RequestID)
 	if !ok {
-		if session.deliverCancelTerminal(end) {
+		if session.deliverCancelTerminal(end, func(e InferenceResponseEnd) InferenceResponseEnd {
+			return s.applyShardGroupAttestation(providerID, assignedID, e)
+		}) {
 			return
 		}
 		s.log.Warn().Str("provider_id", providerID).Str("request_id", end.RequestID).Msg("unknown inference_response_end request_id")
 		return
 	}
 	end = relayBlindTerminalReceipts(active.relayBlind, end)
+	end = s.applyShardGroupAttestation(providerID, assignedID, end)
 	active.done <- end
 	close(active.chunks)
 	s.closeProviderForTier2RekeyIfDrained(session, providerID, assignedID, end.RequestID)

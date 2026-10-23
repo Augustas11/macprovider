@@ -1,0 +1,168 @@
+{
+  "group_attestation" : {
+    "attempt_n" : 1,
+    "group_provider_id" : "prov-head",
+    "receipt_tuple_sha256" : "d2359b425095762905b945bda91e55175f701d02541f9165f662bd0e1635676e",
+    "request_id" : "req_golden_1",
+    "schema" : "macprovider.shard-group-attestation.v1",
+    "segments" : [
+      {
+        "group_epoch" : 3,
+        "step_end" : 5,
+        "step_start" : 0,
+        "sub_receipts" : [
+          {
+            "public_key" : "0EqyMnQrtKs6E2i9RhXk5tAiSrcaAWuvhSCjMsl3hzc=",
+            "signature" : "OFSlwr5K4QTtabTGik4+uUJmd8mNtsWRT3nQWFKESP\/2BRP+xannCW57dtbe+K6rTyacjtfnbkRPo0domwzUDQ==",
+            "sub_receipt" : {
+              "decode_steps" : 4,
+              "group_epoch" : 3,
+              "in_digest" : "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+              "layer_end" : 14,
+              "layer_start" : 0,
+              "member_device_id" : "prov-head",
+              "out_digest" : "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+              "prompt_tokens" : 12,
+              "request_id" : "req_golden_1",
+              "stage_index" : 0
+            }
+          },
+          {
+            "public_key" : "oJql9HpnWYAv+VX43C0qFKXJnSO+l\/hkEn\/5ODRVpPA=",
+            "signature" : "QYNQUvG7pAwqdl6pxsUI7kCASd18J1gZgYlOtNZWg0VdwXlqnUGKTPupn4+Vkwr6bdb7dDlpdcyXKbrXmvfGBg==",
+            "sub_receipt" : {
+              "decode_steps" : 4,
+              "group_epoch" : 3,
+              "in_digest" : "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+              "layer_end" : 28,
+              "layer_start" : 14,
+              "member_device_id" : "mac-b",
+              "out_digest" : "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+              "prompt_tokens" : 12,
+              "request_id" : "req_golden_1",
+              "stage_index" : 1
+            }
+          }
+        ]
+      }
+    ],
+    "signature" : "y5fziiuWRjscFK8ZTbnReCSwxMsTpoFDLWmr7WAhSQAIkVheo+PtthjUBM9NCZlAUKIGEoO4AlMOZwl0ME3eDQ=="
+  },
+  "head_public_key" : "0EqyMnQrtKs6E2i9RhXk5tAiSrcaAWuvhSCjMsl3hzc=",
+  "receipt" : "eyJhdHRlbXB0X24iOjEsInByb3ZpZGVyX2lkIjoicHJvdi1oZWFkIiwicmVjZWlwdF92ZXJzaW9uIjoiNCIsInJlcXVlc3RfaWQiOiJyZXFfZ29sZGVuXzEiLCJ1c2FnZSI6eyJiaWxsYWJsZV9pbnB1dF90b2tlbnMiOjEyLCJiaWxsYWJsZV9vdXRwdXRfdG9rZW5zIjo0LCJkZWxpdmVyZWRfb3V0cHV0X2J5dGVzIjoyMCwib2JzZXJ2ZWRfaW5wdXRfdG9rZW5zIjoxMiwib2JzZXJ2ZWRfb3V0cHV0X3Rva2VucyI6NH19.MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMw==",
+  "shard_group_heartbeat" : {
+    "group_epoch" : 3,
+    "group_provider_id" : "prov-head",
+    "links" : [
+      {
+        "from_member_device_id" : "prov-head",
+        "interface_type" : "thunderbolt",
+        "rtt_p99_us" : 400,
+        "to_member_device_id" : "mac-b"
+      },
+      {
+        "from_member_device_id" : "mac-b",
+        "interface_type" : "thunderbolt",
+        "rtt_p99_us" : 400,
+        "to_member_device_id" : "prov-head"
+      }
+    ],
+    "members" : [
+      {
+        "healthy" : true,
+        "member_device_id" : "prov-head"
+      },
+      {
+        "healthy" : true,
+        "member_device_id" : "mac-b"
+      }
+    ],
+    "type" : "shard_group_heartbeat",
+    "version" : 1
+  },
+  "shard_group_register" : {
+    "record" : {
+      "frame_protection" : "crc32c",
+      "group_epoch" : 3,
+      "group_provider_id" : "prov-head",
+      "interconnect_class" : "thunderbolt-ip",
+      "max_concurrency" : 4,
+      "model" : {
+        "artifact_hash" : "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "artifact_hash_algorithm" : "macprovider.snapshot-manifest.v1",
+        "model_id" : "mlx-community\/Llama-3.2-3B-Instruct-4bit",
+        "pool_model_id" : "pool\/ijUnc-ZQf-LJeRvkhi-0iQ\/llama-3b"
+      },
+      "num_layers" : 28,
+      "parallelism_mode" : "pipeline",
+      "schema" : "macprovider.shard-group-record.v1",
+      "spares" : [
+
+      ],
+      "stages" : [
+        {
+          "layer_end" : 14,
+          "layer_start" : 0,
+          "member_device_id" : "prov-head",
+          "stage_index" : 0
+        },
+        {
+          "layer_end" : 28,
+          "layer_start" : 14,
+          "member_device_id" : "mac-b",
+          "stage_index" : 1
+        }
+      ],
+      "supervision" : {
+        "decode_hop_deadline_ms" : 500,
+        "heartbeat_interval_ms" : 100,
+        "heartbeat_miss_limit" : 3,
+        "prefill_chunk_deadline_ms" : 3000,
+        "replay_deadline_ms" : 10000
+      },
+      "transport_version" : 1
+    },
+    "record_signature" : "fFGeir1ZXK9FA0s3g7JNs2zuFlcfyK9wjTYz18JjbEb499UYzUAZ\/KP9RLn++AxITZa8EAyhrEh9wsR\/8SvlBQ==",
+    "type" : "shard_group_register",
+    "version" : 1
+  },
+  "shard_member_health" : {
+    "group_epoch" : 3,
+    "group_provider_id" : "prov-head",
+    "healthy" : true,
+    "links" : [
+      {
+        "interface_type" : "thunderbolt",
+        "peer_member_device_id" : "prov-head",
+        "rtt_p99_us" : 400
+      }
+    ],
+    "member_device_id" : "mac-b",
+    "reason" : "",
+    "type" : "shard_member_health",
+    "version" : 1
+  },
+  "shard_member_hello" : {
+    "artifact_hash" : "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "artifact_hash_algorithm" : "macprovider.snapshot-manifest.v1",
+    "group_epoch" : 3,
+    "group_provider_id" : "prov-head",
+    "layer_end" : 28,
+    "layer_start" : 14,
+    "links" : [
+      {
+        "interface_type" : "thunderbolt",
+        "peer_member_device_id" : "prov-head"
+      }
+    ],
+    "member_device_id" : "mac-b",
+    "role" : "stage",
+    "stage_fits" : true,
+    "stage_index" : 1,
+    "transport_version" : 1,
+    "type" : "shard_member_hello",
+    "version" : 1,
+    "weights_verified" : true
+  },
+  "tail_public_key" : "oJql9HpnWYAv+VX43C0qFKXJnSO+l\/hkEn\/5ODRVpPA="
+}

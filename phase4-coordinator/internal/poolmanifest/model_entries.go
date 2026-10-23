@@ -142,13 +142,16 @@ func PoolModelRejectCode(err error) string {
 		return RejectCodePaidServing
 	case errors.Is(err, errModelEntryDupHash), errors.Is(err, errModelEntriesOrder), errors.Is(err, errAttestedMembersOrder):
 		return RejectCodeDuplicate
-	case errors.Is(err, errModelEntriesBound), errors.Is(err, errAttestedMembersBound):
+	case errors.Is(err, errModelEntriesBound), errors.Is(err, errAttestedMembersBound), errors.Is(err, errShardGroupsBound):
 		return RejectCodeLimitExceeded
+	case errors.Is(err, errShardGroupsOrder):
+		return RejectCodeDuplicate
 	}
 	for _, invalid := range []error{
 		errExtensionBody, errExtensionEmptyList, errModelEntryID, errModelEntryPoolID, errModelEntryAlgorithm,
 		errModelEntryHash, errModelEntryDisclosure, errModelEntryContext, errModelEntryPriceRange,
 		errModelEntriesObserve, errAttestedMemberAccount,
+		errShardGroupID, errShardGroupModel, errShardGroupMembers, errShardGroupsObserve, errShardGroupsEmptyArg,
 	} {
 		if errors.Is(err, invalid) {
 			return RejectCodeInvalid

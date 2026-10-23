@@ -15,6 +15,11 @@ import (
 
 func newCancelTerminalHarness(t *testing.T) (*Server, *pool.Provider, net.Conn) {
 	t.Helper()
+	return newCancelTerminalHarnessWith(t, nil)
+}
+
+func newCancelTerminalHarnessWith(t *testing.T, mutate func(*pool.Provider)) (*Server, *pool.Provider, net.Conn) {
+	t.Helper()
 	serverConn, providerConn := net.Pipe()
 	t.Cleanup(func() {
 		_ = providerConn.Close()
@@ -22,6 +27,9 @@ func newCancelTerminalHarness(t *testing.T) (*Server, *pool.Provider, net.Conn) 
 	})
 	registry := pool.NewRegistry(nil)
 	provider := &pool.Provider{ProviderID: "p1", AssignedID: "s1", ModelID: "model-a", Tier: pool.TierProvisional, InferencePath: pool.InferencePathWSTunneled}
+	if mutate != nil {
+		mutate(provider)
+	}
 	registry.Register(provider, serverConn)
 	s := NewServer(config.Default(), registry, zerolog.Nop())
 	session := newProviderSession("p1", "s1", serverConn, 4)
@@ -68,27 +76,6 @@ func TestRelayBuyerCancelDeliversProviderCancelledTerminalOnce(t *testing.T) {
 	}
 	if _, ok := relay.AwaitCancelTerminal(20 * time.Millisecond); ok {
 		t.Fatal("a second cancelled frame was delivered")
-	}
-}
-
-// Only a "cancelled" frame answers a buyer cancel. A late "complete" frame
-// signs normal_done, which would not match the buyer_cancel ledger row.
-func TestRelayBuyerCancelIgnoresLateNonCancelledTerminal(t *testing.T) {
-	s, provider, providerConn := newCancelTerminalHarness(t)
-	relay, err := s.DispatchInference(context.Background(), *provider, "req-cancel-complete", []byte(`{"model":"model-a"}`), true)
-	if err != nil {
-		t.Fatalf("dispatch: %v", err)
-	}
-	if _, _, err := wsutil.ReadServerData(providerConn); err != nil {
-		t.Fatalf("read inference_request: %v", err)
-	}
-	relay.Cancel("buyer_disconnected")
-	if _, _, err := wsutil.ReadServerData(providerConn); err != nil {
-		t.Fatalf("read cancel_request: %v", err)
-	}
-	s.handleInferenceEnd("p1", "s1", cancelledEndPayload(t, "req-cancel-complete", "complete", "receipt-normal"))
-	if end, ok := relay.AwaitCancelTerminal(20 * time.Millisecond); ok {
-		t.Fatalf("late complete frame delivered as a cancel terminal: %#v", end)
 	}
 }
 
@@ -140,5 +127,83 @@ func TestEncryptedRelayBuyerCancelDeliversProviderCancelledTerminal(t *testing.T
 	}
 	if _, ok := s.storedSessionFor("p1", "s1"); !ok {
 		t.Fatal("session closed after a valid encrypted cancelled terminal")
+	}
+}
+
+// SPEC-051-R019: a shard group head's cancelled terminal goes through the
+// group attestation check like any other terminal frame, so a receipt
+// without a valid attestation never reaches buyer-cancel settlement.
+func TestRelayBuyerCancelTerminalOfShardHeadNeedsGroupAttestation(t *testing.T) {
+	s, provider, providerConn := newCancelTerminalHarnessWith(t, func(p *pool.Provider) { p.ShardGroupHeadV1 = true })
+	relay, err := s.DispatchInference(context.Background(), *provider, "req-cancel-shard", []byte(`{"model":"model-a"}`), true)
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if _, _, err := wsutil.ReadServerData(providerConn); err != nil {
+		t.Fatalf("read inference_request: %v", err)
+	}
+	relay.Cancel("buyer_disconnected")
+	if _, _, err := wsutil.ReadServerData(providerConn); err != nil {
+		t.Fatalf("read cancel_request: %v", err)
+	}
+	s.handleInferenceEnd("p1", "s1", cancelledEndPayload(t, "req-cancel-shard", "cancelled", "receipt-unattested"))
+	end, ok := relay.AwaitCancelTerminal(time.Second)
+	if !ok {
+		t.Fatal("cancelled terminal frame not delivered")
+	}
+	if end.Status != "cancelled" || end.Receipt != "" {
+		t.Fatalf("terminal = %#v, want the cancelled frame without its unattested receipt", end)
+	}
+}
+
+// #2084 VM acceptance V-3: a provider that finished before the buyer's cancel
+// reached it sends a "complete" terminal for the retired request; it reaches
+// the buyer handler on CancelTerminal exactly once, like a cancelled one. The
+// buyer handler settles it only for a stream the buyer read to its final
+// [DONE]; everywhere else a buyer cancel binds only a "cancelled" terminal
+// (withProviderCancelTerminal), because a complete frame signs normal_done.
+func TestRelayBuyerCancelDeliversALateCompleteTerminalOnce(t *testing.T) {
+	s, provider, providerConn := newCancelTerminalHarness(t)
+	relay, err := s.DispatchInference(context.Background(), *provider, "req-late-complete", []byte(`{"model":"model-a"}`), true)
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if _, _, err := wsutil.ReadServerData(providerConn); err != nil {
+		t.Fatalf("read inference_request: %v", err)
+	}
+	relay.Cancel("buyer_disconnected")
+	if _, _, err := wsutil.ReadServerData(providerConn); err != nil {
+		t.Fatalf("read cancel_request: %v", err)
+	}
+	s.handleInferenceEnd("p1", "s1", cancelledEndPayload(t, "req-late-complete", "complete", "receipt-complete"))
+	s.handleInferenceEnd("p1", "s1", cancelledEndPayload(t, "req-late-complete", "complete", "receipt-again"))
+	end, ok := relay.AwaitCancelTerminal(time.Second)
+	if !ok || end.Status != "complete" || end.Receipt != "receipt-complete" {
+		t.Fatalf("terminal = %#v ok=%v, want the first complete frame", end, ok)
+	}
+	if _, ok := relay.AwaitCancelTerminal(20 * time.Millisecond); ok {
+		t.Fatal("a second terminal was delivered")
+	}
+}
+
+// #2084 VM acceptance V-3: the terminal frame of a request whose buyer
+// context already ended is still handed to RelayStream.Done (it used to be a
+// coin toss against ctx.Done).
+func TestRelayDeliveredHandsTheTerminalOverAfterTheBuyerLeft(t *testing.T) {
+	for i := 0; i < 200; i++ {
+		active := &relayActive{chunks: make(chan InferenceResponseChunk), done: make(chan InferenceResponseEnd, 1)}
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		active.done <- InferenceResponseEnd{Type: "inference_response_end", RequestID: "r", Status: "complete"}
+		close(active.chunks)
+		_, done := active.delivered(ctx)
+		select {
+		case end := <-done:
+			if end.Status != "complete" {
+				t.Fatalf("iteration %d: terminal %#v", i, end)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("iteration %d: terminal dropped after the buyer context ended", i)
+		}
 	}
 }

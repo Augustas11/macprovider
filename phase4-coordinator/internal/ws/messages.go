@@ -178,6 +178,10 @@ type Tier2Caps struct {
 	RelayBlindSettlementReceiptV1 bool `json:"relay_blind_settlement_receipt_v1,omitempty"`
 	// ComputeScoreV1 is the SPEC-036 FR-21 scorer capability.
 	ComputeScoreV1 bool `json:"compute_score_v1,omitempty"`
+	// ShardGroupHeadV1 and ShardMemberV1 are the SPEC-051-R029 shard group
+	// head and member session capabilities.
+	ShardGroupHeadV1 bool `json:"shard_group_head_v1,omitempty"`
+	ShardMemberV1    bool `json:"shard_member_v1,omitempty"`
 }
 
 type AuthChallenge struct {
@@ -593,6 +597,10 @@ type InferenceResponseEnd struct {
 	// terminal frame of a dispatch that carried relay_blind_settlement
 	// (SPEC-001-R005). It is internal: never copied to a buyer surface.
 	RelayBlindSettlementReceipt string `json:"relay_blind_settlement_receipt,omitempty"`
+	// GroupAttestation is the SPEC-051-R019 group attestation a shard group
+	// head sends with its receipt. The coordinator verifies and stores it
+	// and clears it before the frame reaches the buyer path.
+	GroupAttestation json.RawMessage `json:"group_attestation,omitempty"`
 }
 
 // SELivenessChallenge is sent by the coordinator to a provider that completed

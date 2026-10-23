@@ -45,6 +45,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/relayblind"
 	"github.com/augstar/macprovider-coordinator/internal/requestlog"
 	"github.com/augstar/macprovider-coordinator/internal/rewards"
+	"github.com/augstar/macprovider-coordinator/internal/shardgroup"
 	"github.com/augstar/macprovider-coordinator/internal/sourceevidence"
 	"github.com/augstar/macprovider-coordinator/internal/sqliteutil"
 	"github.com/augstar/macprovider-coordinator/internal/stats"
@@ -277,6 +278,14 @@ func runCoordinator() (exitCode int) {
 		fmt.Fprintf(os.Stderr, "fleet cache authority: %v\n", err)
 		os.Exit(1)
 	}
+	// SPEC-051: durable shard group records, member key bindings and
+	// group attestations, and the live group registry.
+	shardGroupStore, err := shardgroup.NewStore(reqLogStore.DB())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "shard groups: %v\n", err)
+		os.Exit(1)
+	}
+	shardGroupRegistry := shardgroup.NewRegistry(shardgroup.ConfigFrom(cfg.ShardGroups), shardGroupStore, nil)
 	moneyCheckpointDB, err := sql.Open("sqlite", sqliteutil.WithManualWALCheckpointPragmas(cfg.Storage.DBPath))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "money sqlite checkpoint: %v\n", err)
@@ -766,6 +775,7 @@ func runCoordinator() (exitCode int) {
 	// is always available for FR-C9.1 mint-on-first-admit even during
 	// the settling window before the operator flips the flag.
 	wsOpts = append(wsOpts, providerws.WithTokenValidator(tokenStore))
+	wsOpts = append(wsOpts, providerws.WithShardGroups(shardGroupRegistry, shardGroupStore, tokenStore))
 	// SPEC-003 v0.8 FR-C9.1/FR-C9.4 — separate TokenIssuer wiring for
 	// minting + TOFU. Same concrete store today; the split is at the
 	// interface layer (codex architect review on PR #44, interface
@@ -1152,6 +1162,7 @@ func runCoordinator() (exitCode int) {
 	wsOpts = append(wsOpts, providerws.WithFleetCache(fleetCacheStore))
 	wsOpts = append(wsOpts, nativeMTPCanaryBootOption(cfg.AutotuneFeeds, autotuneFeeds, logger))
 	wsServer := providerws.NewServer(cfg, registry, logger, wsOpts...)
+	go wsServer.RunShardGroupSweep(shutdownCtx)
 	// SPEC-047-R001 v0.1.5: the SIGHUP reload's Tier-2 material is staged and
 	// promoted with the release publication instead of swapped on its own.
 	tier2.SetReleasePublisher(wsServer)
@@ -5002,6 +5013,15 @@ func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 conf
 		Int("trusted_pools_provider_owner_account_ids_providers", owners.Providers).
 		Str("trusted_pools_provider_owner_account_ids_sha256", owners.Digest).
 		Msg("trusted pools pool-model bounds and owner authority reloaded")
+	// SPEC-051 §4 (#2084 VM acceptance F10): shard_groups values apply on
+	// reload and every group is re-evaluated against them at once.
+	if wsServer.ApplyShardGroupsConfig(cfg.ShardGroups) {
+		logger.Info().
+			Int("shard_groups_max_members", cfg.ShardGroups.MaxMembers).
+			Int("shard_groups_max_link_rtt_p99_us", cfg.ShardGroups.MaxLinkRTTP99US).
+			Int("shard_groups_group_heartbeat_stale_multiple", cfg.ShardGroups.GroupHeartbeatStaleMultiple).
+			Msg("shard_groups config reloaded")
+	}
 	// Every fallible step above returned early on rejection, so reaching here
 	// means this reload's config is the applied one.
 	recordAppliedConfig(logger, "sighup", configPath, configOverlay, configDigests, configLoadedAt, buyerServer.AppliedEconomics())

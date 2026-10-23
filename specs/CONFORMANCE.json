@@ -9,7 +9,7 @@
     {
       "spec_id": "SPEC-001",
       "title": "Phase 3 Binary: Mac Provider Inference CLI",
-      "version": "1.9.41",
+      "version": "1.9.43",
       "path": "specs/SPEC-001-phase3-binary.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -1240,7 +1240,7 @@
     {
       "spec_id": "SPEC-042",
       "title": "Pool Control Plane and Trusted-Pool Manifest",
-      "version": "0.0.43",
+      "version": "0.0.44",
       "path": "specs/SPEC-042-pool-control-plane.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1282,7 +1282,7 @@
     {
       "spec_id": "SPEC-043",
       "title": "Trusted Pool Creator Onboarding MVP",
-      "version": "0.3.5",
+      "version": "0.3.6",
       "path": "specs/SPEC-043-trusted-pool-creator-onboarding.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -1587,6 +1587,53 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1062",
         "rationale": "SPEC-050 v0.1.0 defines the MALIBU stake allowance: a ledger-MALIBU stake, a budgeted daily non-withdrawable inference allowance, allowance-first spend ordering, and the self-dealing reward exclusion. It ships on; the operator's daily budget sets its size. Every requirement stays pending until one account stakes, receives an allowance, and spends it through the gateway live."
+      }
+    },
+    {
+      "spec_id": "SPEC-051",
+      "title": "Multi-Mac Shard Groups",
+      "version": "0.2.6",
+      "path": "specs/SPEC-051-multi-mac-shard-groups.md",
+      "status": "draft",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "multi-mac-shard-groups"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-001",
+        "SPEC-002",
+        "SPEC-003",
+        "SPEC-005",
+        "SPEC-006",
+        "SPEC-008",
+        "SPEC-010",
+        "SPEC-015",
+        "SPEC-022",
+        "SPEC-023",
+        "SPEC-027",
+        "SPEC-032",
+        "SPEC-033",
+        "SPEC-036",
+        "SPEC-038",
+        "SPEC-041",
+        "SPEC-042",
+        "SPEC-043",
+        "SPEC-044",
+        "SPEC-047",
+        "SPEC-049"
+      ],
+      "implementation_status": "partial",
+      "production_status": "not-deployed",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "complete",
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2084",
+        "rationale": "SPEC-051 v0.2.0 defines single-owner multi-Mac shard groups serving Trusted Pool traffic: pipeline-parallel serving of one pool model across one owner's co-located Macs on one wired LAN, with the head's provider identity as the group identity, minimum-of-members trust, a creator-signed pool_shard_groups/v1 authorization, a framed stage transport, the group wire messages, one head-signed receipt with a group attestation of chained per-member sub-receipts, and explicit failure semantics. Every requirement stays pending until a paid Trusted Pool request is served by a shard group through the gateway and settled at the pool price."
       }
     }
   ],
@@ -14164,6 +14211,577 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/2054",
         "rationale": "Authoritative buyer ownership exclusion implemented with source fixtures; deployed gateway/coordinator acceptance remains pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-051-R001",
+      "spec_id": "SPEC-051",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/shardgroup/registry.go:func (r *Registry) Register",
+        "phase4-coordinator/internal/shardgroup/registry.go:func (r *Registry) evaluateLocked",
+        "phase4-coordinator/internal/ws/shard_groups.go:func (s *Server) shardGroupOwners"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/shardgroup/shardgroup_test.go:TestRegisterSignatureEpochAndOwnership",
+        "phase4-coordinator/internal/shardgroup/shardgroup_test.go:TestEvaluateAvailability"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2084",
+        "rationale": "SPEC-051 v0.2.0 (#2084) Shard group scope: one owner, one LAN. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid Trusted Pool request through the gateway served by an authorized shard group. Coordinator half implemented in the #2084 campaign PR; pending the provider half, the coordinator deploy, and a paid Trusted Pool request through the gateway served by an authorized shard group."
+      }
+    },
+    {
+      "requirement_id": "SPEC-051-R002",
+      "spec_id": "SPEC-051",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/shardgroup/record.go:func validatePlacement",
+        "phase4-coordinator/internal/shardgroup/registry.go:func (r *Registry) MemberHello"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/shardgroup/shardgroup_test.go:TestMemberCannotJoinTwoGroups",
+        "phase4-coordinator/internal/shardgroup/shardgroup_test.go:TestValidateRecordReasons"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2084",
+        "rationale": "SPEC-051 v0.2.0 (#2084) One group provider identity, member device identities. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid Trusted Pool request through the gateway served by an authorized shard group. Coordinator half implemented in the #2084 campaign PR; pending the provider half, the coordinator deploy, and a paid Trusted Pool request through the gateway served by an authorized shard group."
+      }
+    },
+    {
+      "requirement_id": "SPEC-051-R003",
+      "spec_id": "SPEC-051",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2084",
+        "rationale": "SPEC-051 v0.2.0 (#2084) Every member passes the full single-provider admission bar. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid Trusted Pool request through the gateway served by an authorized shard group."
+      }
+    },
+    {
+      "requirement_id": "SPEC-051-R004",
+      "spec_id": "SPEC-051",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/shardgroup/registry.go:func labelsAtLeast"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/shardgroup/shardgroup_test.go:TestEvaluateAvailability"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2084",
+        "rationale": "SPEC-051 v0.2.0 (#2084) Group trust is the minimum of its members. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid Trusted Pool request through the gateway served by an authorized shard group. Coordinator half implemented in the #2084 campaign PR; pending the provider half, the coordinator deploy, and a paid Trusted Pool request through the gateway served by an authorized shard group."
+      }
+    },
+    {
+      "requirement_id": "SPEC-051-R005",
+      "spec_id": "SPEC-051",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/shardgroup/record.go:func ValidateRecord",
+        "phase4-coordinator/internal/shardgroup/record.go:func VerifyRecordSignature",
+        "phase4-coordinator/internal/shardgroup/store.go:func (s *Store) AcceptRecord"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/shardgroup/shardgroup_test.go:TestValidateRecordReasons",
+        "phase4-coordinator/internal/shardgroup/shardgroup_test.go:TestRegisterSignatureEpochAndOwnership",
+        "phase4-coordinator/internal/shardgroup/shardgroup_test.go:TestStrictParsingRefusesMalformedMessages"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2084",
+        "rationale": "SPEC-051 v0.2.0 (#2084) Group record. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid Trusted Pool request through the gateway served by an authorized shard group. Coordinator half implemented in the #2084 campaign PR; pending the provider half, the coordinator deploy, and a paid Trusted Pool request through the gateway served by an authorized shard group."
+      }
+    },
+    {
+      "requirement_id": "SPEC-051-R006",
+      "spec_id": "SPEC-051",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/shardgroup/record.go:func validatePlacement"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/shardgroup/shardgroup_test.go:TestValidateRecordReasons"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2084",
+        "rationale": "SPEC-051 v0.2.0 (#2084) Layer placement validity. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid Trusted Pool request through the gateway served by an authorized shard group. Coordinator half implemented in the #2084 campaign PR; pending the provider half, the coordinator deploy, and a paid Trusted Pool request through the gateway served by an authorized shard group."
+      }
+    },
+    {
+      "requirement_id": "SPEC-051-R007",
+      "spec_id": "SPEC-051",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/shardgroup/registry.go:func (r *Registry) bindClaimLocked",
+        "phase4-coordinator/internal/shardgroup/registry.go:func (r *Registry) evaluateLocked"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/shardgroup/shardgroup_test.go:TestMemberHelloBindingAndPendingClaims",
+        "phase4-coordinator/internal/shardgroup/shardgroup_test.go:TestEvaluateAvailability"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2084",
+        "rationale": "SPEC-051 v0.2.0 (#2084) Interconnect admissibility. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid Trusted Pool request through the gateway served by an authorized shard group. Coordinator half implemented in the #2084 campaign PR; pending the provider half, the coordinator deploy, and a paid Trusted Pool request through the gateway served by an authorized shard group."
+      }
+    },
+    {
+      "requirement_id": "SPEC-051-R008",
+      "spec_id": "SPEC-051",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2084",
+        "rationale": "SPEC-051 v0.2.0 (#2084) Member weight identity. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid Trusted Pool request through the gateway served by an authorized shard group."
+      }
+    },
+    {
+      "requirement_id": "SPEC-051-R009",
+      "spec_id": "SPEC-051",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/buyer/relay_blind.go:func relayBlindBindable",
+        "phase4-coordinator/internal/buyer/shard_group_route.go:func (r shardGroupRoute) routable"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/buyer/shard_group_route_internal_test.go:TestShardSessionsRoutingState",
+        "phase4-coordinator/internal/buyer/shard_group_routing_test.go:TestGlobalRequestNeverRoutesToShardGroupSessions"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2084",
+        "rationale": "SPEC-051 v0.2.0 (#2084) Privacy: every member sees the prompt. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid Trusted Pool request through the gateway served by an authorized shard group. Coordinator half implemented in the #2084 campaign PR; pending the provider half, the coordinator deploy, and a paid Trusted Pool request through the gateway served by an authorized shard group."
+      }
+    },
+    {
+      "requirement_id": "SPEC-051-R010",
+      "spec_id": "SPEC-051",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2084",
+        "rationale": "SPEC-051 v0.2.0 (#2084) Stage transport framing. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid Trusted Pool request through the gateway served by an authorized shard group."
+      }
+    },
+    {
+      "requirement_id": "SPEC-051-R011",
+      "spec_id": "SPEC-051",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/shardgroup/record.go:func ValidateRecord"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/shardgroup/shardgroup_test.go:TestValidateRecordReasons"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2084",
+        "rationale": "SPEC-051 v0.2.0 (#2084) Frame integrity and authentication. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid Trusted Pool request through the gateway served by an authorized shard group. Coordinator half implemented in the #2084 campaign PR; pending the provider half, the coordinator deploy, and a paid Trusted Pool request through the gateway served by an authorized shard group."
+      }
+    },
+    {
+      "requirement_id": "SPEC-051-R012",
+      "spec_id": "SPEC-051",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2084",
+        "rationale": "SPEC-051 v0.2.0 (#2084) Sequencing and no silent retransmit. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid Trusted Pool request through the gateway served by an authorized shard group."
+      }
+    },
+    {
+      "requirement_id": "SPEC-051-R013",
+      "spec_id": "SPEC-051",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2084",
+        "rationale": "SPEC-051 v0.2.0 (#2084) Per-hop deadlines and prefill chunks. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid Trusted Pool request through the gateway served by an authorized shard group."
+      }
+    },
+    {
+      "requirement_id": "SPEC-051-R014",
+      "spec_id": "SPEC-051",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2084",
+        "rationale": "SPEC-051 v0.2.0 (#2084) Heartbeats and peer death. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid Trusted Pool request through the gateway served by an authorized shard group."
+      }
+    },
+    {
+      "requirement_id": "SPEC-051-R015",
+      "spec_id": "SPEC-051",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/shardgroup/registry.go:func (r *Registry) Evaluate",
+        "phase4-coordinator/internal/ws/shard_groups.go:func (s *Server) reevaluateShardGroup",
+        "phase4-coordinator/internal/ws/shard_groups.go:func (s *Server) RunShardGroupSweep",
+        "phase4-coordinator/internal/pool/provider.go:func (r *Registry) SetShardGroupState"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/shardgroup/shardgroup_test.go:TestEvaluateAvailability",
+        "phase4-coordinator/internal/ws/shard_groups_test.go:TestShardGroupLifecycleOverWire"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2084",
+        "rationale": "SPEC-051 v0.2.0 (#2084) Group health and availability. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid Trusted Pool request through the gateway served by an authorized shard group. Coordinator half implemented in the #2084 campaign PR; pending the provider half, the coordinator deploy, and a paid Trusted Pool request through the gateway served by an authorized shard group."
+      }
+    },
+    {
+      "requirement_id": "SPEC-051-R016",
+      "spec_id": "SPEC-051",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/pool/provider.go:func (p Provider) RoutingEligible",
+        "phase4-coordinator/internal/buyer/shard_group_route.go:func (r shardGroupRoute) routable",
+        "phase4-coordinator/internal/buyer/shard_group_route.go:func (r shardGroupRoute) filter"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/buyer/shard_group_route_internal_test.go:TestShardGroupRouteGate",
+        "phase4-coordinator/internal/buyer/shard_group_routing_test.go:TestGlobalRequestNeverRoutesToShardGroupSessions",
+        "test/integration/shard_group_integration_test.go:TestShardMemberSessionNeverServesBuyerTraffic",
+        "phase4-coordinator/internal/buyer/shard_group_route_internal_test.go:TestShardGroupRouteFilterCounts"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2084",
+        "rationale": "SPEC-051 v0.2.0 (#2084) Routing to the head only. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid Trusted Pool request through the gateway served by an authorized shard group. Coordinator half implemented in the #2084 campaign PR; pending the provider half, the coordinator deploy, and a paid Trusted Pool request through the gateway served by an authorized shard group."
+      }
+    },
+    {
+      "requirement_id": "SPEC-051-R017",
+      "spec_id": "SPEC-051",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/shardgroup/record.go:func ValidateRecord"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/shardgroup/shardgroup_test.go:TestValidateRecordReasons"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2084",
+        "rationale": "SPEC-051 v0.2.0 (#2084) Cross-stage micro-batching. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid Trusted Pool request through the gateway served by an authorized shard group. Coordinator half implemented in the #2084 campaign PR; pending the provider half, the coordinator deploy, and a paid Trusted Pool request through the gateway served by an authorized shard group."
+      }
+    },
+    {
+      "requirement_id": "SPEC-051-R018",
+      "spec_id": "SPEC-051",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2084",
+        "rationale": "SPEC-051 v0.2.0 (#2084) One buyer receipt per request, signed by the head. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid Trusted Pool request through the gateway served by an authorized shard group."
+      }
+    },
+    {
+      "requirement_id": "SPEC-051-R019",
+      "spec_id": "SPEC-051",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/shardgroup/attestation.go:func VerifyAttestation",
+        "phase4-coordinator/internal/shardgroup/attestation.go:func verifySegment",
+        "phase4-coordinator/internal/ws/shard_groups.go:func (s *Server) applyShardGroupAttestation",
+        "phase4-coordinator/internal/shardgroup/store.go:func (s *Store) RecordAttestation"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/shardgroup/shardgroup_test.go:TestVerifyAttestation",
+        "phase4-coordinator/internal/shardgroup/shardgroup_test.go:TestVerifyAttestationAcrossSpareReplay",
+        "phase4-coordinator/internal/ws/shard_groups_test.go:TestShardGroupAttestationOnTerminalFrame",
+        "phase4-coordinator/internal/shardgroup/shardgroup_test.go:TestStoreAttestationFirstVerdictKept"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2084",
+        "rationale": "SPEC-051 v0.2.0 (#2084) Group attestation with chained member sub-receipts. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid Trusted Pool request through the gateway served by an authorized shard group. Coordinator half implemented in the #2084 campaign PR; pending the provider half, the coordinator deploy, and a paid Trusted Pool request through the gateway served by an authorized shard group."
+      }
+    },
+    {
+      "requirement_id": "SPEC-051-R020",
+      "spec_id": "SPEC-051",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2084",
+        "rationale": "SPEC-051 v0.2.0 (#2084) Billing and settlement as one provider. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid Trusted Pool request through the gateway served by an authorized shard group."
+      }
+    },
+    {
+      "requirement_id": "SPEC-051-R021",
+      "spec_id": "SPEC-051",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/buyer/shard_group_route.go:func shardGroupFailedBeforeFirstToken",
+        "phase4-coordinator/internal/buyer/shard_group_route.go:func shardGroupFailedAttempt"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/buyer/shard_group_route_internal_test.go:TestShardGroupFailedBeforeFirstTokenFailsOver"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2084",
+        "rationale": "SPEC-051 v0.2.0 (#2084) Failure before the first token. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid Trusted Pool request through the gateway served by an authorized shard group. Coordinator half implemented in the #2084 campaign PR; pending the provider half, the coordinator deploy, and a paid Trusted Pool request through the gateway served by an authorized shard group."
+      }
+    },
+    {
+      "requirement_id": "SPEC-051-R022",
+      "spec_id": "SPEC-051",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2084",
+        "rationale": "SPEC-051 v0.2.0 (#2084) Failure after the first token. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid Trusted Pool request through the gateway served by an authorized shard group."
+      }
+    },
+    {
+      "requirement_id": "SPEC-051-R023",
+      "spec_id": "SPEC-051",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/shardgroup/store.go:func (s *Store) AcceptRecord",
+        "phase4-coordinator/internal/shardgroup/registry.go:func (r *Registry) MemberHello"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/shardgroup/shardgroup_test.go:TestRegisterSignatureEpochAndOwnership",
+        "phase4-coordinator/internal/shardgroup/shardgroup_test.go:TestVerifyAttestationAcrossSpareReplay"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2084",
+        "rationale": "SPEC-051 v0.2.0 (#2084) Epoch changes. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid Trusted Pool request through the gateway served by an authorized shard group. Coordinator half implemented in the #2084 campaign PR; pending the provider half, the coordinator deploy, and a paid Trusted Pool request through the gateway served by an authorized shard group."
+      }
+    },
+    {
+      "requirement_id": "SPEC-051-R024",
+      "spec_id": "SPEC-051",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2084",
+        "rationale": "SPEC-051 v0.2.0 (#2084) Isolation from single-Mac serving. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid Trusted Pool request through the gateway served by an authorized shard group."
+      }
+    },
+    {
+      "requirement_id": "SPEC-051-R025",
+      "spec_id": "SPEC-051",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2084",
+        "rationale": "SPEC-051 v0.2.0 (#2084) Qualification before catalog intake. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid Trusted Pool request through the gateway served by an authorized shard group."
+      }
+    },
+    {
+      "requirement_id": "SPEC-051-R026",
+      "spec_id": "SPEC-051",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2084",
+        "rationale": "SPEC-051 v0.2.0 (#2084) Go/no-go decision rule. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid Trusted Pool request through the gateway served by an authorized shard group."
+      }
+    },
+    {
+      "requirement_id": "SPEC-051-R027",
+      "spec_id": "SPEC-051",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/ws/shard_groups.go:func WithShardGroups",
+        "phase4-coordinator/internal/shardgroup/registry.go:func (r *Registry) Register"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/ws/shard_groups_test.go:TestShardGroupLifecycleOverWire",
+        "phase4-coordinator/internal/shardgroup/shardgroup_test.go:TestValidateRecordReasons"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2084",
+        "rationale": "SPEC-051 v0.2.0 (#2084) Version skew. Draft requirement with no implementation yet; it stays pending until implemented, tested, and proven by a paid Trusted Pool request through the gateway served by an authorized shard group. Coordinator half implemented in the #2084 campaign PR; pending the provider half, the coordinator deploy, and a paid Trusted Pool request through the gateway served by an authorized shard group."
+      }
+    },
+    {
+      "requirement_id": "SPEC-051-R028",
+      "spec_id": "SPEC-051",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/poolmanifest/shard_groups.go:func (pc PolicyCore) ValidateFullAcceptance",
+        "phase4-coordinator/internal/poolmanifest/shard_groups.go:func (pc PolicyCore) validateShardGroups",
+        "phase4-coordinator/internal/poolmanifest/shard_groups.go:func DecodePoolShardGroups",
+        "phase4-coordinator/internal/trustpool/status.go:func policyShardGroups",
+        "phase4-coordinator/internal/buyer/shard_group_route.go:func (r shardGroupRoute) routable"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/poolmanifest/shard_groups_test.go:TestPoolShardGroupsRoundTripAndAcceptance",
+        "phase4-coordinator/internal/poolmanifest/shard_groups_test.go:TestPoolShardGroupsRejectionVectors",
+        "phase4-coordinator/internal/trustpool/pool_model_disclosure_test.go:TestShardGroupAuthorizationProjectionAndDisclosure",
+        "phase4-coordinator/internal/buyer/shard_group_route_internal_test.go:TestShardGroupRouteGate",
+        "phase4-coordinator/internal/poolmanifest/shard_groups_test.go:TestShardGroupsOnlyThroughFullAcceptance"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2084",
+        "rationale": "SPEC-051 v0.2.0 (#2084) Trusted Pool authorization (pool_shard_groups/v1). Stays pending until a paid Trusted Pool request through the gateway is served by an authorized shard group and settled at the pool price. Coordinator half implemented in the #2084 campaign PR; pending the provider half, the coordinator deploy, and a paid Trusted Pool request through the gateway served by an authorized shard group."
+      }
+    },
+    {
+      "requirement_id": "SPEC-051-R029",
+      "spec_id": "SPEC-051",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/shardgroup/wire.go:func decodeStrict",
+        "phase4-coordinator/internal/shardgroup/wire.go:func ParseRegister",
+        "phase4-coordinator/internal/shardgroup/wire.go:func ParseMemberHello",
+        "phase4-coordinator/internal/shardgroup/wire.go:func ParseHeartbeat",
+        "phase4-coordinator/internal/ws/shard_groups.go:func (s *Server) handleShardGroupRegister",
+        "phase4-coordinator/internal/ws/shard_groups.go:func (s *Server) handleShardMemberHello",
+        "phase4-coordinator/internal/ws/shard_groups.go:func (s *Server) handleShardGroupHeartbeat"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/shardgroup/shardgroup_test.go:TestStrictParsingRefusesMalformedMessages",
+        "phase4-coordinator/internal/ws/shard_groups_test.go:TestShardGroupLifecycleOverWire",
+        "test/integration/shard_group_integration_test.go:TestShardMemberSessionNeverServesBuyerTraffic"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2084",
+        "rationale": "SPEC-051 v0.2.0 (#2084) Group wire messages. Stays pending until a paid Trusted Pool request through the gateway is served by an authorized shard group and settled at the pool price. Coordinator half implemented in the #2084 campaign PR; pending the provider half, the coordinator deploy, and a paid Trusted Pool request through the gateway served by an authorized shard group."
+      }
+    },
+    {
+      "requirement_id": "SPEC-051-R030",
+      "spec_id": "SPEC-051",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/trustpool/policy.go:func policyMultiMacServing"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/trustpool/pool_model_disclosure_test.go:TestShardGroupAuthorizationProjectionAndDisclosure"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2084",
+        "rationale": "SPEC-051 v0.2.0 (#2084) Pool disclosure of multi-Mac serving. Stays pending until a paid Trusted Pool request through the gateway is served by an authorized shard group and settled at the pool price. Coordinator half implemented in the #2084 campaign PR; pending the provider half, the coordinator deploy, and a paid Trusted Pool request through the gateway served by an authorized shard group."
       }
     }
   ]

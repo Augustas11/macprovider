@@ -237,6 +237,24 @@ type Provider struct {
 	// tier2_capabilities.compute_score_v1: it runs SPEC-036 FR-21 scoring
 	// jobs. Sessions without it are never chosen as scorers.
 	ComputeScoreV1 bool `json:"compute_score_v1,omitempty"`
+	// ShardGroupHeadV1 records that this session advertised
+	// tier2_capabilities.shard_group_head_v1: it is a SPEC-051 group head
+	// and routes only while ShardGroupAvailable (SPEC-051-R015/R016).
+	ShardGroupHeadV1 bool `json:"shard_group_head_v1,omitempty"`
+	// ShardMemberV1 records that this session advertised
+	// tier2_capabilities.shard_member_v1: a SPEC-051 member session, never
+	// routable on its own (SPEC-051-R016).
+	ShardMemberV1 bool `json:"shard_member_v1,omitempty"`
+	// ShardGroupAvailable, ShardGroupEpoch, ShardGroupPoolModelID and
+	// ShardGroupMembers are the coordinator-derived availability of this head
+	// session's group, its latest accepted epoch, the pool model that epoch's
+	// record names (SPEC-051-R016: the head routes only for it), and the
+	// group's non-head members and spares (SPEC-051-R015). They are reset on
+	// every session registration and never wire-exported.
+	ShardGroupAvailable   bool                   `json:"-"`
+	ShardGroupEpoch       uint64                 `json:"-"`
+	ShardGroupPoolModelID string                 `json:"-"`
+	ShardGroupMembers     []ShardGroupMemberView `json:"-"`
 	// ComputeIntegritySuspended is set while the SPEC-036 FR-23 key for this
 	// provider and its served model is failed. The registry recomputes it from
 	// the suspension set on registration, model change and every set change.
@@ -788,6 +806,36 @@ type ReceiptPubkeyPrevious struct {
 // integrity violation and is excluded here even when it is the sole provider for
 // that model.
 func (p Provider) RoutingEligible() bool {
+	// SPEC-051-R016: a member session is never routable on its own, and a
+	// head session only while its group is available.
+	if p.ShardMemberV1 || (p.ShardGroupHeadV1 && !p.ShardGroupAvailable) {
+		return false
+	}
+	return p.shardMemberAdmissible() && p.SlotsFree > 0
+}
+
+// ShardGroupMemberView is one non-head member or spare of an available
+// SPEC-051 group, as the routing gates of SPEC-051-R028 read it.
+type ShardGroupMemberView struct {
+	ProviderID string
+	// AssignedID is the member session the evaluation saw; empty for a spare
+	// without a live member session.
+	AssignedID    string
+	BinaryVersion string
+	// Spare marks a spare: it must be a pool member (it may replace a stage)
+	// but its binary floor is checked when a new epoch makes it active.
+	Spare bool
+}
+
+// ShardMemberAdmissible is RoutingEligible without the SPEC-051 session
+// exclusions and without free-slot capacity: every routing-state gate a single
+// provider must pass, applied to a group member or head when the coordinator
+// evaluates group availability (SPEC-051-R015 condition 4).
+func (p Provider) ShardMemberAdmissible() bool {
+	return p.shardMemberAdmissible()
+}
+
+func (p Provider) shardMemberAdmissible() bool {
 	if p.AuthState == AuthBearerlessDuplicate || p.AuthState == AuthSelfMinted {
 		return false
 	}
@@ -808,7 +856,7 @@ func (p Provider) RoutingEligible() bool {
 	if p.AdmissionCeilingExcluded || p.AdmissionEvidenceStale || p.AdmissionSandboxed || p.CatalogRecheckPending || p.HandshakeAckPending {
 		return false
 	}
-	return (p.State == StateReady || p.State == StateBusy) && p.SlotsFree > 0 && !p.capacitySafetyHold
+	return (p.State == StateReady || p.State == StateBusy) && !p.capacitySafetyHold
 }
 
 // PoolExternalRuntimeRoutingEligible is RoutingEligible without the SPEC-032
@@ -2572,6 +2620,41 @@ func (r *Registry) SetBenchmarkQuarantine(providerID, assignedID string, quarant
 		return false
 	}
 	p.BenchmarkQuarantined = quarantined
+	return true
+}
+
+// SetShardGroupState records the coordinator-derived SPEC-051-R015
+// availability of a head session's group. It applies only to the live session
+// named by assignedID that advertised shard_group_head_v1, and returns true
+// when any recorded value changed.
+func (r *Registry) SetShardGroupState(providerID, assignedID string, available bool, epoch uint64, poolModelID string, members []ShardGroupMemberView) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p := r.providers[providerID]
+	if p == nil || p.AssignedID != assignedID || !p.ShardGroupHeadV1 {
+		return false
+	}
+	if !available {
+		members = nil
+	}
+	changed := p.ShardGroupAvailable != available || p.ShardGroupEpoch != epoch || p.ShardGroupPoolModelID != poolModelID ||
+		!shardGroupMembersEqual(p.ShardGroupMembers, members)
+	p.ShardGroupAvailable = available
+	p.ShardGroupEpoch = epoch
+	p.ShardGroupPoolModelID = poolModelID
+	p.ShardGroupMembers = append([]ShardGroupMemberView(nil), members...)
+	return changed
+}
+
+func shardGroupMembersEqual(a, b []ShardGroupMemberView) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
 	return true
 }
 

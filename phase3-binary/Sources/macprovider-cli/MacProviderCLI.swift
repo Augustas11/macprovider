@@ -58,7 +58,7 @@ struct MacProviderCLI: AsyncParsableCommand {
     /// MACPROVIDER_LAB_HARNESS builds; a plain release binary registers none.
     private static func labSubcommands() -> [ParsableCommand.Type] {
         #if DEBUG || MACPROVIDER_LAB_HARNESS
-        return [NativeMTPHardwareE2ECommand.self, NativeMTPBenchCommand.self, NativeMTPJourneyE2ECommand.self, NativeMTPRequestShapeReplayCommand.self, GLMParityCommand.self]
+        return [NativeMTPHardwareE2ECommand.self, NativeMTPBenchCommand.self, NativeMTPJourneyE2ECommand.self, NativeMTPRequestShapeReplayCommand.self, GLMParityCommand.self, ShardBenchCommand.self]
         #else
         return []
         #endif
@@ -538,7 +538,38 @@ struct ServeCommand: AsyncParsableCommand {
     @Flag(name: .customLong("autotune-candidate"), help: .private)
     var autotuneCandidate = false
 
+    @Option(name: .customLong("shard-group"), help: ArgumentHelp("Serve as the head (stage 0) of a SPEC-051 shard group described by this macprovider.shard-group-config.v1 file. Start the members first.", visibility: .hidden))
+    var shardGroup: String?
+
+    @Option(name: .customLong("shard-member"), help: ArgumentHelp("Serve one stage of a SPEC-051 shard group described by this macprovider.shard-member-config.v1 file. A member takes no buyer requests.", visibility: .hidden))
+    var shardMember: String?
+
+    #if DEBUG || MACPROVIDER_LAB_HARNESS
+    // Lab only (#2084 VM acceptance): two shard roles on one Mac link over
+    // loopback, which SPEC-051-R007 does not admit. This reports a loopback
+    // stage link as `thunderbolt`, and only for an isolated join against a
+    // loopback coordinator (relaxesJoinAdmissionForLab); release builds have
+    // no such flag.
+    @Flag(name: .customLong("lab-loopback-interconnect"), help: .private)
+    var labLoopbackInterconnect = false
+    #endif
+
     mutating func validate() throws {
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        if labLoopbackInterconnect {
+            guard shardGroup != nil || shardMember != nil, isolateLifecycle else {
+                throw ValidationError("--lab-loopback-interconnect requires --shard-group or --shard-member and --isolate-lifecycle")
+            }
+        }
+        #endif
+        if shardGroup != nil || shardMember != nil {
+            guard shardGroup == nil || shardMember == nil else {
+                throw ValidationError("--shard-group and --shard-member are exclusive")
+            }
+            guard draftModel == nil, !autotuneCandidate else {
+                throw ValidationError("--shard-group and --shard-member serve without a draft model and outside autotune")
+            }
+        }
         guard !autotuneCandidate || noJoin else {
             throw ValidationError("--autotune-candidate requires --no-join")
         }
@@ -1017,7 +1048,8 @@ struct ServeCommand: AsyncParsableCommand {
         isolateLifecycle: Bool = false,
         staticInputs: AutotuneStaticInputs = AutotuneStaticInputs(),
         artifactResolver: CachedModelArtifactResolver = CachedModelArtifactResolver(),
-        persistConfigMigration: Bool = false
+        persistConfigMigration: Bool = false,
+        shardStage: ShardStageScope? = nil
     ) async throws -> ModelArtifactPreflightOutcome {
         // #1816: a configured pool_model_id must be well formed and never
         // pinned beside a catalog identity, for every runtime.
@@ -1083,6 +1115,11 @@ struct ServeCommand: AsyncParsableCommand {
             throw ExitCode(2)
         }
         let configuredPath = URL(fileURLWithPath: artifactPath).standardizedFileURL.path
+        if let shardStage {
+            return try shardStagePreflight(
+                &resolved, scope: shardStage, configuredPath: configuredPath, expectedSHA256: expected,
+                joiningCoordinator: joiningCoordinator, servesPoolModelEntry: servesPoolModelEntry)
+        }
         let loadPath: String
         let persistFrom: String?
         let actual: String
@@ -1187,6 +1224,38 @@ struct ServeCommand: AsyncParsableCommand {
                 nativeMTPResolvedArtifactAuthority: nil
             )
         )
+    }
+
+    /// SPEC-051-R008: a shard stage directory holds only its stage's files, so it
+    /// is proved file by file against the full snapshot manifest instead of hashed
+    /// whole, used where it is (never adopted into the durable store under the full
+    /// artifact's name), and serves only a Trusted Pool entry (SPEC-051-R009).
+    private static func shardStagePreflight(
+        _ resolved: inout AppConfig,
+        scope: ShardStageScope,
+        configuredPath: String,
+        expectedSHA256: String,
+        joiningCoordinator: Bool,
+        servesPoolModelEntry: Bool
+    ) throws -> ModelArtifactPreflightOutcome {
+        guard !resolved.donorMode, !joiningCoordinator || servesPoolModelEntry else {
+            FileHandle.standardError.write(Data("a shard stage directory serves a Trusted Pool model entry only; set pool_model_id\n".utf8))
+            throw ExitCode(2)
+        }
+        do {
+            _ = try ShardStageArtifact.verify(
+                directory: URL(fileURLWithPath: configuredPath, isDirectory: true),
+                manifestURL: URL(fileURLWithPath: scope.snapshotManifestPath), expectedSHA256: expectedSHA256, layers: scope.layers)
+        } catch {
+            FileHandle.standardError.write(Data("model artifact verification failed for \(configuredPath): \(error)\n".utf8))
+            throw ExitCode(2)
+        }
+        resolved.modelArtifactPath = configuredPath
+        return ModelArtifactPreflightOutcome(
+            catalogTrust: nil,
+            runtimeBinding: VerifiedModelRuntimeBinding(
+                authorityPath: configuredPath, authoritySHA256: expectedSHA256, loadPath: configuredPath,
+                loadSHA256: expectedSHA256, nativeMTPResolvedArtifactAuthority: nil))
     }
 
     private static func resolveNativeMTPArtifactAuthority(
@@ -2067,6 +2136,13 @@ struct ServeCommand: AsyncParsableCommand {
             && !hasCatalogTrust
     }
 
+    /// The lab loopback interconnect (#2084) is allowed only where the join
+    /// admission already relaxes for the lab: an isolated join against a
+    /// loopback coordinator. A production coordinator URL never qualifies.
+    static func allowsLabLoopbackInterconnect(isolateLifecycle: Bool, coordinatorURL: String?) -> Bool {
+        relaxesJoinAdmissionForLab(isolateLifecycle: isolateLifecycle, coordinatorURL: coordinatorURL)
+    }
+
     static func isLoopbackCoordinatorURL(_ raw: String?) -> Bool {
         guard let raw, let url = URL(string: raw), let host = url.host?.lowercased(), !host.isEmpty else {
             return false
@@ -2599,6 +2675,20 @@ struct ServeCommand: AsyncParsableCommand {
             &resolved,
             cacheWrapValidated: speculativeCacheWrapValidated
         )
+        // Issue #2084 (SPEC-051): an owner-configured shard group role; nil serves
+        // exactly as before. A stage that holds only its own files is verified
+        // against the full snapshot manifest at preflight (SPEC-051-R008).
+        let shardHeadConfig = try shardGroup.map { try ShardGroupHeadConfig.load(path: $0) }
+        let shardMemberConfig = try shardMember.map { try ShardMemberConfig.load(path: $0) }
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        if labLoopbackInterconnect {
+            guard Self.allowsLabLoopbackInterconnect(isolateLifecycle: isolateLifecycle, coordinatorURL: resolved.coordinatorURL) else {
+                throw ValidationError("--lab-loopback-interconnect is refused unless the join is isolated against a loopback coordinator")
+            }
+            ShardLinkInterface.labLoopback.enable()
+        }
+        #endif
+        let shardStageScope = shardHeadConfig?.stageScope ?? shardMemberConfig?.stageScope
         let startupPreflight: Self.ServeStartupPreflightResult
         let startupProviderID = resolved.providerID
         let allowStartupHandoff = consumerUpdaterLifecycleAllowed
@@ -2608,6 +2698,7 @@ struct ServeCommand: AsyncParsableCommand {
                 &resolved,
                 joiningCoordinator: !noJoin,
                 isolateLifecycle: isolateLifecycle,
+                shardStage: shardStageScope,
                 acquireServeLock: { candidateConfig in
                     try Self.acquireProviderServeLock(
                         candidateConfig,
@@ -2887,7 +2978,33 @@ struct ServeCommand: AsyncParsableCommand {
         // execution and advertised heartbeat capability until the tagged fix and
         // cache-wrap parity gate are green.
         do {
-            if let loopbackServedRef = resolved.model, let loopback = LoopbackServeSelection.select(loopbackServedRef) {
+            if shardHeadConfig != nil || shardMemberConfig != nil {
+                guard let shardModelID = resolved.model, LoopbackServeSelection.select(shardModelID) == nil else {
+                    throw ValidationError("a shard group serves an MLX model; set --model to it")
+                }
+                helloRuntimeSource = nil
+                let directory = try ModelRuntime.localModelDirectory(
+                    for: startupPreflight.runtimeBinding?.loadPath ?? resolved.modelArtifactPath ?? shardModelID)
+                let verifySHA256 = startupPreflight.runtimeBinding?.loadSHA256 ?? resolved.modelArtifactSHA256
+                if let head = shardHeadConfig {
+                    resolved.maxConcurrencyOverride = head.maxConcurrency
+                    modelRuntime = try await ShardGroupServe.headRuntime(
+                        config: head, modelID: shardModelID, directory: directory,
+                        catalogArtifactSHA256: resolved.modelArtifactSHA256, verifyArtifactSHA256: verifySHA256,
+                        catalogModelIDAlias: catalogModelIDAlias,
+                        maxContextTokens: ProviderCapacity(maxContextOverride: resolved.maxContextOverride, maxConcurrencyOverride: nil).maxContextTokens,
+                        signer: try ShardGroupServe.signer(config: resolved, fallbackMemberID: "head"),
+                        gate: noJoin || resolved.donorMode ? .notRequired : .awaitingCoordinator)
+                } else if let member = shardMemberConfig {
+                    modelRuntime = try await ShardGroupServe.memberRuntime(
+                        config: member, modelID: shardModelID, directory: directory,
+                        catalogArtifactSHA256: resolved.modelArtifactSHA256, verifyArtifactSHA256: verifySHA256,
+                        signer: try ShardGroupServe.signer(config: resolved, fallbackMemberID: "stage-\(member.stageIndex)"),
+                        lab: noJoin)
+                } else {
+                    throw ValidationError("unreachable shard role")
+                }
+            } else if let loopbackServedRef = resolved.model, let loopback = LoopbackServeSelection.select(loopbackServedRef) {
                 // SPEC-046-R002 / SPEC-010-R007(e) loopback serving (#1569,
                 // #1690 M2): proxy inference to the validated loopback
                 // OpenAI-compatible origin. ONE process, ONE model — no MLX
@@ -3156,6 +3273,9 @@ struct ServeCommand: AsyncParsableCommand {
                     return await mlxRuntime.measureStartupThroughput(
                         maxTokens: ModelRuntime.startupThroughputProbeMaxTokens
                     )
+                }
+                if let shardRuntime = modelRuntime as? ShardGroupRuntime {
+                    return await shardRuntime.measureStartupThroughput(maxTokens: ModelRuntime.startupThroughputProbeMaxTokens)
                 }
                 if let loopbackRuntime = modelRuntime as? OpenAICompatibleLoopbackRuntime {
                     let outcome = await loopbackRuntime.measureStartupThroughput(
@@ -4238,6 +4358,7 @@ struct ServeCommand: AsyncParsableCommand {
         _ resolved: inout AppConfig,
         joiningCoordinator: Bool,
         isolateLifecycle: Bool = false,
+        shardStage: ShardStageScope? = nil,
         coordinatorAcceptsSpecDecodeTelemetry: Bool = Self.bundledCoordinatorAcceptsSpecDecodeTelemetry,
         portIsOpen: (Int) -> Bool = MacProviderPortProbe.isOpen,
         acquireServeLock: (AppConfig) throws -> ProviderServeLock = { config in
@@ -4263,7 +4384,8 @@ struct ServeCommand: AsyncParsableCommand {
                     isolateLifecycle: isolateLifecycle,
                     staticInputs: staticInputs,
                     artifactResolver: artifactResolver,
-                    persistConfigMigration: true
+                    persistConfigMigration: true,
+                    shardStage: shardStage
                 )
             } catch where joiningCoordinator || resolved.donorMode {
                 throw ServeCatalogPreflightError(underlying: error)

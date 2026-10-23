@@ -14627,6 +14627,9 @@ struct CompletionResult: Sendable {
     /// the completion tokens generated through it, as the upstream attested
     /// them per token; empty when it did not.
     let loopbackPrefixCompletionTokens: [Int: Int]?
+    /// Issue #2084: a shard group head's SPEC-051-R019 evidence for this
+    /// completion; nil for every other runtime.
+    let shardGroupEvidence: ShardGroupCompletionEvidence?
     /// SPEC-018 §3.12: reasoning split from an open `<think>`, and the
     /// completion tokens it used (a subset of `completionTokens`).
     let reasoningContent: String?
@@ -14649,10 +14652,12 @@ struct CompletionResult: Sendable {
         specDecodeAcceptedTokens: Int = 0,
         specDecodeGeneration: Int? = nil,
         loopbackPrefixCompletionTokens: [Int: Int]? = nil,
+        shardGroupEvidence: ShardGroupCompletionEvidence? = nil,
         reasoningContent: String? = nil,
         reasoningTokens: Int = 0
     ) {
         self.loopbackPrefixCompletionTokens = loopbackPrefixCompletionTokens
+        self.shardGroupEvidence = shardGroupEvidence
         self.reasoningContent = reasoningContent
         self.reasoningTokens = max(0, reasoningTokens)
         self.content = content
@@ -14694,6 +14699,7 @@ struct CompletionResult: Sendable {
             specDecodeAcceptedTokens: specDecodeAcceptedTokens,
             specDecodeGeneration: specDecodeGeneration,
             loopbackPrefixCompletionTokens: loopbackPrefixCompletionTokens,
+            shardGroupEvidence: shardGroupEvidence,
             reasoningContent: reasoningContent,
             reasoningTokens: reasoningTokens
         )
@@ -14717,6 +14723,7 @@ struct CompletionResult: Sendable {
             specDecodeAcceptedTokens: specDecodeAcceptedTokens,
             specDecodeGeneration: specDecodeGeneration,
             loopbackPrefixCompletionTokens: content == self.content ? loopbackPrefixCompletionTokens : nil,
+            shardGroupEvidence: content == self.content ? shardGroupEvidence : nil,
             reasoningContent: reasoningContent,
             reasoningTokens: reasoningTokens
         )
@@ -14740,6 +14747,7 @@ struct CompletionResult: Sendable {
             specDecodeAcceptedTokens: specDecodeAcceptedTokens,
             specDecodeGeneration: specDecodeGeneration,
             loopbackPrefixCompletionTokens: loopbackPrefixCompletionTokens,
+            shardGroupEvidence: shardGroupEvidence,
             reasoningContent: reasoningContent,
             reasoningTokens: reasoningTokens
         )

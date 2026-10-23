@@ -87,6 +87,10 @@ type options struct {
 	omitCatalog      bool
 	trustedPool      bool
 	receiptKeyFile   string
+	wsRelay          bool
+	shardRole        string
+	shardGroup       string
+	shardKnobs       string
 	explicit         map[string]bool
 }
 
@@ -179,6 +183,10 @@ func parseFlags(args []string) (options, error) {
 	fs.BoolVar(&o.omitCatalog, "omit-catalog", false, "#1816: send no catalog_* envelope and skip -catalog-from-coordinator (an uncatalogued pool-model member)")
 	fs.StringVar(&o.receiptKeyFile, "receipt-key-file", "", "#1816: persist the settlement receipt key (Ed25519 seed file) across restarts, as the real CLI does; without it every start rotates the key")
 	fs.BoolVar(&o.trustedPool, "trusted-pool", false, "#1816: advertise tier2_capabilities.trusted_pool_v1 without a runtime_source (a native mlx_cache pool member)")
+	fs.BoolVar(&o.wsRelay, "ws-relay", false, "#2084: serve inference over the WS tunnel (no endpoint_url, plain frames)")
+	fs.StringVar(&o.shardRole, "shard-role", "", "#2084: SPEC-051 role head|member (implies -ws-relay)")
+	fs.StringVar(&o.shardGroup, "shard-group", "", "#2084: shared group file {record, member_keys}")
+	fs.StringVar(&o.shardKnobs, "shard-knobs", "", "#2084: per-process fault knobs file")
 	if err := fs.Parse(args); err != nil {
 		return o, err
 	}
@@ -336,6 +344,20 @@ func run(o options) error {
 		modelHashAlgorithm = o.modelHashAlg
 	}
 	p.runtimeSource = o.runtimeSource
+	switch o.shardRole {
+	case "":
+	case "head", "member":
+		if o.shardGroup == "" {
+			return errors.New("-shard-role needs -shard-group")
+		}
+		p.shard = newShardState(o.shardRole, o.shardGroup, o.shardKnobs)
+		p.shard.reload()
+		o.wsRelay = true
+	default:
+		return fmt.Errorf("-shard-role must be head or member, not %q", o.shardRole)
+	}
+	p.wsRelay = o.wsRelay
+	p.hbKick = make(chan struct{}, 1)
 	if o.admissionKeyFile != "" {
 		k, err := loadOrCreateAdmissionKey(o.admissionKeyFile)
 		if err != nil {

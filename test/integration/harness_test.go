@@ -1709,6 +1709,9 @@ type fakeProvider struct {
 	modelHashAlgorithm string
 	admissionPriv      ed25519.PrivateKey
 	trustedPoolV1      bool
+	// shardMemberV1 advertises the SPEC-051 member-session capability
+	// (tier2_capabilities.shard_member_v1) on the v2 auth flow.
+	shardMemberV1      bool
 	omitCatalogRelease bool
 	binaryVersion      string // "" = "1.6.0-fake" (receipt hello) or "1.0.0-fake" (legacy hello)
 	// reconnectRequests makes runWS close its session and hello again on
@@ -2607,6 +2610,9 @@ func (p *fakeProvider) runWS(ctx context.Context) {
 		}
 		if p.trustedPoolV1 {
 			initial["tier2_capabilities"].(map[string]any)["trusted_pool_v1"] = true
+		}
+		if p.shardMemberV1 {
+			initial["tier2_capabilities"].(map[string]any)["shard_member_v1"] = true
 		}
 		if p.computeScore != nil {
 			initial["tier2_capabilities"].(map[string]any)["compute_score_v1"] = true

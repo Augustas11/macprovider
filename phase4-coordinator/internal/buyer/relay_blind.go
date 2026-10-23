@@ -543,7 +543,9 @@ func (s *Server) handleRelayBlindReservation(w http.ResponseWriter, r *http.Requ
 // bound by SPEC-032-R001 conformant commit evidence.
 func relayBlindBindable(p pool.Provider) bool {
 	// SPEC-036 FR-25: a suspended model binds no relay-blind or privacy work.
-	return p.ServingCapable() && !p.HandshakeAckPending && !p.ComputeIntegritySuspended
+	// SPEC-051-R009: no shard group head or member serves relay-blind or
+	// privacy-class work.
+	return p.ServingCapable() && !p.HandshakeAckPending && !p.ComputeIntegritySuspended && !p.ShardGroupHeadV1 && !p.ShardMemberV1
 }
 
 // relayBlindSessionUsable is the session half of RoutingEligible for a

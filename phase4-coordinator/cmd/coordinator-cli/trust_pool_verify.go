@@ -176,7 +176,7 @@ func trustPoolAdminVerifyManifest(args []string, stdout io.Writer) error {
 		if hex.EncodeToString(core.PrevManifestCoreHash) != prevDigest {
 			return fmt.Errorf("newest snapshot: version %d does not chain to its predecessor", version)
 		}
-		if err := core.ValidateAcceptance(); err != nil {
+		if err := core.ValidateFullAcceptance(); err != nil {
 			return fmt.Errorf("newest snapshot version %d: core acceptance grammar: %w", version, err)
 		}
 		digestBytes, err := core.ManifestCoreDigest()

@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	"crypto/ecdh"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
@@ -54,6 +55,21 @@ type fakeProvider struct {
 	streamChunks   int
 	chunkDelay     time.Duration
 	nonStreamDelay time.Duration
+
+	// #2084: -ws-relay serves inference over the WS tunnel; shard is the
+	// SPEC-051 role state (shard.go), nil for an ordinary provider.
+	wsRelay  bool
+	shard    *shardState
+	writeMu  sync.Mutex
+	cancelMu sync.Mutex
+	cancels  map[string]chan struct{}
+	// #2084: the SPEC-008 Pillar B encrypted leg of the current session
+	// (tier2.go); tunnelled inference frames are sealed with it.
+	tier2Mu sync.Mutex
+	tier2   *tier2Session
+	// hbKick asks the session loop for an immediate heartbeat (a shard head's
+	// free slots changed).
+	hbKick chan struct{}
 
 	mu         sync.Mutex
 	id         catalogIdentity // model id/hash + catalog envelope advertised
@@ -133,6 +149,12 @@ func decodeSettlementMetadataHeader(header string) (settlementMetadata, bool, er
 }
 
 func (p *fakeProvider) buildSettlementReceiptHeader(metadata settlementMetadata, content, finishReason string, promptTokens, completionTokens, terminalTSUnixMS int64) (string, error) {
+	return p.buildSettlementReceiptHeaderState(metadata, content, finishReason, promptTokens, completionTokens, terminalTSUnixMS, "normal_done")
+}
+
+// buildSettlementReceiptHeaderState is buildSettlementReceiptHeader with an
+// explicit SPEC-015 terminal_state (#2084: buyer_cancel terminals).
+func (p *fakeProvider) buildSettlementReceiptHeaderState(metadata settlementMetadata, content, finishReason string, promptTokens, completionTokens, terminalTSUnixMS int64, terminalState string) (string, error) {
 	normalizedContent := norm.NFC.String(normalizeSpec015LineEndings(content))
 	deliveredBytes := int64(len([]byte(normalizedContent)))
 	outputPrefixEnd := metadata.OutputPrefixStartByte + deliveredBytes
@@ -141,7 +163,7 @@ func (p *fakeProvider) buildSettlementReceiptHeader(metadata settlementMetadata,
 		"finish_reason":            finishReason,
 		"output_prefix_end_byte":   outputPrefixEnd,
 		"output_prefix_start_byte": metadata.OutputPrefixStartByte,
-		"terminal_state":           "normal_done",
+		"terminal_state":           terminalState,
 		"tool_calls":               nil,
 	}
 	outputHash, _, err := spec015CanonicalSHA256Hex(output)
@@ -176,7 +198,7 @@ func (p *fakeProvider) buildSettlementReceiptHeader(metadata settlementMetadata,
 		"route_snapshot_mode":           metadata.RouteSnapshotMode,
 		"route_snapshot_policy_version": metadata.RouteSnapshotPolicyVersion,
 		"signature_key_alg":             "Ed25519",
-		"terminal_state":                "normal_done",
+		"terminal_state":                terminalState,
 		"terminal_state_ts_unix_ms":     terminalTSUnixMS,
 		"usage":                         usage,
 	}
@@ -382,6 +404,9 @@ func (p *fakeProvider) statusHandler() http.Handler {
 				"state":          "live_verified",
 			},
 		}
+		if p.shard != nil {
+			body["shard"] = p.shardStatusJSON()
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(body)
 	})
@@ -472,28 +497,50 @@ func (p *fakeProvider) session(ctx context.Context, attempt int) (bool, error) {
 	_ = conn.SetDeadline(time.Time{})
 	p.setSession(true, assignedID)
 	logf("ws accepted provider_id=%s assigned_id=%s", p.providerID, assignedID)
+	send := func(payload map[string]any) error {
+		b, err := json.Marshal(payload)
+		if err != nil {
+			return err
+		}
+		p.writeMu.Lock()
+		defer p.writeMu.Unlock()
+		return wsutil.WriteClientText(conn, b)
+	}
+	if p.shard != nil {
+		p.shardSessionStarted()
+	}
 
 	hbTick := time.NewTicker(1 * time.Second)
 	defer hbTick.Stop()
 	readDone := make(chan error, 1)
 	go func() {
 		for {
-			if _, _, err := wsutil.ReadServerData(conn); err != nil {
+			frame, _, err := wsutil.ReadServerData(conn)
+			if err != nil {
 				readDone <- err
 				return
 			}
-			// Frames are dropped, as in the harness: in endpoint_url mode the
-			// coordinator forwards inference over HTTP, not the WS.
+			// In endpoint_url mode the coordinator forwards inference over
+			// HTTP and frames are dropped, as in the harness. #2084: a
+			// -ws-relay or shard session serves the tunnel and the group
+			// messages.
+			p.onServerFrame(send, frame)
 		}
 	}()
 	beats := 0
+	kick := p.hbKick
 	for {
+		periodic := false
 		select {
 		case <-ctx.Done():
 			return true, ctx.Err()
 		case err := <-readDone:
 			return true, fmt.Errorf("read: %w", err)
+		case <-kick:
 		case <-hbTick.C:
+			periodic = true
+		}
+		{
 			hb := map[string]any{
 				"type":                       "heartbeat",
 				"status":                     "ready",
@@ -510,8 +557,22 @@ func (p *fakeProvider) session(ctx context.Context, attempt int) (bool, error) {
 				"throughput_tps_since_last":  0.0,
 			}
 			addCanonicalModelIdentity(hb, id.ModelHash)
-			if err := writeJSONFrame(conn, hb); err != nil {
+			if p.shard != nil {
+				p.shard.mu.Lock()
+				free := 2 - p.shard.inflight
+				p.shard.mu.Unlock()
+				if free < 0 {
+					free = 0
+				}
+				hb["slots_free"] = free
+			}
+			if err := send(hb); err != nil {
 				return true, fmt.Errorf("heartbeat write: %w", err)
+			}
+			if p.shard != nil && periodic {
+				if err := p.shardTick(send); err != nil {
+					return true, fmt.Errorf("shard write: %w", err)
+				}
 			}
 			beats++
 			if beats == 1 || beats%60 == 0 {
@@ -536,10 +597,13 @@ func addCatalogIdentity(msg map[string]any, id catalogIdentity) {
 // assigned id comes from auth_response.assigned_id (ws/messages.go
 // AuthResponse), falling back to auth_challenge.assigned_id.
 func (p *fakeProvider) handshakeV2(conn net.Conn, id catalogIdentity) (string, error) {
-	providerECDH := make([]byte, 32)
-	if _, err := rand.Read(providerECDH); err != nil {
+	// A real X25519 key: a -ws-relay session derives the Pillar B leg from it.
+	ecdhPriv, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
 		return "", fmt.Errorf("provider ecdh key: %w", err)
 	}
+	providerECDH := ecdhPriv.PublicKey().Bytes()
+	p.setTier2(nil)
 	initial := map[string]any{
 		"type":                        "auth_request",
 		"version":                     2,
@@ -564,6 +628,19 @@ func (p *fakeProvider) handshakeV2(conn net.Conn, id catalogIdentity) (string, e
 	if !p.omitCatalog {
 		addCatalogIdentity(initial, id)
 	}
+	if p.wsRelay {
+		// #2084: inference over the WS tunnel on the negotiated encrypted leg.
+		delete(initial, "endpoint_url")
+		initial["tier2_capabilities"].(map[string]any)["response_chunk_plaintext_envelope"] = true
+	}
+	if p.shard != nil {
+		caps := initial["tier2_capabilities"].(map[string]any)
+		if p.shard.role == "head" {
+			caps["shard_group_head_v1"] = true
+		} else {
+			caps["shard_member_v1"] = true
+		}
+	}
 	if p.trustedPool {
 		initial["tier2_capabilities"].(map[string]any)["trusted_pool_v1"] = true
 	}
@@ -587,9 +664,10 @@ func (p *fakeProvider) handshakeV2(conn net.Conn, id catalogIdentity) (string, e
 		return "", fmt.Errorf("read auth_challenge: %w", err)
 	}
 	var challenge struct {
-		Type          string `json:"type"`
-		AuthAttemptID string `json:"auth_attempt_id"`
-		AssignedID    string `json:"assigned_id"`
+		Type                     string `json:"type"`
+		AuthAttemptID            string `json:"auth_attempt_id"`
+		AssignedID               string `json:"assigned_id"`
+		CoordinatorECDHPublicKey string `json:"coordinator_ecdh_public_key"`
 	}
 	if err := json.Unmarshal(challengePayload, &challenge); err != nil {
 		return "", fmt.Errorf("decode auth_challenge: %w", err)
@@ -627,11 +705,27 @@ func (p *fakeProvider) handshakeV2(conn net.Conn, id catalogIdentity) (string, e
 		return "", fmt.Errorf("read auth_response: %w", err)
 	}
 	var response struct {
-		Status     string `json:"status"`
-		AssignedID string `json:"assigned_id"`
+		Status       string `json:"status"`
+		AssignedID   string `json:"assigned_id"`
+		Tier2Session *struct {
+			EncryptedLeg struct {
+				Enabled bool `json:"enabled"`
+			} `json:"encrypted_leg"`
+		} `json:"tier2_session"`
 	}
 	if err := json.Unmarshal(responsePayload, &response); err != nil || response.Status != "accepted" {
 		return "", fmt.Errorf("auth_response not accepted: %s (err=%v)", truncate(responsePayload), err)
+	}
+	if p.wsRelay && response.Tier2Session != nil && response.Tier2Session.EncryptedLeg.Enabled {
+		assigned := response.AssignedID
+		if assigned == "" {
+			assigned = challenge.AssignedID
+		}
+		t, err := newTier2Session(ecdhPriv, challenge.CoordinatorECDHPublicKey, p.providerID, assigned)
+		if err != nil {
+			return "", fmt.Errorf("encrypted leg: %w", err)
+		}
+		p.setTier2(t)
 	}
 	logf("auth_response: %s", truncate(responsePayload))
 	if err := writeJSONFrame(conn, readyStateUpdate(id.ModelID, id.ModelHash)); err != nil {
@@ -713,3 +807,59 @@ func advertisedBinaryVersion() string {
 
 // settlementMeta aliases the metadata type where a local variable shadows it.
 type settlementMeta = settlementMetadata
+
+// onServerFrame handles one coordinator frame on an accepted session (#2084):
+// the SPEC-051 group messages, and on a -ws-relay session the tunnelled
+// inference_request / cancel_request.
+func (p *fakeProvider) onServerFrame(send func(map[string]any) error, frame []byte) {
+	if p.shard != nil && p.shardOnFrame(frame) {
+		return
+	}
+	if !p.wsRelay {
+		return
+	}
+	var env struct {
+		Type      string `json:"type"`
+		RequestID string `json:"request_id"`
+	}
+	if json.Unmarshal(frame, &env) != nil {
+		return
+	}
+	switch env.Type {
+	case "inference_request":
+		var req wsInferenceRequest
+		if err := json.Unmarshal(frame, &req); err != nil {
+			logf("bad inference_request: %v", err)
+			return
+		}
+		if req.Encrypted {
+			t := p.currentTier2()
+			if t == nil {
+				logf("encrypted inference_request without an encrypted leg")
+				return
+			}
+			plaintext, err := t.open("inference_request", req.RequestID, req.Stream, req.Enc)
+			if err != nil {
+				logf("inference_request open failed: %v", err)
+				return
+			}
+			var inner struct {
+				Body string `json:"body"`
+			}
+			if err := json.Unmarshal(plaintext, &inner); err != nil {
+				logf("inference_request plaintext: %v", err)
+				return
+			}
+			req.Body = inner.Body
+		}
+		send = p.sealedSender(send, req.Stream)
+		p.mu.Lock()
+		p.hits++
+		p.mu.Unlock()
+		logf("ws inference request_id=%s stream=%t settlement=%t", req.RequestID, req.Stream, req.Settlement != nil)
+		go p.serveWSInference(send, req)
+	case "cancel_request":
+		logf("ws cancel request_id=%s", env.RequestID)
+		p.cancelRequest(env.RequestID)
+	}
+}

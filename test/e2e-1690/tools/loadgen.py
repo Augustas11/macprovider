@@ -26,6 +26,7 @@ ap.add_argument("--workers", type=int, default=4)
 ap.add_argument("--dc-events", type=int, default=3)
 ap.add_argument("--ns-dc-after", type=float, default=0.4)
 ap.add_argument("--header", action="append", default=[], help="extra request header Name:Value")
+ap.add_argument("--read-to-eof", action="store_true", help="st: keep reading after [DONE] until the server ends the response (#2084)")
 a = ap.parse_args()
 key = open(a.key_file).read().strip()
 ctx = ssl.create_default_context()
@@ -132,6 +133,12 @@ def one(kind, n):
             payload = line[5:].strip()
             if payload == b"[DONE]":
                 done = True
+                if a.read_to_eof:
+                    # #2084: a buyer that reads the response to its end, so the
+                    # provider's terminal frame reaches the coordinator before
+                    # the buyer connection closes.
+                    while r.readline():
+                        pass
                 break
             events += 1
             try:

@@ -4255,6 +4255,10 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 					chunks = nil
 				}
 			}
+			if shardGroupFailedBeforeFirstToken(provider, end, body.Len() == 0) {
+				markProviderDone()
+				return wsForwardProviderDisconnected, shardGroupFailedAttempt()
+			}
 			if end.Status != "complete" {
 				status := wsEndHTTPStatus(end.Status)
 				if end.Status == "error_queue_full" {
@@ -4466,8 +4470,29 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 	}
 	// buyerCancelledAttempt records a buyer cancel after relay.Cancel and binds
 	// it to the provider's buyer_cancel terminal frame when one arrives.
+	// buyerReceivedDone records that the buyer was written the stream's final
+	// "data: [DONE]": it has the whole response (#2084 VM acceptance V-3).
+	buyerReceivedDone := false
 	buyerCancelledAttempt := func() requestLogAttempt {
-		return awaitBuyerCancelTerminal(progressAttempt("Buyer disconnected during streaming", billing.FaultNone), relay, acct.tracker, started, providerws.IsBYOMLoopbackRuntimeSource(provider.RuntimeSource))
+		attempt := progressAttempt("Buyer disconnected during streaming", billing.FaultNone)
+		end, ok := relay.AwaitCancelTerminal(providerws.CancelTerminalWait)
+		if !ok {
+			return attempt
+		}
+		if end.Status == "complete" && buyerReceivedDone {
+			// The provider finished before the cancel reached it and the
+			// buyer received the whole stream: settle it as completed.
+			terminalTS := int64(0)
+			if providerTS, ok := trustedProviderTerminalStateTSInt(end.TerminalStateTSUnixMS, started, time.Now().UTC()); ok {
+				terminalTS = providerTS
+			}
+			completed := requestLogAttempt{Status: http.StatusOK, EstimatedCompTokens: s.observedCompletionTokensFromBytes(acct.deliveredBytes()),
+				SettlementOutput: acct.outputAt(billing.TerminalStateNormalDone, terminalTS), SettlementReceipt: normalizeReceiptHeaderValue(end.Receipt)}
+			usage := acct.completionUsage(end.Usage)
+			completed.PromptTokens, completed.CachedPromptTokens, completed.CompletionTokens = usage.prompt, usage.cached, usage.completion
+			return completed
+		}
+		return withProviderCancelTerminal(attempt, end, acct.tracker, started, providerws.IsBYOMLoopbackRuntimeSource(provider.RuntimeSource))
 	}
 	streamFailureAttempt := requestLogAttempt{}
 	hasStreamFailureAttempt := false
@@ -4587,10 +4612,19 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 			return true, wsForwardCancelled
 		}
 		if writeErr != nil {
+			if buyerReceivedDone {
+				// The buyer has the whole stream and went away: a write after
+				// [DONE] failing does not cancel the attempt, whose terminal
+				// frame still settles it (#2084 VM acceptance V-3).
+				return false, ""
+			}
 			relay.Cancel("buyer_disconnected")
 			s.log.Warn().Err(writeErr).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("buyer ws stream write failed")
 			markProviderDone()
 			return true, wsForwardCancelled
+		}
+		if strings.Contains(rewritten, "data: [DONE]") {
+			buyerReceivedDone = true
 		}
 		if flusher != nil {
 			flusher.Flush()
@@ -4651,9 +4685,27 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 		}
 		return writeBuyerSSE(string(flushed))
 	}
+	// A buyer that read the stream's final "data: [DONE]" and closed has the
+	// whole response; the provider's terminal frame (with its receipt) follows
+	// the last chunk. Its disconnect then waits up to CancelTerminalWait for
+	// that frame instead of cancelling an attempt whose output was delivered
+	// (#2084 VM acceptance V-3).
+	buyerGone := r.Context().Done()
+	var afterDone <-chan time.Time
 	for {
 		select {
-		case <-r.Context().Done():
+		case <-buyerGone:
+			if buyerReceivedDone && afterDone == nil {
+				buyerGone = nil
+				timer := time.NewTimer(providerws.CancelTerminalWait)
+				defer timer.Stop()
+				afterDone = timer.C
+				continue
+			}
+			relay.Cancel("buyer_disconnected")
+			markProviderDone()
+			return wsForwardCancelled, buyerCancelledAttempt()
+		case <-afterDone:
 			relay.Cancel("buyer_disconnected")
 			markProviderDone()
 			return wsForwardCancelled, buyerCancelledAttempt()
@@ -4711,6 +4763,10 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 					}
 					return result, progressAttempt("", faultFlag)
 				}
+			}
+			if !committed && shardGroupFailedBeforeFirstToken(provider, end, true) {
+				markProviderDone()
+				return wsForwardProviderDisconnected, shardGroupFailedAttempt()
 			}
 			if !committed && end.Status != "complete" && end.Status != "cancelled" {
 				status := wsEndHTTPStatus(end.Status)
@@ -4966,6 +5022,11 @@ func (s *Server) forwardWSStreamingBuffered(w http.ResponseWriter, r *http.Reque
 						break drainGuaranteedTail
 					}
 				}
+			}
+			if shardGroupFailedBeforeFirstToken(provider, end, raw.Len() == 0) {
+				// Nothing of a buffered stream reached the buyer.
+				markProviderDone()
+				return wsForwardProviderDisconnected, shardGroupFailedAttempt()
 			}
 			if end.Status == "error_context_exceeded" {
 				// Nothing of a buffered stream reached the buyer; the
@@ -8283,9 +8344,23 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 		}
 		trustedInternalRouting = true
 	}
+	// SPEC-051-R028: the shard group route view of this request, shared by
+	// the eligibility filter and both pin paths below (a pin never bypasses
+	// the shard group gate).
+	var shardRoute shardGroupRoute
+	if poolActive {
+		shardRoute = shardGroupRoute{poolID: req.poolID, members: poolMembers, minBinaryVersion: poolMin, groups: poolSnap.ShardGroups,
+			resolve: func(id string) (pool.Provider, bool) { return s.pool.Resolve(id, "") }}
+	}
+	if state != nil {
+		state.shardRoute = shardRoute
+	}
 	if session := headers.Get("X-MacProvider-Session"); session != "" {
 		for _, p := range providers {
 			if p.AssignedID == session {
+				if !shardRoute.routable(p) {
+					return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "shard_group_unavailable", message: "Pinned session provider is a shard group head not authorized for this route"}
+				}
 				if poolActive && !poolMembers[p.ProviderID] {
 					// SPEC-042 R005: the pinned/self-route path bypasses the
 					// eligibility filter, so re-apply pool membership here or
@@ -8337,6 +8412,9 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 	if providerID := headers.Get("X-MacProvider-Provider"); providerID != "" {
 		for _, p := range providers {
 			if p.ProviderID == providerID {
+				if !shardRoute.routable(p) {
+					return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "shard_group_unavailable", message: "Pinned provider is a shard group head not authorized for this route"}
+				}
 				if poolActive && !poolMembers[p.ProviderID] {
 					return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "pool_no_eligible_member", message: "Pinned provider is not a member of the selected pool"}
 				}
@@ -8479,6 +8557,7 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 			manifestCoreDigest:  poolSnap.ManifestCoreDigest,
 			poolModel:           poolModelEntry,
 		}
+		checker.shardGroups = shardRoute
 		checker.poolView.priorManifestVersion, checker.poolView.priorManifestCoreDigest = poolModelPriorGeneration(poolSnap, poolModelEntry)
 		checker.routeAdmissionCtx = withPoolRouteView(admissionCtx, checker.poolView)
 	}
@@ -9285,6 +9364,8 @@ func routeKeyedFilterCounts(counts map[routing.RejectionReason]int) map[string]i
 			key = "byom_non_settlement"
 		case routing.ReasonProviderThroughputFloor:
 			key = "provider_throughput_floor"
+		case routing.ReasonShardGroupNotAuthorized:
+			key = "shard_group_not_authorized" // SPEC-051-R016/R028
 		default:
 			key = "other"
 		}
@@ -9760,6 +9841,16 @@ func (s *Server) pollQueuedProviderWithContext(ctx context.Context, waiter *slot
 		if state != nil && state.poolID != "" && !poolProviderSupportsTrustedPools(provider) {
 			return pool.Provider{}, queuedProviderTerminal
 		}
+		// SPEC-051-R016/R028: a group head is reserved off the queue only while
+		// the selection's shard route still authorizes it, with its active
+		// members re-checked live; without a captured route it never is.
+		var shardRoute shardGroupRoute
+		if state != nil {
+			shardRoute = state.shardRoute
+		}
+		if !shardRoute.routable(provider) {
+			return pool.Provider{}, queuedProviderTerminal
+		}
 		// SPEC-042 R004/R010: same reason as the #768 per-model floor below —
 		// a same-ID reconnect below the pool's binary floor must not be served
 		// off the queue. Uses the floor from the selection snapshot.
@@ -9878,6 +9969,11 @@ func (s *Server) slotQueueCandidates(providers []pool.Provider, excluded routing
 	}
 	for _, provider := range providers {
 		if excluded.Has(provider.SortKey()) || !s.providerSlotQueueEligible(providerForRoute(provider, view)) {
+			continue
+		}
+		// SPEC-051-R016/R028: the queue re-derives the routing gates by hand,
+		// so the shard group gate applies here too.
+		if checker == nil || !checker.shardGroups.routable(provider) {
 			continue
 		}
 		if !s.providerMatchesRequest(provider, checker.model, checker.class) || !checker.ProviderContextSufficient(provider) {
@@ -10270,6 +10366,9 @@ type eligibilityCtx struct {
 	// poolView carries the SPEC-042-R004 external-runtime predicate inputs of
 	// the same snapshot. Zero for global requests.
 	poolView poolRouteView
+	// shardGroups carries the SPEC-051-R028 inputs of the same snapshot. Zero
+	// for global requests, which no shard group head may serve.
+	shardGroups shardGroupRoute
 
 	legacyModelAdmissionRouteGenerations map[string]uint64
 
@@ -10559,7 +10658,11 @@ func (c *eligibilityCtx) RouteSnapshotRejection(p pool.Provider) routing.Rejecti
 // ReasonCatalogMaterialMissing. Eligibility is untouched.
 func (s *Server) eligibleCandidates(providers []pool.Provider, excluded routing.Excluded, checker *eligibilityCtx) routing.FilterResult {
 	checker.routeSnapshotRejections = map[string]routing.RejectionReason{}
+	providers, shardRejected := checker.shardGroups.filter(providers, excluded)
 	result := routing.EligibleCandidates(providers, excluded, pool.Provider.SortKey, checker)
+	if shardRejected > 0 {
+		result.Counts[routing.ReasonShardGroupNotAuthorized] += shardRejected
+	}
 	rejections := checker.routeSnapshotRejections
 	checker.routeSnapshotRejections = nil
 	for _, reason := range rejections {
@@ -11866,6 +11969,13 @@ func awaitBuyerCancelTerminal(attempt requestLogAttempt, relay *providerws.Relay
 // (including stop-string holdback). So a native partial cancel keeps its
 // pre-#1690 billing (byte estimate) and its receipt cannot verify.
 func withProviderCancelTerminal(attempt requestLogAttempt, end providerws.InferenceResponseEnd, delivered *settlementStreamOutputTracker, started time.Time, adoptUsage bool) requestLogAttempt {
+	// Only a "cancelled" terminal answers a buyer cancel: a "complete" frame
+	// that lost the race with the cancel signs normal_done, which the
+	// buyer_cancel row cannot match. A stream the buyer read to [DONE] settles
+	// that frame on its own path (forwardWSStreaming, #2084 V-3).
+	if end.Status != "cancelled" {
+		return attempt
+	}
 	terminalTS := int64(0)
 	if providerTS, ok := trustedProviderTerminalStateTSInt(end.TerminalStateTSUnixMS, started, time.Now().UTC()); ok {
 		terminalTS = providerTS

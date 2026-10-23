@@ -1,0 +1,1080 @@
+package shardgroup
+
+import (
+	"context"
+	"crypto/ed25519"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	_ "modernc.org/sqlite"
+
+	"github.com/augstar/macprovider-coordinator/internal/config"
+	"github.com/augstar/macprovider-coordinator/internal/pool"
+)
+
+const (
+	testPoolModelID = "pool/ijUnc-ZQf-LJeRvkhi-0iQ/deep-model"
+	testHash        = "3333333333333333333333333333333333333333333333333333333333333333"
+	testModelID     = "example/deep-model-4bit"
+	testOwner       = "github:42"
+)
+
+type fixture struct {
+	t        *testing.T
+	reg      *Registry
+	store    *Store
+	now      time.Time
+	keys     map[string]ed25519.PrivateKey
+	sessions map[string]pool.Provider
+	owners   map[string]string
+}
+
+func newFixture(t *testing.T) *fixture {
+	t.Helper()
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "shard.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	store, err := NewStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := &fixture{t: t, store: store, now: time.Unix(1_800_000_000, 0), keys: map[string]ed25519.PrivateKey{}, sessions: map[string]pool.Provider{}, owners: map[string]string{}}
+	f.reg = NewRegistry(ConfigFrom(config.DefaultShardGroupsConfig()), store, func() time.Time { return f.now })
+	for _, id := range []string{"head", "tail", "mid", "spare"} {
+		seed := sha256.Sum256([]byte(id))
+		f.keys[id] = ed25519.NewKeyFromSeed(seed[:])
+		f.owners[id] = testOwner
+		p := pool.Provider{
+			ProviderID: id, AssignedID: "s-" + id, ModelID: testModelID,
+			ModelHashAlgorithm: "macprovider.snapshot-manifest.v1", ModelHash: testHash,
+			InferencePath: pool.InferencePathWSTunneled, State: pool.StateReady, SlotsFree: 4, MaxConcurrency: 4,
+			Tier: pool.TierTrusted, ReceiptPubkey: f.keys[id].Public().(ed25519.PublicKey), BinaryVersion: "1.8.300",
+		}
+		if id == "head" {
+			p.ShardGroupHeadV1 = true
+		} else {
+			p.ShardMemberV1 = true
+		}
+		f.sessions[id] = p
+	}
+	return f
+}
+
+func (f *fixture) ownerLookup(ids []string) map[string]string {
+	out := make(map[string]string, len(ids))
+	for _, id := range ids {
+		out[id] = f.owners[id]
+	}
+	return out
+}
+
+func (f *fixture) lookup(id string) (pool.Provider, bool) {
+	p, ok := f.sessions[id]
+	return p, ok
+}
+
+func twoStageRecord(epoch uint64) Record {
+	return Record{
+		Schema: RecordSchema, GroupProviderID: "head", GroupEpoch: epoch,
+		ParallelismMode: "pipeline", InterconnectClass: "thunderbolt-ip", FrameProtection: "crc32c", TransportVersion: 1,
+		Model:     RecordModel{ModelID: testModelID, PoolModelID: testPoolModelID, ArtifactHashAlgorithm: "macprovider.snapshot-manifest.v1", ArtifactHash: testHash},
+		NumLayers: 32, MaxConcurrency: 4,
+		Stages:      []Stage{{StageIndex: 0, MemberDeviceID: "head", LayerStart: 0, LayerEnd: 18}, {StageIndex: 1, MemberDeviceID: "tail", LayerStart: 18, LayerEnd: 32}},
+		Spares:      []Spare{},
+		Supervision: Supervision{HeartbeatIntervalMS: 100, HeartbeatMissLimit: 3, DecodeHopDeadlineMS: 500, PrefillChunkDeadlineMS: 3000, ReplayDeadlineMS: 10000},
+	}
+}
+
+func sign(t *testing.T, key ed25519.PrivateKey, domain string, raw []byte, withoutSignature bool) string {
+	t.Helper()
+	msg, err := canonicalSigned(domain, raw, withoutSignature)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return base64.StdEncoding.EncodeToString(ed25519.Sign(key, msg))
+}
+
+func (f *fixture) registerPayload(rec Record) []byte {
+	raw, err := json.Marshal(rec)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	payload, _ := json.Marshal(RegisterMessage{Type: TypeRegister, Version: 1, Record: raw, RecordSignature: sign(f.t, f.keys["head"], recordDomain, raw, false)})
+	return payload
+}
+
+func (f *fixture) headSession() HeadSession {
+	p := f.sessions["head"]
+	return HeadSession{ProviderID: "head", AssignedID: p.AssignedID, ModelID: p.ModelID, ModelHashAlgorithm: p.ModelHashAlgorithm, ModelHash: p.ModelHash,
+		MaxConcurrency: p.MaxConcurrency, ReceiptKey: p.ReceiptPubkey, ShardGroupHeadV1: true, WSTunneled: true}
+}
+
+func (f *fixture) register(rec Record) (Result, []Outbound) {
+	return f.reg.Register(context.Background(), f.headSession(), f.registerPayload(rec), f.ownerLookup)
+}
+
+func helloPayload(member string, epoch uint64, stage, start, end int, iface string, peers ...string) []byte {
+	links := make([]MemberLink, 0, len(peers))
+	for _, p := range peers {
+		links = append(links, MemberLink{PeerMemberDeviceID: p, InterfaceType: iface})
+	}
+	role := "stage"
+	if member == "spare" {
+		role = "spare"
+	}
+	payload, _ := json.Marshal(MemberHello{Type: TypeMemberHello, Version: 1, GroupProviderID: "head", GroupEpoch: epoch, MemberDeviceID: member, Role: role,
+		StageIndex: stage, LayerStart: start, LayerEnd: end, TransportVersion: 1, ArtifactHashAlgorithm: "macprovider.snapshot-manifest.v1", ArtifactHash: testHash,
+		WeightsVerified: true, StageFits: true, Links: links})
+	return payload
+}
+
+func (f *fixture) hello(member string, payload []byte) Result {
+	p := f.sessions[member]
+	return f.reg.MemberHello(context.Background(), MemberSession{ProviderID: member, AssignedID: p.AssignedID, ReceiptKey: p.ReceiptPubkey, ShardMemberV1: p.ShardMemberV1}, payload)
+}
+
+func heartbeatPayload(epoch uint64, healthy bool, rtt int, iface string) []byte {
+	payload, _ := json.Marshal(Heartbeat{Type: TypeHeartbeat, Version: 1, GroupProviderID: "head", GroupEpoch: epoch,
+		Members: []HeartbeatMember{{MemberDeviceID: "head", Healthy: true}, {MemberDeviceID: "tail", Healthy: healthy}},
+		Links: []HeartbeatLink{
+			{FromMemberDeviceID: "head", ToMemberDeviceID: "tail", InterfaceType: iface, RTTP99US: rtt},
+			{FromMemberDeviceID: "tail", ToMemberDeviceID: "head", InterfaceType: iface, RTTP99US: rtt},
+		}})
+	return payload
+}
+
+func memberHealthPayload(member string, epoch uint64, healthy bool, iface string, rtt int, peers ...string) []byte {
+	links := make([]MemberHealthLink, 0, len(peers))
+	for _, p := range peers {
+		links = append(links, MemberHealthLink{PeerMemberDeviceID: p, InterfaceType: iface, RTTP99US: rtt})
+	}
+	reason := ""
+	if !healthy {
+		reason = "link_down"
+	}
+	payload, _ := json.Marshal(MemberHealth{Type: TypeMemberHealth, Version: 1, GroupProviderID: "head", GroupEpoch: epoch, MemberDeviceID: member,
+		Healthy: healthy, Reason: reason, Links: links})
+	return payload
+}
+
+func (f *fixture) memberHealth(member string, payload []byte) bool {
+	p := f.sessions[member]
+	_, ok := f.reg.MemberHealth(MemberSession{ProviderID: member, AssignedID: p.AssignedID, ReceiptKey: p.ReceiptPubkey, ShardMemberV1: p.ShardMemberV1}, payload)
+	return ok
+}
+
+func (f *fixture) evaluate() Evaluation {
+	ev, ok := f.reg.Evaluate("head", f.lookup, f.owners, 10*time.Second)
+	if !ok {
+		f.t.Fatal("group unknown")
+	}
+	return ev
+}
+
+func TestStrictParsingRefusesMalformedMessages(t *testing.T) {
+	good := helloPayload("tail", 1, 1, 18, 32, "thunderbolt", "head")
+	if _, err := ParseMemberHello(good); err != nil {
+		t.Fatalf("valid hello refused: %v", err)
+	}
+	for name, payload := range map[string]string{
+		"unknown field":   strings.Replace(string(good), `"type"`, `"extra":1,"type"`, 1),
+		"missing field":   strings.Replace(string(good), `"stage_fits":true,`, ``, 1),
+		"duplicate field": strings.Replace(string(good), `"type"`, `"role":"stage","type"`, 1),
+		"null list":       strings.Replace(string(good), `"links":[{"peer_member_device_id":"head","interface_type":"thunderbolt"}]`, `"links":null`, 1),
+		"negative int":    strings.Replace(string(good), `"stage_index":1`, `"stage_index":-1`, 1),
+		"huge int":        strings.Replace(string(good), `"group_epoch":1`, `"group_epoch":9007199254740993`, 1),
+		"float":           strings.Replace(string(good), `"layer_start":18`, `"layer_start":18.5`, 1),
+		"trailing data":   string(good) + `{}`,
+		"wrong type":      strings.Replace(string(good), TypeMemberHello, TypeHeartbeat, 1),
+	} {
+		if payload == string(good) {
+			t.Fatalf("%s: mutation did not apply", name)
+		}
+		if _, err := ParseMemberHello([]byte(payload)); err == nil {
+			t.Errorf("%s accepted", name)
+		}
+	}
+}
+
+func TestValidateRecordReasons(t *testing.T) {
+	cfg := ConfigFrom(config.DefaultShardGroupsConfig())
+	head := HeadView{ProviderID: "head", ModelID: testModelID, ModelHashAlgorithm: "macprovider.snapshot-manifest.v1", ModelHash: testHash, MaxConcurrency: 4}
+	if r := ValidateRecord(twoStageRecord(1), cfg, head); r != "" {
+		t.Fatalf("valid record refused: %s", r)
+	}
+	// SPEC-051-R011: Ethernet is accepted with authenticated frames.
+	ethernet := twoStageRecord(1)
+	ethernet.InterconnectClass, ethernet.FrameProtection = "ethernet", "hmac-sha256"
+	if r := ValidateRecord(ethernet, cfg, head); r != "" {
+		t.Fatalf("ethernet hmac-sha256 record refused: %s", r)
+	}
+	cases := map[string]struct {
+		mutate func(*Record)
+		want   string
+	}{
+		"tensor":            {func(r *Record) { r.ParallelismMode = "tensor" }, ReasonModeReserved},
+		"rdma":              {func(r *Record) { r.InterconnectClass = "rdma-tb5" }, ReasonInterconnectReserved},
+		"wifi class":        {func(r *Record) { r.InterconnectClass = "wifi" }, ReasonInvalidRecord},
+		"ethernet crc only": {func(r *Record) { r.InterconnectClass = "ethernet" }, ReasonFrameProtectionBelowMinimum},
+		"transport 2":       {func(r *Record) { r.TransportVersion = 2 }, ReasonTransportVersionUnsupported},
+		"model mismatch":    {func(r *Record) { r.Model.ArtifactHash = strings.Repeat("4", 64) }, ReasonModelMismatch},
+		"bad pool model":    {func(r *Record) { r.Model.PoolModelID = "deep-model" }, ReasonInvalidRecord},
+		"concurrency":       {func(r *Record) { r.MaxConcurrency = 5 }, ReasonInvalidRecord},
+		"supervision":       {func(r *Record) { r.Supervision.HeartbeatIntervalMS = 5 }, ReasonInvalidRecord},
+		"layer gap":         {func(r *Record) { r.Stages[1].LayerStart = 19 }, ReasonPlacementInvalid},
+		"short cover":       {func(r *Record) { r.NumLayers = 40 }, ReasonPlacementInvalid},
+		"stage 0 not head":  {func(r *Record) { r.Stages[0].MemberDeviceID = "other" }, ReasonPlacementInvalid},
+		"one stage":         {func(r *Record) { r.Stages = r.Stages[:1]; r.NumLayers = 18 }, ReasonPlacementInvalid},
+		"head spare":        {func(r *Record) { r.Spares = []Spare{{MemberDeviceID: "spare", StageIndex: 0}} }, ReasonPlacementInvalid},
+		"member twice":      {func(r *Record) { r.Spares = []Spare{{MemberDeviceID: "tail", StageIndex: 1}} }, ReasonPlacementInvalid},
+		"other group id":    {func(r *Record) { r.GroupProviderID = "someone" }, ReasonNotGroupHeadSession},
+		"zero epoch":        {func(r *Record) { r.GroupEpoch = 0 }, ReasonInvalidRecord},
+		"too many members": {func(r *Record) {
+			r.Spares = []Spare{{"s1", 1}, {"s2", 1}, {"s3", 1}}
+		}, ReasonTooManyMembers},
+	}
+	for name, tc := range cases {
+		rec := twoStageRecord(1)
+		tc.mutate(&rec)
+		if got := ValidateRecord(rec, cfg, head); got != tc.want {
+			t.Errorf("%s: reason %q, want %q", name, got, tc.want)
+		}
+	}
+}
+
+func TestRegisterSignatureEpochAndOwnership(t *testing.T) {
+	f := newFixture(t)
+	res, _ := f.register(twoStageRecord(1))
+	if !res.Accepted {
+		t.Fatalf("register refused: %s", res.Reason)
+	}
+	// An identical re-registration (reconnect) is acknowledged.
+	if res, _ := f.register(twoStageRecord(1)); !res.Accepted {
+		t.Fatalf("identical re-registration refused: %s", res.Reason)
+	}
+	changed := twoStageRecord(1)
+	changed.Stages[0].LayerEnd, changed.Stages[1].LayerStart = 16, 16
+	if res, _ := f.register(changed); res.Accepted || res.Reason != ReasonEpochNotIncreasing {
+		t.Fatalf("changed epoch-1 record: %+v", res)
+	}
+	stored, ok, err := f.store.LatestRecord(context.Background(), "head")
+	if err != nil || !ok || stored.GroupEpoch != 1 {
+		t.Fatalf("latest record = %+v %v %v", stored, ok, err)
+	}
+	// A record signed by another key is refused.
+	raw, _ := json.Marshal(twoStageRecord(2))
+	payload, _ := json.Marshal(RegisterMessage{Type: TypeRegister, Version: 1, Record: raw, RecordSignature: sign(t, f.keys["tail"], recordDomain, raw, false)})
+	if res, _ := f.reg.Register(context.Background(), f.headSession(), payload, f.ownerLookup); res.Reason != ReasonSignatureInvalid {
+		t.Fatalf("foreign signature: %+v", res)
+	}
+	// Owner mismatch and unclaimed identities are refused.
+	f.owners["tail"] = "github:7"
+	if res, _ := f.register(twoStageRecord(2)); res.Reason != ReasonOwnerMismatch {
+		t.Fatalf("owner mismatch: %+v", res)
+	}
+	f.owners["tail"] = ""
+	f.owners["head"] = ""
+	if res, _ := f.register(twoStageRecord(2)); res.Reason != ReasonOwnerMismatch {
+		t.Fatalf("unclaimed: %+v", res)
+	}
+	// A member session cannot register a group.
+	head := f.headSession()
+	head.ShardMemberV1 = true
+	if res, _ := f.reg.Register(context.Background(), head, f.registerPayload(twoStageRecord(2)), f.ownerLookup); res.Reason != ReasonNotGroupHeadSession {
+		t.Fatalf("member session register: %+v", res)
+	}
+}
+
+func TestMemberHelloBindingAndPendingClaims(t *testing.T) {
+	f := newFixture(t)
+	// A hello before the record is kept and accepted at registration.
+	if res := f.hello("tail", helloPayload("tail", 1, 1, 18, 32, "thunderbolt", "head")); res.Accepted || res.Reason != ReasonGroupNotRegistered {
+		t.Fatalf("early hello: %+v", res)
+	}
+	res, out := f.register(twoStageRecord(1))
+	if !res.Accepted || len(out) != 1 || out[0].ProviderID != "tail" || !out[0].Message.(Result).Accepted {
+		t.Fatalf("register with kept hello: %+v %+v", res, out)
+	}
+	keys, ok := f.reg.Epochs("head")(1)
+	if !ok || keys.StageKeys[1] != base64.StdEncoding.EncodeToString(f.sessions["tail"].ReceiptPubkey) {
+		t.Fatalf("tail key not bound: %+v", keys)
+	}
+	for name, tc := range map[string]struct {
+		payload []byte
+		want    string
+	}{
+		"wifi link":     {helloPayload("tail", 1, 1, 18, 32, "wifi", "head"), ReasonLinkInterfaceInvalid},
+		"wrong layers":  {helloPayload("tail", 1, 1, 17, 32, "thunderbolt", "head"), ReasonRecordMismatch},
+		"missing link":  {helloPayload("tail", 1, 1, 18, 32, "thunderbolt"), ReasonRecordMismatch},
+		"future epoch":  {helloPayload("tail", 2, 1, 18, 32, "thunderbolt", "head"), ReasonGroupNotRegistered},
+		"not in record": {helloPayload("mid", 1, 1, 18, 32, "thunderbolt", "head"), ReasonRecordMismatch},
+	} {
+		member := "tail"
+		if strings.Contains(string(tc.payload), `"member_device_id":"mid"`) {
+			member = "mid"
+		}
+		if res := f.hello(member, tc.payload); res.Reason != tc.want {
+			t.Errorf("%s: %+v, want %s", name, res, tc.want)
+		}
+	}
+	// The head identity is never a member session.
+	if res := f.reg.MemberHello(context.Background(), MemberSession{ProviderID: "tail", AssignedID: "s-tail", ReceiptKey: f.sessions["tail"].ReceiptPubkey}, helloPayload("tail", 1, 1, 18, 32, "thunderbolt", "head")); res.Reason != ReasonNotMemberSession {
+		t.Fatalf("non-member session: %+v", res)
+	}
+}
+
+func TestMemberCannotJoinTwoGroups(t *testing.T) {
+	f := newFixture(t)
+	if res, _ := f.register(twoStageRecord(1)); !res.Accepted {
+		t.Fatal(res.Reason)
+	}
+	// A second head naming "tail" is refused while tail is in head's group.
+	seed := sha256.Sum256([]byte("head2"))
+	key := ed25519.NewKeyFromSeed(seed[:])
+	rec := twoStageRecord(1)
+	rec.GroupProviderID, rec.Stages[0].MemberDeviceID = "head2", "head2"
+	raw, _ := json.Marshal(rec)
+	payload, _ := json.Marshal(RegisterMessage{Type: TypeRegister, Version: 1, Record: raw, RecordSignature: sign(t, key, recordDomain, raw, false)})
+	head := f.headSession()
+	head.ProviderID, head.ReceiptKey = "head2", key.Public().(ed25519.PublicKey)
+	f.owners["head2"] = testOwner
+	if res, _ := f.reg.Register(context.Background(), head, payload, f.ownerLookup); res.Reason != ReasonMemberConflict {
+		t.Fatalf("second group: %+v", res)
+	}
+}
+
+// SPEC-051-R015 (R3-C06): the reason is the first failing numbered
+// condition across all members: an inadmissible spare session (condition 4)
+// is named before a lower-tier active member (condition 5).
+func TestEvaluateAvailabilityReasonPrecedenceAcrossMembers(t *testing.T) {
+	f := newFixture(t)
+	rec := twoStageRecord(1)
+	rec.Spares = []Spare{{MemberDeviceID: "spare", StageIndex: 1}}
+	if res, _ := f.register(rec); !res.Accepted {
+		t.Fatal(res.Reason)
+	}
+	if res := f.hello("tail", helloPayload("tail", 1, 1, 18, 32, "thunderbolt", "head")); !res.Accepted {
+		t.Fatal(res.Reason)
+	}
+	tail := f.sessions["tail"]
+	tail.Tier = pool.TierProvisional
+	f.sessions["tail"] = tail
+	spare := f.sessions["spare"]
+	spare.State = pool.StateDegraded
+	f.sessions["spare"] = spare
+	if ev := f.evaluate(); ev.Reason != ReasonMemberNotAdmissible {
+		t.Fatalf("condition 4 on the spare must precede condition 5 on the tail: %+v", ev)
+	}
+	spare.State = pool.StateReady
+	f.sessions["spare"] = spare
+	if ev := f.evaluate(); ev.Reason != ReasonTrustLabelAboveMember {
+		t.Fatalf("then condition 5: %+v", ev)
+	}
+}
+
+// #2084 VM acceptance R: a real head and member serving a pool entry whose
+// artifact is not the catalog's carry the hello admission sandbox, which a pool
+// route ignores for a session bound to that pool model (SPEC-047-R011). The
+// group evaluation applies the same rule: bound to the record's pool model,
+// the sandboxed sessions are admissible; bound elsewhere or unbound, not.
+func TestEvaluateAvailabilityPoolBoundSandboxedSessions(t *testing.T) {
+	f := newFixture(t)
+	rec := twoStageRecord(1)
+	if res, _ := f.register(rec); !res.Accepted {
+		t.Fatal(res.Reason)
+	}
+	if res := f.hello("tail", helloPayload("tail", 1, 1, 18, 32, "thunderbolt", "head")); !res.Accepted {
+		t.Fatal(res.Reason)
+	}
+	f.reg.Heartbeat("head", "s-head", heartbeatPayload(1, true, 400, "thunderbolt"))
+	f.memberHealth("tail", memberHealthPayload("tail", 1, true, "thunderbolt", 300, "head"))
+	set := func(id, poolModel string) {
+		p := f.sessions[id]
+		p.AdmissionSandboxed = true
+		p.ModelAdmissionPoolID, p.ModelAdmissionPoolModelID = "", ""
+		if poolModel != "" {
+			p.ModelAdmissionPoolID, p.ModelAdmissionPoolModelID = "pool-a", poolModel
+		}
+		f.sessions[id] = p
+	}
+	set("head", rec.Model.PoolModelID)
+	set("tail", "")
+	if ev := f.evaluate(); ev.Reason != ReasonMemberNotAdmissible {
+		t.Fatalf("unbound sandboxed member: %+v", ev)
+	}
+	set("tail", rec.Model.PoolModelID+"-other")
+	if ev := f.evaluate(); ev.Reason != ReasonMemberNotAdmissible {
+		t.Fatalf("member bound to another pool model: %+v", ev)
+	}
+	set("tail", rec.Model.PoolModelID)
+	if ev := f.evaluate(); !ev.Available {
+		t.Fatalf("head and member bound to the record's pool model: %+v", ev)
+	}
+	head := f.sessions["head"]
+	head.ShardGroupPoolModelID = rec.Model.PoolModelID
+	resolve := func(id string) (pool.Provider, bool) { p, ok := f.sessions[id]; return p, ok }
+	if !MemberReservable(head, pool.ShardGroupMemberView{ProviderID: "tail", AssignedID: "s-tail"}, resolve) {
+		t.Fatal("reservation re-check refused the pool-bound sandboxed member")
+	}
+}
+
+func TestEvaluateAvailability(t *testing.T) {
+	f := newFixture(t)
+	if res, _ := f.register(twoStageRecord(1)); !res.Accepted {
+		t.Fatal(res.Reason)
+	}
+	if ev := f.evaluate(); ev.Available || ev.Reason != ReasonMemberNotJoined || !ev.Changed {
+		t.Fatalf("before join: %+v", ev)
+	}
+	if res := f.hello("tail", helloPayload("tail", 1, 1, 18, 32, "thunderbolt", "head")); !res.Accepted {
+		t.Fatal(res.Reason)
+	}
+	if ev := f.evaluate(); ev.Reason != ReasonGroupHeartbeatStale {
+		t.Fatalf("before heartbeat: %+v", ev)
+	}
+	if !f.reg.Heartbeat("head", "s-head", heartbeatPayload(1, true, 400, "thunderbolt")) {
+		t.Fatal("heartbeat dropped")
+	}
+	// SPEC-051-R015 item 8: the member's own report is required too.
+	if ev := f.evaluate(); ev.Reason != ReasonMemberHealthStale {
+		t.Fatalf("before the member's own report: %+v", ev)
+	}
+	if !f.memberHealth("tail", memberHealthPayload("tail", 1, true, "thunderbolt", 300, "head")) {
+		t.Fatal("member health dropped")
+	}
+	ev := f.evaluate()
+	if !ev.Available || len(ev.Members) != 1 || ev.Members[0].ProviderID != "tail" || !ev.Changed {
+		t.Fatalf("available: %+v", ev)
+	}
+	if again := f.evaluate(); again.Changed {
+		t.Fatal("unchanged evaluation reported a change")
+	}
+
+	checks := []struct {
+		name   string
+		mutate func()
+		undo   func()
+		want   string
+	}{
+		{"member disconnected", func() { delete(f.sessions, "tail") }, nil, ReasonMemberSessionMissing},
+		{"member reconnected under a new session", func() { p := f.sessions["tail"]; p.AssignedID = "s-tail-2"; f.sessions["tail"] = p }, nil, ReasonMemberSessionMissing},
+		{"member quarantined", func() { p := f.sessions["tail"]; p.BenchmarkQuarantined = true; f.sessions["tail"] = p }, nil, ReasonMemberNotAdmissible},
+		{"member degraded", func() { p := f.sessions["tail"]; p.State = pool.StateDegraded; f.sessions["tail"] = p }, nil, ReasonMemberNotAdmissible},
+		{"member lower tier", func() { p := f.sessions["tail"]; p.Tier = pool.TierProvisional; f.sessions["tail"] = p }, nil, ReasonTrustLabelAboveMember},
+		{"head attested, member not", func() {
+			h := f.sessions["head"]
+			h.AttestationTier = pool.AttestationTierHardware
+			f.sessions["head"] = h
+		}, nil, ReasonTrustLabelAboveMember},
+		{"owner changed", func() { f.owners["tail"] = "github:9" }, nil, ReasonOwnerMismatch},
+		{"head lost its session", func() { p := f.sessions["head"]; p.AssignedID = "s-head-2"; f.sessions["head"] = p }, nil, ReasonHeadSessionInvalid},
+		{"head swapped model", func() { p := f.sessions["head"]; p.ModelHash = strings.Repeat("5", 64); f.sessions["head"] = p }, nil, ReasonHeadSessionInvalid},
+		{"heartbeat stale", func() { f.now = f.now.Add(31 * time.Second) }, nil, ReasonGroupHeartbeatStale},
+		{"member unhealthy", func() { f.reg.Heartbeat("head", "s-head", heartbeatPayload(1, false, 400, "thunderbolt")) }, nil, ReasonMemberUnhealthy},
+		{"wifi link", func() { f.reg.Heartbeat("head", "s-head", heartbeatPayload(1, true, 400, "wifi")) }, nil, ReasonLinkInterfaceInvalid},
+		{"slow link", func() { f.reg.Heartbeat("head", "s-head", heartbeatPayload(1, true, 2500, "thunderbolt")) }, nil, ReasonLinkRTTExceeded},
+		{"member report stale", func() {
+			f.now = f.now.Add(31 * time.Second)
+			f.reg.Heartbeat("head", "s-head", heartbeatPayload(1, true, 400, "thunderbolt"))
+		}, nil, ReasonMemberHealthStale},
+		{"member reports itself unhealthy", func() { f.memberHealth("tail", memberHealthPayload("tail", 1, false, "thunderbolt", 300, "head")) }, nil, ReasonMemberSelfUnhealthy},
+		{"member sees wifi", func() { f.memberHealth("tail", memberHealthPayload("tail", 1, true, "wifi", 300, "head")) }, nil, ReasonLinkInterfaceInvalid},
+		{"member sees a slow link", func() { f.memberHealth("tail", memberHealthPayload("tail", 1, true, "thunderbolt", 2600, "head")) }, nil, ReasonLinkRTTExceeded},
+		// SPEC-051-R003/R008: every active member serves the record's artifact.
+		{"member serves another artifact", func() { p := f.sessions["tail"]; p.ModelHash = strings.Repeat("6", 64); f.sessions["tail"] = p }, nil, ReasonMemberNotAdmissible},
+	}
+	for _, c := range checks {
+		saved := map[string]pool.Provider{}
+		for k, v := range f.sessions {
+			saved[k] = v
+		}
+		savedOwners := map[string]string{}
+		for k, v := range f.owners {
+			savedOwners[k] = v
+		}
+		savedNow := f.now
+		c.mutate()
+		if ev := f.evaluate(); ev.Available || ev.Reason != c.want || ev.Members != nil {
+			t.Errorf("%s: %+v, want %s", c.name, ev, c.want)
+		}
+		f.sessions, f.owners, f.now = saved, savedOwners, savedNow
+		f.reg.Heartbeat("head", "s-head", heartbeatPayload(1, true, 400, "thunderbolt"))
+		f.memberHealth("tail", memberHealthPayload("tail", 1, true, "thunderbolt", 300, "head"))
+		if ev := f.evaluate(); !ev.Available {
+			t.Fatalf("%s: did not recover: %+v", c.name, ev)
+		}
+	}
+	// A heartbeat from a stale session, for another epoch, or missing a link
+	// is dropped.
+	if f.reg.Heartbeat("head", "s-other", heartbeatPayload(1, true, 400, "thunderbolt")) ||
+		f.reg.Heartbeat("head", "s-head", heartbeatPayload(2, true, 400, "thunderbolt")) {
+		t.Fatal("foreign heartbeat accepted")
+	}
+	// A member report from another session, another epoch, another member,
+	// with a missing link, or self-contradictory, is dropped.
+	for name, tc := range map[string]struct {
+		session string
+		payload []byte
+	}{
+		"other session": {"s-other", memberHealthPayload("tail", 1, true, "thunderbolt", 300, "head")},
+		"other epoch":   {"s-tail", memberHealthPayload("tail", 2, true, "thunderbolt", 300, "head")},
+		"missing link":  {"s-tail", memberHealthPayload("tail", 1, true, "thunderbolt", 300)},
+		"extra link":    {"s-tail", memberHealthPayload("tail", 1, true, "thunderbolt", 300, "head", "mid")},
+		"healthy with reason": {"s-tail", []byte(strings.Replace(string(memberHealthPayload("tail", 1, true, "thunderbolt", 300, "head")),
+			`"reason":""`, `"reason":"link_down"`, 1))},
+		"unknown reason": {"s-tail", []byte(strings.Replace(string(memberHealthPayload("tail", 1, false, "thunderbolt", 300, "head")),
+			`"link_down"`, `"bored"`, 1))},
+	} {
+		p := f.sessions["tail"]
+		if _, ok := f.reg.MemberHealth(MemberSession{ProviderID: "tail", AssignedID: tc.session, ReceiptKey: p.ReceiptPubkey, ShardMemberV1: true}, tc.payload); ok {
+			t.Errorf("%s: member health kept", name)
+		}
+	}
+	// SPEC-051-R015 item 8: a member that rejoins under a new session at the
+	// same epoch needs a report from that session; the old session's healthy
+	// report does not carry over.
+	rejoined := f.sessions["tail"]
+	rejoined.AssignedID = "s-tail-2"
+	f.sessions["tail"] = rejoined
+	if res := f.hello("tail", helloPayload("tail", 1, 1, 18, 32, "thunderbolt", "head")); !res.Accepted {
+		t.Fatalf("rejoin hello: %+v", res)
+	}
+	if ev := f.evaluate(); ev.Available || ev.Reason != ReasonMemberHealthStale {
+		t.Fatalf("rejoined member reused the old session's report: %+v", ev)
+	}
+	if !f.memberHealth("tail", memberHealthPayload("tail", 1, true, "thunderbolt", 300, "head")) {
+		t.Fatal("rejoined member's report dropped")
+	}
+	if ev := f.evaluate(); !ev.Available || ev.Members[0].AssignedID != "s-tail-2" {
+		t.Fatalf("after the rejoined member's report: %+v", ev)
+	}
+	short, _ := json.Marshal(Heartbeat{Type: TypeHeartbeat, Version: 1, GroupProviderID: "head", GroupEpoch: 1,
+		Members: []HeartbeatMember{{"head", true}, {"tail", true}}, Links: []HeartbeatLink{{"head", "tail", "thunderbolt", 400}}})
+	if f.reg.Heartbeat("head", "s-head", short) {
+		t.Fatal("heartbeat missing the return link accepted")
+	}
+}
+
+// --- attestation ---
+
+func digest(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
+}
+
+func receiptEnvelope(t *testing.T, requestID string, attempt int, provider string) (string, string) {
+	t.Helper()
+	// A SPEC-015 v0.4 tuple: its output counts are in usage (no tokens_out).
+	tuple := []byte(`{"attempt_n":` + jsonInt(attempt) + `,"provider_id":"` + provider + `","receipt_version":"4","request_id":"` + requestID +
+		`","usage":{"billable_input_tokens":8,"billable_output_tokens":1,"delivered_output_bytes":4,"observed_input_tokens":8,"observed_output_tokens":1}}`)
+	sum := sha256.Sum256(tuple)
+	return base64.StdEncoding.EncodeToString(tuple) + "." + base64.StdEncoding.EncodeToString(make([]byte, 64)), hex.EncodeToString(sum[:])
+}
+
+func jsonInt(n int) string { b, _ := json.Marshal(n); return string(b) }
+
+func (f *fixture) subReceipt(member string, epoch uint64, stage, start, end int, requestID, in, out string) SignedSubReceipt {
+	sr := SubReceipt{MemberDeviceID: member, GroupEpoch: epoch, StageIndex: stage, LayerStart: start, LayerEnd: end, RequestID: requestID,
+		PromptTokens: 12, DecodeSteps: 7, InDigest: in, OutDigest: out}
+	raw, _ := json.Marshal(sr)
+	return SignedSubReceipt{SubReceipt: sr, PublicKey: base64.StdEncoding.EncodeToString(f.keys[member].Public().(ed25519.PublicKey)), Signature: sign(f.t, f.keys[member], subReceiptDomain, raw, false)}
+}
+
+func (f *fixture) attestation(segments []AttestationSegment, requestID string, attempt int, tupleSHA string) json.RawMessage {
+	return f.takeoverAttestation(segments, requestID, attempt, tupleSHA, nil)
+}
+
+func (f *fixture) takeoverAttestation(segments []AttestationSegment, requestID string, attempt int, tupleSHA string, takeover *Takeover) json.RawMessage {
+	att := Attestation{Schema: AttestationSchema, GroupProviderID: "head", RequestID: requestID, AttemptN: attempt, ReceiptTupleSHA256: tupleSHA, Segments: segments, Takeover: takeover}
+	raw, _ := json.Marshal(att)
+	att.Signature = sign(f.t, f.keys["head"], attestationDomain, raw, true)
+	out, _ := json.Marshal(att)
+	return out
+}
+
+func (f *fixture) joinedGroup() {
+	if res, _ := f.register(twoStageRecord(1)); !res.Accepted {
+		f.t.Fatal(res.Reason)
+	}
+	if res := f.hello("tail", helloPayload("tail", 1, 1, 18, 32, "thunderbolt", "head")); !res.Accepted {
+		f.t.Fatal(res.Reason)
+	}
+}
+
+func TestVerifyAttestation(t *testing.T) {
+	f := newFixture(t)
+	f.joinedGroup()
+	envelope, tupleSHA := receiptEnvelope(t, "req-1", 0, "head")
+	a, b := digest("activations"), digest("tokens")
+	good := []AttestationSegment{{GroupEpoch: 1, StepStart: 0, StepEnd: 8, SubReceipts: []SignedSubReceipt{
+		f.subReceipt("head", 1, 0, 0, 18, "req-1", b, a),
+		f.subReceipt("tail", 1, 1, 18, 32, "req-1", a, b),
+	}}}
+	headKey := f.sessions["head"].ReceiptPubkey
+	verify := func(raw json.RawMessage, env string) Verdict {
+		return VerifyAttestation(raw, env, "head", headKey, f.reg.Epochs("head"))
+	}
+	if v := verify(f.attestation(good, "req-1", 0, tupleSHA), envelope); !v.Verified() || v.ReceiptTupleSHA256 != tupleSHA {
+		t.Fatalf("valid attestation: %+v", v)
+	}
+	if v := verify(nil, envelope); v.FaultKind != FaultMissing {
+		t.Fatalf("missing: %+v", v)
+	}
+	if v := verify(f.attestation(good, "req-1", 1, tupleSHA), envelope); v.FaultKind != FaultReceiptMismatch {
+		t.Fatalf("attempt mismatch: %+v", v)
+	}
+	if v := verify(f.attestation(good, "req-1", 0, digest("other")), envelope); v.FaultKind != FaultReceiptMismatch {
+		t.Fatalf("tuple digest mismatch: %+v", v)
+	}
+	tampered := f.attestation(good, "req-1", 0, tupleSHA)
+	tampered = json.RawMessage(strings.Replace(string(tampered), `"step_end":8`, `"step_end":9`, 1))
+	if v := verify(tampered, envelope); v.FaultKind != FaultHeadSignature {
+		t.Fatalf("tampered: %+v", v)
+	}
+	broken := []AttestationSegment{{GroupEpoch: 1, StepStart: 0, StepEnd: 8, SubReceipts: []SignedSubReceipt{
+		f.subReceipt("head", 1, 0, 0, 18, "req-1", b, a),
+		f.subReceipt("tail", 1, 1, 18, 32, "req-1", digest("forged"), b),
+	}}}
+	if v := verify(f.attestation(broken, "req-1", 0, tupleSHA), envelope); v.FaultKind != FaultDigestChainBreak || v.FaultMemberDeviceID != "tail" {
+		t.Fatalf("chain break: %+v", v)
+	}
+	wrongKey := []AttestationSegment{{GroupEpoch: 1, StepStart: 0, StepEnd: 8, SubReceipts: []SignedSubReceipt{
+		f.subReceipt("head", 1, 0, 0, 18, "req-1", b, a),
+		f.subReceipt("mid", 1, 1, 18, 32, "req-1", a, b),
+	}}}
+	wrongKey[0].SubReceipts[1].SubReceipt.MemberDeviceID = "tail"
+	if v := verify(f.attestation(wrongKey, "req-1", 0, tupleSHA), envelope); v.FaultKind != FaultKeyMismatch || v.FaultMemberDeviceID != "tail" {
+		t.Fatalf("wrong key: %+v", v)
+	}
+	unknownEpoch := []AttestationSegment{{GroupEpoch: 2, StepStart: 0, StepEnd: 8, SubReceipts: good[0].SubReceipts}}
+	if v := verify(f.attestation(unknownEpoch, "req-1", 0, tupleSHA), envelope); v.FaultKind != FaultUnknownEpoch {
+		t.Fatalf("unknown epoch: %+v", v)
+	}
+	gap := []AttestationSegment{{GroupEpoch: 1, StepStart: 1, StepEnd: 8, SubReceipts: good[0].SubReceipts}}
+	if v := verify(f.attestation(gap, "req-1", 0, tupleSHA), envelope); v.FaultKind != FaultSegments {
+		t.Fatalf("segment gap: %+v", v)
+	}
+	otherProvider, otherSHA := receiptEnvelope(t, "req-1", 0, "tail")
+	if v := verify(f.attestation(good, "req-1", 0, otherSHA), otherProvider); v.FaultKind != FaultReceiptMismatch {
+		t.Fatalf("receipt from another provider: %+v", v)
+	}
+}
+
+func TestVerifyAttestationAcrossSpareReplay(t *testing.T) {
+	f := newFixture(t)
+	rec := twoStageRecord(1)
+	rec.Spares = []Spare{{MemberDeviceID: "spare", StageIndex: 1}}
+	if res, _ := f.register(rec); !res.Accepted {
+		t.Fatal(res.Reason)
+	}
+	if res := f.hello("tail", helloPayload("tail", 1, 1, 18, 32, "thunderbolt", "head")); !res.Accepted {
+		t.Fatal(res.Reason)
+	}
+	// The spare replaces the tail in epoch 2 (SPEC-051-R022).
+	next := twoStageRecord(2)
+	next.Stages[1].MemberDeviceID = "spare"
+	if res, _ := f.register(next); !res.Accepted {
+		t.Fatal(res.Reason)
+	}
+	if res := f.hello("spare", helloPayload("spare", 2, 1, 18, 32, "thunderbolt", "head")); res.Reason != ReasonRecordMismatch {
+		t.Fatalf("spare hello with role spare for an active stage: %+v", res)
+	}
+	payload := strings.Replace(string(helloPayload("spare", 2, 1, 18, 32, "thunderbolt", "head")), `"role":"spare"`, `"role":"stage"`, 1)
+	if res := f.hello("spare", []byte(payload)); !res.Accepted {
+		t.Fatalf("spare as stage: %+v", res)
+	}
+	envelope, tupleSHA := receiptEnvelope(t, "req-2", 0, "head")
+	a1, b1, a2, b2 := digest("a1"), digest("b1"), digest("a2"), digest("b2")
+	// A request runs in one epoch: after a replay the new epoch's members
+	// recompute the whole prefix, so a split into two segments is refused.
+	segments := []AttestationSegment{
+		{GroupEpoch: 1, StepStart: 0, StepEnd: 5, SubReceipts: []SignedSubReceipt{
+			f.subReceipt("head", 1, 0, 0, 18, "req-2", b1, a1), f.subReceipt("tail", 1, 1, 18, 32, "req-2", a1, b1)}},
+		{GroupEpoch: 2, StepStart: 5, StepEnd: 9, SubReceipts: []SignedSubReceipt{
+			f.subReceipt("head", 2, 0, 0, 18, "req-2", b2, a2), f.subReceipt("spare", 2, 1, 18, 32, "req-2", a2, b2)}},
+	}
+	if v := VerifyAttestation(f.attestation(segments, "req-2", 0, tupleSHA), envelope, "head", f.sessions["head"].ReceiptPubkey, f.reg.Epochs("head")); v.FaultKind != FaultSegments {
+		t.Fatalf("two-segment attestation: %+v", v)
+	}
+	whole := []AttestationSegment{{GroupEpoch: 2, StepStart: 0, StepEnd: 8, SubReceipts: segments[1].SubReceipts}}
+	if v := VerifyAttestation(f.attestation(whole, "req-2", 0, tupleSHA), envelope, "head", f.sessions["head"].ReceiptPubkey, f.reg.Epochs("head")); !v.Verified() || len(v.GroupEpochs) != 1 {
+		t.Fatalf("replayed request in the new epoch: %+v", v)
+	}
+}
+
+// SPEC-051-R019 item 7: every member's work covers the request, and the
+// receipt claims no more tokens than the head received.
+func TestVerifyAttestationCoverage(t *testing.T) {
+	f := newFixture(t)
+	f.joinedGroup()
+	a, b := digest("activations"), digest("tokens")
+	segment := func(stepEnd int, mutate func(*SubReceipt, *SubReceipt)) []AttestationSegment {
+		head := SubReceipt{MemberDeviceID: "head", GroupEpoch: 1, StageIndex: 0, LayerStart: 0, LayerEnd: 18, RequestID: "req-c", PromptTokens: 12, DecodeSteps: stepEnd - 1, InDigest: b, OutDigest: a}
+		tail := SubReceipt{MemberDeviceID: "tail", GroupEpoch: 1, StageIndex: 1, LayerStart: 18, LayerEnd: 32, RequestID: "req-c", PromptTokens: 12, DecodeSteps: stepEnd - 1, InDigest: a, OutDigest: b}
+		if mutate != nil {
+			mutate(&head, &tail)
+		}
+		signed := func(member string, sr SubReceipt) SignedSubReceipt {
+			raw, _ := json.Marshal(sr)
+			return SignedSubReceipt{SubReceipt: sr, PublicKey: base64.StdEncoding.EncodeToString(f.keys[member].Public().(ed25519.PublicKey)), Signature: sign(t, f.keys[member], subReceiptDomain, raw, false)}
+		}
+		return []AttestationSegment{{GroupEpoch: 1, StepStart: 0, StepEnd: stepEnd, SubReceipts: []SignedSubReceipt{signed("head", head), signed("tail", tail)}}}
+	}
+	envelope := func(tokensOut int) (string, string) {
+		tuple := []byte(`{"attempt_n":0,"provider_id":"head","request_id":"req-c","tokens_out":` + jsonInt(tokensOut) + `}`)
+		sum := sha256.Sum256(tuple)
+		return base64.StdEncoding.EncodeToString(tuple) + "." + base64.StdEncoding.EncodeToString(make([]byte, 64)), hex.EncodeToString(sum[:])
+	}
+	verify := func(segments []AttestationSegment, tokensOut int) Verdict {
+		env, sha := envelope(tokensOut)
+		return VerifyAttestation(f.attestation(segments, "req-c", 0, sha), env, "head", f.sessions["head"].ReceiptPubkey, f.reg.Epochs("head"))
+	}
+	if v := verify(segment(6, nil), 6); !v.Verified() {
+		t.Fatalf("covered request: %+v", v)
+	}
+	// A stop token or a token dropped after a cancel is a step, not a delivered token.
+	if v := verify(segment(6, nil), 5); !v.Verified() {
+		t.Fatalf("one undelivered step: %+v", v)
+	}
+	for name, tc := range map[string]struct {
+		segments  []AttestationSegment
+		tokensOut int
+		member    string
+	}{
+		"receipt claims more tokens than steps": {segment(6, nil), 7, "head"},
+		"head decode steps short of step_end":   {segment(6, func(h, _ *SubReceipt) { h.DecodeSteps = 4 }), 6, "head"},
+		"head processed no prompt":              {segment(6, func(h, _ *SubReceipt) { h.PromptTokens = 0 }), 6, "head"},
+		"member skipped decode steps":           {segment(6, func(_, tl *SubReceipt) { tl.DecodeSteps = 0 }), 6, "tail"},
+		"member skipped prompt tokens":          {segment(6, func(_, tl *SubReceipt) { tl.PromptTokens = 3 }), 6, "tail"},
+		"empty segment":                         {segment(0, func(h, tl *SubReceipt) { h.DecodeSteps, tl.DecodeSteps = 0, 0 }), 0, "head"},
+	} {
+		if v := verify(tc.segments, tc.tokensOut); v.FaultKind != FaultCoverage || v.FaultMemberDeviceID != tc.member {
+			t.Errorf("%s: %+v", name, v)
+		}
+	}
+}
+
+// SPEC-051-R019 item 7 against a real SPEC-015 v0.4 tuple (VM acceptance,
+// R3-A1): v0.4 has no tokens_out; its usage.observed_output_tokens and
+// usage.billable_output_tokens are bound by step_end, and a tuple naming no
+// output count fails closed.
+func TestVerifyAttestationCoverageReadsV04Usage(t *testing.T) {
+	f := newFixture(t)
+	f.joinedGroup()
+	a, b := digest("activations"), digest("tokens")
+	signed := func(member string, sr SubReceipt) SignedSubReceipt {
+		raw, _ := json.Marshal(sr)
+		return SignedSubReceipt{SubReceipt: sr, PublicKey: base64.StdEncoding.EncodeToString(f.keys[member].Public().(ed25519.PublicKey)), Signature: sign(t, f.keys[member], subReceiptDomain, raw, false)}
+	}
+	segment := func(stepEnd int) []AttestationSegment {
+		head := SubReceipt{MemberDeviceID: "head", GroupEpoch: 1, StageIndex: 0, LayerStart: 0, LayerEnd: 18, RequestID: "req-v4", PromptTokens: 8, DecodeSteps: stepEnd - 1, InDigest: b, OutDigest: a}
+		tail := SubReceipt{MemberDeviceID: "tail", GroupEpoch: 1, StageIndex: 1, LayerStart: 18, LayerEnd: 32, RequestID: "req-v4", PromptTokens: 8, DecodeSteps: stepEnd - 1, InDigest: a, OutDigest: b}
+		return []AttestationSegment{{GroupEpoch: 1, StepStart: 0, StepEnd: stepEnd, SubReceipts: []SignedSubReceipt{signed("head", head), signed("tail", tail)}}}
+	}
+	verify := func(stepEnd int, usage string) Verdict {
+		tuple := []byte(`{"attempt_n":0,"provider_id":"head","receipt_version":"4","request_id":"req-v4"` + usage + `}`)
+		sum := sha256.Sum256(tuple)
+		env := base64.StdEncoding.EncodeToString(tuple) + "." + base64.StdEncoding.EncodeToString(make([]byte, 64))
+		return VerifyAttestation(f.attestation(segment(stepEnd), "req-v4", 0, hex.EncodeToString(sum[:])), env, "head", f.sessions["head"].ReceiptPubkey, f.reg.Epochs("head"))
+	}
+	usage := func(observed, billable int) string {
+		return `,"usage":{"billable_input_tokens":8,"billable_output_tokens":` + jsonInt(billable) + `,"delivered_output_bytes":40,"observed_input_tokens":8,"observed_output_tokens":` + jsonInt(observed) + `}`
+	}
+	if v := verify(13, usage(12, 12)); !v.Verified() {
+		t.Fatalf("v0.4 receipt within step_end: %+v", v)
+	}
+	for name, tc := range map[string]struct {
+		stepEnd int
+		usage   string
+	}{
+		"observed output above step_end": {1, usage(12, 12)},
+		"billable output above step_end": {13, usage(12, 14)},
+		"usage without output counts":    {13, `,"usage":{"observed_input_tokens":8}`},
+		"no output count at all":         {13, ""},
+	} {
+		if v := verify(tc.stepEnd, tc.usage); v.FaultKind != FaultCoverage || v.FaultMemberDeviceID != "head" {
+			t.Errorf("%s: %+v", name, v)
+		}
+	}
+}
+
+func TestStoreAttestationFirstVerdictKept(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	rec := AttestationRecord{RequestID: "req", AttemptN: 0, GroupProviderID: "head", ReceiptTupleSHA256: digest("t"), Verified: false, FaultKind: FaultDigestChainBreak, FaultMemberDeviceID: "tail", AttestationJSON: "{}"}
+	if err := f.store.RecordAttestation(ctx, rec, 1); err != nil {
+		t.Fatal(err)
+	}
+	rec.Verified, rec.FaultKind, rec.FaultMemberDeviceID = true, "", ""
+	if err := f.store.RecordAttestation(ctx, rec, 2); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := f.store.Attestation(ctx, "req", 0, "head")
+	if err != nil || !ok || got.Verified || got.FaultMemberDeviceID != "tail" {
+		t.Fatalf("stored = %+v %v %v", got, ok, err)
+	}
+}
+
+// The provider's spare flow end to end: the spare joins epoch 1 as a spare and
+// sends its takeover hello for epoch 2 at once, which is kept; the head's
+// heartbeat carries the spare's standby link; an unreachable spare never stops
+// the group; at the takeover the head registers epoch 2 and the spare's key is
+// bound, so a request the spare finished verifies as one epoch-2 segment.
+func TestSpareStandbyTakeoverFlow(t *testing.T) {
+	f := newFixture(t)
+	rec := twoStageRecord(1)
+	rec.Spares = []Spare{{MemberDeviceID: "spare", StageIndex: 1}}
+	if res, _ := f.register(rec); !res.Accepted {
+		t.Fatal(res.Reason)
+	}
+	if res := f.hello("tail", helloPayload("tail", 1, 1, 18, 32, "thunderbolt", "head")); !res.Accepted {
+		t.Fatal(res.Reason)
+	}
+	if res := f.hello("spare", helloPayload("spare", 1, 1, 18, 32, "thunderbolt", "head")); !res.Accepted {
+		t.Fatalf("spare hello: %+v", res)
+	}
+	takeover := []byte(strings.Replace(string(helloPayload("spare", 2, 1, 18, 32, "thunderbolt", "head")), `"role":"spare"`, `"role":"stage"`, 1))
+	if res := f.hello("spare", takeover); res.Reason != ReasonGroupNotRegistered {
+		t.Fatalf("takeover hello before the takeover: %+v", res)
+	}
+	beat := func(spareHealthy bool, spareInterface string) []byte {
+		payload, _ := json.Marshal(Heartbeat{Type: TypeHeartbeat, Version: 1, GroupProviderID: "head", GroupEpoch: 1,
+			Members: []HeartbeatMember{{MemberDeviceID: "head", Healthy: true}, {MemberDeviceID: "tail", Healthy: true}, {MemberDeviceID: "spare", Healthy: spareHealthy}},
+			Links: []HeartbeatLink{
+				{FromMemberDeviceID: "head", ToMemberDeviceID: "tail", InterfaceType: "thunderbolt", RTTP99US: 400},
+				{FromMemberDeviceID: "tail", ToMemberDeviceID: "head", InterfaceType: "thunderbolt", RTTP99US: 400},
+				{FromMemberDeviceID: "head", ToMemberDeviceID: "spare", InterfaceType: spareInterface, RTTP99US: 0},
+			}})
+		return payload
+	}
+	for name, tc := range map[string]struct {
+		healthy bool
+		iface   string
+		want    string
+	}{
+		"spare reachable":   {true, "thunderbolt", ""},
+		"spare unreachable": {false, "other", ""},
+		"spare on wifi":     {true, "wifi", ReasonLinkInterfaceInvalid},
+	} {
+		if !f.reg.Heartbeat("head", "s-head", beat(tc.healthy, tc.iface)) {
+			t.Fatalf("%s: heartbeat dropped", name)
+		}
+		if !f.memberHealth("tail", memberHealthPayload("tail", 1, true, "thunderbolt", 300, "head")) {
+			t.Fatalf("%s: member health dropped", name)
+		}
+		if ev := f.evaluate(); ev.Reason != tc.want {
+			t.Errorf("%s: reason %q, want %q", name, ev.Reason, tc.want)
+		}
+	}
+	// SPEC-051-R003/R004 (R2-C06): a connected spare passes admission, artifact
+	// and minimum labels; a spare without a session only cannot take over.
+	f.reg.Heartbeat("head", "s-head", beat(true, "thunderbolt"))
+	f.memberHealth("tail", memberHealthPayload("tail", 1, true, "thunderbolt", 300, "head"))
+	for name, tc := range map[string]struct {
+		mutate func()
+		want   string
+	}{
+		"spare quarantined":    {func() { p := f.sessions["spare"]; p.BenchmarkQuarantined = true; f.sessions["spare"] = p }, ReasonMemberNotAdmissible},
+		"spare other artifact": {func() { p := f.sessions["spare"]; p.ModelHash = strings.Repeat("8", 64); f.sessions["spare"] = p }, ReasonMemberNotAdmissible},
+		"spare lower tier":     {func() { p := f.sessions["spare"]; p.Tier = pool.TierProvisional; f.sessions["spare"] = p }, ReasonTrustLabelAboveMember},
+		"spare disconnected":   {func() { delete(f.sessions, "spare") }, ""},
+	} {
+		saved := f.sessions["spare"]
+		tc.mutate()
+		ev := f.evaluate()
+		if ev.Reason != tc.want {
+			t.Errorf("%s: reason %q, want %q", name, ev.Reason, tc.want)
+		}
+		head := f.sessions["head"]
+		view := pool.ShardGroupMemberView{ProviderID: "spare", AssignedID: saved.AssignedID, Spare: true}
+		if got := MemberReservable(head, view, f.lookup); got != (tc.want == "") {
+			t.Errorf("%s: reservable %v at reservation", name, got)
+		}
+		f.sessions["spare"] = saved
+	}
+	// A heartbeat that leaves the spare out does not describe the record.
+	if f.reg.Heartbeat("head", "s-head", heartbeatPayload(1, true, 400, "thunderbolt")) {
+		t.Fatal("heartbeat without the spare accepted")
+	}
+
+	next := twoStageRecord(2)
+	next.Stages[1].MemberDeviceID = "spare"
+	res, out := f.register(next)
+	if !res.Accepted || len(out) != 1 || out[0].ProviderID != "spare" || !out[0].Message.(Result).Accepted {
+		t.Fatalf("takeover registration: %+v %+v", res, out)
+	}
+	keys, ok := f.reg.Epochs("head")(2)
+	if !ok || keys.StageKeys[1] != base64.StdEncoding.EncodeToString(f.sessions["spare"].ReceiptPubkey) {
+		t.Fatalf("spare key not bound to epoch 2: %+v", keys)
+	}
+	envelope, tupleSHA := receiptEnvelope(t, "req-3", 0, "head")
+	a, b := digest("a"), digest("b")
+	segments := []AttestationSegment{{GroupEpoch: 2, StepStart: 0, StepEnd: 8, SubReceipts: []SignedSubReceipt{
+		f.subReceipt("head", 2, 0, 0, 18, "req-3", b, a), f.subReceipt("spare", 2, 1, 18, 32, "req-3", a, b)}}}
+	verify := func(raw json.RawMessage) Verdict {
+		return VerifyAttestation(raw, envelope, "head", f.sessions["head"].ReceiptPubkey, f.reg.Epochs("head"))
+	}
+	if v := verify(f.attestation(segments, "req-3", 0, tupleSHA)); !v.Verified() {
+		t.Fatalf("replayed request attestation: %+v", v)
+	}
+	// SPEC-051-R019 takeover attestation: one new-epoch segment from step 0,
+	// recorded with the epoch it took over from and why.
+	v := verify(f.takeoverAttestation(segments, "req-3", 0, tupleSHA, &Takeover{FromGroupEpoch: 1, Reason: "peer_closed"}))
+	if !v.Verified() || v.TakeoverFromEpoch != 1 || v.TakeoverReason != "peer_closed" {
+		t.Fatalf("takeover attestation: %+v", v)
+	}
+	old := []SignedSubReceipt{f.subReceipt("head", 1, 0, 0, 18, "req-3", b, a), f.subReceipt("tail", 1, 1, 18, 32, "req-3", a, b)}
+	if res := f.hello("tail", helloPayload("tail", 1, 1, 18, 32, "thunderbolt", "head")); res.Reason != ReasonEpochSuperseded {
+		t.Fatalf("tail hello for the superseded epoch: %+v", res)
+	}
+	for name, tc := range map[string]struct {
+		segments []AttestationSegment
+		takeover Takeover
+	}{
+		"two segments":   {[]AttestationSegment{{GroupEpoch: 1, StepStart: 0, StepEnd: 4, SubReceipts: old}, {GroupEpoch: 2, StepStart: 4, StepEnd: 8, SubReceipts: segments[0].SubReceipts}}, Takeover{1, "peer_closed"}},
+		"unknown reason": {segments, Takeover{1, "bored"}},
+		"same epoch":     {segments, Takeover{2, "peer_dead"}},
+		"unknown from":   {segments, Takeover{0, "peer_dead"}},
+	} {
+		if v := verify(f.takeoverAttestation(tc.segments, "req-3", 0, tupleSHA, &tc.takeover)); v.FaultKind != FaultTakeover {
+			t.Errorf("%s: %+v", name, v)
+		}
+	}
+	// A null takeover is malformed, not absent.
+	raw := f.attestation(segments, "req-3", 0, tupleSHA)
+	nulled := strings.Replace(string(raw), `"signature"`, `"takeover":null,"signature"`, 1)
+	if v := verify(json.RawMessage(nulled)); v.FaultKind != FaultMalformed {
+		t.Fatalf("null takeover: %+v", v)
+	}
+	// The store keeps the takeover with the verdict.
+	ctx := context.Background()
+	stored := AttestationRecord{RequestID: "req-3", AttemptN: 0, GroupProviderID: "head", ReceiptTupleSHA256: v.ReceiptTupleSHA256, Verified: true,
+		AttestationJSON: "{}", TakeoverFromEpoch: v.TakeoverFromEpoch, TakeoverReason: v.TakeoverReason}
+	if err := f.store.RecordAttestation(ctx, stored, 1); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := f.store.Attestation(ctx, "req-3", 0, "head")
+	if err != nil || !ok || got.TakeoverFromEpoch != 1 || got.TakeoverReason != "peer_closed" {
+		t.Fatalf("stored takeover = %+v %v %v", got, ok, err)
+	}
+}
+
+// SPEC-051-R023: after a takeover at epoch 2 the head rebuilds at 3, which
+// registers; rebuilding at an epoch the coordinator already accepted is refused.
+func TestRebuildAfterTakeoverRegistersAboveTheTakeoverEpoch(t *testing.T) {
+	f := newFixture(t)
+	if res, _ := f.register(twoStageRecord(1)); !res.Accepted {
+		t.Fatal(res.Reason)
+	}
+	takeover := twoStageRecord(2)
+	takeover.Stages[1].MemberDeviceID = "spare"
+	if res, _ := f.register(takeover); !res.Accepted {
+		t.Fatalf("takeover: %+v", res)
+	}
+	for _, stale := range []uint64{1, 2} {
+		rec := twoStageRecord(stale)
+		if stale == 2 {
+			rec.Stages[0].LayerEnd, rec.Stages[1].LayerStart = 16, 16
+		}
+		if res, _ := f.register(rec); res.Reason != ReasonEpochNotIncreasing {
+			t.Fatalf("rebuild at seen epoch %d: %+v", stale, res)
+		}
+	}
+	if res, _ := f.register(twoStageRecord(3)); !res.Accepted {
+		t.Fatalf("rebuild at epoch 3: %+v", res)
+	}
+	stored, ok, err := f.store.LatestRecord(context.Background(), "head")
+	if err != nil || !ok || stored.GroupEpoch != 3 {
+		t.Fatalf("latest record = %+v %v %v", stored, ok, err)
+	}
+}
+
+// SPEC-051-R003/R004/R015: a member that stops being admissible after the
+// last evaluation fails the reservation-time check against the recorded
+// member session.
+func TestMemberReservableAtReservation(t *testing.T) {
+	f := newFixture(t)
+	head := f.sessions["head"]
+	view := pool.ShardGroupMemberView{ProviderID: "tail", AssignedID: "s-tail"}
+	if !MemberReservable(head, view, f.lookup) {
+		t.Fatal("admissible member refused")
+	}
+	for name, mutate := range map[string]func(*pool.Provider){
+		"compute-integrity suspended": func(p *pool.Provider) { p.ComputeIntegritySuspended = true },
+		"quarantined":                 func(p *pool.Provider) { p.BenchmarkQuarantined = true },
+		"new session":                 func(p *pool.Provider) { p.AssignedID = "s-tail-2" },
+		"other artifact":              func(p *pool.Provider) { p.ModelHash = strings.Repeat("7", 64) },
+		"lower tier":                  func(p *pool.Provider) { p.Tier = pool.TierProvisional },
+	} {
+		saved := f.sessions["tail"]
+		p := saved
+		mutate(&p)
+		f.sessions["tail"] = p
+		if MemberReservable(head, view, f.lookup) {
+			t.Errorf("%s: member still reservable", name)
+		}
+		f.sessions["tail"] = saved
+	}
+	delete(f.sessions, "tail")
+	if MemberReservable(head, view, f.lookup) {
+		t.Fatal("disconnected member reservable")
+	}
+}
+
+// SPEC-051-R005: new epochs are budgeted per group; old epochs leave memory
+// but the store keeps the floor; a refused registration resolves no owner.
+func TestRegistrationBudgetAndEpochRetention(t *testing.T) {
+	f := newFixture(t)
+	for epoch := uint64(1); epoch <= maxNewEpochsPerWindow; epoch++ {
+		res, _ := f.register(twoStageRecord(epoch))
+		if !res.Accepted {
+			t.Fatalf("epoch %d refused: %s", epoch, res.Reason)
+		}
+	}
+	if res, _ := f.register(twoStageRecord(maxNewEpochsPerWindow + 2)); res.Reason != ReasonRegistrationRateLimited {
+		t.Fatalf("over budget: %+v", res)
+	}
+	// Re-sending the latest record stays acknowledged.
+	if res, _ := f.register(twoStageRecord(maxNewEpochsPerWindow)); !res.Accepted {
+		t.Fatalf("idempotent re-send: %+v", res)
+	}
+	f.now = f.now.Add(newEpochWindow)
+	if res, _ := f.register(twoStageRecord(maxNewEpochsPerWindow + 2)); !res.Accepted {
+		t.Fatalf("after the window: %+v", res)
+	}
+	epochs := f.reg.Epochs("head")
+	if _, ok := epochs(1); ok {
+		t.Fatal("epoch 1 still held in memory")
+	}
+	if _, ok := epochs(maxNewEpochsPerWindow + 2); !ok {
+		t.Fatal("latest epoch missing")
+	}
+	if res, _ := f.register(twoStageRecord(3)); res.Reason != ReasonEpochNotIncreasing {
+		t.Fatalf("evicted epoch re-registered: %+v", res)
+	}
+	looked := 0
+	head := f.headSession()
+	head.ShardGroupHeadV1 = false
+	f.reg.Register(context.Background(), head, f.registerPayload(twoStageRecord(99)), func(ids []string) map[string]string {
+		looked++
+		return f.ownerLookup(ids)
+	})
+	payload := f.registerPayload(twoStageRecord(99))
+	payload = []byte(strings.Replace(string(payload), `"record_signature":"`, `"record_signature":"AA`, 1))
+	f.reg.Register(context.Background(), f.headSession(), payload, func(ids []string) map[string]string {
+		looked++
+		return f.ownerLookup(ids)
+	})
+	if looked != 0 {
+		t.Fatalf("refused registrations resolved owners %d times", looked)
+	}
+}

@@ -83,6 +83,8 @@ type poolState struct {
 	// pool_model_entries and R016 pool_attested_members.
 	modelEntries    []poolmanifest.PoolModelEntry
 	attestedMembers []poolmanifest.AttestedMember
+	// shardGroups is the active core's SPEC-051-R028 pool_shard_groups.
+	shardGroups []poolmanifest.PoolShardGroup
 	// delegatedMembers are members admitted through a ProviderPoolDelegationV1
 	// grant; they are never creator-owned (SPEC-042-R006 condition 4).
 	delegatedMembers map[string]struct{}
@@ -132,6 +134,9 @@ type Snapshot struct {
 	// same consistent snapshot as Members.
 	ModelEntries    []poolmanifest.PoolModelEntry
 	AttestedMembers []poolmanifest.AttestedMember
+	// ShardGroups are the active core's SPEC-051-R028 shard group
+	// authorizations, read from the same consistent snapshot as Members.
+	ShardGroups []poolmanifest.PoolShardGroup
 	// MemberOwnerAccounts maps a route member to its coordinator-recorded
 	// SPEC-003 owner account (operator-configured), used only to match R016
 	// attestations. A member absent here has no recorded owner account.
@@ -177,6 +182,7 @@ type RouteableSnapshot struct {
 	RuntimeAllowlist          []string
 	ModelEntries              []poolmanifest.PoolModelEntry
 	AttestedMembers           []poolmanifest.AttestedMember
+	ShardGroups               []poolmanifest.PoolShardGroup
 	DelegatedMembers          []string
 	SettlementMode            string
 	Routeable                 bool
@@ -491,6 +497,7 @@ func (r *Registry) LoadRouteableSnapshot(s RouteableSnapshot) error {
 		runtimeAllowlist:   runtimeAllowlist,
 		modelEntries:       poolmanifest.ClonePoolModelEntries(s.ModelEntries),
 		attestedMembers:    poolmanifest.CloneAttestedMembers(s.AttestedMembers),
+		shardGroups:        poolmanifest.ClonePoolShardGroups(s.ShardGroups),
 		delegatedMembers:   stringSet(s.DelegatedMembers),
 		settlementMode:     canonicalPoolSettlementMode(s.SettlementMode),
 		generation:         s.Generation,
@@ -827,6 +834,7 @@ func buildRouteablePoolStates(snapshots []RouteableSnapshot) (map[string]*poolSt
 			runtimeAllowlist:        runtimeAllowlist,
 			modelEntries:            poolmanifest.ClonePoolModelEntries(s.ModelEntries),
 			attestedMembers:         poolmanifest.CloneAttestedMembers(s.AttestedMembers),
+			shardGroups:             poolmanifest.ClonePoolShardGroups(s.ShardGroups),
 			delegatedMembers:        stringSet(s.DelegatedMembers),
 			settlementMode:          canonicalPoolSettlementMode(s.SettlementMode),
 			generation:              s.Generation,
@@ -1151,6 +1159,7 @@ func (r *Registry) RouteableSnapshots() []RouteableSnapshot {
 			RuntimeAllowlist:   cloneStringSlice(ps.runtimeAllowlist),
 			ModelEntries:       poolmanifest.ClonePoolModelEntries(ps.modelEntries),
 			AttestedMembers:    poolmanifest.CloneAttestedMembers(ps.attestedMembers),
+			ShardGroups:        poolmanifest.ClonePoolShardGroups(ps.shardGroups),
 			DelegatedMembers:   sortedSetKeys(ps.delegatedMembers),
 			SettlementMode:     routeablePoolSettlementMode(ps.settlementMode),
 			Routeable:          ps.routeable,
@@ -1252,6 +1261,7 @@ func (r *Registry) Snapshot(poolID string) Snapshot {
 		RuntimeAllowlist:    cloneStringSlice(ps.runtimeAllowlist),
 		ModelEntries:        poolmanifest.ClonePoolModelEntries(ps.modelEntries),
 		AttestedMembers:     poolmanifest.CloneAttestedMembers(ps.attestedMembers),
+		ShardGroups:         poolmanifest.ClonePoolShardGroups(ps.shardGroups),
 		MemberOwnerAccounts: r.memberOwnerAccountsLocked(members),
 		CreatorAccountID:    ps.creatorAccountID,
 		CreatorOwnedMembers: r.creatorOwnedMembersLocked(ps, members),
@@ -1304,6 +1314,7 @@ func (r *Registry) authorizeAndSnapshotLocked(poolID, buyerAccountID string) (Sn
 		RuntimeAllowlist:    cloneStringSlice(ps.runtimeAllowlist),
 		ModelEntries:        poolmanifest.ClonePoolModelEntries(ps.modelEntries),
 		AttestedMembers:     poolmanifest.CloneAttestedMembers(ps.attestedMembers),
+		ShardGroups:         poolmanifest.ClonePoolShardGroups(ps.shardGroups),
 		MemberOwnerAccounts: r.memberOwnerAccountsLocked(members),
 		CreatorAccountID:    ps.creatorAccountID,
 		CreatorOwnedMembers: r.creatorOwnedMembersLocked(ps, members),

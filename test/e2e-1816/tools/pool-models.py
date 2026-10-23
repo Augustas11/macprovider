@@ -14,6 +14,7 @@ windows.json, pool_id, lock.
   create NAME --members ID[,ID] --buyer ACCT     approval, root, genesis (staged entries), members, buyer, promote
   stage NAME --add SLUG ALG HASH RUNTIMES RATES MAXCTX [--license L]
   stage NAME --remove SLUG | --rates SLUG P,CH,C | --attest ACCT=RT | --unattest ACCT
+             | --shard-group HEAD SLUG MAX | --unshard HEAD     (#2084, SPEC-051-R028)
   manifest NAME [--models-file F] [--start-after S] [--window S] [--allowlist CSV]
       sign + submit the next core; prints `accepted vN digest` or
       `refused HTTP CODE`; exit 0 when accepted, 3 when refused, 4 when the
@@ -101,6 +102,10 @@ def load_models(d):
 def save_models(d, m):
     m["model_entries"].sort(key=lambda e: e["pool_model_id"])
     m["attested_members"].sort(key=lambda a: a["provider_account_id"])
+    if "shard_groups" in m:
+        m["shard_groups"].sort(key=lambda g: g["group_provider_id"])
+        if not m["shard_groups"]:
+            del m["shard_groups"]
     (d / "pool-models.json").write_text(json.dumps(m, indent=2) + "\n")
 
 
@@ -265,6 +270,13 @@ def cmd_stage(a):
             m["attested_members"].append({"provider_account_id": acct, "runtime_classes": sorted(rt.split(","))})
         elif a.unattest:
             m["attested_members"] = [x for x in m["attested_members"] if x["provider_account_id"] != a.unattest]
+        elif a.shard_group:
+            head, slug, mx = a.shard_group
+            gs = [g for g in m.get("shard_groups", []) if g["group_provider_id"] != head]
+            gs.append({"group_provider_id": head, "pool_model_id": "pool/%s/%s" % (pid, slug), "max_members": int(mx)})
+            m["shard_groups"] = gs
+        elif a.unshard:
+            m["shard_groups"] = [g for g in m.get("shard_groups", []) if g["group_provider_id"] != a.unshard]
         out = pathlib.Path(a.out) if a.out else d / "pool-models.json"
         if a.out:
             m["model_entries"].sort(key=lambda e: e["pool_model_id"])
@@ -432,6 +444,7 @@ s = sub.add_parser("stage"); s.add_argument("name"); s.add_argument("--out")
 g = s.add_mutually_exclusive_group(required=True)
 g.add_argument("--add", nargs=6, metavar=("SLUG", "ALG", "HASH", "RUNTIMES", "RATES", "MAXCTX"))
 g.add_argument("--remove"); g.add_argument("--rates", nargs=2); g.add_argument("--attest"); g.add_argument("--unattest")
+g.add_argument("--shard-group", nargs=3, metavar=("HEAD", "SLUG", "MAX")); g.add_argument("--unshard")
 s.add_argument("--license", default="Apache-2.0")
 s = sub.add_parser("manifest"); s.add_argument("name"); s.add_argument("--models-file"); s.add_argument("--start-after", type=int, default=0)
 s.add_argument("--window", type=int); s.add_argument("--allowlist")

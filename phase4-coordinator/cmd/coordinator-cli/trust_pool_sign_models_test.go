@@ -239,3 +239,80 @@ func TestTrustPoolSignManifestLabPoolModelsFixture(t *testing.T) {
 		t.Fatalf("projected lab member = %+v", member)
 	}
 }
+
+const signModelsSnapshotHash = "4444444444444444444444444444444444444444444444444444444444444444"
+
+// writePoolShardGroups writes a --pool-models input with one native
+// (mlx_cache) entry and the given shard_groups JSON array.
+func writePoolShardGroups(t *testing.T, f signFixture, runtime, groups string) string {
+	t.Helper()
+	path := filepath.Join(f.dir, "pool-shard-groups-"+runtime+".json")
+	body := `{
+  "model_entries": [{
+    "pool_model_id": "pool/` + f.poolID + `/sharded",
+    "artifact_hash_algorithm": "macprovider.snapshot-manifest.v1",
+    "artifact_hash": "` + signModelsSnapshotHash + `",
+    "allowed_runtime_sources": ["` + runtime + `"],
+    "license": "Apache-2.0",
+    "paid_serving_attested": true,
+    "pricing": {"prompt_rate_per_mtok": 120, "prompt_cache_hit_rate_per_mtok": 12, "completion_rate_per_mtok": 360},
+    "disclosure_class": "pool_attested_unverified",
+    "max_context_tokens": 32768
+  }],
+  "attested_members": [],
+  "shard_groups": ` + groups + `
+}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestTrustPoolSignManifestShardGroups: the runbook's only signer encodes the
+// SPEC-051-R028 pool_shard_groups/v1 extension from --pool-models, the
+// coordinator's validated append projects it, and the offline signer refuses
+// a group naming a non-native entry or an out-of-range member bound.
+func TestTrustPoolSignManifestShardGroups(t *testing.T) {
+	ctx := context.Background()
+	f := newSignFixture(t)
+	notBefore := f.now.Add(-time.Minute).Truncate(time.Second)
+	expiresAt := notBefore.Add(24 * time.Hour)
+	var out bytes.Buffer
+	manifestOut := filepath.Join(f.dir, "manifest-shard.json")
+	groups := `[{"group_provider_id": "head-b", "pool_model_id": "pool/` + f.poolID + `/sharded", "max_members": 3},
+	            {"group_provider_id": "head-a", "pool_model_id": "pool/` + f.poolID + `/sharded", "max_members": 2}]`
+	args := append(f.manifestArgs("shard-manifest-1", manifestOut, notBefore, expiresAt), "--pool-models", writePoolShardGroups(t, f, "mlx_cache", groups))
+	if err := trustPoolAdmin(args, os.Getenv, nil, &out); err != nil {
+		t.Fatalf("sign-manifest with shard_groups: %v", err)
+	}
+	store := openSignModelsStore(t, &poolmanifest.PoolModelPricingBounds{
+		MinPromptRatePerMtok: 1, MaxPromptRatePerMtok: 1000, MaxPromptCacheHitRatePerMtok: 1000,
+		MinCompletionRatePerMtok: 1, MaxCompletionRatePerMtok: 1000,
+	})
+	registerSignModelsPool(t, store, f)
+	if _, _, _, err := store.AppendValidatedEvent(ctx, readSignedEvent(t, manifestOut)); err != nil {
+		t.Fatalf("append manifest with shard groups: %v", err)
+	}
+	state, err := store.Reconstruct(ctx)
+	if err != nil {
+		t.Fatalf("Reconstruct: %v", err)
+	}
+	pool := state.Pools[f.poolID]
+	want := []poolmanifest.PoolShardGroup{
+		{GroupProviderID: "head-a", PoolModelID: "pool/" + f.poolID + "/sharded", MaxMembers: 2},
+		{GroupProviderID: "head-b", PoolModelID: "pool/" + f.poolID + "/sharded", MaxMembers: 3},
+	}
+	if pool == nil || len(pool.ManifestShardGroups) != 2 || pool.ManifestShardGroups[0] != want[0] || pool.ManifestShardGroups[1] != want[1] {
+		t.Fatalf("shard groups not projected in order: %+v", pool)
+	}
+	for name, path := range map[string]string{
+		"non-native entry": writePoolShardGroups(t, f, "llamacpp_loopback", `[{"group_provider_id": "head-a", "pool_model_id": "pool/`+f.poolID+`/sharded", "max_members": 2}]`),
+		"member bound":     writePoolShardGroups(t, f, "mlx_cache", `[{"group_provider_id": "head-a", "pool_model_id": "pool/`+f.poolID+`/sharded", "max_members": 9}]`),
+		"duplicate group":  writePoolShardGroups(t, f, "mlx_cache", `[{"group_provider_id": "head-a", "pool_model_id": "pool/`+f.poolID+`/sharded", "max_members": 2}, {"group_provider_id": "head-a", "pool_model_id": "pool/`+f.poolID+`/sharded", "max_members": 2}]`),
+	} {
+		bad := append(f.manifestArgs("shard-bad-"+strings.ReplaceAll(name, " ", "-"), filepath.Join(f.dir, "bad-"+strings.ReplaceAll(name, " ", "-")+".json"), notBefore, expiresAt), "--pool-models", path)
+		if err := trustPoolAdmin(bad, os.Getenv, nil, &out); err == nil {
+			t.Errorf("%s: sign-manifest accepted an invalid pool_shard_groups/v1 extension", name)
+		}
+	}
+}
