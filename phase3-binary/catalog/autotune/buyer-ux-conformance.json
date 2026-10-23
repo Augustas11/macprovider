@@ -6,6 +6,73 @@
     }
   },
   "records": {
+    "meta-llama/llama-3.1-8b-instruct": {
+      "capabilities": {
+        "base": true,
+        "messages": true,
+        "reasoning": true,
+        "response_format": true,
+        "responses": true,
+        "tool_choice": [
+          "auto",
+          "none"
+        ],
+        "tools": true
+      },
+      "checked_at": "2026-10-23T20:36:24Z",
+      "checks": {
+        "context_limit_error": {
+          "detail": "context_exceeds_capacity",
+          "status": "pass"
+        },
+        "finish_reason": {
+          "detail": "length at max_tokens",
+          "status": "pass"
+        },
+        "json_object": {
+          "detail": "valid JSON object",
+          "status": "pass"
+        },
+        "messages_beta_thinking": {
+          "detail": "blocks ['text']",
+          "status": "pass"
+        },
+        "no_reasoning_leak": {
+          "detail": "content separated from reasoning",
+          "status": "pass"
+        },
+        "responses_function_tool": {
+          "detail": "function_call item",
+          "status": "pass"
+        },
+        "stop_sequences": {
+          "detail": "stopped at the stop sequence",
+          "status": "pass"
+        },
+        "stream_tool_deltas": {
+          "detail": "2 indexed call(s)",
+          "status": "pass"
+        },
+        "tool_round_trip": {
+          "detail": "answered from the tool result",
+          "status": "pass"
+        },
+        "tools_auto": {
+          "detail": "auto",
+          "status": "pass"
+        },
+        "tools_named": {
+          "detail": "tool_choice not supported for this model",
+          "status": "unsupported"
+        },
+        "tools_required": {
+          "detail": "tool_choice not supported for this model",
+          "status": "unsupported"
+        }
+      },
+      "gateway": "https://api.malibu.tech/v1",
+      "model": "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit"
+    },
     "meta-llama/llama-3.2-3b-instruct": {
       "capabilities": {
         "base": true,

@@ -338,6 +338,25 @@ func TestCheckedInBuyerUXConformanceRecords(t *testing.T) {
 	if !glm.Capabilities.Tools || !glm.Capabilities.Reasoning {
 		t.Fatalf("glm capabilities=%+v", glm.Capabilities)
 	}
+	// Llama-3.1-8B passed every check (record 2026-10-24, coordinator
+	// v1.8.266): the record keeps its derived set, tools included.
+	llama8 := entryFor("mlx-community/Meta-Llama-3.1-8B-Instruct-4bit", true)
+	llama8Derived := entryFor("mlx-community/Meta-Llama-3.1-8B-Instruct-4bit", false)
+	if !reflect.DeepEqual(llama8.Capabilities, llama8Derived.Capabilities) || !reflect.DeepEqual(llama8.SupportedParameters, llama8Derived.SupportedParameters) {
+		t.Fatalf("llama-3.1-8b capabilities changed: got %+v want %+v", llama8.Capabilities, llama8Derived.Capabilities)
+	}
+	if !llama8.Capabilities.Tools || !llama8.Capabilities.ResponseFormat {
+		t.Fatalf("llama-3.1-8b capabilities=%+v", llama8.Capabilities)
+	}
+	// DeepSeek-V4-Flash is promoted with its record owed (SPEC-023 §16.11
+	// rule 4): the base set only until the record lands.
+	dsv4 := entryFor("TensorFold/DeepSeek-V4-Flash-0731-MXFP4-MLX", true)
+	if !entryFor("TensorFold/DeepSeek-V4-Flash-0731-MXFP4-MLX", false).Capabilities.Tools {
+		t.Fatal("DeepSeek-V4 must derive tools before the owed mask")
+	}
+	if c := dsv4.Capabilities; c.Tools || c.Reasoning || c.ResponseFormat || len(c.ToolChoice) != 0 {
+		t.Fatalf("owed DeepSeek-V4 capabilities=%+v", c)
+	}
 }
 
 // SPEC-023 §16.11 fail-closed reload: an unreadable, malformed or oversized
