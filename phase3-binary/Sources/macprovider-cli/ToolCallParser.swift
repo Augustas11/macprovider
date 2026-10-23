@@ -33,12 +33,72 @@ enum ToolCallParser {
 
     /// SPEC-018 §3.1: one parser per catalog grammar, selected by the loaded
     /// chat template's grammar (`ToolCallGrammar`), never by model-ID text.
+    /// The calls are de-duplicated and capped per reply (`uniqueCappedCalls`).
     static func parseToolCalls(
         rawOutput: String,
         grammar: ToolCallGrammar?,
         modelID: String,
         allowedFunctionNames: Set<String>? = nil,
         schemas: [String: JSONValue]? = nil
+    ) -> ParsedToolCalls {
+        let parsed = parseGrammarToolCalls(
+            rawOutput: rawOutput, grammar: grammar, modelID: modelID,
+            allowedFunctionNames: allowedFunctionNames, schemas: schemas
+        )
+        return ParsedToolCalls(
+            cleanedContent: parsed.cleanedContent,
+            toolCalls: uniqueCappedCalls(parsed.toolCalls),
+            leadingContent: parsed.leadingContent
+        )
+    }
+
+    /// SPEC-018 §3.1 (v0.3.2) per-reply call set: a call with the same name
+    /// and the same canonical arguments as an earlier call in the same reply
+    /// is dropped, and at most `ToolSelectionPolicy.maxCalls` (128, the §3.11
+    /// per-reply bound) calls are kept, in generated order. Kept calls are
+    /// unchanged; no text is rewritten or added. Auto mode only: guaranteed
+    /// selection (`parseGuaranteedToolCalls`) validates every generated call
+    /// against the requested cardinality (§3.11), so nothing is dropped there.
+    static func uniqueCappedCalls(_ calls: [ToolCall]) -> [ToolCall] {
+        var seen = Set<Data>()
+        var kept: [ToolCall] = []
+        for call in calls where kept.count < ToolSelectionPolicy.maxCalls {
+            // Byte keys, never Swift `String` equality (which treats canonically
+            // equivalent Unicode as equal). Key order is normalized only when
+            // the arguments hold no number: the parser reads numbers as
+            // `Double`, so two different literals could share a canonical form;
+            // with numbers the raw bytes must match. Function names are
+            // `[A-Za-z0-9_-]`, so the NUL separator cannot occur in one.
+            var key = Data(call.functionName.utf8)
+            if let parsed = try? StrictJSONParser.parse(call.arguments, maxDepth: 128), !containsNumber(parsed),
+               let canonical = try? parsed.deterministicJSONString() {
+                key.append(contentsOf: [0, 1])
+                key.append(contentsOf: canonical.utf8)
+            } else {
+                key.append(contentsOf: [0, 2])
+                key.append(contentsOf: call.arguments.utf8)
+            }
+            guard seen.insert(key).inserted else { continue }
+            kept.append(call)
+        }
+        return kept
+    }
+
+    private static func containsNumber(_ value: JSONValue) -> Bool {
+        switch value {
+        case .int, .double: return true
+        case .object(let object): return object.values.contains(where: containsNumber)
+        case .array(let array): return array.contains(where: containsNumber)
+        case .string, .bool, .null: return false
+        }
+    }
+
+    private static func parseGrammarToolCalls(
+        rawOutput: String,
+        grammar: ToolCallGrammar?,
+        modelID: String,
+        allowedFunctionNames: Set<String>?,
+        schemas: [String: JSONValue]?
     ) -> ParsedToolCalls {
         let none = ParsedToolCalls(cleanedContent: nilIfBlank(rawOutput), toolCalls: [], leadingContent: nil)
         let result: (cleanedContent: String?, toolCalls: [ToolCall])
@@ -103,8 +163,9 @@ enum ToolCallParser {
         return nilIfBlank(String(rawOutput[..<first]))
     }
 
+    /// Byte caps only: the per-reply call count is capped by
+    /// `uniqueCappedCalls` after duplicates are dropped.
     private static func enforceArgumentCaps(_ calls: [ToolCall]) throws {
-        guard calls.count <= ToolSelectionPolicy.maxCalls else { throw ParseError.invalidShape }
         var total = 0
         for call in calls {
             let bytes = call.arguments.utf8.count
@@ -315,33 +376,52 @@ enum ToolCallParser {
 
     /// SPEC-018 §3.1 Qwen bare envelope body: Qwen2.5-Coder answers with the
     /// template's `{"name", "arguments"}` body but without the `<tool_call>`
-    /// tags, sometimes inside the `<tools>` wrapper its system prompt shows.
+    /// tags, sometimes inside the `<tools>` wrapper its system prompt shows
+    /// (one wrapper around all calls, or one wrapper per call).
     /// Accepted only when the whole output is one or more such objects (no
     /// prose), each with exactly those two keys, an object `arguments` and a
-    /// declared name. Anything else returns nil and the tagged grammar runs.
+    /// declared name. A wrapped output is a sequence of closed, non-empty
+    /// `<tools>` groups. Anything else returns nil and the tagged grammar runs.
     static func parseQwenBareCalls(_ rawOutput: String, allowedFunctionNames: Set<String>?) -> [ToolCall]? {
         guard let allowedFunctionNames, !allowedFunctionNames.isEmpty,
               rawOutput.utf8.count <= SPEC018_ARGUMENTS_PER_RESPONSE_BYTE_CAP else { return nil }
         var text = Substring(rawOutput.trimmingCharacters(in: .whitespacesAndNewlines))
-        if text.hasPrefix(qwenBareWrapperOpen) {
-            guard text.hasSuffix(qwenBareWrapperClose) else { return nil }
-            text = text.dropFirst(qwenBareWrapperOpen.count).dropLast(qwenBareWrapperClose.count)
-        }
+        let wrapped = text.hasPrefix(qwenBareWrapperOpen)
         var calls: [ToolCall] = []
-        while true {
+        func nextCall() -> Bool {
             text = text.drop(while: { $0.isWhitespace })
-            if text.isEmpty { break }
-            guard calls.count < ToolSelectionPolicy.maxCalls,
-                  let object = firstCompleteJSONObject(in: String(text)),
+            guard let object = firstCompleteJSONObject(in: String(text)),
                   // Shape check only; `parseJSONCall` applies the tagged path's
                   // argument validator (and its depth rule) to the same object.
                   case .object(let parsed)? = try? StrictJSONParser.parse(object, maxDepth: 128),
                   Set(parsed.keys) == ["name", "arguments"],
                   case .string(let name)? = parsed["name"], allowedFunctionNames.contains(name),
                   case .object? = parsed["arguments"],
-                  let call = try? parseJSONCall(object, argumentKey: "arguments") else { return nil }
+                  let call = try? parseJSONCall(object, argumentKey: "arguments") else { return false }
             calls.append(call)
             text = text.dropFirst(object.count)
+            return true
+        }
+        while true {
+            text = text.drop(while: { $0.isWhitespace })
+            if text.isEmpty { break }
+            guard wrapped else {
+                guard nextCall() else { return nil }
+                continue
+            }
+            guard text.hasPrefix(qwenBareWrapperOpen) else { return nil }
+            text = text.dropFirst(qwenBareWrapperOpen.count)
+            var groupCalls = 0
+            while true {
+                text = text.drop(while: { $0.isWhitespace })
+                if text.hasPrefix(qwenBareWrapperClose) {
+                    guard groupCalls > 0 else { return nil }
+                    text = text.dropFirst(qwenBareWrapperClose.count)
+                    break
+                }
+                guard nextCall() else { return nil }
+                groupCalls += 1
+            }
         }
         guard !calls.isEmpty, (try? enforceArgumentCaps(calls)) != nil else { return nil }
         return calls

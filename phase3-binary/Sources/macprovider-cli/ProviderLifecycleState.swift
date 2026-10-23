@@ -354,6 +354,7 @@ struct ProviderLifecycleStateRecord: Codable, Equatable, Sendable {
             [
                 .locallyReadyConnecting, .networkOffline, .coordinatorUnavailable,
                 .degradedServing, .pausedByOperator, .servingBuyers, .updateInProgress,
+                .failed,
             ]
         case .authenticationRequired, .identityMigrationRequired:
             [
@@ -382,6 +383,13 @@ struct ProviderLifecycleStateRecord: Codable, Equatable, Sendable {
         // installer → paused_by_operator) would otherwise ride the new
         // predecessor edge. Validate (predecessor, target, writer) as a tuple so
         // ONLY the Entry-158 combinations remain legal for these two edges.
+        // #2067: `failed` is left only by a new startup chain or by serve
+        // recording a coordinator-confirmed serving session. A process that
+        // serves must not keep a durable `failed` that refuses every later
+        // write (operator pause included).
+        if previous.state == .failed, state == .servingBuyers, writer != .serve {
+            throw ProviderLifecycleStateError.invalidTransition(from: previous.state.rawValue, to: state.rawValue)
+        }
         if previous.state == .loadingModel {
             switch state {
             case .degradedServing where writer != .serve:

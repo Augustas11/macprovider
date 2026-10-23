@@ -412,7 +412,7 @@ final class CoordinatorClientTests: XCTestCase {
                 message: "wire detail"
             )
         )
-        XCTAssertEqual(protocolFailure.state, .failed)
+        XCTAssertEqual(protocolFailure.state, .coordinatorUnavailable)
         XCTAssertEqual(protocolFailure.reasonCode, "coordinator_auth_protocol_invalid")
 
         let unavailable = CoordinatorClient.lifecycleClassification(
