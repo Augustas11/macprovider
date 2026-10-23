@@ -2,16 +2,16 @@
   "challenge_bank_signer_key_id": "streamvc-autotune-static-v4",
   "entry": {
     "artifact_manifest_sha256": "92a047c3caac2910ca117218affd02d6215eab8d022bbf1a9654869f16b851b6",
-    "challenge_bank_sha256": "43e8091e220df85681b1c372e1143f572b921e1e65606e0e6444ee01968457e1",
+    "challenge_bank_sha256": "65b1936afb6786c025e2dbebd7446f458c41d6e2315378e885ff6fb361a9ffb9",
     "live_executable_cdhash": "6d22d656dfee4dcaeba978ef9a3c77bfedec2955",
     "provider_revision": "90b1a3b72e5d71bb644111173e69eaaa03286212",
     "reproducible_build_sha256": "48c399003dd2d7425fc3ea9e3ea74d02ae7b80ce5c6c5d6a3b9a806ec23de2bf",
     "source_commit": "90b1a3b72e5d71bb644111173e69eaaa03286212"
   },
-  "expires_at": "2027-01-19T06:00:00Z",
-  "issued_at": "2026-10-22T06:00:00Z",
+  "expires_at": "2027-01-20T00:40:00Z",
+  "issued_at": "2026-10-23T00:40:00Z",
   "provider_decode_path_digest": "4be59bfa19c48d43a6a4b920c563afd0afaed2280b7ca0156a22eb35c50410dc",
-  "release_id": "published-2026-10-22-glm53-qwen36-native-mtp-v261",
+  "release_id": "published-2026-10-23-deepseek-v4-flash-listed-v1",
   "revocation_signer_key_id": "streamvc-autotune-static-v4",
   "schema_version": "macprovider.native-mtp-admission-release-input.v1",
   "signer_key_id": "streamvc-autotune-static-v4"

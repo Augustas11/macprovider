@@ -1,6 +1,6 @@
 {
-  "autotune_candidates_sha256": "bb1deb4067098c0c361b64980047a618849259bab94c3c89b51f210fa43ad1f3",
-  "generated_at": "2026-10-22T06:00:00Z",
+  "autotune_candidates_sha256": "76977d9850c59d5fa62d14f0c415c8bb5b102575a5e9165642e9c285c7c43608",
+  "generated_at": "2026-10-23T00:40:00Z",
   "models": [
     {
       "catalog_key": "zai-org/glm-5.3-flash",
@@ -134,9 +134,16 @@
       "model_id": "mlx-community/Qwen3.8-27B-4bit",
       "model_revision": "10c35caafbb80f7dc6a7a432cdd11af10a6d4818",
       "sha256": "8a8786e902127e9175f5be0d7c8bcf4dd32323a0521e4d9a20761608a07a6d05"
+    },
+    {
+      "catalog_key": "deepseek/deepseek-v4-flash",
+      "min_ram_gb": 195,
+      "model_id": "TensorFold/DeepSeek-V4-Flash-0731-MXFP4-MLX",
+      "model_revision": "d6be051ae238b2021de56cf098d8f0206328754a",
+      "sha256": "58ee40d4c0bc436695d1d8d6a6cdfdb0326ec37f25e13ec98ea1d5c0878e732c"
     }
   ],
   "policy_version": "autotune-policy-v1",
-  "release_id": "published-2026-10-22-glm53-qwen36-native-mtp-v261",
+  "release_id": "published-2026-10-23-deepseek-v4-flash-listed-v1",
   "schema_version": "macprovider.tier2-identity-binding.v1"
 }

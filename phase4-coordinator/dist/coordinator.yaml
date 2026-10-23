@@ -368,6 +368,10 @@ rewards:
     # `default` row preserved for fall-through on unmatched buyer strings.
     # Prefix-cache hit pricing is shown at 25% of prompt pricing.
     # Omitted prompt_cache_hit_credits_per_mtok values default to prompt_credits_per_mtok.
+    deepseek/deepseek-v4-flash:            # campaign #2111 listed cut — explicit row below every OpenRouter deepseek-v4-flash endpoint and DeepSeek's off-peak price (2026-10-23)
+      prompt_credits_per_mtok: 45000         # $0.045/M
+      prompt_cache_hit_credits_per_mtok: 2500 # $0.0025/M prefix-cache hit
+      completion_credits_per_mtok: 130000    # $0.13/M
     default:
       prompt_credits_per_mtok: 500000        # $0.50/M (preserved code default)
       prompt_cache_hit_credits_per_mtok: 125000 # $0.125/M prefix-cache hit

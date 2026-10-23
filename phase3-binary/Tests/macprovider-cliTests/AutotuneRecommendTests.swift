@@ -6396,6 +6396,10 @@ final class AutotuneRecommendTests: XCTestCase {
     /// `config.json` (Hugging Face `<model_id>@<model_revision>`), the only
     /// fields `AutotuneModelContextCap` reads. Keyed by catalog key.
     static let signedCandidateConfigGeometry: [String: (revision: String, json: String)] = [
+        "deepseek/deepseek-v4-flash": (
+            revision: "d6be051ae238b2021de56cf098d8f0206328754a",
+            json: #"{"max_position_embeddings":1048576,"num_hidden_layers":43,"hidden_size":4096,"num_attention_heads":64,"num_key_value_heads":1,"head_dim":512}"#
+        ),
         "google-gemma-4-26b-a4b-it": (
             revision: "0d77464eeb233a2da68ebf9d7dc4edaac7db956d",
             json: #"{"text_config":{"max_position_embeddings":262144,"num_hidden_layers":30,"hidden_size":2816,"num_attention_heads":16,"num_key_value_heads":8,"head_dim":256,"layer_types":["sliding_attention","sliding_attention","sliding_attention","sliding_attention","sliding_attention","full_attention","sliding_attention","sliding_attention","sliding_attention","sliding_attention","sliding_attention","full_attention","sliding_attention","sliding_attention","sliding_attention","sliding_attention","sliding_attention","full_attention","sliding_attention","sliding_attention","sliding_attention","sliding_attention","sliding_attention","full_attention","sliding_attention","sliding_attention","sliding_attention","sliding_attention","sliding_attention","full_attention"]}}"#

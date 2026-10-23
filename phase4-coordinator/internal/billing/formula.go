@@ -86,10 +86,14 @@ func NormalizeModelKey(model string) string {
 // key, never a prefix or family: GLM-5.3-Flash's catalog key is
 // zai-org/glm-5.3-flash, while its OpenRouter slug (and the bare name the
 // z-ai/glm- rule rewrites) is z-ai/glm-5.3-flash and its served artifact is
-// Jundot/GLM-5.3-Flash-oQ4e-mtp (epic #2029).
+// Jundot/GLM-5.3-Flash-oQ4e-mtp (epic #2029). DeepSeek-V4-Flash's catalog key
+// is deepseek/deepseek-v4-flash.
 var exactModelKeyAliases = map[string]string{
 	"z-ai/glm-5.3-flash":            "zai-org/glm-5.3-flash",
 	"jundot/glm-5.3-flash-oq4e-mtp": "zai-org/glm-5.3-flash",
+	// DeepSeek-V4-Flash's served artifact and its upstream release (#2111).
+	"tensorfold/deepseek-v4-flash-0731-mxfp4-mlx": "deepseek/deepseek-v4-flash",
+	"deepseek-ai/deepseek-v4-flash-0731":          "deepseek/deepseek-v4-flash",
 }
 
 func normalizeServedAlias(namespace, key string) string {

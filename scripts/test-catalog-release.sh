@@ -315,6 +315,8 @@ expected_history = {
     "published-2026-10-20-glm53-flash-native-mtp-v260",
     # Superseded by the two-model decode-path-bound admission set on CLI 1.8.261.
     "published-2026-10-21-qwen3-8b-cb-v1",
+    # Superseded by the DeepSeek-V4-Flash listed cut (#2111).
+    "published-2026-10-22-glm53-qwen36-native-mtp-v261",
     current_release_id,
 }
 if set(ledger["releases"]) != expected_history:
