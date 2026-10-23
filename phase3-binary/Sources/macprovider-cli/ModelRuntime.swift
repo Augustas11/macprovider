@@ -12899,7 +12899,10 @@ maxTokens: maxTokens,
             requestStops: requestStops,
             globalHitStop: globalHitStop,
             countCompletionTokens: true,
-            generatedCompletionTokens: defaultCompletionTokens
+            generatedCompletionTokens: defaultCompletionTokens,
+            // SPEC-018 §3.1 per-reply call set, auto mode only: required,
+            // named and none validate every generated call (§3.11).
+            uniqueCalls: !(try ToolSelectionPolicy.selection(request.promptSource.toolChoice).holdsOutput)
         )
     }
 
@@ -12910,7 +12913,8 @@ maxTokens: maxTokens,
         requestStops: [String],
         globalHitStop: Bool = false,
         countCompletionTokens: Bool,
-        generatedCompletionTokens: Int = 0
+        generatedCompletionTokens: Int = 0,
+        uniqueCalls: Bool = false
     ) throws -> ParsedGeneratedOutput {
         guard parsed.status != .malformed, parsed.status != .notApplicable else {
             throw harmonyResponseError(for: parsed.failure)
@@ -12923,7 +12927,7 @@ maxTokens: maxTokens,
         guard !globalHitStop || filteredVisible.hitStop else {
             throw malformedHarmonyResponseError()
         }
-        let toolCalls = filteredVisible.hitStop ? [] : parsed.toolCalls
+        let toolCalls = filteredVisible.hitStop ? [] : uniqueCalls ? ToolCallParser.uniqueCappedCalls(parsed.toolCalls) : parsed.toolCalls
         let hasToolCalls = !toolCalls.isEmpty
         let visibleContent = hasToolCalls ? "" : filteredVisible.text
         var output = ParsedGeneratedOutput(

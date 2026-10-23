@@ -175,6 +175,76 @@ final class BuyerUXConformanceRegressionTests: XCTestCase {
         XCTAssertEqual(parse(body).toolCalls.first?.arguments, tagged.toolCalls.first?.arguments)
     }
 
+    /// SPEC-018 v0.3.2: an exact repeat of a call (same name, same canonical
+    /// arguments) in one reply is dropped; kept calls are untouched.
+    func testDuplicateCallsInOneReplyAreDropped() throws {
+        let call = { (args: String) in "<tool_call>\n{\"name\": \"read_file\", \"arguments\": \(args)}\n</tool_call>" }
+        let raw = [call(#"{"path": "/etc/hosts", "n": 1}"#), call(#"{"n": 1, "path": "/etc/hosts"}"#), call(#"{"path": "/etc/passwd", "n": 1}"#), call(#"{"path": "/etc/hosts", "n": 1}"#)].joined(separator: "\n")
+        let parsed = parse(raw)
+        XCTAssertEqual(parsed.toolCalls.map(\.arguments), [#"{"n":1,"path":"/etc/hosts"}"#, #"{"n":1,"path":"/etc/passwd"}"#])
+        XCTAssertEqual(parse(Self.coderTwoBareCalls + "\n" + Self.coderBareCall).toolCalls.count, 2, "bare bodies too")
+        let other = macprovider_cli.ToolCall(id: "call_b", functionName: "write_file", arguments: #"{"path":"/etc/hosts"}"#)
+        let first = macprovider_cli.ToolCall(id: "call_a", functionName: "read_file", arguments: #"{"path":"/etc/hosts"}"#)
+        XCTAssertEqual(ToolCallParser.uniqueCappedCalls([first, other, first]), [first, other], "same arguments, other name is kept")
+
+        // Streaming finalizes through the same parse.
+        let request = try ChatCompletionRequest.parse(data: JSONSerialization.data(withJSONObject: [
+            "model": "qwen2.5-coder-32b-instruct",
+            "messages": [["role": "user", "content": "Read /etc/hosts."]],
+            "tools": [["type": "function", "function": [
+                "name": "read_file", "parameters": ["type": "object", "properties": ["path": ["type": "string"]]],
+            ]]],
+            "parallel_tool_calls": true,
+            "stream": true,
+        ]))
+        request.outputState.resolve(RequestOutputTraits(toolGrammar: .qwen))
+        let output = call(#"{"path": "/etc/hosts"}"#) + "\n" + call(#"{"path": "/etc/hosts"}"#)
+        var emitter = SerialStreamingTextEmitter(request: request)
+        let accumulator = StructuredStreamingContentAccumulator(enabled: false)
+        let idle = StructuredStreamingIdleState(enabled: false)
+        for end in 1...output.count {
+            _ = emitter.step(candidate: (String(output.prefix(end)), false), structuredAccumulator: accumulator, idleState: idle) { _ in }
+        }
+        let streamed = try ModelRuntime.parseGeneratedOutput(
+            filteredText: output, generatedTokenIDs: [], decode: { _ in "" }, request: request, mode: .complete(),
+            defaultCompletionTokens: 9, toolCallPrefill: nil
+        )
+        try emitter.finish(finalText: output, parsed: streamed, structuredAccumulator: accumulator, idleState: idle) { _ in }
+        XCTAssertEqual(streamed.toolCalls.count, 1)
+        XCTAssertEqual(emitter.reconciledToolCalls.count, 1)
+    }
+
+    /// SPEC-018 v0.3.2: at most 128 calls (the §3.11 per-reply bound) are
+    /// kept per reply, the first ones in generated order.
+    func testCallsPerReplyAreCapped() {
+        let raw = (0..<130).map { "<tool_call>\n{\"name\": \"read_file\", \"arguments\": {\"path\": \"/tmp/\($0)\"}}\n</tool_call>" }.joined(separator: "\n")
+        let calls = parse(raw).toolCalls
+        XCTAssertEqual(calls.count, ToolSelectionPolicy.maxCalls)
+        XCTAssertEqual(ToolSelectionPolicy.maxCalls, 128)
+        XCTAssertEqual(calls.first?.arguments, #"{"path":"/tmp/0"}"#)
+        XCTAssertEqual(calls.last?.arguments, #"{"path":"/tmp/127"}"#)
+    }
+
+    /// SPEC-018 v0.3.2 §3.12: a structured response_format renders with
+    /// thinking off (enable_thinking templates) and the lowest effort the
+    /// reasoning_effort templates take, overriding the buyer's effort.
+    func testStructuredResponseFormatRendersWithThinkingOff() throws {
+        for format: [String: Any] in [["type": "json_object"], ["type": "json_schema", "json_schema": ["name": "c", "schema": ["type": "object"]]]] {
+            let request = try ChatCompletionRequest.parse(data: JSONSerialization.data(withJSONObject: [
+                "model": "z-ai/glm-4.5-air", "messages": [["role": "user", "content": "x"]],
+                "response_format": format, "reasoning_effort": "high",
+            ]))
+            XCTAssertEqual(request.templateReasoningEffort, "low")
+            let input = try ModelRuntime.userInput(for: request, templateSupportsThinkingToggle: true)
+            XCTAssertEqual(input.additionalContext?["enable_thinking"] as? Bool, false)
+            XCTAssertEqual(input.additionalContext?["reasoning_effort"] as? String, "low")
+        }
+        let text = try ChatCompletionRequest.parse(data: JSONSerialization.data(withJSONObject: [
+            "model": "m", "messages": [["role": "user", "content": "x"]], "reasoning_effort": "high",
+        ]))
+        XCTAssertEqual(text.templateReasoningEffort, "high", "text requests keep the buyer's effort")
+    }
+
     /// GLM-4.5-Air `json_object` 502: the failing bytes were dropped. The
     /// default log line names the shape (fence, think tags, bytes around the
     /// first object) and a digest, never the content (SPEC-001 NFR-7); a

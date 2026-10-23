@@ -33,12 +33,50 @@ enum ToolCallParser {
 
     /// SPEC-018 §3.1: one parser per catalog grammar, selected by the loaded
     /// chat template's grammar (`ToolCallGrammar`), never by model-ID text.
+    /// The calls are de-duplicated and capped per reply (`uniqueCappedCalls`).
     static func parseToolCalls(
         rawOutput: String,
         grammar: ToolCallGrammar?,
         modelID: String,
         allowedFunctionNames: Set<String>? = nil,
         schemas: [String: JSONValue]? = nil
+    ) -> ParsedToolCalls {
+        let parsed = parseGrammarToolCalls(
+            rawOutput: rawOutput, grammar: grammar, modelID: modelID,
+            allowedFunctionNames: allowedFunctionNames, schemas: schemas
+        )
+        return ParsedToolCalls(
+            cleanedContent: parsed.cleanedContent,
+            toolCalls: uniqueCappedCalls(parsed.toolCalls),
+            leadingContent: parsed.leadingContent
+        )
+    }
+
+    /// SPEC-018 §3.1 (v0.3.2) per-reply call set: a call with the same name
+    /// and the same canonical arguments as an earlier call in the same reply
+    /// is dropped, and at most `ToolSelectionPolicy.maxCalls` (128, the §3.11
+    /// per-reply bound) calls are kept, in generated order. Kept calls are
+    /// unchanged; no text is rewritten or added. Auto mode only: guaranteed
+    /// selection (`parseGuaranteedToolCalls`) validates every generated call
+    /// against the requested cardinality (§3.11), so nothing is dropped there.
+    static func uniqueCappedCalls(_ calls: [ToolCall]) -> [ToolCall] {
+        var seen = Set<String>()
+        var kept: [ToolCall] = []
+        for call in calls where kept.count < ToolSelectionPolicy.maxCalls {
+            let arguments = (try? StrictJSONParser.parse(call.arguments, maxDepth: 128).deterministicJSONString()) ?? call.arguments
+            // Function names are `[A-Za-z0-9_-]`, so NUL cannot occur in one.
+            guard seen.insert(call.functionName + "\u{0}" + arguments).inserted else { continue }
+            kept.append(call)
+        }
+        return kept
+    }
+
+    private static func parseGrammarToolCalls(
+        rawOutput: String,
+        grammar: ToolCallGrammar?,
+        modelID: String,
+        allowedFunctionNames: Set<String>?,
+        schemas: [String: JSONValue]?
     ) -> ParsedToolCalls {
         let none = ParsedToolCalls(cleanedContent: nilIfBlank(rawOutput), toolCalls: [], leadingContent: nil)
         let result: (cleanedContent: String?, toolCalls: [ToolCall])
