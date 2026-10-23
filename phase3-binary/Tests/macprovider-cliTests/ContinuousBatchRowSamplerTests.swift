@@ -5,9 +5,17 @@ import MLXLMCommon
 import XCTest
 
 final class ContinuousBatchRowSamplerTests: XCTestCase {
+    override func invokeTest() {
+        Device.withDefaultDevice(Device(.cpu)) {
+            XCTAssertEqual(Device.defaultDevice().deviceType, .cpu)
+            super.invokeTest()
+        }
+    }
+
     override class func setUp() {
         super.setUp()
-        Device.setDefault(device: .cpu)
+        // Construct directly: Device.cpu resolves Swift's stream defaults first.
+        Device.setDefault(device: Device(.cpu))
     }
 
     // MARK: - Pure seed derivation (no Metal)
@@ -44,20 +52,13 @@ final class ContinuousBatchRowSamplerTests: XCTestCase {
         XCTAssertFalse(ContinuousBatchRowSampler.supports(temperature: 0.7, topP: .infinity))
     }
 
-    // MARK: - MLX sampling (needs the Metal library)
-
-    private func requireMetal() throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
-            throw XCTSkip("MLX default metallib is unavailable in this test host")
-        }
-    }
+    // MARK: - MLX sampling on CPU
 
     private func row(_ temperature: Double, _ topP: Double = 1, seed: Int = 1, step: Int = 0) -> ContinuousBatchRowSampler.Row {
         .init(temperature: temperature, topP: topP, samplerSeed: seed, samplerStep: step)
     }
 
     func testGreedyRowsMatchArgmaxExactly() throws {
-        try requireMetal()
         let logits = MLXArray([0.1, 3.0, 0.2, -1.0, 2.0, 5.0] as [Float]).reshaped([2, 3])
         let tokens = ContinuousBatchRowSampler.sample(logits: logits, rows: [row(0), row(0)]).asArray(Int.self)
         XCTAssertEqual(tokens, [1, 2])
@@ -141,7 +142,6 @@ final class ContinuousBatchRowSamplerTests: XCTestCase {
     /// A sampled row draws exactly what the serial path's own sampler draws for
     /// the same parameters and seed: same algorithm, row-local randomness.
     func testSampledRowEqualsSerialSamplerWithTheSameSeed() throws {
-        try requireMetal()
         let vocab = 32
         let values = (0 ..< vocab).map { Float(sin(Double($0)) * 3) }
         let logits = MLXArray(values).reshaped([1, vocab])
@@ -163,7 +163,6 @@ final class ContinuousBatchRowSamplerTests: XCTestCase {
     /// A row's token depends only on its own logits and seed: the same row
     /// samples the same token whatever its batch neighbours are.
     func testRowTokenIsIndependentOfOtherRows() throws {
-        try requireMetal()
         let vocab = 16
         let mine = (0 ..< vocab).map { Float(cos(Double($0))) }
         let other = (0 ..< vocab).map { Float(Double($0) / 4) }
@@ -179,7 +178,6 @@ final class ContinuousBatchRowSamplerTests: XCTestCase {
 
     /// A tiny nucleus leaves only the argmax, so a sampled row must equal greedy.
     func testTinyTopPCollapsesToArgmax() throws {
-        try requireMetal()
         let logits = MLXArray([0.1, 4.0, 0.2, 1.0] as [Float]).reshaped([1, 4])
         for step in 0 ..< 10 {
             let token = ContinuousBatchRowSampler.sample(

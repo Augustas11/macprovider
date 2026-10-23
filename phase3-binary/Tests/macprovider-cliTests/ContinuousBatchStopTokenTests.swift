@@ -4,9 +4,16 @@ import MLXLMCommon
 import XCTest
 
 final class ContinuousBatchStopTokenTests: XCTestCase {
+    override func invokeTest() {
+        Device.withDefaultDevice(Device(.cpu)) {
+            XCTAssertEqual(Device.defaultDevice().deviceType, .cpu)
+            super.invokeTest()
+        }
+    }
+
     override class func setUp() {
         super.setUp()
-        Device.setDefault(device: .cpu)
+        Device.setDefault(device: Device(.cpu))
     }
 
     func testTrailingModelStopIsDroppedOnlyWhenTheRowStoppedOnIt() {

@@ -6,9 +6,16 @@ import MLXLMCommon
 import XCTest
 
 final class ContinuousBatchSchedulerTests: XCTestCase {
+    override func invokeTest() {
+        Device.withDefaultDevice(Device(.cpu)) {
+            XCTAssertEqual(Device.defaultDevice().deviceType, .cpu)
+            super.invokeTest()
+        }
+    }
+
     override class func setUp() {
         super.setUp()
-        Device.setDefault(device: .cpu)
+        Device.setDefault(device: Device(.cpu))
     }
 
     func testLabBatchCompositionWaitsForEveryRowAndUsesDeclaredOrder() async throws {
@@ -8355,9 +8362,6 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         pagedCache: PagedKVCache,
         allocator: PagedKVBlockAllocator
     ) {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
-            throw XCTSkip("MLX default metallib is unavailable in this test host")
-        }
         let descriptor = Self.descriptor(blockSizeTokens: 4, maxPhysicalBlocks: 32)
         let retainedTokenCount = retainedTokenCount ?? cachedTokens
         let bridge = PagedKVRuntimeContiguousCacheBridge()

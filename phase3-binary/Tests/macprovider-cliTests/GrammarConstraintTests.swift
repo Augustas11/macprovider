@@ -7,6 +7,18 @@ import XCTest
 @testable import macprovider_cli
 
 final class GrammarConstraintTests: XCTestCase {
+    override func invokeTest() {
+        Device.withDefaultDevice(Device(.cpu)) {
+            XCTAssertEqual(Device.defaultDevice().deviceType, .cpu)
+            super.invokeTest()
+        }
+    }
+
+    override class func setUp() {
+        super.setUp()
+        Device.setDefault(device: Device(.cpu))
+    }
+
     func testSerialProcessorAndBatchCursorEnforceTheSameLanguage() throws {
         try Device.withDefaultDevice(.cpu) {
             let pieces: [Int: [UInt8]] = [0: Array("o".utf8), 1: Array("k".utf8), 2: Array("x".utf8), 3: []]
