@@ -31,7 +31,8 @@ public struct GrammarTokenTable: Sendable {
         }
         self.tokens = tokens; self.eosTokenIDs = eosTokenIDs; self.limits = limits
     }
-    /// EOS preserves the accepting state. All other tokens must consume a valid byte path.
+    /// EOS preserves an accepting state, or consumes an exact terminal wrapper
+    /// whose bytes finish the grammar. Premature EOS remains masked.
     public func allowedTokens(state: Int, automaton: GrammarAutomaton) throws -> [Int: Int] {
         guard state >= 0, state < automaton.stateCount else {
             throw unsupportedGrammar("Invalid output grammar state")
@@ -44,8 +45,18 @@ public struct GrammarTokenTable: Sendable {
             scanned += bytes.count
             if let next = automaton.transition(state: state, bytes: bytes) { result[id] = next }
         }
-        if automaton.accepting(state: state) {
-            for id in eosTokenIDs { result[id] = state }
+        for id in eosTokenIDs {
+            if automaton.accepting(state: state) {
+                result[id] = state
+            } else if let bytes = tokens[id], !bytes.isEmpty {
+                guard bytes.count <= limits.maxScanBytes - scanned else {
+                    throw unsupportedGrammar("Output grammar token mask budget exceeded")
+                }
+                scanned += bytes.count
+                if let next = automaton.transition(state: state, bytes: bytes), automaton.accepting(state: next) {
+                    result[id] = next
+                }
+            }
         }
         return result
     }

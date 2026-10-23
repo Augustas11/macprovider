@@ -13,6 +13,19 @@ final class GrammarTokenTableTests: XCTestCase {
         let end = try XCTUnwrap(first[2])
         XCTAssertEqual(try table.allowedTokens(state: end, automaton: dfa), [4: end])
     }
+    func testEOSCanConsumeOnlyACompleteTerminalWrapper() throws {
+        let dfa = try ByteGrammar.literal("a<end>").compile()
+        let table = try GrammarTokenTable(tokens: [0: [97], 1: Array("<end>".utf8)], eosTokenIDs: [1])
+        let first = try table.allowedTokens(state: 0, automaton: dfa)
+        XCTAssertNil(first[1])
+        let afterA = try XCTUnwrap(first[0])
+        let terminal = try XCTUnwrap(table.allowedTokens(state: afterA, automaton: dfa)[1])
+        XCTAssertTrue(dfa.accepting(state: terminal))
+        XCTAssertEqual(try table.allowedTokens(state: terminal, automaton: dfa)[1], terminal)
+        let bounded = try GrammarTokenTable(tokens: [1: Array("<end>".utf8)], eosTokenIDs: [1],
+                                            limits: .init(maxScanBytes: 4))
+        XCTAssertThrowsError(try bounded.allowedTokens(state: afterA, automaton: dfa))
+    }
     func testExplicitTokenizerDecoderModes() throws {
         XCTAssertEqual(try GrammarTokenBytes.decode(piece: "ĠHiĊ", encoding: .byteLevel), Array(" Hi\n".utf8))
         XCTAssertEqual(try GrammarTokenBytes.decode(piece: "Ã", encoding: .byteLevel), [0xc3])
