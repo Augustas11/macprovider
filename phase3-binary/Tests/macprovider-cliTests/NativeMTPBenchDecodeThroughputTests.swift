@@ -39,5 +39,34 @@ final class NativeMTPBenchDecodeThroughputTests: XCTestCase {
             NativeMTPBenchDecodeTiming(completionTokens: 0, firstTokenOffset: nil, endOffset: 6),
         ]))
     }
+
+    func testReasoningOnlyStreamIsTimed() throws {
+        // GLM-5.3-Flash at o128: every generated token is SPEC-018 reasoning.
+        let start = Date(timeIntervalSinceReferenceDate: 1_000)
+        let recorder = NativeMTPChunkTimeRecorder()
+        recorder.observe(.reasoning("The"), at: start.addingTimeInterval(2.0))
+        recorder.observe(.reasoning(""), at: start.addingTimeInterval(2.01))
+        recorder.observe(.reasoning(" user"), at: start.addingTimeInterval(2.025))
+        recorder.observe(.reasoning(" asks"), at: start.addingTimeInterval(2.05))
+        let timing = recorder.timing(since: start)
+        XCTAssertEqual(try XCTUnwrap(timing.ttftSeconds), 2.0, accuracy: 1e-9)
+        XCTAssertEqual(timing.interTokenGaps.count, 2)
+        XCTAssertEqual(timing.interTokenGaps[0], 0.025, accuracy: 1e-9)
+        XCTAssertEqual(timing.interTokenGaps[1], 0.025, accuracy: 1e-9)
+        XCTAssertNotNil(NativeMTPBenchDecodeThroughput.perRequest(
+            completionTokens: 128, ttftSeconds: timing.ttftSeconds, wallSeconds: 5
+        ))
+    }
+
+    func testReasoningThenContentTimesFromFirstReasoningChunk() throws {
+        let start = Date(timeIntervalSinceReferenceDate: 1_000)
+        let recorder = NativeMTPChunkTimeRecorder()
+        recorder.observe(.reasoning("think"), at: start.addingTimeInterval(1.5))
+        recorder.observe(.content("Answer"), at: start.addingTimeInterval(1.6))
+        let timing = recorder.timing(since: start)
+        XCTAssertEqual(try XCTUnwrap(timing.ttftSeconds), 1.5, accuracy: 1e-9)
+        XCTAssertEqual(timing.interTokenGaps.count, 1)
+        XCTAssertEqual(timing.interTokenGaps[0], 0.1, accuracy: 1e-9)
+    }
 }
 #endif
