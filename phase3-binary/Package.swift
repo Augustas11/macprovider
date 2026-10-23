@@ -30,11 +30,12 @@ let package = Package(
         // erases a freed compiled function from every thread's compile cache
         // so a model reload cannot replay a dead trace, and keeps internal
         // casts and broadcasts on the caller's stream so one decode step runs
-        // on one Metal queue. Campaign #2111 adds the deepseek_v4 text model on
-        // branch dsv4/2111-port, one commit on that tag's revision 87dc5159.
+        // on one Metal queue. Campaign #2111 adds the deepseek_v4 text model and
+        // its reference prefill plan on branch dsv4/2111-port, two commits on
+        // that tag's revision 87dc5159.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "fe28d000c3af00f6880591a31e36f5064d9d142b"
+            revision: "baec172471889593f60c70060eefcb624772fee5"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",

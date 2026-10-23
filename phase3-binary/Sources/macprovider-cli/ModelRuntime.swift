@@ -2300,8 +2300,10 @@ actor ModelRuntime: ModelRuntimeServing {
     /// such layer as not realizing a requested cap
     /// (`incompatibleCapacity(expected: maxKVSize, count: 11)`). Prompt length
     /// is still bounded by `validatePromptTokenCount` before allocation.
+    /// DeepSeek V4 likewise builds its own window and pool caches
+    /// (`DeepseekV4PoolCache`, never sized by `maxKVSize`).
     nonisolated static func modelSizesItsOwnKVCache(_ model: any LanguageModel) -> Bool {
-        model is GLM5NextModel || model is GLM5NextTextModel
+        model is GLM5NextModel || model is GLM5NextTextModel || model is DeepseekV4Model
     }
 
     /// Parameters for a `TokenIterator` over an explicit cache the model sized
@@ -14250,6 +14252,10 @@ struct NativeToolCallStreamEmitter {
         case .gemma4?:
             startDelimiter = "<|tool_call>"
             endDelimiter = "<tool_call|>"
+            argumentKey = "arguments"
+        case .dsml?:
+            startDelimiter = DeepseekV4Encoding.toolCallsStart
+            endDelimiter = DeepseekV4Encoding.toolCallsEnd
             argumentKey = "arguments"
         default:
             startDelimiter = "<tool_call>"

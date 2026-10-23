@@ -133,10 +133,14 @@ private extension Character {
 /// rewrite, the returned tokenizer renders the rewritten template as a literal
 /// through the same swift-transformers path (same context, same
 /// `lstripBlocks`/`trimBlocks` options, `add_generation_prompt` true);
-/// otherwise it is the stock adaptor, unchanged.
+/// a DeepSeek-V4 artifact (no template) renders through
+/// `DeepseekV4ChatTokenizer`; otherwise it is the stock adaptor, unchanged.
 struct ChatTemplateCompatTokenizerLoader: MLXLMCommon.TokenizerLoader {
     func load(from directory: URL) async throws -> any MLXLMCommon.Tokenizer {
         let upstream = try await Tokenizers.AutoTokenizer.from(modelFolder: directory)
+        if DeepseekV4ChatTokenizer.applies(to: directory) {
+            return DeepseekV4ChatTokenizer(upstream: upstream)
+        }
         if let template = ChatTemplateCompatibility.configuredTemplate(in: directory) {
             let result = ChatTemplateCompatibility.rewrite(template)
             if result.numericAttributeRewrites > 0 {

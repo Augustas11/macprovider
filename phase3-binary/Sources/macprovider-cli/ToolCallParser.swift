@@ -108,11 +108,12 @@ enum ToolCallParser {
                 return ParsedToolCalls(cleanedContent: nil, toolCalls: bare, leadingContent: nil)
             }
             result = parseQwenToolCalls(rawOutput: rawOutput, modelID: modelID, allowedFunctionNames: allowedFunctionNames, schemas: schemas)
-        case .glm?, .gemma4?, .llama3?:
+        case .glm?, .gemma4?, .llama3?, .dsml?:
             do {
                 let calls: [ToolCall]
                 switch grammar {
                 case .glm?: calls = try parseTaggedCalls(rawOutput, start: "<tool_call>", end: "</tool_call>") { try glmCall($0, schemas: schemas) }
+                case .dsml?: calls = try parseDSMLCalls(rawOutput, schemas: schemas)
                 case .gemma4?: calls = try parseTaggedCalls(rawOutput, start: "<|tool_call>", end: "<tool_call|>") { try GemmaToolCallBridge.call($0, schemas: schemas) }
                 default: calls = try parseLlama3Calls(rawOutput)
                 }
@@ -145,6 +146,7 @@ enum ToolCallParser {
         case .glm?: return ["<tool_call>"]
         case .gemma4?: return ["<|tool_call>"]
         case .llama3?: return ["<|python_tag|>", "{"]
+        case .dsml?: return [DeepseekV4Encoding.toolCallsStart]
         case .harmony?, nil: return []
         }
     }
@@ -255,6 +257,102 @@ enum ToolCallParser {
         default:
             throw ParseError.invalidArguments
         }
+    }
+
+    /// DeepSeek-V4 DSML (`parse_tool_calls`, `encoding_dsv4.py:646-700`).
+    /// Each `<｜DSML｜tool_calls>` block holds one or more invokes, so one
+    /// block can carry parallel calls; the last block may omit its close when
+    /// the output ends there (the end-of-sentence token replaced it), but its
+    /// invokes must be complete. Whitespace between the markup is free, where
+    /// the reference demands its exact newlines.
+    static func parseDSMLCalls(_ rawOutput: String, schemas: [String: JSONValue]?) throws -> [ToolCall] {
+        let start = DeepseekV4Encoding.toolCallsStart
+        let end = DeepseekV4Encoding.toolCallsEnd
+        var calls: [ToolCall] = []
+        var searchFrom = rawOutput.startIndex
+        while let open = rawOutput.range(of: start, range: searchFrom..<rawOutput.endIndex) {
+            let close = rawOutput.range(of: end, range: open.upperBound..<rawOutput.endIndex)
+            let body = rawOutput[open.upperBound..<(close?.lowerBound ?? rawOutput.endIndex)]
+            if close == nil, body.contains(start) { throw ParseError.missingEndDelimiter }
+            calls += try dsmlInvokes(body, schemas: schemas)
+            guard let close else { break }
+            searchFrom = close.upperBound
+        }
+        return calls
+    }
+
+    private static let dsmlInvokeOpen = "<\(DeepseekV4Encoding.dsmlToken)invoke"
+    private static let dsmlInvokeClose = "</\(DeepseekV4Encoding.dsmlToken)invoke>"
+    private static let dsmlParameterOpen = "<\(DeepseekV4Encoding.dsmlToken)parameter"
+    private static let dsmlParameterClose = "</\(DeepseekV4Encoding.dsmlToken)parameter>"
+
+    private static func dsmlInvokes(_ block: Substring, schemas: [String: JSONValue]?) throws -> [ToolCall] {
+        var calls: [ToolCall] = []
+        var rest = block
+        while true {
+            rest = rest.drop(while: \.isWhitespace)
+            if rest.isEmpty { break }
+            guard rest.hasPrefix(dsmlInvokeOpen) else { throw ParseError.invalidShape }
+            let header = try dsmlAttributes(rest.dropFirst(dsmlInvokeOpen.count), names: ["name"])
+            let name = header.values[0]
+            guard isValidToolFunctionName(name) else { throw ParseError.invalidShape }
+            let schema = schemas?[name]
+            rest = header.rest
+            var arguments: [String: JSONValue] = [:]
+            while true {
+                rest = rest.drop(while: \.isWhitespace)
+                if rest.hasPrefix(dsmlInvokeClose) {
+                    rest = rest.dropFirst(dsmlInvokeClose.count)
+                    break
+                }
+                guard !rest.isEmpty else { throw ParseError.missingEndDelimiter }
+                guard rest.hasPrefix(dsmlParameterOpen) else { throw ParseError.invalidShape }
+                let parameter = try dsmlAttributes(rest.dropFirst(dsmlParameterOpen.count), names: ["name", "string"])
+                let key = parameter.values[0]
+                guard isValidToolParameterName(key), arguments[key] == nil,
+                      ["true", "false"].contains(parameter.values[1]) else { throw ParseError.invalidArguments }
+                guard let close = parameter.rest.range(of: dsmlParameterClose) else { throw ParseError.missingEndDelimiter }
+                let raw = String(parameter.rest[..<close.lowerBound])
+                arguments[key] = try dsmlValue(raw, isString: parameter.values[1] == "true", type: explicitParameterType(key, schema: schema))
+                rest = parameter.rest[close.upperBound...]
+            }
+            let value = JSONValue.object(arguments)
+            guard ToolSelectionPolicy.supportsNumericDomain(value) else { throw ParseError.invalidArguments }
+            let json = try value.deterministicJSONString()
+            try validateNoDuplicateJSONKeys(json)
+            calls.append(ToolCall(id: newCallID(), functionName: name, arguments: json))
+        }
+        return calls
+    }
+
+    /// ` name="…" string="…">`: the named attributes in order, then `>`.
+    private static func dsmlAttributes(_ text: Substring, names: [String]) throws -> (values: [String], rest: Substring) {
+        var rest = text
+        var values: [String] = []
+        for name in names {
+            let trimmed = rest.drop(while: \.isWhitespace)
+            // Each attribute follows whitespace.
+            guard trimmed.startIndex > rest.startIndex, trimmed.hasPrefix(name + "=\"") else {
+                throw ParseError.invalidShape
+            }
+            let valueStart = trimmed.index(trimmed.startIndex, offsetBy: name.count + 2)
+            guard let quote = trimmed[valueStart...].firstIndex(of: "\"") else { throw ParseError.invalidShape }
+            values.append(String(trimmed[valueStart..<quote]))
+            rest = trimmed[trimmed.index(after: quote)...]
+        }
+        guard rest.hasPrefix(">") else { throw ParseError.invalidShape }
+        return (values, rest.dropFirst())
+    }
+
+    /// `string="true"` values are text, except that a value for a declared
+    /// non-string parameter which parses as that type is taken typed;
+    /// `string="false"` values are JSON, typed as GLM values are.
+    private static func dsmlValue(_ raw: String, isString: Bool, type: String?) throws -> JSONValue {
+        if isString {
+            if let type, type != "string", let typed = try? glmValue(raw, type: type) { return typed }
+            return .string(raw)
+        }
+        return try glmValue(raw, type: type)
     }
 
     /// Llama 3.x: the template asks for bare JSON `{"name", "parameters"}`;

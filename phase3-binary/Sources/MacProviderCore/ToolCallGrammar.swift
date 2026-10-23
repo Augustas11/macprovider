@@ -19,6 +19,11 @@ public enum ToolCallGrammar: String, Sendable, Equatable, CaseIterable {
     case gemma4
     /// gpt-oss Harmony frames, parsed by `HarmonyResponseParser`.
     case harmony
+    /// DeepSeek-V4 DSML: `<｜DSML｜tool_calls>` holding one
+    /// `<｜DSML｜invoke name="NAME">` per call, each with
+    /// `<｜DSML｜parameter name="KEY" string="true|false">VALUE</｜DSML｜parameter>`
+    /// (`encoding/encoding_dsv4.py`; the family has no Jinja template).
+    case dsml
 
     /// Catalog-family fallback. Families whose template has no tool support
     /// (Qwen2-VL) return nil, and so does any unknown family.
@@ -34,6 +39,7 @@ public enum ToolCallGrammar: String, Sendable, Equatable, CaseIterable {
             || id.contains("llama3.1") || id.contains("llama3.2") || id.contains("llama3.3") { return .llama3 }
         if id.contains("gemma-4") || id.contains("gemma4") { return .gemma4 }
         if id.contains("nemotron-3") || id.contains("nemotron3") { return .qwen }
+        if id.contains("deepseek-v4") || id.contains("deepseek_v4") { return .dsml }
         return nil
     }
 
