@@ -307,13 +307,13 @@ enum DeepseekV4Encoding {
     static func renderMessage(
         index: Int,
         messages: [Value],
+        lastUserIndex: Int,
         thinkingMode: ThinkingMode,
         dropThinking: Bool = true,
         reasoningEffort: ReasoningEffort? = nil
     ) throws -> String {
         var prompt = ""
         let message = messages[index]
-        let lastUserIndex = findLastUserIndex(messages)
         let role = message["role"]?.string
         let content = message["content"]
         let tools = message["tools"].flatMap { $0.isTruthy ? functions($0) : nil }
@@ -429,6 +429,19 @@ enum DeepseekV4Encoding {
 
     static func mergeToolMessages(_ messages: [Value]) -> [Value] {
         var merged: [Value] = []
+        // Keep one uniquely owned buffer for each user/tool group. Storing
+        // the growing array back into Value after every block forces a copy
+        // on the next append.
+        var pendingUser: Value?
+        var pendingBlocks: [Value] = []
+        func flushUser() {
+            if var user = pendingUser {
+                user.set("content_blocks", .array(pendingBlocks))
+                merged.append(user)
+            }
+            pendingUser = nil
+            pendingBlocks = []
+        }
         for message in messages {
             switch message["role"]?.string {
             case "tool":
@@ -437,33 +450,33 @@ enum DeepseekV4Encoding {
                     "tool_use_id": message["tool_call_id"] ?? .string(""),
                     "content": message["content"] ?? .string(""),
                 ])
-                if var last = merged.last, last["role"]?.string == "user", let blocks = last["content_blocks"]?.array {
-                    last.set("content_blocks", .array(blocks + [block]))
-                    merged[merged.count - 1] = last
-                } else {
-                    merged.append(.object(["role": .string("user"), "content_blocks": .array([block])]))
+                if pendingUser == nil {
+                    pendingUser = .object(["role": .string("user")])
                 }
+                pendingBlocks.append(block)
             case "user":
                 let block = Value.object(["type": .string("text"), "text": message["content"] ?? .string("")])
-                if var last = merged.last, last["role"]?.string == "user",
-                   let blocks = last["content_blocks"]?.array, last["task"] == nil || last["task"] == .null {
-                    last.set("content_blocks", .array(blocks + [block]))
-                    merged[merged.count - 1] = last
-                } else {
+                if let task = pendingUser?["task"], task != .null {
+                    flushUser()
+                }
+                if pendingUser == nil {
                     var user = Value.object([
                         "role": .string("user"),
                         "content": message["content"] ?? .string(""),
-                        "content_blocks": .array([block]),
+                        "content_blocks": .array([]),
                     ])
                     for key in ["task", "wo_eos", "mask"] {
                         if let value = message[key] { user.set(key, value) }
                     }
-                    merged.append(user)
+                    pendingUser = user
                 }
+                pendingBlocks.append(block)
             default:
+                flushUser()
                 merged.append(message)
             }
         }
+        flushUser()
         return merged
     }
 
@@ -534,10 +547,12 @@ enum DeepseekV4Encoding {
         if thinkingMode == .thinking, effectiveDropThinking {
             full = dropThinkingMessages(full)
         }
+        let lastUserIndex = findLastUserIndex(full)
         for index in full.indices {
             prompt += try renderMessage(
                 index: index,
                 messages: full,
+                lastUserIndex: lastUserIndex,
                 thinkingMode: thinkingMode,
                 dropThinking: effectiveDropThinking,
                 reasoningEffort: reasoningEffort
