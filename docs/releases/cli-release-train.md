@@ -58,7 +58,18 @@ Verified 2026-10-22 against GitHub release/tag metadata, the release train
 
 ## Next CLI release — net changes vs 1.8.261 (tracked 2026-10-22)
 
-Live fleet target: **1.8.261**. No provider-side PR has merged since; start rows here when one does.
+Live fleet target: **1.8.261** (released 2026-10-22 06:23Z; Pearl runtime v1.8.259). Staged:
+`binaryVersion` **1.8.262**. This combined cut carries the DeepSeek V4 campaign (#2112) and the provider-side PRs merged since 1.8.261.
+
+| PR | Issue | Provider-side change | Status |
+|---|---|---|---|
+| #2109 | #2107 | Buyer API compatibility for agentic clients across every catalog model. | merged (`ab9730172`); next combined CLI |
+| #2115 | #2100 | `glm5_next` prefills in 2048-token CB prompt chunks. | merged (`20ead6ea6`); next combined CLI |
+| #2116 | #2107 | Buyer API conformance fixes for the real-model failures from the #2109 validation run. | merged (`8a44d3f44`); next combined CLI |
+| #2117 | #2107 | Qwen per-call `<tools>` wrappers, `json_object` failure diagnostics, lifecycle failed wedge. | merged (`c47bb4813`); next combined CLI |
+| #2108 | #2084 | Multi-Mac shard groups on Trusted Pools (SPEC-051): stage transport, provider and coordinator. | merged (`9f8491b34`); next combined CLI |
+| #2118 | #2107 | Buyer API re-audit: serial bare calls, conformance binding, grammar-unavailable settlement, schema profile. | merged (`68d6ed54d`); next combined CLI |
+| #2112 | #2111 | DeepSeek V4 native `deepseek_v4` serving (fork `baec1724`, mlx-swift-lm `3.32.3-macprovider.10.3`), DSV4 prompt encoder, DSML tool calls and reasoning; decode-path digest `565617…`; native-MTP admission inputs rebound identity-only. | in progress; lands in 1.8.262 |
 
 ## Shipped v1.8.261 — net changes vs 1.8.260
 
