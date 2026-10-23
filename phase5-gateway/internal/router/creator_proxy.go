@@ -77,6 +77,7 @@ func (s *Server) handleCreatorProxy(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {
 		raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, creatorProxyMaxBodyBytes))
 		if err != nil {
+			drainIfMaxBytesExceeded(w, r, err, creatorProxyMaxBodyBytes+1)
 			writeError(w, http.StatusRequestEntityTooLarge, "invalid_request_error", "request_too_large", "Request body too large")
 			return
 		}

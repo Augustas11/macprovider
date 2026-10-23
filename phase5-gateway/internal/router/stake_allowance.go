@@ -333,6 +333,7 @@ func (s *Server) handleStakeProxy(w http.ResponseWriter, r *http.Request) {
 	if method == http.MethodPost {
 		raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, stakeProxyMaxBody))
 		if err != nil {
+			drainIfMaxBytesExceeded(w, r, err, stakeProxyMaxBody+1)
 			writeError(w, http.StatusRequestEntityTooLarge, "invalid_request_error", "request_too_large", "Request body too large")
 			return
 		}

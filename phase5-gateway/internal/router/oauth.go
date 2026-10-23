@@ -173,6 +173,7 @@ func (s *Server) handleHandoffExchange(w http.ResponseWriter, r *http.Request) {
 		Handoff string `json:"handoff"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+		drainIfMaxBytesExceeded(w, r, err, 1<<20+1)
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "invalid_handoff", "Handoff token is invalid")
 		return
 	}

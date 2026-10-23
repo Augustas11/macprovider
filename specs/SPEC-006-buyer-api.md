@@ -1,7 +1,14 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.65 (2026-10-24, Messages thinking keeps reasoning on; #2107)
+**Version:** 0.9.66 (2026-10-24, oversize body 413 after a bounded drain; #2107)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.6.17, SPEC-003 v0.7, SPEC-004 v0.3.2
+
+**Change log v0.9.66 (2026-10-24, Related: #2107):**
+- §17.1 `413 request_too_large`: before writing the 413, the gateway drains
+  the rest of the oversized body, bounded to 8 MiB in total and a 5 s read
+  deadline where the connection supports one. Rejecting with the body unread
+  made net/http reset the connection, and nginx (streaming `/v1/` bodies)
+  answered 502 instead of the 413. Limits and status codes are unchanged.
 
 **Change log v0.9.65 (2026-10-24, Related: #2107):**
 - §5.4a `/v1/messages` `thinking`: `enabled` with `budget_tokens` below 16384
@@ -4213,7 +4220,7 @@ A coordinator-issued `500` with `code: "route_snapshot_failed"` (a SPEC-022 pre-
 
 405 Method Not Allowed MUST use `type: "invalid_request_error"` and `code: "method_not_allowed"`.
 
-413 Payload Too Large MUST use `type: "invalid_request_error"` and `code: "request_too_large"`.
+413 Payload Too Large MUST use `type: "invalid_request_error"` and `code: "request_too_large"`. The gateway rejects an oversized body with this 413 only after a bounded drain of the unread body (at most 8 MiB in total), so a reverse proxy that streams a body within that bound receives the 413 instead of a connection reset.
 
 ### 17.2 Model unknown
 

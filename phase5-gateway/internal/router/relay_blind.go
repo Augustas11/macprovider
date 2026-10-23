@@ -90,6 +90,7 @@ func (s *Server) handleRelayBlindRouteReservations(w http.ResponseWriter, r *htt
 		return
 	}
 	if int64(len(body)) > s.cfg.Limits.RequestBodyBytes {
+		drainOversizeRequestBody(w, r.Body, int64(len(body)))
 		writeError(w, http.StatusRequestEntityTooLarge, "invalid_request_error", "request_too_large", "Request body too large")
 		return
 	}
@@ -313,7 +314,7 @@ func (s *Server) handleRelayBlindMessagesDisabled(w http.ResponseWriter, r *http
 		s.handleNotFound(w, r)
 		return
 	}
-	body, nonRelayTooLarge, err := readRelayBlindDisabledProbeBody(r, s.cfg.Limits.RequestBodyBytes)
+	body, nonRelayTooLarge, err := readRelayBlindDisabledProbeBody(w, r, s.cfg.Limits.RequestBodyBytes)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "invalid_request_body", "Could not read request body")
 		return
@@ -350,7 +351,7 @@ func (s *Server) handleRelayBlindEndpointDisabled(w http.ResponseWriter, r *http
 		s.handleNotFound(w, r)
 		return
 	}
-	body, nonRelayTooLarge, err := readRelayBlindDisabledProbeBody(r, s.cfg.Limits.RequestBodyBytes)
+	body, nonRelayTooLarge, err := readRelayBlindDisabledProbeBody(w, r, s.cfg.Limits.RequestBodyBytes)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "invalid_request_body", "Could not read request body")
 		return
@@ -477,13 +478,18 @@ func (s *Server) handleRelayBlindEndpointDisabledBody(w http.ResponseWriter, r *
 	writeError(w, http.StatusBadRequest, "invalid_request_error", "relay_blind_endpoint_unsupported", "Relay-blind request encryption v0.1 supports chat_completions only")
 }
 
-func readRelayBlindDisabledProbeBody(r *http.Request, limit int64) ([]byte, bool, error) {
+func readRelayBlindDisabledProbeBody(w http.ResponseWriter, r *http.Request, limit int64) ([]byte, bool, error) {
 	if limit < 0 {
 		limit = 0
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, limit+1))
 	if err != nil {
 		return nil, false, err
+	}
+	if int64(len(body)) > limit {
+		// Every over-limit body is rejected below (404, 400 or 413), and the
+		// messages path swaps r.Body for this prefix, so drain the wire now.
+		drainOversizeRequestBody(w, r.Body, int64(len(body)))
 	}
 	if int64(len(body)) <= limit || relayBlindDisabledProbeBodyRelayShaped(body) {
 		return body, false, nil

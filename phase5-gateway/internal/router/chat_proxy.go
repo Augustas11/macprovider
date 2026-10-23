@@ -278,6 +278,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if int64(len(body)) > readLimit || (int64(len(body)) > s.cfg.Limits.RequestBodyBytes && !relayBlindDisabledProbeBodyRelayShaped(body)) {
+		if int64(len(body)) > readLimit {
+			drainOversizeRequestBody(w, r.Body, int64(len(body)))
+		}
 		writeError(w, http.StatusRequestEntityTooLarge, "invalid_request_error", "request_too_large", "Request body too large")
 		return
 	}
