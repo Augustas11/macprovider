@@ -112,6 +112,10 @@ type ToolSelectionCapability struct {
 	Runtime    string   `json:"runtime"`
 	Modes      []string `json:"modes"`
 	Validation string   `json:"validation"`
+	// SchemaProfiles names the parameters-schema classes the provider accepts
+	// for guaranteed modes beyond the strict validator subset (SPEC-018 §3.11
+	// v0.3.3). Absent means the strict subset only.
+	SchemaProfiles []string `json:"schema_profiles,omitempty"`
 }
 
 // VisionRuntimeCapability is a provider assertion for a loaded vision runtime.

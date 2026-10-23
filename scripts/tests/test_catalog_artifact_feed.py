@@ -89,12 +89,14 @@ _BUYER_UX_TMP = tempfile.TemporaryDirectory()
 BUYER_UX_PASSING = pathlib.Path(_BUYER_UX_TMP.name) / "buyer-ux-conformance.json"
 
 
-def write_buyer_ux_records(path: pathlib.Path, keys, failing=()) -> None:
-    """SPEC-023 §16.11: a conformance record per key; `failing` checks fail."""
+def write_buyer_ux_records(path: pathlib.Path, keys, failing=(), model=None) -> None:
+    """SPEC-023 §16.11: a conformance record per key for the key's served
+    model (the candidate row's model_id); `failing` checks fail."""
     records = {}
     for key in keys:
         checks = {name: {"status": "fail" if name in failing else "pass", "detail": "fixture"} for name in buyer_ux.ALL_CHECKS}
-        records[key] = {"model": key, "gateway": "https://api.malibu.tech/v1", "checked_at": "2026-10-22T00:00:00Z",
+        served = model or (CANDIDATE_OBJ["rows"].get(key) or {}).get("model_id") or key
+        records[key] = {"model": served, "gateway": "https://api.malibu.tech/v1", "checked_at": "2026-10-22T00:00:00Z",
                         "checks": checks, "capabilities": buyer_ux.capabilities_from_checks(checks)}
     path.write_text(json.dumps({"schema_version": buyer_ux.SCHEMA, "records": records}, indent=2, sort_keys=True))
 
@@ -4299,11 +4301,15 @@ class IntakeDecisionManifestTest(unittest.TestCase):
         missing = pathlib.Path(_BUYER_UX_TMP.name) / "absent.json"
         failing = pathlib.Path(_BUYER_UX_TMP.name) / "failing.json"
         write_buyer_ux_records(failing, [self.KEY], failing=("stream_tool_deltas",))
+        # Re-audit r1: a passing record taken against another served model.
+        foreign = pathlib.Path(_BUYER_UX_TMP.name) / "foreign.json"
+        write_buyer_ux_records(foreign, [self.KEY], model="mlx-community/Qwen3-8B-8bit")
         manifest = self.manifest([self.promote_entry()])
         previous = catalog_release.candidate_admission_tiers(CANDIDATE_OBJ)
         previous[self.KEY] = 1  # listed before → promoted now
         self.clear_sources()
-        for path, fragment in ((missing, "no record for"), (failing, "advertises tools but its checks failed")):
+        for path, fragment in ((missing, "no record for"), (failing, "advertises tools but its checks failed"),
+                               (foreign, "not the served model")):
             with patch.object(catalog_release, "BUYER_UX_CONFORMANCE_PATH", path):
                 self.rejects(manifest, fragment, previous_tiers=previous)
 

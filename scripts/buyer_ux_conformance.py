@@ -107,7 +107,18 @@ def _tool_calls_ok(choice: dict, name: str = "read_file") -> str | None:
     calls = (choice.get("message") or {}).get("tool_calls") or []
     if not calls:
         return "no tool_calls"
+    ids = set()
     for call in calls:
+        # A client answers each call by its id, so an absent or repeated id
+        # leaves the call unusable.
+        call_id = call.get("id")
+        if not isinstance(call_id, str) or not call_id:
+            return "tool call without an id"
+        if call_id in ids:
+            return "duplicate tool call ids"
+        ids.add(call_id)
+        if call.get("type") != "function":
+            return f"tool call type {call.get('type')!r} want function"
         fn = call.get("function") or {}
         if fn.get("name") != name:
             return f"tool name {fn.get('name')!r}"
@@ -144,6 +155,8 @@ def check_stream_tool_deltas(transport: Transport, model: str) -> tuple[str, str
     calls: dict[int, dict] = {}
     finish = None
     usage = False
+    # Markup split across deltas is only visible in the assembled content.
+    content = ""
     for event in resp.sse():
         if "error" in event:
             return FAIL, f"stream error {event['error'].get('code')!r}"
@@ -151,7 +164,8 @@ def check_stream_tool_deltas(transport: Transport, model: str) -> tuple[str, str
         for choice in event.get("choices") or []:
             finish = choice.get("finish_reason") or finish
             delta = choice.get("delta") or {}
-            if _leaks_reasoning(delta.get("content") or ""):
+            content += delta.get("content") or ""
+            if _leaks_reasoning(content):
                 return FAIL, "reasoning markup in streamed content"
             for tc in delta.get("tool_calls") or []:
                 index = tc.get("index")
@@ -331,7 +345,10 @@ def model_entry(transport: Transport, model: str) -> dict:
 def run_checks(transport: Transport, model: str) -> dict:
     entry = model_entry(transport, model)
     advertised = entry.get("capabilities") or {}
-    reasoning_model = advertised.get("reasoning") is True
+    # Whether reasoning fields must be proven comes from the canonical model
+    # contract, never from /models: a masked or absent flag there must not
+    # waive the proof of the capability the record grants.
+    reasoning_model = advertised_capabilities(model)["reasoning"]
     context = int(entry.get("max_context_tokens") or advertised.get("context_length") or 32768)
     steps: dict[str, Callable[[], tuple[str, str]]] = {
         "tools_auto": lambda: check_tools(transport, model, "auto", "auto"),
@@ -450,13 +467,18 @@ def advertised_capabilities(model_id: str) -> dict:
     }
 
 
-def require_promotable(key: str, advertised: dict, path: pathlib.Path = RECORD_PATH) -> dict:
-    """SPEC-023 §16.11: a key is promotable only when its record exists, its
-    base checks pass, and every capability the model advertises passes."""
+def require_promotable(key: str, model_id: str, advertised: dict, path: pathlib.Path = RECORD_PATH) -> dict:
+    """SPEC-023 §16.11: a key is promotable only when its record exists, was
+    taken against the served model being promoted, its base checks pass, and
+    every capability the model advertises passes."""
     records = load_records(path)["records"]
     record = records.get(key)
     if record is None:
         raise ConformanceError(f"buyer-UX conformance: no record for {key!r}; run scripts/buyer_ux_conformance.py run")
+    # The coordinator indexes the record by its model id, case-insensitively
+    # (LoadBuyerUXConformance), so the gate binds the same identity.
+    if str(record["model"]).lower() != model_id.lower():
+        raise ConformanceError(f"buyer-UX conformance: {key!r} record is for {record['model']!r}, not the served model {model_id!r}")
     caps = record["capabilities"]
     if not caps["base"]:
         raise ConformanceError(f"buyer-UX conformance: {key!r} fails the base checks")
@@ -510,9 +532,10 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 
 def cmd_check(args: argparse.Namespace) -> int:
-    advertised = json.loads(args.advertised) if args.advertised else advertised_capabilities(args.model_id or args.catalog_key)
+    model_id = args.model_id or args.catalog_key
+    advertised = json.loads(args.advertised) if args.advertised else advertised_capabilities(model_id)
     try:
-        require_promotable(args.catalog_key, advertised, pathlib.Path(args.record))
+        require_promotable(args.catalog_key, model_id, advertised, pathlib.Path(args.record))
     except ConformanceError as err:
         print(str(err), file=sys.stderr)
         return 1

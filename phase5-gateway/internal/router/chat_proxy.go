@@ -2432,9 +2432,16 @@ func coordinatorPoolStateStaleError(status int, body []byte) bool {
 // gateway retry that already saw provider-dispatched work carries the gateway
 // prior-dispatch marker. Structured no_provider_available without the positive
 // marker is therefore settled conservatively instead of refunded or converted
-// into the wholesale 429 contract.
+// into the wholesale 429 contract. The coordinator's 503
+// tool_grammar_provider_unavailable (no serving provider parses the model's
+// tool grammar, #2107) is the same pre-dispatch shape: a gateway retry can
+// reach it after an earlier attempt credited a provider, so it needs the same
+// positive proof before a refund.
 func coordinatorStructuredNoProviderNeedsSettlement(status int, body []byte, h http.Header) bool {
-	if (status != http.StatusServiceUnavailable && status != http.StatusTooManyRequests) || openAIErrorCode(body) != "no_provider_available" {
+	code := openAIErrorCode(body)
+	noProvider := (status == http.StatusServiceUnavailable || status == http.StatusTooManyRequests) && code == "no_provider_available"
+	grammarUnavailable := status == http.StatusServiceUnavailable && code == "tool_grammar_provider_unavailable"
+	if !noProvider && !grammarUnavailable {
 		return false
 	}
 	if strings.TrimSpace(h.Get(gatewayPriorProviderDispatchHeader)) != "" {

@@ -150,8 +150,22 @@ type openRouterPoolSnapshot struct {
 	ReadySlotsTotal    int
 	ReadySlotsFree     int
 	MaxContextTokens   int
-	ToolChoiceModes    []string
+	// Capabilities is the coordinator's /v1/models capability object for the
+	// model: provider eligibility and buyer-UX conformance masking already
+	// applied. Nil when the coordinator lists no serving provider for it.
+	Capabilities *openRouterModelCapabilities
 }
+
+// openRouterModelCapabilities is the part of the coordinator's per-model
+// /v1/models capability object (SPEC-006 §21) that OpenRouter parameters
+// project from.
+type openRouterModelCapabilities struct {
+	Tools          bool     `json:"tools"`
+	ToolChoice     []string `json:"tool_choice"`
+	ResponseFormat bool     `json:"response_format"`
+}
+
+const openRouterCoordinatorModelsMaxBytes = 4 << 20
 
 func (s *Server) handleOpenRouterModels(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
@@ -159,6 +173,11 @@ func (s *Server) handleOpenRouterModels(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	status, err := s.statusFromPoolz(r.Context())
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "service_unavailable", "coordinator_unavailable", "Coordinator unavailable")
+		return
+	}
+	capabilities, err := s.fetchCoordinatorModelCapabilities(r)
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "service_unavailable", "coordinator_unavailable", "Coordinator unavailable")
 		return
@@ -177,7 +196,7 @@ func (s *Server) handleOpenRouterModels(w http.ResponseWriter, r *http.Request) 
 			ReadySlotsFree:     model.ReadySlotsFree,
 			// #1570: only a serving provider's granted context is servable.
 			MaxContextTokens: status.ServingMaxContextTokens[model.ID],
-			ToolChoiceModes:  status.ServingToolChoiceModes[model.ID],
+			Capabilities:     capabilities[model.ID],
 		})
 	}
 	// A model whose only serving providers are busy with no free slot has no
@@ -191,7 +210,7 @@ func (s *Server) handleOpenRouterModels(w http.ResponseWriter, r *http.Request) 
 			}
 		}
 		if !found {
-			pool = append(pool, openRouterPoolSnapshot{ID: id, MaxContextTokens: contextTokens, ToolChoiceModes: status.ServingToolChoiceModes[id]})
+			pool = append(pool, openRouterPoolSnapshot{ID: id, MaxContextTokens: contextTokens, Capabilities: capabilities[id]})
 		}
 	}
 	doc, err := projectOpenRouterModels(pool, rateCard, s.cfg.Limits.MaxTokensPerRequest, s.now())
@@ -207,6 +226,48 @@ func (s *Server) handleOpenRouterModels(w http.ResponseWriter, r *http.Request) 
 	}
 	w.Header().Set("Cache-Control", "public, max-age=15")
 	writeJSON(w, http.StatusOK, doc)
+}
+
+// fetchCoordinatorModelCapabilities reads the coordinator's /v1/models, the
+// capability result after provider eligibility and buyer-UX conformance
+// masking, keyed by model id. OpenRouter parameters never widen it.
+func (s *Server) fetchCoordinatorModelCapabilities(r *http.Request) (map[string]*openRouterModelCapabilities, error) {
+	upReq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, strings.TrimRight(s.coordinatorBuyerURL(), "/")+"/v1/models", nil)
+	if err != nil {
+		return nil, err
+	}
+	upReq.Header.Set("X-Request-ID", requestID(r))
+	resp, err := s.client.Do(upReq)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return nil, fmt.Errorf("models status %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, openRouterCoordinatorModelsMaxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) > openRouterCoordinatorModelsMaxBytes {
+		return nil, fmt.Errorf("models response too large")
+	}
+	var doc struct {
+		Data []struct {
+			ID           string                       `json:"id"`
+			Capabilities *openRouterModelCapabilities `json:"capabilities"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &doc); err != nil {
+		return nil, err
+	}
+	out := make(map[string]*openRouterModelCapabilities, len(doc.Data))
+	for _, model := range doc.Data {
+		if model.ID != "" && model.Capabilities != nil {
+			out[model.ID] = model.Capabilities
+		}
+	}
+	return out, nil
 }
 
 func (s *Server) fetchOpenRouterRateCard(r *http.Request) (openRouterRateCard, error) {
@@ -306,7 +367,7 @@ func openRouterModelRow(listing openRouterListingSpec, id string, isFree, ready 
 			Type:                "text",
 			MaxLength:           openRouterIntegerLimit{Value: maxOutput, Unit: "token"},
 			Streaming:           true,
-			SupportedParameters: openRouterSupportedParameters(listing.PoolID, maxOutput, live.ToolChoiceModes...),
+			SupportedParameters: openRouterSupportedParameters(listing.PoolID, maxOutput, live.Capabilities),
 			Pricing:             []openRouterPricingEntry{{Type: "completion", Unit: "token", CostUSD: cost.Completion}},
 			Capacity:            []openRouterCapacityEntry{{Type: "completion", Unit: "token", Per: "minute", Value: capacity.TokensPerMinute}},
 		}},
@@ -367,7 +428,11 @@ func openRouterSlug(listing openRouterListingSpec, isFree bool) string {
 	return listing.OpenRouterSlug + ":free"
 }
 
-func openRouterSupportedParameters(modelID string, maxTokens int, toolChoiceModes ...string) map[string]openRouterParameterDescriptor {
+// openRouterSupportedParameters projects tool and structured-output
+// parameters from the coordinator's capability result (caps), bounded by the
+// SPEC-018/SPEC-019 family predicates: a capability the coordinator masked,
+// or a model it lists no capabilities for, is never advertised.
+func openRouterSupportedParameters(modelID string, maxTokens int, caps *openRouterModelCapabilities) map[string]openRouterParameterDescriptor {
 	params := map[string]openRouterParameterDescriptor{
 		"max_tokens":  openRouterIntegerParameter(1, maxTokens, "token"),
 		"temperature": openRouterRangeParameter(0, 2),
@@ -376,13 +441,16 @@ func openRouterSupportedParameters(modelID string, maxTokens int, toolChoiceMode
 		"stream":      {Type: "boolean"},
 		"seed":        openRouterIntegerParameter(0, 9007199254740991, ""),
 	}
-	if openRouterToolFamilyModel(modelID) {
+	if caps == nil {
+		return params
+	}
+	if caps.Tools && openRouterToolFamilyModel(modelID) {
 		params["tools"] = openRouterParameterDescriptor{Type: "boolean"}
 		values := []string{"auto"}
 		// String modes are projected only from live enforcement capabilities.
 		// Named selection is an object; /v1/status and SPEC-018 document it.
 		for _, mode := range []string{"none", "required"} {
-			for _, supported := range toolChoiceModes {
+			for _, supported := range caps.ToolChoice {
 				if mode == supported {
 					values = append(values, mode)
 					break
@@ -391,7 +459,7 @@ func openRouterSupportedParameters(modelID string, maxTokens int, toolChoiceMode
 		}
 		params["tool_choice"] = openRouterParameterDescriptor{Type: "enum", Values: values}
 	}
-	if openRouterStructuredOutputModel(modelID) {
+	if caps.ResponseFormat && openRouterStructuredOutputModel(modelID) {
 		// response_format is an object on the wire, so it is an OpenRouter
 		// object descriptor: its "type" member is the closed SPEC-019 enum
 		// and the json_schema body is not machine-described ("unknown").

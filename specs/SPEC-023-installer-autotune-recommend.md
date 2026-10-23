@@ -1,6 +1,6 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.22.31
+version: v0.22.32
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-10-02
@@ -8,6 +8,15 @@ lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-
 
 ## Change log
 
+- **v0.22.32 (2026-10-23, Related: #2107)** — §16.11 post-merge re-audit:
+  promotion binds the record to the served model being promoted (the
+  record's `model` must equal the candidate's served model id,
+  case-insensitively, as the coordinator indexes it); whether
+  `reasoning_content`, `reasoning_tokens` and a leading thinking block are
+  required follows the model contract (`advertised_capabilities`), never the
+  `/models` flag; non-stream tool calls need a non-empty unique `id` and
+  `type:"function"`; streamed content is checked for reasoning markup as
+  assembled, not per delta.
 - **v0.22.31 (2026-10-22, Related: #2107)** — §16.11 buyer-UX conformance
   gate: a key is promoted to `recommendable` only with a passing
   `buyer-ux-conformance.json` record for every capability its served model
@@ -4339,9 +4348,9 @@ gateway the way agentic coding clients use it and writes its record to
 | Capability | Checks (all must pass) |
 |---|---|
 | base (always) | `stop_sequences`, `context_limit_error` (readable 4xx with a code), `finish_reason` (`length` at `max_tokens`) |
-| `tools` | `tools_auto`, `stream_tool_deltas` (an id on each call's first delta, indexes 0..n-1, arguments concatenate to JSON, usage chunk), `tool_round_trip` |
+| `tools` | `tools_auto` (each call has a non-empty unique `id` and `type:"function"`), `stream_tool_deltas` (an id on each call's first delta, indexes 0..n-1, arguments concatenate to JSON, no reasoning markup in the assembled content, usage chunk), `tool_round_trip` |
 | `tool_choice` `required` / named | `tools_required` / `tools_named` (`unsupported` when the model does not serve the mode) |
-| `reasoning` | `no_reasoning_leak` (no `<think>` in content; a reasoning model returns `reasoning_content` and `reasoning_tokens`) |
+| `reasoning` | `no_reasoning_leak` (no `<think>` in content; a reasoning model returns `reasoning_content` and `reasoning_tokens`, where "reasoning model" is the model contract's family derivation, not the `/models` flag) |
 | `response_format` | `json_object` |
 | `/v1/messages` | `messages_beta_thinking` (an `anthropic-beta` header and `thinking`; a reasoning model leads with a thinking block) |
 | `/v1/responses` | `responses_function_tool` |
@@ -4350,9 +4359,11 @@ A record's `capabilities` are derived from its checks and nothing else. Two
 rules bind them:
 
 1. **Promotion.** `validate_intake_promote_entry` refuses
-   `promote_recommendable` unless the key's record exists, its base checks
-   pass, and every capability its served model advertises (the coordinator's
-   family derivation) passes. The check is `require_buyer_ux_conformance`.
+   `promote_recommendable` unless the key's record exists, was taken against
+   the key's served model (its `model` equals the candidate row's served
+   model id, compared case-insensitively), its base checks pass, and every
+   capability its served model advertises (the coordinator's family
+   derivation) passes. The check is `require_buyer_ux_conformance`.
 2. **Publication.** The coordinator loads the file from
    `routing.buyer_ux_conformance_path` at start. It removes from
    `/v1/models` every capability a recorded model failed. A model without a

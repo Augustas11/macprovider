@@ -1,7 +1,23 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.63 (2026-10-22, agentic-client compatibility: Messages beta/thinking, Responses custom tools, /v1/models capabilities, mid-stream reason codes; #2107)
+**Version:** 0.9.64 (2026-10-23, grammar-unavailable settlement guard; OpenRouter parameters from the coordinator capability result; #2107)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.6.17, SPEC-003 v0.7, SPEC-004 v0.3.2
+
+**Change log v0.9.64 (2026-10-23, Related: #2107, post-merge re-audit):**
+- §17.9 settlement: a coordinator `503 tool_grammar_provider_unavailable` is
+  settled like `503 no_provider_available`. The gateway refunds it with a
+  zero-token audit row only when the coordinator's no-prior-dispatch marker is
+  present and no earlier gateway attempt of the request dispatched a provider;
+  otherwise it settles through the finality-aware path as
+  `upstream_provider_error`. It is not retried as a no-provider outcome.
+- §5.3.2 `/v1/openrouter/models`: `tools`, `tool_choice` and
+  `response_format`/`structured_outputs` are projected from the coordinator's
+  `/v1/models` capability object for the model (provider eligibility and
+  buyer-UX conformance masking applied), bounded by the SPEC-018 and SPEC-019
+  family predicates. A capability the coordinator withholds is never
+  advertised; a model the coordinator lists without capabilities advertises
+  base parameters only; an unreadable coordinator `/v1/models` fails the
+  document with `503 coordinator_unavailable`.
 
 **Change log v0.9.63 (2026-10-22, #2107 — agentic coding clients):**
 - §5.4a `/v1/messages`: `anthropic-beta` headers and unknown top-level keys are accepted and ignored (never forwarded); a case variant of a known key stays a 400. `thinking` is accepted: `enabled` maps to `reasoning_effort` (`budget_tokens` < 4096 `low`, < 16384 `medium`, else `high`), `disabled` to `low`, `adaptive` to the template default. With thinking enabled, provider `reasoning_content` becomes a leading `thinking` block (streamed as `thinking_delta`, closed with an empty `signature_delta`); without it reasoning is dropped. Assistant-history `thinking`/`redacted_thinking` blocks are accepted and dropped; `cache_control` is accepted on `tool_use`/`tool_result` blocks. `tool_choice: {"type":"any"}` maps to `required`.
@@ -4313,6 +4329,8 @@ The code MUST distinguish:
 ### 17.9 Wholesale partner shed
 
 For every account, a coordinator §7.8 capacity shed (`429 no_provider_available`) MUST pass through as `429` with `retryable: true` and the gateway `Retry-After`. The gateway MUST settle it exactly like a coordinator `503 no_provider_available`: refund with a zero-token audit row when the no-prior-dispatch marker proves no provider ran, settle conservatively otherwise, and retry it under `retry_503.retry_no_provider_available`.
+
+A coordinator `503 tool_grammar_provider_unavailable` (v0.9.64) is the same pre-dispatch shape: the gateway MUST refund it only when the no-prior-dispatch marker is present and no earlier gateway attempt of the request dispatched a provider, and MUST otherwise settle it through the finality-aware path as `upstream_provider_error`. It is passed through unchanged when refunded and is not retried.
 
 For accounts in `auth.wholesale_account_ids` only:
 

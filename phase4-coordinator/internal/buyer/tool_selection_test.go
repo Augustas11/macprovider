@@ -560,3 +560,61 @@ func TestToolSelectionNonStrictDepthAndRequiredEntries(t *testing.T) {
 		t.Fatal("string required entry not enforced")
 	}
 }
+
+// Re-audit r1 (#2107): a released CLI before the ordinary-parameters
+// admission declares schema-holdback-v1 but refuses a non-strict schema with
+// unsupported_tool_schema. Such a request needs the ordinary-parameters
+// capability token on selection, on a pinned route and on queued
+// revalidation; strict-subset requests keep every schema-holdback-v1 provider.
+func TestToolSelectionNonStrictSchemaNeedsOrdinaryParametersProfile(t *testing.T) {
+	nonStrict := strings.Replace(string(toolSelectionBody(`"required"`)), `,"additionalProperties":false`, "", 1)
+	req, status, code, msg := validateChatRequest([]byte(nonStrict))
+	if status != 0 || req.toolSelection == nil || req.toolSelection.strict["lookup"] {
+		t.Fatalf("non-strict request: %d %s %s policy=%+v", status, code, msg, req.toolSelection)
+	}
+	strict := selectionRequest(t, `"required"`)
+	older := selectionProvider()
+	current := selectionProvider()
+	current.ToolSelectionCapabilities[0].SchemaProfiles = []string{toolSchemaProfileOrdinaryParameters}
+	if !providerSupportsToolSelection(older, strict.toolSelection) || !providerSupportsToolSelection(current, strict.toolSelection) {
+		t.Fatal("strict-subset guarantees need no schema profile")
+	}
+	if !providerSupportsToolSelection(current, req.toolSelection) {
+		t.Fatal("a provider declaring ordinary-parameters-v1 must serve a non-strict schema")
+	}
+	unknown := selectionProvider()
+	unknown.ToolSelectionCapabilities[0].SchemaProfiles = []string{"ordinary-parameters-v0"}
+	for name, p := range map[string]pool.Provider{"older": older, "unknown_profile": unknown} {
+		t.Run(name, func(t *testing.T) {
+			if providerSupportsToolSelection(p, req.toolSelection) {
+				t.Fatal("provider without the ordinary-parameters profile is eligible for a non-strict schema")
+			}
+			registry := pool.NewRegistry(nil)
+			registry.Register(&p, nil)
+			s := NewServer(registry, zerolog.Nop(), time.Now().UTC())
+			for _, header := range []string{"", "X-MacProvider-Provider", "X-MacProvider-Session"} {
+				headers := http.Header{}
+				if header != "" {
+					v := p.ProviderID
+					if header == "X-MacProvider-Session" {
+						v = p.AssignedID
+					}
+					headers.Set(header, v)
+				}
+				_, err := s.selectProviderExcluding(context.Background(), "rid", req, headers, nil, "2024-01-01", &forwardState{})
+				if err == nil || err.code != "unsupported_tool_choice" {
+					t.Fatalf("%s route error %+v", header, err)
+				}
+			}
+			waiter, ok := s.slotQueue.enter(p.ProviderID)
+			if !ok {
+				t.Fatal("queue enter failed")
+			}
+			defer s.slotQueue.leave(waiter)
+			state := &forwardState{toolSelection: req.toolSelection}
+			if _, status := s.pollQueuedProvider(waiter, p.ModelID, nil, 100, state); status != queuedProviderTerminal {
+				t.Fatalf("queued revalidation status %v", status)
+			}
+		})
+	}
+}

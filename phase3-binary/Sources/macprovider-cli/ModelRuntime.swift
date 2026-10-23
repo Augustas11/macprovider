@@ -14302,7 +14302,15 @@ struct NativeToolCallStreamEmitter {
         }
         if grammar == .qwen, Self.mayOpenQwenBareCalls(text) {
             // A held bare body is classified by the final parse; `<tool_call>`
-            // inside one of its argument strings is data, not framing.
+            // inside one of its argument strings is data, not framing. Once
+            // the output so far is itself a complete bare-call output (the
+            // final parse would return its calls), a serial turn may stop:
+            // continuing could add prose that voids the whole-output parse.
+            if !completedValidToolCall,
+               ToolCallParser.parseQwenBareCalls(text, allowedFunctionNames: allowedFunctionNames) != nil
+            {
+                completedValidToolCall = true
+            }
             return []
         }
         if let start = text.range(of: startDelimiter) {

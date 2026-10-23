@@ -1,6 +1,6 @@
 # SPEC-018 — Agentic tool calling (provider-side response synthesis)
 
-**Version:** 0.3.2 (2026-10-23, per-call `<tools>` wrappers, duplicate-call drop and per-reply call cap, thinking off for structured output; #2107)
+**Version:** 0.3.3 (2026-10-23, serial stop on a complete bare Qwen call; `ordinary-parameters-v1` schema profile for guaranteed modes; #2107)
 **Depends on:** SPEC-001 v1.6, SPEC-002 v1.5.5, SPEC-006 v0.9, SPEC-008 (Pillar A model-hash trust layer — referenced by §10a), SPEC-011 v0.5 (warm-swap heartbeat `model_hash` — referenced by §10a), SPEC-015 v0.4 (receipts canonical output binding — see AC-17 and §N.5)
 **Status:** **LOCKED** at v0.2.10 by the streaming cleanup-rewrite byte-domain clarification. Previously LOCKED at v0.2.9 by the serial-turn `parallel_tool_calls` amendment (omitted/`false` stop after the first complete valid tool). Previously LOCKED at v0.2.8 by the #1594 OpenRouter-aligned AC-53 amendment (no independent messages[] count cap). Previously LOCKED at v0.2.7 by the Qwen3-Coder function-XML tool-call grammar amendment (documents the `<function=…><parameter=…>` XML body that Qwen3-Coder emits as a Qwen-row §3.1 body-grammar alternative, with OpenAI/MCP name charset; pending IMPL/conformance already landed on branch `fix/qwen3coder-toolcall-parse`); previously LOCKED at v0.2.6 by #784 C2b admission-timeout reconciliation — v0.2.4 spec PR #202 and IMPL PR #209 both landed (multi-turn acceptance, token-incremental streaming, `tool_call_id` validation, 1 MiB/2 MiB byte caps). v0.2.5 adds gpt-oss/OpenAI Harmony response parsing as a pending implementation/conformance gap. codex 4-lane r4 0/0/0; Claude blind-spot r2 0/0/0. SPEC-019 already depends on this as "LOCKED". The former "LOCK CANDIDATE pending PR" line was never flipped after merge. (Resolved gap, 2026-07-14, runbook item 15: AC-45's `X-MacProvider-Streaming-Mode` header — set by the coordinator on streaming `200` responses — was stripped by the public gateway's blanket `X-MacProvider-*` filter, making the "header absent" fail condition live on `api.malibu.tech`. Fixed by adding the header to the SPEC-006 v0.9.9 § 5.4 response-pass-through allowlist and un-stripping it at the gateway, validated against AC-45's closed enum. Chosen over scoping AC-45 to the coordinator surface because buyers hit the gateway, so scoping would have left AC-45's buyer-visible promise unmet. AC-45's normative text is unchanged; this is a documentation reconciliation, not a lock amendment. Residual: the coordinator currently emits the diagnostic only on the streaming success path — non-streaming AC-45 emission is a separate coordinator-side completeness item, out of scope for the gateway-strip fix.)
 
@@ -18,6 +18,20 @@ SPEC-018 is the **provider-side response synthesis contract** for OpenAI-wire to
 
 ## Change log
 
+- **v0.3.3 (2026-10-23, Related: #2107, post-merge re-audit):** Under
+  Amendment 9. §2.2 serial turn: a Qwen output that is a complete bare-call
+  output (§3.1 bare bodies, wrapped or not, that the final parse accepts as
+  calls) completes the first valid call, so an explicit
+  `parallel_tool_calls:false` turn stops there like a tagged call. An
+  unfinished body, an unclosed `<tools>` wrapper, an undeclared name or prose
+  never completes it. §3.11: a provider that accepts ordinary parameters
+  objects for `required`/named declares `schema_profiles:
+  ["ordinary-parameters-v1"]` on its `schema-holdback-v1` capability entry.
+  A request whose declared schemas include one outside the strict subset is
+  routed only to such a provider (selection, pinned routes, route snapshots
+  and queued revalidation); strict-subset and `auto` requests are unchanged.
+  A provider without the token keeps connecting and serving everything else;
+  this gates one request feature, not admission.
 - **v0.3.2 (2026-10-23, Related: #2107):** §3.1 Qwen row, under Amendment 9:
   the bare `{"name","arguments"}` bodies may sit inside one `<tools>`…`</tools>`
   wrapper or in a sequence of wrappers, one or more bodies each (Qwen2.5-Coder
@@ -397,6 +411,12 @@ When the underlying model output contains N recognized tool calls, the provider 
 
 **AMENDED v0.2.9:** The N-call preservation rule applies when `parallel_tool_calls` is `true`. When the field is omitted or `false`, the turn is serial: after the first complete valid declared tool (complete JSON object or closed function-XML, within byte/depth caps), the provider MUST stop generation, emit `finish_reason:"tool_calls"` and the transport terminal marker, drop leftover markup, and MUST NOT synthesize further `tool_calls[]` from later text in that turn. A non-boolean `parallel_tool_calls` is HTTP 400 `invalid_request`. Incomplete or undeclared markup MUST NOT trigger serial stop.
 
+**AMENDED v0.3.3:** a Qwen §3.1 bare-call output is a complete valid call
+for the serial stop once the output so far is itself a complete bare-call
+output that the final parse accepts (every body closed, declared names, every
+`<tools>` wrapper closed). The stop leaves the held text unchanged; the final
+parse returns its first call.
+
 **AMENDED v0.2.12:** §3.11 guaranteed `required`/named turns withhold and validate the complete generation instead of stopping at the first parsed call. Their serial policy requires exactly one call in the complete output. Ordinary `auto` retains the v0.2.9 behavior above.
 
 Source: `phase3-binary/Sources/macprovider-cli/ToolCallParser.swift:29-50`; locked by `phase3-binary/Tests/macprovider-cliTests/ToolCallParserTests.swift:21-30`; serial stop `phase3-binary/Sources/macprovider-cli/ModelRuntime.swift` and `phase3-binary/Sources/MacProviderCore/ChatCompletionRequest.swift`. Registers `SPEC-018-R004`.
@@ -707,6 +727,18 @@ validated for an arguments object holding every root `required` property, and
 its function-XML values are typed by a declared single `type` when present,
 else read as JSON when they parse and as text otherwise. The v0.2.12 text
 below described the only admitted shape.
+
+**AMENDED v0.3.3:** a provider that admits these ordinary parameters objects
+declares it with `schema_profiles: ["ordinary-parameters-v1"]` on its
+`schema-holdback-v1` capability entry (SPEC-001-R007). Providers released
+before v0.3.1 declare `schema-holdback-v1` without it and refuse such a schema
+with `unsupported_tool_schema`. The coordinator and every route check
+(selection, pinned provider or session, route snapshot, queued revalidation)
+MUST treat a request with any declared schema outside the strict subset as
+unsupported by a provider whose matching entry lacks the token, and fail it
+with HTTP 400 `unsupported_tool_choice` when no provider qualifies. A
+strict-subset request needs no profile. An unknown profile string grants
+nothing.
 
 For `required`/named, every tool's parameters MUST be a schema in the existing
 SPEC-019 strict validator subset: a typed root object; typed schema nodes

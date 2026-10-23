@@ -109,6 +109,23 @@ class BuyerUXConformanceTests(unittest.TestCase):
         self.assertFalse(result["capabilities"]["tools"])
         self.assertEqual(result["capabilities"]["tool_choice"], [])
 
+    def test_non_stream_tool_calls_need_unique_ids_and_function_type(self):
+        """Re-audit r1: a call a client cannot answer by id fails tools_auto."""
+        second = dict(CALL, function={"name": "read_file", "arguments": "{\"path\":\"/etc/passwd\"}"})
+        for calls, detail in (
+            ([{k: v for k, v in CALL.items() if k != "id"}], "without an id"),
+            ([dict(CALL, id="")], "without an id"),
+            ([CALL, second], "duplicate tool call ids"),
+            ([dict(CALL, type="tool")], "type"),
+            ([{k: v for k, v in CALL.items() if k != "type"}], "type"),
+        ):
+            result = self.run_with(tool_auto=chat({"content": None, "tool_calls": calls}, "tool_calls"))
+            self.assertEqual(result["checks"]["tools_auto"]["status"], bux.FAIL, calls)
+            self.assertIn(detail, result["checks"]["tools_auto"]["detail"])
+            self.assertFalse(result["capabilities"]["tools"])
+        two = chat({"content": None, "tool_calls": [CALL, dict(second, id="call_fedcba9876543210")]}, "tool_calls")
+        self.assertEqual(self.run_with(tool_auto=two)["checks"]["tools_auto"]["status"], bux.PASS)
+
     def test_reasoning_leak_and_missing_reasoning_fail(self):
         leak = chat({"content": "2+2 is 4.</think>4"}, "stop")
         self.assertEqual(self.run_with(plain=leak)["checks"]["no_reasoning_leak"]["status"], bux.FAIL)
@@ -116,6 +133,23 @@ class BuyerUXConformanceTests(unittest.TestCase):
         result = self.run_with(plain=unsplit)
         self.assertEqual(result["checks"]["no_reasoning_leak"]["status"], bux.FAIL)
         self.assertFalse(result["capabilities"]["reasoning"])
+
+    def test_reasoning_requirement_comes_from_the_model_contract_not_models(self):
+        """Re-audit r1: a masked or absent /models reasoning flag does not waive
+        reasoning_content and reasoning_tokens for a GLM-5 model."""
+        no_reasoning_fields = chat({"content": "4"}, "stop")
+        no_thinking_block = ok({"type": "message", "role": "assistant", "content": [{"type": "text", "text": "4"}]})
+        for caps in ({"tools": True, "tool_choice": ["auto", "none"], "reasoning": False}, {"tools": True, "tool_choice": ["auto", "none"]}):
+            models = ok({"data": [{"id": MODEL, "max_context_tokens": 65536, "capabilities": caps}]})
+            result = self.run_with(models=models, plain=no_reasoning_fields, messages=no_thinking_block)
+            self.assertEqual(result["checks"]["no_reasoning_leak"]["status"], bux.FAIL, caps)
+            self.assertEqual(result["checks"]["messages_beta_thinking"]["status"], bux.FAIL, caps)
+            self.assertFalse(result["capabilities"]["reasoning"])
+        # A model outside the reasoning families needs only clean content.
+        qwen = "mlx-community/Qwen3-8B-4bit"
+        models = ok({"data": [{"id": qwen, "max_context_tokens": 32768, "capabilities": {"reasoning": True}}]})
+        result = bux.run_checks(transport(dict(GOOD, models=models, plain=no_reasoning_fields)), qwen)
+        self.assertEqual(result["checks"]["no_reasoning_leak"]["status"], bux.PASS)
 
     def test_stream_index_and_error_failures(self):
         all_zero = sse(
@@ -130,6 +164,15 @@ class BuyerUXConformanceTests(unittest.TestCase):
                       {"error": {"code": "upstream_provider_error", "message": "Upstream provider error"}})
         result = self.run_with(stream=errored)
         self.assertIn("upstream_provider_error", result["checks"]["stream_tool_deltas"]["detail"])
+        self.assertFalse(result["capabilities"]["tools"])
+
+    def test_reasoning_markup_split_across_stream_deltas_fails(self):
+        """Re-audit r1: a delimiter spanning deltas is caught in the assembled content."""
+        events = list(GOOD["stream"].sse())
+        split = [{"choices": [{"index": 0, "delta": {"content": part}, "finish_reason": None}]} for part in ("Two files.</th", "ink>")]
+        result = self.run_with(stream=sse(*(events[:1] + split + events[1:])))
+        self.assertEqual(result["checks"]["stream_tool_deltas"]["status"], bux.FAIL)
+        self.assertIn("reasoning markup", result["checks"]["stream_tool_deltas"]["detail"])
         self.assertFalse(result["capabilities"]["tools"])
 
     def test_json_mode_stop_messages_responses_and_finish_failures(self):
@@ -154,12 +197,18 @@ class BuyerUXConformanceTests(unittest.TestCase):
             path.write_text(json.dumps({"schema_version": bux.SCHEMA, "records": {"zai-org/glm-5.3-flash": record}}))
             advertised = bux.advertised_capabilities(MODEL)
             self.assertEqual(advertised["tool_choice"], ["auto", "none"])
-            bux.require_promotable("zai-org/glm-5.3-flash", advertised, path)
+            bux.require_promotable("zai-org/glm-5.3-flash", MODEL, advertised, path)
+            # The coordinator indexes records case-insensitively by model id.
+            bux.require_promotable("zai-org/glm-5.3-flash", MODEL.lower(), advertised, path)
             with self.assertRaisesRegex(bux.ConformanceError, "no record"):
-                bux.require_promotable("other", advertised, path)
+                bux.require_promotable("other", MODEL, advertised, path)
+            # Re-audit r1: a passing record for another served model never
+            # qualifies the key's current model.
+            with self.assertRaisesRegex(bux.ConformanceError, "not the served model"):
+                bux.require_promotable("zai-org/glm-5.3-flash", "zai-org/GLM-5.3-Flash-other", advertised, path)
             # Advertising a mode the record did not pass is refused.
             with self.assertRaisesRegex(bux.ConformanceError, "tool_choice"):
-                bux.require_promotable("zai-org/glm-5.3-flash", dict(advertised, tool_choice=["auto", "none", "required"]), path)
+                bux.require_promotable("zai-org/glm-5.3-flash", MODEL, dict(advertised, tool_choice=["auto", "none", "required"]), path)
             # A record whose capabilities do not follow its checks is invalid.
             record["capabilities"]["tools"] = False
             path.write_text(json.dumps({"schema_version": bux.SCHEMA, "records": {"k": record}}))

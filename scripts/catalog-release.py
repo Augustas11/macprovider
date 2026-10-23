@@ -5169,7 +5169,7 @@ def require_buyer_ux_conformance(key: str, row: dict, label: str) -> None:
     module = BUYER_UX
     model_id = row.get("served_model_id") or row.get("model_id") or key
     try:
-        module.require_promotable(key, module.advertised_capabilities(model_id), BUYER_UX_CONFORMANCE_PATH)
+        module.require_promotable(key, model_id, module.advertised_capabilities(model_id), BUYER_UX_CONFORMANCE_PATH)
     except module.ConformanceError as err:
         fail(f"{label}: {err}")
 

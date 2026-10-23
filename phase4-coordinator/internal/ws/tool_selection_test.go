@@ -35,3 +35,29 @@ func TestToolSelectionCapabilityWire(t *testing.T) {
 		t.Fatal("poolz lost capabilities")
 	}
 }
+
+// Re-audit r1 (#2107): the schema_profiles capability token survives hello,
+// v2 auth and heartbeat parsing; an entry without it parses as before.
+func TestToolSelectionCapabilitySchemaProfilesWire(t *testing.T) {
+	entry := map[string]any{"model_id": "mlx-community/Qwen3.6-35B-A3B-4bit", "runtime": "mlx_cache", "modes": []string{"auto", "required"}, "validation": "schema-holdback-v1", "schema_profiles": []string{"ordinary-parameters-v1"}}
+	auth := validAuthRequestInitial()
+	auth["tool_selection_capabilities"] = []any{entry}
+	req, _, field, err := ParseAuthRequest(mustAuthJSON(t, auth))
+	if err != nil {
+		t.Fatalf("auth %s %v", field, err)
+	}
+	if got := req.Hello().ToolSelectionCapabilities; len(got) != 1 || len(got[0].SchemaProfiles) != 1 || got[0].SchemaProfiles[0] != "ordinary-parameters-v1" {
+		t.Fatalf("auth schema profiles lost: %+v", got)
+	}
+	heartbeat := map[string]any{"type": "heartbeat", "status": "ready", "model_id": entry["model_id"], "model_params_b": 35.0, "ram_gb": 128, "max_context_tokens": 50000, "max_concurrency": 1, "slots_free": 1, "slots_total": 1, "throughput_tps_estimate": 1.0, "requests_served_since_last": 0, "avg_latency_ms_since_last": 0.0, "throughput_tps_since_last": 0.0, "tool_selection_capabilities": []any{entry}}
+	hb, _, field, err := ParseHeartbeat(mustAuthJSON(t, heartbeat))
+	if err != nil || len(hb.ToolSelectionCapabilities) != 1 || len(hb.ToolSelectionCapabilities[0].SchemaProfiles) != 1 {
+		t.Fatalf("heartbeat %s %v %+v", field, err, hb)
+	}
+	delete(entry, "schema_profiles")
+	heartbeat["tool_selection_capabilities"] = []any{entry}
+	hb, _, field, err = ParseHeartbeat(mustAuthJSON(t, heartbeat))
+	if err != nil || len(hb.ToolSelectionCapabilities) != 1 || hb.ToolSelectionCapabilities[0].SchemaProfiles != nil {
+		t.Fatalf("legacy entry %s %v %+v", field, err, hb)
+	}
+}
