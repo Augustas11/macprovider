@@ -9020,6 +9020,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                 let start = promptTokenIds.count - iteratorInput.text.tokens.size
                                 let resumeAt = try Self.cancellableLocalPrefill(
                                     tokenCount: promptTokenIds.count, from: start, stepSize: prefillStepSize,
+                                    referenceStepSize: generationContext.model is DeepseekV4Model ? DeepseekV4Model.prefillStepSize : nil,
                                     isCancelled: { Task.isCancelled || shouldCancel() || drainCancelled.isFired }
                                 ) { range in
                                     let chunk = LMInput.Text(tokens: MLXArray(Array(promptTokenIds[range])))
@@ -9873,6 +9874,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         let start = promptTokenIds.count - iteratorInput.text.tokens.size
                         let resumeAt = try Self.cancellableLocalPrefill(
                             tokenCount: promptTokenIds.count, from: start, stepSize: prefillStepSize,
+                            referenceStepSize: generationContext.model is DeepseekV4Model ? DeepseekV4Model.prefillStepSize : nil,
                             isCancelled: { Task.isCancelled || shouldCancel() || drainCancelled.isFired }
                         ) { range in
                             let chunk = LMInput.Text(tokens: MLXArray(Array(promptTokenIds[range])))
@@ -12578,20 +12580,27 @@ maxTokens: maxTokens,
     /// SPEC-001-R011: prefills `[start, tokenCount)` in `stepSize` chunks,
     /// checking `isCancelled` before each chunk, and leaves the final
     /// (at most `stepSize`) tokens for the TokenIterator, exactly as its own
-    /// prefill would. Returns the index the iterator continues from.
+    /// prefill would. With a model reference step, leave only the final token
+    /// and use that fixed step instead of the configured chunk size. Returns
+    /// the index the iterator continues from.
     static func cancellableLocalPrefill(
         tokenCount: Int,
         from start: Int,
         stepSize: Int,
+        referenceStepSize: Int? = nil,
         isCancelled: () -> Bool,
         prefill: (Range<Int>) throws -> Void
     ) throws -> Int {
-        let step = max(1, stepSize)
+        let step = max(1, referenceStepSize ?? stepSize)
+        // DeepSeek-V4's ratio-4 pools depend on forward-call boundaries. Match
+        // its prepare/oracle plan even when local preemption prefills first.
+        let remainder = referenceStepSize == nil ? step : 1
         var cursor = max(0, start)
-        while tokenCount - cursor > step {
+        while tokenCount - cursor > remainder {
             if isCancelled() { throw CancellationError() }
-            try prefill(cursor ..< cursor + step)
-            cursor += step
+            let count = min(step, tokenCount - cursor - 1)
+            try prefill(cursor ..< cursor + count)
+            cursor += count
         }
         if isCancelled() { throw CancellationError() }
         return cursor
