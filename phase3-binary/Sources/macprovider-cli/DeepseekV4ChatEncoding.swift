@@ -807,6 +807,7 @@ private struct OrderedJSONParser {
                        scalars[index] == "\\", scalars[index + 1] == "u" {
                         index += 2
                         let low = try hex4()
+                        guard (0xDC00 ..< 0xE000).contains(low) else { throw error("bad low surrogate") }
                         code = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00)
                     }
                     guard let scalar = Unicode.Scalar(code) else { throw error("bad code point") }
