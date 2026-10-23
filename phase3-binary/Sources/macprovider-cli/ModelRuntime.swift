@@ -13460,22 +13460,26 @@ maxTokens: maxTokens,
     /// Set once at serve startup from `log_level` (debug or trace).
     nonisolated(unsafe) static var logsStructuredFailurePreview = false
     static let structuredFailurePreviewCharacters = 80
+    private static let structuredFailureDigestKey = SymmetricKey(size: .bits256)
 
     /// One log line for a JSON-mode output that failed validation, so the
     /// failure is diagnosable without the dropped bytes. SPEC-001 NFR-7: the
     /// default line carries no response content, only its size, digest and
     /// shape (fence, think tags, bytes before the first JSON value, whether
-    /// that value parses, bytes after it). A bounded, escaped head/tail
-    /// preview is added only at debug level.
+    /// that value parses, bytes after it). The digest is keyed per process, so
+    /// it matches repeats of one output but cannot be checked against guessed
+    /// short outputs offline. A bounded, escaped head/tail preview is added
+    /// only at debug level.
     static func structuredFailureDiagnostic(_ content: String, model: String, preview: Bool) -> String {
-        let digest = SHA256.hash(data: Data(content.utf8)).map { String(format: "%02x", $0) }.joined()
+        let digest = HMAC<SHA256>.authenticationCode(for: Data(content.utf8), using: structuredFailureDigestKey)
+            .prefix(16).map { String(format: "%02x", $0) }.joined()
         let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
         let valueStart = trimmed.firstIndex(where: { $0 == "{" || $0 == "[" })
         var fields = [
             "warning: structured_output_malformed",
             "model=\"\(escapedLogPreview(model.prefix(128)))\"",
             "bytes=\(content.utf8.count)",
-            "sha256=\(digest)",
+            "digest=\(digest)",
             "fence=\(trimmed.hasPrefix("```"))",
             "think=\(content.contains(ReasoningOutput.openTag) || content.contains(ReasoningOutput.closeTag))",
             "leading_bytes=\(valueStart.map { trimmed[..<$0].utf8.count } ?? trimmed.utf8.count)",

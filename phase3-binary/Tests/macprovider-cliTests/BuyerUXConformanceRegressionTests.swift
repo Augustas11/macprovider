@@ -189,6 +189,8 @@ final class BuyerUXConformanceRegressionTests: XCTestCase {
         for field in ["bytes=\(fenced.utf8.count)", "fence=true", "think=false", "leading_bytes=8", "first_object_parses=true", "trailing_bytes=4"] {
             XCTAssertTrue(line.contains(field), "\(field) in \(line)")
         }
+        XCTAssertNotNil(line.range(of: #"digest=[0-9a-f]{32}( |$)"#, options: .regularExpression), line)
+        XCTAssertEqual(line, ModelRuntime.structuredFailureDiagnostic(fenced, model: "z-ai/glm-4.5-air", preview: false), "repeats correlate")
         let think = ModelRuntime.structuredFailureDiagnostic("<think>x</think>\n{\"color\": \"blue\"}", model: "m", preview: false)
         XCTAssertTrue(think.contains("think=true"), think)
         XCTAssertTrue(ModelRuntime.structuredFailureDiagnostic("", model: "m", preview: false).contains("bytes=0"))
