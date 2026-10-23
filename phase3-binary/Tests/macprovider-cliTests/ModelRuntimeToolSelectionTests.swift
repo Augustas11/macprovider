@@ -215,6 +215,9 @@ final class ModelRuntimeToolSelectionTests: XCTestCase {
         XCTAssertEqual(supported.first?["model_id"] as? String, canonical)
         XCTAssertEqual(supported.first?["runtime"] as? String, "mlx_cache")
         XCTAssertEqual(supported.first?["modes"] as? [String], ["auto", "none", "required", "named"])
+        // Re-audit r1: the token that lets the coordinator route a non-strict
+        // parameters schema here (older CLIs refuse it).
+        XCTAssertEqual(supported.first?["schema_profiles"] as? [String], ["ordinary-parameters-v1"])
         // A claim keyed by another id never inherits the allowlisted identity.
         XCTAssertEqual(CoordinatorClient.toolSelectionCapabilities(wireModelID: "catalog-alias", runtimeWireModelID: canonical, runtimeSource: nil).first?["modes"] as? [String], ["auto", "none"])
         // Swap in flight: the advertised id is not the runtime's current one.

@@ -7394,8 +7394,14 @@ actor CoordinatorClient {
                 modelID: runtimeWireModelID == wireModelID ? wireModelID : nil, runtime: runtime
             ),
             "validation": "schema-holdback-v1",
+            // SPEC-018 §3.11 v0.3.3: guaranteed modes accept ordinary OpenAI
+            // parameters objects, not only the strict subset. The coordinator
+            // routes a non-strict schema only to a provider declaring this.
+            "schema_profiles": [Self.ordinaryParametersSchemaProfile],
         ]]
     }
+
+    static let ordinaryParametersSchemaProfile = "ordinary-parameters-v1"
 
     /// Implementation identity only. The coordinator separately requires a
     /// qualification for the exact provider/configuration before image routing.

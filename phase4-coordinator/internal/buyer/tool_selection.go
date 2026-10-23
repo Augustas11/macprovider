@@ -8,6 +8,7 @@ import (
 	"math"
 	"net/http"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -34,10 +35,27 @@ func unsupportedToolChoiceRouteError() *routeError {
 	return &routeError{status: http.StatusBadRequest, code: "unsupported_tool_choice", message: "No compatible provider supports the requested tool selection"}
 }
 
+// toolSchemaProfileOrdinaryParameters is the capability token a provider
+// declares when it accepts ordinary OpenAI parameters objects (outside the
+// strict subset) for guaranteed modes (SPEC-018 §3.11 v0.3.3). A provider
+// without it still serves auto and strict-subset guarantees; only a request
+// with a non-strict schema needs it.
+const toolSchemaProfileOrdinaryParameters = "ordinary-parameters-v1"
+
+func (p *toolSelectionPolicy) needsOrdinaryParameters() bool {
+	for _, strict := range p.strict {
+		if !strict {
+			return true
+		}
+	}
+	return false
+}
+
 func providerSupportsToolSelection(p pool.Provider, policy *toolSelectionPolicy) bool {
 	if policy == nil {
 		return true
 	}
+	ordinary := policy.needsOrdinaryParameters()
 	// SPEC-018 §3.11: guaranteed selection follows the native provider's
 	// declared capability for its exact loaded model; the coordinator still
 	// validates every guaranteed output (schema holdback). Legacy and external
@@ -47,6 +65,9 @@ func providerSupportsToolSelection(p pool.Provider, policy *toolSelectionPolicy)
 	}
 	for _, cap := range p.ToolSelectionCapabilities {
 		if cap.ModelID != p.ModelID || cap.Runtime != engineClassNative || cap.Validation != "schema-holdback-v1" {
+			continue
+		}
+		if ordinary && !slices.Contains(cap.SchemaProfiles, toolSchemaProfileOrdinaryParameters) {
 			continue
 		}
 		for _, mode := range cap.Modes {
