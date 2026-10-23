@@ -17,7 +17,8 @@ let package = Package(
         )
     ],
     dependencies: [
-        // Fork tag 3.32.3-macprovider.10.1 (branch glm53/tuple-0324, on 3.32.3-macprovider.10):
+        // Fork tag 3.32.3-macprovider.10.3 (branch dsv4/2111-port), which is tag
+        // 3.32.3-macprovider.10.1 (branch glm53/tuple-0324, on 3.32.3-macprovider.10):
         // upstream mlx-swift-lm 3.32.3 plus the 3.32.3-macprovider.9 stack (the
         // packed MTP verification, fused A3B MoE, GDN checkpoint and compiled
         // MTP verification step commits upstream does not carry, and upstream
@@ -30,9 +31,8 @@ let package = Package(
         // erases a freed compiled function from every thread's compile cache
         // so a model reload cannot replay a dead trace, and keeps internal
         // casts and broadcasts on the caller's stream so one decode step runs
-        // on one Metal queue. Campaign #2111 adds the deepseek_v4 text model and
-        // its reference prefill plan on branch dsv4/2111-port, two commits on
-        // that tag's revision 87dc5159.
+        // on one Metal queue. 10.3 adds campaign #2111's deepseek_v4 text model
+        // and its reference prefill plan, two commits on 10.1's revision 87dc5159.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
             revision: "baec172471889593f60c70060eefcb624772fee5"
