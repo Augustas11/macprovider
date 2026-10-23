@@ -873,6 +873,28 @@ done
 unset VISION_QUALIFICATION_FILE
 rm -f "$tmp/svc/restarts" "$tmp/pearl/coordinator.yaml" "$tmp/pearl/overlay.yaml" "$tmp/pearl/overlay.before"
 
+# ==== cli-release: the cut waits for catalog activation =======================
+# The candidate bakes origin/main's catalog release; with Pearl serving another
+# (1.8.262 canary: rate_card_update_required), candidate_cut is blocked and
+# points at catalog-activate.sh. Once Pearl serves it, the cut is offered.
+health v9.0.0 $LIVE
+fixture '{"latest_stable": "v'"$LIVE"'", "runs": {"acceptance-candidate.yml": []}}'
+COMMITTED_RID="$(git -C "$W" show "$B:phase3-binary/catalog/autotune/release.json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["release_id"])')"
+printf '{"release_id":"older-live-release","status":"live_verified","feeds":{}}' > "$tmp/svc/autotune-release.json"
+MACPROVIDER_OPS_STATE_DIR="$tmp/state-catalog-cut" run_rc 0 "cli status with the committed catalog not live" scripts/ops/cli-release.sh status
+expect_next candidate_cut:blocked
+case "$(next_field command):$(next_field reason)" in
+  "scripts/ops/catalog-activate.sh status:"*"$COMMITTED_RID is not live on Pearl (serves older-live-release)"*) ok ;;
+  *) bad "catalog-gated cut: command/reason $(next_field command) / $(next_field reason)" ;;
+esac
+rm -f "$tmp/svc/autotune-release.json"
+MACPROVIDER_OPS_STATE_DIR="$tmp/state-catalog-cut" run_rc 0 "cli status with Pearl's catalog unreadable" scripts/ops/cli-release.sh status
+expect_next candidate_cut:blocked
+printf '{"release_id":"%s","status":"live_verified","feeds":{}}' "$COMMITTED_RID" > "$tmp/svc/autotune-release.json"
+MACPROVIDER_OPS_STATE_DIR="$tmp/state-catalog-cut" run_rc 0 "cli status with the committed catalog live" scripts/ops/cli-release.sh status
+expect_next candidate_cut:mutate
+rm -rf "$tmp/svc/autotune-release.json" "$tmp/state-catalog-cut"
+
 # ==== cli-release (structured evidence) =======================================
 health v9.0.0 $LIVE
 J='"path": ".github/workflows/promote-signed-native-mtp-release-journey.yml"'
