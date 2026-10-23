@@ -149,6 +149,15 @@ class BuyerUXConformanceTests(unittest.TestCase):
         self.assertIn("upstream_provider_error", result["checks"]["stream_tool_deltas"]["detail"])
         self.assertFalse(result["capabilities"]["tools"])
 
+    def test_reasoning_markup_split_across_stream_deltas_fails(self):
+        """Re-audit r1: a delimiter spanning deltas is caught in the assembled content."""
+        events = list(GOOD["stream"].sse())
+        split = [{"choices": [{"index": 0, "delta": {"content": part}, "finish_reason": None}]} for part in ("Two files.</th", "ink>")]
+        result = self.run_with(stream=sse(*(events[:1] + split + events[1:])))
+        self.assertEqual(result["checks"]["stream_tool_deltas"]["status"], bux.FAIL)
+        self.assertIn("reasoning markup", result["checks"]["stream_tool_deltas"]["detail"])
+        self.assertFalse(result["capabilities"]["tools"])
+
     def test_json_mode_stop_messages_responses_and_finish_failures(self):
         bad_json = bux.Response(502, json.dumps({"error": {"code": "malformed_json_response", "message": "x"}}).encode())
         self.assertFalse(self.run_with(json=bad_json)["capabilities"]["response_format"])

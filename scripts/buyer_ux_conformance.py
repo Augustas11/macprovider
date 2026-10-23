@@ -155,6 +155,8 @@ def check_stream_tool_deltas(transport: Transport, model: str) -> tuple[str, str
     calls: dict[int, dict] = {}
     finish = None
     usage = False
+    # Markup split across deltas is only visible in the assembled content.
+    content = ""
     for event in resp.sse():
         if "error" in event:
             return FAIL, f"stream error {event['error'].get('code')!r}"
@@ -162,7 +164,8 @@ def check_stream_tool_deltas(transport: Transport, model: str) -> tuple[str, str
         for choice in event.get("choices") or []:
             finish = choice.get("finish_reason") or finish
             delta = choice.get("delta") or {}
-            if _leaks_reasoning(delta.get("content") or ""):
+            content += delta.get("content") or ""
+            if _leaks_reasoning(content):
                 return FAIL, "reasoning markup in streamed content"
             for tc in delta.get("tool_calls") or []:
                 index = tc.get("index")
