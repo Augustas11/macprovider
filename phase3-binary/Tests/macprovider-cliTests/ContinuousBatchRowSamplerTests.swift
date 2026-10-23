@@ -58,6 +58,19 @@ final class ContinuousBatchRowSamplerTests: XCTestCase {
         XCTAssertEqual(tokens, [1, 2])
     }
 
+    func testUnconstrainedSamplingPreservesLogitsAndLogProbabilities() throws {
+        try requireMetal()
+        let values: [Float] = [0.25, -1, 3, 0.75, 2, -0.5]
+        let logits = MLXArray(values).reshaped([2, 3])
+        let before = log(softmax(logits, axis: -1)).asArray(Float.self)
+        _ = ContinuousBatchRowSampler.sample(
+            logits: logits,
+            rows: [row(0), row(0.7, 0.9, seed: 42, step: 3)]
+        ).asArray(Int.self)
+        XCTAssertEqual(logits.asArray(Float.self), values)
+        XCTAssertEqual(log(softmax(logits, axis: -1)).asArray(Float.self), before)
+    }
+
     /// A sampled row draws exactly what the serial path's own sampler draws for
     /// the same parameters and seed: same algorithm, row-local randomness.
     func testSampledRowEqualsSerialSamplerWithTheSameSeed() throws {

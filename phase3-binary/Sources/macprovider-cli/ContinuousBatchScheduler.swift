@@ -535,6 +535,8 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
     /// that sit on this prompt's checkpoint positions carry forward into the
     /// row's own checkpoints. Empty for every non-hybrid request.
     let retainedRecurrentCheckpoints: [RecurrentStateCheckpoint]
+    /// Runtime-only token grammar; excluded from the wire fingerprint.
+    let grammarConstraint: GrammarConstraintState?
     /// Runtime-only row observer. It is deliberately excluded from the
     /// idempotency fingerprint: duplicate waiters reuse the canonical row's
     /// observer and receive its boundary in the retained result.
@@ -595,6 +597,7 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
         recurrentCheckpointPositions: [Int] = [],
         modelHasRecurrentLayers: Bool = false,
         retainedRecurrentCheckpoints: [RecurrentStateCheckpoint] = [],
+        grammarConstraint: GrammarConstraintState? = nil,
         serialToolStopObserver: ContinuousBatchCanonicalStopObserver? = nil,
         decodePath: DecodePath = .ordinary,
         nativeMTPMaximumProposalDepth: Int = 0,
@@ -624,13 +627,14 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
         self.recurrentCheckpointPositions = recurrentCheckpointPositions
         self.modelHasRecurrentLayers = modelHasRecurrentLayers
         self.retainedRecurrentCheckpoints = retainedRecurrentCheckpoints
+        self.grammarConstraint = grammarConstraint
         self.serialToolStopObserver = serialToolStopObserver
-        self.decodePath = decodePath
+        self.decodePath = grammarConstraint == nil ? decodePath : .ordinary
         self.nativeMTPMaximumProposalDepth = max(0, nativeMTPMaximumProposalDepth)
         self.nativeMTPCompleteWindowBytesByDepth = nativeMTPCompleteWindowBytesByDepth
         self.nativeMTPMaximumActiveRows = max(1, nativeMTPMaximumActiveRows)
-        self.nativeMTPTupleFence = decodePath == .nativeMTP ? nativeMTPTupleFence : nil
-        self.nativeMTPIntegrityProbe = decodePath == .nativeMTP && nativeMTPIntegrityProbe
+        self.nativeMTPTupleFence = self.decodePath == .nativeMTP ? nativeMTPTupleFence : nil
+        self.nativeMTPIntegrityProbe = self.decodePath == .nativeMTP && nativeMTPIntegrityProbe
         self.nativeMTPProposalTokens = nativeMTPProposalTokens
         self.nativeMTPAdaptationDirective = nativeMTPAdaptationDirective
         self.selfCheckProbe = selfCheckProbe
@@ -992,6 +996,7 @@ struct ContinuousBatchPrefillInput: Sendable, Equatable {
     let temperature: Double
     let topP: Double
     let samplerStep: Int
+    let grammarConstraint: GrammarConstraintState?
     /// Native MTP drafters such as Qwen require target hidden states for the
     /// complete prompt. Every prefill chunk of a native row sets this flag so
     /// the backend advances the row's drafter over the chunk's own hidden
@@ -1016,6 +1021,7 @@ struct ContinuousBatchPrefillInput: Sendable, Equatable {
         temperature: Double = 0,
         topP: Double = 1,
         samplerStep: Int = 0,
+        grammarConstraint: GrammarConstraintState? = nil,
         nativeMTPPromptPrefill: Bool = false,
         nativeMTPNextPromptToken: Int? = nil
     ) {
@@ -1031,6 +1037,7 @@ struct ContinuousBatchPrefillInput: Sendable, Equatable {
         self.temperature = temperature
         self.topP = topP
         self.samplerStep = samplerStep
+        self.grammarConstraint = grammarConstraint
         self.nativeMTPPromptPrefill = nativeMTPPromptPrefill
         self.nativeMTPNextPromptToken = nativeMTPNextPromptToken
     }
@@ -1071,6 +1078,8 @@ struct ContinuousBatchDecodeInput: Sendable, Equatable {
     /// parameters, and the row logits; hidden cross-row sampler state is
     /// forbidden.
     let samplerStep: Int
+    /// Request-owned grammar, advanced by the row sampler after token selection.
+    var grammarConstraint: GrammarConstraintState? = nil
     /// A native-MTP row riding the ordinary forward at load-gate depth zero.
     /// The backend keeps each sampled token and the target hidden state that
     /// produced it, and advances the row's drafter over them before the
@@ -3302,6 +3311,8 @@ actor ContinuousBatchScheduler {
     /// at the next hop). Otherwise the compiled lockstep window, capped by the
     /// shortest remaining `maxOutputTokens` in the batch.
     private func lockstepDecodeWindowSteps(for rows: [Row]) -> Int {
+        // Grammar state advances per committed token, never beyond a stop boundary.
+        guard !rows.contains(where: { $0.request.grammarConstraint != nil }) else { return 1 }
         let joinPending = !waiting.isEmpty
             || pendingBindingChecks > 0
             || !admittingRequests.isEmpty
@@ -4736,6 +4747,7 @@ actor ContinuousBatchScheduler {
                     committedKVTokenCount: committedKVTokenCount,
                     targetKVTokenCount: targetKVTokenCount,
                     samplerStep: row.generatedTokens.count,
+                    grammarConstraint: row.request.grammarConstraint,
                     captureNativeMTPDrafterColumns: row.usesNativeMTP,
                     stopTokenSequences: row.request.stopTokenSequences
                 )))
@@ -5463,6 +5475,7 @@ actor ContinuousBatchScheduler {
                         temperature: row.request.temperature,
                         topP: row.request.topP,
                         samplerStep: row.generatedTokens.count,
+                        grammarConstraint: row.request.grammarConstraint,
                         nativeMTPPromptPrefill: row.usesNativeMTP,
                         nativeMTPNextPromptToken: row.usesNativeMTP && end < promptTokenCount
                             ? row.request.promptTokens[end]

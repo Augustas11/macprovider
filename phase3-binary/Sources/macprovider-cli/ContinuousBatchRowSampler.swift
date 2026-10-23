@@ -20,6 +20,7 @@ enum ContinuousBatchRowSampler {
         let topP: Double
         let samplerSeed: Int
         let samplerStep: Int
+        var grammarConstraint: GrammarConstraintState? = nil
     }
 
     /// Parameters the batched path can sample exactly as the serial path does.
@@ -49,20 +50,27 @@ enum ContinuousBatchRowSampler {
     /// Samples one token per row. `logits` is `[rows, vocab]`; the result is
     /// `[rows]` in row order. An all-greedy batch keeps the single batched argmax.
     static func sample(logits: MLXArray, rows: [Row]) -> MLXArray {
-        if rows.allSatisfy({ $0.temperature == 0 }) {
+        if rows.allSatisfy({ $0.temperature == 0 && $0.grammarConstraint == nil }) {
             return argMax(logits, axis: -1).asType(.uint32)
         }
         let perRow: [MLXArray] = rows.enumerated().map { index, row in
-            let rowLogits = logits[index ..< index + 1]
+            let originalLogits = logits[index ..< index + 1]
+            let rowLogits = row.grammarConstraint?.mask(logits: originalLogits) ?? originalLogits
+            let token: MLXArray
             if row.temperature == 0 {
-                return argMax(rowLogits, axis: -1).reshaped([1]).asType(.uint32)
+                token = argMax(rowLogits, axis: -1).reshaped([1]).asType(.uint32)
+            } else {
+                let parameters = GenerateParameters(
+                    temperature: Float(row.temperature),
+                    topP: Float(row.topP),
+                    seed: stepSeed(samplerSeed: row.samplerSeed, samplerStep: row.samplerStep)
+                )
+                token = parameters.sampler().sample(logits: rowLogits).reshaped([1]).asType(.uint32)
             }
-            let parameters = GenerateParameters(
-                temperature: Float(row.temperature),
-                topP: Float(row.topP),
-                seed: stepSeed(samplerSeed: row.samplerSeed, samplerStep: row.samplerStep)
-            )
-            return parameters.sampler().sample(logits: rowLogits).reshaped([1]).asType(.uint32)
+            if let constraint = row.grammarConstraint {
+                constraint.didSample(token: token.item(Int.self))
+            }
+            return token
         }
         return concatenated(perRow, axis: 0)
     }

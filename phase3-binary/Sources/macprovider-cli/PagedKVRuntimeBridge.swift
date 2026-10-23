@@ -4009,7 +4009,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             temperature: input.temperature,
             topP: input.topP,
             samplerSeed: input.samplerSeed,
-            samplerStep: input.samplerStep
+            samplerStep: input.samplerStep,
+            grammarConstraint: input.sampleFirstToken ? input.grammarConstraint : nil
         )
     }
 
@@ -4022,7 +4023,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 temperature: $0.temperature,
                 topP: $0.topP,
                 samplerSeed: $0.samplerSeed,
-                samplerStep: $0.samplerStep + step
+                samplerStep: $0.samplerStep + step,
+                grammarConstraint: $0.grammarConstraint
             )
         }
     }
