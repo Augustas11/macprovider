@@ -688,6 +688,13 @@ parity gates, admit MXFP8, or enable production serving.
 
 ### MTP-4 — v0.1 request eligibility and fallback boundary (SPEC-048-R004)
 
+**v0.1.52 (Related: #2107):** A request with an active tool-call or structured
+output grammar mask MUST use ordinary serial or continuous-batching decode.
+Native MTP MUST be disabled for that row before draft/verify begins: draft
+proposals and acceptance currently do not preserve the target sampler's
+request-local grammar state. Unconstrained rows retain existing eligibility.
+This exclusion is not a throughput qualification or a live policy change.
+
 Native MTP v0.1 accepts only the chat-completions request profile below. Values
 are tested after ordinary request parsing/default resolution (an absent
 `temperature` resolves to the ordinary default `1.0` and is therefore a

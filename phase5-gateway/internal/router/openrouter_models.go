@@ -475,6 +475,16 @@ func openRouterSupportedParameters(modelID string, maxTokens int, caps *openRout
 	return params
 }
 
+// DSML needs a live declaration: it is newer than the shared parser floor.
+func containsGuaranteedToolMode(modes []string) bool {
+	for _, mode := range modes {
+		if mode == "required" || mode == "named" {
+			return true
+		}
+	}
+	return false
+}
+
 // openRouterToolFamilyModel mirrors the coordinator's toolGrammarFamily
 // (SPEC-018 §3.1, #2107): every catalog family whose chat template has a tool
 // grammar, which the provider both parses and renders as history.

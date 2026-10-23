@@ -2,7 +2,8 @@ package router
 
 // mergeToolChoiceModes mirrors the coordinator's schema-holdback-v1 contract
 // (SPEC-018 §3.11): a native provider's declared modes for its exact loaded
-// model. Parser-family support alone never grants a guaranteed mode. A session must
+// model. Grammar-mask family support is advertised by upgraded native providers; family
+// recognition alone never grants a guaranteed mode to an older provider. A session must
 // bind enforcement to its current model and runtime; stale swap data is ignored.
 func mergeToolChoiceModes(current []string, provider poolzProviderRow) []string {
 	supported := map[string]bool{"auto": true}

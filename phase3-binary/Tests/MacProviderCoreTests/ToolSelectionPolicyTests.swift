@@ -23,16 +23,19 @@ final class ToolSelectionPolicyTests: XCTestCase {
         ToolCall(id: id, functionName: name, arguments: arguments)
     }
 
-    func testExactModelAndRuntimeCapabilities() throws {
+    func testGrammarFamilyAndRuntimeCapabilities() throws {
         let request = try Self.request()
         XCTAssertNoThrow(try ToolSelectionPolicy.validateRequest(request, loadedModelID: ToolSelectionPolicy.supportedNativeModel, runtime: "mlx_cache"))
-        for model in ["other/Qwen3.6-35B-A3B-4bit", "mlx-community/Qwen3-8B-4bit", "mlx-community/gpt-oss-20b", "mlx-community/Llama-3.3-70B"] {
-            XCTAssertThrowsError(try ToolSelectionPolicy.validateRequest(request, loadedModelID: model, runtime: "mlx_cache"))
+        for model in ["other/Qwen3.6-35B-A3B-4bit", "mlx-community/Qwen3-8B-4bit", "mlx-community/gpt-oss-20b", "mlx-community/Llama-3.3-70B", "zai-org/GLM-5.3", "google/gemma-4", "nvidia/Nemotron-3", "deepseek-ai/DeepSeek-V4"] {
+            XCTAssertNoThrow(try ToolSelectionPolicy.validateRequest(request, loadedModelID: model, runtime: "mlx_cache"))
         }
         for runtime in ["llama_cpp_loopback", "ollama_loopback", "mlxlm_loopback", "omlx_loopback", "lmstudio_loopback"] {
             XCTAssertThrowsError(try ToolSelectionPolicy.validateRequest(request, loadedModelID: ToolSelectionPolicy.supportedNativeModel, runtime: runtime))
         }
-        XCTAssertEqual(ToolSelectionPolicy.modes(modelID: "unknown", runtime: "mlx_cache"), ["auto", "none"])
+        for model in ["unknown", "mlx-community/Qwen2-VL-2B-Instruct-4bit"] {
+            XCTAssertEqual(ToolSelectionPolicy.modes(modelID: model, runtime: "mlx_cache"), ["auto", "none"])
+            XCTAssertThrowsError(try ToolSelectionPolicy.validateRequest(request, loadedModelID: model, runtime: "mlx_cache"))
+        }
     }
 
     func testRequiredNeverSucceedsWithProseAndChecksArguments() throws {
@@ -58,8 +61,13 @@ final class ToolSelectionPolicyTests: XCTestCase {
                 for alias in [model.lowercased(), model + "-copy", model.replacingOccurrences(of: "4bit", with: "8bit"),
                               String(model.split(separator: "/").last!), "local/" + model, "buyer/alias"] {
                     XCTAssertNil(ToolSelectionPolicy.guaranteedCallProfile(modelID: alias))
-                    XCTAssertEqual(ToolSelectionPolicy.modes(modelID: alias, runtime: "mlx_cache"), ["auto", "none"])
-                    XCTAssertThrowsError(try ToolSelectionPolicy.validateRequest(request, loadedModelID: alias, runtime: "mlx_cache"))
+                    let supported = ToolCallGrammar.family(modelID: alias) != nil
+                    XCTAssertEqual(ToolSelectionPolicy.modes(modelID: alias, runtime: "mlx_cache"), supported ? ["auto", "none", "required", "named"] : ["auto", "none"])
+                    if supported {
+                        XCTAssertNoThrow(try ToolSelectionPolicy.validateRequest(request, loadedModelID: alias, runtime: "mlx_cache"))
+                    } else {
+                        XCTAssertThrowsError(try ToolSelectionPolicy.validateRequest(request, loadedModelID: alias, runtime: "mlx_cache"))
+                    }
                 }
                 XCTAssertThrowsError(try ToolSelectionPolicy.validateRequest(request, loadedModelID: model, runtime: "ollama_loopback"))
                 for extra: [String: Any] in [["max_tokens": NSNull()], ["max_tokens": 16_385], ["stop": ["cut"]]] {

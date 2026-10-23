@@ -267,6 +267,12 @@ class BuyerUXConformanceTests(unittest.TestCase):
     def test_checked_in_record_file_is_valid(self):
         bux.load_records(bux.RECORD_PATH)
 
+    def test_guaranteed_modes_follow_native_grammar_families(self):
+        for model in ("mlx-community/Qwen3-8B-4bit", "zai-org/GLM-5.3", "meta/Llama-3.1-8B", "google/gemma-4", "openai/gpt-oss-20b", "nvidia/Nemotron-3", "deepseek-ai/DeepSeek-V4"):
+            with self.subTest(model=model):
+                self.assertEqual(bux.advertised_capabilities(model)["tool_choice"], ["auto", "none", "required", "named"])
+        self.assertEqual(bux.advertised_capabilities("unknown/model")["tool_choice"], [])
+
     def test_advertised_capabilities_mirror_the_coordinator_families(self):
         self.assertFalse(bux.advertised_capabilities("mlx-community/Qwen2-VL-2B-Instruct-4bit")["tools"])
         self.assertTrue(bux.advertised_capabilities("mlx-community/Meta-Llama-3.1-8B-Instruct-4bit")["tools"])
