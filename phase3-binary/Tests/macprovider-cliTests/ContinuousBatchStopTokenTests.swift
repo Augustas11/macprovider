@@ -1,8 +1,14 @@
+import MLX
 import MLXLMCommon
 @testable import macprovider_cli
 import XCTest
 
 final class ContinuousBatchStopTokenTests: XCTestCase {
+    override class func setUp() {
+        super.setUp()
+        Device.setDefault(device: .cpu)
+    }
+
     func testTrailingModelStopIsDroppedOnlyWhenTheRowStoppedOnIt() {
         let stops: Set<Int> = [151645, 151643]
 

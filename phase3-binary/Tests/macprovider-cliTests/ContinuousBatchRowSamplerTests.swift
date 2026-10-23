@@ -5,6 +5,11 @@ import MLXLMCommon
 import XCTest
 
 final class ContinuousBatchRowSamplerTests: XCTestCase {
+    override class func setUp() {
+        super.setUp()
+        Device.setDefault(device: .cpu)
+    }
+
     // MARK: - Pure seed derivation (no Metal)
 
     func testRequestSeedIsStablePerRequestIDAndDistinctAcrossIDs() {

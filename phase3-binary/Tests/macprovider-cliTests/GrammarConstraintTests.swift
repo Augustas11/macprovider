@@ -95,6 +95,17 @@ final class GrammarConstraintTests: XCTestCase {
         XCTAssertEqual(pieces[127], [0xc3])
         XCTAssertEqual(pieces[102], [0xa9])
         XCTAssertEqual(pieces[50256], Array("<|endoftext|>".utf8))
+        var unsupported = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(fixture.utf8)) as? [String: Any])
+        unsupported["decoder"] = ["type": "Metaspace", "replacement": "_", "prepend_scheme": "always"]
+        XCTAssertThrowsError(try GrammarConstraintState.vocabulary(
+            data: JSONSerialization.data(withJSONObject: unsupported), tokenizer: tokenizer)) {
+            XCTAssertEqual(($0 as? APIError)?.status, 400)
+        }
+        unsupported["decoder"] = ["type": "Sequence", "decoders": [["type": "ByteLevel"], ["type": "ByteFallback"]]]
+        XCTAssertThrowsError(try GrammarConstraintState.vocabulary(
+            data: JSONSerialization.data(withJSONObject: unsupported), tokenizer: tokenizer)) {
+            XCTAssertEqual(($0 as? APIError)?.status, 400)
+        }
         let state = try GrammarConstraintState(grammar: .literal("é"), tokens: pieces, eosTokenIDs: [50256])
         state.didSample(token: 127)
         state.didSample(token: 102)

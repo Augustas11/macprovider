@@ -537,6 +537,8 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
     let retainedRecurrentCheckpoints: [RecurrentStateCheckpoint]
     /// Runtime-only token grammar; excluded from the wire fingerprint.
     let grammarConstraint: GrammarConstraintState?
+    /// Stable grammar/tokenizer identity fences replay across distinct constraints.
+    let grammarFingerprint: String?
     /// Runtime-only row observer. It is deliberately excluded from the
     /// idempotency fingerprint: duplicate waiters reuse the canonical row's
     /// observer and receive its boundary in the retained result.
@@ -628,6 +630,7 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
         self.modelHasRecurrentLayers = modelHasRecurrentLayers
         self.retainedRecurrentCheckpoints = retainedRecurrentCheckpoints
         self.grammarConstraint = grammarConstraint
+        self.grammarFingerprint = grammarConstraint?.fingerprint
         self.serialToolStopObserver = serialToolStopObserver
         self.decodePath = grammarConstraint == nil ? decodePath : .ordinary
         self.nativeMTPMaximumProposalDepth = max(0, nativeMTPMaximumProposalDepth)
@@ -655,6 +658,7 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
         case presencePenalty
         case frequencyPenalty
         case cachedPromptTokens
+        case grammarFingerprint
     }
 }
 
