@@ -345,7 +345,10 @@ def model_entry(transport: Transport, model: str) -> dict:
 def run_checks(transport: Transport, model: str) -> dict:
     entry = model_entry(transport, model)
     advertised = entry.get("capabilities") or {}
-    reasoning_model = advertised.get("reasoning") is True
+    # Whether reasoning fields must be proven comes from the canonical model
+    # contract, never from /models: a masked or absent flag there must not
+    # waive the proof of the capability the record grants.
+    reasoning_model = advertised_capabilities(model)["reasoning"]
     context = int(entry.get("max_context_tokens") or advertised.get("context_length") or 32768)
     steps: dict[str, Callable[[], tuple[str, str]]] = {
         "tools_auto": lambda: check_tools(transport, model, "auto", "auto"),

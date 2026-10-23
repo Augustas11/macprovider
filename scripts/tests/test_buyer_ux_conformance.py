@@ -134,6 +134,23 @@ class BuyerUXConformanceTests(unittest.TestCase):
         self.assertEqual(result["checks"]["no_reasoning_leak"]["status"], bux.FAIL)
         self.assertFalse(result["capabilities"]["reasoning"])
 
+    def test_reasoning_requirement_comes_from_the_model_contract_not_models(self):
+        """Re-audit r1: a masked or absent /models reasoning flag does not waive
+        reasoning_content and reasoning_tokens for a GLM-5 model."""
+        no_reasoning_fields = chat({"content": "4"}, "stop")
+        no_thinking_block = ok({"type": "message", "role": "assistant", "content": [{"type": "text", "text": "4"}]})
+        for caps in ({"tools": True, "tool_choice": ["auto", "none"], "reasoning": False}, {"tools": True, "tool_choice": ["auto", "none"]}):
+            models = ok({"data": [{"id": MODEL, "max_context_tokens": 65536, "capabilities": caps}]})
+            result = self.run_with(models=models, plain=no_reasoning_fields, messages=no_thinking_block)
+            self.assertEqual(result["checks"]["no_reasoning_leak"]["status"], bux.FAIL, caps)
+            self.assertEqual(result["checks"]["messages_beta_thinking"]["status"], bux.FAIL, caps)
+            self.assertFalse(result["capabilities"]["reasoning"])
+        # A model outside the reasoning families needs only clean content.
+        qwen = "mlx-community/Qwen3-8B-4bit"
+        models = ok({"data": [{"id": qwen, "max_context_tokens": 32768, "capabilities": {"reasoning": True}}]})
+        result = bux.run_checks(transport(dict(GOOD, models=models, plain=no_reasoning_fields)), qwen)
+        self.assertEqual(result["checks"]["no_reasoning_leak"]["status"], bux.PASS)
+
     def test_stream_index_and_error_failures(self):
         all_zero = sse(
             {"choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "id": "call_a", "function": {"name": "read_file", "arguments": "{}"}}]}}]},
