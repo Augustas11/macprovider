@@ -221,20 +221,26 @@ final class ShardGroupEngineTests: XCTestCase {
     }
 
     func testStageLossIsTypedWithEachRequestsDeliveredCount() throws {
-        // Tail calls: 1-2 serve both prefills, 3-4 the first decode step of each; on
-        // call 5 the tail's link goes down mid-decode.
+        // Both prefills complete before tail call 5, where the tail's link goes down
+        // mid-decode. How decode steps batch or interleave before that is timing, so
+        // each request's delivered count must equal exactly the tokens its sink saw.
         let rig = try rig(tailOnCall: { call, links in if call == 5 { links[1].upstream.close() } })
         let collector = ShardGenerationCollector(count: 2)
+        let seen = DeliveredTokenCounts()
         let ids = try rig.engine.submit(
             [ShardGenerationRequest(promptTokens: [5, 9, 2], maxTokens: 20), ShardGenerationRequest(promptTokens: [8, 1], maxTokens: 20)],
-            sink: collector.receive)
+            sink: { id, result in
+                if case .success(.token) = result { seen.add(id) }
+                collector.receive(id, result)
+            })
         let (summaries, errors) = collector.wait()
         XCTAssertTrue(summaries.isEmpty)
         for id in ids {
             guard case ShardGroupEngineError.streamTerminated(let delivered, _)? = errors[id] else {
                 return XCTFail("expected streamTerminated, got \(String(describing: errors[id]))")
             }
-            XCTAssertEqual(delivered, 2, "request \(id): prefill token plus one decode step")
+            XCTAssertEqual(delivered, seen.count(id), "request \(id): delivered count equals the tokens streamed")
+            XCTAssertGreaterThanOrEqual(delivered, 1, "request \(id): its prefill token was streamed before the loss")
         }
         XCTAssertTrue(rig.engine.waitUntilStopped(timeout: 5))
         XCTAssertFalse(rig.engine.status.running)
@@ -402,5 +408,22 @@ final class ShardGroupEngineTests: XCTestCase {
         XCTAssertEqual(receipts[1].publicKey, key.publicKey.rawRepresentation.base64EncodedString())
         XCTAssertTrue(receipts[1].signatureIsValid)
         try rig.engine.shutdown()
+    }
+}
+
+private final class DeliveredTokenCounts: @unchecked Sendable {
+    private let lock = NSLock()
+    private var counts = [UInt64: Int]()
+
+    func add(_ id: UInt64) {
+        lock.lock()
+        counts[id, default: 0] += 1
+        lock.unlock()
+    }
+
+    func count(_ id: UInt64) -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return counts[id, default: 0]
     }
 }
