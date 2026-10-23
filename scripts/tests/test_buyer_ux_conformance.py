@@ -154,12 +154,18 @@ class BuyerUXConformanceTests(unittest.TestCase):
             path.write_text(json.dumps({"schema_version": bux.SCHEMA, "records": {"zai-org/glm-5.3-flash": record}}))
             advertised = bux.advertised_capabilities(MODEL)
             self.assertEqual(advertised["tool_choice"], ["auto", "none"])
-            bux.require_promotable("zai-org/glm-5.3-flash", advertised, path)
+            bux.require_promotable("zai-org/glm-5.3-flash", MODEL, advertised, path)
+            # The coordinator indexes records case-insensitively by model id.
+            bux.require_promotable("zai-org/glm-5.3-flash", MODEL.lower(), advertised, path)
             with self.assertRaisesRegex(bux.ConformanceError, "no record"):
-                bux.require_promotable("other", advertised, path)
+                bux.require_promotable("other", MODEL, advertised, path)
+            # Re-audit r1: a passing record for another served model never
+            # qualifies the key's current model.
+            with self.assertRaisesRegex(bux.ConformanceError, "not the served model"):
+                bux.require_promotable("zai-org/glm-5.3-flash", "zai-org/GLM-5.3-Flash-other", advertised, path)
             # Advertising a mode the record did not pass is refused.
             with self.assertRaisesRegex(bux.ConformanceError, "tool_choice"):
-                bux.require_promotable("zai-org/glm-5.3-flash", dict(advertised, tool_choice=["auto", "none", "required"]), path)
+                bux.require_promotable("zai-org/glm-5.3-flash", MODEL, dict(advertised, tool_choice=["auto", "none", "required"]), path)
             # A record whose capabilities do not follow its checks is invalid.
             record["capabilities"]["tools"] = False
             path.write_text(json.dumps({"schema_version": bux.SCHEMA, "records": {"k": record}}))

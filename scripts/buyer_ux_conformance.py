@@ -450,13 +450,18 @@ def advertised_capabilities(model_id: str) -> dict:
     }
 
 
-def require_promotable(key: str, advertised: dict, path: pathlib.Path = RECORD_PATH) -> dict:
-    """SPEC-023 §16.11: a key is promotable only when its record exists, its
-    base checks pass, and every capability the model advertises passes."""
+def require_promotable(key: str, model_id: str, advertised: dict, path: pathlib.Path = RECORD_PATH) -> dict:
+    """SPEC-023 §16.11: a key is promotable only when its record exists, was
+    taken against the served model being promoted, its base checks pass, and
+    every capability the model advertises passes."""
     records = load_records(path)["records"]
     record = records.get(key)
     if record is None:
         raise ConformanceError(f"buyer-UX conformance: no record for {key!r}; run scripts/buyer_ux_conformance.py run")
+    # The coordinator indexes the record by its model id, case-insensitively
+    # (LoadBuyerUXConformance), so the gate binds the same identity.
+    if str(record["model"]).lower() != model_id.lower():
+        raise ConformanceError(f"buyer-UX conformance: {key!r} record is for {record['model']!r}, not the served model {model_id!r}")
     caps = record["capabilities"]
     if not caps["base"]:
         raise ConformanceError(f"buyer-UX conformance: {key!r} fails the base checks")
@@ -510,9 +515,10 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 
 def cmd_check(args: argparse.Namespace) -> int:
-    advertised = json.loads(args.advertised) if args.advertised else advertised_capabilities(args.model_id or args.catalog_key)
+    model_id = args.model_id or args.catalog_key
+    advertised = json.loads(args.advertised) if args.advertised else advertised_capabilities(model_id)
     try:
-        require_promotable(args.catalog_key, advertised, pathlib.Path(args.record))
+        require_promotable(args.catalog_key, model_id, advertised, pathlib.Path(args.record))
     except ConformanceError as err:
         print(str(err), file=sys.stderr)
         return 1
