@@ -112,6 +112,7 @@ test-dist-catalog:
 	bash -n scripts/lib/catalog-canary-token.sh
 	bash phase3-binary/dist/test/check_baked_static_feed_sync.test.sh
 	bash scripts/test-catalog-release.sh
+	python3 scripts/catalog-pricing-preflight.py
 	bash scripts/test-autotune-gate-matrix.sh
 
 # Every scripts/tests/test_*.py module via discovery, the ops Python suites,
