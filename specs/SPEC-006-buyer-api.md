@@ -4220,7 +4220,7 @@ A coordinator-issued `500` with `code: "route_snapshot_failed"` (a SPEC-022 pre-
 
 405 Method Not Allowed MUST use `type: "invalid_request_error"` and `code: "method_not_allowed"`.
 
-413 Payload Too Large MUST use `type: "invalid_request_error"` and `code: "request_too_large"`. The gateway rejects an oversized body with this 413 only after a bounded drain of the unread body (at most 8 MiB in total), so a reverse proxy that streams the body never sees a reset in place of the 413.
+413 Payload Too Large MUST use `type: "invalid_request_error"` and `code: "request_too_large"`. The gateway rejects an oversized body with this 413 only after a bounded drain of the unread body (at most 8 MiB in total), so a reverse proxy that streams a body within that bound receives the 413 instead of a connection reset.
 
 ### 17.2 Model unknown
 
