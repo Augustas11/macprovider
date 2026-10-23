@@ -109,6 +109,23 @@ class BuyerUXConformanceTests(unittest.TestCase):
         self.assertFalse(result["capabilities"]["tools"])
         self.assertEqual(result["capabilities"]["tool_choice"], [])
 
+    def test_non_stream_tool_calls_need_unique_ids_and_function_type(self):
+        """Re-audit r1: a call a client cannot answer by id fails tools_auto."""
+        second = dict(CALL, function={"name": "read_file", "arguments": "{\"path\":\"/etc/passwd\"}"})
+        for calls, detail in (
+            ([{k: v for k, v in CALL.items() if k != "id"}], "without an id"),
+            ([dict(CALL, id="")], "without an id"),
+            ([CALL, second], "duplicate tool call ids"),
+            ([dict(CALL, type="tool")], "type"),
+            ([{k: v for k, v in CALL.items() if k != "type"}], "type"),
+        ):
+            result = self.run_with(tool_auto=chat({"content": None, "tool_calls": calls}, "tool_calls"))
+            self.assertEqual(result["checks"]["tools_auto"]["status"], bux.FAIL, calls)
+            self.assertIn(detail, result["checks"]["tools_auto"]["detail"])
+            self.assertFalse(result["capabilities"]["tools"])
+        two = chat({"content": None, "tool_calls": [CALL, dict(second, id="call_fedcba9876543210")]}, "tool_calls")
+        self.assertEqual(self.run_with(tool_auto=two)["checks"]["tools_auto"]["status"], bux.PASS)
+
     def test_reasoning_leak_and_missing_reasoning_fail(self):
         leak = chat({"content": "2+2 is 4.</think>4"}, "stop")
         self.assertEqual(self.run_with(plain=leak)["checks"]["no_reasoning_leak"]["status"], bux.FAIL)

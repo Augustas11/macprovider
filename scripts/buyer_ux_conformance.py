@@ -107,7 +107,18 @@ def _tool_calls_ok(choice: dict, name: str = "read_file") -> str | None:
     calls = (choice.get("message") or {}).get("tool_calls") or []
     if not calls:
         return "no tool_calls"
+    ids = set()
     for call in calls:
+        # A client answers each call by its id, so an absent or repeated id
+        # leaves the call unusable.
+        call_id = call.get("id")
+        if not isinstance(call_id, str) or not call_id:
+            return "tool call without an id"
+        if call_id in ids:
+            return "duplicate tool call ids"
+        ids.add(call_id)
+        if call.get("type") != "function":
+            return f"tool call type {call.get('type')!r} want function"
         fn = call.get("function") or {}
         if fn.get("name") != name:
             return f"tool name {fn.get('name')!r}"
