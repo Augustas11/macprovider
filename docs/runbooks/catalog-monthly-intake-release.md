@@ -180,6 +180,23 @@ stops publishing a capability that failed, so a partial pass still lists the
 model, just without the failed capability. Re-run after a CLI release that
 changes the model's serving path.
 
+Once the record is on `origin/main`, put it in force on Pearl with the
+catalog entry point. No re-signed release is needed for a record-only change:
+
+```bash
+scripts/ops/catalog-activate.sh status   # step buyer_ux_conformance
+MACPROVIDER_OPS_OWNER=<session> scripts/ops/catalog-activate.sh next --run
+```
+
+The step installs the file at `/opt/macprovider/buyer-ux-conformance.json`,
+adds `routing.buyer_ux_conformance_path` to `coordinator.yaml` in place under
+both Pearl locks, and sends one SIGHUP. It is done when `/healthz`
+`buyer_ux_conformance_sha256` equals the committed file's SHA-256. A
+coordinator runtime that predates the SIGHUP reload gets one restart instead,
+about 5-40 seconds of coordinator downtime, and `next` prints that downtime
+first. On failure the step restores `coordinator.yaml` and the record file,
+then applies them again the same way.
+
 ## 3. Write `intake-decision.json`
 
 `phase3-binary/catalog/autotune/intake-decision.json`, schema

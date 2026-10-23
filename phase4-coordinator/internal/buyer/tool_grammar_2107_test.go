@@ -1,12 +1,14 @@
 package buyer
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -246,5 +248,88 @@ func TestCheckedInBuyerUXConformanceRecords(t *testing.T) {
 	}
 	if !glm.Capabilities.Tools || !glm.Capabilities.Reasoning {
 		t.Fatalf("glm capabilities=%+v", glm.Capabilities)
+	}
+}
+
+// SPEC-023 §16.11 fail-closed reload: an unreadable, malformed or oversized
+// record file never widens what /v1/models publishes. At boot that means no
+// records (every model keeps its derived set); after a good load the records
+// in force stay.
+func TestReloadBuyerUXConformanceKeepsRecordsInForce(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/buyer-ux-conformance.json"
+	s := NewServer(pool.NewRegistry(nil), zerolog.Nop(), time.Now().UTC())
+	if _, err := s.ReloadBuyerUXConformance(path); err == nil {
+		t.Fatal("a missing record file must be an error")
+	}
+	if sha, n := s.BuyerUXConformanceStatus(); sha != "" || n != 0 {
+		t.Fatalf("status after a failed first load: %q %d", sha, n)
+	}
+	good := `{"schema_version":"macprovider.buyer-ux-conformance.v1","records":{"k":{"model":"mlx-community/Llama-3.2-3B-Instruct-4bit","capabilities":{"tools":false,"tool_choice":[],"reasoning":true,"response_format":true}}}}`
+	if err := os.WriteFile(path, []byte(good), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := s.ReloadBuyerUXConformance(path)
+	if err != nil || !changed {
+		t.Fatalf("good load: changed=%v err=%v", changed, err)
+	}
+	sha, n := s.BuyerUXConformanceStatus()
+	if len(sha) != 64 || n != 1 {
+		t.Fatalf("status after a good load: %q %d", sha, n)
+	}
+	if changed, err := s.ReloadBuyerUXConformance(path); err != nil || changed {
+		t.Fatalf("same bytes: changed=%v err=%v", changed, err)
+	}
+	masked := func() bool {
+		p := pool.Provider{ModelID: "mlx-community/Llama-3.2-3B-Instruct-4bit", BinaryVersion: toolGrammarProviderMinVersion}
+		entry := modelEntry{ID: p.ModelID, Capabilities: mergeModelCapabilities(nil, p, false)}
+		s.applyBuyerUXConformance(&entry)
+		return !entry.Capabilities.Tools
+	}
+	if !masked() {
+		t.Fatal("the loaded record does not mask tools")
+	}
+	for name, body := range map[string][]byte{
+		"malformed":       []byte(`{"records":`),
+		"wrong schema":    []byte(`{"schema_version":"v0","records":{}}`),
+		"missing fields":  []byte(`{"schema_version":"macprovider.buyer-ux-conformance.v1","records":{"k":{"model":"m"}}}`),
+		"missing records": []byte(`{"schema_version":"macprovider.buyer-ux-conformance.v1"}`),
+		"null records":    []byte(`{"schema_version":"macprovider.buyer-ux-conformance.v1","records":null}`),
+		"oversized":       append([]byte(good), bytes.Repeat([]byte(" "), buyerUXConformanceMaxBytes)...),
+	} {
+		if err := os.WriteFile(path, body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.ReloadBuyerUXConformance(path); err == nil {
+			t.Fatalf("%s record file was accepted", name)
+		}
+		if got, _ := s.BuyerUXConformanceStatus(); got != sha || !masked() {
+			t.Fatalf("%s record file changed the records in force", name)
+		}
+	}
+	// A FIFO at the path is refused without blocking (no writer is ever
+	// attached).
+	fifo := dir + "/fifo.json"
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { _, err := s.ReloadBuyerUXConformance(fifo); done <- err }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("a FIFO record path was accepted")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a FIFO record path blocked the reload")
+	}
+	if got, _ := s.BuyerUXConformanceStatus(); got != sha || !masked() {
+		t.Fatal("a FIFO record path changed the records in force")
+	}
+	if changed, err := s.ReloadBuyerUXConformance(""); err != nil || !changed {
+		t.Fatalf("clearing the path: changed=%v err=%v", changed, err)
+	}
+	if got, n := s.BuyerUXConformanceStatus(); got != "" || n != 0 || masked() {
+		t.Fatalf("cleared path still masks: %q %d", got, n)
 	}
 }

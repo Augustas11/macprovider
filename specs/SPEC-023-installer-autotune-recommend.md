@@ -1,6 +1,6 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.22.32
+version: v0.22.33
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-10-02
@@ -8,6 +8,15 @@ lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-
 
 ## Change log
 
+- **v0.22.33 (2026-10-24, Related: #2107)** — §16.11 delivery. The
+  coordinator applies `routing.buyer_ux_conformance_path` at start and on
+  every SIGHUP and reports the file in force on `/healthz`
+  (`buyer_ux_conformance_reloads`, `buyer_ux_conformance_sha256`,
+  `buyer_ux_conformance_records`). An unreadable file keeps the records in
+  force (none at start). The file is not a signed release member: it is
+  installed from origin/main by `scripts/ops/catalog-activate.sh` step
+  `buyer_ux_conformance`, so a records-only change needs no re-signed
+  release.
 - **v0.22.32 (2026-10-23, Related: #2107)** — §16.11 post-merge re-audit:
   promotion binds the record to the served model being promoted (the
   record's `model` must equal the candidate's served model id,
@@ -4365,9 +4374,30 @@ rules bind them:
    capability its served model advertises (the coordinator's family
    derivation) passes. The check is `require_buyer_ux_conformance`.
 2. **Publication.** The coordinator loads the file from
-   `routing.buyer_ux_conformance_path` at start. It removes from
-   `/v1/models` every capability a recorded model failed. A model without a
-   record keeps the derived set.
+   `routing.buyer_ux_conformance_path` at start and again on every SIGHUP
+   (v0.22.33). It removes from `/v1/models` every capability a recorded
+   model failed. A model without a record keeps the derived set. A file
+   that is missing, unreadable, malformed or larger than 4 MiB changes
+   nothing: the records already in force stay (at start there are none),
+   the error is logged, and the coordinator keeps running; the rest of a
+   SIGHUP reload still applies. `/healthz` reports
+   `buyer_ux_conformance_reloads: true`, the SHA-256 of the file in force
+   (`buyer_ux_conformance_sha256`, omitted when none is) and the number of
+   models it records (`buyer_ux_conformance_records`).
+3. **Delivery.** The file is not a member of the signed catalog release
+   and is not signed. It only removes capabilities from the buyer-facing
+   list: it carries no price, admission, trust or provider input, and no
+   provider CLI reads it. Making it a signed feed would change the release's
+   signer set, which `content-gate` assigns to the full provider-app lane,
+   so every record change would need a CLI release. Its integrity is the
+   reviewed commit, as for `release.json` and `trusted-keys.json`: on Pearl,
+   `scripts/ops/catalog-activate.sh` step `buyer_ux_conformance` compares
+   origin/main's `buyer-ux-conformance.json` with the `/healthz` digest. When
+   they differ it installs that file (root-owned, coordinator group, mode
+   0640) at `/opt/macprovider/buyer-ux-conformance.json`, adds
+   `routing.buyer_ux_conformance_path` to `coordinator.yaml` in place under
+   both Pearl locks, and sends one SIGHUP. A runtime without the reload gets
+   one restart instead. Runtime and catalog deploys do not touch the file.
 
 Live runs happen after a release, against the gateway, as an intake step. The
 checker is unit-tested against recorded responses.

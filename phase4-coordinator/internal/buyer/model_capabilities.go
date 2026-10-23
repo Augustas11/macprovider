@@ -1,12 +1,16 @@
 package buyer
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"sort"
 	"strings"
+	"syscall"
 
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/versionfloor"
@@ -169,15 +173,42 @@ type buyerUXCapabilities struct {
 	ResponseFormat bool     `json:"response_format"`
 }
 
+// buyerUXConformanceMaxBytes bounds the record file read; the checked-in file
+// is a few KiB per model.
+const buyerUXConformanceMaxBytes = 4 << 20
+
 // LoadBuyerUXConformance reads the record file and returns the allowed
 // capabilities keyed by served model id. An empty path means no records.
 func LoadBuyerUXConformance(path string) (map[string]buyerUXCapabilities, error) {
+	records, _, err := loadBuyerUXConformance(path)
+	return records, err
+}
+
+// loadBuyerUXConformance also returns the SHA-256 of the exact bytes it
+// parsed, which /healthz reports so activation tooling can prove the
+// installed file is the one in force.
+func loadBuyerUXConformance(path string) (map[string]buyerUXCapabilities, string, error) {
 	if strings.TrimSpace(path) == "" {
-		return nil, nil
+		return nil, "", nil
 	}
-	raw, err := os.ReadFile(path)
+	// O_NONBLOCK so a FIFO or device at the path cannot block boot or a
+	// SIGHUP reload; only a regular file is read.
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
-		return nil, err
+		return nil, "", err
+	}
+	defer f.Close()
+	if info, err := f.Stat(); err != nil {
+		return nil, "", err
+	} else if !info.Mode().IsRegular() {
+		return nil, "", fmt.Errorf("buyer-ux conformance: %s is not a regular file", path)
+	}
+	raw, err := io.ReadAll(io.LimitReader(f, buyerUXConformanceMaxBytes+1))
+	if err != nil {
+		return nil, "", err
+	}
+	if len(raw) > buyerUXConformanceMaxBytes {
+		return nil, "", fmt.Errorf("buyer-ux conformance: %s is larger than %d bytes", path, buyerUXConformanceMaxBytes)
 	}
 	var doc struct {
 		SchemaVersion string `json:"schema_version"`
@@ -187,19 +218,25 @@ func LoadBuyerUXConformance(path string) (map[string]buyerUXCapabilities, error)
 		} `json:"records"`
 	}
 	if err := json.Unmarshal(raw, &doc); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if doc.SchemaVersion != "macprovider.buyer-ux-conformance.v1" {
-		return nil, fmt.Errorf("buyer-ux conformance: unsupported schema_version %q", doc.SchemaVersion)
+		return nil, "", fmt.Errorf("buyer-ux conformance: unsupported schema_version %q", doc.SchemaVersion)
+	}
+	// A missing or null records object is malformed, never "no records":
+	// accepting it would clear the masks in force.
+	if doc.Records == nil {
+		return nil, "", fmt.Errorf("buyer-ux conformance: records object is missing")
 	}
 	out := make(map[string]buyerUXCapabilities, len(doc.Records))
 	for key, record := range doc.Records {
 		if record.Capabilities == nil || strings.TrimSpace(record.Model) == "" {
-			return nil, fmt.Errorf("buyer-ux conformance: record %q needs model and capabilities", key)
+			return nil, "", fmt.Errorf("buyer-ux conformance: record %q needs model and capabilities", key)
 		}
 		out[strings.ToLower(record.Model)] = *record.Capabilities
 	}
-	return out, nil
+	sum := sha256.Sum256(raw)
+	return out, hex.EncodeToString(sum[:]), nil
 }
 
 // SetBuyerUXConformance installs the conformance records.
@@ -207,6 +244,33 @@ func (s *Server) SetBuyerUXConformance(records map[string]buyerUXCapabilities) {
 	s.routingMu.Lock()
 	s.buyerUXConformance = records
 	s.routingMu.Unlock()
+}
+
+// ReloadBuyerUXConformance applies routing.buyer_ux_conformance_path, at boot
+// and on every SIGHUP (SPEC-023 §16.11). An empty path clears the records. A
+// file that cannot be read or parsed is an error and changes nothing: the
+// records already in force stay (at boot there are none, so every model keeps
+// its derived set). changed reports whether the applied file differs from the
+// one in force before.
+func (s *Server) ReloadBuyerUXConformance(path string) (changed bool, err error) {
+	records, digest, err := loadBuyerUXConformance(path)
+	if err != nil {
+		return false, err
+	}
+	s.routingMu.Lock()
+	defer s.routingMu.Unlock()
+	changed = digest != s.buyerUXConformanceSHA256
+	s.buyerUXConformance = records
+	s.buyerUXConformanceSHA256 = digest
+	return changed, nil
+}
+
+// BuyerUXConformanceStatus is the SHA-256 of the record file in force (empty
+// when none is) and the number of models it records, for /healthz.
+func (s *Server) BuyerUXConformanceStatus() (string, int) {
+	s.routingMu.RLock()
+	defer s.routingMu.RUnlock()
+	return s.buyerUXConformanceSHA256, len(s.buyerUXConformance)
 }
 
 // applyBuyerUXConformance removes every capability the model's conformance

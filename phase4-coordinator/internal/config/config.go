@@ -1104,7 +1104,10 @@ type RoutingConfig struct {
 	// BuyerUXConformancePath names the buyer-UX conformance record file
 	// (phase3-binary/catalog/autotune/buyer-ux-conformance.json, SPEC-023
 	// §16.11). A capability a model failed is not published on /v1/models.
-	// Empty means no records. It applies at coordinator start.
+	// Empty means no records. It applies at coordinator start and on SIGHUP;
+	// an unreadable file keeps the records in force (none at start). On Pearl
+	// scripts/ops/catalog-activate.sh installs the file (step
+	// buyer_ux_conformance).
 	BuyerUXConformancePath string `yaml:"buyer_ux_conformance_path"`
 }
 

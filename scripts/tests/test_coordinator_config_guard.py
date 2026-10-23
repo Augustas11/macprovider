@@ -96,6 +96,13 @@ GUARDED = {
         '--guard-sha256 $(shasum -a 256 "$REPO_ROOT/scripts/lib/coordinator_config_guard.py"',
         '< "$OPS_LIB_DIR/pearl-cli-config.py"',
     ),
+    # Step buyer_ux_conformance (SPEC-023 §16.11): the coordinator.yaml key
+    # edit + SIGHUP/restart goes through the same guarded pearl-cli-config.py.
+    "scripts/ops/catalog-activate.sh": (
+        'PEARL_CONFIG_GUARD="${PEARL_CONFIG_GUARD:-/usr/local/share/macprovider/scripts/coordinator_config_guard.py}"',
+        'guard_sha="$(shasum -a 256 "$REPO_ROOT/scripts/lib/coordinator_config_guard.py"',
+        '< "$OPS_LIB_DIR/pearl-cli-config.py"',
+    ),
     "scripts/ops/lib/pearl-cli-config.py": (
         "the installed coordinator_config_guard.py differs from the reviewed source",
         "return module.LockSet(args.install_root, updater_lock=args.updater_lock,",

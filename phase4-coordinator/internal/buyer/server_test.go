@@ -1007,7 +1007,9 @@ func rateCardVersionFromServer(t *testing.T, server *buyer.Server) string {
 	return got.Version
 }
 
-func TestModelsReturnsEmptyListWhenNoReadyProviders(t *testing.T) {
+// SPEC-002 FR-B1: a busy provider with every slot in flight still lists its
+// model; saturation is answered at request time, not by hiding the model.
+func TestModelsListsBusyProviderWithNoFreeSlots(t *testing.T) {
 	registry := pool.NewRegistry([]config.ProviderConfig{
 		{ProviderID: "p1", EndpointURL: "https://p1.example"},
 	})
@@ -1029,8 +1031,8 @@ func TestModelsReturnsEmptyListWhenNoReadyProviders(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
 		t.Fatalf("json: %v", err)
 	}
-	if len(got.Data) != 0 {
-		t.Fatalf("data len = %d, want 0", len(got.Data))
+	if len(got.Data) != 1 {
+		t.Fatalf("data len = %d, want 1 (the saturated model stays listed)", len(got.Data))
 	}
 }
 
@@ -1162,7 +1164,9 @@ func TestModelsDefaultIncludesReadyProvidersWithoutFreeSlots(t *testing.T) {
 	}
 }
 
-func TestModelsPillarAExcludesReadyProvidersWithoutFreeSlots(t *testing.T) {
+// SPEC-002 FR-B1: with Pillar A active, too, a provider at capacity lists its
+// model (#2107 live: GLM-5.3-Flash vanished while the Studio ran 4/4 slots).
+func TestModelsPillarAListsReadyProvidersWithoutFreeSlots(t *testing.T) {
 	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: "https://p1.example"}})
 	registerWithHashStatusSlots(registry, "p1", "session-1", "model-a", pool.StateReady, 20000, 0, 1, "https://p1.example", "")
 	server := buyer.NewServer(
@@ -1185,8 +1189,8 @@ func TestModelsPillarAExcludesReadyProvidersWithoutFreeSlots(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
 		t.Fatalf("json: %v", err)
 	}
-	if len(got.Data) != 0 {
-		t.Fatalf("data len = %d, want 0; body=%s", len(got.Data), rr.Body.String())
+	if len(got.Data) != 1 {
+		t.Fatalf("data len = %d, want 1; body=%s", len(got.Data), rr.Body.String())
 	}
 }
 
@@ -1233,7 +1237,9 @@ func TestModelsPillarAReportsMixedHashState(t *testing.T) {
 	}
 }
 
-func TestModelsPillarAHashCountsOnlyBaseRoutableProviders(t *testing.T) {
+// The hash state counts the providers the entry lists, saturated ones
+// included, so it does not flip with load.
+func TestModelsPillarAHashCountsListedProviders(t *testing.T) {
 	registry := pool.NewRegistry([]config.ProviderConfig{
 		{ProviderID: "verified", EndpointURL: "https://verified.example"},
 		{ProviderID: "busy", EndpointURL: "https://busy.example"},
@@ -1270,8 +1276,8 @@ func TestModelsPillarAHashCountsOnlyBaseRoutableProviders(t *testing.T) {
 	if len(got.Data) != 1 {
 		t.Fatalf("models = %d, want 1 body=%s", len(got.Data), rr.Body.String())
 	}
-	if got.Data[0].HashVerified != true || got.Data[0].HashVerification.Status != "all_verified" ||
-		got.Data[0].HashVerification.VerifiedProviderCount != 1 || got.Data[0].HashVerification.UncataloguedProviderCount != 0 {
+	if got.Data[0].HashVerified != false || got.Data[0].HashVerification.Status != "partial" ||
+		got.Data[0].HashVerification.VerifiedProviderCount != 1 || got.Data[0].HashVerification.UncataloguedProviderCount != 1 {
 		t.Fatalf("hash_verification=%+v hash_verified=%v body=%s", got.Data[0].HashVerification, got.Data[0].HashVerified, rr.Body.String())
 	}
 }
@@ -9740,5 +9746,109 @@ func TestHTTPForwardingStripsReceiptHeaderWithNonPrintableBytes(t *testing.T) {
 				t.Fatalf("receipt header = %q, want stripped for non-printable bytes (%s)", got, tc.name)
 			}
 		})
+	}
+}
+
+// SPEC-002 FR-B1: listing ignores only saturation. A saturated provider that
+// is also excluded for any other reason (trust, compute integrity, catalog
+// admission, benchmark quarantine, receipt rotation, SPEC-051 member session)
+// still hides its model, with and without Pillar A.
+func TestModelsOmitsSaturatedProvidersExcludedForOtherReasons(t *testing.T) {
+	type exclusion struct {
+		before func(*pool.Provider)
+		after  func(*pool.Registry)
+	}
+	cases := map[string]exclusion{
+		"bearerless duplicate":     {before: func(p *pool.Provider) { p.AuthState = pool.AuthBearerlessDuplicate }},
+		"shard member session":     {before: func(p *pool.Provider) { p.ShardMemberV1 = true }},
+		"legacy catalog admission": {before: func(p *pool.Provider) { p.CatalogAdmissionMode = "legacy" }},
+		"compute integrity": {after: func(r *pool.Registry) {
+			r.SetComputeIntegritySuspended("p1", "model-a", true)
+		}},
+		"benchmark quarantined": {after: func(r *pool.Registry) { r.SetBenchmarkQuarantine("p1", "session-1", true) }},
+		"admission evidence stale": {after: func(r *pool.Registry) {
+			r.SetAdmissionEvidenceStale("p1", "session-1", true)
+		}},
+	}
+	for name, exclude := range cases {
+		for _, pillarA := range []bool{false, true} {
+			registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: "https://p1.example"}})
+			p := &pool.Provider{
+				ProviderID: "p1", AssignedID: "session-1", Hostname: "p1.local", ModelID: "model-a",
+				ModelParamsB: 7, RAMGB: 16, MaxContextTokens: 20000, MaxConcurrency: 4, SlotsFree: 0, SlotsTotal: 4,
+				ThroughputTPSEstimate: 20, EndpointURL: "https://p1.example", Tier: pool.TierPinned,
+				InferencePath: pool.InferencePathHTTPForwarding, State: pool.StateBusy,
+				LastHeartbeatAt: time.Now().UTC(), ConnectedAt: time.Now().UTC(), BinaryVersion: "0.1.0",
+			}
+			if exclude.before != nil {
+				exclude.before(p)
+			}
+			registry.Register(p, nil)
+			if exclude.after != nil {
+				exclude.after(registry)
+			}
+			snap := registry.Snapshot()
+			if len(snap) != 1 || snap[0].ListingEligible() {
+				t.Fatalf("%s: fixture is not a registered, listing-ineligible provider: %d", name, len(snap))
+			}
+			opts := []buyer.Option{}
+			if pillarA {
+				opts = append(opts, buyer.WithTier2Config(config.Tier2Config{ObserveEnabled: true}))
+			}
+			server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0), opts...)
+			rr := httptest.NewRecorder()
+			server.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
+			var got struct {
+				Data []struct {
+					ID string `json:"id"`
+				} `json:"data"`
+			}
+			if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+				t.Fatalf("%s: json: %v", name, err)
+			}
+			if len(got.Data) != 0 {
+				t.Fatalf("%s (pillarA=%v): excluded saturated provider listed its model: %s", name, pillarA, rr.Body.String())
+			}
+		}
+	}
+}
+
+// The Pillar A hash state counts only the providers the entry lists: a
+// saturated provider that a listing gate removes (here a loopback BYOM
+// runtime, which never serves paid global traffic) does not change it.
+func TestModelsPillarAHashIgnoresProvidersTheListOmits(t *testing.T) {
+	registry := pool.NewRegistry([]config.ProviderConfig{
+		{ProviderID: "verified", EndpointURL: "https://verified.example"},
+		{ProviderID: "loopback", EndpointURL: "https://loopback.example"},
+	})
+	registerWithHashStatusSlots(registry, "verified", "session-1", "model-a", pool.StateReady, 20000, 1, 1, "https://verified.example", pool.HashStatusVerified)
+	registry.Register(&pool.Provider{
+		ProviderID: "loopback", AssignedID: "session-2", Hostname: "loopback.local", ModelID: "model-a",
+		ModelParamsB: 7, RAMGB: 16, MaxContextTokens: 20000, MaxConcurrency: 1, SlotsFree: 0, SlotsTotal: 1,
+		ThroughputTPSEstimate: 20, EndpointURL: "https://loopback.example", Tier: pool.TierPinned,
+		InferencePath: pool.InferencePathHTTPForwarding, State: pool.StateBusy, RuntimeSource: "ollama_loopback",
+		LastHeartbeatAt: time.Now().UTC(), ConnectedAt: time.Now().UTC(), BinaryVersion: "0.1.0",
+		HashStatus: pool.HashStatusMismatch,
+	}, nil)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0),
+		buyer.WithTier2Config(config.Tier2Config{ObserveEnabled: true}))
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
+	var got struct {
+		Data []struct {
+			ProviderCount    int `json:"provider_count"`
+			HashVerification struct {
+				Status                string `json:"status"`
+				VerifiedProviderCount int    `json:"verified_provider_count"`
+				MismatchProviderCount int    `json:"mismatch_provider_count"`
+			} `json:"hash_verification"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	if len(got.Data) != 1 || got.Data[0].ProviderCount != 1 || got.Data[0].HashVerification.Status != "all_verified" ||
+		got.Data[0].HashVerification.VerifiedProviderCount != 1 || got.Data[0].HashVerification.MismatchProviderCount != 0 {
+		t.Fatalf("hash state counts an omitted provider: %s", rr.Body.String())
 	}
 }

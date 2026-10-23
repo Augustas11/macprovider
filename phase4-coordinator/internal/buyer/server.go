@@ -285,7 +285,10 @@ type Server struct {
 	visionQualifications []config.VisionQualificationConfig
 	// buyerUXConformance caps /v1/models capabilities by each model's
 	// buyer-UX conformance record (SPEC-023 §16.11), keyed by lower-case model id.
-	buyerUXConformance     map[string]buyerUXCapabilities
+	buyerUXConformance map[string]buyerUXCapabilities
+	// buyerUXConformanceSHA256 is the SHA-256 of the record file in force.
+	buyerUXConformanceSHA256 string
+
 	maxRetries             int
 	retryPerAttemptTimeout time.Duration
 	maxFaultedPerRequest   int
@@ -550,11 +553,10 @@ func WithRoutingConfig(cfg config.RoutingConfig) Option {
 		s.visionQualifications = append([]config.VisionQualificationConfig(nil), cfg.VisionQualifications...)
 		s.routingMu.Unlock()
 		// SPEC-023 §16.11: conformance records cap /v1/models capabilities.
-		// An unreadable file publishes no records and logs why.
-		if records, err := LoadBuyerUXConformance(cfg.BuyerUXConformancePath); err != nil {
+		// An unreadable file publishes no records and logs why; SIGHUP
+		// applies the path again (cmd/coordinator reloadCoordinatorConfig).
+		if _, err := s.ReloadBuyerUXConformance(cfg.BuyerUXConformancePath); err != nil {
 			s.log.Error().Err(err).Str("path", cfg.BuyerUXConformancePath).Msg("routing.buyer_ux_conformance_path unreadable; no conformance records applied")
-		} else {
-			s.buyerUXConformance = records
 		}
 		s.maxRetries = cfg.MaxRetries
 		if cfg.RetryPerAttemptTimeoutS > 0 {
@@ -2401,19 +2403,26 @@ func unavailableModelComputeIntegrityStatus() modelComputeIntegrityStatus {
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	models := map[string]modelEntry{}
 	providers := s.pool.Snapshot()
+	// listed holds the providers that passed every listing gate below; the
+	// Pillar A hash state is computed over exactly these.
+	listed := make([]pool.Provider, 0, len(providers))
 	cfg := s.tier2Config()
 	pillarAActive := tier2.ModelHashActive(cfg)
 	tier2Active := tier2.ConfigActive(cfg)
 	for _, p := range providers {
-		if pillarAActive && !p.RoutingEligible() {
+		// SPEC-002 FR-B1: a provider at capacity (every slot in flight, or
+		// busy) still lists its model; only the free-slot term of routing
+		// eligibility is ignored here. Selection is unchanged.
+		if pillarAActive && !p.ListingEligible() {
 			continue
 		}
-		if !pillarAActive && (!p.CapacityEligible() || (p.State == pool.StateBusy && !p.RoutingEligible())) {
+		if !pillarAActive && (!p.CapacityEligible() || (p.State == pool.StateBusy && !p.ListingEligible())) {
 			continue
 		}
 		if !s.byomDefaultPaidRoutingEligible(p) {
 			continue
 		}
+		listed = append(listed, p)
 		excluded := tier2Active && s.tier2ProviderExcludedForConfig(p, cfg)
 		entry := models[p.ModelID]
 		if entry.ID == "" {
@@ -2466,7 +2475,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 				if data[i].Objective != "" {
 					continue
 				}
-				s.applyHashVerification(&data[i], providers, cfg)
+				s.applyHashVerification(&data[i], listed, cfg)
 			}
 		}
 	}
@@ -2496,7 +2505,10 @@ func (s *Server) applyHashVerification(entry *modelEntry, providers []pool.Provi
 		// not per catalog-key billing equivalence. modelIDEqual/#900 aliases
 		// must not cross-contaminate /v1/models Pillar-A status across
 		// distinct HF ids that share a rate-card key.
-		if !hasAvailableSlot(p) || !strings.EqualFold(p.ModelID, entry.ID) {
+		// providers is the set handleModels listed (every listing gate,
+		// BYOM included); saturation does not change a model's hash state
+		// (SPEC-002 FR-B1).
+		if !strings.EqualFold(p.ModelID, entry.ID) {
 			continue
 		}
 		status := s.effectiveHashStatus(p, cfg)
