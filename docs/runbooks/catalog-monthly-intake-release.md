@@ -157,11 +157,22 @@ rate row; `recommendable: true` in `demand-rank.json`;
 bench provenance other than `omlx_seeded`; and your explicit admission
 reference (release-notes anchor or ticket id, no identity).
 
-### 2a. Buyer-UX conformance (every promotion, SPEC-023 §16.11)
+### 2a. Buyer-UX conformance (every promotion, SPEC-023 v0.22.34 §16.11)
 
-Before you write a `promote_recommendable` entry, run the conformance suite
-against the model as the gateway serves it, and commit the record with the
-release:
+The suite runs through the gateway, so it needs the model served there. Which
+case applies depends on whether the key already has a record:
+
+- **The key has a record** (it was promoted before, or a provider already
+  serves it through the gateway): re-run it before you write the
+  `promote_recommendable` entry and commit the record with the release, as
+  below. A record that fails blocks the promotion.
+- **First promotion, no record yet** (a `listed` row cannot serve gateway
+  traffic, so no gateway record can exist): promote with the record owed
+  (§16.11 rule 4), then run the suite after the release is live. See
+  "Conformance owed" below.
+
+For a key that has a record, run the conformance suite against the model as
+the gateway serves it, and commit the record with the release:
 
 ```bash
 python3 scripts/buyer_ux_conformance.py run \
@@ -196,6 +207,49 @@ coordinator runtime that predates the SIGHUP reload gets one restart instead,
 about 5-40 seconds of coordinator downtime, and `next` prints that downtime
 first. On failure the step restores `coordinator.yaml` and the record file,
 then applies them again the same way.
+
+#### Conformance owed (first promotion, §16.11 rule 4)
+
+1. In the `promote_recommendable` entry's `promotion` object, add
+   `"conformance_owed": true`.
+2. In `buyer-ux-conformance.json`, add a top-level `owed` entry for the key:
+
+   ```json
+   "owed": {"<catalog key>": {"model": "<served model id>", "release_id": "<the release you are cutting>"}}
+   ```
+
+   The generator refuses the promotion without it, refuses a `model` that is
+   not the candidate row's served model id, and refuses the marker when the
+   key already has a record that fails.
+3. Deploy in this order. The coordinator advertises the base capability set
+   only for an owed model (no tools, `tool_choice`, reasoning or
+   `response_format`), and only a runtime that has this rule applies it.
+   `catalog-activate.sh` step `buyer_ux_conformance` blocks, and names
+   `scripts/ops/pearl-runtime.sh status`, while the running coordinator
+   ignores owed entries. So release the coordinator runtime first, then let
+   `catalog-activate.sh next --run` install the record file (step
+   `buyer_ux_conformance`) before it activates the release (step
+   `catalog_activation`).
+4. After the release is live, step `buyer_ux_conformance_owed` stays open.
+   While a provider serves the model through the gateway, run the suite and
+   check the owed state:
+
+   ```bash
+   python3 scripts/buyer_ux_conformance.py run \
+     --key-file ~/.config/macprovider/buyer-api-key \
+     --model <served model id> --catalog-key <catalog key>
+   python3 scripts/buyer_ux_conformance.py owed-status   # state: settled
+   ```
+
+5. Commit the record file to `origin/main`. This is a records-only change
+   with no re-signed release. The owed entry may stay; the record decides.
+   Then `catalog-activate.sh next --run` installs it (step
+   `buyer_ux_conformance`), and step `buyer_ux_conformance_owed` is done.
+
+A record that fails cannot land while the promoting release's
+`intake-decision.json` is current, because `catalog-release.py verify` re-runs
+the gate. Fix the serving path and run the suite again, or cut a release that
+moves the key back to `listed`. Until then the model keeps the base set.
 
 ## 3. Write `intake-decision.json`
 
