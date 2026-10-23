@@ -1013,6 +1013,7 @@ func (s *Server) handleFeedback(w http.ResponseWriter, r *http.Request) {
 		Scope     string `json:"scope"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, s.cfg.Limits.MaxFeedbackBodyBytes)).Decode(&req); err != nil {
+		drainIfMaxBytesExceeded(w, r, err, s.cfg.Limits.MaxFeedbackBodyBytes+1)
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "invalid_feedback", "Invalid feedback")
 		return
 	}

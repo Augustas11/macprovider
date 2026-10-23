@@ -683,6 +683,7 @@ func (s *Server) readWalletSessionBody(w http.ResponseWriter, r *http.Request, l
 		return nil, false
 	}
 	if int64(len(body)) > limit {
+		drainOversizeRequestBody(w, r.Body, int64(len(body)))
 		writeError(w, http.StatusRequestEntityTooLarge, "invalid_request_error", "request_too_large", "Request body too large")
 		return nil, false
 	}
