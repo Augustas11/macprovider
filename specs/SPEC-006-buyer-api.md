@@ -1,7 +1,23 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.64 (2026-10-23, grammar-unavailable settlement guard; OpenRouter parameters from the coordinator capability result; #2107)
+**Version:** 0.9.65 (2026-10-24, Messages thinking keeps reasoning on; #2107)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.6.17, SPEC-003 v0.7, SPEC-004 v0.3.2
+
+**Change log v0.9.65 (2026-10-24, Related: #2107):**
+- §5.4a `/v1/messages` `thinking`: `enabled` with `budget_tokens` below 16384
+  (or absent) and `adaptive` map to `reasoning_effort` `medium`; larger
+  budgets map to `high`. Enabled or adaptive thinking never maps to `low`:
+  the GLM-5.3 template renders `low` as "Reasoning Effort: Low" and the model
+  then skips reasoning, and an omitted effort becomes the provider's `low`
+  default when tools are declared (SPEC-018 §3.12). `medium` selects each
+  catalog reasoning template's default level. `disabled` stays `low`; no
+  `thinking` forwards no `reasoning_effort` and returns no thinking block.
+- `signature`: thinking blocks carry `"signature": ""` (non-streaming) and are
+  closed with an empty `signature_delta` (streaming). The Anthropic SDKs type
+  the field as a string and accept the empty value. The gateway signs no
+  reasoning, so it never emits a value that a client could mistake for a
+  verifiable Anthropic signature. Thinking blocks a client echoes back are
+  dropped before dispatch, so the signature is never checked.
 
 **Change log v0.9.64 (2026-10-23, Related: #2107, post-merge re-audit):**
 - §17.9 settlement: a coordinator `503 tool_grammar_provider_unavailable` is
