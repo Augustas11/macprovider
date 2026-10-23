@@ -4,15 +4,20 @@ import Foundation
 /// optional declared fields are emitted too. Values remain model-generated.
 public enum GrammarTemplates {
     public static func grammar(for request: ChatCompletionRequest, traits: RequestOutputTraits) throws -> ByteGrammar? {
+        let family = traits.toolGrammar ?? ToolCallGrammar.family(modelID: request.model)
         switch request.responseFormat {
-        case .jsonSchema(let spec): return schema(spec.schema)
-        case .jsonObject: return .choice([genericObject(depth: 3), array(generic(depth: 2))])
+        case .jsonSchema(let spec):
+            try validateRequiredProperties(spec.schema)
+            return structured(schema(spec.schema), family: family)
+        case .jsonObject:
+            return structured(.choice([genericObject(depth: 1), array(generic(depth: 0))]), family: family)
         case .text: break
         }
         let selection = try ToolSelectionPolicy.selection(request.promptSource.toolChoice)
         guard selection.requiresCall else { return nil }
-        guard let family = traits.toolGrammar ?? ToolCallGrammar.family(modelID: request.model) else { return nil }
+        guard let family else { return nil }
         let schemas = try ToolSelectionPolicy.schemas(request)
+        for value in schemas.values { try validateRequiredProperties(value) }
         if family == .glm || family == .deepseekV4 || family == .gemma4 {
             for value in schemas.values { try validateTaggedSchema(value) }
         }
@@ -28,6 +33,9 @@ public enum GrammarTemplates {
     public static func schema(_ value: JSONValue) -> ByteGrammar { schema(value, depth: 0, gemma: false) }
 
     public static func toolCall(name: String, parameters: JSONValue, family: ToolCallGrammar) -> ByteGrammar {
+        // Unsupported top-level keywords must never widen a function's
+        // parameters from an object into arbitrary JSON scalars.
+        let parameters = canonicalToolObject(parameters)
         let arguments = schema(parameters)
         switch family {
         case .qwen:
@@ -53,6 +61,39 @@ public enum GrammarTemplates {
         case .harmony:
             return .sequence([.literal("<|start|>assistant to=functions." + name + "<|channel|>commentary<|message|>"), arguments, .literal("<|call|>")])
         }
+    }
+
+    private static func structured(_ body: ByteGrammar, family: ToolCallGrammar?) -> ByteGrammar {
+        guard family == .harmony else { return body }
+        return .sequence([.literal("<|start|>assistant<|channel|>final<|message|>"), body, .literal("<|return|>")])
+    }
+
+    private static func canonicalToolObject(_ value: JSONValue) -> JSONValue {
+        guard case .object(let object) = value else {
+            return .object(["type": .string("object"), "properties": .object([:])])
+        }
+        var result: [String: JSONValue] = ["type": .string("object"), "properties": object["properties"] ?? .object([:])]
+        for key in ["required", "additionalProperties"] { result[key] = object[key] }
+        return .object(result)
+    }
+
+    private static func validateRequiredProperties(_ value: JSONValue) throws {
+        guard case .object(let object) = value else { return }
+        if case .array(let values)? = object["enum"],
+           !values.contains(where: { matchesDeclaredType($0, type: object["type"]) }) {
+            throw unsupportedGrammar("Output enum has no values matching its declared type")
+        }
+        let properties: [String: JSONValue]
+        if case .object(let declared)? = object["properties"] { properties = declared } else { properties = [:] }
+        if case .array(let required)? = object["required"] {
+            for key in required {
+                guard case .string(let name) = key, properties[name] != nil else {
+                    throw unsupportedGrammar("Required output properties need declared schemas")
+                }
+            }
+        }
+        for child in properties.values { try validateRequiredProperties(child) }
+        if let items = object["items"] { try validateRequiredProperties(items) }
     }
 
     private static func validateTaggedSchema(_ value: JSONValue) throws {
@@ -82,33 +123,41 @@ public enum GrammarTemplates {
 
     private static let digits = ByteGrammar.bytes(Set("0123456789".utf8))
     private static let nonzero = ByteGrammar.bytes(Set("123456789".utf8))
+    // Fifteen integral digits and nonpositive bounded exponents stay finite
+    // and inside the parser's safe numeric magnitude for every generated value.
     private static let integer = ByteGrammar.sequence([.optional(.literal("-")), .choice([
-        .literal("0"), .sequence([nonzero, .zeroOrMore(digits)])
+        .literal("0"), .sequence([nonzero] + Array(repeating: .optional(digits), count: 14))
     ])])
     private static let number = ByteGrammar.sequence([integer,
         .optional(.sequence([.literal("."), digits, .zeroOrMore(digits)])),
-        .optional(.sequence([.bytes(Set("eE".utf8)), .optional(.bytes(Set("+-".utf8))), digits, .zeroOrMore(digits)]))
+        .optional(.sequence([.bytes(Set("eE".utf8)), .literal("-"), digits, .optional(digits)]))
     ])
     // ASCII is a valid JSON string sublanguage. Unicode is available via escapes.
+    private static let unicodeEscape = ByteGrammar.choice([
+        .sequence([.bytes(Set("0123456789abcABCeEfF".utf8)), hex, hex, hex]),
+        .sequence([.bytes(Set("dD".utf8)), .bytes(Set("01234567".utf8)), hex, hex]),
+        .sequence([.bytes(Set("dD".utf8)), .bytes(Set("89abAB".utf8)), hex, hex,
+                   .literal("\\u"), .bytes(Set("dD".utf8)), .bytes(Set("cdefCDEF".utf8)), hex, hex])
+    ])
     private static let string = ByteGrammar.sequence([.literal("\""), .zeroOrMore(.choice([
         .bytes(Set(UInt8(32)...UInt8(126)).subtracting([34, 92, 60])),
         .sequence([.literal("\\"), .choice([.bytes(Set("\"\\/bfnrt".utf8)),
-            .sequence([.literal("u"), hex, hex, hex, hex])])])
+            .sequence([.literal("u"), unicodeEscape])])])
     ])), .literal("\"")])
     private static let hex = ByteGrammar.bytes(Set("0123456789abcdefABCDEF".utf8))
     private static let rawText = ByteGrammar.zeroOrMore(.bytes(Set(UInt8(32)...UInt8(126)).subtracting([60])))
     private static func quoted(_ value: String) -> String { (try? JSONValue.string(value).deterministicJSONString()) ?? "\"\"" }
 
     private static func schema(_ value: JSONValue, depth: Int, gemma: Bool) -> ByteGrammar {
-        guard depth < 8, case .object(let object) = value else { return generic(depth: 2, gemma: gemma) }
+        guard depth < 8, case .object(let object) = value else { return generic(depth: 1, gemma: gemma) }
         let supported: Set<String> = ["type", "properties", "required", "additionalProperties", "items", "enum", "description", "title", "$schema"]
-        guard Set(object.keys).isSubset(of: supported) else { return generic(depth: 2, gemma: gemma) }
+        guard Set(object.keys).isSubset(of: supported) else { return generic(depth: 1, gemma: gemma) }
         if case .array(let values)? = object["enum"], !values.isEmpty {
-            return .choice(values.map { literal($0, gemma: gemma) })
+            return .choice(values.filter { matchesDeclaredType($0, type: object["type"]) }.map { literal($0, gemma: gemma) })
         }
         switch object["type"] {
         case .string("object")?:
-            guard case .object(let properties)? = object["properties"] else { return genericObject(depth: 2, gemma: gemma) }
+            guard case .object(let properties)? = object["properties"] else { return genericObject(depth: 1, gemma: gemma) }
             let entries = properties.keys.sorted().map { key in
                 ByteGrammar.sequence([literal(.string(key), gemma: gemma), .literal(":"), schema(properties[key]!, depth: depth + 1, gemma: gemma)])
             }
@@ -119,7 +168,16 @@ public enum GrammarTemplates {
         case .string("integer")?: return integer
         case .string("boolean")?: return .choice([.literal("true"), .literal("false")])
         case .string("null")?: return .literal("null")
-        default: return generic(depth: 2, gemma: gemma)
+        default: return generic(depth: 1, gemma: gemma)
+        }
+    }
+
+    private static func matchesDeclaredType(_ value: JSONValue, type: JSONValue?) -> Bool {
+        guard case .string(let type)? = type else { return true }
+        switch (type, value) {
+        case ("string", .string), ("integer", .int), ("number", .int), ("number", .double),
+             ("boolean", .bool), ("object", .object), ("array", .array), ("null", .null): return true
+        default: return false
         }
     }
 

@@ -31,12 +31,52 @@ final class GrammarTemplatesTests: XCTestCase {
         let string = GrammarTemplates.schema(.object(["type": .string("string")]))
         XCTAssertTrue(try accepts(string, #""escaped\n\u00e9""#))
         XCTAssertFalse(try accepts(string, "\"bad\nline\""))
+        XCTAssertTrue(try accepts(string, #""\uD83D\uDE00""#))
+        XCTAssertFalse(try accepts(string, #""\uD800""#))
+        XCTAssertFalse(try accepts(string, #""\uDC00""#))
     }
 
     func testUnsupportedKeywordFallsBackToJSONWithoutProse() throws {
         let grammar = GrammarTemplates.schema(.object(["type": .string("string"), "pattern": .string("x")]))
-        XCTAssertTrue(try accepts(grammar, #"{"nested":[true,3]}"#))
+        XCTAssertTrue(try accepts(grammar, #"{"nested":true}"#))
         XCTAssertFalse(try accepts(grammar, "Here is JSON: {}"))
+    }
+
+    func testDefaultCompileBudgetCoversStructuredAndFallbackLanguages() throws {
+        for format in [#"{"type":"json_object"}"#, #"{"type":"json_schema","json_schema":{"name":"fallback","strict":false,"schema":{"type":"string","pattern":"x"}}}"#] {
+            let request = try ChatCompletionRequest.parse(data: Data(("{\"model\":\"test\",\"messages\":[{\"role\":\"user\",\"content\":\"test\"}],\"response_format\":" + format + "}").utf8))
+            _ = try XCTUnwrap(GrammarTemplates.grammar(for: request, traits: .unresolved)).compile()
+        }
+        let parameters = JSONValue.object(["type": .string("object"), "properties": .object(["value": .object(["pattern": .string("x")])]), "unsupported": .bool(true)])
+        for family in ToolCallGrammar.allCases {
+            _ = try GrammarTemplates.toolCall(name: "f", parameters: parameters, family: family).compile()
+        }
+    }
+
+    func testEnumHonorsDeclaredTypeAndNumbersStayFinite() throws {
+        let typedEnum = GrammarTemplates.schema(.object(["type": .string("integer"), "enum": .array([.int(2), .string("wrong")])]))
+        XCTAssertTrue(try accepts(typedEnum, "2"))
+        XCTAssertFalse(try accepts(typedEnum, #""wrong""#))
+        let number = GrammarTemplates.schema(.object(["type": .string("number")]))
+        XCTAssertTrue(try accepts(number, "123.45e-20"))
+        XCTAssertFalse(try accepts(number, "1e999"))
+        XCTAssertFalse(try accepts(number, "999999999999999999999999999999999999"))
+    }
+
+    func testUndeclaredRequiredPropertiesRejectBeforeGeneration() throws {
+        let raw = #"{"model":"test","messages":[{"role":"user","content":"test"}],"response_format":{"type":"json_schema","json_schema":{"name":"required","strict":false,"schema":{"type":"object","required":["missing"]}}}}"#
+        let request = try ChatCompletionRequest.parse(data: Data(raw.utf8))
+        XCTAssertThrowsError(try GrammarTemplates.grammar(for: request, traits: .unresolved)) { error in
+            XCTAssertEqual((error as? APIError)?.status, 400)
+        }
+    }
+
+    func testToolWithUndeclaredRequiredPropertyRejectsBeforeGeneration() throws {
+        let raw = #"{"model":"mlx-community/Qwen3.6-35B-A3B-4bit","messages":[{"role":"user","content":"test"}],"max_tokens":100,"tool_choice":"required","tools":[{"type":"function","function":{"name":"f","parameters":{"type":"object","required":["missing"]}}}]}"#
+        let request = try ChatCompletionRequest.parse(data: Data(raw.utf8))
+        XCTAssertThrowsError(try GrammarTemplates.grammar(for: request, traits: .unresolved)) { error in
+            XCTAssertEqual((error as? APIError)?.status, 400)
+        }
     }
 
     func testEveryFamilyHasACompleteCallLanguage() throws {
