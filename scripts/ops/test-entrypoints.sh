@@ -2129,7 +2129,7 @@ import importlib.util, json, sys
 spec = importlib.util.spec_from_file_location("bux", sys.argv[1]); bux = importlib.util.module_from_spec(spec); spec.loader.exec_module(bux)
 path, release, state = sys.argv[2:5]
 doc = json.load(open(path))
-model = "Test/Owed-Model-4bit"
+model = "Test/Qwen3-Owed-4bit"
 # Only the fixture key is owed here; records for other models stay.
 doc["owed"] = {"test/owed-model": {"model": model, "release_id": release}}
 doc["records"].pop("test/owed-model", None)
@@ -2173,7 +2173,7 @@ if [ "$(state_of buyer_ux_conformance_owed)" = pending ]; then ok; else bad "owe
 printf '{"release_id":"%s","status":"live_verified","feeds":{"x":{"verified_at":"2026-01-01T00:00:00Z"}}}' "$R" > "$tmp/svc/autotune-release.json"
 run_rc 0 "owed status after the promoting release is live" scripts/ops/catalog-activate.sh status
 if [ "$(state_of buyer_ux_conformance_owed)" = owed ]; then ok; else bad "owed after activation: $(state_of buyer_ux_conformance_owed)"; fi
-case "$(fact_of buyer_ux_conformance_owed)" in "test/owed-model (Test/Owed-Model-4bit, owed: no record)") ok ;; *) bad "owed fact: $(fact_of buyer_ux_conformance_owed)" ;; esac
+case "$(fact_of buyer_ux_conformance_owed)" in "test/owed-model (Test/Qwen3-Owed-4bit, owed: no record)") ok ;; *) bad "owed fact: $(fact_of buyer_ux_conformance_owed)" ;; esac
 if [ "$(next_field id)" = buyer_ux_conformance_owed ]; then
   case "$(next_field kind):$(next_field command)" in manual:*"buyer_ux_conformance.py run"*) ok ;; *) bad "owed next: $(next_field kind) $(next_field command)" ;; esac
 fi
