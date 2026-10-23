@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -206,5 +207,44 @@ func TestBuyerUXConformanceMasksFailedCapabilities(t *testing.T) {
 	// The checked-in record file loads.
 	if _, err := LoadBuyerUXConformance("../../../phase3-binary/catalog/autotune/buyer-ux-conformance.json"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// The checked-in live records (#2107): Llama-3.2-3B failed tool_round_trip, so
+// /v1/models drops tools for it; GLM-5.3-Flash passed everything and keeps its
+// derived set.
+func TestCheckedInBuyerUXConformanceRecords(t *testing.T) {
+	records, err := LoadBuyerUXConformance("../../../phase3-binary/catalog/autotune/buyer-ux-conformance.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := NewServer(pool.NewRegistry(nil), zerolog.Nop(), time.Now().UTC())
+	s.SetBuyerUXConformance(records)
+	entryFor := func(model string, conform bool) modelEntry {
+		p := pool.Provider{ModelID: model, BinaryVersion: toolGrammarProviderMinVersion}
+		entry := modelEntry{ID: model, Capabilities: mergeModelCapabilities(nil, p, false)}
+		if conform {
+			s.applyBuyerUXConformance(&entry)
+		}
+		finishModelCapabilities(&entry)
+		return entry
+	}
+	llama := entryFor("mlx-community/Llama-3.2-3B-Instruct-4bit", true)
+	if !entryFor("mlx-community/Llama-3.2-3B-Instruct-4bit", false).Capabilities.Tools {
+		t.Fatal("Llama-3.2 must derive tools before the record masks it")
+	}
+	if llama.Capabilities.Tools || len(llama.Capabilities.ToolChoice) != 0 || !llama.Capabilities.ResponseFormat {
+		t.Fatalf("llama capabilities=%+v", llama.Capabilities)
+	}
+	if strings.Contains(strings.Join(llama.SupportedParameters, ","), "tool") {
+		t.Fatalf("llama supported_parameters=%v", llama.SupportedParameters)
+	}
+	glm := entryFor("Jundot/GLM-5.3-Flash-oQ4e-mtp", true)
+	derived := entryFor("Jundot/GLM-5.3-Flash-oQ4e-mtp", false)
+	if !reflect.DeepEqual(glm.Capabilities, derived.Capabilities) || !reflect.DeepEqual(glm.SupportedParameters, derived.SupportedParameters) {
+		t.Fatalf("glm capabilities changed: got %+v want %+v", glm.Capabilities, derived.Capabilities)
+	}
+	if !glm.Capabilities.Tools || !glm.Capabilities.Reasoning {
+		t.Fatalf("glm capabilities=%+v", glm.Capabilities)
 	}
 }
