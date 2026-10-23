@@ -7,7 +7,8 @@ import XCTest
 final class ShardLinkHealthTests: XCTestCase {
     private let configuration = ShardLinkConfiguration(groupEpoch: 5, heartbeatInterval: 0.02, missedHeartbeatLimit: 5)
 
-    private func pair() throws -> (ShardStageLink, ShardStageLink) {
+    private func pair(_ configuration: ShardLinkConfiguration? = nil) throws -> (ShardStageLink, ShardStageLink) {
+        let configuration = configuration ?? self.configuration
         let listener = try ShardStageListener(host: "127.0.0.1", port: 0)
         let dialed = try ShardStageLink.connect(host: "127.0.0.1", port: listener.port, timeout: 5, configuration: configuration)
         return (try listener.accept(timeout: 5, configuration: configuration), dialed)
@@ -106,7 +107,9 @@ final class ShardLinkHealthTests: XCTestCase {
     }
 
     func testClosingWakesABlockedReceiveAndThePeerSeesTheEnd() throws {
-        let (accepted, dialed) = try pair()
+        // Liveness must not fire before the close on a slow host; this test is about close, not silence.
+        let (accepted, dialed) = try pair(
+            ShardLinkConfiguration(groupEpoch: 5, heartbeatInterval: 0.02, missedHeartbeatLimit: 500))
         let woke = expectation(description: "receive returned")
         let outcome = ErrorBox()
         DispatchQueue.global().async {
