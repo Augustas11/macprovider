@@ -248,6 +248,46 @@ validate_dsv4_target_status "$FIXTURE" 41
             )
             self.assertEqual(result.returncode == 0, expected, result.stderr)
 
+    def test_dsv4_window_hold_waits_for_the_file_and_is_capped(self):
+        # A fake clock: each sleep advances it; REMOVE_AFTER removes the hold
+        # file after that many sleeps (0 = never).
+        harness = """
+HOLD="$OPS_TMP_DIR/hold"
+echo 1000 > "$OPS_TMP_DIR/clock"
+date() { cat "$OPS_TMP_DIR/clock"; }
+sleep() {
+  echo $(( $(cat "$OPS_TMP_DIR/clock") + $1 )) > "$OPS_TMP_DIR/clock"
+  trace "sleep marker=$([ -e "$HOLD.holding" ] && echo yes || echo no)"
+  n=$(grep -c '^sleep' "$TRACE")
+  if [ "${REMOVE_AFTER:-0}" -gt 0 ] && [ "$n" -ge "$REMOVE_AFTER" ]; then rm -f "$HOLD"; fi
+}
+"""
+        def run(setup):
+            result, _ = self.run_shell(["dsv4_window_hold"], harness + setup + """
+dsv4_window_hold tx-1
+trace "end clock=$(cat "$OPS_TMP_DIR/clock") marker=$([ -e "$HOLD.holding" ] && echo yes || echo no) file=$([ -e "$HOLD" ] && echo yes || echo no)"
+cat "$TRACE"
+""")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return result.stdout.splitlines()
+
+        # Unset, absent file, or an invalid ceiling: no hold at all.
+        for setup in ("", 'DSV4_WINDOW_HOLD_FILE="$HOLD"\n',
+                      'DSV4_WINDOW_HOLD_FILE="$HOLD"; touch "$HOLD"; DSV4_WINDOW_HOLD_MAX_MINUTES=61\n',
+                      'DSV4_WINDOW_HOLD_FILE="$HOLD"; touch "$HOLD"; DSV4_WINDOW_HOLD_MAX_MINUTES=0\n',
+                      'DSV4_WINDOW_HOLD_FILE=relative; touch "$HOLD"\n'):
+            lines = run(setup)
+            self.assertFalse([line for line in lines if line.startswith("sleep")], setup)
+            self.assertTrue(lines[-1].startswith("end clock=1000 marker=no"), lines)
+        # Holds while the file exists, with the marker present, then clears it.
+        lines = run('DSV4_WINDOW_HOLD_FILE="$HOLD"; touch "$HOLD"; REMOVE_AFTER=3\n')
+        self.assertEqual(lines[:3], ["sleep marker=yes"] * 3)
+        self.assertEqual(lines[-1], "end clock=1015 marker=no file=no")
+        # Never removed: stops at the ceiling (1 minute = 12 sleeps of 5 s).
+        lines = run('DSV4_WINDOW_HOLD_FILE="$HOLD"; touch "$HOLD"; DSV4_WINDOW_HOLD_MAX_MINUTES=1\n')
+        self.assertEqual(len([line for line in lines if line.startswith("sleep")]), 12)
+        self.assertEqual(lines[-1], "end clock=1060 marker=no file=yes")
+
     def test_dsv4_window_restore_requires_glm_with_cb_and_native_mtp(self):
         valid = {"native_mtp": {"enabled": True, "mode": "active"}, "continuous_batching": {"active": True}}
         for mutate, expected in (
@@ -288,6 +328,7 @@ validate_glm_restored_status "$FIXTURE"
             "validate_dsv4_target_status",
             "buyer_ux_conformance.py\" run",
             "record_dsv4_serving_request",
+            "dsv4_window_hold",
             "checkpoint_remote proof_complete",
             "restore_provider ||",
         ]

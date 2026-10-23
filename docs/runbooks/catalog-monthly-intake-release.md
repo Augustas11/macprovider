@@ -259,6 +259,12 @@ then applies them again the same way.
    - it sends one tagged buyer request for evidence (e) and prints the
      `next --done buyer_serving_e2e` command to record after you check its
      request log and settlement rows on Pearl;
+   - if `DSV4_WINDOW_HOLD_FILE` (an absolute local path) exists at that point,
+     it keeps DeepSeek serving until you remove the file, at most
+     `DSV4_WINDOW_HOLD_MAX_MINUTES` (default 30, at most 60). While it holds,
+     `$DSV4_WINDOW_HOLD_FILE.holding` exists, so a separate client can wait
+     for it and send its own sequential prompts through the gateway without
+     overlapping the suite;
    - it restores GLM with continuous batching on and native MTP eligible.
 
    An interrupted window is restored first by step `dsv4_restore`; a

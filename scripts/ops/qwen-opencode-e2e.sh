@@ -24,6 +24,12 @@
 # directory) instead of downloading it, serves DeepSeek at one owner-pinned
 # slot and 32k context with continuous batching and native MTP off, runs the
 # owed buyer-UX conformance through GATEWAY_URL, and restores GLM.
+# DSV4_WINDOW_HOLD_FILE (absolute local path, optional): when the file exists
+# after the conformance run and the evidence (e) request, the window keeps
+# DeepSeek serving until the file is removed, at most
+# DSV4_WINDOW_HOLD_MAX_MINUTES (default 30, at most 60), so a separate client
+# can send its own sequential prompts through the gateway (#2083). While it
+# holds, "$DSV4_WINDOW_HOLD_FILE.holding" exists; GLM is restored afterwards.
 #
 # `diagnostic` is deliberately separate from live ops.  It requires
 # QWEN_E2E_DIAGNOSTIC_CONFIG/JOURNAL/VALIDATOR to be regular files below the
@@ -1358,6 +1364,7 @@ run_dsv4_window() {
   # SPEC-023-R017 5(e): one tagged buyer request through the gateway served by
   # this provider on the live release, for the operator's evidence record.
   record_dsv4_serving_request "$transaction_id" || rc=$?
+  dsv4_window_hold "$transaction_id"
   checkpoint_remote proof_complete "$DSV4_TARGET" "$REMOTE_REC_ONE"
   restore_provider || refuse "GLM restoration did not reach continuous batching and native MTP; the journal stays restore-required"
   [ "$rc" = 0 ] || refuse "the DeepSeek-V4-Flash conformance run failed a check; record at $record"
@@ -1383,6 +1390,38 @@ json.dump({"model_id": model, "sha256": "58ee40d4c0bc436695d1d8d6a6cdfdb0326ec37
            "request_id": request_id, "provider_coordinator_session_id": session}, open(out, "w"), sort_keys=True)
 PY
   log "evidence (e): check request_log and settlement for $request_id on Pearl (read-only), then: scripts/ops/catalog-activate.sh next --done buyer_serving_e2e --evidence 'model=$DSV4_TARGET_MODEL_ID@58ee40d4c0bc436695d1d8d6a6cdfdb0326ec37f25e13ec98ea1d5c0878e732c request $request_id session $session <settlement row>'"
+}
+
+# dsv4_window_hold TXID: while DSV4_WINDOW_HOLD_FILE exists, keep DeepSeek
+# serving for a separate client, bounded by DSV4_WINDOW_HOLD_MAX_MINUTES. The
+# EXIT trap still restores GLM if the window is interrupted during the hold.
+dsv4_window_hold() {
+  local file="${DSV4_WINDOW_HOLD_FILE:-}" max="${DSV4_WINDOW_HOLD_MAX_MINUTES:-30}" start now logged=-1 minute
+  [ -n "$file" ] || return 0
+  case "$file" in /*) ;; *) log "DSV4_WINDOW_HOLD_FILE is not absolute; no hold"; return 0 ;; esac
+  if ! [[ "$max" =~ ^[0-9]{1,2}$ ]] || [ "$max" -lt 1 ] || [ "$max" -gt 60 ]; then
+    log "DSV4_WINDOW_HOLD_MAX_MINUTES must be 1-60; no hold"
+    return 0
+  fi
+  rm -f "$file.holding"
+  [ -e "$file" ] || return 0
+  printf '%s\n' "$1" > "$file.holding"
+  start="$(date +%s)"
+  while [ -e "$file" ]; do
+    now="$(date +%s)"
+    if [ $((now - start)) -ge $((max * 60)) ]; then
+      log "hold ceiling of $max minutes reached; restoring GLM"
+      break
+    fi
+    minute=$(((now - start) / 60))
+    if [ "$minute" != "$logged" ]; then
+      log "holding DeepSeek-V4-Flash serving while $file exists (minute $minute of at most $max)"
+      logged="$minute"
+    fi
+    sleep 5
+  done
+  rm -f "$file.holding"
+  log "hold ended after $(( ($(date +%s) - start) / 60 )) minute(s); restoring GLM"
 }
 
 run_dsv4_restore() {
