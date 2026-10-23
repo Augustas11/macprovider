@@ -261,7 +261,9 @@ then applies them again the same way.
      request log and settlement rows on Pearl;
    - if `DSV4_WINDOW_HOLD_FILE` (an absolute local path) exists at that point,
      it keeps DeepSeek serving until you remove the file, at most
-     `DSV4_WINDOW_HOLD_MAX_MINUTES` (default 30, at most 60). While it holds,
+     `DSV4_WINDOW_HOLD_MAX_MINUTES` (default 30, at most 60; the cap also holds if
+     the clock steps back). The file must sit in a real (non-symlink) directory
+     you own with no group or other write, or no hold starts. While it holds,
      `$DSV4_WINDOW_HOLD_FILE.holding` exists, so a separate client can wait
      for it and send its own sequential prompts through the gateway without
      overlapping the suite;

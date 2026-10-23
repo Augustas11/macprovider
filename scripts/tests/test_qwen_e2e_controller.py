@@ -252,7 +252,8 @@ validate_dsv4_target_status "$FIXTURE" 41
         # A fake clock: each sleep advances it; REMOVE_AFTER removes the hold
         # file after that many sleeps (0 = never).
         harness = """
-HOLD="$OPS_TMP_DIR/hold"
+REAL_TMP="$(cd -P "$OPS_TMP_DIR" && pwd -P)"
+HOLD="$REAL_TMP/hold"
 echo 1000 > "$OPS_TMP_DIR/clock"
 date() { cat "$OPS_TMP_DIR/clock"; }
 sleep() {
@@ -263,7 +264,7 @@ sleep() {
 }
 """
         def run(setup):
-            result, _ = self.run_shell(["dsv4_window_hold"], harness + setup + """
+            result, _ = self.run_shell(["dsv4_window_hold", "dsv4_hold_marker_clear"], harness + setup + """
 dsv4_window_hold tx-1
 trace "end clock=$(cat "$OPS_TMP_DIR/clock") marker=$([ -e "$HOLD.holding" ] && echo yes || echo no) file=$([ -e "$HOLD" ] && echo yes || echo no)"
 cat "$TRACE"
@@ -287,6 +288,33 @@ cat "$TRACE"
         lines = run('DSV4_WINDOW_HOLD_FILE="$HOLD"; touch "$HOLD"; DSV4_WINDOW_HOLD_MAX_MINUTES=1\n')
         self.assertEqual(len([line for line in lines if line.startswith("sleep")]), 12)
         self.assertEqual(lines[-1], "end clock=1060 marker=no file=yes")
+        # A leading-zero ceiling is decimal, not octal (08 = 8 minutes = 96 sleeps).
+        lines = run('DSV4_WINDOW_HOLD_FILE="$HOLD"; touch "$HOLD"; DSV4_WINDOW_HOLD_MAX_MINUTES=08\n')
+        self.assertEqual(len([line for line in lines if line.startswith("sleep")]), 96)
+        # A wall clock stepped backwards cannot extend the hold past the cap.
+        lines = run('''DSV4_WINDOW_HOLD_FILE="$HOLD"; touch "$HOLD"; DSV4_WINDOW_HOLD_MAX_MINUTES=1
+sleep() { trace "sleep marker=yes"; }
+''')
+        self.assertEqual(len([line for line in lines if line.startswith("sleep")]), 12)
+        # A symlinked marker is never followed or clobbered; no hold starts.
+        lines = run('''DSV4_WINDOW_HOLD_FILE="$HOLD"; touch "$HOLD" "$REAL_TMP/victim"
+ln -s "$REAL_TMP/victim" "$HOLD.holding"
+dsv4_hold_marker_clear() { :; }
+''')
+        self.assertFalse([line for line in lines if line.startswith("sleep")])
+        # A group/other-writable directory is refused: no hold, no marker.
+        lines = run('''DSV4_WINDOW_HOLD_FILE="$HOLD"; touch "$HOLD"; chmod 770 "$REAL_TMP"
+''')
+        self.assertFalse([line for line in lines if line.startswith("sleep")])
+        self.assertTrue(lines[-1].startswith("end clock=1000 marker=no"), lines)
+        # The interrupt cleanup removes the readiness marker.
+        result, _ = self.run_shell(["dsv4_hold_marker_clear"], '''DSV4_WINDOW_HOLD_FILE="$OPS_TMP_DIR/hold"
+touch "$DSV4_WINDOW_HOLD_FILE.holding"
+DSV4_HOLD_MARKER="$DSV4_WINDOW_HOLD_FILE.holding"
+dsv4_hold_marker_clear
+[ ! -e "$DSV4_WINDOW_HOLD_FILE.holding" ] && echo cleared
+''')
+        self.assertEqual(result.stdout.strip(), "cleared", result.stderr)
 
     def test_dsv4_window_restore_requires_glm_with_cb_and_native_mtp(self):
         valid = {"native_mtp": {"enabled": True, "mode": "active"}, "continuous_batching": {"active": True}}

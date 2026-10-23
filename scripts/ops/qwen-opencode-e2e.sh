@@ -1096,6 +1096,7 @@ campaign_cleanup() {
   local rc=$? cleanup_rc=0 cleanup_status cleanup_required journal_absent=false intent_json=""
   trap - EXIT INT TERM HUP
   set +e
+  dsv4_hold_marker_clear
   if studio_helper inspect --journal "$QWEN_E2E_JOURNAL" > "$OPS_TMP_DIR/cleanup-journal.json" 2>/dev/null; then
     cleanup_status="$(json_field "$OPS_TMP_DIR/cleanup-journal.json" 'd.get("status")')"
     cleanup_required="$(json_field "$OPS_TMP_DIR/cleanup-journal.json" 'd.get("restore_required")')"
@@ -1288,6 +1289,7 @@ run_native_mtp_campaign() {
 
 run_dsv4_window() {
   require_catalog_lock catalog-activate:buyer_ux_conformance_owed
+  dsv4_hold_marker_clear
   for name in QWEN_E2E_CLI QWEN_E2E_CONFIG QWEN_E2E_JOURNAL QWEN_E2E_HANDBACK \
     QWEN_E2E_WRITTEN_HANDBACK BUYER_TOKEN_FILE DSV4_IMPORT_DIR GATEWAY_URL; do
     [ -n "${!name:-}" ] || refuse "$name is required by the fixed DeepSeek-V4-Flash window"
@@ -1394,22 +1396,48 @@ PY
 
 # dsv4_window_hold TXID: while DSV4_WINDOW_HOLD_FILE exists, keep DeepSeek
 # serving for a separate client, bounded by DSV4_WINDOW_HOLD_MAX_MINUTES. The
-# EXIT trap still restores GLM if the window is interrupted during the hold.
+# EXIT trap still restores GLM if the window is interrupted during the hold,
+# and removes the readiness marker first (DSV4_HOLD_MARKER).
+# The ceiling is enforced twice: by wall clock and by a count of 5 s sleeps, so
+# a backwards clock step cannot extend the hold past the cap.
+DSV4_HOLD_MARKER=""
+dsv4_hold_marker_clear() {
+  [ -z "${DSV4_HOLD_MARKER:-}" ] || rm -f "$DSV4_HOLD_MARKER"
+  case "${DSV4_WINDOW_HOLD_FILE:-}" in /*) rm -f "$DSV4_WINDOW_HOLD_FILE.holding" ;; esac
+  DSV4_HOLD_MARKER=""
+}
 dsv4_window_hold() {
-  local file="${DSV4_WINDOW_HOLD_FILE:-}" max="${DSV4_WINDOW_HOLD_MAX_MINUTES:-30}" start now logged=-1 minute
+  local file="${DSV4_WINDOW_HOLD_FILE:-}" max="${DSV4_WINDOW_HOLD_MAX_MINUTES:-30}" start now logged=-1 minute dir ticks=0
   [ -n "$file" ] || return 0
   case "$file" in /*) ;; *) log "DSV4_WINDOW_HOLD_FILE is not absolute; no hold"; return 0 ;; esac
-  if ! [[ "$max" =~ ^[0-9]{1,2}$ ]] || [ "$max" -lt 1 ] || [ "$max" -gt 60 ]; then
+  if ! [[ "$max" =~ ^[0-9]{1,2}$ ]]; then
     log "DSV4_WINDOW_HOLD_MAX_MINUTES must be 1-60; no hold"
     return 0
   fi
-  rm -f "$file.holding"
+  max=$((10#$max))
+  if [ "$max" -lt 1 ] || [ "$max" -gt 60 ]; then
+    log "DSV4_WINDOW_HOLD_MAX_MINUTES must be 1-60; no hold"
+    return 0
+  fi
+  dir="${file%/*}"
+  [ -n "$dir" ] || dir=/
+  if [ -L "$dir" ] || [ "$(cd -P "$dir" 2>/dev/null && pwd -P)" != "$dir" ] ||
+     [ -z "$(find "$dir" -maxdepth 0 -type d -user "$(id -un)" ! -perm -020 ! -perm -002 2>/dev/null)" ]; then
+    log "hold directory $dir must be a real directory owned by the operator without group or other write; no hold"
+    return 0
+  fi
+  dsv4_hold_marker_clear
   [ -e "$file" ] || return 0
-  printf '%s\n' "$1" > "$file.holding"
+  # Exclusive create (noclobber): never follows a symlink and never opens a FIFO.
+  if ! ( set -C; printf '%s\n' "$1" > "$file.holding" ) 2>/dev/null; then
+    log "hold marker $file.holding could not be created exclusively; no hold"
+    return 0
+  fi
+  DSV4_HOLD_MARKER="$file.holding"
   start="$(date +%s)"
   while [ -e "$file" ]; do
     now="$(date +%s)"
-    if [ $((now - start)) -ge $((max * 60)) ]; then
+    if [ $((now - start)) -ge $((max * 60)) ] || [ "$ticks" -ge $((max * 12)) ]; then
       log "hold ceiling of $max minutes reached; restoring GLM"
       break
     fi
@@ -1419,13 +1447,15 @@ dsv4_window_hold() {
       logged="$minute"
     fi
     sleep 5
+    ticks=$((ticks + 1))
   done
-  rm -f "$file.holding"
+  dsv4_hold_marker_clear
   log "hold ended after $(( ($(date +%s) - start) / 60 )) minute(s); restoring GLM"
 }
 
 run_dsv4_restore() {
   require_catalog_lock catalog-activate:dsv4_restore
+  dsv4_hold_marker_clear
   studio_helper inspect --journal "$QWEN_E2E_JOURNAL" > "$OPS_TMP_DIR/journal.json" ||
     refuse "transaction journal is unreadable"
   [ "$(json_field "$OPS_TMP_DIR/journal.json" 'd.get("profile")')" = "$DSV4_PROFILE" ] ||
