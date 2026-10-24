@@ -58,9 +58,16 @@ type responsesAdapter struct {
 	streamTerminal bool
 	text           strings.Builder
 	textOpen       bool
-	seq            int64
-	toolCalls      map[int]*responsesStreamToolCall
-	writeErr       error
+	// Provider reasoning streams as a Responses `reasoning` item, closed
+	// before the first message or call item of the turn.
+	reasoning     strings.Builder
+	reasoningID   string
+	reasoningOut  int
+	reasoningOpen bool
+	reasoningDone []responsesOutputEntry
+	seq           int64
+	toolCalls     map[int]*responsesStreamToolCall
+	writeErr      error
 
 	captureArmed bool
 	captureCap   int
@@ -68,6 +75,12 @@ type responsesAdapter struct {
 	overflowed   bool
 
 	streamThinkFilter
+}
+
+// responsesOutputEntry is a finished output item and its output_index.
+type responsesOutputEntry struct {
+	index int
+	item  map[string]any
 }
 
 type responsesStreamToolCall struct {
@@ -178,6 +191,15 @@ func (a *responsesAdapter) Write(p []byte) (int, error) {
 			return 0, a.writeErr
 		}
 	}
+}
+
+// writeSSEComment writes an SSE comment (a keepalive) to a live stream.
+func (a *responsesAdapter) writeSSEComment(p []byte) error {
+	if !a.stream || a.passthrough || a.status != http.StatusOK || a.streamTerminal {
+		return nil
+	}
+	a.writeBytes(p)
+	return a.writeErr
 }
 
 func (a *responsesAdapter) Flush() {
@@ -386,12 +408,28 @@ func responsesInputToChatMessages(instructions *string, input json.RawMessage) (
 	if err := json.Unmarshal(input, &items); err != nil {
 		return nil, fmt.Errorf("input must be a string or array")
 	}
+	// A `reasoning` item belongs to the model turn that follows it: its text
+	// becomes `reasoning_content` on the next assistant message, which the
+	// chat templates of interleaved-thinking models render back.
+	var pendingReasoning []string
 	for _, item := range items {
+		if itemType, _ := item["type"].(string); itemType == "reasoning" {
+			if text := responsesReasoningItemText(item); text != "" {
+				pendingReasoning = append(pendingReasoning, text)
+			}
+			continue
+		}
 		converted, ok, err := responsesInputItemToChatMessage(item)
 		if err != nil {
 			return nil, err
 		}
 		if ok {
+			if converted["role"] == "assistant" {
+				if len(pendingReasoning) > 0 {
+					converted["reasoning_content"] = strings.Join(pendingReasoning, "\n")
+				}
+			}
+			pendingReasoning = nil
 			messages = append(messages, converted)
 		}
 	}
@@ -408,8 +446,7 @@ func responsesInputItemToChatMessage(item map[string]any) (map[string]any, bool,
 		"local_shell_call", "local_shell_call_output", "computer_call_output", "item_reference":
 		return nil, false, fmt.Errorf("%s input is not supported", itemType)
 	case "reasoning":
-		// The model's own prior reasoning; the chat template renders history
-		// without it.
+		// Folded into the next assistant message by the caller.
 		return nil, false, nil
 	case "custom_tool_call_output":
 		callID, _ := item["call_id"].(string)
@@ -490,6 +527,35 @@ func responsesInputItemToChatMessage(item map[string]any) (map[string]any, bool,
 		return nil, false, nil
 	}
 	return map[string]any{"role": role, "content": content}, true, nil
+}
+
+// responsesReasoningItemText is the plain text of a `reasoning` input item:
+// its `reasoning_text`/`text` content parts, else its `summary_text` parts.
+// `encrypted_content` is never read; it is opaque and not ours to decode.
+func responsesReasoningItemText(item map[string]any) string {
+	collect := func(v any, types ...string) string {
+		parts, _ := v.([]any)
+		texts := make([]string, 0, len(parts))
+		for _, part := range parts {
+			m, _ := part.(map[string]any)
+			typ, _ := m["type"].(string)
+			text, _ := m["text"].(string)
+			if text == "" {
+				continue
+			}
+			for _, want := range types {
+				if typ == want {
+					texts = append(texts, text)
+					break
+				}
+			}
+		}
+		return strings.Join(texts, "\n")
+	}
+	if text := collect(item["content"], "reasoning_text", "text"); text != "" {
+		return text
+	}
+	return collect(item["summary"], "summary_text")
 }
 
 func responsesContentSupported(v any) bool {
@@ -930,6 +996,7 @@ func (a *responsesAdapter) translateNonStreamingResponse(body []byte) ([]byte, e
 			PromptTokensDetails struct {
 				CachedTokens int64 `json:"cached_tokens"`
 			} `json:"prompt_tokens_details"`
+			CompletionTokensDetails json.RawMessage `json:"completion_tokens_details"`
 		} `json:"usage"`
 		Choices []struct {
 			Message      json.RawMessage `json:"message"`
@@ -956,10 +1023,11 @@ func (a *responsesAdapter) translateNonStreamingResponse(body []byte) ([]byte, e
 		return nil, fmt.Errorf("missing assistant message")
 	}
 	var msg struct {
-		Role         string  `json:"role"`
-		Content      any     `json:"content"`
-		Refusal      *string `json:"refusal"`
-		FunctionCall *struct {
+		Role             string  `json:"role"`
+		Content          any     `json:"content"`
+		ReasoningContent string  `json:"reasoning_content"`
+		Refusal          *string `json:"refusal"`
+		FunctionCall     *struct {
 			Name      string `json:"name"`
 			Arguments string `json:"arguments"`
 		} `json:"function_call"`
@@ -978,6 +1046,9 @@ func (a *responsesAdapter) translateNonStreamingResponse(body []byte) ([]byte, e
 	text := stripThinkBlocks(responsesContentToText(msg.Content))
 	if msg.Refusal != nil {
 		text = strings.TrimSpace(text + *msg.Refusal)
+	}
+	if msg.ReasoningContent != "" {
+		output = append(output, responsesReasoningItem("rs_"+idSuffix(id), msg.ReasoningContent))
 	}
 	if text != "" {
 		output = append(output, map[string]any{
@@ -1035,6 +1106,7 @@ func (a *responsesAdapter) translateNonStreamingResponse(body []byte) ([]byte, e
 		observedCachedTokensFromCounts(chat.Usage.CachedPromptTokens, chat.Usage.PromptTokensDetails.CachedTokens),
 		chat.Usage.CompletionTokens,
 		chat.Usage.TotalTokens,
+		sanitizedReasoningTokens(chat.Usage.CompletionTokensDetails, chat.Usage.CompletionTokens),
 	))
 	resp["incomplete_details"] = incompleteDetails
 	return json.Marshal(resp)
@@ -1072,6 +1144,7 @@ func (a *responsesAdapter) handleChatStreamLine(line string) {
 			PromptTokensDetails struct {
 				CachedTokens int64 `json:"cached_tokens"`
 			} `json:"prompt_tokens_details"`
+			CompletionTokensDetails json.RawMessage `json:"completion_tokens_details"`
 		} `json:"usage"`
 		Choices []struct {
 			Delta struct {
@@ -1106,12 +1179,15 @@ func (a *responsesAdapter) handleChatStreamLine(line string) {
 		a.model = chunk.Model
 	}
 	if chunk.Usage != nil {
-		a.streamUsage = responsesUsageMap(chunk.Usage.PromptTokens, observedCachedTokensFromCounts(chunk.Usage.CachedPromptTokens, chunk.Usage.PromptTokensDetails.CachedTokens), chunk.Usage.CompletionTokens, chunk.Usage.TotalTokens)
+		a.streamUsage = responsesUsageMap(chunk.Usage.PromptTokens, observedCachedTokensFromCounts(chunk.Usage.CachedPromptTokens, chunk.Usage.PromptTokensDetails.CachedTokens), chunk.Usage.CompletionTokens, chunk.Usage.TotalTokens, sanitizedReasoningTokens(chunk.Usage.CompletionTokensDetails, chunk.Usage.CompletionTokens))
 	}
 	if len(chunk.Choices) == 0 {
 		return
 	}
 	delta := chunk.Choices[0].Delta
+	if delta.ReasoningContent != nil {
+		a.emitReasoningDelta(*delta.ReasoningContent)
+	}
 	if delta.Content != nil {
 		a.emitTextDelta(a.filterThinkContent(*delta.Content))
 	}
@@ -1130,10 +1206,78 @@ func (a *responsesAdapter) handleChatStreamLine(line string) {
 	a.flush()
 }
 
+// emitReasoningDelta streams provider reasoning_content as a `reasoning`
+// output item with `reasoning_text` content (the OpenAI Responses shape that
+// Codex CLI records and sends back).
+func (a *responsesAdapter) emitReasoningDelta(delta string) {
+	if delta == "" {
+		return
+	}
+	if !a.reasoningOpen {
+		a.reasoningID = "rs_" + idSuffix(a.effectiveResponseID())
+		if n := len(a.reasoningDone); n > 0 {
+			a.reasoningID = fmt.Sprintf("%s_%d", a.reasoningID, n)
+		}
+		a.reasoningOut = a.nextOutputIndex()
+		a.emitResponsesSSE("response.output_item.added", map[string]any{
+			"type": "response.output_item.added", "output_index": a.reasoningOut,
+			"item":            map[string]any{"id": a.reasoningID, "type": "reasoning", "summary": []any{}, "content": []any{}},
+			"sequence_number": a.nextSeq(),
+		})
+		a.emitResponsesSSE("response.content_part.added", map[string]any{
+			"type": "response.content_part.added", "item_id": a.reasoningID, "output_index": a.reasoningOut, "content_index": 0,
+			"part":            map[string]any{"type": "reasoning_text", "text": ""},
+			"sequence_number": a.nextSeq(),
+		})
+		a.reasoningOpen = true
+		a.reasoning.Reset()
+	}
+	a.reasoning.WriteString(delta)
+	a.emitResponsesSSE("response.reasoning_text.delta", map[string]any{
+		"type": "response.reasoning_text.delta", "item_id": a.reasoningID, "output_index": a.reasoningOut, "content_index": 0,
+		"delta": delta, "sequence_number": a.nextSeq(),
+	})
+}
+
+// closeReasoning finishes an open reasoning item. It runs before any message
+// or call item opens, so the reasoning precedes the output it led to.
+func (a *responsesAdapter) closeReasoning() {
+	if !a.reasoningOpen {
+		return
+	}
+	a.reasoningOpen = false
+	text := a.reasoning.String()
+	a.emitResponsesSSE("response.reasoning_text.done", map[string]any{
+		"type": "response.reasoning_text.done", "item_id": a.reasoningID, "output_index": a.reasoningOut, "content_index": 0,
+		"text": text, "sequence_number": a.nextSeq(),
+	})
+	a.emitResponsesSSE("response.content_part.done", map[string]any{
+		"type": "response.content_part.done", "item_id": a.reasoningID, "output_index": a.reasoningOut, "content_index": 0,
+		"part": map[string]any{"type": "reasoning_text", "text": text}, "sequence_number": a.nextSeq(),
+	})
+	item := responsesReasoningItem(a.reasoningID, text)
+	a.emitResponsesSSE("response.output_item.done", map[string]any{
+		"type": "response.output_item.done", "output_index": a.reasoningOut, "item": item, "sequence_number": a.nextSeq(),
+	})
+	a.reasoningDone = append(a.reasoningDone, responsesOutputEntry{index: a.reasoningOut, item: item})
+}
+
+// responsesReasoningItem is a completed Responses `reasoning` output item.
+// `summary` is always present: Codex CLI requires it to parse the item.
+func responsesReasoningItem(id, text string) map[string]any {
+	return map[string]any{
+		"id":      id,
+		"type":    "reasoning",
+		"summary": []any{},
+		"content": []map[string]any{{"type": "reasoning_text", "text": text}},
+	}
+}
+
 func (a *responsesAdapter) emitTextDelta(delta string) {
 	if delta == "" {
 		return
 	}
+	a.closeReasoning()
 	if a.messageID == "" {
 		a.messageID = "msg_" + idSuffix(a.effectiveResponseID())
 	}
@@ -1168,6 +1312,7 @@ func (a *responsesAdapter) emitToolCallDelta(index int, id, name, arguments stri
 		tc = &responsesStreamToolCall{ID: "fc_" + idSuffix(callID), CallID: callID, Name: name}
 		a.toolCalls[index] = tc
 	}
+	a.closeReasoning()
 	if name != "" {
 		tc.Name = name
 	}
@@ -1207,7 +1352,8 @@ func (a *responsesAdapter) emitStreamDone() {
 	if remainder := a.flushThinkRemainder(); remainder != "" {
 		a.emitTextDelta(remainder)
 	}
-	output := []map[string]any{}
+	a.closeReasoning()
+	entries := append([]responsesOutputEntry(nil), a.reasoningDone...)
 	if a.textOpen {
 		text := a.text.String()
 		a.emitResponsesSSE("response.output_text.done", map[string]any{
@@ -1223,7 +1369,7 @@ func (a *responsesAdapter) emitStreamDone() {
 		a.emitResponsesSSE("response.output_item.done", map[string]any{
 			"type": "response.output_item.done", "output_index": a.messageOut, "item": item, "sequence_number": a.nextSeq(),
 		})
-		output = append(output, item)
+		entries = append(entries, responsesOutputEntry{index: a.messageOut, item: item})
 	}
 	toolCalls := make([]*responsesStreamToolCall, 0, len(a.toolCalls))
 	for _, tc := range a.toolCalls {
@@ -1242,7 +1388,7 @@ func (a *responsesAdapter) emitStreamDone() {
 			a.emitResponsesSSE("response.output_item.done", map[string]any{
 				"type": "response.output_item.done", "output_index": tc.Output, "item": item, "sequence_number": a.nextSeq(),
 			})
-			output = append(output, item)
+			entries = append(entries, responsesOutputEntry{index: tc.Output, item: item})
 			continue
 		}
 		a.emitResponsesSSE("response.function_call_arguments.done", map[string]any{
@@ -1253,7 +1399,12 @@ func (a *responsesAdapter) emitStreamDone() {
 		a.emitResponsesSSE("response.output_item.done", map[string]any{
 			"type": "response.output_item.done", "output_index": tc.Output, "item": item, "sequence_number": a.nextSeq(),
 		})
-		output = append(output, item)
+		entries = append(entries, responsesOutputEntry{index: tc.Output, item: item})
+	}
+	sort.SliceStable(entries, func(i, j int) bool { return entries[i].index < entries[j].index })
+	output := make([]map[string]any, 0, len(entries))
+	for _, entry := range entries {
+		output = append(output, entry.item)
 	}
 	event, status, incompleteDetails := responsesTerminalFromFinishReason(a.finishReason)
 	response := a.responseObjectWith(a.effectiveResponseID(), a.now().Unix(), status, output, a.streamUsage)
@@ -1368,7 +1519,7 @@ func (a *responsesAdapter) setFallbackStreamUsage(promptTokens, completionTokens
 		completionTokens = 0
 	}
 	if a.streamUsage == nil {
-		a.streamUsage = responsesUsageMap(promptTokens, 0, completionTokens, promptTokens+completionTokens)
+		a.streamUsage = responsesUsageMap(promptTokens, 0, completionTokens, promptTokens+completionTokens, 0)
 	}
 }
 
@@ -1474,14 +1625,16 @@ func responsesTerminalFromFinishReason(reason string) (event, status string, inc
 	return "response.completed", "completed", nil
 }
 
-func responsesUsageMap(prompt, cached, completion, total int64) map[string]any {
+// responsesUsageMap mirrors the chat usage. reasoning is the provider's
+// completion_tokens_details.reasoning_tokens, already inside completion.
+func responsesUsageMap(prompt, cached, completion, total, reasoning int64) map[string]any {
 	return map[string]any{
 		"input_tokens":         prompt,
 		"output_tokens":        completion,
 		"total_tokens":         total,
 		"input_tokens_details": map[string]any{"cached_tokens": cached, "cache_write_tokens": 0},
 		"output_tokens_details": map[string]any{
-			"reasoning_tokens": 0,
+			"reasoning_tokens": reasoning,
 		},
 	}
 }
