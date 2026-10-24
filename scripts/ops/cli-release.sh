@@ -55,7 +55,9 @@
 #                           then sends one provider-attributed buyer request through the gateway;
 #                           refused when Pearl's journal shows the canary's privacy advertisement
 #                           rejected as posture_unapproved_code_identity in the last 10 minutes,
-#                           or when the running coordinator does not hold the registrations of 7a)
+#                           or when the running coordinator does not hold the registrations of 7a);
+#                           a served model with no entry in the candidate's signed CB policy
+#                           passes with CB off (serial by design), policy live_verified
 #   7 e2e_gate              in-scope e2e green on the candidate (Promotion gate item 3):
 #                           `next --done e2e_gate --run-id N [--run-id M ...]` (each a successful
 #                           promote-signed-*-journey run whose head SHA, title or log names the
@@ -977,12 +979,20 @@ marker_canary_probe_matches() {
   [ "$(marker_field "$OPS_SCOPE" canary_smoke 'd.get("kind")')" = "status_probe_gateway_proof" ] || return 1
   local decision
   decision="$(marker_field "$OPS_SCOPE" canary_smoke 'd.get("probe", {}).get("self_check_decision")')"
-  [ "$decision" = single_row ] ||
+  local serial
+  serial="$(marker_field "$OPS_SCOPE" canary_smoke 'd.get("probe", {}).get("cb_serial_no_policy_entry")')"
+  [ "$decision" = single_row ] || [ "$serial" = true ] ||
     [ "$(marker_field "$OPS_SCOPE" canary_smoke 'd.get("probe", {}).get("continuous_batching_active")')" = "true" ] || return 1
-  [ "$(marker_field "$OPS_SCOPE" canary_smoke 'd.get("probe", {}).get("paged_kv_decision")')" = "attached" ] || return 1
+  [ "$serial" = true ] ||
+    [ "$(marker_field "$OPS_SCOPE" canary_smoke 'd.get("probe", {}).get("paged_kv_decision")')" = "attached" ] || return 1
   # CB authorization: either the legacy signed positive policy entry, or the
   # #1947 on-device self-check grant (the signed policy is revocation-only).
-  if [ "$decision" = single_row ]; then
+  if [ "$serial" = true ]; then
+    # Serial by design: the served model has no entry in the candidate's
+    # signed CB policy, so the provider keeps CB off for it.
+    [ "$(marker_field "$OPS_SCOPE" canary_smoke 'd.get("probe", {}).get("policy_load_status")')" = "live_verified" ] || return 1
+    [ "$(marker_field "$OPS_SCOPE" canary_smoke 'd.get("probe", {}).get("continuous_batching_active")')" = "false" ] || return 1
+  elif [ "$decision" = single_row ]; then
     [ "$(marker_field "$OPS_SCOPE" canary_smoke 'd.get("probe", {}).get("policy_load_status")')" = "live_verified" ] || return 1
     [ "$(marker_field "$OPS_SCOPE" canary_smoke 'd.get("probe", {}).get("policy_local_proof_result")')" = "passed" ] || return 1
     [ "$(marker_field "$OPS_SCOPE" canary_smoke 'd.get("probe", {}).get("emergency_off_override")')" = "false" ] || return 1
@@ -1094,9 +1104,18 @@ structured_done() {
         studio_ssh "curl -s -m 10 http://127.0.0.1:$STUDIO_STATUS_PORT/v1/status" > "$OPS_TMP_DIR/canary.json" ||
           refuse "canary /v1/status not readable over STUDIO_SSH"
         local probe
-        probe="$(python3 - "$OPS_TMP_DIR/canary.json" "$V" "$compat" <<'PY'
+        # The candidate's own signed CB policy: a served model without an entry
+        # in it is served serially by design (#2134: DeepSeek V4 CB stays off
+        # without a signed entry), which is not a CB regression.
+        git -C "$REPO_ROOT" show "$sha:phase3-binary/catalog/autotune/continuous-batching-policy.json" \
+          > "$OPS_TMP_DIR/cb-policy.json" 2>/dev/null || : > "$OPS_TMP_DIR/cb-policy.json"
+        probe="$(python3 - "$OPS_TMP_DIR/canary.json" "$V" "$compat" "$OPS_TMP_DIR/cb-policy.json" <<'PY'
 import json, sys
 d, v, compat = json.load(open(sys.argv[1])), sys.argv[2], sys.argv[3]
+try:
+    signed = json.load(open(sys.argv[4]))
+except Exception:
+    signed = None
 cb = d.get("continuous_batching") or {}
 policy = cb.get("policy") or {}
 got = {
@@ -1115,6 +1134,18 @@ got = {
     "self_check_key": {k: (cb.get("self_check") or {}).get(k) for k in
                        ("model_sha256", "metallib_sha256", "kernel_identifier", "hardware_class", "os_build", "runtime_build", "decode_window")},
 }
+# Serial by design: the signed CB policy of the candidate (the release this canary
+# loaded) has no entry for the served model, and CB is off with no self-check.
+model = d.get("model")
+serial = (isinstance(signed, dict) and isinstance(signed.get("entries"), list) and
+          isinstance(model, str) and bool(model) and
+          bool(signed.get("release_id")) and policy.get("release_id") == signed.get("release_id") and
+          all(isinstance(e, dict) and model not in (e.get("model_id"), e.get("model_key")) for e in signed["entries"]) and
+          cb.get("active") is False and cb.get("mode") == "off" and not cb.get("self_check"))
+if serial:
+    got["model"] = model
+    got["continuous_batching_mode"] = cb.get("mode")
+    got["cb_serial_no_policy_entry"] = True
 bad = []
 if got["binary_version"] != v: bad.append("binary_version %r != %r" % (got["binary_version"], v))
 if got["coordinator_connected"] is not True: bad.append("coordinator.connected is not true")
@@ -1137,14 +1168,16 @@ if got["self_check_decision"] in ("prior_grant_pending_recheck", "pending", "def
         any(not isinstance(key[k], str) or not key[k] for k in key if k != "decode_window") or
         type(key["decode_window"]) is not int or key["decode_window"] < 1):
         bad.append("an undecided self-check needs provider_id and the self_check key to confirm it later")
-if got["continuous_batching_active"] is not True and not single_row: bad.append("continuous_batching.active is not true")
-if got["paged_kv_decision"] != "attached": bad.append("continuous_batching.paged_kv_decision %r != 'attached'" % (got["paged_kv_decision"],))
+if got["continuous_batching_active"] is not True and not single_row and not serial: bad.append("continuous_batching.active is not true")
+if got["paged_kv_decision"] != "attached" and not serial: bad.append("continuous_batching.paged_kv_decision %r != 'attached'" % (got["paged_kv_decision"],))
 if got["self_check_decision"] == "granted" or recheck_pending:
     # #1947: CB is authorized by the on-device self-check; the signed policy only revokes.
     if type(got["self_check_served_slots"]) is not int or got["self_check_served_slots"] < 1:
         bad.append("continuous_batching.self_check.served_slots %r < 1" % (got["self_check_served_slots"],))
     if got["emergency_off_override"] is not False:
         bad.append("continuous_batching.policy.emergency_off_override is not false")
+elif serial:
+    if got["policy_load_status"] != "live_verified": bad.append("continuous_batching.policy.load_status %r != 'live_verified'" % (got["policy_load_status"],))
 elif single_row:
     if got["policy_load_status"] != "live_verified": bad.append("continuous_batching.policy.load_status %r != 'live_verified'" % (got["policy_load_status"],))
     if got["policy_local_proof_result"] != "passed": bad.append("continuous_batching.policy.local_proof_result %r != 'passed'" % (got["policy_local_proof_result"],))
