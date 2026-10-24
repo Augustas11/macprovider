@@ -630,6 +630,39 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: hubRoot.path))
     }
 
+    func testInstalledOnlyRecommendationAcceptsCatalogKeyAndRejectsUnmatchedEntry() throws {
+        let request = try makeRequest()
+        let modelKey = try XCTUnwrap(request.candidateCatalog.rows.keys.sorted().first)
+        let hubRoot = URL(fileURLWithPath: "/tmp")
+            .appendingPathComponent("mpm-installed-only-filter-\(getpid())-\(UUID().uuidString)", isDirectory: true)
+        let resolver = CachedModelArtifactResolver(hubRoot: hubRoot)
+        let modelID = try XCTUnwrap(request.candidateCatalog.rows[modelKey]?.modelID)
+        let byKey = try AutotuneCommand.installedOnlyBenchmarkOutcomes(
+            request: request,
+            candidateModelIDs: [modelKey],
+            catalogSHA: request.candidateCatalogSHA256,
+            artifactResolver: resolver
+        )
+        let byID = try AutotuneCommand.installedOnlyBenchmarkOutcomes(
+            request: request,
+            candidateModelIDs: [modelID],
+            catalogSHA: request.candidateCatalogSHA256,
+            artifactResolver: resolver
+        )
+
+        XCTAssertEqual(byKey.diagnostics, byID.diagnostics)
+        XCTAssertEqual(Set(byKey.diagnostics.keys), [modelKey])
+        XCTAssertThrowsError(try AutotuneCommand.installedOnlyBenchmarkOutcomes(
+            request: request,
+            candidateModelIDs: [modelKey, "missing/catalog-key"],
+            catalogSHA: request.candidateCatalogSHA256,
+            artifactResolver: resolver
+        )) { error in
+            XCTAssertTrue(String(describing: error).contains("missing/catalog-key"))
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: hubRoot.path))
+    }
+
     /// #1689 F7: a background check-only run verifies bytes where they are
     /// and never populates the durable store.
     func testInstalledOnlyCheckNeverPopulatesTheDurableStore() throws {

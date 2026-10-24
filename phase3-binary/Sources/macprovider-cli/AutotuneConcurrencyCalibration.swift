@@ -605,7 +605,6 @@ struct Stage1ConcurrencyCalibrationAdapter: AutotuneConcurrencyCalibrationProbin
     static let windowSeconds: TimeInterval = 90
     static let arrivalStaggerSeconds: TimeInterval = 0.25
 
-    private static let readyTimeoutSec: TimeInterval = 120
     private static let stopGraceSeconds: Double = 10
     private static let probeIdleTimeoutSec: TimeInterval = 300
     private static let probeTotalTimeoutSec: TimeInterval = 300
@@ -653,7 +652,7 @@ struct Stage1ConcurrencyCalibrationAdapter: AutotuneConcurrencyCalibrationProbin
             runner,
             graceSeconds: Self.stopGraceSeconds
         ) {
-            switch try await runner.waitForReady(timeout: Self.readyTimeoutSec, deadline: deadline) {
+            switch try await runner.waitForReady(timeout: AutotuneReadinessBudget.seconds(model: model, artifactBinding: artifactBinding), deadline: deadline) {
             case .ready:
                 break
             case .processExited(let rc, let stderrTail):

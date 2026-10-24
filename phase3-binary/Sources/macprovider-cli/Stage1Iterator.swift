@@ -6,6 +6,8 @@ import Foundation
 struct CandidateArtifactBinding: Equatable, Sendable {
     let path: String
     let sha256: String
+    var sizeBytes: Int? = nil
+    var minRAMGB: Int? = nil
 }
 
 protocol Stage1ProviderRunning: AnyObject {
@@ -296,7 +298,7 @@ struct Stage1Iterator {
     private let gateTTFTMS: Int
     private let stage1Replicates: Int
     private let port: Int
-    private let readyTimeoutSec: TimeInterval
+    private let readyTimeoutSec: TimeInterval?
     private let now: () -> Date
     private let cancellationReason: () -> AutotuneCancellationReason?
 
@@ -312,7 +314,7 @@ struct Stage1Iterator {
         stage1Replicates: Int,
         port: Int,
         prober: Stage1Probing = Stage1Prober(),
-        readyTimeoutSec: TimeInterval = 120,
+        readyTimeoutSec: TimeInterval? = nil,
         now: @escaping () -> Date = Date.init,
         cancellationReason: @escaping () -> AutotuneCancellationReason? = { nil }
     ) {
@@ -373,7 +375,7 @@ struct Stage1Iterator {
                 model: candidate,
                 port: port,
                 runner: preWarmRunner,
-                readyTimeoutSec: readyTimeoutSec
+                readyTimeoutSec: readyTimeoutSec ?? AutotuneReadinessBudget.seconds(model: candidate)
             )
 
             switch preWarmResult {
@@ -564,7 +566,7 @@ struct Stage1Prober: Stage1Probing {
     private static let stopTokens = ["<|im_end|>", "<|endoftext|>", "<|eot_id|>"]
 
     private let session: URLSession
-    private let readyTimeoutSec: TimeInterval
+    private let readyTimeoutSec: TimeInterval?
     private let stopGraceSeconds: Double
     private let probeIdleTimeoutSec: TimeInterval
     private let probeTotalTimeoutSec: TimeInterval
@@ -572,7 +574,7 @@ struct Stage1Prober: Stage1Probing {
 
     init(
         session: URLSession = .shared,
-        readyTimeoutSec: TimeInterval = 120,
+        readyTimeoutSec: TimeInterval? = nil,
         stopGraceSeconds: Double = 10,
         probeIdleTimeoutSec: TimeInterval = Stage1Prober.defaultProbeIdleTimeoutSec,
         probeTotalTimeoutSec: TimeInterval = Stage1Prober.defaultProbeTotalTimeoutSec,
@@ -665,7 +667,8 @@ struct Stage1Prober: Stage1Probing {
             deadline: deadline
         )
         return try await withCandidateProviderCleanup(runner, graceSeconds: stopGraceSeconds) {
-        switch try await runner.waitForReady(timeout: boundedTimeout(readyTimeoutSec, deadline: deadline), deadline: deadline) {
+        let readinessBudget = readyTimeoutSec ?? AutotuneReadinessBudget.seconds(model: model, artifactBinding: artifactBinding)
+        switch try await runner.waitForReady(timeout: boundedTimeout(readinessBudget, deadline: deadline), deadline: deadline) {
         case .ready:
             break
         case .processExited(let rc, let stderrTail):
@@ -817,7 +820,8 @@ struct Stage1Prober: Stage1Probing {
             deadline: deadline
         )
         return try await withCandidateProviderCleanup(runner, graceSeconds: stopGraceSeconds) {
-            switch try await runner.waitForReady(timeout: boundedTimeout(readyTimeoutSec, deadline: deadline), deadline: deadline) {
+            let readinessBudget = readyTimeoutSec ?? AutotuneReadinessBudget.seconds(model: model, artifactBinding: artifactBinding)
+            switch try await runner.waitForReady(timeout: boundedTimeout(readinessBudget, deadline: deadline), deadline: deadline) {
             case .ready:
                 break
             case .processExited(let rc, let stderrTail):

@@ -1,6 +1,6 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.22.34
+version: v0.22.35
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-10-02
@@ -8,6 +8,15 @@ lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-
 
 ## Change log
 
+- **v0.22.35 (2026-10-24, Related: #2127)** — Registers
+  `SPEC-023-R027`: paid-yield recommendation and calibration probes derive
+  model readiness budgets from verified artifact size or signed
+  `min_ram_gb`, retain the 120 s floor, cap readiness at 1,800 s and the
+  remaining overall probe deadline, and fail promptly when the child exits.
+  `--candidate-models` accepts either a signed catalog key or its Hugging
+  Face `model_id`; every unmatched entry produces an explicit error before
+  probing instead of silently yielding `no_eligible_model`. No model-loading
+  benchmark or live configuration change is implied by this revision.
 - **v0.22.34 (2026-10-24, Related: #2111)** — §16.11 rule 4, conformance
   owed on a first promotion. A gateway record needs a served model and a
   served model needs `recommendable`, so a key with no record yet may be
@@ -2755,6 +2764,33 @@ MAY restart a foreground serve only when
 old foreground model. `--recommend --check-only`, `--prefetch`, and
 `--freshness-check` MUST NOT stop or restart a provider.
 
+**SPEC-023-R027 — Model-aware probe readiness and explicit candidate filters.**
+Paid-yield recommendation probes (Stage 1, Stage 2, context calibration and
+concurrency calibration) MUST allow a candidate that is still loading a
+readiness budget of `max(120, min(1800, 10 × footprint_gib))` seconds.
+`footprint_gib` is the verified artifact byte footprint divided by `2^30`;
+when that footprint is unavailable, the signed candidate row's `min_ram_gb`
+MUST supply the footprint estimate. Unknown or invalid size estimates MUST
+retain the 120-second budget. Every wait MUST also be bounded by the
+remaining overall `--max-duration` probe deadline where one is provided; a
+shorter remaining deadline takes precedence over the readiness floor. The
+longer budget MUST NOT delay detection of a crashed or exited provider:
+readiness polling MUST retain its existing cadence, check child-process
+liveness before and after each HTTP check, and fail immediately on an observed
+exit. Small models
+whose computed budget is at most 120 seconds retain the existing timeout.
+A longer readiness budget changes neither memory-fit eligibility nor the
+probe's inference, safety or response-validation gates.
+
+`--candidate-models` MUST match each supplied entry against either the signed
+candidate row's catalog key or its Hugging Face `model_id`, and MUST select
+only those signed rows. Before downloading or probing, the command MUST
+reject any entries that match no signed row with an explicit error naming
+all unmatched entries, including when other supplied entries do match. A
+matched row remains subject to every existing eligibility and trust gate;
+this filter MUST NOT introduce unsigned candidates or bypass signed-row
+validation.
+
 `autotune --recommend` re-runs or prompts the operator in exactly these v0.4 cases:
 
 1. Manual invocation: `malibu-cli autotune --recommend`.
@@ -3052,6 +3088,20 @@ across abrupt CLI exit and an in-process restore error fails the command. An
 applying run never restarts the old foreground model. `--check-only`, `--prefetch`, and
 `--freshness-check` do not invoke the stop/restore path.
   AC-49 (`SPEC-023-R023`, full-economics payout ranking): The Score-A `raw_score` payout term is `(completion_rate_per_mtok + R × effective_prompt_rate) × global_multiplier × provider_share` with `R = 0.5`, `C = 0.0` (`effective_prompt_rate = prompt_rate_per_mtok`), `global_multiplier = global_multiplier_ppm / 1_000_000`, and `provider_share = provider_share_bps / 10_000`. A row with a higher `prompt_rate_per_mtok` but an equal `completion_rate_per_mtok`, equal measured TPS, equal demand, and equal `global_multiplier_ppm` ranks strictly higher than before (prompt economics now enter the score); scaling the whole card's `global_multiplier_ppm` scales every payout term by that factor without changing the eligible order; a row with a nil rate-card row scores `0`. Ranking compares the unrounded ordering score, so two rows whose true economics differ by less than `1e-6` (identical rounded `raw_score`) rank by true economics — the higher true payout wins even against a lower-payout peer with higher TPS — and only rows with a genuinely equal unrounded `raw_score` fall through to the tps → demand → model-key tiebreakers. The 6-decimal rounding is applied only to the JSON-visible `raw_score` / earning-potential fields.
+
+AC-50 (`SPEC-023-R027`, model-aware readiness): The real Stage-1 probe and
+provider-readiness path, driven by a fake clock and fake child provider,
+accepts a large signed candidate that becomes ready after 120 seconds but
+before its size-derived budget and overall deadline. A child that exits
+before readiness fails within one polling interval even when its model has
+a longer budget. Budget coverage verifies the 120-second floor,
+1,800-second ceiling, artifact-size precedence, signed-RAM fallback and
+remaining overall deadline.
+
+AC-51 (`SPEC-023-R027`, candidate filters): A signed candidate can be selected
+by catalog key or Hugging Face `model_id`. A filter containing unmatched
+entries fails explicitly and names every unmatched entry, even alongside a
+valid key; it does not silently return `no_eligible_model`.
 
 AC-OMLX-1: A row with `bench_gate.provenance.source == "omlx_seeded"` and `runtime_status == "recommendable"` is rejected by catalog validation.
 
