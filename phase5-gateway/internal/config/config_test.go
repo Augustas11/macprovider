@@ -694,7 +694,7 @@ func TestPhaseDeadlineDefaults(t *testing.T) {
 		{"first_token_seconds", cfg.Timeouts.FirstTokenSeconds, 0},
 		{"stream_ceiling_floor_seconds", cfg.Timeouts.StreamCeilingFloorSeconds, 60},
 		{"stream_ceiling_per_token_ms", cfg.Timeouts.StreamCeilingPerTokenMS, 250},
-		{"stream_ceiling_max_seconds", cfg.Timeouts.StreamCeilingMaxSeconds, 900},
+		{"stream_ceiling_max_seconds", cfg.Timeouts.StreamCeilingMaxSeconds, 3600},
 		{"non_stream_request_seconds", cfg.Timeouts.NonStreamRequestSeconds, 0},
 	} {
 		if tc.got != tc.want {
@@ -761,7 +761,7 @@ func TestValidateRejectsInconsistentPhaseDeadlines(t *testing.T) {
 		},
 		{
 			name:    "ceiling max below floor",
-			mutate:  func(c *Config) { c.Timeouts.StreamCeilingFloorSeconds = 950 },
+			mutate:  func(c *Config) { c.Timeouts.StreamCeilingFloorSeconds = 3700 },
 			wantSub: "stream_ceiling_floor_seconds",
 		},
 		{
@@ -770,6 +770,25 @@ func TestValidateRejectsInconsistentPhaseDeadlines(t *testing.T) {
 			name:    "ceiling max below legacy wall",
 			mutate:  func(c *Config) { c.Timeouts.StreamCeilingMaxSeconds = 120 },
 			wantSub: "stream_ceiling_max_seconds",
+		},
+		{
+			// A reservation reaped before its request settles loses the
+			// settlement; the longest request bound must fit inside it.
+			name: "reservation max age below the stream ceiling",
+			mutate: func(c *Config) {
+				c.Quotas.ReservationMaxAgeHours = 2
+				c.Timeouts.StreamCeilingMaxSeconds = 7200
+			},
+			wantSub: "reservation_max_age_hours",
+		},
+		{
+			name: "reservation max age below the non-stream wall",
+			mutate: func(c *Config) {
+				c.Quotas.ReservationMaxAgeHours = 2
+				c.Timeouts.NonStreamRequestSeconds = 7150
+				c.Timeouts.CoordinatorHeaderTimeoutSeconds = 7150
+			},
+			wantSub: "reservation_max_age_hours",
 		},
 		{
 			name:    "non-stream wall below connect budget",

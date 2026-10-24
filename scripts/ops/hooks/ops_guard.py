@@ -397,6 +397,10 @@ def classify(word, raw, args, names, ctx):
         raise Blocked("direct Pearl coordinator config edit and restart", route(CLI))
     elif word == "catalog-activate.sh" and args[:1] == ["_buyer-ux-conformance"]:
         raise Blocked("direct Pearl coordinator config edit and SIGHUP or restart", route(CAT))
+    elif word == "pearl-runtime.sh" and args[:1] == ["_stream-ceiling"]:
+        raise Blocked("direct Pearl coordinator and gateway config edit and restart",
+                      "Use PEARL_RUNTIME_TASK=stream-ceiling " + RT + " instead (status, then next, then next --run). "
+                      "See scripts/ops/README.md.")
     elif word in ("python3", "python", "ssh", "bash", "sh") and any("pearl-cli-config.py" in a for a in args):
         raise Blocked("direct Pearl coordinator config edit and restart", route(CLI))
     elif word == "deploy-pearl-vps.sh":

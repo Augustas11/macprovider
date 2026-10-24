@@ -61,6 +61,21 @@ link, owned by this user, mode 0600, in a directory no one else can write).
 Locally, `validate-vision-qualification PATH [OUT]` applies
 the rules and prints only the field count and the entry sha256.
 
+Also used by scripts/ops/pearl-runtime.sh PEARL_RUNTIME_TASK=stream-ceiling
+(SPEC-002 FR-P11a C2 twin walls, SPEC-006 §17.7.1):
+  python3 - sc-facts [layout flags] --gateway-config PATH --gateway-unit UNIT
+            --gateway-healthz URL                               read-only facts
+  python3 - apply-stream-ceiling [same flags]
+Under the same locks it raises, never lowers, coordinator
+routing.request_timeout_s and provider_http.timeout_s (in the file that sets
+each) to 3600 and gateway timeouts.stream_ceiling_max_seconds to 3600,
+non_stream_request_seconds to 3660 and coordinator_header_timeout_seconds to
+cover it, with exact-anchor edits a YAML reparse proves; checks the deploy
+gate's C2/C2b relations on the result; backs the three files up; validates
+the coordinator files with the running coordinator; restarts the coordinator,
+then the gateway, and proves both booted with the new bytes. On failure it
+restores the files (compare-and-swap) and restarts both onto them.
+
 Also used by scripts/ops/catalog-activate.sh step buyer_ux_conformance
 (SPEC-023 §16.11 buyer-UX conformance records, #2107):
   python3 - buc-facts [layout flags] --buc-path PATH            read-only facts
@@ -1577,6 +1592,371 @@ def apply_buyer_ux_conformance(args):
             os.unlink(args.buc_staged)
 
 
+# --- streaming ceiling twin walls (SPEC-002 FR-P11a C2, SPEC-006 §17.7.1) ---
+#
+# Used by scripts/ops/pearl-runtime.sh PEARL_RUNTIME_TASK=stream-ceiling. Pearl's
+# configs are preserved live, so the raised walls in dist/coordinator.yaml and
+# gateway.yaml.example reach Pearl only through this field-scoped, raise-only
+# edit. SC_STREAM_CEILING and SC_NON_STREAM_WALL equal the tracked values
+# (scripts/tests/test_pearl_cli_config.py pins the parity).
+
+SC_STREAM_CEILING = 3600
+# Gateway non-streaming wall: strictly above the coordinator request wall (C2).
+SC_NON_STREAM_WALL = 3660
+SC_COORDINATOR_KEYS = (("routing", "request_timeout_s"), ("provider_http", "timeout_s"))
+# The gateway runtime defaults (phase5-gateway/internal/config/config.go)
+# that apply when gateway.yaml omits a key; the stream ceiling default is the
+# pre-3600 one, the value an older gateway binary falls back to.
+SC_GATEWAY_DEFAULTS = {"coordinator_request_seconds": 300, "coordinator_header_timeout_seconds": 300,
+                       "coordinator_admission_seconds": 120, "stream_ceiling_floor_seconds": 60,
+                       "stream_ceiling_max_seconds": 900, "non_stream_request_seconds": 0}
+SC_GATEWAY_RESERVATION_DEFAULT_HOURS = 24
+
+
+def sc_int(value, what):
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise Refused("%s must be a non-negative integer" % what)
+    return value
+
+
+def sc_load(path, what):
+    import yaml
+
+    with open(path, "rb") as f:
+        raw = f.read()
+    doc = yaml.safe_load(raw) or {}
+    if not isinstance(doc, dict):
+        raise Refused("%s must be a YAML mapping" % what)
+    return raw, doc
+
+
+def sc_section(doc, section, what):
+    value = doc.get(section)
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise Refused("%s %s must be a mapping" % (what, section))
+    return value
+
+
+def sc_coordinator_walls(base, overlay):
+    """{(section, key): (effective value, "base"|"overlay")}. The overlay wins
+    (--config-overlay); a key set in neither file is refused, because the
+    deploy gate (C2) requires it explicit."""
+    out = {}
+    for section, key in SC_COORDINATOR_KEYS:
+        name = "%s.%s" % (section, key)
+        ov = sc_section(overlay, section, "the overlay")
+        bs = sc_section(base, section, "coordinator.yaml")
+        if key in ov:
+            out[(section, key)] = (sc_int(ov[key], "overlay " + name), "overlay")
+        elif key in bs:
+            out[(section, key)] = (sc_int(bs[key], "coordinator.yaml " + name), "base")
+        else:
+            raise Refused("coordinator %s is set in neither coordinator.yaml nor the overlay; reconcile it first" % name)
+    return out
+
+
+def sc_gateway_timeouts(doc):
+    t = sc_section(doc, "timeouts", "gateway.yaml")
+    out = {}
+    for key, default in SC_GATEWAY_DEFAULTS.items():
+        out[key] = sc_int(t.get(key, default), "gateway timeouts." + key)
+    out["explicit"] = sorted(k for k in SC_GATEWAY_DEFAULTS if k in t)
+    quotas = sc_section(doc, "quotas", "gateway.yaml")
+    out["reservation_max_age_hours"] = sc_int(quotas.get("reservation_max_age_hours", SC_GATEWAY_RESERVATION_DEFAULT_HOURS),
+                                              "gateway quotas.reservation_max_age_hours")
+    return out
+
+
+def sc_non_stream(g):
+    return g["non_stream_request_seconds"] or g["coordinator_request_seconds"]
+
+
+def sc_c2(rt, pht, g):
+    """The deploy gate's C2/C2b relations (phase4-coordinator/dist/
+    check-deploy-config.sh) plus the gateway's own ceiling and reservation
+    rules, on effective values. Returns the first violation or None."""
+    stream_max, non_stream = g["stream_ceiling_max_seconds"], sc_non_stream(g)
+    if rt < stream_max:
+        return "coordinator routing.request_timeout_s (%d) is below gateway stream_ceiling_max_seconds (%d)" % (rt, stream_max)
+    if pht < stream_max:
+        return "coordinator provider_http.timeout_s (%d) is below gateway stream_ceiling_max_seconds (%d)" % (pht, stream_max)
+    if non_stream <= rt:
+        return "gateway non_stream_request_seconds (%d) is not above coordinator request_timeout_s (%d)" % (non_stream, rt)
+    if g["coordinator_header_timeout_seconds"] < max(g["coordinator_admission_seconds"], non_stream):
+        return "gateway coordinator_header_timeout_seconds (%d) is below max(admission, non-stream wall) (%d)" % (
+            g["coordinator_header_timeout_seconds"], max(g["coordinator_admission_seconds"], non_stream))
+    if stream_max < max(g["stream_ceiling_floor_seconds"], g["coordinator_request_seconds"]):
+        return "gateway stream_ceiling_max_seconds (%d) is below its floor or coordinator_request_seconds" % stream_max
+    if g["reservation_max_age_hours"] * 3600 < max(stream_max, non_stream) + 60:
+        return "gateway quotas.reservation_max_age_hours (%d) does not outlive the longest request bound" % (
+            g["reservation_max_age_hours"])
+    return None
+
+
+def sc_plan(base, overlay, gateway):
+    """(coordinator edits {(section, key): (file, old, new)}, gateway edits
+    {key: (old, new)}). Raise-only: a live value already at or above its
+    target is kept."""
+    walls = sc_coordinator_walls(base, overlay)
+    coord = {}
+    for (section, key), (value, where) in walls.items():
+        if value < SC_STREAM_CEILING:
+            coord[(section, key)] = (where, value, SC_STREAM_CEILING)
+    rt = max(walls[("routing", "request_timeout_s")][0], SC_STREAM_CEILING)
+    g = sc_gateway_timeouts(gateway)
+    want = {"stream_ceiling_max_seconds": max(g["stream_ceiling_max_seconds"], SC_STREAM_CEILING)}
+    want["non_stream_request_seconds"] = max(sc_non_stream(g), SC_NON_STREAM_WALL, rt + 1)
+    want["coordinator_header_timeout_seconds"] = max(g["coordinator_header_timeout_seconds"],
+                                                     want["non_stream_request_seconds"], g["coordinator_admission_seconds"])
+    gw = {}
+    for key, new in want.items():
+        old = g[key] if key in g["explicit"] else None
+        if old != new:
+            if old is None:
+                raise Refused("gateway timeouts.%s is not set in gateway.yaml; the deploy gate (C2) requires it explicit, "
+                              "reconcile it first" % key)
+            gw[key] = (old, new)
+    return coord, gw
+
+
+def sc_edit(text, header, edits, what):
+    """Exact-anchor scalar edits under one top-level block, proven by a YAML
+    reparse to change exactly those keys."""
+    import yaml
+
+    new = text
+    expected = copy.deepcopy(yaml.safe_load(text) or {})
+    for key, value in sorted(edits.items()):
+        new = set_scalar(new, r"^%s:[ \t]*$" % re.escape(header), key, value)
+        expected.setdefault(header, {})[key] = value
+    if (yaml.safe_load(new) or {}) != expected:
+        raise Refused("the %s edit changed more than %s.%s" % (what, header, "/".join(sorted(edits))))
+    return new
+
+
+def sc_render(base_raw, overlay_raw, gateway_raw, coord, gw):
+    """New bytes for coordinator.yaml, the overlay and gateway.yaml."""
+    files = {"base": base_raw.decode(), "overlay": overlay_raw.decode()}
+    for where in ("base", "overlay"):
+        by_section = {}
+        for (section, key), (w, _, new) in coord.items():
+            if w == where:
+                by_section.setdefault(section, {})[key] = new
+        for section, edits in sorted(by_section.items()):
+            files[where] = sc_edit(files[where], section, edits, "coordinator " + where)
+    gateway = gateway_raw.decode()
+    if gw:
+        gateway = sc_edit(gateway, "timeouts", {k: v[1] for k, v in gw.items()}, "gateway.yaml")
+    return files["base"].encode(), files["overlay"].encode(), gateway.encode()
+
+
+def sc_running_gateway(args):
+    """The gateway unit's main pid, refused unless it runs args.gateway_config."""
+    pid = subprocess.run(["systemctl", "show", "-p", "MainPID", "--value", args.gateway_unit],
+                         capture_output=True, text=True, timeout=15).stdout.strip()
+    if not pid.isdigit() or pid == "0":
+        raise Refused("the gateway unit has no main process")
+    with open(os.path.join(args.proc, pid, "cmdline"), "rb") as f:
+        argv = [a.decode() for a in f.read().split(b"\0") if a]
+    configs = [argv[i + 1] for i, a in enumerate(argv[:-1]) if a in ("-config", "--config")]
+    configs += [a.split("=", 1)[1] for a in argv if a.startswith(("-config=", "--config="))]
+    if configs != [args.gateway_config]:
+        raise Refused("the running gateway does not use --config %s" % args.gateway_config)
+    return pid
+
+
+def sc_gateway_applied(args):
+    """The gateway main process runs --config args.gateway_config and started
+    after that file last changed (it reads the file only at start)."""
+    try:
+        sc_running_gateway(args)
+    except (Refused, OSError):
+        return False
+    start = main_start(args.gateway_unit)
+    return start is not None and int(os.stat(args.gateway_config).st_ctime) < start
+
+
+def sc_state(args):
+    base_raw, base = sc_load(args.config, "coordinator.yaml")
+    overlay_raw, overlay = sc_load(args.overlay, "the overlay")
+    gateway_raw, gateway = sc_load(args.gateway_config, "gateway.yaml")
+    return base_raw, base, overlay_raw, overlay, gateway_raw, gateway
+
+
+def sc_facts(args):
+    """Read-only: effective walls, the planned raise, and whether both
+    services booted with the files on disk. No secret is printed."""
+    _, base, _, overlay, _, gateway = sc_state(args)
+    walls = sc_coordinator_walls(base, overlay)
+    g = sc_gateway_timeouts(gateway)
+    coord, gw = sc_plan(base, overlay, gateway)
+    rt, pht = walls[("routing", "request_timeout_s")], walls[("provider_http", "timeout_s")]
+    out = {
+        "coordinator_request_timeout_s": rt[0],
+        "coordinator_request_timeout_s_file": rt[1],
+        "coordinator_provider_http_timeout_s": pht[0],
+        "coordinator_provider_http_timeout_s_file": pht[1],
+        "gateway_stream_ceiling_max_seconds": g["stream_ceiling_max_seconds"],
+        "gateway_non_stream_request_seconds": sc_non_stream(g),
+        "gateway_coordinator_header_timeout_seconds": g["coordinator_header_timeout_seconds"],
+        "planned_coordinator": sorted("%s.%s %d->%d (%s)" % (s, k, o, n, w) for (s, k), (w, o, n) in coord.items()),
+        "planned_gateway": sorted("timeouts.%s %d->%d" % (k, o, n) for k, (o, n) in gw.items()),
+        "c2_violation": sc_c2(rt[0], pht[0], g) or "",
+        "coordinator_applied": applied(args),
+        "gateway_applied": sc_gateway_applied(args),
+    }
+    print(json.dumps(out, sort_keys=True))
+
+
+def sc_after_config_second(args):
+    """Block until the clock is past the second gateway.yaml last changed,
+    so the restarted process's start second (systemd reports whole seconds)
+    is strictly later than the write and sc_gateway_applied can prove it."""
+    changed = int(os.stat(args.gateway_config).st_ctime)
+    while int(time.time()) <= changed:
+        time.sleep(0.05)
+
+
+def sc_restart_gateway(args, old_pid):
+    sc_after_config_second(args)
+    subprocess.run(["systemctl", "restart", args.gateway_unit], check=True, timeout=120, capture_output=True)
+    healthz(args.gateway_healthz)
+    if sc_running_gateway(args) == old_pid:
+        raise Refused("the gateway main process did not change after the restart")
+    if not sc_gateway_applied(args):
+        raise Refused("the restarted gateway did not start after its config was written")
+
+
+def sc_put_back(path, original, written, what):
+    """Compare-and-swap restore: only bytes this task wrote are replaced."""
+    with open(path, "rb") as f:
+        current = f.read()
+    if current not in (original, written):
+        raise Refused("%s changed under the task (neither the original nor the installed bytes); it was left as found" % what)
+    if current != original:
+        tmp = write_like(path, original, path)
+        try:
+            install(tmp, path)
+        finally:
+            if os.path.lexists(tmp):
+                os.unlink(tmp)
+    with open(path, "rb") as f:
+        if f.read() != original:
+            raise Refused("%s on disk is not the original bytes" % what)
+
+
+def sc_rollback(args, targets, backup, exc):
+    """Restore every file this task wrote, then restart both services onto
+    the originals and prove them. Always raises Refused."""
+    try:
+        for path, original, written, what in targets:
+            sc_put_back(path, original, written, what)
+    except Exception as rexc:
+        raise Refused("the stream-ceiling install or restart failed (%s) and restoring the original files failed (%s): "
+                      "coordinator.yaml, the overlay, gateway.yaml and both running services are UNPROVEN; compare "
+                      "them with the backup in %s, then check both services and run status now"
+                      % (failure(exc), failure(rexc), backup))
+    # Both services are recovered independently, the gateway first: the
+    # restored (lower) gateway ceiling then never sits above coordinator walls
+    # that are still raised, the reverse of the install order (C2).
+    failed = []
+    try:
+        sc_after_config_second(args)
+        if subprocess.run(["systemctl", "restart", args.gateway_unit], timeout=120, capture_output=True).returncode != 0:
+            raise Refused("systemctl restart failed")
+        healthz(args.gateway_healthz)
+        if not sc_gateway_applied(args):
+            raise Refused("the gateway did not start after its restored config was written")
+    except Exception as gexc:
+        failed.append("gateway: %s" % failure(gexc))
+    try:
+        recovery_restart(args, "the original coordinator config is restored on disk (bytes verified)")
+    except Exception as cexc:
+        failed.append("coordinator: %s" % failure(cexc))
+    if failed:
+        raise Refused("the stream-ceiling install or restart failed (%s); the original files are restored (bytes "
+                      "verified) but the recovery is UNPROVEN for %s: check both services and run status now"
+                      % (failure(exc), "; ".join(failed)))
+    raise Refused("the stream-ceiling install or restart failed (%s); the original files are restored (bytes verified) "
+                  "and both services were restarted onto them (/healthz answered, boot verified)" % failure(exc))
+
+
+def apply_stream_ceiling(args):
+    import yaml
+
+    with guard(args):
+        pid, binary, env, uid, gid = running(args)
+        gw_pid = sc_running_gateway(args)
+        base_raw, base, overlay_raw, overlay, gateway_raw, gateway = sc_state(args)
+        coord, gw = sc_plan(base, overlay, gateway)
+        new_base, new_overlay, new_gateway = sc_render(base_raw, overlay_raw, gateway_raw, coord, gw)
+        nb, no, ng = (yaml.safe_load(b) or {} for b in (new_base, new_overlay, new_gateway))
+        walls = sc_coordinator_walls(nb, no)
+        violation = sc_c2(walls[("routing", "request_timeout_s")][0], walls[("provider_http", "timeout_s")][0],
+                          sc_gateway_timeouts(ng))
+        if violation:
+            raise Refused("the planned walls fail the deploy gate: %s" % violation)
+        result = {"planned_coordinator": len(coord), "planned_gateway": len(gw)}
+        if not coord and not gw:
+            # Disk already holds the walls. Done only when both services
+            # booted with these bytes; otherwise restart onto them, the
+            # coordinator first.
+            restarted = []
+            if not applied(args):
+                check = as_service([binary, "--validate-config", "--config", args.config,
+                                    "--config-overlay", args.overlay], env, uid, gid, 120)
+                if check.returncode != 0:
+                    raise Refused("the running coordinator binary rejects the on-disk config (--validate-config)")
+                restart(args, pid)
+                restarted.append("coordinator")
+            if not sc_gateway_applied(args):
+                sc_restart_gateway(args, gw_pid)
+                restarted.append("gateway")
+            result["restarted"] = restarted
+            print(json.dumps(result, sort_keys=True))
+            return
+        stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        os.makedirs(args.backup_root, mode=0o700, exist_ok=True)
+        backup = tempfile.mkdtemp(prefix="%s-stream-ceiling-" % stamp, dir=args.backup_root)
+        os.chmod(backup, 0o700)
+        for name, data in (("coordinator.yaml", base_raw), ("coordinator.pearl-overlays.yaml", overlay_raw),
+                           ("gateway.yaml", gateway_raw)):
+            fd = os.open(os.path.join(backup, name), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+        result["backup"] = backup
+        targets = [t for t in ((args.config, base_raw, new_base, "coordinator.yaml"),
+                               (args.overlay, overlay_raw, new_overlay, "the overlay"),
+                               (args.gateway_config, gateway_raw, new_gateway, "gateway.yaml")) if t[1] != t[2]]
+        tmps = {}
+        try:
+            for path, _, new, _ in targets:
+                tmps[path] = write_like(path, new, path)
+            check = as_service([binary, "--validate-config", "--config", tmps.get(args.config, args.config),
+                                "--config-overlay", tmps.get(args.overlay, args.overlay)], env, uid, gid, 120)
+            if check.returncode != 0:
+                raise Refused("the running coordinator binary rejects the edited config (--validate-config)")
+            # From here edited bytes may be on disk: any failure restores and
+            # proves. The coordinator restarts first, so the gateway ceiling
+            # is never above the coordinator walls.
+            try:
+                for path, _, _, _ in targets:
+                    install(tmps[path], path)
+                    del tmps[path]
+                restart(args, pid)
+                sc_restart_gateway(args, gw_pid)
+            except Exception as exc:
+                sc_rollback(args, targets, backup, exc)
+        finally:
+            for tmp in tmps.values():
+                if os.path.lexists(tmp):
+                    os.unlink(tmp)
+        result["restarted"] = ["coordinator", "gateway"]
+        print(json.dumps(result, sort_keys=True))
+
+
 def main(argv):
     if argv[:1] == ["validate-vision-qualification"]:
         # Local, read-only (OUT, when given, is a new 0600 file holding the
@@ -1611,7 +1991,8 @@ def main(argv):
         return
     p = argparse.ArgumentParser()
     p.add_argument("cmd", choices=["apply", "ci-facts", "apply-compute-integrity", "vq-facts",
-                                   "apply-vision-qualification", "buc-facts", "apply-buyer-ux-conformance"])
+                                   "apply-vision-qualification", "buc-facts", "apply-buyer-ux-conformance",
+                                   "sc-facts", "apply-stream-ceiling"])
     p.add_argument("--config", required=True)
     p.add_argument("--overlay", required=True)
     p.add_argument("--unit", required=True)
@@ -1633,10 +2014,24 @@ def main(argv):
     p.add_argument("--buc-path", metavar="PATH")
     p.add_argument("--buc-staged", metavar="PATH")
     p.add_argument("--buc-sha256", metavar="SHA256")
+    p.add_argument("--gateway-config", metavar="PATH")
+    p.add_argument("--gateway-unit", metavar="UNIT")
+    p.add_argument("--gateway-healthz", metavar="URL")
     args = p.parse_args(argv)
     try:
         if args.cmd == "apply":
             apply(args)
+        elif args.cmd in ("sc-facts", "apply-stream-ceiling"):
+            if not re.match(r"^/[A-Za-z0-9._/-]+$", args.gateway_config or "") or \
+                    not re.match(r"^[A-Za-z0-9@._-]+$", args.gateway_unit or "") or \
+                    not re.match(r"^http://(127\.0\.0\.1|\[::1\]|localhost):[0-9]+/[A-Za-z0-9._/-]*$",
+                                 args.gateway_healthz or ""):
+                raise Refused("--gateway-config (absolute path), --gateway-unit and --gateway-healthz (loopback) "
+                              "are required")
+            if args.cmd == "sc-facts":
+                sc_facts(args)
+            else:
+                apply_stream_ceiling(args)
         elif args.cmd == "vq-facts":
             vq_facts(args)
         elif args.cmd == "apply-vision-qualification":
