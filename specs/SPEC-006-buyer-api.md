@@ -1,7 +1,28 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.67 (2026-10-24, 3600 s streaming ceiling and an explicit `request_timeout` cut; #2107)
+**Version:** 0.9.68 (2026-10-24, reasoning round trip on all buyer surfaces, keepalives and prompt-sized first-token budget; Related: #2107)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.6.28, SPEC-003 v0.7, SPEC-004 v0.3.2
+
+**Change log v0.9.68 (2026-10-24, Related: #2107):** Registers
+`SPEC-006-R025` and `SPEC-006-R026`. `/v1/responses` no longer discards model reasoning. Provider
+`reasoning_content` is returned as a Responses `reasoning` output item
+(`reasoning_text` content) ahead of the turn's message and calls, streamed as
+`response.reasoning_text.delta`, and `output_tokens_details.reasoning_tokens`
+carries the provider's sanitized count. A `reasoning` input item becomes
+`reasoning_content` on the assistant message built from the next assistant
+output item, so interleaved-thinking models (DeepSeek-V4, GLM-5.3) see their
+own reasoning in a tool loop instead of re-reasoning every round. This
+replaces the v0.9.63 rule "Prior `reasoning` items are dropped". On
+`/v1/messages`, assistant-history `thinking` block text becomes that turn's
+`reasoning_content` (replacing v0.9.63 "accepted and dropped";
+`redacted_thinking` stays dropped), and Chat Completions assistant
+`reasoning_content` is forwarded unchanged. Billing is unchanged: reasoning
+tokens stay inside `completion_tokens`. R026: every streaming buyer, not only
+wholesale accounts, receives `: keepalive` SSE comments, and the first-token
+deadline grows with the estimated prompt
+(`first_token + prompt / first_token_prefill_tokens_per_second`, default
+100 tok/s, capped by `stream_ceiling_max_seconds`), so a long agent prompt is
+not cut during prefill.
 
 **Change log v0.9.67 (2026-10-24, Related: #2107):** Registers
 `SPEC-006-R024`. The gateway streaming ceiling default
@@ -1978,7 +1999,7 @@ Completion `usage` MUST include OpenAI `prompt_tokens_details.cached_tokens` (ob
 
 Wholesale partner accounts MUST always receive a final stream `usage` chunk even when `stream_options.include_usage` is omitted. If the provider stream omitted usage, the gateway MUST inject a gateway-estimated usage chunk before `[DONE]`. Public accounts are unchanged.
 
-Wholesale partner streams MUST also receive gateway-only SSE comment keepalives (`: keepalive`) on an idle interval. SPEC-001 FR-5 provider-binary keepalives are unchanged.
+Wholesale partner streams MUST also receive gateway-only SSE comment keepalives (`: keepalive`) on an idle interval. SPEC-001 FR-5 provider-binary keepalives are unchanged. (v0.9.68) Every other streaming buyer receives them too, starting one interval after the stream opens (SPEC-006-R026).
 
 The free SKU wire id `mlx-community/Llama-3.2-3B-Instruct-4bit-free` MUST route to the same pool as `mlx-community/Llama-3.2-3B-Instruct-4bit`. Coordinator `NormalizeModelKey` MUST strip a trailing `-free` before other quantization suffixes. `request_log.model` MUST retain the original buyer string so SPEC-005 D1a can split $0 vs paid.
 
@@ -4295,7 +4316,8 @@ stream_ceiling_max_seconds)`, default maximum 3600 s. A plain stream that
 reaches it MUST end as specified in SPEC-006-R024 (`request_timeout`).
 Structured-output streams keep the SPEC-019 AC-V2-9 300 s sub-ceiling and its
 `provider_timeout` envelope. The first-token and decode-idle deadlines keep
-`provider_timeout`: there the provider stalled.
+`provider_timeout`: there the provider stalled. (v0.9.68) The first-token
+deadline scales with the prompt as specified in SPEC-006-R026.
 
 ### 17.6 Streaming cancellation
 
@@ -5159,3 +5181,102 @@ plain streams only, so the coordinator request log can label the cut
 `quotas.reservation_max_age_hours` does not exceed the longest request bound
 (the larger of the stream ceiling and the effective non-streaming wall) by at
 least 60 s, so no quota reservation expires before its request settles.
+
+
+## SPEC-006-R025 — Responses reasoning round trip
+
+`POST /v1/responses` is a stateless facade over Chat Completions
+(`store:false`). It MUST carry the model's reasoning in both directions.
+
+Output. When the provider returns `message.reasoning_content` (streaming:
+`delta.reasoning_content`, SPEC-018 §3.12), the response MUST contain one
+`reasoning` output item per contiguous run of reasoning, placed before the
+message, `function_call` and `custom_tool_call` items that follow it:
+
+```json
+{"id":"rs_<response suffix>","type":"reasoning","summary":[],
+ "content":[{"type":"reasoning_text","text":"<reasoning>"}]}
+```
+
+`summary` is always present (Codex CLI requires it to parse the item); no
+summary is generated. No `encrypted_content` is emitted. Streaming emits
+`response.output_item.added`, `response.content_part.added`,
+`response.reasoning_text.delta` per chunk, then `response.reasoning_text.done`,
+`response.content_part.done` and `response.output_item.done`, and closes the
+item before the first message or call item opens. Reasoning that arrives
+after a message or call item opened is not returned (it would follow the
+output it did not lead to). A stream that ends or fails during reasoning
+closes the item before its terminal event (`response.completed`,
+`response.incomplete` or `response.failed`). Inline `<think>` text in
+`content` remains stripped from the message and is not converted.
+`usage.output_tokens_details.reasoning_tokens` MUST equal the provider's
+`completion_tokens_details.reasoning_tokens` when it lies in
+`[0, completion_tokens]`, else 0. Input, output and total token counts, the
+usage row and settlement MUST be identical to the same response without
+reasoning: reasoning tokens are already part of `completion_tokens`.
+
+Input (`/v1/responses`). A `reasoning` input item MUST NOT be a 400. Its text is the
+`reasoning_text`/`text` parts of `content`, or, when those are empty, the
+`summary_text` parts of `summary`; other part types and `encrypted_content`
+are ignored (`encrypted_content` is never decoded). Consecutive reasoning
+items join with a newline. The text MUST be set as `reasoning_content` on the
+next chat message built from the input when that message is an assistant
+message (from `message`, `function_call` or `custom_tool_call`); if a user,
+system or tool message comes first, it is dropped. It is never attached to a
+non-assistant message. Coordinator validation and provider dispatch MUST
+forward assistant `reasoning_content` unchanged, and the provider passes it to
+the loaded template (SPEC-018 §3.12).
+
+Input (`/v1/messages`). The text of an assistant message's `thinking` blocks
+(joined with a newline) MUST be set as `reasoning_content` on the chat
+assistant message built from that Anthropic message. `signature` is not
+checked (this gateway emits an empty one, and Anthropic SDK clients echo
+whatever they received); `redacted_thinking` `data` is opaque and dropped.
+
+Input (`/v1/chat/completions`). Assistant `reasoning_content` MUST reach the
+provider unchanged.
+
+Security (all three surfaces). The reasoning text is the buyer's own conversation history. A
+client can author any `reasoning` text, exactly as it can already author any
+assistant message or `reasoning_content` on Chat Completions; it gains no
+capability. It is plain text inside the existing request-body cap (§17.1) and
+is counted by the prompt-token estimate like any other body string, so no
+separate bound applies. The provider sees it as plaintext like the rest of the
+prompt (Tier 1, §1.6).
+
+Codex CLI 0.163 (`wire_api = "responses"`, custom provider) records items from
+`response.output_item.done`, requires `summary`, and sends a reasoning item
+back with its `reasoning_text` content and `encrypted_content: null`, so this
+shape round-trips without an encrypted carrier.
+
+
+## SPEC-006-R026 — Long-prefill streaming: keepalives and prompt-sized first token
+
+Agent harnesses send first turns of 80k+ tokens; a provider that prefills at
+a few hundred tokens per second needs minutes before its first token.
+
+Keepalives. Every authenticated streaming response on `/v1/chat/completions`,
+`/v1/responses` and `/v1/messages` MUST receive `: keepalive` SSE comment
+lines every 15 s from the moment the gateway commits streaming headers until
+the stream's `[DONE]` or end. Wholesale accounts also receive one at once
+(their existing contract); for every other buyer the first comes after one
+interval, so a stream that finishes sooner is byte-identical to before. The
+Responses and Messages translators write the comment between whole
+translated events, never inside one. SSE comment lines are ignored by
+conforming parsers (WHATWG SSE; the OpenAI and Anthropic SDK decoders skip
+lines starting with `:`). Keepalives are not content: they never re-arm the
+first-token or decode-idle deadlines.
+
+First-token deadline. The first-token phase (armed when streaming headers
+commit) MUST be `first_token + ceil(estimated_prompt_tokens /
+first_token_prefill_tokens_per_second)` seconds, never above
+`stream_ceiling_max_seconds` (a `first_token` above the ceiling is clamped to
+it), where `first_token` is the existing
+`FirstTokenTimeout` and the estimate is the gateway's prompt estimate (body
+bytes / 4 plus image allowances). `first_token_prefill_tokens_per_second`
+defaults to 100 (DeepSeek-V4 prefills about 280 tok/s on a Studio, so this
+covers a 2.8x slower provider); 0 disables scaling. Bound: the stream ceiling
+still applies from the first byte of the request, and a buyer can extend its
+own first-token wait only by sending a longer prompt, which the request-body
+cap (§17.1) and its prompt billing already bound. Example: `first_token`
+300 s and a 131k-token prompt give 1611 s.

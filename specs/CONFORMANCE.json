@@ -152,7 +152,7 @@
     {
       "spec_id": "SPEC-006",
       "title": "Buyer API Gateway: Mac Provider's first public buyer surface",
-      "version": "0.9.67",
+      "version": "0.9.68",
       "path": "specs/SPEC-006-buyer-api.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -504,7 +504,7 @@
     {
       "spec_id": "SPEC-018",
       "title": "Agentic tool calling (provider-side response synthesis)",
-      "version": "0.3.6",
+      "version": "0.3.7",
       "path": "specs/SPEC-018-agentic-tool-calling.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -2508,6 +2508,26 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/2107",
         "rationale": "SPEC-018 v0.3.5 §3.12 normalizes none/minimal to low for GLM-5.3, gpt-oss and Qwen3.8 while preserving DeepSeek-V4 chat mode, thinking switches and structured-output low. Unit and template-rendering coverage lands here; production remains pending the next signed CLI release."
+      }
+    },
+    {
+      "requirement_id": "SPEC-018-R008",
+      "spec_id": "SPEC-018",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func userInput"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/GLMReasoningHistoryTests.swift:final class GLMReasoningHistoryTests",
+        "phase3-binary/Tests/macprovider-cliTests/DeepseekV4ReasoningHistoryTests.swift:final class DeepseekV4ReasoningHistoryTests"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2107",
+        "rationale": "GLM-5.3 history reasoning_content now reaches the template (DeepSeek-V4 already did), with fixture-template rendering tests; production remains pending the next signed CLI release."
       }
     },
     {
@@ -14315,6 +14335,69 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/2107",
         "rationale": "3600 s ceiling and the explicit request_timeout cut are implemented with gateway tests; live only once the runtime release and the Pearl stream-ceiling step have run and a long stream is observed through api.malibu.tech."
+      }
+    },
+    {
+      "requirement_id": "SPEC-006-R025",
+      "spec_id": "SPEC-006",
+      "state": "pending",
+      "implementation": [
+        "phase5-gateway/internal/router/responses.go:func responsesInputToChatMessages",
+        "phase5-gateway/internal/router/responses.go:func responsesReasoningItemText",
+        "phase5-gateway/internal/router/responses.go:func (a *responsesAdapter) emitReasoningDelta",
+        "phase5-gateway/internal/router/responses.go:func (a *responsesAdapter) closeReasoning",
+        "phase5-gateway/internal/router/responses.go:func responsesReasoningItem(id, text string)",
+        "phase5-gateway/internal/router/responses.go:func responsesUsageMap",
+        "phase5-gateway/internal/router/anthropic_messages.go:func anthropicAssistantBlocksToChat"
+      ],
+      "tests": [
+        "phase5-gateway/internal/router/responses_reasoning_test.go:func TestResponsesStreamingReasoningItemPrecedesFunctionCall",
+        "phase5-gateway/internal/router/responses_reasoning_test.go:func TestResponsesStreamingReasoningItemPrecedesMessage",
+        "phase5-gateway/internal/router/responses_reasoning_test.go:func TestResponsesStreamingReasoningOnlyTruncatedStillClosesItem",
+        "phase5-gateway/internal/router/responses_reasoning_test.go:func TestResponsesStreamingWithoutReasoningGolden",
+        "phase5-gateway/internal/router/responses_reasoning_test.go:func TestResponsesNonStreamingReasoningItemPrecedesOutput",
+        "phase5-gateway/internal/router/responses_reasoning_test.go:func TestResponsesNonStreamingWithoutReasoningGolden",
+        "phase5-gateway/internal/router/responses_reasoning_test.go:func TestResponsesReasoningInputAttachesToFollowingAssistantTurn",
+        "phase5-gateway/internal/router/responses_reasoning_test.go:func TestResponsesReasoningInputTextSelection",
+        "phase5-gateway/internal/router/responses_reasoning_test.go:func TestResponsesReasoningDoesNotChangeBilledUsage",
+        "phase4-coordinator/internal/buyer/reasoning_history_forward_test.go:func TestValidatedChatRequestForwardsAssistantReasoningContent",
+        "phase5-gateway/internal/router/agent_harness_stream_test.go:func TestChatCompletionsForwardsAssistantReasoningContent",
+        "phase5-gateway/internal/router/agent_harness_stream_test.go:func TestAnthropicMessagesThinkingHistoryBecomesReasoningContent"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2107",
+        "rationale": "Responses reasoning output items, reasoning_tokens and reasoning input round trip, Messages thinking-history and Chat Completions reasoning_content forwarding are implemented with unit and handler tests (billed usage unchanged); live once the gateway runtime release reaches Pearl and a Codex CLI tool loop is observed through api.malibu.tech."
+      }
+    },
+    {
+      "requirement_id": "SPEC-006-R026",
+      "spec_id": "SPEC-006",
+      "state": "pending",
+      "implementation": [
+        "phase5-gateway/internal/config/config.go:func (c Config) FirstTokenTimeoutForPrompt",
+        "phase5-gateway/internal/router/wholesale_stream.go:func startWholesaleKeepalives",
+        "phase5-gateway/internal/router/wholesale_stream.go:func (s *wholesaleStreamWriter) writeKeepalive",
+        "phase5-gateway/internal/router/responses.go:func (a *responsesAdapter) writeSSEComment",
+        "phase5-gateway/internal/router/anthropic_messages.go:func (a *anthropicMessagesAdapter) writeSSEComment"
+      ],
+      "tests": [
+        "phase5-gateway/internal/config/first_token_prompt_test.go:func TestFirstTokenTimeoutForPrompt",
+        "phase5-gateway/internal/router/agent_harness_stream_test.go:func TestStreamingKeepalivesReachEveryBuyerOnAllSurfaces",
+        "phase5-gateway/internal/router/agent_harness_stream_test.go:func TestFastStreamCarriesNoKeepaliveForOrdinaryBuyers",
+        "phase5-gateway/internal/router/agent_harness_stream_test.go:func TestFirstTokenBudgetScalesWithPromptSize",
+        "phase5-gateway/internal/router/wholesale_partner_test.go:func TestWholesaleStreamInjectsUsageAndKeepalive"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2107",
+        "rationale": "Keepalives for every streaming buyer and the prompt-sized first-token budget (default 100 tok/s, needs no Pearl config change) are implemented with config and handler tests; live once the gateway runtime release reaches Pearl and a long-prompt agent turn is observed through api.malibu.tech."
       }
     },
     {

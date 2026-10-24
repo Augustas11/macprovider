@@ -1,0 +1,38 @@
+event: response.created
+data: {"response":{"created_at":1782864000,"error":null,"id":"resp_abababab-abab-4bab-8bab-abababababab","incomplete_details":null,"instructions":null,"max_output_tokens":null,"metadata":{},"model":"dsv4","object":"response","output":[],"parallel_tool_calls":true,"previous_response_id":null,"reasoning":{"effort":null,"summary":null},"status":"in_progress","store":false,"temperature":null,"text":{"format":{"type":"text"}},"tool_choice":"auto","tools":[{"name":"lookup","parameters":{"type":"object"},"type":"function"}],"top_p":null,"truncation":"disabled","usage":null,"user":null},"sequence_number":1,"type":"response.created"}
+
+event: response.output_item.added
+data: {"item":{"content":[],"id":"msg_resp_abababab-abab-4bab-8bab-abababababab","role":"assistant","status":"in_progress","type":"message"},"output_index":0,"sequence_number":2,"type":"response.output_item.added"}
+
+event: response.content_part.added
+data: {"content_index":0,"item_id":"msg_resp_abababab-abab-4bab-8bab-abababababab","output_index":0,"part":{"annotations":[],"text":"","type":"output_text"},"sequence_number":3,"type":"response.content_part.added"}
+
+event: response.output_text.delta
+data: {"content_index":0,"delta":"hi","item_id":"msg_resp_abababab-abab-4bab-8bab-abababababab","output_index":0,"sequence_number":4,"type":"response.output_text.delta"}
+
+event: response.output_item.added
+data: {"item":{"arguments":"","call_id":"call_0123456789abcdef","id":"fc_call_0123456789abcdef","name":"lookup","status":"in_progress","type":"function_call"},"output_index":1,"sequence_number":5,"type":"response.output_item.added"}
+
+event: response.function_call_arguments.delta
+data: {"delta":"{}","item_id":"fc_call_0123456789abcdef","output_index":1,"sequence_number":6,"type":"response.function_call_arguments.delta"}
+
+event: response.output_text.done
+data: {"content_index":0,"item_id":"msg_resp_abababab-abab-4bab-8bab-abababababab","output_index":0,"sequence_number":7,"text":"hi","type":"response.output_text.done"}
+
+event: response.content_part.done
+data: {"content_index":0,"item_id":"msg_resp_abababab-abab-4bab-8bab-abababababab","output_index":0,"part":{"annotations":[],"text":"hi","type":"output_text"},"sequence_number":8,"type":"response.content_part.done"}
+
+event: response.output_item.done
+data: {"item":{"content":[{"annotations":[],"text":"hi","type":"output_text"}],"id":"msg_resp_abababab-abab-4bab-8bab-abababababab","role":"assistant","status":"completed","type":"message"},"output_index":0,"sequence_number":9,"type":"response.output_item.done"}
+
+event: response.function_call_arguments.done
+data: {"arguments":"{}","item_id":"fc_call_0123456789abcdef","name":"lookup","output_index":1,"sequence_number":10,"type":"response.function_call_arguments.done"}
+
+event: response.output_item.done
+data: {"item":{"arguments":"{}","call_id":"call_0123456789abcdef","id":"fc_call_0123456789abcdef","name":"lookup","status":"completed","type":"function_call"},"output_index":1,"sequence_number":11,"type":"response.output_item.done"}
+
+event: response.completed
+data: {"response":{"created_at":1782864000,"error":null,"id":"resp_abababab-abab-4bab-8bab-abababababab","incomplete_details":null,"instructions":null,"max_output_tokens":null,"metadata":{},"model":"llama","object":"response","output":[{"content":[{"annotations":[],"text":"hi","type":"output_text"}],"id":"msg_resp_abababab-abab-4bab-8bab-abababababab","role":"assistant","status":"completed","type":"message"},{"arguments":"{}","call_id":"call_0123456789abcdef","id":"fc_call_0123456789abcdef","name":"lookup","status":"completed","type":"function_call"}],"parallel_tool_calls":true,"previous_response_id":null,"reasoning":{"effort":null,"summary":null},"status":"completed","store":false,"temperature":null,"text":{"format":{"type":"text"}},"tool_choice":"auto","tools":[{"name":"lookup","parameters":{"type":"object"},"type":"function"}],"top_p":null,"truncation":"disabled","usage":{"input_tokens":4,"input_tokens_details":{"cache_write_tokens":0,"cached_tokens":0},"output_tokens":5,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":9},"user":null},"sequence_number":12,"type":"response.completed"}
+
+data: [DONE]
+
