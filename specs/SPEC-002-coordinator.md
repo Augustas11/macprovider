@@ -5751,11 +5751,20 @@ A provider response frame (`inference_response_chunk`,
 `inference_response_validation`, `inference_response_end`) whose
 `request_id` is not active on the provider session MUST be discarded without
 closing the WebSocket, failing another request, or changing the provider's
-pool state. This covers a request retired moments ago, one whose retired
-entry has expired, and one the coordinator never issued. Each discard MUST
-emit a warn log with `event` `relay_inactive_frame_dropped`, the frame type,
-the request_id and a `reason` (`retired_request`, `unknown_request` or
-`stale_key_epoch`), and MUST increment the inactive-frame counter. A late
+pool state, with one exception: an encrypted frame that claims the session's
+current key epoch and does not verify (below) is an AEAD failure. This covers
+a request retired moments ago, one whose retired entry has expired, and one the
+coordinator never issued. On a Tier-2 session a plaintext frame for an inactive
+request is discarded the same way; a plaintext frame for an active request
+remains an encryption violation. Each discard MUST increment the
+inactive-frame counter and is logged at warn with `event`
+`relay_inactive_frame_dropped`, the frame type, the request_id and a `reason`
+(`retired_request`, `unknown_request` or `stale_key_epoch`). Logging is
+rate-limited to one event per provider session per second; each event carries
+`suppressed_since_last`. A request_id with control characters or longer than
+128 bytes is logged as `invalid`. An encrypted frame is routed by its AAD
+`request_id`, so its cleartext envelope `request_id` never causes it to be
+skipped unauthenticated. A late
 `cancelled` or `complete` terminal of a buyer-cancelled request still reaches
 the cancel-terminal waiter (FR-P18) while the retired entry exists.
 
@@ -5775,6 +5784,6 @@ late frame always opens under the current key.
 The coordinator MUST remember a retired request for at least
 `routing.request_timeout_s` plus one minute (never less than five minutes), the
 longest a provider can legitimately keep working on a request after it was
-retired. The retired set MUST be bounded per provider session (8192 entries,
-oldest evicted first); an evicted request's late frames take the unknown-request
+retired. The retired set MUST be bounded per provider session (8192 entries; the oldest
+entry without an armed cancel terminal is evicted first); an evicted request's late frames take the unknown-request
 path above and are still discarded without closing the session.

@@ -14427,7 +14427,13 @@
         "phase4-coordinator/internal/ws/late_frame_test.go:func TestEncryptedRelayKnownRequestAEADFailureStillClosesSession",
         "phase4-coordinator/internal/ws/late_frame_test.go:func TestRelayDropsPlaintextFramesForUnknownRequest",
         "phase4-coordinator/internal/ws/late_frame_test.go:func TestRetiredRelayRequestTTLCoversTheRequestWall",
-        "phase4-coordinator/internal/ws/late_frame_test.go:func TestRetiredRelayRequestsAreCapped"
+        "phase4-coordinator/internal/ws/late_frame_test.go:func TestRetiredRelayRequestsAreCapped",
+        "phase4-coordinator/internal/ws/late_frame_test.go:func TestTier2SessionDropsPlaintextFramesForInactiveRequest",
+        "phase4-coordinator/internal/ws/late_frame_test.go:func TestTier2SessionStillClosesOnPlaintextFrameForActiveRequest",
+        "phase4-coordinator/internal/ws/late_frame_test.go:func TestEncryptedRelayDropsStaleEpochValidationFrame",
+        "phase4-coordinator/internal/ws/late_frame_test.go:func TestEncryptedRelayConsumesUnloggableRequestIDFrame",
+        "phase4-coordinator/internal/ws/late_frame_test.go:func TestInactiveFrameDropLogsAreRateLimitedPerSession",
+        "phase4-coordinator/internal/ws/late_frame_test.go:func TestRetiredRelayRequestCapKeepsArmedCancelTerminal"
       ],
       "journeys": [],
       "evidence": [],

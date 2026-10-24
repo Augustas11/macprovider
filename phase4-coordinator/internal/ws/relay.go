@@ -420,9 +420,13 @@ type providerSession struct {
 	active         map[string]*relayActive
 	retired        map[string]retiredRelayRequest
 	retiredTTL     time.Duration
-	activeChanged  chan struct{}
-	closedCh       chan struct{}
-	httpOnly       bool
+	// inactiveLog* rate-limit relay_inactive_frame_dropped logs per session.
+	inactiveLogMu         sync.Mutex
+	inactiveLogAt         time.Time
+	inactiveLogSuppressed uint64
+	activeChanged         chan struct{}
+	closedCh              chan struct{}
+	httpOnly              bool
 	// maxTextFrameBytes is the largest text frame the provider accepts
 	// (SPEC-001-R012). enqueueFrame refuses a larger one; 0 disables the
 	// check (raw control frames are never checked).
@@ -783,15 +787,18 @@ func (ps *providerSession) markRetiredLocked(active *relayActive, now time.Time)
 		return
 	}
 	cutoff := now.Add(-ps.retiredTTL)
-	oldestID := ""
+	// Eviction prefers the oldest entry without an armed cancel terminal, so a
+	// burst of retirements does not cost a buyer-cancel waiter its receipt.
+	oldestID, oldestArmed := "", true
 	var oldestAt time.Time
 	for id, retired := range ps.retired {
 		if retired.retiredAt.Before(cutoff) {
 			delete(ps.retired, id)
 			continue
 		}
-		if oldestID == "" || retired.retiredAt.Before(oldestAt) {
-			oldestID, oldestAt = id, retired.retiredAt
+		armed := retired.cancelTerminal != nil
+		if oldestID == "" || (oldestArmed && !armed) || (armed == oldestArmed && retired.retiredAt.Before(oldestAt)) {
+			oldestID, oldestArmed, oldestAt = id, armed, retired.retiredAt
 		}
 	}
 	if _, replacing := ps.retired[active.requestID]; !replacing && len(ps.retired) >= maxRetiredRelayRequests {
@@ -1821,11 +1828,11 @@ func (s *Server) consumeInactiveEncryptedFrame(session *providerSession, provide
 	}
 	plaintext, err := session.consumeInactiveEncryptedFrame(providerID, assignedID, stream, frameType, requestID, aad, envelope)
 	if errors.Is(err, errTier2InactiveFrameStaleKey) {
-		s.logInactiveFrameDropped(providerID, assignedID, frameType, requestID, "stale_key_epoch", true)
+		s.logInactiveFrameDropped(session, providerID, assignedID, frameType, requestID, "stale_key_epoch", true)
 		return
 	}
 	if err != nil {
-		s.closeProviderForTier2AEADFailure(session, providerID, assignedID, requestID, err.Error())
+		s.closeProviderForTier2AEADFailure(session, providerID, assignedID, inactiveFrameLogID(requestID), err.Error())
 		return
 	}
 	if wasRetired && frameType == "inference_response_end" {
@@ -1839,11 +1846,30 @@ func (s *Server) consumeInactiveEncryptedFrame(session *providerSession, provide
 			}
 		}
 	}
-	s.logInactiveFrameDropped(providerID, assignedID, frameType, requestID, reason, true)
+	s.logInactiveFrameDropped(session, providerID, assignedID, frameType, requestID, reason, true)
 }
 
-func (s *Server) logInactiveFrameDropped(providerID, assignedID, frameType, requestID, reason string, encrypted bool) {
+// inactiveFrameLogID is the request_id as logged for a frame the coordinator
+// is not serving. The coordinator never issues an ID with control characters
+// or longer than this, so such an ID is replaced rather than logged.
+func inactiveFrameLogID(requestID string) string {
+	const maxLoggedRequestIDBytes = 128
+	if containsControlChar(requestID) || len(requestID) > maxLoggedRequestIDBytes {
+		return "invalid"
+	}
+	return requestID
+}
+
+// logInactiveFrameDropped counts every inactive-frame drop and logs at most one
+// per session per inactiveFrameLogInterval, carrying the drops it suppressed,
+// so a provider flooding stale frames cannot amplify coordinator logging.
+func (s *Server) logInactiveFrameDropped(session *providerSession, providerID, assignedID, frameType, requestID, reason string, encrypted bool) {
 	relayInactiveFrameDroppedTotal.Add(1)
+	suppressed, ok := session.allowInactiveFrameLog(time.Now())
+	if !ok {
+		return
+	}
+	requestID = inactiveFrameLogID(requestID)
 	msg := "unknown " + frameType + " request_id dropped"
 	if reason == "retired_request" {
 		msg = "late " + frameType + " for retired request dropped"
@@ -1859,7 +1885,22 @@ func (s *Server) logInactiveFrameDropped(providerID, assignedID, frameType, requ
 		Str("frame_type", frameType).
 		Str("reason", reason).
 		Bool("encrypted", encrypted).
+		Uint64("suppressed_since_last", suppressed).
 		Msg(msg)
+}
+
+const inactiveFrameLogInterval = time.Second
+
+func (ps *providerSession) allowInactiveFrameLog(now time.Time) (uint64, bool) {
+	ps.inactiveLogMu.Lock()
+	defer ps.inactiveLogMu.Unlock()
+	if !ps.inactiveLogAt.IsZero() && now.Sub(ps.inactiveLogAt) < inactiveFrameLogInterval {
+		ps.inactiveLogSuppressed++
+		return 0, false
+	}
+	suppressed := ps.inactiveLogSuppressed
+	ps.inactiveLogAt, ps.inactiveLogSuppressed = now, 0
+	return suppressed, true
 }
 
 func (s *Server) closeProviderForTier2AEADFailure(session *providerSession, providerID, assignedID, requestID, reason string) {
@@ -2004,7 +2045,10 @@ func (s *Server) handleInferenceChunk(providerID, assignedID string, payload []b
 	// (closeProviderForTier2AEADFailure, LogAEADDecryptFailed,
 	// LogEncryptedLegSessionClosed) and reach structured logs with raw
 	// C1/CSI before the post-parse containsControlChar check fires.
-	if containsControlChar(envelope.RequestID) {
+	// An encrypted frame is routed by its AAD request_id and must still be
+	// authenticated to consume its sequence slot (SPEC-002-R010); its cleartext
+	// envelope.request_id is only logged through inactiveFrameLogID.
+	if !envelope.Encrypted && containsControlChar(envelope.RequestID) {
 		s.log.Warn().Str("provider_id", providerID).Msg("inference_response_chunk envelope.request_id contains control chars; dropping")
 		return
 	}
@@ -2017,16 +2061,12 @@ func (s *Server) handleInferenceChunk(providerID, assignedID string, payload []b
 	if envelope.Encrypted {
 		aad, _, err := tier2.DecodeAEADAAD(envelope.Enc.AAD)
 		if err != nil {
-			s.closeProviderForTier2AEADFailure(session, providerID, assignedID, envelope.RequestID, err.Error())
+			s.closeProviderForTier2AEADFailure(session, providerID, assignedID, inactiveFrameLogID(envelope.RequestID), err.Error())
 			return
 		}
 		requestID := aad.RequestID
 		if requestID == "" {
 			requestID = envelope.RequestID
-		}
-		if containsControlChar(requestID) {
-			s.log.Warn().Str("provider_id", providerID).Msg("encrypted inference_response_chunk AAD request_id contains control chars; dropping")
-			return
 		}
 		active, ok := session.activeFor(requestID)
 		if !ok {
@@ -2040,8 +2080,9 @@ func (s *Server) handleInferenceChunk(providerID, assignedID string, payload []b
 		}
 	} else if session.hasTier2Session() {
 		requestID := envelope.RequestID
-		if requestID == "" {
-			requestID = "unknown"
+		if _, exists := session.activeFor(requestID); !exists {
+			s.logInactiveFrameDropped(session, providerID, assignedID, "inference_response_chunk", requestID, "unknown_request", false)
+			return
 		}
 		tier2.LogAEADDecryptFailed(s.log, providerID, assignedID, requestID, "tier2 encrypted response chunk required")
 		tier2.LogEncryptedLegSessionClosed(s.log, providerID, assignedID, requestID, "unencrypted_tier2_frame")
@@ -2061,7 +2102,7 @@ func (s *Server) handleInferenceChunk(providerID, assignedID string, payload []b
 	}
 	active, ok := session.activeFor(chunk.RequestID)
 	if !ok {
-		s.logInactiveFrameDropped(providerID, assignedID, "inference_response_chunk", chunk.RequestID, "unknown_request", false)
+		s.logInactiveFrameDropped(session, providerID, assignedID, "inference_response_chunk", chunk.RequestID, "unknown_request", false)
 		return
 	}
 	if s.relayChunkWouldExceed(active, len([]byte(chunk.Data))) {
@@ -2096,24 +2137,25 @@ func (s *Server) handleInferenceValidation(providerID, assignedID string, payloa
 		return
 	}
 	var envelope encryptedInferenceResponseEnd
-	if err := json.Unmarshal(payload, &envelope); err != nil || containsControlChar(envelope.RequestID) {
+	if err := json.Unmarshal(payload, &envelope); err != nil || (!envelope.Encrypted && containsControlChar(envelope.RequestID)) {
 		return
 	}
 	requestID := envelope.RequestID
 	var frame InferenceResponseValidation
 	if envelope.Encrypted {
 		aad, _, err := tier2.DecodeAEADAAD(envelope.Enc.AAD)
-		if err != nil || aad.Type != "inference_response_validation" || aad.Direction != "p2c" {
-			s.closeProviderForTier2AEADFailure(session, providerID, assignedID, requestID, "invalid relay-blind validation AAD")
+		if err != nil {
+			s.closeProviderForTier2AEADFailure(session, providerID, assignedID, inactiveFrameLogID(requestID), "invalid relay-blind validation AAD")
 			return
 		}
 		requestID = aad.RequestID
-		if containsControlChar(requestID) {
-			return
-		}
 		active, exists := session.activeFor(requestID)
 		if !exists {
 			s.consumeInactiveEncryptedFrame(session, providerID, assignedID, "inference_response_validation", requestID, aad, tier2.AEADEnvelope{Encrypted: true, Enc: envelope.Enc})
+			return
+		}
+		if aad.Type != "inference_response_validation" || aad.Direction != "p2c" {
+			s.closeProviderForTier2AEADFailure(session, providerID, assignedID, requestID, "invalid relay-blind validation AAD")
 			return
 		}
 		frame, err = session.openInferenceValidation(providerID, assignedID, active, aad, tier2.AEADEnvelope{Encrypted: true, Enc: envelope.Enc})
@@ -2123,17 +2165,22 @@ func (s *Server) handleInferenceValidation(providerID, assignedID string, payloa
 		}
 		frame.RequestID = requestID
 	} else {
-		if session.hasTier2Session() || json.Unmarshal(payload, &frame) != nil {
-			if session.hasTier2Session() {
-				s.closeProviderForTier2AEADFailure(session, providerID, assignedID, requestID, "tier2 encrypted validation required")
+		if session.hasTier2Session() {
+			if _, exists := session.activeFor(requestID); !exists {
+				s.logInactiveFrameDropped(session, providerID, assignedID, "inference_response_validation", requestID, "unknown_request", false)
+				return
 			}
+			s.closeProviderForTier2AEADFailure(session, providerID, assignedID, requestID, "tier2 encrypted validation required")
+			return
+		}
+		if json.Unmarshal(payload, &frame) != nil {
 			return
 		}
 		requestID = frame.RequestID
 	}
 	active, ok := session.activeFor(requestID)
 	if !ok {
-		s.logInactiveFrameDropped(providerID, assignedID, "inference_response_validation", requestID, "unknown_request", false)
+		s.logInactiveFrameDropped(session, providerID, assignedID, "inference_response_validation", requestID, "unknown_request", false)
 		return
 	}
 	validEvidence := frame.Type == "inference_response_validation" && frame.RequestID == requestID
@@ -2180,23 +2227,19 @@ func (s *Server) handleInferenceEnd(providerID, assignedID string, payload []byt
 	}
 	// SPEC-002 v1.5.1 R-2 / issue #197 R6 code: reject control-character
 	// envelope.RequestID before any tier2 log helper or structured log.
-	if containsControlChar(envelope.RequestID) {
+	if !envelope.Encrypted && containsControlChar(envelope.RequestID) {
 		s.log.Warn().Str("provider_id", providerID).Msg("inference_response_end envelope.request_id contains control chars; dropping")
 		return
 	}
 	if envelope.Encrypted {
 		aad, _, err := tier2.DecodeAEADAAD(envelope.Enc.AAD)
 		if err != nil {
-			s.closeProviderForTier2AEADFailure(session, providerID, assignedID, envelope.RequestID, err.Error())
+			s.closeProviderForTier2AEADFailure(session, providerID, assignedID, inactiveFrameLogID(envelope.RequestID), err.Error())
 			return
 		}
 		requestID := aad.RequestID
 		if requestID == "" {
 			requestID = envelope.RequestID
-		}
-		if containsControlChar(requestID) {
-			s.log.Warn().Str("provider_id", providerID).Msg("encrypted inference_response_end AAD request_id contains control chars; dropping")
-			return
 		}
 		active, ok := session.activeFor(requestID)
 		if !ok {
@@ -2221,8 +2264,9 @@ func (s *Server) handleInferenceEnd(providerID, assignedID string, payload []byt
 		end = opened
 	} else if session.hasTier2Session() {
 		requestID := envelope.RequestID
-		if requestID == "" {
-			requestID = "unknown"
+		if _, exists := session.activeFor(requestID); !exists {
+			s.logInactiveFrameDropped(session, providerID, assignedID, "inference_response_end", requestID, "unknown_request", false)
+			return
 		}
 		s.closeProviderForTier2AEADFailure(session, providerID, assignedID, requestID, "tier2 encrypted response end required")
 		return
@@ -2257,7 +2301,7 @@ func (s *Server) handleInferenceEnd(providerID, assignedID string, payload []byt
 		}) {
 			return
 		}
-		s.logInactiveFrameDropped(providerID, assignedID, "inference_response_end", end.RequestID, "unknown_request", false)
+		s.logInactiveFrameDropped(session, providerID, assignedID, "inference_response_end", end.RequestID, "unknown_request", false)
 		return
 	}
 	end = relayBlindTerminalReceipts(active.relayBlind, end)

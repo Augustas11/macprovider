@@ -30,6 +30,15 @@ func lateFrameHarness(t *testing.T) (*Server, *pool.Provider, net.Conn, *bytes.B
 	return s, provider, providerConn, &logs
 }
 
+// resetInactiveLogLimit lets the next inactive-frame drop log immediately.
+func resetInactiveLogLimit(s *Server) {
+	if session, ok := s.storedSessionFor("p1", "s1"); ok {
+		session.inactiveLogMu.Lock()
+		session.inactiveLogAt = time.Time{}
+		session.inactiveLogMu.Unlock()
+	}
+}
+
 func assertSessionOpen(t *testing.T, s *Server, logs *bytes.Buffer) {
 	t.Helper()
 	if _, ok := s.storedSessionFor("p1", "s1"); !ok {
@@ -121,6 +130,7 @@ func TestEncryptedRelayDropsFramesForNeverIssuedRequest(t *testing.T) {
 	before := RelayInactiveFrameDroppedTotalForTest()
 
 	s.handleInferenceChunk("p1", "s1", encryptedResponseChunk(t, provider, "req-never", false, 0, []byte(`x`)))
+	resetInactiveLogLimit(s)
 	s.handleInferenceEnd("p1", "s1", encryptedResponseEnd(t, provider, "req-never", false, 1, InferenceResponseEnd{
 		Type: "inference_response_end", RequestID: "req-never", Status: "complete",
 	}))
@@ -129,6 +139,7 @@ func TestEncryptedRelayDropsFramesForNeverIssuedRequest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seal validation: %v", err)
 	}
+	resetInactiveLogLimit(s)
 	s.handleInferenceValidation("p1", "s1", mustJSON(encryptedInferenceResponseEnd{Type: "inference_response_validation", RequestID: "req-never", Encrypted: true, Enc: validation.Enc}))
 
 	assertSessionOpen(t, s, logs)
@@ -231,7 +242,9 @@ func TestRelayDropsPlaintextFramesForUnknownRequest(t *testing.T) {
 	before := RelayInactiveFrameDroppedTotalForTest()
 
 	s.handleInferenceChunk("p1", "s1", mustJSON(InferenceResponseChunk{Type: "inference_response_chunk", RequestID: "req-gone", Seq: 0, Data: "x"}))
+	resetInactiveLogLimit(s)
 	s.handleInferenceEnd("p1", "s1", mustJSON(InferenceResponseEnd{Type: "inference_response_end", RequestID: "req-gone", Status: "complete"}))
+	resetInactiveLogLimit(s)
 	s.handleInferenceValidation("p1", "s1", mustJSON(InferenceResponseValidation{Type: "inference_response_validation", RelayBlindValidation: RelayBlindValidation{RequestID: "req-gone"}}))
 
 	if _, ok := s.storedSessionFor("p1", "s1"); !ok {
@@ -286,5 +299,116 @@ func TestRetiredRelayRequestsAreCapped(t *testing.T) {
 	}
 	if _, ok := session.retired["req-8192"]; !ok {
 		t.Fatal("newest retired entry missing")
+	}
+}
+
+// A plaintext frame on a Tier-2 session is an encryption violation only for a
+// request the coordinator is serving; for an inactive request it is dropped.
+func TestTier2SessionDropsPlaintextFramesForInactiveRequest(t *testing.T) {
+	s, _, _, logs := lateFrameHarness(t)
+	before := RelayInactiveFrameDroppedTotalForTest()
+
+	s.handleInferenceChunk("p1", "s1", mustJSON(InferenceResponseChunk{Type: "inference_response_chunk", RequestID: "req-gone", Seq: 0, Data: "x"}))
+	s.handleInferenceEnd("p1", "s1", mustJSON(InferenceResponseEnd{Type: "inference_response_end", RequestID: "req-gone", Status: "complete"}))
+	s.handleInferenceValidation("p1", "s1", mustJSON(InferenceResponseValidation{Type: "inference_response_validation", RequestID: "req-gone"}))
+
+	assertSessionOpen(t, s, logs)
+	if got := RelayInactiveFrameDroppedTotalForTest() - before; got != 3 {
+		t.Fatalf("inactive frame drops = %d, want 3", got)
+	}
+}
+
+func TestTier2SessionStillClosesOnPlaintextFrameForActiveRequest(t *testing.T) {
+	s, provider, providerConn, _ := lateFrameHarness(t)
+	relay := dispatchAndRead(t, s, provider, providerConn, "req-active", true)
+
+	s.handleInferenceChunk("p1", "s1", mustJSON(InferenceResponseChunk{Type: "inference_response_chunk", RequestID: "req-active", Seq: 0, Data: "x"}))
+
+	if _, ok := s.storedSessionFor("p1", "s1"); ok {
+		t.Fatal("plaintext chunk for an active request on a Tier-2 session kept the session")
+	}
+	select {
+	case err := <-relay.Errors:
+		if err != ErrRelayAEADFailed {
+			t.Fatalf("relay error = %v, want ErrRelayAEADFailed", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("active request not failed")
+	}
+}
+
+// A stale-epoch validation frame takes the inactive path before any
+// validation-specific AAD check, like chunk and end frames.
+func TestEncryptedRelayDropsStaleEpochValidationFrame(t *testing.T) {
+	s, provider, _, logs := lateFrameHarness(t)
+	aad := tier2.AEADFrameAAD{Type: "inference_response_end", Direction: "p2c", RequestID: "req-old-epoch", ProviderID: "p1", AssignedID: "s1", Seq: 0}
+	sealed, err := tier2.SealPillarBFrame(bytes.Repeat([]byte{0x66}, 32), provider.Tier2Session.P2CNonceBase, "retired-kid", 0, aad, []byte(`{}`))
+	if err != nil {
+		t.Fatalf("seal: %v", err)
+	}
+	s.handleInferenceValidation("p1", "s1", mustJSON(encryptedInferenceResponseEnd{Type: "inference_response_validation", RequestID: "req-old-epoch", Encrypted: true, Enc: sealed.Enc}))
+
+	assertSessionOpen(t, s, logs)
+	if provider.Tier2Session.P2CCounter != 0 {
+		t.Fatalf("p2c counter = %d, want 0", provider.Tier2Session.P2CCounter)
+	}
+}
+
+// An authentic frame whose AAD request_id the coordinator could never have
+// issued still consumes its sequence slot; only the logged ID is replaced.
+func TestEncryptedRelayConsumesUnloggableRequestIDFrame(t *testing.T) {
+	s, provider, _, logs := lateFrameHarness(t)
+	odd := "req-\x1b[2J"
+	s.handleInferenceEnd("p1", "s1", encryptedResponseEnd(t, provider, odd, false, 0, InferenceResponseEnd{Type: "inference_response_end", RequestID: odd, Status: "complete"}))
+
+	assertSessionOpen(t, s, logs)
+	if provider.Tier2Session.P2CCounter != 1 {
+		t.Fatalf("p2c counter = %d, want 1", provider.Tier2Session.P2CCounter)
+	}
+	if !bytes.Contains(logs.Bytes(), []byte(`"request_id":"invalid"`)) || bytes.Contains(logs.Bytes(), []byte(`\u001b`)) {
+		t.Fatalf("unsafe request_id logged: %s", logs.String())
+	}
+}
+
+func TestInactiveFrameDropLogsAreRateLimitedPerSession(t *testing.T) {
+	s, _, _, logs := lateFrameHarness(t)
+	before := RelayInactiveFrameDroppedTotalForTest()
+	for i := 0; i < 50; i++ {
+		s.handleInferenceEnd("p1", "s1", mustJSON(InferenceResponseEnd{Type: "inference_response_end", RequestID: "req-flood", Status: "complete"}))
+	}
+	if got := RelayInactiveFrameDroppedTotalForTest() - before; got != 50 {
+		t.Fatalf("inactive frame drops = %d, want 50", got)
+	}
+	if got := bytes.Count(logs.Bytes(), []byte(`"event":"relay_inactive_frame_dropped"`)); got != 1 {
+		t.Fatalf("drop log lines = %d, want 1", got)
+	}
+	resetInactiveLogLimit(s)
+	s.handleInferenceEnd("p1", "s1", mustJSON(InferenceResponseEnd{Type: "inference_response_end", RequestID: "req-flood", Status: "complete"}))
+	if !bytes.Contains(logs.Bytes(), []byte(`"suppressed_since_last":49`)) {
+		t.Fatalf("suppressed drops not reported: %s", logs.String())
+	}
+}
+
+func TestRetiredRelayRequestCapKeepsArmedCancelTerminal(t *testing.T) {
+	session := newProviderSession("p1", "s1", nil, 1)
+	start := time.Now()
+	session.activeMu.Lock()
+	session.markRetiredLocked(&relayActive{requestID: "req-armed"}, start)
+	armed := session.retired["req-armed"]
+	armed.cancelTerminal = make(chan InferenceResponseEnd, 1)
+	session.retired["req-armed"] = armed
+	for i := 1; i <= maxRetiredRelayRequests; i++ {
+		id, _ := json.Marshal(i)
+		session.markRetiredLocked(&relayActive{requestID: "req-" + string(id)}, start.Add(time.Duration(i)*time.Millisecond))
+	}
+	session.activeMu.Unlock()
+	if _, ok := session.retired["req-armed"]; !ok {
+		t.Fatal("armed cancel-terminal entry evicted")
+	}
+	if _, ok := session.retired["req-1"]; ok {
+		t.Fatal("oldest unarmed entry survived the cap")
+	}
+	if len(session.retired) != maxRetiredRelayRequests {
+		t.Fatalf("retired entries = %d, want %d", len(session.retired), maxRetiredRelayRequests)
 	}
 }
