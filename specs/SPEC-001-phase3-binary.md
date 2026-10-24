@@ -1470,7 +1470,8 @@ single-pass vision path) stops when that forward returns:
 - *Bound.* The stop takes at most the chunk being evaluated when the cancel
   arrives. For a request cancelled mid-chunk this extends the FR-26 5-second
   target by at most that one chunk's evaluation time.
-- *Cleanup.* The request's serving slot is released when it ends. A request
+- *Cleanup.* The request's serving slot is released when it ends, after the
+  GPU work it already queued (at most one prefill chunk) has finished. A request
   cancelled during prefill MUST NOT commit a conversation-cache entry, a prompt
   snapshot or a recurrent checkpoint; its lease is aborted. A serial request
   cancelled at any point before its entry is inserted publishes nothing; the

@@ -9429,6 +9429,10 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         }
                         return completion
                     } catch {
+                        // SPEC-001-R013: wait for GPU work this request already
+                        // queued (at most one prefill chunk) before its slot is
+                        // released, so the next request does not queue behind it.
+                        Stream().synchronize()
                         if let lease {
                             await conversationCache.abort(lease)
                         }
@@ -9609,8 +9613,11 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                 }
             }
         } catch let error as DrainCancelledError {
+            Stream().synchronize()
             throw error
         } catch let error as CancellationError {
+            // SPEC-001-R013: as on the serial path, settle queued prefill work.
+            Stream().synchronize()
             throw error
         } catch let error as SpeculativeGenerationFailure {
             throw error
@@ -10420,6 +10427,10 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         }
                         return validated
                     } catch {
+                        // SPEC-001-R013: wait for GPU work this request already
+                        // queued (at most one prefill chunk) before its slot is
+                        // released, so the next request does not queue behind it.
+                        Stream().synchronize()
                         if let lease {
                             await conversationCache.abort(lease)
                         }
