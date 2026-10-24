@@ -46,34 +46,59 @@ Historical tables below do not select today's release version.
 
 ## Current published release and fleet target
 
-Verified 2026-10-22 against GitHub release/tag metadata, the release train
-(`scripts/ops/cli-release.sh status`: `v1.8.261 train complete`) and live coordinator health:
+Verified 2026-10-24 against GitHub release/tag metadata, the release train
+(`scripts/ops/cli-release.sh status`: `v1.8.270 train complete`) and live coordinator health:
 
 | Field | Value |
 |---|---|
-| GitHub provider release | [v1.8.261](https://github.com/Augustas11/macprovider/releases/tag/v1.8.261), published 2026-10-22 06:23Z |
-| Signed compatibility-set id | `Augustas11/macprovider:v1.8.261@90b1a3b72e5d71bb644111173e69eaaa03286212` |
-| Pearl runtime / recommended provider | `v1.8.259` / `1.8.261` |
-| Release mirror / installer | `latest.json` → v1.8.261; `get.malibu.tech/install.sh` parity with v1.8.261, consumer health OK |
+| GitHub provider release | [v1.8.270](https://github.com/Augustas11/macprovider/releases/tag/v1.8.270), promoted 2026-10-24 (promotion run 40111708233) |
+| Signed compatibility-set id | `Augustas11/macprovider:v1.8.270@48cf25db2f6cc64a3779eb0ed36ff669874bf519` |
+| Pearl runtime / recommended provider | `v1.8.269` / `1.8.270` (recommendation bump 2026-10-24 16:42Z) |
+| Release mirror / installer | `latest.json` → v1.8.270; `get.malibu.tech/install.sh` parity with v1.8.270, consumer health OK |
+| Catalog | `published-2026-10-24-glm53-qwen36-native-mtp-v270` (#2136), activated 2026-10-24 17:26–17:48Z; `native_mtp_admission_decode_path` `match` (`6471812e…`) |
+| Consumed identities | Provider and runtime tags through **v1.8.270** are consumed (v1.8.263–v1.8.269 are Pearl runtime tags). The next provider CLI takes the next unused tag; refresh both trains and remote tags first. |
 
-## Next CLI release — net changes vs 1.8.261 (tracked 2026-10-22)
+## Next CLI release — net changes vs 1.8.270 (tracked 2026-10-24)
 
-Live fleet target: **1.8.261** (released 2026-10-22 06:23Z; Pearl runtime v1.8.259). Staged:
-`binaryVersion` **1.8.262**. This combined cut carries the DeepSeek V4 campaign (#2112) and the provider-side PRs merged since 1.8.261.
+Live fleet target: **1.8.270**. No provider-side change has merged since.
 
 | PR | Issue | Provider-side change | Status |
 |---|---|---|---|
-| #2109 | #2107 | Buyer API compatibility for agentic clients across every catalog model. | merged (`ab9730172`); next combined CLI |
-| #2115 | #2100 | `glm5_next` prefills in 2048-token CB prompt chunks. | merged (`20ead6ea6`); next combined CLI |
-| #2116 | #2107 | Buyer API conformance fixes for the real-model failures from the #2109 validation run. | merged (`8a44d3f44`); next combined CLI |
-| #2117 | #2107 | Qwen per-call `<tools>` wrappers, `json_object` failure diagnostics, lifecycle failed wedge. | merged (`c47bb4813`); next combined CLI |
-| #2108 | #2084 | Multi-Mac shard groups on Trusted Pools (SPEC-051): stage transport, provider and coordinator. | merged (`9f8491b34`); next combined CLI |
-| #2118 | #2107 | Buyer API re-audit: serial bare calls, conformance binding, grammar-unavailable settlement, schema profile. | merged (`68d6ed54d`); next combined CLI |
-| #2112 | #2111 | DeepSeek V4 native `deepseek_v4` serving (fork `baec1724`, mlx-swift-lm `3.32.3-macprovider.10.3`), DSV4 prompt encoder, DSML tool calls and reasoning; decode-path digest `565617…`; native-MTP admission inputs rebound identity-only. | in progress; lands in 1.8.262 |
-| #2129 | #2127 | Autotune readiness: large candidates finish loading before autotune probes; model-aware readiness and signed candidate aliases. | merged (`25ce4bd6e`); next combined CLI |
-| #2130 | #2107 | GLM-5.3, gpt-oss and Qwen3.8 render `none`/`minimal` reasoning effort as `low` instead of silently requesting maximum reasoning (SPEC-018 0.3.5). | merged (`34d66d6b0`); next combined CLI |
-| #2131 | #2107 | Grammar-constrained decoding: guaranteed tool_choice required/named and strict json_schema for every catalog grammar (SPEC-018 0.3.6); decode-path digest `adc3f5dc…` (includes #2130); identity-only native-MTP admission rebind after the cut. | merged (`ec04c6de8`); next combined CLI |
-| #2134 | #2111 | DeepSeek V4 CB backend (off without a live-verified signed policy entry for the exact tuple; fork `c8be0f61`, mlx-swift-lm `3.32.3-macprovider.10.5`) and extend-only prompt snapshots for DeepSeek V4 and GLM-5.3 serial turns (SPEC-024 0.2.12 FR-CI2a); GLM CB rows unchanged; decode-path digest `6471812e…`; identity-only native-MTP and CB admission rebinds after the cut. | merged (`a65f20090`); next combined CLI |
+
+## Shipped v1.8.270 — net changes vs 1.8.262
+
+Published as v1.8.270 on 2026-10-24 at source `48cf25db2f6cc64a3779eb0ed36ff669874bf519`
+(candidate run 40104446783, promotion run 40111708233, rollout verification run 40113229828;
+e2e gate CF-270-E2E). Studio canary on DeepSeek V4-Flash (serial, CB off by design). The
+native-MTP admission set is rebound identity-only to the 1.8.270 decode path `6471812e…` by
+#2136 (catalog-only; it also fixes `scripts/ops` `workflow_runs`, which hid an in-flight
+acceptance run from `cli-release.sh status`). The release metallib `3d9b4a74…` is unchanged,
+so every signed CB policy entry still matches. `afd62110e` (test-only clock pin) also rides.
+
+| PR | Issue | Provider-side change | Status |
+|---|---|---|---|
+| #2129 | #2127 | Autotune readiness: large candidates finish loading before autotune probes; model-aware readiness and signed candidate aliases. | shipped v1.8.270 (`25ce4bd6e`) |
+| #2130 | #2107 | GLM-5.3, gpt-oss and Qwen3.8 render `none`/`minimal` reasoning effort as `low` instead of silently requesting maximum reasoning (SPEC-018 0.3.5). | shipped v1.8.270 (`34d66d6b0`) |
+| #2131 | #2107 | Grammar-constrained decoding: guaranteed tool_choice required/named and strict json_schema for every catalog grammar (SPEC-018 0.3.6); decode-path digest `adc3f5dc…` (includes #2130); identity-only native-MTP admission rebind after the cut. | shipped v1.8.270 (`ec04c6de8`) |
+| #2133 | #2107 | Reasoning round trip on all buyer surfaces (Messages `thinking`, Responses, Chat Completions), keepalives and prompt-sized first token. | shipped v1.8.270 (`0be1ed916`) |
+| #2134 | #2111 | DeepSeek V4 CB backend (off without a live-verified signed policy entry for the exact tuple; fork `c8be0f61`, mlx-swift-lm `3.32.3-macprovider.10.5`) and extend-only prompt snapshots for DeepSeek V4 and GLM-5.3 serial turns (SPEC-024 0.2.12 FR-CI2a); GLM CB rows unchanged; decode-path digest `6471812e…`; identity-only native-MTP and CB admission rebinds after the cut. | shipped v1.8.270 (`a65f20090`) |
+| #2135 | #2111 | Version staging 1.8.270 (live-stable rows 1.8.262) and `cli-release.sh` canary probe accepting a serial canary whose model has no signed CB policy entry (DeepSeek V4). | shipped v1.8.270 (`48cf25db2`); release source |
+
+## Shipped v1.8.262 — net changes vs 1.8.261
+
+Published as v1.8.262 on 2026-10-23 at source `92e39cf5f5979a7757011d837e62014abd35418e`
+(candidate run 39927039135; e2e gate CF-262-E2E). The native-MTP admission set was rebound to
+its decode path by #2120.
+
+| PR | Issue | Provider-side change | Status |
+|---|---|---|---|
+| #2109 | #2107 | Buyer API compatibility for agentic clients across every catalog model. | shipped v1.8.262 (`ab9730172`) |
+| #2115 | #2100 | `glm5_next` prefills in 2048-token CB prompt chunks. | shipped v1.8.262 (`20ead6ea6`) |
+| #2116 | #2107 | Buyer API conformance fixes for the real-model failures from the #2109 validation run. | shipped v1.8.262 (`8a44d3f44`) |
+| #2117 | #2107 | Qwen per-call `<tools>` wrappers, `json_object` failure diagnostics, lifecycle failed wedge. | shipped v1.8.262 (`c47bb4813`) |
+| #2108 | #2084 | Multi-Mac shard groups on Trusted Pools (SPEC-051): stage transport, provider and coordinator. | shipped v1.8.262 (`9f8491b34`) |
+| #2118 | #2107 | Buyer API re-audit: serial bare calls, conformance binding, grammar-unavailable settlement, schema profile. | shipped v1.8.262 (`68d6ed54d`) |
+| #2112 | #2111 | DeepSeek V4 native `deepseek_v4` serving (fork `baec1724`, mlx-swift-lm `3.32.3-macprovider.10.3`), DSV4 prompt encoder, DSML tool calls and reasoning; decode-path digest `565617…`; native-MTP admission inputs rebound identity-only. | shipped v1.8.262 |
 
 ## Shipped v1.8.261 — net changes vs 1.8.260
 
