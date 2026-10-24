@@ -187,7 +187,12 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             FileHandle.standardError.write(Data("msb-throughput: model reports unsupported cache topology\n".utf8))
             throw ExitCode(1)
         }
-        let layerCount = Self.pagedAttentionLayerCount(cacheKinds)
+        let pooled = Self.isDeepseekV4Pool(cacheKinds)
+        if pooled {
+            try Self.validateDeepseekV4Harness(engine: engine, scenario: scenario, compiled: compile, rows: rows)
+        }
+        // Pool layers are row-owned; their count is not paged-gather evidence.
+        let layerCount = pooled ? cacheKinds.count : Self.pagedAttentionLayerCount(cacheKinds)
         guard layerCount > 0 else {
             FileHandle.standardError.write(Data("msb-throughput: model reports zero paged attention layers\n".utf8))
             throw ExitCode(1)
@@ -463,7 +468,21 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         cacheKinds.filter(\.usesPagedKVCache).count
     }
 
+    static func isDeepseekV4Pool(_ cacheKinds: [PagedKVSharedForwardBackend.CacheKind]) -> Bool {
+        cacheKinds.contains { if case .deepseekV4Pool = $0 { return true }; return false }
+    }
+
+    static func validateDeepseekV4Harness(
+        engine: MSBThroughputEngine, scenario: MSBThroughputScenario, compiled: Bool, rows: Int
+    ) throws {
+        guard engine == .scheduler, !compiled, (1...8).contains(rows),
+              scenario == .throughput || scenario == .parity else {
+            throw ValidationError("DeepSeek V4 requires --engine scheduler --no-compile, 1...8 rows, and --scenario throughput or parity")
+        }
+    }
+
     private static func msbCacheClass(_ cacheKinds: [PagedKVSharedForwardBackend.CacheKind]) -> String {
+        if isDeepseekV4Pool(cacheKinds) { return "mixed" }
         if cacheKinds.contains(.recurrentMamba) { return "mixed" }
         let sliding = cacheKinds.filter(\.hasSlidingWindow)
         guard !sliding.isEmpty else { return "KVCacheSimple" }
@@ -691,7 +710,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             modelSHA256: sha,
             tokenizerSHA256: sha,
             chatTemplateSHA256: sha,
-            supportedModelFamilies: ["qwen", "llama"],
+            supportedModelFamilies: Self.isDeepseekV4Pool(cacheKinds) ? ["deepseek_v4"] : ["qwen", "llama"],
             allowedCacheClasses: [cacheClass],
             supportsMoEDispatch: true,
             hardwareClass: "apple-silicon-harness",
@@ -713,15 +732,20 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             parityLabel: descriptor.parityLabel,
             poolEpoch: 1
         )
-        let inner = PagedKVSharedForwardBackend(
-            container: container,
-            blockSizeTokens: blockSizeTokens,
-            maxPhysicalBlocks: maxPhysicalBlocks,
-            poolEpoch: 1,
-            layerCount: cacheKinds.count,
-            cacheKinds: cacheKinds,
-            compiledDecode: compiled
-        )
+        let inner: any ContinuousBatchSchedulerBackend
+        if Self.isDeepseekV4Pool(cacheKinds) {
+            inner = DeepseekV4ContinuousBatchBackend(container: container)
+        } else {
+            inner = PagedKVSharedForwardBackend(
+                container: container,
+                blockSizeTokens: blockSizeTokens,
+                maxPhysicalBlocks: maxPhysicalBlocks,
+                poolEpoch: 1,
+                layerCount: cacheKinds.count,
+                cacheKinds: cacheKinds,
+                compiledDecode: compiled
+            )
+        }
         let backend = MSBSchedulerWindowTimingBackend(inner: inner)
         let allocator = try PagedKVBlockAllocator(
             blockSizeTokens: blockSizeTokens,
@@ -735,12 +759,13 @@ struct MSBThroughputCommand: AsyncParsableCommand {
                 maxActiveRows: max(1, maxActiveRows),
                 decodeHeadroomTokens: 1,
                 maxPromptChunkTokens: max(1, maxPromptChunkTokens),
+                referencePrefillStepSize: Self.isDeepseekV4Pool(cacheKinds) ? DeepseekV4Model.prefillStepSize : nil,
                 snapshot: ContinuousBatchSchedulerSnapshot(
                     modelID: descriptor.modelID,
                     modelSHA256: descriptor.modelSHA256,
                     weightsGeneration: 1
                 ),
-                maxDecodeLockstepWindow: cacheKinds.contains(.recurrentMamba)
+                maxDecodeLockstepWindow: Self.isDeepseekV4Pool(cacheKinds) ? 1 : cacheKinds.contains(.recurrentMamba)
                     ? min(
                         max(1, maxDecodeLockstepWindow),
                         ModelRuntime.servePathDecodeLockstepWindow(cacheKinds: cacheKinds)
@@ -1371,14 +1396,14 @@ struct MSBThroughputCommand: AsyncParsableCommand {
     ) async throws {
         let compared = parityTokens
         let parityPrefillStepSize = ContinuousBatchSchedulerConfiguration.defaultPromptChunkTokens
-        let prompts = try await buildDistinctPrompts(container: container, count: 2, tokens: promptTokens)
+        let prompts = try await buildDistinctPrompts(container: container, count: rows, tokens: promptTokens)
         var peakRSSMB = memoryRSSMB()
-        let serialA = try await runProductionSerialOnce(
-            container: container, promptTokens: prompts[0], timedDecodeTokens: compared
-        )
-        let serialB = try await runProductionSerialOnce(
-            container: container, promptTokens: prompts[1], timedDecodeTokens: compared
-        )
+        var serialRuns: [SerialRunDetail] = []
+        for prompt in prompts {
+            serialRuns.append(try await runProductionSerialOnce(
+                container: container, promptTokens: prompt, timedDecodeTokens: compared
+            ))
+        }
         var standaloneRows: [SchedulerRunDetail] = []
         standaloneRows.reserveCapacity(prompts.count)
         for prompt in prompts {
@@ -1402,7 +1427,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             requestedOutputTokens: compared
         )
         peakRSSMB = max(peakRSSMB, memoryRSSMB())
-        let serialRows = [serialA.generatedTokens, serialB.generatedTokens]
+        let serialRows = serialRuns.map(\.generatedTokens)
         let standaloneMatches = zip(standaloneRows, serialRows).map { standalone, serial in
             msbTemp0ParityMatch(
                 serial: serial,
@@ -1411,11 +1436,11 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             )
         }
         let oneMatch = standaloneMatches[0]
-        let batchedMatches = zip(twoRow.tokensByRow, [serialA.generatedTokens, serialB.generatedTokens]).map { batched, serial in
+        let batchedMatches = zip(twoRow.tokensByRow, serialRuns.map(\.generatedTokens)).map { batched, serial in
             msbTemp0ParityMatch(serial: serial, batched: batched, comparedTokens: compared).match
         }
         let firstDivergence = standaloneMatches.compactMap(\.firstDivergence).first
-            ?? zip(twoRow.tokensByRow, [serialA.generatedTokens, serialB.generatedTokens])
+            ?? zip(twoRow.tokensByRow, serialRuns.map(\.generatedTokens))
             .compactMap { batched, serial in
                 msbTemp0ParityMatch(serial: serial, batched: batched, comparedTokens: compared).firstDivergence
             }
@@ -1426,7 +1451,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             standaloneRowMatches: standaloneMatches.map(\.match),
             batchedRowMatches: batchedMatches,
             firstDivergenceIndex: firstDivergence,
-            serialTokenSHA256: msbTokenSequenceSHA256(Array(serialA.generatedTokens.prefix(compared))),
+            serialTokenSHA256: msbTokenSequenceSHA256(Array(serialRuns[0].generatedTokens.prefix(compared))),
             batchedTokenSHA256: msbTokenSequenceSHA256(Array(standaloneRows[0].tokensByRow[0].prefix(compared))),
             rows: serialRows.enumerated().map { index, serial in
                 let standalone = standaloneRows[index].tokensByRow[0]
@@ -1447,9 +1472,9 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             modelID: modelID,
             layerCount: layerCount,
             engine: "scheduler",
-            rows: 2,
-            promptTokenLengths: Array(repeating: promptTokens, count: 2),
-            serialRunTPS: [serialA.timedTokensPerSecond],
+            rows: rows,
+            promptTokenLengths: Array(repeating: promptTokens, count: rows),
+            serialRunTPS: [serialRuns[0].timedTokensPerSecond],
             engineSingleRowTPS: [standaloneRows[0].batched.perRowTokensPerSecond],
             aggregateRunTPS: [try msbAggregateThroughput(twoRow.batched.rowSamples).aggregateTokensPerSecond],
             perRowP50: twoRow.batched.perRowTokensPerSecond,
@@ -1459,7 +1484,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
                 usageRows: twoRow.usage,
                 usagePass: msbUsageAttributionPass(
                     rows: twoRow.usage,
-                    expectedPromptTokens: [promptTokens, promptTokens],
+                    expectedPromptTokens: prompts.map(\.count),
                     expectedCompletionTokens: compared
                 ),
                 msb03: nil,
@@ -2385,13 +2410,13 @@ private struct MSBRaggedPrefillParityReport: Encodable {
 }
 
 private final class MSBSchedulerWindowTimingBackend: ContinuousBatchSchedulerBackend, @unchecked Sendable {
-    private let inner: PagedKVSharedForwardBackend
+    private let inner: any ContinuousBatchSchedulerBackend
     private let lock = NSLock()
     private var windowNanoseconds: UInt64 = 0
     private var windowCalls = 0
     private var decodeCalls = 0
 
-    init(inner: PagedKVSharedForwardBackend) {
+    init(inner: any ContinuousBatchSchedulerBackend) {
         self.inner = inner
     }
 
@@ -2425,7 +2450,10 @@ private final class MSBSchedulerWindowTimingBackend: ContinuousBatchSchedulerBac
 
     func decode(rows: [ContinuousBatchDecodeInput]) async throws -> [ContinuousBatchDecodeOutcome] {
         recordDecodeCall()
-        return try await inner.decode(rows: rows)
+        let started = DispatchTime.now().uptimeNanoseconds
+        let result = try await inner.decode(rows: rows)
+        recordDecodeTime(elapsed: DispatchTime.now().uptimeNanoseconds &- started)
+        return result
     }
 
     func decodeLockstepWindow(
@@ -2442,6 +2470,12 @@ private final class MSBSchedulerWindowTimingBackend: ContinuousBatchSchedulerBac
     private func recordDecodeCall() {
         lock.lock()
         decodeCalls += 1
+        lock.unlock()
+    }
+
+    private func recordDecodeTime(elapsed: UInt64) {
+        lock.lock()
+        windowNanoseconds += elapsed
         lock.unlock()
     }
 
