@@ -346,7 +346,8 @@ public enum PagedKVAttachDecision: Equatable, Sendable {
 
 public enum PagedKVAttachGate {
     public static let allowedCacheClasses = ["KVCacheSimple"]
-    public static let recognizedModelFamilies = ["glm5_next", "gpt_oss", "llama", "qwen"]
+    public static let deepseekV4RowPoolBridgeIdentifier = "deepseek-v4-row-pool-decode-v1"
+    public static let recognizedModelFamilies = ["deepseek_v4", "glm5_next", "gpt_oss", "llama", "qwen"]
 
     /// Some mixed cache layouts are measured per identity: Qwen hybrid decoders
     /// retain row-local recurrent state while paging only attention KV, and the
@@ -423,6 +424,16 @@ public enum PagedKVAttachGate {
               )
         else {
             return fail(.allocator)
+        }
+        // DeepSeek uses row-owned pools, never paged Metal gather. Its distinct
+        // measured bridge identity prevents a gather descriptor from admitting it.
+        if modelFamily == "deepseek_v4" {
+            guard hybridDecoderArchitectureVerified,
+                  runtimeCacheClass == "mixed",
+                  observedIdentity.kernelIdentifier == Self.deepseekV4RowPoolBridgeIdentifier
+            else { return fail(.kernel) }
+        } else if observedIdentity.kernelIdentifier == Self.deepseekV4RowPoolBridgeIdentifier {
+            return fail(.kernel)
         }
         guard !requiresMoEDispatch || observedIdentity.moeDispatchProven else { return fail(.kernel) }
         guard gates.engineBridgeAvailable else { return fail(.kernel) }
