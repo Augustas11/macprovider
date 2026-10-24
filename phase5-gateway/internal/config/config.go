@@ -192,6 +192,10 @@ type TimeoutsConfig struct {
 	// seconds)) bounds response headers to the first
 	// content-bearing delta on a streaming response.
 	FirstTokenSeconds int `yaml:"first_token_seconds"`
+	// FirstTokenPrefillTokensPerSecond scales the first-token budget with
+	// the prompt (SPEC-006-R026): first_token + estimated prompt tokens /
+	// this rate, capped by stream_ceiling_max_seconds. 0 disables scaling.
+	FirstTokenPrefillTokensPerSecond int `yaml:"first_token_prefill_tokens_per_second"`
 	// StreamCeiling* derive the hard streaming safety bound from the
 	// request's max_tokens: clamp(floor + max_tokens*per_token,
 	// >= coordinator_request_seconds, <= max).
@@ -465,6 +469,9 @@ func Default() Config {
 			NonStreamRequestSeconds:     0, // inherit coordinator_request_seconds
 			StreamingCancelMS:           500,
 			StreamingIdleMS:             10000,
+
+			// Conservative: DeepSeek-V4 prefills ~280 tok/s on a Studio.
+			FirstTokenPrefillTokensPerSecond: 100,
 		},
 		Settlement: SettlementConfig{
 			ReconcileEnabled:               true,
@@ -740,7 +747,7 @@ func (c Config) Validate() error {
 	if c.Timeouts.CoordinatorConnectSeconds <= 0 || c.Timeouts.CoordinatorAdmissionSeconds <= 0 ||
 		c.Timeouts.FirstTokenSeconds < 0 || c.Timeouts.StreamCeilingFloorSeconds <= 0 ||
 		c.Timeouts.StreamCeilingPerTokenMS <= 0 || c.Timeouts.StreamCeilingMaxSeconds <= 0 ||
-		c.Timeouts.NonStreamRequestSeconds < 0 {
+		c.Timeouts.NonStreamRequestSeconds < 0 || c.Timeouts.FirstTokenPrefillTokensPerSecond < 0 {
 		return fmt.Errorf("timeouts phase budgets must be positive")
 	}
 	if c.Timeouts.CoordinatorAdmissionSeconds < c.Timeouts.CoordinatorConnectSeconds {
@@ -1283,6 +1290,27 @@ func (c Config) FirstTokenTimeout() time.Duration {
 		return derived
 	}
 	return time.Duration(c.Timeouts.FirstTokenSeconds) * time.Second
+}
+
+// FirstTokenTimeoutForPrompt is the first-token budget for a prompt of
+// promptTokens estimated tokens: FirstTokenTimeout plus the prefill time at
+// first_token_prefill_tokens_per_second, never below FirstTokenTimeout and
+// never above stream_ceiling_max_seconds (SPEC-006-R026).
+func (c Config) FirstTokenTimeoutForPrompt(promptTokens int64) time.Duration {
+	base := c.FirstTokenTimeout()
+	rate := int64(c.Timeouts.FirstTokenPrefillTokensPerSecond)
+	if rate <= 0 || promptTokens <= 0 {
+		return base
+	}
+	limit := time.Duration(c.Timeouts.StreamCeilingMaxSeconds) * time.Second
+	if base >= limit {
+		return base
+	}
+	prefillSeconds := (promptTokens + rate - 1) / rate
+	if prefillSeconds >= int64((limit-base)/time.Second) {
+		return limit
+	}
+	return base + time.Duration(prefillSeconds)*time.Second
 }
 
 // NonStreamRequestTimeout is the flat wall retained for non-streaming

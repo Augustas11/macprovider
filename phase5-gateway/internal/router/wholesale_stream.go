@@ -47,13 +47,32 @@ func (s *wholesaleStreamWriter) stopKeepalives() {
 	s.mu.Unlock()
 }
 
+// sseCommentWriter is implemented by the Responses and Messages adapters,
+// which translate chat SSE line by line and would drop a comment line; it
+// writes the comment straight to the buyer between whole translated events.
+type sseCommentWriter interface {
+	writeSSEComment(p []byte) error
+}
+
 func (s *wholesaleStreamWriter) writeKeepalive() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.stopped {
 		return false
 	}
-	if _, err := s.w.Write([]byte(wholesaleKeepaliveComment)); err != nil {
+	var err error
+	if inner, ok := unwrapStatusWriter(s.w); ok {
+		if cw, ok := inner.ResponseWriter.(sseCommentWriter); ok {
+			err = cw.writeSSEComment([]byte(wholesaleKeepaliveComment))
+		} else {
+			_, err = s.w.Write([]byte(wholesaleKeepaliveComment))
+		}
+	} else if cw, ok := s.w.(sseCommentWriter); ok {
+		err = cw.writeSSEComment([]byte(wholesaleKeepaliveComment))
+	} else {
+		_, err = s.w.Write([]byte(wholesaleKeepaliveComment))
+	}
+	if err != nil {
 		return false
 	}
 	if s.flusher != nil {
@@ -62,9 +81,23 @@ func (s *wholesaleStreamWriter) writeKeepalive() bool {
 	return true
 }
 
-func startWholesaleKeepalives(ctxDone <-chan struct{}, wrap *wholesaleStreamWriter) func() {
+// unwrapStatusWriter returns the handler's *statusWriter behind w, looking
+// through the keepalive wrapper.
+func unwrapStatusWriter(w http.ResponseWriter) (*statusWriter, bool) {
+	if wrap, ok := w.(*wholesaleStreamWriter); ok {
+		w = wrap.w
+	}
+	sw, ok := w.(*statusWriter)
+	return sw, ok
+}
+
+// startWholesaleKeepalives writes `: keepalive` SSE comments every
+// wholesaleKeepaliveInterval until stopped (SPEC-006-R026). immediate also
+// writes one at once (wholesale accounts); other buyers get the first at the
+// first interval, so a fast stream's bytes are unchanged.
+func startWholesaleKeepalives(ctxDone <-chan struct{}, wrap *wholesaleStreamWriter, immediate bool) func() {
 	done := make(chan struct{})
-	if !wrap.writeKeepalive() {
+	if immediate && !wrap.writeKeepalive() {
 		return func() {
 			wrap.stopKeepalives()
 		}
