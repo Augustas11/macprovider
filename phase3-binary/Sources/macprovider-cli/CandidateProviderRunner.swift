@@ -64,6 +64,8 @@ final class CandidateProviderRunner {
     private let ownedCandidateConfigRoot: URL?
     private let logDirectory: URL
     private let session: URLSession
+    private let readinessClock: () -> Date
+    private let readinessSleep: (TimeInterval) async throws -> Void
     private let stateLock = NSLock()
     private var current: RunningProvider?
 
@@ -71,7 +73,11 @@ final class CandidateProviderRunner {
         providerBinaryPath: String? = nil,
         configPath: String? = nil,
         logDirectory: URL = CandidateProviderRunner.defaultLogDirectory,
-        session: URLSession = .shared
+        session: URLSession = .shared,
+        readinessClock: @escaping () -> Date = Date.init,
+        readinessSleep: @escaping (TimeInterval) async throws -> Void = { seconds in
+            try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+        }
     ) throws {
         if let providerBinaryPath {
             self.providerBinaryPath = Self.absolutePath(providerBinaryPath)
@@ -88,6 +94,8 @@ final class CandidateProviderRunner {
         }
         self.logDirectory = logDirectory
         self.session = session
+        self.readinessClock = readinessClock
+        self.readinessSleep = readinessSleep
     }
 
     deinit {
@@ -226,11 +234,11 @@ final class CandidateProviderRunner {
 
     func waitForReady(timeout: TimeInterval, deadline externalDeadline: Date?) async throws -> ReadyStatus {
         let provider = try currentProvider()
-        let timeoutDeadline = Date().addingTimeInterval(timeout)
+        let timeoutDeadline = readinessClock().addingTimeInterval(timeout)
         let deadline = Self.earliestDeadline(timeoutDeadline, externalDeadline)
         var lastError = "not checked yet"
 
-        while Date() < deadline {
+        while readinessClock() < deadline {
             if !provider.process.isRunning {
                 cleanupExitedProvider(provider)
                 return .processExited(
@@ -241,12 +249,14 @@ final class CandidateProviderRunner {
 
             var request = URLRequest(url: URL(string: "http://127.0.0.1:\(provider.port)/v1/models")!)
             request.httpMethod = "GET"
-            request.timeoutInterval = Self.boundedInterval(1, deadline: deadline)
+            request.timeoutInterval = max(0.001, min(1, deadline.timeIntervalSince(readinessClock())))
 
             do {
                 let readinessRequest = request
                 let session = self.session
-                let result = try await Self.withDeadline(deadline) {
+                // Convert the injected readiness clock into a real I/O deadline.
+                let ioDeadline = Date().addingTimeInterval(max(0.001, deadline.timeIntervalSince(readinessClock())))
+                let result = try await Self.withDeadline(ioDeadline) {
                     let (_, response) = try await session.data(for: readinessRequest)
                     return ReadinessResponseBox(response: response)
                 }
@@ -269,7 +279,8 @@ final class CandidateProviderRunner {
                                 stderrTail: provider.stderrTail.snapshot()
                             )
                         }
-                        let ownerPIDs = Self.listenerOwnerPIDs(port: provider.port, deadline: deadline)
+                        let ownershipDeadline = Date().addingTimeInterval(max(0, deadline.timeIntervalSince(readinessClock())))
+                        let ownerPIDs = Self.listenerOwnerPIDs(port: provider.port, deadline: ownershipDeadline)
                         if ownerPIDs == [provider.process.processIdentifier] {
                             return .ready
                         } else {
@@ -295,8 +306,8 @@ final class CandidateProviderRunner {
                 )
             }
 
-            let sleepSeconds = Self.boundedInterval(1, deadline: deadline)
-            try await Task.sleep(nanoseconds: UInt64(sleepSeconds * 1_000_000_000))
+            let sleepSeconds = max(0.001, min(1, deadline.timeIntervalSince(readinessClock())))
+            try await readinessSleep(sleepSeconds)
         }
 
         return .timeout(lastError: lastError)

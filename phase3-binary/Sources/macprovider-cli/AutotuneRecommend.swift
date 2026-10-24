@@ -5560,7 +5560,9 @@ struct AutotuneRecommendationBenchmarker {
                     replicates: replicates,
                     artifactBinding: CandidateArtifactBinding(
                         path: artifact.modelArgument,
-                        sha256: artifact.sha256
+                        sha256: artifact.sha256,
+                        sizeBytes: artifact.sizeBytes,
+                        minRAMGB: row.minRAMGB
                     ),
                     deadline: deadline
                 )

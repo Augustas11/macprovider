@@ -15,7 +15,7 @@ struct AutotuneCommand: AsyncParsableCommand {
     @Option(help: "Target context in tokens.")
     var targetContext = 2000
 
-    @Option(help: "Override default ordered model list as comma-separated HuggingFace model IDs. Operator order is preserved.")
+    @Option(help: "Override default ordered model list as comma-separated HuggingFace model IDs (or signed catalog keys with --recommend). Operator order is preserved.")
     var candidateModels: String?
 
     @Option(help: "Trim the default list above this model size, e.g. 16B. Ignored when --candidate-models is set.")
@@ -590,7 +590,8 @@ struct AutotuneCommand: AsyncParsableCommand {
     }
 
     /// When `--candidate-models` is set, `--recommend` probes only catalog rows
-    /// whose HuggingFace `model_id` appears in the operator list. Otherwise
+    /// whose catalog key or HuggingFace `model_id` appears in the operator list.
+    /// Resolve both forms to model IDs once the signed catalog is available. Otherwise
     /// `--max-model-size` / `--min-model-size` trim signed catalog rows by the
     /// first `N`/`N.N`+`B` token in the model id (e.g. `30B` in `...-30B-A3B-...`).
     func recommendCandidateModelFilter(catalog: CandidateCatalog?) throws -> Set<String>? {
@@ -604,7 +605,8 @@ struct AutotuneCommand: AsyncParsableCommand {
                     Data("warning: --candidate-models supplied; ignoring --max-model-size/--min-model-size\n".utf8)
                 )
             }
-            return Set(models)
+            guard let catalog else { return Set(models) }
+            return try Self.resolveCandidateModelIDs(Set(models), catalog: catalog)
         }
         guard maxModelSize != nil || minModelSize != nil else {
             return nil
@@ -639,6 +641,23 @@ struct AutotuneCommand: AsyncParsableCommand {
             throw ValidationError("model-size filters removed every signed catalog candidate")
         }
         return allowed
+    }
+
+    static func resolveCandidateModelIDs(_ entries: Set<String>, catalog: CandidateCatalog) throws -> Set<String> {
+        var modelIDs = Set<String>()
+        var unmatched: [String] = []
+        for entry in entries.sorted() {
+            let matches = catalog.rows.filter { $0.key == entry || $0.value.modelID == entry }
+            if matches.isEmpty {
+                unmatched.append(entry)
+            } else {
+                modelIDs.formUnion(matches.values.map(\.modelID))
+            }
+        }
+        guard unmatched.isEmpty else {
+            throw ValidationError("--candidate-models: no signed catalog row matches: \(unmatched.joined(separator: ", "))")
+        }
+        return modelIDs
     }
 
     /// First standalone `N`/`N.N`+`B` token in a HuggingFace id. `A3B` MoE
@@ -1254,7 +1273,9 @@ struct AutotuneCommand: AsyncParsableCommand {
                         port: port,
                         artifactBinding: CandidateArtifactBinding(
                             path: selectedBenchmark.modelArtifactPath,
-                            sha256: selectedBenchmark.artifactSHA256
+                            sha256: selectedBenchmark.artifactSHA256,
+                            sizeBytes: selectedBenchmark.modelArtifactSizeBytes,
+                            minRAMGB: selectedRow.minRAMGB
                         )
                     ),
                     deadline: recommendationDeadline,
@@ -1345,7 +1366,9 @@ struct AutotuneCommand: AsyncParsableCommand {
                         port: port,
                         artifactBinding: CandidateArtifactBinding(
                             path: selectedBenchmark.modelArtifactPath,
-                            sha256: selectedBenchmark.artifactSHA256
+                            sha256: selectedBenchmark.artifactSHA256,
+                            sizeBytes: selectedBenchmark.modelArtifactSizeBytes,
+                            minRAMGB: selectedRow.minRAMGB
                         ),
                         isInterrupted: { interruptFlag.isSet() }
                     ),
@@ -1551,6 +1574,7 @@ struct AutotuneCommand: AsyncParsableCommand {
             let demand = inputs.demand
             let catalog = inputs.candidate
             let rateCard = inputs.rateCard
+            let candidateModelFilter = try recommendCandidateModelFilter(catalog: catalog.value)
             let fingerprint = MachineFingerprinter().sample()
             let resolvedConfig = try? ConfigLoader.load(cli: CLIOverrides(configPath: config))
             let draftModel = try Self.recommendDraftModel(configPath: config, failClosed: false)
@@ -1647,6 +1671,9 @@ struct AutotuneCommand: AsyncParsableCommand {
         catalogSHA: String,
         artifactResolver: CachedModelArtifactResolver
     ) throws -> BenchmarkOutcomes {
+        let candidateModelIDs = try candidateModelIDs.map {
+            try resolveCandidateModelIDs($0, catalog: request.candidateCatalog)
+        }
         var benchmarks: [String: CandidateBenchmark] = [:]
         var diagnostics: [String: String] = [:]
         for modelKey in request.candidateCatalog.rows.keys.sorted() {
@@ -1750,7 +1777,7 @@ struct AutotuneCommand: AsyncParsableCommand {
             throw ValidationError(AutotuneRecommendEngine.paidTrustBlockMessage(warnings))
         }
 
-        guard let requestedModelIDs = try recommendCandidateModelFilter(catalog: nil), !requestedModelIDs.isEmpty else {
+        guard let requestedModelIDs = try recommendCandidateModelFilter(catalog: catalog.value), !requestedModelIDs.isEmpty else {
             throw ValidationError("--prefetch requires an explicit --candidate-models allowlist")
         }
         let outcome = try await AutotuneRecommendationBenchmarker(

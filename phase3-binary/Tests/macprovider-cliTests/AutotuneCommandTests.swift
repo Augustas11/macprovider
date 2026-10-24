@@ -120,6 +120,57 @@ final class AutotuneCommandTests: XCTestCase {
         XCTAssertTrue(filter.contains("mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit"))
     }
 
+    func testRecommendCandidateFilterAcceptsSignedCatalogKey() throws {
+        let catalog = try AutotuneStaticInputs.decodeCandidateCatalog(
+            Data(AutotuneStaticInputs.bakedCandidateCatalogJSON.utf8)
+        )
+        let key = try XCTUnwrap(catalog.rows.keys.sorted().first)
+        let row = try XCTUnwrap(catalog.rows[key])
+        XCTAssertNotEqual(key, row.modelID)
+        let command = try AutotuneCommand.parse([
+            "--recommend", "--candidate-models", key, "--dry-run",
+        ])
+
+        XCTAssertEqual(try command.recommendCandidateModelFilter(catalog: catalog), [row.modelID])
+    }
+
+    func testRecommendCandidateFilterAcceptsSignedModelIDAndDeduplicatesAliases() throws {
+        let catalog = try AutotuneStaticInputs.decodeCandidateCatalog(
+            Data(AutotuneStaticInputs.bakedCandidateCatalogJSON.utf8)
+        )
+        let key = try XCTUnwrap(catalog.rows.keys.sorted().first)
+        let row = try XCTUnwrap(catalog.rows[key])
+        let modelIDCommand = try AutotuneCommand.parse([
+            "--recommend", "--candidate-models", row.modelID, "--dry-run",
+        ])
+        let aliasesCommand = try AutotuneCommand.parse([
+            "--recommend", "--candidate-models", "\(key),\(row.modelID)", "--dry-run",
+        ])
+
+        XCTAssertEqual(try modelIDCommand.recommendCandidateModelFilter(catalog: catalog), [row.modelID])
+        XCTAssertEqual(try aliasesCommand.recommendCandidateModelFilter(catalog: catalog), [row.modelID])
+    }
+
+    func testRecommendCandidateFilterNamesEveryUnmatchedEntry() throws {
+        let catalog = try AutotuneStaticInputs.decodeCandidateCatalog(
+            Data(AutotuneStaticInputs.bakedCandidateCatalogJSON.utf8)
+        )
+        let key = try XCTUnwrap(catalog.rows.keys.sorted().first)
+        // Even a partially matching allowlist must fail, rather than silently
+        // benchmark a smaller set than the operator requested.
+        for entries in ["missing/key,unknown/model", "\(key),missing/key,unknown/model"] {
+            let command = try AutotuneCommand.parse([
+                "--recommend", "--candidate-models", entries, "--dry-run",
+            ])
+            XCTAssertThrowsError(try command.recommendCandidateModelFilter(catalog: catalog)) { error in
+                let message = String(describing: error)
+                XCTAssertTrue(message.contains("no signed catalog row matches"))
+                XCTAssertTrue(message.contains("missing/key"))
+                XCTAssertTrue(message.contains("unknown/model"))
+            }
+        }
+    }
+
     func testMaxContextAxisRejectsBelowTargetCell() throws {
         XCTAssertThrowsError(
             try AutotuneCommand.parse([

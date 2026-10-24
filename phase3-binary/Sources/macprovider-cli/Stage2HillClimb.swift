@@ -349,14 +349,14 @@ struct Stage2Prober: Stage2Probing {
     private static let stopTokens = ["<|im_end|>", "<|endoftext|>", "<|eot_id|>"]
 
     private let session: URLSession
-    private let readyTimeoutSec: TimeInterval
+    private let readyTimeoutSec: TimeInterval?
     private let stopGraceSeconds: Double
     private let probeTotalTimeoutSec: TimeInterval
     private let clock: () -> Date
 
     init(
         session: URLSession = .shared,
-        readyTimeoutSec: TimeInterval = 120,
+        readyTimeoutSec: TimeInterval? = nil,
         stopGraceSeconds: Double = 10,
         probeTotalTimeoutSec: TimeInterval = Stage2Prober.defaultProbeTotalTimeoutSec,
         clock: @escaping () -> Date = Date.init
@@ -408,7 +408,7 @@ struct Stage2Prober: Stage2Probing {
             maxBatch: knobs.maxBatch
         )
         return try await withCandidateProviderCleanup(runner, graceSeconds: stopGraceSeconds) {
-        switch try await runner.waitForReady(timeout: readyTimeoutSec) {
+        switch try await runner.waitForReady(timeout: readyTimeoutSec ?? AutotuneReadinessBudget.seconds(model: model)) {
         case .ready:
             break
         case .processExited(let rc, let stderrTail):

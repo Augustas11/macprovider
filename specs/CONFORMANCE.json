@@ -665,7 +665,7 @@
     {
       "spec_id": "SPEC-023",
       "title": "Installer-Integrated Autotune Recommend",
-      "version": "v0.22.34",
+      "version": "v0.22.35",
       "path": "specs/SPEC-023-installer-autotune-recommend.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -13089,6 +13089,36 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1880",
         "rationale": "#1880 step 5: scripts/catalog-release.py accepts macprovider.intake-decision.v2, re-derives each pool_proven_evidence value from the retained model-admission-pool-proven.json (closed parse, 24-hour source age, exact verified artifact pair of the key), applies INTAKE_POOL_PAID_REQUEST_FLOOR, INTAKE_OFFER_FLOOR, the licence and current-probe preconditions, rejects v1 records selecting pool_proven, and intake-pool-proven-value derives the value; the producers are SPEC-047-R011/R012. Pending until a released pool-proven listed key is evidenced."
+      }
+    },
+    {
+      "requirement_id": "SPEC-023-R027",
+      "spec_id": "SPEC-023",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/Stage1Iterator.swift:struct Stage1Prober",
+        "phase3-binary/Sources/macprovider-cli/Stage2HillClimb.swift:struct Stage2Prober",
+        "phase3-binary/Sources/macprovider-cli/AutotuneConcurrencyCalibration.swift:struct Stage1ConcurrencyCalibrationAdapter",
+        "phase3-binary/Sources/macprovider-cli/AutotuneCommand.swift:func recommendCandidateModelFilter",
+        "phase3-binary/Sources/macprovider-cli/AutotuneReadinessBudget.swift:enum AutotuneReadinessBudget",
+        "phase3-binary/Sources/macprovider-cli/CandidateProviderRunner.swift:final class CandidateProviderRunner",
+        "phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift:struct AutotuneRecommendationBenchmarker"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneReadinessTests.swift:final class AutotuneReadinessTests",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneCommandTests.swift::testRecommendCandidateFilterAcceptsSignedCatalogKey",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneCommandTests.swift::testRecommendCandidateFilterAcceptsSignedModelIDAndDeduplicatesAliases",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneCommandTests.swift::testRecommendCandidateFilterNamesEveryUnmatchedEntry"
+      ],
+      "journeys": [
+        "JOURNEY-PROVIDER-PREBETA-ADMISSION"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2127",
+        "rationale": "SPEC-023 v0.22.35 adds model-aware readiness budgets for paid-yield probes, prompt child-exit detection, overall-deadline bounds, and signed catalog-key or Hugging Face model_id candidate filters with explicit unmatched-entry errors. Fake-clock readiness and filter regression tests are mapped; conformance remains pending until the next signed CLI release carries the change and released recommendation-path evidence is captured. No model-loading or live-provider run is authorized by the CPU-only regression tests."
       }
     },
     {
