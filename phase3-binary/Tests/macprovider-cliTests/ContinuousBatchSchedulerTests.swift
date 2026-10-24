@@ -6333,6 +6333,28 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertEqual(windows[0].steps, 4)
     }
 
+    func testDeepseekV4ReferencePrefillIgnoresGenericChunkAndTokenBudgets() async throws {
+        let backend = WindowRecordingBackend(scripts: ["deepseek": [77]])
+        let configuration = ContinuousBatchSchedulerConfiguration(
+            descriptor: Self.descriptor(blockSizeTokens: 128, maxPhysicalBlocks: 64),
+            tuple: Self.tuple(), maxActiveRows: 2, decodeHeadroomTokens: 1,
+            maxPrefillRowsPerIteration: 2, maxPrefillTokensPerIteration: 128,
+            maxPromptChunkTokens: 64, referencePrefillStepSize: 2048,
+            snapshot: .init(modelID: Self.modelID, modelSHA256: Self.modelSHA, weightsGeneration: 1)
+        )
+        XCTAssertEqual(configuration.maxPrefillRowsPerIteration, 1)
+        let scheduler = ContinuousBatchScheduler(
+            configuration: configuration,
+            allocator: try PagedKVBlockAllocator(blockSizeTokens: 128, maxPhysicalBlocks: 64),
+            backend: backend, replayAuthority: TestReplayAuthority()
+        )
+        let result = try await scheduler.submit(.init(id: "deepseek", conversationKey: "",
+            promptTokens: Array(repeating: 3, count: 4096), maxOutputTokens: 1))
+        XCTAssertEqual(result.outputTokens, [77])
+        let chunks = await backend.prefillChunks(id: "deepseek")
+        XCTAssertEqual(chunks, [2048, 2047, 1])
+    }
+
     private static let modelID = "mlx-community/Qwen-Test"
     private static let modelSHA = String(repeating: "a", count: 64)
     private static let tokenizerSHA = String(repeating: "b", count: 64)

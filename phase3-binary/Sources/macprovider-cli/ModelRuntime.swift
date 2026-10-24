@@ -717,17 +717,20 @@ struct PagedKVRuntimeModelCapabilities: Equatable, Sendable {
     /// The verified sparse-attention layout of an allowlisted `glm5_next`
     /// identity (SPEC-039 FR-PKV12), read from its `config.json`.
     let sparseAttention: PagedKVSparseAttentionLayout?
+    let deepseekV4Pool: DeepseekV4PoolLayout?
 
     init(
         modelFamily: String,
         requiresMoEDispatch: Bool,
         hybridDecoderArchitectureVerified: Bool = false,
-        sparseAttention: PagedKVSparseAttentionLayout? = nil
+        sparseAttention: PagedKVSparseAttentionLayout? = nil,
+        deepseekV4Pool: DeepseekV4PoolLayout? = nil
     ) {
         self.modelFamily = modelFamily
         self.requiresMoEDispatch = requiresMoEDispatch
         self.hybridDecoderArchitectureVerified = hybridDecoderArchitectureVerified
         self.sparseAttention = sparseAttention
+        self.deepseekV4Pool = deepseekV4Pool
     }
 
     /// Prompt tokens of the attach-time parity probes: 513 (the production
@@ -741,6 +744,28 @@ struct PagedKVRuntimeModelCapabilities: Equatable, Sendable {
         let (twoBlocks, blocksOverflow) = max(0, blockSizeTokens).multipliedReportingOverflow(by: 2)
         let (span, spanOverflow) = sparseAttention.indexTopk.addingReportingOverflow(twoBlocks)
         return blocksOverflow || spanOverflow ? Int.max : max(base, span)
+    }
+}
+
+/// DeepSeek's compressor schedule may include trailing MTP stages; only
+/// decoder layers own serving caches. The supported ratios have different
+/// leaf layouts (ratio 4 also owns the lightning-indexer pool).
+struct DeepseekV4PoolLayout: Equatable, Sendable {
+    let ratios: [Int]
+    let windowTokens: Int
+    var expectedCacheKinds: [PagedKVSharedForwardBackend.CacheKind] {
+        ratios.map { $0 == 0 ? .slidingWindow(windowTokens: windowTokens) : .deepseekV4Pool(ratio: $0, windowTokens: windowTokens) }
+    }
+    init?(config: [String: Any]) {
+        guard config["model_type"] as? String == "deepseek_v4",
+              let layers = config["num_hidden_layers"] as? Int, layers > 0,
+              let schedule = config["compress_ratios"] as? [Int], schedule.count >= layers,
+              let window = config["sliding_window"] as? Int, window == 128
+        else { return nil }
+        let ratios = Array(schedule.prefix(layers))
+        guard ratios.allSatisfy({ [0, 4, 128].contains($0) }), ratios.contains(4), ratios.contains(128) else { return nil }
+        self.ratios = ratios
+        self.windowTokens = window
     }
 }
 
@@ -2470,7 +2495,11 @@ actor ModelRuntime: ModelRuntimeServing {
     /// (MLA sparse attention over gathered latent and pooled keys) never share
     /// a label with stock-SDPA tuples.
     nonisolated static func pagedKVParityLabelSuffix(modelFamily: String) -> String {
-        modelFamily == "glm5_next" ? "glm5-next-mla-parity-v1" : "sdpa-parity-v1"
+        switch modelFamily {
+        case "deepseek_v4": "deepseek-v4-row-pool-parity-v1"
+        case "glm5_next": "glm5-next-mla-parity-v1"
+        default: "sdpa-parity-v1"
+        }
     }
 
     /// SPEC-039 FR-PKV12 (v0.1.20): the `glm5_next` AC-20 fixture, attach
@@ -2512,7 +2541,11 @@ actor ModelRuntime: ModelRuntimeServing {
             return nil
         }
         let metallibSHA256 = hexString(SHA256.hash(data: metallibData))
-        guard let kernelIdentifier = Self.nonEmpty(environment.registeredKernelIdentifier()) else {
+        let rowOwnedPools = modelCapabilities.modelFamily == "deepseek_v4"
+        let measuredKernelIdentifier = rowOwnedPools
+            ? PagedKVAttachGate.deepseekV4RowPoolBridgeIdentifier
+            : environment.registeredKernelIdentifier()
+        guard let kernelIdentifier = Self.nonEmpty(measuredKernelIdentifier) else {
             PagedKVRuntimeDiagnostics.log("measure nil: kernel identifier not registered")
             return nil
         }
@@ -2523,12 +2556,13 @@ actor ModelRuntime: ModelRuntimeServing {
             return nil
         }
         let hardwareClass = "apple-silicon:\(chip):ram-\(fingerprint.ramGB)gb"
-        // The parity label is derived ONLY from a genuinely established on-device gather
+        // For paged families the parity label requires an on-device gather
         // parity probe: token-for-token argmax equality against stock KVCacheSimple, plus
         // proof the real Metal gather ran for every layer at every forward pass over BOTH
-        // K and V (`nLayers * nNew * 2`) across a non-degenerate (>= 3 block),
+        // K and V (`nLayers * nForwards * 2`) across a non-degenerate (>= 3 block),
         // boundary-crossing, non-identity layout. Anything short of that fails closed —
-        // no measured parity, no label, no attach.
+        // no measured parity, no label, no attach. DeepSeek instead proves
+        // row-owned pool parity below and receives a distinct bridge identity.
         // SPEC-039 FR-PKV12: the `glm5_next` entry advertises only with its
         // evidence recorded (`glm5NextPagedAttachEvidenceRecorded`); without
         // it attach fails closed on parity.
@@ -2536,24 +2570,35 @@ actor ModelRuntime: ModelRuntimeServing {
             PagedKVRuntimeDiagnostics.log("measure nil: glm5_next paged attach evidence not recorded (SPEC-039 AC-20)")
             return nil
         }
-        // Every paged layer gathers twice per forward: K and V, or for
-        // `pagedMLA` the latent and the pooled keys (SPEC-039 FR-PKV4 rule 4).
-        guard let parity = parityProbe,
-              parity.established,
-              parity.nLayers > 0,
-              parity.nNew > 0,
-              parity.nForwards >= parity.nNew,
-              parity.gatherKernelCalls == parity.nLayers * parity.nForwards * 2,
-              parity.maxLogicalBlocks >= 3,
-              parity.nonIdentityPermutation
-        else {
-            if let p = parityProbe {
-                PagedKVRuntimeDiagnostics.log(
-                    "measure nil: parity gate (established=\(p.established) nLayers=\(p.nLayers) nNew=\(p.nNew) nForwards=\(p.nForwards) gatherKernelCalls=\(p.gatherKernelCalls) expect=\(p.nLayers * p.nForwards * 2) maxLogicalBlocks=\(p.maxLogicalBlocks)>=3? nonIdentity=\(p.nonIdentityPermutation))")
-            } else {
-                PagedKVRuntimeDiagnostics.log("measure nil: parity probe result nil")
+        guard let parity = parityProbe, parity.established else { return nil }
+        if rowOwnedPools {
+            // Pools/window/indexer stay row-owned. Do not manufacture gather
+            // calls or a permutation: prove exact production-backend parity,
+            // ragged positions, and state transfer across a leave/join instead.
+            guard modelCapabilities.hybridDecoderArchitectureVerified,
+                  let layout = modelCapabilities.deepseekV4Pool,
+                  let proof = parity.rowPoolProof,
+                  proof.layerCount == layout.ratios.count,
+                  proof.established,
+                  parity.nLayers == proof.layerCount,
+                  parity.nNew == proof.tokensPerRow,
+                  parity.gatherKernelCalls == 0,
+                  parity.maxLogicalBlocks == 0,
+                  !parity.nonIdentityPermutation
+            else { return nil }
+        } else {
+            // K/V (or GLM latent/pooled keys) gather twice per layer per forward.
+            guard parity.rowPoolProof == nil,
+                  parity.nLayers > 0,
+                  parity.nNew > 0,
+                  parity.nForwards >= parity.nNew,
+                  parity.gatherKernelCalls == parity.nLayers * parity.nForwards * 2,
+                  parity.maxLogicalBlocks >= 3,
+                  parity.nonIdentityPermutation
+            else {
+                PagedKVRuntimeDiagnostics.log("measure nil: paged gather parity shape invalid")
+                return nil
             }
-            return nil
         }
         let parityLabel = hexString(SHA256.hash(data: Data(
             "\(metallibSHA256)|\(kernelIdentifier)|\(modelSHA256)|\(tokenizerSHA256 ?? "")|\(chatTemplateSHA256 ?? "")|\(hardwareClass)|\(modelID)|blk\(config.blockSizeTokens)|max\(config.maxPhysicalBlocks)|\(Self.pagedKVParityLabelSuffix(modelFamily: modelCapabilities.modelFamily))".utf8
@@ -2731,6 +2776,30 @@ actor ModelRuntime: ModelRuntimeServing {
                     modelCapabilities: modelCapabilities
                 )
         else { return (nil, nil) }
+        if modelCapabilities.modelFamily == "deepseek_v4" {
+            let pairs = Self.pagedKVRuntimeIsolationProbePromptPairs
+            var last: (PagedKVRuntimeParityProbeResult?, PagedKVRuntimeMoEProbeResult?) = (nil, nil)
+            for pair in pairs {
+                let prompts = await container.perform { context in
+                    [context.tokenizer.encode(text: pair.0, addSpecialTokens: true),
+                     context.tokenizer.encode(text: pair.1, addSpecialTokens: true)]
+                }
+                last = await DeepseekV4RuntimeParityProbe.run(
+                    container: container,
+                    blockSizeTokens: pagedKVConfig.blockSizeTokens,
+                    maxPhysicalBlocks: pagedKVConfig.maxPhysicalBlocks,
+                    cacheKinds: cacheKinds,
+                    promptA: Self.repeatedProbeTokens(prompts[0], targetCount: 513),
+                    promptB: Self.repeatedProbeTokens(prompts[1], targetCount: 642)
+                )
+                // Only clean, exact but indistinguishable runs may try another
+                // challenge. A divergence/exception is final and fails closed.
+                guard let isolation = last.1,
+                      Self.isCleanIndistinguishableIsolationRun(isolation)
+                else { return last }
+            }
+            return last
+        }
         let probePromptTokens = modelCapabilities.attachProbePromptTokens(blockSizeTokens: pagedKVConfig.blockSizeTokens)
         let encodedProbePrompt = await container.perform { context in
             context.tokenizer.encode(text: Self.pagedKVRuntimeParityProbePrompt, addSpecialTokens: true)
@@ -2838,6 +2907,9 @@ actor ModelRuntime: ModelRuntimeServing {
         modelCapabilities: PagedKVRuntimeModelCapabilities
     ) -> Bool {
         guard modelCapabilities.hybridDecoderArchitectureVerified else { return false }
+        if modelCapabilities.modelFamily == "deepseek_v4" {
+            return modelCapabilities.deepseekV4Pool?.expectedCacheKinds == cacheKinds
+        }
         if modelCapabilities.modelFamily == "glm5_next" {
             // Exactly one cache per decoder layer, in layer order, each pool
             // width equal to `index_kpool` (SPEC-039 FR-PKV12).
@@ -3128,6 +3200,7 @@ maxTokens: 1,
             "qwen/qwen3.6-35b-a3b": "Qwen3_5MoeForConditionalGeneration",
             "qwen/qwen3.8-27b": "Qwen3_5ForConditionalGeneration",
             "zai-org/glm-5.3-flash": "Glm5NextForConditionalGeneration",
+            "deepseek/deepseek-v4-flash": "DeepseekV4ForCausalLM",
         ]
         let configObject = configJSONData.flatMap {
             try? JSONSerialization.jsonObject(with: $0) as? [String: Any]
@@ -3146,6 +3219,13 @@ maxTokens: 1,
             else { return nil }
             return PagedKVSparseAttentionLayout(textConfig: textConfig)
         }()
+        let deepseekV4Pool: DeepseekV4PoolLayout? = {
+            guard modelID?.lowercased() == "deepseek/deepseek-v4-flash", let configObject,
+                  configObject["architectures"] == nil
+                    || configObject["architectures"] as? [String] == ["DeepseekV4ForCausalLM"]
+            else { return nil }
+            return DeepseekV4PoolLayout(config: configObject)
+        }()
         let allowlistedArchitectureVerified: Bool = {
             guard let id = modelID?.lowercased(),
                   let expectedArchitecture = hybridArchitectureAllowlist[id],
@@ -3153,9 +3233,10 @@ maxTokens: 1,
                   let architectures = configObject["architectures"] as? [String]
             else { return false }
             if expectedArchitecture == "Glm5NextForConditionalGeneration" { return sparseAttention != nil }
+            if expectedArchitecture == "DeepseekV4ForCausalLM" { return deepseekV4Pool != nil }
             return architectures.contains(expectedArchitecture)
         }()
-        let architectureVerified = allowlistedArchitectureVerified
+        let architectureVerified = allowlistedArchitectureVerified || deepseekV4Pool != nil
             || qwen35HybridDecoderArchitectureVerified(
             modelID: modelID,
             configJSONData: configJSONData
@@ -3165,7 +3246,8 @@ maxTokens: 1,
             requiresMoEDispatch: (configJSONData.flatMap(Self.pagedKVConfigRequiresMoE) ?? false)
                 || Self.pagedKVModelIDLooksLikeExpertModel(modelID),
             hybridDecoderArchitectureVerified: architectureVerified,
-            sparseAttention: sparseAttention
+            sparseAttention: sparseAttention,
+            deepseekV4Pool: deepseekV4Pool
         )
     }
 
@@ -5566,6 +5648,11 @@ maxTokens: 1,
               let tuple = continuousBatchingRequestedTuple(),
               !continuousBatchingAcceptanceCoverage.isRevoked(tuple)
         else { return nil }
+        if currentPagedKVModelCapabilities.modelFamily == "deepseek_v4" {
+            guard continuousBatchingPolicyLoadResult.status == .liveVerified,
+                  continuousBatchingPolicyLoadResult.selection.admitsDeepseekV4Pool(tuple)
+            else { return nil }
+        }
         return ContinuousBatchingSelfCheckTarget(
             key: ContinuousBatchingSelfCheckKey(
                 modelSHA256: tuple.modelSHA256,
@@ -5586,7 +5673,7 @@ maxTokens: 1,
             maxRequestTokens: scheduler.maxRequestTokens,
             poolTokens: scheduler.poolTokens,
             blockSizeTokens: scheduler.blockSizeTokens,
-            // Only a pagedMLA (`glm5_next`) backend has a flattened-token cap.
+            // Paged MLA and DeepSeek row pools both use the eight-token decode cap.
             decodeOnlyGain: scheduler.forwardTokenCap != nil,
             policyCeiling: continuousBatchingPolicyServedSlotCeiling(modelSHA256: tuple.modelSHA256)
         )
@@ -5835,6 +5922,10 @@ maxTokens: 1,
             continuousBatchingPolicyLoadResult.selection.entries.first { entry in
                 entry.tuple.modelID == requested.modelID && entry.tuple.modelSHA256 == requested.modelSHA256
             }?.rollout
+        }
+        if currentPagedKVModelCapabilities.modelFamily == "deepseek_v4" {
+            guard continuousBatchingPolicyLoadResult.status == .liveVerified,
+                  let tuple, continuousBatchingPolicyLoadResult.selection.admitsDeepseekV4Pool(tuple) else { return .off }
         }
         let policyMode: ContinuousBatchingMode?
         switch continuousBatchingSelfCheck {

@@ -33,7 +33,8 @@ extension ModelRuntime {
         promptChunkCeiling: Int = ContinuousBatchSchedulerConfiguration.defaultPromptChunkTokens,
         allowsRaggedPrefillOffsets: Bool = false,
         nativeMTPPromptRowsJoinRaggedPrefill: Bool = false,
-        maxDecodeRowsPerForward: Int = Int.max
+        maxDecodeRowsPerForward: Int = Int.max,
+        referencePrefillStepSize: Int? = nil
     ) -> ContinuousBatchSchedulerConfiguration {
         // The family ceiling is the chunk unless the operator set
         // `prefill_step_size`, which may only lower it (SPEC-038 FR-CB2).
@@ -53,6 +54,7 @@ extension ModelRuntime {
             maxPrefillTokensPerIteration: prefillTokensPerIteration
                 ?? ContinuousBatchSchedulerConfiguration.defaultPrefillTokensPerIteration,
             maxPromptChunkTokens: promptChunkTokens,
+            referencePrefillStepSize: referencePrefillStepSize,
             allowsRaggedPrefillOffsets: allowsRaggedPrefillOffsets,
             nativeMTPPromptRowsJoinRaggedPrefill: nativeMTPPromptRowsJoinRaggedPrefill,
             tokenDeliveryBufferLimit: ContinuousBatchSchedulerConfiguration.productionTokenDeliveryBufferLimit,
@@ -87,6 +89,7 @@ extension ModelRuntime {
     nonisolated static func schedulerPromptChunkCeiling(
         backend: (any ContinuousBatchSchedulerBackend)?
     ) -> Int {
+        if backend is DeepseekV4ContinuousBatchBackend { return DeepseekV4ContinuousBatchBackend.prefillChunkTokens }
         guard let backend = backend as? PagedKVSharedForwardBackend,
               backend.cacheKinds.contains(where: \.isPagedMLA)
         else {
@@ -113,7 +116,8 @@ extension ModelRuntime {
         configured: Int,
         backend: (any ContinuousBatchSchedulerBackend)?
     ) -> Int {
-        guard let cap = (backend as? PagedKVSharedForwardBackend)?.maxDecodeRowsPerForward, cap < configured else {
+        let bound = backend is DeepseekV4ContinuousBatchBackend ? DeepseekV4ContinuousBatchBackend.maxDecodeRows : (backend as? PagedKVSharedForwardBackend)?.maxDecodeRowsPerForward
+        guard let cap = bound, cap < configured else {
             return configured
         }
         FileHandle.standardError.write(Data(
@@ -239,7 +243,8 @@ extension ModelRuntime {
                     backend: backend,
                     prefillGrouping: prefillGrouping
                 ),
-                maxDecodeRowsPerForward: schedulerDecodeRowBound(configured: maxDecodeRowsPerForward, backend: backend)
+                maxDecodeRowsPerForward: schedulerDecodeRowBound(configured: maxDecodeRowsPerForward, backend: backend),
+                referencePrefillStepSize: backend is DeepseekV4ContinuousBatchBackend ? 2048 : nil
             ),
             allocator: allocator,
             backend: backend,
@@ -305,6 +310,19 @@ extension ModelRuntime {
               let cacheKinds = await pagedKVCacheKinds(container: container)
         else {
             return nil
+        }
+        if cacheKinds.contains(where: \.isDeepseekV4Pool) {
+            return makeContinuousBatchScheduler(
+                decision: decision, tuple: tuple,
+                backend: DeepseekV4ContinuousBatchBackend(container: container),
+                maxBatch: maxBatch, queueLimit: queueLimit, queueWaitTimeoutMS: queueWaitTimeoutMS,
+                prefillTokensPerIteration: prefillTokensPerIteration, maxContextTokens: maxContextTokens,
+                modelID: modelID, modelSHA256: modelSHA256, weightsGeneration: weightsGeneration,
+                prefillStepSize: 2048, maxDecodeLockstepWindow: 1,
+                nativeMTPRoundByteCapacity: nil, nativeMTPStatusSink: nativeMTPStatusSink,
+                prefillGrouping: .unconstrained, maxDecodeRowsPerForward: min(8, continuousBatchDecodeRowBound(cacheKinds: cacheKinds)),
+                replayAuthority: replayAuthority
+            )
         }
         // A hybrid (Qwen3.6) row retains its paged KV only when cached-turn
         // batching is on (SPEC-038 AC-26): the next turn then restores the
@@ -466,6 +484,7 @@ extension ModelRuntime {
     nonisolated static func servePathDecodeLockstepWindow(
         cacheKinds: [PagedKVSharedForwardBackend.CacheKind]
     ) -> Int {
+        if cacheKinds.contains(where: \.isDeepseekV4Pool) { return 1 }
         #if MACPROVIDER_LAB_HARNESS
         // Lab A/B measurement only (#1906): a smaller hybrid window, down to 1.
         if cacheKinds.contains(.recurrentMamba),
@@ -484,6 +503,7 @@ extension ModelRuntime {
     nonisolated static func decodeLockstepWindow(
         backendOverride: any ContinuousBatchSchedulerBackend
     ) -> Int {
+        if backendOverride is DeepseekV4ContinuousBatchBackend { return 1 }
         guard let paged = backendOverride as? PagedKVSharedForwardBackend else {
             return ContinuousBatchSchedulerConfiguration.defaultDecodeLockstepWindow
         }

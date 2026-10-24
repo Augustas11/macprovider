@@ -559,16 +559,23 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         /// and the indexer's pooled keys (one per `kpool` tokens) paged on the
         /// row's one block table (`PagedMLALatentCache`).
         case pagedMLA(kpool: Int)
+        /// Row-owned DeepSeek compressor plus window (and ratio-4 indexer).
+        case deepseekV4Pool(ratio: Int, windowTokens: Int)
 
         var usesPagedKVCache: Bool {
             switch self {
             case .pagedAttention, .slidingWindow, .pagedMLA: true
-            case .recurrentMamba: false
+            case .recurrentMamba, .deepseekV4Pool: false
             }
         }
 
         var isPagedMLA: Bool {
             if case .pagedMLA = self { return true }
+            return false
+        }
+
+        var isDeepseekV4Pool: Bool {
+            if case .deepseekV4Pool = self { return true }
             return false
         }
 
@@ -578,6 +585,21 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         }
 
         static func recognized(from cache: KVCache) -> CacheKind? {
+            if let list = cache as? CacheList {
+                var leaves: [KVCache] = []
+                list.mapChildren { leaves.append($0); return $0 }
+                guard let window = leaves.first as? RotatingKVCache,
+                      let windowTokens = window.maxSize, windowTokens > 0,
+                      window.metaState.first == "0",
+                      leaves.count == 2 || leaves.count == 3,
+                      let pool = leaves[1] as? DeepseekV4PoolCache,
+                      pool.ratio == 4 || pool.ratio == 128,
+                      leaves.count == (pool.ratio == 4 ? 3 : 2),
+                      leaves.dropFirst().allSatisfy({ ($0 as? DeepseekV4PoolCache)?.ratio == pool.ratio })
+                else { return nil }
+                return .deepseekV4Pool(ratio: pool.ratio, windowTokens: windowTokens)
+            }
+
             if let latent = cache as? any GLM5NextLatentCache {
                 guard latent.kpool >= 1 else { return nil }
                 return .pagedMLA(kpool: latent.kpool)
@@ -603,7 +625,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 guard let kind = recognized(from: cache) else { return nil }
                 kinds.append(kind)
             }
-            return kinds.contains(where: \.usesPagedKVCache) ? kinds : nil
+            return kinds.contains(where: { $0.usesPagedKVCache || $0.isDeepseekV4Pool }) ? kinds : nil
         }
     }
 
@@ -762,7 +784,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     /// The flattened-token cap of a shared forward over these layers, or nil
     /// when only the device route bound applies.
     static func maxFlattenedTokensPerForward(cacheKinds: [CacheKind]) -> Int? {
-        cacheKinds.contains(where: \.isPagedMLA) ? pagedMLAMaxFlattenedTokensPerForward : nil
+        cacheKinds.contains(where: { $0.isPagedMLA || $0.isDeepseekV4Pool }) ? pagedMLAMaxFlattenedTokensPerForward : nil
     }
 
     /// Whether every row of a prefill group prefills in its own forward: no
@@ -1814,7 +1836,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             case .pagedAttention, .slidingWindow:
                 guard let cache = attention.next() else { throw unavailable }
                 caches.append(cache)
-            case .pagedMLA:
+            case .pagedMLA, .deepseekV4Pool:
                 throw unavailable
             case .recurrentMamba:
                 guard let state = recurrentCheckpoint.states[index], !state.isEmpty else { throw unavailable }
@@ -1914,7 +1936,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                         throw PagedKVContiguousCacheBridgeError.blockTableMismatch
                     }
                     layers.append(cache)
-                case .pagedMLA:
+                case .pagedMLA, .deepseekV4Pool:
                     throw PagedKVContiguousCacheBridgeError.blockTableMismatch
                 case .recurrentMamba:
                     let cache = MambaCache()
@@ -2041,6 +2063,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                         initialOffset: initialOffset,
                         reconstructViaGather: false
                     )
+                case .deepseekV4Pool:
+                    preconditionFailure("DeepSeek V4 requires DeepseekV4ContinuousBatchBackend")
                 case .recurrentMamba:
                     MambaCache()
                 }
@@ -4082,6 +4106,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                         }
                     }
                 )
+            case .deepseekV4Pool:
+                throw ContinuousBatchSchedulerError.unsupported("deepseek_v4_backend_required")
             case .recurrentMamba:
                 let rows = rowCaches.compactMap { $0[layerIndex] as? MambaCache }
                 guard rows.count == rowCaches.count else {

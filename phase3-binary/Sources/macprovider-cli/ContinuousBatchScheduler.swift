@@ -293,6 +293,8 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
     let prefillGrouping: ContinuousBatchPrefillGroupingRule
     let maxPrefillTokensPerIteration: Int
     let maxPromptChunkTokens: Int
+    /// Fixed per-row reference partition, independent of generic token budgets.
+    let referencePrefillStepSize: Int?
     /// Whether one prefill group may hold rows at different prompt offsets
     /// (SPEC-038 FR-CB2 ragged shared prefill). Set only when the backend runs
     /// that shape in one forward (`PagedKVSharedForwardBackend
@@ -360,6 +362,7 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
         prefillGrouping: ContinuousBatchPrefillGroupingRule = .unconstrained,
         maxPrefillTokensPerIteration: Int? = nil,
         maxPromptChunkTokens: Int = 256,
+        referencePrefillStepSize: Int? = nil,
         allowsRaggedPrefillOffsets: Bool = false,
         nativeMTPPromptRowsJoinRaggedPrefill: Bool = false,
         drainTimeoutNanoseconds: UInt64 = 30_000_000_000,
@@ -396,7 +399,8 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
             maxActiveRows: self.maxActiveRows
         )
         self.decodeHeadroomTokens = max(0, decodeHeadroomTokens)
-        self.maxPrefillRowsPerIteration = max(1, maxPrefillRowsPerIteration)
+        self.referencePrefillStepSize = referencePrefillStepSize.map { max(1, $0) }
+        self.maxPrefillRowsPerIteration = referencePrefillStepSize == nil ? max(1, maxPrefillRowsPerIteration) : 1
         self.prefillGrouping = prefillGrouping
         self.maxPromptChunkTokens = max(1, maxPromptChunkTokens)
         self.allowsRaggedPrefillOffsets = allowsRaggedPrefillOffsets
@@ -2186,7 +2190,7 @@ actor ContinuousBatchScheduler {
     /// device route bound (`glm5_next`: 8, SPEC-039 v0.1.19); nil when only
     /// the device bound applies.
     nonisolated var forwardTokenCap: Int? {
-        (backend as? PagedKVSharedForwardBackend)?.maxDecodeRowsPerForward
+        backend is DeepseekV4ContinuousBatchBackend ? 8 : (backend as? PagedKVSharedForwardBackend)?.maxDecodeRowsPerForward
     }
     nonisolated var poolTokens: Int {
         configuration.descriptor.blockSizeTokens * configuration.descriptor.maxPhysicalBlocks
@@ -5673,6 +5677,9 @@ actor ContinuousBatchScheduler {
     }
 
     private func prefillEnd(for row: Row, maxChunkTokens: Int) -> Int {
+        if configuration.referencePrefillStepSize != nil {
+            return DeepseekV4ContinuousBatchBackend.prefillEnd(offset: row.prefillCursor, promptCount: row.request.promptTokens.count)
+        }
         let spanEnd = prefillSpanEnd(for: row)
         let remaining = spanEnd - row.prefillCursor
         guard remaining > 0 else { return row.prefillCursor }
