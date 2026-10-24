@@ -403,8 +403,10 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
         self.maxPrefillRowsPerIteration = referencePrefillStepSize == nil ? max(1, maxPrefillRowsPerIteration) : 1
         self.prefillGrouping = prefillGrouping
         self.maxPromptChunkTokens = max(1, maxPromptChunkTokens)
-        self.allowsRaggedPrefillOffsets = allowsRaggedPrefillOffsets
-        self.nativeMTPPromptRowsJoinRaggedPrefill = allowsRaggedPrefillOffsets
+        // Ragged grouping may shorten chunks to fit its generic token budget.
+        // Reference pooling partitions must instead prefill each row alone.
+        self.allowsRaggedPrefillOffsets = referencePrefillStepSize == nil && allowsRaggedPrefillOffsets
+        self.nativeMTPPromptRowsJoinRaggedPrefill = self.allowsRaggedPrefillOffsets
             && nativeMTPPromptRowsJoinRaggedPrefill
         self.maxPrefillTokensPerIteration = max(
             1,

@@ -80,8 +80,10 @@ final class DeepseekV4BackendFixtureTests: XCTestCase {
                 allocator: try PagedKVBlockAllocator(blockSizeTokens: 128, maxPhysicalBlocks: 128),
                 backend: DeepseekV4ContinuousBatchBackend(container: container(model)),
                 replayAuthority: ContinuousBatchRuntimeReplayAuthority.inMemoryForTests())
-            async let first = scheduler.submit(.init(id: "tiny-a", conversationKey: "", promptTokens: prompts[0], maxOutputTokens: 6))
-            async let second = scheduler.submit(.init(id: "tiny-b", conversationKey: "", promptTokens: prompts[1], maxOutputTokens: 6))
+            async let first = scheduler.submit(.init(id: "tiny-a", conversationKey: "", promptTokens: prompts[0],
+                maxOutputTokens: 6, temperature: 0))
+            async let second = scheduler.submit(.init(id: "tiny-b", conversationKey: "", promptTokens: prompts[1],
+                maxOutputTokens: 6, temperature: 0))
             let (firstResult, secondResult) = try await (first, second)
             let results = [firstResult, secondResult]
             for index in results.indices {

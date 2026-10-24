@@ -6340,9 +6340,11 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             tuple: Self.tuple(), maxActiveRows: 2, decodeHeadroomTokens: 1,
             maxPrefillRowsPerIteration: 2, maxPrefillTokensPerIteration: 128,
             maxPromptChunkTokens: 64, referencePrefillStepSize: 2048,
+            allowsRaggedPrefillOffsets: true,
             snapshot: .init(modelID: Self.modelID, modelSHA256: Self.modelSHA, weightsGeneration: 1)
         )
         XCTAssertEqual(configuration.maxPrefillRowsPerIteration, 1)
+        XCTAssertFalse(configuration.allowsRaggedPrefillOffsets)
         let scheduler = ContinuousBatchScheduler(
             configuration: configuration,
             allocator: try PagedKVBlockAllocator(blockSizeTokens: 128, maxPhysicalBlocks: 64),
