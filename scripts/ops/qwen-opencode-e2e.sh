@@ -1402,12 +1402,34 @@ PY
 # a backwards clock step cannot extend the hold past the cap.
 DSV4_HOLD_MARKER=""
 dsv4_hold_marker_clear() {
-  [ -z "${DSV4_HOLD_MARKER:-}" ] || rm -f "$DSV4_HOLD_MARKER"
-  case "${DSV4_WINDOW_HOLD_FILE:-}" in /*) rm -f "$DSV4_WINDOW_HOLD_FILE.holding" ;; esac
+  # Best effort: a marker that cannot be removed must never block GLM recovery.
+  [ -z "${DSV4_HOLD_MARKER:-}" ] || rm -f "$DSV4_HOLD_MARKER" 2>/dev/null || true
+  case "${DSV4_WINDOW_HOLD_FILE:-}" in /*) rm -f "$DSV4_WINDOW_HOLD_FILE.holding" 2>/dev/null || true ;; esac
   DSV4_HOLD_MARKER=""
 }
+# dsv4_hold_marker_create FILE TXID: walk FILE's directories from / with
+# O_NOFOLLOW, requiring each to be owned by this user or root with no group or
+# other write, then create FILE.holding relative to the pinned directory with
+# O_CREAT|O_EXCL|O_NOFOLLOW|O_NONBLOCK (never follows or opens an existing entry).
+dsv4_hold_marker_create() {
+  python3 -I -c '
+import os, stat, sys
+path, txid = sys.argv[1], sys.argv[2]
+parts = [p for p in path.split("/")[:-1] if p]
+fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+for name in parts + [None]:
+    st = os.fstat(fd)
+    if st.st_uid not in (0, os.geteuid()) or st.st_mode & 0o022 or not stat.S_ISDIR(st.st_mode):
+        sys.exit(1)
+    if name is None:
+        break
+    fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+mfd = os.open(os.path.basename(path) + ".holding", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=fd)
+os.write(mfd, (txid + "\n").encode())
+' "$1" "$2" 2>/dev/null
+}
 dsv4_window_hold() {
-  local file="${DSV4_WINDOW_HOLD_FILE:-}" max="${DSV4_WINDOW_HOLD_MAX_MINUTES:-30}" start now logged=-1 minute dir ticks=0
+  local file="${DSV4_WINDOW_HOLD_FILE:-}" max="${DSV4_WINDOW_HOLD_MAX_MINUTES:-30}" start now logged=-1 minute ticks=0
   [ -n "$file" ] || return 0
   case "$file" in /*) ;; *) log "DSV4_WINDOW_HOLD_FILE is not absolute; no hold"; return 0 ;; esac
   if ! [[ "$max" =~ ^[0-9]{1,2}$ ]]; then
@@ -1419,20 +1441,12 @@ dsv4_window_hold() {
     log "DSV4_WINDOW_HOLD_MAX_MINUTES must be 1-60; no hold"
     return 0
   fi
-  dir="${file%/*}"
-  [ -n "$dir" ] || dir=/
-  if [ -L "$dir" ] || [ "$(cd -P "$dir" 2>/dev/null && pwd -P)" != "$dir" ] ||
-     [ -z "$(find "$dir" -maxdepth 0 -type d -user "$(id -un)" ! -perm -020 ! -perm -002 2>/dev/null)" ]; then
-    log "hold directory $dir must be a real directory owned by the operator without group or other write; no hold"
-    return 0
-  fi
   dsv4_hold_marker_clear
   [ -e "$file" ] || return 0
-  # Exclusive create (noclobber): never follows a symlink and never opens a FIFO.
-  if ! ( set -C; printf '%s\n' "$1" > "$file.holding" ) 2>/dev/null; then
-    log "hold marker $file.holding could not be created exclusively; no hold"
+  dsv4_hold_marker_create "$file" "$1" || {
+    log "hold directory chain must be real, operator or root owned, without group or other write, and the marker must not pre-exist; no hold"
     return 0
-  fi
+  }
   DSV4_HOLD_MARKER="$file.holding"
   start="$(date +%s)"
   while [ -e "$file" ]; do

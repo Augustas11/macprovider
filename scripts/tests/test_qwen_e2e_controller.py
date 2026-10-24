@@ -264,7 +264,7 @@ sleep() {
 }
 """
         def run(setup):
-            result, _ = self.run_shell(["dsv4_window_hold", "dsv4_hold_marker_clear"], harness + setup + """
+            result, _ = self.run_shell(["dsv4_window_hold", "dsv4_hold_marker_clear", "dsv4_hold_marker_create"], harness + setup + """
 dsv4_window_hold tx-1
 trace "end clock=$(cat "$OPS_TMP_DIR/clock") marker=$([ -e "$HOLD.holding" ] && echo yes || echo no) file=$([ -e "$HOLD" ] && echo yes || echo no)"
 cat "$TRACE"
@@ -307,6 +307,23 @@ dsv4_hold_marker_clear() { :; }
 ''')
         self.assertFalse([line for line in lines if line.startswith("sleep")])
         self.assertTrue(lines[-1].startswith("end clock=1000 marker=no"), lines)
+        # A pre-existing FIFO at the marker path is never opened (O_EXCL): no hang, no hold.
+        lines = run('''DSV4_WINDOW_HOLD_FILE="$HOLD"; touch "$HOLD"
+dsv4_hold_marker_clear() { mkfifo "$HOLD.holding"; }
+''')
+        self.assertFalse([line for line in lines if line.startswith("sleep")])
+        # A group/other-writable ancestor is refused too.
+        lines = run('''mkdir -p "$REAL_TMP/a/b"; chmod 700 "$REAL_TMP/a/b"; chmod 770 "$REAL_TMP/a"
+HOLD="$REAL_TMP/a/b/hold"; DSV4_WINDOW_HOLD_FILE="$HOLD"; touch "$HOLD"
+''')
+        self.assertFalse([line for line in lines if line.startswith("sleep")])
+        # Marker removal failing must never abort recovery.
+        result, _ = self.run_shell(["dsv4_hold_marker_clear"], '''DSV4_WINDOW_HOLD_FILE="$OPS_TMP_DIR/sub/hold"
+mkdir "$OPS_TMP_DIR/sub"; touch "$OPS_TMP_DIR/sub/hold.holding"; chmod 500 "$OPS_TMP_DIR/sub"
+DSV4_HOLD_MARKER="$DSV4_WINDOW_HOLD_FILE.holding"
+dsv4_hold_marker_clear; echo survived; chmod 700 "$OPS_TMP_DIR/sub"
+''')
+        self.assertEqual(result.stdout.strip(), "survived", result.stderr)
         # The interrupt cleanup removes the readiness marker.
         result, _ = self.run_shell(["dsv4_hold_marker_clear"], '''DSV4_WINDOW_HOLD_FILE="$OPS_TMP_DIR/hold"
 touch "$DSV4_WINDOW_HOLD_FILE.holding"
