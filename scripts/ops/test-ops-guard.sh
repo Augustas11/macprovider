@@ -128,6 +128,8 @@ expect block 'scripts/ops/cli-release.sh _pearl-config --accepted-id x'
 expect block 'bash scripts/ops/cli-release.sh _pearl-config --recommend 1.2.3 x'
 expect block 'scripts/ops/cli-release.sh _revoke-seed'
 expect block 'scripts/ops/catalog-activate.sh _buyer-ux-conformance 0123abcd'
+expect block 'scripts/ops/pearl-runtime.sh _stream-ceiling'
+expect allow 'PEARL_RUNTIME_TASK=stream-ceiling scripts/ops/pearl-runtime.sh status'
 expect allow 'scripts/ops/catalog-activate.sh status'
 expect block "ssh pearl 'python3 - apply --accepted-id x' < scripts/ops/lib/pearl-cli-config.py"
 expect block 'python3 scripts/ops/lib/pearl-cli-config.py apply --accepted-id x'

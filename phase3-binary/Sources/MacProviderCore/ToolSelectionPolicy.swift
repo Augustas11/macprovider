@@ -1,8 +1,8 @@
 import Foundation
 
 /// Bounded, fail-closed tool selection. Guaranteed modes start generation
-/// inside a call (SPEC-018 §3.11 call prefill) and validate the complete
-/// output; the decoder does not constrain logits.
+/// inside a template grammar (SPEC-018 §3.11) and validate the complete
+/// output in addition to constraining token sampling.
 public enum ToolSelectionPolicy {
     public static let supportedNativeModel = "mlx-community/Qwen3.6-35B-A3B-4bit"
 
@@ -44,9 +44,8 @@ public enum ToolSelectionPolicy {
         }
     }
 
-    /// Exact loaded identities that support `required`/named, with the
-    /// template facts the call prefill needs. A model without an entry gets
-    /// neither guaranteed mode.
+    /// Optional legacy prefill profiles. Guaranteed-mode admission follows
+    /// ToolCallGrammar family support; this table does not limit admission.
     public static let guaranteedCallProfiles: [String: GuaranteedCallProfile] = [
         supportedNativeModel: GuaranteedCallProfile(
             format: .functionXML,
@@ -101,13 +100,13 @@ public enum ToolSelectionPolicy {
 
     public static func modes(modelID: String?, runtime: String) -> [String] {
         guard runtime == "mlx_cache" else { return ["auto"] }
-        return guaranteedCallProfile(modelID: modelID) != nil ? ["auto", "none", "required", "named"] : ["auto", "none"]
+        return modelID.flatMap(ToolCallGrammar.family(modelID:)) != nil ? ["auto", "none", "required", "named"] : ["auto", "none"]
     }
 
     public static func validateRequest(_ request: ChatCompletionRequest, loadedModelID: String?, runtime: String) throws {
         let mode = try selection(request.promptSource.toolChoice)
         guard mode.holdsOutput else { return }
-        guard runtime == "mlx_cache", !mode.requiresCall || guaranteedCallProfile(modelID: loadedModelID) != nil else {
+        guard runtime == "mlx_cache", !mode.requiresCall || loadedModelID.flatMap(ToolCallGrammar.family(modelID:)) != nil else {
             throw unsupported("This model/runtime does not support the requested tool selection")
         }
         guard mode.requiresCall else { return }

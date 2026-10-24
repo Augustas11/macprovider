@@ -451,15 +451,17 @@ func Default() Config {
 			// window behind a cold coordinator does not 503 the buyer.
 			// Admission 120s fails a pre-header hang ~2.5x faster than the
 			// old 300s wall. First token 120s covers a slow prefill.
-			// Ceiling 60s + 250ms/token, capped at 900s and floored at
+			// Ceiling 60s + 250ms/token, capped at 3600s and floored at
 			// coordinator_request_seconds so it is never shorter than the
-			// flat wall it replaces.
+			// flat wall it replaces. 3600s covers a full 32k-token reasoning
+			// answer on a slow serial provider (~15-25 tok/s plus a
+			// multi-minute prefill); 900s cut those mid-answer.
 			CoordinatorConnectSeconds:   60,
 			CoordinatorAdmissionSeconds: 120,
 			FirstTokenSeconds:           0, // derive min(120, header timeout)
 			StreamCeilingFloorSeconds:   60,
 			StreamCeilingPerTokenMS:     250,
-			StreamCeilingMaxSeconds:     900,
+			StreamCeilingMaxSeconds:     3600,
 			NonStreamRequestSeconds:     0, // inherit coordinator_request_seconds
 			StreamingCancelMS:           500,
 			StreamingIdleMS:             10000,
@@ -787,6 +789,18 @@ func (c Config) Validate() error {
 	if c.Timeouts.StreamCeilingMaxSeconds < c.Timeouts.CoordinatorRequestSeconds {
 		return fmt.Errorf("timeouts.stream_ceiling_max_seconds (%d) must be >= timeouts.coordinator_request_seconds (%d) — the per-phase streaming ceiling must never be shorter than the flat wall it replaces",
 			c.Timeouts.StreamCeilingMaxSeconds, c.Timeouts.CoordinatorRequestSeconds)
+	}
+	// A quota reservation must outlive the longest request it holds for, or
+	// the reaper can expire it before the request settles. Both request
+	// bounds are measured from gateway first byte; one extra minute covers
+	// settlement after the bound fires.
+	longestRequestSeconds := c.Timeouts.StreamCeilingMaxSeconds
+	if effectiveNonStreamSeconds > longestRequestSeconds {
+		longestRequestSeconds = effectiveNonStreamSeconds
+	}
+	if int64(c.Quotas.ReservationMaxAgeHours)*3600 < int64(longestRequestSeconds)+60 {
+		return fmt.Errorf("quotas.reservation_max_age_hours (%d) must exceed the longest request bound (%ds, max of stream_ceiling_max_seconds and effective non_stream_request_seconds) by at least 60s",
+			c.Quotas.ReservationMaxAgeHours, longestRequestSeconds)
 	}
 	if c.Timeouts.NonStreamRequestSeconds > 0 && c.Timeouts.NonStreamRequestSeconds < c.Timeouts.CoordinatorConnectSeconds {
 		return fmt.Errorf("timeouts.non_stream_request_seconds (%d) must be >= timeouts.coordinator_connect_seconds (%d), or 0 to inherit coordinator_request_seconds",

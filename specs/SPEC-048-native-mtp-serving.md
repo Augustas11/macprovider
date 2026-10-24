@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.54
+**Version:** 0.1.55
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.54",
+  "version": "0.1.55",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -501,7 +501,7 @@ The mlx-swift-lm row is the immutable fork tag `3.32.3-macprovider.10.5`
 (commit `c8be0f61…`, branch `campaign/2111-dsv4-cb`): tag
 `3.32.3-macprovider.10.4` (`676a62a4…`) plus batched DeepSeek-V4 attention,
 compressor/indexer projections and per-row rotary offsets, keys-only windows
-and geometric pool storage (0.1.54, Related: #2111). The prior tag adds
+and geometric pool storage (0.1.55, Related: #2111). The prior tag adds
 row-owned continuous batching to the serial DeepSeek-V4 port on the epic
 #2029 tag `3.32.3-macprovider.10.1` (`87dc5159…`, `glm53/tuple-0324`).
 `phase3-binary/Package.resolved` resolves the new revision exactly.
@@ -555,7 +555,7 @@ Authorized surface:
   bit-identical to the general path; and compile state declared for every
   Qwen 3.5 trace, including the fused GDN input projection (upstream #631,
   cherry-picked), so no trace reads a model array as a tape constant.
-- mlx-swift-lm fork, DeepSeek-V4 continuous batching (0.1.54, Related: #2111):
+- mlx-swift-lm fork, DeepSeek-V4 continuous batching (0.1.55, Related: #2111):
   `DeepseekV4Model.decodeBatch(_:rowCaches:)` accepts one token for each of
   1...8 independently prefetched rows. Embedding, hyper-connections, attention
   projections, output projections and MoE share a batched forward. On CPU,
@@ -707,6 +707,13 @@ not make a model/artifact tuple eligible, satisfy the serial or multi-row
 parity gates, admit MXFP8, or enable production serving.
 
 ### MTP-4 — v0.1 request eligibility and fallback boundary (SPEC-048-R004)
+
+**v0.1.53 (Related: #2107):** A request with an active tool-call or structured
+output grammar mask MUST use ordinary serial or continuous-batching decode.
+Native MTP MUST be disabled for that row before draft/verify begins: draft
+proposals and acceptance currently do not preserve the target sampler's
+request-local grammar state. Unconstrained rows retain existing eligibility.
+This exclusion is not a throughput qualification or a live policy change.
 
 Native MTP v0.1 accepts only the chat-completions request profile below. Values
 are tested after ordinary request parsing/default resolution (an absent
@@ -1867,7 +1874,7 @@ requests.
 
 ## 9. Changelog and history
 
-- **0.1.54 (2026-10-24)** — R003: pins the DeepSeek-V4 CB performance slice
+- **0.1.55 (2026-10-24)** — R003: pins the DeepSeek-V4 CB performance slice
   `3.32.3-macprovider.10.5` (`c8be0f61…`) on `676a62a4…`. Batched attention,
   compressor/indexer projections and per-row rotary offsets reduce repeated
   dispatch and weight reads; keys-only windows and geometric pools avoid
@@ -1877,7 +1884,7 @@ requests.
   the campaign freeze audit; those remain pending.
 
 
-- **0.1.53 (2026-10-24)** — R003: pins the DeepSeek-V4 CB campaign fork
+- **0.1.54 (2026-10-24)** — R003: pins the DeepSeek-V4 CB campaign fork
   `3.32.3-macprovider.10.4` (`676a62a4…`, `campaign/2111-dsv4-cb`) on
   `baec1724…`. Only `DeepseekV4.swift`, `DeepseekV4PoolCache.swift` and their
   tiny-fixture tests change in the fork. SPEC-038/039 define its row-owned
@@ -1885,6 +1892,10 @@ requests.
   granted by this tuple update. CPU tests are correctness evidence; the
   operator's native four-row throughput and hardware exactness window remain
   pending, as does the campaign freeze audit.
+
+- **0.1.53 (2026-10-24)** — R004: constrained tool and structured-output
+  rows use ordinary decoding until draft/verify preserves grammar state.
+  Related: #2107.
 
 - **0.1.52 (2026-10-23)** — R003: the mlx-swift-lm row moves to the
   immutable fork tag `3.32.3-macprovider.10.3` (`baec1724…`, branch

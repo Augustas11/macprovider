@@ -525,6 +525,7 @@ extension ModelRuntime {
         modelHasRecurrentLayers: Bool = false,
         retainedRecurrentCheckpoints: [RecurrentStateCheckpoint] = [],
         serialToolStopObserver: ContinuousBatchCanonicalStopObserver? = nil,
+        grammarConstraint: GrammarConstraintState? = nil,
         nativeMTPAdmission: NativeMTPRuntimeAdmission? = nil
     ) throws -> ContinuousBatchSubmission {
         guard let requestID = schedulerRequestID(for: request) else {
@@ -551,6 +552,7 @@ extension ModelRuntime {
                 recurrentCheckpointPositions: recurrentCheckpointPositions,
                 modelHasRecurrentLayers: modelHasRecurrentLayers,
                 retainedRecurrentCheckpoints: retainedRecurrentCheckpoints,
+                grammarConstraint: grammarConstraint,
                 serialToolStopObserver: serialToolStopObserver,
                 decodePath: nativeMTPAdmission?.effectivePath ?? .ordinary,
                 nativeMTPMaximumProposalDepth: nativeMTPAdmission?.initialProposalDepth ?? 0,

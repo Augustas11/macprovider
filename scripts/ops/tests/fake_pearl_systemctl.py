@@ -18,7 +18,11 @@ pearl/coordinator.yaml and pearl/overlay.yaml, bin/fake-coordinator.
                                    also gives the unit a new main pid
   restart U also loads that file: svc/buc_sha, or with svc/buc_legacy an
   "unreadable" journal line when the configured file does not load.
-  _init                            create the first /proc entry
+  _init                            create the first /proc entries
+A unit whose name contains "gateway" is the fake gateway instead: its own
+pid (svc/gw_mainpid), start second (svc/gw_started_at), restart count (svc/gw_restarts) and /proc entry running
+--config pearl/gateway.yaml; svc/gw_restart_fail makes its restart fail,
+svc/gw_restart_fail_once the next one.
 Anything else exits 1. A file svc/restart_fail makes restart fail;
 svc/restart_fail_once makes the next restart fail (and is removed).
 """
@@ -49,6 +53,24 @@ def mkproc(p):
                                                % ((os.getuid(),) * 4 + (os.getgid(),) * 4))
     open(os.path.join(svc, "mainpid"), "w").write(str(p))
     open(os.path.join(svc, "started_at"), "w").write(str(int(time.time())))
+
+
+def gateway_unit(args):
+    return any("gateway" in a for a in args)
+
+
+def gw_pid():
+    path = os.path.join(svc, "gw_mainpid")
+    return int(open(path).read()) if os.path.exists(path) else 5252
+
+
+def mkgwproc(p):
+    d = os.path.join(proc, str(p))
+    os.makedirs(d, exist_ok=True)
+    argv = [os.path.join(root, "bin", "fake-gateway"), "--config", os.path.join(pearl, "gateway.yaml")]
+    open(os.path.join(d, "cmdline"), "wb").write(b"\0".join(a.encode() for a in argv) + b"\0")
+    open(os.path.join(svc, "gw_mainpid"), "w").write(str(p))
+    open(os.path.join(svc, "gw_started_at"), "w").write(str(int(time.time())))
 
 
 def digest(path):
@@ -112,6 +134,21 @@ def buyer_ux_conformance():
 args = sys.argv[1:]
 if args == ["_init"]:
     mkproc(4242)
+    mkgwproc(5252)
+elif gateway_unit(args) and args[:1] == ["show"] and "ExecMainStartTimestamp" in args:
+    print("@" + open(os.path.join(svc, "gw_started_at")).read().strip())
+elif gateway_unit(args) and args[:1] == ["show"] and "MainPID" in args:
+    print(gw_pid())
+elif gateway_unit(args) and args[:1] == ["restart"]:
+    if os.path.exists(os.path.join(svc, "gw_restart_fail")):
+        sys.exit(1)
+    if os.path.exists(os.path.join(svc, "gw_restart_fail_once")):
+        os.unlink(os.path.join(svc, "gw_restart_fail_once"))
+        sys.exit(1)
+    mkgwproc(gw_pid() + 1)
+    n = os.path.join(svc, "gw_restarts")
+    count = int(open(n).read()) + 1 if os.path.exists(n) else 1
+    open(n, "w").write(str(count))
 elif args[:1] == ["show"] and "InvocationID" in args:
     seq = os.path.join(svc, "invocation_seq")
     if os.path.exists(seq):

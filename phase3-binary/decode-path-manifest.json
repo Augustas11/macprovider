@@ -1,12 +1,18 @@
 {
   "schema_version": "macprovider.decode-path-manifest.v1",
   "files": [
+    "Sources/MacProviderCore/GrammarAutomaton.swift",
+    "Sources/MacProviderCore/GrammarTemplates.swift",
+    "Sources/MacProviderCore/GrammarTokenTable.swift",
     "Sources/MacProviderCore/PagedKVEngine.swift",
+    "Sources/MacProviderCore/ToolCallGrammar.swift",
     "Sources/macprovider-cli/CompiledDecode.swift",
     "Sources/macprovider-cli/ContinuousBatchRowSampler.swift",
     "Sources/macprovider-cli/ContinuousBatchScheduler.swift",
     "Sources/macprovider-cli/DeepseekV4ContinuousBatchBackend.swift",
     "Sources/macprovider-cli/DeepseekV4RuntimeParityProbe.swift",
+    "Sources/macprovider-cli/GrammarConstraintState.swift",
+    "Sources/macprovider-cli/ModelRuntime.swift",
     "Sources/macprovider-cli/NativeMTP.swift",
     "Sources/macprovider-cli/NativeMTPAcceptance.swift",
     "Sources/macprovider-cli/NativeMTPAdaptation.swift",
