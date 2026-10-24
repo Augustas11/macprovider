@@ -9,7 +9,7 @@
     {
       "spec_id": "SPEC-001",
       "title": "Phase 3 Binary: Mac Provider Inference CLI",
-      "version": "1.9.45",
+      "version": "1.9.46",
       "path": "specs/SPEC-001-phase3-binary.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -14244,6 +14244,38 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
         "rationale": "Message-limit enforcement, advertisement and the 413 mapping are covered by unit and loopback tests. A live large-prompt request through the gateway after the coordinator runtime and a provider CLI carrying the advertised limit ship remains pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-001-R013",
+      "spec_id": "SPEC-001",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:nonisolated static func withDrainAndClientCancellation",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func prefillPromptSnapshot",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func prefillRecurrentCheckpoints",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func cancellableLocalPrefill",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:private static func collectSpeculativeText",
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:private func processCancellations",
+        "phase3-binary/Sources/macprovider-cli/InferenceRelay.swift:func handleCancelRequest"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/PrefillCancellationTests.swift:func testClientCancelStopsChunkedPrefillWithinOneChunkAndReleasesTheSlot",
+        "phase3-binary/Tests/macprovider-cliTests/PrefillCancellationTests.swift:func testCancelBeforePrefillRunsNoChunk",
+        "phase3-binary/Tests/macprovider-cliTests/PrefillCancellationTests.swift:func testUncancelledPrefillRunsEveryChunk",
+        "phase3-binary/Tests/macprovider-cliTests/PrefillCancellationTests.swift:func testDrainStillEndsTheOperationAsADrain",
+        "phase3-binary/Tests/macprovider-cliTests/ConversationPromptSnapshotTests.swift:func testDeepseekV4PromptSnapshotStopsWithinOneChunkOnCancelAndCommitsNothing",
+        "phase3-binary/Tests/macprovider-cliTests/LocalRequestPriorityTests.swift:func testLocalPrefillChecksPreemptionBetweenChunks",
+        "phase4-coordinator/internal/ws/relay_test.go:func TestRelayCancelSendsCancelRequest",
+        "phase4-coordinator/internal/ws/cancel_delivered_boundary_test.go:func TestRelayContextCancelBeforeRegistrationCarriesEmptyBoundary"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2111",
+        "rationale": "Chunk-boundary cancellation, slot release and the aborted snapshot lease are covered by unit tests over the library prefill driver and the DeepSeek V4 tiny fixture. A live buyer cancel during a long prefill on a provider running a CLI that carries this change remains pending."
       }
     },
     {

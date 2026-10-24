@@ -155,7 +155,7 @@ final class ConversationPromptSnapshotTests: XCTestCase {
                                                         modelID: "dsv4", kvBits: nil))
             XCTAssertNil(lease1.reusableCache)
             let work1 = try model.newCache(parameters: nil)
-            let snap1 = ModelRuntime.prefillPromptSnapshot(lease: lease1, cache: work1, promptTokenIds: turn1,
+            let snap1 = try ModelRuntime.prefillPromptSnapshot(lease: lease1, cache: work1, promptTokenIds: turn1,
                                                            start: 0, context: context, prefillStepSize: 512)
             XCTAssertTrue(snap1.applies)
             XCTAssertEqual(snap1.tokenCount, 2048)
@@ -172,7 +172,7 @@ final class ConversationPromptSnapshotTests: XCTestCase {
                                                         modelID: "dsv4", kvBits: nil))
             XCTAssertEqual(lease2.cachedPromptTokens, 2048)
             let resumedCache = try XCTUnwrap(lease2.reusableCache).layers
-            let snap2 = ModelRuntime.prefillPromptSnapshot(lease: lease2, cache: resumedCache, promptTokenIds: turn2,
+            let snap2 = try ModelRuntime.prefillPromptSnapshot(lease: lease2, cache: resumedCache, promptTokenIds: turn2,
                                                            start: lease2.lcp, context: context, prefillStepSize: 512)
             XCTAssertEqual(snap2.tokenCount, 4096)
             XCTAssertEqual(snap2.resumeAt, 4096)
@@ -189,6 +189,42 @@ final class ConversationPromptSnapshotTests: XCTestCase {
             let fresh = try Self.greedyReference(model, input: turn2, cache: try model.newCache(parameters: nil), count: 8)
             XCTAssertEqual(resumed, fresh)
             await cache.abort(lease2)
+        }
+    }
+
+    /// SPEC-001 FR-26 / SPEC-001-R013: a cancel during the multi-chunk
+    /// prompt-snapshot prefill (the DeepSeek V4 keyed path, which prefills
+    /// almost the whole prompt here) stops within one chunk, returns no
+    /// snapshot, and the aborted lease commits nothing.
+    func testDeepseekV4PromptSnapshotStopsWithinOneChunkOnCancelAndCommitsNothing() async throws {
+        try Self.requireMetal()
+        try await Device.withDefaultDevice(.cpu) {
+            let model = try Self.tinyDeepseekV4()
+            let context = ModelContext(configuration: .init(id: "deepseek/deepseek-v4-flash"), model: model,
+                                       processor: FixtureProcessor(), tokenizer: NoMarkerTokenizer())
+            let cache = ConversationCache(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+            let key = "conv:dsv4-cancel"
+            // Snapshot target 6144: three 2048-token reference chunks.
+            let prompt = (0..<6200).map { Int32(($0 * 7 + 3) % 128) }
+            let lease = try Self.unwrap(await cache.begin(conversationKey: key, incomingTokens: prompt,
+                                                       modelID: "dsv4", kvBits: nil))
+            let work = try model.newCache(parameters: nil)
+            var checks = 0
+            XCTAssertThrowsError(try ModelRuntime.prefillPromptSnapshot(
+                lease: lease, cache: work, promptTokenIds: prompt, start: 0, context: context,
+                prefillStepSize: 512, isCancelled: { checks += 1; return checks > 1 }
+            )) { error in
+                XCTAssertTrue(error is CancellationError)
+            }
+            XCTAssertEqual(checks, 2, "one chunk ran; the check before the second stopped it")
+
+            // The serial path's catch aborts the lease: the key is free and holds no entry.
+            await cache.abort(lease)
+            let next = try Self.unwrap(await cache.begin(conversationKey: key, incomingTokens: prompt,
+                                                      modelID: "dsv4", kvBits: nil))
+            XCTAssertNil(next.reusableCache)
+            XCTAssertEqual(next.cachedPromptTokens, 0)
+            await cache.abort(next)
         }
     }
 
@@ -246,7 +282,7 @@ final class ConversationPromptSnapshotTests: XCTestCase {
             let lease1 = try Self.unwrap(await cache.begin(conversationKey: key, incomingTokens: turn1,
                                                         modelID: "glm", kvBits: nil))
             let work1 = try model.newCache(parameters: nil)
-            let snap1 = ModelRuntime.prefillPromptSnapshot(lease: lease1, cache: work1, promptTokenIds: turn1,
+            let snap1 = try ModelRuntime.prefillPromptSnapshot(lease: lease1, cache: work1, promptTokenIds: turn1,
                                                            start: 0, context: context, prefillStepSize: 512)
             XCTAssertEqual(snap1.tokenCount, history.count)
             let reply = try Self.greedy(model, input: Array(turn1[history.count...]), cache: work1, count: 4)
@@ -267,14 +303,14 @@ final class ConversationPromptSnapshotTests: XCTestCase {
                                                         modelID: "glm", kvBits: nil))
             XCTAssertEqual(lease2.cachedPromptTokens, history.count)
             let resumedCache = try XCTUnwrap(lease2.reusableCache).layers
-            let snap2 = ModelRuntime.prefillPromptSnapshot(lease: lease2, cache: resumedCache, promptTokenIds: turn2,
+            let snap2 = try ModelRuntime.prefillPromptSnapshot(lease: lease2, cache: resumedCache, promptTokenIds: turn2,
                                                            start: lease2.lcp, context: context, prefillStepSize: 512)
             XCTAssertEqual(snap2.tokenCount, turn2.count - 2)
             let resumed = try Self.greedy(model, input: Array(turn2[snap2.tokenCount...]), cache: resumedCache, count: 8)
 
             // Fresh keyed turn 2 (snapshot to its own marker) and a plain full prefill.
             let keyedFreshCache = try model.newCache(parameters: nil)
-            let keyedFresh = ModelRuntime.prefillPromptSnapshot(lease: lease2, cache: keyedFreshCache, promptTokenIds: turn2,
+            let keyedFresh = try ModelRuntime.prefillPromptSnapshot(lease: lease2, cache: keyedFreshCache, promptTokenIds: turn2,
                                                                 start: 0, context: context, prefillStepSize: 512)
             let keyed = try Self.greedy(model, input: Array(turn2[keyedFresh.tokenCount...]), cache: keyedFreshCache, count: 8)
             let plain = try Self.greedy(model, input: turn2, cache: try model.newCache(parameters: nil), count: 8)
