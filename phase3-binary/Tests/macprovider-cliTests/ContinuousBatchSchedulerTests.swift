@@ -404,6 +404,37 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         try await eventually { await allocator.freeBlockCount() == 32 }
     }
 
+    /// SPEC-024 FR-CI2a: a keyed snapshot-family row splits prefill at the
+    /// snapshot position and publishes only that prompt snapshot.
+    func testKeyedSnapshotRowPublishesOnlyItsPromptSnapshot() async throws {
+        let backend = ScriptedBackend(scripts: ["snap": [7, 8]], promptSnapshotBackend: true)
+        let scheduler = try await makeScheduler(maxActiveRows: 1, maxPromptChunkTokens: 16, backend: backend)
+        let result = try await scheduler.submit(.init(
+            id: "snap", conversationKey: "conv:snap", promptTokens: Array(1...40),
+            maxOutputTokens: 2, temperature: 0.0, promptSnapshotTokenCount: 36
+        ))
+        XCTAssertNil(result.retainedCache)
+        let cache = try XCTUnwrap(result.serialConversationCache)
+        XCTAssertTrue(cache.promptSnapshot)
+        XCTAssertEqual(cache.tokenCount, 36)
+        let snapshots = await backend.promptSnapshots()
+        XCTAssertEqual(snapshots["snap"], [36])
+    }
+
+    /// A snapshot-family row whose snapshot was not captured publishes no
+    /// conversation cache rather than its decoded state.
+    func testKeyedSnapshotRowWithoutASnapshotPublishesNothing() async throws {
+        let backend = ScriptedBackend(scripts: ["nosnap": [7, 8]])
+        let scheduler = try await makeScheduler(maxActiveRows: 1, maxPromptChunkTokens: 16, backend: backend)
+        let result = try await scheduler.submit(.init(
+            id: "nosnap", conversationKey: "conv:nosnap", promptTokens: Array(1...40),
+            maxOutputTokens: 2, temperature: 0.0, promptSnapshotTokenCount: 36
+        ))
+        XCTAssertEqual(result.outputTokens, [7, 8])
+        XCTAssertNil(result.retainedCache)
+        XCTAssertNil(result.serialConversationCache)
+    }
+
     func testZeroOutputHybridRowMaterializesTheFullPrefilledPrompt() async throws {
         let backend = ScriptedBackend(scripts: [:], recurrentCheckpointBackend: true)
         let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 16)
@@ -8832,6 +8863,9 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
     private let recurrentCheckpointBackend: Bool
     private let terminalNilRecurrentSnapshots: [String: Set<Int>]
     private var recurrentSnapshotLog: [String: [Int]] = [:]
+    /// SPEC-024 FR-CI2a: answers `snapshotPromptCache` with a flagged entry.
+    private let promptSnapshotBackend: Bool
+    private var promptSnapshotLog: [String: [Int]] = [:]
     private let snapshotGate: AsyncGate?
     private let materializeGate: AsyncGate?
     private var serialMaterializeLog: [String: [Int]] = [:]
@@ -8890,8 +8924,10 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
         terminalNilRecurrentSnapshots: [String: Set<Int>] = [:],
         recurrentCheckpointBackend: Bool = false,
         snapshotGate: AsyncGate? = nil,
-        materializeGate: AsyncGate? = nil
+        materializeGate: AsyncGate? = nil,
+        promptSnapshotBackend: Bool = false
     ) {
+        self.promptSnapshotBackend = promptSnapshotBackend
         self.materializeGate = materializeGate
         self.recurrentCheckpointBackend = recurrentCheckpointBackend
         self.snapshotGate = snapshotGate
@@ -9113,6 +9149,15 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
         }
         try terminalCommitBridge.record(caches: terminalCommitCaches, binding: input.binding)
     }
+
+    func snapshotPromptCache(requestID: String, tokenCount: Int) async -> ContinuousBatchSerialConversationCache? {
+        promptSnapshotLog[requestID, default: []].append(tokenCount)
+        guard promptSnapshotBackend else { return nil }
+        return ContinuousBatchSerialConversationCache(
+            layers: [KVCacheSimple()], recurrentCheckpoints: [], tokenCount: tokenCount, promptSnapshot: true)
+    }
+
+    func promptSnapshots() -> [String: [Int]] { promptSnapshotLog }
 
     func snapshotRecurrentState(requestID: String, tokenCount: Int) async -> RecurrentStateCheckpoint? {
         guard recurrentCheckpointBackend else { return nil }

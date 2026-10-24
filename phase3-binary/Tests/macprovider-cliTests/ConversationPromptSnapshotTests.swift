@@ -120,6 +120,14 @@ final class ConversationPromptSnapshotTests: XCTestCase {
         XCTAssertNil(ModelRuntime.conversationPromptSnapshotTokenCount(promptTokenIds: prompt, policy: nil))
     }
 
+    /// GLM-5-Next CB rows publish no prompt snapshot; DeepSeek V4 CB rows do.
+    func testContinuousBatchRowsKeepOnlyTheReferencePlanSnapshot() {
+        XCTAssertEqual(ModelRuntime.continuousBatchPromptSnapshotPolicy(.referencePlanBoundary(step: 2048)),
+                       .referencePlanBoundary(step: 2048))
+        XCTAssertNil(ModelRuntime.continuousBatchPromptSnapshotPolicy(.lastRoleMarker(tokenIDs: [60, 61])))
+        XCTAssertNil(ModelRuntime.continuousBatchPromptSnapshotPolicy(nil))
+    }
+
     func testGLM5NextSnapshotPolicyNeedsRoundTrippingRoleTokens() throws {
         try Self.requireMetal()
         let tokenizer = MarkerTokenizer()

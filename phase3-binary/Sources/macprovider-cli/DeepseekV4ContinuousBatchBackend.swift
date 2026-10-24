@@ -72,7 +72,8 @@ final class DeepseekV4ContinuousBatchBackend: ContinuousBatchSchedulerBackend, @
                     let logits = model(tokens, cache: row.caches)
                     let sampledArray = input.sampleFirstToken ? ContinuousBatchRowSampler.sample(
                         logits: logits[0..., -1, 0...], rows: [.init(temperature: input.temperature,
-                        topP: input.topP, samplerSeed: input.samplerSeed, samplerStep: input.samplerStep)]
+                        topP: input.topP, samplerSeed: input.samplerSeed, samplerStep: input.samplerStep,
+                        grammarConstraint: input.grammarConstraint)]
                     ) : nil
                     eval((sampledArray.map { [$0] } ?? []) + row.caches.flatMap(\.state))
                     let sampled = sampledArray?.asArray(Int.self).first
@@ -132,8 +133,11 @@ final class DeepseekV4ContinuousBatchBackend: ContinuousBatchSchedulerBackend, @
                     rowCaches: indices.map { eligible[$0].1.caches })
                 let sampled = ContinuousBatchRowSampler.sample(logits: logits[0..., -1, 0...], rows: indices.map {
                     let input = eligible[$0].0
+                    // Grammar rows run one-step windows (the scheduler bounds them),
+                    // so no pipelined overshoot advances their grammar state.
                     return .init(temperature: input.temperature, topP: input.topP,
-                        samplerSeed: input.samplerSeed, samplerStep: input.samplerStep + step)
+                        samplerSeed: input.samplerSeed, samplerStep: input.samplerStep + step,
+                        grammarConstraint: input.grammarConstraint)
                 })
                 // A single evaluation includes cache writes that logits do not
                 // depend on; asArray below only waits for this queued work.

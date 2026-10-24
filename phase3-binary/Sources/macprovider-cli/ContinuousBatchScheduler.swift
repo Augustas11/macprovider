@@ -5182,6 +5182,22 @@ actor ContinuousBatchScheduler {
     /// which only records the ID and no longer finds the row; a cancel recorded
     /// meanwhile wins, and no conversation cache is published for it.
     private func finishTerminal(_ row: Row, status: ContinuousBatchSchedulerTerminalStatus) async {
+        if row.request.promptSnapshotTokenCount != nil {
+            // SPEC-024 FR-CI2a: a keyed snapshot-family row publishes only its
+            // prompt snapshot, never a retained or decoded cache (its window and
+            // pool layers cannot be rewound). No snapshot captured: publish none.
+            let released = await release(row.handle)
+            if cancelledIDs.remove(row.request.id) != nil {
+                finish(row, status: released ? .cancelled : .requestFailed, errorCode: released
+                    ? "request_cancelled"
+                    : "continuous_batching_cleanup_failed")
+                return
+            }
+            finish(row, status: released ? status : .requestFailed, errorCode: released
+                ? nil
+                : "continuous_batching_cleanup_failed", serialConversationCache: row.promptSnapshot)
+            return
+        }
         if let retainedCache = await retainTerminalCache(
             for: row,
             targetLogicalTokens: row.canonicalRetainedLogicalTokenCount
@@ -5195,20 +5211,6 @@ actor ContinuousBatchScheduler {
                 return
             }
             finish(row, status: status, errorCode: nil, retainedCache: retainedCache)
-            return
-        }
-        if let promptSnapshot = row.promptSnapshot {
-            // SPEC-024 FR-CI2a: publish the prompt snapshot, never the decoded cache.
-            let released = await release(row.handle)
-            if cancelledIDs.remove(row.request.id) != nil {
-                finish(row, status: released ? .cancelled : .requestFailed, errorCode: released
-                    ? "request_cancelled"
-                    : "continuous_batching_cleanup_failed")
-                return
-            }
-            finish(row, status: released ? status : .requestFailed, errorCode: released
-                ? nil
-                : "continuous_batching_cleanup_failed", serialConversationCache: promptSnapshot)
             return
         }
         if contiguousCacheBridge != nil, row.request.modelHasRecurrentLayers {

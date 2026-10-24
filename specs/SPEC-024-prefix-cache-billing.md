@@ -483,10 +483,13 @@ trimmed. A hit resumes prefill at `S` and reports `cached_prompt_tokens = S`. Wi
 deterministic decoding a resumed turn MUST produce the same greedy tokens as a fresh prefill of
 the full prompt (AC-CI-6). Snapshot entries count against the FR-CI4 conversation and token caps
 like any other entry (one snapshot per entry, `S` tokens) and are never written to the SPEC-037
-disk tier. A continuous-batching row of either family captures the same snapshot when its
-prefill reaches `S` and publishes it at a normal terminal; the next keyed turn serial-routes
-under the SPEC-038 AC-26 fence and reuses it there. Strict continuous batching (`on`), which
-refuses that serial route, publishes no snapshot. Every other family keeps the FR-CI2 predicate
+disk tier. A DeepSeek V4 continuous-batching row captures the same snapshot when its prefill
+reaches `S` and publishes only that snapshot at a normal terminal (never a retained or decoded
+cache; no captured snapshot publishes nothing); the next keyed turn serial-routes under the
+SPEC-038 AC-26 fence and reuses it there. A GLM-5-Next continuous-batching row publishes no
+snapshot until its paged-latent snapshot has hardware parity evidence; GLM-5-Next serial turns
+snapshot as above. Strict continuous batching (`on`), which refuses that serial route,
+publishes no snapshot. Every other family keeps the FR-CI2 predicate
 and canonical prefix unchanged.
 
 **FR-CI3 (canonical prefix).** On a served turn the provider commits the canonical prefix as
@@ -771,8 +774,9 @@ Prefix-cache reuse MUST NOT be enabled on a path where the conversation key is b
   token cap, and is never captured by the disk tier. On the CPU tiny fixture, a two-turn DeepSeek V4
   conversation resumed from the turn-1 snapshot holds bit-identical cache state and greedy
   tokens to a fresh prefill, and an off-plan resume changes the pools. On a tiny Metal GLM-5-Next
-  model, a two-turn conversation resumed at the role marker yields the fresh greedy tokens. A CB row's GLM paged
-  latent cache converts to a serial cache equal to the stock cache.
+  model, a two-turn conversation resumed at the role marker yields the fresh greedy tokens. A keyed
+  CB row publishes only its prompt snapshot (none when it captured none), and GLM-5-Next CB rows
+  take no snapshot.
 - **AC-CI-7 (keyed serial trimmable allocation, SPEC-024-R001).** A conversation-keyed serial
   request on a full-attention model MUST allocate `KVCacheSimple` (or another class that
   remains trimmable after `offset >= maxContextTokens`). A keyless request MUST keep the

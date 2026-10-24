@@ -7046,7 +7046,8 @@ maxTokens: 1,
                     promptSnapshotTokenCount: Self.nonEmpty(request.conversationKey) == nil ? nil
                         : Self.conversationPromptSnapshotTokenCount(
                             promptTokenIds: promptTokens.map(Int32.init),
-                            policy: Self.conversationPromptSnapshotPolicy(model: context.model, tokenizer: tokenizer))
+                            policy: Self.continuousBatchPromptSnapshotPolicy(
+                                Self.conversationPromptSnapshotPolicy(model: context.model, tokenizer: tokenizer)))
                 ),
                 StreamingDetokenizer(tokenizer: tokenizer)
             )
@@ -12738,6 +12739,18 @@ maxTokens: maxTokens,
         /// generation prompt (`<|assistant|><think>`), which the next turn
         /// re-renders unchanged.
         case lastRoleMarker(tokenIDs: Set<Int32>)
+    }
+
+    /// The snapshot policy a CB row may use. GLM-5-Next CB rows publish no
+    /// prompt snapshot (their paged-latent snapshot has no hardware parity
+    /// evidence yet), so a GLM CB row keeps its pre-snapshot behavior; GLM
+    /// serial turns still snapshot. DeepSeek V4 CB rows keep the reference-plan
+    /// snapshot.
+    nonisolated static func continuousBatchPromptSnapshotPolicy(
+        _ policy: ConversationPromptSnapshotPolicy?
+    ) -> ConversationPromptSnapshotPolicy? {
+        guard case .referencePlanBoundary = policy else { return nil }
+        return policy
     }
 
     static let glm5NextRoleMarkers = ["<|system|>", "<|user|>", "<|assistant|>", "<|observation|>"]
