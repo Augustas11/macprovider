@@ -13251,10 +13251,9 @@ maxTokens: maxTokens,
             supportsThinkingToggle: templateSupportsThinkingToggle,
             supportsPreserveThinking: templateSupportsPreserveThinking
         )
-        // SPEC-018 §3.12: the buyer's reasoning_effort (default `low` when
-        // tools are declared) reaches the template; templates without the
-        // variable ignore it.
-        if let effort = request.templateReasoningEffort {
+        // SPEC-018 §3.12: normalize against the loaded family, including
+        // when the buyer uses an alias. Templates without the variable ignore it.
+        if let effort = request.templateReasoningEffort(for: toolSelectionModelID ?? request.model) {
             additionalContext = (additionalContext ?? [:]).merging(["reasoning_effort": effort]) { _, new in new }
         }
         if grammar == .dsml {
