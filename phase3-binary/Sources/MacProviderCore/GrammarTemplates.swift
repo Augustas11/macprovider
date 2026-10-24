@@ -18,7 +18,7 @@ public enum GrammarTemplates {
         guard let family else { return nil }
         let schemas = try ToolSelectionPolicy.schemas(request)
         for value in schemas.values { try validateRequiredProperties(value) }
-        if family == .glm || family == .deepseekV4 || family == .gemma4 {
+        if family == .glm || family == .dsml || family == .gemma4 {
             for value in schemas.values { try validateTaggedSchema(value) }
         }
         let names = schemas.keys.sorted().filter { name in
@@ -51,8 +51,8 @@ public enum GrammarTemplates {
             return .sequence([.literal("<tool_call>{\"name\":" + quoted(name) + ",\"arguments\":"), arguments, .literal("}</tool_call>")])
         case .llama3:
             return .sequence([.literal("{\"name\":" + quoted(name) + ",\"parameters\":"), arguments, .literal("}")])
-        case .deepseekV4, .glm:
-            let dsml = family == .deepseekV4
+        case .dsml, .glm:
+            let dsml = family == .dsml
             var parts: [ByteGrammar] = [.literal(dsml ? "<｜DSML｜tool_calls><｜DSML｜invoke name=\"" + name + "\">" : "<tool_call>" + name)]
             if case .object(let object) = parameters, case .object(let properties)? = object["properties"] {
                 for key in properties.keys.sorted() {

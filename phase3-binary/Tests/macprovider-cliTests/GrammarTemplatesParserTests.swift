@@ -122,7 +122,7 @@ final class GrammarTemplatesParserTests: XCTestCase {
         case .glm: return "<tool_call>" + name + "<arg_key>city</arg_key><arg_value>Paris</arg_value></tool_call>"
         case .gemma4: return "<|tool_call>call:" + name + "{<|\"|>city<|\"|>:<|\"|>Paris<|\"|>}<tool_call|>"
         case .harmony: return "<|start|>assistant to=functions." + name + "<|channel|>commentary<|message|>{\"city\":\"Paris\"}<|call|>"
-        case .deepseekV4: return "<｜DSML｜tool_calls><｜DSML｜invoke name=\"" + name + "\"><｜DSML｜parameter name=\"city\" string=\"true\">Paris</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜tool_calls>"
+        case .dsml: return "<｜DSML｜tool_calls><｜DSML｜invoke name=\"" + name + "\"><｜DSML｜parameter name=\"city\" string=\"true\">Paris</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜tool_calls>"
         }
     }
 
@@ -165,7 +165,7 @@ final class GrammarTemplatesParserTests: XCTestCase {
             (.llama3, #"{"name":"f","parameters":{"city":"Paris","data":[{"ok":true}]}}"#),
             (.glm, #"<tool_call>f<arg_key>city</arg_key><arg_value>Paris</arg_value><arg_key>data</arg_key><arg_value>[{"ok":true}]</arg_value></tool_call>"#),
             (.gemma4, "<|tool_call>call:f{<|\"|>city<|\"|>:<|\"|>Paris<|\"|>,<|\"|>data<|\"|>:[{<|\"|>ok<|\"|>:true}]}<tool_call|>"),
-            (.deepseekV4, #"<｜DSML｜tool_calls><｜DSML｜invoke name="f"><｜DSML｜parameter name="city" string="true">Paris</｜DSML｜parameter><｜DSML｜parameter name="data" string="false">[{"ok":true}]</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜tool_calls>"#)
+            (.dsml, #"<｜DSML｜tool_calls><｜DSML｜invoke name="f"><｜DSML｜parameter name="city" string="true">Paris</｜DSML｜parameter><｜DSML｜parameter name="data" string="false">[{"ok":true}]</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜tool_calls>"#)
         ]
         for (family, text) in examples {
             let dfa = try GrammarTemplates.toolCall(name: "f", parameters: parameters, family: family).compile()

@@ -59,11 +59,6 @@ func legacyToolFamily(model string) bool {
 // capability derivation and request eligibility. A SPEC-051 shard group head
 // refuses tools (shard_group_tools_unsupported), so it never counts.
 func providerParsesToolGrammar(p pool.Provider) bool {
-	// DSML arrived after the shared parser floor. Only a provider declaring
-	// exact-model guaranteed selection has the full DSML grammar implementation.
-	if toolGrammarFamily(p.ModelID) == toolGrammarDeepSeekV4 {
-		return !p.ShardGroupHeadV1 && providerSupportsToolSelection(p, &toolSelectionPolicy{mode: "required"})
-	}
 	return !p.ShardGroupHeadV1 && toolGrammarFamily(p.ModelID) != "" && (legacyToolFamily(p.ModelID) || providerServesToolGrammars(p))
 }
 

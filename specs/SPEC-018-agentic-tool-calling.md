@@ -18,7 +18,7 @@ SPEC-018 is the **provider-side response synthesis contract** for OpenAI-wire to
 
 ## Change log
 
-- **v0.3.5 (2026-10-23, Related: #2107):** §3.11 defines bounded token-level
+- **v0.3.5 (2026-10-24, Related: #2107):** §3.11 defines bounded token-level
   grammar masks across native tool-template families, replacing profile-only
   admission while retaining output validation and capability evidence gates.
 

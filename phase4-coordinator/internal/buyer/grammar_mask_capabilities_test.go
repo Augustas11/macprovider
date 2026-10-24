@@ -1,22 +1,25 @@
 package buyer
 
 import (
-	"testing"
-
 	"github.com/augstar/macprovider-coordinator/internal/pool"
+	"testing"
 )
 
-func TestDSMLCapabilitiesRequireExactLoadedModelDeclaration(t *testing.T) {
+func TestDSMLGuaranteedModesRequireExactLoadedModelDeclaration(t *testing.T) {
 	p := pool.Provider{ModelID: "deepseek-ai/DeepSeek-V4", BinaryVersion: "1.8.262"}
-	if providerParsesToolGrammar(p) {
-		t.Fatal("old shared parser floor granted DSML support")
+	policy := &toolSelectionPolicy{mode: "required"}
+	if !providerParsesToolGrammar(p) {
+		t.Fatal("main's DSML parser support was lost")
+	}
+	if providerSupportsToolSelection(p, policy) {
+		t.Fatal("parser support granted a guaranteed mode")
 	}
 	p.ToolSelectionCapabilities = []pool.ToolSelectionCapability{{ModelID: p.ModelID, Runtime: "mlx_cache", Modes: []string{"required", "named"}, Validation: "schema-holdback-v1"}}
-	if !providerParsesToolGrammar(p) {
-		t.Fatal("exact loaded-model grammar declaration was ignored")
+	if !providerSupportsToolSelection(p, policy) {
+		t.Fatal("exact loaded-model declaration was ignored")
 	}
 	p.ModelID = "deepseek-ai/DeepSeek-V4-other"
-	if providerParsesToolGrammar(p) {
-		t.Fatal("stale declaration granted DSML support after model swap")
+	if providerSupportsToolSelection(p, policy) {
+		t.Fatal("stale declaration granted guaranteed selection after swap")
 	}
 }

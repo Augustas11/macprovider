@@ -1,6 +1,6 @@
 # SPEC-019 - Structured output (`response_format: json_schema`)
 
-**Version:** 0.3.3 (2026-10-22, deterministic malformed_json_response is not retryable; post-think validation; #2107)
+**Version:** 0.3.3 (2026-10-24, grammar masks for valid strict and non-strict JSON; Related: #2107)
 **Depends on:** SPEC-001, SPEC-006, SPEC-015, SPEC-018 v0.2.10 LOCKED
 **Status:** LOCKED. v0.3.1 extends the §1a rollout gate to relay-blind requests; v0.3.0 adds the non-enforcing `strict:false` mode (§1a) and supersedes AC-4; v0.2.6 clarifies cleanup-prefix holdback and exact streaming byte parity; v0.2.5 clarified the existing §8 "preserve retryability" requirement.
 
@@ -1742,6 +1742,9 @@ matching SPEC-018 v0.2.10 clarification; it makes no SPEC-015 schema change and
 adds no HTTP endpoint.
 
 ### Change log
+
+- **v0.3.3 (2026-10-24, Related: #2107):** §1a constrains and holds strict
+  and non-strict JSON until parsing succeeds; non-strict schemas stay advisory.
 
 - **v0.3.1 (2026-10-15, relay-blind gate):** §1a rollout: relay-blind and
   privacy-class requests declare non-strict mode in the SPEC-041-R003
