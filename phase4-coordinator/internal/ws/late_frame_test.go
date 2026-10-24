@@ -372,9 +372,18 @@ func TestEncryptedRelayConsumesUnloggableRequestIDFrame(t *testing.T) {
 
 func TestInactiveFrameDropLogsAreRateLimitedPerSession(t *testing.T) {
 	s, _, _, logs := lateFrameHarness(t)
+	session, _ := s.storedSessionFor("p1", "s1")
 	before := RelayInactiveFrameDroppedTotalForTest()
-	for i := 0; i < 50; i++ {
+	flood := func() {
 		s.handleInferenceEnd("p1", "s1", mustJSON(InferenceResponseEnd{Type: "inference_response_end", RequestID: "req-flood", Status: "complete"}))
+	}
+	flood()
+	// Pin the last log time in the future so the window cannot lapse mid-test.
+	session.inactiveLogMu.Lock()
+	session.inactiveLogAt = time.Now().Add(time.Hour)
+	session.inactiveLogMu.Unlock()
+	for i := 0; i < 49; i++ {
+		flood()
 	}
 	if got := RelayInactiveFrameDroppedTotalForTest() - before; got != 50 {
 		t.Fatalf("inactive frame drops = %d, want 50", got)
@@ -383,9 +392,83 @@ func TestInactiveFrameDropLogsAreRateLimitedPerSession(t *testing.T) {
 		t.Fatalf("drop log lines = %d, want 1", got)
 	}
 	resetInactiveLogLimit(s)
-	s.handleInferenceEnd("p1", "s1", mustJSON(InferenceResponseEnd{Type: "inference_response_end", RequestID: "req-flood", Status: "complete"}))
+	flood()
 	if !bytes.Contains(logs.Bytes(), []byte(`"suppressed_since_last":49`)) {
 		t.Fatalf("suppressed drops not reported: %s", logs.String())
+	}
+}
+
+func TestPlaintextInactiveFramesAreCountedAndClassified(t *testing.T) {
+	serverConn, providerConn := net.Pipe()
+	defer providerConn.Close()
+	defer serverConn.Close()
+	var logs bytes.Buffer
+	registry := pool.NewRegistry(nil)
+	provider := &pool.Provider{ProviderID: "p1", AssignedID: "s1", ModelID: "model-a", InferencePath: pool.InferencePathWSTunneled, State: pool.StateReady, SlotsFree: 1, SlotsTotal: 1, MaxConcurrency: 1}
+	registry.Register(provider, serverConn)
+	s := NewServer(config.Default(), registry, zerolog.New(&logs))
+	session := newProviderSession("p1", "s1", serverConn, 4)
+	s.sessions.Store(sessionKey("p1", "s1"), session)
+	go session.runWriter()
+	go func() {
+		for {
+			if _, _, err := wsutil.ReadServerData(providerConn); err != nil {
+				return
+			}
+		}
+	}()
+	relay, err := s.DispatchInference(context.Background(), *provider, "req-retired", []byte(`{"model":"model-a"}`), true)
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	relay.Cancel("timeout")
+	before := RelayInactiveFrameDroppedTotalForTest()
+
+	s.handleInferenceChunk("p1", "s1", mustJSON(InferenceResponseChunk{Type: "inference_response_chunk", RequestID: "req-retired", Seq: 0, Data: "x"}))
+	if !bytes.Contains(logs.Bytes(), []byte(`"reason":"retired_request"`)) {
+		t.Fatalf("retired plaintext frame not classified: %s", logs.String())
+	}
+	resetInactiveLogLimit(s)
+	s.handleInferenceEnd("p1", "s1", mustJSON(InferenceResponseEnd{Type: "inference_response_end", RequestID: "req-\x1b[2J", Status: "complete"}))
+	s.handleInferenceChunk("p1", "s1", mustJSON(InferenceResponseChunk{Type: "inference_response_chunk", RequestID: "req-\x1b[2J", Seq: 0, Data: "x"}))
+	s.handleInferenceValidation("p1", "s1", mustJSON(InferenceResponseValidation{Type: "inference_response_validation", RequestID: "req-\x1b[2J"}))
+
+	if got := RelayInactiveFrameDroppedTotalForTest() - before; got != 4 {
+		t.Fatalf("inactive frame drops = %d, want 4", got)
+	}
+	if bytes.Contains(logs.Bytes(), []byte(`\u001b`)) {
+		t.Fatalf("control characters reached the log: %s", logs.String())
+	}
+	if _, ok := s.storedSessionFor("p1", "s1"); !ok {
+		t.Fatal("session closed")
+	}
+}
+
+// An encrypted frame whose AAD does not decode is a stale-epoch drop when its
+// kid is not current, and an AEAD failure when it is.
+func TestEncryptedRelayUndecodableAADFollowsKeyEpoch(t *testing.T) {
+	undecodable := func(t *testing.T, provider *pool.Provider, kid string) []byte {
+		t.Helper()
+		var envelope encryptedInferenceResponseEnd
+		if err := json.Unmarshal(encryptedResponseEnd(t, provider, "req-x", false, 0, InferenceResponseEnd{Type: "inference_response_end", RequestID: "req-x", Status: "complete"}), &envelope); err != nil {
+			t.Fatal(err)
+		}
+		envelope.Enc.AAD = "not-base64!"
+		envelope.Enc.KID = kid
+		return mustJSON(envelope)
+	}
+
+	s, provider, _, logs := lateFrameHarness(t)
+	s.handleInferenceEnd("p1", "s1", undecodable(t, provider, "retired-kid"))
+	assertSessionOpen(t, s, logs)
+	if provider.Tier2Session.P2CCounter != 0 {
+		t.Fatalf("p2c counter = %d, want 0", provider.Tier2Session.P2CCounter)
+	}
+
+	s, provider, _, _ = lateFrameHarness(t)
+	s.handleInferenceEnd("p1", "s1", undecodable(t, provider, provider.Tier2Session.KeyID))
+	if _, ok := s.storedSessionFor("p1", "s1"); ok {
+		t.Fatal("undecodable current-epoch frame kept the session")
 	}
 }
 

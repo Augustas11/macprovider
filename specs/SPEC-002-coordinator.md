@@ -5774,8 +5774,9 @@ unread when it belongs to the current epoch: the coordinator authenticates it
 under the current key with the AAD it carries (the retired entry's `stream`
 flag when one exists), consumes its sequence slot, and then discards it. A
 frame whose `kid` is not the session's current key id, or that reaches a
-session without a Tier-2 key, is discarded without touching sequence state,
-because its sequence number belongs to an epoch the session no longer holds.
+session without a Tier-2 key, is discarded without touching sequence state
+(even when its AAD does not decode), because its sequence number belongs to an
+epoch the session no longer holds.
 A frame that carries the current `kid` and fails authentication, replays a
 consumed sequence number, or falls outside the receive window is an AEAD
 failure under SPEC-008 §6.7.1, as it is for an active request: an authentic

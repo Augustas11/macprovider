@@ -14433,7 +14433,9 @@
         "phase4-coordinator/internal/ws/late_frame_test.go:func TestEncryptedRelayDropsStaleEpochValidationFrame",
         "phase4-coordinator/internal/ws/late_frame_test.go:func TestEncryptedRelayConsumesUnloggableRequestIDFrame",
         "phase4-coordinator/internal/ws/late_frame_test.go:func TestInactiveFrameDropLogsAreRateLimitedPerSession",
-        "phase4-coordinator/internal/ws/late_frame_test.go:func TestRetiredRelayRequestCapKeepsArmedCancelTerminal"
+        "phase4-coordinator/internal/ws/late_frame_test.go:func TestRetiredRelayRequestCapKeepsArmedCancelTerminal",
+        "phase4-coordinator/internal/ws/late_frame_test.go:func TestPlaintextInactiveFramesAreCountedAndClassified",
+        "phase4-coordinator/internal/ws/late_frame_test.go:func TestEncryptedRelayUndecodableAADFollowsKeyEpoch"
       ],
       "journeys": [],
       "evidence": [],
