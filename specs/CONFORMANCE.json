@@ -14237,6 +14237,7 @@
       "tests": [
         "phase4-coordinator/internal/buyer/stream_deadline_label_test.go:func TestGatewayStreamDeadlineLabelsRequestLogWithoutChangingSettlement",
         "phase4-coordinator/internal/buyer/stream_deadline_label_test.go:func TestGatewayStreamDeadlineInFutureDoesNotLabel",
+        "phase4-coordinator/internal/buyer/stream_deadline_label_test.go:func TestGatewayStreamDeadlineUsesCancelTimeNotLogTime",
         "scripts/tests/test_pearl_cli_config.py:class StreamCeilingPlanTest",
         "scripts/tests/test_pearl_cli_config.py:class StreamCeilingApplyTest"
       ],
@@ -14284,7 +14285,8 @@
         "phase5-gateway/internal/router/request_deadlines_test.go:func TestStreamCeilingClosesAnOpenEvent",
         "phase5-gateway/internal/router/request_deadlines_test.go:func TestStreamCeilingAnthropicMessagesErrorEvent",
         "phase5-gateway/internal/router/request_deadlines_test.go:func TestStreamDeadlineHeaderOnlyOnPlainStreams",
-        "phase5-gateway/internal/config/config_test.go:func TestValidateRejectsInconsistentPhaseDeadlines"
+        "phase5-gateway/internal/config/config_test.go:func TestValidateRejectsInconsistentPhaseDeadlines",
+        "phase5-gateway/internal/router/request_deadlines_test.go:func TestStreamCeilingOverMaxTokensNamesTheSettledOutcome"
       ],
       "journeys": [],
       "evidence": [],

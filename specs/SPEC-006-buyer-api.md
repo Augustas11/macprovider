@@ -5159,4 +5159,3 @@ plain streams only, so the coordinator request log can label the cut
 `quotas.reservation_max_age_hours` does not exceed the longest request bound
 (the larger of the stream ceiling and the effective non-streaming wall) by at
 least 60 s, so no quota reservation expires before its request settles.
-

@@ -1567,6 +1567,10 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		switch {
 		case structuredStreaming:
 			writeStructuredOutputTimeoutSSE(w, requestID(r))
+		case estimateTokensFromBytes(emitted) > maxStreamingCompletionTokens(maxTokens):
+			// settleObservedContent settles this as stream_output_exceeded;
+			// the terminal names the same outcome (SPEC-006 §17.7.1 default).
+			writeSSEError(w, "Upstream stream exceeded requested max_tokens", "api_error", "stream_output_exceeded")
 		case ceiling:
 			writeSSEError(w, deadlines.streamCeilingTimeoutMessage(), "api_error", requestTimeoutCode)
 		default:

@@ -1768,8 +1768,12 @@ def sc_running_gateway(args):
 
 
 def sc_gateway_applied(args):
-    """The gateway main process started after gateway.yaml last changed (it
-    reads the file only at start)."""
+    """The gateway main process runs --config args.gateway_config and started
+    after that file last changed (it reads the file only at start)."""
+    try:
+        sc_running_gateway(args)
+    except (Refused, OSError):
+        return False
     start = main_start(args.gateway_unit)
     return start is not None and int(os.stat(args.gateway_config).st_ctime) < start
 
@@ -1938,7 +1942,8 @@ def apply_stream_ceiling(args):
             # is never above the coordinator walls.
             try:
                 for path, _, _, _ in targets:
-                    install(tmps.pop(path), path)
+                    install(tmps[path], path)
+                    del tmps[path]
                 restart(args, pid)
                 sc_restart_gateway(args, gw_pid)
             except Exception as exc:

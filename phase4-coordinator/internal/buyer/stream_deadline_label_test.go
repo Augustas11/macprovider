@@ -30,12 +30,19 @@ type streamDeadlineRow struct {
 // request_log row plus the settlement evidence.
 func runGatewayCancelledStream(t *testing.T, deadline string) streamDeadlineRow {
 	t.Helper()
+	return runGatewayCancelledStreamTerminalAfter(t, deadline, 0)
+}
+
+// runGatewayCancelledStreamTerminalAfter delays the provider's cancel
+// terminal, so the row is logged well after the cancel arrived.
+func runGatewayCancelledStreamTerminalAfter(t *testing.T, deadline string, terminalDelay time.Duration) streamDeadlineRow {
+	t.Helper()
 	const delivered = "Hello, partial"
 	h := newBuyerCancelHarness(t, "stream-deadline-label-catalog", func(h *buyerCancelHarness, ctx context.Context, requestID string, meta *providerws.SettlementReceiptMetadata) *providerws.RelayStream {
 		chunks := make(chan providerws.InferenceResponseChunk)
 		terminal := make(chan providerws.InferenceResponseEnd, 1)
 		terminalTS := time.Now().UTC().UnixMilli()
-		terminal <- providerws.InferenceResponseEnd{
+		end := providerws.InferenceResponseEnd{
 			Type:                  "inference_response_end",
 			RequestID:             requestID,
 			Status:                "cancelled",
@@ -43,6 +50,11 @@ func runGatewayCancelledStream(t *testing.T, deadline string) streamDeadlineRow 
 			Usage:                 json.RawMessage(`{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}`),
 			TerminalStateTSUnixMS: terminalTS,
 			Receipt:               buyerCancelReceipt(t, h.key, meta, delivered, 5, 3, terminalTS),
+		}
+		if terminalDelay == 0 {
+			terminal <- end
+		} else {
+			time.AfterFunc(terminalDelay, func() { terminal <- end })
 		}
 		go func() {
 			chunks <- providerws.InferenceResponseChunk{
@@ -119,5 +131,16 @@ func TestGatewayStreamDeadlineInFutureDoesNotLabel(t *testing.T) {
 	row := runGatewayCancelledStream(t, future)
 	if row.errorCode.Valid && row.errorCode.String != "" {
 		t.Fatalf("a cancel before the gateway deadline got error_code=%q", row.errorCode.String)
+	}
+}
+
+// The label follows when the cancel arrived, not when the row is logged: a
+// buyer that left more than the skew before the deadline stays unlabelled
+// even when the provider's cancel terminal arrives after the deadline.
+func TestGatewayStreamDeadlineUsesCancelTimeNotLogTime(t *testing.T) {
+	deadline := strconv.FormatInt(time.Now().Add(1500*time.Millisecond).UnixMilli(), 10)
+	row := runGatewayCancelledStreamTerminalAfter(t, deadline, 1900*time.Millisecond)
+	if row.errorCode.Valid && row.errorCode.String != "" {
+		t.Fatalf("a cancel 1.4 s before the deadline got error_code=%q from its later log time", row.errorCode.String)
 	}
 }

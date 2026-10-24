@@ -5730,4 +5730,3 @@ fields, fault flag or settlement: the prompt estimate and terminal state are
 computed before it is applied, and billing treats the code like an empty one.
 A cancel before the deadline, a request without the header, and an
 unauthenticated request are unlabelled.
-

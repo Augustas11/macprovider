@@ -2889,8 +2889,15 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// lives in *billingRecorder — only the per-attempt token-estimate
 	// adapter remains here.
 	gatewayStreamDeadline := time.Time{}
+	// buyerCancelledAt is when the gateway's cancel arrived, not when the
+	// row is logged: a cancel waits for the provider's terminal first.
+	var buyerCancelledAt atomic.Int64
 	if hasAuthenticatedAccount && req.Stream {
 		gatewayStreamDeadline, _ = unixMillisHeader(r.Header, gatewayStreamDeadlineHeader)
+		if !gatewayStreamDeadline.IsZero() {
+			stop := context.AfterFunc(r.Context(), func() { buyerCancelledAt.Store(s.now().UnixNano()) })
+			defer stop()
+		}
 	}
 	logAttemptWithReceiptState := func(provider pool.Provider, fallbackStatus int, attempt requestLogAttempt, retried int) (billing.SettlementReceiptState, bool, error) {
 		if attempt.Logged {
@@ -2910,7 +2917,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		// Labelled after the prompt estimate and terminal state above, which
 		// read ErrorCode: the label changes neither, and billing's usageFor
 		// treats request_timeout like an empty code.
-		if gatewayStreamDeadlineReached(attempt, gatewayStreamDeadline, s.now()) {
+		if at := buyerCancelledAt.Load(); at != 0 && gatewayStreamDeadlineReached(attempt, gatewayStreamDeadline, time.Unix(0, at)) {
 			attempt.ErrorCode = requestTimeoutErrorCode
 		}
 		if err := rec.withPendingReceipt(provider, attempt.SettlementReceipt, func() error {
@@ -9566,12 +9573,12 @@ const requestTimeoutErrorCode = "request_timeout"
 const gatewayStreamDeadlineSkew = time.Second
 
 // gatewayStreamDeadlineReached reports whether attempt is a buyer cancel the
-// gateway made at its stream_ceiling. It only labels the row: the terminal
+// gateway made at its stream_ceiling; cancelledAt is when the cancel arrived. It only labels the row: the terminal
 // state stays buyer_cancel, decided by the message, not the code.
-func gatewayStreamDeadlineReached(attempt requestLogAttempt, deadline, now time.Time) bool {
+func gatewayStreamDeadlineReached(attempt requestLogAttempt, deadline, cancelledAt time.Time) bool {
 	return !deadline.IsZero() && attempt.ErrorCode == "" &&
 		terminalStateFromAttempt(http.StatusOK, attempt.Error, "") == billing.TerminalStateBuyerCancel &&
-		!now.Before(deadline.Add(-gatewayStreamDeadlineSkew))
+		!cancelledAt.Before(deadline.Add(-gatewayStreamDeadlineSkew))
 }
 
 func hasInternalRoutingHeader(headers http.Header) bool {

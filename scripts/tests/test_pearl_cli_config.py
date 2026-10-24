@@ -508,6 +508,16 @@ class StreamCeilingPlanTest(unittest.TestCase):
         with self.assertRaisesRegex(pcc.Refused, "anchor|changed more"):
             pcc.sc_edit(text, "timeouts", {"stream_ceiling_max_seconds": 3600}, "gateway.yaml")
 
+    def test_gateway_on_another_config_is_not_applied(self):
+        from unittest import mock
+        with tempfile.NamedTemporaryFile() as cfg:
+            a = argparse.Namespace(gateway_config=cfg.name, gateway_unit="gateway.service")
+            with mock.patch.object(pcc, "main_start", lambda unit: 2 ** 40):
+                with mock.patch.object(pcc, "sc_running_gateway", mock.Mock(side_effect=pcc.Refused("other config"))):
+                    self.assertFalse(pcc.sc_gateway_applied(a))
+                with mock.patch.object(pcc, "sc_running_gateway", lambda a: "7"):
+                    self.assertTrue(pcc.sc_gateway_applied(a))
+
     def test_targets_match_the_tracked_configs(self):
         import yaml
         coord = yaml.safe_load((REPO / "phase4-coordinator/dist/coordinator.yaml").read_text())
@@ -607,6 +617,15 @@ class StreamCeilingApplyTest(unittest.TestCase):
                 self.mock.patch.object(pcc, "sc_gateway_applied", lambda a: True):
             pcc.sc_restart_gateway(self.args, "7")
         self.assertGreater(int(time.time()), int(os.stat(self.paths["gateway"]).st_ctime))
+
+    def test_failed_install_leaves_no_temporary_copy(self):
+        def failing_install(tmp, path):
+            raise OSError("rename failed")
+        with self.mock.patch.object(pcc, "install", failing_install), \
+                self.mock.patch.object(pcc, "sc_restart_gateway", lambda a, pid: None):
+            with self.assertRaises(pcc.Refused):
+                pcc.apply_stream_ceiling(self.args)
+        self.assertEqual(sorted(n for n in os.listdir(self.dir) if n.startswith(".cli-release-")), [])
 
     def test_rejected_coordinator_config_changes_nothing(self):
         restart = self.mock.Mock()

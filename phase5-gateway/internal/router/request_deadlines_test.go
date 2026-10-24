@@ -357,6 +357,33 @@ func TestStreamCeilingClosesAnOpenEvent(t *testing.T) {
 	}
 }
 
+// TestStreamCeilingOverMaxTokensNamesTheSettledOutcome: content past max_tokens
+// (but under the 8-byte hard guard) settles as stream_output_exceeded, so the
+// terminal at the ceiling names that outcome, not request_timeout.
+func TestStreamCeilingOverMaxTokensNamesTheSettledOutcome(t *testing.T) {
+	client := seamStreamingUpstreamCtx(endlessFrameStream(50*time.Millisecond,
+		`data: {"id":"c","choices":[{"delta":{"content":"xxxxxx"}}]}`+"\n\n"))
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Timeouts.CoordinatorRequestSeconds = 1
+		cfg.Timeouts.StreamCeilingFloorSeconds = 1
+		cfg.Timeouts.StreamCeilingPerTokenMS = 1
+		cfg.Timeouts.StreamCeilingMaxSeconds = 1
+		cfg.Timeouts.StreamingIdleMS = 30000
+		cfg.Timeouts.FirstTokenSeconds = 300
+	}, WithHTTPClient(client))
+	key := createAccountAndKey(t, store, cfg, "acct_ceiling_overflow")
+
+	// max_tokens 20: overflow above 80 content bytes, hard guard above 160.
+	// About 20 frames of 6 bytes arrive before the 1 s ceiling.
+	resp := postChat(t, h, key, `{"model":"llama","stream":true,"max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`, nil)
+	terminal := lastSSEDataFrameBeforeDone(t, resp.Body.String())
+	outcome, _ := usageEventOutcome(t, dbPath, "acct_ceiling_overflow")
+	if code := terminalSSEErrorCode(terminal); code != outcome || code != "stream_output_exceeded" {
+		t.Fatalf("terminal code=%q settled outcome=%q, want both stream_output_exceeded", code, outcome)
+	}
+}
+
 // TestStreamCeilingAnthropicMessagesErrorEvent: the /v1/messages facade turns
 // the request_timeout envelope into an Anthropic `event: error` frame.
 func TestStreamCeilingAnthropicMessagesErrorEvent(t *testing.T) {
