@@ -9396,7 +9396,8 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                         lease,
                                         cache: ConversationCacheLayers(layers, promptSnapshot: true),
                                         fullTokens: Array(promptTokenIds.prefix(promptSnapshot.tokenCount)),
-                                        cold: coldContext
+                                        cold: coldContext,
+                                        isCancelled: shouldCancel
                                     )
                                 } else {
                                     await conversationCache.abort(lease)
@@ -9422,7 +9423,8 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                 lease,
                                 cache: ConversationCacheLayers(kvCache, recurrentCheckpoints: recurrentCheckpoints),
                                 fullTokens: fullTokens,
-                                cold: coldContext
+                                cold: coldContext,
+                                isCancelled: shouldCancel
                             )
                         }
                         return completion
@@ -10385,7 +10387,8 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                         lease,
                                         cache: ConversationCacheLayers(layers, promptSnapshot: true),
                                         fullTokens: Array(promptTokenIds.prefix(promptSnapshot.tokenCount)),
-                                        cold: coldContext
+                                        cold: coldContext,
+                                        isCancelled: shouldCancel
                                     )
                                 } else {
                                     await conversationCache.abort(lease)
@@ -10411,7 +10414,8 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                 lease,
                                 cache: ConversationCacheLayers(kvCache, recurrentCheckpoints: recurrentCheckpoints),
                                 fullTokens: fullTokens,
-                                cold: coldContext
+                                cold: coldContext,
+                                isCancelled: shouldCancel
                             )
                         }
                         return validated

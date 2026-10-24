@@ -30,6 +30,23 @@ final class ConversationPromptSnapshotTests: XCTestCase {
         await cache.abort(hit)
     }
 
+    /// SPEC-001-R013: a request cancelled before its entry is inserted
+    /// publishes nothing, and its key is free for the next request.
+    func testCommitOfACancelledRequestPublishesNothing() async throws {
+        let cache = ConversationCache(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+        let stored = int32Range(0..<64)
+        let lease = try Self.unwrap(await cache.begin(conversationKey: "conv:cancelled", incomingTokens: stored,
+                                                   modelID: "model-a", kvBits: nil))
+        let layers = ConversationCacheLayers([RotatingKVCache(maxSize: 8, keep: 0)], promptSnapshot: true)
+        await cache.commit(lease, cache: layers, fullTokens: stored, isCancelled: { true })
+
+        let extended = stored + int32Range(200..<230)
+        let next = try Self.unwrap(await cache.begin(conversationKey: "conv:cancelled", incomingTokens: extended,
+                                                  modelID: "model-a", kvBits: nil))
+        XCTAssertNil(next.reusableCache, "the cancelled request's cache was not published")
+        await cache.abort(next)
+    }
+
     func testSnapshotEntryMissesWhenThePromptDivergesInsideIt() async throws {
         let cache = ConversationCache(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
         let stored = int32Range(0..<64)

@@ -14254,6 +14254,7 @@
         "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:nonisolated static func withDrainAndClientCancellation",
         "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:final class PrefillCancelScope",
         "phase3-binary/Sources/macprovider-cli/ConversationCache.swift:private func waitForTurn",
+        "phase3-binary/Sources/macprovider-cli/ConversationCache.swift:func commit(",
         "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func prefillPromptSnapshot",
         "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func prefillRecurrentCheckpoints",
         "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func cancellableLocalPrefill",
@@ -14271,6 +14272,7 @@
         "phase3-binary/Tests/macprovider-cliTests/PrefillCancellationTests.swift:func testCancelAfterPrefillDoesNotInterruptTheOperation",
         "phase3-binary/Tests/macprovider-cliTests/PrefillCancellationTests.swift:func testCancelledWaiterForABusyConversationKeyTakesNoLease",
         "phase3-binary/Tests/macprovider-cliTests/ConversationPromptSnapshotTests.swift:func testDeepseekV4PromptSnapshotStopsWithinOneChunkOnCancelAndCommitsNothing",
+        "phase3-binary/Tests/macprovider-cliTests/ConversationPromptSnapshotTests.swift:func testCommitOfACancelledRequestPublishesNothing",
         "phase3-binary/Tests/macprovider-cliTests/LocalRequestPriorityTests.swift:func testLocalPrefillChecksPreemptionBetweenChunks",
         "phase4-coordinator/internal/ws/relay_test.go:func TestRelayCancelSendsCancelRequest",
         "phase4-coordinator/internal/ws/cancel_delivered_boundary_test.go:func TestRelayContextCancelBeforeRegistrationCarriesEmptyBoundary"

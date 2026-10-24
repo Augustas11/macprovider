@@ -431,10 +431,16 @@ actor ConversationCache {
             recurrentCheckpoint: retainedCheckpoint, originalStoredAt: entry.storedAt)
     }
 
-    func commit(_ lease: ConversationCacheLease, cache: ConversationCacheLayers, fullTokens: [Int32], now: Date = Date(), cold: ConversationColdContext? = nil) async {
+    /// `isCancelled` is the request's own cancel signal (SPEC-001-R013): a request
+    /// cancelled before its entry is inserted publishes nothing. It is checked
+    /// with the purge fence, the second time with no suspension before insertion.
+    func commit(
+        _ lease: ConversationCacheLease, cache: ConversationCacheLayers, fullTokens: [Int32], now: Date = Date(),
+        cold: ConversationColdContext? = nil, isCancelled: @Sendable () -> Bool = { false }
+    ) async {
         // SPEC-037 FR-KVP8 — a `commit()` whose stamps predate a purge that landed
         // during the request reinserts nothing (neither RAM nor disk).
-        guard !Task.isCancelled, !isFenced(lease) else {
+        guard !Task.isCancelled, !isCancelled(), !isFenced(lease) else {
             log("event=conv_cache action=commit_fenced key_hash=\(lease.keyHash)")
             await cache.discardRetainedPagedKV(conversationKey: lease.key)
             releaseTurn(lease.key)
@@ -452,7 +458,7 @@ actor ConversationCache {
            old.kvCache.retainedPagedKVSequence?.handle != cache.retainedPagedKVSequence?.handle {
             await old.kvCache.discardRetainedPagedKV(conversationKey: lease.key)
         }
-        guard !Task.isCancelled, !isFenced(lease) else {
+        guard !Task.isCancelled, !isCancelled(), !isFenced(lease) else {
             log("event=conv_cache action=commit_fenced key_hash=\(lease.keyHash)")
             await cache.discardRetainedPagedKV(conversationKey: lease.key)
             releaseTurn(lease.key)

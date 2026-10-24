@@ -1449,7 +1449,9 @@ in-flight inference" in FR-26 includes prompt prefill. A provider MUST stop a
 request that is cancelled while it waits for its prompt's conversation key or
 prefills its prompt (a `cancel_request` for it, a local client disconnect or
 preemption, or a drain) before the next prefill chunk starts, on the serial and
-continuous-batching paths and for every model family:
+continuous-batching paths and for every model family whose prompt prefills in
+chunks. A prompt that a model prefills in one forward (an image prompt on a
+single-pass vision path) stops when that forward returns:
 
 - *Serial.* While the request prefills, a cancel cancels the task that runs
   it, and every chunked prefill loop the provider or the model runs (the
@@ -1470,7 +1472,9 @@ continuous-batching paths and for every model family:
   target by at most that one chunk's evaluation time.
 - *Cleanup.* The request's serving slot is released when it ends. A request
   cancelled during prefill MUST NOT commit a conversation-cache entry, a prompt
-  snapshot or a recurrent checkpoint; its lease is aborted.
+  snapshot or a recurrent checkpoint; its lease is aborted. A serial request
+  cancelled at any point before its entry is inserted publishes nothing; the
+  commit checks the request's cancel with no suspension before insertion.
 - *Drain.* A drain that coincides with a cancel ends the request as a drain.
 - *Terminal and settlement.* A request cancelled during prefill ends with the
   terminal a cancel before the first token already produced:
