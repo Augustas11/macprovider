@@ -19,6 +19,17 @@ final class GrammarConstraintTests: XCTestCase {
         Device.setDefault(device: Device(.cpu))
     }
 
+    private func requireMetal() throws {
+        // Under `swift test` Bundle.main is Xcode's xctest runner; MLX loads
+        // the metallib colocated with this test bundle's binary.
+        let tests = Bundle(for: Self.self)
+        guard PagedKVMetallibGate.defaultMetallibExists()
+            || PagedKVMetallibGate.defaultMetallibExists(bundleURL: tests.resourceURL, executableURL: tests.executableURL)
+        else {
+            throw XCTSkip("MLX default metallib is unavailable in this test host")
+        }
+    }
+
     func testVocabularyAdmissionBoundsEveryReachableMaskIncludingEOS() throws {
         // 250,000 mask entries at 32 bytes exactly fill the 8 MB budget.
         let tokens = Dictionary(uniqueKeysWithValues: (0..<250_000).map { ($0, [UInt8(97)]) })
@@ -31,6 +42,7 @@ final class GrammarConstraintTests: XCTestCase {
     }
 
     func testTokenizerDeadEndsAreRejectedBeforeSampling() throws {
+        try requireMetal()
         let whitespace = ByteGrammar.sequence([.zeroOrMore(.literal(" ")), .literal("ok")])
         XCTAssertThrowsError(try GrammarConstraintState(grammar: whitespace,
             tokens: [0: Array(" ".utf8), 1: Array("o".utf8)], eosTokenIDs: [2])) {
@@ -64,6 +76,7 @@ final class GrammarConstraintTests: XCTestCase {
     }
 
     func testSerialProcessorAndBatchCursorEnforceTheSameLanguage() throws {
+        try requireMetal()
         try Device.withDefaultDevice(.cpu) {
             let pieces: [Int: [UInt8]] = [0: Array("o".utf8), 1: Array("k".utf8), 2: Array("x".utf8), 3: []]
             let serial = try GrammarConstraintState(grammar: .literal("ok"), tokens: pieces, eosTokenIDs: [3])
@@ -86,6 +99,7 @@ final class GrammarConstraintTests: XCTestCase {
     }
 
     func testReasoningMayContinueUntilCloseButCrossingInvalidPrefixIsMasked() throws {
+        try requireMetal()
         try Device.withDefaultDevice(.cpu) {
             let pieces: [Int: [UInt8]] = [0: Array("thought".utf8), 1: Array("</thi".utf8),
                 2: Array("nk>o".utf8), 3: Array("k".utf8), 4: Array("nk>x".utf8), 5: [], 6: Array("o".utf8)]

@@ -8367,6 +8367,12 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         pagedCache: PagedKVCache,
         allocator: PagedKVBlockAllocator
     ) {
+        let tests = Bundle(for: Self.self)
+        guard PagedKVMetallibGate.defaultMetallibExists()
+            || PagedKVMetallibGate.defaultMetallibExists(bundleURL: tests.resourceURL, executableURL: tests.executableURL)
+        else {
+            throw XCTSkip("MLX default metallib is unavailable in this test host")
+        }
         let descriptor = Self.descriptor(blockSizeTokens: 4, maxPhysicalBlocks: 32)
         let retainedTokenCount = retainedTokenCount ?? cachedTokens
         let bridge = PagedKVRuntimeContiguousCacheBridge()
