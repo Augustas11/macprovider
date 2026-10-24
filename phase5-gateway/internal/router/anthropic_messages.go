@@ -252,6 +252,15 @@ func (a *anthropicMessagesAdapter) Write(p []byte) (int, error) {
 	}
 }
 
+// writeSSEComment writes an SSE comment (a keepalive) to a live stream.
+func (a *anthropicMessagesAdapter) writeSSEComment(p []byte) error {
+	if !a.stream || a.replayBody || a.status != http.StatusOK || a.streamDone {
+		return nil
+	}
+	a.writeBytes(p)
+	return a.writeErr
+}
+
 func (a *anthropicMessagesAdapter) Flush() {
 	if a.stream {
 		a.flush()
@@ -696,8 +705,10 @@ func anthropicValidateContentRaw(path string, raw json.RawMessage, role string) 
 				}
 			}
 		case "thinking", "redacted_thinking":
-			// Prior thinking blocks an SDK client echoes back are accepted
-			// and dropped: the chat template renders history without them.
+			// Prior thinking blocks an SDK client echoes back are accepted.
+			// `thinking` text becomes the assistant message's
+			// reasoning_content (SPEC-006-R025); `redacted_thinking` data and
+			// signatures are opaque and dropped.
 			if role != "assistant" {
 				return fmt.Errorf("%s.type %q is not supported", blockPath, typ)
 			}
@@ -840,6 +851,7 @@ func anthropicUserBlocksToChat(blocks []map[string]any) ([]map[string]any, error
 
 func anthropicAssistantBlocksToChat(blocks []map[string]any) ([]map[string]any, error) {
 	textParts := []string{}
+	thinkingParts := []string{}
 	toolCalls := []map[string]any{}
 	for i, block := range blocks {
 		typ, _ := block["type"].(string)
@@ -874,13 +886,20 @@ func anthropicAssistantBlocksToChat(blocks []map[string]any) ([]map[string]any, 
 					"arguments": string(args),
 				},
 			})
-		case "thinking", "redacted_thinking":
-			// Dropped: see anthropicValidateContentRaw.
+		case "thinking":
+			if s, _ := block["thinking"].(string); s != "" {
+				thinkingParts = append(thinkingParts, s)
+			}
+		case "redacted_thinking":
+			// Opaque: see anthropicValidateContentRaw.
 		default:
 			return nil, fmt.Errorf("content[%d].type %q is not supported", i, typ)
 		}
 	}
 	msg := map[string]any{"role": "assistant", "content": strings.Join(textParts, "")}
+	if len(thinkingParts) > 0 {
+		msg["reasoning_content"] = strings.Join(thinkingParts, "\n")
+	}
 	if len(toolCalls) > 0 {
 		if msg["content"] == "" {
 			msg["content"] = nil
