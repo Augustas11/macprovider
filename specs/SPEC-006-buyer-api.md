@@ -5138,8 +5138,9 @@ The gateway MUST bound every streaming chat completion with the §17.5.1
 ceiling. `timeouts.stream_ceiling_max_seconds` defaults to 3600 s; SPEC-002-R009
 keeps the coordinator walls at or above it. When the ceiling cuts a stream
 that is not structured output, the gateway MUST cancel the coordinator
-request, MUST drop a partial SSE frame the cut tore, and MUST write a
-standalone terminal envelope as the last data frame, followed by
+request, MUST drop a partial SSE line the cut tore, MUST close an SSE event
+whose blank-line separator had not arrived, and MUST write a standalone
+terminal envelope as the last event, followed by
 `data: [DONE]`:
 
 ```text

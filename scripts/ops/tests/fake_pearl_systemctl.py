@@ -20,8 +20,7 @@ pearl/coordinator.yaml and pearl/overlay.yaml, bin/fake-coordinator.
   "unreadable" journal line when the configured file does not load.
   _init                            create the first /proc entries
 A unit whose name contains "gateway" is the fake gateway instead: its own
-pid (svc/gw_mainpid), start time (svc/gw_started_at, after the last change to
-pearl/gateway.yaml), restart count (svc/gw_restarts) and /proc entry running
+pid (svc/gw_mainpid), start second (svc/gw_started_at), restart count (svc/gw_restarts) and /proc entry running
 --config pearl/gateway.yaml; svc/gw_restart_fail makes its restart fail,
 svc/gw_restart_fail_once the next one.
 Anything else exits 1. A file svc/restart_fail makes restart fail;
@@ -71,11 +70,7 @@ def mkgwproc(p):
     argv = [os.path.join(root, "bin", "fake-gateway"), "--config", os.path.join(pearl, "gateway.yaml")]
     open(os.path.join(d, "cmdline"), "wb").write(b"\0".join(a.encode() for a in argv) + b"\0")
     open(os.path.join(svc, "gw_mainpid"), "w").write(str(p))
-    started = int(time.time())
-    gw = os.path.join(pearl, "gateway.yaml")
-    if os.path.exists(gw):
-        started = max(started, int(os.stat(gw).st_ctime) + 1)
-    open(os.path.join(svc, "gw_started_at"), "w").write(str(started))
+    open(os.path.join(svc, "gw_started_at"), "w").write(str(int(time.time())))
 
 
 def digest(path):

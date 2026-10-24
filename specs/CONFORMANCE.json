@@ -14281,6 +14281,7 @@
       "tests": [
         "phase5-gateway/internal/router/request_deadlines_test.go:func TestStreamCeilingFiresOnEndlessStream",
         "phase5-gateway/internal/router/request_deadlines_test.go:func TestStreamCeilingDropsTornFrame",
+        "phase5-gateway/internal/router/request_deadlines_test.go:func TestStreamCeilingClosesAnOpenEvent",
         "phase5-gateway/internal/router/request_deadlines_test.go:func TestStreamCeilingAnthropicMessagesErrorEvent",
         "phase5-gateway/internal/router/request_deadlines_test.go:func TestStreamDeadlineHeaderOnlyOnPlainStreams",
         "phase5-gateway/internal/config/config_test.go:func TestValidateRejectsInconsistentPhaseDeadlines"

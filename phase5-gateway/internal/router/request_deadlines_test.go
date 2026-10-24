@@ -260,22 +260,35 @@ func TestStreamCeilingFiresOnEndlessStream(t *testing.T) {
 	}
 }
 
-// lastSSEDataFrameBeforeDone returns the last `data:` payload before
-// `data: [DONE]`, failing unless the stream ends with [DONE].
+// lastSSEDataFrameBeforeDone parses the body as SSE events (a blank line ends
+// an event; its data fields join with "\n", as a client sees them) and returns
+// the data of the event before `[DONE]`, failing unless the stream ends with
+// [DONE].
 func lastSSEDataFrameBeforeDone(t *testing.T, body string) string {
 	t.Helper()
-	var frames []string
+	var events []string
+	var data []string
 	for _, line := range strings.Split(body, "\n") {
-		if data, ok := strings.CutPrefix(line, "data: "); ok {
-			frames = append(frames, data)
-		} else if strings.TrimSpace(line) != "" {
-			t.Fatalf("stream line %q is not a data frame; body=%.600q", line, body)
+		if strings.TrimSpace(line) == "" {
+			if len(data) > 0 {
+				events = append(events, strings.Join(data, "\n"))
+				data = nil
+			}
+			continue
 		}
+		field, ok := strings.CutPrefix(line, "data: ")
+		if !ok {
+			t.Fatalf("stream line %q is not a data field; body=%.600q", line, body)
+		}
+		data = append(data, field)
 	}
-	if len(frames) < 2 || frames[len(frames)-1] != "[DONE]" {
-		t.Fatalf("stream does not end with a terminal frame and [DONE]; body=%.600q", body)
+	if len(data) > 0 {
+		events = append(events, strings.Join(data, "\n"))
 	}
-	return frames[len(frames)-2]
+	if len(events) < 2 || events[len(events)-1] != "[DONE]" {
+		t.Fatalf("stream does not end with a terminal event and [DONE]; body=%.600q", body)
+	}
+	return events[len(events)-2]
 }
 
 // TestStreamCeilingDropsTornFrame: the ceiling cancels the upstream mid-read.
@@ -309,6 +322,37 @@ func TestStreamCeilingDropsTornFrame(t *testing.T) {
 		t.Fatalf("terminal frame code=%q want %s; body=%q", code, requestTimeoutCode, body)
 	}
 	if outcome, _ := usageEventOutcome(t, dbPath, "acct_ceiling_torn"); outcome != "provider_timeout" {
+		t.Fatalf("usage outcome=%q want provider_timeout", outcome)
+	}
+}
+
+// TestStreamCeilingClosesAnOpenEvent: the ceiling fires after a complete data
+// line but before its blank separator. The terminal must not join that event.
+func TestStreamCeilingClosesAnOpenEvent(t *testing.T) {
+	client := seamStreamingUpstreamCtx(func(pw *io.PipeWriter, ctx context.Context) {
+		_, _ = pw.Write([]byte(`data: {"id":"c","choices":[{"delta":{"reasoning_content":"think"}}]}` + "\n\n"))
+		_, _ = pw.Write([]byte(`data: {"id":"c","choices":[{"delta":{"reasoning_content":"open"}}]}` + "\n"))
+		<-ctx.Done()
+		_ = pw.CloseWithError(ctx.Err())
+	})
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Timeouts.CoordinatorRequestSeconds = 1
+		cfg.Timeouts.StreamCeilingFloorSeconds = 1
+		cfg.Timeouts.StreamCeilingPerTokenMS = 1
+		cfg.Timeouts.StreamCeilingMaxSeconds = 1
+		cfg.Timeouts.StreamingIdleMS = 30000
+		cfg.Timeouts.FirstTokenSeconds = 300
+	}, WithHTTPClient(client))
+	key := createAccountAndKey(t, store, cfg, "acct_ceiling_open_event")
+
+	resp := postChat(t, h, key, `{"model":"llama","stream":true,"max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`, nil)
+	body := resp.Body.String()
+	terminal := lastSSEDataFrameBeforeDone(t, body)
+	if code := terminalSSEErrorCode(terminal); code != requestTimeoutCode {
+		t.Fatalf("terminal event code=%q want %s (it joined the open event?); body=%q", code, requestTimeoutCode, body)
+	}
+	if outcome, _ := usageEventOutcome(t, dbPath, "acct_ceiling_open_event"); outcome != "provider_timeout" {
 		t.Fatalf("usage outcome=%q want provider_timeout", outcome)
 	}
 }

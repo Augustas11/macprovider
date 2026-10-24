@@ -1550,11 +1550,19 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 	// stream_ceiling: a plain stream then ends in request_timeout (the
 	// provider did not stall), settled exactly like provider_timeout
 	// (SPEC-006 §17.7.1 named mapping).
+	// eventOpen is true while the last forwarded line was a field of an SSE
+	// event whose blank-line separator has not arrived yet. A gateway
+	// terminal written then would join that event, so it is closed first.
+	eventOpen := false
 	settleIdleTimeout := func(ceiling bool) {
 		cancelCoordinator()
 		if terminalStructuredErrorCode != "" {
 			refundTerminalStructuredError()
 			return
+		}
+		if eventOpen {
+			_, _ = w.Write([]byte("\n"))
+			eventOpen = false
 		}
 		switch {
 		case structuredStreaming:
@@ -1930,6 +1938,9 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		if len(line) > 0 {
 			if !forwardLine(line) {
 				return
+			}
+			if line[len(line)-1] == '\n' {
+				eventOpen = strings.TrimSpace(string(line)) != ""
 			}
 		}
 		if err == nil {

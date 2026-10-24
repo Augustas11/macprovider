@@ -971,7 +971,7 @@ gather_stream_ceiling() {
   fact pearl_coordinator_config_applied "$capplied"
   fact pearl_gateway_config_applied "$gapplied"
   step pearl_state "done" "coordinator walls $rt/$pht s, gateway ceiling $ceiling s, non-stream $non_stream s"
-  if [ -z "$planned" ] && [ -z "$violation" ] && [ "$capplied" = True ] && [ "$gapplied" = True ]; then
+  if [ -z "$planned" ] && [ -z "$violation" ] && [ "$capplied" = true ] && [ "$gapplied" = true ]; then
     step stream_ceiling "done" "coordinator walls $rt/$pht s cover the gateway ceiling $ceiling s; both services booted with them"
     set_next "done" "done" "the streaming walls are live: gateway ceiling $ceiling s, coordinator walls $rt/$pht s" ""
     return

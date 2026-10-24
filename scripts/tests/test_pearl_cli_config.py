@@ -591,6 +591,23 @@ class StreamCeilingApplyTest(unittest.TestCase):
                          (SC_BASE, SC_OVERLAY, SC_GATEWAY))
         self.assertEqual(self.events, ["systemctl restart coordinator.service", "systemctl restart gateway.service"])
 
+    def test_coordinator_recovery_failure_still_recovers_the_gateway(self):
+        with self.mock.patch.object(pcc, "restart", lambda a, pid: None), \
+                self.mock.patch.object(pcc, "sc_restart_gateway", self.mock.Mock(side_effect=pcc.Refused("gw boom"))), \
+                self.mock.patch.object(pcc, "recovery_restart", self.mock.Mock(side_effect=pcc.Refused("coord down"))):
+            with self.assertRaisesRegex(pcc.Refused, "recovery is UNPROVEN for coordinator: coord down"):
+                pcc.apply_stream_ceiling(self.args)
+        self.assertEqual(self.read("gateway"), SC_GATEWAY)
+        self.assertEqual(self.events, ["systemctl restart gateway.service"])
+
+    def test_gateway_restart_starts_after_the_config_second(self):
+        import time
+        os.utime(self.paths["gateway"])
+        with self.mock.patch.object(pcc, "sc_running_gateway", lambda a: "8"), \
+                self.mock.patch.object(pcc, "sc_gateway_applied", lambda a: True):
+            pcc.sc_restart_gateway(self.args, "7")
+        self.assertGreater(int(time.time()), int(os.stat(self.paths["gateway"]).st_ctime))
+
     def test_rejected_coordinator_config_changes_nothing(self):
         restart = self.mock.Mock()
         with self.mock.patch.object(pcc, "as_service", lambda *a: subprocess.CompletedProcess([], 1)), \

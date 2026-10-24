@@ -2203,6 +2203,89 @@ cp "$tmp/saved-healthz.json" "$tmp/svc/healthz.json"
 rm -f "$tmp/saved-healthz.json" "$tmp/svc/autotune-release.json" "$tmp/buc-committed.saved"
 printf '%s' "$BUC_MODELS" > "$tmp/svc/buc_models"
 
+# ==== streaming walls (PEARL_RUNTIME_TASK=stream-ceiling) =====================
+# Pearl's live coordinator.yaml and gateway.yaml keep the 900 s walls until this
+# task raises them (raise-only), restarts the coordinator, then the gateway.
+export PEARL_GATEWAY_CONFIG="$tmp/pearl/gateway.yaml" PEARL_GATEWAY_HEALTHZ_URL="http://127.0.0.1:$PORT/healthz"
+gw_restarts() { cat "$tmp/svc/gw_restarts" 2>/dev/null || echo 0; }
+sc_restarts() { echo "$(cat "$tmp/svc/restarts" 2>/dev/null || echo 0)/$(gw_restarts)"; }
+printf 'listen:\n  bind_address: 127.0.0.1\nrouting:\n  # twin wall\n  request_timeout_s: 900\nprovider_http:\n  timeout_s: 900\n' > "$tmp/pearl/coordinator.yaml"
+printf 'relay_blind:\n  enabled: true\n' > "$tmp/pearl/overlay.yaml"
+printf 'timeouts:\n  coordinator_request_seconds: 300\n  coordinator_header_timeout_seconds: 960\n  coordinator_admission_seconds: 120\n  stream_ceiling_max_seconds: 900\n  non_stream_request_seconds: 960\n  streaming_idle_ms: 10000\n' > "$tmp/pearl/gateway.yaml"
+systemctl restart macprovider-coordinator
+systemctl restart macprovider-gateway
+for f in coordinator.yaml overlay.yaml gateway.yaml; do cp "$tmp/pearl/$f" "$tmp/pearl/$f.before"; done
+sc_expect_done() {
+  if [ "$(next_field id):$(next_field kind)" = done:done ]; then ok; else
+    bad "stream-ceiling not done: planned=$(fact_of pearl_stream_ceiling_planned) c2=$(fact_of pearl_c2_violation) coordinator_applied=$(fact_of pearl_coordinator_config_applied) gateway_applied=$(fact_of pearl_gateway_config_applied)"
+  fi
+}
+sc_files_unchanged() {
+  local f
+  for f in coordinator.yaml overlay.yaml gateway.yaml; do cmp -s "$tmp/pearl/$f" "$tmp/pearl/$f.before" || return 1; done
+}
+rm -f "$tmp/svc/restarts" "$tmp/svc/gw_restarts"
+PEARL_SSH= PEARL_RUNTIME_TASK=stream-ceiling run_rc 0 "stream-ceiling status without ssh" scripts/ops/pearl-runtime.sh status
+expect_next pearl_state:blocked
+PEARL_RUNTIME_TASK=stream-ceiling run_rc 0 "stream-ceiling status" scripts/ops/pearl-runtime.sh status
+expect_next stream_ceiling:mutate
+case "$(next_field command)" in "scripts/ops/pearl-runtime.sh _stream-ceiling") ok ;; *) bad "stream-ceiling command: $(next_field command)" ;; esac
+case "$(next_field expected_downtime)" in "one coordinator restart"*"then one gateway restart"*) ok ;; *) bad "stream-ceiling downtime: $(next_field expected_downtime)" ;; esac
+case "$(next_field runbook)" in docs/runbooks/pearl-coordinator-rollout.md#streaming-walls-one-time) ok ;; *) bad "stream-ceiling runbook: $(next_field runbook)" ;; esac
+if grep -q '^## Streaming walls (one-time)$' "$SRC_REPO/docs/runbooks/pearl-coordinator-rollout.md"; then ok; else bad "the streaming walls runbook section does not exist"; fi
+if [ "$(fact_of pearl_coordinator_request_timeout_s)" = "900 (base)" ] && [ "$(fact_of pearl_gateway_stream_ceiling_max_seconds)" = 900 ]; then ok; else bad "stream-ceiling facts: $(fact_of pearl_coordinator_request_timeout_s) $(fact_of pearl_gateway_stream_ceiling_max_seconds)"; fi
+case "$(fact_of pearl_stream_ceiling_planned)" in *"routing.request_timeout_s 900->3600 (base)"*"timeouts.non_stream_request_seconds 960->3660"*"timeouts.stream_ceiling_max_seconds 900->3600"*) ok ;; *) bad "stream-ceiling plan: $(fact_of pearl_stream_ceiling_planned)" ;; esac
+run_rc 3 "_stream-ceiling refuses outside next --run" scripts/ops/pearl-runtime.sh _stream-ceiling
+PEARL_RUNTIME_TASK=stream-ceiling run_rc 3 "stream-ceiling needs an owner" scripts/ops/pearl-runtime.sh next --run
+PEARL_GATEWAY_HEALTHZ_URL="http://10.0.0.1:9443/healthz" PEARL_RUNTIME_TASK=stream-ceiling run_rc 3 "non-loopback gateway healthz refused" scripts/ops/pearl-runtime.sh status
+# The running coordinator rejects the edited config: nothing changes.
+printf '# INVALID marker the fake coordinator rejects\n' >> "$tmp/pearl/coordinator.yaml"
+cp "$tmp/pearl/coordinator.yaml" "$tmp/pearl/coordinator.yaml.before"
+PEARL_RUNTIME_TASK=stream-ceiling MACPROVIDER_OPS_OWNER=t run_rc 3 "stream-ceiling refused by --validate-config" scripts/ops/pearl-runtime.sh next --run
+expect_err "rejects the edited config"
+expect_lock_free
+if sc_files_unchanged && [ "$(sc_restarts)" = 0/0 ]; then ok; else bad "rejected stream-ceiling edit not left alone (restarts=$(sc_restarts))"; fi
+printf 'listen:\n  bind_address: 127.0.0.1\nrouting:\n  # twin wall\n  request_timeout_s: 900\nprovider_http:\n  timeout_s: 900\n' > "$tmp/pearl/coordinator.yaml"
+cp "$tmp/pearl/coordinator.yaml" "$tmp/pearl/coordinator.yaml.before"
+systemctl restart macprovider-coordinator
+rm -f "$tmp/svc/restarts"
+# The gateway restart fails: all three files are restored and both services
+# restart onto them.
+: > "$tmp/svc/gw_restart_fail_once"
+PEARL_RUNTIME_TASK=stream-ceiling MACPROVIDER_OPS_OWNER=t run_rc 3 "stream-ceiling rolled back when the gateway restart fails" scripts/ops/pearl-runtime.sh next --run
+expect_err "the original files are restored (bytes verified) and both services were restarted onto them"
+expect_lock_free
+if sc_files_unchanged && [ "$(sc_restarts)" = 2/1 ]; then ok; else bad "stream-ceiling rollback (restarts=$(sc_restarts))"; fi
+rm -f "$tmp/svc/restarts" "$tmp/svc/gw_restarts"
+PEARL_RUNTIME_TASK=stream-ceiling MACPROVIDER_OPS_OWNER=t run_rc 0 "stream-ceiling runs" scripts/ops/pearl-runtime.sh next --run
+expect_lock_free
+if grep -q "EXPECTED DOWNTIME for stream_ceiling: one coordinator restart" "$tmp/out"; then ok; else bad "stream-ceiling downtime not printed first"; fi
+if [ "$(sc_restarts)" = 1/1 ]; then ok; else bad "stream-ceiling restarts: $(sc_restarts)"; fi
+if python3 -c 'import sys,yaml
+c=yaml.safe_load(open(sys.argv[1])); g=yaml.safe_load(open(sys.argv[2]))["timeouts"]
+ok = c == {"listen": {"bind_address": "127.0.0.1"}, "routing": {"request_timeout_s": 3600}, "provider_http": {"timeout_s": 3600}} and \
+  g == {"coordinator_request_seconds": 300, "coordinator_header_timeout_seconds": 3660, "coordinator_admission_seconds": 120,
+        "stream_ceiling_max_seconds": 3600, "non_stream_request_seconds": 3660, "streaming_idle_ms": 10000}
+sys.exit(0 if ok else 1)' "$tmp/pearl/coordinator.yaml" "$tmp/pearl/gateway.yaml"; then ok; else bad "stream-ceiling edit: $(cat "$tmp/pearl/coordinator.yaml" "$tmp/pearl/gateway.yaml")"; fi
+if grep -q '  # twin wall' "$tmp/pearl/coordinator.yaml" && cmp -s "$tmp/pearl/overlay.yaml" "$tmp/pearl/overlay.yaml.before"; then ok; else bad "stream-ceiling touched more than the walls"; fi
+if find "$PEARL_BACKUP_ROOT" -path '*stream-ceiling*' -name gateway.yaml | grep -q .; then ok; else bad "no stream-ceiling backup"; fi
+PEARL_RUNTIME_TASK=stream-ceiling run_rc 0 "stream-ceiling status after the raise" scripts/ops/pearl-runtime.sh status
+sc_expect_done
+rm -f "$tmp/svc/restarts" "$tmp/svc/gw_restarts"
+PEARL_RUNTIME_TASK=stream-ceiling MACPROVIDER_OPS_OWNER=t run_rc 0 "stream-ceiling is a no-op once live" scripts/ops/pearl-runtime.sh next --run
+if [ "$(sc_restarts)" = 0/0 ]; then ok; else bad "live walls restarted again: $(sc_restarts)"; fi
+# gateway.yaml changed after the gateway started: one gateway restart, no edit.
+while [ "$(date +%s)" -le "$(cat "$tmp/svc/gw_started_at")" ]; do sleep 0.2; done
+printf '# edited after boot\n' >> "$tmp/pearl/gateway.yaml"
+PEARL_RUNTIME_TASK=stream-ceiling run_rc 0 "stream-ceiling gateway not booted" scripts/ops/pearl-runtime.sh status
+expect_next stream_ceiling:mutate
+PEARL_RUNTIME_TASK=stream-ceiling MACPROVIDER_OPS_OWNER=t run_rc 0 "stream-ceiling restarts the gateway onto its walls" scripts/ops/pearl-runtime.sh next --run
+if [ "$(sc_restarts)" = 0/1 ]; then ok; else bad "unapplied gateway restarts: $(sc_restarts)"; fi
+PEARL_RUNTIME_TASK=stream-ceiling run_rc 0 "stream-ceiling status after the gateway restart" scripts/ops/pearl-runtime.sh status
+sc_expect_done
+rm -f "$tmp/svc/restarts" "$tmp/svc/gw_restarts" "$tmp/pearl"/*.before
+unset PEARL_GATEWAY_CONFIG PEARL_GATEWAY_HEALTHZ_URL
+
 # ==== pearl-runtime updater-bundle ==============================================
 UBROOT="$tmp/ubroot"
 mkdir -p "$UBROOT"
@@ -2288,84 +2371,6 @@ ub 0 "updater-bundle status with a writer changed on origin/main" scripts/ops/pe
 expect_next bundle_source:blocked
 case "$(next_field reason)" in *"origin/main changes scripts/lib/coordinator_config_guard.py"*) ok ;; *) bad "drift reason: $(next_field reason)" ;; esac
 rm -f "$tmp/bin/flock"
-
-# ==== streaming walls (PEARL_RUNTIME_TASK=stream-ceiling) =====================
-# Pearl's live coordinator.yaml and gateway.yaml keep the 900 s walls until this
-# task raises them (raise-only), restarts the coordinator, then the gateway.
-export PEARL_GATEWAY_CONFIG="$tmp/pearl/gateway.yaml" PEARL_GATEWAY_HEALTHZ_URL="http://127.0.0.1:$PORT/healthz"
-gw_restarts() { cat "$tmp/svc/gw_restarts" 2>/dev/null || echo 0; }
-sc_restarts() { echo "$(cat "$tmp/svc/restarts" 2>/dev/null || echo 0)/$(gw_restarts)"; }
-printf 'listen:\n  bind_address: 127.0.0.1\nrouting:\n  # twin wall\n  request_timeout_s: 900\nprovider_http:\n  timeout_s: 900\n' > "$tmp/pearl/coordinator.yaml"
-printf 'relay_blind:\n  enabled: true\n' > "$tmp/pearl/overlay.yaml"
-printf 'timeouts:\n  coordinator_request_seconds: 300\n  coordinator_header_timeout_seconds: 960\n  coordinator_admission_seconds: 120\n  stream_ceiling_max_seconds: 900\n  non_stream_request_seconds: 960\n  streaming_idle_ms: 10000\n' > "$tmp/pearl/gateway.yaml"
-systemctl restart macprovider-coordinator
-systemctl restart macprovider-gateway
-for f in coordinator.yaml overlay.yaml gateway.yaml; do cp "$tmp/pearl/$f" "$tmp/pearl/$f.before"; done
-sc_files_unchanged() {
-  local f
-  for f in coordinator.yaml overlay.yaml gateway.yaml; do cmp -s "$tmp/pearl/$f" "$tmp/pearl/$f.before" || return 1; done
-}
-rm -f "$tmp/svc/restarts" "$tmp/svc/gw_restarts"
-PEARL_SSH= PEARL_RUNTIME_TASK=stream-ceiling run_rc 0 "stream-ceiling status without ssh" scripts/ops/pearl-runtime.sh status
-expect_next pearl_state:blocked
-PEARL_RUNTIME_TASK=stream-ceiling run_rc 0 "stream-ceiling status" scripts/ops/pearl-runtime.sh status
-expect_next stream_ceiling:mutate
-case "$(next_field command)" in "scripts/ops/pearl-runtime.sh _stream-ceiling") ok ;; *) bad "stream-ceiling command: $(next_field command)" ;; esac
-case "$(next_field expected_downtime)" in "one coordinator restart"*"then one gateway restart"*) ok ;; *) bad "stream-ceiling downtime: $(next_field expected_downtime)" ;; esac
-case "$(next_field runbook)" in docs/runbooks/pearl-coordinator-rollout.md#streaming-walls-one-time) ok ;; *) bad "stream-ceiling runbook: $(next_field runbook)" ;; esac
-if grep -q '^## Streaming walls (one-time)$' "$SRC_REPO/docs/runbooks/pearl-coordinator-rollout.md"; then ok; else bad "the streaming walls runbook section does not exist"; fi
-if [ "$(fact_of pearl_coordinator_request_timeout_s)" = "900 (base)" ] && [ "$(fact_of pearl_gateway_stream_ceiling_max_seconds)" = 900 ]; then ok; else bad "stream-ceiling facts: $(fact_of pearl_coordinator_request_timeout_s) $(fact_of pearl_gateway_stream_ceiling_max_seconds)"; fi
-case "$(fact_of pearl_stream_ceiling_planned)" in *"routing.request_timeout_s 900->3600 (base)"*"timeouts.non_stream_request_seconds 960->3660"*"timeouts.stream_ceiling_max_seconds 900->3600"*) ok ;; *) bad "stream-ceiling plan: $(fact_of pearl_stream_ceiling_planned)" ;; esac
-run_rc 3 "_stream-ceiling refuses outside next --run" scripts/ops/pearl-runtime.sh _stream-ceiling
-PEARL_RUNTIME_TASK=stream-ceiling run_rc 3 "stream-ceiling needs an owner" scripts/ops/pearl-runtime.sh next --run
-PEARL_GATEWAY_HEALTHZ_URL="http://10.0.0.1:9443/healthz" PEARL_RUNTIME_TASK=stream-ceiling run_rc 3 "non-loopback gateway healthz refused" scripts/ops/pearl-runtime.sh status
-# The running coordinator rejects the edited config: nothing changes.
-printf '# INVALID marker the fake coordinator rejects\n' >> "$tmp/pearl/coordinator.yaml"
-cp "$tmp/pearl/coordinator.yaml" "$tmp/pearl/coordinator.yaml.before"
-PEARL_RUNTIME_TASK=stream-ceiling MACPROVIDER_OPS_OWNER=t run_rc 3 "stream-ceiling refused by --validate-config" scripts/ops/pearl-runtime.sh next --run
-expect_err "rejects the edited config"
-expect_lock_free
-if sc_files_unchanged && [ "$(sc_restarts)" = 0/0 ]; then ok; else bad "rejected stream-ceiling edit not left alone (restarts=$(sc_restarts))"; fi
-printf 'listen:\n  bind_address: 127.0.0.1\nrouting:\n  # twin wall\n  request_timeout_s: 900\nprovider_http:\n  timeout_s: 900\n' > "$tmp/pearl/coordinator.yaml"
-cp "$tmp/pearl/coordinator.yaml" "$tmp/pearl/coordinator.yaml.before"
-systemctl restart macprovider-coordinator
-rm -f "$tmp/svc/restarts"
-# The gateway restart fails: all three files are restored and both services
-# restart onto them.
-: > "$tmp/svc/gw_restart_fail_once"
-PEARL_RUNTIME_TASK=stream-ceiling MACPROVIDER_OPS_OWNER=t run_rc 3 "stream-ceiling rolled back when the gateway restart fails" scripts/ops/pearl-runtime.sh next --run
-expect_err "the original files are restored (bytes verified) and both services were restarted onto them"
-expect_lock_free
-if sc_files_unchanged && [ "$(sc_restarts)" = 2/1 ]; then ok; else bad "stream-ceiling rollback (restarts=$(sc_restarts))"; fi
-rm -f "$tmp/svc/restarts" "$tmp/svc/gw_restarts"
-PEARL_RUNTIME_TASK=stream-ceiling MACPROVIDER_OPS_OWNER=t run_rc 0 "stream-ceiling runs" scripts/ops/pearl-runtime.sh next --run
-expect_lock_free
-if grep -q "EXPECTED DOWNTIME for stream_ceiling: one coordinator restart" "$tmp/out"; then ok; else bad "stream-ceiling downtime not printed first"; fi
-if [ "$(sc_restarts)" = 1/1 ]; then ok; else bad "stream-ceiling restarts: $(sc_restarts)"; fi
-if python3 -c 'import sys,yaml
-c=yaml.safe_load(open(sys.argv[1])); g=yaml.safe_load(open(sys.argv[2]))["timeouts"]
-ok = c == {"listen": {"bind_address": "127.0.0.1"}, "routing": {"request_timeout_s": 3600}, "provider_http": {"timeout_s": 3600}} and \
-  g == {"coordinator_request_seconds": 300, "coordinator_header_timeout_seconds": 3660, "coordinator_admission_seconds": 120,
-        "stream_ceiling_max_seconds": 3600, "non_stream_request_seconds": 3660, "streaming_idle_ms": 10000}
-sys.exit(0 if ok else 1)' "$tmp/pearl/coordinator.yaml" "$tmp/pearl/gateway.yaml"; then ok; else bad "stream-ceiling edit: $(cat "$tmp/pearl/coordinator.yaml" "$tmp/pearl/gateway.yaml")"; fi
-if grep -q '  # twin wall' "$tmp/pearl/coordinator.yaml" && cmp -s "$tmp/pearl/overlay.yaml" "$tmp/pearl/overlay.yaml.before"; then ok; else bad "stream-ceiling touched more than the walls"; fi
-if find "$PEARL_BACKUP_ROOT" -path '*stream-ceiling*' -name gateway.yaml | grep -q .; then ok; else bad "no stream-ceiling backup"; fi
-PEARL_RUNTIME_TASK=stream-ceiling run_rc 0 "stream-ceiling status after the raise" scripts/ops/pearl-runtime.sh status
-expect_next done:done
-rm -f "$tmp/svc/restarts" "$tmp/svc/gw_restarts"
-PEARL_RUNTIME_TASK=stream-ceiling MACPROVIDER_OPS_OWNER=t run_rc 0 "stream-ceiling is a no-op once live" scripts/ops/pearl-runtime.sh next --run
-if [ "$(sc_restarts)" = 0/0 ]; then ok; else bad "live walls restarted again: $(sc_restarts)"; fi
-# gateway.yaml changed after the gateway started: one gateway restart, no edit.
-while [ "$(date +%s)" -le "$(cat "$tmp/svc/gw_started_at")" ]; do sleep 0.2; done
-printf '# edited after boot\n' >> "$tmp/pearl/gateway.yaml"
-PEARL_RUNTIME_TASK=stream-ceiling run_rc 0 "stream-ceiling gateway not booted" scripts/ops/pearl-runtime.sh status
-expect_next stream_ceiling:mutate
-PEARL_RUNTIME_TASK=stream-ceiling MACPROVIDER_OPS_OWNER=t run_rc 0 "stream-ceiling restarts the gateway onto its walls" scripts/ops/pearl-runtime.sh next --run
-if [ "$(sc_restarts)" = 0/1 ]; then ok; else bad "unapplied gateway restarts: $(sc_restarts)"; fi
-PEARL_RUNTIME_TASK=stream-ceiling run_rc 0 "stream-ceiling status after the gateway restart" scripts/ops/pearl-runtime.sh status
-expect_next done:done
-rm -f "$tmp/svc/restarts" "$tmp/svc/gw_restarts" "$tmp/pearl"/*.before
-unset PEARL_GATEWAY_CONFIG PEARL_GATEWAY_HEALTHZ_URL
 
 printf 'entry points: %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

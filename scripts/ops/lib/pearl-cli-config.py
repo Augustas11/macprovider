@@ -1806,7 +1806,17 @@ def sc_facts(args):
     print(json.dumps(out, sort_keys=True))
 
 
+def sc_after_config_second(args):
+    """Block until the clock is past the second gateway.yaml last changed,
+    so the restarted process's start second (systemd reports whole seconds)
+    is strictly later than the write and sc_gateway_applied can prove it."""
+    changed = int(os.stat(args.gateway_config).st_ctime)
+    while int(time.time()) <= changed:
+        time.sleep(0.05)
+
+
 def sc_restart_gateway(args, old_pid):
+    sc_after_config_second(args)
     subprocess.run(["systemctl", "restart", args.gateway_unit], check=True, timeout=120, capture_output=True)
     healthz(args.gateway_healthz)
     if sc_running_gateway(args) == old_pid:
@@ -1844,16 +1854,28 @@ def sc_rollback(args, targets, backup, exc):
                       "coordinator.yaml, the overlay, gateway.yaml and both running services are UNPROVEN; compare "
                       "them with the backup in %s, then check both services and run status now"
                       % (failure(exc), failure(rexc), backup))
-    recovery_restart(args, "the original coordinator config is restored on disk (bytes verified)")
+    # Both services are recovered independently: a coordinator that fails
+    # its recovery must not leave the gateway on the raised ceiling.
+    failed = []
     try:
+        recovery_restart(args, "the original coordinator config is restored on disk (bytes verified)")
+    except Exception as cexc:
+        failed.append("coordinator: %s" % failure(cexc))
+    try:
+        sc_after_config_second(args)
         if subprocess.run(["systemctl", "restart", args.gateway_unit], timeout=120, capture_output=True).returncode != 0:
             raise Refused("systemctl restart failed")
         healthz(args.gateway_healthz)
+        if not sc_gateway_applied(args):
+            raise Refused("the gateway did not start after its restored config was written")
     except Exception as gexc:
-        raise Refused("the original files are restored (bytes verified) and the coordinator is back on them, but the "
-                      "gateway recovery restart failed (%s): check the gateway and run status now" % failure(gexc))
+        failed.append("gateway: %s" % failure(gexc))
+    if failed:
+        raise Refused("the stream-ceiling install or restart failed (%s); the original files are restored (bytes "
+                      "verified) but the recovery is UNPROVEN for %s: check both services and run status now"
+                      % (failure(exc), "; ".join(failed)))
     raise Refused("the stream-ceiling install or restart failed (%s); the original files are restored (bytes verified) "
-                  "and both services were restarted onto them (/healthz answered)" % failure(exc))
+                  "and both services were restarted onto them (/healthz answered, boot verified)" % failure(exc))
 
 
 def apply_stream_ceiling(args):
