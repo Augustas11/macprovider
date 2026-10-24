@@ -1,6 +1,6 @@
 # SPEC-018 — Agentic tool calling (provider-side response synthesis)
 
-**Version:** 0.3.5 (2026-10-24, bounded grammar masks; Related: #2107)
+**Version:** 0.3.6 (2026-10-24, bounded grammar masks; Related: #2107)
 **Depends on:** SPEC-001 v1.6, SPEC-002 v1.5.5, SPEC-006 v0.9, SPEC-008 (Pillar A model-hash trust layer — referenced by §10a), SPEC-011 v0.5 (warm-swap heartbeat `model_hash` — referenced by §10a), SPEC-015 v0.4 (receipts canonical output binding — see AC-17 and §N.5)
 **Status:** **LOCKED** at v0.2.10 by the streaming cleanup-rewrite byte-domain clarification. Previously LOCKED at v0.2.9 by the serial-turn `parallel_tool_calls` amendment (omitted/`false` stop after the first complete valid tool). Previously LOCKED at v0.2.8 by the #1594 OpenRouter-aligned AC-53 amendment (no independent messages[] count cap). Previously LOCKED at v0.2.7 by the Qwen3-Coder function-XML tool-call grammar amendment (documents the `<function=…><parameter=…>` XML body that Qwen3-Coder emits as a Qwen-row §3.1 body-grammar alternative, with OpenAI/MCP name charset; pending IMPL/conformance already landed on branch `fix/qwen3coder-toolcall-parse`); previously LOCKED at v0.2.6 by #784 C2b admission-timeout reconciliation — v0.2.4 spec PR #202 and IMPL PR #209 both landed (multi-turn acceptance, token-incremental streaming, `tool_call_id` validation, 1 MiB/2 MiB byte caps). v0.2.5 adds gpt-oss/OpenAI Harmony response parsing as a pending implementation/conformance gap. codex 4-lane r4 0/0/0; Claude blind-spot r2 0/0/0. SPEC-019 already depends on this as "LOCKED". The former "LOCK CANDIDATE pending PR" line was never flipped after merge. (Resolved gap, 2026-07-14, runbook item 15: AC-45's `X-MacProvider-Streaming-Mode` header — set by the coordinator on streaming `200` responses — was stripped by the public gateway's blanket `X-MacProvider-*` filter, making the "header absent" fail condition live on `api.malibu.tech`. Fixed by adding the header to the SPEC-006 v0.9.9 § 5.4 response-pass-through allowlist and un-stripping it at the gateway, validated against AC-45's closed enum. Chosen over scoping AC-45 to the coordinator surface because buyers hit the gateway, so scoping would have left AC-45's buyer-visible promise unmet. AC-45's normative text is unchanged; this is a documentation reconciliation, not a lock amendment. Residual: the coordinator currently emits the diagnostic only on the streaming success path — non-streaming AC-45 emission is a separate coordinator-side completeness item, out of scope for the gateway-strip fix.)
 
@@ -18,9 +18,17 @@ SPEC-018 is the **provider-side response synthesis contract** for OpenAI-wire to
 
 ## Change log
 
-- **v0.3.5 (2026-10-24, Related: #2107):** §3.11 defines bounded token-level
+- **v0.3.6 (2026-10-24, Related: #2107):** §3.11 defines bounded token-level
   grammar masks across native tool-template families, replacing profile-only
   admission while retaining output validation and capability evidence gates.
+
+- **v0.3.5 (2026-10-24, Related: #2107):** Lock amendment under §10c.1
+  (**Amendment 11**). §3.12's v0.3.0 effort pass-through is normalized for
+  GLM-5.3, gpt-oss and Qwen3.8: `none`/`minimal` render as `low`, their lowest
+  supported effort. GLM-5.3 otherwise silently turns these values into `max`,
+  exhausting short output budgets before an answer. Mitigation: only these
+  two inputs and known families change; other values, unknown families,
+  DeepSeek-V4 chat mode and the v0.3.2 structured-output override are unchanged.
 
 - **v0.3.4 (2026-10-23, DeepSeek-V4, Related: #2111, #2107):**
   Lock amendment under §10c.1 (**Amendment 10**). (1) §3.1 new row `dsml`
@@ -695,7 +703,7 @@ Normative rules:
 
 ### 3.11 Bounded tool-selection guarantees (v0.2.12)
 
-**AMENDED v0.3.5 (Related: #2107):** This amendment supersedes the
+**AMENDED v0.3.6 (Related: #2107):** This amendment supersedes the
 profile-only admission and prefill-only guarantee below. Native `mlx_cache`
 providers support `required` and named choice for every §3.1 template grammar,
 including DeepSeek V4 DSML. Model-family support is the admission fallback; the
@@ -973,9 +981,18 @@ the generated text up to the first `</think>` is reasoning:
   version.
 
 `reasoning_effort` (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`;
-anything else is 400) reaches the chat template as `reasoning_effort`. When a
-request declares tools and omits it, the provider passes `low`; otherwise the
-template default applies. Templates without the variable ignore it.
+anything else is 400) reaches the chat template as `reasoning_effort`.
+The v0.3.0 pass-through rule is **AMENDED v0.3.5 (Amendment 11)**: for the
+loaded GLM-5.3, gpt-oss and Qwen3.8 families, `none` and `minimal` MUST render
+as `low`, the lowest effort those templates support. GLM-5.3 accepts `low` and
+`high` (anything else renders `max`); gpt-oss supports `low`/`medium`/`high`;
+Qwen3.8 supports `low`/`medium`/`xhigh`. No other value is remapped, and an
+unknown family retains pass-through. The loaded model identity takes precedence
+over a buyer alias. DeepSeek-V4 retains its encoder mapping below, including
+`none` selecting chat mode. Qwen thinking-toggle families (including Qwen3.8),
+GLM-4.5, Nemotron-3 and Gemma-4 keep `enable_thinking: false`; templates that
+do not use `reasoning_effort` ignore it. When a request declares tools and
+omits effort, the provider passes `low`; otherwise the template default applies.
 v0.3.2: when the request carries `response_format` `json_object` or
 `json_schema`, the provider passes `low` whatever the buyer sent, and
 templates with `enable_thinking` render with it `false` (as for every
@@ -1401,6 +1418,11 @@ SPEC-018 v0.2 introduces and exercises a lock-amendment precedent: a previously 
 Silent scope cuts of locked invariants are NON-COMPLIANT. Future SPEC-018 versions invoking this precedent MUST satisfy (a)-(d) AND enumerate the amendment in this section's amendment log. Future SPEC versions invoking this precedent for OTHER v0.2 invariants MUST satisfy the same (a)-(d) rules and add an enumerated entry. AC numbers are stable across SPEC-018 versions; once an AC is assigned a number, that number is never reused or renumbered, even if the AC content is amended.
 
 Amendment log:
+- Amendment 11 (v0.3.5, Related: #2107): §3.12 v0.3.0 effort pass-through is
+  normalized only for `none`/`minimal` on GLM-5.3, gpt-oss and Qwen3.8. Rationale:
+  unsupported low-effort inputs must not silently request maximum reasoning.
+  Mitigation: `low` is the lowest supported level; other values, unknown
+  families, DeepSeek-V4 chat mode and the structured-output override are preserved.
 - Amendment 1 (v0.2.1): §10c v0.1.3-locked model-hash registry requirement → deferred to v0.3. Rationale: narrow v0.2 scope makes registry curation strategically premature. Mitigation: AC-46 model-hash observation channel + §8.4.2 final-close tightening.
 - Amendment 2 (v0.2.3): §3.9 v0.2.1-introduced minimal prompt-echo guard → DELETED. Rationale: minimal guard had three exploitable defects making it net-negative vs. no guard (whitespace bypass; scope incomplete; self-DoS via Cline reading SPEC-018.md). Residual risk: same-family echo attack remains unmitigated in v0.2. Mitigation: deferred to v0.3 full guard.
 - Amendment 3 (v0.2.8): AC-53 / §10d.1 v0.2.0-locked maximum `messages[]` length 256 → DELETED as an independent cap. Rationale: the count cap is not a model constraint and blocks legitimate coding-agent sessions (Pi/Cline 300+ messages); OpenRouter and OrcaRouter impose no message-count limit. Residual risk: large-but-under-body-cap arrays still cost validation CPU. Mitigation: AC-50 4 MiB raw-body cap (public gateway SPEC-006 default `request_body_bytes` may be stricter), AC-51/AC-52 aggregate byte caps, AC-54 tool-call count, AC-55 linear validation, and the served context window.
