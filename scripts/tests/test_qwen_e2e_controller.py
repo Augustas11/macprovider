@@ -264,7 +264,7 @@ sleep() {
 }
 """
         def run(setup):
-            result, _ = self.run_shell(["dsv4_window_hold", "dsv4_hold_marker_clear", "dsv4_hold_marker_create"], harness + setup + """
+            result, _ = self.run_shell(["dsv4_window_hold", "dsv4_hold_marker_clear", "dsv4_hold_marker_create", "dsv4_hold_marker_walk"], harness + setup + """
 dsv4_window_hold tx-1
 trace "end clock=$(cat "$OPS_TMP_DIR/clock") marker=$([ -e "$HOLD.holding" ] && echo yes || echo no) file=$([ -e "$HOLD" ] && echo yes || echo no)"
 cat "$TRACE"
@@ -318,16 +318,21 @@ HOLD="$REAL_TMP/a/b/hold"; DSV4_WINDOW_HOLD_FILE="$HOLD"; touch "$HOLD"
 ''')
         self.assertFalse([line for line in lines if line.startswith("sleep")])
         # Marker removal failing must never abort recovery.
-        result, _ = self.run_shell(["dsv4_hold_marker_clear"], '''DSV4_WINDOW_HOLD_FILE="$OPS_TMP_DIR/sub/hold"
-mkdir "$OPS_TMP_DIR/sub"; touch "$OPS_TMP_DIR/sub/hold.holding"; chmod 500 "$OPS_TMP_DIR/sub"
-DSV4_HOLD_MARKER="$DSV4_WINDOW_HOLD_FILE.holding"
-dsv4_hold_marker_clear; echo survived; chmod 700 "$OPS_TMP_DIR/sub"
+        result, _ = self.run_shell(["dsv4_hold_marker_clear", "dsv4_hold_marker_walk"], '''R="$(cd -P "$OPS_TMP_DIR" && pwd -P)"; DSV4_WINDOW_HOLD_FILE="$R/sub/hold"
+mkdir "$R/sub"; touch "$R/sub/hold.holding"; chmod 500 "$R/sub"
+dsv4_hold_marker_clear; echo survived; chmod 700 "$R/sub"
 ''')
         self.assertEqual(result.stdout.strip(), "survived", result.stderr)
+        # Cleanup never follows an intermediate symlink to delete elsewhere.
+        result, _ = self.run_shell(["dsv4_hold_marker_clear", "dsv4_hold_marker_walk"], '''R="$(cd -P "$OPS_TMP_DIR" && pwd -P)"
+mkdir "$R/real"; ln -s "$R/real" "$R/link"; touch "$R/real/hold.holding"
+DSV4_WINDOW_HOLD_FILE="$R/link/hold"
+dsv4_hold_marker_clear; [ -e "$R/real/hold.holding" ] && echo kept
+''')
+        self.assertEqual(result.stdout.strip(), "kept", result.stderr)
         # The interrupt cleanup removes the readiness marker.
-        result, _ = self.run_shell(["dsv4_hold_marker_clear"], '''DSV4_WINDOW_HOLD_FILE="$OPS_TMP_DIR/hold"
+        result, _ = self.run_shell(["dsv4_hold_marker_clear", "dsv4_hold_marker_walk"], '''R="$(cd -P "$OPS_TMP_DIR" && pwd -P)"; DSV4_WINDOW_HOLD_FILE="$R/hold"
 touch "$DSV4_WINDOW_HOLD_FILE.holding"
-DSV4_HOLD_MARKER="$DSV4_WINDOW_HOLD_FILE.holding"
 dsv4_hold_marker_clear
 [ ! -e "$DSV4_WINDOW_HOLD_FILE.holding" ] && echo cleared
 ''')

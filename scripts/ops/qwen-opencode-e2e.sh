@@ -1397,24 +1397,24 @@ PY
 # dsv4_window_hold TXID: while DSV4_WINDOW_HOLD_FILE exists, keep DeepSeek
 # serving for a separate client, bounded by DSV4_WINDOW_HOLD_MAX_MINUTES. The
 # EXIT trap still restores GLM if the window is interrupted during the hold,
-# and removes the readiness marker first (DSV4_HOLD_MARKER).
+# and removes the readiness marker first.
 # The ceiling is enforced twice: by wall clock and by a count of 5 s sleeps, so
 # a backwards clock step cannot extend the hold past the cap.
-DSV4_HOLD_MARKER=""
 dsv4_hold_marker_clear() {
   # Best effort: a marker that cannot be removed must never block GLM recovery.
-  [ -z "${DSV4_HOLD_MARKER:-}" ] || rm -f "$DSV4_HOLD_MARKER" 2>/dev/null || true
-  case "${DSV4_WINDOW_HOLD_FILE:-}" in /*) rm -f "$DSV4_WINDOW_HOLD_FILE.holding" 2>/dev/null || true ;; esac
-  DSV4_HOLD_MARKER=""
+  # Unlink through the same trusted O_NOFOLLOW directory walk as creation.
+  case "${DSV4_WINDOW_HOLD_FILE:-}" in
+    /*) dsv4_hold_marker_walk clear "$DSV4_WINDOW_HOLD_FILE" "" || true ;;
+  esac
 }
-# dsv4_hold_marker_create FILE TXID: walk FILE's directories from / with
+# dsv4_hold_marker_walk create|clear FILE TXID: walk FILE's directories from / with
 # O_NOFOLLOW, requiring each to be owned by this user or root with no group or
 # other write, then create FILE.holding relative to the pinned directory with
 # O_CREAT|O_EXCL|O_NOFOLLOW|O_NONBLOCK (never follows or opens an existing entry).
-dsv4_hold_marker_create() {
+dsv4_hold_marker_walk() {
   python3 -I -c '
 import os, stat, sys
-path, txid = sys.argv[1], sys.argv[2]
+mode, path, txid = sys.argv[1], sys.argv[2], sys.argv[3]
 parts = [p for p in path.split("/")[:-1] if p]
 fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
 for name in parts + [None]:
@@ -1424,10 +1424,17 @@ for name in parts + [None]:
     if name is None:
         break
     fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+if mode == "clear":
+    try:
+        os.unlink(os.path.basename(path) + ".holding", dir_fd=fd)
+    except FileNotFoundError:
+        pass
+    sys.exit(0)
 mfd = os.open(os.path.basename(path) + ".holding", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=fd)
 os.write(mfd, (txid + "\n").encode())
-' "$1" "$2" 2>/dev/null
+' "$1" "$2" "$3" 2>/dev/null
 }
+dsv4_hold_marker_create() { dsv4_hold_marker_walk create "$1" "$2"; }
 dsv4_window_hold() {
   local file="${DSV4_WINDOW_HOLD_FILE:-}" max="${DSV4_WINDOW_HOLD_MAX_MINUTES:-30}" start now logged=-1 minute ticks=0
   [ -n "$file" ] || return 0
@@ -1447,7 +1454,6 @@ dsv4_window_hold() {
     log "hold directory chain must be real, operator or root owned, without group or other write, and the marker must not pre-exist; no hold"
     return 0
   }
-  DSV4_HOLD_MARKER="$file.holding"
   start="$(date +%s)"
   while [ -e "$file" ]; do
     now="$(date +%s)"
