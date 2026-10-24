@@ -15,6 +15,23 @@ final class GrammarTemplatesTests: XCTestCase {
         return dfa.accepting(state: state)
     }
 
+    func testAdvisorySchemaHintsCannotRejectNonStrictPreparation() throws {
+        let schemas = [
+            #"{"type":"object","properties":{"optional":{"type":"integer","enum":["text"]}}}"#,
+            #"{"type":"object","required":[3]}"#,
+            #"{"type":"object","required":["missing"],"additionalProperties":false}"#
+        ]
+        for schema in schemas {
+            let raw = "{\"model\":\"test\",\"messages\":[{\"role\":\"user\",\"content\":\"test\"}],\"response_format\":{\"type\":\"json_schema\",\"json_schema\":{\"name\":\"result\",\"strict\":false,\"schema\":" + schema + "}}}"
+            let request = try ChatCompletionRequest.parse(data: Data(raw.utf8))
+            let language = try XCTUnwrap(GrammarTemplates.grammar(for: request, traits: .unresolved))
+            let dfa = try language.compile()
+            for json in ["{}", "true", "[1]"] {
+                XCTAssertTrue(dfa.accepting(state: try XCTUnwrap(dfa.transition(state: 0, bytes: Array(json.utf8)))))
+            }
+        }
+    }
+
     func testSchemaValuesAreGeneratedAndTyped() throws {
         let grammar = GrammarTemplates.schema(parameters)
         XCTAssertTrue(try accepts(grammar, #"{"city":"Paris","count":2}"#))

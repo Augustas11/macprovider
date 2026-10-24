@@ -107,6 +107,22 @@ final class GrammarTemplatesParserTests: XCTestCase {
                 } else {
                     parsedCalls = ToolCallParser.parseToolCalls(rawOutput: call, grammar: family, modelID: "test", allowedFunctionNames: ["f", "g"], schemas: ["f": schema, "g": schema]).toolCalls
                 }
+                if family != .harmony {
+                    request.outputState.resolve(RequestOutputTraits(toolGrammar: family))
+                    let finalized = try ModelRuntime.parseGeneratedOutput(
+                        filteredText: call, generatedTokenIDs: [], decode: { _ in "" }, request: request,
+                        mode: .complete(), defaultCompletionTokens: 9, toolCallPrefill: nil)
+                    XCTAssertEqual(finalized.toolCalls.count, 1, "finalization \(family) named=\(named)")
+                    XCTAssertEqual(finalized.toolCalls.first?.functionName, "f")
+                    XCTAssertEqual(finalized.content, "")
+                    // Finalization independently rejects bytes outside the
+                    // complete native envelope and a second generated call.
+                    if family != .qwen {
+                        XCTAssertThrowsError(try ModelRuntime.parseGeneratedOutput(
+                            filteredText: call + call, generatedTokenIDs: [], decode: { _ in "" }, request: request,
+                            mode: .complete(), defaultCompletionTokens: 9, toolCallPrefill: nil))
+                    }
+                }
                 XCTAssertEqual(parsedCalls.count, 1)
                 let parsedCall = try XCTUnwrap(parsedCalls.first, family.rawValue)
                 XCTAssertEqual(parsedCall.functionName, "f")

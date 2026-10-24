@@ -2,6 +2,18 @@ import XCTest
 @testable import MacProviderCore
 
 final class GrammarTokenTableTests: XCTestCase {
+    func testTokenReachabilityIsBoundedAndPrunesDeadPrefixes() throws {
+        let dfa = try ByteGrammar.choice([.literal("ab"), .literal("cd")]).compile()
+        let table = try GrammarTokenTable(tokens: [0: [97], 1: [99], 2: [100]], eosTokenIDs: [3])
+        let productive = try table.productiveStates(automaton: dfa)
+        XCTAssertTrue(productive.contains(0))
+        XCTAssertFalse(productive.contains(try XCTUnwrap(dfa.transition(state: 0, bytes: [97]))))
+        XCTAssertTrue(productive.contains(try XCTUnwrap(dfa.transition(state: 0, bytes: [99]))))
+        XCTAssertThrowsError(try table.productiveStates(automaton: dfa, maxWork: 1))
+        let complete = try GrammarTokenTable(tokens: Dictionary(uniqueKeysWithValues: (0..<256).map { ($0, [UInt8($0)]) }), eosTokenIDs: [256])
+        XCTAssertTrue(try complete.productiveStates(automaton: dfa).contains(0))
+    }
+
     func testPiecesMaySplitUTF8AndEOSRequiresAcceptance() throws {
         let dfa = try ByteGrammar.literal("é").compile()
         let table = try GrammarTokenTable(tokens: [0: [0xc3], 1: [0xa9], 2: [0xc3, 0xa9],

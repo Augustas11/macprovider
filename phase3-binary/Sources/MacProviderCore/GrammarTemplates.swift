@@ -7,6 +7,11 @@ public enum GrammarTemplates {
         let family = traits.toolGrammar ?? ToolCallGrammar.family(modelID: request.model)
         switch request.responseFormat {
         case .jsonSchema(let spec):
+            if !spec.strict {
+                // Advisory schemas cannot narrow admission. Use generic JSON
+                // rather than fail preparation on an incompatible schema hint.
+                return structured(generic(depth: 1), family: family)
+            }
             try validateRequiredProperties(spec.schema)
             return structured(schema(spec.schema), family: family)
         case .jsonObject:

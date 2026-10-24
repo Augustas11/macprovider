@@ -22,6 +22,7 @@ final class GrammarConstraintState: @unchecked Sendable, Equatable {
     private final class Compiled: @unchecked Sendable {
         let automaton: GrammarAutomaton
         let table: GrammarTokenTable
+        let productiveStates: Set<Int>
         let tokens: [Int: [UInt8]]
         let eos: Set<Int>
         let fingerprint: String
@@ -32,6 +33,7 @@ final class GrammarConstraintState: @unchecked Sendable, Equatable {
         init(grammar: ByteGrammar, tokens: [Int: [UInt8]], eos: Set<Int>) throws {
             automaton = try grammar.compile()
             table = try GrammarTokenTable(tokens: tokens, eosTokenIDs: eos)
+            productiveStates = try table.productiveStates(automaton: automaton)
             self.tokens = tokens
             self.eos = eos
             var hash = SHA256()
@@ -61,7 +63,7 @@ final class GrammarConstraintState: @unchecked Sendable, Equatable {
             lock.lock()
             defer { lock.unlock() }
             if let mask = masks[state] { return mask }
-            let mask = try table.allowedTokens(state: state, automaton: automaton)
+            let mask = try table.allowedTokens(state: state, automaton: automaton).filter { productiveStates.contains($0.value) }
             guard !mask.isEmpty else { throw Self.error("Tokenizer cannot continue this output grammar") }
             // Evict derived masks rather than rejecting a valid long request.
             let cost = mask.count * 32
@@ -207,13 +209,17 @@ final class GrammarConstraintState: @unchecked Sendable, Equatable {
 
     private func next(_ bytes: [UInt8]) -> (state: Int, reasoning: Bool, tail: [UInt8])? {
         guard reasoning else {
-            return compiled.automaton.transition(state: state, bytes: bytes).map { ($0, false, []) }
+            return compiled.automaton.transition(state: state, bytes: bytes).flatMap {
+                compiled.productiveStates.contains($0) ? ($0, false, []) : nil
+            }
         }
         let combined = reasoningTail + bytes
         if combined.count >= close.count {
             for index in 0...(combined.count - close.count) where Array(combined[index..<index + close.count]) == close {
                 let suffix = Array(combined.dropFirst(index + close.count))
-                return compiled.automaton.transition(state: state, bytes: suffix).map { ($0, false, []) }
+                return compiled.automaton.transition(state: state, bytes: suffix).flatMap {
+                    compiled.productiveStates.contains($0) ? ($0, false, []) : nil
+                }
             }
         }
         return (state, true, Array(combined.suffix(close.count - 1)))

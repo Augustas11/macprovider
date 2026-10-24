@@ -19,6 +19,24 @@ final class GrammarConstraintTests: XCTestCase {
         Device.setDefault(device: Device(.cpu))
     }
 
+    func testTokenizerDeadEndsAreRejectedBeforeSampling() throws {
+        let whitespace = ByteGrammar.sequence([.zeroOrMore(.literal(" ")), .literal("ok")])
+        XCTAssertThrowsError(try GrammarConstraintState(grammar: whitespace,
+            tokens: [0: Array(" ".utf8), 1: Array("o".utf8)], eosTokenIDs: [2])) {
+            XCTAssertEqual(($0 as? APIError)?.status, 400)
+            XCTAssertEqual(($0 as? APIError)?.code, "unsupported_output_grammar")
+        }
+        let state = try GrammarConstraintState(grammar: .choice([.literal("ab"), .literal("cd")]),
+            tokens: [0: Array("a".utf8), 1: Array("c".utf8), 2: Array("d".utf8)], eosTokenIDs: [3])
+        let mask = state.mask(logits: MLXArray([Float](repeating: 0, count: 4))).asArray(Float.self)
+        XCTAssertEqual(mask[0], -.infinity, "A byte-legal prefix cannot select a token dead end")
+        XCTAssertEqual(mask[1], 0)
+        state.didSample(token: 1)
+        state.didSample(token: 2)
+        state.didSample(token: 3)
+        try state.validate()
+    }
+
     func testSerialProcessorAndBatchCursorEnforceTheSameLanguage() throws {
         try Device.withDefaultDevice(.cpu) {
             let pieces: [Int: [UInt8]] = [0: Array("o".utf8), 1: Array("k".utf8), 2: Array("x".utf8), 3: []]

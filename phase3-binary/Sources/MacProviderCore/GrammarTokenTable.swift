@@ -31,6 +31,39 @@ public struct GrammarTokenTable: Sendable {
         }
         self.tokens = tokens; self.eosTokenIDs = eosTokenIDs; self.limits = limits
     }
+    /// Prove token-level completion before inference, and identify states
+    /// whose outgoing token transitions must be excluded. Ordinary byte-level
+    /// vocabularies carry every byte, so byte productivity already proves this.
+    public func productiveStates(automaton: GrammarAutomaton, maxWork: Int = 8_000_000) throws -> Set<Int> {
+        guard maxWork > 0 else { throw unsupportedGrammar("Invalid tokenizer reachability budget") }
+        let singleBytes = Set(tokens.compactMap { id, bytes in
+            !eosTokenIDs.contains(id) && bytes.count == 1 ? bytes[0] : nil
+        })
+        if singleBytes.count == 256 { return Set(0..<automaton.stateCount) }
+        // Sparse/fixture tokenizers need the exact token graph. Bound total
+        // scan work across every state, not just each individual mask.
+        let scanCost = tokens.values.reduce(0) { $0 + max(1, $1.count) } + eosTokenIDs.count
+        guard scanCost <= maxWork / max(1, automaton.stateCount) else {
+            throw unsupportedGrammar("Tokenizer reachability budget exceeded")
+        }
+        var reverse = [[Int]](repeating: [], count: automaton.stateCount)
+        var productive: Set<Int> = []
+        for source in 0..<automaton.stateCount {
+            if automaton.accepting(state: source) { productive.insert(source) }
+            for target in Set(try allowedTokens(state: source, automaton: automaton).values) {
+                reverse[target].append(source)
+            }
+        }
+        var pending = Array(productive)
+        while let target = pending.popLast() {
+            for source in reverse[target] where productive.insert(source).inserted { pending.append(source) }
+        }
+        guard productive.contains(automaton.initialState) else {
+            throw unsupportedGrammar("Tokenizer cannot complete this output grammar")
+        }
+        return productive
+    }
+
     /// EOS preserves an accepting state, or consumes an exact terminal wrapper
     /// whose bytes finish the grammar. Premature EOS remains masked.
     public func allowedTokens(state: Int, automaton: GrammarAutomaton) throws -> [Int: Int] {

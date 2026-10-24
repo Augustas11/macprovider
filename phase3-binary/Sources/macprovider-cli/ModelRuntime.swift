@@ -13113,11 +13113,24 @@ maxTokens: maxTokens,
         toolCallPrefill: String?
     ) throws -> (content: String, toolCalls: [ToolCall]) {
         if try ToolSelectionPolicy.selection(request.promptSource.toolChoice).requiresCall {
-            // The prompt ended inside the call: parse prefill + continuation.
-            // Without calls the turn fails validation; the content is only the
-            // generated text, never the prefill.
+            let grammar = toolGrammar(for: request)
+            let raw = (toolCallPrefill ?? "") + text
+            // Non-Qwen guaranteed output must match the whole generated
+            // envelope, before main's native parser interprets its values.
+            // Auto-mode recovery (prose, missing closes, duplicate drop) never
+            // supplies the guaranteed-mode framing/cardinality contract.
+            if grammar != .qwen {
+                guard let language = try GrammarTemplates.grammar(for: request, traits: request.outputTraits) else {
+                    throw ToolSelectionPolicy.outputError("Unsupported tool output grammar")
+                }
+                let automaton = try language.compile()
+                guard let terminal = automaton.transition(state: 0, bytes: Array(raw.trimmingCharacters(in: .whitespacesAndNewlines).utf8)),
+                      automaton.accepting(state: terminal) else {
+                    throw ToolSelectionPolicy.outputError("Tool output requires a complete native envelope")
+                }
+            }
             let calls = try ToolCallParser.parseGuaranteedToolCalls(
-                (toolCallPrefill ?? "") + text, schemas: try ToolSelectionPolicy.schemas(request)
+                raw, grammar: grammar, modelID: request.model, schemas: try ToolSelectionPolicy.schemas(request)
             )
             return (calls.isEmpty ? text : "", calls)
         }
@@ -14287,10 +14300,6 @@ struct NativeToolCallStreamEmitter {
             startDelimiter = "<|python_tag|>"
             endDelimiter = "<|eom_id|>"
             argumentKey = "parameters"
-        case .deepseekV4?:
-            startDelimiter = "<｜DSML｜tool_calls>"
-            endDelimiter = "</｜DSML｜tool_calls>"
-            argumentKey = "arguments"
         case .gemma4?:
             startDelimiter = "<|tool_call>"
             endDelimiter = "<tool_call|>"
