@@ -274,15 +274,15 @@ final class ModelRuntimeToolSelectionTests: XCTestCase {
         }
     }
 
-    /// A pool alias is never a catalog identity: it neither qualifies a local
-    /// model nor disqualifies a configured allowlisted one.
+    /// A pool alias neither grants a missing grammar nor removes a loaded
+    /// model's supported grammar.
     func testPoolAliasNeitherGrantsNorRemovesGuaranteedModes() async throws {
         let pool = "pool/abcdefghijklmnopqrstuv/qwen"
         let canonical = runtime(catalogModelIDAlias: pool)
         let handle = try await canonical.acquireRequestHandle(try request())
         await canonical.unregisterInFlight(handle.registrationID)
-        let local = runtime(modelID: "qwen/qwen3.6-35b-a3b", catalogModelIDAlias: pool)
-        for model in ["qwen/qwen3.6-35b-a3b", pool] {
+        let local = runtime(modelID: "local/unknown-grammar", catalogModelIDAlias: pool)
+        for model in ["local/unknown-grammar", pool] {
             do {
                 _ = try await local.acquireRequestHandle(try request(model: model))
                 XCTFail("pool alias qualified a local model")

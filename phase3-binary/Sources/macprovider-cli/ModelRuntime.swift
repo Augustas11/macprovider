@@ -374,6 +374,7 @@ struct ContinuousBatchPreparedRequest: Sendable {
     let modelHasRecurrentLayers: Bool
     /// SPEC-018 §3.11 call prefill ending `promptTokens`, if any.
     let toolCallPrefill: String?
+    var grammarConstraint: GrammarConstraintState? = nil
 }
 
 /// Serializes text prompt preparation for one admitted Qwen target snapshot.
@@ -455,7 +456,8 @@ actor ContinuousBatchTextPreparationLane {
                         tokenizer: tokenizer
                     ),
                     modelHasRecurrentLayers: hybrid,
-                    toolCallPrefill: toolCallPrefill
+                    toolCallPrefill: toolCallPrefill,
+                    grammarConstraint: try GrammarConstraintState.prepare(request: request, tokenizer: tokenizer, configuration: configuration, eosTokenIDs: modelStopTokenIDs)
                 ),
                 ModelRuntime.StreamingDetokenizer(tokenizer: tokenizer)
             )
@@ -1541,7 +1543,8 @@ actor ModelRuntime: ModelRuntimeServing {
         draftLoaded: Bool,
         numDraftTokens: Int?
     ) -> SpeculativeRoute {
-        guard !HarmonyResponseParser.isHarmonyModelID(request.model),
+        guard !GrammarConstraintState.isRequired(request),
+              !HarmonyResponseParser.isHarmonyModelID(request.model),
               !request.containsNonTextMessageContentPart,
               request.allowsSpeculativeDecoding,
               // The speculative collectors do not split reasoning (§3.12).
@@ -6835,6 +6838,9 @@ maxTokens: 1,
                         nativeVisionProfile: handle.snapshot.nativeVisionProfile,
                         toolSelectionModelID: selectionModelID
                     )
+                    _ = try GrammarConstraintState.prepare(
+                        request: request, tokenizer: context.tokenizer, configuration: context.configuration,
+                        eosTokenIDs: Self.generationStopTokenIDs(for: context))
                     let count = prepared.text.tokens.size
                     try Self.validatePromptTokenCount(count, maxContextTokens: maxContextTokens)
                     return count
@@ -6942,7 +6948,8 @@ maxTokens: 1,
                         context: context
                     ),
                     modelHasRecurrentLayers: hybrid,
-                    toolCallPrefill: toolCallPrefill
+                    toolCallPrefill: toolCallPrefill,
+                    grammarConstraint: try GrammarConstraintState.prepare(request: request, tokenizer: tokenizer, configuration: context.configuration, eosTokenIDs: Self.generationStopTokenIDs(for: context))
                 ),
                 StreamingDetokenizer(tokenizer: tokenizer)
             )
@@ -7940,6 +7947,7 @@ maxTokens: 1,
             modelHasRecurrentLayers: prepared.modelHasRecurrentLayers,
             retainedRecurrentCheckpoints: Self.retainedRecurrentCheckpoints(for: lease),
             serialToolStopObserver: serialToolStop,
+            grammarConstraint: prepared.grammarConstraint,
             nativeMTPAdmission: nativeMTPAdmission
         )
         let result: ContinuousBatchSchedulerResult
@@ -7968,6 +7976,7 @@ maxTokens: 1,
                 throw Self.terminalFailureError(code: result.errorCode ?? "continuous_batching_request_failed")
             }
             let completionEndedAt = Date()
+            try prepared.grammarConstraint?.validate()
             let finalized = try await container.perform { context in
                 try Self.finalizeContinuousBatchRow(
                     request: request,
@@ -8376,6 +8385,7 @@ maxTokens: 1,
             modelHasRecurrentLayers: prepared.modelHasRecurrentLayers,
             retainedRecurrentCheckpoints: Self.retainedRecurrentCheckpoints(for: lease),
             serialToolStopObserver: serialToolStop,
+            grammarConstraint: prepared.grammarConstraint,
             nativeMTPAdmission: nativeMTPAdmission
         )
         let result: ContinuousBatchSchedulerResult
@@ -8433,6 +8443,7 @@ maxTokens: 1,
                 )
             }
             let completionEndedAt = Date()
+            try prepared.grammarConstraint?.validate()
             let finalized = try await container.perform { context in
                 try Self.finalizeContinuousBatchRow(
                     request: request,
@@ -8885,6 +8896,9 @@ maxTokens: boundedMaxTokens,
                         nativeVisionProfile: snapshot.nativeVisionProfile,
                         toolSelectionModelID: selectionModelID
                     )
+                    let grammarConstraint = try GrammarConstraintState.prepare(
+                        request: request, tokenizer: context.tokenizer, configuration: context.configuration,
+                        eosTokenIDs: Self.generationStopTokenIDs(for: context))
                     // Cancelled during preparation (client gone, or local
                     // work preempted under SPEC-001-R011): release the gate.
                     try Task.checkCancellation()
@@ -9039,7 +9053,9 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                 completePromptTokenIDs: parameters.repetitionPenalty == nil ? [] : promptTokenIds.map(Int.init))
                             let iterator = try TokenIterator(
                                 input: iteratorInput, model: generationContext.model, cache: kvCache,
-                                parameters: generation.parameters, components: generation.components)
+                                parameters: generation.parameters, components: grammarConstraint.map { constraint in
+                                    generation.components.appendingLogitProcessor { GrammarLogitProcessor(constraint: constraint) }
+                                } ?? generation.components)
                             Self.clearMLXBufferCacheAfterPrefill()
                             var serialToolObserver = NativeToolCallStreamEmitter(
                                 modelID: request.model,
@@ -9146,6 +9162,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             if shouldCancel() {
                                 throw CancellationError()
                             }
+                            try grammarConstraint?.validate()
                             let resultTokenIDs = result.tokenIds
 
                         guard result.output.utf8.count <= ToolCallParser.SPEC018_ARGUMENTS_PER_RESPONSE_BYTE_CAP else {
@@ -9453,6 +9470,34 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
         shouldCancel: @escaping @Sendable () -> Bool = { false },
         onChunk: @escaping @Sendable (StreamChunk) -> Void
     ) async throws -> CompletionResult {
+        guard Self.requiresStructuredValidation(request.responseFormat) else {
+            return try await streamPrepared(request, with: handle, shouldCancel: shouldCancel, onChunk: onChunk)
+        }
+        // Serial and CB share this boundary: no JSON content reaches the buyer
+        // until syntax/schema validation succeeds, including length/stop exits.
+        let held = StructuredStreamingContentAccumulator(enabled: true)
+        let startedAt = Date()
+        let firstChunk = ContinuousBatchFirstTokenClock()
+        var completion = try await streamPrepared(request, with: handle, shouldCancel: shouldCancel) { chunk in
+            if case .content(let text) = chunk { held.append(text) }
+            else { firstChunk.mark(); onChunk(chunk) }
+        }
+        if let error = held.error { throw error }
+        completion = try Self.validateStructuredStreamingCompletion(completion, request: request, buyerVisibleContent: held.content)
+        try handle.drainCancelled.check()
+        try Task.checkCancellation()
+        if shouldCancel() { throw CancellationError() }
+        if !held.content.isEmpty { firstChunk.mark(); onChunk(.content(held.content)) }
+        completion.ttftMilliseconds = firstChunk.ttftMilliseconds(since: startedAt)
+        return completion
+    }
+
+    private func streamPrepared(
+        _ request: ChatCompletionRequest,
+        with handle: RequestHandle,
+        shouldCancel: @escaping @Sendable () -> Bool = { false },
+        onChunk: @escaping @Sendable (StreamChunk) -> Void
+    ) async throws -> CompletionResult {
         try ToolSelectionPolicy.validateRequest(request, loadedModelID: toolSelectionModelID(handle.snapshot), runtime: "mlx_cache")
         _ = try Self.validateNativeVisionRequest(request, profile: handle.snapshot.nativeVisionProfile)
         if try ToolSelectionPolicy.selection(request.promptSource.toolChoice).holdsOutput {
@@ -9673,6 +9718,9 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         nativeVisionProfile: snapshot.nativeVisionProfile,
                         toolSelectionModelID: selectionModelID
                     )
+                    let grammarConstraint = try GrammarConstraintState.prepare(
+                        request: request, tokenizer: context.tokenizer, configuration: context.configuration,
+                        eosTokenIDs: Self.generationStopTokenIDs(for: context))
                     // Cancelled during preparation (client gone, or local
                     // work preempted under SPEC-001-R011): release the gate.
                     try Task.checkCancellation()
@@ -9927,7 +9975,9 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         completePromptTokenIDs: parameters.repetitionPenalty == nil ? [] : promptTokenIds.map(Int.init))
                     let iterator = try TokenIterator(
                         input: iteratorInput, model: generationContext.model, cache: kvCache,
-                        parameters: generation.parameters, components: generation.components)
+                        parameters: generation.parameters, components: grammarConstraint.map { constraint in
+                                    generation.components.appendingLogitProcessor { GrammarLogitProcessor(constraint: constraint) }
+                                } ?? generation.components)
                     Self.clearMLXBufferCacheAfterPrefill()
                     do {
                         let result: BlockingGenerateResult = try await blockingInferenceExecutor.run { inferenceCancellation in
@@ -10051,6 +10101,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         if let streamingParseError {
                             throw streamingParseError
                         }
+                        try grammarConstraint?.validate()
                         let resultTokenIDs = result.tokenIds
 
                         let final = Self.applyOutputFilters(
@@ -13090,11 +13141,24 @@ maxTokens: maxTokens,
         toolCallPrefill: String?
     ) throws -> (content: String, toolCalls: [ToolCall]) {
         if try ToolSelectionPolicy.selection(request.promptSource.toolChoice).requiresCall {
-            // The prompt ended inside the call: parse prefill + continuation.
-            // Without calls the turn fails validation; the content is only the
-            // generated text, never the prefill.
+            let grammar = toolGrammar(for: request)
+            let raw = (toolCallPrefill ?? "") + text
+            // Non-Qwen guaranteed output must match the whole generated
+            // envelope, before main's native parser interprets its values.
+            // Auto-mode recovery (prose, missing closes, duplicate drop) never
+            // supplies the guaranteed-mode framing/cardinality contract.
+            if grammar != .qwen {
+                guard let language = try GrammarTemplates.grammar(for: request, traits: request.outputTraits) else {
+                    throw ToolSelectionPolicy.outputError("Unsupported tool output grammar")
+                }
+                let automaton = try language.compile()
+                guard let terminal = automaton.transition(state: 0, bytes: Array(raw.trimmingCharacters(in: .whitespacesAndNewlines).utf8)),
+                      automaton.accepting(state: terminal) else {
+                    throw ToolSelectionPolicy.outputError("Tool output requires a complete native envelope")
+                }
+            }
             let calls = try ToolCallParser.parseGuaranteedToolCalls(
-                (toolCallPrefill ?? "") + text, schemas: try ToolSelectionPolicy.schemas(request)
+                raw, grammar: grammar, modelID: request.model, schemas: try ToolSelectionPolicy.schemas(request)
             )
             return (calls.isEmpty ? text : "", calls)
         }
@@ -13142,9 +13206,8 @@ maxTokens: maxTokens,
             return false
         case .jsonObject:
             return true
-        case .jsonSchema(let spec):
-            // SPEC-019 v0.3.0 §1a: non-strict output is not validated.
-            return spec.strict
+        case .jsonSchema:
+            return true
         }
     }
 
@@ -13222,9 +13285,9 @@ maxTokens: maxTokens,
             : "Return exactly one call."
         switch selection {
         case .required:
-            messages = Self.withLeadingSystemInstruction("Call a declared function using complete <tool_call> envelopes in the tool-call format described above. \(callCountInstruction) Return only tool calls; arguments must match the declared schemas.", to: messages)
+            messages = Self.withLeadingSystemInstruction("Call a declared function using the native tool-call format described above. \(callCountInstruction) Return only tool calls; arguments must match the declared schemas.", to: messages)
         case .named(let name):
-            messages = Self.withLeadingSystemInstruction("Call the declared function \(name) using a complete <tool_call> envelope in the tool-call format described above. \(callCountInstruction) Return only calls to that function; arguments must match its schema.", to: messages)
+            messages = Self.withLeadingSystemInstruction("Call the declared function \(name) using the native tool-call format described above. \(callCountInstruction) Return only calls to that function; arguments must match its schema.", to: messages)
         case .none:
             messages = Self.withLeadingSystemInstruction("Do not call any function or tool. Respond with assistant text.", to: messages)
         case .auto: break
@@ -13325,7 +13388,7 @@ maxTokens: maxTokens,
         toolSelectionModelID: String?
     ) async throws -> (input: LMInput, toolCallPrefill: String?) {
         // Planned first: it validates the selected name before any prompt text.
-        let plan = try toolCallPrefill(for: request, toolSelectionModelID: toolSelectionModelID)
+        let plan = GrammarConstraintState.isRequired(request) ? nil : try toolCallPrefill(for: request, toolSelectionModelID: toolSelectionModelID)
         let grammar = try resolvedToolGrammar(for: request, templateToolFormat: context.configuration.toolCallFormat?.rawValue)
         let input = try userInput(
             for: request,
@@ -13406,7 +13469,7 @@ maxTokens: maxTokens,
         toolSelectionModelID: String?,
         templateToolFormat: String? = nil
     ) async throws -> (tokens: [Int], toolCallPrefill: String?) {
-        let plan = try toolCallPrefill(for: request, toolSelectionModelID: toolSelectionModelID)
+        let plan = GrammarConstraintState.isRequired(request) ? nil : try toolCallPrefill(for: request, toolSelectionModelID: toolSelectionModelID)
         let grammar = try resolvedToolGrammar(for: request, templateToolFormat: templateToolFormat)
         let input = try userInput(
             for: request,
@@ -13574,10 +13637,8 @@ maxTokens: maxTokens,
             _ = try parseStructuredJSONContent(completion.content, requireObjectOrArray: true)
             return completion
         case .jsonSchema(let spec):
-            guard spec.strict else {
-                return completion
-            }
             let parsed = try parseStructuredJSONContent(completion.content, requireObjectOrArray: false)
+            guard spec.strict else { return completion }
             do {
                 try JSONSchemaValidator.validateInstance(parsed, against: spec.schema)
             } catch let error as APIError {

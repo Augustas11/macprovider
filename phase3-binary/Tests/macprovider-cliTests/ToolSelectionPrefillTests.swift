@@ -52,9 +52,9 @@ final class ToolSelectionPrefillTests: XCTestCase {
         XCTAssertEqual(qwen?.generationPromptSuffix, generationPrompt)
         XCTAssertNil(ToolSelectionPolicy.guaranteedCallProfile(modelID: "mlx-community/Qwen2.5-7B-Instruct-4bit"))
         XCTAssertNil(ToolSelectionPolicy.guaranteedCallProfile(modelID: nil))
-        // Guaranteed modes are advertised exactly for models with a profile.
+        // Legacy prompt prefills do not limit decoder grammar admission.
         XCTAssertEqual(ToolSelectionPolicy.modes(modelID: self.qwen, runtime: "mlx_cache"), ["auto", "none", "required", "named"])
-        XCTAssertEqual(ToolSelectionPolicy.modes(modelID: "mlx-community/Qwen2.5-7B-Instruct-4bit", runtime: "mlx_cache"), ["auto", "none"])
+        XCTAssertEqual(ToolSelectionPolicy.modes(modelID: "mlx-community/Qwen2.5-7B-Instruct-4bit", runtime: "mlx_cache"), ["auto", "none", "required", "named"])
     }
 
     // MARK: Prompt assembly per mode

@@ -1,6 +1,6 @@
 # SPEC-018 — Agentic tool calling (provider-side response synthesis)
 
-**Version:** 0.3.5 (2026-10-24, family-aware lowest reasoning effort; Related: #2107)
+**Version:** 0.3.6 (2026-10-24, bounded grammar masks; Related: #2107)
 **Depends on:** SPEC-001 v1.6, SPEC-002 v1.5.5, SPEC-006 v0.9, SPEC-008 (Pillar A model-hash trust layer — referenced by §10a), SPEC-011 v0.5 (warm-swap heartbeat `model_hash` — referenced by §10a), SPEC-015 v0.4 (receipts canonical output binding — see AC-17 and §N.5)
 **Status:** **LOCKED** at v0.2.10 by the streaming cleanup-rewrite byte-domain clarification. Previously LOCKED at v0.2.9 by the serial-turn `parallel_tool_calls` amendment (omitted/`false` stop after the first complete valid tool). Previously LOCKED at v0.2.8 by the #1594 OpenRouter-aligned AC-53 amendment (no independent messages[] count cap). Previously LOCKED at v0.2.7 by the Qwen3-Coder function-XML tool-call grammar amendment (documents the `<function=…><parameter=…>` XML body that Qwen3-Coder emits as a Qwen-row §3.1 body-grammar alternative, with OpenAI/MCP name charset; pending IMPL/conformance already landed on branch `fix/qwen3coder-toolcall-parse`); previously LOCKED at v0.2.6 by #784 C2b admission-timeout reconciliation — v0.2.4 spec PR #202 and IMPL PR #209 both landed (multi-turn acceptance, token-incremental streaming, `tool_call_id` validation, 1 MiB/2 MiB byte caps). v0.2.5 adds gpt-oss/OpenAI Harmony response parsing as a pending implementation/conformance gap. codex 4-lane r4 0/0/0; Claude blind-spot r2 0/0/0. SPEC-019 already depends on this as "LOCKED". The former "LOCK CANDIDATE pending PR" line was never flipped after merge. (Resolved gap, 2026-07-14, runbook item 15: AC-45's `X-MacProvider-Streaming-Mode` header — set by the coordinator on streaming `200` responses — was stripped by the public gateway's blanket `X-MacProvider-*` filter, making the "header absent" fail condition live on `api.malibu.tech`. Fixed by adding the header to the SPEC-006 v0.9.9 § 5.4 response-pass-through allowlist and un-stripping it at the gateway, validated against AC-45's closed enum. Chosen over scoping AC-45 to the coordinator surface because buyers hit the gateway, so scoping would have left AC-45's buyer-visible promise unmet. AC-45's normative text is unchanged; this is a documentation reconciliation, not a lock amendment. Residual: the coordinator currently emits the diagnostic only on the streaming success path — non-streaming AC-45 emission is a separate coordinator-side completeness item, out of scope for the gateway-strip fix.)
 
@@ -17,6 +17,10 @@ SPEC-018 is the **provider-side response synthesis contract** for OpenAI-wire to
 **Money-path**: all v0.2 changes preserve v0.1.5 settlement protection (`FaultBreakerQualifying` + zero credits on malformed streams via `billing_recorder.go:176` + `formula.go:112`).
 
 ## Change log
+
+- **v0.3.6 (2026-10-24, Related: #2107):** §3.11 defines bounded token-level
+  grammar masks across native tool-template families, replacing profile-only
+  admission while retaining output validation and capability evidence gates.
 
 - **v0.3.5 (2026-10-24, Related: #2107):** Lock amendment under §10c.1
   (**Amendment 11**). §3.12's v0.3.0 effort pass-through is normalized for
@@ -698,6 +702,33 @@ Normative rules:
 6. **Non-Harmony byte identity:** If the request `modelID` does not match the §3.1 Harmony row, the Harmony parser MUST be bypassed. Existing Qwen/Llama parser behavior remains unchanged. Before computing a content delta or feeding decoded text to the incremental tool-call parser, the provider MUST hold back the longest trailing suffix that is a proper prefix of any deterministic `clean_up_tokenization_spaces` rewrite pattern (`" ."`, `" ?"`, `" !"`, `" ,"`, `" ' "`, `" n't"`, `" 'm"`, `" 's"`, `" 've"`, `" 're"`). The terminal flush releases the finalized text. Non-Harmony streaming content and tool-argument concatenations MUST therefore be byte-identical to the corresponding non-streaming decoded bytes for the same generated text and token IDs. The buyer-delivered concatenation remains the streaming output, structured-output terminal-validation, and settlement domain under SPEC-015 §N.5. Retaining a cleanup-deleted space is permitted only as bounded defensive fallback behavior for an unknown cleanup rewrite outside this fixed rule set; it MUST NOT apply to streamed tool arguments, and any such argument mismatch fails final-close. Harmony retains the exact parity rule in rule 4.
 
 ### 3.11 Bounded tool-selection guarantees (v0.2.12)
+
+**AMENDED v0.3.6 (Related: #2107):** This amendment supersedes the
+profile-only admission and prefill-only guarantee below. Native `mlx_cache`
+providers support `required` and named choice for every §3.1 template grammar,
+including DeepSeek V4 DSML. Model-family support is the admission fallback; the
+loaded template selects the actual wrapper grammar. Exact-identity prefill
+profiles are optional compatibility data, not an admission allowlist. The
+complete-envelope constrained decoder MUST NOT prepend a legacy call prefill: its
+grammar owns the opening wrapper as well as the body and closing wrapper. The
+provider MUST constrain the complete native call envelope, declared function
+name, argument syntax and permitted call cardinality during token sampling,
+with request-local state on serial and continuous-batching paths. It MUST mask
+illegal tokens before penalties and sampling, and MUST NOT share mutable
+grammar state between rows. EOS is legal only at an accepting grammar state.
+
+The bounded schema compiler enforces its supported JSON Schema subset. An
+admitted schema outside that subset uses generic JSON-object generation and
+the existing final schema/required-key validation; it MUST NOT claim full
+decode-time enforcement of unsupported keywords. Unsupported grammar or
+compiler resource bounds MUST fail before inference with HTTP 400, rather than
+fall back to unconstrained sampling. All existing request, argument, output
+holdback and settlement/error bounds continue to apply. `none` MUST never
+expose a tool call. Published capabilities still require an exact loaded-model
+native-runtime provider declaration and passing buyer conformance; family
+recognition alone MUST NOT inflate older-provider or live-catalog claims.
+
+
 
 **SPEC-018-R006 — Preserve and enforce selected tool modes.** This section
 supersedes historical auto-only restrictions and governs the non-auto paths.

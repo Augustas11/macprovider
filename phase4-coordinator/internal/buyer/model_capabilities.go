@@ -24,7 +24,8 @@ import (
 //     same predicate behind tools_unsupported_for_model).
 //   - tool_choice: auto with tools, plus every mode (none, required, named)
 //     a native provider declares for its exact loaded model
-//     (providerSupportsToolSelection).
+//     (providerSupportsToolSelection). Grammar-mask providers declare these
+//     modes for every supported template family; older declarations stay bounded.
 //   - tools and reasoning for a family an older provider did not parse need
 //     a provider at toolGrammarProviderMinVersion or later.
 //   - reasoning: the family's template always opens a reasoning block, so

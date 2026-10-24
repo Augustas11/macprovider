@@ -6,6 +6,18 @@ import MLXLMCommon
 import XCTest
 
 final class ContinuousBatchSchedulerTests: XCTestCase {
+    override func invokeTest() {
+        Device.withDefaultDevice(Device(.cpu)) {
+            XCTAssertEqual(Device.defaultDevice().deviceType, .cpu)
+            super.invokeTest()
+        }
+    }
+
+    override class func setUp() {
+        super.setUp()
+        Device.setDefault(device: Device(.cpu))
+    }
+
     func testLabBatchCompositionWaitsForEveryRowAndUsesDeclaredOrder() async throws {
         let backend = ScriptedBackend(scripts: ["first": [11], "second": [22]])
         let scheduler = try await makeScheduler(
@@ -5704,7 +5716,12 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
                 ))
             }
         }
-        try await eventually { await scheduler.metrics().waitingCount >= 2 }
+        // waitingCount includes binding checks; wait for both submissions to
+        // attach before releasing the in-flight first chunk.
+        try await eventually {
+            let metrics = await scheduler.metrics()
+            return metrics.waitingCount == 2 && metrics.attachedWaiters == 3
+        }
         await prefillGate.open()
 
         let firstResult = try await first.value
@@ -8350,7 +8367,10 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         pagedCache: PagedKVCache,
         allocator: PagedKVBlockAllocator
     ) {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
+        let tests = Bundle(for: Self.self)
+        guard PagedKVMetallibGate.defaultMetallibExists()
+            || PagedKVMetallibGate.defaultMetallibExists(bundleURL: tests.resourceURL, executableURL: tests.executableURL)
+        else {
             throw XCTSkip("MLX default metallib is unavailable in this test host")
         }
         let descriptor = Self.descriptor(blockSizeTokens: 4, maxPhysicalBlocks: 32)

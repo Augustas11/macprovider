@@ -1,6 +1,6 @@
 # SPEC-019 - Structured output (`response_format: json_schema`)
 
-**Version:** 0.3.2 (2026-10-22, deterministic malformed_json_response is not retryable; post-think validation; #2107)
+**Version:** 0.3.3 (2026-10-24, grammar masks for valid strict and non-strict JSON; Related: #2107)
 **Depends on:** SPEC-001, SPEC-006, SPEC-015, SPEC-018 v0.2.10 LOCKED
 **Status:** LOCKED. v0.3.1 extends the §1a rollout gate to relay-blind requests; v0.3.0 adds the non-enforcing `strict:false` mode (§1a) and supersedes AC-4; v0.2.6 clarifies cleanup-prefix holdback and exact streaming byte parity; v0.2.5 clarified the existing §8 "preserve retryability" requirement.
 
@@ -135,6 +135,17 @@ non-enforcing mode in §1a. Under strict mode `json_schema.schema` is required
 and MUST fit the §3 subset.
 
 ### 1a. Strict and non-strict modes (v0.3.0)
+
+**AMENDED v0.3.3 (Related: #2107):** Native grammar-mask generation constrains
+both strict and non-strict `json_schema` to syntactically valid JSON. Both modes
+hold output until JSON parsing succeeds; malformed JSON fails with the existing
+non-retryable `malformed_json_response` error. For non-strict mode the schema
+remains advisory: the provider MUST NOT apply full instance-schema validation
+or claim enforcement of unsupported schema keywords. A supported compiler
+subset MAY guide token generation; other admitted schemas use generic JSON.
+This amendment supersedes item 3's no-parse/no-holdback rule below, without
+changing non-strict schema admission or its lack of instance-schema guarantees.
+
 
 The effective mode is a pure function of the raw request body, so the
 coordinator and the provider derive the same mode without negotiation:
@@ -1731,6 +1742,9 @@ matching SPEC-018 v0.2.10 clarification; it makes no SPEC-015 schema change and
 adds no HTTP endpoint.
 
 ### Change log
+
+- **v0.3.3 (2026-10-24, Related: #2107):** §1a constrains and holds strict
+  and non-strict JSON until parsing succeeds; non-strict schemas stay advisory.
 
 - **v0.3.1 (2026-10-15, relay-blind gate):** §1a rollout: relay-blind and
   privacy-class requests declare non-strict mode in the SPEC-041-R003

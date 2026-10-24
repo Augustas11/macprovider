@@ -528,6 +528,23 @@ enum ToolCallParser {
     static let qwenBareWrapperOpen = "<tools>"
     static let qwenBareWrapperClose = "</tools>"
 
+    /// Guaranteed native families share main's typed parser, without the
+    /// auto-mode duplicate/call-cap projection. The caller validates the whole
+    /// generated envelope first; output policy still validates every call.
+    static func parseGuaranteedToolCalls(_ rawOutput: String, grammar: ToolCallGrammar?, modelID: String,
+                                         schemas: [String: JSONValue]) throws -> [ToolCall] {
+        if grammar == .qwen { return try parseGuaranteedToolCalls(rawOutput, schemas: schemas) }
+        guard rawOutput.utf8.count <= SPEC018_ARGUMENTS_PER_RESPONSE_BYTE_CAP else {
+            throw ToolSelectionPolicy.outputError("Tool output exceeded byte limit")
+        }
+        let parsed = parseGrammarToolCalls(rawOutput: rawOutput, grammar: grammar, modelID: modelID,
+                                          allowedFunctionNames: Set(schemas.keys), schemas: schemas)
+        guard !parsed.toolCalls.isEmpty, parsed.toolCalls.count <= ToolSelectionPolicy.maxCalls else {
+            throw ToolSelectionPolicy.outputError("Malformed native tool output")
+        }
+        return parsed.toolCalls
+    }
+
     /// Guaranteed modes deliberately exclude the auto-mode recovery paths. Every
     /// byte outside a closed `<tool_call>` envelope must be blank. An envelope
     /// body is either strict JSON or one complete function-XML call (the format

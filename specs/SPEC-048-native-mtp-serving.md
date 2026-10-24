@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.52
+**Version:** 0.1.53
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.52",
+  "version": "0.1.53",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -687,6 +687,13 @@ not make a model/artifact tuple eligible, satisfy the serial or multi-row
 parity gates, admit MXFP8, or enable production serving.
 
 ### MTP-4 — v0.1 request eligibility and fallback boundary (SPEC-048-R004)
+
+**v0.1.53 (Related: #2107):** A request with an active tool-call or structured
+output grammar mask MUST use ordinary serial or continuous-batching decode.
+Native MTP MUST be disabled for that row before draft/verify begins: draft
+proposals and acceptance currently do not preserve the target sampler's
+request-local grammar state. Unconstrained rows retain existing eligibility.
+This exclusion is not a throughput qualification or a live policy change.
 
 Native MTP v0.1 accepts only the chat-completions request profile below. Values
 are tested after ordinary request parsing/default resolution (an absent
@@ -1846,6 +1853,10 @@ the text-only path without image inputs; that does not admit multimodal buyer
 requests.
 
 ## 9. Changelog and history
+
+- **0.1.53 (2026-10-24)** — R004: constrained tool and structured-output
+  rows use ordinary decoding until draft/verify preserves grammar state.
+  Related: #2107.
 
 - **0.1.52 (2026-10-23)** — R003: the mlx-swift-lm row moves to the
   immutable fork tag `3.32.3-macprovider.10.3` (`baec1724…`, branch
