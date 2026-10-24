@@ -144,10 +144,12 @@ production_release_active_runs() {
 }
 
 # Runs of WORKFLOW as JSON lines: id, status, conclusion, headSha, createdAt.
+# An in-flight run has no conclusion; print "-" so `read` with IFS=$'\t' (tab is
+# IFS whitespace, so empty fields collapse) keeps headSha in its own field.
 workflow_runs() {
   gh run list -R "$(gh_repo)" -w "$1" -L "${2:-20}" \
     --json databaseId,status,conclusion,headSha,createdAt,updatedAt \
-    --jq '.[] | "\(.databaseId)\t\(.status)\t\(.conclusion)\t\(.headSha)\t\(.createdAt)"' 2>/dev/null || true
+    --jq '.[] | "\(.databaseId)\t\(.status)\t\(.conclusion // "" | if . == "" then "-" else . end)\t\(.headSha)\t\(.createdAt)"' 2>/dev/null || true
 }
 
 origin_main_sha() {
