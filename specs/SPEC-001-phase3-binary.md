@@ -1446,30 +1446,38 @@ unknown IDs" contract does not hold uniformly — see the detailed §6.6
 
 **SPEC-001-R013 — A cancel stops prefill within one chunk.** "Aborts the
 in-flight inference" in FR-26 includes prompt prefill. A provider MUST stop a
-cancelled request (a `cancel_request` for it, a local client disconnect or
+request that is cancelled while it waits for its prompt's conversation key or
+prefills its prompt (a `cancel_request` for it, a local client disconnect or
 preemption, or a drain) before the next prefill chunk starts, on the serial and
 continuous-batching paths and for every model family:
 
-- *Serial.* The request's prefill runs in a task that the cancel cancels, and
-  every chunked prefill loop the provider or the model runs (the model's own
-  chunk plan, the SPEC-024 FR-CI2a prompt snapshot, the FR-CI2 recurrent
-  checkpoints, the SPEC-001-R011 local prefill, the speculative iterator's
-  prefill) checks for cancellation before each chunk. The chunk plan, and so
-  the computed cache, is unchanged for a request that is not cancelled.
+- *Serial.* While the request prefills, a cancel cancels the task that runs
+  it, and every chunked prefill loop the provider or the model runs (the
+  model's own chunk plan, the SPEC-024 FR-CI2a prompt snapshot, the FR-CI2
+  recurrent checkpoints, the SPEC-001-R011 local prefill, the speculative
+  iterator's prefill) checks for cancellation before each chunk and before
+  copying a snapshot or checkpoint. A request waiting for a conversation key
+  that another request holds stops waiting and takes no lease. The chunk plan,
+  and so the computed cache, is unchanged for a request that is not cancelled.
+- *After prefill.* Once the prompt is in the cache, a cancel is handled by the
+  decode loop exactly as before this requirement: decode stops at its next
+  token, and the terminal and any delivered-prefix receipt are unchanged.
 - *Continuous batching.* A cancelled prompt row is retired at the next
   scheduler iteration; one iteration prefills at most the configured prefill
   tokens per row.
 - *Bound.* The stop takes at most the chunk being evaluated when the cancel
   arrives. For a request cancelled mid-chunk this extends the FR-26 5-second
   target by at most that one chunk's evaluation time.
-- *Cleanup.* The request's serving slot is released when it ends. A cancelled
-  request MUST NOT commit a conversation-cache entry, a prompt snapshot or a
-  recurrent checkpoint; its lease is aborted.
-- *Terminal and settlement.* The provider sends the same terminal it sends for
-  a cancel before the first token: `inference_response_end` with
-  `status: "cancelled"`, no generated output and no receipt. Settlement follows
-  SPEC-015 §N.7 and SPEC-022 R-5.6 / R-14.6 for a `buyer_cancel` with an empty
-  delivered prefix; nothing is billed and no provider credit is earned.
+- *Cleanup.* The request's serving slot is released when it ends. A request
+  cancelled during prefill MUST NOT commit a conversation-cache entry, a prompt
+  snapshot or a recurrent checkpoint; its lease is aborted.
+- *Drain.* A drain that coincides with a cancel ends the request as a drain.
+- *Terminal and settlement.* A request cancelled during prefill ends with the
+  terminal a cancel before the first token already produced:
+  `inference_response_end` with `status: "cancelled"`, no generated output and
+  no receipt. Settlement follows SPEC-015 §N.7 and SPEC-022 R-5.6 / R-14.6 for
+  a `buyer_cancel` with an empty delivered prefix; nothing is billed and no
+  provider credit is earned.
 
 **FR-27. Error mapping.**
 Inference errors map to `status` values in `inference_response_end`:

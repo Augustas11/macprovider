@@ -8988,12 +8988,16 @@ maxTokens: boundedMaxTokens,
         let templateSupportsThinkingToggle = snapshot.templateSupportsThinkingToggle
         let templateSupportsPreserveThinking = snapshot.templateSupportsPreserveThinking
         let selectionModelID = toolSelectionModelID(snapshot)
-        // SPEC-001 FR-26: a buyer cancel cancels the serial operation's task,
-        // so the model's prefill stops at its next chunk boundary
-        // (`PrefillParameters.forEachChunk` checks task cancellation), not
-        // only between decode tokens. The group returns after the operation
-        // has unwound and released the gate and the conversation-cache lease.
-        let completion = try await Self.withDrainAndClientCancellation(drainCancelled, shouldCancel: shouldCancel) {
+        // SPEC-001-R013: while the request prefills, a buyer cancel cancels the
+        // serial operation's task, so the model's prefill stops at its next
+        // chunk boundary (`PrefillParameters.forEachChunk` checks task
+        // cancellation). The group returns after the operation has unwound and
+        // released the gate and the conversation-cache lease. After prefill a
+        // cancel is handled by the decode loop as before.
+        let prefillScope = PrefillCancelScope()
+        let completion = try await Self.withDrainAndClientCancellation(
+            drainCancelled, shouldCancel: { prefillScope.interruptsPrefill(cancelled: shouldCancel()) }
+        ) {
             try await inferenceGate.withPermit {
                 try drainCancelled.check()
                 try Task.checkCancellation()
@@ -9072,6 +9076,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                 specDecodeGeneration: snapshot.specDecodeGeneration,
                                 shouldCancel: shouldCancel,
                                 drainCancelled: drainCancelled,
+                                prefillScope: prefillScope,
                                 blockingInferenceExecutor: blockingInferenceExecutor
                             )
                         } catch let error as DrainCancelledError {
@@ -9084,6 +9089,8 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             // before any buyer-visible response exists for the
                             // non-streaming endpoint.
                             Self.logSpeculativeFallback(error)
+                            // The fallback prefills the prompt again.
+                            prefillScope.reopenForPrefill()
                         }
                     }
                     let conversationCacheAllowed = Self.serialConversationCacheLeaseAllowed(
@@ -9182,6 +9189,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                     generation.components.appendingLogitProcessor { GrammarLogitProcessor(constraint: constraint) }
                                 } ?? generation.components)
                             Self.clearMLXBufferCacheAfterPrefill()
+                            try prefillScope.markPrefillDone()
                             var serialToolObserver = NativeToolCallStreamEmitter(
                                 modelID: request.model,
                                 grammar: Self.toolGrammar(for: request),
@@ -9444,6 +9452,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
         specDecodeGeneration: Int,
         shouldCancel: @escaping @Sendable () -> Bool,
         drainCancelled: DrainCancelToken,
+        prefillScope: PrefillCancelScope,
         blockingInferenceExecutor: BlockingInferenceExecutor
     ) async throws -> CompletionResult {
         let generated = try await collectSpeculativeText(
@@ -9455,6 +9464,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
             numDraftTokens: numDraftTokens,
             shouldCancel: shouldCancel,
             drainCancelled: drainCancelled,
+            prefillScope: prefillScope,
             blockingInferenceExecutor: blockingInferenceExecutor
         )
         try drainCancelled.check()
@@ -9529,6 +9539,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
         numDraftTokens: Int,
         shouldCancel: @escaping @Sendable () -> Bool,
         drainCancelled: DrainCancelToken,
+        prefillScope: PrefillCancelScope,
         blockingInferenceExecutor: BlockingInferenceExecutor
     ) async throws -> SpeculativeTextResult {
         do {
@@ -9548,6 +9559,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                     numDraftTokens: numDraftTokens
                 )
                 Self.clearMLXBufferCacheAfterPrefill()
+                try prefillScope.markPrefillDone()
                 return try await blockingInferenceExecutor.run { inferenceCancellation in
                     let stopTokenIDs = Self.generationStopTokenIDs(for: targetContext)
                     var tokenIDs: [Int] = []
@@ -9834,9 +9846,12 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
         let templateSupportsThinkingToggle = snapshot.templateSupportsThinkingToggle
         let templateSupportsPreserveThinking = snapshot.templateSupportsPreserveThinking
         let selectionModelID = toolSelectionModelID(snapshot)
-        // SPEC-001 FR-26: as on the non-streaming serial path, a buyer cancel
-        // also stops a long prefill at its next chunk boundary.
-        return try await Self.withDrainAndClientCancellation(drainCancelled, shouldCancel: shouldCancel) {
+        // SPEC-001-R013: as on the non-streaming serial path, a buyer cancel
+        // stops a long prefill at its next chunk boundary.
+        let prefillScope = PrefillCancelScope()
+        return try await Self.withDrainAndClientCancellation(
+            drainCancelled, shouldCancel: { prefillScope.interruptsPrefill(cancelled: shouldCancel()) }
+        ) {
             try await Self.withStructuredStreamingIdleTimeout(
                 idleState: idleState,
                 onIdleTimeout: { () throws -> CompletionResult in
@@ -9939,6 +9954,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             numDraftTokens: numDraftTokens,
                             shouldCancel: shouldCancel,
                             drainCancelled: drainCancelled,
+                            prefillScope: prefillScope,
                             blockingInferenceExecutor: blockingInferenceExecutor
                         )
                         // Warm-decode wall-time for the speculative path.
@@ -10137,6 +10153,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                         generation.components.appendingLogitProcessor { GrammarLogitProcessor(constraint: constraint) }
                                     } ?? generation.components)
                         Self.clearMLXBufferCacheAfterPrefill()
+                        try prefillScope.markPrefillDone()
                         let result: BlockingGenerateResult = try await blockingInferenceExecutor.run { inferenceCancellation in
                             BlockingGenerateResult(generate(input: iteratorInput, context: generationContext, iterator: iterator) { tokens in
                                 EgressPerfTraceKey.current?.recordDecodeCallbackEntry()
@@ -12259,8 +12276,16 @@ maxTokens: maxTokens,
                 }
                 throw CancellationError()
             }
-            guard let result = try await group.next() else {
-                throw DrainCancelledError()
+            let result: T
+            do {
+                guard let next = try await group.next() else {
+                    throw DrainCancelledError()
+                }
+                result = next
+            } catch {
+                // A drain that coincides with a cancel is reported as the drain.
+                if error is CancellationError, token.isFired { throw DrainCancelledError() }
+                throw error
             }
             group.cancelAll()
             return result
@@ -12863,6 +12888,7 @@ maxTokens: maxTokens,
             eval(cache)
             cursor = end
         }
+        if isCancelled() { throw CancellationError() }
         // Copies, because window, pool and recurrent buffers are written in place.
         let layers = cache.map { $0.copy() }
         eval(layers)
@@ -12913,6 +12939,7 @@ maxTokens: maxTokens,
                 asyncEval(cache)
                 start = end
             }
+            if isCancelled() { throw CancellationError() }
             eval(cache)
             cursor = position
             guard let checkpoint = captureRecurrentCheckpoint(cache: cache, tokenCount: position) else {
@@ -14989,6 +15016,41 @@ final class DrainCancelToken: @unchecked Sendable {
                 continuation.resume()
             }
         }
+    }
+}
+
+/// SPEC-001-R013: lets a client cancel interrupt a serial operation only while
+/// it prefills. The operation marks the end of its prefill; from then on a
+/// cancel is handled by the decode loop exactly as before, so the terminal and
+/// receipt of a cancel after prefill are unchanged. The mark and the interrupt
+/// decision share one lock: once a cancel has interrupted the prefill, the mark
+/// throws instead of letting decode start.
+final class PrefillCancelScope: @unchecked Sendable {
+    private let lock = NSLock()
+    private var prefillDone = false
+    private var interrupted = false
+
+    /// The cancel watcher's predicate: true when `cancelled` must interrupt.
+    func interruptsPrefill(cancelled: Bool) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard cancelled, !prefillDone else { return false }
+        interrupted = true
+        return true
+    }
+
+    func markPrefillDone() throws {
+        lock.lock()
+        defer { lock.unlock() }
+        if interrupted { throw CancellationError() }
+        prefillDone = true
+    }
+
+    /// A fallback that prefills the prompt again (speculative to serial).
+    func reopenForPrefill() {
+        lock.lock()
+        prefillDone = false
+        lock.unlock()
     }
 }
 
