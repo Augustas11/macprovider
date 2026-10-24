@@ -63,6 +63,10 @@ func makeCoordinatorWebSocketTask(
     return task
 }
 
+/// Largest coordinator handshake message (auth_challenge, auth_response)
+/// parsed before the session is accepted: Foundation's former default.
+let coordinatorHandshakeMaximumMessageBytes = 1024 * 1024
+
 /// Received-but-unhandled coordinator message budget (four maximum-size
 /// messages).
 let coordinatorInboundBacklogLimitBytes = 4 * coordinatorWebSocketMaximumMessageBytes
@@ -8921,6 +8925,12 @@ actor CoordinatorClient {
 
     private static func receiveJSONObject(from webSocket: ProviderWebSocketTask) async throws -> [String: Any] {
         let message = try await webSocket.receive()
+        // SPEC-001-R012: handshake messages are small and fixed-shape; refuse a
+        // large one before JSON materialization so the post-auth message limit
+        // never becomes a pre-auth parse cost.
+        guard CoordinatorInboundBacklog.byteCount(of: message) <= coordinatorHandshakeMaximumMessageBytes else {
+            throw CoordinatorAuthError.invalidMessage("Coordinator handshake message too large")
+        }
         let text: String
         switch message {
         case .string(let value):

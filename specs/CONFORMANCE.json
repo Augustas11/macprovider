@@ -14233,7 +14233,9 @@
         "phase4-coordinator/internal/ws/frame_limits_test.go:func TestDispatchRefusesOverLimitRequestAndKeepsSessionInStep",
         "phase4-coordinator/internal/buyer/provider_frame_too_large_test.go:func TestProviderFrameTooLargeAnswers413WithoutRetryOrProviderFault",
         "phase5-gateway/internal/router/provider_frame_too_large_test.go:func TestCoordinatorProviderFrameTooLargeReaches413",
-        "phase5-gateway/internal/router/oversize_body_test.go:func TestOversizeChatBodyStreamedReturns413NotReset"
+        "phase5-gateway/internal/router/oversize_body_test.go:func TestOversizeChatBodyStreamedReturns413NotReset",
+        "phase4-coordinator/internal/ws/frame_limits_test.go:func TestUnmarkTier2RequestDispatchedTargetsCountedEpoch",
+        "phase4-coordinator/internal/ws/frame_limits_test.go:func TestEncryptedDispatchEndsSessionWhenSealedFrameCannotBeQueued"
       ],
       "journeys": [],
       "evidence": [],

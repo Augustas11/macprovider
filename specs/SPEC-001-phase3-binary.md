@@ -4924,7 +4924,8 @@ limit): six-byte JSON escapes of every content byte, the sealed plaintext
 envelope and base64 come to about 32 MiB. The provider MUST bound coordinator messages it has
 received but not yet handled to 256 MiB in total and end the session (then
 reconnect) past that, so the larger limit cannot grow its memory without
-bound.
+bound. Before the session is accepted it MUST NOT parse a
+handshake message (`auth_challenge`, `auth_response`) larger than 1 MiB.
 
 *Coordinator: never write an over-limit frame.* The coordinator MUST treat a
 session's limit as the advertised value clamped to [1 MiB, 64 MiB], and as

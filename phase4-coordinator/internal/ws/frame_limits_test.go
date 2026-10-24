@@ -267,3 +267,54 @@ func TestDispatchRefusesOverLimitRequestAndKeepsSessionInStep(t *testing.T) {
 		t.Fatalf("next frame request=%q seq=%d, want req-next at seq 0", outer.RequestID, outer.Enc.Seq)
 	}
 }
+
+// A refusal undoes the dispatch count on the Tier-2 epoch it was counted
+// against, even when a rekey installed a new epoch in between.
+func TestUnmarkTier2RequestDispatchedTargetsCountedEpoch(t *testing.T) {
+	epochA := &pool.Tier2Session{KeyID: "a"}
+	epochB := &pool.Tier2Session{KeyID: "b", RequestsDispatched: 5}
+	ps := &providerSession{tier2: epochA}
+	marked := ps.markTier2RequestDispatched()
+	if marked != epochA || epochA.RequestsDispatched != 1 {
+		t.Fatalf("mark: epoch %v count %d", marked, epochA.RequestsDispatched)
+	}
+	ps.tier2 = epochB
+	ps.unmarkTier2RequestDispatched(marked)
+	if epochA.RequestsDispatched != 0 || epochB.RequestsDispatched != 5 {
+		t.Fatalf("rollback hit the wrong epoch: a=%d b=%d", epochA.RequestsDispatched, epochB.RequestsDispatched)
+	}
+	ps.unmarkTier2RequestDispatched(nil)
+	ps.unmarkTier2RequestDispatched(epochA)
+	if epochA.RequestsDispatched != 0 {
+		t.Fatal("rollback went below zero")
+	}
+}
+
+// A sealed encrypted frame that cannot be queued has spent a C2P sequence
+// number the provider never sees, so the session ends instead of staying out
+// of step.
+func TestEncryptedDispatchEndsSessionWhenSealedFrameCannotBeQueued(t *testing.T) {
+	s, provider, _ := newEncryptedRelayHarness(t)
+	session, ok := s.storedSessionFor("p1", "s1")
+	if !ok {
+		t.Fatal("no session")
+	}
+	// Nobody reads the provider side: the writer blocks on its first frame and
+	// the queue then fills.
+	full := false
+	for i := 0; i < 64 && !full; i++ {
+		full = errors.Is(session.send([]byte(`{"type":"warm_up"}`)), ErrRelayBackpressure)
+	}
+	if !full {
+		t.Fatalf("write queue never filled (len %d cap %d)", len(session.writeCh), cap(session.writeCh))
+	}
+	if _, err := s.DispatchInference(context.Background(), *provider, "req-full", chatBody(10), true); !errors.Is(err, ErrRelayClosed) {
+		t.Fatalf("dispatch err = %v, want ErrRelayClosed", err)
+	}
+	if provider.Tier2Session.C2PCounter != 1 {
+		t.Fatalf("c2p counter %d, want the spent sequence 1", provider.Tier2Session.C2PCounter)
+	}
+	if _, ok := s.storedSessionFor("p1", "s1"); ok {
+		t.Fatal("out-of-step session kept")
+	}
+}
