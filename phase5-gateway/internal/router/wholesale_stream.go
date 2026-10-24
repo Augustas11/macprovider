@@ -12,6 +12,10 @@ var wholesaleKeepaliveInterval = 15 * time.Second
 const wholesaleKeepaliveComment = ": keepalive\n\n"
 
 type wholesaleStreamWriter struct {
+	// gate excludes keepalives while the stream goroutine processes a line
+	// or finalizes (adapter state, dedupe capture and poisoning are not
+	// guarded by mu).
+	gate    sync.Mutex
 	mu      sync.Mutex
 	stopped bool
 	w       http.ResponseWriter
@@ -54,7 +58,12 @@ type sseCommentWriter interface {
 	writeSSEComment(p []byte) error
 }
 
+func (s *wholesaleStreamWriter) hold()    { s.gate.Lock() }
+func (s *wholesaleStreamWriter) release() { s.gate.Unlock() }
+
 func (s *wholesaleStreamWriter) writeKeepalive() bool {
+	s.gate.Lock()
+	defer s.gate.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.stopped {

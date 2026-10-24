@@ -1368,13 +1368,11 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 	// SPEC-006-R026: every streaming buyer gets `: keepalive` comments, so a
 	// long prefill does not trip an intermediary's idle timeout. Wholesale
 	// accounts also get one immediately (their partner contract).
-	{
-		wrap := &wholesaleStreamWriter{w: w, flusher: flusher}
-		w = wrap
-		flusher = wrap
-		stopKeepalives := startWholesaleKeepalives(r.Context().Done(), wrap, wholesale)
-		defer stopKeepalives()
-	}
+	keepalive := &wholesaleStreamWriter{w: w, flusher: flusher}
+	w = keepalive
+	flusher = keepalive
+	stopKeepalives := startWholesaleKeepalives(r.Context().Done(), keepalive, wholesale)
+	defer stopKeepalives()
 	// #760: the coordinator has committed streaming headers, which post-#92
 	// means it accepted the request and is relaying provider output. The
 	// admission budget is done; from here the first content-bearing delta is
@@ -1908,8 +1906,20 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		}
 		return true
 	}
+	// The keepalive goroutine runs only while this goroutine waits on the
+	// upstream: every line, terminal path and finalization below runs with
+	// the keepalive held, and keepalives stop before it is released.
+	keepaliveHeld := false
+	defer func() {
+		keepalive.stopKeepalives()
+		if keepaliveHeld {
+			keepalive.release()
+		}
+	}()
 	for {
 		line, err := readStreamingLineWithIdleTimeout(r.Context(), reader, progressDeadline, cancelCoordinator, resp.Body)
+		keepalive.hold()
+		keepaliveHeld = true
 		if errors.Is(err, bufio.ErrBufferFull) {
 			slog.Error("streaming coordinator line exceeded limit", "request_id", requestID(r), "max_line_bytes", maxStreamingLineBytes)
 			// Gateway-side truncation due to oversized line — NOT a
@@ -1950,6 +1960,8 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 			}
 		}
 		if err == nil {
+			keepalive.release()
+			keepaliveHeld = false
 			continue
 		}
 		if err == io.EOF {

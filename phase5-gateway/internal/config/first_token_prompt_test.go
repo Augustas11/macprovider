@@ -1,6 +1,7 @@
 package config
 
 import (
+	"math"
 	"testing"
 	"time"
 )
@@ -30,6 +31,15 @@ func TestFirstTokenTimeoutForPrompt(t *testing.T) {
 	cfg.Timeouts.FirstTokenPrefillTokensPerSecond = 0
 	if got := cfg.FirstTokenTimeoutForPrompt(131_072); got != 300*time.Second {
 		t.Fatalf("disabled scaling budget=%s want the floor", got)
+	}
+	cfg.Timeouts.FirstTokenPrefillTokensPerSecond = 100
+	cfg.Timeouts.FirstTokenSeconds = 5000
+	if got := cfg.FirstTokenTimeoutForPrompt(10); got != 3600*time.Second {
+		t.Fatalf("first_token above the ceiling budget=%s want the ceiling", got)
+	}
+	cfg.Timeouts.FirstTokenSeconds = 300
+	if got := cfg.FirstTokenTimeoutForPrompt(math.MaxInt64); got != 3600*time.Second {
+		t.Fatalf("max prompt budget=%s want the ceiling", got)
 	}
 	cfg.Timeouts.FirstTokenPrefillTokensPerSecond = -1
 	if err := cfg.Validate(); err == nil {

@@ -5203,8 +5203,11 @@ summary is generated. No `encrypted_content` is emitted. Streaming emits
 `response.output_item.added`, `response.content_part.added`,
 `response.reasoning_text.delta` per chunk, then `response.reasoning_text.done`,
 `response.content_part.done` and `response.output_item.done`, and closes the
-item before the first message or call item opens. A stream that ends during
-reasoning closes it before the terminal event. Inline `<think>` text in
+item before the first message or call item opens. Reasoning that arrives
+after a message or call item opened is not returned (it would follow the
+output it did not lead to). A stream that ends or fails during reasoning
+closes the item before its terminal event (`response.completed`,
+`response.incomplete` or `response.failed`). Inline `<think>` text in
 `content` remains stripped from the message and is not converted.
 `usage.output_tokens_details.reasoning_tokens` MUST equal the provider's
 `completion_tokens_details.reasoning_tokens` when it lies in
@@ -5267,7 +5270,8 @@ first-token or decode-idle deadlines.
 First-token deadline. The first-token phase (armed when streaming headers
 commit) MUST be `first_token + ceil(estimated_prompt_tokens /
 first_token_prefill_tokens_per_second)` seconds, never above
-`stream_ceiling_max_seconds`, where `first_token` is the existing
+`stream_ceiling_max_seconds` (a `first_token` above the ceiling is clamped to
+it), where `first_token` is the existing
 `FirstTokenTimeout` and the estimate is the gateway's prompt estimate (body
 bytes / 4 plus image allowances). `first_token_prefill_tokens_per_second`
 defaults to 100 (DeepSeek-V4 prefills about 280 tok/s on a Studio, so this

@@ -1210,14 +1210,13 @@ func (a *responsesAdapter) handleChatStreamLine(line string) {
 // output item with `reasoning_text` content (the OpenAI Responses shape that
 // Codex CLI records and sends back).
 func (a *responsesAdapter) emitReasoningDelta(delta string) {
-	if delta == "" {
+	// Reasoning arriving after a message or call item opened would land after
+	// the output it did not lead to; it is not returned (SPEC-006-R025).
+	if delta == "" || a.textOpen || len(a.toolCalls) > 0 {
 		return
 	}
 	if !a.reasoningOpen {
 		a.reasoningID = "rs_" + idSuffix(a.effectiveResponseID())
-		if n := len(a.reasoningDone); n > 0 {
-			a.reasoningID = fmt.Sprintf("%s_%d", a.reasoningID, n)
-		}
 		a.reasoningOut = a.nextOutputIndex()
 		a.emitResponsesSSE("response.output_item.added", map[string]any{
 			"type": "response.output_item.added", "output_index": a.reasoningOut,
@@ -1439,6 +1438,7 @@ func (a *responsesAdapter) emitStreamFailed(errFrame *responsesStreamError) {
 		a.emitStreamDone()
 		return
 	}
+	a.closeReasoning()
 	message := errFrame.Message
 	if message == "" {
 		message = "Upstream provider failed"

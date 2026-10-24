@@ -1295,19 +1295,26 @@ func (c Config) FirstTokenTimeout() time.Duration {
 // FirstTokenTimeoutForPrompt is the first-token budget for a prompt of
 // promptTokens estimated tokens: FirstTokenTimeout plus the prefill time at
 // first_token_prefill_tokens_per_second, never below FirstTokenTimeout and
-// never above stream_ceiling_max_seconds (SPEC-006-R026).
+// never above stream_ceiling_max_seconds (SPEC-006-R026). Validate keeps the
+// ceiling positive; the limit <= 0 branches only guard the arithmetic.
 func (c Config) FirstTokenTimeoutForPrompt(promptTokens int64) time.Duration {
 	base := c.FirstTokenTimeout()
+	limit := time.Duration(c.Timeouts.StreamCeilingMaxSeconds) * time.Second
+	if limit > 0 && base >= limit {
+		return limit
+	}
 	rate := int64(c.Timeouts.FirstTokenPrefillTokensPerSecond)
 	if rate <= 0 || promptTokens <= 0 {
 		return base
 	}
-	limit := time.Duration(c.Timeouts.StreamCeilingMaxSeconds) * time.Second
-	if base >= limit {
-		return base
+	prefillSeconds := promptTokens / rate
+	if promptTokens%rate != 0 {
+		prefillSeconds++
 	}
-	prefillSeconds := (promptTokens + rate - 1) / rate
-	if prefillSeconds >= int64((limit-base)/time.Second) {
+	if limit <= 0 || prefillSeconds >= int64((limit-base)/time.Second) {
+		if limit <= 0 {
+			return base
+		}
 		return limit
 	}
 	return base + time.Duration(prefillSeconds)*time.Second

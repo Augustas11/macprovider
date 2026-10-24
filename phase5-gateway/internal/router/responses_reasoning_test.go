@@ -454,3 +454,41 @@ func TestResponsesReasoningDoesNotChangeBilledUsage(t *testing.T) {
 		}
 	}
 }
+
+func TestResponsesStreamingFailureClosesOpenReasoning(t *testing.T) {
+	body := runResponsesStream(t,
+		`data: {"id":"chatcmpl_rf","model":"dsv4","choices":[{"delta":{"reasoning_content":"thinking"}}]}`,
+		`data: {"error":{"message":"boom","type":"api_error","code":"provider_error"}}`,
+	)
+	names, payloads := responsesSSEEvents(t, body)
+	n := len(names)
+	if n < 4 || names[n-1] != "response.failed" || names[n-2] != "response.output_item.done" || names[n-4] != "response.reasoning_text.done" {
+		t.Fatalf("events=%v", names)
+	}
+	if item := payloads[n-2]["item"].(map[string]any); item["type"] != "reasoning" {
+		t.Fatalf("closed item=%v", item)
+	}
+}
+
+func TestResponsesStreamingLateReasoningIsNotReturned(t *testing.T) {
+	body := runResponsesStream(t,
+		`data: {"id":"chatcmpl_late","model":"dsv4","choices":[{"delta":{"reasoning_content":"first"}}]}`,
+		`data: {"id":"chatcmpl_late","model":"dsv4","choices":[{"delta":{"content":"answer"}}]}`,
+		`data: {"id":"chatcmpl_late","model":"dsv4","choices":[{"delta":{"reasoning_content":"late"}}]}`,
+		`data: {"id":"chatcmpl_late","model":"dsv4","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_0123456789abcdef","type":"function","function":{"name":"lookup","arguments":"{}"}}]}}]}`,
+		`data: {"id":"chatcmpl_late","model":"dsv4","choices":[{"delta":{"reasoning_content":"later"}}]}`,
+		`data: [DONE]`,
+	)
+	if strings.Contains(body, "late") {
+		t.Fatalf("late reasoning returned:\n%s", body)
+	}
+	_, payloads := responsesSSEEvents(t, body)
+	output := payloads[len(payloads)-1]["response"].(map[string]any)["output"].([]any)
+	var types []string
+	for _, item := range output {
+		types = append(types, item.(map[string]any)["type"].(string))
+	}
+	if strings.Join(types, ",") != "reasoning,message,function_call" {
+		t.Fatalf("output types=%v", types)
+	}
+}

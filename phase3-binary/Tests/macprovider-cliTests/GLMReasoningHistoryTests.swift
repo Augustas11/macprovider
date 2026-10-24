@@ -42,7 +42,7 @@ final class GLMReasoningHistoryTests: XCTestCase {
             ChatTemplateCompatibility.rewrite(source).template,
             with: .init(lstripBlocks: true, trimBlocks: true)
         )
-        // Round-trip through JSON so the template sees plain Foundation values.
+        // Round-trip messages through JSON so the template sees plain Foundation values.
         func plain(_ value: Any) throws -> Value {
             try Value(any: JSONSerialization.jsonObject(with: JSONSerialization.data(withJSONObject: value)))
         }
@@ -50,7 +50,8 @@ final class GLMReasoningHistoryTests: XCTestCase {
             "messages": try plain(DefaultMessageGenerator().generate(from: input)),
             "add_generation_prompt": .boolean(true),
         ]
-        if let tools = input.tools { context["tools"] = try plain(tools) }
+        // Tools already hold template values (Jinja `.null`), as the runtime passes them.
+        if let tools = input.tools { context["tools"] = try Value(any: tools) }
         return try template.render(context)
     }
 
