@@ -24,6 +24,12 @@
 # directory) instead of downloading it, serves DeepSeek at one owner-pinned
 # slot and 32k context with continuous batching and native MTP off, runs the
 # owed buyer-UX conformance through GATEWAY_URL, and restores GLM.
+# DSV4_WINDOW_HOLD_FILE (absolute local path, optional): when the file exists
+# after the conformance run and the evidence (e) request, the window keeps
+# DeepSeek serving until the file is removed, at most
+# DSV4_WINDOW_HOLD_MAX_MINUTES (default 30, at most 60), so a separate client
+# can send its own sequential prompts through the gateway (#2083). While it
+# holds, "$DSV4_WINDOW_HOLD_FILE.holding" exists; GLM is restored afterwards.
 #
 # `diagnostic` is deliberately separate from live ops.  It requires
 # QWEN_E2E_DIAGNOSTIC_CONFIG/JOURNAL/VALIDATOR to be regular files below the
@@ -1090,6 +1096,7 @@ campaign_cleanup() {
   local rc=$? cleanup_rc=0 cleanup_status cleanup_required journal_absent=false intent_json=""
   trap - EXIT INT TERM HUP
   set +e
+  dsv4_hold_marker_clear
   if studio_helper inspect --journal "$QWEN_E2E_JOURNAL" > "$OPS_TMP_DIR/cleanup-journal.json" 2>/dev/null; then
     cleanup_status="$(json_field "$OPS_TMP_DIR/cleanup-journal.json" 'd.get("status")')"
     cleanup_required="$(json_field "$OPS_TMP_DIR/cleanup-journal.json" 'd.get("restore_required")')"
@@ -1282,6 +1289,7 @@ run_native_mtp_campaign() {
 
 run_dsv4_window() {
   require_catalog_lock catalog-activate:buyer_ux_conformance_owed
+  dsv4_hold_marker_clear
   for name in QWEN_E2E_CLI QWEN_E2E_CONFIG QWEN_E2E_JOURNAL QWEN_E2E_HANDBACK \
     QWEN_E2E_WRITTEN_HANDBACK BUYER_TOKEN_FILE DSV4_IMPORT_DIR GATEWAY_URL; do
     [ -n "${!name:-}" ] || refuse "$name is required by the fixed DeepSeek-V4-Flash window"
@@ -1358,6 +1366,7 @@ run_dsv4_window() {
   # SPEC-023-R017 5(e): one tagged buyer request through the gateway served by
   # this provider on the live release, for the operator's evidence record.
   record_dsv4_serving_request "$transaction_id" || rc=$?
+  dsv4_window_hold "$transaction_id"
   checkpoint_remote proof_complete "$DSV4_TARGET" "$REMOTE_REC_ONE"
   restore_provider || refuse "GLM restoration did not reach continuous batching and native MTP; the journal stays restore-required"
   [ "$rc" = 0 ] || refuse "the DeepSeek-V4-Flash conformance run failed a check; record at $record"
@@ -1385,8 +1394,90 @@ PY
   log "evidence (e): check request_log and settlement for $request_id on Pearl (read-only), then: scripts/ops/catalog-activate.sh next --done buyer_serving_e2e --evidence 'model=$DSV4_TARGET_MODEL_ID@58ee40d4c0bc436695d1d8d6a6cdfdb0326ec37f25e13ec98ea1d5c0878e732c request $request_id session $session <settlement row>'"
 }
 
+# dsv4_window_hold TXID: while DSV4_WINDOW_HOLD_FILE exists, keep DeepSeek
+# serving for a separate client, bounded by DSV4_WINDOW_HOLD_MAX_MINUTES. The
+# EXIT trap still restores GLM if the window is interrupted during the hold,
+# and removes the readiness marker first.
+# The ceiling is enforced twice: by wall clock and by a count of 5 s sleeps, so
+# a backwards clock step cannot extend the hold past the cap.
+dsv4_hold_marker_clear() {
+  # Best effort: a marker that cannot be removed must never block GLM recovery.
+  # Unlink through the same trusted O_NOFOLLOW directory walk as creation.
+  case "${DSV4_WINDOW_HOLD_FILE:-}" in
+    /*) dsv4_hold_marker_walk clear "$DSV4_WINDOW_HOLD_FILE" "" || true ;;
+  esac
+}
+# dsv4_hold_marker_walk create|clear FILE TXID: walk FILE's directories from / with
+# O_NOFOLLOW, requiring each to be owned by this user or root with no group or
+# other write (a root-owned sticky ancestor such as /tmp is accepted: others
+# cannot rename entries they do not own), then create FILE.holding relative to the pinned directory with
+# O_CREAT|O_EXCL|O_NOFOLLOW|O_NONBLOCK (never follows or opens an existing entry).
+dsv4_hold_marker_walk() {
+  python3 -I -c '
+import os, stat, sys
+mode, path, txid = sys.argv[1], sys.argv[2], sys.argv[3]
+parts = [p for p in path.split("/")[:-1] if p]
+fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+for name in parts + [None]:
+    st = os.fstat(fd)
+    sticky_root = name is not None and st.st_uid == 0 and st.st_mode & stat.S_ISVTX
+    if st.st_uid not in (0, os.geteuid()) or (st.st_mode & 0o022 and not sticky_root) or not stat.S_ISDIR(st.st_mode):
+        sys.exit(1)
+    if name is None:
+        break
+    fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+if mode == "clear":
+    try:
+        os.unlink(os.path.basename(path) + ".holding", dir_fd=fd)
+    except FileNotFoundError:
+        pass
+    sys.exit(0)
+mfd = os.open(os.path.basename(path) + ".holding", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=fd)
+os.write(mfd, (txid + "\n").encode())
+' "$1" "$2" "$3" 2>/dev/null
+}
+dsv4_hold_marker_create() { dsv4_hold_marker_walk create "$1" "$2"; }
+dsv4_window_hold() {
+  local file="${DSV4_WINDOW_HOLD_FILE:-}" max="${DSV4_WINDOW_HOLD_MAX_MINUTES:-30}" start now logged=-1 minute ticks=0
+  [ -n "$file" ] || return 0
+  case "$file" in /*) ;; *) log "DSV4_WINDOW_HOLD_FILE is not absolute; no hold"; return 0 ;; esac
+  if ! [[ "$max" =~ ^[0-9]{1,2}$ ]]; then
+    log "DSV4_WINDOW_HOLD_MAX_MINUTES must be 1-60; no hold"
+    return 0
+  fi
+  max=$((10#$max))
+  if [ "$max" -lt 1 ] || [ "$max" -gt 60 ]; then
+    log "DSV4_WINDOW_HOLD_MAX_MINUTES must be 1-60; no hold"
+    return 0
+  fi
+  dsv4_hold_marker_clear
+  [ -e "$file" ] || return 0
+  dsv4_hold_marker_create "$file" "$1" || {
+    log "hold directory chain must be real, operator or root owned, without group or other write, and the marker must not pre-exist; no hold"
+    return 0
+  }
+  start="$(date +%s)"
+  while [ -e "$file" ]; do
+    now="$(date +%s)"
+    if [ $((now - start)) -ge $((max * 60)) ] || [ "$ticks" -ge $((max * 12)) ]; then
+      log "hold ceiling of $max minutes reached; restoring GLM"
+      break
+    fi
+    minute=$(((now - start) / 60))
+    if [ "$minute" != "$logged" ]; then
+      log "holding DeepSeek-V4-Flash serving while $file exists (minute $minute of at most $max)"
+      logged="$minute"
+    fi
+    sleep 5
+    ticks=$((ticks + 1))
+  done
+  dsv4_hold_marker_clear
+  log "hold ended after $(( ($(date +%s) - start) / 60 )) minute(s); restoring GLM"
+}
+
 run_dsv4_restore() {
   require_catalog_lock catalog-activate:dsv4_restore
+  dsv4_hold_marker_clear
   studio_helper inspect --journal "$QWEN_E2E_JOURNAL" > "$OPS_TMP_DIR/journal.json" ||
     refuse "transaction journal is unreadable"
   [ "$(json_field "$OPS_TMP_DIR/journal.json" 'd.get("profile")')" = "$DSV4_PROFILE" ] ||

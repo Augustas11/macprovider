@@ -117,7 +117,7 @@ BUC_DOWNTIME_SIGHUP="none: no coordinator restart; one SIGHUP applies the record
 BUC_DOWNTIME_RESTART="one coordinator restart, about 5-40 seconds (in-flight requests drain, then the coordinator starts): the running runtime reads the record file only at start, so buyer and provider traffic through the coordinator is interrupted for that time. If the restarted coordinator cannot load the file, coordinator.yaml and the record file are restored and the coordinator restarts once more"
 QWEN_NATIVE_PROFILE=qwen36-native-mtp
 DSV4_WINDOW_PROFILE=dsv4-flash-window
-DSV4_WINDOW_DOWNTIME="Studio provider: GLM-5.3-Flash buyer traffic is unavailable from the GLM->DeepSeek restart through the DeepSeek-V4-Flash load (~167 GB), the conformance run (about 10-30 minutes at one serial slot), and the restart and model load back to GLM; DeepSeek buyers are served during the window. Pearl is not restarted"
+DSV4_WINDOW_DOWNTIME="Studio provider: GLM-5.3-Flash buyer traffic is unavailable from the GLM->DeepSeek restart through the DeepSeek-V4-Flash load (~167 GB), the conformance run (about 10-30 minutes at one serial slot), an optional operator hold while DSV4_WINDOW_HOLD_FILE exists (at most DSV4_WINDOW_HOLD_MAX_MINUTES, default 30, cap 60), and the restart and model load back to GLM; DeepSeek buyers are served during the window. Pearl is not restarted"
 
 qwen_journal_probe() {
   "$OPS_DIR/qwen-opencode-e2e.sh" _catalog-qwen36-journal
