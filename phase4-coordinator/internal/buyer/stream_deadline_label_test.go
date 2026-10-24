@@ -30,12 +30,13 @@ type streamDeadlineRow struct {
 // request_log row plus the settlement evidence.
 func runGatewayCancelledStream(t *testing.T, deadline string) streamDeadlineRow {
 	t.Helper()
-	return runGatewayCancelledStreamTerminalAfter(t, deadline, 0)
+	return runGatewayCancelledStreamTerminalAfter(t, deadline, 0, nil)
 }
 
 // runGatewayCancelledStreamTerminalAfter delays the provider's cancel
-// terminal, so the row is logged well after the cancel arrived.
-func runGatewayCancelledStreamTerminalAfter(t *testing.T, deadline string, terminalDelay time.Duration) streamDeadlineRow {
+// terminal, so the row is logged well after the cancel arrived. A non-nil now
+// replaces the server clock that stamps the cancel arrival.
+func runGatewayCancelledStreamTerminalAfter(t *testing.T, deadline string, terminalDelay time.Duration, now func() time.Time) streamDeadlineRow {
 	t.Helper()
 	const delivered = "Hello, partial"
 	h := newBuyerCancelHarness(t, "stream-deadline-label-catalog", func(h *buyerCancelHarness, ctx context.Context, requestID string, meta *providerws.SettlementReceiptMetadata) *providerws.RelayStream {
@@ -67,6 +68,9 @@ func runGatewayCancelledStreamTerminalAfter(t *testing.T, deadline string, termi
 		}()
 		return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: make(chan providerws.InferenceResponseEnd), Errors: make(chan error, 1), CancelTerminal: terminal}
 	})
+	if now != nil {
+		h.server.SetNowForTest(now)
+	}
 	body := []byte(`{"model":"model-a","stream":true,"messages":[{"role":"user","content":"hi"}],"temperature":0.000001,"top_p":0.5,"presence_penalty":0,"frequency_penalty":0}`)
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body)).WithContext(h.ctx)
 	req.Header.Set("Authorization", "Bearer operator-key")
@@ -137,9 +141,16 @@ func TestGatewayStreamDeadlineInFutureDoesNotLabel(t *testing.T) {
 // The label follows when the cancel arrived, not when the row is logged: a
 // buyer that left more than the skew before the deadline stays unlabelled
 // even when the provider's cancel terminal arrives after the deadline.
+//
+// The server clock is pinned to cancelAt, so the cancel is stamped exactly
+// 1.5 s before the deadline however slow setup runs (under -race it took
+// over 0.5 s and pushed a wall-clock cancel into the skew window). The
+// terminal still waits 1.9 s of real time, so the row is logged after the
+// deadline on the wall clock: a label computed from log time fails here.
 func TestGatewayStreamDeadlineUsesCancelTimeNotLogTime(t *testing.T) {
-	deadline := strconv.FormatInt(time.Now().Add(1500*time.Millisecond).UnixMilli(), 10)
-	row := runGatewayCancelledStreamTerminalAfter(t, deadline, 1900*time.Millisecond)
+	cancelAt := time.Now().UTC()
+	deadline := strconv.FormatInt(cancelAt.Add(1500*time.Millisecond).UnixMilli(), 10)
+	row := runGatewayCancelledStreamTerminalAfter(t, deadline, 1900*time.Millisecond, func() time.Time { return cancelAt })
 	if row.errorCode.Valid && row.errorCode.String != "" {
 		t.Fatalf("a cancel 1.4 s before the deadline got error_code=%q from its later log time", row.errorCode.String)
 	}
