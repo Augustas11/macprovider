@@ -51,8 +51,8 @@ public struct ChatCompletionRequest: Sendable {
     /// call, as OpenAI does (SPEC-018 v0.3.0); `false` is serial: generation
     /// stops after the first complete valid tool call.
     public let parallelToolCalls: Bool?
-    /// OpenAI `reasoning_effort`, passed verbatim to the chat template as
-    /// `reasoning_effort` (SPEC-018 §3.12). nil when omitted.
+    /// OpenAI `reasoning_effort`, normalized for the template family at render
+    /// time (SPEC-018 §3.12). nil when omitted.
     public let reasoningEffort: String?
     /// Output facts the runtime resolves when it renders the prompt (tool
     /// grammar, open think block). Never parsed from the request body; shared
@@ -97,17 +97,30 @@ public struct ChatCompletionRequest: Sendable {
         parallelToolCalls == false
     }
 
-    /// The `reasoning_effort` the chat template sees: the buyer's value, or
-    /// `low` when tools are declared and the buyer sent none (agent turns
-    /// should reach the call quickly), else nil (template default).
+    /// The effort for the request's model; the runtime uses the loaded model
+    /// identity when a buyer addresses it through an alias.
     public var templateReasoningEffort: String? {
+        templateReasoningEffort(for: model)
+    }
+
+    /// SPEC-018 §3.12: templates without a none/minimal level receive their
+    /// lowest level. Other values and unknown families keep their behavior.
+    public func templateReasoningEffort(for modelID: String) -> String? {
         // SPEC-018 §3.12 (v0.3.2): a structured response_format renders with
         // the least reasoning the template takes, so the reply starts with
         // the JSON. `low` is the lowest level every catalog reasoning_effort
         // template accepts; enable_thinking templates already render with
         // thinking off (`ModelRuntime.templateAdditionalContext`).
         if case .text = responseFormat {} else { return "low" }
-        if let reasoningEffort { return reasoningEffort }
+        if let reasoningEffort {
+            if reasoningEffort == "none" || reasoningEffort == "minimal" {
+                let id = modelID.lowercased()
+                if id.contains("glm-5.3") || id.contains("gpt-oss") || id.contains("qwen3.8") {
+                    return "low"
+                }
+            }
+            return reasoningEffort
+        }
         guard case .array(let tools)? = promptSource.tools, !tools.isEmpty else { return nil }
         return "low"
     }
