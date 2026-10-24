@@ -7,6 +7,8 @@ template and to parse the tool calls those templates render (SPEC-018 §3.1,
 
 | File | Source repository | Revision | From |
 | --- | --- | --- | --- |
+| `gpt-oss-20b.jinja` | `mlx-community/gpt-oss-20b-MXFP4-Q8` | `773a7da77e569019bb0fd17a554b263738d669a3` | `chat_template.jinja` |
+| `qwen3.8-27b.jinja` | `mlx-community/Qwen3.8-27B-4bit` | `10c35caafbb80f7dc6a7a432cdd11af10a6d4818` | `chat_template.jinja` |
 | `glm-4.5-air.jinja` | `mlx-community/GLM-4.5-Air-4bit` | `60837794f3caafc4682dd1a9188a82c55a9100ef` | `chat_template.jinja` |
 | `llama-3.1-8b-instruct.jinja` | `mlx-community/Meta-Llama-3.1-8B-Instruct-4bit` | `241a666dad6cb93c8ff213d39a7f34a36bf26db4` | `tokenizer_config.json` `chat_template` |
 | `llama-3.2-3b-instruct.jinja` | `mlx-community/Llama-3.2-3B-Instruct-4bit` | `7f0dc925e0d0afb0322d96f9255cfddf2ba5636e` | `tokenizer_config.json` `chat_template` |
@@ -18,3 +20,7 @@ template and to parse the tool calls those templates render (SPEC-018 §3.1,
 Each template remains under its model's license (Llama 3.1 / 3.2 Community
 License, Gemma Terms of Use, NVIDIA Open Model License, Apache-2.0, MIT); the
 files are test inputs only and ship in no binary.
+
+`ReasoningEffortTests` also renders the effort-aware GLM-5.3, gpt-oss and
+Qwen3.8 templates and verifies the existing thinking switches. gpt-oss is
+Apache-2.0; Qwen3.8 uses the license of its source model.
