@@ -348,14 +348,17 @@ func TestCheckedInBuyerUXConformanceRecords(t *testing.T) {
 	if !llama8.Capabilities.Tools || !llama8.Capabilities.ResponseFormat {
 		t.Fatalf("llama-3.1-8b capabilities=%+v", llama8.Capabilities)
 	}
-	// DeepSeek-V4-Flash is promoted with its record owed (SPEC-023 §16.11
-	// rule 4): the base set only until the record lands.
+	// DeepSeek-V4-Flash was promoted with its record owed (SPEC-023 §16.11
+	// rule 4); its record (2026-10-24, Pearl v1.8.267) passed every check, and
+	// a record always decides over the owed entry that stays beside it: the
+	// derived set, no longer the base-only mask.
 	dsv4 := entryFor("TensorFold/DeepSeek-V4-Flash-0731-MXFP4-MLX", true)
-	if !entryFor("TensorFold/DeepSeek-V4-Flash-0731-MXFP4-MLX", false).Capabilities.Tools {
-		t.Fatal("DeepSeek-V4 must derive tools before the owed mask")
+	dsv4Derived := entryFor("TensorFold/DeepSeek-V4-Flash-0731-MXFP4-MLX", false)
+	if !reflect.DeepEqual(dsv4.Capabilities, dsv4Derived.Capabilities) || !reflect.DeepEqual(dsv4.SupportedParameters, dsv4Derived.SupportedParameters) {
+		t.Fatalf("deepseek-v4 capabilities changed: got %+v want %+v", dsv4.Capabilities, dsv4Derived.Capabilities)
 	}
-	if c := dsv4.Capabilities; c.Tools || c.Reasoning || c.ResponseFormat || len(c.ToolChoice) != 0 {
-		t.Fatalf("owed DeepSeek-V4 capabilities=%+v", c)
+	if c := dsv4.Capabilities; !c.Tools || !c.Reasoning || !c.ResponseFormat || len(c.ToolChoice) == 0 {
+		t.Fatalf("deepseek-v4 capabilities=%+v", c)
 	}
 }
 
