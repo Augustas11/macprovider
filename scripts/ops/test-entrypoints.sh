@@ -1166,6 +1166,35 @@ mkdir -p "$tmp/state-norecord"
 MACPROVIDER_OPS_STATE_DIR="$tmp/state-norecord" run_rc 3 "re-check gate fails closed without a canary record" \
   scripts/ops/cli-release.sh _check-canary-self-check "$CAND"
 rm -rf "$tmp/state-norecord"
+# A served model with no entry in the candidate's signed CB policy is served
+# serially by design (#2134: DeepSeek V4 CB stays off without a signed entry).
+SERIAL_RID="$(git -C "$W" show "$B:phase3-binary/catalog/autotune/continuous-batching-policy.json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["release_id"])')"
+status_serial() { # MODEL POLICY_RELEASE_ID
+  status_doc $CAND true false false live_verified failed fallback_paged_fallback_identity null
+  python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["model"]=sys.argv[2]; c=d["continuous_batching"]; c["mode"]="off"; c["policy"].update(release_id=sys.argv[3], emergency_off_override=True); json.dump(d,open(p,"w"))' "$tmp/svc/status.json" "$1" "$2"
+}
+cp -R "$tmp/state" "$tmp/state-serial"
+status_serial zai-org/glm-5.3-flash "$SERIAL_RID"
+MACPROVIDER_OPS_STATE_DIR="$tmp/state-serial" run_rc 3 "canary probe refuses CB off on a model with a signed CB policy entry" \
+  scripts/ops/cli-release.sh next --done canary_smoke --probe
+expect_err "continuous_batching.active is not true"
+status_serial deepseek/deepseek-v4-flash published-other-release
+MACPROVIDER_OPS_STATE_DIR="$tmp/state-serial" run_rc 3 "canary probe refuses a serial canary on another policy release" \
+  scripts/ops/cli-release.sh next --done canary_smoke --probe
+expect_err "continuous_batching.active is not true"
+status_serial deepseek/deepseek-v4-flash "$SERIAL_RID"
+python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["continuous_batching"]["policy"]["load_status"]="absent_fallback"; json.dump(d,open(p,"w"))' "$tmp/svc/status.json"
+MACPROVIDER_OPS_STATE_DIR="$tmp/state-serial" run_rc 3 "canary probe refuses a serial canary without a verified signed policy" \
+  scripts/ops/cli-release.sh next --done canary_smoke --probe
+expect_err "load_status 'absent_fallback' != 'live_verified'"
+status_serial deepseek/deepseek-v4-flash "$SERIAL_RID"
+MACPROVIDER_OPS_STATE_DIR="$tmp/state-serial" run_rc 0 "canary probe accepts a model without a signed CB policy entry served serially" \
+  scripts/ops/cli-release.sh next --done canary_smoke --probe
+if python3 -c 'import json,sys; p=json.load(open(sys.argv[1]))["probe"]; sys.exit(0 if p["cb_serial_no_policy_entry"] is True and p["continuous_batching_active"] is False and p["model"] == "deepseek/deepseek-v4-flash" else 1)' \
+  "$tmp/state-serial/cli-release-$CAND/canary_smoke.json"; then ok; else bad "serial canary not recorded in the canary_smoke marker"; fi
+MACPROVIDER_OPS_STATE_DIR="$tmp/state-serial" run_rc 0 "cli status after a serial canary" scripts/ops/cli-release.sh status
+expect_next e2e_gate:manual
+rm -rf "$tmp/state-serial"
 status_doc $CAND true true false absent_fallback none attached '{"decision":"granted","served_slots":8}'
 run_rc 0 "canary probe on the candidate" scripts/ops/cli-release.sh next --done canary_smoke --probe
 STUDIO_SSH=unreachable-host run_rc 0 "rollout gate is a no-op for a canary recorded on a final decision" \

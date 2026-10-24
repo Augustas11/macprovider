@@ -194,7 +194,10 @@ scripts/ops/live-lock.sh acquire <label> --steal                 # only past the
   `prior_grant_pending_recheck` when the prior grant serves (`served_slots`
   > 0, CB active) and records the pending re-check; the provider runs that
   re-check under a bounded admission hold (SPEC-038 FR-CB10), so no buyer
-  traffic has to be stopped. The next step, `canary_self_check`
+  traffic has to be stopped. A canary serving a model that has no entry in the
+  candidate's signed CB policy (DeepSeek V4, #2134) passes with CB off and
+  serial decode when its signed policy is `live_verified` for the candidate's
+  release; a model with an entry still needs CB active. The next step, `canary_self_check`
   (`_check-canary-self-check`), then requires the same canary (provider,
   version, compatibility set, self-check key) to report the final `granted`
   or kept-prior-grant decision with the admission hold ended; promotion waits
