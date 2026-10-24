@@ -1365,18 +1365,20 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 	w.WriteHeader(http.StatusOK)
 	flusher, _ := w.(http.Flusher)
 	wholesale := s.isWholesaleAccount(subject.AccountID)
-	if wholesale {
-		wrap := &wholesaleStreamWriter{w: w, flusher: flusher}
-		w = wrap
-		flusher = wrap
-		stopKeepalives := startWholesaleKeepalives(r.Context().Done(), wrap)
-		defer stopKeepalives()
-	}
+	// SPEC-006-R026: every streaming buyer gets `: keepalive` comments, so a
+	// long prefill does not trip an intermediary's idle timeout. Wholesale
+	// accounts also get one immediately (their partner contract).
+	keepalive := &wholesaleStreamWriter{w: w, flusher: flusher}
+	w = keepalive
+	flusher = keepalive
+	stopKeepalives := startWholesaleKeepalives(r.Context().Done(), keepalive, wholesale)
+	defer stopKeepalives()
 	// #760: the coordinator has committed streaming headers, which post-#92
 	// means it accepted the request and is relaying provider output. The
 	// admission budget is done; from here the first content-bearing delta is
 	// on its own clock, disarmed below the moment one arrives.
-	deadlines.armPhase(deadlinePhaseFirstToken, s.cfg.FirstTokenTimeout())
+	// SPEC-006-R026: the prefill budget grows with the prompt.
+	deadlines.armPhase(deadlinePhaseFirstToken, s.cfg.FirstTokenTimeoutForPrompt(promptEstimate))
 	reader := bufio.NewReaderSize(resp.Body, maxStreamingLineBytes)
 	var cancelOnce sync.Once
 	cancelCoordinator := func() {
@@ -1626,10 +1628,8 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		}
 		if data, ok := sseDataValue(text); ok {
 			if data == "[DONE]" {
-				if wholesale {
-					if wrap, ok := w.(*wholesaleStreamWriter); ok {
-						wrap.stopKeepalives()
-					}
+				if wrap, ok := w.(*wholesaleStreamWriter); ok {
+					wrap.stopKeepalives()
 				}
 				if wholesale && !forwardedUsage && terminalStructuredErrorCode == "" {
 					promptTok, completionTok := promptEstimate, gatewayContentEstimatedCompletion()
@@ -1906,8 +1906,20 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		}
 		return true
 	}
+	// The keepalive goroutine runs only while this goroutine waits on the
+	// upstream: every line, terminal path and finalization below runs with
+	// the keepalive held, and keepalives stop before it is released.
+	keepaliveHeld := false
+	defer func() {
+		keepalive.stopKeepalives()
+		if keepaliveHeld {
+			keepalive.release()
+		}
+	}()
 	for {
 		line, err := readStreamingLineWithIdleTimeout(r.Context(), reader, progressDeadline, cancelCoordinator, resp.Body)
+		keepalive.hold()
+		keepaliveHeld = true
 		if errors.Is(err, bufio.ErrBufferFull) {
 			slog.Error("streaming coordinator line exceeded limit", "request_id", requestID(r), "max_line_bytes", maxStreamingLineBytes)
 			// Gateway-side truncation due to oversized line — NOT a
@@ -1948,6 +1960,8 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 			}
 		}
 		if err == nil {
+			keepalive.release()
+			keepaliveHeld = false
 			continue
 		}
 		if err == io.EOF {
@@ -2025,7 +2039,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 	if adapter := anthropicMessagesAdapterFromContext(r.Context()); adapter != nil && adapter.stream && !adapter.streamDone {
 		if err := adapter.validateStreamComplete(); err != nil {
 			adapter.emitInvalidProviderResponse(err.Error())
-			if sw, ok := w.(*statusWriter); ok && sw.captureArmed && !sw.overflowed && !sw.poisoned {
+			if sw, ok := unwrapStatusWriter(w); ok && sw.captureArmed && !sw.overflowed && !sw.poisoned {
 				sw.captureDedupeBytes(sw.drainTransformedDedupeBytes(nil))
 			}
 			if flusher != nil {
@@ -2044,7 +2058,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		fallbackCompletion := gatewaySerializedEstimatedCompletion()
 		adapter.setFallbackStreamUsage(promptEstimate, fallbackCompletion)
 		adapter.emitMessageStop()
-		if sw, ok := w.(*statusWriter); ok && sw.captureArmed && !sw.overflowed && !sw.poisoned {
+		if sw, ok := unwrapStatusWriter(w); ok && sw.captureArmed && !sw.overflowed && !sw.poisoned {
 			sw.captureDedupeBytes(sw.drainTransformedDedupeBytes(nil))
 		}
 		if adapter.writeErr != nil {
@@ -4177,7 +4191,7 @@ func (sw *statusWriter) dedupeCapture() []byte {
 // committed 200, so the status code alone cannot tell a complete stream from
 // a truncated one. A no-op for any writer that is not a *statusWriter.
 func poisonDedupeCapture(w http.ResponseWriter) {
-	if sw, ok := w.(*statusWriter); ok {
+	if sw, ok := unwrapStatusWriter(w); ok {
 		sw.poisoned = true
 	}
 }
@@ -4190,7 +4204,7 @@ func sseErrorDeliveredClean(w http.ResponseWriter, code string) bool {
 	if code == "" {
 		return false
 	}
-	if sw, ok := w.(*statusWriter); ok {
+	if sw, ok := unwrapStatusWriter(w); ok {
 		if transformed, ok := sw.ResponseWriter.(cleanSSEErrorDedupeTransformer); ok {
 			return transformed.dedupeCleanSSEError(code)
 		}

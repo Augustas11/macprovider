@@ -1,6 +1,6 @@
 # SPEC-018 — Agentic tool calling (provider-side response synthesis)
 
-**Version:** 0.3.6 (2026-10-24, bounded grammar masks; Related: #2107)
+**Version:** 0.3.7 (2026-10-24, history reasoning reaches the template; Related: #2107)
 **Depends on:** SPEC-001 v1.6, SPEC-002 v1.5.5, SPEC-006 v0.9, SPEC-008 (Pillar A model-hash trust layer — referenced by §10a), SPEC-011 v0.5 (warm-swap heartbeat `model_hash` — referenced by §10a), SPEC-015 v0.4 (receipts canonical output binding — see AC-17 and §N.5)
 **Status:** **LOCKED** at v0.2.10 by the streaming cleanup-rewrite byte-domain clarification. Previously LOCKED at v0.2.9 by the serial-turn `parallel_tool_calls` amendment (omitted/`false` stop after the first complete valid tool). Previously LOCKED at v0.2.8 by the #1594 OpenRouter-aligned AC-53 amendment (no independent messages[] count cap). Previously LOCKED at v0.2.7 by the Qwen3-Coder function-XML tool-call grammar amendment (documents the `<function=…><parameter=…>` XML body that Qwen3-Coder emits as a Qwen-row §3.1 body-grammar alternative, with OpenAI/MCP name charset; pending IMPL/conformance already landed on branch `fix/qwen3coder-toolcall-parse`); previously LOCKED at v0.2.6 by #784 C2b admission-timeout reconciliation — v0.2.4 spec PR #202 and IMPL PR #209 both landed (multi-turn acceptance, token-incremental streaming, `tool_call_id` validation, 1 MiB/2 MiB byte caps). v0.2.5 adds gpt-oss/OpenAI Harmony response parsing as a pending implementation/conformance gap. codex 4-lane r4 0/0/0; Claude blind-spot r2 0/0/0. SPEC-019 already depends on this as "LOCKED". The former "LOCK CANDIDATE pending PR" line was never flipped after merge. (Resolved gap, 2026-07-14, runbook item 15: AC-45's `X-MacProvider-Streaming-Mode` header — set by the coordinator on streaming `200` responses — was stripped by the public gateway's blanket `X-MacProvider-*` filter, making the "header absent" fail condition live on `api.malibu.tech`. Fixed by adding the header to the SPEC-006 v0.9.9 § 5.4 response-pass-through allowlist and un-stripping it at the gateway, validated against AC-45's closed enum. Chosen over scoping AC-45 to the coordinator surface because buyers hit the gateway, so scoping would have left AC-45's buyer-visible promise unmet. AC-45's normative text is unchanged; this is a documentation reconciliation, not a lock amendment. Residual: the coordinator currently emits the diagnostic only on the streaming success path — non-streaming AC-45 emission is a separate coordinator-side completeness item, out of scope for the gateway-strip fix.)
 
@@ -17,6 +17,11 @@ SPEC-018 is the **provider-side response synthesis contract** for OpenAI-wire to
 **Money-path**: all v0.2 changes preserve v0.1.5 settlement protection (`FaultBreakerQualifying` + zero credits on malformed streams via `billing_recorder.go:176` + `formula.go:112`).
 
 ## Change log
+
+- **v0.3.7 (2026-10-24, Related: #2107):** §3.12 assistant-history
+  `reasoning_content` reaches the loaded template for GLM-5.3 as it already
+  did for the DeepSeek-V4 encoder. Registers `SPEC-018-R008`. Additive: a
+  request without history reasoning renders exactly as before.
 
 - **v0.3.6 (2026-10-24, Related: #2107):** §3.11 defines bounded token-level
   grammar masks across native tool-template families, replacing profile-only
@@ -997,6 +1002,17 @@ v0.3.2: when the request carries `response_format` `json_object` or
 `json_schema`, the provider passes `low` whatever the buyer sent, and
 templates with `enable_thinking` render with it `false` (as for every
 request), so the reply starts with the JSON where the template allows it.
+
+**History reasoning (v0.3.7).** An assistant history message's
+`reasoning_content` (from Chat Completions or a SPEC-006-R025 Responses
+`reasoning` item) MUST reach the prompt renderer for the families that render
+it: the DeepSeek-V4 encoder (which keeps it for turns after the last user
+message, or every turn when tools are declared) and the GLM-5.3 template
+(which renders it as `<think>…</think>`; turns without it keep
+`<think></think>`). A GLM request without history reasoning keeps the
+structured chat input, so its prompt is unchanged. Other families ignore the
+field. It is prompt text, billed in `prompt_tokens` like any other.
+Registers `SPEC-018-R008`.
 
 **DeepSeek-V4 (v0.3.4).** The family ships no Jinja template; the provider
 renders prompts with `DeepseekV4Encoding`, a port of the model's

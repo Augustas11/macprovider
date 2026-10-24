@@ -1023,7 +1023,9 @@ func TestResponsesStreamingChatErrorBecomesFailedTerminal(t *testing.T) {
 	}
 }
 
-func TestResponsesStreamingSplitThinkAndReasoningContentAreHidden(t *testing.T) {
+// Inline <think> text stays out of the message; provider reasoning_content is
+// returned only as a separate reasoning item (SPEC-006 §5.4b).
+func TestResponsesStreamingSplitThinkHiddenAndReasoningContentIsReasoningItem(t *testing.T) {
 	rec := httptest.NewRecorder()
 	adapter := newResponsesAdapter(rec, "89898989-8989-4898-8898-898989898989", nil)
 	adapter.stream = true
@@ -1036,8 +1038,11 @@ func TestResponsesStreamingSplitThinkAndReasoningContentAreHidden(t *testing.T) 
 	adapter.handleChatStreamLine(`data: [DONE]`)
 
 	body := rec.Body.String()
-	if strings.Contains(body, "hidden") || strings.Contains(body, "<think") || strings.Contains(body, "reasoning_content") {
-		t.Fatalf("stream leaked hidden reasoning:\n%s", body)
+	if strings.Contains(body, `"hidden`) || strings.Contains(body, "nk>hidden") || strings.Contains(body, "<think") || strings.Contains(body, "reasoning_content") {
+		t.Fatalf("stream leaked inline think text:\n%s", body)
+	}
+	if !strings.Contains(body, `"delta":"also hidden"`) || !strings.Contains(body, `"type":"reasoning"`) {
+		t.Fatalf("reasoning_content not returned as a reasoning item:\n%s", body)
 	}
 	if !strings.Contains(body, `"delta":" visible"`) || !strings.Contains(body, "event: response.completed") {
 		t.Fatalf("stream missing visible completion:\n%s", body)

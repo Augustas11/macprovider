@@ -131,6 +131,11 @@ timeouts:
   # min(120, coordinator_header_timeout_seconds); an explicit value must be
   # <= coordinator_header_timeout_seconds (the transport gives up first).
   first_token_seconds: 0
+  # SPEC-006-R026: the first-token budget grows with the prompt —
+  # first_token + estimated prompt tokens / this rate, capped by
+  # stream_ceiling_max_seconds. 100 is conservative (DeepSeek-V4 prefills
+  # ~280 tok/s on a Studio). 0 disables scaling.
+  first_token_prefill_tokens_per_second: 100
   # Hard streaming safety ceiling, derived from the request's max_tokens:
   #   clamp(floor + max_tokens * per_token_ms,
   #         >= coordinator_request_seconds, <= max)
