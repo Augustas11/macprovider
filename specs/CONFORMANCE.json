@@ -35,7 +35,7 @@
     {
       "spec_id": "SPEC-002",
       "title": "Phase 4 Coordinator: Mac Provider Request Router",
-      "version": "1.6.27",
+      "version": "1.6.28",
       "path": "specs/SPEC-002-coordinator.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -152,7 +152,7 @@
     {
       "spec_id": "SPEC-006",
       "title": "Buyer API Gateway: Mac Provider's first public buyer surface",
-      "version": "0.9.66",
+      "version": "0.9.67",
       "path": "specs/SPEC-006-buyer-api.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -14225,6 +14225,31 @@
       }
     },
     {
+      "requirement_id": "SPEC-002-R009",
+      "spec_id": "SPEC-002",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/config/config.go:func Default",
+        "phase4-coordinator/internal/buyer/server.go:func gatewayStreamDeadlineReached",
+        "phase4-coordinator/dist/check-deploy-config.sh:C2 streaming ceiling",
+        "scripts/ops/lib/pearl-cli-config.py:def apply_stream_ceiling"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/buyer/stream_deadline_label_test.go:func TestGatewayStreamDeadlineLabelsRequestLogWithoutChangingSettlement",
+        "phase4-coordinator/internal/buyer/stream_deadline_label_test.go:func TestGatewayStreamDeadlineInFutureDoesNotLabel",
+        "scripts/tests/test_pearl_cli_config.py:class StreamCeilingPlanTest",
+        "scripts/tests/test_pearl_cli_config.py:class StreamCeilingApplyTest"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2107",
+        "rationale": "Twin walls default to 3600 s and the ceiling-cut request_log label is implemented with coordinator and ops tests; Pearl's preserved live walls are raised by the stream-ceiling step after merge."
+      }
+    },
+    {
       "requirement_id": "SPEC-006-R023",
       "spec_id": "SPEC-006",
       "state": "pending",
@@ -14241,6 +14266,32 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/2054",
         "rationale": "Authoritative buyer ownership exclusion implemented with source fixtures; deployed gateway/coordinator acceptance remains pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-006-R024",
+      "spec_id": "SPEC-006",
+      "state": "pending",
+      "implementation": [
+        "phase5-gateway/internal/config/config.go:func Default",
+        "phase5-gateway/internal/router/request_deadlines.go:const requestTimeoutCode",
+        "phase5-gateway/internal/router/request_deadlines.go:func (d *requestDeadlines) ceilingDeadline",
+        "phase5-gateway/internal/router/request_deadlines.go:func (d *requestDeadlines) streamCeilingTimeoutMessage"
+      ],
+      "tests": [
+        "phase5-gateway/internal/router/request_deadlines_test.go:func TestStreamCeilingFiresOnEndlessStream",
+        "phase5-gateway/internal/router/request_deadlines_test.go:func TestStreamCeilingDropsTornFrame",
+        "phase5-gateway/internal/router/request_deadlines_test.go:func TestStreamCeilingAnthropicMessagesErrorEvent",
+        "phase5-gateway/internal/router/request_deadlines_test.go:func TestStreamDeadlineHeaderOnlyOnPlainStreams",
+        "phase5-gateway/internal/config/config_test.go:func TestValidateRejectsInconsistentPhaseDeadlines"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2107",
+        "rationale": "3600 s ceiling and the explicit request_timeout cut are implemented with gateway tests; live only once the runtime release and the Pearl stream-ceiling step have run and a long stream is observed through api.malibu.tech."
       }
     },
     {

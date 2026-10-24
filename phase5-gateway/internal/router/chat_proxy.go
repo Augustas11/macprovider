@@ -219,9 +219,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		// deadline_phase names the clock that ended the request when one
 		// did (admission / first_token / stream_ceiling / decode_idle /
-		// non_stream_wall). Operator-facing ONLY: every buyer-visible
-		// terminal keeps its existing code (provider_timeout,
-		// coordinator_unavailable), so no error-code contract widens here.
+		// non_stream_wall). Operator-facing ONLY: the buyer-visible terminal
+		// code is chosen where the stream ends (provider_timeout,
+		// request_timeout, coordinator_unavailable), not from this field.
 		attrs := []any{
 			"request_id", requestID(r),
 			"account_id", accountID,
@@ -782,6 +782,11 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			// SPEC-006-R019: the effective mode labels the coordinator's
 			// route_trace line; it never changes coordinator routing.
 			upReq.Header.Set(internalPrivacyModeEmitHeader, effectivePrivacy)
+			// A plain stream cut at its ceiling ends in request_timeout; the
+			// coordinator labels its request_log row from this deadline.
+			if deadline := deadlines.ceilingDeadline(); chat.Stream && !structuredStreaming && !deadline.IsZero() {
+				upReq.Header.Set(gatewayStreamDeadlineHeader, strconv.FormatInt(deadline.UnixMilli(), 10))
+			}
 		}
 		if internalConversation != "" {
 			// Authorization + X-MacProvider-Account are set
@@ -1541,15 +1546,22 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		poisonDedupeCapture(w)
 		settleObservedContent("client_disconnect")
 	}
-	settleIdleTimeout := func() {
+	// settleIdleTimeout ends a stream on a gateway clock. ceiling marks the
+	// stream_ceiling: a plain stream then ends in request_timeout (the
+	// provider did not stall), settled exactly like provider_timeout
+	// (SPEC-006 §17.7.1 named mapping).
+	settleIdleTimeout := func(ceiling bool) {
 		cancelCoordinator()
 		if terminalStructuredErrorCode != "" {
 			refundTerminalStructuredError()
 			return
 		}
-		if structuredStreaming {
+		switch {
+		case structuredStreaming:
 			writeStructuredOutputTimeoutSSE(w, requestID(r))
-		} else {
+		case ceiling:
+			writeSSEError(w, deadlines.streamCeilingTimeoutMessage(), "api_error", requestTimeoutCode)
+		default:
 			writeSSEError(w, "Provider timed out during streaming", "api_error", "provider_timeout")
 		}
 		if flusher != nil {
@@ -1904,8 +1916,16 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 				"deadline_phase", deadlineReasonDecodeIdle,
 			)
 			deadlines.noteReason(deadlineReasonDecodeIdle)
-			settleIdleTimeout()
+			settleIdleTimeout(false)
 			return
+		}
+		// A phase deadline cancels the upstream mid-read, so the last line
+		// can be a torn SSE frame. Forwarding it would splice the terminal
+		// error envelope onto a partial frame the buyer cannot parse.
+		if err != nil && len(line) > 0 && line[len(line)-1] != '\n' {
+			if _, expired := phaseDeadlineExceeded(upstreamCtx); expired {
+				line = nil
+			}
 		}
 		if len(line) > 0 {
 			if !forwardLine(line) {
@@ -1925,8 +1945,9 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		// #760: a phase budget (first_token / stream_ceiling) expiring cancels
 		// the upstream, which surfaces here as a read error. That is a TIMEOUT,
 		// not a provider disconnect: it must settle through the same
-		// settleIdleTimeout funnel as the decode-idle timer so the buyer sees
-		// provider_timeout and the usage row records provider_timeout. Emitting
+		// settleIdleTimeout funnel as the decode-idle timer so the usage row
+		// records provider_timeout. The buyer sees provider_timeout, or
+		// request_timeout when the stream_ceiling cut a plain stream. Emitting
 		// provider_disconnected + settleTruncated here was the SPEC-019 AC-V2-9
 		// violation. settleIdleTimeout already handles the structured-output
 		// envelope and the already-forwarded-terminal-frame case, so this
@@ -1938,7 +1959,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 				"deadline_phase", phase,
 				"structured_streaming", structuredStreaming,
 			)
-			settleIdleTimeout()
+			settleIdleTimeout(phase == deadlinePhaseStreamCeiling)
 			return
 		}
 		slog.Error("streaming coordinator read failed", "request_id", requestID(r), "error", err)

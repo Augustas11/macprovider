@@ -1980,7 +1980,7 @@ func Default() Config {
 		Routing: RoutingConfig{
 			PreflightThresholdTokens:       4096,
 			PreflightTimeoutS:              5,
-			RequestTimeoutS:                900,
+			RequestTimeoutS:                3600, // C2: >= gateway stream_ceiling_max_seconds
 			FailoverEnabled:                true,
 			FailoverTimeoutS:               5,
 			SlotQueueMaxPendingPerProvider: 4,
@@ -1999,7 +1999,7 @@ func Default() Config {
 			ModelClasses:                   map[string]ModelClassConfig{},
 		},
 		ProviderHTTP: ProviderHTTPConfig{
-			TimeoutS: 900,
+			TimeoutS: 3600,
 		},
 		Limits: LimitsConfig{
 			MaxChatRequestBodyBytes: 4 << 20,

@@ -1,6 +1,18 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.6.27 (2026-10-24, `/v1/models` keeps a model listed while its providers are at capacity)
+**Version:** 1.6.28 (2026-10-24, 3600 s streaming twin walls; a gateway ceiling cut is labelled in `request_log`)
+
+**Change log v1.6.28 (2026-10-24, Related: #2107):** Registers
+`SPEC-002-R009`. `routing.request_timeout_s` and `provider_http.timeout_s`
+default to 3600 s (were 900 s), the twin walls of the gateway's new 3600 s
+streaming ceiling (SPEC-006 v0.9.67). The C2/C2b relations are unchanged, so
+Pearl's gateway non-streaming wall and header timeout move to 3660 s with
+them. A stream the gateway cut at its ceiling reaches the coordinator as a
+buyer cancel; its `request_log` row now carries `error_code` `request_timeout`
+when the gateway's declared deadline has passed. Status, terminal state,
+tokens and settlement are those of the buyer cancel; billing reads the code
+like an empty one. Pearl preserves its live config, so the walls are raised
+there by `scripts/ops/pearl-runtime.sh` `PEARL_RUNTIME_TASK=stream-ceiling`.
 
 **Change log v1.6.27 (2026-10-24, Related: #2107):** FR-B1 lists a model
 while at least one of its providers passes every routing gate except free
@@ -1783,7 +1795,7 @@ connection. The following rules are normative:
 
 3. **Cleanup.** The coordinator removes a `request_id` from its active
    map after receiving `inference_response_end` OR after
-   `routing.request_timeout_s` expires (default 900 s).
+   `routing.request_timeout_s` expires (default 3600 s).
 
 See also SPEC-001 v1.2.4 § 6.6 "Request ID lifecycle and error
 handling" for the provider-side rules.
@@ -1798,7 +1810,7 @@ memory budget. Buffer absorbs brief TCP congestion.
 
 **FR-P20. WS-tunneled response timeout.**
 Per outstanding `inference_request`, coordinator starts a timer of
-`routing.request_timeout_s` (default 900 s). On timeout: send
+`routing.request_timeout_s` (default 3600 s). On timeout: send
 `cancel_request`, return HTTP 504 to buyer, free slot. The timeout counts
 as a `relay-timeout-mid-inference` fault toward the **FR-P11a** circuit-breaker,
 which (as of v1.2.0) is the single source of truth for timeout-driven
@@ -5292,12 +5304,12 @@ pool:
 routing:
   preflight_threshold_tokens: 4096   # Skip preflight for prompts under this size
   preflight_timeout_s: 5
-  request_timeout_s: 900             # Must cover gateway stream_ceiling_max_seconds (C2)
+  request_timeout_s: 3600            # Must cover gateway stream_ceiling_max_seconds (C2)
   failover_enabled: true
   failover_timeout_s: 5
 
 provider_http:
-  timeout_s: 900                     # Must cover gateway stream_ceiling_max_seconds (C2)
+  timeout_s: 3600                    # Must cover gateway stream_ceiling_max_seconds (C2)
 
 auth:
   operator_key: "<required>"   # Bearer token for /poolz and /admin/blacklist
@@ -5696,3 +5708,26 @@ and a privacy-class refusal is recorded under SPEC-049-R030. Exclusion
 MUST happen before provider dispatch, receipt creation or provider credit; a
 never-dispatched attempt MUST remain unbilled. Reward exclusion in SPEC-050
 is additional protection and MUST NOT substitute for this routing gate.
+
+
+## SPEC-002-R009 — Streaming twin walls and the ceiling-cut label
+
+`routing.request_timeout_s` and `provider_http.timeout_s` MUST be at least the
+gateway's `timeouts.stream_ceiling_max_seconds` (FR-P11a C2), and the gateway's
+effective `non_stream_request_seconds` MUST stay strictly above
+`routing.request_timeout_s`; both coordinator walls default to 3600 s. The
+deploy gate (`dist/check-deploy-config.sh`) and the Pearl
+`PEARL_RUNTIME_TASK=stream-ceiling` step enforce these relations; the step
+only raises values, restarts the coordinator before the gateway, and restores
+all three files on any failure.
+
+When an authenticated gateway account sends
+`X-MacProvider-Internal-Stream-Deadline-Unix-Ms` on a streaming request and
+the attempt ends as a buyer cancel at or after that deadline (1 s skew
+tolerated), the `request_log` row MUST carry `error_code` `request_timeout`.
+The label MUST NOT change the row's status, error text, terminal state, token
+fields, fault flag or settlement: the prompt estimate and terminal state are
+computed before it is applied, and billing treats the code like an empty one.
+A cancel before the deadline, a request without the header, and an
+unauthenticated request are unlabelled.
+

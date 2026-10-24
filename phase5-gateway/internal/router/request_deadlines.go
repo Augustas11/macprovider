@@ -48,6 +48,20 @@ const (
 	deadlineReasonDecodeIdle = "decode_idle"
 )
 
+// requestTimeoutCode is the buyer-visible terminal code for a plain stream cut
+// by its stream_ceiling (SPEC-006 §17.7.1 named mapping). The provider did not
+// fail, so provider_timeout would misdirect the buyer; first_token and
+// decode_idle keep provider_timeout because there the provider stalled.
+// Structured-output streams keep provider_timeout (SPEC-019 AC-V2-9).
+const requestTimeoutCode = "request_timeout"
+
+// gatewayStreamDeadlineHeader carries the absolute stream_ceiling deadline
+// (Unix ms) to the coordinator, so the request_log row of a stream the gateway
+// cut at its ceiling records error_code request_timeout instead of an
+// unexplained buyer disconnect (SPEC-002 FR-P11a). The internal- prefix keeps
+// it gateway-authenticated on the coordinator side.
+const gatewayStreamDeadlineHeader = "X-MacProvider-Internal-Stream-Deadline-Unix-Ms"
+
 // spec019StructuredStreamingCeiling is the structured-output streaming budget
 // SPEC-019 v0.2.4 pins normatively (§AC-V2-9: "300s from gateway first byte of
 // request to provider terminal SSE frame").
@@ -91,6 +105,9 @@ type requestDeadlines struct {
 	stopped bool
 	phase   *time.Timer
 	ceiling *time.Timer
+	// ceilingBudget is the armed stream_ceiling budget, for the buyer-visible
+	// request_timeout message. Zero until armCeiling runs.
+	ceilingBudget time.Duration
 	// reason is an explicitly recorded terminal clock that has no
 	// cancellation cause of its own — today only the decode-idle timer,
 	// which cancels the upstream itself and reports via a sentinel error.
@@ -178,9 +195,10 @@ func (d *requestDeadlines) disarmPhase() {
 func (d *requestDeadlines) armCeiling(budget time.Duration) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.stopped || d.ceiling != nil {
+	if d.stopped || d.ceiling != nil || d.ceilingBudget > 0 {
 		return
 	}
+	d.ceilingBudget = budget
 	remaining := budget - time.Since(d.startedAt)
 	if remaining <= 0 {
 		d.cancel(&phaseDeadlineError{Phase: deadlinePhaseStreamCeiling})
@@ -189,6 +207,25 @@ func (d *requestDeadlines) armCeiling(budget time.Duration) {
 	d.ceiling = time.AfterFunc(remaining, func() {
 		d.cancel(&phaseDeadlineError{Phase: deadlinePhaseStreamCeiling})
 	})
+}
+
+// ceilingDeadline is the absolute stream_ceiling deadline, or the zero time
+// when no ceiling is armed.
+func (d *requestDeadlines) ceilingDeadline() time.Time {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.ceilingBudget <= 0 {
+		return time.Time{}
+	}
+	return d.startedAt.Add(d.ceilingBudget)
+}
+
+// streamCeilingTimeoutMessage is the buyer-visible request_timeout message.
+func (d *requestDeadlines) streamCeilingTimeoutMessage() string {
+	d.mu.Lock()
+	budget := d.ceilingBudget
+	d.mu.Unlock()
+	return fmt.Sprintf("Request reached the streaming time limit of %d s and the response is incomplete; lower max_tokens or shorten the request", int64(budget/time.Second))
 }
 
 // noteReason records a terminal clock that is not a cancellation cause.

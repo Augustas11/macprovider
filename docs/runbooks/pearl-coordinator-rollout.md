@@ -166,6 +166,42 @@ the output along with any `postgres://` URL and `password=` pair; control
 characters are stripped. If `PEARL_SSH` is unset or the check fails, the step
 is blocked, and a live release is not reported done. Expected downtime: none; the coordinator is not restarted.
 
+## Streaming walls (one-time)
+
+The gateway streaming ceiling and its coordinator twin walls are 3600 s in the
+tracked configs (SPEC-002 FR-P11a C2, SPEC-006 §17.7.1). Pearl preserves its
+live `coordinator.yaml`, overlay and `gateway.yaml`, so a runtime apply does
+not change them. Raise them once with:
+
+```bash
+PEARL_RUNTIME_TASK=stream-ceiling scripts/ops/pearl-runtime.sh status
+PEARL_RUNTIME_TASK=stream-ceiling scripts/ops/pearl-runtime.sh next --run
+```
+
+Run it after the runtime release that ships the explicit `request_timeout`
+terminal is live. The step edits only these keys and never lowers one:
+
+| File | Key | Target |
+|---|---|---|
+| `coordinator.yaml` or the overlay (whichever sets it) | `routing.request_timeout_s` | 3600 |
+| same | `provider_http.timeout_s` | 3600 |
+| `gateway.yaml` | `timeouts.stream_ceiling_max_seconds` | 3600 |
+| `gateway.yaml` | `timeouts.non_stream_request_seconds` | 3660 (above the coordinator wall, C2) |
+| `gateway.yaml` | `timeouts.coordinator_header_timeout_seconds` | 3660 (covers the non-streaming wall, C2b) |
+
+It refuses a result that fails the deploy gate's C2/C2b relations, backs the
+three files up under the backup root, validates the coordinator files with the
+running coordinator, then restarts the coordinator and then the gateway. The
+coordinator goes first so the gateway ceiling is never above the coordinator
+walls. If a restart or its check fails, it restores the three files and
+restarts both again.
+
+Expected downtime: one coordinator restart (about 5-40 s), then one gateway
+restart (up to 40 s of drain). Buyer and provider traffic is interrupted for
+each, and a stream still open when either stops is cut. The step is done when
+the walls are at their targets and both services booted with the files on
+disk.
+
 ## Catalog activation (full deploy)
 
 The updater cannot activate a catalog: runtime releases carry `catalog: null`.

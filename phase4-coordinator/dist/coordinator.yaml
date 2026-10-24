@@ -108,10 +108,11 @@ pool:
 routing:
   preflight_threshold_tokens: 4096
   preflight_timeout_s: 5
-  # #760/#784: the gateway streaming ceiling is 900s; keep the coordinator
+  # #760/#784: the gateway streaming ceiling is 3600s; keep the coordinator
   # request wall at least that high or healthy long streams are truncated here
-  # before the gateway ceiling can fire.
-  request_timeout_s: 900
+  # before the gateway ceiling can fire. Pearl's live value is raised by
+  # scripts/ops/pearl-runtime.sh PEARL_RUNTIME_TASK=stream-ceiling.
+  request_timeout_s: 3600
   failover_enabled: true
   failover_timeout_s: 5
   slot_queue_max_pending_per_provider: 4
@@ -143,8 +144,8 @@ routing:
   buyer_ux_conformance_path: /opt/macprovider/buyer-ux-conformance.json
 
 provider_http:
-  # #760/#784 twin wall: must cover the gateway streaming ceiling.
-  timeout_s: 900
+  # #760/#784 twin wall: must cover the gateway streaming ceiling (3600s).
+  timeout_s: 3600
 
 limits:
   max_chat_request_body_bytes: 1048576  # 1 MiB default; raise for buyers with large tools arrays
