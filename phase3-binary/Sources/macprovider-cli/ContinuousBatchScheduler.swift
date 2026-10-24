@@ -535,6 +535,11 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
     /// reply-end checkpoint even when no prompt checkpoint was eligible.
     /// Excluded from the idempotency fingerprint like the checkpoint positions.
     let modelHasRecurrentLayers: Bool
+    /// SPEC-024 FR-CI2a: the prompt length at which a keyed row of a snapshot
+    /// family (DeepSeek V4, GLM-5-Next) deep-copies its cache for extend-only
+    /// reuse; prefill stops on it. Runtime-only and derived from
+    /// `promptTokens`, so it stays out of the idempotency fingerprint.
+    let promptSnapshotTokenCount: Int?
     /// SPEC-038 AC-26 hybrid cached turn: the retained entry's recurrent
     /// checkpoints at or below `cachedPromptTokens`. The one at exactly
     /// `cachedPromptTokens` is installed with the retained paged KV; any others
@@ -604,6 +609,7 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
         retainedPagedKVSequence: PagedKVRetainedSequence? = nil,
         recurrentCheckpointPositions: [Int] = [],
         modelHasRecurrentLayers: Bool = false,
+        promptSnapshotTokenCount: Int? = nil,
         retainedRecurrentCheckpoints: [RecurrentStateCheckpoint] = [],
         grammarConstraint: GrammarConstraintState? = nil,
         serialToolStopObserver: ContinuousBatchCanonicalStopObserver? = nil,
@@ -634,6 +640,9 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
         self.retainedPagedKVSequence = retainedPagedKVSequence
         self.recurrentCheckpointPositions = recurrentCheckpointPositions
         self.modelHasRecurrentLayers = modelHasRecurrentLayers
+        self.promptSnapshotTokenCount = promptSnapshotTokenCount.flatMap {
+            $0 >= ConversationCache.lcpThreshold && $0 < promptTokens.count ? $0 : nil
+        }
         self.retainedRecurrentCheckpoints = retainedRecurrentCheckpoints
         self.grammarConstraint = grammarConstraint
         self.grammarFingerprint = grammarConstraint?.fingerprint
@@ -869,11 +878,20 @@ final class ContinuousBatchSerialConversationCache: @unchecked Sendable {
     let layers: [KVCache]
     let recurrentCheckpoints: [RecurrentStateCheckpoint]
     let tokenCount: Int
+    /// SPEC-024 FR-CI2a: `layers` are a deep copy taken when prefill reached
+    /// exactly `tokenCount` prompt tokens; the entry is extend-only.
+    let promptSnapshot: Bool
 
-    init(layers: [KVCache], recurrentCheckpoints: [RecurrentStateCheckpoint], tokenCount: Int) {
+    init(
+        layers: [KVCache],
+        recurrentCheckpoints: [RecurrentStateCheckpoint],
+        tokenCount: Int,
+        promptSnapshot: Bool = false
+    ) {
         self.layers = layers
         self.recurrentCheckpoints = recurrentCheckpoints
         self.tokenCount = tokenCount
+        self.promptSnapshot = promptSnapshot
     }
 }
 
@@ -1390,6 +1408,10 @@ protocol ContinuousBatchSchedulerBackend: Sendable {
     /// Snapshot the row's own recurrent-layer state right after prefill reached
     /// `tokenCount` prompt tokens. Nil when the backend has no recurrent layers.
     func snapshotRecurrentState(requestID: String, tokenCount: Int) async -> RecurrentStateCheckpoint?
+    /// SPEC-024 FR-CI2a: a deep copy of the row's caches in the serial
+    /// conversation-cache format, taken right after prefill reached exactly
+    /// `tokenCount` prompt tokens. Nil when the backend cannot express it.
+    func snapshotPromptCache(requestID: String, tokenCount: Int) async -> ContinuousBatchSerialConversationCache?
     /// Build the row's serial-format conversation cache at a normal terminal,
     /// before its blocks are released: attention KV materialized from `binding`
     /// and trimmed to `tokenCount`. Nil when the backend has no recurrent layers.
@@ -1546,6 +1568,10 @@ extension ContinuousBatchSchedulerBackend {
     }
 
     func snapshotRecurrentState(requestID: String, tokenCount: Int) async -> RecurrentStateCheckpoint? {
+        nil
+    }
+
+    func snapshotPromptCache(requestID: String, tokenCount: Int) async -> ContinuousBatchSerialConversationCache? {
         nil
     }
 
@@ -2125,6 +2151,9 @@ actor ContinuousBatchScheduler {
         /// Keyed hybrid rows: recurrent state at each reached prompt checkpoint
         /// plus the terminal covered-token checkpoint.
         var recurrentCheckpoints: [RecurrentStateCheckpoint] = []
+        /// SPEC-024 FR-CI2a: the keyed row's prompt snapshot, once prefill
+        /// reached `request.promptSnapshotTokenCount`.
+        var promptSnapshot: ContinuousBatchSerialConversationCache? = nil
         var decodePath: DecodePath = .ordinary
         var nativeMTPAdaptation: NativeMTPDepthAdaptationState?
         var nativeMTPDirective: NativeMTPAdaptationDirective?
@@ -5168,6 +5197,20 @@ actor ContinuousBatchScheduler {
             finish(row, status: status, errorCode: nil, retainedCache: retainedCache)
             return
         }
+        if let promptSnapshot = row.promptSnapshot {
+            // SPEC-024 FR-CI2a: publish the prompt snapshot, never the decoded cache.
+            let released = await release(row.handle)
+            if cancelledIDs.remove(row.request.id) != nil {
+                finish(row, status: released ? .cancelled : .requestFailed, errorCode: released
+                    ? "request_cancelled"
+                    : "continuous_batching_cleanup_failed")
+                return
+            }
+            finish(row, status: released ? status : .requestFailed, errorCode: released
+                ? nil
+                : "continuous_batching_cleanup_failed", serialConversationCache: promptSnapshot)
+            return
+        }
         if contiguousCacheBridge != nil, row.request.modelHasRecurrentLayers {
             let released = await release(row.handle)
             if cancelledIDs.remove(row.request.id) != nil {
@@ -5544,9 +5587,18 @@ actor ContinuousBatchScheduler {
                 continue
             }
             row.prefillCursor += item.chunkCount
-            if pendingRecurrentCheckpointPositions(for: row).contains(row.prefillCursor) {
-                if let checkpoint = await backend.snapshotRecurrentState(requestID: id, tokenCount: row.prefillCursor) {
+            let checkpointDue = pendingRecurrentCheckpointPositions(for: row).contains(row.prefillCursor)
+            let promptSnapshotDue = promptSnapshotIsPending(for: row)
+                && row.request.promptSnapshotTokenCount == row.prefillCursor
+            if checkpointDue || promptSnapshotDue {
+                if checkpointDue,
+                   let checkpoint = await backend.snapshotRecurrentState(requestID: id, tokenCount: row.prefillCursor) {
                     row.recurrentCheckpoints.append(checkpoint)
+                }
+                if promptSnapshotDue,
+                   let snapshot = await backend.snapshotPromptCache(requestID: id, tokenCount: row.prefillCursor),
+                   snapshot.promptSnapshot, snapshot.tokenCount == row.prefillCursor {
+                    row.promptSnapshot = snapshot
                 }
                 guard activePrompt[id] != nil else { continue }
                 // A cancel that arrived while the snapshot was suspended only
@@ -5689,12 +5741,24 @@ actor ContinuousBatchScheduler {
     /// before crossing one.
     private func prefillSpanEnd(for row: Row) -> Int {
         let promptTokenCount = row.request.promptTokens.count
-        if let checkpoint = pendingRecurrentCheckpointPositions(for: row).first(where: {
-            $0 > row.prefillCursor
-        }) {
+        var boundaries = pendingRecurrentCheckpointPositions(for: row)
+        if promptSnapshotIsPending(for: row), let snapshot = row.request.promptSnapshotTokenCount {
+            boundaries.append(snapshot)
+        }
+        if let checkpoint = boundaries.filter({ $0 > row.prefillCursor }).min() {
             return min(promptTokenCount, checkpoint)
         }
         return promptTokenCount
+    }
+
+    /// SPEC-024 FR-CI2a: a keyed row of a snapshot family still owes its
+    /// prompt snapshot. A reference-plan row (DeepSeek V4) needs no split: the
+    /// runtime places its snapshot on a reference-plan boundary.
+    private func promptSnapshotIsPending(for row: Row) -> Bool {
+        row.promptSnapshot == nil
+            && row.request.promptSnapshotTokenCount != nil
+            && row.request.cachedPromptTokens == 0
+            && !row.request.conversationKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private func prefillEnd(for row: Row, maxChunkTokens: Int) -> Int {

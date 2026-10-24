@@ -375,6 +375,8 @@ struct ContinuousBatchPreparedRequest: Sendable {
     /// SPEC-018 §3.11 call prefill ending `promptTokens`, if any.
     let toolCallPrefill: String?
     var grammarConstraint: GrammarConstraintState? = nil
+    /// SPEC-024 FR-CI2a: keyed rows of a snapshot family only.
+    var promptSnapshotTokenCount: Int? = nil
 }
 
 /// Serializes text prompt preparation for one admitted Qwen target snapshot.
@@ -7040,7 +7042,11 @@ maxTokens: 1,
                     ),
                     modelHasRecurrentLayers: hybrid,
                     toolCallPrefill: toolCallPrefill,
-                    grammarConstraint: try GrammarConstraintState.prepare(request: request, tokenizer: tokenizer, configuration: context.configuration, eosTokenIDs: Self.generationStopTokenIDs(for: context))
+                    grammarConstraint: try GrammarConstraintState.prepare(request: request, tokenizer: tokenizer, configuration: context.configuration, eosTokenIDs: Self.generationStopTokenIDs(for: context)),
+                    promptSnapshotTokenCount: Self.nonEmpty(request.conversationKey) == nil ? nil
+                        : Self.conversationPromptSnapshotTokenCount(
+                            promptTokenIds: promptTokens.map(Int32.init),
+                            policy: Self.conversationPromptSnapshotPolicy(model: context.model, tokenizer: tokenizer))
                 ),
                 StreamingDetokenizer(tokenizer: tokenizer)
             )
@@ -8036,6 +8042,9 @@ maxTokens: 1,
             retainedPagedKVSequence: lease?.reusableCache?.retainedPagedKVSequence,
             recurrentCheckpointPositions: prepared.recurrentCheckpointPositions,
             modelHasRecurrentLayers: prepared.modelHasRecurrentLayers,
+            // SPEC-024 FR-CI2a: a snapshot hit serial-routes (AC-26 fence), which
+            // strict `.on` refuses, so strict rows publish no snapshot.
+            promptSnapshotTokenCount: capability.mode == .on ? nil : prepared.promptSnapshotTokenCount,
             retainedRecurrentCheckpoints: Self.retainedRecurrentCheckpoints(for: lease),
             serialToolStopObserver: serialToolStop,
             grammarConstraint: prepared.grammarConstraint,
@@ -8117,7 +8126,8 @@ maxTokens: 1,
                     lease,
                     cache: ConversationCacheLayers(
                         serialCache.layers,
-                        recurrentCheckpoints: serialCache.recurrentCheckpoints
+                        recurrentCheckpoints: serialCache.recurrentCheckpoints,
+                        promptSnapshot: serialCache.promptSnapshot
                     ),
                     fullTokens: fullTokens,
                     cold: coldContext
@@ -8474,6 +8484,9 @@ maxTokens: 1,
             retainedPagedKVSequence: lease?.reusableCache?.retainedPagedKVSequence,
             recurrentCheckpointPositions: prepared.recurrentCheckpointPositions,
             modelHasRecurrentLayers: prepared.modelHasRecurrentLayers,
+            // SPEC-024 FR-CI2a: a snapshot hit serial-routes (AC-26 fence), which
+            // strict `.on` refuses, so strict rows publish no snapshot.
+            promptSnapshotTokenCount: capability.mode == .on ? nil : prepared.promptSnapshotTokenCount,
             retainedRecurrentCheckpoints: Self.retainedRecurrentCheckpoints(for: lease),
             serialToolStopObserver: serialToolStop,
             grammarConstraint: prepared.grammarConstraint,
@@ -8615,7 +8628,8 @@ maxTokens: 1,
                     lease,
                     cache: ConversationCacheLayers(
                         serialCache.layers,
-                        recurrentCheckpoints: serialCache.recurrentCheckpoints
+                        recurrentCheckpoints: serialCache.recurrentCheckpoints,
+                        promptSnapshot: serialCache.promptSnapshot
                     ),
                     fullTokens: fullTokens,
                     cold: coldContext
@@ -9118,6 +9132,14 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             if let resumeAt = recurrent.resumeAt {
                                 iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[resumeAt...])))
                             }
+                            // SPEC-024 FR-CI2a: snapshot families commit only the prompt prefix.
+                            let promptSnapshot = Self.prefillPromptSnapshot(
+                                lease: lease, cache: kvCache, promptTokenIds: promptTokenIds,
+                                start: promptTokenIds.count - iteratorInput.text.tokens.size,
+                                context: generationContext, prefillStepSize: prefillStepSize)
+                            if let resumeAt = promptSnapshot.resumeAt {
+                                iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[resumeAt...])))
+                            }
                             if isLocalRequest, !request.containsNonTextMessageContentPart {
                                 // SPEC-001-R011: a local prompt prefills in chunks with a
                                 // preemption check before each, so a buyer never waits on a
@@ -9348,6 +9370,19 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         )
                         if let lease {
                             let fullTokens = promptTokenIds + resultTokenIDs.map(Int32.init)
+                            if promptSnapshot.applies {
+                                if let layers = promptSnapshot.layers {
+                                    await conversationCache.commit(
+                                        lease,
+                                        cache: ConversationCacheLayers(layers, promptSnapshot: true),
+                                        fullTokens: Array(promptTokenIds.prefix(promptSnapshot.tokenCount)),
+                                        cold: coldContext
+                                    )
+                                } else {
+                                    await conversationCache.abort(lease)
+                                }
+                                return completion
+                            }
                             guard Self.serialHybridCacheCanPublishTerminalCheckpoint(
                                 cache: kvCache,
                                 terminalModelStopStripped: terminalModelStopStripped
@@ -10006,6 +10041,14 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                     if let resumeAt = recurrent.resumeAt {
                         iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[resumeAt...])))
                     }
+                    // SPEC-024 FR-CI2a: snapshot families commit only the prompt prefix.
+                    let promptSnapshot = Self.prefillPromptSnapshot(
+                        lease: lease, cache: kvCache, promptTokenIds: promptTokenIds,
+                        start: promptTokenIds.count - iteratorInput.text.tokens.size,
+                        context: generationContext, prefillStepSize: prefillStepSize)
+                    if let resumeAt = promptSnapshot.resumeAt {
+                        iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[resumeAt...])))
+                    }
                     if isLocalRequest, !request.containsNonTextMessageContentPart {
                         // SPEC-001-R011: a local prompt prefills in chunks with a
                         // preemption check before each, so a buyer never waits on a
@@ -10296,6 +10339,19 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         )
                         if let lease {
                             let fullTokens = promptTokenIds + resultTokenIDs.map(Int32.init)
+                            if promptSnapshot.applies {
+                                if let layers = promptSnapshot.layers {
+                                    await conversationCache.commit(
+                                        lease,
+                                        cache: ConversationCacheLayers(layers, promptSnapshot: true),
+                                        fullTokens: Array(promptTokenIds.prefix(promptSnapshot.tokenCount)),
+                                        cold: coldContext
+                                    )
+                                } else {
+                                    await conversationCache.abort(lease)
+                                }
+                                return validated
+                            }
                             guard Self.serialHybridCacheCanPublishTerminalCheckpoint(
                                 cache: kvCache,
                                 terminalModelStopStripped: terminalModelStopStripped
@@ -12667,6 +12723,112 @@ maxTokens: maxTokens,
             inferenceRan: false,
             settlementRan: false
         )
+    }
+
+    /// SPEC-024 FR-CI2a: where a keyed prompt is snapshotted for extend-only
+    /// reuse. Only families whose caches cannot be rewound to an arbitrary
+    /// prefix take it; every other family keeps its FR-CI2 entry unchanged.
+    enum ConversationPromptSnapshotPolicy: Equatable, Sendable {
+        /// DeepSeek V4: its ratio-4 overlap pools depend on forward-call
+        /// boundaries, so the snapshot sits on a boundary of the fixed
+        /// reference prefill plan (`min(step, remaining - 1)` chunks from 0).
+        /// The resumed prefill then runs the same calls as a fresh one.
+        case referencePlanBoundary(step: Int)
+        /// GLM-5-Next: the last chat-role marker, i.e. the history before the
+        /// generation prompt (`<|assistant|><think>`), which the next turn
+        /// re-renders unchanged.
+        case lastRoleMarker(tokenIDs: Set<Int32>)
+    }
+
+    static let glm5NextRoleMarkers = ["<|system|>", "<|user|>", "<|assistant|>", "<|observation|>"]
+
+    nonisolated static func conversationPromptSnapshotPolicy(
+        model: any LanguageModel,
+        tokenizer: any MLXLMCommon.Tokenizer
+    ) -> ConversationPromptSnapshotPolicy? {
+        if model is DeepseekV4Model {
+            return .referencePlanBoundary(step: DeepseekV4Model.prefillStepSize)
+        }
+        if model is GLM5NextModel || model is GLM5NextTextModel {
+            // Only ids that round-trip, so an unknown-token fallback never matches.
+            let ids = glm5NextRoleMarkers.compactMap { marker -> Int32? in
+                guard let id = tokenizer.convertTokenToId(marker),
+                      tokenizer.convertIdToToken(id) == marker else { return nil }
+                return Int32(id)
+            }
+            return ids.isEmpty ? nil : .lastRoleMarker(tokenIDs: Set(ids))
+        }
+        return nil
+    }
+
+    /// The snapshot length for `promptTokenIds`, or nil when it would be below
+    /// the reuse threshold. Always `< promptTokenIds.count`.
+    nonisolated static func conversationPromptSnapshotTokenCount(
+        promptTokenIds: [Int32],
+        policy: ConversationPromptSnapshotPolicy?
+    ) -> Int? {
+        let count: Int
+        switch policy {
+        case nil:
+            return nil
+        case .referencePlanBoundary(let step):
+            guard step > 0, promptTokenIds.count > 1 else { return nil }
+            count = step * ((promptTokenIds.count - 1) / step)
+        case .lastRoleMarker(let tokenIDs):
+            guard let last = promptTokenIds.lastIndex(where: { tokenIDs.contains($0) }) else { return nil }
+            count = last
+        }
+        return count >= ConversationCache.lcpThreshold ? count : nil
+    }
+
+    /// SPEC-024 FR-CI2a serial prompt snapshot. With a lease on a snapshot
+    /// family, prefill `cache` from `start` (the reused length, or 0) to the
+    /// snapshot length and deep-copy every layer there. A reference-plan
+    /// family prefills in whole steps, so the iterator resumes on the plan's
+    /// own boundary. `applies` is true whenever the request must commit only a
+    /// prompt snapshot (the decoded cache is never published for it).
+    struct SerialPromptSnapshot {
+        let applies: Bool
+        let layers: [KVCache]?
+        let tokenCount: Int
+        let resumeAt: Int?
+    }
+
+    static func prefillPromptSnapshot(
+        lease: ConversationCacheLease?,
+        cache: [KVCache],
+        promptTokenIds: [Int32],
+        start: Int,
+        context: ModelContext,
+        prefillStepSize: Int
+    ) -> SerialPromptSnapshot {
+        let none = SerialPromptSnapshot(applies: false, layers: nil, tokenCount: 0, resumeAt: nil)
+        guard lease != nil,
+              let policy = conversationPromptSnapshotPolicy(model: context.model, tokenizer: context.tokenizer)
+        else { return none }
+        let skipped = SerialPromptSnapshot(applies: true, layers: nil, tokenCount: 0, resumeAt: nil)
+        guard let target = conversationPromptSnapshotTokenCount(promptTokenIds: promptTokenIds, policy: policy),
+              target >= start
+        else { return skipped }
+        var step = max(1, prefillStepSize)
+        if case .referencePlanBoundary(let reference) = policy {
+            // A resume off the reference plan would change the pools.
+            guard start % reference == 0 else { return skipped }
+            step = reference
+        }
+        var cursor = start
+        while cursor < target {
+            let end = min(cursor + step, target)
+            let chunk = LMInput.Text(tokens: MLXArray(Array(promptTokenIds[cursor..<end])))
+            _ = context.model(chunk[text: .newAxis], cache: cache, state: nil)
+            eval(cache)
+            cursor = end
+        }
+        // Copies, because window, pool and recurrent buffers are written in place.
+        let layers = cache.map { $0.copy() }
+        eval(layers)
+        return SerialPromptSnapshot(
+            applies: true, layers: layers, tokenCount: target, resumeAt: target > start ? target : nil)
     }
 
     /// SPEC-024 FR-CI2 hybrid reuse. For a keyed serial request on a model with

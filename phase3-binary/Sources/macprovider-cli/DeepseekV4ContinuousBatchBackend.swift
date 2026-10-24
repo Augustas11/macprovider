@@ -222,6 +222,21 @@ final class DeepseekV4ContinuousBatchBackend: ContinuousBatchSchedulerBackend, @
         }
     }
 
+    /// SPEC-024 FR-CI2a: the row's own `newCache` layers are already the
+    /// serial cache format; copy them at exactly `tokenCount`.
+    func snapshotPromptCache(requestID: String, tokenCount: Int) async -> ContinuousBatchSerialConversationCache? {
+        await container.perform { _ -> ContinuousBatchSerialConversationCache? in
+            self.lock.lock()
+            let row = self.rows[requestID]
+            self.lock.unlock()
+            guard let row, row.tokenCount == tokenCount else { return nil }
+            let layers = row.caches.map { $0.copy() }
+            eval(layers)
+            return ContinuousBatchSerialConversationCache(
+                layers: layers, recurrentCheckpoints: [], tokenCount: tokenCount, promptSnapshot: true)
+        }
+    }
+
     func finish(requestID: String) {
         lock.lock(); defer { lock.unlock() }
         rows.removeValue(forKey: requestID)

@@ -53,6 +53,39 @@ final class PagedMLALatentCacheTests: XCTestCase {
         XCTAssertEqual(cache.pooledCapacity, 2)
     }
 
+    /// SPEC-024 FR-CI2a: a CB row's prompt snapshot converts each paged
+    /// latent cache into a serial `GLM5NextAttentionCache` that equals the
+    /// stock cache fed the same tokens and keeps equalling it as the next turn
+    /// extends it. CPU only.
+    func testPromptSnapshotConversionEqualsAndExtendsLikeTheStockCacheOnCPU() {
+        Device.withDefaultDevice(.cpu) {
+            var rng = SplitMix(seed: 31)
+            let paged = makeCache()
+            let oracle = stock()
+            for length in [7, 10, 1, 3] {
+                step(paged, oracle, length: length, rng: &rng, label: "prefill \(length)")
+            }
+            let snapshot = PagedKVSharedForwardBackend.serialAttentionCache(copying: paged)
+            XCTAssertEqual(snapshot.offset, paged.offset)
+            assertStatesEqual(snapshot.state, oracle.state, "converted snapshot")
+            // The paged source keeps moving; the snapshot must not.
+            step(paged, nil, length: 5, rng: &rng)
+            assertStatesEqual(snapshot.state, oracle.state, "snapshot after source advanced")
+            var resumed = SplitMix(seed: 97)
+            var fresh = SplitMix(seed: 97)
+            for length in [9, 1, 1, 6] {
+                let input = randomInputs(length: length, rng: &resumed)
+                _ = randomInputs(length: length, rng: &fresh)
+                let lhs = apply(snapshot, input)
+                let rhs = apply(oracle, input)
+                XCTAssertTrue(equal(lhs.latent, rhs.latent), "extended latent \(length)")
+                XCTAssertEqual(lhs.pooled.map(\.shape), rhs.pooled.map(\.shape))
+                if let l = lhs.pooled, let r = rhs.pooled { XCTAssertTrue(equal(l, r), "extended pooled \(length)") }
+            }
+            assertStatesEqual(snapshot.state, oracle.state, "extended snapshot")
+        }
+    }
+
     func testCopyIsIndependent() throws {
         try requireMetal()
         let cache = makeCache()

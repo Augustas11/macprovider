@@ -1898,6 +1898,51 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         }
     }
 
+    /// SPEC-024 FR-CI2a: a GLM-5-Next row (`pagedMLA` plus `recurrentMamba`
+    /// layers) in the serial cache format at exactly `tokenCount`. The paged
+    /// latent cache holds the `GLM5NextAttentionCache` state layout, so each
+    /// sparse layer copies into a serial `GLM5NextAttentionCache`; recurrent
+    /// layers copy their state. Every other layout returns nil.
+    func snapshotPromptCache(requestID: String, tokenCount: Int) async -> ContinuousBatchSerialConversationCache? {
+        guard cacheKinds.contains(where: \.isPagedMLA),
+              cacheKinds.allSatisfy({ $0.isPagedMLA || $0 == .recurrentMamba }),
+              beginOperation()
+        else { return nil }
+        defer { endOperation() }
+        return await container.perform { _ -> ContinuousBatchSerialConversationCache? in
+            guard let row = self.existingRowState(for: requestID),
+                  row.caches.count == self.cacheKinds.count,
+                  row.recurrentWindow == nil
+            else { return nil }
+            var layers: [KVCache] = []
+            for (index, kind) in self.cacheKinds.enumerated() {
+                if kind == .recurrentMamba {
+                    let state = row.caches[index].state
+                    guard !state.isEmpty else { return nil }
+                    let cache = MambaCache()
+                    cache.state = state.map { $0[.ellipsis] }
+                    layers.append(cache)
+                } else {
+                    guard let latent = row.caches[index] as? PagedMLALatentCache,
+                          latent.offset == tokenCount
+                    else { return nil }
+                    layers.append(Self.serialAttentionCache(copying: latent))
+                }
+            }
+            eval(layers)
+            return ContinuousBatchSerialConversationCache(
+                layers: layers, recurrentCheckpoints: [], tokenCount: tokenCount, promptSnapshot: true)
+        }
+    }
+
+    /// The serial `GLM5NextAttentionCache` holding a copy of `latent`'s state
+    /// (same layout: latent, pooled keys, pending and folded windows).
+    static func serialAttentionCache(copying latent: PagedMLALatentCache) -> GLM5NextAttentionCache {
+        let cache = GLM5NextAttentionCache(kpool: latent.kpool, maxTrim: latent.maxTrim)
+        cache.state = latent.state.map { $0[.ellipsis] }
+        return cache
+    }
+
     /// Reuses the FR-PKV10 materialize path on a throwaway bridge that records
     /// only this row's paged caches, so nothing outlives the call.
     func materializeSerialConversationCache(
