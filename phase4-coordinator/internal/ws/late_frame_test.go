@@ -470,6 +470,23 @@ func TestEncryptedRelayUndecodableAADFollowsKeyEpoch(t *testing.T) {
 	if _, ok := s.storedSessionFor("p1", "s1"); ok {
 		t.Fatal("undecodable current-epoch frame kept the session")
 	}
+
+	// A stale kid does not excuse an undecodable frame that names an active
+	// request: that stays an AEAD failure on the request (SPEC-008 6.7.1).
+	s, provider, providerConn, _ := lateFrameHarness(t)
+	relay := dispatchAndRead(t, s, provider, providerConn, "req-x", false)
+	s.handleInferenceEnd("p1", "s1", undecodable(t, provider, "retired-kid"))
+	if _, ok := s.storedSessionFor("p1", "s1"); ok {
+		t.Fatal("undecodable stale-kid frame for an active request kept the session")
+	}
+	select {
+	case err := <-relay.Errors:
+		if err != ErrRelayAEADFailed {
+			t.Fatalf("relay error = %v, want ErrRelayAEADFailed", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("active request not failed")
+	}
 }
 
 func TestRetiredRelayRequestCapKeepsArmedCancelTerminal(t *testing.T) {

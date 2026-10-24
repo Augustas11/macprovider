@@ -1867,9 +1867,11 @@ func (s *Server) inactiveFrameReason(session *providerSession, requestID string)
 // closeOrDropUndecodableFrame handles an encrypted frame whose AAD does not
 // decode. Under the current key epoch that is an AEAD failure; under a key
 // epoch the session no longer holds it is a stale frame that cannot touch the
-// current sequence window, so it is dropped (SPEC-002-R010).
+// current sequence window, so it is dropped (SPEC-002-R010) unless its
+// cleartext request_id names a request the coordinator is serving.
 func (s *Server) closeOrDropUndecodableFrame(session *providerSession, providerID, assignedID, frameType, envelopeRequestID, kid, reason string) {
-	if session.tier2KeyEpochIsStale(kid) {
+	_, active := session.activeFor(envelopeRequestID)
+	if !active && session.tier2KeyEpochIsStale(kid) {
 		s.logInactiveFrameDropped(session, providerID, assignedID, frameType, envelopeRequestID, "stale_key_epoch", true)
 		return
 	}
