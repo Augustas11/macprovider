@@ -389,11 +389,15 @@ type providerSession struct {
 	activeChanged  chan struct{}
 	closedCh       chan struct{}
 	httpOnly       bool
-	tier2Mu        sync.Mutex
-	tier2          *pool.Tier2Session
-	rekeyMu        sync.Mutex
-	rekey          *tier2RekeyExchange
-	rekeyWaiters   int
+	// maxTextFrameBytes is the largest text frame the provider accepts
+	// (SPEC-001-R012). enqueueFrame refuses a larger one; 0 disables the
+	// check (raw control frames are never checked).
+	maxTextFrameBytes int64
+	tier2Mu           sync.Mutex
+	tier2             *pool.Tier2Session
+	rekeyMu           sync.Mutex
+	rekey             *tier2RekeyExchange
+	rekeyWaiters      int
 
 	// ackPending holds text frames enqueued before the handshake ack in
 	// preAck; sendHandshakeAck flushes them behind the ack. Raw control
@@ -492,6 +496,8 @@ func newProviderSession(providerID, assignedID string, conn net.Conn, bufferSize
 		retired:       map[string]retiredRelayRequest{},
 		activeChanged: make(chan struct{}, 1),
 		closedCh:      make(chan struct{}),
+
+		maxTextFrameBytes: LegacyProviderWSMaxMessageBytes,
 	}
 }
 
@@ -655,6 +661,11 @@ func (ps *providerSession) enqueueRaw(rawFrame []byte) error {
 }
 
 func (ps *providerSession) enqueueFrame(f providerFrame) error {
+	if !f.raw && ps.maxTextFrameBytes > 0 && int64(len(f.payload)) > ps.maxTextFrameBytes {
+		// Writing it would make the provider close the whole session
+		// (SPEC-001-R012). Refuse this frame only.
+		return ErrProviderFrameTooLarge
+	}
 	ps.writeMu.Lock()
 	defer ps.writeMu.Unlock()
 	if ps.closed {
@@ -946,7 +957,14 @@ func (ps *providerSession) sealInferenceRequestWithFleetCache(provider pool.Prov
 			PrivacyClass:          relayBlindPrivacyClass(relayBlind),
 			RelayBlindSettlement:  relayBlindSettlementMetadata(relayBlind),
 		}
-		return json.Marshal(msg)
+		frame, err := json.Marshal(msg)
+		if err != nil {
+			return nil, err
+		}
+		if ps.maxTextFrameBytes > 0 && int64(len(frame)) > ps.maxTextFrameBytes {
+			return nil, ErrProviderFrameTooLarge
+		}
+		return frame, nil
 	}
 	defer ps.tier2Mu.Unlock()
 	if session.C2PCounter == ^uint64(0) {
@@ -976,6 +994,29 @@ func (ps *providerSession) sealInferenceRequestWithFleetCache(provider pool.Prov
 	})
 	if err != nil {
 		return nil, err
+	}
+	// SPEC-001-R012: size the frame before sealing, so an over-limit request
+	// spends neither the sequence number nor a nonce and the session stays
+	// in step with the provider.
+	if ps.maxTextFrameBytes > 0 {
+		sized, err := tier2.PillarBEnvelopeBodyForSize(session.KeyID, seq, aad, len(plaintext))
+		if err != nil {
+			return nil, err
+		}
+		frame, err := json.Marshal(encryptedInferenceRequest{
+			Type:       "inference_request",
+			RequestID:  requestID,
+			Stream:     stream,
+			Encrypted:  true,
+			Enc:        sized,
+			Settlement: settlement,
+		})
+		if err != nil {
+			return nil, err
+		}
+		if int64(len(frame)) > ps.maxTextFrameBytes {
+			return nil, ErrProviderFrameTooLarge
+		}
 	}
 	envelope, err := tier2.SealPillarBFrame(session.C2PKey, session.C2PNonceBase, session.KeyID, seq, aad, plaintext)
 	if err != nil {

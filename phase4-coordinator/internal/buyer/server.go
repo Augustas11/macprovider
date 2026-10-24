@@ -145,6 +145,7 @@ var spec018RetryableByCode = map[string]bool{
 	"malformed_json_response":                                 true,
 	"json_schema_validation_failed":                           true,
 	"request_body_too_large":                                  false,
+	"request_too_large":                                       false,
 	"tool_result_too_large":                                   false,
 	"tool_results_aggregate_too_large":                        false,
 	"tool_call_arguments_too_large":                           false,
@@ -474,7 +475,15 @@ const (
 	// so it renders the non-streaming 413 context_exceeds_capacity and is
 	// neither retried nor breaker-qualifying.
 	wsForwardContextExceeded wsForwardResult = "context_exceeded"
+	// wsForwardRequestTooLarge is a request whose inference_request frame
+	// exceeds the selected provider's WebSocket message limit
+	// (SPEC-001-R012). Nothing was sent and the provider session is intact;
+	// it renders 413 request_too_large and is neither retried nor
+	// breaker-qualifying.
+	wsForwardRequestTooLarge wsForwardResult = "request_too_large"
 )
+
+const providerFrameTooLargeMessage = "Request is too large for the selected provider's transport"
 
 type breakerFault string
 
@@ -3361,7 +3370,7 @@ func (s *Server) forwardWSNonStreamSequence(
 		},
 		handleNonRetryableTerminal: func(_ http.ResponseWriter, dispatched dispatchedAttempt, state *forwardState) bool {
 			result := dispatched.nativeResult
-			if result == wsForwardFailed || result == wsForwardUnavailable || result == wsForwardCancelled {
+			if result == wsForwardFailed || result == wsForwardUnavailable || result == wsForwardCancelled || result == wsForwardRequestTooLarge {
 				if result != wsForwardCancelled || shouldLogAttempt(dispatched.tr.attempt) {
 					if err := logAttempt(state.provider, statusForForwardResult(result), dispatched.tr.attempt, state.explicitRetries); err != nil {
 						s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", state.provider.ProviderID).Msg("ws terminal attempt log failed")
@@ -4204,6 +4213,13 @@ func (s *Server) forwardWS(w http.ResponseWriter, r *http.Request, requestID str
 			}
 			writeError(w, http.StatusServiceUnavailable, "no_provider_available", "Selected provider is not reachable")
 			return wsForwardUnavailable, requestLogAttempt{Status: http.StatusServiceUnavailable, Error: "Selected provider is not reachable"}
+		}
+		if errors.Is(err, providerws.ErrProviderFrameTooLarge) {
+			attempt := requestLogAttempt{Status: http.StatusRequestEntityTooLarge, Error: providerFrameTooLargeMessage, ErrorCode: "request_too_large"}
+			if !stream {
+				writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", providerFrameTooLargeMessage)
+			}
+			return wsForwardRequestTooLarge, attempt
 		}
 		if errors.Is(err, providerws.ErrRelayAEADFailed) {
 			if stream {
@@ -6869,7 +6885,7 @@ func statusForForwardResult(result wsForwardResult) int {
 		return http.StatusGatewayTimeout
 	case wsForwardQueueFull, wsForwardUnavailable:
 		return http.StatusServiceUnavailable
-	case wsForwardContextExceeded:
+	case wsForwardContextExceeded, wsForwardRequestTooLarge:
 		return http.StatusRequestEntityTooLarge
 	default:
 		return http.StatusBadGateway
@@ -6886,6 +6902,8 @@ func writeStreamForwardError(w http.ResponseWriter, result wsForwardResult) {
 		writeError(w, http.StatusBadGateway, "provider_disconnected", "Selected provider disconnected; buyer should retry")
 	case wsForwardContextExceeded:
 		writeError(w, http.StatusRequestEntityTooLarge, "context_exceeds_capacity", "Request exceeds provider context capacity")
+	case wsForwardRequestTooLarge:
+		writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", providerFrameTooLargeMessage)
 	case wsForwardCancelled, wsForwardProviderDisconnectedCommitted:
 		return
 	default:

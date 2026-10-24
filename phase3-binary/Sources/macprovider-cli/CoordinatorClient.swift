@@ -45,6 +45,24 @@ private let providerWebSocketSession: URLSession = {
     )
 }()
 
+// SPEC-001-R012: the coordinator-to-provider WebSocket message limit. A
+// URLSessionWebSocketTask fails the whole task on one message over its
+// maximumMessageSize (NSPOSIXErrorDomain 40, close 1009), and Foundation's
+// default is 1 MiB, which a large prompt's sealed inference_request exceeds.
+// The provider raises the limit and advertises it in
+// auth_request.tier2_capabilities.ws_max_message_bytes; the coordinator never
+// writes a larger frame to this session.
+let coordinatorWebSocketMaximumMessageBytes = 64 * 1024 * 1024
+
+func makeCoordinatorWebSocketTask(
+    _ request: URLRequest,
+    maximumMessageSize: Int = coordinatorWebSocketMaximumMessageBytes
+) -> URLSessionWebSocketTask {
+    let task = providerWebSocketSession.webSocketTask(with: request)
+    task.maximumMessageSize = maximumMessageSize
+    return task
+}
+
 extension URLSessionWebSocketTask: ProviderWebSocketTask {
     var closeCodeRawValueForDiagnostics: Int? {
         let rawValue = closeCode.rawValue
@@ -785,7 +803,7 @@ actor CoordinatorClient {
         privacyPostureProbeOverride: (any PrivacyPostureProbe)? = nil,
         privacySESignerOverride: (any SEBlobSigner)? = nil,
         privacyCodeBoundAttestorOverride: (any PrivacyCodeBoundAttesting)? = nil,
-        webSocketFactory: @escaping @Sendable (URLRequest) -> ProviderWebSocketTask = { providerWebSocketSession.webSocketTask(with: $0) },
+        webSocketFactory: @escaping @Sendable (URLRequest) -> ProviderWebSocketTask = { makeCoordinatorWebSocketTask($0) },
         sleepAssertionFactory: @escaping @Sendable () -> ProviderSleepAssertion? = { CaffeinateSleepAssertion.start() },
         pairingController: PairingController? = nil,
         connectAndRunOverride: (@Sendable () async throws -> Void)? = nil,
@@ -8356,6 +8374,9 @@ actor CoordinatorClient {
                 "relay_blind_settlement_receipt_v1": true,
                 // SPEC-036 FR-21: this runtime runs teacher-forced scoring jobs.
                 ComputeScoreProtocol.capability: computeScoreExecutor != nil,
+                // SPEC-001-R012: the largest coordinator-to-provider message
+                // this session's WebSocket accepts.
+                "ws_max_message_bytes": coordinatorWebSocketMaximumMessageBytes,
             ],
         ]
         if await advertisesFleetCacheProtocol() {

@@ -3073,6 +3073,12 @@ func (c Config) Validate() error {
 	if c.WS.MaxFrameBytes > 64<<20 {
 		return fmt.Errorf("ws.max_frame_bytes must be <= 67108864")
 	}
+	// SPEC-001-R012: providers may send any provider-to-coordinator frame up
+	// to 4 MiB; a smaller read cap would turn a valid frame into a dropped
+	// provider session.
+	if c.WS.MaxFrameBytes < 4<<20 {
+		return fmt.Errorf("ws.max_frame_bytes must be >= 4194304")
+	}
 	if c.Relay.MaxRequestBufferBytes <= 0 {
 		return fmt.Errorf("relay.max_request_buffer_bytes must be > 0")
 	}

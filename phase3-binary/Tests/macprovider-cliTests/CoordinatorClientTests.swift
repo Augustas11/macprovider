@@ -7151,6 +7151,8 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertEqual(caps["relay_blind_settlement_receipt_v1"] as? Bool, true)
         // SPEC-036 FR-21: the MLX runtime runs scoring jobs.
         XCTAssertEqual(caps["compute_score_v1"] as? Bool, true)
+        // SPEC-001-R012: the advertised coordinator-to-provider message limit.
+        XCTAssertEqual(caps["ws_max_message_bytes"] as? Int, 64 * 1024 * 1024)
     }
 
     func testInBandAEADRekeyProvesFreshKeysBeforeSameSessionCutover() async throws {

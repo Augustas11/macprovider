@@ -655,6 +655,17 @@ func TestProviderWebSocketBoundsDefaultAndValidate(t *testing.T) {
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "max_frame_bytes") {
 		t.Fatalf("oversize frame cap validation err=%v", err)
 	}
+
+	// SPEC-001-R012: the provider-to-coordinator floor.
+	cfg = validTestConfig()
+	cfg.WS.MaxFrameBytes = 4<<20 - 1
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "max_frame_bytes must be >= 4194304") {
+		t.Fatalf("undersize frame cap validation err=%v", err)
+	}
+	cfg.WS.MaxFrameBytes = 4 << 20
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("4 MiB frame cap should validate: %v", err)
+	}
 }
 
 func TestSpec005BillingDefaultsAndValidation(t *testing.T) {

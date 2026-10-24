@@ -1,6 +1,21 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.44 (2026-10-23, tool-selection capability `schema_profiles` member)
+**Version:** 1.9.45 (2026-10-25, WebSocket message size limits)
+
+**Change log v1.9.45 (2026-10-25, Related: #614):**
+Adds `SPEC-001-R012`. A provider's WebSocket client fails the whole session on
+one message over its limit, and Foundation's default limit is 1 MiB, so a
+prompt of about 784 KB (sealed and base64-encoded into an `inference_request`
+of about 1.07 MB) dropped the provider's coordinator session and the buyer got
+503. The provider now accepts coordinator-to-provider messages up to 64 MiB and
+advertises its limit in `auth_request.tier2_capabilities.ws_max_message_bytes`.
+The coordinator never writes a text frame larger than the session's limit (the
+legacy 1 MiB when not advertised): it refuses that request with 413
+`request_too_large`, sends nothing, spends no AEAD sequence number and keeps
+the session. Provider-to-coordinator frames are bounded at 4 MiB, the floor of
+the coordinator's `ws.max_frame_bytes`. The §6.6 16 MB `inference_request`
+bound and the OQ-4 position are replaced. No trust-tier, settlement or
+hardware-acceptance claim is added.
 
 **Change log v1.9.44 (2026-10-23, Related: #2107):**
 SPEC-001-R007 adds one optional member to a `tool_selection_capabilities`
@@ -3257,8 +3272,8 @@ budget as a 502, never reaches the buyer verbatim, and neither degrades the
 provider nor counts as a breaker fault.
 
 **Size limit:** The coordinator MUST NOT send an `inference_request`
-whose total WS frame size exceeds 16 MB. This accommodates the largest
-legal request body (10 MB per FR-8 Stage 1) plus envelope overhead.
+(or any other text frame) larger than the session's WebSocket message limit;
+see `SPEC-001-R012` (§6.15.5).
 
 #### inference_response_chunk (P→C)
 
@@ -4892,6 +4907,46 @@ retransmit an inference request/response and does not alter §6.6's application
 retransmission policy, advertised-capacity relay admission, or request-ID
 lifecycle.
 
+#### 6.15.5. WebSocket message size limits (NEW in v1.9.45)
+
+**SPEC-001-R012 — The serving connection survives any single request's size.**
+A WebSocket client may end the whole session when one message exceeds its
+limit (Foundation's `URLSessionWebSocketTask` fails the task with
+`NSPOSIXErrorDomain` 40 and closes with 1009). One request MUST NOT be able to
+do that.
+
+*Provider: advertise and accept.* The provider's coordinator
+WebSocket MUST accept text messages up to 64 MiB (67,108,864 bytes) and MUST
+advertise the limit it enforces as the integer
+`auth_request.tier2_capabilities.ws_max_message_bytes` on the initial stage.
+64 MiB covers the worst-case encoding of a 4 MiB chat body (the SPEC-006 body
+limit): six-byte JSON escapes of every content byte, the sealed plaintext
+envelope and base64 come to about 32 MiB.
+
+*Coordinator: never write an over-limit frame.* The coordinator MUST treat a
+session's limit as the advertised value clamped to [1 MiB, 64 MiB], and as
+1 MiB (1,048,576 bytes) when the member is absent, not an integer, or smaller.
+It MUST NOT write a text frame larger than that limit. For an encrypted-leg
+`inference_request` it MUST compute the sealed frame's exact length before
+sealing and refuse without spending the C2P sequence number or a nonce, so the
+session stays in step with the provider. A refused frame leaves the session
+open and routable and is not a provider fault. A buyer request refused this way
+ends `413` with error code `request_too_large`; it is not retried on another
+provider and is not breaker-qualifying. Raw WebSocket control frames are not
+text messages and are not checked.
+
+*Provider-to-coordinator frames.* The coordinator's
+`ws.max_frame_bytes` MUST be at least 4 MiB (4,194,304 bytes); configuration
+below that is rejected. A provider MUST keep every provider-to-coordinator frame
+within 4 MiB. Output is bounded by the request's `max_tokens`; a non-streaming
+response at the gateway's 32,768-token ceiling stays well under 4 MiB after
+JSON escaping and base64.
+
+*Gateway.* A chat body over the gateway's `limits.request_body_bytes` is
+answered `413 request_too_large` by the gateway before any provider is
+selected. The coordinator's 413 `request_too_large` reaches the buyer
+unchanged.
+
 ---
 
 ## 7. Dependencies and references
@@ -5551,12 +5606,9 @@ completion would be a single `inference_response_chunk` with a ~200 KB
 `data` field, which fits in one WS text frame (gobwas/ws default max:
 unbounded; network MTU handles fragmentation).
 
-**Current position:** No explicit frame size limit in the protocol.
-The 16 MB coordinator-side limit on `inference_request` (§ 6.6) is
-sufficient. Non-streaming responses are bounded by `max_tokens`
-(provider-enforced) and should not exceed a few MB. Monitor during
-AC-12 testing. If WS throughput is a bottleneck, consider chunking
-non-streaming responses.
+**Current position (v1.9.45):** Resolved by `SPEC-001-R012` (§6.15.5):
+coordinator-to-provider messages are bounded by the provider's advertised
+limit (legacy 1 MiB), provider-to-coordinator frames by 4 MiB.
 
 **OQ-5. Provider-side WS write buffer sizing.**
 FR-28 specifies 256 chunks per request as the provider-side write

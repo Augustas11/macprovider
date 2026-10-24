@@ -957,7 +957,7 @@ var coordinatorEmittedErrorCodes = []string{
 	"provider_disconnected", "provider_error", "provider_failed",
 	"provider_not_found", "provider_response_too_large", "provider_stream_downgraded",
 	"provider_timeout", "provisional_quota_exceeded", "rate_limited",
-	"request_body_too_large", "request_canceled", "request_content_encoding_unsupported", "request_log_failed",
+	"request_body_too_large", "request_too_large", "request_canceled", "request_content_encoding_unsupported", "request_log_failed",
 	"response_byte_cap_exceeded", "route_snapshot_failed", "session_ended",
 	"settlement_finality_failed", "settlement_receipt_lookup_failed", "stream_output_exceeded", "streaming_json_object_unsupported",
 	"streaming_json_schema_unsupported", "tier2_aead_decrypt_failed", "tier2_attestation_required",

@@ -182,6 +182,10 @@ type Tier2Caps struct {
 	// head and member session capabilities.
 	ShardGroupHeadV1 bool `json:"shard_group_head_v1,omitempty"`
 	ShardMemberV1    bool `json:"shard_member_v1,omitempty"`
+	// WSMaxMessageBytes is the SPEC-001-R012 largest coordinator-to-provider
+	// text message the provider's WebSocket accepts. Absent means the legacy
+	// 1 MiB Foundation default.
+	WSMaxMessageBytes int64 `json:"ws_max_message_bytes,omitempty"`
 }
 
 type AuthChallenge struct {
