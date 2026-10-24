@@ -1858,13 +1858,10 @@ def sc_rollback(args, targets, backup, exc):
                       "coordinator.yaml, the overlay, gateway.yaml and both running services are UNPROVEN; compare "
                       "them with the backup in %s, then check both services and run status now"
                       % (failure(exc), failure(rexc), backup))
-    # Both services are recovered independently: a coordinator that fails
-    # its recovery must not leave the gateway on the raised ceiling.
+    # Both services are recovered independently, the gateway first: the
+    # restored (lower) gateway ceiling then never sits above coordinator walls
+    # that are still raised, the reverse of the install order (C2).
     failed = []
-    try:
-        recovery_restart(args, "the original coordinator config is restored on disk (bytes verified)")
-    except Exception as cexc:
-        failed.append("coordinator: %s" % failure(cexc))
     try:
         sc_after_config_second(args)
         if subprocess.run(["systemctl", "restart", args.gateway_unit], timeout=120, capture_output=True).returncode != 0:
@@ -1874,6 +1871,10 @@ def sc_rollback(args, targets, backup, exc):
             raise Refused("the gateway did not start after its restored config was written")
     except Exception as gexc:
         failed.append("gateway: %s" % failure(gexc))
+    try:
+        recovery_restart(args, "the original coordinator config is restored on disk (bytes verified)")
+    except Exception as cexc:
+        failed.append("coordinator: %s" % failure(cexc))
     if failed:
         raise Refused("the stream-ceiling install or restart failed (%s); the original files are restored (bytes "
                       "verified) but the recovery is UNPROVEN for %s: check both services and run status now"

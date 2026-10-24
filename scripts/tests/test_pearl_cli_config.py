@@ -599,7 +599,8 @@ class StreamCeilingApplyTest(unittest.TestCase):
                 pcc.apply_stream_ceiling(self.args)
         self.assertEqual((self.read("config"), self.read("overlay"), self.read("gateway")),
                          (SC_BASE, SC_OVERLAY, SC_GATEWAY))
-        self.assertEqual(self.events, ["systemctl restart coordinator.service", "systemctl restart gateway.service"])
+        # Rollback restarts the gateway before the coordinator (C2 holds throughout).
+        self.assertEqual(self.events, ["systemctl restart gateway.service", "systemctl restart coordinator.service"])
 
     def test_coordinator_recovery_failure_still_recovers_the_gateway(self):
         with self.mock.patch.object(pcc, "restart", lambda a, pid: None), \

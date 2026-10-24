@@ -194,7 +194,7 @@ three files up under the backup root, validates the coordinator files with the
 running coordinator, then restarts the coordinator and then the gateway. The
 coordinator goes first so the gateway ceiling is never above the coordinator
 walls. If a restart or its check fails, it restores the three files and
-restarts both again.
+restarts both again, the gateway first for the same reason.
 
 Expected downtime: one coordinator restart (about 5-40 s), then one gateway
 restart (up to 40 s of drain). Buyer and provider traffic is interrupted for

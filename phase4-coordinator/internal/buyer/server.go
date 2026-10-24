@@ -2891,13 +2891,27 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	gatewayStreamDeadline := time.Time{}
 	// buyerCancelledAt is when the gateway's cancel arrived, not when the
 	// row is logged: a cancel waits for the provider's terminal first.
+	// cancelRecorded closes once the AfterFunc stored it; AfterFunc runs
+	// asynchronously, so a row logged right after the cancel waits for it.
 	var buyerCancelledAt atomic.Int64
+	var cancelRecorded chan struct{}
 	if hasAuthenticatedAccount && req.Stream {
 		gatewayStreamDeadline, _ = unixMillisHeader(r.Header, gatewayStreamDeadlineHeader)
 		if !gatewayStreamDeadline.IsZero() {
-			stop := context.AfterFunc(r.Context(), func() { buyerCancelledAt.Store(s.now().UnixNano()) })
+			cancelRecorded = make(chan struct{})
+			stop := context.AfterFunc(r.Context(), func() {
+				buyerCancelledAt.Store(s.now().UnixNano())
+				close(cancelRecorded)
+			})
 			defer stop()
 		}
+	}
+	cancelArrival := func() int64 {
+		if cancelRecorded == nil || r.Context().Err() == nil {
+			return 0
+		}
+		<-cancelRecorded
+		return buyerCancelledAt.Load()
 	}
 	logAttemptWithReceiptState := func(provider pool.Provider, fallbackStatus int, attempt requestLogAttempt, retried int) (billing.SettlementReceiptState, bool, error) {
 		if attempt.Logged {
@@ -2917,7 +2931,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		// Labelled after the prompt estimate and terminal state above, which
 		// read ErrorCode: the label changes neither, and billing's usageFor
 		// treats request_timeout like an empty code.
-		if at := buyerCancelledAt.Load(); at != 0 && gatewayStreamDeadlineReached(attempt, gatewayStreamDeadline, time.Unix(0, at)) {
+		if at := cancelArrival(); at != 0 && gatewayStreamDeadlineReached(attempt, gatewayStreamDeadline, time.Unix(0, at)) {
 			attempt.ErrorCode = requestTimeoutErrorCode
 		}
 		if err := rec.withPendingReceipt(provider, attempt.SettlementReceipt, func() error {

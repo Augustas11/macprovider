@@ -5718,8 +5718,9 @@ effective `non_stream_request_seconds` MUST stay strictly above
 `routing.request_timeout_s`; both coordinator walls default to 3600 s. The
 deploy gate (`dist/check-deploy-config.sh`) and the Pearl
 `PEARL_RUNTIME_TASK=stream-ceiling` step enforce these relations; the step
-only raises values, restarts the coordinator before the gateway, and restores
-all three files on any failure.
+only raises values, restarts the coordinator before the gateway, and on any
+failure restores all three files and restarts the gateway before the
+coordinator, so the gateway ceiling never exceeds the coordinator walls.
 
 When an authenticated gateway account sends
 `X-MacProvider-Internal-Stream-Deadline-Unix-Ms` on a streaming request and
