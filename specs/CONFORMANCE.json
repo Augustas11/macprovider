@@ -14216,17 +14216,21 @@
         "phase4-coordinator/internal/ws/relay.go:func (ps *providerSession) enqueueFrame",
         "phase4-coordinator/internal/ws/relay.go:func (ps *providerSession) sealInferenceRequestWithFleetCache",
         "phase4-coordinator/internal/tier2/pillar_b.go:func PillarBEnvelopeBodyForSize",
-        "phase4-coordinator/internal/config/config.go:func (c Config) Validate"
+        "phase4-coordinator/internal/config/config.go:func (c Config) Validate",
+        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:final class CoordinatorInboundBacklog"
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/CoordinatorWebSocketMessageLimitTests.swift:func testCoordinatorTaskUsesAdvertisedMessageLimit",
         "phase3-binary/Tests/macprovider-cliTests/CoordinatorWebSocketMessageLimitTests.swift:func testMessageOverLegacyDefaultIsReceived",
         "phase3-binary/Tests/macprovider-cliTests/CoordinatorWebSocketMessageLimitTests.swift:func testLimitBoundaryAcceptsAtLimitAndRejectsOneByteOver",
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorWebSocketMessageLimitTests.swift:func testInboundBacklogIsBoundedByBytes",
+        "phase4-coordinator/internal/ws/frame_limits_test.go:func TestTier2CapsParsesWSMaxMessageBytes",
         "phase4-coordinator/internal/tier2/pillar_b_size_test.go:func TestPillarBEnvelopeBodyForSizeMatchesSealedLength",
         "phase4-coordinator/internal/ws/frame_limits_test.go:func TestEnqueueFrameRefusesOverLimitTextFrameAndKeepsSession",
         "phase4-coordinator/internal/ws/frame_limits_test.go:func TestSealInferenceRequestEnforcesProviderMessageLimitWithoutSpendingSeq",
         "phase4-coordinator/internal/ws/frame_limits_test.go:func TestLegacyLimitRefusesIncidentSizedRequestThatAdvertisedLimitAccepts",
         "phase4-coordinator/internal/ws/frame_limits_test.go:func TestMaximumChatBodyWorstCaseEscapingFitsAdvertisedLimit",
+        "phase4-coordinator/internal/ws/frame_limits_test.go:func TestDispatchRefusesOverLimitRequestAndKeepsSessionInStep",
         "phase4-coordinator/internal/buyer/provider_frame_too_large_test.go:func TestProviderFrameTooLargeAnswers413WithoutRetryOrProviderFault",
         "phase5-gateway/internal/router/provider_frame_too_large_test.go:func TestCoordinatorProviderFrameTooLargeReaches413",
         "phase5-gateway/internal/router/oversize_body_test.go:func TestOversizeChatBodyStreamedReturns413NotReset"

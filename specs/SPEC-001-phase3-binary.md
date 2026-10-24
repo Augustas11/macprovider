@@ -4921,11 +4921,15 @@ advertise the limit it enforces as the integer
 `auth_request.tier2_capabilities.ws_max_message_bytes` on the initial stage.
 64 MiB covers the worst-case encoding of a 4 MiB chat body (the SPEC-006 body
 limit): six-byte JSON escapes of every content byte, the sealed plaintext
-envelope and base64 come to about 32 MiB.
+envelope and base64 come to about 32 MiB. The provider MUST bound coordinator messages it has
+received but not yet handled to 256 MiB in total and end the session (then
+reconnect) past that, so the larger limit cannot grow its memory without
+bound.
 
 *Coordinator: never write an over-limit frame.* The coordinator MUST treat a
 session's limit as the advertised value clamped to [1 MiB, 64 MiB], and as
-1 MiB (1,048,576 bytes) when the member is absent, not an integer, or smaller.
+1 MiB (1,048,576 bytes) when the member is absent, not a JSON integer that fits
+in 64 bits, or smaller; such a value never fails the `auth_request`.
 It MUST NOT write a text frame larger than that limit. For an encrypted-leg
 `inference_request` it MUST compute the sealed frame's exact length before
 sealing and refuse without spending the C2P sequence number or a nonce, so the

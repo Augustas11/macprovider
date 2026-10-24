@@ -661,15 +661,15 @@ func (ps *providerSession) enqueueRaw(rawFrame []byte) error {
 }
 
 func (ps *providerSession) enqueueFrame(f providerFrame) error {
-	if !f.raw && ps.maxTextFrameBytes > 0 && int64(len(f.payload)) > ps.maxTextFrameBytes {
-		// Writing it would make the provider close the whole session
-		// (SPEC-001-R012). Refuse this frame only.
-		return ErrProviderFrameTooLarge
-	}
 	ps.writeMu.Lock()
 	defer ps.writeMu.Unlock()
 	if ps.closed {
 		return ErrRelayClosed
+	}
+	if !f.raw && ps.maxTextFrameBytes > 0 && int64(len(f.payload)) > ps.maxTextFrameBytes {
+		// Writing it would make the provider close the whole session
+		// (SPEC-001-R012). Refuse this frame only.
+		return ErrProviderFrameTooLarge
 	}
 	if ps.ackPending && !f.raw {
 		// Leave room for the ack itself in writeCh at flush time.
@@ -1320,6 +1320,17 @@ func (ps *providerSession) markTier2RequestDispatched() {
 	}
 }
 
+// unmarkTier2RequestDispatched undoes markTier2RequestDispatched for a request
+// refused before anything was sealed or written (SPEC-001-R012), so refused
+// requests never advance the request-count rekey trigger.
+func (ps *providerSession) unmarkTier2RequestDispatched() {
+	ps.tier2Mu.Lock()
+	defer ps.tier2Mu.Unlock()
+	if ps.tier2 != nil && ps.tier2.RequestsDispatched > 0 {
+		ps.tier2.RequestsDispatched--
+	}
+}
+
 func (ps *providerSession) tier2RekeyReason(now time.Time, cfg config.Tier2Config) (string, bool) {
 	ps.tier2Mu.Lock()
 	defer ps.tier2Mu.Unlock()
@@ -1810,6 +1821,9 @@ func (s *Server) dispatchInference(ctx context.Context, provider pool.Provider, 
 			return nil, ErrRelayAEADFailed
 		}
 		session.removeActive(requestID)
+		if provider.EncryptedLeg && errors.Is(err, ErrProviderFrameTooLarge) {
+			session.unmarkTier2RequestDispatched()
+		}
 		return nil, err
 	}
 	if err := session.sendProbe(payload, providerDispatchWriteProbeTimeout); err != nil {

@@ -17,6 +17,23 @@ final class CoordinatorWebSocketMessageLimitTests: XCTestCase {
         XCTAssertGreaterThan(task.maximumMessageSize, 1024 * 1024)
     }
 
+    // Raising the message limit must not let a coordinator grow provider
+    // memory without bound: received-but-unhandled messages share a byte budget.
+    func testInboundBacklogIsBoundedByBytes() {
+        XCTAssertEqual(coordinatorInboundBacklogLimitBytes, 4 * coordinatorWebSocketMaximumMessageBytes)
+        let backlog = CoordinatorInboundBacklog(limitBytes: 10)
+        XCTAssertTrue(backlog.add(6))
+        XCTAssertTrue(backlog.add(4))
+        XCTAssertFalse(backlog.add(1))
+        XCTAssertEqual(backlog.pendingBytes, 10)
+        backlog.remove(6)
+        XCTAssertTrue(backlog.add(6))
+        backlog.remove(100)
+        XCTAssertEqual(backlog.pendingBytes, 0)
+        XCTAssertEqual(CoordinatorInboundBacklog.byteCount(of: .string("héllo")), 6)
+        XCTAssertEqual(CoordinatorInboundBacklog.byteCount(of: .data(Data(count: 3))), 3)
+    }
+
     // A message larger than Foundation's old 1 MiB default, the size class of
     // the live failure, now arrives intact on a production-configured task.
     func testMessageOverLegacyDefaultIsReceived() async throws {

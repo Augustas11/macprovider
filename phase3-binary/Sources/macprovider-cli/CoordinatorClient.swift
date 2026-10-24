@@ -63,6 +63,61 @@ func makeCoordinatorWebSocketTask(
     return task
 }
 
+/// Received-but-unhandled coordinator message budget (four maximum-size
+/// messages).
+let coordinatorInboundBacklogLimitBytes = 4 * coordinatorWebSocketMaximumMessageBytes
+
+struct CoordinatorInboundBacklogExceeded: Error, CustomStringConvertible, Equatable {
+    let limitBytes: Int
+
+    var description: String {
+        "coordinator inbound backlog exceeded \(limitBytes) bytes"
+    }
+}
+
+/// Byte count of received coordinator messages not yet handled.
+final class CoordinatorInboundBacklog: @unchecked Sendable {
+    let limitBytes: Int
+    private let lock = NSLock()
+    private var bytes = 0
+
+    init(limitBytes: Int) {
+        self.limitBytes = limitBytes
+    }
+
+    /// Adds a received message; false when the backlog would exceed the limit.
+    func add(_ count: Int) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard bytes + count <= limitBytes else { return false }
+        bytes += count
+        return true
+    }
+
+    func remove(_ count: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        bytes = max(0, bytes - count)
+    }
+
+    var pendingBytes: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return bytes
+    }
+
+    static func byteCount(of message: URLSessionWebSocketTask.Message) -> Int {
+        switch message {
+        case .string(let text):
+            return text.utf8.count
+        case .data(let data):
+            return data.count
+        @unknown default:
+            return 0
+        }
+    }
+}
+
 extension URLSessionWebSocketTask: ProviderWebSocketTask {
     var closeCodeRawValueForDiagnostics: Int? {
         let rawValue = closeCode.rawValue
@@ -2603,6 +2658,10 @@ actor CoordinatorClient {
             bufferingPolicy: .unbounded
         )
 
+        // SPEC-001-R012: messages may now be up to 64 MiB, so the unbounded
+        // inbox is bounded by bytes instead: received-but-unhandled messages
+        // past the budget end the session (reconnect) rather than grow memory.
+        let backlog = CoordinatorInboundBacklog(limitBytes: coordinatorInboundBacklogLimitBytes)
         try await withThrowingTaskGroup(of: Void.self) { group in
             // Receive task: keep the socket drained. Captures `socket` and
             // `continuation` (both Sendable), never `self`, so nothing here
@@ -2617,6 +2676,10 @@ actor CoordinatorClient {
                         Self.keepaliveDebug("ws_receive_error error=\(error)")
                         throw error
                     }
+                    guard backlog.add(CoordinatorInboundBacklog.byteCount(of: message)) else {
+                        Self.keepaliveDebug("ws_inbound_backlog_exceeded limit=\(backlog.limitBytes)")
+                        throw CoordinatorInboundBacklogExceeded(limitBytes: backlog.limitBytes)
+                    }
                     continuation.yield(message)
                 }
             }
@@ -2626,6 +2689,7 @@ actor CoordinatorClient {
             group.addTask { [self] in
                 for await message in inbox {
                     try Task.checkCancellation()
+                    defer { backlog.remove(CoordinatorInboundBacklog.byteCount(of: message)) }
                     try await handle(message)
                 }
             }

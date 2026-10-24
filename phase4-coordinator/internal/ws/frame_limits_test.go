@@ -2,14 +2,17 @@ package ws
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"net"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/tier2"
+	"github.com/gobwas/ws/wsutil"
 )
 
 func TestProviderInboundMessageLimitNormalizesAdvertisedValue(t *testing.T) {
@@ -36,12 +39,27 @@ func TestTier2CapsParsesWSMaxMessageBytes(t *testing.T) {
 	if caps.WSMaxMessageBytes != 64<<20 {
 		t.Fatalf("ws_max_message_bytes = %d", caps.WSMaxMessageBytes)
 	}
-	caps = Tier2Caps{}
-	if err := json.Unmarshal([]byte(`{"encrypted_leg":true}`), &caps); err != nil {
-		t.Fatal(err)
-	}
-	if providerInboundMessageLimit(caps.WSMaxMessageBytes) != LegacyProviderWSMaxMessageBytes {
-		t.Fatal("a provider that does not advertise must get the legacy 1 MiB limit")
+	// Absent or not an int64 JSON integer: decoded as not advertised, and the
+	// rest of the capability object still parses (SPEC-001-R012).
+	for _, raw := range []string{
+		`{"encrypted_leg":true}`,
+		`{"encrypted_leg":true,"ws_max_message_bytes":"67108864"}`,
+		`{"encrypted_leg":true,"ws_max_message_bytes":1.5}`,
+		`{"encrypted_leg":true,"ws_max_message_bytes":1e9}`,
+		`{"encrypted_leg":true,"ws_max_message_bytes":{"n":1}}`,
+		`{"encrypted_leg":true,"ws_max_message_bytes":null}`,
+		`{"encrypted_leg":true,"ws_max_message_bytes":99999999999999999999999}`,
+	} {
+		caps = Tier2Caps{}
+		if err := json.Unmarshal([]byte(raw), &caps); err != nil {
+			t.Fatalf("%s: %v", raw, err)
+		}
+		if !caps.EncryptedLeg {
+			t.Fatalf("%s: other capabilities lost", raw)
+		}
+		if providerInboundMessageLimit(int64(caps.WSMaxMessageBytes)) != LegacyProviderWSMaxMessageBytes {
+			t.Fatalf("%s: limit %d, want legacy 1 MiB", raw, caps.WSMaxMessageBytes)
+		}
 	}
 }
 
@@ -75,6 +93,13 @@ func TestEnqueueFrameRefusesOverLimitTextFrameAndKeepsSession(t *testing.T) {
 	if len(ps.writeCh) != 1 {
 		t.Fatal("at-limit frame was not queued")
 	}
+	// A closed session reports closed, not too-large, so a dead provider is
+	// never misreported as a buyer size error.
+	ps.close()
+	if err := ps.send(bytes.Repeat([]byte{'x'}, 1025)); !errors.Is(err, ErrRelayClosed) {
+		t.Fatalf("over-limit send on closed session err = %v, want ErrRelayClosed", err)
+	}
+	ps = newProviderSession("p", "a", server, 4)
 	// Raw control frames are not text messages and are never size-checked.
 	if err := ps.enqueueFrame(providerFrame{raw: true, payload: bytes.Repeat([]byte{0}, 2048)}); err != nil {
 		t.Fatalf("raw frame err = %v", err)
@@ -205,4 +230,40 @@ func TestMaximumChatBodyWorstCaseEscapingFitsAdvertisedLimit(t *testing.T) {
 		t.Fatalf("worst-case %d-byte body refused: %v", len(body), err)
 	}
 	t.Logf("%d-byte worst-case body -> %d-byte frame (limit %d)", len(body), len(raw), MaxProviderWSMaxMessageBytes)
+}
+
+// Through the real dispatch path: an over-limit encrypted request is refused
+// without spending the C2P sequence, the rekey request count, or the session;
+// the next request goes out at sequence 0.
+func TestDispatchRefusesOverLimitRequestAndKeepsSessionInStep(t *testing.T) {
+	s, provider, providerConn := newEncryptedRelayHarness(t)
+	big := chatBody(int(LegacyProviderWSMaxMessageBytes))
+	if _, err := s.DispatchInference(context.Background(), *provider, "req-big", big, true); !errors.Is(err, ErrProviderFrameTooLarge) {
+		t.Fatalf("dispatch err = %v, want ErrProviderFrameTooLarge", err)
+	}
+	if provider.Tier2Session.C2PCounter != 0 || provider.Tier2Session.RequestsDispatched != 0 {
+		t.Fatalf("refusal spent state: c2p=%d dispatched=%d", provider.Tier2Session.C2PCounter, provider.Tier2Session.RequestsDispatched)
+	}
+	session, ok := s.storedSessionFor("p1", "s1")
+	if !ok || !session.isOpen() {
+		t.Fatal("session closed after a refused request")
+	}
+	if p, ok := s.pool.Resolve("p1", "s1"); !ok || p.State != pool.StateReady {
+		t.Fatalf("provider after refusal: ok=%v state=%v", ok, p.State)
+	}
+	if _, err := s.DispatchInference(context.Background(), *provider, "req-next", chatBody(10), true); err != nil {
+		t.Fatalf("next dispatch: %v", err)
+	}
+	_ = providerConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	payload, _, err := wsutil.ReadServerData(providerConn)
+	if err != nil {
+		t.Fatalf("read next inference_request: %v", err)
+	}
+	var outer encryptedInferenceRequest
+	if err := json.Unmarshal(payload, &outer); err != nil {
+		t.Fatal(err)
+	}
+	if outer.RequestID != "req-next" || outer.Enc.Seq != 0 {
+		t.Fatalf("next frame request=%q seq=%d, want req-next at seq 0", outer.RequestID, outer.Enc.Seq)
+	}
 }

@@ -3054,7 +3054,7 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 	entry.ComputeScoreV1 = initial.Tier2Capabilities.ComputeScoreV1
 	entry.ShardGroupHeadV1 = initial.Tier2Capabilities.ShardGroupHeadV1
 	entry.ShardMemberV1 = initial.Tier2Capabilities.ShardMemberV1
-	entry.WSMaxMessageBytes = initial.Tier2Capabilities.WSMaxMessageBytes
+	entry.WSMaxMessageBytes = int64(initial.Tier2Capabilities.WSMaxMessageBytes)
 	entry.AttestationStatus = attestationStatus
 	if attestResult.SEResult != nil {
 		entry.SEPublicKey = append([]byte(nil), attestResult.SEResult.SEPublicKey...)
