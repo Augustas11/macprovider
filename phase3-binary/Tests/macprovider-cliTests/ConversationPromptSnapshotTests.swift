@@ -121,6 +121,7 @@ final class ConversationPromptSnapshotTests: XCTestCase {
     }
 
     func testGLM5NextSnapshotPolicyNeedsRoundTrippingRoleTokens() throws {
+        try Self.requireMetal()
         let tokenizer = MarkerTokenizer()
         let glm = try Self.tinyGLM()
         XCTAssertEqual(ModelRuntime.conversationPromptSnapshotPolicy(model: glm, tokenizer: tokenizer),
@@ -132,6 +133,7 @@ final class ConversationPromptSnapshotTests: XCTestCase {
     // MARK: - DeepSeek V4 tiny fixture: resumed == fresh, bit for bit
 
     func testDeepseekV4ResumedTurnMatchesFreshPrefillExactlyOnCPU() async throws {
+        try Self.requireMetal()
         try await Device.withDefaultDevice(.cpu) {
             let model = try Self.tinyDeepseekV4()
             let context = ModelContext(configuration: .init(id: "deepseek/deepseek-v4-flash"), model: model,
@@ -185,6 +187,7 @@ final class ConversationPromptSnapshotTests: XCTestCase {
     /// The caveat the boundary exists for: resuming off the reference plan
     /// changes the ratio-4 overlap pools.
     func testDeepseekV4OffPlanResumeChangesThePools() throws {
+        try Self.requireMetal()
         try Device.withDefaultDevice(.cpu) {
             let model = try Self.tinyDeepseekV4()
             let prompt = (0..<2200).map { Int32(($0 * 7 + 3) % 128) }
@@ -289,6 +292,16 @@ final class ConversationPromptSnapshotTests: XCTestCase {
     private func int32Range(_ range: Range<Int>) -> [Int32] { range.map(Int32.init) }
 
     /// `XCTUnwrap` takes an autoclosure, which cannot hold an `await`.
+    /// MLX loads the default metallib even for the CPU device.
+    private static func requireMetal() throws {
+        let tests = Bundle(for: ConversationPromptSnapshotTests.self)
+        guard PagedKVMetallibGate.defaultMetallibExists()
+            || PagedKVMetallibGate.defaultMetallibExists(bundleURL: tests.resourceURL, executableURL: tests.executableURL)
+        else {
+            throw XCTSkip("MLX default metallib is unavailable in this test host")
+        }
+    }
+
     private static func unwrap(_ lease: ConversationCacheLease?) throws -> ConversationCacheLease {
         try XCTUnwrap(lease)
     }

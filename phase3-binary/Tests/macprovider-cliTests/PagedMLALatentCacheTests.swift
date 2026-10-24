@@ -57,7 +57,8 @@ final class PagedMLALatentCacheTests: XCTestCase {
     /// latent cache into a serial `GLM5NextAttentionCache` that equals the
     /// stock cache fed the same tokens and keeps equalling it as the next turn
     /// extends it. CPU only.
-    func testPromptSnapshotConversionEqualsAndExtendsLikeTheStockCacheOnCPU() {
+    func testPromptSnapshotConversionEqualsAndExtendsLikeTheStockCacheOnCPU() throws {
+        try requireMetal()
         Device.withDefaultDevice(.cpu) {
             var rng = SplitMix(seed: 31)
             let paged = makeCache()

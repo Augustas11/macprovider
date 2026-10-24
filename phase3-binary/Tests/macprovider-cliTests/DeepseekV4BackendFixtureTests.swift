@@ -9,6 +9,17 @@ import XCTest
 
 /// Optional dependency fixture, always CPU. No model download or real weights.
 final class DeepseekV4BackendFixtureTests: XCTestCase {
+    override func setUpWithError() throws {
+        // MLX loads the default metallib even for the CPU device; probe beside
+        // the test bundle's own executable too, where MLX looks.
+        let tests = Bundle(for: Self.self)
+        guard PagedKVMetallibGate.defaultMetallibExists()
+            || PagedKVMetallibGate.defaultMetallibExists(bundleURL: tests.resourceURL, executableURL: tests.executableURL)
+        else {
+            throw XCTSkip("MLX default metallib is unavailable in this test host")
+        }
+    }
+
     private func tiny() throws -> DeepseekV4Model {
         guard let path = ProcessInfo.processInfo.environment["MACPROVIDER_DSV4_TINY_FIXTURE"], !path.isEmpty else {
             throw XCTSkip("MACPROVIDER_DSV4_TINY_FIXTURE is not set")
