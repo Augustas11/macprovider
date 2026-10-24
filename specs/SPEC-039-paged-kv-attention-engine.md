@@ -1,7 +1,12 @@
 # SPEC-039 — Paged KV / paged-attention engine
 
-Version: v0.1.22
-Status: draft (normative design). v0.1.22 (follows SPEC-038 v0.3.23) counts
+Version: v0.1.24
+Status: draft (normative design). v0.1.24 permits direct row-owned cache
+updates and bounded pipelined DeepSeek decode under SPEC-038 v0.3.30;
+failed rows and stopped rows with untrimmed lookahead are discarded.
+v0.1.23 defines the `deepseek_v4`
+row-owned pooled-cache batching adapter and its boundary from paged K/V.
+v0.1.22 (follows SPEC-038 v0.3.23) counts
 the SPEC-038 FR-CB10 admission hold as the self-check's idle window.
 v0.1.21 notes that a signed policy entry may
 also carry a served-slot ceiling (SPEC-038 v0.3.22 FR-CB11); it only lowers
@@ -71,6 +76,15 @@ is `RotatingKVCache` only because the serve path caps KV for memory attaches to
 paged mode (the block pool bounds memory), while a genuine sliding-window model
 stays fail-safe. IMPL lands with this revision.
 Owner: provider runtime / inference engine
+Change log v0.1.23 (2026-10-24): FR-PKV11/12 distinguish the
+`deepseek_v4` row-owned pooled-cache batching family from paged storage.
+The adapter reuses scheduler lifecycle and bounded capacity accounting while
+the fork owns each row's compressed pools, pending windows, sliding window
+and indexer. Ragged single-token decode may share model projections; prompt
+prefill remains row-local under SPEC-038 v0.3.29. Positive signed policy and
+local probes are still required; no paged-gather or real-model acceptance
+evidence is asserted. AC-21 covers this separate cache topology.
+
 Change log v0.1.20 (2026-10-17): the FR-PKV12 GLM-5.3-Flash entry's
 evidence is recorded under `docs/evidence/glm53-flash-t4-2026-10-17/`, on the
 exact identity (snapshot-manifest `7299b6a7…`, M3 Ultra, Metal library
@@ -753,7 +767,45 @@ expand support by guesswork: the resident tuple remains outside the descriptor
 unless its canonical family label is in the explicit admission allowlist and
 all runtime measurement gates pass.
 
+**Row-owned pooled-family boundary (v0.1.23).** A descriptor MAY identify
+`deepseek_v4` as a continuous-batching adapter whose compressed caches remain
+row-owned in the pinned fork. That advertisement MUST distinguish its pool
+cache kind from paged K/V and `pagedMLA`; it MUST NOT assert paged-gather
+coverage or reuse either family's parity result. Allocator reservations MAY
+provide conservative scheduler capacity bounds without implying that the
+compressed tensors reside in physical K/V pages. The adapter still obeys
+request identity, generation ownership, bounded admission, cancellation and
+release rules. Buyer admission additionally requires the positive signed
+policy entry in SPEC-038 FR-CB10; family recognition alone grants nothing.
+
 ### FR-PKV12 — cache-class allowlist and attach-time admission gate (SPEC-039-R012)
+
+**DeepSeek V4 row-owned adapter (v0.1.23).** The `deepseek_v4` model's
+`DeepseekV4PoolCache` topology MAY use the separate row-owned batching adapter
+defined in FR-PKV11. This is not an addition to the paged-storage allowlist
+below. The runtime MUST validate the resident model's cache count, layer
+order, compression ratios and 128-token window against its configuration;
+unknown or incompatible layouts fail safe to serial with an observable reason.
+Each row MUST own its completed compressed pools, incomplete compression
+windows, sliding attention window, pooled indexer and absolute offset. A
+batched forward MUST reconstruct its inputs from the currently participating
+rows and commit each result only to that row. Membership changes MUST NOT
+carry packed peer state into another request, and ragged padding MUST NOT
+become a row's cache history. Prefill MUST use SPEC-038 FR-CB2's reference
+plan. The adapter's own exactness and leave/join probes MUST establish local
+correctness before any capability grant; neither the generic paged-gather
+probe nor GLM's paged-MLA evidence substitutes for this proof. This revision
+does not grant retained cross-turn caches or native-MTP transactions to the
+new family.
+Ratio-0 layers use the validated sliding-window cache; ratio-4 and ratio-128
+layers use `deepseekV4Pool(ratio:windowTokens:)`. A forward updates each
+participating row's persistent caches directly. Whole-cache staging is not
+required: a failed forward MUST invalidate the affected rows and MUST NOT
+publish or reuse their partially advanced state. Shared decode is bounded
+to 8 rows; the pipelined window follows SPEC-038 FR-CB2's commit-after-stop
+rule. A stopped row with untrimmable lookahead MUST lose its entire cache;
+no overshoot state may enter a retained or resumed request. The local window
+stores keys only because this model uses the same tensor for keys and values.
 
 At model attach, the engine MUST inspect the runtime `newCache()` class and the
 `kv_bits` setting against a **paged allowlist**. The v1 allowlist is:
@@ -1199,6 +1251,19 @@ The implementation PR for this SPEC MUST include fixtures that prove:
   `glm5-next-mla-parity-v1`. A block size that is not a multiple of
   `index_kpool` and a `GLM5NextAttentionCache` whose pool width differs from
   the config both fail closed.
+
+- **AC-21 `deepseek_v4` row-owned pooled-cache exactness (FR-PKV11/12,
+  v0.1.23):** the tiny fork fixture MUST compare exact temperature-zero token
+  streams against serial at 1, 2, 4 and 8 rows with ragged prompt offsets,
+  then exercise peer leave and row join while surviving rows continue. The
+  fixture MUST preserve reference prefill partitions and cover both
+  compression ratios (4 and 128), the 128-token window and indexer state.
+  A cache fixture MUST cover incomplete multi-token continuation without
+  negative slicing, then complete a pooling window and compare the result
+  with the same row's serial state. Provider tests MUST reject incompatible
+  topology and missing positive signed admission. These are CPU correctness
+  fixtures; production qualification and the SPEC-038 throughput gate remain
+  pending until the separate operator measurement window.
 
 ## 7. No-go list
 

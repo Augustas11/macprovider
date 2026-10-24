@@ -375,6 +375,8 @@ struct ContinuousBatchPreparedRequest: Sendable {
     /// SPEC-018 §3.11 call prefill ending `promptTokens`, if any.
     let toolCallPrefill: String?
     var grammarConstraint: GrammarConstraintState? = nil
+    /// SPEC-024 FR-CI2a: keyed rows of a snapshot family only.
+    var promptSnapshotTokenCount: Int? = nil
 }
 
 /// Serializes text prompt preparation for one admitted Qwen target snapshot.
@@ -719,17 +721,20 @@ struct PagedKVRuntimeModelCapabilities: Equatable, Sendable {
     /// The verified sparse-attention layout of an allowlisted `glm5_next`
     /// identity (SPEC-039 FR-PKV12), read from its `config.json`.
     let sparseAttention: PagedKVSparseAttentionLayout?
+    let deepseekV4Pool: DeepseekV4PoolLayout?
 
     init(
         modelFamily: String,
         requiresMoEDispatch: Bool,
         hybridDecoderArchitectureVerified: Bool = false,
-        sparseAttention: PagedKVSparseAttentionLayout? = nil
+        sparseAttention: PagedKVSparseAttentionLayout? = nil,
+        deepseekV4Pool: DeepseekV4PoolLayout? = nil
     ) {
         self.modelFamily = modelFamily
         self.requiresMoEDispatch = requiresMoEDispatch
         self.hybridDecoderArchitectureVerified = hybridDecoderArchitectureVerified
         self.sparseAttention = sparseAttention
+        self.deepseekV4Pool = deepseekV4Pool
     }
 
     /// Prompt tokens of the attach-time parity probes: 513 (the production
@@ -743,6 +748,28 @@ struct PagedKVRuntimeModelCapabilities: Equatable, Sendable {
         let (twoBlocks, blocksOverflow) = max(0, blockSizeTokens).multipliedReportingOverflow(by: 2)
         let (span, spanOverflow) = sparseAttention.indexTopk.addingReportingOverflow(twoBlocks)
         return blocksOverflow || spanOverflow ? Int.max : max(base, span)
+    }
+}
+
+/// DeepSeek's compressor schedule may include trailing MTP stages; only
+/// decoder layers own serving caches. The supported ratios have different
+/// leaf layouts (ratio 4 also owns the lightning-indexer pool).
+struct DeepseekV4PoolLayout: Equatable, Sendable {
+    let ratios: [Int]
+    let windowTokens: Int
+    var expectedCacheKinds: [PagedKVSharedForwardBackend.CacheKind] {
+        ratios.map { $0 == 0 ? .slidingWindow(windowTokens: windowTokens) : .deepseekV4Pool(ratio: $0, windowTokens: windowTokens) }
+    }
+    init?(config: [String: Any]) {
+        guard config["model_type"] as? String == "deepseek_v4",
+              let layers = config["num_hidden_layers"] as? Int, layers > 0,
+              let schedule = config["compress_ratios"] as? [Int], schedule.count >= layers,
+              let window = config["sliding_window"] as? Int, window == 128
+        else { return nil }
+        let ratios = Array(schedule.prefix(layers))
+        guard ratios.allSatisfy({ [0, 4, 128].contains($0) }), ratios.contains(4), ratios.contains(128) else { return nil }
+        self.ratios = ratios
+        self.windowTokens = window
     }
 }
 
@@ -2473,7 +2500,11 @@ actor ModelRuntime: ModelRuntimeServing {
     /// (MLA sparse attention over gathered latent and pooled keys) never share
     /// a label with stock-SDPA tuples.
     nonisolated static func pagedKVParityLabelSuffix(modelFamily: String) -> String {
-        modelFamily == "glm5_next" ? "glm5-next-mla-parity-v1" : "sdpa-parity-v1"
+        switch modelFamily {
+        case "deepseek_v4": "deepseek-v4-row-pool-parity-v1"
+        case "glm5_next": "glm5-next-mla-parity-v1"
+        default: "sdpa-parity-v1"
+        }
     }
 
     /// SPEC-039 FR-PKV12 (v0.1.20): the `glm5_next` AC-20 fixture, attach
@@ -2515,7 +2546,11 @@ actor ModelRuntime: ModelRuntimeServing {
             return nil
         }
         let metallibSHA256 = hexString(SHA256.hash(data: metallibData))
-        guard let kernelIdentifier = Self.nonEmpty(environment.registeredKernelIdentifier()) else {
+        let rowOwnedPools = modelCapabilities.modelFamily == "deepseek_v4"
+        let measuredKernelIdentifier = rowOwnedPools
+            ? PagedKVAttachGate.deepseekV4RowPoolBridgeIdentifier
+            : environment.registeredKernelIdentifier()
+        guard let kernelIdentifier = Self.nonEmpty(measuredKernelIdentifier) else {
             PagedKVRuntimeDiagnostics.log("measure nil: kernel identifier not registered")
             return nil
         }
@@ -2526,12 +2561,13 @@ actor ModelRuntime: ModelRuntimeServing {
             return nil
         }
         let hardwareClass = "apple-silicon:\(chip):ram-\(fingerprint.ramGB)gb"
-        // The parity label is derived ONLY from a genuinely established on-device gather
+        // For paged families the parity label requires an on-device gather
         // parity probe: token-for-token argmax equality against stock KVCacheSimple, plus
         // proof the real Metal gather ran for every layer at every forward pass over BOTH
-        // K and V (`nLayers * nNew * 2`) across a non-degenerate (>= 3 block),
+        // K and V (`nLayers * nForwards * 2`) across a non-degenerate (>= 3 block),
         // boundary-crossing, non-identity layout. Anything short of that fails closed —
-        // no measured parity, no label, no attach.
+        // no measured parity, no label, no attach. DeepSeek instead proves
+        // row-owned pool parity below and receives a distinct bridge identity.
         // SPEC-039 FR-PKV12: the `glm5_next` entry advertises only with its
         // evidence recorded (`glm5NextPagedAttachEvidenceRecorded`); without
         // it attach fails closed on parity.
@@ -2539,24 +2575,35 @@ actor ModelRuntime: ModelRuntimeServing {
             PagedKVRuntimeDiagnostics.log("measure nil: glm5_next paged attach evidence not recorded (SPEC-039 AC-20)")
             return nil
         }
-        // Every paged layer gathers twice per forward: K and V, or for
-        // `pagedMLA` the latent and the pooled keys (SPEC-039 FR-PKV4 rule 4).
-        guard let parity = parityProbe,
-              parity.established,
-              parity.nLayers > 0,
-              parity.nNew > 0,
-              parity.nForwards >= parity.nNew,
-              parity.gatherKernelCalls == parity.nLayers * parity.nForwards * 2,
-              parity.maxLogicalBlocks >= 3,
-              parity.nonIdentityPermutation
-        else {
-            if let p = parityProbe {
-                PagedKVRuntimeDiagnostics.log(
-                    "measure nil: parity gate (established=\(p.established) nLayers=\(p.nLayers) nNew=\(p.nNew) nForwards=\(p.nForwards) gatherKernelCalls=\(p.gatherKernelCalls) expect=\(p.nLayers * p.nForwards * 2) maxLogicalBlocks=\(p.maxLogicalBlocks)>=3? nonIdentity=\(p.nonIdentityPermutation))")
-            } else {
-                PagedKVRuntimeDiagnostics.log("measure nil: parity probe result nil")
+        guard let parity = parityProbe, parity.established else { return nil }
+        if rowOwnedPools {
+            // Pools/window/indexer stay row-owned. Do not manufacture gather
+            // calls or a permutation: prove exact production-backend parity,
+            // ragged positions, and state transfer across a leave/join instead.
+            guard modelCapabilities.hybridDecoderArchitectureVerified,
+                  let layout = modelCapabilities.deepseekV4Pool,
+                  let proof = parity.rowPoolProof,
+                  proof.layerCount == layout.ratios.count,
+                  proof.established,
+                  parity.nLayers == proof.layerCount,
+                  parity.nNew == proof.tokensPerRow,
+                  parity.gatherKernelCalls == 0,
+                  parity.maxLogicalBlocks == 0,
+                  !parity.nonIdentityPermutation
+            else { return nil }
+        } else {
+            // K/V (or GLM latent/pooled keys) gather twice per layer per forward.
+            guard parity.rowPoolProof == nil,
+                  parity.nLayers > 0,
+                  parity.nNew > 0,
+                  parity.nForwards >= parity.nNew,
+                  parity.gatherKernelCalls == parity.nLayers * parity.nForwards * 2,
+                  parity.maxLogicalBlocks >= 3,
+                  parity.nonIdentityPermutation
+            else {
+                PagedKVRuntimeDiagnostics.log("measure nil: paged gather parity shape invalid")
+                return nil
             }
-            return nil
         }
         let parityLabel = hexString(SHA256.hash(data: Data(
             "\(metallibSHA256)|\(kernelIdentifier)|\(modelSHA256)|\(tokenizerSHA256 ?? "")|\(chatTemplateSHA256 ?? "")|\(hardwareClass)|\(modelID)|blk\(config.blockSizeTokens)|max\(config.maxPhysicalBlocks)|\(Self.pagedKVParityLabelSuffix(modelFamily: modelCapabilities.modelFamily))".utf8
@@ -2734,6 +2781,30 @@ actor ModelRuntime: ModelRuntimeServing {
                     modelCapabilities: modelCapabilities
                 )
         else { return (nil, nil) }
+        if modelCapabilities.modelFamily == "deepseek_v4" {
+            let pairs = Self.pagedKVRuntimeIsolationProbePromptPairs
+            var last: (PagedKVRuntimeParityProbeResult?, PagedKVRuntimeMoEProbeResult?) = (nil, nil)
+            for pair in pairs {
+                let prompts = await container.perform { context in
+                    [context.tokenizer.encode(text: pair.0, addSpecialTokens: true),
+                     context.tokenizer.encode(text: pair.1, addSpecialTokens: true)]
+                }
+                last = await DeepseekV4RuntimeParityProbe.run(
+                    container: container,
+                    blockSizeTokens: pagedKVConfig.blockSizeTokens,
+                    maxPhysicalBlocks: pagedKVConfig.maxPhysicalBlocks,
+                    cacheKinds: cacheKinds,
+                    promptA: Self.repeatedProbeTokens(prompts[0], targetCount: 513),
+                    promptB: Self.repeatedProbeTokens(prompts[1], targetCount: 642)
+                )
+                // Only clean, exact but indistinguishable runs may try another
+                // challenge. A divergence/exception is final and fails closed.
+                guard let isolation = last.1,
+                      Self.isCleanIndistinguishableIsolationRun(isolation)
+                else { return last }
+            }
+            return last
+        }
         let probePromptTokens = modelCapabilities.attachProbePromptTokens(blockSizeTokens: pagedKVConfig.blockSizeTokens)
         let encodedProbePrompt = await container.perform { context in
             context.tokenizer.encode(text: Self.pagedKVRuntimeParityProbePrompt, addSpecialTokens: true)
@@ -2841,6 +2912,9 @@ actor ModelRuntime: ModelRuntimeServing {
         modelCapabilities: PagedKVRuntimeModelCapabilities
     ) -> Bool {
         guard modelCapabilities.hybridDecoderArchitectureVerified else { return false }
+        if modelCapabilities.modelFamily == "deepseek_v4" {
+            return modelCapabilities.deepseekV4Pool?.expectedCacheKinds == cacheKinds
+        }
         if modelCapabilities.modelFamily == "glm5_next" {
             // Exactly one cache per decoder layer, in layer order, each pool
             // width equal to `index_kpool` (SPEC-039 FR-PKV12).
@@ -3131,6 +3205,7 @@ maxTokens: 1,
             "qwen/qwen3.6-35b-a3b": "Qwen3_5MoeForConditionalGeneration",
             "qwen/qwen3.8-27b": "Qwen3_5ForConditionalGeneration",
             "zai-org/glm-5.3-flash": "Glm5NextForConditionalGeneration",
+            "deepseek/deepseek-v4-flash": "DeepseekV4ForCausalLM",
         ]
         let configObject = configJSONData.flatMap {
             try? JSONSerialization.jsonObject(with: $0) as? [String: Any]
@@ -3149,6 +3224,13 @@ maxTokens: 1,
             else { return nil }
             return PagedKVSparseAttentionLayout(textConfig: textConfig)
         }()
+        let deepseekV4Pool: DeepseekV4PoolLayout? = {
+            guard modelID?.lowercased() == "deepseek/deepseek-v4-flash", let configObject,
+                  configObject["architectures"] == nil
+                    || configObject["architectures"] as? [String] == ["DeepseekV4ForCausalLM"]
+            else { return nil }
+            return DeepseekV4PoolLayout(config: configObject)
+        }()
         let allowlistedArchitectureVerified: Bool = {
             guard let id = modelID?.lowercased(),
                   let expectedArchitecture = hybridArchitectureAllowlist[id],
@@ -3156,9 +3238,10 @@ maxTokens: 1,
                   let architectures = configObject["architectures"] as? [String]
             else { return false }
             if expectedArchitecture == "Glm5NextForConditionalGeneration" { return sparseAttention != nil }
+            if expectedArchitecture == "DeepseekV4ForCausalLM" { return deepseekV4Pool != nil }
             return architectures.contains(expectedArchitecture)
         }()
-        let architectureVerified = allowlistedArchitectureVerified
+        let architectureVerified = allowlistedArchitectureVerified || deepseekV4Pool != nil
             || qwen35HybridDecoderArchitectureVerified(
             modelID: modelID,
             configJSONData: configJSONData
@@ -3168,7 +3251,8 @@ maxTokens: 1,
             requiresMoEDispatch: (configJSONData.flatMap(Self.pagedKVConfigRequiresMoE) ?? false)
                 || Self.pagedKVModelIDLooksLikeExpertModel(modelID),
             hybridDecoderArchitectureVerified: architectureVerified,
-            sparseAttention: sparseAttention
+            sparseAttention: sparseAttention,
+            deepseekV4Pool: deepseekV4Pool
         )
     }
 
@@ -5569,6 +5653,9 @@ maxTokens: 1,
               let tuple = continuousBatchingRequestedTuple(),
               !continuousBatchingAcceptanceCoverage.isRevoked(tuple)
         else { return nil }
+        guard continuousBatchingPolicyLoadResult.admitsContinuousBatching(
+            modelFamily: currentPagedKVModelCapabilities.modelFamily, tuple: tuple
+        ) else { return nil }
         return ContinuousBatchingSelfCheckTarget(
             key: ContinuousBatchingSelfCheckKey(
                 modelSHA256: tuple.modelSHA256,
@@ -5589,7 +5676,7 @@ maxTokens: 1,
             maxRequestTokens: scheduler.maxRequestTokens,
             poolTokens: scheduler.poolTokens,
             blockSizeTokens: scheduler.blockSizeTokens,
-            // Only a pagedMLA (`glm5_next`) backend has a flattened-token cap.
+            // Paged MLA and DeepSeek row pools both use the eight-token decode cap.
             decodeOnlyGain: scheduler.forwardTokenCap != nil,
             policyCeiling: continuousBatchingPolicyServedSlotCeiling(modelSHA256: tuple.modelSHA256)
         )
@@ -5617,6 +5704,10 @@ maxTokens: 1,
               continuousBatchScheduler != nil,
               let tuple = continuousBatchingRequestedTuple()
         else { return false }
+        // A model-key provisional grant never sizes DeepSeek V4 above one slot.
+        guard continuousBatchingPolicyLoadResult.admitsContinuousBatching(
+            modelFamily: currentPagedKVModelCapabilities.modelFamily, tuple: tuple
+        ) else { return false }
         return !continuousBatchingAcceptanceCoverage.isRevoked(tuple)
     }
 
@@ -5839,6 +5930,9 @@ maxTokens: 1,
                 entry.tuple.modelID == requested.modelID && entry.tuple.modelSHA256 == requested.modelSHA256
             }?.rollout
         }
+        guard continuousBatchingPolicyLoadResult.admitsContinuousBatching(
+            modelFamily: currentPagedKVModelCapabilities.modelFamily, tuple: tuple
+        ) else { return .off }
         let policyMode: ContinuousBatchingMode?
         switch continuousBatchingSelfCheck {
         case .granted:
@@ -6949,7 +7043,12 @@ maxTokens: 1,
                     ),
                     modelHasRecurrentLayers: hybrid,
                     toolCallPrefill: toolCallPrefill,
-                    grammarConstraint: try GrammarConstraintState.prepare(request: request, tokenizer: tokenizer, configuration: context.configuration, eosTokenIDs: Self.generationStopTokenIDs(for: context))
+                    grammarConstraint: try GrammarConstraintState.prepare(request: request, tokenizer: tokenizer, configuration: context.configuration, eosTokenIDs: Self.generationStopTokenIDs(for: context)),
+                    promptSnapshotTokenCount: Self.nonEmpty(request.conversationKey) == nil ? nil
+                        : Self.conversationPromptSnapshotTokenCount(
+                            promptTokenIds: promptTokens.map(Int32.init),
+                            policy: Self.continuousBatchPromptSnapshotPolicy(
+                                Self.conversationPromptSnapshotPolicy(model: context.model, tokenizer: tokenizer)))
                 ),
                 StreamingDetokenizer(tokenizer: tokenizer)
             )
@@ -7945,6 +8044,9 @@ maxTokens: 1,
             retainedPagedKVSequence: lease?.reusableCache?.retainedPagedKVSequence,
             recurrentCheckpointPositions: prepared.recurrentCheckpointPositions,
             modelHasRecurrentLayers: prepared.modelHasRecurrentLayers,
+            // SPEC-024 FR-CI2a: a snapshot hit serial-routes (AC-26 fence), which
+            // strict `.on` refuses, so strict rows publish no snapshot.
+            promptSnapshotTokenCount: capability.mode == .on ? nil : prepared.promptSnapshotTokenCount,
             retainedRecurrentCheckpoints: Self.retainedRecurrentCheckpoints(for: lease),
             serialToolStopObserver: serialToolStop,
             grammarConstraint: prepared.grammarConstraint,
@@ -8026,7 +8128,8 @@ maxTokens: 1,
                     lease,
                     cache: ConversationCacheLayers(
                         serialCache.layers,
-                        recurrentCheckpoints: serialCache.recurrentCheckpoints
+                        recurrentCheckpoints: serialCache.recurrentCheckpoints,
+                        promptSnapshot: serialCache.promptSnapshot
                     ),
                     fullTokens: fullTokens,
                     cold: coldContext
@@ -8383,6 +8486,9 @@ maxTokens: 1,
             retainedPagedKVSequence: lease?.reusableCache?.retainedPagedKVSequence,
             recurrentCheckpointPositions: prepared.recurrentCheckpointPositions,
             modelHasRecurrentLayers: prepared.modelHasRecurrentLayers,
+            // SPEC-024 FR-CI2a: a snapshot hit serial-routes (AC-26 fence), which
+            // strict `.on` refuses, so strict rows publish no snapshot.
+            promptSnapshotTokenCount: capability.mode == .on ? nil : prepared.promptSnapshotTokenCount,
             retainedRecurrentCheckpoints: Self.retainedRecurrentCheckpoints(for: lease),
             serialToolStopObserver: serialToolStop,
             grammarConstraint: prepared.grammarConstraint,
@@ -8524,7 +8630,8 @@ maxTokens: 1,
                     lease,
                     cache: ConversationCacheLayers(
                         serialCache.layers,
-                        recurrentCheckpoints: serialCache.recurrentCheckpoints
+                        recurrentCheckpoints: serialCache.recurrentCheckpoints,
+                        promptSnapshot: serialCache.promptSnapshot
                     ),
                     fullTokens: fullTokens,
                     cold: coldContext
@@ -9027,6 +9134,14 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             if let resumeAt = recurrent.resumeAt {
                                 iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[resumeAt...])))
                             }
+                            // SPEC-024 FR-CI2a: snapshot families commit only the prompt prefix.
+                            let promptSnapshot = Self.prefillPromptSnapshot(
+                                lease: lease, cache: kvCache, promptTokenIds: promptTokenIds,
+                                start: promptTokenIds.count - iteratorInput.text.tokens.size,
+                                context: generationContext, prefillStepSize: prefillStepSize)
+                            if let resumeAt = promptSnapshot.resumeAt {
+                                iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[resumeAt...])))
+                            }
                             if isLocalRequest, !request.containsNonTextMessageContentPart {
                                 // SPEC-001-R011: a local prompt prefills in chunks with a
                                 // preemption check before each, so a buyer never waits on a
@@ -9257,6 +9372,19 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         )
                         if let lease {
                             let fullTokens = promptTokenIds + resultTokenIDs.map(Int32.init)
+                            if promptSnapshot.applies {
+                                if let layers = promptSnapshot.layers {
+                                    await conversationCache.commit(
+                                        lease,
+                                        cache: ConversationCacheLayers(layers, promptSnapshot: true),
+                                        fullTokens: Array(promptTokenIds.prefix(promptSnapshot.tokenCount)),
+                                        cold: coldContext
+                                    )
+                                } else {
+                                    await conversationCache.abort(lease)
+                                }
+                                return completion
+                            }
                             guard Self.serialHybridCacheCanPublishTerminalCheckpoint(
                                 cache: kvCache,
                                 terminalModelStopStripped: terminalModelStopStripped
@@ -9915,6 +10043,14 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                     if let resumeAt = recurrent.resumeAt {
                         iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[resumeAt...])))
                     }
+                    // SPEC-024 FR-CI2a: snapshot families commit only the prompt prefix.
+                    let promptSnapshot = Self.prefillPromptSnapshot(
+                        lease: lease, cache: kvCache, promptTokenIds: promptTokenIds,
+                        start: promptTokenIds.count - iteratorInput.text.tokens.size,
+                        context: generationContext, prefillStepSize: prefillStepSize)
+                    if let resumeAt = promptSnapshot.resumeAt {
+                        iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[resumeAt...])))
+                    }
                     if isLocalRequest, !request.containsNonTextMessageContentPart {
                         // SPEC-001-R011: a local prompt prefills in chunks with a
                         // preemption check before each, so a buyer never waits on a
@@ -10205,6 +10341,19 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         )
                         if let lease {
                             let fullTokens = promptTokenIds + resultTokenIDs.map(Int32.init)
+                            if promptSnapshot.applies {
+                                if let layers = promptSnapshot.layers {
+                                    await conversationCache.commit(
+                                        lease,
+                                        cache: ConversationCacheLayers(layers, promptSnapshot: true),
+                                        fullTokens: Array(promptTokenIds.prefix(promptSnapshot.tokenCount)),
+                                        cold: coldContext
+                                    )
+                                } else {
+                                    await conversationCache.abort(lease)
+                                }
+                                return validated
+                            }
                             guard Self.serialHybridCacheCanPublishTerminalCheckpoint(
                                 cache: kvCache,
                                 terminalModelStopStripped: terminalModelStopStripped
@@ -12576,6 +12725,124 @@ maxTokens: maxTokens,
             inferenceRan: false,
             settlementRan: false
         )
+    }
+
+    /// SPEC-024 FR-CI2a: where a keyed prompt is snapshotted for extend-only
+    /// reuse. Only families whose caches cannot be rewound to an arbitrary
+    /// prefix take it; every other family keeps its FR-CI2 entry unchanged.
+    enum ConversationPromptSnapshotPolicy: Equatable, Sendable {
+        /// DeepSeek V4: its ratio-4 overlap pools depend on forward-call
+        /// boundaries, so the snapshot sits on a boundary of the fixed
+        /// reference prefill plan (`min(step, remaining - 1)` chunks from 0).
+        /// The resumed prefill then runs the same calls as a fresh one.
+        case referencePlanBoundary(step: Int)
+        /// GLM-5-Next: the last chat-role marker, i.e. the history before the
+        /// generation prompt (`<|assistant|><think>`), which the next turn
+        /// re-renders unchanged.
+        case lastRoleMarker(tokenIDs: Set<Int32>)
+    }
+
+    /// The snapshot policy a CB row may use. GLM-5-Next CB rows publish no
+    /// prompt snapshot (their paged-latent snapshot has no hardware parity
+    /// evidence yet), so a GLM CB row keeps its pre-snapshot behavior; GLM
+    /// serial turns still snapshot. DeepSeek V4 CB rows keep the reference-plan
+    /// snapshot.
+    nonisolated static func continuousBatchPromptSnapshotPolicy(
+        _ policy: ConversationPromptSnapshotPolicy?
+    ) -> ConversationPromptSnapshotPolicy? {
+        guard case .referencePlanBoundary = policy else { return nil }
+        return policy
+    }
+
+    static let glm5NextRoleMarkers = ["<|system|>", "<|user|>", "<|assistant|>", "<|observation|>"]
+
+    nonisolated static func conversationPromptSnapshotPolicy(
+        model: any LanguageModel,
+        tokenizer: any MLXLMCommon.Tokenizer
+    ) -> ConversationPromptSnapshotPolicy? {
+        if model is DeepseekV4Model {
+            return .referencePlanBoundary(step: DeepseekV4Model.prefillStepSize)
+        }
+        if model is GLM5NextModel || model is GLM5NextTextModel {
+            // Only ids that round-trip, so an unknown-token fallback never matches.
+            let ids = glm5NextRoleMarkers.compactMap { marker -> Int32? in
+                guard let id = tokenizer.convertTokenToId(marker),
+                      tokenizer.convertIdToToken(id) == marker else { return nil }
+                return Int32(id)
+            }
+            return ids.isEmpty ? nil : .lastRoleMarker(tokenIDs: Set(ids))
+        }
+        return nil
+    }
+
+    /// The snapshot length for `promptTokenIds`, or nil when it would be below
+    /// the reuse threshold. Always `< promptTokenIds.count`.
+    nonisolated static func conversationPromptSnapshotTokenCount(
+        promptTokenIds: [Int32],
+        policy: ConversationPromptSnapshotPolicy?
+    ) -> Int? {
+        let count: Int
+        switch policy {
+        case nil:
+            return nil
+        case .referencePlanBoundary(let step):
+            guard step > 0, promptTokenIds.count > 1 else { return nil }
+            count = step * ((promptTokenIds.count - 1) / step)
+        case .lastRoleMarker(let tokenIDs):
+            guard let last = promptTokenIds.lastIndex(where: { tokenIDs.contains($0) }) else { return nil }
+            count = last
+        }
+        return count >= ConversationCache.lcpThreshold ? count : nil
+    }
+
+    /// SPEC-024 FR-CI2a serial prompt snapshot. With a lease on a snapshot
+    /// family, prefill `cache` from `start` (the reused length, or 0) to the
+    /// snapshot length and deep-copy every layer there. A reference-plan
+    /// family prefills in whole steps, so the iterator resumes on the plan's
+    /// own boundary. `applies` is true whenever the request must commit only a
+    /// prompt snapshot (the decoded cache is never published for it).
+    struct SerialPromptSnapshot {
+        let applies: Bool
+        let layers: [KVCache]?
+        let tokenCount: Int
+        let resumeAt: Int?
+    }
+
+    static func prefillPromptSnapshot(
+        lease: ConversationCacheLease?,
+        cache: [KVCache],
+        promptTokenIds: [Int32],
+        start: Int,
+        context: ModelContext,
+        prefillStepSize: Int
+    ) -> SerialPromptSnapshot {
+        let none = SerialPromptSnapshot(applies: false, layers: nil, tokenCount: 0, resumeAt: nil)
+        guard lease != nil,
+              let policy = conversationPromptSnapshotPolicy(model: context.model, tokenizer: context.tokenizer)
+        else { return none }
+        let skipped = SerialPromptSnapshot(applies: true, layers: nil, tokenCount: 0, resumeAt: nil)
+        guard let target = conversationPromptSnapshotTokenCount(promptTokenIds: promptTokenIds, policy: policy),
+              target >= start
+        else { return skipped }
+        var step = max(1, prefillStepSize)
+        if case .referencePlanBoundary(let reference) = policy {
+            // A resume off the reference plan would change the pools.
+            guard start % reference == 0 else { return skipped }
+            step = reference
+        }
+        var cursor = start
+        while cursor < target {
+            let end = min(cursor + step, target)
+            let chunk = LMInput.Text(tokens: MLXArray(Array(promptTokenIds[cursor..<end])))
+            _ = context.model(chunk[text: .newAxis], cache: cache, state: nil)
+            eval(cache)
+            cursor = end
+        }
+        // Copies, because window, pool and recurrent buffers are written in place.
+        let layers = cache.map { $0.copy() }
+        eval(layers)
+        return SerialPromptSnapshot(
+            applies: true, layers: layers, tokenCount: target, resumeAt: target > start ? target : nil)
     }
 
     /// SPEC-024 FR-CI2 hybrid reuse. For a keyed serial request on a model with

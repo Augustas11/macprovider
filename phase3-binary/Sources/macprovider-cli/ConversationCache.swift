@@ -36,18 +36,25 @@ final class ConversationCacheLayers: @unchecked Sendable {
     /// Ascending by `tokenCount`; bounded to scaffold end, last turn start, and
     /// the covered reply end for hybrid recurrent reuse.
     let recurrentCheckpoints: [RecurrentStateCheckpoint]
+    /// SPEC-024 FR-CI2a: a deep copy of every layer taken when prefill reached
+    /// exactly the committed canonical tokens (a prompt prefix). Its layers may
+    /// be rotating, pooled or recurrent and are never trimmed, so the entry
+    /// serves only an incoming prompt that extends all of its tokens.
+    let promptSnapshot: Bool
     private let discardRetainedPagedKVSequence: (@Sendable (PagedKVRetainedSequence, String) async -> Void)?
 
     init(
         _ layers: [KVCache],
         retainedPagedKVSequence: PagedKVRetainedSequence? = nil,
         discardRetainedPagedKVSequence: (@Sendable (PagedKVRetainedSequence, String) async -> Void)? = nil,
-        recurrentCheckpoints: [RecurrentStateCheckpoint] = []
+        recurrentCheckpoints: [RecurrentStateCheckpoint] = [],
+        promptSnapshot: Bool = false
     ) {
         self.layers = layers
         self.retainedPagedKVSequence = retainedPagedKVSequence
         self.discardRetainedPagedKVSequence = discardRetainedPagedKVSequence
         self.recurrentCheckpoints = recurrentCheckpoints.sorted { $0.tokenCount < $1.tokenCount }
+        self.promptSnapshot = promptSnapshot
     }
 
     static func hasRecurrentLayers(_ layers: [KVCache]) -> Bool {
@@ -345,7 +352,15 @@ actor ConversationCache {
             reuseLength = checkpoint.tokenCount
             retainedCheckpoint = checkpoint
         }
-        if !retainedPagedKV {
+        if !retainedPagedKV, entry.kvCache.promptSnapshot {
+            // SPEC-024 FR-CI2a: a prompt snapshot is reused only by extension. Its
+            // window, pool or recurrent layers cannot be rewound, so any prompt
+            // that diverges inside the stored tokens misses.
+            guard lcp == entry.canonicalPromptTokens.count else {
+                log("event=conv_cache action=miss key_hash=\(keyHash) reason=prompt_snapshot_diverged lcp=\(lcp) snapshot_tokens=\(entry.canonicalPromptTokens.count)")
+                return await predicateMiss("prompt_snapshot_diverged")
+            }
+        } else if !retainedPagedKV {
             // SPEC-024-R001: RotatingKVCache is trimmable only while offset < maxSize,
             // and even then trim is windowed — not full-prefix reuse. Reject the class
             // rather than treating a temporarily-trimmable rotating cache as a hit.
@@ -403,7 +418,8 @@ actor ConversationCache {
             return nil
         }
         let stats = currentStats()
-        let checkpointField = (restoreCheckpoint ?? retainedCheckpoint).map { " recurrent_checkpoint=\($0.tokenCount)" } ?? ""
+        let checkpointField = (restoreCheckpoint ?? retainedCheckpoint).map { " recurrent_checkpoint=\($0.tokenCount)" }
+            ?? (entry.kvCache.promptSnapshot ? " prompt_snapshot=true" : "")
         log("event=conv_cache action=hit key_hash=\(keyHash) cached_prompt_tokens=\(reuseLength) prompt_tokens=\(incomingTokens.count) lcp=\(lcp) trim_by=\(trimBy)\(checkpointField) conv_cache_entries=\(stats.entries) conv_cache_tokens=\(stats.tokens)")
         return stampedLease(
             reusableCache: entry.kvCache,
@@ -465,7 +481,11 @@ actor ConversationCache {
         // SPEC-037 FR-KVP3 — snapshot-at-commit while the lease is still held: the
         // synchronous deep copy is the only hot-path cost; the disk write is
         // deferred so the hot commit never blocks on I/O.
-        if let coldTier, let cold, cold.eligible,
+        if cache.promptSnapshot {
+            // SPEC-024 FR-CI2a: prompt snapshots stay in RAM; the SPEC-037 disk
+            // codec does not encode window, pool or recurrent snapshot layers.
+            log("event=conv_cache action=cold_snapshot_skipped key_hash=\(lease.keyHash) reason=prompt_snapshot")
+        } else if let coldTier, let cold, cold.eligible,
            let snapshot = coldTier.captureSnapshot(
                conversationKey: lease.key, layers: cache, fullTokens: fullTokens,
                sampledPurgeGeneration: lease.sampledPurgeGeneration, identity: cold.identity,

@@ -694,7 +694,7 @@
     {
       "spec_id": "SPEC-024",
       "title": "Prefix-cache billing and provider-local cache isolation",
-      "version": "0.2.11",
+      "version": "0.2.12",
       "path": "specs/SPEC-024-prefix-cache-billing.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -1101,7 +1101,7 @@
     {
       "spec_id": "SPEC-038",
       "title": "Continuous batching for concurrent provider inference",
-      "version": "v0.3.28",
+      "version": "v0.3.30",
       "path": "specs/SPEC-038-continuous-batching.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1136,7 +1136,7 @@
     {
       "spec_id": "SPEC-039",
       "title": "Paged KV / paged-attention engine",
-      "version": "v0.1.22",
+      "version": "v0.1.24",
       "path": "specs/SPEC-039-paged-kv-attention-engine.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1475,7 +1475,7 @@
     {
       "spec_id": "SPEC-048",
       "title": "Native Multi-Token Prediction Serving",
-      "version": "0.1.53",
+      "version": "0.1.55",
       "path": "specs/SPEC-048-native-mtp-serving.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -3730,6 +3730,40 @@
       }
     },
     {
+      "requirement_id": "SPEC-024-R004",
+      "spec_id": "SPEC-024",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/ConversationCache.swift:begin",
+        "phase3-binary/Sources/macprovider-cli/ConversationCache.swift:commit",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:conversationPromptSnapshotTokenCount",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:prefillPromptSnapshot",
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:promptSnapshotIsPending",
+        "phase3-binary/Sources/macprovider-cli/DeepseekV4ContinuousBatchBackend.swift:snapshotPromptCache",
+        "phase3-binary/Sources/macprovider-cli/PagedKVRuntimeBridge.swift:snapshotPromptCache"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/ConversationPromptSnapshotTests.swift:testSnapshotEntryServesOnlyAnExtendingPrompt",
+        "phase3-binary/Tests/macprovider-cliTests/ConversationPromptSnapshotTests.swift:testSnapshotEntryMissesWhenThePromptDivergesInsideIt",
+        "phase3-binary/Tests/macprovider-cliTests/ConversationPromptSnapshotTests.swift:testUnflaggedRotatingAndPoolEntriesStillMiss",
+        "phase3-binary/Tests/macprovider-cliTests/ConversationPromptSnapshotTests.swift:testDeepseekV4ResumedTurnMatchesFreshPrefillExactlyOnCPU",
+        "phase3-binary/Tests/macprovider-cliTests/ConversationPromptSnapshotTests.swift:testGLM5NextResumedTurnMatchesFreshPrefill",
+        "phase3-binary/Tests/macprovider-cliTests/ConversationCacheTests.swift:testPromptSnapshotIsNeverCapturedByTheColdTier",
+        "phase3-binary/Tests/macprovider-cliTests/PagedMLALatentCacheTests.swift:testPromptSnapshotConversionEqualsAndExtendsLikeTheStockCacheOnCPU",
+        "phase3-binary/Tests/macprovider-cliTests/ConversationPromptSnapshotTests.swift:testContinuousBatchRowsKeepOnlyTheReferencePlanSnapshot",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testKeyedSnapshotRowPublishesOnlyItsPromptSnapshot",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testKeyedSnapshotRowWithoutASnapshotPublishesNothing"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2111",
+        "rationale": "DeepSeek V4 keyed turns missed with rotating_window_cache and GLM-5-Next keyed turns committed nothing usable, so agent loops re-prefilled every turn from zero. Extend-only prompt snapshots are CPU-tested; pending the GPU two-turn parity window and live evidence."
+      }
+    },
+    {
       "requirement_id": "SPEC-032-R001",
       "spec_id": "SPEC-032",
       "state": "conformant",
@@ -5247,7 +5281,8 @@
         "phase3-binary/Sources/macprovider-cli/PagedKVRuntimeBridge.swift:static func verifyGroups",
         "phase3-binary/Sources/macprovider-cli/PagedKVRuntimeBridge.swift:private func notePaddedAttentionBypass",
         "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:enum ContinuousBatchDecodeRouteBound",
-        "phase3-binary/Sources/macprovider-cli/ServeDecodePath.swift:nonisolated static func schedulerPromptChunkCeiling"
+        "phase3-binary/Sources/macprovider-cli/ServeDecodePath.swift:nonisolated static func schedulerPromptChunkCeiling",
+        "phase3-binary/Sources/macprovider-cli/DeepseekV4ContinuousBatchBackend.swift:final class DeepseekV4ContinuousBatchBackend"
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testPrefillBatchesCompatibleChunksWithinRowAndTokenBudgets",
@@ -5329,7 +5364,8 @@
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testProductionPromptChunkFollowsTheFamilyCeilingAndTheOperatorOnlyLowersIt",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testGLMPromptChunkKeepsActiveRowsDecodingBetweenChunks",
         "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeMixedCacheTests.swift:testSchedulerPromptChunkCeilingIsPerFamily",
-        "phase3-binary/Tests/macprovider-cliTests/ServingKnobsConfigTests.swift:testPrefillStepSizeIsTrackedAsExplicitOnlyWhenConfigured"
+        "phase3-binary/Tests/macprovider-cliTests/ServingKnobsConfigTests.swift:testPrefillStepSizeIsTrackedAsExplicitOnlyWhenConfigured",
+        "phase3-binary/Tests/macprovider-cliTests/DeepseekV4ContinuousBatchTests.swift:final class DeepseekV4ContinuousBatchTests"
       ],
       "journeys": [],
       "evidence": [],
@@ -5337,7 +5373,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1758",
-        "rationale": "FR-CB2 v0.3.8 streams each decode-window step to buyers (stop, visibility and delivery per step; release at the hop boundary; returned window authoritative; early hop exit only when every row is cancelled), measured on Studio llama-3.1-8b (audits/2026-10-02-cb-stream-per-step/EVIDENCE.md: >=98.5% of window-16 throughput at 1/4/8 slots, per-step cadence, greedy parity). FR-CB2 v0.3.2 batched-prefill scheduling commits the whole prompt, samples the first generated token from the final prefill position, preserves bounded group/per-row token budgets and isolated fallback, and uses the production 512-token partition. Issue #1773 records packaged-runtime boundary parity at L511/L512/L513; broader rollout remains release-gated. FR-CB2 v0.3.16 gives hybrid models the 16-step window with stop-boundary recurrent checkpoints and runs the startup isolation/parity probes at that window; the served-artifact hybrid window proof (msb-throughput --scenario hybrid-window, #1906) passed on the Studio M3 Ultra for the A3B (fused MoE on and off) and 27B (docs/research/hybrid-decode-window/). FR-CB2 v0.3.26 admits the validated Qwen adapter to native ragged prompt grouping; targeted cache/output/drafter-seed and capacity-downgrade regressions are mapped here. The same version requires generation-bound Qwen text preparation independent of the target-forward lock, with parity and occupied-lock admission regressions for both streaming and non-streaming requests. Source 87ee0bcaa passed six targeted Metal regressions but failed gated s2 TTFT (+6.3484% median, +6.6132% corrected upper against +5%); other cells and the sustained phase passed. The preparation correction still requires current-source Swift execution and Studio acceptance for issue #2081."
+        "rationale": "Related: #2111 adds the row-owned DeepSeek-V4 CB family boundary. The CPU build/tests and operator-owned real-weight throughput/parity window are distinct gates; no signed deployment policy is changed by this campaign. FR-CB2 v0.3.8 streams each decode-window step to buyers (stop, visibility and delivery per step; release at the hop boundary; returned window authoritative; early hop exit only when every row is cancelled), measured on Studio llama-3.1-8b (audits/2026-10-02-cb-stream-per-step/EVIDENCE.md: >=98.5% of window-16 throughput at 1/4/8 slots, per-step cadence, greedy parity). FR-CB2 v0.3.2 batched-prefill scheduling commits the whole prompt, samples the first generated token from the final prefill position, preserves bounded group/per-row token budgets and isolated fallback, and uses the production 512-token partition. Issue #1773 records packaged-runtime boundary parity at L511/L512/L513; broader rollout remains release-gated. FR-CB2 v0.3.16 gives hybrid models the 16-step window with stop-boundary recurrent checkpoints and runs the startup isolation/parity probes at that window; the served-artifact hybrid window proof (msb-throughput --scenario hybrid-window, #1906) passed on the Studio M3 Ultra for the A3B (fused MoE on and off) and 27B (docs/research/hybrid-decode-window/). FR-CB2 v0.3.26 admits the validated Qwen adapter to native ragged prompt grouping; targeted cache/output/drafter-seed and capacity-downgrade regressions are mapped here. The same version requires generation-bound Qwen text preparation independent of the target-forward lock, with parity and occupied-lock admission regressions for both streaming and non-streaming requests. Source 87ee0bcaa passed six targeted Metal regressions but failed gated s2 TTFT (+6.3484% median, +6.6132% corrected upper against +5%); other cells and the sustained phase passed. The preparation correction still requires current-source Swift execution and Studio acceptance for issue #2081."
       }
     },
     {
@@ -5859,7 +5895,8 @@
       "state": "pending",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:nonisolated static func pagedKVModelCapabilities",
-        "phase3-binary/Sources/macprovider-cli/PagedKVRuntimeParityProbe.swift:runSharedForwardExactParityProbe"
+        "phase3-binary/Sources/macprovider-cli/PagedKVRuntimeParityProbe.swift:runSharedForwardExactParityProbe",
+        "phase3-binary/Sources/macprovider-cli/DeepseekV4ContinuousBatchBackend.swift:final class DeepseekV4ContinuousBatchBackend"
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeBridgeTests.swift:testQwen3xHybridArchitectureRequiresExactAllowlistedIdentityAndConfigMetadata",
@@ -5870,7 +5907,8 @@
         "phase3-binary/Tests/macprovider-cliTests/PagedKVSlidingWindowTests.swift:testLegacyFullHistoryMaskPredicateStillWindows",
         "phase3-binary/Tests/macprovider-cliTests/PagedKVSlidingWindowTests.swift:testPagedSingleTokenDecodePastWindowPresentsOnlyWindow",
         "phase3-binary/Tests/macprovider-cliTests/PagedKVSlidingWindowTests.swift:testPagedMultiTokenPrefillPastWindowMatchesRotatingPresentation",
-        "phase3-binary/Tests/macprovider-cliTests/PagedKVSlidingWindowTests.swift:testBatchedEqualLengthDecodePastWindowUsesPresentedWindow"
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVSlidingWindowTests.swift:testBatchedEqualLengthDecodePastWindowUsesPresentedWindow",
+        "phase3-binary/Tests/macprovider-cliTests/DeepseekV4ContinuousBatchTests.swift:final class DeepseekV4ContinuousBatchTests"
       ],
       "journeys": [],
       "evidence": [
@@ -5885,7 +5923,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1773",
-        "rationale": "FR-PKV12 v0.1.14 admits the exact openai/gpt-oss-120b identity/config pair after Mac Studio packaged-runtime evidence recorded in docs/evidence/2026-10-01-1780-gpt-oss-120b-evidence.md: 1024-token prefill, 48-token parity, standalone=[true,true], batched=[true,true], isolation/replay/drain pass. stdout sha256 ca05b28d8cbbb55fd1db530109a0c8e1c7de782149bb127a89607036f2013f0e; stderr sha256 648b75892ed8b47023fe253cf3874dacd0c25582e82c6ecb7d1ed32942d58b87. The grant remains exact-identity only; gpt-oss-20b evidence does not generalize to aliases or the gpt_oss family. Runtime attach still fails closed unless the identity/config pair and fresh 48-token shared-forward proof pass; release and production deployment remain pending."
+        "rationale": "Related: #2111 adds the row-owned DeepSeek-V4 CB family boundary. The CPU build/tests and operator-owned real-weight throughput/parity window are distinct gates; no signed deployment policy is changed by this campaign. FR-PKV12 v0.1.14 admits the exact openai/gpt-oss-120b identity/config pair after Mac Studio packaged-runtime evidence recorded in docs/evidence/2026-10-01-1780-gpt-oss-120b-evidence.md: 1024-token prefill, 48-token parity, standalone=[true,true], batched=[true,true], isolation/replay/drain pass. stdout sha256 ca05b28d8cbbb55fd1db530109a0c8e1c7de782149bb127a89607036f2013f0e; stderr sha256 648b75892ed8b47023fe253cf3874dacd0c25582e82c6ecb7d1ed32942d58b87. The grant remains exact-identity only; gpt-oss-20b evidence does not generalize to aliases or the gpt_oss family. Runtime attach still fails closed unless the identity/config pair and fresh 48-token shared-forward proof pass; release and production deployment remain pending."
       }
     },
     {
@@ -11627,7 +11665,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1770",
-        "rationale": "SPEC-048 v0.1.52 authorizes the campaign fork tuple: mlx-swift-lm fork tag 3.32.3-macprovider.10.3 (baec172471889593f60c70060eefcb624772fee5, branch dsv4/2111-port), which is the epic #2029 tag 3.32.3-macprovider.10.1 plus the #2111 deepseek_v4 model (new DeepseekV4.swift and DeepseekV4PoolCache.swift, one LLMModelFactory registration line, test fixtures, and a GLM5Next.swift visibility and initializer refactor with no numeric change); 3.32.3-macprovider.10.1 is 87dc5159c87d73f4d7abd524fbdd17760cf56285, branch glm53/tuple-0324; upstream 3.32.3; on the fork's 3.32.3-macprovider.10 b4077dcb28336b388f3d09be2a091c12f8e179aa, which is the #2028 tuple's 3.32.3-macprovider.9 dbe8bcb3 plus the core v0.32.4 pin and the upstream #622 exact-rewind fix with KVCache.maxTrimCount, and adds the GLM-5-Next files and model and drafter registration, plus a single-sync greedy round and an optional MTPAdaptiveDepth controller in MTPSpeculativeTokenIterator that the provider does not use, depth-D MambaCache rollback (the depth-1 checkpoint path unchanged), and the #2035 Qwen2-VL per-image vision attention fix, and GLM-5-Next configuration validation at load, which changes no decode-path line), mlx-swift 0.32.3-macprovider.9 (29d3b93375cc56cd2649b40e4310a8bc445e9874, upstream 0.32.3), and MLX core v0.32.4-macprovider.4 (2f512e3997349c8648f5d7c5113eb2c825aa242d, upstream v0.32.4), each pinned by full revision and rebased per adopted upstream release under the MLX_ENGINE_UPGRADE_MATRIX per-rebase acceptance gate. The tuple carries the previously reviewed MTP transaction, packed verification, packed drafter, fused A3B MoE (exact stock module types only), and checkpointed GDN surfaces, the compiled MTP verification step, declared compile state for every trace, batch-invariant small-M quantized matmul routing, every-thread compiled-function erase, the #2028 caller-stream propagation (checked by scripts/check_mlx_core_streams.py and MLXCoreStreamPropagationTests against SPEC048_MLX_CORE_REVISION), plus the GLM-5-Next model, attention cache, batched latent caches and fused decode kernels (T3 parity: docs/evidence/glm53-flash-t3-parity-2026-10-16/), its MTP-1 target-side verification with one-token rewind, GLM5NextMTPDraftModel drafter, packed verification inside continuous batching (GLM5NextLatentCacheBatch row transactions), the fused multi-vector projection glm5NextQMVBatch (bitwise equal to the one-vector path) the one-dispatch KDA verify step glm5NextKDAVerifyStep, and depth-D drafting and verification with GLM5NextMTPDraftModel serving at depth 1 by default (the provider's paged equivalent and admission gate are SPEC-048 MTP-2). The review record for this tuple is PENDING on two items, the JOURNEY-NATIVE-MTP-SERVING run on the final tagged tuple and the GLM R015 record; the #2028 tuple (3.32.3-macprovider.9 / 0.32.3-macprovider.8 / v0.32.2-macprovider.5, audits/2026-10-16-2028-gptoss-decode/) and the earlier 3.32.3-macprovider.6 tuple keep their review records. No production build may resolve an untagged mlx-swift-lm revision; the upstream watch verifies that the tag resolves to the pinned revision. R003 stays pending for native serving: native-MTP R015 gates signing and activation of a native tuple, not this pin, and nothing here makes any production tuple eligible."
+        "rationale": "SPEC-048 v0.1.55 advances only mlx-swift-lm to 3.32.3-macprovider.10.5 (c8be0f618df1e0df230137a3cbe932aa798d602b, campaign/2111-dsv4-cb): shared attention and compressor/indexer projections, per-row rotary offsets, keys-only windows and geometric pool storage. CPU exact 1/2/4/8-row fixtures pass; real-weight GPU parity, four-row throughput, signed activation and freeze audit remain pending. Prior tuple context: SPEC-048 v0.1.54 advances only mlx-swift-lm to 3.32.3-macprovider.10.4 (676a62a45365d72040b65964e90b3a61cfa146c6, campaign/2111-dsv4-cb), adding DeepseekV4Model.decodeBatch with row-owned ragged pool/window/indexer caches and correcting incomplete multi-token pool continuation. Other tuple components are unchanged. CPU tiny-fixture correctness does not establish the pending real-weight four-row performance gate, hardware parity, signed CB admission, campaign freeze audit or native-MTP serving journey. Prior tuple context: SPEC-048 v0.1.52 authorizes the campaign fork tuple: mlx-swift-lm fork tag 3.32.3-macprovider.10.3 (baec172471889593f60c70060eefcb624772fee5, branch dsv4/2111-port), which is the epic #2029 tag 3.32.3-macprovider.10.1 plus the #2111 deepseek_v4 model (new DeepseekV4.swift and DeepseekV4PoolCache.swift, one LLMModelFactory registration line, test fixtures, and a GLM5Next.swift visibility and initializer refactor with no numeric change); 3.32.3-macprovider.10.1 is 87dc5159c87d73f4d7abd524fbdd17760cf56285, branch glm53/tuple-0324; upstream 3.32.3; on the fork's 3.32.3-macprovider.10 b4077dcb28336b388f3d09be2a091c12f8e179aa, which is the #2028 tuple's 3.32.3-macprovider.9 dbe8bcb3 plus the core v0.32.4 pin and the upstream #622 exact-rewind fix with KVCache.maxTrimCount, and adds the GLM-5-Next files and model and drafter registration, plus a single-sync greedy round and an optional MTPAdaptiveDepth controller in MTPSpeculativeTokenIterator that the provider does not use, depth-D MambaCache rollback (the depth-1 checkpoint path unchanged), and the #2035 Qwen2-VL per-image vision attention fix, and GLM-5-Next configuration validation at load, which changes no decode-path line), mlx-swift 0.32.3-macprovider.9 (29d3b93375cc56cd2649b40e4310a8bc445e9874, upstream 0.32.3), and MLX core v0.32.4-macprovider.4 (2f512e3997349c8648f5d7c5113eb2c825aa242d, upstream v0.32.4), each pinned by full revision and rebased per adopted upstream release under the MLX_ENGINE_UPGRADE_MATRIX per-rebase acceptance gate. The tuple carries the previously reviewed MTP transaction, packed verification, packed drafter, fused A3B MoE (exact stock module types only), and checkpointed GDN surfaces, the compiled MTP verification step, declared compile state for every trace, batch-invariant small-M quantized matmul routing, every-thread compiled-function erase, the #2028 caller-stream propagation (checked by scripts/check_mlx_core_streams.py and MLXCoreStreamPropagationTests against SPEC048_MLX_CORE_REVISION), plus the GLM-5-Next model, attention cache, batched latent caches and fused decode kernels (T3 parity: docs/evidence/glm53-flash-t3-parity-2026-10-16/), its MTP-1 target-side verification with one-token rewind, GLM5NextMTPDraftModel drafter, packed verification inside continuous batching (GLM5NextLatentCacheBatch row transactions), the fused multi-vector projection glm5NextQMVBatch (bitwise equal to the one-vector path) the one-dispatch KDA verify step glm5NextKDAVerifyStep, and depth-D drafting and verification with GLM5NextMTPDraftModel serving at depth 1 by default (the provider's paged equivalent and admission gate are SPEC-048 MTP-2). The review record for this tuple is PENDING on two items, the JOURNEY-NATIVE-MTP-SERVING run on the final tagged tuple and the GLM R015 record; the #2028 tuple (3.32.3-macprovider.9 / 0.32.3-macprovider.8 / v0.32.2-macprovider.5, audits/2026-10-16-2028-gptoss-decode/) and the earlier 3.32.3-macprovider.6 tuple keep their review records. No production build may resolve an untagged mlx-swift-lm revision; the upstream watch verifies that the tag resolves to the pinned revision. R003 stays pending for native serving: native-MTP R015 gates signing and activation of a native tuple, not this pin, and nothing here makes any production tuple eligible."
       }
     },
     {

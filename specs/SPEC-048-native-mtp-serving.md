@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.53
+**Version:** 0.1.55
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.53",
+  "version": "0.1.55",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -493,21 +493,22 @@ The authorized dependency tuple is exact:
 
 | Repository | Fork tag | Revision | Upstream base |
 |---|---|---|---|
-| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.10.3` | `baec172471889593f60c70060eefcb624772fee5` | fork `3.32.3-macprovider.10.1` (`87dc5159c87d73f4d7abd524fbdd17760cf56285`) on fork `3.32.3-macprovider.10` (`b4077dcb28336b388f3d09be2a091c12f8e179aa`) on `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
+| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.10.5` | `c8be0f618df1e0df230137a3cbe932aa798d602b` | fork `3.32.3-macprovider.10.1` (`87dc5159c87d73f4d7abd524fbdd17760cf56285`) on fork `3.32.3-macprovider.10` (`b4077dcb28336b388f3d09be2a091c12f8e179aa`) on `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
 | `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.9` | `29d3b93375cc56cd2649b40e4310a8bc445e9874` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
 | `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.4` | `2f512e3997349c8648f5d7c5113eb2c825aa242d` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
 
-The mlx-swift-lm row is the immutable fork tag `3.32.3-macprovider.10.3`
-(annotated tag object `27640b33…`, commit `baec1724…`, branch
-`dsv4/2111-port`): the epic #2029 campaign tag `3.32.3-macprovider.10.1`
-(annotated tag object `6a9ba2b9…`, commit `87dc5159…`, branch
-`glm53/tuple-0324`) plus the campaign #2111 DeepSeek-V4 commits (0.1.52), and
-`phase3-binary/Package.resolved` resolves exactly that revision. The tag name
-`3.32.3-macprovider.10.2` is an unrelated, unauthorized GLM candidate tag and
-is not part of this tuple. A production build MUST NOT resolve an
-untagged mlx-swift-lm revision, and a revision differing from this row is
-outside the authorized tuple; `scripts/check-upstream-throughput-blockers.sh`
-verifies that the row's tag resolves to the row's revision on the fork.
+The mlx-swift-lm row is the immutable fork tag `3.32.3-macprovider.10.5`
+(commit `c8be0f61…`, branch `campaign/2111-dsv4-cb`): tag
+`3.32.3-macprovider.10.4` (`676a62a4…`) plus batched DeepSeek-V4 attention,
+compressor/indexer projections and per-row rotary offsets, keys-only windows
+and geometric pool storage (0.1.55, Related: #2111). The prior tag adds
+row-owned continuous batching to the serial DeepSeek-V4 port on the epic
+#2029 tag `3.32.3-macprovider.10.1` (`87dc5159…`, `glm53/tuple-0324`).
+`phase3-binary/Package.resolved` resolves the new revision exactly.
+`3.32.3-macprovider.10.2` remains an unrelated GLM candidate outside the tuple.
+A production build MUST NOT resolve an untagged mlx-swift-lm revision;
+`scripts/check-upstream-throughput-blockers.sh` verifies that the row's tag
+resolves to the row's revision on the fork.
 
 Each link pins the next by full revision: `phase3-binary/Package.swift` pins
 the mlx-swift-lm fork, that fork's manifest pins the mlx-swift fork, and the
@@ -554,6 +555,25 @@ Authorized surface:
   bit-identical to the general path; and compile state declared for every
   Qwen 3.5 trace, including the fused GDN input projection (upstream #631,
   cherry-picked), so no trace reads a model array as a tape constant.
+- mlx-swift-lm fork, DeepSeek-V4 continuous batching (0.1.55, Related: #2111):
+  `DeepseekV4Model.decodeBatch(_:rowCaches:)` accepts one token for each of
+  1...8 independently prefetched rows. Embedding, hyper-connections, attention
+  projections, output projections and MoE share a batched forward. On CPU,
+  the small hyper-connection mixes use row-local arithmetic to preserve exact
+  serial rounding; GPU keeps its fused row-independent path. Attention uses
+  each row's own window offset, compression pools and indexer. Compressor and
+  indexer projections run once over all rows; ragged histories are masked to
+  the longest row. Homogeneous dense or sparse rows use one batched attention
+  body. Mixed dense/sparse rows use two batched bodies to preserve serial
+  sparse normalization and exact tokens. Windows retain keys only; pools grow
+  geometrically and update row-owned slices. Rows may
+  join, leave and reorder without transferring cache identity. Per-row
+  `prepare` retains 2048-token chunks and a final one-token forward. The
+  incomplete multi-token `DeepseekV4PoolCache.accumulateWindows` continuation
+  copies only newly appended tokens after its retained prefix. These caches
+  are not paged K/V and do not add a native-MTP adapter or admission. The
+  provider's signed CB policy remains deployment state, with exact token
+  parity and measured campaign gain required before activation.
 - mlx-swift fork: the core submodule moved to the MLX core fork, and the
   compiled-function erase documented for the per-thread cache. No API change.
 - mlx-swift-lm fork, GLM-5-Next (0.1.35, epic #2029; batched rows 0.1.37;
@@ -1814,7 +1834,7 @@ the journey must include its independent and combined evidence.
 | `native-mtp-serving` | `DECISION_REQUIRED` | `@Augustas11` | `#1770` | Authority acceptance, release-candidate review, and signed real-hardware journey evidence for the first production tuple. |
 | First Qwen-family MTP artifact | `UNKNOWN` | `@Augustas11` | `#1770` | Legally/provenance-clean immutable model, tokenizer, MTP manifest, and exact hashes. |
 | MLX dependency tuple | `RESOLVED_FOR_TUPLE` | `@Augustas11` | `#1906` | The operator's permanent fork model (MTP-3) replaces the upstream-release requirement. MTP-3 names the exact three-fork tuple; each rebase passes the runbook's per-rebase acceptance gate and a SPEC revision. |
-| GLM-5.3-Flash `glm5_next_mtp_v1` tuple | `DECISION_REQUIRED` | `@Augustas11` | `#2029` | Pending: the `JOURNEY-NATIVE-MTP-SERVING` run on the final tagged tuple (mlx-swift-lm `3.32.3-macprovider.10.3`) and the GLM R015 record, which complete the R003 review record. Implemented in the campaign branch: the observer, sidecar parsing, v2 projection reader, SPEC-023 v0.22.27 widths, the fork's MTP-1 drafter and packed verification, and the provider drafter load path, admission gate and paged packed verification. |
+| GLM-5.3-Flash `glm5_next_mtp_v1` tuple | `DECISION_REQUIRED` | `@Augustas11` | `#2029` | Pending: the `JOURNEY-NATIVE-MTP-SERVING` run on the final tagged tuple (mlx-swift-lm `3.32.3-macprovider.10.5`) and the GLM R015 record, which complete the R003 review record. Implemented in the campaign branch: the observer, sidecar parsing, v2 projection reader, SPEC-023 v0.22.27 widths, the fork's MTP-1 drafter and packed verification, and the provider drafter load path, admission gate and paged packed verification. |
 | First MLX-native MXFP8 artifact | `UNKNOWN` | `@Augustas11` | `#1770` | SPEC-023/SPEC-010 format, fit, quality, license, provenance, and hardware evidence. |
 | Batched-verify numerical parity | `RESOLVED_FOR_TUPLE` | `@Augustas11` | `#1770` | The qmv-to-qmm switch at 12 packed verify tokens cannot occur for the first tuple: `max_native_active_rows` is 1 and depth is 1, so a packed verify is at most 2 tokens, and rows above the bound ride the ordinary forward at depth zero. A tuple whose bound times `proposal_depth + 1` reaches 12 must decide between a bounded drift allowance and kernel-matched verification before it can be signed. |
 | Depth-1 throughput value | `RESOLVED_FOR_TUPLE` | `@Augustas11` | `#1770` | The 2026-10-06 quiet R015 (policy `e24cb7bc…`, amended 0.1.25 gates) passed every cell for the A3B Studio tuple: one-slot decode ratio 1.19-1.28 with corrected lower bounds +18% to +26%, gated s2/s8 cells non-inferior. The value is one-slot only; the R007 bound of 1 keeps native off above it. |
@@ -1853,6 +1873,25 @@ the text-only path without image inputs; that does not admit multimodal buyer
 requests.
 
 ## 9. Changelog and history
+
+- **0.1.55 (2026-10-24)** — R003: pins the DeepSeek-V4 CB performance slice
+  `3.32.3-macprovider.10.5` (`c8be0f61…`) on `676a62a4…`. Batched attention,
+  compressor/indexer projections and per-row rotary offsets reduce repeated
+  dispatch and weight reads; keys-only windows and geometric pools avoid
+  per-step whole-cache staging. SPEC-038/039 define bounded lookahead with
+  stopped/failed row state discarded. CPU exactness at 1/2/4/8 rows does not
+  establish GPU exactness, the four-row throughput gate, signed activation or
+  the campaign freeze audit; those remain pending.
+
+
+- **0.1.54 (2026-10-24)** — R003: pins the DeepSeek-V4 CB campaign fork
+  `3.32.3-macprovider.10.4` (`676a62a4…`, `campaign/2111-dsv4-cb`) on
+  `baec1724…`. Only `DeepseekV4.swift`, `DeepseekV4PoolCache.swift` and their
+  tiny-fixture tests change in the fork. SPEC-038/039 define its row-owned
+  pooled-cache serving boundary. No signed policy or native-MTP admission is
+  granted by this tuple update. CPU tests are correctness evidence; the
+  operator's native four-row throughput and hardware exactness window remain
+  pending, as does the campaign freeze audit.
 
 - **0.1.53 (2026-10-24)** — R004: constrained tool and structured-output
   rows use ordinary decoding until draft/verify preserves grammar state.

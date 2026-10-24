@@ -1,11 +1,29 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.28
+Version: v0.3.30
 Status: draft (normative contract; runtime enablement is default-on per Mac behind the FR-CB10 on-device self-check, v0.3.15)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.3.30 (2026-10-24, DeepSeek pipelined decode):**
+FR-CB2 permits a bounded lockstep window with one queued lookahead step.
+Projection, RoPE and attention run across rows; ragged padding is masked.
+Rows own their caches directly. A failed forward invalidates the affected
+rows. A stopped row's untrimmed lookahead state is discarded and MUST NOT
+be published or reused. Retained-cache handoff remains unsupported.
+
+**Change log v0.3.29 (2026-10-24, DeepSeek V4 pooled-cache batching):**
+FR-CB2 admits a `deepseek_v4` backend with row-owned compression pools,
+sliding windows and indexer state; decode shares model projections while
+retaining each row's absolute offset and attention history. Prompt processing
+keeps the reference 2048-token partition and final singleton token per row.
+FR-CB10 requires a positive signed policy entry for this new family, plus its
+local correctness probes and self-check. This is deployment state, not an
+additional default-off runtime flag. No DeepSeek production qualification or
+throughput result is asserted by this revision. SPEC-039 v0.1.23 defines the
+nonpaged-cache boundary; AC-16 adds the tiny-model exactness fixtures.
+
 **Change log v0.3.28 (2026-10-22, FR-CB2 per-family prompt chunk):**
 FR-CB2: the serve path's per-row prompt chunk limit is the backend family's
 ceiling. A `glm5_next` (pagedMLA) backend takes 2048 tokens; every other
@@ -793,6 +811,40 @@ never below the default, and never above the lockstep window. A family's
 ceiling rises only with a same-build measurement of its prefill throughput and
 greedy parity at the new chunk.
 
+**DeepSeek V4 reference prefill (v0.3.29).** A `deepseek_v4` row MUST
+prefill alone with the same reference partition as serial: consume up to 2048
+tokens per forward while leaving the last prompt token for its own singleton
+forward. The scheduler MUST NOT balance chunks against another row, combine
+prompt rows in a shared forward, or repartition this row using the generic
+512-token limit. Its admission and iteration budgeting MUST accommodate the
+next reference chunk without shortening it; incompatible configured limits
+MUST use serial fallback or a reason-coded refusal. Pooling boundaries are
+part of correctness, so changing this partition requires new exactness proof.
+
+DeepSeek decode MUST share model projections across compatible rows while
+each row retains its own absolute token offset, compression-ratio-4 and
+compression-ratio-128 pending windows and completed pools, 128-token sliding
+attention window, and indexer state. Ragged offsets MUST drive row-local RoPE,
+pool completion, selection and masking. Padding or a peer's offset MUST NOT
+advance a row's state or enter its attention history. Joining and leaving
+rows MUST preserve every surviving row's state and token stream. State is
+packed only for the current forward and committed back to its owning row;
+reusing a packed cache across membership changes is non-conformant. A
+multi-token continuation that does not complete a pooling window MUST retain
+the incomplete window without constructing a negative slice. These caches
+use the SPEC-039 FR-PKV12 row-owned pooled-family adapter; they MUST NOT be
+advertised as ordinary paged K/V or as paged-gather proof.
+Every DeepSeek shared decode forward MUST carry at most 8 rows. A bounded
+lockstep decode window MAY queue one lookahead forward before reading the
+preceding sampled tokens. It MUST recognize stops in generation order,
+return only the accepted prefix, and discard a stopped row's complete cache
+if lookahead advanced it past that prefix. Such state MUST NOT be published,
+retained, or reused. Continuing rows commit only their accepted endpoint;
+joining or reordering rows MUST rebuild the next batch from those owners.
+Failed forwards MUST invalidate affected rows rather than reuse partially
+advanced caches. All cache writes and sampled tokens of a step MUST be
+scheduled together. This rule grants no retained-cache handoff.
+
 Rows in one compatible prefill group MUST be processed by one backend shared
 prefill forward. An implementation MUST NOT claim batched prefill when it
 serially prefills compatible rows one at a time. When the backend cannot prove
@@ -1322,6 +1374,16 @@ identity-mismatched policy is equivalent to no acceptance coverage.
 
 **(v0.3.15) Default-on with on-device qualification.** The two paragraphs
 above are superseded where they conflict:
+
+**DeepSeek V4 admission (v0.3.29).** For `deepseek_v4`, a valid positive
+signed SPEC-023 policy entry covering the exact model/runtime tuple MUST
+admit batching before a coordinator-joined provider can use this family.
+Absence of that entry keeps this family serial, even if its local descriptor
+and self-check pass. The revocation-only default below does not broaden this
+family's admission. Policy authorization does not replace load-time exactness,
+row-isolation or on-device qualification, and a signed revocation still wins.
+Isolated lab/test entry points MAY exercise the adapter without authorizing
+buyer traffic. No extra runtime enable flag is introduced.
 
 1. Acceptance coverage for a coordinator-joined provider is every tuple the
    local SPEC-039 descriptor admits, minus signed revocations. A signed policy
@@ -2208,6 +2270,17 @@ hardware-capability run or a static-review obligation. Every
   ownership across reload, and exclusion of multimodal and other-adapter
   paths. Passing these fixtures does not substitute for the hardware
   performance gates.
+  (v0.3.29) A real tiny `deepseek_v4` fixture MUST produce exact greedy
+  serial-versus-batched token streams at 1, 2, 4 and 8 rows, including unequal
+  prompt offsets, a row joining and a peer leaving mid-stream. Each row's
+  prefill MUST retain the 2048-token/reference-final-singleton partition.
+  Pool-cache fixtures MUST cover multi-token continuation with an incomplete
+  compression window, completion across a boundary, and preserved indexer and
+  window state. CPU fixture success proves correctness only; the campaign's
+  real-model gate remains exact serial token parity at all four widths and
+  at least 67.4 aggregate decode tokens/s at 4 rows with 1024-token prompts
+  and 256 output tokens per row. The hardware window is separate from CPU
+  testing and MUST report that goal metric before further campaign tooling.
   (v0.3.18) Decode and verification isolation:
   - Backend-driven bitwise tests run rows with their own histories through
     the shared decode cache, the ragged prefill cache and the packed

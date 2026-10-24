@@ -69,6 +69,14 @@ struct ContinuousBatchingPolicySelection: Sendable, Equatable {
         ContinuousBatchingAcceptanceCoverage(acceptedTuples: entries.map(\.tuple))
     }
 
+    /// New row-owned pools require explicit signed deployment admission. A
+    /// generic self-check grant never expands this family's deployment state.
+    func admitsDeepseekV4Pool(_ tuple: ContinuousBatchingRequestedTuple) -> Bool {
+        ContinuousBatchingAcceptanceCoverage(
+            acceptedTuples: entries.filter { $0.rollout != .off }.map(\.tuple)
+        ).covers(tuple) && !revocations.contains { $0.revokes(tuple) }
+    }
+
     /// SPEC-038 FR-CB11 (v0.3.22): the lowest `max_served_slots` among the
     /// positive entries for this model artifact; nil when none carries one.
     func servedSlotCeiling(modelSHA256: String) -> Int? {
@@ -95,6 +103,15 @@ struct ContinuousBatchingPolicyLoadResult: Sendable, Equatable {
     let status: ContinuousBatchingPolicyLoadStatus
     let policySHA256: String?
     let signerKeyID: String?
+
+    /// DeepSeek V4 batches (mode, self-check, served slots) only under a
+    /// live-verified signed policy that admits this exact tuple. Every other
+    /// family is unaffected.
+    func admitsContinuousBatching(modelFamily: String?, tuple: ContinuousBatchingRequestedTuple?) -> Bool {
+        guard modelFamily == "deepseek_v4" else { return true }
+        guard status == .liveVerified, let tuple else { return false }
+        return selection.admitsDeepseekV4Pool(tuple)
+    }
 }
 
 enum ContinuousBatchingSignedPolicyError: Error, Equatable, CustomStringConvertible {

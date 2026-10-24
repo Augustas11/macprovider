@@ -200,6 +200,26 @@ final class ConversationCacheTests: XCTestCase {
         await cache.abort(hit!)
     }
 
+    /// SPEC-024 FR-CI2a: a prompt snapshot stays in RAM. The cold tier never
+    /// captures it, while an ordinary entry under the same cold context does.
+    func testPromptSnapshotIsNeverCapturedByTheColdTier() async {
+        let coldTier = FakeConversationColdTier()
+        let cache = ConversationCache(
+            config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900), coldTier: coldTier)
+        let tokens = int32Range(0..<64)
+        let snapshotLease = await cache.begin(conversationKey: "conv:snapshot-cold", incomingTokens: tokens,
+                                              modelID: "model-a", kvBits: nil, cold: coldContext(eligible: true))
+        await cache.commit(snapshotLease!, cache: ConversationCacheLayers(
+            [RotatingKVCache(maxSize: 8, keep: 0), DeepseekV4PoolCache(ratio: 4)], promptSnapshot: true),
+            fullTokens: tokens, cold: coldContext(eligible: true))
+        XCTAssertEqual(coldTier.captureCount, 0)
+        let ordinaryLease = await cache.begin(conversationKey: "conv:ordinary-cold", incomingTokens: tokens,
+                                              modelID: "model-a", kvBits: nil, cold: coldContext(eligible: true))
+        await cache.commit(ordinaryLease!, cache: ConversationCacheLayers([trimmableCache(offset: 64)]),
+                           fullTokens: tokens, cold: coldContext(eligible: true))
+        XCTAssertEqual(coldTier.captureCount, 1)
+    }
+
     func testKeyedSerialSimpleCacheHitSkipsPrefillTokens() async {
         let cache = ConversationCache(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
         let seedTokens = int32Range(0..<64)

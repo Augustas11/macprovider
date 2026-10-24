@@ -34,7 +34,7 @@ needs a SPEC revision.
 
 | Fork | Upstream | Tag scheme | Current tag | Revision | Upstream base |
 | --- | --- | --- | --- | --- | --- |
-| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.10.3` | `baec172471889593f60c70060eefcb624772fee5` | `3.32.3` (`3b339ad6…`) |
+| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.10.5` | `c8be0f618df1e0df230137a3cbe932aa798d602b` | `3.32.3` (`3b339ad6…`) |
 | `Augustas11/mlx-swift` | `ml-explore/mlx-swift` | `<upstream>-macprovider.<n>` | `0.32.3-macprovider.9` | `29d3b93375cc56cd2649b40e4310a8bc445e9874` | `0.32.3` (`19601207…`) |
 | `Augustas11/mlx` (MLX core) | `ml-explore/mlx` | `v<upstream>-macprovider.<n>` | `v0.32.4-macprovider.4` | `2f512e3997349c8648f5d7c5113eb2c825aa242d` | `v0.32.4` (`36969c09…`) |
 
@@ -50,12 +50,16 @@ the mlx-swift-lm fork keeps upstream's tools version.
 Every rebase replays these stacks and drops any patch upstream now carries
 (record which, and why it is equivalent).
 
-mlx-swift-lm (`3.32.3..baec1724`, tag `3.32.3-macprovider.10.3` on campaign
-branch `dsv4/2111-port`: tag `3.32.3-macprovider.10.1` (`87dc5159`, branch
-`glm53/tuple-0324`; the `3.32.3-macprovider.10` stack (`b4077dcb`,
-`3.32.3-macprovider.9` plus the upstream #622 rotating-cache exact-rewind fix
-and `KVCache.maxTrimCount`) plus GLM-5-Next) plus DeepSeek-V4. The tag
-`3.32.3-macprovider.10.2` is an unrelated GLM candidate outside the tuple):
+mlx-swift-lm (`3.32.3..c8be0f61`, tag `3.32.3-macprovider.10.5`, branch
+`campaign/2111-dsv4-cb`): tag `3.32.3-macprovider.10.4` (`676a62a4`) plus
+shared attention/compressor/indexer work, per-row rotary offsets, keys-only
+windows and geometric pool storage. 10.4 is `3.32.3-macprovider.10.3` (`baec1724`,
+`dsv4/2111-port`) plus row-owned DeepSeek-V4 batched decode and incomplete
+pool continuation safety. The prior tag adds DeepSeek-V4 to
+`3.32.3-macprovider.10.1` (`87dc5159`, `glm53/tuple-0324`) on the
+`3.32.3-macprovider.10` stack. `3.32.3-macprovider.10.2` remains an unrelated
+GLM candidate outside the tuple. CPU fixture parity is separate from the
+pending real-weight native four-row throughput gate and campaign freeze audit.
 
 | Patch | Commits | What it carries |
 | --- | --- | --- |
@@ -75,6 +79,9 @@ and `KVCache.maxTrimCount`) plus GLM-5-Next) plus DeepSeek-V4. The tag
 | GLM-5-Next config validation (epic #2029) | `87dc515` | `GLM5NextConfiguration.validateModelConfiguration` rejects `index_topk` outside `index_kpool...65536` or not a whole number of pools, `index_kpool` outside `1...1024`, unknown `mlp_layer_types` / `indexer_types` values, and sparse MLP layers without `1 <= num_experts_per_tok <= n_routed_experts`. No decode-path line. |
 | Qwen2-VL per-image vision attention (#2035) | `5eb60da`, `918ecc2`, `3545cb0`, `8ee6305` | MLXVLM `Qwen2VL.swift` vision blocks attend within each image (and each video frame group) instead of across all of a request's images (it used `frames[0].t`); equal-length images batch; the rotary batch axis is dropped before per-image attention. |
 | DeepSeek-V4 (#2111) | `fe28d00`, `baec172` | `DeepseekV4.swift` (text model, compressed pools, HISA indexer, reference prefill plan in `prepare`), `DeepseekV4PoolCache.swift`, the `deepseek_v4` `LLMModelFactory` registration, and the tiny test fixture. `GLM5Next.swift` refactor only: `makeLimitedSwiGLU` loses `private`, `GLM5NextHyperConnection` gains a memberwise init behind the identical convenience init. |
+| DeepSeek-V4 CB (#2111) | `362659f`, `676a62a` | `DeepseekV4Model.decodeBatch(_:rowCaches:)`: 1...8 ragged decode rows share projections/MoE and keep independent window/pool/indexer caches; per-row 2048+final-token prefill unchanged. Correct incomplete multi-token pool continuation; CPU tiny exactness, join/leave/reordering and boundary regressions. No native-MTP adapter or signed policy activation. |
+
+| DeepSeek-V4 CB performance (#2111) | `c8be0f6` | Shared compressor/indexer projections and rotary offsets; one batched attention body for homogeneous rows, two for mixed dense/sparse rows to preserve exact arithmetic; keys-only windows and geometric row-owned pool storage. CPU exact 1/2/4/8-row fixtures pass; GPU parity and throughput remain pending. |
 
 `784f021` (Swift 6.1 tools version) is reverted by `e81dd7c`; drop both on the
 next rebase.

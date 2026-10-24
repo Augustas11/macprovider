@@ -30,6 +30,8 @@ struct PagedKVRuntimeParityProbeResult: Sendable, Equatable {
     let gatherKernelCalls: Int
     let maxLogicalBlocks: Int
     let nonIdentityPermutation: Bool
+    /// Distinct proof for row-owned DeepSeek pools; never gather evidence.
+    let rowPoolProof: DeepseekV4RowPoolParityProof?
 
     init(
         established: Bool,
@@ -38,7 +40,8 @@ struct PagedKVRuntimeParityProbeResult: Sendable, Equatable {
         nForwards: Int? = nil,
         gatherKernelCalls: Int,
         maxLogicalBlocks: Int,
-        nonIdentityPermutation: Bool
+        nonIdentityPermutation: Bool,
+        rowPoolProof: DeepseekV4RowPoolParityProof? = nil
     ) {
         self.established = established
         self.nLayers = nLayers
@@ -47,6 +50,7 @@ struct PagedKVRuntimeParityProbeResult: Sendable, Equatable {
         self.gatherKernelCalls = gatherKernelCalls
         self.maxLogicalBlocks = maxLogicalBlocks
         self.nonIdentityPermutation = nonIdentityPermutation
+        self.rowPoolProof = rowPoolProof
     }
 
     static func failClosed(nNew: Int) -> PagedKVRuntimeParityProbeResult {

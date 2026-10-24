@@ -404,6 +404,37 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         try await eventually { await allocator.freeBlockCount() == 32 }
     }
 
+    /// SPEC-024 FR-CI2a: a keyed snapshot-family row splits prefill at the
+    /// snapshot position and publishes only that prompt snapshot.
+    func testKeyedSnapshotRowPublishesOnlyItsPromptSnapshot() async throws {
+        let backend = ScriptedBackend(scripts: ["snap": [7, 8]], promptSnapshotBackend: true)
+        let scheduler = try await makeScheduler(maxActiveRows: 1, maxPromptChunkTokens: 16, backend: backend)
+        let result = try await scheduler.submit(.init(
+            id: "snap", conversationKey: "conv:snap", promptTokens: Array(1...40),
+            maxOutputTokens: 2, temperature: 0.0, promptSnapshotTokenCount: 36
+        ))
+        XCTAssertNil(result.retainedCache)
+        let cache = try XCTUnwrap(result.serialConversationCache)
+        XCTAssertTrue(cache.promptSnapshot)
+        XCTAssertEqual(cache.tokenCount, 36)
+        let snapshots = await backend.promptSnapshots()
+        XCTAssertEqual(snapshots["snap"], [36])
+    }
+
+    /// A snapshot-family row whose snapshot was not captured publishes no
+    /// conversation cache rather than its decoded state.
+    func testKeyedSnapshotRowWithoutASnapshotPublishesNothing() async throws {
+        let backend = ScriptedBackend(scripts: ["nosnap": [7, 8]])
+        let scheduler = try await makeScheduler(maxActiveRows: 1, maxPromptChunkTokens: 16, backend: backend)
+        let result = try await scheduler.submit(.init(
+            id: "nosnap", conversationKey: "conv:nosnap", promptTokens: Array(1...40),
+            maxOutputTokens: 2, temperature: 0.0, promptSnapshotTokenCount: 36
+        ))
+        XCTAssertEqual(result.outputTokens, [7, 8])
+        XCTAssertNil(result.retainedCache)
+        XCTAssertNil(result.serialConversationCache)
+    }
+
     func testZeroOutputHybridRowMaterializesTheFullPrefilledPrompt() async throws {
         let backend = ScriptedBackend(scripts: [:], recurrentCheckpointBackend: true)
         let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 16)
@@ -6350,6 +6381,30 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertEqual(windows[0].steps, 4)
     }
 
+    func testDeepseekV4ReferencePrefillIgnoresGenericChunkAndTokenBudgets() async throws {
+        let backend = WindowRecordingBackend(scripts: ["deepseek": [77]])
+        let configuration = ContinuousBatchSchedulerConfiguration(
+            descriptor: Self.descriptor(blockSizeTokens: 128, maxPhysicalBlocks: 64),
+            tuple: Self.tuple(), maxActiveRows: 2, decodeHeadroomTokens: 1,
+            maxPrefillRowsPerIteration: 2, maxPrefillTokensPerIteration: 128,
+            maxPromptChunkTokens: 64, referencePrefillStepSize: 2048,
+            allowsRaggedPrefillOffsets: true,
+            snapshot: .init(modelID: Self.modelID, modelSHA256: Self.modelSHA, weightsGeneration: 1)
+        )
+        XCTAssertEqual(configuration.maxPrefillRowsPerIteration, 1)
+        XCTAssertFalse(configuration.allowsRaggedPrefillOffsets)
+        let scheduler = ContinuousBatchScheduler(
+            configuration: configuration,
+            allocator: try PagedKVBlockAllocator(blockSizeTokens: 128, maxPhysicalBlocks: 64),
+            backend: backend, replayAuthority: TestReplayAuthority()
+        )
+        let result = try await scheduler.submit(.init(id: "deepseek", conversationKey: "",
+            promptTokens: Array(repeating: 3, count: 4096), maxOutputTokens: 1))
+        XCTAssertEqual(result.outputTokens, [77])
+        let chunks = await backend.prefillChunks(id: "deepseek")
+        XCTAssertEqual(chunks, [2048, 2047, 1])
+    }
+
     private static let modelID = "mlx-community/Qwen-Test"
     private static let modelSHA = String(repeating: "a", count: 64)
     private static let tokenizerSHA = String(repeating: "b", count: 64)
@@ -8808,6 +8863,9 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
     private let recurrentCheckpointBackend: Bool
     private let terminalNilRecurrentSnapshots: [String: Set<Int>]
     private var recurrentSnapshotLog: [String: [Int]] = [:]
+    /// SPEC-024 FR-CI2a: answers `snapshotPromptCache` with a flagged entry.
+    private let promptSnapshotBackend: Bool
+    private var promptSnapshotLog: [String: [Int]] = [:]
     private let snapshotGate: AsyncGate?
     private let materializeGate: AsyncGate?
     private var serialMaterializeLog: [String: [Int]] = [:]
@@ -8866,8 +8924,10 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
         terminalNilRecurrentSnapshots: [String: Set<Int>] = [:],
         recurrentCheckpointBackend: Bool = false,
         snapshotGate: AsyncGate? = nil,
-        materializeGate: AsyncGate? = nil
+        materializeGate: AsyncGate? = nil,
+        promptSnapshotBackend: Bool = false
     ) {
+        self.promptSnapshotBackend = promptSnapshotBackend
         self.materializeGate = materializeGate
         self.recurrentCheckpointBackend = recurrentCheckpointBackend
         self.snapshotGate = snapshotGate
@@ -9089,6 +9149,15 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
         }
         try terminalCommitBridge.record(caches: terminalCommitCaches, binding: input.binding)
     }
+
+    func snapshotPromptCache(requestID: String, tokenCount: Int) async -> ContinuousBatchSerialConversationCache? {
+        promptSnapshotLog[requestID, default: []].append(tokenCount)
+        guard promptSnapshotBackend else { return nil }
+        return ContinuousBatchSerialConversationCache(
+            layers: [KVCacheSimple()], recurrentCheckpoints: [], tokenCount: tokenCount, promptSnapshot: true)
+    }
+
+    func promptSnapshots() -> [String: [Int]] { promptSnapshotLog }
 
     func snapshotRecurrentState(requestID: String, tokenCount: Int) async -> RecurrentStateCheckpoint? {
         guard recurrentCheckpointBackend else { return nil }
