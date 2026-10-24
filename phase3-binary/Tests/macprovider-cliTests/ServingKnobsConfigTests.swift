@@ -714,14 +714,17 @@ final class ServingKnobsConfigTests: XCTestCase {
         XCTAssertEqual(gemma4.modelFamily, "gemma4")
         XCTAssertFalse(PagedKVAttachGate.recognizedModelFamilies.contains(gemma4.modelFamily))
 
-        // DeepSeek V4-Flash (#2111): its own family, not paged yet; V4.1
-        // (`deepseek_v41`) is a different model.
+        // DeepSeek V4-Flash has its own row-owned pool bridge. Recognizing
+        // the family never admits an unverified raw artifact or layout;
+        // V4.1 (`deepseek_v41`) is a different model.
         let dsv4 = ModelRuntime.pagedKVModelCapabilities(
             modelID: "TensorFold/DeepSeek-V4-Flash-0731-MXFP4-MLX",
             configJSONData: Data(#"{"model_type":"deepseek_v4","architectures":["DeepseekV4ForCausalLM"],"n_routed_experts":256,"num_experts_per_tok":6}"#.utf8)
         )
         XCTAssertEqual(dsv4.modelFamily, "deepseek_v4")
-        XCTAssertFalse(PagedKVAttachGate.recognizedModelFamilies.contains(dsv4.modelFamily))
+        XCTAssertTrue(PagedKVAttachGate.recognizedModelFamilies.contains(dsv4.modelFamily))
+        XCTAssertFalse(dsv4.hybridDecoderArchitectureVerified)
+        XCTAssertNil(dsv4.deepseekV4Pool)
         let dsv41 = ModelRuntime.pagedKVModelCapabilities(
             modelID: "deepseek-ai/DeepSeek-V4.1-Flash",
             configJSONData: Data(#"{"model_type":"deepseek_v41","architectures":["DeepseekV41ForConditionalGeneration"]}"#.utf8)
