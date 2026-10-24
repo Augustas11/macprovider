@@ -1,6 +1,17 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.45 (2026-10-25, WebSocket message size limits)
+**Version:** 1.9.46 (2026-10-25, cancellation during prefill)
+
+**Change log v1.9.46 (2026-10-25, Related: #2111):**
+Adds `SPEC-001-R013`. The provider checked a cancel only between decode
+tokens, so a request with a very long prompt that was cancelled before its
+first token kept prefilling to the end and held its serving slot. A cancel now
+stops a
+request during prefill within one prefill chunk, on the serial and
+continuous-batching paths, and a cancelled request commits no
+conversation-cache entry or prompt snapshot. The cancel terminal and its
+settlement are unchanged (FR-26, SPEC-015 §N.7). No wire field, trust-tier,
+settlement or hardware-acceptance claim is added.
 
 **Change log v1.9.45 (2026-10-25, Related: #614):**
 Adds `SPEC-001-R012`. A provider's WebSocket client fails the whole session on
@@ -1432,6 +1443,46 @@ on the plaintext relay path it replies idempotently with
 unknown ID is **silently dropped with no ack**. The ≤ v1.6 "always acknowledge
 unknown IDs" contract does not hold uniformly — see the detailed §6.6
 `cancel_request` note.
+
+**SPEC-001-R013 — A cancel stops prefill within one chunk.** "Aborts the
+in-flight inference" in FR-26 includes prompt prefill. A provider MUST stop a
+request that is cancelled while it waits for its prompt's conversation key or
+prefills its prompt (a `cancel_request` for it, a local client disconnect or
+preemption, or a drain) before the next prefill chunk starts, on the serial and
+continuous-batching paths and for every model family whose prompt prefills in
+chunks. A prompt that a model prefills in one forward (an image prompt on a
+single-pass vision path) stops when that forward returns:
+
+- *Serial.* While the request prefills, a cancel cancels the task that runs
+  it, and every chunked prefill loop the provider or the model runs (the
+  model's own chunk plan, the SPEC-024 FR-CI2a prompt snapshot, the FR-CI2
+  recurrent checkpoints, the SPEC-001-R011 local prefill, the speculative
+  iterator's prefill) checks for cancellation before each chunk and before
+  copying a snapshot or checkpoint. A request waiting for a conversation key
+  that another request holds stops waiting and takes no lease. The chunk plan,
+  and so the computed cache, is unchanged for a request that is not cancelled.
+- *After prefill.* Once the prompt is in the cache, a cancel is handled by the
+  decode loop exactly as before this requirement: decode stops at its next
+  token, and the terminal and any delivered-prefix receipt are unchanged.
+- *Continuous batching.* A cancelled prompt row is retired at the next
+  scheduler iteration; one iteration prefills at most the configured prefill
+  tokens per row.
+- *Bound.* The stop takes at most the chunk being evaluated when the cancel
+  arrives. For a request cancelled mid-chunk this extends the FR-26 5-second
+  target by at most that one chunk's evaluation time.
+- *Cleanup.* The request's serving slot is released when it ends, after the
+  GPU work it already queued (at most one prefill chunk) has finished. A request
+  cancelled during prefill MUST NOT commit a conversation-cache entry, a prompt
+  snapshot or a recurrent checkpoint; its lease is aborted. A serial request
+  cancelled at any point before its entry is inserted publishes nothing; the
+  commit checks the request's cancel with no suspension before insertion.
+- *Drain.* A drain that coincides with a cancel ends the request as a drain.
+- *Terminal and settlement.* A request cancelled during prefill ends with the
+  terminal a cancel before the first token already produced:
+  `inference_response_end` with `status: "cancelled"`, no generated output and
+  no receipt. Settlement follows SPEC-015 §N.7 and SPEC-022 R-5.6 / R-14.6 for
+  a `buyer_cancel` with an empty delivered prefix; nothing is billed and no
+  provider credit is earned.
 
 **FR-27. Error mapping.**
 Inference errors map to `status` values in `inference_response_end`:

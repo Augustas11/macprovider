@@ -8988,7 +8988,16 @@ maxTokens: boundedMaxTokens,
         let templateSupportsThinkingToggle = snapshot.templateSupportsThinkingToggle
         let templateSupportsPreserveThinking = snapshot.templateSupportsPreserveThinking
         let selectionModelID = toolSelectionModelID(snapshot)
-        let completion = try await Self.withDrainCancellation(drainCancelled) {
+        // SPEC-001-R013: while the request prefills, a buyer cancel cancels the
+        // serial operation's task, so the model's prefill stops at its next
+        // chunk boundary (`PrefillParameters.forEachChunk` checks task
+        // cancellation). The group returns after the operation has unwound and
+        // released the gate and the conversation-cache lease. After prefill a
+        // cancel is handled by the decode loop as before.
+        let prefillScope = PrefillCancelScope()
+        let completion = try await Self.withDrainAndClientCancellation(
+            drainCancelled, shouldCancel: { prefillScope.interruptsPrefill(cancelled: shouldCancel()) }
+        ) {
             try await inferenceGate.withPermit {
                 try drainCancelled.check()
                 try Task.checkCancellation()
@@ -9067,6 +9076,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                 specDecodeGeneration: snapshot.specDecodeGeneration,
                                 shouldCancel: shouldCancel,
                                 drainCancelled: drainCancelled,
+                                prefillScope: prefillScope,
                                 blockingInferenceExecutor: blockingInferenceExecutor
                             )
                         } catch let error as DrainCancelledError {
@@ -9079,6 +9089,8 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             // before any buyer-visible response exists for the
                             // non-streaming endpoint.
                             Self.logSpeculativeFallback(error)
+                            // The fallback prefills the prompt again.
+                            prefillScope.reopenForPrefill()
                         }
                     }
                     let conversationCacheAllowed = Self.serialConversationCacheLeaseAllowed(
@@ -9128,24 +9140,29 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                     forceSimpleKV: forceSimpleKV)
                                 iteratorInput = lmInput
                             }
-                            let recurrent = Self.prefillRecurrentCheckpoints(
+                            // A drain reaches these loops as task cancellation, after the
+                            // wrapper has already surfaced DrainCancelledError.
+                            let recurrent = try Self.prefillRecurrentCheckpoints(
                                 lease: lease, cache: kvCache, promptTokenIds: promptTokenIds,
-                                context: generationContext, prefillStepSize: prefillStepSize)
+                                context: generationContext, prefillStepSize: prefillStepSize,
+                                isCancelled: { Task.isCancelled || shouldCancel() })
                             if let resumeAt = recurrent.resumeAt {
                                 iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[resumeAt...])))
                             }
                             // SPEC-024 FR-CI2a: snapshot families commit only the prompt prefix.
-                            let promptSnapshot = Self.prefillPromptSnapshot(
+                            let promptSnapshot = try Self.prefillPromptSnapshot(
                                 lease: lease, cache: kvCache, promptTokenIds: promptTokenIds,
                                 start: promptTokenIds.count - iteratorInput.text.tokens.size,
-                                context: generationContext, prefillStepSize: prefillStepSize)
+                                context: generationContext, prefillStepSize: prefillStepSize,
+                                isCancelled: { Task.isCancelled || shouldCancel() })
                             if let resumeAt = promptSnapshot.resumeAt {
                                 iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[resumeAt...])))
                             }
                             if isLocalRequest, !request.containsNonTextMessageContentPart {
                                 // SPEC-001-R011: a local prompt prefills in chunks with a
                                 // preemption check before each, so a buyer never waits on a
-                                // long local prefill. Buyer prefill is unchanged.
+                                // long local prefill. Buyer prefill keeps the model's own chunk plan
+                                // and stops on cancel through task cancellation (SPEC-001 FR-26).
                                 let start = promptTokenIds.count - iteratorInput.text.tokens.size
                                 let resumeAt = try Self.cancellableLocalPrefill(
                                     tokenCount: promptTokenIds.count, from: start, stepSize: prefillStepSize,
@@ -9172,6 +9189,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                     generation.components.appendingLogitProcessor { GrammarLogitProcessor(constraint: constraint) }
                                 } ?? generation.components)
                             Self.clearMLXBufferCacheAfterPrefill()
+                            try prefillScope.markPrefillDone()
                             var serialToolObserver = NativeToolCallStreamEmitter(
                                 modelID: request.model,
                                 grammar: Self.toolGrammar(for: request),
@@ -9378,7 +9396,8 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                         lease,
                                         cache: ConversationCacheLayers(layers, promptSnapshot: true),
                                         fullTokens: Array(promptTokenIds.prefix(promptSnapshot.tokenCount)),
-                                        cold: coldContext
+                                        cold: coldContext,
+                                        isCancelled: shouldCancel
                                     )
                                 } else {
                                     await conversationCache.abort(lease)
@@ -9404,11 +9423,16 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                 lease,
                                 cache: ConversationCacheLayers(kvCache, recurrentCheckpoints: recurrentCheckpoints),
                                 fullTokens: fullTokens,
-                                cold: coldContext
+                                cold: coldContext,
+                                isCancelled: shouldCancel
                             )
                         }
                         return completion
                     } catch {
+                        // SPEC-001-R013: wait for GPU work this request already
+                        // queued (at most one prefill chunk) before its slot is
+                        // released, so the next request does not queue behind it.
+                        Stream().synchronize()
                         if let lease {
                             await conversationCache.abort(lease)
                         }
@@ -9434,6 +9458,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
         specDecodeGeneration: Int,
         shouldCancel: @escaping @Sendable () -> Bool,
         drainCancelled: DrainCancelToken,
+        prefillScope: PrefillCancelScope,
         blockingInferenceExecutor: BlockingInferenceExecutor
     ) async throws -> CompletionResult {
         let generated = try await collectSpeculativeText(
@@ -9445,6 +9470,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
             numDraftTokens: numDraftTokens,
             shouldCancel: shouldCancel,
             drainCancelled: drainCancelled,
+            prefillScope: prefillScope,
             blockingInferenceExecutor: blockingInferenceExecutor
         )
         try drainCancelled.check()
@@ -9519,23 +9545,28 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
         numDraftTokens: Int,
         shouldCancel: @escaping @Sendable () -> Bool,
         drainCancelled: DrainCancelToken,
+        prefillScope: PrefillCancelScope,
         blockingInferenceExecutor: BlockingInferenceExecutor
     ) async throws -> SpeculativeTextResult {
         do {
             return try await draft.perform(nonSendable: (input, targetContext, cache)) { draftContext, values in
                 let (input, targetContext, cache) = values
+                // SPEC-001 FR-26: build the iterator (its prompt prefill) in the
+                // request task, where the model's chunked prefill sees a buyer
+                // cancel through task cancellation; the executor thread cannot.
+                let draftCache = try draftContext.model.newCache(parameters: parameters)
+                var iterator = try SpeculativeTokenIterator(
+                    input: input,
+                    mainModel: targetContext.model,
+                    draftModel: draftContext.model,
+                    mainCache: cache,
+                    draftCache: draftCache,
+                    parameters: parameters,
+                    numDraftTokens: numDraftTokens
+                )
+                Self.clearMLXBufferCacheAfterPrefill()
+                try prefillScope.markPrefillDone()
                 return try await blockingInferenceExecutor.run { inferenceCancellation in
-                    let draftCache = try draftContext.model.newCache(parameters: parameters)
-                    var iterator = try SpeculativeTokenIterator(
-                        input: input,
-                        mainModel: targetContext.model,
-                        draftModel: draftContext.model,
-                        mainCache: cache,
-                        draftCache: draftCache,
-                        parameters: parameters,
-                        numDraftTokens: numDraftTokens
-                    )
-                    Self.clearMLXBufferCacheAfterPrefill()
                     let stopTokenIDs = Self.generationStopTokenIDs(for: targetContext)
                     var tokenIDs: [Int] = []
                     var output = ""
@@ -9582,8 +9613,11 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                 }
             }
         } catch let error as DrainCancelledError {
+            Stream().synchronize()
             throw error
         } catch let error as CancellationError {
+            // SPEC-001-R013: as on the serial path, settle queued prefill work.
+            Stream().synchronize()
             throw error
         } catch let error as SpeculativeGenerationFailure {
             throw error
@@ -9821,7 +9855,12 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
         let templateSupportsThinkingToggle = snapshot.templateSupportsThinkingToggle
         let templateSupportsPreserveThinking = snapshot.templateSupportsPreserveThinking
         let selectionModelID = toolSelectionModelID(snapshot)
-        return try await Self.withDrainCancellation(drainCancelled) {
+        // SPEC-001-R013: as on the non-streaming serial path, a buyer cancel
+        // stops a long prefill at its next chunk boundary.
+        let prefillScope = PrefillCancelScope()
+        return try await Self.withDrainAndClientCancellation(
+            drainCancelled, shouldCancel: { prefillScope.interruptsPrefill(cancelled: shouldCancel()) }
+        ) {
             try await Self.withStructuredStreamingIdleTimeout(
                 idleState: idleState,
                 onIdleTimeout: { () throws -> CompletionResult in
@@ -9924,6 +9963,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             numDraftTokens: numDraftTokens,
                             shouldCancel: shouldCancel,
                             drainCancelled: drainCancelled,
+                            prefillScope: prefillScope,
                             blockingInferenceExecutor: blockingInferenceExecutor
                         )
                         // Warm-decode wall-time for the speculative path.
@@ -10020,102 +10060,109 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         ))
                     }
                     #endif
-                    let kvCache: [KVCache]
-                    var iteratorInput: LMInput
-                    let forceSimpleKV = Self.forceSimpleKVCache(
-                        eligible: coldContext?.eligible == true,
-                        conversationKey: request.conversationKey,
-                        containsImage: request.containsNonTextMessageContentPart)
-                    if let reusableCache = lease?.reusableCache, let lcp = lease?.lcp {
-                        kvCache = reusableCache.layers
-                        iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[lcp...])))
-                    } else {
-                        // SPEC-037 FR-KVP1 / SPEC-024-R001: same KVCacheSimple selector as
-                        // the non-streaming path (eligible persist or keyed serial reuse).
-                        kvCache = try Self.serveCache(
-                            model: generationContext.model, baseParameters: parameters,
-                            forceSimpleKV: forceSimpleKV)
-                        iteratorInput = lmInput
-                    }
-                    let recurrent = Self.prefillRecurrentCheckpoints(
-                        lease: lease, cache: kvCache, promptTokenIds: promptTokenIds,
-                        context: generationContext, prefillStepSize: prefillStepSize)
-                    if let resumeAt = recurrent.resumeAt {
-                        iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[resumeAt...])))
-                    }
-                    // SPEC-024 FR-CI2a: snapshot families commit only the prompt prefix.
-                    let promptSnapshot = Self.prefillPromptSnapshot(
-                        lease: lease, cache: kvCache, promptTokenIds: promptTokenIds,
-                        start: promptTokenIds.count - iteratorInput.text.tokens.size,
-                        context: generationContext, prefillStepSize: prefillStepSize)
-                    if let resumeAt = promptSnapshot.resumeAt {
-                        iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[resumeAt...])))
-                    }
-                    if isLocalRequest, !request.containsNonTextMessageContentPart {
-                        // SPEC-001-R011: a local prompt prefills in chunks with a
-                        // preemption check before each, so a buyer never waits on a
-                        // long local prefill. Buyer prefill is unchanged.
-                        let start = promptTokenIds.count - iteratorInput.text.tokens.size
-                        let resumeAt = try Self.cancellableLocalPrefill(
-                            tokenCount: promptTokenIds.count, from: start, stepSize: prefillStepSize,
-                            referenceStepSize: generationContext.model is DeepseekV4Model ? DeepseekV4Model.prefillStepSize : nil,
-                            isCancelled: { Task.isCancelled || shouldCancel() || drainCancelled.isFired }
-                        ) { range in
-                            let chunk = LMInput.Text(tokens: MLXArray(Array(promptTokenIds[range])))
-                            _ = generationContext.model(chunk[text: .newAxis], cache: kvCache, state: nil)
-                            eval(kvCache)
+                    // A cancel or failure during prefill (snapshot, checkpoint,
+                    // iterator construction) aborts the lease below; nothing is
+                    // committed for a request that did not finish.
+                    do {
+                        let kvCache: [KVCache]
+                        var iteratorInput: LMInput
+                        let forceSimpleKV = Self.forceSimpleKVCache(
+                            eligible: coldContext?.eligible == true,
+                            conversationKey: request.conversationKey,
+                            containsImage: request.containsNonTextMessageContentPart)
+                        if let reusableCache = lease?.reusableCache, let lcp = lease?.lcp {
+                            kvCache = reusableCache.layers
+                            iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[lcp...])))
+                        } else {
+                            // SPEC-037 FR-KVP1 / SPEC-024-R001: same KVCacheSimple selector as
+                            // the non-streaming path (eligible persist or keyed serial reuse).
+                            kvCache = try Self.serveCache(
+                                model: generationContext.model, baseParameters: parameters,
+                                forceSimpleKV: forceSimpleKV)
+                            iteratorInput = lmInput
                         }
-                        if resumeAt > start {
+                        let recurrent = try Self.prefillRecurrentCheckpoints(
+                            lease: lease, cache: kvCache, promptTokenIds: promptTokenIds,
+                            context: generationContext, prefillStepSize: prefillStepSize,
+                            isCancelled: { Task.isCancelled || shouldCancel() })
+                        if let resumeAt = recurrent.resumeAt {
                             iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[resumeAt...])))
                         }
-                    }
+                        // SPEC-024 FR-CI2a: snapshot families commit only the prompt prefix.
+                        let promptSnapshot = try Self.prefillPromptSnapshot(
+                            lease: lease, cache: kvCache, promptTokenIds: promptTokenIds,
+                            start: promptTokenIds.count - iteratorInput.text.tokens.size,
+                            context: generationContext, prefillStepSize: prefillStepSize,
+                            isCancelled: { Task.isCancelled || shouldCancel() })
+                        if let resumeAt = promptSnapshot.resumeAt {
+                            iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[resumeAt...])))
+                        }
+                        if isLocalRequest, !request.containsNonTextMessageContentPart {
+                            // SPEC-001-R011: a local prompt prefills in chunks with a
+                            // preemption check before each, so a buyer never waits on a
+                            // long local prefill. Buyer prefill keeps the model's own chunk plan
+                            // and stops on cancel through task cancellation (SPEC-001 FR-26).
+                            let start = promptTokenIds.count - iteratorInput.text.tokens.size
+                            let resumeAt = try Self.cancellableLocalPrefill(
+                                tokenCount: promptTokenIds.count, from: start, stepSize: prefillStepSize,
+                                referenceStepSize: generationContext.model is DeepseekV4Model ? DeepseekV4Model.prefillStepSize : nil,
+                                isCancelled: { Task.isCancelled || shouldCancel() || drainCancelled.isFired }
+                            ) { range in
+                                let chunk = LMInput.Text(tokens: MLXArray(Array(promptTokenIds[range])))
+                                _ = generationContext.model(chunk[text: .newAxis], cache: kvCache, state: nil)
+                                eval(kvCache)
+                            }
+                            if resumeAt > start {
+                                iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[resumeAt...])))
+                            }
+                        }
 
-                    var stoppedByRequestStop = false
-                    var stoppedBySerialToolCall = false
-                    var textEmitter = SerialStreamingTextEmitter(request: request)
-                    var streamingParseError: APIError?
-                    var harmonyObservedFinalTokenCount = 0
-                    var harmonyObservedTokenCount = 0
-                    var labSerialHookError: APIError?
-                    #if DEBUG || MACPROVIDER_LAB_HARNESS
-                    let labCommitTracker = labSerialHooks.map {
-                        LabSerialCommitTracker(requestID: $0.requestID, observer: $0.timingObserver)
-                    }
-                    #else
-                    let labCommitTracker: LabSerialCommitTracker? = nil
-                    #endif
+                        var stoppedByRequestStop = false
+                        var stoppedBySerialToolCall = false
+                        var textEmitter = SerialStreamingTextEmitter(request: request)
+                        var streamingParseError: APIError?
+                        var harmonyObservedFinalTokenCount = 0
+                        var harmonyObservedTokenCount = 0
+                        var labSerialHookError: APIError?
+                        #if DEBUG || MACPROVIDER_LAB_HARNESS
+                        let labCommitTracker = labSerialHooks.map {
+                            LabSerialCommitTracker(requestID: $0.requestID, observer: $0.timingObserver)
+                        }
+                        #else
+                        let labCommitTracker: LabSerialCommitTracker? = nil
+                        #endif
 
-                    // SPEC-037 FR-KVP2.5: speculative-decode routing is determined
-                    // BEFORE conversationCache.begin() (block above, ahead of the
-                    // lease acquisition) — a speculative-routed request acquires no
-                    // lease, triggers no promotion, commits nothing, and leaves no
-                    // busy key. This non-speculative path therefore never re-checks
-                    // speculativeRoute; the post-begin speculative block that origin
-                    // carried here would double-run and (on its success return) leak
-                    // the lease as a stuck busy key, so it is intentionally dropped.
-                    let isHarmonyResponse = HarmonyResponseParser.isHarmonyModelID(request.model)
-                    var harmonyFinalDetokenizer = NaiveStreamingDetokenizer(tokenizer: context.tokenizer)
-                    var harmonyStreamingParser = HarmonyResponseParser.StreamingParser(
-                        decode: { context.tokenizer.decode(tokenIds: $0) },
-                        decodeFinalToken: { tokenID in
-                            harmonyFinalDetokenizer.append(token: tokenID)
-                            return harmonyFinalDetokenizer.next()
-                        },
-                        allowedFunctionNames: Self.toolFunctionNames(from: request.promptSource.tools),
-                        stopCandidates: stopTokenFilter.tokens
-                    )
-                    let generation = Self.serveGenerationConfiguration(
-                        parameters: Self.serveIteratorParameters(
-                            parameters, forceSimpleKV: forceSimpleKV, reusedCache: lease?.reusableCache != nil,
-                            cache: kvCache),
-                        completePromptTokenIDs: parameters.repetitionPenalty == nil ? [] : promptTokenIds.map(Int.init))
-                    let iterator = try TokenIterator(
-                        input: iteratorInput, model: generationContext.model, cache: kvCache,
-                        parameters: generation.parameters, components: grammarConstraint.map { constraint in
-                                    generation.components.appendingLogitProcessor { GrammarLogitProcessor(constraint: constraint) }
-                                } ?? generation.components)
-                    Self.clearMLXBufferCacheAfterPrefill()
-                    do {
+                        // SPEC-037 FR-KVP2.5: speculative-decode routing is determined
+                        // BEFORE conversationCache.begin() (block above, ahead of the
+                        // lease acquisition) — a speculative-routed request acquires no
+                        // lease, triggers no promotion, commits nothing, and leaves no
+                        // busy key. This non-speculative path therefore never re-checks
+                        // speculativeRoute; the post-begin speculative block that origin
+                        // carried here would double-run and (on its success return) leak
+                        // the lease as a stuck busy key, so it is intentionally dropped.
+                        let isHarmonyResponse = HarmonyResponseParser.isHarmonyModelID(request.model)
+                        var harmonyFinalDetokenizer = NaiveStreamingDetokenizer(tokenizer: context.tokenizer)
+                        var harmonyStreamingParser = HarmonyResponseParser.StreamingParser(
+                            decode: { context.tokenizer.decode(tokenIds: $0) },
+                            decodeFinalToken: { tokenID in
+                                harmonyFinalDetokenizer.append(token: tokenID)
+                                return harmonyFinalDetokenizer.next()
+                            },
+                            allowedFunctionNames: Self.toolFunctionNames(from: request.promptSource.tools),
+                            stopCandidates: stopTokenFilter.tokens
+                        )
+                        let generation = Self.serveGenerationConfiguration(
+                            parameters: Self.serveIteratorParameters(
+                                parameters, forceSimpleKV: forceSimpleKV, reusedCache: lease?.reusableCache != nil,
+                                cache: kvCache),
+                            completePromptTokenIDs: parameters.repetitionPenalty == nil ? [] : promptTokenIds.map(Int.init))
+                        let iterator = try TokenIterator(
+                            input: iteratorInput, model: generationContext.model, cache: kvCache,
+                            parameters: generation.parameters, components: grammarConstraint.map { constraint in
+                                        generation.components.appendingLogitProcessor { GrammarLogitProcessor(constraint: constraint) }
+                                    } ?? generation.components)
+                        Self.clearMLXBufferCacheAfterPrefill()
+                        try prefillScope.markPrefillDone()
                         let result: BlockingGenerateResult = try await blockingInferenceExecutor.run { inferenceCancellation in
                             BlockingGenerateResult(generate(input: iteratorInput, context: generationContext, iterator: iterator) { tokens in
                                 EgressPerfTraceKey.current?.recordDecodeCallbackEntry()
@@ -10347,7 +10394,8 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                         lease,
                                         cache: ConversationCacheLayers(layers, promptSnapshot: true),
                                         fullTokens: Array(promptTokenIds.prefix(promptSnapshot.tokenCount)),
-                                        cold: coldContext
+                                        cold: coldContext,
+                                        isCancelled: shouldCancel
                                     )
                                 } else {
                                     await conversationCache.abort(lease)
@@ -10373,11 +10421,16 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                 lease,
                                 cache: ConversationCacheLayers(kvCache, recurrentCheckpoints: recurrentCheckpoints),
                                 fullTokens: fullTokens,
-                                cold: coldContext
+                                cold: coldContext,
+                                isCancelled: shouldCancel
                             )
                         }
                         return validated
                     } catch {
+                        // SPEC-001-R013: wait for GPU work this request already
+                        // queued (at most one prefill chunk) before its slot is
+                        // released, so the next request does not queue behind it.
+                        Stream().synchronize()
                         if let lease {
                             await conversationCache.abort(lease)
                         }
@@ -12217,7 +12270,7 @@ maxTokens: maxTokens,
         }
     }
 
-    private nonisolated static func withDrainAndClientCancellation<T: Sendable>(
+    nonisolated static func withDrainAndClientCancellation<T: Sendable>(
         _ token: DrainCancelToken,
         shouldCancel: @escaping @Sendable () -> Bool,
         operation: @escaping @Sendable () async throws -> T
@@ -12238,8 +12291,16 @@ maxTokens: maxTokens,
                 }
                 throw CancellationError()
             }
-            guard let result = try await group.next() else {
-                throw DrainCancelledError()
+            let result: T
+            do {
+                guard let next = try await group.next() else {
+                    throw DrainCancelledError()
+                }
+                result = next
+            } catch {
+                // A drain that coincides with a cancel is reported as the drain.
+                if error is CancellationError, token.isFired { throw DrainCancelledError() }
+                throw error
             }
             group.cancelAll()
             return result
@@ -12801,6 +12862,8 @@ maxTokens: maxTokens,
     /// family prefills in whole steps, so the iterator resumes on the plan's
     /// own boundary. `applies` is true whenever the request must commit only a
     /// prompt snapshot (the decoded cache is never published for it).
+    /// SPEC-001 FR-26: `isCancelled` is checked before every chunk, so a
+    /// cancelled request stops within one chunk and returns no snapshot.
     struct SerialPromptSnapshot {
         let applies: Bool
         let layers: [KVCache]?
@@ -12814,8 +12877,9 @@ maxTokens: maxTokens,
         promptTokenIds: [Int32],
         start: Int,
         context: ModelContext,
-        prefillStepSize: Int
-    ) -> SerialPromptSnapshot {
+        prefillStepSize: Int,
+        isCancelled: () -> Bool = { Task.isCancelled }
+    ) throws -> SerialPromptSnapshot {
         let none = SerialPromptSnapshot(applies: false, layers: nil, tokenCount: 0, resumeAt: nil)
         guard lease != nil,
               let policy = conversationPromptSnapshotPolicy(model: context.model, tokenizer: context.tokenizer)
@@ -12832,12 +12896,14 @@ maxTokens: maxTokens,
         }
         var cursor = start
         while cursor < target {
+            if isCancelled() { throw CancellationError() }
             let end = min(cursor + step, target)
             let chunk = LMInput.Text(tokens: MLXArray(Array(promptTokenIds[cursor..<end])))
             _ = context.model(chunk[text: .newAxis], cache: cache, state: nil)
             eval(cache)
             cursor = end
         }
+        if isCancelled() { throw CancellationError() }
         // Copies, because window, pool and recurrent buffers are written in place.
         let layers = cache.map { $0.copy() }
         eval(layers)
@@ -12852,13 +12918,15 @@ maxTokens: maxTokens,
     /// cache is already past reuse the stored checkpoint at that exact length (still
     /// a prefix of this prompt). `resumeAt` is the prompt index the TokenIterator
     /// must continue from, or nil when nothing was prefilled here.
+    /// SPEC-001 FR-26: `isCancelled` is checked before every chunk.
     static func prefillRecurrentCheckpoints(
         lease: ConversationCacheLease?,
         cache: [KVCache],
         promptTokenIds: [Int32],
         context: ModelContext,
-        prefillStepSize: Int
-    ) -> (checkpoints: [RecurrentStateCheckpoint], resumeAt: Int?) {
+        prefillStepSize: Int,
+        isCancelled: () -> Bool = { Task.isCancelled }
+    ) throws -> (checkpoints: [RecurrentStateCheckpoint], resumeAt: Int?) {
         guard let lease else { return ([], nil) }
         let positions = ConversationCache.recurrentCheckpointPositions(
             promptTokenIds: promptTokenIds,
@@ -12879,12 +12947,14 @@ maxTokens: maxTokens,
             }
             var start = cursor
             while start < position {
+                if isCancelled() { throw CancellationError() }
                 let end = min(start + max(1, prefillStepSize), position)
                 let chunk = LMInput.Text(tokens: MLXArray(Array(promptTokenIds[start..<end])))
                 _ = context.model(chunk[text: .newAxis], cache: cache, state: nil)
                 asyncEval(cache)
                 start = end
             }
+            if isCancelled() { throw CancellationError() }
             eval(cache)
             cursor = position
             guard let checkpoint = captureRecurrentCheckpoint(cache: cache, tokenCount: position) else {
@@ -14961,6 +15031,41 @@ final class DrainCancelToken: @unchecked Sendable {
                 continuation.resume()
             }
         }
+    }
+}
+
+/// SPEC-001-R013: lets a client cancel interrupt a serial operation only while
+/// it prefills. The operation marks the end of its prefill; from then on a
+/// cancel is handled by the decode loop exactly as before, so the terminal and
+/// receipt of a cancel after prefill are unchanged. The mark and the interrupt
+/// decision share one lock: once a cancel has interrupted the prefill, the mark
+/// throws instead of letting decode start.
+final class PrefillCancelScope: @unchecked Sendable {
+    private let lock = NSLock()
+    private var prefillDone = false
+    private var interrupted = false
+
+    /// The cancel watcher's predicate: true when `cancelled` must interrupt.
+    func interruptsPrefill(cancelled: Bool) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard cancelled, !prefillDone else { return false }
+        interrupted = true
+        return true
+    }
+
+    func markPrefillDone() throws {
+        lock.lock()
+        defer { lock.unlock() }
+        if interrupted { throw CancellationError() }
+        prefillDone = true
+    }
+
+    /// A fallback that prefills the prompt again (speculative to serial).
+    func reopenForPrefill() {
+        lock.lock()
+        prefillDone = false
+        lock.unlock()
     }
 }
 

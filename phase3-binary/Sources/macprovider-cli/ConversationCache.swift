@@ -174,7 +174,7 @@ actor ConversationCache {
     private let config: Config
     private var entries: [String: Entry] = [:]
     private var busyKeys: Set<String> = []
-    private var waiters: [String: [CheckedContinuation<Void, Never>]] = [:]
+    private var waiters: [String: [(id: UUID, continuation: CheckedContinuation<Void, Never>)]] = [:]
 
     /// SPEC-037 stage 5 — optional encrypted disk cold tier. Nil ⇒ the hot tier
     /// behaves byte-identically to today (FR-KVP1 non-gated-key invariant).
@@ -212,7 +212,7 @@ actor ConversationCache {
             fleetGrant.map { $0.isValid && $0.conversationKey == key } ?? true
         }
         guard authorized() else { return nil }
-        await waitForTurn(key)
+        guard await waitForTurn(key) else { return nil }
         busyKeys.insert(key)
         guard authorized() else { releaseTurn(key); return nil }
 
@@ -431,10 +431,16 @@ actor ConversationCache {
             recurrentCheckpoint: retainedCheckpoint, originalStoredAt: entry.storedAt)
     }
 
-    func commit(_ lease: ConversationCacheLease, cache: ConversationCacheLayers, fullTokens: [Int32], now: Date = Date(), cold: ConversationColdContext? = nil) async {
+    /// `isCancelled` is the request's own cancel signal (SPEC-001-R013): a request
+    /// cancelled before its entry is inserted publishes nothing. It is checked
+    /// with the purge fence, the second time with no suspension before insertion.
+    func commit(
+        _ lease: ConversationCacheLease, cache: ConversationCacheLayers, fullTokens: [Int32], now: Date = Date(),
+        cold: ConversationColdContext? = nil, isCancelled: @Sendable () -> Bool = { false }
+    ) async {
         // SPEC-037 FR-KVP8 — a `commit()` whose stamps predate a purge that landed
         // during the request reinserts nothing (neither RAM nor disk).
-        guard !Task.isCancelled, !isFenced(lease) else {
+        guard !Task.isCancelled, !isCancelled(), !isFenced(lease) else {
             log("event=conv_cache action=commit_fenced key_hash=\(lease.keyHash)")
             await cache.discardRetainedPagedKV(conversationKey: lease.key)
             releaseTurn(lease.key)
@@ -452,7 +458,7 @@ actor ConversationCache {
            old.kvCache.retainedPagedKVSequence?.handle != cache.retainedPagedKVSequence?.handle {
             await old.kvCache.discardRetainedPagedKV(conversationKey: lease.key)
         }
-        guard !Task.isCancelled, !isFenced(lease) else {
+        guard !Task.isCancelled, !isCancelled(), !isFenced(lease) else {
             log("event=conv_cache action=commit_fenced key_hash=\(lease.keyHash)")
             await cache.discardRetainedPagedKV(conversationKey: lease.key)
             releaseTurn(lease.key)
@@ -632,12 +638,35 @@ actor ConversationCache {
         return index
     }
 
-    private func waitForTurn(_ key: String) async {
+    /// False when the waiting task is cancelled while the key is still busy
+    /// (SPEC-001-R013): a cancelled request stops waiting for another
+    /// request's turn and takes no lease. A waiter that `releaseTurn` resumed
+    /// takes the free turn even if cancelled, so the turn is never lost.
+    private func waitForTurn(_ key: String) async -> Bool {
         while busyKeys.contains(key) {
-            await withCheckedContinuation { continuation in
-                waiters[key, default: []].append(continuation)
+            if Task.isCancelled { return false }
+            let id = UUID()
+            await withTaskCancellationHandler {
+                await withCheckedContinuation { continuation in
+                    if Task.isCancelled {
+                        continuation.resume()
+                    } else {
+                        waiters[key, default: []].append((id, continuation))
+                    }
+                }
+            } onCancel: {
+                Task { await self.cancelTurnWaiter(key: key, id: id) }
             }
         }
+        return true
+    }
+
+    private func cancelTurnWaiter(key: String, id: UUID) {
+        guard var keyWaiters = waiters[key],
+              let index = keyWaiters.firstIndex(where: { $0.id == id }) else { return }
+        let waiter = keyWaiters.remove(at: index)
+        waiters[key] = keyWaiters.isEmpty ? nil : keyWaiters
+        waiter.continuation.resume()
     }
 
     private func releaseTurn(_ key: String) {
@@ -648,7 +677,7 @@ actor ConversationCache {
         }
         let next = keyWaiters.removeFirst()
         waiters[key] = keyWaiters.isEmpty ? nil : keyWaiters
-        next.resume()
+        next.continuation.resume()
     }
 
     private func sweepExpired(now: Date) async {
