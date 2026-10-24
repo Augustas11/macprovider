@@ -182,6 +182,24 @@ type Tier2Caps struct {
 	// head and member session capabilities.
 	ShardGroupHeadV1 bool `json:"shard_group_head_v1,omitempty"`
 	ShardMemberV1    bool `json:"shard_member_v1,omitempty"`
+	// WSMaxMessageBytes is the SPEC-001-R012 largest coordinator-to-provider
+	// text message the provider's WebSocket accepts. Absent means the legacy
+	// 1 MiB Foundation default.
+	WSMaxMessageBytes WSMessageLimit `json:"ws_max_message_bytes,omitempty"`
+}
+
+// WSMessageLimit is the optional SPEC-001-R012 capability value. Any value that
+// is not a JSON integer representable as int64 decodes as 0 (not advertised:
+// the legacy 1 MiB limit) instead of failing the whole auth_request.
+type WSMessageLimit int64
+
+func (l *WSMessageLimit) UnmarshalJSON(data []byte) error {
+	*l = 0
+	n, err := strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
+	if err == nil {
+		*l = WSMessageLimit(n)
+	}
+	return nil
 }
 
 type AuthChallenge struct {

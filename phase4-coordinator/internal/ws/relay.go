@@ -267,6 +267,9 @@ func MaxOutputTokensFromContext(ctx context.Context) (int, bool) {
 }
 
 type relayActive struct {
+	// tier2Epoch is the Tier-2 session this dispatch was counted against
+	// (nil on a plaintext session).
+	tier2Epoch          *pool.Tier2Session
 	requestID           string
 	stream              bool
 	cancelTerminal      chan InferenceResponseEnd
@@ -389,11 +392,15 @@ type providerSession struct {
 	activeChanged  chan struct{}
 	closedCh       chan struct{}
 	httpOnly       bool
-	tier2Mu        sync.Mutex
-	tier2          *pool.Tier2Session
-	rekeyMu        sync.Mutex
-	rekey          *tier2RekeyExchange
-	rekeyWaiters   int
+	// maxTextFrameBytes is the largest text frame the provider accepts
+	// (SPEC-001-R012). enqueueFrame refuses a larger one; 0 disables the
+	// check (raw control frames are never checked).
+	maxTextFrameBytes int64
+	tier2Mu           sync.Mutex
+	tier2             *pool.Tier2Session
+	rekeyMu           sync.Mutex
+	rekey             *tier2RekeyExchange
+	rekeyWaiters      int
 
 	// ackPending holds text frames enqueued before the handshake ack in
 	// preAck; sendHandshakeAck flushes them behind the ack. Raw control
@@ -492,6 +499,8 @@ func newProviderSession(providerID, assignedID string, conn net.Conn, bufferSize
 		retired:       map[string]retiredRelayRequest{},
 		activeChanged: make(chan struct{}, 1),
 		closedCh:      make(chan struct{}),
+
+		maxTextFrameBytes: LegacyProviderWSMaxMessageBytes,
 	}
 }
 
@@ -659,6 +668,11 @@ func (ps *providerSession) enqueueFrame(f providerFrame) error {
 	defer ps.writeMu.Unlock()
 	if ps.closed {
 		return ErrRelayClosed
+	}
+	if !f.raw && ps.maxTextFrameBytes > 0 && int64(len(f.payload)) > ps.maxTextFrameBytes {
+		// Writing it would make the provider close the whole session
+		// (SPEC-001-R012). Refuse this frame only.
+		return ErrProviderFrameTooLarge
 	}
 	if ps.ackPending && !f.raw {
 		// Leave room for the ack itself in writeCh at flush time.
@@ -946,7 +960,14 @@ func (ps *providerSession) sealInferenceRequestWithFleetCache(provider pool.Prov
 			PrivacyClass:          relayBlindPrivacyClass(relayBlind),
 			RelayBlindSettlement:  relayBlindSettlementMetadata(relayBlind),
 		}
-		return json.Marshal(msg)
+		frame, err := json.Marshal(msg)
+		if err != nil {
+			return nil, err
+		}
+		if ps.maxTextFrameBytes > 0 && int64(len(frame)) > ps.maxTextFrameBytes {
+			return nil, ErrProviderFrameTooLarge
+		}
+		return frame, nil
 	}
 	defer ps.tier2Mu.Unlock()
 	if session.C2PCounter == ^uint64(0) {
@@ -976,6 +997,29 @@ func (ps *providerSession) sealInferenceRequestWithFleetCache(provider pool.Prov
 	})
 	if err != nil {
 		return nil, err
+	}
+	// SPEC-001-R012: size the frame before sealing, so an over-limit request
+	// spends neither the sequence number nor a nonce and the session stays
+	// in step with the provider.
+	if ps.maxTextFrameBytes > 0 {
+		sized, err := tier2.PillarBEnvelopeBodyForSize(session.KeyID, seq, aad, len(plaintext))
+		if err != nil {
+			return nil, err
+		}
+		frame, err := json.Marshal(encryptedInferenceRequest{
+			Type:       "inference_request",
+			RequestID:  requestID,
+			Stream:     stream,
+			Encrypted:  true,
+			Enc:        sized,
+			Settlement: settlement,
+		})
+		if err != nil {
+			return nil, err
+		}
+		if int64(len(frame)) > ps.maxTextFrameBytes {
+			return nil, ErrProviderFrameTooLarge
+		}
 	}
 	envelope, err := tier2.SealPillarBFrame(session.C2PKey, session.C2PNonceBase, session.KeyID, seq, aad, plaintext)
 	if err != nil {
@@ -1271,11 +1315,26 @@ func (ps *providerSession) markTier2P2CSequenceSeen(seq uint64) {
 	ps.tier2.P2CSeen[seq] = struct{}{}
 }
 
-func (ps *providerSession) markTier2RequestDispatched() {
+// markTier2RequestDispatched counts a dispatch against the current Tier-2
+// epoch and returns that epoch, so a refusal can undo exactly this count.
+func (ps *providerSession) markTier2RequestDispatched() *pool.Tier2Session {
 	ps.tier2Mu.Lock()
 	defer ps.tier2Mu.Unlock()
 	if ps.tier2 != nil {
 		ps.tier2.RequestsDispatched++
+	}
+	return ps.tier2
+}
+
+// unmarkTier2RequestDispatched undoes markTier2RequestDispatched on the epoch it
+// counted against, for a request refused before anything was sealed or
+// written (SPEC-001-R012), so refused requests never advance any epoch's
+// request-count rekey trigger.
+func (ps *providerSession) unmarkTier2RequestDispatched(epoch *pool.Tier2Session) {
+	ps.tier2Mu.Lock()
+	defer ps.tier2Mu.Unlock()
+	if epoch != nil && epoch.RequestsDispatched > 0 {
+		epoch.RequestsDispatched--
 	}
 }
 
@@ -1688,7 +1747,7 @@ func (s *Server) addTier2Active(ctx context.Context, session *providerSession, p
 		}
 		active, err := session.addActive(requestID, provider.MaxConcurrency, stream)
 		if err == nil {
-			session.markTier2RequestDispatched()
+			active.tier2Epoch = session.markTier2RequestDispatched()
 		}
 		session.rekeyMu.Unlock()
 		return active, err
@@ -1769,12 +1828,23 @@ func (s *Server) dispatchInference(ctx context.Context, provider pool.Provider, 
 			return nil, ErrRelayAEADFailed
 		}
 		session.removeActive(requestID)
+		if errors.Is(err, ErrProviderFrameTooLarge) {
+			session.unmarkTier2RequestDispatched(active.tier2Epoch)
+		}
 		return nil, err
 	}
 	if err := session.sendProbe(payload, providerDispatchWriteProbeTimeout); err != nil {
 		session.removeActive(requestID)
 		if errors.Is(err, ErrRelayClosed) {
 			s.handleProviderWriteFailure(session, err)
+			return nil, err
+		}
+		if active.tier2Epoch != nil {
+			// The frame was sealed, spending a C2P sequence number the
+			// provider will never see; later frames could not open. End the
+			// session instead of leaving it out of step.
+			s.closeProviderForTier2SessionFailure(session, provider.ProviderID, provider.AssignedID, requestID, "c2p_frame_not_sent", ErrRelayClosed)
+			return nil, ErrRelayClosed
 		}
 		return nil, err
 	}

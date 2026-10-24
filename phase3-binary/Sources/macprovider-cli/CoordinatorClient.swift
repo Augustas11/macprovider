@@ -45,6 +45,83 @@ private let providerWebSocketSession: URLSession = {
     )
 }()
 
+// SPEC-001-R012: the coordinator-to-provider WebSocket message limit. A
+// URLSessionWebSocketTask fails the whole task on one message over its
+// maximumMessageSize (NSPOSIXErrorDomain 40, close 1009), and Foundation's
+// default is 1 MiB, which a large prompt's sealed inference_request exceeds.
+// The provider raises the limit and advertises it in
+// auth_request.tier2_capabilities.ws_max_message_bytes; the coordinator never
+// writes a larger frame to this session.
+let coordinatorWebSocketMaximumMessageBytes = 64 * 1024 * 1024
+
+func makeCoordinatorWebSocketTask(
+    _ request: URLRequest,
+    maximumMessageSize: Int = coordinatorWebSocketMaximumMessageBytes
+) -> URLSessionWebSocketTask {
+    let task = providerWebSocketSession.webSocketTask(with: request)
+    task.maximumMessageSize = maximumMessageSize
+    return task
+}
+
+/// Largest coordinator handshake message (auth_challenge, auth_response)
+/// parsed before the session is accepted: Foundation's former default.
+let coordinatorHandshakeMaximumMessageBytes = 1024 * 1024
+
+/// Received-but-unhandled coordinator message budget (four maximum-size
+/// messages).
+let coordinatorInboundBacklogLimitBytes = 4 * coordinatorWebSocketMaximumMessageBytes
+
+struct CoordinatorInboundBacklogExceeded: Error, CustomStringConvertible, Equatable {
+    let limitBytes: Int
+
+    var description: String {
+        "coordinator inbound backlog exceeded \(limitBytes) bytes"
+    }
+}
+
+/// Byte count of received coordinator messages not yet handled.
+final class CoordinatorInboundBacklog: @unchecked Sendable {
+    let limitBytes: Int
+    private let lock = NSLock()
+    private var bytes = 0
+
+    init(limitBytes: Int) {
+        self.limitBytes = limitBytes
+    }
+
+    /// Adds a received message; false when the backlog would exceed the limit.
+    func add(_ count: Int) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard bytes + count <= limitBytes else { return false }
+        bytes += count
+        return true
+    }
+
+    func remove(_ count: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        bytes = max(0, bytes - count)
+    }
+
+    var pendingBytes: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return bytes
+    }
+
+    static func byteCount(of message: URLSessionWebSocketTask.Message) -> Int {
+        switch message {
+        case .string(let text):
+            return text.utf8.count
+        case .data(let data):
+            return data.count
+        @unknown default:
+            return 0
+        }
+    }
+}
+
 extension URLSessionWebSocketTask: ProviderWebSocketTask {
     var closeCodeRawValueForDiagnostics: Int? {
         let rawValue = closeCode.rawValue
@@ -785,7 +862,7 @@ actor CoordinatorClient {
         privacyPostureProbeOverride: (any PrivacyPostureProbe)? = nil,
         privacySESignerOverride: (any SEBlobSigner)? = nil,
         privacyCodeBoundAttestorOverride: (any PrivacyCodeBoundAttesting)? = nil,
-        webSocketFactory: @escaping @Sendable (URLRequest) -> ProviderWebSocketTask = { providerWebSocketSession.webSocketTask(with: $0) },
+        webSocketFactory: @escaping @Sendable (URLRequest) -> ProviderWebSocketTask = { makeCoordinatorWebSocketTask($0) },
         sleepAssertionFactory: @escaping @Sendable () -> ProviderSleepAssertion? = { CaffeinateSleepAssertion.start() },
         pairingController: PairingController? = nil,
         connectAndRunOverride: (@Sendable () async throws -> Void)? = nil,
@@ -2585,6 +2662,10 @@ actor CoordinatorClient {
             bufferingPolicy: .unbounded
         )
 
+        // SPEC-001-R012: messages may now be up to 64 MiB, so the unbounded
+        // inbox is bounded by bytes instead: received-but-unhandled messages
+        // past the budget end the session (reconnect) rather than grow memory.
+        let backlog = CoordinatorInboundBacklog(limitBytes: coordinatorInboundBacklogLimitBytes)
         try await withThrowingTaskGroup(of: Void.self) { group in
             // Receive task: keep the socket drained. Captures `socket` and
             // `continuation` (both Sendable), never `self`, so nothing here
@@ -2599,6 +2680,10 @@ actor CoordinatorClient {
                         Self.keepaliveDebug("ws_receive_error error=\(error)")
                         throw error
                     }
+                    guard backlog.add(CoordinatorInboundBacklog.byteCount(of: message)) else {
+                        Self.keepaliveDebug("ws_inbound_backlog_exceeded limit=\(backlog.limitBytes)")
+                        throw CoordinatorInboundBacklogExceeded(limitBytes: backlog.limitBytes)
+                    }
                     continuation.yield(message)
                 }
             }
@@ -2608,6 +2693,7 @@ actor CoordinatorClient {
             group.addTask { [self] in
                 for await message in inbox {
                     try Task.checkCancellation()
+                    defer { backlog.remove(CoordinatorInboundBacklog.byteCount(of: message)) }
                     try await handle(message)
                 }
             }
@@ -8356,6 +8442,9 @@ actor CoordinatorClient {
                 "relay_blind_settlement_receipt_v1": true,
                 // SPEC-036 FR-21: this runtime runs teacher-forced scoring jobs.
                 ComputeScoreProtocol.capability: computeScoreExecutor != nil,
+                // SPEC-001-R012: the largest coordinator-to-provider message
+                // this session's WebSocket accepts.
+                "ws_max_message_bytes": coordinatorWebSocketMaximumMessageBytes,
             ],
         ]
         if await advertisesFleetCacheProtocol() {
@@ -8836,6 +8925,12 @@ actor CoordinatorClient {
 
     private static func receiveJSONObject(from webSocket: ProviderWebSocketTask) async throws -> [String: Any] {
         let message = try await webSocket.receive()
+        // SPEC-001-R012: handshake messages are small and fixed-shape; refuse a
+        // large one before JSON materialization so the post-auth message limit
+        // never becomes a pre-auth parse cost.
+        guard CoordinatorInboundBacklog.byteCount(of: message) <= coordinatorHandshakeMaximumMessageBytes else {
+            throw CoordinatorAuthError.invalidMessage("Coordinator handshake message too large")
+        }
         let text: String
         switch message {
         case .string(let value):

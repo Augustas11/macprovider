@@ -249,6 +249,9 @@ type Provider struct {
 	// tier2_capabilities.shard_member_v1: a SPEC-051 member session, never
 	// routable on its own (SPEC-051-R016).
 	ShardMemberV1 bool `json:"shard_member_v1,omitempty"`
+	// WSMaxMessageBytes is the advertised SPEC-001-R012 coordinator-to-provider
+	// message limit (0 = not advertised: the legacy 1 MiB default applies).
+	WSMaxMessageBytes int64 `json:"ws_max_message_bytes,omitempty"`
 	// ShardGroupAvailable, ShardGroupEpoch, ShardGroupPoolModelID and
 	// ShardGroupMembers are the coordinator-derived availability of this head
 	// session's group, its latest accepted epoch, the pool model that epoch's

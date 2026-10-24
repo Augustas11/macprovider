@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/rs/zerolog"
 )
@@ -272,6 +273,35 @@ func SealPillarBFrame(key, nonceBase []byte, keyID string, seq uint64, aad AEADF
 			Tag:        base64.RawURLEncoding.EncodeToString(sealed[tagStart:]),
 			KID:        keyID,
 		},
+	}, nil
+}
+
+// PillarBEnvelopeBodyForSize returns an envelope body whose JSON encoding has
+// exactly the length SealPillarBFrame would produce for a plaintextLen-byte
+// plaintext under the same key id, seq and AAD. It seals nothing, so a caller
+// can refuse an over-limit frame (SPEC-001-R012) before it spends a sequence
+// number or a nonce. The placeholder fields are not a valid ciphertext.
+func PillarBEnvelopeBodyForSize(keyID string, seq uint64, aad AEADFrameAAD, plaintextLen int) (AEADEnvelopeBody, error) {
+	if aad.Seq != seq {
+		return AEADEnvelopeBody{}, fmt.Errorf("AAD seq does not match frame seq")
+	}
+	if plaintextLen < 0 {
+		return AEADEnvelopeBody{}, fmt.Errorf("plaintext length must not be negative")
+	}
+	aadRaw, err := MarshalAEADAAD(aad)
+	if err != nil {
+		return AEADEnvelopeBody{}, err
+	}
+	const nonceBytes, tagBytes = 12, 16
+	placeholder := func(n int) string { return strings.Repeat("A", base64.RawURLEncoding.EncodedLen(n)) }
+	return AEADEnvelopeBody{
+		Alg:        PillarBAEADA256GCM,
+		Seq:        seq,
+		Nonce:      placeholder(nonceBytes),
+		AAD:        base64.RawURLEncoding.EncodeToString(aadRaw),
+		Ciphertext: placeholder(plaintextLen),
+		Tag:        placeholder(tagBytes),
+		KID:        keyID,
 	}, nil
 }
 

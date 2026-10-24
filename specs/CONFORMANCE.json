@@ -9,7 +9,7 @@
     {
       "spec_id": "SPEC-001",
       "title": "Phase 3 Binary: Mac Provider Inference CLI",
-      "version": "1.9.44",
+      "version": "1.9.45",
       "path": "specs/SPEC-001-phase3-binary.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -14204,6 +14204,46 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/2054",
         "rationale": "Local-use accounting separation and customers-first admission are covered by fixture runtimes shaped like the serial and continuous-batching gates and by the real continuous-batching scheduler. Released-provider acceptance with the in-app Chat client remains pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-001-R012",
+      "spec_id": "SPEC-001",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:func makeCoordinatorWebSocketTask",
+        "phase4-coordinator/internal/ws/frame_limits.go:func providerInboundMessageLimit",
+        "phase4-coordinator/internal/ws/relay.go:func (ps *providerSession) enqueueFrame",
+        "phase4-coordinator/internal/ws/relay.go:func (ps *providerSession) sealInferenceRequestWithFleetCache",
+        "phase4-coordinator/internal/tier2/pillar_b.go:func PillarBEnvelopeBodyForSize",
+        "phase4-coordinator/internal/config/config.go:func (c Config) Validate",
+        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:final class CoordinatorInboundBacklog"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorWebSocketMessageLimitTests.swift:func testCoordinatorTaskUsesAdvertisedMessageLimit",
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorWebSocketMessageLimitTests.swift:func testMessageOverLegacyDefaultIsReceived",
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorWebSocketMessageLimitTests.swift:func testLimitBoundaryAcceptsAtLimitAndRejectsOneByteOver",
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorWebSocketMessageLimitTests.swift:func testInboundBacklogIsBoundedByBytes",
+        "phase4-coordinator/internal/ws/frame_limits_test.go:func TestTier2CapsParsesWSMaxMessageBytes",
+        "phase4-coordinator/internal/tier2/pillar_b_size_test.go:func TestPillarBEnvelopeBodyForSizeMatchesSealedLength",
+        "phase4-coordinator/internal/ws/frame_limits_test.go:func TestEnqueueFrameRefusesOverLimitTextFrameAndKeepsSession",
+        "phase4-coordinator/internal/ws/frame_limits_test.go:func TestSealInferenceRequestEnforcesProviderMessageLimitWithoutSpendingSeq",
+        "phase4-coordinator/internal/ws/frame_limits_test.go:func TestLegacyLimitRefusesIncidentSizedRequestThatAdvertisedLimitAccepts",
+        "phase4-coordinator/internal/ws/frame_limits_test.go:func TestMaximumChatBodyWorstCaseEscapingFitsAdvertisedLimit",
+        "phase4-coordinator/internal/ws/frame_limits_test.go:func TestDispatchRefusesOverLimitRequestAndKeepsSessionInStep",
+        "phase4-coordinator/internal/buyer/provider_frame_too_large_test.go:func TestProviderFrameTooLargeAnswers413WithoutRetryOrProviderFault",
+        "phase5-gateway/internal/router/provider_frame_too_large_test.go:func TestCoordinatorProviderFrameTooLargeReaches413",
+        "phase5-gateway/internal/router/oversize_body_test.go:func TestOversizeChatBodyStreamedReturns413NotReset",
+        "phase4-coordinator/internal/ws/frame_limits_test.go:func TestUnmarkTier2RequestDispatchedTargetsCountedEpoch",
+        "phase4-coordinator/internal/ws/frame_limits_test.go:func TestEncryptedDispatchEndsSessionWhenSealedFrameCannotBeQueued"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Message-limit enforcement, advertisement and the 413 mapping are covered by unit and loopback tests. A live large-prompt request through the gateway after the coordinator runtime and a provider CLI carrying the advertised limit ship remains pending."
       }
     },
     {
