@@ -72,6 +72,8 @@ final class DeepseekV4BackendFixtureTests: XCTestCase {
                 moePromotionEvidenceAvailable: true, maxActiveRows: 2, decodeHeadroomTokens: 8,
                 maxPrefillRowsPerIteration: 2, maxPrefillTokensPerIteration: 64, maxPromptChunkTokens: 32,
                 referencePrefillStepSize: 2048,
+                // CPU fixture prefill can exceed the production admission deadline.
+                queueWaitTimeoutNanoseconds: 600_000_000_000,
                 snapshot: .init(modelID: tuple.modelID, modelSHA256: tuple.modelSHA256, weightsGeneration: 1),
                 maxDecodeLockstepWindow: 1, maxDecodeRowsPerForward: 8)
             let scheduler = ContinuousBatchScheduler(configuration: configuration,
