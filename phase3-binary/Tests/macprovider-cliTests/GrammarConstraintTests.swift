@@ -19,6 +19,17 @@ final class GrammarConstraintTests: XCTestCase {
         Device.setDefault(device: Device(.cpu))
     }
 
+    func testVocabularyAdmissionBoundsEveryReachableMaskIncludingEOS() throws {
+        // 250,000 mask entries at 32 bytes exactly fill the 8 MB budget.
+        let tokens = Dictionary(uniqueKeysWithValues: (0..<250_000).map { ($0, [UInt8(97)]) })
+        XCTAssertNoThrow(try GrammarConstraintState(grammar: .literal("a"), tokens: tokens, eosTokenIDs: [249_999]))
+        // An EOS ID outside the vocabulary also occupies a possible mask entry.
+        XCTAssertThrowsError(try GrammarConstraintState(grammar: .literal("a"), tokens: tokens, eosTokenIDs: [250_000])) {
+            XCTAssertEqual(($0 as? APIError)?.status, 400)
+            XCTAssertEqual(($0 as? APIError)?.code, "unsupported_output_grammar")
+        }
+    }
+
     func testTokenizerDeadEndsAreRejectedBeforeSampling() throws {
         let whitespace = ByteGrammar.sequence([.zeroOrMore(.literal(" ")), .literal("ok")])
         XCTAssertThrowsError(try GrammarConstraintState(grammar: whitespace,

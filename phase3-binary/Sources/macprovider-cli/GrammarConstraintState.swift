@@ -21,6 +21,8 @@ final class GrammarConstraintState: @unchecked Sendable, Equatable {
     private let reasoningProductivePrefixes: Set<Int>
 
     private final class Compiled: @unchecked Sendable {
+        private static let maskByteBudget = 8_000_000
+        private static let maskEntryBytes = 32
         let automaton: GrammarAutomaton
         let table: GrammarTokenTable
         let productiveStates: Set<Int>
@@ -33,7 +35,10 @@ final class GrammarConstraintState: @unchecked Sendable, Equatable {
 
         init(grammar: ByteGrammar, tokens: [Int: [UInt8]], eos: Set<Int>) throws {
             automaton = try grammar.compile()
-            table = try GrammarTokenTable(tokens: tokens, eosTokenIDs: eos)
+            // Any reachable mask is a subset of this admitted ID union. Bound
+            // it before inference so later states cannot exceed the cache budget.
+            table = try GrammarTokenTable(tokens: tokens, eosTokenIDs: eos,
+                limits: .init(maxTokens: Self.maskByteBudget / Self.maskEntryBytes))
             productiveStates = try table.productiveStates(automaton: automaton)
             self.tokens = tokens
             self.eos = eos
@@ -101,9 +106,9 @@ final class GrammarConstraintState: @unchecked Sendable, Equatable {
             let mask = try table.allowedTokens(state: state, automaton: automaton).filter { productiveStates.contains($0.value) }
             guard !mask.isEmpty else { throw Self.error("Tokenizer cannot continue this output grammar") }
             // Evict derived masks rather than rejecting a valid long request.
-            let cost = mask.count * 32
-            guard cost <= 8_000_000 else { throw Self.error("Output grammar token mask exceeds memory limit") }
-            if maskBytes + cost > 8_000_000 { masks.removeAll(); maskBytes = 0 }
+            let cost = mask.count * Self.maskEntryBytes
+            guard cost <= Self.maskByteBudget else { throw Self.error("Output grammar token mask exceeds memory limit") }
+            if maskBytes + cost > Self.maskByteBudget { masks.removeAll(); maskBytes = 0 }
             masks[state] = mask
             maskBytes += cost
             return mask
