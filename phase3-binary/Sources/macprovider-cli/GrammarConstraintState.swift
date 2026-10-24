@@ -17,7 +17,8 @@ final class GrammarConstraintState: @unchecked Sendable, Equatable {
     private var reasoning: Bool
     private var reasoningTail: [UInt8] = []
     private var failure: APIError?
-    private let close = Array("</think>".utf8)
+    private static let close = Array("</think>".utf8)
+    private let reasoningProductivePrefixes: Set<Int>
 
     private final class Compiled: @unchecked Sendable {
         let automaton: GrammarAutomaton
@@ -59,6 +60,40 @@ final class GrammarConstraintState: @unchecked Sendable, Equatable {
             _ = try allowed(automaton.initialState)
         }
 
+        /// The close marker is a small prefix automaton. A closing token must
+        /// also leave a token-productive answer prefix, including merged pieces.
+        func reasoningProductivePrefixes() throws -> Set<Int> {
+            let close = GrammarConstraintState.close
+            let pieces = tokens.filter { !eos.contains($0.key) }.map(\.value)
+            let singletonBytes = Set(pieces.compactMap { $0.count == 1 ? $0[0] : nil })
+            if Set(close).isSubset(of: singletonBytes) { return Set(0..<close.count) }
+            let work = pieces.reduce(0) { $0 + $1.count + close.count }
+            guard work <= 8_000_000 / close.count else {
+                throw Self.error("Reasoning-close token reachability exceeds work limit")
+            }
+            var reverse = [[Int]](repeating: [], count: close.count)
+            var productive = Set<Int>()
+            for prefix in 0..<close.count {
+                for bytes in pieces {
+                    let next = GrammarConstraintState.reasoningTransition(prefix: prefix, bytes: bytes)
+                    if let suffix = next.suffix {
+                        if let answer = automaton.transition(state: automaton.initialState, bytes: suffix),
+                           productiveStates.contains(answer) { productive.insert(prefix) }
+                    } else { reverse[next.prefix].append(prefix) }
+                }
+            }
+            var queue = Array(productive)
+            var index = 0
+            while index < queue.count {
+                let current = queue[index]; index += 1
+                for predecessor in reverse[current] where productive.insert(predecessor).inserted {
+                    queue.append(predecessor)
+                }
+            }
+            guard productive.contains(0) else { throw Self.error("Tokenizer cannot close reasoning before constrained output") }
+            return productive
+        }
+
         func allowed(_ state: Int) throws -> [Int: Int] {
             lock.lock()
             defer { lock.unlock() }
@@ -92,12 +127,14 @@ final class GrammarConstraintState: @unchecked Sendable, Equatable {
 
     init(grammar: ByteGrammar, tokens: [Int: [UInt8]], eosTokenIDs: Set<Int>, reasoningOpen: Bool = false) throws {
         compiled = try Compiled(grammar: grammar, tokens: tokens, eos: eosTokenIDs)
+        reasoningProductivePrefixes = reasoningOpen ? try compiled.reasoningProductivePrefixes() : []
         state = compiled.automaton.initialState
         reasoning = reasoningOpen
     }
 
-    private init(compiled: Compiled, reasoningOpen: Bool) {
+    private init(compiled: Compiled, reasoningOpen: Bool) throws {
         self.compiled = compiled
+        reasoningProductivePrefixes = reasoningOpen ? try compiled.reasoningProductivePrefixes() : []
         state = compiled.automaton.initialState
         reasoning = reasoningOpen
     }
@@ -140,14 +177,14 @@ final class GrammarConstraintState: @unchecked Sendable, Equatable {
         cache.lock.lock()
         defer { cache.lock.unlock() }
         if let compiled = cache.entries[key] {
-            return GrammarConstraintState(compiled: compiled, reasoningOpen: request.outputTraits.reasoningOpen)
+            return try GrammarConstraintState(compiled: compiled, reasoningOpen: request.outputTraits.reasoningOpen)
         }
         let pieces = try vocabulary(data: data, tokenizer: tokenizer)
         let compiled = try Compiled(grammar: grammar, tokens: pieces, eos: eosTokenIDs)
         // A small bounded cache; model/tokenizer identity includes the full file.
         if cache.entries.count >= 2 { cache.entries.removeAll() }
         cache.entries[key] = compiled
-        return GrammarConstraintState(compiled: compiled, reasoningOpen: request.outputTraits.reasoningOpen)
+        return try GrammarConstraintState(compiled: compiled, reasoningOpen: request.outputTraits.reasoningOpen)
     }
 
     /// Read actual vocabulary IDs, including holes and raw added/special tokens.
@@ -207,22 +244,33 @@ final class GrammarConstraintState: @unchecked Sendable, Equatable {
         return result
     }
 
+    private static func reasoningTransition(prefix: Int, bytes: [UInt8]) -> (prefix: Int, suffix: [UInt8]?) {
+        let combined = Array(close.prefix(prefix)) + bytes
+        if combined.count >= close.count {
+            for index in 0...(combined.count - close.count) where Array(combined[index..<index + close.count]) == close {
+                return (0, Array(combined.dropFirst(index + close.count)))
+            }
+        }
+        for count in stride(from: min(close.count - 1, combined.count), through: 1, by: -1) {
+            if combined.suffix(count).elementsEqual(close.prefix(count)) { return (count, nil) }
+        }
+        return (0, nil)
+    }
+
     private func next(_ bytes: [UInt8]) -> (state: Int, reasoning: Bool, tail: [UInt8])? {
         guard reasoning else {
             return compiled.automaton.transition(state: state, bytes: bytes).flatMap {
                 compiled.productiveStates.contains($0) ? ($0, false, []) : nil
             }
         }
-        let combined = reasoningTail + bytes
-        if combined.count >= close.count {
-            for index in 0...(combined.count - close.count) where Array(combined[index..<index + close.count]) == close {
-                let suffix = Array(combined.dropFirst(index + close.count))
-                return compiled.automaton.transition(state: state, bytes: suffix).flatMap {
-                    compiled.productiveStates.contains($0) ? ($0, false, []) : nil
-                }
+        let next = Self.reasoningTransition(prefix: reasoningTail.count, bytes: bytes)
+        if let suffix = next.suffix {
+            return compiled.automaton.transition(state: state, bytes: suffix).flatMap {
+                compiled.productiveStates.contains($0) ? ($0, false, []) : nil
             }
         }
-        return (state, true, Array(combined.suffix(close.count - 1)))
+        guard reasoningProductivePrefixes.contains(next.prefix) else { return nil }
+        return (state, true, Array(Self.close.prefix(next.prefix)))
     }
 
     func mask(logits: MLXArray) -> MLXArray {

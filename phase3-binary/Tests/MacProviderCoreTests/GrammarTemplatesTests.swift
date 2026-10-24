@@ -89,12 +89,23 @@ final class GrammarTemplatesTests: XCTestCase {
         XCTAssertFalse(try accepts(number, "999999999999999999999999999999999999"))
     }
 
-    func testUndeclaredRequiredPropertiesReceiveGenericValueGrammar() throws {
+    func testStrictClosedObjectWithoutPropertiesOnlyAcceptsEmptyObject() throws {
+        let raw = #"{"model":"test","messages":[{"role":"user","content":"test"}],"response_format":{"type":"json_schema","json_schema":{"name":"empty","strict":true,"schema":{"type":"object","additionalProperties":false}}}}"#
+        let request = try ChatCompletionRequest.parse(data: Data(raw.utf8))
+        let grammar = try XCTUnwrap(GrammarTemplates.grammar(for: request, traits: .unresolved))
+        XCTAssertTrue(try accepts(grammar, "{}"))
+        XCTAssertFalse(try accepts(grammar, #"{"key":1}"#))
+        if case .jsonSchema(let spec) = request.responseFormat {
+            XCTAssertNoThrow(try JSONSchemaValidator.validateInstance(.object([:]), against: spec.schema))
+        } else { XCTFail("Expected strict schema") }
+    }
+
+    func testNonStrictRequiredPropertiesRemainAdvisory() throws {
         let raw = #"{"model":"test","messages":[{"role":"user","content":"test"}],"response_format":{"type":"json_schema","json_schema":{"name":"required","strict":false,"schema":{"type":"object","required":["missing"]}}}}"#
         let request = try ChatCompletionRequest.parse(data: Data(raw.utf8))
         let grammar = try XCTUnwrap(GrammarTemplates.grammar(for: request, traits: .unresolved))
         XCTAssertTrue(try accepts(grammar, #"{"missing":true}"#))
-        XCTAssertFalse(try accepts(grammar, "{}"))
+        XCTAssertTrue(try accepts(grammar, "{}"))
     }
 
     func testToolWithUndeclaredRequiredPropertyReceivesGenericValueGrammar() throws {

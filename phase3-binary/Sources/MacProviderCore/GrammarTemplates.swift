@@ -245,7 +245,8 @@ public enum GrammarTemplates {
         }
         switch object["type"] {
         case .string("object")?:
-            guard object["properties"] != nil || object["required"] != nil else { return genericObject(depth: 1, gemma: gemma) }
+            guard object["properties"] != nil || object["required"] != nil
+                    || object["additionalProperties"] == .bool(false) else { return genericObject(depth: 1, gemma: gemma) }
             let properties = objectProperties(object)
             let entries = properties.keys.sorted().map { key in
                 ByteGrammar.sequence([literal(.string(key), gemma: gemma), .literal(":"), schema(properties[key]!, depth: depth + 1, gemma: gemma)])

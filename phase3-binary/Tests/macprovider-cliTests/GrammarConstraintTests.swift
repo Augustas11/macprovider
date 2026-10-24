@@ -37,6 +37,21 @@ final class GrammarConstraintTests: XCTestCase {
         try state.validate()
     }
 
+    func testReasoningCloseMustBeTokenReachableBeforeSampling() throws {
+        XCTAssertThrowsError(try GrammarConstraintState(grammar: .literal("ok"),
+            tokens: [0: Array("ok".utf8)], eosTokenIDs: [1], reasoningOpen: true)) {
+            XCTAssertEqual(($0 as? APIError)?.code, "unsupported_output_grammar")
+        }
+        // The close marker may cross token boundaries and merge with the answer.
+        let state = try GrammarConstraintState(grammar: .literal("ok"),
+            tokens: [0: Array("</thi".utf8), 1: Array("nk>ok".utf8), 2: Array("ok".utf8)],
+            eosTokenIDs: [3], reasoningOpen: true)
+        state.didSample(token: 0)
+        state.didSample(token: 1)
+        state.didSample(token: 3)
+        try state.validate()
+    }
+
     func testSerialProcessorAndBatchCursorEnforceTheSameLanguage() throws {
         try Device.withDefaultDevice(.cpu) {
             let pieces: [Int: [UInt8]] = [0: Array("o".utf8), 1: Array("k".utf8), 2: Array("x".utf8), 3: []]

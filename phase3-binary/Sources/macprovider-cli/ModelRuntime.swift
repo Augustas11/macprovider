@@ -9470,6 +9470,34 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
         shouldCancel: @escaping @Sendable () -> Bool = { false },
         onChunk: @escaping @Sendable (StreamChunk) -> Void
     ) async throws -> CompletionResult {
+        guard Self.requiresStructuredValidation(request.responseFormat) else {
+            return try await streamPrepared(request, with: handle, shouldCancel: shouldCancel, onChunk: onChunk)
+        }
+        // Serial and CB share this boundary: no JSON content reaches the buyer
+        // until syntax/schema validation succeeds, including length/stop exits.
+        let held = StructuredStreamingContentAccumulator(enabled: true)
+        let startedAt = Date()
+        let firstChunk = ContinuousBatchFirstTokenClock()
+        var completion = try await streamPrepared(request, with: handle, shouldCancel: shouldCancel) { chunk in
+            if case .content(let text) = chunk { held.append(text) }
+            else { firstChunk.mark(); onChunk(chunk) }
+        }
+        if let error = held.error { throw error }
+        completion = try Self.validateStructuredStreamingCompletion(completion, request: request, buyerVisibleContent: held.content)
+        try handle.drainCancelled.check()
+        try Task.checkCancellation()
+        if shouldCancel() { throw CancellationError() }
+        if !held.content.isEmpty { firstChunk.mark(); onChunk(.content(held.content)) }
+        completion.ttftMilliseconds = firstChunk.ttftMilliseconds(since: startedAt)
+        return completion
+    }
+
+    private func streamPrepared(
+        _ request: ChatCompletionRequest,
+        with handle: RequestHandle,
+        shouldCancel: @escaping @Sendable () -> Bool = { false },
+        onChunk: @escaping @Sendable (StreamChunk) -> Void
+    ) async throws -> CompletionResult {
         try ToolSelectionPolicy.validateRequest(request, loadedModelID: toolSelectionModelID(handle.snapshot), runtime: "mlx_cache")
         _ = try Self.validateNativeVisionRequest(request, profile: handle.snapshot.nativeVisionProfile)
         if try ToolSelectionPolicy.selection(request.promptSource.toolChoice).holdsOutput {

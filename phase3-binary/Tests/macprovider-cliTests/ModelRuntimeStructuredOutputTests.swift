@@ -96,7 +96,7 @@ final class ModelRuntimeStructuredOutputTests: XCTestCase {
             retryable: true,
             param: "/age"
         )
-        XCTAssertEqual(visible.value, #"{"name":"Ada","age":"old"}"#)
+        XCTAssertEqual(visible.value, "", "Rejected structured content must never reach the buyer")
     }
 
     // Non-strict schemas remain advisory; JSON syntax is still guaranteed.
@@ -128,9 +128,13 @@ final class ModelRuntimeStructuredOutputTests: XCTestCase {
                 status: 502, code: "malformed_json_response", retryable: !content.isEmpty)
             let request = try Self.request(responseFormat: Self.nonStrictJsonSchemaResponseFormat(), stream: true)
             let handle = try await runtime.acquireRequestHandle(request)
+            let visible = LockedString()
             await XCTAssertAsyncAPIError(
-                try await runtime.stream(request, with: handle) { _ in },
+                try await runtime.stream(request, with: handle) { chunk in
+                    if case .content(let text) = chunk { visible.append(text) }
+                },
                 status: 502, code: "malformed_json_response", retryable: !content.isEmpty)
+            XCTAssertEqual(visible.value, "")
         }
     }
 
