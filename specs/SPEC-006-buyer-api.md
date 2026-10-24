@@ -1,7 +1,21 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.66 (2026-10-24, oversize body 413 after a bounded drain; #2107)
-**Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.6.17, SPEC-003 v0.7, SPEC-004 v0.3.2
+**Version:** 0.9.67 (2026-10-24, 3600 s streaming ceiling and an explicit `request_timeout` cut; #2107)
+**Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.6.28, SPEC-003 v0.7, SPEC-004 v0.3.2
+
+**Change log v0.9.67 (2026-10-24, Related: #2107):** Registers
+`SPEC-006-R024`. The gateway streaming ceiling default
+(`timeouts.stream_ceiling_max_seconds`) rises from 900 s to 3600 s, so a full
+32k-token reasoning answer from a slow serial provider is not cut mid-answer.
+A plain stream cut at its ceiling now ends with a standalone SSE error
+envelope `code: "request_timeout"` (`api_error`, `retryable: false`) and
+`data: [DONE]`; `/v1/messages` emits it as an Anthropic `event: error`. It was
+`provider_timeout`, and a frame torn by the cut could hide the envelope. The
+usage row still settles as `provider_timeout` under §17.7 (new §17.7.1 named
+mapping). First-token, decode-idle and structured-output timeouts are
+unchanged. The gateway non-streaming wall and header timeout move only with
+the SPEC-002 C2 relations (Pearl: 3660 s), and
+`quotas.reservation_max_age_hours` must outlive the longest request bound.
 
 **Change log v0.9.66 (2026-10-24, Related: #2107):**
 - §17.1 `413 request_too_large`: before writing the 413, the gateway drains
@@ -1502,7 +1516,7 @@ The gateway MUST install panic recovery middleware that converts unexpected pani
 
 **Retryable (`true`) — the same request may succeed later without changes, grouped by why:**
 
-- Availability/timeout: `no_provider_available`, `provider_error`, `provider_timeout`, `provider_disconnected`, `provider_failed` (coordinator-generated); `coordinator_unavailable`, `upstream_provider_error` (§13.4's error-action table already directs buyers to retry this), `invalid_provider_usage`, `invalid_provider_response` (gateway-generated provider response-shape defects).
+- Availability/timeout: `no_provider_available`, `provider_error`, `provider_timeout`, `provider_disconnected`, `provider_failed` (coordinator-generated); `coordinator_unavailable`, `upstream_provider_error` (§13.4's error-action table already directs buyers to retry this), `invalid_provider_usage`, `invalid_provider_response` (gateway-generated provider response-shape defects). `request_timeout` (v0.9.67, SPEC-006-R024) is permanent (`false`): the stream reached its ceiling while the provider was still producing, the identical request runs into the same limit, and an automatic retry re-bills the partial output.
 - Temporal 429s that ship a machine-readable backoff signal — a `Retry-After` or `X-RateLimit-Reset*` header the buyer can act on: `provisional_quota_exceeded`, `rate_limited` (coordinator); `account_request_rate_exceeded`, `account_concurrency_exceeded`, `demo_concurrency_exceeded`, `quota_exhausted` (gateway).
 - Operator-controlled capacity pauses — the pause condition itself resolves with time, not with a different request: `public_api_paused`, `demo_paused`, `capacity_signup_closed`.
 - Preflight/idempotency infrastructure availability: `preflight_rejected`, `idempotency_unavailable`.
@@ -4272,6 +4286,17 @@ provider_timeout
 
 Quota settlement MUST follow Section 17.7.
 
+### 17.5.1 Streaming request ceiling (v0.9.67)
+
+A streaming request is bounded by a ceiling armed once at gateway first byte
+of request and never re-armed: `clamp(stream_ceiling_floor_seconds +
+max_tokens * stream_ceiling_per_token_ms, >= coordinator_request_seconds, <=
+stream_ceiling_max_seconds)`, default maximum 3600 s. A plain stream that
+reaches it MUST end as specified in SPEC-006-R024 (`request_timeout`).
+Structured-output streams keep the SPEC-019 AC-V2-9 300 s sub-ceiling and its
+`provider_timeout` envelope. The first-token and decode-idle deadlines keep
+`provider_timeout`: there the provider stalled.
+
 ### 17.6 Streaming cancellation
 
 When the buyer disconnects from an SSE stream, the gateway MUST cancel the upstream coordinator request within 500 ms.
@@ -4324,6 +4349,7 @@ Constraints on the envelope:
    - NAMED MAPPING EXCEPTIONS — each entry below is a named gateway divergence (gateway writes a `usage_events` row AND the buyer-visible `error.code` is different) that this clause permits explicitly:
      - `error.code = "provider_disconnected"` ↔ `usage_events.outcome = "stream_truncated"`. Reference: `writeProviderDisconnectedSSE` in `phase5-gateway/internal/router/chat_proxy.go`, which calls `writeSSEError(..., "server_error", "provider_disconnected")` for the SPEC-002 FR-B6 envelope while the gateway settles as `stream_truncated`.
      - (v0.9.54, #1570) `error.code = "upstream_provider_error"` ↔ `usage_events.outcome = "stream_malformed"` and `error.code = "provider_disconnected"` ↔ `usage_events.outcome = "stream_malformed"`. Reference: `coordinatorStreamTerminalError` in `phase5-gateway/internal/router/chat_proxy.go`. A coordinator post-commit terminal frame with code `provider_error` (normalized per §17 to `upstream_provider_error`) or `provider_disconnected` is emitted with that code, while the gateway settles the stream exactly as before, as `stream_malformed`.
+     - (v0.9.67, SPEC-006-R024) `error.code = "request_timeout"` ↔ `usage_events.outcome = "provider_timeout"`. Reference: `settleIdleTimeout` in `phase5-gateway/internal/router/chat_proxy.go`. A plain stream cut by its stream ceiling tells the buyer the request ran out of time; it settles exactly as a gateway timeout always has (§17.7 504 rows: prompt plus the observed completion).
    - Any future divergence MUST be added to this list as a named mapping (with reference implementation citation) BEFORE the divergent code path ships. Unlisted divergences MUST be treated by the harness as uncorroborated overbill candidates.
 3. The envelope MUST be the LAST data frame on the stream before `[DONE]` or EOF. Content frames MUST NOT follow the envelope. Additional data frames sent AFTER `[DONE]` are invisible to OpenAI-style clients; the harness MUST stop reading at the first `[DONE]` and MUST NOT count post-`[DONE]` content (envelope or otherwise) as part of buyer-side corroboration evidence. (#232 R3 SEC HIGH.)
 4. Reference implementations: `writeSSEError`, `writeStructuredOutputTimeoutSSE`, `writeProviderDisconnectedSSE` in `phase5-gateway/internal/router/chat_proxy.go`.
@@ -5104,3 +5130,32 @@ preserve supported tool-call and tool-result envelopes. Connected-app fixtures
 prove only the covered API behavior; they do not establish installed-client
 compatibility, additional model qualification, or private transport for
 Responses/Messages.
+
+
+## SPEC-006-R024 — Streaming request ceiling and explicit cut
+
+The gateway MUST bound every streaming chat completion with the §17.5.1
+ceiling. `timeouts.stream_ceiling_max_seconds` defaults to 3600 s; SPEC-002-R009
+keeps the coordinator walls at or above it. When the ceiling cuts a stream
+that is not structured output, the gateway MUST cancel the coordinator
+request, MUST drop a partial SSE line the cut tore, MUST close an SSE event
+whose blank-line separator had not arrived, and MUST write a standalone
+terminal envelope as the last event, followed by
+`data: [DONE]`:
+
+```text
+data: {"error":{"message":"Request reached the streaming time limit of <N> s and the response is incomplete; lower max_tokens or shorten the request","type":"api_error","code":"request_timeout","retryable":false}}
+```
+
+On `/v1/messages` the same code reaches the buyer as an Anthropic SSE
+`event: error` (`type: api_error`, `code: request_timeout`,
+`retryable: false`). Settlement MUST follow §17.7 for a gateway timeout with
+partial output: `usage_events.outcome = "provider_timeout"`, prompt plus the
+gateway-observed completion, under the §17.7.1 named mapping. No new money
+outcome is introduced. The gateway MUST send the coordinator the absolute
+ceiling as `X-MacProvider-Internal-Stream-Deadline-Unix-Ms` on authenticated
+plain streams only, so the coordinator request log can label the cut
+(SPEC-002-R009). The gateway MUST refuse a configuration whose
+`quotas.reservation_max_age_hours` does not exceed the longest request bound
+(the larger of the stream ceiling and the effective non-streaming wall) by at
+least 60 s, so no quota reservation expires before its request settles.

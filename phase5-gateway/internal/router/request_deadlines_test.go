@@ -2,9 +2,11 @@ package router
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -192,9 +194,16 @@ func endlessFrameStream(every time.Duration, frame string) func(*io.PipeWriter, 
 // TestStreamCeilingFiresOnEndlessStream is the safety half of #760: removing
 // the flat wall must not make a runaway generation unbounded. A stream that
 // keeps emitting real content forever is still cut, by the max_tokens-derived
-// ceiling, and settles as provider_timeout — not provider_disconnected.
+// ceiling. The buyer sees request_timeout (not provider_disconnected, and not
+// provider_timeout: the provider never stalled), and the usage row settles as
+// provider_timeout (SPEC-006 §17.7.1 named mapping).
 func TestStreamCeilingFiresOnEndlessStream(t *testing.T) {
-	client := seamStreamingUpstreamCtx(endlessContentStream(50 * time.Millisecond))
+	var upstreamDeadline string
+	stream := seamStreamingUpstreamCtx(endlessContentStream(50 * time.Millisecond))
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		upstreamDeadline = r.Header.Get(gatewayStreamDeadlineHeader)
+		return stream.Transport.RoundTrip(r)
+	})}
 	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
 		cfg.Coordinator.BuyerURL = "http://coordinator.test"
 		// Ceiling = clamp(1s + 20*1ms, >=1s, <=1s) = 1s. The idle timer and
@@ -217,14 +226,231 @@ func TestStreamCeilingFiresOnEndlessStream(t *testing.T) {
 		t.Fatalf("endless stream ran %s — the ceiling did not bound it", elapsed)
 	}
 	body := resp.Body.String()
-	if !strings.Contains(body, `"code":"provider_timeout"`) || !strings.Contains(body, "data: [DONE]") {
-		t.Fatalf("want provider_timeout + [DONE] terminal after %s; body=%.400q", elapsed, body)
+	if strings.Contains(body, "provider_disconnected") || strings.Contains(body, `"code":"provider_timeout"`) {
+		t.Fatalf("ceiling expiry must surface as request_timeout only; body=%.400q", body)
 	}
-	if strings.Contains(body, "provider_disconnected") {
-		t.Fatalf("ceiling expiry must not surface as a provider disconnect; body=%.400q", body)
+	terminal := lastSSEDataFrameBeforeDone(t, body)
+	var envelope struct {
+		Error struct {
+			Message   string `json:"message"`
+			Type      string `json:"type"`
+			Code      string `json:"code"`
+			Retryable *bool  `json:"retryable"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(terminal), &envelope); err != nil {
+		t.Fatalf("terminal frame is not standalone JSON: %v frame=%q", err, terminal)
+	}
+	if envelope.Error.Code != requestTimeoutCode || envelope.Error.Type != "api_error" ||
+		envelope.Error.Retryable == nil || *envelope.Error.Retryable ||
+		!strings.Contains(envelope.Error.Message, "streaming time limit of 1 s") {
+		t.Fatalf("terminal envelope=%+v want api_error request_timeout, retryable=false, the 1 s limit in the message", envelope.Error)
 	}
 	if outcome, _ := usageEventOutcome(t, dbPath, "acct_ceiling"); outcome != "provider_timeout" {
 		t.Fatalf("usage outcome=%q want provider_timeout", outcome)
+	}
+	// The coordinator labels its request_log row from this deadline: it is
+	// the gateway's armed ceiling, gateway first byte + 1 s.
+	deadlineMS, err := strconv.ParseInt(upstreamDeadline, 10, 64)
+	if err != nil {
+		t.Fatalf("upstream %s=%q want Unix ms", gatewayStreamDeadlineHeader, upstreamDeadline)
+	}
+	if got := time.UnixMilli(deadlineMS); got.Before(start.Add(900*time.Millisecond)) || got.After(start.Add(1100*time.Millisecond)) {
+		t.Fatalf("upstream stream deadline=%s want start+1s (start=%s)", got, start)
+	}
+}
+
+// lastSSEDataFrameBeforeDone parses the body as SSE events (a blank line ends
+// an event; its data fields join with "\n", as a client sees them) and returns
+// the data of the event before `[DONE]`, failing unless the stream ends with
+// [DONE].
+func lastSSEDataFrameBeforeDone(t *testing.T, body string) string {
+	t.Helper()
+	var events []string
+	var data []string
+	for _, line := range strings.Split(body, "\n") {
+		if strings.TrimSpace(line) == "" {
+			if len(data) > 0 {
+				events = append(events, strings.Join(data, "\n"))
+				data = nil
+			}
+			continue
+		}
+		field, ok := strings.CutPrefix(line, "data: ")
+		if !ok {
+			t.Fatalf("stream line %q is not a data field; body=%.600q", line, body)
+		}
+		data = append(data, field)
+	}
+	if len(data) > 0 {
+		events = append(events, strings.Join(data, "\n"))
+	}
+	if len(events) < 2 || events[len(events)-1] != "[DONE]" {
+		t.Fatalf("stream does not end with a terminal event and [DONE]; body=%.600q", body)
+	}
+	return events[len(events)-2]
+}
+
+// TestStreamCeilingDropsTornFrame: the ceiling cancels the upstream mid-read.
+// A frame the coordinator had only half sent must not reach the buyer, or the
+// request_timeout envelope is spliced onto it and no client can parse either.
+func TestStreamCeilingDropsTornFrame(t *testing.T) {
+	client := seamStreamingUpstreamCtx(func(pw *io.PipeWriter, ctx context.Context) {
+		_, _ = pw.Write([]byte(`data: {"id":"c","choices":[{"delta":{"reasoning_content":"think"}}]}` + "\n\n"))
+		_, _ = pw.Write([]byte(`data: {"id":"c","choices":[{"delta":{"reasoning_content":"tor`))
+		<-ctx.Done()
+		_ = pw.CloseWithError(ctx.Err())
+	})
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Timeouts.CoordinatorRequestSeconds = 1
+		cfg.Timeouts.StreamCeilingFloorSeconds = 1
+		cfg.Timeouts.StreamCeilingPerTokenMS = 1
+		cfg.Timeouts.StreamCeilingMaxSeconds = 1
+		cfg.Timeouts.StreamingIdleMS = 30000
+		cfg.Timeouts.FirstTokenSeconds = 300
+	}, WithHTTPClient(client))
+	key := createAccountAndKey(t, store, cfg, "acct_ceiling_torn")
+
+	resp := postChat(t, h, key, `{"model":"llama","stream":true,"max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`, nil)
+	body := resp.Body.String()
+	if strings.Contains(body, `"tor`) {
+		t.Fatalf("torn frame reached the buyer; body=%q", body)
+	}
+	terminal := lastSSEDataFrameBeforeDone(t, body)
+	if code := terminalSSEErrorCode(terminal); code != requestTimeoutCode {
+		t.Fatalf("terminal frame code=%q want %s; body=%q", code, requestTimeoutCode, body)
+	}
+	if outcome, _ := usageEventOutcome(t, dbPath, "acct_ceiling_torn"); outcome != "provider_timeout" {
+		t.Fatalf("usage outcome=%q want provider_timeout", outcome)
+	}
+}
+
+// TestStreamCeilingClosesAnOpenEvent: the ceiling fires after a complete data
+// line but before its blank separator. The terminal must not join that event.
+func TestStreamCeilingClosesAnOpenEvent(t *testing.T) {
+	client := seamStreamingUpstreamCtx(func(pw *io.PipeWriter, ctx context.Context) {
+		_, _ = pw.Write([]byte(`data: {"id":"c","choices":[{"delta":{"reasoning_content":"think"}}]}` + "\n\n"))
+		_, _ = pw.Write([]byte(`data: {"id":"c","choices":[{"delta":{"reasoning_content":"open"}}]}` + "\n"))
+		<-ctx.Done()
+		_ = pw.CloseWithError(ctx.Err())
+	})
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Timeouts.CoordinatorRequestSeconds = 1
+		cfg.Timeouts.StreamCeilingFloorSeconds = 1
+		cfg.Timeouts.StreamCeilingPerTokenMS = 1
+		cfg.Timeouts.StreamCeilingMaxSeconds = 1
+		cfg.Timeouts.StreamingIdleMS = 30000
+		cfg.Timeouts.FirstTokenSeconds = 300
+	}, WithHTTPClient(client))
+	key := createAccountAndKey(t, store, cfg, "acct_ceiling_open_event")
+
+	resp := postChat(t, h, key, `{"model":"llama","stream":true,"max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`, nil)
+	body := resp.Body.String()
+	terminal := lastSSEDataFrameBeforeDone(t, body)
+	if code := terminalSSEErrorCode(terminal); code != requestTimeoutCode {
+		t.Fatalf("terminal event code=%q want %s (it joined the open event?); body=%q", code, requestTimeoutCode, body)
+	}
+	if outcome, _ := usageEventOutcome(t, dbPath, "acct_ceiling_open_event"); outcome != "provider_timeout" {
+		t.Fatalf("usage outcome=%q want provider_timeout", outcome)
+	}
+}
+
+// TestStreamCeilingOverMaxTokensNamesTheSettledOutcome: content past max_tokens
+// (but under the 8-byte hard guard) settles as stream_output_exceeded, so the
+// terminal at the ceiling names that outcome, not request_timeout.
+func TestStreamCeilingOverMaxTokensNamesTheSettledOutcome(t *testing.T) {
+	client := seamStreamingUpstreamCtx(endlessFrameStream(50*time.Millisecond,
+		`data: {"id":"c","choices":[{"delta":{"content":"xxxxxx"}}]}`+"\n\n"))
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Timeouts.CoordinatorRequestSeconds = 1
+		cfg.Timeouts.StreamCeilingFloorSeconds = 1
+		cfg.Timeouts.StreamCeilingPerTokenMS = 1
+		cfg.Timeouts.StreamCeilingMaxSeconds = 1
+		cfg.Timeouts.StreamingIdleMS = 30000
+		cfg.Timeouts.FirstTokenSeconds = 300
+	}, WithHTTPClient(client))
+	key := createAccountAndKey(t, store, cfg, "acct_ceiling_overflow")
+
+	// max_tokens 20: overflow above 80 content bytes, hard guard above 160.
+	// About 20 frames of 6 bytes arrive before the 1 s ceiling.
+	resp := postChat(t, h, key, `{"model":"llama","stream":true,"max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`, nil)
+	terminal := lastSSEDataFrameBeforeDone(t, resp.Body.String())
+	outcome, _ := usageEventOutcome(t, dbPath, "acct_ceiling_overflow")
+	if code := terminalSSEErrorCode(terminal); code != outcome || code != "stream_output_exceeded" {
+		t.Fatalf("terminal code=%q settled outcome=%q, want both stream_output_exceeded", code, outcome)
+	}
+}
+
+// TestStreamCeilingAnthropicMessagesErrorEvent: the /v1/messages facade turns
+// the request_timeout envelope into an Anthropic `event: error` frame.
+func TestStreamCeilingAnthropicMessagesErrorEvent(t *testing.T) {
+	client := seamStreamingUpstreamCtx(endlessContentStream(50 * time.Millisecond))
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Features.AnthropicMessagesEnabled = true
+		cfg.Timeouts.CoordinatorRequestSeconds = 1
+		cfg.Timeouts.StreamCeilingFloorSeconds = 1
+		cfg.Timeouts.StreamCeilingPerTokenMS = 1
+		cfg.Timeouts.StreamCeilingMaxSeconds = 1
+		cfg.Timeouts.StreamingIdleMS = 30000
+		cfg.Timeouts.FirstTokenSeconds = 300
+	}, WithHTTPClient(client))
+	key := createAccountAndKey(t, store, cfg, "acct_ceiling_anthropic")
+
+	resp := postAnthropicMessages(t, h, key, `{"model":"llama","stream":true,"max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`, nil)
+	body := resp.Body.String()
+	idx := strings.Index(body, "event: error\n")
+	if idx < 0 {
+		t.Fatalf("no Anthropic error event; body=%.600q", body)
+	}
+	data, _, _ := strings.Cut(strings.TrimPrefix(body[idx:], "event: error\n"), "\n")
+	var event struct {
+		Type  string `json:"type"`
+		Error struct {
+			Type      string `json:"type"`
+			Code      string `json:"code"`
+			Retryable *bool  `json:"retryable"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimPrefix(data, "data: ")), &event); err != nil {
+		t.Fatalf("error event data=%q: %v", data, err)
+	}
+	if event.Type != "error" || event.Error.Type != "api_error" || event.Error.Code != requestTimeoutCode ||
+		event.Error.Retryable == nil || *event.Error.Retryable {
+		t.Fatalf("error event=%+v want api_error request_timeout retryable=false", event)
+	}
+	if outcome, _ := usageEventOutcome(t, dbPath, "acct_ceiling_anthropic"); outcome != "provider_timeout" {
+		t.Fatalf("usage outcome=%q want provider_timeout", outcome)
+	}
+}
+
+// TestStreamDeadlineHeaderOnlyOnPlainStreams: non-streaming requests have no
+// stream ceiling, and structured streams keep SPEC-019's provider_timeout, so
+// neither tells the coordinator to label a cut as request_timeout.
+func TestStreamDeadlineHeaderOnlyOnPlainStreams(t *testing.T) {
+	var seen []string
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		seen = append(seen, r.Header.Get(gatewayStreamDeadlineHeader))
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}},
+			`{"id":"c","object":"chat.completion","created":1,"model":"llama","usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2},"choices":[{"index":0,"message":{"role":"assistant","content":"{}"},"finish_reason":"stop"}]}`), nil
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+	}, WithHTTPClient(client))
+	key := createAccountAndKey(t, store, cfg, "acct_deadline_header")
+
+	_ = postChat(t, h, key, `{"model":"llama","max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`, nil)
+	_ = postChat(t, h, key, structuredStreamingRequestBody(), nil)
+	if len(seen) != 2 {
+		t.Fatalf("upstream calls=%d want 2", len(seen))
+	}
+	for i, v := range seen {
+		if v != "" {
+			t.Fatalf("call %d carried %s=%q; only plain streams carry it", i, gatewayStreamDeadlineHeader, v)
+		}
 	}
 }
 

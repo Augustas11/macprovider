@@ -420,5 +420,248 @@ class VisionQualificationApplyRollbackTest(unittest.TestCase):
         self.addCleanup(patcher.stop)
 
 
+# --- stream-ceiling twin walls (SPEC-002 FR-P11a C2) ------------------------
+
+REPO = pathlib.Path(__file__).resolve().parents[2]
+SC_BASE = b"""# coordinator base
+routing:
+  preflight_timeout_s: 5
+  # #760/#784 twin wall
+  request_timeout_s: 900
+  failover_enabled: true
+provider_http:
+  timeout_s: 900
+"""
+SC_OVERLAY = b"relay_blind:\n  enabled: true\n"
+SC_GATEWAY = b"""timeouts:
+  coordinator_request_seconds: 300
+  coordinator_header_timeout_seconds: 960
+  coordinator_admission_seconds: 120
+  stream_ceiling_floor_seconds: 60
+  stream_ceiling_max_seconds: 900
+  non_stream_request_seconds: 960
+  streaming_idle_ms: 10000
+quotas:
+  reservation_max_age_hours: 24
+"""
+
+
+def sc_docs(base=SC_BASE, overlay=SC_OVERLAY, gateway=SC_GATEWAY):
+    import yaml
+    return tuple(yaml.safe_load(b) or {} for b in (base, overlay, gateway))
+
+
+class StreamCeilingPlanTest(unittest.TestCase):
+    def test_pearl_posture_is_raised_and_passes_c2(self):
+        import yaml
+        coord, gw = pcc.sc_plan(*sc_docs())
+        self.assertEqual(coord, {("routing", "request_timeout_s"): ("base", 900, 3600),
+                                 ("provider_http", "timeout_s"): ("base", 900, 3600)})
+        self.assertEqual(gw, {"stream_ceiling_max_seconds": (900, 3600), "non_stream_request_seconds": (960, 3660),
+                              "coordinator_header_timeout_seconds": (960, 3660)})
+        base, overlay, gateway = pcc.sc_render(SC_BASE, SC_OVERLAY, SC_GATEWAY, coord, gw)
+        self.assertEqual(overlay, SC_OVERLAY)
+        self.assertIn(b"  # #760/#784 twin wall\n  request_timeout_s: 3600\n", base)
+        self.assertIn(b"  streaming_idle_ms: 10000\n", gateway)
+        b, g = yaml.safe_load(base), yaml.safe_load(gateway)
+        self.assertIsNone(pcc.sc_c2(b["routing"]["request_timeout_s"], b["provider_http"]["timeout_s"],
+                                    pcc.sc_gateway_timeouts(g)))
+        self.assertEqual(pcc.sc_plan(b, {}, g), ({}, {}))
+
+    def test_today_posture_fails_c2_only_after_a_partial_raise(self):
+        _, _, g = sc_docs()
+        self.assertIsNone(pcc.sc_c2(900, 900, pcc.sc_gateway_timeouts(g)))
+        self.assertIn("non_stream_request_seconds", pcc.sc_c2(3600, 3600, pcc.sc_gateway_timeouts(g)))
+
+    def test_overlay_value_is_edited_where_it_is_set(self):
+        overlay = b"routing:\n  request_timeout_s: 1200\n"
+        coord, _ = pcc.sc_plan(*sc_docs(overlay=overlay))
+        self.assertEqual(coord[("routing", "request_timeout_s")], ("overlay", 1200, 3600))
+        base, new_overlay, _ = pcc.sc_render(SC_BASE, overlay, SC_GATEWAY, coord, {})
+        self.assertEqual(new_overlay, b"routing:\n  request_timeout_s: 3600\n")
+        self.assertIn(b"request_timeout_s: 900\n", base)
+
+    def test_higher_live_walls_are_never_lowered(self):
+        base = SC_BASE.replace(b"request_timeout_s: 900", b"request_timeout_s: 7200")
+        gateway = SC_GATEWAY.replace(b"reservation_max_age_hours: 24", b"reservation_max_age_hours: 24")
+        coord, gw = pcc.sc_plan(*sc_docs(base=base, gateway=gateway))
+        self.assertNotIn(("routing", "request_timeout_s"), coord)
+        self.assertEqual(gw["non_stream_request_seconds"], (960, 7201))
+        self.assertEqual(gw["coordinator_header_timeout_seconds"], (960, 7201))
+
+    def test_missing_keys_are_refused(self):
+        with self.assertRaisesRegex(pcc.Refused, "provider_http.timeout_s is set in neither"):
+            pcc.sc_plan(*sc_docs(base=b"routing:\n  request_timeout_s: 900\n"))
+        with self.assertRaisesRegex(pcc.Refused, "non_stream_request_seconds is not set"):
+            pcc.sc_plan(*sc_docs(gateway=SC_GATEWAY.replace(b"  non_stream_request_seconds: 960\n", b"")))
+        with self.assertRaisesRegex(pcc.Refused, "non-negative integer"):
+            pcc.sc_plan(*sc_docs(base=SC_BASE.replace(b"timeout_s: 900\n", b"timeout_s: true\n")))
+
+    def test_short_reservation_window_fails_c2(self):
+        _, _, g = sc_docs(gateway=SC_GATEWAY.replace(b"reservation_max_age_hours: 24", b"reservation_max_age_hours: 1"))
+        self.assertIn("reservation_max_age_hours", pcc.sc_c2(3600, 3600, dict(pcc.sc_gateway_timeouts(g),
+                      stream_ceiling_max_seconds=3600, non_stream_request_seconds=3660,
+                      coordinator_header_timeout_seconds=3660)))
+
+    def test_edit_that_touches_another_key_is_refused(self):
+        text = "timeouts:\n  stream_ceiling_max_seconds: 900\n  nested:\n    stream_ceiling_max_seconds: 1\n"
+        with self.assertRaisesRegex(pcc.Refused, "anchor|changed more"):
+            pcc.sc_edit(text, "timeouts", {"stream_ceiling_max_seconds": 3600}, "gateway.yaml")
+
+    def test_gateway_on_another_config_is_not_applied(self):
+        from unittest import mock
+        with tempfile.NamedTemporaryFile() as cfg:
+            a = argparse.Namespace(gateway_config=cfg.name, gateway_unit="gateway.service")
+            with mock.patch.object(pcc, "main_start", lambda unit: 2 ** 40):
+                with mock.patch.object(pcc, "sc_running_gateway", mock.Mock(side_effect=pcc.Refused("other config"))):
+                    self.assertFalse(pcc.sc_gateway_applied(a))
+                with mock.patch.object(pcc, "sc_running_gateway", lambda a: "7"):
+                    self.assertTrue(pcc.sc_gateway_applied(a))
+
+    def test_targets_match_the_tracked_configs(self):
+        import yaml
+        coord = yaml.safe_load((REPO / "phase4-coordinator/dist/coordinator.yaml").read_text())
+        self.assertEqual(coord["routing"]["request_timeout_s"], pcc.SC_STREAM_CEILING)
+        self.assertEqual(coord["provider_http"]["timeout_s"], pcc.SC_STREAM_CEILING)
+        gateway = yaml.safe_load((REPO / "phase5-gateway/gateway.yaml.example").read_text())["timeouts"]
+        self.assertEqual(gateway["stream_ceiling_max_seconds"], pcc.SC_STREAM_CEILING)
+        self.assertEqual(gateway["non_stream_request_seconds"], pcc.SC_NON_STREAM_WALL)
+        self.assertEqual(gateway["coordinator_header_timeout_seconds"], pcc.SC_NON_STREAM_WALL)
+        self.assertIn("StreamCeilingMaxSeconds:     3600,",
+                      (REPO / "phase5-gateway/internal/config/config.go").read_text())
+
+
+class StreamCeilingApplyTest(unittest.TestCase):
+    """The apply restarts the coordinator before the gateway, and any
+    failure once edited bytes may be on disk restores all three files and
+    restarts both services onto them."""
+
+    def setUp(self):
+        import contextlib
+        from unittest import mock
+        self.mock = mock
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(subprocess.run, ["rm", "-rf", self.dir])
+        self.paths = {}
+        for name, data in (("config", SC_BASE), ("overlay", SC_OVERLAY), ("gateway", SC_GATEWAY)):
+            self.paths[name] = os.path.join(self.dir, name + ".yaml")
+            with open(self.paths[name], "wb") as f:
+                f.write(data)
+        self.args = argparse.Namespace(
+            config=self.paths["config"], overlay=self.paths["overlay"], gateway_config=self.paths["gateway"],
+            backup_root=os.path.join(self.dir, "backups"), unit="coordinator.service",
+            gateway_unit="gateway.service", healthz="http://127.0.0.1:1/healthz",
+            gateway_healthz="http://127.0.0.1:2/healthz")
+        self.events = []
+        self.systemctl = mock.Mock(side_effect=self.fake_run)
+        for name, value in (("guard", lambda a: contextlib.nullcontext()),
+                            ("running", lambda a: (1, "/bin/coordinator", {}, os.getuid(), os.getgid())),
+                            ("sc_running_gateway", lambda a: "7"),
+                            ("as_service", lambda *a: subprocess.CompletedProcess([], 0)),
+                            ("healthz", lambda url: {}),
+                            ("applied", lambda a: True),
+                            ("sc_gateway_applied", lambda a: True)):
+            patcher = mock.patch.object(pcc, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        patcher = mock.patch.object(pcc.subprocess, "run", self.systemctl)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def fake_run(self, cmd, *a, **kw):
+        self.events.append(" ".join(cmd))
+        return subprocess.CompletedProcess(cmd, 0)
+
+    def read(self, name):
+        with open(self.paths[name], "rb") as f:
+            return f.read()
+
+    def test_success_raises_both_files_and_restarts_coordinator_first(self):
+        restarts = []
+        with self.mock.patch.object(pcc, "restart", lambda a, pid: restarts.append("coordinator")), \
+                self.mock.patch.object(pcc, "sc_restart_gateway", lambda a, pid: restarts.append("gateway")):
+            pcc.apply_stream_ceiling(self.args)
+        self.assertEqual(restarts, ["coordinator", "gateway"])
+        self.assertIn(b"request_timeout_s: 3600", self.read("config"))
+        self.assertEqual(self.read("overlay"), SC_OVERLAY)
+        self.assertIn(b"stream_ceiling_max_seconds: 3600", self.read("gateway"))
+        backups = os.listdir(self.args.backup_root)
+        self.assertEqual(len(backups), 1)
+        with open(os.path.join(self.args.backup_root, backups[0], "gateway.yaml"), "rb") as f:
+            self.assertEqual(f.read(), SC_GATEWAY)
+        self.assertEqual(sorted(n for n in os.listdir(self.dir) if n.startswith(".cli-release-")), [])
+
+    def test_gateway_restart_failure_restores_files_and_restarts_both(self):
+        with self.mock.patch.object(pcc, "restart", lambda a, pid: None), \
+                self.mock.patch.object(pcc, "sc_restart_gateway", self.mock.Mock(side_effect=pcc.Refused("gw boom"))):
+            with self.assertRaisesRegex(pcc.Refused, "gw boom.*original files are restored \\(bytes verified\\) "
+                                                     "and both services were restarted"):
+                pcc.apply_stream_ceiling(self.args)
+        self.assertEqual((self.read("config"), self.read("overlay"), self.read("gateway")),
+                         (SC_BASE, SC_OVERLAY, SC_GATEWAY))
+        # Rollback restarts the gateway before the coordinator (C2 holds throughout).
+        self.assertEqual(self.events, ["systemctl restart gateway.service", "systemctl restart coordinator.service"])
+
+    def test_coordinator_recovery_failure_still_recovers_the_gateway(self):
+        with self.mock.patch.object(pcc, "restart", lambda a, pid: None), \
+                self.mock.patch.object(pcc, "sc_restart_gateway", self.mock.Mock(side_effect=pcc.Refused("gw boom"))), \
+                self.mock.patch.object(pcc, "recovery_restart", self.mock.Mock(side_effect=pcc.Refused("coord down"))):
+            with self.assertRaisesRegex(pcc.Refused, "recovery is UNPROVEN for coordinator: coord down"):
+                pcc.apply_stream_ceiling(self.args)
+        self.assertEqual(self.read("gateway"), SC_GATEWAY)
+        self.assertEqual(self.events, ["systemctl restart gateway.service"])
+
+    def test_gateway_restart_starts_after_the_config_second(self):
+        import time
+        os.utime(self.paths["gateway"])
+        with self.mock.patch.object(pcc, "sc_running_gateway", lambda a: "8"), \
+                self.mock.patch.object(pcc, "sc_gateway_applied", lambda a: True):
+            pcc.sc_restart_gateway(self.args, "7")
+        self.assertGreater(int(time.time()), int(os.stat(self.paths["gateway"]).st_ctime))
+
+    def test_failed_install_leaves_no_temporary_copy(self):
+        def failing_install(tmp, path):
+            raise OSError("rename failed")
+        with self.mock.patch.object(pcc, "install", failing_install), \
+                self.mock.patch.object(pcc, "sc_restart_gateway", lambda a, pid: None):
+            with self.assertRaises(pcc.Refused):
+                pcc.apply_stream_ceiling(self.args)
+        self.assertEqual(sorted(n for n in os.listdir(self.dir) if n.startswith(".cli-release-")), [])
+
+    def test_rejected_coordinator_config_changes_nothing(self):
+        restart = self.mock.Mock()
+        with self.mock.patch.object(pcc, "as_service", lambda *a: subprocess.CompletedProcess([], 1)), \
+                self.mock.patch.object(pcc, "restart", restart):
+            with self.assertRaisesRegex(pcc.Refused, "rejects the edited config"):
+                pcc.apply_stream_ceiling(self.args)
+        restart.assert_not_called()
+        self.assertEqual((self.read("config"), self.read("gateway")), (SC_BASE, SC_GATEWAY))
+        self.assertEqual(sorted(n for n in os.listdir(self.dir) if n.startswith(".cli-release-")), [])
+
+    def test_concurrent_gateway_change_is_left_as_found(self):
+        foreign = b"timeouts:\n  stream_ceiling_max_seconds: 1\n"
+        def gateway_restart(args, pid):
+            with open(self.paths["gateway"], "wb") as f:
+                f.write(foreign)
+            raise pcc.Refused("gw boom")
+        with self.mock.patch.object(pcc, "restart", lambda a, pid: None), \
+                self.mock.patch.object(pcc, "sc_restart_gateway", gateway_restart):
+            with self.assertRaisesRegex(pcc.Refused, "UNPROVEN"):
+                pcc.apply_stream_ceiling(self.args)
+        self.assertEqual(self.read("gateway"), foreign)
+        self.assertEqual(self.events, [])
+
+    def test_walls_already_live_are_done_without_a_restart(self):
+        with self.mock.patch.object(pcc, "restart", lambda a, pid: None), \
+                self.mock.patch.object(pcc, "sc_restart_gateway", lambda a, pid: None):
+            pcc.apply_stream_ceiling(self.args)
+        restart, gw_restart = self.mock.Mock(), self.mock.Mock()
+        with self.mock.patch.object(pcc, "restart", restart), \
+                self.mock.patch.object(pcc, "sc_restart_gateway", gw_restart):
+            pcc.apply_stream_ceiling(self.args)
+        restart.assert_not_called()
+        gw_restart.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

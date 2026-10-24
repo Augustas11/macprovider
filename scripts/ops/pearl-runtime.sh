@@ -164,6 +164,31 @@
 #   Env: PEARL_UPDATER_BIN, PEARL_TIER2_WATCHDOG_BIN, PEARL_CONFIG_GUARD,
 #   PEARL_UPDATER_LOCK, PEARL_DEPLOY_LOCK (installed paths on Pearl).
 #
+# One-time task (PEARL_RUNTIME_TASK=stream-ceiling): raise the streaming walls
+# Pearl preserves live to the tracked values (SPEC-002 FR-P11a C2, SPEC-006
+# §17.7.1; docs/runbooks/pearl-coordinator-rollout.md "Streaming walls"):
+#   1 pearl_state       read-only: effective coordinator routing.request_timeout_s
+#                       and provider_http.timeout_s (base or overlay), gateway
+#                       timeouts.stream_ceiling_max_seconds,
+#                       non_stream_request_seconds and
+#                       coordinator_header_timeout_seconds, the planned raise,
+#                       the deploy gate's C2 relations, and whether both services
+#                       booted with the files on disk
+#   2 stream_ceiling    under the live-ops lock and both Pearl locks: raise (never
+#                       lower) the coordinator walls to 3600 in the file that sets
+#                       each, the gateway ceiling to 3600, its non-streaming wall
+#                       to 3660 and its header timeout to cover it; refuse a
+#                       result that fails C2; back the three files up; validate
+#                       the coordinator files with the running coordinator;
+#                       restart the coordinator, then the gateway (downtime
+#                       stated first), and prove both booted with the new bytes;
+#                       on failure restore the files and restart both again
+#   Done when the walls are at their targets, C2 holds and both services booted
+#   with the files on disk.
+#   Env: PEARL_GATEWAY_CONFIG (default /opt/macprovider/gateway.yaml),
+#   PEARL_GATEWAY_UNIT (default macprovider-gateway), PEARL_GATEWAY_HEALTHZ_URL
+#   (default http://127.0.0.1:9443/healthz) and the Pearl layout above.
+#
 # Env (or ~/.config/macprovider/ops.env): COORDINATOR_URL, GATEWAY_URL,
 # PEARL_SSH, PEARL_RUNTIME_VERSION, UPDATER_WAIT_MAX_S (default 2700),
 # PEARL_COORDINATOR_ENV (default /etc/macprovider/coordinator.env),
@@ -192,12 +217,15 @@ CI_DOWNTIME="one coordinator restart, about 5-40 seconds (in-flight requests dra
 VQ_DOC="docs/runbooks/native-vision-acceptance.md"
 UB_DOC="docs/runbooks/catalog-release-decision-tree.md"
 UB_DOWNTIME="none: installs the updater, the Tier-2 enforcement watchdog, the config guard and their units, then systemctl daemon-reload; no coordinator, gateway or provider restart"
+SC_DOC="docs/runbooks/pearl-coordinator-rollout.md#streaming-walls-one-time"
+SC_DOWNTIME="one coordinator restart (about 5-40 seconds: in-flight requests drain, then it starts), then one gateway restart (up to 40 seconds of drain, then it starts); buyer and provider traffic is interrupted for each, and a stream still open when either stops is cut. If a restart or its check fails, the three files are restored and both services restart once more"
 VQ_DOWNTIME="one coordinator restart, about 5-40 seconds (in-flight requests drain, then the coordinator starts); buyer and provider traffic through the coordinator is interrupted for that time. If the post-restart check fails, the overlay is restored and the coordinator restarts once more"
 
 # Pearl layout for the coordinator config helper (defaults: production; the
 # same as cli-release.sh _pearl-config).
 PEARL_COORDINATOR_CONFIG="${PEARL_COORDINATOR_CONFIG:-/opt/macprovider/coordinator.yaml}"
 PEARL_COORDINATOR_OVERLAY="${PEARL_COORDINATOR_OVERLAY:-/etc/macprovider/coordinator.pearl-overlays.yaml}"
+PEARL_GATEWAY_CONFIG="${PEARL_GATEWAY_CONFIG:-/opt/macprovider/gateway.yaml}"
 PEARL_INSTALL_ROOT="${PEARL_INSTALL_ROOT:-/opt/macprovider}"
 PEARL_CONFIG_GUARD="${PEARL_CONFIG_GUARD:-/usr/local/share/macprovider/scripts/coordinator_config_guard.py}"
 PEARL_BACKUP_ROOT="${PEARL_BACKUP_ROOT:-/root/macprovider-backups}"
@@ -894,6 +922,76 @@ vq_internal() {
   fi
 }
 
+# stream_ceiling_layout: the Pearl layout of the stream-ceiling task (SC_LAYOUT).
+stream_ceiling_layout() {
+  pearl_config_layout
+  SC_GATEWAY_UNIT="${PEARL_GATEWAY_UNIT:-macprovider-gateway}"
+  SC_GATEWAY_HEALTHZ="${PEARL_GATEWAY_HEALTHZ_URL:-http://127.0.0.1:9443/healthz}"
+  plain_args "$PEARL_GATEWAY_CONFIG" "$SC_GATEWAY_UNIT" "$SC_GATEWAY_HEALTHZ"
+  [[ "$PEARL_GATEWAY_CONFIG" =~ ^/[A-Za-z0-9._/-]+$ ]] || refuse "PEARL_GATEWAY_CONFIG must be an absolute plain path"
+  [[ "$SC_GATEWAY_HEALTHZ" =~ ^http://(127\.0\.0\.1|\[::1\]|localhost):[0-9]+/[A-Za-z0-9._/-]*$ ]] ||
+    refuse "PEARL_GATEWAY_HEALTHZ_URL must be an http://127.0.0.1:PORT/ URL (Pearl's loopback)"
+  SC_LAYOUT="$PEARL_LAYOUT --gateway-config $PEARL_GATEWAY_CONFIG --gateway-unit $SC_GATEWAY_UNIT --gateway-healthz $SC_GATEWAY_HEALTHZ"
+}
+
+gather_stream_ceiling() {
+  OPS_SCOPE="stream-ceiling"
+  NEXT_RUNBOOK="$SC_DOC"
+  stream_ceiling_layout
+  if [ -z "${PEARL_SSH:-}" ]; then
+    step pearl_state blocked "PEARL_SSH is unset"
+    set_next pearl_state blocked "Read the streaming walls on Pearl" "" "PEARL_SSH is unset"
+    return
+  fi
+  local facts
+  if ! facts="$(pearl_ssh "python3 - sc-facts $SC_LAYOUT" < "$OPS_LIB_DIR/pearl-cli-config.py" 2>"$OPS_TMP_DIR/sc.err")" ||
+    [ -z "$(json_field_str "$facts" 'd["coordinator_applied"]')" ]; then
+    step pearl_state blocked "cannot read the streaming walls on Pearl"
+    set_next pearl_state blocked "Read the streaming walls on Pearl" "" \
+      "sc-facts over ssh failed: $(tail -n 1 "$OPS_TMP_DIR/sc.err" | safe_remote_output | cut -c1-200)"
+    return
+  fi
+  local rt pht ceiling non_stream header planned violation capplied gapplied
+  rt="$(json_field_str "$facts" 'd["coordinator_request_timeout_s"]')"
+  pht="$(json_field_str "$facts" 'd["coordinator_provider_http_timeout_s"]')"
+  ceiling="$(json_field_str "$facts" 'd["gateway_stream_ceiling_max_seconds"]')"
+  non_stream="$(json_field_str "$facts" 'd["gateway_non_stream_request_seconds"]')"
+  header="$(json_field_str "$facts" 'd["gateway_coordinator_header_timeout_seconds"]')"
+  planned="$(json_field_str "$facts" '"; ".join(d["planned_coordinator"] + d["planned_gateway"])')"
+  violation="$(json_field_str "$facts" 'd["c2_violation"]')"
+  capplied="$(json_field_str "$facts" 'd["coordinator_applied"]')"
+  gapplied="$(json_field_str "$facts" 'd["gateway_applied"]')"
+  fact pearl_coordinator_request_timeout_s "$rt ($(json_field_str "$facts" 'd["coordinator_request_timeout_s_file"]'))"
+  fact pearl_coordinator_provider_http_timeout_s "$pht ($(json_field_str "$facts" 'd["coordinator_provider_http_timeout_s_file"]'))"
+  fact pearl_gateway_stream_ceiling_max_seconds "$ceiling"
+  fact pearl_gateway_non_stream_request_seconds "$non_stream"
+  fact pearl_gateway_coordinator_header_timeout_seconds "$header"
+  fact pearl_stream_ceiling_planned "${planned:-none}"
+  fact pearl_c2_violation "${violation:-none}"
+  fact pearl_coordinator_config_applied "$capplied"
+  fact pearl_gateway_config_applied "$gapplied"
+  step pearl_state "done" "coordinator walls $rt/$pht s, gateway ceiling $ceiling s, non-stream $non_stream s"
+  if [ -z "$planned" ] && [ -z "$violation" ] && [ "$capplied" = true ] && [ "$gapplied" = true ]; then
+    step stream_ceiling "done" "coordinator walls $rt/$pht s cover the gateway ceiling $ceiling s; both services booted with them"
+    set_next "done" "done" "the streaming walls are live: gateway ceiling $ceiling s, coordinator walls $rt/$pht s" ""
+    return
+  fi
+  step stream_ceiling pending "${planned:-on disk, not yet booted}"
+  set_next stream_ceiling mutate "Raise the Pearl streaming walls (${planned:-restart onto the on-disk walls}); restart the coordinator, then the gateway" \
+    "scripts/ops/pearl-runtime.sh _stream-ceiling"
+  next_meta stream_ceiling "$SC_DOC" "$SC_DOWNTIME"
+}
+
+# _stream-ceiling: run lib/pearl-cli-config.py apply-stream-ceiling under both
+# Pearl locks (next --run only).
+sc_internal() {
+  [ "${MACPROVIDER_OPS_ENTRYPOINT:-}" = 1 ] ||
+    refuse "_stream-ceiling runs only from 'PEARL_RUNTIME_TASK=stream-ceiling $0 next --run' (live-ops lock, downtime banner)"
+  require_pearl_ssh
+  stream_ceiling_layout
+  pearl_ssh "python3 - apply-stream-ceiling $SC_LAYOUT" < "$OPS_LIB_DIR/pearl-cli-config.py"
+}
+
 # The guard-bearing writers the updater bundle installs: "installed repo-path"
 # (a subset of scripts/pricing-lane-installed-writers.txt).
 ub_writers() {
@@ -1127,6 +1225,7 @@ gather() {
       compute-integrity-enable) gather_compute_integrity; return ;;
       vision-qualification) gather_vision_qualification; return ;;
       updater-bundle) gather_updater_bundle; return ;;
+      stream-ceiling) gather_stream_ceiling; return ;;
       *) refuse "unknown PEARL_RUNTIME_TASK: $PEARL_RUNTIME_TASK" ;;
     esac
   fi
@@ -1424,6 +1523,7 @@ internal() {
     _compute-integrity-enable) shift; ci_enable_internal "$@" ;;
     _vision-qualification) shift; vq_internal "$@" ;;
     _updater-bundle) shift; ub_internal "$@" ;;
+    _stream-ceiling) sc_internal ;;
     *) usage >&2; exit 2 ;;
   esac
 }

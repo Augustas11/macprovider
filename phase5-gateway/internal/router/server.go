@@ -1689,6 +1689,10 @@ var gatewayPermanentCodes = map[string]bool{
 	// SPEC-006-R019 buyer privacy mode: the request as sent can never satisfy
 	// the stated boundary, so retrying it unchanged cannot succeed.
 	"invalid_privacy_mode": true, "privacy_mode_unsatisfied": true,
+	// The stream reached its stream_ceiling while the provider was still
+	// producing. The same request runs into the same limit, and an automatic
+	// retry re-bills the partial output; the buyer lowers max_tokens instead.
+	"request_timeout": true,
 }
 
 func gatewayRetryable(code string) bool {
