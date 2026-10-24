@@ -5653,11 +5653,9 @@ maxTokens: 1,
               let tuple = continuousBatchingRequestedTuple(),
               !continuousBatchingAcceptanceCoverage.isRevoked(tuple)
         else { return nil }
-        if currentPagedKVModelCapabilities.modelFamily == "deepseek_v4" {
-            guard continuousBatchingPolicyLoadResult.status == .liveVerified,
-                  continuousBatchingPolicyLoadResult.selection.admitsDeepseekV4Pool(tuple)
-            else { return nil }
-        }
+        guard continuousBatchingPolicyLoadResult.admitsContinuousBatching(
+            modelFamily: currentPagedKVModelCapabilities.modelFamily, tuple: tuple
+        ) else { return nil }
         return ContinuousBatchingSelfCheckTarget(
             key: ContinuousBatchingSelfCheckKey(
                 modelSHA256: tuple.modelSHA256,
@@ -5706,6 +5704,10 @@ maxTokens: 1,
               continuousBatchScheduler != nil,
               let tuple = continuousBatchingRequestedTuple()
         else { return false }
+        // A model-key provisional grant never sizes DeepSeek V4 above one slot.
+        guard continuousBatchingPolicyLoadResult.admitsContinuousBatching(
+            modelFamily: currentPagedKVModelCapabilities.modelFamily, tuple: tuple
+        ) else { return false }
         return !continuousBatchingAcceptanceCoverage.isRevoked(tuple)
     }
 
@@ -5928,10 +5930,9 @@ maxTokens: 1,
                 entry.tuple.modelID == requested.modelID && entry.tuple.modelSHA256 == requested.modelSHA256
             }?.rollout
         }
-        if currentPagedKVModelCapabilities.modelFamily == "deepseek_v4" {
-            guard continuousBatchingPolicyLoadResult.status == .liveVerified,
-                  let tuple, continuousBatchingPolicyLoadResult.selection.admitsDeepseekV4Pool(tuple) else { return .off }
-        }
+        guard continuousBatchingPolicyLoadResult.admitsContinuousBatching(
+            modelFamily: currentPagedKVModelCapabilities.modelFamily, tuple: tuple
+        ) else { return .off }
         let policyMode: ContinuousBatchingMode?
         switch continuousBatchingSelfCheck {
         case .granted:

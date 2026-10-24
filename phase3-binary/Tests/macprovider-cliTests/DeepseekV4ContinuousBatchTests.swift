@@ -99,6 +99,38 @@ final class DeepseekV4ContinuousBatchTests: XCTestCase {
         XCTAssertFalse(selection.admitsDeepseekV4Pool(tuple))
     }
 
+    /// Mode, self-check and served-slot sizing share one gate: DeepSeek V4
+    /// needs a live-verified policy covering the exact tuple; a model-key match
+    /// on another runtime tuple never admits it. Other families pass through.
+    func testDeepseekV4BatchingGateNeedsLiveVerifiedExactTuple() {
+        let tuple = Self.tuple()
+        let accepted = ContinuousBatchingAcceptedTuple(
+            modelID: tuple.modelID, modelSHA256: tuple.modelSHA256, cacheClass: tuple.cacheClass,
+            kvDType: tuple.kvDType, requiresMoE: tuple.requiresMoE, hardwareClass: tuple.hardwareClass,
+            metallibSHA256: tuple.metallibSHA256, kernelIdentifier: tuple.kernelIdentifier)
+        let provenance = ContinuousBatchingPolicyProvenance(source: "test", status: "test", evidenceID: "test",
+            packageManifestSHA256: "test", studioCampaignSHA256: "test", providerCLIVersion: "test", liveExecutableCDHash: "test")
+        let selection = ContinuousBatchingPolicySelection(releaseID: "test", policyVersion: "test",
+            generatedAt: .distantPast, expiresAt: .distantFuture, candidateCatalogSHA256: "test",
+            signerKeyID: "test", source: "test",
+            entries: [.init(tupleSHA256: "test", modelKey: tuple.modelID, rollout: .canary, tuple: accepted, provenance: provenance)])
+        func load(_ status: ContinuousBatchingPolicyLoadStatus, _ selection: ContinuousBatchingPolicySelection)
+            -> ContinuousBatchingPolicyLoadResult {
+            .init(selection: selection, status: status, policySHA256: nil, signerKeyID: nil)
+        }
+        let live = load(.liveVerified, selection)
+        XCTAssertTrue(live.admitsContinuousBatching(modelFamily: "deepseek_v4", tuple: tuple))
+        XCTAssertFalse(live.admitsContinuousBatching(modelFamily: "deepseek_v4",
+            tuple: Self.tuple(kernel: "different-runtime")), "model-key match, other runtime tuple")
+        XCTAssertFalse(live.admitsContinuousBatching(modelFamily: "deepseek_v4", tuple: nil))
+        XCTAssertFalse(load(.absentFallback, selection).admitsContinuousBatching(modelFamily: "deepseek_v4", tuple: tuple))
+        XCTAssertFalse(load(.integrityFailureFallback, selection)
+            .admitsContinuousBatching(modelFamily: "deepseek_v4", tuple: tuple))
+        XCTAssertFalse(load(.liveVerified, .emptyOff).admitsContinuousBatching(modelFamily: "deepseek_v4", tuple: tuple))
+        XCTAssertTrue(load(.liveVerified, .emptyOff).admitsContinuousBatching(modelFamily: "glm5_next", tuple: tuple))
+        XCTAssertTrue(load(.liveVerified, .emptyOff).admitsContinuousBatching(modelFamily: nil, tuple: nil))
+    }
+
     private static func tuple(modelSHA: String = "model", kernel: String = "deepseek-v4-row-pool-decode-v1") -> ContinuousBatchingRequestedTuple {
         .init(modelID: "deepseek/deepseek-v4-flash", modelSHA256: modelSHA, tokenizerSHA256: nil,
               chatTemplateSHA256: nil, cacheClass: "mixed", kvDType: .fp16, requiresMoE: true,

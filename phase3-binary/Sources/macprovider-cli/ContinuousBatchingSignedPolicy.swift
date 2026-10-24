@@ -103,6 +103,15 @@ struct ContinuousBatchingPolicyLoadResult: Sendable, Equatable {
     let status: ContinuousBatchingPolicyLoadStatus
     let policySHA256: String?
     let signerKeyID: String?
+
+    /// DeepSeek V4 batches (mode, self-check, served slots) only under a
+    /// live-verified signed policy that admits this exact tuple. Every other
+    /// family is unaffected.
+    func admitsContinuousBatching(modelFamily: String?, tuple: ContinuousBatchingRequestedTuple?) -> Bool {
+        guard modelFamily == "deepseek_v4" else { return true }
+        guard status == .liveVerified, let tuple else { return false }
+        return selection.admitsDeepseekV4Pool(tuple)
+    }
 }
 
 enum ContinuousBatchingSignedPolicyError: Error, Equatable, CustomStringConvertible {
