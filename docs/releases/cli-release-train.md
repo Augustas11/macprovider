@@ -73,6 +73,7 @@ Live fleet target: **1.8.261** (released 2026-10-22 06:23Z; Pearl runtime v1.8.2
 | #2129 | #2127 | Autotune readiness: large candidates finish loading before autotune probes; model-aware readiness and signed candidate aliases. | merged (`25ce4bd6e`); next combined CLI |
 | #2130 | #2107 | GLM-5.3, gpt-oss and Qwen3.8 render `none`/`minimal` reasoning effort as `low` instead of silently requesting maximum reasoning (SPEC-018 0.3.5). | merged (`34d66d6b0`); next combined CLI |
 | #2131 | #2107 | Grammar-constrained decoding: guaranteed tool_choice required/named and strict json_schema for every catalog grammar (SPEC-018 0.3.6); decode-path digest `adc3f5dc…` (includes #2130); identity-only native-MTP admission rebind after the cut. | merged (`ec04c6de8`); next combined CLI |
+| #2134 | #2111 | DeepSeek V4 CB backend (off without a live-verified signed policy entry for the exact tuple; fork `c8be0f61`, mlx-swift-lm `3.32.3-macprovider.10.5`) and extend-only prompt snapshots for DeepSeek V4 and GLM-5.3 serial turns (SPEC-024 0.2.12 FR-CI2a); GLM CB rows unchanged; decode-path digest `6471812e…`; identity-only native-MTP and CB admission rebinds after the cut. | merged (`a65f20090`); next combined CLI |
 
 ## Shipped v1.8.261 — net changes vs 1.8.260
 
