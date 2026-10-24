@@ -58,12 +58,19 @@ Verified 2026-10-24 against GitHub release/tag metadata, the release train
 | Catalog | `published-2026-10-24-glm53-qwen36-native-mtp-v270` (#2136), activated 2026-10-24 17:26–17:48Z; `native_mtp_admission_decode_path` `match` (`6471812e…`) |
 | Consumed identities | Provider and runtime tags through **v1.8.270** are consumed (v1.8.263–v1.8.269 are Pearl runtime tags). The next provider CLI takes the next unused tag; refresh both trains and remote tags first. |
 
-## Next CLI release — net changes vs 1.8.270 (tracked 2026-10-24)
+## Next CLI release — net changes vs 1.8.270 (tracked 2026-10-25)
 
-Live fleet target: **1.8.270**. No provider-side change has merged since.
+Live fleet target: **1.8.270**. Staged: `binaryVersion` **1.8.272** (v1.8.271 is the
+Pearl runtime tag that carries #2137's coordinator half). Every row below is merged and
+none is open, so the cut is authorized. #2138 moves the decode-path digest to
+`4d04a3f3…`, so the native-MTP admission set is rebound identity-only after the cut
+(no R015 rerun).
 
 | PR | Issue | Provider-side change | Status |
 |---|---|---|---|
+| #2137 | #614 | Provider WebSocket receive limit 64 MiB, so a large sealed prompt no longer closes the session with 1009 and a buyer 503 (SPEC-001-R012); coordinator half live in runtime v1.8.271. | merged (`c1992df77`) |
+| #2138 | #2111 | A buyer cancel stops prompt prefill within one chunk (SPEC-001-R013); decode-path digest `4d04a3f3…`. | merged (`a17fc834b`) |
+| this PR | — | Version staging 1.8.272 (live-stable rows 1.8.270). | release source |
 
 ## Shipped v1.8.270 — net changes vs 1.8.262
 
