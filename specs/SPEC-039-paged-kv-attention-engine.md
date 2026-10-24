@@ -1,7 +1,10 @@
 # SPEC-039 — Paged KV / paged-attention engine
 
-Version: v0.1.23
-Status: draft (normative design). v0.1.23 defines the `deepseek_v4`
+Version: v0.1.24
+Status: draft (normative design). v0.1.24 permits direct row-owned cache
+updates and bounded pipelined DeepSeek decode under SPEC-038 v0.3.30;
+failed rows and stopped rows with untrimmed lookahead are discarded.
+v0.1.23 defines the `deepseek_v4`
 row-owned pooled-cache batching adapter and its boundary from paged K/V.
 v0.1.22 (follows SPEC-038 v0.3.23) counts
 the SPEC-038 FR-CB10 admission hold as the self-check's idle window.
@@ -795,11 +798,14 @@ probe nor GLM's paged-MLA evidence substitutes for this proof. This revision
 does not grant retained cross-turn caches or native-MTP transactions to the
 new family.
 Ratio-0 layers use the validated sliding-window cache; ratio-4 and ratio-128
-layers use `deepseekV4Pool(ratio:windowTokens:)`. A forward stages copies of
-the participating rows' caches, evaluates the result, and only then commits
-each row's state. Shared decode is bounded to 8 rows and a one-token window
-under SPEC-038 FR-CB2; a failed forward MUST NOT commit a partially advanced
-cache.
+layers use `deepseekV4Pool(ratio:windowTokens:)`. A forward updates each
+participating row's persistent caches directly. Whole-cache staging is not
+required: a failed forward MUST invalidate the affected rows and MUST NOT
+publish or reuse their partially advanced state. Shared decode is bounded
+to 8 rows; the pipelined window follows SPEC-038 FR-CB2's commit-after-stop
+rule. A stopped row with untrimmable lookahead MUST lose its entire cache;
+no overshoot state may enter a retained or resumed request. The local window
+stores keys only because this model uses the same tensor for keys and values.
 
 At model attach, the engine MUST inspect the runtime `newCache()` class and the
 `kv_bits` setting against a **paged allowlist**. The v1 allowlist is:

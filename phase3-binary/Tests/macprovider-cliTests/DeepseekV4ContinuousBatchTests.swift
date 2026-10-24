@@ -34,7 +34,8 @@ final class DeepseekV4ContinuousBatchTests: XCTestCase {
         XCTAssertEqual(kinds, layout.expectedCacheKinds)
         XCTAssertTrue(ModelRuntime.measuredMixedPagedKVTopology(kinds, modelCapabilities: capabilities))
         XCTAssertFalse(Kind.deepseekV4Pool(ratio: 4, windowTokens: 128).usesPagedKVCache)
-        XCTAssertEqual(ModelRuntime.servePathDecodeLockstepWindow(cacheKinds: kinds), 1)
+        XCTAssertEqual(ModelRuntime.servePathDecodeLockstepWindow(cacheKinds: kinds),
+                       ContinuousBatchSchedulerConfiguration.defaultDecodeLockstepWindow)
         XCTAssertEqual(ModelRuntime.effectiveDecodeRowBound(deviceBound: 16, cacheKinds: kinds), 8)
         XCTAssertEqual(ModelRuntime.effectiveDecodeRowBound(deviceBound: 4, cacheKinds: kinds), 4)
         XCTAssertNil(Kind.recognized(from: CacheList(RotatingKVCache(maxSize: 128), DeepseekV4PoolCache(ratio: 4))))

@@ -1,11 +1,18 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.29
+Version: v0.3.30
 Status: draft (normative contract; runtime enablement is default-on per Mac behind the FR-CB10 on-device self-check, v0.3.15)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.3.30 (2026-10-24, DeepSeek pipelined decode):**
+FR-CB2 permits a bounded lockstep window with one queued lookahead step.
+Projection, RoPE and attention run across rows; ragged padding is masked.
+Rows own their caches directly. A failed forward invalidates the affected
+rows. A stopped row's untrimmed lookahead state is discarded and MUST NOT
+be published or reused. Retained-cache handoff remains unsupported.
+
 **Change log v0.3.29 (2026-10-24, DeepSeek V4 pooled-cache batching):**
 FR-CB2 admits a `deepseek_v4` backend with row-owned compression pools,
 sliding windows and indexer state; decode shares model projections while
@@ -827,10 +834,16 @@ multi-token continuation that does not complete a pooling window MUST retain
 the incomplete window without constructing a negative slice. These caches
 use the SPEC-039 FR-PKV12 row-owned pooled-family adapter; they MUST NOT be
 advertised as ordinary paged K/V or as paged-gather proof.
-Every DeepSeek shared decode forward MUST carry at most 8 rows. Its decode
-window MUST remain 1 until per-token stop-boundary snapshots are supported;
-the generic lockstep window MUST NOT overadvance this family's row-owned
-state past a terminal token.
+Every DeepSeek shared decode forward MUST carry at most 8 rows. A bounded
+lockstep decode window MAY queue one lookahead forward before reading the
+preceding sampled tokens. It MUST recognize stops in generation order,
+return only the accepted prefix, and discard a stopped row's complete cache
+if lookahead advanced it past that prefix. Such state MUST NOT be published,
+retained, or reused. Continuing rows commit only their accepted endpoint;
+joining or reordering rows MUST rebuild the next batch from those owners.
+Failed forwards MUST invalidate affected rows rather than reuse partially
+advanced caches. All cache writes and sampled tokens of a step MUST be
+scheduled together. This rule grants no retained-cache handoff.
 
 Rows in one compatible prefill group MUST be processed by one backend shared
 prefill forward. An implementation MUST NOT claim batched prefill when it

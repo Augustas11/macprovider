@@ -318,7 +318,7 @@ extension ModelRuntime {
                 maxBatch: maxBatch, queueLimit: queueLimit, queueWaitTimeoutMS: queueWaitTimeoutMS,
                 prefillTokensPerIteration: prefillTokensPerIteration, maxContextTokens: maxContextTokens,
                 modelID: modelID, modelSHA256: modelSHA256, weightsGeneration: weightsGeneration,
-                prefillStepSize: 2048, maxDecodeLockstepWindow: 1,
+                prefillStepSize: 2048, maxDecodeLockstepWindow: ContinuousBatchSchedulerConfiguration.defaultDecodeLockstepWindow,
                 nativeMTPRoundByteCapacity: nil, nativeMTPStatusSink: nativeMTPStatusSink,
                 prefillGrouping: .unconstrained, maxDecodeRowsPerForward: min(8, continuousBatchDecodeRowBound(cacheKinds: cacheKinds)),
                 replayAuthority: replayAuthority
@@ -484,7 +484,6 @@ extension ModelRuntime {
     nonisolated static func servePathDecodeLockstepWindow(
         cacheKinds: [PagedKVSharedForwardBackend.CacheKind]
     ) -> Int {
-        if cacheKinds.contains(where: \.isDeepseekV4Pool) { return 1 }
         #if MACPROVIDER_LAB_HARNESS
         // Lab A/B measurement only (#1906): a smaller hybrid window, down to 1.
         if cacheKinds.contains(.recurrentMamba),

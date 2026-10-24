@@ -6,8 +6,8 @@ import MacProviderCore
 
 /// DeepSeek pools are row-owned state, not ordinary paged K/V. The scheduler's
 /// block reservations bound logical resident tokens; this backend never claims
-/// a paged gather or retained-cache handoff. Copies stage a complete row (window,
-/// both compressor buffers and indexer) before any forward mutates it.
+/// a paged gather or retained-cache handoff. Forwards mutate the row-owned caches
+/// directly; a failed or stopped row is retired rather than rolled back.
 final class DeepseekV4ContinuousBatchBackend: ContinuousBatchSchedulerBackend, @unchecked Sendable {
     static let maxDecodeRows = 8
     static let prefillChunkTokens = 2_048
@@ -29,7 +29,7 @@ final class DeepseekV4ContinuousBatchBackend: ContinuousBatchSchedulerBackend, @
         return offset + (promptCount - offset == 1 ? 1 : min(prefillChunkTokens, promptCount - offset - 1))
     }
 
-    private func stagedRow(id: String, offset: Int, model: DeepseekV4Model) throws -> Row {
+    private func ownedRow(id: String, offset: Int, model: DeepseekV4Model) throws -> Row {
         lock.lock()
         let existing = rows[id]
         let unavailable = cancelled || !active.contains(id)
@@ -39,7 +39,7 @@ final class DeepseekV4ContinuousBatchBackend: ContinuousBatchSchedulerBackend, @
             guard existing.tokenCount == offset else {
                 throw ContinuousBatchSchedulerError.unsupported("deepseek_v4_row_offset_mismatch")
             }
-            return Row(caches: existing.caches.map { $0.copy() }, tokenCount: offset)
+            return existing
         }
         guard offset == 0 else { throw ContinuousBatchSchedulerError.unsupported("deepseek_v4_retained_cache_unavailable") }
         return Row(caches: try model.newCache(parameters: nil), tokenCount: 0)
@@ -67,18 +67,20 @@ final class DeepseekV4ContinuousBatchBackend: ContinuousBatchSchedulerBackend, @
                           input.targetKVTokenCount == input.committedKVTokenCount + input.promptTokens.count,
                           ContinuousBatchRowSampler.supports(temperature: input.temperature, topP: input.topP)
                     else { throw ContinuousBatchSchedulerError.unsupported("deepseek_v4_reference_prefill_required") }
-                    var row = try self.stagedRow(id: input.requestID, offset: input.committedKVTokenCount, model: model)
+                    var row = try self.ownedRow(id: input.requestID, offset: input.committedKVTokenCount, model: model)
                     let tokens = MLXArray(input.promptTokens.map(Int32.init)).reshaped([1, input.promptTokens.count])
                     let logits = model(tokens, cache: row.caches)
-                    let sampled = input.sampleFirstToken ? ContinuousBatchRowSampler.sample(
+                    let sampledArray = input.sampleFirstToken ? ContinuousBatchRowSampler.sample(
                         logits: logits[0..., -1, 0...], rows: [.init(temperature: input.temperature,
                         topP: input.topP, samplerSeed: input.samplerSeed, samplerStep: input.samplerStep)]
-                    ).asArray(Int.self).first : nil
-                    eval(row.caches)
+                    ) : nil
+                    eval((sampledArray.map { [$0] } ?? []) + row.caches.flatMap(\.state))
+                    let sampled = sampledArray?.asArray(Int.self).first
                     row.tokenCount = input.targetKVTokenCount
                     self.commit(row, id: input.requestID)
                     return ContinuousBatchPrefillOutput(requestID: input.requestID, sampledToken: sampled)
                 } catch {
+                    self.finish(requestID: input.requestID)
                     return ContinuousBatchPrefillOutput(requestID: input.requestID, failureCode: "continuous_batching_prefill_failed")
                 }
             }
@@ -86,7 +88,19 @@ final class DeepseekV4ContinuousBatchBackend: ContinuousBatchSchedulerBackend, @
     }
 
     func decode(rows inputs: [ContinuousBatchDecodeInput]) async throws -> [ContinuousBatchDecodeOutcome] {
-        guard !inputs.isEmpty else { return [] }
+        try await decodeLockstepWindow(rows: inputs, steps: 1, onStep: nil)
+    }
+
+    /// One graph is queued ahead of the tokens being read. DeepSeek pools cannot
+    /// be trimmed, so a stop retires that row's state, including its queued
+    /// one-step overshoot. Only continuing rows publish their final logical
+    /// offset. This backend offers no retained-cache/serial-cache handoff.
+    func decodeLockstepWindow(
+        rows inputs: [ContinuousBatchDecodeInput],
+        steps: Int,
+        onStep: ContinuousBatchDecodeWindowStepObserver?
+    ) async throws -> [ContinuousBatchDecodeOutcome] {
+        guard !inputs.isEmpty, steps >= 1 else { return [] }
         guard inputs.count <= Self.maxDecodeRows, Set(inputs.map(\.requestID)).count == inputs.count else {
             throw ContinuousBatchSchedulerError.unsupported("deepseek_v4_decode_row_bound")
         }
@@ -96,50 +110,113 @@ final class DeepseekV4ContinuousBatchBackend: ContinuousBatchSchedulerBackend, @
             }
             var eligible: [(ContinuousBatchDecodeInput, Row)] = []
             for input in inputs {
-                guard !input.captureNativeMTPDrafterColumns,
+                let (expectedTarget, targetOverflow) = input.committedKVTokenCount.addingReportingOverflow(steps)
+                guard !targetOverflow, !input.captureNativeMTPDrafterColumns,
                       input.presencePenalty == 0, input.frequencyPenalty == 0,
-                      input.targetKVTokenCount == input.committedKVTokenCount + 1,
+                      input.targetKVTokenCount == expectedTarget,
                       ContinuousBatchRowSampler.supports(temperature: input.temperature, topP: input.topP),
-                      let row = try? self.stagedRow(id: input.requestID, offset: input.committedKVTokenCount, model: model)
-                else { continue }
+                      let row = try? self.ownedRow(id: input.requestID, offset: input.committedKVTokenCount, model: model)
+                else {
+                    self.finish(requestID: input.requestID)
+                    continue
+                }
                 eligible.append((input, row))
             }
             guard !eligible.isEmpty else { return inputs.map { .rowFailure(requestID: $0.requestID) } }
-            let tokens = MLXArray(eligible.map { Int32($0.0.currentToken) }).reshaped([eligible.count, 1])
-            let logits = model.decodeBatch(tokens, rowCaches: eligible.map { $0.1.caches })
-            let sampled = ContinuousBatchRowSampler.sample(logits: logits[0..., -1, 0...], rows: eligible.map {
-                .init(temperature: $0.0.temperature, topP: $0.0.topP,
-                      samplerSeed: $0.0.samplerSeed, samplerStep: $0.0.samplerStep)
-            }).asArray(Int.self)
-            guard sampled.count == eligible.count else {
-                throw ContinuousBatchSchedulerError.unsupported("continuous_batching_invalid_logits_shape")
+            var collected = eligible.map { _ in [Int]() }
+            var stopped = Set<Int>()
+            var streaming = eligible.count == inputs.count
+
+            func enqueue(_ tokens: MLXArray, indices: [Int], step: Int) -> MLXArray {
+                let logits = model.decodeBatch(tokens.reshaped([indices.count, 1]),
+                    rowCaches: indices.map { eligible[$0].1.caches })
+                let sampled = ContinuousBatchRowSampler.sample(logits: logits[0..., -1, 0...], rows: indices.map {
+                    let input = eligible[$0].0
+                    return .init(temperature: input.temperature, topP: input.topP,
+                        samplerSeed: input.samplerSeed, samplerStep: input.samplerStep + step)
+                })
+                // A single evaluation includes cache writes that logits do not
+                // depend on; asArray below only waits for this queued work.
+                asyncEval([sampled] + indices.flatMap { eligible[$0].1.caches.flatMap(\.state) })
+                return sampled
             }
-            eval(eligible.flatMap { $0.1.caches })
+
+            var pendingIndices = Array(eligible.indices)
+            var pending = enqueue(MLXArray(eligible.map { Int32($0.0.currentToken) }), indices: pendingIndices, step: 0)
+            var cancelledWindow = false
+            for step in 0..<steps {
+                let current = pending
+                let currentIndices = pendingIndices
+                // Stops from the previous host read are excluded before the
+                // next graph is built. A newly discovered stop has at most one
+                // already queued forward, and its caches are never committed.
+                let nextIndices = currentIndices.filter { !stopped.contains($0) }
+                if step + 1 < steps, !nextIndices.isEmpty {
+                    let positions = nextIndices.map { Int32(currentIndices.firstIndex(of: $0)!) }
+                    let nextTokens = nextIndices.count == currentIndices.count
+                        ? current : current.take(MLXArray(positions), axis: 0)
+                    pending = enqueue(nextTokens, indices: nextIndices, step: step + 1)
+                    pendingIndices = nextIndices
+                }
+                let sampled = current.asArray(Int.self)
+                guard sampled.count == currentIndices.count else {
+                    // Directly mutated caches cannot be retried after a failed
+                    // forward. The scheduler already isolates row failures.
+                    eligible.forEach { self.finish(requestID: $0.0.requestID) }
+                    return inputs.map { .rowFailure(requestID: $0.requestID) }
+                }
+                for (position, index) in currentIndices.enumerated() where !stopped.contains(index) {
+                    collected[index].append(sampled[position])
+                    let input = eligible[index].0
+                    let history = input.generatedTokens + collected[index]
+                    if input.stopTokenSequences.contains(where: { !$0.isEmpty && history.suffix($0.count).elementsEqual($0) }) {
+                        stopped.insert(index)
+                        self.finish(requestID: input.requestID)
+                    }
+                }
+                if streaming, let onStep {
+                    if !onStep(.init(stepIndex: step, tokens: sampled)) {
+                        cancelledWindow = true
+                        break
+                    }
+                }
+                // After a terminal row leaves, per-row outputs have different
+                // lengths. The authoritative result carries the remaining
+                // tokens; no incomplete cohort is sent to the step observer.
+                if !stopped.isEmpty { streaming = false }
+                if stopped.count == eligible.count { break }
+            }
+            // The observer/stop may end before the queued overshoot is read.
+            // Drain that graph before the container hop releases its row state.
+            if cancelledWindow || stopped.count == eligible.count {
+                eval([pending] + eligible.flatMap { $0.1.caches.flatMap(\.state) })
+            }
             var outputs: [String: ContinuousBatchDecodeOutcome] = [:]
             for (index, item) in eligible.enumerated() {
-                var row = item.1
-                row.tokenCount = item.0.targetKVTokenCount
-                self.commit(row, id: item.0.requestID)
-                outputs[item.0.requestID] = .output(.init(requestID: item.0.requestID, token: sampled[index]))
+                if cancelledWindow {
+                    self.finish(requestID: item.0.requestID)
+                } else if !stopped.contains(index) {
+                    var row = item.1
+                    row.tokenCount += collected[index].count
+                    self.commit(row, id: item.0.requestID)
+                }
+                outputs[item.0.requestID] = .output(.init(requestID: item.0.requestID, tokens: collected[index]))
             }
             return inputs.map { outputs[$0.requestID] ?? .rowFailure(requestID: $0.requestID) }
         }
     }
 
-    // Pools cannot be trimmed after a stop in a speculative multi-step window.
-    // Keep the serve scheduler at window=1; callers may still use the protocol's
-    // sequential window helper when they own a fixed-length lab completion.
     func commitTerminalKV(_ input: ContinuousBatchTerminalKVCommitInput) async throws {
         try await container.perform(nonSendable: input) { context, input in
             guard let model = context.model as? DeepseekV4Model else {
                 throw ContinuousBatchSchedulerError.unsupported("deepseek_v4_model_required")
             }
-            var row = try self.stagedRow(id: input.requestID, offset: input.committedKVTokenCount, model: model)
+            var row = try self.ownedRow(id: input.requestID, offset: input.committedKVTokenCount, model: model)
             guard input.targetKVTokenCount == input.committedKVTokenCount + 1 else {
                 throw ContinuousBatchSchedulerError.unsupported("deepseek_v4_row_offset_mismatch")
             }
             let logits = model.decodeBatch(MLXArray([Int32(input.currentToken)]).reshaped([1, 1]), rowCaches: [row.caches])
-            eval(logits); eval(row.caches)
+            eval([logits] + row.caches.flatMap(\.state))
             row.tokenCount = input.targetKVTokenCount
             self.commit(row, id: input.requestID)
         }

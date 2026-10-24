@@ -765,7 +765,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
                     modelSHA256: descriptor.modelSHA256,
                     weightsGeneration: 1
                 ),
-                maxDecodeLockstepWindow: Self.isDeepseekV4Pool(cacheKinds) ? 1 : cacheKinds.contains(.recurrentMamba)
+                maxDecodeLockstepWindow: (Self.isDeepseekV4Pool(cacheKinds) || cacheKinds.contains(.recurrentMamba))
                     ? min(
                         max(1, maxDecodeLockstepWindow),
                         ModelRuntime.servePathDecodeLockstepWindow(cacheKinds: cacheKinds)

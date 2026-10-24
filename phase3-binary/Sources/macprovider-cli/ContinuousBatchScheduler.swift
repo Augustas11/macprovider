@@ -1337,8 +1337,10 @@ protocol ContinuousBatchSchedulerBackend: Sendable {
     /// inside one model-container hop. Returned `tokens` MUST contain every
     /// sampled token in generation order, not only the last. Each step's
     /// sampled tokens go to `onStep` as soon as they exist and MUST equal the
-    /// returned `tokens` prefix. The backend MAY end the window early only when
-    /// `onStep` returns false, and then with the same token count for every row.
+    /// returned `tokens` prefix. The backend MAY end the whole window early
+    /// when `onStep` returns false, with the same token count for every row.
+    /// A row may end at its supplied stop sequence; then its output ends at
+    /// that stop and subsequent incomplete cohorts are not sent to `onStep`.
     func decodeLockstepWindow(
         rows: [ContinuousBatchDecodeInput],
         steps: Int,
