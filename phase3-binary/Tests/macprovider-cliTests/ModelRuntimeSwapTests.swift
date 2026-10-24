@@ -1323,7 +1323,10 @@ final class ModelRuntimeSwapTests: XCTestCase {
 
         XCTAssertGreaterThanOrEqual(matches, 2, "non-streaming and streaming serving decode must not block Swift cooperative tasks")
         XCTAssertFalse(source.contains("let result: GenerateResult = generate(input: iteratorInput"))
-        XCTAssertTrue(source.contains("return try await blockingInferenceExecutor.run { inferenceCancellation in\n                    let draftCache = try draftContext.model.newCache(parameters: parameters)"))
+        // SPEC-001-R013: the speculative iterator (its prompt prefill) is built in
+        // the request task so a cancel stops it; its decode loop stays on the executor.
+        XCTAssertTrue(source.contains("let draftCache = try draftContext.model.newCache(parameters: parameters)\n                var iterator = try SpeculativeTokenIterator("))
+        XCTAssertTrue(source.contains("try prefillScope.markPrefillDone()\n                return try await blockingInferenceExecutor.run { inferenceCancellation in\n                    let stopTokenIDs = Self.generationStopTokenIDs(for: targetContext)"))
         XCTAssertTrue(source.contains("SpeculativeTokenIterator("), "speculative decode must use the blocking iterator route")
         XCTAssertFalse(source.contains("let stream = try generate(\n                    input: input,\n                    cache: cache"))
         XCTAssertFalse(source.contains("generateTokens("), "raw speculative startup/canary generation must not use AsyncStream token generation")

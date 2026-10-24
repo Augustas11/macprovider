@@ -321,14 +321,14 @@ class BYOMContractLockTests(unittest.TestCase):
         readme = read_text("specs/README.md")
         conformance = json.loads(read_text("specs/CONFORMANCE.json"))
 
-        self.assertIn("**Version:** 1.9.45", spec001)
+        self.assertIn("**Version:** 1.9.46", spec001)
         self.assertIn("**Version:** 0.2.12", spec044)
         self.assertIn('"version": "0.2.12"', spec044)
         # SPEC-001 cites the v0.2.10 preparation and lock-graph clauses, which
         # v0.2.11 (Discover view, projection bound, cached projection) and
         # v0.2.12 (v1 catalog reference rate and catalog download) left unchanged.
         self.assertIn("SPEC-044 v0.2.10", spec001)
-        self.assertIn("| SPEC-001 | Phase 3 Binary: Mac Provider Inference CLI | 1.9.45 |", readme)
+        self.assertIn("| SPEC-001 | Phase 3 Binary: Mac Provider Inference CLI | 1.9.46 |", readme)
         self.assertIn("| SPEC-044 | Malibu Model Catalog Economics | 0.2.12 |", readme)
         current_spec044 = spec044.split("## 8. Changelog and history", 1)[0]
         self.assertNotIn("v0.2.7", current_spec044)
@@ -338,7 +338,7 @@ class BYOMContractLockTests(unittest.TestCase):
         spec001_record = next(
             record for record in conformance["specs"] if record["spec_id"] == "SPEC-001"
         )
-        self.assertEqual(spec001_record["version"], "1.9.45")
+        self.assertEqual(spec001_record["version"], "1.9.46")
         spec_record = next(
             record for record in conformance["specs"] if record["spec_id"] == "SPEC-044"
         )
