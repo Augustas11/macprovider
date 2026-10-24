@@ -1409,7 +1409,8 @@ dsv4_hold_marker_clear() {
 }
 # dsv4_hold_marker_walk create|clear FILE TXID: walk FILE's directories from / with
 # O_NOFOLLOW, requiring each to be owned by this user or root with no group or
-# other write, then create FILE.holding relative to the pinned directory with
+# other write (a root-owned sticky ancestor such as /tmp is accepted: others
+# cannot rename entries they do not own), then create FILE.holding relative to the pinned directory with
 # O_CREAT|O_EXCL|O_NOFOLLOW|O_NONBLOCK (never follows or opens an existing entry).
 dsv4_hold_marker_walk() {
   python3 -I -c '
@@ -1419,7 +1420,8 @@ parts = [p for p in path.split("/")[:-1] if p]
 fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
 for name in parts + [None]:
     st = os.fstat(fd)
-    if st.st_uid not in (0, os.geteuid()) or st.st_mode & 0o022 or not stat.S_ISDIR(st.st_mode):
+    sticky_root = name is not None and st.st_uid == 0 and st.st_mode & stat.S_ISVTX
+    if st.st_uid not in (0, os.geteuid()) or (st.st_mode & 0o022 and not sticky_root) or not stat.S_ISDIR(st.st_mode):
         sys.exit(1)
     if name is None:
         break
