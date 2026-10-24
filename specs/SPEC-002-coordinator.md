@@ -1,6 +1,17 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.6.28 (2026-10-24, 3600 s streaming twin walls; a gateway ceiling cut is labelled in `request_log`)
+**Version:** 1.6.29 (2026-10-25, a late or unknown provider frame never closes the provider session)
+
+**Change log v1.6.29 (2026-10-25, Related: #2111):** Registers `SPEC-002-R010`. An encrypted
+`inference_response_end` for a request whose retired entry had expired (5 min)
+was treated as an AEAD failure and closed the whole provider session, failing
+every other request in flight on it. A response frame for a request the
+coordinator is not serving is now authenticated, its P2C sequence slot
+consumed, and the frame discarded with a structured log and a counter; the
+WebSocket stays open (FR-P18.1 rule 1). Only a frame that claims the current
+key epoch and fails authentication remains an AEAD failure (SPEC-008 §6.7.1).
+Retired requests are remembered for `routing.request_timeout_s` plus one
+minute (floor 5 min), at most 8192 per provider session.
 
 **Change log v1.6.28 (2026-10-24, Related: #2107):** Registers
 `SPEC-002-R009`. `routing.request_timeout_s` and `provider_http.timeout_s`
@@ -1783,10 +1794,11 @@ The coordinator maintains an active request_id map per provider WS
 connection. The following rules are normative:
 
 1. **Unknown request_id.** If the coordinator receives an
-   `inference_response_chunk` or `inference_response_end` with a
-   `request_id` it did not issue (or that has already been cleaned up),
-   the coordinator MUST log at warn level and discard the frame. MUST
-   NOT propagate to any buyer. MUST NOT close the WebSocket.
+   `inference_response_chunk`, `inference_response_validation` or
+   `inference_response_end` with a `request_id` it did not issue (or that
+   has already been cleaned up), the coordinator MUST log at warn level
+   and discard the frame. MUST NOT propagate to any buyer. MUST NOT close
+   the WebSocket. Encrypted frames follow `SPEC-002-R010`.
 
 2. **Duplicate active request_id.** The coordinator MUST NEVER reuse
    a `request_id` while the prior request with that ID is still
@@ -5731,3 +5743,38 @@ fields, fault flag or settlement: the prompt estimate and terminal state are
 computed before it is applied, and billing treats the code like an empty one.
 A cancel before the deadline, a request without the header, and an
 unauthenticated request are unlabelled.
+
+
+## SPEC-002-R010 — Late and unknown provider response frames
+
+A provider response frame (`inference_response_chunk`,
+`inference_response_validation`, `inference_response_end`) whose
+`request_id` is not active on the provider session MUST be discarded without
+closing the WebSocket, failing another request, or changing the provider's
+pool state. This covers a request retired moments ago, one whose retired
+entry has expired, and one the coordinator never issued. Each discard MUST
+emit a warn log with `event` `relay_inactive_frame_dropped`, the frame type,
+the request_id and a `reason` (`retired_request`, `unknown_request` or
+`stale_key_epoch`), and MUST increment the inactive-frame counter. A late
+`cancelled` or `complete` terminal of a buyer-cancelled request still reaches
+the cancel-terminal waiter (FR-P18) while the retired entry exists.
+
+Tier-2 P2C sequence numbers are one counter per key epoch, shared by every
+request on the session, so an encrypted inactive frame MUST NOT be dropped
+unread when it belongs to the current epoch: the coordinator authenticates it
+under the current key with the AAD it carries (the retired entry's `stream`
+flag when one exists), consumes its sequence slot, and then discards it. A
+frame whose `kid` is not the session's current key id, or that reaches a
+session without a Tier-2 key, is discarded without touching sequence state,
+because its sequence number belongs to an epoch the session no longer holds.
+A frame that carries the current `kid` and fails authentication, replays a
+consumed sequence number, or falls outside the receive window is an AEAD
+failure under SPEC-008 §6.7.1, as it is for an active request: an authentic
+late frame always opens under the current key.
+
+The coordinator MUST remember a retired request for at least
+`routing.request_timeout_s` plus one minute (never less than five minutes), the
+longest a provider can legitimately keep working on a request after it was
+retired. The retired set MUST be bounded per provider session (8192 entries,
+oldest evicted first); an evicted request's late frames take the unknown-request
+path above and are still discarded without closing the session.

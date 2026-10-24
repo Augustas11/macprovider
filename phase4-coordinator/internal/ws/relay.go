@@ -35,7 +35,32 @@ var (
 	errTier2C2PCounterExhausted  = errors.New("tier2 c2p frame counter exhausted")
 )
 
-const retiredRelayRequestTTL = 5 * time.Minute
+// A retired request is remembered so a late provider frame for it is consumed
+// quietly. The provider can keep working on a request until the request wall
+// (routing.request_timeout_s) after dispatch, and a request is never retired
+// before dispatch, so remembering it for the wall plus a transit grace covers
+// every legitimate late frame. The floor keeps short test walls sane; the cap
+// bounds memory per provider session. An entry evicted by the cap only loses
+// the retired-specific checks: the frame then takes the unknown-request path,
+// which also drops it without closing the session (SPEC-002 FR-P18.1).
+const (
+	retiredRelayRequestTTLFloor = 5 * time.Minute
+	retiredRelayRequestGrace    = time.Minute
+	maxRetiredRelayRequests     = 8192
+)
+
+// errTier2InactiveFrameStaleKey marks an encrypted frame for an inactive
+// request that was sealed under a key epoch the session no longer holds. Its
+// sequence number belongs to that old epoch, so it is dropped without touching
+// the current epoch's receive window.
+var errTier2InactiveFrameStaleKey = errors.New("tier2 inactive frame key epoch is not current")
+
+func retiredRelayRequestTTL(requestWall time.Duration) time.Duration {
+	if ttl := requestWall + retiredRelayRequestGrace; ttl > retiredRelayRequestTTLFloor {
+		return ttl
+	}
+	return retiredRelayRequestTTLFloor
+}
 
 // CancelTerminalWait bounds how long a buyer handler waits for the provider's
 // "cancelled" terminal frame after a buyer_disconnected cancel_request.
@@ -52,6 +77,7 @@ const tier2MaxOutOfOrderP2CFrames = 4096
 
 var relayEndFrameAADMismatchTotal atomic.Uint64
 var relayBufferExceededTotal atomic.Uint64
+var relayInactiveFrameDroppedTotal atomic.Uint64
 
 type RelayStream struct {
 	RequestID   string
@@ -350,6 +376,10 @@ func RelayBufferExceededTotalForTest() uint64 {
 	return relayBufferExceededTotal.Load()
 }
 
+func RelayInactiveFrameDroppedTotalForTest() uint64 {
+	return relayInactiveFrameDroppedTotal.Load()
+}
+
 type retiredRelayRequest struct {
 	stream    bool
 	retiredAt time.Time
@@ -389,6 +419,7 @@ type providerSession struct {
 	activeMu       sync.Mutex
 	active         map[string]*relayActive
 	retired        map[string]retiredRelayRequest
+	retiredTTL     time.Duration
 	activeChanged  chan struct{}
 	closedCh       chan struct{}
 	httpOnly       bool
@@ -497,6 +528,7 @@ func newProviderSession(providerID, assignedID string, conn net.Conn, bufferSize
 		writeLimit:    writeLimit,
 		active:        map[string]*relayActive{},
 		retired:       map[string]retiredRelayRequest{},
+		retiredTTL:    retiredRelayRequestTTLFloor,
 		activeChanged: make(chan struct{}, 1),
 		closedCh:      make(chan struct{}),
 
@@ -750,11 +782,20 @@ func (ps *providerSession) markRetiredLocked(active *relayActive, now time.Time)
 	if active == nil || strings.TrimSpace(active.requestID) == "" {
 		return
 	}
-	cutoff := now.Add(-retiredRelayRequestTTL)
+	cutoff := now.Add(-ps.retiredTTL)
+	oldestID := ""
+	var oldestAt time.Time
 	for id, retired := range ps.retired {
 		if retired.retiredAt.Before(cutoff) {
 			delete(ps.retired, id)
+			continue
 		}
+		if oldestID == "" || retired.retiredAt.Before(oldestAt) {
+			oldestID, oldestAt = id, retired.retiredAt
+		}
+	}
+	if _, replacing := ps.retired[active.requestID]; !replacing && len(ps.retired) >= maxRetiredRelayRequests {
+		delete(ps.retired, oldestID)
 	}
 	ps.retired[active.requestID] = retiredRelayRequest{
 		stream:    active.stream,
@@ -769,7 +810,7 @@ func (ps *providerSession) recentlyRetired(requestID string) (retiredRelayReques
 	if !ok {
 		return retiredRelayRequest{}, false
 	}
-	if time.Since(retired.retiredAt) > retiredRelayRequestTTL {
+	if time.Since(retired.retiredAt) > ps.retiredTTL {
 		delete(ps.retired, requestID)
 		return retiredRelayRequest{}, false
 	}
@@ -847,7 +888,7 @@ func (ps *providerSession) deliverCancelTerminal(end InferenceResponseEnd, prepa
 	}
 	ps.activeMu.Lock()
 	retired, ok := ps.retired[end.RequestID]
-	if !ok || retired.cancelTerminal == nil || time.Since(retired.retiredAt) > retiredRelayRequestTTL {
+	if !ok || retired.cancelTerminal == nil || time.Since(retired.retiredAt) > ps.retiredTTL {
 		ps.activeMu.Unlock()
 		return false
 	}
@@ -1223,11 +1264,20 @@ func relayBlindValidationMatches(expected *RelayBlindDispatchContext, validation
 		validation.MaxOutputTokens == expected.MaxOutputTokens
 }
 
-func (ps *providerSession) consumeRetiredEncryptedFrame(providerID, assignedID string, retired retiredRelayRequest, expectedType, expectedRequestID string, aad tier2.AEADFrameAAD, envelope tier2.AEADEnvelope) ([]byte, error) {
+// consumeInactiveEncryptedFrame authenticates an encrypted p2c frame for a
+// request that is no longer active: retired (stream from the retired entry) or
+// unknown (stream from the frame's own AAD). P2C sequence numbers are one
+// counter per key epoch shared by every request on the session, so an
+// authentic frame consumes its slot like any other; dropping it unconsumed
+// would leave a permanent hole that closes the session once the receive window
+// fills. A frame from a key epoch the session no longer holds returns
+// errTier2InactiveFrameStaleKey and touches no sequence state. Any other error
+// is an AEAD failure on the current epoch.
+func (ps *providerSession) consumeInactiveEncryptedFrame(providerID, assignedID string, stream bool, expectedType, expectedRequestID string, aad tier2.AEADFrameAAD, envelope tier2.AEADEnvelope) ([]byte, error) {
 	ps.tier2Mu.Lock()
 	defer ps.tier2Mu.Unlock()
-	if ps.tier2 == nil {
-		return nil, errors.New("encrypted frame for provider without tier2 session")
+	if ps.tier2 == nil || envelope.Enc.KID != ps.tier2.KeyID {
+		return nil, errTier2InactiveFrameStaleKey
 	}
 	seq := aad.Seq
 	if seq == ^uint64(0) {
@@ -1242,14 +1292,14 @@ func (ps *providerSession) consumeRetiredEncryptedFrame(providerID, assignedID s
 	if aad.RequestID != expectedRequestID {
 		return nil, errors.New("tier2 retired frame request_id mismatch")
 	}
-	if aad.Stream != retired.stream {
+	if aad.Stream != stream {
 		return nil, errors.New("tier2 retired frame stream mismatch")
 	}
 	expectedAAD := tier2.AEADFrameAAD{
 		Type:       expectedType,
 		Direction:  "p2c",
 		RequestID:  expectedRequestID,
-		Stream:     retired.stream,
+		Stream:     stream,
 		ProviderID: providerID,
 		AssignedID: assignedID,
 		Seq:        seq,
@@ -1754,6 +1804,64 @@ func (s *Server) addTier2Active(ctx context.Context, session *providerSession, p
 	}
 }
 
+// consumeInactiveEncryptedFrame handles an encrypted p2c frame whose request_id
+// is not active: a late frame for a retired request, or one the coordinator
+// never issued or has already forgotten. SPEC-002 FR-P18.1 rule 1: it is
+// discarded and never closes the WebSocket. It is still authenticated so its
+// sequence slot is consumed; only a frame that claims the current key epoch and
+// fails authentication is an AEAD failure (SPEC-008 §6.7.1). A late retired
+// terminal still reaches a buyer-cancel waiter.
+func (s *Server) consumeInactiveEncryptedFrame(session *providerSession, providerID, assignedID, frameType, requestID string, aad tier2.AEADFrameAAD, envelope tier2.AEADEnvelope) {
+	retired, wasRetired := session.recentlyRetired(requestID)
+	stream := aad.Stream
+	reason := "unknown_request"
+	if wasRetired {
+		stream = retired.stream
+		reason = "retired_request"
+	}
+	plaintext, err := session.consumeInactiveEncryptedFrame(providerID, assignedID, stream, frameType, requestID, aad, envelope)
+	if errors.Is(err, errTier2InactiveFrameStaleKey) {
+		s.logInactiveFrameDropped(providerID, assignedID, frameType, requestID, "stale_key_epoch", true)
+		return
+	}
+	if err != nil {
+		s.closeProviderForTier2AEADFailure(session, providerID, assignedID, requestID, err.Error())
+		return
+	}
+	if wasRetired && frameType == "inference_response_end" {
+		var late InferenceResponseEnd
+		if json.Unmarshal(plaintext, &late) == nil {
+			late.RequestID = requestID
+			if session.deliverCancelTerminal(late, func(e InferenceResponseEnd) InferenceResponseEnd {
+				return s.applyShardGroupAttestation(providerID, assignedID, e)
+			}) {
+				return
+			}
+		}
+	}
+	s.logInactiveFrameDropped(providerID, assignedID, frameType, requestID, reason, true)
+}
+
+func (s *Server) logInactiveFrameDropped(providerID, assignedID, frameType, requestID, reason string, encrypted bool) {
+	relayInactiveFrameDroppedTotal.Add(1)
+	msg := "unknown " + frameType + " request_id dropped"
+	if reason == "retired_request" {
+		msg = "late " + frameType + " for retired request dropped"
+		if encrypted {
+			msg = "late encrypted " + frameType + " for retired request dropped"
+		}
+	}
+	s.log.Warn().
+		Str("event", "relay_inactive_frame_dropped").
+		Str("provider_id", providerID).
+		Str("assigned_id", assignedID).
+		Str("request_id", requestID).
+		Str("frame_type", frameType).
+		Str("reason", reason).
+		Bool("encrypted", encrypted).
+		Msg(msg)
+}
+
 func (s *Server) closeProviderForTier2AEADFailure(session *providerSession, providerID, assignedID, requestID, reason string) {
 	tier2.LogAEADDecryptFailed(s.log, providerID, assignedID, requestID, reason)
 	s.closeProviderForTier2SessionFailure(session, providerID, assignedID, requestID, "aead_decrypt_failed", ErrRelayAEADFailed)
@@ -1922,16 +2030,7 @@ func (s *Server) handleInferenceChunk(providerID, assignedID string, payload []b
 		}
 		active, ok := session.activeFor(requestID)
 		if !ok {
-			if retired, ok := session.recentlyRetired(requestID); ok {
-				if _, err := session.consumeRetiredEncryptedFrame(providerID, assignedID, retired, "inference_response_chunk", requestID, aad, tier2.AEADEnvelope{Encrypted: true, Enc: envelope.Enc}); err != nil {
-					s.closeProviderForTier2AEADFailure(session, providerID, assignedID, requestID, err.Error())
-					return
-				}
-				s.log.Warn().Str("provider_id", providerID).Str("request_id", requestID).Msg("late encrypted inference_response_chunk for retired request dropped")
-				return
-			}
-			s.log.Warn().Str("provider_id", providerID).Str("request_id", requestID).Msg("unknown encrypted inference_response_chunk request_id")
-			s.closeProviderForTier2AEADFailure(session, providerID, assignedID, requestID, "unknown encrypted inference_response_chunk request_id")
+			s.consumeInactiveEncryptedFrame(session, providerID, assignedID, "inference_response_chunk", requestID, aad, tier2.AEADEnvelope{Encrypted: true, Enc: envelope.Enc})
 			return
 		}
 		chunk, err = session.openInferenceChunk(providerID, assignedID, active, aad, tier2.AEADEnvelope{Encrypted: true, Enc: envelope.Enc})
@@ -1962,7 +2061,7 @@ func (s *Server) handleInferenceChunk(providerID, assignedID string, payload []b
 	}
 	active, ok := session.activeFor(chunk.RequestID)
 	if !ok {
-		s.log.Warn().Str("provider_id", providerID).Str("request_id", chunk.RequestID).Msg("unknown inference_response_chunk request_id")
+		s.logInactiveFrameDropped(providerID, assignedID, "inference_response_chunk", chunk.RequestID, "unknown_request", false)
 		return
 	}
 	if s.relayChunkWouldExceed(active, len([]byte(chunk.Data))) {
@@ -2009,9 +2108,12 @@ func (s *Server) handleInferenceValidation(providerID, assignedID string, payloa
 			return
 		}
 		requestID = aad.RequestID
+		if containsControlChar(requestID) {
+			return
+		}
 		active, exists := session.activeFor(requestID)
 		if !exists {
-			s.closeProviderForTier2AEADFailure(session, providerID, assignedID, requestID, "unknown relay-blind validation request_id")
+			s.consumeInactiveEncryptedFrame(session, providerID, assignedID, "inference_response_validation", requestID, aad, tier2.AEADEnvelope{Encrypted: true, Enc: envelope.Enc})
 			return
 		}
 		frame, err = session.openInferenceValidation(providerID, assignedID, active, aad, tier2.AEADEnvelope{Encrypted: true, Enc: envelope.Enc})
@@ -2030,7 +2132,11 @@ func (s *Server) handleInferenceValidation(providerID, assignedID string, payloa
 		requestID = frame.RequestID
 	}
 	active, ok := session.activeFor(requestID)
-	validEvidence := ok && frame.Type == "inference_response_validation" && frame.RequestID == requestID
+	if !ok {
+		s.logInactiveFrameDropped(providerID, assignedID, "inference_response_validation", requestID, "unknown_request", false)
+		return
+	}
+	validEvidence := frame.Type == "inference_response_validation" && frame.RequestID == requestID
 	if validEvidence {
 		validation := frame.RelayBlindValidation
 		privacyDispatch := active.relayBlind != nil && active.relayBlind.PrivacyClass == relayblind.PrivacyClassV1
@@ -2094,26 +2200,7 @@ func (s *Server) handleInferenceEnd(providerID, assignedID string, payload []byt
 		}
 		active, ok := session.activeFor(requestID)
 		if !ok {
-			if retired, ok := session.recentlyRetired(requestID); ok {
-				plaintext, err := session.consumeRetiredEncryptedFrame(providerID, assignedID, retired, "inference_response_end", requestID, aad, tier2.AEADEnvelope{Encrypted: true, Enc: envelope.Enc})
-				if err != nil {
-					s.closeProviderForTier2AEADFailure(session, providerID, assignedID, requestID, err.Error())
-					return
-				}
-				var late InferenceResponseEnd
-				if json.Unmarshal(plaintext, &late) == nil {
-					late.RequestID = requestID
-					if session.deliverCancelTerminal(late, func(e InferenceResponseEnd) InferenceResponseEnd {
-						return s.applyShardGroupAttestation(providerID, assignedID, e)
-					}) {
-						return
-					}
-				}
-				s.log.Warn().Str("provider_id", providerID).Str("request_id", requestID).Msg("late encrypted inference_response_end for retired request dropped")
-				return
-			}
-			s.log.Warn().Str("provider_id", providerID).Str("request_id", requestID).Msg("unknown encrypted inference_response_end request_id")
-			s.closeProviderForTier2AEADFailure(session, providerID, assignedID, requestID, "unknown encrypted inference_response_end request_id")
+			s.consumeInactiveEncryptedFrame(session, providerID, assignedID, "inference_response_end", requestID, aad, tier2.AEADEnvelope{Encrypted: true, Enc: envelope.Enc})
 			return
 		}
 		opened, err := session.openInferenceEnd(providerID, assignedID, active, aad, tier2.AEADEnvelope{Encrypted: true, Enc: envelope.Enc})
@@ -2170,7 +2257,7 @@ func (s *Server) handleInferenceEnd(providerID, assignedID string, payload []byt
 		}) {
 			return
 		}
-		s.log.Warn().Str("provider_id", providerID).Str("request_id", end.RequestID).Msg("unknown inference_response_end request_id")
+		s.logInactiveFrameDropped(providerID, assignedID, "inference_response_end", end.RequestID, "unknown_request", false)
 		return
 	}
 	end = relayBlindTerminalReceipts(active.relayBlind, end)

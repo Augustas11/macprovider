@@ -35,7 +35,7 @@
     {
       "spec_id": "SPEC-002",
       "title": "Phase 4 Coordinator: Mac Provider Request Router",
-      "version": "1.6.28",
+      "version": "1.6.29",
       "path": "specs/SPEC-002-coordinator.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -14406,6 +14406,36 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/2107",
         "rationale": "Twin walls default to 3600 s and the ceiling-cut request_log label is implemented with coordinator and ops tests; Pearl's preserved live walls are raised by the stream-ceiling step after merge."
+      }
+    },
+    {
+      "requirement_id": "SPEC-002-R010",
+      "spec_id": "SPEC-002",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/ws/relay.go:func (s *Server) consumeInactiveEncryptedFrame",
+        "phase4-coordinator/internal/ws/relay.go:func (ps *providerSession) consumeInactiveEncryptedFrame",
+        "phase4-coordinator/internal/ws/relay.go:func (s *Server) logInactiveFrameDropped",
+        "phase4-coordinator/internal/ws/relay.go:func retiredRelayRequestTTL",
+        "phase4-coordinator/internal/ws/relay.go:func (ps *providerSession) markRetiredLocked"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/ws/late_frame_test.go:func TestEncryptedRelayLateEndAfterRetiredTTLKeepsSessionAndOtherRequests",
+        "phase4-coordinator/internal/ws/late_frame_test.go:func TestEncryptedRelayDropsFramesForNeverIssuedRequest",
+        "phase4-coordinator/internal/ws/late_frame_test.go:func TestEncryptedRelayDropsUnknownFrameFromStaleKeyEpoch",
+        "phase4-coordinator/internal/ws/late_frame_test.go:func TestEncryptedRelayClosesOnForgedUnknownFrameUnderCurrentKey",
+        "phase4-coordinator/internal/ws/late_frame_test.go:func TestEncryptedRelayKnownRequestAEADFailureStillClosesSession",
+        "phase4-coordinator/internal/ws/late_frame_test.go:func TestRelayDropsPlaintextFramesForUnknownRequest",
+        "phase4-coordinator/internal/ws/late_frame_test.go:func TestRetiredRelayRequestTTLCoversTheRequestWall",
+        "phase4-coordinator/internal/ws/late_frame_test.go:func TestRetiredRelayRequestsAreCapped"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2111",
+        "rationale": "Implemented with coordinator unit tests; ships with the next Pearl runtime release, after which a late frame on the live coordinator is the remaining proof."
       }
     },
     {
