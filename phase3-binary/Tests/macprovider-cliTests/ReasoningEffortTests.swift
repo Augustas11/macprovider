@@ -8,7 +8,7 @@ import XCTest
 final class ReasoningEffortTests: XCTestCase {
     private static let fixtures = URL(fileURLWithPath: #filePath)
         .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-        .appendingPathComponent("scripts/tests/fixtures")
+        .appendingPathComponent("scripts/tests/fixtures/")
 
     private func request(model: String, effort: String? = nil, extra: [String: Any] = [:]) throws -> ChatCompletionRequest {
         var body: [String: Any] = ["model": model, "messages": [["role": "user", "content": "Write hello."]]]
