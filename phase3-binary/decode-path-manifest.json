@@ -5,6 +5,8 @@
     "Sources/macprovider-cli/CompiledDecode.swift",
     "Sources/macprovider-cli/ContinuousBatchRowSampler.swift",
     "Sources/macprovider-cli/ContinuousBatchScheduler.swift",
+    "Sources/macprovider-cli/DeepseekV4ContinuousBatchBackend.swift",
+    "Sources/macprovider-cli/DeepseekV4RuntimeParityProbe.swift",
     "Sources/macprovider-cli/NativeMTP.swift",
     "Sources/macprovider-cli/NativeMTPAcceptance.swift",
     "Sources/macprovider-cli/NativeMTPAdaptation.swift",

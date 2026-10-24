@@ -17,7 +17,8 @@ let package = Package(
         )
     ],
     dependencies: [
-        // Fork tag 3.32.3-macprovider.10.3 (branch dsv4/2111-port), which is tag
+        // Fork tag 3.32.3-macprovider.10.4 (branch campaign/2111-dsv4-cb), on tag
+        // 3.32.3-macprovider.10.3 (baec1724), which is tag
         // 3.32.3-macprovider.10.1 (branch glm53/tuple-0324, on 3.32.3-macprovider.10):
         // upstream mlx-swift-lm 3.32.3 plus the 3.32.3-macprovider.9 stack (the
         // packed MTP verification, fused A3B MoE, GDN checkpoint and compiled
@@ -33,9 +34,11 @@ let package = Package(
         // casts and broadcasts on the caller's stream so one decode step runs
         // on one Metal queue. 10.3 adds campaign #2111's deepseek_v4 text model
         // and its reference prefill plan, two commits on 10.1's revision 87dc5159.
+        // 10.4 adds row-owned batched pool/window decode and corrects incomplete
+        // multi-token pooling continuation; other family decode paths are unchanged.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "baec172471889593f60c70060eefcb624772fee5"
+            revision: "676a62a45365d72040b65964e90b3a61cfa146c6"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",
