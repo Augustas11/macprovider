@@ -70,6 +70,9 @@ Live fleet target: **1.8.261** (released 2026-10-22 06:23Z; Pearl runtime v1.8.2
 | #2108 | #2084 | Multi-Mac shard groups on Trusted Pools (SPEC-051): stage transport, provider and coordinator. | merged (`9f8491b34`); next combined CLI |
 | #2118 | #2107 | Buyer API re-audit: serial bare calls, conformance binding, grammar-unavailable settlement, schema profile. | merged (`68d6ed54d`); next combined CLI |
 | #2112 | #2111 | DeepSeek V4 native `deepseek_v4` serving (fork `baec1724`, mlx-swift-lm `3.32.3-macprovider.10.3`), DSV4 prompt encoder, DSML tool calls and reasoning; decode-path digest `565617…`; native-MTP admission inputs rebound identity-only. | in progress; lands in 1.8.262 |
+| #2129 | #2127 | Autotune readiness: large candidates finish loading before autotune probes; model-aware readiness and signed candidate aliases. | merged (`25ce4bd6e`); next combined CLI |
+| #2130 | #2107 | GLM-5.3, gpt-oss and Qwen3.8 render `none`/`minimal` reasoning effort as `low` instead of silently requesting maximum reasoning (SPEC-018 0.3.5). | merged (`34d66d6b0`); next combined CLI |
+| #2131 | #2107 | Grammar-constrained decoding: guaranteed tool_choice required/named and strict json_schema for every catalog grammar (SPEC-018 0.3.6); decode-path digest `adc3f5dc…` (includes #2130); identity-only native-MTP admission rebind after the cut. | merged (`ec04c6de8`); next combined CLI |
 
 ## Shipped v1.8.261 — net changes vs 1.8.260
 
