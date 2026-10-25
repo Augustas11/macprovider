@@ -331,6 +331,7 @@ def watchdog(m):
 MATRICES = {shapes_name: tuple((shape, temperature) for shape in shapes for temperature in (0, 1))
             for shapes_name, shapes in (("matrix", ("plain_text", "tools_history_reasoning")),
                                         ("matrix-tools", ("tools_history_reasoning",)))}
+MATRICES["matrix-s2"] = MATRICES["matrix"]
 
 
 def bench_command(m, d):
@@ -353,7 +354,8 @@ def bench_command(m, d):
         put(path, dict(base, request_shape=shape, temperature=temperature,
                        top_p=1 if temperature == 0 else .95))
         paths.append(str(path))
-    return command + ["--policy-list", *paths, "--out", str(d / "baseline")]
+    selection = ["--only-cell", "s2-p512-o128"] if m["cell"] == "matrix-s2" else []
+    return command + ["--policy-list", *paths, "--out", str(d / "baseline"), *selection]
 
 
 def lab_env(kind):
@@ -380,6 +382,8 @@ def fixed_command(m, kind):
                 "-skipPackagePluginValidation",
                 "-only-testing:MLXLMTests/GLM5NextTests/testPackedVerifyDepthOneCohortsMatchSerialRows",
                 "-only-testing:MLXLMTests/GLM5NextTests/testPackedVerifyRank512FallbackMatchesSerialRows",
+                "-only-testing:MLXLMTests/GLM5NextTests/testMTPDrafterRollbackAndPackedAdvanceMatchSerialCommit",
+                "-only-testing:MLXLMTests/GLM5NextTests/testPackedVerifyDepthThreeMatchesSerialRows",
                 "-parallel-testing-enabled", "NO", "-jobs", "2",
                 "-derivedDataPath", str(cache / "DerivedData"),
                 "-clonedSourcePackagesDirPath", str(cache / "SourcePackages"),

@@ -1,6 +1,7 @@
 import CryptoKit
 import Foundation
 import MLX
+import MLXLLM
 import MLXLMCommon
 import MacProviderCore
 
@@ -1414,14 +1415,13 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         }
         defer { endOperation() }
 
-        // The drafter already proposed each row's next token in the round
-        // that last advanced it (prefill or finalize), so proposal is a host
-        // lookup. The drafter is consulted only to bound the depth.
-        let maximumBlockSize = try await drafterContainer.perform { context -> Int? in
+        // Depth one is the seed retained by prefill/finalize. Deeper GLM
+        // requests chain that seed on copied caches without publishing state.
+        let (maximumBlockSize, supportsGLMChaining) = try await drafterContainer.perform { context -> (Int?, Bool) in
             guard context.model is any MTPPackedStatefulDrafterModel else {
                 throw ContinuousBatchSchedulerError.unsupported("native_mtp_packed_drafter_required")
             }
-            return context.model.maximumBlockSize
+            return (context.model.maximumBlockSize, context.model is GLM5NextMTPDraftModel)
         }
         // A row returning from load-gate depth zero first catches its drafter
         // up on the columns it committed through the ordinary forward, so
@@ -1451,7 +1451,51 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             ) else {
                 throw ContinuousBatchSchedulerError.unsupported("native_mtp_proposal_depth_exceeds_drafter")
             }
-            proposals[input.requestID] = nativeMTPDrafterSeedToken(for: input.requestID).map { [$0] } ?? []
+            if !supportsGLMChaining || input.maximumProposalDepth == 1 {
+                proposals[input.requestID] = nativeMTPDrafterSeedToken(for: input.requestID).map { [$0] } ?? []
+            }
+        }
+        let chainedInputs = supportsGLMChaining ? inputs.filter { $0.maximumProposalDepth > 1 } : []
+        if !chainedInputs.isEmpty {
+            let chained = try await container.perform(nonSendable: chainedInputs) { context, inputs in
+                self.enterTargetLock(); defer { self.exitTargetLock() }
+                try self.throwIfCancelRequested()
+                guard inputs.allSatisfy({ $0.maximumProposalDepth == 2 }) else {
+                    throw ContinuousBatchSchedulerError.unsupported("native_mtp_chained_depth_unsupported")
+                }
+                let states = try inputs.map { input -> MTPDrafterState in
+                    guard let state = self.nativeMTPDrafterState(for: input.requestID),
+                          state.proposalAppended == 0, state.seedToken != nil, state.seedHidden != nil
+                    else {
+                        throw ContinuousBatchSchedulerError.unsupported("native_mtp_missing_drafter_state")
+                    }
+                    return state
+                }
+                let tokens = try await drafterContainer.perform(
+                    nonSendable: (context.model, states)
+                ) { drafterContext, values in
+                    let (target, states) = values
+                    guard let drafter = drafterContext.model as? GLM5NextMTPDraftModel else {
+                        throw ContinuousBatchSchedulerError.unsupported("native_mtp_chained_drafter_unsupported")
+                    }
+                    let result = try drafter.chainPacked(
+                        target: target, states: states, depth: 2,
+                        sampler: GenerateParameters(temperature: 0).sampler())
+                    guard result.proposals.shape == [states.count, 2] else {
+                        throw ContinuousBatchSchedulerError.unsupported("native_mtp_chained_proposal_count_mismatch")
+                    }
+                    let proposals = result.proposals.asType(.int32)
+                    eval(proposals)
+                    // The caches are tentative copies. Finalize folds the
+                    // accepted target prefix into the unchanged stored state.
+                    return proposals.asArray(Int32.self).map(Int.init)
+                }
+                try self.throwIfCancelRequested()
+                return Dictionary(uniqueKeysWithValues: inputs.enumerated().map { index, input in
+                    (input.requestID, Array(tokens[(index * 2) ..< (index * 2 + 2)]))
+                })
+            }
+            proposals.merge(chained) { _, new in new }
         }
         return proposals
     }

@@ -114,6 +114,27 @@ final class NativeMTPBenchGLMTests: XCTestCase {
         XCTAssertThrowsError(try load(object))
     }
 
+    func testDepthTwoExplorationIsLimitedToGLMTwoRowBound() throws {
+        var object = try glmPolicyObject()
+        object["schema"] = "macprovider.native-mtp-exploratory-policy.v1"
+        object["proposal_depth"] = 2
+        object["max_native_active_rows"] = 2
+        let policy = try load(object)
+        XCTAssertEqual(policy.proposalDepth, 2)
+        XCTAssertNoThrow(try policy.validateFamily(.glm5Next))
+        XCTAssertThrowsError(try policy.validateFamily(.qwen35))
+        object["max_native_active_rows"] = 4
+        XCTAssertThrowsError(try load(object).validateFamily(.glm5Next))
+        object["schema"] = "macprovider.native-mtp-r015-policy.v1"
+        object["max_native_active_rows"] = 1
+        XCTAssertThrowsError(try load(object))
+        object["schema"] = "macprovider.native-mtp-exploratory-policy.v1"
+        object["proposal_depth"] = 3
+        XCTAssertThrowsError(try load(object))
+        object["proposal_depth"] = true
+        XCTAssertThrowsError(try load(object))
+    }
+
     func testPolicyRejectsInvalidSamplerShapeAndBypassTypes() throws {
         let base = try glmPolicyObject()
         for value in [0, -1, 1.1, true, "0.95"] as [Any] {

@@ -590,6 +590,7 @@ private final class NativeMTPBenchRunner {
             modelID: modelID,
             maxBatch: qualifiedSlots,
             maxNativeActiveRows: policy.maxNativeActiveRows(for: cell),
+            proposalDepth: policy.proposalDepth,
             maxPromptTokens: policy.maximumPromptTokens ?? 1_048_576,
             maxPhysicalBlocks: maxBlocks,
             diagnosticEligibilityBypass: policy.diagnosticEligibilityBypass
@@ -859,6 +860,7 @@ private final class NativeMTPBenchRunner {
             "top_p": policy.topP,
             "request_shape": policy.requestShape,
             "diagnostic_eligibility_bypass": policy.diagnosticEligibilityBypass,
+            "proposal_depth": policy.proposalDepth,
             "arrival_interval_ms": policy.arrivalIntervalMS,
             // 2: run records carry decode-only throughput (SPEC-048-R015).
             // 3: effective_paths carry each admission's other_active_rows.
@@ -1437,6 +1439,7 @@ struct NativeMTPBenchPolicy {
     /// admission policy; absent in a pilot means the bound equals each cell's
     /// qualified slot count (gate never engages).
     let maxNativeActiveRows: Int?
+    let proposalDepth: Int
     /// Request temperature for every row of both paths (default greedy). A
     /// sampled row's seed derives from its request ID, which both paths
     /// share, so seeded parity is still a token-identity comparison.
@@ -1516,6 +1519,7 @@ struct NativeMTPBenchPolicy {
             maxNativeActiveRows: object["max_native_active_rows"] == nil
                 ? nil
                 : try intAtLeast(object, "max_native_active_rows", 1),
+            proposalDepth: try intAtLeast(object, "proposal_depth", 1),
             temperature: try samplingTemperature(object, "temperature"),
             topP: try topPValue(object),
             requestShape: try requestShapeValue(object),
@@ -1526,10 +1530,12 @@ struct NativeMTPBenchPolicy {
             exploratory: exploratory
         )
         try policy.validateMatrix()
+        guard policy.proposalDepth == 1 || (exploratory && policy.proposalDepth == 2) else {
+            throw NativeMTPBenchError.invalidPolicy("proposal_depth must equal 1 outside a depth-2 exploratory policy")
+        }
         let fixedMethodology: [String: AnyHashable] = [
             "quantization": "4bit",
             "cache_mode": "paged_kv_mixed",
-            "proposal_depth": 1,
             "run_order": "seeded_random_counterbalanced",
             "prompt_corpus": "deterministic_synthetic_unique_v2",
             "exclusion_rules": "none",
@@ -1599,10 +1605,15 @@ struct NativeMTPBenchPolicy {
     }
 
     /// The fixture family's own tuple limits, checked before any model load:
-    /// a greedy-only family (glm5_next) routes sampled rows to ordinary
-    /// decode, and a family that signs a native active-row bound measures at
+    /// an unsupported sampled profile routes rows to ordinary decode, and
+    /// a family that signs a native active-row bound measures at
     /// most that bound, so either mismatch could only fail after the load.
     func validateFamily(_ family: NativeMTPHardwareE2EFamily) throws {
+        if proposalDepth == 2 {
+            guard family == .glm5Next, let bound = maxNativeActiveRows, bound <= 2 else {
+                throw NativeMTPBenchError.invalidPolicy("depth-2 exploration requires glm5_next and max_native_active_rows at most 2")
+            }
+        }
         if !family.admitsSampledRows, (temperature > 0 || topP != 1), !diagnosticEligibilityBypass {
             throw NativeMTPBenchError.invalidPolicy(
                 "temperature must be 0: \(family.familyAdapter) admits greedy rows only"

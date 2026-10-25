@@ -256,6 +256,7 @@ final class NativeMTPHardwareE2ERunner {
     private let modelID: String
     private let maxBatch: Int
     private let maxNativeActiveRows: Int
+    private let proposalDepth: Int
     private let maxPromptTokens: Int
     private let maxPhysicalBlocks: Int
     private let verifyServePath: Bool
@@ -280,6 +281,7 @@ final class NativeMTPHardwareE2ERunner {
         modelID: String = NativeMTPHardwareE2ERunner.defaultModelID,
         maxBatch: Int = 2,
         maxNativeActiveRows: Int? = nil,
+        proposalDepth: Int = 1,
         maxPromptTokens: Int = 1_048_576,
         maxPhysicalBlocks: Int = 512,
         verifyServePath: Bool = false,
@@ -290,6 +292,7 @@ final class NativeMTPHardwareE2ERunner {
             .standardizedFileURL
         self.modelID = modelID
         self.maxBatch = maxBatch
+        self.proposalDepth = proposalDepth
         self.maxPromptTokens = maxPromptTokens
         self.maxPhysicalBlocks = maxPhysicalBlocks
         self.verifyServePath = verifyServePath
@@ -505,7 +508,7 @@ final class NativeMTPHardwareE2ERunner {
         let admission = signedAdmission.capability
         try require(admission.targetArtifactSHA256 == targetIdentity.digest, "target digest admission mismatch")
         try require(admission.mtpArtifactSHA256 == mtpIdentity.digest, "MTP digest admission mismatch")
-        try require(admission.maxProposalDepth == 1, "unexpected proposal depth")
+        try require(admission.maxProposalDepth == proposalDepth, "unexpected proposal depth")
         try require(admission.selfTestChallengeBank.challengeBankPath == "native-mtp-selftest-bank.json", "bad self-test bank")
         let capability = NativeMTPCapability(
             admitted: true,
@@ -1164,8 +1167,8 @@ final class NativeMTPHardwareE2ERunner {
             "mtp_family_adapter": family.familyAdapter,
             "mtp_state_class": "hybrid_stageable_rewindable",
             "mtp_head_count": 1,
-            "proposal_depth": 1,
-            "complete_window_bytes_by_depth": family.completeWindowBytesByDepth(maxContextTokens: maxContextTokens),
+            "proposal_depth": proposalDepth,
+            "complete_window_bytes_by_depth": family.completeWindowBytesByDepth(maxContextTokens: maxContextTokens, maxDepth: proposalDepth),
             "runtime_revision": Self.upstreamRevision,
             "provider_revision": Self.providerRevision,
             "source_commit": Self.providerRevision,

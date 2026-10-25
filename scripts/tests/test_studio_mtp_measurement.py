@@ -28,6 +28,8 @@ class MeasurementTests(unittest.TestCase):
         self.assertEqual(command[:3], ["/usr/bin/xcrun", "xcodebuild", "test"])
         self.assertIn("-only-testing:MLXLMTests/GLM5NextTests/testPackedVerifyDepthOneCohortsMatchSerialRows", command)
         self.assertIn("-only-testing:MLXLMTests/GLM5NextTests/testPackedVerifyRank512FallbackMatchesSerialRows", command)
+        self.assertIn("-only-testing:MLXLMTests/GLM5NextTests/testMTPDrafterRollbackAndPackedAdvanceMatchSerialCommit", command)
+        self.assertIn("-only-testing:MLXLMTests/GLM5NextTests/testPackedVerifyDepthThreeMatchesSerialRows", command)
         self.assertEqual(command[command.index("-jobs") + 1], "2")
         self.assertEqual(command[command.index("-derivedDataPath") + 1],
                          "/campaign/.lab-window/glm-cohort-tests/DerivedData")
@@ -373,6 +375,23 @@ class MeasurementTests(unittest.TestCase):
     def test_tools_matrix_is_the_six_tools_cells(self):
         self.assertEqual(M.MATRICES["matrix-tools"], (("tools_history_reasoning", 0), ("tools_history_reasoning", 1)))
         M.policy_ok(json.dumps(self.policy()), "a" * 40, "matrix-tools")
+
+    def test_two_row_matrix_keeps_all_profiles_and_selects_only_two_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            policy = dict(self.policy(), proposal_depth=2, max_native_active_rows=2)
+            M.put(d / "policy.json", policy)
+            M.policy_ok(json.dumps(policy), "a" * 40, "matrix-s2")
+            command = M.bench_command({"source": "/source", "commit": "a" * 40,
+                                       "cell": "matrix-s2"}, d)
+            self.assertEqual(command[-2:], ["--only-cell", "s2-p512-o128"])
+            paths = command[command.index("--policy-list") + 1:command.index("--out")]
+            self.assertEqual(len(paths), 4)
+            profiles = [json.loads(Path(p).read_text()) for p in paths]
+            self.assertEqual({(p["request_shape"], p["temperature"]) for p in profiles},
+                             set(M.MATRICES["matrix"]))
+            self.assertTrue(all(p["proposal_depth"] == 2 and p["max_native_active_rows"] == 2
+                                for p in profiles))
 
     def test_preflight_counts_one_summary_per_policy(self):
         with tempfile.TemporaryDirectory() as tmp:

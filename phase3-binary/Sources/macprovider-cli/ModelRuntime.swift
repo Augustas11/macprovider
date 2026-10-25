@@ -12159,8 +12159,8 @@ maxTokens: maxTokens,
     }
 
     /// The drafter container for an admitted adapter. A `checkpoint_mtp`
-    /// drafter is built from the target's `config.json` through the drafter
-    /// type registry, never through `MTPDrafterModelFactory`, which would
+    /// drafter is built from the target's `config.json` with the admitted
+    /// GLM head, never through `MTPDrafterModelFactory`, which would
     /// read the target's weight files a second time for a model that owns no
     /// parameters.
     static func loadNativeMTPDrafterContainer(
@@ -12177,17 +12177,20 @@ maxTokens: maxTokens,
                 using: tokenizerLoader
             )
         case .targetEmbedded:
-            await GLM5NextMTPRegistration.register()
             let configData = try Data(contentsOf: targetDirectory.appendingPathComponent("config.json"))
             guard let object = try JSONSerialization.jsonObject(with: configData) as? [String: Any],
                   let modelType = object["model_type"] as? String
             else {
                 throw NativeMTPDrafterLoadError.unsupportedAdapter(familyAdapter)
             }
-            let model = try await MTPDrafterTypeRegistry.shared.createModel(
-                configuration: configData,
-                modelType: modelType
-            )
+            guard ["glm5_next", "glm5_next_text"].contains(modelType) else {
+                throw NativeMTPDrafterLoadError.unsupportedAdapter(familyAdapter)
+            }
+            let config = try JSONDecoder.json5().decode(GLM5NextConfiguration.self, from: configData)
+            try config.validateModelConfiguration()
+            // Positive-depth tuning uses the existing GLM recursive head.
+            // Signed admission and the scheduler still choose the row's depth.
+            let model = GLM5NextMTPDraftModel(config, maximumDepth: 2)
             return MTPDrafterContainer(context: MTPDrafterContext(
                 configuration: ModelConfiguration(directory: targetDirectory, tokenizerSource: nil, defaultPrompt: ""),
                 model: model

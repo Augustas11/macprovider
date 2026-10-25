@@ -17,7 +17,7 @@ let package = Package(
         )
     ],
     dependencies: [
-        // Fork tag 3.32.3-macprovider.10.12 (campaign/2144-native-mtp), on tag
+        // Fork tag 3.32.3-macprovider.10.13 (campaign/2144-native-mtp), on tag
         // 3.32.3-macprovider.10.5 (c8be0f61, campaign/2111-dsv4-cb), on tag
         // 3.32.3-macprovider.10.4 (676a62a4), on tag 3.32.3-macprovider.10.3, then
         // 3.32.3-macprovider.10.1 (branch glm53/tuple-0324, on 3.32.3-macprovider.10):
@@ -42,7 +42,7 @@ let package = Package(
         // compatible per-column attention while retaining row-owned caches.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "a9b6c021becbff5d9f0651ae5c2b7bfd497852bb"
+            revision: "b128c37f26d2cbd58700c0ebf3a761f1df7b5415"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",
