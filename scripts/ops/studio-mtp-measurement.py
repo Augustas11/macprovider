@@ -491,10 +491,13 @@ def run_acceptance(m):
 
 
 def lab_env(kind):
-    return {"HOME": str(Path.home()), "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
-            "MACPROVIDER_NATIVE_MTP_E2E": "1",
-            **({"DEVELOPER_DIR": str(XCODE_DEVELOPER_DIR)}
-               if kind in ("metal", "fork-tests", "acceptance-tests") else {})}
+    environment = {"HOME": str(Path.home()), "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+                   "MACPROVIDER_NATIVE_MTP_E2E": "1"}
+    if kind in ("metal", "fork-tests"):
+        environment["DEVELOPER_DIR"] = str(XCODE_DEVELOPER_DIR)
+    elif kind == "acceptance-tests":
+        environment["DEVELOPER_DIR"] = CLT_DEVELOPER_DIR
+    return environment
 
 
 def fixed_command(m, kind):
@@ -522,9 +525,10 @@ def fixed_command(m, kind):
                 "-clonedSourcePackagesDirPath", str(cache / "SourcePackages"),
                 "-resultBundlePath", str(d / "glm-cohort-parity.xcresult")]
     if kind == "acceptance-tests" and m["cell"] == "acceptance":
-        # Keep the frozen CLI's Swift compiler; full Xcode supplies Metal.
+        # Existing package test hooks are DEBUG-only. Keep their normal debug
+        # configuration and the CLI compiler/SDK; the corpus uses release below.
         return ["/Library/Developer/CommandLineTools/usr/bin/swift", "test", "--package-path", package,
-                "-c", "release", "-j", "2", "--disable-automatic-resolution",
+                "-c", "debug", "-j", "2", "--disable-automatic-resolution",
                 "-Xswiftc", "-DMACPROVIDER_LAB_HARNESS", "--filter",
                 "NativeMTPAcceptance.*Tests|NativeMTPLabNumericalOracleTests|NativeMTPBackendSafetyTests"]
     if kind == "metalcheck":

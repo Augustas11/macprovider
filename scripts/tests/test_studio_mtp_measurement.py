@@ -468,7 +468,8 @@ class AcceptanceMeasurementTests(unittest.TestCase):
         self.assertEqual(command[command.index("--package-path") + 1], "/campaign/phase3-binary")
         self.assertEqual(command[command.index("--filter") + 1],
                          "NativeMTPAcceptance.*Tests|NativeMTPLabNumericalOracleTests|NativeMTPBackendSafetyTests")
-        self.assertEqual(M.lab_env("acceptance-tests")["DEVELOPER_DIR"], str(M.XCODE_DEVELOPER_DIR))
+        self.assertEqual(command[command.index("-c") + 1], "debug")
+        self.assertEqual(M.lab_env("acceptance-tests")["DEVELOPER_DIR"], M.CLT_DEVELOPER_DIR)
         self.assertEqual(M.ACCEPTANCE_TESTS, 600)
         self.assertEqual(M.TOTAL, 3600)
         worker = __import__("inspect").getsource(M.worker)
