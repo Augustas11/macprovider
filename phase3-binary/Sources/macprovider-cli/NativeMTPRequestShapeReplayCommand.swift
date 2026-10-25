@@ -1516,15 +1516,12 @@ final class NativeMTPRequestShapeReplayRunner {
                 return "tool_grammar_required_mismatch:\(row.requestID)"
             }
             if row.stringFeature("tool_choice_kind") == "function" {
-                let expected = Self.syntheticToolChoice(for: row)
-                let data = try? JSONSerialization.data(withJSONObject: expected, options: [.sortedKeys])
-                let actual = request.promptSource.toolChoice.flatMap { try? JSONEncoder().encode($0) }
                 // Parsed named choice is also checked by production grammar;
-                // compare canonical JSON instead of retaining any real name.
-                guard let data, let actual,
-                      let actualObject = try? JSONSerialization.jsonObject(with: actual),
-                      let actualCanonical = try? JSONSerialization.data(withJSONObject: actualObject, options: [.sortedKeys]),
-                      data == actualCanonical else { return "named_tool_choice_mismatch:\(row.requestID)" }
+                // compare parsed JSON values without retaining any real name.
+                guard let expected = try? MacProviderCore.JSONValue.parse(Self.syntheticToolChoice(for: row)),
+                      request.promptSource.toolChoice == expected else {
+                    return "named_tool_choice_mismatch:\(row.requestID)"
+                }
             }
         }
         var knownKeys = NativeMTPSelector.admittedTopLevelKeys

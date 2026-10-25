@@ -467,7 +467,7 @@ class AcceptanceMeasurementTests(unittest.TestCase):
         self.assertEqual(command[:2], ["/Library/Developer/CommandLineTools/usr/bin/swift", "test"])
         self.assertEqual(command[command.index("--package-path") + 1], "/campaign/phase3-binary")
         self.assertEqual(command[command.index("--filter") + 1],
-                         "NativeMTPAcceptance.*Tests|NativeMTPLabNumericalOracleTests|NativeMTPBackendSafetyTests|NativeMTPRequestShapeReplayCommandTests")
+                         "NativeMTPAcceptance.*Tests|NativeMTPLabNumericalOracleTests|NativeMTPBackendSafetyTests|NativeMTPRequestShapeReplayCommandTests|NativeMTPRequestShapeCaptureTests|NativeMTPSelectorTests")
         self.assertEqual(command[command.index("-c") + 1], "debug")
         self.assertEqual(M.lab_env("acceptance-tests")["DEVELOPER_DIR"], str(M.XCODE_DEVELOPER_DIR))
         self.assertEqual(M.ACCEPTANCE_TESTS, 600)

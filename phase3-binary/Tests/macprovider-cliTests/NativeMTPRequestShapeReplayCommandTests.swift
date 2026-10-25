@@ -955,9 +955,10 @@ final class NativeMTPRequestShapeReplayCommandTests: XCTestCase {
         XCTAssertEqual(request.templateReasoningEffort(for: request.model), "low")
         XCTAssertTrue(GrammarConstraintState.isRequired(request))
         let choice = try XCTUnwrap(request.promptSource.toolChoice)
-        let encoded = try JSONEncoder().encode(choice)
-        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
-        XCTAssertEqual((object["function"] as? [String: Any])?["name"] as? String, "replay_tool_1")
+        XCTAssertEqual(choice, .object([
+            "type": .string("function"),
+            "function": .object(["name": .string("replay_tool_1")]),
+        ]))
     }
 
     func testCapacityFallbackDoesNotRewritePreCapacityEligibility() {
