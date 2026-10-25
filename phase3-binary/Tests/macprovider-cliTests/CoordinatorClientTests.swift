@@ -5683,69 +5683,192 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertLessThan(elapsedNs, 10 * 1_000_000_000, "bounded send should not block beyond ~5s, got \(elapsedNs)ns")
     }
 
-    // Issue #189: the watchdog is the App-Nap insurance — if the
-    // heartbeat task itself stops being scheduled, an independent
-    // observer must fire the exit hook so launchd respawns the
-    // process.
-    func testHeartbeatWatchdogFiresExitHookOnStaleness() async throws {
-        let recorder = CoordinatorFrameRecorder()
+    func testHeartbeatWatchdogRequestsReconnectWithoutExitingOrUnloadingModel() async throws {
         let status = ProviderStatus(
-            modelID: "model-a",
-            modelLoaded: true,
+            modelID: "model-a", modelLoaded: true,
             capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
         )
-        let captured = CapturedWatchdogReason()
+        let reason = LockedBox<String?>(nil)
+        let client = try await makeClient(
+            status: status, recorder: CoordinatorFrameRecorder(),
+            watchdogExitHook: { reason.set($0) }
+        )
+        let socket = FakeProviderWebSocketTask(receiveResults: [])
+        await client.setWebSocketForTest(socket)
+        await client.seedLastHeartbeatSuccessForTest(ageNanoseconds: 16_000_000_000)
+        await client.evaluateHeartbeatWatchdogForTest(intervalSeconds: 1)
+        let recoveryPending = await client.heartbeatRecoveryPendingForTest()
+        let snapshot = await status.snapshot()
+        XCTAssertTrue(recoveryPending)
+        XCTAssertEqual(socket.cancelCountSnapshot(), 1)
+        XCTAssertNil(reason.get())
+        XCTAssertTrue(snapshot.modelLoaded)
+        // Repeated liveness checks must not keep extending the local deadline.
+        await client.evaluateHeartbeatWatchdogForTest(intervalSeconds: 1)
+        XCTAssertEqual(socket.cancelCountSnapshot(), 1)
+        await client.cleanupConnectionForTest()
+    }
+
+    func testHeartbeatWatchdogHardFailsOnlyWhenLocalRecoveryRemainsWedged() async throws {
+        let status = ProviderStatus(
+            modelID: "model-a", modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let reason = LockedBox<String?>(nil)
         let preparationRan = LockedBox(false)
         let client = try await makeClient(
-            status: status,
-            recorder: recorder,
-            watchdogExitPreparation: {
-                preparationRan.set(true)
-            },
-            watchdogExitHook: { reason in
-                XCTAssertTrue(preparationRan.get(), "watchdog exit hook ran before synchronous cleanup")
-                Task { await captured.set(reason) }
+            status: status, recorder: CoordinatorFrameRecorder(),
+            watchdogExitPreparation: { preparationRan.set(true) },
+            watchdogExitHook: {
+                XCTAssertTrue(preparationRan.get(), "fatal recovery must prepare synchronous cleanup")
+                reason.set($0)
             }
         )
-
-        // The minimum tolerance is 15s so a bounded 5s send can finish.
-        // Seeding age=16s puts us safely past tolerance on the first
-        // 0.5s check tick.
-        await client.seedLastHeartbeatSuccessForTest(ageNanoseconds: 16 * 1_000_000_000)
+        await client.seedLastHeartbeatSuccessForTest(ageNanoseconds: 16_000_000_000)
         await client.startHeartbeatWatchdogForTest(intervalSeconds: 1)
-
         try await Self.waitUntil(timeoutNanoseconds: 5_000_000_000) {
-            await captured.value() != nil
+            await client.heartbeatRecoveryPendingForTest()
         }
-        let reason = await captured.value()
-        XCTAssertNotNil(reason)
-        XCTAssertTrue(reason?.contains("heartbeat liveness") ?? false, reason ?? "<nil>")
-        await client.cancelHeartbeatWatchdogForTest()
+        XCTAssertNil(reason.get(), "remote liveness loss must first request recovery")
+        await client.seedHeartbeatRecoveryAgeForTest(ageNanoseconds: 59_000_000_000)
+        await client.evaluateHeartbeatWatchdogForTest(intervalSeconds: 1)
+        XCTAssertNil(reason.get(), "local recovery must have its full grace period")
+        await client.seedHeartbeatRecoveryAgeForTest(ageNanoseconds: 61_000_000_000)
+        try await Self.waitUntil(timeoutNanoseconds: 5_000_000_000) { reason.get() != nil }
+        XCTAssertTrue(reason.get()?.contains("local coordinator recovery wedged") == true)
+        await client.cleanupConnectionForTest()
     }
 
     func testHeartbeatWatchdogReconnectsInsteadOfExitDuringAdmissionHold() async throws {
-        let recorder = CoordinatorFrameRecorder()
         let status = ProviderStatus(
-            modelID: "model-a",
-            modelLoaded: true,
+            modelID: "model-a", modelLoaded: true,
             capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
         )
-        let captured = CapturedWatchdogReason()
+        let reason = LockedBox<String?>(nil)
         let client = try await makeClient(
-            status: status,
-            recorder: recorder,
-            watchdogExitHook: { reason in
-                Task { await captured.set(reason) }
-            }
+            status: status, recorder: CoordinatorFrameRecorder(),
+            watchdogExitHook: { reason.set($0) }
         )
-
+        let socket = FakeProviderWebSocketTask(receiveResults: [])
+        await client.setWebSocketForTest(socket)
         await client.setAdmissionPendingHoldActiveForTest(true)
-        await client.seedLastHeartbeatSuccessForTest(ageNanoseconds: 16 * 1_000_000_000)
+        await client.seedLastHeartbeatSuccessForTest(ageNanoseconds: 16_000_000_000)
+        await client.evaluateHeartbeatWatchdogForTest(intervalSeconds: 1)
+        XCTAssertEqual(socket.cancelCountSnapshot(), 1)
+        XCTAssertNil(reason.get(), "admission hold must reconnect instead of exiting")
+        await client.cleanupConnectionForTest()
+    }
+
+    func testCompletedCleanupDisarmsRecoveryDuringCoordinatorOutage() async throws {
+        let status = ProviderStatus(
+            modelID: "model-a", modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let reason = LockedBox<String?>(nil)
+        let client = try await makeClient(
+            status: status, recorder: CoordinatorFrameRecorder(),
+            watchdogExitHook: { reason.set($0) }
+        )
         await client.startHeartbeatWatchdogForTest(intervalSeconds: 1)
-        try await Task.sleep(nanoseconds: 2_000_000_000)
-        let reason = await captured.value()
-        XCTAssertNil(reason, "admission hold must reconnect instead of Darwin.exit")
+        await client.seedLastHeartbeatSuccessForTest(ageNanoseconds: 16_000_000_000)
+        await client.evaluateHeartbeatWatchdogForTest(intervalSeconds: 1)
+        let oldGeneration = await client.heartbeatWatchdogGenerationForTest()
+        await client.cleanupConnectionForTest()
+        let recoveryPending = await client.heartbeatRecoveryPendingForTest()
+        XCTAssertFalse(recoveryPending, "finished local teardown must disarm the recovery deadline")
+        // Even a queued old observer cannot act during arbitrarily long backoff.
+        await client.seedLastHeartbeatSuccessForTest(ageNanoseconds: 600_000_000_000)
+        await client.evaluateHeartbeatWatchdogForTest(intervalSeconds: 1, generation: oldGeneration)
+        XCTAssertNil(reason.get())
+        let snapshot = await status.snapshot()
+        XCTAssertTrue(snapshot.modelLoaded)
+    }
+
+    func testStaleHeartbeatRecoveryCannotCancelReplacementSession() async throws {
+        let status = ProviderStatus(
+            modelID: "model-a", modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(status: status, recorder: CoordinatorFrameRecorder())
+        await client.startHeartbeatWatchdogForTest(intervalSeconds: 1)
+        let oldGeneration = await client.heartbeatWatchdogGenerationForTest()
+        await client.cleanupConnectionForTest()
+        let newSocket = FakeProviderWebSocketTask(receiveResults: [])
+        await client.setWebSocketForTest(newSocket)
+        await client.startHeartbeatWatchdogForTest(intervalSeconds: 1)
+        await client.seedLastHeartbeatSuccessForTest(ageNanoseconds: 16_000_000_000)
+        await client.requestHeartbeatRecoveryForTest(generation: oldGeneration)
+        await client.evaluateHeartbeatWatchdogForTest(intervalSeconds: 1, generation: oldGeneration)
+        XCTAssertEqual(newSocket.cancelCountSnapshot(), 0)
+        let recoveryPending = await client.heartbeatRecoveryPendingForTest()
+        XCTAssertFalse(recoveryPending)
         await client.cancelHeartbeatWatchdogForTest()
+        await client.cleanupConnectionForTest()
+    }
+
+    func testSocketCancellationReconnectsThroughOutageAndRetainsLoadedModel() async throws {
+        var config = AppConfig.defaults(configPath: "/tmp/macprovider-test.yaml")
+        config.coordinatorURL = "wss://127.0.0.1:8444/ws/provider"
+        config.providerID = "provider-test"
+        config.model = "model-a"
+        config.wsTunneledMode = false
+        config.autoUpdateEnabled = false
+        config.autoupdateEnabled = false
+        let status = ProviderStatus(
+            modelID: "model-a", modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let firstReads = ReconnectAttemptRecorder()
+        let restoredReads = ReconnectAttemptRecorder()
+        let first = FakeProviderWebSocketTask(receiveResults: [], receiveOverride: { socket in
+            if await firstReads.recordAttempt() == 1 {
+                return .string("{\"type\":\"hello_ack\",\"heartbeat_interval_s\":5,\"compatibility_policy\":\"unconfigured\"}")
+            }
+            while socket.cancelCountSnapshot() == 0 {
+                try await Task.sleep(nanoseconds: 1_000_000)
+            }
+            // A transport cancellation is not cancellation of the serving task.
+            throw CancellationError()
+        })
+        let unavailable = FakeProviderWebSocketTask(receiveResults: [.failure(URLError(.cannotConnectToHost))])
+        let restored = FakeProviderWebSocketTask(receiveResults: [], receiveOverride: { _ in
+            if await restoredReads.recordAttempt() == 1 {
+                return .string("{\"type\":\"hello_ack\",\"heartbeat_interval_s\":5,\"compatibility_policy\":\"unconfigured\"}")
+            }
+            try await Task.sleep(nanoseconds: 60_000_000_000)
+            throw CancellationError()
+        })
+        let factory = FakeProviderWebSocketFactory(sockets: [first, unavailable, restored])
+        let reason = LockedBox<String?>(nil)
+        let runtime = try await ModelRuntime(modelID: nil)
+        let client = try XCTUnwrap(CoordinatorClient(
+            config: config, modelRuntime: runtime, providerStatus: status,
+            reconnectInitialBackoffNanoseconds: 1_000_000,
+            attestationGenerator: StaticAttestationGenerator(token: nil),
+            webSocketFactory: { factory.makeSocket(for: $0) },
+            sleepAssertionFactory: { nil },
+            watchdogExitHook: { reason.set($0) }
+        ))
+        await client.suppressSignedRecoveryDiscoveryForTest()
+        await client.start()
+        try await Self.waitUntil(timeoutNanoseconds: 5_000_000_000) {
+            await status.snapshot().coordinatorConnected
+        }
+        await client.seedLastHeartbeatSuccessForTest(ageNanoseconds: 16_000_000_000)
+        await client.evaluateHeartbeatWatchdogForTest(intervalSeconds: 5)
+        try await Self.waitUntil(timeoutNanoseconds: 5_000_000_000) {
+            guard factory.requestsSnapshot().count == 3 else { return false }
+            return await status.snapshot().coordinatorConnected
+        }
+        let snapshot = await status.snapshot()
+        let recoveryPending = await client.heartbeatRecoveryPendingForTest()
+        XCTAssertTrue(snapshot.modelLoaded)
+        XCTAssertTrue(snapshot.coordinatorConnected)
+        XCTAssertFalse(recoveryPending)
+        XCTAssertNil(reason.get())
+        XCTAssertGreaterThan(first.cancelCountSnapshot(), 0)
+        XCTAssertEqual(restored.resumeCountSnapshot(), 1)
+        await client.stop()
     }
 
     func testSignalShutdownOwnsExitWhileJoinedSelfCheckCleanupIsSuspended() async throws {
@@ -5822,9 +5945,7 @@ final class CoordinatorClientTests: XCTestCase {
     }
 
     // Issue #189 R1 security MEDIUM: inbound traffic must also count
-    // as heartbeat liveness. If the coordinator stops responding but
-    // the OS keeps queuing our sends, the watchdog must still fire
-    // — and conversely, fresh inbound activity must keep it quiet
+    // as heartbeat liveness. Fresh inbound activity must keep it quiet
     // even when no sends have happened. The handler hook bumps
     // recordHeartbeatSuccess on every received frame.
     func testHandleBumpsHeartbeatSuccessOnInboundActivity() async throws {

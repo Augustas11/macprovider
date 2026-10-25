@@ -9,7 +9,7 @@
     {
       "spec_id": "SPEC-001",
       "title": "Phase 3 Binary: Mac Provider Inference CLI",
-      "version": "1.9.46",
+      "version": "1.9.47",
       "path": "specs/SPEC-001-phase3-binary.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -1645,12 +1645,23 @@
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:func setSleepAssertionDesired",
         "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:private func runReconnectLoop",
-        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:func drainFromCoordinator"
+        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:func drainFromCoordinator",
+        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:private func evaluateHeartbeatWatchdog",
+        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:private func requestHeartbeatRecovery",
+        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:private func cleanupConnection()"
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testSleepAssertionSurvivesDisconnectAndReleasesOnStop",
         "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testSleepAssertionFollowsServingIntent",
-        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testSleepAssertionRefusesReArmAfterStop"
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testSleepAssertionRefusesReArmAfterStop",
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testHeartbeatWatchdogRequestsReconnectWithoutExitingOrUnloadingModel",
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testHeartbeatWatchdogHardFailsOnlyWhenLocalRecoveryRemainsWedged",
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testCompletedCleanupDisarmsRecoveryDuringCoordinatorOutage",
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testStaleHeartbeatRecoveryCannotCancelReplacementSession",
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testSocketCancellationReconnectsThroughOutageAndRetainsLoadedModel",
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testSignalShutdownOwnsExitWhileJoinedSelfCheckCleanupIsSuspended",
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testRepeatedInvalidAuthRequestFailuresFireRecoveryHook",
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testTransientReconnectFailureResetsAuthProtocolFailureStreak"
       ],
       "journeys": [],
       "evidence": [],
@@ -1658,7 +1669,7 @@
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/854",
-        "rationale": "Provider serving continuity across coordinator disconnect, reconnect backoff, and coordinator drain (§6.5 / FR-13 / FR-15 / AC-16): PR #853 binds the macOS sleep assertion to serving intent under regression tests, but production physical uptime evidence remains pending."
+        "rationale": "Provider serving continuity across coordinator disconnect, reconnect backoff and drain (FR-13 / AC-16): regression tests cover sleep assertions, reconnect-first heartbeat recovery with the model retained, a bounded fatal watchdog for wedged local teardown, stale-session fencing and signal/auth safeguards. Released-provider live acceptance remains pending until the next CLI cut; no hardware or live runtime changes were performed in this campaign."
       }
     },
     {
