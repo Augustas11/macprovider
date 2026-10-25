@@ -131,6 +131,9 @@ final class PrivacyCodeBoundTests: XCTestCase {
             let fd = accept(listener, nil, nil)
             guard fd >= 0 else { return }
             defer { close(fd) }
+            // The client closes at its deadline while this peer is still writing.
+            var noSigPipe: Int32 = 1
+            _ = setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size))
             _ = try? PrivacyCodeBoundFrame.read(from: fd, deadline: .now() + 2)
             // A frame header promising 100 bytes, then one byte every 300 ms.
             var header = Data()
