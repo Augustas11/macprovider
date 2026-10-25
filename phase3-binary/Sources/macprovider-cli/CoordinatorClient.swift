@@ -691,10 +691,11 @@ actor CoordinatorClient {
     private var coordinatorSessionAccepted = false
     private var runTask: Task<Void, Never>?
     private var heartbeatTask: Task<Void, Never>?
-    // Issue #189: separate watchdog task observing heartbeat liveness.
-    // If the heartbeat task itself stalls (App Nap, cooperative-task
-    // starvation), the watchdog fires watchdogExitHook so launchd respawns.
+    // Stale heartbeats first request a reconnect. Process exit is reserved for
+    // local receive/cleanup work that cannot unwind after socket cancellation.
     private var heartbeatWatchdogTask: Task<Void, Never>?
+    private var heartbeatWatchdogGeneration: UInt64 = 0
+    private var heartbeatRecoveryStartedNanoseconds: UInt64?
     /// Once a signal owns process exit, no liveness recovery may replace it.
     private var signalShutdownStarted = false
     /// SPEC-047-R003(iv) hold: polls readiness for an accepted session whose
@@ -702,9 +703,8 @@ actor CoordinatorClient {
     private var admissionPendingReadinessWatchTask: Task<Void, Never>?
     /// The coordinator hold the accepted session is held through: a pending
     /// BYOM admission, or (SPEC-001 v1.9.21) missing network catalog material.
-    /// The Issue #189 watchdog must reconnect this session, not Darwin.exit:
-    /// launchd KeepAlive is not present on the physical admission-journey rig,
-    /// and exiting drops the live binding SPEC-047-R003(iv) requires.
+    /// Like every accepted session, this hold reconnects without restarting
+    /// the process when coordinator transport liveness is lost.
     private var activeBuyerServingHold: CoordinatorReadinessClient.BuyerServingHold?
     private var admissionPendingHoldActive: Bool { activeBuyerServingHold != nil }
     private var lastHeartbeatSuccessNanoseconds: UInt64 = 0
@@ -1275,7 +1275,7 @@ actor CoordinatorClient {
         stopNativeMTPServedBankPoll()
         stopNativeMTPTupleOfferRetry()
         heartbeatTask?.cancel()
-        heartbeatWatchdogTask?.cancel()
+        stopHeartbeatWatchdog()
         admissionPendingReadinessWatchTask?.cancel()
         activeBuyerServingHold = nil
         swapHeartbeatTask?.cancel()
@@ -2706,6 +2706,12 @@ actor CoordinatorClient {
                 try await group.next()
             } catch {
                 group.cancelAll()
+                // A cancelled socket/child is a transport failure unless the
+                // owning serving task itself was cancelled. Otherwise the
+                // reconnect loop mistakes soft recovery for operator shutdown.
+                if error is CancellationError, !Task.isCancelled {
+                    throw URLError(.networkConnectionLost)
+                }
                 throw error
             }
             group.cancelAll()
@@ -2725,8 +2731,12 @@ actor CoordinatorClient {
         stopNativeMTPTupleOfferRetry()
         heartbeatTask?.cancel()
         heartbeatTask = nil
-        heartbeatWatchdogTask?.cancel()
-        heartbeatWatchdogTask = nil
+        let watchdogGeneration = heartbeatWatchdogGeneration
+        // Keep the observer alive across suspending relay cleanup. Entering
+        // teardown is not proof that local recovery can actually complete.
+        if heartbeatWatchdogTask != nil {
+            requestHeartbeatRecovery(generation: watchdogGeneration)
+        }
         admissionPendingReadinessWatchTask?.cancel()
         admissionPendingReadinessWatchTask = nil
         activeBuyerServingHold = nil
@@ -2771,16 +2781,14 @@ actor CoordinatorClient {
             connected: false
         )
         await providerStatus.setCoordinatorSession(connected: false)
+        if heartbeatWatchdogGeneration == watchdogGeneration {
+            stopHeartbeatWatchdog()
+        }
     }
 
     private func handle(_ message: URLSessionWebSocketTask.Message) async throws {
-        // Issue #189 R1 security MEDIUM: the watchdog measures local
-        // send completion, which a one-way-broken socket can satisfy
-        // indefinitely (OS-level queueing while the coordinator has
-        // stopped receiving). Bump the success timestamp on EVERY
-        // received frame too, so a coordinator that has stopped
-        // talking back (the actual signal we care about) trips the
-        // watchdog within tolerance.
+        // Received frames are positive liveness evidence too. Successful sends
+        // alone do not prove remote receipt (the OS may still queue them).
         recordHeartbeatSuccess()
 
         let text: String
@@ -3994,14 +4002,37 @@ actor CoordinatorClient {
         try await sendHeartbeatBounded(resetWindow: resetWindow)
     }
 
-    // Issue #189: test seam — start a watchdog with a short interval
-    // and verify it fires the exit hook when last-success is stale.
+    // Test seams exercise both recovery phases without a wall-clock wait.
     func startHeartbeatWatchdogForTest(intervalSeconds: Int) {
         startHeartbeatWatchdog(intervalSeconds: intervalSeconds)
     }
 
     func evaluateHeartbeatWatchdogForTest(intervalSeconds: Int) {
         evaluateHeartbeatWatchdog(tolerance: Self.heartbeatWatchdogToleranceNanoseconds(intervalSeconds: intervalSeconds))
+    }
+
+    func heartbeatRecoveryPendingForTest() -> Bool {
+        heartbeatRecoveryStartedNanoseconds != nil
+    }
+
+    func seedHeartbeatRecoveryAgeForTest(ageNanoseconds: UInt64) {
+        let now = DispatchTime.now().uptimeNanoseconds
+        heartbeatRecoveryStartedNanoseconds = now > ageNanoseconds ? now - ageNanoseconds : 1
+    }
+
+    func heartbeatWatchdogGenerationForTest() -> UInt64 {
+        heartbeatWatchdogGeneration
+    }
+
+    func requestHeartbeatRecoveryForTest(generation: UInt64) {
+        requestHeartbeatRecovery(generation: generation)
+    }
+
+    func evaluateHeartbeatWatchdogForTest(intervalSeconds: Int, generation: UInt64) {
+        evaluateHeartbeatWatchdog(
+            tolerance: Self.heartbeatWatchdogToleranceNanoseconds(intervalSeconds: intervalSeconds),
+            generation: generation
+        )
     }
 
     func setAdmissionPendingHoldActiveForTest(_ active: Bool) {
@@ -4018,8 +4049,7 @@ actor CoordinatorClient {
     }
 
     func cancelHeartbeatWatchdogForTest() {
-        heartbeatWatchdogTask?.cancel()
-        heartbeatWatchdogTask = nil
+        stopHeartbeatWatchdog()
     }
 
     func suppressSignedRecoveryDiscoveryForTest() {
@@ -6134,13 +6164,8 @@ actor CoordinatorClient {
     // existing closeWebSocketAfterKeepaliveFailure → reconnect path fires
     // before the coordinator decides we're gone.
     private static let heartbeatSendTimeoutSeconds: Double = 5
-    // Issue #189: watchdog tolerance, expressed against the actual tick
-    // cadence (≤ keepaliveTickCeilingSeconds = 5s) rather than the
-    // coordinator-supplied interval. The tick is what produces a
-    // success timestamp, so multiplying tickSeconds × 3 (= ≤15s on a
-    // 5s tick) gives a hard upper bound that is independent of the
-    // coordinator-configured heartbeat interval and is always well
-    // below the 90s coordinator inactivity drop.
+    // The 15s liveness tolerance requests transport recovery, never process
+    // exit. It is independent of the coordinator-configured heartbeat interval.
     private static let heartbeatWatchdogToleranceMultiplier: Int = 3
     // A one-second coordinator heartbeat previously produced a three-second
     // watchdog tolerance even though a single bounded send is allowed five
@@ -6149,16 +6174,19 @@ actor CoordinatorClient {
     // Keep the historical 15-second upper bound as the minimum as well: it is
     // still far below coordinator inactivity while exceeding the send bound.
     private static let heartbeatWatchdogMinimumToleranceSeconds: Int = 15
+    // Only local recovery is bounded: remote unavailability and reconnect
+    // backoff may last indefinitely without unloading the resident model.
+    private static let heartbeatRecoveryTimeoutNanoseconds: UInt64 = 60_000_000_000
     private func startHeartbeat(intervalSeconds: Int) {
-        guard !signalShutdownStarted else { return }
+        guard !signalShutdownStarted, !stopped else { return }
         heartbeatTask?.cancel()
-        heartbeatWatchdogTask?.cancel()
         let tickSeconds = max(1, min(intervalSeconds, Self.keepaliveTickCeilingSeconds))
         Self.keepaliveDebug("heartbeat_start interval_s=\(intervalSeconds) tick_s=\(tickSeconds)")
         // Seed last-success to "now" so the watchdog doesn't fire before
         // the very first tick completes.
         lastHeartbeatSuccessNanoseconds = DispatchTime.now().uptimeNanoseconds
         startHeartbeatWatchdog(intervalSeconds: intervalSeconds)
+        let generation = heartbeatWatchdogGeneration
         heartbeatTask = Task { [weak self] in
             var secondsSinceWindowReset = 0
             while !Task.isCancelled {
@@ -6178,7 +6206,8 @@ actor CoordinatorClient {
                     // Issue #189: bound the send so a wedged URLSession does
                     // not silently absorb every tick for hours.
                     try await self?.sendHeartbeatBounded(resetWindow: rollWindow)
-                    await self?.recordHeartbeatSuccess()
+                    guard !Task.isCancelled,
+                          await self?.recordHeartbeatSuccess(generation: generation) == true else { return }
                     // SPEC-020-R005 (HIGH-1): re-observe a stuck coordinator
                     // recommendation on the periodic tick so the accepted-session
                     // recovery counter can accumulate to the threshold. Self-
@@ -6187,7 +6216,7 @@ actor CoordinatorClient {
                     await self?.reobserveAcceptedSessionRecoveryIfDue()
                 } catch {
                     Self.keepaliveDebug("keepalive_send_error error=\(error)")
-                    await self?.closeWebSocketAfterKeepaliveFailure()
+                    await self?.requestHeartbeatRecovery(generation: generation)
                     return
                 }
             }
@@ -6202,11 +6231,13 @@ actor CoordinatorClient {
     // Tolerance derives from tickSeconds (the actual tick cadence,
     // capped at keepaliveTickCeilingSeconds = 5s), NOT from the
     // coordinator-supplied intervalSeconds. This keeps the watchdog
-    // tolerance bounded at ~15s regardless of operator/coordinator
+    // reconnect threshold bounded at 15s regardless of operator/coordinator
     // misconfiguration and avoids integer-overflow math at the
     // extremes (Int.max heartbeat_interval_s no longer traps).
     private func startHeartbeatWatchdog(intervalSeconds: Int) {
-        guard !signalShutdownStarted else { return }
+        guard !signalShutdownStarted, !stopped else { return }
+        stopHeartbeatWatchdog()
+        let generation = heartbeatWatchdogGeneration
         let tickSeconds = max(1, min(intervalSeconds, Self.keepaliveTickCeilingSeconds))
         let tolerance = Self.heartbeatWatchdogToleranceNanoseconds(intervalSeconds: intervalSeconds)
         // Check at a sub-tick cadence so an overrun is detected within
@@ -6217,28 +6248,54 @@ actor CoordinatorClient {
                 try? await Task.sleep(nanoseconds: checkNanoseconds)
                 if Task.isCancelled { return }
                 guard let self else { return }
-                if await self.evaluateHeartbeatWatchdog(tolerance: tolerance) { return }
+                if await self.evaluateHeartbeatWatchdog(tolerance: tolerance, generation: generation) { return }
             }
         }
     }
 
-    /// Check and act in one actor turn: shutdown cannot claim exit between
-    /// checking the latch and invoking the hook (or reconnecting a held session).
+    /// Check and act in one actor turn so shutdown and session replacement
+    /// cannot race a recovery action into the wrong socket or exit path.
     @discardableResult
-    private func evaluateHeartbeatWatchdog(tolerance: UInt64) -> Bool {
-        guard !Task.isCancelled, !signalShutdownStarted else { return true }
-        let elapsed = nanosecondsSinceLastHeartbeatSuccess()
-        guard elapsed >= tolerance else { return false }
-        if admissionPendingHoldActive {
-            closeWebSocketAfterKeepaliveFailure()
-        } else {
-            watchdogExitHook("heartbeat liveness exceeded tolerance: \(elapsed / 1_000_000_000)s since last success >= \(tolerance / 1_000_000_000)s")
+    private func evaluateHeartbeatWatchdog(tolerance: UInt64, generation: UInt64? = nil) -> Bool {
+        guard !Task.isCancelled, !signalShutdownStarted, !stopped else { return true }
+        if let generation, generation != heartbeatWatchdogGeneration { return true }
+        if let recoveryStarted = heartbeatRecoveryStartedNanoseconds {
+            let now = DispatchTime.now().uptimeNanoseconds
+            let recoveryElapsed = now > recoveryStarted ? now - recoveryStarted : 0
+            guard recoveryElapsed >= Self.heartbeatRecoveryTimeoutNanoseconds else { return false }
+            watchdogExitHook("local coordinator recovery wedged: socket cancellation/cleanup made no progress for \(recoveryElapsed / 1_000_000_000)s")
+            return true
         }
-        return true
+        guard nanosecondsSinceLastHeartbeatSuccess() >= tolerance else { return false }
+        requestHeartbeatRecovery(generation: heartbeatWatchdogGeneration)
+        return false
+    }
+
+    private func requestHeartbeatRecovery(generation: UInt64) {
+        guard !signalShutdownStarted, !stopped,
+              generation == heartbeatWatchdogGeneration,
+              heartbeatRecoveryStartedNanoseconds == nil else { return }
+        heartbeatRecoveryStartedNanoseconds = DispatchTime.now().uptimeNanoseconds
+        Self.keepaliveDebug("heartbeat_recovery_requested local_timeout_s=60")
+        closeWebSocketAfterKeepaliveFailure()
+    }
+
+    private func stopHeartbeatWatchdog() {
+        heartbeatWatchdogGeneration &+= 1
+        heartbeatRecoveryStartedNanoseconds = nil
+        heartbeatWatchdogTask?.cancel()
+        heartbeatWatchdogTask = nil
     }
 
     private func recordHeartbeatSuccess() {
         lastHeartbeatSuccessNanoseconds = DispatchTime.now().uptimeNanoseconds
+    }
+
+    @discardableResult
+    private func recordHeartbeatSuccess(generation: UInt64) -> Bool {
+        guard generation == heartbeatWatchdogGeneration else { return false }
+        recordHeartbeatSuccess()
+        return true
     }
 
     private static func heartbeatWatchdogToleranceNanoseconds(intervalSeconds: Int) -> UInt64 {
@@ -6487,8 +6544,7 @@ actor CoordinatorClient {
         signalShutdownStarted = true
         heartbeatTask?.cancel()
         heartbeatTask = nil
-        heartbeatWatchdogTask?.cancel()
-        heartbeatWatchdogTask = nil
+        stopHeartbeatWatchdog()
     }
 
     func drainForExit(reason: String) async {
@@ -6535,8 +6591,7 @@ actor CoordinatorClient {
         // the drain_status sequence is still being emitted.
         heartbeatTask?.cancel()
         heartbeatTask = nil
-        heartbeatWatchdogTask?.cancel()
-        heartbeatWatchdogTask = nil
+        stopHeartbeatWatchdog()
         try? await sendStateUpdate(state: .draining, reason: reason)
         try? await sendDrainStatus(phase: "starting")
         try? await sendDrainStatus(phase: "in_progress")
@@ -6549,8 +6604,7 @@ actor CoordinatorClient {
         webSocket?.cancel(with: .goingAway, reason: nil)
         heartbeatTask?.cancel()
         heartbeatTask = nil
-        heartbeatWatchdogTask?.cancel()
-        heartbeatWatchdogTask = nil
+        stopHeartbeatWatchdog()
         // Keep the sleep assertion: a drain is a coordinator restart, after
         // which the reconnect loop reconnects. Releasing here would let the Mac
         // sleep during the drain grace window and stall the reconnect. The loop
@@ -7310,8 +7364,7 @@ actor CoordinatorClient {
     ) async throws -> Bool {
         heartbeatTask?.cancel()
         heartbeatTask = nil
-        heartbeatWatchdogTask?.cancel()
-        heartbeatWatchdogTask = nil
+        stopHeartbeatWatchdog()
         try await sendStateUpdate(state: .draining, reason: "autoupdate_to_\(target)")
         // The coordinator has now seen the draining frame (it stops routing buyers);
         // any later throw must be reconciled, not silently degraded.
@@ -7347,8 +7400,7 @@ actor CoordinatorClient {
     private func autoupdateLocalDrain(target: String) async -> Bool {
         heartbeatTask?.cancel()
         heartbeatTask = nil
-        heartbeatWatchdogTask?.cancel()
-        heartbeatWatchdogTask = nil
+        stopHeartbeatWatchdog()
         await providerStatus.setState(.draining, reason: "autoupdate_to_\(target)")
         let softDrained = await providerStatus.waitUntilDrained(timeoutSeconds: 120, preemptingLocal: true)
         if softDrained {
