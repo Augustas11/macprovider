@@ -1,6 +1,7 @@
 #if DEBUG || MACPROVIDER_LAB_HARNESS
 import Foundation
 import XCTest
+import MacProviderCore
 @testable import macprovider_cli
 
 /// `native-mtp-bench --validate-policy-only` is the pre-downtime check: every
@@ -101,6 +102,20 @@ final class NativeMTPBenchPolicyPreflightTests: XCTestCase {
         assertRefuses("tokenizer_sha256") {
             try frozen.validateObserved(modelID: frozen.modelID, targetSHA256: target, mtpSHA256: mtp, tokenizerSHA256: other)
         }
+    }
+
+    /// Window 5 (2026-10-25): the tools/history profile carried a tool_call id
+    /// the production parser refuses, found only after the provider was paused.
+    func testEveryRequestProfileParsesThroughTheProductionValidator() throws {
+        for shape in ["plain_text", "tools_history_reasoning"] {
+            for (temperature, topP) in [(0.0, 1.0), (1.0, 0.95)] {
+                XCTAssertNoThrow(try NativeMTPBenchRequests.make(
+                    modelID: "zai-org/glm-5.3-flash", requestID: "validate", prompt: "p", maxTokens: 128,
+                    temperature: temperature, topP: topP, requestShape: shape
+                ), shape)
+            }
+        }
+        XCTAssertFalse(ChatCompletionRequest.isAcceptedToolCallID("call_baseline_read"))
     }
 
     func testPersistentHashCacheGivesTheUncachedDigestAndRehashesChangedFiles() throws {

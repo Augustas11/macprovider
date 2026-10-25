@@ -291,6 +291,18 @@ private final class NativeMTPBenchRunner {
     /// load, then a one-line summary. No MLX model is loaded.
     func validate() throws {
         let checked = try preflight()
+        // Both request forms a cell builds (prompt sizing, then the run),
+        // through the production request parser; no model or tokenizer.
+        for cell in policy.matrixCells {
+            _ = try NativeMTPBenchRequests.make(
+                modelID: modelID, requestID: "prompt-sizing", prompt: "validate", maxTokens: 1,
+                temperature: 0, requestShape: policy.requestShape
+            )
+            _ = try NativeMTPBenchRequests.make(
+                modelID: modelID, requestID: "validate-\(cell.id)", prompt: "validate", maxTokens: cell.maxTokens,
+                temperature: policy.temperature, topP: policy.topP, requestShape: policy.requestShape
+            )
+        }
         let summary: [String: Any] = [
             "validate_only": "pass",
             "family": layout.family.modelFamily,
@@ -630,7 +642,7 @@ private final class NativeMTPBenchRunner {
                     // Both paths use the same request ID (separate runtimes),
                     // so a sampled row draws the same seeded stream on each.
                     let requestID = "\(cell.id)-b\(block)-r\(index)"
-                    let request = try Self.makeRequest(
+                    let request = try NativeMTPBenchRequests.make(
                         modelID: modelID,
                         requestID: requestID,
                         prompt: prompt,
@@ -764,7 +776,7 @@ private final class NativeMTPBenchRunner {
         let finalTarget = target
         return try await container.perform { context in
             func servedCount(_ text: String) async throws -> Int {
-                let request = try Self.makeRequest(
+                let request = try NativeMTPBenchRequests.make(
                     modelID: modelID,
                     requestID: "prompt-sizing",
                     prompt: text,
@@ -856,42 +868,6 @@ private final class NativeMTPBenchRunner {
         ]
     }
 
-    private static func makeRequest(
-        modelID: String,
-        requestID: String,
-        prompt: String,
-        maxTokens: Int,
-        temperature: Double,
-        topP: Double = 1,
-        requestShape: String = "plain_text"
-    ) throws -> ChatCompletionRequest {
-        var object: [String: Any] = [
-            "model": modelID,
-            "messages": [["role": "user", "content": prompt]],
-            "max_tokens": maxTokens,
-            "temperature": temperature,
-            "top_p": topP,
-            "stream": true,
-        ]
-        if requestShape == "tools_history_reasoning" {
-            object["tools"] = [["type": "function", "function": [
-                "name": "read_file", "description": "Read a project source file.",
-                "parameters": ["type": "object", "properties": ["path": ["type": "string"]], "required": ["path"]],
-            ]]]
-            object["messages"] = [
-                ["role": "user", "content": "Read the project file before answering."],
-                ["role": "assistant", "content": "", "tool_calls": [[
-                    "id": "call_baseline_read", "type": "function", "function": ["name": "read_file", "arguments": "{\"path\":\"main.swift\"}"],
-                ]]],
-                ["role": "tool", "tool_call_id": "call_baseline_read", "content": "func main() { print(42) }"],
-                ["role": "user", "content": prompt],
-            ]
-            object["chat_template_kwargs"] = ["enable_thinking": true]
-        }
-        let data = try JSONSerialization.data(withJSONObject: object)
-        return try ChatCompletionRequest.parse(data: data).withRequestID(requestID)
-    }
-
     private static func runStreamingRequest(_ request: ChatCompletionRequest, runtime: ModelRuntime, tokenObserver: NativeMTPLabCommittedTokenTimingObserver) async throws -> NativeMTPBenchRequestResult {
         guard let requestID = request.requestID else {
             throw NativeMTPBenchError.assertionFailed("request missing id")
@@ -951,6 +927,46 @@ private final class NativeMTPBenchRunner {
         var buffer = [CChar](repeating: 0, count: size)
         guard sysctlbyname(name, &buffer, &size, nil, 0) == 0 else { return nil }
         return String(cString: buffer)
+    }
+}
+
+/// The bench's request for one profile. Parsed by the production validator,
+/// so a profile the runtime would refuse fails before any model load.
+enum NativeMTPBenchRequests {
+    static func make(
+        modelID: String,
+        requestID: String,
+        prompt: String,
+        maxTokens: Int,
+        temperature: Double,
+        topP: Double = 1,
+        requestShape: String = "plain_text"
+    ) throws -> ChatCompletionRequest {
+        var object: [String: Any] = [
+            "model": modelID,
+            "messages": [["role": "user", "content": prompt]],
+            "max_tokens": maxTokens,
+            "temperature": temperature,
+            "top_p": topP,
+            "stream": true,
+        ]
+        if requestShape == "tools_history_reasoning" {
+            object["tools"] = [["type": "function", "function": [
+                "name": "read_file", "description": "Read a project source file.",
+                "parameters": ["type": "object", "properties": ["path": ["type": "string"]], "required": ["path"]],
+            ]]]
+            object["messages"] = [
+                ["role": "user", "content": "Read the project file before answering."],
+                ["role": "assistant", "content": "", "tool_calls": [[
+                    "id": "call_baselinereadfile0001", "type": "function", "function": ["name": "read_file", "arguments": "{\"path\":\"main.swift\"}"],
+                ]]],
+                ["role": "tool", "tool_call_id": "call_baselinereadfile0001", "content": "func main() { print(42) }"],
+                ["role": "user", "content": prompt],
+            ]
+            object["chat_template_kwargs"] = ["enable_thinking": true]
+        }
+        let data = try JSONSerialization.data(withJSONObject: object)
+        return try ChatCompletionRequest.parse(data: data).withRequestID(requestID)
     }
 }
 
