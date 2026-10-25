@@ -2,6 +2,7 @@ import Foundation
 import MLX
 import MLXLLM
 import MLXLMCommon
+import MLXNN
 @testable import MacProviderCore
 @testable import macprovider_cli
 import XCTest
@@ -11,13 +12,23 @@ import XCTest
 /// GLM-5-Next's linear-attention kernels are GPU-only, so these run on Metal
 /// and skip where the MLX metallib is unavailable.
 ///
-/// Turn 1 prefills to the last role marker, snapshots there (target layers and
-/// MTP head state), and finishes. Turn 2 extends turn 1 at the marker. A warm
-/// turn-2 row installs the snapshot and prefills only the rest; a cold row
-/// prefills the full turn-2 prompt with the same chunk boundaries. Both must
-/// hold byte-equal target and head state and produce the same greedy tokens,
-/// and the stored snapshot must not change.
+/// Turn 1 prefills to its last `<|assistant|>`, snapshots there (target layers
+/// and MTP head state), and finishes. Turn 2 extends turn 1 at the marker. A
+/// warm turn-2 row installs the snapshot and prefills only the rest; a cold
+/// row prefills the full turn-2 prompt. Both take their chunk plans from the
+/// production planner (`ModelRuntime.continuousBatchPromptResumeBoundaries`
+/// and `ContinuousBatchScheduler`'s balanced chunks), must hold byte-equal
+/// target and head state and produce the same greedy tokens, and the stored
+/// snapshot must not change.
 final class GLM5NextCBPromptSnapshotTests: XCTestCase {
+    /// GPU-only kernels: other classes set a CPU default device for the whole
+    /// process (`Device.setDefault`), so pin the GPU here.
+    override func invokeTest() {
+        Device.withDefaultDevice(Device(.gpu)) {
+            super.invokeTest()
+        }
+    }
+
     private static let blockSize = 8
     private static let chunk = 16
     private static let decodeSteps = 8
@@ -33,16 +44,62 @@ final class GLM5NextCBPromptSnapshotTests: XCTestCase {
         try await runTwoTurns(native: true)
     }
 
+    /// Window A (2026-10-25) root cause, reproduced: a cold prefill that runs
+    /// straight through an earlier turn's snapshot position (the plan before
+    /// the fix: split only at the row's own snapshot) computes a different
+    /// state there than the resumed row, whose short chunk after the snapshot
+    /// takes other kernel routes (here 4-bit quantized matmuls and the MoE
+    /// gather on a 5-token chunk against one 68-token chunk). The production
+    /// plan, split at every resume boundary, gives the identical state.
+    /// Kernel routing is device-dependent; on this fixture the old plan
+    /// differs on Apple M-series GPUs.
+    func testColdPrefillThroughAnEarlierSnapshotDiffersUnlessItSplitsThere() async throws {
+        try requireMetal()
+        let model = try ConversationPromptSnapshotTests.tinyGLM()
+        let floats = model.parameters().flattened().map { key, value in
+            (key, value.dtype == .float32 ? value.asType(.bfloat16) : value)
+        }
+        model.update(parameters: ModuleParameters.unflattened(floats))
+        quantize(model: model, groupSize: 32, bits: 4) { _, module in
+            (module as? Linear).map { $0.weight.dim(1) % 32 == 0 } ?? false
+        }
+        eval(model)
+        let rows = try Self.rows(model: model, native: false, chunk: 512)
+
+        let history = Self.history
+        let turn1 = history + [Self.assistant, Self.think]
+        let first = try await rows.run("turn1", prompt: turn1, snapshotAt: history.count, steps: 4)
+        let snapshot = try XCTUnwrap(first.snapshot)
+        let turn2 = history + [Self.assistant, first.tokens[0] % 56, Self.observation, 2, 5]
+            + [Self.assistant, Self.think]
+
+        let warm = try await rows.run("warm", prompt: turn2, snapshotAt: nil, steps: Self.decodeSteps,
+                                      resume: snapshot)
+        let cold = try await rows.run("cold", prompt: turn2, snapshotAt: nil, steps: Self.decodeSteps)
+        let unsplit = try await rows.run("unsplit", prompt: turn2, snapshotAt: nil, steps: Self.decodeSteps,
+                                         boundaries: [turn2.count - 2])
+        XCTAssertEqual(cold.chunkEnds.filter { $0 > history.count }, warm.chunkEnds,
+                       "after the snapshot the cold plan is the resumed plan")
+        XCTAssertFalse(unsplit.chunkEnds.contains(history.count))
+        assertEqualStates(warm.finalLayers, cold.finalLayers, "resume-boundary plan")
+        XCTAssertEqual(warm.tokens, cold.tokens)
+        XCTAssertFalse(Self.equalStates(warm.finalLayers, unsplit.finalLayers),
+                       "a cold prefill through the snapshot position matched the resumed state; the fixture no longer exposes chunk-plan dependence")
+    }
+
     // MARK: - Harness
 
-    private func runTwoTurns(native: Bool) async throws {
+    private static let history: [Int] = {
+        var history = [system] + (0 ..< 40).map { ($0 * 7 + 3) % 56 }
+        history += [user] + (0 ..< 21).map { ($0 * 5 + 1) % 56 }
+        return history
+    }()
+
+    private static func rows(model: GLM5NextTextModel, native: Bool, chunk: Int) throws -> Rows {
         let configuration = try ConversationPromptSnapshotTests.tinyGLMConfiguration()
-        let model = try ConversationPromptSnapshotTests.tinyGLM()
         let kinds = try model.newCache(parameters: nil).map {
             try XCTUnwrap(PagedKVSharedForwardBackend.CacheKind.recognized(from: $0))
         }
-        XCTAssertTrue(kinds.contains(where: \.isPagedMLA))
-        XCTAssertTrue(kinds.contains(.recurrentMamba))
         let drafter: MTPDrafterContainer? = native
             ? MTPDrafterContainer(context: MTPDrafterContext(
                 configuration: ModelConfiguration(id: "zai-org/glm-5.3-flash"),
@@ -60,14 +117,23 @@ final class GLM5NextCBPromptSnapshotTests: XCTestCase {
             drafterContainer: drafter
         )
         let allocator = try PagedKVBlockAllocator(blockSizeTokens: Self.blockSize, maxPhysicalBlocks: 256)
-        let rows = Rows(backend: backend, allocator: allocator, native: native)
+        return Rows(backend: backend, allocator: allocator, native: native, chunk: chunk)
+    }
 
-        var history = [Self.system] + (0 ..< 40).map { ($0 * 7 + 3) % 56 }
-        history += [Self.user] + (0 ..< 21).map { ($0 * 5 + 1) % 56 }
+    private func runTwoTurns(native: Bool) async throws {
+        let model = try ConversationPromptSnapshotTests.tinyGLM()
+        let kinds = try model.newCache(parameters: nil).map {
+            try XCTUnwrap(PagedKVSharedForwardBackend.CacheKind.recognized(from: $0))
+        }
+        XCTAssertTrue(kinds.contains(where: \.isPagedMLA))
+        XCTAssertTrue(kinds.contains(.recurrentMamba))
+        let rows = try Self.rows(model: model, native: native, chunk: Self.chunk)
+
+        let history = Self.history
         let turn1 = history + [Self.assistant, Self.think]
         let s1 = history.count
 
-        let first = try await rows.run("turn1", prompt: turn1, boundaries: [s1], snapshotAt: s1, steps: 4)
+        let first = try await rows.run("turn1", prompt: turn1, snapshotAt: s1, steps: 4)
         let snapshot = try XCTUnwrap(first.snapshot)
         XCTAssertEqual(snapshot.tokenCount, s1)
         if native {
@@ -85,10 +151,11 @@ final class GLM5NextCBPromptSnapshotTests: XCTestCase {
         turn2 += [Self.assistant, Self.think]
         let s2 = turn2.count - 2
 
-        let warm = try await rows.run("warm", prompt: turn2, boundaries: [s2], snapshotAt: nil,
+        let warm = try await rows.run("warm", prompt: turn2, snapshotAt: nil,
                                       steps: Self.decodeSteps, resume: snapshot)
-        let cold = try await rows.run("cold", prompt: turn2, boundaries: [s1, s2], snapshotAt: nil,
-                                      steps: Self.decodeSteps)
+        let cold = try await rows.run("cold", prompt: turn2, snapshotAt: nil, steps: Self.decodeSteps)
+        XCTAssertTrue(cold.chunkEnds.contains(s1) && cold.chunkEnds.contains(s2),
+                      "the cold plan ends a chunk at every resume boundary: \(cold.chunkEnds)")
         XCTAssertEqual(warm.tokens, cold.tokens, "the resumed row's greedy tokens diverged from the cold row")
         XCTAssertGreaterThan(Set(cold.tokens).count, 1)
         assertEqualStates(warm.finalLayers, cold.finalLayers, "target state after prefill")
@@ -107,6 +174,7 @@ final class GLM5NextCBPromptSnapshotTests: XCTestCase {
 
     private struct RunResult {
         let tokens: [Int]
+        let chunkEnds: [Int]
         let snapshot: ContinuousBatchSerialConversationCache?
         let finalLayers: [[MLXArray]]
         let finalHead: [[MLXArray]]?
@@ -116,24 +184,31 @@ final class GLM5NextCBPromptSnapshotTests: XCTestCase {
         let backend: PagedKVSharedForwardBackend
         let allocator: PagedKVBlockAllocator
         let native: Bool
+        let chunk: Int
 
-        init(backend: PagedKVSharedForwardBackend, allocator: PagedKVBlockAllocator, native: Bool) {
+        init(backend: PagedKVSharedForwardBackend, allocator: PagedKVBlockAllocator, native: Bool, chunk: Int) {
             self.backend = backend
             self.allocator = allocator
             self.native = native
+            self.chunk = chunk
         }
 
-        /// Production-shaped prefill: chunks of at most `chunk` tokens that
-        /// never cross a boundary, the final chunk sampling the first token,
-        /// then one-token decode steps.
+        /// The production prefill plan: the scheduler's balanced chunks of at
+        /// most `chunk` tokens, ending at every resume boundary the runtime
+        /// derives for `prompt` (or at `boundaries` when given), the final
+        /// chunk sampling the first token; then one-token decode steps.
         func run(
             _ id: String,
             prompt: [Int],
-            boundaries: [Int],
             snapshotAt: Int?,
             steps: Int,
-            resume: ContinuousBatchSerialConversationCache? = nil
+            resume: ContinuousBatchSerialConversationCache? = nil,
+            boundaries explicitBoundaries: [Int]? = nil
         ) async throws -> RunResult {
+            let boundaries = explicitBoundaries ?? ModelRuntime.continuousBatchPromptResumeBoundaries(
+                promptTokenIds: prompt.map(Int32.init),
+                policy: .resumeMarker(tokenID: Int32(GLM5NextCBPromptSnapshotTests.assistant)))
+            var chunkEnds: [Int] = []
             let start = resume?.tokenCount ?? 0
             let handle = try await allocator.allocate(
                 conversationKey: "conv:\(id)", maxTokens: prompt.count + steps + 8, initialTokens: start)
@@ -146,8 +221,12 @@ final class GLM5NextCBPromptSnapshotTests: XCTestCase {
             var snapshot: ContinuousBatchSerialConversationCache?
             var first: Int?
             while offset < prompt.count {
-                let limit = boundaries.filter { $0 > offset }.min() ?? prompt.count
-                let end = min(offset + chunk, limit)
+                let end = ContinuousBatchScheduler.balancedPrefillChunkEnd(
+                    cursor: offset,
+                    spanEnd: ContinuousBatchScheduler.nextPrefillBound(
+                        cursor: offset, promptTokenCount: prompt.count, boundaries: boundaries),
+                    maxChunkTokens: chunk)
+                chunkEnds.append(end)
                 _ = try await allocator.extend(handle, by: end - offset)
                 let outputs = try await backend.prefill(rows: [ContinuousBatchPrefillInput(
                     requestID: id,
@@ -197,7 +276,16 @@ final class GLM5NextCBPromptSnapshotTests: XCTestCase {
             }
             backend.finish(requestID: id)
             _ = try await allocator.release(handle)
-            return RunResult(tokens: generated, snapshot: snapshot, finalLayers: finalLayers, finalHead: finalHead)
+            return RunResult(tokens: generated, chunkEnds: chunkEnds, snapshot: snapshot,
+                             finalLayers: finalLayers, finalHead: finalHead)
+        }
+    }
+
+    private static func equalStates(_ lhs: [[MLXArray]], _ rhs: [[MLXArray]]) -> Bool {
+        lhs.count == rhs.count && zip(lhs, rhs).allSatisfy { a, b in
+            a.count == b.count && zip(a, b).allSatisfy { x, y in
+                x.shape == y.shape && x.dtype == y.dtype && (x.size == 0 || all(x .== y).item(Bool.self))
+            }
         }
     }
 

@@ -13,6 +13,13 @@ cold turns 0. The next turn's history carries the warm reply.
 
 Writes one JSON document to stdout and exits 1 on any failed check. Stdlib
 only; run with `python3 -I`.
+
+`--first-logits-log SERVE_LOG` instead reads the lab serve's
+`[lab-first-logits]` lines (MACPROVIDER_LAB_FIRST_TOKEN_LOGITS=1) and pairs
+each warm request with its cold twin: equal float32 logit digests mean the
+resumed prompt state was bit-identical to the cold prefill; otherwise the top-5
+logits and the top-1/top-2 margins show how far apart they were and how
+contested the greedy choice was. Exits 1 unless every pair is identical.
 """
 
 from __future__ import annotations
@@ -20,6 +27,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import json
+import re
 import sys
 import time
 import urllib.request
@@ -70,7 +78,56 @@ def summary(document: dict) -> dict:
     }
 
 
+FIRST_LOGITS = re.compile(
+    r"\[lab-first-logits\] request_id=(?P<run>\S+)-(?P<mode>warm|cold)-(?P<row>\d+)-(?P<turn>\d+) "
+    r"prompt_tokens=(?P<prompt>\d+) sha256=(?P<sha>[0-9a-f]{64}) top5=(?P<top>\S+)")
+
+
+def first_logits_report(path: str) -> int:
+    rows: dict[tuple[str, int, int], dict[str, dict]] = {}
+    with open(path, encoding="utf-8", errors="replace") as log:
+        for line in log:
+            match = FIRST_LOGITS.search(line)
+            if not match:
+                continue
+            top = [(int(i), float(v)) for i, v in (pair.split(":") for pair in match["top"].split(","))]
+            key = (match["run"], int(match["row"]), int(match["turn"]))
+            rows.setdefault(key, {})[match["mode"]] = {
+                "prompt_tokens": int(match["prompt"]), "sha256": match["sha"], "top5": top,
+                "margin": top[0][1] - top[1][1] if len(top) > 1 else None,
+            }
+    pairs = []
+    for (run, row, turn), modes in sorted(rows.items()):
+        warm, cold = modes.get("warm"), modes.get("cold")
+        if not warm or not cold:
+            pairs.append({"run": run, "row": row, "turn": turn, "complete": False})
+            continue
+        cold_top = dict(cold["top5"])
+        shared = [i for i, _ in warm["top5"] if i in cold_top]
+        pairs.append({
+            "run": run, "row": row, "turn": turn, "complete": True,
+            "prompt_tokens": [warm["prompt_tokens"], cold["prompt_tokens"]],
+            "identical": warm["sha256"] == cold["sha256"],
+            "top1_equal": warm["top5"][0][0] == cold["top5"][0][0],
+            "margin_warm": warm["margin"], "margin_cold": cold["margin"],
+            "max_abs_diff_shared_top5": max((abs(dict(warm["top5"])[i] - cold_top[i]) for i in shared), default=None),
+            "top5_warm": warm["top5"], "top5_cold": cold["top5"],
+        })
+    complete = [pair for pair in pairs if pair["complete"]]
+    identical = sum(pair["identical"] for pair in complete)
+    passed = bool(complete) and identical == len(pairs)
+    json.dump({
+        "schema": "macprovider.glm53-cb-prefix-cache-first-logits.v1",
+        "pairs": len(pairs), "complete_pairs": len(complete), "identical_pairs": identical,
+        "passed": passed, "details": pairs,
+    }, sys.stdout, indent=1, sort_keys=True)
+    sys.stdout.write("\n")
+    return 0 if passed else 1
+
+
 def main() -> int:
+    if len(sys.argv) == 3 and sys.argv[1] == "--first-logits-log":
+        return first_logits_report(sys.argv[2])
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--model", default="zai-org/glm-5.3-flash")

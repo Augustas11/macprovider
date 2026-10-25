@@ -13,7 +13,10 @@
 #        glm53_cb_prefix_cache.py at 1 and 4 rows: warm (same key) vs cold
 #        (fresh key) greedy parity per turn, warm turns >= 2 cached. Then
 #        fails unless the serve log shows snapshot hits, batched admissions,
-#        no serial_routed line and no batched forward or install failure.
+#        no serial_routed line and no batched forward or install failure, and
+#        unless every warm request's first-token logits are bit-identical to
+#        its cold twin's (first-logits.json, from the serve's lab-only
+#        `[lab-first-logits]` lines: digest, top 5 and top-1 margin).
 #   glm53-cb-prefix-cache-window.sh mtp      `native-mtp-journey-e2e
 #        --cached-prefix-turns` (step 13 only) at 1, 2 and 4 native rows:
 #        native rows resumed from a snapshot stay native and match ordinary CB
@@ -99,6 +102,13 @@ preflight() {
   mkdir "$LOCK" 2> /dev/null || { echo "refusing: another window holds $LOCK" >&2; exit 3; }
   LOCKED=1
   [[ -x $HARNESS/macprovider-cli && -f $HARNESS/mlx.metallib ]] || { echo "no harness at $HARNESS" >&2; exit 3; }
+  # The harness must carry the resume-boundary chunk plan (the Window A
+  # 2026-10-25 parity fix) and the lab first-token logits diagnostic.
+  local marker
+  for marker in prompt_snapshot_off_resume_boundary '[lab-first-logits] request_id='; do
+    strings -a "$HARNESS/macprovider-cli" | grep -qF -- "$marker" ||
+      { echo "refusing: $HARNESS/macprovider-cli lacks '$marker' (stale harness build)" >&2; exit 3; }
+  done
   [[ $(shasum -a 256 "$HARNESS/mlx.metallib" | cut -d' ' -f1) == $RELEASE_METALLIB_SHA256 ]] ||
     { echo "refusing: $HARNESS/mlx.metallib is not the signed release metallib" >&2; exit 3; }
   [[ -f $MODEL/config.json ]] || { echo "no model at $MODEL" >&2; exit 3; }
@@ -130,7 +140,7 @@ write_config() {
 
 # start_serve <config> <log stem>: waits for the lab serve's listener.
 start_serve() {
-  MACPROVIDER_CONV_CACHE_MAX_CONVERSATIONS=16 \
+  MACPROVIDER_CONV_CACHE_MAX_CONVERSATIONS=16 MACPROVIDER_LAB_FIRST_TOKEN_LOGITS=1 \
     "$HARNESS/macprovider-cli" serve --config "$1" --no-join --autotune-candidate \
     > "$2.out" 2> "$2.err" < /dev/null &
   SERVE_PID=$!
@@ -218,8 +228,20 @@ parity() {
     echo "batching_admitted=$admitted"
     echo "serial_routed=$serial"
     echo "forward_failures=$failures"
+    echo "snapshot_off_resume_boundary_misses=$(grep -c 'reason=prompt_snapshot_off_resume_boundary' $log || true)"
     grep -o 'serial_routed reason=[a-z_]*' $log | sort | uniq -c || true
   } | tee -a "$OUT/summary.txt"
+  # Warm vs cold first-token logits: bit-identical prompt state, or by how much
+  # and how contested the greedy choice was.
+  local logits_rc=0
+  /usr/bin/python3 -I "$SRC/glm53_cb_prefix_cache.py" --first-logits-log "$log" \
+    > "$OUT/first-logits.json" 2> "$OUT/first-logits.err" || logits_rc=$?
+  /usr/bin/python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1])); print("first_logits_pairs=%d identical=%d" % (d["pairs"], d["identical_pairs"]))' \
+    "$OUT/first-logits.json" 2>&1 | tee -a "$OUT/summary.txt" || true
+  if (( logits_rc != 0 )); then
+    echo "parity verdict=FAIL (first-token logits differ warm vs cold; see first-logits.json)" | tee -a "$OUT/summary.txt"
+    (( rc != 0 )) || rc=8
+  fi
   # PASS needs the snapshot resumed on CB rows: hits and batched admissions,
   # no serial route and no failed forward or install.
   if (( hits == 0 || admitted == 0 || serial > 0 || failures > 0 )); then

@@ -232,7 +232,8 @@ actor ConversationCache {
         cold: ConversationColdContext? = nil,
         allowRetainedPagedKVHandoff: Bool = false,
         fleetGrant: FleetConversationCacheGrant? = nil,
-        requireNativeMTPDrafterSnapshot: Bool = false
+        requireNativeMTPDrafterSnapshot: Bool = false,
+        promptSnapshotResumeBoundaries: [Int]? = nil
     ) async -> ConversationCacheLease? {
         guard let key = conversationKey?.trimmingCharacters(in: .whitespacesAndNewlines), !key.isEmpty else {
             return nil
@@ -396,6 +397,13 @@ actor ConversationCache {
                entry.kvCache.nativeMTPDrafter?.restores(into: incomingTokens, at: lcp) != true {
                 log("event=conv_cache action=miss key_hash=\(keyHash) reason=prompt_snapshot_drafter_unavailable snapshot_tokens=\(entry.canonicalPromptTokens.count)")
                 return await predicateMiss("prompt_snapshot_drafter_unavailable")
+            }
+            // SPEC-024-R005: a CB row resumes only on one of its own prompt's
+            // chunk boundaries, so the resumed and a cold prefill of this
+            // prompt run the same chunks (bit-identical state).
+            if let promptSnapshotResumeBoundaries, !promptSnapshotResumeBoundaries.contains(lcp) {
+                log("event=conv_cache action=miss key_hash=\(keyHash) reason=prompt_snapshot_off_resume_boundary snapshot_tokens=\(entry.canonicalPromptTokens.count)")
+                return await predicateMiss("prompt_snapshot_off_resume_boundary")
             }
         } else if !retainedPagedKV {
             // SPEC-024-R001: RotatingKVCache is trimmable only while offset < maxSize,

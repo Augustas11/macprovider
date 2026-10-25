@@ -456,6 +456,38 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         try await eventually { await allocator.freeBlockCount() == 64 }
     }
 
+    /// SPEC-024-R005, Window A 2026-10-25: a cold keyed row ends a prefill
+    /// chunk at every resume boundary (each earlier turn's snapshot), so past
+    /// the snapshot it runs exactly the chunks of the row resumed there.
+    /// Without the boundaries the cold row ran one chunk straight through the
+    /// snapshot position, and its state there differed from the snapshot.
+    func testColdRowSplitsAtResumeBoundariesLikeTheResumedRow() async throws {
+        func chunkEnds(id: String, cached: Int, boundaries: [Int]) async throws -> [Int] {
+            let backend = ScriptedBackend(scripts: [id: [7]], promptSnapshotBackend: true)
+            let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 64)
+            let scheduler = try await makeScheduler(descriptor: Self.descriptor(blockSizeTokens: 4, maxPhysicalBlocks: 64),
+                                                    maxActiveRows: 1, maxPromptChunkTokens: 64, backend: backend,
+                                                    allocator: allocator)
+            let stored = ContinuousBatchSerialConversationCache(
+                layers: [KVCacheSimple()], recurrentCheckpoints: [], tokenCount: 36, promptSnapshot: true)
+            let result = try await scheduler.submit(.init(
+                id: id, conversationKey: "conv:\(id)", promptTokens: Array(1...60),
+                maxOutputTokens: 1, temperature: 0.0, cachedPromptTokens: cached,
+                promptSnapshotTokenCount: 56, promptSnapshotCache: cached > 0 ? stored : nil,
+                promptResumeBoundaries: boundaries
+            ))
+            XCTAssertEqual(result.terminalStatus, .length, id)
+            return await backend.prefillInputs().map { $0.promptTokenOffset + $0.promptTokens.count }
+        }
+        let resumed = try await chunkEnds(id: "warm", cached: 36, boundaries: [36, 56])
+        let cold = try await chunkEnds(id: "cold", cached: 0, boundaries: [36, 56])
+        XCTAssertEqual(resumed, [56, 60])
+        XCTAssertEqual(cold, [36, 56, 60])
+        XCTAssertEqual(cold.filter { $0 > 36 }, resumed)
+        let unsplit = try await chunkEnds(id: "unsplit", cached: 0, boundaries: [])
+        XCTAssertEqual(unsplit, [56, 60], "the plan before the fix ran through 36")
+    }
+
     /// A snapshot whose length is not the cached length is never admitted.
     func testPositiveCachedTurnWithAMismatchedSnapshotIsRefused() async throws {
         let backend = ScriptedBackend(scripts: ["bad": [7]], promptSnapshotBackend: true)

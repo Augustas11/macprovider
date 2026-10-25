@@ -381,6 +381,10 @@ struct ContinuousBatchPreparedRequest: Sendable {
     /// later positive-cached turn may install into its own CB row (cached
     /// turns enabled and accepted for this tuple).
     var promptSnapshotAttachesToContinuousBatchRow = false
+    /// SPEC-024-R005: keyed GLM-5-Next CB rows only; the positions every
+    /// prefill of this prompt ends a chunk at
+    /// (`ModelRuntime.continuousBatchPromptResumeBoundaries`).
+    var promptResumeBoundaries: [Int] = []
 }
 
 /// Serializes text prompt preparation for one admitted Qwen target snapshot.
@@ -7037,7 +7041,7 @@ maxTokens: 1,
                 Self.conversationPromptSnapshotPolicy(model: context.model, tokenizer: tokenizer),
                 cachedTurnsAttachable: promptSnapshotCachedTurnsAttachable)
             let attachesToRow: Bool = {
-                guard case .lastRoleMarker = snapshotPolicy else { return false }
+                guard case .resumeMarker = snapshotPolicy else { return false }
                 return true
             }()
             return (
@@ -7060,7 +7064,11 @@ maxTokens: 1,
                         : Self.conversationPromptSnapshotTokenCount(
                             promptTokenIds: promptTokens.map(Int32.init),
                             policy: snapshotPolicy),
-                    promptSnapshotAttachesToContinuousBatchRow: attachesToRow
+                    promptSnapshotAttachesToContinuousBatchRow: attachesToRow,
+                    promptResumeBoundaries: Self.nonEmpty(request.conversationKey) == nil ? []
+                        : Self.continuousBatchPromptResumeBoundaries(
+                            promptTokenIds: promptTokens.map(Int32.init),
+                            policy: snapshotPolicy)
                 ),
                 StreamingDetokenizer(tokenizer: tokenizer)
             )
@@ -8012,7 +8020,9 @@ maxTokens: 1,
                 // the MTP head state taken at it; any other hit is a miss here,
                 // so the row stays native and prefills from zero.
                 requireNativeMTPDrafterSnapshot: tokenBoundedNativeMTPAdmission.usesNativeMTP
-                    && prepared.promptSnapshotAttachesToContinuousBatchRow
+                    && prepared.promptSnapshotAttachesToContinuousBatchRow,
+                promptSnapshotResumeBoundaries: prepared.promptSnapshotAttachesToContinuousBatchRow
+                    ? prepared.promptResumeBoundaries : nil
             )
             : nil
         #if DEBUG || MACPROVIDER_LAB_HARNESS
@@ -8079,6 +8089,7 @@ maxTokens: 1,
             retainedRecurrentCheckpoints: Self.retainedRecurrentCheckpoints(for: lease),
             promptSnapshotCache: promptSnapshotCache,
             publishesPromptSnapshotOnly: prepared.promptSnapshotAttachesToContinuousBatchRow,
+            promptResumeBoundaries: prepared.promptResumeBoundaries,
             serialToolStopObserver: serialToolStop,
             grammarConstraint: prepared.grammarConstraint,
             nativeMTPAdmission: nativeMTPAdmission
@@ -8482,7 +8493,9 @@ maxTokens: 1,
                 // the MTP head state taken at it; any other hit is a miss here,
                 // so the row stays native and prefills from zero.
                 requireNativeMTPDrafterSnapshot: tokenBoundedNativeMTPAdmission.usesNativeMTP
-                    && prepared.promptSnapshotAttachesToContinuousBatchRow
+                    && prepared.promptSnapshotAttachesToContinuousBatchRow,
+                promptSnapshotResumeBoundaries: prepared.promptSnapshotAttachesToContinuousBatchRow
+                    ? prepared.promptResumeBoundaries : nil
             )
             : nil
         #if DEBUG || MACPROVIDER_LAB_HARNESS
@@ -8541,6 +8554,7 @@ maxTokens: 1,
             retainedRecurrentCheckpoints: Self.retainedRecurrentCheckpoints(for: lease),
             promptSnapshotCache: promptSnapshotCache,
             publishesPromptSnapshotOnly: prepared.promptSnapshotAttachesToContinuousBatchRow,
+            promptResumeBoundaries: prepared.promptResumeBoundaries,
             serialToolStopObserver: serialToolStop,
             grammarConstraint: prepared.grammarConstraint,
             nativeMTPAdmission: nativeMTPAdmission
@@ -12851,8 +12865,19 @@ maxTokens: maxTokens,
         case referencePlanBoundary(step: Int)
         /// GLM-5-Next: the last chat-role marker, i.e. the history before the
         /// generation prompt (`<|assistant|><think>`), which the next turn
-        /// re-renders unchanged.
-        case lastRoleMarker(tokenIDs: Set<Int32>)
+        /// re-renders unchanged. `resumeTokenID` is the `<|assistant|>` id the
+        /// CB form below is built from.
+        case lastRoleMarker(tokenIDs: Set<Int32>, resumeTokenID: Int32? = nil)
+        /// SPEC-024-R005 GLM-5-Next CB rows: the snapshot sits at the last
+        /// `tokenID` (`<|assistant|>`, the generation-prompt start), and every
+        /// keyed prefill also ends a chunk at each earlier `tokenID` position
+        /// (`continuousBatchPromptResumeBoundaries`). Prefill numerics depend on
+        /// chunk shapes (matmul, conv, attention and MoE kernels pick their
+        /// routes by chunk length), so a snapshot equals the cold prefill's
+        /// state at that position only when both ran the same chunks: a turn
+        /// resumed at an earlier turn's snapshot and a cold prefill of the same
+        /// prompt then run identical chunk plans.
+        case resumeMarker(tokenID: Int32)
     }
 
     /// The snapshot policy a CB row may use. DeepSeek V4 CB rows keep the
@@ -12868,8 +12893,28 @@ maxTokens: maxTokens,
     ) -> ConversationPromptSnapshotPolicy? {
         switch policy {
         case .referencePlanBoundary: return policy
-        case .lastRoleMarker: return cachedTurnsAttachable ? policy : nil
+        case .lastRoleMarker(_, let resumeTokenID):
+            guard cachedTurnsAttachable, let resumeTokenID else { return nil }
+            return .resumeMarker(tokenID: resumeTokenID)
+        case .resumeMarker: return cachedTurnsAttachable ? policy : nil
         case nil: return nil
+        }
+    }
+
+    /// SPEC-024-R005: the prompt positions a keyed GLM-5-Next CB row ends a
+    /// prefill chunk at, cold or resumed: every `<|assistant|>` at or above the
+    /// reuse threshold, i.e. every position an earlier turn of this
+    /// conversation may have snapshotted at, plus this prompt's own snapshot.
+    /// A pure function of the tokens, so a prompt and any prompt extending it
+    /// agree on every boundary below their common prefix. Empty for every
+    /// other policy.
+    nonisolated static func continuousBatchPromptResumeBoundaries(
+        promptTokenIds: [Int32],
+        policy: ConversationPromptSnapshotPolicy?
+    ) -> [Int] {
+        guard case .resumeMarker(let tokenID) = policy else { return [] }
+        return promptTokenIds.indices.filter {
+            promptTokenIds[$0] == tokenID && $0 >= ConversationCache.lcpThreshold
         }
     }
 
@@ -12890,6 +12935,7 @@ maxTokens: maxTokens,
     ) -> Bool {
         guard prepared.promptSnapshotAttachesToContinuousBatchRow,
               let lease, lease.cachedPromptTokens > 0,
+              prepared.promptResumeBoundaries.contains(lease.cachedPromptTokens),
               let reusable = lease.reusableCache,
               reusable.promptSnapshot,
               reusable.retainedPagedKVSequence == nil,
@@ -12926,12 +12972,13 @@ maxTokens: maxTokens,
         }
         if model is GLM5NextModel || model is GLM5NextTextModel {
             // Only ids that round-trip, so an unknown-token fallback never matches.
-            let ids = glm5NextRoleMarkers.compactMap { marker -> Int32? in
+            func roundTrip(_ marker: String) -> Int32? {
                 guard let id = tokenizer.convertTokenToId(marker),
                       tokenizer.convertIdToToken(id) == marker else { return nil }
                 return Int32(id)
             }
-            return ids.isEmpty ? nil : .lastRoleMarker(tokenIDs: Set(ids))
+            let ids = glm5NextRoleMarkers.compactMap(roundTrip)
+            return ids.isEmpty ? nil : .lastRoleMarker(tokenIDs: Set(ids), resumeTokenID: roundTrip("<|assistant|>"))
         }
         return nil
     }
@@ -12949,8 +12996,11 @@ maxTokens: maxTokens,
         case .referencePlanBoundary(let step):
             guard step > 0, promptTokenIds.count > 1 else { return nil }
             count = step * ((promptTokenIds.count - 1) / step)
-        case .lastRoleMarker(let tokenIDs):
+        case .lastRoleMarker(let tokenIDs, _):
             guard let last = promptTokenIds.lastIndex(where: { tokenIDs.contains($0) }) else { return nil }
+            count = last
+        case .resumeMarker(let tokenID):
+            guard let last = promptTokenIds.lastIndex(of: tokenID) else { return nil }
             count = last
         }
         return count >= ConversationCache.lcpThreshold ? count : nil

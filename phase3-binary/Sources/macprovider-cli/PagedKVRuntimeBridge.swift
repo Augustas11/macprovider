@@ -42,6 +42,38 @@ struct NativeMTPStateDigestRecord: Equatable, Sendable {
     #endif
 }
 
+#if DEBUG || MACPROVIDER_LAB_HARNESS
+/// Lab only (issue #2143 Window A diagnosis). With
+/// `MACPROVIDER_LAB_FIRST_TOKEN_LOGITS=1`, each CB row's first-token logits
+/// are logged: their float32 SHA-256 (equal digests mean the prompt state was
+/// bit-identical) and the top five `id:logit`, which show how contested the
+/// greedy choice was. Absent from release builds.
+enum ContinuousBatchLabFirstTokenLogits {
+    static let enabled = ProcessInfo.processInfo.environment["MACPROVIDER_LAB_FIRST_TOKEN_LOGITS"] == "1"
+
+    /// `logits`: `[rows, vocabulary]`, one row per `requestIDs` entry.
+    static func log(requestIDs: [String], promptTokenCounts: [Int], logits: MLXArray) {
+        guard enabled else { return }
+        let rows = logits.asType(.float32)
+        for (index, requestID) in requestIDs.enumerated() {
+            let values = rows[index].asArray(Float.self)
+            let digest = values.withUnsafeBytes { SHA256.hash(data: $0) }
+                .map { String(format: "%02x", $0) }.joined()
+            var top: [(Int, Float)] = []
+            for (id, value) in values.enumerated() where top.count < 5 || value > top[4].1 {
+                top.append((id, value))
+                top.sort { $0.1 > $1.1 }
+                if top.count > 5 { top.removeLast() }
+            }
+            let topText = top.map { "\($0.0):\($0.1)" }.joined(separator: ",")
+            try? FileHandle.standardError.write(contentsOf: Data(
+                ("[lab-first-logits] request_id=\(requestID) prompt_tokens=\(promptTokenCounts[index]) "
+                    + "sha256=\(digest) top5=\(topText)\n").utf8))
+        }
+    }
+}
+#endif
+
 final class NativeMTPStateDigestObserver: @unchecked Sendable {
     private let lock = NSLock()
     private var records: [NativeMTPStateDigestRecord] = []
@@ -996,6 +1028,13 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                        Self.hasValidBatchState(batchedCaches) {
                         let sampledTokens: [Int]?
                         if inputs.contains(where: \.sampleFirstToken) {
+                            #if DEBUG || MACPROVIDER_LAB_HARNESS
+                            let sampling = inputs.indices.filter { inputs[$0].sampleFirstToken }
+                            ContinuousBatchLabFirstTokenLogits.log(
+                                requestIDs: sampling.map { inputs[$0].requestID },
+                                promptTokenCounts: sampling.map { inputs[$0].targetKVTokenCount },
+                                logits: output.logits[0..., -1, 0...][MLXArray(sampling.map(Int32.init))])
+                            #endif
                             sampledTokens = ContinuousBatchRowSampler.sample(
                                 logits: output.logits[0..., -1, 0...],
                                 rows: inputs.map(Self.samplerRow)
@@ -1092,6 +1131,12 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                             context.model(text, cache: state.caches, state: modelState)
                         }
                         if input.sampleFirstToken {
+                            #if DEBUG || MACPROVIDER_LAB_HARNESS
+                            ContinuousBatchLabFirstTokenLogits.log(
+                                requestIDs: [input.requestID],
+                                promptTokenCounts: [input.targetKVTokenCount],
+                                logits: output.logits[0..., -1, 0...])
+                            #endif
                             sampledToken = ContinuousBatchRowSampler.sample(
                                 logits: output.logits[0..., -1, 0...],
                                 rows: [Self.samplerRow(input)]

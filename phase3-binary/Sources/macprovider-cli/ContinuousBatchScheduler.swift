@@ -545,6 +545,12 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
     /// does, even when its prompt is too short to carry one: it then publishes
     /// nothing, never a retained or decoded cache. Runtime-only.
     let publishesPromptSnapshotOnly: Bool
+    /// SPEC-024-R005: prompt positions every prefill chunk of this row ends
+    /// at, besides its snapshot and checkpoints (a keyed GLM-5-Next row: each
+    /// position an earlier turn may have snapshotted at), so a row resumed
+    /// from such a snapshot and a cold row of the same prompt prefill the
+    /// same chunks. Derived from `promptTokens`; runtime-only.
+    let promptResumeBoundaries: [Int]
     /// SPEC-038 AC-26 hybrid cached turn: the retained entry's recurrent
     /// checkpoints at or below `cachedPromptTokens`. The one at exactly
     /// `cachedPromptTokens` is installed with the retained paged KV; any others
@@ -623,6 +629,7 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
         retainedRecurrentCheckpoints: [RecurrentStateCheckpoint] = [],
         promptSnapshotCache: ContinuousBatchSerialConversationCache? = nil,
         publishesPromptSnapshotOnly: Bool = false,
+        promptResumeBoundaries: [Int] = [],
         grammarConstraint: GrammarConstraintState? = nil,
         serialToolStopObserver: ContinuousBatchCanonicalStopObserver? = nil,
         decodePath: DecodePath = .ordinary,
@@ -657,6 +664,7 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
         }
         self.publishesPromptSnapshotOnly = publishesPromptSnapshotOnly
             && !conversationKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        self.promptResumeBoundaries = Set(promptResumeBoundaries.filter { $0 > 0 && $0 < promptTokens.count }).sorted()
         self.retainedRecurrentCheckpoints = retainedRecurrentCheckpoints
         self.promptSnapshotCache = promptSnapshotCache?.promptSnapshot == true ? promptSnapshotCache : nil
         self.grammarConstraint = grammarConstraint
@@ -5829,17 +5837,22 @@ actor ContinuousBatchScheduler {
         }
     }
 
-    /// End of the span a prefill chunk may cover: the prompt end, or the next
-    /// declared recurrent checkpoint. Hybrid recurrent state may only be
+    /// End of the span a prefill chunk may cover: the prompt end, the next
+    /// declared recurrent checkpoint, the pending prompt snapshot, or the next
+    /// resume boundary (SPEC-024-R005). Hybrid recurrent state may only be
     /// snapshotted on its declared boundary, so compatible groups split
     /// before crossing one.
     private func prefillSpanEnd(for row: Row) -> Int {
-        let promptTokenCount = row.request.promptTokens.count
-        var boundaries = pendingRecurrentCheckpointPositions(for: row)
+        var boundaries = pendingRecurrentCheckpointPositions(for: row) + row.request.promptResumeBoundaries
         if promptSnapshotIsPending(for: row), let snapshot = row.request.promptSnapshotTokenCount {
             boundaries.append(snapshot)
         }
-        if let checkpoint = boundaries.filter({ $0 > row.prefillCursor }).min() {
+        return Self.nextPrefillBound(
+            cursor: row.prefillCursor, promptTokenCount: row.request.promptTokens.count, boundaries: boundaries)
+    }
+
+    nonisolated static func nextPrefillBound(cursor: Int, promptTokenCount: Int, boundaries: [Int]) -> Int {
+        if let checkpoint = boundaries.filter({ $0 > cursor }).min() {
             return min(promptTokenCount, checkpoint)
         }
         return promptTokenCount
@@ -5859,13 +5872,19 @@ actor ContinuousBatchScheduler {
         if configuration.referencePrefillStepSize != nil {
             return DeepseekV4ContinuousBatchBackend.prefillEnd(offset: row.prefillCursor, promptCount: row.request.promptTokens.count)
         }
-        let spanEnd = prefillSpanEnd(for: row)
-        let remaining = spanEnd - row.prefillCursor
-        guard remaining > 0 else { return row.prefillCursor }
+        return Self.balancedPrefillChunkEnd(
+            cursor: row.prefillCursor, spanEnd: prefillSpanEnd(for: row), maxChunkTokens: maxChunkTokens)
+    }
+
+    /// The end of the next chunk: `[cursor, spanEnd)` split into the fewest
+    /// chunks of at most `maxChunkTokens`, balanced.
+    nonisolated static func balancedPrefillChunkEnd(cursor: Int, spanEnd: Int, maxChunkTokens: Int) -> Int {
+        let remaining = spanEnd - cursor
+        guard remaining > 0 else { return cursor }
         let chunkLimit = max(1, maxChunkTokens)
         let chunksRemaining = (remaining + chunkLimit - 1) / chunkLimit
         let balancedChunkSize = (remaining + chunksRemaining - 1) / chunksRemaining
-        return min(spanEnd, row.prefillCursor + balancedChunkSize)
+        return min(spanEnd, cursor + balancedChunkSize)
     }
 
     private func transitionPrefilledRow(_ row: Row, sampledToken: Int? = nil) async {

@@ -148,13 +148,85 @@ final class ConversationPromptSnapshotTests: XCTestCase {
     /// SPEC-024-R005: a GLM-5-Next CB row snapshots only under the AC-26
     /// grant, so without it no later hit is fenced off CB.
     func testGLM5NextCBRowsSnapshotOnlyUnderTheCachedTurnsGrant() {
-        let glm = ModelRuntime.ConversationPromptSnapshotPolicy.lastRoleMarker(tokenIDs: [60, 61])
+        let glm = ModelRuntime.ConversationPromptSnapshotPolicy.lastRoleMarker(tokenIDs: [60, 61], resumeTokenID: 61)
         XCTAssertNil(ModelRuntime.continuousBatchPromptSnapshotPolicy(glm, cachedTurnsAttachable: false))
-        XCTAssertEqual(ModelRuntime.continuousBatchPromptSnapshotPolicy(glm, cachedTurnsAttachable: true), glm)
+        XCTAssertEqual(ModelRuntime.continuousBatchPromptSnapshotPolicy(glm, cachedTurnsAttachable: true),
+                       .resumeMarker(tokenID: 61))
+        XCTAssertNil(ModelRuntime.continuousBatchPromptSnapshotPolicy(.lastRoleMarker(tokenIDs: [60, 61]),
+                                                                     cachedTurnsAttachable: true),
+                     "no round-tripping <|assistant|>, no CB snapshot")
         XCTAssertEqual(ModelRuntime.continuousBatchPromptSnapshotPolicy(.referencePlanBoundary(step: 2048),
                                                                        cachedTurnsAttachable: true),
                        .referencePlanBoundary(step: 2048))
         XCTAssertNil(ModelRuntime.continuousBatchPromptSnapshotPolicy(nil, cachedTurnsAttachable: true))
+    }
+
+    /// SPEC-024-R005: a GLM-5-Next CB row snapshots at its last
+    /// `<|assistant|>` and ends a prefill chunk at every `<|assistant|>` at or
+    /// above the reuse threshold. Every snapshot an earlier turn took sits on
+    /// a later turn's boundaries, so a cold prefill of the later prompt and
+    /// one resumed at that snapshot run the same chunks.
+    func testResumeBoundariesCoverEveryEarlierTurnsSnapshot() {
+        let policy = ModelRuntime.ConversationPromptSnapshotPolicy.resumeMarker(tokenID: 61)
+        func count(_ prompt: [Int32]) -> Int? {
+            ModelRuntime.conversationPromptSnapshotTokenCount(promptTokenIds: prompt, policy: policy)
+        }
+        func boundaries(_ prompt: [Int32]) -> [Int] {
+            ModelRuntime.continuousBatchPromptResumeBoundaries(promptTokenIds: prompt, policy: policy)
+        }
+        let system: [Int32] = [63] + Array(repeating: 1, count: 20)
+        let early: [Int32] = system + [60, 2, 61, 3, 60, 4]          // an assistant marker below 32
+        var history = early + Array(repeating: 5, count: 30) + [60, 6]
+        var prompts: [[Int32]] = []
+        for turn in 0 ..< 3 {
+            prompts.append(history + [61, 5])
+            history += [61] + Array(repeating: Int32(7 + turn), count: 9) + [62, 8, 60, 9]
+        }
+        let snapshots = prompts.map(count)
+        XCTAssertEqual(snapshots, [prompts[0].count - 2, prompts[1].count - 2, prompts[2].count - 2])
+        for (index, prompt) in prompts.enumerated() {
+            XCTAssertEqual(boundaries(prompt), snapshots[...index].compactMap { $0 },
+                           "turn \(index): every earlier snapshot and its own, nothing else")
+            XCTAssertEqual(boundaries(prompt).last, count(prompt))
+        }
+        XCTAssertFalse(boundaries(prompts[2]).contains(23), "an <|assistant|> below the reuse threshold")
+        // A prompt whose last role marker is not <|assistant|> snapshots at its
+        // last <|assistant|>, which is still one of its boundaries.
+        let noGeneration = prompts[1] + [60, 3]
+        XCTAssertEqual(count(noGeneration), boundaries(noGeneration).last)
+        XCTAssertEqual(ModelRuntime.continuousBatchPromptResumeBoundaries(
+            promptTokenIds: prompts[2], policy: .lastRoleMarker(tokenIDs: [60, 61, 62], resumeTokenID: 61)), [])
+    }
+
+    /// SPEC-024-R005: a CB lease resumes a snapshot only when its length is
+    /// one of the incoming prompt's resume boundaries; otherwise the cold and
+    /// resumed chunk plans would differ, so it is a miss.
+    func testResumeBoundaryLeaseMissesASnapshotOffTheIncomingPromptsBoundaries() async throws {
+        let cache = ConversationCache(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+        let stored = int32Range(0..<64)
+        func seed(_ key: String) async throws -> ConversationCacheLayers {
+            let lease = try Self.unwrap(await cache.begin(conversationKey: key, incomingTokens: stored,
+                                                       modelID: "model-a", kvBits: nil))
+            let layers = ConversationCacheLayers([RotatingKVCache(maxSize: 8, keep: 0)], promptSnapshot: true)
+            await cache.commit(lease, cache: layers, fullTokens: stored)
+            return layers
+        }
+        let incoming = stored + [61] + int32Range(200..<230)
+        let layers = try await seed("conv:on")
+        let hit = try Self.unwrap(await cache.begin(conversationKey: "conv:on", incomingTokens: incoming,
+                                                    modelID: "model-a", kvBits: nil,
+                                                    promptSnapshotResumeBoundaries: [64, 94]))
+        XCTAssertTrue(hit.reusableCache === layers)
+        XCTAssertEqual(hit.cachedPromptTokens, 64)
+        await cache.abort(hit)
+
+        _ = try await seed("conv:off")
+        let miss = try Self.unwrap(await cache.begin(conversationKey: "conv:off", incomingTokens: incoming,
+                                                     modelID: "model-a", kvBits: nil,
+                                                     promptSnapshotResumeBoundaries: [94]))
+        XCTAssertNil(miss.reusableCache)
+        XCTAssertEqual(miss.cachedPromptTokens, 0)
+        await cache.abort(miss)
     }
 
     /// SPEC-024-R005 / SPEC-048 MTP-9: a native-MTP lease reuses a snapshot
@@ -215,7 +287,8 @@ final class ConversationPromptSnapshotTests: XCTestCase {
         let tokenizer = MarkerTokenizer()
         let glm = try Self.tinyGLM()
         XCTAssertEqual(ModelRuntime.conversationPromptSnapshotPolicy(model: glm, tokenizer: tokenizer),
-                       .lastRoleMarker(tokenIDs: Set(MarkerTokenizer.markers.values.map(Int32.init))))
+                       .lastRoleMarker(tokenIDs: Set(MarkerTokenizer.markers.values.map(Int32.init)),
+                                       resumeTokenID: 61))
         XCTAssertNil(ModelRuntime.conversationPromptSnapshotPolicy(model: glm, tokenizer: NoMarkerTokenizer()),
                      "a tokenizer without the role tokens gets no policy")
     }

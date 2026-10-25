@@ -13,7 +13,12 @@
   later hit is fenced off CB. On a native-MTP row the snapshot also carries the
   MTP head state at the same boundary, and a native-MTP turn reuses a snapshot
   only together with it (otherwise it misses and stays native; SPEC-048 0.1.57
-  MTP-9). Billing arithmetic is unchanged.
+  MTP-9). Every keyed prefill of such a row, cold or resumed, ends a chunk at
+  each `<|assistant|>` at or above the reuse threshold (the resume boundaries),
+  so a resumed row and a cold prefill of the same prompt run identical chunks
+  and hold bit-identical state; a snapshot off the incoming prompt's resume
+  boundaries misses. This is a prefill-plan change only. Billing arithmetic is
+  unchanged.
 
 **Change log v0.2.12 (2026-10-24, Related: #2111 — extend-only prompt snapshots):**
 - **SPEC-024-R004 / FR-CI2a.** DeepSeek V4 (128-token window plus compressed
@@ -507,6 +512,19 @@ continuous-batching row takes the FR-CI2a snapshot at `S` only while the SPEC-03
 covers its runtime tuple (operator flag `continuous_batching_cached_turns` on and the signed
 entry records `cached_turns_accepted: true`); without the grant it publishes nothing (v0.2.12
 behaviour), in every CB mode. Under the grant:
+- **Snapshot position.** On a CB row `S` is the last `<|assistant|>` of the prompt (on a prompt
+  ending in the generation prompt, the last role marker, as above).
+- **Chunk plan.** Prefill numerics depend on chunk shapes (quantized matmul, convolution,
+  attention and MoE kernels choose their routes by chunk length), so state at `S` equals a
+  cold prefill's state at `S` only when both ran the same chunks. Every prefill of a keyed
+  GLM-5-Next CB row under the grant, cold or resumed, MUST end a chunk at each resume boundary:
+  every position of `<|assistant|>` at or above the LCP minimum (each position an earlier turn
+  of the conversation may have snapshotted at, and its own `S`), in addition to the chunk
+  bounds it already has; chunks between boundaries are the ordinary balanced chunks of that
+  span. The boundaries are a function of the prompt tokens alone, so a prompt and any prompt
+  extending it agree on every boundary inside their common prefix. A lease whose `S` is not a
+  resume boundary of the incoming prompt is a **miss** (`prompt_snapshot_off_resume_boundary`).
+  Decode is unchanged.
 - **Capture.** The row's prefill MUST stop on `S` (a chunk boundary), so the snapshot is the
   committed state a fresh prefill of the same prompt holds at `S`. Each sparse layer's latent,
   pooled indexer keys and partial pool window and each linear-attention (KDA) layer's
@@ -822,7 +840,11 @@ Prefix-cache reuse MUST NOT be enabled on a path where the conversation key is b
   GLM-5-Next CB row snapshots at `S` (plus the MTP head state on a native row), a positive-cached
   GLM-5-Next turn installs the snapshot into its own CB row and resumes prefill at `S`, a native
   row without matching head state misses, and on a tiny Metal GLM-5-Next model the CB row resumed
-  from the snapshot yields the greedy tokens of a CB row that prefilled the full prompt.
+  from the snapshot yields the greedy tokens of a CB row that prefilled the full prompt. Both
+  take the production chunk plan: a cold row ends a chunk at every resume boundary, past the
+  snapshot it runs the resumed row's chunks, and the two hold bit-identical state; a cold
+  prefill that runs one chunk through the snapshot position (the plan before the boundaries)
+  holds different state there, and a lease off the incoming prompt's boundaries misses.
 - **AC-CI-7 (keyed serial trimmable allocation, SPEC-024-R001).** A conversation-keyed serial
   request on a full-attention model MUST allocate `KVCacheSimple` (or another class that
   remains trimmable after `offset >= maxContextTokens`). A keyless request MUST keep the

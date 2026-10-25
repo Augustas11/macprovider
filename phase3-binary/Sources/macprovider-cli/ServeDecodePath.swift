@@ -527,6 +527,7 @@ extension ModelRuntime {
         retainedRecurrentCheckpoints: [RecurrentStateCheckpoint] = [],
         promptSnapshotCache: ContinuousBatchSerialConversationCache? = nil,
         publishesPromptSnapshotOnly: Bool = false,
+        promptResumeBoundaries: [Int] = [],
         serialToolStopObserver: ContinuousBatchCanonicalStopObserver? = nil,
         grammarConstraint: GrammarConstraintState? = nil,
         nativeMTPAdmission: NativeMTPRuntimeAdmission? = nil
@@ -558,6 +559,7 @@ extension ModelRuntime {
                 retainedRecurrentCheckpoints: retainedRecurrentCheckpoints,
                 promptSnapshotCache: promptSnapshotCache,
                 publishesPromptSnapshotOnly: publishesPromptSnapshotOnly,
+                promptResumeBoundaries: promptResumeBoundaries,
                 grammarConstraint: grammarConstraint,
                 serialToolStopObserver: serialToolStopObserver,
                 decodePath: nativeMTPAdmission?.effectivePath ?? .ordinary,
