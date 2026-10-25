@@ -103,6 +103,7 @@ write_config() {
   {
     print -r -- "model: $MODEL_ID"
     print -r -- "model_artifact_path: \"$MODEL\""
+    print -r -- "model_artifact_sha256: $MODEL_SHA256"
     print -r -- "port: $LAB_PORT"
     print -r -- "ctl_socket_path: \"$OUT/ctl.sock\""
     print -r -- "credential_store: protected_file"
