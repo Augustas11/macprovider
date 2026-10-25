@@ -2302,6 +2302,7 @@ actor ContinuousBatchScheduler {
     private var labNativeMTPPhaseTrap: NativeMTPLabPhaseTrap?
     private var labNativeMTPPostoutputFault: NativeMTPLabPostoutputFault?
     private var labNativeMTPCommitTimingObserver: NativeMTPLabCommittedTokenTimingObserver?
+    private var labNativeMTPNumericalOracle: NativeMTPLabNumericalOracle.Binding?
     private var labNativeMTPDecodeOutputCap: NativeMTPLabDecodeOutputCap?
     /// Lab-only batch-composition fence. The journey harness installs the exact
     /// request order before submitting a batch; the pump stays stopped until
@@ -4602,6 +4603,14 @@ actor ContinuousBatchScheduler {
     }
 
 
+    /// Lab-only numeric comparison of one ordinary/native request pair.
+    func installLabNativeMTPNumericalOracle(_ binding: NativeMTPLabNumericalOracle.Binding?) -> Bool {
+        guard let pagedBackend = backend as? PagedKVSharedForwardBackend else { return false }
+        pagedBackend.installLabNativeMTPNumericalOracle(binding)
+        labNativeMTPNumericalOracle = binding
+        return true
+    }
+
     /// Lab-only journey hook: attach the backend state digest observer that
     /// proves hidden KV/recurrent state across verification and finalize.
     /// Returns false when this scheduler is not backed by the native paged-KV
@@ -5104,6 +5113,15 @@ actor ContinuousBatchScheduler {
     /// it must; the caller performs that release/finish.
     private func advanceDecodeRow(_ token: Int, requestID: String) -> DecodeRowCompletion? {
         guard var row = activeDecode[requestID] else { return nil }
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        if let binding = labNativeMTPNumericalOracle,
+           row.request.serialToolStopObserver?.stopTokenCount == nil {
+            guard binding.oracle.select(
+                role: binding.role, requestID: row.request.id,
+                position: row.generatedTokens.count, tokenID: token)
+            else { return .failed(errorCode: "native_mtp_lab_numerical_oracle_failed") }
+        }
+        #endif
         row.generatedTokens.append(token)
         row.currentToken = token
         row.pendingOutputTokens.append(token)
@@ -5167,6 +5185,18 @@ actor ContinuousBatchScheduler {
             // closes the row. Finalization truncates to the recorded boundary.
             earlyStopIDs.insert(row.request.id)
         }
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        if let binding = labNativeMTPNumericalOracle {
+            for (offset, token) in visibleTokens.enumerated() {
+                if let stop = row.request.serialToolStopObserver?.stopTokenCount,
+                   firstVisibleIndex + offset >= stop { break }
+                guard binding.oracle.emit(
+                    role: binding.role, requestID: row.request.id,
+                    ordinal: firstVisibleIndex + offset, tokenID: token)
+                else { return .failed(errorCode: "native_mtp_lab_numerical_oracle_failed") }
+            }
+        }
+        #endif
         activeDecode[row.request.id] = row
         CBTrace.log(row.request.id, "sch_active")
         if !deliverVisibleTokens(
@@ -5965,6 +5995,19 @@ actor ContinuousBatchScheduler {
         CBTrace.log(requestID, "sch_complete status=\(result.terminalStatus) waiters=\(requestWaiters[requestID]?.count ?? 0) stopping=\(stoppingActiveWaiters.values.contains(where: { $0.requestID == requestID }))")
         endQueueWait(requestID: requestID)
         guard terminalResults[requestID] == nil, pendingTerminalDeliveries[requestID] == nil else { return }
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        if let binding = labNativeMTPNumericalOracle {
+            binding.oracle.finishRequest(
+                role: binding.role, requestID: requestID,
+                emittedCount: min(result.outputTokens.count, result.serialToolStopTokenCount ?? result.outputTokens.count),
+                completed: result.terminalStatus == .stop || result.terminalStatus == .length,
+                terminal: NativeMTPLabNumericalOracle.Terminal.classify(
+                    status: result.terminalStatus, stopCause: result.stopCause,
+                    toolBoundaryTokenCount: result.serialToolStopTokenCount),
+                selectedTokenIDs: Array(result.generatedTokens.prefix(
+                    result.serialToolStopTokenCount ?? result.generatedTokens.count)))
+        }
+        #endif
         requestAdmissionSequences.removeValue(forKey: requestID)
         let waiters = requestWaiters.removeValue(forKey: requestID) ?? []
         if stoppingActiveWaiters.values.contains(where: { $0.requestID == requestID }) {

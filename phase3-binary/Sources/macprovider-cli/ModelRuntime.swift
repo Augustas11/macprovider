@@ -8197,6 +8197,15 @@ maxTokens: 1,
         return true
     }
 
+    /// Lab-only numeric comparison using this runtime's normal scheduler.
+    func installLabNativeMTPNumericalOracle(
+        _ oracle: NativeMTPLabNumericalOracle?, role: NativeMTPLabNumericalOracle.Role
+    ) async -> Bool {
+        guard let continuousBatchScheduler else { return false }
+        let binding = oracle.map { NativeMTPLabNumericalOracle.Binding(oracle: $0, role: role) }
+        return await continuousBatchScheduler.installLabNativeMTPNumericalOracle(binding)
+    }
+
     /// Lab-only journey hook: install the hidden-state digest observer on the
     /// backend used by this runtime's scheduler.
     func installLabNativeMTPStateDigestObserver(_ observer: NativeMTPStateDigestObserver?) async -> Bool {

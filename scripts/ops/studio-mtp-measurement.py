@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""One bounded GLM exploratory cell, with independent Studio and Pearl recovery.
+"""Bounded GLM exploratory cells or acceptance, with independent recovery.
 
 status / next are read-only. Execution binds this clean campaign commit.
 The operator explicitly authorized local measurement extensions for issue 2144. Environment: STUDIO_SSH, PEARL_SSH, STUDIO_MTP_SOURCE_DIR,
 STUDIO_MTP_CONFIG, STUDIO_STATUS_PORT, MACPROVIDER_OPS_OWNER. Explicit arguments
-bind the clean campaign source commit and immutable exploratory policy. No
+bind the clean campaign source commit and immutable workload policy. No
 operator shell commands or replacement serving binaries are accepted.
 """
 from __future__ import annotations
@@ -35,6 +35,7 @@ RUNNER = "malibu-buyer-runner.service"
 TOTAL = 3600
 BUILD = 900
 FORK_TESTS = 600
+ACCEPTANCE_TESTS = 600
 CELL = 3000
 # Pre-downtime bench policy validation. The first run reads the snapshot once
 # (outside the page cache); later runs reuse hashes of unchanged file stamps.
@@ -80,7 +81,97 @@ def source_ok(source, commit):
             raise Refusal("source has untracked compiler inputs")
 
 
-def policy_ok(data, commit, cell):
+ACCEPTANCE_POLICY_KEYS = {
+    "schema", "model_id", "target_sha256", "mtp_sha256", "tokenizer_sha256",
+    "hw_model", "chip", "ram_gb", "os_build", "xcode_build_version", "swift_version",
+    "provider_commit", "mlx_fork_revision", "quantization", "cache_mode", "corpus_sha256",
+}
+
+
+def strict_json(data):
+    def unique(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise Refusal("duplicate frozen JSON key")
+            value[key] = item
+        return value
+    def reject_constant(_):
+        raise Refusal("non-finite frozen JSON")
+    try:
+        return json.loads(data, object_pairs_hook=unique, parse_constant=reject_constant)
+    except (ValueError, TypeError) as exc:
+        raise Refusal("invalid frozen JSON") from exc
+
+
+def acceptance_inputs(policy, corpus, commit):
+    if len(policy) > 65536 or corpus is None or len(corpus) > 64 * 1024 * 1024:
+        raise Refusal("acceptance frozen input size exceeds bound")
+    p = strict_json(policy)
+    if not isinstance(p, dict) or set(p) != ACCEPTANCE_POLICY_KEYS:
+        raise Refusal("acceptance policy fields differ")
+    fixed = {"schema": "macprovider.native-mtp-acceptance-policy.v1", "model_id": MODEL,
+             "provider_commit": commit, "hw_model": "Mac15,14",
+             "quantization": "4bit", "cache_mode": "paged_kv_mixed"}
+    if any(type(p[k]) is not str or p[k] != value for k, value in fixed.items()):
+        raise Refusal("acceptance policy identity differs")
+    for key in ("target_sha256", "mtp_sha256", "tokenizer_sha256", "corpus_sha256", "mlx_fork_revision"):
+        size = 40 if key == "mlx_fork_revision" else 64
+        if not isinstance(p[key], str) or not re.fullmatch(f"[0-9a-f]{{{size}}}", p[key]):
+            raise Refusal("invalid acceptance policy digest: " + key)
+    if type(p["ram_gb"]) is not int or p["ram_gb"] <= 0:
+        raise Refusal("invalid acceptance policy RAM")
+    for key in ("chip", "os_build", "xcode_build_version", "swift_version"):
+        if not isinstance(p[key], str) or not p[key].strip():
+            raise Refusal("invalid acceptance policy field: " + key)
+    if corpus is None or sha(corpus) != p["corpus_sha256"]:
+        raise Refusal("acceptance corpus bytes differ")
+    c = strict_json(corpus)
+    keys = {"schema", "model_id", "max_prompt_tokens", "qualified_slots", "max_native_active_rows",
+            "proposal_depth", "minimum_compared_positions", "cases"}
+    if not isinstance(c, dict) or set(c) != keys:
+        raise Refusal("acceptance corpus fields differ")
+    fixed = {"schema": "macprovider.native-mtp-acceptance-corpus.v1", "model_id": MODEL,
+             "max_prompt_tokens": 4096, "qualified_slots": 4, "max_native_active_rows": 1}
+    if any(type(c[k]) is not type(value) or c[k] != value for k, value in fixed.items()):
+        raise Refusal("acceptance corpus tuple differs")
+    if type(c["proposal_depth"]) is not int or c["proposal_depth"] not in (1, 2):
+        raise Refusal("invalid acceptance corpus depth")
+    if type(c["minimum_compared_positions"]) is not int or not 6400 <= c["minimum_compared_positions"] <= 102400:
+        raise Refusal("invalid acceptance corpus position floor")
+    cases = c["cases"]
+    if not isinstance(cases, list) or not 200 <= len(cases) <= 400:
+        raise Refusal("acceptance corpus needs 200..400 cases")
+    counts = dict.fromkeys(("short", "1.5k", "4k", "8k", "near_boundary"), 0)
+    seen, native_budget = set(), 0
+    for case in cases:
+        if not isinstance(case, dict) or set(case) != {"id", "stratum", "expected_native", "request"}:
+            raise Refusal("invalid acceptance case fields")
+        name = case["id"]
+        if not isinstance(name, str) or not name or len(name.encode()) > 128 or name in seen:
+            raise Refusal("invalid acceptance case identity")
+        seen.add(name)
+        stratum = case["stratum"]
+        if not isinstance(stratum, str) or stratum not in counts or type(case["expected_native"]) is not bool:
+            raise Refusal("invalid acceptance case stratum")
+        counts[stratum] += 1
+        if stratum == "8k" and case["expected_native"]:
+            raise Refusal("above-cap acceptance case must remain ordinary")
+        request = case["request"]
+        if (not isinstance(request, dict) or request.get("model") != MODEL
+                or request.get("stream") is not False or "diagnostic_eligibility_bypass" in request
+                or type(request.get("max_tokens")) is not int or not 1 <= request["max_tokens"] <= 256):
+            raise Refusal("invalid acceptance request bounds")
+        if case["expected_native"]:
+            native_budget += request["max_tokens"]
+    if min(counts.values()) < 20 or native_budget < c["minimum_compared_positions"]:
+        raise Refusal("acceptance corpus planned coverage incomplete")
+    return p, c
+
+
+def policy_ok(data, commit, cell, corpus=None):
+    if cell == "acceptance":
+        return acceptance_inputs(data, corpus, commit)[0]
     p = json.loads(data)
     required = {"schema": "macprovider.native-mtp-exploratory-policy.v1",
                 "model_id": MODEL, "provider_commit": commit, "hw_model": "Mac15,14",
@@ -341,6 +432,13 @@ def bench_command(m, d):
     pre-downtime validation and the window run byte-identical policies.
     """
     package = Path(m["source"]) / "phase3-binary"
+    if m["cell"] == "acceptance":
+        return [str(package / ".build/release/macprovider-cli"), "native-mtp-journey-e2e",
+                "--root", str(Path(m["source"]) / ".lab-window/fixture"),
+                "--model-id", MODEL, "--provider-commit", m["commit"],
+                "--qualified-slots", "4", "--max-native-active-rows", "1", "--max-prompt-tokens", "4096",
+                "--acceptance-corpus", str(d / "acceptance-corpus.json"),
+                "--acceptance-policy", str(d / "policy.json")]
     command = [str(package / ".build/release/macprovider-cli"), "native-mtp-bench",
                "--root", str(Path(m["source"]) / ".lab-window/fixture"),
                "--model-id", MODEL, "--provider-commit", m["commit"], "--phase", "matrix"]
@@ -358,10 +456,45 @@ def bench_command(m, d):
     return command + ["--policy-list", *paths, "--out", str(d / "baseline"), *selection]
 
 
+def run_acceptance(m):
+    d = Path(m["dir"])
+    policy = (d / "policy.json").read_bytes()
+    corpus = (d / "acceptance-corpus.json").read_bytes()
+    if sha(policy) != m["policy_sha256"] or sha(corpus) != m["corpus_sha256"]:
+        raise Refusal("acceptance inputs changed before execution")
+    _, c = acceptance_inputs(policy, corpus, m["commit"])
+    output = d / "acceptance-result.json"
+    with open(output, "wb", opener=lambda p, f: os.open(p, f, 0o600)) as out:
+        result = subprocess.run(bench_command(m, d), stdout=out, timeout=CELL - 10,
+                                env=lab_env("cell"))
+    # Preserve the result even when the command fails; it remains correctness
+    # evidence only, and never an R015 performance/admission verdict.
+    if result.returncode:
+        raise Refusal("acceptance corpus failed; no retry; private result retained")
+    value = strict_json(output.read_bytes())
+    if (not isinstance(value, dict) or value.get("status") != "pass"
+            or value.get("schema") != "macprovider.native-mtp-acceptance-result.v1"
+            or value.get("journey_complete") is not False
+            or value.get("corpus_sha256") != m["corpus_sha256"]
+            or value.get("policy_sha256") != m["policy_sha256"]
+            or type(value.get("native_compared_positions")) is not int
+            or value["native_compared_positions"] < c["minimum_compared_positions"]
+            or not isinstance(value.get("cases"), list) or len(value["cases"]) != len(c["cases"])
+            or not isinstance(value.get("checks"), dict) or not value["checks"]
+            or any(check is not True for check in value["checks"].values())):
+        raise Refusal("acceptance result incomplete or identity differs")
+    for row, case in zip(value["cases"], c["cases"]):
+        if (not isinstance(row, dict) or row.get("id") != case["id"]
+                or row.get("stratum") != case["stratum"] or row.get("passed") is not True
+                or row.get("expected_native") is not case["expected_native"]):
+            raise Refusal("acceptance result case provenance differs")
+
+
 def lab_env(kind):
     return {"HOME": str(Path.home()), "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
             "MACPROVIDER_NATIVE_MTP_E2E": "1",
-            **({"DEVELOPER_DIR": str(XCODE_DEVELOPER_DIR)} if kind in ("metal", "fork-tests") else {})}
+            **({"DEVELOPER_DIR": str(XCODE_DEVELOPER_DIR)}
+               if kind in ("metal", "fork-tests", "acceptance-tests") else {})}
 
 
 def fixed_command(m, kind):
@@ -388,10 +521,18 @@ def fixed_command(m, kind):
                 "-derivedDataPath", str(cache / "DerivedData"),
                 "-clonedSourcePackagesDirPath", str(cache / "SourcePackages"),
                 "-resultBundlePath", str(d / "glm-cohort-parity.xcresult")]
+    if kind == "acceptance-tests" and m["cell"] == "acceptance":
+        # Keep the frozen CLI's Swift compiler; full Xcode supplies Metal.
+        return ["/Library/Developer/CommandLineTools/usr/bin/swift", "test", "--package-path", package,
+                "-c", "release", "-j", "2", "--disable-automatic-resolution",
+                "-Xswiftc", "-DMACPROVIDER_LAB_HARNESS", "--filter",
+                "NativeMTPAcceptance.*Tests|NativeMTPLabNumericalOracleTests|NativeMTPBackendSafetyTests"]
     if kind == "metalcheck":
         return [sys.executable, str(d / "entry.py"), "_metalcheck", str(d / "manifest.json")]
     if kind == "cell" and m["cell"] in MATRICES:
         return [sys.executable, str(d / "entry.py"), "_matrix", str(d / "manifest.json")]
+    if kind == "cell" and m["cell"] == "acceptance":
+        return [sys.executable, str(d / "entry.py"), "_acceptance", str(d / "manifest.json")]
     if kind == "cell":
         return bench_command(m, d)
     raise Refusal("unknown fixed lab command")
@@ -499,10 +640,22 @@ def worker(m):
             if time.monotonic() > stop_deadline:
                 raise Refusal("incumbent process still alive")
             time.sleep(.2)
+        build_started = time.monotonic()
         grouped(m, "build", BUILD)
+        build_spent = time.monotonic() - build_started
         grouped(m, "metal", BUILD)
         grouped(m, "metalcheck", 120)
         grouped(m, "fork-tests", FORK_TESTS)
+        if m["cell"] == "acceptance":
+            grouped(m, "acceptance-tests", ACCEPTANCE_TESTS)
+            # SwiftPM tests may relink the executable with enable-testing.
+            # Restore the normal frozen lab flags, sharing the original CLI
+            # build budget rather than granting a second build allowance.
+            remaining_build = BUILD - build_spent
+            if remaining_build <= 0:
+                raise Refusal("CLI build budget exhausted before flag restoration")
+            grouped(m, "build", remaining_build)
+            grouped(m, "metalcheck", 120)
         source_ok(m["source"], m["commit"])
         grouped(m, "cell", CELL)
     except Exception as exc:
@@ -517,7 +670,8 @@ def worker(m):
             put(d / "journal.json", record)
         print(json.dumps({"window_ended": True}), flush=True)
         restore(m)
-    return {"restored": True, "lab_passed": failure is None, "failure": failure, "result": str(d / "runs.jsonl"), "source_commit": m["commit"],
+    return {"restored": True, "lab_passed": failure is None, "failure": failure,
+            "result": str(d / ("acceptance-result.json" if m["cell"] == "acceptance" else "runs.jsonl")), "source_commit": m["commit"],
             "policy_sha256": m["policy_sha256"]}
 
 
@@ -623,13 +777,23 @@ def preflight_remote(m):
     if sha(policy) != m["policy_sha256"]:
         raise Refusal("policy bytes drifted")
     (d / "policy.json").write_bytes(policy)
+    acceptance = m["cell"] == "acceptance"
+    corpus = None
+    if acceptance:
+        corpus = base64.b64decode(m["corpus_code"], validate=True)
+        acceptance_inputs(policy, corpus, m["commit"])
+        if sha(corpus) != m["corpus_sha256"]:
+            raise Refusal("acceptance corpus transport differs")
+        (d / "acceptance-corpus.json").write_bytes(corpus)
+        (d / "acceptance-corpus.json").chmod(0o600)
     validator = root / ("validator-" + m["validator_sha256"][:16])
     if not validator.is_file() or sha(validator.read_bytes()) != m["validator_sha256"]:
         raise Refusal("uploaded validator bytes differ")
     validator.chmod(0o700)
     command = bench_command(m, d)
     command[0] = str(validator)
-    command += ["--validate-policy-only", "--identity-cache", str(root / "identity-cache.json")]
+    command += ["--validate-acceptance-only" if acceptance else "--validate-policy-only",
+                "--identity-cache", str(root / "identity-cache.json")]
     # Background policy: efficiency cores and throttled I/O beside serving.
     result = subprocess.run(["/usr/sbin/taskpolicy", "-b", *command], stdin=subprocess.DEVNULL,
                             capture_output=True, text=True, env=lab_env("cell"), timeout=VALIDATE)
@@ -641,7 +805,30 @@ def preflight_remote(m):
     expected = len(MATRICES[m["cell"]]) if m["cell"] in MATRICES else 1
     if len(summaries) != expected or any(s.get("validate_only") != "pass" for s in summaries):
         raise Refusal("bench policy validation incomplete")
+    if acceptance:
+        acceptance_summary_ok(summaries[0], policy, corpus, m["commit"])
     return {"preflight": "pass", "validated": summaries}
+
+
+def acceptance_summary_ok(summary, policy, corpus, commit):
+    p, c = acceptance_inputs(policy, corpus, commit)
+    if summary.get("policy_sha256") != sha(policy):
+        raise Refusal("acceptance validator policy digest differs")
+    observed = summary.get("observed_environment")
+    if not isinstance(observed, dict):
+        raise Refusal("acceptance validator environment missing")
+    for key, expected in p.items():
+        if key == "schema":
+            continue  # Both strict policy decoders enforce this fixed schema.
+        values = [item[key] for item in (summary, observed) if key in item]
+        if not values or any(type(value) is not type(expected) or value != expected for value in values):
+            raise Refusal("acceptance validator field differs: " + key)
+    for key in ("model_id", "qualified_slots", "max_native_active_rows", "max_prompt_tokens",
+                "proposal_depth", "minimum_compared_positions"):
+        if type(summary.get(key)) is not type(c[key]) or summary[key] != c[key]:
+            raise Refusal("acceptance validator corpus field differs: " + key)
+    if type(summary.get("cases")) is not int or summary["cases"] != len(c["cases"]):
+        raise Refusal("acceptance validator case count differs")
 
 
 # The validator is built on the operator Mac with Command Line Tools (the
@@ -808,13 +995,22 @@ def controller(args):
     if not re.fullmatch("[0-9a-f]{40}", args.source_commit):
         raise Refusal("exact source commit required")
     data = args.policy.read_bytes()
-    policy_ok(data, args.source_commit, args.cell)
+    corpus_path = getattr(args, "acceptance_corpus", None)
+    if (args.cell == "acceptance") != (corpus_path is not None):
+        raise Refusal("acceptance mode requires its corpus; other modes exclude it")
+    corpus = None
+    if corpus_path is not None:
+        with corpus_path.open("rb") as stream:
+            corpus = stream.read(64 * 1024 * 1024 + 1)
+    policy_ok(data, args.source_commit, args.cell, corpus)
     source_ok(ROOT, args.source_commit)
     payload = {"source": source, "commit": args.source_commit, "cell": args.cell,
                "config": os.environ["STUDIO_MTP_CONFIG"], "port": int(os.environ["STUDIO_STATUS_PORT"]),
                "socket_override": os.environ.get("STUDIO_MTP_CTL_SOCKET"),
                "nonce": uuid.uuid4().hex, "policy_sha256": sha(data),
                "probe_code": base64.b64encode((ROOT / "scripts/ops/lib/studio-owner-pin-probe.py").read_bytes()).decode()}
+    if corpus is not None:
+        payload["corpus_sha256"] = sha(corpus)
     code = Path(__file__).read_bytes()
     loader = "import base64;__file__='/tmp/macprovider-mtp/entry.py';exec(compile(base64.b64decode(" + repr(base64.b64encode(code).decode()) + "),'entry.py','exec'))"
     # Remote dispatch via stdin leaves host arguments and all secrets out of argv.
@@ -824,8 +1020,11 @@ def controller(args):
     # Every frozen field the window validates is compared here, while live.
     validator = upload_validator(os.environ["STUDIO_SSH"], build_validator(args.source_commit))
     preflight_code = "import sys;sys.argv=['entry.py','_preflight'];" + loader
+    frozen_inputs = {"policy_code": base64.b64encode(data).decode()}
+    if corpus is not None:
+        frozen_inputs["corpus_code"] = base64.b64encode(corpus).decode()
     checked = ssh(os.environ["STUDIO_SSH"], preflight_code,
-                  dict(m, policy_code=base64.b64encode(data).decode(), validator_sha256=validator),
+                  dict(m, **frozen_inputs, validator_sha256=validator),
                   timeout=VALIDATE + 120)
     print(json.dumps(checked), flush=True)
     if not args.run:
@@ -857,7 +1056,7 @@ def controller(args):
         pearl(os.environ["PEARL_SSH"], unit, True)
         m["entry_code"] = base64.b64encode(code).decode()
         m["probe_code"] = payload["probe_code"]
-        m["policy_code"] = base64.b64encode(data).decode()
+        m.update(frozen_inputs)
         worker_code = "import sys;sys.argv=['entry.py','_prepare'];" + loader
         result = dispatch_worker(os.environ["STUDIO_SSH"], worker_code, m, start_runner)
         certain = result.get("restored") is True
@@ -899,6 +1098,9 @@ def main():
             if result.returncode:
                 raise Refusal("baseline matrix failed; no retry")
             return
+        if mode == "_acceptance":
+            run_acceptance(json.loads(Path(sys.argv[2]).read_text()))
+            return
         if mode == "_group":
             gate, kind = int(sys.argv[2]), sys.argv[3]
             m = json.loads(Path(sys.argv[4]).read_text())
@@ -927,6 +1129,13 @@ def main():
                     raise Refusal("policy bytes drifted")
                 (d / name).write_bytes(content)
                 (d / name).chmod(0o600)
+            if m["cell"] == "acceptance":
+                corpus = base64.b64decode(m.pop("corpus_code"), validate=True)
+                acceptance_inputs((d / "policy.json").read_bytes(), corpus, m["commit"])
+                if sha(corpus) != m["corpus_sha256"]:
+                    raise Refusal("acceptance corpus transport differs")
+                (d / "acceptance-corpus.json").write_bytes(corpus)
+                (d / "acceptance-corpus.json").chmod(0o600)
             put(d / "controller-lease.json", {"connected": True, "updated": time.time()})
             threading.Thread(target=lease_reader, args=(d, sys.stdin), daemon=True).start()
             print(json.dumps(worker(m)))
@@ -940,10 +1149,13 @@ def main():
     parser.add_argument("--run", action="store_true")
     parser.add_argument("--source-commit", required=True)
     parser.add_argument("--policy", type=Path, required=True)
-    parser.add_argument("--cell", choices=("s1-p512-o128", "s2-p512-o128", "s4-p512-o128", *MATRICES), required=True)
+    parser.add_argument("--cell", choices=("s1-p512-o128", "s2-p512-o128", "s4-p512-o128", *MATRICES, "acceptance"), required=True)
+    parser.add_argument("--acceptance-corpus", type=Path)
     args = parser.parse_args()
     if args.run and args.action != "next":
         parser.error("--run requires next")
+    if (args.cell == "acceptance") != (args.acceptance_corpus is not None):
+        parser.error("--acceptance-corpus is required only with --cell acceptance")
     controller(args)
 
 

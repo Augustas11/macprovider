@@ -1,4 +1,5 @@
 import ArgumentParser
+import CryptoKit
 import Foundation
 import MacProviderCore
 import MLXLMCommon
@@ -45,7 +46,93 @@ struct NativeMTPJourneyE2ECommand: AsyncParsableCommand {
     @Option(name: .customLong("selftest-challenge-id"), help: "Step-12 challenge_id; unique within one bank.")
     var selfTestChallengeID: String = NativeMTPJourneyRunner.defaultSelfTestChallengeID
 
+    @Option(name: .customLong("acceptance-corpus"), help: "Frozen R005 acceptance corpus; run only its production-shaped request pairs.")
+    var acceptanceCorpusPath: String?
+
+    @Flag(name: .customLong("validate-acceptance-only"), help: "Parse every frozen acceptance request without loading a model or using MLX.")
+    var validateAcceptanceOnly = false
+
+    @Option(name: .customLong("prepare-acceptance-corpus"), help: "Write the synthetic GLM corpus using only its tokenizer, before preregistration.")
+    var prepareAcceptanceCorpusPath: String?
+
+    @Option(name: .customLong("acceptance-policy"), help: "Frozen artifact/environment/corpus identity policy.")
+    var acceptancePolicyPath: String?
+
+    @Option(name: .customLong("provider-commit"), help: "Exact source commit for acceptance identity validation.")
+    var providerCommit: String?
+
+    @Option(name: .customLong("identity-cache"), help: "Model-free acceptance preflight file-stamp identity cache.")
+    var identityCachePath: String?
+
     func run() async throws {
+        if let output = prepareAcceptanceCorpusPath {
+            guard acceptanceCorpusPath == nil, acceptancePolicyPath == nil, providerCommit == nil,
+                  identityCachePath == nil, !validateAcceptanceOnly, !selfTestOnly else {
+                throw ValidationError("corpus preparation cannot execute a journey")
+            }
+            let target = URL(fileURLWithPath: ConfigLoader.expandTilde(root)).appendingPathComponent("target")
+            let data = try await NativeMTPAcceptanceCorpusBuilder.make(targetDirectory: target, modelID: modelID)
+            let url = URL(fileURLWithPath: ConfigLoader.expandTilde(output))
+            try data.write(to: url, options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+            return
+        }
+        let corpus = try acceptanceCorpusPath.map {
+            try NativeMTPAcceptanceCorpus.load(from: URL(fileURLWithPath: ConfigLoader.expandTilde($0)))
+        }
+        var checkedTarget: MLXSnapshotIdentity?
+        var acceptancePolicy: NativeMTPAcceptancePolicy?
+        var preflightDocument: [String: Any] = [:]
+        if let corpus {
+            guard !selfTestOnly, corpus.modelID == modelID,
+                  corpus.qualifiedSlots == qualifiedSlots,
+                  corpus.maxNativeActiveRows == maxNativeActiveRows,
+                  corpus.maxPromptTokens == maxPromptTokens else {
+                throw ValidationError("acceptance corpus differs from the requested tuple")
+            }
+            guard let acceptancePolicyPath, let providerCommit,
+                  providerCommit.range(of: #"^[0-9a-f]{40}$"#, options: .regularExpression) != nil,
+                  validateAcceptanceOnly == (identityCachePath != nil) else {
+                throw ValidationError("acceptance requires a policy/source commit; only model-free preflight uses an identity cache")
+            }
+            let policy = try NativeMTPAcceptancePolicy.load(from: URL(fileURLWithPath: ConfigLoader.expandTilde(acceptancePolicyPath)))
+            let targetURL = URL(fileURLWithPath: ConfigLoader.expandTilde(root)).appendingPathComponent("target")
+            let cache = NativeMTPBenchIdentityCache(persistentURL: identityCachePath.map { URL(fileURLWithPath: ConfigLoader.expandTilde($0)) })
+            let target = try cache.identity(directory: targetURL)
+            let tokenizerSHA = SHA256.hash(data: try Data(contentsOf: targetURL.appendingPathComponent("tokenizer.json")))
+                .map { String(format: "%02x", $0) }.joined()
+            let environment = NativeMTPBenchEnvironment.capture(providerCommit: providerCommit)
+            try policy.validate(corpus: corpus, environment: environment,
+                                targetSHA256: target.digest, mtpSHA256: target.digest, tokenizerSHA256: tokenizerSHA)
+            checkedTarget = target
+            acceptancePolicy = policy
+            preflightDocument = [
+                "target_sha256": target.digest, "mtp_sha256": target.digest, "tokenizer_sha256": tokenizerSHA,
+                "quantization": "4bit", "cache_mode": "paged_kv_mixed",
+                "policy_sha256": policy.digestSHA256,
+                "observed_environment": [
+                    "hw_model": environment.hwModel, "chip": environment.chip, "ram_gb": environment.ramGB,
+                    "os_build": environment.osBuild, "xcode_build_version": environment.xcodeBuildVersion,
+                    "swift_version": environment.swiftVersion, "provider_commit": environment.providerCommit,
+                    "mlx_fork_revision": NativeMTPHardwareE2ERunner.upstreamRevision,
+                ],
+            ]
+        } else if acceptancePolicyPath != nil || providerCommit != nil || identityCachePath != nil {
+            throw ValidationError("acceptance identity arguments require a corpus")
+        }
+        if validateAcceptanceOnly {
+            guard let corpus else { throw ValidationError("acceptance corpus is required") }
+            preflightDocument.merge([
+                "validate_only": "pass", "corpus_sha256": corpus.digestSHA256,
+                "cases": corpus.cases.count, "model_id": corpus.modelID,
+                "qualified_slots": corpus.qualifiedSlots, "max_native_active_rows": corpus.maxNativeActiveRows,
+                "max_prompt_tokens": corpus.maxPromptTokens, "proposal_depth": corpus.proposalDepth,
+                "minimum_compared_positions": corpus.minimumComparedPositions,
+            ]) { _, new in new }
+            let data = try JSONSerialization.data(withJSONObject: preflightDocument, options: [.sortedKeys])
+            FileHandle.standardOutput.write(data + Data("\n".utf8))
+            return
+        }
         guard ProcessInfo.processInfo.environment["MACPROVIDER_NATIVE_MTP_E2E"] == "1" else {
             FileHandle.standardError.write(Data("native-mtp-journey-e2e: set MACPROVIDER_NATIVE_MTP_E2E=1 on the Mac Studio\n".utf8))
             throw ExitCode(2)
@@ -66,7 +153,10 @@ struct NativeMTPJourneyE2ECommand: AsyncParsableCommand {
             maxPromptTokens: maxPromptTokens,
             selfTestOnly: selfTestOnly,
             selfTestPrompts: selfTestPrompts.isEmpty ? [NativeMTPJourneyRunner.defaultSelfTestPrompt] : selfTestPrompts,
-            selfTestChallengeID: selfTestChallengeID
+            selfTestChallengeID: selfTestChallengeID,
+            acceptanceCorpus: corpus,
+            acceptancePolicy: acceptancePolicy,
+            acceptanceTargetIdentity: checkedTarget
         )
         let result = try await journey.run()
         let data = try JSONSerialization.data(withJSONObject: result.document, options: [.sortedKeys])
@@ -110,12 +200,13 @@ final class NativeMTPJourneyRunner {
     private let selfTestOnly: Bool
     private let selfTestPrompts: [String]
     private let selfTestChallengeID: String
+    private let acceptanceCorpus: NativeMTPAcceptanceCorpus?
+    private let acceptancePolicy: NativeMTPAcceptancePolicy?
+    private let acceptanceTargetIdentity: MLXSnapshotIdentity?
     static let defaultSelfTestPrompt =
         "native_mtp_selftest_v1 synthetic challenge: continue the sequence alpha beta gamma delta"
     static let defaultSelfTestChallengeID = "native-mtp-selftest-journey-0001"
-    /// The tuple's request profile admits sampled rows (Qwen3.5). A
-    /// greedy-only tuple (glm5_next) must route them to ordinary decode with
-    /// reason `sampling` (SPEC-048 R004).
+    /// Whether the family signs the ordinary seeded sampled profile.
     private var admitsSampledRows = true
     /// step-05 forces rejections at the fixture's real paged-KV block
     /// boundaries: the family block (Qwen3.5 32, glm5_next 256).
@@ -257,7 +348,10 @@ final class NativeMTPJourneyRunner {
         maxPromptTokens: Int,
         selfTestOnly: Bool = false,
         selfTestPrompts: [String] = [NativeMTPJourneyRunner.defaultSelfTestPrompt],
-        selfTestChallengeID: String = NativeMTPJourneyRunner.defaultSelfTestChallengeID
+        selfTestChallengeID: String = NativeMTPJourneyRunner.defaultSelfTestChallengeID,
+        acceptanceCorpus: NativeMTPAcceptanceCorpus? = nil,
+        acceptancePolicy: NativeMTPAcceptancePolicy? = nil,
+        acceptanceTargetIdentity: MLXSnapshotIdentity? = nil
     ) {
         self.root = root
         self.modelID = modelID
@@ -267,6 +361,9 @@ final class NativeMTPJourneyRunner {
         self.selfTestOnly = selfTestOnly
         self.selfTestPrompts = selfTestPrompts
         self.selfTestChallengeID = selfTestChallengeID
+        self.acceptanceCorpus = acceptanceCorpus
+        self.acceptancePolicy = acceptancePolicy
+        self.acceptanceTargetIdentity = acceptanceTargetIdentity
     }
 
     func run() async throws -> (document: [String: Any], passed: Bool) {
@@ -279,21 +376,26 @@ final class NativeMTPJourneyRunner {
             modelID: modelID,
             maxBatch: qualifiedSlots,
             maxNativeActiveRows: maxNativeActiveRows,
+            proposalDepth: acceptanceCorpus?.proposalDepth ?? 1,
             maxPromptTokens: maxPromptTokens,
             maxPhysicalBlocks: NativeMTPHardwareE2ERunner.sizedMaxPhysicalBlocks(
                 slots: qualifiedSlots,
-                promptTokens: maxPromptTokens + 256,
+                promptTokens: acceptanceCorpus == nil ? maxPromptTokens + 256 : 8_960,
                 outputTokens: outputBudget
             )
         )
         let recorder = NativeMTPHardwareAdmissionRecorder()
         let fixture = try await runner.loadRuntimeFixture(
-            maxContextTokens: maxPromptTokens + outputBudget + 512,
+            maxContextTokens: acceptanceCorpus == nil ? maxPromptTokens + outputBudget + 512 : 8_960,
+            knownTargetIdentity: acceptanceTargetIdentity,
             ordinaryAdmissionRecorder: nil,
             nativeAdmissionRecorder: recorder
         )
         let ordinary = fixture.runtimes.ordinary
         let native = fixture.runtimes.native
+        if let acceptanceCorpus {
+            return try await runAcceptanceCorpus(acceptanceCorpus, ordinary: ordinary, native: native, recorder: recorder)
+        }
         let override = NativeMTPLabProposalOverride(rules: [
             (prefix: "journey-reject-all-", mode: .everyRound),
             (prefix: "journey-boundary-", mode: Self.boundaryMode(family: family)),
@@ -433,6 +535,131 @@ final class NativeMTPJourneyRunner {
 
     /// step-04: native output equals isolated ordinary output (tokens, text,
     /// usage, terminal) for greedy and seeded sampled rows, streaming off.
+    private func runAcceptanceCorpus(
+        _ corpus: NativeMTPAcceptanceCorpus,
+        ordinary: ModelRuntime,
+        native: ModelRuntime,
+        recorder: NativeMTPHardwareAdmissionRecorder
+    ) async throws -> (document: [String: Any], passed: Bool) {
+        let oracle = NativeMTPLabNumericalOracle()
+        guard await ordinary.installLabNativeMTPNumericalOracle(oracle, role: .ordinary),
+              await native.installLabNativeMTPNumericalOracle(oracle, role: .native) else {
+            _ = await ordinary.installLabNativeMTPNumericalOracle(nil, role: .ordinary)
+            _ = await native.installLabNativeMTPNumericalOracle(nil, role: .native)
+            throw NativeMTPHardwareE2EError.assertionFailed("acceptance oracle requires attached schedulers")
+        }
+        var records: [[String: Any]] = []
+        var positions = 0
+        var accepted: UInt64 = 0
+        var rejected: UInt64 = 0
+        var terminals = Set<String>()
+        var toolBoundary = false
+        var reasoningClose = false
+        var nearTiedPositions = 0
+        for item in corpus.cases {
+            do {
+                try oracle.beginPair(requestID: item.id, maxPositions: item.request.maxTokens ?? 256)
+                let expected = try await ordinary.complete(item.request)
+                let before = await native.currentSnapshot().nativeMTPStatus
+                let actual = try await native.complete(item.request)
+                let delta = NativeMTPStatusDelta(before: before, after: await native.currentSnapshot().nativeMTPStatus)
+                let comparison = oracle.summary()
+                let promptShape = NativeMTPAcceptanceCorpusBuilder.contains(expected.promptTokens, stratum: item.stratum)
+                let path = lastPath(recorder, item.id)
+                let admission = item.expectedNative ? path == .nativeMTP && delta.proposedTokens > 0 : path == .ordinary && delta.proposedTokens == 0
+                let outputParity = same(expected, actual)
+                let passed = promptShape && admission && outputParity && comparison.passed && comparison.retainedVectors == 0
+                let positionRecords = comparison.positions.map(Self.acceptancePositionDocument)
+                records.append([
+                    "id": item.id, "stratum": item.stratum.rawValue,
+                    "expected_native": item.expectedNative, "passed": passed,
+                    "prompt_tokens": expected.promptTokens, "prompt_stratum_passed": promptShape,
+                    "admission_passed": admission, "output_parity": outputParity,
+                    "ordinary_terminal": Self.jsonOptional(comparison.ordinaryTerminal?.rawValue),
+                    "native_terminal": Self.jsonOptional(comparison.nativeTerminal?.rawValue),
+                    "finish_reason": actual.finishReason,
+                    "completion_tokens": actual.completionTokens,
+                    "generated_completion_tokens": actual.generatedCompletionTokens,
+                    "oracle_failure": Self.jsonOptional(comparison.firstFailure?.reason),
+                    "positions": positionRecords,
+                    "selected_positions": comparison.selectedPositions.map(Self.acceptancePositionDocument),
+                    "ordinary_selected_count": comparison.ordinarySelectedCount,
+                    "native_selected_count": comparison.nativeSelectedCount,
+                ])
+                FileHandle.standardError.write(Data("native-mtp-acceptance: case=\(item.id) passed=\(passed) positions=\(comparison.positions.count)\n".utf8))
+                // A failed row ends this tuple run. Later positions and cases
+                // are never claimed after the first observed divergence.
+                guard passed else { break }
+                if item.expectedNative {
+                    positions += comparison.positions.count
+                    accepted += delta.acceptedTokens
+                    rejected += delta.rejectedTokens
+                    if let terminal = comparison.nativeTerminal { terminals.insert(terminal.rawValue) }
+                    toolBoundary = toolBoundary || actual.toolCalls?.isEmpty == false
+                    reasoningClose = reasoningClose || (
+                        actual.reasoningContent?.isEmpty == false
+                        && (!actual.content.isEmpty || actual.toolCalls?.isEmpty == false)
+                    )
+                    nearTiedPositions += comparison.positions.filter { ($0.ordinaryGap ?? .infinity) <= 0.05 }.count
+                }
+            } catch {
+                records.append(["id": item.id, "passed": false, "error": String(describing: error)])
+                break
+            }
+        }
+        _ = await ordinary.installLabNativeMTPNumericalOracle(nil, role: .ordinary)
+        _ = await native.installLabNativeMTPNumericalOracle(nil, role: .native)
+        let checks: [String: Bool] = [
+            "all_cases_passed": records.count == corpus.cases.count && records.allSatisfy { $0["passed"] as? Bool == true },
+            "native_positions": positions >= corpus.minimumComparedPositions,
+            "all_and_none_acceptance": accepted > 0 && rejected > 0,
+            "partial_acceptance_inapplicable": corpus.proposalDepth == 1,
+            "eos_terminal": terminals.contains(NativeMTPLabNumericalOracle.Terminal.eos.rawValue),
+            "stop_sequence_terminal": terminals.contains(NativeMTPLabNumericalOracle.Terminal.stopSequence.rawValue),
+            "max_tokens_terminal": terminals.contains(NativeMTPLabNumericalOracle.Terminal.maxTokens.rawValue),
+            "generated_tool_boundary": toolBoundary,
+            "generated_reasoning_close": reasoningClose,
+            "near_tied_positions": nearTiedPositions > 0,
+        ]
+        let passed = checks.values.allSatisfy { $0 }
+        return ([
+            "schema": "macprovider.native-mtp-acceptance-result.v1",
+            "status": passed ? "pass" : "fail", "journey_complete": false,
+            "evidence_class": "lab_isolated_no_join", "corpus_sha256": corpus.digestSHA256,
+            "policy_sha256": Self.jsonOptional(acceptancePolicy?.digestSHA256),
+            "provider_commit": Self.jsonOptional(acceptancePolicy?.providerCommit),
+            "target_sha256": Self.jsonOptional(acceptancePolicy?.targetSHA256),
+            "mtp_sha256": Self.jsonOptional(acceptancePolicy?.mtpSHA256),
+            "tokenizer_sha256": Self.jsonOptional(acceptancePolicy?.tokenizerSHA256),
+            "model_id": corpus.modelID, "max_prompt_tokens": corpus.maxPromptTokens,
+            "qualified_slots": corpus.qualifiedSlots, "max_native_active_rows": corpus.maxNativeActiveRows,
+            "proposal_depth": corpus.proposalDepth, "native_compared_positions": positions,
+            "near_tied_positions": nearTiedPositions, "accepted": accepted, "rejected": rejected,
+            "checks": checks, "cases": records,
+        ], passed)
+    }
+
+    private static func acceptancePositionDocument(_ position: NativeMTPLabNumericalOracle.Position) -> [String: Any] {
+        [
+            "position": position.position,
+            "ordinary_token": position.ordinaryToken,
+            "native_token": position.nativeToken,
+            "token_exact": position.tokenExact,
+            "top1_exact": position.top1Exact,
+            "finite": position.finite,
+            "max_abs_difference": jsonOptional(position.maxAbsDifference),
+            "ordinary_top1": jsonOptional(position.ordinaryTop1),
+            "native_top1": jsonOptional(position.nativeTop1),
+            "ordinary_gap": jsonOptional(position.ordinaryGap),
+            "native_gap": jsonOptional(position.nativeGap),
+        ]
+    }
+
+    private static func jsonOptional<T>(_ value: T?) -> Any {
+        if let value { return value }
+        return NSNull()
+    }
+
     private func serialOracle(ordinary: ModelRuntime, native: ModelRuntime, recorder: NativeMTPHardwareAdmissionRecorder, proposalDepth: Int) async throws -> NativeMTPJourneyStep {
         var step = NativeMTPJourneyStep(id: "step-04-serial-token-oracle")
         let cases: [(String, String, Double, Double)] = [
@@ -1313,6 +1540,14 @@ final class NativeMTPJourneyRunner {
             && lhs.promptTokens == rhs.promptTokens
             && lhs.completionTokens == rhs.completionTokens
             && lhs.generatedCompletionTokens == rhs.generatedCompletionTokens
+            && lhs.reasoningContent == rhs.reasoningContent
+            && lhs.reasoningTokens == rhs.reasoningTokens
+            // IDs are parser-generated UUIDs; compare the model's ordered
+            // function/argument output and leave metadata identity alone.
+            && (lhs.toolCalls ?? []).count == (rhs.toolCalls ?? []).count
+            && zip(lhs.toolCalls ?? [], rhs.toolCalls ?? []).allSatisfy { pair in
+                pair.0.functionName == pair.1.functionName && pair.0.arguments == pair.1.arguments
+            }
     }
 
     private func lastPath(_ recorder: NativeMTPHardwareAdmissionRecorder, _ id: String) -> DecodePath? {
