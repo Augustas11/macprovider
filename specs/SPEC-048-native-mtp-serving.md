@@ -510,17 +510,14 @@ unsupported projections and cache rollback remain row-local. This accommodation
 is required because MLX fallback attention can change its numerical reduction
 route when its batch shape changes. Single-row and ordinary decode retain their
 routes. The eight-flattened-token exactness bound remains intact.
-The campaign also connects the existing `GLM5NextMTPDraftModel.chainPacked`
-recursive head at positive depth two, following SGLang `ad950cd` batch-dependent
-positive-depth tuning. It proposes on copied caches and discards tentative
-chain state; finalization folds the accepted target prefix into the unchanged
-stored base. Depth one retains its seed lookup, and other families retain their
-proposal path. Two rows at depth two verify six flattened tokens, inside the
-existing eight-token bound; four such rows exceed that bound. This is an
-exploratory candidate, not permission to widen signed depth or row admission.
-The published depth and native active-row bound remain one until the relevant
-R005/R015 evidence supports a new tuple. Tag `.10.13` adds the copied-chain
-commit regression for accepted-prefix lengths zero, one and two.
+The campaign tested the existing `GLM5NextMTPDraftModel.chainPacked` head
+at depth two following SGLang `ad950cd` positive-depth tuning. All four two-row
+profiles preserved exact parity but reached only 0.795–0.860× ordinary CB.
+The product adapter was removed: GLM retains its registered depth-one drafter
+and seed-only proposal path. Neither tested multi-row design meets the goal
+throughput floor, so the native active-row bound remains one. Tag `.10.13`
+retains copied-chain regressions for accepted-prefix lengths zero, one and two;
+those tests do not grant deeper serving admission.
 This candidate needs fresh GLM token/state parity and R015 qualification before
 admission; its tag is not qualification evidence. Tag
 `3.32.3-macprovider.10.5` consists of `3.32.3-macprovider.10.4` (`676a62a4…`) plus batched DeepSeek-V4 attention,
@@ -1949,10 +1946,10 @@ requests.
   R003 binds the packed GLM projection candidate `3.32.3-macprovider.10.13`
   (`b128c37f…`); new qualification is required for its changed verifier.
   The exactness description explicitly scopes the fused-shape envelope;
-  arbitrary fallback fixtures do not inherit qualification. The candidate also
-  connects the existing recursive packed head at depth two for bounded
-  exploration following SGLang positive-depth tuning; signed depth and row
-  limits remain unchanged until qualified.
+  arbitrary fallback fixtures do not inherit qualification. The existing
+  recursive packed head was tested at depth two following SGLang positive-depth
+  tuning. Its 0.795–0.860× two-row throughput missed the ordinary-CB floor,
+  so its product adapter was removed and signed depth and row limits remain one.
   R004 also admits unconstrained GLM tools/history and ordinary reasoning effort
   following oMLX rendered-prefix semantics. Active grammar and explicit serial
   tool-call stopping remain ordinary. The campaign fixture now uses the actual
