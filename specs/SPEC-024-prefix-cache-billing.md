@@ -1,8 +1,17 @@
 # SPEC-024 - Prefix-cache billing and provider-local cache isolation
 
-**Version:** 0.2.12 (2026-10-24, extend-only prompt snapshots)
+**Version:** 0.2.13 (2026-10-25, keyed GLM-5-Next misses publish serially)
 **Status:** **Billing arithmetic (§4 ledger / §5 rate card / §6 formula) MOVED to SPEC-005 v0.6** (canonical). SPEC-024 **retains** the `cached_prompt_tokens` **wire field** (§3, a SPEC-002 addendum), the **buyer-visible** mirror field (§8, a SPEC-006 addendum), the fraud model (§7), and the provider-local cache-**isolation** baseline (§11–§16) — none of which SPEC-005 **re-owns** (SPEC-005 §5.3.1 does fold in the §14 coordinator cross-check *gates* as billing-eligibility rules, but SPEC-024 remains their canonical home).
 **Depends on:** SPEC-002 v1.5.2 (coordinator-provider wire), SPEC-004 v0.3.2 (sticky affinity; FR-SR-2 provider-visibility carve-out), SPEC-005 v0.6.10 (billing — the canonical owner of prefix-cache billing arithmetic, formula, ledger columns, and rate-card keys), SPEC-006 v0.9.39 (buyer API; §1.3 conversation-key derivation + survivability (b) carve-out + OpenAI nested usage), SPEC-008 v0.4.1 (Tier-2 trust; §2.2 invariant (b) carve-out permitting the provider-visible derived conversation_key), SPEC-018 v0.2.4 (tool calling)
+
+**Change log v0.2.13 (2026-10-25, Related: #2111 — keyed GLM-5-Next misses publish serially):**
+- **SPEC-024-R005 / FR-CI2a.** Under continuous batching `canary`, a keyed
+  GLM-5-Next miss entered a CB row, which publishes no snapshot, so every
+  turn of an agent loop missed and re-prefilled its whole history. A keyed
+  miss whose serial turn would publish a snapshot but whose CB row would not
+  now runs serially and publishes it; the next turn hits it under the AC-26
+  fence. Unkeyed requests, strict `on`, DeepSeek V4 and every other family
+  are unchanged. Billing arithmetic is unchanged.
 
 **Change log v0.2.12 (2026-10-24, Related: #2111 — extend-only prompt snapshots):**
 - **SPEC-024-R004 / FR-CI2a.** DeepSeek V4 (128-token window plus compressed
@@ -492,6 +501,20 @@ snapshot as above. Strict continuous batching (`on`), which refuses that serial 
 publishes no snapshot. Every other family keeps the FR-CI2 predicate
 and canonical prefix unchanged.
 
+**SPEC-024-R005 (keyed miss publish route, v0.2.13).** Under continuous batching `canary`, a
+request MUST NOT enter a continuous-batching row, and MUST run on the serial path, when all of
+these hold: it carries a conversation key; its lease reports `cached_prompt_tokens = 0`; it has
+only text content (the serial path takes no lease otherwise); and a serial turn of its prompt
+would publish a snapshot (`S` defined above) while a CB row of it would not (today GLM-5-Next).
+The serial turn then publishes its snapshot, and the next keyed turn hits it under the SPEC-038
+AC-26 fence. The provider logs
+`event=batching_unsupported action=serial_routed reason=keyed_miss_snapshot_publish`. The route
+is taken before native MTP is selected, so such a miss is not served native (the serial path
+never runs native MTP). Strict `on` refuses that next serial route, so under `on` such a
+request keeps its CB row and publishes nothing. Requests without a key, keyed hits, DeepSeek V4
+(whose CB rows publish their own snapshot), and every family without a snapshot policy MUST
+route exactly as before.
+
 **FR-CI3 (canonical prefix).** On a served turn the provider commits the canonical prefix as
 `prompt_token_ids ‖ generated_token_ids` (shipped: always both, not an optional extension).
 The prompt token IDs are the provider's rendered prompt **including any tool messages and
@@ -776,7 +799,10 @@ Prefix-cache reuse MUST NOT be enabled on a path where the conversation key is b
   tokens to a fresh prefill, and an off-plan resume changes the pools. On a tiny Metal GLM-5-Next
   model, a two-turn conversation resumed at the role marker yields the fresh greedy tokens. A keyed
   CB row publishes only its prompt snapshot (none when it captured none), and GLM-5-Next CB rows
-  take no snapshot.
+  take no snapshot. **(SPEC-024-R005)** Under `canary`, a keyed text-only GLM-5-Next miss
+  serial-routes with reason `keyed_miss_snapshot_publish`, its serial snapshot serves the next
+  turn, and that hit is serial-routed by the AC-26 fence; an unkeyed request, a keyed hit, a
+  non-text request, strict `on`, and a DeepSeek V4 keyed miss stay on their current route.
 - **AC-CI-7 (keyed serial trimmable allocation, SPEC-024-R001).** A conversation-keyed serial
   request on a full-attention model MUST allocate `KVCacheSimple` (or another class that
   remains trimmable after `offset >= maxContextTokens`). A keyless request MUST keep the

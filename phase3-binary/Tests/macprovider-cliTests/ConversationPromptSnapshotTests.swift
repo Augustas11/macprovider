@@ -145,6 +145,84 @@ final class ConversationPromptSnapshotTests: XCTestCase {
         XCTAssertNil(ModelRuntime.continuousBatchPromptSnapshotPolicy(nil))
     }
 
+    // MARK: - SPEC-024-R005: canary keyed GLM miss serial-routes to publish
+
+    private static func keyedMissRoutesSerial(
+        mode: ContinuousBatchingMode = .canary,
+        hasKey: Bool = true,
+        nonText: Bool = false,
+        cached: Int = 0,
+        prompt: [Int32],
+        policy: ModelRuntime.ConversationPromptSnapshotPolicy?
+    ) -> Bool {
+        let keyedPolicy = hasKey ? policy : nil
+        return ModelRuntime.keyedMissShouldSerialRouteToPublishSnapshot(
+            mode: mode, hasConversationKey: hasKey, hasNonTextContent: nonText, cachedPromptTokens: cached,
+            serialSnapshotTokenCount: ModelRuntime.conversationPromptSnapshotTokenCount(
+                promptTokenIds: prompt, policy: keyedPolicy),
+            continuousBatchSnapshotTokenCount: ModelRuntime.conversationPromptSnapshotTokenCount(
+                promptTokenIds: prompt, policy: ModelRuntime.continuousBatchPromptSnapshotPolicy(keyedPolicy)))
+    }
+
+    private static let glmPolicy = ModelRuntime.ConversationPromptSnapshotPolicy.lastRoleMarker(tokenIDs: [600, 601])
+
+    /// Turn 1 (keyed miss) serial-routes and its serial snapshot commits; turn 2
+    /// hits that snapshot, and the existing AC-26 fence serial-routes the hit.
+    func testCanaryKeyedGLMMissServesSeriallyAndTheNextTurnHitsItsSnapshot() async throws {
+        let cache = ConversationCache(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+        let key = "conv:glm-keyed-miss"
+        let turn1 = int32Range(0..<40) + [600] + int32Range(100..<110) + [601]
+        let snapshotLength = try XCTUnwrap(ModelRuntime.conversationPromptSnapshotTokenCount(
+            promptTokenIds: turn1, policy: Self.glmPolicy))
+        XCTAssertEqual(snapshotLength, 51)
+
+        let lease1 = try Self.unwrap(await cache.begin(conversationKey: key, incomingTokens: turn1,
+                                                    modelID: "glm", kvBits: nil))
+        XCTAssertEqual(lease1.cachedPromptTokens, 0)
+        XCTAssertTrue(Self.keyedMissRoutesSerial(cached: lease1.cachedPromptTokens, prompt: turn1, policy: Self.glmPolicy))
+        // The CB attach path releases the miss lease; the serial path takes its own and commits its snapshot.
+        await cache.abortForSerialFallback(lease1)
+        let serial1 = try Self.unwrap(await cache.begin(conversationKey: key, incomingTokens: turn1,
+                                                     modelID: "glm", kvBits: nil))
+        XCTAssertEqual(serial1.cachedPromptTokens, 0)
+        let layers = ConversationCacheLayers([RotatingKVCache(maxSize: 8, keep: 0)], promptSnapshot: true)
+        await cache.commit(serial1, cache: layers, fullTokens: Array(turn1.prefix(snapshotLength)))
+
+        let turn2 = turn1 + int32Range(200..<230) + [601]
+        let lease2 = try Self.unwrap(await cache.begin(conversationKey: key, incomingTokens: turn2,
+                                                    modelID: "glm", kvBits: nil))
+        XCTAssertEqual(lease2.cachedPromptTokens, snapshotLength)
+        XCTAssertTrue(lease2.reusableCache === layers)
+        XCTAssertFalse(Self.keyedMissRoutesSerial(cached: lease2.cachedPromptTokens, prompt: turn2, policy: Self.glmPolicy),
+                       "a hit is not this route's to take")
+        XCTAssertEqual(ModelRuntime.cachedHitFenceReason(
+            mode: .canary, cachedPromptTokens: lease2.cachedPromptTokens, hasRetainedPagedKVHandoff: false,
+            cachedTurnsEnabled: false, cachedTurnsAccepted: false), .stickyCacheHandoffUnavailable,
+                       "the AC-26 fence serial-routes the hit")
+        await cache.abort(lease2)
+    }
+
+    func testKeyedMissSerialRouteLeavesEveryOtherRequestInTheBatch() {
+        let glmPrompt = int32Range(0..<40) + [600] + int32Range(100..<110)
+        XCTAssertTrue(Self.keyedMissRoutesSerial(prompt: glmPrompt, policy: Self.glmPolicy))
+        XCTAssertFalse(Self.keyedMissRoutesSerial(hasKey: false, prompt: glmPrompt, policy: Self.glmPolicy),
+                       "an unkeyed request stays in the batch")
+        XCTAssertFalse(Self.keyedMissRoutesSerial(mode: .on, prompt: glmPrompt, policy: Self.glmPolicy),
+                       "strict on keeps the row: it refuses the serial route the next hit needs")
+        XCTAssertFalse(Self.keyedMissRoutesSerial(mode: .off, prompt: glmPrompt, policy: Self.glmPolicy))
+        XCTAssertFalse(Self.keyedMissRoutesSerial(nonText: true, prompt: glmPrompt, policy: Self.glmPolicy),
+                       "the serial path takes no lease for non-text content")
+        XCTAssertFalse(Self.keyedMissRoutesSerial(prompt: int32Range(0..<40), policy: Self.glmPolicy),
+                       "no role marker: the serial turn would publish nothing either")
+        XCTAssertFalse(Self.keyedMissRoutesSerial(prompt: Array(repeating: 1, count: 4097),
+                                                  policy: .referencePlanBoundary(step: 2048)),
+                       "DeepSeek V4 CB rows publish their own snapshot")
+        XCTAssertFalse(Self.keyedMissRoutesSerial(prompt: glmPrompt, policy: nil),
+                       "a family without a snapshot policy is unchanged")
+        XCTAssertEqual(ModelRuntime.keyedMissSnapshotPublishTelemetryLine,
+                       "event=batching_unsupported action=serial_routed reason=keyed_miss_snapshot_publish\n")
+    }
+
     func testGLM5NextSnapshotPolicyNeedsRoundTrippingRoleTokens() throws {
         try Self.requireMetal()
         let tokenizer = MarkerTokenizer()

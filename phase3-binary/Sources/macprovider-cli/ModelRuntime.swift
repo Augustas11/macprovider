@@ -377,6 +377,10 @@ struct ContinuousBatchPreparedRequest: Sendable {
     var grammarConstraint: GrammarConstraintState? = nil
     /// SPEC-024 FR-CI2a: keyed rows of a snapshot family only.
     var promptSnapshotTokenCount: Int? = nil
+    /// SPEC-024-R005: the snapshot a serial turn of this keyed prompt would
+    /// publish. It differs from `promptSnapshotTokenCount` only for a family
+    /// whose CB rows publish no snapshot (GLM-5-Next).
+    var serialPromptSnapshotTokenCount: Int? = nil
 }
 
 /// Serializes text prompt preparation for one admitted Qwen target snapshot.
@@ -7028,6 +7032,9 @@ maxTokens: 1,
             // Only keyed requests can hold or reuse conversation state.
             let hybrid = try Self.nonEmpty(request.conversationKey) != nil
                 && ConversationCacheLayers.hasRecurrentLayers(context.model.newCache(parameters: nil))
+            let snapshotPolicy = Self.nonEmpty(request.conversationKey) == nil ? nil
+                : Self.conversationPromptSnapshotPolicy(model: context.model, tokenizer: tokenizer)
+            let snapshotPromptTokenIDs = snapshotPolicy == nil ? [] : promptTokens.map(Int32.init)
             return (
                 ContinuousBatchPreparedRequest(
                     promptTokens: promptTokens,
@@ -7044,11 +7051,12 @@ maxTokens: 1,
                     modelHasRecurrentLayers: hybrid,
                     toolCallPrefill: toolCallPrefill,
                     grammarConstraint: try GrammarConstraintState.prepare(request: request, tokenizer: tokenizer, configuration: context.configuration, eosTokenIDs: Self.generationStopTokenIDs(for: context)),
-                    promptSnapshotTokenCount: Self.nonEmpty(request.conversationKey) == nil ? nil
-                        : Self.conversationPromptSnapshotTokenCount(
-                            promptTokenIds: promptTokens.map(Int32.init),
-                            policy: Self.continuousBatchPromptSnapshotPolicy(
-                                Self.conversationPromptSnapshotPolicy(model: context.model, tokenizer: tokenizer)))
+                    promptSnapshotTokenCount: Self.conversationPromptSnapshotTokenCount(
+                        promptTokenIds: snapshotPromptTokenIDs,
+                        policy: Self.continuousBatchPromptSnapshotPolicy(snapshotPolicy)),
+                    serialPromptSnapshotTokenCount: Self.conversationPromptSnapshotTokenCount(
+                        promptTokenIds: snapshotPromptTokenIDs,
+                        policy: snapshotPolicy)
                 ),
                 StreamingDetokenizer(tokenizer: tokenizer)
             )
@@ -7802,6 +7810,53 @@ maxTokens: 1,
         return max(1, maxContextTokens - completion.promptTokens)
     }
 
+    static let keyedMissSnapshotPublishTelemetryLine =
+        "event=batching_unsupported action=serial_routed reason=keyed_miss_snapshot_publish\n"
+
+    /// SPEC-024-R005. A canary keyed miss of a family whose serial turns
+    /// publish a prompt snapshot but whose CB rows publish none (GLM-5-Next)
+    /// runs serially, so the next turn has an entry to hit; the AC-26 fence
+    /// then serial-routes that hit. As a CB row it would publish nothing and
+    /// every turn would re-prefill the whole history. Strict `.on` refuses
+    /// the serial route the next hit needs, so it keeps the row. The serial
+    /// path takes no lease for non-text content, so such a request stays too.
+    static func keyedMissShouldSerialRouteToPublishSnapshot(
+        mode: ContinuousBatchingMode,
+        hasConversationKey: Bool,
+        hasNonTextContent: Bool,
+        cachedPromptTokens: Int,
+        serialSnapshotTokenCount: Int?,
+        continuousBatchSnapshotTokenCount: Int?
+    ) -> Bool {
+        mode == .canary && hasConversationKey && !hasNonTextContent && cachedPromptTokens == 0
+            && serialSnapshotTokenCount != nil && continuousBatchSnapshotTokenCount == nil
+    }
+
+    private func serialRouteCanaryKeyedMissToPublishSnapshot(
+        _ lease: ConversationCacheLease?,
+        request: ChatCompletionRequest,
+        capability: ContinuousBatchingCapability,
+        prepared: ContinuousBatchPreparedRequest
+    ) async -> Bool {
+        guard let lease,
+              Self.keyedMissShouldSerialRouteToPublishSnapshot(
+                  mode: capability.mode,
+                  hasConversationKey: Self.nonEmpty(request.conversationKey) != nil,
+                  hasNonTextContent: request.containsNonTextMessageContentPart,
+                  cachedPromptTokens: lease.cachedPromptTokens,
+                  serialSnapshotTokenCount: prepared.serialPromptSnapshotTokenCount,
+                  continuousBatchSnapshotTokenCount: prepared.promptSnapshotTokenCount
+              )
+        else {
+            return false
+        }
+        // A miss holds no reusable entry; this only releases the key's turn
+        // so the serial request can take its own lease.
+        await conversationCache.abortForSerialFallback(lease)
+        try? FileHandle.standardError.write(contentsOf: Data(Self.keyedMissSnapshotPublishTelemetryLine.utf8))
+        return true
+    }
+
     private func serialRouteCanaryCachedHitMissingRetainedHandoff(
         _ lease: ConversationCacheLease?,
         capability: ContinuousBatchingCapability,
@@ -8012,6 +8067,15 @@ maxTokens: 1,
             lease,
             capability: capability,
             modelHasRecurrentLayers: prepared.modelHasRecurrentLayers
+        ) {
+            return nil
+        }
+        if conversationCacheAllowed,
+           await serialRouteCanaryKeyedMissToPublishSnapshot(
+            lease,
+            request: request,
+            capability: capability,
+            prepared: prepared
         ) {
             return nil
         }
@@ -8461,6 +8525,15 @@ maxTokens: 1,
             lease,
             capability: capability,
             modelHasRecurrentLayers: prepared.modelHasRecurrentLayers
+        ) {
+            return nil
+        }
+        if conversationCacheAllowed,
+           await serialRouteCanaryKeyedMissToPublishSnapshot(
+            lease,
+            request: request,
+            capability: capability,
+            prepared: prepared
         ) {
             return nil
         }
