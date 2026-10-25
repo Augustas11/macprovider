@@ -28,6 +28,8 @@ import importlib.util
 import json
 import re
 import subprocess
+import sys
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -316,6 +318,68 @@ def admission_tuple_sha256(sidecar: bytes, entry_index: object) -> str:
 
 # --------------------------------------------------------------------------- serving
 
+def source_decode_digest(root: Path, commit: str) -> str:
+    """Recompute a source identity from Git blobs; never execute old source."""
+    if not isinstance(commit,str) or not re.fullmatch(r"[0-9a-f]{40}",commit):
+        fail("qualification source must be a full commit")
+    module_path=ROOT / "scripts/decode_path_digest.py"
+    spec=importlib.util.spec_from_file_location("qualified_decode_identity",module_path)
+    module=importlib.util.module_from_spec(spec)
+    sys.modules[spec.name]=module
+    spec.loader.exec_module(module)
+    def blob(relative: str) -> bytes:
+        value=git_file_bytes(root,commit,"phase3-binary/"+relative)
+        if value is None:fail("qualification source blob missing: "+relative)
+        return value
+    with tempfile.TemporaryDirectory(prefix="native-mtp-source-identity.") as directory:
+        package=Path(directory)
+        (package/"decode-path-manifest.json").write_bytes(blob("decode-path-manifest.json"))
+        (package/"Package.resolved").write_bytes(blob("Package.resolved"))
+        files,_=module.load_manifest(package)
+        for relative in files:
+            path=package/relative;path.parent.mkdir(parents=True,exist_ok=True)
+            path.write_bytes(blob(relative))
+        return module.compute(package)
+
+
+def validate_qualification_source_reuse(bundle: Bundle, entry: dict, policy: bytes, policy_body: dict) -> None:
+    """An identity-only squash/release rebind retains original measurement source.
+
+    This branch deliberately handles equal recomputed decode identities only.
+    Changed-path review cannot be supplied as an asserted boolean.
+    """
+    proof=parse_json(bundle.require("qualification-reuse.json"),"qualification-reuse.json")
+    fields={"schema","measured_source_commit","current_source_commit","measured_entry_index",
+            "measured_sidecar_sha256","benchmark_policy_sha256","decode_path_digest","metallib_sha256"}
+    exact_keys(proof,fields,"qualification-reuse.json")
+    if proof["schema"]!="macprovider.native-mtp-qualification-source-reuse.v1":fail("qualification reuse schema differs")
+    source=policy_body.get("provider_commit")
+    if proof["measured_source_commit"]!=source or proof["current_source_commit"]!=entry["source_commit"]:
+        fail("qualification reuse original/current source differs")
+    origin_bytes=bundle.require("qualification-origin-native-mtp-admission.json")
+    if proof["measured_sidecar_sha256"]!=sha256(origin_bytes) or proof["benchmark_policy_sha256"]!=sha256(policy):
+        fail("qualification reuse evidence bytes differ")
+    origin,_=validated_sidecar_entry(origin_bytes,proof["measured_entry_index"])
+    if origin["source_commit"]!=source or origin["provider_revision"]!=source or origin["ordinary_baseline"]["provider_revision"]!=source:
+        fail("qualification reuse must preserve original provider identity")
+    import copy
+    def semantic(value: dict) -> dict:
+        result=copy.deepcopy(value)
+        for key in ("source_commit","provider_revision","reproducible_build_sha256","live_executable_cdhash"):
+            result.pop(key,None)
+        result["ordinary_baseline"].pop("provider_revision",None)
+        return result
+    if semantic(origin)!=semantic(entry):
+        fail("qualification reuse changed profile/runtime/Metal/geometry/evidence")
+    digest=proof["decode_path_digest"]
+    if not isinstance(digest,str) or not SHA256_RE.fullmatch(digest) or origin.get("decode_path_digest")!=digest or entry.get("decode_path_digest")!=digest:
+        fail("qualification reuse decode identity differs")
+    if not isinstance(proof["metallib_sha256"],str) or not SHA256_RE.fullmatch(proof["metallib_sha256"]) or entry.get("metallib_sha256")!=proof["metallib_sha256"]:
+        fail("qualification reuse Metal identity differs")
+    if source_decode_digest(ROOT,source)!=digest or source_decode_digest(ROOT,entry["source_commit"])!=digest:
+        fail("qualification reuse source decode identities differ")
+
+
 def compose_serving(bundle: Bundle, *, captured_at: str, expires_at: str | None = None) -> dict[str, Any]:
     captured = parse_timestamp(captured_at, "captured_at")
     expires = parse_timestamp(expires_at, "expires_at") if expires_at else captured + timedelta(days=EXPIRY_DAYS[SERVING])
@@ -338,7 +402,9 @@ def compose_serving(bundle: Bundle, *, captured_at: str, expires_at: str | None 
     if not isinstance(policy_body, dict) or policy_body.get("schema") != R015_POLICY_SCHEMA:
         fail(f"r015-policy.json schema must be {R015_POLICY_SCHEMA}")
     if policy_body.get("provider_commit") != entry["source_commit"]:
-        fail("r015-policy.json provider_commit must equal the selected sidecar entry source_commit")
+        if "qualification-reuse.json" not in bundle.files:
+            fail("r015-policy.json provider_commit must equal the selected sidecar entry source_commit or carry verified qualification source reuse")
+        validate_qualification_source_reuse(bundle,entry,policy,policy_body)
     observations: dict[str, bool] = {}
     for name, step_id, check, required in OBSERVATION_SOURCES:
         value = steps[step_id]["checks"].get(check)

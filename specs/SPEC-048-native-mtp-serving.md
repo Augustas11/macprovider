@@ -1364,6 +1364,20 @@ listed file is missing or changes without a regenerated digest.
   behavior change, as applied in #2136 and #2141. Admission still requires
   exact matching bindings; identity-only rebind does not bypass a mismatch,
   signed publishing, or revocation.
+  Reused qualification artifacts MUST retain the source identity of their
+  actual measurements, including the original benchmark policy's
+  `provider_commit`; rebinding the sidecar MUST NOT rewrite that field or
+  relabel historical timings as measurements of the new CLI. A separate
+  authenticated reuse record MUST bind those original artifacts and their
+  measured source to the reviewed target source and signed CLI identity,
+  with the tuple-specific evidence that its draft/verify/commit behavior and
+  qualification scope are unchanged. Matching recomputed decode-path digests
+  may establish unchanged decode identity across a squash commit; a changed
+  digest requires the reviewed behavior analysis above, not an assertion of
+  source equality. Raw evidence, original identities, reuse proof and current
+  signed bindings MUST all validate before composition or signing. A changed
+  sampled verifier or expanded request profile does not inherit historical
+  greedy correctness or performance evidence.
 - R015 requalification is required only when a change alters how the qualified
   tuple drafts, verifies, or commits tokens. Before requesting that rerun,
   list the existing qualification evidence and name the changed decode-path
@@ -1399,6 +1413,24 @@ listed file is missing or changes without a regenerated digest.
   retain the general tag/recommendation gate above. This exception neither
   admits a local unsigned/unreleased build nor satisfies an e2e/journey gate;
   every later release and qualification gate remains mandatory.
+  The signed native-binding bundle MAY be assembled after the campaign merge
+  from the narrow reviewed deterministic recipe in SPEC-023-R017; all emitted
+  bytes MUST match independent reconstruction from its committed inputs and
+  verified signed CLI identity. That assembly exception changes neither this
+  guarded unchanged-greedy-scope transaction nor its rollback obligations.
+  Expanded GLM sampled/tools/reasoning scope retains the final tag and fleet
+  recommendation gate and requires genuine R005 token/state proof and passing
+  R015 qualification, including the preregistered privacy-reviewed v2
+  observation and fresh paired replay. Recipe assembly and offline projection
+  supply neither correctness nor performance evidence.
+  JOURNEY-NATIVE-MTP-SERVING also permits its narrow authenticated post-cut
+  redacted draft-asset delivery through the existing protected serving-journey
+  workflow. The workflow MUST authenticate the exact reviewed merged source,
+  successful protected acceptance candidate and CI run, signed candidate bytes
+  and full closed evidence inventory before recomputing and signing the
+  genuine journey result. Transport does not satisfy a journey step, R005,
+  R015, a live e2e gate or conformance promotion; the ordinary committed-evidence
+  route remains available.
 
 SPEC-023 autotune recommendation, SPEC-032 hardware-evidence performance
 measurement, and every ordinary catalog gate seed MUST force
@@ -2014,7 +2046,10 @@ requests.
 
 ## 9. Changelog and history
 
-- **0.1.57 (2026-10-26)** — R002/R004: allow the existing signed sampled
+- **0.1.57 (2026-10-26)** — R013 cross-references SPEC-023-R017's narrow
+  reviewed deterministic native-binding assembly exception without relaxing
+  signed publication, qualification, unchanged-scope canary or exact rollback
+  gates. R002/R004: allow the existing signed sampled
   profile for GLM-5-Next using R005 exact target-sample matching (mlx-vlm
   positioned sampling reference). Greedy signatures remain greedy-only; the
   signed native-row bound remains one pending campaign R015 qualification.

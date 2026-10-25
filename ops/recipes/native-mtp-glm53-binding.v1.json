@@ -1,0 +1,41 @@
+{
+  "model_key": "zai-org/glm-5.3-flash",
+  "phases": {
+    "expanded_glm_sampled": {
+      "max_native_active_rows": 1,
+      "max_prompt_tokens": 4096,
+      "proposal_depth": 1,
+      "qualified_slots": 4,
+      "request_feature_profile": "native_mtp_sampled_text_v1"
+    },
+    "identity_only_greedy": {
+      "max_native_active_rows": 1,
+      "max_prompt_tokens": 4096,
+      "proposal_depth": 1,
+      "qualified_slots": 4,
+      "request_feature_profile": "native_mtp_greedy_text_v1"
+    }
+  },
+  "reused_evidence_keys": [
+    "fit_evidence_sha256",
+    "quality_evidence_sha256",
+    "state_rollback_evidence_sha256"
+  ],
+  "schema_version": "macprovider.native-mtp-binding-recipe.v1",
+  "security_artifact_name": "swift-xunit-shard-{shard}-{sha}",
+  "security_required_cases": [
+    "NativeMTPSelectorTests.testGLMStillRejectsStatefulToolGrammarAndUnknownTemplateControls",
+    "NativeMTPSelectorTests.testGLMGreedyProfileIdentityRebindKeepsPriorShapeScope",
+    "NativeMTPAdmissionSidecarTests.testEmbeddedGLMAdapterSignsAtMostOneNativeActiveRow"
+  ],
+  "source_inputs": {
+    "phase3-binary/catalog/autotune/autotune-artifacts-source.json": "11a8be672b5b0485a29676e04e01f55dcedbde150603cc893b9c76ff01bbd258",
+    "phase3-binary/catalog/autotune/continuous-batching-policy-source.json": "f557b03bb4406eb366f7e2c90d788423768ccada289d9f651969187de8847941",
+    "phase3-binary/catalog/autotune/native-mtp-admission-release.json": "6e0abe5a1ee861d6e3bc484407cda8c00695e92ba686e83a0fbbd4b5dbfe4ef9",
+    "phase3-binary/catalog/autotune/native-mtp-admission-tuple.json": "878a8a621c34ec5f19b912c46dd45944f912b1b8db50e4d72571df35c4aa4dea",
+    "phase3-binary/catalog/autotune/native-mtp-artifact-manifest.json": "92a047c3caac2910ca117218affd02d6215eab8d022bbf1a9654869f16b851b6",
+    "phase3-binary/catalog/autotune/native-mtp-selftest-bank.json": "ddf387a23dbf82c43e88e93c7d3218e1ee3e43bada7ea9515bfa341ac0294d92",
+    "phase3-binary/catalog/autotune/rate-card-source.json": "04a113bb547219b378918e8cfd8170e158dd5066bd8a5d5c3d5d0f05b0e90b57",
+    "phase3-binary/catalog/autotune/trusted-keys.json": "da1ca2cb3788ee4e63982808bb90223ae0040ec150cb6fa6e9af04e52c773de6"
+  }
+}

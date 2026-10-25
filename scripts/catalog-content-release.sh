@@ -119,6 +119,10 @@ MODE=""
 COMMIT=""
 PRICING_ACK=""
 PREFLIGHT_VERDICT_FILE=""
+NATIVE_BINDING_BUNDLE="${CATALOG_NATIVE_BINDING_BUNDLE:-}"
+NATIVE_BINDING_RECIPE="${CATALOG_NATIVE_BINDING_RECIPE:-ops/recipes/native-mtp-glm53-binding.v1.json}"
+NATIVE_BINDING_PROOF=""
+NATIVE_BINDING_GATE_ARGS=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --preflight|--deploy|--recover-pricing-txn|--host-check)
@@ -623,7 +627,7 @@ PY
 # ---------------------------------------------------------------------------
 # Preflight.
 # ---------------------------------------------------------------------------
-TOOLING_FILES="scripts/catalog-content-release.sh scripts/lib/autotune-activate.sh scripts/lib/catalog-canary-token.sh scripts/lib/coordinator-config-guard.sh scripts/pearl_autotune_deploy_lock.py scripts/catalog-verifier-bundle.txt ops/pearl-updater/catalog-canary-proof.py phase4-coordinator/dist/coordinator-pricing-recover"
+TOOLING_FILES="scripts/catalog-content-release.sh scripts/lib/autotune-activate.sh scripts/lib/catalog-canary-token.sh scripts/lib/coordinator-config-guard.sh scripts/pearl_autotune_deploy_lock.py scripts/catalog-verifier-bundle.txt scripts/native_mtp_binding_bundle.py scripts/native_mtp_signed_serving_proof.py ops/recipes/native-mtp-glm53-binding.v1.json ops/pearl-updater/catalog-canary-proof.py phase4-coordinator/dist/coordinator-pricing-recover"
 
 pf_commit() {
   case "$COMMIT" in
@@ -658,6 +662,34 @@ pf_assemble() {
   if ! git -C "$REPO_ROOT" archive --format=tar "$COMMIT" phase3-binary/catalog/autotune phase3-binary/dist/static | tar -xf - -C "$a"; then
     record release_assembled 0 "git archive $COMMIT failed"; return 1
   fi
+  if [ -n "$NATIVE_BINDING_BUNDLE" ]; then
+    [ "$NATIVE_BINDING_RECIPE" = ops/recipes/native-mtp-glm53-binding.v1.json ] || {
+      record release_assembled 0 "unknown native binding recipe"; return 1;
+    }
+    # Freeze caller-owned bytes before verification. Only the reviewed recipe
+    # verifier can replace git assembly; every remaining content gate still runs.
+    if ! python3 -I - "$NATIVE_BINDING_BUNDLE" "$WORK/binding" <<'BINDING_FREEZE'
+import os,pathlib,shutil,stat,sys
+source=pathlib.Path(sys.argv[1]);target=pathlib.Path(sys.argv[2])
+if source.is_symlink() or not source.is_dir():raise ValueError('bundle directory')
+for p in source.rglob('*'):
+ st=p.lstat()
+ if not (stat.S_ISDIR(st.st_mode) or stat.S_ISREG(st.st_mode)):raise ValueError('nonregular bundle member')
+target.mkdir(mode=0o700)
+shutil.copytree(source,target/source.name,symlinks=False)
+BINDING_FREEZE
+    then record release_assembled 0 "cannot freeze native binding bundle"; return 1; fi
+    NATIVE_BINDING_BUNDLE="$WORK/binding/$(basename "$NATIVE_BINDING_BUNDLE")"
+    NATIVE_BINDING_PROOF="$WORK/native-binding-proof.json"
+    if ! MACPROVIDER_OPS_ENTRYPOINT=1 python3 -I "$SCRIPT_DIR/native_mtp_binding_bundle.py" verify \
+        --bundle "$NATIVE_BINDING_BUNDLE" --repo "$REPO_ROOT" --commit "$COMMIT" \
+        --recipe "$NATIVE_BINDING_RECIPE" > "$NATIVE_BINDING_PROOF" 2> "$WORK/native-binding.err"; then
+      record release_assembled 0 "native binding derivation proof failed"; return 1
+    fi
+    REL="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["release_dir"])' "$NATIVE_BINDING_PROOF")"
+    NATIVE_BINDING_GATE_ARGS=(--native-binding-bundle "$NATIVE_BINDING_BUNDLE" --native-binding-recipe "$NATIVE_BINDING_RECIPE")
+  fi
+  if [ -z "$NATIVE_BINDING_BUNDLE" ]; then
   for name in release.json trusted-keys.json tier2-catalog.json; do
     cp "$a/phase3-binary/catalog/autotune/$name" "$REL/$name" || { record release_assembled 0 "commit lacks $name"; return 1; }
   done
@@ -676,8 +708,16 @@ pf_assemble() {
       cp "$a/phase3-binary/dist/static/$name" "$REL/$name" || { record release_assembled 0 "release.json binds the native-MTP set but the commit lacks $name"; return 1; }
     done
   fi
-  cp "$a/phase3-binary/catalog/autotune/release-ledger.json" "$WORK/gate/release-ledger.json" 2>/dev/null &&
-    cp "$a/phase3-binary/catalog/autotune/not-buyer-serving.json" "$WORK/gate/not-buyer-serving.json" 2>/dev/null ||
+  fi
+  if [ -n "$NATIVE_BINDING_BUNDLE" ]; then
+    local binding_ledger
+    binding_ledger="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["ledger_path"])' "$NATIVE_BINDING_PROOF")"
+    cp "$binding_ledger" "$WORK/gate/release-ledger.json" || { record release_assembled 0 "missing derived ledger"; return 1; }
+  else
+    cp "$a/phase3-binary/catalog/autotune/release-ledger.json" "$WORK/gate/release-ledger.json" || { record release_assembled 0 "missing committed ledger"; return 1; }
+  fi
+  release_identity "$REL" REL || { record release_assembled 0 "native binding release identity is malformed"; return 1; }
+  cp "$a/phase3-binary/catalog/autotune/not-buyer-serving.json" "$WORK/gate/not-buyer-serving.json" 2>/dev/null ||
     { record release_assembled 0 "commit lacks release-ledger.json or not-buyer-serving.json"; return 1; }
   # The Tier-2 trust root (tier2.catalog_public_key) every verify of this
   # release uses, here and under the lock on Pearl: the reviewed commit's
@@ -792,7 +832,7 @@ pf_live() {
 
 pf_content_gate() {
   local rc=0
-  python3 -I "$SCRIPT_DIR/catalog-release.py" content-gate --release "$REL" --live "$LIVE" --commit "$COMMIT" \
+  python3 -I "$SCRIPT_DIR/catalog-release.py" content-gate --release "$REL" --live "$LIVE" --commit "$COMMIT" ${NATIVE_BINDING_GATE_ARGS[@]+"${NATIVE_BINDING_GATE_ARGS[@]}"} \
     --tier2-content-index "$WORK/gate/tier2-content-index.json" --tier2-coordinator-config "$WORK/gate/tier2-trust-root.yaml" \
     >"$WORK/gate.json" 2>"$WORK/gate.err" || rc=$?
   GATE_LANE="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("lane",""))' "$WORK/gate.json" 2>/dev/null || true)"
@@ -1467,7 +1507,7 @@ PY
 # #1693: the content gate again, now bound to the fetched effective diff.
 pf_pricing_gate() {
   local rc=0 detail
-  python3 -I "$SCRIPT_DIR/catalog-release.py" content-gate --release "$REL" --live "$LIVE" --commit "$COMMIT" \
+  python3 -I "$SCRIPT_DIR/catalog-release.py" content-gate --release "$REL" --live "$LIVE" --commit "$COMMIT" ${NATIVE_BINDING_GATE_ARGS[@]+"${NATIVE_BINDING_GATE_ARGS[@]}"} \
     --tier2-content-index "$WORK/gate/tier2-content-index.json" --tier2-coordinator-config "$WORK/gate/tier2-trust-root.yaml" \
     --pricing-diff "$PRICING_DIR/pricing-diff.json" \
     --pricing-diff-sha256 "$PRICING_DIFF_SHA" >"$WORK/gate-pricing.json" 2>"$WORK/gate-pricing.err" || rc=$?
@@ -2333,6 +2373,30 @@ cp "$WORK/dryload.json" "$WORK/admitted-prehup.json"
 SSH "rm -rf '$REMOTE_SCRATCH'" >/dev/null 2>&1 || true
 REMOTE_SCRATCH=""
 
+# Both assembly paths freeze an exact byte manifest before upload. Dynamic
+# bindings must be rederived from the committed recipe again under the lease;
+# their signed inventory never substitutes for deterministic verification.
+if [ -n "$NATIVE_BINDING_BUNDLE" ]; then
+  MACPROVIDER_OPS_ENTRYPOINT=1 python3 -I "$SCRIPT_DIR/native_mtp_binding_bundle.py" verify \
+    --bundle "$NATIVE_BINDING_BUNDLE" --repo "$REPO_ROOT" --commit "$COMMIT" \
+    --recipe "$NATIVE_BINDING_RECIPE" > "$WORK/native-binding-recheck.json" ||
+    fatal "native binding proof changed under the lease"
+  cmp -s "$NATIVE_BINDING_PROOF" "$WORK/native-binding-recheck.json" ||
+    fatal "native binding receipt changed under the lease"
+  python3 -I - "$NATIVE_BINDING_PROOF" "$REL" "$WORK/gate/release-ledger.json" "$WORK/release-bytes.sha256" <<'BINDING_MANIFEST' || fatal "cannot freeze verified binding bytes"
+import hashlib,json,pathlib,sys
+proof,rel,ledger,out=sys.argv[1:]
+v=json.loads(pathlib.Path(proof).read_text());root=pathlib.Path(rel)
+if root.resolve()!=pathlib.Path(v['release_dir']).resolve():raise ValueError('release path')
+if pathlib.Path(ledger).read_bytes()!=pathlib.Path(v['ledger_path']).read_bytes():raise ValueError('ledger changed')
+lines=[]
+for p in sorted(root.iterdir()):
+ if p.is_symlink() or not p.is_file() or any(c.isspace() for c in p.name):raise ValueError('release member')
+ lines.append(hashlib.sha256(p.read_bytes()).hexdigest()+' '+p.name+'\n')
+if not lines:raise ValueError('empty release')
+pathlib.Path(out).write_text(''.join(lines))
+BINDING_MANIFEST
+else
 # Reviewed-commit byte proof: a sha256 manifest of every release file, built
 # from `git show <commit>:<path>` (never the staged copy), shipped + sha-checked
 # beside the verifier; the under-lock gate checks every staged byte against it.
@@ -2349,6 +2413,8 @@ for name in sorted(os.listdir(rel)):
     lines.append("%s %s\n" % (sha, name))
 open(out, "w").write("".join(lines))
 PY
+
+fi
 
 IFS= read -r -d '' AA_GATE_SNIPPET <<'GATE' || true
 # Content lane: every staged byte must be the reviewed commit's (manifest built

@@ -58,12 +58,19 @@ Verified 2026-10-25 against GitHub release/tag metadata, the release train
 | Catalog | `published-2026-10-25-glm53-qwen36-native-mtp-v272` (#2141), activated 2026-10-25 02:49–03:12Z; `native_mtp_admission_decode_path` `match` (`4d04a3f3…`) |
 | Consumed identities | Provider and runtime tags through **v1.8.272** are consumed (v1.8.271 is a Pearl runtime tag). The next provider CLI takes the next unused tag; refresh both trains and remote tags first. |
 
-## Next CLI release — net changes vs 1.8.272 (tracked 2026-10-25)
+## Next CLI release — native-MTP campaign (1.8.274)
 
-Live fleet target: **1.8.272**. No provider-side change has merged since.
+Related: #2144; campaign PR #2152. Refresh both release trains and remote tags
+before cutting; 1.8.273 is a coordinator runtime identity and is not reused.
 
-| PR | Issue | Provider-side change | Status |
-|---|---|---|---|
+The first matched signed binary/policy transaction retains the already-qualified
+GLM greedy request profile, one native row, depth one and four CB slots. It
+rebinds verified CLI/decode/Metal identity only. Expanded sampled, tools,
+history and reasoning eligibility needs its genuine R005 and representative
+R015 proof, plus signed serving-journey evidence; it cannot be activated by a
+CLI carry-forward record. Failed multi-row designs do not raise the row bound.
+
+- **Carry-forward CF-274-E2E (1.8.274; retained greedy scope only):** carry forward the existing qualified GLM one-row/depth-one greedy R015 evidence in `docs/research/spec048-r015/glm53-flash-r015-v2/window-20261019T010258Z/` and unchanged qualifying fit/quality/state evidence. The campaign's one-row draft/verify/commit arithmetic for that retained scope is unchanged; the signed bindings must match the actual new candidate and shipped Metal bytes. This is a preregistered scope record, not a claim that a future signed candidate, canary, journey or gateway request has already passed. The release train still requires exact signed-byte verification, live code-identity registration, the guarded matched-pair canary, 120-second stability, and an attributed paid gateway proof. The campaign's lab correctness gate, full-diff audit and required CI must pass before merge. No full signed serving journey is claimed or replaced by this carry-forward, and this record grants no expanded-profile admission.
 
 ## Shipped v1.8.272 — net changes vs 1.8.270
 

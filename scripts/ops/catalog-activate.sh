@@ -121,6 +121,28 @@ DSV4_WINDOW_DOWNTIME="Studio provider: GLM-5.3-Flash buyer traffic is unavailabl
 
 # This optional intent selects a single matched signed binary/policy step.
 # It contains identities and private paths, never private key bytes.
+# Dynamic native bindings are accepted only after deterministic verification of
+# the one committed campaign recipe, never from arbitrary local catalog files.
+NATIVE_BINDING_RECIPE=ops/recipes/native-mtp-glm53-binding.v1.json
+CATALOG_TARGET_DIR="$REPO_ROOT/$AUTOTUNE"
+CATALOG_TARGET_INPUT="$REPO_ROOT/$AUTOTUNE/native-mtp-admission-release.json"
+
+native_binding_context() {
+  local commit="$1" receipt="$OPS_TMP_DIR/native-binding-proof.json"
+  CATALOG_TARGET_DIR="$REPO_ROOT/$AUTOTUNE"
+  CATALOG_TARGET_INPUT="$REPO_ROOT/$AUTOTUNE/native-mtp-admission-release.json"
+  [ -n "${CATALOG_NATIVE_BINDING_BUNDLE:-}" ] || return 0
+  [ "${CATALOG_NATIVE_BINDING_RECIPE:-$NATIVE_BINDING_RECIPE}" = "$NATIVE_BINDING_RECIPE" ] || return 1
+  MACPROVIDER_OPS_ENTRYPOINT=1 python3 -I "$REPO_ROOT/scripts/native_mtp_binding_bundle.py" verify \
+    --bundle "$CATALOG_NATIVE_BINDING_BUNDLE" --repo "$REPO_ROOT" --commit "$commit" \
+    --recipe "$NATIVE_BINDING_RECIPE" > "$receipt" 2> "$OPS_TMP_DIR/native-binding-proof.err" || return 1
+  CATALOG_TARGET_DIR="$(json_field "$receipt" 'd["release_dir"]')"
+  CATALOG_TARGET_INPUT="$(json_field "$receipt" 'd["release_input_path"]')"
+  fact native_binding_phase "$(json_field "$receipt" 'd["phase"]')"
+  fact native_binding_receipt_sha256 "$(json_field "$receipt" 'd["receipt_sha256"]')"
+  [ -d "$CATALOG_TARGET_DIR" ] && [ -f "$CATALOG_TARGET_INPUT" ]
+}
+
 signed_pair_state_dir() { printf '%s/%s/signed-native-pair' "$OPS_STATE_DIR" "$OPS_SCOPE"; }
 
 signed_pair_plan_sha() {
@@ -157,7 +179,7 @@ signed_pair_decode_path_gate() {
   provenance="$(json_field "$plan" 'd["target"]["provenance"]')"
   if [ "$provenance" = reviewed_published_signed_release ]; then
     python3 "$REPO_ROOT/scripts/decode_path_digest.py" --publish-gate \
-      "$REPO_ROOT/$AUTOTUNE/native-mtp-admission-release.json" "$REPO_ROOT/$AUTOTUNE/native-mtp-admission.json" "$recommended" 2>&1 ||
+      "$CATALOG_TARGET_INPUT" "$CATALOG_TARGET_DIR/native-mtp-admission.json" "$recommended" 2>&1 ||
       printf '%s\n' "blocked: decode-path publish gate failed"
     return 0
   fi
@@ -175,7 +197,7 @@ signed_pair_decode_path_gate() {
     printf '%s\n' "blocked: signed-pair verified candidate run unavailable"; return 0;
   }
   MACPROVIDER_OPS_ENTRYPOINT=1 python3 "$REPO_ROOT/scripts/decode_path_digest.py" --publish-gate \
-    "$REPO_ROOT/$AUTOTUNE/native-mtp-admission-release.json" "$REPO_ROOT/$AUTOTUNE/native-mtp-admission.json" "$recommended" \
+    "$CATALOG_TARGET_INPUT" "$CATALOG_TARGET_DIR/native-mtp-admission.json" "$recommended" \
     --signed-pair-plan "$plan" --signed-byte-verification "$marker" \
     --signed-pair-run-json "$run_json" --signed-pair-prior-sidecar "$prior" 2>&1 ||
     printf '%s\n' "blocked: signed-pair decode-path publish proof failed"
@@ -266,6 +288,7 @@ signed_pair_internal() {
   [ "${MACPROVIDER_OPS_ENTRYPOINT:-}" = 1 ] || refuse "signed pair transition requires next --run"
   local commit="$1" expected="$2" got
   [ "$commit" = "$(origin_main_sha)" ] && [ "$commit" = "$(git -C "$REPO_ROOT" rev-parse HEAD)" ] || refuse "signed pair source moved"
+  native_binding_context "$commit" || refuse "native binding proof changed before publication"
   got="$(signed_pair_plan_sha)" || refuse "signed pair intent is invalid"
   [ "$got" = "$expected" ] || refuse "signed pair intent changed since status"
   # Re-fetch under live-ops custody. The actor later independently proves the
@@ -421,7 +444,25 @@ gather() {
   local main_sha head_sha R native_bound=false bank_rid verify_ok=false qwen_lock_purpose="" qwen_local_intent=false
   main_sha="$(origin_main_sha)"
   head_sha="$(git -C "$REPO_ROOT" rev-parse HEAD)"
-  R="$(json_field "$REPO_ROOT/$AUTOTUNE/release.json" 'd["release_id"]')"
+  if [ "$(live_lock_purpose 2>/dev/null || true)" = catalog-activate:signed_native_pair ] &&
+     [ -n "${CATALOG_SIGNED_PAIR_PLAN:-}" ]; then
+    # Recovery does not depend on still-valid candidate envelopes. The private
+    # intent and actor independently prove the already-journaled terminal pair.
+    R="$(json_field "$CATALOG_SIGNED_PAIR_PLAN" 'd["target"]["catalog_release_id"]')"
+    [[ "$R" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$ ]] || die "invalid recovery release identity"
+    OPS_SCOPE="catalog-$R"
+    if [ -f "$(signed_pair_state_dir)/controller-state.json" ]; then
+      step signed_native_pair_reconcile pending "signed pair journal awaits a live terminal acknowledgement"
+      set_next signed_native_pair_reconcile mutate "Reconcile the journaled signed binary/policy pair" \
+        "$OPS_DIR/catalog-activate.sh _signed-native-pair-reconcile"
+      return
+    fi
+  fi
+  if ! native_binding_context "$main_sha"; then
+    set_next native_binding_bundle blocked "Verify the committed native binding recipe" "" "signed bundle derivation or qualification proof failed"
+    return
+  fi
+  R="$(json_field "$CATALOG_TARGET_DIR/release.json" 'd["release_id"]')"
   [ -n "$R" ] || die "cannot read $AUTOTUNE/release.json"
   OPS_SCOPE="catalog-$R"
 
@@ -549,13 +590,18 @@ gather() {
   fact origin_main_sha "$main_sha"
   fact checkout_is_origin_main "$([ "$head_sha" = "$main_sha" ] && echo true || echo false)"
   fact committed_release_id "$R"
-  if [ -n "$(json_field "$REPO_ROOT/$AUTOTUNE/release.json" 'd["feeds"]["native-mtp-admission.json"]["sha256"]')" ]; then
+  if [ -n "$(json_field "$CATALOG_TARGET_DIR/release.json" 'd["feeds"]["native-mtp-admission.json"]["sha256"]')" ]; then
     native_bound=true
   fi
   fact native_bound "$native_bound"
-  bank_rid="$(json_field "$REPO_ROOT/$AUTOTUNE/native-mtp-selftest-bank.json" 'd["release_id"]')"
+  bank_rid="$(json_field "$CATALOG_TARGET_DIR/native-mtp-selftest-bank.json" 'd["release_id"]')"
   fact committed_bank_release_id "$bank_rid"
-  if MACPROVIDER_REQUIRED_CB_BASELINE=studio-qwen3.6-a3b-v1 python3 "$REPO_ROOT/scripts/catalog-release.py" verify > "$OPS_TMP_DIR/verify.out" 2>&1; then
+  if [ -n "${CATALOG_NATIVE_BINDING_BUNDLE:-}" ]; then
+    if python3 "$REPO_ROOT/scripts/catalog-release.py" verify-directory --directory "$CATALOG_TARGET_DIR" \
+        --tier2-coordinator-config "$REPO_ROOT/phase4-coordinator/dist/coordinator.yaml" > "$OPS_TMP_DIR/verify.out" 2>&1; then
+      verify_ok=true
+    fi
+  elif MACPROVIDER_REQUIRED_CB_BASELINE=studio-qwen3.6-a3b-v1 python3 "$REPO_ROOT/scripts/catalog-release.py" verify > "$OPS_TMP_DIR/verify.out" 2>&1; then
     verify_ok=true
   fi
   fact catalog_release_verify "$verify_ok"
@@ -579,7 +625,7 @@ gather() {
   # Routes: a 200, or a JSON 404 from the coordinator itself, proves nginx
   # forwards the path; an nginx HTML 404 means the location block is missing.
   local missing="" feed route code
-  for feed in $(json_field "$REPO_ROOT/$AUTOTUNE/release.json" '" ".join(sorted(d["feeds"]))'); do
+  for feed in $(json_field "$CATALOG_TARGET_DIR/release.json" '" ".join(sorted(d["feeds"]))'); do
     route="$(feed_route "$feed")"
     [ -n "$route" ] || continue
     set -- "$route" "$route.sig"
@@ -604,7 +650,7 @@ gather() {
       live_bank_sha="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$OPS_TMP_DIR/bank.json")"
     fi
     local key_id
-    key_id="$(json_field "$REPO_ROOT/$AUTOTUNE/native-mtp-admission.json" 'd["revocation_signer_key_id"]')"
+    key_id="$(json_field "$CATALOG_TARGET_DIR/native-mtp-admission.json" 'd["revocation_signer_key_id"]')"
     if [ "$(http_get "$base/v1/native-mtp-revocations.$key_id.json" "$OPS_TMP_DIR/rev.json")" = "200" ]; then
       slot_exp="$(json_field "$OPS_TMP_DIR/rev.json" 'd["expires_at"]')"
       python3 -c 'import datetime,sys; e=datetime.datetime.strptime(sys.argv[1],"%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc); sys.exit(0 if e>datetime.datetime.now(datetime.timezone.utc) else 1)' "$slot_exp" 2>/dev/null &&
@@ -801,7 +847,7 @@ $owed_writer '$deploy_log' '$owed_dir' '$R'"
           "$(json_field "$OPS_TMP_DIR/healthz.json" 'd.get("recommended_binary_version") or ""' 2>/dev/null)")"
       else
         dp_gate="$(python3 "$REPO_ROOT/scripts/decode_path_digest.py" --publish-gate \
-          "$REPO_ROOT/$AUTOTUNE/native-mtp-admission-release.json" "$REPO_ROOT/$AUTOTUNE/native-mtp-admission.json" \
+          "$CATALOG_TARGET_INPUT" "$CATALOG_TARGET_DIR/native-mtp-admission.json" \
           "$(json_field "$OPS_TMP_DIR/healthz.json" 'd.get("recommended_binary_version") or ""' 2>/dev/null)" 2>&1 ||
           echo "blocked: decode-path publish gate failed")"
       fi
@@ -1746,12 +1792,13 @@ buc_internal() {
 
 internal() {
   case "$1" in
-    _signed-native-pair) shift; R="$(json_field "$REPO_ROOT/$AUTOTUNE/release.json" 'd["release_id"]')"; OPS_SCOPE="catalog-$R"; signed_pair_internal "$@" ;;
-    _signed-native-pair-reconcile) R="$(json_field "$REPO_ROOT/$AUTOTUNE/release.json" 'd["release_id"]')"; OPS_SCOPE="catalog-$R"; signed_pair_reconcile ;;
+    _signed-native-pair) shift; native_binding_context "$(origin_main_sha)" || refuse "native binding proof is invalid"; R="$(json_field "$CATALOG_TARGET_DIR/release.json" 'd["release_id"]')"; OPS_SCOPE="catalog-$R"; signed_pair_internal "$@" ;;
+    _signed-native-pair-reconcile) R="$(json_field "$CATALOG_SIGNED_PAIR_PLAN" 'd["target"]["catalog_release_id"]')"; OPS_SCOPE="catalog-$R"; signed_pair_reconcile ;;
     _qwen-lock-reconcile) reconcile_qwen_restore_lock ;;
     _buyer-ux-conformance) shift; buc_internal "$@" ;;
     _gateway-proof)
-      R="$(json_field "$REPO_ROOT/$AUTOTUNE/release.json" 'd["release_id"]')"
+      native_binding_context "$(origin_main_sha)" || refuse "native binding proof is invalid"
+      R="$(json_field "$CATALOG_TARGET_DIR/release.json" 'd["release_id"]')"
       OPS_SCOPE="catalog-$R"
       gateway_proof ;;
     *) usage >&2; exit 2 ;;

@@ -507,7 +507,19 @@ jobs:
       - name: Run Swift test shard ${{ matrix.shard }}/4
         working-directory: phase3-binary
         timeout-minutes: 20
-        run: python3 -u ../scripts/ci-swift-test-shard.py --shard ${{ matrix.shard }} --total 4
+        run: python3 -u ../scripts/ci-swift-test-shard.py --shard ${{ matrix.shard }} --total 4 --xunit shard-xunit.xml
+
+      # Retain the xUnit output even for a failing test shard. The artifact
+      # metadata binds the ZIP to this Actions run and checked-out source SHA.
+      - name: Upload Swift xUnit shard report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: swift-xunit-shard-${{ matrix.shard }}-${{ github.sha }}
+          path: phase3-binary/shard-xunit.xml
+          if-no-files-found: warn
+          include-hidden-files: false
+          retention-days: 7
 
   swift-journeys:
     # Hermetic BYOM journeys and Sparkle key checks, split out of the old
