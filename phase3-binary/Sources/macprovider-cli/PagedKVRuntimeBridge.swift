@@ -1029,11 +1029,13 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                         let sampledTokens: [Int]?
                         if inputs.contains(where: \.sampleFirstToken) {
                             #if DEBUG || MACPROVIDER_LAB_HARNESS
-                            let sampling = inputs.indices.filter { inputs[$0].sampleFirstToken }
-                            ContinuousBatchLabFirstTokenLogits.log(
-                                requestIDs: sampling.map { inputs[$0].requestID },
-                                promptTokenCounts: sampling.map { inputs[$0].targetKVTokenCount },
-                                logits: output.logits[0..., -1, 0...][MLXArray(sampling.map(Int32.init))])
+                            if ContinuousBatchLabFirstTokenLogits.enabled {
+                                let sampling = inputs.indices.filter { inputs[$0].sampleFirstToken }
+                                ContinuousBatchLabFirstTokenLogits.log(
+                                    requestIDs: sampling.map { inputs[$0].requestID },
+                                    promptTokenCounts: sampling.map { inputs[$0].targetKVTokenCount },
+                                    logits: output.logits[0..., -1, 0...][MLXArray(sampling.map(Int32.init))])
+                            }
                             #endif
                             sampledTokens = ContinuousBatchRowSampler.sample(
                                 logits: output.logits[0..., -1, 0...],
@@ -1132,10 +1134,12 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                         }
                         if input.sampleFirstToken {
                             #if DEBUG || MACPROVIDER_LAB_HARNESS
-                            ContinuousBatchLabFirstTokenLogits.log(
-                                requestIDs: [input.requestID],
-                                promptTokenCounts: [input.targetKVTokenCount],
-                                logits: output.logits[0..., -1, 0...])
+                            if ContinuousBatchLabFirstTokenLogits.enabled {
+                                ContinuousBatchLabFirstTokenLogits.log(
+                                    requestIDs: [input.requestID],
+                                    promptTokenCounts: [input.targetKVTokenCount],
+                                    logits: output.logits[0..., -1, 0...])
+                            }
                             #endif
                             sampledToken = ContinuousBatchRowSampler.sample(
                                 logits: output.logits[0..., -1, 0...],

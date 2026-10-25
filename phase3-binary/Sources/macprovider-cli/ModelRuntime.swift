@@ -8172,7 +8172,8 @@ maxTokens: 1,
                         serialCache.layers,
                         recurrentCheckpoints: serialCache.recurrentCheckpoints,
                         promptSnapshot: serialCache.promptSnapshot,
-                        nativeMTPDrafter: serialCache.nativeMTPDrafter
+                        nativeMTPDrafter: serialCache.nativeMTPDrafter,
+                        resumeBoundaryPlan: prepared.promptSnapshotAttachesToContinuousBatchRow
                     ),
                     fullTokens: fullTokens,
                     cold: coldContext
@@ -8697,7 +8698,8 @@ maxTokens: 1,
                         serialCache.layers,
                         recurrentCheckpoints: serialCache.recurrentCheckpoints,
                         promptSnapshot: serialCache.promptSnapshot,
-                        nativeMTPDrafter: serialCache.nativeMTPDrafter
+                        nativeMTPDrafter: serialCache.nativeMTPDrafter,
+                        resumeBoundaryPlan: prepared.promptSnapshotAttachesToContinuousBatchRow
                     ),
                     fullTokens: fullTokens,
                     cold: coldContext
@@ -12938,6 +12940,7 @@ maxTokens: maxTokens,
               prepared.promptResumeBoundaries.contains(lease.cachedPromptTokens),
               let reusable = lease.reusableCache,
               reusable.promptSnapshot,
+              reusable.resumeBoundaryPlan,
               reusable.retainedPagedKVSequence == nil,
               lease.reusableCanonicalPromptTokens?.count == lease.cachedPromptTokens
         else { return false }

@@ -198,16 +198,19 @@ final class ConversationPromptSnapshotTests: XCTestCase {
             promptTokenIds: prompts[2], policy: .lastRoleMarker(tokenIDs: [60, 61, 62], resumeTokenID: 61)), [])
     }
 
-    /// SPEC-024-R005: a CB lease resumes a snapshot only when its length is
-    /// one of the incoming prompt's resume boundaries; otherwise the cold and
-    /// resumed chunk plans would differ, so it is a miss.
+    /// SPEC-024-R005: a CB lease resumes a snapshot only when another CB row
+    /// took it on the resume-boundary plan and its length is one of the
+    /// incoming prompt's resume boundaries; otherwise the cold and resumed
+    /// chunk plans would differ, so it is a miss. A serial snapshot, even on
+    /// a boundary, ran another plan.
     func testResumeBoundaryLeaseMissesASnapshotOffTheIncomingPromptsBoundaries() async throws {
         let cache = ConversationCache(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
         let stored = int32Range(0..<64)
-        func seed(_ key: String) async throws -> ConversationCacheLayers {
+        func seed(_ key: String, plan: Bool = true) async throws -> ConversationCacheLayers {
             let lease = try Self.unwrap(await cache.begin(conversationKey: key, incomingTokens: stored,
                                                        modelID: "model-a", kvBits: nil))
-            let layers = ConversationCacheLayers([RotatingKVCache(maxSize: 8, keep: 0)], promptSnapshot: true)
+            let layers = ConversationCacheLayers([RotatingKVCache(maxSize: 8, keep: 0)], promptSnapshot: true,
+                                                 resumeBoundaryPlan: plan)
             await cache.commit(lease, cache: layers, fullTokens: stored)
             return layers
         }
@@ -227,6 +230,20 @@ final class ConversationPromptSnapshotTests: XCTestCase {
         XCTAssertNil(miss.reusableCache)
         XCTAssertEqual(miss.cachedPromptTokens, 0)
         await cache.abort(miss)
+
+        _ = try await seed("conv:serial", plan: false)
+        let serialMiss = try Self.unwrap(await cache.begin(conversationKey: "conv:serial", incomingTokens: incoming,
+                                                           modelID: "model-a", kvBits: nil,
+                                                           promptSnapshotResumeBoundaries: [64, 94]))
+        XCTAssertNil(serialMiss.reusableCache, "a serial snapshot never resumes a CB row")
+        await cache.abort(serialMiss)
+        let serialLayers = try await seed("conv:serial-path", plan: false)
+        let serialHit = try Self.unwrap(await cache.begin(conversationKey: "conv:serial-path", incomingTokens: incoming,
+                                                          modelID: "model-a", kvBits: nil))
+        XCTAssertTrue(serialHit.reusableCache === serialLayers, "the serial path still reuses it")
+        await cache.abort(serialHit)
+        XCTAssertFalse(ConversationCacheLayers([KVCacheSimple()], resumeBoundaryPlan: true).resumeBoundaryPlan,
+                       "only a prompt snapshot carries the plan mark")
     }
 
     /// SPEC-024-R005 / SPEC-048 MTP-9: a native-MTP lease reuses a snapshot

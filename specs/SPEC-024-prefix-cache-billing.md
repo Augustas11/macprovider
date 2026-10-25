@@ -522,8 +522,10 @@ behaviour), in every CB mode. Under the grant:
   of the conversation may have snapshotted at, and its own `S`), in addition to the chunk
   bounds it already has; chunks between boundaries are the ordinary balanced chunks of that
   span. The boundaries are a function of the prompt tokens alone, so a prompt and any prompt
-  extending it agree on every boundary inside their common prefix. A lease whose `S` is not a
-  resume boundary of the incoming prompt is a **miss** (`prompt_snapshot_off_resume_boundary`).
+  extending it agree on every boundary inside their common prefix. A CB row resumes only a
+  snapshot another CB row took on this plan (a serial snapshot ran other chunks); a lease whose
+  entry lacks that mark, or whose `S` is not a resume boundary of the incoming prompt, is a
+  **miss** (`prompt_snapshot_off_resume_boundary`). The serial path's own reuse is unchanged.
   Decode is unchanged.
 - **Capture.** The row's prefill MUST stop on `S` (a chunk boundary), so the snapshot is the
   committed state a fresh prefill of the same prompt holds at `S`. Each sparse layer's latent,

@@ -67,6 +67,10 @@ final class ConversationCacheLayers: @unchecked Sendable {
     /// SPEC-024-R005: the native-MTP head state at this prompt snapshot, when a
     /// native GLM-5-Next CB row published it. Nil for every other entry.
     let nativeMTPDrafter: NativeMTPDrafterPrefixSnapshot?
+    /// SPEC-024-R005: a prompt snapshot a GLM-5-Next CB row took on the resume
+    /// boundary chunk plan. Only such an entry may resume a CB row; a serial
+    /// snapshot ran another chunk plan. False for every other entry.
+    let resumeBoundaryPlan: Bool
     private let discardRetainedPagedKVSequence: (@Sendable (PagedKVRetainedSequence, String) async -> Void)?
 
     init(
@@ -75,7 +79,8 @@ final class ConversationCacheLayers: @unchecked Sendable {
         discardRetainedPagedKVSequence: (@Sendable (PagedKVRetainedSequence, String) async -> Void)? = nil,
         recurrentCheckpoints: [RecurrentStateCheckpoint] = [],
         promptSnapshot: Bool = false,
-        nativeMTPDrafter: NativeMTPDrafterPrefixSnapshot? = nil
+        nativeMTPDrafter: NativeMTPDrafterPrefixSnapshot? = nil,
+        resumeBoundaryPlan: Bool = false
     ) {
         self.layers = layers
         self.retainedPagedKVSequence = retainedPagedKVSequence
@@ -83,6 +88,7 @@ final class ConversationCacheLayers: @unchecked Sendable {
         self.recurrentCheckpoints = recurrentCheckpoints.sorted { $0.tokenCount < $1.tokenCount }
         self.promptSnapshot = promptSnapshot
         self.nativeMTPDrafter = promptSnapshot ? nativeMTPDrafter : nil
+        self.resumeBoundaryPlan = promptSnapshot && resumeBoundaryPlan
     }
 
     static func hasRecurrentLayers(_ layers: [KVCache]) -> Bool {
@@ -398,10 +404,12 @@ actor ConversationCache {
                 log("event=conv_cache action=miss key_hash=\(keyHash) reason=prompt_snapshot_drafter_unavailable snapshot_tokens=\(entry.canonicalPromptTokens.count)")
                 return await predicateMiss("prompt_snapshot_drafter_unavailable")
             }
-            // SPEC-024-R005: a CB row resumes only on one of its own prompt's
-            // chunk boundaries, so the resumed and a cold prefill of this
+            // SPEC-024-R005: a CB row resumes only a snapshot another CB row
+            // took on the resume-boundary plan, and only on one of its own
+            // prompt's boundaries, so the resumed and a cold prefill of this
             // prompt run the same chunks (bit-identical state).
-            if let promptSnapshotResumeBoundaries, !promptSnapshotResumeBoundaries.contains(lcp) {
+            if let promptSnapshotResumeBoundaries,
+               !entry.kvCache.resumeBoundaryPlan || !promptSnapshotResumeBoundaries.contains(lcp) {
                 log("event=conv_cache action=miss key_hash=\(keyHash) reason=prompt_snapshot_off_resume_boundary snapshot_tokens=\(entry.canonicalPromptTokens.count)")
                 return await predicateMiss("prompt_snapshot_off_resume_boundary")
             }

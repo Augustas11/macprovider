@@ -106,7 +106,9 @@ preflight() {
   # 2026-10-25 parity fix) and the lab first-token logits diagnostic.
   local marker
   for marker in prompt_snapshot_off_resume_boundary '[lab-first-logits] request_id='; do
-    strings -a "$HARNESS/macprovider-cli" | grep -qF -- "$marker" ||
+    # grep the binary itself: a `strings | grep` pipeline can die of SIGPIPE
+    # under pipefail and reject a valid harness.
+    grep -aqF -- "$marker" "$HARNESS/macprovider-cli" ||
       { echo "refusing: $HARNESS/macprovider-cli lacks '$marker' (stale harness build)" >&2; exit 3; }
   done
   [[ $(shasum -a 256 "$HARNESS/mlx.metallib" | cut -d' ' -f1) == $RELEASE_METALLIB_SHA256 ]] ||
@@ -234,7 +236,7 @@ parity() {
   # Warm vs cold first-token logits: bit-identical prompt state, or by how much
   # and how contested the greedy choice was.
   local logits_rc=0
-  /usr/bin/python3 -I "$SRC/glm53_cb_prefix_cache.py" --first-logits-log "$log" \
+  /usr/bin/python3 -I "$SRC/glm53_cb_prefix_cache.py" --first-logits-log "$log" "$OUT"/parity-rows*.json \
     > "$OUT/first-logits.json" 2> "$OUT/first-logits.err" || logits_rc=$?
   /usr/bin/python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1])); print("first_logits_pairs=%d identical=%d" % (d["pairs"], d["identical_pairs"]))' \
     "$OUT/first-logits.json" 2>&1 | tee -a "$OUT/summary.txt" || true
