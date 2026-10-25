@@ -42,11 +42,11 @@ EXPECTED_LOCATIONS = {
 # scripts: the upstream watch imports these names, and a test checks them
 # against the SPEC-048 fork table.
 SPEC048_MLX_SWIFT_LM_FORK = "https://github.com/Augustas11/mlx-swift-lm"
-# Fork tag 3.32.3-macprovider.10.5 (branch campaign/2111-dsv4-cb):
-# 3.32.3-macprovider.10.4 (676a62a4) plus shared DeepSeek V4 attention,
-# batched compressor/indexer projections and keys-only row cache storage.
-SPEC048_MLX_SWIFT_LM_TAG = "3.32.3-macprovider.10.5"
-SPEC048_MLX_SWIFT_LM_REVISION = "c8be0f618df1e0df230137a3cbe932aa798d602b"
+# Fork tag 3.32.3-macprovider.10.10 (campaign/2144-native-mtp):
+# 3.32.3-macprovider.10.5 (c8be0f61) plus compatible GLM per-column
+# attention cohorts and shared MTP indexer projections.
+SPEC048_MLX_SWIFT_LM_TAG = "3.32.3-macprovider.10.10"
+SPEC048_MLX_SWIFT_LM_REVISION = "2b0768211a226c40c4db9b13c2ce064491f7a3e8"
 SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE = "3b339ad6e3b3f44c8121ecff5131c7fd55e075e6"
 SPEC048_MLX_SWIFT_FORK = "https://github.com/Augustas11/mlx-swift"
 SPEC048_MLX_SWIFT_TAG = "0.32.3-macprovider.9"

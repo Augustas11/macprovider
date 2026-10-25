@@ -5,7 +5,7 @@ import XCTest
 
 /// `native-mtp-bench` on a GLM-5.3-Flash fixture: the MTP layer is embedded
 /// in the target (`checkpoint_mtp`), so the fixture has no `mtp/` directory,
-/// and the family's greedy-only profile and one-row bound are checked before
+/// and the family's sampled profile and one-row bound are checked before
 /// any model load.
 final class NativeMTPBenchGLMTests: XCTestCase {
     private static let glmPolicyURL = URL(fileURLWithPath: #filePath)
@@ -71,13 +71,11 @@ final class NativeMTPBenchGLMTests: XCTestCase {
         XCTAssertThrowsError(try check(cell: "s2-p1536-o512", block: 0, sustained: true))
     }
 
-    func testGreedyOnlyFamilyRefusesASampledPolicyBeforeLoading() throws {
+    func testGLMFamilyAcceptsASignedSampledPolicyBeforeLoading() throws {
         var object = try glmPolicyObject()
         object["temperature"] = 0.7
         let policy = try load(object)
-        XCTAssertThrowsError(try policy.validateFamily(.glm5Next)) { error in
-            XCTAssertTrue("\(error)".contains("greedy rows only"), "\(error)")
-        }
+        XCTAssertNoThrow(try policy.validateFamily(.glm5Next))
         XCTAssertNoThrow(try policy.validateFamily(.qwen35))
     }
 

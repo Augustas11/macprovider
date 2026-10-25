@@ -16,10 +16,10 @@ final class NativeMTPHardwareE2EGLMTests: XCTestCase {
         XCTAssertEqual(family.blockSizeTokens, 256)
         XCTAssertTrue(family.matchesPagedKind(.pagedMLA(kpool: 4)))
         XCTAssertFalse(family.matchesPagedKind(.pagedAttention))
-        // The GLM drafter is greedy only: the lab tuple signs the greedy
+        // The GLM drafter proposes greedily; target-match verification signs the sampled
         // profile, and Qwen3.5's lab tuple keeps the sampled one.
-        XCTAssertEqual(family.requestFeatureProfile, "native_mtp_greedy_text_v1")
-        XCTAssertFalse(family.admitsSampledRows)
+        XCTAssertEqual(family.requestFeatureProfile, "native_mtp_sampled_text_v1")
+        XCTAssertTrue(family.admitsSampledRows)
         XCTAssertEqual(NativeMTPHardwareE2EFamily.qwen35.requestFeatureProfile, "native_mtp_sampled_text_v1")
         XCTAssertTrue(NativeMTPHardwareE2EFamily.qwen35.admitsSampledRows)
     }

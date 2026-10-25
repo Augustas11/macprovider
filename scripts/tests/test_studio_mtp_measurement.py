@@ -23,6 +23,20 @@ class MeasurementTests(unittest.TestCase):
         self.assertNotIn("DEVELOPER_DIR", M.lab_env("build"))
         self.assertTrue(str(M.XCODE_DEVELOPER_DIR).endswith("Applications/Xcode.app/Contents/Developer"))
 
+    def test_fork_cohort_tests_use_fixed_xcode_command_inside_window(self):
+        command = M.fixed_command({"source": "/campaign", "dir": "/window"}, "fork-tests")
+        self.assertEqual(command[:3], ["/usr/bin/xcrun", "xcodebuild", "test"])
+        self.assertIn("-only-testing:MLXLMTests/GLM5NextTests/testPackedVerifyDepthOneCohortsMatchSerialRows", command)
+        self.assertEqual(command[command.index("-jobs") + 1], "2")
+        self.assertEqual(command[command.index("-derivedDataPath") + 1],
+                         "/campaign/.lab-window/glm-cohort-tests/DerivedData")
+        self.assertEqual(command[command.index("-clonedSourcePackagesDirPath") + 1],
+                         "/campaign/.lab-window/glm-cohort-tests/SourcePackages")
+        self.assertEqual(command[command.index("-resultBundlePath") + 1],
+                         "/window/glm-cohort-parity.xcresult")
+        self.assertEqual(M.lab_env("fork-tests")["DEVELOPER_DIR"], str(M.XCODE_DEVELOPER_DIR))
+        self.assertEqual(M.FORK_TESTS, 600)
+
     def test_missing_metal_compiler_refused_before_downtime(self):
         failed = Mock(returncode=1)
         with patch.object(M, "run", return_value=b"Mac15,14\n"), patch.object(M, "source_ok"), \
@@ -248,7 +262,7 @@ class MeasurementTests(unittest.TestCase):
         conn.connect.assert_called_once_with("/exact/socket")
 
     def test_fixed_build_then_one_cell_and_restore_on_build_failure(self):
-        for failure in (False, True):
+        for failure in (None, "build", "fork-tests"):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as tmp:
                 d = Path(tmp)
                 M.put(d / "watchdog-ready.json", {})
@@ -258,8 +272,8 @@ class MeasurementTests(unittest.TestCase):
                             "policy_sha256": "b" * 64, "socket": "/exact/socket"}
                 def grouped(m, kind, timeout):
                     events.append(("command", M.fixed_command(m, kind), timeout))
-                    if failure:
-                        raise M.Refusal("build failed")
+                    if kind == failure:
+                        raise M.Refusal("fixed command failed")
                 with patch.object(M, "socket_owner"), patch.object(M, "birth", return_value=""), patch.object(M.subprocess, "Popen"), \
                         patch.object(M, "check_live"), patch.object(M, "source_ok"), \
                         patch.object(M, "probe", return_value=manifest["baseline"]), patch.object(M, "serving", return_value=True), \
@@ -280,9 +294,14 @@ class MeasurementTests(unittest.TestCase):
                 if not failure:
                     self.assertIn("build-mlx-metallib.sh", events[4][1][1])
                     self.assertEqual(events[5][1][2], "_metalcheck")
-                    bench = events[6][1]
+                    self.assertEqual(events[6][1][:3], ["/usr/bin/xcrun", "xcodebuild", "test"])
+                    self.assertEqual(events[6][2], 600)
+                    bench = events[7][1]
                     self.assertEqual(bench[1], "native-mtp-bench")
                     self.assertEqual(bench[bench.index("--only-cell") + 1], manifest["cell"])
+                elif failure == "fork-tests":
+                    self.assertFalse(any(event[0] == "command" and "native-mtp-bench" in event[1]
+                                         for event in events))
 
     BENCH_FIELDS = ("hw_model", "chip", "ram_gb", "os_build", "xcode_build_version", "swift_version",
                     "provider_commit", "mlx_fork_revision", "model_id", "target_sha256", "mtp_sha256",

@@ -34,6 +34,7 @@ RUNNER = "malibu-buyer-runner.service"
 # recovery timer): pause/drain, the release build, metallib, check, matrix.
 TOTAL = 3600
 BUILD = 900
+FORK_TESTS = 600
 CELL = 3000
 # Pre-downtime bench policy validation. The first run reads the snapshot once
 # (outside the page cache); later runs reuse hashes of unchanged file stamps.
@@ -358,7 +359,7 @@ def bench_command(m, d):
 def lab_env(kind):
     return {"HOME": str(Path.home()), "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
             "MACPROVIDER_NATIVE_MTP_E2E": "1",
-            **({"DEVELOPER_DIR": str(XCODE_DEVELOPER_DIR)} if kind == "metal" else {})}
+            **({"DEVELOPER_DIR": str(XCODE_DEVELOPER_DIR)} if kind in ("metal", "fork-tests") else {})}
 
 
 def fixed_command(m, kind):
@@ -371,6 +372,17 @@ def fixed_command(m, kind):
     if kind == "metal":
         return ["/bin/bash", str(Path(package) / "scripts/build-mlx-metallib.sh"),
                 str(Path(package) / ".build/arm64-apple-macosx/release")]
+    if kind == "fork-tests":
+        cache = Path(m["source"]) / ".lab-window/glm-cohort-tests"
+        return ["/usr/bin/xcrun", "xcodebuild", "test",
+                "-scheme", "mlx-swift-lm-Package",
+                "-destination", "platform=macOS,arch=arm64",
+                "-skipPackagePluginValidation",
+                "-only-testing:MLXLMTests/GLM5NextTests/testPackedVerifyDepthOneCohortsMatchSerialRows",
+                "-parallel-testing-enabled", "NO", "-jobs", "2",
+                "-derivedDataPath", str(cache / "DerivedData"),
+                "-clonedSourcePackagesDirPath", str(cache / "SourcePackages"),
+                "-resultBundlePath", str(d / "glm-cohort-parity.xcresult")]
     if kind == "metalcheck":
         return [sys.executable, str(d / "entry.py"), "_metalcheck", str(d / "manifest.json")]
     if kind == "cell" and m["cell"] in MATRICES:
@@ -485,6 +497,7 @@ def worker(m):
         grouped(m, "build", BUILD)
         grouped(m, "metal", BUILD)
         grouped(m, "metalcheck", 120)
+        grouped(m, "fork-tests", FORK_TESTS)
         source_ok(m["source"], m["commit"])
         grouped(m, "cell", CELL)
     except Exception as exc:
@@ -889,7 +902,10 @@ def main():
             if os.read(gate, 1) != b"1":
                 return
             os.close(gate)
-            put(output, {"returncode": subprocess.run(command).returncode})
+            # Xcode discovers a Swift package from its fixed checkout root.
+            cwd = (Path(m["source"]) / "phase3-binary/.build/checkouts/mlx-swift-lm"
+                   if kind == "fork-tests" else None)
+            put(output, {"returncode": subprocess.run(command, cwd=cwd).returncode})
             while True:
                 time.sleep(60)
         elif mode == "_inspect":

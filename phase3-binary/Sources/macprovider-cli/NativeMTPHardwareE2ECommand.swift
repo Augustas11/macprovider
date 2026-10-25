@@ -49,7 +49,7 @@ struct NativeMTPHardwareE2EFamily: Equatable, Sendable {
     )
 
     /// The lab tuple's `request_feature_profile`: sampled where the family
-    /// may sign it (Qwen3.5), greedy only for `glm5_next` (SPEC-048 MTP-2).
+    /// may sign it (Qwen3.5 and GLM-5-Next, SPEC-048 MTP-2).
     var requestFeatureProfile: String {
         NativeMTPAdmissionSidecar.allowedRequestFeatureProfiles(familyAdapter: familyAdapter)
             .contains(NativeMTPAdmissionSidecar.sampledRequestFeatureProfile)
