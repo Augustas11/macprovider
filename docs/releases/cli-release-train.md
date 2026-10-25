@@ -46,31 +46,40 @@ Historical tables below do not select today's release version.
 
 ## Current published release and fleet target
 
-Verified 2026-10-24 against GitHub release/tag metadata, the release train
-(`scripts/ops/cli-release.sh status`: `v1.8.270 train complete`) and live coordinator health:
+Verified 2026-10-25 against GitHub release/tag metadata, the release train
+(`scripts/ops/cli-release.sh status`: `v1.8.272 train complete`) and live coordinator health:
 
 | Field | Value |
 |---|---|
-| GitHub provider release | [v1.8.270](https://github.com/Augustas11/macprovider/releases/tag/v1.8.270), promoted 2026-10-24 (promotion run 40111708233) |
-| Signed compatibility-set id | `Augustas11/macprovider:v1.8.270@48cf25db2f6cc64a3779eb0ed36ff669874bf519` |
-| Pearl runtime / recommended provider | `v1.8.269` / `1.8.270` (recommendation bump 2026-10-24 16:42Z) |
-| Release mirror / installer | `latest.json` → v1.8.270; `get.malibu.tech/install.sh` parity with v1.8.270, consumer health OK |
-| Catalog | `published-2026-10-24-glm53-qwen36-native-mtp-v270` (#2136), activated 2026-10-24 17:26–17:48Z; `native_mtp_admission_decode_path` `match` (`6471812e…`) |
-| Consumed identities | Provider and runtime tags through **v1.8.270** are consumed (v1.8.263–v1.8.269 are Pearl runtime tags). The next provider CLI takes the next unused tag; refresh both trains and remote tags first. |
+| GitHub provider release | [v1.8.272](https://github.com/Augustas11/macprovider/releases/tag/v1.8.272), promoted 2026-10-25 (promotion run 40152407985) |
+| Signed compatibility-set id | `Augustas11/macprovider:v1.8.272@28c06242701de711454f65b4bfb34375d31803c7` |
+| Pearl runtime / recommended provider | `v1.8.271` / `1.8.272` (recommendation bump 2026-10-25) |
+| Release mirror / installer | `latest.json` → v1.8.272; `get.malibu.tech/install.sh` parity with v1.8.272, consumer health OK |
+| Catalog | `published-2026-10-25-glm53-qwen36-native-mtp-v272` (#2141), activated 2026-10-25 02:49–03:12Z; `native_mtp_admission_decode_path` `match` (`4d04a3f3…`) |
+| Consumed identities | Provider and runtime tags through **v1.8.272** are consumed (v1.8.271 is a Pearl runtime tag). The next provider CLI takes the next unused tag; refresh both trains and remote tags first. |
 
-## Next CLI release — net changes vs 1.8.270 (tracked 2026-10-25)
+## Next CLI release — net changes vs 1.8.272 (tracked 2026-10-25)
 
-Live fleet target: **1.8.270**. Staged: `binaryVersion` **1.8.272** (v1.8.271 is the
-Pearl runtime tag that carries #2137's coordinator half). Every row below is merged and
-none is open, so the cut is authorized. #2138 moves the decode-path digest to
-`4d04a3f3…`, so the native-MTP admission set is rebound identity-only after the cut
-(no R015 rerun).
+Live fleet target: **1.8.272**. No provider-side change has merged since.
 
 | PR | Issue | Provider-side change | Status |
 |---|---|---|---|
-| #2137 | #614 | Provider WebSocket receive limit 64 MiB, so a large sealed prompt no longer closes the session with 1009 and a buyer 503 (SPEC-001-R012); coordinator half live in runtime v1.8.271. | merged (`c1992df77`) |
-| #2138 | #2111 | A buyer cancel stops prompt prefill within one chunk (SPEC-001-R013); decode-path digest `4d04a3f3…`. | merged (`a17fc834b`) |
-| this PR | — | Version staging 1.8.272 (live-stable rows 1.8.270). | release source |
+
+## Shipped v1.8.272 — net changes vs 1.8.270
+
+Published as v1.8.272 on 2026-10-25 at source `28c06242701de711454f65b4bfb34375d31803c7`
+(candidate run 40146768804, promotion run 40152407985, rollout verification run 40153236925;
+e2e gate CF-272-E2E). Studio canary on DeepSeek V4-Flash (serial, CB off by design). The first
+signer run 40142899739 (cut at `1dde22532`) refused on main drift when #2140 (coordinator-only)
+merged during the wait; the candidate was re-cut on `28c062427`. The native-MTP admission set is
+rebound identity-only to the 1.8.272 decode path `4d04a3f3…` by #2141 (catalog-only). The release
+metallib `3d9b4a74…` is unchanged, so every signed CB policy entry still matches.
+
+| PR | Issue | Provider-side change | Status |
+|---|---|---|---|
+| #2137 | #614 | Provider WebSocket receive limit 64 MiB, so a large sealed prompt no longer closes the session with 1009 and a buyer 503 (SPEC-001-R012); coordinator half live in runtime v1.8.271. | shipped v1.8.272 (`c1992df77`) |
+| #2138 | #2111 | A buyer cancel stops prompt prefill within one chunk (SPEC-001-R013); decode-path digest `4d04a3f3…`; identity-only native-MTP admission rebind after the cut (#2141). | shipped v1.8.272 (`a17fc834b`) |
+| #2139 | #2111 | Version staging 1.8.272 (live-stable rows 1.8.270). | shipped v1.8.272 (`1dde22532`) |
 
 ## Shipped v1.8.270 — net changes vs 1.8.262
 
