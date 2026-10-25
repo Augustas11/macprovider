@@ -392,7 +392,7 @@ struct NativeMTPRuntimeAdmission: Sendable, Equatable {
     /// missing lease, or retained paged-KV handoff reselects ordinary with
     /// reason `conversation_key` before native state exists. A request whose
     /// provenance forbids any lease (SPEC-049) has no cache outcome to change.
-    /// **(0.1.56, SPEC-024-R005)** A hit on a GLM-5-Next prompt snapshot that
+    /// **(0.1.57, SPEC-024-R005)** A hit on a GLM-5-Next prompt snapshot that
     /// carries the MTP head state at its boundary also stays native: the CB
     /// row restores target and head state together and keeps the hit.
     func resolvingConversationCacheLease(

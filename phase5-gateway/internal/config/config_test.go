@@ -2,9 +2,12 @@ package config
 
 import (
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestQuotaReaperDefaults(t *testing.T) {
@@ -815,6 +818,35 @@ func TestValidateRejectsInconsistentPhaseDeadlines(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tc.wantSub) {
 				t.Fatalf("Validate() error = %q, want substring %q", err.Error(), tc.wantSub)
+			}
+		})
+	}
+}
+
+// Cancellation is immediate; SPEC-006 §17.6 gives a 500 ms upper bound,
+// while SPEC-002 FR-P18 owns the provider acknowledgement wait. Legacy
+// configs must still load when they contain the former, unused gateway key.
+func TestLoadIgnoresLegacyStreamingCancelMS(t *testing.T) {
+	original, err := yaml.Marshal(validTestConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseline, err := Load(writeTempConfig(t, string(original)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range []string{"500", "0", "-1"} {
+		t.Run(value, func(t *testing.T) {
+			contents := strings.Replace(string(original), "timeouts:\n", "timeouts:\n    streaming_cancel_ms: "+value+"\n", 1)
+			if contents == string(original) {
+				t.Fatal("timeouts mapping missing from fixture")
+			}
+			got, err := Load(writeTempConfig(t, contents))
+			if err != nil {
+				t.Fatalf("legacy streaming_cancel_ms must be ignored: %v", err)
+			}
+			if !reflect.DeepEqual(got, baseline) {
+				t.Fatal("legacy streaming_cancel_ms changed the loaded config")
 			}
 		})
 	}

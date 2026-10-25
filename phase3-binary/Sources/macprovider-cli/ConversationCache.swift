@@ -30,7 +30,7 @@ extension RecurrentStateCheckpoint: Equatable {
     }
 }
 
-/// SPEC-048-R009 (0.1.56) / SPEC-024-R005: the native-MTP head's state at a
+/// SPEC-048-R009 (0.1.57) / SPEC-024-R005: the native-MTP head's state at a
 /// GLM-5-Next prompt snapshot, captured on a native continuous-batching row
 /// right after its prefill reached the snapshot length `nextPosition`. The
 /// head's cache entry for position `p` pairs the target hidden state at `p`

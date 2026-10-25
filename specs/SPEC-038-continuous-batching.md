@@ -12,7 +12,7 @@ FR-CB4 admits a second usable handoff: a GLM-5-Next prompt snapshot
 installs the snapshot into its own CB row (block table starting at the
 snapshot length, arrays shared until the row's first write) and resumes
 chunked prefill there, with native MTP when the snapshot carries the MTP
-head state (SPEC-048 0.1.56). AC-26 adds the GLM proof. Without the grant
+head state (SPEC-048 0.1.57). AC-26 adds the GLM proof. Without the grant
 every GLM row behaves as in v0.3.30, and every other family is unchanged.
 
 **Change log v0.3.30 (2026-10-24, DeepSeek pipelined decode):**

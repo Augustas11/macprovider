@@ -12,7 +12,7 @@
   Without the grant a GLM CB row publishes nothing, exactly as in v0.2.12, so no
   later hit is fenced off CB. On a native-MTP row the snapshot also carries the
   MTP head state at the same boundary, and a native-MTP turn reuses a snapshot
-  only together with it (otherwise it misses and stays native; SPEC-048 0.1.56
+  only together with it (otherwise it misses and stays native; SPEC-048 0.1.57
   MTP-9). Billing arithmetic is unchanged.
 
 **Change log v0.2.12 (2026-10-24, Related: #2111 — extend-only prompt snapshots):**

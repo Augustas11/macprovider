@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.56
+**Version:** 0.1.57
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.56",
+  "version": "0.1.57",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -649,9 +649,10 @@ per-rebase acceptance gate in `docs/runbooks/MLX_ENGINE_UPGRADE_MATRIX.md`
 (startup batched-isolation probes with the fused MoE path on and off,
 continuous-batching enable-gate rows, cross-thread model reload with zero
 stale trace replays, fused-layout eligibility and fallback, and compile-state
-ownership); native-MTP R015 only when a decode-path line changed since the
-last R015 evidence; and a three-lane freeze audit with zero Critical, High,
-or Medium findings. Native-MTP R015 gates signing and activation of a native
+ownership); native-MTP R015 only when a named decode-path line changed how
+the qualified tuple drafts, verifies, or commits tokens since the last R015
+evidence (MTP-13 identity-only rebind rule); and a three-lane freeze audit
+with zero Critical, High, or Medium findings. Native-MTP R015 gates signing and activation of a native
 tuple (R007, R015), never the ordinary path.
 
 Review record for the #2028 tuple (2026-10-16; mlx-swift-lm
@@ -1075,7 +1076,7 @@ mutation, so the change is a selection and never a fallback:
   would hand back a retained paged-KV entry rather than a serial-format one
   reselects `ordinary` with reason `conversation_key`, keeping the ordinary
   cache-hit decision and discount, except as below;
-- **(0.1.56)** a SPEC-024-R005 GLM-5-Next prompt-snapshot hit that carries
+- **(0.1.57)** a SPEC-024-R005 GLM-5-Next prompt-snapshot hit that carries
   the MTP head state at its boundary stays `native_mtp`: the CB row installs
   target state and head state together, resumes prefill at the snapshot
   length and keeps the hit and its discount. When the runtime can install
@@ -1098,7 +1099,7 @@ normal terminal it publishes the serial-format entry built from its committed
 target state only: tokens, token count, attention KV, and recurrent
 checkpoints, which MUST equal the ordinary row's entry for the same request.
 No proposal, rejected position, staged state, or drafter state may enter the
-entry, except **(0.1.56)** the SPEC-024-R005 MTP head state: the head's
+entry, except **(0.1.57)** the SPEC-024-R005 MTP head state: the head's
 committed cache at exactly the snapshot length, captured during prompt
 prefill (never inside a verification round) together with the prompt token
 its last entry consumed. It is draft-side only: restoring it can change
@@ -1111,7 +1112,7 @@ no commit, no busy key.
 This applies to streaming and non-streaming paths. A future amendment that
 reuses native-MTP state, or publishes retained paged-KV handoffs from native
 rows, must prove target KV plus every MTP/recurrent state component and
-preserve SPEC-024 billing isolation. **(0.1.56)** The R005 snapshot reuse is
+preserve SPEC-024 billing isolation. **(0.1.57)** The R005 snapshot reuse is
 that amendment for GLM-5-Next: its proof is the SPEC-038 v0.3.31 AC-26 GLM
 proof (resumed native rows match ordinary CB tokens at the same row count,
 with tokens/s, acceptance and TTFT reported in the R015 cells), recorded
@@ -1330,9 +1331,26 @@ listed file is missing or changes without a regenerated digest.
   tuple revocation is unchanged.
 - Consequence: a signed CLI cut needs no admission step when its embedded
   digest equals the admitted entry's `decode_path_digest` and its shipped Metal
-  library equals `metallib_sha256`. A difference in either means the decode
-  path changed, so the tuple needs requalification evidence (AGENTS.md rule 2),
-  not an identity rebind.
+  library equals `metallib_sha256` (the other admission fields above still
+  MUST match). A changed digest alone does not establish an MTP decode change:
+  the manifest hashes whole files and dependency revisions, including changes
+  unrelated to the qualified tuple's MTP behavior.
+- For an already-qualified MTP tuple, a change that does not alter how it
+  drafts, verifies, or commits tokens requires only an identity-only rebind
+  when its binding changes: update the signed `decode_path_digest` and CLI
+  identity/provenance to the new release, and any other changed runtime
+  identity fields, while reusing the existing qualification evidence. This
+  includes a CLI cut or a manifest-file/dependency change with no such MTP
+  behavior change, as applied in #2136 and #2141. Admission still requires
+  exact matching bindings; identity-only rebind does not bypass a mismatch,
+  signed publishing, or revocation.
+- R015 requalification is required only when a change alters how the qualified
+  tuple drafts, verifies, or commits tokens. Before requesting that rerun,
+  list the existing qualification evidence and name the changed decode-path
+  code line and its effect on that MTP behavior (AGENTS.md HARD RULE 2).
+  A changed digest, CLI identity, or Metal-library hash alone is not that
+  evidence. A Metal-library change follows the same behavior test and MUST
+  have its signed binding updated; it cannot retain a mismatched hash.
 - Publishing: the binding is qualification-owned (tuple input). CLIs before
   the reader reject unknown entry keys, so R014 item 10 applies. A
   decode-path entry is published only when the bound release CLI embeds that
@@ -1378,8 +1396,9 @@ For each qualified tuple, production enablement requires all of the following:
    to it: `SPEC-023-R024`, `SPEC-030-R021`, `SPEC-031-R033`, `SPEC-036-R018`,
    `SPEC-038-R018`, `SPEC-039-R015`, and `SPEC-048-R001..R013/R015/R016`, for
    that exact tuple, captured on the tuple's current decode path (AGENTS.md
-   rule 2: a new run is needed only when a decode-path input changed, never
-   because of age). CONFORMANCE state is repository-wide and therefore
+   HARD RULE 2 and MTP-13: an identity-only rebind reuses the existing signed
+   journey; a digest or CLI/runtime identity change alone does not require a
+   new run, nor does age). CONFORMANCE state is repository-wide and therefore
    necessary but never sufficient for another tuple; each advertised tuple
    requires its own unrevoked sidecar and journey result.
 7. The frozen implementation/evidence diff passes code, security, and
@@ -1388,7 +1407,9 @@ For each qualified tuple, production enablement requires all of the following:
    in isolated loopback against the sidecar source-commit/build digest
    (**0.1.51:** for a decode-path entry, against its `decode_path_digest`; a
    later signed CLI with the same embedded digest needs neither a new sidecar
-   nor a new release journey);
+   nor a new release journey; a changed digest with unchanged MTP
+   draft/verify/commit behavior follows the MTP-13 identity-only rebind rule
+   and reuses the existing qualification and journey evidence);
    release-asset byte identity and the previous-stable updater pass when the
    CLI ships in both Malibu.app and the standalone tarball. R014 is promoted
    to `conformant` from this post-release-candidate evidence before production
@@ -1442,7 +1463,13 @@ journey, the 30-minute sustained cell, ordinary and MTP parity sample, and
 post-gateway eligibility sample. It is required when hardware, OS/toolchain,
 provider/MLX, model/artifact/tokenizer/MTP manifest, quantization, cache/state
 topology, depth, slots, thresholds, or benchmark policy changes, never because
-of calendar age.
+of calendar age. For an already-qualified tuple, provider/MLX or other runtime
+identity changes alone instead follow MTP-13: when they do not alter how MTP
+drafts, verifies, or commits tokens, only an identity-only rebind is required,
+reusing the existing qualification and signed journey evidence. This exception
+does not qualify a different model/artifact, hardware tier, capacity, or
+benchmark policy. R015 reruns require the named changed decode-path line and
+existing evidence specified by MTP-13.
 
 ### MTP-15 — preregistered Studio and tier benchmark gate (SPEC-048-R015)
 
@@ -1591,11 +1618,14 @@ unchanged artifact and policy bindings. R003/R014 review, the signed serving
 journey, and the gateway live proof also remain required by their respective
 requirements. This disposition cannot be reused for a different model,
 artifact digest, mlx-swift-lm revision, native-row bound, qualified slot count,
-hardware tier, or campaign. A runtime change to the measured decode,
-prompt-preparation, scheduling, cache, or native-MTP path requires fresh
-qualification and a separately reviewed disposition if its frozen analyzer
-does not pass. An identity-only documentation or specification merge that
-does not change any measured runtime line does not require the campaign to be
+hardware tier, or campaign, except that the MTP-13 identity-only rebind rule
+preserves the existing qualification and this disposition when runtime identity
+changes without altering how the qualified tuple drafts, verifies, or commits
+tokens. A change to that MTP behavior requires fresh R015 qualification,
+identified by a named changed decode-path code line and the existing evidence
+(AGENTS.md HARD RULE 2), and a separately reviewed disposition if its frozen
+analyzer does not pass. An identity-only rebind or documentation/specification
+merge with no such MTP behavior change does not require the campaign to be
 rerun. It has no expiry.
 
 A gated cell MUST also exercise the in-flight hold on the measured hardware,
@@ -1893,11 +1923,18 @@ requests.
 
 ## 9. Changelog and history
 
-- **0.1.56 (2026-10-25)** — R009 (MTP-9): a native-MTP GLM-5-Next row reuses
+- **0.1.57 (2026-10-25)** — R009 (MTP-9): a native-MTP GLM-5-Next row reuses
   a SPEC-024-R005 prompt snapshot together with the MTP head state taken at
   it, on its own CB row, and stays native; any other snapshot is a miss for
   it rather than an ordinary reselection. Draft-side head state may enter the
   snapshot entry. No other family or path changes. Related: #2143.
+- **0.1.56 (2026-10-25)** — R003/R013/R014/R015: align requalification with
+  AGENTS.md HARD RULE 2 and the identity-only rebinds in #2136 and #2141.
+  Qualified tuples reuse evidence when a digest or CLI/runtime identity changes
+  without changing how MTP drafts, verifies, or commits tokens. Only such MTP
+  decode changes require R015 requalification, with existing evidence listed
+  and a named changed decode-path line. Exact signed admission matching,
+  publishing, and revocation remain required.
 
 - **0.1.55 (2026-10-24)** — R003: pins the DeepSeek-V4 CB performance slice
   `3.32.3-macprovider.10.5` (`c8be0f61…`) on `676a62a4…`. Batched attention,
@@ -1935,8 +1972,10 @@ requests.
   iterator or loader line changes. The decode-path digest already covers
   this revision (`565617716a5ce9a1…`); the signed native-MTP admission
   entries keep their 0.1.51 bindings
-  until they are rebound after requalification, and the issue #2081
-  disposition keeps naming the revision it was reviewed on. The tag name
+  until rebound under the MTP-13 identity-only rule when MTP draft/verify/commit
+  behavior is unchanged; requalification is required only for changes to that
+  behavior. The issue #2081 disposition retains its original evidence revision.
+  The tag name
   `3.32.3-macprovider.10.2` belongs to an unrelated GLM candidate and is not
   authorized.
 

@@ -156,7 +156,6 @@ timeouts:
   # otherwise a gateway-side cancel can race/preempt coordinator relay-timeout
   # attribution and hide FR-P11a breaker faults.
   non_stream_request_seconds: 3660
-  streaming_cancel_ms: 500
   # Post-first-byte stream idle timeout. If the coordinator stops producing
   # SSE bytes, terminate with provider_timeout before buyer clients hit their
   # own shorter request deadlines. #760 made this a CONTENT-progress budget:
