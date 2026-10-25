@@ -10,7 +10,7 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC | Title | Version | Lifecycle | ID migration | Conformance | Link |
 |---|---|---|---|---|---|---|
 | SPEC-001 | Phase 3 Binary: Mac Provider Inference CLI | 1.9.46 | normative | pending | pending: 13 | [SPEC-001-phase3-binary.md](SPEC-001-phase3-binary.md) |
-| SPEC-002 | Phase 4 Coordinator: Mac Provider Request Router | 1.6.28 | normative | pending | pending: 9 | [SPEC-002-coordinator.md](SPEC-002-coordinator.md) |
+| SPEC-002 | Phase 4 Coordinator: Mac Provider Request Router | 1.6.29 | normative | pending | pending: 10 | [SPEC-002-coordinator.md](SPEC-002-coordinator.md) |
 | SPEC-003 | Open Onboarding: Distribution, Lifecycle & Onboarding UX | 0.12.3 | normative | pending | pending: 5 | [SPEC-003-open-onboarding.md](SPEC-003-open-onboarding.md) |
 | SPEC-004 | Smart Router | 0.3.6 | normative | pending | pending corpus migration | [SPEC-004-smart-router.md](SPEC-004-smart-router.md) |
 | SPEC-005 | Billing, Settlement, and Provider Rewards | 0.6.25 | normative | complete | conformant: 2, pending: 13 | [SPEC-005-billing.md](SPEC-005-billing.md) |

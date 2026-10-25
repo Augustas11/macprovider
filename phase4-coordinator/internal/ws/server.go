@@ -4537,6 +4537,7 @@ func (s *Server) registerProviderSessionLocked(conn net.Conn, entry *pool.Provid
 		_ = old.Close()
 	}
 	session := newProviderSession(entry.ProviderID, entry.AssignedID, conn, s.cfg.WS.WriteBufferSize, s.cfg.ProviderWSWriteTimeout())
+	session.retiredTTL = retiredRelayRequestTTL(time.Duration(s.cfg.Routing.RequestTimeoutS) * time.Second)
 	session.useTier2Session(entry.Tier2Session)
 	session.maxTextFrameBytes = providerInboundMessageLimit(entry.WSMaxMessageBytes)
 	session.probeWrites = true

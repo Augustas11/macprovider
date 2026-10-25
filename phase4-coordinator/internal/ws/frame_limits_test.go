@@ -300,7 +300,17 @@ func TestEncryptedDispatchEndsSessionWhenSealedFrameCannotBeQueued(t *testing.T)
 		t.Fatal("no session")
 	}
 	// Nobody reads the provider side: the writer blocks on its first frame and
-	// the queue then fills.
+	// the queue then fills. Wait until the writer holds the first frame, or it
+	// frees a queue slot after the fill and the dispatch below gets queued.
+	if err := session.send([]byte(`{"type":"warm_up"}`)); err != nil {
+		t.Fatalf("first send: %v", err)
+	}
+	for deadline := time.Now().Add(time.Second); len(session.writeCh) != 0; {
+		if time.Now().After(deadline) {
+			t.Fatal("writer never took the first frame")
+		}
+		time.Sleep(time.Millisecond)
+	}
 	full := false
 	for i := 0; i < 64 && !full; i++ {
 		full = errors.Is(session.send([]byte(`{"type":"warm_up"}`)), ErrRelayBackpressure)
