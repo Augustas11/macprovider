@@ -9,8 +9,8 @@
 #        cached_turns_accepted, continuous_batching_cached_turns on. Drives
 #        glm53_cb_prefix_cache.py at 1 and 4 rows: warm (same key) vs cold
 #        (fresh key) greedy parity per turn, warm turns >= 2 cached. Then
-#        checks the serve log: snapshot hits, batched admissions, no
-#        serial_routed line and no batched forward failure.
+#        fails unless the serve log shows snapshot hits, batched admissions,
+#        no serial_routed line and no batched forward or install failure.
 #   glm53-cb-prefix-cache-window.sh mtp      `native-mtp-journey-e2e
 #        --cached-prefix-turns` (step 13 only) at 1, 2 and 4 native rows:
 #        native rows resumed from a snapshot stay native and match ordinary CB
@@ -72,7 +72,19 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# The Studio check NativeMTPHardwareE2ERunner.requireStudioHost() makes,
+# before anything loads the model or touches the GPU.
+require_studio_host() {
+  local model arch chip
+  model=$(sysctl -n hw.model 2>/dev/null) || model=
+  arch=$(uname -m 2>/dev/null) || arch=
+  chip=$(sysctl -n machdep.cpu.brand_string 2>/dev/null) || chip=
+  [[ $arch == arm64 && $model == Mac15,* && $chip == "Apple M3 Ultra" ]] ||
+    { echo "refusing: expected a Mac Studio M3 Ultra host, got model=$model arch=$arch chip=$chip" >&2; exit 3; }
+}
+
 preflight() {
+  require_studio_host
   live_absent || exit 3
   mkdir "$LOCK" 2> /dev/null || { echo "refusing: another window holds $LOCK" >&2; exit 3; }
   LOCKED=1
@@ -177,15 +189,29 @@ parity() {
   done
   curl -s http://127.0.0.1:$LAB_PORT/v1/status > "$OUT/status-end.json"
   stop_serve
-  local log=$OUT/serve.err
+  local log=$OUT/serve.err hits admitted serial failures
+  # The isolated --no-join serve takes only this driver's requests, so the
+  # whole serve log is this leg's traffic.
+  hits=$(grep -c 'action=hit .*prompt_snapshot=true' $log || true)
+  admitted=$(grep -c 'event=batching_admitted' $log || true)
+  serial=$(grep -c 'serial_routed' $log || true)
+  failures=$(grep -cE 'batching_forward_failed|batching_prefill_failed|prompt_snapshot_install_unavailable' $log || true)
   {
-    echo "snapshot_hits=$(grep -c 'action=hit .*prompt_snapshot=true' $log || true)"
+    echo "snapshot_hits=$hits"
     echo "snapshot_drafter_misses=$(grep -c 'reason=prompt_snapshot_drafter_unavailable' $log || true)"
-    echo "batching_admitted=$(grep -c 'event=batching_admitted' $log || true)"
-    echo "serial_routed=$(grep -c 'serial_routed' $log || true)"
-    echo "forward_failures=$(grep -cE 'batching_forward_failed|batching_prefill_failed|prompt_snapshot_install_unavailable' $log || true)"
+    echo "batching_admitted=$admitted"
+    echo "serial_routed=$serial"
+    echo "forward_failures=$failures"
     grep -o 'serial_routed reason=[a-z_]*' $log | sort | uniq -c || true
   } | tee -a "$OUT/summary.txt"
+  # PASS needs the snapshot resumed on CB rows: hits and batched admissions,
+  # no serial route and no failed forward or install.
+  if (( hits == 0 || admitted == 0 || serial > 0 || failures > 0 )); then
+    echo "parity verdict=FAIL (routing: CB snapshot resume not exercised cleanly)" | tee -a "$OUT/summary.txt"
+    (( rc != 0 )) || rc=7
+  else
+    echo "parity routing verdict=PASS" | tee -a "$OUT/summary.txt"
+  fi
   return $rc
 }
 

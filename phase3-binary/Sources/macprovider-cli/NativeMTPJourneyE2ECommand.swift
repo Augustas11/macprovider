@@ -1401,8 +1401,10 @@ final class NativeMTPJourneyRunner {
                 let label = "row\(row).turn\(turn)"
                 let nativeResult = nativeRun.results[row][turn]
                 let ordinaryResult = ordinaryRun.results[row][turn]
-                step.check("\(label).native_matches_ordinary", same(nativeResult, ordinaryResult))
-                step.check("\(label).warm_matches_cold", same(ordinaryResult, ordinaryRun.cold[row][turn]))
+                // GLM may spend the whole budget on reasoning, so the reasoning
+                // text is part of the parity, not only the visible content.
+                step.check("\(label).native_matches_ordinary", sameWithReasoning(nativeResult, ordinaryResult))
+                step.check("\(label).warm_matches_cold", sameWithReasoning(ordinaryResult, ordinaryRun.cold[row][turn]))
                 step.check("\(label).native_admitted",
                            lastPath(recorder, "journey-cached-native-\(row)-\(turn)") == .nativeMTP)
                 if turn > 0 {
@@ -1465,6 +1467,12 @@ final class NativeMTPJourneyRunner {
             && lhs.promptTokens == rhs.promptTokens
             && lhs.completionTokens == rhs.completionTokens
             && lhs.generatedCompletionTokens == rhs.generatedCompletionTokens
+    }
+
+    private func sameWithReasoning(_ lhs: CompletionResult, _ rhs: CompletionResult) -> Bool {
+        same(lhs, rhs)
+            && lhs.reasoningContent == rhs.reasoningContent
+            && lhs.reasoningTokens == rhs.reasoningTokens
     }
 
     private func lastPath(_ recorder: NativeMTPHardwareAdmissionRecorder, _ id: String) -> DecodePath? {

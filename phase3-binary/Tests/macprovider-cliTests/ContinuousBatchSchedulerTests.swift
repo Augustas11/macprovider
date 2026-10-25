@@ -510,6 +510,50 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertNil(result.serialConversationCache)
     }
 
+    /// SPEC-024-R005: a keyed GLM row under the cached-turns grant whose
+    /// prompt is too short for a snapshot publishes nothing, where the same
+    /// hybrid row without the flag would retain its decoded cache. Native and
+    /// ordinary rows therefore commit the same (empty) outcome.
+    func testSnapshotOnlyPublisherWithoutASnapshotRetainsNothing() async throws {
+        for snapshotOnly in [false, true] {
+            let bridge = HeadlessRetainedCacheBridge()
+            let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 32)
+            let backend = ScriptedBackend(scripts: ["short": [500, 7]], recurrentCheckpointBackend: true)
+            let scheduler = try await makeScheduler(
+                descriptor: Self.descriptor(blockSizeTokens: 4, maxPhysicalBlocks: 32),
+                maxActiveRows: 1,
+                maxPromptChunkTokens: 8,
+                backend: backend,
+                allocator: allocator,
+                contiguousCacheBridge: bridge
+            )
+            let result = try await scheduler.submit(.init(
+                id: "short",
+                conversationKey: "conv:short",
+                promptTokens: Array(0..<40),
+                maxOutputTokens: 2,
+                stopTokenSequences: [[7]],
+                modelStopTokenIDs: [7],
+                temperature: 0.0,
+                recurrentCheckpointPositions: [33, 38],
+                modelHasRecurrentLayers: true,
+                publishesPromptSnapshotOnly: snapshotOnly
+            ))
+            XCTAssertEqual(result.terminalStatus, .stop)
+            if snapshotOnly {
+                XCTAssertNil(result.retainedCache)
+                XCTAssertNil(result.serialConversationCache)
+            } else {
+                XCTAssertNotNil(result.retainedCache)
+            }
+            if let retained = result.retainedCache {
+                await scheduler.acknowledgeRetainedCacheDelivery(retained)
+                await scheduler.discardRetainedCache(retained.retainedSequence, conversationKey: "conv:short")
+            }
+            try await eventually { await allocator.freeBlockCount() == 32 }
+        }
+    }
+
     func testZeroOutputHybridRowMaterializesTheFullPrefilledPrompt() async throws {
         let backend = ScriptedBackend(scripts: [:], recurrentCheckpointBackend: true)
         let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 16)

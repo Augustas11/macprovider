@@ -512,7 +512,9 @@ behaviour), in every CB mode. Under the grant:
   pooled indexer keys and partial pool window and each linear-attention (KDA) layer's
   recurrent and convolution state are copied at their stored dtype (no conversion). The
   snapshot is published only at the row's normal terminal; a failed or cancelled row publishes
-  nothing. Capture happens during prefill, never inside a native-MTP verification round.
+  nothing. Capture happens during prefill, never inside a native-MTP verification round. A keyed
+  row whose prompt has no `S` at or above the reuse threshold publishes nothing (never a retained
+  or decoded cache), on native-MTP and ordinary rows alike.
 - **Native-MTP head state.** On a native-MTP row the snapshot MUST also carry the MTP head's
   cache when the head sits exactly at `S` with no tentative proposal, together with prompt
   token `S` (the token its last entry consumed). It is draft-side state only; no proposal,

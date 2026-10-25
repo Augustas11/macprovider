@@ -540,6 +540,11 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
     /// reuse; prefill stops on it. Runtime-only and derived from
     /// `promptTokens`, so it stays out of the idempotency fingerprint.
     let promptSnapshotTokenCount: Int?
+    /// SPEC-024-R005: a keyed GLM-5-Next row under the AC-26 cached-turns
+    /// grant publishes only its prompt snapshot, as a snapshot-family row
+    /// does, even when its prompt is too short to carry one: it then publishes
+    /// nothing, never a retained or decoded cache. Runtime-only.
+    let publishesPromptSnapshotOnly: Bool
     /// SPEC-038 AC-26 hybrid cached turn: the retained entry's recurrent
     /// checkpoints at or below `cachedPromptTokens`. The one at exactly
     /// `cachedPromptTokens` is installed with the retained paged KV; any others
@@ -617,6 +622,7 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
         promptSnapshotTokenCount: Int? = nil,
         retainedRecurrentCheckpoints: [RecurrentStateCheckpoint] = [],
         promptSnapshotCache: ContinuousBatchSerialConversationCache? = nil,
+        publishesPromptSnapshotOnly: Bool = false,
         grammarConstraint: GrammarConstraintState? = nil,
         serialToolStopObserver: ContinuousBatchCanonicalStopObserver? = nil,
         decodePath: DecodePath = .ordinary,
@@ -649,6 +655,8 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
         self.promptSnapshotTokenCount = promptSnapshotTokenCount.flatMap {
             $0 >= ConversationCache.lcpThreshold && $0 < promptTokens.count ? $0 : nil
         }
+        self.publishesPromptSnapshotOnly = publishesPromptSnapshotOnly
+            && !conversationKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         self.retainedRecurrentCheckpoints = retainedRecurrentCheckpoints
         self.promptSnapshotCache = promptSnapshotCache?.promptSnapshot == true ? promptSnapshotCache : nil
         self.grammarConstraint = grammarConstraint
@@ -5243,7 +5251,7 @@ actor ContinuousBatchScheduler {
     /// which only records the ID and no longer finds the row; a cancel recorded
     /// meanwhile wins, and no conversation cache is published for it.
     private func finishTerminal(_ row: Row, status: ContinuousBatchSchedulerTerminalStatus) async {
-        if row.request.promptSnapshotTokenCount != nil {
+        if row.request.promptSnapshotTokenCount != nil || row.request.publishesPromptSnapshotOnly {
             // SPEC-024 FR-CI2a: a keyed snapshot-family row publishes only its
             // prompt snapshot, never a retained or decoded cache (its window and
             // pool layers cannot be rewound). No snapshot captured: publish none.

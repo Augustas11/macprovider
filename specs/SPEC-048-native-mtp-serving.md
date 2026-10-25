@@ -1082,7 +1082,9 @@ mutation, so the change is a selection and never a fallback:
   such snapshots, a native row's lease treats every other snapshot (no head
   state, or a recorded boundary token that differs from the prompt's) as a
   miss (`prompt_snapshot_drafter_unavailable`), so the row stays native and
-  prefills from zero instead of reselecting ordinary;
+  prefills from zero instead of reselecting ordinary. Under that grant a keyed
+  GLM-5-Next row publishes only its prompt snapshot, or nothing when its prompt
+  is too short for one, so a cache miss stays native whatever its length;
 - otherwise (a miss on a runtime that publishes keyed rows in the SPEC-038
   FR-CB4 serial conversation-cache format) the row stays `native_mtp`, keeps
   the lease, and reports `cached_prompt_tokens = 0`.

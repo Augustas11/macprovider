@@ -8045,9 +8045,11 @@ maxTokens: 1,
             leaseAllowed: conversationCacheAllowed,
             cachedPromptTokens: lease?.cachedPromptTokens,
             // A row that publishes a prompt snapshot publishes it in the serial
-            // format and nothing else (SPEC-024 FR-CI2a).
+            // format and nothing else (SPEC-024 FR-CI2a); under R005 a GLM row
+            // too short to carry one publishes nothing on either path.
             keyedRowsCommitSerialFormat: (prepared.modelHasRecurrentLayers && !continuousBatchingCachedTurns)
-                || publishedPromptSnapshotTokenCount != nil,
+                || publishedPromptSnapshotTokenCount != nil
+                || prepared.promptSnapshotAttachesToContinuousBatchRow,
             cachedPrefixRestoresNativeMTPDrafter: promptSnapshotCache?.nativeMTPDrafter != nil
         )
         CBTrace.log(schedulerRequestID, "rt_native path=\(nativeMTPAdmission.effectivePath.rawValue) reason=\(nativeMTPAdmission.selection.nativeMTPReason?.rawValue ?? "-") cache_only=\(request.conversationCacheOnly)")
@@ -8076,6 +8078,7 @@ maxTokens: 1,
             promptSnapshotTokenCount: publishedPromptSnapshotTokenCount,
             retainedRecurrentCheckpoints: Self.retainedRecurrentCheckpoints(for: lease),
             promptSnapshotCache: promptSnapshotCache,
+            publishesPromptSnapshotOnly: prepared.promptSnapshotAttachesToContinuousBatchRow,
             serialToolStopObserver: serialToolStop,
             grammarConstraint: prepared.grammarConstraint,
             nativeMTPAdmission: nativeMTPAdmission
@@ -8511,9 +8514,11 @@ maxTokens: 1,
             leaseAllowed: conversationCacheAllowed,
             cachedPromptTokens: lease?.cachedPromptTokens,
             // A row that publishes a prompt snapshot publishes it in the serial
-            // format and nothing else (SPEC-024 FR-CI2a).
+            // format and nothing else (SPEC-024 FR-CI2a); under R005 a GLM row
+            // too short to carry one publishes nothing on either path.
             keyedRowsCommitSerialFormat: (prepared.modelHasRecurrentLayers && !continuousBatchingCachedTurns)
-                || publishedPromptSnapshotTokenCount != nil,
+                || publishedPromptSnapshotTokenCount != nil
+                || prepared.promptSnapshotAttachesToContinuousBatchRow,
             cachedPrefixRestoresNativeMTPDrafter: promptSnapshotCache?.nativeMTPDrafter != nil
         )
         CBTrace.log(schedulerRequestID, "rt_native path=\(nativeMTPAdmission.effectivePath.rawValue) reason=\(nativeMTPAdmission.selection.nativeMTPReason?.rawValue ?? "-") cache_only=\(request.conversationCacheOnly)")
@@ -8535,6 +8540,7 @@ maxTokens: 1,
             promptSnapshotTokenCount: publishedPromptSnapshotTokenCount,
             retainedRecurrentCheckpoints: Self.retainedRecurrentCheckpoints(for: lease),
             promptSnapshotCache: promptSnapshotCache,
+            publishesPromptSnapshotOnly: prepared.promptSnapshotAttachesToContinuousBatchRow,
             serialToolStopObserver: serialToolStop,
             grammarConstraint: prepared.grammarConstraint,
             nativeMTPAdmission: nativeMTPAdmission
