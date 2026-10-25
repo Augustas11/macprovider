@@ -5,6 +5,7 @@ import json
 import shutil
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from scripts import decode_path_digest as tool
@@ -156,6 +157,156 @@ class DecodePathDigestTests(unittest.TestCase):
             path.write_text(json.dumps({"entries": [{"decode_path_digest": "a" * 64}]}), "utf-8")
             self.assertEqual(tool.admission_status(path, "a" * 64), "match")
             self.assertEqual(tool.admission_status(path, "b" * 64), "mismatch")
+
+
+
+
+class SignedPairPublishGateTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.version = "1.8.999"
+        self.source = "a" * 40
+        self.digest = "d" * 64
+        self.env = patch.dict(tool.os.environ, MACPROVIDER_OPS_ENTRYPOINT="1", MACPROVIDER_OPS_OWNER="test")
+        self.env.start()
+        self.addCleanup(self.env.stop)
+        self.identity = patch.object(tool, "verify_release_input", return_value=self.version)
+        self.identity.start()
+        self.addCleanup(self.identity.stop)
+        self.original_envelope = tool._verify_candidate_envelope
+        self.envelope = patch.object(tool, "_verify_candidate_envelope")
+        self.verify = self.envelope.start()
+        self.addCleanup(self.envelope.stop)
+        self.bytes = self.root / "candidate"
+        self.bytes.mkdir()
+        self.archive = self.bytes / f"macprovider-cli-v{self.version}-darwin-arm64.tar.gz"
+        self.archive.write_bytes(b"signed candidate archive fixture")
+        self.write(self.bytes / "acceptance-candidate.json", {"fixture": True})
+        (self.bytes / "acceptance-candidate.json.sig").write_bytes(b"signature fixture")
+        self.code = {"binary_version": self.version, "binary_sha256": "b" * 64,
+                     "team_id": "TEAM", "signing_identifier": "tech.malibu.provider",
+                     "slices": [{"code_cdhash": "c" * 40}]}
+        self.write(self.bytes / "pearl-release.json", {"provider_code_identity": self.code})
+        (self.bytes / "checksums.txt").write_text("".join(
+            f"{tool._file_digest(path)}  {path.name}\n" for path in (self.archive, self.bytes / "pearl-release.json")))
+        self.old_row = {"model_key": "glm", "request_feature_profile": "native_mtp_greedy_text_v1",
+                        "proposal_depth": 1, "max_native_active_rows": 1, "source_commit": "f" * 40,
+                        "decode_path_digest": "e" * 64, "challenge_bank_sha256": "1" * 64,
+                        "performance_evidence_sha256": "2" * 64,
+                        "provider_revision": "f" * 40, "reproducible_build_sha256": "8" * 64,
+                        "live_executable_cdhash": "8" * 40}
+        self.row = dict(self.old_row, source_commit=self.source, decode_path_digest=self.digest,
+                        provider_revision=self.source, reproducible_build_sha256=self.code["binary_sha256"],
+                        live_executable_cdhash="c" * 40)
+        self.prior_sidecar = self.root / "prior.json"
+        self.sidecar = self.root / "sidecar.json"
+        self.write(self.prior_sidecar, {"entries": [self.old_row]})
+        self.write(self.sidecar, {"entries": [self.row]})
+        def role(path):
+            return {"version": self.version, "source_commit": self.source, "model_key": "glm", "model_hash": "3" * 64,
+                    "request_feature_profile": "native_mtp_greedy_text_v1", "ordinary_context_tokens": 8192,
+                    "feed_sha256": {"/v1/native-mtp-admission": tool._file_digest(path),
+                                    "/v1/native-mtp-admission.sig": "4" * 64,
+                                    "/v1/native-mtp-selftest-bank": "1" * 64,
+                                    "/v1/native-mtp-selftest-bank.sig": "5" * 64,
+                                    "/v1/continuous-batching-policy": "6" * 64,
+                                    "/v1/continuous-batching-policy.sig": "7" * 64}}
+        self.prior = dict(role(self.prior_sidecar), provenance="reviewed_published_signed_release")
+        self.target = dict(role(self.sidecar), provenance="reviewed_signed_acceptance_candidate", candidate_run_id="123",
+                           binary_sha256=self.code["binary_sha256"], cdhash="c" * 40, team_id="TEAM",
+                           signing_identifier=self.code["signing_identifier"], decode_path_digest=self.digest,
+                           local_tarball_path=str(self.archive), tarball_sha256=tool._file_digest(self.archive))
+        for name, key in (("acceptance-candidate.json", "acceptance_manifest_sha256"),
+                          ("acceptance-candidate.json.sig", "acceptance_signature_sha256"), ("checksums.txt", "checksums_sha256")):
+            self.target[key] = tool._file_digest(self.bytes / name)
+        self.plan = {"schema_version": "macprovider.signed_native_pair.v1", "transaction_id": "test-pair",
+                     "prior": self.prior, "target": self.target}
+        self.marker = {"step": "signed_byte_verification", "run_id": "123", "candidate_sha": self.source,
+                       "bytes_dir": str(self.bytes), "binary_sha256": self.code["binary_sha256"],
+                       "compatibility_set_id": f"Augustas11/macprovider:v{self.version}@{self.source}",
+                       "checksums_sha256": self.target["checksums_sha256"]}
+        self.run = {"id": 123, "event": "workflow_dispatch", "status": "completed", "conclusion": "success",
+                    "path": ".github/workflows/acceptance-candidate.yml", "head_branch": "main",
+                    "head_sha": "9" * 40, "repository": {"full_name": "Augustas11/macprovider"}, "run_attempt": 1}
+        self.release = self.root / "release.json"
+        self.write(self.release, {"provider_decode_path_digest": self.digest,
+                   "entry": {"source_commit": self.source, "provider_revision": self.source,
+                             "reproducible_build_sha256": self.target["binary_sha256"], "live_executable_cdhash": self.target["cdhash"]}})
+        self.proof = tool.SignedPairPublishProof(self.root / "plan.json", self.root / "marker.json", self.root / "run.json", self.prior_sidecar)
+        self.refresh()
+
+    def write(self, path, value):
+        path.write_text(json.dumps(value), encoding="utf-8")
+
+    def refresh(self):
+        self.write(self.proof.plan, self.plan)
+        self.write(self.proof.signed_byte_verification, self.marker)
+        self.write(self.proof.run, self.run)
+
+    def gate(self):
+        return tool.publish_gate(self.release, self.sidecar, "1.8.1", self.proof)
+
+    def test_exact_signed_candidate_old_scope_does_not_need_final_tag_or_recommendation(self):
+        with patch.object(tool, "_tag_commit", side_effect=AssertionError("premature final tag lookup")):
+            self.assertEqual(self.gate(), "ok")
+        self.verify.assert_called_once_with(self.bytes, self.version, self.source, self.run)
+
+    def test_rejects_missing_ops_custody_failed_run_or_mismatched_signed_identity(self):
+        with patch.dict(tool.os.environ, MACPROVIDER_OPS_ENTRYPOINT="0"):
+            with self.assertRaisesRegex(tool.DecodePathError, "owning ops"):
+                self.gate()
+        mutations = [(self.run, "conclusion", "failure"), (self.run, "path", ".github/workflows/other.yml"),
+                     (self.target, "candidate_run_id", "456"), (self.marker, "binary_sha256", "0" * 64),
+                     (self.target, "acceptance_signature_sha256", "0" * 64),
+                     (self.prior, "provenance", "local"), (self.target, "request_feature_profile", "native_mtp_sampled_text_v1")]
+        for obj, key, value in mutations:
+            with self.subTest(key=key):
+                original = obj[key]
+                obj[key] = value
+                self.refresh()
+                with self.assertRaises(tool.DecodePathError):
+                    self.gate()
+                obj[key] = original
+        self.refresh()
+
+    def test_rejects_widened_scope_or_changed_qualification_even_with_matching_plan_hash(self):
+        for key, value in (("proposal_depth", 2), ("max_native_active_rows", 2),
+                           ("request_feature_profile", "native_mtp_sampled_text_v1"), ("performance_evidence_sha256", "0" * 64)):
+            with self.subTest(key=key):
+                changed = dict(self.row, **{key: value})
+                self.write(self.sidecar, {"entries": [changed]})
+                self.target["feed_sha256"]["/v1/native-mtp-admission"] = tool._file_digest(self.sidecar)
+                self.refresh()
+                with self.assertRaisesRegex(tool.DecodePathError, "scope changed"):
+                    self.gate()
+
+    def test_candidate_exception_cannot_relabel_legacy_sidecar(self):
+        self.write(self.sidecar, {"entries": [{"model_key": "glm"}]})
+        with self.assertRaisesRegex(tool.DecodePathError, "requires decode-path-bound"):
+            self.gate()
+
+    def test_changed_archive_or_unverified_envelope_is_rejected(self):
+        self.verify.side_effect = tool.DecodePathError("invalid envelope")
+        with self.assertRaisesRegex(tool.DecodePathError, "invalid envelope"):
+            self.gate()
+        self.verify.side_effect = None
+        self.archive.write_bytes(b"different archive")
+        with self.assertRaisesRegex(tool.DecodePathError, "archive bytes changed"):
+            self.gate()
+
+    def test_envelope_verifier_binds_control_commit_separately_from_candidate(self):
+        with patch.object(tool.subprocess, "run") as command:
+            command.return_value.returncode = 0
+            self.original_envelope(self.bytes, self.version, self.source, self.run)
+            args = command.call_args.args[0]
+            self.assertEqual(args[args.index("--control-commit") + 1], self.run["head_sha"])
+            self.assertEqual(args[args.index("--candidate-commit") + 1], self.source)
+            self.assertIn("--public-key", args)
+            command.return_value.returncode = 1
+            with self.assertRaisesRegex(tool.DecodePathError, "envelope verification failed"):
+                self.original_envelope(self.bytes, self.version, self.source, self.run)
 
 
 if __name__ == "__main__":

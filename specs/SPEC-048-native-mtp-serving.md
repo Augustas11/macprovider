@@ -1380,6 +1380,25 @@ listed file is missing or changes without a regenerated digest.
   `source_commit`. The release tag `v<binaryVersion>` of that commit names it.
   The live coordinator recommends that release or a later one. The identity fields stay
   in every entry as provenance (dual-field).
+  The sole pre-promotion exception is an identity-only rebind of an already
+  qualified, one-row, depth-one greedy tuple inside the guarded matched signed
+  binary/policy transaction exposed by `scripts/ops/`. Its target MUST be the
+  exact reviewed main-source acceptance CLI cut: a successful protected
+  `acceptance-candidate.yml` run, signature-verified acceptance envelope,
+  checksums, source commit, binary SHA-256, CDHash and embedded decode-path
+  digest all match the frozen transaction and signed-byte verification record.
+  The independently verified prior published signed binary, signed policy and
+  self-test bank MUST remain available for exact-pair rollback; the transaction
+  MUST preserve CB, prior request-feature scope, model inventory, qualification
+  evidence, row/depth bounds and ordinary context, with independent recovery
+  custody before pause. Only identity/provenance bindings may change. The
+  candidate's final release tag and fleet recommendation are not prerequisites
+  for this bounded canary transaction: the existing CLI train requires its
+  physical canary and in-scope e2e before final tagging/promotion. Normal catalog
+  publication, wider sampled/tools/reasoning eligibility and increased bounds
+  retain the general tag/recommendation gate above. This exception neither
+  admits a local unsigned/unreleased build nor satisfies an e2e/journey gate;
+  every later release and qualification gate remains mandatory.
 
 SPEC-023 autotune recommendation, SPEC-032 hardware-evidence performance
 measurement, and every ordinary catalog gate seed MUST force

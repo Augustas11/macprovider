@@ -263,6 +263,12 @@ PRICING_VERIFIED=0
 CCR_PRICING_KEEP=0
 CCR_ROLLED_BACK=0
 CCR_CANARY_TOUCHED=0
+SIGNED_PAIR_PLAN="${CATALOG_SIGNED_PAIR_PLAN:-}"
+SIGNED_PAIR_ARMED=0
+SIGNED_PAIR_STUDIO_ARMED=0
+SIGNED_PAIR_INTENT_SHA=""
+SIGNED_PAIR_TERMINAL=0
+SIGNED_PAIR_TXID=""
 CCR_PASSED_AB=0
 CCR_FAILED_STEP=""
 T_HUP=""
@@ -287,6 +293,144 @@ PRIOR_RATE_SHA=""
 PRIOR_SIGNED_SHA=""
 PRIOR_SNAPSHOT_ID=""
 
+# This mode is selected only by catalog-activate's owned next --run step.
+# Ordinary content and pricing transactions retain their existing behavior.
+ccr_signed_pair_action() {
+  "$SCRIPT_DIR/ops/canary-swap.sh" signed-pair --plan "$SIGNED_PAIR_PLAN" --action "$1"
+}
+
+ccr_signed_pair_state() {
+  python3 - "${CATALOG_SIGNED_PAIR_STATE_DIR:-}" "$1" "$SIGNED_PAIR_TXID" "$SIGNED_PAIR_INTENT_SHA" \
+      "$LOCK_HELPER_DIR" "${AA_SIGNED_PAIR_READER_KEY_DIR:-}" "$SIGNED_PAIR_PLAN" <<'PAIR_DURABLE'
+import json,os,pathlib,re,stat,sys
+raw,phase,tx,digest,helper,key,plan=sys.argv[1:]
+p=pathlib.Path(raw)
+if not p.is_absolute() or not re.fullmatch(r'[A-Za-z0-9_-]{1,80}',tx) or not re.fullmatch(r'[a-f0-9]{64}',digest):raise SystemExit(1)
+# No symlink component may redirect durable custody or a private resolved plan.
+for parent in reversed([p,*p.parents]):
+ if parent.exists():
+  if not stat.S_ISDIR(parent.lstat().st_mode) or parent.is_symlink():raise SystemExit(1)
+ else:parent.mkdir(mode=0o700)
+st=p.stat()
+if st.st_uid!=os.getuid() or stat.S_IMODE(st.st_mode)!=0o700:raise SystemExit(1)
+state=p/'controller-state.json'
+if state.exists():
+ old=json.loads(state.read_text())
+ if old['transaction_id']!=tx or old['intent_sha256']!=digest or old['helper_dir']!=helper:raise SystemExit(1)
+v={'schema':'macprovider.signed-pair-controller.v1','transaction_id':tx,'intent_sha256':digest,
+ 'helper_dir':helper,'guard_dir':helper+'/signed-pair-'+tx,'reader_key_dir':key,'phase':phase,'resolved_plan_path':str(p/'resolved-plan.json')}
+def put(dest,value):
+ temp=dest.with_name(dest.name+'.next-'+str(os.getpid()))
+ fd=os.open(temp,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+ with os.fdopen(fd,'w') as out:json.dump(value,out,sort_keys=True);out.flush();os.fsync(out.fileno())
+ os.replace(temp,dest)
+put(state,v)
+if phase=='reader_ready':put(p/'resolved-plan.json',json.load(open(plan)))
+if phase=='terminal':put(p/'terminal-ack.json',{'terminal_acknowledged':True,'transaction_id':tx,'intent_sha256':digest})
+fd=os.open(p,os.O_RDONLY);os.fsync(fd);os.close(fd)
+PAIR_DURABLE
+}
+
+ccr_signed_pair_prepare() {
+  [ -n "$SIGNED_PAIR_PLAN" ] || return 0
+  [ "${MACPROVIDER_OPS_ENTRYPOINT:-}" = 1 ] || fatal "signed pair requires the catalog ops entry point"
+  [ "$PRICING" = 0 ] || fatal "signed pair cannot change pricing"
+  "$SCRIPT_DIR/ops/live-lock.sh" status | python3 -c 'import json,os,sys; r=(json.load(sys.stdin).get("lock") or {}); sys.exit(0 if r.get("owner")==os.environ.get("MACPROVIDER_OPS_OWNER") and r.get("purpose")=="catalog-activate:signed_native_pair" and r.get("pid_bound") is False else 1)' || fatal "signed pair does not own the durable live-ops lock"
+  # The intent carries no private key. The lease-owned reader creates its
+  # transaction key in the external operator secret store, before any pause.
+  SIGNED_PAIR_TXID="$(python3 - "$SIGNED_PAIR_PLAN" "$REL_ID" <<'PAIR_INTENT'
+import json,os,re,stat,sys
+p,rid=sys.argv[1:]
+f=os.open(p,os.O_RDONLY|os.O_NOFOLLOW)
+with os.fdopen(f) as stream:
+ st=os.fstat(stream.fileno())
+ if not stat.S_ISREG(st.st_mode) or st.st_uid!=os.getuid() or st.st_mode & 0o077: raise SystemExit(1)
+ d=json.load(stream)
+t=d.get('transaction_id','')
+if not re.fullmatch(r'[A-Za-z0-9_-]{1,80}',t) or d.get('target',{}).get('catalog_release_id')!=rid: raise SystemExit(1)
+print(t)
+PAIR_INTENT
+)" || fatal "signed pair intent is unsafe or names another target release"
+  SIGNED_PAIR_INTENT_SHA="$(sha256_file "$SIGNED_PAIR_PLAN")"
+  [ "$SIGNED_PAIR_INTENT_SHA" = "${CATALOG_SIGNED_PAIR_INTENT_SHA256:-}" ] || fatal "signed pair intent changed after status"
+  ccr_signed_pair_state arming || fatal "durable signed pair custody could not be recorded"
+  SIGNED_PAIR_ARMED=1
+  aa_signed_pair_arm "$SIGNED_PAIR_TXID" || fatal "independent pair recovery did not arm"
+  aa_signed_pair_reader_prepare "$SIGNED_PAIR_TXID" > "$WORK/pair-reader.json" || fatal "independent decision reader did not initialize"
+  # Bind the generated reader to the frozen intent without changing any
+  # prior/target identity or remote destination from that intent.
+  python3 - "$SIGNED_PAIR_PLAN" "$WORK/pair-reader.json" "$WORK/signed-pair-plan.json" <<'PAIR_BIND'
+import json,os,sys
+src,reader,out=sys.argv[1:]
+d=json.load(open(src));r=json.load(open(reader))
+if d['transaction_id']!=r['transaction_id']: raise SystemExit(1)
+d['receipt_reader']['local_private_key_path']=r['private_key_path']
+f=os.open(out,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+with os.fdopen(f,'w') as stream: json.dump(d,stream,sort_keys=True);stream.flush();os.fsync(stream.fileno())
+PAIR_BIND
+  SIGNED_PAIR_PLAN="$WORK/signed-pair-plan.json"
+  ccr_signed_pair_state reader_ready || fatal "durable receipt-reader custody could not be recorded"
+  ccr_signed_pair_action preflight > "$WORK/pair-preflight.json" || fatal "frozen signed pair preflight failed"
+  SIGNED_PAIR_STUDIO_ARMED=1
+  ccr_signed_pair_action arm > "$WORK/pair-armed.json" || fatal "Studio independent pair recovery did not arm"
+  aa_signed_pair_runner_stop "$SIGNED_PAIR_TXID" || fatal "buyer runner could not be stopped under recovery custody"
+  ccr_signed_pair_action prepare > "$WORK/pair-prepared.json" || fatal "provider pause and zero-inflight preparation failed"
+  CCR_CANARY_TOUCHED=1
+}
+
+ccr_signed_pair_finish() {
+  ccr_signed_pair_action prepare-commit > "$WORK/pair-prepare-commit.json" || return 1
+  aa_signed_pair_runner_restore "$SIGNED_PAIR_TXID" || return 1
+  aa_signed_pair_commit "$SIGNED_PAIR_TXID" > "$WORK/pair-committed.json" || return 1
+  # The Studio independently reads the authoritative decision. A lost local
+  # relay cannot make it restore the prior binary against the target policy.
+  ccr_signed_pair_action commit > "$WORK/pair-studio-committed.json" || return 1
+  aa_signed_pair_runner_retire "$SIGNED_PAIR_TXID" || return 1
+  aa_signed_pair_reader_retire "$SIGNED_PAIR_TXID" || return 1
+  ccr_signed_pair_state terminal || return 1
+  SIGNED_PAIR_TERMINAL=1
+}
+
+ccr_signed_pair_cleanup() {
+  local result=0 decision_rc=0
+  [ "$SIGNED_PAIR_ARMED" = 1 ] || return 0
+  if [ -z "${AA_SIGNED_PAIR_READER_KEY_DIR:-}" ]; then
+    AA_SIGNED_PAIR_READER_KEY_DIR="$(python3 - "$SIGNED_PAIR_TXID" <<'PAIR_KEY_INTENT'
+import json,os,pathlib,re,stat,sys
+t=sys.argv[1]
+if not re.fullmatch(r'[A-Za-z0-9_-]{1,80}',t):raise SystemExit(1)
+root=pathlib.Path.home()/'.config/macprovider/operator-secrets';p=root/('signed-pair-'+t+'.intent.json')
+if not os.path.lexists(p):raise SystemExit(0)
+f=os.open(p,os.O_RDONLY|os.O_NOFOLLOW)
+with os.fdopen(f) as stream:
+ st=os.fstat(stream.fileno())
+ if not stat.S_ISREG(st.st_mode) or st.st_uid!=os.getuid() or stat.S_IMODE(st.st_mode)!=0o600:raise SystemExit(1)
+ d=json.load(stream)
+k=pathlib.Path(d['key_dir'])
+if d.get('transaction_id')!=t or k.parent!=root or not k.name.startswith('signed-pair-'+t+'-'):raise SystemExit(1)
+print(k)
+PAIR_KEY_INTENT
+)" || return 1
+  fi
+  if [ "$SIGNED_PAIR_TERMINAL" != 1 ]; then
+    # Recovery serializes against commit in the remote decision journal. The
+    # actor reads that decision before selecting the matching released payload.
+    aa_signed_pair_recover "$SIGNED_PAIR_TXID" > "$WORK/pair-recovery.json" || decision_rc=$?
+    case "$decision_rc" in
+      0) if [ "$SIGNED_PAIR_STUDIO_ARMED" = 1 ]; then ccr_signed_pair_action rollback > "$WORK/pair-studio-recovery.json" || result=1; fi ;;
+      2) ccr_signed_pair_action commit > "$WORK/pair-studio-recovery.json" || result=1 ;;
+      *) result=1 ;;
+    esac
+    aa_signed_pair_runner_restore "$SIGNED_PAIR_TXID" || result=1
+    if [ "$result" = 0 ]; then
+      aa_signed_pair_runner_retire "$SIGNED_PAIR_TXID" || result=1
+      aa_signed_pair_reader_retire "$SIGNED_PAIR_TXID" || result=1
+      [ "$result" != 0 ] || ccr_signed_pair_state terminal || result=1
+    fi
+  fi
+  return "$result"
+}
+
 ccr_cleanup() {
   local rc=$? probe
   trap - EXIT
@@ -294,6 +438,16 @@ ccr_cleanup() {
   # the rollback short; channel loss is detected by aa_lease_run itself.
   trap '' HUP INT TERM
   set +e
+  if [ "$SIGNED_PAIR_ARMED" = 1 ]; then
+    if ! ccr_signed_pair_cleanup; then
+      log "SIGNED PAIR RECOVERY PENDING: durable recovery custody remains; no successful activation is claimed"
+      exit 6
+    fi
+    aa_lease_release
+    aa_cleanup_remote_helpers
+    rm -rf "$WORK"
+    exit "$rc"
+  fi
   if [ "$PRICING" = 1 ] && [ "$PRICING_VERIFIED" = 1 ] && [ "$CCR_DONE" = 0 ] && [ "$CCR_ROLLED_BACK" = 0 ] && ! aa_lease_lost; then
     # A verified price is never rolled back: only validate + finalize it.
     log "run ended (rc=$rc) after the pricing journal was verified; finalizing the candidate (never rolled back)"
@@ -1703,7 +1857,12 @@ ev_c_canary() {
   else
     log "evidence (c): restarting canary serve onto $REL_ID (launchd drain + restart)"
   fi
-  canary_restart "$apply" || { ev_fail c "canary restart failed"; return 1; }
+  if [ -n "$SIGNED_PAIR_PLAN" ]; then
+    ccr_signed_pair_action ready > "$WORK/pair-ready.json" &&
+      ccr_signed_pair_action resume > "$WORK/pair-resumed.json" || { ev_fail c "matched signed pair did not become ready"; return 1; }
+  else
+    canary_restart "$apply" || { ev_fail c "canary restart failed"; return 1; }
+  fi
   log "evidence (c): waiting up to ${CANARY_RECOVERY_SECONDS}s for the canary (a large model keeps its status silent while it loads)"
   deadline=$((SECONDS + CANARY_RECOVERY_SECONDS))
   while :; do
@@ -1861,7 +2020,7 @@ ccr_evidence() {
   ev_a_served_bytes || return 1
   ev_b_journal || return 1
   CCR_PASSED_AB=1
-  ev_c_canary || { plan_retention; return 1; }
+  ev_c_canary || { [ -n "$SIGNED_PAIR_PLAN" ] || plan_retention; return 1; }
   ev_d_watch || return 1
   ev_pricing_state || return 1
   return 0
@@ -2346,6 +2505,7 @@ T_RB="$T_HUP"
 log "activating releases/$RELEASE_DIRNAME ($REL_ID) over $CURRENT_TARGET"
 # Before the publish is sent: an interrupt from here on reads the actual Pearl
 # state through the lease (ccr_cleanup) instead of assuming nothing changed.
+ccr_signed_pair_prepare
 CCR_ACTIVATED=maybe
 aa_publish
 CCR_ACTIVATED=1
@@ -2355,7 +2515,16 @@ ccr_evidence_hook() {
   T_RB="$(remote_now)"
   return 1
 }
-aa_post_activation_evidence ccr_evidence_hook
+if [ -n "$SIGNED_PAIR_PLAN" ]; then
+  # Loaded target and exact retained window are proved before installing bytes.
+  ev_a_served_bytes && ev_b_journal || fatal "target policy activation proof failed"
+  aa_signed_pair_activation_verified "$SIGNED_PAIR_TXID" || fatal "loaded target pair receipt could not be frozen"
+  ccr_signed_pair_action install > "$WORK/pair-installed.json" || fatal "released target installation failed"
+  ccr_evidence_hook || fatal "matched pair post-activation evidence failed"
+  ccr_signed_pair_finish || fatal "matched pair could not commit safely"
+else
+  aa_post_activation_evidence ccr_evidence_hook
+fi
 if [ "$PRICING" = 1 ] && ! pricing_finalize; then
   CCR_PRICING_KEEP=1
   CCR_FATAL_RC=5

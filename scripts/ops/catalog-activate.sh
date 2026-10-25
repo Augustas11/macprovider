@@ -119,6 +119,167 @@ QWEN_NATIVE_PROFILE=qwen36-native-mtp
 DSV4_WINDOW_PROFILE=dsv4-flash-window
 DSV4_WINDOW_DOWNTIME="Studio provider: GLM-5.3-Flash buyer traffic is unavailable from the GLM->DeepSeek restart through the DeepSeek-V4-Flash load (~167 GB), the conformance run (about 10-30 minutes at one serial slot), an optional operator hold while DSV4_WINDOW_HOLD_FILE exists (at most DSV4_WINDOW_HOLD_MAX_MINUTES, default 30, cap 60), and the restart and model load back to GLM; DeepSeek buyers are served during the window. Pearl is not restarted"
 
+# This optional intent selects a single matched signed binary/policy step.
+# It contains identities and private paths, never private key bytes.
+signed_pair_state_dir() { printf '%s/%s/signed-native-pair' "$OPS_STATE_DIR" "$OPS_SCOPE"; }
+
+signed_pair_plan_sha() {
+  python3 - "${CATALOG_SIGNED_PAIR_PLAN:-}" "$R" <<'PAIR_PLAN'
+import hashlib,json,os,re,stat,sys
+p,rid=sys.argv[1:]
+f=os.open(p,os.O_RDONLY|os.O_NOFOLLOW)
+with os.fdopen(f,'rb') as stream:
+ st=os.fstat(stream.fileno())
+ if not stat.S_ISREG(st.st_mode) or st.st_uid!=os.getuid() or st.st_mode & 0o077: raise SystemExit(1)
+ raw=stream.read(1048577)
+if len(raw)>1048576:raise SystemExit(1)
+def unique(pairs):
+ d={}
+ for k,v in pairs:
+  if k in d:raise ValueError('duplicate intent field')
+  d[k]=v
+ return d
+d=json.loads(raw,object_pairs_hook=unique)
+if d.get('schema_version')!='macprovider.signed_native_pair.v1' or not re.fullmatch(r'[A-Za-z0-9_-]{1,80}',d.get('transaction_id','')):raise SystemExit(1)
+if d.get('target',{}).get('catalog_release_id')!=rid:raise SystemExit(1)
+print(hashlib.sha256(raw).hexdigest())
+PAIR_PLAN
+}
+
+# Read-only candidate-order proof. Call again under transaction custody before
+# publication with the freshly verified prior sidecar, never a cached verdict.
+signed_pair_decode_path_gate() {
+  local plan="$1" prior="$2" recommended="$3" version run_id marker run_json provenance
+  [ -n "$plan" ] && [ -f "$plan" ] && [ -f "$prior" ] &&
+    [ -n "${MACPROVIDER_OPS_OWNER:-}" ] && [ "$(gh_repo)" = Augustas11/macprovider ] || {
+      printf '%s\n' "blocked: signed-pair candidate proof prerequisites missing"; return 0;
+    }
+  provenance="$(json_field "$plan" 'd["target"]["provenance"]')"
+  if [ "$provenance" = reviewed_published_signed_release ]; then
+    python3 "$REPO_ROOT/scripts/decode_path_digest.py" --publish-gate \
+      "$REPO_ROOT/$AUTOTUNE/native-mtp-admission-release.json" "$REPO_ROOT/$AUTOTUNE/native-mtp-admission.json" "$recommended" 2>&1 ||
+      printf '%s\n' "blocked: decode-path publish gate failed"
+    return 0
+  fi
+  [ "$provenance" = reviewed_signed_acceptance_candidate ] || {
+    printf '%s\n' "blocked: signed-pair target provenance unknown"; return 0;
+  }
+  version="$(json_field "$plan" 'd["target"]["version"]')"
+  run_id="$(json_field "$plan" 'str(d["target"]["candidate_run_id"])')"
+  is_semver "$version" && [[ "$run_id" =~ ^[1-9][0-9]*$ ]] || {
+    printf '%s\n' "blocked: signed-pair candidate identity malformed"; return 0;
+  }
+  marker="$(marker_path "cli-release-$version" signed_byte_verification)"
+  run_json="$OPS_TMP_DIR/signed-pair-candidate-run.json"
+  [ -f "$marker" ] && gh api "repos/Augustas11/macprovider/actions/runs/$run_id" > "$run_json" 2>/dev/null || {
+    printf '%s\n' "blocked: signed-pair verified candidate run unavailable"; return 0;
+  }
+  MACPROVIDER_OPS_ENTRYPOINT=1 python3 "$REPO_ROOT/scripts/decode_path_digest.py" --publish-gate \
+    "$REPO_ROOT/$AUTOTUNE/native-mtp-admission-release.json" "$REPO_ROOT/$AUTOTUNE/native-mtp-admission.json" "$recommended" \
+    --signed-pair-plan "$plan" --signed-byte-verification "$marker" \
+    --signed-pair-run-json "$run_json" --signed-pair-prior-sidecar "$prior" 2>&1 ||
+    printf '%s\n' "blocked: signed-pair decode-path publish proof failed"
+}
+
+signed_pair_acknowledged() {
+  python3 - "$(signed_pair_state_dir)" "$(signed_pair_plan_sha)" <<'PAIR_ACK_CHECK'
+import json,os,pathlib,stat,sys
+p=pathlib.Path(sys.argv[1]);digest=sys.argv[2]
+def load(name):
+ f=os.open(p/name,os.O_RDONLY|os.O_NOFOLLOW)
+ with os.fdopen(f) as stream:
+  st=os.fstat(stream.fileno())
+  if not stat.S_ISREG(st.st_mode) or st.st_uid!=os.getuid() or st.st_mode & 0o077:raise SystemExit(1)
+  return json.load(stream)
+s=load('controller-state.json');a=load('terminal-ack.json')
+if set(a)!={'terminal_acknowledged','transaction_id','intent_sha256'} or a['terminal_acknowledged'] is not True or a['transaction_id']!=s['transaction_id'] or a['intent_sha256']!=s['intent_sha256'] or a['intent_sha256']!=digest or s['phase']!='terminal':raise SystemExit(1)
+PAIR_ACK_CHECK
+}
+
+signed_pair_probe() {
+  [ -n "${CATALOG_SIGNED_PAIR_PLAN:-}" ] || return 1
+  "$OPS_DIR/canary-swap.sh" signed-pair --plan "$CATALOG_SIGNED_PAIR_PLAN" --action status
+}
+
+signed_pair_reconcile() {
+  [ "${MACPROVIDER_OPS_ENTRYPOINT:-}" = 1 ] || refuse "signed pair reconciliation requires next --run"
+  local state_dir state_record values tx helper guard secret
+  state_dir="$(signed_pair_state_dir)"
+  state_record="$state_dir/controller-state.json"
+  signed_pair_probe > "$OPS_TMP_DIR/pair-terminal.json" || refuse "signed pair terminal status is unreadable"
+  [ "$(json_field "$OPS_TMP_DIR/pair-terminal.json" 'd.get("terminal_ready")')" = true ] ||
+    refuse "independent signed pair recovery has not proved a live matching terminal pair"
+  values="$(python3 - "$state_record" "$(signed_pair_plan_sha)" <<'PAIR_STATE'
+import json,os,re,stat,sys
+p,digest=sys.argv[1:]
+f=os.open(p,os.O_RDONLY|os.O_NOFOLLOW)
+with os.fdopen(f) as stream:
+ st=os.fstat(stream.fileno())
+ if not stat.S_ISREG(st.st_mode) or st.st_uid!=os.getuid() or st.st_mode & 0o077:raise SystemExit(1)
+ d=json.load(stream)
+if d['intent_sha256']!=digest:raise SystemExit(1)
+t=d['transaction_id'];h=d['helper_dir'];g=d['guard_dir'];k=d.get('reader_key_dir','')
+if not k:
+ intent=os.path.expanduser('~/.config/macprovider/operator-secrets/signed-pair-'+t+'.intent.json')
+ if os.path.lexists(intent):
+  f=os.open(intent,os.O_RDONLY|os.O_NOFOLLOW)
+  with os.fdopen(f) as stream:
+   st=os.fstat(stream.fileno())
+   if not stat.S_ISREG(st.st_mode) or st.st_uid!=os.getuid() or stat.S_IMODE(st.st_mode)!=0o600:raise SystemExit(1)
+   record=json.load(stream)
+  if record.get('transaction_id')!=t:raise SystemExit(1)
+  k=record['key_dir']
+if not re.fullmatch(r'[A-Za-z0-9_-]{1,80}',t) or not re.fullmatch(r'/tmp/macprovider-autotune-lock\.[A-Za-z0-9]+',h) or g!=h+'/signed-pair-'+t:raise SystemExit(1)
+if '\n' in k or (k and not k.startswith(os.path.expanduser('~/.config/macprovider/operator-secrets/signed-pair-'+t+'-'))):raise SystemExit(1)
+print('\n'.join([t,h,g,k]))
+PAIR_STATE
+)" || refuse "durable signed pair controller state is invalid"
+  tx="$(printf '%s\n' "$values" | sed -n 1p)"
+  helper="$(printf '%s\n' "$values" | sed -n 2p)"
+  guard="$(printf '%s\n' "$values" | sed -n 3p)"
+  secret="$(printf '%s\n' "$values" | sed -n 4p)"
+  SSH() { pearl_ssh "$@"; }
+  fatal() { refuse "$@"; }
+  AA_WORK_DIR="$OPS_TMP_DIR/pair-terminal"
+  mkdir -m 0700 "$AA_WORK_DIR"
+  . "$REPO_ROOT/scripts/lib/autotune-activate.sh"
+  LOCK_HELPER_DIR="$helper"
+  LOCK_HELPER="$helper/pearl_autotune_deploy_lock.py"
+  AA_SIGNED_PAIR_GUARD_DIR="$guard"
+  AA_SIGNED_PAIR_READER_KEY_DIR="$secret"
+  aa_signed_pair_runner_retire "$tx" || refuse "runner recovery retirement is pending"
+  aa_signed_pair_reader_retire "$tx" || refuse "receipt reader retirement is pending"
+  aa_cleanup_remote_helpers
+  python3 - "$state_record" "$state_dir/terminal-ack.json" <<'PAIR_ACK'
+import json,os,pathlib,sys
+r=json.load(open(sys.argv[1]));r['phase']='terminal';p=pathlib.Path(sys.argv[2]);t=p.with_name(p.name+'.next-'+str(os.getpid()))
+f=os.open(t,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+with os.fdopen(f,'w') as out:json.dump({'terminal_acknowledged':True,'transaction_id':r['transaction_id'],'intent_sha256':r['intent_sha256']},out);out.flush();os.fsync(out.fileno())
+os.replace(t,p)
+state=pathlib.Path(sys.argv[1]);temp=state.with_name(state.name+'.next-'+str(os.getpid()));f=os.open(temp,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+with os.fdopen(f,'w') as out:json.dump(r,out,sort_keys=True);out.flush();os.fsync(out.fileno())
+os.replace(temp,state);f=os.open(p.parent,os.O_RDONLY);os.fsync(f);os.close(f)
+PAIR_ACK
+}
+
+signed_pair_internal() {
+  [ "${MACPROVIDER_OPS_ENTRYPOINT:-}" = 1 ] || refuse "signed pair transition requires next --run"
+  local commit="$1" expected="$2" got
+  [ "$commit" = "$(origin_main_sha)" ] && [ "$commit" = "$(git -C "$REPO_ROOT" rev-parse HEAD)" ] || refuse "signed pair source moved"
+  got="$(signed_pair_plan_sha)" || refuse "signed pair intent is invalid"
+  [ "$got" = "$expected" ] || refuse "signed pair intent changed since status"
+  # Re-fetch under live-ops custody. The actor later independently proves the
+  # same prior signed bytes under the publication lease before pausing.
+  local prior="$OPS_TMP_DIR/signed-pair-prior-admission.json" health="$OPS_TMP_DIR/signed-pair-health.json" gate
+  [ "$(http_get "${COORDINATOR_URL%/}/v1/native-mtp-admission" "$prior")" = 200 ] &&
+    [ "$(http_get "${COORDINATOR_URL%/}/healthz" "$health")" = 200 ] || refuse "signed pair prior policy is unreadable"
+  gate="$(signed_pair_decode_path_gate "$CATALOG_SIGNED_PAIR_PLAN" "$prior" \
+    "$(json_field "$health" 'd.get("recommended_binary_version") or ""')")"
+  [ "$gate" = ok ] || refuse "signed pair decode-path proof changed before publication"
+  CATALOG_SIGNED_PAIR_INTENT_SHA256="$expected" CATALOG_SIGNED_PAIR_STATE_DIR="$(signed_pair_state_dir)" \
+    "$REPO_ROOT/scripts/catalog-content-release.sh" --deploy --commit "$commit"
+}
+
 qwen_journal_probe() {
   "$OPS_DIR/qwen-opencode-e2e.sh" _catalog-qwen36-journal
 }
@@ -170,6 +331,23 @@ release_live_lock() {
   [ -n "$OPS_LOCK_OWNER" ] || return 0
   local owner="$OPS_LOCK_OWNER" probe="$OPS_TMP_DIR/qwen-lock-journal.json" purpose=""
   purpose="$(live_lock_purpose 2>/dev/null || true)"
+  if [ "$purpose" = catalog-activate:signed_native_pair ]; then
+    if [ ! -e "$(signed_pair_state_dir)/controller-state.json" ]; then
+      OPS_LOCK_OWNER=""
+      "$OPS_DIR/live-lock.sh" release "$owner" >&2 || true
+      return 0
+    fi
+    if ! signed_pair_acknowledged ||
+       ! signed_pair_probe > "$OPS_TMP_DIR/pair-lock-terminal.json" 2>/dev/null ||
+       [ "$(json_field "$OPS_TMP_DIR/pair-lock-terminal.json" 'd.get("terminal_ready")')" != true ]; then
+      log "retaining the durable live-ops lock until signed pair recovery proves a live terminal pair"
+      OPS_LOCK_OWNER=""
+      return 0
+    fi
+    OPS_LOCK_OWNER=""
+    "$OPS_DIR/live-lock.sh" release "$owner" >&2 || true
+    return 0
+  fi
   if qwen_native_intent_present; then
     if [ "$purpose" != catalog-activate:qwen_restore ]; then
       "$OPS_DIR/live-lock.sh" acquire "$owner" \
@@ -210,7 +388,9 @@ release_live_lock() {
 }
 
 acquire_live_lock_for_step() {
-  if [ "$NEXT_ID" = qwen_restore ] || [ "$NEXT_ID" = qwen_prejournal_reconcile ]; then
+  if [ "$NEXT_ID" = signed_native_pair ] || [ "$NEXT_ID" = signed_native_pair_reconcile ]; then
+    "$OPS_DIR/live-lock.sh" acquire "$MACPROVIDER_OPS_OWNER" --purpose catalog-activate:signed_native_pair >&2
+  elif [ "$NEXT_ID" = qwen_restore ] || [ "$NEXT_ID" = qwen_prejournal_reconcile ]; then
     "$OPS_DIR/live-lock.sh" acquire "$MACPROVIDER_OPS_OWNER" \
       --purpose catalog-activate:qwen_restore >&2
   elif [ "$(live_lock_purpose 2>/dev/null || true)" = catalog-activate:qwen_restore ]; then
@@ -357,6 +537,14 @@ gather() {
         "QWEN_E2E_JOURNAL is configured but cannot be inspected over STUDIO_SSH; an interrupted window may still need GLM restored"
       return
     fi
+  fi
+  if [ "$(live_lock_purpose 2>/dev/null || true)" = catalog-activate:signed_native_pair ] &&
+     [ -f "$(signed_pair_state_dir)/controller-state.json" ]; then
+    step signed_native_pair_reconcile pending "signed pair journal must reach an acknowledged live terminal pair"
+    set_next signed_native_pair_reconcile mutate "Reconcile the journaled signed binary/policy pair" \
+      "$OPS_DIR/catalog-activate.sh _signed-native-pair-reconcile"
+    next_meta signed_native_pair_reconcile "$MTP_DOC" "recovery only: restore the journaled released pair and buyer runner"
+    return
   fi
   fact origin_main_sha "$main_sha"
   fact checkout_is_origin_main "$([ "$head_sha" = "$main_sha" ] && echo true || echo false)"
@@ -608,14 +796,29 @@ $owed_writer '$deploy_log' '$owed_dir' '$R'"
     # release (git-verified digest at its source commit) is the recommended CLI.
     local dp_gate="ok"
     if [ "$native_bound" = true ]; then
-      dp_gate="$(python3 "$REPO_ROOT/scripts/decode_path_digest.py" --publish-gate \
-        "$REPO_ROOT/$AUTOTUNE/native-mtp-admission-release.json" "$REPO_ROOT/$AUTOTUNE/native-mtp-admission.json" \
-        "$(json_field "$OPS_TMP_DIR/healthz.json" 'd.get("recommended_binary_version") or ""' 2>/dev/null)" 2>&1 ||
-        echo "blocked: decode-path publish gate failed")"
+      if [ -n "${CATALOG_SIGNED_PAIR_PLAN:-}" ]; then
+        dp_gate="$(signed_pair_decode_path_gate "$CATALOG_SIGNED_PAIR_PLAN" "$OPS_TMP_DIR/adm.json" \
+          "$(json_field "$OPS_TMP_DIR/healthz.json" 'd.get("recommended_binary_version") or ""' 2>/dev/null)")"
+      else
+        dp_gate="$(python3 "$REPO_ROOT/scripts/decode_path_digest.py" --publish-gate \
+          "$REPO_ROOT/$AUTOTUNE/native-mtp-admission-release.json" "$REPO_ROOT/$AUTOTUNE/native-mtp-admission.json" \
+          "$(json_field "$OPS_TMP_DIR/healthz.json" 'd.get("recommended_binary_version") or ""' 2>/dev/null)" 2>&1 ||
+          echo "blocked: decode-path publish gate failed")"
+      fi
     fi
     fact native_mtp_decode_path_publish_gate "$dp_gate"
     if [ "$dp_gate" != ok ]; then
       set_next catalog_activation blocked "Activate content release $R" "" "$dp_gate"
+    elif [ -n "${CATALOG_SIGNED_PAIR_PLAN:-}" ] && [ "$fresh" = true ] && [ "$go" = true ] && [ -z "$pricing" ]; then
+      local pair_sha
+      if [ "$head_sha" != "$main_sha" ] || ! pair_sha="$(signed_pair_plan_sha)"; then
+        set_next signed_native_pair blocked "Validate the matched signed release intent" "" "clean origin/main and an exact private target intent are required"
+      else
+        step signed_native_pair pending "released signed binary and signed policy must change under one recovery journal"
+        set_next signed_native_pair mutate "Install the matched signed native-MTP binary/policy pair" \
+          "$OPS_DIR/catalog-activate.sh _signed-native-pair $main_sha $pair_sha"
+        next_meta signed_native_pair "$MTP_DOC" "provider pause/drain, one released-binary restart and model load, then 120-second stability; independent exact-pair recovery is armed first; content publication uses one coordinator SIGHUP"
+      fi
     elif [ "$fresh" = true ] && { [ "$p_paused" = true ] || [ "$p_status_ok" = false ]; } &&
       { [ "$go" = true ] || printf '%s' "$lane_detail" | grep -q 'lane='; }; then
       set_next catalog_activation blocked "Activate content release $R" "" "$paused_why"
@@ -1543,6 +1746,8 @@ buc_internal() {
 
 internal() {
   case "$1" in
+    _signed-native-pair) shift; R="$(json_field "$REPO_ROOT/$AUTOTUNE/release.json" 'd["release_id"]')"; OPS_SCOPE="catalog-$R"; signed_pair_internal "$@" ;;
+    _signed-native-pair-reconcile) R="$(json_field "$REPO_ROOT/$AUTOTUNE/release.json" 'd["release_id"]')"; OPS_SCOPE="catalog-$R"; signed_pair_reconcile ;;
     _qwen-lock-reconcile) reconcile_qwen_restore_lock ;;
     _buyer-ux-conformance) shift; buc_internal "$@" ;;
     _gateway-proof)
