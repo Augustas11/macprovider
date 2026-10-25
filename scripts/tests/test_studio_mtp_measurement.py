@@ -211,6 +211,7 @@ class MeasurementTests(unittest.TestCase):
                 return {"runner_active": True, "timer_retired": retire}
             with patch.dict(M.os.environ, env), patch.object(M, "source_ok"), patch.object(M, "published"), \
                     patch.object(M, "run", return_value=b"a" * 40) as run, patch.object(M, "ssh", return_value=remote), \
+                    patch.object(M, "build_validator"), patch.object(M, "upload_validator", return_value="c" * 64), \
                     patch.object(M, "dispatch_worker", side_effect=dispatch), patch.object(M, "pearl", side_effect=pearl), \
                     patch("builtins.print"), self.assertRaises(M.Refusal):
                 M.controller(argparse.Namespace(source_commit="a" * 40, policy=policy, cell="s2-p512-o128", run=True))
@@ -287,17 +288,20 @@ class MeasurementTests(unittest.TestCase):
                     "provider_commit", "mlx_fork_revision", "model_id", "target_sha256", "mtp_sha256",
                     "tokenizer_sha256")
 
-    def preflight_case(self, tmp, validate, build_rc=0, cell="matrix"):
-        """Runs preflight_remote with build/metal/validate children faked."""
+    def preflight_case(self, tmp, validate, cell="matrix", validator=b"validator-bytes", uploaded=None):
+        """Runs preflight_remote with the validate child faked."""
         policy = json.dumps(self.policy()).encode()
+        digest = M.sha(validator)
+        root = Path(tmp) / ".config/macprovider/studio-mtp-measurement"
+        root.mkdir(parents=True)
+        (root / ("validator-" + digest[:16])).write_bytes(validator if uploaded is None else uploaded)
         m = {"source": "/source", "commit": "a" * 40, "cell": cell, "nonce": "n1",
-             "policy_sha256": M.sha(policy), "policy_code": M.base64.b64encode(policy).decode()}
+             "policy_sha256": M.sha(policy), "policy_code": M.base64.b64encode(policy).decode(),
+             "validator_sha256": digest}
         calls = []
         def fake(argv, **kwargs):
             calls.append((argv, kwargs))
-            if "--validate-policy-only" in argv:
-                return validate
-            return Mock(returncode=build_rc)
+            return validate
         with patch.object(M.Path, "home", return_value=Path(tmp)), patch.object(M, "source_ok"), \
                 patch.object(M, "pins_ok"), patch.object(M.subprocess, "run", side_effect=fake):
             try:
@@ -313,31 +317,42 @@ class MeasurementTests(unittest.TestCase):
                 self.assertIsInstance(result, M.Refusal)
                 self.assertIn(f"{field} mismatch: frozen=1 observed=2", str(result))
 
-    def test_preflight_validates_the_window_policies_without_metal(self):
+    def test_preflight_refuses_a_request_the_production_parser_rejects(self):
         with tempfile.TemporaryDirectory() as tmp:
-            ok = "\n".join(json.dumps({"validate_only": "pass"}) for _ in M.MATRIX_PROFILES)
-            result, calls = self.preflight_case(tmp, Mock(returncode=0, stdout=ok, stderr=""))
-            self.assertEqual(result["preflight"], "pass")
-            kinds = [c[0] for c in calls]
-            self.assertEqual(kinds[0][:3], ["/usr/bin/nice", "-n", "19"])
-            self.assertIn("--disable-automatic-resolution", kinds[0])
-            self.assertIn("build-mlx-metallib.sh", kinds[1][-2])
-            self.assertEqual(calls[1][1]["env"]["DEVELOPER_DIR"], str(M.XCODE_DEVELOPER_DIR))
-            validate, kwargs = calls[2]
-            self.assertEqual(validate[:2], ["/usr/sbin/taskpolicy", "-b"])
-            self.assertEqual(kwargs["env"]["MACPROVIDER_NATIVE_MTP_E2E"], "1")
-            self.assertNotIn("DEVELOPER_DIR", kwargs["env"])
-            self.assertIn("--identity-cache", validate)
-            # The exact argv and policy bytes the window's matrix step runs.
-            pre = Path(tmp) / ".config/macprovider/studio-mtp-measurement/preflight-n1"
-            window = Path(tmp) / "window"
-            window.mkdir()
-            (window / "policy.json").write_bytes((pre / "policy.json").read_bytes())
-            m = {"source": "/source", "commit": "a" * 40, "cell": "matrix"}
-            expected = [a.replace(str(window), str(pre)) for a in M.bench_command(m, window)]
-            self.assertEqual(validate[2:-3], expected)
-            for name in (p.name for p in pre.glob("*-policy.json")):
-                self.assertEqual((pre / name).read_bytes(), (window / name).read_bytes())
+            stderr = 'Error: APIError(status: 400, message: "Invalid tool_call id", code: "invalid_tool_call_id")\n'
+            result, _ = self.preflight_case(tmp, Mock(returncode=1, stdout="", stderr=stderr), cell="matrix-tools")
+            self.assertIn("invalid_tool_call_id", str(result))
+
+    def test_preflight_runs_only_the_validator_on_the_window_policies(self):
+        for cell in M.MATRICES:
+            with self.subTest(cell=cell), tempfile.TemporaryDirectory() as tmp:
+                ok = "\n".join(json.dumps({"validate_only": "pass"}) for _ in M.MATRICES[cell])
+                result, calls = self.preflight_case(tmp, Mock(returncode=0, stdout=ok, stderr=""), cell=cell)
+                self.assertEqual(result["preflight"], "pass")
+                # One child only: no build, metallib or other Studio work outside the window.
+                self.assertEqual(len(calls), 1)
+                validate, kwargs = calls[0]
+                self.assertEqual(validate[:2], ["/usr/sbin/taskpolicy", "-b"])
+                self.assertTrue(Path(validate[2]).name.startswith("validator-"))
+                self.assertEqual(kwargs["env"]["MACPROVIDER_NATIVE_MTP_E2E"], "1")
+                self.assertNotIn("DEVELOPER_DIR", kwargs["env"])
+                self.assertIn("--identity-cache", validate)
+                # The exact argv and policy bytes the window's matrix step runs.
+                pre = Path(tmp) / ".config/macprovider/studio-mtp-measurement/preflight-n1"
+                window = Path(tmp) / "window"
+                window.mkdir()
+                (window / "policy.json").write_bytes((pre / "policy.json").read_bytes())
+                m = {"source": "/source", "commit": "a" * 40, "cell": cell}
+                expected = [a.replace(str(window), str(pre)) for a in M.bench_command(m, window)]
+                self.assertEqual(validate[3:-3], expected[1:])
+                names = sorted(p.name for p in pre.glob("*-policy.json"))
+                self.assertEqual(len(names), len(M.MATRICES[cell]))
+                for name in names:
+                    self.assertEqual((pre / name).read_bytes(), (window / name).read_bytes())
+
+    def test_tools_matrix_is_the_six_tools_cells(self):
+        self.assertEqual(M.MATRICES["matrix-tools"], (("tools_history_reasoning", 0), ("tools_history_reasoning", 1)))
+        M.policy_ok(json.dumps(self.policy()), "a" * 40, "matrix-tools")
 
     def test_preflight_counts_one_summary_per_policy(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -345,12 +360,20 @@ class MeasurementTests(unittest.TestCase):
             result, _ = self.preflight_case(tmp, Mock(returncode=0, stdout=one, stderr=""))
             self.assertIsInstance(result, M.Refusal)
 
-    def test_preflight_build_or_metal_failure_refuses_before_validation(self):
+    def test_preflight_refuses_validator_bytes_that_differ_from_the_upload(self):
         with tempfile.TemporaryDirectory() as tmp:
-            result, calls = self.preflight_case(tmp, Mock(returncode=0, stdout="", stderr=""), build_rc=1)
+            result, calls = self.preflight_case(tmp, Mock(returncode=0, stdout="", stderr=""), uploaded=b"other")
             self.assertIsInstance(result, M.Refusal)
-            self.assertIn("pre-downtime build step failed", str(result))
-            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls, [])
+
+    def test_validator_is_built_locally_with_command_line_tools(self):
+        with patch.object(M, "source_ok"), patch.object(M, "run", return_value=b"") as run:
+            path = M.build_validator("a" * 40)
+        argv, kwargs = run.call_args.args[0], run.call_args.kwargs
+        self.assertEqual(kwargs["env"]["DEVELOPER_DIR"], M.CLT_DEVELOPER_DIR)
+        self.assertIn("-DMACPROVIDER_LAB_HARNESS", argv)
+        self.assertIn(str(M.ROOT / "phase3-binary"), argv)
+        self.assertEqual(path, M.VALIDATOR_SCRATCH / "release/macprovider-cli")
 
     def test_package_resolved_pin_mismatch_names_dependency(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -374,6 +397,7 @@ class MeasurementTests(unittest.TestCase):
             refusal = M.Refusal("remote: bench policy validation refused: swift_version mismatch")
             with patch.dict(M.os.environ, env), patch.object(M, "source_ok"), patch.object(M, "published"), \
                     patch.object(M, "run") as run, patch.object(M, "ssh", side_effect=[remote, refusal]), \
+                    patch.object(M, "build_validator"), patch.object(M, "upload_validator", return_value="c" * 64), \
                     patch.object(M, "pearl") as pearl, patch("builtins.print"), self.assertRaises(M.Refusal) as caught:
                 M.controller(argparse.Namespace(source_commit="a" * 40, policy=policy, cell="matrix", run=True))
             self.assertIn("swift_version mismatch", str(caught.exception))

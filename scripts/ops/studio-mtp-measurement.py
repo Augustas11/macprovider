@@ -31,7 +31,7 @@ MODEL = "zai-org/glm-5.3-flash"
 LABEL = "live.malibu.provider"
 RUNNER = "malibu-buyer-runner.service"
 # Independent hard ceiling for the whole Studio window (watchdog and Pearl
-# recovery timer): pause/drain, the no-op rebuild, metallib, check, matrix.
+# recovery timer): pause/drain, the release build, metallib, check, matrix.
 TOTAL = 3600
 BUILD = 900
 CELL = 3000
@@ -93,7 +93,7 @@ def policy_ok(data, commit, cell):
             or p.get("top_p", 1) not in (1, .95)
             or p.get("request_shape", "plain_text") not in ("plain_text", "tools_history_reasoning")
             or p.get("gated_cells", []) or p.get("arrival_interval_ms", 0) != 0
-            or cell not in ("s1-p512-o128", "s2-p512-o128", "s4-p512-o128", "matrix")):
+            or cell not in ("s1-p512-o128", "s2-p512-o128", "s4-p512-o128", *MATRICES)):
         raise Refusal("unsupported sampling, shape or cell")
     return p
 
@@ -325,8 +325,11 @@ def watchdog(m):
         put(d / "recovery-blocked.json", {"blocked": True})
 
 
-MATRIX_PROFILES = tuple((shape, temperature) for shape in ("plain_text", "tools_history_reasoning")
-                        for temperature in (0, 1))
+# Each matrix runs every slot cell for each (request shape, temperature)
+# profile; "matrix-tools" is the tools/history/reasoning half alone.
+MATRICES = {shapes_name: tuple((shape, temperature) for shape in shapes for temperature in (0, 1))
+            for shapes_name, shapes in (("matrix", ("plain_text", "tools_history_reasoning")),
+                                        ("matrix-tools", ("tools_history_reasoning",)))}
 
 
 def bench_command(m, d):
@@ -339,12 +342,12 @@ def bench_command(m, d):
     command = [str(package / ".build/release/macprovider-cli"), "native-mtp-bench",
                "--root", str(Path(m["source"]) / ".lab-window/fixture"),
                "--model-id", MODEL, "--provider-commit", m["commit"], "--phase", "matrix"]
-    if m["cell"] != "matrix":
+    if m["cell"] not in MATRICES:
         return command + ["--policy", str(d / "policy.json"), "--out", str(d / "runs.jsonl"),
                           "--only-cell", m["cell"]]
     base = json.loads((d / "policy.json").read_text())
     paths = []
-    for shape, temperature in MATRIX_PROFILES:
+    for shape, temperature in MATRICES[m["cell"]]:
         path = d / f"{shape}-t{temperature}-policy.json"
         put(path, dict(base, request_shape=shape, temperature=temperature,
                        top_p=1 if temperature == 0 else .95))
@@ -370,7 +373,7 @@ def fixed_command(m, kind):
                 str(Path(package) / ".build/arm64-apple-macosx/release")]
     if kind == "metalcheck":
         return [sys.executable, str(d / "entry.py"), "_metalcheck", str(d / "manifest.json")]
-    if kind == "cell" and m["cell"] == "matrix":
+    if kind == "cell" and m["cell"] in MATRICES:
         return [sys.executable, str(d / "entry.py"), "_matrix", str(d / "manifest.json")]
     if kind == "cell":
         return bench_command(m, d)
@@ -581,14 +584,17 @@ def pins_ok(package):
 
 
 def preflight_remote(m):
-    """Before downtime: build, metallib and the bench's own policy validation.
+    """Before downtime: the bench's own policy validation, and nothing heavier.
 
-    Runs the exact window build and metal argv at the lowest CPU priority, then
-    `native-mtp-bench --validate-policy-only` (no model load, no MLX/Metal) on
-    the policies the window will run, so every frozen field the bench checks
-    (hardware, OS build, Xcode, Swift stdout, provider commit, runtime revision,
-    model/MTP/tokenizer digests, policy schema and matrix) is compared while
-    the provider still serves.
+    The Studio runs no build or other CPU/GPU work outside its own window
+    (builds happen after pause and drain). The controller builds the
+    validator at the bound commit on the operator Mac and uploads it; here
+    it runs `native-mtp-bench --validate-policy-only` (no model load, no
+    MLX/Metal) on the policies the window will run, so every frozen field
+    the bench checks (hardware, OS build, Xcode, Swift stdout, provider
+    commit, runtime revision, model/MTP/tokenizer digests, policy schema and
+    matrix, and every cell's requests through the production parser) is
+    compared while the provider still serves.
     """
     source_ok(m["source"], m["commit"])
     pins_ok(Path(m["source"]) / "phase3-binary")
@@ -599,14 +605,13 @@ def preflight_remote(m):
     if sha(policy) != m["policy_sha256"]:
         raise Refusal("policy bytes drifted")
     (d / "policy.json").write_bytes(policy)
-    with open(d / "preflight.log", "ab") as log:
-        for kind in ("build", "metal"):
-            if subprocess.run(["/usr/bin/nice", "-n", "19", *fixed_command(dict(m, dir=str(d)), kind)],
-                              stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
-                              env=lab_env(kind), timeout=BUILD).returncode:
-                raise Refusal(f"pre-downtime {kind} step failed; log {d / 'preflight.log'}")
-    source_ok(m["source"], m["commit"])
-    command = bench_command(m, d) + ["--validate-policy-only", "--identity-cache", str(root / "identity-cache.json")]
+    validator = root / ("validator-" + m["validator_sha256"][:16])
+    if not validator.is_file() or sha(validator.read_bytes()) != m["validator_sha256"]:
+        raise Refusal("uploaded validator bytes differ")
+    validator.chmod(0o700)
+    command = bench_command(m, d)
+    command[0] = str(validator)
+    command += ["--validate-policy-only", "--identity-cache", str(root / "identity-cache.json")]
     # Background policy: efficiency cores and throttled I/O beside serving.
     result = subprocess.run(["/usr/sbin/taskpolicy", "-b", *command], stdin=subprocess.DEVNULL,
                             capture_output=True, text=True, env=lab_env("cell"), timeout=VALIDATE)
@@ -615,10 +620,39 @@ def preflight_remote(m):
         reason = next((line.strip() for line in reversed(result.stderr.splitlines()) if line.strip()), "no output")
         raise Refusal("bench policy validation refused: " + reason)
     summaries = [json.loads(line) for line in result.stdout.splitlines() if line.startswith("{")]
-    expected = len(MATRIX_PROFILES) if m["cell"] == "matrix" else 1
+    expected = len(MATRICES[m["cell"]]) if m["cell"] in MATRICES else 1
     if len(summaries) != expected or any(s.get("validate_only") != "pass" for s in summaries):
         raise Refusal("bench policy validation incomplete")
     return {"preflight": "pass", "validated": summaries}
+
+
+# The validator is built on the operator Mac with Command Line Tools (the
+# Studio's Swift major/minor; the bench reads the Studio's own toolchain
+# version at run time), never on the Studio outside a window.
+VALIDATOR_SCRATCH = Path.home() / ".cache/macprovider/studio-mtp-validator"
+CLT_DEVELOPER_DIR = "/Library/Developer/CommandLineTools"
+
+
+def build_validator(commit):
+    source_ok(ROOT, commit)
+    try:
+        run(["/usr/bin/xcrun", "swift", "build", "--package-path", str(ROOT / "phase3-binary"),
+             "-c", "release", "--scratch-path", str(VALIDATOR_SCRATCH), "--disable-automatic-resolution",
+             "-Xswiftc", "-DMACPROVIDER_LAB_HARNESS", "--product", "macprovider-cli"],
+            timeout=3600, env=dict(os.environ, DEVELOPER_DIR=CLT_DEVELOPER_DIR))
+    except subprocess.SubprocessError:
+        raise Refusal("local validator build failed")
+    source_ok(ROOT, commit)
+    return VALIDATOR_SCRATCH / "release/macprovider-cli"
+
+
+def upload_validator(host, path):
+    if not re.fullmatch(r"[A-Za-z0-9_.@-]+", host) or host.startswith("-") or host == "local":
+        raise Refusal("SSH alias required")
+    digest = sha(path.read_bytes())
+    run(["scp", "-q", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", str(path),
+         f"{host}:.config/macprovider/studio-mtp-measurement/validator-{digest[:16]}"], timeout=600)
+    return digest
 
 
 def ssh(host, code, payload, timeout=30):
@@ -770,9 +804,11 @@ def controller(args):
     m = ssh(os.environ["STUDIO_SSH"], inspect_code, payload)
     published(m)
     # Every frozen field the window validates is compared here, while live.
+    validator = upload_validator(os.environ["STUDIO_SSH"], build_validator(args.source_commit))
     preflight_code = "import sys;sys.argv=['entry.py','_preflight'];" + loader
-    checked = ssh(os.environ["STUDIO_SSH"], preflight_code, dict(m, policy_code=base64.b64encode(data).decode()),
-                  timeout=2 * BUILD + VALIDATE + 120)
+    checked = ssh(os.environ["STUDIO_SSH"], preflight_code,
+                  dict(m, policy_code=base64.b64encode(data).decode(), validator_sha256=validator),
+                  timeout=VALIDATE + 120)
     print(json.dumps(checked), flush=True)
     if not args.run:
         print(json.dumps({"next": "bounded-measurement", "run": False, "source_commit": m["commit"],
@@ -883,7 +919,7 @@ def main():
     parser.add_argument("--run", action="store_true")
     parser.add_argument("--source-commit", required=True)
     parser.add_argument("--policy", type=Path, required=True)
-    parser.add_argument("--cell", choices=("s1-p512-o128", "s2-p512-o128", "s4-p512-o128", "matrix"), required=True)
+    parser.add_argument("--cell", choices=("s1-p512-o128", "s2-p512-o128", "s4-p512-o128", *MATRICES), required=True)
     args = parser.parse_args()
     if args.run and args.action != "next":
         parser.error("--run requires next")
