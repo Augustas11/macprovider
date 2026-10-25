@@ -493,12 +493,12 @@ The authorized dependency tuple is exact:
 
 | Repository | Fork tag | Revision | Upstream base |
 |---|---|---|---|
-| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.10.6` | `19b2c2b79cad649c2e1264fb932f05ef4c6a918d` | fork `3.32.3-macprovider.10.1` (`87dc5159c87d73f4d7abd524fbdd17760cf56285`) on fork `3.32.3-macprovider.10` (`b4077dcb28336b388f3d09be2a091c12f8e179aa`) on `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
+| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.10.7` | `790b4fd84995e6d1d593cc4dd544be21bf1cbe33` | fork `3.32.3-macprovider.10.1` (`87dc5159c87d73f4d7abd524fbdd17760cf56285`) on fork `3.32.3-macprovider.10` (`b4077dcb28336b388f3d09be2a091c12f8e179aa`) on `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
 | `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.9` | `29d3b93375cc56cd2649b40e4310a8bc445e9874` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
 | `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.4` | `2f512e3997349c8648f5d7c5113eb2c825aa242d` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
 
-The mlx-swift-lm row is the immutable fork tag `3.32.3-macprovider.10.6`
-(commit `19b2c2b7…`, branch `campaign/2111-dsv4-fidelity`): tag
+The mlx-swift-lm row is the immutable fork tag `3.32.3-macprovider.10.7`
+(commit `790b4fd8…`, branch `campaign/2111-dsv4-fidelity`): tag
 `3.32.3-macprovider.10.5` (`c8be0f61…`, batched DeepSeek-V4 attention,
 compressor/indexer projections and per-row rotary offsets, keys-only windows
 and geometric pool storage) plus DeepSeek-V4 fidelity to DeepSeek's reference
@@ -582,12 +582,14 @@ Authorized surface:
   state, metaState and `copy()`, so pooled entries no longer depend on how a
   prompt is split into calls. The indexer selects the exact top
   `min(index_topk, P)` by default (HISA only when a config sets
-  `index_block` and `index_keep`). Router logits, the compressor
-  (projections, buffers, `ape`, softmax, sum), attention scores, softmax and
-  accumulation with float32 sinks, the expert SwiGLU (routing weight applied
-  before `w2`) and combine with the shared expert, and the head logits are
-  float32; the float32 linear reads bf16 weights directly for up to 8 GPU
-  rows, so no float32 weight copy stays resident. The reference's QAT
+  `index_block` and `index_keep`), its prefill scores tiled under a fixed
+  workspace. Router logits, the compressor (projections, buffers, `ape`,
+  softmax, sum), attention scores, max, normalizer and accumulation with
+  float32 sinks, the expert SwiGLU (routing weight applied before `w2`) and
+  combine with the shared expert, and the head logits are float32; as in
+  DeepSeek's kernel, the unnormalized attention weights are rounded to bf16
+  before the value product. The float32 linear reads bf16 weights directly
+  for up to 8 GPU rows, so no float32 weight copy stays resident. The reference's QAT
   simulations stay out. Other families' decode paths are unchanged; the tag
   changes the decode-path digest, so admitted tuples rebind identity-only.
 - mlx-swift fork: the core submodule moved to the MLX core fork, and the
@@ -1920,12 +1922,12 @@ requests.
 
 ## 9. Changelog and history
 
-- **0.1.57 (2026-10-25)** — R003: pins `3.32.3-macprovider.10.6`
-  (`19b2c2b7…`) on `c8be0f61…`: DeepSeek-V4 follows DeepSeek's reference
+- **0.1.57 (2026-10-25)** — R003: pins `3.32.3-macprovider.10.7`
+  (`790b4fd8…`) on `c8be0f61…`: DeepSeek-V4 follows DeepSeek's reference
   (carried ratio-4 overlap state, exact indexer top-k, float32 router,
-  attention and sinks, compressor, experts and head). The tiny fixture's
-  oracle now comes from a port of the reference and matches within 5e-6
-  log-probability on the CPU; the full-model teacher-forced diff, full-model
+  attention scores and sinks with the kernel's bf16 attention weights,
+  compressor, experts and head). The tiny fixture's oracle now comes from a
+  port of the reference and matches within 1.4e-4 log-probability on the CPU; the full-model teacher-forced diff, full-model
   oracles and the throughput cost of the float32 paths remain pending a
   Studio window. GLM-5.3 and Qwen decode code is unchanged.
 

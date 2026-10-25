@@ -247,7 +247,7 @@ final class ConversationPromptSnapshotTests: XCTestCase {
 
     /// The caveat the boundary exists for: resuming off the reference plan
     /// leaves a different cache state (window layout, buffered pool rows and
-    /// chunk-shape rounding; since fork 3.32.3-macprovider.10.6 the ratio-4
+    /// chunk-shape rounding; since fork 3.32.3-macprovider.10.7 the ratio-4
     /// overlap pools themselves carry across calls).
     func testDeepseekV4OffPlanResumeChangesThePools() throws {
         try Self.requireMetal()

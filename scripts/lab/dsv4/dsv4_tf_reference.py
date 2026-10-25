@@ -2,12 +2,14 @@
 
 The reference is the MLX port of DeepSeek's `inference/model.py` + `kernel.py`
 that ships in the V4-Flash-0731 MXFP4 artifact (`<model_dir>/deepseek_v4.py`).
-It is loaded with four corrections:
+It is loaded with these corrections:
 
 - `Block.hc_post` mixes the hyper-connection streams as DeepSeek does,
   `y[j] = post[j] * x + sum_i comb[i, j] * residual[i]` in float32 (the port
   indexes `residual[:, :, None]`, which mixes `residual[j]` instead, and
   expands in bf16);
+- `sparse_attn` rounds the unnormalized attention weights to bf16 before
+  the value product, as DeepSeek's kernel does (the port keeps them float32);
 - the QAT simulations (fp8/fp4 activation quant-dequant, the indexer's
   Hadamard rotation) are off unless `--qat` is given, because the Swift port
   leaves them out;
@@ -28,7 +30,9 @@ Subcommands (Python with mlx >= 0.32 and numpy; the full model needs ~170 GB):
           positions: every 64 tokens and 2040-2055, 4088-4103.
   dump    <model_dir> <tokens.json> <out.safetensors>
           The reference's per-layer state at those positions, in the layout
-          of the fork's `DeepseekV4TeacherForcedDumpTests`.
+          of the fork's `DeepseekV4TeacherForcedDumpTests`. `topk_exact.L` is
+          the exact top-k recomputed from the captured input and the final
+          index pool, not the selection a forward made.
   compare <ours.safetensors> <reference.safetensors> [--json out.json]
           Layer-by-layer differences.
 """
@@ -65,15 +69,31 @@ def reference(model_dir, qat):
 
     ref.Block.hc_post = hc_post
 
-    dense_sparse_attn = ref.sparse_attn
+    def kernel_sparse_attn(q, kv, attn_sink, topk_idxs, softmax_scale):
+        # The port's sparse_attn plus the kernel's bf16 rounding of the
+        # unnormalized weights before the value product (kernel.py:305,
+        # 340-343); the normalizer and accumulation stay float32. Like the
+        # Swift port, this takes the row max over all keys.
+        n = kv.shape[1]
+        safe = mx.clip(topk_idxs, 0, n - 1)
+        sel = mx.take_along_axis(
+            kv[:, None, :, :], mx.broadcast_to(safe[..., None], (*safe.shape, kv.shape[-1])), axis=2)
+        sel = sel.astype(mx.float32)
+        scores = mx.einsum("bshd,bskd->bhsk", q.astype(mx.float32), sel) * softmax_scale
+        scores = mx.where((topk_idxs != -1)[:, None, :, :], scores, mx.array(-float("inf"), mx.float32))
+        m = scores.max(axis=-1, keepdims=True)
+        p = mx.exp(scores - m)
+        denom = p.sum(axis=-1) + mx.exp(attn_sink.astype(mx.float32)[None, :, None] - m[..., 0])
+        o = mx.einsum("bhsk,bskd->bhsd", p.astype(mx.bfloat16).astype(mx.float32), sel)
+        return mx.swapaxes(o / denom[..., None], 1, 2).astype(q.dtype)
 
     def sparse_attn(q, kv, attn_sink, topk_idxs, softmax_scale):
         s = q.shape[1]
         if s <= QUERY_TILE:
-            return dense_sparse_attn(q, kv, attn_sink, topk_idxs, softmax_scale)
+            return kernel_sparse_attn(q, kv, attn_sink, topk_idxs, softmax_scale)
         tiles = []
         for start in range(0, s, QUERY_TILE):
-            tile = dense_sparse_attn(
+            tile = kernel_sparse_attn(
                 q[:, start:start + QUERY_TILE], kv, attn_sink,
                 topk_idxs[:, start:start + QUERY_TILE], softmax_scale)
             mx.eval(tile)
@@ -254,8 +274,8 @@ def cmd_dump(a):
                 s = (mx.maximum(s, 0.0) * w[0, 0].astype(mx.float32)[:, None]).sum(axis=0)
                 top = mx.sort(mx.argsort(-s)[:k].astype(mx.int32))
                 rows.append(top if k == ix.index_topk else mx.concatenate([top, mx.full((ix.index_topk - k,), -1, mx.int32)]))
-            out[f"topk.{l}"] = mx.stack(rows)
-            mx.eval(out[f"topk.{l}"])
+            out[f"topk_exact.{l}"] = mx.stack(rows)
+            mx.eval(out[f"topk_exact.{l}"])
         print(f"layer {l} done", flush=True)
     last = out[f"h.{len(model.layers) - 1}"].astype(h.dtype)[None]
     reduced = ref.hc_head_reduce(last, model.hc_head_fn, model.hc_head_scale, model.hc_head_base,
@@ -293,13 +313,21 @@ def cmd_compare(a):
             row["pool_entries"] = [int(ours[f"pool.{l}"].shape[0]), int(theirs[f"pool.{l}"].shape[0])]
             x, y = np.array(ours[f"pool.{l}"][:n], np.float64), np.array(theirs[f"pool.{l}"][:n], np.float64)
             row["pool_rel_l2"] = float(np.linalg.norm(x - y) / max(np.linalg.norm(y), 1e-30))
-        if f"topk.{l}" in ours and f"topk.{l}" in theirs:
+        if f"index_pool.{l}" in ours and f"index_pool.{l}" in theirs:
+            n = min(ours[f"index_pool.{l}"].shape[0], theirs[f"index_pool.{l}"].shape[0])
+            row["index_pool_entries"] = [int(ours[f"index_pool.{l}"].shape[0]), int(theirs[f"index_pool.{l}"].shape[0])]
+            x = np.array(ours[f"index_pool.{l}"][:n], np.float64)
+            y = np.array(theirs[f"index_pool.{l}"][:n], np.float64)
+            row["index_pool_rel_l2"] = float(np.linalg.norm(x - y) / max(np.linalg.norm(y), 1e-30))
+        if f"topk_exact.{l}" in ours and f"topk_exact.{l}" in theirs:
+            # Exact top-k recomputed from each side's captured input and final
+            # index pool, not the selection a forward made.
             jac = []
-            for a_, b_ in zip(np.array(ours[f"topk.{l}"]), np.array(theirs[f"topk.{l}"])):
+            for a_, b_ in zip(np.array(ours[f"topk_exact.{l}"]), np.array(theirs[f"topk_exact.{l}"])):
                 sa, sb = set(a_[a_ >= 0]), set(b_[b_ >= 0])
                 jac.append(len(sa & sb) / max(len(sa | sb), 1))
-            row["topk_jaccard_mean"] = float(np.mean(jac))
-            row["topk_jaccard_min"] = float(np.min(jac))
+            row["topk_exact_jaccard_mean"] = float(np.mean(jac))
+            row["topk_exact_jaccard_min"] = float(np.min(jac))
         report["layers"].append(row)
     lo, lt = np.array(ours["logits"], np.float64), np.array(theirs["logits"], np.float64)
     lpo = lo - np.log(np.exp(lo - lo.max(-1, keepdims=True)).sum(-1, keepdims=True)) - lo.max(-1, keepdims=True)

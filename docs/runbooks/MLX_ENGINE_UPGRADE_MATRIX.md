@@ -34,7 +34,7 @@ needs a SPEC revision.
 
 | Fork | Upstream | Tag scheme | Current tag | Revision | Upstream base |
 | --- | --- | --- | --- | --- | --- |
-| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.10.6` | `19b2c2b79cad649c2e1264fb932f05ef4c6a918d` | `3.32.3` (`3b339ad6…`) |
+| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.10.7` | `790b4fd84995e6d1d593cc4dd544be21bf1cbe33` | `3.32.3` (`3b339ad6…`) |
 | `Augustas11/mlx-swift` | `ml-explore/mlx-swift` | `<upstream>-macprovider.<n>` | `0.32.3-macprovider.9` | `29d3b93375cc56cd2649b40e4310a8bc445e9874` | `0.32.3` (`19601207…`) |
 | `Augustas11/mlx` (MLX core) | `ml-explore/mlx` | `v<upstream>-macprovider.<n>` | `v0.32.4-macprovider.4` | `2f512e3997349c8648f5d7c5113eb2c825aa242d` | `v0.32.4` (`36969c09…`) |
 
@@ -50,7 +50,7 @@ the mlx-swift-lm fork keeps upstream's tools version.
 Every rebase replays these stacks and drops any patch upstream now carries
 (record which, and why it is equivalent).
 
-mlx-swift-lm (`3.32.3..19b2c2b7`, tag `3.32.3-macprovider.10.6`, branch
+mlx-swift-lm (`3.32.3..790b4fd8`, tag `3.32.3-macprovider.10.7`, branch
 `campaign/2111-dsv4-fidelity`): tag `3.32.3-macprovider.10.5` (`c8be0f61`)
 plus DeepSeek-V4 fidelity to DeepSeek's reference. 10.5 is tag
 `3.32.3-macprovider.10.4` (`676a62a4`) plus
@@ -84,7 +84,7 @@ pending real-weight native four-row throughput gate and campaign freeze audit.
 | DeepSeek-V4 CB (#2111) | `362659f`, `676a62a` | `DeepseekV4Model.decodeBatch(_:rowCaches:)`: 1...8 ragged decode rows share projections/MoE and keep independent window/pool/indexer caches; per-row 2048+final-token prefill unchanged. Correct incomplete multi-token pool continuation; CPU tiny exactness, join/leave/reordering and boundary regressions. No native-MTP adapter or signed policy activation. |
 
 | DeepSeek-V4 CB performance (#2111) | `c8be0f6` | Shared compressor/indexer projections and rotary offsets; one batched attention body for homogeneous rows, two for mixed dense/sparse rows to preserve exact arithmetic; keys-only windows and geometric row-owned pool storage. CPU exact 1/2/4/8-row fixtures pass; GPU parity and throughput remain pending. |
-| DeepSeek-V4 reference fidelity (#2111) | `a4fd218`, `a985f94`, `7285658`, `28db1cf`, `9b5108b`, `012a2c6`, `72f8345`, `19b2c2b` | `deepseek_v4` follows DeepSeek's `inference/model.py`/`kernel.py`: ratio-4 overlap state carried in `DeepseekV4PoolCache` (state, metaState, `copy()`), exact indexer top-k by default (HISA only by explicit config), float32 router (gate weight widened in sanitize), attention and sinks (query tiles for long chunks), compressor, expert SwiGLU/combine and head logits (`deepseekV4LinearF32`, a bf16-weight float32 GEMV kernel for up to 8 GPU rows). Tiny-fixture oracle regenerated from a port of the reference (`make_oracle.py`), within 5e-6 log-probability on the CPU; fixture `tid2eid` made duplicate-free. Full-model parity and throughput pending a Studio window. |
+| DeepSeek-V4 reference fidelity (#2111) | `a4fd218`, `a985f94`, `7285658`, `28db1cf`, `9b5108b`, `012a2c6`, `72f8345`, `19b2c2b`, `790b4fd` | `deepseek_v4` follows DeepSeek's `inference/model.py`/`kernel.py`: ratio-4 overlap state carried in `DeepseekV4PoolCache` (state, metaState, `copy()`), exact indexer top-k by default (HISA only by explicit config; prefill scores tiled under a 512 MiB workspace), float32 router (gate weight widened in sanitize), attention scores and sinks with the kernel's bf16 weights before the value product (query tiles for long chunks), compressor, expert SwiGLU/combine and head logits (`deepseekV4LinearF32`, a bf16-weight float32 GEMV kernel for up to 8 GPU rows). Tiny-fixture oracle regenerated from a port of the reference (`make_oracle.py`), within 1.4e-4 log-probability on the CPU; fixture `tid2eid` made duplicate-free. Full-model parity and throughput pending a Studio window. |
 
 `784f021` (Swift 6.1 tools version) is reverted by `e81dd7c`; drop both on the
 next rebase.
