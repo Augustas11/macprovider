@@ -689,7 +689,13 @@ final class NativeMTPHardwareE2ERunner {
         let maximumBlockSize = await drafterContainer.perform { context in
             context.model.maximumBlockSize
         }
-        try require(maximumBlockSize == 2, "unexpected MTP maximum block size \(String(describing: maximumBlockSize))")
+        try require(
+            NativeMTPProposalBounds.fits(
+                maximumProposalDepth: proposalDepth,
+                maximumBlockSize: maximumBlockSize
+            ),
+            "MTP proposal depth \(proposalDepth) exceeds drafter maximum block size \(String(describing: maximumBlockSize))"
+        )
 
         let cacheKinds = try await targetContainer.perform { context in
             try context.model.newCache(parameters: nil as GenerateParameters?).map { cache in

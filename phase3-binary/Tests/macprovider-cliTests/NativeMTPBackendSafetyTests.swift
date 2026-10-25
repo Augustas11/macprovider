@@ -13,6 +13,10 @@ final class NativeMTPBackendSafetyTests: XCTestCase {
             maximumBlockSize: 2
         ))
         XCTAssertTrue(NativeMTPProposalBounds.fits(
+            maximumProposalDepth: 1,
+            maximumBlockSize: 3
+        ))
+        XCTAssertTrue(NativeMTPProposalBounds.fits(
             maximumProposalDepth: 2,
             maximumBlockSize: 3
         ))
