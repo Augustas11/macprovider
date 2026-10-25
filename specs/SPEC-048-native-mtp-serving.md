@@ -90,8 +90,8 @@ Accepted journey id: `JOURNEY-NATIVE-MTP-SERVING`.
 - training or converting an MTP head;
 - probabilistic (rejection-sampling) speculative acceptance; sampled rows are
   verified only by target-sample exact match (MTP-5);
-- tools, structured output, logprobs, penalties, conversation-cache reuse, or
-  disk-cache reuse on the v0.1 native-MTP path;
+- grammar-constrained tools, structured output, logprobs, penalties,
+  conversation-cache reuse, or disk-cache reuse on the v0.1 native-MTP path;
 - vision or image inputs, even when an admitted artifact originated from a
   vision-language model;
 - custom MXFP8 Metal kernels or a second inference runtime;
@@ -733,9 +733,21 @@ SPEC-023-R024 entry carries `request_feature_profile =
 selects ordinary with reason `sampling`. The remaining generation-affecting
 allowlist is: absent/default `top_k`, absent/zero `min_p`, zero frequency and
 presence penalties, absent/default-one repetition penalty, `n == 1`, no logit
-bias, no `logprobs` or `top_logprobs`, no reasoning/thinking toggle or chat
-template kwargs, no tools/tool choice/tool-call history, plain-text response
-format, no Harmony protocol, and text-only messages. The allowed transport or
+bias, no `logprobs` or `top_logprobs`, plain-text response format, no Harmony
+protocol, and text-only messages. For `glm5_next_mtp_v1`, both profiles also
+admit ordinary-parser-supported `reasoning_effort`, tool definitions, tool-call
+history (including assistant reasoning content), and unconstrained `tool_choice`
+`auto`/`none`. Omitted or true `parallel_tool_calls` is supported. Explicit false
+remains ordinary: the native transaction currently finalizes before the
+serial-tool output observer detects the first complete call. Required/named
+tools and any active grammar mask remain ordinary. Other adapters retain their
+no-tools/history/reasoning boundary. Unknown chat-template kwargs remain
+ordinary. GLM uses the same rendered prompt, row-position target sampler and
+ordinary output parser as non-native decode, following oMLX
+`78fa08bc1aef7290c93c83bb70811547763ebf33` (rendered-prefix processing and
+first-stop handling). Tool/reasoning markers themselves do not disable drafting;
+only the target-verified prefix is emitted, with ordinary token stop handling.
+No mutable grammar processor is advanced by discarded drafts. The allowed transport or
 limit keys are `model`, `messages`, `max_tokens`, `max_completion_tokens`,
 `stream`, `stream_options` containing only `include_usage`, `stop`, and `user`;
 they retain ordinary validation. A `seed` is eligible only where the ordinary
@@ -1912,6 +1924,10 @@ requests.
   profile for GLM-5-Next using R005 exact target-sample matching (mlx-vlm
   positioned sampling reference). Greedy signatures remain greedy-only; the
   signed native-row bound remains one pending campaign R015 qualification.
+  R004 also admits unconstrained GLM tools/history and ordinary reasoning effort
+  following oMLX rendered-prefix semantics. Active grammar and explicit serial
+  tool-call stopping remain ordinary. The campaign fixture now uses the actual
+  production reasoning control instead of ignored chat-template kwargs.
 
 - **0.1.56 (2026-10-25)** — R003/R013/R014/R015: align requalification with
   AGENTS.md HARD RULE 2 and the identity-only rebinds in #2136 and #2141.

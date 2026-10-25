@@ -109,10 +109,12 @@ final class NativeMTPBenchPolicyPreflightTests: XCTestCase {
     func testEveryRequestProfileParsesThroughTheProductionValidator() throws {
         for shape in ["plain_text", "tools_history_reasoning"] {
             for (temperature, topP) in [(0.0, 1.0), (1.0, 0.95)] {
-                XCTAssertNoThrow(try NativeMTPBenchRequests.make(
+                let request = try NativeMTPBenchRequests.make(
                     modelID: "zai-org/glm-5.3-flash", requestID: "validate", prompt: "p", maxTokens: 128,
                     temperature: temperature, topP: topP, requestShape: shape
-                ), shape)
+                )
+                XCTAssertFalse(request.topLevelKeys.contains("chat_template_kwargs"))
+                XCTAssertEqual(request.reasoningEffort, shape == "tools_history_reasoning" ? "high" : nil)
             }
         }
         XCTAssertFalse(ChatCompletionRequest.isAcceptedToolCallID("call_baseline_read"))

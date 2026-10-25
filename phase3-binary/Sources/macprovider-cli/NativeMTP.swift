@@ -233,16 +233,14 @@ struct NativeMTPSelector: Sendable {
         guard request.stop.isEmpty || nativeCapability.supportsStopSequences else {
             return .capabilityMismatch
         }
+        // oMLX's rendered-prompt eligibility: tool/history and reasoning tokens
+        // use the ordinary parser after target verification. Only the GLM adapter
+        // implements these shapes; other families retain their existing gate.
+        let supportsToolPrompt = nativeCapability.family == "glm5_next_mtp_v1"
         var eligibleKeys = admittedTopLevelKeys
-        var labToolsDiagnostic = false
-        #if DEBUG || MACPROVIDER_LAB_HARNESS
-        // Measurement only: the exploratory bench preserves the actual tool
-        // prompt while exercising the existing verifier. Plain release builds
-        // contain neither this environment hook nor the bypass.
-        labToolsDiagnostic = ProcessInfo.processInfo.environment["MACPROVIDER_MTP_BENCH_DIAGNOSTIC_ELIGIBILITY"] == "1"
-            && CommandLine.arguments.contains("native-mtp-bench")
-        if labToolsDiagnostic { eligibleKeys.insert("chat_template_kwargs") }
-        #endif
+        if supportsToolPrompt {
+            eligibleKeys.formUnion(["reasoning_effort", "parallel_tool_calls"])
+        }
         guard request.topLevelKeys.isSubset(of: eligibleKeys),
               request.streamOptionKeys.isSubset(of: admittedStreamOptionKeys) else {
             return .unknownRequestField
@@ -283,7 +281,11 @@ struct NativeMTPSelector: Sendable {
         guard case .text = request.responseFormat else {
             return .structuredOutput
         }
-        guard labToolsDiagnostic || (hasNoTools(request.promptSource.tools)
+        // Grammar processors are mutable target-sampler state. Until the
+        // verifier snapshots them, required/named tools must remain ordinary.
+        guard !GrammarConstraintState.isRequired(request),
+              !request.stopsAfterFirstCompleteToolCall else { return .tools }
+        guard supportsToolPrompt || (hasNoTools(request.promptSource.tools)
               && isAbsentOrNull(request.promptSource.toolChoice)
               && !hasToolTurnState(request.messages)) else {
             return .tools

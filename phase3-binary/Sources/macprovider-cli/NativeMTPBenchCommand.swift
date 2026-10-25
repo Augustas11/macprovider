@@ -963,7 +963,9 @@ enum NativeMTPBenchRequests {
                 ["role": "tool", "tool_call_id": "call_baselinereadfile0001", "content": "func main() { print(42) }"],
                 ["role": "user", "content": prompt],
             ]
-            object["chat_template_kwargs"] = ["enable_thinking": true]
+            // Use the production-rendered reasoning control; chat_template_kwargs
+            // is not consumed by the request parser and would be a no-op here.
+            object["reasoning_effort"] = "high"
         }
         let data = try JSONSerialization.data(withJSONObject: object)
         return try ChatCompletionRequest.parse(data: data).withRequestID(requestID)
