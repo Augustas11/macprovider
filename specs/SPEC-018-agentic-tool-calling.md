@@ -20,7 +20,7 @@ SPEC-018 is the **provider-side response synthesis contract** for OpenAI-wire to
 
 - **v0.3.8 (2026-10-25, Related: #2111):** §3.12 DeepSeek-V4 names the
   runtime reference its completions come from: DeepSeek's `inference/model.py`
-  and `kernel.py`, through mlx-swift-lm `3.32.3-macprovider.10.8` (SPEC-048
+  and `kernel.py`, through mlx-swift-lm `3.32.3-macprovider.10.9` (SPEC-048
   R003). Additive: the encoder, tokenizer and `dsml` parser contracts and
   their goldens are unchanged.
 
@@ -1043,7 +1043,7 @@ Other model families use their existing tokenizer path.
 The completions this encoding frames (reasoning, answers and `dsml` calls) come
 from the `deepseek_v4` runtime of the SPEC-048 R003 mlx-swift-lm tuple. Its
 reference is DeepSeek's `inference/model.py` and `kernel.py` (v0.3.8,
-`3.32.3-macprovider.10.8`), not mlx-vlm's port: the ratio-4 compressor carries
+`3.32.3-macprovider.10.9`), not mlx-vlm's port: the ratio-4 compressor carries
 the previous window across calls, the indexer selects the exact top-k, and
 the router, compressor, attention with its sinks, experts and head logits are
 float32. The reference's QAT simulations are not reproduced. The fork's tiny

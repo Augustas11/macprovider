@@ -493,12 +493,12 @@ The authorized dependency tuple is exact:
 
 | Repository | Fork tag | Revision | Upstream base |
 |---|---|---|---|
-| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.10.8` | `c14b360fb172c0ffe2976d79c8e268fd2695788f` | fork `3.32.3-macprovider.10.1` (`87dc5159c87d73f4d7abd524fbdd17760cf56285`) on fork `3.32.3-macprovider.10` (`b4077dcb28336b388f3d09be2a091c12f8e179aa`) on `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
+| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.10.9` | `c9baca402cb990b088eef09e9aa1088fd2ad6d7a` | fork `3.32.3-macprovider.10.1` (`87dc5159c87d73f4d7abd524fbdd17760cf56285`) on fork `3.32.3-macprovider.10` (`b4077dcb28336b388f3d09be2a091c12f8e179aa`) on `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
 | `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.9` | `29d3b93375cc56cd2649b40e4310a8bc445e9874` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
 | `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.4` | `2f512e3997349c8648f5d7c5113eb2c825aa242d` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
 
-The mlx-swift-lm row is the immutable fork tag `3.32.3-macprovider.10.8`
-(commit `c14b360f…`, branch `campaign/2111-dsv4-fidelity`): tag
+The mlx-swift-lm row is the immutable fork tag `3.32.3-macprovider.10.9`
+(commit `c9baca40…`, branch `campaign/2111-dsv4-fidelity`): tag
 `3.32.3-macprovider.10.5` (`c8be0f61…`, batched DeepSeek-V4 attention,
 compressor/indexer projections and per-row rotary offsets, keys-only windows
 and geometric pool storage) plus DeepSeek-V4 fidelity to DeepSeek's reference
@@ -1926,8 +1926,8 @@ requests.
 
 ## 9. Changelog and history
 
-- **0.1.57 (2026-10-25)** — R003: pins `3.32.3-macprovider.10.8`
-  (`c14b360f…`) on `c8be0f61…`: DeepSeek-V4 follows DeepSeek's reference
+- **0.1.57 (2026-10-25)** — R003: pins `3.32.3-macprovider.10.9`
+  (`c9baca40…`) on `c8be0f61…`: DeepSeek-V4 follows DeepSeek's reference
   (carried ratio-4 overlap state, exact indexer top-k, float32 router,
   attention in the kernel's ordered 64-key blocks with bf16 weights and
   float32 sinks, compressor, experts and head); explicitly configured HISA

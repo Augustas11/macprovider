@@ -6118,7 +6118,7 @@ maxTokens: 1,
     ) async -> [PagedKVSharedForwardBackend.CacheKind]? {
         await container.perform { context in
             // A DeepSeek V4 config with an explicit HISA indexer is not
-            // batch-exact (fork 3.32.3-macprovider.10.8): it serves serially.
+            // batch-exact (fork 3.32.3-macprovider.10.9): it serves serially.
             if let deepseek = context.model as? DeepseekV4Model, !deepseek.batchesExactly { return nil }
             return try? Self.pagedKVCacheKinds(model: context.model)
         }
