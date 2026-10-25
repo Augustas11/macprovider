@@ -161,7 +161,8 @@ final class NativeMTPRequestShapeReplayRunner {
             blocks: blocks,
             seed: replayPolicy.seed,
             qualifiedSlots: qualifiedSlots,
-            maxNativeActiveRows: maxNativeActiveRows
+            maxNativeActiveRows: maxNativeActiveRows,
+            supportsSampling: layout.family.admitsSampledRows
         )
         let identityMismatches = capture.identityMismatches(targetSHA256: targetIdentity.digest)
         try writer.write(header(targetIdentity: targetIdentity, mtpIdentity: mtpIdentity, tokenizerSHA256: tokenizerSHA))
@@ -1793,8 +1794,13 @@ struct NativeMTPRequestShapeReplayShape {
         self.stream = try Self.bool(object, "stream")
         self.servedModelHashSHA256 = try Self.hex64(object, "served_model_hash_sha256")
         self.servedWeightsManifestSHA256 = try Self.hex64(object, "served_weights_manifest_sha256")
-        self.temperature = try Self.double(object, "requested_temperature")
-        self.topP = try Self.double(object, "requested_top_p")
+        let temperature = try Self.double(object, "requested_temperature")
+        let topP = try Self.double(object, "requested_top_p")
+        self.temperature = temperature
+        self.topP = topP
+        guard try Self.bool(object, "sampling_requested") == (temperature != 0 || topP != 1) else {
+            throw NativeMTPRequestShapeReplayError.invalidCapture("sampling_requested_inconsistent")
+        }
         self.requestedMaxCompletionTokens = try Self.optionalNonnegativeInt(object, "requested_max_completion_tokens")
         self.maxCompletionTokens = try Self.positiveInt(object, "effective_max_output_tokens")
         self.promptTokens = try Self.positiveInt(object, "prompt_tokens")
@@ -1837,7 +1843,14 @@ struct NativeMTPRequestShapeReplayShape {
     }
 
     var projectedSelectorReason: String {
-        if boolFeature("sampling_requested") { return NativeMTPSelectorReason.sampling.rawValue }
+        projectedSelectorReason(supportsSampling: false)
+    }
+
+    func projectedSelectorReason(supportsSampling: Bool) -> String {
+        if boolFeature("sampling_requested"),
+           !supportsSampling || !ContinuousBatchRowSampler.supports(temperature: temperature, topP: topP) {
+            return NativeMTPSelectorReason.sampling.rawValue
+        }
         if boolFeature("multiple_completions_requested") { return NativeMTPSelectorReason.multipleCompletions.rawValue }
         if boolFeature("logit_controls_requested") { return NativeMTPSelectorReason.logitControls.rawValue }
         if conversationKeyPresent && !conversationCacheOnly { return NativeMTPSelectorReason.conversationKey.rawValue }
@@ -2051,13 +2064,14 @@ struct NativeMTPRequestShapeReplayPlan {
         blocks: Int,
         seed: Int,
         qualifiedSlots: Int = Self.qualifiedSlots,
-        maxNativeActiveRows: Int = Self.maxNativeActiveRows
+        maxNativeActiveRows: Int = Self.maxNativeActiveRows,
+        supportsSampling: Bool = false
     ) throws -> NativeMTPRequestShapeReplayPlan {
         guard (2...8).contains(qualifiedSlots),
               (1...qualifiedSlots).contains(maxNativeActiveRows) else {
             throw NativeMTPRequestShapeReplayError.invalidCapture("invalid replay slot or native-row bound")
         }
-        let rows = try projectedRows(capture.shapes)
+        let rows = try projectedRows(capture.shapes, supportsSampling: supportsSampling)
         let sampleShapeCount = capture.shapes.count
         let omittedSampleShapeCount = 0
         let pendingSampleReasons = rows.compactMap(\.pendingReason)
@@ -2114,7 +2128,9 @@ struct NativeMTPRequestShapeReplayPlan {
         return promptTarget + maxCompletion + 256
     }
 
-    private static func projectedRows(_ shapes: [NativeMTPRequestShapeReplayShape]) throws -> [NativeMTPRequestShapeReplayRow] {
+    private static func projectedRows(
+        _ shapes: [NativeMTPRequestShapeReplayShape], supportsSampling: Bool
+    ) throws -> [NativeMTPRequestShapeReplayRow] {
         guard !shapes.isEmpty else {
             throw NativeMTPRequestShapeReplayError.invalidCapture("no shapes to replay")
         }
@@ -2136,7 +2152,8 @@ struct NativeMTPRequestShapeReplayPlan {
                 shape: shape,
                 captureIndex: index,
                 blockIndex: 0,
-                nilMaxContextCoherent: nilMaxContextCoherent
+                nilMaxContextCoherent: nilMaxContextCoherent,
+                supportsSampling: supportsSampling
             )
         }
     }
@@ -2225,7 +2242,8 @@ struct NativeMTPRequestShapeReplayRow {
         shape: NativeMTPRequestShapeReplayShape,
         captureIndex: Int,
         blockIndex: Int,
-        nilMaxContextCoherent: Bool = true
+        nilMaxContextCoherent: Bool = true,
+        supportsSampling: Bool = false
     ) {
         self.shapeID = shape.shapeID
         self.captureIndex = captureIndex
@@ -2244,7 +2262,7 @@ struct NativeMTPRequestShapeReplayRow {
         self.conversationCacheRetainedHandoff = shape.conversationCacheRetainedHandoff
         self.anonymousCacheGroupSHA256 = shape.anonymousCacheGroupSHA256
         self.requiresCacheProof = shape.conversationKeyPresent
-        let projectedReason = shape.projectedSelectorReason
+        let projectedReason = shape.projectedSelectorReason(supportsSampling: supportsSampling)
         if shape.conversationKeyPresent && shape.anonymousCacheGroupSHA256 == nil {
             self.pendingReason = "cache_shape_missing_anonymous_group:\(shape.shapeID)"
         } else if (shape.conversationCacheLease == "hit" || shape.conversationCacheCachedPromptTokens > 0)
@@ -2272,7 +2290,8 @@ struct NativeMTPRequestShapeReplayRow {
         self.expectedSelectorReason = projectedReason
         self.syntheticStandIn = NativeMTPReplaySyntheticStandIn(reason: projectedReason, shape: shape)
         self.replayFeatures = shape.features
-        self.metricsClass = shape.metricsClass
+        self.metricsClass = projectedReason == NativeMTPSelectorReason.eligible.rawValue
+            ? .ordinaryBaseline : .mixedIneligible
         self.exportedShape = shape.sanitizedExport
     }
 

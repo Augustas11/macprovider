@@ -528,6 +528,59 @@ final class NativeMTPRequestShapeReplayCommandTests: XCTestCase {
         XCTAssertEqual(plan.blocks[0].rows[0].expectedSelectorReason, "sampling")
     }
 
+    func testSampledProjectionRequiresExplicitCapabilityAndPreservesSampler() throws {
+        let capture = try NativeMTPRequestShapeReplayCapture.load(from: writeCapture([
+            shape("sampled-a", extra: ["sampling_requested": true, "requested_temperature": 1.0, "requested_top_p": 0.95]),
+            shape("sampled-b", extra: ["sampling_requested": true, "requested_temperature": 0.7, "requested_top_p": 0.9]),
+        ]))
+        let legacy = try NativeMTPRequestShapeReplayPlan.make(capture: capture, blocks: 10, seed: 48015)
+        XCTAssertEqual(legacy.blocks[0].rows[0].expectedSelectorReason, "sampling")
+        let sampled = try NativeMTPRequestShapeReplayPlan.make(
+            capture: capture, blocks: 10, seed: 48015,
+            qualifiedSlots: 4, maxNativeActiveRows: 1, supportsSampling: true
+        )
+        XCTAssertTrue(sampled.sampleCoverageComplete)
+        XCTAssertEqual(sampled.blocks[0].runnableWaves.map(\.count), [1, 1])
+        let row = sampled.blocks[1].rows[0]
+        XCTAssertEqual(row.expectedSelectorReason, "eligible")
+        guard case .ordinaryBaseline = row.metricsClass else {
+            return XCTFail("sampled eligible rows must use ordinary-baseline metrics")
+        }
+        XCTAssertEqual(row.temperature, 1.0)
+        XCTAssertEqual(row.topP, 0.95)
+        XCTAssertEqual(row.exportedShape["requested_temperature"] as? Double, 1.0)
+        XCTAssertEqual(row.exportedShape["requested_top_p"] as? Double, 0.95)
+    }
+
+    func testSampledProjectionRetainsOtherFeatureGates() throws {
+        let capture = try NativeMTPRequestShapeReplayCapture.load(from: writeCapture([
+            shape("unknown", extra: ["sampling_requested": true, "requested_temperature": 1.0, "unknown_top_level_keys_present": true]),
+            shape("unsupported-sampler", extra: ["sampling_requested": true, "requested_top_p": 1.1]),
+            shape("reasoning", extra: ["sampling_requested": true, "requested_temperature": 1.0, "reasoning_or_template_model": true]),
+            shape("tools", extra: ["sampling_requested": true, "requested_temperature": 1.0, "tools_present": true]),
+        ]))
+        let plan = try NativeMTPRequestShapeReplayPlan.make(
+            capture: capture, blocks: 10, seed: 48015, supportsSampling: true
+        )
+        XCTAssertEqual(plan.blocks[0].rows.map(\.expectedSelectorReason), [
+            "unknown_request_field", "sampling", "reasoning_or_template", "tools",
+        ])
+        XCTAssertNotNil(plan.blocks[0].rows[2].pendingReason)
+    }
+
+    func testCaptureRejectsInconsistentSamplerFlag() throws {
+        for extra: [String: Any] in [
+            ["sampling_requested": false, "requested_temperature": 1.0],
+            ["sampling_requested": true],
+        ] {
+            XCTAssertThrowsError(try NativeMTPRequestShapeReplayCapture.load(from: writeCapture([
+                shape("inconsistent", extra: extra),
+            ]))) { error in
+                XCTAssertTrue("\(error)".contains("sampling_requested_inconsistent"))
+            }
+        }
+    }
+
     func testOneTokenOrdinaryRowsStayPendingForITLMetric() throws {
         let url = try writeCapture([
             shape("one-token", extra: ["completion_tokens": 1, "generated_completion_tokens": 1]),
