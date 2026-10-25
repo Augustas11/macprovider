@@ -524,10 +524,11 @@ enum NativeMTPAdmissionSidecar {
         familyAdapter == embeddedMTPFamilyAdapter ? 1 : nil
     }
 
-    /// The only `request_feature_profile` values a family adapter may sign
-    /// (SPEC-048 MTP-2): `glm5_next_mtp_v1` is greedy only.
+    /// Greedy proposals also support sampled requests: acceptance compares each
+    /// proposal with the ordinary row sampler's target token at that position.
+    /// The signed profile still determines whether sampling is qualified.
     static func allowedRequestFeatureProfiles(familyAdapter: String) -> Set<String> {
-        familyAdapter == embeddedMTPFamilyAdapter ? [greedyRequestFeatureProfile] : requestFeatureProfiles
+        requestFeatureProfiles
     }
 
     /// SPEC-048-R002 (0.1.35/0.1.36): the release entry carries no layout, so

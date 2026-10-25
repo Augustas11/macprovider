@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.56
+**Version:** 0.1.57
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.56",
+  "version": "0.1.57",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -371,8 +371,12 @@ do not apply to this adapter; these do:
   maximum block size 2: the last committed token plus one proposal, so
   `max_proposal_depth = 1`), shares the target's last sparse-attention top-k
   selection as the model config's `index_share_for_mtp_iteration` requires,
-  and is admitted only with `request_feature_profile =
-  "native_mtp_greedy_text_v1"`. (0.1.43) A `glm5_next_mtp_v1` tuple signs
+  and admits `request_feature_profile =
+  "native_mtp_greedy_text_v1"` or `"native_mtp_sampled_text_v1"`. The sampled
+  profile uses the existing R005 row/position-keyed target-sample exact-match
+  verifier, following mlx-vlm `e9af376626b04ba0cdad23b1476fd7a4a583d721`
+  (`_mtp_acceptance_walk`, positioned target sampling); it does not replace
+  the ordinary sampler or relax seeded token parity. (0.1.43) A `glm5_next_mtp_v1` tuple signs
   `max_native_active_rows` 1, as the first Qwen3.6 tuple does: on the M3
   Ultra (provider native path, packed verification in continuous batching,
   depth 1, greedy, 256 tokens) one native row decoded at 1.27x ordinary
@@ -1903,6 +1907,11 @@ the text-only path without image inputs; that does not admit multimodal buyer
 requests.
 
 ## 9. Changelog and history
+
+- **0.1.57 (2026-10-26)** — R002/R004: allow the existing signed sampled
+  profile for GLM-5-Next using R005 exact target-sample matching (mlx-vlm
+  positioned sampling reference). Greedy signatures remain greedy-only; the
+  signed native-row bound remains one pending campaign R015 qualification.
 
 - **0.1.56 (2026-10-25)** — R003/R013/R014/R015: align requalification with
   AGENTS.md HARD RULE 2 and the identity-only rebinds in #2136 and #2141.

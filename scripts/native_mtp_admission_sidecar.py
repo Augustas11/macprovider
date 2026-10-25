@@ -296,9 +296,6 @@ def validate_entry(entry: object, path: str) -> dict:
         fail(f"{path}.max_native_active_rows", "exceeds qualified_slots")
     if entry["request_feature_profile"] not in PROFILES:
         fail(f"{path}.request_feature_profile", "unsupported")
-    # SPEC-048 MTP-2: the glm5_next drafter proposes greedily only.
-    if entry["mtp_family_adapter"] == "glm5_next_mtp_v1" and entry["request_feature_profile"] != "native_mtp_greedy_text_v1":
-        fail(f"{path}.request_feature_profile", "glm5_next_mtp_v1 is greedy only")
     _int(entry["max_prompt_tokens"], f"{path}.max_prompt_tokens", 1, 1_048_576)
     low = _int(entry["decrease_threshold_ppm"], f"{path}.decrease_threshold_ppm", 0, 1_000_000)
     high = _int(entry["increase_threshold_ppm"], f"{path}.increase_threshold_ppm", 0, 1_000_000)
