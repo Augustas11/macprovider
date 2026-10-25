@@ -1933,9 +1933,20 @@ struct NativeMTPReplayV2Projection {
     let arrivalSchedule: [String: Any]
 
     // Same sorted compact ASCII JSON + newline as Python's _canonical_bytes.
-    // Preserve JSON numeric types: a captured 1.0 is not rewritten to 1.
+    // Python normalizes these two sampler fields to float; preserve every
+    // other captured numeric type while matching that canonical projection.
     static func sampleDigest(_ rows: [[String: Any]]) throws -> String {
-        let normalized: Any = rows
+        let normalized: Any = try rows.map { row in
+            var result = row
+            for key in ["requested_temperature", "requested_top_p"] {
+                guard let number = row[key] as? NSNumber,
+                      CFGetTypeID(number) != CFBooleanGetTypeID(), number.doubleValue.isFinite else {
+                    throw NativeMTPRequestShapeReplayError.invalidCapture("invalid projection sampler number")
+                }
+                result[key] = number.doubleValue
+            }
+            return result
+        }
         func quoted(_ string: String) throws -> String {
             let raw = try JSONSerialization.data(withJSONObject: string, options: [.fragmentsAllowed, .withoutEscapingSlashes])
             let escaped = String(decoding: raw, as: UTF8.self)
@@ -2399,7 +2410,7 @@ struct NativeMTPRequestShapeReplayShape {
             "stream": stream,
             "requested_temperature": temperature,
             "requested_top_p": topP,
-            "requested_max_completion_tokens": requestedMaxCompletionTokens as Any,
+            "requested_max_completion_tokens": requestedMaxCompletionTokens.map { $0 as Any } ?? NSNull(),
             "effective_max_output_tokens": maxCompletionTokens,
             "prompt_tokens": promptTokens,
             "target_completion_tokens": targetCompletionTokens,
@@ -2413,7 +2424,7 @@ struct NativeMTPRequestShapeReplayShape {
             "conversation_cache_lease": conversationCacheLease,
             "conversation_cache_cached_prompt_tokens": conversationCacheCachedPromptTokens,
             "conversation_cache_retained_handoff": conversationCacheRetainedHandoff,
-            "anonymous_cache_group_sha256": anonymousCacheGroupSHA256 as Any,
+            "anonymous_cache_group_sha256": anonymousCacheGroupSHA256.map { $0 as Any } ?? NSNull(),
         ]
         for (key, value) in features {
             object[key] = value

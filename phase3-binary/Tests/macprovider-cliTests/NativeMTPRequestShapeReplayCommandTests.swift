@@ -999,6 +999,22 @@ final class NativeMTPRequestShapeReplayCommandTests: XCTestCase {
         XCTAssertEqual(legacyGLM.blocks[0].runnableWaves.map(\.count), [4])
     }
 
+    func testV2ProjectionDigestPreservesAbsentJSONValues() throws {
+        let capture = try NativeMTPRequestShapeReplayCapture.load(from: writeV2Capture([
+            v2Shape("nulls", extra: ["requested_max_completion_tokens": NSNull()]),
+        ]))
+        let row = capture.shapes[0].sanitizedExport
+        XCTAssertTrue(row["requested_max_completion_tokens"] is NSNull)
+        XCTAssertTrue(row["anonymous_cache_group_sha256"] is NSNull)
+        XCTAssertTrue(JSONSerialization.isValidJSONObject(row))
+        // Foundation emits integral Doubles as JSON integers; the projection
+        // normalizes sampler values exactly like Python CapturedShape.
+        let serialized = try JSONSerialization.data(withJSONObject: [row])
+        let decoded = try XCTUnwrap(JSONSerialization.jsonObject(with: serialized) as? [[String: Any]])
+        XCTAssertEqual(try NativeMTPReplayV2Projection.sampleDigest([row]),
+                       try NativeMTPReplayV2Projection.sampleDigest(decoded))
+    }
+
     func testV2ProjectionBindsEveryInputAndFullCandidateShape() throws {
         let capture = try NativeMTPRequestShapeReplayCapture.load(from: writeV2Capture([v2Shape("bound")]))
         var template = capture.shapes[0].sanitizedExport
