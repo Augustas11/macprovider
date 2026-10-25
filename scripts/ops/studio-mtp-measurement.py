@@ -493,10 +493,8 @@ def run_acceptance(m):
 def lab_env(kind):
     environment = {"HOME": str(Path.home()), "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
                    "MACPROVIDER_NATIVE_MTP_E2E": "1"}
-    if kind in ("metal", "fork-tests"):
+    if kind in ("metal", "fork-tests", "acceptance-tests"):
         environment["DEVELOPER_DIR"] = str(XCODE_DEVELOPER_DIR)
-    elif kind == "acceptance-tests":
-        environment["DEVELOPER_DIR"] = CLT_DEVELOPER_DIR
     return environment
 
 
@@ -526,7 +524,8 @@ def fixed_command(m, kind):
                 "-resultBundlePath", str(d / "glm-cohort-parity.xcresult")]
     if kind == "acceptance-tests" and m["cell"] == "acceptance":
         # Existing package test hooks are DEBUG-only. Keep their normal debug
-        # configuration and the CLI compiler/SDK; the corpus uses release below.
+        # configuration and CLI compiler. Full Xcode supplies XCTest, which the
+        # Command Line Tools SDK omits; the corpus uses release below.
         return ["/Library/Developer/CommandLineTools/usr/bin/swift", "test", "--package-path", package,
                 "-c", "debug", "-j", "2", "--disable-automatic-resolution",
                 "-Xswiftc", "-DMACPROVIDER_LAB_HARNESS", "--filter",
