@@ -5852,12 +5852,22 @@ final class CoordinatorClientTests: XCTestCase {
         await client.suppressSignedRecoveryDiscoveryForTest()
         await client.start()
         try await Self.waitUntil(timeoutNanoseconds: 5_000_000_000) {
-            await status.snapshot().coordinatorConnected
+            // Connected status is published before heartbeat startup. Wait for
+            // the post-start acceptance frame before injecting staleness.
+            guard first.sentFrames().contains(where: {
+                $0["type"] as? String == "state_update"
+                    && $0["reason"] as? String == "coordinator hello_ack received"
+            }) else { return false }
+            return await status.snapshot().coordinatorConnected
         }
         await client.seedLastHeartbeatSuccessForTest(ageNanoseconds: 16_000_000_000)
         await client.evaluateHeartbeatWatchdogForTest(intervalSeconds: 5)
         try await Self.waitUntil(timeoutNanoseconds: 5_000_000_000) {
             guard factory.requestsSnapshot().count == 3 else { return false }
+            guard restored.sentFrames().contains(where: {
+                $0["type"] as? String == "state_update"
+                    && $0["reason"] as? String == "coordinator hello_ack received"
+            }) else { return false }
             return await status.snapshot().coordinatorConnected
         }
         let snapshot = await status.snapshot()
