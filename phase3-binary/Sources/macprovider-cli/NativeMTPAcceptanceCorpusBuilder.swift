@@ -100,9 +100,9 @@ enum NativeMTPAcceptanceCorpusBuilder {
             object["messages"] = [
                 ["role": "user", "content": "Read main.swift before answering."],
                 ["role": "assistant", "content": "", "reasoning_content": "I need to inspect the source first.", "tool_calls": [[
-                    "id": "call_acceptance0001", "type": "function", "function": ["name": "read_file", "arguments": "{\"path\":\"main.swift\"}"],
+                    "id": "call_acceptancecase0001", "type": "function", "function": ["name": "read_file", "arguments": "{\"path\":\"main.swift\"}"],
                 ]]],
-                ["role": "tool", "tool_call_id": "call_acceptance0001", "content": "func main() { print(42) }"],
+                ["role": "tool", "tool_call_id": "call_acceptancecase0001", "content": "func main() { print(42) }"],
                 ["role": "user", "content": prompt],
             ]
             object["reasoning_effort"] = "high"

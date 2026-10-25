@@ -36,10 +36,10 @@ final class NativeMTPAcceptanceCorpusTests: XCTestCase {
             request["messages"] = [
                 ["role": "user", "content": "Read the file."],
                 ["role": "assistant", "content": "", "tool_calls": [[
-                    "id": "call_acceptance0001", "type": "function",
+                    "id": "call_acceptancecase0001", "type": "function",
                     "function": ["name": "read_file", "arguments": "{}"],
                 ]]],
-                ["role": "tool", "tool_call_id": "call_acceptance0001", "content": "hello"],
+                ["role": "tool", "tool_call_id": "call_acceptancecase0001", "content": "hello"],
                 ["role": "user", "content": "Explain the result."],
             ]
         }
