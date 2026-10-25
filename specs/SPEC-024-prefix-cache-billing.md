@@ -1,8 +1,19 @@
 # SPEC-024 - Prefix-cache billing and provider-local cache isolation
 
-**Version:** 0.2.12 (2026-10-24, extend-only prompt snapshots)
+**Version:** 0.2.13 (2026-10-25, GLM-5-Next prompt snapshots on continuous-batching rows)
 **Status:** **Billing arithmetic (§4 ledger / §5 rate card / §6 formula) MOVED to SPEC-005 v0.6** (canonical). SPEC-024 **retains** the `cached_prompt_tokens` **wire field** (§3, a SPEC-002 addendum), the **buyer-visible** mirror field (§8, a SPEC-006 addendum), the fraud model (§7), and the provider-local cache-**isolation** baseline (§11–§16) — none of which SPEC-005 **re-owns** (SPEC-005 §5.3.1 does fold in the §14 coordinator cross-check *gates* as billing-eligibility rules, but SPEC-024 remains their canonical home).
 **Depends on:** SPEC-002 v1.5.2 (coordinator-provider wire), SPEC-004 v0.3.2 (sticky affinity; FR-SR-2 provider-visibility carve-out), SPEC-005 v0.6.10 (billing — the canonical owner of prefix-cache billing arithmetic, formula, ledger columns, and rate-card keys), SPEC-006 v0.9.39 (buyer API; §1.3 conversation-key derivation + survivability (b) carve-out + OpenAI nested usage), SPEC-008 v0.4.1 (Tier-2 trust; §2.2 invariant (b) carve-out permitting the provider-visible derived conversation_key), SPEC-018 v0.2.4 (tool calling)
+
+**Change log v0.2.13 (2026-10-25, Related: #2143 — GLM-5-Next prompt snapshots on CB rows):**
+- **SPEC-024-R005 / FR-CI2a.** A GLM-5-Next continuous-batching row publishes its
+  prompt snapshot, and a positive-cached GLM-5-Next turn resumes from it in its
+  own CB row, whenever the SPEC-038 AC-26 grant covers the tuple
+  (`continuous_batching_cached_turns` on and `cached_turns_accepted: true`).
+  Without the grant a GLM CB row publishes nothing, exactly as in v0.2.12, so no
+  later hit is fenced off CB. On a native-MTP row the snapshot also carries the
+  MTP head state at the same boundary, and a native-MTP turn reuses a snapshot
+  only together with it (otherwise it misses and stays native; SPEC-048 0.1.56
+  MTP-9). Billing arithmetic is unchanged.
 
 **Change log v0.2.12 (2026-10-24, Related: #2111 — extend-only prompt snapshots):**
 - **SPEC-024-R004 / FR-CI2a.** DeepSeek V4 (128-token window plus compressed
@@ -486,11 +497,40 @@ like any other entry (one snapshot per entry, `S` tokens) and are never written 
 disk tier. A DeepSeek V4 continuous-batching row captures the same snapshot when its prefill
 reaches `S` and publishes only that snapshot at a normal terminal (never a retained or decoded
 cache; no captured snapshot publishes nothing); the next keyed turn serial-routes under the
-SPEC-038 AC-26 fence and reuses it there. A GLM-5-Next continuous-batching row publishes no
-snapshot until its paged-latent snapshot has hardware parity evidence; GLM-5-Next serial turns
-snapshot as above. Strict continuous batching (`on`), which refuses that serial route,
-publishes no snapshot. Every other family keeps the FR-CI2 predicate
-and canonical prefix unchanged.
+SPEC-038 AC-26 fence and reuses it there. GLM-5-Next serial turns snapshot as above.
+Strict continuous batching (`on`), which refuses that serial route, publishes no snapshot,
+except under SPEC-024-R005 below. Every other family keeps the FR-CI2 predicate and canonical
+prefix unchanged.
+
+**SPEC-024-R005 (GLM-5-Next snapshots on continuous-batching rows, v0.2.13).** A GLM-5-Next
+continuous-batching row takes the FR-CI2a snapshot at `S` only while the SPEC-038 AC-26 grant
+covers its runtime tuple (operator flag `continuous_batching_cached_turns` on and the signed
+entry records `cached_turns_accepted: true`); without the grant it publishes nothing (v0.2.12
+behaviour), in every CB mode. Under the grant:
+- **Capture.** The row's prefill MUST stop on `S` (a chunk boundary), so the snapshot is the
+  committed state a fresh prefill of the same prompt holds at `S`. Each sparse layer's latent,
+  pooled indexer keys and partial pool window and each linear-attention (KDA) layer's
+  recurrent and convolution state are copied at their stored dtype (no conversion). The
+  snapshot is published only at the row's normal terminal; a failed or cancelled row publishes
+  nothing. Capture happens during prefill, never inside a native-MTP verification round.
+- **Native-MTP head state.** On a native-MTP row the snapshot MUST also carry the MTP head's
+  cache when the head sits exactly at `S` with no tentative proposal, together with prompt
+  token `S` (the token its last entry consumed). It is draft-side state only; no proposal,
+  rejected position or staged state enters the entry.
+- **Resume.** A positive-cached turn whose lease holds such a snapshot (`cached_prompt_tokens
+  = S`, the FR-CI2a extend-only hit) enters its own CB row: the row's block table starts at
+  `S` tokens, each layer takes the snapshot's arrays (shared immutable buffers; the row's first
+  write produces its own buffer, so the stored entry never changes), and chunked prefill
+  resumes at `S`. The row then takes its own snapshot at its new `S′ > S` and publishes it as
+  above. A native-MTP turn reuses the snapshot only when it carries head state whose recorded
+  token equals the incoming prompt's token `S`; any other snapshot is a miss for that turn
+  (`prompt_snapshot_drafter_unavailable`), which stays native and prefills from zero. An
+  ordinary row ignores the head state. Any layout or length mismatch fails admission closed
+  before the row exists.
+- **Parity.** With deterministic decoding, a CB row resumed from a snapshot MUST produce the
+  greedy tokens of a CB row that prefilled the full prompt (AC-CI-6), with and without native
+  MTP. Snapshot entries count against the FR-CI4 caps as above; the fixed recurrent state of
+  every entry (about 140 MiB for GLM-5.3-Flash) is bounded by the conversation cap.
 
 **FR-CI3 (canonical prefix).** On a served turn the provider commits the canonical prefix as
 `prompt_token_ids ‖ generated_token_ids` (shipped: always both, not an optional extension).
@@ -776,7 +816,11 @@ Prefix-cache reuse MUST NOT be enabled on a path where the conversation key is b
   tokens to a fresh prefill, and an off-plan resume changes the pools. On a tiny Metal GLM-5-Next
   model, a two-turn conversation resumed at the role marker yields the fresh greedy tokens. A keyed
   CB row publishes only its prompt snapshot (none when it captured none), and GLM-5-Next CB rows
-  take no snapshot.
+  take no snapshot without the AC-26 grant. **(v0.2.13, SPEC-024-R005)** Under the grant a
+  GLM-5-Next CB row snapshots at `S` (plus the MTP head state on a native row), a positive-cached
+  GLM-5-Next turn installs the snapshot into its own CB row and resumes prefill at `S`, a native
+  row without matching head state misses, and on a tiny Metal GLM-5-Next model the CB row resumed
+  from the snapshot yields the greedy tokens of a CB row that prefilled the full prompt.
 - **AC-CI-7 (keyed serial trimmable allocation, SPEC-024-R001).** A conversation-keyed serial
   request on a full-attention model MUST allocate `KVCacheSimple` (or another class that
   remains trimmable after `offset >= maxContextTokens`). A keyless request MUST keep the

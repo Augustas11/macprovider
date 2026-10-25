@@ -45,6 +45,12 @@ struct NativeMTPJourneyE2ECommand: AsyncParsableCommand {
     @Option(name: .customLong("selftest-challenge-id"), help: "Step-12 challenge_id; unique within one bank.")
     var selfTestChallengeID: String = NativeMTPJourneyRunner.defaultSelfTestChallengeID
 
+    @Option(
+        name: .customLong("cached-prefix-turns"),
+        help: "Run only step 13 (SPEC-024-R005): this many turns of cache-only keyed conversations, one per native row, native vs ordinary CB with cached turns admitted. 0 (default) skips it."
+    )
+    var cachedPrefixTurns: Int = 0
+
     func run() async throws {
         guard ProcessInfo.processInfo.environment["MACPROVIDER_NATIVE_MTP_E2E"] == "1" else {
             FileHandle.standardError.write(Data("native-mtp-journey-e2e: set MACPROVIDER_NATIVE_MTP_E2E=1 on the Mac Studio\n".utf8))
@@ -66,7 +72,8 @@ struct NativeMTPJourneyE2ECommand: AsyncParsableCommand {
             maxPromptTokens: maxPromptTokens,
             selfTestOnly: selfTestOnly,
             selfTestPrompts: selfTestPrompts.isEmpty ? [NativeMTPJourneyRunner.defaultSelfTestPrompt] : selfTestPrompts,
-            selfTestChallengeID: selfTestChallengeID
+            selfTestChallengeID: selfTestChallengeID,
+            cachedPrefixTurns: cachedPrefixTurns
         )
         let result = try await journey.run()
         let data = try JSONSerialization.data(withJSONObject: result.document, options: [.sortedKeys])
@@ -110,6 +117,8 @@ final class NativeMTPJourneyRunner {
     private let selfTestOnly: Bool
     private let selfTestPrompts: [String]
     private let selfTestChallengeID: String
+    /// Step 13 only when positive (SPEC-024-R005 lab leg).
+    private let cachedPrefixTurns: Int
     static let defaultSelfTestPrompt =
         "native_mtp_selftest_v1 synthetic challenge: continue the sequence alpha beta gamma delta"
     static let defaultSelfTestChallengeID = "native-mtp-selftest-journey-0001"
@@ -257,8 +266,10 @@ final class NativeMTPJourneyRunner {
         maxPromptTokens: Int,
         selfTestOnly: Bool = false,
         selfTestPrompts: [String] = [NativeMTPJourneyRunner.defaultSelfTestPrompt],
-        selfTestChallengeID: String = NativeMTPJourneyRunner.defaultSelfTestChallengeID
+        selfTestChallengeID: String = NativeMTPJourneyRunner.defaultSelfTestChallengeID,
+        cachedPrefixTurns: Int = 0
     ) {
+        self.cachedPrefixTurns = max(0, cachedPrefixTurns)
         self.root = root
         self.modelID = modelID
         self.qualifiedSlots = qualifiedSlots
@@ -286,6 +297,7 @@ final class NativeMTPJourneyRunner {
                 outputTokens: outputBudget
             )
         )
+        runner.continuousBatchingCachedTurns = cachedPrefixTurns > 0
         let recorder = NativeMTPHardwareAdmissionRecorder()
         let fixture = try await runner.loadRuntimeFixture(
             maxContextTokens: maxPromptTokens + outputBudget + 512,
@@ -326,8 +338,14 @@ final class NativeMTPJourneyRunner {
                 ))
             }
         }
+        let cachedPrefixOnly = cachedPrefixTurns > 0
+        if cachedPrefixOnly {
+            await run("step-13-cached-prefix") {
+                try await cachedPrefix(ordinary: ordinary, native: native, recorder: recorder, turns: cachedPrefixTurns)
+            }
+        }
         // --selftest-only: step 12 alone, for a challenge-bank record.
-        if !selfTestOnly {
+        if !selfTestOnly && !cachedPrefixOnly {
             await run("step-04-serial-token-oracle") {
                 try await serialOracle(ordinary: ordinary, native: native, recorder: recorder, proposalDepth: fixture.admission.maxProposalDepth)
             }
@@ -353,12 +371,12 @@ final class NativeMTPJourneyRunner {
                 try await cancellation(ordinary: ordinary, native: native, recorder: recorder)
             }
         }
-        for (index, prompt) in selfTestPrompts.enumerated() {
+        for (index, prompt) in (cachedPrefixOnly ? [] : selfTestPrompts).enumerated() {
             await run("step-12-native-selftest") {
                 try await selfTest(ordinary: ordinary, native: native, fixture: fixture, prompt: prompt, promptIndex: index)
             }
         }
-        if !selfTestOnly {
+        if !selfTestOnly && !cachedPrefixOnly {
             await run("step-10-warm-swap") {
                 try await warmSwapBoundary(ordinary: ordinary, native: native, recorder: recorder, fixture: fixture)
             }
@@ -377,7 +395,8 @@ final class NativeMTPJourneyRunner {
             // Covers only the hardware steps below; never a journey verdict.
             "journey_complete": false,
             "executed_steps_status": executedStatus,
-            "covered_steps": selfTestOnly ? ["step-12-native-canary (provider-local self-test half)"] : [
+            "covered_steps": cachedPrefixOnly ? ["step-13-cached-prefix (SPEC-024-R005 lab leg)"]
+                : selfTestOnly ? ["step-12-native-canary (provider-local self-test half)"] : [
                 "step-04-serial-token-oracle",
                 "step-05-cache-state-boundary",
                 "step-06-streaming-stop",
@@ -425,6 +444,7 @@ final class NativeMTPJourneyRunner {
         case "step-09-cancellation": return 9
         case "step-10-warm-swap": return 10
         case "step-12-native-selftest": return 12
+        case "step-13-cached-prefix": return 13
         default: return Int.max
         }
     }
@@ -1281,6 +1301,138 @@ final class NativeMTPJourneyRunner {
     }
 
     // MARK: helpers
+
+    /// step-13 (SPEC-024-R005 lab leg): one cache-only keyed conversation per
+    /// native row, `turns` turns, every row of a turn submitted together.
+    /// Each later turn re-renders the history with the row's own reply, so it
+    /// extends the previous turn's prompt snapshot. Native rows (resumed from
+    /// the snapshot with the MTP head state) must stay native and match the
+    /// ordinary rows token for token; warm ordinary rows must match the same
+    /// prompts sent cold under fresh keys. Reports output tokens/s, wall time
+    /// and acceptance per turn for native and ordinary at the same row count.
+    private func cachedPrefix(
+        ordinary: ModelRuntime,
+        native: ModelRuntime,
+        recorder: NativeMTPHardwareAdmissionRecorder,
+        turns: Int
+    ) async throws -> NativeMTPJourneyStep {
+        var step = NativeMTPJourneyStep(id: "step-13-cached-prefix")
+        let rows = maxNativeActiveRows
+        let maxTokens = 256
+        let system = "You are a careful assistant. Answer in plain prose. (journey-cached-prefix)"
+        let questions = [
+            "Describe how a lighthouse keeper prepares the lamp for the night.",
+            "List what the keeper checks after a storm, and why.",
+            "Explain how the tide tables change the keeper's schedule.",
+            "Summarize the keeper's week in a short paragraph.",
+            "Write the log entry for a quiet night.",
+            "Describe the supply boat's arrival.",
+        ]
+        func request(_ id: String, key: String, history: [[String: String]]) throws -> ChatCompletionRequest {
+            let object: [String: Any] = [
+                "model": modelID,
+                "messages": [["role": "system", "content": system]] + history,
+                "max_tokens": maxTokens,
+                "temperature": 0,
+                "top_p": 1,
+                "stream": false,
+            ]
+            return try ChatCompletionRequest.parse(data: JSONSerialization.data(withJSONObject: object))
+                .withRequestID(id)
+                .withConversationKey(key, cacheOnly: true)
+        }
+        struct Turn { var history: [[String: String]] }
+        func runConversations(_ runtime: ModelRuntime, label: String, coldOracle: ModelRuntime?) async throws
+            -> (results: [[CompletionResult]], cold: [[CompletionResult]], seconds: [Double], acceptance: [Double])
+        {
+            var histories = Array(repeating: [[String: String]](), count: rows)
+            var results = Array(repeating: [CompletionResult](), count: rows)
+            var cold = Array(repeating: [CompletionResult](), count: rows)
+            var seconds: [Double] = []
+            var acceptance: [Double] = []
+            for turn in 0 ..< turns {
+                var requests: [ChatCompletionRequest] = []
+                for row in 0 ..< rows {
+                    histories[row].append(["role": "user", "content": "\(questions[(row + turn) % questions.count]) (row \(row), turn \(turn))"])
+                    requests.append(try request("journey-cached-\(label)-\(row)-\(turn)",
+                                                key: "conv:journey-cached-\(label)-\(row)", history: histories[row]))
+                }
+                let before = await runtime.currentSnapshot().nativeMTPStatus
+                let started = Date()
+                let outputs = try await complete(requests, runtime: runtime, staggerMS: 0)
+                seconds.append(Date().timeIntervalSince(started))
+                let delta = NativeMTPStatusDelta(before: before, after: await runtime.currentSnapshot().nativeMTPStatus)
+                acceptance.append(delta.proposedTokens == 0 ? 0 : Double(delta.acceptedTokens) / Double(delta.proposedTokens))
+                for row in 0 ..< rows {
+                    let id = "journey-cached-\(label)-\(row)-\(turn)"
+                    guard let output = outputs[id] else {
+                        throw NativeMTPHardwareE2EError.assertionFailed("\(id) returned no result")
+                    }
+                    results[row].append(output)
+                    histories[row].append(["role": "assistant", "content": output.content])
+                }
+                if let coldOracle {
+                    // The same prompts under fresh keys: nothing to reuse.
+                    var coldRequests: [ChatCompletionRequest] = []
+                    for row in 0 ..< rows {
+                        coldRequests.append(try request("journey-cold-\(label)-\(row)-\(turn)",
+                                                        key: "conv:journey-cold-\(label)-\(row)-\(turn)",
+                                                        history: Array(histories[row].dropLast())))
+                    }
+                    let coldOutputs = try await complete(coldRequests, runtime: coldOracle, staggerMS: 0)
+                    for row in 0 ..< rows {
+                        guard let output = coldOutputs["journey-cold-\(label)-\(row)-\(turn)"] else {
+                            throw NativeMTPHardwareE2EError.assertionFailed("cold row \(row) turn \(turn) returned no result")
+                        }
+                        cold[row].append(output)
+                    }
+                }
+            }
+            return (results, cold, seconds, acceptance)
+        }
+
+        let nativeRun = try await runConversations(native, label: "native", coldOracle: nil)
+        let ordinaryRun = try await runConversations(ordinary, label: "ordinary", coldOracle: ordinary)
+        var turnDetails: [[String: Any]] = []
+        for turn in 0 ..< turns {
+            let nativeTokens = (0 ..< rows).reduce(0) { $0 + nativeRun.results[$1][turn].completionTokens }
+            let ordinaryTokens = (0 ..< rows).reduce(0) { $0 + ordinaryRun.results[$1][turn].completionTokens }
+            for row in 0 ..< rows {
+                let label = "row\(row).turn\(turn)"
+                let nativeResult = nativeRun.results[row][turn]
+                let ordinaryResult = ordinaryRun.results[row][turn]
+                step.check("\(label).native_matches_ordinary", same(nativeResult, ordinaryResult))
+                step.check("\(label).warm_matches_cold", same(ordinaryResult, ordinaryRun.cold[row][turn]))
+                step.check("\(label).native_admitted",
+                           lastPath(recorder, "journey-cached-native-\(row)-\(turn)") == .nativeMTP)
+                if turn > 0 {
+                    step.check("\(label).native_reused_prefix", nativeResult.cachedPromptTokens > 0)
+                    step.check("\(label).ordinary_reused_prefix", ordinaryResult.cachedPromptTokens > 0)
+                    step.check("\(label).cold_reused_nothing", ordinaryRun.cold[row][turn].cachedPromptTokens == 0)
+                }
+            }
+            turnDetails.append([
+                "turn": turn,
+                "rows": rows,
+                "native_output_tokens": nativeTokens,
+                "native_wall_s": nativeRun.seconds[turn],
+                "native_output_tokens_per_s": nativeRun.seconds[turn] > 0 ? Double(nativeTokens) / nativeRun.seconds[turn] : 0,
+                "native_acceptance": nativeRun.acceptance[turn],
+                "ordinary_output_tokens": ordinaryTokens,
+                "ordinary_wall_s": ordinaryRun.seconds[turn],
+                "ordinary_output_tokens_per_s": ordinaryRun.seconds[turn] > 0 ? Double(ordinaryTokens) / ordinaryRun.seconds[turn] : 0,
+                "native_cached_prompt_tokens": (0 ..< rows).map { nativeRun.results[$0][turn].cachedPromptTokens },
+                "native_prompt_tokens": (0 ..< rows).map { nativeRun.results[$0][turn].promptTokens },
+                "native_ttft_ms": (0 ..< rows).map { nativeRun.results[$0][turn].ttftMilliseconds ?? -1 },
+                "ordinary_ttft_ms": (0 ..< rows).map { ordinaryRun.results[$0][turn].ttftMilliseconds ?? -1 },
+            ])
+        }
+        step.details["turns"] = turnDetails
+        // Non-streaming TTFT is the whole generation (SPEC-015); the R015 TTFT
+        // cell comes from the streaming bench, not from this step.
+        step.uncovered = ["streaming TTFT", "relay usage, receipt and settlement fields (AC-26 packaged proof)"]
+        return step
+    }
 
     private func makeRequest(
         id: String,

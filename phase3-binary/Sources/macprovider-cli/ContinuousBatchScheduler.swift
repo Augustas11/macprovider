@@ -546,6 +546,11 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
     /// that sit on this prompt's checkpoint positions carry forward into the
     /// row's own checkpoints. Empty for every non-hybrid request.
     let retainedRecurrentCheckpoints: [RecurrentStateCheckpoint]
+    /// SPEC-024-R005 / SPEC-038 AC-26: the GLM-5-Next prompt snapshot a
+    /// positive-cached turn resumes from (`tokenCount == cachedPromptTokens`).
+    /// The row installs it at admission and prefills the rest of the prompt.
+    /// Runtime-only; excluded from the idempotency fingerprint.
+    let promptSnapshotCache: ContinuousBatchSerialConversationCache?
     /// Runtime-only token grammar; excluded from the wire fingerprint.
     let grammarConstraint: GrammarConstraintState?
     /// Stable grammar/tokenizer identity fences replay across distinct constraints.
@@ -611,6 +616,7 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
         modelHasRecurrentLayers: Bool = false,
         promptSnapshotTokenCount: Int? = nil,
         retainedRecurrentCheckpoints: [RecurrentStateCheckpoint] = [],
+        promptSnapshotCache: ContinuousBatchSerialConversationCache? = nil,
         grammarConstraint: GrammarConstraintState? = nil,
         serialToolStopObserver: ContinuousBatchCanonicalStopObserver? = nil,
         decodePath: DecodePath = .ordinary,
@@ -644,6 +650,7 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
             $0 >= ConversationCache.lcpThreshold && $0 < promptTokens.count ? $0 : nil
         }
         self.retainedRecurrentCheckpoints = retainedRecurrentCheckpoints
+        self.promptSnapshotCache = promptSnapshotCache?.promptSnapshot == true ? promptSnapshotCache : nil
         self.grammarConstraint = grammarConstraint
         self.grammarFingerprint = grammarConstraint?.fingerprint
         self.serialToolStopObserver = serialToolStopObserver
@@ -881,17 +888,30 @@ final class ContinuousBatchSerialConversationCache: @unchecked Sendable {
     /// SPEC-024 FR-CI2a: `layers` are a deep copy taken when prefill reached
     /// exactly `tokenCount` prompt tokens; the entry is extend-only.
     let promptSnapshot: Bool
+    /// SPEC-024-R005: on a native-MTP GLM-5-Next row, the MTP head state at
+    /// the same prompt snapshot. Nil for every other cache.
+    let nativeMTPDrafter: NativeMTPDrafterPrefixSnapshot?
 
     init(
         layers: [KVCache],
         recurrentCheckpoints: [RecurrentStateCheckpoint],
         tokenCount: Int,
-        promptSnapshot: Bool = false
+        promptSnapshot: Bool = false,
+        nativeMTPDrafter: NativeMTPDrafterPrefixSnapshot? = nil
     ) {
         self.layers = layers
         self.recurrentCheckpoints = recurrentCheckpoints
         self.tokenCount = tokenCount
         self.promptSnapshot = promptSnapshot
+        self.nativeMTPDrafter = promptSnapshot ? nativeMTPDrafter : nil
+    }
+}
+
+/// Identity equality, as `RecurrentStateCheckpoint`: a scheduler request that
+/// carries a snapshot to install stays `Equatable` without comparing tensors.
+extension ContinuousBatchSerialConversationCache: Equatable {
+    static func == (lhs: ContinuousBatchSerialConversationCache, rhs: ContinuousBatchSerialConversationCache) -> Bool {
+        lhs === rhs
     }
 }
 
@@ -1412,6 +1432,27 @@ protocol ContinuousBatchSchedulerBackend: Sendable {
     /// conversation-cache format, taken right after prefill reached exactly
     /// `tokenCount` prompt tokens. Nil when the backend cannot express it.
     func snapshotPromptCache(requestID: String, tokenCount: Int) async -> ContinuousBatchSerialConversationCache?
+    /// SPEC-024-R005: as `snapshotPromptCache`, plus the native-MTP head state
+    /// at `tokenCount` on a native row. `nextPromptToken` is prompt token
+    /// `tokenCount`, the token the head's last entry consumed. The default
+    /// takes no head state.
+    func snapshotPromptCacheAndHead(
+        requestID: String,
+        tokenCount: Int,
+        nextPromptToken: Int
+    ) async -> ContinuousBatchSerialConversationCache?
+    /// SPEC-024-R005 / SPEC-038 AC-26: install a GLM-5-Next prompt snapshot
+    /// (`tokenCount == binding`'s logical length) as the row's caches before
+    /// prefill resumes at `tokenCount`. With `restoreNativeMTPDrafter`, the
+    /// row's native-MTP head state comes from `snapshot.nativeMTPDrafter`, and
+    /// a snapshot without one fails admission. Backends that cannot express it
+    /// MUST fail closed.
+    func installPromptSnapshotCache(
+        requestID: String,
+        snapshot: ContinuousBatchSerialConversationCache,
+        binding: PagedKVStorageBinding,
+        restoreNativeMTPDrafter: Bool
+    ) async throws
     /// Build the row's serial-format conversation cache at a normal terminal,
     /// before its blocks are released: attention KV materialized from `binding`
     /// and trimmed to `tokenCount`. Nil when the backend has no recurrent layers.
@@ -1573,6 +1614,23 @@ extension ContinuousBatchSchedulerBackend {
 
     func snapshotPromptCache(requestID: String, tokenCount: Int) async -> ContinuousBatchSerialConversationCache? {
         nil
+    }
+
+    func snapshotPromptCacheAndHead(
+        requestID: String,
+        tokenCount: Int,
+        nextPromptToken: Int
+    ) async -> ContinuousBatchSerialConversationCache? {
+        await snapshotPromptCache(requestID: requestID, tokenCount: tokenCount)
+    }
+
+    func installPromptSnapshotCache(
+        requestID: String,
+        snapshot: ContinuousBatchSerialConversationCache,
+        binding: PagedKVStorageBinding,
+        restoreNativeMTPDrafter: Bool
+    ) async throws {
+        throw ContinuousBatchSchedulerError.unsupported("continuous_batching_prompt_snapshot_install_unavailable")
     }
 
     func materializeSerialConversationCache(
@@ -2080,6 +2138,7 @@ extension ContinuousBatchSchedulerError {
         "continuous_batching_local_binding_mismatch": 503,
         "continuous_batching_terminal_kv_commit_unavailable": 503,
         "continuous_batching_retained_hybrid_cache_unavailable": 503,
+        "continuous_batching_prompt_snapshot_install_unavailable": 503,
         "continuous_batching_native_mtp_backend_unavailable": 503,
         "continuous_batching_native_mtp_round_memory_exhausted": 503,
         "continuous_batching_native_mtp_tuple_disabled": 503,
@@ -2390,7 +2449,9 @@ actor ContinuousBatchScheduler {
             await discardUnacceptedRetainedCache(for: request)
             throw ContinuousBatchSchedulerError.unsupported(reason)
         }
-        if request.cachedPromptTokens > 0 && request.retainedPagedKVSequence == nil {
+        if request.cachedPromptTokens > 0
+            && request.retainedPagedKVSequence == nil
+            && request.promptSnapshotCache?.tokenCount != request.cachedPromptTokens {
             record(.stickyCacheUnsupported)
             throw ContinuousBatchSchedulerError.unsupported("continuous_batching_paged_kv_handoff_unavailable")
         }
@@ -5375,6 +5436,25 @@ actor ContinuousBatchScheduler {
                         recurrentCheckpoint: recurrentCheckpoint
                     )
                     prefillCursor = request.cachedPromptTokens
+                } else if let snapshot = request.promptSnapshotCache, request.cachedPromptTokens > 0 {
+                    // SPEC-024-R005: a fresh table already counting the snapshot
+                    // tokens; the row's caches take the snapshot's arrays and
+                    // prefill resumes on the snapshot boundary.
+                    handle = try await allocator.allocate(
+                        conversationKey: schedulerConversationKey(for: request),
+                        initialCapacityTokens: reservation.initialCapacityTokens,
+                        maxLogicalTokens: reservation.maxLogicalTokens,
+                        initialTokens: request.cachedPromptTokens
+                    )
+                    admissionHandle = handle
+                    let binding = try await allocator.binding(for: handle)
+                    try await backend.installPromptSnapshotCache(
+                        requestID: request.id,
+                        snapshot: snapshot,
+                        binding: binding,
+                        restoreNativeMTPDrafter: request.decodePath == .nativeMTP
+                    )
+                    prefillCursor = request.cachedPromptTokens
                 } else {
                     handle = try await allocator.allocate(
                         conversationKey: schedulerConversationKey(for: request),
@@ -5598,7 +5678,11 @@ actor ContinuousBatchScheduler {
                     row.recurrentCheckpoints.append(checkpoint)
                 }
                 if promptSnapshotDue,
-                   let snapshot = await backend.snapshotPromptCache(requestID: id, tokenCount: row.prefillCursor),
+                   let snapshot = await backend.snapshotPromptCacheAndHead(
+                       requestID: id,
+                       tokenCount: row.prefillCursor,
+                       nextPromptToken: row.request.promptTokens[row.prefillCursor]
+                   ),
                    snapshot.promptSnapshot, snapshot.tokenCount == row.prefillCursor {
                     row.promptSnapshot = snapshot
                 }
@@ -5758,8 +5842,8 @@ actor ContinuousBatchScheduler {
     /// runtime places its snapshot on a reference-plan boundary.
     private func promptSnapshotIsPending(for row: Row) -> Bool {
         row.promptSnapshot == nil
-            && row.request.promptSnapshotTokenCount != nil
-            && row.request.cachedPromptTokens == 0
+            && (row.request.promptSnapshotTokenCount ?? 0) > row.request.cachedPromptTokens
+            && (row.request.cachedPromptTokens == 0 || row.request.promptSnapshotCache != nil)
             && !row.request.conversationKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 

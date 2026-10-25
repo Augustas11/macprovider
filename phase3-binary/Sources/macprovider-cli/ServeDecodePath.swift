@@ -525,6 +525,7 @@ extension ModelRuntime {
         modelHasRecurrentLayers: Bool = false,
         promptSnapshotTokenCount: Int? = nil,
         retainedRecurrentCheckpoints: [RecurrentStateCheckpoint] = [],
+        promptSnapshotCache: ContinuousBatchSerialConversationCache? = nil,
         serialToolStopObserver: ContinuousBatchCanonicalStopObserver? = nil,
         grammarConstraint: GrammarConstraintState? = nil,
         nativeMTPAdmission: NativeMTPRuntimeAdmission? = nil
@@ -554,6 +555,7 @@ extension ModelRuntime {
                 modelHasRecurrentLayers: modelHasRecurrentLayers,
                 promptSnapshotTokenCount: promptSnapshotTokenCount,
                 retainedRecurrentCheckpoints: retainedRecurrentCheckpoints,
+                promptSnapshotCache: promptSnapshotCache,
                 grammarConstraint: grammarConstraint,
                 serialToolStopObserver: serialToolStopObserver,
                 decodePath: nativeMTPAdmission?.effectivePath ?? .ordinary,

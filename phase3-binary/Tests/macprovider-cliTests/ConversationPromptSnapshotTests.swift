@@ -145,6 +145,71 @@ final class ConversationPromptSnapshotTests: XCTestCase {
         XCTAssertNil(ModelRuntime.continuousBatchPromptSnapshotPolicy(nil))
     }
 
+    /// SPEC-024-R005: a GLM-5-Next CB row snapshots only under the AC-26
+    /// grant, so without it no later hit is fenced off CB.
+    func testGLM5NextCBRowsSnapshotOnlyUnderTheCachedTurnsGrant() {
+        let glm = ModelRuntime.ConversationPromptSnapshotPolicy.lastRoleMarker(tokenIDs: [60, 61])
+        XCTAssertNil(ModelRuntime.continuousBatchPromptSnapshotPolicy(glm, cachedTurnsAttachable: false))
+        XCTAssertEqual(ModelRuntime.continuousBatchPromptSnapshotPolicy(glm, cachedTurnsAttachable: true), glm)
+        XCTAssertEqual(ModelRuntime.continuousBatchPromptSnapshotPolicy(.referencePlanBoundary(step: 2048),
+                                                                       cachedTurnsAttachable: true),
+                       .referencePlanBoundary(step: 2048))
+        XCTAssertNil(ModelRuntime.continuousBatchPromptSnapshotPolicy(nil, cachedTurnsAttachable: true))
+    }
+
+    /// SPEC-024-R005 / SPEC-048 MTP-9: a native-MTP lease reuses a snapshot
+    /// only with MTP head state at its boundary whose recorded token is the
+    /// incoming prompt's token there; anything else is a miss, never a
+    /// reselection. An ordinary lease ignores the head state.
+    func testNativeLeaseReusesASnapshotOnlyWithMatchingHeadState() async throws {
+        let cache = ConversationCache(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+        let stored = int32Range(0..<64)
+        let marker: Int32 = 61
+        let extended = stored + [marker] + int32Range(200..<230)
+        let headState = NativeMTPDrafterPrefixSnapshot(cache: [KVCacheSimple()], nextPosition: 64,
+                                                       foldedNextToken: Int(marker))
+
+        func seed(_ key: String, drafter: NativeMTPDrafterPrefixSnapshot?) async throws -> ConversationCacheLayers {
+            let lease = try Self.unwrap(await cache.begin(conversationKey: key, incomingTokens: stored,
+                                                       modelID: "model-a", kvBits: nil))
+            let layers = ConversationCacheLayers([RotatingKVCache(maxSize: 8, keep: 0)], promptSnapshot: true,
+                                                 nativeMTPDrafter: drafter)
+            await cache.commit(lease, cache: layers, fullTokens: stored)
+            return layers
+        }
+        func begin(_ key: String, _ tokens: [Int32], native: Bool) async throws -> ConversationCacheLease {
+            try Self.unwrap(await cache.begin(conversationKey: key, incomingTokens: tokens, modelID: "model-a",
+                                              kvBits: nil, requireNativeMTPDrafterSnapshot: native))
+        }
+
+        let withHead = try await seed("conv:head", drafter: headState)
+        let hit = try await begin("conv:head", extended, native: true)
+        XCTAssertTrue(hit.reusableCache === withHead)
+        XCTAssertEqual(hit.cachedPromptTokens, 64)
+        XCTAssertEqual(hit.reusableCache?.nativeMTPDrafter?.nextPosition, 64)
+        await cache.abort(hit)
+
+        _ = try await seed("conv:other-token", drafter: headState)
+        let otherToken = stored + [Int32(62)] + int32Range(200..<230)
+        let tokenMiss = try await begin("conv:other-token", otherToken, native: true)
+        XCTAssertNil(tokenMiss.reusableCache)
+        XCTAssertEqual(tokenMiss.cachedPromptTokens, 0)
+        await cache.abort(tokenMiss)
+
+        _ = try await seed("conv:no-head", drafter: nil)
+        let headMiss = try await begin("conv:no-head", extended, native: true)
+        XCTAssertNil(headMiss.reusableCache)
+        await cache.abort(headMiss)
+
+        let ordinaryLayers = try await seed("conv:ordinary", drafter: nil)
+        let ordinary = try await begin("conv:ordinary", extended, native: false)
+        XCTAssertTrue(ordinary.reusableCache === ordinaryLayers)
+        await cache.abort(ordinary)
+
+        // Head state never rides on a non-snapshot entry.
+        XCTAssertNil(ConversationCacheLayers([KVCacheSimple()], nativeMTPDrafter: headState).nativeMTPDrafter)
+    }
+
     func testGLM5NextSnapshotPolicyNeedsRoundTrippingRoleTokens() throws {
         try Self.requireMetal()
         let tokenizer = MarkerTokenizer()
@@ -438,7 +503,12 @@ final class ConversationPromptSnapshotTests: XCTestCase {
 
     /// The randomly initialised GLM-5-Next text model of
     /// `GLM5NextSerialBaselineTests` (linear-attention and sparse layers).
-    private static func tinyGLM() throws -> GLM5NextTextModel {
+    /// Shared with `GLM5NextCBPromptSnapshotTests`.
+    static func tinyGLM() throws -> GLM5NextTextModel {
+        GLM5NextTextModel(try tinyGLMConfiguration()).withTinyNoise()
+    }
+
+    static func tinyGLMConfiguration() throws -> GLM5NextConfiguration {
         let json = """
         {
             "model_type": "glm5_next_text", "vocab_size": 64, "hidden_size": 64,
@@ -466,15 +536,20 @@ final class ConversationPromptSnapshotTests: XCTestCase {
         """
         let configuration = try JSONDecoder().decode(GLM5NextConfiguration.self, from: Data(json.utf8))
         try configuration.validateModelConfiguration()
-        let model = GLM5NextTextModel(configuration)
+        return configuration
+    }
+}
+
+private extension GLM5NextTextModel {
+    func withTinyNoise() -> GLM5NextTextModel {
         let noisy: [(String, MLXArray)] = withRandomState(MLXRandom.RandomState(seed: 7)) {
-            model.parameters().flattened().map { key, value in
+            parameters().flattened().map { key, value in
                 (key, (MLXRandom.normal(value.shape) * 0.02).asType(value.dtype))
             }
         }
-        model.update(parameters: ModuleParameters.unflattened(noisy))
-        eval(model)
-        return model
+        update(parameters: ModuleParameters.unflattened(noisy))
+        eval(self)
+        return self
     }
 }
 

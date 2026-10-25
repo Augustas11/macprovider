@@ -30,6 +30,29 @@ extension RecurrentStateCheckpoint: Equatable {
     }
 }
 
+/// SPEC-048-R009 (0.1.56) / SPEC-024-R005: the native-MTP head's state at a
+/// GLM-5-Next prompt snapshot, captured on a native continuous-batching row
+/// right after its prefill reached the snapshot length `nextPosition`. The
+/// head's cache entry for position `p` pairs the target hidden state at `p`
+/// with prompt token `p + 1`, so the last entry consumed `foldedNextToken`
+/// (prompt token `nextPosition`). A later turn may restore it only when its
+/// own prompt has that token at `nextPosition` (oMLX `_MtpPrefixSnapshot`,
+/// adapted: the GLM role marker there is fixed, so the boundary pair is folded
+/// at capture instead of carrying a pending hidden column). The cache layers
+/// are copies that nothing mutates; a restore copies them again.
+struct NativeMTPDrafterPrefixSnapshot: @unchecked Sendable {
+    let cache: [KVCache]
+    let nextPosition: Int
+    let foldedNextToken: Int
+
+    /// The token check a restoring prompt must pass.
+    func restores(into incomingTokens: [Int32], at tokenCount: Int) -> Bool {
+        nextPosition == tokenCount
+            && incomingTokens.indices.contains(tokenCount)
+            && Int(incomingTokens[tokenCount]) == foldedNextToken
+    }
+}
+
 final class ConversationCacheLayers: @unchecked Sendable {
     let layers: [KVCache]
     let retainedPagedKVSequence: PagedKVRetainedSequence?
@@ -41,6 +64,9 @@ final class ConversationCacheLayers: @unchecked Sendable {
     /// be rotating, pooled or recurrent and are never trimmed, so the entry
     /// serves only an incoming prompt that extends all of its tokens.
     let promptSnapshot: Bool
+    /// SPEC-024-R005: the native-MTP head state at this prompt snapshot, when a
+    /// native GLM-5-Next CB row published it. Nil for every other entry.
+    let nativeMTPDrafter: NativeMTPDrafterPrefixSnapshot?
     private let discardRetainedPagedKVSequence: (@Sendable (PagedKVRetainedSequence, String) async -> Void)?
 
     init(
@@ -48,13 +74,15 @@ final class ConversationCacheLayers: @unchecked Sendable {
         retainedPagedKVSequence: PagedKVRetainedSequence? = nil,
         discardRetainedPagedKVSequence: (@Sendable (PagedKVRetainedSequence, String) async -> Void)? = nil,
         recurrentCheckpoints: [RecurrentStateCheckpoint] = [],
-        promptSnapshot: Bool = false
+        promptSnapshot: Bool = false,
+        nativeMTPDrafter: NativeMTPDrafterPrefixSnapshot? = nil
     ) {
         self.layers = layers
         self.retainedPagedKVSequence = retainedPagedKVSequence
         self.discardRetainedPagedKVSequence = discardRetainedPagedKVSequence
         self.recurrentCheckpoints = recurrentCheckpoints.sorted { $0.tokenCount < $1.tokenCount }
         self.promptSnapshot = promptSnapshot
+        self.nativeMTPDrafter = promptSnapshot ? nativeMTPDrafter : nil
     }
 
     static func hasRecurrentLayers(_ layers: [KVCache]) -> Bool {
@@ -203,7 +231,8 @@ actor ConversationCache {
         now: Date = Date(),
         cold: ConversationColdContext? = nil,
         allowRetainedPagedKVHandoff: Bool = false,
-        fleetGrant: FleetConversationCacheGrant? = nil
+        fleetGrant: FleetConversationCacheGrant? = nil,
+        requireNativeMTPDrafterSnapshot: Bool = false
     ) async -> ConversationCacheLease? {
         guard let key = conversationKey?.trimmingCharacters(in: .whitespacesAndNewlines), !key.isEmpty else {
             return nil
@@ -359,6 +388,14 @@ actor ConversationCache {
             guard lcp == entry.canonicalPromptTokens.count else {
                 log("event=conv_cache action=miss key_hash=\(keyHash) reason=prompt_snapshot_diverged lcp=\(lcp) snapshot_tokens=\(entry.canonicalPromptTokens.count)")
                 return await predicateMiss("prompt_snapshot_diverged")
+            }
+            // SPEC-024-R005: a native-MTP row reuses a snapshot only together
+            // with the MTP head state taken at it; otherwise it stays native
+            // and prefills from zero (never an ordinary reselection).
+            if requireNativeMTPDrafterSnapshot,
+               entry.kvCache.nativeMTPDrafter?.restores(into: incomingTokens, at: lcp) != true {
+                log("event=conv_cache action=miss key_hash=\(keyHash) reason=prompt_snapshot_drafter_unavailable snapshot_tokens=\(entry.canonicalPromptTokens.count)")
+                return await predicateMiss("prompt_snapshot_drafter_unavailable")
             }
         } else if !retainedPagedKV {
             // SPEC-024-R001: RotatingKVCache is trimmable only while offset < maxSize,

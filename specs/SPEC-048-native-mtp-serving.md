@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.55
+**Version:** 0.1.56
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.55",
+  "version": "0.1.56",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -1074,7 +1074,15 @@ mutation, so the change is a selection and never a fallback:
 - a lease reporting `cached_prompt_tokens > 0`, no lease, or a runtime that
   would hand back a retained paged-KV entry rather than a serial-format one
   reselects `ordinary` with reason `conversation_key`, keeping the ordinary
-  cache-hit decision and discount;
+  cache-hit decision and discount, except as below;
+- **(0.1.56)** a SPEC-024-R005 GLM-5-Next prompt-snapshot hit that carries
+  the MTP head state at its boundary stays `native_mtp`: the CB row installs
+  target state and head state together, resumes prefill at the snapshot
+  length and keeps the hit and its discount. When the runtime can install
+  such snapshots, a native row's lease treats every other snapshot (no head
+  state, or a recorded boundary token that differs from the prompt's) as a
+  miss (`prompt_snapshot_drafter_unavailable`), so the row stays native and
+  prefills from zero instead of reselecting ordinary;
 - otherwise (a miss on a runtime that publishes keyed rows in the SPEC-038
   FR-CB4 serial conversation-cache format) the row stays `native_mtp`, keeps
   the lease, and reports `cached_prompt_tokens = 0`.
@@ -1088,7 +1096,12 @@ normal terminal it publishes the serial-format entry built from its committed
 target state only: tokens, token count, attention KV, and recurrent
 checkpoints, which MUST equal the ordinary row's entry for the same request.
 No proposal, rejected position, staged state, or drafter state may enter the
-entry. A failed, cancelled, or pre-output-fallback native row publishes
+entry, except **(0.1.56)** the SPEC-024-R005 MTP head state: the head's
+committed cache at exactly the snapshot length, captured during prompt
+prefill (never inside a verification round) together with the prompt token
+its last entry consumed. It is draft-side only: restoring it can change
+proposals and acceptance, never the target's tokens, which the target
+verifies as on any native row. A failed, cancelled, or pre-output-fallback native row publishes
 nothing and aborts its lease. SPEC-037 disk persistence is unchanged: hybrid
 entries are not persisted. A request with no key behaves as before: no lease,
 no commit, no busy key.
@@ -1096,7 +1109,11 @@ no commit, no busy key.
 This applies to streaming and non-streaming paths. A future amendment that
 reuses native-MTP state, or publishes retained paged-KV handoffs from native
 rows, must prove target KV plus every MTP/recurrent state component and
-preserve SPEC-024 billing isolation.
+preserve SPEC-024 billing isolation. **(0.1.56)** The R005 snapshot reuse is
+that amendment for GLM-5-Next: its proof is the SPEC-038 v0.3.31 AC-26 GLM
+proof (resumed native rows match ordinary CB tokens at the same row count,
+with tokens/s, acceptance and TTFT reported in the R015 cells), recorded
+before the signed `cached_turns_accepted` grant.
 
 ### MTP-10 — observability and warm-swap isolation (SPEC-048-R010)
 
@@ -1873,6 +1890,12 @@ the text-only path without image inputs; that does not admit multimodal buyer
 requests.
 
 ## 9. Changelog and history
+
+- **0.1.56 (2026-10-25)** — R009 (MTP-9): a native-MTP GLM-5-Next row reuses
+  a SPEC-024-R005 prompt snapshot together with the MTP head state taken at
+  it, on its own CB row, and stays native; any other snapshot is a miss for
+  it rather than an ordinary reselection. Draft-side head state may enter the
+  snapshot entry. No other family or path changes. Related: #2143.
 
 - **0.1.55 (2026-10-24)** — R003: pins the DeepSeek-V4 CB performance slice
   `3.32.3-macprovider.10.5` (`c8be0f61…`) on `676a62a4…`. Batched attention,
