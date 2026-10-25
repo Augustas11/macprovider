@@ -379,6 +379,7 @@ def fixed_command(m, kind):
                 "-destination", "platform=macOS,arch=arm64",
                 "-skipPackagePluginValidation",
                 "-only-testing:MLXLMTests/GLM5NextTests/testPackedVerifyDepthOneCohortsMatchSerialRows",
+                "-only-testing:MLXLMTests/GLM5NextTests/testPackedVerifyRank512FallbackMatchesSerialRows",
                 "-parallel-testing-enabled", "NO", "-jobs", "2",
                 "-derivedDataPath", str(cache / "DerivedData"),
                 "-clonedSourcePackagesDirPath", str(cache / "SourcePackages"),

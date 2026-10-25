@@ -27,6 +27,7 @@ class MeasurementTests(unittest.TestCase):
         command = M.fixed_command({"source": "/campaign", "dir": "/window"}, "fork-tests")
         self.assertEqual(command[:3], ["/usr/bin/xcrun", "xcodebuild", "test"])
         self.assertIn("-only-testing:MLXLMTests/GLM5NextTests/testPackedVerifyDepthOneCohortsMatchSerialRows", command)
+        self.assertIn("-only-testing:MLXLMTests/GLM5NextTests/testPackedVerifyRank512FallbackMatchesSerialRows", command)
         self.assertEqual(command[command.index("-jobs") + 1], "2")
         self.assertEqual(command[command.index("-derivedDataPath") + 1],
                          "/campaign/.lab-window/glm-cohort-tests/DerivedData")
