@@ -16,30 +16,26 @@ SPEC.loader.exec_module(M)
 
 
 class MeasurementTests(unittest.TestCase):
-    def test_cached_metal_bytes_are_checked_before_staging(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            debug = root / "phase3-binary/.build/arm64-apple-macosx/debug"
-            release = debug.parent / "release"
-            debug.mkdir(parents=True)
-            release.mkdir()
-            (debug / "mlx.metallib").write_bytes(b"cached library")
-            manifest = root / "manifest.json"
-            M.put(manifest, {"source": tmp, "cached_metal": {"sha256": M.sha(b"cached library"), "revision": "a" * 40}})
-            with patch("sys.argv", ["entry.py", "_metal", str(manifest)]), patch.object(M, "source_ok"), patch("builtins.print"):
-                M.main()
-                self.assertEqual((release / "mlx.metallib").read_bytes(), b"cached library")
-                (debug / "mlx.metallib").write_bytes(b"changed")
-                with self.assertRaises(M.Refusal):
-                    M.main()
-                self.assertEqual((release / "mlx.metallib").read_bytes(), b"cached library")
+    def test_metal_step_uses_xcode_developer_dir(self):
+        grouped = __import__("inspect").getsource(M.grouped)
+        self.assertIn('"DEVELOPER_DIR": str(XCODE_DEVELOPER_DIR)} if kind == "metal"', grouped)
+        self.assertTrue(str(M.XCODE_DEVELOPER_DIR).endswith("Applications/Xcode.app/Contents/Developer"))
+
+    def test_missing_metal_compiler_refused_before_downtime(self):
+        failed = Mock(returncode=1)
+        with patch.object(M, "run", return_value=b"Mac15,14\n"), patch.object(M, "source_ok"), \
+                patch("subprocess.run", return_value=failed) as xcrun:
+            with self.assertRaises(M.Refusal):
+                M.inspect_remote({"source": "/campaign", "commit": "a" * 40})
+        self.assertEqual(xcrun.call_args.kwargs["env"]["DEVELOPER_DIR"], str(M.XCODE_DEVELOPER_DIR))
 
     def test_release_metal_library_uses_existing_build_entry_point(self):
         command = M.fixed_command({"source": "/campaign", "dir": "/window"}, "metal")
         self.assertEqual(command, ["/bin/bash", "/campaign/phase3-binary/scripts/build-mlx-metallib.sh",
                                    "/campaign/phase3-binary/.build/arm64-apple-macosx/release"])
         worker = __import__("inspect").getsource(M.worker)
-        self.assertLess(worker.index('grouped(m, "metal", BUILD)'), worker.index('grouped(m, "cell", CELL)'))
+        self.assertLess(worker.index('grouped(m, "metal", BUILD)'), worker.index('grouped(m, "metalcheck", 120)'))
+        self.assertLess(worker.index('grouped(m, "metalcheck", 120)'), worker.index('grouped(m, "cell", CELL)'))
 
     def policy(self):
         return dict(schema="macprovider.native-mtp-exploratory-policy.v1",
@@ -280,7 +276,8 @@ class MeasurementTests(unittest.TestCase):
                 self.assertEqual(result["lab_passed"], not failure)
                 if not failure:
                     self.assertIn("build-mlx-metallib.sh", events[4][1][1])
-                    bench = events[5][1]
+                    self.assertEqual(events[5][1][2], "_metalcheck")
+                    bench = events[6][1]
                     self.assertEqual(bench[1], "native-mtp-bench")
                     self.assertEqual(bench[bench.index("--only-cell") + 1], manifest["cell"])
 

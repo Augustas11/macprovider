@@ -34,6 +34,9 @@ TOTAL = 2400
 BUILD = 900
 CELL = 1500
 ROOT = Path(__file__).resolve().parents[2]
+# Command Line Tools (the Studio's xcode-select default) ship no Metal compiler.
+# Every successful Studio metallib build used the full Xcode developer dir.
+XCODE_DEVELOPER_DIR = Path.home() / "Applications/Xcode.app/Contents/Developer"
 
 
 class Refusal(RuntimeError):
@@ -325,10 +328,10 @@ def fixed_command(m, kind):
                 "-c", "release", "-j", "2", "--disable-automatic-resolution",
                 "-Xswiftc", "-DMACPROVIDER_LAB_HARNESS", "--product", "macprovider-cli"]
     if kind == "metal":
-        if m.get("cached_metal"):
-            return [sys.executable, str(d / "entry.py"), "_metal", str(d / "manifest.json")]
         return ["/bin/bash", str(Path(package) / "scripts/build-mlx-metallib.sh"),
                 str(Path(package) / ".build/arm64-apple-macosx/release")]
+    if kind == "metalcheck":
+        return [sys.executable, str(d / "entry.py"), "_metalcheck", str(d / "manifest.json")]
     if kind == "cell" and m["cell"] == "matrix":
         return [sys.executable, str(d / "entry.py"), "_matrix", str(d / "manifest.json")]
     if kind == "cell":
@@ -351,7 +354,8 @@ def grouped(m, kind, timeout):
                              stdin=subprocess.DEVNULL, stdout=open(d / "lab.log", "ab"),
                              stderr=subprocess.STDOUT, env={
                                  "HOME": str(Path.home()), "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
-                                 "MACPROVIDER_NATIVE_MTP_E2E": "1"})
+                                 "MACPROVIDER_NATIVE_MTP_E2E": "1",
+                                 **({"DEVELOPER_DIR": str(XCODE_DEVELOPER_DIR)} if kind == "metal" else {})})
     os.close(read_fd)
     try:
         with open(d / "transaction.lock", "a") as lock:
@@ -426,7 +430,8 @@ def worker(m):
             raise Refusal("incumbent process drifted before pause")
         socket_owner(m["socket"], fresh["launch"]["pid"])
         control(m, "pause_request")
-        until = time.monotonic() + 20
+        # Pause stops admission only; in-flight buyer requests keep generating.
+        until = time.monotonic() + 300
         while True:
             s = status(m)
             lifecycle = s.get("lifecycle", {})
@@ -445,6 +450,7 @@ def worker(m):
             time.sleep(.2)
         grouped(m, "build", BUILD)
         grouped(m, "metal", BUILD)
+        grouped(m, "metalcheck", 120)
         source_ok(m["source"], m["commit"])
         grouped(m, "cell", CELL)
     except Exception as exc:
@@ -496,16 +502,15 @@ def inspect_remote(m):
         raise Refusal("execution target is not the designated Studio")
     source_ok(m["source"], m["commit"])
     package = Path(m["source"]) / "phase3-binary"
-    if subprocess.run(["xcrun", "-sdk", "macosx", "-find", "metal"],
+    # Checked before downtime: the Metal compiler under the Xcode developer
+    # dir, and the MLX kernel sources matching the dependency lockfile.
+    if subprocess.run(["/usr/bin/xcrun", "-sdk", "macosx", "-find", "metal"],
+                      env=dict(os.environ, DEVELOPER_DIR=str(XCODE_DEVELOPER_DIR)),
                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
-        # Reuse the existing lab artifact when only Command Line Tools are
-        # installed. Pin its bytes before downtime; never substitute live files.
-        cached = package / ".build/arm64-apple-macosx/debug/mlx.metallib"
-        checkout = package / ".build/checkouts/mlx-swift"
-        pin = next(p["state"]["revision"] for p in json.loads((package / "Package.resolved").read_text())["pins"]
-                   if p["identity"] == "mlx-swift")
-        source_ok(checkout, pin)
-        m["cached_metal"] = {"sha256": sha(cached.read_bytes()), "revision": pin}
+        raise Refusal("Metal compiler unavailable under the Xcode developer dir")
+    pin = next(p["state"]["revision"] for p in json.loads((package / "Package.resolved").read_text())["pins"]
+               if p["identity"] == "mlx-swift")
+    source_ok(package / ".build/checkouts/mlx-swift", pin)
     home = Path.home()
     m["install"] = str(home / "macprovider")
     # Reuse the probe's deliberately narrow YAML scalar grammar, without
@@ -672,7 +677,7 @@ def controller(args):
         return
     owner = os.environ["MACPROVIDER_OPS_OWNER"]
     lock = str(ROOT / "scripts/ops/live-lock.sh")
-    run([lock, "acquire", owner, "--purpose", "issue-2144-bounded-measurement"])
+    run([lock, "acquire", owner, "--purpose", "issue-2144-baseline"])
     state = Path(os.environ.get("MACPROVIDER_OPS_STATE_DIR", str(Path.home() / ".config/macprovider/ops-state")))
     state.mkdir(mode=0o700, parents=True, exist_ok=True)
     journal = state / "studio-mtp-measurement.json"
@@ -716,15 +721,19 @@ def controller(args):
 def main():
     if len(sys.argv) > 1 and sys.argv[1].startswith("_"):
         mode = sys.argv[1]
-        if mode == "_metal":
+        if mode == "_metalcheck":
+            # The bench sets MLX's cache limit (device creation and default
+            # metallib load) before argument validation. A rejected commit
+            # therefore proves the lab binary finds its metallib without a model.
             m = json.loads(Path(sys.argv[2]).read_text())
-            package = Path(m["source"]) / "phase3-binary"
-            source_ok(package / ".build/checkouts/mlx-swift", m["cached_metal"]["revision"])
-            data = (package / ".build/arm64-apple-macosx/debug/mlx.metallib").read_bytes()
-            if sha(data) != m["cached_metal"]["sha256"]:
-                raise Refusal("cached lab Metal library changed")
-            (package / ".build/arm64-apple-macosx/release/mlx.metallib").write_bytes(data)
-            print("Reused byte-pinned lab Metal library for the pinned MLX dependency", flush=True)
+            command = fixed_command(dict(m, cell="s1-p512-o128"), "cell")
+            command[command.index("--provider-commit") + 1] = "metal-check"
+            command[command.index("--out") + 1] = str(Path(m["dir"]) / "metalcheck.jsonl")
+            result = subprocess.run(command, capture_output=True, text=True, timeout=60)
+            output = result.stdout + result.stderr
+            print(output, flush=True)
+            if "metallib" in output or "--provider-commit must be lowercase 40-hex" not in output:
+                raise Refusal("lab binary failed the MLX metallib check")
             return
         if mode == "_matrix":
             m = json.loads(Path(sys.argv[2]).read_text())
