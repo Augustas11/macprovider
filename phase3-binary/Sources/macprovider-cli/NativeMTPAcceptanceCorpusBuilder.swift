@@ -13,7 +13,7 @@ enum NativeMTPAcceptanceCorpusBuilder {
         }
         let tokenizer = try await ChatTemplateCompatTokenizerLoader().load(from: targetDirectory)
         var cases: [[String: Any]] = []
-        for (stratumIndex, stratum) in NativeMTPAcceptanceCorpus.Stratum.allCases.enumerated() {
+        for stratum in NativeMTPAcceptanceCorpus.Stratum.allCases {
             let target: Int
             switch stratum {
             case .short: target = 256
@@ -21,8 +21,9 @@ enum NativeMTPAcceptanceCorpusBuilder {
             case .fourK, .nearBoundary: target = 4072
             case .eightK: target = 8192
             }
-            for offset in 0..<40 {
-                let index = stratumIndex * 40 + offset
+            let count = stratum == .short ? 120 : 20
+            for offset in 0..<count {
+                let index = cases.count
                 func object(_ padding: Int) -> [String: Any] {
                     requestObject(modelID: modelID, index: index, padding: padding)
                 }
@@ -87,7 +88,7 @@ enum NativeMTPAcceptanceCorpusBuilder {
         var object: [String: Any] = [
             "model": modelID,
             "messages": [["role": "user", "content": prompt]],
-            "max_tokens": 256,
+            "max_tokens": 128,
             "temperature": sampled ? 1.0 : 0.0,
             "top_p": sampled ? 0.95 : 1.0,
             "stream": false,
