@@ -70,10 +70,17 @@ live_absent() {
 LOCKED=0
 SERVE_PID=
 cleanup() {
-  [[ -n $SERVE_PID ]] && { kill -TERM $SERVE_PID 2>/dev/null; sleep 5; kill -KILL $SERVE_PID 2>/dev/null || true; }
-  (( LOCKED )) && rmdir "$LOCK" 2>/dev/null || true
+  if [[ -n $SERVE_PID ]]; then
+    kill -TERM $SERVE_PID 2>/dev/null; sleep 5; kill -KILL $SERVE_PID 2>/dev/null || true
+  fi
+  SERVE_PID=
+  if (( LOCKED )); then rmdir "$LOCK" 2>/dev/null || true; LOCKED=0; fi
 }
 trap cleanup EXIT
+# zsh skips the EXIT trap when ERR_EXIT ends the shell from inside a function
+# (a leg returning nonzero), which left the window lock behind and made the
+# next leg refuse. ZERR runs the same cleanup and keeps the exit status.
+trap 'rc=$?; cleanup; exit $rc' ZERR
 
 # The Studio check NativeMTPHardwareE2ERunner.requireStudioHost() makes,
 # before anything loads the model or touches the GPU.
