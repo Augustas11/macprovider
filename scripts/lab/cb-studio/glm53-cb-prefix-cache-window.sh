@@ -4,9 +4,12 @@
 # build, each one bounded:
 #
 #   glm53-cb-prefix-cache-window.sh parity   isolated loopback lab serve on
-#        127.0.0.1:$LAB_PORT (--no-join --autotune-candidate), CB canary with
-#        the signed CB policy loaded plus a manual accepted tuple that records
-#        cached_turns_accepted, continuous_batching_cached_turns on. Drives
+#        127.0.0.1:$LAB_PORT (--no-join --autotune-candidate), CB canary on a
+#        manual accepted tuple equal to the signed CB policy's GLM entry plus
+#        cached_turns_accepted, continuous_batching_cached_turns on. A --no-join
+#        serve runs no catalog preflight, so it never loads the signed policy
+#        (status absent_empty_off_fallback); the manual tuple is the CB
+#        authority here. Drives
 #        glm53_cb_prefix_cache.py at 1 and 4 rows: warm (same key) vs cold
 #        (fresh key) greedy parity per turn, warm turns >= 2 cached. Then
 #        fails unless the serve log shows snapshot hits, batched admissions,
@@ -181,6 +184,10 @@ parity() {
   [[ $identity == *"model_sha256=$MODEL_SHA256 hardware_class=$HARDWARE_CLASS metallib_sha256=$RELEASE_METALLIB_SHA256 kernel_identifier=$KERNEL"* ]] ||
     { echo "refusing: runtime identity differs from the signed GLM tuple: $identity" >&2; exit 6; }
   curl -s http://127.0.0.1:$LAB_PORT/v1/status > "$OUT/status-start.json"
+  # Every serve start logs one serial_routed line before the model loads;
+  # the verdict reads only what the serve logged after it was ready.
+  local base
+  base=$(wc -l < "$OUT/serve.err" | tr -d ' ')
   local rc=0 rows
   for rows in 1 4; do
     bounded ${LEG_TIMEOUT_S:-3600} "$OUT/parity-rows$rows.json" "$OUT/parity-rows$rows.err" \
@@ -190,9 +197,10 @@ parity() {
   done
   curl -s http://127.0.0.1:$LAB_PORT/v1/status > "$OUT/status-end.json"
   stop_serve
-  local log=$OUT/serve.err hits admitted serial failures
+  local log=$OUT/serve-driver.err hits admitted serial failures
   # The isolated --no-join serve takes only this driver's requests, so the
-  # whole serve log is this leg's traffic.
+  # serve log after readiness is this leg's traffic.
+  tail -n +$(( base + 1 )) "$OUT/serve.err" > "$log"
   hits=$(grep -c 'action=hit .*prompt_snapshot=true' $log || true)
   admitted=$(grep -c 'event=batching_admitted' $log || true)
   serial=$(grep -c 'serial_routed' $log || true)
