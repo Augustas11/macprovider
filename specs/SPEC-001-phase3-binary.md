@@ -1,6 +1,15 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.46 (2026-10-25, cancellation during prefill)
+**Version:** 1.9.47 (2026-10-25, coordinator recovery without model reload)
+
+**Change log v1.9.47 (2026-10-25):**
+Clarifies FR-13 / `SPEC-001-R001`: heartbeat staleness requests an in-process
+reconnect before any fatal recovery action. A coordinator outage, including a
+runtime restart, must preserve the provider process and loaded model while
+reconnecting with backoff. The fatal recovery watchdog observes failure of
+local session teardown to progress after reconnect is requested, not time
+without a successful coordinator heartbeat. Authentication protocol safeguards
+and signal-owned shutdown remain unchanged.
 
 **Change log v1.9.46 (2026-10-25, Related: #2111):**
 Adds `SPEC-001-R013`. The provider checked a cancel only between decode
@@ -1234,6 +1243,30 @@ coordinator URL is configured, the binary runs in standalone mode
 drops, the binary reconnects with exponential backoff (1s, 2s, 4s, ...
 capped at 60s). The coordinator is a Phase 4 dependency; the binary
 ships with the client protocol fully implemented, tested against a mock.
+
+**SPEC-001-R001 — Preserve serving intent and the loaded runtime during
+coordinator recovery.** A coordinator restart, transport failure or heartbeat
+timeout MUST NOT by itself terminate the provider or unload its model. The
+local HTTP server and loaded runtime remain alive while the coordinator
+session is replaced using the existing authenticated handshake and capped
+exponential backoff. Failed coordinator connection attempts and backoff are
+remote unavailability, not evidence of a locally wedged provider.
+
+The heartbeat send remains bounded at five seconds. At 15 seconds without
+heartbeat activity, or on a heartbeat send failure, the provider MUST request
+reconnect by cancelling that session's WebSocket. A separate local recovery
+deadline of 60 seconds starts when reconnect is requested. The hard-fail
+watchdog MAY terminate the process nonzero only if that session's receive and
+cleanup work still cannot complete within that deadline. Merely entering
+cleanup MUST NOT disarm this deadline before local teardown completes. A
+completed teardown disarms it before coordinator reconnect/backoff, even if
+the coordinator remains offline indefinitely. Stale heartbeat or recovery
+tasks from a prior session MUST NOT cancel a newer socket or reset its watchdog state. Local
+termination signals retain exclusive ownership of process exit once shutdown
+starts; recovery MUST NOT override or re-arm across that shutdown. The
+existing fatal safeguard for three consecutive malformed authentication
+protocol failures remains distinct from transient transport errors.
+
 **Reconciled v1.7:** provider authentication is **not** wholly out of scope. The
 binary-side credential transport and proof generation are shipped and in scope —
 it attaches `Authorization: Bearer <provider_token>` on the coordinator WS
