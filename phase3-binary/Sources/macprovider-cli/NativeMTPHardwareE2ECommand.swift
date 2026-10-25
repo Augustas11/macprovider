@@ -261,6 +261,7 @@ final class NativeMTPHardwareE2ERunner {
     private let verifyServePath: Bool
     /// Lab throughput phase completion tokens per row; 0 skips it.
     private let throughputTokens: Int
+    private let diagnosticEligibilityBypass: Bool
     /// Detected from `target/config.json`; Qwen3.5 when unreadable, so an
     /// unrecognized target fails the family check in the fixture load.
     let family: NativeMTPHardwareE2EFamily
@@ -282,7 +283,8 @@ final class NativeMTPHardwareE2ERunner {
         maxPromptTokens: Int = 1_048_576,
         maxPhysicalBlocks: Int = 512,
         verifyServePath: Bool = false,
-        throughputTokens: Int = 0
+        throughputTokens: Int = 0,
+        diagnosticEligibilityBypass: Bool = false
     ) {
         root = URL(fileURLWithPath: (rootPath as NSString).expandingTildeInPath, isDirectory: true)
             .standardizedFileURL
@@ -292,6 +294,7 @@ final class NativeMTPHardwareE2ERunner {
         self.maxPhysicalBlocks = maxPhysicalBlocks
         self.verifyServePath = verifyServePath
         self.throughputTokens = throughputTokens
+        self.diagnosticEligibilityBypass = diagnosticEligibilityBypass
         let family = NativeMTPHardwareE2EFamily.detect(configJSONData: try? Data(
             contentsOf: root.appendingPathComponent("target/config.json")
         )) ?? .qwen35
@@ -520,8 +523,8 @@ final class NativeMTPHardwareE2ERunner {
             completeWindowBytesByDepth: admission.completeWindowBytesByDepth,
             family: admission.familyAdapter,
             throughputDeltaPPM: admission.throughputDeltaPPM,
-            maximumNativeActiveRows: admission.maxNativeActiveRows,
-            supportsSampling: admission.supportsSampling
+            maximumNativeActiveRows: diagnosticEligibilityBypass ? maxNativeActiveRows : admission.maxNativeActiveRows,
+            supportsSampling: admission.supportsSampling || diagnosticEligibilityBypass
         )
         let servePathLoad: ModelRuntime.NativeMTPHardwareE2EServePathLoad?
         if verifyServePath {
@@ -605,12 +608,19 @@ final class NativeMTPHardwareE2ERunner {
         let mtpDirectory = self.mtpDirectory
         try requireDirectory(targetDirectory)
         try requireDirectory(mtpDirectory)
-        let observedTargetIdentity = try MLXSnapshotIdentity.compute(directory: targetDirectory)
-        let observedMTPIdentity = family.embeddedMTP
-            ? observedTargetIdentity
-            : try MLXSnapshotIdentity.compute(directory: mtpDirectory)
-        try require(observedTargetIdentity == targetIdentity, "target identity changed during load")
-        try require(observedMTPIdentity == mtpIdentity, "MTP identity changed during load")
+        if diagnosticEligibilityBypass {
+            try require(targetIdentity.directory == targetDirectory.standardizedFileURL.resolvingSymlinksInPath()
+                && targetIdentity.isCurrent(), "target identity changed during diagnostic load")
+            try require(mtpIdentity.directory == mtpDirectory.standardizedFileURL.resolvingSymlinksInPath()
+                && mtpIdentity.isCurrent(), "MTP identity changed during diagnostic load")
+        } else {
+            let observedTargetIdentity = try MLXSnapshotIdentity.compute(directory: targetDirectory)
+            let observedMTPIdentity = family.embeddedMTP
+                ? observedTargetIdentity
+                : try MLXSnapshotIdentity.compute(directory: mtpDirectory)
+            try require(observedTargetIdentity == targetIdentity, "target identity changed during load")
+            try require(observedMTPIdentity == mtpIdentity, "MTP identity changed during load")
+        }
         // Run the same artifact observer the production enable path runs
         // (ModelRuntime native-MTP load) so lab evidence cannot pass on artifacts
         // that production would reject.
@@ -1165,7 +1175,7 @@ final class NativeMTPHardwareE2ERunner {
             "hardware_class": NativeMTPAdmissionSidecar.canonicalHardwareClass(machine.chip),
             "ram_bytes": machine.ramGB * 1_073_741_824,
             "qualified_slots": maxBatch,
-            "max_native_active_rows": maxNativeActiveRows,
+            "max_native_active_rows": diagnosticEligibilityBypass ? min(maxNativeActiveRows, family.signedMaxNativeActiveRows ?? maxNativeActiveRows) : maxNativeActiveRows,
             // A Qwen3.5 lab tuple qualifies sampled rows too (target-sample
             // exact match), so temperature cells measure the native path; a
             // glm5_next tuple is greedy only.

@@ -233,7 +233,17 @@ struct NativeMTPSelector: Sendable {
         guard request.stop.isEmpty || nativeCapability.supportsStopSequences else {
             return .capabilityMismatch
         }
-        guard request.topLevelKeys.isSubset(of: admittedTopLevelKeys),
+        var eligibleKeys = admittedTopLevelKeys
+        var labToolsDiagnostic = false
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        // Measurement only: the exploratory bench preserves the actual tool
+        // prompt while exercising the existing verifier. Plain release builds
+        // contain neither this environment hook nor the bypass.
+        labToolsDiagnostic = ProcessInfo.processInfo.environment["MACPROVIDER_MTP_BENCH_DIAGNOSTIC_ELIGIBILITY"] == "1"
+            && CommandLine.arguments.contains("native-mtp-bench")
+        if labToolsDiagnostic { eligibleKeys.insert("chat_template_kwargs") }
+        #endif
+        guard request.topLevelKeys.isSubset(of: eligibleKeys),
               request.streamOptionKeys.isSubset(of: admittedStreamOptionKeys) else {
             return .unknownRequestField
         }
@@ -273,9 +283,9 @@ struct NativeMTPSelector: Sendable {
         guard case .text = request.responseFormat else {
             return .structuredOutput
         }
-        guard hasNoTools(request.promptSource.tools),
-              isAbsentOrNull(request.promptSource.toolChoice),
-              !hasToolTurnState(request.messages) else {
+        guard labToolsDiagnostic || (hasNoTools(request.promptSource.tools)
+              && isAbsentOrNull(request.promptSource.toolChoice)
+              && !hasToolTurnState(request.messages)) else {
             return .tools
         }
         guard isAbsentNullOrFalse(request.promptSource.logprobs),

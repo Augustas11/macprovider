@@ -92,10 +92,68 @@ final class NativeMTPBenchGLMTests: XCTestCase {
         }
     }
 
+    func testExploratoryDiagnosticCanMeasureSampledConcurrentNativeRows() throws {
+        var object = try glmPolicyObject()
+        object["schema"] = "macprovider.native-mtp-exploratory-policy.v1"
+        object["slots"] = [1, 2, 4]
+        object["gated_cells"] = []
+        object["temperature"] = 1.0
+        object["top_p"] = 0.95
+        object["request_shape"] = "tools_history_reasoning"
+        object["max_native_active_rows"] = 4
+        object["diagnostic_eligibility_bypass"] = true
+        let policy = try load(object)
+        XCTAssertEqual(policy.topP, 0.95)
+        XCTAssertEqual(policy.requestShape, "tools_history_reasoning")
+        XCTAssertTrue(policy.diagnosticEligibilityBypass)
+        XCTAssertNoThrow(try policy.validateFamily(.glm5Next))
+        XCTAssertEqual(policy.maxNativeActiveRows(for: NativeMTPBenchCell(slots: 4, promptTokens: 1536, maxTokens: 128)), 4)
+    }
+
+    func testDiagnosticBypassCannotQualifyAnAdmissionPolicy() throws {
+        var object = try glmPolicyObject()
+        object["diagnostic_eligibility_bypass"] = true
+        XCTAssertThrowsError(try load(object))
+    }
+
+    func testPolicyRejectsInvalidSamplerShapeAndBypassTypes() throws {
+        let base = try glmPolicyObject()
+        for value in [0, -1, 1.1, true, "0.95"] as [Any] {
+            var object = base
+            object["top_p"] = value
+            XCTAssertThrowsError(try load(object), "top_p=\(value)")
+        }
+        var object = base
+        object["request_shape"] = "unknown"
+        XCTAssertThrowsError(try load(object))
+        object = base
+        object["diagnostic_eligibility_bypass"] = 1
+        XCTAssertThrowsError(try load(object))
+    }
+
+    func testRawTokenParityCaptureIsExplicitlyOptedIn() {
+        let sanitized = NativeMTPLabCommittedTokenTimingObserver()
+        sanitized.record(requestID: "r", ordinal: 0, outputCount: 1, tokenID: 42)
+        XCTAssertNil(sanitized.snapshot().first?.tokenID)
+        let parity = NativeMTPLabCommittedTokenTimingObserver(captureTokenIDs: true)
+        parity.record(requestID: "r", ordinal: 0, outputCount: 1, tokenID: 42)
+        XCTAssertEqual(parity.snapshot().first?.tokenID, 42)
+    }
+
     func testValidateOnlyIsAnOptInFlag() throws {
         let base = ["--root", "/fixture", "--policy", "/p.json", "--out", "/o.jsonl", "--provider-commit", String(repeating: "a", count: 40)]
         XCTAssertFalse(try NativeMTPBenchCommand.parse(base).validateOnly)
         XCTAssertTrue(try NativeMTPBenchCommand.parse(base + ["--validate-only"]).validateOnly)
+    }
+
+    func testPolicyListParsesSeveralFrozenPolicies() throws {
+        let command = try NativeMTPBenchCommand.parse([
+            "--root", "/fixture", "--out", "/results", "--provider-commit", String(repeating: "a", count: 40),
+            "--policy-list", "/greedy.json", "/sampled.json", "--phase", "matrix",
+        ])
+        XCTAssertNil(command.policyPath)
+        XCTAssertEqual(command.policyList, ["/greedy.json", "/sampled.json"])
+        XCTAssertEqual(command.phase, .matrix)
     }
 
     private func glmPolicyObject() throws -> [String: Any] {

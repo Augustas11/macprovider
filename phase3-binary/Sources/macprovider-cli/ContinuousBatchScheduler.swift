@@ -1220,18 +1220,25 @@ final class NativeMTPLabCommittedTokenTimingObserver: @unchecked Sendable {
         let ordinal: Int
         /// Buyer-visible output token count after this commit is applied.
         let outputCount: Int
+        var tokenID: Int? = nil
     }
 
     private let lock = NSLock()
     private var events: [Event] = []
+    private let captureTokenIDs: Bool
 
-    func record(requestID: String, ordinal: Int, outputCount: Int) {
+    init(captureTokenIDs: Bool = false) {
+        self.captureTokenIDs = captureTokenIDs
+    }
+
+    func record(requestID: String, ordinal: Int, outputCount: Int, tokenID: Int? = nil) {
         lock.lock()
         events.append(Event(
             requestID: requestID,
             monotonicNanoseconds: DispatchTime.now().uptimeNanoseconds,
             ordinal: ordinal,
-            outputCount: outputCount
+            outputCount: outputCount,
+            tokenID: captureTokenIDs ? tokenID : nil
         ))
         lock.unlock()
     }
@@ -5148,7 +5155,8 @@ actor ContinuousBatchScheduler {
                 labNativeMTPCommitTimingObserver?.record(
                     requestID: row.request.id,
                     ordinal: firstVisibleIndex + offset,
-                    outputCount: firstVisibleIndex + offset + 1
+                    outputCount: firstVisibleIndex + offset + 1,
+                    tokenID: visibleTokens[offset]
                 )
             }
         }
