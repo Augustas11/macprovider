@@ -6795,16 +6795,17 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         ])
     }
 
-    func testNativeMTPLabCommitTimingObserverRecordsOnlyMetadata() {
+    func testNativeMTPLabCommitTimingObserverRecordsOptionalTokenIDs() {
         let observer = NativeMTPLabCommittedTokenTimingObserver()
 
         observer.record(requestID: "row-a", ordinal: 0, outputCount: 1)
-        observer.record(requestID: "row-a", ordinal: 1, outputCount: 2)
+        observer.record(requestID: "row-a", ordinal: 1, outputCount: 2, tokenID: 19)
 
         let events = observer.snapshot()
         XCTAssertEqual(events.map(\.requestID), ["row-a", "row-a"])
         XCTAssertEqual(events.map(\.ordinal), [0, 1])
         XCTAssertEqual(events.map(\.outputCount), [1, 2])
+        XCTAssertEqual(events.map(\.tokenID), [nil, 19])
         XCTAssertGreaterThan(events[0].monotonicNanoseconds, 0)
         XCTAssertGreaterThanOrEqual(events[1].monotonicNanoseconds, events[0].monotonicNanoseconds)
     }
@@ -6842,6 +6843,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertEqual(events.map(\.requestID), ["ordinary", "ordinary"])
         XCTAssertEqual(events.map(\.ordinal), [0, 1])
         XCTAssertEqual(events.map(\.outputCount), [1, 2])
+        XCTAssertEqual(events.map(\.tokenID), [31, 32])
     }
 
     func testLabDecodeOutputCapLimitsNativeMultiTokenRoundBeforeFinalize() async throws {
@@ -6881,6 +6883,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertEqual(events.map(\.requestID), ["native", "native", "native"])
         XCTAssertEqual(events.map(\.ordinal), [0, 1, 2])
         XCTAssertEqual(events.map(\.outputCount), [1, 2, 3])
+        XCTAssertEqual(events.map(\.tokenID), [20, 21, 22])
     }
 
     private func assertNativeMTPTrapCancelledOnlyAtSelectedPhase(

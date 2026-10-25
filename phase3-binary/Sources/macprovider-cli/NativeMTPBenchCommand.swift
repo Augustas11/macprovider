@@ -108,8 +108,88 @@ enum NativeMTPBenchPhase: String, ExpressibleByArgument, Sendable {
     case sustained
 }
 
+/// Hash every committed token as an unsigned 64-bit little-endian word.
+/// Parser truncation and reasoning splits do not redefine this sequence.
+struct NativeMTPBenchTokenEvidence: Sendable {
+    let count: Int
+    let sha256: String
+    let complete: Bool
+    let ttftSeconds: Double?
+    let interTokenGaps: [Double]
+
+    init(events: [NativeMTPLabCommittedTokenTimingObserver.Event], startedNanoseconds: UInt64, generatedTokens: Int) {
+        count = events.count
+        var data = Data()
+        var valid = generatedTokens == 0 || !events.isEmpty
+        var previous = startedNanoseconds
+        for (index, event) in events.enumerated() {
+            if event.ordinal != index || event.outputCount != index + 1
+                || event.monotonicNanoseconds < previous {
+                valid = false
+            }
+            previous = event.monotonicNanoseconds
+            if let tokenID = event.tokenID, tokenID >= 0 {
+                var word = UInt64(tokenID).littleEndian
+                withUnsafeBytes(of: &word) { data.append(contentsOf: $0) }
+            } else {
+                valid = false
+            }
+        }
+        sha256 = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        complete = valid
+        ttftSeconds = events.first.flatMap {
+            $0.monotonicNanoseconds >= startedNanoseconds
+                ? Double($0.monotonicNanoseconds - startedNanoseconds) / 1_000_000_000 : nil
+        }
+        interTokenGaps = zip(events.dropFirst(), events).map {
+            Double($0.monotonicNanoseconds >= $1.monotonicNanoseconds
+                ? $0.monotonicNanoseconds - $1.monotonicNanoseconds : 0) / 1_000_000_000
+        }
+    }
+}
+
 /// R015 prompt realization helpers (`deterministic_synthetic_unique_v2`).
 enum NativeMTPBenchPrompts {
+    static func makeRequest(
+        modelID: String,
+        requestID: String,
+        prompt: String,
+        maxTokens: Int,
+        temperature: Double,
+        topP: Double = 1,
+        requestShape: String = "plain"
+    ) throws -> ChatCompletionRequest {
+        var object: [String: Any] = [
+            "model": modelID,
+            "messages": [["role": "user", "content": prompt]],
+            "max_tokens": maxTokens,
+            "temperature": temperature,
+            "top_p": topP,
+            "stream": true,
+        ]
+        if requestShape == "tools" {
+            object["reasoning_effort"] = "high"
+            object["tools"] = [[
+                "type": "function",
+                "function": [
+                    "name": "measurement_lookup",
+                    "description": "Return a deterministic measurement value.",
+                    "parameters": ["type": "object", "properties": [:], "additionalProperties": false],
+                ],
+            ]]
+            object["messages"] = [
+                ["role": "user", "content": "Look up the measurement value."],
+                ["role": "assistant", "content": "", "reasoning_content": "I will look up the measurement value.",
+                 "tool_calls": [["id": "measurement_call", "type": "function",
+                                 "function": ["name": "measurement_lookup", "arguments": "{}"]]]],
+                ["role": "tool", "tool_call_id": "measurement_call", "content": "42"],
+                ["role": "user", "content": prompt],
+            ]
+        }
+        let data = try JSONSerialization.data(withJSONObject: object)
+        return try ChatCompletionRequest.parse(data: data).withRequestID(requestID)
+    }
+
     /// The fewest salts whose prompt's served count reaches `target`, and
     /// that count. Each salt appends tokens, so the count rises with the salt
     /// count and this bisection returns the text that appending one salt at a
@@ -495,32 +575,47 @@ private final class NativeMTPBenchRunner {
         let thermalStart = ProcessInfo.processInfo.thermalState.label
         let modelID = self.modelID
         let temperature = policy.temperature
+        let topP = policy.topP
+        let requestShape = policy.requestShape
         let arrivalIntervalNanoseconds = UInt64(policy.arrivalIntervalMS) * 1_000_000
-        let results = try await withThrowingTaskGroup(of: NativeMTPBenchRequestResult.self) { group in
-            for (index, prompt) in prompts.enumerated() {
-                group.addTask {
-                    if arrivalIntervalNanoseconds > 0, index > 0 {
-                        try await Task.sleep(nanoseconds: UInt64(index) * arrivalIntervalNanoseconds)
+        let tokenObserver = NativeMTPLabCommittedTokenTimingObserver()
+        _ = await runtime.installLabNativeMTPCommitTimingObserver(tokenObserver)
+        let commitTiming = policy.exploratory
+        let results: [NativeMTPBenchRequestResult]
+        do {
+            results = try await withThrowingTaskGroup(of: NativeMTPBenchRequestResult.self) { group in
+                for (index, prompt) in prompts.enumerated() {
+                    group.addTask {
+                        if arrivalIntervalNanoseconds > 0, index > 0 {
+                            try await Task.sleep(nanoseconds: UInt64(index) * arrivalIntervalNanoseconds)
+                        }
+                        // Both paths use the same request ID (separate runtimes),
+                        // so a sampled row draws the same seeded stream on each.
+                        let requestID = "\(cell.id)-b\(block)-r\(index)"
+                        let request = try NativeMTPBenchPrompts.makeRequest(
+                            modelID: modelID,
+                            requestID: requestID,
+                            prompt: prompt,
+                            maxTokens: cell.maxTokens,
+                            temperature: temperature,
+                            topP: topP,
+                            requestShape: requestShape
+                        )
+                        return try await Self.runStreamingRequest(request, runtime: runtime, tokenObserver: tokenObserver, commitTiming: commitTiming)
                     }
-                    // Both paths use the same request ID (separate runtimes),
-                    // so a sampled row draws the same seeded stream on each.
-                    let requestID = "\(cell.id)-b\(block)-r\(index)"
-                    let request = try Self.makeRequest(
-                        modelID: modelID,
-                        requestID: requestID,
-                        prompt: prompt,
-                        maxTokens: cell.maxTokens,
-                        temperature: temperature
-                    )
-                    return try await Self.runStreamingRequest(request, runtime: runtime)
                 }
+                var values: [NativeMTPBenchRequestResult] = []
+                for try await value in group {
+                    values.append(value)
+                }
+                return values.sorted { $0.requestID < $1.requestID }
             }
-            var values: [NativeMTPBenchRequestResult] = []
-            for try await value in group {
-                values.append(value)
-            }
-            return values.sorted { $0.requestID < $1.requestID }
+        } catch {
+            _ = await runtime.installLabNativeMTPCommitTimingObserver(nil)
+            memorySampler.stop()
+            throw error
         }
+        _ = await runtime.installLabNativeMTPCommitTimingObserver(nil)
         let ended = Date()
         memorySampler.stop()
         let statusAfter = await runtime.currentSnapshot().nativeMTPStatus
@@ -544,10 +639,14 @@ private final class NativeMTPBenchRunner {
             } ?? []
             : []
         // A SPEC-048-R007 load-gate downgrade is the policy working, not a
-        // fallback; every other non-native admission still fails the run.
+        // fallback; exploratory request-feature refusals are recorded separately.
         let loadGateDowngrades = admissions.filter {
             $0.admission.effectivePath != .nativeMTP
                 && $0.admission.selection.nativeMTPReason == .capacityAboveNativeBound
+        }.count
+        let featureGateObservations = admissions.filter {
+            $0.admission.effectivePath != .nativeMTP
+                && policy.observesFeatureGate($0.admission.selection.nativeMTPReason)
         }.count
         var run = NativeMTPBenchRunResult(
             cell: cell,
@@ -575,11 +674,12 @@ private final class NativeMTPBenchRunner {
             finishReasons: results.map(\.completion.finishReason),
             capacityRejections: Int(statusDelta.capacityRejections),
             fallbacks: Int(statusDelta.preoutputFallbacks + statusDelta.postoutputFailures),
-            errors: 0,
+            errors: results.filter { !$0.tokenEvidence.complete }.count,
             nativeAdmissions: admissions.filter { $0.admission.effectivePath == .nativeMTP }.count,
             nativeRequests: path == .nativeMTP ? results.count : 0,
-            nonNativeAdmissions: admissions.filter { $0.admission.effectivePath != .nativeMTP }.count - loadGateDowngrades,
+            nonNativeAdmissions: admissions.filter { $0.admission.effectivePath != .nativeMTP }.count - loadGateDowngrades - featureGateObservations,
             loadGateDowngrades: loadGateDowngrades,
+            featureGateObservations: featureGateObservations,
             missingNativeAdmissions: path == .nativeMTP ? max(0, results.count - admissions.count) : 0,
             effectivePaths: admissions.map {
                 [
@@ -634,14 +734,18 @@ private final class NativeMTPBenchRunner {
         }
         let finalUpper = upper
         let finalTarget = target
+        let topP = policy.topP
+        let requestShape = policy.requestShape
         return try await container.perform { context in
             func servedCount(_ text: String) async throws -> Int {
-                let request = try Self.makeRequest(
+                let request = try NativeMTPBenchPrompts.makeRequest(
                     modelID: modelID,
                     requestID: "prompt-sizing",
                     prompt: text,
                     maxTokens: 1,
-                    temperature: 0
+                    temperature: 0,
+                    topP: topP,
+                    requestShape: requestShape
                 )
                 let input = try ModelRuntime.userInput(
                     for: request,
@@ -675,8 +779,20 @@ private final class NativeMTPBenchRunner {
     private func parityMismatch(ordinary: NativeMTPBenchRunResult, native: NativeMTPBenchRunResult) -> Bool {
         guard ordinary.requests.count == native.requests.count else { return true }
         for (lhs, rhs) in zip(ordinary.requests, native.requests) {
+            if lhs.requestID != rhs.requestID { return true }
+            guard lhs.tokenEvidence.complete, rhs.tokenEvidence.complete,
+                  lhs.tokenEvidence.count == rhs.tokenEvidence.count,
+                  lhs.tokenEvidence.sha256 == rhs.tokenEvidence.sha256 else { return true }
             if lhs.completion.content != rhs.completion.content { return true }
             if lhs.completion.reasoningContent != rhs.completion.reasoningContent { return true }
+            // API tool IDs are assigned UUIDs after decoding, not model tokens.
+            let lhsCalls = lhs.completion.toolCalls ?? []
+            let rhsCalls = rhs.completion.toolCalls ?? []
+            if lhsCalls.count != rhsCalls.count { return true }
+            for (left, right) in zip(lhsCalls, rhsCalls) {
+                if left.functionName != right.functionName || left.arguments != right.arguments { return true }
+            }
+            if lhs.completion.finishReason != rhs.completion.finishReason { return true }
             if lhs.completion.completionTokens != rhs.completion.completionTokens { return true }
         }
         return false
@@ -712,39 +828,30 @@ private final class NativeMTPBenchRunner {
             "qualified_slots": policy.qualifiedSlots.map { $0 as Any } ?? NSNull(),
             "maximum_prompt_tokens": policy.maximumPromptTokens.map { $0 as Any } ?? NSNull(),
             "temperature": policy.temperature,
+            "top_p": policy.topP,
+            "request_shape": policy.requestShape,
+            "request_reasoning_effort": policy.requestShape == "tools" ? "high" as Any : NSNull(),
+            "fresh_thinking_enabled": false,
+            "thinking_measurement_limit": "baseline runtime keeps enable_thinking=false; tools shape preserves historical reasoning",
             "arrival_interval_ms": policy.arrivalIntervalMS,
             // 2: run records carry decode-only throughput (SPEC-048-R015).
             // 3: effective_paths carry each admission's other_active_rows.
             // 4: native runs carry the scheduler's gated_* load-gate evidence.
             // 5: sustained records carry sustained_window_id.
-            "run_metrics_version": 5,
+            // 6: committed token-ID digest/count/coverage; exploratory commit timing.
+            "run_metrics_version": 6,
         ]
     }
 
-    private static func makeRequest(
-        modelID: String,
-        requestID: String,
-        prompt: String,
-        maxTokens: Int,
-        temperature: Double
-    ) throws -> ChatCompletionRequest {
-        let object: [String: Any] = [
-            "model": modelID,
-            "messages": [["role": "user", "content": prompt]],
-            "max_tokens": maxTokens,
-            "temperature": temperature,
-            "top_p": 1.0,
-            "stream": true,
-        ]
-        let data = try JSONSerialization.data(withJSONObject: object)
-        return try ChatCompletionRequest.parse(data: data).withRequestID(requestID)
-    }
-
-    private static func runStreamingRequest(_ request: ChatCompletionRequest, runtime: ModelRuntime) async throws -> NativeMTPBenchRequestResult {
+    private static func runStreamingRequest(
+        _ request: ChatCompletionRequest, runtime: ModelRuntime,
+        tokenObserver: NativeMTPLabCommittedTokenTimingObserver, commitTiming: Bool
+    ) async throws -> NativeMTPBenchRequestResult {
         guard let requestID = request.requestID else {
             throw NativeMTPBenchError.assertionFailed("request missing id")
         }
         let start = Date()
+        let startedNanoseconds = DispatchTime.now().uptimeNanoseconds
         let handle = try await runtime.acquireRequestHandle(request)
         let chunks = NativeMTPChunkTimeRecorder()
         let completion: CompletionResult
@@ -759,13 +866,19 @@ private final class NativeMTPBenchRunner {
         await runtime.unregisterInFlight(handle.registrationID)
         let end = Date()
         let timing = chunks.timing(since: start)
+        let tokenEvidence = NativeMTPBenchTokenEvidence(
+            events: tokenObserver.snapshot().filter { $0.requestID == requestID },
+            startedNanoseconds: startedNanoseconds,
+            generatedTokens: completion.generatedCompletionTokens
+        )
         return NativeMTPBenchRequestResult(
             requestID: requestID,
             startedAt: start,
             completion: completion,
             wallSeconds: end.timeIntervalSince(start),
-            ttftSeconds: timing.ttftSeconds,
-            interTokenGaps: timing.interTokenGaps
+            ttftSeconds: commitTiming ? tokenEvidence.ttftSeconds : timing.ttftSeconds,
+            interTokenGaps: commitTiming ? tokenEvidence.interTokenGaps : timing.interTokenGaps,
+            tokenEvidence: tokenEvidence
         )
     }
 
@@ -898,6 +1011,7 @@ private struct NativeMTPBenchRequestResult: Sendable {
     let wallSeconds: TimeInterval
     let ttftSeconds: TimeInterval?
     let interTokenGaps: [TimeInterval]
+    let tokenEvidence: NativeMTPBenchTokenEvidence
 
     /// SPEC-048 parity covers every generated token, so a SPEC-018 §3.12
     /// reasoning split is hashed too: reasoning, a NUL, then content. Without
@@ -938,6 +1052,7 @@ private struct NativeMTPBenchRunResult {
     let nativeRequests: Int
     var nonNativeAdmissions: Int
     let loadGateDowngrades: Int
+    let featureGateObservations: Int
     let missingNativeAdmissions: Int
     let effectivePaths: [[String: Any]]
     let statusDelta: NativeMTPStatusDelta
@@ -988,6 +1103,9 @@ private struct NativeMTPBenchRunResult {
                 return [
                     "request_id": request.requestID,
                     "content_sha256": request.contentSHA256,
+                    "committed_token_ids_sha256": request.tokenEvidence.sha256,
+                    "committed_token_ids_count": request.tokenEvidence.count,
+                    "committed_token_ids_complete": request.tokenEvidence.complete,
                     "completion_tokens": request.completion.completionTokens,
                     "committed_tps": perRequestTPS[index],
                     "decode_tps": perRequestDecodeTPS[index].map { $0 as Any } ?? NSNull(),
@@ -1009,6 +1127,7 @@ private struct NativeMTPBenchRunResult {
             "native_requests": nativeRequests,
             "non_native_admissions": nonNativeAdmissions,
             "load_gate_downgrades": loadGateDowngrades,
+            "feature_gate_observations": featureGateObservations,
             "missing_native_admissions": missingNativeAdmissions,
             "effective_paths": effectivePaths,
             "mtp_proposed_tokens": statusDelta.proposedTokens,
@@ -1268,6 +1387,9 @@ struct NativeMTPBenchPolicy {
     /// sampled row's seed derives from its request ID, which both paths
     /// share, so seeded parity is still a token-identity comparison.
     let temperature: Double
+    let topP: Double
+    /// Exploratory GLM tool loop includes assistant reasoning and tool history.
+    let requestShape: String
     /// Staggered arrival: row `i` of a block starts `i *` this many
     /// milliseconds after the block, so load crosses the native active-row
     /// bound mid-flight. Zero submits every row at once.
@@ -1290,7 +1412,7 @@ struct NativeMTPBenchPolicy {
             "provider_commit", "mlx_fork_revision", "quantization", "cache_mode", "proposal_depth",
             "run_order", "prompt_corpus", "exclusion_rules", "confidence_method",
             "max_native_active_rows", "qualified_slots", "temperature", "arrival_interval_ms",
-            "gated_cells", "maximum_prompt_tokens",
+            "gated_cells", "maximum_prompt_tokens", "top_p", "request_shape",
         ]
         let unknown = Set(object.keys).subtracting(allowed)
         guard unknown.isEmpty else { throw NativeMTPBenchError.invalidPolicy("unknown keys: \(unknown.sorted())") }
@@ -1302,6 +1424,24 @@ struct NativeMTPBenchPolicy {
             exploratory = true
         default:
             throw NativeMTPBenchError.invalidPolicy("bad schema")
+        }
+        if !exploratory, object["top_p"] != nil || object["request_shape"] != nil {
+            throw NativeMTPBenchError.invalidPolicy("top_p and request_shape require exploratory schema")
+        }
+        let topP: Double
+        if let raw = object["top_p"] {
+            guard let number = raw as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+                  number.doubleValue.isFinite, number.doubleValue > 0, number.doubleValue <= 1 else {
+                throw NativeMTPBenchError.invalidPolicy("top_p must be a number in (0, 1]")
+            }
+            topP = number.doubleValue
+        } else {
+            topP = 1
+        }
+        let requestShape = object["request_shape"] as? String ?? "plain"
+        guard object["request_shape"] == nil || object["request_shape"] is String,
+              ["plain", "tools"].contains(requestShape) else {
+            throw NativeMTPBenchError.invalidPolicy("request_shape must be plain or tools")
         }
         let thresholds = try dictionary(object, "thresholds")
         try requireThresholds(thresholds)
@@ -1339,6 +1479,8 @@ struct NativeMTPBenchPolicy {
                 ? nil
                 : try intAtLeast(object, "max_native_active_rows", 1),
             temperature: try samplingTemperature(object, "temperature"),
+            topP: topP,
+            requestShape: requestShape,
             arrivalIntervalMS: object["arrival_interval_ms"] == nil
                 ? 0
                 : try nonnegativeInt(object, "arrival_interval_ms"),
@@ -1390,11 +1532,11 @@ struct NativeMTPBenchPolicy {
     }
 
     /// The fixture family's own tuple limits, checked before any model load:
-    /// a greedy-only family (glm5_next) routes sampled rows to ordinary
-    /// decode, and a family that signs a native active-row bound measures at
-    /// most that bound, so either mismatch could only fail after the load.
+    /// formal policies require native-eligible sampling and the family row
+    /// bound. Exploratory policies measure selector refusals without changing
+    /// the actual capability or signed policy.
     func validateFamily(_ family: NativeMTPHardwareE2EFamily) throws {
-        if !family.admitsSampledRows, temperature > 0 {
+        if !exploratory, !family.admitsSampledRows, temperature > 0 || topP != 1 {
             throw NativeMTPBenchError.invalidPolicy(
                 "temperature must be 0: \(family.familyAdapter) admits greedy rows only"
             )
@@ -1406,6 +1548,18 @@ struct NativeMTPBenchPolicy {
                 )
             }
         }
+    }
+
+    /// Expected selector refusals remain observations in an exploratory run;
+    /// tuple, capability and execution failures still fail the measurement.
+    func observesFeatureGate(_ reason: NativeMTPSelectorReason?) -> Bool {
+        guard exploratory else { return false }
+        return (reason == .sampling && (temperature != 0 || topP != 1))
+            || (reason == .tools && requestShape == "tools")
+            || (reason == .reasoningOrTemplate && requestShape == "tools")
+            // reasoning_effort is supported by request parsing/template input,
+            // but is not yet admitted by the native selector's key allowlist.
+            || (reason == .unknownRequestField && requestShape == "tools")
     }
 
     /// The runtime bound for one cell. A cell's runtime is qualified at its
