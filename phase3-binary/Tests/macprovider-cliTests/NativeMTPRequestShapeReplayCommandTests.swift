@@ -1,5 +1,6 @@
 #if DEBUG || MACPROVIDER_LAB_HARNESS
 import Foundation
+import CryptoKit
 import XCTest
 @testable import macprovider_cli
 
@@ -873,6 +874,217 @@ final class NativeMTPRequestShapeReplayCommandTests: XCTestCase {
             usableRetainedHandoff: false,
             recurrentCheckpointCount: 0
         )
+    }
+
+
+    func testV2FullTemplateCanonicalDigestMatchesPythonFixture() throws {
+        let data = Data(#"[{"anonymous_cache_group_sha256":null,"assistant_tool_call_count":0,"completion_tokens":64,"conversation_cache_cached_prompt_tokens":0,"conversation_cache_lease":"not_applicable","conversation_cache_retained_handoff":false,"conversation_key_cache_only":false,"conversation_key_present":false,"effective_max_output_tokens":96,"effective_reasoning_effort":null,"frequency_penalty_nonzero":false,"generated_completion_tokens":64,"logit_bias_geometry":{"present":false},"logit_bias_present":false,"logit_controls_requested":false,"logprobs_requested":false,"min_p_nonzero":false,"multimodal_requested":false,"multiple_completions_requested":false,"observed_effective_path":"ordinary","observed_selector_eligible":true,"observed_selector_reason":"eligible","parallel_tool_calls_state":"absent","presence_penalty_nonzero":false,"projected_selector_eligible":true,"projected_selector_reason":"eligible","prompt_tokens":256,"reasoning_effort_state":"absent","reasoning_or_template_model":false,"repetition_penalty_nondefault":false,"requested_frequency_penalty":0,"requested_max_completion_tokens":96,"requested_min_p":null,"requested_n":1,"requested_presence_penalty":0,"requested_repetition_penalty":1,"requested_temperature":0.0,"requested_top_k":null,"requested_top_logprobs":null,"requested_top_p":1.0,"response_format_kind":"text","response_schema_geometry":{"kind":"text"},"sampling_requested":false,"served_model_family":"glm5_next_mtp_v1","served_model_hash_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","served_weights_manifest_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","shape_id":"digest-fixture","stop_sequence_utf8_length_buckets":{},"stop_sequence_utf8_lengths":[],"stop_sequences":0,"stream":true,"structured_output_requested":false,"target_completion_tokens":64,"tool_choice_function_index":null,"tool_choice_kind":"absent","tool_choice_present":false,"tool_count":0,"tool_grammar_required":false,"tool_message_count":0,"tool_parameter_schema_geometries":[],"tool_turn_state_present":false,"tools_present":false,"top_k_present":false,"top_logprobs_requested":false,"unknown_request_fields_present":false,"unknown_stream_option_keys_present":false,"unknown_top_level_keys_present":false}]"#.utf8)
+        let rows = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [[String: Any]])
+        XCTAssertEqual(try NativeMTPReplayV2Projection.sampleDigest(rows),
+                       "566ecee05d09d92e8ecdfff0d5b8a531962765c0b58c8d4fd5ec79e974d9a698")
+    }
+
+    func testV2ObservationDoesNotBecomeCandidateEligibility() throws {
+        let observed = v2Shape("observed-native", extra: ["observed_selector_reason": "eligible",
+            "observed_selector_eligible": true, "observed_effective_path": "native_mtp"])
+        let capture = try NativeMTPRequestShapeReplayCapture.load(from: writeV2Capture([observed]))
+        XCTAssertTrue(capture.header.isV2)
+        XCTAssertEqual(capture.shapes[0].preCapacitySelectorReason, "eligible")
+        // A capture observation without a bound candidate projection is never
+        // silently treated as eligible candidate admission.
+        XCTAssertEqual(capture.shapes[0].projectedSelectorReason, "unknown_request_field")
+        XCTAssertNil(capture.shapes[0].sanitizedExport["pre_capacity_selector_reason"])
+        XCTAssertEqual(capture.shapes[0].sanitizedExport["observed_effective_path"] as? String, "native_mtp")
+    }
+
+    func testV2RejectsMixedSchemasMissingControlsAndWrongTypes() throws {
+        for key in NativeMTPReplayV2Validation.controls {
+            var missing = v2Shape("missing")
+            missing.removeValue(forKey: key)
+            XCTAssertThrowsError(try NativeMTPRequestShapeReplayCapture.load(from: writeV2Capture([missing])))
+        }
+        for extra: [String: Any] in [
+            ["unexpected": true], ["observed_selector_eligible": 1],
+            ["observed_selector_reason": "invented"], ["parallel_tool_calls_state": "null"],
+            ["reasoning_effort_state": "arbitrary buyer value"], ["effective_reasoning_effort": "arbitrary"],
+            ["tool_choice_function_index": 0], ["sequence": 2],
+            ["schema": NativeMTPRequestShapeCapture.schema],
+        ] {
+            XCTAssertThrowsError(try NativeMTPRequestShapeReplayCapture.load(from: writeV2Capture([v2Shape("invalid", extra: extra)])))
+        }
+        XCTAssertThrowsError(try NativeMTPRequestShapeReplayCapture.load(from: writeV2Capture([
+            v2Shape("repeated"), v2Shape("repeated", extra: ["sequence": 2]),
+        ])))
+        XCTAssertThrowsError(try NativeMTPRequestShapeReplayCapture.load(from: writeV2Capture([
+            v2Shape("off-native", extra: ["observed_selector_reason": "eligible", "observed_selector_eligible": true,
+                                          "observed_effective_path": "native_mtp"]),
+        ], mode: "off")))
+    }
+
+    func testV2UnknownControlsStayPendingWithoutRemovingWeight() throws {
+        let cases: [[String: Any]] = [
+            ["served_model_family": "unknown"], ["parallel_tool_calls_state": "unknown"],
+            ["reasoning_effort_state": "unknown"], ["unknown_top_level_keys_present": true],
+            ["tool_choice_kind": "other", "tool_choice_present": true],
+            ["served_model_hash_sha256": "unavailable"],
+        ]
+        for extra in cases {
+            let capture = try NativeMTPRequestShapeReplayCapture.load(from: writeV2Capture([v2Shape("pending", extra: extra)]))
+            let plan = try NativeMTPRequestShapeReplayPlan.make(capture: capture, blocks: 10, seed: 48015, qualifiedSlots: 4)
+            XCTAssertEqual(plan.sampleShapeCount, 1)
+            XCTAssertEqual(plan.omittedSampleShapeCount, 0)
+            XCTAssertEqual(plan.pendingSampleShapeCount, 1)
+            XCTAssertTrue(plan.pendingReason?.hasPrefix("PENDING_UNREPRODUCIBLE_CAPTURE:") == true)
+            XCTAssertEqual(plan.blocks[0].rows[0].targetCompletionTokens, 64)
+        }
+    }
+
+    func testV2ReconstructsReasoningParallelAndNamedChoiceThroughProductionParser() throws {
+        let geometry: [String: Any] = ["byte_count": 2, "max_depth": 1, "object_count": 1, "array_count": 0, "property_count": 0]
+        let value = v2Shape("named", extra: ["parallel_tool_calls_state": "false", "reasoning_effort_state": "none",
+            "effective_reasoning_effort": "low", "tools_present": true, "tool_count": 2,
+            "tool_parameter_schema_geometries": [geometry, geometry], "tool_choice_present": true,
+            "tool_choice_kind": "function", "tool_choice_function_index": 1, "tool_grammar_required": true])
+        let shape = try NativeMTPRequestShapeReplayShape(value, candidateReason: "tools")
+        let row = NativeMTPRequestShapeReplayRow(shape: shape, captureIndex: 0, blockIndex: 0, supportsSampling: true)
+        let base = try NativeMTPRequestShapeReplayRunner.makeRequest(modelID: "zai-org/glm-5.3-flash",
+            requestID: row.requestID, prompt: "synthetic", maxTokens: 128, temperature: 0, topP: 1, stream: true)
+        let request = try NativeMTPRequestShapeReplayRunner.applySyntheticStandIn(for: row, to: base)
+        XCTAssertEqual(request.parallelToolCalls, false)
+        XCTAssertEqual(request.reasoningEffort, "none")
+        XCTAssertEqual(request.templateReasoningEffort(for: request.model), "low")
+        XCTAssertTrue(GrammarConstraintState.isRequired(request))
+        let choice = try XCTUnwrap(request.promptSource.toolChoice)
+        let encoded = try JSONEncoder().encode(choice)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        XCTAssertEqual((object["function"] as? [String: Any])?["name"] as? String, "replay_tool_1")
+    }
+
+    func testCapacityFallbackDoesNotRewritePreCapacityEligibility() {
+        XCTAssertTrue(NativeMTPRequestShapeReplayRunner.admissionMatches(path: .nativeMTP,
+            expectedReason: "eligible", expectedPath: "native_mtp", actualReason: "capacity_above_native_bound", actualPath: "ordinary"))
+        for (path, expected, actualPath) in [(NativeMTPRequestShapeReplayPath.ordinary, "eligible", "ordinary"),
+                                             (.nativeMTP, "tools", "ordinary"), (.nativeMTP, "eligible", "native_mtp")] {
+            XCTAssertFalse(NativeMTPRequestShapeReplayRunner.admissionMatches(path: path,
+                expectedReason: expected, expectedPath: "native_mtp", actualReason: "capacity_above_native_bound", actualPath: actualPath))
+        }
+        XCTAssertFalse(NativeMTPRequestShapeReplayRunner.admissionMatches(path: .ordinary,
+            expectedReason: "mode_off", expectedPath: "ordinary", actualReason: "eligible", actualPath: "native_mtp"))
+    }
+
+    func testV2ParallelControlReconstructionMatchesProductionStopAfterToolGetter() throws {
+        for (state, expected, stopsAfterFirst) in [("absent", nil as Bool?, false), ("true", true, false), ("false", false, true)] {
+            let shape = try NativeMTPRequestShapeReplayShape(v2Shape("parallel-\(state)", extra: ["parallel_tool_calls_state": state]), candidateReason: state == "false" ? "tools" : "eligible")
+            let row = NativeMTPRequestShapeReplayRow(shape: shape, captureIndex: 0, blockIndex: 0, supportsSampling: true)
+            let base = try NativeMTPRequestShapeReplayRunner.makeRequest(modelID: "zai-org/glm-5.3-flash",
+                requestID: row.requestID, prompt: "synthetic", maxTokens: 128, temperature: 0, topP: 1, stream: true)
+            let request = try NativeMTPRequestShapeReplayRunner.applySyntheticStandIn(for: row, to: base)
+            XCTAssertEqual(request.parallelToolCalls, expected, state)
+            XCTAssertEqual(request.stopsAfterFirstCompleteToolCall, stopsAfterFirst, state)
+            XCTAssertEqual(request.topLevelKeys.contains("parallel_tool_calls"), state != "absent", state)
+        }
+    }
+
+    func testV2KeepsQualifiedCBSlotsEvenWhenAllShapesAreEligible() throws {
+        let shapes = try (0..<4).map { index in
+            try NativeMTPRequestShapeReplayShape(v2Shape("slot-\(index)", extra: ["sequence": index + 1]), candidateReason: "eligible")
+        }
+        let capture = NativeMTPRequestShapeReplayCapture(header: try NativeMTPRequestShapeReplayHeader(v2Header()), shapes: shapes)
+        let plan = try NativeMTPRequestShapeReplayPlan.make(capture: capture, blocks: 10, seed: 48015,
+            qualifiedSlots: 4, maxNativeActiveRows: 1, supportsSampling: true)
+        XCTAssertEqual(plan.blocks[0].runnableWaves.map(\.count), [4])
+        let legacyGLM = try NativeMTPRequestShapeReplayPlan.make(capture: capture, blocks: 10, seed: 48015,
+            qualifiedSlots: 4, maxNativeActiveRows: 1, preserveTotalSlots: true)
+        XCTAssertEqual(legacyGLM.blocks[0].runnableWaves.map(\.count), [4])
+    }
+
+    func testV2ProjectionBindsEveryInputAndFullCandidateShape() throws {
+        let capture = try NativeMTPRequestShapeReplayCapture.load(from: writeV2Capture([v2Shape("bound")]))
+        var template = capture.shapes[0].sanitizedExport
+        template["projected_selector_reason"] = "eligible"
+        template["projected_selector_eligible"] = true
+        let sampleSHA = try NativeMTPReplayV2Projection.sampleDigest([template])
+        let tuple: [String: Any] = ["maximum_prompt_tokens": 4096, "maximum_completion_tokens": 256,
+            "request_feature_profile": "native_mtp_sampled_text_v1", "supports_stop_sequences": true,
+            "supports_streaming": true, "supports_non_streaming": true, "has_qualified_row_mapped_transactions": true,
+            "maximum_proposal_depth": 1, "supports_current_processor": true, "supports_current_state_cache": true,
+            "tuple_admitted": true, "tuple_revoked": false, "revocation_state_available": true, "family_adapter": "glm5_next_mtp_v1"]
+        let tupleURL = try writeV2Object(tuple)
+        let tupleSHA = SHA256.hash(data: try Data(contentsOf: tupleURL)).map { String(format: "%02x", $0) }.joined()
+        let hash = String(repeating: "a", count: 64)
+        let schedule: [String: Any] = ["kind": "modeled_preregistered_staggered_arrivals", "source": "bench_policy.arrival_interval_ms",
+            "arrival_interval_ms": 25, "offset_rule": "wave_index_times_interval", "order": "capture_sequence", "identical_across_paths": true]
+        var plan: [String: Any] = ["schema": "macprovider.native-mtp-request-shape-replay-plan.v2",
+            "qualification_status": "PENDING_REAL_LAB_REPLAY", "policy_sha256": hash, "sample_digest_sha256": sampleSHA,
+            "source_capture_sha256": hash, "tuple_bounds_sha256": tupleSHA, "bench_policy_sha256": hash,
+            "projection_stage": "offline_sanitized_shape_projection_only", "capture_schema": capture.header.schema,
+            "capture_header": capture.header.object,
+            "sample_report": ["sampling_plan_id": "bounded", "sample_period_start": "2026-10-26T00:00:00Z",
+                "sample_period_end": "2026-10-26T01:00:00Z", "captured_request_count": 1, "captured_completion_tokens": 64,
+                "projected_request_count_per_block": 1, "representativeness_claim": "bounded preregistered persistable traffic"],
+            "replay_requirements": ["status": "PENDING", "reason": "requires measured paired replay", "must_provide": ["fresh timing"]],
+            "arrival_schedule": schedule, "blocks": (0..<10).map { ["block_index": $0, "request_shape_templates": [template], "metrics_status": "PENDING_REAL_REPLAY"] as [String: Any] }]
+        func load(_ value: [String: Any]) throws -> NativeMTPReplayV2Projection {
+            try NativeMTPReplayV2Projection.load(planURL: writeV2Object(value), tupleURL: tupleURL, capture: capture,
+                captureSHA: hash, policySHA: hash, benchPolicySHA: hash, sampleSHA: sampleSHA,
+                arrivalIntervalMS: 25, blocks: 10, modelID: "zai-org/glm-5.3-flash")
+        }
+        let bound = try load(plan)
+        XCTAssertEqual(bound.capture.shapes[0].candidateReason, "eligible")
+        XCTAssertEqual(bound.capture.shapes[0].preCapacitySelectorReason, "mode_off")
+        for key in ["policy_sha256", "source_capture_sha256", "tuple_bounds_sha256", "bench_policy_sha256", "sample_digest_sha256"] {
+            var drift = plan
+            drift[key] = String(repeating: "b", count: 64)
+            XCTAssertThrowsError(try load(drift), key)
+        }
+        plan["unexpected"] = true
+        XCTAssertThrowsError(try load(plan))
+    }
+
+    private func writeV2Object(_ object: [String: Any]) throws -> URL {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("replay-v2-\(UUID().uuidString).json")
+        try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]).write(to: url)
+        addTeardownBlock { try? FileManager.default.removeItem(at: url) }
+        return url
+    }
+
+    private func writeV2Capture(_ shapes: [[String: Any]], mode: String = "auto") throws -> URL {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("replay-v2-\(UUID().uuidString).jsonl")
+        let text = try ([v2Header(mode: mode)] + shapes).map(json).joined(separator: "\n") + "\n"
+        try Data(text.utf8).write(to: url)
+        addTeardownBlock { try? FileManager.default.removeItem(at: url) }
+        return url
+    }
+
+    private func v2Header(mode: String = "auto") -> [String: Any] {
+        ["schema": NativeMTPReplayV2Validation.captureSchema, "record_type": "header",
+         "captured_at": "2026-10-26T00:00:00Z", "sample_window_started_at": "2026-10-26T00:00:00Z",
+         "native_mtp_mode": mode, "capture_requires_native_mtp_off": false,
+         "sample_method": "opt_in_successful_persistable_completions_observation", "served_identity": "per_record_sha256",
+         "capture_role": "request_shape_observation_only", "build_source_commit": String(repeating: "a", count: 40),
+         "build_cdhash": String(repeating: "b", count: 40), "build_identity_complete": true,
+         "cli_version": "1.8.999", "max_records": 1000, "max_bytes": 10485760]
+    }
+
+    private func v2Shape(_ id: String, extra: [String: Any] = [:]) -> [String: Any] {
+        var value = shape(id)
+        value.removeValue(forKey: "max_completion_tokens_requested")
+        value.removeValue(forKey: "pre_capacity_selector_reason")
+        value.removeValue(forKey: "pre_capacity_eligible")
+        value.removeValue(forKey: "effective_path")
+        value["schema"] = NativeMTPReplayV2Validation.captureSchema
+        value["anonymous_cache_group_sha256"] = NSNull()
+        value["observed_selector_reason"] = "mode_off"
+        value["observed_selector_eligible"] = false
+        value["observed_effective_path"] = "ordinary"
+        value["served_model_family"] = "glm5_next_mtp_v1"
+        value["parallel_tool_calls_state"] = "absent"
+        value["reasoning_effort_state"] = "absent"
+        value["effective_reasoning_effort"] = NSNull()
+        value["tool_choice_function_index"] = NSNull()
+        value["tool_grammar_required"] = false
+        for (key, item) in extra { value[key] = item }
+        return value
     }
 
     private func writeCapture(_ shapes: [[String: Any]]) throws -> URL {

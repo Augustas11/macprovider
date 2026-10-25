@@ -21,6 +21,33 @@ the private engineering archive; the evidence code reads stays under
 - No unreleased local binary is joined to the live coordinator (SPEC-048 R014
   item 9).
 
+## Representative request-shape observations
+
+The existing v1 collector remains off-only. To observe an already-serving
+qualified tuple without changing its actual `off`/`auto` mode, explicitly select
+`MACPROVIDER_NATIVE_MTP_SHAPE_CAPTURE_SCHEMA=v2` with the existing capture-directory
+opt-in and bounded record/byte limits. A mode change starts a new capture file.
+The old signed GLM greedy profile keeps its plain-text scope on the new binary;
+expanded tools/history/reasoning and sampling require the signed sampled profile.
+Observation neither broadens admission nor activates an unqualified tuple.
+
+Before collection, durably preregister the persistable population, period,
+limits, omission accounting and modeled replay schedule. Review the exact
+sanitized capture/status bytes for privacy before projection. Preserve observed
+selection/path separately from candidate pre-capacity shape eligibility and
+fresh measured admission. Unknown or unreproducible controls leave qualification
+pending; do not drop their request/token weight or collect nonpersistable data.
+
+Use the matching v2 projection/replay with exact capture, tuple-bounds and policy
+bindings, including the existing bench-policy bytes. Execute fresh ordinary and
+mixed paired loads across the full qualified CB slots with the same frozen
+wave-index-times-`arrival_interval_ms` stagger and cache-conflict ordering.
+Capture completion order is not an observed arrival schedule. Count ordinary
+rows toward the signed native cap; do not split waves by native eligibility.
+An observation is not an ordinary control, and offline projection remains
+`PENDING_REAL_LAB_REPLAY`. SPEC-048 R015's existing representative, mixed-load
+and promotion gates still apply.
+
 ## Order
 
 Each step depends on the one before it. The first admission of a tuple comes

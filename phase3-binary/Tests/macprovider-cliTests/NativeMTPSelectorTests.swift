@@ -168,7 +168,7 @@ final class NativeMTPSelectorTests: XCTestCase {
             XCTAssertEqual(request.messages[1].reasoningContent, "I should use lookup.")
             XCTAssertEqual(NativeMTPSelector.reason(
                 request: request, mode: .auto,
-                nativeCapability: admittedCapability(family: "glm5_next_mtp_v1")
+                nativeCapability: admittedCapability(supportsSampling: true, family: "glm5_next_mtp_v1")
             ), .eligible, choice)
             // A family without this qualification retains the unknown-field gate.
             XCTAssertEqual(NativeMTPSelector.reason(
@@ -181,18 +181,53 @@ final class NativeMTPSelectorTests: XCTestCase {
             if let parallel { extra["parallel_tool_calls"] = parallel }
             XCTAssertEqual(NativeMTPSelector.reason(
                 request: try makeRequest(extra: extra), mode: .auto,
-                nativeCapability: admittedCapability(family: "glm5_next_mtp_v1")
+                nativeCapability: admittedCapability(supportsSampling: true, family: "glm5_next_mtp_v1")
             ), .eligible)
         }
         let serialTool = try makeRequest(extra: ["tools": tools, "parallel_tool_calls": false])
         XCTAssertEqual(NativeMTPSelector.reason(
             request: serialTool, mode: .auto,
-            nativeCapability: admittedCapability(family: "glm5_next_mtp_v1")
+            nativeCapability: admittedCapability(supportsSampling: true, family: "glm5_next_mtp_v1")
         ), .tools)
         let toolsOnly = try makeRequest(extra: ["tools": tools])
         XCTAssertEqual(NativeMTPSelector.reason(
             request: toolsOnly, mode: .auto, nativeCapability: admittedCapability()
         ), .tools)
+    }
+
+    func testGLMGreedyProfileIdentityRebindKeepsPriorShapeScope() throws {
+        let tools: [[String: Any]] = [["type": "function", "function": [
+            "name": "lookup", "parameters": ["type": "object"],
+        ]]]
+        let cases: [([String: Any], NativeMTPSelectorReason)] = [
+            (["tools": tools], .tools),
+            (["tool_choice": "none"], .tools),
+            (["reasoning_effort": "high"], .unknownRequestField),
+            (["reasoning_effort": NSNull()], .unknownRequestField),
+            (["parallel_tool_calls": true], .unknownRequestField),
+            (["parallel_tool_calls": false], .unknownRequestField),
+            (["messages": [
+                ["role": "assistant", "content": "", "tool_calls": [[
+                    "id": "call_lookup0000000001", "type": "function",
+                    "function": ["name": "lookup", "arguments": "{}"],
+                ]]],
+                ["role": "tool", "tool_call_id": "call_lookup0000000001", "content": "42"],
+            ]], .tools),
+        ]
+        for (extra, expected) in cases {
+            XCTAssertEqual(NativeMTPSelector.reason(
+                request: try makeRequest(extra: extra), mode: .auto,
+                nativeCapability: admittedCapability(family: "glm5_next_mtp_v1")
+            ), expected, String(describing: extra.keys))
+        }
+        XCTAssertEqual(NativeMTPSelector.reason(
+            request: try makeRequest(), mode: .auto,
+            nativeCapability: admittedCapability(family: "glm5_next_mtp_v1")
+        ), .eligible, "old greedy plain-text scope remains active")
+        XCTAssertEqual(NativeMTPSelector.reason(
+            request: try makeRequest(extra: ["reasoning_effort": "high"]), mode: .auto,
+            nativeCapability: admittedCapability(supportsSampling: true, family: "glm5_next_mtp_v1")
+        ), .eligible, "sampled signed profile authorizes expanded scope even at temperature zero")
     }
 
     func testGLMStillRejectsStatefulToolGrammarAndUnknownTemplateControls() throws {
@@ -205,7 +240,7 @@ final class NativeMTPSelectorTests: XCTestCase {
             XCTAssertTrue(GrammarConstraintState.isRequired(request))
             XCTAssertEqual(NativeMTPSelector.reason(
                 request: request, mode: .auto,
-                nativeCapability: admittedCapability(family: "glm5_next_mtp_v1")
+                nativeCapability: admittedCapability(supportsSampling: true, family: "glm5_next_mtp_v1")
             ), .tools)
         }
         let unknownControls: [[String: Any]] = [
@@ -215,7 +250,7 @@ final class NativeMTPSelectorTests: XCTestCase {
         for extra in unknownControls {
             XCTAssertEqual(NativeMTPSelector.reason(
                 request: try makeRequest(extra: extra), mode: .auto,
-                nativeCapability: admittedCapability(family: "glm5_next_mtp_v1")
+                nativeCapability: admittedCapability(supportsSampling: true, family: "glm5_next_mtp_v1")
             ), .unknownRequestField)
         }
     }

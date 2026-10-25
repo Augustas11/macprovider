@@ -753,15 +753,19 @@ selects ordinary with reason `sampling`. The remaining generation-affecting
 allowlist is: absent/default `top_k`, absent/zero `min_p`, zero frequency and
 presence penalties, absent/default-one repetition penalty, `n == 1`, no logit
 bias, no `logprobs` or `top_logprobs`, plain-text response format, no Harmony
-protocol, and text-only messages. For `glm5_next_mtp_v1`, both profiles also
-admit ordinary-parser-supported `reasoning_effort`, tool definitions, tool-call
-history (including assistant reasoning content), and unconstrained `tool_choice`
+protocol, and text-only messages. For `glm5_next_mtp_v1`, only the signed
+`native_mtp_sampled_text_v1` profile also admits ordinary-parser-supported
+`reasoning_effort`, tool definitions, tool-call history (including assistant
+reasoning content), and unconstrained `tool_choice`
 `auto`/`none`. Omitted or true `parallel_tool_calls` is supported. Explicit false
 remains ordinary: the native transaction currently finalizes before the
 serial-tool output observer detects the first complete call. Required/named
-tools and any active grammar mask remain ordinary. Other adapters retain their
-no-tools/history/reasoning boundary. Unknown chat-template kwargs remain
-ordinary. GLM uses the same rendered prompt, row-position target sampler and
+tools and any active grammar mask remain ordinary. The GLM greedy profile keeps
+its prior plain-text scope, including its no-tools/history/reasoning boundary,
+until a signed sampled profile is selected; a new binary alone does not widen
+that profile. Other adapters retain their no-tools/history/reasoning boundary.
+Unknown chat-template kwargs remain ordinary. GLM uses the same rendered prompt,
+row-position target sampler and
 ordinary output parser as non-native decode, following oMLX
 `78fa08bc1aef7290c93c83bb70811547763ebf33` (rendered-prefix processing and
 first-stop handling). Tool/reasoning markers themselves do not disable drafting;
@@ -1740,6 +1744,58 @@ MUST be no more than 5%, and the corrected lower bound for ordinary-row
 throughput change MUST be no worse than -5%, against the same load with MTP
 disabled. This is in addition to R007's ready-to-decode wait bound.
 
+**Privacy-safe v2 observation and paired replay.** The opt-in
+`macprovider.native-mtp-request-shape-capture.v2` records successful persistable
+completions with the provider's actual `off` or `auto` mode unchanged. Its role
+is `request_shape_observation_only`: an observed ordinary or native completion
+is not a measured ordinary control. Collection MUST NOT filter on candidate
+eligibility, tools, sampling, observed path, or available native capacity.
+SPEC-049 nonpersistable requests produce no request-derived record or counter;
+sampling claims MUST disclose that population boundary and all omissions.
+The existing v1 schema, off-only collection guards and formats remain unchanged;
+absent schema selection still chooses v1. Explicit v2 selection does not alter
+the signed request profile or admit broader traffic.
+
+V2 MUST preserve normalized parsed controls and actual served family, geometry,
+anonymous cache relationships and source identity without raw prompt/tool text,
+function names or recoverable cache keys. Capture timestamps MUST NOT be used
+as latency or original-arrival evidence.
+The `observed_selector_reason`, `observed_selector_eligible` and
+`observed_effective_path` fields describe actual capture-time selection only.
+The bound candidate plan separately supplies `projected_selector_reason` and
+`projected_selector_eligible` before capacity checks; fresh paired runs supply
+actual measured admissions and paths. These facts MUST NOT be substituted for
+one another. The >=10% request/token floors use candidate pre-capacity R004
+shape shares. Capacity fallback remains measured ordinary work, not claimed
+native admission. Known ineligible controls remain in both full paired loads
+and representative denominators.
+
+V2 capture requires the matching closed v2 projection-plan and replay schemas.
+Strict validation MUST bind exact capture, tuple-bounds, complete sanitized
+projection, bench-policy and analysis-policy bytes, preserving capture-build
+identity separately from replay-build identity. Sampling and analysis rules
+are preregistered before collection; a durable truthful privacy review binds
+the captured bytes, omissions and reviewed fields. Missing source identity,
+unknown family/control states, unresolved tool choices or other unreproducible
+shapes remain counted
+and make qualification `PENDING_UNREPRODUCIBLE_CAPTURE`; they MUST NOT silently
+become known ordinary or eligible shapes. The production parser remains
+authoritative before execution.
+
+Both ordinary and mixed replay use the same frozen modeled stagger, in capture
+sequence and cache-conflict order across the full qualified CB slots. Its
+wave-local offset is index times the bound bench-policy `arrival_interval_ms`,
+positive when qualified slots exceed the signed native-row bound. Capture
+completion order does not reconstruct real arrival concurrency. Replay MUST
+NOT split waves by eligible-row count to manufacture admission: the native cap
+counts all active buyer rows, including ordinary rows. Fresh executions retain
+all paired blocks and existing completion, cache, concurrency and corrected
+metric gates. Conversion to the existing final analyzer contract preserves
+projected pre-capacity shape shares separately from measured paths and uses
+only fresh paired timings; offline projection remains
+`PENDING_REAL_LAB_REPLAY`. Observation or schema validation does not qualify,
+release, promote or activate a tuple.
+
 The 256 GB Mac Studio is mandatory for the large-host issue campaign but does
 not prove any lower RAM tier. Every hardware/RAM tier advertised for the tuple
 requires its own fit, correctness, capacity, and sustained evidence. Sanitized
@@ -1954,6 +2010,10 @@ requests.
   following oMLX rendered-prefix semantics. Active grammar and explicit serial
   tool-call stopping remain ordinary. The campaign fixture now uses the actual
   production reasoning control instead of ignored chat-template kwargs.
+  The existing GLM greedy profile retains its prior plain-text scope until
+  the signed sampled profile is selected. R015 adds mode-independent privacy-safe
+  v2 observations, distinct projected/measured eligibility, and identical frozen
+  modeled arrivals across full ordinary/mixed CB loads; v1 remains compatible.
 
 - **0.1.56 (2026-10-25)** — R003/R013/R014/R015: align requalification with
   AGENTS.md HARD RULE 2 and the identity-only rebinds in #2136 and #2141.

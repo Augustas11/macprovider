@@ -235,8 +235,11 @@ struct NativeMTPSelector: Sendable {
         }
         // oMLX's rendered-prompt eligibility: tool/history and reasoning tokens
         // use the ordinary parser after target verification. Only the GLM adapter
-        // implements these shapes; other families retain their existing gate.
+        // implements these shapes. The existing signed sampled profile also
+        // authorizes their expanded scope; an identity-only release rebind of
+        // the old greedy profile must preserve its prior text-only scope.
         let supportsToolPrompt = nativeCapability.family == "glm5_next_mtp_v1"
+            && nativeCapability.supportsSampling
         var eligibleKeys = admittedTopLevelKeys
         if supportsToolPrompt {
             eligibleKeys.formUnion(["reasoning_effort", "parallel_tool_calls"])
