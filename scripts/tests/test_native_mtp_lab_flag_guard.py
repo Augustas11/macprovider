@@ -13,6 +13,12 @@ SCAN_ROOTS = (
     ROOT / ".github" / "workflows",
 )
 TEXT_SUFFIXES = {".bash", ".json", ".mjs", ".py", ".sh", ".yaml", ".yml"}
+# These exact lab-only surfaces build the isolated measurement binary and test
+# its fixed commands. Release, signing and CI entry points remain scanned.
+LAB_BUILD_SURFACES = {
+    ROOT / "scripts" / "ops" / "studio-mtp-measurement.py",
+    ROOT / "scripts" / "tests" / "test_studio_mtp_measurement.py",
+}
 CLI_SOURCES = ROOT / "phase3-binary" / "Sources" / "macprovider-cli"
 LAB_GUARD = "DEBUG || " + FORBIDDEN
 # Lab-only command types: every declaration and every reference, including
@@ -78,7 +84,7 @@ class NativeMTPLabFlagGuardTests(unittest.TestCase):
             if not root.exists():
                 continue
             for path in sorted(p for p in root.rglob("*") if p.is_file()):
-                if path.resolve() == this_file or "__pycache__" in path.parts:
+                if path.resolve() == this_file or path in LAB_BUILD_SURFACES or "__pycache__" in path.parts:
                     continue
                 if path.suffix not in TEXT_SUFFIXES and path.name != "Makefile":
                     continue
