@@ -208,7 +208,6 @@ type TimeoutsConfig struct {
 	// coordinator_request_seconds, so a pre-#760 config that raised only the
 	// legacy wall keeps its non-streaming bound unchanged.
 	NonStreamRequestSeconds int `yaml:"non_stream_request_seconds"`
-	StreamingCancelMS       int `yaml:"streaming_cancel_ms"`
 	StreamingIdleMS         int `yaml:"streaming_idle_ms"`
 }
 
@@ -467,7 +466,6 @@ func Default() Config {
 			StreamCeilingPerTokenMS:     250,
 			StreamCeilingMaxSeconds:     3600,
 			NonStreamRequestSeconds:     0, // inherit coordinator_request_seconds
-			StreamingCancelMS:           500,
 			StreamingIdleMS:             10000,
 
 			// Conservative: DeepSeek-V4 prefills ~280 tok/s on a Studio.
@@ -740,7 +738,7 @@ func (c Config) Validate() error {
 	if c.Capacity.MonthlyBudgetUSD <= 0 || c.Capacity.ReadyProviderDegradedThreshold <= 0 || c.Capacity.ProjectedCostTier1Percent <= 0 || c.Capacity.TierCooldownSeconds <= 0 {
 		return fmt.Errorf("capacity thresholds must be positive")
 	}
-	if c.Timeouts.CoordinatorRequestSeconds <= 0 || c.Timeouts.CoordinatorHeaderTimeoutSeconds <= 0 || c.Timeouts.StreamingCancelMS <= 0 || c.Timeouts.StreamingIdleMS <= 0 {
+	if c.Timeouts.CoordinatorRequestSeconds <= 0 || c.Timeouts.CoordinatorHeaderTimeoutSeconds <= 0 || c.Timeouts.StreamingIdleMS <= 0 {
 		return fmt.Errorf("timeouts must be positive")
 	}
 	// Issue #760 per-phase deadline orderings.
