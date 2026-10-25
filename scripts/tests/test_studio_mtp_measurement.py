@@ -18,7 +18,9 @@ SPEC.loader.exec_module(M)
 class MeasurementTests(unittest.TestCase):
     def test_metal_step_uses_xcode_developer_dir(self):
         grouped = __import__("inspect").getsource(M.grouped)
-        self.assertIn('"DEVELOPER_DIR": str(XCODE_DEVELOPER_DIR)} if kind == "metal"', grouped)
+        self.assertIn("env=lab_env(kind)", grouped)
+        self.assertEqual(M.lab_env("metal")["DEVELOPER_DIR"], str(M.XCODE_DEVELOPER_DIR))
+        self.assertNotIn("DEVELOPER_DIR", M.lab_env("build"))
         self.assertTrue(str(M.XCODE_DEVELOPER_DIR).endswith("Applications/Xcode.app/Contents/Developer"))
 
     def test_missing_metal_compiler_refused_before_downtime(self):
@@ -280,6 +282,119 @@ class MeasurementTests(unittest.TestCase):
                     bench = events[6][1]
                     self.assertEqual(bench[1], "native-mtp-bench")
                     self.assertEqual(bench[bench.index("--only-cell") + 1], manifest["cell"])
+
+    BENCH_FIELDS = ("hw_model", "chip", "ram_gb", "os_build", "xcode_build_version", "swift_version",
+                    "provider_commit", "mlx_fork_revision", "model_id", "target_sha256", "mtp_sha256",
+                    "tokenizer_sha256")
+
+    def preflight_case(self, tmp, validate, build_rc=0, cell="matrix"):
+        """Runs preflight_remote with build/metal/validate children faked."""
+        policy = json.dumps(self.policy()).encode()
+        m = {"source": "/source", "commit": "a" * 40, "cell": cell, "nonce": "n1",
+             "policy_sha256": M.sha(policy), "policy_code": M.base64.b64encode(policy).decode()}
+        calls = []
+        def fake(argv, **kwargs):
+            calls.append((argv, kwargs))
+            if "--validate-policy-only" in argv:
+                return validate
+            return Mock(returncode=build_rc)
+        with patch.object(M.Path, "home", return_value=Path(tmp)), patch.object(M, "source_ok"), \
+                patch.object(M, "pins_ok"), patch.object(M.subprocess, "run", side_effect=fake):
+            try:
+                return M.preflight_remote(m), calls
+            except M.Refusal as exc:
+                return exc, calls
+
+    def test_preflight_refuses_and_names_every_bench_field(self):
+        for field in self.BENCH_FIELDS:
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as tmp:
+                stderr = f"native-mtp-e2e: x\nError: invalid policy: {field} mismatch: frozen=1 observed=2\n"
+                result, calls = self.preflight_case(tmp, Mock(returncode=1, stdout="", stderr=stderr))
+                self.assertIsInstance(result, M.Refusal)
+                self.assertIn(f"{field} mismatch: frozen=1 observed=2", str(result))
+
+    def test_preflight_validates_the_window_policies_without_metal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ok = "\n".join(json.dumps({"validate_only": "pass"}) for _ in M.MATRIX_PROFILES)
+            result, calls = self.preflight_case(tmp, Mock(returncode=0, stdout=ok, stderr=""))
+            self.assertEqual(result["preflight"], "pass")
+            kinds = [c[0] for c in calls]
+            self.assertEqual(kinds[0][:3], ["/usr/bin/nice", "-n", "19"])
+            self.assertIn("--disable-automatic-resolution", kinds[0])
+            self.assertIn("build-mlx-metallib.sh", kinds[1][-2])
+            self.assertEqual(calls[1][1]["env"]["DEVELOPER_DIR"], str(M.XCODE_DEVELOPER_DIR))
+            validate, kwargs = calls[2]
+            self.assertEqual(validate[:2], ["/usr/sbin/taskpolicy", "-b"])
+            self.assertEqual(kwargs["env"]["MACPROVIDER_NATIVE_MTP_E2E"], "1")
+            self.assertNotIn("DEVELOPER_DIR", kwargs["env"])
+            self.assertIn("--identity-cache", validate)
+            # The exact argv and policy bytes the window's matrix step runs.
+            pre = Path(tmp) / ".config/macprovider/studio-mtp-measurement/preflight-n1"
+            window = Path(tmp) / "window"
+            window.mkdir()
+            (window / "policy.json").write_bytes((pre / "policy.json").read_bytes())
+            m = {"source": "/source", "commit": "a" * 40, "cell": "matrix"}
+            expected = [a.replace(str(window), str(pre)) for a in M.bench_command(m, window)]
+            self.assertEqual(validate[2:-3], expected)
+            for name in (p.name for p in pre.glob("*-policy.json")):
+                self.assertEqual((pre / name).read_bytes(), (window / name).read_bytes())
+
+    def test_preflight_counts_one_summary_per_policy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            one = json.dumps({"validate_only": "pass"})
+            result, _ = self.preflight_case(tmp, Mock(returncode=0, stdout=one, stderr=""))
+            self.assertIsInstance(result, M.Refusal)
+
+    def test_preflight_build_or_metal_failure_refuses_before_validation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result, calls = self.preflight_case(tmp, Mock(returncode=0, stdout="", stderr=""), build_rc=1)
+            self.assertIsInstance(result, M.Refusal)
+            self.assertIn("pre-downtime build step failed", str(result))
+            self.assertEqual(len(calls), 1)
+
+    def test_package_resolved_pin_mismatch_names_dependency(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            package = Path(tmp)
+            (package / "Package.resolved").write_text(json.dumps({"pins": [
+                {"identity": "mlx-swift-lm", "location": "https://github.com/x/mlx-swift-lm.git",
+                 "state": {"revision": "c" * 40}}]}))
+            with patch.object(M, "run", return_value=b"d" * 40 + b"\n") as run, self.assertRaises(M.Refusal) as caught:
+                M.pins_ok(package)
+            self.assertIn(f"mlx-swift-lm pinned={'c' * 40} checkout={'d' * 40}", str(caught.exception))
+            self.assertIn(str(package / ".build/checkouts/mlx-swift-lm"), run.call_args.args[0])
+
+    def test_preflight_refusal_stops_before_lock_and_runner(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            policy = Path(tmp) / "policy.json"
+            policy.write_text(json.dumps(self.policy()))
+            env = {"STUDIO_MTP_SOURCE_DIR": "/source", "STUDIO_MTP_CONFIG": "/config", "STUDIO_STATUS_PORT": "8080",
+                   "STUDIO_SSH": "studio", "PEARL_SSH": "pearl", "MACPROVIDER_OPS_OWNER": "test",
+                   "MACPROVIDER_OPS_STATE_DIR": tmp}
+            remote = {"dir": "/remote/run", "nonce": "123", "commit": "a" * 40, "policy_sha256": "b" * 64}
+            refusal = M.Refusal("remote: bench policy validation refused: swift_version mismatch")
+            with patch.dict(M.os.environ, env), patch.object(M, "source_ok"), patch.object(M, "published"), \
+                    patch.object(M, "run") as run, patch.object(M, "ssh", side_effect=[remote, refusal]), \
+                    patch.object(M, "pearl") as pearl, patch("builtins.print"), self.assertRaises(M.Refusal) as caught:
+                M.controller(argparse.Namespace(source_commit="a" * 40, policy=policy, cell="matrix", run=True))
+            self.assertIn("swift_version mismatch", str(caught.exception))
+            run.assert_not_called()
+            pearl.assert_not_called()
+
+    def test_ssh_surfaces_the_remote_refusal_line(self):
+        error = subprocess.CalledProcessError(1, ["ssh"], stderr=(
+            b"noise\nstudio-mtp-measurement: blocked: bench policy validation refused: Error: invalid policy: "
+            b"os_build mismatch: frozen=26A434 observed=26A500; journals/lock retained if armed\n"))
+        with patch.object(M, "run", side_effect=error), self.assertRaises(M.Refusal) as caught:
+            M.ssh("studio", "pass", {})
+        self.assertEqual(str(caught.exception), "remote: bench policy validation refused: Error: invalid policy: "
+                         "os_build mismatch: frozen=26A434 observed=26A500")
+
+    def test_window_hard_ceiling_is_sixty_minutes(self):
+        self.assertEqual(M.TOTAL, 3600)
+        captured = []
+        with patch.object(M, "ssh", side_effect=lambda h, c, p: captured.append(p) or {}):
+            M.pearl("pearl", "unit", True)
+        self.assertEqual(captured[0]["seconds"], M.TOTAL)
 
 
 if __name__ == "__main__":

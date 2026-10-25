@@ -30,9 +30,14 @@ import uuid
 MODEL = "zai-org/glm-5.3-flash"
 LABEL = "live.malibu.provider"
 RUNNER = "malibu-buyer-runner.service"
-TOTAL = 2400
+# Independent hard ceiling for the whole Studio window (watchdog and Pearl
+# recovery timer): pause/drain, the no-op rebuild, metallib, check, matrix.
+TOTAL = 3600
 BUILD = 900
-CELL = 1500
+CELL = 3000
+# Pre-downtime bench policy validation. The first run reads the snapshot once
+# (outside the page cache); later runs reuse hashes of unchanged file stamps.
+VALIDATE = 5400
 ROOT = Path(__file__).resolve().parents[2]
 # Command Line Tools (the Studio's xcode-select default) ship no Metal compiler.
 # Every successful Studio metallib build used the full Xcode developer dir.
@@ -320,6 +325,39 @@ def watchdog(m):
         put(d / "recovery-blocked.json", {"blocked": True})
 
 
+MATRIX_PROFILES = tuple((shape, temperature) for shape in ("plain_text", "tools_history_reasoning")
+                        for temperature in (0, 1))
+
+
+def bench_command(m, d):
+    """The one bench argv for this cell or matrix, in window or preflight dir d.
+
+    The matrix writes its four derived request profiles into d first, so the
+    pre-downtime validation and the window run byte-identical policies.
+    """
+    package = Path(m["source"]) / "phase3-binary"
+    command = [str(package / ".build/release/macprovider-cli"), "native-mtp-bench",
+               "--root", str(Path(m["source"]) / ".lab-window/fixture"),
+               "--model-id", MODEL, "--provider-commit", m["commit"], "--phase", "matrix"]
+    if m["cell"] != "matrix":
+        return command + ["--policy", str(d / "policy.json"), "--out", str(d / "runs.jsonl"),
+                          "--only-cell", m["cell"]]
+    base = json.loads((d / "policy.json").read_text())
+    paths = []
+    for shape, temperature in MATRIX_PROFILES:
+        path = d / f"{shape}-t{temperature}-policy.json"
+        put(path, dict(base, request_shape=shape, temperature=temperature,
+                       top_p=1 if temperature == 0 else .95))
+        paths.append(str(path))
+    return command + ["--policy-list", *paths, "--out", str(d / "baseline")]
+
+
+def lab_env(kind):
+    return {"HOME": str(Path.home()), "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+            "MACPROVIDER_NATIVE_MTP_E2E": "1",
+            **({"DEVELOPER_DIR": str(XCODE_DEVELOPER_DIR)} if kind == "metal" else {})}
+
+
 def fixed_command(m, kind):
     d = Path(m["dir"])
     package = str(Path(m["source"]) / "phase3-binary")
@@ -335,11 +373,7 @@ def fixed_command(m, kind):
     if kind == "cell" and m["cell"] == "matrix":
         return [sys.executable, str(d / "entry.py"), "_matrix", str(d / "manifest.json")]
     if kind == "cell":
-        return [str(Path(package) / ".build/release/macprovider-cli"), "native-mtp-bench",
-                "--root", str(Path(m["source"]) / ".lab-window/fixture"),
-                "--model-id", MODEL, "--policy", str(d / "policy.json"),
-                "--out", str(d / "runs.jsonl"), "--provider-commit", m["commit"],
-                "--only-cell", m["cell"], "--phase", "matrix"]
+        return bench_command(m, d)
     raise Refusal("unknown fixed lab command")
 
 
@@ -352,10 +386,7 @@ def grouped(m, kind, timeout):
                               kind, str(d / "manifest.json"), str(d / "command-done.json")],
                              pass_fds=(read_fd,), start_new_session=True,
                              stdin=subprocess.DEVNULL, stdout=open(d / "lab.log", "ab"),
-                             stderr=subprocess.STDOUT, env={
-                                 "HOME": str(Path.home()), "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
-                                 "MACPROVIDER_NATIVE_MTP_E2E": "1",
-                                 **({"DEVELOPER_DIR": str(XCODE_DEVELOPER_DIR)} if kind == "metal" else {})})
+                             stderr=subprocess.STDOUT, env=lab_env(kind))
     os.close(read_fd)
     try:
         with open(d / "transaction.lock", "a") as lock:
@@ -508,9 +539,7 @@ def inspect_remote(m):
                       env=dict(os.environ, DEVELOPER_DIR=str(XCODE_DEVELOPER_DIR)),
                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
         raise Refusal("Metal compiler unavailable under the Xcode developer dir")
-    pin = next(p["state"]["revision"] for p in json.loads((package / "Package.resolved").read_text())["pins"]
-               if p["identity"] == "mlx-swift")
-    source_ok(package / ".build/checkouts/mlx-swift", pin)
+    pins_ok(package)
     home = Path.home()
     m["install"] = str(home / "macprovider")
     # Reuse the probe's deliberately narrow YAML scalar grammar, without
@@ -531,13 +560,83 @@ def inspect_remote(m):
     return m
 
 
+def pins_ok(package):
+    """Every dependency checkout is at its Package.resolved revision.
+
+    The build uses --disable-automatic-resolution, so a stale checkout (MLX
+    kernels, the mlx-swift-lm runtime the bench stamps) would be compiled.
+    """
+    for pin in json.loads((package / "Package.resolved").read_text())["pins"]:
+        name = pin["location"].rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
+        checkout = package / ".build/checkouts" / name
+        pinned = pin["state"].get("revision")
+        try:
+            head = run(["git", "-C", str(checkout), "rev-parse", "HEAD"]).decode().strip()
+        except (OSError, subprocess.SubprocessError):
+            head = "missing"
+        if head != pinned:
+            raise Refusal(f"Package.resolved pin mismatch: {pin['identity']} pinned={pinned} checkout={head}")
+        if run(["git", "-C", str(checkout), "status", "--porcelain", "--untracked-files=no"]):
+            raise Refusal(f"dependency checkout modified: {pin['identity']}")
+
+
+def preflight_remote(m):
+    """Before downtime: build, metallib and the bench's own policy validation.
+
+    Runs the exact window build and metal argv at the lowest CPU priority, then
+    `native-mtp-bench --validate-policy-only` (no model load, no MLX/Metal) on
+    the policies the window will run, so every frozen field the bench checks
+    (hardware, OS build, Xcode, Swift stdout, provider commit, runtime revision,
+    model/MTP/tokenizer digests, policy schema and matrix) is compared while
+    the provider still serves.
+    """
+    source_ok(m["source"], m["commit"])
+    pins_ok(Path(m["source"]) / "phase3-binary")
+    root = Path.home() / ".config/macprovider/studio-mtp-measurement"
+    d = root / ("preflight-" + m["nonce"])
+    d.mkdir(mode=0o700, parents=True, exist_ok=False)
+    policy = base64.b64decode(m["policy_code"])
+    if sha(policy) != m["policy_sha256"]:
+        raise Refusal("policy bytes drifted")
+    (d / "policy.json").write_bytes(policy)
+    with open(d / "preflight.log", "ab") as log:
+        for kind in ("build", "metal"):
+            if subprocess.run(["/usr/bin/nice", "-n", "19", *fixed_command(dict(m, dir=str(d)), kind)],
+                              stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+                              env=lab_env(kind), timeout=BUILD).returncode:
+                raise Refusal(f"pre-downtime {kind} step failed; log {d / 'preflight.log'}")
+    source_ok(m["source"], m["commit"])
+    command = bench_command(m, d) + ["--validate-policy-only", "--identity-cache", str(root / "identity-cache.json")]
+    # Background policy: efficiency cores and throttled I/O beside serving.
+    result = subprocess.run(["/usr/sbin/taskpolicy", "-b", *command], stdin=subprocess.DEVNULL,
+                            capture_output=True, text=True, env=lab_env("cell"), timeout=VALIDATE)
+    (d / "validate.log").write_text(result.stdout + result.stderr)
+    if result.returncode:
+        reason = next((line.strip() for line in reversed(result.stderr.splitlines()) if line.strip()), "no output")
+        raise Refusal("bench policy validation refused: " + reason)
+    summaries = [json.loads(line) for line in result.stdout.splitlines() if line.startswith("{")]
+    expected = len(MATRIX_PROFILES) if m["cell"] == "matrix" else 1
+    if len(summaries) != expected or any(s.get("validate_only") != "pass" for s in summaries):
+        raise Refusal("bench policy validation incomplete")
+    return {"preflight": "pass", "validated": summaries}
+
+
 def ssh(host, code, payload, timeout=30):
     if not re.fullmatch(r"[A-Za-z0-9_.@-]+", host) or host.startswith("-") or host == "local":
         raise Refusal("SSH alias required")
     command = "python3 -c " + shlex.quote(code)
-    return json.loads(run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
-                           "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=1",
-                           host, command], input=json.dumps(payload).encode(), timeout=timeout))
+    try:
+        out = run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
+                   "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=1",
+                   host, command], input=json.dumps(payload).encode(), timeout=timeout)
+    except subprocess.CalledProcessError as exc:
+        # The remote entry prints one sanitized refusal line; surface it.
+        prefix = "studio-mtp-measurement: blocked: "
+        lines = [l for l in (exc.stderr or b"").decode(errors="replace").splitlines() if l.startswith(prefix)]
+        if lines:
+            raise Refusal("remote: " + lines[-1][len(prefix):].removesuffix("; journals/lock retained if armed"))
+        raise
+    return json.loads(out)
 
 
 def dispatch_worker(host, code, payload, window_ended):
@@ -620,7 +719,7 @@ p=json.load(sys.stdin); u=p["unit"]; s="malibu-buyer-runner.service"
 def r(a): return subprocess.run(a,check=True,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL).stdout.decode().strip()
 if p["arm"]:
  r(["systemctl","is-active",s])
- r(["systemd-run","--collect","--unit="+u,"--on-active=2400s","--timer-property=AccuracySec=1s","/usr/bin/python3","-c",p["recovery_code"],u])
+ r(["systemd-run","--collect","--unit="+u,"--on-active=%ds"%p["seconds"],"--timer-property=AccuracySec=1s","/usr/bin/python3","-c",p["recovery_code"],u])
  r(["systemctl","is-active",u+".timer"])
  r(["systemctl","stop",s])
 elif p["retire"]:
@@ -637,7 +736,7 @@ else:
  r(["systemctl","start",s])
  if r(["systemctl","is-active",s]) != "active": raise RuntimeError("runner inactive")
 print(json.dumps({"ok":True,"runner_active":not p["arm"],"timer_retired":p["retire"]}))'''
-    return ssh(host, code, {"unit": unit, "arm": arm, "retire": retire,
+    return ssh(host, code, {"unit": unit, "arm": arm, "retire": retire, "seconds": TOTAL,
                             "recovery_code": TIMER_RECOVERY_CODE})
 
 
@@ -670,10 +769,15 @@ def controller(args):
     inspect_code = "import sys;sys.argv=['entry.py','_inspect'];" + loader
     m = ssh(os.environ["STUDIO_SSH"], inspect_code, payload)
     published(m)
+    # Every frozen field the window validates is compared here, while live.
+    preflight_code = "import sys;sys.argv=['entry.py','_preflight'];" + loader
+    checked = ssh(os.environ["STUDIO_SSH"], preflight_code, dict(m, policy_code=base64.b64encode(data).decode()),
+                  timeout=2 * BUILD + VALIDATE + 120)
+    print(json.dumps(checked), flush=True)
     if not args.run:
         print(json.dumps({"next": "bounded-measurement", "run": False, "source_commit": m["commit"],
                           "policy_sha256": m["policy_sha256"], "window_seconds": TOTAL,
-                          "downtime": "Studio pause/build/cell/restore; buyer runner stopped at most 2400 seconds"}))
+                          "downtime": f"Studio pause/build/cell/restore; buyer runner stopped at most {TOTAL} seconds"}))
         return
     owner = os.environ["MACPROVIDER_OPS_OWNER"]
     lock = str(ROOT / "scripts/ops/live-lock.sh")
@@ -737,24 +841,7 @@ def main():
             return
         if mode == "_matrix":
             m = json.loads(Path(sys.argv[2]).read_text())
-            d = Path(m["dir"])
-            base = json.loads((d / "policy.json").read_text())
-            paths = []
-            for shape in ("plain_text", "tools_history_reasoning"):
-                for temperature in (0, 1):
-                    tag = f"{shape}-t{temperature}"
-                    policy = dict(base, request_shape=shape, temperature=temperature,
-                                  top_p=1 if temperature == 0 else .95)
-                    policy_path = d / (tag + "-policy.json")
-                    put(policy_path, policy)
-                    paths.append(str(policy_path))
-            command = fixed_command(dict(m, cell="s1-p512-o128"), "cell")
-            index = command.index("--only-cell")
-            del command[index:index + 2]
-            index = command.index("--policy")
-            command[index:index + 2] = ["--policy-list", *paths]
-            command[command.index("--out") + 1] = str(d / "baseline")
-            result = subprocess.run(command, timeout=CELL - 10)
+            result = subprocess.run(bench_command(m, Path(m["dir"])), timeout=CELL - 10)
             if result.returncode:
                 raise Refusal("baseline matrix failed; no retry")
             return
@@ -771,6 +858,8 @@ def main():
                 time.sleep(60)
         elif mode == "_inspect":
             print(json.dumps(inspect_remote(json.load(sys.stdin))))
+        elif mode == "_preflight":
+            print(json.dumps(preflight_remote(json.load(sys.stdin))))
         elif mode == "_prepare":
             m = json.loads(sys.stdin.readline())
             d = Path(m["dir"])

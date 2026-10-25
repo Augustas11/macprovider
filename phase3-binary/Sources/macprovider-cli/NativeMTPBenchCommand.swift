@@ -49,16 +49,33 @@ struct NativeMTPBenchCommand: AsyncParsableCommand {
     )
     var validateOnly = false
 
+    @Flag(
+        name: .customLong("validate-policy-only"),
+        help: "--validate-only without any MLX/Metal use, safe beside a serving provider. Requires --identity-cache."
+    )
+    var validatePolicyOnly = false
+
+    @Option(
+        name: .customLong("identity-cache"),
+        help: "--validate-policy-only: per-file SHA-256 cache keyed by the full file stamp (inode, size, mtime, ctime); a miss is read outside the page cache."
+    )
+    var identityCachePath: String?
+
     func run() async throws {
         let environment = ProcessInfo.processInfo.environment
         guard environment["MACPROVIDER_NATIVE_MTP_E2E"] == "1" else {
             FileHandle.standardError.write(Data("native-mtp-bench: set MACPROVIDER_NATIVE_MTP_E2E=1 on the Mac Studio\n".utf8))
             throw ExitCode(2)
         }
-        // Before any MLX device use (the host check samples the GPU): the
-        // family's command-buffer budget and cache limit, as serve and the
-        // journey harness set them.
-        NativeMTPHardwareE2ERunner.applyServeProcessSetup(rootPath: root)
+        guard validatePolicyOnly == (identityCachePath != nil), !(validatePolicyOnly && validateOnly) else {
+            throw ValidationError("--validate-policy-only requires --identity-cache and excludes --validate-only")
+        }
+        // Before any MLX device use: the family's command-buffer budget and
+        // cache limit, as serve and the journey harness set them. The
+        // policy-only check never touches MLX, so it skips this.
+        if !validatePolicyOnly {
+            NativeMTPHardwareE2ERunner.applyServeProcessSetup(rootPath: root)
+        }
         try NativeMTPHardwareE2ERunner.requireStudioHost()
         guard providerCommit.range(of: #"^[0-9a-f]{40}$"#, options: .regularExpression) != nil else {
             throw ValidationError("--provider-commit must be lowercase 40-hex")
@@ -67,7 +84,9 @@ struct NativeMTPBenchCommand: AsyncParsableCommand {
             throw ValidationError("supply exactly one of --policy or --policy-list")
         }
         let paths = policyPath.map { [$0] } ?? policyList
-        let identityCache = policyList.isEmpty ? nil : NativeMTPBenchIdentityCache()
+        let identityCache = identityCachePath.map {
+            NativeMTPBenchIdentityCache(persistentURL: URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath))
+        } ?? (policyList.isEmpty ? nil : NativeMTPBenchIdentityCache())
         for (index, path) in paths.enumerated() {
             if !policyList.isEmpty {
                 let policy = try NativeMTPBenchPolicy.load(from: URL(fileURLWithPath: (path as NSString).expandingTildeInPath))
@@ -85,7 +104,7 @@ struct NativeMTPBenchCommand: AsyncParsableCommand {
                 phase: phase,
                 identityCache: identityCache
             )
-            if validateOnly { try bench.validate() }
+            if validateOnly || validatePolicyOnly { try bench.validate() }
             else { try await bench.run() }
         }
     }
@@ -171,10 +190,23 @@ enum NativeMTPBenchPrompts {
     }
 }
 
-/// Same-process reuse only: every reuse checks inode/ctime/size/mtime and
+/// Same-process reuse: every reuse checks inode/ctime/size/mtime and
 /// additions/removals against the exact snapshot just hashed by this command.
-private final class NativeMTPBenchIdentityCache {
+/// With `persistentURL` (`--validate-policy-only` only), a file's hash is also
+/// reused across processes while its full stamp is unchanged, so the
+/// pre-downtime check reads a large snapshot once, not once per window.
+final class NativeMTPBenchIdentityCache {
+    struct Entry: Codable, Equatable {
+        let stamp: MLXSnapshotIdentity.FileStamp
+        let sha256: String
+    }
+
     private var identities: [URL: MLXSnapshotIdentity] = [:]
+    private let persistentURL: URL?
+
+    init(persistentURL: URL? = nil) {
+        self.persistentURL = persistentURL
+    }
 
     func identity(directory: URL) throws -> MLXSnapshotIdentity {
         let key = directory.standardizedFileURL.resolvingSymlinksInPath()
@@ -184,8 +216,26 @@ private final class NativeMTPBenchIdentityCache {
             }
             return identity
         }
-        let identity = try MLXSnapshotIdentity.compute(directory: directory)
+        let identity = try persistentURL.map { try Self.persistentIdentity(directory: key, store: $0) }
+            ?? MLXSnapshotIdentity.compute(directory: directory)
         identities[key] = identity
+        return identity
+    }
+
+    private static func persistentIdentity(directory: URL, store: URL) throws -> MLXSnapshotIdentity {
+        // An unreadable or malformed store is an empty one: every file is read.
+        var all = (try? JSONDecoder().decode([String: [Entry]].self, from: Data(contentsOf: store))) ?? [:]
+        let known = all[directory.path] ?? []
+        var fresh: [Entry] = []
+        let identity = try MLXSnapshotIdentity.compute(directory: directory) { stamp, read in
+            let sha = try known.first(where: { $0.stamp == stamp })?.sha256 ?? read()
+            fresh.append(Entry(stamp: stamp, sha256: sha))
+            return sha
+        }
+        all[directory.path] = fresh
+        try FileManager.default.createDirectory(at: store.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try JSONEncoder().encode(all).write(to: store, options: [.atomic])
+        chmod(store.path, 0o600)
         return identity
     }
 }
@@ -252,6 +302,16 @@ private final class NativeMTPBenchRunner {
             "cells": policy.matrixCells.map(\.id),
             "sustained_cell_id": policy.sustainedCellID,
             "existing_records": checked.existing.hasRecords,
+            "observed_environment": [
+                "hw_model": checked.environment.hwModel,
+                "chip": checked.environment.chip,
+                "ram_gb": checked.environment.ramGB,
+                "os_build": checked.environment.osBuild,
+                "xcode_build_version": checked.environment.xcodeBuildVersion,
+                "swift_version": checked.environment.swiftVersion,
+                "provider_commit": checked.environment.providerCommit,
+                "mlx_fork_revision": NativeMTPHardwareE2ERunner.upstreamRevision,
+            ] as [String: Any],
         ]
         FileHandle.standardOutput.write(try JSONSerialization.data(withJSONObject: summary, options: [.sortedKeys]))
         FileHandle.standardOutput.write(Data("\n".utf8))
