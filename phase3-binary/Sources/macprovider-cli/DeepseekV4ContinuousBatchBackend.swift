@@ -109,6 +109,9 @@ final class DeepseekV4ContinuousBatchBackend: ContinuousBatchSchedulerBackend, @
             guard let model = context.model as? DeepseekV4Model else {
                 throw ContinuousBatchSchedulerError.unsupported("deepseek_v4_model_required")
             }
+            guard model.batchesExactly else {
+                throw ContinuousBatchSchedulerError.unsupported("deepseek_v4_hisa_not_batch_exact")
+            }
             var eligible: [(ContinuousBatchDecodeInput, Row)] = []
             for input in inputs {
                 let (expectedTarget, targetOverflow) = input.committedKVTokenCount.addingReportingOverflow(steps)
@@ -214,6 +217,9 @@ final class DeepseekV4ContinuousBatchBackend: ContinuousBatchSchedulerBackend, @
         try await container.perform(nonSendable: input) { context, input in
             guard let model = context.model as? DeepseekV4Model else {
                 throw ContinuousBatchSchedulerError.unsupported("deepseek_v4_model_required")
+            }
+            guard model.batchesExactly else {
+                throw ContinuousBatchSchedulerError.unsupported("deepseek_v4_hisa_not_batch_exact")
             }
             var row = try self.ownedRow(id: input.requestID, offset: input.committedKVTokenCount, model: model)
             guard input.targetKVTokenCount == input.committedKVTokenCount + 1 else {

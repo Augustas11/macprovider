@@ -17,7 +17,7 @@ let package = Package(
         )
     ],
     dependencies: [
-        // Fork tag 3.32.3-macprovider.10.7 (branch campaign/2111-dsv4-fidelity), on tag
+        // Fork tag 3.32.3-macprovider.10.8 (branch campaign/2111-dsv4-fidelity), on tag
         // 3.32.3-macprovider.10.5 (c8be0f61), on tag 3.32.3-macprovider.10.4
         // (676a62a4), on tag 3.32.3-macprovider.10.3, then
         // 3.32.3-macprovider.10.1 (branch glm53/tuple-0324, on 3.32.3-macprovider.10):
@@ -38,15 +38,15 @@ let package = Package(
         // 10.4 adds row-owned batched pool/window decode and corrects incomplete
         // multi-token pooling continuation. 10.5 shares attention, compressor/indexer
         // projections and rotary offsets across rows, with keys-only windows and
-        // geometric pool storage. 10.7 makes deepseek_v4 follow DeepSeek's
+        // geometric pool storage. 10.8 makes deepseek_v4 follow DeepSeek's
         // inference/model.py: the ratio-4 overlap window carried across calls,
-        // the exact indexer top-k by default, float32 router, attention with
-        // float32 sinks and the kernel's bf16 attention weights, compressor,
+        // the exact indexer top-k by default, float32 router, the kernel's
+        // blocked attention arithmetic with float32 sinks, compressor,
         // expert SwiGLU/combine and head logits. Other family decode paths are
         // unchanged.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "790b4fd84995e6d1d593cc4dd544be21bf1cbe33"
+            revision: "c14b360fb172c0ffe2976d79c8e268fd2695788f"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",

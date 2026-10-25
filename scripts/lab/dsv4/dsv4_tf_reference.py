@@ -8,8 +8,11 @@ It is loaded with these corrections:
   `y[j] = post[j] * x + sum_i comb[i, j] * residual[i]` in float32 (the port
   indexes `residual[:, :, None]`, which mixes `residual[j]` instead, and
   expands in bf16);
-- `sparse_attn` rounds the unnormalized attention weights to bf16 before
-  the value product, as DeepSeek's kernel does (the port keeps them float32);
+- `sparse_attn` walks each query's key list in 64-key blocks with a running
+  max and rounds the unnormalized weights to bf16 before the value product,
+  as DeepSeek's kernel does (the port keeps float32 weights and one softmax),
+  and the indexer returns its top-k in descending score order as the
+  reference's `topk` does (the port uses `argpartition`);
 - the QAT simulations (fp8/fp4 activation quant-dequant, the indexer's
   Hadamard rotation) are off unless `--qat` is given, because the Swift port
   leaves them out;
@@ -70,22 +73,35 @@ def reference(model_dir, qat):
     ref.Block.hc_post = hc_post
 
     def kernel_sparse_attn(q, kv, attn_sink, topk_idxs, softmax_scale):
-        # The port's sparse_attn plus the kernel's bf16 rounding of the
-        # unnormalized weights before the value product (kernel.py:305,
-        # 340-343); the normalizer and accumulation stay float32. Like the
-        # Swift port, this takes the row max over all keys.
+        # DeepSeek's sparse_attn over each query's ordered key list: float32
+        # scores; per 64-key block a running max, exp(s - running max)
+        # rounded to bf16 for the value product, the float32 accumulator and
+        # normalizer rescaled when the max rises; the sink joins at the end
+        # (kernel.py:294-350). The port keeps float32 weights and one softmax.
         n = kv.shape[1]
         safe = mx.clip(topk_idxs, 0, n - 1)
         sel = mx.take_along_axis(
             kv[:, None, :, :], mx.broadcast_to(safe[..., None], (*safe.shape, kv.shape[-1])), axis=2)
         sel = sel.astype(mx.float32)
+        b, s_, h, _ = q.shape
+        k = topk_idxs.shape[-1]
         scores = mx.einsum("bshd,bskd->bhsk", q.astype(mx.float32), sel) * softmax_scale
         scores = mx.where((topk_idxs != -1)[:, None, :, :], scores, mx.array(-float("inf"), mx.float32))
-        m = scores.max(axis=-1, keepdims=True)
-        p = mx.exp(scores - m)
-        denom = p.sum(axis=-1) + mx.exp(attn_sink.astype(mx.float32)[None, :, None] - m[..., 0])
-        o = mx.einsum("bhsk,bskd->bhsd", p.astype(mx.bfloat16).astype(mx.float32), sel)
-        return mx.swapaxes(o / denom[..., None], 1, 2).astype(q.dtype)
+        blocks = (k + 63) // 64
+        if blocks * 64 > k:
+            scores = mx.concatenate(
+                [scores, mx.full((b, h, s_, blocks * 64 - k), -float("inf"), mx.float32)], axis=-1)
+        blocked = scores.reshape(b, h, s_, blocks, 64)
+        running = mx.cummax(blocked.max(axis=-1), axis=-1)
+        peak = running[..., -1:]
+        p = mx.exp(blocked - running[..., None])
+        rescale = mx.exp(running - peak)
+        denom = (p.sum(axis=-1) * rescale).sum(axis=-1) + mx.exp(
+            attn_sink.astype(mx.float32)[None, :, None] - peak[..., 0])
+        w = (p.astype(mx.bfloat16).astype(mx.float32) * rescale[..., None]).reshape(
+            b, h, s_, blocks * 64)[..., :k]
+        o = mx.einsum("bhsk,bskd->bhsd", w, sel) / denom[..., None]
+        return mx.swapaxes(o, 1, 2).astype(q.dtype)
 
     def sparse_attn(q, kv, attn_sink, topk_idxs, softmax_scale):
         s = q.shape[1]
@@ -124,7 +140,9 @@ def reference(model_dir, qat):
             if start_pos == 0:
                 limit = np.arange(start + 1, end + 1)[:, None] // ratio
                 scores = scores + mx.array(np.where(np.arange(t)[None, :] >= limit, -np.inf, 0.0), mx.float32)
-            top = mx.argpartition(-scores, kth=k - 1, axis=-1)[..., :k].astype(mx.int32)
+            # The reference's topk is in descending score order; the order
+            # fixes the attention's 64-key blocks.
+            top = mx.argsort(-scores, axis=-1)[..., :k].astype(mx.int32)
             if start_pos == 0:
                 invalid = top >= mx.array(np.arange(start + 1, end + 1)[:, None] // ratio)
                 top = mx.where(invalid, -1, top + offset)
