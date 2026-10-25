@@ -591,6 +591,45 @@ final class NativeMTPRequestShapeReplayCommandTests: XCTestCase {
         XCTAssertEqual(plan.blocks[0].runnableWaves[1].map(\.shapeID), ["eligible-b", "ineligible"])
     }
 
+    func testRunnableWavesUseQualifiedTupleSlotsAndNativeBound() throws {
+        let url = try writeCapture((0..<5).map {
+            shape("ordinary-\($0)", extra: ["unknown_top_level_keys_present": true])
+        })
+        let capture = try NativeMTPRequestShapeReplayCapture.load(from: url)
+        let plan = try NativeMTPRequestShapeReplayPlan.make(
+            capture: capture, blocks: 10, seed: 48015,
+            qualifiedSlots: 4, maxNativeActiveRows: 1
+        )
+        XCTAssertTrue(plan.sampleCoverageComplete)
+        XCTAssertEqual(plan.blocks[0].runnableWaves.map(\.count), [4, 1])
+        XCTAssertEqual(plan.sampleCoverageExport["max_concurrent_requests"] as? Int, 4)
+        XCTAssertEqual(plan.maxNativeRowCount, 1)
+        let legacy = try NativeMTPRequestShapeReplayPlan.make(capture: capture, blocks: 10, seed: 48015)
+        XCTAssertEqual(legacy.blocks[0].runnableWaves.map(\.count), [5])
+        XCTAssertEqual(legacy.sampleCoverageExport["max_concurrent_requests"] as? Int, 8)
+    }
+
+    func testRunnableWavesRespectConfiguredNativeRowBound() throws {
+        let capture = try NativeMTPRequestShapeReplayCapture.load(from: writeCapture([
+            shape("eligible-a"), shape("eligible-b"), shape("eligible-c"),
+        ]))
+        let plan = try NativeMTPRequestShapeReplayPlan.make(
+            capture: capture, blocks: 10, seed: 48015,
+            qualifiedSlots: 4, maxNativeActiveRows: 2
+        )
+        XCTAssertEqual(plan.blocks[0].runnableWaves.map(\.count), [2, 1])
+    }
+
+    func testPlanRejectsInvalidQualifiedTupleBounds() throws {
+        let capture = try NativeMTPRequestShapeReplayCapture.load(from: writeCapture([shape("eligible")]))
+        for (slots, nativeRows) in [(1, 1), (9, 1), (4, 0), (4, 5)] {
+            XCTAssertThrowsError(try NativeMTPRequestShapeReplayPlan.make(
+                capture: capture, blocks: 10, seed: 48015,
+                qualifiedSlots: slots, maxNativeActiveRows: nativeRows
+            ))
+        }
+    }
+
     func testRunnableWavesSerializeRepeatedAnonymousCacheGroups() throws {
         let group = String(repeating: "d", count: 64)
         let url = try writeCapture([

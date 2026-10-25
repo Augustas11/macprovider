@@ -530,7 +530,7 @@ def fixed_command(m, kind):
         return ["/Library/Developer/CommandLineTools/usr/bin/swift", "test", "--package-path", package,
                 "-c", "debug", "-j", "2", "--disable-automatic-resolution",
                 "-Xswiftc", "-DMACPROVIDER_LAB_HARNESS", "--filter",
-                "NativeMTPAcceptance.*Tests|NativeMTPLabNumericalOracleTests|NativeMTPBackendSafetyTests"]
+                "NativeMTPAcceptance.*Tests|NativeMTPLabNumericalOracleTests|NativeMTPBackendSafetyTests|NativeMTPRequestShapeReplayCommandTests"]
     if kind == "metalcheck":
         return [sys.executable, str(d / "entry.py"), "_metalcheck", str(d / "manifest.json")]
     if kind == "cell" and m["cell"] in MATRICES:

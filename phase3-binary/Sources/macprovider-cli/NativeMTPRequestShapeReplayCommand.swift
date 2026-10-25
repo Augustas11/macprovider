@@ -109,13 +109,40 @@ final class NativeMTPRequestShapeReplayRunner {
         self.benchPolicy = try NativeMTPBenchPolicy.load(from: self.benchPolicyURL)
     }
 
+    private var qualifiedSlots: Int {
+        benchPolicy.qualifiedSlots ?? NativeMTPRequestShapeReplayPlan.qualifiedSlots
+    }
+
+    private var maxNativeActiveRows: Int {
+        benchPolicy.maxNativeActiveRows ?? NativeMTPRequestShapeReplayPlan.maxNativeActiveRows
+    }
+
     func run() async throws {
-        let targetDirectory = root.appendingPathComponent("target", isDirectory: true)
-        let mtpDirectory = root.appendingPathComponent("mtp", isDirectory: true)
+        // The replay fixture executes depth one; an exploratory bench policy
+        // for another depth cannot bind evidence from this executor.
+        guard benchPolicy.proposalDepth == 1 else {
+            throw NativeMTPBenchError.invalidPolicy("request-shape replay requires proposal_depth 1")
+        }
+        let layout = NativeMTPBenchFixtureLayout.resolve(root: root)
+        // Legacy separate-drafter policies may omit tuple bounds. Embedded
+        // families must never inherit those replay defaults as qualification.
+        if layout.family.embeddedMTP {
+            guard benchPolicy.qualifiedSlots != nil,
+                  let bound = benchPolicy.maxNativeActiveRows,
+                  let signedBound = layout.family.signedMaxNativeActiveRows,
+                  bound <= signedBound else {
+                throw NativeMTPBenchError.invalidPolicy("embedded MTP replay requires explicit qualified_slots and a signed native-row bound")
+            }
+        }
+        try benchPolicy.validateFamily(layout.family)
+        let targetDirectory = layout.targetDirectory
+        let mtpDirectory = layout.mtpDirectory
         try Self.requireDirectory(targetDirectory)
         try Self.requireDirectory(mtpDirectory)
         let targetIdentity = try MLXSnapshotIdentity.compute(directory: targetDirectory)
-        let mtpIdentity = try MLXSnapshotIdentity.compute(directory: mtpDirectory)
+        let mtpIdentity = layout.family.embeddedMTP
+            ? targetIdentity
+            : try MLXSnapshotIdentity.compute(directory: mtpDirectory)
         let tokenizerSHA = try Self.sha256(of: targetDirectory.appendingPathComponent("tokenizer.json"))
         try benchPolicy.validateObserved(
             modelID: modelID,
@@ -132,7 +159,9 @@ final class NativeMTPRequestShapeReplayRunner {
         let plan = try NativeMTPRequestShapeReplayPlan.make(
             capture: capture,
             blocks: blocks,
-            seed: replayPolicy.seed
+            seed: replayPolicy.seed,
+            qualifiedSlots: qualifiedSlots,
+            maxNativeActiveRows: maxNativeActiveRows
         )
         let identityMismatches = capture.identityMismatches(targetSHA256: targetIdentity.digest)
         try writer.write(header(targetIdentity: targetIdentity, mtpIdentity: mtpIdentity, tokenizerSHA256: tokenizerSHA))
@@ -165,15 +194,15 @@ final class NativeMTPRequestShapeReplayRunner {
 
     private func loadFixture(maxPromptTokens: Int, maxCompletionTokens: Int, maxContextTokens: Int) async throws -> NativeMTPHardwareRuntimeFixture {
         let maxBlocks = NativeMTPHardwareE2ERunner.sizedMaxPhysicalBlocks(
-            slots: NativeMTPRequestShapeReplayPlan.qualifiedSlots,
+            slots: qualifiedSlots,
             promptTokens: maxPromptTokens,
             outputTokens: maxCompletionTokens
         )
         let runner = NativeMTPHardwareE2ERunner(
             rootPath: root.path,
             modelID: modelID,
-            maxBatch: NativeMTPRequestShapeReplayPlan.qualifiedSlots,
-            maxNativeActiveRows: NativeMTPRequestShapeReplayPlan.maxNativeActiveRows,
+            maxBatch: qualifiedSlots,
+            maxNativeActiveRows: maxNativeActiveRows,
             maxPromptTokens: benchPolicy.maximumPromptTokens ?? 1_048_576,
             maxPhysicalBlocks: maxBlocks
         )
@@ -442,8 +471,8 @@ final class NativeMTPRequestShapeReplayRunner {
             "capture_schema": capture.header.schema,
             "capture_requires_native_mtp_off": capture.header.captureRequiresNativeMTPOff,
             "run_order": "paired_random_counterbalanced",
-            "mixed_rows": NativeMTPRequestShapeReplayPlan.qualifiedSlots,
-            "max_native_active_rows": NativeMTPRequestShapeReplayPlan.maxNativeActiveRows,
+            "mixed_rows": qualifiedSlots,
+            "max_native_active_rows": maxNativeActiveRows,
             "cache_key_scope": "paired_block_and_path_isolated",
             "exports_raw_prompt_text": false,
             "exports_recoverable_cache_groups": false,
@@ -475,9 +504,9 @@ final class NativeMTPRequestShapeReplayRunner {
             "sample_coverage": plan.sampleCoverageExport,
             "identity_mismatches": identityMismatches,
             "blocks": blocks,
-            "qualified_slots": NativeMTPRequestShapeReplayPlan.qualifiedSlots,
-            "execution_shape": "ordered_waves_max_8_concurrent",
-            "max_native_active_rows": NativeMTPRequestShapeReplayPlan.maxNativeActiveRows,
+            "qualified_slots": qualifiedSlots,
+            "execution_shape": "ordered_waves_max_\(qualifiedSlots)_concurrent",
+            "max_native_active_rows": maxNativeActiveRows,
             "cache_key_scope": "paired_block_and_path_isolated",
             "request_shapes": capture.shapes.map(\.sanitizedExport),
         ]
@@ -1982,6 +2011,8 @@ struct NativeMTPRequestShapeReplayPlan {
     static let qualifiedSlots = 8
     static let maxNativeActiveRows = 1
 
+    let qualifiedSlotCount: Int
+    let maxNativeRowCount: Int
     let blocks: [NativeMTPRequestShapeReplayBlock]
     let pendingReason: String?
     let promptTokenTarget: Int
@@ -2002,7 +2033,7 @@ struct NativeMTPRequestShapeReplayPlan {
             "sample_weight_total": sampleShapeCount,
             "projected_request_count_per_block": rowsPerBlock,
             "runnable_request_count_per_block": runnableRowsPerBlock,
-            "max_concurrent_requests": Self.qualifiedSlots,
+            "max_concurrent_requests": qualifiedSlotCount,
             "runnable_waves_per_block": runnableWavesPerBlock,
             "omitted_sample_shape_count": omittedSampleShapeCount,
             "pending_sample_shape_count": pendingSampleShapeCount,
@@ -2018,8 +2049,14 @@ struct NativeMTPRequestShapeReplayPlan {
     static func make(
         capture: NativeMTPRequestShapeReplayCapture,
         blocks: Int,
-        seed: Int
+        seed: Int,
+        qualifiedSlots: Int = Self.qualifiedSlots,
+        maxNativeActiveRows: Int = Self.maxNativeActiveRows
     ) throws -> NativeMTPRequestShapeReplayPlan {
+        guard (2...8).contains(qualifiedSlots),
+              (1...qualifiedSlots).contains(maxNativeActiveRows) else {
+            throw NativeMTPRequestShapeReplayError.invalidCapture("invalid replay slot or native-row bound")
+        }
         let rows = try projectedRows(capture.shapes)
         let sampleShapeCount = capture.shapes.count
         let omittedSampleShapeCount = 0
@@ -2039,11 +2076,15 @@ struct NativeMTPRequestShapeReplayPlan {
             NativeMTPRequestShapeReplayBlock(
                 index: index,
                 nativeFirst: nativeFirst[index],
-                rows: rows.map { $0.withBlock(index) }
+                rows: rows.map { $0.withBlock(index) },
+                qualifiedSlots: qualifiedSlots,
+                maxNativeActiveRows: maxNativeActiveRows
             )
         }
         let pending = rows.compactMap(\.pendingReason).first
         return NativeMTPRequestShapeReplayPlan(
+            qualifiedSlotCount: qualifiedSlots,
+            maxNativeRowCount: maxNativeActiveRows,
             blocks: plannedBlocks,
             pendingReason: pending,
             promptTokenTarget: promptTarget,
@@ -2105,6 +2146,8 @@ struct NativeMTPRequestShapeReplayBlock {
     let index: Int
     let nativeFirst: Bool
     let rows: [NativeMTPRequestShapeReplayRow]
+    let qualifiedSlots: Int
+    let maxNativeActiveRows: Int
     var runnableRows: [NativeMTPRequestShapeReplayRow] {
         rows.filter { $0.pendingReason == nil }
     }
@@ -2118,9 +2161,9 @@ struct NativeMTPRequestShapeReplayBlock {
             let cacheGroup = row.anonymousCacheGroupSHA256
             let cacheConflict = cacheGroup.map { cacheGroupsInCurrentWave.contains($0) } ?? false
             let eligibleConflict = row.expectedSelectorReason == NativeMTPSelectorReason.eligible.rawValue
-                && eligibleRowsInCurrentWave >= NativeMTPRequestShapeReplayPlan.maxNativeActiveRows
+                && eligibleRowsInCurrentWave >= maxNativeActiveRows
             if !current.isEmpty
-                && (current.count >= NativeMTPRequestShapeReplayPlan.qualifiedSlots || cacheConflict || eligibleConflict) {
+                && (current.count >= qualifiedSlots || cacheConflict || eligibleConflict) {
                 waves.append(current)
                 current = []
                 cacheGroupsInCurrentWave = []
