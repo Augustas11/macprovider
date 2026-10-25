@@ -22,11 +22,20 @@ import XCTest
 /// snapshot must not change.
 final class GLM5NextCBPromptSnapshotTests: XCTestCase {
     /// GPU-only kernels: other classes set a CPU default device for the whole
-    /// process (`Device.setDefault`), so pin the GPU here.
+    /// process (`Device.setDefault`), so pin the GPU here. Without a metallib
+    /// no GPU stream is created (MLX aborts); every test then skips.
     override func invokeTest() {
+        guard Self.metallibAvailable else { return super.invokeTest() }
         Device.withDefaultDevice(Device(.gpu)) {
             super.invokeTest()
         }
+    }
+
+    private static var metallibAvailable: Bool {
+        let bundle = Bundle(for: Self.self)
+        return PagedKVMetallibGate.defaultMetallibExists()
+            || PagedKVMetallibGate.defaultMetallibExists(bundleURL: bundle.resourceURL,
+                                                         executableURL: bundle.executableURL)
     }
 
     private static let blockSize = 8
@@ -303,10 +312,7 @@ final class GLM5NextCBPromptSnapshotTests: XCTestCase {
     }
 
     private func requireMetal() throws {
-        let bundle = Bundle(for: Self.self)
-        guard PagedKVMetallibGate.defaultMetallibExists()
-            || PagedKVMetallibGate.defaultMetallibExists(bundleURL: bundle.resourceURL, executableURL: bundle.executableURL)
-        else {
+        guard Self.metallibAvailable else {
             throw XCTSkip("MLX default metallib is unavailable in this test host")
         }
     }
