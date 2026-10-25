@@ -1,6 +1,6 @@
 # SPEC-018 — Agentic tool calling (provider-side response synthesis)
 
-**Version:** 0.3.7 (2026-10-24, history reasoning reaches the template; Related: #2107)
+**Version:** 0.3.8 (2026-10-25, DeepSeek-V4 runtime reference; Related: #2111)
 **Depends on:** SPEC-001 v1.6, SPEC-002 v1.5.5, SPEC-006 v0.9, SPEC-008 (Pillar A model-hash trust layer — referenced by §10a), SPEC-011 v0.5 (warm-swap heartbeat `model_hash` — referenced by §10a), SPEC-015 v0.4 (receipts canonical output binding — see AC-17 and §N.5)
 **Status:** **LOCKED** at v0.2.10 by the streaming cleanup-rewrite byte-domain clarification. Previously LOCKED at v0.2.9 by the serial-turn `parallel_tool_calls` amendment (omitted/`false` stop after the first complete valid tool). Previously LOCKED at v0.2.8 by the #1594 OpenRouter-aligned AC-53 amendment (no independent messages[] count cap). Previously LOCKED at v0.2.7 by the Qwen3-Coder function-XML tool-call grammar amendment (documents the `<function=…><parameter=…>` XML body that Qwen3-Coder emits as a Qwen-row §3.1 body-grammar alternative, with OpenAI/MCP name charset; pending IMPL/conformance already landed on branch `fix/qwen3coder-toolcall-parse`); previously LOCKED at v0.2.6 by #784 C2b admission-timeout reconciliation — v0.2.4 spec PR #202 and IMPL PR #209 both landed (multi-turn acceptance, token-incremental streaming, `tool_call_id` validation, 1 MiB/2 MiB byte caps). v0.2.5 adds gpt-oss/OpenAI Harmony response parsing as a pending implementation/conformance gap. codex 4-lane r4 0/0/0; Claude blind-spot r2 0/0/0. SPEC-019 already depends on this as "LOCKED". The former "LOCK CANDIDATE pending PR" line was never flipped after merge. (Resolved gap, 2026-07-14, runbook item 15: AC-45's `X-MacProvider-Streaming-Mode` header — set by the coordinator on streaming `200` responses — was stripped by the public gateway's blanket `X-MacProvider-*` filter, making the "header absent" fail condition live on `api.malibu.tech`. Fixed by adding the header to the SPEC-006 v0.9.9 § 5.4 response-pass-through allowlist and un-stripping it at the gateway, validated against AC-45's closed enum. Chosen over scoping AC-45 to the coordinator surface because buyers hit the gateway, so scoping would have left AC-45's buyer-visible promise unmet. AC-45's normative text is unchanged; this is a documentation reconciliation, not a lock amendment. Residual: the coordinator currently emits the diagnostic only on the streaming success path — non-streaming AC-45 emission is a separate coordinator-side completeness item, out of scope for the gateway-strip fix.)
 
@@ -17,6 +17,12 @@ SPEC-018 is the **provider-side response synthesis contract** for OpenAI-wire to
 **Money-path**: all v0.2 changes preserve v0.1.5 settlement protection (`FaultBreakerQualifying` + zero credits on malformed streams via `billing_recorder.go:176` + `formula.go:112`).
 
 ## Change log
+
+- **v0.3.8 (2026-10-25, Related: #2111):** §3.12 DeepSeek-V4 names the
+  runtime reference its completions come from: DeepSeek's `inference/model.py`
+  and `kernel.py`, through mlx-swift-lm `3.32.3-macprovider.10.6` (SPEC-048
+  R003). Additive: the encoder, tokenizer and `dsml` parser contracts and
+  their goldens are unchanged.
 
 - **v0.3.7 (2026-10-24, Related: #2107):** §3.12 assistant-history
   `reasoning_content` reaches the loaded template for GLM-5.3 as it already
@@ -1033,6 +1039,16 @@ retaining the artifact bytes, split sequence, BPE model and added tokens.
 `DeepseekV4EncodingTests` checks exact IDs for all 14 provider requests and four
 reference goldens using `scripts/tests/fixtures/dsv4-encoding/token-ids.json`.
 Other model families use their existing tokenizer path.
+
+The completions this encoding frames (reasoning, answers and `dsml` calls) come
+from the `deepseek_v4` runtime of the SPEC-048 R003 mlx-swift-lm tuple. Its
+reference is DeepSeek's `inference/model.py` and `kernel.py` (v0.3.8,
+`3.32.3-macprovider.10.6`), not mlx-vlm's port: the ratio-4 compressor carries
+the previous window across calls, the indexer selects the exact top-k, and
+the router, compressor, attention with its sinks, experts and head logits are
+float32. The reference's QAT simulations are not reproduced. The fork's tiny
+fixture checks the runtime against a port of that reference; full-model
+parity is measured on the Studio before DeepSeek-V4 is activated.
 
 ## 4. Streaming Wire Shape
 
