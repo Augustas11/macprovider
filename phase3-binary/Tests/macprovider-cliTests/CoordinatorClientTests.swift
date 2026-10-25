@@ -4445,7 +4445,11 @@ final class CoordinatorClientTests: XCTestCase {
 
         do {
             try await client.connectAndRunOnceForTest()
-        } catch is CancellationError {
+            XCTFail("expected the fake coordinator socket to end")
+        } catch let error as URLError {
+            // Socket cancellation is a reconnectable transport failure; the
+            // owning serving task has not been cancelled.
+            XCTAssertEqual(error.code, .networkConnectionLost)
         }
 
         // A heartbeat text frame is emitted on the keepalive tick (interval 1s,
@@ -4453,6 +4457,7 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertTrue(socket.sentFrames().contains { $0["type"] as? String == "heartbeat" })
         // ...and no WebSocket control ping is ever sent.
         XCTAssertEqual(socket.pingCountSnapshot(), 0)
+        await client.cleanupConnectionForTest()
     }
 
     func testHelloIncludesModelHashWhenAvailable() async throws {
