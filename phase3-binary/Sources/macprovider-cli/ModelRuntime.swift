@@ -7836,7 +7836,8 @@ maxTokens: 1,
         _ lease: ConversationCacheLease?,
         request: ChatCompletionRequest,
         capability: ContinuousBatchingCapability,
-        prepared: ContinuousBatchPreparedRequest
+        prepared: ContinuousBatchPreparedRequest,
+        nativeMTPAdmission: NativeMTPRuntimeAdmission
     ) async -> Bool {
         guard let lease,
               Self.keyedMissShouldSerialRouteToPublishSnapshot(
@@ -7853,6 +7854,20 @@ maxTokens: 1,
         // A miss holds no reusable entry; this only releases the key's turn
         // so the serial request can take its own lease.
         await conversationCache.abortForSerialFallback(lease)
+        // SPEC-048-R009: the row's CB form publishes no serial-format entry,
+        // so a cache-only native admission reselects ordinary with reason
+        // `conversation_key` before any native state exists, and status
+        // records the path the request actually runs.
+        recordNativeMTPTokenBoundDowngrade(
+            requestID: request.requestID,
+            admitted: nativeMTPAdmission,
+            resolved: nativeMTPAdmission.resolvingConversationCacheLease(
+                hasConversationKey: true,
+                leaseAllowed: true,
+                cachedPromptTokens: lease.cachedPromptTokens,
+                keyedRowsCommitSerialFormat: false
+            )
+        )
         try? FileHandle.standardError.write(contentsOf: Data(Self.keyedMissSnapshotPublishTelemetryLine.utf8))
         return true
     }
@@ -8075,7 +8090,8 @@ maxTokens: 1,
             lease,
             request: request,
             capability: capability,
-            prepared: prepared
+            prepared: prepared,
+            nativeMTPAdmission: tokenBoundedNativeMTPAdmission
         ) {
             return nil
         }
@@ -8533,7 +8549,8 @@ maxTokens: 1,
             lease,
             request: request,
             capability: capability,
-            prepared: prepared
+            prepared: prepared,
+            nativeMTPAdmission: tokenBoundedNativeMTPAdmission
         ) {
             return nil
         }

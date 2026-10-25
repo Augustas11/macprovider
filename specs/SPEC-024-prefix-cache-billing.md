@@ -11,7 +11,8 @@
   miss whose serial turn would publish a snapshot but whose CB row would not
   now runs serially and publishes it; the next turn hits it under the AC-26
   fence. Unkeyed requests, strict `on`, DeepSeek V4 and every other family
-  are unchanged. Billing arithmetic is unchanged.
+  are unchanged. A cache-only native-MTP admission of such a miss reselects
+  ordinary (SPEC-048 0.1.56 MTP-9). Billing arithmetic is unchanged.
 
 **Change log v0.2.12 (2026-10-24, Related: #2111 — extend-only prompt snapshots):**
 - **SPEC-024-R004 / FR-CI2a.** DeepSeek V4 (128-token window plus compressed
@@ -402,7 +403,8 @@ selection; it then takes exactly the lease the ordinary path would take, and
 that lease decides before any native state exists. The request MUST reselect
 `ordinary` (selector reason `conversation_key`) when the lease reports
 `cached_prompt_tokens > 0`, when no lease is granted, or when the runtime
-would hand back a retained paged-KV entry instead of a serial-format one. On
+would hand back a retained paged-KV entry instead of a serial-format one, and
+**(v0.2.13)** when the miss serial-routes under SPEC-024-R005. On
 a miss with serial-format publication it stays `native_mtp`, keeps the lease,
 reports `cached_prompt_tokens = 0`, and at a normal terminal publishes the
 serial-format entry built from its committed target state: the same tokens,
@@ -508,9 +510,11 @@ only text content (the serial path takes no lease otherwise); and a serial turn 
 would publish a snapshot (`S` defined above) while a CB row of it would not (today GLM-5-Next).
 The serial turn then publishes its snapshot, and the next keyed turn hits it under the SPEC-038
 AC-26 fence. The provider logs
-`event=batching_unsupported action=serial_routed reason=keyed_miss_snapshot_publish`. The route
-is taken before native MTP is selected, so such a miss is not served native (the serial path
-never runs native MTP). Strict `on` refuses that next serial route, so under `on` such a
+`event=batching_unsupported action=serial_routed reason=keyed_miss_snapshot_publish`. The serial
+path never runs native MTP, so a cache-only native admission of such a miss reselects
+`ordinary` (reason `conversation_key`) when its lease decides the path, before any native state
+exists, exactly as SPEC-048-R009 reselects a row whose CB form would not publish the
+serial-format entry. Strict `on` refuses that next serial route, so under `on` such a
 request keeps its CB row and publishes nothing. Requests without a key, keyed hits, DeepSeek V4
 (whose CB rows publish their own snapshot), and every family without a snapshot policy MUST
 route exactly as before.

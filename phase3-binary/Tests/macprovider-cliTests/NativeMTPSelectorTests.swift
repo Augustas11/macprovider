@@ -680,6 +680,10 @@ final class NativeMTPSelectorTests: XCTestCase {
             XCTAssertEqual(downgraded.selection.nativeMTPReason, .conversationKey)
             XCTAssertTrue(downgraded.allowsConversationCacheLease)
         }
+        // SPEC-024-R005: a keyed miss whose CB row publishes no serial-format
+        // entry serial-routes; this reselection is recorded as the path run.
+        XCTAssertTrue(ModelRuntime.isNativeMTPTokenBoundDowngrade(
+            admitted: native, resolved: resolve(cached: 0, serial: false)))
         let ordinary = ModelRuntime.nativeMTPRuntimeAdmission(
             for: try makeRequest().withConversationKey("conv:sticky"),
             draftConfigured: false,

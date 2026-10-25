@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.55
+**Version:** 0.1.56
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.55",
+  "version": "0.1.56",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -1075,6 +1075,11 @@ mutation, so the change is a selection and never a fallback:
   would hand back a retained paged-KV entry rather than a serial-format one
   reselects `ordinary` with reason `conversation_key`, keeping the ordinary
   cache-hit decision and discount;
+- **(0.1.56)** a miss that SPEC-024-R005 serial-routes (canary, a family whose
+  serial turns publish a prompt snapshot but whose CB rows publish none, today
+  GLM-5-Next) also reselects `ordinary` with reason `conversation_key`: its CB
+  row would publish no serial-format entry, and the serial path that publishes
+  the snapshot never runs native MTP;
 - otherwise (a miss on a runtime that publishes keyed rows in the SPEC-038
   FR-CB4 serial conversation-cache format) the row stays `native_mtp`, keeps
   the lease, and reports `cached_prompt_tokens = 0`.
@@ -1874,6 +1879,11 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.56 (2026-10-25)** — R009 (MTP-9): a cache-only keyed miss that
+  SPEC-024-R005 serial-routes (CB canary, GLM-5-Next, whose CB rows publish no
+  prompt snapshot) reselects `ordinary` with reason `conversation_key` before
+  any native state exists, so its serial turn publishes the snapshot the next
+  turn reuses. Related: #2111.
 - **0.1.55 (2026-10-24)** — R003: pins the DeepSeek-V4 CB performance slice
   `3.32.3-macprovider.10.5` (`c8be0f61…`) on `676a62a4…`. Batched attention,
   compressor/indexer projections and per-row rotary offsets reduce repeated
