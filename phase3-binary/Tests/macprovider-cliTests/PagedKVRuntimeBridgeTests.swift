@@ -30,6 +30,23 @@ private final class RuntimeBridgeChunkRecorder: @unchecked Sendable {
 }
 
 final class PagedKVRuntimeBridgeTests: XCTestCase {
+    // CPU-only scheduler fixtures change the process-wide default device. Pin
+    // this Metal-backed class for each invocation so test order cannot route
+    // GPU-only model kernels to the CPU. Explicit CPU scopes below still win.
+    override func invokeTest() {
+        guard Self.metallibAvailable else { return super.invokeTest() }
+        Device.withDefaultDevice(Device(.gpu)) {
+            super.invokeTest()
+        }
+    }
+
+    private static var metallibAvailable: Bool {
+        let bundle = Bundle(for: PagedKVRuntimeBridgeTests.self)
+        return PagedKVMetallibGate.defaultMetallibExists(
+            bundleURL: bundle.resourceURL, executableURL: bundle.executableURL
+        ) || PagedKVMetallibGate.defaultMetallibExists()
+    }
+
     func testQwen3xHybridArchitectureRequiresExactAllowlistedIdentityAndConfigMetadata() {
         let dense = Data(#"{"model_type":"qwen3_5","architectures":["Qwen3_5ForConditionalGeneration"]}"#.utf8)
         let moe = Data(#"{"model_type":"qwen3_5_moe","architectures":["Qwen3_5MoeForConditionalGeneration"]}"#.utf8)
@@ -5976,10 +5993,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         // SwiftPM may launch XCTest through swiftpm-testing-helper, whose main
         // bundle is not the test bundle containing the packaged MLX resources.
         let testBundle = Bundle(for: PagedKVRuntimeBridgeTests.self)
-        guard PagedKVMetallibGate.defaultMetallibExists(
-            bundleURL: testBundle.resourceURL,
-            executableURL: testBundle.executableURL
-        ) || PagedKVMetallibGate.defaultMetallibExists() else {
+        guard Self.metallibAvailable else {
             throw XCTSkip("MLX default metallib is unavailable; test bundle=\(testBundle.bundleURL.path), test resources=\(testBundle.resourceURL?.path ?? "nil"), test executable=\(testBundle.executableURL?.path ?? "nil"), main bundle=\(Bundle.main.bundleURL.path), main executable=\(Bundle.main.executableURL?.path ?? "nil")")
         }
     }
