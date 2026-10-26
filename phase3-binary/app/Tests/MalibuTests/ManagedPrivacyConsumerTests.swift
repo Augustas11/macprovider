@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import XCTest
 @testable import Malibu
@@ -35,7 +36,7 @@ final class ManagedPrivacyConsumerTests: XCTestCase {
 
     @MainActor
     func testManagedLaunchHandsOffOnlyLocalTokenAndRequiresPrivateEndpoint() throws {
-        let home = FileManager.default.temporaryDirectory.appendingPathComponent("privacy-app-\(UUID().uuidString)")
+        let home = try temporaryHome()
         defer { try? FileManager.default.removeItem(at: home) }
         var reads = 0
         let buyerKey = "buyer-key-must-not-reach-agent"
@@ -45,7 +46,7 @@ final class ManagedPrivacyConsumerTests: XCTestCase {
         store.modelID = "test-model"
         store.executable = URL(fileURLWithPath: "/bin/echo")
         store.preview()
-        XCTAssertTrue(store.canSetup, store.status)
+        _ = try XCTUnwrap(store.canSetup ? true : nil, store.status)
         store.setup()
         let setupReads = reads
         XCTAssertThrowsError(try store.prepareEmbeddedLaunch(.crush, isolated: true))
@@ -58,7 +59,7 @@ final class ManagedPrivacyConsumerTests: XCTestCase {
 
     @MainActor
     func testOrdinaryGatewayReceiptCannotReadBuyerKeyOrLaunch() throws {
-        let home = FileManager.default.temporaryDirectory.appendingPathComponent("privacy-app-\(UUID().uuidString)")
+        let home = try temporaryHome()
         defer { try? FileManager.default.removeItem(at: home) }
         let root = home.appendingPathComponent("Library/Application Support/Malibu/ConnectedApps")
         let receipts = ConnectedConfigTransaction(receiptDirectory: root.appendingPathComponent("backups"))
@@ -77,5 +78,14 @@ final class ManagedPrivacyConsumerTests: XCTestCase {
             XCTAssertEqual((error as? ConnectedAppsError)?.localizedDescription, ConnectedAppsError.privacySetupUpgrade.localizedDescription)
         }
         XCTAssertFalse(FileManager.default.fileExists(atPath: handoff.path))
+    }
+
+    private func temporaryHome() throws -> URL {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent("privacy-app-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        // Preserve real ancestors: production deliberately refuses the /var symlink.
+        let resolved = try XCTUnwrap(realpath(home.path, nil))
+        defer { free(resolved) }
+        return URL(fileURLWithPath: String(cString: resolved), isDirectory: true)
     }
 }

@@ -35,7 +35,7 @@ final class TerminalBackendTests: XCTestCase {
                                                  inheritedEnvironment: ["HOME": home.path, "PATH": "/usr/bin:/bin", "ANTHROPIC_AUTH_TOKEN": "inherited-secret", "DYLD_INSERT_LIBRARIES": "/bad"])
         let expected = Set(["HOME", "PATH", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "CLAUDE_CONFIG_DIR", "TERM"] + ClaudeCodeLauncher.modelEnvironmentKeys)
         XCTAssertEqual(Set(plan.environment.keys), expected)
-        XCTAssertEqual(plan.environment["ANTHROPIC_BASE_URL"], "http://127.0.0.1:11435")
+        XCTAssertEqual(plan.environment["ANTHROPIC_BASE_URL"], "http://127.0.0.1:11435/")
         XCTAssertEqual(plan.environment["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"], "1")
         XCTAssertEqual(plan.environment["TERM"], "xterm-256color")
         for name in ClaudeCodeLauncher.modelEnvironmentKeys { XCTAssertEqual(plan.environment[name], toolModel.id) }
