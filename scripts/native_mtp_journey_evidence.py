@@ -342,17 +342,30 @@ def source_decode_digest(root: Path, commit: str) -> str:
         return module.compute(package)
 
 
+def _source_equivalence_module():
+    spec = importlib.util.spec_from_file_location("journey_source_equivalence",
+        Path(__file__).resolve().with_name("native_mtp_source_equivalence.py"))
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def validate_qualification_source_reuse(bundle: Bundle, entry: dict, policy: bytes, policy_body: dict) -> None:
     """An identity-only squash/release rebind retains original measurement source.
 
-    This branch deliberately handles equal recomputed decode identities only.
-    Changed-path review cannot be supplied as an asserted boolean.
+    Equal raw identities keep the original bounded reuse path.
+    LAB-only source changes require a reviewed recipe-pinned mechanical proof;
+    changed-path review cannot be supplied as an asserted boolean.
     """
     proof=parse_json(bundle.require("qualification-reuse.json"),"qualification-reuse.json")
     fields={"schema","measured_source_commit","current_source_commit","measured_entry_index",
             "measured_sidecar_sha256","benchmark_policy_sha256","decode_path_digest","metallib_sha256"}
+    changed = proof.get("schema") == "macprovider.native-mtp-qualification-source-reuse.v2"
+    if changed:
+        fields = fields - {"decode_path_digest"} | {"measured_decode_path_digest", "current_decode_path_digest", "source_equivalence_contract_sha256"}
     exact_keys(proof,fields,"qualification-reuse.json")
-    if proof["schema"]!="macprovider.native-mtp-qualification-source-reuse.v1":fail("qualification reuse schema differs")
+    if not changed and proof["schema"]!="macprovider.native-mtp-qualification-source-reuse.v1":fail("qualification reuse schema differs")
     source=policy_body.get("provider_commit")
     if proof["measured_source_commit"]!=source or proof["current_source_commit"]!=entry["source_commit"]:
         fail("qualification reuse original/current source differs")
@@ -362,22 +375,146 @@ def validate_qualification_source_reuse(bundle: Bundle, entry: dict, policy: byt
     origin,_=validated_sidecar_entry(origin_bytes,proof["measured_entry_index"])
     if origin["source_commit"]!=source or origin["provider_revision"]!=source or origin["ordinary_baseline"]["provider_revision"]!=source:
         fail("qualification reuse must preserve original provider identity")
+    historical_fork = False
+    if changed:
+        module = _source_equivalence_module()
+        historical_fork = (source == module.W3_SOURCE
+            and origin.get("runtime_revision") == module.OLD_FORK
+            and entry.get("runtime_revision") == module.NEW_FORK
+            and origin.get("request_feature_profile") == entry.get("request_feature_profile") == module.PROFILE)
     import copy
     def semantic(value: dict) -> dict:
         result=copy.deepcopy(value)
         for key in ("source_commit","provider_revision","reproducible_build_sha256","live_executable_cdhash"):
             result.pop(key,None)
         result["ordinary_baseline"].pop("provider_revision",None)
+        if changed:
+            result.pop("decode_path_digest", None)
+        if historical_fork:
+            result.pop("runtime_revision", None)
         return result
     if semantic(origin)!=semantic(entry):
         fail("qualification reuse changed profile/runtime/Metal/geometry/evidence")
-    digest=proof["decode_path_digest"]
-    if not isinstance(digest,str) or not SHA256_RE.fullmatch(digest) or origin.get("decode_path_digest")!=digest or entry.get("decode_path_digest")!=digest:
+    digest = proof["measured_decode_path_digest"] if changed else proof["decode_path_digest"]
+    current_digest = proof["current_decode_path_digest"] if changed else digest
+    if (not isinstance(digest,str) or not SHA256_RE.fullmatch(digest)
+            or not isinstance(current_digest,str) or not SHA256_RE.fullmatch(current_digest)
+            or origin.get("decode_path_digest")!=digest or entry.get("decode_path_digest")!=current_digest):
         fail("qualification reuse decode identity differs")
     if not isinstance(proof["metallib_sha256"],str) or not SHA256_RE.fullmatch(proof["metallib_sha256"]) or entry.get("metallib_sha256")!=proof["metallib_sha256"]:
         fail("qualification reuse Metal identity differs")
-    if source_decode_digest(ROOT,source)!=digest or source_decode_digest(ROOT,entry["source_commit"])!=digest:
+    if changed:
+        try:
+            contract_sha = module.verify_source_equivalence(ROOT, source, entry["source_commit"], digest, current_digest, request_feature_profile=entry["request_feature_profile"])
+        except module.SourceEquivalenceError as error:
+            fail(str(error))
+        if contract_sha is None or proof["source_equivalence_contract_sha256"] != contract_sha:
+            fail("qualification reuse reviewed contract differs")
+    elif source_decode_digest(ROOT,source)!=digest or source_decode_digest(ROOT,entry["source_commit"])!=digest:
         fail("qualification reuse source decode identities differ")
+
+
+def _serving_contract_module(filename: str):
+    spec = importlib.util.spec_from_file_location("serving_contract_" + filename.replace(".", "_"),
+        Path(__file__).resolve().with_name(filename))
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def validate_representative_serving_policy(bundle: Bundle, entry: dict, policy: bytes,
+                                           steps: dict) -> None:
+    """Reopen public paired evidence and numeric redaction, preserving custody.
+
+    Private raw R005 bytes are validated by the producer, not reopened here.
+    The protected signer checks the closed numeric projection, its immutable
+    raw-byte commitments/custody, and authenticated post-cut source transport.
+    This is the existing operator-custody model, not hardware attestation.
+    """
+    core = _serving_contract_module("native_mtp_binding_bundle.py")
+    reuse = _source_equivalence_module()
+    with tempfile.TemporaryDirectory(prefix="native-mtp-serving-representative.") as directory:
+        scratch = Path(directory)
+        representative = scratch / "representative"
+        representative.mkdir()
+        names = {"capture.json", "tuple-bounds.json", "projection-plan.json", "privacy-review.json",
+                 "preregistration.json", "bench-policy.json", "replay.json", "replay-policy.json", "analysis.json", "source.json"}
+        for name in names:
+            (representative / name).write_bytes(bundle.require("observations/representative/" + name))
+        if (representative / "replay-policy.json").read_bytes() != policy:
+            fail("representative policy bytes differ from sidecar-bound r015-policy.json")
+        try:
+            hashes = core.validate_representative_replay(representative, stage=ROOT, repo=ROOT,
+                current_source=entry["source_commit"], entry=entry, scratch=scratch)
+        except (core.BindingBundleError, ValueError) as error:
+            fail(str(error))
+        if any(entry[key] != value for key, value in hashes.items()):
+            fail("representative replay qualification hashes differ from sidecar")
+        details = steps["step-14-studio-and-tier-benchmark"]["details"]
+        keys = set(hashes) | {"correctness_evidence_sha256", "security_negative_evidence_sha256"}
+        if details.get("qualification_sha256") != {key: entry[key] for key in keys}:
+            fail("step14 qualification digests differ from sidecar")
+        paths = {}
+        for kind, name in (("policy", "w3-policy.json"), ("runs", "w3-runs.jsonl"), ("analysis", "w3-analysis.json")):
+            data = bundle.require("observations/" + name)
+            path = scratch / name; path.write_bytes(data); paths[kind] = path
+            if details.get("w3_" + kind + "_sha256") != sha256(data):
+                fail("step14 original W3 artifact digest differs")
+        original = parse_json(paths["policy"].read_bytes(), "original W3 policy")
+        if original.get("schema") != R015_POLICY_SCHEMA or details.get("w3_provider_commit") != original.get("provider_commit"):
+            fail("original W3 policy schema/source differs")
+        expected = {"model_id": entry["model_key"], "target_sha256": entry["ordinary_baseline"]["artifact_hash"],
+                    "mtp_sha256": entry["artifact_hash"], "tokenizer_sha256": entry["tokenizer_sha256"],
+                    "max_native_active_rows": entry["max_native_active_rows"],
+                    "maximum_prompt_tokens": entry["max_prompt_tokens"], "qualified_slots": entry["qualified_slots"],
+                    "proposal_depth": entry["proposal_depth"]}
+        if any(original.get(key) != value for key, value in expected.items()):
+            fail("original W3 policy tuple scope differs")
+        bench = parse_json((representative / "bench-policy.json").read_bytes(), "representative bench policy")
+        for key in ("hw_model", "chip", "ram_gb"):
+            if original.get(key) != bench.get(key):
+                fail("original W3 and representative hardware differ")
+        analyzer = core._module(ROOT, "native_mtp_r015_analyze.py")
+        result = analyzer.analyze(paths["runs"], paths["policy"])
+        if result.get("overall_status") != "PASS" or result != parse_json(paths["analysis"].read_bytes(), "original W3 analysis"):
+            fail("original W3 analyzer result differs or fails")
+        try:
+            source = original["provider_commit"]
+            source_digest = reuse.source_decode_digest(ROOT, source)
+            contract_sha = reuse.verify_source_equivalence(ROOT, source, entry["source_commit"],
+                source_digest, entry["decode_path_digest"], request_feature_profile=entry["request_feature_profile"])
+        except reuse.SourceEquivalenceError as error:
+            fail(str(error))
+        if details.get("w3_source_equivalence_contract_sha256") != contract_sha:
+            fail("original W3 source-equivalence contract differs")
+        if original.get("mlx_fork_revision") != entry["runtime_revision"] and not (
+                source == reuse.W3_SOURCE and original.get("mlx_fork_revision") == reuse.OLD_FORK
+                and entry["runtime_revision"] == reuse.NEW_FORK and contract_sha is not None):
+            fail("original W3 runtime differs without verified exact test-only fork bridge")
+        projection = parse_json(bundle.require("observations/r005-numeric-projection.json"), "R005 numeric projection")
+        numeric = _serving_contract_module("native_mtp_r005_redacted.py")
+        try:
+            verified = numeric.validate_projection(projection, entry)
+        except ValueError as error:
+            fail(str(error))
+        if verified["raw_result_sha256"] != entry["correctness_evidence_sha256"]:
+            fail("R005 projected raw-result custody digest differs from sidecar")
+        if verified["projection_sha256"] != sha256(bundle.require("observations/r005-numeric-projection.json")):
+            fail("R005 numeric projection bytes are not canonical")
+        r005 = steps["step-04-serial-token-oracle"]["details"]
+        if r005.get("r005_numeric_projection_sha256") != verified["projection_sha256"]:
+            fail("step04 numeric projection digest differs")
+        for key, field in (("r005_result_sha256", "raw_result_sha256"), ("r005_policy_sha256", "policy_sha256"), ("r005_corpus_sha256", "corpus_sha256")):
+            if r005.get(key) != verified[field]:
+                fail("step04 R005 projected custody digest differs")
+        try:
+            measured = verified["measured_source_commit"]
+            reuse.verify_source_equivalence(ROOT, measured, entry["source_commit"],
+                reuse.source_decode_digest(ROOT, measured), entry["decode_path_digest"],
+                request_feature_profile=entry["request_feature_profile"])
+        except reuse.SourceEquivalenceError as error:
+            fail(str(error))
 
 
 def compose_serving(bundle: Bundle, *, captured_at: str, expires_at: str | None = None) -> dict[str, Any]:
@@ -399,12 +536,17 @@ def compose_serving(bundle: Bundle, *, captured_at: str, expires_at: str | None 
     if entry["benchmark_policy_sha256"] != sha256(policy):
         fail("r015-policy.json is not the benchmark policy the sidecar entry binds")
     policy_body = parse_json(policy, "r015-policy.json")
-    if not isinstance(policy_body, dict) or policy_body.get("schema") != R015_POLICY_SCHEMA:
-        fail(f"r015-policy.json schema must be {R015_POLICY_SCHEMA}")
-    if policy_body.get("provider_commit") != entry["source_commit"]:
-        if "qualification-reuse.json" not in bundle.files:
-            fail("r015-policy.json provider_commit must equal the selected sidecar entry source_commit or carry verified qualification source reuse")
-        validate_qualification_source_reuse(bundle,entry,policy,policy_body)
+    if not isinstance(policy_body, dict):
+        fail("r015-policy.json must be a policy object")
+    if policy_body.get("schema") == "macprovider.native-mtp-post-gateway-replay-policy.v1":
+        validate_representative_serving_policy(bundle, entry, policy, steps)
+    elif policy_body.get("schema") == R015_POLICY_SCHEMA:
+        if policy_body.get("provider_commit") != entry["source_commit"]:
+            if "qualification-reuse.json" not in bundle.files:
+                fail("r015-policy.json provider_commit must equal the selected sidecar entry source_commit or carry verified qualification source reuse")
+            validate_qualification_source_reuse(bundle,entry,policy,policy_body)
+    else:
+        fail("r015-policy.json has an unsupported benchmark policy schema")
     observations: dict[str, bool] = {}
     for name, step_id, check, required in OBSERVATION_SOURCES:
         value = steps[step_id]["checks"].get(check)

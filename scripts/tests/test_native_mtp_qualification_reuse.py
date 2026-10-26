@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 
 COPY=Path(__file__).resolve().parents[2]
-ROOT=next(p for p in [COPY, *COPY.parents] if (p/'scripts/native_mtp_journey_evidence.py').is_file())
+ROOT=next(p for p in [COPY, *COPY.parents] if (p/'scripts/native_mtp_admission_sidecar.py').is_file())
 sys.path.insert(0,str(ROOT/'scripts'));sys.path.insert(0,str(ROOT))
 from scripts.tests.test_native_mtp_journey_evidence import sidecar_and_policy
 spec=importlib.util.spec_from_file_location('reuse_contract',COPY/'scripts/native_mtp_journey_evidence.py')
@@ -53,6 +53,37 @@ class ReuseTests(unittest.TestCase):
         self.assertEqual(result['benchmark_policy_sha256'],C.sha256(self.policy))
         self.assertEqual(json.loads(files['r015-policy.json'])['provider_commit'],'a'*40)
 
+
+    def changed_proof(self):
+        self.current['decode_path_digest']='0'*64
+        self.proof.update(schema='macprovider.native-mtp-qualification-source-reuse.v2',
+            measured_decode_path_digest=self.proof.pop('decode_path_digest'),
+            current_decode_path_digest='0'*64, source_equivalence_contract_sha256='9'*64)
+        return C.Bundle('bundle',{'qualification-reuse.json':json.dumps(self.proof).encode(),
+            'qualification-origin-native-mtp-admission.json':self.origin},b'')
+
+    def test_reviewed_changed_digest_path_preserves_original_policy(self):
+        # The shared validator is independently exercised against actual source
+        # bytes in test_native_mtp_source_equivalence.py; spy on its boundary here.
+        bundle=self.changed_proof()
+        import importlib.util
+        helper_path=C.Path(C.__file__).with_name('native_mtp_source_equivalence.py')
+        helper_spec=importlib.util.spec_from_file_location('reuse_helper_test',helper_path)
+        helper=importlib.util.module_from_spec(helper_spec);helper_spec.loader.exec_module(helper)
+        with patch.object(helper,'verify_source_equivalence',return_value='9'*64) as verify, patch.object(C,'_source_equivalence_module',return_value=helper):
+            C.validate_qualification_source_reuse(bundle,self.current,self.policy,json.loads(self.policy))
+        self.assertEqual(json.loads(self.policy)['provider_commit'],'a'*40)
+        self.assertEqual(verify.call_args.args[1:],('a'*40,'b'*40,'e'*64,'0'*64))
+
+    def test_changed_digest_still_refuses_profile_or_metal_change(self):
+        bundle=self.changed_proof()
+        self.current['metallib_sha256']='1'*64
+        with self.assertRaisesRegex(C.NativeMTPEvidenceError,'profile/runtime'):
+            C.validate_qualification_source_reuse(bundle,self.current,self.policy,json.loads(self.policy))
+        self.current['metallib_sha256']='f'*64
+        self.current['max_native_active_rows']=2
+        with self.assertRaisesRegex(C.NativeMTPEvidenceError,'profile/runtime'):
+            C.validate_qualification_source_reuse(bundle,self.current,self.policy,json.loads(self.policy))
 
     def test_changed_source_decode_digest_is_rejected(self):
         with self.assertRaisesRegex(C.NativeMTPEvidenceError,'source decode identities'):self.check(['e'*64,'0'*64])

@@ -29,6 +29,7 @@
     "NativeMTPAdmissionSidecarTests.testEmbeddedGLMAdapterSignsAtMostOneNativeActiveRow"
   ],
   "source_inputs": {
+    "ops/recipes/native-mtp-glm53-lab-source-equivalence.v1.json": "e55765b281afa7eb68cc211eed941b3254effb2cd668ddd17ce4eb6c3a064cb6",
     "phase3-binary/catalog/autotune/autotune-artifacts-source.json": "11a8be672b5b0485a29676e04e01f55dcedbde150603cc893b9c76ff01bbd258",
     "phase3-binary/catalog/autotune/continuous-batching-policy-source.json": "f557b03bb4406eb366f7e2c90d788423768ccada289d9f651969187de8847941",
     "phase3-binary/catalog/autotune/native-mtp-admission-release.json": "6e0abe5a1ee861d6e3bc484407cda8c00695e92ba686e83a0fbbd4b5dbfe4ef9",

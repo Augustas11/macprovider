@@ -1378,6 +1378,26 @@ listed file is missing or changes without a regenerated digest.
   signed bindings MUST all validate before composition or signing. A changed
   sampled verifier or expanded request profile does not inherit historical
   greedy correctness or performance evidence.
+  A representative-policy sidecar retains the actual post-gateway replay
+  policy bytes and schema as its benchmark-policy binding. Its signed journey
+  separately retains and reanalyzes the original R015 matrix policy, runs and
+  analysis, with their true measured source, while rederiving the privacy-safe
+  representative projection and fresh paired replay. An exact reviewed
+  test-only dependency revision change or LAB-only source delta may establish
+  reuse mechanically under the reviewed recipe; it does not authorize a
+  different request profile, hardware, bounds, Metal library or production
+  draft/verify/commit behavior.
+  Public R005 evidence MAY use the closed numeric redaction produced only
+  after the existing full private acceptance validator passes. It preserves
+  every numerical gate and case/position/selection coverage, whole-sequence
+  commitments and exact raw result/policy/corpus SHA-256 identities, the true
+  measured source, and a durable private Git-commit custody reference. Raw
+  prompts, token IDs and per-token hashes MUST remain private. The protected
+  signer revalidates that closed projection, arithmetic, coverage, source and
+  authenticated transport provenance; it MUST explicitly record that it does
+  not reopen the private raw bytes or provide independent hardware
+  attestation. A custody commitment alone cannot replace either the full
+  producer validation or the public numeric validation.
 - R015 requalification is required only when a change alters how the qualified
   tuple drafts, verifies, or commits tokens. Before requesting that rerun,
   list the existing qualification evidence and name the changed decode-path

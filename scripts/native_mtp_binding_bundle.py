@@ -287,22 +287,11 @@ def validate_security_artifact(q: Path, *, repo: Path, source: dict, recipe: dic
     return digest(q / "security-evidence.json")
 
 
-def _qualification(stage: Path, bundle: Path, entry: dict, recipe: dict) -> dict:
-    q = bundle / "qualification"
-    acceptance = read_json(q / "acceptance.json")
-    policy = read_json(q / "acceptance-policy.json")
-    corpus = read_json(q / "acceptance-corpus.json")
-    validate_acceptance(acceptance, policy, corpus, entry, policy_sha=digest(q / "acceptance-policy.json"), corpus_sha=digest(q / "acceptance-corpus.json"))
-    source = read_json(q / "source.json")
-    require(set(source) == {"source_commit", "decode_path_digest"} and source["source_commit"] == policy["provider_commit"], "qualification source binding")
-    require(source["decode_path_digest"] == entry["decode_path_digest"], "qualification decode path changed")
-    # Caller source digest assertions are insufficient: recompute at lab commit.
-    lab = stage.parent / "qualification-source"
-    original_repo = Path(os.environ["BINDING_REPO_INTERNAL"])
-    _archive(original_repo, source["source_commit"], lab)
-    dp = _module(lab, "decode_path_digest.py")
-    require(dp.compute(lab / "phase3-binary") == source["decode_path_digest"], "qualification source digest mismatch")
-    require(policy["mlx_fork_revision"] == entry["runtime_revision"], "qualification runtime mismatch")
+def validate_representative_replay(q: Path, *, stage: Path, repo: Path, current_source: str,
+                                   entry: dict, scratch: Path) -> dict:
+    """Recompute representative v2 projection, real paired runs and analysis."""
+    original_repo = Path(repo)
+    equivalence = _module(stage, "native_mtp_source_equivalence.py")
     replay = _module(stage, "native_mtp_request_shape_replay.py")
     capture_header, _ = replay.load_capture(q / "capture.json")
     require(capture_header["schema"] == replay.CAPTURE_SCHEMA_V2, "expanded scope requires mode-independent privacy-safe v2 capture")
@@ -317,25 +306,105 @@ def _qualification(stage: Path, bundle: Path, entry: dict, recipe: dict) -> dict
     require(projected_policy == frozen_policy and projected_plan == frozen_plan, "capture projection does not rederive frozen policy/plan")
     replay_header, _ = replay._load_replay_runs(q / "replay.json", frozen_policy, digest(q / "replay-policy.json"), digest(q / "capture.json"))
     require(replay_header["mixed_rows"] == entry["qualified_slots"] and replay_header["max_native_active_rows"] == entry["max_native_active_rows"] and replay_header["tuple_bounds_sha256"] == digest(q / "tuple-bounds.json") and replay_header["bench_policy_sha256"] == digest(q / "bench-policy.json"), "R015 full-slot/frozen-input binding mismatch")
-    for key in ("model_id", "target_sha256", "mtp_sha256", "tokenizer_sha256"):
-        require(replay_header[key] == policy[key], "R015 artifact identity mismatch")
-    replay_source = stage.parent / "replay-source"
-    _archive(original_repo, replay_header["provider_commit"], replay_source)
-    replay_dp = _module(replay_source, "decode_path_digest.py")
-    require(replay_dp.compute(replay_source / "phase3-binary") == entry["decode_path_digest"], "R015 decode path changed")
+    expected_artifacts = {"model_id": entry["model_key"], "target_sha256": entry["ordinary_baseline"]["artifact_hash"],
+                          "mtp_sha256": entry["artifact_hash"], "tokenizer_sha256": entry["tokenizer_sha256"]}
+    for key, expected in expected_artifacts.items():
+        require(replay_header[key] == expected, "R015 artifact identity mismatch")
+    try:
+        measured_replay_digest = equivalence.source_decode_digest(original_repo, replay_header["provider_commit"])
+        equivalence.verify_source_equivalence(original_repo, replay_header["provider_commit"],
+            current_source,
+            measured_replay_digest, entry["decode_path_digest"], request_feature_profile=entry["request_feature_profile"])
+    except equivalence.SourceEquivalenceError as error:
+        raise BindingBundleError(str(error)) from error
     records = replay.convert_replay_to_analyzer_jsonl(q / "replay.json", q / "replay-policy.json", capture_sha256=digest(q / "capture.json"))
-    out = stage.parent / "replay-analyzer.jsonl"
+    out = scratch / "replay-analyzer.jsonl"
     replay.write_replay_analyzer_jsonl(records, out)
     analyzer = _module(stage, "native_mtp_post_gateway_replay_analyze.py")
     result = analyzer.analyze(out, q / "replay-policy.json")
     require(result.get("overall_status") == "PASS", "R015 analyzer gate failed")
     require(read_json(q / "analysis.json") == result, "R015 supplied analysis is not the rederived result")
+    return {"batch_evidence_sha256": digest(q / "replay.json"),
+            "performance_evidence_sha256": digest(q / "analysis.json"),
+            "benchmark_policy_sha256": digest(q / "replay-policy.json")}
+
+
+def _qualification(stage: Path, bundle: Path, entry: dict, recipe: dict, *, repo: Path) -> dict:
+    q = bundle / "qualification"
+    acceptance = read_json(q / "acceptance.json")
+    policy = read_json(q / "acceptance-policy.json")
+    corpus = read_json(q / "acceptance-corpus.json")
+    validate_acceptance(acceptance, policy, corpus, entry, policy_sha=digest(q / "acceptance-policy.json"), corpus_sha=digest(q / "acceptance-corpus.json"))
+    source = read_json(q / "source.json")
+    require(set(source) == {"source_commit", "decode_path_digest"} and source["source_commit"] == policy["provider_commit"], "qualification source binding")
+    # Caller source digest assertions are insufficient: recompute at lab commit.
+    original_repo = Path(repo)
+    equivalence = _module(stage, "native_mtp_source_equivalence.py")
+    try:
+        equivalence.verify_source_equivalence(original_repo, source["source_commit"],
+            read_json(bundle / "inputs.json")["identity"]["source_commit"],
+            source["decode_path_digest"], entry["decode_path_digest"], request_feature_profile=entry["request_feature_profile"])
+    except equivalence.SourceEquivalenceError as error:
+        raise BindingBundleError(str(error)) from error
+    require(policy["mlx_fork_revision"] == entry["runtime_revision"], "qualification runtime mismatch")
+    representative = validate_representative_replay(q, stage=stage, repo=original_repo,
+        current_source=read_json(bundle / "inputs.json")["identity"]["source_commit"], entry=entry, scratch=stage.parent)
     security_source = read_json(q / "security-actions.json").get("source_commit")
     require(isinstance(security_source, str) and re.fullmatch(r"[0-9a-f]{40}", security_source) is not None, "security CI full source commit required")
     final_source = read_json(bundle / "inputs.json")["identity"]["source_commit"]
     require(git(original_repo, "rev-parse", f"{security_source}^{{tree}}") == git(original_repo, "rev-parse", f"{final_source}^{{tree}}"), "security CI/audit tree differs from merged reviewed source")
     security_sha = validate_security_artifact(q, repo=original_repo, source={"source_commit": security_source}, recipe=recipe, prior_evidence=entry["security_negative_evidence_sha256"])
-    return {"security_negative_evidence_sha256": security_sha, "correctness_evidence_sha256": digest(q / "acceptance.json"), "batch_evidence_sha256": digest(q / "replay.json"), "performance_evidence_sha256": digest(q / "analysis.json"), "benchmark_policy_sha256": digest(q / "replay-policy.json")}
+    return {"security_negative_evidence_sha256": security_sha, "correctness_evidence_sha256": digest(q / "acceptance.json"), **representative}
+
+
+@_closed_errors
+def validate_serving_qualification(bundle: Path, *, repo: Path, source_commit: str,
+                                   sidecar_path: Path, entry_index: int) -> dict:
+    """Reopen real qualification before sealing, without serving-proof recursion.
+
+    The caller compares these five digests to its sidecar and step-14 inputs.
+    This is not a signed serving result or an activation receipt. All source
+    code is staged from reviewed main; subprocess environment is passed locally.
+    """
+    bundle, repo = Path(bundle).resolve(), Path(repo).resolve()
+    recipe, _ = _recipe(repo, source_commit, RECIPE_PATH)
+    inputs = read_json(bundle / "inputs.json")
+    require(inputs.get("phase") == "expanded_glm_sampled" and inputs.get("identity", {}).get("source_commit") == source_commit,
+            "qualification bundle source/phase mismatch")
+    require((bundle / "release/native-mtp-admission.json").read_bytes() == Path(sidecar_path).read_bytes(),
+            "qualification sidecar differs from derived signed release")
+    with tempfile.TemporaryDirectory(prefix="native-serving-qualification-") as directory:
+        stage = Path(directory) / "source"
+        _archive(repo, source_commit, stage)
+        for name, expected in recipe["source_inputs"].items():
+            require(_relative(name) and digest(stage / name) == expected, "reviewed recipe source input changed")
+        generator = _module(stage, "native_mtp_admission_sidecar.py")
+        sidecar = generator.validate_sidecar(generator.strict_json_loads(Path(sidecar_path).read_text()))
+        require(type(entry_index) is int and 0 <= entry_index < len(sidecar["entries"]), "qualification entry index invalid")
+        entry = sidecar["entries"][entry_index]
+        require(entry["model_key"] == recipe["model_key"], "qualification model differs from reviewed recipe")
+        for key, expected in recipe["phases"]["expanded_glm_sampled"].items():
+            require(entry[key] == expected, "qualification profile/bounds differ from recipe")
+        require(all(entry[key] == inputs["identity"][key] for key in IDENTITY_KEYS | {"metallib_sha256"}),
+                "qualification sidecar code identity differs")
+        # The aggregator always begins with the reviewed original hardware
+        # negatives, not its own already-aggregated output from the new sidecar.
+        originals = [row["entry"] for row in read_json(stage / CATALOG / "native-mtp-admission-tuple.json")
+                     if row["entry"]["model_key"] == recipe["model_key"]]
+        require(len(originals) == 1, "ambiguous original qualification tuple")
+        original = originals[0]
+        require(all(entry[key] == original[key] for key in recipe["reused_evidence_keys"]), "reused hardware evidence changed")
+        env = _environment(repo, source_commit, bundle / "previous")
+        env["GIT_WORK_TREE"] = str(stage)
+        _run([sys.executable, stage / "scripts/catalog-release.py", "verify-directory",
+              "--directory", bundle / "release", "--tier2-coordinator-config", stage / "phase4-coordinator/dist/coordinator.yaml"],
+             cwd=stage, env=env)
+        import copy
+        qualifying = copy.deepcopy(entry)
+        qualifying["security_negative_evidence_sha256"] = original["security_negative_evidence_sha256"]
+        result = _qualification(stage, bundle, qualifying, recipe, repo=repo)
+        require(all(entry[key] == value for key, value in result.items()), "sidecar qualification digests differ from actual evidence")
+        return result
 
 
 def _flat(stage: Path, target: Path) -> None:
@@ -400,7 +469,7 @@ def _derive(bundle: Path, *, repo: Path, commit: str, recipe: dict, stage: Path,
         require(target[key] == bounds[key], "recipe cannot widen row/depth/context/CB bounds")
     target["request_feature_profile"] = bounds["request_feature_profile"]
     if inputs["phase"] == "expanded_glm_sampled":
-        target.update(_qualification(stage, bundle, target, recipe))
+        target.update(_qualification(stage, bundle, target, recipe, repo=repo))
     tuple_path.write_bytes(canonical(tuples))
     tool = [sys.executable, stage / "scripts/catalog-release.py"]
     # Existing signatures are reused during verification, then rechecked against

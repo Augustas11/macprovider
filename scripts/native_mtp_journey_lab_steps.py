@@ -150,7 +150,16 @@ def main():
         require(all((args.acceptance_result, args.acceptance_policy, args.acceptance_corpus)), "sampled step04 requires actual frozen R005 records")
         core = module(args.root, "binding_bundle", "scripts/native_mtp_binding_bundle.py")
         result, policy, corpus = (path.read_bytes() for path in (args.acceptance_result, args.acceptance_policy, args.acceptance_corpus))
-        require(strict(policy).get("provider_commit") == entry["source_commit"], "R005 current-source binding or an explicit separately validated source-reuse adapter is required")
+        measured_source = strict(policy).get("provider_commit")
+        if measured_source != entry["source_commit"]:
+            reuse = module(args.root, "source_equivalence", "scripts/native_mtp_source_equivalence.py")
+            measured_digest = reuse.source_decode_digest(args.root, measured_source)
+            contract_sha = reuse.verify_source_equivalence(args.root, measured_source,
+                entry["source_commit"], measured_digest, entry["decode_path_digest"], request_feature_profile=entry["request_feature_profile"])
+            output["step-04-serial-token-oracle"]["details"].update(
+                r005_measured_source_commit=measured_source,
+                r005_current_source_commit=entry["source_commit"],
+                r005_source_equivalence_contract_sha256=contract_sha)
         core.validate_acceptance(strict(result), strict(policy), strict(corpus), entry, policy_sha=sha(policy), corpus_sha=sha(corpus))
         output["step-04-serial-token-oracle"]["details"]["r005_result_sha256"] = sha(result)
         output["step-04-serial-token-oracle"]["details"]["r005_policy_sha256"] = sha(policy)
