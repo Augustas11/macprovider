@@ -27,11 +27,11 @@ type disclosureItem struct {
 var tier1DisclosureText = []disclosureItem{
 	{
 		Key:  "plaintext_to_provider",
-		Text: "Buyer prompts and provider responses are processed as plaintext on provider hardware. Providers can technically observe prompts and outputs that route through their machine. This is acceptable for cooperative deployments where buyer and provider have an established trust relationship; it is NOT a private-inference guarantee.",
+		Text: "In default mode, buyer prompts and provider responses are plaintext to the gateway and the serving Mac. Providers can technically observe prompts and outputs that route through their machine. This is acceptable for cooperative deployments where buyer and provider have an established trust relationship; it is NOT a private-inference guarantee.",
 	},
 	{
 		Key:  "hardware_attestation",
-		Text: "There is no hardware attestation or runtime integrity check on providers. The coordinator admits providers based on `provider_id` match (pinned tier) or rate-limited provisional admission. Once admitted, the provider runtime is trusted to faithfully serve requests; this API does NOT cryptographically verify this.",
+		Text: "Default mode provides no hardware attestation or runtime integrity check on providers. The coordinator admits providers based on `provider_id` match (pinned tier) or rate-limited provisional admission. Once admitted, the provider runtime is trusted to faithfully serve requests; this API does NOT cryptographically verify this.",
 	},
 	{
 		Key:  "model_identity",
@@ -63,7 +63,7 @@ var tier1DisclosureText = []disclosureItem{
 	},
 	{
 		Key:  "tier2_milestone",
-		Text: "The product makes NO private-inference, hardware-attestation, runtime-binary-attestation, provider-private-prompt, untrusted-provider, malicious-output-prevention, or provider-falsified-model-measurement detection claims. Any buyer-facing language, including front-door copy, docs, error messages, API responses, marketing material, and this spec, MUST be consistent with these limitations.",
+		Text: "Default mode makes NO private-inference, hardware-attestation, runtime-binary-attestation, provider-private-prompt, untrusted-provider, malicious-output-prevention, or provider-falsified-model-measurement detection claims. The opt-in privacy class has the separate, limited protections described on /privacy. Any buyer-facing language, including front-door copy, docs, error messages, API responses, marketing material, and this spec, MUST be consistent with these limitations.",
 	},
 	{
 		Key:  "prefix_cache",

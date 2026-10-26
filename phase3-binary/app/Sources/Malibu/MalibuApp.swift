@@ -40,11 +40,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let preferences = AppPreferences.shared
     private var preferenceCancellables: Set<AnyCancellable> = []
     private var bundleRelaunchMonitor: AppBundleRelaunchMonitor?
+    private var instanceHandoff: AppInstanceHandoff?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Log both installed versions so support can identify a partially
         // completed compatibility-set transaction without reading the bundle.
+        _ = CLIUpdateRunner.runningAppVersion
         logStartupProvenance()
+        if let handoff = AppInstanceHandoff() {
+            instanceHandoff = handoff
+            Task { @MainActor [weak self] in
+                guard await handoff.claim() else { return }
+                self?.finishLaunching()
+            }
+        } else {
+            finishLaunching()
+        }
+    }
+
+    private func finishLaunching() {
         AppDelegate.current = self
 
         menuBar = MenuBarController(agent: agent, isVisible: preferences.showsMenuBarIcon) { [weak self] action in
@@ -88,7 +102,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             lifecycleLeaseKind: snapshot.lifecycleLeaseKind,
             cliUpdateInProgress: snapshot.cliUpdateInProgress,
             providerSoftwareRepairInProgress: snapshot.providerSoftwareRepairInProgress,
-            appFlowInProgress: terminationDrain != nil
+            appFlowInProgress: terminationDeadline.started
                 || uninstallTask != nil
                 || onboardingWindow != nil
                 || NSApp.modalWindow != nil
@@ -109,40 +123,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // step 2. Any deep-link scheme SPEC-027 needs (verified-email flow) is
     // that spec's normative surface, not SPEC-026's.
 
-    // AUDIT R2 CODE H2 + R3 CODE M1 + R4 hardening: intercept every
-    // termination (Quit menu, Cmd-Q, logout, killall by name) and route the
-    // running child through the same shutdown drain as Quit-and-Uninstall.
-    // Concurrent Quit + Uninstall orderings:
-    //   A) Uninstall only            → performUninstall drives termination.
-    //   B) Quit only                 → agent.shutdown, then reply.
-    //   C) Uninstall then Quit       → await uninstallTask, then reply.
-    //   D) Quit then Uninstall       → shutdown + await uninstallTask if it
-    //                                  appears mid-flight.
-    // In every ordering, cleanup completes before NSApp.reply.
-    // AUDIT R4 CODE M1: any second/third termination request (double Cmd-Q,
-    // logout on top of Quit menu, programmatic NSApp.terminate) MUST also
-    // return .terminateLater. Returning .terminateNow on re-entry would
-    // bypass the in-flight drain and truncate Keychain/config cleanup.
-    // NSApp.reply(toApplicationShouldTerminate:) is idempotent — the first
-    // drain's completion covers every waiting terminate request.
-    private var terminationDrain: Task<Void, Never>?
+    // Ordinary quit detaches app observers without stopping the launchd provider.
+    // Uninstall is awaited when possible, but cannot strand a stale app forever.
+    private let terminationDeadline = AppTerminationDeadline()
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        if terminationDrain == nil {
-            terminationDrain = Task { @MainActor [weak self] in
-                guard let self else { NSApp.reply(toApplicationShouldTerminate: true); return }
-                // Always detach Malibu's observers first. Option 2 keeps the
-                // launchd provider running on ordinary app quit. shutdown() is
-                // idempotent; if uninstall already detached, this is a no-op.
-                await TerminalSession.terminateAll()
-                await self.agent.shutdown(gracefulSeconds: 15)
-                // If an uninstall was in-flight (or started concurrently), wait
-                // for it to complete before signalling termination.
-                if let uninstall = self.uninstallTask {
-                    _ = await uninstall.value
-                }
-                NSApp.reply(toApplicationShouldTerminate: true)
+        terminationDeadline.begin(drain: { [weak self] in
+            guard let self else { return }
+            await TerminalSession.terminateAll()
+            await self.agent.shutdown(gracefulSeconds: 15)
+            if let uninstall = self.uninstallTask {
+                _ = await uninstall.value
             }
-        }
+        }, reply: { timedOut in
+            if timedOut {
+                NSLog("Malibu quit drain exceeded 35 seconds; shutdown or uninstall did not finish; allowing termination")
+            }
+            NSApp.reply(toApplicationShouldTerminate: true)
+        })
         return .terminateLater
     }
 
@@ -384,9 +381,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    // Uninstall runs to completion (residue reporting included) BEFORE any
-    // termination path resolves. If applicationShouldTerminate is already
-    // awaiting `uninstallTask`, we let it drive termination; otherwise we
+    // Uninstall normally completes residue reporting before termination. The
+    // independent quit deadline still applies. If applicationShouldTerminate
+    // is already awaiting `uninstallTask`, we let it drive termination; otherwise we
     // request termination ourselves.
     private func performUninstall() async {
         await agent.shutdown(gracefulSeconds: 30)
@@ -399,7 +396,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.presentUninstallResidue(residue, loginItem: unregisterFailure)
         }
 
-        if terminationDrain != nil {
+        if terminationDeadline.started {
             // applicationShouldTerminate is awaiting `uninstallTask.value`.
             // Returning from here completes the task; that side will call
             // NSApp.reply(toApplicationShouldTerminate: true).

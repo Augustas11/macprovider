@@ -805,12 +805,30 @@ enum CLIUpdateRunner {
         return true
     }
 
+    // Captured before any update replaces the bundle on disk.
+    static let runningAppVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+
+    static func mayRelaunch(runningVersion: String?, installedVersion: String?) -> Bool {
+        guard let runningVersion, let installedVersion,
+              let running = ProviderCLIVersion.strictNormalize(runningVersion),
+              let installed = ProviderCLIVersion.strictNormalize(installedVersion) else { return false }
+        return ProviderCLIVersion.compare(installed, running) != .ascending
+    }
+
     /// Opens the signature-verified installed bundle as a new process, then
     /// quits this one. Quit keeps the launchd provider running.
     @MainActor
     static func relaunchInstalledApp(at bundleURL: URL) async throws {
         guard validateMalibuAppCodeSignature(at: bundleURL) else {
             throw Error.appBundleSignatureInvalid
+        }
+        // A rollback on disk must not make a newer running app surrender
+        // to an older successor, even before that successor elects a winner.
+        guard mayRelaunch(
+            runningVersion: runningAppVersion,
+            installedVersion: readInstalledMalibuAppIdentity(at: bundleURL)?.version
+        ) else {
+            throw Error.appRelaunchFailed("installed Malibu is older than the running app or its version is invalid")
         }
         let ownPID = ProcessInfo.processInfo.processIdentifier
         let before = Set(
@@ -827,6 +845,7 @@ enum CLIUpdateRunner {
                     app.processIdentifier != ownPID
                         && !before.contains(app.processIdentifier)
                         && !app.isTerminated
+                        && AppInstanceHandoff.isReadySuccessor(app, runningVersion: runningAppVersion)
                 }
             if launched {
                 NSApp.terminate(nil)

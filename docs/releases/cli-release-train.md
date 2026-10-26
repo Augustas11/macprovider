@@ -44,6 +44,12 @@ Pearl coordinator/gateway release numbering is independent from the provider
 CLI train. Failed and superseded tags remain consumed and must not be reused.
 Historical tables below do not select today's release version.
 
+Pending gateway-only release content is tracked in the
+[coordinator release train](coordinator-release-train.md#pending-runtime-inclusion--public-privacy-disclosures-2026-10-26):
+#2159 (`2236eb74a`, issue #2156) updates public privacy disclosures and needs the
+next Pearl runtime deployment. It is outside the provider CLI/app candidate;
+cutting that candidate does not publish the embedded gateway pages.
+
 ## Current published release and fleet target
 
 Verified 2026-10-25 against GitHub release/tag metadata, the release train
@@ -58,12 +64,21 @@ Verified 2026-10-25 against GitHub release/tag metadata, the release train
 | Catalog | `published-2026-10-25-glm53-qwen36-native-mtp-v272` (#2141), activated 2026-10-25 02:49–03:12Z; `native_mtp_admission_decode_path` `match` (`4d04a3f3…`) |
 | Consumed identities | Provider and runtime tags through **v1.8.272** are consumed (v1.8.271 is a Pearl runtime tag). The next provider CLI takes the next unused tag; refresh both trains and remote tags first. |
 
-## Next CLI release — net changes vs 1.8.272 (tracked 2026-10-25)
+## Next CLI release — net changes vs 1.8.272 (tracked 2026-10-26)
 
-Live fleet target: **1.8.272**. No provider-side change has merged since.
+Live fleet target: **1.8.272**. Include the merged changes below in the next CLI/app cut.
 
 | PR | Issue | Provider-side change | Status |
 |---|---|---|---|
+| #2158 | #2155 | Malibu.app retires duplicate app/menu-bar instances after updates: launch-time version election, successor readiness acknowledgement, 35-second quit deadline and forced stale-app exit after 40 seconds; newer running app survives an older rollback launch (SPEC-025-R013/R014). | merged (`79c1c81f6`); next CLI/app cut; signed live acceptance pending |
+
+**#2155 release acceptance:** CI run `40257144313` passed all 28 checks and
+`antfleet-ops` approved #2158. Before promoting the next signed CLI/app cut,
+verify on the designated Studio that a real bundle update and a second launch
+leave exactly one Malibu process and one menu-bar icon, including a hung old
+quit drain and pre-handoff legacy duplicates. Verify that an older rollback
+launch preserves the newer running app and that app handoff keeps the launchd
+provider running. This source merge is not live-update acceptance.
 
 ## Shipped v1.8.272 — net changes vs 1.8.270
 
