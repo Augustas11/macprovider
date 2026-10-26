@@ -725,7 +725,7 @@
     {
       "spec_id": "SPEC-025",
       "title": "Native Mac App (signed `.dmg`, native Mac app with menu-bar presence)",
-      "version": "v0.40.0",
+      "version": "v0.41.0",
       "path": "specs/SPEC-025-native-mac-app.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -15181,6 +15181,45 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/2084",
         "rationale": "SPEC-051 v0.2.0 (#2084) Pool disclosure of multi-Mac serving. Stays pending until a paid Trusted Pool request through the gateway is served by an authorized shard group and settled at the pool price. Coordinator half implemented in the #2084 campaign PR; pending the provider half, the coordinator deploy, and a paid Trusted Pool request through the gateway served by an authorized shard group."
+      }
+    },
+    {
+      "requirement_id": "SPEC-025-R013",
+      "spec_id": "SPEC-025",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/app/Sources/Malibu/System/AppInstanceHandoff.swift:final class AppInstanceHandoff"
+      ],
+      "tests": [
+        "phase3-binary/app/Tests/MalibuTests/AppInstanceHandoffTests.swift:final class AppInstanceHandoffTests"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2155",
+        "rationale": "Single-instance handoff and bounded quit source and regression tests added; signed release and live post-update single-process/menu-bar acceptance remain pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-025-R014",
+      "spec_id": "SPEC-025",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/app/Sources/Malibu/System/AppTerminationDeadline.swift:final class AppTerminationDeadline",
+        "phase3-binary/app/Sources/Malibu/MalibuApp.swift:func applicationShouldTerminate"
+      ],
+      "tests": [
+        "phase3-binary/app/Tests/MalibuTests/AppTerminationDeadlineTests.swift:final class AppTerminationDeadlineTests"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2155",
+        "rationale": "Single-instance handoff and bounded quit source and regression tests added; signed release and live post-update single-process/menu-bar acceptance remain pending."
       }
     }
   ]
