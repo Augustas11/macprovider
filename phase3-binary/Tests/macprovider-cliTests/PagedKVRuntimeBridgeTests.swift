@@ -30,6 +30,23 @@ private final class RuntimeBridgeChunkRecorder: @unchecked Sendable {
 }
 
 final class PagedKVRuntimeBridgeTests: XCTestCase {
+    // CPU-only scheduler fixtures change the process-wide default device. Pin
+    // this Metal-backed class for each invocation so test order cannot route
+    // GPU-only model kernels to the CPU. Explicit CPU scopes below still win.
+    override func invokeTest() {
+        guard Self.metallibAvailable else { return super.invokeTest() }
+        Device.withDefaultDevice(Device(.gpu)) {
+            super.invokeTest()
+        }
+    }
+
+    private static var metallibAvailable: Bool {
+        let bundle = Bundle(for: PagedKVRuntimeBridgeTests.self)
+        return PagedKVMetallibGate.defaultMetallibExists(
+            bundleURL: bundle.resourceURL, executableURL: bundle.executableURL
+        ) || PagedKVMetallibGate.defaultMetallibExists()
+    }
+
     func testQwen3xHybridArchitectureRequiresExactAllowlistedIdentityAndConfigMetadata() {
         let dense = Data(#"{"model_type":"qwen3_5","architectures":["Qwen3_5ForConditionalGeneration"]}"#.utf8)
         let moe = Data(#"{"model_type":"qwen3_5_moe","architectures":["Qwen3_5MoeForConditionalGeneration"]}"#.utf8)
@@ -896,9 +913,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     }
 
     func testRealSharedForwardBackendGreedyMatchesLoneAndMixedOffsetBatch() async throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
-            throw XCTSkip("MLX default metallib is unavailable in this test host")
-        }
+        try requireMetal()
 
         let descriptor = Self.bridgeDescriptor()
         let container = ModelContainer(context: ModelContext(
@@ -3645,9 +3660,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     }
 
     func testLockstepSharedForwardDecodePopulatesBatchInnerState() async throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
-            throw XCTSkip("MLX default metallib is unavailable in this test host")
-        }
+        try requireMetal()
 
         let descriptor = Self.bridgeDescriptor()
         let container = ModelContainer(context: ModelContext(
@@ -3740,9 +3753,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     }
 
     func testLockstepWindowReturnsEverySampledTokenInOrder() async throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
-            throw XCTSkip("MLX default metallib is unavailable in this test host")
-        }
+        try requireMetal()
 
         let descriptor = Self.bridgeDescriptor()
         let container = ModelContainer(context: ModelContext(
@@ -3810,9 +3821,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     /// The window reports each step's tokens as sampled (equal to the returned
     /// prefix) and ends after a step when the observer asks it to.
     func testLockstepWindowStreamsStepsAndEndsWhenObserverStops() async throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
-            throw XCTSkip("MLX default metallib is unavailable in this test host")
-        }
+        try requireMetal()
         for stopAfterFirstStep in [false, true] {
             let descriptor = Self.bridgeDescriptor()
             let container = ModelContainer(context: ModelContext(
@@ -3877,9 +3886,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     }
 
     func testRealSharedForwardBackendCancelWaitsForActivePrefill() async throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
-            throw XCTSkip("MLX default metallib is unavailable in this test host")
-        }
+        try requireMetal()
 
         let descriptor = Self.bridgeDescriptor()
         let modelGate = RuntimeBridgeBlockingModelGate()
@@ -3969,9 +3976,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     }
 
     func testLabStateDigestObserverRecordsPagedKVCacheLogicalPrefix() async throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
-            throw XCTSkip("MLX default metallib is unavailable in this test host")
-        }
+        try requireMetal()
 
         let descriptor = Self.bridgeDescriptor(blockSizeTokens: 4, maxPhysicalBlocks: 4)
         let backend = PagedKVSharedForwardBackend(
@@ -4015,9 +4020,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     }
 
     func testLabDrafterStateDigestIgnoresPhysicalPaddingBeyondCommittedPrefix() throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
-            throw XCTSkip("MLX default metallib is unavailable in this test host")
-        }
+        try requireMetal()
 
         let paddedKey = MLXArray([Float](arrayLiteral: 1, 2, 99, 100), [1, 1, 4, 1])
         let paddedValue = MLXArray([Float](arrayLiteral: 3, 4, 101, 102), [1, 1, 4, 1])
@@ -4346,9 +4349,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     }
 
     func testLabStateDigestObserverFailsClosedForPagedSlidingWindowCache() async throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
-            throw XCTSkip("MLX default metallib is unavailable in this test host")
-        }
+        try requireMetal()
 
         let descriptor = Self.bridgeDescriptor(blockSizeTokens: 4, maxPhysicalBlocks: 4)
         let backend = PagedKVSharedForwardBackend(
@@ -4391,9 +4392,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     }
 
     func testLabStateDigestObserverFailsClosedForUnknownCacheKind() async throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
-            throw XCTSkip("MLX default metallib is unavailable in this test host")
-        }
+        try requireMetal()
 
         let descriptor = Self.bridgeDescriptor(blockSizeTokens: 4, maxPhysicalBlocks: 4)
         let backend = PagedKVSharedForwardBackend(
@@ -4454,10 +4453,8 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         ))
     }
 
-    func testQwenPreparationLanePreservesPromptStopsToolPrefillAndCheckpoints() async throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
-            throw XCTSkip("MLX default metallib is unavailable in this test host")
-        }
+    func testQwenPreparationLanePreservesRequiredToolGrammarPromptStopsAndCheckpoints() async throws {
+        try requireMetal()
 
         let tokenizer = RuntimeBridgePreparationTokenizer()
         let generationPrompt = "<|im_start|>assistant\n<think>\n\n</think>\n\n"
@@ -4468,8 +4465,30 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
             + tokenizer.encode(text: generationPrompt, addSpecialTokens: false)
         let laneProcessor = RuntimeBridgeCapturingPromptProcessor(tokens: baseTokens.map(Int32.init))
         let legacyProcessor = RuntimeBridgeCapturingPromptProcessor(tokens: baseTokens.map(Int32.init))
+        // Required tool calls compile a token grammar from resolved tokenizer
+        // metadata. Keep this character tokenizer fixture consistent with its
+        // on-disk byte vocabulary rather than bypassing grammar admission.
+        let tokenizerDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("bridge-tool-tokenizer-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tokenizerDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tokenizerDirectory) }
+        var vocabulary = Dictionary(uniqueKeysWithValues: (33...126).map {
+            (String(UnicodeScalar($0)!), $0)
+        })
+        vocabulary.merge(["Ġ": 32, "Ċ": 10, "ĉ": 9, "č": 13]) { _, new in new }
+        let tokenizerMetadata: [String: Any] = [
+            "model": ["type": "BPE", "vocab": vocabulary, "merges": []],
+            "decoder": ["type": "ByteLevel"],
+            "added_tokens": [
+                ["id": tokenizer.eosTokenID, "content": tokenizer.eosToken!, "special": true],
+                ["id": tokenizer.extraEOSTokenID, "content": tokenizer.extraEOSToken, "special": true],
+            ],
+        ]
+        try JSONSerialization.data(withJSONObject: tokenizerMetadata)
+            .write(to: tokenizerDirectory.appendingPathComponent("tokenizer.json"))
         let configuration = ModelConfiguration(
             id: ToolSelectionPolicy.supportedNativeModel,
+            tokenizerSource: .directory(tokenizerDirectory),
             extraEOSTokens: [tokenizer.extraEOSToken],
             eosTokenIds: [901]
         )
@@ -4510,11 +4529,14 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
             Array(baseTokens.suffix(tokenizer.encode(text: plan.generationPromptSuffix, addSpecialTokens: false).count)),
             tokenizer.encode(text: plan.generationPromptSuffix, addSpecialTokens: false)
         )
-        let expectedPrompt = baseTokens + tokenizer.encode(text: plan.prefill, addSpecialTokens: false)
+        // Required-tool grammar owns the generated tool delimiters. Both
+        // preparation paths must avoid appending an extra textual prefill.
+        let expectedPrompt = baseTokens
         let expectedStops: Set<Int> = [901, tokenizer.eosTokenID, tokenizer.extraEOSTokenID]
+        XCTAssertNotNil(prepared.grammarConstraint, "Required tool calls must retain grammar admission")
         XCTAssertEqual(prepared.promptTokens, expectedPrompt)
         XCTAssertEqual(prepared.promptTokens, legacyInput.text.tokens.asArray(Int.self))
-        XCTAssertEqual(prepared.toolCallPrefill, plan.prefill)
+        XCTAssertNil(prepared.toolCallPrefill)
         XCTAssertEqual(prepared.toolCallPrefill, legacyToolCallPrefill)
         XCTAssertEqual(prepared.modelStopTokenIDs, expectedStops)
         XCTAssertEqual(
@@ -4541,9 +4563,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     }
 
     func testQwenPreparationLaneRejectsQueuedDrainBeforeProcessorRuns() async throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
-            throw XCTSkip("MLX default metallib is unavailable in this test host")
-        }
+        try requireMetal()
 
         let preparationGate = RuntimeBridgeTestGate()
         let processor = RuntimeBridgeBlockingPromptProcessor(
@@ -4652,25 +4672,19 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     }
 
     func testQwenPreparationLaneAdmitsNonStreamingRowWhileTargetLockIsHeld() async throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
-            throw XCTSkip("MLX default metallib is unavailable in this test host")
-        }
+        try requireMetal()
 
         try await assertQwenPreparationLaneAdmitsWhileTargetLockIsHeld(streaming: false)
     }
 
     func testQwenPreparationLaneAdmitsStreamingRowWhileTargetLockIsHeld() async throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
-            throw XCTSkip("MLX default metallib is unavailable in this test host")
-        }
+        try requireMetal()
 
         try await assertQwenPreparationLaneAdmitsWhileTargetLockIsHeld(streaming: true)
     }
 
     func testAttachedModelRuntimeServesFreshGreedyRequestsThroughScheduler() async throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
-            throw XCTSkip("MLX default metallib is unavailable in this test host")
-        }
+        try requireMetal()
 
         let modelID = "mlx-community/Qwen-Test"
         let modelSHA = String(repeating: "a", count: 64)
@@ -4739,9 +4753,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     // past it is clamped and reports `length`, and a prompt that fills the
     // context is the serial 413 before any backend work.
     func testAttachedServePathBoundsRowsByServedContext() async throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
-            throw XCTSkip("MLX default metallib is unavailable in this test host")
-        }
+        try requireMetal()
 
         let modelID = "mlx-community/Qwen-Test"
         func runtime(promptTokens: [Int32], backend: RuntimeBridgeScriptedBackend) -> ModelRuntime {
@@ -4793,9 +4805,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     }
 
     func testAttachedServePathPrefillsChatPreparedMultiTokenPrompt() async throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
-            throw XCTSkip("MLX default metallib is unavailable in this test host")
-        }
+        try requireMetal()
 
         let modelID = "mlx-community/Qwen-Test"
         let backend = RuntimeBridgeScriptedBackend(scripts: [:])
@@ -4820,9 +4830,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     }
 
     func testAttachedServePathPrefillFailureReturnsReasonCoded503() async throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
-            throw XCTSkip("MLX default metallib is unavailable in this test host")
-        }
+        try requireMetal()
 
         let modelID = "mlx-community/Qwen-Test"
         let backend = RuntimeBridgeScriptedBackend(
@@ -4853,9 +4861,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     }
 
     func testAttachedModelRuntimeCancelsBlockedCompletionSubmit() async throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
-            throw XCTSkip("MLX default metallib is unavailable in this test host")
-        }
+        try requireMetal()
 
         let gate = RuntimeBridgeTestGate()
         let backend = RuntimeBridgeScriptedBackend(scripts: [:], decodeGate: gate)
@@ -4880,9 +4886,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     }
 
     func testAttachedModelRuntimeCancelsBlockedStreamingSubmit() async throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
-            throw XCTSkip("MLX default metallib is unavailable in this test host")
-        }
+        try requireMetal()
 
         let gate = RuntimeBridgeTestGate()
         let backend = RuntimeBridgeScriptedBackend(scripts: [:], decodeGate: gate)
@@ -4920,9 +4924,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     }
 
     func testContiguousCacheBridgeRestoresLiveKVCacheByteExactAndRoundTrips() async throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
-            throw XCTSkip("MLX default metallib is unavailable in this test host")
-        }
+        try requireMetal()
 
         let descriptor = Self.bridgeDescriptor(blockSizeTokens: 2, maxPhysicalBlocks: 6)
         let bridge = PagedKVRuntimeContiguousCacheBridge()
@@ -4992,9 +4994,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     }
 
     func testContiguousCacheBridgeRecordsBFloat16KV() async throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
-            throw XCTSkip("MLX default metallib is unavailable in this test host")
-        }
+        try requireMetal()
 
         let descriptor = Self.bridgeDescriptor(blockSizeTokens: 2, maxPhysicalBlocks: 6)
         let bridge = PagedKVRuntimeContiguousCacheBridge()
@@ -5024,9 +5024,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     }
 
     func testCompiledWritebackKeepsEachRowsOwnTargetLength() throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
-            throw XCTSkip("MLX default metallib is unavailable in this test host")
-        }
+        try requireMetal()
         let row0 = MLXArray((1...8).map(Float.init), [1, 1, 8, 1])
         let row1 = MLXArray((11...18).map(Float.init), [1, 1, 8, 1])
         let keys = concatenated([row0, row1], axis: 0)
@@ -5052,9 +5050,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     }
 
     func testCompiledWritebackThrowsWhenCompiledShorterThanARowTarget() throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
-            throw XCTSkip("MLX default metallib is unavailable in this test host")
-        }
+        try requireMetal()
         let keys = MLXArray((1...4).map(Float.init), [1, 1, 4, 1])
         let values = MLXArray((101...104).map(Float.init), [1, 1, 4, 1])
         eval(keys, values)
@@ -5080,9 +5076,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     }
 
     func testContiguousCacheBridgePreservesMidBlockTrimAcrossExtractAndRetainReattach() async throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
-            throw XCTSkip("MLX default metallib is unavailable in this test host")
-        }
+        try requireMetal()
 
         let descriptor = Self.bridgeDescriptor(blockSizeTokens: 4, maxPhysicalBlocks: 6)
         let bridge = PagedKVRuntimeContiguousCacheBridge()
@@ -5170,9 +5164,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     }
 
     func testContiguousCacheBridgeRejectsCrossHandleCacheRecord() async throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
-            throw XCTSkip("MLX default metallib is unavailable in this test host")
-        }
+        try requireMetal()
 
         let descriptor = Self.bridgeDescriptor(blockSizeTokens: 2, maxPhysicalBlocks: 6)
         let bridge = PagedKVRuntimeContiguousCacheBridge()
@@ -5269,7 +5261,14 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
                     modelID: descriptor.modelID,
                     modelSHA256: descriptor.modelSHA256,
                     weightsGeneration: 1
-                )
+                ),
+                // Scripted rounds must not depend on unrelated Studio memory use.
+                nativeMTPRoundSystemMemoryProbe: .init(identity: "runtime-bridge-test") {
+                    NativeMTPRoundSystemMemorySample(
+                        availableBytes: 1_000_000_000,
+                        physicalBytes: 1_000_000_000
+                    )
+                }
             ),
             allocator: try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: maxPhysicalBlocks),
             backend: backend,
@@ -5641,6 +5640,250 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         }
     }
 
+    func testCreativeHoldPreservesActiveContinuousBatchingAndNativeMTP() async throws {
+        try requireMetal()
+        let modelID = "model-a"
+        let hash = String(repeating: "a", count: 64)
+        let proof = Self.sizingProof(modelID: modelID, modelSHA: hash)
+        let admission = Self.creativeAdmission(modelID: modelID, hash: hash)
+        let capability = NativeMTPCapability(
+            admitted: true, revoked: false, revocationStateAvailable: true,
+            supportsCurrentProcessor: true, supportsCurrentStateCache: true,
+            supportsStreaming: true, supportsNonStreaming: true, supportsStopSequences: true,
+            hasQualifiedRowMappedTransactions: true, maximumProposalDepth: 1,
+            maximumPromptTokens: 4096, maximumCompletionTokens: 256,
+            completeWindowBytesByDepth: [8, 32], family: admission.familyAdapter)
+        let container = ModelContainer(context: ModelContext(
+            configuration: ModelConfiguration(id: modelID),
+            model: RuntimeBridgeFakeModel(nextTokenByInput: [:]),
+            processor: RuntimeBridgePromptProcessor(tokens: [3]), tokenizer: RuntimeBridgeFakeTokenizer()))
+        let drafter = MTPDrafterContainer(context: MTPDrafterContext(
+            configuration: ModelConfiguration(id: "same-drafter"), model: RuntimeBridgeRecordingMTPDrafter()))
+        let runtime = ModelRuntime(
+            modelID: modelID, modelHash: hash,
+            pagedKVConfig: PagedKVConfig(enabled: true, blockSizeTokens: 32, maxPhysicalBlocks: 64),
+            maxBatch: 2, continuousBatchingMode: .on, continuousBatchingDurableReplayAuthorityAvailable: true,
+            nativeMTPMode: .auto, nativeMTPCapability: capability, nativeMTPSchedulerSupported: true,
+            nativeMTPDrafterContainer: drafter, labNativeMTPAdmissionCapability: admission,
+            warmSwapEnabled: false, pagedKVObservedRuntimeIdentity: Self.observedIdentity(from: proof),
+            pagedKVHardwareSizingProof: proof, pagedKVRuntimeCacheClass: "KVCacheSimple",
+            pagedKVSchedulerBackendInstalled: true,
+            pagedKVModelCapabilities: ModelRuntime.pagedKVModelCapabilities(modelID: "mlx-community/Qwen-Test", configJSONData: nil),
+            container: container,
+            continuousBatchingBackend: RuntimeBridgeScriptedBackend(scripts: [:]),
+            loader: { _ in throw PagedKVRuntimeBridgeTestError.notExpected }, testLoader: { ($0, hash) },
+            testCompletion: { _, _ in throw PagedKVRuntimeBridgeTestError.notExpected })
+        let offer = NativeMTPTupleReofferTests.offer()
+        await runtime.installNativeMTPTupleOfferForTest(offer)
+        let before = await runtime.currentSnapshot()
+        let beforeDrafter = await runtime.creativeNativeDrafterArtifactForTest()
+        XCTAssertTrue(before.continuousBatching?.active == true)
+        XCTAssertTrue(before.nativeMTPStatus.enabled)
+        XCTAssertTrue(before.schedulerSupportsNativeMTP)
+        try await runtime.unloadForLocalCreativeHold()
+        let unloaded = await runtime.currentSnapshot()
+        XCTAssertNil(unloaded.modelID)
+        XCTAssertNil(unloaded.nativeMTPTupleOffer)
+        let tuple = NativeMTPSelfTestRuntimeTuple(
+            modelID: modelID, modelHash: hash, modelHashAlgorithm: "sha256",
+            tokenizerDigest: offer.runtimeTuple.tokenizerDigest, artifactDigest: offer.runtimeTuple.artifactDigest,
+            manifestDigest: offer.runtimeTuple.manifestDigest, sidecarDigest: offer.runtimeTuple.sidecarDigest,
+            providerBinarySHA256: offer.runtimeTuple.providerBinarySHA256, runtimeCDHash: offer.runtimeTuple.runtimeCDHash,
+            cacheNamespace: offer.runtimeTuple.cacheNamespace, stateDigest: offer.runtimeTuple.stateDigest, proposalDepth: 1)
+        let input = NativeMTPSelfTestInput(
+            tupleSHA256: admission.tupleSHA256, modelID: modelID, modelRevision: hash,
+            familyAdapter: admission.familyAdapter, proposalDepth: 1, challengeBank: admission.selfTestChallengeBank,
+            servedSnapshot: NativeMTPSelfTestServedSnapshot(tupleSHA256: admission.tupleSHA256,
+                runtimeTuple: tuple, generation: UInt64(before.specDecodeGeneration + 1), proposalDepth: 1))
+        let receipt = NativeMTPSelfTestReceipt(
+            version: NativeMTPSelfTestRunner.capability, tupleSHA256: admission.tupleSHA256,
+            challengeBankSHA256: admission.selfTestChallengeBank.challengeBankSHA256,
+            promptTokenIDs: [3], generatedTokenIDs: [4], terminalReason: .length,
+            acceptedTokens: 1, rejectedTokens: 0, bonusTokens: 0, committedTokens: 1,
+            committedStateDigestSHA256: String(repeating: "8", count: 64), actualDecodePath: .nativeMTP, fallbackUsed: false)
+        // Replace only external loading/self-check execution with a deterministic
+        // admitted fixture. The production install, scheduler, tuple publication,
+        // revocation watcher and failure/ownership transitions all run below.
+        let load = ModelRuntime.NativeMTPRuntimeLoadResult(
+            targetContainer: container, targetDirectory: URL(fileURLWithPath: NSTemporaryDirectory()),
+            drafterContainer: drafter, capability: capability, admissionCapability: admission,
+            selfTestInput: input, selfTestRuntimeTuple: tuple, runtimeTuple: offer.runtimeTuple,
+            servedSnapshotID: "restored-snapshot", runtimeCacheClass: "KVCacheSimple",
+            modelCapabilities: ModelRuntime.pagedKVModelCapabilities(modelID: "mlx-community/Qwen-Test", configJSONData: nil),
+            revocationSignerKeyID: "test-signer", revocationTrustedKeyring:
+                NativeMTPAdmissionSidecar.TrustedKeyring(publicKeysByKeyID: [:], requiredKeyID: "test-signer"),
+            revocationExpiresAt: nil)
+        await runtime.setNativeMTPRevocationPollerForTest { _, _ in
+            do { try await Task.sleep(nanoseconds: 60_000_000_000) } catch {}
+        }
+        await runtime.setCreativeNativeReloadForTest({ load }, receipt: receipt)
+        try await runtime.restoreAfterLocalCreativeHold()
+        let after = await runtime.currentSnapshot()
+        XCTAssertEqual(after.modelID, before.modelID)
+        XCTAssertEqual(after.modelHash, before.modelHash)
+        XCTAssertEqual(after.continuousBatching?.active, before.continuousBatching?.active)
+        XCTAssertEqual(after.continuousBatching?.mode, before.continuousBatching?.mode)
+        XCTAssertEqual(after.continuousBatching?.scheduler?.slotsTotal, before.continuousBatching?.scheduler?.slotsTotal)
+        XCTAssertEqual(after.nativeMTPStatus.enabled, before.nativeMTPStatus.enabled)
+        XCTAssertEqual(after.nativeMTPCapability, before.nativeMTPCapability)
+        XCTAssertEqual(after.schedulerSupportsNativeMTP, before.schedulerSupportsNativeMTP)
+        XCTAssertEqual(after.nativeMTPTupleOffer?.nativeMTPAdmissionTupleSHA256, before.nativeMTPTupleOffer?.nativeMTPAdmissionTupleSHA256)
+        XCTAssertEqual(after.nativeMTPTupleOffer?.runtimeTuple, before.nativeMTPTupleOffer?.runtimeTuple)
+        let afterDrafter = await runtime.creativeNativeDrafterArtifactForTest()
+        XCTAssertEqual(afterDrafter, beforeDrafter)
+        XCTAssertNotNil(afterDrafter)
+        let cache = await runtime.creativeConversationCacheForTest()
+        for _ in 0..<2 {
+            let lease = await cache.begin(conversationKey: "after-hold", incomingTokens: [3], modelID: modelID, kvBits: nil)
+            XCTAssertNotNil(lease, "Restoration must leave conversation-cache leases usable")
+            if let lease { await cache.abort(lease) }
+        }
+        let watcher = await runtime.nativeMTPRevocationWatcherActiveForTest()
+        XCTAssertTrue(watcher)
+        // Coordinator bank mismatch must survive the hold without publishing
+        // an offer until the ordinary re-offer/revocation gates permit it.
+        let parkedOffer = try XCTUnwrap(after.nativeMTPTupleOffer)
+        let didPark = await runtime.parkNativeMTPTupleForReoffer(
+            admissionTupleSHA256: parkedOffer.nativeMTPAdmissionTupleSHA256,
+            servedSnapshotID: parkedOffer.servedSnapshotID,
+            targetGeneration: parkedOffer.targetGeneration)
+        XCTAssertTrue(didPark)
+        let parkedBefore = await runtime.currentSnapshot()
+        try await runtime.unloadForLocalCreativeHold()
+        try await runtime.restoreAfterLocalCreativeHold()
+        let parkedAfter = await runtime.currentSnapshot()
+        let remainsParked = await runtime.nativeMTPTupleIsParkedForTest()
+        XCTAssertTrue(remainsParked)
+        XCTAssertNil(parkedAfter.nativeMTPTupleOffer)
+        XCTAssertEqual(parkedAfter.nativeMTPStatus, parkedBefore.nativeMTPStatus)
+        XCTAssertEqual(parkedAfter.continuousBatching?.active, parkedBefore.continuousBatching?.active)
+        XCTAssertEqual(parkedAfter.continuousBatching?.mode, parkedBefore.continuousBatching?.mode)
+        await runtime.setNativeMTPRevokedSetReaderForTest { _, _ in [] }
+        let reoffered = await runtime.restoreParkedNativeMTPTuple(parkedOffer)
+        XCTAssertEqual(reoffered, .restored)
+        let publishedAfterHold = await runtime.currentSnapshot()
+        XCTAssertEqual(publishedAfterHold.nativeMTPTupleOffer, parkedOffer)
+        XCTAssertTrue(publishedAfterHold.nativeMTPStatus.enabled)
+
+        // A fresh hold can drain the rebuilt scheduler; the old scheduler's
+        // permanently drained state is not reused.
+        try await runtime.unloadForLocalCreativeHold()
+        let failedReceipt = NativeMTPSelfTestReceipt(
+            version: NativeMTPSelfTestRunner.capability, tupleSHA256: admission.tupleSHA256,
+            challengeBankSHA256: admission.selfTestChallengeBank.challengeBankSHA256,
+            promptTokenIDs: [3], generatedTokenIDs: [4], terminalReason: .length,
+            acceptedTokens: 0, rejectedTokens: 1, bonusTokens: 0, committedTokens: 1,
+            committedStateDigestSHA256: String(repeating: "8", count: 64), actualDecodePath: .ordinary, fallbackUsed: true)
+        await runtime.setCreativeNativeReloadForTest({ load }, receipt: failedReceipt)
+        try await runtime.restoreAfterLocalCreativeHold()
+        let failedQualification = await runtime.currentSnapshot()
+        XCTAssertEqual(failedQualification.modelID, modelID)
+        XCTAssertTrue(failedQualification.continuousBatching?.active == true)
+        XCTAssertNil(failedQualification.nativeMTPTupleOffer)
+        XCTAssertFalse(failedQualification.nativeMTPStatus.enabled)
+        XCTAssertEqual(failedQualification.continuousBatching?.mode, before.continuousBatching?.mode)
+
+        // A revoked/unavailable admission uses ordinary loading too, without
+        // requiring the operator's warm-swap feature to be enabled.
+        await runtime.installNativeMTPTupleOfferForTest(offer)
+        try await runtime.unloadForLocalCreativeHold()
+        await runtime.setCreativeNativeReloadForTest({
+            throw ModelRuntimeLoadError(target: modelID, reason: "tuple revoked")
+        }, receipt: receipt)
+        try await runtime.restoreAfterLocalCreativeHold()
+        let revoked = await runtime.currentSnapshot()
+        XCTAssertEqual(revoked.modelID, modelID)
+        XCTAssertTrue(revoked.continuousBatching?.active == true)
+        XCTAssertNil(revoked.nativeMTPTupleOffer)
+        XCTAssertFalse(revoked.nativeMTPStatus.enabled)
+        XCTAssertEqual(revoked.continuousBatching?.mode, before.continuousBatching?.mode)
+
+    }
+
+    func testCreativeHoldPreservesOrdinaryActiveBatching() async throws {
+        try requireMetal()
+        let hash = String(repeating: "a", count: 64)
+        let runtime = Self.attachedRuntime(modelID: "mlx-community/Qwen-Test",
+            backend: RuntimeBridgeScriptedBackend(scripts: [:]), warmSwapEnabled: true,
+            testLoader: { ($0, hash) },
+            testCompletion: { _, _ in throw PagedKVRuntimeBridgeTestError.notExpected })
+        let before = await runtime.currentSnapshot()
+        XCTAssertTrue(before.continuousBatching?.active == true)
+        try await runtime.unloadForLocalCreativeHold()
+        try await runtime.restoreAfterLocalCreativeHold()
+        let after = await runtime.currentSnapshot()
+        XCTAssertEqual(after.continuousBatching?.active, before.continuousBatching?.active)
+        XCTAssertEqual(after.nativeMTPStatus.enabled, before.nativeMTPStatus.enabled)
+        XCTAssertEqual(after.continuousBatching?.mode, before.continuousBatching?.mode)
+        XCTAssertEqual(after.continuousBatching?.scheduler?.slotsTotal, before.continuousBatching?.scheduler?.slotsTotal)
+    }
+
+    func testCreativeHoldPreservesNativeMTPPausedAfterFallback() async throws {
+        try requireMetal()
+        let hash = String(repeating: "a", count: 64)
+        let runtime = Self.attachedRuntime(modelID: "mlx-community/Qwen-Test",
+            backend: RuntimeBridgeScriptedBackend(scripts: [:]), warmSwapEnabled: false,
+            testLoader: { ($0, hash) },
+            testCompletion: { _, _ in throw PagedKVRuntimeBridgeTestError.notExpected })
+        // This is the state after native runtime fallback has fenced its tuple:
+        // base batching remains healthy, while native remains disabled.
+        await runtime.setNativeMTPDisabledStatusReasonForTest(.runtimeFailure)
+        let before = await runtime.currentSnapshot()
+        try await runtime.unloadForLocalCreativeHold()
+        try await runtime.restoreAfterLocalCreativeHold()
+        let after = await runtime.currentSnapshot()
+        XCTAssertEqual(after.modelID, before.modelID)
+        XCTAssertEqual(after.nativeMTPStatus, before.nativeMTPStatus)
+        XCTAssertNil(after.nativeMTPTupleOffer)
+        XCTAssertFalse(after.nativeMTPStatus.enabled)
+        XCTAssertEqual(after.continuousBatching?.active, before.continuousBatching?.active)
+        XCTAssertEqual(after.continuousBatching?.mode, before.continuousBatching?.mode)
+    }
+
+    private static func creativeAdmission(modelID: String, hash: String) -> NativeMTPAdmissionCapability {
+        NativeMTPAdmissionCapability(
+            tupleSHA256: String(repeating: "7", count: 64),
+            sidecarSHA256: String(repeating: "0", count: 64),
+            modelID: modelID,
+            modelRevision: hash,
+            targetArtifactSHA256: hash,
+            mtpArtifactSHA256: String(repeating: "2", count: 64),
+            tokenizerSHA256: String(repeating: "3", count: 64),
+            mtpManifestSHA256: String(repeating: "4", count: 64),
+            familyAdapter: "qwen3_5_mtp_v1",
+            sourceLayout: "separate_artifact",
+            predictionLayerCount: 1,
+            maxProposalDepth: 1,
+            completeWindowBytesByDepth: [8, 32],
+            throughputDeltaPPM: 0,
+            maxPromptTokens: 4096,
+            maxCompletionTokens: 256,
+            cacheClass: "paged_kv",
+            stateClass: "hybrid_stageable_rewindable",
+            quantization: NativeMTPAdmissionSidecar.Quantization(target: "mlx_affine_4bit", mtp: "mlx_affine_4bit"),
+            providerRevision: String(repeating: "a", count: 40),
+            upstreamMLXSwiftLMRevision: KVBuildIdentity.mlxSwiftLMRevision,
+            qualifiedSlots: 2,
+            maxNativeActiveRows: 2,
+            spec023ReleaseID: "native-mtp-test",
+            spec023SourceCommit: String(repeating: "a", count: 40),
+            spec023BuildDigestSHA256: String(repeating: "b", count: 64),
+            spec023LiveExecutableCDHash: String(repeating: "1", count: 40),
+            evidenceArtifactSHA256: [String(repeating: "5", count: 64)],
+            challengeBankSignerKeyID: "native-mtp-selftest-test",
+            revocationSignerKeyID: "native-mtp-revocation-test",
+            selfTestChallengeBank: NativeMTPSelfTestChallengeBank(
+                releaseID: "native-mtp-test",
+                challengeBankPath: "native-mtp-selftest-bank.json",
+                challengeBankSHA256: String(repeating: "6", count: 64),
+                signaturePath: "native-mtp-selftest-bank.json.sig",
+                signerKeyID: "native-mtp-selftest-test",
+                signatureSHA256: String(repeating: "7", count: 64)
+            ),
+            capturedArtifacts: nil
+        )
+    }
+
     private static func attachedRuntime(
         modelID: String,
         backend: RuntimeBridgeScriptedBackend,
@@ -5648,7 +5891,8 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         container suppliedContainer: ModelContainer? = nil,
         preparationLane: ContinuousBatchTextPreparationLane? = nil,
         warmSwapEnabled: Bool = false,
-        testLoader: (@Sendable (String) async throws -> (String, String?))? = nil
+        testLoader: (@Sendable (String) async throws -> (String, String?))? = nil,
+        testCompletion: (@Sendable (RuntimeSnapshot, ChatCompletionRequest) async throws -> CompletionResult)? = nil
     ) -> ModelRuntime {
         let modelSHA = String(repeating: "a", count: 64)
         let proof = Self.sizingProof(modelID: modelID, modelSHA: modelSHA)
@@ -5674,7 +5918,8 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
             continuousBatchingBackend: backend,
             testContinuousBatchTextPreparationLane: preparationLane,
             loader: { _ in throw PagedKVRuntimeBridgeTestError.notExpected },
-            testLoader: testLoader
+            testLoader: testLoader,
+            testCompletion: testCompletion
         )
     }
 
@@ -5778,8 +6023,11 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     }
 
     private func requireMetal() throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
-            throw XCTSkip("MLX default metallib is unavailable in this test host")
+        // SwiftPM may launch XCTest through swiftpm-testing-helper, whose main
+        // bundle is not the test bundle containing the packaged MLX resources.
+        let testBundle = Bundle(for: PagedKVRuntimeBridgeTests.self)
+        guard Self.metallibAvailable else {
+            throw XCTSkip("MLX default metallib is unavailable; test bundle=\(testBundle.bundleURL.path), test resources=\(testBundle.resourceURL?.path ?? "nil"), test executable=\(testBundle.executableURL?.path ?? "nil"), main bundle=\(Bundle.main.bundleURL.path), main executable=\(Bundle.main.executableURL?.path ?? "nil")")
         }
     }
 }

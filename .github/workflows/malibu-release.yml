@@ -305,6 +305,10 @@ jobs:
 
           python3 scripts/prepare-malibu-bootstrap-trust-anchor.py prepare \
             "v${APP_VERSION}" "$app" scripts/dist/malibu-v1.8.32-sparkle-public-key
+          # Embed the CLI runtime notices before the app bundle is signed.
+          test -s "$payload_dir/THIRD-PARTY-NOTICES.txt"
+          install -m 0644 "$payload_dir/THIRD-PARTY-NOTICES.txt" "$app/Contents/Resources/THIRD-PARTY-NOTICES.txt"
+          cmp "$payload_dir/THIRD-PARTY-NOTICES.txt" "$app/Contents/Resources/THIRD-PARTY-NOTICES.txt"
           cp "$payload_dir/macprovider-cli" "$app/Contents/MacOS/macprovider-cli"
           chmod 755 "$app/Contents/MacOS/macprovider-cli"
           cp "$payload_dir/mlx.metallib" "$app/Contents/MacOS/mlx.metallib"

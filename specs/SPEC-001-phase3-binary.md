@@ -1,6 +1,15 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.48 (2026-10-26, local Anthropic Messages)
+**Version:** 1.9.49 (2026-10-26, local image generation)
+
+**Change log v1.9.49 (2026-10-26, Related: #2164):**
+Adds SPEC-001-R014 for loopback-only SDXL-Turbo image generation and amends
+R009/R011 to admit explicitly marked local-app creative work. A bounded
+creative hold fences customer admission only when memory requires unloading
+the language model, restores it after cancellation/failure or the 120-second
+warm interval, and never attributes images to customer work or earnings.
+Runtime fixtures and app tests do not establish real-weights lab acceptance
+or released-provider acceptance; both remain pending.
 
 **Change log v1.9.48 (2026-10-26, Related: #2160):**
 Amends `SPEC-001-R009` to add the loopback `POST /v1/messages` adapter for
@@ -2419,6 +2428,79 @@ tool round trips, thinking, stream termination and Anthropic-shaped errors.
 Actual Claude Code multi-turn tools, streaming, Stop and customer preemption on
 the designated lab Mac remain separate acceptance gates.
 
+The listener MUST additionally expose `POST /v1/images/generations` under
+SPEC-001-R014. This endpoint requires SPEC-001-R011's explicit local-app
+classification; unmarked and coordinator-origin requests MUST be rejected
+before download, admission or model loading. Images MUST NOT be accepted
+through coordinator forwarding, relay frames or the gateway. Local capability
+discovery MUST keep image generation distinct from language-model or remote
+buyer capabilities.
+
+**SPEC-001-R014 — Local image generation and creative hold.** The loopback
+listener MUST accept `POST /v1/images/generations` only from a loopback peer
+with exactly one `X-MacProvider-Origin: local-app` header and no settlement
+metadata. Missing, duplicate, conflicting or coordinator-origin headers MUST
+be rejected. Other HTTP methods MUST return 405 with `Allow: POST`. The
+request MUST contain a nonempty `prompt` of at most 4,000 Unicode characters
+(after rejecting whitespace-only input), `size` equal to
+`512x512` or `1024x1024` (default `512x512`), integer `steps` in 1–4
+(default 4), optional unsigned 64-bit integer `seed`, `n:1` and
+`response_format:"b64_json"` (the latter two MAY be omitted to use those
+fixed defaults); malformed and unsupported values MUST
+fail explicitly before work starts. Success MUST be the OpenAI images shape
+`{"created":<unix-seconds>,"data":[{"b64_json":<PNG-base64>}]}`. One generation
+may run at a time; another generation MUST receive HTTP 429 with a clear busy
+message. Cancellation MUST abort download/generation and start restoration;
+an explicit local-app-only cancel endpoint MAY provide this alongside client
+disconnect cancellation.
+
+The only supported preset is `sdxlTurbo`. The implementation MUST vendor the
+MIT-licensed StableDiffusion sources from `ml-explore/mlx-swift-examples` tag
+`2.29.1`, preserve their license and list them in the shipped third-party
+notices. It MUST compile with the existing pinned MLX dependency graph without
+adding a package dependency. Weights MUST come from `stabilityai/sdxl-turbo`
+fp16 variant files at one immutable revision with a SHA-256 manifest per file.
+First-use downloads MUST use provider model storage, report bytes/progress,
+support resume and verify files before loading; a hash mismatch MUST fail and
+MUST NOT load the unverified file. Tests MUST use a fake backend and MUST NOT
+load real weights.
+
+Physical RAM at most 16 GiB MUST select quantized mode. `1024x1024` MUST be
+refused below 32 GiB physical RAM with a clear reason. The memory decision MUST
+compare currently free unified memory, after the loaded language model, with
+the selected preset peak plus a 1.5 GB margin. The measured peaks are 7.4 GB
+for quantized 512 px, 10.2 GB for fp16 512 px and 13.3 GB for fp16 1024 px.
+Insufficient physical memory for the image workload and margin MUST produce
+an unavailable reason rather than an attempted load.
+
+If the free-memory comparison fails, the provider MUST enter a local creative
+hold: stop admitting customer work with the operator-pause admission
+mechanism, let in-flight work finish within a bounded wait, unload the
+language model, then load the image model and generate. Drain timeout MUST
+fail safely and restore admission without unloading an in-use model. The
+image model MUST stay warm for 120 seconds after the last completed image;
+then it MUST unload, reload the prior language model through the existing
+warm-swap/load path and release the creative hold. Failure or cancellation at
+any stage MUST initiate that restoration immediately. Customer admission MUST
+never remain paused because a creative operation failed, and an independent
+operator pause MUST remain authoritative. With sufficient free memory, image
+generation need not unload the language model or hold customer admission.
+
+Local status MUST advertise `local_image_generation_v1` in
+`local_status_contract.capabilities` and expose a `local_image_generation`
+object with `state`, `progress` (0–1), `downloaded_bytes`, `total_bytes`,
+`available`, `unavailable_reason` and `physical_memory_bytes`. Its state is
+`idle`, `downloading` (with progress and total download size),
+`holding_customers`, `generating`, `warm` or `restoring`, plus enough physical
+memory/availability information for the app to gate size and explain refusal.
+This capability MUST NOT be advertised as coordinator or buyer capability.
+Images MUST NOT increment customer request, token, heartbeat, billing,
+settlement or earnings figures. Fake-backend tests MUST cover request and
+origin validation, coordinator rejection, memory decisions across RAM/model
+sizes, the complete hold/warm/restore sequence, failure and cancellation
+restoration, single flight, status and manifest verification. Real-weights
+lab acceptance remains a separate pending gate.
+
 **SPEC-001-R010 — Exact loaded-model token utilities.** `POST /v1/tokenize`,
 `POST /v1/detokenize` and `POST /v1/apply-template` MUST use the tokenizer/template of the
 selected loaded model. Each operation MUST bind lookup, execution and result to
@@ -2466,6 +2548,14 @@ metadata, canary probes and warmup gates). SPEC-001-R010 token utilities are
 always local. WebSocket relay requests are always network. Under the
 SPEC-001-R009 local-process trust policy this is a classification, not an
 authentication boundary.
+
+SPEC-001-R014 image generation is local work subject to the same origin and
+accounting boundary. Its memory-driven local creative hold is the explicit
+exception to ordinary local language work yielding to buyers: it uses the
+operator-pause admission fence, lets admitted customer work drain within a
+bounded wait, and restores customer serving when the image residency ends.
+It MUST NOT overwrite a pre-existing operator pause or clear a pause requested
+during creative work. Images have no coordinator dispatch or settlement path.
 
 *Accounting.* Local work MUST NOT be counted in the heartbeat
 `requests_served_since_last`, latency, throughput, `slots_free`, request,

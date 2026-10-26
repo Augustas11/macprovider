@@ -80,6 +80,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil else {
             return
         }
+        AgentTaskRuntime.shared.start()
         Task { @MainActor [weak self] in
             await self?.handleStartup()
         }
@@ -127,6 +128,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // Uninstall is awaited when possible, but cannot strand a stale app forever.
     private let terminationDeadline = AppTerminationDeadline()
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        AgentTaskRuntime.shared.stop()
         terminationDeadline.begin(drain: { [weak self] in
             guard let self else { return }
             await TerminalSession.terminateAll()

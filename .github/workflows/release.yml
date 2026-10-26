@@ -1070,6 +1070,10 @@ jobs:
             "$tag" "$APP" \
             scripts/dist/malibu-v1.8.32-sparkle-public-key
 
+          # Embed the CLI runtime notices before the app bundle is signed.
+          test -s "$WORK/THIRD-PARTY-NOTICES.txt"
+          install -m 0644 "$WORK/THIRD-PARTY-NOTICES.txt" "$APP/Contents/Resources/THIRD-PARTY-NOTICES.txt"
+          cmp "$WORK/THIRD-PARTY-NOTICES.txt" "$APP/Contents/Resources/THIRD-PARTY-NOTICES.txt"
           cp "$WORK/macprovider-cli" "$APP/Contents/MacOS/macprovider-cli"
           chmod 755 "$APP/Contents/MacOS/macprovider-cli"
           [ -f "$WORK/mlx.metallib" ] || {

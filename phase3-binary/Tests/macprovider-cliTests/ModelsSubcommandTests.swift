@@ -7,6 +7,18 @@ import XCTest
 @testable import macprovider_cli
 
 final class ModelsSubcommandTests: XCTestCase {
+    func testOutputCaptureHandlesMoreThanAPipeBuffer() async throws {
+        let output = String(repeating: "output", count: 32_768)
+        let diagnostic = String(repeating: "diagnostic", count: 32_768)
+        let capture = await captureOutput {
+            try FileHandle.standardOutput.write(contentsOf: Data(output.utf8))
+            try FileHandle.standardError.write(contentsOf: Data(diagnostic.utf8))
+        }
+        XCTAssertNil(capture.error)
+        XCTAssertEqual(capture.stdout, output)
+        XCTAssertEqual(capture.stderr, diagnostic)
+    }
+
     func testModelsStatusReturnsStatusResponse() async throws {
         let socketPath = try makeSocketPath()
         let server = ControlSocketServer(socketPath: socketPath, modelRuntime: makeRuntime(modelID: "old-model"))
@@ -2699,13 +2711,23 @@ private struct CapturedOutput {
     let error: Error?
 }
 
+// Catalog JSON can exceed a pipe's capacity. File-backed capture avoids blocking
+// the command before the test gets a chance to read, and is removed on close.
 private func captureOutput(_ body: () async throws -> Void) async -> CapturedOutput {
-    let stdoutPipe = Pipe()
-    let stderrPipe = Pipe()
+    guard let output = tmpfile() else {
+        return CapturedOutput(stdout: "", stderr: "", error: POSIXError(.ENOSPC))
+    }
+    defer { fclose(output) }
+    guard let diagnostic = tmpfile() else {
+        return CapturedOutput(stdout: "", stderr: "", error: POSIXError(.ENOSPC))
+    }
+    defer { fclose(diagnostic) }
+    fflush(stdout)
+    fflush(stderr)
     let savedStdout = dup(STDOUT_FILENO)
     let savedStderr = dup(STDERR_FILENO)
-    dup2(stdoutPipe.fileHandleForWriting.fileDescriptor, STDOUT_FILENO)
-    dup2(stderrPipe.fileHandleForWriting.fileDescriptor, STDERR_FILENO)
+    dup2(fileno(output), STDOUT_FILENO)
+    dup2(fileno(diagnostic), STDERR_FILENO)
 
     let error: Error?
     do {
@@ -2721,11 +2743,10 @@ private func captureOutput(_ body: () async throws -> Void) async -> CapturedOut
     dup2(savedStderr, STDERR_FILENO)
     close(savedStdout)
     close(savedStderr)
-    stdoutPipe.fileHandleForWriting.closeFile()
-    stderrPipe.fileHandleForWriting.closeFile()
-
-    let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-    let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+    lseek(fileno(output), 0, SEEK_SET)
+    lseek(fileno(diagnostic), 0, SEEK_SET)
+    let stdoutData = FileHandle(fileDescriptor: fileno(output), closeOnDealloc: false).readDataToEndOfFile()
+    let stderrData = FileHandle(fileDescriptor: fileno(diagnostic), closeOnDealloc: false).readDataToEndOfFile()
     return CapturedOutput(
         stdout: String(decoding: stdoutData, as: UTF8.self),
         stderr: String(decoding: stderrData, as: UTF8.self),
