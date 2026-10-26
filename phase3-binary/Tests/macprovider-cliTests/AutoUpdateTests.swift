@@ -3859,11 +3859,13 @@ final class AutoUpdateTests: XCTestCase {
             // LaunchAgent present (launchdProviderAvailable == true), a headless
             // provider MUST be diverted to the operator-handoff skip and never
             // driven into consumer autoupdate mutation.
-            launchdProviderAvailable: { true }
+            launchdProviderAvailable: { true },
+            headlessOperatorManagedTopology: { true },
+            localStatusProbe: { _ in Self.inactiveContinuousBatchingLocalStatus() }
         )
 
-        // No injected topology closure: exercise the real determination via
-        // `credentialStore == .protectedFile`.
+        // Pin the headless fixture independently of the test host's install
+        // manifest; default topology determination has dedicated tests below.
         let outcome = await updater.handleCoordinatorRecommendation("1.7.0")
         XCTAssertEqual(outcome, .notAttempted)
 
@@ -3897,7 +3899,9 @@ final class AutoUpdateTests: XCTestCase {
             currentBinaryURL: { nil },
             rollbackObserverAvailable: { true },
             // Same safety boundary on the R005 signed-recovery path.
-            launchdProviderAvailable: { true }
+            launchdProviderAvailable: { true },
+            headlessOperatorManagedTopology: { true },
+            localStatusProbe: { _ in Self.inactiveContinuousBatchingLocalStatus() }
         )
 
         await updater.handleSignedReleaseDiscovery(attribution: [:])

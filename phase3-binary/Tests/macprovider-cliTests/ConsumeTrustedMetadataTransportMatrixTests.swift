@@ -777,11 +777,11 @@ private final class TransportCertificateAuthority {
         try OpenSSL.run(arguments)
         let p12 = try Data(contentsOf: URL(fileURLWithPath: p12Path))
         var imported: CFArray?
-        let status = SecPKCS12Import(
-            p12 as CFData,
-            [kSecImportExportPassphrase as String: "macprovider-test"] as CFDictionary,
-            &imported
-        )
+        var options: [String: Any] = [kSecImportExportPassphrase as String: "macprovider-test"]
+        // Test identities, including deliberately invalid chains, belong only
+        // to this process and must not depend on the SSH user's login keychain.
+        if #available(macOS 15.0, *) { options[kSecImportToMemoryOnly as String] = true }
+        let status = SecPKCS12Import(p12 as CFData, options as CFDictionary, &imported)
         XCTAssertEqual(status, errSecSuccess)
         let items = try XCTUnwrap(imported as? [[String: Any]])
         let first = try XCTUnwrap(items.first)

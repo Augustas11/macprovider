@@ -127,13 +127,17 @@ final class PrivacyCodeBoundTests: XCTestCase {
         let socketURL = directory.appendingPathComponent("d.sock")
         let listener = try bindTestListener(socketURL)
         defer { close(listener) }
+        let done = DispatchSemaphore(value: 0)
+        defer { XCTAssertEqual(done.wait(timeout: .now() + 3), .success) }
         DispatchQueue.global().async {
+            defer { done.signal() }
             let fd = accept(listener, nil, nil)
             guard fd >= 0 else { return }
             defer { close(fd) }
-            // The client closes at its deadline while this peer is still writing.
-            var noSigPipe: Int32 = 1
-            _ = setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size))
+            // The client deliberately times out before the next drip. EPIPE
+            // is the expected end of this fixture, not a process-wide signal.
+            var noSigpipe: Int32 = 1
+            guard setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSigpipe, socklen_t(MemoryLayout<Int32>.size)) == 0 else { return }
             _ = try? PrivacyCodeBoundFrame.read(from: fd, deadline: .now() + 2)
             // A frame header promising 100 bytes, then one byte every 300 ms.
             var header = Data()

@@ -1,5 +1,6 @@
 import Foundation
 import MacProviderCore
+import MacProviderImageGen
 import Darwin
 @preconcurrency import NIO
 @preconcurrency import NIOHTTP1
@@ -301,6 +302,7 @@ struct HTTPServer: Sendable {
     let compatibilitySetManifest: CompatibilitySetManifest?
     let lifecycleStateStore: ProviderLifecycleStateStore
     let lifecycleLeaseStore: ProviderLifecycleLeaseStore
+    let images: LocalImageGeneration?
     let onListening: @Sendable () throws -> Void
 
     init(
@@ -319,6 +321,24 @@ struct HTTPServer: Sendable {
         lifecycleLeaseStore: ProviderLifecycleLeaseStore = ProviderLifecycleLeaseStore(),
         onListening: @escaping @Sendable () throws -> Void = {}
     ) {
+        if let mlx = modelRuntime as? ModelRuntime {
+            let backend = LocalSDXLBackend(backend: SDXLTurboBackend(modelDirectory:
+                ProviderBuild1LaneAStatusResolver.durableRoot(config: config).appendingPathComponent("local-images/sdxl-turbo")))
+            self.images = LocalImageGeneration(backend: backend, lifecycle: LocalCreativeLifecycle(
+                pause: { await providerStatus.setLocalCreativeHold(true) },
+                drain: {
+                    let drained = await providerStatus.waitUntilDrained(timeoutSeconds: 30, preemptingLocal: true, cancellationAware: true)
+                    try Task.checkCancellation()
+                    guard drained else {
+                        throw APIError(status: 503, message: "Customer work did not finish within the creative hold drain bound.", code: "image_drain_timeout")
+                    }
+                },
+                unloadLanguage: { try await mlx.unloadForLocalCreativeHold() },
+                restoreLanguage: { try await mlx.restoreAfterLocalCreativeHold() },
+                resume: { await providerStatus.setLocalCreativeHold(false) },
+                languageRestoredAfterRelease: { await providerStatus.localCreativeLanguageRestoredAfterRelease() }
+            ))
+        } else { self.images = nil }
         self.config = config
         self.modelRuntime = modelRuntime
         self.providerStatus = providerStatus
@@ -377,7 +397,8 @@ struct HTTPServer: Sendable {
                             compatibilitySetManifest: compatibilitySetManifest,
                             lifecycleStateStore: lifecycleStateStore,
                             lifecycleLeaseStore: lifecycleLeaseStore,
-                            continuousBatchQueueWaitTimeoutMS: config.continuousBatchQueueWaitTimeoutMS
+                            continuousBatchQueueWaitTimeoutMS: config.continuousBatchQueueWaitTimeoutMS,
+                            images: images
                         )
                     )
                 }
@@ -472,6 +493,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         "metrics_request_rate_v1",
         // SPEC-001-R011: local use is counted apart and yields to buyers.
         "local_chat_priority_v1",
+        LocalImageGeneration.capability,
         "local_anthropic_messages_v1",
         "referral_repeatable_advocacy_v1",
         "referral_fragment_links_v1",
@@ -521,6 +543,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
     private let modelID: String?
     private let providerID: String?
     private let coordinatorURL: String?
+    private let images: LocalImageGeneration?
     private let modelRuntime: any ModelRuntimeServing
     private let providerStatus: ProviderStatus
     private let warmSwapEnabled: Bool
@@ -577,8 +600,10 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         compatibilitySetManifest: CompatibilitySetManifest? = nil,
         lifecycleStateStore: ProviderLifecycleStateStore = ProviderLifecycleStateStore(),
         lifecycleLeaseStore: ProviderLifecycleLeaseStore = ProviderLifecycleLeaseStore(),
-        continuousBatchQueueWaitTimeoutMS: Int? = nil
+        continuousBatchQueueWaitTimeoutMS: Int? = nil,
+        images: LocalImageGeneration? = nil
     ) {
+        self.images = images
         self.queueWaitRetryAfterSeconds = Self.queueWaitRetryAfterSeconds(continuousBatchQueueWaitTimeoutMS)
         self.modelID = modelID
         self.providerID = providerID
@@ -683,6 +708,12 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         }
 
         switch (requestHead.method, path(from: requestHead.uri)) {
+        case (.POST, "/v1/images/generations"):
+            handleImageGeneration(context: context, cancel: false)
+        case (.POST, "/v1/images/generations/cancel"):
+            handleImageGeneration(context: context, cancel: true)
+        case (_, "/v1/images/generations"), (_, "/v1/images/generations/cancel"):
+            writeError(context: context, status: .methodNotAllowed, message: "method not allowed", code: "invalid_request", extraHeaders: [("Allow", "POST")])
         case (.GET, "/v1/capabilities"):
             handleLocalCapabilities(context: context)
         case (_, "/v1/capabilities"):
@@ -722,6 +753,58 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         default:
             writeError(context: context, status: .notFound, message: "not found", code: "invalid_request")
         }
+    }
+
+    static func validateImageAccess(headers: HTTPHeaders, peerIsLoopback: Bool) throws {
+        guard requestOrigin(headers: headers, settlementMetadata: nil, peerIsLoopback: peerIsLoopback) == .local,
+              headers["X-MacProvider-Privacy-Class"].isEmpty else {
+            throw APIError(status: 403, message: "Image generation accepts only local-app requests on loopback.", code: "local_images_only")
+        }
+        try validateBrowserRequestHeaders(headers)
+    }
+
+    private func handleImageGeneration(context: ChannelHandlerContext, cancel: Bool) {
+        do {
+            guard let head = requestHead else { return }
+            try Self.validateImageAccess(headers: head.headers, peerIsLoopback: Self.isLoopbackPeer(context.remoteAddress))
+            guard let images else {
+                throw APIError(status: 503, message: "Image generation requires the native MLX provider runtime.", code: "image_generation_unavailable")
+            }
+            let writer = ResponseWriter(context: context)
+            let operationHeaders = head.headers["X-MacProvider-Image-Operation-ID"]
+            let suppliedOperationID = operationHeaders.count == 1 ? UUID(uuidString: operationHeaders[0]) : nil
+            guard operationHeaders.isEmpty || suppliedOperationID != nil else {
+                throw APIError(status: 400, message: "Use a single image operation UUID.", code: "invalid_image_operation")
+            }
+            if cancel {
+                guard let operationID = suppliedOperationID else {
+                    throw APIError(status: 400, message: "Cancellation requires the image operation UUID.", code: "invalid_image_operation")
+                }
+                Task { await images.cancel(operationID: operationID); writer.writeJSON(status: .ok, body: ["cancelled": true]) }
+                return
+            }
+            try Self.validateJSONContentType(head.headers.first(name: "Content-Type"))
+            try Self.validateContentEncoding(head.headers["Content-Encoding"])
+            let bytes = bodyBuffer?.getBytes(at: bodyBuffer?.readerIndex ?? 0, length: bodyBuffer?.readableBytes ?? 0) ?? []
+            let request: LocalImageRequest
+            do { request = try JSONDecoder().decode(LocalImageRequest.self, from: Data(bytes)) }
+            catch let error as APIError { throw error }
+            catch { throw APIError(status: 400, message: "Invalid image generation request.", code: "invalid_image_request") }
+            let disconnect = ClientDisconnectState()
+            inflightDisconnects.append(disconnect)
+            let operationID = suppliedOperationID ?? UUID()
+            let task = Task {
+                do {
+                    let png = try await images.generate(request, operationID: operationID)
+                    guard !disconnect.isDisconnected else { return }
+                    writer.writeJSON(status: .ok, body: ["created": Int(Date().timeIntervalSince1970), "data": [["b64_json": png.base64EncodedString()]]])
+                } catch let error as APIError { writer.writeAPIError(error) }
+                catch is CancellationError { writer.writeAPIError(APIError(status: 499, message: "Image generation cancelled.", code: "image_generation_cancelled")) }
+                catch { writer.writeAPIError(APIError(status: 500, message: "Image generation failed. The provider is restoring customer serving.", code: "image_generation_failed")) }
+            }
+            disconnect.onDisconnect { task.cancel() }
+        } catch let error as APIError { writeAPIError(context: context, error) }
+        catch { writeAPIError(context: context, APIError(status: 400, message: "Invalid image request.", code: "invalid_image_request")) }
     }
 
     private func handleLocalCapabilities(context: ChannelHandlerContext) {
@@ -893,6 +976,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
 
     private func handleStatus(context: ChannelHandlerContext) {
         let writer = ResponseWriter(context: context)
+        let images = images
         let providerStatus = providerStatus
         let modelRuntime = modelRuntime
         let warmSwapEnabled = warmSwapEnabled
@@ -904,7 +988,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         let lifecycleStateStore = lifecycleStateStore
         let lifecycleLeaseStore = lifecycleLeaseStore
         let compatibilitySetManifest = compatibilitySetManifest
-        Task.detached { @Sendable [providerStatus, modelRuntime, warmSwapEnabled, writer, providerID, coordinatorURL, catalogStatus, credentialStatusRuntime, admissionIdentityStatusRuntime, lifecycleStateStore, lifecycleLeaseStore, compatibilitySetManifest] in
+        Task.detached { @Sendable [images, providerStatus, modelRuntime, warmSwapEnabled, writer, providerID, coordinatorURL, catalogStatus, credentialStatusRuntime, admissionIdentityStatusRuntime, lifecycleStateStore, lifecycleLeaseStore, compatibilitySetManifest] in
             let snapshot = await providerStatus.snapshot()
             let credentialStatus = await credentialStatusRuntime.snapshot()
             let admissionIdentityStatus = await admissionIdentityStatusRuntime.snapshot()
@@ -953,7 +1037,8 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     admissionIdentityStatus: admissionIdentityStatus,
                     lifecycleStateInspection: lifecycleStateStore.inspect(),
                     lifecycleLeaseInspection: lifecycleLeaseStore.inspect(),
-                    compatibilitySetManifest: compatibilitySetManifest
+                    compatibilitySetManifest: compatibilitySetManifest,
+                    localImageStatus: await images?.status()
                 )
             )
         }
@@ -2549,7 +2634,8 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         admissionIdentityStatus: ProviderAdmissionIdentityStatusContext? = nil,
         lifecycleStateInspection: ProviderLifecycleStateInspection = .missing,
         lifecycleLeaseInspection: ProviderLifecycleLeaseInspection = .missing,
-        compatibilitySetManifest: CompatibilitySetManifest? = nil
+        compatibilitySetManifest: CompatibilitySetManifest? = nil,
+        localImageStatus: [String: Any]? = nil
     ) -> [String: Any] {
         let observedAt = Date()
         let observationID = UUID().uuidString.lowercased()
@@ -2559,6 +2645,12 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         let effectiveModelID = runtimeSnapshot?.modelID ?? snapshot.modelID
         let effectiveModelLoaded = runtimeSnapshot.map { $0.container != nil || $0.modelID != nil } ?? snapshot.modelLoaded
         var body: [String: Any] = [
+            "local_image_generation": localImageStatus ?? [
+                "state": "idle", "available": false, "progress": 0,
+                "downloaded_bytes": 0, "total_bytes": 0,
+                "physical_memory_bytes": ProcessInfo.processInfo.physicalMemory,
+                "unavailable_reason": "Image generation requires the native MLX provider runtime."
+            ],
             "binary_version": CoordinatorClient.binaryVersion,
             "compatibility_set_id": jsonNullable(compatibilitySetManifest?.compatibilitySetID),
             "compatibility_set_sha256": jsonNullable(compatibilitySetManifest?.envelopeSHA256),

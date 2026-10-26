@@ -296,6 +296,10 @@ cli_notary="$signing_tmp/macprovider-cli-notary.zip"
   --wait
 rm -f "$cli_notary"
 
+# Embed the CLI runtime notices before the app bundle is signed.
+test -s "$cli_work/THIRD-PARTY-NOTICES.txt"
+install -m 0644 "$cli_work/THIRD-PARTY-NOTICES.txt" "$app/Contents/Resources/THIRD-PARTY-NOTICES.txt"
+cmp "$cli_work/THIRD-PARTY-NOTICES.txt" "$app/Contents/Resources/THIRD-PARTY-NOTICES.txt"
 install -m 0755 "$cli_work/macprovider-cli" "$app/Contents/MacOS/macprovider-cli"
 install -m 0644 "$cli_work/compatibility-set.json" "$app/Contents/Resources/compatibility-set.json"
 cmp "$cli_work/compatibility-set.json" "$app/Contents/Resources/compatibility-set.json"

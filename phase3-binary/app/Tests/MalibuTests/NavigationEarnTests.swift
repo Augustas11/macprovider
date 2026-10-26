@@ -21,6 +21,13 @@ final class NavigationEarnTests: XCTestCase {
         XCTAssertEqual(MalibuNavigation(persistedValue: "future-section").selection, .chat)
     }
 
+    func testAgentTaskSidebarOrderAndLabels() {
+        XCTAssertEqual(MalibuSection.allCases.map(\.title),
+                       ["Chat", "Terminal", "Create", "Agents", "Tasks", "Models", "Earn", "Settings", "Diagnostics"])
+        XCTAssertEqual(MalibuNavigation(persistedValue: "agents").selection, .agents)
+        XCTAssertEqual(MalibuNavigation(persistedValue: "tasks").selection, .tasks)
+    }
+
     func testModelLinksSelectTheirExactTab() {
         let navigation = MalibuNavigation()
         navigation.showModels(.onThisMac)
