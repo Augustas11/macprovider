@@ -116,8 +116,9 @@ class AdapterTests(unittest.TestCase):
                 elif active:
                     output.append(line)
             return "".join(output)
-        # Reviewed production projection at frozen campaign source 6507121b05b166e94ed473dd9eb981fc9ec5f18e.
-        expected = {'ModelRuntime.swift': '87eba8c3ecf6176e8ffa6145851b5e214b7ec2078cfba9897bac5da132329af2', 'ContinuousBatchScheduler.swift': '466c1dec3416f65ca6d72ee42231f8033a405656c5a2f1ff67ae12b68ee295f8'}
+        # Production projection independently merged from frozen 6507121b0 and
+        # upstream prefix-cache source b1faa879b (their actual Git merge base).
+        expected = {'ModelRuntime.swift': 'fa84bbe685a0a03737dfb6f09c909812af894d324febba5464a0ebd8c909eb8d', 'ContinuousBatchScheduler.swift': '907ed7e8a13f09dce7b9e9883ffa65eb112e3870d2c47b4b4150030d3e23f890'}
         for name, digest in expected.items():
             after = (BASE / "phase3-binary/Sources/macprovider-cli" / name).read_text()
             self.assertEqual(hashlib.sha256(release_lines(after).encode()).hexdigest(), digest, name)

@@ -87,6 +87,72 @@ final class PagedMLALatentCacheTests: XCTestCase {
         }
     }
 
+    /// SPEC-024-R005: a CB row installed from a GLM-5-Next prompt snapshot
+    /// holds exactly the snapshot (latent, pooled keys, partial windows,
+    /// recurrent state), extends exactly as the stock cache would, and its
+    /// writes never reach the stored snapshot, which a second row can still
+    /// install. A layout or length mismatch fails closed. CPU only.
+    func testPromptSnapshotInstallSharesTheSnapshotUntilTheRowWritesOnCPU() throws {
+        try requireMetal()
+        try Device.withDefaultDevice(.cpu) {
+            var rng = SplitMix(seed: 41)
+            let serial = stock()
+            for length in [9, 6, 3] { _ = apply(serial, randomInputs(length: length, rng: &rng)) }
+            XCTAssertNotEqual(serial.offset % kpool, 0, "the snapshot holds a partial pool window")
+            let mamba = MambaCache()
+            mamba.state = [MLXArray((0 ..< 12).map(Float.init)).reshaped([1, 3, 4]),
+                           MLXArray((0 ..< 8).map { Float($0) * 0.5 }).reshaped([1, 2, 4])]
+            let snapshot = ContinuousBatchSerialConversationCache(
+                layers: [serial, mamba], recurrentCheckpoints: [], tokenCount: serial.offset, promptSnapshot: true)
+            let storedLatent = serial.state
+            let storedRecurrent = mamba.state
+            let kinds: [PagedKVSharedForwardBackend.CacheKind] = [.pagedMLA(kpool: kpool), .recurrentMamba]
+            func install() throws -> [KVCache] {
+                try PagedKVSharedForwardBackend.promptSnapshotRowCaches(
+                    snapshot, cacheKinds: kinds, blockSizeTokens: blockSize, maxPhysicalBlocks: 64,
+                    poolEpoch: 1, binding: makeCache().binding)
+            }
+            let row = try install()
+            let paged = try XCTUnwrap(row[0] as? PagedMLALatentCache)
+            XCTAssertEqual(paged.offset, serial.offset)
+            assertStatesEqual(paged.state, storedLatent, "installed sparse layer")
+            assertStatesEqual(row[1].state, storedRecurrent, "installed recurrent layer")
+            XCTAssertFalse((row[1] as AnyObject) === mamba)
+
+            // The row extends like the stock cache fed the same tokens.
+            let oracle = stock()
+            oracle.state = storedLatent.map { $0[.ellipsis] }
+            for length in [5, 1, 7] {
+                let input = randomInputs(length: length, rng: &rng)
+                let lhs = apply(paged, input)
+                let rhs = apply(oracle, input)
+                XCTAssertTrue(equal(lhs.latent, rhs.latent), "resumed latent \(length)")
+                XCTAssertEqual(lhs.pooled.map(\.shape), rhs.pooled.map(\.shape))
+                if let l = lhs.pooled, let r = rhs.pooled { XCTAssertTrue(equal(l, r), "resumed pooled \(length)") }
+            }
+            let recurrentRow = try XCTUnwrap(row[1] as? MambaCache)
+            recurrentRow.state = [MLXArray.zeros([1, 3, 4]), MLXArray.zeros([1, 2, 4])]
+            // Nothing the row wrote reached the stored snapshot.
+            assertStatesEqual(serial.state, storedLatent, "stored snapshot after the row wrote")
+            assertStatesEqual(mamba.state, storedRecurrent, "stored recurrent state after the row wrote")
+            let second = try install()
+            assertStatesEqual(second[0].state, storedLatent, "second install")
+
+            // Fail closed on any mismatch.
+            XCTAssertThrowsError(try PagedKVSharedForwardBackend.promptSnapshotRowCaches(
+                snapshot, cacheKinds: [.pagedMLA(kpool: kpool * 2), .recurrentMamba], blockSizeTokens: blockSize,
+                maxPhysicalBlocks: 64, poolEpoch: 1, binding: makeCache().binding))
+            XCTAssertThrowsError(try PagedKVSharedForwardBackend.promptSnapshotRowCaches(
+                snapshot, cacheKinds: [.recurrentMamba, .pagedMLA(kpool: kpool)], blockSizeTokens: blockSize,
+                maxPhysicalBlocks: 64, poolEpoch: 1, binding: makeCache().binding))
+            let shorter = ContinuousBatchSerialConversationCache(
+                layers: [serial, mamba], recurrentCheckpoints: [], tokenCount: serial.offset - 1, promptSnapshot: true)
+            XCTAssertThrowsError(try PagedKVSharedForwardBackend.promptSnapshotRowCaches(
+                shorter, cacheKinds: kinds, blockSizeTokens: blockSize, maxPhysicalBlocks: 64, poolEpoch: 1,
+                binding: makeCache().binding))
+        }
+    }
+
     func testCopyIsIndependent() throws {
         try requireMetal()
         let cache = makeCache()

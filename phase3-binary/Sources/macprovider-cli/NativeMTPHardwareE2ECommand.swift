@@ -267,6 +267,9 @@ final class NativeMTPHardwareE2ERunner {
     /// Detected from `target/config.json`; Qwen3.5 when unreadable, so an
     /// unrecognized target fails the family check in the fixture load.
     let family: NativeMTPHardwareE2EFamily
+    /// SPEC-024-R005 lab leg: both runtimes admit positive-cached turns to
+    /// their CB rows (the test runtimes cover every tuple).
+    var continuousBatchingCachedTurns = false
 
     static func sizedMaxPhysicalBlocks(slots: Int, promptTokens: Int, outputTokens: Int) -> Int {
         let boundedSlots = max(1, slots)
@@ -848,6 +851,7 @@ final class NativeMTPHardwareE2ERunner {
             prefillStepSize: 512,
             maxBatch: maxBatch,
             continuousBatchingMode: .on,
+            continuousBatchingCachedTurns: continuousBatchingCachedTurns,
             continuousBatchingDurableReplayAuthorityAvailable: true,
             nativeMTPMode: nativeCapability == nil ? .off : .auto,
             nativeMTPCapability: nativeCapability,

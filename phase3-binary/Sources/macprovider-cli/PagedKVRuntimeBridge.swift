@@ -42,6 +42,38 @@ struct NativeMTPStateDigestRecord: Equatable, Sendable {
     #endif
 }
 
+#if DEBUG || MACPROVIDER_LAB_HARNESS
+/// Lab only (issue #2143 Window A diagnosis). With
+/// `MACPROVIDER_LAB_FIRST_TOKEN_LOGITS=1`, each CB row's first-token logits
+/// are logged: their float32 SHA-256 (equal digests mean the prompt state was
+/// bit-identical) and the top five `id:logit`, which show how contested the
+/// greedy choice was. Absent from release builds.
+enum ContinuousBatchLabFirstTokenLogits {
+    static let enabled = ProcessInfo.processInfo.environment["MACPROVIDER_LAB_FIRST_TOKEN_LOGITS"] == "1"
+
+    /// `logits`: `[rows, vocabulary]`, one row per `requestIDs` entry.
+    static func log(requestIDs: [String], promptTokenCounts: [Int], logits: MLXArray) {
+        guard enabled else { return }
+        let rows = logits.asType(.float32)
+        for (index, requestID) in requestIDs.enumerated() {
+            let values = rows[index].asArray(Float.self)
+            let digest = values.withUnsafeBytes { SHA256.hash(data: $0) }
+                .map { String(format: "%02x", $0) }.joined()
+            var top: [(Int, Float)] = []
+            for (id, value) in values.enumerated() where top.count < 5 || value > top[4].1 {
+                top.append((id, value))
+                top.sort { $0.1 > $1.1 }
+                if top.count > 5 { top.removeLast() }
+            }
+            let topText = top.map { "\($0.0):\($0.1)" }.joined(separator: ",")
+            try? FileHandle.standardError.write(contentsOf: Data(
+                ("[lab-first-logits] request_id=\(requestID) prompt_tokens=\(promptTokenCounts[index]) "
+                    + "sha256=\(digest) top5=\(topText)\n").utf8))
+        }
+    }
+}
+#endif
+
 final class NativeMTPStateDigestObserver: @unchecked Sendable {
     private let lock = NSLock()
     private var records: [NativeMTPStateDigestRecord] = []
@@ -997,6 +1029,15 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                        Self.hasValidBatchState(batchedCaches) {
                         let sampledTokens: [Int]?
                         if inputs.contains(where: \.sampleFirstToken) {
+                            #if DEBUG || MACPROVIDER_LAB_HARNESS
+                            if ContinuousBatchLabFirstTokenLogits.enabled {
+                                let sampling = inputs.indices.filter { inputs[$0].sampleFirstToken }
+                                ContinuousBatchLabFirstTokenLogits.log(
+                                    requestIDs: sampling.map { inputs[$0].requestID },
+                                    promptTokenCounts: sampling.map { inputs[$0].targetKVTokenCount },
+                                    logits: output.logits[0..., -1, 0...][MLXArray(sampling.map(Int32.init))])
+                            }
+                            #endif
                             sampledTokens = ContinuousBatchRowSampler.sample(
                                 logits: output.logits[0..., -1, 0...],
                                 rows: inputs.map(Self.samplerRow)
@@ -1101,6 +1142,14 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                             context.model(text, cache: state.caches, state: modelState)
                         }
                         if input.sampleFirstToken {
+                            #if DEBUG || MACPROVIDER_LAB_HARNESS
+                            if ContinuousBatchLabFirstTokenLogits.enabled {
+                                ContinuousBatchLabFirstTokenLogits.log(
+                                    requestIDs: [input.requestID],
+                                    promptTokenCounts: [input.targetKVTokenCount],
+                                    logits: output.logits[0..., -1, 0...])
+                            }
+                            #endif
                             sampledToken = ContinuousBatchRowSampler.sample(
                                 logits: output.logits[0..., -1, 0...],
                                 rows: [Self.samplerRow(input)]
@@ -1973,6 +2022,26 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     /// sparse layer copies into a serial `GLM5NextAttentionCache`; recurrent
     /// layers copy their state. Every other layout returns nil.
     func snapshotPromptCache(requestID: String, tokenCount: Int) async -> ContinuousBatchSerialConversationCache? {
+        await captureGLMPromptSnapshot(requestID: requestID, tokenCount: tokenCount, nextPromptToken: nil)
+    }
+
+    /// SPEC-024-R005: on a native-MTP row the snapshot also carries the MTP
+    /// head state, copied when the head sits exactly at `tokenCount` with no
+    /// tentative proposal (prefill, never mid-verify: the snapshot point is
+    /// strictly inside the prompt). Its last entry consumed `nextPromptToken`.
+    func snapshotPromptCacheAndHead(
+        requestID: String,
+        tokenCount: Int,
+        nextPromptToken: Int
+    ) async -> ContinuousBatchSerialConversationCache? {
+        await captureGLMPromptSnapshot(requestID: requestID, tokenCount: tokenCount, nextPromptToken: nextPromptToken)
+    }
+
+    private func captureGLMPromptSnapshot(
+        requestID: String,
+        tokenCount: Int,
+        nextPromptToken: Int?
+    ) async -> ContinuousBatchSerialConversationCache? {
         guard cacheKinds.contains(where: \.isPagedMLA),
               cacheKinds.allSatisfy({ $0.isPagedMLA || $0 == .recurrentMamba }),
               beginOperation()
@@ -1998,10 +2067,117 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                     layers.append(Self.serialAttentionCache(copying: latent))
                 }
             }
-            eval(layers)
+            var drafter: NativeMTPDrafterPrefixSnapshot?
+            if let nextPromptToken,
+               let state = self.nativeMTPDrafterState(for: requestID),
+               state.nextPosition == tokenCount,
+               state.proposalAppended == 0 {
+                drafter = NativeMTPDrafterPrefixSnapshot(
+                    cache: state.cache.map { $0.copy() },
+                    nextPosition: tokenCount,
+                    foldedNextToken: nextPromptToken
+                )
+            }
+            eval(layers + (drafter?.cache ?? []))
             return ContinuousBatchSerialConversationCache(
-                layers: layers, recurrentCheckpoints: [], tokenCount: tokenCount, promptSnapshot: true)
+                layers: layers, recurrentCheckpoints: [], tokenCount: tokenCount, promptSnapshot: true,
+                nativeMTPDrafter: drafter)
         }
+    }
+
+    /// SPEC-024-R005 / SPEC-038 AC-26: the row's caches from a GLM-5-Next
+    /// prompt snapshot at exactly `binding`'s logical length. Each sparse layer
+    /// takes the snapshot's latent, pooled keys and partial windows; each
+    /// recurrent layer its state. The row's arrays alias the snapshot's
+    /// immutable MLX buffers until its first write, which writes a new buffer
+    /// (`PagedMLALatentCache.adopt`), so the stored entry never changes. A
+    /// native row's MTP head resumes from a copy of the snapshot's head state.
+    /// Any layout or length mismatch fails admission before a row exists.
+    func installPromptSnapshotCache(
+        requestID: String,
+        snapshot: ContinuousBatchSerialConversationCache,
+        binding: PagedKVStorageBinding,
+        restoreNativeMTPDrafter: Bool
+    ) async throws {
+        let unavailable = ContinuousBatchSchedulerError.unsupported("continuous_batching_prompt_snapshot_install_unavailable")
+        let tokenCount = snapshot.tokenCount
+        guard snapshot.promptSnapshot,
+              tokenCount > 0,
+              binding.currentTable.logicalTokenCount == tokenCount,
+              snapshot.layers.count == cacheKinds.count,
+              cacheKinds.contains(where: \.isPagedMLA),
+              cacheKinds.allSatisfy({ $0.isPagedMLA || $0 == .recurrentMamba })
+        else { throw unavailable }
+        let drafter = restoreNativeMTPDrafter ? snapshot.nativeMTPDrafter : nil
+        if restoreNativeMTPDrafter {
+            guard let drafter, drafter.nextPosition == tokenCount, !drafter.cache.isEmpty else { throw unavailable }
+        }
+        guard beginOperation() else {
+            throw ContinuousBatchSchedulerError.unsupported("continuous_batching_backend_cancelled")
+        }
+        defer { endOperation() }
+        let caches = try Self.promptSnapshotRowCaches(
+            snapshot,
+            cacheKinds: cacheKinds,
+            blockSizeTokens: blockSizeTokens,
+            maxPhysicalBlocks: maxPhysicalBlocks,
+            poolEpoch: poolEpoch,
+            binding: binding
+        )
+        try setRowState(RowState(caches: caches, state: nil), for: requestID, binding: binding)
+        if let drafter {
+            storeNativeMTPDrafterAdvance(
+                requestIDs: [requestID],
+                states: [MTPDrafterState(cache: drafter.cache.map { $0.copy() }, nextPosition: tokenCount)],
+                seedTokens: [nil]
+            )
+        }
+    }
+
+    /// Row caches for `installPromptSnapshotCache`, nil-free or throwing.
+    static func promptSnapshotRowCaches(
+        _ snapshot: ContinuousBatchSerialConversationCache,
+        cacheKinds: [CacheKind],
+        blockSizeTokens: Int,
+        maxPhysicalBlocks: Int,
+        poolEpoch: Int,
+        binding: PagedKVStorageBinding
+    ) throws -> [KVCache] {
+        let unavailable = ContinuousBatchSchedulerError.unsupported("continuous_batching_prompt_snapshot_install_unavailable")
+        guard snapshot.layers.count == cacheKinds.count else { throw unavailable }
+        var caches: [KVCache] = []
+        for (index, kind) in cacheKinds.enumerated() {
+            let layer = snapshot.layers[index]
+            switch kind {
+            case .recurrentMamba:
+                guard layer is MambaCache else { throw unavailable }
+                let state = layer.state
+                guard !state.isEmpty, state.allSatisfy({ $0.size > 0 }) else { throw unavailable }
+                let cache = MambaCache()
+                cache.state = state.map { $0[.ellipsis] }
+                caches.append(cache)
+            case .pagedMLA(let kpool):
+                guard let serial = layer as? GLM5NextAttentionCache,
+                      serial.kpool == kpool,
+                      serial.offset == snapshot.tokenCount
+                else { throw unavailable }
+                let cache = PagedMLALatentCache(
+                    kpool: kpool,
+                    blockSizeTokens: blockSizeTokens,
+                    maxPhysicalBlocks: maxPhysicalBlocks,
+                    poolEpoch: poolEpoch,
+                    binding: binding,
+                    initialOffset: 0,
+                    reconstructViaGather: false
+                )
+                cache.state = serial.state
+                guard cache.offset == snapshot.tokenCount else { throw unavailable }
+                caches.append(cache)
+            case .pagedAttention, .slidingWindow, .deepseekV4Pool:
+                throw unavailable
+            }
+        }
+        return caches
     }
 
     /// The serial `GLM5NextAttentionCache` holding a copy of `latent`'s state

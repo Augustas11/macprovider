@@ -1,11 +1,20 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.30
+Version: v0.3.31
 Status: draft (normative contract; runtime enablement is default-on per Mac behind the FR-CB10 on-device self-check, v0.3.15)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.3.31 (2026-10-25, GLM-5-Next cached turns on CB rows, Related: #2143):**
+FR-CB4 admits a second usable handoff: a GLM-5-Next prompt snapshot
+(SPEC-024-R005). Under the unchanged AC-26 grant a positive-cached GLM turn
+installs the snapshot into its own CB row (block table starting at the
+snapshot length, arrays shared until the row's first write) and resumes
+chunked prefill there, with native MTP when the snapshot carries the MTP
+head state (SPEC-048 0.1.57). AC-26 adds the GLM proof. Without the grant
+every GLM row behaves as in v0.3.30, and every other family is unchanged.
+
 **Change log v0.3.30 (2026-10-24, DeepSeek pipelined decode):**
 FR-CB2 permits a bounded lockstep window with one queued lookahead step.
 Projection, RoPE and attention run across rows; ragged padding is masked.
@@ -1123,7 +1132,12 @@ enter the scheduler only when the provider flag
 `continuous_batching_cached_turns` is on (default off) AND its lease carries a
 usable retained handoff. A usable handoff is a retained FR-PKV10 paged-KV
 sequence and, for a hybrid model, the recurrent checkpoint the lease resumes
-from. **(v0.2.9)** It additionally requires AC-26 acceptance for the tuple:
+from; **(v0.3.31)** or, for GLM-5-Next, a SPEC-024-R005 prompt snapshot at
+exactly the cached length, which the row installs (sparse latent and pooled
+keys at the snapshot length, recurrent state, and on a native-MTP row the MTP
+head state) before prefill resumes at that length. A snapshot that does not
+match the row's cache layout fails admission closed. The row never writes
+into the stored snapshot's buffers. **(v0.2.9)** It additionally requires AC-26 acceptance for the tuple:
 the FR-CB10 accepted-tuple entry covering the requested runtime tuple MUST
 record `cached_turns_accepted: true`. Any other positive-cached turn MUST keep
 the AC-26 fence: canary serial-routes and `on` fails closed (FR-CB8), with
@@ -2393,7 +2407,16 @@ hardware-capability run or a static-review obligation. Every
   usage, receipt and settlement fields, passes on that exact tuple and
   revision. A hybrid tuple's proof MUST include a checkpoint-resumed turn. The
   runtime admits positive-cached turns only where the grant is present, so the
-  flag alone never lets such a turn into canary.
+  flag alone never lets such a turn into canary. **(v0.3.31)** A GLM-5-Next
+  tuple's proof MUST, on the packaged build with the signed policy loaded so
+  CB engages: (a) run a multi-turn keyed conversation through the relay whose
+  later turns report `cached_prompt_tokens` equal to the previous snapshot
+  length, enter a CB row (no `serial_routed` line), and produce the greedy
+  tokens of the same turns sent cold under a new key; (b) include native-MTP
+  rows resumed from a snapshot that keep `native_mtp` and match an ordinary CB
+  row's tokens at the same row count, plus their tokens/s, acceptance and
+  TTFT against ordinary CB at that row count (SPEC-048 R015 cells); and
+  (c) carry correct usage, receipt and settlement fields for every turn.
 
 ## 8. Go/no-go gates
 

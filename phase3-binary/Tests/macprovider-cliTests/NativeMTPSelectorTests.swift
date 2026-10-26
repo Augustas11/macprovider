@@ -782,6 +782,20 @@ final class NativeMTPSelectorTests: XCTestCase {
         XCTAssertTrue(resolve(cached: 0).usesNativeMTP)
         XCTAssertTrue(resolve(key: false, cached: nil).usesNativeMTP)
         XCTAssertTrue(resolve(allowed: false, cached: nil).usesNativeMTP)
+        // SPEC-048 0.1.56 MTP-9: a snapshot hit that restores the MTP head
+        // state stays native; without it, the hit still reselects ordinary.
+        XCTAssertTrue(native.resolvingConversationCacheLease(
+            hasConversationKey: true, leaseAllowed: true, cachedPromptTokens: 12,
+            keyedRowsCommitSerialFormat: true, cachedPrefixRestoresNativeMTPDrafter: true
+        ).usesNativeMTP)
+        XCTAssertFalse(native.resolvingConversationCacheLease(
+            hasConversationKey: true, leaseAllowed: true, cachedPromptTokens: 12,
+            keyedRowsCommitSerialFormat: false, cachedPrefixRestoresNativeMTPDrafter: true
+        ).usesNativeMTP)
+        XCTAssertFalse(native.resolvingConversationCacheLease(
+            hasConversationKey: true, leaseAllowed: true, cachedPromptTokens: nil,
+            keyedRowsCommitSerialFormat: true, cachedPrefixRestoresNativeMTPDrafter: true
+        ).usesNativeMTP)
         for downgraded in [resolve(cached: 12), resolve(cached: nil), resolve(cached: 0, serial: false)] {
             XCTAssertFalse(downgraded.usesNativeMTP)
             XCTAssertEqual(downgraded.selection.path, .ordinary)
