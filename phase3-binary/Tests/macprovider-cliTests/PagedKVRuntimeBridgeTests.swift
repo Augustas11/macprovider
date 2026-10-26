@@ -4465,8 +4465,30 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
             + tokenizer.encode(text: generationPrompt, addSpecialTokens: false)
         let laneProcessor = RuntimeBridgeCapturingPromptProcessor(tokens: baseTokens.map(Int32.init))
         let legacyProcessor = RuntimeBridgeCapturingPromptProcessor(tokens: baseTokens.map(Int32.init))
+        // Required tool calls compile a token grammar from resolved tokenizer
+        // metadata. Keep this character tokenizer fixture consistent with its
+        // on-disk byte vocabulary rather than bypassing grammar admission.
+        let tokenizerDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("bridge-tool-tokenizer-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tokenizerDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tokenizerDirectory) }
+        var vocabulary = Dictionary(uniqueKeysWithValues: (33...126).map {
+            (String(UnicodeScalar($0)!), $0)
+        })
+        vocabulary.merge(["Ġ": 32, "Ċ": 10, "ĉ": 9, "č": 13]) { _, new in new }
+        let tokenizerMetadata: [String: Any] = [
+            "model": ["type": "BPE", "vocab": vocabulary, "merges": []],
+            "decoder": ["type": "ByteLevel"],
+            "added_tokens": [
+                ["id": tokenizer.eosTokenID, "content": tokenizer.eosToken!, "special": true],
+                ["id": tokenizer.extraEOSTokenID, "content": tokenizer.extraEOSToken, "special": true],
+            ],
+        ]
+        try JSONSerialization.data(withJSONObject: tokenizerMetadata)
+            .write(to: tokenizerDirectory.appendingPathComponent("tokenizer.json"))
         let configuration = ModelConfiguration(
             id: ToolSelectionPolicy.supportedNativeModel,
+            tokenizerSource: .directory(tokenizerDirectory),
             extraEOSTokens: [tokenizer.extraEOSToken],
             eosTokenIds: [901]
         )
@@ -4509,6 +4531,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         )
         let expectedPrompt = baseTokens + tokenizer.encode(text: plan.prefill, addSpecialTokens: false)
         let expectedStops: Set<Int> = [901, tokenizer.eosTokenID, tokenizer.extraEOSTokenID]
+        XCTAssertNotNil(prepared.grammarConstraint, "Required tool calls must retain grammar admission")
         XCTAssertEqual(prepared.promptTokens, expectedPrompt)
         XCTAssertEqual(prepared.promptTokens, legacyInput.text.tokens.asArray(Int.self))
         XCTAssertEqual(prepared.toolCallPrefill, plan.prefill)
