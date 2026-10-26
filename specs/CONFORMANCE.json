@@ -694,7 +694,7 @@
     {
       "spec_id": "SPEC-024",
       "title": "Prefix-cache billing and provider-local cache isolation",
-      "version": "0.2.12",
+      "version": "0.2.13",
       "path": "specs/SPEC-024-prefix-cache-billing.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -1101,7 +1101,7 @@
     {
       "spec_id": "SPEC-038",
       "title": "Continuous batching for concurrent provider inference",
-      "version": "v0.3.30",
+      "version": "v0.3.31",
       "path": "specs/SPEC-038-continuous-batching.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1475,7 +1475,7 @@
     {
       "spec_id": "SPEC-048",
       "title": "Native Multi-Token Prediction Serving",
-      "version": "0.1.56",
+      "version": "0.1.57",
       "path": "specs/SPEC-048-native-mtp-serving.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -3772,6 +3772,48 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/2111",
         "rationale": "DeepSeek V4 keyed turns missed with rotating_window_cache and GLM-5-Next keyed turns committed nothing usable, so agent loops re-prefilled every turn from zero. Extend-only prompt snapshots are CPU-tested; pending the GPU two-turn parity window and live evidence."
+      }
+    },
+    {
+      "requirement_id": "SPEC-024-R005",
+      "spec_id": "SPEC-024",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/ConversationCache.swift:begin",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:continuousBatchPromptSnapshotPolicy",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:leaseHasAttachablePromptSnapshot",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:continuousBatchPromptSnapshotCache",
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:admitWaitingRows",
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:promptSnapshotIsPending",
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:prefillSpanEnd",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:continuousBatchPromptResumeBoundaries",
+        "phase3-binary/Sources/macprovider-cli/PagedKVRuntimeBridge.swift:installPromptSnapshotCache",
+        "phase3-binary/Sources/macprovider-cli/PagedKVRuntimeBridge.swift:promptSnapshotRowCaches",
+        "phase3-binary/Sources/macprovider-cli/PagedKVRuntimeBridge.swift:captureGLMPromptSnapshot",
+        "phase3-binary/Sources/macprovider-cli/NativeMTP.swift:resolvingConversationCacheLease"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/ConversationPromptSnapshotTests.swift:testGLM5NextCBRowsSnapshotOnlyUnderTheCachedTurnsGrant",
+        "phase3-binary/Tests/macprovider-cliTests/ConversationPromptSnapshotTests.swift:testNativeLeaseReusesASnapshotOnlyWithMatchingHeadState",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testPositiveCachedSnapshotTurnInstallsTheSnapshotAndResumesPrefill",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testPositiveCachedTurnWithAMismatchedSnapshotIsRefused",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testSnapshotInstallFailureFailsAdmissionAndReleasesTheTable",
+        "phase3-binary/Tests/macprovider-cliTests/PagedMLALatentCacheTests.swift:testPromptSnapshotInstallSharesTheSnapshotUntilTheRowWritesOnCPU",
+        "phase3-binary/Tests/macprovider-cliTests/GLM5NextCBPromptSnapshotTests.swift:testCBRowResumedFromAPromptSnapshotMatchesAColdCBRow",
+        "phase3-binary/Tests/macprovider-cliTests/GLM5NextCBPromptSnapshotTests.swift:testNativeMTPRowResumedFromAPromptSnapshotRestoresTheHeadState",
+        "phase3-binary/Tests/macprovider-cliTests/GLM5NextCBPromptSnapshotTests.swift:testColdPrefillThroughAnEarlierSnapshotDiffersUnlessItSplitsThere",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testColdRowSplitsAtResumeBoundariesLikeTheResumedRow",
+        "phase3-binary/Tests/macprovider-cliTests/ConversationPromptSnapshotTests.swift:testResumeBoundariesCoverEveryEarlierTurnsSnapshot",
+        "phase3-binary/Tests/macprovider-cliTests/ConversationPromptSnapshotTests.swift:testResumeBoundaryLeaseMissesASnapshotOffTheIncomingPromptsBoundaries",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPSelectorTests.swift:testCacheOnlyNativeAdmissionResolvesOnTheLease"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2143",
+        "rationale": "GLM-5-Next keyed agent turns on continuous-batching rows published no conversation-cache entry and could not resume a cached prefix on CB, so every turn re-prefilled its full history. Under the SPEC-038 AC-26 grant, GLM CB rows now publish the FR-CI2a prompt snapshot (with MTP head state on native rows) and positive-cached turns install it into their own CB row. CPU and tiny-model Metal tests cover it; pending the Studio GPU parity and MTP-versus-ordinary window, the AC-26 relay/billing/settlement proof and the signed cached_turns_accepted grant."
       }
     },
     {
@@ -11799,11 +11841,14 @@
       "state": "pending",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/NativeMTP.swift:resolvingConversationCacheLease",
-        "phase4-coordinator/internal/ws/relay.go:ContextWithConversationCacheOnlyKey"
+        "phase4-coordinator/internal/ws/relay.go:ContextWithConversationCacheOnlyKey",
+        "phase3-binary/Sources/macprovider-cli/ConversationCache.swift:begin"
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPSelectorTests.swift:testCacheOnlyNativeAdmissionResolvesOnTheLease",
-        "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeBridgeTests.swift:testKeyedNativeRowCommitsTheOrdinarySerialConversationCacheEntry"
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeBridgeTests.swift:testKeyedNativeRowCommitsTheOrdinarySerialConversationCacheEntry",
+        "phase3-binary/Tests/macprovider-cliTests/GLM5NextCBPromptSnapshotTests.swift:testNativeMTPRowResumedFromAPromptSnapshotRestoresTheHeadState",
+        "phase3-binary/Tests/macprovider-cliTests/ConversationPromptSnapshotTests.swift:testNativeLeaseReusesASnapshotOnlyWithMatchingHeadState"
       ],
       "journeys": [
         "JOURNEY-NATIVE-MTP-SERVING"

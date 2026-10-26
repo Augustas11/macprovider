@@ -377,6 +377,14 @@ struct ContinuousBatchPreparedRequest: Sendable {
     var grammarConstraint: GrammarConstraintState? = nil
     /// SPEC-024 FR-CI2a: keyed rows of a snapshot family only.
     var promptSnapshotTokenCount: Int? = nil
+    /// SPEC-024-R005: the snapshot is a GLM-5-Next CB-row snapshot that a
+    /// later positive-cached turn may install into its own CB row (cached
+    /// turns enabled and accepted for this tuple).
+    var promptSnapshotAttachesToContinuousBatchRow = false
+    /// SPEC-024-R005: keyed GLM-5-Next CB rows only; the positions every
+    /// prefill of this prompt ends a chunk at
+    /// (`ModelRuntime.continuousBatchPromptResumeBoundaries`).
+    var promptResumeBoundaries: [Int] = []
 }
 
 /// Serializes text prompt preparation for one admitted Qwen target snapshot.
@@ -6991,7 +6999,8 @@ maxTokens: 1,
         container: ModelContainer,
         maxContextTokens: Int,
         toolSelectionModelID: String?,
-        drainCancelled: DrainCancelToken
+        drainCancelled: DrainCancelToken,
+        promptSnapshotCachedTurnsAttachable: Bool = false
     ) async throws -> (ContinuousBatchPreparedRequest, StreamingDetokenizer) {
         if !request.containsNonTextMessageContentPart,
            let lane = snapshot.continuousBatchTextPreparationLane {
@@ -7028,6 +7037,13 @@ maxTokens: 1,
             // Only keyed requests can hold or reuse conversation state.
             let hybrid = try Self.nonEmpty(request.conversationKey) != nil
                 && ConversationCacheLayers.hasRecurrentLayers(context.model.newCache(parameters: nil))
+            let snapshotPolicy = Self.continuousBatchPromptSnapshotPolicy(
+                Self.conversationPromptSnapshotPolicy(model: context.model, tokenizer: tokenizer),
+                cachedTurnsAttachable: promptSnapshotCachedTurnsAttachable)
+            let attachesToRow: Bool = {
+                guard case .resumeMarker = snapshotPolicy else { return false }
+                return true
+            }()
             return (
                 ContinuousBatchPreparedRequest(
                     promptTokens: promptTokens,
@@ -7047,8 +7063,12 @@ maxTokens: 1,
                     promptSnapshotTokenCount: Self.nonEmpty(request.conversationKey) == nil ? nil
                         : Self.conversationPromptSnapshotTokenCount(
                             promptTokenIds: promptTokens.map(Int32.init),
-                            policy: Self.continuousBatchPromptSnapshotPolicy(
-                                Self.conversationPromptSnapshotPolicy(model: context.model, tokenizer: tokenizer)))
+                            policy: snapshotPolicy),
+                    promptSnapshotAttachesToContinuousBatchRow: attachesToRow,
+                    promptResumeBoundaries: Self.nonEmpty(request.conversationKey) == nil ? []
+                        : Self.continuousBatchPromptResumeBoundaries(
+                            promptTokenIds: promptTokens.map(Int32.init),
+                            policy: snapshotPolicy)
                 ),
                 StreamingDetokenizer(tokenizer: tokenizer)
             )
@@ -7805,21 +7825,21 @@ maxTokens: 1,
     private func serialRouteCanaryCachedHitMissingRetainedHandoff(
         _ lease: ConversationCacheLease?,
         capability: ContinuousBatchingCapability,
-        modelHasRecurrentLayers: Bool
+        modelHasRecurrentLayers: Bool,
+        hasAttachablePromptSnapshot: Bool = false
     ) async throws -> Bool {
         guard let lease,
               let reason = Self.cachedHitFenceReason(
                   mode: capability.mode,
                   cachedPromptTokens: lease.cachedPromptTokens,
-                  hasRetainedPagedKVHandoff: Self.leaseHasUsableRetainedHandoff(
+                  // SPEC-024-R005: a GLM-5-Next prompt snapshot is the other
+                  // usable handoff; the same grant still gates it.
+                  hasRetainedPagedKVHandoff: hasAttachablePromptSnapshot || Self.leaseHasUsableRetainedHandoff(
                       lease,
                       modelHasRecurrentLayers: modelHasRecurrentLayers
                   ),
                   cachedTurnsEnabled: continuousBatchingCachedTurns,
-                  cachedTurnsAccepted: continuousBatchingCachedTurns
-                      && continuousBatchingRequestedTuple().map {
-                          continuousBatchingAcceptanceCoverage.coversCachedTurns($0)
-                      } == true
+                  cachedTurnsAccepted: continuousBatchCachedTurnsAccepted
               )
         else {
             return false
@@ -7952,7 +7972,8 @@ maxTokens: 1,
             container: container,
             maxContextTokens: maxContextTokens,
             toolSelectionModelID: selectionModelID,
-            drainCancelled: drainCancelled
+            drainCancelled: drainCancelled,
+            promptSnapshotCachedTurnsAttachable: continuousBatchCachedTurnsAccepted
         )
         CBTrace.logPreparation(schedulerRequestID, "rt_cb_prepare_end path=complete tokens=\(prepared.promptTokens.count)")
 
@@ -7994,7 +8015,14 @@ maxTokens: 1,
                 kvBits: batchKVBits,
                 cold: coldContext,
                 allowRetainedPagedKVHandoff: true,
-                fleetGrant: request.fleetCacheGrant
+                fleetGrant: request.fleetCacheGrant,
+                // SPEC-024-R005: a native GLM row reuses a snapshot only with
+                // the MTP head state taken at it; any other hit is a miss here,
+                // so the row stays native and prefills from zero.
+                requireNativeMTPDrafterSnapshot: tokenBoundedNativeMTPAdmission.usesNativeMTP
+                    && prepared.promptSnapshotAttachesToContinuousBatchRow,
+                promptSnapshotResumeBoundaries: prepared.promptSnapshotAttachesToContinuousBatchRow
+                    ? prepared.promptResumeBoundaries : nil
             )
             : nil
         #if DEBUG || MACPROVIDER_LAB_HARNESS
@@ -8011,15 +8039,28 @@ maxTokens: 1,
            try await serialRouteCanaryCachedHitMissingRetainedHandoff(
             lease,
             capability: capability,
-            modelHasRecurrentLayers: prepared.modelHasRecurrentLayers
+            modelHasRecurrentLayers: prepared.modelHasRecurrentLayers,
+            hasAttachablePromptSnapshot: Self.leaseHasAttachablePromptSnapshot(lease, prepared: prepared)
         ) {
             return nil
         }
+        let promptSnapshotCache = Self.continuousBatchPromptSnapshotCache(for: lease, prepared: prepared)
+        // SPEC-024 FR-CI2a: a snapshot hit outside R005 serial-routes (AC-26
+        // fence), which strict `.on` refuses, so strict rows publish no
+        // snapshot unless a CB row can install it (R005).
+        let publishedPromptSnapshotTokenCount = capability.mode == .on
+            && !prepared.promptSnapshotAttachesToContinuousBatchRow ? nil : prepared.promptSnapshotTokenCount
         let nativeMTPAdmission = tokenBoundedNativeMTPAdmission.resolvingConversationCacheLease(
             hasConversationKey: Self.nonEmpty(request.conversationKey) != nil,
             leaseAllowed: conversationCacheAllowed,
             cachedPromptTokens: lease?.cachedPromptTokens,
-            keyedRowsCommitSerialFormat: prepared.modelHasRecurrentLayers && !continuousBatchingCachedTurns
+            // A row that publishes a prompt snapshot publishes it in the serial
+            // format and nothing else (SPEC-024 FR-CI2a); under R005 a GLM row
+            // too short to carry one publishes nothing on either path.
+            keyedRowsCommitSerialFormat: (prepared.modelHasRecurrentLayers && !continuousBatchingCachedTurns)
+                || publishedPromptSnapshotTokenCount != nil
+                || prepared.promptSnapshotAttachesToContinuousBatchRow,
+            cachedPrefixRestoresNativeMTPDrafter: promptSnapshotCache?.nativeMTPDrafter != nil
         )
         CBTrace.log(schedulerRequestID, "rt_native path=\(nativeMTPAdmission.effectivePath.rawValue) reason=\(nativeMTPAdmission.selection.nativeMTPReason?.rawValue ?? "-") cache_only=\(request.conversationCacheOnly)")
         recordNativeMTPTokenBoundDowngrade(
@@ -8044,10 +8085,11 @@ maxTokens: 1,
             retainedPagedKVSequence: lease?.reusableCache?.retainedPagedKVSequence,
             recurrentCheckpointPositions: prepared.recurrentCheckpointPositions,
             modelHasRecurrentLayers: prepared.modelHasRecurrentLayers,
-            // SPEC-024 FR-CI2a: a snapshot hit serial-routes (AC-26 fence), which
-            // strict `.on` refuses, so strict rows publish no snapshot.
-            promptSnapshotTokenCount: capability.mode == .on ? nil : prepared.promptSnapshotTokenCount,
+            promptSnapshotTokenCount: publishedPromptSnapshotTokenCount,
             retainedRecurrentCheckpoints: Self.retainedRecurrentCheckpoints(for: lease),
+            promptSnapshotCache: promptSnapshotCache,
+            publishesPromptSnapshotOnly: prepared.promptSnapshotAttachesToContinuousBatchRow,
+            promptResumeBoundaries: prepared.promptResumeBoundaries,
             serialToolStopObserver: serialToolStop,
             grammarConstraint: prepared.grammarConstraint,
             nativeMTPAdmission: nativeMTPAdmission
@@ -8129,7 +8171,9 @@ maxTokens: 1,
                     cache: ConversationCacheLayers(
                         serialCache.layers,
                         recurrentCheckpoints: serialCache.recurrentCheckpoints,
-                        promptSnapshot: serialCache.promptSnapshot
+                        promptSnapshot: serialCache.promptSnapshot,
+                        nativeMTPDrafter: serialCache.nativeMTPDrafter,
+                        resumeBoundaryPlan: prepared.promptSnapshotAttachesToContinuousBatchRow
                     ),
                     fullTokens: fullTokens,
                     cold: coldContext
@@ -8393,7 +8437,8 @@ maxTokens: 1,
             container: container,
             maxContextTokens: maxContextTokens,
             toolSelectionModelID: selectionModelID,
-            drainCancelled: drainCancelled
+            drainCancelled: drainCancelled,
+            promptSnapshotCachedTurnsAttachable: continuousBatchCachedTurnsAccepted
         )
         CBTrace.logPreparation(schedulerRequestID, "rt_cb_prepare_end path=stream tokens=\(prepared.promptTokens.count)")
 
@@ -8444,7 +8489,14 @@ maxTokens: 1,
                 kvBits: batchKVBits,
                 cold: coldContext,
                 allowRetainedPagedKVHandoff: true,
-                fleetGrant: request.fleetCacheGrant
+                fleetGrant: request.fleetCacheGrant,
+                // SPEC-024-R005: a native GLM row reuses a snapshot only with
+                // the MTP head state taken at it; any other hit is a miss here,
+                // so the row stays native and prefills from zero.
+                requireNativeMTPDrafterSnapshot: tokenBoundedNativeMTPAdmission.usesNativeMTP
+                    && prepared.promptSnapshotAttachesToContinuousBatchRow,
+                promptSnapshotResumeBoundaries: prepared.promptSnapshotAttachesToContinuousBatchRow
+                    ? prepared.promptResumeBoundaries : nil
             )
             : nil
         #if DEBUG || MACPROVIDER_LAB_HARNESS
@@ -8460,15 +8512,28 @@ maxTokens: 1,
            try await serialRouteCanaryCachedHitMissingRetainedHandoff(
             lease,
             capability: capability,
-            modelHasRecurrentLayers: prepared.modelHasRecurrentLayers
+            modelHasRecurrentLayers: prepared.modelHasRecurrentLayers,
+            hasAttachablePromptSnapshot: Self.leaseHasAttachablePromptSnapshot(lease, prepared: prepared)
         ) {
             return nil
         }
+        let promptSnapshotCache = Self.continuousBatchPromptSnapshotCache(for: lease, prepared: prepared)
+        // SPEC-024 FR-CI2a: a snapshot hit outside R005 serial-routes (AC-26
+        // fence), which strict `.on` refuses, so strict rows publish no
+        // snapshot unless a CB row can install it (R005).
+        let publishedPromptSnapshotTokenCount = capability.mode == .on
+            && !prepared.promptSnapshotAttachesToContinuousBatchRow ? nil : prepared.promptSnapshotTokenCount
         let nativeMTPAdmission = tokenBoundedNativeMTPAdmission.resolvingConversationCacheLease(
             hasConversationKey: Self.nonEmpty(request.conversationKey) != nil,
             leaseAllowed: conversationCacheAllowed,
             cachedPromptTokens: lease?.cachedPromptTokens,
-            keyedRowsCommitSerialFormat: prepared.modelHasRecurrentLayers && !continuousBatchingCachedTurns
+            // A row that publishes a prompt snapshot publishes it in the serial
+            // format and nothing else (SPEC-024 FR-CI2a); under R005 a GLM row
+            // too short to carry one publishes nothing on either path.
+            keyedRowsCommitSerialFormat: (prepared.modelHasRecurrentLayers && !continuousBatchingCachedTurns)
+                || publishedPromptSnapshotTokenCount != nil
+                || prepared.promptSnapshotAttachesToContinuousBatchRow,
+            cachedPrefixRestoresNativeMTPDrafter: promptSnapshotCache?.nativeMTPDrafter != nil
         )
         CBTrace.log(schedulerRequestID, "rt_native path=\(nativeMTPAdmission.effectivePath.rawValue) reason=\(nativeMTPAdmission.selection.nativeMTPReason?.rawValue ?? "-") cache_only=\(request.conversationCacheOnly)")
         recordNativeMTPTokenBoundDowngrade(
@@ -8486,10 +8551,11 @@ maxTokens: 1,
             retainedPagedKVSequence: lease?.reusableCache?.retainedPagedKVSequence,
             recurrentCheckpointPositions: prepared.recurrentCheckpointPositions,
             modelHasRecurrentLayers: prepared.modelHasRecurrentLayers,
-            // SPEC-024 FR-CI2a: a snapshot hit serial-routes (AC-26 fence), which
-            // strict `.on` refuses, so strict rows publish no snapshot.
-            promptSnapshotTokenCount: capability.mode == .on ? nil : prepared.promptSnapshotTokenCount,
+            promptSnapshotTokenCount: publishedPromptSnapshotTokenCount,
             retainedRecurrentCheckpoints: Self.retainedRecurrentCheckpoints(for: lease),
+            promptSnapshotCache: promptSnapshotCache,
+            publishesPromptSnapshotOnly: prepared.promptSnapshotAttachesToContinuousBatchRow,
+            promptResumeBoundaries: prepared.promptResumeBoundaries,
             serialToolStopObserver: serialToolStop,
             grammarConstraint: prepared.grammarConstraint,
             nativeMTPAdmission: nativeMTPAdmission
@@ -8631,7 +8697,9 @@ maxTokens: 1,
                     cache: ConversationCacheLayers(
                         serialCache.layers,
                         recurrentCheckpoints: serialCache.recurrentCheckpoints,
-                        promptSnapshot: serialCache.promptSnapshot
+                        promptSnapshot: serialCache.promptSnapshot,
+                        nativeMTPDrafter: serialCache.nativeMTPDrafter,
+                        resumeBoundaryPlan: prepared.promptSnapshotAttachesToContinuousBatchRow
                     ),
                     fullTokens: fullTokens,
                     cold: coldContext
@@ -12799,20 +12867,101 @@ maxTokens: maxTokens,
         case referencePlanBoundary(step: Int)
         /// GLM-5-Next: the last chat-role marker, i.e. the history before the
         /// generation prompt (`<|assistant|><think>`), which the next turn
-        /// re-renders unchanged.
-        case lastRoleMarker(tokenIDs: Set<Int32>)
+        /// re-renders unchanged. `resumeTokenID` is the `<|assistant|>` id the
+        /// CB form below is built from.
+        case lastRoleMarker(tokenIDs: Set<Int32>, resumeTokenID: Int32? = nil)
+        /// SPEC-024-R005 GLM-5-Next CB rows: the snapshot sits at the last
+        /// `tokenID` (`<|assistant|>`, the generation-prompt start), and every
+        /// keyed prefill also ends a chunk at each earlier `tokenID` position
+        /// (`continuousBatchPromptResumeBoundaries`). Prefill numerics depend on
+        /// chunk shapes (matmul, conv, attention and MoE kernels pick their
+        /// routes by chunk length), so a snapshot equals the cold prefill's
+        /// state at that position only when both ran the same chunks: a turn
+        /// resumed at an earlier turn's snapshot and a cold prefill of the same
+        /// prompt then run identical chunk plans.
+        case resumeMarker(tokenID: Int32)
     }
 
-    /// The snapshot policy a CB row may use. GLM-5-Next CB rows publish no
-    /// prompt snapshot (their paged-latent snapshot has no hardware parity
-    /// evidence yet), so a GLM CB row keeps its pre-snapshot behavior; GLM
-    /// serial turns still snapshot. DeepSeek V4 CB rows keep the reference-plan
-    /// snapshot.
+    /// The snapshot policy a CB row may use. DeepSeek V4 CB rows keep the
+    /// reference-plan snapshot. A GLM-5-Next CB row snapshots at the last role
+    /// marker only when the next keyed turn can install that snapshot into its
+    /// own CB row (SPEC-024-R005: cached turns enabled and the signed entry for
+    /// this tuple records `cached_turns_accepted`); otherwise it publishes
+    /// nothing, as before, so no later hit is fenced off CB. GLM serial turns
+    /// still snapshot.
     nonisolated static func continuousBatchPromptSnapshotPolicy(
-        _ policy: ConversationPromptSnapshotPolicy?
+        _ policy: ConversationPromptSnapshotPolicy?,
+        cachedTurnsAttachable: Bool = false
     ) -> ConversationPromptSnapshotPolicy? {
-        guard case .referencePlanBoundary = policy else { return nil }
-        return policy
+        switch policy {
+        case .referencePlanBoundary: return policy
+        case .lastRoleMarker(_, let resumeTokenID):
+            guard cachedTurnsAttachable, let resumeTokenID else { return nil }
+            return .resumeMarker(tokenID: resumeTokenID)
+        case .resumeMarker: return cachedTurnsAttachable ? policy : nil
+        case nil: return nil
+        }
+    }
+
+    /// SPEC-024-R005: the prompt positions a keyed GLM-5-Next CB row ends a
+    /// prefill chunk at, cold or resumed: every `<|assistant|>` at or above the
+    /// reuse threshold, i.e. every position an earlier turn of this
+    /// conversation may have snapshotted at, plus this prompt's own snapshot.
+    /// A pure function of the tokens, so a prompt and any prompt extending it
+    /// agree on every boundary below their common prefix. Empty for every
+    /// other policy.
+    nonisolated static func continuousBatchPromptResumeBoundaries(
+        promptTokenIds: [Int32],
+        policy: ConversationPromptSnapshotPolicy?
+    ) -> [Int] {
+        guard case .resumeMarker(let tokenID) = policy else { return [] }
+        return promptTokenIds.indices.filter {
+            promptTokenIds[$0] == tokenID && $0 >= ConversationCache.lcpThreshold
+        }
+    }
+
+    /// SPEC-038 AC-26: positive-cached turns may enter the scheduler for the
+    /// requested tuple (operator flag on and the signed grant present).
+    private var continuousBatchCachedTurnsAccepted: Bool {
+        continuousBatchingCachedTurns
+            && continuousBatchingRequestedTuple().map {
+                continuousBatchingAcceptanceCoverage.coversCachedTurns($0)
+            } == true
+    }
+
+    /// SPEC-024-R005: the lease resumes a GLM-5-Next prompt snapshot a CB row
+    /// can install (exactly the snapshot length, serial-format layers).
+    nonisolated static func leaseHasAttachablePromptSnapshot(
+        _ lease: ConversationCacheLease?,
+        prepared: ContinuousBatchPreparedRequest
+    ) -> Bool {
+        guard prepared.promptSnapshotAttachesToContinuousBatchRow,
+              let lease, lease.cachedPromptTokens > 0,
+              prepared.promptResumeBoundaries.contains(lease.cachedPromptTokens),
+              let reusable = lease.reusableCache,
+              reusable.promptSnapshot,
+              reusable.resumeBoundaryPlan,
+              reusable.retainedPagedKVSequence == nil,
+              lease.reusableCanonicalPromptTokens?.count == lease.cachedPromptTokens
+        else { return false }
+        return true
+    }
+
+    /// The snapshot a CB row installs for `lease`, or nil.
+    nonisolated static func continuousBatchPromptSnapshotCache(
+        for lease: ConversationCacheLease?,
+        prepared: ContinuousBatchPreparedRequest
+    ) -> ContinuousBatchSerialConversationCache? {
+        guard leaseHasAttachablePromptSnapshot(lease, prepared: prepared),
+              let lease, let reusable = lease.reusableCache
+        else { return nil }
+        return ContinuousBatchSerialConversationCache(
+            layers: reusable.layers,
+            recurrentCheckpoints: [],
+            tokenCount: lease.cachedPromptTokens,
+            promptSnapshot: true,
+            nativeMTPDrafter: reusable.nativeMTPDrafter
+        )
     }
 
     static let glm5NextRoleMarkers = ["<|system|>", "<|user|>", "<|assistant|>", "<|observation|>"]
@@ -12826,12 +12975,13 @@ maxTokens: maxTokens,
         }
         if model is GLM5NextModel || model is GLM5NextTextModel {
             // Only ids that round-trip, so an unknown-token fallback never matches.
-            let ids = glm5NextRoleMarkers.compactMap { marker -> Int32? in
+            func roundTrip(_ marker: String) -> Int32? {
                 guard let id = tokenizer.convertTokenToId(marker),
                       tokenizer.convertIdToToken(id) == marker else { return nil }
                 return Int32(id)
             }
-            return ids.isEmpty ? nil : .lastRoleMarker(tokenIDs: Set(ids))
+            let ids = glm5NextRoleMarkers.compactMap(roundTrip)
+            return ids.isEmpty ? nil : .lastRoleMarker(tokenIDs: Set(ids), resumeTokenID: roundTrip("<|assistant|>"))
         }
         return nil
     }
@@ -12849,8 +12999,11 @@ maxTokens: maxTokens,
         case .referencePlanBoundary(let step):
             guard step > 0, promptTokenIds.count > 1 else { return nil }
             count = step * ((promptTokenIds.count - 1) / step)
-        case .lastRoleMarker(let tokenIDs):
+        case .lastRoleMarker(let tokenIDs, _):
             guard let last = promptTokenIds.lastIndex(where: { tokenIDs.contains($0) }) else { return nil }
+            count = last
+        case .resumeMarker(let tokenID):
+            guard let last = promptTokenIds.lastIndex(of: tokenID) else { return nil }
             count = last
         }
         return count >= ConversationCache.lcpThreshold ? count : nil
