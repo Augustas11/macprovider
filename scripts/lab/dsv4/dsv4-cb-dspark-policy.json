@@ -1,0 +1,86 @@
+{
+  "schema": "macprovider.dsv4-cb-dspark-policy.v1",
+  "issue": 2111,
+  "artifact": {
+    "repo": "TensorFold/DeepSeek-V4-Flash-0731-MXFP4-MLX",
+    "revision": "d6be051ae238b2021de56cf098d8f0206328754a",
+    "target_sha256": "58ee40d4c0bc436695d1d8d6a6cdfdb0326ec37f25e13ec98ea1d5c0878e732c",
+    "files": 62,
+    "bytes": 167094772883,
+    "config_sha256": "2c6e5047fbc5284f3dbdd101059d2d29f1ceb14cdc26ee93c9872c720398e35a",
+    "tokenizer_sha256": "8f9f37ca37fdc4f5fd36d5cf4d3b0e8392edb4e894fd10cc0d70b4957c8633cf",
+    "encoding_sha256": "abc0d26120250dda0ae077dc64aa28836026e61e970854aaeb792445e6a0dde6",
+    "tensors": 72317,
+    "mtp_tensors": 4705,
+    "dspark": {
+      "dspark_block_size": 5,
+      "dspark_noise_token_id": 128799,
+      "dspark_target_layer_ids": [
+        40,
+        41,
+        42
+      ],
+      "dspark_markov_rank": 256
+    }
+  },
+  "runtime_under_test": {
+    "pr": 2151,
+    "fork_tag": "3.32.3-macprovider.10.9",
+    "fork_commit": "c9baca402cb990b088eef09e9aa1088fd2ad6d7a",
+    "decode_path_digest": "9525bc48b6dad02e56acaecafb0d5a1208341cf2a0b01a031b788c4a5b4e3349",
+    "metallib_sha256": "3d9b4a747758128cc5418e62c5ad8e282a11b0d436423537137e013beaa1261b"
+  },
+  "cb": {
+    "engine": "scheduler",
+    "rows": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "prompt_tokens": 1024,
+    "decode_tokens": 256,
+    "runs": 3,
+    "parity_tokens": 256,
+    "gate_rows": 4,
+    "gate_aggregate_tps": 67.4,
+    "gate_reference": "mlx-vlm 0.7.10 BatchGenerator, 4 rows, decode_window_tps 67.44 (2026-10-22 dsv4-reference window)",
+    "parity_rows": [
+      1,
+      2,
+      4,
+      8
+    ]
+  },
+  "dspark": {
+    "reference": "mlx-vlm 0.7.10 deepseek_v4 + scripts/lab/dsv4/dsv4_vlm_fidelity.py (carried ratio-4 overlap, exact indexer top-k, float32 router); drafter mlx-vlm deepseek_v4_dspark at a fixed block size",
+    "environment": {
+      "mlx": "0.32.4",
+      "mlx-metal": "0.32.4",
+      "mlx-vlm": "0.7.10"
+    },
+    "block_sizes": [
+      2,
+      3,
+      4,
+      6
+    ],
+    "batch_rows": 4,
+    "decode_tokens": 256,
+    "strata": [
+      "prose",
+      "reasoning",
+      "code"
+    ],
+    "long_contexts": [
+      8192,
+      32768
+    ],
+    "go_speedup": 1.15,
+    "requests_sha256": "01bb9294714fcc95c7dc8540b460c309f8c5ff782214d24b3e95d4e4297b9383",
+    "proof_scope": "reference_only"
+  },
+  "budget": {
+    "addon_s": 6000
+  }
+}
