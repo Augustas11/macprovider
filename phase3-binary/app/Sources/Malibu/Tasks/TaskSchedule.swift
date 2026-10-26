@@ -43,6 +43,10 @@ struct ScheduledTask: Codable, Identifiable, Equatable {
     var enabled = true
     var preapprovedTools: Set<String> = []
     var nextFire: Date?
+    // Persist the evaluation origin so a device-zone change can recompute the
+    // pending wall-clock occurrence without dropping a missed catch-up run.
+    var scheduleAnchor: Date?
+    var scheduleTimezoneIdentifier: String?
 }
 
 struct TaskRun: Codable, Identifiable, Equatable {

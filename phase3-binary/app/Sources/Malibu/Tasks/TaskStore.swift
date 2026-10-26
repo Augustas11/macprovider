@@ -44,16 +44,40 @@ final class TaskStore: ObservableObject {
             let enabledChanged = baseline.enabled != task.enabled
             updated.enabled = enabledChanged ? task.enabled : old.enabled
             updated.nextFire = old.nextFire
+            updated.scheduleAnchor = old.scheduleAnchor
+            updated.scheduleTimezoneIdentifier = old.scheduleTimezoneIdentifier
             if scheduleChanged || (enabledChanged && task.enabled) {
-                updated.nextFire = task.schedule.initialFire(now: clock(), timezone: timezone())
+                updated.scheduleAnchor = clock()
+                updated.scheduleTimezoneIdentifier = timezone().identifier
+                updated.nextFire = task.schedule.initialFire(now: updated.scheduleAnchor!, timezone: timezone())
             }
         } else {
             guard tasks.count < 100 else { throw ChatFailure.limit }
-            updated.nextFire = task.schedule.initialFire(now: clock(), timezone: timezone())
+            updated.scheduleAnchor = clock()
+            updated.scheduleTimezoneIdentifier = timezone().identifier
+            updated.nextFire = task.schedule.initialFire(now: updated.scheduleAnchor!, timezone: timezone())
         }
         var result = tasks.filter { $0.id != task.id }; result.append(updated)
         try TaskPrivateFiles.write(result, to: directory.appendingPathComponent("tasks.json"))
         tasks = result; notice = nil
+    }
+
+    func refreshTimezone(now: Date, timezone: TimeZone) throws {
+        var result = tasks
+        for index in result.indices where result[index].schedule.kind != .once {
+            guard result[index].scheduleTimezoneIdentifier != timezone.identifier else { continue }
+            if let anchor = result[index].scheduleAnchor {
+                result[index].nextFire = result[index].schedule.nextFire(after: anchor, timezone: timezone)
+            } else {
+                // Existing task files have no zone/anchor. Preserve their pending
+                // catch-up once, then track subsequent timezone changes durably.
+                result[index].scheduleAnchor = now
+            }
+            result[index].scheduleTimezoneIdentifier = timezone.identifier
+        }
+        guard result != tasks else { return }
+        try TaskPrivateFiles.write(result, to: directory.appendingPathComponent("tasks.json"))
+        tasks = result
     }
 
     func remove(_ id: UUID) throws {
@@ -71,6 +95,8 @@ final class TaskStore: ObservableObject {
         guard let index = tasks.firstIndex(where: { $0.id == task.id }) else { return }
         var result = tasks
         result[index].nextFire = task.schedule.nextFire(after: now, timezone: timezone)
+        result[index].scheduleAnchor = now
+        result[index].scheduleTimezoneIdentifier = timezone.identifier
         if task.schedule.kind == .once { result[index].enabled = false }
         try TaskPrivateFiles.write(result, to: directory.appendingPathComponent("tasks.json"))
         tasks = result

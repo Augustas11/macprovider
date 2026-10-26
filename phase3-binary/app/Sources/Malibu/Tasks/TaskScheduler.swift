@@ -46,9 +46,12 @@ final class TaskScheduler: ObservableObject {
     func tick() {
         guard runningTaskID == nil else { return }
         let now = clock()
+        let zone = timezone()
+        do { try store.refreshTimezone(now: now, timezone: zone) }
+        catch { store.reportStorageError(); return }
         guard let task = store.tasks.filter({ $0.enabled && $0.nextFire.map { $0 <= now } == true })
             .sorted(by: { ($0.nextFire ?? .distantFuture) < ($1.nextFire ?? .distantFuture) }).first else { return }
-        do { try store.consume(task, now: now, timezone: timezone()) }
+        do { try store.consume(task, now: now, timezone: zone) }
         catch { store.reportStorageError(); return }
         begin(task)
     }

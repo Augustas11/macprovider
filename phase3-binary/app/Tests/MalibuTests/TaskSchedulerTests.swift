@@ -119,6 +119,56 @@ final class TaskSchedulerTests: XCTestCase {
         XCTAssertFalse(try XCTUnwrap(store.tasks.first).enabled)
     }
 
+    func testTimezoneChangeRecomputesDailyOccurrenceAndPersistsAcrossReload() throws {
+        let formatter = ISO8601DateFormatter()
+        let now = try XCTUnwrap(formatter.date(from: "2026-10-26T12:00:00Z"))
+        var zone = try XCTUnwrap(TimeZone(identifier: "America/Los_Angeles"))
+        let path = try directory()
+        let store = TaskStore(directory: path, clock: { now }, timezone: { zone })
+        var scheduled = task(now: now)
+        scheduled.schedule = TaskSchedule(kind: .daily, hour: 9, minute: 0)
+        try store.save(scheduled)
+        XCTAssertEqual(store.tasks.first?.nextFire, formatter.date(from: "2026-10-26T16:00:00Z"))
+        zone = try XCTUnwrap(TimeZone(identifier: "America/New_York"))
+        let scheduler = TaskScheduler(store: store, clock: { now }, timezone: { zone }, execute: { _ in
+            XCTFail("09:00 has not arrived"); return "unexpected"
+        })
+        scheduler.tick()
+        XCTAssertEqual(store.tasks.first?.nextFire, formatter.date(from: "2026-10-26T13:00:00Z"))
+        let reloaded = TaskStore(directory: path, clock: { now }, timezone: { zone })
+        XCTAssertEqual(reloaded.tasks, store.tasks)
+    }
+
+    func testTimezoneChangeAfterMissedRunCatchesUpOnceAcrossReload() async throws {
+        let formatter = ISO8601DateFormatter()
+        var now = try XCTUnwrap(formatter.date(from: "2026-10-26T12:00:00Z"))
+        var zone = try XCTUnwrap(TimeZone(identifier: "America/Los_Angeles"))
+        let path = try directory()
+        let store = TaskStore(directory: path, clock: { now }, timezone: { zone })
+        var scheduled = task(now: now)
+        scheduled.schedule = TaskSchedule(kind: .daily, hour: 9, minute: 0)
+        try store.save(scheduled)
+        now = try XCTUnwrap(formatter.date(from: "2026-10-27T14:00:00Z"))
+        zone = try XCTUnwrap(TimeZone(identifier: "America/New_York"))
+        // A closed app observes the change on its first tick after reload.
+        let reloaded = TaskStore(directory: path, clock: { now }, timezone: { zone })
+        var calls = 0
+        let scheduler = TaskScheduler(store: reloaded, clock: { now }, timezone: { zone }, execute: { _ in
+            calls += 1; return "caught up"
+        })
+        scheduler.tick()
+        try await eventually { scheduler.runningTaskID == nil }
+        XCTAssertEqual(calls, 1)
+        XCTAssertEqual(reloaded.tasks.first?.nextFire, formatter.date(from: "2026-10-28T13:00:00Z"))
+        let again = TaskStore(directory: path, clock: { now }, timezone: { zone })
+        let next = TaskScheduler(store: again, clock: { now }, timezone: { zone }, execute: { _ in
+            calls += 1; return "unexpected"
+        })
+        next.tick()
+        XCTAssertNil(next.runningTaskID)
+        XCTAssertEqual(calls, 1)
+    }
+
     func testWallTimeCapCancelsRunAndRecordsFailure() async throws {
         let store = TaskStore(directory: try directory())
         var canceled = false
