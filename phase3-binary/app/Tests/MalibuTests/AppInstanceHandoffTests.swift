@@ -271,8 +271,13 @@ final class AppInstanceHandoffTests: XCTestCase {
     }
 
     func testSimilarNamedNonMalibuProcessIsNeverTargeted() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let lookalike = directory.appendingPathComponent("Malibu-helper")
+        try FileManager.default.copyItem(at: URL(fileURLWithPath: "/bin/sleep"), to: lookalike)
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        process.executableURL = lookalike
         process.arguments = ["10"]
         try process.run()
         defer { process.terminate(); process.waitUntilExit() }

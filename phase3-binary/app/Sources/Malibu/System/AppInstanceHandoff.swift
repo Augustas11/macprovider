@@ -49,7 +49,7 @@ final class AppInstanceHandoff {
               let record = Registry().record(pid: app.processIdentifier, launchedAt: date),
               record.ready, let version = record.identity.version,
               ProviderCLIVersion.compare(version, minimum) != .ascending,
-              Registry.application(matching: record.identity) != nil else { return false }
+              Registry().application(matching: record.identity) != nil else { return false }
         return true
     }
 
@@ -107,7 +107,7 @@ final class AppInstanceHandoff {
             terminate: { identity, force in
                 // Re-resolve and compare the launch time before every signal:
                 // a recycled PID must never become a termination target.
-                guard let app = Registry.application(matching: identity) else { return true }
+                guard let app = registry.application(matching: identity) else { return true }
                 return force ? app.forceTerminate() : app.terminate()
             },
             quitSelf: { NSApp.terminate(nil) },
@@ -212,12 +212,12 @@ final class AppInstanceHandoff {
         }
 
         private let directory: URL
-        private let validatesSignature: (Int32) -> Bool
+        private let validatesSignature: @MainActor (Int32) -> Bool
 
         init(
             directory: URL = FileManager.default.homeDirectoryForCurrentUser
                 .appendingPathComponent("Library/Application Support/Malibu/app-instances", isDirectory: true),
-            validatesSignature: @escaping (Int32) -> Bool = Registry.isSignedMalibu
+            validatesSignature: @escaping @MainActor (Int32) -> Bool = Registry.isSignedMalibu
         ) {
             self.directory = directory
             self.validatesSignature = validatesSignature
@@ -277,10 +277,6 @@ final class AppInstanceHandoff {
             guard SecRequirementCreateWithString(text as CFString, [], &requirement) == errSecSuccess,
                   let requirement else { return false }
             return SecCodeCheckValidity(code, [], requirement) == errSecSuccess
-        }
-
-        static func application(matching identity: Identity) -> NSRunningApplication? {
-            Registry().application(matching: identity)
         }
 
         // A running app's location is not its identity: activation renames
