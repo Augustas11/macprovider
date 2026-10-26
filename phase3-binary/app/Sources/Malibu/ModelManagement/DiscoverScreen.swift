@@ -188,13 +188,21 @@ struct DiscoverScreen: View {
     @ObservedObject var store: ModelManagementStore
     @ObservedObject var agent: MalibuAgent
     @State private var search = ""
-    @State private var fitsOnly = true
+    @State private var fitsOnly: Bool
+    private let mode: ModelsHubTab
     @State private var sort: DiscoverPresentation.Sort = .catalog
     @State private var selectedID: String?
     @State private var switchRow: MalibuModelRow?
     @State private var pendingDownload: MalibuModelRow?
     @State private var otherQuery = ""
     @State private var otherExpanded = false
+
+    init(store: ModelManagementStore, agent: MalibuAgent, mode: ModelsHubTab = .recommended) {
+        self.store = store
+        self.agent = agent
+        self.mode = mode
+        _fitsOnly = State(initialValue: mode == .recommended)
+    }
 
     private var visible: [MalibuModelRow] {
         DiscoverPresentation.visibleRows(store.rows, search: search, fitsOnly: fitsOnly, sort: sort)
@@ -262,7 +270,7 @@ struct DiscoverScreen: View {
 
     private var toolbar: some View {
         HStack(spacing: 12) {
-            Text(String(localized: "Discover", comment: "Discover title"))
+            Text(mode.title)
                 .font(.title2.weight(.semibold))
             Spacer()
             TextField(String(localized: "Search catalog", comment: "Discover search"), text: $search)
@@ -350,9 +358,11 @@ struct DiscoverScreen: View {
                         .accessibilityAddTraits(selected?.id == row.id ? .isSelected : [])
                     }
                 }
-                Divider().padding(.vertical, 6)
-                otherMLXSection
-                    .padding(12)
+                if mode == .browse {
+                    Divider().padding(.vertical, 6)
+                    otherMLXSection
+                        .padding(12)
+                }
             }
         }
         }

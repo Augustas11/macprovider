@@ -37,6 +37,9 @@ final class ModelScreensHostedTests: XCTestCase {
         try? FileManager.default.createDirectory(at: artifacts, withIntermediateDirectories: true)
         try host(ModelsScreen(store: store, agent: agent), png: artifacts.appendingPathComponent("20-models-populated.png"))
         try host(DiscoverScreen(store: store, agent: agent), png: artifacts.appendingPathComponent("21-discover-populated.png"))
+        for tab in ModelsHubTab.allCases {
+            try host(ModelsHubScreen(store: store, agent: agent, selection: .constant(tab)), png: artifacts.appendingPathComponent("models-hub-\(tab.rawValue).png"))
+        }
         let ready = try XCTUnwrap(store.rows.first { $0.action == .switchModel })
         try host(ModelSwitchSheet(store: store, row: ready, isRevert: false) {}, png: artifacts.appendingPathComponent("22-switch-confirm.png"), size: NSSize(width: 480, height: 330))
         try host(ConnectedAppsScreen(), png: artifacts.appendingPathComponent("23-connected-apps.png"), size: NSSize(width: 830, height: 760))
@@ -65,6 +68,7 @@ final class ModelScreensHostedTests: XCTestCase {
         try? FileManager.default.createDirectory(at: artifacts, withIntermediateDirectories: true)
         try host(ModelsScreen(store: store, agent: agent), png: artifacts.appendingPathComponent("24-models-downloading.png"))
         try host(DiscoverScreen(store: store, agent: agent), png: artifacts.appendingPathComponent("25-discover-downloading.png"))
+        try host(ModelsHubScreen(store: store, agent: agent, selection: .constant(.downloads)), png: artifacts.appendingPathComponent("models-hub-active-download.png"))
         store.cancelDownload()
         await task.value
         XCTAssertNil(store.download)
