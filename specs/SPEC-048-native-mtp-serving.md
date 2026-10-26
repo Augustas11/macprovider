@@ -534,12 +534,12 @@ The authorized dependency tuple is exact:
 
 | Repository | Fork tag | Revision | Upstream base |
 |---|---|---|---|
-| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.10.9.1` | `098c33964e6c7bb9ac9695d5f18ed4cc87252e67` | fork `3.32.3-macprovider.10.1` (`87dc5159c87d73f4d7abd524fbdd17760cf56285`) on fork `3.32.3-macprovider.10` (`b4077dcb28336b388f3d09be2a091c12f8e179aa`) on `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
+| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.10.9.2` | `0c0e58fc1091cb6a9552706bedcaac5dd6257e8e` | fork `3.32.3-macprovider.10.1` (`87dc5159c87d73f4d7abd524fbdd17760cf56285`) on fork `3.32.3-macprovider.10` (`b4077dcb28336b388f3d09be2a091c12f8e179aa`) on `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
 | `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.9` | `29d3b93375cc56cd2649b40e4310a8bc445e9874` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
 | `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.4` | `2f512e3997349c8648f5d7c5113eb2c825aa242d` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
 
-The mlx-swift-lm row is the immutable fork tag `3.32.3-macprovider.10.9.1`
-(commit `098c3396…`, branch `campaign/2111-dsv4-fidelity`): tag
+The mlx-swift-lm row is the immutable fork tag `3.32.3-macprovider.10.9.2`
+(commit `0c0e58fc…`, branch `campaign/2111-dsv4-fidelity`): tag
 `3.32.3-macprovider.10.5` (`c8be0f61…`, batched DeepSeek-V4 attention,
 compressor/indexer projections and per-row rotary offsets, keys-only windows
 and geometric pool storage) plus DeepSeek-V4 fidelity to DeepSeek's reference
@@ -552,7 +552,7 @@ A production build MUST NOT resolve an untagged mlx-swift-lm revision;
 `scripts/check-upstream-throughput-blockers.sh` verifies that the row's tag
 resolves to the row's revision on the fork.
 
-The 10.9.1 tag adds the embedded three-stage DSpark drafter, exact ragged
+The 10.9.2 tag adds the embedded three-stage DSpark drafter, exact ragged
 verification, deterministic confidence scheduling and exact cache-prefix
 commit/abort. Proposal depth remains independent of the three-stage count.
 This tuple change does not publish a signed admission entry or qualify its
