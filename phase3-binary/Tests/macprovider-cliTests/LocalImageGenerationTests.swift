@@ -409,7 +409,7 @@ final class LocalImageGenerationTests: XCTestCase {
                          available: UInt64 = 0, warmNanoseconds: UInt64 = 120_000_000_000) -> LocalImageGeneration {
         LocalImageGeneration(backend: FakeImageBackend(events: events, failure: failure, blocking: blocking),
             lifecycle: LocalCreativeLifecycle(pause: { await events.add("pause") }, drain: { await events.add("drain") },
-                unloadLanguage: { await events.add("unload_language") }, restoreLanguage: { await events.add("restore_language") },
+                unloadLanguage: { await events.add("unload_language") }, restoreLanguage: { try Task.checkCancellation(); await events.add("restore_language") },
                 resume: { await events.add("resume") }), physicalBytes: 16 * 1_073_741_824,
             availableBytes: { available }, warmNanoseconds: warmNanoseconds)
     }

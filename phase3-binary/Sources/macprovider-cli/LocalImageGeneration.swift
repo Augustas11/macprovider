@@ -180,11 +180,15 @@ actor LocalImageGeneration {
         else { await restore() }
     }
     func restore() async {
-        guard operation == nil else { return }
-        await Task.detached { await self.restoreCleanup() }.value
+        guard operation == nil, !restoring else { return }
+        guard state != .recoveryRequired || held || languageUnloaded else { return }
+        // Claim ownership before yielding to the cancellation-independent task;
+        // otherwise a new image could start before cleanup reaches this actor.
+        restoring = true
+        await Task.detached { await self.restoreCleanup(alreadyClaimed: true) }.value
     }
-    private func restoreCleanup() async {
-        guard !restoring else { return }
+    private func restoreCleanup(alreadyClaimed: Bool = false) async {
+        guard alreadyClaimed || !restoring else { return }
         guard state != .recoveryRequired || held || languageUnloaded else { return }
         restoring = true; state = .restoring
         warmTimer?.cancel(); warmTimer = nil
