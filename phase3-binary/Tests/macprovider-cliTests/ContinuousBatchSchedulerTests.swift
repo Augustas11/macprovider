@@ -1016,7 +1016,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             allocator: allocator,
             contiguousCacheBridge: bridge
         )
-        let conversationCache = ConversationCache(
+        let conversationCache = makeConversationCacheForTest(
             config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900)
         )
         let key = "conv:hybrid"
@@ -1143,7 +1143,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             allocator: allocator,
             contiguousCacheBridge: bridge
         )
-        let conversationCache = ConversationCache(
+        let conversationCache = makeConversationCacheForTest(
             config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900)
         )
         let key = "conv:hybrid-sole-reply-end"
@@ -1217,7 +1217,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             allocator: allocator,
             contiguousCacheBridge: HeadlessRetainedCacheBridge()
         )
-        let conversationCache = ConversationCache(
+        let conversationCache = makeConversationCacheForTest(
             config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900)
         )
         let key = "conv:dense"
@@ -1887,7 +1887,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             promptCount: 40,
             retainedTokenCount: 40
         )
-        let conversationCache = ConversationCache(
+        let conversationCache = makeConversationCacheForTest(
             config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900)
         )
         let seedTokens = Array(0..<40).map(Int32.init)
@@ -2001,7 +2001,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         let terminalCommitTargets = await backend.terminalCommitTargets()
         XCTAssertEqual(terminalCommitTargets, ["sticky-hit": 43])
 
-        let conversationCache = ConversationCache(
+        let conversationCache = makeConversationCacheForTest(
             config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900)
         )
         if let retainedCache = result.retainedCache {

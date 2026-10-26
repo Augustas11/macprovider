@@ -1682,6 +1682,7 @@ final class ControlSocketTests: XCTestCase {
             warmSwapEnabled: warmSwapEnabled,
             targetAuthorities: targetAuthorities,
             authorizedSwitchModelIDs: authorizedSwitchModelIDs,
+            testConversationCacheMemoryBudget: conversationCacheTestMemoryBudget(),
             loader: { _ in throw ControlSocketTestError.unexpectedContainerLoader },
             testLoader: { target in (target, "hash") }
         )

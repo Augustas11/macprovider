@@ -6,13 +6,25 @@ import MLXLMCommon
 import XCTest
 
 final class ConversationCacheTests: XCTestCase {
+    override func invokeTest() {
+        Device.withDefaultDevice(Device(.cpu)) {
+            XCTAssertEqual(Device.defaultDevice().deviceType, .cpu)
+            super.invokeTest()
+        }
+    }
+
+    override class func setUp() {
+        super.setUp()
+        Device.setDefault(device: Device(.cpu))
+    }
+
     func testRevokedFleetGrantCannotBeginOrPublishAfterPurge() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let authority = FleetConversationCacheAuthority(storageURL: root.appendingPathComponent("floors.json"))
         let key = "conv:fleet-a"
         let grant = try authority.authorize(conversationKey: key, generation: 1)
-        let cache = ConversationCache()
+        let cache = makeConversationCacheForTest()
         let tokens = int32Range(0..<64)
         let lease = await cache.begin(conversationKey: key, incomingTokens: tokens,
                                       modelID: "model-a", kvBits: nil, fleetGrant: grant)
@@ -37,7 +49,7 @@ final class ConversationCacheTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let authority = FleetConversationCacheAuthority(storageURL: root.appendingPathComponent("floors.json"))
         let grant = try authority.authorize(conversationKey: "conv:account-a", generation: 1)
-        let cache = ConversationCache()
+        let cache = makeConversationCacheForTest()
         let lease = await cache.begin(conversationKey: "conv:account-b", incomingTokens: [1, 2],
                                       modelID: "model-a", kvBits: nil, fleetGrant: grant)
         XCTAssertNil(lease)
@@ -58,7 +70,7 @@ final class ConversationCacheTests: XCTestCase {
     }
 
     func testHitTrimsCacheAndPreservesUsageInvariant() async {
-        let cache = ConversationCache(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+        let cache = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
         let seedTokens = int32Range(0..<64)
         let seed = await cache.begin(conversationKey: "conv:test", incomingTokens: seedTokens, modelID: "model-a", kvBits: nil)
         let layer = trimmableCache(offset: seedTokens.count)
@@ -75,7 +87,7 @@ final class ConversationCacheTests: XCTestCase {
     }
 
     func testModelAndKVBitsSwapMiss() async {
-        let cache = ConversationCache(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+        let cache = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
         let tokens = int32Range(0..<64)
         let seed = await cache.begin(conversationKey: "conv:test", incomingTokens: tokens, modelID: "model-a", kvBits: 4)
         await cache.commit(seed!, cache: ConversationCacheLayers([trimmableCache(offset: tokens.count)]), fullTokens: tokens)
@@ -92,7 +104,7 @@ final class ConversationCacheTests: XCTestCase {
     }
 
     func testTTLAndNonTrimmableMiss() async {
-        let cache = ConversationCache(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 60))
+        let cache = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 60))
         let tokens = int32Range(0..<64)
         let old = Date(timeIntervalSince1970: 1_000)
         let seed = await cache.begin(conversationKey: "conv:ttl", incomingTokens: tokens, modelID: "model-a", kvBits: nil, now: old)
@@ -109,7 +121,7 @@ final class ConversationCacheTests: XCTestCase {
     }
 
     func testSerialFallbackAbortRestoresNonRetainedCacheForBillingParity() async {
-        let cache = ConversationCache(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+        let cache = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
         let seedTokens = int32Range(0..<64)
         let seed = await cache.begin(conversationKey: "conv:fallback", incomingTokens: seedTokens, modelID: "model-a", kvBits: nil)
         let layer = trimmableCache(offset: seedTokens.count)
@@ -141,7 +153,7 @@ final class ConversationCacheTests: XCTestCase {
     }
 
     func testSerialFallbackAbortDoesNotRestoreAfterPurge() async {
-        let cache = ConversationCache(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+        let cache = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
         let seedTokens = int32Range(0..<64)
         let seed = await cache.begin(conversationKey: "conv:fallback-purge", incomingTokens: seedTokens, modelID: "model-a", kvBits: nil)
         let layer = trimmableCache(offset: seedTokens.count)
@@ -182,7 +194,7 @@ final class ConversationCacheTests: XCTestCase {
     }
 
     func testRotatingWindowCacheMissesEvenWhenTemporarilyTrimmable() async {
-        let cache = ConversationCache(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+        let cache = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
         let tokens = int32Range(0..<64)
         let seed = await cache.begin(conversationKey: "conv:windowed", incomingTokens: tokens, modelID: "model-a", kvBits: nil)
         let rotating = RotatingKVCache(maxSize: 256, keep: 0)
@@ -203,7 +215,7 @@ final class ConversationCacheTests: XCTestCase {
     /// Eligible prompt snapshots pass through the same encrypted cold-tier bridge.
     func testPromptSnapshotIsCapturedByTheColdTier() async {
         let coldTier = FakeConversationColdTier()
-        let cache = ConversationCache(
+        let cache = makeConversationCacheForTest(
             config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900), coldTier: coldTier)
         let tokens = int32Range(0..<64)
         let snapshotLease = await cache.begin(conversationKey: "conv:snapshot-cold", incomingTokens: tokens,
@@ -220,7 +232,7 @@ final class ConversationCacheTests: XCTestCase {
     }
 
     func testKeyedSerialSimpleCacheHitSkipsPrefillTokens() async {
-        let cache = ConversationCache(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+        let cache = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
         let seedTokens = int32Range(0..<64)
         let seed = await cache.begin(conversationKey: "conv:auto.prefix.hit", incomingTokens: seedTokens, modelID: "model-a", kvBits: nil)
         let layer = KVCacheSimple()
@@ -238,7 +250,7 @@ final class ConversationCacheTests: XCTestCase {
     }
 
     func testTTLSweepDoesNotRemoveEntryCommittedDuringRetainedDiscard() async throws {
-        let cache = ConversationCache(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 60))
+        let cache = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 60))
         let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 16)
         let oldRetained = try await retainedSequence(
             allocator: allocator,
@@ -305,7 +317,7 @@ final class ConversationCacheTests: XCTestCase {
     }
 
     func testLRUAndTokenCapEviction() async {
-        let cache = ConversationCache(config: .init(maxConversations: 2, maxTokens: 10_000, ttlSeconds: 900))
+        let cache = makeConversationCacheForTest(config: .init(maxConversations: 2, maxTokens: 10_000, ttlSeconds: 900))
         for index in 0..<3 {
             let tokens = int32Range(0..<64).map { $0 + Int32(index * 100) }
             let lease = await cache.begin(conversationKey: "conv:\(index)", incomingTokens: tokens, modelID: "model-a", kvBits: nil)
@@ -314,7 +326,7 @@ final class ConversationCacheTests: XCTestCase {
         let stats = await cache.snapshotStats()
         XCTAssertEqual(stats.entries, 2)
 
-        let tokenCapped = ConversationCache(config: .init(maxConversations: 8, maxTokens: 100, ttlSeconds: 900))
+        let tokenCapped = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 100, ttlSeconds: 900))
         for index in 0..<3 {
             let tokens = int32Range(0..<64).map { $0 + Int32(index * 100) }
             let lease = await tokenCapped.begin(conversationKey: "conv:t\(index)", incomingTokens: tokens, modelID: "model-a", kvBits: nil)
@@ -329,7 +341,7 @@ final class ConversationCacheTests: XCTestCase {
         XCTAssertEqual(config.maxConversations, 64)
         XCTAssertEqual(config.maxTokens, 2_000_000)
         XCTAssertEqual(config.ttlSeconds, 3 * 24 * 60 * 60)
-        let cache = ConversationCache(config: config)
+        let cache = makeConversationCacheForTest(config: config)
         let start = Date(timeIntervalSince1970: 1_000)
         let tokens = int32Range(0..<64)
         for index in 0..<12 {
@@ -345,7 +357,7 @@ final class ConversationCacheTests: XCTestCase {
     }
 
     func testLRUProtectsLongPrefixOnRecencyTie() async throws {
-        let cache = ConversationCache(config: .init(maxConversations: 2, maxTokens: 10_000, ttlSeconds: 900))
+        let cache = makeConversationCacheForTest(config: .init(maxConversations: 2, maxTokens: 10_000, ttlSeconds: 900))
         let now = Date(timeIntervalSince1970: 1_000)
         for (key, count) in [("long", 128), ("short", 64), ("new", 96)] {
             let tokens = int32Range(0..<count)
@@ -372,7 +384,7 @@ final class ConversationCacheTests: XCTestCase {
             NativeMTPRoundSystemMemorySample(availableBytes: available, physicalBytes: physical)
         })
         XCTAssertEqual(budget.hotByteLimit(), 4_095)
-        let cache = ConversationCache(memoryBudget: budget)
+        let cache = makeConversationCacheForTest(memoryBudget: budget)
         let tokens = int32Range(0..<64)
         let layer = KVCacheSimple()
         layer.state = [MLXArray(Array(repeating: Float(1), count: 1_024)).reshaped(1, 1, 64, 16),
@@ -522,7 +534,7 @@ final class ConversationCacheTests: XCTestCase {
         )
         let oldRetained = try await allocator.retain(handle)
         let recorder = RetainedDiscardRecorder()
-        let cache = ConversationCache(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+        let cache = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
         let seedTokens = int32Range(0..<64)
         let seed = await cache.begin(
             conversationKey: "conv:retained",
@@ -581,7 +593,7 @@ final class ConversationCacheTests: XCTestCase {
             tokenCount: 64
         )
         let recorder = RetainedDiscardRecorder()
-        let cache = ConversationCache(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+        let cache = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
         let seedTokens = int32Range(0..<64)
         let seed = await cache.begin(
             conversationKey: "conv:handoff",
@@ -624,7 +636,7 @@ final class ConversationCacheTests: XCTestCase {
             tokenCount: 64
         )
         let recorder = RetainedDiscardRecorder()
-        let cache = ConversationCache(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+        let cache = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
         let tokens = int32Range(0..<64)
         let seed = await cache.begin(
             conversationKey: "conv:purge",
@@ -661,7 +673,7 @@ final class ConversationCacheTests: XCTestCase {
             tokenCount: 64
         )
         let recorder = RetainedDiscardRecorder()
-        let cache = ConversationCache(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+        let cache = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
         let tokens = int32Range(0..<64)
         let lease = await cache.begin(
             conversationKey: "conv:fenced",
@@ -703,7 +715,7 @@ final class ConversationCacheTests: XCTestCase {
         )
         let oldDiscardGate = RetainedDiscardGate()
         let newRecorder = RetainedDiscardRecorder()
-        let cache = ConversationCache(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+        let cache = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
         let seedTokens = int32Range(0..<64)
         let seed = await cache.begin(
             conversationKey: "conv:commit-race",
@@ -778,7 +790,7 @@ final class ConversationCacheTests: XCTestCase {
         let victimDiscardGate = RetainedDiscardGate()
         let currentRecorder = RetainedDiscardRecorder()
         let coldTier = FakeConversationColdTier()
-        let cache = ConversationCache(
+        let cache = makeConversationCacheForTest(
             config: .init(maxConversations: 1, maxTokens: 200_000, ttlSeconds: 900),
             coldTier: coldTier
         )
@@ -964,7 +976,7 @@ final class ConversationCacheTests: XCTestCase {
     }
 
     func testHybridEntryHitsFullHistoryCheckpoint() async {
-        let cache = ConversationCache(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+        let cache = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
         let stored = int32Range(0..<90)
         let layers = await seedHybridEntry(cache, key: "conv:hybrid", tokens: stored, checkpoints: [40, 70])
 
@@ -980,7 +992,7 @@ final class ConversationCacheTests: XCTestCase {
     }
 
     func testHybridEntryScaffoldOnlyMatchHitsFirstCheckpoint() async {
-        let cache = ConversationCache(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+        let cache = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
         let stored = int32Range(0..<90)
         let layers = await seedHybridEntry(cache, key: "conv:hybrid", tokens: stored, checkpoints: [40, 70])
 
@@ -993,7 +1005,7 @@ final class ConversationCacheTests: XCTestCase {
     }
 
     func testHybridEntryMissesWhenPrefixStopsBeforeEveryCheckpoint() async {
-        let cache = ConversationCache(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+        let cache = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
         let stored = int32Range(0..<90)
         let layers = await seedHybridEntry(cache, key: "conv:hybrid", tokens: stored, checkpoints: [40, 70])
 
@@ -1006,7 +1018,7 @@ final class ConversationCacheTests: XCTestCase {
     }
 
     func testHybridEntryWithoutCheckpointStaysNotTrimmable() async {
-        let cache = ConversationCache(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+        let cache = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
         let stored = int32Range(0..<90)
         _ = await seedHybridEntry(cache, key: "conv:hybrid", tokens: stored, checkpoints: [])
 
@@ -1020,7 +1032,7 @@ final class ConversationCacheTests: XCTestCase {
         guard PagedKVMetallibGate.defaultMetallibExists() else {
             throw XCTSkip("MLX default metallib is unavailable in this test host")
         }
-        let cache = ConversationCache(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+        let cache = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
         let stored = int32Range(0..<90)
         let seed = await cache.begin(conversationKey: "conv:hybrid", incomingTokens: stored, modelID: "hybrid", kvBits: nil)
         let attention = trimmableCache(offset: stored.count)
@@ -1054,7 +1066,7 @@ final class ConversationCacheTests: XCTestCase {
     /// trim the attention layers exactly onto the largest checkpoint, including
     /// the reply-end checkpoint when the next turn repeats the answer.
     func testBatchedHybridEntryTrimsAttentionOntoCheckpoint() async {
-        let cache = ConversationCache(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+        let cache = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
         let canonical = int32Range(0..<90)
         let seed = await cache.begin(conversationKey: "conv:batched", incomingTokens: int32Range(0..<80), modelID: "hybrid", kvBits: nil)
         let attention = trimmableCache(offset: 89)
@@ -1102,7 +1114,7 @@ final class ConversationCacheTests: XCTestCase {
     func testRetainedHybridEntryLeasesLargestCheckpointAndLeavesTrimToScheduler() async throws {
         let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 32)
         let recorder = RetainedDiscardRecorder()
-        let cache = ConversationCache(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+        let cache = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
         let retained = try await seedRetainedHybridEntry(
             cache, allocator: allocator, recorder: recorder, tokens: int32Range(0..<90), checkpoints: [40, 70])
 
@@ -1129,7 +1141,7 @@ final class ConversationCacheTests: XCTestCase {
     func testRetainedHybridEntryMissesWithoutCheckpointInPrefixAndDiscardsOwner() async throws {
         let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 32)
         let recorder = RetainedDiscardRecorder()
-        let cache = ConversationCache(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+        let cache = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
         let retained = try await seedRetainedHybridEntry(
             cache, allocator: allocator, recorder: recorder, tokens: int32Range(0..<90), checkpoints: [40, 70])
 

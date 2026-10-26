@@ -4053,6 +4053,7 @@ maxTokens: 1,
         continuousBatchingBackend: (any ContinuousBatchSchedulerBackend)? = nil,
         continuousBatchPrefillGrouping: ContinuousBatchPrefillGroupingRule? = nil,
         testContinuousBatchTextPreparationLane: ContinuousBatchTextPreparationLane? = nil,
+        testConversationCacheMemoryBudget: ConversationCacheMemoryBudget? = nil,
         pagedKVRuntimeProber: PagedKVRuntimeProber = .live,
         loader: @escaping @Sendable (String) async throws -> (ModelContainer, String, String?),
         testLoader: (@Sendable (String) async throws -> (String, String?))? = nil,
@@ -4198,7 +4199,13 @@ maxTokens: 1,
             observedRuntimeIdentity: effectiveObservedIdentity
         )
         self.continuousBatchScheduler = nil
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        self.conversationCache = ConversationCache(
+            memoryBudget: testConversationCacheMemoryBudget ?? ConversationCacheMemoryBudget()
+        )
+        #else
         self.conversationCache = ConversationCache()
+        #endif
         self.maxBatch = boundedMaxBatch
         self.maxBatchBeforePolicyCeiling = boundedMaxBatch
         self.inferenceGate = AsyncSemaphore(value: boundedMaxBatch)
