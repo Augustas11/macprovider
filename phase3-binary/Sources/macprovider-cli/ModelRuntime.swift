@@ -7752,7 +7752,14 @@ maxTokens: 1,
                 modelHashObserved: validObservedModelHash(modelHash),
                 settlementDisposition: result.settlementDisposition,
                 reasoningContent: parsed.reasoningContent,
-                reasoningTokens: parsed.reasoningTokens
+                reasoningTokens: parsed.reasoningTokens,
+                // The scheduler removes stop tokens from outputTokens; the
+                // retained generatedTokens still prove the matched request stop.
+                stopSequence: request.stop.isEmpty ? nil : HarmonyResponseParser.isHarmonyModelID(request.model)
+                    ? parsed.stopSequence
+                    : matchedRequestStop(in: decode(generatedTokens), stopTokenFilter: stopTokenFilter,
+                                         requestStops: request.stop, reasoningOpen: request.outputTraits.reasoningOpen,
+                                         hasToolCalls: !parsed.toolCalls.isEmpty)
             ),
             filteredText: filtered.text,
             parsed: parsed,
@@ -9444,7 +9451,12 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             modelHashObserved: Self.validObservedModelHash(snapshot.modelHash),
                             settlementDisposition: .eligibleOwner,
                             reasoningContent: parsed.reasoningContent,
-                            reasoningTokens: parsed.reasoningTokens
+                            reasoningTokens: parsed.reasoningTokens,
+                            stopSequence: HarmonyResponseParser.isHarmonyModelID(request.model)
+                                ? parsed.stopSequence
+                                : Self.matchedRequestStop(in: result.output, stopTokenFilter: stopTokenFilter,
+                                                          requestStops: request.stop, reasoningOpen: request.outputTraits.reasoningOpen,
+                                                          hasToolCalls: !parsed.toolCalls.isEmpty)
                         ), request: request)
                         self.nativeMTPRequestShapeCapture?.record(
                             request: request,
@@ -9583,7 +9595,10 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
             settlementDisposition: .eligibleOwner,
             specDecodeDraftedTokens: generated.draftedTokens,
             specDecodeAcceptedTokens: generated.acceptedTokens,
-            specDecodeGeneration: specDecodeGeneration
+            specDecodeGeneration: specDecodeGeneration,
+            stopSequence: matchedRequestStop(in: generated.output, stopTokenFilter: stopTokenFilter,
+                                             requestStops: request.stop, reasoningOpen: request.outputTraits.reasoningOpen,
+                                             hasToolCalls: !parsed.toolCalls.isEmpty)
         ), request: request)
     }
 
@@ -10092,7 +10107,10 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             settlementDisposition: .eligibleOwner,
                             specDecodeDraftedTokens: generated.draftedTokens,
                             specDecodeAcceptedTokens: generated.acceptedTokens,
-                            specDecodeGeneration: snapshot.specDecodeGeneration
+                            specDecodeGeneration: snapshot.specDecodeGeneration,
+                            stopSequence: Self.matchedRequestStop(in: generated.output, stopTokenFilter: stopTokenFilter,
+                                                                  requestStops: request.stop, reasoningOpen: request.outputTraits.reasoningOpen,
+                                                                  hasToolCalls: !parsed.toolCalls.isEmpty)
                         )
                         return try Self.validateStructuredStreamingCompletion(
                             completion,
@@ -10437,7 +10455,12 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             settlementDisposition: .eligibleOwner,
                             reasoningContent: request.outputTraits.reasoningOpen || isHarmonyResponse
                                 ? textEmitter.emittedReasoning : nil,
-                            reasoningTokens: parsed.reasoningTokens
+                            reasoningTokens: parsed.reasoningTokens,
+                            stopSequence: isHarmonyResponse
+                                ? parsed.stopSequence
+                                : Self.matchedRequestStop(in: result.output, stopTokenFilter: stopTokenFilter,
+                                                          requestStops: request.stop, reasoningOpen: request.outputTraits.reasoningOpen,
+                                                          hasToolCalls: !parsed.toolCalls.isEmpty)
                         )
                         let validated = try Self.validateStructuredStreamingCompletion(
                             completion,
@@ -12688,6 +12711,34 @@ maxTokens: maxTokens,
         return hash
     }
 
+    /// Metadata only: report the same earliest request stop the output filter
+    /// removes, after model-token stripping and outside open reasoning. A model
+    /// EOS is not a request stop, and successful tool calls are not text stops.
+    static func matchedRequestStop(
+        in text: String,
+        stopTokenFilter: StopTokenFilter,
+        requestStops: [String],
+        reasoningOpen: Bool = false,
+        hasToolCalls: Bool = false
+    ) -> String? {
+        guard !hasToolCalls else { return nil }
+        let visible: String
+        if reasoningOpen {
+            guard let close = text.range(of: ReasoningOutput.closeTag) else { return nil }
+            visible = String(text[close.upperBound...])
+        } else {
+            visible = text
+        }
+        let stripped = stopTokenFilter.stripping(from: visible)
+        var earliest: (index: String.Index, stop: String)?
+        for stop in requestStops where !stop.isEmpty {
+            if let range = stripped.range(of: stop), earliest == nil || range.lowerBound < earliest!.index {
+                earliest = (range.lowerBound, stop)
+            }
+        }
+        return earliest?.stop
+    }
+
     static func applyOutputFilters(
         _ text: String,
         stopTokenFilter: StopTokenFilter,
@@ -13403,6 +13454,7 @@ maxTokens: maxTokens,
         let generatedCompletionTokens: Int
         let hitStop: Bool
         let isTerminal: Bool
+        var stopSequence: String? = nil
         /// SPEC-018 §3.12 reasoning split from an open `<think>`; nil when the
         /// prompt did not leave one open.
         var reasoningContent: String? = nil
@@ -13506,6 +13558,12 @@ maxTokens: maxTokens,
             generatedCompletionTokens: generatedCompletionTokens,
             hitStop: filteredVisible.hitStop,
             isTerminal: parsed.status == .parsed
+        )
+        output.stopSequence = matchedRequestStop(
+            in: parsed.content ?? "",
+            stopTokenFilter: stopTokenFilter,
+            requestStops: requestStops,
+            hasToolCalls: !toolCalls.isEmpty
         )
         // SPEC-018 §3.10 rule 1a: the analysis channel is the reasoning.
         output.reasoningContent = parsed.reasoningContent
@@ -14184,7 +14242,8 @@ maxTokens: maxTokens,
             specDecodeAcceptedTokens: completion.specDecodeAcceptedTokens,
             specDecodeGeneration: completion.specDecodeGeneration,
             reasoningContent: completion.reasoningContent,
-            reasoningTokens: completion.reasoningTokens
+            reasoningTokens: completion.reasoningTokens,
+            stopSequence: completion.stopSequence
         )
         return try validateStructuredCompletion(visibleCompletion, request: request)
     }
@@ -15245,6 +15304,8 @@ private struct TokenizerArtifactManifestFile: Encodable {
 struct CompletionResult: Sendable {
     let content: String
     let finishReason: String
+    /// Matched caller stop, distinct from a natural model end-of-turn.
+    let stopSequence: String?
     let promptTokens: Int
     let cachedPromptTokens: Int
     let kvCacheReuseRatio: Double
@@ -15291,7 +15352,8 @@ struct CompletionResult: Sendable {
         loopbackPrefixCompletionTokens: [Int: Int]? = nil,
         shardGroupEvidence: ShardGroupCompletionEvidence? = nil,
         reasoningContent: String? = nil,
-        reasoningTokens: Int = 0
+        reasoningTokens: Int = 0,
+        stopSequence: String? = nil
     ) {
         self.loopbackPrefixCompletionTokens = loopbackPrefixCompletionTokens
         self.shardGroupEvidence = shardGroupEvidence
@@ -15299,6 +15361,7 @@ struct CompletionResult: Sendable {
         self.reasoningTokens = max(0, reasoningTokens)
         self.content = content
         self.finishReason = finishReason
+        self.stopSequence = stopSequence
         self.promptTokens = promptTokens
         let clampedPromptTokens = max(0, promptTokens)
         let clampedCachedTokens = max(0, min(cachedPromptTokens, clampedPromptTokens))
@@ -15338,7 +15401,8 @@ struct CompletionResult: Sendable {
             loopbackPrefixCompletionTokens: loopbackPrefixCompletionTokens,
             shardGroupEvidence: shardGroupEvidence,
             reasoningContent: reasoningContent,
-            reasoningTokens: reasoningTokens
+            reasoningTokens: reasoningTokens,
+            stopSequence: stopSequence
         )
     }
 
@@ -15362,7 +15426,8 @@ struct CompletionResult: Sendable {
             loopbackPrefixCompletionTokens: content == self.content ? loopbackPrefixCompletionTokens : nil,
             shardGroupEvidence: content == self.content ? shardGroupEvidence : nil,
             reasoningContent: reasoningContent,
-            reasoningTokens: reasoningTokens
+            reasoningTokens: reasoningTokens,
+            stopSequence: stopSequence
         )
     }
 
@@ -15386,7 +15451,8 @@ struct CompletionResult: Sendable {
             loopbackPrefixCompletionTokens: loopbackPrefixCompletionTokens,
             shardGroupEvidence: shardGroupEvidence,
             reasoningContent: reasoningContent,
-            reasoningTokens: reasoningTokens
+            reasoningTokens: reasoningTokens,
+            stopSequence: stopSequence
         )
     }
 
@@ -15416,7 +15482,8 @@ struct CompletionResult: Sendable {
             settlementDisposition: tokens == nil ? .usageUnattested : settlementDisposition,
             specDecodeDraftedTokens: specDecodeDraftedTokens,
             specDecodeAcceptedTokens: specDecodeAcceptedTokens,
-            specDecodeGeneration: specDecodeGeneration
+            specDecodeGeneration: specDecodeGeneration,
+            stopSequence: stopSequence
         )
     }
 }
