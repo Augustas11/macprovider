@@ -235,7 +235,10 @@ MALIBU_BUILD_STEP = r'''        if: ${{ github.event.inputs.promote_run_id == ''
           read -r version build <<<"$version_line"
           cd phase3-binary/app
           "$RUNNER_TEMP/xcodegen-2.45.4/xcodegen/bin/xcodegen" generate
+          bash ../../scripts/resolve-app-packages.sh "$PWD" "$RUNNER_TEMP/MalibuSourcePackages"
           xcodebuild \
+            -clonedSourcePackagesDirPath "$RUNNER_TEMP/MalibuSourcePackages" \
+            -onlyUsePackageVersionsFromResolvedFile -disableAutomaticPackageResolution \
             -project Malibu.xcodeproj \
             -scheme Malibu \
             -configuration Release \

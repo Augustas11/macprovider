@@ -68,7 +68,7 @@ class AppPackageLockTests(unittest.TestCase):
             guard.verify(self.app)
 
     def test_every_workflow_uses_same_locked_resolver(self):
-        for workflow in ("ci", "malibu-release", "acceptance-candidate"):
+        for workflow in ("ci", "malibu-release", "acceptance-candidate", "release"):
             text = (ROOT / f".github/workflows/{workflow}.yml").read_text()
             self.assertIn('/resolve-app-packages.sh "$PWD" "$RUNNER_TEMP/MalibuSourcePackages"', text)
             self.assertIn('-onlyUsePackageVersionsFromResolvedFile -disableAutomaticPackageResolution', text)

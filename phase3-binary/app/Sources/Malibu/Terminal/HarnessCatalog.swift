@@ -143,11 +143,11 @@ final class HarnessCatalog: ObservableObject {
                 usleep(10_000)
             }
             drain()
-            if !exited || overflowed {
-                _ = kill(-pid, SIGTERM)
-                usleep(100_000)
-                _ = kill(-pid, SIGKILL)
-            }
+            // Successful startup scripts can also leave background children.
+            // Keep the unreaped leader's PID reserved through both signals.
+            _ = kill(-pid, SIGTERM)
+            usleep(100_000)
+            _ = kill(-pid, SIGKILL)
             var status: Int32 = 0
             while waitpid(pid, &status, 0) == -1 && errno == EINTR {}
             guard exited, status == 0, !overflowed,
