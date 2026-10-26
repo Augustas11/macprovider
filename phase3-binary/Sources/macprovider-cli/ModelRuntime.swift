@@ -396,6 +396,7 @@ actor ContinuousBatchTextPreparationLane {
     private let tokenizer: any MLXLMCommon.Tokenizer
     private let configuration: ModelConfiguration
     private let hasRecurrentLayers: Bool
+    private let supportsBonsaiThinking: Bool
 #if DEBUG
     private var preparationEntryCount = 0
 #endif
@@ -404,12 +405,14 @@ actor ContinuousBatchTextPreparationLane {
         processor: any UserInputProcessor,
         tokenizer: any MLXLMCommon.Tokenizer,
         configuration: ModelConfiguration,
-        hasRecurrentLayers: Bool
+        hasRecurrentLayers: Bool,
+        supportsBonsaiThinking: Bool = false
     ) {
         self.processor = processor
         self.tokenizer = tokenizer
         self.configuration = configuration
         self.hasRecurrentLayers = hasRecurrentLayers
+        self.supportsBonsaiThinking = supportsBonsaiThinking
     }
 
     func prepare(
@@ -427,6 +430,7 @@ actor ContinuousBatchTextPreparationLane {
         let tokenizer = tokenizer
         let configuration = configuration
         let hasRecurrentLayers = hasRecurrentLayers
+        let supportsBonsaiThinking = supportsBonsaiThinking
         return try await serial.withPermit {
             try Task.checkCancellation()
             try drainCancelled.check()
@@ -437,7 +441,8 @@ actor ContinuousBatchTextPreparationLane {
                 templateSupportsThinkingToggle: templateSupportsThinkingToggle,
                 templateSupportsPreserveThinking: templateSupportsPreserveThinking,
                 toolSelectionModelID: toolSelectionModelID,
-                templateToolFormat: configuration.toolCallFormat?.rawValue
+                templateToolFormat: configuration.toolCallFormat?.rawValue,
+                supportsBonsaiThinking: supportsBonsaiThinking
             )
             try Task.checkCancellation()
             try drainCancelled.check()
@@ -14150,14 +14155,27 @@ maxTokens: maxTokens,
 
     static func templateAdditionalContext(
         supportsThinkingToggle: Bool,
-        supportsPreserveThinking: Bool = false
+        supportsPreserveThinking: Bool = false,
+        enableThinking: Bool = false
     ) -> [String: any Sendable]? {
         guard supportsThinkingToggle else { return nil }
-        var context: [String: any Sendable] = ["enable_thinking": false]
+        var context: [String: any Sendable] = ["enable_thinking": enableThinking]
         if supportsPreserveThinking {
             context["preserve_thinking"] = true
         }
         return context
+    }
+
+    /// SPEC-018-R010: only a model-owned Prism capability permits this opt-in.
+    /// Buyer aliases and a template's variable alone do not establish it.
+    static func bonsaiThinkingEnabled(
+        for request: ChatCompletionRequest, supportsBonsaiThinking: Bool
+    ) -> Bool {
+        guard supportsBonsaiThinking,
+              !request.containsNonTextMessageContentPart,
+              case .text = request.responseFormat else { return false }
+        if case .array(let tools)? = request.promptSource.tools, !tools.isEmpty { return false }
+        return ["high", "xhigh", "max"].contains(request.reasoningEffort ?? "")
     }
 
     /// Validate media before processor work, test generation seams or dispatch.
@@ -14205,7 +14223,8 @@ maxTokens: maxTokens,
         templateSupportsThinkingToggle: Bool = false,
         templateSupportsPreserveThinking: Bool = false,
         nativeVisionProfile: NativeVisionProfile? = nil,
-        toolSelectionModelID: String? = nil
+        toolSelectionModelID: String? = nil,
+        supportsBonsaiThinking: Bool = false
     ) throws -> UserInput {
         if let input = try validateNativeVisionRequest(request, profile: nativeVisionProfile) {
             return try NativeVisionProfile.userInput(from: input)
@@ -14249,7 +14268,9 @@ maxTokens: maxTokens,
         }
         var additionalContext = Self.templateAdditionalContext(
             supportsThinkingToggle: templateSupportsThinkingToggle,
-            supportsPreserveThinking: templateSupportsPreserveThinking
+            supportsPreserveThinking: templateSupportsPreserveThinking,
+            enableThinking: Self.bonsaiThinkingEnabled(
+                for: request, supportsBonsaiThinking: supportsBonsaiThinking)
         )
         // SPEC-018 §3.12: normalize against the loaded family, including
         // when the buyer uses an alias. Templates without the variable ignore it.
@@ -14340,7 +14361,8 @@ maxTokens: maxTokens,
             templateSupportsThinkingToggle: templateSupportsThinkingToggle,
             templateSupportsPreserveThinking: templateSupportsPreserveThinking,
             nativeVisionProfile: nativeVisionProfile,
-            toolSelectionModelID: toolSelectionModelID
+            toolSelectionModelID: toolSelectionModelID,
+            supportsBonsaiThinking: context.model is PrismHadamardQwen35
         )
         let lmInput: LMInput
         do {
@@ -14412,7 +14434,8 @@ maxTokens: maxTokens,
         templateSupportsThinkingToggle: Bool,
         templateSupportsPreserveThinking: Bool,
         toolSelectionModelID: String?,
-        templateToolFormat: String? = nil
+        templateToolFormat: String? = nil,
+        supportsBonsaiThinking: Bool = false
     ) async throws -> (tokens: [Int], toolCallPrefill: String?) {
         let plan = GrammarConstraintState.isRequired(request) ? nil : try toolCallPrefill(for: request, toolSelectionModelID: toolSelectionModelID)
         let grammar = try resolvedToolGrammar(for: request, templateToolFormat: templateToolFormat)
@@ -14420,7 +14443,8 @@ maxTokens: maxTokens,
             for: request,
             templateSupportsThinkingToggle: templateSupportsThinkingToggle,
             templateSupportsPreserveThinking: templateSupportsPreserveThinking,
-            toolSelectionModelID: toolSelectionModelID
+            toolSelectionModelID: toolSelectionModelID,
+            supportsBonsaiThinking: supportsBonsaiThinking
         )
         let lmInput: LMInput
         do {
