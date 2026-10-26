@@ -23,7 +23,7 @@ final class NavigationEarnTests: XCTestCase {
 
     func testAgentTaskSidebarOrderAndLabels() {
         XCTAssertEqual(MalibuSection.allCases.map(\.title),
-                       ["Chat", "Terminal", "Agents", "Tasks", "Models", "Earn", "Settings", "Diagnostics"])
+                       ["Chat", "Terminal", "Create", "Agents", "Tasks", "Models", "Earn", "Settings", "Diagnostics"])
         XCTAssertEqual(MalibuNavigation(persistedValue: "agents").selection, .agents)
         XCTAssertEqual(MalibuNavigation(persistedValue: "tasks").selection, .tasks)
     }

@@ -6,6 +6,7 @@ import SwiftUI
 enum MalibuSection: String, CaseIterable, Identifiable, Hashable {
     case chat
     case terminal
+    case create
     case agents
     case tasks
     case models
@@ -19,6 +20,7 @@ enum MalibuSection: String, CaseIterable, Identifiable, Hashable {
         switch self {
         case .chat: return String(localized: "Chat", comment: "Sidebar section")
         case .terminal: return String(localized: "Terminal", comment: "Sidebar section")
+        case .create: return "Create"
         case .agents: return "Agents"
         case .tasks: return "Tasks"
         case .models: return String(localized: "Models", comment: "Sidebar section")
@@ -32,6 +34,7 @@ enum MalibuSection: String, CaseIterable, Identifiable, Hashable {
         switch self {
         case .chat: return "bubble.left.and.bubble.right"
         case .terminal: return "terminal"
+        case .create: return "paintbrush.pointed"
         case .agents: return "person.crop.rectangle.stack"
         case .tasks: return "checklist"
         case .models: return "square.stack.3d.up"
@@ -170,6 +173,7 @@ struct MainShellView: View {
     let onResetProvider: () -> Void
     @ObservedObject private var modelStore = ModelManagementStore.shared
     @StateObject private var terminalWorkspace = TerminalWorkspace()
+    @StateObject private var createStore = CreateStore()
 
     var body: some View {
         NavigationSplitView {
@@ -275,6 +279,8 @@ struct MainShellView: View {
             ChatScreen(agent: agent)
         case .terminal:
             TerminalScreen(workspace: terminalWorkspace)
+        case .create:
+            CreateScreen(store: createStore)
         case .agents:
             AgentsScreen(store: AgentTaskRuntime.shared.agents)
         case .tasks:
