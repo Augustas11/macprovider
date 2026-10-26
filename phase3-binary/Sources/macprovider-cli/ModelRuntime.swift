@@ -1863,8 +1863,10 @@ actor ModelRuntime: ModelRuntimeServing {
         containsImage ? NativeVisionProfile.prefillStepSize : configured
     }
 
-    struct HarmonyTerminalPreservingTokenizer: MLXLMCommon.Tokenizer {
+    struct HarmonyTerminalPreservingTokenizer: MLXLMCommon.Tokenizer, ControlTokenAware {
         let base: any MLXLMCommon.Tokenizer
+
+        var controlTokens: ControlTokenTable? { ControlTokenTable.of(base) }
 
         var bosToken: String? { base.bosToken }
 
@@ -6877,7 +6879,7 @@ maxTokens: 1,
                             throw LocalTokenUtilityRequest.invalid("Token ID is outside the loaded tokenizer vocabulary")
                         }
                         tokens = nil
-                        text = context.tokenizer.decode(tokenIds: ids, skipSpecialTokens: false)
+                        text = ControlTextShield.strip(context.tokenizer.decode(tokenIds: ids, skipSpecialTokens: false))
                     case .applyTemplate:
                         let messages: [[String: any Sendable]] = request.messages!.map { message in
                             ["role": message["role"]!, "content": message["content"]!]
@@ -6890,7 +6892,7 @@ maxTokens: 1,
                             throw APIError(status: 422, message: "Loaded tokenizer cannot apply this chat template", code: "chat_template_unsupported")
                         }
                         guard tokens!.count <= LocalTokenUtilityRequest.tokenLimit else { throw LocalTokenUtilityRequest.limitError() }
-                        text = context.tokenizer.decode(tokenIds: tokens!, skipSpecialTokens: false)
+                        text = ControlTextShield.strip(context.tokenizer.decode(tokenIds: tokens!, skipSpecialTokens: false))
                     }
                     guard (tokens?.count ?? 0) <= LocalTokenUtilityRequest.tokenLimit,
                           (text?.utf8.count ?? 0) <= LocalTokenUtilityRequest.outputByteLimit else {
@@ -7126,10 +7128,27 @@ maxTokens: 1,
 
         init(tokenizer: any MLXLMCommon.Tokenizer) {
             let cleanupProbe = tokenizer.encode(text: " .", addSpecialTokens: false)
+            let cleanUp = tokenizer.decode(tokenIds: cleanupProbe) == "."
+            let tokenPiece = tokenizer.convertIdToToken
+            // SPEC-018 §3.14: per-token text marks control text written with
+            // ordinary tokens, as the whole-sequence decode does.
+            let control = ControlTokenTable.of(tokenizer)
             self.init(
                 decode: { tokenizer.decode(tokenIds: $0) },
-                tokenPiece: tokenizer.convertIdToToken,
-                cleanUpTokenizationSpaces: tokenizer.decode(tokenIds: cleanupProbe) == "."
+                makeIncremental: {
+                    let box = ByteLevelIncrementalTextDecoderBox(
+                        tokenPiece: tokenPiece,
+                        cleanUpTokenizationSpaces: cleanUp
+                    )
+                    guard let control, !control.matcher.isEmpty else {
+                        return IncrementalTextDecoder(appendToken: box.append)
+                    }
+                    let shield = ControlTextIncrementalShield(control: control)
+                    return IncrementalTextDecoder(appendToken: { token in
+                        shield.shielded(token: token, fullText: box.append(token))
+                    })
+                },
+                cleanUpTokenizationSpaces: cleanUp
             )
         }
     }
@@ -8971,6 +8990,16 @@ maxTokens: boundedMaxTokens,
         with handle: RequestHandle,
         shouldCancel: @escaping @Sendable () -> Bool = { false }
     ) async throws -> (CompletionResult, RuntimeSnapshot) {
+        // SPEC-018 §3.14: control-text marks never leave the runtime.
+        let (completion, snapshot) = try await completeWithServedSnapshotMarked(request, with: handle, shouldCancel: shouldCancel)
+        return (completion.strippingControlTextMarks(), snapshot)
+    }
+
+    private func completeWithServedSnapshotMarked(
+        _ request: ChatCompletionRequest,
+        with handle: RequestHandle,
+        shouldCancel: @escaping @Sendable () -> Bool
+    ) async throws -> (CompletionResult, RuntimeSnapshot) {
         try ToolSelectionPolicy.validateRequest(request, loadedModelID: toolSelectionModelID(handle.snapshot), runtime: "mlx_cache")
         _ = try Self.validateNativeVisionRequest(request, profile: handle.snapshot.nativeVisionProfile)
         // SPEC-025 §5.2 model-liveness: mark active buyer inference so a stalled
@@ -9754,6 +9783,18 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
         _ request: ChatCompletionRequest,
         with handle: RequestHandle,
         shouldCancel: @escaping @Sendable () -> Bool = { false },
+        onChunk: @escaping @Sendable (StreamChunk) -> Void
+    ) async throws -> CompletionResult {
+        // SPEC-018 §3.14: control-text marks never leave the runtime.
+        try await streamMarked(request, with: handle, shouldCancel: shouldCancel) { chunk in
+            onChunk(chunk.strippingControlTextMarks())
+        }.strippingControlTextMarks()
+    }
+
+    private func streamMarked(
+        _ request: ChatCompletionRequest,
+        with handle: RequestHandle,
+        shouldCancel: @escaping @Sendable () -> Bool,
         onChunk: @escaping @Sendable (StreamChunk) -> Void
     ) async throws -> CompletionResult {
         guard Self.requiresStructuredValidation(request.responseFormat) else {
@@ -12797,7 +12838,7 @@ maxTokens: maxTokens,
         stopTokenFilter: StopTokenFilter,
         requestStops: [String]
     ) -> (text: String, hitStop: Bool) {
-        let stripped = stopTokenFilter.stripping(from: text)
+        let stripped = stopTokenFilter.stripping(from: text, joiner: ControlTextShield.markString)
         var earliestStop: String.Index?
         for stop in requestStops where !stop.isEmpty {
             if let range = stripped.range(of: stop) {
@@ -13742,14 +13783,18 @@ maxTokens: maxTokens,
                     throw ToolSelectionPolicy.outputError("Unsupported tool output grammar")
                 }
                 let automaton = try language.compile()
-                guard let terminal = automaton.transition(state: 0, bytes: Array(raw.trimmingCharacters(in: .whitespacesAndNewlines).utf8)),
+                // SPEC-018 §3.14: the envelope automaton checks values as the
+                // buyer receives them; structure is still parsed below from
+                // the marked text, where ordinary-token markers stay literal.
+                let unmarked = ControlTextShield.strip(raw)
+                guard let terminal = automaton.transition(state: 0, bytes: Array(unmarked.trimmingCharacters(in: .whitespacesAndNewlines).utf8)),
                       automaton.accepting(state: terminal) else {
                     throw ToolSelectionPolicy.outputError("Tool output requires a complete native envelope")
                 }
             }
             let calls = try ToolCallParser.parseGuaranteedToolCalls(
                 raw, grammar: grammar, modelID: request.model, schemas: try ToolSelectionPolicy.schemas(request)
-            )
+            ).map { $0.strippingControlTextMarks() }
             return (calls.isEmpty ? text : "", calls)
         }
         guard let allowedFunctionNames = toolFunctionNames(from: request.promptSource.tools) else {
@@ -14135,6 +14180,9 @@ maxTokens: maxTokens,
     }
 
     static func validateStructuredCompletion(_ completion: CompletionResult, request: ChatCompletionRequest) throws -> CompletionResult {
+        // SPEC-018 §3.14: structure is parsed; values are validated exactly
+        // as the buyer receives them.
+        let completion = completion.strippingControlTextMarks()
         let validationCalls = (completion.toolCalls ?? []).map {
             MacProviderCore.ToolCall(id: $0.id, functionName: $0.functionName, arguments: $0.arguments)
         }
@@ -14261,6 +14309,8 @@ maxTokens: maxTokens,
         request: ChatCompletionRequest,
         buyerVisibleContent: String
     ) throws -> CompletionResult {
+        let completion = completion.strippingControlTextMarks()
+        let buyerVisibleContent = ControlTextShield.strip(buyerVisibleContent)
         guard requiresStructuredValidation(request.responseFormat), completion.toolCalls?.isEmpty != false else {
             return completion
         }
