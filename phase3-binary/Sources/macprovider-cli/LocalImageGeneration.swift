@@ -68,8 +68,6 @@ struct LocalCreativeLifecycle: Sendable {
     let unloadLanguage: @Sendable () async throws -> Void
     let restoreLanguage: @Sendable () async throws -> Void
     let resume: @Sendable () async -> Void
-    /// Relinquish exclusive ownership after bounded reload attempts fail.
-    var abandonLanguage: @Sendable () async -> Void = {}
 }
 
 /// Owns both the single-flight slot and the creative hold, shared by every HTTP channel.
@@ -80,6 +78,7 @@ actor LocalImageGeneration {
     let lifecycle: LocalCreativeLifecycle
     let physicalBytes: UInt64
     let availableBytes: @Sendable () -> UInt64
+    let recoveryNanoseconds: UInt64
     let warmNanoseconds: UInt64
     private(set) var state: LocalImageState = .idle
     private var completedBytes: Int64 = 0
@@ -96,9 +95,11 @@ actor LocalImageGeneration {
          physicalBytes: UInt64 = ProcessInfo.processInfo.physicalMemory,
          availableBytes: @escaping @Sendable () -> UInt64 = {
              UInt64(max(0, NativeMTPRoundSystemMemoryProbe.system.sample()?.availableBytes ?? 0))
-         }, warmNanoseconds: UInt64 = 120_000_000_000) {
+         }, warmNanoseconds: UInt64 = 120_000_000_000,
+         recoveryNanoseconds: UInt64 = 5_000_000_000) {
         self.backend = backend; self.lifecycle = lifecycle; self.physicalBytes = physicalBytes
         self.availableBytes = availableBytes; self.warmNanoseconds = warmNanoseconds
+        self.recoveryNanoseconds = recoveryNanoseconds
     }
 
     func status() -> [String: Any] {
@@ -110,7 +111,7 @@ actor LocalImageGeneration {
     }
 
     func generate(_ request: LocalImageRequest, operationID: UUID = UUID()) async throws -> Data {
-        guard operation == nil, !restoring else {
+        guard operation == nil, !restoring, !languageUnloaded || held else {
             throw APIError(status: 429, message: "Image generation is busy. Wait for the current image or restoration to finish.", code: "image_generation_busy")
         }
         let decision = LocalImageMemoryDecision.evaluate(physicalBytes: physicalBytes, availableBytes: availableBytes(), pixels: request.pixels)
@@ -202,12 +203,17 @@ actor LocalImageGeneration {
                 }
             }
         }
-        if languageUnloaded { await lifecycle.abandonLanguage() }
         if held { await lifecycle.resume(); held = false }
         state = languageUnloaded ? .recoveryRequired : .idle
-        // Recovery is now owned by the ordinary runtime/operator path.
-        languageUnloaded = false
         operationID = nil
         restoring = false
+        if languageUnloaded {
+            // Keep the saved runtime identity and retry without operator warm swap.
+            // Images remain fenced until the base language model is serving again.
+            warmTimer = Task { [weak self, recoveryNanoseconds] in
+                do { try await Task.sleep(nanoseconds: recoveryNanoseconds) } catch { return }
+                await self?.restore()
+            }
+        }
     }
 }

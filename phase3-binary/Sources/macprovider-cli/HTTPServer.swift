@@ -335,8 +335,7 @@ struct HTTPServer: Sendable {
                 },
                 unloadLanguage: { try await mlx.unloadForLocalCreativeHold() },
                 restoreLanguage: { try await mlx.restoreAfterLocalCreativeHold() },
-                resume: { await providerStatus.setLocalCreativeHold(false) },
-                abandonLanguage: { await mlx.abandonLocalCreativeHold() }
+                resume: { await providerStatus.setLocalCreativeHold(false) }
             ))
         } else { self.images = nil }
         self.config = config

@@ -357,8 +357,7 @@ final class LocalImageGenerationTests: XCTestCase {
                     },
                     unloadLanguage: { try await runtime.unloadForLocalCreativeHold() },
                     restoreLanguage: { try await runtime.restoreAfterLocalCreativeHold() },
-                    resume: { await status.setLocalCreativeHold(false) },
-                    abandonLanguage: { await runtime.abandonLocalCreativeHold() }),
+                    resume: { await status.setLocalCreativeHold(false) }),
                 physicalBytes: 16 * 1_073_741_824, availableBytes: { 0 })
             if scenario == .restoreExhausted { await reloads.setFailures(3) }
             if scenario == .restoreRetry { await reloads.setFailures(1) }
@@ -378,8 +377,8 @@ final class LocalImageGenerationTests: XCTestCase {
                 let attempts = await reloads.attempts
                 XCTAssertEqual(attempts, 3)
                 await service.restore()
-                let stillFailed = await service.state
-                XCTAssertEqual(stillFailed, .recoveryRequired)
+                let recoveredState = await service.state
+                XCTAssertEqual(recoveredState, .idle)
             } else {
                 let admission = await status.beginRequestIfAccepting()
                 XCTAssertNotNil(admission, "\(scenario)")
@@ -395,6 +394,40 @@ final class LocalImageGenerationTests: XCTestCase {
             XCTAssertNotNil(admission, "\(scenario)")
             if let admission { await status.finishRequest(startedAt: admission, completion: nil, failed: false) }
         }
+    }
+
+    func testExhaustedRetriesAutomaticallyRestoreWithDefaultWarmSwapDisabled() async throws {
+        let reloads = CreativeReloadControl()
+        let runtime = ModelRuntime(modelID: "fixture", warmSwapEnabled: false,
+            loader: { _ in throw CocoaError(.fileReadUnknown) },
+            testLoader: { try await reloads.load($0) },
+            testCompletion: { _, _ in throw CocoaError(.fileReadUnknown) })
+        let status = ProviderStatus(modelID: "fixture", modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: 1))
+        await runtime.setProviderStatus(status)
+        await reloads.setFailures(3)
+        let service = LocalImageGeneration(backend: RecoveryImageBackend(scenario: .backendCrash),
+            lifecycle: LocalCreativeLifecycle(pause: { await status.setLocalCreativeHold(true) }, drain: {},
+                unloadLanguage: { try await runtime.unloadForLocalCreativeHold() },
+                restoreLanguage: { try await runtime.restoreAfterLocalCreativeHold() },
+                resume: { await status.setLocalCreativeHold(false) }),
+            physicalBytes: 16 * 1_073_741_824, availableBytes: { 0 }, recoveryNanoseconds: 20_000_000)
+        do { _ = try await service.generate(request()); XCTFail("Expected backend failure") } catch {}
+        for _ in 0..<200 {
+            if await service.state == .idle { break }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        let state = await service.state
+        let loaded = await runtime.isLoaded
+        let attempts = await reloads.attempts
+        let snapshot = await runtime.currentSnapshot()
+        XCTAssertEqual(state, .idle)
+        XCTAssertTrue(loaded)
+        XCTAssertEqual(snapshot.modelID, "fixture")
+        XCTAssertEqual(attempts, 4)
+        let admission = await status.beginRequestIfAccepting()
+        XCTAssertNotNil(admission)
+        if let admission { await status.finishRequest(startedAt: admission, completion: nil, failed: false) }
     }
 
     private func waitForGenerating(_ service: LocalImageGeneration) async {
