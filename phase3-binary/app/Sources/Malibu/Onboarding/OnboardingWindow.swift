@@ -87,7 +87,7 @@ private struct OnboardingRootView: View {
                         .font(.system(size: 13, weight: .medium))
                         .tracking(0.5)
                         .foregroundStyle(.secondary)
-                    Text("Earn from your Mac.")
+                    Text("Private AI on your Mac. It earns while you're not using it.")
                         .font(.system(size: 28, weight: .semibold))
                 }
             }
@@ -173,7 +173,7 @@ private struct OnboardingRootView: View {
                         .buttonStyle(.bordered)
                         .disabled(true)
                 }
-                Button("Open Dashboard") { onDone() }
+                Button("Open Malibu") { onDone() }
                     .buttonStyle(.borderedProminent)
                     .tint(MalibuBrand.coral)
             }
