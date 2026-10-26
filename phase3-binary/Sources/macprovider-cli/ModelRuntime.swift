@@ -1920,6 +1920,8 @@ actor ModelRuntime: ModelRuntimeServing {
     private var creativeRestoreTarget: String?
     private struct CreativeServingState {
         let nativeTupleSHA256: String?
+        let parkedOffer: NativeMTPPublishedTupleOffer?
+        let nativeStatus: NativeMTPStatusSink
         let batchingActive: Bool
         let selfCheck: ContinuousBatchingSelfCheckState
         let selfCheckReport: ContinuousBatchingSelfCheckReport?
@@ -5063,8 +5065,15 @@ maxTokens: 1,
             throw ModelRuntimeLoadError(target: currentModelID, reason: "verified reload authority unavailable")
         }
         creativeRestoreTarget = currentModelID
+        // Copy in place: the scheduler continues writing to the live sink while
+        // it drains, and unloading must not mutate the saved fallback state.
+        let savedNativeStatus = NativeMTPStatusSink.disabled()
+        savedNativeStatus.adopt(currentNativeMTPStatusSink)
         creativeServingState = CreativeServingState(
-            nativeTupleSHA256: currentNativeMTPTupleOffer?.nativeMTPAdmissionTupleSHA256,
+            nativeTupleSHA256: currentNativeMTPTupleOffer?.nativeMTPAdmissionTupleSHA256
+                ?? parkedNativeMTPTuple?.offer.nativeMTPAdmissionTupleSHA256,
+            parkedOffer: parkedNativeMTPTuple?.offer,
+            nativeStatus: savedNativeStatus,
             batchingActive: continuousBatchScheduler != nil,
             selfCheck: continuousBatchingSelfCheck,
             selfCheckReport: continuousBatchingSelfCheckReport,
@@ -5151,6 +5160,44 @@ maxTokens: 1,
                         // Startup fences a failed native self-check but keeps the
                         // verified target available for ordinary batching.
                         await rebuildContinuousBatchScheduler(container: currentContainer)
+                        if let parkedOffer = previous.parkedOffer {
+                            await nativeMTPParkedTupleDiscardHandler?(parkedOffer)
+                        }
+                    } else if let parkedOffer = previous.parkedOffer {
+                        // Reload the drafter under today's admission gates, but
+                        // retain the coordinator's original re-offer identity.
+                        // A creative hold must not promote a bank-mismatched tuple.
+                        let parked = ParkedNativeMTPTuple(
+                            offer: parkedOffer,
+                            capability: currentNativeMTPCapability,
+                            admissionCapability: currentNativeMTPAdmissionCapability,
+                            drafterContainer: currentNativeMTPDrafterContainer,
+                            selfTestInput: currentNativeMTPSelfTestInput,
+                            revocationRefresh: load.revocationSignerKeyID.flatMap { signer in
+                                load.revocationTrustedKeyring.map { keyring in
+                                    NativeMTPRevocationRefreshInputs(
+                                        signerKeyID: signer, trustedKeyring: keyring,
+                                        tupleSHA256: parkedOffer.nativeMTPAdmissionTupleSHA256,
+                                        servedSnapshotID: parkedOffer.servedSnapshotID,
+                                        targetGeneration: parkedOffer.targetGeneration)
+                                }
+                            },
+                            specDecodeGeneration: currentSpecDecodeGeneration)
+                        if let offer = currentNativeMTPTupleOffer {
+                            await disableNativeMTPTuple(
+                                admissionTupleSHA256: offer.nativeMTPAdmissionTupleSHA256,
+                                servedSnapshotID: offer.servedSnapshotID,
+                                targetGeneration: offer.targetGeneration, reason: .tupleNotAdmitted)
+                        }
+                        await continuousBatchScheduler?.disableNativeMTPTuple(NativeMTPTupleFence(
+                            admissionTupleSHA256: parkedOffer.nativeMTPAdmissionTupleSHA256,
+                            servedSnapshotID: parkedOffer.servedSnapshotID,
+                            targetGeneration: parkedOffer.targetGeneration))
+                        parkedNativeMTPTuple = parked
+                        if let refresh = parked.revocationRefresh { startNativeMTPRevocationRefresh(refresh) }
+                        currentNativeMTPStatusSink.adopt(previous.nativeStatus)
+                    } else {
+                        currentNativeMTPStatusSink.adopt(previous.nativeStatus)
                     }
                 } catch {
                     // Native admission can change during image residency. Its
@@ -5161,12 +5208,18 @@ maxTokens: 1,
                     try await reload.value
                     restoreCreativeBatchingQualification(previous)
                     await rebuildContinuousBatchScheduler(container: currentContainer)
+                    publishNativeMTPStatusSink(capability: nil, admissionCapability: nil,
+                        reasonIfDisabled: .tupleNotAdmitted)
+                    if let parkedOffer = previous.parkedOffer {
+                        await nativeMTPParkedTupleDiscardHandler?(parkedOffer)
+                    }
                 }
             } else {
                 let reload = try await beginSwap(targetModelID: target, creativeRestore: true)
                 try await reload.value
                 restoreCreativeBatchingQualification(previous)
                 await rebuildContinuousBatchScheduler(container: currentContainer)
+                currentNativeMTPStatusSink.adopt(previous.nativeStatus)
             }
             guard isLoaded, currentModelID == target,
                   !previous.batchingActive || continuousBatchScheduler != nil else {

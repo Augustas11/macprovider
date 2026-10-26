@@ -5739,6 +5739,31 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         }
         let watcher = await runtime.nativeMTPRevocationWatcherActiveForTest()
         XCTAssertTrue(watcher)
+        // Coordinator bank mismatch must survive the hold without publishing
+        // an offer until the ordinary re-offer/revocation gates permit it.
+        let parkedOffer = try XCTUnwrap(after.nativeMTPTupleOffer)
+        let didPark = await runtime.parkNativeMTPTupleForReoffer(
+            admissionTupleSHA256: parkedOffer.nativeMTPAdmissionTupleSHA256,
+            servedSnapshotID: parkedOffer.servedSnapshotID,
+            targetGeneration: parkedOffer.targetGeneration)
+        XCTAssertTrue(didPark)
+        let parkedBefore = await runtime.currentSnapshot()
+        try await runtime.unloadForLocalCreativeHold()
+        try await runtime.restoreAfterLocalCreativeHold()
+        let parkedAfter = await runtime.currentSnapshot()
+        let remainsParked = await runtime.nativeMTPTupleIsParkedForTest()
+        XCTAssertTrue(remainsParked)
+        XCTAssertNil(parkedAfter.nativeMTPTupleOffer)
+        XCTAssertEqual(parkedAfter.nativeMTPStatus, parkedBefore.nativeMTPStatus)
+        XCTAssertEqual(parkedAfter.continuousBatching?.active, parkedBefore.continuousBatching?.active)
+        XCTAssertEqual(parkedAfter.continuousBatching?.mode, parkedBefore.continuousBatching?.mode)
+        await runtime.setNativeMTPRevokedSetReaderForTest { _, _ in [] }
+        let reoffered = await runtime.restoreParkedNativeMTPTuple(parkedOffer)
+        XCTAssertEqual(reoffered, .restored)
+        let publishedAfterHold = await runtime.currentSnapshot()
+        XCTAssertEqual(publishedAfterHold.nativeMTPTupleOffer, parkedOffer)
+        XCTAssertTrue(publishedAfterHold.nativeMTPStatus.enabled)
+
         // A fresh hold can drain the rebuilt scheduler; the old scheduler's
         // permanently drained state is not reused.
         try await runtime.unloadForLocalCreativeHold()
@@ -5790,6 +5815,28 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertEqual(after.nativeMTPStatus.enabled, before.nativeMTPStatus.enabled)
         XCTAssertEqual(after.continuousBatching?.mode, before.continuousBatching?.mode)
         XCTAssertEqual(after.continuousBatching?.scheduler?.slotsTotal, before.continuousBatching?.scheduler?.slotsTotal)
+    }
+
+    func testCreativeHoldPreservesNativeMTPPausedAfterFallback() async throws {
+        try requireMetal()
+        let hash = String(repeating: "a", count: 64)
+        let runtime = Self.attachedRuntime(modelID: "mlx-community/Qwen-Test",
+            backend: RuntimeBridgeScriptedBackend(scripts: [:]), warmSwapEnabled: false,
+            testLoader: { ($0, hash) },
+            testCompletion: { _, _ in throw PagedKVRuntimeBridgeTestError.notExpected })
+        // This is the state after native runtime fallback has fenced its tuple:
+        // base batching remains healthy, while native remains disabled.
+        await runtime.setNativeMTPDisabledStatusReasonForTest(.runtimeFailure)
+        let before = await runtime.currentSnapshot()
+        try await runtime.unloadForLocalCreativeHold()
+        try await runtime.restoreAfterLocalCreativeHold()
+        let after = await runtime.currentSnapshot()
+        XCTAssertEqual(after.modelID, before.modelID)
+        XCTAssertEqual(after.nativeMTPStatus, before.nativeMTPStatus)
+        XCTAssertNil(after.nativeMTPTupleOffer)
+        XCTAssertFalse(after.nativeMTPStatus.enabled)
+        XCTAssertEqual(after.continuousBatching?.active, before.continuousBatching?.active)
+        XCTAssertEqual(after.continuousBatching?.mode, before.continuousBatching?.mode)
     }
 
     private static func creativeAdmission(modelID: String, hash: String) -> NativeMTPAdmissionCapability {
