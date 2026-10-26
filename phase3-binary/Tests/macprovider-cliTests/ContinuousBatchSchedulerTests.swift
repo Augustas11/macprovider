@@ -421,6 +421,113 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertEqual(snapshots["snap"], [36])
     }
 
+    /// SPEC-024-R005 / SPEC-038 AC-26: a positive-cached turn carrying a
+    /// GLM-5-Next prompt snapshot gets a table already counting the snapshot
+    /// tokens, installs the snapshot, prefills only the rest of the prompt and
+    /// publishes its own, longer snapshot.
+    func testPositiveCachedSnapshotTurnInstallsTheSnapshotAndResumesPrefill() async throws {
+        let backend = ScriptedBackend(scripts: ["warm": [7, 8]], promptSnapshotBackend: true)
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 64)
+        let scheduler = try await makeScheduler(descriptor: Self.descriptor(blockSizeTokens: 4, maxPhysicalBlocks: 64),
+                                                maxActiveRows: 1, maxPromptChunkTokens: 16, backend: backend,
+                                                allocator: allocator)
+        let stored = ContinuousBatchSerialConversationCache(
+            layers: [KVCacheSimple()], recurrentCheckpoints: [], tokenCount: 36, promptSnapshot: true)
+        let result = try await scheduler.submit(.init(
+            id: "warm", conversationKey: "conv:warm", promptTokens: Array(1...60),
+            maxOutputTokens: 2, temperature: 0.0, cachedPromptTokens: 36,
+            promptSnapshotTokenCount: 56, promptSnapshotCache: stored
+        ))
+        XCTAssertEqual(result.terminalStatus, .length)
+        XCTAssertEqual(result.outputTokens, [7, 8])
+        XCTAssertEqual(result.cachedPromptTokens, 36)
+        let installs = await backend.promptSnapshotInstalls()
+        XCTAssertEqual(installs["warm"], [36])
+        let inputs = await backend.prefillInputs()
+        XCTAssertEqual(inputs.first?.committedKVTokenCount, 36)
+        XCTAssertEqual(inputs.first?.promptTokens.first, 37)
+        XCTAssertEqual(inputs.flatMap(\.promptTokens), Array(37...60))
+        // The row snapshots again at its own, later boundary.
+        let snapshots = await backend.promptSnapshots()
+        XCTAssertEqual(snapshots["warm"], [56])
+        let published = try XCTUnwrap(result.serialConversationCache)
+        XCTAssertEqual(published.tokenCount, 56)
+        XCTAssertFalse(published === stored)
+        try await eventually { await allocator.freeBlockCount() == 64 }
+    }
+
+    /// SPEC-024-R005, Window A 2026-10-25: a cold keyed row ends a prefill
+    /// chunk at every resume boundary (each earlier turn's snapshot), so past
+    /// the snapshot it runs exactly the chunks of the row resumed there.
+    /// Without the boundaries the cold row ran one chunk straight through the
+    /// snapshot position, and its state there differed from the snapshot.
+    func testColdRowSplitsAtResumeBoundariesLikeTheResumedRow() async throws {
+        func chunkEnds(id: String, cached: Int, boundaries: [Int]) async throws -> [Int] {
+            let backend = ScriptedBackend(scripts: [id: [7]], promptSnapshotBackend: true)
+            let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 64)
+            let scheduler = try await makeScheduler(descriptor: Self.descriptor(blockSizeTokens: 4, maxPhysicalBlocks: 64),
+                                                    maxActiveRows: 1, maxPromptChunkTokens: 64, backend: backend,
+                                                    allocator: allocator)
+            let stored = ContinuousBatchSerialConversationCache(
+                layers: [KVCacheSimple()], recurrentCheckpoints: [], tokenCount: 36, promptSnapshot: true)
+            let result = try await scheduler.submit(.init(
+                id: id, conversationKey: "conv:\(id)", promptTokens: Array(1...60),
+                maxOutputTokens: 1, temperature: 0.0, cachedPromptTokens: cached,
+                promptSnapshotTokenCount: 56, promptSnapshotCache: cached > 0 ? stored : nil,
+                promptResumeBoundaries: boundaries
+            ))
+            XCTAssertEqual(result.terminalStatus, .length, id)
+            return await backend.prefillInputs().map { $0.promptTokenOffset + $0.promptTokens.count }
+        }
+        let resumed = try await chunkEnds(id: "warm", cached: 36, boundaries: [36, 56])
+        let cold = try await chunkEnds(id: "cold", cached: 0, boundaries: [36, 56])
+        XCTAssertEqual(resumed, [56, 60])
+        XCTAssertEqual(cold, [36, 56, 60])
+        XCTAssertEqual(cold.filter { $0 > 36 }, resumed)
+        let unsplit = try await chunkEnds(id: "unsplit", cached: 0, boundaries: [])
+        XCTAssertEqual(unsplit, [56, 60], "the plan before the fix ran through 36")
+    }
+
+    /// A snapshot whose length is not the cached length is never admitted.
+    func testPositiveCachedTurnWithAMismatchedSnapshotIsRefused() async throws {
+        let backend = ScriptedBackend(scripts: ["bad": [7]], promptSnapshotBackend: true)
+        let scheduler = try await makeScheduler(maxActiveRows: 1, maxPromptChunkTokens: 16, backend: backend)
+        let stored = ContinuousBatchSerialConversationCache(
+            layers: [KVCacheSimple()], recurrentCheckpoints: [], tokenCount: 30, promptSnapshot: true)
+        do {
+            _ = try await scheduler.submit(.init(
+                id: "bad", conversationKey: "conv:bad", promptTokens: Array(1...60),
+                maxOutputTokens: 1, temperature: 0.0, cachedPromptTokens: 36, promptSnapshotCache: stored
+            ))
+            XCTFail("a mismatched snapshot was admitted")
+        } catch ContinuousBatchSchedulerError.unsupported(let code) {
+            XCTAssertEqual(code, "continuous_batching_paged_kv_handoff_unavailable")
+        }
+        let installs = await backend.promptSnapshotInstalls()
+        XCTAssertNil(installs["bad"])
+    }
+
+    /// A backend that cannot install the snapshot fails the row at admission
+    /// and returns its table; nothing is prefilled.
+    func testSnapshotInstallFailureFailsAdmissionAndReleasesTheTable() async throws {
+        let backend = ScriptedBackend(scripts: ["nofit": [7]])
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 64)
+        let scheduler = try await makeScheduler(descriptor: Self.descriptor(blockSizeTokens: 4, maxPhysicalBlocks: 64),
+                                                maxActiveRows: 1, maxPromptChunkTokens: 16, backend: backend,
+                                                allocator: allocator)
+        let stored = ContinuousBatchSerialConversationCache(
+            layers: [KVCacheSimple()], recurrentCheckpoints: [], tokenCount: 36, promptSnapshot: true)
+        let result = try await scheduler.submit(.init(
+            id: "nofit", conversationKey: "conv:nofit", promptTokens: Array(1...60),
+            maxOutputTokens: 1, temperature: 0.0, cachedPromptTokens: 36, promptSnapshotCache: stored
+        ))
+        XCTAssertEqual(result.terminalStatus, .requestFailed)
+        XCTAssertEqual(result.errorCode, "continuous_batching_admission_failed")
+        let prefills = await backend.prefillCallCount()
+        XCTAssertEqual(prefills, 0)
+        try await eventually { await allocator.freeBlockCount() == 64 }
+    }
+
     /// A snapshot-family row whose snapshot was not captured publishes no
     /// conversation cache rather than its decoded state.
     func testKeyedSnapshotRowWithoutASnapshotPublishesNothing() async throws {
@@ -433,6 +540,50 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertEqual(result.outputTokens, [7, 8])
         XCTAssertNil(result.retainedCache)
         XCTAssertNil(result.serialConversationCache)
+    }
+
+    /// SPEC-024-R005: a keyed GLM row under the cached-turns grant whose
+    /// prompt is too short for a snapshot publishes nothing, where the same
+    /// hybrid row without the flag would retain its decoded cache. Native and
+    /// ordinary rows therefore commit the same (empty) outcome.
+    func testSnapshotOnlyPublisherWithoutASnapshotRetainsNothing() async throws {
+        for snapshotOnly in [false, true] {
+            let bridge = HeadlessRetainedCacheBridge()
+            let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 32)
+            let backend = ScriptedBackend(scripts: ["short": [500, 7]], recurrentCheckpointBackend: true)
+            let scheduler = try await makeScheduler(
+                descriptor: Self.descriptor(blockSizeTokens: 4, maxPhysicalBlocks: 32),
+                maxActiveRows: 1,
+                maxPromptChunkTokens: 8,
+                backend: backend,
+                allocator: allocator,
+                contiguousCacheBridge: bridge
+            )
+            let result = try await scheduler.submit(.init(
+                id: "short",
+                conversationKey: "conv:short",
+                promptTokens: Array(0..<40),
+                maxOutputTokens: 2,
+                stopTokenSequences: [[7]],
+                modelStopTokenIDs: [7],
+                temperature: 0.0,
+                recurrentCheckpointPositions: [33, 38],
+                modelHasRecurrentLayers: true,
+                publishesPromptSnapshotOnly: snapshotOnly
+            ))
+            XCTAssertEqual(result.terminalStatus, .stop)
+            if snapshotOnly {
+                XCTAssertNil(result.retainedCache)
+                XCTAssertNil(result.serialConversationCache)
+            } else {
+                XCTAssertNotNil(result.retainedCache)
+            }
+            if let retained = result.retainedCache {
+                await scheduler.acknowledgeRetainedCacheDelivery(retained)
+                await scheduler.discardRetainedCache(retained.retainedSequence, conversationKey: "conv:short")
+            }
+            try await eventually { await allocator.freeBlockCount() == 32 }
+        }
     }
 
     func testZeroOutputHybridRowMaterializesTheFullPrefilledPrompt() async throws {
@@ -8866,6 +9017,7 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
     /// SPEC-024 FR-CI2a: answers `snapshotPromptCache` with a flagged entry.
     private let promptSnapshotBackend: Bool
     private var promptSnapshotLog: [String: [Int]] = [:]
+    private var promptSnapshotInstallLog: [String: [Int]] = [:]
     private let snapshotGate: AsyncGate?
     private let materializeGate: AsyncGate?
     private var serialMaterializeLog: [String: [Int]] = [:]
@@ -9158,6 +9310,20 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
     }
 
     func promptSnapshots() -> [String: [Int]] { promptSnapshotLog }
+
+    func installPromptSnapshotCache(
+        requestID: String,
+        snapshot: ContinuousBatchSerialConversationCache,
+        binding: PagedKVStorageBinding,
+        restoreNativeMTPDrafter: Bool
+    ) async throws {
+        guard promptSnapshotBackend, binding.currentTable.logicalTokenCount == snapshot.tokenCount else {
+            throw ContinuousBatchSchedulerError.unsupported("continuous_batching_prompt_snapshot_install_unavailable")
+        }
+        promptSnapshotInstallLog[requestID, default: []].append(snapshot.tokenCount)
+    }
+
+    func promptSnapshotInstalls() -> [String: [Int]] { promptSnapshotInstallLog }
 
     func snapshotRecurrentState(requestID: String, tokenCount: Int) async -> RecurrentStateCheckpoint? {
         guard recurrentCheckpointBackend else { return nil }

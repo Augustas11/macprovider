@@ -145,12 +145,167 @@ final class ConversationPromptSnapshotTests: XCTestCase {
         XCTAssertNil(ModelRuntime.continuousBatchPromptSnapshotPolicy(nil))
     }
 
+    /// SPEC-024-R005: a GLM-5-Next CB row snapshots only under the AC-26
+    /// grant, so without it no later hit is fenced off CB.
+    func testGLM5NextCBRowsSnapshotOnlyUnderTheCachedTurnsGrant() {
+        let glm = ModelRuntime.ConversationPromptSnapshotPolicy.lastRoleMarker(tokenIDs: [60, 61], resumeTokenID: 61)
+        XCTAssertNil(ModelRuntime.continuousBatchPromptSnapshotPolicy(glm, cachedTurnsAttachable: false))
+        XCTAssertEqual(ModelRuntime.continuousBatchPromptSnapshotPolicy(glm, cachedTurnsAttachable: true),
+                       .resumeMarker(tokenID: 61))
+        XCTAssertNil(ModelRuntime.continuousBatchPromptSnapshotPolicy(.lastRoleMarker(tokenIDs: [60, 61]),
+                                                                     cachedTurnsAttachable: true),
+                     "no round-tripping <|assistant|>, no CB snapshot")
+        XCTAssertEqual(ModelRuntime.continuousBatchPromptSnapshotPolicy(.referencePlanBoundary(step: 2048),
+                                                                       cachedTurnsAttachable: true),
+                       .referencePlanBoundary(step: 2048))
+        XCTAssertNil(ModelRuntime.continuousBatchPromptSnapshotPolicy(nil, cachedTurnsAttachable: true))
+    }
+
+    /// SPEC-024-R005: a GLM-5-Next CB row snapshots at its last
+    /// `<|assistant|>` and ends a prefill chunk at every `<|assistant|>` at or
+    /// above the reuse threshold. Every snapshot an earlier turn took sits on
+    /// a later turn's boundaries, so a cold prefill of the later prompt and
+    /// one resumed at that snapshot run the same chunks.
+    func testResumeBoundariesCoverEveryEarlierTurnsSnapshot() {
+        let policy = ModelRuntime.ConversationPromptSnapshotPolicy.resumeMarker(tokenID: 61)
+        func count(_ prompt: [Int32]) -> Int? {
+            ModelRuntime.conversationPromptSnapshotTokenCount(promptTokenIds: prompt, policy: policy)
+        }
+        func boundaries(_ prompt: [Int32]) -> [Int] {
+            ModelRuntime.continuousBatchPromptResumeBoundaries(promptTokenIds: prompt, policy: policy)
+        }
+        let system: [Int32] = [63] + Array(repeating: 1, count: 20)
+        let early: [Int32] = system + [60, 2, 61, 3, 60, 4]          // an assistant marker below 32
+        var history = early + Array(repeating: 5, count: 30) + [60, 6]
+        var prompts: [[Int32]] = []
+        for turn in 0 ..< 3 {
+            prompts.append(history + [61, 5])
+            history += [61] + Array(repeating: Int32(7 + turn), count: 9) + [62, 8, 60, 9]
+        }
+        let snapshots = prompts.map(count)
+        XCTAssertEqual(snapshots, [prompts[0].count - 2, prompts[1].count - 2, prompts[2].count - 2])
+        for (index, prompt) in prompts.enumerated() {
+            XCTAssertEqual(boundaries(prompt), snapshots[...index].compactMap { $0 },
+                           "turn \(index): every earlier snapshot and its own, nothing else")
+            XCTAssertEqual(boundaries(prompt).last, count(prompt))
+        }
+        XCTAssertFalse(boundaries(prompts[2]).contains(23), "an <|assistant|> below the reuse threshold")
+        // A prompt whose last role marker is not <|assistant|> snapshots at its
+        // last <|assistant|>, which is still one of its boundaries.
+        let noGeneration = prompts[1] + [60, 3]
+        XCTAssertEqual(count(noGeneration), boundaries(noGeneration).last)
+        XCTAssertEqual(ModelRuntime.continuousBatchPromptResumeBoundaries(
+            promptTokenIds: prompts[2], policy: .lastRoleMarker(tokenIDs: [60, 61, 62], resumeTokenID: 61)), [])
+    }
+
+    /// SPEC-024-R005: a CB lease resumes a snapshot only when another CB row
+    /// took it on the resume-boundary plan and its length is one of the
+    /// incoming prompt's resume boundaries; otherwise the cold and resumed
+    /// chunk plans would differ, so it is a miss. A serial snapshot, even on
+    /// a boundary, ran another plan.
+    func testResumeBoundaryLeaseMissesASnapshotOffTheIncomingPromptsBoundaries() async throws {
+        let cache = ConversationCache(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+        let stored = int32Range(0..<64)
+        func seed(_ key: String, plan: Bool = true) async throws -> ConversationCacheLayers {
+            let lease = try Self.unwrap(await cache.begin(conversationKey: key, incomingTokens: stored,
+                                                       modelID: "model-a", kvBits: nil))
+            let layers = ConversationCacheLayers([RotatingKVCache(maxSize: 8, keep: 0)], promptSnapshot: true,
+                                                 resumeBoundaryPlan: plan)
+            await cache.commit(lease, cache: layers, fullTokens: stored)
+            return layers
+        }
+        let incoming = stored + [61] + int32Range(200..<230)
+        let layers = try await seed("conv:on")
+        let hit = try Self.unwrap(await cache.begin(conversationKey: "conv:on", incomingTokens: incoming,
+                                                    modelID: "model-a", kvBits: nil,
+                                                    promptSnapshotResumeBoundaries: [64, 94]))
+        XCTAssertTrue(hit.reusableCache === layers)
+        XCTAssertEqual(hit.cachedPromptTokens, 64)
+        await cache.abort(hit)
+
+        _ = try await seed("conv:off")
+        let miss = try Self.unwrap(await cache.begin(conversationKey: "conv:off", incomingTokens: incoming,
+                                                     modelID: "model-a", kvBits: nil,
+                                                     promptSnapshotResumeBoundaries: [94]))
+        XCTAssertNil(miss.reusableCache)
+        XCTAssertEqual(miss.cachedPromptTokens, 0)
+        await cache.abort(miss)
+
+        _ = try await seed("conv:serial", plan: false)
+        let serialMiss = try Self.unwrap(await cache.begin(conversationKey: "conv:serial", incomingTokens: incoming,
+                                                           modelID: "model-a", kvBits: nil,
+                                                           promptSnapshotResumeBoundaries: [64, 94]))
+        XCTAssertNil(serialMiss.reusableCache, "a serial snapshot never resumes a CB row")
+        await cache.abort(serialMiss)
+        let serialLayers = try await seed("conv:serial-path", plan: false)
+        let serialHit = try Self.unwrap(await cache.begin(conversationKey: "conv:serial-path", incomingTokens: incoming,
+                                                          modelID: "model-a", kvBits: nil))
+        XCTAssertTrue(serialHit.reusableCache === serialLayers, "the serial path still reuses it")
+        await cache.abort(serialHit)
+        XCTAssertFalse(ConversationCacheLayers([KVCacheSimple()], resumeBoundaryPlan: true).resumeBoundaryPlan,
+                       "only a prompt snapshot carries the plan mark")
+    }
+
+    /// SPEC-024-R005 / SPEC-048 MTP-9: a native-MTP lease reuses a snapshot
+    /// only with MTP head state at its boundary whose recorded token is the
+    /// incoming prompt's token there; anything else is a miss, never a
+    /// reselection. An ordinary lease ignores the head state.
+    func testNativeLeaseReusesASnapshotOnlyWithMatchingHeadState() async throws {
+        let cache = ConversationCache(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+        let stored = int32Range(0..<64)
+        let marker: Int32 = 61
+        let extended = stored + [marker] + int32Range(200..<230)
+        let headState = NativeMTPDrafterPrefixSnapshot(cache: [KVCacheSimple()], nextPosition: 64,
+                                                       foldedNextToken: Int(marker))
+
+        func seed(_ key: String, drafter: NativeMTPDrafterPrefixSnapshot?) async throws -> ConversationCacheLayers {
+            let lease = try Self.unwrap(await cache.begin(conversationKey: key, incomingTokens: stored,
+                                                       modelID: "model-a", kvBits: nil))
+            let layers = ConversationCacheLayers([RotatingKVCache(maxSize: 8, keep: 0)], promptSnapshot: true,
+                                                 nativeMTPDrafter: drafter)
+            await cache.commit(lease, cache: layers, fullTokens: stored)
+            return layers
+        }
+        func begin(_ key: String, _ tokens: [Int32], native: Bool) async throws -> ConversationCacheLease {
+            try Self.unwrap(await cache.begin(conversationKey: key, incomingTokens: tokens, modelID: "model-a",
+                                              kvBits: nil, requireNativeMTPDrafterSnapshot: native))
+        }
+
+        let withHead = try await seed("conv:head", drafter: headState)
+        let hit = try await begin("conv:head", extended, native: true)
+        XCTAssertTrue(hit.reusableCache === withHead)
+        XCTAssertEqual(hit.cachedPromptTokens, 64)
+        XCTAssertEqual(hit.reusableCache?.nativeMTPDrafter?.nextPosition, 64)
+        await cache.abort(hit)
+
+        _ = try await seed("conv:other-token", drafter: headState)
+        let otherToken = stored + [Int32(62)] + int32Range(200..<230)
+        let tokenMiss = try await begin("conv:other-token", otherToken, native: true)
+        XCTAssertNil(tokenMiss.reusableCache)
+        XCTAssertEqual(tokenMiss.cachedPromptTokens, 0)
+        await cache.abort(tokenMiss)
+
+        _ = try await seed("conv:no-head", drafter: nil)
+        let headMiss = try await begin("conv:no-head", extended, native: true)
+        XCTAssertNil(headMiss.reusableCache)
+        await cache.abort(headMiss)
+
+        let ordinaryLayers = try await seed("conv:ordinary", drafter: nil)
+        let ordinary = try await begin("conv:ordinary", extended, native: false)
+        XCTAssertTrue(ordinary.reusableCache === ordinaryLayers)
+        await cache.abort(ordinary)
+
+        // Head state never rides on a non-snapshot entry.
+        XCTAssertNil(ConversationCacheLayers([KVCacheSimple()], nativeMTPDrafter: headState).nativeMTPDrafter)
+    }
+
     func testGLM5NextSnapshotPolicyNeedsRoundTrippingRoleTokens() throws {
         try Self.requireMetal()
         let tokenizer = MarkerTokenizer()
         let glm = try Self.tinyGLM()
         XCTAssertEqual(ModelRuntime.conversationPromptSnapshotPolicy(model: glm, tokenizer: tokenizer),
-                       .lastRoleMarker(tokenIDs: Set(MarkerTokenizer.markers.values.map(Int32.init))))
+                       .lastRoleMarker(tokenIDs: Set(MarkerTokenizer.markers.values.map(Int32.init)),
+                                       resumeTokenID: 61))
         XCTAssertNil(ModelRuntime.conversationPromptSnapshotPolicy(model: glm, tokenizer: NoMarkerTokenizer()),
                      "a tokenizer without the role tokens gets no policy")
     }
@@ -440,7 +595,12 @@ final class ConversationPromptSnapshotTests: XCTestCase {
 
     /// The randomly initialised GLM-5-Next text model of
     /// `GLM5NextSerialBaselineTests` (linear-attention and sparse layers).
-    private static func tinyGLM() throws -> GLM5NextTextModel {
+    /// Shared with `GLM5NextCBPromptSnapshotTests`.
+    static func tinyGLM() throws -> GLM5NextTextModel {
+        GLM5NextTextModel(try tinyGLMConfiguration()).withTinyNoise()
+    }
+
+    static func tinyGLMConfiguration() throws -> GLM5NextConfiguration {
         let json = """
         {
             "model_type": "glm5_next_text", "vocab_size": 64, "hidden_size": 64,
@@ -468,15 +628,20 @@ final class ConversationPromptSnapshotTests: XCTestCase {
         """
         let configuration = try JSONDecoder().decode(GLM5NextConfiguration.self, from: Data(json.utf8))
         try configuration.validateModelConfiguration()
-        let model = GLM5NextTextModel(configuration)
+        return configuration
+    }
+}
+
+private extension GLM5NextTextModel {
+    func withTinyNoise() -> GLM5NextTextModel {
         let noisy: [(String, MLXArray)] = withRandomState(MLXRandom.RandomState(seed: 7)) {
-            model.parameters().flattened().map { key, value in
+            parameters().flattened().map { key, value in
                 (key, (MLXRandom.normal(value.shape) * 0.02).asType(value.dtype))
             }
         }
-        model.update(parameters: ModuleParameters.unflattened(noisy))
-        eval(model)
-        return model
+        update(parameters: ModuleParameters.unflattened(noisy))
+        eval(self)
+        return self
     }
 }
 
