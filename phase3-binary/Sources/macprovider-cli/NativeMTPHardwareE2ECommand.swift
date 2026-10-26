@@ -84,6 +84,9 @@ struct NativeMTPHardwareE2EFamily: Equatable, Sendable {
     /// nil when the harness's slot count is used. glm5_next signs 1: at four
     /// rows native MTP decoded at 0.79x ordinary in window A2 (1.27x at one).
     var signedMaxNativeActiveRows: Int? { self == .glm5Next ? 1 : nil }
+    var implementationMaxNativeActiveRows: Int? {
+        NativeMTPAdmissionSidecar.maxNativeActiveRowsBound(familyAdapter: familyAdapter)
+    }
 
     /// Whether the tuple admits sampled rows to native MTP.
     var admitsSampledRows: Bool { requestFeatureProfile == NativeMTPAdmissionSidecar.sampledRequestFeatureProfile }
@@ -544,7 +547,8 @@ final class NativeMTPHardwareE2ERunner {
             family: admission.familyAdapter,
             throughputDeltaPPM: admission.throughputDeltaPPM,
             maximumNativeActiveRows: diagnosticEligibilityBypass ? maxNativeActiveRows : admission.maxNativeActiveRows,
-            supportsSampling: admission.supportsSampling || diagnosticEligibilityBypass
+            supportsSampling: admission.supportsSampling || diagnosticEligibilityBypass,
+            adaptationConfig: admission.adaptationConfig
         )
         let servePathLoad: ModelRuntime.NativeMTPHardwareE2EServePathLoad?
         if verifyServePath {

@@ -1719,20 +1719,37 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         )
     }
 
-    /// SPEC-048 MTP-2 (0.1.43): a glm5_next tuple signs at most one native
-    /// active row (window A2: 1.27x at one row, 0.79x at four); Qwen keeps
-    /// the generic 1...8 range.
-    func testEmbeddedGLMAdapterSignsAtMostOneNativeActiveRow() throws {
+    func testEmbeddedGLMImplementationCeilingAllowsFutureSignedTwoAndFourRowBounds() throws {
+        for bound in [1, 2, 4] {
+            let fixture = try makeReleaseEnvelopeFixture(
+                prepareSnapshot: { base in try Self.embeddedLayout(base) },
+                entryEdit: {
+                    $0["mtp_family_adapter"] = "glm5_next_mtp_v1"
+                    $0["max_native_active_rows"] = bound
+                }
+            )
+            defer { try? FileManager.default.removeItem(at: fixture.base.root) }
+            let capability = try NativeMTPAdmissionSidecar.load(
+                sidecarData: fixture.sidecarData, signatureData: fixture.signatureData,
+                snapshotRoot: fixture.base.snapshot, context: fixture.context,
+                trustedKeyring: fixture.base.trustedKeyring, resolvedArtifactAuthority: fixture.authority)
+            XCTAssertEqual(capability.maxNativeActiveRows, bound)
+            let config = try XCTUnwrap(capability.adaptationConfig)
+            XCTAssertEqual(config.qualifiedMaximumDepth, capability.maxProposalDepth)
+            XCTAssertEqual(config.decreaseThresholdPPM, 1)
+            XCTAssertEqual(config.increaseThresholdPPM, 2)
+            XCTAssertEqual(config.maxVerificationPositionsPerCommittedMilli, 1000)
+        }
         let wide = try makeReleaseEnvelopeFixture(
             prepareSnapshot: { base in try Self.embeddedLayout(base) },
             entryEdit: {
                 $0["mtp_family_adapter"] = "glm5_next_mtp_v1"
-                $0["max_native_active_rows"] = 2
+                $0["max_native_active_rows"] = 5
             }
         )
         defer { try? FileManager.default.removeItem(at: wide.base.root) }
         XCTAssertEqual(try rejectedReleaseEnvelopeError(wide), .invalidValue("$.entries[0].max_native_active_rows"))
-        XCTAssertEqual(NativeMTPAdmissionSidecar.maxNativeActiveRowsBound(familyAdapter: "glm5_next_mtp_v1"), 1)
+        XCTAssertEqual(NativeMTPAdmissionSidecar.maxNativeActiveRowsBound(familyAdapter: "glm5_next_mtp_v1"), 4)
         XCTAssertNil(NativeMTPAdmissionSidecar.maxNativeActiveRowsBound(familyAdapter: "qwen3_5_mtp_v1"))
     }
 

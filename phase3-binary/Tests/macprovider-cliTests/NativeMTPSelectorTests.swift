@@ -917,6 +917,26 @@ final class NativeMTPSelectorTests: XCTestCase {
         XCTAssertEqual(downgraded.selection.nativeMTPReason, .capacityAboveNativeBound)
     }
 
+    func testSignedAdaptationConfigurationSurvivesSelectionAndSchedulerSubmission() throws {
+        let config = try NativeMTPAdaptationConfig(qualifiedMaximumDepth: 4,
+            decreaseThresholdPPM: 600_000, increaseThresholdPPM: 850_000,
+            maxVerificationPositionsPerCommittedMilli: 2_000)
+        let request = try makeRequest().withRequestID("adaptation-forwarding")
+        let capability = admittedCapability(maximumProposalDepth: 4, adaptationConfig: config)
+        let admission = NativeMTPRuntimeAdmission.resolve(
+            selection: DecodePathSelection(path: .nativeMTP, nativeMTPReason: .eligible),
+            capability: capability, schedulerSupportsNativeMTP: true)
+        let fence = NativeMTPTupleFence(admissionTupleSHA256: String(repeating: "a", count: 64),
+            servedSnapshotID: "snapshot", targetGeneration: 1)
+        let bound = admission.binding(to: fence)
+        let submission = try ModelRuntime.continuousBatchSubmission(for: request, promptTokens: [1],
+            maxOutputTokens: 128, nativeMTPAdmission: bound)
+        XCTAssertEqual(bound.adaptationConfig, config)
+        XCTAssertEqual(submission.schedulerRequest.nativeMTPAdaptationConfig, config)
+        XCTAssertEqual(submission.schedulerRequest.nativeMTPMaximumProposalDepth, 4)
+        XCTAssertEqual(submission.schedulerRequest.nativeMTPTupleFence, fence)
+    }
+
     private func admittedCapability(
         supportsStreaming: Bool = true,
         supportsNonStreaming: Bool = true,
@@ -926,7 +946,8 @@ final class NativeMTPSelectorTests: XCTestCase {
         maximumCompletionTokens: Int = 4096,
         maximumNativeActiveRows: Int = Int.max,
         supportsSampling: Bool = false,
-        family: String? = nil
+        family: String? = nil,
+        adaptationConfig: NativeMTPAdaptationConfig? = nil
     ) -> NativeMTPCapability {
         NativeMTPCapability(
             admitted: true,
@@ -943,7 +964,8 @@ final class NativeMTPSelectorTests: XCTestCase {
             maximumCompletionTokens: maximumCompletionTokens,
             family: family,
             maximumNativeActiveRows: maximumNativeActiveRows,
-            supportsSampling: supportsSampling
+            supportsSampling: supportsSampling,
+            adaptationConfig: adaptationConfig
         )
     }
 

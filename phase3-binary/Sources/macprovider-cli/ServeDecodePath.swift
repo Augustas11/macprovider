@@ -567,6 +567,7 @@ extension ModelRuntime {
                 nativeMTPCompleteWindowBytesByDepth: nativeMTPAdmission?.completeWindowBytesByDepth ?? [],
                 nativeMTPMaximumActiveRows: nativeMTPAdmission?.maximumNativeActiveRows ?? 0,
                 nativeMTPTupleFence: nativeMTPAdmission?.tupleFence,
+                nativeMTPAdaptationConfig: nativeMTPAdmission?.adaptationConfig,
                 ingestProvenance: request.ingestProvenance
             )
         )

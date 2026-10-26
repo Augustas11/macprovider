@@ -1619,7 +1619,7 @@ struct NativeMTPBenchPolicy {
                 "temperature must be 0: \(family.familyAdapter) admits greedy rows only"
             )
         }
-        if let signed = family.signedMaxNativeActiveRows, !exploratory {
+        if let signed = family.implementationMaxNativeActiveRows, !exploratory {
             guard let bound = maxNativeActiveRows, bound <= signed else {
                 throw NativeMTPBenchError.invalidPolicy(
                     "max_native_active_rows must be at most \(signed) for \(family.familyAdapter)"

@@ -333,13 +333,16 @@ class NativeMTPAdmissionMultiEntryTests(unittest.TestCase):
         # Qwen may still sign the sampled profile.
         self.assertEqual(body["entries"][0]["request_feature_profile"], self.qwen["entry"]["request_feature_profile"])
 
-    def test_glm_tuple_signs_at_most_one_native_active_row(self):
-        # SPEC-048 MTP-2 (0.1.43): 4 rows decoded at 0.79x ordinary.
+    def test_glm_implementation_ceiling_preserves_current_policy_and_permits_future_bounds(self):
         body = json.loads(build([self.qwen, self.glm], release_input()))
         self.assertEqual(body["entries"][1]["max_native_active_rows"], 1)
-        wide = copy.deepcopy(self.glm)
-        wide["entry"]["max_native_active_rows"] = 2
-        with self.assertRaisesRegex(SidecarError, "at most 1 native active row"):
+        for bound in (2, 4):
+            wide = copy.deepcopy(self.glm)
+            wide["entry"]["max_native_active_rows"] = bound
+            wider = json.loads(build([self.qwen, wide], release_input()))
+            self.assertEqual(wider["entries"][1]["max_native_active_rows"], bound)
+        wide["entry"]["max_native_active_rows"] = 5
+        with self.assertRaisesRegex(SidecarError, "at most 4 native active rows"):
             build([self.qwen, wide], release_input())
 
     def test_duplicate_or_empty_tuple_lists_fail_closed(self):

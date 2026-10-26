@@ -590,6 +590,7 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
     /// packed target verification at depth zero.
     let nativeMTPProposalTokens: [Int]
     let nativeMTPAdaptationDirective: NativeMTPAdaptationDirective?
+    let nativeMTPAdaptationConfig: NativeMTPAdaptationConfig?
     /// Runtime-only: an on-device self-check row (SPEC-038 FR-CB10). Buyer
     /// rows are capped at the served slot count and are not admitted beside
     /// self-check rows; self-check rows may use every scheduler row. Excluded
@@ -640,6 +641,7 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
         nativeMTPIntegrityProbe: Bool = false,
         nativeMTPProposalTokens: [Int] = [],
         nativeMTPAdaptationDirective: NativeMTPAdaptationDirective? = nil,
+        nativeMTPAdaptationConfig: NativeMTPAdaptationConfig? = nil,
         selfCheckProbe: Bool = false,
         selfCheckCohort: ContinuousBatchSelfCheckCohort? = nil,
         ingestProvenance: KVIngestProvenance = .unknown
@@ -678,6 +680,7 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
         self.nativeMTPIntegrityProbe = self.decodePath == .nativeMTP && nativeMTPIntegrityProbe
         self.nativeMTPProposalTokens = nativeMTPProposalTokens
         self.nativeMTPAdaptationDirective = nativeMTPAdaptationDirective
+        self.nativeMTPAdaptationConfig = nativeMTPAdaptationConfig
         self.selfCheckProbe = selfCheckProbe
         self.selfCheckCohort = selfCheckProbe ? selfCheckCohort : nil
         self.ingestProvenance = ingestProvenance
@@ -2238,6 +2241,8 @@ actor ContinuousBatchScheduler {
         var promptSnapshot: ContinuousBatchSerialConversationCache? = nil
         var decodePath: DecodePath = .ordinary
         var nativeMTPAdaptation: NativeMTPDepthAdaptationState?
+        var nativeMTPFusedOrdinaryDecode = false
+        var nativeMTPVerificationPositions: UInt64 = 0
         var nativeMTPDirective: NativeMTPAdaptationDirective?
         var nativeMTPTupleFence: NativeMTPTupleFence?
         var nativeMTPCounters: NativeMTPSelfTestCounters?
@@ -2371,6 +2376,7 @@ actor ContinuousBatchScheduler {
     /// `nativeMTPLoadGateReleaseRounds` consecutive decode rounds at or below
     /// it, so a row finishing and another arriving cannot flap the depth.
     private var nativeMTPLoadGateEngaged = false
+    private var nativeMTPTupleBreakers: [NativeMTPTupleFence: NativeMTPTupleCircuitBreakerState] = [:]
     #if DEBUG || MACPROVIDER_LAB_HARNESS
     private var labJourneyResourceObserver: NativeMTPJourneyResourceObserver?
     private var labJourneyReservationContext: (requestID: String, generatedTokens: Int, depth: Int)?
@@ -3457,6 +3463,10 @@ actor ContinuousBatchScheduler {
             let remaining = remainingDecodeOutputTokens(for: row)
             guard remaining > 0 else { continue }
             window = min(window, remaining)
+            if row.nativeMTPFusedOrdinaryDecode, let adaptation = row.nativeMTPAdaptation,
+               adaptation.currentDepth == 0 {
+                window = min(window, Int(NativeMTPAdaptationConfig.epochCommittedTokens - adaptation.committedTokens))
+            }
             bounded = true
         }
         return bounded ? max(1, window) : 1
@@ -3518,11 +3528,52 @@ actor ContinuousBatchScheduler {
         let requestedDepth = row.nativeMTPDirective?.forcedDepth
             ?? row.nativeMTPAdaptation?.currentDepth
             ?? row.request.nativeMTPMaximumProposalDepth
+        let tupleDepth = row.request.nativeMTPIntegrityProbe
+            ? row.request.nativeMTPMaximumProposalDepth
+            : (row.nativeMTPTupleFence.flatMap { nativeMTPTupleBreakers[$0]?.directive.forcedDepth }
+                ?? row.request.nativeMTPMaximumProposalDepth)
         return min(
             max(0, requestedDepth),
+            max(0, tupleDepth),
             row.request.nativeMTPMaximumProposalDepth,
             remainingProposalCapacity
         )
+    }
+
+    private func initialNativeMTPAdaptation(for request: ContinuousBatchSchedulerRequest) -> NativeMTPDepthAdaptationState? {
+        // Integrity probes exercise every signed proposal position and must
+        // not train buyer acceptance policy from deliberate rejection fixtures.
+        guard request.decodePath == .nativeMTP, !request.nativeMTPIntegrityProbe,
+              let config = request.nativeMTPAdaptationConfig else { return nil }
+        var initialDepth = min(2, request.nativeMTPMaximumProposalDepth)
+        if let fence = request.nativeMTPTupleFence {
+            if nativeMTPTupleBreakers[fence] == nil {
+                nativeMTPTupleBreakers[fence] = NativeMTPTupleCircuitBreakerState(config: config, initialDepth: initialDepth)
+            }
+            initialDepth = min(initialDepth, nativeMTPTupleBreakers[fence]?.requestInitialDepth ?? initialDepth)
+        }
+        var adaptation = NativeMTPDepthAdaptationState(config: config, initialDepth: initialDepth)
+        if let directive = request.nativeMTPAdaptationDirective {
+            adaptation.applyTupleDirective(directive)
+        }
+        return adaptation
+    }
+
+    private func recordNativeMTPCompletedRequest(_ row: Row) {
+        guard row.usesNativeMTP, !row.request.nativeMTPIntegrityProbe,
+              terminalResults[row.request.id] == nil,
+              pendingTerminalDeliveries[row.request.id] == nil,
+              let fence = row.nativeMTPTupleFence,
+              var breaker = nativeMTPTupleBreakers[fence] else { return }
+        breaker.recordEligibleRequest(
+            committedTokens: row.nativeMTPCounters?.committedTokens ?? 0,
+            accepted: row.nativeMTPCounters?.acceptedTokens ?? 0,
+            proposed: NativeMTPDepthAdaptationState.saturatingAdd(
+                row.nativeMTPCounters?.acceptedTokens ?? 0,
+                row.nativeMTPCounters?.rejectedTokens ?? 0),
+            packedTargetVerificationPositions: row.nativeMTPVerificationPositions
+        )
+        nativeMTPTupleBreakers[fence] = breaker
     }
 
     private func nativeMTPFixtureProposalTokens(for row: Row, maximumDepth: Int) -> [Int] {
@@ -4620,6 +4671,13 @@ actor ContinuousBatchScheduler {
                     active.nativeMTPCounters,
                     roundCounters
                 )
+                active.nativeMTPAdaptation?.recordRound(NativeMTPRoundWork(
+                    acceptedProposalPrefixCount: roundCounters.acceptedTokens,
+                    proposalCount: UInt64(clamping: proposalCount),
+                    committedTokenCount: roundCounters.committedTokens
+                ))
+                active.nativeMTPVerificationPositions = NativeMTPDepthAdaptationState.saturatingAdd(
+                    active.nativeMTPVerificationPositions, UInt64(clamping: item.input.verifiedInputTokenCount))
                 activeDecode[requestID] = active
             }
             if let consumed = reserved.first(where: { $0.row.request.id == item.row.request.id })?.consumedFixtureProposals,
@@ -4823,25 +4881,32 @@ actor ContinuousBatchScheduler {
         }
         let allNativeRows = rows.filter(\.usesNativeMTP)
         updateNativeMTPLoadGate(nativeRows: allNativeRows)
-        // While the load gate holds native rows at depth zero, a native verify
-        // of one column is the ordinary decode step with extra transaction
+        // At load-gate or confidence depth zero, a native verify of one
+        // column is the ordinary decode step with extra transaction
         // cost, so those rows ride the ordinary lockstep forward instead and
         // the backend keeps their drafter columns for when depth returns.
         // Integrity probes are exempt from the gate and keep verifying.
-        let fusedIDs: Set<String> = nativeMTPLoadGateEngaged
-            ? Set(allNativeRows.filter { !$0.request.nativeMTPIntegrityProbe }.map(\.request.id))
-            : []
-        let nativeRows = allNativeRows.filter { !fusedIDs.contains($0.request.id) }
+        let fusedIDs = Set(allNativeRows.filter { row in
+            guard !row.request.nativeMTPIntegrityProbe else { return false }
+            // DeepInfer confidence scheduling: only this row parks drafting;
+            // the row retains native identity and its committed drafter columns.
+            return nativeMTPLoadGateEngaged
+                || (row.nativeMTPAdaptation != nil && nativeMTPMaximumProposalDepth(for: row) == 0)
+        }.map(\.request.id))
+        for row in rows {
+            activeDecode[row.request.id]?.nativeMTPFusedOrdinaryDecode = fusedIDs.contains(row.request.id)
+        }
+        let nativeRows = allNativeRows.filter { !fusedIDs.contains($0.request.id) }.compactMap { activeDecode[$0.request.id] }
         #if DEBUG || MACPROVIDER_LAB_HARNESS
         if !fusedIDs.isEmpty {
             labNativeMTPLoadGateRecorder?.recordHeldRound(requestIDs: fusedIDs)
         }
         #endif
         guard !nativeRows.isEmpty else {
-            await runOrdinaryDecodeStep(rows: rows)
+            await runOrdinaryDecodeStep(rows: rows.compactMap { activeDecode[$0.request.id] })
             return
         }
-        let ordinaryRows = rows.filter { !$0.usesNativeMTP || fusedIDs.contains($0.request.id) }
+        let ordinaryRows = rows.filter { !$0.usesNativeMTP || fusedIDs.contains($0.request.id) }.compactMap { activeDecode[$0.request.id] }
         if rows.first.map({ $0.usesNativeMTP && !fusedIDs.contains($0.request.id) }) == true {
             await runNativeMTPDecodeStep(rows: nativeRows)
             guard !cleanupFailedClosed else { return }
@@ -5248,6 +5313,14 @@ actor ContinuousBatchScheduler {
             else { return .failed(errorCode: "native_mtp_lab_numerical_oracle_failed") }
         }
         #endif
+        if row.nativeMTPFusedOrdinaryDecode, row.nativeMTPAdaptation != nil {
+            row.nativeMTPAdaptation?.recordRound(NativeMTPRoundWork(
+                acceptedProposalPrefixCount: 0, proposalCount: 0, committedTokenCount: 1))
+            row.nativeMTPVerificationPositions = NativeMTPDepthAdaptationState.saturatingAdd(
+                row.nativeMTPVerificationPositions, 1)
+            row.nativeMTPCounters = Self.addNativeMTPCounters(row.nativeMTPCounters,
+                NativeMTPSelfTestCounters(acceptedTokens: 0, rejectedTokens: 0, bonusTokens: 1, committedTokens: 1))
+        }
         row.generatedTokens.append(token)
         row.currentToken = token
         row.pendingOutputTokens.append(token)
@@ -5609,7 +5682,7 @@ actor ContinuousBatchScheduler {
                         request.recurrentCheckpointPositions.contains($0.tokenCount)
                     },
                     decodePath: request.decodePath,
-                    nativeMTPAdaptation: nil,
+                    nativeMTPAdaptation: initialNativeMTPAdaptation(for: request),
                     nativeMTPDirective: request.nativeMTPAdaptationDirective,
                     nativeMTPTupleFence: request.nativeMTPTupleFence,
                     nativeMTPFixtureProposalsConsumed: false
@@ -6082,6 +6155,7 @@ actor ContinuousBatchScheduler {
         errorCode: String?,
         serialConversationCache: ContinuousBatchSerialConversationCache? = nil
     ) {
+        recordNativeMTPCompletedRequest(row)
         earlyStopIDs.remove(row.request.id)
         record(status == .cancelled ? .cancelled : .stopped)
         let isSuccessful = status == .stop || status == .length
@@ -6118,6 +6192,7 @@ actor ContinuousBatchScheduler {
         errorCode: String?,
         retainedCache: ContinuousBatchRetainedCache?
     ) {
+        recordNativeMTPCompletedRequest(row)
         earlyStopIDs.remove(row.request.id)
         record(status == .cancelled ? .cancelled : .stopped)
         let isSuccessful = status == .stop || status == .length

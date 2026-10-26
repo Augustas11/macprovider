@@ -161,8 +161,8 @@ final class NativeMTPRequestShapeReplayRunner {
         if layout.family.embeddedMTP {
             guard benchPolicy.qualifiedSlots != nil,
                   let bound = benchPolicy.maxNativeActiveRows,
-                  let signedBound = layout.family.signedMaxNativeActiveRows,
-                  bound <= signedBound else {
+                  let implementationBound = layout.family.implementationMaxNativeActiveRows,
+                  bound <= implementationBound else {
                 throw NativeMTPBenchError.invalidPolicy("embedded MTP replay requires explicit qualified_slots and a signed native-row bound")
             }
         }

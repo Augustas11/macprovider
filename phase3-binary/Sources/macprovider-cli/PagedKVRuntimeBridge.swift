@@ -871,6 +871,28 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         if start < widths.count { groups.append(start ..< widths.count) }
         return groups
     }
+    /// oMLX fused_batch.advance groups equal draft depths before verification.
+    /// Keep every row's real width and the vector-kernel token cap. MTP-7
+    /// requires oldest-ready rows first, so cohorts stop at a width change
+    /// instead of moving a later compatible row ahead of an older row.
+    static func packedVerifyGroups(widths: [Int], maxTokens: Int) -> [[Int]] {
+        var groups: [[Int]] = []
+        var start = 0
+        while start < widths.count {
+            let width = widths[start]
+            // Division avoids overflow even for an unbounded test limit.
+            // An individually wider row still runs alone, as before.
+            let rowLimit = max(1, maxTokens / max(1, width))
+            var end = start + 1
+            while end < widths.count, end - start < rowLimit, widths[end] == width {
+                end += 1
+            }
+            groups.append(Array(start..<end))
+            start = end
+        }
+        return groups
+    }
+
     private var activeOperations = 0
     private var cancelRequested = false
     /// Set once a ragged prefill forward attended outside
@@ -1541,19 +1563,21 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
 
         clearDecodeSession()
         let ordered = inputs.sorted { $0.packedRowIndex < $1.packedRowIndex }
-        let groups = Self.verifyGroups(
+        let groups = Self.packedVerifyGroups(
             widths: ordered.map(\.verifiedInputTokenCount),
             maxTokens: serializesPaddedRows ? 1 : maxVerifyTokensPerForward
         )
         guard groups.count > 1 else {
-            return try await verifyNativeMTPPackedGroup(rows: inputs)
+            return try await verifyNativeMTPPackedGroup(rows: ordered)
         }
         var verifiedRows: [NativeMTPVerifiedRow] = []
         for group in groups {
-            // Each group verifies as its own packed round, rows re-indexed
-            // from 0; results keep the round's packed row indices.
-            let groupInputs = ordered[group].enumerated().map { index, input in
-                ContinuousBatchNativeMTPVerifyInput(
+            // Depth cohorts keep each query's serial width, avoiding both
+            // wasted padding and batch-shape-dependent kernel selection.
+            // Re-index only within the cohort, then restore scheduler identity.
+            let groupInputs = group.enumerated().map { index, originalIndex in
+                let input = ordered[originalIndex]
+                return ContinuousBatchNativeMTPVerifyInput(
                     requestID: input.requestID,
                     currentToken: input.currentToken,
                     proposalTokens: input.proposalTokens,
@@ -1574,7 +1598,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             verifiedRows += groupRows.map { row in
                 NativeMTPVerifiedRow(
                     schedulerRowID: row.schedulerRowID,
-                    packedRowIndex: ordered[group.lowerBound + row.packedRowIndex].packedRowIndex,
+                    packedRowIndex: ordered[group[row.packedRowIndex]].packedRowIndex,
                     proposedTokenIDs: row.proposedTokenIDs,
                     targetTopTokenIDs: row.targetTopTokenIDs
                 )

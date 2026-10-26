@@ -8255,7 +8255,8 @@ maxTokens: 1,
             maximumProposalDepth: 0, maximumPromptTokens: c.maximumPromptTokens,
             maximumCompletionTokens: c.maximumCompletionTokens, completeWindowBytesByDepth: c.completeWindowBytesByDepth,
             family: c.family, throughputDeltaPPM: c.throughputDeltaPPM,
-            maximumNativeActiveRows: c.maximumNativeActiveRows, supportsSampling: c.supportsSampling)
+            maximumNativeActiveRows: c.maximumNativeActiveRows, supportsSampling: c.supportsSampling,
+            adaptationConfig: c.adaptationConfig)
         return true
     }
 
@@ -11701,7 +11702,8 @@ maxTokens: maxTokens,
                 family: admissionCapability.familyAdapter,
                 throughputDeltaPPM: admissionCapability.throughputDeltaPPM,
                 maximumNativeActiveRows: admissionCapability.maxNativeActiveRows,
-                supportsSampling: admissionCapability.supportsSampling
+                supportsSampling: admissionCapability.supportsSampling,
+                adaptationConfig: admissionCapability.adaptationConfig
             )
             let runtimeTuple = NativeMTPPublishedRuntimeTuple(
                 modelID: selfTestRuntimeTuple.modelID,

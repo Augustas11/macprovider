@@ -45,6 +45,7 @@ struct NativeMTPCapability: Sendable, Equatable {
     /// The signed tuple qualified sampled rows (SPEC-023-R024
     /// `native_mtp_sampled_text_v1`); greedy-only tuples route them ordinary.
     let supportsSampling: Bool
+    let adaptationConfig: NativeMTPAdaptationConfig?
 
     init(
         admitted: Bool,
@@ -63,7 +64,8 @@ struct NativeMTPCapability: Sendable, Equatable {
         family: String? = nil,
         throughputDeltaPPM: Int = 0,
         maximumNativeActiveRows: Int = Int.max,
-        supportsSampling: Bool = false
+        supportsSampling: Bool = false,
+        adaptationConfig: NativeMTPAdaptationConfig? = nil
     ) {
         self.admitted = admitted
         self.revoked = revoked
@@ -82,6 +84,7 @@ struct NativeMTPCapability: Sendable, Equatable {
         self.throughputDeltaPPM = throughputDeltaPPM
         self.maximumNativeActiveRows = max(1, maximumNativeActiveRows)
         self.supportsSampling = supportsSampling
+        self.adaptationConfig = adaptationConfig
     }
 
     static let unavailable = NativeMTPCapability(
@@ -384,6 +387,7 @@ struct NativeMTPRuntimeAdmission: Sendable, Equatable {
     let completeWindowBytesByDepth: [Int]
     let maximumNativeActiveRows: Int
     let tupleFence: NativeMTPTupleFence?
+    var adaptationConfig: NativeMTPAdaptationConfig? = nil
 
     var usesNativeMTP: Bool {
         effectivePath == .nativeMTP
@@ -455,7 +459,8 @@ struct NativeMTPRuntimeAdmission: Sendable, Equatable {
             maximumCompletionTokens: capability.maximumCompletionTokens,
             completeWindowBytesByDepth: capability.completeWindowBytesByDepth,
             maximumNativeActiveRows: capability.maximumNativeActiveRows,
-            tupleFence: nil
+            tupleFence: nil,
+            adaptationConfig: capability.adaptationConfig
         )
     }
 
@@ -511,7 +516,8 @@ struct NativeMTPRuntimeAdmission: Sendable, Equatable {
             maximumCompletionTokens: maximumCompletionTokens,
             completeWindowBytesByDepth: completeWindowBytesByDepth,
             maximumNativeActiveRows: maximumNativeActiveRows,
-            tupleFence: usesNativeMTP ? fence : nil
+            tupleFence: usesNativeMTP ? fence : nil,
+            adaptationConfig: adaptationConfig
         )
     }
 }

@@ -79,15 +79,26 @@ final class NativeMTPBenchGLMTests: XCTestCase {
         XCTAssertNoThrow(try policy.validateFamily(.qwen35))
     }
 
-    func testSignedOneRowBoundRefusesAWiderPolicyBeforeLoading() throws {
+    func testFutureSignedBoundsTwoAndFourCanBeQualifiedWithinImplementationCeiling() throws {
+        for bound in [2, 4] {
+            var object = try glmPolicyObject()
+            object["max_native_active_rows"] = bound
+            object["slots"] = Array(1...bound)
+            object["gated_cells"] = NativeMTPBenchPolicy.mandatoryGatedCellIDs(bound: bound, qualifiedSlots: 4)
+            let policy = try load(object)
+            XCTAssertNoThrow(try policy.validateFamily(.glm5Next))
+        }
         var object = try glmPolicyObject()
-        object["max_native_active_rows"] = 2
-        object["slots"] = [1, 2]
-        object["gated_cells"] = ["s3-p1536-o512", "s4-p1536-o512"]
+        object["max_native_active_rows"] = 5
+        object["slots"] = Array(1...5)
+        object["qualified_slots"] = 8
+        object["gated_cells"] = NativeMTPBenchPolicy.mandatoryGatedCellIDs(bound: 5, qualifiedSlots: 8)
+        object["sustained_cell_id"] = "s8-p1536-o512"
         let policy = try load(object)
         XCTAssertThrowsError(try policy.validateFamily(.glm5Next)) { error in
-            XCTAssertTrue("\(error)".contains("max_native_active_rows must be at most 1"), "\(error)")
+            XCTAssertTrue("\(error)".contains("max_native_active_rows must be at most 4"), "\(error)")
         }
+        XCTAssertEqual(NativeMTPHardwareE2EFamily.glm5Next.signedMaxNativeActiveRows, 1)
     }
 
     func testExploratoryDiagnosticCanMeasureSampledConcurrentNativeRows() throws {
