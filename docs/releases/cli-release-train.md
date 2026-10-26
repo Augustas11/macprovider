@@ -44,6 +44,12 @@ Pearl coordinator/gateway release numbering is independent from the provider
 CLI train. Failed and superseded tags remain consumed and must not be reused.
 Historical tables below do not select today's release version.
 
+Pending gateway-only release content is tracked in the
+[coordinator release train](coordinator-release-train.md#pending-runtime-inclusion--public-privacy-disclosures-2026-10-26):
+#2159 (`2236eb74a`, issue #2156) updates public privacy disclosures and needs the
+next Pearl runtime deployment. It is outside the provider CLI/app candidate;
+cutting that candidate does not publish the embedded gateway pages.
+
 ## Current published release and fleet target
 
 Verified 2026-10-25 against GitHub release/tag metadata, the release train
@@ -58,12 +64,84 @@ Verified 2026-10-25 against GitHub release/tag metadata, the release train
 | Catalog | `published-2026-10-25-glm53-qwen36-native-mtp-v272` (#2141), activated 2026-10-25 02:49–03:12Z; `native_mtp_admission_decode_path` `match` (`4d04a3f3…`) |
 | Consumed identities | Provider and runtime tags through **v1.8.272** are consumed (v1.8.271 is a Pearl runtime tag). The next provider CLI takes the next unused tag; refresh both trains and remote tags first. |
 
-## Next CLI release — net changes vs 1.8.272 (tracked 2026-10-25)
+## Next CLI release — net changes vs 1.8.272 (tracked 2026-10-26)
 
-Live fleet target: **1.8.272**. No provider-side change has merged since.
+Live fleet target: **1.8.272**. Include the merged changes below in the next CLI/app cut.
 
 | PR | Issue | Provider-side change | Status |
 |---|---|---|---|
+| #2158 | #2155 | Malibu.app retires duplicate app/menu-bar instances after updates: launch-time version election, successor readiness acknowledgement, 35-second quit deadline and forced stale-app exit after 40 seconds; newer running app survives an older rollback launch (SPEC-025-R013/R014). | merged (`79c1c81f6`); next CLI/app cut; signed live acceptance pending |
+| #2161 | #2160 (closed) | Provider-local `/v1/messages` for Claude Code: tools, thinking, JSON/SSE errors and stop metadata over the shared runtime; local priority, cancellation and unbilled accounting; status capability (SPEC-001-R009/R011, SPEC-025-R015). | merged (`9678fc21d`); next CLI/app cut; signed live acceptance pending |
+| [#2165](https://github.com/Augustas11/macprovider/pull/2165) | #2157 | Managed coding-agent privacy: consumer encrypts original Chat, Responses and Messages bodies; provider-local conversion; signed endpoint-family binding; protected local credentials, budget admission and verified assurance UI. | merged (`dae190161`); next CLI/app cut plus coordinated Pearl runtime; production acceptance pending |
+
+**#2160 release acceptance:** all 28 checks in
+[CI run 40261607346](https://github.com/Augustas11/macprovider/actions/runs/40261607346)
+passed, and `antfleet-ops` approved and merged #2161. Studio acceptance passed
+30 targeted tests and a real four-turn streamed Claude Code coding task with
+Read/Bash tools, cancellation, simulated network-priority preemption and native
+stop-sequence reporting. The client also sent `X-MacProvider-Origin: local-app`
+through `ANTHROPIC_CUSTOM_HEADERS`; base URL/model/auth alone do not classify
+local work. The lab used `--bare` and explicit tools; full default-client
+configuration and the Malibu Terminal launcher are not established by this test.
+
+Issue #2160 is closed following source merge. Before promoting the next signed
+provider cut, verify that released bytes support the local tool session and Stop,
+and that a real paying Malibu buyer preempts local work without customer errors.
+Local requests must remain unbilled and outside heartbeat accounting. No signed
+release, live routing, billing or settlement acceptance is claimed by the lab.
+The metadata change in `ModelRuntime.swift` changes the conservative decode-path
+digest to `105875b44bb72502928fe5c96b82c6598a326c7c99670f9ebc241350e3556776`;
+generation and output filtering are unchanged. Preserve existing qualification
+and follow the release identity-binding procedure for signed policies.
+
+**#2155 release acceptance:** CI run `40257144313` passed all 28 checks and
+`antfleet-ops` approved #2158. Before promoting the next signed CLI/app cut,
+verify on the designated Studio that a real bundle update and a second launch
+leave exactly one Malibu process and one menu-bar icon, including a hung old
+quit drain and pre-handoff legacy duplicates. Verify that an older rollback
+launch preserves the newer running app and that app handoff keeps the launchd
+provider running. This source merge is not live-update acceptance.
+
+## Coding-agent privacy release acceptance — issue 2157
+
+[#2165](https://github.com/Augustas11/macprovider/pull/2165) merged as
+`dae190161f6b50680640cec77b81f82ad8b1e41b`; `antfleet-ops` approved and
+merged the reviewed head `f6b292d30` after all 28 checks in
+[CI run 40282107873](https://github.com/Augustas11/macprovider/actions/runs/40282107873)
+passed. One unchanged rerun passed a pre-existing coordinator keepalive race;
+21 focused Swift XCTest cases also passed on the authorized alternate Mac.
+
+On operator instruction, issue [#2157](https://github.com/Augustas11/macprovider/issues/2157)
+is closed with remaining release work tracked here and in the
+[coordinator train](coordinator-release-train.md#coding-agent-privacy--pending-runtime-inclusion-2026-10-26).
+Source merge and issue closure do not establish live privacy for coding agents.
+Both the signed CLI/Malibu.app cut and matching coordinator/gateway runtime must
+include `dae190161`; neither release alone delivers the feature.
+
+Release through `scripts/ops/cli-release.sh status`, then `next` and
+`next --run`, with the matching Pearl rollout tracked in the coordinator train.
+Before promotion, complete and record these acceptance gates against released,
+signed bytes:
+
+- Launch Codex and Claude Code from Malibu.app Terminal and Connected apps;
+  complete real multi-turn tool-using tasks through the production gateway.
+  Verify original Responses/Messages bodies enter the encrypted path, with
+  translation only inside the reserved provider runtime.
+- Verify authenticated served privacy/assurance labels and relay logs containing
+  envelopes without request/response content. The provider still reads plaintext
+  to infer. Require `code_bound_attested` on a supported macOS 27 provider and
+  verify that an unmet requirement fails closed.
+- Exercise budget admission, invalid/revoked identity or family mismatch,
+  interrupted/truncated streams and postdispatch uncertainty: no plaintext
+  fallback, silent downgrade, failover or automatic resubmission. Verify agents
+  receive only protected local tokens and managed legacy profiles migrate safely.
+- Preserve ordinary Chat-only key/pin compatibility and existing accounting and
+  settlement gates. Record signed runtime identities and acceptance evidence in
+  both trains before marking the feature shipped.
+
+Signed rollout and these real-agent production gates remain pending. Reuse
+existing qualification evidence; a new cut requires identity binding, not an
+unrelated inference benchmark.
 
 ## Shipped v1.8.272 — net changes vs 1.8.270
 

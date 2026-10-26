@@ -108,6 +108,41 @@ func TestPrivacyRouteRendersHonestRetention(t *testing.T) {
 	}
 }
 
+func TestPublicPagesDistinguishPrivacyModes(t *testing.T) {
+	h, _, _, _ := newTestHarness(t, fakeOAuth{})
+	for _, path := range []string{"/privacy", "/docs", "/account"} {
+		t.Run(path, func(t *testing.T) {
+			resp := assertStatus(t, h, http.MethodGet, path, "", "", "", http.StatusOK)
+			text := strings.ToLower(normalizeDisclosureText(accountVisibleText(resp.Body.String())))
+			for _, want := range []string{"default mode", "plaintext to the gateway and the serving mac", "opt-in privacy class"} {
+				if !strings.Contains(text, want) {
+					t.Errorf("missing privacy-mode disclosure %q", want)
+				}
+			}
+			for _, stale := range []string{"The product makes NO private-inference", "<li>private inference</li>"} {
+				if strings.Contains(resp.Body.String(), stale) {
+					t.Errorf("contains unqualified non-claim %q", stale)
+				}
+			}
+		})
+	}
+	for _, path := range []string{"/privacy", "/docs"} {
+		resp := assertStatus(t, h, http.MethodGet, path, "", "", "", http.StatusOK)
+		text := strings.ToLower(normalizeDisclosureText(accountVisibleText(resp.Body.String())))
+		for _, want := range []string{
+			"chat completions only", "relay-blind-client",
+			"gateway and coordinator cannot read request or response content",
+			"provider runtime still reads plaintext to run inference",
+			"enrolled providers", "signed, hardened runtime",
+			"end-to-end encryption that excludes the provider",
+		} {
+			if !strings.Contains(text, want) {
+				t.Errorf("%s missing privacy-class scope or limitation %q", path, want)
+			}
+		}
+	}
+}
+
 func TestTier1DisclosureMatchesSpecSection16(t *testing.T) {
 	specPath := filepath.Join("..", "..", "..", "specs", "SPEC-006-buyer-api.md")
 	raw, err := os.ReadFile(specPath)
