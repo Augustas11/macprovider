@@ -26,10 +26,16 @@ enum ModelsHubPresentation {
     static func rows(for tab: ModelsHubTab, rows: [MalibuModelRow]) -> [MalibuModelRow] {
         switch tab {
         case .recommended, .browse:
-            return DiscoverPresentation.visibleRows(rows, search: "", fitsOnly: tab == .recommended, sort: .catalog)
+            return discoveryRows(for: tab, rows: rows, search: "", fitsOnly: false, sort: .catalog)
         case .onThisMac: return ModelsPresentation.sections(rows).flatMap(\.rows)
         case .downloads: return []
         }
+    }
+
+    static func discoveryRows(for tab: ModelsHubTab, rows: [MalibuModelRow], search: String,
+                              fitsOnly: Bool, sort: DiscoverPresentation.Sort) -> [MalibuModelRow] {
+        DiscoverPresentation.visibleRows(rows, search: search,
+                                         fitsOnly: tab == .recommended || fitsOnly, sort: sort)
     }
 
     static func recentDownloads(_ history: [ModelActivityEntry]) -> [ModelActivityEntry] {

@@ -18,6 +18,19 @@ final class ModelsHubTests: XCTestCase {
         XCTAssertTrue(ModelsHubPresentation.emptyDownloads.contains("No downloads yet"))
     }
 
+    func testRecommendedAlwaysFitsWhileBrowseCanShowTheFullCatalog() throws {
+        let fitting = try ShellScreensTests.catalogOnlyRow(key: "fits", modelID: "vendor/fits")
+        let large = try ShellScreensTests.catalogOnlyRow(key: "large", modelID: "vendor/large", fit: "does_not_fit")
+        for filter in [false, true] {
+            XCTAssertEqual(ModelsHubPresentation.discoveryRows(for: .recommended, rows: [fitting, large],
+                search: "", fitsOnly: filter, sort: .catalog).map(\.id), [fitting.id])
+        }
+        XCTAssertEqual(ModelsHubPresentation.discoveryRows(for: .browse, rows: [fitting, large],
+            search: "", fitsOnly: false, sort: .catalog).map(\.id), [fitting.id, large.id])
+        XCTAssertEqual(ModelsHubPresentation.discoveryRows(for: .browse, rows: [fitting, large],
+            search: "", fitsOnly: true, sort: .catalog).map(\.id), [fitting.id])
+    }
+
     func testRecentDownloadsExcludeSwitchesAndKeepNewestFirst() {
         let entries = (0..<25).map { index in
             ModelActivityEntry(id: UUID(), timestamp: Date(timeIntervalSince1970: Double(index)), operation: "download", fromModelID: nil, toModelID: "model-\(index)", outcome: index % 2 == 0 ? "success" : "cancelled", reason: nil)

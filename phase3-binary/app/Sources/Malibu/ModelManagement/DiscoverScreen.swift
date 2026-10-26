@@ -205,7 +205,7 @@ struct DiscoverScreen: View {
     }
 
     private var visible: [MalibuModelRow] {
-        DiscoverPresentation.visibleRows(store.rows, search: search, fitsOnly: fitsOnly, sort: sort)
+        ModelsHubPresentation.discoveryRows(for: mode, rows: store.rows, search: search, fitsOnly: fitsOnly, sort: sort)
     }
 
     private var selected: MalibuModelRow? {
@@ -280,7 +280,9 @@ struct DiscoverScreen: View {
                 ForEach(DiscoverPresentation.Sort.allCases) { Text($0.title).tag($0) }
             }
             .frame(maxWidth: 200)
-            Toggle(String(localized: "Fits this Mac", comment: "Discover fit filter"), isOn: $fitsOnly)
+            if mode == .browse {
+                Toggle(String(localized: "Fits this Mac", comment: "Discover fit filter"), isOn: $fitsOnly)
+            }
         }
     }
 
