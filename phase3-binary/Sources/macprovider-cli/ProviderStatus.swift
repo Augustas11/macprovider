@@ -1424,6 +1424,11 @@ actor ProviderStatus {
         }
     }
 
+    func localCreativeLanguageRestoredAfterRelease() async {
+        guard modelLoaded, !localCreativeHold, !operatorPauseFence else { return }
+        await creativeHoldReleaseHandler?()
+    }
+
     func setOperatorPauseFence(_ paused: Bool) {
         operatorPauseFence = paused
         if paused {

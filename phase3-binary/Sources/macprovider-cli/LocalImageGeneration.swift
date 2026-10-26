@@ -68,6 +68,7 @@ struct LocalCreativeLifecycle: Sendable {
     let unloadLanguage: @Sendable () async throws -> Void
     let restoreLanguage: @Sendable () async throws -> Void
     let resume: @Sendable () async -> Void
+    var languageRestoredAfterRelease: @Sendable () async -> Void = {}
 }
 
 /// Owns both the single-flight slot and the creative hold, shared by every HTTP channel.
@@ -213,7 +214,14 @@ actor LocalImageGeneration {
         await backend.unload()
         if languageUnloaded {
             for attempt in 0..<3 {
-                do { try await lifecycle.restoreLanguage(); languageUnloaded = false; break }
+                do {
+                    try await lifecycle.restoreLanguage()
+                    languageUnloaded = false
+                    // The original release may already have registered an unloaded,
+                    // unavailable session. Recovery needs its own authenticated reconnect.
+                    if !held { await lifecycle.languageRestoredAfterRelease() }
+                    break
+                }
                 catch {
                     lastError = "Could not reload the language model: \(error)"
                     if attempt < 2 { try? await Task.sleep(nanoseconds: 250_000_000) }

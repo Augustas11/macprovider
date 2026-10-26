@@ -503,6 +503,91 @@ final class CoordinatorClientTests: XCTestCase {
         await client.stop()
     }
 
+    func testDelayedCreativeRestorationReauthenticatesUnavailableReplacement() async throws {
+        try await assertDelayedCreativeRestoration(operatorPaused: false)
+    }
+
+    func testDelayedCreativeRestorationPreservesOperatorPause() async throws {
+        try await assertDelayedCreativeRestoration(operatorPaused: true)
+    }
+
+    private func assertDelayedCreativeRestoration(operatorPaused: Bool) async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let reloads = DelayedCreativeReloads()
+        let status = ProviderStatus(modelID: "fixture", modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1))
+        let runtime = ModelRuntime(modelID: "fixture", warmSwapEnabled: false,
+            loader: { _ in throw CocoaError(.fileReadUnknown) },
+            testLoader: { try await reloads.load($0) },
+            testCompletion: { _, _ in throw CocoaError(.fileReadUnknown) })
+        await runtime.setProviderStatus(status)
+        let client = try await makeClient(status: status, recorder: recorder)
+        let initial = FakeProviderWebSocketTask(receiveResults: [])
+        await client.setWebSocketForTest(initial)
+        try await client.handleCoordinatorPayloadForTest([
+            "type": "hello_ack", "assigned_id": "creative-initial", "heartbeat_interval_s": 30,
+        ])
+        await client.reinstallRequestCapacityStateUpdateHandlerForTest()
+        let images = LocalImageGeneration(backend: DelayedCreativeFailingBackend(),
+            lifecycle: LocalCreativeLifecycle(
+                pause: { await status.setLocalCreativeHold(true) }, drain: {},
+                unloadLanguage: { try await runtime.unloadForLocalCreativeHold() },
+                restoreLanguage: { try await runtime.restoreAfterLocalCreativeHold() },
+                resume: { await status.setLocalCreativeHold(false) },
+                languageRestoredAfterRelease: { await status.localCreativeLanguageRestoredAfterRelease() }),
+            physicalBytes: 16 * 1_073_741_824, availableBytes: { 0 },
+            recoveryNanoseconds: 20_000_000)
+        let request = try JSONDecoder().decode(LocalImageRequest.self, from: Data(#"{"prompt":"sea"}"#.utf8))
+        do { _ = try await images.generate(request); XCTFail("Expected image backend failure") } catch {}
+        let exhaustedState = await images.state
+        let loadedBeforeRecovery = await runtime.isLoaded
+        XCTAssertEqual(exhaustedState, .recoveryRequired)
+        XCTAssertFalse(loadedBeforeRecovery)
+        XCTAssertEqual(initial.cancelCount, 1)
+
+        let replacement = FakeProviderWebSocketTask(receiveResults: [])
+        await client.setWebSocketForTest(replacement)
+        try await client.handleCoordinatorPayloadForTest([
+            "type": "hello_ack", "assigned_id": "creative-unavailable", "heartbeat_interval_s": 30,
+        ])
+        await client.reinstallRequestCapacityStateUpdateHandlerForTest()
+        try await client.sendHeartbeatForTest()
+        let unavailable = await recorder.frames.last { $0["type"] as? String == "heartbeat" }
+        XCTAssertEqual(unavailable?["status"] as? String, "unavailable",
+            "An unloaded replacement session must never advertise ready")
+        if operatorPaused { _ = await client.pauseByOperator() }
+        let cancellationsBeforeRecovery = replacement.cancelCount
+        await reloads.allowRestoration()
+        for _ in 0..<400 {
+            if await images.state == .idle { break }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        let recoveredState = await images.state
+        let loaded = await runtime.isLoaded
+        let paused = await status.operatorPauseFence
+        XCTAssertEqual(recoveredState, .idle)
+        XCTAssertTrue(loaded)
+        XCTAssertEqual(paused, operatorPaused)
+        XCTAssertEqual(replacement.cancelCount, cancellationsBeforeRecovery + (operatorPaused ? 0 : 1),
+            "Delayed recovery must request fresh authentication unless the operator is paused")
+        let recovered = await status.snapshot()
+        XCTAssertEqual(recovered.status, operatorPaused ? .unavailable : .ready)
+        if !operatorPaused {
+            let readySession = FakeProviderWebSocketTask(receiveResults: [])
+            await client.setWebSocketForTest(readySession)
+            try await client.handleCoordinatorPayloadForTest([
+                "type": "hello_ack", "assigned_id": "creative-restored", "heartbeat_interval_s": 30,
+            ])
+        }
+        try await client.sendHeartbeatForTest()
+        let finalHeartbeat = await recorder.frames.last { $0["type"] as? String == "heartbeat" }
+        XCTAssertEqual(finalHeartbeat?["status"] as? String, operatorPaused ? "unavailable" : "ready")
+        let admission = await status.beginRequestIfAccepting()
+        XCTAssertEqual(admission != nil, !operatorPaused)
+        if let admission { await status.finishRequest(startedAt: admission, completion: nil, failed: false) }
+        await client.stop()
+    }
+
     func testCreativeHoldReleaseNeverLiftsOperatorPause() async throws {
         let recorder = CoordinatorFrameRecorder()
         let status = ProviderStatus(modelID: "model-a", modelLoaded: true,
@@ -11384,4 +11469,21 @@ private final class FakeProviderWebSocketTask: ProviderWebSocketTask, @unchecked
             cancelCount
         }
     }
+}
+
+private actor DelayedCreativeReloads {
+    private var allowed = false
+    func allowRestoration() { allowed = true }
+    func load(_ model: String) throws -> (modelID: String, modelHash: String) {
+        guard allowed else { throw CocoaError(.fileReadUnknown) }
+        return (model, "fixture-hash")
+    }
+}
+
+private struct DelayedCreativeFailingBackend: LocalImageBackend {
+    func prepare(quantized: Bool, progress: @escaping @Sendable (Int64, Int64) -> Void) async throws {
+        throw CocoaError(.fileReadUnknown)
+    }
+    func generate(_ request: LocalImageRequest) async throws -> Data { Data() }
+    func unload() async {}
 }
