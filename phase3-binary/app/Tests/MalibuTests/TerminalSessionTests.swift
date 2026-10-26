@@ -145,4 +145,61 @@ final class TerminalSessionTests: XCTestCase {
         XCTAssertEqual(kill(-pid, 0), -1)
         XCTAssertEqual(errno, ESRCH)
     }
+    func testCloseTerminatesForegroundAndBackgroundJobControlGroups() async throws {
+        try await assertJobControlChildrenTerminate(onQuit: false)
+    }
+
+    func testQuitTerminatesForegroundAndBackgroundJobControlGroups() async throws {
+        try await assertJobControlChildrenTerminate(onQuit: true)
+    }
+
+    private func assertJobControlChildrenTerminate(onQuit: Bool) async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let backgroundFile = folder.appendingPathComponent("background")
+        let foregroundFile = folder.appendingPathComponent("foreground")
+        let view = EmbeddedProcessTerminalView(frame: .init(x: 0, y: 0, width: 640, height: 400))
+        let command = """
+        /bin/sh -c 'trap "" HUP; echo $$ > "$1"; exec /bin/sleep 30' child "$1/background" &
+        /bin/sh -c 'trap "" HUP; echo $$ > "$1"; exec /bin/sleep 30' child "$1/foreground"
+        """
+        view.startProcess(executable: "/bin/zsh", args: ["-f", "-i", "-m", "-c", command, "fixture", folder.path],
+                          environment: ["TERM=xterm-256color", "PATH=/usr/bin:/bin"])
+        let shell = view.process.shellPid
+        guard shell > 1 else { XCTFail("PTY did not start"); return }
+        var children: [pid_t] = []
+        defer {
+            for pid in children { _ = kill(pid, SIGKILL) }
+            _ = kill(-shell, SIGKILL)
+        }
+        for _ in 0..<100 {
+            if FileManager.default.fileExists(atPath: backgroundFile.path),
+               FileManager.default.fileExists(atPath: foregroundFile.path) { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        children = try [backgroundFile, foregroundFile].map {
+            let value = try String(contentsOf: $0, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+            return try XCTUnwrap(pid_t(value))
+        }
+        XCTAssertNotEqual(getpgid(children[0]), shell)
+        XCTAssertNotEqual(getpgid(children[1]), shell)
+        XCTAssertNotEqual(getpgid(children[0]), getpgid(children[1]))
+        for pid in children { XCTAssertEqual(getsid(pid), shell) }
+        let session = TerminalSession(harness: .shell)
+        session.adoptTestProcessGroup(shell)
+        if onQuit {
+            await TerminalSession.terminateAll()
+        } else {
+            session.close()
+            try await Task.sleep(for: .milliseconds(300))
+            for pid in children { XCTAssertEqual(kill(pid, 0), 0, "HUP-resistant job survives until escalation") }
+            try await Task.sleep(for: .seconds(3.2))
+        }
+        for pid in children {
+            XCTAssertEqual(kill(pid, 0), -1, "Job-control child must die even after its shell exits")
+            XCTAssertEqual(errno, ESRCH)
+        }
+    }
+
 }
