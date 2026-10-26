@@ -719,7 +719,7 @@ actor ProviderStatus {
     /// queue-pressure refusal). The check and the in-flight count move
     /// together, so a request either counts toward a hold's drain or is refused.
     func admitRequest(requestID: String? = nil) async -> ProviderRequestAdmission {
-        guard status != .draining, status != .unavailable else { return .pausedOrDraining }
+        guard !localCreativeHold, status != .draining, status != .unavailable else { return .pausedOrDraining }
         guard !cbAdmissionHold.active else { return .selfCheckAdmissionHold }
         return .admitted(await beginRequest(requestID: requestID))
     }
@@ -1127,7 +1127,7 @@ actor ProviderStatus {
     /// draining. An operator pause stops network buyers only, so the
     /// provider can still use its own model while paused.
     private var acceptsLocalRequests: Bool {
-        guard modelLoaded, !localAdmissionClosed else { return false }
+        guard modelLoaded, !localAdmissionClosed, !localCreativeHold else { return false }
         switch status {
         case .ready, .busy, .degraded: return true
         case .draining: return false
@@ -1317,7 +1317,7 @@ actor ProviderStatus {
     /// Waits for buyer work to finish. `preemptingLocal` (process exit and
     /// update drains) also preempts local work and waits for it; an operator
     /// pause leaves local work running.
-    func waitUntilDrained(timeoutSeconds: Int, preemptingLocal: Bool = false) async -> Bool {
+    func waitUntilDrained(timeoutSeconds: Int, preemptingLocal: Bool = false, cancellationAware: Bool = false) async -> Bool {
         let deadline = Date().addingTimeInterval(TimeInterval(max(0, timeoutSeconds)))
         if preemptingLocal {
             localAdmissionClosed = true
@@ -1325,7 +1325,7 @@ actor ProviderStatus {
             wakeLocalCapacityWaiters()
         }
         while requestsInFlight > 0 || (preemptingLocal && (!localLeases.isEmpty || localQueuedCount > 0)) {
-            if Date() >= deadline {
+            if Date() >= deadline || (cancellationAware && Task.isCancelled) {
                 // A drain that timed out leaves the provider serving.
                 if preemptingLocal { localAdmissionClosed = false }
                 return false
@@ -1395,6 +1395,27 @@ actor ProviderStatus {
     /// can make the provider ready or busy; only clearing the fence, which
     /// CoordinatorClient does on resume alone, re-opens routing.
     private(set) var operatorPauseFence = false
+    private(set) var localCreativeHold = false
+
+    func markLanguageUnloadedForCreativeHold() {
+        modelLoaded = false
+        transition(to: .unavailable, reason: "local_creative_hold")
+    }
+
+    func setLocalCreativeHold(_ held: Bool) async {
+        localCreativeHold = held
+        if held {
+            transition(to: .unavailable, reason: "local_creative_hold")
+            preemptAdmittedLocalWork()
+        } else {
+            if modelLoaded && !operatorPauseFence && status == .unavailable {
+                transition(to: .ready, reason: "local_creative_hold_ended")
+            }
+            reopenLocalAdmission()
+            wakeLocalCapacityWaiters()
+            await refreshAvailabilityState()
+        }
+    }
 
     func setOperatorPauseFence(_ paused: Bool) {
         operatorPauseFence = paused
@@ -1407,9 +1428,9 @@ actor ProviderStatus {
     private func transition(to requestedState: ProviderHealthState, reason requestedReason: String) -> Bool {
         var newState = requestedState
         var reason = requestedReason
-        if operatorPauseFence, newState == .ready || newState == .busy {
+        if (operatorPauseFence || localCreativeHold), newState == .ready || newState == .busy {
             newState = .unavailable
-            reason = "operator_paused"
+            reason = operatorPauseFence ? "operator_paused" : "local_creative_hold"
         }
         guard status != newState else { return false }
         status = newState

@@ -1917,6 +1917,7 @@ actor ModelRuntime: ModelRuntimeServing {
     // relay_serve_model_id_alias.
     private let catalogModelIDAlias: String?
     private var currentContainer: ModelContainer?
+    private var creativeRestoreTarget: String?
     /// Keeps the loaded model's weights in MLX's residency sets; see
     /// `startResidentWeightsTicket(modelFamily:)`.
     private var residentWeightsTicket: WiredMemoryTicket?
@@ -5101,13 +5102,68 @@ maxTokens: 1,
         return (capacity.maxContextTokens, capacity.maxContextSource)
     }
 
+    /// Drops all runtime owners after admission has been fenced and both local
+    /// and buyer rows have drained. Restoration reuses the verified swap loader.
+    func unloadForLocalCreativeHold() async throws {
+        guard state == .ready, inFlightCancellations.isEmpty,
+              preparedAdoptionReservationID == nil, let currentModelID else {
+            throw APIError(status: 409, message: "The language model is busy switching or draining.", code: "local_creative_hold_unavailable")
+        }
+        guard testLoader != nil || targetAuthority(for: currentModelID) != nil else {
+            throw ModelRuntimeLoadError(target: currentModelID, reason: "verified reload authority unavailable")
+        }
+        creativeRestoreTarget = currentModelID
+        state = .draining
+        do {
+            if let scheduler = continuousBatchScheduler { _ = try await scheduler.drain() }
+        } catch {
+            state = .ready
+            creativeRestoreTarget = nil
+            await rebuildContinuousBatchScheduler(container: currentContainer)
+            throw error
+        }
+        let hadMLXModel = currentContainer != nil || currentDraftContainer != nil || currentNativeMTPDrafterContainer != nil
+        stopNativeMTPRevocationRefresh()
+        currentNativeMTPTupleOffer = nil
+        parkedNativeMTPTuple = nil
+        continuousBatchScheduler = nil
+        await conversationCache.purgeAllHot()
+        currentContinuousBatchTextPreparationLane = nil
+        currentNativeMTPSelfTestInput = nil
+        currentNativeMTPDrafterContainer = nil
+        currentDraftContainer = nil
+        currentContainer = nil
+        self.currentModelID = nil
+        currentDraftModelID = nil
+        currentDraftTargetModelID = nil
+        await providerStatus?.markLanguageUnloadedForCreativeHold()
+        if let ticket = residentWeightsTicket { residentWeightsTicket = nil; _ = await ticket.end() }
+        // Fixture runtimes own no MLX allocations and must not initialize a GPU.
+        if hadMLXModel { Memory.clearCache() }
+    }
+
+    func restoreAfterLocalCreativeHold() async throws {
+        guard let target = creativeRestoreTarget else { return }
+        state = .ready
+        let reload = try await beginSwap(targetModelID: target, creativeRestore: true)
+        try await reload.value
+        guard isLoaded, currentModelID == target else {
+            throw ModelRuntimeLoadError(target: target, reason: "language model restoration failed")
+        }
+        creativeRestoreTarget = nil
+    }
+
     func beginSwap(
         targetModelID: String,
         adoptionKnobs: ModelRuntimeAdoptionServeKnobs? = nil,
         adoptionTransactionID: String? = nil,
-        now: Date = Date()
+        now: Date = Date(),
+        creativeRestore: Bool = false
     ) async throws -> Task<Void, Error> {
-        guard warmSwapEnabled else { throw WarmSwapDisabledError() }
+        guard creativeRestoreTarget == nil || creativeRestore else {
+            throw APIError(status: 409, message: "A local creative hold owns the language model.", code: "local_creative_hold")
+        }
+        guard warmSwapEnabled || creativeRestore else { throw WarmSwapDisabledError() }
         pruneAdoptionTransactions(now: now)
         if let reservationID = preparedAdoptionReservationID {
             guard reservationID == adoptionTransactionID else {
