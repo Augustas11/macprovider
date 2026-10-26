@@ -10,6 +10,7 @@ final class ConnectedRedirectBlocker: NSObject, URLSessionTaskDelegate, @uncheck
 }
 
 struct ConnectedGatewayClient {
+    var baseURL: URL = ConnectedAppConfiguration.gateway
     static let maximumResponseBytes = 262_144
 
     /// Coding agents send long system prompts and tool schemas: the picker
@@ -161,7 +162,8 @@ struct ConnectedGatewayClient {
     }
 
     private func request(path: String, key: String, body: [String: Any]?) async throws -> Data {
-        // Fixed production HTTPS origin: no arbitrary endpoint can receive the buyer key.
+        // Production metadata uses the fixed HTTPS gateway. Inference tests use
+        // only the fixed loopback consumer and its local token.
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 20
         configuration.timeoutIntervalForResource = 30
@@ -170,7 +172,7 @@ struct ConnectedGatewayClient {
         configuration.urlCache = nil
         let session = URLSession(configuration: configuration, delegate: ConnectedRedirectBlocker(), delegateQueue: nil)
         defer { session.invalidateAndCancel() }
-        var request = URLRequest(url: ConnectedAppConfiguration.gateway.appendingPathComponent(path))
+        var request = URLRequest(url: baseURL.appendingPathComponent(path))
         request.httpMethod = body == nil ? "GET" : "POST"
         request.setValue("Bearer " + key, forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")

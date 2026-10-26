@@ -10,7 +10,7 @@ struct ClaudeCodeLaunchPlan {
     let cleanupDirectory: URL
 }
 
-/// Claude receives a per-launch environment; no ~/.claude files are changed.
+/// Claude receives only the consumer token; no ~/.claude files are changed.
 enum ClaudeCodeLauncher {
     static let modelEnvironmentKeys = [
         "ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL",
@@ -21,7 +21,7 @@ enum ClaudeCodeLauncher {
     static func prepare(
         executable: URL,
         model: ConnectedModel,
-        key: String,
+        endpoint: ManagedPrivacyEndpoint,
         loginPath: String? = nil,
         home: URL = FileManager.default.homeDirectoryForCurrentUser,
         inheritedEnvironment: [String: String] = ProcessInfo.processInfo.environment
@@ -29,8 +29,6 @@ enum ClaudeCodeLauncher {
         guard model.supportsTools, let context = model.contextWindow, context >= 32_768,
               !model.id.isEmpty, model.id.utf8.count < 512,
               ProcessEnvironmentSanitizer.isSafeValue(model.id),
-              !key.isEmpty, key.utf8.count <= 4096,
-              !key.unicodeScalars.contains(where: { CharacterSet.whitespacesAndNewlines.contains($0) || CharacterSet.controlCharacters.contains($0) }),
               executable.isFileURL, FileManager.default.isExecutableFile(atPath: executable.path) else {
             throw ConnectedAppsError.invalidConfiguration
         }
@@ -50,7 +48,7 @@ enum ClaudeCodeLauncher {
         guard lstat(config.path, &configStat) == 0, configStat.st_mode & S_IFMT == S_IFDIR,
               configStat.st_uid == getuid(), chmod(config.path, 0o700) == 0 else { throw ConnectedAppsError.unsafeFile }
         var environment = [
-            "ANTHROPIC_BASE_URL": "https://api.malibu.tech",
+            "ANTHROPIC_BASE_URL": ManagedPrivacyEndpoint.baseURL.deletingLastPathComponent().absoluteString,
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
             "CLAUDE_CONFIG_DIR": config.path,
             "TERM": "xterm-256color"
@@ -73,7 +71,7 @@ enum ClaudeCodeLauncher {
         """.utf8)
         do {
             try ConnectedConfigTransaction.replace(script, expected: ConnectedConfigSnapshot(bytes: nil, mode: nil), bytes: bytes, mode: 0o700)
-            try ConnectedBuyerKeychain.writeLaunchHandoff(key, to: handoff)
+            try ConnectedBuyerKeychain.writeLaunchHandoff(endpoint.localToken, to: handoff)
         } catch {
             ConnectedBuyerKeychain.removeLaunchHandoff(handoff)
             try? FileManager.default.removeItem(at: launch)

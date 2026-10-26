@@ -91,10 +91,10 @@ final class LocalResponsesAdapterTests: XCTestCase {
             XCTAssertThrowsError(try adapter(["input": [["role": "user", "content": [["type": "input_text", "text": "hello", field: "unsupported"]]]]]))
         }
         XCTAssertThrowsError(try adapter(["text": ["format": ["type": "text", "verbosity": "high"]]]))
-        XCTAssertThrowsError(try adapter(["tools": [["type": "web_search"]]]))
+        _ = try adapter(["tools": [["type": "web_search"]]])
         XCTAssertThrowsError(try adapter(["tool_choice": "required"]))
         XCTAssertThrowsError(try adapter(["tools": [["type": "function", "name": "weather"]], "tool_choice": ["type": "function", "name": "weather", "namespace": "other"]]))
-        XCTAssertThrowsError(try adapter(["reasoning": ["effort": "high"]]))
+        XCTAssertThrowsError(try adapter(["reasoning": ["effort": "bogus"]]))
         for metadata in [42, "string", ["array"]] as [Any] {
             XCTAssertThrowsError(try adapter(["metadata": metadata]))
         }
@@ -140,4 +140,104 @@ final class LocalResponsesAdapterTests: XCTestCase {
         XCTAssertEqual(output[1]["call_id"] as? String, "call_1")
         XCTAssertEqual((result["usage"] as? [String: Any])?["input_tokens"] as? Int, 4)
     }
+    private var patchTool: [String: Any] {
+        ["type": "custom", "name": "apply_patch", "description": "Apply a patch", "format": ["type": "grammar", "syntax": "lark", "definition": "start: \"*** Begin Patch\""]]
+    }
+
+    /// The Codex #2107 gateway contract must also work after private decryption.
+    func testCodexCustomToolReasoningAndFullHistoryRoundTrip() throws {
+        let patch = "*** Begin Patch\n*** End Patch"
+        let adapter = try adapter([
+            "store": false, "reasoning": ["effort": "low", "summary": "auto"],
+            "include": ["reasoning.encrypted_content"], "tools": [patchTool, ["type": "web_search"]],
+            "tool_choice": ["type": "custom", "name": "apply_patch"],
+            "input": [
+                ["type": "message", "role": "user", "content": "patch it"],
+                ["type": "reasoning", "content": [["type": "reasoning_text", "text": "Check first."]], "summary": [], "encrypted_content": "opaque-upstream"],
+                ["type": "custom_tool_call", "call_id": "call_patch", "name": "apply_patch", "input": patch],
+                ["type": "custom_tool_call_output", "call_id": "call_patch", "output": "Done"],
+                ["type": "reasoning", "summary": []],
+                ["type": "message", "role": "user", "content": "continue"]
+            ]
+        ])
+        let chat = try JSONSerialization.jsonObject(with: adapter.chatRequestBody) as! [String: Any]
+        XCTAssertEqual(chat["reasoning_effort"] as? String, "low")
+        XCTAssertEqual((chat["tools"] as! [[String: Any]]).count, 1)
+        XCTAssertEqual(LocalResponsesAdapter.unservedToolTypes(in: try data(["tools": [patchTool, ["type": "web_search"]]])), ["web_search"])
+        let fn = (chat["tools"] as! [[String: Any]])[0]["function"] as! [String: Any]
+        XCTAssertTrue((fn["description"] as! String).contains("lark grammar"))
+        XCTAssertEqual((chat["tool_choice"] as! [String: Any])["type"] as? String, "function")
+        let messages = chat["messages"] as! [[String: Any]]
+        XCTAssertEqual(messages.count, 4)
+        XCTAssertEqual(messages[1]["reasoning_content"] as? String, "Check first.")
+        let call = (messages[1]["tool_calls"] as! [[String: Any]])[0]
+        let args = (call["function"] as! [String: Any])["arguments"] as! String
+        XCTAssertEqual((try JSONSerialization.jsonObject(with: Data(args.utf8)) as! [String: Any])["input"] as? String, patch)
+        XCTAssertEqual(messages[2]["tool_call_id"] as? String, "call_patch")
+        XCTAssertEqual(messages[2]["content"] as? String, "Done")
+        XCTAssertFalse(String(decoding: adapter.chatRequestBody, as: UTF8.self).contains("opaque-upstream"))
+        let body: [String: Any] = ["choices": [["message": ["reasoning_content": "Check again.", "tool_calls": [["id": "call_next", "function": ["name": "apply_patch", "arguments": args]]]], "finish_reason": "tool_calls"]], "usage": ["prompt_tokens": 4, "completion_tokens": 3, "completion_tokens_details": ["reasoning_tokens": 2]]]
+        let result = try JSONSerialization.jsonObject(with: adapter.translateResponse(data(body))) as! [String: Any]
+        let output = result["output"] as! [[String: Any]]
+        XCTAssertEqual(output.map { $0["type"] as! String }, ["reasoning", "custom_tool_call"])
+        XCTAssertEqual(output[1]["input"] as? String, patch)
+        XCTAssertEqual(output[1]["call_id"] as? String, "call_next")
+        let usage = result["usage"] as! [String: Any]
+        XCTAssertEqual((usage["output_tokens_details"] as! [String: Any])["reasoning_tokens"] as? Int, 2)
+    }
+
+    func testCodexCustomStreamEmitsWholeInputAfterReasoning() throws {
+        let adapter = try adapter(["tools": [patchTool], "stream": true])
+        let args = String(decoding: try data(["input": "*** Begin Patch\n*** End Patch"]), as: UTF8.self)
+        let split = args.index(args.startIndex, offsetBy: args.count / 2)
+        var frames: [String] = []
+        let deltas: [[String: Any]] = [
+            ["reasoning_content": "Think first."],
+            ["tool_calls": [["index": 0, "id": "call_patch", "function": ["name": "apply_patch", "arguments": String(args[..<split])]]]],
+            ["tool_calls": [["index": 0, "function": ["arguments": String(args[split...])]]]]
+        ]
+        for delta in deltas {
+            frames += adapter.consumeStream("data: \(String(decoding: try data(["choices": [["delta": delta]]]), as: UTF8.self))\n\n")
+        }
+        XCTAssertFalse(frames.joined().contains("custom_tool_call"))
+        frames += adapter.consumeStream("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n")
+        let events = try payloads(frames)
+        XCTAssertFalse(events.contains { ($0["type"] as? String ?? "").hasPrefix("response.function_call_arguments.") })
+        XCTAssertEqual(events.filter { $0["type"] as? String == "response.reasoning_text.done" }.count, 1)
+        let done = events.filter { $0["type"] as? String == "response.output_item.done" }
+        XCTAssertEqual(done.count, 2)
+        let item = done[1]["item"] as! [String: Any]
+        XCTAssertEqual(item["type"] as? String, "custom_tool_call")
+        XCTAssertEqual(item["input"] as? String, "*** Begin Patch\n*** End Patch")
+        XCTAssertEqual(events.compactMap { $0["sequence_number"] as? Int }, Array(1...events.count))
+        let terminal = events.last!["response"] as! [String: Any]
+        XCTAssertEqual((terminal["output"] as! [[String: Any]]).map { $0["type"] as! String }, ["reasoning", "custom_tool_call"])
+    }
+
+    func testCodexControlsAndCustomToolsRemainStrict() throws {
+        for extra: [String: Any] in [
+            ["include": ["unknown"]], ["reasoning": ["effort": "high", "unknown": true]],
+            ["tools": [["type": "local_shell"]]],
+            ["tools": [["type": "web_search"]], "tool_choice": "required"],
+            ["tools": [["type": "web_search"]], "tool_choice": ["type": "function", "name": "web_search"]],
+            ["tools": [["type": "custom", "name": "x", "format": ["type": "grammar", "syntax": "bogus", "definition": "x"]]]],
+            ["tools": [patchTool, ["type": "function", "name": "apply_patch"]]],
+            ["input": [["type": "custom_tool_call", "name": "apply_patch", "call_id": "c", "input": 42]]],
+            ["input": [["type": "reasoning", "content": [["type": "input_image", "text": "unsupported"]]]]]
+        ] { XCTAssertThrowsError(try adapter(extra)) }
+    }
+
+    func testHostedToolDisclosureMatchesRecursiveTranslation() throws {
+        let tools: [[String: Any]] = [["type": "web_search"], ["type": "namespace", "name": "nested", "tools": [
+            ["type": "namespace", "name": "deeper", "tools": [patchTool, ["type": "file_search"]]],
+            ["type": "web_search"]
+        ]]]
+        let body = try data(["model": "test-model", "input": "hello", "tools": tools])
+        XCTAssertEqual(LocalResponsesAdapter.unservedToolTypes(in: body), ["file_search", "web_search"])
+        let translated = try LocalResponsesAdapter(body: body)
+        let chat = try JSONSerialization.jsonObject(with: translated.chatRequestBody) as! [String: Any]
+        XCTAssertEqual((chat["tools"] as! [[String: Any]]).count, 1)
+        XCTAssertFalse(String(decoding: translated.chatRequestBody, as: UTF8.self).contains("web_search"))
+    }
+
 }

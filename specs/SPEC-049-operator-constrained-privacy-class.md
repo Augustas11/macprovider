@@ -1,6 +1,6 @@
 # SPEC-049 - Operator-Constrained Privacy Class
 
-**Version:** 0.7.0
+**Version:** 0.8.0
 Status: draft
 Owner: @Augustas11
 Issue: https://github.com/Augustas11/macprovider/issues/1749
@@ -10,7 +10,7 @@ Audit history: v0.1.0 is the initial default-off Beta contract. v0.2.0 replaces 
 {
   "spec_id": "SPEC-049",
   "title": "Operator-Constrained Privacy Class",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "path": "specs/SPEC-049-operator-constrained-privacy-class.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -62,9 +62,9 @@ The privacy class MUST NOT be described as confidential compute, a hardware encl
 
 ### 1.3 Scope
 
-In scope for v0.2: the global pool and, from v0.4.0, an authorized Trusted Pool selection under SPEC-049-R032; endpoint family `chat_completions` only; stream and non-stream; the SPEC-041 reference buyer client (`relay-blind-client`) as the only decrypting client; native in-process MLX serving only; Secure Enclave posture keys and relay-blind identities enrolled automatically on the first attested session (operator-configured pins still override); code identities approved from signed release metadata plus an operator allow-list and deny list; buyer identity pins distributed through the operator-signed identity directory. In scope from v0.5.0: the `code_bound_attested` label for a provider whose Malibu.app (macOS 27 or later, App Attest supported) holds the App Attest key that SPEC-033 §5.7.1 recorded for the provider ID, and whose runtime reaches that app's local attestor (SPEC-049-R035); the buyer's optional assurance requirement on the reservation.
+In scope for v0.2: the global pool and, from v0.4.0, an authorized Trusted Pool selection under SPEC-049-R032; endpoint family `chat_completions` and, from v0.8.0, `responses` and `messages`; stream and non-stream; the SPEC-041 reference buyer client (`relay-blind-client`) and the SPEC-045 `macprovider-cli consume` local privacy client as decrypting clients; native in-process MLX serving only; Secure Enclave posture keys and relay-blind identities enrolled automatically on the first attested session (operator-configured pins still override); code identities approved from signed release metadata plus an operator allow-list and deny list; buyer identity pins distributed through the operator-signed identity directory. In scope from v0.5.0: the `code_bound_attested` label for a provider whose Malibu.app (macOS 27 or later, App Attest supported) holds the App Attest key that SPEC-033 §5.7.1 recorded for the provider ID, and whose runtime reaches that app's local attestor (SPEC-049-R035); the buyer's optional assurance requirement on the reservation.
 
-Out of scope for v0.2: `responses` and `messages` endpoint families; browser or third-party clients; loopback, subprocess, or IPC runtimes; a pool selection made by a wallet session or a demo account, and a pool-scoped plain SPEC-041 request without this class (both rejected, see SPEC-049-R022 and SPEC-049-R032); App Attest in the standalone CLI, daemons, or the development (`appattestdevelop`) environment; buyer-side verification of the App Attest assertion; App Attest fraud-metric receipt evaluation; MDA SIP/SecureBoot evaluation; production activation.
+Out of scope: browser or third-party clients acting as decrypting clients without the SPEC-045 local privacy client; loopback, subprocess, or IPC runtimes; a pool selection made by a wallet session or a demo account, and a pool-scoped plain SPEC-041 request without this class (both rejected, see SPEC-049-R022 and SPEC-049-R032); App Attest in the standalone CLI, daemons, or the development (`appattestdevelop`) environment; buyer-side verification of the App Attest assertion; App Attest fraud-metric receipt evaluation; MDA SIP/SecureBoot evaluation; production activation.
 
 ### 1.4 Carry-forward from earlier planning
 
@@ -815,7 +815,7 @@ When `privacy_class.release_code_identities.metadata_dir` and `privacy_class.rel
 
 **Routes.** The coordinator serves `GET /v1/privacy-class/directory` on its gateway-context buyer port. The gateway serves `GET /v1/privacy-class/directory` to buyers authenticated with an API key as for a reservation (a wallet session has no signed-request profile for this route in v0.2 and is refused with `privacy_class_unavailable`; wallet-session buyers pin with `--identity-pin`), forwards the coordinator's 200 body byte for byte (at most 1 MiB) with `Cache-Control: no-store`, maps errors to the §4.9 inventory, and adds no trust: it does not verify, re-sign, filter, or cache the directory. Both routes return `privacy_class_disabled` when the class is disabled in that component.
 
-**Buyer.** `relay-blind-client --privacy-class` without `--identity-pin` MUST take the directory public key from `--directory-public-key` (canonical base64url raw 32-byte Ed25519) or `MACPROVIDER_PRIVACY_DIRECTORY_PUBLIC_KEY`, pinned once by the buyer from an operator channel outside the gateway and coordinator path. Before the reservation it fetches the directory from the gateway, and MUST reject it unless the envelope is closed and at most 1 MiB, `key_id` equals the pinned key's fingerprint, the signature verifies over the exact payload bytes, the payload is closed and valid per §4.11, `issued_at_unix` is at most 60 seconds in the future, and the current time is before `expires_at_unix`. After the reservation it selects the entry whose `fingerprint` equals the key record's `identity_fingerprint`; a missing or revoked entry MUST fail before encryption. The in-memory pin is the SPEC-041-R002 pin with that identity key and fingerprint, the key record's models (which MUST include the requested model), `chat_completions`, and the directory's validity window. `--identity-pin` overrides the directory and is required with a wallet session. A buyer that needs no coordinator in its identity trust path uses `--identity-pin`.
+**Buyer.** `relay-blind-client --privacy-class` without `--identity-pin` MUST take the directory public key from `--directory-public-key` (canonical base64url raw 32-byte Ed25519) or `MACPROVIDER_PRIVACY_DIRECTORY_PUBLIC_KEY`, pinned once by the buyer from an operator channel outside the gateway and coordinator path. Before the reservation it fetches the directory from the gateway, and MUST reject it unless the envelope is closed and at most 1 MiB, `key_id` equals the pinned key's fingerprint, the signature verifies over the exact payload bytes, the payload is closed and valid per §4.11, `issued_at_unix` is at most 60 seconds in the future, and the current time is before `expires_at_unix`. After the reservation it selects the entry whose `fingerprint` equals the key record's `identity_fingerprint`; a missing or revoked entry MUST fail before encryption. The in-memory pin is the SPEC-041-R002 pin with that identity key and fingerprint, the key record's models (which MUST include the requested model), its signed endpoint-family scope (which MUST include the requested family), and the directory's validity window. `--identity-pin` overrides the directory and is required with a wallet session. A buyer that needs no coordinator in its identity trust path uses `--identity-pin`.
 
 ### SPEC-049-R029 - Slot-aware selection and fair share for pinned waiters
 
@@ -917,6 +917,46 @@ The buyer requests the code-bound label only by `X-MacProvider-Privacy-Assurance
 3. **Check before every assertion.** For every request the attestor MUST take the peer's audit token from the kernel (`LOCAL_PEERTOKEN`), never from a message field, re-read on every request; obtain the peer's dynamic `SecCode` from the audit token; require `SecCodeCheckValidity` against `anchor apple generic and identifier "live.malibu.provider.cli" and certificate leaf[subject.OU] = "<own team>"`; read the dynamic code-signing flags by audit token and require every required and no forbidden §4.13 flag; read the dynamic cdhash; and fill fields 10..14 of the statement from these observations only. On any failure it answers `peer_rejected` and asserts nothing. It asserts only for a provider ID whose key id it holds, over the framing it computed itself from the closed request and its own observations, at most once per second and at most one at a time.
 4. **Runtime.** In privacy mode the provider runtime MUST, for each posture challenge, ask the attestor with a total deadline of 3 seconds, check that the reply's statement fields 1..8 equal its request, and send the `privacy_code_bound_evidence` message immediately before the `privacy_posture_response`. Any failure, including no socket, sends the posture alone. The runtime MUST NOT hold, request, or emulate an App Attest key, and MUST NOT send evidence for a posture it did not build. The channel carries no plaintext, so SPEC-049-R009 is unchanged.
 5. **No switch.** Code-bound has no enable flag in any component (AGENTS.md rule 11): it is in force wherever its prerequisites hold, and its absence leaves `device_bound_self_attested_beta`, plain SPEC-041 relay-blind, and plaintext behaviour unchanged. The coordinator needs the SPEC-033 App Attest record connection and `onboarding.apple_team_id` and `onboarding.bundle_id`; the provider needs a Malibu.app attestor.
+
+### SPEC-049-R036 - Managed-agent privacy client and original endpoint family
+
+The SPEC-045 consumer MAY act as a second decrypting client for managed coding
+agents. It MUST accept only authenticated loopback requests and keep the upstream
+buyer credential out of agent configuration and environments. Agents receive a
+per-run local credential. Managed Malibu.app Terminal and supported Connected
+apps launches use this privacy client by default; missing trusted directory
+configuration or unavailable privacy routing MUST fail closed, never select the
+ordinary gateway path. Existing ordinary standalone consume operation remains
+an explicitly weaker mode, with no privacy-class claim.
+
+The buyer MUST encrypt the original request bytes without endpoint conversion.
+`chat_completions`, `responses` and `messages` identify distinct envelope
+families. The family MUST match the original local route, signed key-record
+scope, reservation, durable reservation row, envelope AAD and provider dispatch.
+Old reservations and Chat-only signed records authorize Chat only. For privacy-class Chat/Responses requests that omit an inner output cap, the authenticated envelope supplies the conservative cap (4096 by default); the provider applies that cap after parsing without rewriting the original buyer bytes. Messages retains its required explicit `max_tokens`. An explicit inner cap must agree with the envelope. Non-Chat
+families require the privacy class and MUST NOT fall back to ordinary SPEC-041.
+The provider reuses its in-process local API adapters after authenticated
+opening and converts generated response bodies or stream events before sealing.
+No decrypted request is sent through a plaintext HTTP loopback or subprocess.
+All R010 provenance, cache, persistence and diagnostics exclusions remain in force.
+
+The client MUST verify the operator-signed identity directory against a locally
+trusted public key, key scope/freshness, exact reservation and provider binding,
+requested assurance, response encryption headers, authenticated frame sequence,
+final marker, usage counts and the R020 disclosures before reporting success.
+An assurance requirement of `code_bound_attested` MUST propagate to reservation
+and response verification; a lower label is an error. UI displays only a served
+assurance verified from an actual response, never a configured or requested label
+as if it had been served. Public metadata discovery alone is not a privacy test.
+
+Tool calls/results, long contexts, streaming and concurrent requests retain their
+original family semantics and independent reservation/AEAD state. Bounds apply
+before decryption allocations and local budget admission precedes dispatch.
+After any possible dispatch, failures expose `do_not_resubmit`; no automatic
+retry, redirect, failover or plaintext downgrade is permitted. Missing or
+unverifiable usage keeps local exposure held. A buffered stream MUST remain
+bounded and authenticate its completion before success. The existing R020
+non-claims and relay-visible metadata disclosures are unchanged.
 
 ## 6. Operator runbook requirement
 
@@ -1093,3 +1133,5 @@ remains open; R023 promotion is not required for operation.
   incident tools. `approved_code_identities[].expires_at` is optional (absent
   never expires, R006). SPEC-049-R023 promotion is not required for operation.
   No wire or requirement-state change; every requirement stays pending.
+
+- 0.8.0 - Related: #2157. R036 brings the local consumer and original Responses/Messages envelope families into scope, keeps translation inside the provider and requires managed launches to fail closed with verified served assurance. Live multi-turn Codex/Claude acceptance and code-bound hardware acceptance remain pending; no conformance promotion.

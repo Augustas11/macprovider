@@ -6464,6 +6464,148 @@ final class ConsumeCommandTests: XCTestCase {
         }
     }
 
+    func testPrivacyConfigurationRequiresPinnedKeyAndClosedAssurance() throws {
+        let key = RelayBlindBase64URL.encode(Data(repeating: 7, count: 32))
+        XCTAssertThrowsError(try ConsumePrivacyConfiguration.parse(enabled: true, directoryPublicKey: nil, requiredAssurance: nil))
+        XCTAssertThrowsError(try ConsumePrivacyConfiguration.parse(enabled: true, directoryPublicKey: key, requiredAssurance: "unknown"))
+        XCTAssertThrowsError(try ConsumePrivacyConfiguration.parse(enabled: false, directoryPublicKey: key, requiredAssurance: nil))
+        let config = try XCTUnwrap(ConsumePrivacyConfiguration.parse(enabled: true, directoryPublicKey: key, requiredAssurance: "code_bound_attested"))
+        XCTAssertEqual(config.requiredAssurance, "code_bound_attested")
+        XCTAssertFalse(config.directoryKeyFingerprint.isEmpty)
+        let descriptor = ConsumeEndpointDescriptor(boundURL: "http://127.0.0.1:11435", processID: 1, launchID: "launch", startedAt: "now", ledgerPathClass: nil, localToken: "local-secret", privacy: config)
+        let wire = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(descriptor)) as? [String: Any])
+        XCTAssertEqual(wire["privacy_class"] as? String, "operator_constrained_beta_v1")
+        XCTAssertEqual(wire["privacy_directory_key_fingerprint"] as? String, config.directoryKeyFingerprint)
+    }
+
+    func testPrivacyOriginalResponsesAndMessagesWireNeverUsesPlainUpstream() async throws {
+        for family in ["responses", "messages"] {
+            let token = try ConsumeLocalToken.generate()
+            let recorder = ConsumeUpstreamRequestRecorder()
+            let ordinary = ConsumeUpstreamRequestRecorder()
+            let body = Data((family == "responses"
+                ? #"{ "model": "llama-test", "input": "private tool result", "max_output_tokens": 32, "stream": true }"#
+                : #"{ "model": "llama-test", "messages": [{"role":"user","content":"private tool result"}], "max_tokens": 32, "stream": true }"#).utf8)
+            let privateWire = Data("event: \(family).completed\ndata: {\"result\":\"private answer\"}\n\n".utf8)
+            let privacy = ConsumePrivacyConfiguration(directoryPublicKey: RelayBlindBase64URL.encode(Data(repeating: 7, count: 32)), requiredAssurance: nil)
+            let runtime = consumeRuntime(token: token, credentialStatus: .environmentLoaded, credentialCustody: consumeCredentialCustody("buyer-secret"), budget: ConsumeBudgetConfig(mode: .noBudget, maxRequestMicroUSD: nil, allowUnpriced: false, ledger: nil, ledgerPathClass: nil), trustedPricing: .available(phase3CTrustedRateCard(promptRatePerMtok: 1_000_000, completionRatePerMtok: 2_000_000, usdPerMillionCredits: 1)), upstreamClient: ConsumeStubUpstreamClient { request, loop in
+                ordinary.append(request)
+                return loop.makeFailedFuture(ConsumeUpstreamForwardError.dispatchedUnavailable)
+            }, now: { ConsumeCommandTests.phase3CTestNow }, privacy: privacy, privacyForwarder: { request, actualFamily in
+                XCTAssertEqual(actualFamily, family)
+                recorder.append(request)
+                return ConsumeUpstreamResponse(statusCode: 200, headers: [("content-type", "text/event-stream"), ("x-macprovider-privacy-class", "operator_constrained_beta_v1"), ("x-macprovider-privacy-assurance", "device_bound_self_attested_beta"), ("x-malibu-unserved-tools", "web_search")], body: privateWire, verifiedUsage: Data(#"{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}"#.utf8))
+            })
+            let result = try await privacyResponse(from: runtime, token: token.value, path: "/v1/" + family, body: body)
+            XCTAssertEqual(result.status, .ok)
+            XCTAssertEqual(result.body, String(decoding: privateWire, as: UTF8.self))
+            XCTAssertEqual(result.headers.first(name: "x-macprovider-privacy-assurance"), "device_bound_self_attested_beta")
+            XCTAssertEqual(result.headers.first(name: "x-malibu-unserved-tools"), "web_search")
+            XCTAssertEqual(recorder.snapshot().first?.body, body)
+            XCTAssertEqual(recorder.snapshot().first?.endpoint, "/v1/" + family)
+            XCTAssertEqual(ordinary.snapshot().count, 0)
+            XCTAssertEqual(runtime.statusPayload()["privacy_assurance"] as? String, "device_bound_self_attested_beta")
+            XCTAssertEqual(runtime.statusPayload()["response_spool_bytes"] as? Int, 0)
+        }
+    }
+
+    func testPrivacyUncertainDispatchHoldsBudgetAndReturnsDoNotResubmitWithoutFallback() async throws {
+        let token = try ConsumeLocalToken.generate()
+        let home = try makeTemporaryDirectory()
+        let ledger = try ConsumeBudgetLedger.open(ledgerPath: home.appendingPathComponent("privacy-budget.jsonl").path, homeDirectory: home, startupDirectory: home)
+        let ordinary = ConsumeUpstreamRequestRecorder()
+        let requestBody = Data(#"{"model":"llama-test","input":"secret","max_output_tokens":16}"#.utf8)
+        let rateCard = phase3CTrustedRateCard(promptRatePerMtok: 1_000_000, completionRatePerMtok: 2_000_000, usdPerMillionCredits: 1)
+        let runtime = consumeRuntime(token: token, credentialStatus: .environmentLoaded, credentialCustody: consumeCredentialCustody("buyer-secret"), budget: ConsumeBudgetConfig(mode: .budget(ConsumeMicroUSD(rawValue: 10_000_000)), maxRequestMicroUSD: nil, allowUnpriced: false, ledger: ledger, ledgerPathClass: ledger.pathClass), trustedPricing: .available(rateCard), upstreamClient: ConsumeStubUpstreamClient { request, loop in
+            ordinary.append(request)
+            return loop.makeFailedFuture(ConsumeUpstreamForwardError.dispatchedUnavailable)
+        }, now: { ConsumeCommandTests.phase3CTestNow }, privacy: ConsumePrivacyConfiguration(directoryPublicKey: RelayBlindBase64URL.encode(Data(repeating: 7, count: 32)), requiredAssurance: "code_bound_attested"), privacyForwarder: { _, _ in
+            throw ConsumePrivacyBuyerError.doNotResubmit(code: "privacy_response_invalid")
+        })
+        let result = try await privacyResponse(from: runtime, token: token.value, path: "/v1/responses", body: requestBody)
+        XCTAssertEqual(result.status, HTTPResponseStatus.badRequest)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(result.body.utf8)) as? [String: Any])
+        XCTAssertEqual(object["retry"] as? String, "do_not_resubmit")
+        XCTAssertEqual(result.headers.first(name: "x-should-retry"), "false")
+        XCTAssertNil(result.headers.first(name: "retry-after"))
+        let summary = try ledger.summary()
+        XCTAssertEqual(summary.heldReservationCount, 1)
+        let metadata = try ConsumePrivacyBuyer.requestMetadata(requestBody, family: "responses", streaming: false)
+        XCTAssertEqual(metadata.inputCap, UInt64(requestBody.count) + 4096)
+        let match = try XCTUnwrap(ConsumeTrustedPricingState.available(rateCard).match(model: "llama-test"))
+        let envelopeEstimate = try ConsumePricedExposureEstimator.estimate(promptTokenUpperBound: Int64(metadata.inputCap), completionTokenUpperBound: Int64(metadata.outputCap), match: match, projection: rateCard.projection)
+        XCTAssertEqual(summary.held, envelopeEstimate.amount, "Local admission must reserve the complete authenticated envelope token allowance")
+        XCTAssertEqual(ordinary.snapshot().count, 0)
+        XCTAssertTrue(runtime.statusPayload()["privacy_assurance"] is NSNull)
+    }
+
+    func testPrivacyBudgetSettlesOnlySeparateVerifiedUsageAndRejectsAssuranceDowngrade() async throws {
+        for downgrade in [false, true] {
+            let token = try ConsumeLocalToken.generate()
+            let home = try makeTemporaryDirectory()
+            let ledger = try ConsumeBudgetLedger.open(ledgerPath: home.appendingPathComponent("privacy-budget.jsonl").path, homeDirectory: home, startupDirectory: home)
+            let runtime = consumeRuntime(token: token, credentialStatus: .environmentLoaded, credentialCustody: consumeCredentialCustody("buyer-secret"), budget: ConsumeBudgetConfig(mode: .budget(ConsumeMicroUSD(rawValue: 10_000_000)), maxRequestMicroUSD: nil, allowUnpriced: false, ledger: ledger, ledgerPathClass: ledger.pathClass), trustedPricing: .available(phase3CTrustedRateCard(promptRatePerMtok: 1_000_000, completionRatePerMtok: 2_000_000, usdPerMillionCredits: 1)), now: { ConsumeCommandTests.phase3CTestNow }, privacy: ConsumePrivacyConfiguration(directoryPublicKey: RelayBlindBase64URL.encode(Data(repeating: 7, count: 32)), requiredAssurance: "code_bound_attested"), privacyForwarder: { _, _ in
+                // Agent body is deliberately not Chat and cannot supply budget usage.
+                ConsumeUpstreamResponse(statusCode: 200, headers: [("content-type", "application/json"), ("x-macprovider-privacy-class", "operator_constrained_beta_v1"), ("x-macprovider-privacy-assurance", downgrade ? "device_bound_self_attested_beta" : "code_bound_attested")], body: Data(#"{"output":[{"text":"private answer"}]}"#.utf8), verifiedUsage: Data(#"{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}"#.utf8))
+            })
+            let result = try await privacyResponse(from: runtime, token: token.value, path: "/v1/responses", body: Data(#"{"model":"llama-test","input":"secret","max_output_tokens":16}"#.utf8))
+            let summary = try ledger.summary()
+            if downgrade {
+                XCTAssertEqual(result.status, HTTPResponseStatus.badRequest)
+                XCTAssertEqual(result.headers.first(name: "x-should-retry"), "false")
+                XCTAssertNil(result.headers.first(name: "retry-after"))
+                XCTAssertEqual(summary.heldReservationCount, 1)
+                XCTAssertFalse(result.body.contains("private answer"))
+                XCTAssertNil(result.headers.first(name: "x-macprovider-privacy-assurance"))
+            } else {
+                XCTAssertEqual(result.status, .ok)
+                XCTAssertEqual(summary.heldReservationCount, 0)
+                XCTAssertGreaterThan(summary.settled.rawValue, 0)
+                XCTAssertEqual(runtime.statusPayload()["privacy_assurance"] as? String, "code_bound_attested")
+            }
+        }
+    }
+
+    func testPrivacyFamiliesRemainUnavailableInOrdinaryConsume() throws {
+        let token = try ConsumeLocalToken.generate()
+        let runtime = consumeRuntime(token: token)
+        for endpoint in ["responses", "messages"] {
+            let result = try response(from: runtime, head: HTTPRequestHead(version: .http1_1, method: .POST, uri: "/v1/" + endpoint, headers: HTTPHeaders([("Authorization", "Bearer " + token.value)])), body: Data(#"{"model":"llama-test"}"#.utf8))
+            XCTAssertEqual(result.status, .notFound)
+        }
+    }
+
+    private func privacyResponse(from runtime: ConsumeEndpointRuntime, token: String, path: String, body: Data) async throws -> (status: HTTPResponseStatus, headers: HTTPHeaders, body: String) {
+        let channel = EmbeddedChannel()
+        try channel.pipeline.addHandler(ConsumeLocalHandler(runtime: runtime)).wait()
+        defer { _ = try? channel.finish() }
+        let head = HTTPRequestHead(version: .http1_1, method: .POST, uri: path, headers: HTTPHeaders([("Authorization", "Bearer " + token), ("content-type", "application/json")]))
+        try channel.writeInbound(HTTPServerRequestPart.head(head))
+        var buffer = channel.allocator.buffer(capacity: body.count)
+        buffer.writeBytes(body)
+        try channel.writeInbound(HTTPServerRequestPart.body(buffer))
+        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+        var responseHead: HTTPResponseHead?
+        var bytes = Data()
+        for _ in 0..<1000 {
+            channel.embeddedEventLoop.run()
+            while let part = try channel.readOutbound(as: HTTPServerResponsePart.self) {
+                switch part {
+                case .head(let value): responseHead = value
+                case .body(.byteBuffer(var value)):
+                    if let data = value.readBytes(length: value.readableBytes) { bytes.append(contentsOf: data) }
+                case .end:
+                    let resultHead = try XCTUnwrap(responseHead)
+                    return (resultHead.status, resultHead.headers, String(decoding: bytes, as: UTF8.self))
+                default: break
+                }
+            }
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        XCTFail("privacy response did not complete")
+        return (.internalServerError, HTTPHeaders(), "")
+    }
+
     private static let phase3CTestNow = ISO8601DateFormatter.autotuneInternet.date(from: "2026-08-23T00:00:00Z")!
 
     private func consumeRuntime(
@@ -6478,7 +6620,9 @@ final class ConsumeCommandTests: XCTestCase {
         },
         pricingAdmissionGate: ConsumePricingAdmissionGate = ConsumePricingAdmissionGate(),
         now: @escaping @Sendable () -> Date = { Date() },
-        requestCounter: ConsumeEndpointRequestCounter = ConsumeEndpointRequestCounter()
+        requestCounter: ConsumeEndpointRequestCounter = ConsumeEndpointRequestCounter(),
+        privacy: ConsumePrivacyConfiguration? = nil,
+        privacyForwarder: ConsumePrivacyForwarder? = nil
     ) -> ConsumeEndpointRuntime {
         ConsumeEndpointRuntime(
             launchID: "launch-phase2-test",
@@ -6494,7 +6638,9 @@ final class ConsumeCommandTests: XCTestCase {
             upstreamClient: upstreamClient,
             pricingAdmissionGate: pricingAdmissionGate,
             now: now,
-            requestCounter: requestCounter
+            requestCounter: requestCounter,
+            privacy: privacy,
+            privacyForwarder: privacyForwarder
         )
     }
 
