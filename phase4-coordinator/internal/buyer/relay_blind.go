@@ -487,6 +487,10 @@ func (s *Server) handleRelayBlindReservation(w http.ResponseWriter, r *http.Requ
 		writeRelayBlindError(w, "relay_blind_route_reservation_invalid", "Invalid route reservation")
 		return
 	}
+	if request.EndpointFamily != relayblind.EndpointChatCompletions {
+		writeRelayBlindError(w, "relay_blind_endpoint_unsupported", "Non-chat encrypted requests require the privacy class")
+		return
+	}
 	unlockSelection := s.relayBlind.lockAccountSelection(account.ID())
 	defer func() { unlockSelection() }()
 	provider, key, found, refused, ownershipErr := s.selectRelayBlindProvider(r.Context(), account.ID(), request.Model, request.EncryptedRequestBytes, false, relayblind.KeyClassRelayBlind, request.Requires)
@@ -506,7 +510,7 @@ func (s *Server) handleRelayBlindReservation(w http.ResponseWriter, r *http.Requ
 	if key.ExpiresAtUnix < expires {
 		expires = key.ExpiresAtUnix
 	}
-	reservation, err := s.relayBlind.store.CreateReservation(r.Context(), relayblind.ReservationCreate{
+	reservation, err := s.relayBlind.store.CreateReservation(r.Context(), relayblind.ReservationCreate{EndpointFamily: request.EndpointFamily,
 		AccountID: account.ID(), WalletSession: walletSession, ProviderID: provider.ProviderID, AssignedSession: provider.AssignedID,
 		KeyRecord: key, Model: request.Model, ProviderModel: provider.ModelID, Stream: request.Stream,
 		MaxEncryptedRequestBytes: request.EncryptedRequestBytes, MaxOutputTokens: request.MaxOutputTokens,
@@ -526,7 +530,7 @@ func (s *Server) handleRelayBlindReservation(w http.ResponseWriter, r *http.Requ
 	unlockSelection = func() {}
 	response := relayblind.ReservationResponse{
 		Version: relayblind.ReservationVersion, ProviderBinding: reservation.ProviderBinding, BuyerBinding: reservation.BuyerBinding,
-		KeyRecordDigest: key.KeyRecordDigest, KeyRecord: key, KID: key.KID, EndpointFamily: relayblind.EndpointChatCompletions,
+		KeyRecordDigest: key.KeyRecordDigest, KeyRecord: key, KID: key.KID, EndpointFamily: request.EndpointFamily,
 		Model: request.Model, ProviderModel: provider.ModelID, Stream: request.Stream, MaxEncryptedRequestBytes: uint64(request.EncryptedRequestBytes),
 		MaxOutputTokens: request.MaxOutputTokens, InputTokenUpperBound: request.InputTokenUpperBound,
 		ReservationTokenCap: request.InputTokenUpperBound + request.MaxOutputTokens, ExpiresAtUnix: expires,

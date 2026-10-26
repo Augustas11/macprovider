@@ -1,5 +1,37 @@
 # Coordinator Release Train — Pearl coordinator / gateway
 
+## Coding-agent privacy — pending runtime inclusion (2026-10-26)
+
+| PR | Issue | Coordinator/gateway change | Status |
+|---|---|---|---|
+| [#2165](https://github.com/Augustas11/macprovider/pull/2165) | #2157 (closed on operator instruction; release work tracked here) | Signed Chat/Responses/Messages capability and exact reservation/route/envelope family binding across coordinator and gateway; original content stays encrypted through relays and conversion occurs only in the provider. Legacy ordinary Chat-only pins remain supported. | merged (`dae190161`); matching Pearl runtime and signed CLI/app rollout pending |
+
+`antfleet-ops` approved and merged the exact reviewed head after all 28 checks in
+[CI run 40282107873](https://github.com/Augustas11/macprovider/actions/runs/40282107873)
+passed. Include `dae190161f6b50680640cec77b81f82ad8b1e41b` in the next reviewed
+Pearl runtime source and coordinate with the
+[CLI release acceptance](cli-release-train.md#coding-agent-privacy-release-acceptance--issue-2157).
+A gateway/coordinator deployment alone does not supply the encrypting consumer
+or the new provider runtime; a CLI/app cut alone does not deploy relay support.
+
+Use `scripts/ops/pearl-runtime.sh status`, then `next` / `next --run`, following
+[the Pearl rollout runbook](../runbooks/pearl-coordinator-rollout.md). State the
+expected downtime before applying the runtime. Preserve existing Chat-only
+reservations and reject unsigned, unsupported or substituted endpoint families.
+Keep privacy bodies opaque at both relays and retain at-most-once dispatch,
+no failover and terminal postdispatch uncertainty.
+
+After both reviewed/signed releases are deployed, record real multi-turn Codex
+and Claude Code production tasks launched from Malibu.app, authenticated privacy
+and required assurance labels, relay-envelope/log proof and existing billing/
+receipt/settlement results. Verify `code_bound_attested` on supported macOS 27
+hardware when required; provider-runtime plaintext access remains explicit.
+Align public disclosures with the capabilities actually deployed: the #2159
+Chat/reference-client-only copy below describes the earlier class and must not
+be treated as acceptance for managed Responses/Messages support. Record the
+runtime identity and evidence in both trains before marking this row shipped.
+No signed rollout or real-agent production acceptance is claimed yet.
+
 ## Provider-only Messages compatibility — source merged (2026-10-26)
 
 [#2161](https://github.com/Augustas11/macprovider/pull/2161) merged as

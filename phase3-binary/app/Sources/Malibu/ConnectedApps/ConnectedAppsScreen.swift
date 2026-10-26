@@ -11,6 +11,7 @@ final class ConnectedAppsStore: ObservableObject {
     @Published var status = "Not configured. Client compatibility has not been tested."
     @Published var busy = false
     @Published var endpointTested: String?
+    @Published private(set) var localEndpointToken: String?
     /// SPEC-025-R012: the model list needs a saved key; its result or error
     /// is shown beside the load action.
     @Published private(set) var hasBuyerKey: Bool
@@ -73,6 +74,8 @@ final class ConnectedAppsStore: ObservableObject {
     func forgetKey() {
         perform {
             try ConnectedBuyerKeychain.delete()
+            ManagedPrivacyConsumer.shared.stop()
+            self.localEndpointToken = nil
             ConnectedApp.allCases.forEach { ConnectedBuyerKeychain.removeLaunchHandoff(self.keyHandoffURL($0)) }
             self.models = []
             self.modelID = ""
@@ -87,6 +90,7 @@ final class ConnectedAppsStore: ObservableObject {
     static let saveKeyFirst = "Save a buyer key first."
 
     func loadModels() {
+        hasBuyerKey = keyExists()
         guard hasBuyerKey else {
             modelsLoadFailed = true
             modelsMessage = Self.saveKeyFirst
@@ -114,10 +118,10 @@ final class ConnectedAppsStore: ObservableObject {
         guard let model = selectedModel, app != .cursor else { return }
         let selectedApp = app
         run {
-            let key = try ConnectedBuyerKeychain.read()
-            try await ConnectedGatewayClient().test(api: selectedApp.api, model: model.id, key: key)
+            let endpoint = try await self.privateEndpoint()
+            try await ConnectedGatewayClient(baseURL: ManagedPrivacyEndpoint.baseURL).test(api: selectedApp.api, model: model.id, key: endpoint.localToken)
             self.endpointTested = "Endpoint tested: \(selectedApp.api.rawValue) · \(model.id) · tool call and result round trip. Client streaming and the client's own compatibility are not tested."
-            self.status = "A bounded buyer-funded inference completed."
+            self.status = "A bounded private buyer-funded tool round trip completed."
         }
     }
 
@@ -164,7 +168,7 @@ final class ConnectedAppsStore: ObservableObject {
                                                                   keyHandoff: self.keyHandoffURL(app))
             entries.append((try self.transactions.preview(target: self.launcherURL(app), proposed: launcher), app.slug + "-launch", true))
             self.pending = entries
-            self.previewText = "App: \(app.rawValue)\nModel: \(model.id)\nAPI: \(app.api.rawValue)\nConfiguration: \(target.path)\nLauncher: \(self.launcherURL(app).path)\nCredential: Keychain, handed to each Launch through a private one-time file. \(ConnectedAppConfiguration.keyExposure)\(app == .crush ? "\n" + ConnectedAppConfiguration.crushProjectConfigWarning : "")\nBackups: private app storage; exact original bytes retained.\n\n" + String(decoding: config, as: UTF8.self)
+            self.previewText = "App: \(app.rawValue)\nModel: \(model.id)\nAPI: \(app.api.rawValue)\nConfiguration: \(target.path)\nLauncher: \(self.launcherURL(app).path)\nCredential: local endpoint token handed to each Launch through a private one-time file. Buyer key goes only to the private consumer. \(ConnectedAppConfiguration.keyExposure)\(app == .crush ? "\n" + ConnectedAppConfiguration.crushProjectConfigWarning : "")\nBackups: private app storage; exact original bytes retained.\n\n" + String(decoding: config, as: UTF8.self)
             self.status = previous == nil ? "Preview ready. Set up explicitly to write these files." : "Existing setup found. Identical setup is safe to repeat; restore before changing the model or executable."
         }
     }
@@ -202,25 +206,95 @@ final class ConnectedAppsStore: ObservableObject {
         }
     }
 
+    /// The embedded terminal uses the same receipt and key-handoff gates as Launch.
+    func validateManagedLaunch(_ app: ConnectedApp) throws -> (launcher: URL, text: String) {
+        guard let launcher = try transactions.receipt(named: app.slug + "-launch"),
+              let config = try transactions.receipt(named: app.slug + "-config"),
+              try ConnectedConfigTransaction.read(URL(fileURLWithPath: launcher.path)).bytes == launcher.installed,
+              try ConnectedConfigTransaction.read(URL(fileURLWithPath: config.path)).bytes == config.installed else {
+            throw ConnectedAppsError.conflict
+        }
+        // Receipt integrity alone does not make an older generated launcher safe.
+        // Refuse it before reading Keychain or producing either launch handoff.
+        guard let launcherText = String(data: launcher.installed, encoding: .utf8),
+              launcherText.hasPrefix(ConnectedAppConfiguration.handoffPrefix(keyHandoffURL(app))) else {
+            throw ConnectedAppsError.launcherSetupUpgrade
+        }
+        if let catalog = try transactions.receipt(named: app.slug + "-catalog") {
+            guard try ConnectedConfigTransaction.read(URL(fileURLWithPath: catalog.path)).bytes == catalog.installed else { throw ConnectedAppsError.conflict }
+        }
+        if app == .openCode {
+            try validateOpenCodePlugin()
+        }
+        guard String(decoding: config.installed, as: UTF8.self).contains(ManagedPrivacyEndpoint.baseURL.absoluteString) else {
+            throw ConnectedAppsError.privacySetupUpgrade
+        }
+        return (URL(fileURLWithPath: launcher.path), launcherText)
+    }
+
+    func prepareEmbeddedLaunch(_ app: ConnectedApp, isolated: Bool = false, endpoint: ManagedPrivacyEndpoint? = nil) throws -> (launcher: URL, handoff: URL, cleanupDirectory: URL?) {
+        let validated = try validateManagedLaunch(app)
+        guard let endpoint else { throw ConnectedAppsError.privacyUnavailable }
+        let launcherText = validated.text
+        let key = endpoint.localToken
+        if isolated {
+            let directory = root.appendingPathComponent("terminal/" + UUID().uuidString, isDirectory: true)
+            let handoff = directory.appendingPathComponent("buyer.key")
+            let script = directory.appendingPathComponent("Launch.command")
+            let oldLine = "KEY_FILE=" + ConnectedAppConfiguration.shell(keyHandoffURL(app).path)
+            guard launcherText.components(separatedBy: oldLine).count == 2 else { throw ConnectedAppsError.conflict }
+            let bytes = Data(launcherText.replacingOccurrences(of: oldLine,
+                with: "KEY_FILE=" + ConnectedAppConfiguration.shell(handoff.path)).utf8)
+            do {
+                try ConnectedConfigTransaction.replace(script, expected: ConnectedConfigSnapshot(bytes: nil, mode: nil), bytes: bytes, mode: 0o700)
+                try ConnectedBuyerKeychain.writeLaunchHandoff(key, to: handoff)
+            } catch {
+                try? FileManager.default.removeItem(at: directory)
+                throw error
+            }
+            return (script, handoff, directory)
+        }
+        try ConnectedBuyerKeychain.writeLaunchHandoff(key, to: keyHandoffURL(app))
+        return (validated.launcher, keyHandoffURL(app), nil)
+    }
+
+    func privateEndpoint() async throws -> ManagedPrivacyEndpoint {
+        let endpoint = try await ManagedPrivacyConsumer.shared.start(buyerKey: readKey())
+        localEndpointToken = endpoint.localToken
+        return endpoint
+    }
+
+    func startPrivateEndpoint() {
+        run {
+            _ = try await self.privateEndpoint()
+            self.status = "Private endpoint ready. Its local token is available for manual setup. No inference has run."
+        }
+    }
+
+    func copyLocalEndpointToken() {
+        guard let token = localEndpointToken else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(token, forType: .string)
+    }
+
     func launch() {
-        perform {
-            guard let launcher = try self.transactions.receipt(named: self.app.slug + "-launch"),
-                  let config = try self.transactions.receipt(named: self.app.slug + "-config"),
-                  try ConnectedConfigTransaction.read(URL(fileURLWithPath: launcher.path)).bytes == launcher.installed,
-                  try ConnectedConfigTransaction.read(URL(fileURLWithPath: config.path)).bytes == config.installed else {
-                throw ConnectedAppsError.conflict
+        // Validate legacy receipts synchronously, before a Keychain read or
+        // starting a process. A historical plaintext profile cannot launch.
+        do { _ = try validateManagedLaunch(app) }
+        catch { status = (error as? ConnectedAppsError)?.localizedDescription ?? ConnectedAppsError.conflict.localizedDescription; return }
+        let selected = app
+        run {
+            let endpoint = try await self.privateEndpoint()
+            let prepared = try self.prepareEmbeddedLaunch(selected, endpoint: endpoint)
+            do {
+                _ = try await NSWorkspace.shared.open([prepared.launcher],
+                                        withApplicationAt: URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app"),
+                                        configuration: NSWorkspace.OpenConfiguration())
+            } catch {
+                ConnectedBuyerKeychain.removeLaunchHandoff(prepared.handoff)
+                throw error
             }
-            if let catalog = try self.transactions.receipt(named: self.app.slug + "-catalog") {
-                guard try ConnectedConfigTransaction.read(URL(fileURLWithPath: catalog.path)).bytes == catalog.installed else { throw ConnectedAppsError.conflict }
-            }
-            if self.app == .openCode {
-                try self.validateOpenCodePlugin()
-            }
-            try ConnectedBuyerKeychain.writeLaunchHandoff(try ConnectedBuyerKeychain.read(), to: self.keyHandoffURL(self.app))
-            NSWorkspace.shared.open([URL(fileURLWithPath: launcher.path)],
-                                    withApplicationAt: URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app"),
-                                    configuration: NSWorkspace.OpenConfiguration())
-            self.status = "Launch requested. Confirm the selected provider/model in the client. Launching does not verify compatibility."
+            self.status = "Private launch requested. Confirm the selected provider/model in the client. Client compatibility is unverified."
         }
     }
 
@@ -320,13 +394,16 @@ final class ConnectedAppsStore: ObservableObject {
 struct ConnectedAppsScreen: View {
     @StateObject private var store = ConnectedAppsStore()
     @State private var buyerKey = ""
+    @AppStorage(ManagedPrivacyConsumer.budgetPreference) private var privacyBudgetUSD = "1.00"
+    @ObservedObject private var privacy = ManagedPrivacyConsumer.shared
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 Text("Connected apps").font(.title2.weight(.semibold))
-                Text(ConnectedAppConfiguration.privacy).foregroundStyle(.orange)
-                Text("Gateway: \(ConnectedAppConfiguration.gateway.absoluteString)").font(.caption)
+                Text("Private endpoint: \(ManagedPrivacyEndpoint.baseURL.absoluteString)").font(.caption)
+                Text(privacy.assuranceSummary).font(.caption).accessibilityIdentifier("connected-apps-privacy-assurance")
+                Text(ConnectedAppConfiguration.privacyScope).font(.caption).foregroundStyle(.secondary)
                 ShellPanel("Buyer credential") {
                     SecureField("Buyer API key", text: $buyerKey)
                     HStack {
@@ -335,6 +412,11 @@ struct ConnectedAppsScreen: View {
                         Link("Get a buyer key", destination: URL(string: "https://www.malibu.tech/console/")!)
                     }
                     Text("This is your buyer key, separate from provider earnings credentials.").font(.caption)
+                    HStack {
+                        Text("Buyer session cap (USD)")
+                        TextField("1.00", text: $privacyBudgetUSD).frame(width: 100)
+                    }
+                    Text("The private endpoint shares this cap across coding apps until Malibu quits. Changing the cap takes effect on the next Malibu session.").font(.caption).foregroundStyle(.secondary)
                     Text(ConnectedAppConfiguration.keyExposure).font(.caption).foregroundStyle(.orange)
                     DisclosureGroup("Details") {
                         Text(ConnectedAppConfiguration.setupDetails)
@@ -363,6 +445,10 @@ struct ConnectedAppsScreen: View {
                     if store.app == .cursor {
                         Text(ConnectedAppConfiguration.cursorDisclosure)
                         Text(ConnectedAppConfiguration.cursorSetup)
+                        HStack {
+                            Button("Start private endpoint") { store.startPrivateEndpoint() }.disabled(store.busy || !store.hasBuyerKey)
+                            Button("Copy local endpoint token") { store.copyLocalEndpointToken() }.disabled(store.localEndpointToken == nil)
+                        }
                         Text("Model: \(store.modelID.isEmpty ? "Choose above" : store.modelID)")
                         Text("Manual setup pending. Cursor API compatibility is unverified.").foregroundStyle(.secondary)
                     } else {
@@ -395,7 +481,6 @@ struct ConnectedAppsScreen: View {
                 if let tested = store.endpointTested { Text(tested).font(.caption) }
                 Text(store.status).font(.callout).accessibilityIdentifier("connected-apps-status")
                 if store.busy { HStack { ProgressView().controlSize(.small); Button("Cancel request") { store.cancel() } } }
-                Text("Not private · Malibu has not verified any app with this gateway.").font(.caption).foregroundStyle(.secondary)
             }
             .padding(20)
         }

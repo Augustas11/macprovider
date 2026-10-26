@@ -164,12 +164,18 @@ func (st *relayBlindSettlementStack) relayBlindSnapshotCount() int {
 func (st *relayBlindSettlementStack) pinPath(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(st.stateDir, "buyer-pin.json")
+	families := []string{"chat_completions"}
+	if st.fixture.privacyClass {
+		// The fixture's ephemeral privacy runtime serves all signed families;
+		// ordinary persisted identities must keep their legacy Chat-only pin.
+		families = []string{"chat_completions", "messages", "responses"}
+	}
 	pin := map[string]any{
 		"version":             "relay-blind-pilot-pin-v1",
 		"identity_public_key": st.fixture.descriptor.IdentityPublicKey,
 		"fingerprint":         st.fixture.descriptor.KeyRecord["identity_fingerprint"],
 		"models":              []string{settlementFixtureModelID},
-		"endpoint_families":   []string{"chat_completions"},
+		"endpoint_families":   families,
 		"not_before_unix":     st.fixture.descriptor.KeyRecord["not_before_unix"],
 		"expires_at_unix":     st.fixture.descriptor.KeyRecord["expires_at_unix"],
 		"revoked":             false,

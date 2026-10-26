@@ -4,12 +4,10 @@ import SwiftUI
 /// The sidebar sections of the main window (SPEC-025-R001). The order is the
 /// order shown; `isUtility` sections sit below the divider.
 enum MalibuSection: String, CaseIterable, Identifiable, Hashable {
-    case dashboard
     case chat
-    case connectedApps
+    case terminal
     case models
-    case discover
-    case provider
+    case earn
     case settings
     case diagnostics
 
@@ -17,12 +15,10 @@ enum MalibuSection: String, CaseIterable, Identifiable, Hashable {
 
     var title: String {
         switch self {
-        case .dashboard: return String(localized: "Dashboard", comment: "Sidebar section")
         case .chat: return String(localized: "Chat", comment: "Sidebar section")
-        case .connectedApps: return String(localized: "Connected apps", comment: "Sidebar section")
+        case .terminal: return String(localized: "Terminal", comment: "Sidebar section")
         case .models: return String(localized: "Models", comment: "Sidebar section")
-        case .discover: return String(localized: "Discover", comment: "Sidebar section")
-        case .provider: return String(localized: "Provider", comment: "Sidebar section")
+        case .earn: return String(localized: "Earn", comment: "Sidebar section")
         case .settings: return String(localized: "Settings", comment: "Sidebar section")
         case .diagnostics: return String(localized: "Diagnostics", comment: "Sidebar section")
         }
@@ -30,31 +26,49 @@ enum MalibuSection: String, CaseIterable, Identifiable, Hashable {
 
     var systemImage: String {
         switch self {
-        case .dashboard: return "square.grid.2x2"
         case .chat: return "bubble.left.and.bubble.right"
-        case .connectedApps: return "app.connected.to.app.below.fill"
+        case .terminal: return "terminal"
         case .models: return "square.stack.3d.up"
-        case .discover: return "magnifyingglass"
-        case .provider: return "arrow.up.arrow.down"
+        case .earn: return "dollarsign.circle"
         case .settings: return "gearshape"
         case .diagnostics: return "stethoscope"
         }
     }
 
-    var isUtility: Bool { self == .settings || self == .diagnostics }
+    static func migrated(_ value: String) -> MalibuSection? {
+        switch value {
+        case "dashboard", "provider": return .earn
+        case "discover": return .models
+        case "connectedApps": return .terminal
+        default: return Self(rawValue: value)
+        }
+    }
 
+    var isUtility: Bool { self == .settings || self == .diagnostics }
     static var primary: [MalibuSection] { allCases.filter { !$0.isUtility } }
     static var utility: [MalibuSection] { allCases.filter(\.isUtility) }
 }
 
-/// Which section the main window shows. One instance per window, owned by
-/// the app delegate so menu commands can open a given section.
+/// One navigation owner retains model-tab destinations when restoring legacy links.
 @MainActor
 final class MalibuNavigation: ObservableObject {
-    @Published var selection: MalibuSection? = .dashboard
+    @Published var selection: MalibuSection? = .chat
+    @Published var modelsTab: ModelsHubTab = .recommended
 
-    func show(_ section: MalibuSection) {
-        selection = section
+    init(persistedValue: String? = nil) {
+        if let persistedValue { showPersistedValue(persistedValue) }
+    }
+
+    func show(_ section: MalibuSection) { selection = section }
+
+    func showModels(_ tab: ModelsHubTab) {
+        modelsTab = tab
+        selection = .models
+    }
+
+    func showPersistedValue(_ value: String) {
+        if value == "discover" { modelsTab = .browse }
+        selection = MalibuSection.migrated(value) ?? .chat
     }
 }
 
@@ -149,6 +163,7 @@ struct MainShellView: View {
     let onExportDiagnostics: () -> Void
     let onResetProvider: () -> Void
     @ObservedObject private var modelStore = ModelManagementStore.shared
+    @StateObject private var terminalWorkspace = TerminalWorkspace()
 
     var body: some View {
         NavigationSplitView {
@@ -240,24 +255,22 @@ struct MainShellView: View {
 
     @ViewBuilder
     private var detail: some View {
-        switch navigation.selection ?? .dashboard {
-        case .dashboard:
-            DashboardView(
+        switch navigation.selection ?? .chat {
+        case .earn:
+            EarnScreen(
                 agent: agent,
                 navigate: navigation.show,
+                browseModels: { navigation.showModels(.browse) },
+                onThisMacModels: { navigation.showModels(.onThisMac) },
                 onExportDiagnostics: onExportDiagnostics,
                 onResetProvider: onResetProvider
             )
         case .chat:
             ChatScreen(agent: agent)
-        case .connectedApps:
-            ConnectedAppsScreen()
+        case .terminal:
+            TerminalScreen(workspace: terminalWorkspace)
         case .models:
-            ModelsScreen(store: modelStore, agent: agent)
-        case .discover:
-            DiscoverScreen(store: modelStore, agent: agent)
-        case .provider:
-            ProviderScreen(agent: agent, navigate: navigation.show)
+            ModelsHubScreen(store: modelStore, agent: agent, selection: $navigation.modelsTab)
         case .settings:
             SettingsScreen(agent: agent)
         case .diagnostics:

@@ -15,7 +15,7 @@ enum DashboardCopy {
     static let resetProviderConfirmButton = "Reset provider service"
     static let resetProviderCancelButton = "Cancel"
     static let openModels = String(localized: "Models", comment: "Dashboard link to the Models section")
-    static let compareInDiscover = String(localized: "Compare in Discover", comment: "Dashboard link to the Discover section")
+    static let compareInDiscover = String(localized: "Browse models", comment: "Dashboard link to the Discover section")
     static let openDiagnostics = String(localized: "Diagnostics", comment: "Dashboard link to the Diagnostics section")
     static let invitesNudge = String(localized: "You have provider invites to share.", comment: "Dashboard invite nudge")
     static let openInvites = String(localized: "Invites in Settings", comment: "Dashboard link to Settings invites")
@@ -101,7 +101,7 @@ enum DashboardCopy {
         let pill = AgentSnapshotPresenter.statusPill(snapshot)
         let status = AgentSnapshotPresenter.consolidatedStatus(snapshot)
         let card = AgentSnapshotPresenter.earningsCard(snapshot, now: now)
-        var strings = ["Dashboard"]
+        var strings = ["Earn"]
         if let subtitle = AgentSnapshotPresenter.dashboardSubtitle(snapshot, now: now) { strings.append(subtitle) }
         strings.append(pill.label)
         if showsStatusNotice(snapshot) {
@@ -141,6 +141,10 @@ struct DashboardView: View {
     let navigate: (MalibuSection) -> Void
     let onExportDiagnostics: () -> Void
     let onResetProvider: () -> Void
+    var browseModels: (() -> Void)? = nil
+    var onThisMacModels: (() -> Void)? = nil
+    var includesProviderDetails = false
+    @State var providerDetailsExpanded = false
     @State private var showAddWalletSheet = false
     @State private var rewardActivityExpanded = false
     @ObservedObject private var modelStore = ModelManagementStore.shared
@@ -172,7 +176,7 @@ struct DashboardView: View {
                             .lineLimit(2)
                             .truncationMode(.middle)
                         Spacer()
-                        Button(DashboardCopy.compareInDiscover) { navigate(.discover) }
+                        Button(DashboardCopy.compareInDiscover) { (browseModels ?? { navigate(.models) })() }
                     }
                 }
             }
@@ -185,6 +189,12 @@ struct DashboardView: View {
                     Button(DashboardCopy.openInvites) { navigate(.settings) }
                 }
                 .padding(.horizontal, 4)
+            }
+            if includesProviderDetails {
+                DisclosureGroup("Provider details", isExpanded: $providerDetailsExpanded) {
+                    ProviderDetailsContent(agent: agent, navigate: navigate)
+                }
+                .accessibilityIdentifier("malibu.earn.provider-details")
             }
         }
         .padding(20)
@@ -207,7 +217,7 @@ struct DashboardView: View {
     private var header: some View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(MalibuSection.dashboard.title)
+                Text(MalibuSection.earn.title)
                     .font(.title2.weight(.semibold))
                 if let subtitle = AgentSnapshotPresenter.dashboardSubtitle(agent.snapshot) {
                     Text(ShellText.display(subtitle))
@@ -219,6 +229,7 @@ struct DashboardView: View {
             }
             Spacer()
             StatusPillView(pill: AgentSnapshotPresenter.statusPill(agent.snapshot))
+            if includesProviderDetails { ProviderPauseControl(agent: agent) }
         }
     }
 
@@ -267,9 +278,9 @@ struct DashboardView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             HStack(spacing: 8) {
-                Button(DashboardCopy.openModels) { navigate(.models) }
+                Button(DashboardCopy.openModels) { (onThisMacModels ?? { navigate(.models) })() }
                     .accessibilityIdentifier("malibu.dashboard.open-models")
-                Button(DashboardCopy.compareInDiscover) { navigate(.discover) }
+                Button(DashboardCopy.compareInDiscover) { (browseModels ?? { navigate(.models) })() }
                     .accessibilityIdentifier("malibu.dashboard.open-discover")
             }
         }
