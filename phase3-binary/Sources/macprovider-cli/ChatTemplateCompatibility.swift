@@ -1,4 +1,5 @@
 import Foundation
+import Hub
 import MLXHuggingFace
 import MLXLMCommon
 import Tokenizers
@@ -129,42 +130,58 @@ private extension Character {
 }
 
 /// Loads the swift-transformers tokenizer as `#huggingFaceTokenizerLoader()`
-/// does. When the configured chat template needs a `ChatTemplateCompatibility`
-/// rewrite, the returned tokenizer renders the rewritten template as a literal
-/// through the same swift-transformers path (same context, same
-/// `lstripBlocks`/`trimBlocks` options, `add_generation_prompt` true);
-/// a DeepSeek-V4 artifact (no template) renders through
-/// `DeepseekV4ChatTokenizer`; otherwise it is the stock adaptor, unchanged.
+/// does (`PreTrainedTokenizer` from the folder's `tokenizer_config.json`,
+/// `tokenizer.json` and chat template). Prompts render through
+/// `ChatTemplatePromptRenderer` (the same context and options, with the
+/// `ChatTemplateCompatibility` rewrite) and encode through
+/// `PromptControlTokenEncoder` (SPEC-018 §3.14); a DeepSeek-V4 artifact (no
+/// template) renders through `DeepseekV4ChatTokenizer`.
 struct ChatTemplateCompatTokenizerLoader: MLXLMCommon.TokenizerLoader {
     func load(from directory: URL) async throws -> any MLXLMCommon.Tokenizer {
         if DeepseekV4ChatTokenizer.applies(to: directory) {
             return try await DeepseekV4ChatTokenizer.load(from: directory)
         }
-        let upstream = try await Tokenizers.AutoTokenizer.from(modelFolder: directory)
-        if let template = ChatTemplateCompatibility.configuredTemplate(in: directory) {
-            let result = ChatTemplateCompatibility.rewrite(template)
-            if result.numericAttributeRewrites > 0 {
-                FileHandle.standardError.write(Data(
-                    "event=chat_template_compat rewrite=numeric_attribute_access count=\(result.numericAttributeRewrites)\n".utf8
-                ))
-                return LiteralChatTemplateTokenizer(upstream: upstream, template: result.template)
-            }
+        let config = LanguageModelConfigurationFromHub(modelFolder: directory)
+        guard let tokenizerConfig = try await config.tokenizerConfig else {
+            throw Tokenizers.TokenizerError.missingConfig
         }
-        return #adaptHuggingFaceTokenizer(upstream)
+        let tokenizerData = try await config.tokenizerData
+        let upstream = try PreTrainedTokenizer(tokenizerConfig: tokenizerConfig, tokenizerData: tokenizerData)
+        let renderer = ChatTemplatePromptRenderer(tokenizerConfig: tokenizerConfig)
+        if renderer.numericAttributeRewrites > 0 {
+            FileHandle.standardError.write(Data(
+                "event=chat_template_compat rewrite=numeric_attribute_access count=\(renderer.numericAttributeRewrites)\n".utf8
+            ))
+        }
+        let encoder = try PromptControlTokenEncoder(
+            tokenizerConfig: tokenizerConfig,
+            tokenizerData: tokenizerData,
+            upstream: upstream,
+            structuralSources: renderer.templateTexts
+        )
+        return ChatTemplateTokenizer(upstream: upstream, renderer: renderer, encoder: encoder)
     }
 }
 
-/// The stock adaptor's behaviour with a literal chat template.
-struct LiteralChatTemplateTokenizer: MLXLMCommon.Tokenizer {
-    let upstream: any Tokenizers.Tokenizer
-    let template: String
+/// A Hugging Face tokenizer with a Jinja chat template, encoding prompts and
+/// decoding output by control-token ID (SPEC-018 §3.14).
+struct ChatTemplateTokenizer: MLXLMCommon.Tokenizer, ControlTokenAware {
+    let upstream: PreTrainedTokenizer
+    let renderer: ChatTemplatePromptRenderer
+    let encoder: PromptControlTokenEncoder
+
+    var controlTokens: ControlTokenTable? { encoder.control }
 
     func encode(text: String, addSpecialTokens: Bool) -> [Int] {
         upstream.encode(text: text, addSpecialTokens: addSpecialTokens)
     }
 
     func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String {
-        upstream.decode(tokens: tokenIds, skipSpecialTokens: skipSpecialTokens)
+        ControlTextShield.decode(
+            tokenIds: tokenIds,
+            skipSpecialTokens: skipSpecialTokens,
+            control: encoder.control
+        ) { upstream.decode(tokens: $0, skipSpecialTokens: $1) }
     }
 
     func convertTokenToId(_ token: String) -> Int? { upstream.convertTokenToId(token) }
@@ -179,18 +196,20 @@ struct LiteralChatTemplateTokenizer: MLXLMCommon.Tokenizer {
         tools: [[String: any Sendable]]?,
         additionalContext: [String: any Sendable]?
     ) throws -> [Int] {
-        do {
-            return try upstream.applyChatTemplate(
-                messages: messages,
-                chatTemplate: .literal(template),
-                addGenerationPrompt: true,
-                truncation: false,
-                maxLength: nil,
-                tools: tools,
-                additionalContext: additionalContext
-            )
-        } catch Tokenizers.TokenizerError.missingChatTemplate {
-            throw MLXLMCommon.TokenizerError.missingChatTemplate
+        var input = try renderer.input(messages: messages, tools: tools, additionalContext: additionalContext)
+        // Assistant history that carries its reasoning inline
+        // (`<think>…</think>answer`) is split here, as templates that read
+        // `reasoning_content` split it themselves, so the think markers come
+        // from the template rather than from history text (SPEC-018 §3.14).
+        // The split is used only when the template renders it to exactly the
+        // text it renders for the inline form.
+        if let split = ChatTemplatePromptRenderer.splittingInlineReasoning(messages) {
+            let splitInput = try renderer.input(messages: split, tools: tools, additionalContext: additionalContext)
+            if let original = try? renderer.render(input), let candidate = try? renderer.render(splitInput), original == candidate {
+                input = splitInput
+            }
         }
+        return try encoder.encodePrompt(
+            input, check: ChatTemplatePromptRenderer.check, sanitize: ChatTemplatePromptRenderer.sanitize, render: renderer.render)
     }
 }

@@ -19,6 +19,9 @@ final class GrammarConstraintState: @unchecked Sendable, Equatable {
     private var failure: APIError?
     private static let close = Array("</think>".utf8)
     private let reasoningProductivePrefixes: Set<Int>
+    /// SPEC-018 §3.14: when `</think>` is a control token, only that token
+    /// ends reasoning; the same text in ordinary tokens stays reasoning.
+    private let closeTokenID: Int?
 
     private final class Compiled: @unchecked Sendable {
         private static let maskByteBudget = 8_000_000
@@ -130,16 +133,19 @@ final class GrammarConstraintState: @unchecked Sendable, Equatable {
     }
     private static let cache = Cache()
 
-    init(grammar: ByteGrammar, tokens: [Int: [UInt8]], eosTokenIDs: Set<Int>, reasoningOpen: Bool = false) throws {
+    init(grammar: ByteGrammar, tokens: [Int: [UInt8]], eosTokenIDs: Set<Int>, reasoningOpen: Bool = false,
+         closeTokenID: Int? = nil) throws {
         compiled = try Compiled(grammar: grammar, tokens: tokens, eos: eosTokenIDs)
-        reasoningProductivePrefixes = reasoningOpen ? try compiled.reasoningProductivePrefixes() : []
+        self.closeTokenID = closeTokenID
+        reasoningProductivePrefixes = reasoningOpen && closeTokenID == nil ? try compiled.reasoningProductivePrefixes() : []
         state = compiled.automaton.initialState
         reasoning = reasoningOpen
     }
 
-    private init(compiled: Compiled, reasoningOpen: Bool) throws {
+    private init(compiled: Compiled, reasoningOpen: Bool, closeTokenID: Int?) throws {
         self.compiled = compiled
-        reasoningProductivePrefixes = reasoningOpen ? try compiled.reasoningProductivePrefixes() : []
+        self.closeTokenID = closeTokenID
+        reasoningProductivePrefixes = reasoningOpen && closeTokenID == nil ? try compiled.reasoningProductivePrefixes() : []
         state = compiled.automaton.initialState
         reasoning = reasoningOpen
     }
@@ -179,17 +185,18 @@ final class GrammarConstraintState: @unchecked Sendable, Equatable {
         let data = try Data(contentsOf: url)
         let fingerprint = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
         let key = CacheKey(tokenizer: fingerprint, grammar: grammar, eos: eosTokenIDs)
+        let closeTokenID = ControlTokenTable.of(tokenizer)?.idsByText["</think>"]
         cache.lock.lock()
         defer { cache.lock.unlock() }
         if let compiled = cache.entries[key] {
-            return try GrammarConstraintState(compiled: compiled, reasoningOpen: request.outputTraits.reasoningOpen)
+            return try GrammarConstraintState(compiled: compiled, reasoningOpen: request.outputTraits.reasoningOpen, closeTokenID: closeTokenID)
         }
         let pieces = try vocabulary(data: data, tokenizer: tokenizer)
         let compiled = try Compiled(grammar: grammar, tokens: pieces, eos: eosTokenIDs)
         // A small bounded cache; model/tokenizer identity includes the full file.
         if cache.entries.count >= 2 { cache.entries.removeAll() }
         cache.entries[key] = compiled
-        return try GrammarConstraintState(compiled: compiled, reasoningOpen: request.outputTraits.reasoningOpen)
+        return try GrammarConstraintState(compiled: compiled, reasoningOpen: request.outputTraits.reasoningOpen, closeTokenID: closeTokenID)
     }
 
     /// Read actual vocabulary IDs, including holes and raw added/special tokens.
@@ -262,7 +269,10 @@ final class GrammarConstraintState: @unchecked Sendable, Equatable {
         return (0, nil)
     }
 
-    private func next(_ bytes: [UInt8]) -> (state: Int, reasoning: Bool, tail: [UInt8])? {
+    private func next(_ token: Int, _ bytes: [UInt8]) -> (state: Int, reasoning: Bool, tail: [UInt8])? {
+        if reasoning, let closeTokenID {
+            return token == closeTokenID ? (state, false, []) : (state, true, [])
+        }
         guard reasoning else {
             return compiled.automaton.transition(state: state, bytes: bytes).flatMap {
                 compiled.productiveStates.contains($0) ? ($0, false, []) : nil
@@ -287,7 +297,7 @@ final class GrammarConstraintState: @unchecked Sendable, Equatable {
             if failure != nil { allowed = Array(compiled.eos) }
             else if reasoning {
                 allowed = compiled.tokens.compactMap { id, bytes in
-                    !compiled.eos.contains(id) && next(bytes) != nil ? id : nil
+                    !compiled.eos.contains(id) && next(id, bytes) != nil ? id : nil
                 }
             } else { allowed = Array(try compiled.allowed(state).keys) }
         } catch { failure = error as? APIError ?? Compiled.error("Output grammar mask failed"); allowed = Array(compiled.eos) }
@@ -315,7 +325,7 @@ final class GrammarConstraintState: @unchecked Sendable, Equatable {
             failure = Compiled.error("Output stopped before grammar acceptance")
             return
         }
-        guard let bytes = compiled.tokens[token], let next = next(bytes) else {
+        guard let bytes = compiled.tokens[token], let next = next(token, bytes) else {
             failure = Compiled.error("Decoder selected an illegal output token")
             return
         }

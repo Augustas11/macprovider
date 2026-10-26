@@ -84,7 +84,7 @@ final class GLM5NextChatTemplateTests: XCTestCase {
         let tokenizer = try await ChatTemplateCompatTokenizerLoader().load(
             from: URL(fileURLWithPath: (raw as NSString).expandingTildeInPath)
         )
-        XCTAssertTrue(tokenizer is LiteralChatTemplateTokenizer)
+        XCTAssertTrue(tokenizer is ChatTemplateTokenizer)
         let (cases, references) = try Self.loadCases()
         for (testCase, reference) in zip(cases, references) {
             let name = testCase["name"] as! String
