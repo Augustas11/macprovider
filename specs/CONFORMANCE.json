@@ -15367,7 +15367,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/2164",
-        "rationale": "Local image generation source, verified weight manifest and fake-backend contract tests are present. Real-weights lab Air acceptance and released-provider acceptance remain pending."
+        "rationale": "Local image generation source, verified weight manifest and fake-backend contract tests are present. Low-memory coverage uses fixtures. Real-weights designated Mac Studio acceptance and released-provider acceptance remain pending."
       }
     },
     {
@@ -15391,7 +15391,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/2164",
-        "rationale": "Create UI, owner-only PNG gallery and XCTest coverage are present. Real-weights lab Air acceptance and released-app acceptance remain pending."
+        "rationale": "Create UI, owner-only PNG gallery and XCTest coverage are present. Low-memory coverage uses fixtures. Real-weights designated Mac Studio acceptance and released-app acceptance remain pending."
       }
     },
     {

@@ -1239,8 +1239,9 @@ errors. These surfaces MUST NOT introduce privacy claims.
   and Copy actions. Images MUST never be uploaded. Tests MUST cover sidebar
   order and labels, every provider image state, RAM-based size gating,
   unavailable states, gallery path and file permissions. Real-weights image
-  quality and generation acceptance on the lab Air remain separate pending
-  gates.
+  quality and generation acceptance on the designated Mac Studio remain
+  separate pending gates. Low-memory coverage MUST use fixtures; hardware
+  acceptance MUST NOT run on the operator Mac.
 
 ### 3.3 Updates — CLI-owned signed compatibility set
 
