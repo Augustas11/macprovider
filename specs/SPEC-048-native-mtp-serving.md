@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.58
+**Version:** 0.1.59
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.58",
+  "version": "0.1.59",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -382,8 +382,15 @@ do not apply to this adapter; these do:
   depth 1, greedy, 256 tokens) one native row decoded at 1.27x ordinary
   (48.4 vs 38.2 tok/s, acceptance 0.889), while four native rows decoded at
   0.79x ordinary continuous batching (51.5 vs 65.6 tok/s, acceptance 0.870).
-  The sidecar loader and generator reject a larger bound for this adapter;
-  further rows take ordinary decode under the R007 load gate. R004, R012,
+  (0.1.59) The adapter's implementation ceiling is four native active rows;
+  the sidecar loader and generator accept only integer bounds from one through
+  `min(4, qualified_slots)`. This capability is not qualification: the current
+  signed deployment bound remains one. Publishing any larger bound requires
+  a new frozen R015 policy and passing native-eligible evidence for every
+  requested row count through that bound, including exact token/state parity,
+  packed mixed-row verification and the existing throughput gates. Gated cells
+  and source tests cannot raise the signed bound. Rows above the actual signed
+  bound still take ordinary decode under the R007 load gate. R004, R012,
   R014, and R015 apply unchanged.
 - *Provider load and admission (0.1.40).* The provider builds the drafter
   inside the loaded target: a parameterless model created from the target's
@@ -1534,6 +1541,45 @@ For each qualified tuple, production enablement requires all of the following:
     is the released CLI. Publishing earlier would turn native MTP off for
     every tuple on the older CLI.
 
+**Qualification bootstrap order (0.1.59).** A signed collector candidate and
+qualification of a changed decoder are separate dependencies. They MUST be
+ordered as follows, without withdrawing an already-enabled native-MTP tuple:
+
+1. Obtain the collector-capable signed acceptance candidate through
+   `scripts/ops/cli-release.sh` (`status`, `next`, then the documented
+   `next --run` cut and signed-byte-verification steps). Stop before fleet
+   promotion or any native-policy change. The candidate signature authenticates
+   its bytes; it supplies no missing R005/R015 evidence or production admission.
+   A candidate-only cut is not final tagging, recommendation or activation.
+2. Collect the preregistered v2 observation on a signed runtime already
+   admissible for the incumbent qualified scope. Collection preserves live
+   native MTP, ordinary CB, request eligibility and the signed row/depth bounds.
+   The capture runtime need not be the later replay runtime: MTP-15 binds their
+   source identities separately. Any pre-promotion collector installation MUST
+   satisfy MTP-13's existing unchanged-greedy-scope signed-pair requirements
+   through `scripts/ops/`; no newly qualified greedy parent may be inferred
+   from the candidate signature or an identity-only rebind.
+3. After truthful privacy review of that capture, qualify the exact changed
+   signed candidate in isolated Studio loopback before changing its production
+   policy. Retain the real capture source, candidate source and signed-byte
+   identities. Run the genuine R005 proof, formal R015 matrix, sustained cell
+   and fresh paired representative replay, plus the other tuple-specific gates
+   above. Observation, exploratory cells and offline projection replace none
+   of them. An isolated candidate MUST NOT join the live coordinator merely
+   to produce the missing observation or qualification.
+4. Only after qualification and review may the existing release and catalog
+   trains advance through their remaining gates and activate the qualified
+   policy. Final tag/recommendation, signed journeys, release verification and
+   exact-pair recovery requirements remain unchanged.
+
+If no collector-capable signed runtime can satisfy step 2, signing the changed
+decoder does not break the cycle. The prerequisite is a reviewed collector-only
+source/cut order that preserves the incumbent qualified decode behavior and
+satisfies MTP-13 before observation. Until that prerequisite exists, the new
+qualification remains pending; the incumbent native-MTP policy stays enabled.
+This order adds no publication exception or evidence waiver and does not
+authorize bypassing a refusing ops step.
+
 Failure or revocation of any tuple-specific gate MUST remove or disable only that
 tuple's native-MTP eligibility and MUST preserve ordinary decode. No partial
 Phase 0/1 implementation may claim issue completion or a production MTP
@@ -2084,6 +2130,16 @@ the text-only path without image inputs; that does not admit multimodal buyer
 requests.
 
 ## 9. Changelog and history
+
+- **0.1.59 (2026-10-26)** — MTP-14 separates a collector-capable signed
+  candidate cut from changed-decoder qualification and production activation.
+  Genuine MTP-on observation requires an independently admissible collector;
+  isolated signed-candidate R005/R015 and representative replay precede policy
+  changes. Existing signed-pair, qualification and release gates are preserved;
+  a missing collector-only source/cut prerequisite remains pending. MTP-2
+  raises the GLM adapter's implementation ceiling to four native active rows,
+  leaving the signed deployment bound at one; a future signed higher bound
+  requires its complete per-bound R015 qualification before publication.
 
 - **0.1.58 (2026-10-26)** — Reconciles the sampled-profile campaign with the
   0.1.57 R009 prompt/head snapshot contract; its SPEC-024-R005 and SPEC-038
