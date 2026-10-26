@@ -208,6 +208,12 @@ def validate_acceptance(result: dict, policy: dict, corpus: dict, tuple_entry: d
     corpus_cases = corpus.get("cases")
     require(isinstance(cases, list) and isinstance(corpus_cases, list) and len(cases) == len(corpus_cases) and len(cases) >= 200, "R005 corpus incomplete")
     require([case.get("id") for case in cases] == [case.get("id") for case in corpus_cases] and len({case.get("id") for case in cases}) == len(cases), "R005 case identity/order")
+    visible = validate_acceptance_rows(cases, corpus_cases)
+    require(visible >= 6400 and result.get("native_compared_positions") == visible, "R005 compared position floor")
+
+
+def validate_acceptance_rows(cases: list, corpus_cases: list) -> int:
+    """Shared full numeric validation; prefix resumption never trusts pass flags."""
     visible = 0
     for case, frozen_case in zip(cases, corpus_cases):
         require(case.get("stratum") == frozen_case.get("stratum") and case.get("expected_native") is frozen_case.get("expected_native"), "R005 frozen stratum/admission mismatch")
@@ -229,7 +235,40 @@ def validate_acceptance(result: dict, policy: dict, corpus: dict, tuple_entry: d
         require(selected[:len(positions)] == positions, "R005 visible prefix mismatch")
         if case.get("expected_native") is True:
             visible += len(positions)
-    require(visible >= 6400 and result.get("native_compared_positions") == visible, "R005 compared position floor")
+    return visible
+
+
+def validate_acceptance_checkpoint(value: dict, policy: dict, corpus: dict, *, policy_sha: str, corpus_sha: str) -> dict:
+    """A private complete-case prefix, never a partial acceptance verdict."""
+    require(set(value) == {"schema", "provider_commit", "policy_sha256", "corpus_sha256", "cases"}, "checkpoint fields")
+    require(value["schema"] == "macprovider.native-mtp-acceptance-checkpoint.v1", "checkpoint schema")
+    require(value["provider_commit"] == policy["provider_commit"] and value["policy_sha256"] == policy_sha and value["corpus_sha256"] == policy["corpus_sha256"] == corpus_sha, "checkpoint frozen identity")
+    rows = value["cases"]
+    require(isinstance(rows, list) and 0 <= len(rows) <= len(corpus["cases"]), "checkpoint prefix bounds")
+    frozen = corpus["cases"][:len(rows)]
+    require([r.get("id") for r in rows] == [r["id"] for r in frozen] and len({r.get("id") for r in rows}) == len(rows), "checkpoint prefix/order/duplicates")
+    visible = validate_acceptance_rows(rows, frozen)
+    accepted = rejected = near = 0
+    terminals = set(); tool = reasoning = False
+    for row, case in zip(rows, frozen):
+        limits = {"short": (1, 512), "1.5k": (1505, 1566), "4k": (4015, 4096), "8k": (8029, 8355), "near_boundary": (4032, 4096)}
+        lo, hi = limits[case["stratum"]]
+        require(row.get("prompt_stratum_passed") is True and type(row.get("prompt_tokens")) is int and lo <= row["prompt_tokens"] <= hi, "checkpoint actual prompt stratum")
+        observed = row.get("checkpoint_observations")
+        require(isinstance(observed, dict) and set(observed) == {"accepted", "rejected", "proposed", "decode_path", "tool_call_count", "reasoning_nonempty", "content_nonempty", "conversation_cache_key_absent"}, "checkpoint actual observations")
+        for key in ("accepted", "rejected", "proposed", "tool_call_count"):
+            require(type(observed[key]) is int and 0 <= observed[key] <= 2**63-1, "checkpoint observed counter")
+        require(observed["accepted"] + observed["rejected"] == observed["proposed"], "checkpoint proposal accounting")
+        require(all(type(observed[k]) is bool for k in ("reasoning_nonempty", "content_nonempty", "conversation_cache_key_absent")) and observed["conversation_cache_key_absent"], "checkpoint request-local no-cache contract")
+        require(observed["decode_path"] == ("native_mtp" if case["expected_native"] else "ordinary") and (observed["proposed"] > 0 if case["expected_native"] else observed["proposed"] == 0), "checkpoint actual admission")
+        if case["expected_native"]:
+            accepted += observed["accepted"]; rejected += observed["rejected"]
+            require(accepted <= 2**64-1 and rejected <= 2**64-1 and accepted + rejected <= 2**64-1, "checkpoint aggregate counter overflow")
+            terminals.add(row["native_terminal"])
+            tool |= observed["tool_call_count"] > 0
+            reasoning |= observed["reasoning_nonempty"] and (observed["content_nonempty"] or observed["tool_call_count"] > 0)
+            near += sum(p["ordinary_gap"] <= .05 for p in row["positions"])
+    return dict(native_positions=visible, accepted=accepted, rejected=rejected, terminals=sorted(terminals), tool_boundary=tool, reasoning_close=reasoning, near_tied_positions=near)
 
 
 def validate_security_artifact(q: Path, *, repo: Path, source: dict, recipe: dict, prior_evidence: str) -> str:

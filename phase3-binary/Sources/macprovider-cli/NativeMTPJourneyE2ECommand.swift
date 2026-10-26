@@ -1,5 +1,6 @@
 import ArgumentParser
 import CryptoKit
+import CoreFoundation
 import Foundation
 import MacProviderCore
 import MLXLMCommon
@@ -49,6 +50,9 @@ struct NativeMTPJourneyE2ECommand: AsyncParsableCommand {
     @Option(name: .customLong("acceptance-corpus"), help: "Frozen R005 acceptance corpus; run only its production-shaped request pairs.")
     var acceptanceCorpusPath: String?
 
+    @Option(name: .customLong("acceptance-checkpoint"), help: "Private atomic complete-case checkpoint; an existing file resumes only its exact frozen prefix.")
+    var acceptanceCheckpointPath: String?
+
     @Flag(name: .customLong("validate-acceptance-only"), help: "Parse every frozen acceptance request without loading a model or using MLX.")
     var validateAcceptanceOnly = false
 
@@ -85,7 +89,7 @@ struct NativeMTPJourneyE2ECommand: AsyncParsableCommand {
             return
         }
         if let output = prepareAcceptanceCorpusPath {
-            guard acceptanceCorpusPath == nil, acceptancePolicyPath == nil, providerCommit == nil,
+            guard acceptanceCheckpointPath == nil, acceptanceCorpusPath == nil, acceptancePolicyPath == nil, providerCommit == nil,
                   identityCachePath == nil, !validateAcceptanceOnly, !selfTestOnly else {
                 throw ValidationError("corpus preparation cannot execute a journey")
             }
@@ -95,6 +99,9 @@ struct NativeMTPJourneyE2ECommand: AsyncParsableCommand {
             try data.write(to: url, options: .atomic)
             try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
             return
+        }
+        guard acceptanceCheckpointPath == nil || acceptanceCorpusPath != nil else {
+            throw ValidationError("acceptance checkpoint requires the full frozen corpus")
         }
         let corpus = try acceptanceCorpusPath.map {
             try NativeMTPAcceptanceCorpus.load(from: URL(fileURLWithPath: ConfigLoader.expandTilde($0)))
@@ -176,6 +183,7 @@ struct NativeMTPJourneyE2ECommand: AsyncParsableCommand {
             acceptanceCorpus: corpus,
             acceptancePolicy: acceptancePolicy,
             acceptanceTargetIdentity: checkedTarget,
+            acceptanceCheckpointPath: acceptanceCheckpointPath,
             signedAdmissionInputs: signedAdmissionInputs,
             selectedSteps: Set(journeySteps)
         )
@@ -350,6 +358,86 @@ private struct NativeMTPJourneyStep {
     }
 }
 
+/// Complete private case records only. No counters are accepted from stderr.
+/// The guarded controller independently validates these numeric rows before
+/// transport and before model load; this loader additionally rejects unsafe
+/// direct CLI input rather than accepting a caller-supplied passed flag.
+private final class AcceptanceCheckpoint {
+    let url: URL
+    let identity: [String: String]
+    var records: [[String: Any]] = []
+    init(path: String, policy: NativeMTPAcceptancePolicy?, corpus: NativeMTPAcceptanceCorpus) throws {
+        guard let policy else { throw ValidationError("checkpoint requires frozen policy") }
+        url = URL(fileURLWithPath: ConfigLoader.expandTilde(path))
+        identity = ["schema": "macprovider.native-mtp-acceptance-checkpoint.v1", "provider_commit": policy.providerCommit,
+                    "policy_sha256": policy.digestSHA256, "corpus_sha256": corpus.digestSHA256]
+        guard corpus.cases.allSatisfy({ $0.request.conversationKey == nil }) else { throw ValidationError("checkpoint requests must be request-local with no cache key") }
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        let attrs = try FileManager.default.attributesOfItem(atPath: url.path)
+        guard attrs[.type] as? FileAttributeType == .typeRegular,
+              (attrs[.posixPermissions] as? NSNumber)?.intValue == 0o600,
+              ((attrs[.size] as? NSNumber)?.intValue ?? Int.max) <= 64 * 1024 * 1024 else { throw ValidationError("checkpoint file type/permissions/size differ") }
+        let bytes = try Data(contentsOf: url)
+        guard bytes.count <= 64 * 1024 * 1024 else { throw ValidationError("checkpoint grew while reading") }
+        try AutotuneStrictJSON.rejectDuplicateKeys(bytes)
+        guard let object = try JSONSerialization.jsonObject(with: bytes) as? [String: Any],
+              Set(object.keys) == Set(identity.keys).union(["cases"]),
+              identity.allSatisfy({ object[$0.key] as? String == $0.value }),
+              let rows = object["cases"] as? [[String: Any]], rows.count <= corpus.cases.count else { throw ValidationError("checkpoint identity/type/permissions differ") }
+        for (row, item) in zip(rows, corpus.cases) {
+            guard row["id"] as? String == item.id, row["stratum"] as? String == item.stratum.rawValue,
+                  row["expected_native"] as? Bool == item.expectedNative,
+                  row["passed"] as? Bool == true, row["prompt_stratum_passed"] as? Bool == true,
+                  let promptTokens = row["prompt_tokens"] as? Int, NativeMTPAcceptanceCorpusBuilder.contains(promptTokens, stratum: item.stratum),
+                  row["admission_passed"] as? Bool == true, row["output_parity"] as? Bool == true,
+                  row["oracle_failure"] is NSNull,
+                  let terminal = row["native_terminal"] as? String, row["ordinary_terminal"] as? String == terminal,
+                  ["eos", "stopSequence", "maxTokens", "toolBoundary", "other"].contains(terminal),
+                  let visible = row["positions"] as? [[String: Any]], let selected = row["selected_positions"] as? [[String: Any]], !selected.isEmpty,
+                  visible.count == row["completion_tokens"] as? Int, visible.count <= 256,
+                  selected.count == row["ordinary_selected_count"] as? Int, selected.count == row["native_selected_count"] as? Int,
+                  let observations = row["checkpoint_observations"] as? [String: Any],
+                  observations["conversation_cache_key_absent"] as? Bool == true,
+                  observations["decode_path"] as? String == (item.expectedNative ? "native_mtp" : "ordinary") else { throw ValidationError("checkpoint case prefix differs") }
+            for values in [visible, selected] {
+                for (index, value) in values.enumerated() {
+                    guard value["position"] as? Int == index, value["token_exact"] as? Bool == true,
+                          value["top1_exact"] as? Bool == true, value["finite"] as? Bool == true,
+                          let token = value["ordinary_token"] as? Int, value["native_token"] as? Int == token,
+                          let top = value["ordinary_top1"] as? Int, value["native_top1"] as? Int == top else { throw ValidationError("checkpoint token/top1 parity") }
+                    for key in ["max_abs_difference", "ordinary_gap", "native_gap"] {
+                        guard let n = value[key] as? Double, n.isFinite, n >= 0, key != "max_abs_difference" || n <= 0.05 else { throw ValidationError("checkpoint numeric parity") }
+                    }
+                }
+            }
+            guard NSArray(array: Array(selected.prefix(visible.count))).isEqual(to: visible) else { throw ValidationError("checkpoint visible prefix") }
+            for key in ["accepted", "rejected", "proposed", "tool_call_count"] {
+                guard let n = observations[key] as? NSNumber, CFGetTypeID(n) != CFBooleanGetTypeID(),
+                      let integer = n as? UInt64, integer <= UInt64(Int64.max),
+                      n.doubleValue.isFinite, n.doubleValue >= 0,
+                      n.doubleValue.rounded(.towardZero) == n.doubleValue else { throw ValidationError("checkpoint observed counter") }
+            }
+            guard let accepted = observations["accepted"] as? UInt64, let rejected = observations["rejected"] as? UInt64,
+                  let proposed = observations["proposed"] as? UInt64, accepted <= proposed, rejected == proposed - accepted,
+                  item.expectedNative ? proposed > 0 : proposed == 0,
+                  observations["reasoning_nonempty"] is Bool, observations["content_nonempty"] is Bool else { throw ValidationError("checkpoint aggregate observations") }
+        }
+        records = rows
+    }
+    func persist(_ rows: [[String: Any]]) throws {
+        var object: [String: Any] = identity; object["cases"] = rows
+        let data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+        let temp = url.deletingLastPathComponent().appendingPathComponent(".acceptance-" + UUID().uuidString)
+        guard FileManager.default.createFile(atPath: temp.path, contents: nil, attributes: [.posixPermissions: 0o600]) else { throw ValidationError("checkpoint create failed") }
+        defer { try? FileManager.default.removeItem(at: temp) }
+        let handle = try FileHandle(forWritingTo: temp)
+        do { try handle.write(contentsOf: data); try handle.synchronize(); try handle.close() }
+        catch { try? handle.close(); throw error }
+        if FileManager.default.fileExists(atPath: url.path) { _ = try FileManager.default.replaceItemAt(url, withItemAt: temp) }
+        else { try FileManager.default.moveItem(at: temp, to: url) }
+    }
+}
+
 final class NativeMTPJourneyRunner {
     private let root: String
     private let modelID: String
@@ -362,6 +450,7 @@ final class NativeMTPJourneyRunner {
     private let acceptanceCorpus: NativeMTPAcceptanceCorpus?
     private let acceptancePolicy: NativeMTPAcceptancePolicy?
     private let acceptanceTargetIdentity: MLXSnapshotIdentity?
+    private let acceptanceCheckpointPath: String?
     static let defaultSelfTestPrompt =
         "native_mtp_selftest_v1 synthetic challenge: continue the sequence alpha beta gamma delta"
     static let defaultSelfTestChallengeID = "native-mtp-selftest-journey-0001"
@@ -516,6 +605,7 @@ final class NativeMTPJourneyRunner {
         acceptanceCorpus: NativeMTPAcceptanceCorpus? = nil,
         acceptancePolicy: NativeMTPAcceptancePolicy? = nil,
         acceptanceTargetIdentity: MLXSnapshotIdentity? = nil,
+        acceptanceCheckpointPath: String? = nil,
         signedAdmissionInputs: String? = nil,
         selectedSteps: Set<String> = []
     ) {
@@ -532,6 +622,7 @@ final class NativeMTPJourneyRunner {
         self.acceptanceCorpus = acceptanceCorpus
         self.acceptancePolicy = acceptancePolicy
         self.acceptanceTargetIdentity = acceptanceTargetIdentity
+        self.acceptanceCheckpointPath = acceptanceCheckpointPath
     }
 
     func run() async throws -> (document: [String: Any], passed: Bool) {
@@ -744,7 +835,10 @@ final class NativeMTPJourneyRunner {
             _ = await native.installLabNativeMTPNumericalOracle(nil, role: .native)
             throw NativeMTPHardwareE2EError.assertionFailed("acceptance oracle requires attached schedulers")
         }
-        var records: [[String: Any]] = []
+        let checkpoint = try acceptanceCheckpointPath.map {
+            try AcceptanceCheckpoint(path: $0, policy: acceptancePolicy, corpus: corpus)
+        }
+        var records = checkpoint?.records ?? []
         var positions = 0
         var accepted: UInt64 = 0
         var rejected: UInt64 = 0
@@ -752,8 +846,28 @@ final class NativeMTPJourneyRunner {
         var toolBoundary = false
         var reasoningClose = false
         var nearTiedPositions = 0
-        for item in corpus.cases {
+        for row in records {
+            guard let observed = row["checkpoint_observations"] as? [String: Any] else { throw ValidationError("missing checkpoint observations") }
+            if row["expected_native"] as? Bool == true {
+                let values = row["positions"] as! [[String: Any]]
+                positions += values.count
+                let addedAccepted = accepted.addingReportingOverflow((observed["accepted"] as! NSNumber).uint64Value)
+                let addedRejected = rejected.addingReportingOverflow((observed["rejected"] as! NSNumber).uint64Value)
+                guard !addedAccepted.overflow, !addedRejected.overflow,
+                      !addedAccepted.partialValue.addingReportingOverflow(addedRejected.partialValue).overflow else {
+                    throw ValidationError("checkpoint aggregate counter overflow")
+                }
+                accepted = addedAccepted.partialValue
+                rejected = addedRejected.partialValue
+                terminals.insert(row["native_terminal"] as! String)
+                toolBoundary = toolBoundary || (observed["tool_call_count"] as! Int) > 0
+                reasoningClose = reasoningClose || (observed["reasoning_nonempty"] as! Bool && (observed["content_nonempty"] as! Bool || (observed["tool_call_count"] as! Int) > 0))
+                nearTiedPositions += values.filter { ($0["ordinary_gap"] as! Double) <= 0.05 }.count
+            }
+        }
+        for item in corpus.cases.dropFirst(records.count) {
             do {
+                guard item.request.conversationKey == nil else { throw ValidationError("checkpoint run requires request-local no-cache requests") }
                 try oracle.beginPair(requestID: item.id, maxPositions: item.request.maxTokens ?? 256)
                 let expected = try await ordinary.complete(item.request)
                 let before = await native.currentSnapshot().nativeMTPStatus
@@ -781,7 +895,14 @@ final class NativeMTPJourneyRunner {
                     "selected_positions": comparison.selectedPositions.map(Self.acceptancePositionDocument),
                     "ordinary_selected_count": comparison.ordinarySelectedCount,
                     "native_selected_count": comparison.nativeSelectedCount,
+                    "checkpoint_observations": [
+                        "accepted": delta.acceptedTokens, "rejected": delta.rejectedTokens, "proposed": delta.proposedTokens,
+                        "decode_path": path?.rawValue ?? "unobserved", "tool_call_count": actual.toolCalls?.count ?? 0,
+                        "reasoning_nonempty": actual.reasoningContent?.isEmpty == false, "content_nonempty": !actual.content.isEmpty,
+                        "conversation_cache_key_absent": item.request.conversationKey == nil,
+                    ],
                 ])
+                try checkpoint?.persist(records)
                 FileHandle.standardError.write(Data("native-mtp-acceptance: case=\(item.id) passed=\(passed) positions=\(comparison.positions.count)\n".utf8))
                 // A failed row ends this tuple run. Later positions and cases
                 // are never claimed after the first observed divergence.
@@ -800,6 +921,7 @@ final class NativeMTPJourneyRunner {
                 }
             } catch {
                 records.append(["id": item.id, "passed": false, "error": String(describing: error)])
+                try checkpoint?.persist(records)
                 break
             }
         }

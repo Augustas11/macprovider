@@ -13,6 +13,7 @@ import argparse
 import base64
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -518,6 +519,38 @@ MATRICES = {shapes_name: tuple((shape, temperature) for shape in shapes for temp
 MATRICES["matrix-s2"] = MATRICES["matrix"]
 
 
+def validate_checkpoint(m, data, policy, corpus):
+    """Independent numeric validation before a prefix can skip any request."""
+    if len(data) > 64 * 1024 * 1024 or sha(data) != m.get("resume_sha256"):
+        raise Refusal("checkpoint transport size/hash differs")
+    if strict_json(policy).get("provider_commit") != m["commit"]:
+        raise Refusal("checkpoint execution source differs")
+    source = Path(m["source"]) / "scripts/native_mtp_binding_bundle.py"
+    spec = importlib.util.spec_from_file_location("native_checkpoint_validator", source)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    try:
+        return module.validate_acceptance_checkpoint(strict_json(data), strict_json(policy), strict_json(corpus),
+            policy_sha=m["policy_sha256"], corpus_sha=m["corpus_sha256"])
+    except (ValueError, KeyError, TypeError, AttributeError, OverflowError) as error:
+        raise Refusal("checkpoint raw numeric prefix rejected: " + str(error)) from error
+
+
+def transport_checkpoint(m, d, policy, corpus):
+    if "resume_code" not in m:
+        if m.get("resume_sha256") is not None:
+            raise Refusal("checkpoint transport missing")
+        return
+    data = base64.b64decode(m["resume_code"], validate=True)
+    validate_checkpoint(m, data, policy, corpus)
+    path = d / "acceptance-checkpoint.json"
+    with open(path, "wb", opener=lambda p, f: os.open(p, f, 0o600)) as stream:
+        stream.write(data)
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
 def bench_command(m, d):
     """The one bench argv for this cell or matrix, in window or preflight dir d.
 
@@ -540,7 +573,8 @@ def bench_command(m, d):
                 "--model-id", MODEL, "--provider-commit", m["commit"],
                 "--qualified-slots", "4", "--max-native-active-rows", "1", "--max-prompt-tokens", "4096",
                 "--acceptance-corpus", str(d / "acceptance-corpus.json"),
-                "--acceptance-policy", str(d / "policy.json")]
+                "--acceptance-policy", str(d / "policy.json"),
+                "--acceptance-checkpoint", str(d / "acceptance-checkpoint.json")]
     command = [str(package / ".build/release/macprovider-cli"), "native-mtp-bench",
                "--root", str(Path(m["source"]) / ".lab-window/fixture"),
                "--model-id", MODEL, "--provider-commit", m["commit"], "--phase", "matrix"]
@@ -565,6 +599,8 @@ def run_acceptance(m):
     if sha(policy) != m["policy_sha256"] or sha(corpus) != m["corpus_sha256"]:
         raise Refusal("acceptance inputs changed before execution")
     _, c = acceptance_inputs(policy, corpus, m["commit"])
+    if m.get("resume_sha256") is not None:
+        validate_checkpoint(m, (d / "acceptance-checkpoint.json").read_bytes(), policy, corpus)
     output = d / "acceptance-result.json"
     with open(output, "wb", opener=lambda p, f: os.open(p, f, 0o600)) as out:
         result = subprocess.run(bench_command(m, d), stdout=out, timeout=CELL - 10,
@@ -896,6 +932,7 @@ def preflight_remote(m):
             raise Refusal("acceptance corpus transport differs")
         (d / "acceptance-corpus.json").write_bytes(corpus)
         (d / "acceptance-corpus.json").chmod(0o600)
+        transport_checkpoint(m, d, policy, corpus)
     validator = root / ("validator-" + m["validator_sha256"][:16])
     if not validator.is_file() or sha(validator.read_bytes()) != m["validator_sha256"]:
         raise Refusal("uploaded validator bytes differ")
@@ -1130,6 +1167,13 @@ def controller(args):
     if signed_path is not None:
         with signed_path.open("rb") as stream:
             signed = stream.read(64 * 1024 * 1024 + 1)
+    resume = None
+    if getattr(args, "acceptance_resume", None) is not None:
+        path = args.acceptance_resume
+        if args.cell != "acceptance" or path.is_symlink() or not path.is_file() or path.stat().st_mode & 0o777 != 0o600:
+            raise Refusal("resume requires a private regular acceptance checkpoint")
+        with path.open("rb") as stream:
+            resume = stream.read(64 * 1024 * 1024 + 1)
     policy_ok(data, args.source_commit, args.cell, signed if journey else corpus)
     source_ok(ROOT, args.source_commit)
     payload = {"source": source, "commit": args.source_commit, "cell": args.cell,
@@ -1139,6 +1183,9 @@ def controller(args):
                "probe_code": base64.b64encode((ROOT / "scripts/ops/lib/studio-owner-pin-probe.py").read_bytes()).decode()}
     if corpus is not None:
         payload["corpus_sha256"] = sha(corpus)
+    if resume is not None:
+        payload["resume_sha256"] = sha(resume)
+        validate_checkpoint(dict(payload, source=str(ROOT)), resume, data, corpus)
     code = Path(__file__).read_bytes()
     loader = "import base64;__file__='/tmp/macprovider-mtp/entry.py';exec(compile(base64.b64decode(" + repr(base64.b64encode(code).decode()) + "),'entry.py','exec'))"
     # Remote dispatch via stdin leaves host arguments and all secrets out of argv.
@@ -1153,6 +1200,8 @@ def controller(args):
         frozen_inputs["signed_inputs_code"] = base64.b64encode(signed).decode()
     if corpus is not None:
         frozen_inputs["corpus_code"] = base64.b64encode(corpus).decode()
+    if resume is not None:
+        frozen_inputs["resume_code"] = base64.b64encode(resume).decode()
     checked = ssh(os.environ["STUDIO_SSH"], preflight_code,
                   dict(m, **frozen_inputs, validator_sha256=validator),
                   timeout=VALIDATE + 120)
@@ -1272,6 +1321,8 @@ def main():
                     raise Refusal("acceptance corpus transport differs")
                 (d / "acceptance-corpus.json").write_bytes(corpus)
                 (d / "acceptance-corpus.json").chmod(0o600)
+                transport_checkpoint(m, d, (d / "policy.json").read_bytes(), corpus)
+                m.pop("resume_code", None)
             if m["cell"] in JOURNEY_CELLS:
                 deliver_journey(m, d)
                 frozen = base64.b64decode(m.pop("requests_code"), validate=True)
@@ -1294,6 +1345,7 @@ def main():
     parser.add_argument("--policy", type=Path, required=True)
     parser.add_argument("--cell", choices=("s1-p512-o128", "s2-p512-o128", "s4-p512-o128", *MATRICES, "acceptance", *JOURNEY_CELLS), required=True)
     parser.add_argument("--acceptance-corpus", type=Path)
+    parser.add_argument("--acceptance-resume", type=Path, help="Private exact frozen complete-case prefix; never a partial qualification")
     parser.add_argument("--journey-signed-inputs", type=Path, help="Frozen private signed-input inventory JSON; journey cells only")
     args = parser.parse_args()
     if args.run and args.action != "next":
