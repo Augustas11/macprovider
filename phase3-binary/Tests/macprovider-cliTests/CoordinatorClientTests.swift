@@ -2849,6 +2849,7 @@ final class CoordinatorClientTests: XCTestCase {
             recorder: CoordinatorFrameRecorder(),
             credentialStore: .protectedFile
         )
+        await client.setHeadlessTopologyOverrideForTest { true }
         // Same newer + missing-target shape that reaches eligibility for a
         // consumer_user provider; the headless guard must suppress it entirely.
         await client.configureAcceptedRecoveryForTest(accepted: true, recommendation: "v99.9.9", compatibilitySetID: nil)

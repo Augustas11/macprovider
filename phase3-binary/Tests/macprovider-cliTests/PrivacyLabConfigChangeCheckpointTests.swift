@@ -265,10 +265,15 @@ final class PrivacyLabConfigChangeCheckpointTests: XCTestCase {
             Darwin.close(pair.1)
         }
         let checkpoint = try PrivacyLabConfigChangeCheckpoint(fd: pair.0, nonceFactory: { "nonce-ok" })
+        let done = DispatchSemaphore(value: 0)
+        defer { XCTAssertEqual(done.wait(timeout: .now() + 2), .success) }
         DispatchQueue.global(qos: .utility).async {
+            defer { done.signal() }
             _ = try? Self.readFrame(pair.1)
             if closeAfterReady {
-                Darwin.close(pair.1)
+                // The outer defer owns the descriptor. Shutdown sends EOF
+                // without a second close racing the next test's reused fd.
+                Darwin.shutdown(pair.1, SHUT_WR)
                 return
             }
             if let rawAck {
@@ -279,7 +284,7 @@ final class PrivacyLabConfigChangeCheckpointTests: XCTestCase {
                 Self.writeFrame(ack, fd: pair.1)
             }
             if closeAfterAck {
-                Darwin.close(pair.1)
+                Darwin.shutdown(pair.1, SHUT_WR)
             }
         }
         try body(checkpoint)
@@ -307,6 +312,13 @@ final class PrivacyLabConfigChangeCheckpointTests: XCTestCase {
         var sockets: [Int32] = [-1, -1]
         guard Darwin.socketpair(AF_UNIX, SOCK_STREAM, 0, &sockets) == 0 else {
             throw POSIXError(.init(rawValue: errno) ?? .EIO)
+        }
+        var noSigpipe: Int32 = 1
+        for fd in sockets {
+            guard setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSigpipe, socklen_t(MemoryLayout<Int32>.size)) == 0 else {
+                Darwin.close(sockets[0]); Darwin.close(sockets[1])
+                throw POSIXError(.init(rawValue: errno) ?? .EIO)
+            }
         }
         return (sockets[0], sockets[1])
     }
