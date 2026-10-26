@@ -2351,7 +2351,9 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 initialOffset: $0.committedKVTokenCount
             )
         }
-        if supportedInputs.count > 1 && rowStates.contains(where: { $0.state != nil }) {
+        let hasBatchedState = supportedInputs.count > 1 && rowStates.contains(where: { $0.state != nil })
+        let invariantStateModel = model as? any BatchInvariantDecodeStateModel
+        if hasBatchedState && invariantStateModel == nil {
             return supportedInputs.map { ContinuousBatchDecodeOutcome.rowFailure(requestID: $0.requestID) }
         }
         // Native rows riding this forward need the target hidden state of
@@ -2362,6 +2364,10 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             : supportedInputs.indices.filter { supportedInputs[$0].captureNativeMTPDrafterColumns }
         if !captureIndices.isEmpty && rowStates.contains(where: { $0.state != nil }) {
             return supportedInputs.map { ContinuousBatchDecodeOutcome.rowFailure(requestID: $0.requestID) }
+        }
+        func discardAdvancedRows() {
+            storeDecodeSession(nil)
+            for input in supportedInputs { removeRowState(for: input.requestID) }
         }
         var capturedColumns: [Int: [(token: Int, hidden: MLXArray)]] = [:]
 
@@ -2461,7 +2467,19 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 let tokenInput = MLXArray(currentTokens.map(Int32.init)).reshaped([supportedInputs.count, 1])
                 let text = LMInput.Text(tokens: tokenInput)
                 let stepState: LMOutput.State?
-                if captureIndices.isEmpty {
+                if hasBatchedState, let invariantStateModel {
+                    do {
+                        stepState = try invariantStateModel.batchDecodeState(
+                            rowStates.map(\.state),
+                            cacheOffsets: supportedInputs.map { $0.committedKVTokenCount + stepIndex }
+                        )
+                    } catch {
+                        // A later merge failure must not leave an earlier step's
+                        // advanced cache available for a retry at the old offset.
+                        if stepIndex > 0 { discardAdvancedRows() }
+                        return supportedInputs.map { .rowFailure(requestID: $0.requestID) }
+                    }
+                } else if captureIndices.isEmpty {
                     stepState = supportedInputs.count == 1 ? rowStates[0].state : nil
                 } else {
                     var emit = LMOutput.State()
@@ -2470,6 +2488,16 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 }
                 let output = withPreparedCache(cachesAsKV, lengths: text.sequenceLengths) {
                     model(text, cache: cachesAsKV, state: stepState)
+                }
+                if hasBatchedState, let invariantStateModel, let stepState {
+                    do {
+                        try invariantStateModel.validateBatchDecodeState(output.state, against: stepState)
+                    } catch {
+                        // Forward already mutated the batch cache. Publish no
+                        // tokens, and never reuse that cache with retained state.
+                        discardAdvancedRows()
+                        return supportedInputs.map { .rowFailure(requestID: $0.requestID) }
+                    }
                 }
                 if notePaddedAttentionBypass(batchedCaches, phase: "decode") {
                     // Fail closed before sampling; the rows' caches already
@@ -2504,7 +2532,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                     }
                 } else if supportedInputs.count == 1 {
                     rowStates[0].state = output.state
-                } else if output.state != nil {
+                } else if !hasBatchedState && output.state != nil {
                     return supportedInputs.map { ContinuousBatchDecodeOutcome.rowFailure(requestID: $0.requestID) }
                 }
                 for index in supportedInputs.indices {
@@ -3951,9 +3979,10 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     func installRowStateForTest(
         caches: [KVCache],
         requestID: String,
-        binding: PagedKVStorageBinding
+        binding: PagedKVStorageBinding,
+        state: LMOutput.State? = nil
     ) throws {
-        try setRowState(RowState(caches: caches, state: nil), for: requestID, binding: binding)
+        try setRowState(RowState(caches: caches, state: state), for: requestID, binding: binding)
     }
 
     func lockstepInnerStateNonEmptyForTest() -> Bool {
