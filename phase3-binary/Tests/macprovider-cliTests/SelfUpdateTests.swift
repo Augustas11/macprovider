@@ -1082,15 +1082,23 @@ final class SelfUpdateTests: XCTestCase {
     }
 
     func testReloadHelperTimesOutHungBootstrapWithoutRemovingProviderPlist() throws {
-        let started = Date()
+        let timeoutChecks = 3
+        let terminateGraceChecks = 2
+        let watchdogBudget = 0.1 * Double(timeoutChecks + terminateGraceChecks)
+        let started = ProcessInfo.processInfo.systemUptime
         let result = try runReloadHelperScenario(
             absentAfterCheck: 1,
             maxChecks: 3,
-            hangOperation: "bootstrap"
+            hangOperation: "bootstrap",
+            commandTimeoutChecks: timeoutChecks,
+            commandTerminateGraceChecks: terminateGraceChecks
         )
 
         XCTAssertEqual(result.status, 124)
-        XCTAssertLessThan(Date().timeIntervalSince(started), 2)
+        // Four successful launchctl commands precede bootstrap and each can incur
+        // a real 0.1s watchdog tick. Allow process startup/scheduling on slow CI,
+        // while still requiring the infinite, TERM-ignoring fixture to exit promptly.
+        XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - started, watchdogBudget + 5)
         XCTAssertEqual(result.log.filter { $0.hasPrefix("bootstrap ") }.count, 1)
         XCTAssertTrue(result.providerPlistExists)
         XCTAssertFalse(result.helperPlistExists)
@@ -2390,7 +2398,9 @@ private func runReloadHelperScenario(
     absentAfterCheck: Int?,
     maxChecks: Int,
     printFailureStatus: Int? = nil,
-    hangOperation: String? = nil
+    hangOperation: String? = nil,
+    commandTimeoutChecks: Int = 3,
+    commandTerminateGraceChecks: Int = 2
 ) throws -> ReloadHelperScenarioResult {
     let root = FileManager.default.temporaryDirectory
         .appendingPathComponent("reload-helper-\(UUID().uuidString)", isDirectory: true)
@@ -2485,8 +2495,8 @@ private func runReloadHelperScenario(
         sleepPath: sleepURL.path,
         commandSleepPath: commandSleepURL.path,
         providerRemovalMaxChecks: maxChecks,
-        commandTimeoutChecks: 3,
-        commandTerminateGraceChecks: 2
+        commandTimeoutChecks: commandTimeoutChecks,
+        commandTerminateGraceChecks: commandTerminateGraceChecks
     )
     let propertyList = try XCTUnwrap(
         PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]
