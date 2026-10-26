@@ -67,7 +67,9 @@ final class MCPClientTests: XCTestCase {
     }
 
     func testAllowOnceAsksAgainAndInvalidArgumentsNeverExecute() async throws {
-        let (client, directory) = try server()
+        // This tests approval and validation, not Python startup or request latency.
+        // Keep a bounded fail-safe without imposing a tight CI scheduling budget.
+        let (client, directory) = try server(timeout: 30, lifetime: 300)
         let tools = try await client.start()
         let tool = try XCTUnwrap(tools.first)
         var approvals = 0
