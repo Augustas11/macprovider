@@ -59,7 +59,7 @@ final class NavigationEarnTests: XCTestCase {
                                     onThisMacModels: {}, onExportDiagnostics: {}, onResetProvider: {})
             let window = NSWindow(contentViewController: NSHostingController(rootView: screen.frame(width: 1000, height: 1600)))
             window.setContentSize(NSSize(width: 1000, height: 1600))
-            window.orderFrontRegardless()
+            window.makeKeyAndOrderFront(nil)
             defer { window.close() }
             settle(window)
             let rendered = try renderedText(window)
