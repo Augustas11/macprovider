@@ -21,7 +21,7 @@ options:
 packages:
   SwiftTerm:
     url: https://github.com/migueldeicaza/SwiftTerm
-    exactVersion: 1.99.0
+    exactVersion: 1.2.5
 
 settings:
   base:

@@ -106,7 +106,7 @@ private struct TerminalTabView: View {
 }
 
 private struct EmbeddedTerminal: NSViewRepresentable {
-    let view: LocalProcessTerminalView
-    func makeNSView(context: Context) -> LocalProcessTerminalView { view }
-    func updateNSView(_ nsView: LocalProcessTerminalView, context: Context) {}
+    let view: EmbeddedProcessTerminalView
+    func makeNSView(context: Context) -> EmbeddedProcessTerminalView { view }
+    func updateNSView(_ nsView: EmbeddedProcessTerminalView, context: Context) {}
 }

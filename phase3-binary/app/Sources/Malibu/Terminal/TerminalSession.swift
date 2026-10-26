@@ -5,13 +5,13 @@ import Darwin
 
 /// Owns an ephemeral PTY. Keeping views here preserves scrollback when switching tabs.
 @MainActor
-final class TerminalSession: NSObject, ObservableObject, Identifiable, LocalProcessTerminalViewDelegate {
+final class TerminalSession: NSObject, ObservableObject, Identifiable {
     let id = UUID()
     let harness: TerminalHarness
     @Published var workingDirectory = FileManager.default.homeDirectoryForCurrentUser
     @Published private(set) var started = false
     @Published private(set) var message: String?
-    private(set) var terminalView: LocalProcessTerminalView?
+    private(set) var terminalView: EmbeddedProcessTerminalView?
     private var processGroup: pid_t = 0
     private var leaderIdentity: ProcessIdentity?
     private var groupMembers: [pid_t: ProcessIdentity] = [:]
@@ -61,8 +61,10 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, LocalProc
                     environment = try ProcessEnvironmentSanitizer.sanitized(extraEnvironment: ["TERM": "xterm-256color"])
                 }
             }
-            let view = LocalProcessTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 500))
-            view.processDelegate = self
+            let view = EmbeddedProcessTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 500))
+            view.onTermination = { [weak self] exitCode in
+                self?.processTerminated(exitCode: exitCode)
+            }
             view.startProcess(executable: command.path, args: arguments,
                               environment: environment.map { "\($0.key)=\($0.value)" },
                               currentDirectory: workingDirectory.path)
@@ -207,10 +209,7 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, LocalProc
         }
     }
 
-    func sizeChanged(source: LocalProcessTerminalView, newCols: Int, newRows: Int) {}
-    func setTerminalTitle(source: LocalProcessTerminalView, title: String) {}
-    func hostCurrentDirectoryUpdate(source: SwiftTerm.TerminalView, directory: String?) {}
-    func processTerminated(source: SwiftTerm.TerminalView, exitCode: Int32?) {
+    private func processTerminated(exitCode: Int32?) {
         // A leader may exit while its tools remain in the group. Keep ownership
         // of known surviving members through close's three-second escalation.
         refreshGroupOwnership()
