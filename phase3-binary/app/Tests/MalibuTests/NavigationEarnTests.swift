@@ -71,8 +71,9 @@ final class NavigationEarnTests: XCTestCase {
                               "Pause/Resume must be rendered in the Earn header")
             XCTAssertFalse(diagnostic.contains("Customer slots"), "Provider details start collapsed")
             let disclosure = try XCTUnwrap(rendered.first { $0.text.contains("Provider details") }, diagnostic)
-            // Click the rendered disclosure triangle just left of its label.
-            let point = NSPoint(x: disclosure.bounds.minX * window.frame.width - 12,
+            // Vision includes the leading disclosure chevron in the text bounds.
+            // Click inside that glyph, rather than left of the detected run.
+            let point = NSPoint(x: disclosure.bounds.minX * window.frame.width + 4,
                                 y: disclosure.bounds.midY * window.frame.height)
             for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
                 let event = try XCTUnwrap(NSEvent.mouseEvent(with: type, location: point, modifierFlags: [],
