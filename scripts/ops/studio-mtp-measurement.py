@@ -169,7 +169,100 @@ def acceptance_inputs(policy, corpus, commit):
     return p, c
 
 
+JOURNEY_STEPS = ("04", "05", "06", "07", "08", "09", "10")
+JOURNEY_CELLS = tuple("journey-" + step for step in JOURNEY_STEPS) + ("journey-all",)
+JOURNEY_RAW_IDS = {"04": "step-04-serial-token-oracle", "05": "step-05-cache-state-boundary",
+                   "06": "step-06-streaming-stop", "07": "step-07-08-mixed-multirow-capacity",
+                   "08": "step-08-capacity-and-depth-zero", "09": "step-09-cancellation", "10": "step-10-warm-swap"}
+JOURNEY_KEYS = (ACCEPTANCE_POLICY_KEYS - {"corpus_sha256"}) | {
+    "signed_inputs_sha256", "metallib_sha256", "decode_path_digest", "qualified_slots",
+    "max_native_active_rows", "max_prompt_tokens", "proposal_depth"}
+
+
+def journey_inputs(data, inventory, commit):
+    p = strict_json(data)
+    if (set(p) != JOURNEY_KEYS or p.get("schema") != "macprovider.native-mtp-journey-policy.v1"
+            or p.get("provider_commit") != commit or p.get("model_id") != MODEL
+            or p.get("hw_model") != "Mac15,14" or p.get("quantization") != "4bit"
+            or p.get("cache_mode") != "paged_kv_mixed"):
+        raise Refusal("journey policy fields differ")
+    for name, value in (("qualified_slots", 4), ("max_native_active_rows", 1),
+                        ("max_prompt_tokens", 4096), ("proposal_depth", 1)):
+        if type(p.get(name)) is not int or p[name] != value:
+            raise Refusal("journey tuple bound differs")
+    for name in ("target_sha256", "mtp_sha256", "tokenizer_sha256", "metallib_sha256",
+                 "decode_path_digest", "signed_inputs_sha256"):
+        if not isinstance(p.get(name), str) or not re.fullmatch("[0-9a-f]{64}", p[name]):
+            raise Refusal("journey digest invalid")
+    if not isinstance(inventory, bytes) or not 1 <= len(inventory) <= 64 * 1024 * 1024 or sha(inventory) != p["signed_inputs_sha256"]:
+        raise Refusal("journey signed inventory differs")
+    v = strict_json(inventory)
+    if set(v) != {"schema", "files"} or v["schema"] != "macprovider.native-mtp-journey-signed-inputs.v1" or not isinstance(v["files"], list) or not 6 <= len(v["files"]) <= 64:
+        raise Refusal("journey signed inventory schema differs")
+    names = set()
+    for row in v["files"]:
+        if not isinstance(row, dict) or set(row) != {"path", "sha256", "base64"}:
+            raise Refusal("journey signed inventory row differs")
+        name = row["path"]
+        if (not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*", name)
+                or any(part in (".", "..") for part in name.split("/")) or name in names):
+            raise Refusal("journey signed inventory path invalid")
+        names.add(name)
+        try: content = base64.b64decode(row["base64"], validate=True)
+        except (ValueError, TypeError): raise Refusal("journey signed inventory encoding invalid")
+        if not 1 <= len(content) <= 16 * 1024 * 1024 or sha(content) != row["sha256"]:
+            raise Refusal("journey signed inventory bytes differ")
+    if not {"catalog.json", "catalog.json.sig", "artifact-feed.json", "artifact-feed.json.sig",
+            "native-mtp-admission.json", "native-mtp-admission.json.sig"} <= names:
+        raise Refusal("journey signed inventory required files missing")
+    return p, v
+
+
+def deliver_journey(m, d):
+    policy = (d / "policy.json").read_bytes()
+    inventory = base64.b64decode(m["signed_inputs_code"], validate=True)
+    _, v = journey_inputs(policy, inventory, m["commit"])
+    target = d / "signed-inputs"
+    target.mkdir(mode=0o700, exist_ok=False)
+    (target / "signed-inputs-inventory.json").write_bytes(inventory)
+    (target / "signed-inputs-inventory.json").chmod(0o600)
+    for row in v["files"]:
+        path = target / row["path"]
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with path.open("xb") as stream: stream.write(base64.b64decode(row["base64"], validate=True))
+        path.chmod(0o600)
+
+
+def run_journey(m):
+    d = Path(m["dir"])
+    if sha((d / "policy.json").read_bytes()) != m["policy_sha256"] or sha((d / "journey-requests.json").read_bytes()) != m["requests_sha256"]:
+        raise Refusal("journey frozen inputs changed before execution")
+    # The signed inputs are immutable, revalidated by the production verifier
+    # again in the CLI before model load. No new performance qualification.
+    output = d / "journey-result.json"
+    with open(output, "xb", opener=lambda path, flags: os.open(path, flags, 0o600)) as stream:
+        result = subprocess.run(bench_command(m, d), stdout=stream, timeout=CELL - 10, env=lab_env("cell"))
+    value = strict_json(output.read_bytes())
+    policy = strict_json((d / "policy.json").read_bytes())
+    for field in ("model_id", "target_sha256", "mtp_sha256", "tokenizer_sha256", "qualified_slots", "max_native_active_rows", "max_prompt_tokens"):
+        if value.get(field) != policy[field] or type(value.get(field)) is not type(policy[field]):
+            raise Refusal("journey actual tuple differs")
+    if value.get("lab_decode_path_digest") != policy["decode_path_digest"] or value.get("lab_metallib_sha256") != policy["metallib_sha256"]:
+        raise Refusal("journey actual decode/Metal identity differs")
+    expected = list(JOURNEY_STEPS) if m["cell"] == "journey-all" else [m["cell"][-2:]]
+    if (result.returncode or value.get("executed_steps_status") != "pass" or value.get("journey_complete") is not False
+            or value.get("signed_policy_inputs") is not True or value.get("requested_steps") != expected
+            or value.get("request_inventory_sha256") != m["requests_sha256"]
+            or value.get("lab_binary_release_candidate") is not False
+            or not isinstance(value.get("steps"), list)
+            or [row.get("step_id") for row in value["steps"]] != [JOURNEY_RAW_IDS[step] for step in expected]
+            or any(row.get("status") != "pass" or row.get("uncovered_contract") for row in value["steps"])):
+        raise Refusal("journey actual cell failed/incomplete; no retry; private result retained")
+
+
 def policy_ok(data, commit, cell, corpus=None):
+    if cell in JOURNEY_CELLS:
+        return journey_inputs(data, corpus, commit)[0]
     if cell == "acceptance":
         return acceptance_inputs(data, corpus, commit)[0]
     p = json.loads(data)
@@ -432,6 +525,15 @@ def bench_command(m, d):
     pre-downtime validation and the window run byte-identical policies.
     """
     package = Path(m["source"]) / "phase3-binary"
+    if m["cell"] in JOURNEY_CELLS:
+        steps = JOURNEY_STEPS if m["cell"] == "journey-all" else (m["cell"][-2:],)
+        return [str(package / ".build/release/macprovider-cli"), "native-mtp-journey-e2e",
+                "--root", str(Path(m["source"]) / ".lab-window/fixture"), "--model-id", MODEL,
+                "--provider-commit", m["commit"], "--qualified-slots", "4", "--max-native-active-rows", "1",
+                "--max-prompt-tokens", "4096", "--signed-admission-inputs", str(d / "signed-inputs"),
+                "--journey-policy", str(d / "policy.json"), "--journey-requests", str(d / "journey-requests.json"),
+                "--journey-metallib", str(package / ".build/arm64-apple-macosx/release/mlx.metallib"),
+                *[arg for step in steps for arg in ("--journey-step", step)]]
     if m["cell"] == "acceptance":
         return [str(package / ".build/release/macprovider-cli"), "native-mtp-journey-e2e",
                 "--root", str(Path(m["source"]) / ".lab-window/fixture"),
@@ -534,6 +636,8 @@ def fixed_command(m, kind):
         return [sys.executable, str(d / "entry.py"), "_metalcheck", str(d / "manifest.json")]
     if kind == "cell" and m["cell"] in MATRICES:
         return [sys.executable, str(d / "entry.py"), "_matrix", str(d / "manifest.json")]
+    if kind == "cell" and m["cell"] in JOURNEY_CELLS:
+        return [sys.executable, str(d / "entry.py"), "_journey", str(d / "manifest.json")]
     if kind == "cell" and m["cell"] == "acceptance":
         return [sys.executable, str(d / "entry.py"), "_acceptance", str(d / "manifest.json")]
     if kind == "cell":
@@ -674,7 +778,7 @@ def worker(m):
         print(json.dumps({"window_ended": True}), flush=True)
         restore(m)
     return {"restored": True, "lab_passed": failure is None, "failure": failure,
-            "result": str(d / ("acceptance-result.json" if m["cell"] == "acceptance" else "runs.jsonl")), "source_commit": m["commit"],
+            "result": str(d / ("journey-result.json" if m["cell"] in JOURNEY_CELLS else "acceptance-result.json" if m["cell"] == "acceptance" else "runs.jsonl")), "source_commit": m["commit"],
             "policy_sha256": m["policy_sha256"]}
 
 
@@ -781,6 +885,9 @@ def preflight_remote(m):
         raise Refusal("policy bytes drifted")
     (d / "policy.json").write_bytes(policy)
     acceptance = m["cell"] == "acceptance"
+    journey = m["cell"] in JOURNEY_CELLS
+    if journey:
+        deliver_journey(m, d)
     corpus = None
     if acceptance:
         corpus = base64.b64decode(m["corpus_code"], validate=True)
@@ -795,7 +902,7 @@ def preflight_remote(m):
     validator.chmod(0o700)
     command = bench_command(m, d)
     command[0] = str(validator)
-    command += ["--validate-acceptance-only" if acceptance else "--validate-policy-only",
+    command += ["--freeze-journey-requests" if journey else "--validate-acceptance-only" if acceptance else "--validate-policy-only",
                 "--identity-cache", str(root / "identity-cache.json")]
     # Background policy: efficiency cores and throttled I/O beside serving.
     result = subprocess.run(["/usr/sbin/taskpolicy", "-b", *command], stdin=subprocess.DEVNULL,
@@ -810,7 +917,17 @@ def preflight_remote(m):
         raise Refusal("bench policy validation incomplete")
     if acceptance:
         acceptance_summary_ok(summaries[0], policy, corpus, m["commit"])
-    return {"preflight": "pass", "validated": summaries}
+    response = {"preflight": "pass", "validated": summaries}
+    if journey:
+        frozen = (d / "journey-requests.json").read_bytes()
+        summary = summaries[0]
+        if (summary.get("request_inventory_sha256") != sha(frozen) or summary.get("policy_sha256") != m["policy_sha256"]
+                or summary.get("signed_inputs_verified") is not True or summary.get("observed_policy") != strict_json(policy)
+                or type(summary.get("requests_parsed")) is not int or not 1 <= summary["requests_parsed"] <= 256
+                or len(frozen) > 8 * 1024 * 1024):
+            raise Refusal("journey validator binding differs")
+        response.update(requests_code=base64.b64encode(frozen).decode(), requests_sha256=sha(frozen))
+    return response
 
 
 def acceptance_summary_ok(summary, policy, corpus, commit):
@@ -999,13 +1116,21 @@ def controller(args):
         raise Refusal("exact source commit required")
     data = args.policy.read_bytes()
     corpus_path = getattr(args, "acceptance_corpus", None)
+    journey = args.cell in JOURNEY_CELLS
+    signed_path = getattr(args, "journey_signed_inputs", None)
+    if journey != (signed_path is not None):
+        raise Refusal("journey mode requires its immutable signed inventory")
     if (args.cell == "acceptance") != (corpus_path is not None):
         raise Refusal("acceptance mode requires its corpus; other modes exclude it")
     corpus = None
     if corpus_path is not None:
         with corpus_path.open("rb") as stream:
             corpus = stream.read(64 * 1024 * 1024 + 1)
-    policy_ok(data, args.source_commit, args.cell, corpus)
+    signed = None
+    if signed_path is not None:
+        with signed_path.open("rb") as stream:
+            signed = stream.read(64 * 1024 * 1024 + 1)
+    policy_ok(data, args.source_commit, args.cell, signed if journey else corpus)
     source_ok(ROOT, args.source_commit)
     payload = {"source": source, "commit": args.source_commit, "cell": args.cell,
                "config": os.environ["STUDIO_MTP_CONFIG"], "port": int(os.environ["STUDIO_STATUS_PORT"]),
@@ -1024,11 +1149,16 @@ def controller(args):
     validator = upload_validator(os.environ["STUDIO_SSH"], build_validator(args.source_commit))
     preflight_code = "import sys;sys.argv=['entry.py','_preflight'];" + loader
     frozen_inputs = {"policy_code": base64.b64encode(data).decode()}
+    if signed is not None:
+        frozen_inputs["signed_inputs_code"] = base64.b64encode(signed).decode()
     if corpus is not None:
         frozen_inputs["corpus_code"] = base64.b64encode(corpus).decode()
     checked = ssh(os.environ["STUDIO_SSH"], preflight_code,
                   dict(m, **frozen_inputs, validator_sha256=validator),
                   timeout=VALIDATE + 120)
+    if journey:
+        frozen_inputs["requests_code"] = checked.pop("requests_code")
+        m["requests_sha256"] = checked["requests_sha256"]
     print(json.dumps(checked), flush=True)
     if not args.run:
         print(json.dumps({"next": "bounded-measurement", "run": False, "source_commit": m["commit"],
@@ -1101,6 +1231,9 @@ def main():
             if result.returncode:
                 raise Refusal("baseline matrix failed; no retry")
             return
+        if mode == "_journey":
+            run_journey(json.loads(Path(sys.argv[2]).read_text()))
+            return
         if mode == "_acceptance":
             run_acceptance(json.loads(Path(sys.argv[2]).read_text()))
             return
@@ -1139,6 +1272,13 @@ def main():
                     raise Refusal("acceptance corpus transport differs")
                 (d / "acceptance-corpus.json").write_bytes(corpus)
                 (d / "acceptance-corpus.json").chmod(0o600)
+            if m["cell"] in JOURNEY_CELLS:
+                deliver_journey(m, d)
+                frozen = base64.b64decode(m.pop("requests_code"), validate=True)
+                if sha(frozen) != m["requests_sha256"]:
+                    raise Refusal("journey request transport differs")
+                (d / "journey-requests.json").write_bytes(frozen)
+                (d / "journey-requests.json").chmod(0o600)
             put(d / "controller-lease.json", {"connected": True, "updated": time.time()})
             threading.Thread(target=lease_reader, args=(d, sys.stdin), daemon=True).start()
             print(json.dumps(worker(m)))
@@ -1152,8 +1292,9 @@ def main():
     parser.add_argument("--run", action="store_true")
     parser.add_argument("--source-commit", required=True)
     parser.add_argument("--policy", type=Path, required=True)
-    parser.add_argument("--cell", choices=("s1-p512-o128", "s2-p512-o128", "s4-p512-o128", *MATRICES, "acceptance"), required=True)
+    parser.add_argument("--cell", choices=("s1-p512-o128", "s2-p512-o128", "s4-p512-o128", *MATRICES, "acceptance", *JOURNEY_CELLS), required=True)
     parser.add_argument("--acceptance-corpus", type=Path)
+    parser.add_argument("--journey-signed-inputs", type=Path, help="Frozen private signed-input inventory JSON; journey cells only")
     args = parser.parse_args()
     if args.run and args.action != "next":
         parser.error("--run requires next")

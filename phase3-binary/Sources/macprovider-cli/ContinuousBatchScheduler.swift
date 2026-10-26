@@ -2297,6 +2297,8 @@ actor ContinuousBatchScheduler {
     /// it, so a row finishing and another arriving cannot flap the depth.
     private var nativeMTPLoadGateEngaged = false
     #if DEBUG || MACPROVIDER_LAB_HARNESS
+    private var labJourneyResourceObserver: NativeMTPJourneyResourceObserver?
+    private var labJourneyReservationContext: (requestID: String, generatedTokens: Int, depth: Int)?
     private var labNativeMTPLoadGateRecorder: NativeMTPLoadGateRecorder?
     private var labNativeMTPProposalOverride: NativeMTPLabProposalOverride?
     private var labNativeMTPPhaseTrap: NativeMTPLabPhaseTrap?
@@ -3476,6 +3478,44 @@ actor ContinuousBatchScheduler {
         return bytes
     }
 
+    #if DEBUG || MACPROVIDER_LAB_HARNESS
+    private func reserveNativeMTPRoundBytes(_ bytes: Int) throws -> NativeMTPRoundByteReservation {
+        guard bytes > 0 else {
+            throw ContinuousBatchSchedulerError.requestFailed("continuous_batching_native_mtp_window_bytes_unavailable")
+        }
+        let (nextReserved, overflow) = nativeMTPReservedRoundBytes.addingReportingOverflow(bytes)
+        let sample = configuration.nativeMTPRoundSystemMemoryProbe.sample()
+        let effectiveCapacity: Int
+        if let context = labJourneyReservationContext, let observer = labJourneyResourceObserver {
+            effectiveCapacity = observer.capacity(requestID: context.requestID,
+                generatedTokens: context.generatedTokens, realCapacity: configuration.nativeMTPRoundByteCapacity)
+            observer.record(.init(requestID: context.requestID, generatedTokens: context.generatedTokens,
+                depth: context.depth, bytes: bytes, reservedBefore: nativeMTPReservedRoundBytes,
+                capacity: effectiveCapacity, admitted: !overflow && nextReserved <= effectiveCapacity
+                    && Self.nativeMTPSystemMemoryHeadroomAdmits(reservedAfter: nextReserved, sample: sample)))
+        } else { effectiveCapacity = configuration.nativeMTPRoundByteCapacity }
+        guard !overflow,
+              nextReserved <= effectiveCapacity,
+              Self.nativeMTPSystemMemoryHeadroomAdmits(reservedAfter: nextReserved, sample: sample) else {
+            // SPEC-048 R012: say which bound refused, with every number.
+            let floor = sample.map { max(1, $0.physicalBytes / 10) }
+            try? FileHandle.standardError.write(contentsOf: Data(
+                ("event=native_mtp_round_reservation_refused requested_bytes=\(bytes) reserved_before_bytes=\(nativeMTPReservedRoundBytes) "
+                    + "outstanding_reservations=\(nativeMTPRoundByteReservations.count) capacity_bytes=\(effectiveCapacity) "
+                    + "available_bytes=\(sample.map { String($0.availableBytes) } ?? "unavailable") "
+                    + "physical_bytes=\(sample.map { String($0.physicalBytes) } ?? "unavailable") "
+                    + "floor_bytes=\(floor.map(String.init) ?? "unavailable") "
+                    + "reason=\(overflow ? "overflow" : nextReserved > effectiveCapacity ? "capacity" : "system_headroom")\n").utf8
+            ))
+            throw ContinuousBatchSchedulerError.requestFailed("continuous_batching_native_mtp_round_memory_exhausted")
+        }
+        let id = UUID()
+        nativeMTPReservedRoundBytes = nextReserved
+        nativeMTPRoundByteReservations[id] = bytes
+        return NativeMTPRoundByteReservation(id: id, bytes: bytes)
+    }
+
+    #else
     private func reserveNativeMTPRoundBytes(_ bytes: Int) throws -> NativeMTPRoundByteReservation {
         guard bytes > 0 else {
             throw ContinuousBatchSchedulerError.requestFailed("continuous_batching_native_mtp_window_bytes_unavailable")
@@ -3503,6 +3543,7 @@ actor ContinuousBatchScheduler {
         return NativeMTPRoundByteReservation(id: id, bytes: bytes)
     }
 
+    #endif
     /// SPEC-048 R012: the round's reservation fits above the 10% physical
     /// free-memory floor.
     static func nativeMTPSystemMemoryHeadroomAdmits(
@@ -3796,6 +3837,10 @@ actor ContinuousBatchScheduler {
                 }
                 let byteReservation: NativeMTPRoundByteReservation
                 do {
+                    #if DEBUG || MACPROVIDER_LAB_HARNESS
+                    labJourneyReservationContext = (row.request.id, row.generatedTokens.count, depth)
+                    defer { labJourneyReservationContext = nil }
+                    #endif
                     byteReservation = try reserveNativeMTPRoundBytes(completeWindowBytes)
                 } catch {
                     reservationFailure = error
@@ -4592,6 +4637,10 @@ actor ContinuousBatchScheduler {
     #if DEBUG || MACPROVIDER_LAB_HARNESS
     /// Lab-only: record the in-flight load gate's real decisions for R015
     /// gated-cell evidence. Never installed outside lab builds.
+    func installLabJourneyResourceObserver(_ observer: NativeMTPJourneyResourceObserver?) {
+        labJourneyResourceObserver = observer
+    }
+
     func installLabNativeMTPLoadGateRecorder(_ recorder: NativeMTPLoadGateRecorder?) {
         labNativeMTPLoadGateRecorder = recorder
     }
@@ -5991,6 +6040,9 @@ actor ContinuousBatchScheduler {
         rowProgressEvents &+= 1
         #if DEBUG || MACPROVIDER_LAB_HARNESS
         labNativeMTPLoadGateRecorder?.recordTerminal(requestID: requestID, status: result.terminalStatus)
+        labJourneyResourceObserver?.record(.init(requestID: requestID, status: result.terminalStatus.rawValue,
+            errorCode: result.errorCode, emittedTokens: result.emittedTokens,
+            hasRetainedCache: result.retainedCache != nil, hasSerialCache: result.serialConversationCache != nil))
         #endif
         CBTrace.log(requestID, "sch_complete status=\(result.terminalStatus) waiters=\(requestWaiters[requestID]?.count ?? 0) stopping=\(stoppingActiveWaiters.values.contains(where: { $0.requestID == requestID }))")
         endQueueWait(requestID: requestID)

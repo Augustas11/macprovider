@@ -259,6 +259,7 @@ final class NativeMTPHardwareE2ERunner {
     private let proposalDepth: Int
     private let maxPromptTokens: Int
     private let maxPhysicalBlocks: Int
+    private let signedJourneyInputs: String?
     private let verifyServePath: Bool
     /// Lab throughput phase completion tokens per row; 0 skips it.
     private let throughputTokens: Int
@@ -286,7 +287,8 @@ final class NativeMTPHardwareE2ERunner {
         maxPhysicalBlocks: Int = 512,
         verifyServePath: Bool = false,
         throughputTokens: Int = 0,
-        diagnosticEligibilityBypass: Bool = false
+        diagnosticEligibilityBypass: Bool = false,
+        signedJourneyInputs: String? = nil
     ) {
         root = URL(fileURLWithPath: (rootPath as NSString).expandingTildeInPath, isDirectory: true)
             .standardizedFileURL
@@ -295,6 +297,7 @@ final class NativeMTPHardwareE2ERunner {
         self.proposalDepth = proposalDepth
         self.maxPromptTokens = maxPromptTokens
         self.maxPhysicalBlocks = maxPhysicalBlocks
+        self.signedJourneyInputs = signedJourneyInputs
         self.verifyServePath = verifyServePath
         self.throughputTokens = throughputTokens
         self.diagnosticEligibilityBypass = diagnosticEligibilityBypass
@@ -499,16 +502,27 @@ final class NativeMTPHardwareE2ERunner {
         let tokenizerSHA = try sha256(of: root.appendingPathComponent("target/tokenizer.json"))
         let manifestSHA = try sha256(of: mtpDirectory.appendingPathComponent("config.json"))
         let machine = MachineFingerprinter().sample()
-        let signedAdmission = try makeAndValidateAdmission(
-            targetIdentity: targetIdentity,
-            mtpIdentity: mtpIdentity,
-            machine: machine,
-            maxContextTokens: maxContextTokens
-        )
+        let signedAdmission: NativeMTPHardwareSignedAdmission
+        if let signedJourneyInputs {
+            try require(!diagnosticEligibilityBypass && !verifyServePath,
+                        "signed-policy LAB execution forbids eligibility bypass and test build-identity injection")
+            signedAdmission = try NativeMTPJourneySignedInputs.load(
+                directory: URL(fileURLWithPath: ConfigLoader.expandTilde(signedJourneyInputs)),
+                artifactRoot: root, modelID: modelID, target: targetIdentity,
+                machine: machine, slots: maxBatch)
+        } else {
+            signedAdmission = try makeAndValidateAdmission(
+                targetIdentity: targetIdentity, mtpIdentity: mtpIdentity,
+                machine: machine, maxContextTokens: maxContextTokens)
+        }
         let admission = signedAdmission.capability
         try require(admission.targetArtifactSHA256 == targetIdentity.digest, "target digest admission mismatch")
         try require(admission.mtpArtifactSHA256 == mtpIdentity.digest, "MTP digest admission mismatch")
         try require(admission.maxProposalDepth == proposalDepth, "unexpected proposal depth")
+        if signedJourneyInputs != nil {
+            try require(admission.maxPromptTokens == maxPromptTokens, "signed prompt cap mismatch")
+            try require(admission.maxNativeActiveRows == maxNativeActiveRows, "signed native row bound mismatch")
+        }
         try require(admission.selfTestChallengeBank.challengeBankPath == "native-mtp-selftest-bank.json", "bad self-test bank")
         let capability = NativeMTPCapability(
             admitted: true,

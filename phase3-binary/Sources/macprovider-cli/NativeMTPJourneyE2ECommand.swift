@@ -64,7 +64,26 @@ struct NativeMTPJourneyE2ECommand: AsyncParsableCommand {
     @Option(name: .customLong("identity-cache"), help: "Model-free acceptance preflight file-stamp identity cache.")
     var identityCachePath: String?
 
+    @Option(name: .customLong("signed-admission-inputs"), help: "Offline genuinely signed catalog/feed/admission bundle; LAB execution remains honestly labeled LAB.")
+    var signedAdmissionInputs: String?
+
+    @Option(name: .customLong("journey-step"), help: "Run one bounded LAB step (04,05,06,07,08,09,10,12); repeat for a subset.")
+    var journeySteps: [String] = []
+
+    @Option(name: .customLong("journey-policy"))
+    var journeyPolicy: String?
+    @Option(name: .customLong("journey-requests"))
+    var journeyRequests: String?
+    @Option(name: .customLong("journey-metallib"))
+    var journeyMetallib: String?
+    @Flag(name: .customLong("freeze-journey-requests"))
+    var freezeJourneyRequests = false
+
     func run() async throws {
+        if journeyPolicy != nil || journeyRequests != nil || journeyMetallib != nil || freezeJourneyRequests {
+            try await runFrozenJourney()
+            return
+        }
         if let output = prepareAcceptanceCorpusPath {
             guard acceptanceCorpusPath == nil, acceptancePolicyPath == nil, providerCommit == nil,
                   identityCachePath == nil, !validateAcceptanceOnly, !selfTestOnly else {
@@ -156,12 +175,152 @@ struct NativeMTPJourneyE2ECommand: AsyncParsableCommand {
             selfTestChallengeID: selfTestChallengeID,
             acceptanceCorpus: corpus,
             acceptancePolicy: acceptancePolicy,
-            acceptanceTargetIdentity: checkedTarget
+            acceptanceTargetIdentity: checkedTarget,
+            signedAdmissionInputs: signedAdmissionInputs,
+            selectedSteps: Set(journeySteps)
         )
         let result = try await journey.run()
         let data = try JSONSerialization.data(withJSONObject: result.document, options: [.sortedKeys])
         FileHandle.standardOutput.write(data)
         FileHandle.standardOutput.write(Data("\n".utf8))
+        if !result.passed { throw ExitCode(1) }
+    }
+}
+
+private extension NativeMTPJourneyE2ECommand {
+    /// Model-free preflight uses the production signature/parser boundary.
+    /// Execution repeats it before loading the model. The preflight Metal hash
+    /// is read from the bound source build directory, never asserted by env.
+    func runFrozenJourney() async throws {
+        func read(_ url: URL, maximum: Int) throws -> Data {
+            let values = try url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
+            guard values.isRegularFile == true, values.isSymbolicLink != true,
+                  let size = values.fileSize, size > 0, size <= maximum else { throw ValidationError("bounded journey input unavailable") }
+            let bytes = try Data(contentsOf: url)
+            guard bytes.count == size else { throw ValidationError("journey input changed while reading") }
+            return bytes
+        }
+        guard let journeyPolicy, let journeyRequests, let journeyMetallib,
+              let signedAdmissionInputs, let providerCommit,
+              providerCommit.range(of: #"^[0-9a-f]{40}$"#, options: .regularExpression) != nil,
+              acceptanceCorpusPath == nil, acceptancePolicyPath == nil,
+              prepareAcceptanceCorpusPath == nil, !validateAcceptanceOnly, !selfTestOnly,
+              selfTestPrompts.isEmpty, !journeySteps.isEmpty,
+              Set(journeySteps).count == journeySteps.count,
+              Set(journeySteps).isSubset(of: ["04", "05", "06", "07", "08", "09", "10"]),
+              qualifiedSlots == 4, maxNativeActiveRows == 1, maxPromptTokens == 4096,
+              modelID == "zai-org/glm-5.3-flash", freezeJourneyRequests == (identityCachePath != nil) else {
+            throw ValidationError("invalid frozen GLM journey invocation")
+        }
+        let policyData = try read(URL(fileURLWithPath: journeyPolicy), maximum: 64 * 1024)
+        guard policyData.count <= 64 * 1024 else { throw ValidationError("journey policy size") }
+        try AutotuneStrictJSON.rejectDuplicateKeys(policyData)
+        guard let policy = try JSONSerialization.jsonObject(with: policyData) as? [String: Any] else { throw ValidationError("journey policy object") }
+        let expectedKeys: Set<String> = ["schema", "model_id", "target_sha256", "mtp_sha256", "tokenizer_sha256",
+            "hw_model", "chip", "ram_gb", "os_build", "xcode_build_version", "swift_version", "provider_commit",
+            "mlx_fork_revision", "quantization", "cache_mode", "signed_inputs_sha256", "metallib_sha256",
+            "decode_path_digest", "qualified_slots", "max_native_active_rows", "max_prompt_tokens", "proposal_depth"]
+        guard Set(policy.keys) == expectedKeys, policy["hw_model"] as? String == "Mac15,14" else { throw ValidationError("journey policy missing/unknown fields") }
+        let environment = NativeMTPBenchEnvironment.capture(providerCommit: providerCommit)
+        let fixtureRoot = URL(fileURLWithPath: ConfigLoader.expandTilde(root))
+        let targetURL = fixtureRoot.appendingPathComponent("target")
+        let cache = NativeMTPBenchIdentityCache(persistentURL: identityCachePath.map { URL(fileURLWithPath: $0) })
+        let target = try cache.identity(directory: targetURL)
+        let tokenizerSHA = NativeMTPJourneyRequestInventory.sha(try Data(contentsOf: targetURL.appendingPathComponent("tokenizer.json")))
+        let metalURL = URL(fileURLWithPath: journeyMetallib)
+        let metalValues = try metalURL.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
+        guard metalValues.isRegularFile == true, metalValues.isSymbolicLink != true,
+              let metalSize = metalValues.fileSize, metalSize > 0, metalSize <= 512 * 1024 * 1024 else { throw ValidationError("journey Metal identity unavailable") }
+        let metalSHA = NativeMTPJourneyRequestInventory.sha(try Data(contentsOf: metalURL))
+        let signedRoot = URL(fileURLWithPath: signedAdmissionInputs)
+        let inventoryData = try read(signedRoot.appendingPathComponent("signed-inputs-inventory.json"), maximum: 64 * 1024 * 1024)
+        guard inventoryData.count <= 64 * 1024 * 1024 else { throw ValidationError("signed inventory size") }
+        try AutotuneStrictJSON.rejectDuplicateKeys(inventoryData)
+        guard let inventory = try JSONSerialization.jsonObject(with: inventoryData) as? [String: Any],
+              Set(inventory.keys) == ["schema", "files"], inventory["schema"] as? String == "macprovider.native-mtp-journey-signed-inputs.v1",
+              let files = inventory["files"] as? [[String: Any]], (6...64).contains(files.count) else { throw ValidationError("signed inventory schema") }
+        var seen = Set<String>()
+        for file in files {
+            guard Set(file.keys) == ["path", "sha256", "base64"], let name = file["path"] as? String,
+                  name.range(of: #"^[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*$"#, options: .regularExpression) != nil,
+                  !name.split(separator: "/").contains(where: { $0 == "." || $0 == ".." }), seen.insert(name).inserted,
+                  let encoded = file["base64"] as? String, let bytes = Data(base64Encoded: encoded),
+                  !bytes.isEmpty, bytes.count <= 16 * 1024 * 1024,
+                  NativeMTPJourneyRequestInventory.sha(bytes) == file["sha256"] as? String else { throw ValidationError("signed inventory row") }
+            let url = signedRoot.appendingPathComponent(name)
+            let values = try url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+            guard url.resolvingSymlinksInPath().path.hasPrefix(signedRoot.resolvingSymlinksInPath().path + "/"),
+                  values.isRegularFile == true, values.isSymbolicLink != true,
+                  try read(url, maximum: 16 * 1024 * 1024) == bytes else { throw ValidationError("signed input bytes drifted") }
+        }
+        let observed: [String: Any] = ["schema": "macprovider.native-mtp-journey-policy.v1", "model_id": modelID,
+            "target_sha256": target.digest, "mtp_sha256": target.digest, "tokenizer_sha256": tokenizerSHA,
+            "hw_model": environment.hwModel, "chip": environment.chip, "ram_gb": environment.ramGB,
+            "os_build": environment.osBuild, "xcode_build_version": environment.xcodeBuildVersion,
+            "swift_version": environment.swiftVersion, "provider_commit": providerCommit,
+            "mlx_fork_revision": NativeMTPHardwareE2ERunner.upstreamRevision, "quantization": "4bit",
+            "cache_mode": "paged_kv_mixed", "signed_inputs_sha256": NativeMTPJourneyRequestInventory.sha(inventoryData),
+            "metallib_sha256": metalSHA, "decode_path_digest": DecodePathIdentity.digest,
+            "qualified_slots": qualifiedSlots, "max_native_active_rows": maxNativeActiveRows,
+            "max_prompt_tokens": maxPromptTokens, "proposal_depth": 1]
+        guard try NativeMTPJourneyRequestInventory.canonical(policy) == NativeMTPJourneyRequestInventory.canonical(observed) else {
+            throw ValidationError("frozen journey environment/artifact field differs")
+        }
+        let signed = try NativeMTPJourneySignedInputs.load(directory: signedRoot, artifactRoot: fixtureRoot,
+            modelID: modelID, target: target, machine: MachineFingerprinter().sample(), slots: qualifiedSlots,
+            preflightMetallibSHA256: metalSHA)
+        guard signed.capability.maxNativeActiveRows == maxNativeActiveRows,
+              signed.capability.maxPromptTokens == maxPromptTokens,
+              signed.capability.maxProposalDepth == 1 else { throw ValidationError("signed journey tuple bounds differ") }
+        let runner = NativeMTPJourneyRunner(root: root, modelID: modelID, qualifiedSlots: qualifiedSlots,
+            maxNativeActiveRows: maxNativeActiveRows, maxPromptTokens: maxPromptTokens,
+            signedAdmissionInputs: signedAdmissionInputs, selectedSteps: Set(journeySteps))
+        let requestURL = URL(fileURLWithPath: journeyRequests)
+        let requests: NativeMTPJourneyRequestInventory
+        let cap: String
+        if freezeJourneyRequests {
+            let tokenizer = try await ChatTemplateCompatTokenizerLoader().load(from: targetURL)
+            var text = "Summarize the following notes."
+            var salt = 0
+            while tokenizer.encode(text: text, addSpecialTokens: true).count < maxPromptTokens + 64 {
+                guard salt < 16_384 else { throw ValidationError("over-cap prompt tokenizer bound") }
+                text += " note-\(salt) the committee reviewed the quarterly logistics report and its appendices."
+                salt += 1
+            }
+            cap = text
+            let recording = NativeMTPJourneyRequestInventory()
+            runner.requestInventory = recording
+            try runner.enumerateFrozenRequests(capPrompt: cap)
+            let bytes = try recording.data()
+            guard !FileManager.default.fileExists(atPath: requestURL.path) else { throw ValidationError("request inventory already exists") }
+            try bytes.write(to: requestURL, options: .withoutOverwriting)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: requestURL.path)
+            requests = try NativeMTPJourneyRequestInventory(data: bytes)
+        } else {
+            requests = try NativeMTPJourneyRequestInventory(data: read(requestURL, maximum: 8 * 1024 * 1024))
+            guard let row = requests.rows.first(where: { $0["id"] as? String == "journey-prompt-cap" }),
+                  let encoded = row["body_base64"] as? String, let bytes = Data(base64Encoded: encoded),
+                  let body = try JSONSerialization.jsonObject(with: bytes) as? [String: Any],
+                  let messages = body["messages"] as? [[String: Any]], let text = messages.first?["content"] as? String else {
+                throw ValidationError("frozen over-cap prompt missing")
+            }
+            cap = text
+        }
+        runner.requestInventory = requests
+        runner.frozenCapPrompt = cap
+        try runner.enumerateFrozenRequests(capPrompt: cap)
+        if freezeJourneyRequests {
+            let summary: [String: Any] = ["validate_only": "pass", "policy_sha256": NativeMTPJourneyRequestInventory.sha(policyData),
+                "request_inventory_sha256": requests.digest!, "requests_parsed": requests.rows.count,
+                "signed_inputs_verified": true, "observed_policy": observed]
+            FileHandle.standardOutput.write(try NativeMTPJourneyRequestInventory.canonical(summary) + Data("\n".utf8))
+            return
+        }
+        guard ProcessInfo.processInfo.environment["MACPROVIDER_NATIVE_MTP_E2E"] == "1" else { throw ValidationError("journey LAB environment required") }
+        NativeMTPHardwareE2ERunner.applyServeProcessSetup(rootPath: root)
+        try NativeMTPHardwareE2ERunner.requireStudioHost()
+        let result = try await runner.run()
+        FileHandle.standardOutput.write(try NativeMTPJourneyRequestInventory.canonical(result.document) + Data("\n".utf8))
         if !result.passed { throw ExitCode(1) }
     }
 }
@@ -340,6 +499,11 @@ final class NativeMTPJourneyRunner {
         .blockBoundary(blockTokens: boundaryBlockTokens(family: family), includeBlockStart: family != .qwen35)
     }
 
+    private let signedAdmissionInputs: String?
+    private let selectedSteps: Set<String>
+    var requestInventory: NativeMTPJourneyRequestInventory?
+    var frozenCapPrompt: String?
+
     init(
         root: String,
         modelID: String,
@@ -351,8 +515,12 @@ final class NativeMTPJourneyRunner {
         selfTestChallengeID: String = NativeMTPJourneyRunner.defaultSelfTestChallengeID,
         acceptanceCorpus: NativeMTPAcceptanceCorpus? = nil,
         acceptancePolicy: NativeMTPAcceptancePolicy? = nil,
-        acceptanceTargetIdentity: MLXSnapshotIdentity? = nil
+        acceptanceTargetIdentity: MLXSnapshotIdentity? = nil,
+        signedAdmissionInputs: String? = nil,
+        selectedSteps: Set<String> = []
     ) {
+        self.signedAdmissionInputs = signedAdmissionInputs
+        self.selectedSteps = selectedSteps
         self.root = root
         self.modelID = modelID
         self.qualifiedSlots = qualifiedSlots
@@ -367,6 +535,9 @@ final class NativeMTPJourneyRunner {
     }
 
     func run() async throws -> (document: [String: Any], passed: Bool) {
+        guard selectedSteps.isSubset(of: Set(["04", "05", "06", "07", "08", "09", "10", "12"])) else {
+            throw NativeMTPHardwareE2EError.assertionFailed("unknown journey step")
+        }
         let family = NativeMTPHardwareE2ERunner(rootPath: root).family
         admitsSampledRows = family.admitsSampledRows
         let boundaryTokens = Self.boundaryRowTokens(blockTokens: Self.boundaryBlockTokens(family: family))
@@ -382,7 +553,8 @@ final class NativeMTPJourneyRunner {
                 slots: qualifiedSlots,
                 promptTokens: acceptanceCorpus == nil ? maxPromptTokens + 256 : 8_960,
                 outputTokens: outputBudget
-            )
+            ),
+            signedJourneyInputs: signedAdmissionInputs
         )
         let recorder = NativeMTPHardwareAdmissionRecorder()
         let fixture = try await runner.loadRuntimeFixture(
@@ -391,6 +563,7 @@ final class NativeMTPJourneyRunner {
             ordinaryAdmissionRecorder: nil,
             nativeAdmissionRecorder: recorder
         )
+        admitsSampledRows = fixture.admission.supportsSampling
         let ordinary = fixture.runtimes.ordinary
         let native = fixture.runtimes.native
         if let acceptanceCorpus {
@@ -409,6 +582,8 @@ final class NativeMTPJourneyRunner {
         // continues so one failure does not hide the others.
         var steps: [NativeMTPJourneyStep] = []
         func run(_ id: String, _ body: () async throws -> NativeMTPJourneyStep) async {
+            let number = String(id.dropFirst(5).prefix(2))
+            if !selectedSteps.isEmpty && !selectedSteps.contains(number) { return }
             let started = Date()
             do {
                 steps.append(try await body())
@@ -451,6 +626,11 @@ final class NativeMTPJourneyRunner {
                     container: fixture.runtimes.targetContainer
                 )
             }
+            if signedAdmissionInputs != nil {
+                await run("step-08-capacity-and-depth-zero") {
+                    try await capacityAndDepthZero(ordinary: ordinary, native: native, recorder: recorder, fixture: fixture)
+                }
+            }
             await run("step-09-cancellation") {
                 try await cancellation(ordinary: ordinary, native: native, recorder: recorder)
             }
@@ -470,7 +650,7 @@ final class NativeMTPJourneyRunner {
         let reportSteps = steps.enumerated().sorted {
             (stepOrder($0.element.id), $0.offset) < (stepOrder($1.element.id), $1.offset)
         }.map(\.element)
-        let passed = reportSteps.allSatisfy(\.passed)
+        let passed = !reportSteps.isEmpty && reportSteps.allSatisfy(\.passed)
         // pass only when every executed step is complete; partial when any
         // passing step leaves journey clauses uncovered.
         let executedStatus = !passed ? "fail" : (reportSteps.allSatisfy { $0.uncovered.isEmpty } ? "pass" : "partial")
@@ -479,16 +659,18 @@ final class NativeMTPJourneyRunner {
             // Covers only the hardware steps below; never a journey verdict.
             "journey_complete": false,
             "executed_steps_status": executedStatus,
-            "covered_steps": selfTestOnly ? ["step-12-native-canary (provider-local self-test half)"] : [
-                "step-04-serial-token-oracle",
-                "step-05-cache-state-boundary",
-                "step-06-streaming-stop",
-                "step-07-mixed-multirow",
-                "step-08-capacity-and-depth-zero",
-                "step-09-cancellation",
-                "step-10-warm-swap",
-                "step-12-native-canary (provider-local self-test half)",
-            ],
+            "requested_steps": selectedSteps.sorted(),
+            "covered_steps": signedAdmissionInputs == nil && selectedSteps.isEmpty ? (selfTestOnly
+                ? ["step-12-native-canary (provider-local self-test half)"] : [
+                    "step-04-serial-token-oracle", "step-05-cache-state-boundary", "step-06-streaming-stop",
+                    "step-07-mixed-multirow", "step-08-capacity-and-depth-zero", "step-09-cancellation",
+                    "step-10-warm-swap", "step-12-native-canary (provider-local self-test half)",
+                ]) : reportSteps.map(\.id),
+            "not_executed_lab_steps": Set([
+                "step-04-serial-token-oracle", "step-05-cache-state-boundary", "step-06-streaming-stop",
+                "step-07-08-mixed-multirow-capacity", "step-08-capacity-and-depth-zero",
+                "step-09-cancellation", "step-10-warm-swap", "step-12-native-selftest",
+            ]).subtracting(Set(reportSteps.map(\.id))).sorted(),
             "pending_steps": [
                 "step-01-bind-tuple",
                 "step-02-capability-negatives",
@@ -499,6 +681,11 @@ final class NativeMTPJourneyRunner {
                 "step-15-redaction-review",
             ],
             "evidence_class": "lab_isolated_no_join",
+            "lab_binary_release_candidate": false,
+            "request_inventory_sha256": Self.jsonOptional(requestInventory?.digest),
+            "lab_binary_sha256": try Bundle.main.executableURL.map { url in
+                try SHA256.hash(data: Data(contentsOf: url)).map { String(format: "%02x", $0) }.joined()
+            } ?? "unavailable",
             "model_id": modelID,
             "target_sha256": fixture.targetIdentity.digest,
             "mtp_sha256": fixture.mtpIdentity.digest,
@@ -507,7 +694,16 @@ final class NativeMTPJourneyRunner {
             "qualified_slots": qualifiedSlots,
             "max_native_active_rows": maxNativeActiveRows,
             "max_prompt_tokens": maxPromptTokens,
-            "request_feature_profile": family.requestFeatureProfile,
+            "request_feature_profile": fixture.admission.supportsSampling
+                ? NativeMTPAdmissionSidecar.sampledRequestFeatureProfile : NativeMTPAdmissionSidecar.greedyRequestFeatureProfile,
+            "signed_policy_inputs": signedAdmissionInputs != nil,
+            "admission_tuple_sha256": fixture.admission.tupleSHA256,
+            "admission_sidecar_sha256": fixture.admission.sidecarSHA256,
+            "policy_source_commit": fixture.admission.spec023SourceCommit,
+            "policy_binary_sha256": fixture.admission.spec023BuildDigestSHA256,
+            "policy_cdhash": fixture.admission.spec023LiveExecutableCDHash,
+            "lab_decode_path_digest": DecodePathIdentity.digest,
+            "lab_metallib_sha256": Self.jsonOptional(ModelRuntime.nativeMTPRuntimeMetallibSHA256()),
             "machine": [
                 "chip": fixture.machine.chip,
                 "ram_gb": fixture.machine.ramGB,
@@ -1090,8 +1286,9 @@ final class NativeMTPJourneyRunner {
         // Fresh request ids and keys: the scheduler rejects a reused id with a
         // different body, and a reused key would hit the conversation cache.
         let control = try await completeDeterministicBatch(
-            requests.map {
-                $0.withRequestID(($0.requestID ?? "") + "-control")
+            try requests.map {
+                try requestInventory?.checkControl(id: $0.requestID ?? "", conversationKey: $0.conversationKey)
+                return $0.withRequestID(($0.requestID ?? "") + "-control")
                     .withConversationKey($0.conversationKey.map { $0 + "-control" })
             },
             runtime: ordinary
@@ -1121,7 +1318,9 @@ final class NativeMTPJourneyRunner {
         step.check("slots_unchanged", snapshot.continuousBatching?.scheduler?.slotsTotal == qualifiedSlots)
 
         // Signed prompt cap: a prompt above max_prompt_tokens selects ordinary.
-        let longPrompt = try await prompt(container: container, minimumTokens: maxPromptTokens + 64)
+        let longPrompt: String
+        if let frozenCapPrompt { longPrompt = frozenCapPrompt }
+        else { longPrompt = try await prompt(container: container, minimumTokens: maxPromptTokens + 64) }
         let capped = try makeRequest(id: "journey-prompt-cap", prompt: longPrompt, maxTokens: 64, temperature: 0, topP: 1)
         let cappedExpected = try await ordinary.complete(capped)
         let cappedActual = try await native.complete(capped)
@@ -1129,6 +1328,26 @@ final class NativeMTPJourneyRunner {
         let cappedAdmission = recorder.requestSnapshot().last { $0.requestID == "journey-prompt-cap" }
         step.check("prompt_cap.selected_ordinary", cappedAdmission?.admission.effectivePath == .ordinary
             && cappedAdmission?.admission.selection.nativeMTPReason == .capabilityMismatch)
+        if signedAdmissionInputs != nil && admitsSampledRows {
+            for control in ["sampled", "tools", "history", "reasoning"] {
+                let id = "journey-profile-\(control)"
+                let shaped = try profileRequest(id: id, control: control)
+                var batch = [shaped]
+                for row in 1..<qualifiedSlots {
+                    batch.append(try makeRequest(id: "\(id)-peer-\(row)",
+                        prompt: "Peer \(row): list five rivers.", maxTokens: 48 + row * 8,
+                        temperature: 0, topP: 1, conversationKey: row % 2 == 0 ? "conv:\(id)-\(row)" : nil))
+                }
+                let oracle = try await completeDeterministicBatch(batch, runtime: ordinary)
+                let actual = try await completeDeterministicBatch(batch, runtime: native)
+                for request in batch {
+                    let rowID = request.requestID ?? ""
+                    step.check("\(rowID).profile_parity", oracle[rowID].map { expected in actual[rowID].map { same(expected, $0) } ?? false } ?? false)
+                }
+                step.check("\(id).native_admitted", lastPath(recorder, id) == .nativeMTP)
+                step.check("\(id).mixed_width", ((await native.currentSnapshot()).continuousBatching?.scheduler?.maxObservedBatchDepth ?? 0) >= qualifiedSlots)
+            }
+        }
         step.details["oracle_batch_composition"] = requests.compactMap(\.requestID)
         step.details["paths"] = paths
         step.details["selector_reasons"] = reasons
@@ -1148,6 +1367,11 @@ final class NativeMTPJourneyRunner {
     /// row still matches ordinary.
     private func cancellation(ordinary: ModelRuntime, native: ModelRuntime, recorder: NativeMTPHardwareAdmissionRecorder) async throws -> NativeMTPJourneyStep {
         var step = NativeMTPJourneyStep(id: "step-09-cancellation")
+        let resourceObserver = NativeMTPJourneyResourceObserver()
+        let cacheObserver = NativeMTPLabConversationCacheObserver()
+        step.check("terminal_observer_installed", await native.installLabJourneyResourceObserver(resourceObserver))
+        step.check("cache_observer_installed", await native.installLabNativeMTPConversationCacheObserver(cacheObserver))
+
         let phaseCases: [(String, NativeMTPLabPhaseTrapPhase)] = [
             ("journey-cancel-after-proposal", .afterProposal),
             ("journey-cancel-after-verify", .afterVerify),
@@ -1238,6 +1462,7 @@ final class NativeMTPJourneyRunner {
             topP: 1,
             stream: true
         )
+        let hotBeforeCancel = await native.hotConversationStats()
         let chunks = NativeMTPJourneyCounter()
         let handle = try await native.acquireRequestHandle(request)
         var cancelledCleanly = false
@@ -1253,6 +1478,9 @@ final class NativeMTPJourneyRunner {
             step.details["cancel_error"] = String(describing: error)
         }
         await native.unregisterInFlight(handle.registrationID)
+        let hotAfterCancel = await native.hotConversationStats()
+        step.check("cancelled_stream_no_hot_persistence", hotBeforeCancel.entries == hotAfterCancel.entries
+            && hotBeforeCancel.tokens == hotAfterCancel.tokens)
         step.details["chunks_before_cancel"] = chunks.value
         step.check("native_admitted", lastPath(recorder, "journey-cancel-0") == .nativeMTP)
         step.check("cancellation_threshold_reached", chunks.value >= 16)
@@ -1264,6 +1492,20 @@ final class NativeMTPJourneyRunner {
         let actual = try await native.complete(follow)
         step.check("follow_up_parity", same(expected, actual))
         step.check("follow_up_native", lastPath(recorder, "journey-cancel-follow") == .nativeMTP)
+        let cancelledIDs = Set(phaseCases.map { $0.0 } + ["journey-cancel-0"])
+        for id in cancelledIDs.sorted() {
+            let terminals = resourceObserver.terminalSnapshot().filter { $0.requestID == id }
+            step.check("\(id).exactly_one_terminal", terminals.count == 1)
+            step.check("\(id).no_persistent_payload", terminals.count == 1 && terminals.allSatisfy {
+                !$0.hasRetainedCache && !$0.hasSerialCache && $0.status != "stop" && $0.status != "length"
+            })
+            let leases = cacheObserver.snapshot().filter { $0.requestID == id }
+            step.check("\(id).native_cache_lease_excluded", !leases.isEmpty && leases.allSatisfy {
+                !$0.leaseAllowed && !$0.leaseObserved && !$0.retainedHandoff
+            })
+        }
+        _ = await native.installLabJourneyResourceObserver(nil)
+        _ = await native.installLabNativeMTPConversationCacheObserver(nil)
         return step
     }
 
@@ -1527,11 +1769,116 @@ final class NativeMTPJourneyRunner {
             "temperature": temperature,
             "top_p": topP,
             "stream": stream,
+            "seed": 8516,
         ]
         if let stop { object["stop"] = stop }
-        return try ChatCompletionRequest.parse(data: JSONSerialization.data(withJSONObject: object))
+        let body = try NativeMTPJourneyRequestInventory.canonical(object)
+        try requestInventory?.check(id: id, body: body, conversationKey: conversationKey)
+        return try ChatCompletionRequest.parse(data: body)
             .withRequestID(id)
             .withConversationKey(conversationKey)
+    }
+
+    private func profileRequest(id: String, control: String) throws -> ChatCompletionRequest {
+        let sampled = control == "sampled"
+        var object: [String: Any] = ["model": modelID,
+            "messages": [["role": "user", "content": "Explain what the example function does in three sentences."]],
+            "max_tokens": 96, "temperature": sampled ? 1.0 : 0.0,
+            "top_p": sampled ? 0.95 : 1.0, "seed": 8516, "stream": false]
+        if control == "tools" || control == "history" {
+            object["tools"] = [["type": "function", "function": ["name": "read_file",
+                "parameters": ["type": "object", "properties": ["path": ["type": "string"]], "required": ["path"]]]]]
+            object["tool_choice"] = "auto"
+            object["parallel_tool_calls"] = true
+        }
+        if control == "history" {
+            object["messages"] = [
+                ["role": "user", "content": "Read example.swift before answering."],
+                ["role": "assistant", "content": "", "reasoning_content": "Inspect the file.", "tool_calls": [[
+                    "id": "call_journey", "type": "function", "function": ["name": "read_file", "arguments": "{\"path\":\"example.swift\"}"]]]],
+                ["role": "tool", "tool_call_id": "call_journey", "content": "func square(_ x: Int) -> Int { x * x }"],
+                ["role": "user", "content": "Explain the function."]]
+        }
+        if control == "reasoning" || control == "history" { object["reasoning_effort"] = "high" }
+        let body = try NativeMTPJourneyRequestInventory.canonical(object)
+        try requestInventory?.check(id: id, body: body, conversationKey: nil)
+        return try ChatCompletionRequest.parse(data: body).withRequestID(id)
+    }
+
+    private func capacityAndDepthZero(ordinary: ModelRuntime, native: ModelRuntime,
+        recorder: NativeMTPHardwareAdmissionRecorder, fixture: NativeMTPHardwareRuntimeFixture) async throws -> NativeMTPJourneyStep {
+        var step = NativeMTPJourneyStep(id: "step-08-capacity-and-depth-zero")
+        let ledger = fixture.admission.completeWindowBytesByDepth
+        guard ledger.count > 1, ledger[0] > 0, ledger[1] > ledger[0] else {
+            throw NativeMTPHardwareE2EError.assertionFailed("signed byte ledger cannot distinguish depth 0 and 1")
+        }
+        for (id, capacity, expectFailure) in [
+            ("journey-budget-depth-zero", ledger[0], false),
+            ("journey-budget-depth-zero-exhausted", 0, true),
+            ("journey-budget-before-output-exhausted", 0, true),
+        ] {
+            let threshold = id == "journey-budget-before-output-exhausted" ? 0 : 8
+            let observer = NativeMTPJourneyResourceObserver(fault: .init(
+                requestID: id, afterGeneratedTokens: threshold, capacityBytes: capacity))
+            step.check("\(id).observer_installed", await native.installLabJourneyResourceObserver(observer))
+            let request = try makeRequest(id: id, prompt: "List one hundred different harbor observations with details.",
+                maxTokens: 96, temperature: 0, topP: 1)
+            let expected = try await ordinary.complete(request)
+            var completed: CompletionResult?
+            var failure: String?
+            do { completed = try await native.complete(request) } catch { failure = String(describing: error) }
+            let idle = try await waitForSchedulerIdle(native)
+            let attempts = observer.reservationSnapshot().filter { $0.requestID == id }
+            let terminals = observer.terminalSnapshot().filter { $0.requestID == id }
+            let injected = attempts.filter { $0.generatedTokens >= threshold }
+            step.check("\(id).native_admitted", lastPath(recorder, id) == .nativeMTP)
+            step.check("\(id).injection_reached", !injected.isEmpty)
+            if threshold > 0 {
+                step.check("\(id).fault_after_stickiness", attempts.contains { $0.generatedTokens < threshold && $0.admitted }
+                    && !injected.isEmpty && injected.allSatisfy { $0.generatedTokens >= threshold })
+            } else {
+                step.check("\(id).pre_output_failure_emitted_zero", terminals.count == 1 && terminals[0].emittedTokens == 0
+                    && !injected.isEmpty && injected.allSatisfy { $0.generatedTokens == 0 })
+            }
+            step.check("\(id).higher_depth_refused", injected.contains { $0.depth > 0 && !$0.admitted })
+            step.check("\(id).no_overcommit", attempts.allSatisfy {
+                !$0.admitted || ($0.bytes <= $0.capacity && $0.reservedBefore <= $0.capacity - $0.bytes)
+            })
+            step.check("\(id).exactly_one_terminal", terminals.count == 1)
+            step.check("\(id).row_released", idle)
+            if expectFailure {
+                step.check("\(id).depth_zero_refused", injected.contains { $0.depth == 0 && !$0.admitted })
+                step.check("\(id).bounded_capacity_failure", completed == nil && failure != nil
+                    && terminals.count == 1 && terminals[0].errorCode == "continuous_batching_native_mtp_round_memory_exhausted")
+                step.check("\(id).no_persistent_payload", terminals.allSatisfy { !$0.hasRetainedCache && !$0.hasSerialCache })
+            } else {
+                step.check("\(id).depth_zero_admitted", injected.contains { $0.depth == 0 && $0.admitted })
+                step.check("\(id).ordinary_parity", completed.map { same(expected, $0) } ?? false)
+            }
+            step.details[id] = ["fault_after_generated_tokens": threshold, "capacity_bytes": capacity,
+                "attempts": attempts.map { ["depth": $0.depth, "generated_tokens": $0.generatedTokens,
+                    "bytes": $0.bytes, "reserved_before": $0.reservedBefore, "capacity": $0.capacity, "admitted": $0.admitted] as [String: Any] },
+                "terminal_status": terminals.map(\.status), "failure": Self.jsonOptional(failure)]
+            _ = await native.installLabJourneyResourceObserver(nil)
+        }
+        step.check("advertised_slots_unchanged", (await native.currentSnapshot()).continuousBatching?.scheduler?.slotsTotal == qualifiedSlots)
+        let preflightID = "journey-budget-pre-admission"
+        step.check("pre_admission_capacity_withdrawn", await native.labSetJourneyVerificationCapacityAvailable(false))
+        let preflight = try makeRequest(id: preflightID, prompt: "Name three rivers.", maxTokens: 48, temperature: 0, topP: 1)
+        do {
+            let expected = try await ordinary.complete(preflight)
+            let actual = try await native.complete(preflight)
+            let observed = recorder.requestSnapshot().last { $0.requestID == preflightID }?.admission
+            step.check("pre_admission_ordinary_capacity_selection", observed?.effectivePath == .ordinary
+                && observed?.selection.nativeMTPReason == .insufficientVerificationCapacity)
+            step.check("pre_admission_ordinary_parity", same(expected, actual))
+        } catch {
+            _ = await native.labSetJourneyVerificationCapacityAvailable(true)
+            throw error
+        }
+        step.check("pre_admission_capacity_restored", await native.labSetJourneyVerificationCapacityAvailable(true))
+        step.details["pre_admission_negative"] = "LAB resource withdrawal sets available proposal depth to zero; signed policy bytes and profile remain unchanged. Existing production selector chooses ordinary before mutation."
+        return step
     }
 
     private func same(_ lhs: CompletionResult, _ rhs: CompletionResult) -> Bool {
@@ -1693,6 +2040,75 @@ final class NativeMTPJourneyRunner {
             committedTokens: Int(clamping: counters.committedTokens),
             terminalReason: result.terminalStatus
         )
+    }
+
+
+    /// Enumerates the existing request factories, without loading weights,
+    /// creating an MLX array, executing hooks, or inferring. Runtime factories
+    /// below are checked against this inventory, so additions fail closed.
+    func enumerateFrozenRequests(capPrompt: String) throws {
+        func plain(_ id: String, _ prompt: String, _ tokens: Int, _ temp: Double = 0,
+                   _ topP: Double = 1, _ stop: [String]? = nil, _ stream: Bool = false,
+                   _ key: String? = nil, _ model: String? = nil) throws {
+            _ = try makeRequest(id: id, model: model, prompt: prompt, maxTokens: tokens,
+                                temperature: temp, topP: topP, stop: stop, stream: stream, conversationKey: key)
+        }
+        let oracle: [(String, String, Double, Double)] = [
+            ("journey-serial-greedy-0", "Explain in three sentences why the sky appears blue.", 0, 1),
+            ("journey-serial-greedy-1", "Write a short Python function that reverses a linked list.", 0, 1),
+            ("journey-serial-greedy-2", "List five prime numbers greater than one hundred and say why each is prime.", 0, 1),
+            ("journey-serial-sampled-0", "Describe a quiet harbor town at dawn.", 0.7, 0.9),
+            ("journey-serial-sampled-1", "Give three tips for learning a new language.", 1, 1)]
+        for (id, prompt, temp, topP) in oracle {
+            try plain(id, prompt, 192, temp, topP)
+            if temp == 0 { try plain("journey-prompt-tokens", prompt, 1) }
+        }
+        for id in ["journey-reject-all-0", "journey-boundary-0", "journey-boundary-1"] {
+            let prompt = "Tell a detailed story about a lighthouse keeper (\(id))."
+            try plain(id, prompt, id.hasPrefix("journey-boundary-") ? 1024 : 256)
+            try plain("journey-prompt-tokens", prompt, 1)
+        }
+        let streaming: [(String, String, [String]?, Int, Double)] = [
+            ("journey-stream-stop", "Count from one to thirty in English words, separated by commas.", [" twelve"], 256, 0),
+            ("journey-stream-length", "Write a long essay about the history of printing.", nil, 160, 0),
+            ("journey-stream-eos", "Reply with exactly the single word OK and nothing else.", nil, 512, 0),
+            ("journey-stream-sampled", "Invent a recipe for a winter soup.", nil, 160, 0.7)]
+        for (id, prompt, stop, tokens, temp) in streaming {
+            try plain(id + "-ns", prompt, tokens, temp, 1, stop)
+            try plain(id + "-s", prompt, tokens, temp, 1, stop, true)
+        }
+        try plain("journey-stream-early-consumer-stop", "Write a long numbered explanation of how sailors navigate by stars.", 512, 0, 1, nil, true)
+        try plain("journey-stream-postoutput-fault", "Write a long numbered field guide to constellations used by navigators.", 512, 0, 1, nil, true)
+        for row in 0..<qualifiedSlots {
+            let id = "journey-mixed-\(row)"
+            let key = row % 3 == 2 ? "conv:journey-mixed-\(row)" : nil
+            try plain(id, "Row \(row): summarize the causes and effects of the industrial revolution in \(3 + row) points.", 256 + 32 * row, 0, 1, nil, false, key)
+            try requestInventory?.checkControl(id: id, conversationKey: key)
+        }
+        try plain("journey-prompt-cap", capPrompt, 64)
+        // Parse expanded controls even when the signed profile is greedy-only;
+        // actual selection still follows the production signed supportsSampling.
+        for control in ["sampled", "tools", "history", "reasoning"] {
+            let id = "journey-profile-\(control)"
+            _ = try profileRequest(id: id, control: control)
+            for row in 1..<qualifiedSlots {
+                try plain("\(id)-peer-\(row)", "Peer \(row): list five rivers.", 48 + row * 8,
+                    0, 1, nil, false, row % 2 == 0 ? "conv:\(id)-\(row)" : nil)
+            }
+        }
+        for id in ["journey-budget-depth-zero", "journey-budget-depth-zero-exhausted", "journey-budget-before-output-exhausted"] {
+            try plain(id, "List one hundred different harbor observations with details.", 96)
+        }
+        try plain("journey-budget-pre-admission", "Name three rivers.", 48)
+        for id in ["journey-cancel-after-proposal", "journey-cancel-after-verify", "journey-cancel-before-finalize"] {
+            let prompt = "Write a very long story about a journey across a desert and include many vivid details."
+            try plain(id, prompt, 256)
+            try plain(id + "-peer", prompt, 256, 0, 1, nil, false, "conv:\(id)-peer")
+        }
+        try plain("journey-cancel-0", "Write a very long story about a journey across a desert.", 512, 0, 1, nil, true)
+        try plain("journey-cancel-follow", "Name three rivers in Europe.", 96)
+        try plain("journey-warm-swap-old-native", "Write a compact but detailed explanation of how lighthouses use lenses to focus light.", 512, 0, 1, nil, true)
+        try plain("journey-warm-swap-new-ordinary", "Name three ocean currents and give one fact about each.", 96, 0, 1, nil, false, nil, modelID + "-warm-swap-alias")
     }
 
     private func prompt(container: ModelContainer, minimumTokens: Int) async throws -> String {

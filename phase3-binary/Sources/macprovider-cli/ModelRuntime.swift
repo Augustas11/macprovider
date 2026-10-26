@@ -2126,6 +2126,7 @@ actor ModelRuntime: ModelRuntimeServing {
     #if DEBUG || MACPROVIDER_LAB_HARNESS
     private var labNativeMTPCommitTimingObserver: NativeMTPLabCommittedTokenTimingObserver?
     private var labNativeMTPDecodeOutputCap: NativeMTPLabDecodeOutputCap?
+    private var labJourneyWithdrawnCapability: NativeMTPCapability?
     private var labNativeMTPConversationCacheObserver: NativeMTPLabConversationCacheObserver?
     #endif
 
@@ -8183,6 +8184,36 @@ maxTokens: 1,
 
     /// Lab-only R015 hook: record the attached scheduler's in-flight load-gate
     /// decisions. Returns false when no scheduler is attached.
+    /// Resource-negative fixture: only withdraws verification capacity on an idle
+    /// isolated LAB runtime. Restore is the exact saved capability, never caller data.
+    func labSetJourneyVerificationCapacityAvailable(_ available: Bool) -> Bool {
+        guard inFlightCancellations.isEmpty else { return false }
+        if available {
+            guard let saved = labJourneyWithdrawnCapability else { return false }
+            currentNativeMTPCapability = saved
+            labJourneyWithdrawnCapability = nil
+            return true
+        }
+        guard labJourneyWithdrawnCapability == nil, let c = currentNativeMTPCapability else { return false }
+        labJourneyWithdrawnCapability = c
+        currentNativeMTPCapability = NativeMTPCapability(
+            admitted: c.admitted, revoked: c.revoked, revocationStateAvailable: c.revocationStateAvailable,
+            supportsCurrentProcessor: c.supportsCurrentProcessor, supportsCurrentStateCache: c.supportsCurrentStateCache,
+            supportsStreaming: c.supportsStreaming, supportsNonStreaming: c.supportsNonStreaming,
+            supportsStopSequences: c.supportsStopSequences, hasQualifiedRowMappedTransactions: c.hasQualifiedRowMappedTransactions,
+            maximumProposalDepth: 0, maximumPromptTokens: c.maximumPromptTokens,
+            maximumCompletionTokens: c.maximumCompletionTokens, completeWindowBytesByDepth: c.completeWindowBytesByDepth,
+            family: c.family, throughputDeltaPPM: c.throughputDeltaPPM,
+            maximumNativeActiveRows: c.maximumNativeActiveRows, supportsSampling: c.supportsSampling)
+        return true
+    }
+
+    func installLabJourneyResourceObserver(_ observer: NativeMTPJourneyResourceObserver?) async -> Bool {
+        guard let continuousBatchScheduler else { return false }
+        await continuousBatchScheduler.installLabJourneyResourceObserver(observer)
+        return true
+    }
+
     func installLabNativeMTPLoadGateRecorder(_ recorder: NativeMTPLoadGateRecorder?) async -> Bool {
         guard let continuousBatchScheduler else { return false }
         await continuousBatchScheduler.installLabNativeMTPLoadGateRecorder(recorder)
