@@ -205,14 +205,23 @@ final class AppInstanceHandoff {
     /// Registry files are private, small and bound to a process launch date.
     /// Stale files can never manufacture a live process or target a reused PID.
     @MainActor
-    private final class Registry {
+    final class Registry {
         struct Record: Codable {
             let identity: Identity
             let ready: Bool
         }
 
-        private let directory = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/Malibu/app-instances", isDirectory: true)
+        private let directory: URL
+        private let validatesSignature: (Int32) -> Bool
+
+        init(
+            directory: URL = FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("Library/Application Support/Malibu/app-instances", isDirectory: true),
+            validatesSignature: @escaping (Int32) -> Bool = Registry.isSignedMalibu
+        ) {
+            self.directory = directory
+            self.validatesSignature = validatesSignature
+        }
 
         private func recordURL(_ pid: Int32) -> URL {
             directory.appendingPathComponent("\(pid).json")
@@ -258,7 +267,7 @@ final class AppInstanceHandoff {
         }
 
         /// Validate the running guest, not its replaced on-disk bundle.
-        private static func isSignedMalibu(_ pid: Int32) -> Bool {
+        static func isSignedMalibu(_ pid: Int32) -> Bool {
             var code: SecCode?
             guard SecCodeCopyGuestWithAttributes(
                 nil, [kSecGuestAttributePid: NSNumber(value: pid)] as CFDictionary, [], &code
@@ -271,25 +280,28 @@ final class AppInstanceHandoff {
         }
 
         static func application(matching identity: Identity) -> NSRunningApplication? {
+            Registry().application(matching: identity)
+        }
+
+        // A running app's location is not its identity: activation renames
+        // the predecessor bundle, and LaunchServices may retain its old URL.
+        // Verify the running code and launch date again before every signal.
+        func application(matching identity: Identity) -> NSRunningApplication? {
             guard let app = NSRunningApplication(processIdentifier: identity.pid),
                   !app.isTerminated, app.bundleIdentifier == "tech.malibu.app",
                   app.launchDate == identity.launchedAt,
-                  let url = app.bundleURL,
-                  CLIUpdateRunner.isUpdaterOwnedMalibuInstall(url),
-                  isSameUser(identity.pid), isSignedMalibu(identity.pid) else { return nil }
+                  Self.isSameUser(identity.pid), validatesSignature(identity.pid) else { return nil }
             return app
         }
 
         func peers(own: Identity) -> [Identity] {
             NSRunningApplication.runningApplications(withBundleIdentifier: "tech.malibu.app")
                 .compactMap { app in
-                    guard !app.isTerminated, let date = app.launchDate,
-                          let url = app.bundleURL,
-                          CLIUpdateRunner.isUpdaterOwnedMalibuInstall(url) else { return nil }
+                    guard !app.isTerminated, let date = app.launchDate else { return nil }
                     let pid = app.processIdentifier
                     if pid == own.pid { return own }
                     let observed = Identity(pid: pid, launchedAt: date, version: nil)
-                    guard Self.application(matching: observed) != nil else { return nil }
+                    guard application(matching: observed) != nil else { return nil }
                     let published = record(pid: pid, launchedAt: date)
                     return AppInstanceHandoff.discoveredIdentity(
                         pid: pid, launchedAt: date,
