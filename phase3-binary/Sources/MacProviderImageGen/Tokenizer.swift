@@ -35,6 +35,19 @@ struct Bigram: Hashable {
 /// what exists there (at time of writing).
 class CLIPTokenizer {
 
+    /// CLIP's reversible byte alphabet keeps UTF-8 bytes out of BPE's
+    /// whitespace/control characters. Vocabulary entries use this alphabet,
+    /// rather than the original Unicode characters of the prompt.
+    private static let byteAlphabet: [String] = {
+        let literalBytes = Set(Array(33...126) + Array(161...172) + Array(174...255))
+        var nextScalar = 256
+        return (0...255).map { byte in
+            if literalBytes.contains(byte) { return String(UnicodeScalar(byte)!) }
+            defer { nextScalar += 1 }
+            return String(UnicodeScalar(nextScalar)!)
+        }
+    }()
+
     let pattern =
         #/<\|startoftext\|>|<\|endoftext\|>|'s|'t|'re|'ve|'m|'ll|'d|[\p{L}]+|[\p{N}]|[^\s\p{L}\p{N}]+/#
     let bpeRanks: [Bigram: Int]
@@ -70,7 +83,8 @@ class CLIPTokenizer {
 
         precondition(!text.isEmpty)
 
-        var unigrams = text.dropLast().map { String($0) } + ["\(text.last!)</w>"]
+        let scalars = text.unicodeScalars.map { String($0) }
+        var unigrams = Array(scalars.dropLast()) + ["\(scalars.last!)</w>"]
         var uniqueBigrams = Set(zip(unigrams, unigrams.dropFirst()).map { Bigram($0) })
 
         // In every iteration try to merge the two most likely bigrams. If none
@@ -117,20 +131,18 @@ class CLIPTokenizer {
     }
 
     public func tokenize(text: String) -> [Int32] {
-        // Lower case cleanup and split according to self.pat. Hugging Face does
-        // a much more thorough job here but this should suffice for 95% of
-        // cases.
-
-        let clean = text.lowercased().replacing(#/\s+/#, with: " ")
+        let clean = text.precomposedStringWithCanonicalMapping.lowercased().replacing(#/\s+/#, with: " ")
         let tokens = clean.matches(of: pattern).map { $0.description }
 
         // Split the tokens according to the byte-pair merge file
-        let bpeTokens = tokens.flatMap { bpe(text: String($0)) }
+        let bpeTokens = tokens.flatMap { token in
+            bpe(text: token.utf8.map { Self.byteAlphabet[Int($0)] }.joined())
+        }
 
         // Map to token ids and return
         // SDXL CLIP encoders have 77 position embeddings. Keep the final EOS
         // even when a valid HTTP prompt produces more than 75 content tokens.
-        let result = [bosToken] + bpeTokens.compactMap { vocabulary[$0] }.prefix(75) + [eosToken]
+        let result = [bosToken] + bpeTokens.map { vocabulary[$0] ?? eosToken }.prefix(75) + [eosToken]
 
         return result.map { Int32($0) }
     }
