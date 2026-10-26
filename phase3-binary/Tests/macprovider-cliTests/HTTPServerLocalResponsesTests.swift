@@ -8,6 +8,149 @@ import XCTest
 /// Real loopback HTTP requests exercise the route guard and shared inference
 /// pipeline without loading weights or entering a hardware inference path.
 final class HTTPServerLocalResponsesTests: XCTestCase {
+    func testMessagesUseSharedRuntimeAndAnthropicResponseShape() async throws {
+        let runtime = LocalResponsesRuntime()
+        try await withServer(runtime: runtime) { port in
+            let response = try await self.post(port: port, path: "/v1/messages", body: self.messagesBody())
+            XCTAssertEqual(response.statusCode, 200)
+            let object = try self.object(response.data)
+            XCTAssertEqual(object["type"] as? String, "message")
+            XCTAssertEqual(object["role"] as? String, "assistant")
+            XCTAssertEqual(object["model"] as? String, "fixture-model")
+            XCTAssertEqual(object["stop_reason"] as? String, "end_turn")
+            let content = try XCTUnwrap(object["content"] as? [[String: Any]])
+            XCTAssertEqual(content.first?["type"] as? String, "text")
+            XCTAssertEqual(content.first?["text"] as? String, "answer")
+            let usage = try XCTUnwrap(object["usage"] as? [String: Any])
+            XCTAssertEqual(usage["input_tokens"] as? Int, 2)
+            XCTAssertEqual(usage["output_tokens"] as? Int, 1)
+        }
+        let calls = await runtime.calls
+        XCTAssertEqual(calls, 1)
+    }
+
+    func testMessagesStreamUsesAnthropicEventsWithoutChatDoneSentinel() async throws {
+        try await withServer(runtime: LocalResponsesRuntime()) { port in
+            let response = try await self.post(port: port, path: "/v1/messages", body: self.messagesBody(stream: true))
+            XCTAssertEqual(response.statusCode, 200)
+            XCTAssertTrue(response.contentType.hasPrefix("text/event-stream"))
+            let text = String(decoding: response.data, as: UTF8.self)
+            let frames = try self.events(response.data)
+            XCTAssertEqual(frames.first?["type"] as? String, "message_start")
+            XCTAssertEqual(frames.last?["type"] as? String, "message_stop")
+            XCTAssertEqual(frames.filter { $0["type"] as? String == "message_stop" }.count, 1)
+            XCTAssertEqual(frames.filter { $0["type"] as? String == "content_block_delta" }
+                .compactMap { ($0["delta"] as? [String: Any])?["text"] as? String }.joined(), "answer")
+            XCTAssertTrue(text.contains("event: message_start\n"), text)
+            XCTAssertTrue(text.contains("event: content_block_stop\n"), text)
+            XCTAssertFalse(text.contains("data: [DONE]"), text)
+            XCTAssertFalse(text.contains("chat.completion.chunk"), text)
+        }
+    }
+
+    func testMessagesGuardFailuresAndMethodsAreAnthropicErrors() async throws {
+        let runtime = LocalResponsesRuntime()
+        try await withServer(runtime: runtime) { port in
+            for (headers, expectedStatus, expectedCode) in [
+                (["Origin": "https://evil.example"], 403, "browser_request_forbidden"),
+                (["Sec-Fetch-Site": "cross-site"], 403, "browser_request_forbidden"),
+                (["Content-Type": "text/plain"], 415, "request_content_type_unsupported"),
+                (["Content-Encoding": "gzip"], 415, "request_content_encoding_unsupported"),
+                (["X-MacProvider-Privacy-Class": "private"], 400, PrivacyClassConstants.downgradeRejected),
+            ] {
+                let response = try await self.post(port: port, path: "/v1/messages", headers: headers, body: self.messagesBody())
+                XCTAssertEqual(response.statusCode, expectedStatus)
+                let object = try self.object(response.data)
+                XCTAssertEqual(object["type"] as? String, "error")
+                let error = try XCTUnwrap(object["error"] as? [String: Any])
+                XCTAssertEqual(error["code"] as? String, expectedCode)
+                XCTAssertNotNil(error["message"] as? String)
+            }
+            let malformed = try await self.post(port: port, path: "/v1/messages", body: ["model": "fixture-model"])
+            XCTAssertEqual(malformed.statusCode, 400)
+            XCTAssertEqual(try self.object(malformed.data)["type"] as? String, "error")
+            let session = URLSession(configuration: .ephemeral)
+            defer { session.invalidateAndCancel() }
+            var request = URLRequest(url: try XCTUnwrap(URL(string: "http://127.0.0.1:\(port)/v1/messages")))
+            request.httpMethod = "GET"
+            let (data, response) = try await session.data(for: request)
+            XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 405)
+            XCTAssertEqual(try self.object(data)["type"] as? String, "error")
+        }
+        let calls = await runtime.calls
+        XCTAssertEqual(calls, 0)
+    }
+
+    func testMessagesRuntimeFailuresRemainAnthropicErrors() async throws {
+        for stream in [false, true] {
+            try await withServer(runtime: LocalResponsesRuntime(failAfterChunk: true)) { port in
+                let response = try await self.post(port: port, path: "/v1/messages", body: self.messagesBody(stream: stream))
+                XCTAssertEqual(response.statusCode, stream ? 200 : 500)
+                if stream {
+                    let frames = try self.events(response.data)
+                    let errors = frames.filter { $0["type"] as? String == "error" }
+                    XCTAssertEqual(errors.count, 1)
+                    XCTAssertEqual((errors.first?["error"] as? [String: Any])?["code"] as? String, "fixture_failure")
+                    XCTAssertFalse(frames.contains { $0["type"] as? String == "message_stop" })
+                } else {
+                    let object = try self.object(response.data)
+                    XCTAssertEqual(object["type"] as? String, "error")
+                    XCTAssertEqual((object["error"] as? [String: Any])?["code"] as? String, "fixture_failure")
+                }
+            }
+        }
+    }
+
+    func testBuyerPreemptsLocalMessagesWithoutFailingBuyer() async throws {
+        for stream in [false, true] {
+            let runtime = LocalResponsesRuntime(awaitDisconnect: true, holdFirstRequestOnly: true)
+            let status = ProviderStatus(modelID: "fixture-model", modelLoaded: true, capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: 1))
+            try await withServer(runtime: runtime, providerStatus: status) { port in
+                let local = Task {
+                    try await self.post(port: port, path: "/v1/messages", headers: [
+                        RouterHandler.requestOriginHeaderName: RouterHandler.localAppOriginValue,
+                    ], body: self.messagesBody(stream: stream))
+                }
+                do {
+                    try await self.waitUntil { await runtime.entered }
+                    let active = await status.snapshot()
+                    XCTAssertEqual(active.localUsage.requestsInFlight, 1)
+                    XCTAssertEqual(active.requestsInFlight, 0)
+                    let buyer = try await self.post(port: port, path: "/v1/chat/completions", body: [
+                        "model": "fixture-model", "messages": [["role": "user", "content": "buyer"]],
+                    ])
+                    XCTAssertEqual(buyer.statusCode, 200)
+                    let response = try await local.value
+                    if stream {
+                        XCTAssertEqual(response.statusCode, 200)
+                        let frames = try self.events(response.data)
+                        let errors = frames.filter { $0["type"] as? String == "error" }
+                        XCTAssertEqual(errors.count, 1)
+                        XCTAssertEqual((errors.first?["error"] as? [String: Any])?["code"] as? String, "local_preempted")
+                        XCTAssertFalse(frames.contains { $0["type"] as? String == "message_stop" })
+                    } else {
+                        XCTAssertEqual(response.statusCode, 503)
+                        let object = try self.object(response.data)
+                        XCTAssertEqual(object["type"] as? String, "error")
+                        XCTAssertEqual((object["error"] as? [String: Any])?["code"] as? String, "local_preempted")
+                    }
+                    let finished = await status.snapshot(resetWindow: true)
+                    XCTAssertEqual(finished.localUsage.requestsPreempted, 1)
+                    XCTAssertEqual(finished.requestsServedSinceLast, 1)
+                } catch {
+                    local.cancel()
+                    _ = await local.result
+                    throw error
+                }
+            }
+        }
+    }
+
+    private func messagesBody(stream: Bool = false) -> [String: Any] {
+        ["model": "fixture-model", "max_tokens": 64, "stream": stream,
+         "messages": [["role": "user", "content": "hello"]]]
+    }
+
     func testResponsesAndChatUseTheSameRuntime() async throws {
         let runtime = LocalResponsesRuntime()
         try await withServer(runtime: runtime) { port in
@@ -118,6 +261,14 @@ final class HTTPServerLocalResponsesTests: XCTestCase {
                 let (data, _) = try await session.data(from: URL(string: "http://127.0.0.1:\(port)/v1/capabilities")!)
                 let capabilities = try self.object(data)
                 XCTAssertEqual(capabilities["model"] as? String, "fixture-model")
+                let messages = try XCTUnwrap(capabilities["messages"] as? [String: Any])
+                XCTAssertEqual(messages["endpoint"] as? String, "/v1/messages")
+                XCTAssertEqual(messages["available"] as? Bool, true)
+                XCTAssertEqual(messages["model"] as? String, "fixture-model")
+                XCTAssertEqual(messages["stream"] as? Bool, true)
+                let (statusData, _) = try await session.data(from: URL(string: "http://127.0.0.1:\(port)/v1/status")!)
+                let contract = try XCTUnwrap(self.object(statusData)["local_status_contract"] as? [String: Any])
+                XCTAssertTrue((contract["capabilities"] as? [String] ?? []).contains("local_anthropic_messages_v1"))
                 let responses = try XCTUnwrap(capabilities["responses"] as? [String: Any])
                 XCTAssertEqual(responses["available"] as? Bool, true)
                 XCTAssertEqual(responses["model"] as? String, "fixture-model")
@@ -157,7 +308,7 @@ final class HTTPServerLocalResponsesTests: XCTestCase {
     }
 
     func testClientDisconnectCancelsResponsesAndTokenUtilities() async throws {
-        for path in ["/v1/responses", "/v1/tokenize"] {
+        for path in ["/v1/responses", "/v1/messages", "/v1/tokenize"] {
             let runtime = LocalResponsesRuntime(awaitDisconnect: true)
             let status = ProviderStatus(modelID: "fixture-model", modelLoaded: true, capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: 1))
             try await withServer(runtime: runtime, providerStatus: status) { port in
@@ -166,9 +317,9 @@ final class HTTPServerLocalResponsesTests: XCTestCase {
                     // token utilities are always local.
                     try await self.post(port: port, path: path, headers: [
                         RouterHandler.requestOriginHeaderName: RouterHandler.localAppOriginValue,
-                    ], body: path == "/v1/responses"
+                    ], body: path == "/v1/messages" ? self.messagesBody() : (path == "/v1/responses"
                         ? ["model": "fixture-model", "input": "hello"]
-                        : ["model": "fixture-model", "text": "hello"])
+                        : ["model": "fixture-model", "text": "hello"]))
                 }
                 do {
                     try await self.waitUntil { await runtime.entered }
@@ -260,12 +411,14 @@ private actor LocalResponsesRuntime: ModelRuntimeServing {
     let failAfterChunk: Bool
     let tokenUtilitiesSupported: Bool
     let awaitDisconnect: Bool
+    let holdFirstRequestOnly: Bool
     private(set) var entered = false
     private(set) var cancelled = false
-    init(failAfterChunk: Bool = false, tokenUtilitiesSupported: Bool = true, awaitDisconnect: Bool = false) {
+    init(failAfterChunk: Bool = false, tokenUtilitiesSupported: Bool = true, awaitDisconnect: Bool = false, holdFirstRequestOnly: Bool = false) {
         self.failAfterChunk = failAfterChunk
         self.tokenUtilitiesSupported = tokenUtilitiesSupported
         self.awaitDisconnect = awaitDisconnect
+        self.holdFirstRequestOnly = holdFirstRequestOnly
     }
     func localResponsesCapabilities() async -> LocalResponsesCapabilities {
         .loaded(model: "fixture-model", modelHash: "fixture-hash", generation: 7,
@@ -282,7 +435,7 @@ private actor LocalResponsesRuntime: ModelRuntimeServing {
             tokens: request.operation == .detokenize ? nil : [11, 12], text: request.operation == .detokenize ? "hello" : nil)
     }
     private func waitForDisconnectIfNeeded(_ shouldCancel: @escaping @Sendable () -> Bool) async throws {
-        guard awaitDisconnect else { return }
+        guard awaitDisconnect, !holdFirstRequestOnly || calls == 1 else { return }
         entered = true
         do {
             while !shouldCancel() { try await Task.sleep(nanoseconds: 5_000_000) }
@@ -313,8 +466,9 @@ private actor LocalResponsesRuntime: ModelRuntimeServing {
     }
     func stream(_ request: ChatCompletionRequest, with handle: RequestHandle, shouldCancel: @escaping @Sendable () -> Bool, onChunk: @escaping @Sendable (StreamChunk) -> Void) async throws -> CompletionResult {
         calls += 1
+        if holdFirstRequestOnly { onChunk(.content("answer")) }
         try await waitForDisconnectIfNeeded(shouldCancel)
-        onChunk(.content("answer"))
+        if !holdFirstRequestOnly { onChunk(.content("answer")) }
         if failAfterChunk { throw APIError(status: 500, message: "Fixture failure", code: "fixture_failure") }
         return result()
     }
