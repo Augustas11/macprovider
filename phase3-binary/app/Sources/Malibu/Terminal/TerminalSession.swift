@@ -20,6 +20,13 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable {
     private var cleanupDirectory: URL?
     private static var active: [UUID: TerminalSession] = [:]
     private var closing = false
+    private(set) static var isTerminating = false
+
+    /// Test isolation only; production termination is irreversible.
+    static func resetTerminationForTesting() {
+        precondition(active.isEmpty)
+        isTerminating = false
+    }
 
     init(harness: TerminalHarness) { self.harness = harness; super.init() }
 
@@ -27,6 +34,10 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable {
     func start(executable: URL?, model: ConnectedModel?, loginPath: String? = nil,
                hasKey: () -> Bool = { ConnectedBuyerKeychain.exists() },
                readKey: () throws -> String = { try ConnectedBuyerKeychain.read() }) {
+        guard !Self.isTerminating else {
+            message = "Malibu is quitting. New terminal sessions cannot start."
+            return
+        }
         guard !started, !closing else { return }
         guard harness == .shell || hasKey() else {
             message = "Add a buyer key in Other apps"
@@ -108,6 +119,7 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable {
         guard !closing else { return }
         closing = true
         signalOwnedSession(SIGHUP)
+        terminalView?.process.closeIO()
         cleanup()
         Task { @MainActor in
             try? await Task.sleep(for: .seconds(3))
@@ -122,6 +134,7 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable {
     }
 
     static func terminateAll() async {
+        isTerminating = true
         let sessions = Array(active.values)
         for session in sessions { session.close() }
         // App termination must not discard owners before their final children die.

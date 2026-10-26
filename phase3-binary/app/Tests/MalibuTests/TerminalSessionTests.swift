@@ -5,6 +5,88 @@ import XCTest
 
 @MainActor
 final class TerminalSessionTests: XCTestCase {
+    override func tearDown() async throws {
+        await TerminalSession.terminateAll()
+        TerminalSession.resetTerminationForTesting()
+        try await super.tearDown()
+    }
+
+    func testQuitRejectsLaunchDuringSuspendedCleanup() async throws {
+        let view = EmbeddedProcessTerminalView(frame: .init(x: 0, y: 0, width: 640, height: 400))
+        view.startProcess(executable: "/bin/sh", args: ["-c", "trap '' HUP TERM; exec /bin/sleep 600"], environment: ["PATH=/usr/bin:/bin"])
+        let pid = view.process.shellPid
+        XCTAssertGreaterThan(pid, 1)
+        guard pid > 1 else { return }
+        defer { _ = kill(-pid, SIGKILL) }
+        try await Task.sleep(for: .milliseconds(150))
+        let owner = TerminalSession(harness: .shell)
+        owner.adoptTestProcessGroup(pid)
+        let quit = Task { await TerminalSession.terminateAll() }
+        while !TerminalSession.isTerminating { await Task.yield() }
+        XCTAssertEqual(kill(pid, 0), 0, "Quit cleanup must still be pending")
+        let late = TerminalSession(harness: .shell)
+        late.start(executable: URL(fileURLWithPath: "/bin/sleep"), model: nil)
+        XCTAssertFalse(late.started)
+        XCTAssertNil(late.terminalView)
+        XCTAssertTrue(late.message?.contains("quitting") == true)
+        await quit.value
+        XCTAssertEqual(kill(pid, 0), -1)
+        XCTAssertEqual(errno, ESRCH)
+    }
+
+    func testRepeatedNormalExitTabsReturnDescriptorCountToBaseline() async throws {
+        try await assertDescriptorsReturnToBaseline(forceClose: false)
+    }
+
+    func testRepeatedForcedCloseTabsReturnDescriptorCountToBaseline() async throws {
+        try await assertDescriptorsReturnToBaseline(forceClose: true)
+    }
+
+    private func openDescriptorCount() -> Int {
+        let bytes = proc_pidinfo(getpid(), PROC_PIDLISTFDS, 0, nil, 0)
+        var entries = [proc_fdinfo](repeating: proc_fdinfo(), count: Int(bytes) / MemoryLayout<proc_fdinfo>.stride + 32)
+        let count = proc_pidinfo(getpid(), PROC_PIDLISTFDS, 0, &entries, Int32(entries.count * MemoryLayout<proc_fdinfo>.stride))
+        return Int(count) / MemoryLayout<proc_fdinfo>.stride
+    }
+
+    private func assertDescriptorsReturnToBaseline(forceClose: Bool) async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let executable = folder.appendingPathComponent("test-shell")
+        try Data((forceClose ? "#!/bin/sh\nexec /bin/sleep 600\n" : "#!/bin/sh\nexit 0\n").utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
+        let tabs = TerminalTabs()
+        // Warm up lazy AppKit/Dispatch resources before recording the baseline.
+        for iteration in 0..<9 {
+            let baseline = openDescriptorCount()
+            let session = try XCTUnwrap(tabs.add(.shell))
+            session.start(executable: executable, model: nil)
+            XCTAssertTrue(session.started)
+            let view = try XCTUnwrap(session.terminalView)
+            if !forceClose {
+                for _ in 0..<200 {
+                    if !view.process.running && view.process.childfd == -1 { break }
+                    try await Task.sleep(for: .milliseconds(10))
+                }
+                XCTAssertFalse(view.process.running)
+                XCTAssertEqual(view.process.childfd, -1)
+                if iteration > 0 { XCTAssertEqual(openDescriptorCount(), baseline, "Normal exit leaked a descriptor") }
+            }
+            tabs.close(session)
+            // A repeated shutdown must never close an unrelated reused fd.
+            view.process.closeIO()
+            try await Task.sleep(for: .milliseconds(3200))
+            if iteration > 0 { XCTAssertEqual(openDescriptorCount(), baseline, "Tab \(iteration) leaked a descriptor") }
+            let sentinel = Darwin.open("/dev/null", O_RDONLY)
+            XCTAssertGreaterThanOrEqual(sentinel, 0)
+            view.process.closeIO()
+            try await Task.sleep(for: .milliseconds(20))
+            XCTAssertNotEqual(fcntl(sentinel, F_GETFD), -1, "Repeated shutdown closed a reused descriptor")
+            _ = Darwin.close(sentinel)
+        }
+    }
+
     func testHarnessDoesNotCreateProcessWithoutBuyerKey() {
         let session = TerminalSession(harness: .claudeCode)
         session.start(executable: URL(fileURLWithPath: "/bin/sleep"), model: nil, hasKey: { false }, readKey: {

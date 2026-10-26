@@ -8,6 +8,26 @@ import XCTest
 /// Does not run the provider CLI and does not attach to the live provider.
 @MainActor
 final class ModelScreensHostedTests: XCTestCase {
+    func testRecommendedEmptyRecoverySwitchesHubToBrowse() async throws {
+        let store = ModelManagementStore(
+            cli: ProjectionCLI(stdout: Self.projection(rows: [ShellScreensTests.catalogOnlyRowJSON(
+                key: "large", modelID: "vendor/large", fit: "does_not_fit")])),
+            makeBrowseCLI: { ProjectionCLI(stdout: "") }, paths: Self.paths(),
+            defaults: UserDefaults(suiteName: "RecommendedEmpty-\(UUID().uuidString)")!)
+        await store.refresh(currentModelID: nil, peer: Self.peer())
+        XCTAssertTrue(ModelsHubPresentation.rows(for: .recommended, rows: store.rows).isEmpty)
+        XCTAssertFalse(ModelsHubPresentation.rows(for: .browse, rows: store.rows).isEmpty)
+        XCTAssertTrue(DiscoverPresentation.emptyRecommended.contains("No recommended model fits"))
+        XCTAssertTrue(DiscoverPresentation.emptyRecommended.contains("Models › Browse"))
+        XCTAssertFalse(DiscoverPresentation.emptyRecommended.contains("Turn off"))
+        var selected = ModelsHubTab.recommended
+        let hub = ModelsHubScreen(store: store, agent: MalibuAgent(initialSnapshot: .empty),
+            selection: Binding(get: { selected }, set: { selected = $0 }))
+        let browse = try XCTUnwrap(hub.discovery.browseModels)
+        browse()
+        XCTAssertEqual(selected, .browse)
+    }
+
     func testPopulatedModelsAndDiscoverScreensRender() async throws {
         let rows = [
             ShellScreensTests.rowJSON(key: "llama-3.2-3b-instruct", isCurrent: true, estimatedGB: 1.8, completion: 0.08, demandRank: 9),

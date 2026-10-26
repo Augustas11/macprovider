@@ -26,6 +26,7 @@ enum DiscoverPresentation {
     }
 
     static let emptyCatalog = String(localized: "No signed catalog models are available right now. Models lists every row with the reason it can or can't be served.", comment: "Discover empty catalog")
+    static let emptyRecommended = String(localized: "No recommended model fits this Mac. Browse all catalog models in Models › Browse.", comment: "Recommended empty state")
     static let emptyFilter = String(localized: "No catalog model matches. Turn off \"Fits this Mac\" or clear the search to see more.", comment: "Discover empty after filter")
     static let otherMLXTitle = String(localized: "Other MLX models (not earnable)", comment: "Discover HF section title")
     static let otherMLXExplainer = String(localized: "Search results from Hugging Face mlx-community. These are not in the Malibu catalog: they carry no rate, earn nothing on the network, and can't be switched to from Malibu.", comment: "Discover HF section explainer")
@@ -190,6 +191,7 @@ struct DiscoverScreen: View {
     @State private var search = ""
     @State private var fitsOnly: Bool
     private let mode: ModelsHubTab
+    let browseModels: (() -> Void)?
     @State private var sort: DiscoverPresentation.Sort = .catalog
     @State private var selectedID: String?
     @State private var switchRow: MalibuModelRow?
@@ -197,10 +199,11 @@ struct DiscoverScreen: View {
     @State private var otherQuery = ""
     @State private var otherExpanded = false
 
-    init(store: ModelManagementStore, agent: MalibuAgent, mode: ModelsHubTab = .recommended) {
+    init(store: ModelManagementStore, agent: MalibuAgent, mode: ModelsHubTab = .recommended, browseModels: (() -> Void)? = nil) {
         self.store = store
         self.agent = agent
         self.mode = mode
+        self.browseModels = browseModels
         _fitsOnly = State(initialValue: mode == .recommended)
     }
 
@@ -306,10 +309,16 @@ struct DiscoverScreen: View {
                         .fixedSize(horizontal: false, vertical: true)
                         .padding(12)
                 } else if visible.isEmpty {
-                    Text(DiscoverPresentation.emptyFilter)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .padding(12)
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(mode == .recommended ? DiscoverPresentation.emptyRecommended : DiscoverPresentation.emptyFilter)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        if mode == .recommended, let browseModels {
+                            Button("Browse all models", action: browseModels)
+                                .accessibilityIdentifier("malibu.models.recommended.browse")
+                        }
+                    }
+                    .padding(12)
                 } else {
                     // SPEC-044-R004: visible in the same scroll container.
                     Text(ModelsPresentation.rateDisclosure)

@@ -2,13 +2,12 @@ import AppKit
 import Darwin
 import SwiftTerm
 
-/// SwiftTerm 1.2.5's LocalProcessTerminalView hides its process handle. Own the
-/// public LocalProcess directly so session cleanup can identity-check its PGID.
+/// Own the PTY channel and descriptor; SwiftTerm 1.2.5 LocalProcess cannot
+/// coordinate channel shutdown with closing its original master descriptor.
 @MainActor
-final class EmbeddedProcessTerminalView: TerminalView, @preconcurrency TerminalViewDelegate, @preconcurrency LocalProcessDelegate {
-    // SwiftTerm predates actor annotations. UI callbacks and LocalProcess's
-    // default dispatch queue both deliver these delegate calls on the main queue.
-    private(set) lazy var process = LocalProcess(delegate: self)
+final class EmbeddedProcessTerminalView: TerminalView, @preconcurrency TerminalViewDelegate {
+    // SwiftTerm predates actor annotations; terminal callbacks run on the main queue.
+    private(set) lazy var process = EmbeddedTerminalProcess(delegate: self)
     var onTermination: ((Int32?) -> Void)?
 
     override init(frame: NSRect) {
@@ -55,7 +54,7 @@ final class EmbeddedProcessTerminalView: TerminalView, @preconcurrency TerminalV
         _ = PseudoTerminalHelpers.setWinSize(masterPtyDescriptor: process.childfd, windowSize: &size)
     }
 
-    func processTerminated(_ source: LocalProcess, exitCode: Int32?) {
+    func processDidExit(exitCode: Int32?) {
         onTermination?(exitCode)
     }
 
@@ -68,5 +67,76 @@ final class EmbeddedProcessTerminalView: TerminalView, @preconcurrency TerminalV
         // SwiftTerm invokes this delegate for OSC 52 received from terminal
         // output. Only explicit user Copy may write the system pasteboard;
         // TerminalView.copy(_:) handles that selection action independently.
+    }
+}
+
+/// Use SwiftTerm's forkpty helper, but keep descriptor ownership in the IO
+/// cleanup handler. DispatchIO.close alone does not close a borrowed descriptor.
+@MainActor
+final class EmbeddedTerminalProcess {
+    private weak var delegate: EmbeddedProcessTerminalView?
+    private var channel: DispatchIO?
+    private var monitor: DispatchSourceProcess?
+    private(set) var childfd: Int32 = -1
+    private(set) var shellPid: pid_t = 0
+    private(set) var running = false
+
+    init(delegate: EmbeddedProcessTerminalView) { self.delegate = delegate }
+
+    func startProcess(executable: String, args: [String], environment: [String]) {
+        guard shellPid == 0 else { return }
+        var size = delegate?.getWindowSize() ?? winsize()
+        guard let (pid, descriptor) = PseudoTerminalHelpers.fork(andExec: executable,
+            args: [executable] + args, env: environment, desiredWindowSize: &size) else { return }
+        shellPid = pid
+        childfd = descriptor
+        running = true
+        let io = DispatchIO(type: .stream, fileDescriptor: descriptor, queue: .main) { _ in
+            // Runs only after all channel operations relinquish the descriptor.
+            // Capture the original master, never the mutable childfd sentinel.
+            _ = Darwin.close(descriptor)
+        }
+        channel = io
+        io.setLimit(lowWater: 1)
+        io.read(offset: 0, length: Int.max, queue: .main) { [weak self] done, data, error in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                if let data, !data.isEmpty { self.delegate?.dataReceived(slice: Array(data)[...]) }
+                if done || error != 0 { self.closeIO() }
+            }
+        }
+        let source = DispatchSource.makeProcessSource(identifier: pid, eventMask: .exit, queue: .main)
+        source.setEventHandler { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                var status: Int32 = 0
+                let result = waitpid(pid, &status, WNOHANG)
+                self.running = false
+                self.monitor?.cancel()
+                self.monitor = nil
+                // Let EOF drain buffered terminal output before closing IO.
+                self.delegate?.processDidExit(exitCode: result == pid ? status : nil)
+            }
+        }
+        monitor = source
+        source.resume()
+    }
+
+    func send(data: ArraySlice<UInt8>) {
+        guard running, let channel else { return }
+        let bytes = data.withUnsafeBytes { DispatchData(bytes: $0) }
+        channel.write(offset: 0, data: bytes, queue: .main) { _, _, _ in }
+    }
+
+    func closeIO() {
+        guard let channel else { return }
+        self.channel = nil
+        childfd = -1
+        channel.close(flags: .stop)
+    }
+
+    deinit {
+        channel?.close(flags: .stop)
+        monitor?.cancel()
     }
 }

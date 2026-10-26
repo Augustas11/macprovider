@@ -61,7 +61,7 @@ struct ModelsHubScreen: View {
             Divider()
             switch selection {
             case .recommended, .browse:
-                DiscoverScreen(store: store, agent: agent, mode: selection)
+                discovery
                     // Filters and selection belong to each discovery mode.
                     .id(selection)
             case .onThisMac:
@@ -71,6 +71,10 @@ struct ModelsHubScreen: View {
             }
         }
         .accessibilityIdentifier("malibu.models.hub")
+    }
+
+    var discovery: DiscoverScreen {
+        DiscoverScreen(store: store, agent: agent, mode: selection, browseModels: { selection = .browse })
     }
 
     private var downloads: some View {
