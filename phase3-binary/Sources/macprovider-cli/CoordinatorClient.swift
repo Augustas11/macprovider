@@ -514,7 +514,7 @@ actor CoordinatorClient {
     typealias InstalledCompatibilityManifest = @Sendable (URL, String) -> CompatibilitySetManifest?
     typealias ReloadHelperFence = @Sendable () throws -> Void
 
-    static let binaryVersion = "1.8.272"
+    static let binaryVersion = "1.8.274"
     private static let keepaliveDebugEnabled = ProcessInfo.processInfo.environment["MACPROVIDER_KEEPALIVE_DEBUG"] == "1"
     private static let admissionCanaryHeartbeatOverridePathEnv = "MACPROVIDER_CANARY_HEARTBEAT_OVERRIDE_PATH"
     private static let admissionCanaryCoordinatorHostEnv = "MACPROVIDER_CANARY_COORDINATOR_HOST"
@@ -1331,7 +1331,20 @@ actor CoordinatorClient {
         webSocket = nil
     }
 
+    private func resumeAfterLocalCreativeHold() async {
+        // unavailable -> ready is intentionally refused by the coordinator.
+        // Cross its authenticated registration boundary instead of publishing
+        // a ready transition that can never reopen buyer routing.
+        let paused = await providerStatus.operatorPauseFence
+        guard !operatorPaused, !paused, !stopped, !signalShutdownStarted,
+              coordinatorSessionAccepted else { return }
+        closeWebSocketAfterKeepaliveFailure()
+    }
+
     private func installRequestCapacityStateUpdateHandler() async {
+        await providerStatus.setCreativeHoldReleaseHandler { [weak self] in
+            await self?.resumeAfterLocalCreativeHold()
+        }
         requestCapacityTransitionGeneration &+= 1
         let generation = requestCapacityTransitionGeneration
         pendingRequestCapacityTransitions.removeAll()
@@ -1347,6 +1360,7 @@ actor CoordinatorClient {
     }
 
     private func clearRequestCapacityStateUpdateHandler() async {
+        await providerStatus.setCreativeHoldReleaseHandler(nil)
         requestCapacityTransitionGeneration &+= 1
         await providerStatus.setRequestCapacityChangeHandler(nil)
         pendingRequestCapacityTransitions.removeAll()

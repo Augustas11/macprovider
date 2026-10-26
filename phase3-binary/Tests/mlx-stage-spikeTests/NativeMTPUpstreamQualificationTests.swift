@@ -439,7 +439,11 @@ final class NativeMTPUpstreamQualificationTests: XCTestCase {
             "default.metallib",
             "mlx-swift_Cmlx.bundle/default.metallib",
         ]
-        let roots = [Bundle.main.resourceURL, Bundle.main.executableURL?.deletingLastPathComponent()]
+        // SwiftPM's main bundle may belong to swiftpm-testing-helper. The
+        // isolated XCTest bundle owns the MLX resources used by these fixtures.
+        let testBundle = Bundle(for: NativeMTPUpstreamQualificationTests.self)
+        let roots = [testBundle.resourceURL, testBundle.executableURL?.deletingLastPathComponent(),
+                     Bundle.main.resourceURL, Bundle.main.executableURL?.deletingLastPathComponent()]
         return roots.compactMap { $0 }.contains { root in
             relativeNames.contains { FileManager.default.fileExists(atPath: root.appendingPathComponent($0).path) }
         }
@@ -447,7 +451,8 @@ final class NativeMTPUpstreamQualificationTests: XCTestCase {
 
     private static func requireDefaultMetallib() throws {
         guard defaultMetallibExists() else {
-            throw XCTSkip("MLX default metallib is unavailable in this test host")
+            let testBundle = Bundle(for: NativeMTPUpstreamQualificationTests.self)
+            throw XCTSkip("MLX default metallib is unavailable; test bundle=\(testBundle.bundleURL.path), test resources=\(testBundle.resourceURL?.path ?? "nil"), test executable=\(testBundle.executableURL?.path ?? "nil"), main bundle=\(Bundle.main.bundleURL.path), main executable=\(Bundle.main.executableURL?.path ?? "nil")")
         }
     }
 

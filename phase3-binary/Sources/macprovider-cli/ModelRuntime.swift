@@ -1863,8 +1863,10 @@ actor ModelRuntime: ModelRuntimeServing {
         containsImage ? NativeVisionProfile.prefillStepSize : configured
     }
 
-    struct HarmonyTerminalPreservingTokenizer: MLXLMCommon.Tokenizer {
+    struct HarmonyTerminalPreservingTokenizer: MLXLMCommon.Tokenizer, ControlTokenAware {
         let base: any MLXLMCommon.Tokenizer
+
+        var controlTokens: ControlTokenTable? { ControlTokenTable.of(base) }
 
         var bosToken: String? { base.bosToken }
 
@@ -1917,6 +1919,22 @@ actor ModelRuntime: ModelRuntimeServing {
     // relay_serve_model_id_alias.
     private let catalogModelIDAlias: String?
     private var currentContainer: ModelContainer?
+    private var creativeRestoreTarget: String?
+    private struct CreativeServingState {
+        let nativeTupleSHA256: String?
+        let parkedOffer: NativeMTPPublishedTupleOffer?
+        let nativeStatus: NativeMTPStatusSink
+        let batchingActive: Bool
+        let selfCheck: ContinuousBatchingSelfCheckState
+        let selfCheckReport: ContinuousBatchingSelfCheckReport?
+        let servedSlots: Int
+        let attachDecision: PagedKVAttachDecision
+        let observedIdentity: PagedKVObservedRuntimeIdentity?
+        let sizingProof: PagedKVHardwareSizingProof?
+        let runtimeCacheClass: String
+        let modelCapabilities: PagedKVRuntimeModelCapabilities
+    }
+    private var creativeServingState: CreativeServingState?
     /// Keeps the loaded model's weights in MLX's residency sets; see
     /// `startResidentWeightsTicket(modelFamily:)`.
     private var residentWeightsTicket: WiredMemoryTicket?
@@ -1952,6 +1970,20 @@ actor ModelRuntime: ModelRuntimeServing {
     /// restore of the same tuple is refused meanwhile.
     private var nativeMTPRestoreInFlight = false
     #if DEBUG || MACPROVIDER_LAB_HARNESS
+    private var creativeNativeReloadForTest: (@Sendable () async throws -> NativeMTPRuntimeLoadResult)?
+    private var creativeNativeSelfCheckForTest: NativeMTPSelfTestReceipt?
+
+    func setCreativeNativeReloadForTest(
+        _ reload: @escaping @Sendable () async throws -> NativeMTPRuntimeLoadResult,
+        receipt: NativeMTPSelfTestReceipt
+    ) {
+        creativeNativeReloadForTest = reload
+        creativeNativeSelfCheckForTest = receipt
+    }
+
+    func creativeConversationCacheForTest() -> ConversationCache { conversationCache }
+    func creativeNativeDrafterArtifactForTest() -> String? { currentNativeMTPAdmissionCapability?.mtpArtifactSHA256 }
+
     private var nativeMTPTupleFenceHookForTest: (@Sendable () async -> Void)?
     private var nativeMTPTupleEnableHookForTest: (@Sendable () async -> Void)?
     #endif
@@ -3823,84 +3855,7 @@ maxTokens: 1,
         self.continuousBatchingDurableReplayAuthorityAvailable =
             self.continuousBatchScheduler != nil && self.continuousBatchReplayAuthority.durableAvailable
         if let nativeMTPLoad = candidateNativeMTPLoad {
-            let selfTestReceipt: NativeMTPSelfTestReceipt?
-            if let scheduler = self.continuousBatchScheduler {
-                do {
-                    // SPEC-048-R016 (v0.1.32): qualify native MTP on this Mac.
-                    // MTP-on greedy output must equal ordinary decode on the same
-                    // paged engine, and MTP must beat it by the R015 decode bar.
-                    // A pre-signed token digest from another runtime revision is
-                    // not the reference.
-                    var receipt: NativeMTPSelfTestReceipt?
-                    var mtpSeconds = Double.infinity
-                    for attempt in 0..<NativeMTPOnDeviceSelfCheck.repetitions {
-                        // Distinct request ids: a repeated id would replay the
-                        // scheduler's retained result instead of running.
-                        let start = Date()
-                        receipt = try await self.executeNativeMTPSelfTest(
-                            nativeMTPLoad.selfTestInput,
-                            scheduler: scheduler,
-                            capability: nativeMTPLoad.capability,
-                            servedSnapshotID: nativeMTPLoad.servedSnapshotID,
-                            attempt: attempt
-                        )
-                        mtpSeconds = min(mtpSeconds, Date().timeIntervalSince(start))
-                    }
-                    let ordinary = try await self.executeNativeMTPOrdinaryReference(
-                        nativeMTPLoad.selfTestInput,
-                        scheduler: scheduler
-                    )
-                    let verdict = NativeMTPOnDeviceSelfCheck.decide(
-                        mtpTokens: receipt?.generatedTokenIDs ?? [],
-                        mtpSeconds: mtpSeconds,
-                        ordinaryTokens: ordinary.tokens,
-                        ordinarySeconds: ordinary.seconds
-                    )
-                    FileHandle.standardError.write(Data(
-                        "event=native_mtp_self_check result=\(verdict.reason) speedup=\(String(format: "%.2f", verdict.speedup)) tokens=\(ordinary.tokens.count)\n".utf8
-                    ))
-                    if let receipt, verdict.passed, receipt.actualDecodePath == .nativeMTP, !receipt.fallbackUsed {
-                        selfTestReceipt = receipt
-                    } else {
-                        selfTestReceipt = Self.rejectNativeMTPSelfTest(reasonCode: "selftest_\(verdict.reason)")
-                    }
-                } catch {
-                    FileHandle.standardError.write(Data(
-                        "event=native_mtp_self_check result=execution_failed error=\(String(describing: error))\n".utf8
-                    ))
-                    selfTestReceipt = Self.rejectNativeMTPSelfTest(reasonCode: "selftest_execution_failed")
-                }
-            } else {
-                selfTestReceipt = Self.rejectNativeMTPSelfTest(reasonCode: "selftest_scheduler_unavailable")
-            }
-            if let receipt = selfTestReceipt {
-                self.currentNativeMTPCapability = nativeMTPLoad.capability
-                self.currentNativeMTPAdmissionCapability = nativeMTPLoad.admissionCapability
-                self.currentNativeMTPDrafterContainer = nativeMTPLoad.drafterContainer
-                self.currentNativeMTPSelfTestInput = nativeMTPLoad.selfTestInput
-                self.currentNativeMTPTupleOffer = Self.nativeMTPTupleOffer(
-                    load: nativeMTPLoad,
-                    receipt: receipt
-                )
-                startNativeMTPRevocationRefresh(load: nativeMTPLoad)
-                publishNativeMTPStatusSink(
-                    capability: nativeMTPLoad.capability,
-                    admissionCapability: nativeMTPLoad.admissionCapability,
-                    reasonIfDisabled: .tupleNotAdmitted
-                )
-            } else {
-                stopNativeMTPRevocationRefresh()
-                self.currentNativeMTPDrafterContainer = nil
-                self.currentNativeMTPAdmissionCapability = nil
-                self.currentNativeMTPCapability = nil
-                self.currentNativeMTPTupleOffer = nil
-                self.currentNativeMTPSelfTestInput = nil
-                publishNativeMTPStatusSink(
-                    capability: nil,
-                    admissionCapability: nil,
-                    reasonIfDisabled: .tupleNotAdmitted
-                )
-            }
+            await qualifyAndPublishNativeMTP(nativeMTPLoad)
         }
         self.currentContinuousBatchTextPreparationLane = await Self.makeContinuousBatchTextPreparationLane(
             container: container,
@@ -5101,13 +5056,283 @@ maxTokens: 1,
         return (capacity.maxContextTokens, capacity.maxContextSource)
     }
 
+    /// Drops all runtime owners after admission has been fenced and both local
+    /// and buyer rows have drained. Restoration reuses the verified swap loader.
+    func unloadForLocalCreativeHold() async throws {
+        guard state == .ready, inFlightCancellations.isEmpty,
+              preparedAdoptionReservationID == nil, let currentModelID else {
+            throw APIError(status: 409, message: "The language model is busy switching or draining.", code: "local_creative_hold_unavailable")
+        }
+        guard testLoader != nil || targetAuthority(for: currentModelID) != nil else {
+            throw ModelRuntimeLoadError(target: currentModelID, reason: "verified reload authority unavailable")
+        }
+        creativeRestoreTarget = currentModelID
+        // Copy in place: the scheduler continues writing to the live sink while
+        // it drains, and unloading must not mutate the saved fallback state.
+        let savedNativeStatus = NativeMTPStatusSink.disabled()
+        savedNativeStatus.adopt(currentNativeMTPStatusSink)
+        creativeServingState = CreativeServingState(
+            nativeTupleSHA256: currentNativeMTPTupleOffer?.nativeMTPAdmissionTupleSHA256
+                ?? parkedNativeMTPTuple?.offer.nativeMTPAdmissionTupleSHA256,
+            parkedOffer: parkedNativeMTPTuple?.offer,
+            nativeStatus: savedNativeStatus,
+            batchingActive: continuousBatchScheduler != nil,
+            selfCheck: continuousBatchingSelfCheck,
+            selfCheckReport: continuousBatchingSelfCheckReport,
+            servedSlots: servedSlotLimit,
+            attachDecision: pagedKVAttachDecision,
+            observedIdentity: pagedKVObservedRuntimeIdentity,
+            sizingProof: pagedKVHardwareSizingProof,
+            runtimeCacheClass: pagedKVRuntimeCacheClass,
+            modelCapabilities: currentPagedKVModelCapabilities
+        )
+        state = .draining
+        do {
+            if let scheduler = continuousBatchScheduler { _ = try await scheduler.drain() }
+        } catch {
+            state = .ready
+            creativeRestoreTarget = nil
+            creativeServingState = nil
+            await rebuildContinuousBatchScheduler(container: currentContainer)
+            throw error
+        }
+        let hadMLXModel = currentContainer != nil || currentDraftContainer != nil || currentNativeMTPDrafterContainer != nil
+        stopNativeMTPRevocationRefresh()
+        currentNativeMTPTupleOffer = nil
+        parkedNativeMTPTuple = nil
+        continuousBatchScheduler = nil
+        await conversationCache.purgeAllHot()
+        currentContinuousBatchTextPreparationLane = nil
+        currentNativeMTPSelfTestInput = nil
+        currentNativeMTPDrafterContainer = nil
+        currentNativeMTPCapability = nil
+        currentNativeMTPAdmissionCapability = nil
+        publishNativeMTPStatusSink(capability: nil, admissionCapability: nil)
+        currentDraftContainer = nil
+        currentContainer = nil
+        self.currentModelID = nil
+        currentDraftModelID = nil
+        currentDraftTargetModelID = nil
+        await providerStatus?.markLanguageUnloadedForCreativeHold()
+        if let ticket = residentWeightsTicket { residentWeightsTicket = nil; _ = await ticket.end() }
+        // Fixture runtimes own no MLX allocations and must not initialize a GPU.
+        if hadMLXModel { Memory.clearCache() }
+    }
+
+    func restoreAfterLocalCreativeHold() async throws {
+        guard let target = creativeRestoreTarget, let previous = creativeServingState else { return }
+        state = .ready
+        do {
+            if let expectedTuple = previous.nativeTupleSHA256 {
+                do {
+                    // Load the same signed target and drafter through the startup loader.
+                    // An ordinary swap explicitly tears native MTP down and is therefore
+                    // not a valid restoration of an admitted native provider.
+                    let load = try await loadCreativeNativeMTP(target: target, expectedTuple: expectedTuple)
+                    guard load.admissionCapability.tupleSHA256 == expectedTuple,
+                          load.admissionCapability.targetArtifactSHA256 == currentModelHash else {
+                        throw ModelRuntimeLoadError(target: target, reason: "native MTP restoration tuple changed")
+                    }
+                    try transitionToLoading(target: target)
+                    await completeSwapAtomically(
+                        container: load.targetContainer,
+                        modelID: target,
+                        modelHash: load.admissionCapability.targetArtifactSHA256,
+                        modelHashAlgorithm: ModelArtifactIdentity.snapshotManifestV1,
+                        weightsManifestSHA256: try? Self.modelWeightArtifactManifestHash(in: load.targetDirectory),
+                        tokenizerConfigSHA256: Self.tokenizerIdentityHashes(in: load.targetDirectory).config,
+                        chatTemplateSHA256: Self.tokenizerIdentityHashes(in: load.targetDirectory).template,
+                        nativeVisionProfile: nil,
+                        draftModelID: nil,
+                        draftContainer: nil,
+                        draftFailureReason: nil,
+                        modelCapabilities: load.modelCapabilities,
+                        adoptionKnobs: nil
+                    )
+                    restoreCreativeBatchingQualification(previous)
+                    currentNativeMTPDrafterContainer = load.drafterContainer
+                    currentNativeMTPAdmissionCapability = load.admissionCapability
+                    currentNativeMTPSelfTestInput = load.selfTestInput
+                    await rebuildContinuousBatchScheduler(container: load.targetContainer)
+                    await qualifyAndPublishNativeMTP(load)
+                    currentContinuousBatchTextPreparationLane = await Self.makeContinuousBatchTextPreparationLane(
+                        container: load.targetContainer, admissionCapability: currentNativeMTPAdmissionCapability,
+                        nativeVisionProfile: nil)
+                    if currentNativeMTPCapability == nil {
+                        // Startup fences a failed native self-check but keeps the
+                        // verified target available for ordinary batching.
+                        await rebuildContinuousBatchScheduler(container: currentContainer)
+                        if let parkedOffer = previous.parkedOffer {
+                            await nativeMTPParkedTupleDiscardHandler?(parkedOffer)
+                        }
+                    } else if let parkedOffer = previous.parkedOffer {
+                        // Reload the drafter under today's admission gates, but
+                        // retain the coordinator's original re-offer identity.
+                        // A creative hold must not promote a bank-mismatched tuple.
+                        let parked = ParkedNativeMTPTuple(
+                            offer: parkedOffer,
+                            capability: currentNativeMTPCapability,
+                            admissionCapability: currentNativeMTPAdmissionCapability,
+                            drafterContainer: currentNativeMTPDrafterContainer,
+                            selfTestInput: currentNativeMTPSelfTestInput,
+                            revocationRefresh: load.revocationSignerKeyID.flatMap { signer in
+                                load.revocationTrustedKeyring.map { keyring in
+                                    NativeMTPRevocationRefreshInputs(
+                                        signerKeyID: signer, trustedKeyring: keyring,
+                                        tupleSHA256: parkedOffer.nativeMTPAdmissionTupleSHA256,
+                                        servedSnapshotID: parkedOffer.servedSnapshotID,
+                                        targetGeneration: parkedOffer.targetGeneration)
+                                }
+                            },
+                            specDecodeGeneration: currentSpecDecodeGeneration)
+                        if let offer = currentNativeMTPTupleOffer {
+                            await disableNativeMTPTuple(
+                                admissionTupleSHA256: offer.nativeMTPAdmissionTupleSHA256,
+                                servedSnapshotID: offer.servedSnapshotID,
+                                targetGeneration: offer.targetGeneration, reason: .tupleNotAdmitted)
+                        }
+                        await continuousBatchScheduler?.disableNativeMTPTuple(NativeMTPTupleFence(
+                            admissionTupleSHA256: parkedOffer.nativeMTPAdmissionTupleSHA256,
+                            servedSnapshotID: parkedOffer.servedSnapshotID,
+                            targetGeneration: parkedOffer.targetGeneration))
+                        parkedNativeMTPTuple = parked
+                        if let refresh = parked.revocationRefresh { startNativeMTPRevocationRefresh(refresh) }
+                        currentNativeMTPStatusSink.adopt(previous.nativeStatus)
+                    } else {
+                        currentNativeMTPStatusSink.adopt(previous.nativeStatus)
+                    }
+                } catch {
+                    // Native admission can change during image residency. Its
+                    // refusal must never prevent the independently verified base
+                    // weights from returning through the ordinary reload path.
+                    state = .ready
+                    let reload = try await beginSwap(targetModelID: target, creativeRestore: true)
+                    try await reload.value
+                    restoreCreativeBatchingQualification(previous)
+                    await rebuildContinuousBatchScheduler(container: currentContainer)
+                    publishNativeMTPStatusSink(capability: nil, admissionCapability: nil,
+                        reasonIfDisabled: .tupleNotAdmitted)
+                    if let parkedOffer = previous.parkedOffer {
+                        await nativeMTPParkedTupleDiscardHandler?(parkedOffer)
+                    }
+                }
+            } else {
+                let reload = try await beginSwap(targetModelID: target, creativeRestore: true)
+                try await reload.value
+                restoreCreativeBatchingQualification(previous)
+                await rebuildContinuousBatchScheduler(container: currentContainer)
+                currentNativeMTPStatusSink.adopt(previous.nativeStatus)
+            }
+            guard isLoaded, currentModelID == target,
+                  !previous.batchingActive || continuousBatchScheduler != nil else {
+                throw ModelRuntimeLoadError(target: target, reason: "language model serving state restoration failed")
+            }
+            // The artifact and knobs are unchanged. Preserve the prior batching
+            // qualification and row grant instead of resetting a working provider.
+            continuousBatchingSelfCheck = previous.selfCheck
+            continuousBatchingSelfCheckReport = previous.selfCheckReport
+            servedSlotLimit = previous.servedSlots
+            await inferenceGate.resize(to: previous.servedSlots, stamp: selfCheckGeneration)
+            await continuousBatchScheduler?.setBuyerRowLimit(previous.servedSlots)
+            await providerStatus?.updateServedSlots(previous.servedSlots, stamp: selfCheckGeneration)
+            creativeRestoreTarget = nil
+            creativeServingState = nil
+        } catch {
+            await discardCreativePartialReload()
+            throw error
+        }
+    }
+
+    private func discardCreativePartialReload() async {
+        stopNativeMTPRevocationRefresh()
+        currentNativeMTPTupleOffer = nil
+        parkedNativeMTPTuple = nil
+        continuousBatchScheduler = nil
+        currentContinuousBatchTextPreparationLane = nil
+        currentNativeMTPSelfTestInput = nil
+        currentNativeMTPDrafterContainer = nil
+        currentNativeMTPCapability = nil
+        currentNativeMTPAdmissionCapability = nil
+        publishNativeMTPStatusSink(capability: nil, admissionCapability: nil)
+        currentDraftContainer = nil
+        currentContainer = nil
+        currentModelID = nil
+        currentDraftModelID = nil
+        currentDraftTargetModelID = nil
+        await conversationCache.purgeAllHot()
+        if let ticket = residentWeightsTicket { residentWeightsTicket = nil; _ = await ticket.end() }
+        await providerStatus?.markLanguageUnloadedForCreativeHold()
+        state = .ready
+        targetModelID = nil
+    }
+
+
+    private func loadCreativeNativeMTP(target: String, expectedTuple: String) async throws -> NativeMTPRuntimeLoadResult {
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        if let reload = creativeNativeReloadForTest { return try await reload() }
+        #endif
+        guard let authority = targetAuthority(for: target),
+              let directory = try? Self.localModelDirectory(for: authority.modelArgument),
+              let load = await Self.loadNativeMTPDrafterIfAdmitted(
+                mode: nativeMTPMode,
+                targetModelID: target,
+                targetModelRevision: authority.artifactSHA256,
+                targetDirectory: directory,
+                maxContextTokens: maxContextTokens,
+                kvBitsOverride: kvBitsOverride,
+                prefillStepSize: prefillStepSize,
+                slotCount: maxBatch,
+                sidecarPath: configuredNativeMTPAdmissionSidecarPath,
+                artifactRoot: configuredNativeMTPAdmissionArtifactRoot,
+                signaturePath: configuredNativeMTPAdmissionSignaturePath,
+                trustedKeyring: configuredNativeMTPTrustedKeyring,
+                runningBuildIdentity: configuredNativeMTPRunningBuildIdentity,
+                revokedTupleSHA256: configuredNativeMTPRevokedTupleSHA256,
+                resolvedArtifactAuthority: configuredNativeMTPResolvedArtifactAuthority,
+                targetGeneration: UInt64(max(1, currentSpecDecodeGeneration + 1)),
+                selfTestRunner: nativeMTPSelfTestRunner
+              ), load.admissionCapability.tupleSHA256 == expectedTuple else {
+            throw ModelRuntimeLoadError(target: target, reason: "native MTP restoration admission failed")
+        }
+        try Self.verifyLoadedArtifact(directory: load.targetDirectory, expectedSHA256: authority.artifactSHA256)
+        return load
+    }
+
+    private func restoreCreativeBatchingQualification(_ previous: CreativeServingState) {
+        // These proofs remain bound to the exact same signed artifact, runtime,
+        // hardware and serving knobs; the hold is not a new qualification.
+        pagedKVAttachDecision = previous.attachDecision
+        pagedKVObservedRuntimeIdentity = previous.observedIdentity
+        pagedKVHardwareSizingProof = previous.sizingProof
+        pagedKVRuntimeCacheClass = previous.runtimeCacheClass
+        currentPagedKVModelCapabilities = previous.modelCapabilities
+        pagedKVSchedulerBackendInstalled = previous.batchingActive
+        continuousBatchingSelfCheck = previous.selfCheck
+        continuousBatchingSelfCheckReport = previous.selfCheckReport
+    }
+
+    /// Exhausted creative retries relinquish ownership to ordinary model recovery.
+    /// The unloaded provider stays unavailable, but model switching is no longer
+    /// fenced by a creative operation that has already ended.
+    func abandonLocalCreativeHold() async {
+        if creativeRestoreTarget != nil { await discardCreativePartialReload() }
+        creativeRestoreTarget = nil
+        creativeServingState = nil
+        state = .ready
+        targetModelID = nil
+    }
+
     func beginSwap(
         targetModelID: String,
         adoptionKnobs: ModelRuntimeAdoptionServeKnobs? = nil,
         adoptionTransactionID: String? = nil,
-        now: Date = Date()
+        now: Date = Date(),
+        creativeRestore: Bool = false
     ) async throws -> Task<Void, Error> {
-        guard warmSwapEnabled else { throw WarmSwapDisabledError() }
+        guard creativeRestoreTarget == nil || creativeRestore else {
+            throw APIError(status: 409, message: "A local creative hold owns the language model.", code: "local_creative_hold")
+        }
+        guard warmSwapEnabled || creativeRestore else { throw WarmSwapDisabledError() }
         pruneAdoptionTransactions(now: now)
         if let reservationID = preparedAdoptionReservationID {
             guard reservationID == adoptionTransactionID else {
@@ -6132,6 +6357,96 @@ maxTokens: 1,
         }
     }
 
+    /// Startup and creative restoration share the same on-device admission gate.
+    private func qualifyAndPublishNativeMTP(_ nativeMTPLoad: NativeMTPRuntimeLoadResult) async {
+        let selfTestReceipt: NativeMTPSelfTestReceipt?
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        let injectedReceipt = creativeRestoreTarget == nil ? nil : creativeNativeSelfCheckForTest
+        #else
+        let injectedReceipt: NativeMTPSelfTestReceipt? = nil
+        #endif
+        if let injectedReceipt {
+            selfTestReceipt = injectedReceipt.actualDecodePath == .nativeMTP && !injectedReceipt.fallbackUsed
+                ? injectedReceipt : nil
+        } else if let scheduler = self.continuousBatchScheduler {
+            do {
+                // SPEC-048-R016 (v0.1.32): qualify native MTP on this Mac.
+                // MTP-on greedy output must equal ordinary decode on the same
+                // paged engine, and MTP must beat it by the R015 decode bar.
+                // A pre-signed token digest from another runtime revision is
+                // not the reference.
+                var receipt: NativeMTPSelfTestReceipt?
+                var mtpSeconds = Double.infinity
+                for attempt in 0..<NativeMTPOnDeviceSelfCheck.repetitions {
+                    // Distinct request ids: a repeated id would replay the
+                    // scheduler's retained result instead of running.
+                    let start = Date()
+                    receipt = try await self.executeNativeMTPSelfTest(
+                        nativeMTPLoad.selfTestInput,
+                        scheduler: scheduler,
+                        capability: nativeMTPLoad.capability,
+                        servedSnapshotID: nativeMTPLoad.servedSnapshotID,
+                        attempt: attempt
+                    )
+                    mtpSeconds = min(mtpSeconds, Date().timeIntervalSince(start))
+                }
+                let ordinary = try await self.executeNativeMTPOrdinaryReference(
+                    nativeMTPLoad.selfTestInput,
+                    scheduler: scheduler
+                )
+                let verdict = NativeMTPOnDeviceSelfCheck.decide(
+                    mtpTokens: receipt?.generatedTokenIDs ?? [],
+                    mtpSeconds: mtpSeconds,
+                    ordinaryTokens: ordinary.tokens,
+                    ordinarySeconds: ordinary.seconds
+                )
+                FileHandle.standardError.write(Data(
+                    "event=native_mtp_self_check result=\(verdict.reason) speedup=\(String(format: "%.2f", verdict.speedup)) tokens=\(ordinary.tokens.count)\n".utf8
+                ))
+                if let receipt, verdict.passed, receipt.actualDecodePath == .nativeMTP, !receipt.fallbackUsed {
+                    selfTestReceipt = receipt
+                } else {
+                    selfTestReceipt = Self.rejectNativeMTPSelfTest(reasonCode: "selftest_\(verdict.reason)")
+                }
+            } catch {
+                FileHandle.standardError.write(Data(
+                    "event=native_mtp_self_check result=execution_failed error=\(String(describing: error))\n".utf8
+                ))
+                selfTestReceipt = Self.rejectNativeMTPSelfTest(reasonCode: "selftest_execution_failed")
+            }
+        } else {
+            selfTestReceipt = Self.rejectNativeMTPSelfTest(reasonCode: "selftest_scheduler_unavailable")
+        }
+        if let receipt = selfTestReceipt {
+            self.currentNativeMTPCapability = nativeMTPLoad.capability
+            self.currentNativeMTPAdmissionCapability = nativeMTPLoad.admissionCapability
+            self.currentNativeMTPDrafterContainer = nativeMTPLoad.drafterContainer
+            self.currentNativeMTPSelfTestInput = nativeMTPLoad.selfTestInput
+            self.currentNativeMTPTupleOffer = Self.nativeMTPTupleOffer(
+                load: nativeMTPLoad,
+                receipt: receipt
+            )
+            startNativeMTPRevocationRefresh(load: nativeMTPLoad)
+            publishNativeMTPStatusSink(
+                capability: nativeMTPLoad.capability,
+                admissionCapability: nativeMTPLoad.admissionCapability,
+                reasonIfDisabled: .tupleNotAdmitted
+            )
+        } else {
+            stopNativeMTPRevocationRefresh()
+            self.currentNativeMTPDrafterContainer = nil
+            self.currentNativeMTPAdmissionCapability = nil
+            self.currentNativeMTPCapability = nil
+            self.currentNativeMTPTupleOffer = nil
+            self.currentNativeMTPSelfTestInput = nil
+            publishNativeMTPStatusSink(
+                capability: nil,
+                admissionCapability: nil,
+                reasonIfDisabled: .tupleNotAdmitted
+            )
+        }
+    }
+
     private func rebuildContinuousBatchScheduler(container: ModelContainer?) async {
         publishNativeMTPStatusSink(
             capability: currentNativeMTPCapability,
@@ -6879,7 +7194,7 @@ maxTokens: 1,
                             throw LocalTokenUtilityRequest.invalid("Token ID is outside the loaded tokenizer vocabulary")
                         }
                         tokens = nil
-                        text = context.tokenizer.decode(tokenIds: ids, skipSpecialTokens: false)
+                        text = ControlTextShield.strip(context.tokenizer.decode(tokenIds: ids, skipSpecialTokens: false))
                     case .applyTemplate:
                         let messages: [[String: any Sendable]] = request.messages!.map { message in
                             ["role": message["role"]!, "content": message["content"]!]
@@ -6892,7 +7207,7 @@ maxTokens: 1,
                             throw APIError(status: 422, message: "Loaded tokenizer cannot apply this chat template", code: "chat_template_unsupported")
                         }
                         guard tokens!.count <= LocalTokenUtilityRequest.tokenLimit else { throw LocalTokenUtilityRequest.limitError() }
-                        text = context.tokenizer.decode(tokenIds: tokens!, skipSpecialTokens: false)
+                        text = ControlTextShield.strip(context.tokenizer.decode(tokenIds: tokens!, skipSpecialTokens: false))
                     }
                     guard (tokens?.count ?? 0) <= LocalTokenUtilityRequest.tokenLimit,
                           (text?.utf8.count ?? 0) <= LocalTokenUtilityRequest.outputByteLimit else {
@@ -7128,10 +7443,27 @@ maxTokens: 1,
 
         init(tokenizer: any MLXLMCommon.Tokenizer) {
             let cleanupProbe = tokenizer.encode(text: " .", addSpecialTokens: false)
+            let cleanUp = tokenizer.decode(tokenIds: cleanupProbe) == "."
+            let tokenPiece = tokenizer.convertIdToToken
+            // SPEC-018 §3.14: per-token text marks control text written with
+            // ordinary tokens, as the whole-sequence decode does.
+            let control = ControlTokenTable.of(tokenizer)
             self.init(
                 decode: { tokenizer.decode(tokenIds: $0) },
-                tokenPiece: tokenizer.convertIdToToken,
-                cleanUpTokenizationSpaces: tokenizer.decode(tokenIds: cleanupProbe) == "."
+                makeIncremental: {
+                    let box = ByteLevelIncrementalTextDecoderBox(
+                        tokenPiece: tokenPiece,
+                        cleanUpTokenizationSpaces: cleanUp
+                    )
+                    guard let control, !control.matcher.isEmpty else {
+                        return IncrementalTextDecoder(appendToken: box.append)
+                    }
+                    let shield = ControlTextIncrementalShield(control: control)
+                    return IncrementalTextDecoder(appendToken: { token in
+                        shield.shielded(token: token, fullText: box.append(token))
+                    })
+                },
+                cleanUpTokenizationSpaces: cleanUp
             )
         }
     }
@@ -8933,6 +9265,16 @@ maxTokens: boundedMaxTokens,
         with handle: RequestHandle,
         shouldCancel: @escaping @Sendable () -> Bool = { false }
     ) async throws -> (CompletionResult, RuntimeSnapshot) {
+        // SPEC-018 §3.14: control-text marks never leave the runtime.
+        let (completion, snapshot) = try await completeWithServedSnapshotMarked(request, with: handle, shouldCancel: shouldCancel)
+        return (completion.strippingControlTextMarks(), snapshot)
+    }
+
+    private func completeWithServedSnapshotMarked(
+        _ request: ChatCompletionRequest,
+        with handle: RequestHandle,
+        shouldCancel: @escaping @Sendable () -> Bool
+    ) async throws -> (CompletionResult, RuntimeSnapshot) {
         try ToolSelectionPolicy.validateRequest(request, loadedModelID: toolSelectionModelID(handle.snapshot), runtime: "mlx_cache")
         _ = try Self.validateNativeVisionRequest(request, profile: handle.snapshot.nativeVisionProfile)
         // SPEC-025 §5.2 model-liveness: mark active buyer inference so a stalled
@@ -9716,6 +10058,18 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
         _ request: ChatCompletionRequest,
         with handle: RequestHandle,
         shouldCancel: @escaping @Sendable () -> Bool = { false },
+        onChunk: @escaping @Sendable (StreamChunk) -> Void
+    ) async throws -> CompletionResult {
+        // SPEC-018 §3.14: control-text marks never leave the runtime.
+        try await streamMarked(request, with: handle, shouldCancel: shouldCancel) { chunk in
+            onChunk(chunk.strippingControlTextMarks())
+        }.strippingControlTextMarks()
+    }
+
+    private func streamMarked(
+        _ request: ChatCompletionRequest,
+        with handle: RequestHandle,
+        shouldCancel: @escaping @Sendable () -> Bool,
         onChunk: @escaping @Sendable (StreamChunk) -> Void
     ) async throws -> CompletionResult {
         guard Self.requiresStructuredValidation(request.responseFormat) else {
@@ -11189,7 +11543,7 @@ maxTokens: maxTokens,
         let cdHash: String
     }
 
-    private struct NativeMTPRuntimeLoadResult {
+    struct NativeMTPRuntimeLoadResult: Sendable {
         let targetContainer: ModelContainer
         let targetDirectory: URL
         let drafterContainer: MTPDrafterContainer
@@ -11233,7 +11587,7 @@ maxTokens: maxTokens,
         }
     }
 
-    private static func nativeMTPTupleOffer(
+    static func nativeMTPTupleOffer(
         load: NativeMTPRuntimeLoadResult,
         receipt: NativeMTPSelfTestReceipt
     ) -> NativeMTPPublishedTupleOffer {
@@ -12803,7 +13157,7 @@ maxTokens: maxTokens,
         stopTokenFilter: StopTokenFilter,
         requestStops: [String]
     ) -> (text: String, hitStop: Bool) {
-        let stripped = stopTokenFilter.stripping(from: text)
+        let stripped = stopTokenFilter.stripping(from: text, joiner: ControlTextShield.markString)
         var earliestStop: String.Index?
         for stop in requestStops where !stop.isEmpty {
             if let range = stripped.range(of: stop) {
@@ -13748,14 +14102,18 @@ maxTokens: maxTokens,
                     throw ToolSelectionPolicy.outputError("Unsupported tool output grammar")
                 }
                 let automaton = try language.compile()
-                guard let terminal = automaton.transition(state: 0, bytes: Array(raw.trimmingCharacters(in: .whitespacesAndNewlines).utf8)),
+                // SPEC-018 §3.14: the envelope automaton checks values as the
+                // buyer receives them; structure is still parsed below from
+                // the marked text, where ordinary-token markers stay literal.
+                let unmarked = ControlTextShield.strip(raw)
+                guard let terminal = automaton.transition(state: 0, bytes: Array(unmarked.trimmingCharacters(in: .whitespacesAndNewlines).utf8)),
                       automaton.accepting(state: terminal) else {
                     throw ToolSelectionPolicy.outputError("Tool output requires a complete native envelope")
                 }
             }
             let calls = try ToolCallParser.parseGuaranteedToolCalls(
                 raw, grammar: grammar, modelID: request.model, schemas: try ToolSelectionPolicy.schemas(request)
-            )
+            ).map { $0.strippingControlTextMarks() }
             return (calls.isEmpty ? text : "", calls)
         }
         guard let allowedFunctionNames = toolFunctionNames(from: request.promptSource.tools) else {
@@ -14141,6 +14499,9 @@ maxTokens: maxTokens,
     }
 
     static func validateStructuredCompletion(_ completion: CompletionResult, request: ChatCompletionRequest) throws -> CompletionResult {
+        // SPEC-018 §3.14: structure is parsed; values are validated exactly
+        // as the buyer receives them.
+        let completion = completion.strippingControlTextMarks()
         let validationCalls = (completion.toolCalls ?? []).map {
             MacProviderCore.ToolCall(id: $0.id, functionName: $0.functionName, arguments: $0.arguments)
         }
@@ -14267,6 +14628,8 @@ maxTokens: maxTokens,
         request: ChatCompletionRequest,
         buyerVisibleContent: String
     ) throws -> CompletionResult {
+        let completion = completion.strippingControlTextMarks()
+        let buyerVisibleContent = ControlTextShield.strip(buyerVisibleContent)
         guard requiresStructuredValidation(request.responseFormat), completion.toolCalls?.isEmpty != false else {
             return completion
         }

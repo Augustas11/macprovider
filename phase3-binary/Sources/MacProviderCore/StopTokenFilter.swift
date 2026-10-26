@@ -14,9 +14,29 @@ public struct StopTokenFilter: Sendable {
     }
 
     public func stripping(from text: String) -> String {
+        stripping(from: text, joiner: "")
+    }
+
+    /// Removes the stop tokens' text. Where a removal joins text on both
+    /// sides, `joiner` goes between them, so two fragments around a removed
+    /// token never read as one marker; removals at either end leave nothing.
+    public func stripping(from text: String, joiner: String) -> String {
         var output = text
         for token in tokens {
-            output = output.replacingOccurrences(of: token, with: "")
+            guard output.contains(token) else { continue }
+            if joiner.isEmpty {
+                output = output.replacingOccurrences(of: token, with: "")
+                continue
+            }
+            let parts = output.components(separatedBy: token)
+            var joined = ""
+            for (index, part) in parts.enumerated() {
+                if index > 0, !joined.isEmpty, parts[index...].contains(where: { !$0.isEmpty }) {
+                    joined += joiner
+                }
+                joined += part
+            }
+            output = joined
         }
         return output
     }

@@ -76,6 +76,20 @@ let package = Package(
     ],
     targets: [
         .target(
+            name: "MacProviderImageGen",
+            dependencies: [
+                // Reuse the pinned fork's MLX/MLXNN dependency graph.
+                .product(name: "MLXLMCommon", package: "mlx-swift-lm")
+            ],
+            path: "Sources/MacProviderImageGen",
+            exclude: ["LICENSE", "README.md"]
+        ),
+        .testTarget(
+            name: "MacProviderImageGenTests",
+            dependencies: ["MacProviderImageGen"],
+            path: "Tests/MacProviderImageGenTests"
+        ),
+        .target(
             name: "MacProviderCore",
             dependencies: [
                 .product(name: "Yams", package: "Yams")
@@ -89,6 +103,7 @@ let package = Package(
             name: "macprovider-cli",
             dependencies: [
                 "MacProviderCore",
+                "MacProviderImageGen",
                 .product(name: "MLXLLM", package: "mlx-swift-lm"),
                 .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
                 .product(name: "MLXHuggingFace", package: "mlx-swift-lm"),

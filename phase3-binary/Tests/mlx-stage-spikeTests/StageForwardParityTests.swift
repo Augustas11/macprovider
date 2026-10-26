@@ -68,7 +68,9 @@ func resolveLlamaModelDir() -> URL? {
         !envPath.isEmpty
     {
         let url = URL(fileURLWithPath: envPath)
-        if FileManager.default.fileExists(atPath: url.path) { return url }
+        // An explicit path is authoritative. A missing fixture must never
+        // silently fall back to models owned by a live provider on this host.
+        return FileManager.default.fileExists(atPath: url.path) ? url : nil
     }
     for candidate in [
         "mlx-community/Llama-3.2-3B-Instruct-4bit",

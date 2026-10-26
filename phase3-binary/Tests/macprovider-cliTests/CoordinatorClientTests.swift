@@ -467,6 +467,150 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertEqual(capExceeded.reasonCode, "autotune_model_cap_exceeded")
     }
 
+    func testCreativeHoldReleaseReauthenticatesAcceptedCoordinatorSession() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let status = ProviderStatus(modelID: "model-a", modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1))
+        let client = try await makeClient(status: status, recorder: recorder)
+        let socket = FakeProviderWebSocketTask(receiveResults: [])
+        await client.setWebSocketForTest(socket)
+        try await client.handleCoordinatorPayloadForTest([
+            "type": "hello_ack", "assigned_id": "creative-session", "heartbeat_interval_s": 30,
+        ])
+        // Install the same handler installed by an accepted production session.
+        await client.reinstallRequestCapacityStateUpdateHandlerForTest()
+        await status.setLocalCreativeHold(true)
+        try await client.sendHeartbeatForTest()
+        let held = await recorder.frames.last { $0["type"] as? String == "heartbeat" }
+        XCTAssertEqual(held?["status"] as? String, "unavailable")
+        await status.setLocalCreativeHold(false)
+        XCTAssertEqual(socket.cancelCount, 1, "A fresh authenticated registration must reopen routing")
+        let admission = await status.beginRequestIfAccepting()
+        XCTAssertNotNil(admission)
+        if let admission { await status.finishRequest(startedAt: admission, completion: nil, failed: false) }
+        // The reconnect registration advertises the restored model as ready.
+        let replacement = FakeProviderWebSocketTask(receiveResults: [])
+        await client.setWebSocketForTest(replacement)
+        try await client.handleCoordinatorPayloadForTest([
+            "type": "hello_ack", "assigned_id": "creative-reconnected", "heartbeat_interval_s": 30,
+        ])
+        try await client.sendHeartbeatForTest()
+        let restored = await recorder.frames.last { $0["type"] as? String == "heartbeat" }
+        XCTAssertEqual(restored?["status"] as? String, "ready")
+        // A replayed release does not bounce the newly registered session.
+        await status.setLocalCreativeHold(false)
+        XCTAssertEqual(replacement.cancelCount, 0)
+        await client.stop()
+    }
+
+    func testDelayedCreativeRestorationReauthenticatesUnavailableReplacement() async throws {
+        try await assertDelayedCreativeRestoration(operatorPaused: false)
+    }
+
+    func testDelayedCreativeRestorationPreservesOperatorPause() async throws {
+        try await assertDelayedCreativeRestoration(operatorPaused: true)
+    }
+
+    private func assertDelayedCreativeRestoration(operatorPaused: Bool) async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let reloads = DelayedCreativeReloads()
+        let status = ProviderStatus(modelID: "fixture", modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1))
+        let runtime = ModelRuntime(modelID: "fixture", warmSwapEnabled: false,
+            loader: { _ in throw CocoaError(.fileReadUnknown) },
+            testLoader: { try await reloads.load($0) },
+            testCompletion: { _, _ in throw CocoaError(.fileReadUnknown) })
+        await runtime.setProviderStatus(status)
+        let client = try await makeClient(status: status, recorder: recorder)
+        let initial = FakeProviderWebSocketTask(receiveResults: [])
+        await client.setWebSocketForTest(initial)
+        try await client.handleCoordinatorPayloadForTest([
+            "type": "hello_ack", "assigned_id": "creative-initial", "heartbeat_interval_s": 30,
+        ])
+        await client.reinstallRequestCapacityStateUpdateHandlerForTest()
+        let images = LocalImageGeneration(backend: DelayedCreativeFailingBackend(),
+            lifecycle: LocalCreativeLifecycle(
+                pause: { await status.setLocalCreativeHold(true) }, drain: {},
+                unloadLanguage: { try await runtime.unloadForLocalCreativeHold() },
+                restoreLanguage: { try await runtime.restoreAfterLocalCreativeHold() },
+                resume: { await status.setLocalCreativeHold(false) },
+                languageRestoredAfterRelease: { await status.localCreativeLanguageRestoredAfterRelease() }),
+            physicalBytes: 16 * 1_073_741_824, availableBytes: { 0 },
+            recoveryNanoseconds: 20_000_000)
+        let request = try JSONDecoder().decode(LocalImageRequest.self, from: Data(#"{"prompt":"sea"}"#.utf8))
+        do { _ = try await images.generate(request); XCTFail("Expected image backend failure") } catch {}
+        let exhaustedState = await images.state
+        let loadedBeforeRecovery = await runtime.isLoaded
+        XCTAssertEqual(exhaustedState, .recoveryRequired)
+        XCTAssertFalse(loadedBeforeRecovery)
+        XCTAssertEqual(initial.cancelCount, 1)
+
+        let replacement = FakeProviderWebSocketTask(receiveResults: [])
+        await client.setWebSocketForTest(replacement)
+        try await client.handleCoordinatorPayloadForTest([
+            "type": "hello_ack", "assigned_id": "creative-unavailable", "heartbeat_interval_s": 30,
+        ])
+        await client.reinstallRequestCapacityStateUpdateHandlerForTest()
+        try await client.sendHeartbeatForTest()
+        let unavailable = await recorder.frames.last { $0["type"] as? String == "heartbeat" }
+        XCTAssertEqual(unavailable?["status"] as? String, "unavailable",
+            "An unloaded replacement session must never advertise ready")
+        if operatorPaused { _ = await client.pauseByOperator() }
+        let cancellationsBeforeRecovery = replacement.cancelCount
+        await reloads.allowRestoration()
+        for _ in 0..<400 {
+            if await images.state == .idle { break }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        let recoveredState = await images.state
+        let loaded = await runtime.isLoaded
+        let paused = await status.operatorPauseFence
+        XCTAssertEqual(recoveredState, .idle)
+        XCTAssertTrue(loaded)
+        XCTAssertEqual(paused, operatorPaused)
+        XCTAssertEqual(replacement.cancelCount, cancellationsBeforeRecovery + (operatorPaused ? 0 : 1),
+            "Delayed recovery must request fresh authentication unless the operator is paused")
+        let recovered = await status.snapshot()
+        XCTAssertEqual(recovered.status, operatorPaused ? .unavailable : .ready)
+        if !operatorPaused {
+            let readySession = FakeProviderWebSocketTask(receiveResults: [])
+            await client.setWebSocketForTest(readySession)
+            try await client.handleCoordinatorPayloadForTest([
+                "type": "hello_ack", "assigned_id": "creative-restored", "heartbeat_interval_s": 30,
+            ])
+        }
+        try await client.sendHeartbeatForTest()
+        let finalHeartbeat = await recorder.frames.last { $0["type"] as? String == "heartbeat" }
+        XCTAssertEqual(finalHeartbeat?["status"] as? String, operatorPaused ? "unavailable" : "ready")
+        let admission = await status.beginRequestIfAccepting()
+        XCTAssertEqual(admission != nil, !operatorPaused)
+        if let admission { await status.finishRequest(startedAt: admission, completion: nil, failed: false) }
+        await client.stop()
+    }
+
+    func testCreativeHoldReleaseNeverLiftsOperatorPause() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let status = ProviderStatus(modelID: "model-a", modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1))
+        let client = try await makeClient(status: status, recorder: recorder)
+        let socket = FakeProviderWebSocketTask(receiveResults: [])
+        await client.setWebSocketForTest(socket)
+        try await client.handleCoordinatorPayloadForTest([
+            "type": "hello_ack", "assigned_id": "creative-session", "heartbeat_interval_s": 30,
+        ])
+        await client.reinstallRequestCapacityStateUpdateHandlerForTest()
+        await status.setLocalCreativeHold(true)
+        _ = await client.pauseByOperator()
+        let cancellations = socket.cancelCount
+        await status.setLocalCreativeHold(false)
+        XCTAssertEqual(socket.cancelCount, cancellations)
+        let admission = await status.beginRequestIfAccepting()
+        XCTAssertNil(admission)
+        let snapshot = await status.snapshot()
+        XCTAssertEqual(snapshot.status, .unavailable)
+        await client.stop()
+    }
+
     func testOperatorPauseAndResumeFenceRequestsAndPublishCoordinatorState() async throws {
         let recorder = CoordinatorFrameRecorder()
         let status = ProviderStatus(
@@ -2849,6 +2993,7 @@ final class CoordinatorClientTests: XCTestCase {
             recorder: CoordinatorFrameRecorder(),
             credentialStore: .protectedFile
         )
+        await client.setHeadlessTopologyOverrideForTest { true }
         // Same newer + missing-target shape that reaches eligibility for a
         // consumer_user provider; the headless guard must suppress it entirely.
         await client.configureAcceptedRecoveryForTest(accepted: true, recommendation: "v99.9.9", compatibilitySetID: nil)
@@ -11324,4 +11469,21 @@ private final class FakeProviderWebSocketTask: ProviderWebSocketTask, @unchecked
             cancelCount
         }
     }
+}
+
+private actor DelayedCreativeReloads {
+    private var allowed = false
+    func allowRestoration() { allowed = true }
+    func load(_ model: String) throws -> (modelID: String, modelHash: String) {
+        guard allowed else { throw CocoaError(.fileReadUnknown) }
+        return (model, "fixture-hash")
+    }
+}
+
+private struct DelayedCreativeFailingBackend: LocalImageBackend {
+    func prepare(quantized: Bool, progress: @escaping @Sendable (Int64, Int64) -> Void) async throws {
+        throw CocoaError(.fileReadUnknown)
+    }
+    func generate(_ request: LocalImageRequest) async throws -> Data { Data() }
+    func unload() async {}
 }

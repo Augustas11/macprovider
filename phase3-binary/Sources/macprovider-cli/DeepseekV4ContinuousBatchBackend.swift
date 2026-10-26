@@ -121,7 +121,7 @@ final class DeepseekV4ContinuousBatchBackend: ContinuousBatchSchedulerBackend, @
                         row.drafterState = try await self.prepareDrafter(
                             target: model, tokens: tokens, hidden: hidden,
                             bonus: sampled ?? 0, state: row.drafterState)
-                        row.lastHidden = hidden[0..., -1..., 0...]
+                        row.lastHidden = hidden[0..., (-1)..., 0...]
                     }
                     row.tokenCount = input.targetKVTokenCount
                     self.commit(row, id: input.requestID)
@@ -521,9 +521,12 @@ final class DeepseekV4ContinuousBatchBackend: ContinuousBatchSchedulerBackend, @
                 }
             }
             let selections = concatenated(sampledColumns.flatMap { $0 }, axis: 0)
-            eval([selections] + working.flatMap { $0.flatMap(\.state) }
-                + snapshots.flatMap { $0.flatMap { $0.flatMap(\.state) } }
-                + hiddenColumns.flatMap { $0 })
+            let workingState: [MLXArray] = working.flatMap { $0.flatMap(\.state) }
+            let snapshotState: [MLXArray] = snapshots.flatMap { prefixes in
+                prefixes.flatMap { caches in caches.flatMap(\.state) }
+            }
+            let hiddenState: [MLXArray] = hiddenColumns.flatMap { $0 }
+            eval([selections] + workingState + snapshotState + hiddenState)
             let selectedIDs = selections.asArray(Int32.self).map(Int.init)
             var cursor = 0
             var verified: [NativeMTPVerifiedRow] = []
