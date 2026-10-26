@@ -71,6 +71,27 @@ Live fleet target: **1.8.272**. Include the merged changes below in the next CLI
 | PR | Issue | Provider-side change | Status |
 |---|---|---|---|
 | #2158 | #2155 | Malibu.app retires duplicate app/menu-bar instances after updates: launch-time version election, successor readiness acknowledgement, 35-second quit deadline and forced stale-app exit after 40 seconds; newer running app survives an older rollback launch (SPEC-025-R013/R014). | merged (`79c1c81f6`); next CLI/app cut; signed live acceptance pending |
+| #2161 | #2160 (closed) | Provider-local `/v1/messages` for Claude Code: tools, thinking, JSON/SSE errors and stop metadata over the shared runtime; local priority, cancellation and unbilled accounting; status capability (SPEC-001-R009/R011, SPEC-025-R015). | merged (`9678fc21d`); next CLI/app cut; signed live acceptance pending |
+
+**#2160 release acceptance:** all 28 checks in
+[CI run 40261607346](https://github.com/Augustas11/macprovider/actions/runs/40261607346)
+passed, and `antfleet-ops` approved and merged #2161. Studio acceptance passed
+30 targeted tests and a real four-turn streamed Claude Code coding task with
+Read/Bash tools, cancellation, simulated network-priority preemption and native
+stop-sequence reporting. The client also sent `X-MacProvider-Origin: local-app`
+through `ANTHROPIC_CUSTOM_HEADERS`; base URL/model/auth alone do not classify
+local work. The lab used `--bare` and explicit tools; full default-client
+configuration and the Malibu Terminal launcher are not established by this test.
+
+Issue #2160 is closed following source merge. Before promoting the next signed
+provider cut, verify that released bytes support the local tool session and Stop,
+and that a real paying Malibu buyer preempts local work without customer errors.
+Local requests must remain unbilled and outside heartbeat accounting. No signed
+release, live routing, billing or settlement acceptance is claimed by the lab.
+The metadata change in `ModelRuntime.swift` changes the conservative decode-path
+digest to `105875b44bb72502928fe5c96b82c6598a326c7c99670f9ebc241350e3556776`;
+generation and output filtering are unchanged. Preserve existing qualification
+and follow the release identity-binding procedure for signed policies.
 
 **#2155 release acceptance:** CI run `40257144313` passed all 28 checks and
 `antfleet-ops` approved #2158. Before promoting the next signed CLI/app cut,

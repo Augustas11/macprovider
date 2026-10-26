@@ -1,20 +1,28 @@
 # SPEC-025 — Native Mac App (signed `.dmg`, native Mac app with menu-bar presence)
 
-Status: DRAFT v0.42.0 · Owner: @Augustas11 · Target: 2026 Q3
+Status: DRAFT v0.43.0 · Owner: @Augustas11 · Target: 2026 Q3
 
-**Change log v0.42.0 (2026-10-26, Related: #2054):**
+**Change log v0.43.0 (2026-10-26, Related: #2054):**
 User-first navigation opens on Chat; Earn combines Dashboard and Provider;
 Models merges discovery, installed models and downloads; Terminal embeds
-bounded, ephemeral shell and gateway harness sessions. R015 clarifies login-PATH
+bounded, ephemeral shell and gateway harness sessions. R016 clarifies login-PATH
 propagation and session-wide terminal cleanup; project-config disabling applies
 to OpenCode, while Crush retains its visible warning. The first-run menu command
 is Open Malibu. Terminal output cannot write the clipboard; deliberate user Copy
 remains available. The Connected apps / Terminal privacy warnings were removed
-by operator decision, and no privacy claim replaces them. R012 and R015 remove
+by operator decision, and no privacy claim replaces them. R012 and R016 remove
 the persistent privacy warning, gateway privacy status, Details privacy text,
 Cursor transit note and Malibu Chat privacy redirect. The buyer-key
 credential-safety sentence remains required. Existing copy, catalog, preparation
 and client configuration rules remain normative.
+The Terminal requirement is SPEC-025-R016. This change does not implement
+the local-provider path of SPEC-025-R015; Terminal harness tabs target the gateway.
+
+**Change log v0.42.0 (2026-10-26, Related: #2160):**
+Adds SPEC-025-R015's local Terminal compatibility contract: Claude Code uses
+provider-local `/v1/messages` only when the provider explicitly advertises the
+adapter, with SPEC-001-R011 local-work marking and customer-first behavior.
+Terminal implementation and actual client acceptance remain pending.
 
 **Change log v0.41.0 (2026-10-26, Related: #2155):**
 §3.3 adds SPEC-025-R013 single-instance handoff and SPEC-025-R014 bounded
@@ -1028,7 +1036,25 @@ projections (SPEC-044-R004), colour never the only signal.
   Installing the plugin is not automatic-tool-use acceptance, and isolated
   client acceptance MUST NOT imply production-gateway verification.
 
-- **SPEC-025-R015 Terminal.** Terminal MUST embed a terminal with tabs,
+- **SPEC-025-R015 Terminal local-provider compatibility.** A Terminal launcher
+  that offers Claude Code on this Mac's loaded model MUST require fresh provider
+  status advertising `local_anthropic_messages_v1` and a currently available
+  `messages` capability for `/v1/messages` (SPEC-001-R009). Missing capability,
+  model or readiness MUST produce an unavailable state. It MUST configure
+  `ANTHROPIC_BASE_URL` to the provider's loopback base URL and `ANTHROPIC_MODEL`
+  to the observed model identity. Every generated request MUST carry exactly one
+  `X-MacProvider-Origin: local-app`; a base URL or dummy
+  `ANTHROPIC_AUTH_TOKEN` alone is insufficient to mark local work. Do not send
+  buyer keys or settlement metadata to the local endpoint. Local sessions are
+  unbilled, never earnings, and yield to customers under SPEC-001-R011.
+  `local_preempted` MUST end the current turn cleanly; Stop or client exit MUST
+  cancel its outstanding inference. Endpoint support is distinct from loaded
+  model tool capability and actual client acceptance. Claim Claude Code
+  compatibility only after a real multi-turn task with tools, streaming, Stop
+  and customer preemption passes on the designated lab Mac. This requirement
+  does not itself establish that the Terminal launcher is implemented.
+
+- **SPEC-025-R016 Terminal.** Terminal MUST embed a terminal with tabs,
   capped at eight; output MUST never be persisted. The tab "+" menu lists
   Shell, Claude Code, Codex, OpenCode, Crush and other R012 adapters with a
   launcher. Harness entries are enabled only when the executable is found on

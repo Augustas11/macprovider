@@ -1,6 +1,14 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.47 (2026-10-25, coordinator recovery without model reload)
+**Version:** 1.9.48 (2026-10-26, local Anthropic Messages)
+
+**Change log v1.9.48 (2026-10-26, Related: #2160):**
+Amends `SPEC-001-R009` to add the loopback `POST /v1/messages` adapter for
+Anthropic clients. It reuses Chat Completions admission and inference, including
+SPEC-001-R011 local-work classification, accounting and customer preemption.
+Local status advertises `local_anthropic_messages_v1`; capability discovery
+names the supported Messages endpoint. Translation tests alone do not establish
+Claude Code or released-provider acceptance.
 
 **Change log v1.9.47 (2026-10-25):**
 Clarifies FR-13 / `SPEC-001-R001`: heartbeat staleness requests an in-process
@@ -2318,7 +2326,7 @@ Do not change the HTTP status code mid-stream.
 
 ### 6.0.1. Provider-local stateless APIs
 
-**SPEC-001-R009 — Local Responses and client authorization.** The provider's
+**SPEC-001-R009 — Local Responses, Messages and client authorization.** The provider's
 loopback HTTP listener MUST support `POST /v1/responses` as a stateless adapter
 onto its existing Chat Completions inference path. It MUST remain bound to
 loopback. Its authorization policy is trust in local OS processes that can
@@ -2374,6 +2382,42 @@ three capability lists are empty, and enforcement is `unavailable`.
 
 Shared Go/Swift contract fixtures MUST cover accepted inputs, unsupported
 controls, function tools, structured output, streaming and terminal errors.
+
+The listener MUST also support `POST /v1/messages` as a stateless Anthropic
+Messages adapter onto that same Chat Completions path; other methods MUST return
+405 with `Allow: POST`. It follows the same local-process trust and browser-origin
+policy above. A supplied Anthropic authentication token is not authentication or
+billing authority and MUST NOT be forwarded. The caller MUST send exactly one
+`X-MacProvider-Origin: local-app` to receive SPEC-001-R011 local-work treatment;
+setting `ANTHROPIC_BASE_URL` alone does not establish local classification.
+
+Messages translation MUST preserve supported system text blocks, assistant
+`tool_use` and user `tool_result` history with call/result pairing, declared tools
+and tool choice, `max_tokens`, and `stop_sequences`. `thinking` maps to the
+SPEC-018 reasoning effort: disabled to `low`, enabled/adaptive to `medium`, and
+an enabled budget of at least 16,384 tokens to `high`. Unsupported controls and
+media MUST fail explicitly before generation, never disappear silently.
+Nonstreaming replies MUST use Anthropic message content blocks, usage and stop
+reasons. Streaming MUST emit ordered `message_start`, `content_block_start`,
+`content_block_delta`, `content_block_stop`, `message_delta` and `message_stop`
+events, including tool argument deltas and requested thinking. Translation MUST
+follow the gateway Messages semantics for the supported subset. Errors MUST use
+Anthropic `type:"error"` envelopes; after stream headers, failures MUST emit an
+`error` event and MUST NOT report a successful message terminal. This includes
+`local_preempted`, retaining its retryable code so the client can end the turn.
+Client Stop/disconnect MUST cancel the existing underlying runtime request.
+
+`GET /v1/status` MUST advertise `local_anthropic_messages_v1` when this adapter
+is present. `GET /v1/capabilities` MUST expose a `messages` object naming
+`endpoint:"/v1/messages"`, `stateless:true` and `stream:true`, with availability
+and model identity drawn from a runtime-owned snapshot. Endpoint support MUST
+NOT imply that the loaded model is tool-qualified or that Claude Code has passed
+an actual multi-turn coding session. Messages local work MUST share the existing
+capacity, preemption and unbilled counters; it MUST NOT create a second engine,
+settlement receipt or earnings. Tests MUST cover request/response translation,
+tool round trips, thinking, stream termination and Anthropic-shaped errors.
+Actual Claude Code multi-turn tools, streaming, Stop and customer preemption on
+the designated lab Mac remain separate acceptance gates.
 
 **SPEC-001-R010 — Exact loaded-model token utilities.** `POST /v1/tokenize`,
 `POST /v1/detokenize` and `POST /v1/apply-template` MUST use the tokenizer/template of the

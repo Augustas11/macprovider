@@ -472,6 +472,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         "metrics_request_rate_v1",
         // SPEC-001-R011: local use is counted apart and yields to buyers.
         "local_chat_priority_v1",
+        "local_anthropic_messages_v1",
         "referral_repeatable_advocacy_v1",
         "referral_fragment_links_v1",
         "provider_safety_telemetry_v2",
@@ -706,6 +707,10 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             handleStatus(context: context)
         case (_, "/v1/status"):
             writeError(context: context, status: .methodNotAllowed, message: "method not allowed", code: "invalid_request")
+        case (.POST, "/v1/messages"):
+            handleChatCompletions(context: context, messages: true)
+        case (_, "/v1/messages"):
+            writeError(context: context, status: .methodNotAllowed, message: "method not allowed", code: "invalid_request", extraHeaders: [("Allow", "POST")])
         case (.POST, "/v1/responses"):
             handleChatCompletions(context: context, responses: true)
         case (_, "/v1/responses"):
@@ -742,6 +747,16 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     "preemption_window_ms": localUsage.preemptionWindowMS,
                     "queue_wait_ms": localUsage.queueWaitMS,
                     "preempted_error_code": "local_preempted",
+                ],
+                "messages": [
+                    "endpoint": "/v1/messages", "stream": true, "stateless": true,
+                    "available": responses.available,
+                    "model": responses.model as Any? ?? NSNull(),
+                    "tool_choice_modes": responses.toolChoiceModes.map { mode in
+                        mode == "required" ? "any" : mode == "named" ? "tool" : mode
+                    },
+                    "origin_header": "X-MacProvider-Origin",
+                    "origin_value": "local-app",
                 ],
                 "responses": [
                     "endpoint": "/v1/responses", "stateless": true, "store": false,
@@ -944,7 +959,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         }
     }
 
-    private func handleChatCompletions(context: ChannelHandlerContext, responses: Bool = false) {
+    private func handleChatCompletions(context: ChannelHandlerContext, responses: Bool = false, messages: Bool = false) {
         // SPEC-049-R009. Privacy-class work arrives only on the coordinator
         // WebSocket. Reject the header before the body is parsed, and do not
         // echo the header value.
@@ -975,6 +990,24 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
 
         var body = bodyBuffer ?? context.channel.allocator.buffer(capacity: 0)
         var data = Data(body.readBytes(length: body.readableBytes) ?? [])
+        var messagesAdapter: LocalAnthropicMessagesAdapter?
+        if messages {
+            do {
+                try Self.validateContentEncoding(requestHead?.headers["Content-Encoding"] ?? [])
+                let adapter = try LocalAnthropicMessagesAdapter(body: data)
+                data = adapter.chatRequestBody
+                messagesAdapter = adapter
+            } catch let error as LocalAnthropicMessagesError {
+                writeRawJSON(context: context, status: .badRequest, data: error.errorBody)
+                return
+            } catch let error as APIError {
+                writeAPIError(context: context, error)
+                return
+            } catch {
+                writeError(context: context, status: .badRequest, message: "Invalid Messages request", code: "invalid_request")
+                return
+            }
+        }
         var responsesAdapter: LocalResponsesAdapter?
         if responses {
             do {
@@ -993,7 +1026,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 return
             }
         }
-        let writer = ResponseWriter(context: context, retryAfterSeconds: queueWaitRetryAfterSeconds, responsesAdapter: responsesAdapter)
+        let writer = ResponseWriter(context: context, retryAfterSeconds: queueWaitRetryAfterSeconds, responsesAdapter: responsesAdapter, messagesAdapter: messagesAdapter)
         let modelRuntime = modelRuntime
         let warmSwapEnabled = warmSwapEnabled
         let receiptBuilder = receiptBuilder
@@ -1163,7 +1196,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                         stream: false,
                         completion: completion
                     )
-                    let response = Self.chatCompletionResponse(request: request, completion: completion)
+                    let response = Self.chatCompletionResponse(request: request, completion: completion, includeStopSequence: messages)
                     let ttftMs = completion.ttftMilliseconds ?? Self.elapsedMilliseconds(since: startedAt)
                     let terminalStateTSUnixMS = Int64(Date().timeIntervalSince1970 * 1000)
                     // SPEC-015 §M.2.2 — bind the receipt's
@@ -1630,7 +1663,8 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                         created: created,
                         model: request.model,
                         delta: [:],
-                        finishReason: completion.finishReason
+                        finishReason: completion.finishReason,
+                        stopSequence: writer.messagesAdapter != nil ? completion.stopSequence : nil
                     )
                 )
                 writer.writeSSEJSON(
@@ -2346,20 +2380,19 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         )
     }
 
-    private static func chatCompletionResponse(request: ChatCompletionRequest, completion: CompletionResult) -> [String: Any] {
+    private static func chatCompletionResponse(request: ChatCompletionRequest, completion: CompletionResult, includeStopSequence: Bool = false) -> [String: Any] {
         let created = Int(Date().timeIntervalSince1970)
+        var choice: [String: Any] = [
+            "index": 0, "message": Self.chatCompletionMessage(completion),
+            "finish_reason": completion.finishReason,
+        ]
+        if includeStopSequence, let stopSequence = completion.stopSequence { choice["stop_sequence"] = stopSequence }
         return [
             "id": "chatcmpl-\(UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased())",
             "object": "chat.completion",
             "created": created,
             "model": request.model,
-            "choices": [
-                [
-                    "index": 0,
-                    "message": Self.chatCompletionMessage(completion),
-                    "finish_reason": completion.finishReason,
-                ]
-            ],
+            "choices": [choice],
             "usage": Self.usage(completion),
         ]
     }
@@ -3088,45 +3121,47 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         created: Int,
         model: String,
         delta: [String: Any],
-        finishReason: Any
+        finishReason: Any,
+        stopSequence: String? = nil
     ) -> [String: Any] {
-        [
+        var choice: [String: Any] = ["index": 0, "delta": delta, "finish_reason": finishReason]
+        if let stopSequence { choice["stop_sequence"] = stopSequence }
+        return [
             "id": id,
             "object": "chat.completion.chunk",
             "created": created,
             "model": model,
-            "choices": [
-                [
-                    "index": 0,
-                    "delta": delta,
-                    "finish_reason": finishReason,
-                ]
-            ],
+            "choices": [choice],
         ]
     }
 
-    private func writeError(context: ChannelHandlerContext, status: HTTPResponseStatus, message: String, code: String) {
+    private func writeError(context: ChannelHandlerContext, status: HTTPResponseStatus, message: String, code: String, extraHeaders: [(String, String)] = []) {
         writeAPIError(
             context: context,
-            APIError(status: Int(status.code), message: message, code: code)
+            APIError(status: Int(status.code), message: message, code: code),
+            extraHeaders: extraHeaders
         )
     }
 
-    private func writeAPIError(context: ChannelHandlerContext, _ error: APIError) {
+    private func writeAPIError(context: ChannelHandlerContext, _ error: APIError, extraHeaders: [(String, String)] = []) {
         writeJSON(
             context: context,
             status: HTTPResponseStatus(statusCode: error.status),
-            body: error.envelope
+            body: error.envelope,
+            extraHeaders: extraHeaders
         )
     }
 
-    private func writeJSON(context: ChannelHandlerContext, status: HTTPResponseStatus, body: Any) {
+    private func writeJSON(context: ChannelHandlerContext, status: HTTPResponseStatus, body: Any, extraHeaders: [(String, String)] = []) {
         do {
-            let data = try encodeJSONObject(body)
+            let encoded = try encodeJSONObject(body)
+            let data = path(from: requestHead?.uri ?? "") == "/v1/messages" && status != .ok
+                ? LocalAnthropicMessagesAdapter.translateError(encoded) : encoded
             var headers = HTTPHeaders()
             headers.add(name: "content-type", value: "application/json")
             headers.add(name: "content-length", value: "\(data.count)")
             headers.add(name: "connection", value: "close")
+            for (name, value) in extraHeaders { headers.add(name: name, value: value) }
 
             let head = HTTPResponseHead(version: .http1_1, status: status, headers: headers)
             context.write(wrapOutboundOut(.head(head)), promise: nil)
@@ -3203,15 +3238,18 @@ private struct ResponseWriter: @unchecked Sendable {
     let retryAfterSeconds: Int
     // Mutable adapter state is confined to the channel event loop.
     let responsesAdapter: LocalResponsesAdapter?
+    let messagesAdapter: LocalAnthropicMessagesAdapter?
 
     init(
         context: ChannelHandlerContext,
         retryAfterSeconds: Int = RouterHandler.queueWaitRetryAfterSeconds(nil),
-        responsesAdapter: LocalResponsesAdapter? = nil
+        responsesAdapter: LocalResponsesAdapter? = nil,
+        messagesAdapter: LocalAnthropicMessagesAdapter? = nil
     ) {
         self.context = context
         self.retryAfterSeconds = retryAfterSeconds
         self.responsesAdapter = responsesAdapter
+        self.messagesAdapter = messagesAdapter
     }
 
     func writeJSON(
@@ -3224,12 +3262,17 @@ private struct ResponseWriter: @unchecked Sendable {
             let data = try encodeJSONObject(body)
             context.eventLoop.execute {
                 do {
-                    let output = try status == .ok ? (responsesAdapter?.translateResponse(data) ?? data) : data
+                    let output: Data
+                    if let messagesAdapter {
+                        output = try status == .ok ? messagesAdapter.translateResponse(data) : LocalAnthropicMessagesAdapter.translateError(data)
+                    } else {
+                        output = try status == .ok ? (responsesAdapter?.translateResponse(data) ?? data) : data
+                    }
                     writeRawJSON(context: context, status: status, data: output, extraHeaders: extraHeaders, completion: completion)
                 } catch {
                     let failure = APIError(status: 500, message: "Invalid inference response", type: "server_error", code: "internal_error")
                     if let encoded = try? encodeJSONObject(failure.envelope) {
-                        writeRawJSON(context: context, status: .internalServerError, data: encoded)
+                        writeRawJSON(context: context, status: .internalServerError, data: messagesAdapter == nil ? encoded : LocalAnthropicMessagesAdapter.translateError(encoded))
                     } else {
                         context.close(promise: nil)
                     }
@@ -3264,7 +3307,7 @@ private struct ResponseWriter: @unchecked Sendable {
     func startSSE(extraHeaders: [(String, String)] = []) {
         context.eventLoop.execute {
             writeRawSSEHead(context: context, extraHeaders: extraHeaders)
-            for frame in responsesAdapter?.startStream() ?? [] {
+            for frame in messagesAdapter?.startStream() ?? responsesAdapter?.startStream() ?? [] {
                 writeRawSSEPayload(context: context, payload: frame)
             }
         }
@@ -3285,7 +3328,7 @@ private struct ResponseWriter: @unchecked Sendable {
     func writeSSEDone(trailers: [(String, String)] = [], completion: (@Sendable (Bool) -> Void)? = nil) {
         writeSSEData("[DONE]")
         context.eventLoop.execute {
-            for frame in responsesAdapter?.finishStream() ?? [] {
+            for frame in messagesAdapter?.finishStream() ?? responsesAdapter?.finishStream() ?? [] {
                 writeRawSSEPayload(context: context, payload: frame)
             }
             var headers: HTTPHeaders?
@@ -3315,7 +3358,11 @@ private struct ResponseWriter: @unchecked Sendable {
 
     private func writeSSEData(_ payload: String) {
         context.eventLoop.execute {
-            if let responsesAdapter {
+            if let messagesAdapter {
+                for frame in messagesAdapter.consumeStream("data: \(payload)\n\n") {
+                    writeRawSSEPayload(context: context, payload: frame)
+                }
+            } else if let responsesAdapter {
                 for frame in responsesAdapter.consumeStream("data: \(payload)\n\n") {
                     writeRawSSEPayload(context: context, payload: frame)
                 }

@@ -1,5 +1,21 @@
 # Coordinator Release Train — Pearl coordinator / gateway
 
+## Provider-only Messages compatibility — source merged (2026-10-26)
+
+[#2161](https://github.com/Augustas11/macprovider/pull/2161) merged as
+`9678fc21d` after all 28 checks in
+[CI run 40261607346](https://github.com/Augustas11/macprovider/actions/runs/40261607346)
+passed; `antfleet-ops` approved and merged it. Issue
+[#2160](https://github.com/Augustas11/macprovider/issues/2160) is closed.
+
+This adds `/v1/messages` to the provider loopback server so local Claude Code
+sessions share the existing model runtime, local priority and unbilled accounting.
+It changes no coordinator/gateway runtime code and adds no Pearl runtime payload.
+The next provider CLI/app cut carries it; a Pearl runtime release alone does not
+enable the endpoint. Track its signed-release and real paying-buyer acceptance in
+the [CLI release train](cli-release-train.md#next-cli-release--net-changes-vs-18272-tracked-2026-10-26).
+Studio lab acceptance passed, but no live deployment is claimed by this merge.
+
 ## Pending runtime inclusion — public privacy disclosures (2026-10-26)
 
 | PR | Issue | Coordinator/gateway change | Status |
