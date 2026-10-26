@@ -13,7 +13,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from unittest import mock
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from scripts.check_spec_governance import (
@@ -1093,6 +1094,21 @@ class TrustedPoolModelTamperTests(CaptureCase):
 
 
 class TrustedPoolModelPayloadTests(CaptureCase):
+    def setUp(self) -> None:
+        super().setUp()
+        # The capture fixture is anchored at T0, so its evidence expires 20 days later.
+        # Pin the builder's clock inside that window so these tests do not age out.
+        fixed_today = datetime.fromtimestamp(T0, timezone.utc).date() + timedelta(days=10)
+
+        class FixedDate(BUILDER.date):
+            @classmethod
+            def today(cls):
+                return fixed_today
+
+        patcher = mock.patch.object(BUILDER, "date", FixedDate)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def git(self, root: Path, *args: str) -> str:
         return subprocess.run(["git", *args], cwd=root, check=True, capture_output=True, text=True).stdout.strip()
 
