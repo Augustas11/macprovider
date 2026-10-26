@@ -1,6 +1,12 @@
 # SPEC-025 — Native Mac App (signed `.dmg`, native Mac app with menu-bar presence)
 
-Status: DRAFT v0.40.0 · Owner: @Augustas11 · Target: 2026 Q3
+Status: DRAFT v0.41.0 · Owner: @Augustas11 · Target: 2026 Q3
+
+**Change log v0.41.0 (2026-10-26, Related: #2155):**
+§3.3 adds SPEC-025-R013 single-instance handoff and SPEC-025-R014 bounded
+quit. The successor removes stale app processes after an update, including
+instances predating this protocol. A rollback launch preserves a newer running
+app, and hung app shutdown cannot retain duplicate menu-bar items indefinitely.
 
 **Change log v0.40.0 (2026-10-22, Related: #2107):**
 - SPEC-025-R012: the Connected apps model picker lists only models whose
@@ -1107,6 +1113,35 @@ projections (SPEC-044-R004), colour never the only signal.
   after v1.8.39 ship key-free (DECISION_CRITERIA Entry 156/158). Even on the
   bridge, without Sparkle code or a feed URL in the target bundle, the public key
   cannot initiate future updates.
+- **SPEC-025-R013 Single-instance handoff.** Malibu MUST converge to one app
+  process and one menu-bar item after a launch or update. Before starting its
+  provider observers or creating its menu-bar item, an installed, signed Malibu
+  instance MUST identify other running `tech.malibu.app` instances for the same
+  user and elect a single winner. A newer running release wins over an older
+  rollback launch; equal versions select the latest launch, with a deterministic
+  PID tie-break. Version comparisons MUST use the identity of the running code,
+  captured at launch, rather than the mutable installed bundle's current plist.
+  A process MUST NOT terminate a peer with a newer running version. The elected
+  successor MUST ask superseded peers to quit, check that their original process
+  identities actually exit, and escalate to `terminate()` and then
+  `forceTerminate()` after bounded grace periods. This MUST also clean up peers
+  shipped before the handoff protocol. Escalation MUST target only verified
+  Malibu peers, never the CLI or launchd provider, and MUST avoid a reused PID.
+  Relaunch remains start-new-then-quit-old: observing a successor start is not
+  proof that the old process exited. The surviving instance owns that exit
+  verification and escalation. An older rollback launch MUST leave the newer
+  app running and quit itself. Tests MUST cover a second launch, a relaunch
+  whose predecessor's quit drain hangs, and a rollback launch.
+- **SPEC-025-R014 Bounded app quit.** Every app termination request MUST bound
+  the asynchronous shutdown drain by 35 seconds, including its 15-second
+  graceful provider-detach allowance. The deadline MUST run independently of
+  shutdown and uninstall completion; a hung or cancelled await, uninstall,
+  repeated quit request, or modal state MUST NOT extend it. On expiry Malibu
+  MUST log that the termination drain timed out and reply `true` to the pending
+  application termination request. Completion before the deadline MUST cancel
+  the deadline and reply only once. Ordinary and relaunch-driven quit MUST keep
+  the launchd provider service running; app termination is not uninstall. Tests
+  MUST cover a hung drain, timely completion, and repeated termination requests.
 - The updater acquires the maintenance lease, persists a phase journal and exact
   typed rollback plan, stages and validates the target, drains buyer work,
   installs the whole set, restarts launchd, and commits only after exact signed
