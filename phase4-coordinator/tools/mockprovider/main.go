@@ -809,8 +809,8 @@ func startHTTPServer(cfg config, logger *log.Logger, drainer *drainController) *
 	if err != nil {
 		logger.Fatalf("listen %s: %v", addr, err)
 	}
+	logger.Printf("HTTP listening on %s", addr)
 	go func() {
-		logger.Printf("HTTP listening on %s", addr)
 		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			logger.Printf("http serve: %v", err)
 		}

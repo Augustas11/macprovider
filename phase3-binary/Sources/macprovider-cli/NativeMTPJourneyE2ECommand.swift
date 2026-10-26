@@ -2093,8 +2093,8 @@ final class NativeMTPJourneyRunner {
             object["messages"] = [
                 ["role": "user", "content": "Read example.swift before answering."],
                 ["role": "assistant", "content": "", "reasoning_content": "Inspect the file.", "tool_calls": [[
-                    "id": "call_journey", "type": "function", "function": ["name": "read_file", "arguments": "{\"path\":\"example.swift\"}"]]]],
-                ["role": "tool", "tool_call_id": "call_journey", "content": "func square(_ x: Int) -> Int { x * x }"],
+                    "id": "call_journeyreadfile0001", "type": "function", "function": ["name": "read_file", "arguments": "{\"path\":\"example.swift\"}"]]]],
+                ["role": "tool", "tool_call_id": "call_journeyreadfile0001", "content": "func square(_ x: Int) -> Int { x * x }"],
                 ["role": "user", "content": "Explain the function."]]
         }
         if control == "reasoning" || control == "history" { object["reasoning_effort"] = "high" }

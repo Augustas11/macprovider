@@ -188,12 +188,20 @@ final class ShardGroupEngineTests: XCTestCase {
     }
 
     func testAQueuedRequestCancelsWithoutTouchingTheChain() throws {
-        let rig = try rig(maxInFlight: 1)
+        let firstTailForward = DispatchSemaphore(value: 0)
+        let releaseFirstTailForward = DispatchSemaphore(value: 0)
+        let rig = try rig(maxInFlight: 1, tailOnCall: { call, _ in
+            guard call == 1 else { return }
+            firstTailForward.signal()
+            _ = releaseFirstTailForward.wait(timeout: .now() + 5)
+        })
         let collector = ShardGenerationCollector(count: 2)
         let ids = try rig.engine.submit(
             [ShardGenerationRequest(promptTokens: [1, 2], maxTokens: 3), ShardGenerationRequest(promptTokens: [3, 4], maxTokens: 3)],
             sink: collector.receive)
+        XCTAssertEqual(firstTailForward.wait(timeout: .now() + 5), .success)
         rig.engine.cancel(ids[1])
+        releaseFirstTailForward.signal()
         let (summaries, errors) = collector.wait()
         XCTAssertTrue(errors.isEmpty)
         XCTAssertEqual(summaries[ids[0]]?.reason, .length)
