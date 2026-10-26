@@ -14,7 +14,8 @@ final class CreateTests: XCTestCase {
     func testEachProviderStateHasReadableCreatePresentation() async throws {
         let expected: [CreatePhase: String] = [.idle: "Ready to create", .downloading: "Downloading image model",
             .holdingCustomers: "Pausing earning while creating", .generating: "Creating image",
-            .warm: "Image model ready", .restoring: "Restoring customer work"]
+            .warm: "Image model ready", .restoring: "Restoring customer work",
+            .recoveryRequired: "Language model recovery needed"]
         let home = try temporaryHome(); defer { try? FileManager.default.removeItem(at: home) }
         let transport = FakeCreateTransport()
         let store = CreateStore(transport: transport, gallery: CreateGallery(home: home))
@@ -23,7 +24,7 @@ final class CreateTests: XCTestCase {
             transport.current = try status(phase: phase)
             await store.refresh(port: 8080)
             XCTAssertEqual(store.status?.phase.label, expected[phase])
-            XCTAssertEqual(store.canGenerate, [.idle, .warm].contains(phase))
+            XCTAssertEqual(store.canGenerate, [.idle, .warm, .recoveryRequired].contains(phase))
             let host = NSHostingView(rootView: CreateScreen(store: store))
             host.frame = NSRect(x: 0, y: 0, width: 900, height: 900)
             host.layoutSubtreeIfNeeded()
@@ -86,8 +87,10 @@ final class CreateTests: XCTestCase {
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
         XCTAssertEqual(object["n"] as? Int, 1); XCTAssertEqual(object["response_format"] as? String, "b64_json")
         XCTAssertEqual(object["seed"] as? Int, 42)
+        let operationID = UUID()
         for path in ["/v1/images/generations", "/v1/images/generations/cancel"] {
-            let request = LocalCreateTransport.request(at: try ChatEndpoint(port: 8080), path: path, body: body)
+            let request = LocalCreateTransport.request(at: try ChatEndpoint(port: 8080), path: path, body: body, operationID: operationID)
+            XCTAssertEqual(request.value(forHTTPHeaderField: "X-MacProvider-Image-Operation-ID"), operationID.uuidString)
             XCTAssertEqual(request.url?.host, "127.0.0.1")
             XCTAssertEqual(request.value(forHTTPHeaderField: "X-MacProvider-Origin"), "local-app")
             XCTAssertNil(request.value(forHTTPHeaderField: "Authorization"))

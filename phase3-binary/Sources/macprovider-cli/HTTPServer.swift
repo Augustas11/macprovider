@@ -771,8 +771,16 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 throw APIError(status: 503, message: "Image generation requires the native MLX provider runtime.", code: "image_generation_unavailable")
             }
             let writer = ResponseWriter(context: context)
+            let operationHeaders = head.headers["X-MacProvider-Image-Operation-ID"]
+            let suppliedOperationID = operationHeaders.count == 1 ? UUID(uuidString: operationHeaders[0]) : nil
+            guard operationHeaders.isEmpty || suppliedOperationID != nil else {
+                throw APIError(status: 400, message: "Use a single image operation UUID.", code: "invalid_image_operation")
+            }
             if cancel {
-                Task { await images.cancel(); writer.writeJSON(status: .ok, body: ["cancelled": true]) }
+                guard let operationID = suppliedOperationID else {
+                    throw APIError(status: 400, message: "Cancellation requires the image operation UUID.", code: "invalid_image_operation")
+                }
+                Task { await images.cancel(operationID: operationID); writer.writeJSON(status: .ok, body: ["cancelled": true]) }
                 return
             }
             try Self.validateJSONContentType(head.headers.first(name: "Content-Type"))
@@ -784,10 +792,11 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             catch { throw APIError(status: 400, message: "Invalid image generation request.", code: "invalid_image_request") }
             let disconnect = ClientDisconnectState()
             inflightDisconnects.append(disconnect)
+            let operationID = suppliedOperationID ?? UUID()
             let task = Task {
                 do {
-                    let png = try await images.generate(request)
-                    guard !disconnect.isDisconnected else { await images.cancel(); return }
+                    let png = try await images.generate(request, operationID: operationID)
+                    guard !disconnect.isDisconnected else { return }
                     writer.writeJSON(status: .ok, body: ["created": Int(Date().timeIntervalSince1970), "data": [["b64_json": png.base64EncodedString()]]])
                 } catch let error as APIError { writer.writeAPIError(error) }
                 catch is CancellationError { writer.writeAPIError(APIError(status: 499, message: "Image generation cancelled.", code: "image_generation_cancelled")) }

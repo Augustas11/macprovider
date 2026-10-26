@@ -19,7 +19,7 @@ enum CreateFailure: Error, LocalizedError, Equatable {
 }
 
 enum CreatePhase: String, CaseIterable, Sendable {
-    case idle, downloading, holdingCustomers = "holding_customers", generating, warm, restoring
+    case idle, downloading, holdingCustomers = "holding_customers", generating, warm, restoring, recoveryRequired = "recovery_required"
     var label: String {
         switch self {
         case .idle: return "Ready to create"
@@ -28,9 +28,10 @@ enum CreatePhase: String, CaseIterable, Sendable {
         case .generating: return "Creating image"
         case .warm: return "Image model ready"
         case .restoring: return "Restoring customer work"
+        case .recoveryRequired: return "Language model recovery needed"
         }
     }
-    var busy: Bool { ![.idle, .warm].contains(self) }
+    var busy: Bool { ![.idle, .warm, .recoveryRequired].contains(self) }
 }
 
 struct CreateStatus: Equatable, Sendable {
@@ -109,6 +110,7 @@ private final class CreateNoRedirect: NSObject, URLSessionTaskDelegate, @uncheck
 @MainActor
 final class LocalCreateTransport: CreateTransport {
     private let session: URLSession
+    private var operationID: UUID?
     private let redirect = CreateNoRedirect()
     init() {
         let config = URLSessionConfiguration.ephemeral
@@ -118,12 +120,13 @@ final class LocalCreateTransport: CreateTransport {
         session = URLSession(configuration: config)
     }
     deinit { session.invalidateAndCancel() }
-    static func request(at endpoint: ChatEndpoint, path: String, body: Data?) -> URLRequest {
+    static func request(at endpoint: ChatEndpoint, path: String, body: Data?, operationID: UUID? = nil) -> URLRequest {
         var request = URLRequest(url: endpoint.url(path))
         request.httpMethod = "POST"
         request.setValue("local-app", forHTTPHeaderField: "X-MacProvider-Origin")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if path == "/v1/images/generations" { request.timeoutInterval = 3600 }
+        if let operationID { request.setValue(operationID.uuidString, forHTTPHeaderField: "X-MacProvider-Image-Operation-ID") }
         request.httpBody = body
         return request
     }
@@ -133,7 +136,9 @@ final class LocalCreateTransport: CreateTransport {
     }
     func generate(at endpoint: ChatEndpoint, request: CreateRequest) async throws -> Data {
         let body = try JSONEncoder().encode(request)
-        let data = try await read(Self.request(at: endpoint, path: "/v1/images/generations", body: body), limit: 32 * 1024 * 1024)
+        let operationID = UUID()
+        self.operationID = operationID
+        let data = try await read(Self.request(at: endpoint, path: "/v1/images/generations", body: body, operationID: operationID), limit: 32 * 1024 * 1024)
         guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let images = object["data"] as? [[String: Any]], images.count == 1,
               let encoded = images[0]["b64_json"] as? String, let png = Data(base64Encoded: encoded)
@@ -141,7 +146,8 @@ final class LocalCreateTransport: CreateTransport {
         return png
     }
     func cancel(at endpoint: ChatEndpoint) async throws {
-        _ = try await read(Self.request(at: endpoint, path: "/v1/images/generations/cancel", body: Data("{}".utf8)), limit: 16 * 1024)
+        guard let operationID else { return }
+        _ = try await read(Self.request(at: endpoint, path: "/v1/images/generations/cancel", body: Data("{}".utf8), operationID: operationID), limit: 16 * 1024)
     }
     private func read(_ request: URLRequest, limit: Int) async throws -> Data {
         let (bytes, response) = try await session.bytes(for: request, delegate: redirect)
