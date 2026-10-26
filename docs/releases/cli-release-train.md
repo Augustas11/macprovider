@@ -44,6 +44,12 @@ Pearl coordinator/gateway release numbering is independent from the provider
 CLI train. Failed and superseded tags remain consumed and must not be reused.
 Historical tables below do not select today's release version.
 
+Pending gateway-only release content is tracked in the
+[coordinator release train](coordinator-release-train.md#pending-runtime-inclusion--public-privacy-disclosures-2026-10-26):
+#2159 (`2236eb74a`, issue #2156) updates public privacy disclosures and needs the
+next Pearl runtime deployment. It is outside the provider CLI/app candidate;
+cutting that candidate does not publish the embedded gateway pages.
+
 ## Current published release and fleet target
 
 Verified 2026-10-25 against GitHub release/tag metadata, the release train

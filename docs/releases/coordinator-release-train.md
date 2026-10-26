@@ -1,5 +1,33 @@
 # Coordinator Release Train — Pearl coordinator / gateway
 
+## Pending runtime inclusion — public privacy disclosures (2026-10-26)
+
+| PR | Issue | Coordinator/gateway change | Status |
+|---|---|---|---|
+| [#2159](https://github.com/Augustas11/macprovider/pull/2159) | #2156 | Gateway-embedded `/privacy`, `/docs`, and account disclosures distinguish default plaintext routing from the opt-in SPEC-049 privacy class. Matching signup-console copy and SPEC-006 preserve provider-runtime plaintext access, relay-visible metadata, assurance limits, ZDR, retention, and training disclosures. | merged (`2236eb74a`); Pearl runtime deployment pending |
+
+CI run [40259134915](https://github.com/Augustas11/macprovider/actions/runs/40259134915)
+passed on attempt 2; `antfleet-ops` approved and merged the PR. This is a
+release-content handoff, not live-page acceptance. Include `2236eb74a` in the
+next reviewed Pearl runtime source. The gateway embeds these Markdown templates;
+a provider CLI/app release alone does not publish them.
+
+Use `scripts/ops/pearl-runtime.sh status`, then `next` / `next --run`, following
+[the Pearl rollout runbook](../runbooks/pearl-coordinator-rollout.md). Refresh
+live runtime and consumed tag identities before selecting the release tag and
+state the expected downtime before applying it.
+
+After deployment, inspect the public `/privacy`, `/docs`, and `/account` pages.
+Confirm they distinguish default plaintext access from opt-in, chat-completions-only
+privacy using the encrypting `relay-blind-client`; the gateway and coordinator
+cannot read privacy-class request or response content, while the provider runtime
+still reads plaintext to infer. Check that the copy does not promise provider-blind inference or encryption
+that excludes the provider, and that ZDR, retention, and training limits remain
+explicit. Verify the matching `frontdoor/console/index.html` signup copy is
+published too; the embedded gateway-page check does not establish front-door
+deployment. Record
+the runtime identity and public-page result here before marking this row shipped.
+
 ## Qwen2-VL-2B promotion (#2016)
 
 Operator decision 2026-10-17: promote `mlx-community/qwen2-vl-2b-instruct-4bit`
