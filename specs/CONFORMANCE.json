@@ -725,7 +725,7 @@
     {
       "spec_id": "SPEC-025",
       "title": "Native Mac App (signed `.dmg`, native Mac app with menu-bar presence)",
-      "version": "v0.43.0",
+      "version": "v0.44.0",
       "path": "specs/SPEC-025-native-mac-app.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -15270,6 +15270,89 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/2054",
         "rationale": "Terminal implementation and regression coverage added; release and actual client acceptance remain pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-025-R017",
+      "spec_id": "SPEC-025",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/app/Sources/Malibu/Agents/AgentStore.swift:final class AgentStore",
+        "phase3-binary/app/Sources/Malibu/Agents/AgentSession.swift:final class AgentSession",
+        "phase3-binary/app/Sources/Malibu/Agents/AgentsScreen.swift:struct AgentsScreen"
+      ],
+      "tests": [
+        "phase3-binary/app/Tests/MalibuTests/AgentStoreTests.swift:final class AgentStoreTests",
+        "phase3-binary/app/Tests/MalibuTests/AgentModelTargetTests.swift:final class AgentModelTargetTests"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2164",
+        "rationale": "Agents and Tasks campaign source and XCTest acceptance are in progress; release acceptance remains pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-025-R018",
+      "spec_id": "SPEC-025",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/app/Sources/Malibu/Agents/MCPClient.swift:final class MCPClient"
+      ],
+      "tests": [
+        "phase3-binary/app/Tests/MalibuTests/MCPClientTests.swift:final class MCPClientTests"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2164",
+        "rationale": "Agents and Tasks campaign source and XCTest acceptance are in progress; release acceptance remains pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-025-R019",
+      "spec_id": "SPEC-025",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/app/Sources/Malibu/Tasks/TaskSchedule.swift:struct TaskSchedule",
+        "phase3-binary/app/Sources/Malibu/Tasks/TaskStore.swift:final class TaskStore",
+        "phase3-binary/app/Sources/Malibu/Tasks/TaskScheduler.swift:final class TaskScheduler",
+        "phase3-binary/app/Sources/Malibu/Tasks/TasksScreen.swift:struct TasksScreen"
+      ],
+      "tests": [
+        "phase3-binary/app/Tests/MalibuTests/TaskScheduleTests.swift:final class TaskScheduleTests",
+        "phase3-binary/app/Tests/MalibuTests/TaskSchedulerTests.swift:final class TaskSchedulerTests"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2164",
+        "rationale": "Agents and Tasks campaign source and XCTest acceptance are in progress; release acceptance remains pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-025-R020",
+      "spec_id": "SPEC-025",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/app/Sources/Malibu/Shell/MainWindow.swift:enum MalibuSection"
+      ],
+      "tests": [
+        "phase3-binary/app/Tests/MalibuTests/NavigationEarnTests.swift:final class NavigationEarnTests"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2164",
+        "rationale": "Agents and Tasks campaign source and XCTest acceptance are in progress; release acceptance remains pending."
       }
     }
   ]

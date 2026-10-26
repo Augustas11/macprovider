@@ -1,6 +1,15 @@
 # SPEC-025 — Native Mac App (signed `.dmg`, native Mac app with menu-bar presence)
 
-Status: DRAFT v0.43.0 · Owner: @Augustas11 · Target: 2026 Q3
+Status: DRAFT v0.44.0 · Owner: @Augustas11 · Target: 2026 Q3
+
+**Change log v0.44.0 (2026-10-26, Related: #2164):**
+Adds SPEC-025-R017 named Agents, SPEC-025-R018 bounded stdio MCP clients,
+SPEC-025-R019 app-owned scheduled Tasks, and SPEC-025-R020 navigation and
+selection migration. Existing R001–R016 retain their identifiers. The sidebar
+order becomes Chat, Terminal, Agents, Tasks, Models, Earn, then Settings and
+Diagnostics. Agents reuse R011 workspace tools and R012 buyer credentials and
+model eligibility; unattended MCP execution requires an explicit task allow-list.
+Implementation and release acceptance remain pending.
 
 **Change log v0.43.0 (2026-10-26, Related: #2054):**
 User-first navigation opens on Chat; Earn combines Dashboard and Provider;
@@ -779,7 +788,7 @@ every section: reported values only, no machine reason codes, no $/time
 projections (SPEC-044-R004), colour never the only signal.
 
 - **SPEC-025-R001 Shell.** Malibu MUST present one main window titled
-  "Malibu": a sidebar with, in order, Chat, Terminal, Models, Earn,
+  "Malibu": a sidebar with, in order, Chat, Terminal, Agents, Tasks, Models, Earn,
   then a separate utility group with Settings and Diagnostics, and a detail
   pane showing the selected section. It opens on Chat. "Open Malibu"
   opens it on Chat; the menu-bar "Earnings" item opens Earn; "Settings…" (Cmd-,) and the menu-bar Settings item
@@ -1100,6 +1109,82 @@ projections (SPEC-044-R004), colour never the only signal.
   (including OSC 52) MUST be ignored; deliberate user Copy remains available. Earn, Models
   and Terminal follow §3.2 copy rules, with no $/time projections or machine
   reason codes.
+
+### 3.2.3 Agents and Tasks
+
+The §3.2 copy rules apply to Agents, Tasks, their editors, transcripts and
+errors. These surfaces MUST NOT introduce privacy claims.
+
+- **SPEC-025-R017 Named Agents.** Agents MUST offer a list, an editor and
+  an in-memory conversation. Each named agent stores its name, instructions
+  (system prompt), model target, optional user-chosen workspace folder, tools
+  and sampling defaults. The only model targets are **This Mac** and
+  **Malibu network**. This Mac MUST reuse the loaded provider model through
+  loopback `/v1/chat/completions`, with exactly one
+  `X-MacProvider-Origin: local-app` and all SPEC-001-R011 customer-priority
+  semantics. It is available only while the loaded runtime advertises
+  guaranteed tool selection as R011 requires; `local_preempted` ends the turn.
+  This work MUST never count as earnings. Malibu network MUST use
+  `https://api.malibu.tech/v1` and the saved buyer key from the R012 Keychain
+  service. Its model picker MUST apply R012's published
+  `capabilities.tools: true` and minimum 32,768-token context filter, without
+  inferring missing metadata. Model-target transports MUST reuse the existing
+  Chat transport and gateway client rather than fork their protocol logic.
+  Tools are limited to the existing read-only workspace registry with all
+  R011 descriptor-relative no-follow, byte, call, round and time bounds,
+  plus user-configured R018 MCP servers. There are no app-provided shell,
+  file-mutation or arbitrary-network tools. Tool results are untrusted data,
+  never instructions or permission. Stop MUST cancel inference and tools;
+  conversations remain bounded in memory like Chat and MUST NOT enter logs
+  or diagnostics. Agent definitions MUST be stored in Application Support
+  in a `0700` directory with `0600` files; the buyer key MUST NOT be stored
+  in agent definitions.
+- **SPEC-025-R018 MCP client.** User-configured MCP servers MUST use stdio
+  only, with user-entered command and arguments. Their environment MUST be
+  built with `ProcessEnvironmentSanitizer` plus user-entered environment
+  variables; inherited credentials MUST NOT be forwarded implicitly. The
+  in-house JSON-RPC 2.0 client supports `initialize`,
+  `notifications/initialized`, `tools/list` and `tools/call`, without adding a
+  package dependency. It MUST bound message size, request time and server
+  lifetime, namespace tool names per server, validate argument schemas before
+  executing calls, and terminate the server's process group when the agent
+  session ends or the app quits. Each interactive MCP call MUST visibly show
+  the server, tool and arguments and require **Allow once**, **Allow for this
+  session**, or **Deny**. Session permission is scoped to that server/tool in
+  the current session and MUST NOT survive session end. Denial executes no
+  call. Tool results MUST never grant permission. Failure to start, timeout,
+  oversized messages, malformed JSON-RPC or server exit MUST show a visible
+  error and stop further execution for that session. Regression tests MUST
+  exercise the protocol and lifecycle against a fake stdio server in a
+  temporary directory, including process-group termination and approval gates.
+- **SPEC-025-R019 Tasks.** A task stores an agent reference, prompt, schedule,
+  enabled flag and explicit pre-approved MCP tool allow-list chosen at task
+  creation. Supported schedules are once at a date and time, hourly, daily
+  at a time, and weekdays at a time, interpreted in the device-local timezone.
+  Schedule computation MUST accept an injected clock and timezone for tests,
+  including DST transitions. Tasks run only while Malibu is running; they
+  MUST NOT add a LaunchAgent. At launch, any missed schedule runs at most
+  once and is durably advanced so repeated launches cannot replay it.
+  **Run now** MUST be available. There is at most one active run per task
+  and global task concurrency is one. Each run MUST cap inference/tool rounds,
+  wall time and total requested output tokens. Unattended runs may call only
+  their task's explicit pre-approved MCP tools; any other MCP call visibly
+  fails the run without execution or an interactive approval prompt. Quitting
+  MUST cancel active inference and tool processing and terminate owned MCP
+  process groups cleanly. Each run records start, end, status (**succeeded**,
+  **failed** with a reason, **preempted**, or **skipped**) and transcript.
+  Run history and transcripts are local `0600` files in a `0700` directory,
+  bounded to the last 20 runs per task; users can view history and transcripts.
+  Transcripts MUST NOT enter logs or diagnostics exports. The task editor
+  MUST state in one plain line that Malibu network runs are billed to the
+  buyer key. This Mac runs are local work and MUST never count as earnings.
+- **SPEC-025-R020 Agent and Task navigation.** The sidebar MUST list **Chat,
+  Terminal, Agents, Tasks, Models, Earn**, followed by the separate **Settings**
+  and **Diagnostics** utility group. Persisted Agents and Tasks selections
+  MUST restore their destinations; existing selection migration and the
+  default Chat destination MUST remain functional. Create is outside this
+  revision. Navigation tests MUST verify order, labels and persisted selection
+  migration.
 
 ### 3.3 Updates — CLI-owned signed compatibility set
 
