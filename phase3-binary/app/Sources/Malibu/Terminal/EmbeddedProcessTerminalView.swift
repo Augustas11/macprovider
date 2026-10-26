@@ -65,8 +65,8 @@ final class EmbeddedProcessTerminalView: TerminalView, @preconcurrency TerminalV
     func rangeChanged(source: TerminalView, startY: Int, endY: Int) {}
 
     func clipboardCopy(source: TerminalView, content: Data) {
-        guard let string = String(data: content, encoding: .utf8) else { return }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.writeObjects([string as NSString])
+        // SwiftTerm invokes this delegate for OSC 52 received from terminal
+        // output. Only explicit user Copy may write the system pasteboard;
+        // TerminalView.copy(_:) handles that selection action independently.
     }
 }

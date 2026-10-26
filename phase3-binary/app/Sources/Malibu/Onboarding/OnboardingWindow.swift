@@ -87,7 +87,7 @@ private struct OnboardingRootView: View {
                         .font(.system(size: 13, weight: .medium))
                         .tracking(0.5)
                         .foregroundStyle(.secondary)
-                    Text("Private AI on your Mac. It earns while you're not using it.")
+                    Text("Private local Chat on your Mac. Earn by sharing spare capacity.")
                         .font(.system(size: 28, weight: .semibold))
                 }
             }
