@@ -1,5 +1,49 @@
 # Coordinator Release Train — Pearl coordinator / gateway
 
+## Provider-only Messages compatibility — source merged (2026-10-26)
+
+[#2161](https://github.com/Augustas11/macprovider/pull/2161) merged as
+`9678fc21d` after all 28 checks in
+[CI run 40261607346](https://github.com/Augustas11/macprovider/actions/runs/40261607346)
+passed; `antfleet-ops` approved and merged it. Issue
+[#2160](https://github.com/Augustas11/macprovider/issues/2160) is closed.
+
+This adds `/v1/messages` to the provider loopback server so local Claude Code
+sessions share the existing model runtime, local priority and unbilled accounting.
+It changes no coordinator/gateway runtime code and adds no Pearl runtime payload.
+The next provider CLI/app cut carries it; a Pearl runtime release alone does not
+enable the endpoint. Track its signed-release and real paying-buyer acceptance in
+the [CLI release train](cli-release-train.md#next-cli-release--net-changes-vs-18272-tracked-2026-10-26).
+Studio lab acceptance passed, but no live deployment is claimed by this merge.
+
+## Pending runtime inclusion — public privacy disclosures (2026-10-26)
+
+| PR | Issue | Coordinator/gateway change | Status |
+|---|---|---|---|
+| [#2159](https://github.com/Augustas11/macprovider/pull/2159) | #2156 | Gateway-embedded `/privacy`, `/docs`, and account disclosures distinguish default plaintext routing from the opt-in SPEC-049 privacy class. Matching signup-console copy and SPEC-006 preserve provider-runtime plaintext access, relay-visible metadata, assurance limits, ZDR, retention, and training disclosures. | merged (`2236eb74a`); Pearl runtime deployment pending |
+
+CI run [40259134915](https://github.com/Augustas11/macprovider/actions/runs/40259134915)
+passed on attempt 2; `antfleet-ops` approved and merged the PR. This is a
+release-content handoff, not live-page acceptance. Include `2236eb74a` in the
+next reviewed Pearl runtime source. The gateway embeds these Markdown templates;
+a provider CLI/app release alone does not publish them.
+
+Use `scripts/ops/pearl-runtime.sh status`, then `next` / `next --run`, following
+[the Pearl rollout runbook](../runbooks/pearl-coordinator-rollout.md). Refresh
+live runtime and consumed tag identities before selecting the release tag and
+state the expected downtime before applying it.
+
+After deployment, inspect the public `/privacy`, `/docs`, and `/account` pages.
+Confirm they distinguish default plaintext access from opt-in, chat-completions-only
+privacy using the encrypting `relay-blind-client`; the gateway and coordinator
+cannot read privacy-class request or response content, while the provider runtime
+still reads plaintext to infer. Check that the copy does not promise provider-blind inference or encryption
+that excludes the provider, and that ZDR, retention, and training limits remain
+explicit. Verify the matching `frontdoor/console/index.html` signup copy is
+published too; the embedded gateway-page check does not establish front-door
+deployment. Record
+the runtime identity and public-page result here before marking this row shipped.
+
 ## Qwen2-VL-2B promotion (#2016)
 
 Operator decision 2026-10-17: promote `mlx-community/qwen2-vl-2b-instruct-4bit`

@@ -4,6 +4,14 @@ import XCTest
 @testable import Malibu
 
 final class CLIUpdateRunnerTests: XCTestCase {
+    func testRollbackRelaunchCannotQuitNewerRunningApp() {
+        XCTAssertFalse(CLIUpdateRunner.mayRelaunch(runningVersion: "1.8.280", installedVersion: "1.8.279"))
+        XCTAssertTrue(CLIUpdateRunner.mayRelaunch(runningVersion: "1.8.279", installedVersion: "1.8.280"))
+        XCTAssertTrue(CLIUpdateRunner.mayRelaunch(runningVersion: "1.8.280", installedVersion: "1.8.280"))
+        XCTAssertFalse(CLIUpdateRunner.mayRelaunch(runningVersion: nil, installedVersion: "1.8.280"))
+        XCTAssertFalse(CLIUpdateRunner.mayRelaunch(runningVersion: "1.8.280", installedVersion: "unknown"))
+    }
+
     func testLegacyCLIUsesPinnedCompleteInstaller() throws {
         XCTAssertEqual(
             try CLIUpdateRunner.strategy(
