@@ -1335,7 +1335,7 @@ func identityPinFor(publicKey ed25519.PublicKey, record KeyRecord) IdentityPin {
 		IdentityPublicKey: base64.RawURLEncoding.EncodeToString(publicKey),
 		Fingerprint:       base64.RawURLEncoding.EncodeToString(fingerprint[:]),
 		Models:            append([]string(nil), record.Models...),
-		EndpointFamilies:  []string{EndpointChatCompletions},
+		EndpointFamilies:  append([]string(nil), record.EndpointFamilies...),
 		NotBeforeUnix:     0,
 		ExpiresAtUnix:     math.MaxInt64,
 	}

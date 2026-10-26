@@ -5,6 +5,7 @@ import Combine
 final class MenuBarController {
     enum Action {
         case openDashboard
+        case openEarnings
         case openOnboarding
         case pause
         case resume
@@ -116,7 +117,8 @@ final class MenuBarController {
         menu.addItem(dismissBadgeItem)
 
         menu.addItem(.separator())
-        menu.addItem(action("Open Dashboard", key: "d") { self.onAction(.openDashboard) })
+        menu.addItem(action("Open Malibu", key: "d") { self.onAction(.openDashboard) })
+        menu.addItem(action("Earnings", key: "") { self.onAction(.openEarnings) })
         menu.addItem(action(String(localized: "Settings…", comment: "Menu bar settings action"), key: ",") { self.onAction(.openSettings) })
         menu.addItem(action("Set up…", key: "o") { self.onAction(.openOnboarding) })
         menu.addItem(action("Reset Provider Service…", key: "") { self.onAction(.resetProviderService) })

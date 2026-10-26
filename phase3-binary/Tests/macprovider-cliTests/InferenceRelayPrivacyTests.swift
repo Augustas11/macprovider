@@ -127,6 +127,222 @@ final class InferenceRelayPrivacyTests: XCTestCase {
         try assertNoCanary(frames)
     }
 
+    func testPrivateAgentFamiliesTranslateOnlyInsideEncryptedProviderPipeline() async throws {
+        for family in ["responses", "messages"] {
+            for stream in [false, true] {
+                let harness = try await Harness(model: model, session: session, content: completionCanary, inputTokens: 4)
+                let original: [String: Any] = family == "responses"
+                    ? ["model": model, "input": promptCanary, "max_output_tokens": 4, "stream": stream, "store": false]
+                    : ["model": model, "messages": [["role": "user", "content": promptCanary]], "max_tokens": 4, "stream": stream]
+                let buyer = try goldenBuyerPrivateKey()
+                let message = try harness.message(
+                    requestID: "private-\(family)-\(stream)", stream: stream, privacy: true,
+                    prompt: promptCanary, buyerPrivateKey: buyer,
+                    endpointFamily: family, originalBody: original
+                )
+                let relay = harness.relay(privacyMode: true, probe: ScriptedDecryptProbe(traced: false))
+                try await relay.handleInferenceRequest(message)
+                await assertIdle(relay)
+                let frames = await harness.frames.values
+                XCTAssertEqual(frames.last?["status"] as? String, "complete", "\(family), stream=\(stream)")
+                let material = try responseMaterial(message: message, buyerPrivateKey: buyer, providerPublic: harness.providerPublic)
+                let encrypted: [[String: Any]]
+                if stream {
+                    encrypted = try openPrivacyStream(frames).privacy
+                } else {
+                    let body = try XCTUnwrap(frames.first { $0["type"] as? String == "inference_response_chunk" }?["data"] as? String)
+                    encrypted = try XCTUnwrap(jsonObject(Data(body.utf8))["frames"] as? [[String: Any]])
+                }
+                var plaintext = ""
+                for (index, frame) in encrypted.dropLast().enumerated() {
+                    plaintext += String(decoding: try decryptFrame(frame, material: material, message: message,
+                        stream: stream, seq: UInt64(index), final: false), as: UTF8.self)
+                }
+                XCTAssertTrue(plaintext.contains(completionCanary))
+                XCTAssertFalse(plaintext.contains("chat.completion"))
+                if stream {
+                    XCTAssertTrue(plaintext.contains(family == "responses" ? "event: response.completed" : "event: message_stop"))
+                } else {
+                    let object = try jsonObject(Data(plaintext.utf8))
+                    XCTAssertEqual(object[family == "responses" ? "object" : "type"] as? String,
+                                   family == "responses" ? "response" : "message")
+                }
+                let prepared = await harness.runtime.lastPrepared()
+                XCTAssertEqual(prepared?.ingestProvenance, .privacy)
+                XCTAssertNil(prepared?.conversationKey)
+                await assertCompletionCount(harness.runtime, 1)
+                try assertNoCanary(frames)
+            }
+        }
+    }
+
+    func testPrivateAgentToolUseAndToolResultRoundTrip() async throws {
+        let callID = "call_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        let tool = macprovider_cli.ToolCall(id: callID, functionName: "read_file", arguments: "{\"path\":\"\(promptCanary)\"}")
+        for family in ["responses", "messages"] {
+            for stream in [false, true] {
+                let harness = try await Harness(model: model, session: session, content: completionCanary,
+                    inputTokens: 4, toolCalls: [tool])
+                var original: [String: Any] = family == "responses"
+                    ? ["model": model, "input": promptCanary, "max_output_tokens": 4, "stream": stream,
+                       "tools": [["type": "function", "name": "read_file", "parameters": ["type": "object"]]]]
+                    : ["model": model, "messages": [["role": "user", "content": promptCanary]], "max_tokens": 4,
+                       "stream": stream, "tools": [["name": "read_file", "input_schema": ["type": "object"]]]]
+                let buyer = try goldenBuyerPrivateKey()
+                let message = try harness.message(requestID: "tool-first-\(family)-\(stream)", stream: stream,
+                    privacy: true, prompt: promptCanary, buyerPrivateKey: buyer,
+                    endpointFamily: family, originalBody: original)
+                let relay = harness.relay(privacyMode: true, probe: ScriptedDecryptProbe(traced: false))
+                try await relay.handleInferenceRequest(message)
+                await assertIdle(relay)
+                let firstFrames = await harness.frames.values
+                XCTAssertEqual(firstFrames.last?["status"] as? String, "complete")
+                let material = try responseMaterial(message: message, buyerPrivateKey: buyer, providerPublic: harness.providerPublic)
+                let encrypted: [[String: Any]]
+                if stream { encrypted = try openPrivacyStream(firstFrames).privacy }
+                else {
+                    let body = try XCTUnwrap(firstFrames.first { $0["type"] as? String == "inference_response_chunk" }?["data"] as? String)
+                    encrypted = try XCTUnwrap(jsonObject(Data(body.utf8))["frames"] as? [[String: Any]])
+                }
+                var output = ""
+                for (index, frame) in encrypted.dropLast().enumerated() {
+                    output += String(decoding: try decryptFrame(frame, material: material, message: message,
+                        stream: stream, seq: UInt64(index), final: false), as: UTF8.self)
+                }
+                XCTAssertTrue(output.contains(callID))
+                XCTAssertTrue(output.contains(family == "responses" ? "function_call" : "tool_use"))
+                try assertNoCanary(firstFrames)
+                if family == "responses" {
+                    original["input"] = [
+                        ["type": "function_call", "call_id": callID, "name": tool.functionName, "arguments": tool.arguments],
+                        ["type": "function_call_output", "call_id": callID, "output": completionCanary]
+                    ]
+                } else {
+                    original["messages"] = [
+                        ["role": "assistant", "content": [["type": "tool_use", "id": callID,
+                           "name": tool.functionName, "input": ["path": promptCanary]]]],
+                        ["role": "user", "content": [["type": "tool_result", "tool_use_id": callID, "content": completionCanary]]]
+                    ]
+                }
+                await harness.frames.removeAll()
+                let second = try harness.message(requestID: "tool-second-\(family)-\(stream)", stream: stream,
+                    privacy: true, prompt: promptCanary, endpointFamily: family, originalBody: original)
+                try await relay.handleInferenceRequest(second)
+                await assertIdle(relay)
+                let lastPrepared = await harness.runtime.lastPrepared()
+                let prepared = try XCTUnwrap(lastPrepared)
+                XCTAssertEqual(prepared.messages.last?.role, .tool)
+                XCTAssertEqual(prepared.messages.last?.toolCallID, callID)
+                XCTAssertEqual(prepared.messages.last?.content, completionCanary)
+                XCTAssertEqual(prepared.ingestProvenance, .privacy)
+                XCTAssertNil(prepared.conversationKey)
+                let secondFrames = await harness.frames.values
+                XCTAssertEqual(secondFrames.last?["status"] as? String, "complete")
+                try assertNoCanary(secondFrames)
+            }
+        }
+    }
+
+    func testPrivateCodexCustomToolAndReasoningHistoryRoundTrip() async throws {
+        let callID = "call_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        let tool = macprovider_cli.ToolCall(id: callID, functionName: "apply_patch", arguments: "{\"input\":\"\(promptCanary)\"}")
+        for family in ["responses"] {
+            for stream in [false, true] {
+                let harness = try await Harness(model: model, session: session, content: completionCanary,
+                    inputTokens: 4, toolCalls: [tool])
+                var original: [String: Any] = ["model": model, "input": promptCanary,
+                    "max_output_tokens": 4, "stream": stream, "reasoning": ["effort": "low"],
+                    "include": ["reasoning.encrypted_content"],
+                    "tools": [["type": "custom", "name": "apply_patch", "format": ["type": "text"]], ["type": "web_search"]]]
+                let buyer = try goldenBuyerPrivateKey()
+                let message = try harness.message(requestID: "tool-first-\(family)-\(stream)", stream: stream,
+                    privacy: true, prompt: promptCanary, buyerPrivateKey: buyer,
+                    endpointFamily: family, originalBody: original)
+                let relay = harness.relay(privacyMode: true, probe: ScriptedDecryptProbe(traced: false))
+                try await relay.handleInferenceRequest(message)
+                await assertIdle(relay)
+                let firstFrames = await harness.frames.values
+                XCTAssertEqual(firstFrames.last?["status"] as? String, "complete")
+                let material = try responseMaterial(message: message, buyerPrivateKey: buyer, providerPublic: harness.providerPublic)
+                let encrypted: [[String: Any]]
+                if stream { encrypted = try openPrivacyStream(firstFrames).privacy }
+                else {
+                    let body = try XCTUnwrap(firstFrames.first { $0["type"] as? String == "inference_response_chunk" }?["data"] as? String)
+                    encrypted = try XCTUnwrap(jsonObject(Data(body.utf8))["frames"] as? [[String: Any]])
+                }
+                var output = ""
+                for (index, frame) in encrypted.dropLast().enumerated() {
+                    output += String(decoding: try decryptFrame(frame, material: material, message: message,
+                        stream: stream, seq: UInt64(index), final: false), as: UTF8.self)
+                }
+                XCTAssertTrue(output.contains(callID))
+                XCTAssertTrue(output.contains("custom_tool_call"))
+                XCTAssertFalse(output.contains("response.function_call_arguments.delta"))
+                try assertNoCanary(firstFrames)
+                original["input"] = [
+                    ["type": "message", "role": "user", "content": promptCanary],
+                    ["type": "reasoning", "content": [["type": "reasoning_text", "text": "Check patch."]], "summary": [], "encrypted_content": "opaque-history"],
+                    ["type": "custom_tool_call", "call_id": callID, "name": tool.functionName, "input": promptCanary],
+                    ["type": "custom_tool_call_output", "call_id": callID, "output": completionCanary]
+                ]
+                await harness.frames.removeAll()
+                let second = try harness.message(requestID: "tool-second-\(family)-\(stream)", stream: stream,
+                    privacy: true, prompt: promptCanary, endpointFamily: family, originalBody: original)
+                try await relay.handleInferenceRequest(second)
+                await assertIdle(relay)
+                let lastPrepared = await harness.runtime.lastPrepared()
+                let prepared = try XCTUnwrap(lastPrepared)
+                XCTAssertEqual(prepared.messages.last?.role, .tool)
+                XCTAssertEqual(prepared.messages.last?.toolCallID, callID)
+                XCTAssertEqual(prepared.messages.last?.content, completionCanary)
+                XCTAssertEqual(prepared.ingestProvenance, .privacy)
+                XCTAssertNil(prepared.conversationKey)
+                let secondFrames = await harness.frames.values
+                XCTAssertEqual(secondFrames.last?["status"] as? String, "complete")
+                try assertNoCanary(secondFrames)
+            }
+        }
+    }
+
+    func testPrivateEndpointFamilySubstitutionFailsAuthenticationBeforeInference() async throws {
+        let harness = try await Harness(model: model, session: session, content: completionCanary, inputTokens: 4)
+        var message = try harness.message(
+            requestID: "family-substitution", stream: false, privacy: true, prompt: promptCanary,
+            endpointFamily: "responses",
+            originalBody: ["model": model, "input": promptCanary, "max_output_tokens": 4]
+        )
+        var envelope = try jsonObject(Data(try XCTUnwrap(message["body"] as? String).utf8))
+        envelope["endpoint_family"] = "messages"
+        let changed = try JSONSerialization.data(withJSONObject: envelope, options: [.sortedKeys])
+        message["body"] = String(decoding: changed, as: UTF8.self)
+        var context = try XCTUnwrap(message["relay_blind_context"] as? [String: Any])
+        context["envelope_digest"] = RelayBlindBase64URL.encode(Data(SHA256.hash(data: changed)))
+        message["relay_blind_context"] = context
+        let relay = harness.relay(privacyMode: true, probe: ScriptedDecryptProbe(traced: false))
+        try await relay.handleInferenceRequest(message)
+        await assertIdle(relay)
+        let frames = await harness.frames.values
+        try assertBoundRejection(frames, code: "relay_blind_ciphertext_invalid")
+        await assertCompletionCount(harness.runtime, 0)
+        try assertNoCanary(frames)
+    }
+
+    func testPrivateAgentOmittedOutputCapIsBoundedByAuthenticatedEnvelope() async throws {
+        let harness = try await Harness(model: model, session: session, content: completionCanary, inputTokens: 4)
+        let message = try harness.message(
+            requestID: "family-omitted-cap", stream: false, privacy: true, prompt: promptCanary,
+            endpointFamily: "responses", originalBody: ["model": model, "input": promptCanary]
+        )
+        let relay = harness.relay(privacyMode: true, probe: ScriptedDecryptProbe(traced: false))
+        try await relay.handleInferenceRequest(message)
+        await assertIdle(relay)
+        let prepared = await harness.runtime.lastPrepared()
+        XCTAssertEqual(prepared?.maxTokens, 4)
+        let frames = await harness.frames.values
+        XCTAssertEqual(frames.last?["status"] as? String, "complete")
+        try assertNoCanary(frames)
+    }
+
     func testMarkerMissingInPrivacyModeRejected() async throws {
         let harness = try await Harness(model: model, session: session, content: completionCanary, inputTokens: 4)
         let relay = harness.relay(privacyMode: true, probe: ScriptedDecryptProbe(traced: false))
@@ -1059,16 +1275,18 @@ private actor PrivacyTestRuntime: ModelRuntimeServing {
     private let content: String
     private let cancelAfterChunk: Bool
     private let modelHash: String?
+    private let toolCalls: [macprovider_cli.ToolCall]?
     private var completions = 0
     private var prepared: ChatCompletionRequest?
     private var perfTraceInstalled = false
 
-    init(inputTokens: Int, model: String, content: String, cancelAfterChunk: Bool, modelHash: String? = nil) {
+    init(inputTokens: Int, model: String, content: String, cancelAfterChunk: Bool, modelHash: String? = nil, toolCalls: [macprovider_cli.ToolCall]? = nil) {
         self.inputTokens = inputTokens
         self.model = model
         self.content = content
         self.cancelAfterChunk = cancelAfterChunk
         self.modelHash = modelHash
+        self.toolCalls = toolCalls
     }
 
     func completionCount() -> Int { completions }
@@ -1117,6 +1335,10 @@ private actor PrivacyTestRuntime: ModelRuntimeServing {
         completions += 1
         perfTraceInstalled = EgressPerfTraceKey.current != nil
         onChunk(.content(content))
+        for (index, tool) in (toolCalls ?? []).enumerated() {
+            onChunk(.toolCallDelta(StreamToolCallDelta(index: index, id: tool.id, type: "function",
+                functionName: tool.functionName, arguments: tool.arguments)))
+        }
         if cancelAfterChunk {
             while !shouldCancel() {
                 try await Task.sleep(nanoseconds: 5_000_000)
@@ -1129,9 +1351,10 @@ private actor PrivacyTestRuntime: ModelRuntimeServing {
     private func result() -> CompletionResult {
         CompletionResult(
             content: content,
-            finishReason: "stop",
+            finishReason: toolCalls == nil ? "stop" : "tool_calls",
             promptTokens: inputTokens,
             completionTokens: 2,
+            toolCalls: toolCalls,
             settlementDisposition: .eligibleOwner
         )
     }
@@ -1154,12 +1377,13 @@ private struct Harness {
         content: String,
         inputTokens: Int,
         cancelAfterChunk: Bool = false,
-        modelHash: String? = nil
+        modelHash: String? = nil,
+        toolCalls: [macprovider_cli.ToolCall]? = nil
     ) async throws {
         let root = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
             .appendingPathComponent("macprovider-privacy-relay-\(UUID().uuidString)", isDirectory: true)
         let journalDirectory = root.appendingPathComponent("journal", isDirectory: true)
-        let keys = try RelayBlindKeyManager(directory: root, models: [model])
+        let keys = try RelayBlindKeyManager(directory: root, models: [model], persistAgreementKey: false)
         let providerRuntime = RelayBlindProviderRuntime(
             keyManager: keys,
             journal: try RelayBlindExecutionJournal(directory: journalDirectory),
@@ -1169,7 +1393,7 @@ private struct Harness {
         self.journalDirectory = journalDirectory
         self.runtime = PrivacyTestRuntime(
             inputTokens: inputTokens, model: model, content: content, cancelAfterChunk: cancelAfterChunk,
-            modelHash: modelHash
+            modelHash: modelHash, toolCalls: toolCalls
         )
         self.frames = PrivacyFrameRecorder()
         self.providerPublic = try keys.currentRecord().publicKey
@@ -1219,7 +1443,9 @@ private struct Harness {
         privacy: Bool,
         prompt: String,
         buyerPrivateKey: String? = nil,
-        marker: String? = nil
+        marker: String? = nil,
+        endpointFamily: String = "chat_completions",
+        originalBody: [String: Any]? = nil
     ) throws -> [String: Any] {
         let record = try keys.currentRecord()
         let buyer: Curve25519.KeyAgreement.PrivateKey
@@ -1252,7 +1478,8 @@ private struct Harness {
             requestReplayNonce: replay,
             issuedAtUnix: now,
             ciphertext: Data([0]),
-            tag: Data(repeating: 0, count: 16)
+            tag: Data(repeating: 0, count: 16),
+            endpointFamilyValue: endpointFamily
         )
         let shared = try buyer.sharedSecretFromKeyAgreement(
             with: Curve25519.KeyAgreement.PublicKey(rawRepresentation: record.publicKey)
@@ -1270,7 +1497,7 @@ private struct Harness {
             sharedInfo: Data("macprovider/spec041/request/aead-nonce/v1".utf8),
             outputByteCount: 12
         )
-        let inner: [String: Any] = [
+        let inner: [String: Any] = originalBody ?? [
             "model": model,
             "messages": [["role": "user", "content": prompt]],
             "max_tokens": outputCap,
@@ -1286,7 +1513,7 @@ private struct Harness {
         let envelopeObject: [String: Any] = [
             "version": RelayBlindEnvelope.version,
             "mode": RelayBlindEnvelope.mode,
-            "endpoint_family": RelayBlindEnvelope.endpointFamily,
+            "endpoint_family": endpointFamily,
             "model": model,
             "provider_model": model,
             "stream": stream,

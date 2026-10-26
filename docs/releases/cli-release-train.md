@@ -72,6 +72,7 @@ Live fleet target: **1.8.272**. Include the merged changes below in the next CLI
 |---|---|---|---|
 | #2158 | #2155 | Malibu.app retires duplicate app/menu-bar instances after updates: launch-time version election, successor readiness acknowledgement, 35-second quit deadline and forced stale-app exit after 40 seconds; newer running app survives an older rollback launch (SPEC-025-R013/R014). | merged (`79c1c81f6`); next CLI/app cut; signed live acceptance pending |
 | #2161 | #2160 (closed) | Provider-local `/v1/messages` for Claude Code: tools, thinking, JSON/SSE errors and stop metadata over the shared runtime; local priority, cancellation and unbilled accounting; status capability (SPEC-001-R009/R011, SPEC-025-R015). | merged (`9678fc21d`); next CLI/app cut; signed live acceptance pending |
+| [#2165](https://github.com/Augustas11/macprovider/pull/2165) | #2157 | Managed coding-agent privacy: consumer encrypts original Chat, Responses and Messages bodies; provider-local conversion; signed endpoint-family binding; protected local credentials, budget admission and verified assurance UI. | merged (`dae190161`); next CLI/app cut plus coordinated Pearl runtime; production acceptance pending |
 
 **#2160 release acceptance:** all 28 checks in
 [CI run 40261607346](https://github.com/Augustas11/macprovider/actions/runs/40261607346)
@@ -118,6 +119,46 @@ signed greedy parent, while that qualification requires representative replay.
 This bootstrap dependency remains unresolved; no qualification exemption,
 stale-evidence rebind or MTP-off deployment is authorized by this train record.
 The exploratory goal matrix does not constitute admission qualification.
+## Coding-agent privacy release acceptance — issue 2157
+
+[#2165](https://github.com/Augustas11/macprovider/pull/2165) merged as
+`dae190161f6b50680640cec77b81f82ad8b1e41b`; `antfleet-ops` approved and
+merged the reviewed head `f6b292d30` after all 28 checks in
+[CI run 40282107873](https://github.com/Augustas11/macprovider/actions/runs/40282107873)
+passed. One unchanged rerun passed a pre-existing coordinator keepalive race;
+21 focused Swift XCTest cases also passed on the authorized alternate Mac.
+
+On operator instruction, issue [#2157](https://github.com/Augustas11/macprovider/issues/2157)
+is closed with remaining release work tracked here and in the
+[coordinator train](coordinator-release-train.md#coding-agent-privacy--pending-runtime-inclusion-2026-10-26).
+Source merge and issue closure do not establish live privacy for coding agents.
+Both the signed CLI/Malibu.app cut and matching coordinator/gateway runtime must
+include `dae190161`; neither release alone delivers the feature.
+
+Release through `scripts/ops/cli-release.sh status`, then `next` and
+`next --run`, with the matching Pearl rollout tracked in the coordinator train.
+Before promotion, complete and record these acceptance gates against released,
+signed bytes:
+
+- Launch Codex and Claude Code from Malibu.app Terminal and Connected apps;
+  complete real multi-turn tool-using tasks through the production gateway.
+  Verify original Responses/Messages bodies enter the encrypted path, with
+  translation only inside the reserved provider runtime.
+- Verify authenticated served privacy/assurance labels and relay logs containing
+  envelopes without request/response content. The provider still reads plaintext
+  to infer. Require `code_bound_attested` on a supported macOS 27 provider and
+  verify that an unmet requirement fails closed.
+- Exercise budget admission, invalid/revoked identity or family mismatch,
+  interrupted/truncated streams and postdispatch uncertainty: no plaintext
+  fallback, silent downgrade, failover or automatic resubmission. Verify agents
+  receive only protected local tokens and managed legacy profiles migrate safely.
+- Preserve ordinary Chat-only key/pin compatibility and existing accounting and
+  settlement gates. Record signed runtime identities and acceptance evidence in
+  both trains before marking the feature shipped.
+
+Signed rollout and these real-agent production gates remain pending. Reuse
+existing qualification evidence; a new cut requires identity binding, not an
+unrelated inference benchmark.
 
 ## Shipped v1.8.272 — net changes vs 1.8.270
 

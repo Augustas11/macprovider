@@ -207,20 +207,16 @@ jobs:
           read -r malibu_app_version malibu_app_build <<<"$version_line"
           cd candidate/phase3-binary/app
           "$RUNNER_TEMP/xcodegen-2.45.4/xcodegen/bin/xcodegen" generate
-          package_resolution_args=(archive)
-          if [ -f Package.resolved ]; then
-            resolved_dir="Malibu.xcodeproj/project.xcworkspace/xcshareddata/swiftpm"
-            mkdir -p "$resolved_dir"
-            cp Package.resolved "$resolved_dir/Package.resolved"
-            package_resolution_args+=(-onlyUsePackageVersionsFromResolvedFile)
-          fi
+          bash ../../../control/scripts/resolve-app-packages.sh "$PWD" "$RUNNER_TEMP/MalibuSourcePackages"
           xcodebuild \
+            -clonedSourcePackagesDirPath "$RUNNER_TEMP/MalibuSourcePackages" \
+            -onlyUsePackageVersionsFromResolvedFile -disableAutomaticPackageResolution \
             -project Malibu.xcodeproj \
             -scheme Malibu \
             -configuration Release \
             -destination "generic/platform=macOS" \
             -archivePath "$RUNNER_TEMP/Malibu.xcarchive" \
-            "${package_resolution_args[@]}" \
+            archive \
             ARCHS=arm64 \
             CODE_SIGNING_ALLOWED=NO \
             MARKETING_VERSION="$malibu_app_version" \

@@ -235,7 +235,10 @@ MALIBU_BUILD_STEP = r'''        if: ${{ github.event.inputs.promote_run_id == ''
           read -r version build <<<"$version_line"
           cd phase3-binary/app
           "$RUNNER_TEMP/xcodegen-2.45.4/xcodegen/bin/xcodegen" generate
+          bash ../../scripts/resolve-app-packages.sh "$PWD" "$RUNNER_TEMP/MalibuSourcePackages"
           xcodebuild \
+            -clonedSourcePackagesDirPath "$RUNNER_TEMP/MalibuSourcePackages" \
+            -onlyUsePackageVersionsFromResolvedFile -disableAutomaticPackageResolution \
             -project Malibu.xcodeproj \
             -scheme Malibu \
             -configuration Release \
@@ -746,8 +749,10 @@ if "scripts/verify-malibu-release-artifacts.sh" not in publish:
 for forbidden in ("Sparkle", "SUFeedURL", "SUPublicEDKey"):
     if forbidden in current_app:
         raise SystemExit(f"current Malibu app retains legacy update authority: {forbidden}")
-if re.search(r"^packages:\s*", current_app, re.MULTILINE):
-    raise SystemExit("current Malibu app must remain dependency-free")
+# The build-free package guard enforces the sole reviewed SwiftTerm exception.
+import runpy
+package_guard = runpy.run_path(str(pathlib.Path(sys.argv[1]).parent.parent.parent / "scripts/verify-app-package-lock.py"))
+package_guard["verify"](pathlib.Path(sys.argv[1]).parent.parent.parent / "phase3-binary/app")
 app_sign = publish.split("- name: Sign + notarize + staple Malibu.app", 1)[1].split(
     "\n      - name:", 1
 )[0]
@@ -1997,9 +2002,9 @@ fi
 bash "$input_guard" v1.2.3 false true | grep -Fxq 'v1.2.3 false true'
 
 mkdir -p "$work/reviewed/scripts" "$work/reviewed/phase3-binary/app"
-cp "$root/scripts/verify-app-build-inputs.sh" "$work/reviewed/scripts/"
+cp "$root/scripts/verify-app-build-inputs.sh" "$root/scripts/verify-app-package-lock.py" "$work/reviewed/scripts/"
 cp "$root/phase3-binary/Package.resolved" "$work/reviewed/phase3-binary/"
-cp "$root/phase3-binary/app/project.yml" "$work/reviewed/phase3-binary/app/"
+cp "$root/phase3-binary/app/project.yml" "$root/phase3-binary/app/Package.resolved" "$work/reviewed/phase3-binary/app/"
 git -C "$work/reviewed" init -q
 git -C "$work/reviewed" config user.name release-test
 git -C "$work/reviewed" config user.email release-test@example.invalid

@@ -29,7 +29,7 @@ final class DashboardWindowE2ETests: XCTestCase {
         NSApp.activate(ignoringOtherApps: true)
         Self.spin(0.8)
 
-        XCTAssertEqual(navigation.selection, .dashboard, "the window opens on Dashboard")
+        XCTAssertEqual(navigation.selection, .chat, "the window opens on Chat")
         XCTAssertEqual(AgentSnapshotPresenter.statusPill(agent.snapshot).label, "Serving")
         XCTAssertFalse(DashboardCopy.showsStatusNotice(agent.snapshot))
         XCTAssertNotNil(
@@ -59,7 +59,7 @@ final class DashboardWindowE2ETests: XCTestCase {
             Self.assertRenderedCopy(text, mustContain: [section.title, "Serving"])
         }
 
-        navigation.show(.dashboard)
+        navigation.show(.earn)
         Self.spin(0.4)
         Self.assertRenderedCopy(Self.ocr(try Self.writePNG(Self.capture(window), to: artifacts.appendingPathComponent("10-dashboard-again.png"))),
                                 mustContain: ["Earnings (USDC)", "Your model"])
