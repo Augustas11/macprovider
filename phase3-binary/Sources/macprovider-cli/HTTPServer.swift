@@ -752,7 +752,9 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     "endpoint": "/v1/messages", "stream": true,
                     "available": responses.available,
                     "model": responses.model as Any? ?? NSNull(),
-                    "tool_choice_modes": responses.toolChoiceModes,
+                    "tool_choice_modes": responses.toolChoiceModes.map { mode in
+                        mode == "required" ? "any" : mode == "named" ? "tool" : mode
+                    },
                     "origin_header": "X-MacProvider-Origin",
                     "origin_value": "local-app",
                 ],
