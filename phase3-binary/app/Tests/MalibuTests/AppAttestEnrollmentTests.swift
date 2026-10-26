@@ -33,11 +33,14 @@ final class AppAttestEnrollmentTests: XCTestCase {
         XCTAssertNil(store.nextAttempt(providerID))
     }
 
-    func testRealServiceIsUnsupportedBeforeMacOS27() throws {
-        try XCTSkipIf(ProcessInfo.processInfo.isOperatingSystemAtLeast(
+    func testRealServiceSupportRespectsTheOSAndDeviceCapability() {
+        if ProcessInfo.processInfo.isOperatingSystemAtLeast(
             OperatingSystemVersion(majorVersion: 27, minorVersion: 0, patchVersion: 0)
-        ))
-        XCTAssertFalse(DeviceCheckAppAttestKeyService().isSupported)
+        ) {
+            XCTAssertEqual(DeviceCheckAppAttestKeyService().isSupported, DCAppAttestService.shared.isSupported)
+        } else {
+            XCTAssertFalse(DeviceCheckAppAttestKeyService().isSupported)
+        }
     }
 
     func testAlreadyRecordedShortCircuitsAndPersistsDone() async {
