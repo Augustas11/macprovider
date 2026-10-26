@@ -5665,7 +5665,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
             maxBatch: 2, continuousBatchingMode: .on, continuousBatchingDurableReplayAuthorityAvailable: true,
             nativeMTPMode: .auto, nativeMTPCapability: capability, nativeMTPSchedulerSupported: true,
             nativeMTPDrafterContainer: drafter, labNativeMTPAdmissionCapability: admission,
-            warmSwapEnabled: true, pagedKVObservedRuntimeIdentity: Self.observedIdentity(from: proof),
+            warmSwapEnabled: false, pagedKVObservedRuntimeIdentity: Self.observedIdentity(from: proof),
             pagedKVHardwareSizingProof: proof, pagedKVRuntimeCacheClass: "KVCacheSimple",
             pagedKVSchedulerBackendInstalled: true,
             pagedKVModelCapabilities: ModelRuntime.pagedKVModelCapabilities(modelID: "mlx-community/Qwen-Test", configJSONData: nil),
@@ -5749,19 +5749,29 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
             acceptedTokens: 0, rejectedTokens: 1, bonusTokens: 0, committedTokens: 1,
             committedStateDigestSHA256: String(repeating: "8", count: 64), actualDecodePath: .ordinary, fallbackUsed: true)
         await runtime.setCreativeNativeReloadForTest({ load }, receipt: failedReceipt)
-        for _ in 0..<3 {
-            do { try await runtime.restoreAfterLocalCreativeHold(); XCTFail("A failed native self-check must not degrade to ordinary serving") }
-            catch {}
-            let failed = await runtime.currentSnapshot()
-            XCTAssertNil(failed.modelID)
-            XCTAssertNil(failed.nativeMTPTupleOffer)
-            XCTAssertFalse(failed.nativeMTPStatus.enabled)
-        }
-        await runtime.abandonLocalCreativeHold()
-        let recovered = try await runtime.beginSwap(targetModelID: modelID)
-        try await recovered.value
-        let recoverySnapshot = await runtime.currentSnapshot()
-        XCTAssertEqual(recoverySnapshot.modelID, modelID, "Exhausted native recovery must permit normal model recovery")
+        try await runtime.restoreAfterLocalCreativeHold()
+        let failedQualification = await runtime.currentSnapshot()
+        XCTAssertEqual(failedQualification.modelID, modelID)
+        XCTAssertTrue(failedQualification.continuousBatching?.active == true)
+        XCTAssertNil(failedQualification.nativeMTPTupleOffer)
+        XCTAssertFalse(failedQualification.nativeMTPStatus.enabled)
+        XCTAssertEqual(failedQualification.continuousBatching?.mode, before.continuousBatching?.mode)
+
+        // A revoked/unavailable admission uses ordinary loading too, without
+        // requiring the operator's warm-swap feature to be enabled.
+        await runtime.installNativeMTPTupleOfferForTest(offer)
+        try await runtime.unloadForLocalCreativeHold()
+        await runtime.setCreativeNativeReloadForTest({
+            throw ModelRuntimeLoadError(target: modelID, reason: "tuple revoked")
+        }, receipt: receipt)
+        try await runtime.restoreAfterLocalCreativeHold()
+        let revoked = await runtime.currentSnapshot()
+        XCTAssertEqual(revoked.modelID, modelID)
+        XCTAssertTrue(revoked.continuousBatching?.active == true)
+        XCTAssertNil(revoked.nativeMTPTupleOffer)
+        XCTAssertFalse(revoked.nativeMTPStatus.enabled)
+        XCTAssertEqual(revoked.continuousBatching?.mode, before.continuousBatching?.mode)
+
     }
 
     func testCreativeHoldPreservesOrdinaryActiveBatching() async throws {

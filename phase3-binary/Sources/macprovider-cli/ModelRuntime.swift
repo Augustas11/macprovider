@@ -5113,42 +5113,54 @@ maxTokens: 1,
         state = .ready
         do {
             if let expectedTuple = previous.nativeTupleSHA256 {
-                // Load the same signed target and drafter through the startup loader.
-                // An ordinary swap explicitly tears native MTP down and is therefore
-                // not a valid restoration of an admitted native provider.
-                let load = try await loadCreativeNativeMTP(target: target, expectedTuple: expectedTuple)
-                guard load.admissionCapability.tupleSHA256 == expectedTuple,
-                      load.admissionCapability.targetArtifactSHA256 == currentModelHash else {
-                    throw ModelRuntimeLoadError(target: target, reason: "native MTP restoration tuple changed")
-                }
-                try transitionToLoading(target: target)
-                await completeSwapAtomically(
-                    container: load.targetContainer,
-                    modelID: target,
-                    modelHash: load.admissionCapability.targetArtifactSHA256,
-                    modelHashAlgorithm: ModelArtifactIdentity.snapshotManifestV1,
-                    weightsManifestSHA256: try? Self.modelWeightArtifactManifestHash(in: load.targetDirectory),
-                    tokenizerConfigSHA256: Self.tokenizerIdentityHashes(in: load.targetDirectory).config,
-                    chatTemplateSHA256: Self.tokenizerIdentityHashes(in: load.targetDirectory).template,
-                    nativeVisionProfile: nil,
-                    draftModelID: nil,
-                    draftContainer: nil,
-                    draftFailureReason: nil,
-                    modelCapabilities: load.modelCapabilities,
-                    adoptionKnobs: nil
-                )
-                restoreCreativeBatchingQualification(previous)
-                currentNativeMTPDrafterContainer = load.drafterContainer
-                currentNativeMTPAdmissionCapability = load.admissionCapability
-                currentNativeMTPSelfTestInput = load.selfTestInput
-                await rebuildContinuousBatchScheduler(container: load.targetContainer)
-                await qualifyAndPublishNativeMTP(load)
-                currentContinuousBatchTextPreparationLane = await Self.makeContinuousBatchTextPreparationLane(
-                    container: load.targetContainer, admissionCapability: currentNativeMTPAdmissionCapability,
-                    nativeVisionProfile: nil)
-                guard currentNativeMTPCapability != nil,
-                      currentNativeMTPTupleOffer?.nativeMTPAdmissionTupleSHA256 == expectedTuple else {
-                    throw ModelRuntimeLoadError(target: target, reason: "native MTP restoration self-check failed")
+                do {
+                    // Load the same signed target and drafter through the startup loader.
+                    // An ordinary swap explicitly tears native MTP down and is therefore
+                    // not a valid restoration of an admitted native provider.
+                    let load = try await loadCreativeNativeMTP(target: target, expectedTuple: expectedTuple)
+                    guard load.admissionCapability.tupleSHA256 == expectedTuple,
+                          load.admissionCapability.targetArtifactSHA256 == currentModelHash else {
+                        throw ModelRuntimeLoadError(target: target, reason: "native MTP restoration tuple changed")
+                    }
+                    try transitionToLoading(target: target)
+                    await completeSwapAtomically(
+                        container: load.targetContainer,
+                        modelID: target,
+                        modelHash: load.admissionCapability.targetArtifactSHA256,
+                        modelHashAlgorithm: ModelArtifactIdentity.snapshotManifestV1,
+                        weightsManifestSHA256: try? Self.modelWeightArtifactManifestHash(in: load.targetDirectory),
+                        tokenizerConfigSHA256: Self.tokenizerIdentityHashes(in: load.targetDirectory).config,
+                        chatTemplateSHA256: Self.tokenizerIdentityHashes(in: load.targetDirectory).template,
+                        nativeVisionProfile: nil,
+                        draftModelID: nil,
+                        draftContainer: nil,
+                        draftFailureReason: nil,
+                        modelCapabilities: load.modelCapabilities,
+                        adoptionKnobs: nil
+                    )
+                    restoreCreativeBatchingQualification(previous)
+                    currentNativeMTPDrafterContainer = load.drafterContainer
+                    currentNativeMTPAdmissionCapability = load.admissionCapability
+                    currentNativeMTPSelfTestInput = load.selfTestInput
+                    await rebuildContinuousBatchScheduler(container: load.targetContainer)
+                    await qualifyAndPublishNativeMTP(load)
+                    currentContinuousBatchTextPreparationLane = await Self.makeContinuousBatchTextPreparationLane(
+                        container: load.targetContainer, admissionCapability: currentNativeMTPAdmissionCapability,
+                        nativeVisionProfile: nil)
+                    if currentNativeMTPCapability == nil {
+                        // Startup fences a failed native self-check but keeps the
+                        // verified target available for ordinary batching.
+                        await rebuildContinuousBatchScheduler(container: currentContainer)
+                    }
+                } catch {
+                    // Native admission can change during image residency. Its
+                    // refusal must never prevent the independently verified base
+                    // weights from returning through the ordinary reload path.
+                    state = .ready
+                    let reload = try await beginSwap(targetModelID: target, creativeRestore: true)
+                    try await reload.value
+                    restoreCreativeBatchingQualification(previous)
+                    await rebuildContinuousBatchScheduler(container: currentContainer)
                 }
             } else {
                 let reload = try await beginSwap(targetModelID: target, creativeRestore: true)
