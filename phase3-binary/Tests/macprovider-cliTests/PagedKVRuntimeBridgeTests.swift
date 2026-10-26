@@ -5777,7 +5777,8 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         let hash = String(repeating: "a", count: 64)
         let runtime = Self.attachedRuntime(modelID: "mlx-community/Qwen-Test",
             backend: RuntimeBridgeScriptedBackend(scripts: [:]), warmSwapEnabled: true,
-            testLoader: { ($0, hash) })
+            testLoader: { ($0, hash) },
+            testCompletion: { _, _ in throw PagedKVRuntimeBridgeTestError.notExpected })
         let before = await runtime.currentSnapshot()
         XCTAssertTrue(before.continuousBatching?.active == true)
         try await runtime.unloadForLocalCreativeHold()
@@ -5840,7 +5841,8 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         container suppliedContainer: ModelContainer? = nil,
         preparationLane: ContinuousBatchTextPreparationLane? = nil,
         warmSwapEnabled: Bool = false,
-        testLoader: (@Sendable (String) async throws -> (String, String?))? = nil
+        testLoader: (@Sendable (String) async throws -> (String, String?))? = nil,
+        testCompletion: (@Sendable (RuntimeSnapshot, ChatCompletionRequest) async throws -> CompletionResult)? = nil
     ) -> ModelRuntime {
         let modelSHA = String(repeating: "a", count: 64)
         let proof = Self.sizingProof(modelID: modelID, modelSHA: modelSHA)
@@ -5866,7 +5868,8 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
             continuousBatchingBackend: backend,
             testContinuousBatchTextPreparationLane: preparationLane,
             loader: { _ in throw PagedKVRuntimeBridgeTestError.notExpected },
-            testLoader: testLoader
+            testLoader: testLoader,
+            testCompletion: testCompletion
         )
     }
 
