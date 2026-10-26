@@ -18,6 +18,11 @@ options:
   developmentLanguage: en
   createIntermediateGroups: true
 
+packages:
+  SwiftTerm:
+    url: https://github.com/migueldeicaza/SwiftTerm
+    exactVersion: 1.99.0
+
 settings:
   base:
     SWIFT_VERSION: "5.9"
@@ -87,6 +92,8 @@ targets:
         CODE_SIGN_ENTITLEMENTS: MalibuLocal.entitlements
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         INFOPLIST_KEY_LSApplicationCategoryType: "public.app-category.utilities"
+    dependencies:
+      - package: SwiftTerm
     postBuildScripts:
       - name: Bundle install.sh
         basedOnDependencyAnalysis: false

@@ -725,7 +725,7 @@
     {
       "spec_id": "SPEC-025",
       "title": "Native Mac App (signed `.dmg`, native Mac app with menu-bar presence)",
-      "version": "v0.40.0",
+      "version": "v0.41.0",
       "path": "specs/SPEC-025-native-mac-app.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -10246,7 +10246,8 @@
       ],
       "tests": [
         "phase3-binary/app/Tests/MalibuTests/ShellScreensTests.swift::testSidebarSectionsAreInTheAuditOrder",
-        "phase3-binary/app/Tests/MalibuTests/DashboardWindowE2ETests.swift::testHostedShellVisitsEverySectionResizesAndScrolls"
+        "phase3-binary/app/Tests/MalibuTests/DashboardWindowE2ETests.swift::testHostedShellVisitsEverySectionResizesAndScrolls",
+        "phase3-binary/app/Tests/MalibuTests/NavigationEarnTests.swift:func testPersistedSectionsMigrateWithoutLosingTheirDestination"
       ],
       "journeys": [],
       "evidence": [],
@@ -10281,11 +10282,13 @@
       "spec_id": "SPEC-025",
       "state": "pending",
       "implementation": [
-        "phase3-binary/app/Sources/Malibu/Dashboard/DashboardWindow.swift:struct DashboardView"
+        "phase3-binary/app/Sources/Malibu/Dashboard/DashboardWindow.swift:struct DashboardView",
+        "phase3-binary/app/Sources/Malibu/Shell/EarnScreen.swift:struct EarnScreen"
       ],
       "tests": [
         "phase3-binary/app/Tests/MalibuTests/ShellScreensTests.swift::testDashboardYourModelCardShowsRateDemandAndDisclosureForTrustedCurrentRow",
-        "phase3-binary/app/Tests/MalibuTests/ShellScreensTests.swift::testDashboardHasNoAdvancedDiagnosticsAndNoInviteNudgeWithoutAnInvite"
+        "phase3-binary/app/Tests/MalibuTests/ShellScreensTests.swift::testDashboardHasNoAdvancedDiagnosticsAndNoInviteNudgeWithoutAnInvite",
+        "phase3-binary/app/Tests/MalibuTests/NavigationEarnTests.swift:func testEarnReusesDashboardWithCollapsedProviderDetailsAndVisiblePause"
       ],
       "journeys": [],
       "evidence": [],
@@ -10301,7 +10304,8 @@
       "spec_id": "SPEC-025",
       "state": "pending",
       "implementation": [
-        "phase3-binary/app/Sources/Malibu/ModelManagement/ModelsScreen.swift:struct ModelsScreen"
+        "phase3-binary/app/Sources/Malibu/ModelManagement/ModelsScreen.swift:struct ModelsScreen",
+        "phase3-binary/app/Sources/Malibu/ModelManagement/ModelsHubScreen.swift:struct ModelsHubScreen"
       ],
       "tests": [
         "phase3-binary/app/Tests/MalibuTests/ShellScreensTests.swift::testModelsSectionsFollowSpec044R008OrderAndFilter",
@@ -10309,7 +10313,8 @@
         "phase3-binary/app/Tests/MalibuTests/ModelScreensHostedTests.swift::testPopulatedModelsAndDiscoverScreensRender",
         "phase3-binary/app/Tests/MalibuTests/ShellScreensTests.swift::testReadableTitlesComeFromTheModelIdentifier",
         "phase3-binary/app/Tests/MalibuTests/ShellScreensTests.swift::testDownloadProgressCopy",
-        "phase3-binary/app/Tests/MalibuTests/ModelScreensHostedTests.swift::testDownloadInProgressRenders"
+        "phase3-binary/app/Tests/MalibuTests/ModelScreensHostedTests.swift::testDownloadInProgressRenders",
+        "phase3-binary/app/Tests/MalibuTests/ModelsHubTests.swift:final class ModelsHubTests"
       ],
       "journeys": [],
       "evidence": [],
@@ -10346,12 +10351,14 @@
       "state": "pending",
       "implementation": [
         "phase3-binary/app/Sources/Malibu/ModelManagement/DiscoverScreen.swift:struct DiscoverScreen",
-        "phase3-binary/app/Sources/Malibu/ModelManagement/ModelManagement.swift:func browseOtherMLXModels"
+        "phase3-binary/app/Sources/Malibu/ModelManagement/ModelManagement.swift:func browseOtherMLXModels",
+        "phase3-binary/app/Sources/Malibu/ModelManagement/ModelsHubScreen.swift:struct ModelsHubScreen"
       ],
       "tests": [
         "phase3-binary/app/Tests/MalibuTests/ShellScreensTests.swift::testBrowseQueryIsSanitized",
         "phase3-binary/app/Tests/MalibuTests/ModelManagementTests.swift::testBrowseOtherMLXModelsNeedsTheCatalogJSONCapabilityAndTimesOut",
-        "phase3-binary/app/Tests/MalibuTests/ShellScreensTests.swift::testCatalogOnlyRowsListInDiscoverWithFitDownloadAndFirstRowSelected"
+        "phase3-binary/app/Tests/MalibuTests/ShellScreensTests.swift::testCatalogOnlyRowsListInDiscoverWithFitDownloadAndFirstRowSelected",
+        "phase3-binary/app/Tests/MalibuTests/ModelsHubTests.swift:final class ModelsHubTests"
       ],
       "journeys": [],
       "evidence": [],
@@ -10370,7 +10377,8 @@
         "phase3-binary/app/Sources/Malibu/Agent/ProviderEngineStatus.swift:struct ProviderEngineStatus",
         "phase3-binary/app/Sources/Malibu/Shell/ProviderScreen.swift:enum ProviderScreenPresentation",
         "phase3-binary/Sources/macprovider-cli/HTTPServer.swift:statusResponse",
-        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:struct RuntimeKVDiskTierSnapshot"
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:struct RuntimeKVDiskTierSnapshot",
+        "phase3-binary/app/Sources/Malibu/Shell/ProviderScreen.swift:struct ProviderDetailsContent"
       ],
       "tests": [
         "phase3-binary/app/Tests/MalibuTests/ShellScreensTests.swift::testEngineStatusDecodesCBAndMTPFromStatus",
@@ -15181,6 +15189,29 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/2084",
         "rationale": "SPEC-051 v0.2.0 (#2084) Pool disclosure of multi-Mac serving. Stays pending until a paid Trusted Pool request through the gateway is served by an authorized shard group and settled at the pool price. Coordinator half implemented in the #2084 campaign PR; pending the provider half, the coordinator deploy, and a paid Trusted Pool request through the gateway served by an authorized shard group."
+      }
+    },
+    {
+      "requirement_id": "SPEC-025-R013",
+      "spec_id": "SPEC-025",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/app/Sources/Malibu/Terminal/TerminalScreen.swift:struct TerminalScreen",
+        "phase3-binary/app/Sources/Malibu/Terminal/TerminalSession.swift:final class TerminalSession",
+        "phase3-binary/app/Sources/Malibu/Terminal/ClaudeCodeLauncher.swift:enum ClaudeCodeLauncher",
+        "phase3-binary/app/Sources/Malibu/Terminal/HarnessCatalog.swift:final class HarnessCatalog"
+      ],
+      "tests": [
+        "phase3-binary/app/Tests/MalibuTests/TerminalBackendTests.swift:final class TerminalBackendTests",
+        "phase3-binary/app/Tests/MalibuTests/TerminalSessionTests.swift:final class TerminalSessionTests"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2054",
+        "rationale": "Terminal implementation and regression coverage added; release and actual client acceptance remain pending."
       }
     }
   ]

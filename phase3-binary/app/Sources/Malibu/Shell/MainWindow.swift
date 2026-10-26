@@ -163,6 +163,7 @@ struct MainShellView: View {
     let onExportDiagnostics: () -> Void
     let onResetProvider: () -> Void
     @ObservedObject private var modelStore = ModelManagementStore.shared
+    @StateObject private var terminalWorkspace = TerminalWorkspace()
 
     var body: some View {
         NavigationSplitView {
@@ -267,7 +268,7 @@ struct MainShellView: View {
         case .chat:
             ChatScreen(agent: agent)
         case .terminal:
-            TerminalScreen()
+            TerminalScreen(workspace: terminalWorkspace)
         case .models:
             ModelsHubScreen(store: modelStore, agent: agent, selection: $navigation.modelsTab)
         case .settings:

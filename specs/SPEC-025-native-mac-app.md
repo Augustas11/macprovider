@@ -692,11 +692,11 @@ time (60–240 s for the first model) in the background.
   `/v1/status`; a bare local-ready state is shown as "Reconnecting"
   (`MalibuAgent.swift:307-355`). Steady-state health poll
   every 15 s (`:381-407`); first-attach polls every 2 s up to 600 s (`:188-226`).
-- Menu (reconciled v0.3): the shipped menu-bar left-click opens the Dashboard
-  window directly — there is **no popover** with USDC/MALIBU/uptime/GPU/latency in
+- Menu (reconciled v0.3): the shipped menu-bar left-click opens the Malibu
+  window on Chat directly — there is **no popover** with USDC/MALIBU/uptime/GPU/latency in
   the shipped build (`MenuBarController.swift:56`); the menu exposes a plain **Quit**
   only, with **no "Quit and Uninstall"** item (`MenuBarController.swift:108`).
-- Dashboard (the Dashboard section of the main window, §3.2.1): one **status pill** (Serving, Paused,
+- Earn (the Earn section of the main window, §3.2.1): one **status pill** (Serving, Paused,
   Setting up, Not receiving work, Needs attention, Not running) describing
   customer serving only; a status notice with one action appears only when the
   Mac is not serving, and Reset/Export appear on the main surface only in an
