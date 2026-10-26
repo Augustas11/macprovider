@@ -542,6 +542,9 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         let scheduler = try await makeScheduler(
             descriptor: Self.descriptor(blockSizeTokens: 4, maxPhysicalBlocks: blocks),
             maxActiveRows: 3, maxPromptChunkTokens: chunkTokens,
+            // This fixture checks forward order, not delivery backpressure.
+            // Hold all 22 output tokens even if the sink worker is descheduled.
+            tokenDeliveryBufferLimit: 64,
             maxPrefillRowsPerIteration: 3, maxPrefillTokensPerIteration: chunkTokens,
             prefillGrouping: .ungrouped, backend: backend, allocator: allocator)
         let installed = await scheduler.installLabBatchComposition(["decoding", "cold", "peer"])

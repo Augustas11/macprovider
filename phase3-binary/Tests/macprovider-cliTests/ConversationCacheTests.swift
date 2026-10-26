@@ -386,9 +386,14 @@ final class ConversationCacheTests: XCTestCase {
         XCTAssertEqual(budget.hotByteLimit(), 4_095)
         let cache = makeConversationCacheForTest(memoryBudget: budget)
         let tokens = int32Range(0..<64)
-        let layer = KVCacheSimple()
-        layer.state = [MLXArray(Array(repeating: Float(1), count: 1_024)).reshaped(1, 1, 64, 16),
-                       MLXArray(Array(repeating: Float(2), count: 1_024)).reshaped(1, 1, 64, 16)]
+        // Async XCTest bodies may resume on a different thread from setUp.
+        // Select CPU at the tensor operations, not only at test invocation.
+        let layer = Device.withDefaultDevice(Device(.cpu)) {
+            let layer = KVCacheSimple()
+            layer.state = [MLXArray(Array(repeating: Float(1), count: 1_024)).reshaped(1, 1, 64, 16),
+                           MLXArray(Array(repeating: Float(2), count: 1_024)).reshaped(1, 1, 64, 16)]
+            return layer
+        }
         let lease = await cache.begin(conversationKey: "conv:bytes", incomingTokens: tokens,
                                       modelID: "model-a", kvBits: nil)
         await cache.commit(try XCTUnwrap(lease), cache: ConversationCacheLayers([layer]), fullTokens: tokens)
