@@ -130,6 +130,12 @@ struct MSBThroughputCommand: AsyncParsableCommand {
     var runs: Int = 5
 
     @Option(
+        name: .customLong("mlx-cache-limit-mb"),
+        help: "Optional MLX freed-buffer cache limit in MiB, applied before model loading. Unset preserves the existing limit."
+    )
+    var mlxCacheLimitMB: Int?
+
+    @Option(
         name: .customLong("block-size-tokens"),
         help: "Paged-KV logical block size in tokens. Defaults to the production PagedKVConfig value."
     )
@@ -169,6 +175,16 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             throw ExitCode(2)
         }
 
+        if let mlxCacheLimitMB, !ModelRuntime.isValidMLXCacheLimitMB(mlxCacheLimitMB) {
+            throw ValidationError("--mlx-cache-limit-mb must be in 0...\(ModelRuntime.maximumMLXCacheLimitMB)")
+        }
+        defer {
+            let peak = msbLifetimePeakPhysFootprintMB(pid: getpid()).map(String.init) ?? "unavailable"
+            FileHandle.standardError.write(Data(
+                "msb-throughput: lifetime_peak_phys_footprint_mib=\(peak)\n".utf8
+            ))
+        }
+        ModelRuntime.applyMLXCacheLimit(megabytes: mlxCacheLimitMB)
         let runtime = try await ModelRuntime(modelID: modelID)
         guard await runtime.isLoaded else {
             FileHandle.standardError.write(Data("msb-throughput: failed to load model \(modelID)\n".utf8))

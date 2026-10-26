@@ -3,6 +3,30 @@ import ArgumentParser
 @testable import macprovider_cli
 
 final class MSBParityComparisonTests: XCTestCase {
+    func testOptionalMLXCacheLimitParsing() throws {
+        XCTAssertNil(try MSBThroughputCommand.parse([]).mlxCacheLimitMB)
+        XCTAssertEqual(try MSBThroughputCommand.parse(["--mlx-cache-limit-mb", "256"]).mlxCacheLimitMB, 256)
+        XCTAssertThrowsError(try MSBThroughputCommand.parse([
+            "--mlx-cache-limit-mb", "999999999999999999999999999999"
+        ]))
+    }
+
+    func testInvalidMLXCacheLimitsFailBeforeModelLoading() async throws {
+        for value in [-1, ModelRuntime.maximumMLXCacheLimitMB + 1, Int.max] {
+            let command = try MSBThroughputCommand.parse([
+                "--model", "/nonexistent-msb-cache-limit-fixture",
+                "--mlx-cache-limit-mb=\(value)"
+            ])
+            do {
+                try await command.run()
+                XCTFail("invalid cache limit was accepted")
+            } catch {
+                XCTAssertTrue(error is ValidationError, "expected cache validation before loading: \(error)")
+                XCTAssertTrue(String(describing: error).contains("--mlx-cache-limit-mb"))
+            }
+        }
+    }
+
     func testQualificationDefaultsToProductionUncompiledDecode() throws {
         XCTAssertFalse(try MSBThroughputCommand.parse([]).compile)
         XCTAssertFalse(try MSBThroughputCommand.parse(["--no-compile"]).compile)
