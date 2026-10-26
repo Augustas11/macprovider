@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import MacProviderCore
 
 /// No predispatch error permits falling back to plaintext. Once the encrypted
 /// inference POST is attempted, uncertainty must never cause resubmission.
@@ -32,14 +33,14 @@ struct ConsumePrivacyBuyer: Sendable {
                   !request.bearerToken.contains(where: { $0.isWhitespace || $0.isNewline }) else {
                 throw invalid("local_privacy_configuration_invalid")
             }
-            let unservedTools = Self.unservedToolsDisclosure(family: family, originalBody: request.body)
-            guard (unservedTools?.utf8.count ?? 0) <= 4096 else {
-                throw invalid("local_privacy_tool_disclosure_too_large")
-            }
             let pinnedKey = try Curve25519.Signing.PublicKey(
                 rawRepresentation: RelayBlindBase64URL.decode(directoryPublicKey, exactCount: 32)
             )
             let input = try Self.requestMetadata(request.body, family: family, streaming: request.streaming)
+            let unservedTools = Self.unservedToolsDisclosure(family: family, originalBody: request.body)
+            guard (unservedTools?.utf8.count ?? 0) <= 4096 else {
+                throw invalid("local_privacy_tool_disclosure_too_large")
+            }
             let network = ConsumePrivacyHTTP()
             let directoryResponse = try await network.exchange(
                 url: base.appendingPathComponent("v1/privacy-class/directory"), method: "GET",
@@ -447,7 +448,8 @@ struct ConsumePrivacyBuyer: Sendable {
     }
 
     private static func object(_ raw: Data, keys: Set<String>? = nil) throws -> [String: Any] {
-        try AutotuneStrictJSON.rejectDuplicateKeys(raw)
+        guard let text = String(data: raw, encoding: .utf8) else { throw PrivacyClassError.invalidMaterial }
+        _ = try StrictJSONParser.parse(text, maxDepth: 128)
         guard let result = try JSONSerialization.jsonObject(with: raw) as? [String: Any] else { throw PrivacyClassError.invalidMaterial }
         if let keys { try exact(result, keys) }
         return result

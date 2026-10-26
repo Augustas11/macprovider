@@ -4,6 +4,22 @@ import XCTest
 @testable import macprovider_cli
 
 final class ConsumePrivacyBuyerTests: XCTestCase {
+    func testDeepUntrustedJSONIsRejectedBeforeFoundationOrToolTraversal() throws {
+        let nested = String(repeating: "[", count: 1024) + "0" + String(repeating: "]", count: 1024)
+        let request = Data((#"{"model":"model-a","input":"hello","tools":"# + nested + "}").utf8)
+        XCTAssertThrowsError(try ConsumePrivacyBuyer.requestMetadata(request, family: "responses", streaming: false))
+
+        let signer = Curve25519.Signing.PrivateKey()
+        let now = Int64(Date().timeIntervalSince1970)
+        let outer = Data((#"{"version":"privacy-identity-directory-envelope-v1","payload":"# + nested + "}").utf8)
+        XCTAssertThrowsError(try ConsumePrivacyBuyer.verifyDirectory(outer, publicKey: signer.publicKey, now: Date()))
+        let payload = Data("""
+        {"version":"privacy-identity-directory-v1","privacy_class":"\(PrivacyClassConstants.v1)","issued_at_unix":\(now),"expires_at_unix":\(now + 300),"entries":\(nested)}
+        """.utf8)
+        XCTAssertThrowsError(try ConsumePrivacyBuyer.verifyDirectory(
+            directory(signer: signer, payload: payload), publicKey: signer.publicKey, now: Date()))
+    }
+
     func testLocalHostedToolDisclosurePreservesRequestAndEndpointScope() throws {
         let body = Data(#"{"model":"model-a","input":"hello","tools":[{"type":"web_search"},{"type":"namespace","name":"nested","tools":[{"type":"web_search"},{"type":"file_search"}]},{"type":"custom","name":"apply_patch"},{"type":"function","name":"lookup"},{"type":"bad\r\nheader"}]}"#.utf8)
         let original = body
@@ -131,6 +147,10 @@ final class ConsumePrivacyBuyerTests: XCTestCase {
 
     private func directory(signer: Curve25519.Signing.PrivateKey, issued: Int64, expires: Int64) throws -> Data {
         let payload = try directoryPayload(issued: issued, expires: expires)
+        return try directory(signer: signer, payload: payload)
+    }
+
+    private func directory(signer: Curve25519.Signing.PrivateKey, payload: Data) throws -> Data {
         var signed = Data()
         signed.appendFramed(Data("macprovider/spec049/identity-directory/v1".utf8))
         signed.appendFramed(payload)
