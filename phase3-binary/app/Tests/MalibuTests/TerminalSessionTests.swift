@@ -57,9 +57,11 @@ final class TerminalSessionTests: XCTestCase {
         try Data((forceClose ? "#!/bin/sh\nexec /bin/sleep 600\n" : "#!/bin/sh\nexit 0\n").utf8).write(to: executable)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
         let tabs = TerminalTabs()
-        // Warm up lazy AppKit/Dispatch resources before recording the baseline.
+        var baseline: Int?
+        var firstCycleCount: Int?
+        // Cycle zero warms up lazy AppKit/Dispatch resources, including closeIO.
+        // Keep one fixed post-warm-up baseline so cumulative leaks cannot hide.
         for iteration in 0..<9 {
-            let baseline = openDescriptorCount()
             let session = try XCTUnwrap(tabs.add(.shell))
             session.start(executable: executable, model: nil)
             XCTAssertTrue(session.started)
@@ -71,19 +73,31 @@ final class TerminalSessionTests: XCTestCase {
                 }
                 XCTAssertFalse(view.process.running)
                 XCTAssertEqual(view.process.childfd, -1)
-                if iteration > 0 { XCTAssertEqual(openDescriptorCount(), baseline, "Normal exit leaked a descriptor") }
+                if let baseline {
+                    XCTAssertEqual(openDescriptorCount(), baseline, "Normal exit leaked a descriptor")
+                }
             }
             tabs.close(session)
             // A repeated shutdown must never close an unrelated reused fd.
             view.process.closeIO()
             try await Task.sleep(for: .milliseconds(3200))
-            if iteration > 0 { XCTAssertEqual(openDescriptorCount(), baseline, "Tab \(iteration) leaked a descriptor") }
             let sentinel = Darwin.open("/dev/null", O_RDONLY)
             XCTAssertGreaterThanOrEqual(sentinel, 0)
             view.process.closeIO()
             try await Task.sleep(for: .milliseconds(20))
             XCTAssertNotEqual(fcntl(sentinel, F_GETFD), -1, "Repeated shutdown closed a reused descriptor")
             _ = Darwin.close(sentinel)
+            let count = openDescriptorCount()
+            if iteration == 0 {
+                baseline = count
+            } else {
+                XCTAssertEqual(count, try XCTUnwrap(baseline), "Tab \(iteration) leaked a descriptor")
+                if iteration == 1 { firstCycleCount = count }
+                if iteration == 8 {
+                    XCTAssertEqual(count, try XCTUnwrap(firstCycleCount),
+                                   "Descriptors grew between the first and last measured cycles")
+                }
+            }
         }
     }
 

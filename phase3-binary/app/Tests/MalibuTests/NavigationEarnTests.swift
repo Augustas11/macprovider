@@ -57,8 +57,8 @@ final class NavigationEarnTests: XCTestCase {
             let agent = MalibuAgent(initialSnapshot: snapshot)
             let screen = EarnScreen(agent: agent, navigate: { _ in }, browseModels: {},
                                     onThisMacModels: {}, onExportDiagnostics: {}, onResetProvider: {})
-            let window = NSWindow(contentViewController: NSHostingController(rootView: screen.frame(width: 1000, height: 1600)))
-            window.setContentSize(NSSize(width: 1000, height: 1600))
+            let window = NSWindow(contentViewController: NSHostingController(rootView: screen.frame(width: 1000, height: 800)))
+            window.setContentSize(NSSize(width: 1000, height: 800))
             window.makeKeyAndOrderFront(nil)
             defer { window.close() }
             settle(window)
@@ -87,7 +87,7 @@ final class NavigationEarnTests: XCTestCase {
                 window.sendEvent(event)
             }
             settle(window)
-            let expanded = try renderedText(window).map(\.text).joined(separator: "\n")
+            let expanded = try renderedTextAcrossScroll(window)
             for expected in detailLandmarks {
                 XCTAssertTrue(normalized(expanded).contains(normalized(expected)),
                               "Expanded Earn details must render R007 content: \(expected)\n\(expanded)")
@@ -96,11 +96,37 @@ final class NavigationEarnTests: XCTestCase {
     }
 
     private func settle(_ window: NSWindow) {
-        let deadline = Date().addingTimeInterval(0.25)
+        let deadline = Date().addingTimeInterval(0.5)
         while Date() < deadline {
             RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02))
         }
         window.contentView?.layoutSubtreeIfNeeded()
+    }
+
+    /// Use a screen-sized viewport and overlapping scroll positions so no R007
+    /// landmark is clipped or compressed into an oversized window capture.
+    private func renderedTextAcrossScroll(_ window: NSWindow) throws -> String {
+        func findScrollView(_ view: NSView) -> NSScrollView? {
+            if let scroll = view as? NSScrollView { return scroll }
+            return view.subviews.lazy.compactMap(findScrollView).first
+        }
+        let content = try XCTUnwrap(window.contentView)
+        let scroll = try XCTUnwrap(findScrollView(content))
+        let document = try XCTUnwrap(scroll.documentView)
+        let maxY = max(0, document.bounds.height - scroll.contentView.bounds.height)
+        let step = max(1, scroll.contentView.bounds.height / 2)
+        var texts: [String] = []
+        var offset: CGFloat = 0
+        while true {
+            let y = document.isFlipped ? offset : maxY - offset
+            scroll.contentView.scroll(to: NSPoint(x: 0, y: y))
+            scroll.reflectScrolledClipView(scroll.contentView)
+            settle(window)
+            texts.append(contentsOf: try renderedText(window).map(\.text))
+            if offset == maxY { break }
+            offset = min(maxY, offset + step)
+        }
+        return texts.joined(separator: "\n")
     }
 
     private func normalized(_ text: String) -> String {
