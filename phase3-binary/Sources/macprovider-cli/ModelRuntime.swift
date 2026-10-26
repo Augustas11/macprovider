@@ -11134,10 +11134,23 @@ maxTokens: maxTokens,
             let after = try NativeVisionProfile.load(
                 modelID: NativeVisionProfile.modelID, directory: directory, artifactSHA256: before?.artifactSHA256)
             guard before == after else { throw NativeVisionProfile.identityError() }
+        } else if usesPrismVLMContainer(
+            configJSONData: try Data(contentsOf: directory.appendingPathComponent("config.json"))
+        ) {
+            // Prism keeps the vendor vision tower and packed Hadamard projections.
+            // Selecting its loader does not advertise a qualified vision profile.
+            container = try await VLMModelFactory.shared.loadContainer(from: directory, using: tokenizerLoader)
         } else {
             container = try await LLMModelFactory.shared.loadContainer(from: directory, using: tokenizerLoader)
         }
         return (container, directory)
+    }
+
+    nonisolated static func usesPrismVLMContainer(configJSONData: Data) -> Bool {
+        guard let config = try? JSONSerialization.jsonObject(with: configJSONData) as? [String: Any] else {
+            return false
+        }
+        return config["model_type"] as? String == "prism_hadamard_qwen35"
     }
 
     struct NativeMTPRunningBuildIdentity: Equatable, Sendable {

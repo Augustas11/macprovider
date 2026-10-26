@@ -3556,14 +3556,20 @@ actor ContinuousBatchScheduler {
               Self.nativeMTPSystemMemoryHeadroomAdmits(reservedAfter: nextReserved, sample: sample) else {
             // SPEC-048 R012: say which bound refused, with every number.
             let floor = sample.map { max(1, $0.physicalBytes / 10) }
-            try? FileHandle.standardError.write(contentsOf: Data(
-                ("event=native_mtp_round_reservation_refused requested_bytes=\(bytes) reserved_before_bytes=\(nativeMTPReservedRoundBytes) "
-                    + "outstanding_reservations=\(nativeMTPRoundByteReservations.count) capacity_bytes=\(configuration.nativeMTPRoundByteCapacity) "
-                    + "available_bytes=\(sample.map { String($0.availableBytes) } ?? "unavailable") "
-                    + "physical_bytes=\(sample.map { String($0.physicalBytes) } ?? "unavailable") "
-                    + "floor_bytes=\(floor.map(String.init) ?? "unavailable") "
-                    + "reason=\(overflow ? "overflow" : nextReserved > configuration.nativeMTPRoundByteCapacity ? "capacity" : "system_headroom")\n").utf8
-            ))
+            let availableBytes: String = sample.map { String($0.availableBytes) } ?? "unavailable"
+            let physicalBytes: String = sample.map { String($0.physicalBytes) } ?? "unavailable"
+            let floorBytes: String = floor.map { String($0) } ?? "unavailable"
+            let reason: String = overflow ? "overflow"
+                : nextReserved > configuration.nativeMTPRoundByteCapacity ? "capacity" : "system_headroom"
+            let message: String = [
+                "event=native_mtp_round_reservation_refused requested_bytes=\(bytes) reserved_before_bytes=\(nativeMTPReservedRoundBytes) ",
+                "outstanding_reservations=\(nativeMTPRoundByteReservations.count) capacity_bytes=\(configuration.nativeMTPRoundByteCapacity) ",
+                "available_bytes=\(availableBytes) ",
+                "physical_bytes=\(physicalBytes) ",
+                "floor_bytes=\(floorBytes) ",
+                "reason=\(reason)\n",
+            ].joined()
+            try? FileHandle.standardError.write(contentsOf: Data(message.utf8))
             throw ContinuousBatchSchedulerError.requestFailed("continuous_batching_native_mtp_round_memory_exhausted")
         }
         let id = UUID()

@@ -386,16 +386,17 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         FileHandle.standardOutput.write(json)
         FileHandle.standardOutput.write(Data("\n".utf8))
 
-        FileHandle.standardError.write(Data((
-            "msb-throughput: model=\(modelTag) engine=\(engine.rawValue) compile=\(compiledThisRun) " +
-            "rows=\(rows) block=\(blockSizeTokens) " +
-            "serial_tps_p50=\(decodeBenchFormatTPS(serialP50)) " +
-            "engine_1row_tps_p50=\(decodeBenchFormatTPS(engineSingleP50)) " +
-            "aggregate_tps_p50=\(decodeBenchFormatTPS(aggregateP50)) " +
-            "uplift_vs_1row=\(String(format: "%.2fx", upliftVsSingle)) " +
-            "aggregate_vs_serial=\(String(format: "%.2fx", aggregateVsSerial)) " +
-            "peak_rss_mb=\(peakRSSMB)\n"
-        ).utf8))
+        let summary: String = [
+            "msb-throughput: model=\(modelTag) engine=\(engine.rawValue) compile=\(compiledThisRun) ",
+            "rows=\(rows) block=\(blockSizeTokens) ",
+            "serial_tps_p50=\(decodeBenchFormatTPS(serialP50)) ",
+            "engine_1row_tps_p50=\(decodeBenchFormatTPS(engineSingleP50)) ",
+            "aggregate_tps_p50=\(decodeBenchFormatTPS(aggregateP50)) ",
+            "uplift_vs_1row=\(String(format: "%.2fx", upliftVsSingle)) ",
+            "aggregate_vs_serial=\(String(format: "%.2fx", aggregateVsSerial)) ",
+            "peak_rss_mb=\(peakRSSMB)\n",
+        ].joined()
+        FileHandle.standardError.write(Data(summary.utf8))
 
         guard !stdoutOnly else { return }
         let fileURL: URL
@@ -2026,15 +2027,16 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         let json = try encoder.encode(report)
         FileHandle.standardOutput.write(json)
         FileHandle.standardOutput.write(Data("\n".utf8))
-        FileHandle.standardError.write(Data((
-            "msb-throughput: hybrid-window model=\(modelTag) rows=\(rows) " +
-            "prompt_tokens=\(lengths.min() ?? 0)-\(lengths.max() ?? 0) decode_tokens=\(decodeTokens) " +
-            "window=\(candidateWindow) reference_repeats=\(referenceRepeats) " +
-            "rows_exact=\(rowMatches.filter { $0 }.count)/\(rows) " +
-            "w1_tps_p50=\(decodeBenchFormatTPS(referenceP50)) " +
-            "w\(candidateWindow)_tps_p50=\(decodeBenchFormatTPS(candidateP50)) " +
-            "pass=\(pass) peak_rss_mb=\(peakRSSMB)\n"
-        ).utf8))
+        let summary: String = [
+            "msb-throughput: hybrid-window model=\(modelTag) rows=\(rows) ",
+            "prompt_tokens=\(lengths.min() ?? 0)-\(lengths.max() ?? 0) decode_tokens=\(decodeTokens) ",
+            "window=\(candidateWindow) reference_repeats=\(referenceRepeats) ",
+            "rows_exact=\(rowMatches.filter { $0 }.count)/\(rows) ",
+            "w1_tps_p50=\(decodeBenchFormatTPS(referenceP50)) ",
+            "w\(candidateWindow)_tps_p50=\(decodeBenchFormatTPS(candidateP50)) ",
+            "pass=\(pass) peak_rss_mb=\(peakRSSMB)\n",
+        ].joined()
+        FileHandle.standardError.write(Data(summary.utf8))
         if !stdoutOnly {
             let fileURL: URL
             if let explicitPath = output {

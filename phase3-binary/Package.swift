@@ -38,9 +38,12 @@ let package = Package(
         // multi-token pooling continuation. 10.5 shares attention, compressor/indexer
         // projections and rotary offsets across rows, with keys-only windows and
         // geometric pool storage; other family decode paths are unchanged.
+        // Campaign #2154 adds the schema-2 Prism Hadamard VLM loader on 10.5,
+        // preserving the original packed basis, tied head and full vision weights.
+        // Ordinary model registrations and batching admission are unchanged.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "c8be0f618df1e0df230137a3cbe932aa798d602b"
+            revision: "457fc8496fc3303e48ac7212e67f7e13f6d12e78"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",
