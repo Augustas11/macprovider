@@ -8,9 +8,9 @@ final class ShellScreensTests: XCTestCase {
     func testSidebarSectionsAreInTheAuditOrder() {
         XCTAssertEqual(
             MalibuSection.allCases.map(\.title),
-            ["Chat", "Terminal", "Models", "Earn", "Settings", "Diagnostics"]
+            ["Chat", "Terminal", "Create", "Agents", "Tasks", "Models", "Earn", "Settings", "Diagnostics"]
         )
-        XCTAssertEqual(MalibuSection.primary, [.chat, .terminal, .models, .earn])
+        XCTAssertEqual(MalibuSection.primary, [.chat, .terminal, .create, .agents, .tasks, .models, .earn])
         XCTAssertEqual(MalibuSection.utility, [.settings, .diagnostics])
         XCTAssertEqual(Set(MalibuSection.allCases.map(\.systemImage)).count, MalibuSection.allCases.count)
     }

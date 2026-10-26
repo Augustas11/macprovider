@@ -39,6 +39,13 @@ mkdir -p "$(dirname "$OUTPUT")"
     printf "the macprovider-cli binary, together with their license/notice text.\n\n"
 } > "$OUTPUT"
 
+# StableDiffusion is vendored source rather than a SwiftPM checkout.
+{
+    printf "\n===== mlx-swift-examples StableDiffusion 2.29.1 (MIT) =====\n\n"
+    cat "$REPO_ROOT/phase3-binary/Sources/MacProviderImageGen/LICENSE"
+    printf "\n"
+} >> "$OUTPUT"
+
 found_any=0
 missing_packages=()
 
