@@ -132,6 +132,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         terminationDeadline.begin(drain: { [weak self] in
             guard let self else { return }
             await TerminalSession.terminateAll()
+            ManagedPrivacyConsumer.shared.shutdown()
             await self.agent.shutdown(gracefulSeconds: 15)
             if let uninstall = self.uninstallTask {
                 _ = await uninstall.value

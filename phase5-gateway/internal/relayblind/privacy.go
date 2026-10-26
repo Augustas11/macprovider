@@ -580,8 +580,10 @@ func (a PrivacyKeyAttestation) Verify(pin IdentityPin, signatureB64 string, reco
 			return fmt.Errorf("%w: model outside pin scope", ErrInvalidPrivacy)
 		}
 	}
-	if !contains(pin.EndpointFamilies, EndpointChatCompletions) {
-		return fmt.Errorf("%w: endpoint outside pin scope", ErrInvalidPrivacy)
+	for _, family := range record.EndpointFamilies {
+		if !contains(pin.EndpointFamilies, family) {
+			return fmt.Errorf("%w: endpoint outside pin scope", ErrInvalidPrivacy)
+		}
 	}
 	pub, _ := decodeBase64URLFixed(pin.IdentityPublicKey, ed25519.PublicKeySize)
 	signed, err := record.SignedFraming()

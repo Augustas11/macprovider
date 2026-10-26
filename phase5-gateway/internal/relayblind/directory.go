@@ -187,7 +187,7 @@ func (d IdentityDirectory) PinForRecord(record KeyRecord, model string) (Identit
 		IdentityPublicKey: entry.IdentityPublicKey,
 		Fingerprint:       entry.Fingerprint,
 		Models:            append([]string(nil), record.Models...),
-		EndpointFamilies:  []string{EndpointChatCompletions},
+		EndpointFamilies:  append([]string(nil), record.EndpointFamilies...),
 		NotBeforeUnix:     d.IssuedAtUnix,
 		ExpiresAtUnix:     d.ExpiresAtUnix,
 	}

@@ -725,7 +725,7 @@
     {
       "spec_id": "SPEC-025",
       "title": "Native Mac App (signed `.dmg`, native Mac app with menu-bar presence)",
-      "version": "v0.45.0",
+      "version": "v0.46.0",
       "path": "specs/SPEC-025-native-mac-app.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1205,7 +1205,7 @@
     {
       "spec_id": "SPEC-041",
       "title": "Relay-Blind Request Encryption",
-      "version": "0.6.1",
+      "version": "0.7.0",
       "path": "specs/SPEC-041-relay-blind-request-encryption.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1360,7 +1360,7 @@
     {
       "spec_id": "SPEC-045",
       "title": "Local Consumer Endpoint Mode",
-      "version": "0.1.1",
+      "version": "0.2.0",
       "path": "specs/SPEC-045-local-consumer-endpoint-mode.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1377,7 +1377,9 @@
         "SPEC-018",
         "SPEC-019",
         "SPEC-023",
-        "SPEC-024"
+        "SPEC-024",
+        "SPEC-041",
+        "SPEC-049"
       ],
       "implementation_status": "pending-reconciliation",
       "production_status": "not-deployed",
@@ -1521,7 +1523,7 @@
     {
       "spec_id": "SPEC-049",
       "title": "Operator-Constrained Privacy Class",
-      "version": "0.7.0",
+      "version": "0.8.0",
       "path": "specs/SPEC-049-operator-constrained-privacy-class.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -10552,7 +10554,7 @@
     {
       "requirement_id": "SPEC-045-R001",
       "spec_id": "SPEC-045",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:struct ConsumeCommand",
         "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:struct ConsumeRunCommand",
@@ -10568,21 +10570,13 @@
       "journeys": [
         "JOURNEY-LOCAL-CONSUMER-ENDPOINT"
       ],
-      "evidence": [
-        {
-          "artifact": "commit:dc63ecec59593235593b3de003e567e007ddcdc8",
-          "source": null,
-          "captured_at": "2026-08-24",
-          "expires_at": "2027-08-24"
-        },
-        {
-          "artifact": "sha256:991c30ba0f34377ec66c993e27e2a3dd6b47705acc2799f5cf973d2ebd434161",
-          "source": "journeys/evidence/local-consumer-endpoint-20260824T060103Z.spec-045-r001-spec-045-r002-spec-045-r003-spec-045-r004-spec-045-r005-spec-045-r006-spec-045-r007-spec-045-r008.journey-result.signed.json",
-          "captured_at": "2026-08-24",
-          "expires_at": "2027-08-24"
-        }
-      ],
-      "gap": null
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2157",
+        "rationale": "The managed privacy-consumer extension changes the previously evidenced command/handler selector. Prior ordinary-mode evidence no longer proves this combined selector. Targeted regressions and signed managed-agent privacy acceptance must be reconciled before renewed conformance."
+      }
     },
     {
       "requirement_id": "SPEC-045-R002",
@@ -10817,7 +10811,7 @@
     {
       "requirement_id": "SPEC-045-R008",
       "spec_id": "SPEC-045",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:final class ConsumeLocalHandler",
         "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:final class ConsumePinnedUpstreamClient",
@@ -10844,21 +10838,13 @@
       "journeys": [
         "JOURNEY-LOCAL-CONSUMER-ENDPOINT"
       ],
-      "evidence": [
-        {
-          "artifact": "commit:d51b79b07876da9ab0590f9721936530aa614bde",
-          "source": null,
-          "captured_at": "2026-09-09",
-          "expires_at": "2026-10-09"
-        },
-        {
-          "artifact": "sha256:33f88709398091dccf609bc8606b8edba17ec759668dedf0f8fbeee6c1af9bc5",
-          "source": "journeys/evidence/local-consumer-endpoint-20260909T062325Z.spec-045-r003-spec-045-r004-spec-045-r008.journey-result.signed.json",
-          "captured_at": "2026-09-09",
-          "expires_at": "2026-10-09"
-        }
-      ],
-      "gap": null
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2157",
+        "rationale": "The managed privacy-consumer extension changes the previously evidenced command/handler selector. Prior ordinary-mode evidence no longer proves this combined selector. Targeted regressions and signed managed-agent privacy acceptance must be reconciled before renewed conformance."
+      }
     },
     {
       "requirement_id": "SPEC-046-R001",
@@ -15406,6 +15392,32 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/2164",
         "rationale": "Create UI, owner-only PNG gallery and XCTest coverage are present. Real-weights lab Air acceptance and released-app acceptance remain pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-049-R036",
+      "spec_id": "SPEC-049",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/ConsumeCommand.swift:struct ConsumeRunCommand",
+        "phase3-binary/Sources/macprovider-cli/ConsumePrivacyBuyer.swift:struct ConsumePrivacyBuyer",
+        "phase3-binary/Sources/macprovider-cli/RelayBlindProvider.swift:struct RelayBlindEnvelope",
+        "phase3-binary/Sources/macprovider-cli/InferenceRelay.swift:actor InferenceRelay",
+        "phase5-gateway/internal/router/relay_blind.go:func (s *Server) handleRelayBlindRouteReservations",
+        "phase4-coordinator/internal/relayblind/store.go:func (s *Store) Consume"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/ConsumePrivacyBuyerTests.swift:testDirectoryChecksPinnedSignerFreshnessAndExactPayload",
+        "phase3-binary/Tests/macprovider-cliTests/ConsumePrivacyBuyerTests.swift:testResponseReturnsOriginalWireOnlyAfterFinalAuthentication",
+        "phase3-binary/Tests/macprovider-cliTests/ConsumePrivacyBuyerTests.swift:testStreamRequiresCompleteOuterProtocolAndRejectsClearContent"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2157",
+        "rationale": "Original-family local privacy consumer and provider-side Responses/Messages conversion are under implementation. Targeted protocol and local client checks do not establish signed production deployment or actual multi-turn tool-using Codex and Claude sessions. Code-bound hardware acceptance remains pending. No conformance promotion."
       }
     }
   ]

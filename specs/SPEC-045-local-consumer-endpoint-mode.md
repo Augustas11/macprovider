@@ -1,18 +1,18 @@
 # SPEC-045 - Local Consumer Endpoint Mode
 
-**Version:** 0.1.1
+**Version:** 0.2.0
 
 ```json
 {
   "spec_id": "SPEC-045",
   "title": "Local Consumer Endpoint Mode",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "path": "specs/SPEC-045-local-consumer-endpoint-mode.md",
   "status": "draft",
   "owner": "@Augustas11",
   "authority_domains": ["local-consumer-endpoint"],
   "supersedes": [],
-  "depends_on": ["SPEC-001", "SPEC-005", "SPEC-006", "SPEC-010", "SPEC-015", "SPEC-018", "SPEC-019", "SPEC-023", "SPEC-024"],
+  "depends_on": ["SPEC-001", "SPEC-005", "SPEC-006", "SPEC-010", "SPEC-015", "SPEC-018", "SPEC-019", "SPEC-023", "SPEC-024", "SPEC-041", "SPEC-049"],
   "implementation_status": "pending-reconciliation",
   "production_status": "not-deployed",
   "last_reconciled_commit": null,
@@ -227,3 +227,31 @@ The first implementation should prefer failing closed over broad compatibility. 
 ## 9. Changelog and history
 
 - 0.1.0 - Initial draft. Defines loopback-only local consumer endpoint mode, OpenAI-compatible endpoint subset, upstream credential custody, exact-origin browser rejection, local model/budget admission, restart-safe budget ledger and held-reservation recovery, redacted status, local error codes, and release evidence for issue #927.
+
+
+## Privacy-class managed-agent extension (v0.2.0; Related: #2157)
+
+SPEC-049-R036 extends the allowed inference routes with `/v1/responses` and
+`/v1/messages` in privacy-class mode. The consumer encrypts the original bytes;
+it MUST NOT translate them to Chat. Existing standalone ordinary Chat operation
+and all listener, local authorization, origin, resource and credential-custody
+invariants remain unchanged. New families MUST fail closed outside privacy mode.
+
+`consume run --privacy-class` requires a locally trusted directory public key
+(`--privacy-directory-public-key` or the documented operator environment), and
+supports `--privacy-assurance-required code_bound_attested`. Missing trust,
+unsupported assurance or unsuccessful authenticated completion is an error,
+never an ordinary upstream request. Privacy mode retains trusted local pricing,
+conservative byte-count input admission, explicit original-family output caps,
+pre-dispatch ledger reservation and authenticated usage reconciliation. An
+unverifiable result keeps exposure held; it cannot release a reservation as if
+nothing was sent. The upstream buyer key is never handed to the agent.
+
+Status and private active-endpoint descriptors identify privacy configuration
+for safe attachment by Malibu.app. A verified last-served assurance may be
+reported only after response authentication succeeds, separately from requested
+assurance. Privacy headers forwarded to the caller must be verified by the
+consumer, not merely copied from an arbitrary upstream response. Full original
+stream events and tool call/result payloads retain their family semantics.
+
+No production activation or conformance promotion is asserted by this amendment.

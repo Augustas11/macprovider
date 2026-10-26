@@ -47,6 +47,31 @@ func RequiresNonStrictJSONSchema(requires []string) bool {
 // SPEC-019 §1a non-strict mode: json_schema with strict false, or with strict
 // absent or null and a schema outside the §3 strict subset. A malformed
 // response_format declares nothing; the provider rejects that body itself.
+// RequiredCapabilitiesForFamily reads only routing capability metadata; the
+// original request bytes remain unchanged and encrypted end to end.
+func RequiredCapabilitiesForFamily(body []byte, family string) []string {
+	if family != EndpointResponses {
+		return RequiredCapabilities(body)
+	}
+	var request struct {
+		Text struct {
+			Format map[string]json.RawMessage `json:"format"`
+		} `json:"text"`
+	}
+	if json.Unmarshal(body, &request) != nil || request.Text.Format == nil {
+		return nil
+	}
+	var typ string
+	if json.Unmarshal(request.Text.Format["type"], &typ) != nil || typ != "json_schema" {
+		return nil
+	}
+	format, err := json.Marshal(map[string]any{"response_format": map[string]any{"type": typ, "json_schema": request.Text.Format}})
+	if err != nil {
+		return nil
+	}
+	return RequiredCapabilities(format)
+}
+
 func RequiredCapabilities(body []byte) []string {
 	var request struct {
 		ResponseFormat json.RawMessage `json:"response_format"`

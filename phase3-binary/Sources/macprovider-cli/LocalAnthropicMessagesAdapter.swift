@@ -14,7 +14,7 @@ struct LocalAnthropicMessagesError: Error {
 /// Anthropic Messages wire translation over the existing local chat pipeline.
 /// No model execution, admission, accounting, or cancellation lives here.
 final class LocalAnthropicMessagesAdapter {
-    let chatRequestBody: Data
+    private(set) var chatRequestBody: Data
     let stream: Bool
     private let model: String
     private let thinkingRequested: Bool
@@ -34,6 +34,13 @@ final class LocalAnthropicMessagesAdapter {
     private var thinkBuffer = ""
     private var insideThink = false
     private var refusal = false
+
+    /// Privacy relay parsing releases the translated byte buffer before inference.
+    /// Parsed immutable Swift strings retain the disclosed zeroization limitation.
+    func clearTranslatedRequestBody() {
+        chatRequestBody.resetBytes(in: 0..<chatRequestBody.count)
+        chatRequestBody.removeAll(keepingCapacity: false)
+    }
 
     private static func invalid(_ param: String, _ message: String, code: String = "unsupported_content_shape") -> LocalAnthropicMessagesError {
         LocalAnthropicMessagesError(code: code, param: param, message: message)

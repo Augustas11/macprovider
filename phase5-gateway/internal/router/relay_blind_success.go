@@ -217,7 +217,7 @@ func (s *Server) reserveRelayBlindRoute(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	reservation, err := relayblind.ParseReservationResponse(data)
-	if err != nil || reservation.Model != req.Model || reservation.Stream != *req.Stream || reservation.MaxOutputTokens != req.MaxOutputTokens || reservation.InputTokenUpperBound != req.InputTokenUpperBound || reservation.ExpiresAtUnix <= s.now().Unix() || reservation.ExpiresAtUnix > s.now().Add(30*time.Second).Unix() || reservation.MaxEncryptedRequestBytes < uint64(req.EncryptedRequestBytes) {
+	if err != nil || reservation.EndpointFamily != req.EndpointFamily || reservation.Model != req.Model || reservation.Stream != *req.Stream || reservation.MaxOutputTokens != req.MaxOutputTokens || reservation.InputTokenUpperBound != req.InputTokenUpperBound || reservation.ExpiresAtUnix <= s.now().Unix() || reservation.ExpiresAtUnix > s.now().Add(30*time.Second).Unix() || reservation.MaxEncryptedRequestBytes < uint64(req.EncryptedRequestBytes) {
 		writeError(w, 503, "api_error", "relay_blind_required_unavailable", "Relay-blind reservation evidence is invalid")
 		return
 	}
@@ -251,6 +251,20 @@ func (s *Server) dispatchRelayBlindChat(w http.ResponseWriter, r *http.Request, 
 	if err != nil {
 		writeError(w, 400, "invalid_request_error", "relay_blind_envelope_invalid", "Invalid relay-blind envelope")
 		return
+	}
+	// Request conversion already happened inside the provider. Preserve the
+	// outer encrypted frames and suppress all ordinary forwarding adapters.
+	if privacy {
+		if adapter := responsesAdapterFromContext(r.Context()); adapter != nil {
+			adapter.beginReplayPassthrough()
+		}
+		if adapter := anthropicMessagesAdapterFromContext(r.Context()); adapter != nil {
+			adapter.replayBody = true
+			adapter.stream = true
+		}
+		ctx := context.WithValue(r.Context(), responsesAdapterContextKey{}, (*responsesAdapter)(nil))
+		ctx = context.WithValue(ctx, anthropicMessagesAdapterContextKey{}, (*anthropicMessagesAdapter)(nil))
+		r = r.WithContext(ctx)
 	}
 	if !privacy && (relayBlindPoolSelected(r) || strings.HasPrefix(account, "demo:")) {
 		writeError(w, 400, "invalid_request_error", "relay_blind_downgrade_rejected", "Relay-blind pilot requires an authenticated global route")
@@ -561,7 +575,7 @@ func relayBlindUsageMetadataBody(r *http.Request, body []byte) []byte {
 }
 
 func (s *Server) isRelayBlindPilotCandidate(r *http.Request, body []byte) bool {
-	if !s.cfg.Features.RelayBlindRequests.Enabled || relayBlindEndpointFamilyFromRequest(r) != "chat_completions" {
+	if !s.cfg.Features.RelayBlindRequests.Enabled {
 		return false
 	}
 	_, err := relayblind.ParseEnvelope(body)

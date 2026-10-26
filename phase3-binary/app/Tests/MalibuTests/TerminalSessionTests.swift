@@ -194,8 +194,10 @@ final class TerminalSessionTests: XCTestCase {
         let session = TerminalSession(harness: .shell)
         session.adoptTestProcessGroup(pid)
         await TerminalSession.terminateAll()
-        XCTAssertEqual(kill(-pid, 0), -1)
-        XCTAssertEqual(errno, ESRCH)
+        let probeResult = kill(-pid, 0)
+        let probeError = errno // Capture before XCTest can call other errno-changing APIs.
+        XCTAssertEqual(probeResult, -1)
+        XCTAssertEqual(probeError, ESRCH)
     }
 
     func testWindowWorkspacePreservesTabsAcrossDestinationRecreation() {
@@ -246,8 +248,10 @@ final class TerminalSessionTests: XCTestCase {
         session.adoptTestProcessGroup(pid)
         session.close()
         try await Task.sleep(for: .seconds(3.3))
-        XCTAssertEqual(kill(-pid, 0), -1)
-        XCTAssertEqual(errno, ESRCH)
+        let probeResult = kill(-pid, 0)
+        let probeError = errno // Capture before XCTest can call other errno-changing APIs.
+        XCTAssertEqual(probeResult, -1)
+        XCTAssertEqual(probeError, ESRCH)
     }
     func testCloseTerminatesForegroundAndBackgroundJobControlGroups() async throws {
         try await assertJobControlChildrenTerminate(onQuit: false)
