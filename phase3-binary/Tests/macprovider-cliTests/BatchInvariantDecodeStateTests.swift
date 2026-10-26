@@ -144,8 +144,9 @@ final class BatchInvariantDecodeStateTests: XCTestCase {
                     committedKVTokenCount: offsets[row], targetKVTokenCount: offsets[row] + steps,
                     samplerStep: offsets[row]))
             }
+            let observer: ContinuousBatchDecodeWindowStepObserver? = interrupt ? { _ in false } : nil
             let result = try await backend.decodeLockstepWindow(rows: inputs, steps: steps,
-                onStep: interrupt ? { _ in false } : nil)
+                onStep: observer)
             for row in rows { offsets[row] += steps }
             return result
         }
