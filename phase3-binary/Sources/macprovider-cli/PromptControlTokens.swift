@@ -1073,6 +1073,11 @@ extension ToolCall {
 
 extension CompletionResult {
     func strippingControlTextMarks() -> CompletionResult {
+        let mark = ControlTextShield.mark
+        let marked = content.unicodeScalars.contains(mark)
+            || reasoningContent?.unicodeScalars.contains(mark) == true
+            || toolCalls?.contains { $0.functionName.unicodeScalars.contains(mark) || $0.arguments.unicodeScalars.contains(mark) } == true
+        guard marked else { return self }
         var result = CompletionResult(
             content: ControlTextShield.strip(content),
             finishReason: finishReason,
@@ -1092,7 +1097,8 @@ extension CompletionResult {
             loopbackPrefixCompletionTokens: loopbackPrefixCompletionTokens,
             shardGroupEvidence: shardGroupEvidence,
             reasoningContent: ControlTextShield.strip(reasoningContent),
-            reasoningTokens: reasoningTokens
+            reasoningTokens: reasoningTokens,
+            stopSequence: stopSequence
         )
         result.ttftMilliseconds = ttftMilliseconds
         return result
