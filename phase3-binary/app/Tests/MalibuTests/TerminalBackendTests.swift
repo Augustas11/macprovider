@@ -205,9 +205,13 @@ final class TerminalBackendTests: XCTestCase {
         let launcher = home.appendingPathComponent("Launch.command")
         try ConnectedAppConfiguration.launcher(app: .crush, executable: URL(fileURLWithPath: "/bin/echo"),
             config: home.appendingPathComponent("crush.json"), model: toolModel, keyHandoff: handoff).write(to: launcher)
-        for readable in [true, false] {
-            if readable { try Data("never-output-this-key".utf8).write(to: handoff) }
-            else { XCTAssertEqual(mkfifo(handoff.path, 0o600), 0) }
+        for kind in ["readable", "unreadable", "fifo"] {
+            let readable = kind == "readable"
+            if kind == "fifo" { XCTAssertEqual(mkfifo(handoff.path, 0o600), 0) }
+            else {
+                try Data("never-output-this-key".utf8).write(to: handoff)
+                if kind == "unreadable" { XCTAssertEqual(chmod(handoff.path, 0), 0) }
+            }
             let process = Process()
             let output = Pipe()
             process.executableURL = URL(fileURLWithPath: "/bin/sh")
@@ -222,8 +226,8 @@ final class TerminalBackendTests: XCTestCase {
             let text = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
             XCTAssertFalse(text.contains("never-output-this-key"))
             XCTAssertFalse(FileManager.default.fileExists(atPath: home.appendingPathComponent("intercepted").path))
-            if readable { XCTAssertFalse(FileManager.default.fileExists(atPath: handoff.path)) }
-            else { try FileManager.default.removeItem(at: handoff) }
+            if kind == "fifo" { try FileManager.default.removeItem(at: handoff) }
+            else { XCTAssertFalse(FileManager.default.fileExists(atPath: handoff.path)) }
         }
     }
 
