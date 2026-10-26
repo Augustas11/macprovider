@@ -160,6 +160,33 @@ struct ConnectedGatewayClient {
         guard hasText else { throw ConnectedAppsError.invalidResponse }
     }
 
+    /// Agents share the same fixed-origin, redirect-blocked, bounded gateway path.
+    func complete(body: [String: Any], key: String) async throws -> ChatCompletion {
+        let data = try await request(path: "chat/completions", key: key, body: body)
+        try MalibuStrictJSON.rejectDuplicateKeys(data)
+        guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              root["error"] == nil,
+              let choices = root["choices"] as? [[String: Any]], choices.count == 1,
+              let choice = choices.first,
+              let reason = choice["finish_reason"] as? String,
+              reason == "stop" || reason == "tool_calls",
+              let message = choice["message"] as? [String: Any] else { throw ChatFailure.malformed }
+        let raw = message["tool_calls"] as? [[String: Any]] ?? []
+        guard raw.count <= ChatStore.maxCalls else { throw ChatFailure.limit }
+        let calls = try raw.map { item -> ChatToolCall in
+            guard let id = item["id"] as? String, !id.isEmpty, id.utf8.count <= 128,
+                  let function = item["function"] as? [String: Any],
+                  let name = function["name"] as? String, !name.isEmpty, name.utf8.count <= 64,
+                  let arguments = function["arguments"] as? String, arguments.utf8.count <= 32768
+            else { throw ChatFailure.malformed }
+            return ChatToolCall(id: id, name: name, arguments: arguments)
+        }
+        guard Set(calls.map(\.id)).count == calls.count else { throw ChatFailure.malformed }
+        let text = message["content"] as? String ?? ""
+        guard text.utf8.count <= 65536 else { throw ChatFailure.limit }
+        return ChatCompletion(text: text, calls: calls)
+    }
+
     private func request(path: String, key: String, body: [String: Any]?) async throws -> Data {
         // Fixed production HTTPS origin: no arbitrary endpoint can receive the buyer key.
         let configuration = URLSessionConfiguration.ephemeral
