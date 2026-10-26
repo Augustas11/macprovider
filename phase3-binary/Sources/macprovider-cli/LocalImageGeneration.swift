@@ -85,6 +85,14 @@ actor LocalImageGeneration {
     private var totalBytes: Int64 = 0
     private var operation: Task<Data, Error>?
     private var operationID: UUID?
+    private var cancellationRequested = false
+    #if DEBUG
+    func cancellationRequestedForTest() -> Bool { cancellationRequested }
+    var completionBarrierForTest: (@Sendable () async -> Void)?
+    func setCompletionBarrierForTest(_ barrier: @escaping @Sendable () async -> Void) {
+        completionBarrierForTest = barrier
+    }
+    #endif
     private var warmTimer: Task<Void, Never>?
     private var held = false
     private var languageUnloaded = false
@@ -118,11 +126,17 @@ actor LocalImageGeneration {
         if let reason = decision.unavailableReason { throw APIError(status: 400, message: reason, code: "image_memory_unavailable") }
         warmTimer?.cancel(); warmTimer = nil
         lastError = nil
+        cancellationRequested = false
         let task = Task { try await self.perform(request, decision: decision) }
         operation = task
         self.operationID = operationID
         do {
             let data = try await withTaskCancellationHandler(operation: { try await task.value }, onCancel: { task.cancel() })
+            #if DEBUG
+            await completionBarrierForTest?()
+            #endif
+            try Task.checkCancellation()
+            guard !cancellationRequested else { throw CancellationError() }
             operation = nil
             state = .warm
             warmTimer = Task { [weak self, warmNanoseconds] in
@@ -167,14 +181,17 @@ actor LocalImageGeneration {
     /// A late disconnect or Stop belongs only to its request, including its warm lease.
     func cancel(operationID: UUID) async {
         guard self.operationID == operationID else { return }
+        cancellationRequested = true
         if let operation {
             operation.cancel()
             _ = try? await operation.value
             while self.operationID == operationID && self.operation != nil {
                 try? await Task.sleep(nanoseconds: 10_000_000)
             }
-            // generate's owning task cleans up before releasing its slot.
-        } else { await restore() }
+        }
+        // Completion may have won the child-task race. Restore its warm lease
+        // after the owner releases the slot, without touching a successor.
+        if self.operationID == operationID { await restore() }
     }
     func cancel() async {
         if let operationID { await cancel(operationID: operationID) }

@@ -314,6 +314,29 @@ final class LocalImageGenerationTests: XCTestCase {
         XCTAssertTrue((snapshot["last_error"] as? String)?.contains("Could not reload") == true)
     }
 
+    func testStopAtCompletedChildBoundaryAlwaysRestoresBeforeReturning() async throws {
+        let events = ImageEvents()
+        let service = service(events: events)
+        let boundary = ImageCompletionBoundary()
+        await service.setCompletionBarrierForTest { await boundary.wait() }
+        let id = UUID()
+        let generation = Task { try await service.generate(request(), operationID: id) }
+        while !(await boundary.entered) { try await Task.sleep(nanoseconds: 1_000_000) }
+        let stop = Task { await service.cancel(operationID: id) }
+        // Observe the cancellation intent deterministically before letting the
+        // owner publish the successfully completed child's result.
+        while !(await service.cancellationRequestedForTest()) { await Task.yield() }
+        await boundary.release()
+        await stop.value
+        do { _ = try await generation.value; XCTFail("Stop must cancel the warm publication") }
+        catch is CancellationError {} catch { XCTFail("Unexpected error: \(error)") }
+        let state = await service.state
+        let values = await events.values
+        XCTAssertEqual(state, .idle)
+        XCTAssertEqual(Array(values.suffix(3)), ["unload_image", "restore_language", "resume"])
+        XCTAssertEqual(values.filter { $0 == "restore_language" }.count, 1)
+    }
+
     func testStaleRequestCancellationCannotCancelSuccessorOrItsWarmLease() async throws {
         let events = ImageEvents()
         let backend = ControlledImageBackend(events: events)
@@ -522,4 +545,14 @@ private actor ControlledImageBackend: LocalImageBackend {
         return Data("png".utf8)
     }
     func unload() async { await events.add("unload_image") }
+}
+
+private actor ImageCompletionBoundary {
+    private(set) var entered = false
+    private var continuation: CheckedContinuation<Void, Never>?
+    func wait() async {
+        entered = true
+        await withCheckedContinuation { continuation = $0 }
+    }
+    func release() { continuation?.resume(); continuation = nil }
 }
