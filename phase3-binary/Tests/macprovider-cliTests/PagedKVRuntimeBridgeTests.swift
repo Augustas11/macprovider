@@ -913,9 +913,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     }
 
     func testRealSharedForwardBackendGreedyMatchesLoneAndMixedOffsetBatch() async throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
-            throw XCTSkip("MLX default metallib is unavailable in this test host")
-        }
+        try requireMetal()
 
         let descriptor = Self.bridgeDescriptor()
         let container = ModelContainer(context: ModelContext(
@@ -3662,9 +3660,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     }
 
     func testLockstepSharedForwardDecodePopulatesBatchInnerState() async throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
-            throw XCTSkip("MLX default metallib is unavailable in this test host")
-        }
+        try requireMetal()
 
         let descriptor = Self.bridgeDescriptor()
         let container = ModelContainer(context: ModelContext(
@@ -3757,9 +3753,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     }
 
     func testLockstepWindowReturnsEverySampledTokenInOrder() async throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
-            throw XCTSkip("MLX default metallib is unavailable in this test host")
-        }
+        try requireMetal()
 
         let descriptor = Self.bridgeDescriptor()
         let container = ModelContainer(context: ModelContext(
@@ -3827,9 +3821,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     /// The window reports each step's tokens as sampled (equal to the returned
     /// prefix) and ends after a step when the observer asks it to.
     func testLockstepWindowStreamsStepsAndEndsWhenObserverStops() async throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
-            throw XCTSkip("MLX default metallib is unavailable in this test host")
-        }
+        try requireMetal()
         for stopAfterFirstStep in [false, true] {
             let descriptor = Self.bridgeDescriptor()
             let container = ModelContainer(context: ModelContext(
@@ -3894,9 +3886,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     }
 
     func testRealSharedForwardBackendCancelWaitsForActivePrefill() async throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
-            throw XCTSkip("MLX default metallib is unavailable in this test host")
-        }
+        try requireMetal()
 
         let descriptor = Self.bridgeDescriptor()
         let modelGate = RuntimeBridgeBlockingModelGate()
@@ -3986,9 +3976,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     }
 
     func testLabStateDigestObserverRecordsPagedKVCacheLogicalPrefix() async throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
-            throw XCTSkip("MLX default metallib is unavailable in this test host")
-        }
+        try requireMetal()
 
         let descriptor = Self.bridgeDescriptor(blockSizeTokens: 4, maxPhysicalBlocks: 4)
         let backend = PagedKVSharedForwardBackend(
@@ -4032,9 +4020,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     }
 
     func testLabDrafterStateDigestIgnoresPhysicalPaddingBeyondCommittedPrefix() throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
-            throw XCTSkip("MLX default metallib is unavailable in this test host")
-        }
+        try requireMetal()
 
         let paddedKey = MLXArray([Float](arrayLiteral: 1, 2, 99, 100), [1, 1, 4, 1])
         let paddedValue = MLXArray([Float](arrayLiteral: 3, 4, 101, 102), [1, 1, 4, 1])
@@ -4363,9 +4349,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     }
 
     func testLabStateDigestObserverFailsClosedForPagedSlidingWindowCache() async throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
-            throw XCTSkip("MLX default metallib is unavailable in this test host")
-        }
+        try requireMetal()
 
         let descriptor = Self.bridgeDescriptor(blockSizeTokens: 4, maxPhysicalBlocks: 4)
         let backend = PagedKVSharedForwardBackend(
@@ -4408,9 +4392,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     }
 
     func testLabStateDigestObserverFailsClosedForUnknownCacheKind() async throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
-            throw XCTSkip("MLX default metallib is unavailable in this test host")
-        }
+        try requireMetal()
 
         let descriptor = Self.bridgeDescriptor(blockSizeTokens: 4, maxPhysicalBlocks: 4)
         let backend = PagedKVSharedForwardBackend(
@@ -4472,9 +4454,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     }
 
     func testQwenPreparationLanePreservesPromptStopsToolPrefillAndCheckpoints() async throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
-            throw XCTSkip("MLX default metallib is unavailable in this test host")
-        }
+        try requireMetal()
 
         let tokenizer = RuntimeBridgePreparationTokenizer()
         let generationPrompt = "<|im_start|>assistant\n<think>\n\n</think>\n\n"
@@ -4558,9 +4538,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     }
 
     func testQwenPreparationLaneRejectsQueuedDrainBeforeProcessorRuns() async throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
-            throw XCTSkip("MLX default metallib is unavailable in this test host")
-        }
+        try requireMetal()
 
         let preparationGate = RuntimeBridgeTestGate()
         let processor = RuntimeBridgeBlockingPromptProcessor(
@@ -4669,25 +4647,19 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     }
 
     func testQwenPreparationLaneAdmitsNonStreamingRowWhileTargetLockIsHeld() async throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
-            throw XCTSkip("MLX default metallib is unavailable in this test host")
-        }
+        try requireMetal()
 
         try await assertQwenPreparationLaneAdmitsWhileTargetLockIsHeld(streaming: false)
     }
 
     func testQwenPreparationLaneAdmitsStreamingRowWhileTargetLockIsHeld() async throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
-            throw XCTSkip("MLX default metallib is unavailable in this test host")
-        }
+        try requireMetal()
 
         try await assertQwenPreparationLaneAdmitsWhileTargetLockIsHeld(streaming: true)
     }
 
     func testAttachedModelRuntimeServesFreshGreedyRequestsThroughScheduler() async throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
-            throw XCTSkip("MLX default metallib is unavailable in this test host")
-        }
+        try requireMetal()
 
         let modelID = "mlx-community/Qwen-Test"
         let modelSHA = String(repeating: "a", count: 64)
@@ -4756,9 +4728,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     // past it is clamped and reports `length`, and a prompt that fills the
     // context is the serial 413 before any backend work.
     func testAttachedServePathBoundsRowsByServedContext() async throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
-            throw XCTSkip("MLX default metallib is unavailable in this test host")
-        }
+        try requireMetal()
 
         let modelID = "mlx-community/Qwen-Test"
         func runtime(promptTokens: [Int32], backend: RuntimeBridgeScriptedBackend) -> ModelRuntime {
@@ -4810,9 +4780,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     }
 
     func testAttachedServePathPrefillsChatPreparedMultiTokenPrompt() async throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
-            throw XCTSkip("MLX default metallib is unavailable in this test host")
-        }
+        try requireMetal()
 
         let modelID = "mlx-community/Qwen-Test"
         let backend = RuntimeBridgeScriptedBackend(scripts: [:])
@@ -4837,9 +4805,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     }
 
     func testAttachedServePathPrefillFailureReturnsReasonCoded503() async throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
-            throw XCTSkip("MLX default metallib is unavailable in this test host")
-        }
+        try requireMetal()
 
         let modelID = "mlx-community/Qwen-Test"
         let backend = RuntimeBridgeScriptedBackend(
@@ -4870,9 +4836,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     }
 
     func testAttachedModelRuntimeCancelsBlockedCompletionSubmit() async throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
-            throw XCTSkip("MLX default metallib is unavailable in this test host")
-        }
+        try requireMetal()
 
         let gate = RuntimeBridgeTestGate()
         let backend = RuntimeBridgeScriptedBackend(scripts: [:], decodeGate: gate)
@@ -4897,9 +4861,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     }
 
     func testAttachedModelRuntimeCancelsBlockedStreamingSubmit() async throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
-            throw XCTSkip("MLX default metallib is unavailable in this test host")
-        }
+        try requireMetal()
 
         let gate = RuntimeBridgeTestGate()
         let backend = RuntimeBridgeScriptedBackend(scripts: [:], decodeGate: gate)
@@ -4937,9 +4899,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     }
 
     func testContiguousCacheBridgeRestoresLiveKVCacheByteExactAndRoundTrips() async throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
-            throw XCTSkip("MLX default metallib is unavailable in this test host")
-        }
+        try requireMetal()
 
         let descriptor = Self.bridgeDescriptor(blockSizeTokens: 2, maxPhysicalBlocks: 6)
         let bridge = PagedKVRuntimeContiguousCacheBridge()
@@ -5009,9 +4969,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     }
 
     func testContiguousCacheBridgeRecordsBFloat16KV() async throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
-            throw XCTSkip("MLX default metallib is unavailable in this test host")
-        }
+        try requireMetal()
 
         let descriptor = Self.bridgeDescriptor(blockSizeTokens: 2, maxPhysicalBlocks: 6)
         let bridge = PagedKVRuntimeContiguousCacheBridge()
@@ -5041,9 +4999,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     }
 
     func testCompiledWritebackKeepsEachRowsOwnTargetLength() throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
-            throw XCTSkip("MLX default metallib is unavailable in this test host")
-        }
+        try requireMetal()
         let row0 = MLXArray((1...8).map(Float.init), [1, 1, 8, 1])
         let row1 = MLXArray((11...18).map(Float.init), [1, 1, 8, 1])
         let keys = concatenated([row0, row1], axis: 0)
@@ -5069,9 +5025,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     }
 
     func testCompiledWritebackThrowsWhenCompiledShorterThanARowTarget() throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
-            throw XCTSkip("MLX default metallib is unavailable in this test host")
-        }
+        try requireMetal()
         let keys = MLXArray((1...4).map(Float.init), [1, 1, 4, 1])
         let values = MLXArray((101...104).map(Float.init), [1, 1, 4, 1])
         eval(keys, values)
@@ -5097,9 +5051,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     }
 
     func testContiguousCacheBridgePreservesMidBlockTrimAcrossExtractAndRetainReattach() async throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
-            throw XCTSkip("MLX default metallib is unavailable in this test host")
-        }
+        try requireMetal()
 
         let descriptor = Self.bridgeDescriptor(blockSizeTokens: 4, maxPhysicalBlocks: 6)
         let bridge = PagedKVRuntimeContiguousCacheBridge()
@@ -5187,9 +5139,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     }
 
     func testContiguousCacheBridgeRejectsCrossHandleCacheRecord() async throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
-            throw XCTSkip("MLX default metallib is unavailable in this test host")
-        }
+        try requireMetal()
 
         let descriptor = Self.bridgeDescriptor(blockSizeTokens: 2, maxPhysicalBlocks: 6)
         let bridge = PagedKVRuntimeContiguousCacheBridge()
