@@ -28,7 +28,7 @@ final class TaskStore: ObservableObject {
         } catch { tasks = []; runs = []; notice = "Tasks could not be loaded from their local files." }
     }
 
-    func save(_ task: ScheduledTask) throws {
+    func save(_ task: ScheduledTask, original: ScheduledTask? = nil) throws {
         guard !task.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               task.name.utf8.count <= 256, task.prompt.utf8.count <= ChatStore.maxPromptBytes,
               !task.prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
@@ -37,7 +37,14 @@ final class TaskStore: ObservableObject {
               (0...23).contains(task.schedule.hour), (0...59).contains(task.schedule.minute) else { throw ChatFailure.limit }
         var updated = task
         if let old = tasks.first(where: { $0.id == task.id }) {
-            if old.schedule != task.schedule || (!old.enabled && task.enabled) {
+            // The editor may have stayed open while the scheduler consumed a run.
+            // Only explicit schedule/enabled edits may replace scheduler-owned state.
+            let baseline = original ?? old
+            let scheduleChanged = baseline.schedule != task.schedule
+            let enabledChanged = baseline.enabled != task.enabled
+            updated.enabled = enabledChanged ? task.enabled : old.enabled
+            updated.nextFire = old.nextFire
+            if scheduleChanged || (enabledChanged && task.enabled) {
                 updated.nextFire = task.schedule.initialFire(now: clock(), timezone: timezone())
             }
         } else {

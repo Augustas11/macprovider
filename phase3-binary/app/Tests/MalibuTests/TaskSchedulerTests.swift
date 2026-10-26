@@ -78,6 +78,47 @@ final class TaskSchedulerTests: XCTestCase {
         XCTAssertNil(store.tasks.first?.nextFire)
     }
 
+    func testSavingOpenEditorCannotReplayConsumedOnceOrRecurringOccurrence() async throws {
+        for kind in [TaskSchedule.Kind.once, .hourly] {
+            var now = Date(timeIntervalSince1970: 1_700_000_000)
+            let zone = TimeZone(secondsFromGMT: 0)!
+            let store = TaskStore(directory: try directory(), clock: { now }, timezone: { zone })
+            var scheduled = task(now: now); scheduled.schedule.kind = kind
+            try store.save(scheduled)
+            let original = try XCTUnwrap(store.tasks.first)
+            var edited = original
+            edited.name = "Edited while running"; edited.prompt = "New prompt"
+            now = try XCTUnwrap(original.nextFire)
+            var calls = 0
+            let scheduler = TaskScheduler(store: store, clock: { now }, timezone: { zone }, execute: { _ in
+                calls += 1; return "done"
+            })
+            scheduler.tick()
+            try await eventually { scheduler.runningTaskID == nil }
+            let consumed = try XCTUnwrap(store.tasks.first)
+            try store.save(edited, original: original)
+            XCTAssertEqual(store.tasks.first?.nextFire, consumed.nextFire)
+            XCTAssertEqual(store.tasks.first?.enabled, consumed.enabled)
+            XCTAssertEqual(store.tasks.first?.prompt, "New prompt")
+            scheduler.tick()
+            XCTAssertNil(scheduler.runningTaskID)
+            XCTAssertEqual(calls, 1)
+        }
+    }
+
+    func testExplicitScheduleChangeFromOpenEditorRecomputesOccurrence() throws {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let store = TaskStore(directory: try directory(), clock: { now })
+        try store.save(task(now: now))
+        let original = try XCTUnwrap(store.tasks.first)
+        try store.consume(original, now: now, timezone: .current)
+        var edited = original
+        edited.schedule.date = now.addingTimeInterval(3600)
+        try store.save(edited, original: original)
+        XCTAssertEqual(store.tasks.first?.nextFire, edited.schedule.date)
+        XCTAssertFalse(try XCTUnwrap(store.tasks.first).enabled)
+    }
+
     func testWallTimeCapCancelsRunAndRecordsFailure() async throws {
         let store = TaskStore(directory: try directory())
         var canceled = false

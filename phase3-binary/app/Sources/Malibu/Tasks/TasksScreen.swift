@@ -42,7 +42,7 @@ struct TasksScreen: View {
         }
         .sheet(item: $editing) { task in
             TaskEditor(task: task, agents: agents.agents, error: error) { updated in
-                do { try store.save(updated); selectedID = updated.id; editing = nil; error = nil }
+                do { try store.save(updated, original: task); selectedID = updated.id; editing = nil; error = nil }
                 catch { self.error = "The task could not be saved. Check its name and prompt." }
             }
         }
