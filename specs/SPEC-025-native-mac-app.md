@@ -1,6 +1,12 @@
 # SPEC-025 — Native Mac App (signed `.dmg`, native Mac app with menu-bar presence)
 
-Status: DRAFT v0.40.0 · Owner: @Augustas11 · Target: 2026 Q3
+Status: DRAFT v0.41.0 · Owner: @Augustas11 · Target: 2026 Q3
+
+**Change log v0.41.0 (2026-10-26, Related: #2054):**
+User-first navigation opens on Chat; Earn combines Dashboard and Provider;
+Models merges discovery, installed models and downloads; Terminal embeds
+bounded, ephemeral shell and gateway harness sessions. Existing privacy,
+copy, catalog, preparation and client configuration rules remain normative.
 
 **Change log v0.40.0 (2026-10-22, Related: #2107):**
 - SPEC-025-R012: the Connected apps model picker lists only models whose
@@ -751,10 +757,10 @@ every section: reported values only, no machine reason codes, no $/time
 projections (SPEC-044-R004), colour never the only signal.
 
 - **SPEC-025-R001 Shell.** Malibu MUST present one main window titled
-  "Malibu": a sidebar with, in order, Dashboard, Chat, Connected apps, Models, Discover,
-  Provider, then a separate group with Settings and Diagnostics, and a detail
-  pane showing the selected section. It opens on Dashboard. "Open Dashboard"
-  opens it on Dashboard; "Settings…" (Cmd-,) and the menu-bar Settings item
+  "Malibu": a sidebar with, in order, Chat, Terminal, Models, Earn,
+  then a separate utility group with Settings and Diagnostics, and a detail
+  pane showing the selected section. It opens on Chat. "Open Malibu"
+  opens it on Chat; the menu-bar "Earnings" item opens Earn; "Settings…" (Cmd-,) and the menu-bar Settings item
   open the same window on Settings; there is no separate settings window.
   The minimum content size is 820 × 560 pt, and no section may grow the
   window past its frame. Chat follows the capability-gated local-use requirements in §3.2.2.
@@ -766,17 +772,29 @@ projections (SPEC-044-R004), colour never the only signal.
   rather than a guess. Text that comes from the provider (model ids, reasons,
   log lines) is shown as one plain line with control, format and separator
   characters removed and its length capped.
-- **SPEC-025-R003 Dashboard.** The Dashboard MUST keep the Phase 1 status
+- **SPEC-025-R003 Earn.** Earn MUST keep the Phase 1 status
   pill, status notice and Earnings card (§3.2) and add: a **Your model** card
   with the served model, the switching line (R004), and, for a trusted current
   row, its provider share rate and demand rank with the SPEC-044-R004
-  disclosure beside them, plus links to Models and Discover; a **This Mac**
+  disclosure beside them, plus links to the Models On this Mac and Browse tabs; a **This Mac**
   card with the health line and a link to Diagnostics; a recommendation tip
   only for an actionable recommendation; and an invite nudge only while a
-  current invite link can be copied. Reset and Export appear on the Dashboard
+  current invite link can be copied. Reset and Export appear on Earn
   only in an error state, except the Export action that accompanies the
   hardware-evidence blocker in the Earnings card (§3.2).
-- **SPEC-025-R004 Models.** Models MUST render the SPEC-044 projection in the
+  Below this content Earn MUST host a "Provider details" disclosure,
+  collapsed by default, containing all R007 details. Pause/Resume MUST remain
+  visible at the top of Earn, outside the disclosure.
+- **SPEC-025-R004 Models.** One Models section MUST offer a segmented control
+  in this order: Recommended, Browse, On this Mac, Downloads. Recommended
+  shows the pinned recommendation and signed catalog rows fitting this Mac
+  (the former Discover default); Browse shows the full catalog and bounded
+  explicit provider search from R006. On this Mac hosts the existing Models
+  table, sections, columns, switching line, footer and disclosure. Downloads
+  shows active/recent R014 prepare_model transactions, progress and Cancel,
+  or an empty state when none exist. This is a presentation merge only:
+  projection logic does not change, and every R004/R005/R006 and SPEC-044
+  rule applies wherever rows render. On this Mac MUST render the SPEC-044 projection in the
   SPEC-044-R008 sections as a table with Model, Size, Fit, Status, provider
   completion rate per 1M tokens and Action, one reason line per row saying
   why the model can or cannot be served here, the SPEC-044-R004 disclosure in
@@ -808,8 +826,8 @@ projections (SPEC-044-R004), colour never the only signal.
   with elapsed time and MUST report success only after the provider confirms
   the new model; a failure states that the Mac keeps serving the model it
   reports. Closing the sheet does not cancel the switch.
-- **SPEC-025-R006 Discover.** Discover MUST follow SPEC-044-R013, with the
-  fit filter on by default, every signed catalog model listed under its
+- **SPEC-025-R006 Models discovery.** Recommended and Browse MUST follow SPEC-044-R013, with the
+  fit filter on by default in Recommended and off by default in Browse, every signed catalog model listed under its
   readable R004 title with its fit inline, the first visible row selected, and
   Download offered as in R004. The recommendation (Adopt, Not now, Stop) is
   pinned above the list and shown only when it names a row Discover lists, so
@@ -817,7 +835,7 @@ projections (SPEC-044-R004), colour never the only signal.
   provider search, in its own subprocess bounded to 20 s, with the search term
   limited to letters, digits, space, dot, dash and underscore, never starting
   with a dash.
-- **SPEC-025-R007 Provider.** Provider MUST show the status pill, the
+- **SPEC-025-R007 Provider.** Provider details inside Earn MUST show the status pill, the
   lifecycle line, customer slots, continuous batching state (on with free rows
   and waiting requests, off, or not active), native MTP state (on with mean
   accepted tokens per step, ready, paused after a fallback, off, or not
@@ -861,7 +879,7 @@ projections (SPEC-044-R004), colour never the only signal.
   release metadata is not a user channel. Saving this choice MUST NOT create
   an independent app feed or change the CLI's signed-set update authority.
 
-### 3.2.2 Local Chat and Connected apps
+### 3.2.2 Local Chat, Terminal and Other apps
 
 - **SPEC-025-R010 Local Chat.** Chat MUST use the provider's loopback HTTP
   endpoint on the configured local port. It MUST NOT redirect or fall back
@@ -894,7 +912,9 @@ projections (SPEC-044-R004), colour never the only signal.
   unavailable capability and exceeded bounds MUST fail visibly without
   executing extra operations. Tool results are untrusted conversation data,
   never permission to alter the registry, root or limits.
-- **SPEC-025-R012 Connected apps.** Connected apps MUST distinguish local
+- **SPEC-025-R012 Connected apps.** Terminal’s "Other apps" sub-view is the
+  existing Connected apps screen, unchanged. All rules below remain normative
+  for it. Connected apps MUST distinguish local
   Chat from buyer-funded requests to the Malibu gateway. Offer automated
   setup only for documented supported client configuration formats. Cursor
   uses a documented manual Settings handoff until a supported configuration
@@ -995,6 +1015,44 @@ projections (SPEC-044-R004), colour never the only signal.
   agent prompts, and direct users to verify actual session tool activity.
   Installing the plugin is not automatic-tool-use acceptance, and isolated
   client acceptance MUST NOT imply production-gateway verification.
+
+- **SPEC-025-R013 Terminal.** Terminal MUST embed a terminal with tabs,
+  capped at eight; output MUST never be persisted. The tab "+" menu lists
+  Shell, Claude Code, Codex, OpenCode, Crush and other R012 adapters with a
+  launcher. Harness entries are enabled only when the executable is found on
+  the login-shell PATH, resolved once using `/bin/zsh -lc 'command -v <name>'`
+  with a five-second bound; missing entries say "Not installed". Shell runs
+  `$SHELL -l` (fallback `/bin/zsh`) in the home directory; users may choose
+  a working folder per tab.
+  Harnesses MUST use the Malibu gateway and saved R012 Keychain buyer key,
+  never the loopback provider. The R012 **Not private** line and buyer-key
+  disclosure sentence remain persistently visible. Without a saved key, show
+  "Add a buyer key in Other apps" and a button opening that sub-view; start
+  no process. Codex, OpenCode and Crush use the existing managed launchers,
+  including one-time key handoff and project-config disabling. Missing setup
+  MUST explain the prerequisite and link to Other apps.
+  Claude Code is an env-only adapter that writes nothing in `~/.claude`.
+  Launch `claude --model <id>` with `ANTHROPIC_BASE_URL=https://api.malibu.tech`;
+  deliver `ANTHROPIC_AUTH_TOKEN` through the existing R012 one-time 0600 file
+  inside a 0700 directory. A small launcher reads once, deletes, exports,
+  then execs Claude. Set `ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_OPUS_MODEL`,
+  `ANTHROPIC_DEFAULT_SONNET_MODEL`, `ANTHROPIC_DEFAULT_HAIKU_MODEL` and
+  `ANTHROPIC_SMALL_FAST_MODEL` to the selected gateway model ID;
+  `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`; `CLAUDE_CONFIG_DIR` to a
+  Malibu-owned 0700 directory under
+  `~/Library/Application Support/Malibu/clients/claude-code/`.
+  The picker reuses R012 tools capability and minimum 32,768 context tokens.
+  The gateway serves `/v1/messages` (unauthenticated POST returns 401
+  `authentication_error`); this does not establish client compatibility.
+  Label setup "Configured" until the user runs it; preserve R012's configured,
+  endpoint-tested and compatible distinction.
+  Keys MUST never appear in argv, Malibu-written scrollback, logs, diagnostics
+  or errors. Build child environments using `ProcessEnvironmentSanitizer`
+  plus only the documented adapter variables above and `TERM=xterm-256color`.
+  Closing a tab MUST SIGHUP the child process group and SIGKILL it after
+  three seconds. App quit MUST terminate all terminal children. Earn, Models
+  and Terminal follow §3.2 copy rules, with no $/time projections or machine
+  reason codes.
 
 ### 3.3 Updates — CLI-owned signed compatibility set
 
