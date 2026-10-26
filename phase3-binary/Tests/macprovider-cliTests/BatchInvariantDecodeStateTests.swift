@@ -2,7 +2,6 @@ import Foundation
 import MLX
 import MLXLMCommon
 import MLXNN
-import Tokenizers
 @testable import MacProviderCore
 @testable import macprovider_cli
 import XCTest
@@ -58,7 +57,11 @@ final class BatchInvariantDecodeStateTests: XCTestCase {
     func testAllMissingStatesFailBeforeEagerOrCompiledForward() async throws {
         try await Device.withDefaultDevice(.cpu) {
             let model = InvariantFixtureModel()
-            let fixture = try await Fixture(model: model, missingAllStates: true)
+            let fixture = try await Fixture(model: model, missingAllStates: true, seedWarmCaches: true)
+            XCTAssertEqual(fixture.offsets, [1, 1])
+            XCTAssertEqual(fixture.caches.count, 2)
+            XCTAssertTrue(fixture.caches.allSatisfy { $0.offset == 1 && !$0.innerState().isEmpty },
+                "all-nil metadata must be tested with warmed caches eligible for compiled decode")
             let result = try await fixture.decode([0, 1], steps: 1)
             XCTAssertEqual(result, Self.failures)
             XCTAssertTrue(model.forwardBatches.isEmpty)
@@ -98,9 +101,11 @@ final class BatchInvariantDecodeStateTests: XCTestCase {
         let backend: PagedKVSharedForwardBackend
         let allocator: PagedKVBlockAllocator
         var handles: [PagedKVBlockTableHandle] = []
+        var caches: [PagedKVCache] = []
         var offsets = [0, 0]
 
-        init(model: StatefulFixtureModel, missingSecondState: Bool = false, missingAllStates: Bool = false) async throws {
+        init(model: StatefulFixtureModel, missingSecondState: Bool = false, missingAllStates: Bool = false,
+             seedWarmCaches: Bool = false) async throws {
             allocator = try PagedKVBlockAllocator(blockSizeTokens: 8, maxPhysicalBlocks: 16)
             backend = PagedKVSharedForwardBackend(
                 container: ModelContainer(context: ModelContext(configuration: .init(id: "state-fixture"),
@@ -110,9 +115,17 @@ final class BatchInvariantDecodeStateTests: XCTestCase {
             for row in 0..<2 {
                 let handle = try await allocator.allocate(conversationKey: "row-\(row)", maxTokens: 16)
                 handles.append(handle)
+                if seedWarmCaches { _ = try await allocator.extend(handle, by: 1) }
                 let binding = try await allocator.binding(for: handle)
                 let cache = PagedKVCache(blockSizeTokens: 8, maxPhysicalBlocks: 16, poolEpoch: 1,
                     binding: binding, initialOffset: 0, reconstructViaGather: false)
+                if seedWarmCaches {
+                    let seed = MLXArray.ones([1, 1, 1, 1])
+                    let updated = cache.update(keys: seed, values: seed)
+                    eval(updated.0, updated.1)
+                    offsets[row] = 1
+                }
+                caches.append(cache)
                 var state = LMOutput.State()
                 state[fixtureTagKey] = [row == 0 ? 11 : 29]
                 try backend.installRowStateForTest(caches: [cache], requestID: "row-\(row)",
