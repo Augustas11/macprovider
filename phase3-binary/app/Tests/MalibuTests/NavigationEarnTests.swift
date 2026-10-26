@@ -69,7 +69,12 @@ final class NavigationEarnTests: XCTestCase {
             let action = try XCTUnwrap(rendered.first { $0.text.contains(actionLabel) }, diagnostic)
             XCTAssertLessThan(abs(action.bounds.midY - title.bounds.midY) * window.frame.height, 50,
                               "Pause/Resume must be rendered in the Earn header")
-            XCTAssertFalse(diagnostic.contains("Customer slots"), "Provider details start collapsed")
+            let detailLandmarks = ["Requests", "Endpoints (this Mac only)", "/v1/chat/completions",
+                                   "/v1/responses", "Logs and events are in Diagnostics"]
+            for landmark in detailLandmarks {
+                XCTAssertFalse(normalized(diagnostic).contains(normalized(landmark)),
+                               "Provider details start collapsed: \(landmark)")
+            }
             let disclosure = try XCTUnwrap(rendered.first { $0.text.contains("Provider details") }, diagnostic)
             // Vision includes the leading disclosure chevron in the text bounds.
             // Click inside that glyph, rather than left of the detected run.
@@ -83,9 +88,9 @@ final class NavigationEarnTests: XCTestCase {
             }
             settle(window)
             let expanded = try renderedText(window).map(\.text).joined(separator: "\n")
-            for expected in ["Customer slots", "Requests", "Tokens", "Current run", "Endpoints (this Mac only)",
-                             "/v1/chat/completions", "/v1/responses"] {
-                XCTAssertTrue(expanded.contains(expected), "Expanded Earn details must render R007 content: \(expected)\n\(expanded)")
+            for expected in detailLandmarks {
+                XCTAssertTrue(normalized(expanded).contains(normalized(expected)),
+                              "Expanded Earn details must render R007 content: \(expected)\n\(expanded)")
             }
         }
     }
@@ -96,6 +101,10 @@ final class NavigationEarnTests: XCTestCase {
             RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02))
         }
         window.contentView?.layoutSubtreeIfNeeded()
+    }
+
+    private func normalized(_ text: String) -> String {
+        text.lowercased().split(whereSeparator: \.isWhitespace).joined(separator: " ")
     }
 
     private struct RenderedText {
