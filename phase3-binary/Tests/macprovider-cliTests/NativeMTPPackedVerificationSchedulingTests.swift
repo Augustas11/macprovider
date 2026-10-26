@@ -1,4 +1,5 @@
 import MLX
+import MacProviderCore
 import XCTest
 @testable import macprovider_cli
 
