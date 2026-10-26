@@ -73,10 +73,13 @@ enum NativeMTPAcceptanceCorpusBuilder {
     static func requestObject(modelID: String, index: Int, padding: Int) -> [String: Any] {
         let tools = index % 3 != 0
         let sampled = index % 3 != 1
+        let stopBoundary = !tools && index % 17 == 0
         let context = "Acceptance fixture \(index). Context:" + String(repeating: " x", count: padding)
         let instruction: String
         if tools {
             instruction = "Use minimal reasoning, then immediately call read_file for settings.json. The earlier file does not contain the answer."
+        } else if stopBoundary {
+            instruction = "Your entire final answer must be exactly one ASCII semicolon (;). Do not reason or explain; answer immediately."
         } else if index % 19 == 0 {
             instruction = "Answer with only OK."
         } else if index % 20 == 0 {
@@ -88,7 +91,9 @@ enum NativeMTPAcceptanceCorpusBuilder {
         var object: [String: Any] = [
             "model": modelID,
             "messages": [["role": "user", "content": prompt]],
-            "max_tokens": 128,
+            // GLM has no thinking-off switch. Only explicit stop fixtures use
+            // the existing 256-token bound to reach a visible delimiter.
+            "max_tokens": stopBoundary ? 256 : 128,
             "temperature": sampled ? 1.0 : 0.0,
             "top_p": sampled ? 0.95 : 1.0,
             "stream": false,
@@ -107,8 +112,9 @@ enum NativeMTPAcceptanceCorpusBuilder {
                 ["role": "user", "content": prompt],
             ]
             object["reasoning_effort"] = "high"
-        } else if index % 17 == 0 {
+        } else if stopBoundary {
             object["stop"] = [";"]
+            object["reasoning_effort"] = "low"
         }
         return object
     }
