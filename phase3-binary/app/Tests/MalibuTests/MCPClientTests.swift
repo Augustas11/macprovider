@@ -150,6 +150,40 @@ final class MCPClientTests: XCTestCase {
         XCTAssertEqual(other.processIdentifier, 0)
     }
 
+    func testInteractiveContinuationRestartsExpiredClientAndRequiresFreshPermission() async throws {
+        let (template, directory) = try server()
+        var created: [MCPClient] = []
+        let transport = MCPExpiryTransport()
+        let session = AgentSession(transport: AgentModelTransport(local: transport, port: { 9042 }), makeClient: { configuration in
+            let client = MCPClient(configuration: configuration, lifetime: created.isEmpty ? 1 : 30)
+            created.append(client)
+            return client
+        })
+        defer { session.cancel() }
+        var agent = AgentDefinition(); agent.servers = [template.configuration]
+        let first = Task { try await session.run(agent: agent, prompt: "first") }
+        for _ in 0..<500 where session.pendingApproval == nil {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertNotNil(session.pendingApproval)
+        session.resolveApproval(.allowSession)
+        _ = try await first.value
+        XCTAssertEqual(created.count, 1)
+        try await Task.sleep(for: .milliseconds(1100))
+        XCTAssertFalse(try XCTUnwrap(created.first).isRunning)
+        let second = Task { try await session.run(agent: agent, prompt: "continue") }
+        for _ in 0..<500 where session.pendingApproval == nil {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertEqual(created.count, 2)
+        XCTAssertTrue(try XCTUnwrap(created.last).isRunning)
+        XCTAssertNotNil(session.pendingApproval, "Expired session permission must not authorize the new process")
+        session.resolveApproval(.deny)
+        do { _ = try await second.value; XCTFail("Fresh tool permission was denied") }
+        catch { XCTAssertEqual(error as? MCPFailure, .denied) }
+        XCTAssertEqual(try String(contentsOf: directory.appendingPathComponent("calls")), "call\n")
+    }
+
     func testCancellationEndsInFlightRequest() async throws {
         let (client, _) = try server("timeout", timeout: 3)
         let operation = Task { try await client.start() }
@@ -217,4 +251,22 @@ for line in sys.stdin:
     else: raise Exception('Unexpected method')
     print(json.dumps({'jsonrpc': '2.0', 'id': request['id'], 'result': result}), flush=True)
 """#
+}
+
+@MainActor
+private final class MCPExpiryTransport: ChatTransport {
+    func capability(at endpoint: ChatEndpoint) async throws -> ChatCapability {
+        ChatCapability(model: "fixture", generation: 1, guaranteedTools: true)
+    }
+    func complete(at endpoint: ChatEndpoint, body: Data,
+                  onText: @escaping @MainActor (String) -> Void) async throws -> ChatCompletion {
+        let object = try XCTUnwrap(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+        let messages = try XCTUnwrap(object["messages"] as? [[String: Any]])
+        if messages.last?["role"] as? String == "tool" { return ChatCompletion(text: "done", calls: []) }
+        let tools = try XCTUnwrap(object["tools"] as? [[String: Any]])
+        let function = try XCTUnwrap(tools.first?["function"] as? [String: Any])
+        let name = try XCTUnwrap(function["name"] as? String)
+        return ChatCompletion(text: "", calls: [ChatToolCall(id: UUID().uuidString, name: name,
+                                                           arguments: #"{"text":"hello"}"#)])
+    }
 }

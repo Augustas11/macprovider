@@ -57,6 +57,7 @@ final class MCPClient {
     private static var active: [UUID: MCPClient] = [:]
     private let identity = UUID()
     var processIdentifier: pid_t { pid }
+    var isRunning: Bool { !terminal && pid > 1 && kill(pid, 0) == 0 }
 
     init(configuration: MCPServerConfiguration, timeout: TimeInterval = 15,
          lifetime: TimeInterval = 300, messageLimit: Int = 65536) {

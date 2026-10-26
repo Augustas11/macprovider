@@ -64,9 +64,14 @@ final class AgentSession: ObservableObject {
     private var conversationAgent: AgentDefinition?
     private var history: [[String: Any]] = []
     private let transport: AgentModelTransport
+    private let makeClient: (MCPServerConfiguration) -> MCPClient
     private static var active: [UUID: AgentSession] = [:]
     private let id = UUID()
-    init(transport: AgentModelTransport? = nil) { self.transport = transport ?? AgentModelTransport() }
+    init(transport: AgentModelTransport? = nil,
+         makeClient: @escaping (MCPServerConfiguration) -> MCPClient = { MCPClient(configuration: $0) }) {
+        self.transport = transport ?? AgentModelTransport()
+        self.makeClient = makeClient
+    }
 
     func resolveApproval(_ decision: MCPApprovalDecision) {
         pendingApproval = nil
@@ -139,10 +144,18 @@ final class AgentSession: ObservableObject {
         let workspace: AgentWorkspace?
         if agent.workspaceTools, let path = agent.workspacePath { workspace = try AgentWorkspace(url: URL(fileURLWithPath: path)) }
         else { workspace = nil }
+        // Lifetime expiry and process exit invalidate both schemas and session
+        // permissions. A new client must handshake and ask for permission again.
+        let expired = clients.filter { !$0.isRunning }
+        registeredTools = registeredTools.filter { entry in
+            !expired.contains(where: { $0 === entry.value.0 })
+        }
+        clients.removeAll { client in expired.contains(where: { $0 === client }) }
+        expired.forEach { $0.stop() }
         var tools = workspace == nil ? [] : AgentWorkspace.schemas
         var mcp = registeredTools
         for configuration in agent.servers where !clients.contains(where: { $0.configuration.id == configuration.id }) {
-            let client = MCPClient(configuration: configuration); clients.append(client)
+            let client = makeClient(configuration); clients.append(client)
             for tool in try await client.start() {
                 guard mcp[tool.name] == nil else { throw ChatFailure.invalidTool }
                 mcp[tool.name] = (client, tool)
