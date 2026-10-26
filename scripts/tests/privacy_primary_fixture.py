@@ -31,6 +31,19 @@ def b64url(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
 
 
+def safe_token_bytes(count: int) -> bytes:
+    """Random bytes whose base64url form never reads as a credential to the bundle redaction scanner.
+
+    Raw random base64url text contains `mp_`/`sk-` followed by enough alphabet characters
+    often enough to flake the scanner on synthetic digests; redraw until it does not.
+    """
+    while True:
+        data = secrets.token_bytes(count)
+        text = b64url(data)
+        if not any(pattern.search(text) for _, pattern in contract.BUNDLE_FORBIDDEN_PATTERNS):
+            return data
+
+
 def results(bundle: Path) -> dict[str, int]:
     rows = {}
     for line in (bundle / "results.tsv").read_text().splitlines():
@@ -90,13 +103,13 @@ def build_raw(raw: Path, bundle: Path, *, needles: dict[str, str] | None = None)
 
     def reservation(created: int, *, privacy_class: int, provider: str, stream: int, dispatched: bool = True, state: str = "terminal", terminal_code: str | None = None, request_id: str | None = None) -> dict:
         request = request_id or f"irid-{len(reservations):03d}-{secrets.token_hex(4)}"
-        envelope = secrets.token_bytes(32)
+        envelope = safe_token_bytes(32)
         row = {
             "provider_binding": secrets.token_hex(16), "buyer_binding": secrets.token_hex(16), "account_id": "acct-journey-1839-buyer",
-            "wallet_session": "", "provider_id": provider, "assigned_session": "sess-" + provider, "key_record_digest": b64url(secrets.token_bytes(32)),
+            "wallet_session": "", "provider_id": provider, "assigned_session": "sess-" + provider, "key_record_digest": b64url(safe_token_bytes(32)),
             "kid": "kid", "model": "mlx-community/Llama-3.2-3B-Instruct-4bit", "provider_model": "m", "stream": stream,
             "max_encrypted_request_bytes": 4096, "max_output_tokens": 64, "input_token_upper_bound": 512, "reservation_token_cap": 576,
-            "expires_at_unix": created + 300, "state": state, "envelope_digest": b64url(envelope), "execution_auth_digest": b64url(secrets.token_bytes(32)),
+            "expires_at_unix": created + 300, "state": state, "envelope_digest": b64url(envelope), "execution_auth_digest": b64url(safe_token_bytes(32)),
             "request_id": "buyer-" + request, "validated_input_tokens": 40, "effective_privacy_outcome": "privacy_class" if privacy_class else "relay_blind",
             "terminal_code": terminal_code, "internal_request_id": request, "completion_tokens": 8, "created_at_unix": created,
             "consumed_at_unix": created, "dispatched_at_unix": created + 1 if dispatched else None, "validated_at_unix": created + 1 if dispatched else None,
@@ -117,7 +130,7 @@ def build_raw(raw: Path, bundle: Path, *, needles: dict[str, str] | None = None)
             "provider_session_id": session_for(row["provider_id"], created),
             "route_snapshot_json": canonical, "route_snapshot_canonical_json": canonical, "created_at_utc": utc_text(created),
         })
-        output_hash = hashlib.sha256(secrets.token_bytes(16)).hexdigest()
+        output_hash = hashlib.sha256(safe_token_bytes(16)).hexdigest()
         verdict_id = len(verdicts) + 1
         verdicts.append({
             "id": verdict_id, "account_scope_hash": "0" * 64, "request_id": request, "attempt_n": 0, "provider_id": row["provider_id"],
@@ -155,7 +168,7 @@ def build_raw(raw: Path, bundle: Path, *, needles: dict[str, str] | None = None)
                 "at_unix": created + 2, "mode": "observe", "method": "POST", "path": "/v1/chat/completions", "status": 200, "error_code": "",
                 "response_macprovider_headers": {}, "body_len": 900, "mutated": False,
                 "usage_macprovider_privacy": {"posture_verified_at_unix": created} if row["privacy_class"] else None,
-                "request_envelope_sha256": prompt_hash, "response_body_sha256": hashlib.sha256(secrets.token_bytes(8)).hexdigest(),
+                "request_envelope_sha256": prompt_hash, "response_body_sha256": hashlib.sha256(safe_token_bytes(8)).hexdigest(),
             })
 
     # Steps 02, 03 probes and the step-07/08 canaries (privacy, dispatched by step-09).
@@ -185,8 +198,8 @@ def build_raw(raw: Path, bundle: Path, *, needles: dict[str, str] | None = None)
     # Key records: one attested privacy key for step-02, plain relay-blind keys.
     public, _ = contract.ed25519_sign(SEED, b"")
     nb = start + 5
-    kid = b64url(secrets.token_bytes(16))
-    record = {"alg": "x25519-hkdf-sha256-a256gcm-v1", "public_key": b64url(secrets.token_bytes(32)), "identity_fingerprint": identity["relay_blind_fingerprint"], "models": ["m"], "max_encrypted_request_bytes": 4096, "endpoint_families": ["chat_completions"], "signature_algorithm": "ed25519", "not_before_unix": nb, "expires_at_unix": nb + 3600, "kid": kid}
+    kid = b64url(safe_token_bytes(16))
+    record = {"alg": "x25519-hkdf-sha256-a256gcm-v1", "public_key": b64url(safe_token_bytes(32)), "identity_fingerprint": identity["relay_blind_fingerprint"], "models": ["m"], "max_encrypted_request_bytes": 4096, "endpoint_families": ["chat_completions"], "signature_algorithm": "ed25519", "not_before_unix": nb, "expires_at_unix": nb + 3600, "kid": kid}
     signed = contract.key_record_signed_framing(record)
     record_digest = b64url(hashlib.sha256(signed).digest())
     record["key_record_digest"] = record_digest
