@@ -248,8 +248,8 @@ enum ConnectedAppConfiguration {
         set -eu
         KEY_FILE=\(shell(keyHandoff.path))
         if [ ! -f "$KEY_FILE" ] || [ -L "$KEY_FILE" ]; then echo 'Use Launch in Malibu to deliver the buyer key.' >&2; exit 1; fi
-        MALIBU_API_KEY=$(cat -- "$KEY_FILE" || true)
-        rm -f -- "$KEY_FILE"
+        MALIBU_API_KEY=$(/bin/cat -- "$KEY_FILE") || { /bin/rm -f -- "$KEY_FILE"; exit 1; }
+        /bin/rm -f -- "$KEY_FILE"
         test -n "$MALIBU_API_KEY"
         export MALIBU_API_KEY
         \(versionGuard)\(environment)exec \(shell(executable.path))\(arguments)

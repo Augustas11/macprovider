@@ -63,7 +63,7 @@ struct TerminalScreen: View {
 
 private struct TerminalTabView: View {
     @ObservedObject var session: TerminalSession
-    let executable: URL?
+    let executable: HarnessExecutable?
     @ObservedObject var models: ConnectedAppsStore
     let showOtherApps: () -> Void
 
@@ -92,7 +92,7 @@ private struct TerminalTabView: View {
             } else {
                 HStack {
                     Button("Start \(session.harness.title)") {
-                        session.start(executable: executable, model: models.selectedModel)
+                        session.start(executable: executable?.url, model: models.selectedModel, loginPath: executable?.loginPath)
                     }
                     if session.harness != .shell { Button("Other apps", action: showOtherApps) }
                 }

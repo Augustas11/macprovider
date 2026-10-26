@@ -22,6 +22,7 @@ enum ClaudeCodeLauncher {
         executable: URL,
         model: ConnectedModel,
         key: String,
+        loginPath: String? = nil,
         home: URL = FileManager.default.homeDirectoryForCurrentUser,
         inheritedEnvironment: [String: String] = ProcessInfo.processInfo.environment
     ) throws -> ClaudeCodeLaunchPlan {
@@ -55,7 +56,8 @@ enum ClaudeCodeLauncher {
             "TERM": "xterm-256color"
         ]
         for name in modelEnvironmentKeys { environment[name] = model.id }
-        let sanitized = try ProcessEnvironmentSanitizer.sanitized(from: inheritedEnvironment, extraEnvironment: environment)
+        let sanitized = try HarnessCatalog.launchEnvironment(loginPath: loginPath ?? inheritedEnvironment["PATH"] ?? "/usr/bin:/bin",
+                                                            inherited: inheritedEnvironment, extra: environment)
         let bytes = Data("""
         #!/bin/sh
         set +x

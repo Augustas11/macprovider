@@ -24,7 +24,7 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable {
     init(harness: TerminalHarness) { self.harness = harness; super.init() }
 
     /// Keys are checked before any launcher or PTY is created.
-    func start(executable: URL?, model: ConnectedModel?,
+    func start(executable: URL?, model: ConnectedModel?, loginPath: String? = nil,
                hasKey: () -> Bool = { ConnectedBuyerKeychain.exists() },
                readKey: () throws -> String = { try ConnectedBuyerKeychain.read() }) {
         guard !started, !closing else { return }
@@ -42,10 +42,10 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable {
                 arguments = ["-l"]
                 environment = try ProcessEnvironmentSanitizer.sanitized(extraEnvironment: ["TERM": "xterm-256color"])
             } else {
-                guard let executable else { message = "Not installed"; return }
+                guard let executable, let loginPath else { message = "Not installed"; return }
                 if harness == .claudeCode {
                     guard let model else { message = "Choose a gateway model first."; return }
-                    let plan = try ClaudeCodeLauncher.prepare(executable: executable, model: model, key: readKey())
+                    let plan = try ClaudeCodeLauncher.prepare(executable: executable, model: model, key: readKey(), loginPath: loginPath)
                     command = plan.executable
                     arguments = plan.arguments
                     environment = plan.environment
@@ -58,7 +58,7 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable {
                     arguments = [prepared.launcher.path]
                     handoff = prepared.handoff
                     cleanupDirectory = prepared.cleanupDirectory
-                    environment = try ProcessEnvironmentSanitizer.sanitized(extraEnvironment: ["TERM": "xterm-256color"])
+                    environment = try HarnessCatalog.launchEnvironment(loginPath: loginPath, extra: ["TERM": "xterm-256color"])
                 }
             }
             let view = EmbeddedProcessTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 500))

@@ -9,7 +9,7 @@ final class TerminalBackendTests: XCTestCase {
         let counter = ResolverCounter()
         let catalog = HarnessCatalog { command in
             await counter.record(command)
-            return command == "claude" ? URL(fileURLWithPath: "/bin/echo") : nil
+            return command == "claude" ? HarnessExecutable(url: URL(fileURLWithPath: "/bin/echo"), loginPath: "/usr/bin:/bin") : nil
         }
         await catalog.detect()
         await catalog.detect()
@@ -142,6 +142,89 @@ final class TerminalBackendTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: second.handoff.path))
         let text = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
         XCTAssertFalse(text.contains(key))
+    }
+
+    func testLoginPathValidationRejectsUnsafeEntries() {
+        for path in [".:/usr/bin:/bin", "/usr/bin::/bin", "bin:/usr/bin", "/usr/bin:/bin:", "", "/usr/bin\n/bin"] {
+            XCTAssertNil(HarnessCatalog.validatedLoginPath(path), path)
+            XCTAssertNil(HarnessCatalog.parseResolution("/bin/echo\n" + path + "\n"), path)
+        }
+        XCTAssertEqual(HarnessCatalog.validatedLoginPath("/opt/homebrew/bin:/usr/bin:/bin"), "/opt/homebrew/bin:/usr/bin:/bin")
+        XCTAssertNil(HarnessCatalog.parseResolution("startup noise\n/bin/echo\n/usr/bin:/bin\n"))
+    }
+
+    func testLoginProbePathReachesEnvNodeClaudeAndManagedLaunchers() async throws {
+        let home = try temporaryHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let bin = home.appendingPathComponent("login-bin")
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        let harness = bin.appendingPathComponent("claude")
+        try Data("#!/usr/bin/env node\n".utf8).write(to: harness)
+        try Data("#!/bin/sh\nprintf 'login-node-ran\\n'\n".utf8).write(to: bin.appendingPathComponent("node"))
+        XCTAssertEqual(chmod(harness.path, 0o700), 0)
+        XCTAssertEqual(chmod(bin.appendingPathComponent("node").path, 0o700), 0)
+        let path = bin.path + ":/usr/bin:/bin"
+        try Data(("export PATH=" + ConnectedAppConfiguration.shell(path) + "\n").utf8).write(to: home.appendingPathComponent(".zprofile"))
+        let inherited = ["HOME": home.path, "PATH": "/usr/bin:/bin"]
+        let detected = await HarnessCatalog.resolve("claude", environment: inherited)
+        let resolution = try XCTUnwrap(detected)
+        XCTAssertEqual(resolution.url, harness)
+        XCTAssertEqual(resolution.loginPath, path)
+        let claude = try ClaudeCodeLauncher.prepare(executable: resolution.url, model: toolModel, key: "private-key",
+                                                   loginPath: resolution.loginPath, home: home, inheritedEnvironment: inherited)
+        let managedHandoff = home.appendingPathComponent("managed.key")
+        try Data("private-key".utf8).write(to: managedHandoff)
+        let managed = home.appendingPathComponent("managed.command")
+        try ConnectedAppConfiguration.launcher(app: .crush, executable: resolution.url,
+            config: home.appendingPathComponent("crush.json"), model: toolModel, keyHandoff: managedHandoff).write(to: managed)
+        let managedEnvironment = try HarnessCatalog.launchEnvironment(loginPath: resolution.loginPath, inherited: inherited)
+        for (script, environment) in [(claude.arguments[0], claude.environment), (managed.path, managedEnvironment)] {
+            let process = Process()
+            let output = Pipe()
+            process.executableURL = URL(fileURLWithPath: "/bin/sh")
+            process.arguments = [script]
+            process.environment = environment
+            process.standardOutput = output
+            process.standardError = output
+            try process.run()
+            process.waitUntilExit()
+            XCTAssertEqual(process.terminationStatus, 0)
+            XCTAssertEqual(String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self), "login-node-ran\n")
+        }
+    }
+
+    func testManagedHandoffIgnoresRepositoryCatAndRmAndAbortsOnReadFailure() throws {
+        let home = try temporaryHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        for command in ["cat", "rm"] {
+            let planted = home.appendingPathComponent(command)
+            try Data("#!/bin/sh\nprintf 'intercepted' > intercepted\nexit 0\n".utf8).write(to: planted)
+            XCTAssertEqual(chmod(planted.path, 0o700), 0)
+        }
+        let handoff = home.appendingPathComponent("buyer.key")
+        let launcher = home.appendingPathComponent("Launch.command")
+        try ConnectedAppConfiguration.launcher(app: .crush, executable: URL(fileURLWithPath: "/bin/echo"),
+            config: home.appendingPathComponent("crush.json"), model: toolModel, keyHandoff: handoff).write(to: launcher)
+        for readable in [true, false] {
+            if readable { try Data("never-output-this-key".utf8).write(to: handoff) }
+            else { XCTAssertEqual(mkfifo(handoff.path, 0o600), 0) }
+            let process = Process()
+            let output = Pipe()
+            process.executableURL = URL(fileURLWithPath: "/bin/sh")
+            process.arguments = [launcher.path]
+            process.environment = ["PATH": ".:/usr/bin:/bin"]
+            process.currentDirectoryURL = home
+            process.standardOutput = output
+            process.standardError = output
+            try process.run()
+            process.waitUntilExit()
+            XCTAssertEqual(process.terminationStatus == 0, readable)
+            let text = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            XCTAssertFalse(text.contains("never-output-this-key"))
+            XCTAssertFalse(FileManager.default.fileExists(atPath: home.appendingPathComponent("intercepted").path))
+            if readable { XCTAssertFalse(FileManager.default.fileExists(atPath: handoff.path)) }
+            else { try FileManager.default.removeItem(at: handoff) }
+        }
     }
 
     private var toolModel: ConnectedModel {

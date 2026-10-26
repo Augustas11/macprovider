@@ -37,14 +37,19 @@ enum TerminalHarness: String, CaseIterable, Identifiable {
     }
 }
 
+struct HarnessExecutable: Sendable {
+    let url: URL
+    let loginPath: String
+}
+
 @MainActor
 final class HarnessCatalog: ObservableObject {
-    @Published private(set) var executables: [TerminalHarness: URL] = [:]
+    @Published private(set) var executables: [TerminalHarness: HarnessExecutable] = [:]
     @Published private(set) var detected = false
-    private var detection: Task<[TerminalHarness: URL], Never>?
-    private let resolver: @Sendable (String) async -> URL?
+    private var detection: Task<[TerminalHarness: HarnessExecutable], Never>?
+    private let resolver: @Sendable (String) async -> HarnessExecutable?
 
-    init(resolver: @escaping @Sendable (String) async -> URL? = HarnessCatalog.resolve) {
+    init(resolver: @escaping @Sendable (String) async -> HarnessExecutable? = HarnessCatalog.resolve) {
         self.resolver = resolver
     }
 
@@ -58,7 +63,7 @@ final class HarnessCatalog: ObservableObject {
         if detection == nil {
             let resolver = resolver
             detection = Task {
-                var result: [TerminalHarness: URL] = [:]
+                var result: [TerminalHarness: HarnessExecutable] = [:]
                 for harness in TerminalHarness.allCases where harness != .shell {
                     if let executable = await resolver(harness.command) { result[harness] = executable }
                 }
@@ -69,7 +74,11 @@ final class HarnessCatalog: ObservableObject {
         detected = true
     }
 
-    nonisolated static func resolve(_ command: String) async -> URL? {
+    nonisolated static func resolve(_ command: String) async -> HarnessExecutable? {
+        await resolve(command, environment: ProcessInfo.processInfo.environment)
+    }
+
+    nonisolated static func resolve(_ command: String, environment inherited: [String: String]) async -> HarnessExecutable? {
         guard TerminalHarness.allCases.contains(where: { $0 != .shell && $0.command == command }) else { return nil }
         return await Task.detached(priority: .utility) {
             let process = Process()
@@ -77,11 +86,11 @@ final class HarnessCatalog: ObservableObject {
             var outputBytes = Data()
             var overflowed = false
             process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-            process.arguments = ["-lc", "command -v " + command]
+            process.arguments = ["-lc", "printf '%s\\n%s\\n' \"$(command -v " + command + ")\" \"$PATH\""]
             process.standardInput = FileHandle.nullDevice
             process.standardOutput = pipe
             process.standardError = FileHandle.nullDevice
-            guard let environment = try? ProcessEnvironmentSanitizer.sanitized() else { return nil }
+            guard let environment = try? ProcessEnvironmentSanitizer.sanitized(from: inherited) else { return nil }
             process.environment = environment
             let descriptor = pipe.fileHandleForReading.fileDescriptor
             _ = fcntl(descriptor, F_SETFL, O_NONBLOCK)
@@ -111,10 +120,34 @@ final class HarnessCatalog: ObservableObject {
             guard process.terminationStatus == 0, !overflowed,
                   let output = String(data: outputBytes, encoding: .utf8) else { return nil }
             // Login startup text cannot become an executable path.
-            let path = output.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard path.hasPrefix("/"), !path.contains("\n"), !path.contains("\r"),
-                  FileManager.default.isExecutableFile(atPath: path) else { return nil }
-            return URL(fileURLWithPath: path).resolvingSymlinksInPath()
+            return parseResolution(output)
+
         }.value
     }
+    nonisolated static func validatedLoginPath(_ path: String) -> String? {
+        guard ProcessEnvironmentSanitizer.isSafeValue(path) else { return nil }
+        let entries = path.split(separator: ":", omittingEmptySubsequences: false)
+        guard !entries.isEmpty, entries.allSatisfy({ $0.hasPrefix("/") }) else { return nil }
+        return path
+    }
+
+    nonisolated static func parseResolution(_ output: String) -> HarnessExecutable? {
+        let lines = output.split(separator: "\n", omittingEmptySubsequences: false)
+        guard lines.count == 3, lines[2].isEmpty else { return nil }
+        let path = String(lines[0])
+        guard path.hasPrefix("/"), ProcessEnvironmentSanitizer.isSafeValue(path),
+              FileManager.default.isExecutableFile(atPath: path),
+              let loginPath = validatedLoginPath(String(lines[1])) else { return nil }
+        return HarnessExecutable(url: URL(fileURLWithPath: path).resolvingSymlinksInPath(), loginPath: loginPath)
+    }
+
+    nonisolated static func launchEnvironment(loginPath: String,
+                                             inherited: [String: String] = ProcessInfo.processInfo.environment,
+                                             extra: [String: String] = [:]) throws -> [String: String] {
+        guard let path = validatedLoginPath(loginPath) else { throw ConnectedAppsError.invalidConfiguration }
+        var environment = extra
+        environment["PATH"] = path
+        return try ProcessEnvironmentSanitizer.sanitized(from: inherited, extraEnvironment: environment)
+    }
+
 }
