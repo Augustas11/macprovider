@@ -3928,14 +3928,15 @@ final class ConsumeCommandTests: XCTestCase {
         let firstBlock = Data("data: {\"choices\":[]}\n\n".utf8)
         let doneBlock = Data("data: [DONE]\n\n".utf8)
         let body = firstBlock + doneBlock
-        let head = Data((
-            "HTTP/1.1 200 OK\r\n" +
-            "Content-Type: text/event-stream\r\n" +
-            "Content-Length: \(body.count)\r\n" +
-            "Content-Encoding: identity\r\n" +
-            "X-Request-Id: parser-fixed\r\n" +
-            "\r\n"
-        ).utf8)
+        let headerParts: [String] = [
+            "HTTP/1.1 200 OK\r\n",
+            "Content-Type: text/event-stream\r\n",
+            "Content-Length: \(body.count)\r\n",
+            "Content-Encoding: identity\r\n",
+            "X-Request-Id: parser-fixed\r\n",
+            "\r\n",
+        ]
+        let head = Data(headerParts.joined().utf8)
 
         let parsed = try ConsumePinnedUpstreamClient.parseStreamingHTTPResponseForTesting(
             [head, firstBlock, doneBlock],
