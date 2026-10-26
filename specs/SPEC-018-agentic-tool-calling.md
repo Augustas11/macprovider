@@ -1,6 +1,6 @@
 # SPEC-018 — Agentic tool calling (provider-side response synthesis)
 
-**Version:** 0.3.7 (2026-10-24, history reasoning reaches the template; Related: #2107)
+**Version:** 0.3.8 (2026-10-26, prompt segments and control tokens; Related: #2107)
 **Depends on:** SPEC-001 v1.6, SPEC-002 v1.5.5, SPEC-006 v0.9, SPEC-008 (Pillar A model-hash trust layer — referenced by §10a), SPEC-011 v0.5 (warm-swap heartbeat `model_hash` — referenced by §10a), SPEC-015 v0.4 (receipts canonical output binding — see AC-17 and §N.5)
 **Status:** **LOCKED** at v0.2.10 by the streaming cleanup-rewrite byte-domain clarification. Previously LOCKED at v0.2.9 by the serial-turn `parallel_tool_calls` amendment (omitted/`false` stop after the first complete valid tool). Previously LOCKED at v0.2.8 by the #1594 OpenRouter-aligned AC-53 amendment (no independent messages[] count cap). Previously LOCKED at v0.2.7 by the Qwen3-Coder function-XML tool-call grammar amendment (documents the `<function=…><parameter=…>` XML body that Qwen3-Coder emits as a Qwen-row §3.1 body-grammar alternative, with OpenAI/MCP name charset; pending IMPL/conformance already landed on branch `fix/qwen3coder-toolcall-parse`); previously LOCKED at v0.2.6 by #784 C2b admission-timeout reconciliation — v0.2.4 spec PR #202 and IMPL PR #209 both landed (multi-turn acceptance, token-incremental streaming, `tool_call_id` validation, 1 MiB/2 MiB byte caps). v0.2.5 adds gpt-oss/OpenAI Harmony response parsing as a pending implementation/conformance gap. codex 4-lane r4 0/0/0; Claude blind-spot r2 0/0/0. SPEC-019 already depends on this as "LOCKED". The former "LOCK CANDIDATE pending PR" line was never flipped after merge. (Resolved gap, 2026-07-14, runbook item 15: AC-45's `X-MacProvider-Streaming-Mode` header — set by the coordinator on streaming `200` responses — was stripped by the public gateway's blanket `X-MacProvider-*` filter, making the "header absent" fail condition live on `api.malibu.tech`. Fixed by adding the header to the SPEC-006 v0.9.9 § 5.4 response-pass-through allowlist and un-stripping it at the gateway, validated against AC-45's closed enum. Chosen over scoping AC-45 to the coordinator surface because buyers hit the gateway, so scoping would have left AC-45's buyer-visible promise unmet. AC-45's normative text is unchanged; this is a documentation reconciliation, not a lock amendment. Residual: the coordinator currently emits the diagnostic only on the streaming success path — non-streaming AC-45 emission is a separate coordinator-side completeness item, out of scope for the gateway-strip fix.)
 
@@ -17,6 +17,13 @@ SPEC-018 is the **provider-side response synthesis contract** for OpenAI-wire to
 **Money-path**: all v0.2 changes preserve v0.1.5 settlement protection (`FaultBreakerQualifying` + zero credits on malformed streams via `billing_recorder.go:176` + `formula.go:112`).
 
 ## Change log
+
+- **v0.3.8 (2026-10-26, Related: #2107):** New §3.14. Control tokens enter a
+  prompt only where the chat template or reference encoder writes them;
+  request text is encoded with control-token matching off. Reasoning and
+  tool-call boundaries in output are read from sampled control-token IDs.
+  Registers `SPEC-018-R009`. A prompt whose request text holds no control
+  text keeps its token IDs byte for byte.
 
 - **v0.3.7 (2026-10-24, Related: #2107):** §3.12 assistant-history
   `reasoning_content` reaches the loaded template for GLM-5.3 as it already
@@ -1033,6 +1040,85 @@ retaining the artifact bytes, split sequence, BPE model and added tokens.
 `DeepseekV4EncodingTests` checks exact IDs for all 14 provider requests and four
 reference goldens using `scripts/tests/fixtures/dsv4-encoding/token-ids.json`.
 Other model families use their existing tokenizer path.
+
+### 3.14 Prompt segments and control tokens (v0.3.8)
+
+A **control token** of a loaded tokenizer is an added token that is special,
+or that the model's chat template (or, for DeepSeek-V4, the reference
+encoder) writes, or that an output parser in this section reads
+(`<think>`, `</think>`, `<tool_call>`, `</tool_call>`, `<tool_response>`,
+`</tool_response>`, `<arg_key>`, `</arg_key>`, `<arg_value>`,
+`</arg_value>`, `<|tool_call>`, `<tool_call|>`, `｜DSML｜`). Whitespace-only
+added tokens, and non-special template pieces shorter than three scalars,
+are not control tokens.
+
+**Prompt.** Request text is every string the request supplies to the
+renderer: system, user, assistant and tool message content, history
+`reasoning_content`, tool-call names and arguments (keys and values), tool
+definitions and their JSON schemas (keys and values), and template context
+values. Control tokens MUST appear in the prompt token IDs only where the
+template or encoder writes them. Request text that spells a control token
+MUST encode as ordinary tokens.
+
+The provider renders with each control-token occurrence in request text
+replaced by a per-request placeholder, together with a fragment of two
+scalars or more at either end of a request string (raw or
+whitespace-trimmed) that adjacent template text could complete into a
+control token. It splits the rendered prompt at the control tokens the
+template wrote, restores the request text, and encodes each text section
+with control-token matching off; a section that follows a control token is
+encoded with the same non-first-section pre-tokenization as a whole-string
+encode. A placeholder the template changed other than by carrying it (or by
+`tojson` escaping) fails the request with `400 invalid_request`, as does a
+section that would still encode to a control token.
+
+When no request string holds control text or such a fragment, the prompt
+MUST be the whole-string encode of the template rendering, so the token IDs
+of every existing golden (GLM-5.3 template, DeepSeek-V4 encoder, Qwen,
+Harmony) are unchanged. Non-control added tokens keep matching anywhere.
+
+A request string that is entirely a control-token core (the token with
+only delimiter characters `< > | / [ ] ｜ " ' { }` removed from its ends,
+compared case-insensitively, as written, trimmed, or with the key rewrites
+templates apply: `$` removed, `-` and space as `_`) is replaced whole, so a
+template that writes `'<' ~ key ~ '>'` cannot assemble a control token from
+it. Message `role` values and `type` values are exempt from this whole-string
+rule (templates compare them with their own literals; the API holds them to
+fixed vocabularies) but not from the occurrence and fragment rules. Equal
+request strings get the same placeholder, so template comparisons between
+request strings are unchanged. A string whose key-normalized form holds
+control text is replaced whole as well. Adjacent text parts of one array
+(content parts, or strings a template concatenates) that form control text
+across a part boundary fail the request with `400 invalid_request`.
+Assistant history that carries reasoning inline (`<think>…</think>answer`,
+no `reasoning_content`) is split into `reasoning_content` and content the
+way templates split it, and the split is used only when the template renders
+it to exactly the text of the inline form; the think markers then come from
+the template, and the prompt is unchanged from the inline rendering.
+
+**Output.** End of reasoning, tool-call and DSML boundaries, and role and
+stop markers MUST be read from sampled control-token IDs. Text the model
+writes with ordinary tokens that spells a control token is literal text: it
+does not end reasoning (§3.12), open or close a tool call (§3.1–§3.3),
+or close reasoning for a grammar mask (§3.11). Inside the runtime, such text
+carries a noncharacter mark (U+FDD0) before its last scalar on every decode
+path (whole-sequence decode, streaming detokenizers, per-token decoders);
+the mark is stripped from content, `reasoning_content`, tool-call names and
+arguments, and detokenize results before they leave the runtime, so buyers
+see exactly the text the model wrote. The grammar mask ends reasoning only
+on the `</think>` control-token ID when the tokenizer defines one. Marks are
+removed before a value is validated (JSON mode, `json_schema`, guaranteed
+tool-call arguments), so validation sees exactly the returned value.
+U+FDD0 is a noncharacter reserved for internal use; one the model writes
+itself is removed with the marks, so removal is idempotent. Where stop-token text is removed between two pieces of
+text, a mark joins them, so the pieces never read as one marker.
+
+Exception (privacy filter): the local Responses and Anthropic Messages
+adapters keep removing `<think>…</think>` spans from message content as
+text. They can only hide text, never create structure.
+
+These are prompt-encoding and output-parsing rules; they do not change native
+MTP draft, verify or commit. Registers `SPEC-018-R009`.
 
 ## 4. Streaming Wire Shape
 

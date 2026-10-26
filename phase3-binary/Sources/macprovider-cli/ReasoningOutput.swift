@@ -54,9 +54,9 @@ enum ReasoningOutput {
     ) -> (text: String, hitStop: Bool) {
         guard reasoningOpen else { return filter(text) }
         guard let close = text.range(of: closeTag) else {
-            return (stopTokenFilter.stripping(from: text), false)
+            return (stopTokenFilter.stripping(from: text, joiner: ControlTextShield.markString), false)
         }
-        let head = stopTokenFilter.stripping(from: String(text[..<close.upperBound]))
+        let head = stopTokenFilter.stripping(from: String(text[..<close.upperBound]), joiner: ControlTextShield.markString)
         let tail = filter(String(text[close.upperBound...]))
         return (head + tail.text, tail.hitStop)
     }
