@@ -160,9 +160,12 @@ final class TerminalSessionTests: XCTestCase {
         let backgroundFile = folder.appendingPathComponent("background")
         let foregroundFile = folder.appendingPathComponent("foreground")
         let view = EmbeddedProcessTerminalView(frame: .init(x: 0, y: 0, width: 640, height: 400))
+        // A trailing wait prevents zsh from exec-optimizing the foreground
+        // command into its own PID/PGID; both jobs must exercise job control.
         let command = """
         /bin/sh -c 'trap "" HUP; echo $$ > "$1"; exec /bin/sleep 30' child "$1/background" &
         /bin/sh -c 'trap "" HUP; echo $$ > "$1"; exec /bin/sleep 30' child "$1/foreground"
+        wait
         """
         view.startProcess(executable: "/bin/zsh", args: ["-f", "-i", "-m", "-c", command, "fixture", folder.path],
                           environment: ["TERM=xterm-256color", "PATH=/usr/bin:/bin"])
