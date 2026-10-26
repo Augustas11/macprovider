@@ -2,16 +2,16 @@
   "challenge_bank_signer_key_id": "streamvc-autotune-static-v4",
   "entry": {
     "artifact_manifest_sha256": "92a047c3caac2910ca117218affd02d6215eab8d022bbf1a9654869f16b851b6",
-    "challenge_bank_sha256": "ddf387a23dbf82c43e88e93c7d3218e1ee3e43bada7ea9515bfa341ac0294d92",
-    "live_executable_cdhash": "5c068c040f24a93a77e930a28fb4c9f907ca1202",
-    "provider_revision": "28c06242701de711454f65b4bfb34375d31803c7",
-    "reproducible_build_sha256": "e114598857252c9748d2dbce144f4aa01bc1957f3da9f54d1383120d40fe74ac",
-    "source_commit": "28c06242701de711454f65b4bfb34375d31803c7"
+    "challenge_bank_sha256": "d156d6cadcd4e0ff9c45dde2d69b56875ab74006a7170da551ae4956c6c446b2",
+    "live_executable_cdhash": "7df4dfb271d21709621d9649ac65ac3b36a2177d",
+    "provider_revision": "f8b6856e5226c981abc3a51c8dc1f2529919be4b",
+    "reproducible_build_sha256": "e677067e5731a70196ffc16d24d6dbc7ce30460cdcd200b09226b84d7bddd0e5",
+    "source_commit": "f8b6856e5226c981abc3a51c8dc1f2529919be4b"
   },
-  "expires_at": "2027-01-22T01:37:00Z",
-  "issued_at": "2026-10-25T01:37:00Z",
-  "provider_decode_path_digest": "4d04a3f361258648bfc16e33146681d8824b79350b032c0cfca5af728d8e7ece",
-  "release_id": "published-2026-10-25-glm53-qwen36-native-mtp-v272",
+  "expires_at": "2027-01-23T13:17:00Z",
+  "issued_at": "2026-10-26T13:17:00Z",
+  "provider_decode_path_digest": "0b9ffe092f0aee0e06e7df3eea555a6cac420c7f96f6f7f35a14fb7a8e7631ee",
+  "release_id": "published-2026-10-26-glm53-qwen36-native-mtp-v274",
   "revocation_signer_key_id": "streamvc-autotune-static-v4",
   "schema_version": "macprovider.native-mtp-admission-release-input.v1",
   "signer_key_id": "streamvc-autotune-static-v4"
