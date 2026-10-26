@@ -7520,6 +7520,10 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         )
         let recorder = NativeMTPLoadGateRecorder()
         await scheduler.installLabNativeMTPLoadGateRecorder(recorder)
+        // Both rows must be admitted together so the native row actually
+        // exceeds its one-row bound, regardless of task scheduling order.
+        let installed = await scheduler.installLabBatchComposition(["gated", "ordinary"])
+        XCTAssertTrue(installed)
 
         let native = Task {
             try await scheduler.submit(Self.nativeRequest(
@@ -7557,6 +7561,10 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         )
         let recorder = NativeMTPLoadGateRecorder()
         await scheduler.installLabNativeMTPLoadGateRecorder(recorder)
+        // Both rows must be admitted together so the native row actually
+        // exceeds its one-row bound, regardless of task scheduling order.
+        let installed = await scheduler.installLabBatchComposition(["gated", "ordinary"])
+        XCTAssertTrue(installed)
 
         let native = Task {
             try await scheduler.submit(Self.nativeRequest(
