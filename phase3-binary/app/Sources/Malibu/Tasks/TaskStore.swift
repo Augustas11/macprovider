@@ -8,6 +8,8 @@ final class TaskStore: ObservableObject {
     @Published private(set) var notice: String?
     @Published private var runs: [TaskRun] = []
     let directory: URL
+    static let taskFileByteLimit = 1024 * 1024
+    static let runFileByteLimit = 257 * 1024 * 1024
     static let retention = 20
     static let transcriptByteLimit = 128 * 1024
     private let clock: () -> Date
@@ -18,8 +20,8 @@ final class TaskStore: ObservableObject {
         self.directory = directory; self.clock = clock; self.timezone = timezone
         do {
             try TaskPrivateFiles.prepare(directory)
-            tasks = try TaskPrivateFiles.read([ScheduledTask].self, from: directory.appendingPathComponent("tasks.json"), maximum: 1024 * 1024) ?? []
-            runs = try TaskPrivateFiles.read([TaskRun].self, from: directory.appendingPathComponent("runs.json"), maximum: 257 * 1024 * 1024) ?? []
+            tasks = try TaskPrivateFiles.read([ScheduledTask].self, from: directory.appendingPathComponent("tasks.json"), maximum: Self.taskFileByteLimit) ?? []
+            runs = try TaskPrivateFiles.read([TaskRun].self, from: directory.appendingPathComponent("runs.json"), maximum: Self.runFileByteLimit) ?? []
             guard tasks.count <= 100, runs.count <= 2000 else { throw ChatFailure.limit }
             for id in Set(runs.map(\.taskID)) {
                 let kept = Set(runs.filter { $0.taskID == id }.suffix(Self.retention).map(\.id))
@@ -58,7 +60,7 @@ final class TaskStore: ObservableObject {
             updated.nextFire = task.schedule.initialFire(now: updated.scheduleAnchor!, timezone: timezone())
         }
         var result = tasks.filter { $0.id != task.id }; result.append(updated)
-        try TaskPrivateFiles.write(result, to: directory.appendingPathComponent("tasks.json"))
+        try TaskPrivateFiles.write(result, to: directory.appendingPathComponent("tasks.json"), maximum: Self.taskFileByteLimit)
         tasks = result; notice = nil
     }
 
@@ -76,16 +78,16 @@ final class TaskStore: ObservableObject {
             result[index].scheduleTimezoneIdentifier = timezone.identifier
         }
         guard result != tasks else { return }
-        try TaskPrivateFiles.write(result, to: directory.appendingPathComponent("tasks.json"))
+        try TaskPrivateFiles.write(result, to: directory.appendingPathComponent("tasks.json"), maximum: Self.taskFileByteLimit)
         tasks = result
     }
 
     func remove(_ id: UUID) throws {
         let result = tasks.filter { $0.id != id }
-        try TaskPrivateFiles.write(result, to: directory.appendingPathComponent("tasks.json"))
+        try TaskPrivateFiles.write(result, to: directory.appendingPathComponent("tasks.json"), maximum: Self.taskFileByteLimit)
         tasks = result
         runs.removeAll { $0.taskID == id }
-        try TaskPrivateFiles.write(runs, to: directory.appendingPathComponent("runs.json"))
+        try TaskPrivateFiles.write(runs, to: directory.appendingPathComponent("runs.json"), maximum: Self.runFileByteLimit)
     }
 
     func history(taskID: UUID) -> [TaskRun] { runs.filter { $0.taskID == taskID }.reversed() }
@@ -98,7 +100,7 @@ final class TaskStore: ObservableObject {
         result[index].scheduleAnchor = now
         result[index].scheduleTimezoneIdentifier = timezone.identifier
         if task.schedule.kind == .once { result[index].enabled = false }
-        try TaskPrivateFiles.write(result, to: directory.appendingPathComponent("tasks.json"))
+        try TaskPrivateFiles.write(result, to: directory.appendingPathComponent("tasks.json"), maximum: Self.taskFileByteLimit)
         tasks = result
     }
 
@@ -108,7 +110,7 @@ final class TaskStore: ObservableObject {
         result.append(run)
         let old = result.filter { $0.taskID == run.taskID }.dropLast(Self.retention).map(\.id)
         result.removeAll { old.contains($0.id) }
-        try TaskPrivateFiles.write(result, to: directory.appendingPathComponent("runs.json"))
+        try TaskPrivateFiles.write(result, to: directory.appendingPathComponent("runs.json"), maximum: Self.runFileByteLimit)
         runs = result
     }
 
@@ -141,13 +143,16 @@ private enum TaskPrivateFiles {
         }
         return try JSONDecoder().decode(type, from: data)
     }
-    static func write<T: Encodable>(_ value: T, to file: URL) throws {
+    static func write<T: Encodable>(_ value: T, to file: URL, maximum: Int) throws {
+        // Budget the actual JSON, including escaping, against the same limit
+        // used at restart before replacing the last readable collection.
+        let data = try JSONEncoder().encode(value)
+        guard data.count <= maximum else { throw ChatFailure.limit }
         try prepare(file.deletingLastPathComponent())
         let temp = file.deletingLastPathComponent().appendingPathComponent(".\(UUID().uuidString).tmp")
         let fd = open(temp.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
         guard fd >= 0 else { throw ChatFailure.unsafePath }
         defer { close(fd); unlink(temp.path) }
-        let data = try JSONEncoder().encode(value)
         try data.withUnsafeBytes { bytes in
             var offset = 0
             while offset < bytes.count {

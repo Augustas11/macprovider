@@ -317,6 +317,73 @@ final class TaskSchedulerTests: XCTestCase {
         }
     }
 
+    func testEverySavedTaskAndRunFieldSurvivesRestart() throws {
+        let path = try directory()
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let zone = TimeZone(identifier: "Asia/Makassar")!
+        let store = TaskStore(directory: path, clock: { now }, timezone: { zone })
+        var scheduled = task(now: now)
+        scheduled.name = "猫\\\" task"
+        scheduled.prompt = "Résumé\n猫\\\""
+        scheduled.schedule = TaskSchedule(kind: .weekdays, date: now.addingTimeInterval(600), hour: 17, minute: 42)
+        scheduled.enabled = false
+        scheduled.preapprovedTools = ["server__read", "server__list"]
+        try store.save(scheduled)
+        let saved = try XCTUnwrap(store.tasks.first)
+        XCTAssertNotNil(saved.nextFire)
+        XCTAssertEqual(saved.scheduleAnchor, now)
+        XCTAssertEqual(saved.scheduleTimezoneIdentifier, zone.identifier)
+        let run = TaskRun(taskID: saved.id, startedAt: now, endedAt: now.addingTimeInterval(5),
+                          status: .preempted, reason: "Interrupted\n猫", transcript: "You: \\\"猫\nTool: résumé")
+        try store.record(run)
+
+        let restarted = TaskStore(directory: path)
+        XCTAssertNil(restarted.notice)
+        // Equatable includes every persisted task, schedule and run field.
+        XCTAssertEqual(restarted.tasks, [saved])
+        XCTAssertEqual(restarted.history(taskID: saved.id), [run])
+    }
+
+    func testEscapedTaskCollectionRejectsOverBudgetSaveWithoutLosingRestartData() throws {
+        let path = try directory()
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let store = TaskStore(directory: path, clock: { now })
+        var rejected = false
+        for index in 0..<100 {
+            var scheduled = task(now: now)
+            scheduled.name = "Escaped task \(index)"
+            scheduled.prompt = String(repeating: "\\", count: ChatStore.maxPromptBytes)
+            let previous = store.tasks
+            let file = path.appendingPathComponent("tasks.json")
+            let previousBytes = try? Data(contentsOf: file)
+            do { try store.save(scheduled) }
+            catch {
+                XCTAssertEqual(error as? ChatFailure, .limit)
+                XCTAssertEqual(store.tasks, previous)
+                XCTAssertEqual(try Data(contentsOf: file), previousBytes)
+                rejected = true
+                break
+            }
+        }
+        XCTAssertTrue(rejected, "JSON escaping must count toward the collection budget")
+        XCTAssertGreaterThan(store.tasks.count, 1)
+        XCTAssertLessThanOrEqual(try Data(contentsOf: path.appendingPathComponent("tasks.json")).count,
+                                 TaskStore.taskFileByteLimit)
+        let first = try XCTUnwrap(store.tasks.first)
+        let run = TaskRun(taskID: first.id, startedAt: now, endedAt: now, status: .succeeded,
+                          reason: nil, transcript: "History survives a rejected save")
+        try store.record(run)
+        let restarted = TaskStore(directory: path)
+        XCTAssertNil(restarted.notice)
+        XCTAssertEqual(restarted.tasks, store.tasks)
+        XCTAssertEqual(restarted.history(taskID: first.id), [run])
+        // An edit that adds JSON bytes is subject to the same collection budget.
+        var edited = first
+        edited.preapprovedTools = Set((0..<128).map { String(repeating: "\\", count: 61) + String($0) })
+        XCTAssertThrowsError(try restarted.save(edited))
+        XCTAssertEqual(TaskStore(directory: path).tasks, store.tasks)
+    }
+
     func testTranscriptsNeverEnterDiagnosticsBundle() throws {
         let path = try directory(); let store = TaskStore(directory: path); let scheduled = task()
         let secretTranscript = "task-transcript-canary-\(UUID().uuidString)"
