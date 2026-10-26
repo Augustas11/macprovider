@@ -37,6 +37,32 @@ def canaries():
     return values
 
 
+def diagnostics():
+    candidate=sample('ordinary')['candidate'];runtime={'provider_binary_sha256':'binary','runtime_cdhash':'cd','native_mtp_runtime_tuple_sha256':'f'*64,'target_generation':7,'model_id':'fixture-model','model_hash':'a'*64,'tokenizer_digest':'b'*64}
+    cases=[]
+    for profile in m.DIAGNOSTIC_PROFILES:
+        for case in m.DIAGNOSTIC_CASES:
+            p={'probe_id':profile+case,'probe_nonce':profile+case,'expires_at':'2026-10-26T00:01:00Z','native_mtp_runtime_tuple_sha256':'e'*64 if case=='mismatch_tuple' else 'f'*64,'target_generation':8 if case=='mismatch_generation' else 7}
+            seed=m.hashlib.sha256((profile+case).encode()).hexdigest();p['probe_id']='native-path-'+seed[:32];p['probe_nonce']=seed
+            p.update(model_id='fixture-model',target_model_hash='a'*64,tokenizer_identity='b'*64,sampling_profile={'temperature':0,'top_p':1},corpus_version='synthetic-native-preflight-v1',threshold_version='no-measurement')
+            nonce_key='probe_nonce'
+            if profile==m.DIAGNOSTIC_PROFILES[1]:
+                p['nonce']=p.pop('probe_nonce');nonce_key='nonce'
+                p.update(schema_version=profile+'.request',expected_decode_path='native_mtp',sampler_stage='post_sampler_probabilities',hardware_runtime_class='fixture',support_selection='compute_integrity_support_selection_v1',normalization_basis='full_distribution',k=64,positions=[{'prompt_id':'p','prompt_ref':'synthetic:native-path-binding-v1','position_index':0,'token_prefix_digest':'sha256:'+'d'*64,'context_hash':'sha256:'+'e'*64}])
+            else:p.update(probe_version=profile,decode_path='native_mtp',prompts=[{'prompt_id':'p','prompt':'synthetic fixture','coordinator_owned':True,'buyer_origin':False}],measurement_positions=[0],requested_k=64,support_selection='support_selection_v1',max_prompts=1,max_stochastic_positions=1,timeout_ms=60000)
+            digest=m.diagnostic_digest(profile,'request',p)
+            q={'probe_id':p['probe_id'],nonce_key:p[nonce_key],'probe_request_digest':digest,'result_kind':'provider_inconclusive','provider_reason_code':'inconclusive:native_path_untrusted','expected_decode_path':'native_mtp','actual_decode_path':None,'fallback_used':False,'identity_unavailable_reason':'native_execution_binding_unavailable','native_mtp_runtime_tuple_sha256':p['native_mtp_runtime_tuple_sha256'],'actual_native_mtp_runtime_tuple_sha256':'f'*64,'target_generation':7,'model_id':'fixture-model','target_model_hash':'a'*64,'tokenizer_identity':'b'*64}
+            if profile==m.DIAGNOSTIC_PROFILES[1]:
+                q['schema_version']=profile+'.result';q['hardware_runtime_class']=None
+                for key in ('sampling_profile','corpus_version','threshold_version','support_selection','normalization_basis','sampler_stage'):q[key]=p[key]
+            req={'type':profile+'.request','payload':p,'probe_request_digest':digest}
+            res={'type':profile+'.result','payload':q,'probe_request_digest':digest,'probe_result_digest':m.diagnostic_digest(profile,'result',q)}
+            if profile==m.DIAGNOSTIC_PROFILES[1]:req['schema_version']=profile+'.request';res['schema_version']=profile+'.result'
+            else:req['probe_id']=p['probe_id'];res['probe_id']=p['probe_id']
+            cases.append({'profile':profile,'case':case,'http_status':200,'observation':{'profile':profile,'request':req,'result':res,'classification':'inconclusive:native_path_untrusted','trust_semantics':'observe_only'}})
+    return {'schema_version':m.SCHEMA,'kind':'native-diagnostics','candidate':candidate,'started_at_unix':1792972800,'finished_at_unix':1792972801,'runtime_tuple':runtime,'money_before':{'a':1},'money_after':{'a':1},'cases':cases}
+
+
 class CollectorTests(unittest.TestCase):
     def test_actual_accounting_projection_same_basis(self):
         self.assertEqual(m.compare_accounting(sample('ordinary'),sample('native'))['status'],'pass')
@@ -115,6 +141,43 @@ class CollectorTests(unittest.TestCase):
             argv=call.call_args.args[0]
             self.assertEqual(argv[1],str(Path.cwd()/'scripts/native_mtp_canary_negative_rehearsal.py'))
             self.assertEqual(argv[argv.index('--fault')+1],'delay')
+
+
+class NativeDiagnosticTests(unittest.TestCase):
+    def test_six_actual_profile_preflights_enable_only_diagnostic_checks(self):
+        value=diagnostics()
+        self.assertTrue(m.validate_diagnostics(value,value['candidate']))
+        result=m.compare_canary(canaries(),value)
+        self.assertEqual(result['status'],'pass')
+        self.assertFalse(result['details']['journey_complete'])
+        self.assertIsNotNone(result['details']['diagnostic_observation_sha256'])
+
+    def test_measurement_digest_replay_money_and_missing_case_fail_closed(self):
+        for mutation in ('measurement','digest','replay','money','missing','mismatch'):
+            with self.subTest(mutation=mutation):
+                value=diagnostics();observation=value['cases'][0]['observation']
+                if mutation=='measurement':observation['result']['payload']['result_kind']='measurement'
+                elif mutation=='digest':observation['result']['probe_result_digest']='sha256:'+'0'*64
+                elif mutation=='replay':value['cases'][1]['observation']=copy.deepcopy(observation)
+                elif mutation=='money':value['money_after']={'a':2}
+                elif mutation=='missing':value['cases'].pop()
+                else:value['cases'][1]['observation']['result']['payload']['actual_native_mtp_runtime_tuple_sha256']='e'*64
+                if mutation in ('measurement','mismatch'):
+                    for item in value['cases']:
+                        result=item['observation']['result'];result['probe_result_digest']=m.diagnostic_digest(item['profile'],'result',result['payload'])
+                with self.assertRaises(m.CollectionError):m.validate_diagnostics(value,value['candidate'])
+                self.assertFalse(m.compare_canary(canaries(),value)['checks']['losslessness_claimed_path_diagnostic_inconclusive'])
+
+    def test_no_actual_decode_path_is_inferred_from_available_tuple(self):
+        value=diagnostics();q=value['cases'][0]['observation']['result']['payload'];q['actual_decode_path']='native_mtp'
+        value['cases'][0]['observation']['result']['probe_result_digest']=m.diagnostic_digest(m.DIAGNOSTIC_PROFILES[0],'result',q)
+        with self.assertRaises(m.CollectionError):m.validate_diagnostics(value,value['candidate'])
+
+    def test_profile_digest_domains_and_numeric_subset(self):
+        value={'temperature':0.0,'top_p':1.0}
+        self.assertEqual(m.diagnostic_digest(m.DIAGNOSTIC_PROFILES[0],'request',value),m.diagnostic_digest(m.DIAGNOSTIC_PROFILES[0],'request',{'temperature':0,'top_p':1}))
+        self.assertNotEqual(m.diagnostic_digest(m.DIAGNOSTIC_PROFILES[0],'request',value),m.diagnostic_digest(m.DIAGNOSTIC_PROFILES[1],'request',value))
+        with self.assertRaises(m.CollectionError):m.diagnostic_digest(m.DIAGNOSTIC_PROFILES[0],'request',{'temperature':.7})
 
 
 if __name__=='__main__':unittest.main()

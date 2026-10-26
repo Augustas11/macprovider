@@ -284,8 +284,8 @@ final class Tier2ProviderSession: @unchecked Sendable {
         )
     }
 
-    func openLosslessnessProbeRequestPayload(message: [String: Any], requestID: String) throws -> LosslessnessProbePayload {
-        guard message["type"] as? String == LosslessnessProbeProtocol.encryptedRequestType,
+    func openLosslessnessProbeRequestPayload(message: [String: Any], requestID: String, profile: String = LosslessnessProbeProtocol.version) throws -> LosslessnessProbePayload {
+        guard NativePathProbeProtocol.profiles.contains(profile), message["type"] as? String == (profile + ".encrypted_request"),
               message["encrypted"] as? Bool == true,
               message["stream"] as? Bool == false,
               let enc = message["enc"] as? [String: Any]
@@ -296,7 +296,7 @@ final class Tier2ProviderSession: @unchecked Sendable {
         defer { lock.unlock() }
         let seq = c2pCounter
         let aad = Tier2FrameAAD(
-            type: LosslessnessProbeProtocol.encryptedRequestType,
+            type: (profile + ".encrypted_request"),
             direction: "c2p",
             requestID: requestID,
             stream: false,
@@ -307,17 +307,18 @@ final class Tier2ProviderSession: @unchecked Sendable {
         let plaintext = try Self.openEnvelope(enc, key: c2pKey, nonceBase: c2pNonceBase, keyID: keyID, expectedAAD: aad, expectedSeq: seq)
         c2pCounter += 1
         guard let envelope = try? JSONSerialization.jsonObject(with: plaintext) as? [String: Any],
-              envelope["type"] as? String == LosslessnessProbeProtocol.requestPlaintextType,
+              envelope["type"] as? String == (profile + ".request_plaintext"),
               let payload = envelope["payload"] as? [String: Any] else {
             throw Tier2ProviderError.invalidPlaintext
         }
         return LosslessnessProbePayload(outerEnvelope: payload)
     }
 
-    func sealLosslessnessProbeResult(requestID: String, outerEnvelope: [String: Any]) throws -> [String: Any] {
+    func sealLosslessnessProbeResult(requestID: String, outerEnvelope: [String: Any], profile: String = LosslessnessProbeProtocol.version) throws -> [String: Any] {
+        guard NativePathProbeProtocol.profiles.contains(profile) else { throw Tier2ProviderError.invalidEnvelope }
         let plaintext = try JSONSerialization.data(
             withJSONObject: [
-                "type": LosslessnessProbeProtocol.resultPlaintextType,
+                "type": (profile + ".result_plaintext"),
                 "payload": outerEnvelope,
             ],
             options: [.sortedKeys]
@@ -326,7 +327,7 @@ final class Tier2ProviderSession: @unchecked Sendable {
         defer { lock.unlock() }
         let seq = p2cCounter
         let aad = Tier2FrameAAD(
-            type: LosslessnessProbeProtocol.encryptedResultType,
+            type: (profile + ".encrypted_result"),
             direction: "p2c",
             requestID: requestID,
             stream: false,
@@ -344,7 +345,7 @@ final class Tier2ProviderSession: @unchecked Sendable {
         )
         p2cCounter += 1
         return [
-            "type": LosslessnessProbeProtocol.encryptedResultType,
+            "type": (profile + ".encrypted_result"),
             "request_id": requestID,
             "stream": false,
             "encrypted": true,
@@ -517,9 +518,9 @@ final class Tier2ProviderSession: @unchecked Sendable {
         ]
     }
 
-    static func sealLosslessnessRequestForTest(session: Tier2ProviderSession, requestID: String, outerEnvelope: [String: Any], seq: UInt64 = 0) throws -> [String: Any] {
+    static func sealLosslessnessRequestForTest(session: Tier2ProviderSession, requestID: String, outerEnvelope: [String: Any], seq: UInt64 = 0, profile: String = LosslessnessProbeProtocol.version) throws -> [String: Any] {
         let aad = Tier2FrameAAD(
-            type: LosslessnessProbeProtocol.encryptedRequestType,
+            type: (profile + ".encrypted_request"),
             direction: "c2p",
             requestID: requestID,
             stream: false,
@@ -528,7 +529,7 @@ final class Tier2ProviderSession: @unchecked Sendable {
             seq: seq
         )
         let plaintextEnvelope: [String: Any] = [
-            "type": LosslessnessProbeProtocol.requestPlaintextType,
+            "type": (profile + ".request_plaintext"),
             "payload": outerEnvelope,
         ]
         let plaintextData = try JSONSerialization.data(withJSONObject: plaintextEnvelope, options: [.sortedKeys])
@@ -541,7 +542,7 @@ final class Tier2ProviderSession: @unchecked Sendable {
             seq: seq
         )
         return [
-            "type": LosslessnessProbeProtocol.encryptedRequestType,
+            "type": (profile + ".encrypted_request"),
             "request_id": requestID,
             "stream": false,
             "encrypted": true,
@@ -549,15 +550,15 @@ final class Tier2ProviderSession: @unchecked Sendable {
         ]
     }
 
-    static func openLosslessnessResultForTest(session: Tier2ProviderSession, frame: [String: Any], requestID: String, seq: UInt64 = 0) throws -> [String: Any] {
-        guard frame["type"] as? String == LosslessnessProbeProtocol.encryptedResultType,
+    static func openLosslessnessResultForTest(session: Tier2ProviderSession, frame: [String: Any], requestID: String, seq: UInt64 = 0, profile: String = LosslessnessProbeProtocol.version) throws -> [String: Any] {
+        guard frame["type"] as? String == (profile + ".encrypted_result"),
               frame["encrypted"] as? Bool == true,
               frame["stream"] as? Bool == false,
               let enc = frame["enc"] as? [String: Any] else {
             throw Tier2ProviderError.invalidEnvelope
         }
         let aad = Tier2FrameAAD(
-            type: LosslessnessProbeProtocol.encryptedResultType,
+            type: (profile + ".encrypted_result"),
             direction: "p2c",
             requestID: requestID,
             stream: false,
@@ -567,7 +568,7 @@ final class Tier2ProviderSession: @unchecked Sendable {
         )
         let plaintext = try openEnvelope(enc, key: session.p2cKey, nonceBase: session.p2cNonceBase, keyID: session.keyID, expectedAAD: aad, expectedSeq: seq)
         guard let envelope = try JSONSerialization.jsonObject(with: plaintext) as? [String: Any],
-              envelope["type"] as? String == LosslessnessProbeProtocol.resultPlaintextType,
+              envelope["type"] as? String == (profile + ".result_plaintext"),
               let payload = envelope["payload"] as? [String: Any] else {
             throw Tier2ProviderError.invalidPlaintext
         }

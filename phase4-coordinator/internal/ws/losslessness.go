@@ -1005,6 +1005,9 @@ func (s *Server) nextLosslessnessProfile(provider pool.Provider) LosslessnessSam
 }
 
 func (s *Server) losslessnessProviderHasPending(providerID, assignedID string) bool {
+	if _, nativeBusy := s.nativePathPending.Load(nativePathKey(providerID, assignedID, LosslessnessProbeVersion)); nativeBusy {
+		return true
+	}
 	prefix := losslessnessProbeStoreKey(providerID, assignedID, "")
 	now := s.now()
 	found := false
@@ -1029,6 +1032,11 @@ func (s *Server) losslessnessProviderHasPending(providerID, assignedID string) b
 }
 
 func (s *Server) issueLosslessnessProbeRequest(provider pool.Provider, profile LosslessnessSamplingProfile) error {
+	s.nativePathDispatchMu.Lock()
+	defer s.nativePathDispatchMu.Unlock()
+	if _, busy := s.nativePathPending.Load(nativePathKey(provider.ProviderID, provider.AssignedID, LosslessnessProbeVersion)); busy {
+		return errors.New("native losslessness diagnostic busy")
+	}
 	session, ok := s.sessionFor(provider.ProviderID, provider.AssignedID)
 	if !ok {
 		return errors.New("losslessness probe dispatch requires active provider session")
@@ -1369,6 +1377,9 @@ func (s *Server) handleLosslessnessProbeResult(providerID, assignedID string, pa
 		}
 	}
 
+	if s.consumeNativePathProbeResult(providerID, assignedID, LosslessnessProbeVersion, cleartext) {
+		return
+	}
 	outer, err := ValidateLosslessnessEnvelope(cleartext, losslessnessResultType)
 	if err != nil {
 		s.log.Warn().Err(err).Str("provider_id", providerID).Msg("invalid losslessness result envelope")

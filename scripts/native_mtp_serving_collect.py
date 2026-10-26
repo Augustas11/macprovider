@@ -8,6 +8,7 @@ other thirteen journey steps or promote a partial journey to complete.
 """
 from __future__ import annotations
 import argparse
+import copy
 from datetime import datetime
 import hashlib
 import json
@@ -264,7 +265,120 @@ def fresh_diagnostic(diag,started):
         return all(datetime.fromisoformat(diag[k].replace("Z","+00:00")).timestamp()>=started for k in ("offered_at","last_checked_at"))
     except (KeyError,ValueError,TypeError,AttributeError):return False
 
-def compare_canary(samples):
+DIAGNOSTIC_PROFILES = ("losslessness_probe_v1", "compute_integrity_probe_v1")
+DIAGNOSTIC_CASES = ("matching", "mismatch_tuple", "mismatch_generation")
+
+def diagnostic_digest(profile,kind,payload):
+    # The collector intentionally executes ASCII synthetic greedy preflights
+    # with integral JSON numbers only. This bounded subset has the exact JCS
+    # encoding below; it is not a general-purpose floating-point JCS library.
+    def normalize(value):
+        if isinstance(value,dict):return {k:normalize(v) for k,v in value.items()}
+        if isinstance(value,list):return [normalize(v) for v in value]
+        if isinstance(value,float):
+            require(value.is_integer() and abs(value)<=2147483647,"diagnostic proof numeric subset")
+            return int(value)
+        if isinstance(value,str):require(value.isascii(),"diagnostic proof requires ASCII synthetic metadata")
+        return value
+    value=payload if profile==DIAGNOSTIC_PROFILES[0] else {"type":profile+"."+kind,"schema_version":profile+"."+kind,"payload":payload}
+    raw=json.dumps(normalize(value),sort_keys=True,separators=(",",":"),ensure_ascii=False,allow_nan=False).encode()
+    return "sha256:"+hashlib.sha256(raw).hexdigest()
+
+def validate_diagnostic_request(profile,outer):
+    p=outer["payload"];compute=profile==DIAGNOSTIC_PROFILES[1]
+    require(set(outer)==({"type","schema_version","payload","probe_request_digest"} if compute else {"type","probe_id","payload","probe_request_digest"}),"diagnostic request envelope fields")
+    common=set("probe_id expires_at model_id target_model_hash target_generation tokenizer_identity sampling_profile corpus_version threshold_version native_mtp_runtime_tuple_sha256".split())
+    extra=set(("schema_version nonce sampler_stage hardware_runtime_class support_selection normalization_basis k positions expected_decode_path" if compute else "probe_version probe_nonce decode_path prompts measurement_positions requested_k support_selection max_prompts max_stochastic_positions timeout_ms").split())
+    require(set(p)==common|extra,"native diagnostic request schema")
+    require(re.fullmatch(r"native-path-[0-9a-f]{32}",p["probe_id"]) is not None and re.fullmatch(r"[0-9a-f]{64}",p["nonce" if compute else "probe_nonce"]) is not None,"actual issued diagnostic replay fields")
+    require(type(p["target_generation"]) is int and 1<=p["target_generation"]<=2147483647 and re.fullmatch(r"[0-9a-f]{64}",p["native_mtp_runtime_tuple_sha256"]) is not None,"diagnostic request identity shape")
+    require(p["sampling_profile"]=={"temperature":0,"top_p":1},"bounded greedy diagnostic fixture required")
+    for key in ("model_id","target_model_hash","tokenizer_identity","corpus_version","threshold_version"):
+        require(isinstance(p[key],str) and 0<len(p[key])<=256,"diagnostic request metadata")
+    if compute:
+        require(outer["schema_version"]==p["schema_version"]==profile+".request" and p["expected_decode_path"]=="native_mtp" and p["support_selection"]=="compute_integrity_support_selection_v1" and p["normalization_basis"]=="full_distribution" and p["sampler_stage"]=="post_sampler_probabilities" and p["k"]==64 and isinstance(p["hardware_runtime_class"],str) and bool(p["hardware_runtime_class"]),"compute diagnostic preflight profile")
+        require(isinstance(p["positions"],list) and 1<=len(p["positions"])<=8,"compute diagnostic position bound")
+        prompts={};refs={};seen=set()
+        for pos in p["positions"]:
+            require(set(pos)==set("prompt_id prompt_ref position_index token_prefix_digest context_hash".split()) and isinstance(pos["prompt_id"],str) and bool(pos["prompt_id"]) and pos["prompt_ref"]=="synthetic:native-path-binding-v1" and type(pos["position_index"]) is int and pos["position_index"]>=0,"compute synthetic preflight position")
+            pair=(pos["prompt_id"],pos["position_index"])
+            require(pair not in seen and prompts.get(pos["prompt_id"],pos["prompt_ref"])==pos["prompt_ref"] and refs.get(pos["prompt_ref"],pos["prompt_id"])==pos["prompt_id"],"compute position/prompt mapping")
+            seen.add(pair);prompts[pos["prompt_id"]]=pos["prompt_ref"];refs[pos["prompt_ref"]]=pos["prompt_id"]
+            require(all(re.fullmatch(r"sha256:[0-9a-f]{64}",pos[k]) is not None for k in ("token_prefix_digest","context_hash")),"compute preflight prefix/context binding")
+        require(len(prompts)<=4,"compute prompt bound")
+    else:
+        require(outer["probe_id"]==p["probe_id"] and p["probe_version"]==profile and p["decode_path"]=="native_mtp" and p["support_selection"]=="support_selection_v1" and p["requested_k"] in (64,256) and p["timeout_ms"]==60000,"losslessness native profile")
+        require(type(p["max_prompts"]) is int and 1<=p["max_prompts"]<=4 and type(p["max_stochastic_positions"]) is int and 1<=p["max_stochastic_positions"]<=8,"losslessness bounds")
+        require(isinstance(p["prompts"],list) and 1<=len(p["prompts"])<=p["max_prompts"] and isinstance(p["measurement_positions"],list) and 1<=len(p["measurement_positions"])<=p["max_stochastic_positions"],"losslessness prompt/position count")
+        require(all(type(n) is int and n>=0 for n in p["measurement_positions"]) and len(set(p["measurement_positions"]))==len(p["measurement_positions"]),"losslessness positions")
+        for prompt in p["prompts"]:
+            require(set(prompt)==set("prompt_id prompt coordinator_owned buyer_origin".split()) and isinstance(prompt["prompt_id"],str) and bool(prompt["prompt_id"]) and isinstance(prompt["prompt"],str) and len(prompt["prompt"])<=4096 and prompt["coordinator_owned"] is True and prompt["buyer_origin"] is False,"losslessness coordinator-owned synthetic prompts")
+    return datetime.fromisoformat(p["expires_at"].replace("Z","+00:00")).timestamp()
+
+def capture_diagnostics(config):
+    candidate=code_identity(config);before=require_status(config,_status(config))
+    response=http(endpoint(config["coordinator_url"])+"/poolz",bearer=token(config["operator_token_file"]))
+    require(response["status"]==200,"operator pool unavailable")
+    providers=[p for p in response["body"].get("pool",[]) if p.get("provider_id")==config["provider_id"]]
+    require(len(providers)==1,"diagnostic provider identity ambiguous")
+    diag=providers[0].get("native_mtp_canary") or {}
+    require(diag.get("provider_binary_sha256")==candidate["binary_sha256"] and diag.get("runtime_cdhash")==candidate["cdhash"],"diagnostic signed runtime identity mismatch")
+    require(diag.get("status")=="fresh" and diag.get("last_outcome")=="pass","diagnostics require the actual fresh good native canary")
+    bases=config["native_diagnostic_requests"]
+    require(set(bases)==set(DIAGNOSTIC_PROFILES),"both full profile request fixtures required")
+    money_before=money_snapshot(config);cases=[];started=time.time()
+    for profile in DIAGNOSTIC_PROFILES:
+        for case in DIAGNOSTIC_CASES:
+            request=copy.deepcopy(bases[profile])
+            request.update(model_id=diag["model_id"],target_model_hash=diag["model_hash"],tokenizer_identity=diag["tokenizer_digest"],target_generation=diag["target_generation"],native_mtp_runtime_tuple_sha256=diag["native_mtp_runtime_tuple_sha256"])
+            require(request.get("sampling_profile")=={"temperature":0,"top_p":1},"bounded diagnostic fixture is greedy synthetic preflight")
+            if case=="mismatch_tuple":
+                value=request["native_mtp_runtime_tuple_sha256"];request["native_mtp_runtime_tuple_sha256"]=("0" if value[0]!="0" else "1")+value[1:]
+            if case=="mismatch_generation":request["target_generation"]+=1
+            observed=http(endpoint(config["coordinator_url"])+"/admin/native-mtp-path-diagnostic",bearer=token(config["operator_token_file"]),body={"provider_id":config["provider_id"],"profile":profile,"request_payload":request})
+            cases.append({"profile":profile,"case":case,"http_status":observed["status"],"observation":observed["body"]})
+    return {"schema_version":SCHEMA,"kind":"native-diagnostics","candidate":candidate,"started_at_unix":started,"finished_at_unix":time.time(),"runtime_tuple":diag,"provider_before":before,"provider_after":require_status(config,_status(config)),"money_before":money_before,"money_after":money_snapshot(config),"cases":cases}
+
+def validate_diagnostics(sample,candidate):
+    require(sample["schema_version"]==SCHEMA and sample["kind"]=="native-diagnostics" and sample["candidate"]==candidate,"actual signed diagnostic observation required")
+    require(sample["money_before"]==sample["money_after"],"diagnostics changed money tables")
+    expected={(p,c) for p in DIAGNOSTIC_PROFILES for c in DIAGNOSTIC_CASES}
+    actual={(c["profile"],c["case"]) for c in sample["cases"]}
+    require(len(sample["cases"])==6 and actual==expected,"all six native preflight cases required")
+    runtime=sample["runtime_tuple"];ids=set();nonces=set()
+    require(runtime["provider_binary_sha256"]==candidate["binary_sha256"] and runtime["runtime_cdhash"]==candidate["cdhash"],"diagnostic runtime provenance mismatch")
+    for case in sample["cases"]:
+        profile=case["profile"];observation=case["observation"]
+        require(case["http_status"]==200 and observation["profile"]==profile and observation["classification"]=="inconclusive:native_path_untrusted" and observation["trust_semantics"]=="observe_only","actual native diagnostic classification missing")
+        req,res=observation["request"],observation["result"];p,q=req["payload"],res["payload"]
+        expiry=validate_diagnostic_request(profile,req)
+        require(sample["started_at_unix"]<expiry<=sample["finished_at_unix"]+61,"diagnostic capture/request freshness")
+        compute=profile==DIAGNOSTIC_PROFILES[1]
+        require(set(res)==({"type","schema_version","probe_request_digest","probe_result_digest","payload"} if compute else {"type","probe_id","probe_request_digest","probe_result_digest","payload"}),"native diagnostic result envelope")
+        fields=set("probe_id probe_request_digest result_kind provider_reason_code expected_decode_path actual_decode_path native_mtp_runtime_tuple_sha256 actual_native_mtp_runtime_tuple_sha256 fallback_used identity_unavailable_reason model_id target_model_hash target_generation tokenizer_identity".split())
+        fields.update(("schema_version nonce sampling_profile corpus_version threshold_version hardware_runtime_class support_selection normalization_basis sampler_stage" if compute else "probe_nonce").split())
+        require(set(q)==fields,"native diagnostic result closed schema")
+        if compute:
+            require(res["schema_version"]==q["schema_version"]==profile+".result" and q["hardware_runtime_class"] is None,"compute result schema/unmeasured hardware")
+            require(all(q[k]==p[k] for k in ("sampling_profile","corpus_version","threshold_version","support_selection","normalization_basis","sampler_stage")),"compute profile metadata echo")
+        else:require(res["probe_id"]==p["probe_id"],"losslessness envelope binding")
+        nonce_key="probe_nonce" if profile==DIAGNOSTIC_PROFILES[0] else "nonce"
+        require(p["probe_id"] not in ids and p[nonce_key] not in nonces,"replayed diagnostic request")
+        ids.add(p["probe_id"]);nonces.add(p[nonce_key])
+        require(req["type"]==profile+".request" and res["type"]==profile+".result","diagnostic profile confusion")
+        require(req["probe_request_digest"]==diagnostic_digest(profile,"request",p) and res["probe_request_digest"]==req["probe_request_digest"] and res["probe_result_digest"]==diagnostic_digest(profile,"result",q),"diagnostic profile digest mismatch")
+        require(q["probe_id"]==p["probe_id"] and q[nonce_key]==p[nonce_key] and q["probe_request_digest"]==req["probe_request_digest"],"diagnostic replay binding mismatch")
+        require(q["result_kind"]=="provider_inconclusive" and q["provider_reason_code"]=="inconclusive:native_path_untrusted" and q["expected_decode_path"]=="native_mtp" and q["actual_decode_path"] is None and q["fallback_used"] is False and "positions" not in q and "validation_metadata" not in q,"native diagnostic supplied a measurement/pass or claimed execution")
+        require(q["identity_unavailable_reason"]=="native_execution_binding_unavailable","missing genuine unsupported binding disposition")
+        require(q["native_mtp_runtime_tuple_sha256"]==p["native_mtp_runtime_tuple_sha256"] and q["actual_native_mtp_runtime_tuple_sha256"]==runtime["native_mtp_runtime_tuple_sha256"] and q["target_generation"]==runtime["target_generation"],"actual diagnostic tuple/generation missing")
+        for key,actual_key in (("model_id","model_id"),("target_model_hash","model_hash"),("tokenizer_identity","tokenizer_digest")):
+            require(q[key]==runtime[actual_key],"actual diagnostic identity mismatch")
+        if case["case"]=="matching":require(p["native_mtp_runtime_tuple_sha256"]==q["actual_native_mtp_runtime_tuple_sha256"] and p["target_generation"]==q["target_generation"],"matching diagnostic did not bind current runtime")
+        elif case["case"]=="mismatch_tuple":require(p["native_mtp_runtime_tuple_sha256"]!=q["actual_native_mtp_runtime_tuple_sha256"] and p["target_generation"]==q["target_generation"],"tuple mismatch not actually exercised")
+        else:require(p["target_generation"]!=q["target_generation"] and p["native_mtp_runtime_tuple_sha256"]==q["actual_native_mtp_runtime_tuple_sha256"],"generation mismatch not actually exercised")
+    return True
+
+def compare_canary(samples,diagnostics=None):
     checks={"native_path_canary":False,"native_path_selftest":False,"losslessness_claimed_path_diagnostic_inconclusive":False,"compute_integrity_claimed_path_diagnostic_inconclusive":False}
     reasons=[];cases={}
     try:
@@ -288,10 +402,15 @@ def compare_canary(samples):
             cases[fault]={"reason":diag.get("disabled_reason") or diag.get("last_reason"),"money_unchanged":True}
         checks["native_path_canary"]=True
     except (ValueError,KeyError,TypeError) as error:reasons.append(str(error))
-    # Current production surfaces do not export a claimed-native-path SPEC030/
-    # SPEC036 result. Never infer it from observe_only source or tuple disable.
-    reasons.append("SPEC030/SPEC036 native claimed-path inconclusive result is not exported by existing collection APIs/log events")
-    return {"schema_version":STEP_SCHEMA,"step_id":"step-12-native-canary","status":"pass" if all(checks.values()) else "pending","checks":checks,"details":{"cases":cases,"pending_reasons":reasons,"observation_sha256":[hashlib.sha256(canonical(s)).hexdigest() for s in samples],"journey_complete":False}}
+    if diagnostics is None:
+        reasons.append("actual authenticated SPEC030/SPEC036 native diagnostic observations missing")
+    else:
+        try:
+            validate_diagnostics(diagnostics,samples[0]["candidate"])
+            checks["losslessness_claimed_path_diagnostic_inconclusive"]=True
+            checks["compute_integrity_claimed_path_diagnostic_inconclusive"]=True
+        except (ValueError,KeyError,TypeError,IndexError) as error:reasons.append(str(error))
+    return {"schema_version":STEP_SCHEMA,"step_id":"step-12-native-canary","status":"pass" if all(checks.values()) else "pending","checks":checks,"details":{"cases":cases,"pending_reasons":reasons,"diagnostic_observation_sha256":hashlib.sha256(canonical(diagnostics)).hexdigest() if diagnostics else None,"observation_sha256":[hashlib.sha256(canonical(s)).hexdigest() for s in samples],"journey_complete":False}}
 
 def relay_main(args):
     """Run the reviewed relay, unchanged; expiry delays actual result frames.
@@ -312,12 +431,12 @@ def relay_main(args):
 
 def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__);sub=parser.add_subparsers(dest="command",required=True)
-    for verb in ("accounting-capture","canary-capture"):
+    for verb in ("accounting-capture","canary-capture","diagnostics-capture"):
         p=sub.add_parser(verb);p.add_argument("--config",type=Path,required=True);p.add_argument("--out",type=Path,required=True)
         if verb=="accounting-capture":p.add_argument("--phase",choices=("ordinary","native"),required=True)
-        else:p.add_argument("--fault",choices=tuple(EXPECTED),required=True);p.add_argument("--relay-status",type=Path)
+        elif verb=="canary-capture":p.add_argument("--fault",choices=tuple(EXPECTED),required=True);p.add_argument("--relay-status",type=Path)
     p=sub.add_parser("accounting-compare");p.add_argument("--ordinary",type=Path,required=True);p.add_argument("--native",type=Path,required=True);p.add_argument("--out",type=Path,required=True)
-    p=sub.add_parser("canary-compare");p.add_argument("--observation",type=Path,action="append",required=True);p.add_argument("--out",type=Path,required=True)
+    p=sub.add_parser("canary-compare");p.add_argument("--observation",type=Path,action="append",required=True);p.add_argument("--out",type=Path,required=True);p.add_argument("--diagnostics",type=Path)
     p=sub.add_parser("relay");p.add_argument("--repo",type=Path,required=True);p.add_argument("--listen-port",type=int,required=True);p.add_argument("--upstream-url",required=True);p.add_argument("--fault",choices=tuple(f for f in EXPECTED if f!="good"),required=True);p.add_argument("--delay-seconds",type=float,default=0);p.add_argument("--status-path",type=Path,required=True)
     args=parser.parse_args(argv)
     try:
@@ -325,9 +444,9 @@ def main(argv=None):
         if args.command.endswith("capture"):
             require(os.environ.get("MACPROVIDER_OPS_ENTRYPOINT")=="1" and bool(os.environ.get("MACPROVIDER_OPS_OWNER")),"owning paused-window ops controller required")
             config=read(args.config)
-            result=capture_accounting(config,args.phase) if args.command=="accounting-capture" else capture_canary(config,args.fault,args.relay_status)
+            result=capture_accounting(config,args.phase) if args.command=="accounting-capture" else capture_diagnostics(config) if args.command=="diagnostics-capture" else capture_canary(config,args.fault,args.relay_status)
         elif args.command=="accounting-compare":result=compare_accounting(read(args.ordinary),read(args.native))
-        else:result=compare_canary([read(p) for p in args.observation])
+        else:result=compare_canary([read(p) for p in args.observation],read(args.diagnostics) if args.diagnostics else None)
         write(args.out,result);print(json.dumps({"status":result.get("status","collected"),"artifact_sha256":sha(args.out)},sort_keys=True))
         return 0 if result.get("status") in (None,"pass") else 2
     except (ValueError,OSError,KeyError,TypeError) as error:
