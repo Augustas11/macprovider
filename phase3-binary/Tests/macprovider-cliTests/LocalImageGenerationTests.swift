@@ -246,7 +246,7 @@ final class LocalImageGenerationTests: XCTestCase {
 
     func testStatusCapabilityAndStates() async throws {
         XCTAssertTrue(RouterHandler.localStatusCapabilities.contains("local_image_generation_v1"))
-        XCTAssertEqual(Set(LocalImageState.allCases.map(\.rawValue)), Set(["idle", "downloading", "holding_customers", "generating", "warm", "restoring"]))
+        XCTAssertEqual(Set(LocalImageState.allCases.map(\.rawValue)), Set(["idle", "downloading", "holding_customers", "generating", "warm", "restoring", "recovery_required"]))
         let service = service(events: ImageEvents())
         let status = await service.status()
         XCTAssertEqual(status["state"] as? String, "idle")
@@ -310,8 +310,91 @@ final class LocalImageGenerationTests: XCTestCase {
         XCTAssertEqual(values.filter { $0 == "restore_language" }.count, 3)
         XCTAssertEqual(values.last, "resume")
         let snapshot = await service.status()
-        XCTAssertEqual(snapshot["state"] as? String, "idle")
+        XCTAssertEqual(snapshot["state"] as? String, "recovery_required")
         XCTAssertTrue((snapshot["last_error"] as? String)?.contains("Could not reload") == true)
+    }
+
+    func testStaleRequestCancellationCannotCancelSuccessorOrItsWarmLease() async throws {
+        let events = ImageEvents()
+        let backend = ControlledImageBackend(events: events)
+        let service = LocalImageGeneration(backend: backend,
+            lifecycle: LocalCreativeLifecycle(pause: {}, drain: {}, unloadLanguage: {}, restoreLanguage: {}, resume: {}),
+            physicalBytes: 32 * 1_073_741_824, availableBytes: { 32_000_000_000 })
+        let firstID = UUID(), secondID = UUID()
+        _ = try await service.generate(request(), operationID: firstID)
+        await backend.blockNext()
+        let second = Task { try await service.generate(request(), operationID: secondID) }
+        await waitForGenerating(service)
+        await service.cancel(operationID: firstID)
+        let generating = await service.state
+        XCTAssertEqual(generating, .generating)
+        await backend.release()
+        _ = try await second.value
+        await service.cancel(operationID: firstID)
+        let warm = await service.state
+        XCTAssertEqual(warm, .warm)
+        await service.cancel(operationID: secondID)
+        let idle = await service.state
+        XCTAssertEqual(idle, .idle)
+    }
+
+    func testEveryFailurePathReopensAdmissionAndOrdinaryRuntimeRecovery() async throws {
+        for scenario in CreativeFailureScenario.allCases {
+            let reloads = CreativeReloadControl()
+            let status = ProviderStatus(modelID: "fixture", modelLoaded: true,
+                capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: 1))
+            let runtime = ModelRuntime(modelID: "fixture", warmSwapEnabled: true,
+                loader: { _ in throw CocoaError(.fileReadUnknown) },
+                testLoader: { try await reloads.load($0) },
+                testCompletion: { _, _ in throw CocoaError(.fileReadUnknown) })
+            await runtime.setProviderStatus(status)
+            let backend = RecoveryImageBackend(scenario: scenario)
+            let service = LocalImageGeneration(backend: backend,
+                lifecycle: LocalCreativeLifecycle(
+                    pause: { await status.setLocalCreativeHold(true) },
+                    drain: {
+                        if scenario == .drainTimeout { throw URLError(.timedOut) }
+                    },
+                    unloadLanguage: { try await runtime.unloadForLocalCreativeHold() },
+                    restoreLanguage: { try await runtime.restoreAfterLocalCreativeHold() },
+                    resume: { await status.setLocalCreativeHold(false) },
+                    abandonLanguage: { await runtime.abandonLocalCreativeHold() }),
+                physicalBytes: 16 * 1_073_741_824, availableBytes: { 0 })
+            if scenario == .restoreExhausted { await reloads.setFailures(3) }
+            if scenario == .restoreRetry { await reloads.setFailures(1) }
+            let task = Task { try await service.generate(request()) }
+            if scenario == .cancel {
+                await waitForGenerating(service)
+                await service.cancel()
+            }
+            do { _ = try await task.value; XCTFail("Expected failure: \(scenario)") } catch {}
+            let held = await status.localCreativeHold
+            XCTAssertFalse(held, "\(scenario)")
+            let imageState = await service.state
+            XCTAssertEqual(imageState, scenario == .restoreExhausted ? .recoveryRequired : .idle, "\(scenario)")
+            let loaded = await runtime.isLoaded
+            XCTAssertEqual(loaded, scenario != .restoreExhausted, "\(scenario)")
+            if scenario == .restoreExhausted {
+                let attempts = await reloads.attempts
+                XCTAssertEqual(attempts, 3)
+                await service.restore()
+                let stillFailed = await service.state
+                XCTAssertEqual(stillFailed, .recoveryRequired)
+            } else {
+                let admission = await status.beginRequestIfAccepting()
+                XCTAssertNotNil(admission, "\(scenario)")
+                if let admission { await status.finishRequest(startedAt: admission, completion: nil, failed: false) }
+            }
+            // The normal warm swap must never encounter a leftover creative owner,
+            // even when the model could not be restored during cleanup.
+            let swap = try await runtime.beginSwap(targetModelID: "recovered")
+            try await swap.value
+            let recovered = await runtime.currentSnapshot()
+            XCTAssertEqual(recovered.modelID, "recovered", "\(scenario)")
+            let admission = await status.beginRequestIfAccepting()
+            XCTAssertNotNil(admission, "\(scenario)")
+            if let admission { await status.finishRequest(startedAt: admission, completion: nil, failed: false) }
+        }
     }
 
     private func waitForGenerating(_ service: LocalImageGeneration) async {
@@ -365,6 +448,45 @@ private struct BlockingDownloadImageBackend: LocalImageBackend {
     func generate(_ request: LocalImageRequest) async throws -> Data {
         XCTFail("Cancelled download must never reach generation")
         throw CancellationError()
+    }
+    func unload() async { await events.add("unload_image") }
+}
+
+private enum CreativeFailureScenario: CaseIterable, Sendable {
+    case backendCrash, downloadTimeout, generationTimeout, drainTimeout, cancel, restoreRetry, restoreExhausted
+}
+private struct RecoveryImageBackend: LocalImageBackend {
+    let scenario: CreativeFailureScenario
+    func prepare(quantized: Bool, progress: @escaping @Sendable (Int64, Int64) -> Void) async throws {
+        if scenario == .downloadTimeout { throw URLError(.timedOut) }
+    }
+    func generate(_ request: LocalImageRequest) async throws -> Data {
+        if scenario == .cancel { try await Task.sleep(nanoseconds: 30_000_000_000) }
+        if scenario == .generationTimeout { throw URLError(.timedOut) }
+        throw CocoaError(.fileReadUnknown)
+    }
+    func unload() async {}
+}
+private actor CreativeReloadControl {
+    private var failures = 0
+    private(set) var attempts = 0
+    func setFailures(_ count: Int) { failures = count }
+    func load(_ modelID: String) throws -> (String, String?) {
+        attempts += 1
+        if failures > 0 { failures -= 1; throw CocoaError(.fileReadUnknown) }
+        return (modelID, "fixture-hash")
+    }
+}
+private actor ControlledImageBackend: LocalImageBackend {
+    let events: ImageEvents
+    private var blocked = false
+    init(events: ImageEvents) { self.events = events }
+    func blockNext() { blocked = true }
+    func release() { blocked = false }
+    func prepare(quantized: Bool, progress: @escaping @Sendable (Int64, Int64) -> Void) async throws {}
+    func generate(_ request: LocalImageRequest) async throws -> Data {
+        while blocked { try await Task.sleep(nanoseconds: 5_000_000) }
+        return Data("png".utf8)
     }
     func unload() async { await events.add("unload_image") }
 }

@@ -25,6 +25,7 @@ struct LocalImageRequest: Decodable, Sendable {
 
 enum LocalImageState: String, Sendable, CaseIterable {
     case idle, downloading, holdingCustomers = "holding_customers", generating, warm, restoring
+    case recoveryRequired = "recovery_required"
 }
 
 struct LocalImageMemoryDecision: Equatable, Sendable {
@@ -67,6 +68,8 @@ struct LocalCreativeLifecycle: Sendable {
     let unloadLanguage: @Sendable () async throws -> Void
     let restoreLanguage: @Sendable () async throws -> Void
     let resume: @Sendable () async -> Void
+    /// Relinquish exclusive ownership after bounded reload attempts fail.
+    var abandonLanguage: @Sendable () async -> Void = {}
 }
 
 /// Owns both the single-flight slot and the creative hold, shared by every HTTP channel.
@@ -82,6 +85,7 @@ actor LocalImageGeneration {
     private var completedBytes: Int64 = 0
     private var totalBytes: Int64 = 0
     private var operation: Task<Data, Error>?
+    private var operationID: UUID?
     private var warmTimer: Task<Void, Never>?
     private var held = false
     private var languageUnloaded = false
@@ -105,7 +109,7 @@ actor LocalImageGeneration {
                 "physical_memory_bytes": physicalBytes, "last_error": lastError as Any? ?? NSNull()]
     }
 
-    func generate(_ request: LocalImageRequest) async throws -> Data {
+    func generate(_ request: LocalImageRequest, operationID: UUID = UUID()) async throws -> Data {
         guard operation == nil, !restoring else {
             throw APIError(status: 429, message: "Image generation is busy. Wait for the current image or restoration to finish.", code: "image_generation_busy")
         }
@@ -115,6 +119,7 @@ actor LocalImageGeneration {
         lastError = nil
         let task = Task { try await self.perform(request, decision: decision) }
         operation = task
+        self.operationID = operationID
         do {
             let data = try await withTaskCancellationHandler(operation: { try await task.value }, onCancel: { task.cancel() })
             operation = nil
@@ -128,6 +133,7 @@ actor LocalImageGeneration {
             lastError = error is CancellationError ? "Image generation cancelled." : String(describing: error)
             await Task.detached { await self.restoreCleanup() }.value
             operation = nil
+            self.operationID = nil
             throw error
         }
     }
@@ -157,20 +163,29 @@ actor LocalImageGeneration {
         guard state == .downloading else { return }
         completedBytes = done; totalBytes = total
     }
-    func cancel() async {
+    /// A late disconnect or Stop belongs only to its request, including its warm lease.
+    func cancel(operationID: UUID) async {
+        guard self.operationID == operationID else { return }
         if let operation {
             operation.cancel()
             _ = try? await operation.value
-            while self.operation != nil { try? await Task.sleep(nanoseconds: 10_000_000) }
-            // generate's owning task runs cleanup before it releases its slot.
+            while self.operationID == operationID && self.operation != nil {
+                try? await Task.sleep(nanoseconds: 10_000_000)
+            }
+            // generate's owning task cleans up before releasing its slot.
         } else { await restore() }
+    }
+    func cancel() async {
+        if let operationID { await cancel(operationID: operationID) }
+        else { await restore() }
     }
     func restore() async {
         guard operation == nil else { return }
-        await restoreCleanup()
+        await Task.detached { await self.restoreCleanup() }.value
     }
     private func restoreCleanup() async {
         guard !restoring else { return }
+        guard state != .recoveryRequired || held || languageUnloaded else { return }
         restoring = true; state = .restoring
         warmTimer?.cancel(); warmTimer = nil
         await backend.unload()
@@ -183,7 +198,12 @@ actor LocalImageGeneration {
                 }
             }
         }
+        if languageUnloaded { await lifecycle.abandonLanguage() }
         if held { await lifecycle.resume(); held = false }
-        state = .idle; restoring = false
+        state = languageUnloaded ? .recoveryRequired : .idle
+        // Recovery is now owned by the ordinary runtime/operator path.
+        languageUnloaded = false
+        operationID = nil
+        restoring = false
     }
 }
