@@ -5973,8 +5973,14 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     }
 
     private func requireMetal() throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
-            throw XCTSkip("MLX default metallib is unavailable in this test host")
+        // SwiftPM may launch XCTest through swiftpm-testing-helper, whose main
+        // bundle is not the test bundle containing the packaged MLX resources.
+        let testBundle = Bundle(for: PagedKVRuntimeBridgeTests.self)
+        guard PagedKVMetallibGate.defaultMetallibExists(
+            bundleURL: testBundle.resourceURL,
+            executableURL: testBundle.executableURL
+        ) || PagedKVMetallibGate.defaultMetallibExists() else {
+            throw XCTSkip("MLX default metallib is unavailable; test bundle=\(testBundle.bundleURL.path), test resources=\(testBundle.resourceURL?.path ?? "nil"), test executable=\(testBundle.executableURL?.path ?? "nil"), main bundle=\(Bundle.main.bundleURL.path), main executable=\(Bundle.main.executableURL?.path ?? "nil")")
         }
     }
 }
