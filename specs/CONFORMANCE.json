@@ -10288,7 +10288,8 @@
       "tests": [
         "phase3-binary/app/Tests/MalibuTests/ShellScreensTests.swift::testDashboardYourModelCardShowsRateDemandAndDisclosureForTrustedCurrentRow",
         "phase3-binary/app/Tests/MalibuTests/ShellScreensTests.swift::testDashboardHasNoAdvancedDiagnosticsAndNoInviteNudgeWithoutAnInvite",
-        "phase3-binary/app/Tests/MalibuTests/NavigationEarnTests.swift:func testEarnReusesDashboardWithCollapsedProviderDetailsAndVisiblePause"
+        "phase3-binary/app/Tests/MalibuTests/NavigationEarnTests.swift:func testEarnReusesDashboardWithCollapsedProviderDetailsAndVisiblePause",
+        "phase3-binary/app/Tests/MalibuTests/NavigationEarnTests.swift:func testEarnHeaderRendersPauseAndResumeAndDisclosureRevealsProviderContent"
       ],
       "journeys": [],
       "evidence": [],
@@ -15203,7 +15204,8 @@
       ],
       "tests": [
         "phase3-binary/app/Tests/MalibuTests/TerminalBackendTests.swift:final class TerminalBackendTests",
-        "phase3-binary/app/Tests/MalibuTests/TerminalSessionTests.swift:final class TerminalSessionTests"
+        "phase3-binary/app/Tests/MalibuTests/TerminalSessionTests.swift:final class TerminalSessionTests",
+        "phase3-binary/app/Tests/MalibuTests/TerminalClipboardTests.swift:final class TerminalClipboardTests"
       ],
       "journeys": [],
       "evidence": [],
