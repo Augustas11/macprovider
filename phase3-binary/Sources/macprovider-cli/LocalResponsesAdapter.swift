@@ -14,7 +14,7 @@ struct LocalResponsesError: Error {
 }
 
 final class LocalResponsesAdapter {
-    let chatRequestBody: Data
+    private(set) var chatRequestBody: Data
     let stream: Bool
     private let request: [String: Any]
     private let tools: [[String: Any]]
@@ -148,6 +148,13 @@ final class LocalResponsesAdapter {
         request = req; tools = flatTools; format = textFormat
         stream = req["stream"] as? Bool ?? false
         chatRequestBody = try JSONSerialization.data(withJSONObject: chat)
+    }
+
+    /// Privacy relay parsing releases the translated byte buffer before inference.
+    /// Parsed immutable Swift strings retain the disclosed zeroization limitation.
+    func clearTranslatedRequestBody() {
+        chatRequestBody.resetBytes(in: 0..<chatRequestBody.count)
+        chatRequestBody.removeAll(keepingCapacity: false)
     }
 
     private static func isBoolean(_ value: Any) -> Bool { (value as? NSNumber).map { CFGetTypeID($0) == CFBooleanGetTypeID() } ?? false }

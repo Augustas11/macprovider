@@ -414,7 +414,7 @@ final class ConnectedAppsTests: XCTestCase {
     func testGooseUsesCompleteEndpointAndPublishedContext() throws {
         let bytes = try ConnectedAppConfiguration.configuration(app: .goose, model: model, original: nil)
         let root = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
-        XCTAssertEqual(root["base_url"] as? String, "https://api.malibu.tech/v1/chat/completions")
+        XCTAssertEqual(root["base_url"] as? String, "http://127.0.0.1:11435/v1/chat/completions")
         let models = try XCTUnwrap(root["models"] as? [[String: Any]])
         XCTAssertEqual(models.first?["context_limit"] as? Int, 32768)
     }
@@ -546,7 +546,8 @@ final class ConnectedAppsTests: XCTestCase {
         let sentence = ConnectedAppConfiguration.keyExposure
         XCTAssertTrue(sentence.contains("dedicated, spend-limited buyer key"))
         XCTAssertTrue(sentence.contains("repository configuration"))
-        XCTAssertTrue(sentence.contains("commands its agent runs can read it"))
+        XCTAssertTrue(sentence.contains("commands its agent runs can read its local endpoint token"))
+        XCTAssertTrue(sentence.contains("stays in Malibu and its private consumer"))
         XCTAssertEqual(sentence.filter { $0 == "." }.count, 1, "one sentence")
         // The rest sits behind Details.
         let details = ConnectedAppConfiguration.setupDetails

@@ -35,6 +35,7 @@ enum RelayBlindProviderError: Error, Equatable, CustomStringConvertible {
 struct RelayBlindKeyRecord: Sendable, Equatable {
     static let algorithm = "x25519-hkdf-sha256-a256gcm-v1"
     static let signatureAlgorithm = "ed25519"
+    static let supportedEndpointFamilies = ["chat_completions", "messages", "responses"]
 
     let publicKey: Data
     let identityFingerprint: Data
@@ -70,10 +71,14 @@ struct RelayBlindKeyRecord: Sendable, Equatable {
         models: [String],
         maxEncryptedRequestBytes: UInt64,
         notBeforeUnix: Int64,
-        expiresAtUnix: Int64
+        expiresAtUnix: Int64,
+        endpointFamilies: [String] = ["chat_completions"]
     ) throws -> RelayBlindKeyRecord {
         let sortedModels = try RelayBlindValidation.canonicalModels(models)
-        guard (1...1_048_576).contains(maxEncryptedRequestBytes),
+        guard !endpointFamilies.isEmpty,
+              endpointFamilies == Array(Set(endpointFamilies)).sorted(),
+              endpointFamilies.allSatisfy(supportedEndpointFamilies.contains),
+              (1...1_048_576).contains(maxEncryptedRequestBytes),
               notBeforeUnix >= 0,
               notBeforeUnix < expiresAtUnix,
               expiresAtUnix - notBeforeUnix <= 86_400 else {
@@ -84,7 +89,8 @@ struct RelayBlindKeyRecord: Sendable, Equatable {
             publicKey: encryptionKey.publicKey.rawRepresentation,
             identityFingerprint: identityFingerprint,
             models: sortedModels,
-            maxEncryptedRequestBytes: maxEncryptedRequestBytes
+            maxEncryptedRequestBytes: maxEncryptedRequestBytes,
+            endpointFamilies: endpointFamilies
         )
         let kid = RelayBlindBase64URL.encode(Data(SHA256.hash(data: immutable).prefix(16)))
         var signed = immutable
@@ -97,7 +103,7 @@ struct RelayBlindKeyRecord: Sendable, Equatable {
             identityFingerprint: identityFingerprint,
             models: sortedModels,
             maxEncryptedRequestBytes: maxEncryptedRequestBytes,
-            endpointFamilies: ["chat_completions"],
+            endpointFamilies: endpointFamilies,
             notBeforeUnix: notBeforeUnix,
             expiresAtUnix: expiresAtUnix,
             kid: kid,
@@ -134,6 +140,8 @@ struct RelayBlindEnvelope: Sendable, Equatable {
     let tag: Data
     /// SPEC-041-R003 capability declaration; empty means the member is absent.
     var requires: [String] = []
+    /// Authenticated endpoint family; the static name remains the legacy Chat default.
+    var endpointFamilyValue: String = RelayBlindEnvelope.endpointFamily
 
     static let capabilityJSONSchemaNonStrict = "json_schema_non_strict"
     static let requiresKey = "requires"
@@ -162,7 +170,8 @@ struct RelayBlindEnvelope: Sendable, Equatable {
               object.count == expectedKeys.count,
               object["version"] as? String == version,
               object["mode"] as? String == mode,
-              object["endpoint_family"] as? String == endpointFamily,
+              let endpointFamilyValue = object["endpoint_family"] as? String,
+              RelayBlindKeyRecord.supportedEndpointFamilies.contains(endpointFamilyValue),
               object["algorithm"] as? String == RelayBlindKeyRecord.algorithm,
               let model = object["model"] as? String,
               let providerModel = object["provider_model"] as? String,
@@ -234,12 +243,92 @@ struct RelayBlindEnvelope: Sendable, Equatable {
             issuedAtUnix: issuedAtUnix,
             ciphertext: ciphertext,
             tag: tag,
-            requires: requires
+            requires: requires,
+            endpointFamilyValue: endpointFamilyValue
         )
     }
 
     var aad: Data {
         RelayBlindFraming.envelopeAAD(self)
+    }
+
+    /// SPEC-041 request cipher material, shared by the decrypting provider and
+    /// encrypting consumer. The caller clears its returned nonce copy.
+    func requestCipher(sharedSecret: SharedSecret) throws -> (key: SymmetricKey, nonce: Data) {
+        var shared = sharedSecret.withUnsafeBytes { Data($0) }
+        defer { shared.resetBytes(in: 0..<shared.count) }
+        guard shared.count == 32, shared.contains(where: { $0 != 0 }) else {
+            throw RelayBlindProviderError.ciphertextInvalid
+        }
+        let transcript = Data(SHA256.hash(data: Data("macprovider/spec041/relay-blind/transcript/v1".utf8) + aad))
+        let key = sharedSecret.hkdfDerivedSymmetricKey(
+            using: SHA256.self, salt: transcript,
+            sharedInfo: Data("macprovider/spec041/request/aead/v1".utf8), outputByteCount: 32
+        )
+        let nonceKey = sharedSecret.hkdfDerivedSymmetricKey(
+            using: SHA256.self, salt: transcript,
+            sharedInfo: Data("macprovider/spec041/request/aead-nonce/v1".utf8), outputByteCount: 12
+        )
+        return (key, nonceKey.withUnsafeBytes { Data($0) })
+    }
+}
+
+/// The same endpoint adapters used by local HTTP, retained only in request memory.
+/// Their mutable streaming state is serialized here, never copied across requests.
+final class RelayBlindEndpointAdapter: @unchecked Sendable {
+    private let lock = NSLock()
+    private let responses: LocalResponsesAdapter?
+    private let messages: LocalAnthropicMessagesAdapter?
+    private(set) var chatRequestBody: Data
+
+    private init(responses: LocalResponsesAdapter) {
+        self.responses = responses
+        self.messages = nil
+        self.chatRequestBody = responses.chatRequestBody
+    }
+
+    private init(messages: LocalAnthropicMessagesAdapter) {
+        self.responses = nil
+        self.messages = messages
+        self.chatRequestBody = messages.chatRequestBody
+    }
+
+    static func make(family: String, body: Data, privacyClass: Bool) throws -> RelayBlindEndpointAdapter? {
+        switch family {
+        case "chat_completions": return nil
+        case "responses":
+            guard privacyClass else { throw RelayBlindProviderError.providerUnsupported }
+            return try RelayBlindEndpointAdapter(responses: LocalResponsesAdapter(body: body))
+        case "messages":
+            guard privacyClass else { throw RelayBlindProviderError.providerUnsupported }
+            return try RelayBlindEndpointAdapter(messages: LocalAnthropicMessagesAdapter(body: body))
+        default: throw RelayBlindProviderError.providerUnsupported
+        }
+    }
+
+    func clearRequestBody() {
+        lock.lock()
+        defer { lock.unlock() }
+        chatRequestBody.resetBytes(in: 0..<chatRequestBody.count)
+        chatRequestBody.removeAll(keepingCapacity: false)
+        responses?.clearTranslatedRequestBody()
+        messages?.clearTranslatedRequestBody()
+    }
+
+    func translateResponse(_ body: Data) throws -> Data {
+        lock.lock()
+        defer { lock.unlock() }
+        if let responses { return try responses.translateResponse(body) }
+        if let messages { return try messages.translateResponse(body) }
+        throw RelayBlindProviderError.providerUnsupported
+    }
+
+    func translateStream(_ bytes: String) -> String {
+        lock.lock()
+        defer { lock.unlock() }
+        if let responses { return responses.consumeStream(bytes).joined() }
+        if let messages { return messages.consumeStream(bytes).joined() }
+        return ""
     }
 }
 
@@ -371,6 +460,7 @@ final class RelayBlindProviderRuntime: @unchecked Sendable {
         let context: RelayBlindDispatchContext
         let claim: RelayBlindExecutionJournal.Claim
         let responseSealer: PrivacyResponseSealer?
+        var endpointAdapter: RelayBlindEndpointAdapter? = nil
     }
 
     let keyManager: RelayBlindKeyManager
@@ -460,7 +550,8 @@ final class RelayBlindProviderRuntime: @unchecked Sendable {
         )
         do {
             let active = try keyManager.key(for: envelope.kid, digest: envelope.keyRecordDigest, now: now)
-            guard envelope.ciphertext.count <= active.record.maxEncryptedRequestBytes else {
+            guard envelope.ciphertext.count <= active.record.maxEncryptedRequestBytes,
+                  active.record.endpointFamilies.contains(envelope.endpointFamilyValue) else {
                 throw RelayBlindProviderError.invalidEnvelope
             }
             let peer = try Curve25519.KeyAgreement.PublicKey(rawRepresentation: envelope.buyerEphemeralPublicKey)
@@ -472,27 +563,15 @@ final class RelayBlindProviderRuntime: @unchecked Sendable {
             guard shared.count == 32, shared.contains(where: { $0 != 0 }) else {
                 throw RelayBlindProviderError.ciphertextInvalid
             }
-            let transcript = Data(SHA256.hash(data: Data("macprovider/spec041/relay-blind/transcript/v1".utf8) + envelope.aad))
-            let requestKey = secret.hkdfDerivedSymmetricKey(
-                using: SHA256.self,
-                salt: transcript,
-                sharedInfo: Data("macprovider/spec041/request/aead/v1".utf8),
-                outputByteCount: 32
-            )
-            let nonceKey = secret.hkdfDerivedSymmetricKey(
-                using: SHA256.self,
-                salt: transcript,
-                sharedInfo: Data("macprovider/spec041/request/aead-nonce/v1".utf8),
-                outputByteCount: 12
-            )
-            var nonceData = nonceKey.withUnsafeBytes { Data($0) }
+            let requestCipher = try envelope.requestCipher(sharedSecret: secret)
+            var nonceData = requestCipher.nonce
             defer { nonceData.resetBytes(in: 0..<nonceData.count) }
             let sealed = try AES.GCM.SealedBox(
                 nonce: AES.GCM.Nonce(data: nonceData), ciphertext: envelope.ciphertext, tag: envelope.tag
             )
             var plaintext = Data()
             do {
-                plaintext = try AES.GCM.open(sealed, using: requestKey, authenticating: envelope.aad)
+                plaintext = try AES.GCM.open(sealed, using: requestCipher.key, authenticating: envelope.aad)
             } catch {
                 throw RelayBlindProviderError.ciphertextInvalid
             }
@@ -500,7 +579,21 @@ final class RelayBlindProviderRuntime: @unchecked Sendable {
             guard plaintext.count <= active.record.maxEncryptedRequestBytes else {
                 throw RelayBlindProviderError.ciphertextInvalid
             }
-            let parsed = try ChatCompletionRequest.parse(data: plaintext)
+            // Endpoint conversion stays inside the approved process, after authentication.
+            // No decrypted bytes are sent through the ordinary local HTTP listener.
+            let endpointAdapter = try RelayBlindEndpointAdapter.make(
+                family: envelope.endpointFamilyValue, body: plaintext, privacyClass: privacyClass
+            )
+            let parsedBody: ChatCompletionRequest
+            do {
+                defer { endpointAdapter?.clearRequestBody() }
+                parsedBody = try ChatCompletionRequest.parse(data: endpointAdapter?.chatRequestBody ?? plaintext)
+            }
+            // Agents may omit an output cap. The clear, authenticated reservation
+            // still bounds generation without rewriting the original buyer payload.
+            let parsed = privacyClass && parsedBody.maxTokens == nil
+                ? parsedBody.withMaxTokensLimit(Int(envelope.maxOutputTokens))
+                : parsedBody
             // Encrypted envelopes do not negotiate the native image profile.
             // Reject before preparing input, including on a vision-capable host;
             // expose only the opaque relay-blind error vocabulary.
@@ -551,7 +644,8 @@ final class RelayBlindProviderRuntime: @unchecked Sendable {
                 envelope: envelope,
                 context: context,
                 claim: claim,
-                responseSealer: responseSealer
+                responseSealer: responseSealer,
+                endpointAdapter: endpointAdapter
             )
         } catch let error as RelayBlindProviderError {
             try? journal.markTerminal(claim, now: now)
@@ -832,7 +926,8 @@ final class RelayBlindKeyManager: @unchecked Sendable {
             models: models,
             maxEncryptedRequestBytes: maxEncryptedRequestBytes,
             notBeforeUnix: notBeforeUnix,
-            expiresAtUnix: expiresAtUnix
+            expiresAtUnix: expiresAtUnix,
+            endpointFamilies: RelayBlindKeyRecord.supportedEndpointFamilies
         )
     }
 }
@@ -1017,7 +1112,8 @@ enum RelayBlindFraming {
         publicKey: Data,
         identityFingerprint: Data,
         models: [String],
-        maxEncryptedRequestBytes: UInt64
+        maxEncryptedRequestBytes: UInt64,
+        endpointFamilies: [String] = ["chat_completions"]
     ) -> Data {
         var data = Data()
         data.appendFramed(Data(RelayBlindKeyRecord.algorithm.utf8))
@@ -1026,8 +1122,8 @@ enum RelayBlindFraming {
         data.appendUnsigned32(UInt32(models.count))
         for model in models { data.appendFramed(Data(model.utf8)) }
         data.appendUnsigned64(maxEncryptedRequestBytes)
-        data.appendUnsigned32(1)
-        data.appendFramed(Data("chat_completions".utf8))
+        data.appendUnsigned32(UInt32(endpointFamilies.count))
+        for family in endpointFamilies { data.appendFramed(Data(family.utf8)) }
         data.appendFramed(Data(RelayBlindKeyRecord.signatureAlgorithm.utf8))
         return data
     }
@@ -1036,7 +1132,7 @@ enum RelayBlindFraming {
         var data = Data()
         data.appendFramed(Data(RelayBlindEnvelope.version.utf8))
         data.appendFramed(Data(RelayBlindEnvelope.mode.utf8))
-        data.appendFramed(Data(RelayBlindEnvelope.endpointFamily.utf8))
+        data.appendFramed(Data(value.endpointFamilyValue.utf8))
         data.appendFramed(Data(value.model.utf8))
         data.appendFramed(Data(value.providerModel.utf8))
         data.appendUnsigned64(value.stream ? 1 : 0)
@@ -1568,7 +1664,9 @@ private enum RelayBlindSecureFiles {
 
 extension Data {
     mutating func appendUnsigned32(_ value: UInt32) {
-        append(contentsOf: [UInt8(value >> 24), UInt8(value >> 16), UInt8(value >> 8), UInt8(value)])
+        for shift in stride(from: 24, through: 0, by: -8) {
+            append(UInt8(truncatingIfNeeded: value >> UInt32(shift)))
+        }
     }
 
     mutating func appendUnsigned64(_ value: UInt64) {

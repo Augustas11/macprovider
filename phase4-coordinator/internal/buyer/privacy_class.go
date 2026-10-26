@@ -232,7 +232,7 @@ type privacySelection struct {
 //
 // assurance is the requested SPEC-049-R034 label; a code-bound request ranks
 // only sessions whose latest verified posture is code-bound.
-func (s *Server) selectPrivacyProvider(ctx context.Context, accountID, model string, encryptedBytes int64, requires []string, scope *trustpool.Snapshot, assurance string) (privacySelection, string, string) {
+func (s *Server) selectPrivacyProvider(ctx context.Context, accountID, model string, encryptedBytes int64, requires []string, scope *trustpool.Snapshot, assurance string, endpointFamilies ...string) (privacySelection, string, string) {
 	owned, ownershipErr := s.buyerOwnedProviders(ctx)
 	if ownershipErr != nil {
 		return privacySelection{}, privacyClassUnavailable, relayblind.PrivacyRejectStoreUnavailable
@@ -266,7 +266,7 @@ func (s *Server) selectPrivacyProvider(ctx context.Context, accountID, model str
 		if provider.ModelAdmissionPoolModelID != "" || (scope != nil && !privacyPoolMemberEligible(*scope, provider)) {
 			continue
 		}
-		records, err := s.relayBlind.store.FreshKeyRecords(ctx, provider.ProviderID, provider.AssignedID, model, encryptedBytes, s.now(), relayblind.KeyClassPrivacy)
+		records, err := s.relayBlind.store.FreshKeyRecords(ctx, provider.ProviderID, provider.AssignedID, model, encryptedBytes, s.now(), relayblind.KeyClassPrivacy, endpointFamilies...)
 		if err != nil {
 			s.logPrivacyGateRejection(relayblind.PrivacyRejectStoreUnavailable)
 			closest = closerPrivacyReject(closest, relayblind.PrivacyRejectStoreUnavailable)
@@ -393,7 +393,7 @@ func (s *Server) handlePrivacyClassReservation(w http.ResponseWriter, r *http.Re
 	}
 	unlockSelection := s.relayBlind.lockAccountSelection(accountID)
 	defer func() { unlockSelection() }()
-	selected, code, reason := s.selectPrivacyProvider(r.Context(), accountID, request.Model, request.EncryptedRequestBytes, request.Requires, scope, assurance)
+	selected, code, reason := s.selectPrivacyProvider(r.Context(), accountID, request.Model, request.EncryptedRequestBytes, request.Requires, scope, assurance, request.EndpointFamily)
 	if code == relayBlindCapabilityRefusalCode {
 		s.writeRelayBlindCapabilityRefusal(w, r, phase, true)
 		return
@@ -422,7 +422,7 @@ func (s *Server) handlePrivacyClassReservation(w http.ResponseWriter, r *http.Re
 	if selected.key.ExpiresAtUnix < expires {
 		expires = selected.key.ExpiresAtUnix
 	}
-	create := relayblind.ReservationCreate{
+	create := relayblind.ReservationCreate{EndpointFamily: request.EndpointFamily,
 		AccountID: accountID, WalletSession: walletSession, ProviderID: selected.provider.ProviderID, AssignedSession: selected.provider.AssignedID,
 		KeyRecord: selected.key, Model: request.Model, ProviderModel: selected.provider.ModelID, Stream: request.Stream,
 		MaxEncryptedRequestBytes: request.EncryptedRequestBytes, MaxOutputTokens: request.MaxOutputTokens,
@@ -449,7 +449,7 @@ func (s *Server) handlePrivacyClassReservation(w http.ResponseWriter, r *http.Re
 	unlockSelection = func() {}
 	response := relayblind.ReservationResponse{
 		Version: relayblind.PrivacyReservationVersion, ProviderBinding: reservation.ProviderBinding, BuyerBinding: reservation.BuyerBinding,
-		KeyRecordDigest: selected.key.KeyRecordDigest, KeyRecord: selected.key, KID: selected.key.KID, EndpointFamily: relayblind.EndpointChatCompletions,
+		KeyRecordDigest: selected.key.KeyRecordDigest, KeyRecord: selected.key, KID: selected.key.KID, EndpointFamily: request.EndpointFamily,
 		Model: request.Model, ProviderModel: selected.provider.ModelID, Stream: request.Stream, MaxEncryptedRequestBytes: uint64(request.EncryptedRequestBytes),
 		MaxOutputTokens: request.MaxOutputTokens, InputTokenUpperBound: request.InputTokenUpperBound,
 		ReservationTokenCap: request.InputTokenUpperBound + request.MaxOutputTokens, ExpiresAtUnix: expires,

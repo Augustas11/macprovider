@@ -12,6 +12,7 @@ struct TerminalScreen: View {
         models = workspace.models
     }
     @State private var otherApps = false
+    @ObservedObject private var privacy = ManagedPrivacyConsumer.shared
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -23,6 +24,8 @@ struct TerminalScreen: View {
             if otherApps {
                 ConnectedAppsScreen()
             } else {
+                Text(privacy.assuranceSummary).font(.caption).accessibilityIdentifier("terminal-privacy-assurance")
+                Text(ConnectedAppConfiguration.privacyScope).font(.caption).foregroundStyle(.secondary)
                 Text(ConnectedAppConfiguration.keyExposure).font(.caption).foregroundStyle(.orange)
                 HStack {
                     ScrollView(.horizontal) {

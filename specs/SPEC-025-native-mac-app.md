@@ -1,6 +1,14 @@
 # SPEC-025 — Native Mac App (signed `.dmg`, native Mac app with menu-bar presence)
 
-Status: DRAFT v0.43.0 · Owner: @Augustas11 · Target: 2026 Q3
+Status: DRAFT v0.44.0 · Owner: @Augustas11 · Target: 2026 Q3
+
+**Change log v0.44.0 (2026-10-26, Related: #2157):**
+R012 managed launches and gateway-funded Terminal harnesses use the SPEC-045
+privacy consumer by default. The buyer key stays with the consumer; launched
+agents receive only its local token. Missing trusted configuration fails closed.
+Only verified served assurance may be displayed after an authenticated response;
+requested assurance is not a served label. Prior removal of pre-setup privacy
+warnings remains in force. Actual production agent acceptance remains pending.
 
 **Change log v0.43.0 (2026-10-26, Related: #2054):**
 User-first navigation opens on Chat; Earn combines Dashboard and Provider;
@@ -949,10 +957,15 @@ projections (SPEC-044-R004), colour never the only signal.
   user-owned files outside repositories (directories 0700, files 0600).
   Never display secrets in previews, logs, diagnostics, subprocess arguments
   or errors. Supply a working documented credential mechanism, not an
-  unresolved environment placeholder. A launched client receives the key from
-  Keychain through a one-time file (0600, in a 0700 directory) that the
-  launcher reads once and deletes; the launcher exports the key to the client
-  environment. The interface MUST disclose that repository configuration and
+  unresolved environment placeholder. A managed launched client receives only the SPEC-045 consumer's local
+  token through a one-time file (0600, in a 0700 directory) that the launcher
+  reads once and deletes. The upstream buyer key goes only from Keychain to
+  the local consumer through a protected handoff, never to agent configuration,
+  arguments or environment. Gateway-funded Terminal harnesses and supported
+  managed Connected apps use SPEC-049-R036 by default, preserving original
+  endpoint families and failing closed if directory trust or privacy admission
+  is unavailable. Existing managed profiles must be safely migrated or refused;
+  they cannot silently retain the ordinary production URL. The interface MUST disclose that repository configuration and
   agent commands run by the client can read that environment, and recommend a
   dedicated, spend-limited buyer key. OpenCode sessions MUST be launched with
   project configuration disabled (`OPENCODE_DISABLE_PROJECT_CONFIG=1` and
@@ -967,10 +980,11 @@ projections (SPEC-044-R004), colour never the only signal.
   file permissions on restore. Unsupported or ambiguous formats MUST remain
   unchanged. A connection test MUST exercise the selected API/model with
   bounded cost/time/response size and reject credential-bearing redirects;
-  a models-list fetch alone is not a connection test. Connected apps MUST make
-  no privacy claim and MUST NOT show privacy warnings or privacy status text
-  before setup, on gateway status or in Details, or a Cursor-server transit
-  note. The buyer-key disclosure above is one
+  a models-list fetch alone is not a connection test. Connected apps MUST NOT show pre-setup privacy warnings, ordinary gateway
+  status as privacy evidence, or an unverified privacy claim. After an actual
+  authenticated privacy response, the interface MAY display only its verified
+  served assurance and the exact SPEC-049 non-claims. Manual Cursor setup is
+  not evidence of a privacy-class managed launch. The buyer-key disclosure above is one
   persistently visible sentence that names repository configuration and
   agent commands and recommends a dedicated, spend-limited key; the handoff
   mechanics, managed-profile scope and override caveats MAY sit behind a

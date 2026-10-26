@@ -31,11 +31,11 @@ final class TerminalBackendTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: home) }
         let key = "test-buyer-key"
         let plan = try ClaudeCodeLauncher.prepare(executable: URL(fileURLWithPath: "/bin/echo"), model: toolModel,
-                                                 key: key, home: home,
+                                                 endpoint: try ManagedPrivacyEndpoint(localToken: key), home: home,
                                                  inheritedEnvironment: ["HOME": home.path, "PATH": "/usr/bin:/bin", "ANTHROPIC_AUTH_TOKEN": "inherited-secret", "DYLD_INSERT_LIBRARIES": "/bad"])
         let expected = Set(["HOME", "PATH", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "CLAUDE_CONFIG_DIR", "TERM"] + ClaudeCodeLauncher.modelEnvironmentKeys)
         XCTAssertEqual(Set(plan.environment.keys), expected)
-        XCTAssertEqual(plan.environment["ANTHROPIC_BASE_URL"], "https://api.malibu.tech")
+        XCTAssertEqual(plan.environment["ANTHROPIC_BASE_URL"], "http://127.0.0.1:11435")
         XCTAssertEqual(plan.environment["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"], "1")
         XCTAssertEqual(plan.environment["TERM"], "xterm-256color")
         for name in ClaudeCodeLauncher.modelEnvironmentKeys { XCTAssertEqual(plan.environment[name], toolModel.id) }
@@ -56,7 +56,7 @@ final class TerminalBackendTests: XCTestCase {
         let home = try temporaryHome()
         defer { try? FileManager.default.removeItem(at: home) }
         let plan = try ClaudeCodeLauncher.prepare(executable: URL(fileURLWithPath: "/bin/echo"), model: toolModel,
-                                                 key: "do-not-display-this-key", home: home,
+                                                 endpoint: try ManagedPrivacyEndpoint(localToken: "do-not-display-this-key"), home: home,
                                                  inheritedEnvironment: ["HOME": home.path, "PATH": "/usr/bin:/bin"])
         let process = Process()
         let output = Pipe()
@@ -87,19 +87,19 @@ final class TerminalBackendTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: home) }
         for model in [ConnectedModel(id: "plain", contextWindow: 32768, maxOutputTokens: nil),
                       ConnectedModel(id: "short", contextWindow: 8192, maxOutputTokens: nil, supportsTools: true)] {
-            XCTAssertThrowsError(try ClaudeCodeLauncher.prepare(executable: URL(fileURLWithPath: "/bin/echo"), model: model, key: "key", home: home))
+            XCTAssertThrowsError(try ClaudeCodeLauncher.prepare(executable: URL(fileURLWithPath: "/bin/echo"), model: model, endpoint: try ManagedPrivacyEndpoint(localToken: "key"), home: home))
         }
         let destination = home.appendingPathComponent("elsewhere")
         try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
         try FileManager.default.createSymbolicLink(at: home.appendingPathComponent("Library"), withDestinationURL: destination)
-        XCTAssertThrowsError(try ClaudeCodeLauncher.prepare(executable: URL(fileURLWithPath: "/bin/echo"), model: toolModel, key: "key", home: home))
+        XCTAssertThrowsError(try ClaudeCodeLauncher.prepare(executable: URL(fileURLWithPath: "/bin/echo"), model: toolModel, endpoint: try ManagedPrivacyEndpoint(localToken: "key"), home: home))
     }
 
     @MainActor
     func testManagedHarnessTabsHaveIndependentOneTimeKeyHandoffs() throws {
         let home = try temporaryHome()
         defer { try? FileManager.default.removeItem(at: home) }
-        let key = "isolated-test-buyer-key"
+        let key = "isolated-local-token"
         let store = ConnectedAppsStore(home: home, keyExists: { true }, readKey: { key })
         store.app = .crush
         store.models = [toolModel]
@@ -110,8 +110,8 @@ final class TerminalBackendTests: XCTestCase {
         store.setup()
         XCTAssertTrue(store.status.hasPrefix("Configured."), store.status)
 
-        let first = try store.prepareEmbeddedLaunch(.crush, isolated: true)
-        let second = try store.prepareEmbeddedLaunch(.crush, isolated: true)
+        let first = try store.prepareEmbeddedLaunch(.crush, isolated: true, endpoint: ManagedPrivacyEndpoint(localToken: key))
+        let second = try store.prepareEmbeddedLaunch(.crush, isolated: true, endpoint: ManagedPrivacyEndpoint(localToken: key))
         let firstDirectory = try XCTUnwrap(first.cleanupDirectory)
         let secondDirectory = try XCTUnwrap(second.cleanupDirectory)
         XCTAssertNotEqual(firstDirectory, secondDirectory)
@@ -170,7 +170,7 @@ final class TerminalBackendTests: XCTestCase {
         let resolution = try XCTUnwrap(detected)
         XCTAssertEqual(resolution.url.resolvingSymlinksInPath(), harness.resolvingSymlinksInPath())
         XCTAssertEqual(resolution.loginPath, path)
-        let claude = try ClaudeCodeLauncher.prepare(executable: resolution.url, model: toolModel, key: "private-key",
+        let claude = try ClaudeCodeLauncher.prepare(executable: resolution.url, model: toolModel, endpoint: try ManagedPrivacyEndpoint(localToken: "private-key"),
                                                    loginPath: resolution.loginPath, home: home, inheritedEnvironment: inherited)
         let managedHandoff = home.appendingPathComponent("managed.key")
         try Data("private-key".utf8).write(to: managedHandoff)

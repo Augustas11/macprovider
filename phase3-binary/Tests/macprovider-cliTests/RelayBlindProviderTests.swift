@@ -6,6 +6,63 @@ import MacProviderCore
 @testable import macprovider_cli
 
 final class RelayBlindProviderTests: XCTestCase {
+    func testFramingLengthsBeyondOneByteUseCanonicalBigEndianWithoutTrapping() {
+        for (length, prefix) in [(256, [UInt8(0), 0, 1, 0]), (65_536, [UInt8(0), 1, 0, 0])] {
+            let input = Data(repeating: 0x7f, count: length)
+            var framed = Data()
+            framed.appendFramed(input)
+            XCTAssertEqual(Array(framed.prefix(4)), prefix)
+            XCTAssertEqual(framed.dropFirst(4), input)
+        }
+        var integer = Data()
+        integer.appendUnsigned32(UInt32.max)
+        XCTAssertEqual(integer, Data(repeating: 0xff, count: 4))
+    }
+
+    func testEndpointFamiliesAreSignedAndKeepLegacyChatFraming() throws {
+        let identity = Curve25519.Signing.PrivateKey()
+        let agreement = Curve25519.KeyAgreement.PrivateKey()
+        let legacy = try RelayBlindKeyRecord.make(identityKey: identity, encryptionKey: agreement,
+            models: ["model"], maxEncryptedRequestBytes: 1024, notBeforeUnix: 100, expiresAtUnix: 200)
+        let expanded = try RelayBlindKeyRecord.make(identityKey: identity, encryptionKey: agreement,
+            models: ["model"], maxEncryptedRequestBytes: 1024, notBeforeUnix: 100, expiresAtUnix: 200,
+            endpointFamilies: RelayBlindKeyRecord.supportedEndpointFamilies)
+        XCTAssertEqual(legacy.endpointFamilies, ["chat_completions"])
+        XCTAssertEqual(expanded.endpointFamilies, ["chat_completions", "messages", "responses"])
+        XCTAssertNotEqual(legacy.kid, expanded.kid)
+        XCTAssertNotEqual(legacy.keyRecordDigest, expanded.keyRecordDigest)
+        XCTAssertNotEqual(legacy.signature, expanded.signature)
+        var signed = RelayBlindFraming.keyRecordImmutable(publicKey: expanded.publicKey,
+            identityFingerprint: expanded.identityFingerprint, models: expanded.models,
+            maxEncryptedRequestBytes: expanded.maxEncryptedRequestBytes,
+            endpointFamilies: expanded.endpointFamilies)
+        signed.appendSigned64(expanded.notBeforeUnix)
+        signed.appendSigned64(expanded.expiresAtUnix)
+        XCTAssertTrue(identity.publicKey.isValidSignature(expanded.signature, for: signed))
+        for invalid in [["responses", "messages"], ["messages", "messages"], ["embeddings"], []] {
+            XCTAssertThrowsError(try RelayBlindKeyRecord.make(identityKey: identity, encryptionKey: agreement,
+                models: ["model"], maxEncryptedRequestBytes: 1024, notBeforeUnix: 100, expiresAtUnix: 200,
+                endpointFamilies: invalid))
+        }
+    }
+
+    func testPrivacyAdapterDropsTranslatedInputBytesWithoutLosingResponseContext() throws {
+        for family in ["responses", "messages"] {
+            let request: [String: Any] = family == "responses"
+                ? ["model": "model", "input": "private prompt", "max_output_tokens": 4]
+                : ["model": "model", "messages": [["role": "user", "content": "private prompt"]], "max_tokens": 4]
+            let adapter = try XCTUnwrap(RelayBlindEndpointAdapter.make(family: family,
+                body: JSONSerialization.data(withJSONObject: request), privacyClass: true))
+            XCTAssertFalse(adapter.chatRequestBody.isEmpty)
+            adapter.clearRequestBody()
+            XCTAssertTrue(adapter.chatRequestBody.isEmpty)
+            let completion: [String: Any] = ["model": "model", "choices": [["message": ["role": "assistant", "content": "answer"], "finish_reason": "stop"]], "usage": ["prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2]]
+            let response = try adapter.translateResponse(JSONSerialization.data(withJSONObject: completion))
+            XCTAssertTrue(String(decoding: response, as: UTF8.self).contains("answer"))
+            XCTAssertFalse(String(decoding: response, as: UTF8.self).contains("private prompt"))
+        }
+    }
+
     func testEncryptedMediaFailsWithoutDisclosingContent() throws {
         let root = temporaryStateDirectory()
         defer { try? FileManager.default.removeItem(at: root) }

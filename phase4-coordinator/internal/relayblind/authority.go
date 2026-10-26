@@ -79,7 +79,7 @@ func (a *Authority) AcceptProviderKeys(ctx context.Context, providerID, assigned
 			IdentityPublicKey: base64.RawURLEncoding.EncodeToString(publicKey),
 			Fingerprint:       base64.RawURLEncoding.EncodeToString(fingerprint[:]),
 			Models:            append([]string(nil), record.Models...),
-			EndpointFamilies:  []string{EndpointChatCompletions},
+			EndpointFamilies:  append([]string(nil), record.EndpointFamilies...),
 			NotBeforeUnix:     0,
 			ExpiresAtUnix:     math.MaxInt64,
 		}

@@ -36,6 +36,15 @@ struct ConsumeRunCommand: AsyncParsableCommand {
     @Option(name: .customLong("upstream-gateway-url"), help: "HTTPS gateway origin. Default https://api.malibu.tech.")
     var upstreamGatewayURL: String = ConsumeEndpointDefaults.upstreamGatewayOrigin
 
+    @Flag(name: .customLong("privacy-class"), help: "Encrypt request and response content to one enrolled privacy provider; never fall back to plaintext.")
+    var privacyClass: Bool = false
+
+    @Option(name: .customLong("privacy-directory-public-key"), help: "Pinned base64url Ed25519 privacy directory public key.")
+    var privacyDirectoryPublicKey: String?
+
+    @Option(name: .customLong("privacy-assurance-required"), help: "Require code_bound_attested; a weaker provider is rejected.")
+    var privacyAssuranceRequired: String?
+
     @Option(name: .customLong("allow-model"), parsing: .upToNextOption, help: "Allowed model id. Repeat for multiple models.")
     var allowedModels: [String] = []
 
@@ -70,6 +79,11 @@ struct ConsumeRunCommand: AsyncParsableCommand {
             guard port != 0, (1...65_535).contains(port) else {
                 throw ConsumeStartupError(code: "local_bind_rejected")
             }
+            let privacy = try ConsumePrivacyConfiguration.parse(
+                enabled: privacyClass,
+                directoryPublicKey: privacyDirectoryPublicKey ?? (privacyClass ? (environmentForTesting ?? ProcessInfo.processInfo.environment)["MACPROVIDER_PRIVACY_DIRECTORY_PUBLIC_KEY"] : nil),
+                requiredAssurance: privacyAssuranceRequired
+            )
             let launchID = UUID().uuidString.lowercased()
             let token = try ConsumeLocalToken.generate()
             let budgetConfig = try ConsumeBudgetConfig.parse(
@@ -108,7 +122,8 @@ struct ConsumeRunCommand: AsyncParsableCommand {
                 launchID: launchID,
                 startedAt: ConsumeEndpointStatus.iso8601(Date()),
                 ledgerPathClass: budgetConfig.ledgerPathClass,
-                localToken: token.value
+                localToken: token.value,
+                privacy: privacy
             )
             let runtime = ConsumeEndpointRuntime(
                 launchID: launchID,
@@ -120,7 +135,8 @@ struct ConsumeRunCommand: AsyncParsableCommand {
                 tokenVerifier: token.verifier,
                 credentialCustody: credentialCustody,
                 budget: budgetConfig,
-                trustedPricing: trustedPricing
+                trustedPricing: trustedPricing,
+                privacy: privacy
             )
             let server = ConsumeLocalServer(
                 bindAddress: normalizedBind,
@@ -665,6 +681,15 @@ struct ConsumeUpstreamResponse: Sendable {
     let statusCode: Int
     let headers: [(String, String)]
     let body: Data
+    /// Verified outer usage is kept separate from the original endpoint wire body.
+    let verifiedUsage: Data?
+
+    init(statusCode: Int, headers: [(String, String)], body: Data, verifiedUsage: Data? = nil) {
+        self.statusCode = statusCode
+        self.headers = headers
+        self.body = body
+        self.verifiedUsage = verifiedUsage
+    }
 }
 
 struct ConsumeSSEValidationResult: Sendable {
@@ -3988,6 +4013,33 @@ struct ConsumeCredentialLoader {
 	    }
 }
 
+struct ConsumePrivacyConfiguration: Equatable, Sendable {
+    let directoryPublicKey: String
+    let requiredAssurance: String?
+
+    var directoryKeyFingerprint: String {
+        guard let bytes = try? RelayBlindBase64URL.decode(directoryPublicKey, exactCount: 32) else { return "" }
+        return RelayBlindBase64URL.encode(Data(SHA256.hash(data: bytes)))
+    }
+
+    static func parse(enabled: Bool, directoryPublicKey: String?, requiredAssurance: String?) throws -> Self? {
+        guard enabled else {
+            guard directoryPublicKey == nil, requiredAssurance == nil else {
+                throw ConsumeStartupError(code: "local_privacy_configuration_rejected")
+            }
+            return nil
+        }
+        guard let directoryPublicKey,
+              (try? RelayBlindBase64URL.decode(directoryPublicKey, exactCount: 32)) != nil,
+              requiredAssurance == nil || requiredAssurance == "code_bound_attested" else {
+            throw ConsumeStartupError(code: "local_privacy_configuration_rejected")
+        }
+        return Self(directoryPublicKey: directoryPublicKey, requiredAssurance: requiredAssurance)
+    }
+}
+
+typealias ConsumePrivacyForwarder = @Sendable (ConsumeUpstreamRequest, String) async throws -> ConsumeUpstreamResponse
+
 struct ConsumeEndpointDescriptor: Codable, Equatable {
     static let schemaVersion = "local_consumer_endpoint.descriptor.v1"
 
@@ -3998,6 +4050,9 @@ struct ConsumeEndpointDescriptor: Codable, Equatable {
     let startedAt: String
     let ledgerPathClass: String?
     let localToken: String
+    let privacyClass: String?
+    let privacyAssuranceRequired: String?
+    let privacyDirectoryKeyFingerprint: String?
 
     init(
         boundURL: String,
@@ -4005,7 +4060,8 @@ struct ConsumeEndpointDescriptor: Codable, Equatable {
         launchID: String,
         startedAt: String,
         ledgerPathClass: String?,
-        localToken: String
+        localToken: String,
+        privacy: ConsumePrivacyConfiguration? = nil
     ) {
         self.schemaVersion = Self.schemaVersion
         self.boundURL = boundURL
@@ -4014,6 +4070,9 @@ struct ConsumeEndpointDescriptor: Codable, Equatable {
         self.startedAt = startedAt
         self.ledgerPathClass = ledgerPathClass
         self.localToken = localToken
+        self.privacyClass = privacy == nil ? nil : "operator_constrained_beta_v1"
+        self.privacyAssuranceRequired = privacy?.requiredAssurance
+        self.privacyDirectoryKeyFingerprint = privacy?.directoryKeyFingerprint
     }
 
     enum CodingKeys: String, CodingKey {
@@ -4024,6 +4083,9 @@ struct ConsumeEndpointDescriptor: Codable, Equatable {
         case startedAt = "started_at"
         case ledgerPathClass = "ledger_path_class"
         case localToken = "local_token"
+        case privacyClass = "privacy_class"
+        case privacyAssuranceRequired = "privacy_assurance_required"
+        case privacyDirectoryKeyFingerprint = "privacy_directory_key_fingerprint"
     }
 }
 
@@ -4298,6 +4360,8 @@ struct ConsumeEndpointRuntime: Sendable {
     let now: @Sendable () -> Date
     let requestCounter: ConsumeEndpointRequestCounter
     let diagnostics: ConsumeStatusDiagnostics
+    let privacy: ConsumePrivacyConfiguration?
+    let privacyForwarder: ConsumePrivacyForwarder?
 
     init(
         launchID: String,
@@ -4313,7 +4377,9 @@ struct ConsumeEndpointRuntime: Sendable {
         upstreamClient: ConsumeUpstreamClient = ConsumePinnedUpstreamClient(),
         pricingAdmissionGate: ConsumePricingAdmissionGate = ConsumePricingAdmissionGate(),
         now: @escaping @Sendable () -> Date = { Date() },
-        requestCounter: ConsumeEndpointRequestCounter = ConsumeEndpointRequestCounter()
+        requestCounter: ConsumeEndpointRequestCounter = ConsumeEndpointRequestCounter(),
+        privacy: ConsumePrivacyConfiguration? = nil,
+        privacyForwarder: ConsumePrivacyForwarder? = nil
     ) {
         self.launchID = launchID
         self.boundURL = boundURL
@@ -4329,6 +4395,8 @@ struct ConsumeEndpointRuntime: Sendable {
         self.now = now
         self.requestCounter = requestCounter
         self.diagnostics = ConsumeStatusDiagnostics()
+        self.privacy = privacy
+        self.privacyForwarder = privacyForwarder
     }
 
     func beginIncompleteConnection() -> Bool {
@@ -4393,6 +4461,10 @@ struct ConsumeEndpointRuntime: Sendable {
             "open_streaming_response_count": resourceSnapshot.openStreamingResponses,
             "last_successful_upstream_contact_at": diagnosticSnapshot.lastSuccessfulUpstreamContactAt ?? NSNull(),
             "error_ring": diagnosticSnapshot.errorRing,
+            "privacy_class": privacy == nil ? NSNull() : "operator_constrained_beta_v1",
+            "privacy_assurance_required": privacy?.requiredAssurance as Any? ?? NSNull(),
+            "privacy_directory_key_fingerprint": privacy?.directoryKeyFingerprint as Any? ?? NSNull(),
+            "privacy_assurance": diagnosticSnapshot.privacyAssurance as Any? ?? NSNull(),
         ]
         for (key, value) in budget.statusFields(
             trustedPricing: trustedPricing.revalidated(now: now()),
@@ -4408,6 +4480,14 @@ final class ConsumeStatusDiagnostics: @unchecked Sendable {
     private let lock = NSLock()
     private var lastSuccessfulUpstreamContactAt: String?
     private var errorRing: [[String: Any]] = []
+    private var privacyAssurance: String?
+
+    func recordVerifiedPrivacyAssurance(_ assurance: String) {
+        guard assurance == "code_bound_attested" || assurance == "device_bound_self_attested_beta" else { return }
+        lock.lock()
+        privacyAssurance = assurance
+        lock.unlock()
+    }
 
     private static let maxErrorEntries = 100
     private static let minErrorEntries = 5
@@ -4448,10 +4528,10 @@ final class ConsumeStatusDiagnostics: @unchecked Sendable {
         )
     }
 
-    func snapshot() -> (lastSuccessfulUpstreamContactAt: String?, errorRing: [[String: Any]]) {
+    func snapshot() -> (lastSuccessfulUpstreamContactAt: String?, errorRing: [[String: Any]], privacyAssurance: String?) {
         lock.lock()
         defer { lock.unlock() }
-        return (lastSuccessfulUpstreamContactAt, errorRing)
+        return (lastSuccessfulUpstreamContactAt, errorRing, privacyAssurance)
     }
 
     private func append(errorType: String, errorCode: String, canonicalRequestID: String?) {
@@ -4631,6 +4711,27 @@ enum ConsumeLocalEndpoint: Sendable {
     case status
     case models
     case chatCompletions
+    case responses
+    case messages
+
+    var privacyFamily: String? {
+        switch self {
+        case .chatCompletions: return "chat_completions"
+        case .responses: return "responses"
+        case .messages: return "messages"
+        case .status, .models: return nil
+        }
+    }
+
+    var path: String {
+        switch self {
+        case .chatCompletions: return "/v1/chat/completions"
+        case .responses: return "/v1/responses"
+        case .messages: return "/v1/messages"
+        case .status: return "/v1/status"
+        case .models: return "/v1/models"
+        }
+    }
 }
 
 struct ConsumeValidatedRequest {
@@ -5166,13 +5267,17 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
                 return
             }
             writeLocalModels(context: context)
-        case .chatCompletions:
+        case .chatCompletions, .responses, .messages:
             guard let parsed = parseLocalBody(head: head, body: requestBody, requiresJSONObject: true, context: context) else {
                 return
             }
             guard let model = parsed.objectString("model"),
                   runtime.modelAllowlist.contains(model) else {
                 writeLocalError(context: context, status: .badRequest, code: "local_model_not_allowed")
+                return
+            }
+            if runtime.privacy != nil {
+                forwardPrivateRequest(endpoint: validatedRequest.endpoint, parsed: parsed, model: model, context: context)
                 return
             }
             writeLocalChatAdmissionFailure(
@@ -5271,6 +5376,10 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
             return ConsumeValidatedRequest(endpoint: .models)
         case (.POST, "/v1/chat/completions"):
             return ConsumeValidatedRequest(endpoint: .chatCompletions)
+        case (.POST, "/v1/responses") where runtime.privacy != nil:
+            return ConsumeValidatedRequest(endpoint: .responses)
+        case (.POST, "/v1/messages") where runtime.privacy != nil:
+            return ConsumeValidatedRequest(endpoint: .messages)
         case (.POST, "/v1/status"), (.POST, "/v1/models"), (.GET, "/v1/chat/completions"):
             throw ConsumeLocalValidationError(status: .methodNotAllowed, code: "local_endpoint_unsupported")
         default:
@@ -5308,9 +5417,6 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
               !components.contains("."),
               !components.contains("..") else {
             throw ConsumeLocalValidationError(status: .badRequest, code: "local_invalid_request")
-        }
-        guard decoded == "/v1/status" || decoded == "/v1/models" || decoded == "/v1/chat/completions" else {
-            return decoded
         }
         return decoded
     }
@@ -5426,6 +5532,199 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
             estimate: estimate,
             warningCodes: trustedPricing.warningCodes(match: pricingMatch)
         )
+    }
+
+    /// Admission reads only bounded routing metadata; the original body is encrypted unchanged.
+    private func forwardPrivateRequest(endpoint: ConsumeLocalEndpoint, parsed: JSONValue, model: String, context: ChannelHandlerContext) {
+        guard let privacy = runtime.privacy, let family = endpoint.privacyFamily,
+              case .object(let object) = parsed else {
+            writeLocalError(context: context, status: .badRequest, code: "local_privacy_configuration_rejected")
+            return
+        }
+        let capName = family == "responses" ? "max_output_tokens" : "max_tokens"
+        let outputCap: Int
+        if case .int(let cap)? = object[capName], cap > 0, cap <= Int(Int32.max) {
+            outputCap = cap
+        } else if family == "chat_completions", case .int(let cap)? = object["max_completion_tokens"], cap > 0, cap <= Int(Int32.max) {
+            outputCap = cap
+        } else if family != "messages", object[capName] == nil,
+                  object["max_completion_tokens"] == nil {
+            outputCap = 4096
+        } else {
+            writeLocalError(context: context, status: .badRequest, code: "local_privacy_output_cap_required")
+            return
+        }
+        if family == "chat_completions", object["max_tokens"] != nil, object["max_completion_tokens"] != nil {
+            writeLocalError(context: context, status: .badRequest, code: "local_invalid_request")
+            return
+        }
+        guard object["stream"] == nil || object["stream"] == .bool(true) || object["stream"] == .bool(false),
+              !runtime.pricingAdmissionGate.isEstimateExceeded() else {
+            writeLocalError(context: context, status: .badRequest, code: "local_invalid_request")
+            return
+        }
+        let streaming = object["stream"] == .bool(true)
+        // Share the buyer's exact envelope caps, including its tokenizer framing
+        // allowance; reserving only body bytes would understate permitted usage.
+        guard let metadata = try? ConsumePrivacyBuyer.requestMetadata(requestBody, family: family, streaming: streaming),
+              metadata.model == model, metadata.outputCap == UInt64(outputCap) else {
+            writeLocalError(context: context, status: .badRequest, code: "local_invalid_request")
+            return
+        }
+        guard runtime.budget.mode != .unconfigured else {
+            writeLocalError(context: context, status: .badRequest, code: "local_budget_required")
+            return
+        }
+        guard let bearer = runtime.credentialCustody.upstreamBearerToken() else {
+            writeLocalError(context: context, status: .unauthorized, code: "local_credential_missing")
+            return
+        }
+        let pricing = runtime.trustedPricing.revalidated(now: runtime.now())
+        guard case .available(let rateCard) = pricing,
+              let match = pricing.match(model: model), match.source != .defaultFallback,
+              let estimate = try? ConsumePricedExposureEstimator.estimate(
+                promptTokenUpperBound: Int64(metadata.inputCap),
+                completionTokenUpperBound: Int64(metadata.outputCap),
+                match: match, projection: rateCard.projection
+              ) else {
+            writeLocalError(context: context, status: .serviceUnavailable, code: "local_pricing_unavailable")
+            return
+        }
+        if let maxRequest = runtime.budget.maxRequestMicroUSD, estimate.amount > maxRequest {
+            writeLocalError(context: context, status: HTTPResponseStatus(statusCode: 402), code: "local_request_cap_exceeded")
+            return
+        }
+        // Privacy responses are authenticated completely before delivery, including SSE.
+        guard upstreamResourceReservation == nil,
+              let resources = runtime.reserveUpstreamExchange(
+                responseSpoolBytes: ConsumeLocalLimits.nonStreamingResponseSpoolBytes,
+                openStreamingResponse: streaming
+              ) else {
+            writeLocalError(context: context, status: .serviceUnavailable, code: "local_endpoint_busy")
+            return
+        }
+        upstreamResourceReservation = resources
+        let reservation: (id: String, amount: ConsumeMicroUSD)?
+        do {
+            if let ledger = runtime.budget.ledger {
+                let admission: ConsumeBudgetAdmissionResult
+                switch runtime.budget.mode {
+                case .budget(let budget):
+                    admission = try ledger.reservePricedEstimateForForwarding(runID: runtime.launchID, budget: budget, estimate: estimate.amount, maxRequest: runtime.budget.maxRequestMicroUSD)
+                case .noBudget:
+                    admission = try ledger.reserveNoBudgetEstimateForForwarding(runID: runtime.launchID, estimate: estimate.amount, maxRequest: runtime.budget.maxRequestMicroUSD)
+                case .unconfigured:
+                    throw ConsumeBudgetError(code: "local_budget_required")
+                }
+                switch admission {
+                case .reserved(let id, let amount): reservation = (id, amount)
+                case .budgetExceeded: throw ConsumeBudgetError(code: "local_budget_exceeded")
+                case .requestCapExceeded: throw ConsumeBudgetError(code: "local_request_cap_exceeded")
+                case .held: throw ConsumeBudgetError(code: "local_budget_ledger_unavailable")
+                }
+            } else if runtime.budget.mode == .noBudget {
+                reservation = nil
+            } else {
+                throw ConsumeBudgetError(code: "local_budget_ledger_unavailable")
+            }
+        } catch {
+            releaseUpstreamResourcesIfNeeded()
+            let code = (error as? ConsumeBudgetError)?.code ?? "local_budget_ledger_unavailable"
+            writeLocalError(context: context, status: HTTPResponseStatus(statusCode: code == "local_budget_exceeded" || code == "local_request_cap_exceeded" ? 402 : 503), code: code)
+            return
+        }
+        let cancellation = ConsumeUpstreamCancellationHandle()
+        upstreamCancellationHandle = cancellation
+        let request = ConsumeUpstreamRequest(origin: runtime.upstreamOrigin, endpoint: endpoint.path, bearerToken: bearer, body: requestBody, streaming: streaming, cancellation: cancellation)
+        let promise = context.eventLoop.makePromise(of: ConsumeUpstreamResponse.self)
+        let forwarder = runtime.privacyForwarder
+        let task = Task { @Sendable in
+            do {
+                let response: ConsumeUpstreamResponse
+                if let forwarder {
+                    response = try await forwarder(request, family)
+                } else {
+                    response = try await ConsumePrivacyBuyer(directoryPublicKey: privacy.directoryPublicKey, requiredAssurance: privacy.requiredAssurance).forward(request, family: family)
+                }
+                promise.succeed(response)
+            } catch { promise.fail(error) }
+        }
+        cancellation.setCancel { task.cancel() }
+        let contextBox = ConsumeNIOContextBox(context)
+        upstreamForwardIsPending = true
+        // Conservatively retain resources until the buyer classifies a failure.
+        upstreamForwardWasDispatched = true
+        promise.futureResult.whenComplete { [weak self] result in
+            guard let self else { return }
+            defer {
+                self.releaseUpstreamResourcesIfNeeded()
+                self.upstreamForwardIsPending = false
+                self.upstreamForwardWasDispatched = false
+                self.upstreamCancellationHandle = nil
+                self.endRequestIfNeeded()
+            }
+            do {
+                switch result {
+                case .success(let response):
+                    guard response.statusCode >= 200, response.statusCode < 300,
+                          let verifiedUsage = response.verifiedUsage,
+                          let usage = try JSONSerialization.jsonObject(with: verifiedUsage) as? [String: Any],
+                          case .object(let parsedUsage) = try JSONValue.parse(usage),
+                          response.headers.contains(where: { $0.0.lowercased() == "x-macprovider-privacy-class" && $0.1 == "operator_constrained_beta_v1" }),
+                          let assurance = response.headers.first(where: { $0.0.lowercased() == "x-macprovider-privacy-assurance" })?.1,
+                          assurance == "device_bound_self_attested_beta" || assurance == "code_bound_attested",
+                          privacy.requiredAssurance == nil || privacy.requiredAssurance == assurance else {
+                        throw ConsumePrivacyBuyerError.doNotResubmit(code: "local_privacy_verification_failed")
+                    }
+                    if let reservation, let ledger = self.runtime.budget.ledger {
+                        let settlement = try self.settlementAmount(usage: parsedUsage, fallbackEstimate: estimate.amount, pricingMatch: match, projection: rateCard.projection)
+                        if settlement.amount > reservation.amount {
+                            try ledger.estimateExceeded(runID: self.runtime.launchID, reservationID: reservation.id, reservedAmount: reservation.amount, settledAmount: settlement.amount, reason: "verified_privacy_usage")
+                            self.runtime.pricingAdmissionGate.stopForEstimateExceeded()
+                        } else {
+                            try ledger.settle(runID: self.runtime.launchID, reservationID: reservation.id, reservedAmount: reservation.amount, settledAmount: settlement.amount, reason: "verified_privacy_usage")
+                        }
+                    }
+                    self.runtime.diagnostics.recordVerifiedPrivacyAssurance(assurance)
+                    guard !self.channelInactiveWhileUpstreamPending else { return }
+                    // No Chat-specific response parser: preserve the authenticated endpoint wire.
+                    self.writeUpstreamResponse(response, streaming: streaming, context: contextBox.context, extraHeaders: [("cache-control", "no-store")] + self.warningHeaders(self.runtime.budget.localWarningTokens))
+                case .failure(let error): throw error
+                }
+            } catch {
+                let dispatched: Bool
+                let code: String
+                if case ConsumePrivacyBuyerError.preDispatch(let value) = error {
+                    dispatched = false
+                    code = value
+                } else if case ConsumePrivacyBuyerError.doNotResubmit(let value) = error {
+                    dispatched = true
+                    code = value
+                } else {
+                    dispatched = true
+                    code = "local_privacy_verification_failed"
+                }
+                if let reservation, let ledger = self.runtime.budget.ledger {
+                    do {
+                        if dispatched {
+                            try ledger.hold(runID: self.runtime.launchID, reservationID: reservation.id, amount: reservation.amount, reason: "privacy_do_not_resubmit")
+                        } else {
+                            try ledger.settle(runID: self.runtime.launchID, reservationID: reservation.id, reservedAmount: reservation.amount, settledAmount: .zero, reason: "privacy_pre_dispatch_failed")
+                        }
+                    } catch {
+                        self.runtime.pricingAdmissionGate.stopForEstimateExceeded()
+                    }
+                }
+                guard !self.channelInactiveWhileUpstreamPending else { return }
+                var errorBody = self.errorEnvelope(code: code, forwardedUpstream: dispatched)
+                if dispatched { errorBody["retry"] = "do_not_resubmit" }
+                self.runtime.diagnostics.recordLocalError(code: code)
+                // Coding SDKs automatically retry 5xx statuses. A postdispatch
+                // uncertainty must be terminal even when an SDK ignores the body.
+                let errorHeaders = [("cache-control", "no-store")] + (dispatched ? [("x-should-retry", "false")] : [])
+                self.writeJSON(context: contextBox.context, status: HTTPResponseStatus(statusCode: dispatched ? 400 : 503), body: errorBody, extraHeaders: errorHeaders)
+            }
+        }
     }
 
     private func writeLocalChatAdmissionFailure(model: String, request: JSONValue, bodyByteCount: Int, context: ChannelHandlerContext) {
@@ -7066,7 +7365,13 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
         var headers = HTTPHeaders()
         for (name, value) in response.headers {
             let normalized = name.lowercased()
-            guard Self.allowedUpstreamResponseHeader(normalized) else {
+            let verifiedPrivacyHeader = runtime.privacy != nil && response.verifiedUsage != nil && [
+                "x-macprovider-privacy-class", "x-macprovider-privacy-assurance",
+                "x-macprovider-privacy-mode", "x-macprovider-privacy-mode-disclosure",
+                "x-macprovider-response-encryption", "x-macprovider-requested-privacy-mode",
+                "x-macprovider-effective-privacy-outcome",
+            ].contains(normalized)
+            guard Self.allowedUpstreamResponseHeader(normalized) || verifiedPrivacyHeader else {
                 continue
             }
             headers.add(name: name, value: value)

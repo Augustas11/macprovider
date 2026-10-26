@@ -54,6 +54,12 @@ func (r ReservationResponse) NewEnvelope(requestID string, issuedAt time.Time, r
 }
 
 func NewSignedKeyRecord(publicKey []byte, identityPrivateKey ed25519.PrivateKey, models []string, maxEncryptedRequestBytes uint64, notBefore, expiresAt time.Time) (KeyRecord, error) {
+	return NewSignedKeyRecordForFamilies(publicKey, identityPrivateKey, models, []string{EndpointChatCompletions}, maxEncryptedRequestBytes, notBefore, expiresAt)
+}
+
+// NewSignedKeyRecordForFamilies signs the canonical family list as immutable
+// key material. The legacy constructor keeps byte-identical Chat-only framing.
+func NewSignedKeyRecordForFamilies(publicKey []byte, identityPrivateKey ed25519.PrivateKey, models, endpointFamilies []string, maxEncryptedRequestBytes uint64, notBefore, expiresAt time.Time) (KeyRecord, error) {
 	if len(identityPrivateKey) != ed25519.PrivateKeySize {
 		return KeyRecord{}, ErrInvalidKeyRecord
 	}
@@ -65,7 +71,7 @@ func NewSignedKeyRecord(publicKey []byte, identityPrivateKey ed25519.PrivateKey,
 		IdentityFingerprint:      encodeBase64URL(fingerprint[:]),
 		Models:                   append([]string(nil), models...),
 		MaxEncryptedRequestBytes: maxEncryptedRequestBytes,
-		EndpointFamilies:         []string{EndpointChatCompletions},
+		EndpointFamilies:         append([]string(nil), endpointFamilies...),
 		SignatureAlgorithm:       SignatureAlgorithm,
 		NotBeforeUnix:            notBefore.Unix(),
 		ExpiresAtUnix:            expiresAt.Unix(),
@@ -159,8 +165,10 @@ func (r KeyRecord) Verify(pin IdentityPin, now time.Time) error {
 			return fmt.Errorf("%w: model outside pin scope", ErrInvalidKeyRecord)
 		}
 	}
-	if !contains(pin.EndpointFamilies, EndpointChatCompletions) {
-		return fmt.Errorf("%w: endpoint outside pin scope", ErrInvalidKeyRecord)
+	for _, family := range r.EndpointFamilies {
+		if !contains(pin.EndpointFamilies, family) {
+			return fmt.Errorf("%w: endpoint outside pin scope", ErrInvalidKeyRecord)
+		}
 	}
 	signed, _ := r.SignedFraming()
 	signature, _ := decodeBase64URLFixed(r.Signature, ed25519.SignatureSize)
@@ -429,7 +437,7 @@ func (p IdentityPin) validateStructure() error {
 }
 
 func (e Envelope) validateStructure(requireCiphertext bool) error {
-	if e.Version != EnvelopeVersion || e.Mode != ModeRequired || e.EndpointFamily != EndpointChatCompletions || e.Algorithm != Algorithm || !validModelID(e.Model) || !validModelID(e.ProviderModel) || !visibleASCII(e.RequestID, MaxIdentifierBytes) || e.IssuedAtUnix < 0 {
+	if e.Version != EnvelopeVersion || e.Mode != ModeRequired || !ValidEndpointFamily(e.EndpointFamily) || e.Algorithm != Algorithm || !validModelID(e.Model) || !validModelID(e.ProviderModel) || !visibleASCII(e.RequestID, MaxIdentifierBytes) || e.IssuedAtUnix < 0 {
 		return ErrInvalidEnvelope
 	}
 	cap, err := checkedTokenCap(e.InputTokenUpperBound, e.MaxOutputTokens)

@@ -33,7 +33,7 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-022 | Verified model settlement | v0.4.9 | draft | complete | pending: 16 | [SPEC-022-verified-model-settlement.md](SPEC-022-verified-model-settlement.md) |
 | SPEC-023 | Installer-Integrated Autotune Recommend | v0.22.35 | normative | pending | conformant: 2, pending: 24 | [SPEC-023-installer-autotune-recommend.md](SPEC-023-installer-autotune-recommend.md) |
 | SPEC-024 | Prefix-cache billing and provider-local cache isolation | 0.2.13 | normative | pending | pending: 5 | [SPEC-024-prefix-cache-billing.md](SPEC-024-prefix-cache-billing.md) |
-| SPEC-025 | Native Mac App (signed `.dmg`, native Mac app with menu-bar presence) | v0.43.0 | draft | pending | pending: 16 | [SPEC-025-native-mac-app.md](SPEC-025-native-mac-app.md) |
+| SPEC-025 | Native Mac App (signed `.dmg`, native Mac app with menu-bar presence) | v0.44.0 | draft | pending | pending: 16 | [SPEC-025-native-mac-app.md](SPEC-025-native-mac-app.md) |
 | SPEC-026 | Browserless Provider Onboarding (one-click Launch Provider) | v0.30.1 | draft | pending | pending corpus migration | [SPEC-026-browserless-provider-onboarding.md](SPEC-026-browserless-provider-onboarding.md) |
 | SPEC-027 | Provider Proof of Ownership for App-Track Wallet Changes | v0.1.1 | draft | pending | pending corpus migration | [SPEC-027-provider-proof-of-ownership.md](SPEC-027-provider-proof-of-ownership.md) |
 | SPEC-028 | Classic External-Draft MLX Speculative Decoding for Provider Serve | 0.3-draft | draft | pending | pending corpus migration | [SPEC-028-mlx-speculative-decoding.md](SPEC-028-mlx-speculative-decoding.md) |
@@ -49,15 +49,15 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-038 | Continuous batching for concurrent provider inference | v0.3.31 | draft | complete | pending: 18 | [SPEC-038-continuous-batching.md](SPEC-038-continuous-batching.md) |
 | SPEC-039 | Paged KV / paged-attention engine | v0.1.24 | draft | complete | pending: 15 | [SPEC-039-paged-kv-attention-engine.md](SPEC-039-paged-kv-attention-engine.md) |
 | SPEC-040 | Wallet-Native Buyer Sessions | 0.1.9 | draft | complete | pending: 10 | [SPEC-040-wallet-native-buyer-sessions.md](SPEC-040-wallet-native-buyer-sessions.md) |
-| SPEC-041 | Relay-Blind Request Encryption | 0.6.1 | draft | complete | pending: 8 | [SPEC-041-relay-blind-request-encryption.md](SPEC-041-relay-blind-request-encryption.md) |
+| SPEC-041 | Relay-Blind Request Encryption | 0.7.0 | draft | complete | pending: 8 | [SPEC-041-relay-blind-request-encryption.md](SPEC-041-relay-blind-request-encryption.md) |
 | SPEC-042 | Pool Control Plane and Trusted-Pool Manifest | 0.0.44 | draft | complete | conformant: 2, pending: 14 | [SPEC-042-pool-control-plane.md](SPEC-042-pool-control-plane.md) |
 | SPEC-043 | Trusted Pool Creator Onboarding MVP | 0.3.6 | normative | complete | pending: 14 | [SPEC-043-trusted-pool-creator-onboarding.md](SPEC-043-trusted-pool-creator-onboarding.md) |
 | SPEC-044 | Malibu Model Catalog Economics | 0.2.12 | draft | complete | pending: 14 | [SPEC-044-malibu-model-catalog-economics.md](SPEC-044-malibu-model-catalog-economics.md) |
-| SPEC-045 | Local Consumer Endpoint Mode | 0.1.1 | draft | complete | conformant: 3, pending: 5 | [SPEC-045-local-consumer-endpoint-mode.md](SPEC-045-local-consumer-endpoint-mode.md) |
+| SPEC-045 | Local Consumer Endpoint Mode | 0.2.0 | draft | complete | conformant: 1, pending: 7 | [SPEC-045-local-consumer-endpoint-mode.md](SPEC-045-local-consumer-endpoint-mode.md) |
 | SPEC-046 | Provider BYOM Discovery | 0.5.0 | draft | complete | pending: 9 | [SPEC-046-provider-byom-discovery.md](SPEC-046-provider-byom-discovery.md) |
 | SPEC-047 | Network Model Admission | 0.2.9 | draft | complete | conformant: 4, pending: 8 | [SPEC-047-network-model-admission.md](SPEC-047-network-model-admission.md) |
 | SPEC-048 | Native Multi-Token Prediction Serving | 0.1.57 | draft | complete | pending: 16 | [SPEC-048-native-mtp-serving.md](SPEC-048-native-mtp-serving.md) |
-| SPEC-049 | Operator-Constrained Privacy Class | 0.7.0 | draft | complete | pending: 35 | [SPEC-049-operator-constrained-privacy-class.md](SPEC-049-operator-constrained-privacy-class.md) |
+| SPEC-049 | Operator-Constrained Privacy Class | 0.8.0 | draft | complete | pending: 36 | [SPEC-049-operator-constrained-privacy-class.md](SPEC-049-operator-constrained-privacy-class.md) |
 | SPEC-050 | MALIBU Stake Allowance | 0.1.2 | draft | complete | pending: 14 | [SPEC-050-malibu-stake-allowance.md](SPEC-050-malibu-stake-allowance.md) |
 | SPEC-051 | Multi-Mac Shard Groups | 0.2.6 | draft | complete | pending: 30 | [SPEC-051-multi-mac-shard-groups.md](SPEC-051-multi-mac-shard-groups.md) |
 <!-- AUTOGEN:spec-index END -->

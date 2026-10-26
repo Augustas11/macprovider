@@ -24,7 +24,11 @@ import (
 	"github.com/augstar/macprovider-gateway/internal/relayblind"
 )
 
-func privacyReservationFixture(t *testing.T, stream bool) relayblind.ReservationResponse {
+func privacyReservationFixture(t *testing.T, stream bool, families ...string) relayblind.ReservationResponse {
+	family := relayblind.EndpointChatCompletions
+	if len(families) > 0 {
+		family = families[0]
+	}
 	t.Helper()
 	key, err := ecdh.X25519().GenerateKey(rand.Reader)
 	if err != nil {
@@ -36,7 +40,7 @@ func privacyReservationFixture(t *testing.T, stream bool) relayblind.Reservation
 	}
 	notBefore := fixedNow().Add(-time.Minute)
 	expires := notBefore.Add(time.Duration(relayblind.MaxPrivacyKeyLifetimeSeconds) * time.Second)
-	record, err := relayblind.NewSignedKeyRecord(key.PublicKey().Bytes(), identity, []string{"test-model"}, 4096, notBefore, expires)
+	record, err := relayblind.NewSignedKeyRecordForFamilies(key.PublicKey().Bytes(), identity, []string{"test-model"}, []string{family}, 4096, notBefore, expires)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +54,7 @@ func privacyReservationFixture(t *testing.T, stream bool) relayblind.Reservation
 	res := relayblind.ReservationResponse{
 		Version: relayblind.PrivacyReservationVersion, ProviderBinding: random(), BuyerBinding: random(),
 		KeyRecordDigest: record.KeyRecordDigest, KeyRecord: record, KID: record.KID,
-		EndpointFamily: "chat_completions", Model: "test-model", ProviderModel: "test-model", Stream: stream,
+		EndpointFamily: family, Model: "test-model", ProviderModel: "test-model", Stream: stream,
 		MaxEncryptedRequestBytes: 4096, MaxOutputTokens: 8, InputTokenUpperBound: 16, ReservationTokenCap: 24,
 		ExpiresAtUnix: fixedNow().Add(30 * time.Second).Unix(), CachePolicy: "no-store", FailoverPolicy: "disabled",
 		PrivacyClass: relayblind.PrivacyClassV1, PrivacyAssurance: relayblind.PrivacyAssurance,
@@ -71,8 +75,11 @@ func privacyReservationFixture(t *testing.T, stream bool) relayblind.Reservation
 
 func privacyReservationBody(t *testing.T, res relayblind.ReservationResponse) []byte {
 	t.Helper()
+	if res.EndpointFamily == "" {
+		res.EndpointFamily = relayblind.EndpointChatCompletions
+	}
 	raw, err := json.Marshal(map[string]any{
-		"endpoint_family": "chat_completions", "model": res.Model, "stream": res.Stream,
+		"endpoint_family": res.EndpointFamily, "model": res.Model, "stream": res.Stream,
 		"max_output_tokens": res.MaxOutputTokens, "input_token_upper_bound": res.InputTokenUpperBound,
 		"encrypted_request_bytes": 128,
 	})
@@ -533,79 +540,114 @@ func TestPrivacyFramesPassThroughVerbatimStreamAndNonStream(t *testing.T) {
 	frame1 := frame(1, true, cipherB)
 	framesRaw := "[" + frame0 + "," + frame1 + "]"
 
-	t.Run("stream", func(t *testing.T) {
-		res := privacyReservationFixture(t, true)
-		raw := pilotEnvelopeFixture(t, res)
-		digest := sha256.Sum256(raw)
-		digestText := base64.RawURLEncoding.EncodeToString(digest[:])
-		upstream, _ := privacyCoordinator(t, res, raw, func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set(relayBlindValidatedHeader, digestText)
-			setPrivacyChatEcho(w, privacyCoordinatorVerifiedAt)
-			w.Header().Set(settlementModeHeader, "observe")
-			w.Header().Set("Content-Type", "text/event-stream")
-			io.WriteString(w, "data: "+frame0+"\n\ndata: "+frame1+"\n\ndata: {\"object\":\"chat.completion.chunk\",\"model\":\"test-model\",\"choices\":[],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":2,\"total_tokens\":6}}\n\ndata: [DONE]\n\n")
-		})
-		h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(c *config.Config) {
-			enablePrivacy(c)
-			c.Coordinator.BuyerURL = upstream.URL
-		})
-		key := createAccountAndKey(t, store, cfg, "privacy-frames-stream")
-		reserve := postPrivacy(h, key, "/v1/relay-blind/route-reservations", privacyReservationBody(t, res), map[string]string{privacyClassHeader: privacyClassV1})
-		if reserve.Code != http.StatusOK {
-			t.Fatalf("reserve %d %s", reserve.Code, reserve.Body.String())
-		}
-		chat := postPrivacy(h, key, "/v1/chat/completions", raw, privacyChatHeaders())
-		if chat.Code != http.StatusOK {
-			t.Fatalf("status %d %s", chat.Code, chat.Body.String())
-		}
-		body := chat.Body.String()
-		if strings.Count(body, frame0) != 1 || strings.Count(body, frame1) != 1 {
-			t.Fatalf("frames not verbatim count0=%d count1=%d", strings.Count(body, frame0), strings.Count(body, frame1))
-		}
-		if chat.Header().Get(privacyPostureVerifiedAtHeader) != "" {
-			t.Fatalf("internal posture header reached the buyer: %q", chat.Header().Get(privacyPostureVerifiedAtHeader))
-		}
-		if !strings.Contains(body, "data: "+frame0) || !strings.Contains(body, "data: "+frame1) {
-			t.Fatal("sse prefix changed")
-		}
-		used, held, err := store.DailyUsage(context.Background(), "privacy-frames-stream", fixedNow().Format("2006-01-02"))
-		if err != nil || used != 6 || held != 0 {
-			t.Fatalf("used=%d held=%d err=%v", used, held, err)
-		}
-	})
+	for _, adaptersEnabled := range []bool{false, true} {
+		t.Run("adapters="+strconv.FormatBool(adaptersEnabled), func(t *testing.T) {
+			for _, family := range []string{relayblind.EndpointChatCompletions, relayblind.EndpointResponses, relayblind.EndpointMessages} {
+				t.Run(family, func(t *testing.T) {
+					path := "/v1/chat/completions"
+					if family == relayblind.EndpointResponses {
+						path = "/v1/responses"
+					}
+					if family == relayblind.EndpointMessages {
+						path = "/v1/messages"
+					}
+					t.Run("stream", func(t *testing.T) {
+						res := privacyReservationFixture(t, true, family)
+						raw := pilotEnvelopeFixture(t, res)
+						digest := sha256.Sum256(raw)
+						digestText := base64.RawURLEncoding.EncodeToString(digest[:])
+						upstream, _ := privacyCoordinator(t, res, raw, func(w http.ResponseWriter, r *http.Request) {
+							w.Header().Set(relayBlindValidatedHeader, digestText)
+							setPrivacyChatEcho(w, privacyCoordinatorVerifiedAt)
+							w.Header().Set(settlementModeHeader, "observe")
+							w.Header().Set("Content-Type", "text/event-stream")
+							io.WriteString(w, "data: "+frame0+"\n\ndata: "+frame1+"\n\ndata: {\"object\":\"chat.completion.chunk\",\"model\":\"test-model\",\"choices\":[],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":2,\"total_tokens\":6}}\n\ndata: [DONE]\n\n")
+						})
+						h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(c *config.Config) {
+							enablePrivacy(c)
+							c.Features.ResponsesAPIEnabled = adaptersEnabled
+							c.Features.AnthropicMessagesEnabled = adaptersEnabled
+							c.Coordinator.BuyerURL = upstream.URL
+						})
+						key := createAccountAndKey(t, store, cfg, "privacy-frames-stream")
+						reserve := postPrivacy(h, key, "/v1/relay-blind/route-reservations", privacyReservationBody(t, res), map[string]string{privacyClassHeader: privacyClassV1})
+						if reserve.Code != http.StatusOK {
+							t.Fatalf("reserve %d %s", reserve.Code, reserve.Body.String())
+						}
+						wrongPath := "/v1/chat/completions"
+						if path == wrongPath {
+							wrongPath = "/v1/responses"
+						}
+						wrongRoute := postPrivacy(h, key, wrongPath, raw, privacyChatHeaders())
+						if wrongRoute.Code != http.StatusBadRequest {
+							t.Fatalf("family substitution status %d %s", wrongRoute.Code, wrongRoute.Body.String())
+						}
+						chat := postPrivacy(h, key, path, raw, privacyChatHeaders())
+						if chat.Code != http.StatusOK {
+							t.Fatalf("status %d %s", chat.Code, chat.Body.String())
+						}
+						body := chat.Body.String()
+						if strings.Count(body, frame0) != 1 || strings.Count(body, frame1) != 1 {
+							t.Fatalf("frames not verbatim count0=%d count1=%d", strings.Count(body, frame0), strings.Count(body, frame1))
+						}
+						if chat.Header().Get(privacyPostureVerifiedAtHeader) != "" {
+							t.Fatalf("internal posture header reached the buyer: %q", chat.Header().Get(privacyPostureVerifiedAtHeader))
+						}
+						if !strings.Contains(body, "data: "+frame0) || !strings.Contains(body, "data: "+frame1) {
+							t.Fatal("sse prefix changed")
+						}
+						used, held, err := store.DailyUsage(context.Background(), "privacy-frames-stream", fixedNow().Format("2006-01-02"))
+						if err != nil || used != 6 || held != 0 {
+							t.Fatalf("used=%d held=%d err=%v", used, held, err)
+						}
+					})
 
-	t.Run("nonstream", func(t *testing.T) {
-		res := privacyReservationFixture(t, false)
-		raw := pilotEnvelopeFixture(t, res)
-		digest := sha256.Sum256(raw)
-		digestText := base64.RawURLEncoding.EncodeToString(digest[:])
-		upstream, _ := privacyCoordinator(t, res, raw, func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set(relayBlindValidatedHeader, digestText)
-			setPrivacyChatEcho(w, privacyCoordinatorVerifiedAt)
-			w.Header().Set(settlementModeHeader, "observe")
-			io.WriteString(w, `{"object":"macprovider.privacy_response","version":"privacy-response-v1","frames":`+framesRaw+`,"usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6}}`)
+					t.Run("nonstream", func(t *testing.T) {
+						res := privacyReservationFixture(t, false, family)
+						raw := pilotEnvelopeFixture(t, res)
+						digest := sha256.Sum256(raw)
+						digestText := base64.RawURLEncoding.EncodeToString(digest[:])
+						upstream, _ := privacyCoordinator(t, res, raw, func(w http.ResponseWriter, r *http.Request) {
+							w.Header().Set(relayBlindValidatedHeader, digestText)
+							setPrivacyChatEcho(w, privacyCoordinatorVerifiedAt)
+							w.Header().Set(settlementModeHeader, "observe")
+							io.WriteString(w, `{"object":"macprovider.privacy_response","version":"privacy-response-v1","frames":`+framesRaw+`,"usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6}}`)
+						})
+						h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(c *config.Config) {
+							enablePrivacy(c)
+							c.Features.ResponsesAPIEnabled = adaptersEnabled
+							c.Features.AnthropicMessagesEnabled = adaptersEnabled
+							c.Coordinator.BuyerURL = upstream.URL
+						})
+						key := createAccountAndKey(t, store, cfg, "privacy-frames-json")
+						reserve := postPrivacy(h, key, "/v1/relay-blind/route-reservations", privacyReservationBody(t, res), map[string]string{privacyClassHeader: privacyClassV1})
+						if reserve.Code != http.StatusOK {
+							t.Fatalf("reserve %d %s", reserve.Code, reserve.Body.String())
+						}
+						wrongPath := "/v1/chat/completions"
+						if path == wrongPath {
+							wrongPath = "/v1/responses"
+						}
+						wrongRoute := postPrivacy(h, key, wrongPath, raw, privacyChatHeaders())
+						if wrongRoute.Code != http.StatusBadRequest {
+							t.Fatalf("family substitution status %d %s", wrongRoute.Code, wrongRoute.Body.String())
+						}
+						chat := postPrivacy(h, key, path, raw, privacyChatHeaders())
+						if chat.Code != http.StatusOK {
+							t.Fatalf("status %d %s", chat.Code, chat.Body.String())
+						}
+						if strings.Count(chat.Body.String(), framesRaw) != 1 {
+							t.Fatal("frames raw message was rewritten")
+						}
+						used, held, err := store.DailyUsage(context.Background(), "privacy-frames-json", fixedNow().Format("2006-01-02"))
+						if err != nil || used != 6 || held != 0 {
+							t.Fatalf("used=%d held=%d err=%v", used, held, err)
+						}
+					})
+				})
+			}
 		})
-		h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(c *config.Config) {
-			enablePrivacy(c)
-			c.Coordinator.BuyerURL = upstream.URL
-		})
-		key := createAccountAndKey(t, store, cfg, "privacy-frames-json")
-		reserve := postPrivacy(h, key, "/v1/relay-blind/route-reservations", privacyReservationBody(t, res), map[string]string{privacyClassHeader: privacyClassV1})
-		if reserve.Code != http.StatusOK {
-			t.Fatalf("reserve %d %s", reserve.Code, reserve.Body.String())
-		}
-		chat := postPrivacy(h, key, "/v1/chat/completions", raw, privacyChatHeaders())
-		if chat.Code != http.StatusOK {
-			t.Fatalf("status %d %s", chat.Code, chat.Body.String())
-		}
-		if strings.Count(chat.Body.String(), framesRaw) != 1 {
-			t.Fatal("frames raw message was rewritten")
-		}
-		used, held, err := store.DailyUsage(context.Background(), "privacy-frames-json", fixedNow().Format("2006-01-02"))
-		if err != nil || used != 6 || held != 0 {
-			t.Fatalf("used=%d held=%d err=%v", used, held, err)
-		}
-	})
+	}
 }
 
 func TestPrivacyUsageMetadataExactStrings(t *testing.T) {

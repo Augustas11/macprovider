@@ -784,7 +784,9 @@ actor InferenceRelay {
         var telemetryModelID = loadedModelID ?? ""
         var relayBlindEvidence: RelayBlindValidationEvidence?
         var relayBlindPrepared: RelayBlindPreparedRequest?
-        let privacySealer = relayBlindOpened?.responseSealer.map { PrivacyResponseSealerBox($0) }
+        let privacySealer = relayBlindOpened?.responseSealer.map {
+            PrivacyResponseSealerBox($0, endpointAdapter: relayBlindOpened?.endpointAdapter, stream: stream)
+        }
         let privacyModel = relayBlindOpened?.request.model ?? loadedModelID ?? ""
 
         do {
@@ -2333,9 +2335,13 @@ private final class PrivacyResponseSealerBox: @unchecked Sendable {
     private let lock = NSLock()
     private var sealer: PrivacyResponseSealer
     private var finalEmitted = false
+    private let endpointAdapter: RelayBlindEndpointAdapter?
+    private let stream: Bool
 
-    init(_ sealer: PrivacyResponseSealer) {
+    init(_ sealer: PrivacyResponseSealer, endpointAdapter: RelayBlindEndpointAdapter? = nil, stream: Bool = false) {
         self.sealer = sealer
+        self.endpointAdapter = endpointAdapter
+        self.stream = stream
     }
 
     var hasEmittedFinal: Bool {
@@ -2353,6 +2359,17 @@ private final class PrivacyResponseSealerBox: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         if final, finalEmitted { throw PrivacyClassError.invalidMaterial }
+        // Protocol final frames stay family-independent. Content conversion occurs
+        // before sealing, while plaintext is still inside the provider boundary.
+        if !final, let endpointAdapter {
+            var translated = stream
+                ? Data(endpointAdapter.translateStream(String(decoding: data, as: UTF8.self)).utf8)
+                : try endpointAdapter.translateResponse(data)
+            defer { translated.resetBytes(in: 0..<translated.count) }
+            data.resetBytes(in: 0..<data.count)
+            let frame = try sealer.seal(&translated, final: false)
+            return frame
+        }
         let frame = try sealer.seal(&data, final: final)
         if final { finalEmitted = true }
         return frame
