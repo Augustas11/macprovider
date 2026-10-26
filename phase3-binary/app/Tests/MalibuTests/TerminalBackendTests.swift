@@ -95,6 +95,55 @@ final class TerminalBackendTests: XCTestCase {
         XCTAssertThrowsError(try ClaudeCodeLauncher.prepare(executable: URL(fileURLWithPath: "/bin/echo"), model: toolModel, key: "key", home: home))
     }
 
+    @MainActor
+    func testManagedHarnessTabsHaveIndependentOneTimeKeyHandoffs() throws {
+        let home = try temporaryHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let key = "isolated-test-buyer-key"
+        let store = ConnectedAppsStore(home: home, keyExists: { true }, readKey: { key })
+        store.app = .crush
+        store.models = [toolModel]
+        store.modelID = toolModel.id
+        store.executable = URL(fileURLWithPath: "/bin/echo")
+        store.preview()
+        XCTAssertTrue(store.canSetup, store.status)
+        store.setup()
+        XCTAssertTrue(store.status.hasPrefix("Configured."), store.status)
+
+        let first = try store.prepareEmbeddedLaunch(.crush, isolated: true)
+        let second = try store.prepareEmbeddedLaunch(.crush, isolated: true)
+        let firstDirectory = try XCTUnwrap(first.cleanupDirectory)
+        let secondDirectory = try XCTUnwrap(second.cleanupDirectory)
+        XCTAssertNotEqual(firstDirectory, secondDirectory)
+        XCTAssertNotEqual(first.handoff, second.handoff)
+        XCTAssertNotEqual(first.launcher, second.launcher)
+        for plan in [first, second] {
+            XCTAssertEqual(try String(contentsOf: plan.handoff, encoding: .utf8), key)
+            XCTAssertEqual(try permissions(plan.handoff), 0o600)
+            XCTAssertEqual(try permissions(plan.handoff.deletingLastPathComponent()), 0o700)
+            let script = try String(contentsOf: plan.launcher, encoding: .utf8)
+            XCTAssertTrue(script.contains("KEY_FILE=" + ConnectedAppConfiguration.shell(plan.handoff.path)))
+            XCTAssertFalse(script.contains(key))
+        }
+        // Closing one tab must not delete or consume the sibling's credential.
+        try FileManager.default.removeItem(at: firstDirectory)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: second.launcher.path))
+        XCTAssertEqual(try String(contentsOf: second.handoff, encoding: .utf8), key)
+        let process = Process()
+        let output = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = [second.launcher.path]
+        process.environment = try ProcessEnvironmentSanitizer.sanitized(from: ["HOME": home.path, "PATH": "/usr/bin:/bin"])
+        process.standardOutput = output
+        process.standardError = output
+        try process.run()
+        process.waitUntilExit()
+        XCTAssertEqual(process.terminationStatus, 0)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: second.handoff.path))
+        let text = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        XCTAssertFalse(text.contains(key))
+    }
+
     private var toolModel: ConnectedModel {
         ConnectedModel(id: "vendor/tool-model", contextWindow: 32768, maxOutputTokens: nil, supportsTools: true)
     }
