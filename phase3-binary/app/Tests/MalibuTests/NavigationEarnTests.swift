@@ -62,9 +62,13 @@ final class NavigationEarnTests: XCTestCase {
             defer { window.close() }
             settle(window)
             let content = try XCTUnwrap(window.contentView)
-            let title = try XCTUnwrap(elements(content).first { $0.accessibilityValue() as? String == "Earn" || $0.accessibilityLabel() == "Earn" })
+            let rendered = elements(content)
+            let diagnostic = rendered.prefix(100).map {
+                "role=\($0.accessibilityRole()?.rawValue ?? "nil") label=\($0.accessibilityLabel() ?? "nil") value=\(String(describing: $0.accessibilityValue()).prefix(180))"
+            }.joined(separator: "\n")
+            let title = try XCTUnwrap(rendered.first { text($0).contains("Earn") }, diagnostic)
             let actionLabel = state == .serving ? "Pause customer work…" : "Resume customer work"
-            let action = try XCTUnwrap(elements(content).first { $0.accessibilityLabel() == actionLabel })
+            let action = try XCTUnwrap(rendered.first { text($0).contains(actionLabel) }, diagnostic)
             XCTAssertGreaterThan(action.accessibilityFrame().width, 0)
             XCTAssertLessThan(abs(action.accessibilityFrame().midY - title.accessibilityFrame().midY), 50,
                               "Pause/Resume must be rendered in the Earn header")
@@ -91,11 +95,26 @@ final class NavigationEarnTests: XCTestCase {
     }
 
     private func elements(_ root: Any) -> [any NSAccessibilityProtocol] {
-        guard let element = root as? any NSAccessibilityProtocol else { return [] }
-        return [element] + (element.accessibilityChildren() ?? []).flatMap { elements($0) }
+        var visited = Set<ObjectIdentifier>()
+        func visit(_ object: Any) -> [any NSAccessibilityProtocol] {
+            guard let object = object as? NSObject,
+                  visited.insert(ObjectIdentifier(object)).inserted else { return [] }
+            let element = object as? any NSAccessibilityProtocol
+            let children = element?.accessibilityChildren() ?? []
+            // NSHostingView can be an ignored wrapper. Inspect its native
+            // descendants as well as the exposed virtual accessibility tree.
+            let nativeChildren = (object as? NSView)?.subviews ?? []
+            return (element.map { [$0] } ?? []) + (children + nativeChildren).flatMap(visit)
+        }
+        return visit(root)
+    }
+
+    private func text(_ element: any NSAccessibilityProtocol) -> [String] {
+        [element.accessibilityLabel(), element.accessibilityValue() as? String,
+         element.accessibilityTitle()].compactMap { $0 }
     }
 
     private func strings(_ root: Any) -> Set<String> {
-        Set(elements(root).flatMap { [$0.accessibilityLabel(), $0.accessibilityValue() as? String].compactMap { $0 } })
+        Set(elements(root).flatMap(text))
     }
 }
