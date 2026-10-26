@@ -346,6 +346,43 @@ final class ConnectedAppsTests: XCTestCase {
         }
     }
 
+    @MainActor
+    func testHistoricalManagedLauncherReceiptsCannotReadOrDeliverBuyerKey() throws {
+        for app in [ConnectedApp.codex, .openCode, .goose, .crush] {
+            for helper in ["cat", "rm"] {
+                try temporary { home in
+                    let root = home.appendingPathComponent("Library/Application Support/Malibu/ConnectedApps")
+                    let handoff = root.appendingPathComponent("handoff/" + app.slug + ".key")
+                    let launcher = root.appendingPathComponent(app.slug + "/Launch.command")
+                    let config = root.appendingPathComponent(app.slug + "/config")
+                    let receipts = ConnectedConfigTransaction(receiptDirectory: root.appendingPathComponent("backups"))
+                    let current = try ConnectedAppConfiguration.launcher(app: app,
+                        executable: URL(fileURLWithPath: "/bin/echo"), config: config, model: model, keyHandoff: handoff)
+                    let historical = Data(String(decoding: current, as: UTF8.self)
+                        .replacingOccurrences(of: "/bin/" + helper, with: helper).utf8)
+                    try receipts.apply(receipts.preview(target: config, proposed: Data("managed config".utf8)), named: app.slug + "-config")
+                    try receipts.apply(receipts.preview(target: launcher, proposed: historical), named: app.slug + "-launch", executable: true)
+                    var keyReads = 0
+                    let store = ConnectedAppsStore(home: home, keyExists: { true }, readKey: { keyReads += 1; return "must-stay-in-keychain" })
+                    store.app = app
+                    for isolated in [false, true] {
+                        XCTAssertThrowsError(try store.prepareEmbeddedLaunch(app, isolated: isolated)) { error in
+                            XCTAssertEqual((error as? ConnectedAppsError)?.localizedDescription,
+                                           ConnectedAppsError.launcherSetupUpgrade.localizedDescription)
+                        }
+                        XCTAssertFalse(FileManager.default.fileExists(atPath: handoff.path))
+                        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("terminal").path))
+                    }
+                    // The external Terminal launch uses the same gate, before NSWorkspace.open.
+                    store.launch()
+                    XCTAssertEqual(store.status, ConnectedAppsError.launcherSetupUpgrade.localizedDescription)
+                    XCTAssertEqual(keyReads, 0)
+                    XCTAssertEqual(try Data(contentsOf: launcher), historical)
+                }
+            }
+        }
+    }
+
     private func installLegacyOpenCodeProfile(home: URL, selectedModel: ConnectedModel? = nil) throws -> ConnectedConfigTransaction {
         let profile = selectedModel ?? model
         let root = home.appendingPathComponent("Library/Application Support/Malibu/ConnectedApps")

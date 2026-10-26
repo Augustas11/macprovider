@@ -211,6 +211,12 @@ final class ConnectedAppsStore: ObservableObject {
               try ConnectedConfigTransaction.read(URL(fileURLWithPath: config.path)).bytes == config.installed else {
             throw ConnectedAppsError.conflict
         }
+        // Receipt integrity alone does not make an older generated launcher safe.
+        // Refuse it before reading Keychain or producing either launch handoff.
+        guard let launcherText = String(data: launcher.installed, encoding: .utf8),
+              launcherText.hasPrefix(ConnectedAppConfiguration.handoffPrefix(keyHandoffURL(app))) else {
+            throw ConnectedAppsError.launcherSetupUpgrade
+        }
         if let catalog = try transactions.receipt(named: app.slug + "-catalog") {
             guard try ConnectedConfigTransaction.read(URL(fileURLWithPath: catalog.path)).bytes == catalog.installed else { throw ConnectedAppsError.conflict }
         }
@@ -223,9 +229,8 @@ final class ConnectedAppsStore: ObservableObject {
             let handoff = directory.appendingPathComponent("buyer.key")
             let script = directory.appendingPathComponent("Launch.command")
             let oldLine = "KEY_FILE=" + ConnectedAppConfiguration.shell(keyHandoffURL(app).path)
-            guard let original = String(data: launcher.installed, encoding: .utf8),
-                  original.components(separatedBy: oldLine).count == 2 else { throw ConnectedAppsError.conflict }
-            let bytes = Data(original.replacingOccurrences(of: oldLine,
+            guard launcherText.components(separatedBy: oldLine).count == 2 else { throw ConnectedAppsError.conflict }
+            let bytes = Data(launcherText.replacingOccurrences(of: oldLine,
                 with: "KEY_FILE=" + ConnectedAppConfiguration.shell(handoff.path)).utf8)
             do {
                 try ConnectedConfigTransaction.replace(script, expected: ConnectedConfigSnapshot(bytes: nil, mode: nil), bytes: bytes, mode: 0o700)

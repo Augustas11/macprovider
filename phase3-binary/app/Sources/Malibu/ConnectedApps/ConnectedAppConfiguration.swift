@@ -37,12 +37,13 @@ struct ConnectedModel: Identifiable, Equatable {
 
 enum ConnectedAppsError: Error, LocalizedError {
     case unsafeFile, conflict, invalidConfiguration, unavailableMetadata, credential, invalidResponse
-    case openCodeSetupUpgrade
+    case openCodeSetupUpgrade, launcherSetupUpgrade
     case http(Int), network
     var errorDescription: String? {
         switch self {
         case .unsafeFile: "Configuration is not a bounded, user-owned regular file in a safe directory."
         case .conflict: "Configuration changed since preview or setup. No restore was performed; preserve your newer edits."
+        case .launcherSetupUpgrade: "This managed launcher predates Malibu’s protected key handoff. Choose Restore setup, then Preview setup and Set up before launching. Your buyer key stays in Keychain."
         case .openCodeSetupUpgrade: "This OpenCode setup predates Malibu's managed tool instructions. Choose Restore setup, then Preview setup and Set up to upgrade. Your buyer key stays in Keychain."
         case .invalidConfiguration: "This configuration syntax cannot be changed safely. Use the documented manual setup."
         case .unavailableMetadata: "The gateway does not publish the model metadata this client requires. Automated setup is unavailable."
@@ -243,7 +244,15 @@ enum ConnectedAppConfiguration {
         // Malibu's Launch writes the key to a private 0600 file in a 0700
         // directory; this reads it once and deletes it, so no other program
         // needs Keychain access and the key never appears in arguments or here.
-        return Data("""
+        return Data((handoffPrefix(keyHandoff) + """
+        \(versionGuard)\(environment)exec \(shell(executable.path))\(arguments)
+
+        """).utf8)
+    }
+
+    /// Launch refuses historical receipts unless they contain this exact prefix.
+    static func handoffPrefix(_ keyHandoff: URL) -> String {
+        """
         #!/bin/sh
         set -eu
         KEY_FILE=\(shell(keyHandoff.path))
@@ -252,8 +261,7 @@ enum ConnectedAppConfiguration {
         /bin/rm -f -- "$KEY_FILE"
         test -n "$MALIBU_API_KEY"
         export MALIBU_API_KEY
-        \(versionGuard)\(environment)exec \(shell(executable.path))\(arguments)
 
-        """.utf8)
+        """
     }
 }
