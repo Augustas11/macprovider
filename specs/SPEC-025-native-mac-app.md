@@ -1,6 +1,12 @@
 # SPEC-025 — Native Mac App (signed `.dmg`, native Mac app with menu-bar presence)
 
-Status: DRAFT v0.41.0 · Owner: @Augustas11 · Target: 2026 Q3
+Status: DRAFT v0.41.1 · Owner: @Augustas11 · Target: 2026 Q3
+
+**Change log v0.41.1 (2026-10-26, Related: #2054):**
+R013 clarifies login-PATH propagation and session-wide terminal cleanup;
+project-config disabling applies to OpenCode, while Crush retains its visible
+warning. The first-run menu command is Open Malibu. Terminal output cannot
+write the clipboard; deliberate user Copy remains available.
 
 **Change log v0.41.0 (2026-10-26, Related: #2054):**
 User-first navigation opens on Chat; Earn combines Dashboard and Provider;
@@ -577,7 +583,7 @@ From reading `phase3-binary/`:
    agent (`LSUIElement=true`, `Info.plist:25-26`), so no Dock icon shows until a
    window opens: while any Malibu window (dashboard, onboarding, settings) is
    open the app switches to `.regular` activation (Dock icon, Cmd-Tab entry,
-   main menu with Settings…, Open Dashboard, Edit, Window, Quit) and returns to
+   main menu with Settings…, Open Malibu, Edit, Window, Quit) and returns to
    `.accessory` when the last window closes (`MenuBar/DockPresence.swift`),
    unless the saved Dock preference keeps it visible (R009). The menu-bar
    icon may be hidden only while the Dock remains enabled. On launch, `applicationDidFinishLaunching` runs
@@ -1023,7 +1029,10 @@ projections (SPEC-044-R004), colour never the only signal.
   Shell, Claude Code, Codex, OpenCode, Crush and other R012 adapters with a
   launcher. Harness entries are enabled only when the executable is found on
   the login-shell PATH, resolved once using `/bin/zsh -lc 'command -v <name>'`
-  with a five-second bound; missing entries say "Not installed". Shell runs
+  with a five-second bound. The resolved login-shell PATH MUST contain only
+  absolute, nonempty entries (no `.` or relative entries), and MUST be carried
+  into every harness launch environment, including managed launchers, so
+  env-based interpreters resolve consistently. Missing entries say "Not installed". Shell runs
   `$SHELL -l` (fallback `/bin/zsh`) in the home directory; users may choose
   a working folder per tab.
   Harnesses MUST use the Malibu gateway and saved R012 Keychain buyer key,
@@ -1032,7 +1041,9 @@ projections (SPEC-044-R004), colour never the only signal.
   persistently visible. Without a saved key, show
   "Add a buyer key in Other apps" and a button opening that sub-view; start
   no process. Codex, OpenCode and Crush use the existing managed launchers,
-  including one-time key handoff and project-config disabling. Missing setup
+  including one-time key handoff. OpenCode disables project configuration;
+  Crush retains its visible project-configuration warning because disabling
+  is unavailable. Missing setup
   MUST explain the prerequisite and link to Other apps.
   Claude Code is an env-only adapter that writes nothing in `~/.claude`.
   Launch `claude --model <id>` with `ANTHROPIC_BASE_URL=https://api.malibu.tech`;
@@ -1052,8 +1063,11 @@ projections (SPEC-044-R004), colour never the only signal.
   Keys MUST never appear in argv, Malibu-written scrollback, logs, diagnostics
   or errors. Build child environments using `ProcessEnvironmentSanitizer`
   plus only the documented adapter variables above and `TERM=xterm-256color`.
-  Closing a tab MUST SIGHUP the child process group and SIGKILL it after
-  three seconds. App quit MUST terminate all terminal children. Earn, Models
+  Closing a tab MUST SIGHUP every process group in the terminal shell's
+  session, retaining PID and start-time-checked ownership until all members
+  are gone, and SIGKILL survivors after three seconds. App quit MUST terminate
+  all terminal children under the same rule. Output-triggered clipboard writes
+  (including OSC 52) MUST be ignored; deliberate user Copy remains available. Earn, Models
   and Terminal follow §3.2 copy rules, with no $/time projections or machine
   reason codes.
 
