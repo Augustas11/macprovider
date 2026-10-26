@@ -516,6 +516,8 @@ enum NativeMTPAdmissionSidecar {
     /// most 1024 entries.
     static let maxQuantizationExceptions = 1024
     static let embeddedMTPFamilyAdapter = "glm5_next_mtp_v1"
+    static let deepseekDSparkFamilyAdapter = "deepseek_v4_dspark_v1"
+    static let embeddedMTPFamilyAdapters: Set<String> = [embeddedMTPFamilyAdapter, deepseekDSparkFamilyAdapter]
 
     /// The largest `max_native_active_rows` a family adapter may sign
     /// (SPEC-048 MTP-2): 1 for `glm5_next_mtp_v1`; nil when only the
@@ -525,16 +527,16 @@ enum NativeMTPAdmissionSidecar {
     }
 
     /// The only `request_feature_profile` values a family adapter may sign
-    /// (SPEC-048 MTP-2): `glm5_next_mtp_v1` is greedy only.
+    /// Both embedded adapters propose greedily; Qwen keeps its signed profiles.
     static func allowedRequestFeatureProfiles(familyAdapter: String) -> Set<String> {
-        familyAdapter == embeddedMTPFamilyAdapter ? [greedyRequestFeatureProfile] : requestFeatureProfiles
+        embeddedMTPFamilyAdapters.contains(familyAdapter) ? [greedyRequestFeatureProfile] : requestFeatureProfiles
     }
 
     /// SPEC-048-R002 (0.1.35/0.1.36): the release entry carries no layout, so
-    /// the adapter decides it. Only the GLM-5-Next adapter is embedded; every
-    /// other adapter keeps the separate-artifact layout.
+    /// the adapter decides it. GLM and DeepSeek DSpark share their target
+    /// artifact; other adapters keep the separate-artifact layout.
     static func sourceLayout(forFamilyAdapter familyAdapter: String) -> String {
-        familyAdapter == embeddedMTPFamilyAdapter ? "checkpoint_mtp" : "separate_artifact"
+        embeddedMTPFamilyAdapters.contains(familyAdapter) ? "checkpoint_mtp" : "separate_artifact"
     }
     nonisolated(unsafe) static var testingDescriptorCaptureMutationHook: ((String) throws -> Void)?
     nonisolated(unsafe) static var testingExpectedStagingDeviceOverride: dev_t?
@@ -1118,15 +1120,15 @@ enum NativeMTPAdmissionSidecar {
             quantization,
             "target",
             path: "$.quantization",
-            allowed: ["bf16", "fp16", "mlx_affine_4bit", "mlx_mxfp8"]
+            allowed: ["bf16", "fp16", "mlx_affine_4bit", "mlx_mxfp8", "mlx_mxfp4_mxfp8"]
         )
         let mtpQuantization = try requireString(
             quantization,
             "mtp",
             path: "$.quantization",
-            allowed: ["bf16", "fp16", "mlx_affine_4bit", "mlx_mxfp8"]
+            allowed: ["bf16", "fp16", "mlx_affine_4bit", "mlx_mxfp8", "mlx_mxfp4_mxfp8"]
         )
-        let normalizedAffine = targetQuantization == "mlx_affine_4bit" || mtpQuantization == "mlx_affine_4bit"
+        let normalizedAffine = [targetQuantization, mtpQuantization].contains { ["mlx_affine_4bit", "mlx_mxfp4_mxfp8"].contains($0) }
         let quantizationFields: Set<String> = normalizedAffine
             ? [
                 "target", "mtp", "representation_manifest_sha256",
@@ -1139,7 +1141,7 @@ enum NativeMTPAdmissionSidecar {
         let unquantizedExceptions: [String]
         let perLayerExceptions: [String]
         if normalizedAffine {
-            guard targetQuantization == "mlx_affine_4bit", mtpQuantization == "mlx_affine_4bit" else {
+            guard targetQuantization == mtpQuantization else {
                 throw NativeMTPAdmissionSidecarError.invalidValue("$.quantization")
             }
             representationManifestSHA256 = try requireSHA256(
@@ -1153,7 +1155,7 @@ enum NativeMTPAdmissionSidecar {
                 path: "$.quantization",
                 range: 32...128
             )
-            guard [32, 64, 128].contains(affineBlockSize) else {
+            guard (targetQuantization == "mlx_mxfp4_mxfp8" ? [32] : [32, 64, 128]).contains(affineBlockSize) else {
                 throw NativeMTPAdmissionSidecarError.invalidValue("$.quantization.block_size_elements")
             }
             blockSizeElements = affineBlockSize
@@ -1565,6 +1567,12 @@ enum NativeMTPAdmissionSidecar {
             try requireObject(object, "quantization", path: path),
             path: "\(path).quantization"
         )
+        if case .string(let adapter)? = object["mtp_family_adapter"], adapter == deepseekDSparkFamilyAdapter {
+            guard try requireInt(object, "mtp_head_count", path: path, range: 1...16) == 3,
+                  proposalDepth <= 5, quantization.target == "mlx_mxfp4_mxfp8" else {
+                throw NativeMTPAdmissionSidecarError.invalidValue("\(path).mtp_family_adapter")
+            }
+        }
         try parseOrdinaryBaseline(
             try requireObject(object, "ordinary_baseline", path: path),
             path: "\(path).ordinary_baseline",
@@ -1637,10 +1645,10 @@ enum NativeMTPAdmissionSidecar {
             "padding_rule", "unquantized_exceptions", "per_layer_exceptions",
             "representation_manifest_sha256",
         ], path: path)
-        let kind = try requireString(object, "kind", path: path, allowed: ["base", "mlx_affine", "mlx_mxfp8"])
+        let kind = try requireString(object, "kind", path: path, allowed: ["base", "mlx_affine", "mlx_mxfp8", "mlx_mxfp4_mxfp8"])
         let packedDataDType = try requireString(object, "packed_data_dtype", path: path, allowed: ["none", "uint8", "uint32"])
         let packedLayout = try requireString(object, "packed_layout", path: path, allowed: ["none", "mlx_array_native_v1"])
-        let scaleDType = try requireString(object, "scale_dtype", path: path, allowed: ["none", "bfloat16", "float16", "float32"])
+        let scaleDType = try requireString(object, "scale_dtype", path: path, allowed: ["none", "bfloat16", "float16", "float32", "uint8"])
         let scaleLayout = try requireString(object, "scale_layout", path: path, allowed: ["none", "per_block"])
         let blockSize = try requireNullableInt(object, "block_size_elements", path: path, range: 1...1024)
         let alignmentBytes = try requireNullableInt(object, "alignment_bytes", path: path, range: 1...4096)
@@ -1695,6 +1703,17 @@ enum NativeMTPAdmissionSidecar {
                 representationManifestSHA256: representationManifestSHA256,
                 unquantizedExceptions: unquantizedExceptions,
                 perLayerExceptions: perLayerExceptions
+            )
+        case "mlx_mxfp4_mxfp8":
+            guard packedDataDType == "uint32", packedLayout == "mlx_array_native_v1",
+                  scaleDType == "uint8", scaleLayout == "per_block", blockSize == 32,
+                  alignmentBytes == nil, paddingRule == "none" else {
+                throw NativeMTPAdmissionSidecarError.invalidValue(path)
+            }
+            return Quantization(
+                target: "mlx_mxfp4_mxfp8", mtp: "mlx_mxfp4_mxfp8",
+                blockSizeElements: blockSize, representationManifestSHA256: representationManifestSHA256,
+                unquantizedExceptions: unquantizedExceptions, perLayerExceptions: perLayerExceptions
             )
         case "mlx_mxfp8":
             guard packedDataDType == "uint8",

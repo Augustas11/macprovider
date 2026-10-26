@@ -27,6 +27,15 @@ struct NativeMTPBenchCommand: AsyncParsableCommand {
     @Option(name: .customLong("out"), help: "Output JSONL path.")
     var outPath: String
 
+    @Option(name: .customLong("requests"), help: "Frozen DeepSeek DSpark natural requests JSON; runs native scheduler token probes, separate from R015 qualification.")
+    var requestsPath: String?
+
+    @Option(name: .customLong("requests-sha256"), help: "Required frozen requests file SHA-256 when --requests is used.")
+    var requestsSHA256: String?
+
+    @Option(name: .customLong("long-token-ids"), help: "Optional JSON object with 8192/32768 prompt-token arrays exported from the existing oracles.")
+    var longTokenIDsPath: String?
+
     @Option(name: .customLong("only-cell"), help: "Optional cell id for resumable matrix runs.")
     var onlyCell: String?
 
@@ -68,6 +77,23 @@ struct NativeMTPBenchCommand: AsyncParsableCommand {
             providerCommit: providerCommit,
             phase: phase
         )
+        if let requestsPath {
+            guard let requestsSHA256 else { throw ValidationError("--requests requires --requests-sha256") }
+            let corpus = try NativeMTPFrozenDSparkCorpus.load(
+                from: URL(fileURLWithPath: requestsPath), expectedSHA256: requestsSHA256)
+            let longPrompts = try longTokenIDsPath.map {
+                try NativeMTPFrozenDSparkCorpus.loadLongPrompts(from: URL(fileURLWithPath: $0))
+            } ?? [:]
+            if validateOnly {
+                try bench.validate()
+            } else {
+                try await bench.runFrozenRequests(corpus, longPrompts: longPrompts)
+            }
+            return
+        }
+        guard requestsSHA256 == nil, longTokenIDsPath == nil else {
+            throw ValidationError("--requests-sha256 and --long-token-ids require --requests")
+        }
         if validateOnly {
             try bench.validate()
             return
@@ -153,6 +179,78 @@ enum NativeMTPBenchPrompts {
             throw NativeMTPBenchError.assertionFailed("no prompts sized for block \(block)")
         }
         return prompts
+    }
+}
+
+struct NativeMTPFrozenDSparkCorpus: Sendable {
+    struct Request: Sendable {
+        let name: String
+        let stratum: String
+        let tokenIDs: [Int]
+        let body: Data
+
+        func request(modelID: String, maxTokens: Int) throws -> ChatCompletionRequest {
+            guard var object = try JSONSerialization.jsonObject(with: body) as? [String: Any] else {
+                throw NativeMTPBenchError.invalidPolicy("frozen request body is not an object")
+            }
+            object["model"] = modelID
+            object["temperature"] = 0
+            object["top_p"] = 1
+            object["max_tokens"] = maxTokens
+            object["stream"] = true
+            return try ChatCompletionRequest.parse(data: JSONSerialization.data(withJSONObject: object))
+        }
+    }
+    let sha256: String
+    let tokenizerSHA256: String
+    let requests: [Request]
+
+    static func load(from url: URL, expectedSHA256: String) throws -> Self {
+        let data = try Data(contentsOf: url)
+        let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        guard digest == expectedSHA256 else {
+            throw NativeMTPBenchError.invalidPolicy("frozen requests SHA-256 mismatch")
+        }
+        try NativeMTPBenchJSON.rejectDuplicateKeys(data, label: "frozen requests")
+        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              object["schema"] as? String == "macprovider.dsv4-dspark-requests.v1",
+              let tokenizer = object["tokenizer_sha256"] as? String,
+              let entries = object["requests"] as? [[String: Any]], entries.count == 12 else {
+            throw NativeMTPBenchError.invalidPolicy("invalid frozen requests schema")
+        }
+        let requests = try entries.map { entry -> Request in
+            guard let name = entry["name"] as? String, !name.isEmpty,
+                  let stratum = entry["stratum"] as? String,
+                  ["prose", "reasoning", "code"].contains(stratum),
+                  let ids = entry["ids"] as? [Int], !ids.isEmpty, ids.allSatisfy({ $0 >= 0 }),
+                  let body = entry["request"] as? [String: Any] else {
+                throw NativeMTPBenchError.invalidPolicy("invalid frozen request entry")
+            }
+            return Request(name: name, stratum: stratum, tokenIDs: ids,
+                body: try JSONSerialization.data(withJSONObject: body))
+        }
+        guard Set(requests.map(\.name)).count == 12,
+              ["prose", "reasoning", "code"].allSatisfy({ stratum in
+                  requests.filter { $0.stratum == stratum }.count == 4
+              }) else { throw NativeMTPBenchError.invalidPolicy("frozen request names/strata mismatch") }
+        return Self(sha256: digest, tokenizerSHA256: tokenizer, requests: requests)
+    }
+
+    static func loadLongPrompts(from url: URL) throws -> [Int: [Int]] {
+        let data = try Data(contentsOf: url)
+        try NativeMTPBenchJSON.rejectDuplicateKeys(data, label: "long prompt IDs")
+        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: [Int]],
+              Set(object.keys) == ["8192", "32768"] else {
+            throw NativeMTPBenchError.invalidPolicy("long prompt IDs require exactly 8192 and 32768")
+        }
+        var result: [Int: [Int]] = [:]
+        for (key, ids) in object {
+            guard let count = Int(key), ids.count == count, ids.allSatisfy({ $0 >= 0 }) else {
+                throw NativeMTPBenchError.invalidPolicy("long prompt IDs length/value mismatch")
+            }
+            result[count] = ids
+        }
+        return result
     }
 }
 
@@ -342,6 +440,194 @@ private final class NativeMTPBenchRunner {
         }
     }
 
+    /// Native scheduler proof on the frozen natural bodies. This records
+    /// exact token IDs before decoding text and does not stand in for R015.
+    func runFrozenRequests(
+        _ corpus: NativeMTPFrozenDSparkCorpus,
+        longPrompts: [Int: [Int]]
+    ) async throws {
+        guard layout.family == .deepseekV4, onlyCell == nil, phase != .sustained,
+              !FileManager.default.fileExists(atPath: outURL.path) else {
+            throw NativeMTPBenchError.invalidPolicy("frozen requests require DeepSeek, a fresh --out, and no sustained/only-cell selection")
+        }
+        let checked = try preflight()
+        guard corpus.tokenizerSHA256 == checked.tokenizerSHA256 else {
+            throw NativeMTPBenchError.assertionFailed("frozen corpus tokenizer identity mismatch")
+        }
+        verifiedTargetIdentity = checked.targetIdentity
+        let longest = max(corpus.requests.map { $0.tokenIDs.count }.max() ?? 1,
+            longPrompts.keys.max() ?? 1)
+        let fixture = try await fixture(for: .init(slots: 4, promptTokens: longest, maxTokens: 256))
+        // Verify the frozen IDs against the production request mapping, including
+        // thinking-mode encoding, before submitting any measured token probe.
+        for item in corpus.requests {
+            let body = try item.request(modelID: modelID, maxTokens: 256)
+            let ids = try await fixture.runtimes.targetContainer.perform { context in
+                let input = try ModelRuntime.userInput(for: body)
+                return try await context.processor.prepare(input: input).text.tokens.asArray(Int.self)
+            }
+            guard ids == item.tokenIDs else {
+                throw NativeMTPBenchError.assertionFailed("frozen production prompt IDs differ: \(item.name)")
+            }
+        }
+        let writer = try NativeMTPJSONLWriter(url: outURL, append: false)
+        defer { try? writer.close() }
+        try writer.write([
+            "schema": "macprovider.native-dsv4-dspark-run.v1", "record_type": "header",
+            "runtime": "native_swift_mlx", "qualifies_r015": false,
+            "policy_sha256": policySHA256, "requests_sha256": corpus.sha256,
+            "target_sha256": checked.targetIdentity.digest, "tokenizer_sha256": checked.tokenizerSHA256,
+            "provider_commit": providerCommit, "mlx_fork_revision": policy.mlxForkRevision,
+            "requested_maximum_proposal_depth": policy.proposalDepth,
+            "long_prompt_token_counts": longPrompts.keys.sorted(),
+            "long_prompt_token_sha256": Dictionary(uniqueKeysWithValues: longPrompts.map {
+                (String($0.key), NativeMTPSelfTest.tokenDigest($0.value))
+            }),
+        ])
+        var groups = corpus.requests.map { [$0] }
+        for stratum in ["prose", "reasoning", "code"] {
+            groups.append(corpus.requests.filter { $0.stratum == stratum })
+        }
+        for count in longPrompts.keys.sorted() {
+            let item = NativeMTPFrozenDSparkCorpus.Request(name: "long-\(count)",
+                stratum: "synthetic_long", tokenIDs: longPrompts[count]!, body: Data())
+            groups.append([item])
+            groups.append((0..<4).map { row in
+                .init(name: "long-\(count)-r\(row)", stratum: "synthetic_long",
+                    tokenIDs: item.tokenIDs, body: Data())
+            })
+        }
+        for (groupIndex, group) in groups.enumerated() {
+            let ordinary = try await frozenWave(group, groupIndex: groupIndex,
+                runtime: fixture.runtimes.ordinary, nativeDepth: nil, roundRecorder: nil)
+            let native = try await frozenWave(group, groupIndex: groupIndex,
+                runtime: fixture.runtimes.native, nativeDepth: policy.proposalDepth,
+                roundRecorder: fixture.dsparkRoundRecorder)
+            let equal = ordinary.results.count == native.results.count
+                && zip(ordinary.results, native.results).allSatisfy { pair in
+                    pair.0.name == pair.1.name
+                        && pair.0.result.generatedTokens == pair.1.result.generatedTokens
+                        && pair.0.result.terminalStatus == pair.1.result.terminalStatus
+                }
+            for (path, wave) in [("ordinary", ordinary), ("native_mtp", native)] {
+                var record = wave.record
+                record["schema"] = "macprovider.native-dsv4-dspark-run.v1"
+                record["record_type"] = "run"
+                record["path"] = path
+                record["requests_sha256"] = corpus.sha256
+                record["requested_maximum_proposal_depth"] = policy.proposalDepth
+                record["group_index"] = groupIndex
+                record["stratum"] = group[0].stratum
+                record["parity_pass"] = equal
+                try writer.write(record)
+            }
+            guard equal, native.proposedTokens > 0 else {
+                throw NativeMTPBenchError.assertionFailed("native frozen group failed token parity or proposed no drafts: \(groupIndex)")
+            }
+        }
+    }
+
+    private struct FrozenResult: Sendable {
+        let name: String
+        let result: ContinuousBatchSchedulerResult
+        let started: UInt64
+        let ended: UInt64
+    }
+
+    private struct FrozenWave {
+        let results: [FrozenResult]
+        let proposedTokens: UInt64
+        let record: [String: Any]
+    }
+
+    private func frozenWave(
+        _ requests: [NativeMTPFrozenDSparkCorpus.Request],
+        groupIndex: Int,
+        runtime: ModelRuntime,
+        nativeDepth: Int?,
+        roundRecorder: NativeMTPDSparkRoundRecorder?
+    ) async throws -> FrozenWave {
+        let ids = requests.map { "frozen-g\(groupIndex)-\($0.name)" }
+        let timing = NativeMTPLabCommittedTokenTimingObserver()
+        guard await runtime.installLabNativeMTPCommitTimingObserver(timing),
+              await runtime.installLabBatchComposition(ids) else {
+            throw NativeMTPBenchError.assertionFailed("native frozen timing/composition observer unavailable")
+        }
+        let before = await runtime.currentSnapshot().nativeMTPStatus
+        let memory = NativeMTPMemorySampler()
+        memory.start()
+        let started = DispatchTime.now().uptimeNanoseconds
+        let results: [FrozenResult]
+        do {
+            results = try await withThrowingTaskGroup(of: FrozenResult.self) { group in
+                for (index, item) in requests.enumerated() {
+                    group.addTask {
+                        let rowStarted = DispatchTime.now().uptimeNanoseconds
+                        let result = try await runtime.labTokenProbe(id: ids[index],
+                            promptTokenIDs: item.tokenIDs, maxCompletionTokens: 256, nativeDepth: nativeDepth)
+                        guard result.errorCode == nil, !result.generatedTokens.isEmpty else {
+                            throw NativeMTPBenchError.assertionFailed("frozen native scheduler row failed: \(item.name)")
+                        }
+                        return FrozenResult(name: item.name, result: result,
+                            started: rowStarted, ended: DispatchTime.now().uptimeNanoseconds)
+                    }
+                }
+                var output: [FrozenResult] = []
+                for try await result in group { output.append(result) }
+                return output.sorted { $0.name < $1.name }
+            }
+        } catch {
+            memory.stop()
+            _ = await runtime.installLabNativeMTPCommitTimingObserver(nil)
+            _ = await runtime.installLabBatchComposition(nil)
+            throw error
+        }
+        let ended = DispatchTime.now().uptimeNanoseconds
+        memory.stop()
+        _ = await runtime.installLabNativeMTPCommitTimingObserver(nil)
+        _ = await runtime.installLabBatchComposition(nil)
+        let delta = NativeMTPStatusDelta(before: before, after: await runtime.currentSnapshot().nativeMTPStatus)
+        let events = timing.snapshot()
+        let metrics: [[String: Any]] = results.map { row in
+            let first = events.filter { $0.requestID == row.result.requestID }
+                .map(\.monotonicNanoseconds).min()
+            let ttft = first.map { Double($0 - row.started) / 1_000_000_000 }
+            let wall = Double(row.ended - row.started) / 1_000_000_000
+            var metrics: [String: Any] = ["name": row.name, "prompt_tokens": row.result.promptTokens,
+                "completion_tokens": row.result.generatedTokens.count,
+                "token_sha256": NativeMTPSelfTest.tokenDigest(row.result.generatedTokens),
+                "ttft_seconds": ttft.map { $0 as Any } ?? NSNull(),
+                "decode_tps": NativeMTPBenchDecodeThroughput.perRequest(
+                    completionTokens: row.result.generatedTokens.count, ttftSeconds: ttft,
+                    wallSeconds: wall).map { $0 as Any } ?? NSNull()]
+            if let roundRecorder, let nativeDepth {
+                metrics.merge(roundRecorder.metrics(requestIDs: [row.result.requestID],
+                    maximumDepth: nativeDepth)) { _, actual in actual }
+            }
+            return metrics
+        }
+        let first = events.map(\.monotonicNanoseconds).min()
+        let count = results.reduce(0) { $0 + $1.result.generatedTokens.count }
+        var record: [String: Any] = [
+            "runtime": "native_swift_mlx", "qualifies_r015": false,
+            "sampling": "greedy", "probe": "scheduler_integrity_maximum_depth",
+            "rows": requests.count, "wall_seconds": Double(ended - started) / 1_000_000_000,
+            "aggregate_decode_tps": first.flatMap {
+                ended > $0 ? Double(max(0, count - results.count)) / (Double(ended - $0) / 1_000_000_000) : nil
+            }.map { $0 as Any } ?? NSNull(),
+            "request_metrics": metrics, "mtp_proposed_tokens": delta.proposedTokens,
+            "mtp_accepted_tokens": delta.acceptedTokens, "mtp_rejected_tokens": delta.rejectedTokens,
+            "mtp_accepted_by_position": delta.acceptedByPosition,
+            "target_forwards": delta.targetForwards, "mtp_forwards": delta.mtpForwards,
+            "peak_phys_footprint_bytes": memory.peakPhysFootprintBytes.map { $0 as Any } ?? NSNull(),
+            "min_available_memory_bytes": memory.minAvailableBytes.map { $0 as Any } ?? NSNull(),
+        ]
+        if let roundRecorder, let nativeDepth {
+            record.merge(roundRecorder.metrics(requestIDs: Set(ids), maximumDepth: nativeDepth)) { _, actual in actual }
+        }
+        return FrozenWave(results: results, proposedTokens: delta.proposedTokens, record: record)
+    }
+
     private func runCell(
         _ cell: NativeMTPBenchCell,
         writer: NativeMTPJSONLWriter,
@@ -461,7 +747,8 @@ private final class NativeMTPBenchRunner {
             maxBatch: qualifiedSlots,
             maxNativeActiveRows: policy.maxNativeActiveRows(for: cell),
             maxPromptTokens: policy.maximumPromptTokens ?? 1_048_576,
-            maxPhysicalBlocks: maxBlocks
+            maxPhysicalBlocks: maxBlocks,
+            proposalDepth: policy.proposalDepth
         )
         let fixture = try await runner.loadRuntimeFixture(
             maxContextTokens: cell.promptTokens + cell.maxTokens + 256,
@@ -1275,6 +1562,8 @@ struct NativeMTPBenchPolicy {
     /// Exploratory policies relax the R015 minimums for pilots; every record is
     /// stamped `exploratory` and the analyzer refuses an admission verdict.
     let exploratory: Bool
+    var proposalDepth: Int = 1
+    var quantization: String = "4bit"
 
     static func load(from url: URL) throws -> NativeMTPBenchPolicy {
         let data = try Data(contentsOf: url)
@@ -1342,13 +1631,17 @@ struct NativeMTPBenchPolicy {
             arrivalIntervalMS: object["arrival_interval_ms"] == nil
                 ? 0
                 : try nonnegativeInt(object, "arrival_interval_ms"),
-            exploratory: exploratory
+            exploratory: exploratory,
+            proposalDepth: try intAtLeast(object, "proposal_depth", 1),
+            quantization: try string(object, "quantization")
         )
         try policy.validateMatrix()
+        guard (1...5).contains(policy.proposalDepth),
+              ["4bit", "mlx_mxfp4_mxfp8"].contains(policy.quantization) else {
+            throw NativeMTPBenchError.invalidPolicy("unsupported quantization or proposal_depth")
+        }
         let fixedMethodology: [String: AnyHashable] = [
-            "quantization": "4bit",
             "cache_mode": "paged_kv_mixed",
-            "proposal_depth": 1,
             "run_order": "seeded_random_counterbalanced",
             "prompt_corpus": "deterministic_synthetic_unique_v2",
             "exclusion_rules": "none",
@@ -1394,6 +1687,10 @@ struct NativeMTPBenchPolicy {
     /// decode, and a family that signs a native active-row bound measures at
     /// most that bound, so either mismatch could only fail after the load.
     func validateFamily(_ family: NativeMTPHardwareE2EFamily) throws {
+        guard proposalDepth <= family.maximumProposalDepth,
+              quantization == family.quantizationLabel else {
+            throw NativeMTPBenchError.invalidPolicy("quantization or proposal_depth does not match \(family.familyAdapter)")
+        }
         if !family.admitsSampledRows, temperature > 0 {
             throw NativeMTPBenchError.invalidPolicy(
                 "temperature must be 0: \(family.familyAdapter) admits greedy rows only"

@@ -95,6 +95,26 @@ def glm_tuple():
     return value
 
 
+def dspark_tuple():
+    value = glm_tuple()
+    entry = value["entry"]
+    entry["model_key"] = "deepseek/deepseek-v4-flash"
+    entry["mtp_family_adapter"] = "deepseek_v4_dspark_v1"
+    entry["mtp_head_count"] = 3
+    entry["proposal_depth"] = 5
+    entry["complete_window_bytes_by_depth"] = [1024 * (i + 1) for i in range(6)]
+    entry["quantization"] = {
+        "kind": "mlx_mxfp4_mxfp8", "packed_data_dtype": "uint32",
+        "packed_layout": "mlx_array_native_v1", "scale_dtype": "uint8",
+        "scale_layout": "per_block", "block_size_elements": 32,
+        "alignment_bytes": None, "padding_rule": "none",
+        "unquantized_exceptions": ["target/embed", "target/head"],
+        "per_layer_exceptions": ["target/mtp.0.main_proj"],
+        "representation_manifest_sha256": "6" * 64,
+    }
+    return value
+
+
 def projection_artifacts(tag):
     return {
         name: {"path": f"{tag}/{name}", "sha256": f"{index + 1:x}" * 64}
@@ -282,6 +302,66 @@ class NativeMTPAdmissionSidecarTests(unittest.TestCase):
             self.assertEqual(main(["build", "--tuple", str(tmp / "tuple.json"), "--release", str(tmp / "release.json"), "--out", str(out)]), 0)
             self.assertEqual(out.read_bytes(), build(self.tuple, release_input()))
             self.assertEqual(main(["identity", "--sidecar", str(out)]), 0)
+
+
+class DeepseekDSparkAdmissionTests(unittest.TestCase):
+    def test_third_entry_preserves_qwen_and_glm_bytes(self):
+        controls = json.loads(build([resolved_tuple(), glm_tuple()], release_input()))["entries"]
+        entries = json.loads(build([resolved_tuple(), dspark_tuple(), glm_tuple()], release_input()))["entries"]
+        self.assertEqual(entries[1:], controls)
+        self.assertEqual(entries[0]["mtp_head_count"], 3)
+        self.assertEqual(entries[0]["proposal_depth"], 5)
+
+    def test_dspark_rejects_sampled_profile_and_wrong_stage_count(self):
+        for key, value, reason in [
+            ("request_feature_profile", "native_mtp_sampled_text_v1", "greedy only"),
+            ("mtp_head_count", 1, "requires 3 stages"),
+        ]:
+            with self.subTest(key=key):
+                value_tuple = dspark_tuple()
+                value_tuple["entry"][key] = value
+                with self.assertRaisesRegex(SidecarError, reason):
+                    build(value_tuple, release_input())
+
+    def test_dspark_reader_allows_qualification_rows_but_caps_at_eight(self):
+        for rows in [1, 2, 4, 8]:
+            value = dspark_tuple()
+            value["entry"]["qualified_slots"] = 8
+            value["entry"]["ordinary_baseline"]["qualified_slots"] = 8
+            value["entry"]["max_native_active_rows"] = rows
+            self.assertEqual(json.loads(build(value, release_input()))["entries"][0]["max_native_active_rows"], rows)
+        value["entry"]["max_native_active_rows"] = 9
+        with self.assertRaisesRegex(SidecarError, "max_native_active_rows"):
+            build(value, release_input())
+
+    def test_dspark_depth_does_not_equal_stage_count(self):
+        for depth in [1, 2, 3, 5]:
+            with self.subTest(depth=depth):
+                value = dspark_tuple()
+                value["entry"]["proposal_depth"] = depth
+                value["entry"]["complete_window_bytes_by_depth"] = [1024 * (i + 1) for i in range(depth + 1)]
+                self.assertEqual(json.loads(build(value, release_input()))["entries"][0]["proposal_depth"], depth)
+
+    def test_dspark_rejects_unsupported_depth_and_malformed_quantization(self):
+        value = dspark_tuple()
+        value["entry"]["proposal_depth"] = 6
+        value["entry"]["complete_window_bytes_by_depth"] += [8192]
+        with self.assertRaisesRegex(SidecarError, "at most 5 proposals"):
+            build(value, release_input())
+        for quantization in [None, [], {}, {"kind": "mlx_affine"}]:
+            value = dspark_tuple()
+            value["entry"]["quantization"] = quantization
+            with self.assertRaisesRegex(SidecarError, "requires mixed MX packing"):
+                build(value, release_input())
+
+    def test_mixed_mx_rejects_wrong_scale_encoding_group_and_padding(self):
+        for key, wrong in [("scale_dtype", "bfloat16"), ("packed_data_dtype", "uint8"),
+                           ("block_size_elements", 64), ("padding_rule", "zero_pad_to_alignment")]:
+            with self.subTest(key=key):
+                value = dspark_tuple()
+                value["entry"]["quantization"][key] = wrong
+                with self.assertRaisesRegex(SidecarError, key):
+                    build(value, release_input())
 
 
 class NativeMTPAdmissionMultiEntryTests(unittest.TestCase):

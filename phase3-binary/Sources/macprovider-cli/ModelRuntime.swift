@@ -11578,7 +11578,8 @@ maxTokens: maxTokens,
                 familyAdapter: admissionCapability.familyAdapter,
                 targetDirectory: capturedArtifacts.targetURL,
                 drafterDirectory: drafterDirectory,
-                tokenizerLoader: capturedTokenizerLoader
+                tokenizerLoader: capturedTokenizerLoader,
+                maximumProposalDepth: admissionCapability.maxProposalDepth
             )
             try capturedArtifacts.revalidateAfterLoad()
             let drafterRuntimeObservation = await drafterContainer.perform { context -> (maximumBlockSize: Int?, stateLayerCount: Int?) in
@@ -12087,6 +12088,14 @@ maxTokens: maxTokens,
                 && representation.manifestSHA256 == quantization.representationManifestSHA256
                 && representation.perLayerExceptions == quantization.perLayerExceptions
                 && representation.unquantizedExceptions == quantization.unquantizedExceptions
+        case ("mlx_mxfp4_mxfp8", "mlx_mxfp4_mxfp8"):
+            guard admissionCapability.familyAdapter == "deepseek_v4_dspark_v1",
+                  let representation = try? NativeMTPArtifactObserver.mixedMXRepresentation(for: observation)
+            else { return false }
+            return representation.groupSize == quantization.blockSizeElements
+                && representation.manifestSHA256 == quantization.representationManifestSHA256
+                && representation.perLayerExceptions == quantization.perLayerExceptions
+                && representation.unquantizedExceptions == quantization.unquantizedExceptions
         case ("bf16", "bf16"):
             guard let representation = try? NativeMTPArtifactObserver.baseRepresentation(for: observation) else {
                 return false
@@ -12132,12 +12141,13 @@ maxTokens: maxTokens,
     static let nativeMTPSupportedAdapterLayouts: Set<NativeMTPAdapterLayout> = [
         NativeMTPAdapterLayout(familyAdapter: "qwen3_5_mtp_v1", sourceLayout: "separate_artifact"),
         NativeMTPAdapterLayout(familyAdapter: "glm5_next_mtp_v1", sourceLayout: "checkpoint_mtp"),
+        NativeMTPAdapterLayout(familyAdapter: "deepseek_v4_dspark_v1", sourceLayout: "checkpoint_mtp"),
     ]
 
     static func nativeMTPDrafterSource(familyAdapter: String) -> NativeMTPDrafterSource? {
         switch familyAdapter {
         case "qwen3_5_mtp_v1": .separateArtifact
-        case "glm5_next_mtp_v1": .targetEmbedded
+        case "glm5_next_mtp_v1", "deepseek_v4_dspark_v1": .targetEmbedded
         default: nil
         }
     }
@@ -12154,13 +12164,21 @@ maxTokens: maxTokens,
             sourceLayout: admissionCapability.sourceLayout
         )
         guard nativeMTPSupportedAdapterLayouts.contains(layout),
-              admissionCapability.predictionLayerCount == admissionCapability.maxProposalDepth,
+              (admissionCapability.familyAdapter == "deepseek_v4_dspark_v1"
+                ? admissionCapability.predictionLayerCount == 3
+                : admissionCapability.predictionLayerCount == admissionCapability.maxProposalDepth),
               admissionCapability.cacheClass == canonicalCacheClass,
               admissionCapability.stateClass == nativeMTPExpectedStateClass(modelCapabilities: modelCapabilities),
               drafterPresent
         else { return false }
         guard nativeMTPDrafterSource(familyAdapter: layout.familyAdapter) == .targetEmbedded else {
             return true
+        }
+        if layout.familyAdapter == "deepseek_v4_dspark_v1" {
+            return deepseekV4NativeMTPTopologySupported(
+                maxProposalDepth: admissionCapability.maxProposalDepth,
+                modelCapabilities: modelCapabilities, cacheKinds: cacheKinds
+            )
         }
         return glm5NextNativeMTPTopologySupported(
             maxProposalDepth: admissionCapability.maxProposalDepth,
@@ -12188,6 +12206,21 @@ maxTokens: maxTokens,
               cap == PagedKVSharedForwardBackend.pagedMLAMaxFlattenedTokensPerForward,
               maxProposalDepth >= 1,
               maxProposalDepth + 1 <= cap
+        else { return false }
+        return true
+    }
+
+    /// DSpark stages own private window caches; target windows and compressed
+    /// pools are committed by the row-owned backend, never paged KV trimming.
+    private static func deepseekV4NativeMTPTopologySupported(
+        maxProposalDepth: Int,
+        modelCapabilities: PagedKVRuntimeModelCapabilities,
+        cacheKinds: [PagedKVSharedForwardBackend.CacheKind]?
+    ) -> Bool {
+        guard modelCapabilities.modelFamily == "deepseek_v4",
+              let layout = modelCapabilities.deepseekV4Pool,
+              cacheKinds == layout.expectedCacheKinds,
+              (1...5).contains(maxProposalDepth)
         else { return false }
         return true
     }
@@ -12223,6 +12256,7 @@ maxTokens: maxTokens,
                 switch context.model {
                 case let model as GLM5NextModel: model.languageModel.hasMTPWeights
                 case let model as GLM5NextTextModel: model.hasMTPWeights
+                case let model as DeepseekV4Model: model.hasMTPWeights
                 default: false
                 }
             }
@@ -12238,7 +12272,8 @@ maxTokens: maxTokens,
         familyAdapter: String,
         targetDirectory: URL,
         drafterDirectory: URL,
-        tokenizerLoader: any TokenizerLoader
+        tokenizerLoader: any TokenizerLoader,
+        maximumProposalDepth: Int? = nil
     ) async throws -> MTPDrafterContainer {
         switch nativeMTPDrafterSource(familyAdapter: familyAdapter) {
         case .separateArtifact:
@@ -12249,16 +12284,26 @@ maxTokens: maxTokens,
             )
         case .targetEmbedded:
             await GLM5NextMTPRegistration.register()
+            await DeepseekV4DSparkRegistration.register()
             let configData = try Data(contentsOf: targetDirectory.appendingPathComponent("config.json"))
             guard let object = try JSONSerialization.jsonObject(with: configData) as? [String: Any],
                   let modelType = object["model_type"] as? String
             else {
                 throw NativeMTPDrafterLoadError.unsupportedAdapter(familyAdapter)
             }
-            let model = try await MTPDrafterTypeRegistry.shared.createModel(
-                configuration: configData,
-                modelType: modelType
-            )
+            let model: any MTPDrafterModel
+            if familyAdapter == "deepseek_v4_dspark_v1" {
+                let depth = maximumProposalDepth ?? 5
+                guard modelType == "deepseek_v4", (1...5).contains(depth) else {
+                    throw NativeMTPDrafterLoadError.unsupportedAdapter(familyAdapter)
+                }
+                let configuration = try JSONDecoder().decode(DeepseekV4Configuration.self, from: configData)
+                model = DeepseekV4DSparkDraftModel(configuration, maximumDepth: depth)
+            } else {
+                model = try await MTPDrafterTypeRegistry.shared.createModel(
+                    configuration: configData, modelType: modelType
+                )
+            }
             return MTPDrafterContainer(context: MTPDrafterContext(
                 configuration: ModelConfiguration(directory: targetDirectory, tokenizerSource: nil, defaultPrompt: ""),
                 model: model

@@ -665,7 +665,7 @@
     {
       "spec_id": "SPEC-023",
       "title": "Installer-Integrated Autotune Recommend",
-      "version": "v0.22.35",
+      "version": "v0.22.36",
       "path": "specs/SPEC-023-installer-autotune-recommend.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -1475,7 +1475,7 @@
     {
       "spec_id": "SPEC-048",
       "title": "Native Multi-Token Prediction Serving",
-      "version": "0.1.58",
+      "version": "0.1.59",
       "path": "specs/SPEC-048-native-mtp-serving.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -3623,7 +3623,8 @@
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPGLM5NextObservationTests.swift:testAffineRepresentationAdmitsUpTo1024Exceptions",
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPGLM5NextObservationTests.swift:testOverrideWidthsOtherThanFourFiveSixEightFailClosed",
         "scripts/tests/test_native_mtp_admission_sidecar.py:class NativeMTPAdmissionMultiEntryTests",
-        "scripts/tests/test_native_mtp_admission_sidecar.py:class NativeMTPProjectionManifestTests"
+        "scripts/tests/test_native_mtp_admission_sidecar.py:class NativeMTPProjectionManifestTests",
+        "scripts/tests/test_native_mtp_admission_sidecar.py:class DeepseekDSparkAdmissionTests"
       ],
       "journeys": [
         "JOURNEY-NATIVE-MTP-SERVING"
@@ -3633,7 +3634,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1770",
-        "rationale": "SPEC-023 v0.22.9 defines the closed signed native-MTP admission sidecar; v0.22.27 admits per-module affine override widths 4, 5, 6, or 8 and up to 1024 exceptions per array (GLM-5.3-Flash carries 554), and the generator builds multi-entry sidecars and the v2 multi-model projection manifest. The strict consumer is implemented (#1770) and fails closed on the live executable CDHash binding, complete-window byte closure, MLX affine 4-bit representation, the SPEC-048-R007 max_native_active_rows bound, the greedy/sampled request profile, and the signed max_prompt_tokens bound, with negative fixtures. An unsigned sidecar generator (scripts/native_mtp_admission_sidecar.py) renders and validates the closed body and both identities with a cross-language golden; release-ledger binding, signing, and signed release evidence are not implemented, so the requirement stays pending."
+        "rationale": "SPEC-023 v0.22.36 adds the vendor-native DeepSeek mixed MXFP4/MXFP8 metadata; reader/generator checks and multi-entry preservation fixtures exist, while combined hardware proof and the signed DeepSeek entry remain pending. SPEC-023 v0.22.9 defines the closed signed native-MTP admission sidecar; v0.22.27 admits per-module affine override widths 4, 5, 6, or 8 and up to 1024 exceptions per array (GLM-5.3-Flash carries 554), and the generator builds multi-entry sidecars and the v2 multi-model projection manifest. The strict consumer is implemented (#1770) and fails closed on the live executable CDHash binding, complete-window byte closure, MLX affine 4-bit representation, the SPEC-048-R007 max_native_active_rows bound, the greedy/sampled request profile, and the signed max_prompt_tokens bound, with negative fixtures. An unsigned sidecar generator (scripts/native_mtp_admission_sidecar.py) renders and validates the closed body and both identities with a cross-language golden; release-ledger binding, signing, and signed release evidence are not implemented, so the requirement stays pending."
       }
     },
     {
@@ -11666,7 +11667,10 @@
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPGLM5NextObservationTests.swift:testEmbeddedObservationAcceptsAPostSanitizeCheckpointWithFiveSixEightBitOverrides",
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPGLM5NextObservationTests.swift:testEmbeddedObservationRejectsNamesTheLoaderWouldRewriteOrDrop",
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPAdmissionSidecarTests.swift:testReleaseEnvelopeAcceptsEmbeddedCheckpointMTPAndCapturesTheTargetOnce",
-        "phase3-binary/Tests/macprovider-cliTests/NativeMTPAdmissionSidecarTests.swift:testMultiModelSidecarReadsTheV2ProjectionByModelKey"
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPAdmissionSidecarTests.swift:testMultiModelSidecarReadsTheV2ProjectionByModelKey",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPArtifactObservationTests.swift:testDeepseekDSparkMixedMXObservationAndManifest",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPAdmissionSidecarTests.swift:testDeepseekDSparkFamilyUsesEmbeddedGreedyBlockDrafter",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPAdmissionSidecarTests.swift:testReleaseEnvelopeAcceptsDeepseekThreeStagesAtIndependentProposalDepth"
       ],
       "journeys": [
         "JOURNEY-NATIVE-MTP-SERVING"
@@ -11676,7 +11680,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1770",
-        "rationale": "The immutable NativeMTPCapability, the artifact observer that must match the pinned MLX loader and the signed capability (including the mlx_affine representation manifest digest), and negative artifact fixtures are implemented. Exact immutable production Qwen tuple hashes and signed artifact evidence are still missing. Native MTP ships default-off; the pending candidate pin is ca8c384c4fb6bc7d2fbb7c70a18c34b935701805, whose parent b181102984a4d1875efbd9e0eab3a7dfd1c012c5 is the approved fused-MoE baseline; stays pending until a fresh fused-baseline R015 passes and signed JOURNEY-NATIVE-MTP-SERVING evidence exists."
+        "rationale": "DeepSeek V4 DSpark embedded adapter and mixed-MX observation are implemented in the campaign, with hardware qualification and signed admission pending. The immutable NativeMTPCapability, the artifact observer that must match the pinned MLX loader and the signed capability (including the mlx_affine representation manifest digest), and negative artifact fixtures are implemented. Exact immutable production Qwen tuple hashes and signed artifact evidence are still missing. Native MTP ships default-off; the pending candidate pin is ca8c384c4fb6bc7d2fbb7c70a18c34b935701805, whose parent b181102984a4d1875efbd9e0eab3a7dfd1c012c5 is the approved fused-MoE baseline; stays pending until a fresh fused-baseline R015 passes and signed JOURNEY-NATIVE-MTP-SERVING evidence exists."
       }
     },
     {
@@ -11912,8 +11916,14 @@
       "requirement_id": "SPEC-048-R012",
       "spec_id": "SPEC-048",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/NativeMTPArtifactObservation.swift:static func mixedMXRepresentation",
+        "scripts/native_mtp_admission_sidecar.py:def validate_quantization"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPArtifactObservationTests.swift:testDeepseekDSparkMixedMXObservationAndManifest",
+        "scripts/tests/test_native_mtp_admission_sidecar.py:class DeepseekDSparkAdmissionTests"
+      ],
       "journeys": [
         "JOURNEY-NATIVE-MTP-SERVING"
       ],
@@ -11922,7 +11932,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1770",
-        "rationale": "No MLX-native MXFP8 artifact has passed independent format, fit, quality, memory, thermal, and combined native-MTP qualification."
+        "rationale": "DeepSeek vendor-native mixed MXFP4/MXFP8 representation checks exist, with group32 uint32 packed weights and uint8 E8M0 scales; combined native-MTP hardware parity, throughput, TTFT, peak-memory and admission gates remain pending. Generic mlx_mxfp8 remains independently unqualified."
       }
     },
     {

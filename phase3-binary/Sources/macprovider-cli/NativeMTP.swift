@@ -233,7 +233,13 @@ struct NativeMTPSelector: Sendable {
         guard request.stop.isEmpty || nativeCapability.supportsStopSequences else {
             return .capabilityMismatch
         }
-        guard request.topLevelKeys.isSubset(of: admittedTopLevelKeys),
+        // DeepSeek's documented reasoning effort changes prompt encoding before
+        // prefill; the signed adapter still uses the same greedy decode path.
+        // Other adapters retain their closed request feature allowlist.
+        let admittedKeys = nativeCapability.family == NativeMTPAdmissionSidecar.deepseekDSparkFamilyAdapter
+            ? admittedTopLevelKeys.union(["reasoning_effort"])
+            : admittedTopLevelKeys
+        guard request.topLevelKeys.isSubset(of: admittedKeys),
               request.streamOptionKeys.isSubset(of: admittedStreamOptionKeys) else {
             return .unknownRequestField
         }

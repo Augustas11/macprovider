@@ -4,6 +4,14 @@ import XCTest
 @testable import macprovider_cli
 
 final class NativeMTPAdmissionSidecarTests: XCTestCase {
+    func testDeepseekDSparkFamilyUsesEmbeddedGreedyBlockDrafter() {
+        XCTAssertEqual(NativeMTPAdmissionSidecar.sourceLayout(forFamilyAdapter: "deepseek_v4_dspark_v1"), "checkpoint_mtp")
+        XCTAssertNil(NativeMTPAdmissionSidecar.maxNativeActiveRowsBound(familyAdapter: "deepseek_v4_dspark_v1"))
+        XCTAssertEqual(NativeMTPAdmissionSidecar.allowedRequestFeatureProfiles(familyAdapter: "deepseek_v4_dspark_v1"), ["native_mtp_greedy_text_v1"])
+        XCTAssertEqual(NativeMTPAdmissionSidecar.sourceLayout(forFamilyAdapter: "glm5_next_mtp_v1"), "checkpoint_mtp")
+        XCTAssertEqual(NativeMTPAdmissionSidecar.sourceLayout(forFamilyAdapter: "qwen3_5_mtp_v1"), "separate_artifact")
+    }
+
     func testValidSidecarReturnsImmutableCapability() throws {
         let fixture = try makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
@@ -1634,6 +1642,39 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
             resolvedArtifactAuthority: fixture.authority
         )
         XCTAssertEqual(capability.quantization.perLayerExceptions.count, 1024)
+    }
+
+    func testReleaseEnvelopeAcceptsDeepseekThreeStagesAtIndependentProposalDepth() throws {
+        let fixture = try makeReleaseEnvelopeFixture(
+            prepareSnapshot: { base in try Self.embeddedLayout(base) },
+            entryEdit: { entry in
+                entry["mtp_family_adapter"] = "deepseek_v4_dspark_v1"
+                entry["mtp_head_count"] = 3
+                entry["proposal_depth"] = 5
+                entry["complete_window_bytes_by_depth"] = [1024, 2048, 4096, 8192, 16384, 32768]
+                entry["request_feature_profile"] = "native_mtp_greedy_text_v1"
+                entry["quantization"] = [
+                    "kind": "mlx_mxfp4_mxfp8", "packed_data_dtype": "uint32",
+                    "packed_layout": "mlx_array_native_v1", "scale_dtype": "uint8",
+                    "scale_layout": "per_block", "block_size_elements": 32,
+                    "alignment_bytes": NSNull(), "padding_rule": "none",
+                    "unquantized_exceptions": ["target/embed", "target/head"],
+                    "per_layer_exceptions": ["target/mtp.0.main_proj"],
+                    "representation_manifest_sha256": String(repeating: "a", count: 64),
+                ]
+            }
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.base.root) }
+        let capability = try NativeMTPAdmissionSidecar.load(
+            sidecarData: fixture.sidecarData, signatureData: fixture.signatureData,
+            snapshotRoot: fixture.base.snapshot, context: fixture.context,
+            trustedKeyring: fixture.base.trustedKeyring, resolvedArtifactAuthority: fixture.authority
+        )
+        XCTAssertEqual(capability.sourceLayout, "checkpoint_mtp")
+        XCTAssertEqual(capability.predictionLayerCount, 3)
+        XCTAssertEqual(capability.maxProposalDepth, 5)
+        XCTAssertEqual(capability.quantization.target, "mlx_mxfp4_mxfp8")
+        XCTAssertEqual(capability.quantization.blockSizeElements, 32)
     }
 
     func testReleaseEntrySourceLayoutIsDerivedFromTheAdapter() {

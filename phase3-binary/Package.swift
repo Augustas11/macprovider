@@ -17,7 +17,7 @@ let package = Package(
         )
     ],
     dependencies: [
-        // Fork tag 3.32.3-macprovider.10.9 (branch campaign/2111-dsv4-fidelity), on tag
+        // Fork tag 3.32.3-macprovider.10.9.1 (branch campaign/2111-dsv4-fidelity), on tag
         // 3.32.3-macprovider.10.5 (c8be0f61), on tag 3.32.3-macprovider.10.4
         // (676a62a4), on tag 3.32.3-macprovider.10.3, then
         // 3.32.3-macprovider.10.1 (branch glm53/tuple-0324, on 3.32.3-macprovider.10):
@@ -42,11 +42,13 @@ let package = Package(
         // inference/model.py: the ratio-4 overlap window carried across calls,
         // the exact indexer top-k by default, float32 router, the kernel's
         // blocked attention arithmetic with float32 sinks, compressor,
-        // expert SwiGLU/combine and head logits. Other family decode paths are
-        // unchanged.
+        // expert SwiGLU/combine and head logits. 10.9.1 retains the embedded
+        // three-stage DSpark drafter and adds exact packed verification with
+        // confidence scheduling and cache-prefix transactions. Other family
+        // decode paths are unchanged.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "c9baca402cb990b088eef09e9aa1088fd2ad6d7a"
+            revision: "098c33964e6c7bb9ac9695d5f18ed4cc87252e67"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",
