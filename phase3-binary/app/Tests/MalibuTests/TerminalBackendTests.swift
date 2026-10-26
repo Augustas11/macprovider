@@ -150,7 +150,11 @@ final class TerminalBackendTests: XCTestCase {
     private func temporaryHome() throws -> URL {
         let home = FileManager.default.temporaryDirectory.resolvingSymlinksInPath().appendingPathComponent("malibu-terminal-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        return home
+        // Foundation normalizes /private/var back to the /var symlink on macOS;
+        // retain POSIX realpath so production no-follow traversal sees real ancestors.
+        let resolved = try XCTUnwrap(realpath(home.path, nil))
+        defer { free(resolved) }
+        return URL(fileURLWithPath: String(cString: resolved), isDirectory: true)
     }
     private func permissions(_ url: URL) throws -> Int {
         try XCTUnwrap(FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as? NSNumber).intValue & 0o777
