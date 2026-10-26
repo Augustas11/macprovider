@@ -5671,7 +5671,8 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
             pagedKVModelCapabilities: ModelRuntime.pagedKVModelCapabilities(modelID: "mlx-community/Qwen-Test", configJSONData: nil),
             container: container,
             continuousBatchingBackend: RuntimeBridgeScriptedBackend(scripts: [:]),
-            loader: { _ in throw PagedKVRuntimeBridgeTestError.notExpected }, testLoader: { ($0, hash) })
+            loader: { _ in throw PagedKVRuntimeBridgeTestError.notExpected }, testLoader: { ($0, hash) },
+            testCompletion: { _, _ in throw PagedKVRuntimeBridgeTestError.notExpected })
         let offer = NativeMTPTupleReofferTests.offer()
         await runtime.installNativeMTPTupleOfferForTest(offer)
         let before = await runtime.currentSnapshot()
