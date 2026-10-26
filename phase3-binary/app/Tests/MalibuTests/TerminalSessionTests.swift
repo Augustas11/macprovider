@@ -74,7 +74,15 @@ final class TerminalSessionTests: XCTestCase {
                 XCTAssertFalse(view.process.running)
                 XCTAssertEqual(view.process.childfd, -1)
                 if let baseline {
-                    XCTAssertEqual(openDescriptorCount(), baseline, "Normal exit leaked a descriptor")
+                    // SwiftTerm closes the PTY master asynchronously after child exit.
+                    let clock = ContinuousClock()
+                    let deadline = clock.now.advanced(by: .seconds(3))
+                    var count = openDescriptorCount()
+                    while count != baseline && clock.now < deadline {
+                        try await Task.sleep(for: .milliseconds(20))
+                        count = openDescriptorCount()
+                    }
+                    XCTAssertEqual(count, baseline, "Normal exit leaked a descriptor")
                 }
             }
             tabs.close(session)
