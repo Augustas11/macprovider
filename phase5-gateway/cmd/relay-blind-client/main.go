@@ -154,7 +154,7 @@ const privacyDirectoryPath = "/v1/privacy-class/directory"
 
 type options struct {
 	baseURL, identityPin, model, input, apiKeyEnv, walletSessionID, walletSessionKeyEnv string
-	directoryPublicKey, pool, privacyAssuranceRequired                                  string
+	directoryPublicKey, pool, privacyAssuranceRequired, endpointFamily                  string
 	maxOutputTokens, inputTokenUpperBound                                               int64
 	stream, privacyClass                                                                bool
 	timeout                                                                             time.Duration
@@ -166,6 +166,7 @@ func main() {
 	flag.StringVar(&opts.identityPin, "identity-pin", "", "absolute path to operator-provisioned relay-blind identity pin; with --privacy-class it overrides the signed identity directory")
 	flag.StringVar(&opts.directoryPublicKey, "directory-public-key", "", "pinned base64url Ed25519 public key of the operator-signed privacy identity directory (default: $"+privacyDirectoryKeyEnv+")")
 	flag.StringVar(&opts.model, "model", "", "canonical model ID")
+	flag.StringVar(&opts.endpointFamily, "endpoint-family", relayblind.EndpointChatCompletions, "original request family: chat_completions, responses, messages; non-chat requires --privacy-class")
 	flag.StringVar(&opts.input, "input", "-", "OpenAI-compatible chat request JSON file, or - for stdin")
 	flag.Int64Var(&opts.maxOutputTokens, "max-output-tokens", 0, "maximum output token cap")
 	flag.Int64Var(&opts.inputTokenUpperBound, "input-token-upper-bound", 0, "declared input token upper bound")
@@ -188,6 +189,12 @@ func main() {
 }
 
 func run(ctx context.Context, opts options, stdin io.Reader, stdout, stderr io.Writer, getenv func(string) string) error {
+	if opts.endpointFamily == "" {
+		opts.endpointFamily = relayblind.EndpointChatCompletions
+	}
+	if !relayblind.ValidEndpointFamily(opts.endpointFamily) || (opts.endpointFamily != relayblind.EndpointChatCompletions && !opts.privacyClass) {
+		return errors.New("unsupported endpoint family: non-chat encrypted requests require --privacy-class")
+	}
 	base, err := validateBaseURL(opts.baseURL)
 	if err != nil {
 		return err
@@ -228,7 +235,7 @@ func run(ctx context.Context, opts options, stdin io.Reader, stdout, stderr io.W
 		if err := pin.Verify(time.Now().UTC()); err != nil {
 			return fmt.Errorf("identity pin rejected: %w", err)
 		}
-		if !contains(pin.Models, opts.model) || !contains(pin.EndpointFamilies, relayblind.EndpointChatCompletions) {
+		if !contains(pin.Models, opts.model) || !contains(pin.EndpointFamilies, opts.endpointFamily) {
 			return errors.New("identity pin does not authorize the requested model and endpoint")
 		}
 	}
@@ -261,9 +268,9 @@ func run(ctx context.Context, opts options, stdin io.Reader, stdout, stderr io.W
 	// SPEC-041-R003: declare, outside the ciphertext, only whether the body
 	// needs SPEC-019 §1a non-strict json_schema mode, so the coordinator can
 	// route it to a provider that supports it.
-	requires := relayblind.RequiredCapabilities(inner)
+	requires := relayblind.RequiredCapabilitiesForFamily(inner, opts.endpointFamily)
 	reservationRequest := relayblind.ReservationRequest{
-		EndpointFamily: relayblind.EndpointChatCompletions, Model: opts.model, Stream: opts.stream,
+		EndpointFamily: opts.endpointFamily, Model: opts.model, Stream: opts.stream,
 		MaxOutputTokens: opts.maxOutputTokens, InputTokenUpperBound: opts.inputTokenUpperBound,
 		EncryptedRequestBytes: int64(len(inner)), Requires: requires,
 	}
@@ -363,7 +370,7 @@ func run(ctx context.Context, opts options, stdin io.Reader, stdout, stderr io.W
 	}
 	zeroBytes(buyerKey)
 
-	request, err := newSignedRequest(ctx, base, "/v1/chat/completions", bearer, opts.walletSessionID, sessionKey, inferenceRequestID, envelopeBody, opts.privacyClass, opts.pool, "")
+	request, err := newSignedRequest(ctx, base, relayBlindInferencePath(opts.endpointFamily), bearer, opts.walletSessionID, sessionKey, inferenceRequestID, envelopeBody, opts.privacyClass, opts.pool, "")
 	if err != nil {
 		return err
 	}
@@ -1113,6 +1120,17 @@ func readInnerRequest(path string, stdin io.Reader) ([]byte, error) {
 	return raw, nil
 }
 
+func relayBlindInferencePath(family string) string {
+	switch family {
+	case relayblind.EndpointResponses:
+		return "/v1/responses"
+	case relayblind.EndpointMessages:
+		return "/v1/messages"
+	default:
+		return "/v1/chat/completions"
+	}
+}
+
 func validateInnerRequest(raw []byte, opts options) error {
 	if err := rejectDuplicateKeys(raw); err != nil {
 		return fmt.Errorf("inner chat request rejected: %w", err)
@@ -1130,8 +1148,12 @@ func validateInnerRequest(raw []byte, opts options) error {
 	if err := json.Unmarshal(object["model"], &model); err != nil || model != opts.model {
 		return errors.New("inner chat request model does not match reservation")
 	}
-	if messages, ok := object["messages"]; !ok || len(messages) == 0 || bytes.Equal(bytes.TrimSpace(messages), []byte("null")) {
-		return errors.New("inner chat request messages are required")
+	contentField := "messages"
+	if opts.endpointFamily == relayblind.EndpointResponses {
+		contentField = "input"
+	}
+	if content, ok := object[contentField]; !ok || len(content) == 0 || bytes.Equal(bytes.TrimSpace(content), []byte("null")) {
+		return fmt.Errorf("inner request %s is required", contentField)
 	}
 	stream := false
 	if rawStream, ok := object["stream"]; ok {
@@ -1143,8 +1165,12 @@ func validateInnerRequest(raw []byte, opts options) error {
 		return errors.New("inner chat request stream does not match reservation")
 	}
 	var maxTokens int64
-	if err := json.Unmarshal(object["max_tokens"], &maxTokens); err != nil || maxTokens != opts.maxOutputTokens {
-		return errors.New("inner chat request max_tokens does not match reservation")
+	capField := "max_tokens"
+	if opts.endpointFamily == relayblind.EndpointResponses {
+		capField = "max_output_tokens"
+	}
+	if err := json.Unmarshal(object[capField], &maxTokens); err != nil || maxTokens != opts.maxOutputTokens {
+		return fmt.Errorf("inner request %s does not match reservation", capField)
 	}
 	return nil
 }

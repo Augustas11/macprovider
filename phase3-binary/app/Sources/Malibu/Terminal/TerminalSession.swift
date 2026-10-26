@@ -16,6 +16,7 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable {
     private var leaderIdentity: ProcessIdentity?
     private var sessionMembers: [pid_t: ProcessIdentity] = [:]
     private var groupMonitor: Task<Void, Never>?
+    private var startupTask: Task<Void, Never>?
     private var handoff: URL?
     private var cleanupDirectory: URL?
     private static var active: [UUID: TerminalSession] = [:]
@@ -33,7 +34,8 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable {
     /// Keys are checked before any launcher or PTY is created.
     func start(executable: URL?, model: ConnectedModel?, loginPath: String? = nil,
                hasKey: () -> Bool = { ConnectedBuyerKeychain.exists() },
-               readKey: () throws -> String = { try ConnectedBuyerKeychain.read() }) {
+               readKey: @escaping () throws -> String = { try ConnectedBuyerKeychain.read() },
+               privateEndpoint: ManagedPrivacyEndpoint? = nil) {
         guard !Self.isTerminating else {
             message = "Malibu is quitting. New terminal sessions cannot start."
             return
@@ -41,6 +43,30 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable {
         guard !started, !closing else { return }
         guard harness == .shell || hasKey() else {
             message = "Add a buyer key in Other apps"
+            return
+        }
+        if harness != .shell && privateEndpoint == nil {
+            guard startupTask == nil else { return }
+            guard let executable, let loginPath else { message = "Not installed"; return }
+            if harness == .claudeCode && model == nil { message = "Choose a gateway model first."; return }
+            if let app = harness.connectedApp {
+                do { _ = try ConnectedAppsStore().validateManagedLaunch(app) }
+                catch { message = (error as? ConnectedAppsError)?.localizedDescription ?? ConnectedAppsError.conflict.localizedDescription; return }
+            }
+            message = "Starting the private buyer endpoint…"
+            startupTask = Task { [weak self] in
+                guard let self, !self.closing, !Self.isTerminating, !Task.isCancelled else { return }
+                defer { self.startupTask = nil }
+                do {
+                    let endpoint = try await ManagedPrivacyConsumer.shared.start(buyerKey: readKey())
+                    guard !Task.isCancelled, !self.closing, !Self.isTerminating else { return }
+                    self.start(executable: executable, model: model, loginPath: loginPath, hasKey: { true }, privateEndpoint: endpoint)
+                } catch {
+                    if !Task.isCancelled {
+                        self.message = (error as? ConnectedAppsError)?.localizedDescription ?? ConnectedAppsError.privacyUnavailable.localizedDescription
+                    }
+                }
+            }
             return
         }
         do {
@@ -56,7 +82,8 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable {
                 guard let executable, let loginPath else { message = "Not installed"; return }
                 if harness == .claudeCode {
                     guard let model else { message = "Choose a gateway model first."; return }
-                    let plan = try ClaudeCodeLauncher.prepare(executable: executable, model: model, key: readKey(), loginPath: loginPath)
+                    guard let privateEndpoint else { throw ConnectedAppsError.privacyUnavailable }
+                    let plan = try ClaudeCodeLauncher.prepare(executable: executable, model: model, endpoint: privateEndpoint, loginPath: loginPath)
                     command = plan.executable
                     arguments = plan.arguments
                     environment = plan.environment
@@ -64,7 +91,7 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable {
                     cleanupDirectory = plan.cleanupDirectory
                 } else {
                     guard let app = harness.connectedApp else { return }
-                    let prepared = try ConnectedAppsStore().prepareEmbeddedLaunch(app, isolated: true)
+                    let prepared = try ConnectedAppsStore().prepareEmbeddedLaunch(app, isolated: true, endpoint: privateEndpoint)
                     command = URL(fileURLWithPath: "/bin/sh")
                     arguments = [prepared.launcher.path]
                     handoff = prepared.handoff
@@ -101,7 +128,7 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable {
             Self.active[id] = self
         } catch {
             cleanup()
-            message = "Set up this harness in Other apps before launching."
+            message = (error as? ConnectedAppsError)?.localizedDescription ?? "Set up this harness in Other apps before launching."
         }
     }
 
@@ -118,6 +145,8 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable {
     func close() {
         guard !closing else { return }
         closing = true
+        startupTask?.cancel()
+        startupTask = nil
         signalOwnedSession(SIGHUP)
         terminalView?.process.closeIO()
         cleanup()

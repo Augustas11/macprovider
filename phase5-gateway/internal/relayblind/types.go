@@ -21,6 +21,8 @@ const (
 	PinVersion              = "relay-blind-pilot-pin-v1"
 	ModeRequired            = "required"
 	EndpointChatCompletions = "chat_completions"
+	EndpointMessages        = "messages"
+	EndpointResponses       = "responses"
 	Algorithm               = "x25519-hkdf-sha256-a256gcm-v1"
 	SignatureAlgorithm      = "ed25519"
 	CachePolicyNoStore      = "no-store"
@@ -338,7 +340,7 @@ func ParseStatusResponse(raw []byte) (StatusResponse, error) {
 }
 
 func (r ReservationRequest) Validate() error {
-	if r.EndpointFamily != EndpointChatCompletions || !validModelID(r.Model) || r.MaxOutputTokens <= 0 || r.InputTokenUpperBound <= 0 || r.EncryptedRequestBytes <= 0 || r.EncryptedRequestBytes > MaxEncryptedRequestBytes || !ValidRequires(r.Requires) {
+	if !ValidEndpointFamily(r.EndpointFamily) || !validModelID(r.Model) || r.MaxOutputTokens <= 0 || r.InputTokenUpperBound <= 0 || r.EncryptedRequestBytes <= 0 || r.EncryptedRequestBytes > MaxEncryptedRequestBytes || !ValidRequires(r.Requires) {
 		return ErrInvalidReservation
 	}
 	_, err := checkedTokenCap(r.InputTokenUpperBound, r.MaxOutputTokens)
@@ -348,6 +350,9 @@ func (r ReservationRequest) Validate() error {
 func (r ReservationResponse) Validate() error {
 	switch r.Version {
 	case ReservationVersion:
+		if r.EndpointFamily != EndpointChatCompletions {
+			return ErrInvalidReservation
+		}
 		if r.privacyExtensionPresent() || r.poolExtensionPresent() {
 			return ErrInvalidReservation
 		}
@@ -361,7 +366,7 @@ func (r ReservationResponse) Validate() error {
 	default:
 		return ErrInvalidReservation
 	}
-	if r.EndpointFamily != EndpointChatCompletions || !validModelID(r.Model) || !validModelID(r.ProviderModel) || r.KID != r.KeyRecord.KID || r.KeyRecordDigest != r.KeyRecord.KeyRecordDigest || r.MaxEncryptedRequestBytes == 0 || r.MaxEncryptedRequestBytes > r.KeyRecord.MaxEncryptedRequestBytes || r.ExpiresAtUnix <= 0 || r.CachePolicy != CachePolicyNoStore || r.FailoverPolicy != FailoverPolicyDisabled {
+	if !ValidEndpointFamily(r.EndpointFamily) || !validModelID(r.Model) || !validModelID(r.ProviderModel) || r.KID != r.KeyRecord.KID || r.KeyRecordDigest != r.KeyRecord.KeyRecordDigest || r.MaxEncryptedRequestBytes == 0 || r.MaxEncryptedRequestBytes > r.KeyRecord.MaxEncryptedRequestBytes || r.ExpiresAtUnix <= 0 || r.CachePolicy != CachePolicyNoStore || r.FailoverPolicy != FailoverPolicyDisabled {
 		return ErrInvalidReservation
 	}
 	if _, err := decodeBase64URLFixed(r.ProviderBinding, 32); err != nil {
@@ -493,8 +498,22 @@ func validSortedModels(values []string) bool {
 	return true
 }
 
+// ValidEndpointFamily is the closed envelope vocabulary. Non-chat families
+// require the privacy class at admission; they never use plaintext fallback.
+func ValidEndpointFamily(value string) bool {
+	return value == EndpointChatCompletions || value == EndpointMessages || value == EndpointResponses
+}
+
 func validEndpointFamilies(values []string) bool {
-	return len(values) == 1 && values[0] == EndpointChatCompletions
+	if len(values) == 0 || len(values) > 3 || !sort.StringsAreSorted(values) {
+		return false
+	}
+	for i, value := range values {
+		if !ValidEndpointFamily(value) || (i > 0 && value == values[i-1]) {
+			return false
+		}
+	}
+	return true
 }
 
 func contains(values []string, target string) bool {

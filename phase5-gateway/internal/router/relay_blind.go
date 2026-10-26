@@ -136,8 +136,8 @@ func (s *Server) handleRelayBlindRouteReservations(w http.ResponseWriter, r *htt
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "relay_blind_route_reservation_invalid", "Relay-blind encrypted request exceeds configured size limit")
 		return
 	}
-	if req.EndpointFamily != "chat_completions" {
-		writeError(w, http.StatusBadRequest, "invalid_request_error", "relay_blind_endpoint_unsupported", "Relay-blind request encryption v0.1 supports chat_completions only")
+	if !relayblind.ValidEndpointFamily(req.EndpointFamily) || (req.EndpointFamily != relayblind.EndpointChatCompletions && !present) {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "relay_blind_endpoint_unsupported", "Non-chat encrypted requests require the privacy class")
 		return
 	}
 	if !relayBlindModelIDValid(req.Model) {
@@ -285,12 +285,12 @@ func (s *Server) rejectRelayBlindEnvelopeIfRequired(w http.ResponseWriter, r *ht
 		writeError(w, http.StatusServiceUnavailable, "api_error", "relay_blind_disabled", "Relay-blind request encryption is disabled")
 		return true
 	}
-	if env.EndpointFamily != "chat_completions" {
+	if !relayblind.ValidEndpointFamily(env.EndpointFamily) || (env.EndpointFamily != relayblind.EndpointChatCompletions && (!present || !valid)) {
 		if err := s.recordRelayBlindRequiredAudit(r, accountID, walletSessionID, endpointFamily, env, body, "relay_blind_endpoint_unsupported"); err != nil {
 			writeError(w, http.StatusInternalServerError, "server_error", "internal_error", "Could not record relay-blind required-mode audit")
 			return true
 		}
-		writeError(w, http.StatusBadRequest, "invalid_request_error", "relay_blind_endpoint_unsupported", "Relay-blind request encryption v0.1 supports chat_completions only")
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "relay_blind_endpoint_unsupported", "Non-chat encrypted requests require the privacy class")
 		return true
 	}
 	if env.BuyerBinding != "" {
@@ -471,11 +471,16 @@ func (s *Server) handleRelayBlindEndpointDisabledBody(w http.ResponseWriter, r *
 		writeError(w, http.StatusServiceUnavailable, "api_error", "relay_blind_disabled", "Relay-blind request encryption is disabled")
 		return
 	}
+	present, valid := privacyRequested(r)
+	if relayblind.ValidEndpointFamily(env.EndpointFamily) && present && valid {
+		s.dispatchRelayBlindChat(w, r, body, relayBlindAccountID(authn), authn.WalletSession)
+		return
+	}
 	if err := s.recordRelayBlindRequiredAudit(r, relayBlindAccountID(authn), walletSessionID, endpointFamily, env, body, "relay_blind_endpoint_unsupported"); err != nil {
 		writeError(w, http.StatusInternalServerError, "server_error", "internal_error", "Could not record relay-blind required-mode audit")
 		return
 	}
-	writeError(w, http.StatusBadRequest, "invalid_request_error", "relay_blind_endpoint_unsupported", "Relay-blind request encryption v0.1 supports chat_completions only")
+	writeError(w, http.StatusBadRequest, "invalid_request_error", "relay_blind_endpoint_unsupported", "Non-chat encrypted requests require the privacy class")
 }
 
 func readRelayBlindDisabledProbeBody(w http.ResponseWriter, r *http.Request, limit int64) ([]byte, bool, error) {
@@ -609,6 +614,12 @@ func relayBlindRawRequiredModePresent(body []byte) bool {
 }
 
 func relayBlindEndpointFamilyFromRequest(r *http.Request) string {
+	switch r.URL.Path {
+	case "/v1/responses":
+		return relayblind.EndpointResponses
+	case "/v1/messages":
+		return relayblind.EndpointMessages
+	}
 	if responsesAdapterFromContext(r.Context()) != nil {
 		return "responses"
 	}
