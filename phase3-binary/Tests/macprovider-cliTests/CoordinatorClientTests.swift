@@ -467,6 +467,65 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertEqual(capExceeded.reasonCode, "autotune_model_cap_exceeded")
     }
 
+    func testCreativeHoldReleaseReauthenticatesAcceptedCoordinatorSession() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let status = ProviderStatus(modelID: "model-a", modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1))
+        let client = try await makeClient(status: status, recorder: recorder)
+        let socket = FakeProviderWebSocketTask(receiveResults: [])
+        await client.setWebSocketForTest(socket)
+        try await client.handleCoordinatorPayloadForTest([
+            "type": "hello_ack", "assigned_id": "creative-session", "heartbeat_interval_s": 30,
+        ])
+        // Install the same handler installed by an accepted production session.
+        await client.reinstallRequestCapacityStateUpdateHandlerForTest()
+        await status.setLocalCreativeHold(true)
+        try await client.sendHeartbeatForTest()
+        let held = await recorder.frames.last { $0["type"] as? String == "heartbeat" }
+        XCTAssertEqual(held?["status"] as? String, "unavailable")
+        await status.setLocalCreativeHold(false)
+        XCTAssertEqual(socket.cancelCount, 1, "A fresh authenticated registration must reopen routing")
+        let admission = await status.beginRequestIfAccepting()
+        XCTAssertNotNil(admission)
+        if let admission { await status.finishRequest(startedAt: admission, completion: nil, failed: false) }
+        // The reconnect registration advertises the restored model as ready.
+        let replacement = FakeProviderWebSocketTask(receiveResults: [])
+        await client.setWebSocketForTest(replacement)
+        try await client.handleCoordinatorPayloadForTest([
+            "type": "hello_ack", "assigned_id": "creative-reconnected", "heartbeat_interval_s": 30,
+        ])
+        try await client.sendHeartbeatForTest()
+        let restored = await recorder.frames.last { $0["type"] as? String == "heartbeat" }
+        XCTAssertEqual(restored?["status"] as? String, "ready")
+        // A replayed release does not bounce the newly registered session.
+        await status.setLocalCreativeHold(false)
+        XCTAssertEqual(replacement.cancelCount, 0)
+        await client.stop()
+    }
+
+    func testCreativeHoldReleaseNeverLiftsOperatorPause() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let status = ProviderStatus(modelID: "model-a", modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1))
+        let client = try await makeClient(status: status, recorder: recorder)
+        let socket = FakeProviderWebSocketTask(receiveResults: [])
+        await client.setWebSocketForTest(socket)
+        try await client.handleCoordinatorPayloadForTest([
+            "type": "hello_ack", "assigned_id": "creative-session", "heartbeat_interval_s": 30,
+        ])
+        await client.reinstallRequestCapacityStateUpdateHandlerForTest()
+        await status.setLocalCreativeHold(true)
+        _ = await client.pauseByOperator()
+        let cancellations = socket.cancelCount
+        await status.setLocalCreativeHold(false)
+        XCTAssertEqual(socket.cancelCount, cancellations)
+        let admission = await status.beginRequestIfAccepting()
+        XCTAssertNil(admission)
+        let snapshot = await status.snapshot()
+        XCTAssertEqual(snapshot.status, .unavailable)
+        await client.stop()
+    }
+
     func testOperatorPauseAndResumeFenceRequestsAndPublishCoordinatorState() async throws {
         let recorder = CoordinatorFrameRecorder()
         let status = ProviderStatus(

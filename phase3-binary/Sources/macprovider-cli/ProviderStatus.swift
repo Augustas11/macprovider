@@ -1396,6 +1396,11 @@ actor ProviderStatus {
     /// CoordinatorClient does on resume alone, re-opens routing.
     private(set) var operatorPauseFence = false
     private(set) var localCreativeHold = false
+    private var creativeHoldReleaseHandler: (@Sendable () async -> Void)?
+
+    func setCreativeHoldReleaseHandler(_ handler: (@Sendable () async -> Void)?) {
+        creativeHoldReleaseHandler = handler
+    }
 
     func markLanguageUnloadedForCreativeHold() {
         modelLoaded = false
@@ -1403,6 +1408,7 @@ actor ProviderStatus {
     }
 
     func setLocalCreativeHold(_ held: Bool) async {
+        let wasHeld = localCreativeHold
         localCreativeHold = held
         if held {
             transition(to: .unavailable, reason: "local_creative_hold")
@@ -1414,6 +1420,7 @@ actor ProviderStatus {
             reopenLocalAdmission()
             wakeLocalCapacityWaiters()
             await refreshAvailabilityState()
+            if wasHeld { await creativeHoldReleaseHandler?() }
         }
     }
 
