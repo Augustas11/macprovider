@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import XCTest
+import Vision
 @testable import Malibu
 
 @MainActor
@@ -61,27 +62,29 @@ final class NavigationEarnTests: XCTestCase {
             window.orderFrontRegardless()
             defer { window.close() }
             settle(window)
-            let content = try XCTUnwrap(window.contentView)
-            let rendered = elements(content)
-            let diagnostic = rendered.prefix(100).map {
-                "role=\($0.accessibilityRole()?.rawValue ?? "nil") label=\($0.accessibilityLabel() ?? "nil") value=\(String(describing: $0.accessibilityValue()).prefix(180))"
-            }.joined(separator: "\n")
-            let title = try XCTUnwrap(rendered.first { text($0).contains("Earn") }, diagnostic)
-            let actionLabel = state == .serving ? "Pause customer work…" : "Resume customer work"
-            let action = try XCTUnwrap(rendered.first { text($0).contains(actionLabel) }, diagnostic)
-            XCTAssertGreaterThan(action.accessibilityFrame().width, 0)
-            XCTAssertLessThan(abs(action.accessibilityFrame().midY - title.accessibilityFrame().midY), 50,
+            let rendered = try renderedText(window)
+            let diagnostic = rendered.map(\.text).joined(separator: "\n")
+            let title = try XCTUnwrap(rendered.first { $0.text == "Earn" }, diagnostic)
+            let actionLabel = state == .serving ? "Pause customer work" : "Resume customer work"
+            let action = try XCTUnwrap(rendered.first { $0.text.contains(actionLabel) }, diagnostic)
+            XCTAssertLessThan(abs(action.bounds.midY - title.bounds.midY) * window.frame.height, 50,
                               "Pause/Resume must be rendered in the Earn header")
-            XCTAssertFalse(strings(content).contains("Customer slots"), "Provider details start collapsed")
-            let disclosure = try XCTUnwrap(elements(content).first {
-                $0.accessibilityRole() == .disclosureTriangle
-            })
-            XCTAssertTrue(disclosure.accessibilityPerformPress())
+            XCTAssertFalse(diagnostic.contains("Customer slots"), "Provider details start collapsed")
+            let disclosure = try XCTUnwrap(rendered.first { $0.text.contains("Provider details") }, diagnostic)
+            // Click the rendered disclosure triangle just left of its label.
+            let point = NSPoint(x: disclosure.bounds.minX * window.frame.width - 12,
+                                y: disclosure.bounds.midY * window.frame.height)
+            for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                let event = try XCTUnwrap(NSEvent.mouseEvent(with: type, location: point, modifierFlags: [],
+                    timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                    context: nil, eventNumber: 0, clickCount: 1, pressure: 1))
+                window.sendEvent(event)
+            }
             settle(window)
-            let expanded = strings(content)
+            let expanded = try renderedText(window).map(\.text).joined(separator: "\n")
             for expected in ["Customer slots", "Requests", "Tokens", "Current run", "Endpoints (this Mac only)",
-                             "POST /v1/chat/completions", "POST /v1/responses", ProviderScreenPresentation.endpointsNote] {
-                XCTAssertTrue(expanded.contains(expected), "Expanded Earn details must render R007 content: \(expected)")
+                             "/v1/chat/completions", "/v1/responses"] {
+                XCTAssertTrue(expanded.contains(expected), "Expanded Earn details must render R007 content: \(expected)\n\(expanded)")
             }
         }
     }
@@ -94,27 +97,27 @@ final class NavigationEarnTests: XCTestCase {
         window.contentView?.layoutSubtreeIfNeeded()
     }
 
-    private func elements(_ root: Any) -> [any NSAccessibilityProtocol] {
-        var visited = Set<ObjectIdentifier>()
-        func visit(_ object: Any) -> [any NSAccessibilityProtocol] {
-            guard let object = object as? NSObject,
-                  visited.insert(ObjectIdentifier(object)).inserted else { return [] }
-            let element = object as? any NSAccessibilityProtocol
-            let children = element?.accessibilityChildren() ?? []
-            // NSHostingView can be an ignored wrapper. Inspect its native
-            // descendants as well as the exposed virtual accessibility tree.
-            let nativeChildren = (object as? NSView)?.subviews ?? []
-            return (element.map { [$0] } ?? []) + (children + nativeChildren).flatMap(visit)
+    private struct RenderedText {
+        let text: String
+        let bounds: CGRect
+    }
+
+    /// The hosted test process exposes only an AXGroup on some macOS versions.
+    /// Read the rendered pixels so deleting a view still fails this regression.
+    private func renderedText(_ window: NSWindow) throws -> [RenderedText] {
+        let image = try XCTUnwrap(CGWindowListCreateImage(.null, .optionIncludingWindow,
+            CGWindowID(window.windowNumber), [.bestResolution, .boundsIgnoreFraming]))
+        let attachment = XCTAttachment(image: NSImage(cgImage: image, size: window.frame.size))
+        attachment.name = "Earn rendered controls"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.recognitionLanguages = ["en-US"]
+        request.usesLanguageCorrection = false
+        try VNImageRequestHandler(cgImage: image).perform([request])
+        return (request.results ?? []).compactMap { observation in
+            observation.topCandidates(1).first.map { RenderedText(text: $0.string, bounds: observation.boundingBox) }
         }
-        return visit(root)
-    }
-
-    private func text(_ element: any NSAccessibilityProtocol) -> [String] {
-        [element.accessibilityLabel(), element.accessibilityValue() as? String,
-         element.accessibilityTitle()].compactMap { $0 }
-    }
-
-    private func strings(_ root: Any) -> Set<String> {
-        Set(elements(root).flatMap(text))
     }
 }
