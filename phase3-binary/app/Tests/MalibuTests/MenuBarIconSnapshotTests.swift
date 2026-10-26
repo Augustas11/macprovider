@@ -170,14 +170,14 @@ final class DockPresenceTests: XCTestCase {
 
 @MainActor
 final class MainMenuTests: XCTestCase {
-    /// A `.regular` app needs a real main menu: Settings, Open Dashboard,
+    /// A `.regular` app needs a real main menu: Settings, Open Malibu,
     /// Quit, plus the standard Edit and Window menus.
     func testMainMenuOffersSettingsDashboardAndQuit() {
         let titles = (NSApp.mainMenu?.items ?? []).flatMap { item in
             [item.title] + (item.submenu?.items.map(\.title) ?? [])
         }
         XCTAssertTrue(titles.contains("Settings…"), "\(titles)")
-        XCTAssertTrue(titles.contains("Open Dashboard"), "\(titles)")
+        XCTAssertTrue(titles.contains("Open Malibu"), "\(titles)")
         XCTAssertTrue(titles.contains { $0.hasPrefix("Quit") }, "\(titles)")
         XCTAssertTrue(titles.contains("Edit"), "\(titles)")
         XCTAssertTrue(titles.contains("Window"), "\(titles)")

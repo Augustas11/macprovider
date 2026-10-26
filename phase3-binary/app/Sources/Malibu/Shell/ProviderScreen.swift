@@ -158,30 +158,14 @@ enum ProviderScreenPresentation {
     }
 }
 
-struct ProviderScreen: View {
+/// R007 content shared by the Earn disclosure and standalone hosted fixtures.
+struct ProviderDetailsContent: View {
     @ObservedObject var agent: MalibuAgent
     let navigate: (MalibuSection) -> Void
-    @State private var confirmPause = false
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                HStack(spacing: 12) {
-                    Text(MalibuSection.provider.title)
-                        .font(.title2.weight(.semibold))
-                    StatusPillView(pill: AgentSnapshotPresenter.statusPill(agent.snapshot))
-                    Spacer()
-                    switch ProviderScreenPresentation.pauseAction(agent.snapshot) {
-                    case .pause:
-                        Button(String(localized: "Pause customer work…", comment: "Provider pause action")) { confirmPause = true }
-                    case .resume:
-                        Button(String(localized: "Resume customer work", comment: "Provider resume action")) {
-                            Task { await agent.resume() }
-                        }
-                    case .none:
-                        EmptyView()
-                    }
-                }
+        VStack(alignment: .leading, spacing: 16) {
+            StatusPillView(pill: AgentSnapshotPresenter.statusPill(agent.snapshot))
                 ShellPanel {
                     ForEach(ProviderScreenPresentation.rows(agent.snapshot), id: \.title) { row in
                         MetricRow(title: row.title, value: row.value)
@@ -217,21 +201,49 @@ struct ProviderScreen: View {
                     navigate(.diagnostics)
                 }
                 .buttonStyle(.link)
+        }
+    }
+}
+
+struct ProviderScreen: View {
+    @ObservedObject var agent: MalibuAgent
+    let navigate: (MalibuSection) -> Void
+
+    var body: some View {
+        ScrollView {
+            ProviderDetailsContent(agent: agent, navigate: navigate).padding(20)
+        }
+        .accessibilityIdentifier("malibu.provider")
+    }
+}
+
+/// Pause and Resume live outside the collapsed provider details.
+struct ProviderPauseControl: View {
+    @ObservedObject var agent: MalibuAgent
+    @State private var confirmPause = false
+
+    var body: some View {
+        Group {
+            switch ProviderScreenPresentation.pauseAction(agent.snapshot) {
+            case .pause:
+                Button(String(localized: "Pause customer work…", comment: "Provider pause action")) { confirmPause = true }
+            case .resume:
+                Button(String(localized: "Resume customer work", comment: "Provider resume action")) {
+                    Task { await agent.resume() }
+                }
+            case .none:
+                EmptyView()
             }
-            .padding(20)
-            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .confirmationDialog(
             String(localized: "Pause customer work on this Mac?", comment: "Provider pause confirmation title"),
             isPresented: $confirmPause
         ) {
-            Button(String(localized: "Pause", comment: "Provider pause confirm")) {
-                Task { await agent.pause() }
-            }
+            Button(String(localized: "Pause", comment: "Provider pause confirm")) { Task { await agent.pause() } }
             Button(String(localized: "Cancel", comment: "Provider pause cancel"), role: .cancel) {}
         } message: {
             Text(String(localized: "This Mac stops taking new customer requests until you resume. Requests already running finish. No paid customer work runs while paused.", comment: "Provider pause confirmation message"))
         }
-        .accessibilityIdentifier("malibu.provider")
+        .accessibilityIdentifier("malibu.earn.pause")
     }
 }

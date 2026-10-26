@@ -8,6 +8,26 @@ import XCTest
 /// Does not run the provider CLI and does not attach to the live provider.
 @MainActor
 final class ModelScreensHostedTests: XCTestCase {
+    func testRecommendedEmptyRecoverySwitchesHubToBrowse() async throws {
+        let store = ModelManagementStore(
+            cli: ProjectionCLI(stdout: Self.projection(rows: [ShellScreensTests.catalogOnlyRowJSON(
+                key: "large", modelID: "vendor/large", fit: "does_not_fit")])),
+            makeBrowseCLI: { ProjectionCLI(stdout: "") }, paths: Self.paths(),
+            defaults: UserDefaults(suiteName: "RecommendedEmpty-\(UUID().uuidString)")!)
+        await store.refresh(currentModelID: nil, peer: Self.peer())
+        XCTAssertTrue(ModelsHubPresentation.rows(for: .recommended, rows: store.rows).isEmpty)
+        XCTAssertFalse(ModelsHubPresentation.rows(for: .browse, rows: store.rows).isEmpty)
+        XCTAssertTrue(DiscoverPresentation.emptyRecommended.contains("No recommended model fits"))
+        XCTAssertTrue(DiscoverPresentation.emptyRecommended.contains("Models › Browse"))
+        XCTAssertFalse(DiscoverPresentation.emptyRecommended.contains("Turn off"))
+        var selected = ModelsHubTab.recommended
+        let hub = ModelsHubScreen(store: store, agent: MalibuAgent(initialSnapshot: .empty),
+            selection: Binding(get: { selected }, set: { selected = $0 }))
+        let browse = try XCTUnwrap(hub.discovery.browseModels)
+        browse()
+        XCTAssertEqual(selected, .browse)
+    }
+
     func testPopulatedModelsAndDiscoverScreensRender() async throws {
         let rows = [
             ShellScreensTests.rowJSON(key: "llama-3.2-3b-instruct", isCurrent: true, estimatedGB: 1.8, completion: 0.08, demandRank: 9),
@@ -37,6 +57,9 @@ final class ModelScreensHostedTests: XCTestCase {
         try? FileManager.default.createDirectory(at: artifacts, withIntermediateDirectories: true)
         try host(ModelsScreen(store: store, agent: agent), png: artifacts.appendingPathComponent("20-models-populated.png"))
         try host(DiscoverScreen(store: store, agent: agent), png: artifacts.appendingPathComponent("21-discover-populated.png"))
+        for tab in ModelsHubTab.allCases {
+            try host(ModelsHubScreen(store: store, agent: agent, selection: .constant(tab)), png: artifacts.appendingPathComponent("models-hub-\(tab.rawValue).png"))
+        }
         let ready = try XCTUnwrap(store.rows.first { $0.action == .switchModel })
         try host(ModelSwitchSheet(store: store, row: ready, isRevert: false) {}, png: artifacts.appendingPathComponent("22-switch-confirm.png"), size: NSSize(width: 480, height: 330))
         try host(ConnectedAppsScreen(), png: artifacts.appendingPathComponent("23-connected-apps.png"), size: NSSize(width: 830, height: 760))
@@ -65,6 +88,7 @@ final class ModelScreensHostedTests: XCTestCase {
         try? FileManager.default.createDirectory(at: artifacts, withIntermediateDirectories: true)
         try host(ModelsScreen(store: store, agent: agent), png: artifacts.appendingPathComponent("24-models-downloading.png"))
         try host(DiscoverScreen(store: store, agent: agent), png: artifacts.appendingPathComponent("25-discover-downloading.png"))
+        try host(ModelsHubScreen(store: store, agent: agent, selection: .constant(.downloads)), png: artifacts.appendingPathComponent("models-hub-active-download.png"))
         store.cancelDownload()
         await task.value
         XCTAssertNil(store.download)

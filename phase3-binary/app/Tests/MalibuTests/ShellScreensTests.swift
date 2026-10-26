@@ -8,9 +8,9 @@ final class ShellScreensTests: XCTestCase {
     func testSidebarSectionsAreInTheAuditOrder() {
         XCTAssertEqual(
             MalibuSection.allCases.map(\.title),
-            ["Dashboard", "Chat", "Connected apps", "Models", "Discover", "Provider", "Settings", "Diagnostics"]
+            ["Chat", "Terminal", "Models", "Earn", "Settings", "Diagnostics"]
         )
-        XCTAssertEqual(MalibuSection.primary, [.dashboard, .chat, .connectedApps, .models, .discover, .provider])
+        XCTAssertEqual(MalibuSection.primary, [.chat, .terminal, .models, .earn])
         XCTAssertEqual(MalibuSection.utility, [.settings, .diagnostics])
         XCTAssertEqual(Set(MalibuSection.allCases.map(\.systemImage)).count, MalibuSection.allCases.count)
     }
@@ -18,7 +18,7 @@ final class ShellScreensTests: XCTestCase {
     @MainActor
     func testNavigationOpensOnDashboardAndShowsARequestedSection() {
         let navigation = MalibuNavigation()
-        XCTAssertEqual(navigation.selection, .dashboard)
+        XCTAssertEqual(navigation.selection, .chat)
         navigation.show(.settings)
         XCTAssertEqual(navigation.selection, .settings)
     }
@@ -59,7 +59,7 @@ final class ShellScreensTests: XCTestCase {
         snapshot.state = .serving
         snapshot.currentModelID = "qwen3-8b"
         let strings = DashboardCopy.defaultPublicStrings(snapshot)
-        XCTAssertEqual(strings.first, "Dashboard")
+        XCTAssertEqual(strings.first, "Earn")
         XCTAssertTrue(strings.contains(DashboardCopy.yourModelTitle))
         XCTAssertFalse(strings.contains("Advanced diagnostics"))
         XCTAssertFalse(DashboardCopy.showsInviteNudge(snapshot))

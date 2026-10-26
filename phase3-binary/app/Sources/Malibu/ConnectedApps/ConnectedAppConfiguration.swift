@@ -37,12 +37,13 @@ struct ConnectedModel: Identifiable, Equatable {
 
 enum ConnectedAppsError: Error, LocalizedError {
     case unsafeFile, conflict, invalidConfiguration, unavailableMetadata, credential, invalidResponse
-    case openCodeSetupUpgrade
+    case openCodeSetupUpgrade, launcherSetupUpgrade
     case http(Int), network
     var errorDescription: String? {
         switch self {
         case .unsafeFile: "Configuration is not a bounded, user-owned regular file in a safe directory."
         case .conflict: "Configuration changed since preview or setup. No restore was performed; preserve your newer edits."
+        case .launcherSetupUpgrade: "This managed launcher predates Malibu’s protected key handoff. Choose Restore setup, then Preview setup and Set up before launching. Your buyer key stays in Keychain."
         case .openCodeSetupUpgrade: "This OpenCode setup predates Malibu's managed tool instructions. Choose Restore setup, then Preview setup and Set up to upgrade. Your buyer key stays in Keychain."
         case .invalidConfiguration: "This configuration syntax cannot be changed safely. Use the documented manual setup."
         case .unavailableMetadata: "The gateway does not publish the model metadata this client requires. Automated setup is unavailable."
@@ -62,17 +63,13 @@ enum ConnectedAppsError: Error, LocalizedError {
 /// Codex and Crush use isolated managed profiles, leaving arbitrary TOML/Bash intact.
 enum ConnectedAppConfiguration {
     static let gateway = URL(string: "https://api.malibu.tech/v1")!
-    /// SPEC-025-R012: these clients send ordinary gateway requests, which the
-    /// SPEC-049 private mode does not cover; local Malibu Chat never leaves
-    /// this Mac.
-    static let privacy = "Not private: these apps send requests that Malibu does not encrypt, so the network's private mode doesn't apply and the Malibu gateway and the serving provider can read prompts and responses. For private requests, use Malibu Chat. Usage is billed to your buyer account."
     /// The key is in the launched CLI's environment, so anything that CLI
     /// loads or runs can read it. This is the honest scope of "injection".
     static let keyExposure = "Use a dedicated, spend-limited buyer key: the launched app, its repository configuration and the commands its agent runs can read it."
     /// The handoff mechanics and profile scope, behind Details.
-    static let setupDetails = "Malibu keeps the key in Keychain and hands it to each Launch through a private one-time file; the launcher puts it in the app's environment, where anything the app loads or runs can read it and send it elsewhere. Setup writes a managed profile and a Terminal launcher for the command-line app, so always launch from here. Project settings or managed policy can override the profile; check the provider and model inside the app. Desktop apps are not set up."
+    static let setupDetails = "Malibu keeps the key in Keychain and hands it to each Launch through a one-time file restricted to your account; the launcher puts it in the app's environment. Setup writes a managed profile and a Terminal launcher for the command-line app, so always launch from here. Project settings or managed policy can override the profile; check the provider and model inside the app. Desktop apps are not set up."
     static let crushProjectConfigWarning = "Crush also loads configuration from the directory you launch it in (for example ./.crushrc) and has no switch to ignore it. A repository's Crush configuration can redirect requests or read your buyer key. Launch Crush only in repositories you trust."
-    static let cursorDisclosure = "Cursor also sends your key and prompts through Cursor's servers. BYOK covers supported chat models; Tab uses Cursor models. Verify custom endpoint support in your installed Cursor version."
+    static let cursorDisclosure = "BYOK covers supported chat models; Tab uses Cursor models. Verify custom endpoint support in your installed Cursor version."
     static let cursorSetup = "Open Cursor Settings → Models → API Keys. Enter your buyer key under OpenAI and enable Use OpenAI API Key. Enable Override OpenAI Base URL and enter https://api.malibu.tech/v1. Add the exact gateway model ID shown here, then select it in a new chat. Malibu does not edit Cursor's settings. To undo setup, remove the buyer key and custom model and turn off the base URL override."
     static let openCodeToolDisclosure = "For Qwen3 Coder 30B A3B Instruct and Qwen3 30B A3B Instruct 2507, launch with OpenCode 1.17.9 and Malibu's managed profile for model-scoped sampling and tool instructions. Custom agent prompts are preserved. Check the session's actual tool activity before relying on file access or edits. Managed-profile checks do not verify production gateway tool use."
     private static let openCodeQwenModelIDs: Set<String> = [
@@ -247,17 +244,24 @@ enum ConnectedAppConfiguration {
         // Malibu's Launch writes the key to a private 0600 file in a 0700
         // directory; this reads it once and deletes it, so no other program
         // needs Keychain access and the key never appears in arguments or here.
-        return Data("""
+        return Data((handoffPrefix(keyHandoff) + """
+        \(versionGuard)\(environment)exec \(shell(executable.path))\(arguments)
+
+        """).utf8)
+    }
+
+    /// Launch refuses historical receipts unless they contain this exact prefix.
+    static func handoffPrefix(_ keyHandoff: URL) -> String {
+        """
         #!/bin/sh
         set -eu
         KEY_FILE=\(shell(keyHandoff.path))
         if [ ! -f "$KEY_FILE" ] || [ -L "$KEY_FILE" ]; then echo 'Use Launch in Malibu to deliver the buyer key.' >&2; exit 1; fi
-        MALIBU_API_KEY=$(cat -- "$KEY_FILE" || true)
-        rm -f -- "$KEY_FILE"
+        MALIBU_API_KEY=$(/bin/cat -- "$KEY_FILE") || { /bin/rm -f -- "$KEY_FILE"; exit 1; }
+        /bin/rm -f -- "$KEY_FILE"
         test -n "$MALIBU_API_KEY"
         export MALIBU_API_KEY
-        \(versionGuard)\(environment)exec \(shell(executable.path))\(arguments)
 
-        """.utf8)
+        """
     }
 }

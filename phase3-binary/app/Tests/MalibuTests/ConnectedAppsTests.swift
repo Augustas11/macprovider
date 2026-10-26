@@ -346,6 +346,43 @@ final class ConnectedAppsTests: XCTestCase {
         }
     }
 
+    @MainActor
+    func testHistoricalManagedLauncherReceiptsCannotReadOrDeliverBuyerKey() throws {
+        for app in [ConnectedApp.codex, .openCode, .goose, .crush] {
+            for helper in ["cat", "rm"] {
+                try temporary { home in
+                    let root = home.appendingPathComponent("Library/Application Support/Malibu/ConnectedApps")
+                    let handoff = root.appendingPathComponent("handoff/" + app.slug + ".key")
+                    let launcher = root.appendingPathComponent(app.slug + "/Launch.command")
+                    let config = root.appendingPathComponent(app.slug + "/config")
+                    let receipts = ConnectedConfigTransaction(receiptDirectory: root.appendingPathComponent("backups"))
+                    let current = try ConnectedAppConfiguration.launcher(app: app,
+                        executable: URL(fileURLWithPath: "/bin/echo"), config: config, model: model, keyHandoff: handoff)
+                    let historical = Data(String(decoding: current, as: UTF8.self)
+                        .replacingOccurrences(of: "/bin/" + helper, with: helper).utf8)
+                    try receipts.apply(receipts.preview(target: config, proposed: Data("managed config".utf8)), named: app.slug + "-config")
+                    try receipts.apply(receipts.preview(target: launcher, proposed: historical), named: app.slug + "-launch", executable: true)
+                    var keyReads = 0
+                    let store = ConnectedAppsStore(home: home, keyExists: { true }, readKey: { keyReads += 1; return "must-stay-in-keychain" })
+                    store.app = app
+                    for isolated in [false, true] {
+                        XCTAssertThrowsError(try store.prepareEmbeddedLaunch(app, isolated: isolated)) { error in
+                            XCTAssertEqual((error as? ConnectedAppsError)?.localizedDescription,
+                                           ConnectedAppsError.launcherSetupUpgrade.localizedDescription)
+                        }
+                        XCTAssertFalse(FileManager.default.fileExists(atPath: handoff.path))
+                        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("terminal").path))
+                    }
+                    // The external Terminal launch uses the same gate, before NSWorkspace.open.
+                    store.launch()
+                    XCTAssertEqual(store.status, ConnectedAppsError.launcherSetupUpgrade.localizedDescription)
+                    XCTAssertEqual(keyReads, 0)
+                    XCTAssertEqual(try Data(contentsOf: launcher), historical)
+                }
+            }
+        }
+    }
+
     private func installLegacyOpenCodeProfile(home: URL, selectedModel: ConnectedModel? = nil) throws -> ConnectedConfigTransaction {
         let profile = selectedModel ?? model
         let root = home.appendingPathComponent("Library/Application Support/Malibu/ConnectedApps")
@@ -423,11 +460,12 @@ final class ConnectedAppsTests: XCTestCase {
             // /usr/bin/security (which would widen the Keychain ACL).
             XCTAssertFalse(text.contains("security find-generic-password"))
             XCTAssertTrue(text.contains("KEY_FILE='/fake/handoff/key'"))
-            let read = try XCTUnwrap(text.range(of: "MALIBU_API_KEY=$(cat -- \"$KEY_FILE\""))
-            let remove = try XCTUnwrap(text.range(of: "rm -f -- \"$KEY_FILE\""))
+            let read = try XCTUnwrap(text.range(of: "MALIBU_API_KEY=$(/bin/cat -- \"$KEY_FILE\""))
+            let remove = try XCTUnwrap(text.range(of: "\n/bin/rm -f -- \"$KEY_FILE\"\n"))
             let exec = try XCTUnwrap(text.range(of: "exec '/fake/cli"))
             XCTAssertLessThan(read.lowerBound, remove.lowerBound)
             XCTAssertLessThan(remove.lowerBound, exec.lowerBound, "the handoff is deleted before the client runs")
+            XCTAssertTrue(text.contains("|| { /bin/rm -f -- \"$KEY_FILE\"; exit 1; }"), "a failed key read aborts the launcher")
             XCTAssertTrue(text.contains("export MALIBU_API_KEY"))
             XCTAssertTrue(text.contains("exec '/fake/cli'\\''with-space'"))
             XCTAssertFalse(text.contains("FAKE_BUYER_KEY"))
@@ -457,7 +495,7 @@ final class ConnectedAppsTests: XCTestCase {
                 executable: URL(fileURLWithPath: "/fake/open'code"),
                 config: URL(fileURLWithPath: "/fake/opencode.json"), model: selected,
                 keyHandoff: URL(fileURLWithPath: "/fake/handoff/key")), as: UTF8.self)
-            let remove = try XCTUnwrap(text.range(of: "rm -f -- \"$KEY_FILE\""))
+            let remove = try XCTUnwrap(text.range(of: "\n/bin/rm -f -- \"$KEY_FILE\"\n"))
             let version = try XCTUnwrap(text.range(of: "test \"$('/fake/open"))
             XCTAssertTrue(text.contains("test \"$('/fake/open'\\''code' --version)\" = '1.17.9' || { echo 'This Qwen managed profile requires OpenCode 1.17.9.' >&2; exit 1; }"))
             XCTAssertLessThan(remove.lowerBound, version.lowerBound)
@@ -512,22 +550,18 @@ final class ConnectedAppsTests: XCTestCase {
         XCTAssertEqual(sentence.filter { $0 == "." }.count, 1, "one sentence")
         // The rest sits behind Details.
         let details = ConnectedAppConfiguration.setupDetails
-        XCTAssertTrue(details.contains("private one-time file"))
-        XCTAssertTrue(details.contains("send it elsewhere"))
+        XCTAssertTrue(details.contains("one-time file restricted to your account"))
         XCTAssertTrue(details.contains("Project settings or managed policy can override the profile"))
         XCTAssertTrue(details.contains("Desktop apps are not set up."))
         XCTAssertTrue(ConnectedAppConfiguration.crushProjectConfigWarning.contains(".crushrc"))
     }
 
-    func testNotPrivateBannerSaysPrivateModeDoesNotApplyAndPointsToMalibuChat() {
-        let banner = ConnectedAppConfiguration.privacy
-        XCTAssertTrue(banner.hasPrefix("Not private"))
-        XCTAssertTrue(banner.contains("requests that Malibu does not encrypt"))
-        XCTAssertTrue(banner.contains("private mode doesn't apply"))
-        XCTAssertTrue(banner.contains("gateway and the serving provider can read prompts and responses"))
-        XCTAssertTrue(banner.contains("For private requests, use Malibu Chat."))
-        for overclaim in ["end-to-end", "confidential", "enclave", "relay-blind"] {
-            XCTAssertFalse(banner.lowercased().contains(overclaim))
+    func testConnectedAppsCopyMakesNoPrivacyClaim() {
+        let copy = [ConnectedAppConfiguration.keyExposure,
+                    ConnectedAppConfiguration.setupDetails,
+                    ConnectedAppConfiguration.cursorDisclosure].joined(separator: " ").lowercased()
+        for claim in ["not private", "private requests", "private mode", "encrypt", "cursor's servers"] {
+            XCTAssertFalse(copy.contains(claim))
         }
     }
 
@@ -596,10 +630,9 @@ final class ConnectedAppsTests: XCTestCase {
         }
     }
 
-    func testCursorHasNoWriterAndDisclosesTransit() {
+    func testCursorHasNoWriterAndNamesSupportedFeatures() {
         XCTAssertThrowsError(try ConnectedAppConfiguration.configuration(app: .cursor, model: model, original: nil))
-        XCTAssertTrue(ConnectedAppConfiguration.privacy.contains("Not private"))
-        XCTAssertTrue(ConnectedAppConfiguration.cursorDisclosure.contains("Cursor's servers"))
+        XCTAssertTrue(ConnectedAppConfiguration.cursorDisclosure.contains("BYOK covers supported chat models; Tab uses Cursor models."))
     }
 
     func testSelectedAPITestBodiesAreBounded() {

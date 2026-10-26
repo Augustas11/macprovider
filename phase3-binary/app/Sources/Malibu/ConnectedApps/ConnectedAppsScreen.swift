@@ -87,6 +87,7 @@ final class ConnectedAppsStore: ObservableObject {
     static let saveKeyFirst = "Save a buyer key first."
 
     func loadModels() {
+        hasBuyerKey = keyExists()
         guard hasBuyerKey else {
             modelsLoadFailed = true
             modelsMessage = Self.saveKeyFirst
@@ -202,22 +203,52 @@ final class ConnectedAppsStore: ObservableObject {
         }
     }
 
+    /// The embedded terminal uses the same receipt and key-handoff gates as Launch.
+    func prepareEmbeddedLaunch(_ app: ConnectedApp, isolated: Bool = false) throws -> (launcher: URL, handoff: URL, cleanupDirectory: URL?) {
+        guard let launcher = try transactions.receipt(named: app.slug + "-launch"),
+              let config = try transactions.receipt(named: app.slug + "-config"),
+              try ConnectedConfigTransaction.read(URL(fileURLWithPath: launcher.path)).bytes == launcher.installed,
+              try ConnectedConfigTransaction.read(URL(fileURLWithPath: config.path)).bytes == config.installed else {
+            throw ConnectedAppsError.conflict
+        }
+        // Receipt integrity alone does not make an older generated launcher safe.
+        // Refuse it before reading Keychain or producing either launch handoff.
+        guard let launcherText = String(data: launcher.installed, encoding: .utf8),
+              launcherText.hasPrefix(ConnectedAppConfiguration.handoffPrefix(keyHandoffURL(app))) else {
+            throw ConnectedAppsError.launcherSetupUpgrade
+        }
+        if let catalog = try transactions.receipt(named: app.slug + "-catalog") {
+            guard try ConnectedConfigTransaction.read(URL(fileURLWithPath: catalog.path)).bytes == catalog.installed else { throw ConnectedAppsError.conflict }
+        }
+        if app == .openCode {
+            try validateOpenCodePlugin()
+        }
+        let key = try readKey()
+        if isolated {
+            let directory = root.appendingPathComponent("terminal/" + UUID().uuidString, isDirectory: true)
+            let handoff = directory.appendingPathComponent("buyer.key")
+            let script = directory.appendingPathComponent("Launch.command")
+            let oldLine = "KEY_FILE=" + ConnectedAppConfiguration.shell(keyHandoffURL(app).path)
+            guard launcherText.components(separatedBy: oldLine).count == 2 else { throw ConnectedAppsError.conflict }
+            let bytes = Data(launcherText.replacingOccurrences(of: oldLine,
+                with: "KEY_FILE=" + ConnectedAppConfiguration.shell(handoff.path)).utf8)
+            do {
+                try ConnectedConfigTransaction.replace(script, expected: ConnectedConfigSnapshot(bytes: nil, mode: nil), bytes: bytes, mode: 0o700)
+                try ConnectedBuyerKeychain.writeLaunchHandoff(key, to: handoff)
+            } catch {
+                try? FileManager.default.removeItem(at: directory)
+                throw error
+            }
+            return (script, handoff, directory)
+        }
+        try ConnectedBuyerKeychain.writeLaunchHandoff(key, to: keyHandoffURL(app))
+        return (URL(fileURLWithPath: launcher.path), keyHandoffURL(app), nil)
+    }
+
     func launch() {
         perform {
-            guard let launcher = try self.transactions.receipt(named: self.app.slug + "-launch"),
-                  let config = try self.transactions.receipt(named: self.app.slug + "-config"),
-                  try ConnectedConfigTransaction.read(URL(fileURLWithPath: launcher.path)).bytes == launcher.installed,
-                  try ConnectedConfigTransaction.read(URL(fileURLWithPath: config.path)).bytes == config.installed else {
-                throw ConnectedAppsError.conflict
-            }
-            if let catalog = try self.transactions.receipt(named: self.app.slug + "-catalog") {
-                guard try ConnectedConfigTransaction.read(URL(fileURLWithPath: catalog.path)).bytes == catalog.installed else { throw ConnectedAppsError.conflict }
-            }
-            if self.app == .openCode {
-                try self.validateOpenCodePlugin()
-            }
-            try ConnectedBuyerKeychain.writeLaunchHandoff(try ConnectedBuyerKeychain.read(), to: self.keyHandoffURL(self.app))
-            NSWorkspace.shared.open([URL(fileURLWithPath: launcher.path)],
+            let prepared = try self.prepareEmbeddedLaunch(self.app)
+            NSWorkspace.shared.open([prepared.launcher],
                                     withApplicationAt: URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app"),
                                     configuration: NSWorkspace.OpenConfiguration())
             self.status = "Launch requested. Confirm the selected provider/model in the client. Launching does not verify compatibility."
@@ -325,7 +356,6 @@ struct ConnectedAppsScreen: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 Text("Connected apps").font(.title2.weight(.semibold))
-                Text(ConnectedAppConfiguration.privacy).foregroundStyle(.orange)
                 Text("Gateway: \(ConnectedAppConfiguration.gateway.absoluteString)").font(.caption)
                 ShellPanel("Buyer credential") {
                     SecureField("Buyer API key", text: $buyerKey)
@@ -395,7 +425,6 @@ struct ConnectedAppsScreen: View {
                 if let tested = store.endpointTested { Text(tested).font(.caption) }
                 Text(store.status).font(.callout).accessibilityIdentifier("connected-apps-status")
                 if store.busy { HStack { ProgressView().controlSize(.small); Button("Cancel request") { store.cancel() } } }
-                Text("Not private · Malibu has not verified any app with this gateway.").font(.caption).foregroundStyle(.secondary)
             }
             .padding(20)
         }
