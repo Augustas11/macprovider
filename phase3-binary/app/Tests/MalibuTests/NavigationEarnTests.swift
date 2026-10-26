@@ -90,8 +90,8 @@ final class NavigationEarnTests: XCTestCase {
         window.contentView?.layoutSubtreeIfNeeded()
     }
 
-    private func elements(_ root: Any) -> [any NSAccessibility] {
-        guard let element = root as? any NSAccessibility else { return [] }
+    private func elements(_ root: Any) -> [any NSAccessibilityProtocol] {
+        guard let element = root as? any NSAccessibilityProtocol else { return [] }
         return [element] + (element.accessibilityChildren() ?? []).flatMap { elements($0) }
     }
 
