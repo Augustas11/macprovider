@@ -326,7 +326,8 @@ actor ShardGroupRuntime: ModelRuntimeServing {
     // MARK: Generation
 
     func complete(_ request: ChatCompletionRequest, shouldCancel: @escaping @Sendable () -> Bool) async throws -> CompletionResult {
-        try await generate(request, handle: nil, shouldCancel: shouldCancel, onChunk: nil)
+        // SPEC-018 §3.14: control-text marks never leave the runtime.
+        try await generate(request, handle: nil, shouldCancel: shouldCancel, onChunk: nil).strippingControlTextMarks()
     }
 
     func stream(
@@ -335,7 +336,9 @@ actor ShardGroupRuntime: ModelRuntimeServing {
         shouldCancel: @escaping @Sendable () -> Bool,
         onChunk: @escaping @Sendable (StreamChunk) -> Void
     ) async throws -> CompletionResult {
-        try await generate(request, handle: handle, shouldCancel: shouldCancel, onChunk: onChunk)
+        try await generate(request, handle: handle, shouldCancel: shouldCancel) { chunk in
+            onChunk(chunk.strippingControlTextMarks())
+        }.strippingControlTextMarks()
     }
 
     struct PreparedRequest: Sendable {
@@ -630,16 +633,16 @@ struct ShardStreamingText {
                 let keep = stride(from: min(tag.count - 1, reasoningHeld.count), through: 1, by: -1)
                     .first { reasoningHeld.hasSuffix(String(tag.prefix($0))) } ?? 0
                 let cut = reasoningHeld.index(reasoningHeld.endIndex, offsetBy: -keep)
-                released.reasoning = stopFilter.stripping(from: String(reasoningHeld[..<cut]))
+                released.reasoning = stopFilter.stripping(from: String(reasoningHeld[..<cut]), joiner: ControlTextShield.markString)
                 reasoningHeld = String(reasoningHeld[cut...])
                 return released
             }
-            released.reasoning = stopFilter.stripping(from: String(reasoningHeld[..<close.lowerBound]))
-            text = stopFilter.stripping(from: String(reasoningHeld[close.upperBound...]))
+            released.reasoning = stopFilter.stripping(from: String(reasoningHeld[..<close.lowerBound]), joiner: ControlTextShield.markString)
+            text = stopFilter.stripping(from: String(reasoningHeld[close.upperBound...]), joiner: ControlTextShield.markString)
             reasoningHeld = ""
             inReasoning = false
         } else {
-            text = stopFilter.stripping(from: piece)
+            text = stopFilter.stripping(from: piece, joiner: ControlTextShield.markString)
         }
         if !answerStarted {
             text = String(text.drop(while: { $0.isWhitespace }))
@@ -672,6 +675,6 @@ struct ShardStreamingText {
             reasoningHeld = ""
         }
         guard !stopped else { return Released() }
-        return Released(reasoning: stopFilter.stripping(from: reasoningHeld), content: held)
+        return Released(reasoning: stopFilter.stripping(from: reasoningHeld, joiner: ControlTextShield.markString), content: held)
     }
 }

@@ -589,6 +589,14 @@ enum DeepseekV4Encoding {
         tools: [[String: any Sendable]]?,
         additionalContext: [String: any Sendable]?
     ) throws -> String {
+        try renderPrompt(values: promptValues(messages: messages, tools: tools), additionalContext: additionalContext)
+    }
+
+    /// The reference encoder's input messages for the runtime's inputs.
+    static func promptValues(
+        messages: [[String: any Sendable]],
+        tools: [[String: any Sendable]]?
+    ) -> [Value] {
         var values = messages.map(runtimeMessage)
         if let tools, !tools.isEmpty {
             let toolValues = Value.array(tools.map(runtimeTool))
@@ -598,8 +606,18 @@ enum DeepseekV4Encoding {
                 values.insert(.object(["role": .string("system"), "content": .string(""), "tools": toolValues]), at: 0)
             }
         }
+        return values
+    }
+
+    static func renderPrompt(values: [Value], additionalContext: [String: any Sendable]?) throws -> String {
         let (mode, effort) = options(additionalContext: additionalContext)
         return try encodeMessages(values, thinkingMode: mode, reasoningEffort: effort)
+    }
+
+    /// Every control text the reference encoder writes.
+    static var structuralTexts: [String] {
+        [bosToken, eosToken, thinkingStartToken, thinkingEndToken, dsmlToken, userToken, assistantToken,
+         latestReminderToken] + Array(taskTokens.values)
     }
 
     private static func runtimeMessage(_ message: [String: any Sendable]) -> Value {
@@ -834,8 +852,11 @@ private struct OrderedJSONParser {
 /// The swift-transformers tokenizer with the DeepSeek-V4 encoder as its chat
 /// template (the family ships none). Every other operation is the stock
 /// adaptor's.
-struct DeepseekV4ChatTokenizer: MLXLMCommon.Tokenizer {
-    let upstream: any Tokenizers.Tokenizer
+struct DeepseekV4ChatTokenizer: MLXLMCommon.Tokenizer, ControlTokenAware {
+    let upstream: PreTrainedTokenizer
+    let encoder: PromptControlTokenEncoder
+
+    var controlTokens: ControlTokenTable? { encoder.control }
 
     /// Keep the artifact bytes intact; only normalize the Split regex spelling
     /// before swift-transformers hands it to String.range(.regularExpression).
@@ -850,8 +871,13 @@ struct DeepseekV4ChatTokenizer: MLXLMCommon.Tokenizer {
         let tokenizerData = try await config.tokenizerData
         var data = tokenizerData.dictionary(or: [:])
         data["pre_tokenizer"] = escapedSplitNewlines(tokenizerData.preTokenizer)
-        return Self(upstream: try PreTrainedTokenizer(
-            tokenizerConfig: tokenizerConfig, tokenizerData: Config(data)
+        let normalized = Config(data)
+        let upstream = try PreTrainedTokenizer(tokenizerConfig: tokenizerConfig, tokenizerData: normalized)
+        return Self(upstream: upstream, encoder: try PromptControlTokenEncoder(
+            tokenizerConfig: tokenizerConfig,
+            tokenizerData: normalized,
+            upstream: upstream,
+            structuralSources: DeepseekV4Encoding.structuralTexts
         ))
     }
 
@@ -891,7 +917,11 @@ struct DeepseekV4ChatTokenizer: MLXLMCommon.Tokenizer {
     }
 
     func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String {
-        upstream.decode(tokens: tokenIds, skipSpecialTokens: skipSpecialTokens)
+        ControlTextShield.decode(
+            tokenIds: tokenIds,
+            skipSpecialTokens: skipSpecialTokens,
+            control: encoder.control
+        ) { upstream.decode(tokens: $0, skipSpecialTokens: $1) }
     }
 
     func convertTokenToId(_ token: String) -> Int? { upstream.convertTokenToId(token) }
@@ -906,10 +936,15 @@ struct DeepseekV4ChatTokenizer: MLXLMCommon.Tokenizer {
         tools: [[String: any Sendable]]?,
         additionalContext: [String: any Sendable]?
     ) throws -> [Int] {
-        let prompt: String
         do {
-            prompt = try DeepseekV4Encoding.renderPrompt(
-                messages: messages, tools: tools, additionalContext: additionalContext
+            // The prompt carries BOS; the tokenizer adds none
+            // (`add_bos_token: false`). Role markers come only from the
+            // reference encoder (SPEC-018 §3.14).
+            return try encoder.encodePrompt(
+                DeepseekV4Encoding.promptValues(messages: messages, tools: tools),
+                check: { values, shield in for value in values { try shield.checkAdjacentParts(in: value) } },
+                sanitize: { values, shield in values.map { shield.sanitize($0) } },
+                render: { try DeepseekV4Encoding.renderPrompt(values: $0, additionalContext: additionalContext) }
             )
         } catch let error as DeepseekV4Encoding.EncodingError {
             throw APIError(
@@ -919,8 +954,5 @@ struct DeepseekV4ChatTokenizer: MLXLMCommon.Tokenizer {
                 param: "messages"
             )
         }
-        // The prompt already carries BOS; the tokenizer adds none
-        // (`add_bos_token: false`), and the role markers are added tokens.
-        return upstream.encode(text: prompt, addSpecialTokens: false)
     }
 }
