@@ -1601,8 +1601,7 @@ final class ModelRuntimeSwapTests: XCTestCase {
             modelHash: "old-hash",
             warmSwapEnabled: true,
             swapDrainTimeoutSeconds: 5,
-            drainNowMilliseconds: { clock.nowMilliseconds },
-            drainPollSleep: { await clock.sleep() },
+            drainClock: clock,
             loader: { target in (target, "new-hash") },
             completion: { snapshot, _ in
                 await probe.markStarted(modelID: snapshot.modelID)
@@ -2039,8 +2038,7 @@ final class ModelRuntimeSwapTests: XCTestCase {
         draftModelID: String? = nil,
         warmSwapEnabled: Bool,
         swapDrainTimeoutSeconds: Int = 30,
-        drainNowMilliseconds: (@Sendable () -> Int64)? = nil,
-        drainPollSleep: (@Sendable () async -> Void)? = nil,
+        drainClock: DrainDeadlineTestClock? = nil,
         targetAuthorities: [String: ModelRuntimeTargetAuthority] = [:],
         authorizedSwitchModelIDs: [String] = [],
         loader: @escaping @Sendable (String) async throws -> (String, String?) = { target in (target, nil) },
@@ -2054,8 +2052,12 @@ final class ModelRuntimeSwapTests: XCTestCase {
             draftModelID: draftModelID,
             warmSwapEnabled: warmSwapEnabled,
             swapDrainTimeoutSeconds: swapDrainTimeoutSeconds,
-            testDrainNowMilliseconds: drainNowMilliseconds,
-            testDrainPollSleep: drainPollSleep,
+            testDrainTiming: drainClock.map { clock in
+                ModelRuntime.DrainTiming(
+                    nowMilliseconds: { clock.nowMilliseconds },
+                    pollSleep: { await clock.sleep() }
+                )
+            },
             targetAuthorities: targetAuthorities,
             authorizedSwitchModelIDs: authorizedSwitchModelIDs,
             loader: { _ in throw TestError.unexpectedContainerLoader },

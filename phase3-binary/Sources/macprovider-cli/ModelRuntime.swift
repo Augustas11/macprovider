@@ -2117,6 +2117,10 @@ actor ModelRuntime: ModelRuntimeServing {
     private var continuousBatchingSelfCheckReport: ContinuousBatchingSelfCheckReport?
     private let warmSwapEnabled: Bool
     private let swapDrainTimeoutSeconds: Int
+    struct DrainTiming: Sendable {
+        let nowMilliseconds: @Sendable () -> Int64
+        let pollSleep: @Sendable () async -> Void
+    }
     private var drainNowMilliseconds: @Sendable () -> Int64 = {
         Int64(Date().timeIntervalSince1970 * 1000)
     }
@@ -3999,8 +4003,7 @@ maxTokens: 1,
         testNativeMTPAdmissionRequestObserver: (@Sendable (String?, NativeMTPRuntimeAdmission, Int) -> Void)? = nil,
         warmSwapEnabled: Bool,
         swapDrainTimeoutSeconds: Int = 30,
-        testDrainNowMilliseconds: (@Sendable () -> Int64)? = nil,
-        testDrainPollSleep: (@Sendable () async -> Void)? = nil,
+        testDrainTiming: DrainTiming? = nil,
         providerStatus: ProviderStatus? = nil,
         catalogModelIDAlias: String? = nil,
         targetAuthorities: [String: ModelRuntimeTargetAuthority] = [:],
@@ -4202,8 +4205,10 @@ maxTokens: 1,
         self.warmSwapEnabled = warmSwapEnabled
         self.swapDrainTimeoutSeconds = swapDrainTimeoutSeconds
         self.providerStatus = providerStatus
-        if let testDrainNowMilliseconds { self.drainNowMilliseconds = testDrainNowMilliseconds }
-        if let testDrainPollSleep { self.drainPollSleep = testDrainPollSleep }
+        if let testDrainTiming {
+            self.drainNowMilliseconds = testDrainTiming.nowMilliseconds
+            self.drainPollSleep = testDrainTiming.pollSleep
+        }
         self.loader = loader
         self.testLoader = testLoader
         self.testCompletion = testCompletion
@@ -11173,6 +11178,9 @@ maxTokens: maxTokens,
             // Prism keeps the vendor vision tower and packed Hadamard projections.
             // Selecting its loader does not advertise a qualified vision profile.
             container = try await VLMModelFactory.shared.loadContainer(from: directory, using: tokenizerLoader)
+            // Deferred vision weights belong to the factory's private snapshot.
+            // Admission must hash the same bytes that the container will read.
+            return (container, try await container.modelDirectory)
         } else {
             container = try await LLMModelFactory.shared.loadContainer(from: directory, using: tokenizerLoader)
         }
