@@ -72,6 +72,10 @@ Live fleet target: **1.8.272**. Include the merged changes below in the next CLI
 |---|---|---|---|
 | #2158 | #2155 | Malibu.app retires duplicate app/menu-bar instances after updates: launch-time version election, successor readiness acknowledgement, 35-second quit deadline and forced stale-app exit after 40 seconds; newer running app survives an older rollback launch (SPEC-025-R013/R014). | merged (`79c1c81f6`); next CLI/app cut; signed live acceptance pending |
 | #2161 | #2160 (closed) | Provider-local `/v1/messages` for Claude Code: tools, thinking, JSON/SSE errors and stop metadata over the shared runtime; local priority, cancellation and unbilled accounting; status capability (SPEC-001-R009/R011, SPEC-025-R015). | merged (`9678fc21d`); next CLI/app cut; signed live acceptance pending |
+| #2145 | #2143 | GLM-5.3-Flash prompt-snapshot prefix-cache reuse on CB rows with native MTP under the signed cached-turns grant (SPEC-024-R005); touches `ServeDecodePath.swift`, so the decode-path digest changes; identity-only native-MTP admission rebind after the cut. | merged (`b1faa879b`); next CLI/app cut |
+| #2149 | #854 | Heartbeat liveness loss requests a socket reconnect while the process and model stay resident; a separate 60-second deadline keeps fatal recovery for stalled local teardown. | merged (`1a058e801`); next CLI/app cut |
+| (direct) | #2143 | Test-only: heartbeat regression coverage independent of bulk-transfer scheduling (`ShardLinkAuditFixTests`); no binary change. | merged (`000d72461`) |
+| #2162 | #2054 | Malibu.app: chat-first navigation, merged Models destination, embedded Terminal. | merged (`0779d2aab`); next CLI/app cut; signed live acceptance pending |
 
 **#2160 release acceptance:** all 28 checks in
 [CI run 40261607346](https://github.com/Augustas11/macprovider/actions/runs/40261607346)
