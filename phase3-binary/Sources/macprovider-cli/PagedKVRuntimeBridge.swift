@@ -2351,8 +2351,9 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 initialOffset: $0.committedKVTokenCount
             )
         }
-        let hasBatchedState = supportedInputs.count > 1 && rowStates.contains(where: { $0.state != nil })
         let invariantStateModel = model as? any BatchInvariantDecodeStateModel
+        let hasBatchedState = supportedInputs.count > 1
+            && (invariantStateModel != nil || rowStates.contains(where: { $0.state != nil }))
         if hasBatchedState && invariantStateModel == nil {
             return supportedInputs.map { ContinuousBatchDecodeOutcome.rowFailure(requestID: $0.requestID) }
         }
@@ -2362,7 +2363,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         let captureIndices = drafterContainer == nil
             ? []
             : supportedInputs.indices.filter { supportedInputs[$0].captureNativeMTPDrafterColumns }
-        if !captureIndices.isEmpty && rowStates.contains(where: { $0.state != nil }) {
+        if !captureIndices.isEmpty && (hasBatchedState || rowStates.contains(where: { $0.state != nil })) {
             return supportedInputs.map { ContinuousBatchDecodeOutcome.rowFailure(requestID: $0.requestID) }
         }
         func discardAdvancedRows() {
@@ -2388,6 +2389,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         }
         let cachesAsKV = batchedCaches.map(\.cache)
         let canCompile = compiledDecode
+            && !hasBatchedState
             && captureIndices.isEmpty
             && cacheKinds.allSatisfy({ $0 == .pagedAttention })
             && rowStates.allSatisfy({ $0.state == nil })

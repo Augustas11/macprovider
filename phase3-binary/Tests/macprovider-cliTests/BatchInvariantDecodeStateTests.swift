@@ -55,6 +55,16 @@ final class BatchInvariantDecodeStateTests: XCTestCase {
         }
     }
 
+    func testAllMissingStatesFailBeforeEagerOrCompiledForward() async throws {
+        try await Device.withDefaultDevice(.cpu) {
+            let model = InvariantFixtureModel()
+            let fixture = try await Fixture(model: model, missingAllStates: true)
+            let result = try await fixture.decode([0, 1], steps: 1)
+            XCTAssertEqual(result, Self.failures)
+            XCTAssertTrue(model.forwardBatches.isEmpty)
+        }
+    }
+
     func testChangedOutputDiscardsAdvancedCachesBeforePublishingTokens() async throws {
         try await Device.withDefaultDevice(.cpu) {
             let model = InvariantFixtureModel()
@@ -90,7 +100,7 @@ final class BatchInvariantDecodeStateTests: XCTestCase {
         var handles: [PagedKVBlockTableHandle] = []
         var offsets = [0, 0]
 
-        init(model: StatefulFixtureModel, missingSecondState: Bool = false) async throws {
+        init(model: StatefulFixtureModel, missingSecondState: Bool = false, missingAllStates: Bool = false) async throws {
             allocator = try PagedKVBlockAllocator(blockSizeTokens: 8, maxPhysicalBlocks: 16)
             backend = PagedKVSharedForwardBackend(
                 container: ModelContainer(context: ModelContext(configuration: .init(id: "state-fixture"),
@@ -106,7 +116,7 @@ final class BatchInvariantDecodeStateTests: XCTestCase {
                 var state = LMOutput.State()
                 state[fixtureTagKey] = [row == 0 ? 11 : 29]
                 try backend.installRowStateForTest(caches: [cache], requestID: "row-\(row)",
-                    binding: binding, state: missingSecondState && row == 1 ? nil : state)
+                    binding: binding, state: missingAllStates || (missingSecondState && row == 1) ? nil : state)
             }
         }
 
