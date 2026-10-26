@@ -831,8 +831,17 @@ conformant with the row's own serial reference.
 
 Prefill MUST be bounded by a configured per-iteration prefill token budget. A
 single row MUST NOT consume more than its configured per-row chunk limit in one
-iteration, and a compatible prefill group MUST NOT consume more than the
-configured group token budget in one iteration. The scheduler MUST preserve
+forward; each compatible group MUST NOT consume more than the configured token
+budget in one forward. A row ending on a SPEC-024-R005 resume or snapshot
+boundary MAY run its next original-shaped chunk in that same turn; forwards
+stay separate and there is no intervening decode window or peer prefill. The
+next chunk MUST NOT be shrunk, merged or repartitioned to fit a remaining turn
+budget. Boundary continuations MAY continue while cumulative prefill work is
+within the configured turn token budget. At most one original-shaped group MAY
+cross that budget, after which the turn MUST yield immediately. Consequently,
+total work in a turn MUST NOT exceed twice the configured token budget. Rotate
+each selected row once at turn end, preserving FCFS order. A fixed
+reference-plan backend is unchanged. The scheduler MUST preserve
 FCFS fairness across admitted prompt work: older rows are not bypassed by newer
 compatible rows except when the older row is incompatible with the current
 backend prefill group, cannot be funded by the paged pool, is cancelled, or is

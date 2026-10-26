@@ -488,6 +488,83 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertEqual(unsplit, [56, 60], "the plan before the fix ran through 36")
     }
 
+    /// Boundary partitions do not spend another round-robin turn or decode
+    /// window; one original group may extend the bounded turn budget.
+    func testResumeBoundaryContinuesBeforeDecodeOrAnotherPromptRow() async throws {
+        let (events, inputs) = try await boundaryContinuationEvents(boundaries: [2, 5, 9])
+        let boundary = try XCTUnwrap(events.firstIndex(of: "prefill:cold:2"))
+        XCTAssertEqual(events[boundary + 1], "prefill:cold:3",
+                       "the next original chunk must run before a peer or decode window")
+        XCTAssertEqual(events[boundary + 2], "prefill:cold:4",
+                       "one original group may extend the turn beyond its remaining three tokens")
+        XCTAssertEqual(events[boundary + 3], "decode:decoding",
+                       "the turn must yield immediately after its one-group extension")
+        let cold = inputs.filter { $0.requestID == "cold" }
+        XCTAssertEqual(cold.map { $0.promptTokenOffset + $0.promptTokens.count }, [2, 5, 9, 12])
+        XCTAssertEqual(cold.map(\.promptTokens.count), [2, 3, 4, 3],
+                       "continuing a turn must never repartition the numerical chunks")
+    }
+
+    func testResumeBoundaryExtendsOnceRatherThanShrinkingTheFollowingChunkToFit() async throws {
+        let (events, inputs) = try await boundaryContinuationEvents(boundaries: [2, 9])
+        let boundary = try XCTUnwrap(events.firstIndex(of: "prefill:cold:2"))
+        XCTAssertEqual(events[boundary + 1], "prefill:cold:7",
+                       "run the unchanged seven-token chunk despite the six-token remainder")
+        XCTAssertEqual(events[boundary + 2], "decode:decoding",
+                       "the turn must yield immediately after its one-group extension")
+        let cold = inputs.filter { $0.requestID == "cold" }
+        XCTAssertEqual(cold.map(\.promptTokens.count), [2, 7, 3])
+        XCTAssertEqual(cold.map(\.promptTokenOffset), [0, 2, 9])
+    }
+
+    func testResumeBoundaryKeepsDefaultSizedChunkInTheSameTurn() async throws {
+        let (events, inputs) = try await boundaryContinuationEvents(
+            boundaries: [2, 2_050], chunkTokens: 2_048, promptCount: 2_052, snapshotAt: 2_050)
+        let boundary = try XCTUnwrap(events.firstIndex(of: "prefill:cold:2"))
+        XCTAssertEqual(events[boundary + 1], "prefill:cold:2048",
+                       "the two-token boundary must not buy another decode window at the production chunk size")
+        XCTAssertEqual(events[boundary + 2], "decode:decoding",
+                       "the 2050-token turn must yield before its final two tokens")
+        let cold = inputs.filter { $0.requestID == "cold" }
+        XCTAssertEqual(cold.map(\.promptTokens.count), [2, 2_048, 2])
+        XCTAssertEqual(cold.map(\.promptTokenOffset), [0, 2, 2_050])
+    }
+
+    private func boundaryContinuationEvents(
+        boundaries: [Int], chunkTokens: Int = 8, promptCount: Int = 12, snapshotAt: Int = 9
+    ) async throws
+        -> (events: [String], inputs: [ContinuousBatchPrefillInput]) {
+        let backend = ScriptedBackend(
+            scripts: ["decoding": Array(repeating: 10, count: 20), "cold": [7], "peer": [8]],
+            promptSnapshotBackend: true)
+        let blocks = max(16, (2 * promptCount + 3) / 4 + 16)
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: blocks)
+        let scheduler = try await makeScheduler(
+            descriptor: Self.descriptor(blockSizeTokens: 4, maxPhysicalBlocks: blocks),
+            maxActiveRows: 3, maxPromptChunkTokens: chunkTokens,
+            maxPrefillRowsPerIteration: 3, maxPrefillTokensPerIteration: chunkTokens,
+            prefillGrouping: .ungrouped, backend: backend, allocator: allocator)
+        let installed = await scheduler.installLabBatchComposition(["decoding", "cold", "peer"])
+        XCTAssertTrue(installed)
+        let decoding = Task {
+            try await scheduler.submit(.init(
+                id: "decoding", conversationKey: "", promptTokens: [1], maxOutputTokens: 20))
+        }
+        let cold = Task {
+            try await scheduler.submit(.init(
+                id: "cold", conversationKey: "conv:cold", promptTokens: Array(1...promptCount),
+                maxOutputTokens: 1, temperature: 0.0,
+                promptSnapshotTokenCount: snapshotAt, promptResumeBoundaries: boundaries))
+        }
+        let peer = Task {
+            try await scheduler.submit(.init(
+                id: "peer", conversationKey: "", promptTokens: Array(1...chunkTokens), maxOutputTokens: 1))
+        }
+        let results = try await [decoding.value, cold.value, peer.value]
+        XCTAssertTrue(results.allSatisfy { $0.terminalStatus == .length })
+        return await (backend.events(), backend.prefillInputs())
+    }
+
     /// A snapshot whose length is not the cached length is never admitted.
     func testPositiveCachedTurnWithAMismatchedSnapshotIsRefused() async throws {
         let backend = ScriptedBackend(scripts: ["bad": [7]], promptSnapshotBackend: true)
