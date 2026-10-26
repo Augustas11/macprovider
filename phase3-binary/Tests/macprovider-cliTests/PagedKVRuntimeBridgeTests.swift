@@ -5648,6 +5648,191 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         }
     }
 
+    func testCreativeHoldPreservesActiveContinuousBatchingAndNativeMTP() async throws {
+        try requireMetal()
+        let modelID = "model-a"
+        let hash = String(repeating: "a", count: 64)
+        let proof = Self.sizingProof(modelID: modelID, modelSHA: hash)
+        let admission = Self.creativeAdmission(modelID: modelID, hash: hash)
+        let capability = NativeMTPCapability(
+            admitted: true, revoked: false, revocationStateAvailable: true,
+            supportsCurrentProcessor: true, supportsCurrentStateCache: true,
+            supportsStreaming: true, supportsNonStreaming: true, supportsStopSequences: true,
+            hasQualifiedRowMappedTransactions: true, maximumProposalDepth: 1,
+            maximumPromptTokens: 4096, maximumCompletionTokens: 256,
+            completeWindowBytesByDepth: [8, 32], family: admission.familyAdapter)
+        let container = ModelContainer(context: ModelContext(
+            configuration: ModelConfiguration(id: modelID),
+            model: RuntimeBridgeFakeModel(nextTokenByInput: [:]),
+            processor: RuntimeBridgePromptProcessor(tokens: [3]), tokenizer: RuntimeBridgeFakeTokenizer()))
+        let drafter = MTPDrafterContainer(context: MTPDrafterContext(
+            configuration: ModelConfiguration(id: "same-drafter"), model: RuntimeBridgeRecordingMTPDrafter()))
+        let runtime = ModelRuntime(
+            modelID: modelID, modelHash: hash,
+            pagedKVConfig: PagedKVConfig(enabled: true, blockSizeTokens: 32, maxPhysicalBlocks: 64),
+            maxBatch: 2, continuousBatchingMode: .on, continuousBatchingDurableReplayAuthorityAvailable: true,
+            nativeMTPMode: .auto, nativeMTPCapability: capability, nativeMTPSchedulerSupported: true,
+            nativeMTPDrafterContainer: drafter, labNativeMTPAdmissionCapability: admission,
+            warmSwapEnabled: true, pagedKVObservedRuntimeIdentity: Self.observedIdentity(from: proof),
+            pagedKVHardwareSizingProof: proof, pagedKVRuntimeCacheClass: "KVCacheSimple",
+            pagedKVSchedulerBackendInstalled: true,
+            pagedKVModelCapabilities: ModelRuntime.pagedKVModelCapabilities(modelID: "mlx-community/Qwen-Test", configJSONData: nil),
+            container: container,
+            continuousBatchingBackend: RuntimeBridgeScriptedBackend(scripts: [:]),
+            loader: { _ in throw PagedKVRuntimeBridgeTestError.notExpected }, testLoader: { ($0, hash) })
+        let offer = NativeMTPTupleReofferTests.offer()
+        await runtime.installNativeMTPTupleOfferForTest(offer)
+        let before = await runtime.currentSnapshot()
+        let beforeDrafter = await runtime.creativeNativeDrafterArtifactForTest()
+        XCTAssertTrue(before.continuousBatching?.active == true)
+        XCTAssertTrue(before.nativeMTPStatus.enabled)
+        XCTAssertTrue(before.schedulerSupportsNativeMTP)
+        try await runtime.unloadForLocalCreativeHold()
+        let unloaded = await runtime.currentSnapshot()
+        XCTAssertNil(unloaded.modelID)
+        XCTAssertNil(unloaded.nativeMTPTupleOffer)
+        let tuple = NativeMTPSelfTestRuntimeTuple(
+            modelID: modelID, modelHash: hash, modelHashAlgorithm: "sha256",
+            tokenizerDigest: offer.runtimeTuple.tokenizerDigest, artifactDigest: offer.runtimeTuple.artifactDigest,
+            manifestDigest: offer.runtimeTuple.manifestDigest, sidecarDigest: offer.runtimeTuple.sidecarDigest,
+            providerBinarySHA256: offer.runtimeTuple.providerBinarySHA256, runtimeCDHash: offer.runtimeTuple.runtimeCDHash,
+            cacheNamespace: offer.runtimeTuple.cacheNamespace, stateDigest: offer.runtimeTuple.stateDigest, proposalDepth: 1)
+        let input = NativeMTPSelfTestInput(
+            tupleSHA256: admission.tupleSHA256, modelID: modelID, modelRevision: hash,
+            familyAdapter: admission.familyAdapter, proposalDepth: 1, challengeBank: admission.selfTestChallengeBank,
+            servedSnapshot: NativeMTPSelfTestServedSnapshot(tupleSHA256: admission.tupleSHA256,
+                runtimeTuple: tuple, generation: UInt64(before.specDecodeGeneration + 1), proposalDepth: 1))
+        let receipt = NativeMTPSelfTestReceipt(
+            version: NativeMTPSelfTestRunner.capability, tupleSHA256: admission.tupleSHA256,
+            challengeBankSHA256: admission.selfTestChallengeBank.challengeBankSHA256,
+            promptTokenIDs: [3], generatedTokenIDs: [4], terminalReason: .length,
+            acceptedTokens: 1, rejectedTokens: 0, bonusTokens: 0, committedTokens: 1,
+            committedStateDigestSHA256: String(repeating: "8", count: 64), actualDecodePath: .nativeMTP, fallbackUsed: false)
+        // Replace only external loading/self-check execution with a deterministic
+        // admitted fixture. The production install, scheduler, tuple publication,
+        // revocation watcher and failure/ownership transitions all run below.
+        let load = ModelRuntime.NativeMTPRuntimeLoadResult(
+            targetContainer: container, targetDirectory: URL(fileURLWithPath: NSTemporaryDirectory()),
+            drafterContainer: drafter, capability: capability, admissionCapability: admission,
+            selfTestInput: input, selfTestRuntimeTuple: tuple, runtimeTuple: offer.runtimeTuple,
+            servedSnapshotID: "restored-snapshot", runtimeCacheClass: "KVCacheSimple",
+            modelCapabilities: ModelRuntime.pagedKVModelCapabilities(modelID: "mlx-community/Qwen-Test", configJSONData: nil),
+            revocationSignerKeyID: "test-signer", revocationTrustedKeyring:
+                NativeMTPAdmissionSidecar.TrustedKeyring(publicKeysByKeyID: [:], requiredKeyID: "test-signer"),
+            revocationExpiresAt: nil)
+        await runtime.setNativeMTPRevocationPollerForTest { _, _ in
+            do { try await Task.sleep(nanoseconds: 60_000_000_000) } catch {}
+        }
+        await runtime.setCreativeNativeReloadForTest({ load }, receipt: receipt)
+        try await runtime.restoreAfterLocalCreativeHold()
+        let after = await runtime.currentSnapshot()
+        XCTAssertEqual(after.modelID, before.modelID)
+        XCTAssertEqual(after.modelHash, before.modelHash)
+        XCTAssertEqual(after.continuousBatching?.active, before.continuousBatching?.active)
+        XCTAssertEqual(after.continuousBatching?.mode, before.continuousBatching?.mode)
+        XCTAssertEqual(after.continuousBatching?.scheduler?.slotsTotal, before.continuousBatching?.scheduler?.slotsTotal)
+        XCTAssertEqual(after.nativeMTPStatus.enabled, before.nativeMTPStatus.enabled)
+        XCTAssertEqual(after.nativeMTPCapability, before.nativeMTPCapability)
+        XCTAssertEqual(after.schedulerSupportsNativeMTP, before.schedulerSupportsNativeMTP)
+        XCTAssertEqual(after.nativeMTPTupleOffer?.nativeMTPAdmissionTupleSHA256, before.nativeMTPTupleOffer?.nativeMTPAdmissionTupleSHA256)
+        XCTAssertEqual(after.nativeMTPTupleOffer?.runtimeTuple, before.nativeMTPTupleOffer?.runtimeTuple)
+        let afterDrafter = await runtime.creativeNativeDrafterArtifactForTest()
+        XCTAssertEqual(afterDrafter, beforeDrafter)
+        XCTAssertNotNil(afterDrafter)
+        let cache = await runtime.creativeConversationCacheForTest()
+        for _ in 0..<2 {
+            let lease = await cache.begin(conversationKey: "after-hold", incomingTokens: [3], modelID: modelID, kvBits: nil)
+            XCTAssertNotNil(lease, "Restoration must leave conversation-cache leases usable")
+            if let lease { await cache.abort(lease) }
+        }
+        let watcher = await runtime.nativeMTPRevocationWatcherActiveForTest()
+        XCTAssertTrue(watcher)
+        // A fresh hold can drain the rebuilt scheduler; the old scheduler's
+        // permanently drained state is not reused.
+        try await runtime.unloadForLocalCreativeHold()
+        let failedReceipt = NativeMTPSelfTestReceipt(
+            version: NativeMTPSelfTestRunner.capability, tupleSHA256: admission.tupleSHA256,
+            challengeBankSHA256: admission.selfTestChallengeBank.challengeBankSHA256,
+            promptTokenIDs: [3], generatedTokenIDs: [4], terminalReason: .length,
+            acceptedTokens: 0, rejectedTokens: 1, bonusTokens: 0, committedTokens: 1,
+            committedStateDigestSHA256: String(repeating: "8", count: 64), actualDecodePath: .ordinary, fallbackUsed: true)
+        await runtime.setCreativeNativeReloadForTest({ load }, receipt: failedReceipt)
+        for _ in 0..<3 {
+            do { try await runtime.restoreAfterLocalCreativeHold(); XCTFail("A failed native self-check must not degrade to ordinary serving") }
+            catch {}
+            let failed = await runtime.currentSnapshot()
+            XCTAssertNil(failed.modelID)
+            XCTAssertNil(failed.nativeMTPTupleOffer)
+            XCTAssertFalse(failed.nativeMTPStatus.enabled)
+        }
+        await runtime.abandonLocalCreativeHold()
+        let recovered = try await runtime.beginSwap(targetModelID: modelID)
+        try await recovered.value
+        let recoverySnapshot = await runtime.currentSnapshot()
+        XCTAssertEqual(recoverySnapshot.modelID, modelID, "Exhausted native recovery must permit normal model recovery")
+    }
+
+    func testCreativeHoldPreservesOrdinaryActiveBatching() async throws {
+        try requireMetal()
+        let hash = String(repeating: "a", count: 64)
+        let runtime = Self.attachedRuntime(modelID: "mlx-community/Qwen-Test",
+            backend: RuntimeBridgeScriptedBackend(scripts: [:]), warmSwapEnabled: true,
+            testLoader: { ($0, hash) })
+        let before = await runtime.currentSnapshot()
+        XCTAssertTrue(before.continuousBatching?.active == true)
+        try await runtime.unloadForLocalCreativeHold()
+        try await runtime.restoreAfterLocalCreativeHold()
+        let after = await runtime.currentSnapshot()
+        XCTAssertEqual(after.continuousBatching?.active, before.continuousBatching?.active)
+        XCTAssertEqual(after.nativeMTPStatus.enabled, before.nativeMTPStatus.enabled)
+        XCTAssertEqual(after.continuousBatching?.mode, before.continuousBatching?.mode)
+        XCTAssertEqual(after.continuousBatching?.scheduler?.slotsTotal, before.continuousBatching?.scheduler?.slotsTotal)
+    }
+
+    private static func creativeAdmission(modelID: String, hash: String) -> NativeMTPAdmissionCapability {
+        NativeMTPAdmissionCapability(
+            tupleSHA256: String(repeating: "7", count: 64),
+            sidecarSHA256: String(repeating: "0", count: 64),
+            modelID: modelID,
+            modelRevision: hash,
+            targetArtifactSHA256: hash,
+            mtpArtifactSHA256: String(repeating: "2", count: 64),
+            tokenizerSHA256: String(repeating: "3", count: 64),
+            mtpManifestSHA256: String(repeating: "4", count: 64),
+            familyAdapter: "qwen3_5_mtp_v1",
+            sourceLayout: "separate_artifact",
+            predictionLayerCount: 1,
+            maxProposalDepth: 1,
+            completeWindowBytesByDepth: [8, 32],
+            throughputDeltaPPM: 0,
+            maxPromptTokens: 4096,
+            maxCompletionTokens: 256,
+            cacheClass: "paged_kv",
+            stateClass: "hybrid_stageable_rewindable",
+            quantization: NativeMTPAdmissionSidecar.Quantization(target: "mlx_affine_4bit", mtp: "mlx_affine_4bit"),
+            providerRevision: String(repeating: "a", count: 40),
+            upstreamMLXSwiftLMRevision: KVBuildIdentity.mlxSwiftLMRevision,
+            qualifiedSlots: 2,
+            maxNativeActiveRows: 2,
+            spec023ReleaseID: "native-mtp-test",
+            spec023SourceCommit: String(repeating: "a", count: 40),
+            spec023BuildDigestSHA256: String(repeating: "b", count: 64),
+            spec023LiveExecutableCDHash: String(repeating: "1", count: 40),
+            evidenceArtifactSHA256: [String(repeating: "5", count: 64)],
+            challengeBankSignerKeyID: "native-mtp-selftest-test",
+            revocationSignerKeyID: "native-mtp-revocation-test",
+            selfTestChallengeBank: NativeMTPSelfTestChallengeBank(
+                releaseID: "native-mtp-test",
+                challengeBankPath: "native-mtp-selftest-bank.json",
+                challengeBankSHA256: String(repeating: "6", count: 64),
+                signaturePath: "native-mtp-selftest-bank.json.sig",
+                signerKeyID: "native-mtp-selftest-test",
+                signatureSHA256: String(repeating: "7", count: 64)
+            ),
+            capturedArtifacts: nil
+        )
+    }
+
     private static func attachedRuntime(
         modelID: String,
         backend: RuntimeBridgeScriptedBackend,
