@@ -130,8 +130,10 @@ It consumes, and does not redefine, these owner contracts:
 - **SPEC-032** owns hardware-evidence admission and proof-of-weights
   boundaries.
 - **SPEC-033** owns hardware-evidence verification.
-- **SPEC-037** owns persistent KV and currently excludes every speculative
-  request from lease, promotion, and commit.
+- **SPEC-037** owns persistent KV. Its codec-v3 amendment permits complete
+  GLM prompt snapshots, including paired native-MTP head state, under the
+  identity, privacy, exactness and memory gates in MTP-9; other speculative
+  state remains excluded.
 - **SPEC-038** owns continuous-batching admission, fairness, row lifecycle,
   capacity advertisement, and release-quality economics gates.
 - **SPEC-039** owns paged-KV layout, allocator, block-table lifecycle, and
@@ -1163,8 +1165,15 @@ prefill (never inside a verification round) together with the prompt token
 its last entry consumed. It is draft-side only: restoring it can change
 proposals and acceptance, never the target's tokens, which the target
 verifies as on any native row. A failed, cancelled, or pre-output-fallback native row publishes
-nothing and aborts its lease. SPEC-037 disk persistence is unchanged: hybrid
-entries are not persisted. A request with no key behaves as before: no lease,
+nothing and aborts its lease. **(0.1.58)** SPEC-037's versioned prompt-snapshot
+codec may persist the complete SPEC-024-R005 target/head pair, including exact
+raw tensor bytes, metadata, resume-boundary provenance and folded prompt token.
+A restored native turn MUST pass the same target/head reuse checks as a RAM
+hit; incomplete/unsupported records miss and stay native. Other native-MTP
+state gains no new persistence permission. Cache retention and disk staging
+MUST reserve the full CB capacity and native verify window before allocating,
+while preserving R012's 10% system free-memory floor; only cache residency may
+be declined under pressure. A request with no key behaves as before: no lease,
 no commit, no busy key.
 
 This applies to streaming and non-streaming paths. A future amendment that

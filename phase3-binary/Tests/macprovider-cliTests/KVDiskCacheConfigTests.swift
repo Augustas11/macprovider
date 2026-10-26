@@ -26,6 +26,7 @@ final class KVDiskCacheConfigTests: XCTestCase {
         XCTAssertEqual(c.directory, "/Users/tester/Library/Caches/macprovider/kv-cache")
         XCTAssertEqual(c.maxBytes, 16 * 1024 * 1024 * 1024)
         XCTAssertEqual(c.maxEntries, 64)
+        XCTAssertEqual(c.retentionMinutes, 4_320)
         XCTAssertEqual(c.minFreeBytes, 8 * 1024 * 1024 * 1024)
     }
 

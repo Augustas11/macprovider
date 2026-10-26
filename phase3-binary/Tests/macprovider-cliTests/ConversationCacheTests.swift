@@ -200,9 +200,8 @@ final class ConversationCacheTests: XCTestCase {
         await cache.abort(hit!)
     }
 
-    /// SPEC-024 FR-CI2a: a prompt snapshot stays in RAM. The cold tier never
-    /// captures it, while an ordinary entry under the same cold context does.
-    func testPromptSnapshotIsNeverCapturedByTheColdTier() async {
+    /// Eligible prompt snapshots pass through the same encrypted cold-tier bridge.
+    func testPromptSnapshotIsCapturedByTheColdTier() async {
         let coldTier = FakeConversationColdTier()
         let cache = ConversationCache(
             config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900), coldTier: coldTier)
@@ -212,12 +211,12 @@ final class ConversationCacheTests: XCTestCase {
         await cache.commit(snapshotLease!, cache: ConversationCacheLayers(
             [RotatingKVCache(maxSize: 8, keep: 0), DeepseekV4PoolCache(ratio: 4)], promptSnapshot: true),
             fullTokens: tokens, cold: coldContext(eligible: true))
-        XCTAssertEqual(coldTier.captureCount, 0)
+        XCTAssertEqual(coldTier.captureCount, 1)
         let ordinaryLease = await cache.begin(conversationKey: "conv:ordinary-cold", incomingTokens: tokens,
                                               modelID: "model-a", kvBits: nil, cold: coldContext(eligible: true))
         await cache.commit(ordinaryLease!, cache: ConversationCacheLayers([trimmableCache(offset: 64)]),
                            fullTokens: tokens, cold: coldContext(eligible: true))
-        XCTAssertEqual(coldTier.captureCount, 1)
+        XCTAssertEqual(coldTier.captureCount, 2)
     }
 
     func testKeyedSerialSimpleCacheHitSkipsPrefillTokens() async {
@@ -323,6 +322,107 @@ final class ConversationCacheTests: XCTestCase {
         }
         let cappedStats = await tokenCapped.snapshotStats()
         XCTAssertLessThanOrEqual(cappedStats.tokens, 100)
+    }
+
+    func testAgentDefaultsRetainMoreThanEightConversationsPastOldTTL() async throws {
+        let config = ConversationCache.Config.fromEnvironment([:])
+        XCTAssertEqual(config.maxConversations, 64)
+        XCTAssertEqual(config.maxTokens, 2_000_000)
+        XCTAssertEqual(config.ttlSeconds, 3 * 24 * 60 * 60)
+        let cache = ConversationCache(config: config)
+        let start = Date(timeIntervalSince1970: 1_000)
+        let tokens = int32Range(0..<64)
+        for index in 0..<12 {
+            let lease = await cache.begin(conversationKey: "conv:agent-\(index)", incomingTokens: tokens,
+                                          modelID: "model-a", kvBits: nil, now: start)
+            await cache.commit(try XCTUnwrap(lease), cache: ConversationCacheLayers(
+                [trimmableCache(offset: 64)], promptSnapshot: true), fullTokens: tokens, now: start)
+        }
+        let hit = await cache.begin(conversationKey: "conv:agent-0", incomingTokens: tokens + [65],
+                                    modelID: "model-a", kvBits: nil, now: start.addingTimeInterval(901))
+        XCTAssertEqual(hit?.cachedPromptTokens, 64)
+        if let hit { await cache.abort(hit) }
+    }
+
+    func testLRUProtectsLongPrefixOnRecencyTie() async throws {
+        let cache = ConversationCache(config: .init(maxConversations: 2, maxTokens: 10_000, ttlSeconds: 900))
+        let now = Date(timeIntervalSince1970: 1_000)
+        for (key, count) in [("long", 128), ("short", 64), ("new", 96)] {
+            let tokens = int32Range(0..<count)
+            let lease = await cache.begin(conversationKey: key, incomingTokens: tokens,
+                                          modelID: "model-a", kvBits: nil, now: now)
+            await cache.commit(try XCTUnwrap(lease), cache: ConversationCacheLayers(
+                [trimmableCache(offset: count)]), fullTokens: tokens, now: now)
+        }
+        let hit = await cache.begin(conversationKey: "long", incomingTokens: int32Range(0..<129),
+                                    modelID: "model-a", kvBits: nil, now: now)
+        XCTAssertEqual(hit?.cachedPromptTokens, 128)
+        if let hit { await cache.abort(hit) }
+        let miss = await cache.begin(conversationKey: "short", incomingTokens: int32Range(0..<65),
+                                     modelID: "model-a", kvBits: nil, now: now)
+        XCTAssertEqual(miss?.cachedPromptTokens, 0)
+        if let miss { await cache.abort(miss) }
+    }
+
+    func testRetentionByteLimitProtectsServingAndStagingHeadroom() async throws {
+        let gib = 1024 * 1024 * 1024
+        let physical = 64 * gib
+        let available = physical / 10 + 2 * gib + 4_096
+        let budget = ConversationCacheMemoryBudget(probe: .init(identity: "bounded-test") {
+            NativeMTPRoundSystemMemorySample(availableBytes: available, physicalBytes: physical)
+        })
+        XCTAssertEqual(budget.hotByteLimit(), 4_095)
+        let cache = ConversationCache(memoryBudget: budget)
+        let tokens = int32Range(0..<64)
+        let layer = KVCacheSimple()
+        layer.state = [MLXArray(Array(repeating: Float(1), count: 1_024)).reshaped(1, 1, 64, 16),
+                       MLXArray(Array(repeating: Float(2), count: 1_024)).reshaped(1, 1, 64, 16)]
+        let lease = await cache.begin(conversationKey: "conv:bytes", incomingTokens: tokens,
+                                      modelID: "model-a", kvBits: nil)
+        await cache.commit(try XCTUnwrap(lease), cache: ConversationCacheLayers([layer]), fullTokens: tokens)
+        let stats = await cache.snapshotStats()
+        XCTAssertEqual(stats.entries, 0, "tensor bytes evict before retention consumes serving headroom")
+        budget.configure(maxContextTokens: 131_072, slots: 4, residentTokens: 65_536, verifyBytes: gib)
+        XCTAssertEqual(budget.hotByteLimit(), 0)
+        XCTAssertFalse(budget.admitsStaging(bytes: gib))
+    }
+
+    func testGLMPromptSnapshotBudgetCountsPaddedTargetAndHeadBuffers() throws {
+        try XCTSkipUnless(ProcessInfo.processInfo.environment["KV_ENABLE_MLX_TESTS"] == "1",
+                          "requires MLX runtime (set KV_ENABLE_MLX_TESTS=1 on a capable host)")
+        let target = GLM5NextAttentionCache(kpool: 4)
+        let head = GLM5NextAttentionCache(kpool: 4)
+        _ = target.appendLatent(MLXArray([Float(1), 2, 3], [1, 1, 3, 1]))
+        _ = head.appendLatent(MLXArray([Float(4), 5, 6], [1, 1, 3, 1]))
+        let snapshot = ConversationCacheLayers([target], promptSnapshot: true,
+            nativeMTPDrafter: NativeMTPDrafterPrefixSnapshot(
+                cache: [head.copy()], nextPosition: 3, foldedNextToken: 7), resumeBoundaryPlan: true)
+        let logicalBytes = (target.state + head.state).reduce(0) { $0 + $1.nbytes }
+        let backingBytes = (target.innerState() + head.innerState()).reduce(0) { $0 + $1.nbytes }
+        XCTAssertGreaterThan(backingBytes, logicalBytes, "the fixture must retain step-rounded padding")
+        XCTAssertEqual(ConversationCacheMemoryBudget.tensorBytes(snapshot), backingBytes,
+                       "both the target and copied MTP head must charge their complete retained buffers")
+        let gib = 1024 * 1024 * 1024
+        let physical = 64 * gib
+        let available = physical / 10 + 2 * gib + 1_000_000
+        let budget = ConversationCacheMemoryBudget(probe: .init(identity: "glm-padding-test") {
+            NativeMTPRoundSystemMemorySample(availableBytes: available, physicalBytes: physical)
+        })
+        budget.configure(maxContextTokens: 3_000, slots: 1, residentTokens: 3_000, verifyBytes: 0)
+        budget.observe(layers: snapshot, tokenCount: 3)
+        let variableBytes = logicalBytes / 3 * 3_000
+        let servingBytes = backingBytes - logicalBytes + variableBytes
+        let expected = available - (physical / 10 + 1) - 2 * gib - servingBytes - servingBytes / 20
+        XCTAssertEqual(budget.hotByteLimit(), expected,
+                       "padding is reserved once per row while valid-token state scales to full context")
+        XCTAssertGreaterThan(budget.hotByteLimit(), 900_000,
+                             "short warmup padding must not inflate per-token density")
+    }
+
+    func testUnknownMemorySampleDeclinesOpportunisticAllocations() {
+        let budget = ConversationCacheMemoryBudget(probe: .init(identity: "unavailable") { nil })
+        XCTAssertEqual(budget.hotByteLimit(), 0)
+        XCTAssertFalse(budget.admitsStaging(bytes: 1))
     }
 
     func testCompletionResultClampsCachedTokensToPromptTokens() {

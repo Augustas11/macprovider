@@ -694,7 +694,7 @@
     {
       "spec_id": "SPEC-024",
       "title": "Prefix-cache billing and provider-local cache isolation",
-      "version": "0.2.13",
+      "version": "0.2.14",
       "path": "specs/SPEC-024-prefix-cache-billing.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -1040,7 +1040,7 @@
     {
       "spec_id": "SPEC-037",
       "title": "KV survival across provider restarts (encrypted provider-local disk tier)",
-      "version": "v0.2.2",
+      "version": "v0.2.3",
       "path": "specs/SPEC-037-kv-survival-restart.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -3808,7 +3808,7 @@
         "phase3-binary/Tests/macprovider-cliTests/ConversationPromptSnapshotTests.swift:testUnflaggedRotatingAndPoolEntriesStillMiss",
         "phase3-binary/Tests/macprovider-cliTests/ConversationPromptSnapshotTests.swift:testDeepseekV4ResumedTurnMatchesFreshPrefillExactlyOnCPU",
         "phase3-binary/Tests/macprovider-cliTests/ConversationPromptSnapshotTests.swift:testGLM5NextResumedTurnMatchesFreshPrefill",
-        "phase3-binary/Tests/macprovider-cliTests/ConversationCacheTests.swift:testPromptSnapshotIsNeverCapturedByTheColdTier",
+        "phase3-binary/Tests/macprovider-cliTests/ConversationCacheTests.swift:testPromptSnapshotIsCapturedByTheColdTier",
         "phase3-binary/Tests/macprovider-cliTests/PagedMLALatentCacheTests.swift:testPromptSnapshotConversionEqualsAndExtendsLikeTheStockCacheOnCPU",
         "phase3-binary/Tests/macprovider-cliTests/ConversationPromptSnapshotTests.swift:testContinuousBatchRowsKeepOnlyTheReferencePlanSnapshot",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testKeyedSnapshotRowPublishesOnlyItsPromptSnapshot",

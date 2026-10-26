@@ -1,10 +1,62 @@
 # SPEC-037 — KV survival across provider restarts (encrypted provider-local disk tier)
 
-Version: v0.2.2
+Version: v0.2.3
 Status: draft (v0.2 fleet/recurrent implementation and acceptance in progress)
 Owner: provider runtime / prefix-cache persistence
 Decision source: `docs/research/RESEARCH_233_KV_SURVIVAL_RESTART_MEMO.md` (landed decision memo, commit `d6881b14`)
 Audit history: R1+R2+R3 five-lane audits (codex code/security/architect + adversarial verificator + product critic) reconciled in this text. R2 forced: positive synthetic-key sub-namespace (the shipped `conv:` validator makes prefix-exclusion gating unsatisfiable), per-entry Keychain DEKs as the rollback-proof revocation anchor, purge-generation stamping at lease acquisition, rotation-intent journal, byte-level format grammar, write-side staging caps, and `allow_buyer_keys` rejected in v0.1. R3 forced: non-circular AAD projection (blob hash out of AAD), single-key purge lease fencing, lock inode outside the deletable tree, incoming-vs-served model identity split, DEK lifecycle on eviction, and control-plane state bounds. v0.1.2: Keychain mode for the shipped naked Developer ID CLI is the process-default / login keychain (same store as provider credentials); Data Protection Keychain is used only when a named access group is set on a profiled bundle. v0.1.3: RESEARCH_233 Q6 on the live Qwen3-Coder-30B-A3B 4-bit tuple is unquantized `KVCacheSimple` (`kv_bits=null`, ~98 KiB/token; KVS-01a evidence). Q7 q4 KV is not the active representation. FR-KVP9 promotion hard ceiling rises to 1 GiB so the memo's 8k FP16 class is configurable; the default stays 256 MiB. Codec stays `kvsurv-codec-v1`. KVS-01b evidence is not claimed here. v0.1.4: hybrid entries (any recurrent `ArraysCache`/`MambaCache` layer, with SPEC-024 v0.2.5 recurrent-state checkpoints) are hot-tier only and never persisted or promoted. v0.1.5: decode-path exclusion is explicit for both `classic_draft_spec` and `native_mtp`; neither path may enter persistent or hot conversation-cache lifecycle. v0.2.1 (#2015): a batched hybrid first turn's serial cache carries the terminal checkpoint state in its recurrent layers, so codec-v2 capture sees complete canonical state instead of an empty placeholder; both staging ceilings default to 1 GiB on hosts with at least 64 GiB of memory (256 MiB below), because a Qwen3.6-35B-A3B entry needs ~61 MiB per recurrent checkpoint plus 20 KiB/token and its promotion staging is twice its decoded size. v0.2.2 (#2015): the tier is on by default (AGENTS.md rule 11). Basis: KVS-01a and KVS-01b restart-survival evidence (`docs/runbooks/kv-survival-kvs01a-enable-gate-evidence-2026-09-20.md`, `docs/runbooks/kv-survival-kvs01b-8k-gate-evidence-2026-09-21.md`) and the R016 Studio acceptance on the #2032 build (14/14; median repeat-prefix TTFT 750 ms with the tier on against 3,523 ms off). KVS-02 (same-family model switch misses) and KVS-03 (same model id, different artifact SHA misses) passed as Studio smoke runs (`docs/research/RESEARCH_ROADMAP.md`, RESEARCH_233 row), and the AC-2 per-envelope-field mutation and wrong-epoch fixtures cover the remaining variants. Caps, staging defaults, the fleet-grant gate and fail-closed activation are unchanged. Privacy-class requests bypass the tier per request (SPEC-049 v0.6.0, SPEC-049-R010), so an enabled tier no longer removes a provider from the privacy class.
+
+## Amendment v0.2.3 — lossless prompt-snapshot retention
+
+Related: #2153. Related: #2143.
+
+This amendment supersedes prompt-snapshot/native-MTP persistence exclusions
+below only for the allowlisted complete prompt-snapshot representation:
+
+- **FR-KVP2 / FR-KVP4:** extend-only SPEC-024 FR-CI2a/R005 prompt snapshots
+  may persist under a distinct versioned codec/ABI. Target cache classes and
+  constructor parameters, every tensor's original dtype/shape/raw bytes and
+  cache metadata, `promptSnapshot` and `resumeBoundaryPlan`, and any native-MTP
+  head caches plus `nextPosition`/`foldedNextToken` MUST round-trip together.
+  No numeric conversion, quantization, pending proposal or partial-head fallback
+  is permitted. Non-snapshot classic draft state stays excluded. Restore uses
+  the existing hot predicate and all model/tokenizer/template/ABI identity fences.
+- **Archive contract:** `codec_id=kvsurv-codec-v3`, ABI epoch 3,
+  `cache_class=KVPromptSnapshot`. The closed manifest adds `snapshot_bytes`,
+  exactly equal to `decoded_length` and the sum of authenticated frame plaintext
+  lengths. Target layer records have layout version 3 and dtype `i32` as a
+  constructor descriptor (not tensor storage): `GLM5NextAttentionCache` uses
+  `[kpool,maxTrim,step]`; `MambaCache` uses `[]`. The bounded little-endian `KVC3`
+  archive contains canonical tokens, target/head counts, boundary-plan flag,
+  next position/folded token, then ordered class/constructor/metadata/offset and
+  dtype/shape/raw-byte tensor records. Target layers are complete; a head is
+  absent or one matching GLM attention layer at the same token offset. GLM
+  attention has six state slots; Mamba has its complete two-slot recurrent
+  state. Invalid dimensions, counts, byte lengths, offsets, tokens, class or
+  paired-head metadata MUST reject the entire archive before MLX restoration.
+  DeepSeek V4's recursive window/pool `CacheList` is not in this allowlist;
+  its snapshots retain the enlarged hot tier and skip disk safely.
+- **FR-KVP3 / FR-KVP9:** validate the archive's class allowlist, ordered layer
+  coverage, metadata, tensor dimensions/lengths and total decoded byte bound
+  before allocating MLX arrays. Unsupported, corrupt or incompatible state
+  misses safely. Existing per-entry, aggregate write-live and single-promotion
+  staging bounds and the 1 GiB hard ceilings remain; v3 charges twice decoded
+  length for promotion (archive parsing or tensor materialization); write admission accounts
+  for the complete codec/crypto footprint before copying. Available system
+  memory additionally reserves full CB capacity, native verify windows and the
+  10% free floor. Failure to reserve skips the cache operation, not serving.
+- **FR-KVP10 / FR-KVP11:** retention cleanup defaults to 4,320 minutes and
+  eligibility follows the hot tier's 259,200-second default, measured from the
+  original commit instant. Promotion does not renew either deadline. The
+  16 GiB disk byte budget, 64-entry quota, 8 GiB disk free-space floor,
+  access-based eviction and encrypted store remain unchanged. Purge generation,
+  key epoch, per-key leases, identity checks and privacy/provenance gates apply
+  unchanged to snapshot records.
+
+Reference designs: oMLX raw-byte boundary snapshots and bounded SSD writer;
+vLLM fixed-capacity offload with protected active state; SGLang access-based
+radix eviction and host-cache reserve. oMLX keeps MTP sidecars in memory; this
+versioned complete-state contract is required by our exact R005 restore rule.
 
 ## 1. Purpose and scope
 
@@ -621,7 +673,7 @@ block, fail, or corrupt the request being served.
   configurable instead of adding a `QuantizedKVCache` codec. A further
   raise, or a quantized-KV allowlist, remains a spec-revision decision,
   not a configuration tweak.
-- Promoted entries count against the existing hot-tier budgets (200k
+- Promoted entries count against the existing hot-tier budgets (2M
   tokens, entry cap); promotion MUST NOT raise any RAM ceiling. At most one
   promotion runs at a time namespace-wide (back-pressure; concurrent
   candidates fall back to miss, `disk_miss_busy`, rather than queueing).
@@ -664,7 +716,7 @@ block, fail, or corrupt the request being served.
   `creation_time > now` additionally hard-misses (FR-KVP4b).
 - **Physical retention** is separately bounded: expired or superseded
   generations are deleted by compaction (opportunistic and periodic) and
-  at latest `retention_minutes` (operational default 60) after creation
+  at latest `retention_minutes` (operational default 4320) after creation
   (`disk_evict_retention`). Retention is a cleanup deadline that does
   **not** extend reuse eligibility — and must not be presented to
   operators as survival time (FR-KVP11 notice). TTL and retention are
@@ -693,7 +745,7 @@ YAML file → environment → CLI overrides. Exact surface (AC-9 fixtures):
 | `max_bytes` | `MACPROVIDER_KV_DISK_CACHE_MAX_BYTES` | `--kv-disk-cache-max-bytes` | 16 GiB | > 0; invalid ⇒ tier disabled |
 | `max_entries` | `MACPROVIDER_KV_DISK_CACHE_MAX_ENTRIES` | `--kv-disk-cache-max-entries` | 64 | > 0; invalid ⇒ tier disabled |
 | `max_entry_bytes` | `MACPROVIDER_KV_DISK_CACHE_MAX_ENTRY_BYTES` | `--kv-disk-cache-max-entry-bytes` | 2 GiB | > 0; invalid ⇒ tier disabled |
-| `retention_minutes` | `MACPROVIDER_KV_DISK_CACHE_RETENTION_MINUTES` | `--kv-disk-cache-retention-minutes` | 60 | > 0; **cleanup deadline only — does NOT extend reuse eligibility, which is fixed at the hot-tier TTL (default 900 s) and is not tunable here**; invalid ⇒ tier disabled |
+| `retention_minutes` | `MACPROVIDER_KV_DISK_CACHE_RETENTION_MINUTES` | `--kv-disk-cache-retention-minutes` | 4320 | > 0; **cleanup deadline only — does NOT extend reuse eligibility, which is fixed at the hot-tier TTL (default 259200 s) and is not tunable here**; invalid ⇒ tier disabled |
 | `staging_max_bytes` | `MACPROVIDER_KV_DISK_CACHE_STAGING_MAX_BYTES` | `--kv-disk-cache-staging-max-bytes` | 1 GiB on hosts with ≥ 64 GiB memory, else 256 MiB | read/promotion side; ≤ 1 GiB hard (FR-KVP9); invalid ⇒ tier disabled |
 | `write_staging_max_bytes` | `MACPROVIDER_KV_DISK_CACHE_WRITE_STAGING_MAX_BYTES` | `--kv-disk-cache-write-staging-max-bytes` | 1 GiB on hosts with ≥ 64 GiB memory, else 256 MiB | write/snapshot side; ≤ 1 GiB hard (FR-KVP3); invalid ⇒ tier disabled |
 | `min_free_bytes` | `MACPROVIDER_KV_DISK_CACHE_MIN_FREE_BYTES` | `--kv-disk-cache-min-free-bytes` | 8 GiB | ≥ 1 GiB; invalid ⇒ tier disabled |

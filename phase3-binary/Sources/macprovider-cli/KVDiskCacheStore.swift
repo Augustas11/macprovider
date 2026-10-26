@@ -158,6 +158,7 @@ struct KVWriteSnapshot: Sendable {
     let layers: [KVLayerPayload]
     var layersV2: [KVCacheLayerPayload] = []
     var recurrentCheckpoints: [KVRecurrentCheckpointPayload] = []
+    var promptSnapshot: KVPromptSnapshotPayload? = nil
     let identity: KVWriteIdentity
     /// High-watermark sampled at hot-lease acquisition (FR-KVP8 stamping rule).
     let sampledPurgeGeneration: Int
@@ -174,6 +175,7 @@ struct KVReadHit: Sendable {
     let tokens: [Int32]
     let layers: [KVLayerPayload]
     var decodedV2: KVDecodedPayloadV2? = nil
+    var promptSnapshot: KVPromptSnapshotPayload? = nil
     var createdAtMillis: Int? = nil
     var eligibleUntilMillis: Int? = nil
     let bytesRead: Int
@@ -851,15 +853,19 @@ actor KVDiskCacheStore {
         // Allowlist check.
         let classAllowed = snapshot.identity.codecID == KVDiskCacheFormat.codecID
             ? KVDiskCacheFormat.allowlistedCacheClasses.contains(snapshot.identity.cacheClass)
-            : snapshot.identity.codecID == KVDiskCacheFormat.recurrentCodecID
-                && snapshot.identity.cacheClass == KVDiskCacheFormat.recurrentCacheClass
+            : snapshot.identity.codecID == KVDiskCacheFormat.promptSnapshotCodecID
+                ? snapshot.identity.cacheClass == KVDiskCacheFormat.promptSnapshotCacheClass
+                : snapshot.identity.codecID == KVDiskCacheFormat.recurrentCodecID
+                    && snapshot.identity.cacheClass == KVDiskCacheFormat.recurrentCacheClass
         guard classAllowed else {
             return skip(.allowlistRemoved, snapshot)
         }
 
         // Geometry pre-check: the §5a decoded_length equation (same as read-side).
         let decodedLength: Int?
-        if snapshot.identity.codecID == KVDiskCacheFormat.codecID {
+        if snapshot.identity.codecID == KVDiskCacheFormat.promptSnapshotCodecID {
+            decodedLength = snapshot.promptSnapshot.flatMap { try? KVPromptSnapshotCodec.encodeSegments($0).reduce(0) { $0 + $1.count } }
+        } else if snapshot.identity.codecID == KVDiskCacheFormat.codecID {
             let geometry = snapshot.layers.map {
                 KVDiskCacheFormat.LayerGeometryInput(classID: $0.classID, ndim: $0.ndim, dims: $0.dims, dtype: $0.dtype)
             }
@@ -881,7 +887,7 @@ actor KVDiskCacheStore {
             }
         }
         // An entry that could never be promoted MUST NOT be written.
-        let promotionMultiplier = snapshot.identity.codecID == KVDiskCacheFormat.recurrentCodecID ? 2 : 1
+        let promotionMultiplier = snapshot.identity.codecID == KVDiskCacheFormat.codecID ? 1 : 2
         let (promotionBytes, promotionOverflow) = decodedLength.multipliedReportingOverflow(by: promotionMultiplier)
         guard !promotionOverflow,
               promotionBytes <= config.stagingMaxBytes,
@@ -1009,11 +1015,15 @@ actor KVDiskCacheStore {
             // buffers before the next chunk. Peak live memory beyond the snapshot is one
             // chunk plaintext + one frame — not the whole plaintext AND the whole blob.
             let blobURL = dir.appendingPathComponent("gen-\(generation).blob")
-            let segments = snapshot.identity.codecID == KVDiskCacheFormat.codecID
-                ? try KVPayloadCodec.encodeSegments(tokens: snapshot.tokens, layers: snapshot.layers)
-                : try KVPayloadCodecV2.encodeSegments(
-                    tokens: snapshot.tokens, layers: snapshot.layersV2,
-                    checkpoints: snapshot.recurrentCheckpoints)
+            let segments: [Data]
+            if let prompt = snapshot.promptSnapshot, snapshot.identity.codecID == KVDiskCacheFormat.promptSnapshotCodecID {
+                segments = try KVPromptSnapshotCodec.encodeSegments(prompt)
+            } else if snapshot.identity.codecID == KVDiskCacheFormat.codecID {
+                segments = try KVPayloadCodec.encodeSegments(tokens: snapshot.tokens, layers: snapshot.layers)
+            } else {
+                segments = try KVPayloadCodecV2.encodeSegments(tokens: snapshot.tokens, layers: snapshot.layersV2,
+                                                             checkpoints: snapshot.recurrentCheckpoints)
+            }
             var cursor = KVSegmentCursor(segments)
             var blobHasher = SHA256()
             var writtenBlobBytes = 0
@@ -1169,12 +1179,12 @@ actor KVDiskCacheStore {
     private func buildManifest(snapshot: KVWriteSnapshot, generation: Int, decodedLength: Int,
                                chunks: [KVChunkRecord], blobLength: Int, blobSHA256: String) -> KVDiskManifest {
         let id = snapshot.identity
-        let layerRecords = snapshot.identity.codecID == KVDiskCacheFormat.codecID
+        let layerRecords = snapshot.promptSnapshot.map { KVPromptSnapshotCodec.records($0) } ?? (snapshot.identity.codecID == KVDiskCacheFormat.codecID
             ? snapshot.layers.map {
                 KVLayerRecord(layerIndex: $0.layerIndex, classID: $0.classID, layoutVersion: layoutVersion(for: $0),
                               ndim: $0.ndim, dims: $0.dims, dtype: $0.dtype)
             }
-            : v2LayerRecords(snapshot.layersV2)
+            : v2LayerRecords(snapshot.layersV2))
         return KVDiskManifest(
             schemaID: KVDiskCacheFormat.manifestSchemaID,
             codecID: id.codecID,
@@ -1198,6 +1208,7 @@ actor KVDiskCacheStore {
             layerCount: id.layerCount,
             layers: layerRecords,
             recurrentCheckpoints: v2CheckpointRecords(snapshot.recurrentCheckpoints),
+            snapshotBytes: snapshot.identity.codecID == KVDiskCacheFormat.promptSnapshotCodecID ? decodedLength : nil,
             kvBits: id.kvBits,
             kvGroupSize: id.kvGroupSize,
             kvQuantMode: id.kvQuantMode,
@@ -1261,6 +1272,7 @@ actor KVDiskCacheStore {
     /// back from a detached decode task to the actor.
     private enum KVPromoteDecode: Sendable {
         case ok(tokens: [Int32], layers: [KVLayerPayload], blobSize: Int, peakStaging: Int)
+        case okPrompt(KVPromptSnapshotPayload, blobSize: Int, peakStaging: Int)
         case okV2(KVDecodedPayloadV2, blobSize: Int, peakStaging: Int)
         case corrupt
         case ioError
@@ -1362,6 +1374,13 @@ actor KVDiskCacheStore {
             guard decoded.tokens.count == manifest.tokenCount else { return .corrupt }
             peakStaging = max(peakStaging, decoder.peakBytes)
             return .ok(tokens: decoded.tokens, layers: decoded.layers, blobSize: blobSize, peakStaging: peakStaging)
+        }
+        if manifest.codecID == KVDiskCacheFormat.promptSnapshotCodecID {
+            guard let payload = try? KVPromptSnapshotCodec.decode(v2Plaintext, expectedLayers: manifest.layers,
+                                                                 tokenCount: manifest.tokenCount) else { return .corrupt }
+            let peak = max(peakStaging, v2Plaintext.count * 2)
+            guard peak <= stagingMaxBytes else { return .budget }
+            return .okPrompt(payload, blobSize: blobSize, peakStaging: peak)
         }
         let decoded: KVDecodedPayloadV2
         do {
@@ -1484,7 +1503,7 @@ actor KVDiskCacheStore {
         // Promotion staging ceiling (declared decoded size). codec-v2 restore holds the
         // decoded bytes and the materialized MLX arrays at once, so it is charged twice,
         // matching the write-side admission (FR-KVP3/FR-KVP9).
-        let promotionMultiplier = manifest.codecID == KVDiskCacheFormat.recurrentCodecID ? 2 : 1
+        let promotionMultiplier = manifest.codecID == KVDiskCacheFormat.codecID ? 1 : 2
         let (promotionBytes, promotionOverflow) = manifest.decodedLength.multipliedReportingOverflow(by: promotionMultiplier)
         guard !promotionOverflow, promotionBytes <= config.stagingMaxBytes else {
             emitMiss(.diskMissBudget, detail: .exceedsPromotionCeiling, prefix: prefix)
@@ -1587,6 +1606,17 @@ actor KVDiskCacheStore {
                                   eligibleUntilMillis: manifest.eligibleUntilMillis,
                                   bytesRead: blobSize, decryptMillis: elapsedMillis,
                                   peakStagingBytes: peakStaging))
+        case let .okPrompt(decoded, blobSize, peakStaging):
+            if var entry = liveEntries[index] {
+                entry.lastUsedMillis = nowMillis
+                liveEntries[index] = entry
+                appendUsageRecord(index: index, millis: nowMillis)
+            }
+            let elapsedMillis = Int(Date().timeIntervalSince(started) * 1000)
+            if emitHitEvent { emit(.diskHit, indexHashPrefix: prefix, fields: ["codec_id": manifest.codecID]) }
+            return .hit(KVReadHit(tokens: decoded.tokens, layers: [], promptSnapshot: decoded,
+                createdAtMillis: manifest.createdAtMillis, eligibleUntilMillis: manifest.eligibleUntilMillis,
+                bytesRead: blobSize, decryptMillis: elapsedMillis, peakStagingBytes: peakStaging))
         case let .okV2(decoded, blobSize, peakStaging):
             if var entry = liveEntries[index] {
                 entry.lastUsedMillis = nowMillis
@@ -1616,6 +1646,7 @@ actor KVDiskCacheStore {
     func writeColdSnapshot(
         rawKey: String, tokens: [Int32], layers: [KVLayerPayload],
         layersV2: [KVCacheLayerPayload] = [], recurrentCheckpoints: [KVRecurrentCheckpointPayload] = [],
+        promptSnapshot: KVPromptSnapshotPayload? = nil,
         identity: KVWriteIdentity,
         sampledPurgeGeneration: Int, commitSequence: Int, createdAtMillis: Int, eligibleUntilMillis: Int,
         incarnation: String, nowMillis: Int
@@ -1637,7 +1668,7 @@ actor KVDiskCacheStore {
         // regardless of persist-Task scheduling.
         let snapshot = KVWriteSnapshot(
             rawKey: rawKey, indexHMAC: index, tokens: tokens, layers: layers,
-            layersV2: layersV2, recurrentCheckpoints: recurrentCheckpoints, identity: identity,
+            layersV2: layersV2, recurrentCheckpoints: recurrentCheckpoints, promptSnapshot: promptSnapshot, identity: identity,
             sampledPurgeGeneration: sampledPurgeGeneration, commitSequence: commitSequence,
             createdAtMillis: createdAtMillis, eligibleUntilMillis: eligibleUntilMillis, incarnation: incarnation)
         return try write(snapshot, nowMillis: nowMillis)
