@@ -460,11 +460,12 @@ final class ConnectedAppsTests: XCTestCase {
             // /usr/bin/security (which would widen the Keychain ACL).
             XCTAssertFalse(text.contains("security find-generic-password"))
             XCTAssertTrue(text.contains("KEY_FILE='/fake/handoff/key'"))
-            let read = try XCTUnwrap(text.range(of: "MALIBU_API_KEY=$(cat -- \"$KEY_FILE\""))
-            let remove = try XCTUnwrap(text.range(of: "rm -f -- \"$KEY_FILE\""))
+            let read = try XCTUnwrap(text.range(of: "MALIBU_API_KEY=$(/bin/cat -- \"$KEY_FILE\""))
+            let remove = try XCTUnwrap(text.range(of: "\n/bin/rm -f -- \"$KEY_FILE\"\n"))
             let exec = try XCTUnwrap(text.range(of: "exec '/fake/cli"))
             XCTAssertLessThan(read.lowerBound, remove.lowerBound)
             XCTAssertLessThan(remove.lowerBound, exec.lowerBound, "the handoff is deleted before the client runs")
+            XCTAssertTrue(text.contains("|| { /bin/rm -f -- \"$KEY_FILE\"; exit 1; }"), "a failed key read aborts the launcher")
             XCTAssertTrue(text.contains("export MALIBU_API_KEY"))
             XCTAssertTrue(text.contains("exec '/fake/cli'\\''with-space'"))
             XCTAssertFalse(text.contains("FAKE_BUYER_KEY"))
@@ -494,7 +495,7 @@ final class ConnectedAppsTests: XCTestCase {
                 executable: URL(fileURLWithPath: "/fake/open'code"),
                 config: URL(fileURLWithPath: "/fake/opencode.json"), model: selected,
                 keyHandoff: URL(fileURLWithPath: "/fake/handoff/key")), as: UTF8.self)
-            let remove = try XCTUnwrap(text.range(of: "rm -f -- \"$KEY_FILE\""))
+            let remove = try XCTUnwrap(text.range(of: "\n/bin/rm -f -- \"$KEY_FILE\"\n"))
             let version = try XCTUnwrap(text.range(of: "test \"$('/fake/open"))
             XCTAssertTrue(text.contains("test \"$('/fake/open'\\''code' --version)\" = '1.17.9' || { echo 'This Qwen managed profile requires OpenCode 1.17.9.' >&2; exit 1; }"))
             XCTAssertLessThan(remove.lowerBound, version.lowerBound)

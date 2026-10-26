@@ -168,7 +168,7 @@ final class TerminalBackendTests: XCTestCase {
         let inherited = ["HOME": home.path, "PATH": "/usr/bin:/bin"]
         let detected = await HarnessCatalog.resolve("claude", environment: inherited)
         let resolution = try XCTUnwrap(detected)
-        XCTAssertEqual(resolution.url, harness)
+        XCTAssertEqual(resolution.url.resolvingSymlinksInPath(), harness.resolvingSymlinksInPath())
         XCTAssertEqual(resolution.loginPath, path)
         let claude = try ClaudeCodeLauncher.prepare(executable: resolution.url, model: toolModel, key: "private-key",
                                                    loginPath: resolution.loginPath, home: home, inheritedEnvironment: inherited)
