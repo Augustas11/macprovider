@@ -5799,6 +5799,7 @@ def verify_directory(
         signed_feeds.append((artifact_path, artifacts))
     native_mtp_path = directory / NATIVE_MTP_ADMISSION_FEED_NAME
     native_mtp = native_mtp_obj = native_mtp_bank = None
+    _validate_native_mtp_release_closure(directory, native_mtp_path.exists())
     if native_mtp_path.exists():
         for name in (NATIVE_MTP_MANIFEST_NAME, NATIVE_MTP_BANK_NAME, f"{NATIVE_MTP_BANK_NAME}.sig"):
             if not (directory / name).exists():
@@ -6433,7 +6434,7 @@ def _git_show(repo: pathlib.Path, commit: str, path: str) -> bytes | None:
     return result.stdout if result.returncode == 0 else None
 
 
-def _verify_native_binding_bundle(bundle: pathlib.Path, *, repo: pathlib.Path, commit: str, recipe_path: str):
+def _native_mtp_binding_module():
     # Load the reviewed verifier shipped beside this catalog verifier. A caller
     # cannot replace verification with an object or a claimed success boolean.
     path = ROOT / "scripts" / "native_mtp_binding_bundle.py"
@@ -6443,6 +6444,20 @@ def _verify_native_binding_bundle(bundle: pathlib.Path, *, repo: pathlib.Path, c
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
+    return module
+
+
+def _validate_native_mtp_release_closure(directory: pathlib.Path, native_mtp_present: bool) -> None:
+    try:
+        _native_mtp_binding_module().validate_release_directory(
+            directory, native_mtp_present=native_mtp_present,
+        )
+    except ValueError as exc:
+        fail(f"native MTP release file closure: {exc}")
+
+
+def _verify_native_binding_bundle(bundle: pathlib.Path, *, repo: pathlib.Path, commit: str, recipe_path: str):
+    module = _native_mtp_binding_module()
     return module.verify_bundle(bundle, repo=repo, commit=commit, recipe_path=recipe_path)
 
 

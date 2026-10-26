@@ -78,6 +78,13 @@ def read_json(path: Path):
                       parse_constant=lambda _: (_ for _ in ()).throw(BindingBundleError("nonfinite JSON")))
 
 
+def validate_release_directory(directory: Path, *, native_mtp_present: bool) -> None:
+    """Require the native sidecar family to be complete before verification."""
+    found = {name for name in SIDECAR_FILES if (directory / name).is_file()}
+    expected = SIDECAR_FILES if native_mtp_present else set()
+    require(found == expected, "native release sidecar file set mismatch")
+
+
 def canonical(value) -> bytes:
     return (json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n").encode()
 
