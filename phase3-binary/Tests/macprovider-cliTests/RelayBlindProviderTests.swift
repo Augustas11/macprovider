@@ -46,6 +46,30 @@ final class RelayBlindProviderTests: XCTestCase {
         }
     }
 
+    func testManagerAdvertisesOnlyFamiliesItsRuntimeCanServe() throws {
+        for privacy in [false, true] {
+            let root = temporaryStateDirectory()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let keys = try RelayBlindKeyManager(directory: root, models: ["model"],
+                                                persistAgreementKey: !privacy)
+            let record = try keys.currentRecord()
+            XCTAssertEqual(record.endpointFamilies, privacy
+                ? RelayBlindKeyRecord.supportedEndpointFamilies : ["chat_completions"])
+            // An ordinary identity's record must still satisfy a legacy Chat-only pin.
+            let pinnedScope = privacy ? RelayBlindKeyRecord.supportedEndpointFamilies : ["chat_completions"]
+            XCTAssertTrue(record.endpointFamilies.allSatisfy(pinnedScope.contains))
+            var signed = RelayBlindFraming.keyRecordImmutable(publicKey: record.publicKey,
+                identityFingerprint: record.identityFingerprint, models: record.models,
+                maxEncryptedRequestBytes: record.maxEncryptedRequestBytes,
+                endpointFamilies: record.endpointFamilies)
+            signed.appendSigned64(record.notBeforeUnix)
+            signed.appendSigned64(record.expiresAtUnix)
+            let identity = try Curve25519.Signing.PublicKey(rawRepresentation:
+                RelayBlindBase64URL.decode(keys.identityPublicKeyBase64URL(), exactCount: 32))
+            XCTAssertTrue(identity.isValidSignature(record.signature, for: signed))
+        }
+    }
+
     func testPrivacyAdapterDropsTranslatedInputBytesWithoutLosingResponseContext() throws {
         for family in ["responses", "messages"] {
             let request: [String: Any] = family == "responses"

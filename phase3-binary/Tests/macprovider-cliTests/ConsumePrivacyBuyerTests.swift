@@ -4,6 +4,16 @@ import XCTest
 @testable import macprovider_cli
 
 final class ConsumePrivacyBuyerTests: XCTestCase {
+    func testLocalHostedToolDisclosurePreservesRequestAndEndpointScope() throws {
+        let body = Data(#"{"model":"model-a","input":"hello","tools":[{"type":"web_search"},{"type":"namespace","name":"nested","tools":[{"type":"web_search"},{"type":"file_search"}]},{"type":"custom","name":"apply_patch"},{"type":"function","name":"lookup"},{"type":"bad\r\nheader"}]}"#.utf8)
+        let original = body
+        XCTAssertEqual(ConsumePrivacyBuyer.unservedToolsDisclosure(family: "responses", originalBody: body), "file_search,web_search")
+        XCTAssertNil(ConsumePrivacyBuyer.unservedToolsDisclosure(family: "messages", originalBody: body))
+        XCTAssertNil(ConsumePrivacyBuyer.unservedToolsDisclosure(family: "chat_completions", originalBody: body))
+        XCTAssertNil(ConsumePrivacyBuyer.unservedToolsDisclosure(family: "responses", originalBody: Data(#"{"tools":[{"type":"custom","name":"apply_patch"}]}"#.utf8)))
+        XCTAssertEqual(body, original)
+    }
+
     func testDirectoryChecksPinnedSignerFreshnessAndExactPayload() throws {
         let signer = Curve25519.Signing.PrivateKey()
         let now = Int64(Date().timeIntervalSince1970)

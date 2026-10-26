@@ -32,6 +32,10 @@ struct ConsumePrivacyBuyer: Sendable {
                   !request.bearerToken.contains(where: { $0.isWhitespace || $0.isNewline }) else {
                 throw invalid("local_privacy_configuration_invalid")
             }
+            let unservedTools = Self.unservedToolsDisclosure(family: family, originalBody: request.body)
+            guard (unservedTools?.utf8.count ?? 0) <= 4096 else {
+                throw invalid("local_privacy_tool_disclosure_too_large")
+            }
             let pinnedKey = try Curve25519.Signing.PublicKey(
                 rawRepresentation: RelayBlindBase64URL.decode(directoryPublicKey, exactCount: 32)
             )
@@ -128,7 +132,7 @@ struct ConsumePrivacyBuyer: Sendable {
                 requestID: requestID, model: input.model, inputCap: input.inputCap,
                 outputCap: input.outputCap, assurance: assurance
             )
-            let verifiedHeaders = [
+            var verifiedHeaders = [
                 ("content-type", request.streaming ? "text/event-stream" : "application/json"),
                 ("cache-control", "no-store"),
                 ("x-macprovider-privacy-class", PrivacyClassConstants.v1),
@@ -139,6 +143,9 @@ struct ConsumePrivacyBuyer: Sendable {
                 ("x-macprovider-privacy-mode", "relay_blind_required"),
                 ("x-macprovider-privacy-mode-disclosure", "content_hidden_from_network_relays; serving_provider_runtime_reads_plaintext; metadata_visible_to_relays"),
             ]
+            if let unservedTools {
+                verifiedHeaders.append(("x-malibu-unserved-tools", unservedTools))
+            }
             return ConsumeUpstreamResponse(statusCode: response.response.statusCode, headers: verifiedHeaders,
                                            body: opened.body, verifiedUsage: opened.usage)
         } catch {
@@ -153,6 +160,13 @@ struct ConsumePrivacyBuyer: Sendable {
         "X-MacProvider-Privacy-Class": PrivacyClassConstants.v1,
         "X-MacProvider-Privacy-Mode": "relay_blind_required",
     ]
+
+    /// Derived locally only after response authentication; never part of an upstream request.
+    static func unservedToolsDisclosure(family: String, originalBody: Data) -> String? {
+        guard family == "responses" else { return nil }
+        let types = LocalResponsesAdapter.unservedToolTypes(in: originalBody)
+        return types.isEmpty ? nil : types.joined(separator: ",")
+    }
 
     private func invalid(_ code: String) -> ConsumePrivacyBuyerError { .preDispatch(code: code) }
 

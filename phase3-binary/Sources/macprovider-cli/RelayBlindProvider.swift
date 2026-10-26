@@ -927,7 +927,9 @@ final class RelayBlindKeyManager: @unchecked Sendable {
             maxEncryptedRequestBytes: maxEncryptedRequestBytes,
             notBeforeUnix: notBeforeUnix,
             expiresAtUnix: expiresAtUnix,
-            endpointFamilies: RelayBlindKeyRecord.supportedEndpointFamilies
+            // Only the ephemeral privacy runtime dispatches these adapters. Persisted
+            // SPEC-041 identities retain the legacy Chat-only signed scope.
+            endpointFamilies: persistAgreementKey ? ["chat_completions"] : RelayBlindKeyRecord.supportedEndpointFamilies
         )
     }
 }

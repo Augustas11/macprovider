@@ -7369,7 +7369,7 @@ final class ConsumeLocalHandler: ChannelInboundHandler, @unchecked Sendable {
                 "x-macprovider-privacy-class", "x-macprovider-privacy-assurance",
                 "x-macprovider-privacy-mode", "x-macprovider-privacy-mode-disclosure",
                 "x-macprovider-response-encryption", "x-macprovider-requested-privacy-mode",
-                "x-macprovider-effective-privacy-outcome",
+                "x-macprovider-effective-privacy-outcome", "x-malibu-unserved-tools",
             ].contains(normalized)
             guard Self.allowedUpstreamResponseHeader(normalized) || verifiedPrivacyHeader else {
                 continue
