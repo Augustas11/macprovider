@@ -387,6 +387,51 @@ final class ConversationCacheTests: XCTestCase {
         XCTAssertFalse(budget.admitsStaging(bytes: gib))
     }
 
+    // CPU metadata fixtures: no tensor allocation, evaluation or model load.
+    func testShortGLMSeedDoesNotExtrapolateBoundedIndexerWindows() {
+        let gib = 1024 * 1024 * 1024
+        let budget = ConversationCacheMemoryBudget(probe: .init(identity: "short-glm-seed") {
+            .init(availableBytes: 80 * gib, physicalBytes: 256 * gib)
+        })
+        budget.configure(maxContextTokens: 200_000, slots: 4, residentTokens: 65_536, verifyBytes: 0)
+        // Representative sparse-layer geometry: bf16 latent 512, index width
+        // 128, pool 4, rewind 16. Thirty-token seeds already fill rewind state.
+        let layer = ConversationCacheMemoryBudget.glmGeometry(
+            latentBytesPerToken: 1_024, pooledBytesPerKey: 256,
+            rawKeyBytesPerToken: 256, rawGateBytesPerToken: 256,
+            kpool: 4, maxTrim: 16, step: 256)
+        XCTAssertEqual(layer.bytesPerToken, 1_088)
+        XCTAssertEqual(layer.fixedRowBytes, 272_384)
+        budget.observe(geometry: .init(fixedRowBytes: layer.fixedRowBytes * 48,
+                                       bytesPerToken: layer.bytesPerToken * 48))
+        XCTAssertEqual(budget.hotByteLimit(), 8 * gib,
+                       "the 30-token seed must leave useful retention after full four-slot reserve")
+        // Old classification scales all 22 raw columns by 800k/30. That
+        // fictitious state alone is 13.4 GiB and drives this same guard to zero.
+        let oldDensity = ((30 * 1_024 + 7 * 256 + 22 * 512) * 48 + 29) / 30
+        let oldReserve = 800_000 * oldDensity + (256 - 30) * 1_024 * 48 * 4
+        XCTAssertGreaterThan(oldReserve + oldReserve / 20 + 256 * gib / 10 + 2 * gib, 80 * gib)
+    }
+
+    func testGLMBudgetPreservesVerifyStagingAndFreeFloorAtFullSlots() {
+        let gib = 1024 * 1024 * 1024
+        let layer = ConversationCacheMemoryBudget.glmGeometry(
+            latentBytesPerToken: 1_024, pooledBytesPerKey: 256,
+            rawKeyBytesPerToken: 256, rawGateBytesPerToken: 256,
+            kpool: 4, maxTrim: 16, step: 256)
+        for available in [24 * gib, 26 * gib, 80 * gib] {
+            let budget = ConversationCacheMemoryBudget(probe: .init(identity: "full-slots-\(available)") {
+                .init(availableBytes: available, physicalBytes: 256 * gib)
+            })
+            budget.configure(maxContextTokens: 200_000, slots: 4, residentTokens: 65_536, verifyBytes: gib)
+            budget.observe(geometry: .init(fixedRowBytes: layer.fixedRowBytes * 48,
+                                           bytesPerToken: layer.bytesPerToken * 48))
+            XCTAssertEqual(budget.hotByteLimit(), 0,
+                           "even corrected geometry cannot spend full-slot/head/verify/floor reserves")
+            XCTAssertFalse(budget.admitsStaging(bytes: gib))
+        }
+    }
+
     func testGLMPromptSnapshotBudgetCountsPaddedTargetAndHeadBuffers() throws {
         try XCTSkipUnless(ProcessInfo.processInfo.environment["KV_ENABLE_MLX_TESTS"] == "1",
                           "requires MLX runtime (set KV_ENABLE_MLX_TESTS=1 on a capable host)")
@@ -411,7 +456,7 @@ final class ConversationCacheTests: XCTestCase {
         budget.configure(maxContextTokens: 3_000, slots: 1, residentTokens: 3_000, verifyBytes: 0)
         budget.observe(layers: snapshot, tokenCount: 3)
         let variableBytes = logicalBytes / 3 * 3_000
-        let servingBytes = backingBytes - logicalBytes + variableBytes
+        let servingBytes = 255 * 4 * 2 + variableBytes
         let expected = available - (physical / 10 + 1) - 2 * gib - servingBytes - servingBytes / 20
         XCTAssertEqual(budget.hotByteLimit(), expected,
                        "padding is reserved once per row while valid-token state scales to full context")

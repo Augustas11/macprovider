@@ -207,28 +207,74 @@ final class ConversationCacheMemoryBudget: @unchecked Sendable {
         return arrays.reduce(0) { saturatedAdd($0, $1.nbytes) }
     }
 
+    struct Geometry {
+        var fixedRowBytes = 0
+        var bytesPerToken = 0
+    }
+
+    /// GLM latent columns and pooled keys grow; raw indexer keys/gates do not.
+    /// Reserve the maximum pending + rewind window even for a short seed, and
+    /// one allocation step of latent padding. Only metadata is inspected.
+    static func glmGeometry(
+        latentBytesPerToken: Int, pooledBytesPerKey: Int,
+        rawKeyBytesPerToken: Int, rawGateBytesPerToken: Int,
+        kpool: Int, maxTrim: Int, step: Int
+    ) -> Geometry {
+        guard kpool > 0, maxTrim >= 0, step > 0 else {
+            return Geometry(fixedRowBytes: Int.max, bytesPerToken: Int.max)
+        }
+        let rawCapacity = saturatedAdd(saturatedMultiply(kpool - 1, 2), maxTrim)
+        let rawWidth = saturatedAdd(rawKeyBytesPerToken, rawGateBytesPerToken)
+        let padding = saturatedMultiply(step - 1, latentBytesPerToken)
+        let pooledDensity = pooledBytesPerKey / kpool + (pooledBytesPerKey % kpool == 0 ? 0 : 1)
+        return Geometry(
+            fixedRowBytes: saturatedAdd(padding, saturatedMultiply(rawCapacity, rawWidth)),
+            bytesPerToken: saturatedAdd(latentBytesPerToken, pooledDensity))
+    }
+
+    func observe(geometry: Geometry) {
+        lock.lock(); defer { lock.unlock() }
+        fixedRowBytes = max(fixedRowBytes, geometry.fixedRowBytes)
+        bytesPerToken = max(bytesPerToken, geometry.bytesPerToken)
+    }
+
     func observe(layers: ConversationCacheLayers, tokenCount: Int) {
         guard tokenCount > 0 else { return }
-        var fixed = 0
-        var variable = 0
+        var geometry = Geometry()
         let targetAndDraft = layers.layers + (layers.nativeMTPDrafter?.cache ?? [])
         for layer in targetAndDraft {
             let backing = layer.innerState().reduce(0) { Self.saturatedAdd($0, $1.nbytes) }
+            let part: Geometry
             if layer is ArraysCache {
-                fixed = Self.saturatedAdd(fixed, backing)
+                part = Geometry(fixedRowBytes: backing)
+            } else if let glm = layer as? GLM5NextAttentionCache {
+                let state = glm.state
+                func rowBytes(_ index: Int) -> Int {
+                    let array = state[index]
+                    return array.size > 0 && array.ndim == 3 && array.dim(1) > 0
+                        ? array.nbytes / array.dim(1) : 0
+                }
+                let latentWidth = glm.offset > 0 ? state[0].nbytes / glm.offset : 0
+                let pooledWidth = rowBytes(1)
+                // A seed before the first full pool has only pending raw keys.
+                // A pool-aligned seed may have only folded keys. Their widths
+                // are identical; pooled width is a conservative fallback.
+                let rawKeyWidth = max(rowBytes(2), rowBytes(4), pooledWidth)
+                let rawGateWidth = max(rowBytes(3), rowBytes(5), pooledWidth)
+                part = Self.glmGeometry(
+                    latentBytesPerToken: latentWidth, pooledBytesPerKey: max(pooledWidth, rawKeyWidth),
+                    rawKeyBytesPerToken: rawKeyWidth, rawGateBytesPerToken: rawGateWidth,
+                    kpool: glm.kpool, maxTrim: glm.maxTrim, step: glm.step)
             } else {
-                // A short seed may retain a step-rounded allocation. Reserve its
-                // padding once per row; only the valid-token state grows with
-                // context. Scaling padding by context would disable retention.
                 let logical = layer.state.reduce(0) { Self.saturatedAdd($0, $1.nbytes) }
-                fixed = Self.saturatedAdd(fixed, max(0, backing - logical))
-                variable = Self.saturatedAdd(variable, logical)
+                part = Geometry(
+                    fixedRowBytes: max(0, backing - logical),
+                    bytesPerToken: logical / tokenCount + (logical % tokenCount == 0 ? 0 : 1))
             }
+            geometry.fixedRowBytes = Self.saturatedAdd(geometry.fixedRowBytes, part.fixedRowBytes)
+            geometry.bytesPerToken = Self.saturatedAdd(geometry.bytesPerToken, part.bytesPerToken)
         }
-        let density = variable / tokenCount + (variable % tokenCount == 0 ? 0 : 1)
-        lock.lock(); defer { lock.unlock() }
-        fixedRowBytes = max(fixedRowBytes, fixed)
-        bytesPerToken = max(bytesPerToken, density)
+        observe(geometry: geometry)
     }
 
     /// Both disk directions are independently capped at 1 GiB by SPEC-037.

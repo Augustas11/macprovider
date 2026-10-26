@@ -3129,8 +3129,10 @@ actor ModelRuntime: ModelRuntimeServing {
     }
 
     nonisolated static func clearMLXBufferCacheAfterPrefill(
+        isFinalChunk: Bool = true,
         using clear: () -> Void = { Memory.clearCache() }
     ) {
+        guard isFinalChunk else { return }
         clear()
     }
 
