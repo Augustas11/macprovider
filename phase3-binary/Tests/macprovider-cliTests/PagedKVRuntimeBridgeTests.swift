@@ -5269,7 +5269,14 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
                     modelID: descriptor.modelID,
                     modelSHA256: descriptor.modelSHA256,
                     weightsGeneration: 1
-                )
+                ),
+                // Scripted rounds must not depend on unrelated Studio memory use.
+                nativeMTPRoundSystemMemoryProbe: .init(identity: "runtime-bridge-test") {
+                    NativeMTPRoundSystemMemorySample(
+                        availableBytes: 1_000_000_000,
+                        physicalBytes: 1_000_000_000
+                    )
+                }
             ),
             allocator: try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: maxPhysicalBlocks),
             backend: backend,
