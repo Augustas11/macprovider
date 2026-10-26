@@ -4453,7 +4453,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         ))
     }
 
-    func testQwenPreparationLanePreservesPromptStopsToolPrefillAndCheckpoints() async throws {
+    func testQwenPreparationLanePreservesRequiredToolGrammarPromptStopsAndCheckpoints() async throws {
         try requireMetal()
 
         let tokenizer = RuntimeBridgePreparationTokenizer()
@@ -4529,12 +4529,14 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
             Array(baseTokens.suffix(tokenizer.encode(text: plan.generationPromptSuffix, addSpecialTokens: false).count)),
             tokenizer.encode(text: plan.generationPromptSuffix, addSpecialTokens: false)
         )
-        let expectedPrompt = baseTokens + tokenizer.encode(text: plan.prefill, addSpecialTokens: false)
+        // Required-tool grammar owns the generated tool delimiters. Both
+        // preparation paths must avoid appending an extra textual prefill.
+        let expectedPrompt = baseTokens
         let expectedStops: Set<Int> = [901, tokenizer.eosTokenID, tokenizer.extraEOSTokenID]
         XCTAssertNotNil(prepared.grammarConstraint, "Required tool calls must retain grammar admission")
         XCTAssertEqual(prepared.promptTokens, expectedPrompt)
         XCTAssertEqual(prepared.promptTokens, legacyInput.text.tokens.asArray(Int.self))
-        XCTAssertEqual(prepared.toolCallPrefill, plan.prefill)
+        XCTAssertNil(prepared.toolCallPrefill)
         XCTAssertEqual(prepared.toolCallPrefill, legacyToolCallPrefill)
         XCTAssertEqual(prepared.modelStopTokenIDs, expectedStops)
         XCTAssertEqual(
