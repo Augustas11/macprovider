@@ -512,22 +512,18 @@ final class ConnectedAppsTests: XCTestCase {
         XCTAssertEqual(sentence.filter { $0 == "." }.count, 1, "one sentence")
         // The rest sits behind Details.
         let details = ConnectedAppConfiguration.setupDetails
-        XCTAssertTrue(details.contains("private one-time file"))
-        XCTAssertTrue(details.contains("send it elsewhere"))
+        XCTAssertTrue(details.contains("one-time file restricted to your account"))
         XCTAssertTrue(details.contains("Project settings or managed policy can override the profile"))
         XCTAssertTrue(details.contains("Desktop apps are not set up."))
         XCTAssertTrue(ConnectedAppConfiguration.crushProjectConfigWarning.contains(".crushrc"))
     }
 
-    func testNotPrivateBannerSaysPrivateModeDoesNotApplyAndPointsToMalibuChat() {
-        let banner = ConnectedAppConfiguration.privacy
-        XCTAssertTrue(banner.hasPrefix("Not private"))
-        XCTAssertTrue(banner.contains("requests that Malibu does not encrypt"))
-        XCTAssertTrue(banner.contains("private mode doesn't apply"))
-        XCTAssertTrue(banner.contains("gateway and the serving provider can read prompts and responses"))
-        XCTAssertTrue(banner.contains("For private requests, use Malibu Chat."))
-        for overclaim in ["end-to-end", "confidential", "enclave", "relay-blind"] {
-            XCTAssertFalse(banner.lowercased().contains(overclaim))
+    func testConnectedAppsCopyMakesNoPrivacyClaim() {
+        let copy = [ConnectedAppConfiguration.keyExposure,
+                    ConnectedAppConfiguration.setupDetails,
+                    ConnectedAppConfiguration.cursorDisclosure].joined(separator: " ").lowercased()
+        for claim in ["not private", "private requests", "private mode", "encrypt", "cursor's servers"] {
+            XCTAssertFalse(copy.contains(claim))
         }
     }
 
@@ -596,10 +592,9 @@ final class ConnectedAppsTests: XCTestCase {
         }
     }
 
-    func testCursorHasNoWriterAndDisclosesTransit() {
+    func testCursorHasNoWriterAndNamesSupportedFeatures() {
         XCTAssertThrowsError(try ConnectedAppConfiguration.configuration(app: .cursor, model: model, original: nil))
-        XCTAssertTrue(ConnectedAppConfiguration.privacy.contains("Not private"))
-        XCTAssertTrue(ConnectedAppConfiguration.cursorDisclosure.contains("Cursor's servers"))
+        XCTAssertTrue(ConnectedAppConfiguration.cursorDisclosure.contains("BYOK covers supported chat models; Tab uses Cursor models."))
     }
 
     func testSelectedAPITestBodiesAreBounded() {

@@ -5,8 +5,12 @@ Status: DRAFT v0.41.0 · Owner: @Augustas11 · Target: 2026 Q3
 **Change log v0.41.0 (2026-10-26, Related: #2054):**
 User-first navigation opens on Chat; Earn combines Dashboard and Provider;
 Models merges discovery, installed models and downloads; Terminal embeds
-bounded, ephemeral shell and gateway harness sessions. Existing privacy,
-copy, catalog, preparation and client configuration rules remain normative.
+bounded, ephemeral shell and gateway harness sessions. Connected apps and
+Terminal make no privacy claim; R012 and R013 remove the persistent privacy
+warning, gateway privacy status, Details privacy text, Cursor transit note and
+Malibu Chat privacy redirect. The buyer-key credential-safety sentence remains
+required. Existing copy, catalog, preparation and client configuration rules
+remain normative.
 
 **Change log v0.40.0 (2026-10-22, Related: #2107):**
 - SPEC-025-R012: the Connected apps model picker lists only models whose
@@ -945,12 +949,10 @@ projections (SPEC-044-R004), colour never the only signal.
   file permissions on restore. Unsupported or ambiguous formats MUST remain
   unchanged. A connection test MUST exercise the selected API/model with
   bounded cost/time/response size and reject credential-bearing redirects;
-  a models-list fetch alone is not a connection test. Show **Not private**
-  persistently before setup and on gateway status, saying that these apps
-  send requests Malibu does not encrypt, so the network's private mode does
-  not apply and the gateway and serving provider can read them, and that
-  private requests work through Malibu Chat; Cursor can additionally
-  transmit through Cursor's servers. The buyer-key disclosure above is one
+  a models-list fetch alone is not a connection test. Connected apps MUST make
+  no privacy claim and MUST NOT show privacy warnings or privacy status text
+  before setup, on gateway status or in Details, or a Cursor-server transit
+  note. The buyer-key disclosure above is one
   persistently visible sentence that names repository configuration and
   agent commands and recommends a dedicated, spend-limited key; the handoff
   mechanics, managed-profile scope and override caveats MAY sit behind a
@@ -1025,8 +1027,9 @@ projections (SPEC-044-R004), colour never the only signal.
   `$SHELL -l` (fallback `/bin/zsh`) in the home directory; users may choose
   a working folder per tab.
   Harnesses MUST use the Malibu gateway and saved R012 Keychain buyer key,
-  never the loopback provider. The R012 **Not private** line and buyer-key
-  disclosure sentence remain persistently visible. Without a saved key, show
+  never the loopback provider. Terminal MUST make no privacy claim and MUST
+  NOT show a privacy warning. The R012 buyer-key disclosure sentence remains
+  persistently visible. Without a saved key, show
   "Add a buyer key in Other apps" and a button opening that sub-view; start
   no process. Codex, OpenCode and Crush use the existing managed launchers,
   including one-time key handoff and project-config disabling. Missing setup

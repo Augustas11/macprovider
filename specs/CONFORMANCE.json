@@ -14392,7 +14392,7 @@
         "phase3-binary/app/Tests/MalibuTests/ConnectedAppsTests.swift:func testOpenCodeLauncherIgnoresRepositoryConfiguration",
         "phase3-binary/app/Tests/MalibuTests/ConnectedAppsTests.swift:func testOpenCodeQwenSamplingIsModelScopedAndPreservesExistingAgents",
         "phase3-binary/app/Tests/MalibuTests/ConnectedAppsTests.swift:func testOpenCodeSamplingDoesNotMatchUnrelatedOrNearModelNames",
-        "phase3-binary/app/Tests/MalibuTests/ConnectedAppsTests.swift::testNotPrivateBannerSaysPrivateModeDoesNotApplyAndPointsToMalibuChat",
+        "phase3-binary/app/Tests/MalibuTests/ConnectedAppsTests.swift::testConnectedAppsCopyMakesNoPrivacyClaim",
         "phase3-binary/app/Tests/MalibuTests/ConnectedAppsTests.swift::testGatewayModelsNeedASavedKeyAndLoadAfterSaving",
         "phase3-binary/app/Tests/MalibuTests/ConnectedAppsTests.swift::testGatewayModelLoadErrorsShowBesideTheButton"
       ],

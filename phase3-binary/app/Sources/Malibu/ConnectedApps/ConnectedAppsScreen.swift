@@ -325,7 +325,6 @@ struct ConnectedAppsScreen: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 Text("Connected apps").font(.title2.weight(.semibold))
-                Text(ConnectedAppConfiguration.privacy).foregroundStyle(.orange)
                 Text("Gateway: \(ConnectedAppConfiguration.gateway.absoluteString)").font(.caption)
                 ShellPanel("Buyer credential") {
                     SecureField("Buyer API key", text: $buyerKey)
@@ -395,7 +394,6 @@ struct ConnectedAppsScreen: View {
                 if let tested = store.endpointTested { Text(tested).font(.caption) }
                 Text(store.status).font(.callout).accessibilityIdentifier("connected-apps-status")
                 if store.busy { HStack { ProgressView().controlSize(.small); Button("Cancel request") { store.cancel() } } }
-                Text("Not private · Malibu has not verified any app with this gateway.").font(.caption).foregroundStyle(.secondary)
             }
             .padding(20)
         }
