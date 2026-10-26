@@ -2657,7 +2657,7 @@ actor CoordinatorClient {
     // connection and the group cancels its sibling, so the error unwinds to
     // runReconnectLoop exactly as before.
     private func receiveLoop(_ socket: ProviderWebSocketTask) async throws {
-        let (inbox, continuation) = AsyncStream.makeStream(
+        let (inbox, continuation) = AsyncThrowingStream<URLSessionWebSocketTask.Message, Error>.makeStream(
             of: URLSessionWebSocketTask.Message.self,
             bufferingPolicy: .unbounded
         )
@@ -2671,27 +2671,30 @@ actor CoordinatorClient {
             // `continuation` (both Sendable), never `self`, so nothing here
             // hops onto the actor and stalls the next receive().
             group.addTask {
-                defer { continuation.finish() }
-                while !Task.isCancelled {
-                    let message: URLSessionWebSocketTask.Message
-                    do {
+                do {
+                    while !Task.isCancelled {
+                        let message: URLSessionWebSocketTask.Message
                         message = try await socket.receive()
-                    } catch {
-                        Self.keepaliveDebug("ws_receive_error error=\(error)")
-                        throw error
+                        guard backlog.add(CoordinatorInboundBacklog.byteCount(of: message)) else {
+                            Self.keepaliveDebug("ws_inbound_backlog_exceeded limit=\(backlog.limitBytes)")
+                            throw CoordinatorInboundBacklogExceeded(limitBytes: backlog.limitBytes)
+                        }
+                        continuation.yield(message)
                     }
-                    guard backlog.add(CoordinatorInboundBacklog.byteCount(of: message)) else {
-                        Self.keepaliveDebug("ws_inbound_backlog_exceeded limit=\(backlog.limitBytes)")
-                        throw CoordinatorInboundBacklogExceeded(limitBytes: backlog.limitBytes)
-                    }
-                    continuation.yield(message)
+                    continuation.finish()
+                } catch {
+                    // Finishing normally here lets the drainer win group.next()
+                    // and masks a socket failure as a clean disconnect.
+                    continuation.finish(throwing: error)
+                    Self.keepaliveDebug("ws_receive_error error=\(error)")
+                    throw error
                 }
             }
 
             // Drainer task: serial handle() preserves frame ordering. The actor
             // hop on self.handle is the serialization point and is race-free.
             group.addTask { [self] in
-                for await message in inbox {
+                for try await message in inbox {
                     try Task.checkCancellation()
                     defer { backlog.remove(CoordinatorInboundBacklog.byteCount(of: message)) }
                     try await handle(message)
