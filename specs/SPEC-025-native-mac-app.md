@@ -1,6 +1,13 @@
 # SPEC-025 — Native Mac App (signed `.dmg`, native Mac app with menu-bar presence)
 
-Status: DRAFT v0.44.0 · Owner: @Augustas11 · Target: 2026 Q3
+Status: DRAFT v0.45.0 · Owner: @Augustas11 · Target: 2026 Q3
+
+**Change log v0.45.0 (2026-10-26, Related: #2164):**
+Adds SPEC-025-R021 Create for provider-local SDXL-Turbo images, capability
+and memory gating, creative-hold progress and a local PNG gallery. R001 and
+R020 place Create after Terminal in the sidebar. Existing requirement IDs
+remain stable. App tests do not establish real-weights generation or released
+provider acceptance; those gates remain pending.
 
 **Change log v0.44.0 (2026-10-26, Related: #2164):**
 Adds SPEC-025-R017 named Agents, SPEC-025-R018 bounded stdio MCP clients,
@@ -788,7 +795,7 @@ every section: reported values only, no machine reason codes, no $/time
 projections (SPEC-044-R004), colour never the only signal.
 
 - **SPEC-025-R001 Shell.** Malibu MUST present one main window titled
-  "Malibu": a sidebar with, in order, Chat, Terminal, Agents, Tasks, Models, Earn,
+  "Malibu": a sidebar with, in order, Chat, Terminal, Create, Agents, Tasks, Models, Earn,
   then a separate utility group with Settings and Diagnostics, and a detail
   pane showing the selected section. It opens on Chat. "Open Malibu"
   opens it on Chat; the menu-bar "Earnings" item opens Earn; "Settings…" (Cmd-,) and the menu-bar Settings item
@@ -1179,12 +1186,47 @@ errors. These surfaces MUST NOT introduce privacy claims.
   MUST state in one plain line that Malibu network runs are billed to the
   buyer key. This Mac runs are local work and MUST never count as earnings.
 - **SPEC-025-R020 Agent and Task navigation.** The sidebar MUST list **Chat,
-  Terminal, Agents, Tasks, Models, Earn**, followed by the separate **Settings**
+  Terminal, Create, Agents, Tasks, Models, Earn**, followed by the separate **Settings**
   and **Diagnostics** utility group. Persisted Agents and Tasks selections
   MUST restore their destinations; existing selection migration and the
-  default Chat destination MUST remain functional. Create is outside this
-  revision. Navigation tests MUST verify order, labels and persisted selection
-  migration.
+  default Chat destination MUST remain functional. Create MUST restore its
+  own persisted destination. Navigation tests MUST verify order, labels and
+  persisted selection migration.
+
+### 3.2.4 Create
+
+- **SPEC-025-R021 Create.** Create MUST generate images through the provider's
+  loopback `POST /v1/images/generations` only when local status advertises
+  `local_image_generation_v1` (SPEC-001-R014). Every generation and cancel
+  request MUST carry exactly one `X-MacProvider-Origin: local-app`. No image
+  generation or gallery result may be sent to a remote inference endpoint.
+  An older provider without the capability, an unavailable provider, or
+  insufficient physical memory MUST render an unavailable state with a plain
+  reason rather than an active Generate action.
+
+  Create MUST offer a required bounded prompt, a size picker for `512x512`
+  and `1024x1024`, steps 1–4 with default 4, an optional seed and Generate.
+  `1024x1024` MUST be unavailable below 32 GiB physical RAM. The selected
+  preset is SDXL-Turbo and `n=1`, `response_format=b64_json` are fixed. While
+  work is active, the app MUST prevent duplicate submissions and offer Stop
+  through provider cancellation. It MUST mirror the provider's `idle`,
+  `downloading`, `holding_customers`, `generating`, `warm` and `restoring`
+  states: show download size and measured progress, describe pausing earning
+  while creating, generation and restoration without inventing progress or
+  completion estimates. Provider errors MUST end in a clear retryable result
+  or unavailable reason; the app MUST NOT imply customer serving resumed
+  before the provider reports restoration.
+
+  Create MUST show exactly this plain explanatory line: "Creating pauses
+  earning on this Mac while it runs." The §3.2 copy contract applies: no
+  earnings or time projections and no privacy claims. The gallery MUST save
+  generated PNGs under `~/Pictures/Malibu/`, with `0700` for the created
+  directory and `0600` for image files, and provide deliberate Show in Finder
+  and Copy actions. Images MUST never be uploaded. Tests MUST cover sidebar
+  order and labels, every provider image state, RAM-based size gating,
+  unavailable states, gallery path and file permissions. Real-weights image
+  quality and generation acceptance on the lab Air remain separate pending
+  gates.
 
 ### 3.3 Updates — CLI-owned signed compatibility set
 
