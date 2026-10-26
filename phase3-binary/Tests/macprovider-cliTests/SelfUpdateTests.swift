@@ -2453,9 +2453,11 @@ private func runReloadHelperScenario(
     set -eu
     printf 'sleep %s\\n' "$*" >> '\(logURL.path)'
     """
+    // Give the spawned command a scheduling window. A no-op watchdog tick
+    // can exhaust its budget before a shell fixture writes its first log line.
     let commandSleep = """
     #!/bin/sh
-    exit 0
+    exec /bin/sleep 0.1
     """
     try Data(launchctl.utf8).write(to: launchctlURL)
     try Data(sleep.utf8).write(to: sleepURL)
