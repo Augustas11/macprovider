@@ -73,6 +73,11 @@ final class LocalAnthropicMessagesAdapter {
 
     init(body: Data) throws {
         let request = try Self.object(body)
+        // Privacy-class work is accepted only over the coordinator WebSocket.
+        // Translation must not discard its direct-HTTP downgrade marker.
+        if request.keys.contains("privacy_class") {
+            throw APIError(status: 400, message: PrivacyClassConstants.downgradeRejected, code: PrivacyClassConstants.downgradeRejected)
+        }
         let known: Set<String> = ["model", "max_tokens", "system", "messages", "tools", "tool_choice", "stream", "stop_sequences", "temperature", "top_p", "top_k", "metadata", "service_tier", "thinking"]
         // Match the gateway: SDK extension fields and beta controls are ignored,
         // while ambiguous case variants and explicitly unsupported controls fail.
@@ -241,7 +246,11 @@ final class LocalAnthropicMessagesAdapter {
         return "end_turn"
     }
     private func trimStop(_ text: String, reason: String, sequence: String?) -> (String, String?) {
-        if reason == "stop_sequence", let sequence, !sequence.isEmpty, text.hasSuffix(sequence) { return (String(text.dropLast(sequence.count)), sequence) }
+        if ["stop", "stop_sequence"].contains(reason), let sequence, !sequence.isEmpty {
+            // Native inference already removes matched request stops. Metadata
+            // distinguishes that case from a natural EOS with identical text.
+            return (text.hasSuffix(sequence) ? String(text.dropLast(sequence.count)) : text, sequence)
+        }
         if reason == "stop", let sequence = stopSequences.first(where: { text.hasSuffix($0) }) { return (String(text.dropLast(sequence.count)), sequence) }
         return (text, reason == "stop_sequence" ? sequence : nil)
     }

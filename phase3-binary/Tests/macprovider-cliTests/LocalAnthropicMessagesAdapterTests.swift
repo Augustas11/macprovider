@@ -87,6 +87,20 @@ final class LocalAnthropicMessagesAdapterTests: XCTestCase {
         XCTAssertEqual(stop["stop_sequence"] as? String, "END")
         XCTAssertEqual((stop["content"] as! [[String: Any]])[0]["text"] as? String, "hello")
     }
+    func testNativeAlreadyStrippedStopMetadata() throws {
+        let response = try object(adapter(["stop_sequences": ["END"]]).translateResponse(data([
+            "choices": [["message": ["content": "hello"], "finish_reason": "stop", "stop_sequence": "END"]],
+        ])))
+        XCTAssertEqual(response["stop_reason"] as? String, "stop_sequence")
+        XCTAssertEqual(response["stop_sequence"] as? String, "END")
+        XCTAssertEqual((response["content"] as! [[String: Any]])[0]["text"] as? String, "hello")
+        let stream = try adapter(["stream": true, "stop_sequences": ["END"]])
+        var frames = stream.consumeStream(try delta(["content": "hello"]))
+        frames += stream.consumeStream(try chunk(["choices": [["delta": [:], "finish_reason": "stop", "stop_sequence": "END"]]]))
+        frames += stream.consumeStream("data: [DONE]\n\n")
+        let terminal = try events(frames).first { $0["type"] as? String == "message_delta" }!
+        XCTAssertEqual((terminal["delta"] as! [String: Any])["stop_sequence"] as? String, "END")
+    }
     func testFragmentedStreamThinkingToolUsageAndTerminal() throws {
         let adapter = try adapter(["thinking": ["type": "enabled"], "stream": true])
         var frames = adapter.startStream()

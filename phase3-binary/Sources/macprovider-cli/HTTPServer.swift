@@ -710,7 +710,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         case (.POST, "/v1/messages"):
             handleChatCompletions(context: context, messages: true)
         case (_, "/v1/messages"):
-            writeError(context: context, status: .methodNotAllowed, message: "method not allowed", code: "invalid_request")
+            writeError(context: context, status: .methodNotAllowed, message: "method not allowed", code: "invalid_request", extraHeaders: [("Allow", "POST")])
         case (.POST, "/v1/responses"):
             handleChatCompletions(context: context, responses: true)
         case (_, "/v1/responses"):
@@ -749,7 +749,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     "preempted_error_code": "local_preempted",
                 ],
                 "messages": [
-                    "endpoint": "/v1/messages", "stream": true,
+                    "endpoint": "/v1/messages", "stream": true, "stateless": true,
                     "available": responses.available,
                     "model": responses.model as Any? ?? NSNull(),
                     "tool_choice_modes": responses.toolChoiceModes.map { mode in
@@ -1196,7 +1196,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                         stream: false,
                         completion: completion
                     )
-                    let response = Self.chatCompletionResponse(request: request, completion: completion)
+                    let response = Self.chatCompletionResponse(request: request, completion: completion, includeStopSequence: messages)
                     let ttftMs = completion.ttftMilliseconds ?? Self.elapsedMilliseconds(since: startedAt)
                     let terminalStateTSUnixMS = Int64(Date().timeIntervalSince1970 * 1000)
                     // SPEC-015 §M.2.2 — bind the receipt's
@@ -1663,7 +1663,8 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                         created: created,
                         model: request.model,
                         delta: [:],
-                        finishReason: completion.finishReason
+                        finishReason: completion.finishReason,
+                        stopSequence: writer.messagesAdapter != nil ? completion.stopSequence : nil
                     )
                 )
                 writer.writeSSEJSON(
@@ -2379,20 +2380,19 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         )
     }
 
-    private static func chatCompletionResponse(request: ChatCompletionRequest, completion: CompletionResult) -> [String: Any] {
+    private static func chatCompletionResponse(request: ChatCompletionRequest, completion: CompletionResult, includeStopSequence: Bool = false) -> [String: Any] {
         let created = Int(Date().timeIntervalSince1970)
+        var choice: [String: Any] = [
+            "index": 0, "message": Self.chatCompletionMessage(completion),
+            "finish_reason": completion.finishReason,
+        ]
+        if includeStopSequence, let stopSequence = completion.stopSequence { choice["stop_sequence"] = stopSequence }
         return [
             "id": "chatcmpl-\(UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased())",
             "object": "chat.completion",
             "created": created,
             "model": request.model,
-            "choices": [
-                [
-                    "index": 0,
-                    "message": Self.chatCompletionMessage(completion),
-                    "finish_reason": completion.finishReason,
-                ]
-            ],
+            "choices": [choice],
             "usage": Self.usage(completion),
         ]
     }
@@ -3121,39 +3121,38 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         created: Int,
         model: String,
         delta: [String: Any],
-        finishReason: Any
+        finishReason: Any,
+        stopSequence: String? = nil
     ) -> [String: Any] {
-        [
+        var choice: [String: Any] = ["index": 0, "delta": delta, "finish_reason": finishReason]
+        if let stopSequence { choice["stop_sequence"] = stopSequence }
+        return [
             "id": id,
             "object": "chat.completion.chunk",
             "created": created,
             "model": model,
-            "choices": [
-                [
-                    "index": 0,
-                    "delta": delta,
-                    "finish_reason": finishReason,
-                ]
-            ],
+            "choices": [choice],
         ]
     }
 
-    private func writeError(context: ChannelHandlerContext, status: HTTPResponseStatus, message: String, code: String) {
+    private func writeError(context: ChannelHandlerContext, status: HTTPResponseStatus, message: String, code: String, extraHeaders: [(String, String)] = []) {
         writeAPIError(
             context: context,
-            APIError(status: Int(status.code), message: message, code: code)
+            APIError(status: Int(status.code), message: message, code: code),
+            extraHeaders: extraHeaders
         )
     }
 
-    private func writeAPIError(context: ChannelHandlerContext, _ error: APIError) {
+    private func writeAPIError(context: ChannelHandlerContext, _ error: APIError, extraHeaders: [(String, String)] = []) {
         writeJSON(
             context: context,
             status: HTTPResponseStatus(statusCode: error.status),
-            body: error.envelope
+            body: error.envelope,
+            extraHeaders: extraHeaders
         )
     }
 
-    private func writeJSON(context: ChannelHandlerContext, status: HTTPResponseStatus, body: Any) {
+    private func writeJSON(context: ChannelHandlerContext, status: HTTPResponseStatus, body: Any, extraHeaders: [(String, String)] = []) {
         do {
             let encoded = try encodeJSONObject(body)
             let data = path(from: requestHead?.uri ?? "") == "/v1/messages" && status != .ok
@@ -3162,6 +3161,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             headers.add(name: "content-type", value: "application/json")
             headers.add(name: "content-length", value: "\(data.count)")
             headers.add(name: "connection", value: "close")
+            for (name, value) in extraHeaders { headers.add(name: name, value: value) }
 
             let head = HTTPResponseHead(version: .http1_1, status: status, headers: headers)
             context.write(wrapOutboundOut(.head(head)), promise: nil)

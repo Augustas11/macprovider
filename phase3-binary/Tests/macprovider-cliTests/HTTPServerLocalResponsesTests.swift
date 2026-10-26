@@ -48,6 +48,23 @@ final class HTTPServerLocalResponsesTests: XCTestCase {
         }
     }
 
+    func testMessagesPreserveNativeStopMetadata() async throws {
+        for stream in [false, true] {
+            try await withServer(runtime: LocalResponsesRuntime(stopSequence: "END")) { port in
+                var body = self.messagesBody(stream: stream)
+                body["stop_sequences"] = ["END"]
+                let response = try await self.post(port: port, path: "/v1/messages", body: body)
+                XCTAssertEqual(response.statusCode, 200)
+                let stop: [String: Any]
+                if stream {
+                    let terminal = try XCTUnwrap(self.events(response.data).first { $0["type"] as? String == "message_delta" })
+                    stop = try XCTUnwrap(terminal["delta"] as? [String: Any])
+                } else { stop = try self.object(response.data) }
+                XCTAssertEqual(stop["stop_reason"] as? String, "stop_sequence")
+                XCTAssertEqual(stop["stop_sequence"] as? String, "END")
+            }
+        }
+    }
     func testMessagesGuardFailuresAndMethodsAreAnthropicErrors() async throws {
         let runtime = LocalResponsesRuntime()
         try await withServer(runtime: runtime) { port in
@@ -66,6 +83,14 @@ final class HTTPServerLocalResponsesTests: XCTestCase {
                 XCTAssertEqual(error["code"] as? String, expectedCode)
                 XCTAssertNotNil(error["message"] as? String)
             }
+            for value: Any in ["private", NSNull()] {
+                var markedBody = self.messagesBody()
+                markedBody["privacy_class"] = value
+                let marked = try await self.post(port: port, path: "/v1/messages", body: markedBody)
+                XCTAssertEqual(marked.statusCode, 400)
+                let error = try XCTUnwrap(self.object(marked.data)["error"] as? [String: Any])
+                XCTAssertEqual(error["code"] as? String, PrivacyClassConstants.downgradeRejected)
+            }
             let malformed = try await self.post(port: port, path: "/v1/messages", body: ["model": "fixture-model"])
             XCTAssertEqual(malformed.statusCode, 400)
             XCTAssertEqual(try self.object(malformed.data)["type"] as? String, "error")
@@ -75,6 +100,7 @@ final class HTTPServerLocalResponsesTests: XCTestCase {
             request.httpMethod = "GET"
             let (data, response) = try await session.data(for: request)
             XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 405)
+            XCTAssertEqual((response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Allow"), "POST")
             XCTAssertEqual(try self.object(data)["type"] as? String, "error")
         }
         let calls = await runtime.calls
@@ -263,6 +289,7 @@ final class HTTPServerLocalResponsesTests: XCTestCase {
                 XCTAssertEqual(capabilities["model"] as? String, "fixture-model")
                 let messages = try XCTUnwrap(capabilities["messages"] as? [String: Any])
                 XCTAssertEqual(messages["endpoint"] as? String, "/v1/messages")
+                XCTAssertEqual(messages["stateless"] as? Bool, true)
                 XCTAssertEqual(messages["available"] as? Bool, true)
                 XCTAssertEqual(messages["model"] as? String, "fixture-model")
                 XCTAssertEqual(messages["stream"] as? Bool, true)
@@ -409,13 +436,15 @@ final class HTTPServerLocalResponsesTests: XCTestCase {
 private actor LocalResponsesRuntime: ModelRuntimeServing {
     private(set) var calls = 0
     let failAfterChunk: Bool
+    let stopSequence: String?
     let tokenUtilitiesSupported: Bool
     let awaitDisconnect: Bool
     let holdFirstRequestOnly: Bool
     private(set) var entered = false
     private(set) var cancelled = false
-    init(failAfterChunk: Bool = false, tokenUtilitiesSupported: Bool = true, awaitDisconnect: Bool = false, holdFirstRequestOnly: Bool = false) {
+    init(failAfterChunk: Bool = false, tokenUtilitiesSupported: Bool = true, awaitDisconnect: Bool = false, holdFirstRequestOnly: Bool = false, stopSequence: String? = nil) {
         self.failAfterChunk = failAfterChunk
+        self.stopSequence = stopSequence
         self.tokenUtilitiesSupported = tokenUtilitiesSupported
         self.awaitDisconnect = awaitDisconnect
         self.holdFirstRequestOnly = holdFirstRequestOnly
@@ -473,6 +502,6 @@ private actor LocalResponsesRuntime: ModelRuntimeServing {
         return result()
     }
     private func result() -> CompletionResult {
-        CompletionResult(content: "answer", finishReason: "stop", promptTokens: 2, completionTokens: 1, settlementDisposition: .eligibleOwner)
+        CompletionResult(content: "answer", finishReason: "stop", promptTokens: 2, completionTokens: 1, settlementDisposition: .eligibleOwner, stopSequence: stopSequence)
     }
 }
