@@ -2117,6 +2117,12 @@ actor ModelRuntime: ModelRuntimeServing {
     private var continuousBatchingSelfCheckReport: ContinuousBatchingSelfCheckReport?
     private let warmSwapEnabled: Bool
     private let swapDrainTimeoutSeconds: Int
+    private var drainNowMilliseconds: @Sendable () -> Int64 = {
+        Int64(Date().timeIntervalSince1970 * 1000)
+    }
+    private var drainPollSleep: @Sendable () async -> Void = {
+        try? await Task.sleep(nanoseconds: 50_000_000)
+    }
     private var providerStatus: ProviderStatus?
     private var signalContinuations: [UUID: AsyncStream<SwapSignal>.Continuation] = [:]
     private var nextInFlightID: Int = 0
@@ -3993,6 +3999,8 @@ maxTokens: 1,
         testNativeMTPAdmissionRequestObserver: (@Sendable (String?, NativeMTPRuntimeAdmission, Int) -> Void)? = nil,
         warmSwapEnabled: Bool,
         swapDrainTimeoutSeconds: Int = 30,
+        testDrainNowMilliseconds: (@Sendable () -> Int64)? = nil,
+        testDrainPollSleep: (@Sendable () async -> Void)? = nil,
         providerStatus: ProviderStatus? = nil,
         catalogModelIDAlias: String? = nil,
         targetAuthorities: [String: ModelRuntimeTargetAuthority] = [:],
@@ -4194,6 +4202,8 @@ maxTokens: 1,
         self.warmSwapEnabled = warmSwapEnabled
         self.swapDrainTimeoutSeconds = swapDrainTimeoutSeconds
         self.providerStatus = providerStatus
+        if let testDrainNowMilliseconds { self.drainNowMilliseconds = testDrainNowMilliseconds }
+        if let testDrainPollSleep { self.drainPollSleep = testDrainPollSleep }
         self.loader = loader
         self.testLoader = testLoader
         self.testCompletion = testCompletion
@@ -6326,7 +6336,7 @@ maxTokens: 1,
         }
         // SPEC-001-R011: a swap drain does not wait out local work.
         await providerStatus.preemptAdmittedLocalWork()
-        let drainStartMs = Int64(Date().timeIntervalSince1970 * 1000)
+        let drainStartMs = drainNowMilliseconds()
         let timeoutMs = Int64(timeoutSeconds * 1000)
         while !Task.isCancelled {
             let snapshot = await providerStatus.snapshot()
@@ -6335,11 +6345,11 @@ maxTokens: 1,
             if !providerInFlight && !runtimeInFlight {
                 return false
             }
-            let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+            let nowMs = drainNowMilliseconds()
             if nowMs - drainStartMs >= timeoutMs {
                 return true
             }
-            try? await Task.sleep(nanoseconds: 50_000_000)
+            await drainPollSleep()
         }
         return false
     }

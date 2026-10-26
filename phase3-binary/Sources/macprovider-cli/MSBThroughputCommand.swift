@@ -321,7 +321,10 @@ struct MSBThroughputCommand: AsyncParsableCommand {
                     prompts: prompts,
                     decodeSteps: decodeTokens,
                     compiled: compiledThisRun,
-                    cacheKinds: cacheKinds
+                    cacheKinds: cacheKinds,
+                    // Match serve/parity prefill boundaries so throughput does
+                    // not allocate a whole long prompt in one forward.
+                    maxPromptChunkTokens: ContinuousBatchSchedulerConfiguration.defaultPromptChunkTokens
                 ).batched
             case .serialParallel:
                 FileHandle.standardError.write(Data(

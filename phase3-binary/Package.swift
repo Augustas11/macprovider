@@ -43,7 +43,7 @@ let package = Package(
         // Ordinary model registrations and batching admission are unchanged.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "9b999d87f0ef3f89b089a0ac44e3205a058c2cea"
+            revision: "7fe8036b671cea68a26063cd6759b38010e11765"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",
