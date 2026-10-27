@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -287,6 +288,35 @@ def _verify_candidate_envelope(directory: Path, version: str, source: str, run: 
         raise DecodePathError("signed acceptance candidate envelope verification failed")
 
 
+def _verify_identity_only_decode(old: dict, new: dict) -> None:
+    """Reopen the closed source proof; signed bytes alone prove no behavior."""
+    for key, pattern in (("source_commit", r"[0-9a-f]{40}"),
+                         ("decode_path_digest", r"[0-9a-f]{64}"),
+                         ("runtime_revision", r"[0-9a-f]{40}"),
+                         ("metallib_sha256", r"[0-9a-f]{64}")):
+        if not all(isinstance(row.get(key), str) and re.fullmatch(pattern, row[key])
+                   for row in (old, new)):
+            raise DecodePathError("signed-pair candidate: complete prior/current decode identities required")
+    # The source contract proves release-source equivalence, not arbitrary
+    # changed runtime or Metal-library bytes. Such changes need their own
+    # qualification before this pre-promotion exception can admit them.
+    if any(old[key] != new[key] for key in ("runtime_revision", "metallib_sha256")):
+        raise DecodePathError("signed-pair candidate: runtime/Metal changes require independent qualification")
+    spec = importlib.util.spec_from_file_location(
+        "signed_pair_source_equivalence", ROOT / "scripts/native_mtp_source_equivalence.py")
+    if spec is None or spec.loader is None:
+        raise DecodePathError("signed-pair candidate: source-equivalence verifier unavailable")
+    equivalence = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(equivalence)
+    try:
+        equivalence.verify_source_equivalence(
+            ROOT, old["source_commit"], new["source_commit"],
+            old["decode_path_digest"], new["decode_path_digest"],
+            request_feature_profile=new.get("request_feature_profile"))
+    except (ValueError, OSError, subprocess.SubprocessError) as error:
+        raise DecodePathError("signed-pair candidate: unchanged decode behavior is not proven") from error
+
+
 def _signed_pair_publish_gate(release_input: dict, sidecar: Path, version: str,
                               proof: SignedPairPublishProof) -> None:
     def require(condition: bool, reason: str) -> None:
@@ -400,6 +430,7 @@ def _signed_pair_publish_gate(release_input: dict, sidecar: Path, version: str,
                                                if key != "provider_revision"}
             return result
         require(scope(old) == scope(new), "qualification or eligibility scope changed")
+        _verify_identity_only_decode(old, new)
         require(old.get("challenge_bank_sha256") == prior["feed_sha256"]["/v1/native-mtp-selftest-bank"]
                 and new.get("challenge_bank_sha256") == target["feed_sha256"]["/v1/native-mtp-selftest-bank"], "bank binding mismatch")
         if new.get("model_key") == target.get("model_key"):

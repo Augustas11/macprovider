@@ -5,7 +5,8 @@ import json
 import shutil
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
+from types import SimpleNamespace
 from pathlib import Path
 
 from scripts import decode_path_digest as tool
@@ -179,6 +180,9 @@ class SignedPairPublishGateTests(unittest.TestCase):
         self.envelope = patch.object(tool, "_verify_candidate_envelope")
         self.verify = self.envelope.start()
         self.addCleanup(self.envelope.stop)
+        self.equivalence = patch.object(tool, "_verify_identity_only_decode")
+        self.verify_decode = self.equivalence.start()
+        self.addCleanup(self.equivalence.stop)
         self.bytes = self.root / "candidate"
         self.bytes.mkdir()
         self.archive = self.bytes / f"macprovider-cli-v{self.version}-darwin-arm64.tar.gz"
@@ -196,7 +200,8 @@ class SignedPairPublishGateTests(unittest.TestCase):
                         "decode_path_digest": "e" * 64, "challenge_bank_sha256": "1" * 64,
                         "performance_evidence_sha256": "2" * 64,
                         "provider_revision": "f" * 40, "reproducible_build_sha256": "8" * 64,
-                        "live_executable_cdhash": "8" * 40}
+                        "live_executable_cdhash": "8" * 40, "runtime_revision": "9" * 40,
+                        "metallib_sha256": "7" * 64}
         self.row = dict(self.old_row, source_commit=self.source, decode_path_digest=self.digest,
                         provider_revision=self.source, reproducible_build_sha256=self.code["binary_sha256"],
                         live_executable_cdhash="c" * 40)
@@ -252,6 +257,12 @@ class SignedPairPublishGateTests(unittest.TestCase):
         with patch.object(tool, "_tag_commit", side_effect=AssertionError("premature final tag lookup")):
             self.assertEqual(self.gate(), "ok")
         self.verify.assert_called_once_with(self.bytes, self.version, self.source, self.run)
+        self.verify_decode.assert_called_once_with(self.old_row, self.row)
+
+    def test_signed_candidate_cannot_inherit_changed_decode_qualification(self):
+        self.verify_decode.side_effect = tool.DecodePathError("unchanged decode behavior is not proven")
+        with self.assertRaisesRegex(tool.DecodePathError, "unchanged decode behavior"):
+            self.gate()
 
     def test_rejects_missing_ops_custody_failed_run_or_mismatched_signed_identity(self):
         with patch.dict(tool.os.environ, MACPROVIDER_OPS_ENTRYPOINT="0"):
@@ -307,6 +318,44 @@ class SignedPairPublishGateTests(unittest.TestCase):
             command.return_value.returncode = 1
             with self.assertRaisesRegex(tool.DecodePathError, "envelope verification failed"):
                 self.original_envelope(self.bytes, self.version, self.source, self.run)
+
+
+class IdentityOnlyDecodeProofTests(unittest.TestCase):
+    def setUp(self):
+        self.old = dict(source_commit="a" * 40, decode_path_digest="b" * 64,
+                        runtime_revision="c" * 40, metallib_sha256="d" * 64,
+                        request_feature_profile="native_mtp_greedy_text_v1")
+        self.new = dict(self.old, source_commit="e" * 40, decode_path_digest="f" * 64)
+
+    def test_complete_source_identities_are_recomputed_by_closed_verifier(self):
+        verifier = SimpleNamespace(verify_source_equivalence=Mock())
+        spec = SimpleNamespace(loader=Mock())
+        with patch.object(tool.importlib.util, "spec_from_file_location", return_value=spec), \
+             patch.object(tool.importlib.util, "module_from_spec", return_value=verifier):
+            tool._verify_identity_only_decode(self.old, self.new)
+        verifier.verify_source_equivalence.assert_called_once_with(
+            tool.ROOT, self.old["source_commit"], self.new["source_commit"],
+            self.old["decode_path_digest"], self.new["decode_path_digest"],
+            request_feature_profile=self.new["request_feature_profile"])
+
+    def test_closed_source_proof_failure_cannot_be_replaced_by_signed_identity(self):
+        verifier = SimpleNamespace(verify_source_equivalence=Mock(side_effect=ValueError("production verifier changed")))
+        spec = SimpleNamespace(loader=Mock())
+        with patch.object(tool.importlib.util, "spec_from_file_location", return_value=spec), \
+             patch.object(tool.importlib.util, "module_from_spec", return_value=verifier):
+            with self.assertRaisesRegex(tool.DecodePathError, "unchanged decode behavior is not proven"):
+                tool._verify_identity_only_decode(self.old, self.new)
+
+    def test_missing_identity_and_unproven_runtime_or_metal_changes_reject(self):
+        for key in ("source_commit", "decode_path_digest", "runtime_revision", "metallib_sha256"):
+            with self.subTest(missing=key):
+                old = dict(self.old); del old[key]
+                with self.assertRaisesRegex(tool.DecodePathError, "complete prior/current"):
+                    tool._verify_identity_only_decode(old, self.new)
+        for key, value in (("runtime_revision", "1" * 40), ("metallib_sha256", "2" * 64)):
+            with self.subTest(changed=key):
+                with self.assertRaisesRegex(tool.DecodePathError, "runtime/Metal changes"):
+                    tool._verify_identity_only_decode(self.old, dict(self.new, **{key: value}))
 
 
 if __name__ == "__main__":
