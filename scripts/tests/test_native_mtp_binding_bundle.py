@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import re
 import sys
 import tempfile
 import unittest
@@ -15,6 +16,31 @@ spec = importlib.util.spec_from_file_location("native_mtp_binding_bundle", HERE 
 m = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = m
 spec.loader.exec_module(m)
+
+
+class CommittedRecipeTests(unittest.TestCase):
+    def setUp(self):
+        self.repo = HERE.parent
+        self.recipe = json.loads((self.repo / m.RECIPE_PATH).read_text())
+
+    def test_frozen_source_inputs_match_the_reviewed_tree(self):
+        for relative, expected in self.recipe["source_inputs"].items():
+            with self.subTest(path=relative):
+                self.assertEqual(m.digest(self.repo / relative), expected)
+
+    def test_required_security_cases_exist_and_policy_bounds_stay_one(self):
+        test_root = self.repo / "phase3-binary/Tests/macprovider-cliTests"
+        for case in self.recipe["security_required_cases"]:
+            cls, method = case.split(".")
+            with self.subTest(case=case):
+                source = (test_root / (cls + ".swift")).read_text()
+                self.assertRegex(source, rf"\bclass\s+{re.escape(cls)}\s*:")
+                self.assertRegex(source, rf"\bfunc\s+{re.escape(method)}\s*\(")
+        for phase, bounds in self.recipe["phases"].items():
+            with self.subTest(phase=phase):
+                self.assertEqual(bounds["max_native_active_rows"], 1)
+                self.assertEqual(bounds["proposal_depth"], 1)
+                self.assertEqual(bounds["qualified_slots"], 4)
 
 
 class BindingCoreTests(unittest.TestCase):

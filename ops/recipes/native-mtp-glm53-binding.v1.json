@@ -26,17 +26,19 @@
   "security_required_cases": [
     "NativeMTPSelectorTests.testGLMStillRejectsStatefulToolGrammarAndUnknownTemplateControls",
     "NativeMTPSelectorTests.testGLMGreedyProfileIdentityRebindKeepsPriorShapeScope",
-    "NativeMTPAdmissionSidecarTests.testEmbeddedGLMAdapterSignsAtMostOneNativeActiveRow"
+    "NativeMTPAdmissionSidecarTests.testEmbeddedGLMImplementationCeilingAllowsFutureSignedTwoAndFourRowBounds",
+    "NativeMTPAdmissionSidecarTests.testReleaseEnvelopeBindsNativeActiveRowBoundIntoTupleIdentity",
+    "NativeMTPAdmissionSidecarTests.testReleaseEnvelopeRejectsNativeActiveRowBoundOutsideQualifiedSlots"
   ],
   "source_inputs": {
     "ops/recipes/native-mtp-glm53-lab-source-equivalence.v1.json": "e55765b281afa7eb68cc211eed941b3254effb2cd668ddd17ce4eb6c3a064cb6",
     "phase3-binary/catalog/autotune/autotune-artifacts-source.json": "11a8be672b5b0485a29676e04e01f55dcedbde150603cc893b9c76ff01bbd258",
     "phase3-binary/catalog/autotune/continuous-batching-policy-source.json": "f557b03bb4406eb366f7e2c90d788423768ccada289d9f651969187de8847941",
-    "phase3-binary/catalog/autotune/native-mtp-admission-release.json": "6e0abe5a1ee861d6e3bc484407cda8c00695e92ba686e83a0fbbd4b5dbfe4ef9",
-    "phase3-binary/catalog/autotune/native-mtp-admission-tuple.json": "878a8a621c34ec5f19b912c46dd45944f912b1b8db50e4d72571df35c4aa4dea",
+    "phase3-binary/catalog/autotune/native-mtp-admission-release.json": "329a154f0dadc57bbe59cf875639a5f2f5764dc698953327db087577af46eacf",
+    "phase3-binary/catalog/autotune/native-mtp-admission-tuple.json": "0f74c535506588fabb2da33d740e06d2d0d71a8d5ec65f1bc29f4623255620a8",
     "phase3-binary/catalog/autotune/native-mtp-artifact-manifest.json": "92a047c3caac2910ca117218affd02d6215eab8d022bbf1a9654869f16b851b6",
-    "phase3-binary/catalog/autotune/native-mtp-selftest-bank.json": "ddf387a23dbf82c43e88e93c7d3218e1ee3e43bada7ea9515bfa341ac0294d92",
-    "phase3-binary/catalog/autotune/rate-card-source.json": "04a113bb547219b378918e8cfd8170e158dd5066bd8a5d5c3d5d0f05b0e90b57",
+    "phase3-binary/catalog/autotune/native-mtp-selftest-bank.json": "d156d6cadcd4e0ff9c45dde2d69b56875ab74006a7170da551ae4956c6c446b2",
+    "phase3-binary/catalog/autotune/rate-card-source.json": "940398152ab1482e0b44e3f576fdd9e22578d2baf81ae54d63d750c4b5b0de70",
     "phase3-binary/catalog/autotune/trusted-keys.json": "da1ca2cb3788ee4e63982808bb90223ae0040ec150cb6fa6e9af04e52c773de6"
   }
 }
