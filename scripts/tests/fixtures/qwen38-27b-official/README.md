@@ -139,3 +139,95 @@ If quality is tied/inconclusive, retain the incumbent. If the quality winner
 misses usability, report that tradeoff and retain the incumbent pending the
 operator's decision; no automatic tradeoff or CB/MTP withdrawal.
 
+## One-window plan (slice 8; not executed)
+
+Coding-only restrictions remain in effect. Hardware starts only in the
+assigned guarded Studio window, after host identity and exclusive ownership
+are verified using existing lab controls. No live provider or coordinator
+mutation; lab binary is isolated with `--no-join`. Build source plus lab
+harness there only. Do not reuse historical scripts that hardcode another
+model, identity or host as Qwen3.8 acceptance.
+
+Before running, inventory existing qualification: the catalog has only a
+runtime-validated advisory decode observation for the old community artifact;
+Qwen3.6 has its own artifact-specific CB/MTP evidence. Neither qualifies this
+new source conversion. Reuse all still-applicable evidence and bind changes:
+`ChatCompletionRequest.templateReasoningEffort` and `ModelRuntime.userInput`
+are the changed prompt-preparation lines; decoder/fork math is unchanged.
+New target/drafter identity and official template distinguish this acceptance
+from the incumbent's records. Do not repeat unrelated accepted cells.
+
+1. **Preparation.** After the prerequisite merge/rebase, freeze provider and
+   dependency commits, decode digest, lab binary hash, conversion environment,
+   target/drafter manifests and exact official tokenizer/template hashes.
+   Convert using the pinned command above; verify all 15 MTP tensors were
+   extracted and the text drafter has no nonempty vision config. Set capped
+   GPU limits for each tier; record peak/free RAM and swap before/after load,
+   prefill, decode, CB self-check and MTP. Apply the stricter of runtime caps
+   and catalog allowances: 28 GiB for 32 GB, 44 GiB for 48 GB, retaining the
+   existing 4 GiB reserve. Successful capped allocation on a larger Studio
+   establishes a budget check, not real 32/48 GB throughput. Use actual-tier
+   FR-CB10 before selecting rows on each machine. Report a tier exclusion on
+   the issue once if measured peak fails that tier. Fill `min_ram_gb` from
+   the measured full serving peak; weights alone never establish fit.
+2. **Goal first.** First serving result in the window: paired native target
+   vs incumbent `qwen/qwen3.6-35b-a3b`, prompt512/output128, rows1, serial and
+   actual scheduler CB. Report completed-answer output tok/s, TTFT, error
+   count and token count before any engine optimization or profiling. Use
+   identical prompts, thinking controls, temperature0 and output cap; retain
+   tokenizer-derived prompt lengths for each model. Native MTP starts with
+   same-row ordinary/native goal tok/s, acceptance, TTFT and exact parity.
+3. **Official-reference parity.** Greedy fixed text at exact 1024,8192,32768
+   token contexts, output256, official mlx-vlm0.7.10 on the same converted
+   target vs native. Record reference config, token IDs, first divergence,
+   and all256-token exact match; compare tokens, not decoded strings. Where
+   prompt tokenization differs, first prove native/vendor prompt-token parity.
+4. **Serial/CB matrix for both models.** Cartesian product: prompt1024/8192/
+   32768 × output128/512 × rows1/2/4 × serial/scheduler. Counterbalance model
+   and engine order with at least three paired repeats; retain cold/warm
+   status. Require exact same-model serial/CB greedy token parity, row
+   isolation, cancellation/drain and ragged-prefill checks using existing
+   `msb-throughput --engine scheduler` scenarios. Compare cross-model quality
+   and timing, never require cross-model token equality. Record per-request
+   and aggregate output tok/s, p50/p95 TTFT, completion latency, delivered
+   answer/finish reason, errors and each phase's peak/swap. At prompt4096/
+   output128/rows1 also evaluate the existing4k advisory TTFT target. Use
+   actual scheduler admission metrics; a serial fallback is not a CB pass.
+5. **FR-CB10/tool loop.** Run CB self-check at each capped tier, record selected
+   row count and reason, then assistant→function-XML→tool→assistant with
+   typed nested arguments, required/named selection, retained reasoning,
+   streaming/nonstreaming, all accepted effort values and bounded output.
+   Check argument fidelity, termination, completed buyer answer and usage.
+6. **Paired quality.** Vendor card publishes coding/agentic tasks including
+   Terminal Bench2.1 and SWE-bench Pro. The repository's closest fixed subset
+   is the nine-case `scripts/revenue_benchmark/coding_agent_workload_v1.json`
+   (debug/tests/implement/refactor/review/agent-loop). Freeze its existing
+   digest, identical cases/order, sampling, three repeats, reasoning budget
+   and correctness rubric before inference for both models. Evaluate task
+   correctness/test success and completed tool-loop outcomes, retain all
+   failures, and record scores alongside same-cell throughput. Use the
+   workload planner, not the revenue calculator, for isolated requests; no
+   paid revenue or full vendor-benchmark reproduction is claimed by this
+   proxy. If the subset cannot distinguish quality, record inconclusive and
+   retain the incumbent. Post the measured paired table as the default
+   decision before changing preference. The model card alone cannot pick it.
+7. **MTP.** Existing SPEC-048 R005 acceptance corpus plus current R015 policy
+   matrix, counterbalanced ordinary/native at the same rows (1,2,4 as allowed
+   by the signed tuple); do not grant unsupported rows by benchmark success.
+   Use the existing `NativeMTPQualificationTests` and
+   `native-mtp-hardware-e2e`, `native-mtp-bench --phase matrix`, then
+   `--phase sustained` (at least1800s at the current policy's sustained cell),
+   and the existing analyzer. Freeze the current R015 matrix from main:
+   admitted slots × prompt1536 and min(4096,signed cap), outputs128/512,
+   plus gated overflow cells and sustained s<qualified_slots>-p1536-o512.
+   Record token parity, output tok/s, acceptance, TTFT, fallback and peak.
+   Preserve multi-entry sidecars. A failure stays a failure; do not replace
+   the required gates or seed ordinary throughput with accelerated results.
+8. **Campaign completion.** Fill actual artifacts/memory/intake/policy and the
+   measured default decision in this PR; audit the final combined diff once
+   at freeze (code/security/architecture, 0 critical/high/medium), pass hosted
+   CI, and qualify on the lab build before cut. Shared signed CLI cut →
+   `scripts/ops/catalog-activate.sh` listing → first-promotion conformance
+   (#2107) → promotion. Use `scripts/ops/cli-release.sh status`/`next` and the
+   documented `next --run`; catalog uses its corresponding `status`/`next`
+   sequence. Identity-only cut rebinding does not regenerate qualification.
