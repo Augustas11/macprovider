@@ -1815,6 +1815,22 @@ CATALOG_REQUIRE_NATIVE_MTP_FORWARD=true run_rc 0 "native-MTP proof requires mtp 
 if python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d["native_mtp_forward_required"] is True and d["mtp_forwards_delta"] > 0 and d["cb_shared_forward_calls_delta"] > 0 else 1)' "$tmp/state/catalog-$R/gateway_proof.json"; then ok; else bad "native-MTP proof marker lacks explicit mtp-forward proof"; fi
 CATALOG_REQUIRE_NATIVE_MTP_FORWARD=true run_rc 0 "catalog status accepts the native-MTP proof marker" scripts/ops/catalog-activate.sh status
 if [ "$(state_of gateway_proof)" = "done" ]; then ok; else bad "native-MTP proof marker not accepted"; fi
+# SPEC-038 AC-26: no signed cached-turns grant leaves the provider flag alone;
+# a grant needs continuous_batching_cached_turns in the config, loaded by a
+# provider started after the config was written.
+if [ "$(state_of cached_turns)" = "done" ]; then ok; else bad "cached_turns pending without a signed grant"; fi
+python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["continuous_batching"]["policy"]["cached_turns_authorized"]=True; json.dump(d, open(p, "w"))' "$tmp/svc/status.json"
+mkdir -p "$tmp/home/.config/macprovider"
+printf 'model: test/model\n' > "$tmp/home/.config/macprovider/config.yaml"
+HOME="$tmp/home" CATALOG_REQUIRE_NATIVE_MTP_FORWARD=true run_rc 0 "signed cached-turns grant without the provider flag" scripts/ops/catalog-activate.sh status
+if [ "$(state_of cached_turns)" = "pending" ]; then ok; else bad "cached_turns done without the provider flag"; fi
+printf 'continuous_batching_cached_turns: true\n' >> "$tmp/home/.config/macprovider/config.yaml"
+HOME="$tmp/home" CATALOG_REQUIRE_NATIVE_MTP_FORWARD=true run_rc 0 "provider flag written after the provider started" scripts/ops/catalog-activate.sh status
+if [ "$(state_of cached_turns)" = "pending" ]; then ok; else bad "cached_turns done before the provider reloaded the flag"; fi
+touch -t 200001010000 "$tmp/home/.config/macprovider/config.yaml"
+HOME="$tmp/home" CATALOG_REQUIRE_NATIVE_MTP_FORWARD=true run_rc 0 "provider started after the flag was written" scripts/ops/catalog-activate.sh status
+if [ "$(state_of cached_turns)" = "done" ]; then ok; else bad "cached_turns not done with the flag loaded"; fi
+python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["continuous_batching"]["policy"].pop("cached_turns_authorized"); json.dump(d, open(p, "w"))' "$tmp/svc/status.json"
 # Without PROBE_MODEL the proof asks for the model the canary's /v1/status
 # reports serving, not a catalog constant the canary may not serve.
 python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["model"]="canary/served-model"; json.dump(d, open(p, "w"))' "$tmp/svc/status.json"
