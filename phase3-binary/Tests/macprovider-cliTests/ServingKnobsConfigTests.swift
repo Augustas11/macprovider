@@ -912,27 +912,32 @@ final class ServingKnobsConfigTests: XCTestCase {
             "event=cb_queue_limit_clamped configured=16 effective=8 rows=1"
         )
 
-        let plan = AutoServedSlots.plan(
-            configuredSlots: nil,
-            source: nil,
-            draftConfigured: false,
-            emergencyOff: false,
-            provisionalPolicyEntry: true,
-            recommendedSlots: { 8 },
-            memoryFitKnown: true,
-            policyCeiling: 4
-        )
-        XCTAssertEqual(plan.rows, 4)
-        let capability = ContinuousBatchingPolicy.configurationCapability(
-            mode: .canary,
-            maxBatch: plan.rows,
-            queueLimit: 16,
-            kvBits: nil,
-            draftConfigured: false
-        )
-        XCTAssertEqual(capability.maxActiveRows, 4)
-        XCTAssertEqual(capability.queueLimit, 16, "the configured value serves once the rows hold it")
-        XCTAssertNil(ContinuousBatchingPolicy.queueLimitClampEvent(configured: 16, maxActiveRows: 4))
+        // The signed ceiling permits four rows on the Studio tier, while
+        // the 8 GiB physical-memory bound keeps the same policy at three.
+        for (memoryGiB, expectedRows) in [(256, 4), (8, 3)] {
+            let plan = AutoServedSlots.plan(
+                configuredSlots: nil,
+                source: nil,
+                draftConfigured: false,
+                emergencyOff: false,
+                provisionalPolicyEntry: true,
+                recommendedSlots: { 8 },
+                memoryFitKnown: true,
+                policyCeiling: 4,
+                physicalMemoryBytes: UInt64(memoryGiB) * 1_073_741_824
+            )
+            XCTAssertEqual(plan.rows, expectedRows)
+            let capability = ContinuousBatchingPolicy.configurationCapability(
+                mode: .canary,
+                maxBatch: plan.rows,
+                queueLimit: 16,
+                kvBits: nil,
+                draftConfigured: false
+            )
+            XCTAssertEqual(capability.maxActiveRows, expectedRows)
+            XCTAssertEqual(capability.queueLimit, 16, "the configured value serves once the rows hold it")
+            XCTAssertNil(ContinuousBatchingPolicy.queueLimitClampEvent(configured: 16, maxActiveRows: expectedRows))
+        }
         XCTAssertNil(ContinuousBatchingPolicy.queueLimitClampEvent(configured: nil, maxActiveRows: 1))
     }
 
