@@ -182,6 +182,70 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         ).hybridDecoderArchitectureVerified)
     }
 
+    func testBonsai2BHybridRequiresExactIdentitySchemaAndLayout() throws {
+        let id = "prism-ml/Ternary-Bonsai-2-2B-mlx-2bit"
+        let config = Self.bonsai2BHybridConfig()
+        func capabilities(_ object: [String: Any], modelID: String = "prism-ml/Ternary-Bonsai-2-2B-mlx-2bit") throws -> PagedKVRuntimeModelCapabilities {
+            ModelRuntime.pagedKVModelCapabilities(
+                modelID: modelID, configJSONData: try JSONSerialization.data(withJSONObject: object)
+            )
+        }
+        let verified = try capabilities(config)
+        XCTAssertEqual(verified.modelFamily, "qwen")
+        XCTAssertTrue(verified.hybridDecoderArchitectureVerified)
+        XCTAssertTrue(verified.ordinaryHybridOnly)
+        XCTAssertTrue(PagedKVAttachGate.supportsCacheClass(
+            "mixed", hybridDecoderArchitectureVerified: verified.hybridDecoderArchitectureVerified
+        ))
+        XCTAssertNil(ModelRuntime.nativeMTPAdmissionCacheClass(runtimeCacheClass: "mixed", modelCapabilities: verified))
+        XCTAssertNil(ModelRuntime.nativeMTPAdmissionCacheClass(runtimeCacheClass: "KVCacheSimple", modelCapabilities: verified))
+        let expected: [PagedKVSharedForwardBackend.CacheKind] = (0..<24).map {
+            ($0 + 1).isMultiple(of: 4) ? .pagedAttention : .recurrentMamba
+        }
+        XCTAssertTrue(ModelRuntime.measuredMixedPagedKVTopology(expected, modelCapabilities: verified))
+        XCTAssertFalse(ModelRuntime.measuredMixedPagedKVTopology(Array(expected.dropLast()), modelCapabilities: verified))
+        var swapped = expected
+        swapped.swapAt(0, 3)
+        XCTAssertFalse(ModelRuntime.measuredMixedPagedKVTopology(swapped, modelCapabilities: verified))
+        XCTAssertFalse(ModelRuntime.measuredMixedPagedKVTopology([.recurrentMamba, .pagedAttention], modelCapabilities: verified))
+        for impostor in ["prism-ml/Ternary-Bonsai-2-4B-mlx-2bit", "impostor/Ternary-Bonsai-2-2B-mlx-2bit", "bonsai-2b", id + "-other"] {
+            XCTAssertFalse(try capabilities(config, modelID: impostor).hybridDecoderArchitectureVerified, impostor)
+        }
+        for (key, wrong) in [
+            ("schema_version", 1 as Any), ("schema_version", 3 as Any),
+            ("schema_version", true as Any), ("schema_version", "2" as Any),
+            ("model_type", "qwen3_5" as Any), ("base_model_type", "qwen3_5_text" as Any),
+            ("tensor_namespace", "mlx-lm-qwen3_5" as Any)
+        ] {
+            var invalid = config
+            invalid[key] = wrong
+            XCTAssertFalse(try capabilities(invalid).hybridDecoderArchitectureVerified, key)
+        }
+        let text = try XCTUnwrap(config["text_config"] as? [String: Any])
+        var wrongOrder = try XCTUnwrap(text["layer_types"] as? [String])
+        wrongOrder.swapAt(0, 3)
+        for (key, wrong) in [
+            ("num_hidden_layers", 25 as Any), ("num_hidden_layers", "24" as Any),
+            ("full_attention_interval", 3 as Any), ("model_type", "qwen3_5" as Any),
+            ("mtp_num_hidden_layers", 1 as Any), ("mtp_num_hidden_layers", false as Any),
+            ("mtp_use_dedicated_embeddings", true as Any), ("mtp_use_dedicated_embeddings", 0 as Any), ("layer_types", wrongOrder as Any),
+            ("layer_types", Array(wrongOrder.dropLast()) as Any)
+        ] {
+            var invalidText = text
+            invalidText[key] = wrong
+            var invalid = config
+            invalid["text_config"] = invalidText
+            XCTAssertFalse(try capabilities(invalid).hybridDecoderArchitectureVerified, key)
+        }
+        for key in config.keys {
+            var invalid = config
+            invalid.removeValue(forKey: key)
+            XCTAssertFalse(try capabilities(invalid).hybridDecoderArchitectureVerified, key)
+        }
+        XCTAssertFalse(ModelRuntime.pagedKVModelCapabilities(modelID: id, configJSONData: Data("invalid".utf8)).hybridDecoderArchitectureVerified)
+        XCTAssertFalse(ModelRuntime.pagedKVModelCapabilities(modelID: id, configJSONData: nil).hybridDecoderArchitectureVerified)
+    }
+
     func testNativeMTPAdmissionCacheClassCanonicalizesOnlyVerifiedPagedRuntime() {
         let verified = PagedKVRuntimeModelCapabilities(
             modelFamily: "qwen",
@@ -5313,6 +5377,23 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
             servedSnapshotID: snapshot,
             targetGeneration: generation
         )
+    }
+
+    private static func bonsai2BHybridConfig() -> [String: Any] {
+        [
+            "schema_version": 2,
+            "model_type": "prism_hadamard_qwen35",
+            "base_model_type": "qwen3_5",
+            "tensor_namespace": "mlx-vlm-qwen3_5",
+            "text_config": [
+                "model_type": "qwen3_5_text", "num_hidden_layers": 24,
+                "full_attention_interval": 4, "mtp_num_hidden_layers": 0,
+                "mtp_use_dedicated_embeddings": false,
+                "layer_types": (0..<24).map {
+                    ($0 + 1).isMultiple(of: 4) ? "full_attention" : "linear_attention"
+                },
+            ] as [String: Any],
+        ]
     }
 
     private static func qwen35HybridConfig(

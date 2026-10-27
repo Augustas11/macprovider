@@ -1,0 +1,92 @@
+{
+  "artifact": {
+    "canonical_manifest_sha256": "fe25aaa59aeb54f5ce080818b28808286d26283a61200cb1efb377ac7db62262",
+    "model_id": "prism-ml/Ternary-Bonsai-2-2B-mlx-2bit",
+    "revision": "1c6cbae21f8c38830ce337972b46fdae7b18eaaa"
+  },
+  "binary_sha256": "dffa662acd3b024c679366af45e98858379472447d1df7815423fd9639ea50e3",
+  "cancellation_isolation": {
+    "cancelledCompletionTokens": 0,
+    "cancelledStatus": "cancelled",
+    "healthyCompletionTokens": 32,
+    "healthyStatus": "length",
+    "pass": true
+  },
+  "decode_path_digest": "e9cded4b7d10722591e8b50ad608286dd65e6ced012b14460cb924652056871f",
+  "hardware": {
+    "architecture": "Apple M1",
+    "physical_memory_bytes": 8589934592
+  },
+  "isolation_usage_pass": true,
+  "limits": [
+    "Diagnostic scheduler proof; production attachment and automatic served-slot self-check are separate pending gates.",
+    "Cancellation isolation uses the existing two-row scenario and 32 healthy completion tokens."
+  ],
+  "memory": {
+    "isolation": {
+      "minimum_available_bytes": 2362114048,
+      "peak_physical_footprint_bytes": 2416448256,
+      "swap_growth_mib": 0.0
+    },
+    "parity": {
+      "minimum_available_bytes": 2745384960,
+      "peak_physical_footprint_bytes": 1909986240,
+      "swap_growth_mib": 0.0
+    }
+  },
+  "parity": {
+    "batchedRowMatches": [
+      true,
+      true,
+      true
+    ],
+    "batchedTokenSHA256": "bd57ba71ba403986e472e2b80f3c6490fdaee3ffaab438c5ba87144941615929",
+    "comparedTokens": 48,
+    "oneRowMatch": true,
+    "pass": true,
+    "rows": [
+      {
+        "batchedTokenCount": 48,
+        "batchedTokenSHA256": "bd57ba71ba403986e472e2b80f3c6490fdaee3ffaab438c5ba87144941615929",
+        "serialTokenCount": 49,
+        "serialTokenSHA256": "bd57ba71ba403986e472e2b80f3c6490fdaee3ffaab438c5ba87144941615929",
+        "standaloneTokenCount": 48,
+        "standaloneTokenSHA256": "bd57ba71ba403986e472e2b80f3c6490fdaee3ffaab438c5ba87144941615929"
+      },
+      {
+        "batchedTokenCount": 48,
+        "batchedTokenSHA256": "bdc4ea925fa0e8355295104e5a5696aafac1e658ab8bd97d3493a2a97d664b94",
+        "serialTokenCount": 49,
+        "serialTokenSHA256": "bdc4ea925fa0e8355295104e5a5696aafac1e658ab8bd97d3493a2a97d664b94",
+        "standaloneTokenCount": 48,
+        "standaloneTokenSHA256": "bdc4ea925fa0e8355295104e5a5696aafac1e658ab8bd97d3493a2a97d664b94"
+      },
+      {
+        "batchedTokenCount": 48,
+        "batchedTokenSHA256": "0a1311e6f39f3612fa7d4a26e45ca2e43e44213e9933cbd3c97cf739d4c71bbc",
+        "serialTokenCount": 49,
+        "serialTokenSHA256": "0a1311e6f39f3612fa7d4a26e45ca2e43e44213e9933cbd3c97cf739d4c71bbc",
+        "standaloneTokenCount": 48,
+        "standaloneTokenSHA256": "0a1311e6f39f3612fa7d4a26e45ca2e43e44213e9933cbd3c97cf739d4c71bbc"
+      }
+    ],
+    "serialTokenSHA256": "bd57ba71ba403986e472e2b80f3c6490fdaee3ffaab438c5ba87144941615929",
+    "standaloneRowMatches": [
+      true,
+      true,
+      true
+    ]
+  },
+  "parity_usage_pass": true,
+  "protocol": {
+    "allocator_cache_limit_bytes": 268435456,
+    "compile": false,
+    "engine": "scheduler",
+    "greedy_tokens_compared": 48,
+    "max_prompt_chunk_tokens": 512,
+    "parity_rows": 3,
+    "prompt_tokens_per_row": 513,
+    "tool": "msb-throughput"
+  },
+  "source_commit": "42b6e6c20944ed76f1ab149aa95e3dbcdea872eb"
+}

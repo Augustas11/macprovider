@@ -731,6 +731,8 @@ struct PagedKVRuntimeModelCapabilities: Equatable, Sendable {
     let modelFamily: String
     let requiresMoEDispatch: Bool
     let hybridDecoderArchitectureVerified: Bool
+    /// The exact Bonsai-2 2B layout may evaluate ordinary CB gates only.
+    let ordinaryHybridOnly: Bool
     /// The verified sparse-attention layout of an allowlisted `glm5_next`
     /// identity (SPEC-039 FR-PKV12), read from its `config.json`.
     let sparseAttention: PagedKVSparseAttentionLayout?
@@ -740,12 +742,14 @@ struct PagedKVRuntimeModelCapabilities: Equatable, Sendable {
         modelFamily: String,
         requiresMoEDispatch: Bool,
         hybridDecoderArchitectureVerified: Bool = false,
+        ordinaryHybridOnly: Bool = false,
         sparseAttention: PagedKVSparseAttentionLayout? = nil,
         deepseekV4Pool: DeepseekV4PoolLayout? = nil
     ) {
         self.modelFamily = modelFamily
         self.requiresMoEDispatch = requiresMoEDispatch
         self.hybridDecoderArchitectureVerified = hybridDecoderArchitectureVerified
+        self.ordinaryHybridOnly = ordinaryHybridOnly
         self.sparseAttention = sparseAttention
         self.deepseekV4Pool = deepseekV4Pool
     }
@@ -2970,6 +2974,12 @@ actor ModelRuntime: ModelRuntimeServing {
         modelCapabilities: PagedKVRuntimeModelCapabilities
     ) -> Bool {
         guard modelCapabilities.hybridDecoderArchitectureVerified else { return false }
+        if modelCapabilities.ordinaryHybridOnly {
+            let expected: [PagedKVSharedForwardBackend.CacheKind] = (0..<24).map {
+                ($0 + 1).isMultiple(of: 4) ? .pagedAttention : .recurrentMamba
+            }
+            return modelCapabilities.modelFamily == "qwen" && cacheKinds == expected
+        }
         if modelCapabilities.modelFamily == "deepseek_v4" {
             return modelCapabilities.deepseekV4Pool?.expectedCacheKinds == cacheKinds
         }
@@ -3313,7 +3323,10 @@ maxTokens: 1,
             if expectedArchitecture == "DeepseekV4ForCausalLM" { return deepseekV4Pool != nil }
             return architectures.contains(expectedArchitecture)
         }()
-        let architectureVerified = allowlistedArchitectureVerified || deepseekV4Pool != nil
+        let ordinaryHybridOnly = bonsai2BHybridDecoderArchitectureVerified(
+            modelID: modelID, configObject: configObject
+        )
+        let architectureVerified = ordinaryHybridOnly || allowlistedArchitectureVerified || deepseekV4Pool != nil
             || qwen35HybridDecoderArchitectureVerified(
             modelID: modelID,
             configJSONData: configJSONData
@@ -3323,9 +3336,37 @@ maxTokens: 1,
             requiresMoEDispatch: (configJSONData.flatMap(Self.pagedKVConfigRequiresMoE) ?? false)
                 || Self.pagedKVModelIDLooksLikeExpertModel(modelID),
             hybridDecoderArchitectureVerified: architectureVerified,
+            ordinaryHybridOnly: ordinaryHybridOnly,
             sparseAttention: sparseAttention,
             deepseekV4Pool: deepseekV4Pool
         )
+    }
+
+    private nonisolated static func bonsai2BHybridDecoderArchitectureVerified(
+        modelID: String?, configObject: [String: Any]?
+    ) -> Bool {
+        func integer(_ value: Any?, equals expected: Int) -> Bool {
+            guard let number = value as? NSNumber else { return false }
+            return String(cString: number.objCType) != "c" && number.doubleValue == Double(expected)
+        }
+        guard modelID == "prism-ml/Ternary-Bonsai-2-2B-mlx-2bit",
+              let config = configObject,
+              integer(config["schema_version"], equals: 2),
+              config["model_type"] as? String == "prism_hadamard_qwen35",
+              config["base_model_type"] as? String == "qwen3_5",
+              config["tensor_namespace"] as? String == "mlx-vlm-qwen3_5",
+              let text = config["text_config"] as? [String: Any],
+              text["model_type"] as? String == "qwen3_5_text",
+              integer(text["num_hidden_layers"], equals: 24),
+              integer(text["full_attention_interval"], equals: 4),
+              integer(text["mtp_num_hidden_layers"], equals: 0),
+              let dedicated = text["mtp_use_dedicated_embeddings"] as? NSNumber,
+              String(cString: dedicated.objCType) == "c", !dedicated.boolValue,
+              let layers = text["layer_types"] as? [String], layers.count == 24
+        else { return false }
+        return layers.enumerated().allSatisfy { index, layer in
+            layer == ((index + 1).isMultiple(of: 4) ? "full_attention" : "linear_attention")
+        }
     }
 
     private nonisolated static func qwen35HybridDecoderArchitectureVerified(
@@ -3369,6 +3410,7 @@ maxTokens: 1,
         runtimeCacheClass: String,
         modelCapabilities: PagedKVRuntimeModelCapabilities
     ) -> String? {
+        guard !modelCapabilities.ordinaryHybridOnly else { return nil }
         if runtimeCacheClass == "KVCacheSimple" {
             return "paged_kv"
         }
