@@ -6884,6 +6884,7 @@ maxTokens: 1,
             await inferenceGate.resize(to: swapServedSlots, stamp: swapGeneration)
         }
         await conversationCache.purgeAllHot()
+        conversationCache.memoryBudget.resetGeometryForModelChange()
         currentContainer = container
         if let previous = residentWeightsTicket {
             residentWeightsTicket = nil

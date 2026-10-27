@@ -963,6 +963,38 @@ final class ModelRuntimeSwapTests: XCTestCase {
         XCTAssertEqual(snapshot.modelHash, "new-hash")
     }
 
+    func testCrossFamilySwapResetsRetentionGeometryAfterPurgingOldModel() async throws {
+        let gib = 1024 * 1024 * 1024
+        let budget = ConversationCacheMemoryBudget(probe: .init(identity: "cross-family-swap") {
+            .init(availableBytes: 80 * gib, physicalBytes: 256 * gib)
+        })
+        let runtime = ModelRuntime(
+            modelID: "llama-dense", modelHash: "old-hash", warmSwapEnabled: true,
+            testConversationCacheMemoryBudget: budget,
+            loader: { _ in throw TestError.unexpectedContainerLoader },
+            testLoader: { target in (target, "new-hash") }
+        )
+        // A 32-layer, eight-KV-head fp16 dense model charges 128 KiB/token.
+        // Those maxima must not contaminate the next family's reserve.
+        budget.observe(geometry: .init(fixedRowBytes: 0, bytesPerToken: 131_072))
+        budget.configure(maxContextTokens: 200_000, slots: 4, residentTokens: 65_536, verifyBytes: 0)
+        XCTAssertEqual(budget.hotByteLimit(), 0)
+
+        let task = try await runtime.beginSwap(targetModelID: "glm-sparse")
+        try await task.value
+        XCTAssertEqual(budget.hotByteLimit(), 0, "new geometry remains unknown until observed")
+        let layer = ConversationCacheMemoryBudget.glmGeometry(
+            latentBytesPerToken: 1_024, pooledBytesPerKey: 256,
+            rawKeyBytesPerToken: 256, rawGateBytesPerToken: 256,
+            kpool: 4, maxTrim: 16, step: 256)
+        budget.configure(maxContextTokens: 200_000, slots: 4, residentTokens: 65_536, verifyBytes: 0)
+        budget.observe(geometry: .init(fixedRowBytes: layer.fixedRowBytes * 48,
+                                       bytesPerToken: layer.bytesPerToken * 48))
+        XCTAssertEqual(budget.hotByteLimit(), 8 * gib,
+                       "a drained model swap must use only the new family's geometry")
+        XCTAssertTrue(budget.admitsStaging(bytes: gib))
+    }
+
     func testProviderStatusIdentityFollowsSuccessfulWarmSwap() async throws {
         let providerStatus = makeProviderStatus(modelID: "old-model", modelHash: "old-hash")
         let runtime = makeRuntime(modelID: "old-model", modelHash: "old-hash", warmSwapEnabled: true) { target in
