@@ -283,7 +283,7 @@ def remote_recovery_case(*, phase="provider_bootstrapped", watchdog=False,
     clock = [0]
     journal = {"schema_version": handoff.SCHEMA, "manifest_sha256": "digest", "phase": phase,
                "provider_pid": 41 if phase == "provider_stable" else None,
-               "provider_start_us": 42 if phase == "provider_stable" else None}
+               "provider_instance_id": "11111111-1111-4111-8111-111111111111" if phase == "provider_stable" else None}
     x = manifest()["studio"]
     namespace.update(check_static=lambda _: "/binary", handoff=lambda _: None,
                      load_journal=lambda *_: journal, put=lambda *_: None,
@@ -295,7 +295,7 @@ def remote_recovery_case(*, phase="provider_bootstrapped", watchdog=False,
         return {"binary_version": x["binary_version"], "model": x["model"],
                 "model_loaded": clock[0] >= ready_after, "network_state": "buyer_serving",
                 "continuous_batching": {"active": True, "policy": {"cached_turns_authorized": True}},
-                "service_instance": {"pid": 99 if changed_pid else 41, "process_start_us": 42}}
+                "service_instance": {"pid": 99 if changed_pid else 41, "instance_id": "11111111-1111-4111-8111-111111111111"}}
     def launch(*_args, **_kwargs):
         nonlocal watchdog
         watchdog = True
@@ -393,6 +393,55 @@ except RuntimeError as exc:
     assert "process" in str(exc) and clock[0] == 10, (exc, clock)
 else:
     raise AssertionError("provider death did not fail immediately")
+
+# Released service_instance has UUID/start text, not process_start_us. Refuse
+# missing/malformed UUIDs and a new instance even when the PID was reused.
+namespace, x, clock = remote_recovery_case(phase="provider_stable", watchdog=True)
+snapshot = namespace["status"]
+for value in (None, 42, "not-a-uuid", "22222222-2222-4222-8222-222222222222"):
+    def wrong_instance(port, value=value):
+        result = snapshot(port)
+        result["service_instance"]["instance_id"] = value
+        return result
+    namespace["status"] = wrong_instance
+    try:
+        namespace["recover"](x, "digest")
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("stable recovery accepted a different/missing instance")
+
+# An interrupted stability interval cannot rebind a bootstrap journal either.
+namespace, x, clock = remote_recovery_case()
+journal = namespace["load_journal"](None, None)
+journal.update(provider_pid=41, provider_instance_id="22222222-2222-4222-8222-222222222222")
+try:
+    namespace["recover"](x, "digest")
+except RuntimeError as exc:
+    assert "bootstrap journal" in str(exc)
+else:
+    raise AssertionError("bound bootstrap journal adopted another instance")
+
+# Migrate only the old controller's unbound bootstrap record. Bound journals
+# must fail closed rather than adopting a process under a different identity.
+namespace = {}
+exec(handoff.REMOTE, namespace)
+with tempfile.TemporaryDirectory() as tmp:
+    path = Path(tmp) / "journal.json"
+    legacy = {"schema_version": handoff.SCHEMA, "manifest_sha256": "digest",
+              "phase": "provider_bootstrapped", "provider_pid": None, "provider_start_us": None}
+    path.write_text(json.dumps(legacy))
+    os.chmod(path, 0o600)
+    migrated = namespace["load_journal"](str(path), "digest")
+    assert migrated["provider_instance_id"] is None and "provider_start_us" not in migrated
+    for change in ({"provider_pid": 41}, {"provider_start_us": 42}, {"phase": "provider_stable"}):
+        path.write_text(json.dumps(dict(legacy, **change)))
+        try:
+            namespace["load_journal"](str(path), "digest")
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("bound legacy identity was silently migrated")
 
 # Hash the real installed-file path: released CLI binaries exceed metadata limits.
 namespace = {}
