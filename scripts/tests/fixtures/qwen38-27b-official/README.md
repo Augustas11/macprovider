@@ -23,13 +23,20 @@ paid eligibility, promotion or a tier-default winner.
 
 ## Artifact choice and conversion
 
-No official Qwen-owned MLX build of this checkpoint was found in the official
-model listing. Use the pinned official BF16 source; do not substitute the
-existing community quantization. `source-manifest.json` records all 32 files,
-55,586,114,863 total source bytes, 55,563,006,776 shard bytes and
-55,562,855,904 tensor bytes. The source weights alone exceed both tier
-allowances, so source BF16 is not the serving artifact. Four-bit converted
-size and RAM fit remain unmeasured, not inferred from another quantization.
+The existing catalog artifact `mlx-community/Qwen3.8-27B-4bit` at
+`10c35caafbb80f7dc6a7a432cdd11af10a6d4818` is a direct conversion of
+`Qwen/Qwen3.8-27B`, not a distill; its model card records mlx-vlm0.6.8.
+Reuse it if it retains the source's 15 MTP tensors. Inspection of this pinned
+revision instead finds zero `mtp.*`/`nextn` entries among 2,180 indexed tensors,
+and the complete repository tree has no separate MTP drafter. This observed
+MTP loss, rather than community ownership, requires the official BF16 fallback.
+The candidate index hash and inspection are recorded in `source-manifest.json`.
+
+The official source inventory has 32 files, 55,586,114,863 total bytes,
+55,563,006,776 shard bytes and 55,562,855,904 tensor bytes. BF16 exceeds both
+tier allowances; the replacement's four-bit size and RAM fit remain unmeasured.
+The existing catalog conversion is 16,081,490,933 bytes; its identity and any
+applicable evidence remain reusable, but it cannot qualify missing MTP tensors.
 
 Use existing mlx-vlm 0.7.10 (Blaizzy/mlx-vlm commit
 `8c061ef516e7f8b584c0d5b64f26b50d5806303b`) with mlx 0.32.4, already pinned
@@ -57,6 +64,12 @@ nonempty vision config to the text-only drafter.
 
 Compute both converted identities with the existing canonical snapshot-manifest
 hashing rules, record exact files and bytes, and bind target/drafter separately.
+After conversion and artifact binding, publish the replacement with
+`scripts/publish-model-mirror.py --model qwen/qwen3.8-27b --snapshot "$TARGET_OUTPUT" --out "$MIRROR_OUTPUT"` using the catalog containing
+its actual hash. The script verifies the snapshot against that catalog; do not
+bypass the hash check. Bind/publish the separate drafter using its applicable
+artifact publication contract. Publication is a future window/release step.
+
 Null output hash/size/`min_ram_gb` in this fixture are marked preparation
 placeholders, never publishable artifact-feed entries.
 
@@ -114,7 +127,8 @@ row `192000 / 48000 / 2000000` credits/Mtok, matching `rewards.rate_card` row,
 and demand-rank row (rank30, weight0.4, target5). Those are existing published
 values, not fresh market measurements. Native source restriction remains
 `mlx_cache`. The current recommendable row and its community artifact are
-unchanged; they are not qualification of the new official-derived conversion.
+unchanged. Reuse their applicable evidence; the missing MTP tensors require a
+replacement target/drafter identity and its own qualification.
 
 SPEC-023 §16.8 preparation decision: **pending, no add/promote/default change**.
 This is not a release-bound `macprovider.intake-decision` manifest. Do not
@@ -132,9 +146,10 @@ comparison, implement only the measured winner for 32–48 GB after existing
 paid-eligibility checks, using the Bonsai eligibility-first fallback pattern.
 Record both models' quality scores, serial/CB buyer tok/s, TTFT and memory in
 the PR's default-decision table. A model that cannot serve completed buyer
-answers within the existing advisory target (10 output tok/s and 3s 4k TTFT)
-is flagged as unusable for this default decision; do not lower those targets to
-manufacture a winner. These are comparison criteria, not new admission gates.
+answers at usable output tok/s is flagged in the measured default decision.
+Report the existing 10 output tok/s advisory alongside the paired 1k/8k
+throughput and TTFT; do not add a 4k cell or infer 4k TTFT from those cells.
+These are comparison criteria, not new admission gates.
 If quality is tied/inconclusive, retain the incumbent. If the quality winner
 misses usability, report that tradeoff and retain the incumbent pending the
 operator's decision; no automatic tradeoff or CB/MTP withdrawal.
@@ -149,9 +164,9 @@ harness there only. Do not reuse historical scripts that hardcode another
 model, identity or host as Qwen3.8 acceptance.
 
 Before running, inventory existing qualification: the catalog has only a
-runtime-validated advisory decode observation for the old community artifact;
-Qwen3.6 has its own artifact-specific CB/MTP evidence. Neither qualifies this
-new source conversion. Reuse all still-applicable evidence and bind changes:
+runtime-validated advisory decode observation for the existing conversion;
+Qwen3.6 has its own artifact-specific CB/MTP evidence. Inventory and reuse
+all still-applicable evidence; do not rerun incumbent qualification. Bind changes:
 `ChatCompletionRequest.templateReasoningEffort` and `ModelRuntime.userInput`
 are the changed prompt-preparation lines; decoder/fork math is unchanged.
 New target/drafter identity and official template distinguish this acceptance
@@ -160,7 +175,7 @@ from the incumbent's records. Do not repeat unrelated accepted cells.
 1. **Preparation.** After the prerequisite merge/rebase, freeze provider and
    dependency commits, decode digest, lab binary hash, conversion environment,
    target/drafter manifests and exact official tokenizer/template hashes.
-   Convert using the pinned command above; verify all 15 MTP tensors were
+   The existing conversion has dropped MTP, so convert using the pinned command above; verify all 15 MTP tensors were
    extracted and the text drafter has no nonempty vision config. Set capped
    GPU limits for each tier; record peak/free RAM and swap before/after load,
    prefill, decode, CB self-check and MTP. Apply the stricter of runtime caps
@@ -170,29 +185,46 @@ from the incumbent's records. Do not repeat unrelated accepted cells.
    FR-CB10 before selecting rows on each machine. Report a tier exclusion on
    the issue once if measured peak fails that tier. Fill `min_ram_gb` from
    the measured full serving peak; weights alone never establish fit.
-2. **Goal first.** First serving result in the window: paired native target
-   vs incumbent `qwen/qwen3.6-35b-a3b`, prompt512/output128, rows1, serial and
-   actual scheduler CB. Report completed-answer output tok/s, TTFT, error
-   count and token count before any engine optimization or profiling. Use
-   identical prompts, thinking controls, temperature0 and output cap; retain
-   tokenizer-derived prompt lengths for each model. Native MTP starts with
-   same-row ordinary/native goal tok/s, acceptance, TTFT and exact parity.
+2. **Goal first.** Start with the first required default-comparison cell:
+   prompt1024/output128/rows1, serial and actual scheduler CB, candidate and
+   incumbent `qwen/qwen3.6-35b-a3b`, two paired repeats. Report completed-answer
+   output tok/s, TTFT, errors and token counts before optimization/profiling.
+   This cell counts toward the table below, not an extra benchmark. Use identical
+   prompts, thinking controls, temperature0 and output caps; record tokenized
+   prompt lengths. Native MTP starts with same-row ordinary/native goal tok/s,
+   acceptance, TTFT and exact parity.
 3. **Official-reference parity.** Greedy fixed text at exact 1024,8192,32768
    token contexts, output256, official mlx-vlm0.7.10 on the same converted
    target vs native. Record reference config, token IDs, first divergence,
    and all256-token exact match; compare tokens, not decoded strings. Where
    prompt tokenization differs, first prove native/vendor prompt-token parity.
-4. **Serial/CB matrix for both models.** Cartesian product: prompt1024/8192/
-   32768 × output128/512 × rows1/2/4 × serial/scheduler. Counterbalance model
-   and engine order with at least three paired repeats; retain cold/warm
-   status. Require exact same-model serial/CB greedy token parity, row
-   isolation, cancellation/drain and ragged-prefill checks using existing
-   `msb-throughput --engine scheduler` scenarios. Compare cross-model quality
-   and timing, never require cross-model token equality. Record per-request
-   and aggregate output tok/s, p50/p95 TTFT, completion latency, delivered
-   answer/finish reason, errors and each phase's peak/swap. At prompt4096/
-   output128/rows1 also evaluate the existing4k advisory TTFT target. Use
-   actual scheduler admission metrics; a serial fallback is not a CB pass.
+4. **Default-comparison cells only.** Run this bounded list for both models,
+   each in serial and actual scheduler CB, two counterbalanced paired repeats.
+   No 32k throughput, extra 512/4k prompt cells, third repeat or wider Cartesian
+   sweep. Qwen3.6 runs only this comparison and the nine-case quality workload;
+   do not run its vendor-parity, FR-CB10, tool-loop or MTP qualification again.
+
+   | Prompt tokens | Output cap | Rows |
+   |---|---|---|
+   | 1024 | 128 | 1 |
+   | 1024 | 128 | 2 |
+   | 1024 | 128 | 4 |
+   | 1024 | 512 | 1 |
+   | 1024 | 512 | 2 |
+   | 1024 | 512 | 4 |
+   | 8192 | 128 | 1 |
+   | 8192 | 128 | 2 |
+   | 8192 | 128 | 4 |
+   | 8192 | 512 | 1 |
+   | 8192 | 512 | 2 |
+   | 8192 | 512 | 4 |
+
+   Require exact same-model serial/CB greedy token parity; cross-model token
+   equality is not a quality criterion. Record completed-answer per-request
+   and aggregate output tok/s, TTFT, errors, finish reason and phase peak/swap.
+   Use actual scheduler admission metrics; serial fallback is not a CB pass.
+   Reuse existing row-isolation/cancellation/ragged coverage; do not expand the
+   window to unrelated accepted scenarios without a named changed decode line.
 5. **FR-CB10/tool loop.** Run CB self-check at each capped tier, record selected
    row count and reason, then assistant→function-XML→tool→assistant with
    typed nested arguments, required/named selection, retained reasoning,
@@ -202,7 +234,7 @@ from the incumbent's records. Do not repeat unrelated accepted cells.
    Terminal Bench2.1 and SWE-bench Pro. The repository's closest fixed subset
    is the nine-case `scripts/revenue_benchmark/coding_agent_workload_v1.json`
    (debug/tests/implement/refactor/review/agent-loop). Freeze its existing
-   digest, identical cases/order, sampling, three repeats, reasoning budget
+   digest, identical cases/order, sampling, one pass of all nine cases per model, reasoning budget
    and correctness rubric before inference for both models. Evaluate task
    correctness/test success and completed tool-loop outcomes, retain all
    failures, and record scores alongside same-cell throughput. Use the
@@ -226,6 +258,11 @@ from the incumbent's records. Do not repeat unrelated accepted cells.
    Record token parity, output tok/s, acceptance, TTFT, fallback and peak.
    Preserve multi-entry sidecars. A failure stays a failure; do not replace
    the required gates or seed ordinary throughput with accelerated results.
+The assigned window has no elapsed-time budget: continue until these listed
+cells and applicable required gates are complete. The R015 sustained minimum
+is an acceptance requirement, not a window deadline. Do not substitute a side
+metric or an incomplete run for the default comparison.
+
 8. **Campaign completion.** Fill actual artifacts/memory/intake/policy and the
    measured default decision in this PR; audit the final combined diff once
    at freeze (code/security/architecture, 0 critical/high/medium), pass hosted
