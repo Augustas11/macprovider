@@ -212,14 +212,17 @@ from the incumbent's records. Do not repeat unrelated accepted cells.
    retain the incumbent. Post the measured paired table as the default
    decision before changing preference. The model card alone cannot pick it.
 7. **MTP.** Existing SPEC-048 R005 acceptance corpus plus current R015 policy
-   matrix, counterbalanced ordinary/native at the same rows (1,2,4 as allowed
-   by the signed tuple); do not grant unsupported rows by benchmark success.
+   matrix, counterbalanced ordinary/native at every admitted row count
+   `1...max_native_active_rows`; do not grant unsupported rows by benchmark success.
    Use the existing `NativeMTPQualificationTests` and
    `native-mtp-hardware-e2e`, `native-mtp-bench --phase matrix`, then
    `--phase sustained` (at least1800s at the current policy's sustained cell),
    and the existing analyzer. Freeze the current R015 matrix from main:
-   admitted slots × prompt1536 and min(4096,signed cap), outputs128/512,
-   plus gated overflow cells and sustained s<qualified_slots>-p1536-o512.
+   every admitted slot × each of [1536,4096] at or below the signed cap,
+   plus the cap itself (sorted/deduplicated), outputs128/512. When the native
+   bound is below `qualified_slots`, gated cells are bound+1 and
+   `qualified_slots`, each at prompt1536/output512 with staggered arrivals.
+   Sustained is s<qualified_slots>-p1536-o512.
    Record token parity, output tok/s, acceptance, TTFT, fallback and peak.
    Preserve multi-entry sidecars. A failure stays a failure; do not replace
    the required gates or seed ordinary throughput with accelerated results.
