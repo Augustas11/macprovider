@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.59
+**Version:** 0.1.64
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.59",
+  "version": "0.1.64",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -1581,7 +1581,8 @@ existing evidence specified by MTP-13.
 
 For DeepSeek V4 DSpark, the next hardware proof includes the campaign's
 existing fidelity Window 1/2 cells, CB throughput and exact parity at 1/2/4/8
-rows (four-row aggregate decode throughput at least 67.44 tokens/s), and
+rows (the SPEC-038 FR-CB14 same-build, same-window four-row >=2.0x serial
+gate, with strict MSB-02 >1.5x and MSB-04 two-row >1.3x floors), and
 ordinary-versus-native depth cells on the 12 frozen natural requests at block
 sizes 2/3/4/6 (proposal depths 1/2/3/5), one and four rows, plus 8k/32k
 contexts. Every native cell reports token parity, output tokens/s, acceptance,
@@ -2039,6 +2040,11 @@ the text-only path without image inputs; that does not admit multimodal buyer
 requests.
 
 ## 9. Changelog and history
+
+- **0.1.64 (2026-10-27)** — R015 adopts the supervisor's DeepSeek CB gate:
+  four-row aggregate decode >=2.0x same-build serial in the same Studio
+  window, exact parity at 1/2/4/8 rows and the strict FR-CB14 floors. The
+  67.44 tokens/s mlx-vlm result is a reference, not an absolute pass line.
 
 - **0.1.59 (2026-10-26)** — Adds the DeepSeek V4 DSpark embedded block
   adapter, confidence-scheduled exact greedy verification, exact pool/overlap

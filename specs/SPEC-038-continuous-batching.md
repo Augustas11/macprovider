@@ -1,11 +1,18 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.31
+Version: v0.3.35
 Status: draft (normative contract; runtime enablement is default-on per Mac behind the FR-CB10 on-device self-check, v0.3.15)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.3.35 (2026-10-27, DeepSeek CB campaign gate, Related: #2111):**
+FR-CB14 requires four-row DeepSeek V4 aggregate decode throughput at least
+2.0x the same build's production serial throughput in the same Studio window,
+plus exact 256-token parity at 1/2/4/8 rows. The strict MSB-02 >1.5x and
+MSB-04 two-row >1.3x floors remain. The mlx-vlm 67.44 tokens/s measurement
+is a reference, not an absolute pass line.
+
 **Change log v0.3.31 (2026-10-25, GLM-5-Next cached turns on CB rows, Related: #2143):**
 FR-CB4 admits a second usable handoff: a GLM-5-Next prompt snapshot
 (SPEC-024-R005). Under the unchanged AC-26 grant a positive-cached GLM turn
@@ -1773,6 +1780,25 @@ Gate A2 performance thresholds (MSB-02 > 1.5x MSB-01, MSB-03 > 1.2x MSB-01,
 at least one Entry 110 multi-slot tier > 1.3x aggregate TG, within the memory
 bound) are the promotion thresholds; failing them triggers profiling or pivot,
 not a shipped number.
+
+**DeepSeek V4 campaign gate (Related: #2111).** For the
+`TensorFold/DeepSeek-V4-Flash-0731-MXFP4-MLX` artifact on the M3 Ultra
+256 GB Studio, four-row CB aggregate decode output tokens/s MUST be at least
+2.0x production serial output tokens/s measured from the same build in the
+same window. Use the existing `msb-throughput` scheduler path, greedy,
+1024-token prompts, `--decode-tokens 256`, one untimed warmup and the median
+of three timed runs. Require exact 256-token serial/CB parity at 1, 2, 4 and
+8 rows. MSB-02 MUST remain strictly above 1.5x serial and the MSB-04 two-row
+cell strictly above 1.3x; a faster eight-row cell cannot substitute for the
+four-row gate. A changed decode path requires fresh same-build serial and
+CB controls. The 67.44 tokens/s mlx-vlm result is informative only.
+
+Provenance: the supervisor adopted this ratio gate on 2026-10-27 after
+reviewing the campaign's gate-provenance and ranked batched-decode research.
+It preserves FR-CB14's promotion floors and adds the campaign's stricter
+four-row requirement. The external reference was one mlx-vlm 0.7.10 run;
+using our own simultaneous-build control avoids treating that runtime's
+absolute number or an older fork's serial speed as this build's pass line.
 
 **MoE throughput risk (gating expectation-setter).** On the live 128-expert /
 8-active MoE (`Qwen3-Coder-30B-A3B`), a batch of 2-4 rows routes to largely

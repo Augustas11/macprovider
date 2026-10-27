@@ -51,9 +51,12 @@ class DeepseekCBDSparkHarnessTests(unittest.TestCase):
     def write_cb(self, directory):
         for n in (1, 2, 4, 8):
             t = dict(rows=n, runs=3, scenario='throughput', engine='scheduler', compiled=False,
-                     promptTokensPerRow=1024, decodeTokensPerRow=256, aggregateTPSRuns=[70, 70, 70], aggregateTPSp50=70)
+                     promptTokensPerRow=1024, decodeTokensPerRow=256, aggregateTPSRuns=[70, 70, 70], aggregateTPSp50=70,
+                     productionSerialTPSRuns=[30, 30, 30], productionSerialTPSp50=30,
+                     mlxSwiftLMPin='mlxlm-' + self.policy['runtime_under_test']['fork_commit'][:12])
             p = dict(rows=n, runs=1, scenario='parity', engine='scheduler', compiled=False,
                      promptTokensPerRow=1024, decodeTokensPerRow=256,
+                     mlxSwiftLMPin=t['mlxSwiftLMPin'],
                      leftovers={'parity': {'pass': True, 'comparedTokens': 256}})
             (directory / f'throughput-r{n}.json').write_text(json.dumps(t))
             (directory / f'parity-r{n}.json').write_text(json.dumps(p))
@@ -80,6 +83,46 @@ class DeepseekCBDSparkHarnessTests(unittest.TestCase):
             value['rows'] = 4
             p.write_text(json.dumps(value))
             self.assertEqual(self.summary(directory)['cb_gate']['decision'], 'INCOMPLETE')
+
+    def test_cb_gate_uses_same_build_serial_ratio_instead_of_reference_tps(self):
+        for aggregate, serial, expected in ((60, 30, 'PASS'), (70, 40, 'FAIL')):
+            with self.subTest(aggregate=aggregate, serial=serial), tempfile.TemporaryDirectory() as tmp:
+                directory = Path(tmp)
+                self.write_cb(directory)
+                path = directory / 'throughput-r4.json'
+                value = json.loads(path.read_text())
+                value.update(aggregateTPSRuns=[aggregate] * 3, aggregateTPSp50=aggregate,
+                             productionSerialTPSRuns=[serial] * 3, productionSerialTPSp50=serial,
+                             aggregateVsProductionSerial=100)
+                path.write_text(json.dumps(value))
+                gate = self.summary(directory)['cb_gate']
+                self.assertEqual(gate['decision'], expected)
+                self.assertEqual(gate['gate_serial_speedup'], aggregate / serial)
+                self.assertEqual(gate['bar_tps'], 2 * serial)
+
+    def test_cb_msb04_floor_is_strict_even_when_four_rows_pass(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            self.write_cb(directory)
+            path = directory / 'throughput-r2.json'
+            value = json.loads(path.read_text())
+            for aggregate, expected in ((39, 'FAIL'), (39.001, 'PASS')):
+                value.update(aggregateTPSRuns=[aggregate] * 3, aggregateTPSp50=aggregate)
+                path.write_text(json.dumps(value))
+                self.assertEqual(self.summary(directory)['cb_gate']['decision'], expected)
+
+    def test_cb_requires_valid_serial_samples_from_the_candidate_fork(self):
+        for edit in ({'productionSerialTPSp50': None}, {'productionSerialTPSp50': 0},
+                     {'productionSerialTPSRuns': [30, 30]}, {'productionSerialTPSRuns': [30, 0, 30]},
+                     {'mlxSwiftLMPin': 'mlxlm-676a62a40000'}):
+            with self.subTest(edit=edit), tempfile.TemporaryDirectory() as tmp:
+                directory = Path(tmp)
+                self.write_cb(directory)
+                path = directory / 'throughput-r4.json'
+                value = json.loads(path.read_text())
+                value.update(edit)
+                path.write_text(json.dumps(value))
+                self.assertEqual(self.summary(directory)['cb_gate']['decision'], 'INCOMPLETE')
 
     def test_cb_nonfinite_throughput_does_not_pass(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -231,7 +274,8 @@ class DeepseekCBDSparkHarnessTests(unittest.TestCase):
             for depth in (1, 2, 3, 5):
                 self.assertTrue(any(f'depth-{depth}.json' in line and '--long-token-ids' in line for line in integrity))
                 self.assertTrue(any(f'r015-d{depth}.jsonl' in line and '--long-token-ids' not in line for line in qualification))
-            self.assertIn('(6000 s)', result.stdout)
+            self.assertIn('no wall-clock deadline', result.stdout)
+            self.assertNotIn('--deadline-epoch', result.stdout)
 
 
 if __name__ == '__main__':

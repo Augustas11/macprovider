@@ -101,7 +101,7 @@ The add-on lists the following cells, in order:
 
 | Cells | Evidence and outputs |
 | --- | --- |
-| CB throughput at 1/2/4/8 rows and parity at 1/2/4/8 rows | Existing `msb-throughput` cells; matching Window 1 throughput results are reused. The four-row gate stays at 67.4 tok/s with exact parity. |
+| CB throughput at 1/2/4/8 rows and parity at 1/2/4/8 rows | Existing `msb-throughput` cells; matching Window 1 throughput results are reused. The four-row gate is at least 2.0× same-build, same-window serial with exact parity at all row counts and the strict FR-CB14 floors. The 67.44 tok/s mlx-vlm reference is informative. |
 | Reference DSpark, block sizes 2/3/4/6 | Corrected mlx-vlm ordinary/DSpark controls over the frozen requests and long prompts; `dspark/dspark.json`. This is reference evidence only. |
 | Native frozen-request probes, depths 1/2/3/5 | `native-mtp-bench --requests ... --requests-sha256 ... --long-token-ids ...`; `native/dN.jsonl`. Each depth covers all 12 individual requests, four-row groups for prose/reasoning/code, and one-/four-row groups at 8192/32768 tokens. Records carry exact token parity, acceptance by position, TTFT, decode throughput and peak memory. These scheduler integrity probes have `qualifies_r015: false`. |
 | Native R015 benches, depths 1/2/3/5 | Separate regular `native-mtp-bench` invocations without `--requests`, with the same frozen per-depth policy; `native/r015-dN.jsonl`. These run the policy's matrix and sustained window through the regular bench path. The existing R015 analyzer supplies the qualification verdict. |
@@ -112,14 +112,10 @@ integrity probes, and native R015 benches. The frozen native commands include
 `MACPROVIDER_NATIVE_MTP_E2E=1`, the fixture root, model ID, policy, provider
 commit and output. Hardware-host and identity checks remain in the command.
 
-The add-on retains its 6000-second budget and the earlier of that deadline or
-the controller ceiling minus five minutes. Native integrity cells have an
-initial 1800-second estimate each; regular R015 cells have a 3600-second
-estimate each, including the sustained window. Cells that do not fit are
-skipped and remain `INCOMPLETE`; no window is silently extended. Ceiling,
-abort, controller death and no-progress supervision apply to native cells as
-they do to the existing cells. Full coverage may therefore remain pending
-for the supervisor to schedule in a later authorized window.
+The authorized campaign has no wall-clock deadline. Estimates are planning
+information and never skip a cell. Explicit abort/ceiling markers, controller
+death and no-progress supervision still stop the add-on. Missing cells remain
+`INCOMPLETE`.
 
 `x/summary.json` keeps CB, reference DSpark, native integrity, and native R015
 results separate. Missing native cells, missing identity binding or incomplete

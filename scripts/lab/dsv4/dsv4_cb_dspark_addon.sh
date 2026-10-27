@@ -3,7 +3,7 @@
 # live provider already paused, drained and booted out by that controller, and
 # after its job d (12 coding prompts) has stopped its loopback serve, run
 #   (1) the DeepSeek CB gate on the #2151 build: msb-throughput aggregate decode
-#       tok/s at 1, 2, 4, 8 rows vs serial, gate >= 67.4 at 4 rows, and exact
+#       tok/s at 1, 2, 4, 8 rows vs serial, gate >= 2.0x same-window serial at 4 rows, and exact
 #       token parity at 1, 2, 4, 8 rows;
 #   (2) the DSpark reference lane on the corrected mlx-vlm target;
 #   (3) native frozen-request integrity probes and separate R015 benches.
@@ -20,9 +20,8 @@
 # The DSpark lane is reference evidence; native runtime proof is separate.
 #   bash dsv4_cb_dspark_addon.sh --plan <OUT>    prints every command, runs nothing
 #
-# Stops on $OUT/CEILING, $OUT/ABORT, its own deadline (ADDON_BUDGET_S, and the
-# controller ceiling minus 5 min), or the controller's exit. Every CB cell and
-# the DSpark lane is skipped, not cut, when its estimate does not fit.
+# Stops on explicit controller abort/ceiling markers, controller exit or a stall.
+# The authorized campaign has no wall-clock deadline or cell-skipping budget.
 set -uo pipefail
 export PATH=/usr/sbin:/opt/homebrew/bin:/usr/bin:/bin
 PLAN=0; [ "${1:-}" = --plan ] && { PLAN=1; shift; }
@@ -47,10 +46,6 @@ REQUESTS_SHA256=01bb9294714fcc95c7dc8540b460c309f8c5ff782214d24b3e95d4e4297b9383
 D=$OUT/x
 CONTROLLER=$PPID
 T0=$(date +%s)
-DEADLINE=$(( T0 + ${ADDON_BUDGET_S:-6000} ))
-if [ -n "${PAUSE_T:-}" ] && [ -n "${CEILING_S:-}" ]; then
-  c=$(( PAUSE_T + CEILING_S - 300 )); [ $c -lt $DEADLINE ] && DEADLINE=$c
-fi
 REF=""; [ -n "$W1_OUT" ] && [ -s "$W1_OUT/b/oracles/oracle_32768.npz" ] && REF=$W1_OUT/b/oracles
 
 msb(){ printf 'cd %q && exec ' "$(dirname "$NEWBIN")"; printf '%q ' nice -n 5 "$NEWBIN" msb-throughput --model "$M" --engine scheduler --no-compile "$@" --output "$D/$name.json"; echo; }
@@ -77,7 +72,7 @@ dspark_cmd(){
   printf 'exec '
   printf '%q ' nice -n 5 "$PY" -I "$ADDON/dsv4_dspark_bench.py" "$M" "$D/dspark" --policy "$POLICY" --requests "$ADDON/dsv4-dspark-requests.json" --long-prompts "$ORACLES"
   [ -z "$REF" ] || printf '%q ' --reference-oracles "$REF"
-  printf '%q ' --deadline-epoch "$DEADLINE" --stop-file "$OUT/CEILING" --stop-file "$OUT/ABORT"
+  printf '%q ' --stop-file "$OUT/CEILING" --stop-file "$OUT/ABORT"
   echo
 }
 
@@ -96,7 +91,7 @@ native_cmd(){
 }
 
 if [ $PLAN = 1 ]; then
-  echo "# deadline epoch $DEADLINE ($(( DEADLINE - T0 )) s); W1_OUT=${W1_OUT:-none}; reference oracles ${REF:-none}"
+  echo "# no wall-clock deadline; W1_OUT=${W1_OUT:-none}; reference oracles ${REF:-none}"
   echo "(cd $ADDON && shasum -a 256 -c dsv4-cbds-manifest.sha256)"
   for c in "${CELLS[@]}"; do IFS='|' read -r name est args <<< "$c"
     case $name in
@@ -112,7 +107,7 @@ fi
 
 mkdir -p "$D" && chmod 700 "$D"
 say(){ echo "[$(date -u +%T)] x: $*" | tee -a "$OUT/timeline.txt" >> "$D/addon.log"; }
-halted(){ [ -e "$OUT/CEILING" ] || [ -e "$OUT/ABORT" ] || [ $(date +%s) -ge $DEADLINE ] || ! kill -0 $CONTROLLER 2>/dev/null; }
+halted(){ [ -e "$OUT/CEILING" ] || [ -e "$OUT/ABORT" ] || ! kill -0 $CONTROLLER 2>/dev/null; }
 CHILD=""
 # The child execs down to the measured process; the pattern catches anything
 # that still names this add-on's output directory.
@@ -128,7 +123,7 @@ supervise(){ local name=$1 log=$2; shift 2
   CHILD=$!; local last="" same=0 rc
   say "$name: pid=$CHILD"
   while kill -0 $CHILD 2>/dev/null; do sleep 5
-    if halted; then say "$name: halt (ceiling/abort/deadline/controller)"; cleanup; break; fi
+    if halted; then say "$name: halt (ceiling/abort/controller)"; cleanup; break; fi
     if [ $(( $(date +%s) % 60 )) -lt 5 ]; then
       key="$(wc -c < "$log" | tr -d ' ')|$(ps -o time= -p $CHILD 2>/dev/null)"
       if [ "$key" = "$last" ]; then same=$((same+1)); else same=0; last=$key; fi
@@ -139,7 +134,7 @@ supervise(){ local name=$1 log=$2; shift 2
   wait $CHILD; rc=$?; CHILD=""; say "$name: rc=$rc"; return $rc
 }
 
-say "start; deadline epoch $DEADLINE; W1_OUT=${W1_OUT:-none}"
+say "start; no wall-clock deadline; W1_OUT=${W1_OUT:-none}"
 (cd "$ADDON" && shasum -a 256 -c dsv4-cbds-manifest.sha256 > "$D/manifest-check.txt" 2>&1) || { say "add-on files differ from dsv4-cbds-manifest.sha256; stop"; exit 2; }
 [ -x "$NEWBIN" ] && [ -s "$(dirname "$NEWBIN")/mlx.metallib" ] || { say "missing $NEWBIN or its mlx.metallib; stop"; exit 2; }
 shasum -a 256 "$NEWBIN" "$(dirname "$NEWBIN")/mlx.metallib" > "$D/identity.sha256"
@@ -160,12 +155,18 @@ curl -fsS --max-time 2 "$LIVE_URL" >/dev/null 2>&1 && { say "live provider answe
 
 reuse(){ local n=$1 src="$W1_OUT/c/new-r$1.json"
   [ -n "$W1_OUT" ] && [ -s "$src" ] || return 1
-  "$PY" -I - "$src" "$n" <<'PY' || return 1
-import json, sys
+  "$PY" -I - "$src" "$n" "$POLICY" <<'PY' || return 1
+import json, math, sys
 d = json.load(open(sys.argv[1])); n = int(sys.argv[2])
+pin = "mlxlm-" + json.load(open(sys.argv[3]))["runtime_under_test"]["fork_commit"][:12]
+def positive(v):
+    return type(v) in (int, float) and math.isfinite(v) and v > 0
 ok = (d.get("rows") == n and d.get("runs") == 3 and d.get("scenario") == "throughput" and d.get("engine") == "scheduler"
       and d.get("promptTokensPerRow") == 1024 and d.get("decodeTokensPerRow") == 256 and d.get("compiled") is False
-      and len(d.get("aggregateTPSRuns") or []) == 3)
+      and d.get("mlxSwiftLMPin") == pin
+      and all(isinstance(d.get(k), list) and len(d[k]) == 3 and all(positive(v) for v in d[k])
+              for k in ("aggregateTPSRuns", "productionSerialTPSRuns"))
+      and all(positive(d.get(k)) for k in ("aggregateTPSp50", "productionSerialTPSp50")))
 sys.exit(0 if ok else 1)
 PY
   cp "$src" "$D/throughput-r$n.json" && echo "$src" > "$D/throughput-r$n.reused-from"
@@ -174,7 +175,6 @@ PY
 for c in "${CELLS[@]}"; do IFS='|' read -r name est args <<< "$c"
   halted && { say "halted before $name"; break; }
   case $name in throughput-r*) reuse "${name#throughput-r}" && { say "$name: reused from window 1"; continue; } ;; esac
-  if [ $(( $(date +%s) + est )) -gt $DEADLINE ]; then say "$name: skipped (est ${est}s past deadline)"; continue; fi
   case $name in
     DSPARK) supervise dspark "$D/dspark.log" bash -c "$(dspark_cmd)" ;;
     native-d*|r015-d*)

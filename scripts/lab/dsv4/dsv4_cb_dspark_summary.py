@@ -5,7 +5,7 @@
 
 Reads <dir>/throughput-r{N}.json and parity-r{N}.json (msb-throughput) and
 <dir>/dspark/dspark.json (dsv4_dspark_bench.py), prints one JSON object with
-the CB gate (aggregate decode tok/s at the gate row count >= the bar, exact
+the CB gate (same-build CB/serial ratio, strict FR-CB14 floors and exact
 token parity at every parity row count) and the DSpark go/no-go.
 """
 import argparse
@@ -143,6 +143,7 @@ def main():
     d = args.addon_out_dir
     policy = strict_json(args.policy.read_text())
     cb = policy["cb"]
+    expected_pin = "mlxlm-" + policy["runtime_under_test"]["fork_commit"][:12]
     invalid = []
     rows = {}
     for n in cb["rows"]:
@@ -150,12 +151,16 @@ def main():
         p = load(d / f"parity-r{n}.json")
         valid_t = t is not None and all(t.get(k) == v for k, v in {
             "rows": n, "runs": cb["runs"], "scenario": "throughput", "engine": cb["engine"],
-            "promptTokensPerRow": cb["prompt_tokens"], "decodeTokensPerRow": cb["decode_tokens"], "compiled": False
-        }.items()) and len(t.get("aggregateTPSRuns") or []) == cb["runs"]
-        valid_t = valid_t and all(finite_positive(v) for v in t["aggregateTPSRuns"]) and finite_positive(t.get("aggregateTPSp50"))
+            "promptTokensPerRow": cb["prompt_tokens"], "decodeTokensPerRow": cb["decode_tokens"], "compiled": False,
+            "mlxSwiftLMPin": expected_pin,
+        }.items()) and all(isinstance(t.get(key), list) and len(t[key]) == cb["runs"]
+                           and all(finite_positive(v) for v in t[key])
+                           for key in ("aggregateTPSRuns", "productionSerialTPSRuns"))
+        valid_t = valid_t and finite_positive(t.get("aggregateTPSp50")) and finite_positive(t.get("productionSerialTPSp50"))
         valid_p = p is not None and all(p.get(k) == v for k, v in {
             "rows": n, "runs": 1, "scenario": "parity", "engine": cb["engine"], "compiled": False,
-            "promptTokensPerRow": cb["prompt_tokens"], "decodeTokensPerRow": cb["decode_tokens"]
+            "promptTokensPerRow": cb["prompt_tokens"], "decodeTokensPerRow": cb["decode_tokens"],
+            "mlxSwiftLMPin": expected_pin,
         }.items())
         if not valid_t:
             invalid.append(f"throughput-r{n}")
@@ -169,7 +174,7 @@ def main():
             "aggregate_tps_p50": (t or {}).get("aggregateTPSp50"),
             "aggregate_cv_pct": (t or {}).get("aggregateCVPct"),
             "serial_tps_p50": (t or {}).get("productionSerialTPSp50"),
-            "aggregate_vs_serial": (t or {}).get("aggregateVsProductionSerial"),
+            "aggregate_vs_serial": t["aggregateTPSp50"] / t["productionSerialTPSp50"] if t else None,
             "serial_ttft_s": ((t or {}).get("productionSerialTTFTSecondsRuns") or [None])[0],
             "peak_phys_footprint_mb": (t or {}).get("peakPhysFootprintMB"),
             "throughput_reused_from": reused,
@@ -178,10 +183,15 @@ def main():
             "parity_usage_pass": (p or {}).get("leftovers", {}).get("usagePass") if p else None,
         }
     gate_tps = rows.get(cb["gate_rows"], {}).get("aggregate_tps_p50")
+    gate_serial = rows.get(cb["gate_rows"], {}).get("serial_tps_p50")
+    gate_ratio = rows.get(cb["gate_rows"], {}).get("aggregate_vs_serial")
+    msb04_ratio = rows.get(cb["msb04_rows"], {}).get("aggregate_vs_serial")
     parity_ok = [rows.get(n, {}).get("parity_pass") for n in cb["parity_rows"]]
     if invalid or not isinstance(gate_tps, (int, float)) or not math.isfinite(gate_tps) or None in parity_ok:
         cb_decision = "INCOMPLETE"
-    elif gate_tps >= cb["gate_aggregate_tps"] and all(parity_ok):
+    elif (gate_ratio >= cb["gate_min_serial_speedup"]
+          and gate_ratio > cb["msb02_min_serial_speedup_exclusive"]
+          and msb04_ratio > cb["msb04_min_serial_speedup_exclusive"] and all(parity_ok)):
         cb_decision = "PASS"
     else:
         cb_decision = "FAIL"
@@ -195,7 +205,12 @@ def main():
     decisions = [cell[kind]["decision"] for cell in native.values() for kind in ("integrity", "r015")]
     native_decision = "INCOMPLETE" if "INCOMPLETE" in decisions else ("PASS" if all(v == "PASS" for v in decisions) else "FAIL")
     out = {
-        "cb_gate": {"decision": cb_decision, "bar_tps": cb["gate_aggregate_tps"], "gate_rows": cb["gate_rows"],
+        "cb_gate": {"decision": cb_decision,
+                    "bar_tps": gate_serial * cb["gate_min_serial_speedup"] if gate_serial else None,
+                    "bar_serial_speedup": cb["gate_min_serial_speedup"], "gate_serial_speedup": gate_ratio,
+                    "msb02_pass": gate_ratio > cb["msb02_min_serial_speedup_exclusive"] if gate_ratio is not None else None,
+                    "msb04_pass": msb04_ratio > cb["msb04_min_serial_speedup_exclusive"] if msb04_ratio is not None else None,
+                    "reference_tps": cb["reference_aggregate_tps"], "gate_rows": cb["gate_rows"],
                     "gate_tps": gate_tps, "rows": rows, "invalid_or_missing_cells": invalid},
         "native": {"decision": native_decision, "native_hardware_proof": native_decision == "PASS", "depths": native},
         "dspark": {"proof_scope": "reference_only", "native_hardware_proof": False,

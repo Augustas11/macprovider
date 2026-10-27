@@ -178,7 +178,9 @@ def main():
 
     # 2. Policy fields.
     want = {("cb", "rows"): [1, 2, 4, 8], ("cb", "parity_rows"): [1, 2, 4, 8], ("cb", "gate_rows"): 4,
-            ("cb", "gate_aggregate_tps"): 67.4, ("cb", "decode_tokens"): 256, ("cb", "prompt_tokens"): 1024,
+            ("cb", "gate_min_serial_speedup"): 2.0, ("cb", "decode_tokens"): 256, ("cb", "prompt_tokens"): 1024,
+            ("cb", "msb02_min_serial_speedup_exclusive"): 1.5, ("cb", "msb04_rows"): 2,
+            ("cb", "msb04_min_serial_speedup_exclusive"): 1.3,
             ("cb", "runs"): 3, ("cb", "parity_tokens"): 256, ("cb", "engine"): "scheduler",
             ("dspark", "block_sizes"): [2, 3, 4, 6], ("dspark", "batch_rows"): 4, ("dspark", "decode_tokens"): 256,
             ("dspark", "long_contexts"): [8192, 32768], ("dspark", "go_speedup"): 1.15,
