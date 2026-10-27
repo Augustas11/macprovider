@@ -821,10 +821,20 @@ private final class NativeMTPBenchRunner {
             if lhs.completion.content != rhs.completion.content { return true }
             if lhs.completion.reasoningContent != rhs.completion.reasoningContent { return true }
             if lhs.completion.completionTokens != rhs.completion.completionTokens { return true }
-            if lhs.completion.toolCalls != rhs.completion.toolCalls { return true }
+            if !Self.toolCallsHaveParity(lhs.completion.toolCalls, rhs.completion.toolCalls) { return true }
             if lhs.completion.finishReason != rhs.completion.finishReason { return true }
         }
         return false
+    }
+
+    static func toolCallsHaveParity(_ lhs: [ToolCall]?, _ rhs: [ToolCall]?) -> Bool {
+        // Parser-generated UUIDs are response metadata. The model's ordered
+        // function names and exact argument bytes must still match.
+        let lhs = lhs ?? []
+        let rhs = rhs ?? []
+        return lhs.count == rhs.count && zip(lhs, rhs).allSatisfy { pair in
+            pair.0.functionName == pair.1.functionName && pair.0.arguments == pair.1.arguments
+        }
     }
 
     private func baseHeader(

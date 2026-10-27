@@ -176,6 +176,19 @@ final class NativeMTPBenchGLMTests: XCTestCase {
         XCTAssertTrue(try NativeMTPBenchCommand.parse(base + ["--validate-only"]).validateOnly)
     }
 
+    func testToolCallParityIgnoresGeneratedIDsButPreservesModelOutput() {
+        let ordinary = ToolCall(id: "call_ordinary", functionName: "read_file", arguments: "{\"path\":\"main.swift\"}")
+        let native = ToolCall(id: "call_native", functionName: ordinary.functionName, arguments: ordinary.arguments)
+        XCTAssertTrue(NativeMTPBenchCommand.toolCallsHaveParity([ordinary], [native]))
+        XCTAssertTrue(NativeMTPBenchCommand.toolCallsHaveParity(nil, []))
+        XCTAssertFalse(NativeMTPBenchCommand.toolCallsHaveParity([ordinary], []))
+        let otherName = ToolCall(id: native.id, functionName: "write_file", arguments: native.arguments)
+        let otherArguments = ToolCall(id: native.id, functionName: native.functionName, arguments: "{\"path\":\"other.swift\"}")
+        XCTAssertFalse(NativeMTPBenchCommand.toolCallsHaveParity([ordinary], [otherName]))
+        XCTAssertFalse(NativeMTPBenchCommand.toolCallsHaveParity([ordinary], [otherArguments]))
+        XCTAssertFalse(NativeMTPBenchCommand.toolCallsHaveParity([ordinary, otherName], [otherName, native]))
+    }
+
     func testPolicyListParsesSeveralFrozenPolicies() throws {
         let command = try NativeMTPBenchCommand.parse([
             "--root", "/fixture", "--out", "/results", "--provider-commit", String(repeating: "a", count: 40),
