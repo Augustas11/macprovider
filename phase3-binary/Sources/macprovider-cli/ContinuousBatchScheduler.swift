@@ -5827,6 +5827,59 @@ actor ContinuousBatchScheduler {
             : selectEqualOffsetPrefillGroup()
         guard !selected.isEmpty else { return madeProgress }
 
+        // A resume boundary is a numerical partition, not another scheduling
+        // turn. Keep each row's numerical chunk intact, but let its row use
+        // the rest of this turn's token budget before rotating or decoding.
+        // A boundary may extend the turn by one original group (at most one
+        // extra iteration budget); then yield. Never shrink a chunk to fit:
+        // that would change the GLM cold/warm kernel route (SPEC-024-R005).
+        var group = selected
+        var remainingTokens = configuration.maxPrefillTokensPerIteration
+        while !group.isEmpty {
+            let consumed = group.reduce(0) { $0 + $1.end - $1.row.prefillCursor }
+            let progressed = await runPrefillGroup(group)
+            madeProgress = madeProgress || progressed
+            remainingTokens -= consumed
+            guard progressed, remainingTokens >= 0, !draining,
+                  configuration.referencePrefillStepSize == nil,
+                  !backendCancellationPending, !cleanupFailedClosed else { break }
+            await processCancellations()
+            if await failClosedIfNeeded() { break }
+
+            var continuation: [(row: Row, end: Int)] = []
+            // Build an original-shaped group under the unchanged forward
+            // budget. If it crosses the turn budget, it is the sole bounded
+            // extension: remainingTokens becomes negative and the turn ends.
+            var availableTokens = configuration.maxPrefillTokensPerIteration
+            let chunkLimit = min(configuration.maxPromptChunkTokens, configuration.maxPrefillTokensPerIteration)
+            for item in group {
+                guard let row = activePrompt[item.row.request.id],
+                      row.prefillCursor == item.end,
+                      (row.request.promptResumeBoundaries.contains(item.end)
+                        || row.request.promptSnapshotTokenCount == item.end) else { continue }
+                let end = prefillEnd(for: row, maxChunkTokens: chunkLimit)
+                let tokens = end - row.prefillCursor
+                guard tokens > 0, tokens <= availableTokens else { continue }
+                if let first = continuation.first {
+                    guard tokens == first.end - first.row.prefillCursor,
+                          row.prefillCursor == first.row.prefillCursor,
+                          configuration.prefillGrouping.allowsGrouping(chunkTokens: tokens) else { continue }
+                }
+                continuation.append((row, end))
+                availableTokens -= tokens
+            }
+            group = continuation
+        }
+        // Rotate each row once for the whole bounded turn, including its
+        // boundary continuation. Other prompt rows retain their FCFS order.
+        for id in selected.map({ $0.row.request.id }) where activePrompt[id] != nil {
+            promptOrder.removeAll { $0 == id }
+            promptOrder.append(id)
+        }
+        return madeProgress
+    }
+
+    private func runPrefillGroup(_ selected: [(row: Row, end: Int)]) async -> Bool {
         var prepared: [(row: Row, input: ContinuousBatchPrefillInput, chunkCount: Int)] = []
         for item in selected {
             let row = item.row
@@ -5878,7 +5931,7 @@ actor ContinuousBatchScheduler {
                 ) == false { return true }
             }
         }
-        guard !prepared.isEmpty else { return madeProgress }
+        guard !prepared.isEmpty else { return false }
 
         prefillCalls += 1
         let outputs: [ContinuousBatchPrefillOutput]
@@ -5970,13 +6023,6 @@ actor ContinuousBatchScheduler {
             } else {
                 activePrompt[id] = row
             }
-        }
-        // Round-robin prompt rows at chunk boundaries. This keeps a long or
-        // temporarily incompatible prompt from pinning the FCFS head forever,
-        // while admission order remains unchanged.
-        for id in prepared.map({ $0.row.request.id }) where activePrompt[id] != nil {
-            promptOrder.removeAll { $0 == id }
-            promptOrder.append(id)
         }
         return true
     }

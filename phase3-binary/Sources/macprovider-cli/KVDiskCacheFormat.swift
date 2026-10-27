@@ -25,6 +25,8 @@ enum KVDiskCacheFormat {
     /// Payload codec identifier (FR-KVP4(a)1).
     static let codecID = "kvsurv-codec-v1"
     static let recurrentCodecID = "kvsurv-codec-v2"
+    static let promptSnapshotCodecID = "kvsurv-codec-v3"
+    static let promptSnapshotCacheClass = "KVPromptSnapshot"
     /// Chunk frame magic (§5a blob framing).
     static let chunkMagic = Data("KVS1".utf8)
 
@@ -44,7 +46,7 @@ enum KVDiskCacheFormat {
     /// The v1 serialization allowlist: exactly the unquantized standard cache class.
     static let allowlistedCacheClasses: Set<String> = ["KVCacheSimple"]
     static let recurrentCacheClass = "KVCacheMixedRecurrent"
-    static let supportedCodecIDs: Set<String> = [codecID, recurrentCodecID]
+    static let supportedCodecIDs: Set<String> = [codecID, recurrentCodecID, promptSnapshotCodecID]
 }
 
 // MARK: - Codec dtype enum (§5a payload codec)
@@ -211,6 +213,7 @@ struct KVDiskManifest: Sendable, Equatable {
     let layerCount: Int
     let layers: [KVLayerRecord]
     var recurrentCheckpoints: [KVRecurrentCheckpointRecord] = []
+    var snapshotBytes: Int? = nil
     /// Unquantized caches encode these four as JSON `null` (matching `kvBits == nil`).
     let kvBits: Int?
     let kvGroupSize: Int?
@@ -601,6 +604,9 @@ extension KVDiskManifest {
         if !omitBlobSHA256 {
             fields["blob_sha256"] = strVal(blobSHA256)
         }
+        if codecID == KVDiskCacheFormat.promptSnapshotCodecID, let snapshotBytes {
+            fields["snapshot_bytes"] = intVal(snapshotBytes)
+        }
         if codecID == KVDiskCacheFormat.recurrentCodecID {
             fields["recurrent_checkpoints"] = .array(checkpointValues)
         }
@@ -703,6 +709,7 @@ enum KVManifestCodec {
         if parsedCodecID == KVDiskCacheFormat.recurrentCodecID {
             required.insert("recurrent_checkpoints")
         }
+        if parsedCodecID == KVDiskCacheFormat.promptSnapshotCodecID { required.insert("snapshot_bytes") }
         let present = Set(object.keys)
         guard present == required else {
             let missing = required.subtracting(present)
@@ -967,6 +974,14 @@ enum KVManifestCodec {
                 tokenCount: tokenCount, layers: layers, checkpoints: recurrentCheckpoints), recomputed == decodedLength else {
                 throw KVManifestParseError.corrupt("codec-v2 decoded_length does not recompute")
             }
+        } else if parsedCodecID == KVDiskCacheFormat.promptSnapshotCodecID {
+            guard let bytes = object["snapshot_bytes"] as? NSNumber, isIntegral(bytes),
+                  bytes.intValue == decodedLength, decodedLength > 0,
+                  !layers.isEmpty, layers.enumerated().allSatisfy({ index, layer in
+                      layer.layerIndex == index && layer.layoutVersion == 3 && layer.dtype == .i32
+                          && ((layer.classID == "GLM5NextAttentionCache" && layer.ndim == 3)
+                              || (layer.classID == "MambaCache" && layer.ndim == 0))
+                  }) else { throw KVManifestParseError.corrupt("invalid prompt snapshot envelope") }
         } else {
             throw KVManifestParseError.corrupt("unknown codec_id")
         }
@@ -1020,6 +1035,7 @@ enum KVManifestCodec {
             layerCount: layerCount,
             layers: layers,
             recurrentCheckpoints: recurrentCheckpoints,
+            snapshotBytes: parsedCodecID == KVDiskCacheFormat.promptSnapshotCodecID ? decodedLength : nil,
             kvBits: try optInt("kv_bits"),
             kvGroupSize: try optInt("kv_group_size"),
             kvQuantMode: try optStr("kv_quant_mode"),
@@ -1178,7 +1194,11 @@ enum KVEnvelopeValidator {
             guard let record = manifest.layers.first(where: { $0.layerIndex == geometry.layerIndex }) else {
                 return .miss(.diskMissEnvelope)   // layer set mismatch (row 6)
             }
-            if record.classID == "KVCacheSimple" {
+            if manifest.codecID == KVDiskCacheFormat.promptSnapshotCodecID {
+                guard record.layoutVersion == 3, record.dtype == .i32, geometry.sequenceAxis == -1 else {
+                    return .miss(.diskMissEnvelope)
+                }
+            } else if record.classID == "KVCacheSimple" {
                 guard geometry.sequenceAxis >= 0, geometry.sequenceAxis < record.dims.count,
                       record.dims[geometry.sequenceAxis] == manifest.tokenCount else {
                     return .miss(.diskMissCorrupt)
@@ -1260,7 +1280,9 @@ enum KVEnvelopeValidator {
         // 7: cache class allowlist + class + layer count + per-layer geometry (rows 6,7)
         let classAllowed = manifest.codecID == KVDiskCacheFormat.codecID
             ? KVDiskCacheFormat.allowlistedCacheClasses.contains(manifest.cacheClass)
-            : manifest.cacheClass == KVDiskCacheFormat.recurrentCacheClass
+            : manifest.codecID == KVDiskCacheFormat.promptSnapshotCodecID
+                ? manifest.cacheClass == KVDiskCacheFormat.promptSnapshotCacheClass
+                : manifest.cacheClass == KVDiskCacheFormat.recurrentCacheClass
         guard classAllowed,
               manifest.cacheClass == runtime.cacheClass,
               manifest.layerCount == runtime.layerCount,

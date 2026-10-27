@@ -181,7 +181,7 @@ final class PrefillCancellationTests: XCTestCase {
     /// A request waiting for another request's conversation key stops waiting
     /// when cancelled, takes no lease, and leaves the key's turn order intact.
     func testCancelledWaiterForABusyConversationKeyTakesNoLease() async throws {
-        let cache = ConversationCache(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+        let cache = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
         let tokens = (0..<64).map(Int32.init)
         let ownerLease = await cache.begin(conversationKey: "conv:busy", incomingTokens: tokens,
                                            modelID: "model-a", kvBits: nil)

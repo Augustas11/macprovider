@@ -3129,8 +3129,10 @@ actor ModelRuntime: ModelRuntimeServing {
     }
 
     nonisolated static func clearMLXBufferCacheAfterPrefill(
+        isFinalChunk: Bool = true,
         using clear: () -> Void = { Memory.clearCache() }
     ) {
+        guard isFinalChunk else { return }
         clear()
     }
 
@@ -4051,6 +4053,7 @@ maxTokens: 1,
         continuousBatchingBackend: (any ContinuousBatchSchedulerBackend)? = nil,
         continuousBatchPrefillGrouping: ContinuousBatchPrefillGroupingRule? = nil,
         testContinuousBatchTextPreparationLane: ContinuousBatchTextPreparationLane? = nil,
+        testConversationCacheMemoryBudget: ConversationCacheMemoryBudget? = nil,
         pagedKVRuntimeProber: PagedKVRuntimeProber = .live,
         loader: @escaping @Sendable (String) async throws -> (ModelContainer, String, String?),
         testLoader: (@Sendable (String) async throws -> (String, String?))? = nil,
@@ -4196,7 +4199,13 @@ maxTokens: 1,
             observedRuntimeIdentity: effectiveObservedIdentity
         )
         self.continuousBatchScheduler = nil
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        self.conversationCache = ConversationCache(
+            memoryBudget: testConversationCacheMemoryBudget ?? ConversationCacheMemoryBudget()
+        )
+        #else
         self.conversationCache = ConversationCache()
+        #endif
         self.maxBatch = boundedMaxBatch
         self.maxBatchBeforePolicyCeiling = boundedMaxBatch
         self.inferenceGate = AsyncSemaphore(value: boundedMaxBatch)
@@ -8516,6 +8525,7 @@ maxTokens: 1,
             resolved: tokenBoundedNativeMTPAdmission
         )
         let preparedPromptTokenIDs = prepared.promptTokens.map(Int32.init)
+        configureConversationCacheMemoryBudget()
         let coldContext = coldContext(for: request, snapshot: snapshot)
         let batchKVBits = Self.effectiveKVBits(
             configured: kvBitsOverride,
@@ -9067,6 +9077,7 @@ maxTokens: 1,
             resolved: tokenBoundedNativeMTPAdmission
         )
         let preparedPromptTokenIDs = prepared.promptTokens.map(Int32.init)
+        configureConversationCacheMemoryBudget()
         let coldContext = coldContext(for: request, snapshot: snapshot)
         let batchKVBits = Self.effectiveKVBits(
             configured: kvBitsOverride,
@@ -9695,6 +9706,7 @@ maxTokens: boundedMaxTokens,
         let conversationCache = conversationCache
         // SPEC-037 stage 5 — per-request cold-tier context, captured before the
         // nonisolated inference closure (nil unless the disk tier is attached).
+        configureConversationCacheMemoryBudget()
         let coldContext = coldContext(for: request, snapshot: snapshot)
         let inferenceGate = inferenceGate
         let blockingInferenceExecutor = blockingInferenceExecutor
@@ -10572,6 +10584,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
         let isLocalRequest = localRegistrationIDs.contains(handle.registrationID)
         let conversationCache = conversationCache
         // SPEC-037 stage 5 — per-request cold-tier context (streaming endpoint).
+        configureConversationCacheMemoryBudget()
         let coldContext = coldContext(for: request, snapshot: snapshot)
         let inferenceGate = inferenceGate
         let blockingInferenceExecutor = blockingInferenceExecutor
@@ -11192,14 +11205,26 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
         )
     }
 
+    private func configureConversationCacheMemoryBudget() {
+        let (poolTokens, overflow) = pagedKVConfig.blockSizeTokens.multipliedReportingOverflow(
+            by: pagedKVConfig.maxPhysicalBlocks)
+        conversationCache.memoryBudget.configure(
+            maxContextTokens: maxContextTokens,
+            slots: servedSlotLimit,
+            residentTokens: overflow ? Int.max : poolTokens,
+            verifyBytes: Self.nativeMTPRoundByteCapacity(from: currentNativeMTPAdmissionCapability) ?? 0)
+    }
+
     func attachKVDiskTier(_ tier: KVDiskTier) async {
         coldTierUnsupportedReason = nil
+        configureConversationCacheMemoryBudget()
         let adapter = KVConversationColdTierAdapter(
             store: tier.store, namespaceID: tier.namespaceID,
             eligibilityTTLSeconds: tier.eligibilityTTLSeconds,
             writeStagingMaxBytes: tier.config.writeStagingMaxBytes,
             maxEntryBytes: tier.config.maxEntryBytes,
-            stagingMaxBytes: tier.config.stagingMaxBytes)
+            stagingMaxBytes: tier.config.stagingMaxBytes,
+            memoryBudget: conversationCache.memoryBudget)
         await conversationCache.attachColdTier(adapter)
         // CRITICAL-2: keep the adapter's cached epoch in step with the store so
         // captureSnapshot stamps the epoch at commit time. Seeds immediately.
@@ -11240,6 +11265,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
         let kvBitsOverride = kvBitsOverride
         let prefillStepSize = prefillStepSize
         let blockingInferenceExecutor = blockingInferenceExecutor
+        let memoryBudget = conversationCache.memoryBudget
         let result: KVDiskSeedResult? = try? await inferenceGate.withPermit {
             try await container.perform { context -> KVDiskSeedResult in
                 let input = UserInput(chat: [.user("warmup")])
@@ -11276,6 +11302,11 @@ maxTokens: 1,
                 // rather than leaving every eligible request to skip observably but
                 // silently at attach time. Log-only: the per-request observable skip in
                 // captureSnapshot still covers correctness.
+                memoryBudget.observe(
+                    layers: ConversationCacheLayers(kvCache), tokenCount: max(1, kvCache.map(\.offset).max() ?? 0))
+                if adapter.seedPromptSnapshotTemplate(servedModelID: servedModelID, layers: kvCache) {
+                    return KVDiskSeedResult(template: nil, unsupportedCacheClass: nil)
+                }
                 if adapter.seedTemplate(servedModelID: servedModelID, layers: kvCache) {
                     return KVDiskSeedResult(template: nil, unsupportedCacheClass: nil)
                 }
