@@ -220,6 +220,31 @@
       "primary_artifact_id": "mlx-mxfp4-q8",
       "rate_class": "class-20b-moe"
     },
+    "prism-ml/ternary-bonsai-2-2b-mlx-2bit": {
+      "artifacts": {
+        "mlx-2bit": {
+          "allowed_runtime_sources": [
+            "mlx_cache"
+          ],
+          "hash": "fe25aaa59aeb54f5ce080818b28808286d26283a61200cb1efb377ac7db62262",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "min_ram_gb": 3,
+          "notes": "Verified native ternary MLX snapshot: 24 files, 1213282532 bytes. Upstream Apache-2.0 license and NOTICE retained. Measured peak footprint 2.814 GiB.",
+          "quantization": "2bit",
+          "runtime_format": "mlx_safetensors",
+          "size_bytes": 1213282532,
+          "source_ref": {
+            "kind": "huggingface_revision",
+            "repo_id": "prism-ml/Ternary-Bonsai-2-2B-mlx-2bit",
+            "revision": "1c6cbae21f8c38830ce337972b46fdae7b18eaaa"
+          },
+          "verification_status": "verified",
+          "verified_at": "2026-10-27"
+        }
+      },
+      "primary_artifact_id": "mlx-2bit",
+      "rate_class": "class-3b"
+    },
     "qwen/qwen3-30b-a3b-instruct-2507": {
       "artifacts": {
         "mlx-4bit": {

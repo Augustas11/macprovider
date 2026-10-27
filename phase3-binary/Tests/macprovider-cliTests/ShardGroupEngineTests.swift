@@ -188,20 +188,26 @@ final class ShardGroupEngineTests: XCTestCase {
     }
 
     func testAQueuedRequestCancelsWithoutTouchingTheChain() throws {
-        let firstTailForward = DispatchSemaphore(value: 0)
-        let releaseFirstTailForward = DispatchSemaphore(value: 0)
+        let firstEnteredTail = DispatchSemaphore(value: 0)
+        let releaseFirst = DispatchSemaphore(value: 0)
+        defer { releaseFirst.signal() }
         let rig = try rig(maxInFlight: 1, tailOnCall: { call, _ in
-            guard call == 1 else { return }
-            firstTailForward.signal()
-            _ = releaseFirstTailForward.wait(timeout: .now() + 5)
+            if call == 1 {
+                firstEnteredTail.signal()
+                _ = releaseFirst.wait(timeout: .now() + 5)
+            }
         })
         let collector = ShardGenerationCollector(count: 2)
         let ids = try rig.engine.submit(
             [ShardGenerationRequest(promptTokens: [1, 2], maxTokens: 3), ShardGenerationRequest(promptTokens: [3, 4], maxTokens: 3)],
             sink: collector.receive)
-        XCTAssertEqual(firstTailForward.wait(timeout: .now() + 5), .success)
+        // submit releases the worker before returning. Hold the first request
+        // in native work so the second cannot finish before cancel reaches it.
+        XCTAssertEqual(firstEnteredTail.wait(timeout: .now() + 2), .success)
+        XCTAssertEqual(rig.engine.status.queued, 1, "the second request must still be queued before cancellation")
         rig.engine.cancel(ids[1])
-        releaseFirstTailForward.signal()
+        XCTAssertEqual(rig.engine.status.queued, 0, "cancel must remove the pending request synchronously")
+        releaseFirst.signal()
         let (summaries, errors) = collector.wait()
         XCTAssertTrue(errors.isEmpty)
         XCTAssertEqual(summaries[ids[0]]?.reason, .length)

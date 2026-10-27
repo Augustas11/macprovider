@@ -396,6 +396,7 @@ actor ContinuousBatchTextPreparationLane {
     private let tokenizer: any MLXLMCommon.Tokenizer
     private let configuration: ModelConfiguration
     private let hasRecurrentLayers: Bool
+    private let supportsBonsaiThinking: Bool
 #if DEBUG
     private var preparationEntryCount = 0
 #endif
@@ -404,12 +405,14 @@ actor ContinuousBatchTextPreparationLane {
         processor: any UserInputProcessor,
         tokenizer: any MLXLMCommon.Tokenizer,
         configuration: ModelConfiguration,
-        hasRecurrentLayers: Bool
+        hasRecurrentLayers: Bool,
+        supportsBonsaiThinking: Bool = false
     ) {
         self.processor = processor
         self.tokenizer = tokenizer
         self.configuration = configuration
         self.hasRecurrentLayers = hasRecurrentLayers
+        self.supportsBonsaiThinking = supportsBonsaiThinking
     }
 
     func prepare(
@@ -427,6 +430,7 @@ actor ContinuousBatchTextPreparationLane {
         let tokenizer = tokenizer
         let configuration = configuration
         let hasRecurrentLayers = hasRecurrentLayers
+        let supportsBonsaiThinking = supportsBonsaiThinking
         return try await serial.withPermit {
             try Task.checkCancellation()
             try drainCancelled.check()
@@ -437,7 +441,8 @@ actor ContinuousBatchTextPreparationLane {
                 templateSupportsThinkingToggle: templateSupportsThinkingToggle,
                 templateSupportsPreserveThinking: templateSupportsPreserveThinking,
                 toolSelectionModelID: toolSelectionModelID,
-                templateToolFormat: configuration.toolCallFormat?.rawValue
+                templateToolFormat: configuration.toolCallFormat?.rawValue,
+                supportsBonsaiThinking: supportsBonsaiThinking
             )
             try Task.checkCancellation()
             try drainCancelled.check()
@@ -726,6 +731,8 @@ struct PagedKVRuntimeModelCapabilities: Equatable, Sendable {
     let modelFamily: String
     let requiresMoEDispatch: Bool
     let hybridDecoderArchitectureVerified: Bool
+    /// The exact Bonsai-2 2B layout may evaluate ordinary CB gates only.
+    let ordinaryHybridOnly: Bool
     /// The verified sparse-attention layout of an allowlisted `glm5_next`
     /// identity (SPEC-039 FR-PKV12), read from its `config.json`.
     let sparseAttention: PagedKVSparseAttentionLayout?
@@ -735,12 +742,14 @@ struct PagedKVRuntimeModelCapabilities: Equatable, Sendable {
         modelFamily: String,
         requiresMoEDispatch: Bool,
         hybridDecoderArchitectureVerified: Bool = false,
+        ordinaryHybridOnly: Bool = false,
         sparseAttention: PagedKVSparseAttentionLayout? = nil,
         deepseekV4Pool: DeepseekV4PoolLayout? = nil
     ) {
         self.modelFamily = modelFamily
         self.requiresMoEDispatch = requiresMoEDispatch
         self.hybridDecoderArchitectureVerified = hybridDecoderArchitectureVerified
+        self.ordinaryHybridOnly = ordinaryHybridOnly
         self.sparseAttention = sparseAttention
         self.deepseekV4Pool = deepseekV4Pool
     }
@@ -2147,8 +2156,21 @@ actor ModelRuntime: ModelRuntimeServing {
     /// tuple. Reset to pending on every swap.
     private var continuousBatchingSelfCheck: ContinuousBatchingSelfCheckState = .pending
     private var continuousBatchingSelfCheckReport: ContinuousBatchingSelfCheckReport?
+    // Only real native runtimes select this; preloaded/test runtimes leave it nil.
+    private(set) var mlxCacheLimitMBForLoading: Int? = nil
+    private var hardwareServingRowCap = ProviderCapacity.maxConcurrencyOverrideLimit
     private let warmSwapEnabled: Bool
     private let swapDrainTimeoutSeconds: Int
+    struct DrainTiming: Sendable {
+        let nowMilliseconds: @Sendable () -> Int64
+        let pollSleep: @Sendable () async -> Void
+    }
+    private var drainNowMilliseconds: @Sendable () -> Int64 = {
+        Int64(Date().timeIntervalSince1970 * 1000)
+    }
+    private var drainPollSleep: @Sendable () async -> Void = {
+        try? await Task.sleep(nanoseconds: 50_000_000)
+    }
     private var providerStatus: ProviderStatus?
     private var signalContinuations: [UUID: AsyncStream<SwapSignal>.Continuation] = [:]
     private var nextInFlightID: Int = 0
@@ -2953,6 +2975,12 @@ actor ModelRuntime: ModelRuntimeServing {
         modelCapabilities: PagedKVRuntimeModelCapabilities
     ) -> Bool {
         guard modelCapabilities.hybridDecoderArchitectureVerified else { return false }
+        if modelCapabilities.ordinaryHybridOnly {
+            let expected: [PagedKVSharedForwardBackend.CacheKind] = (0..<24).map {
+                ($0 + 1).isMultiple(of: 4) ? .pagedAttention : .recurrentMamba
+            }
+            return modelCapabilities.modelFamily == "qwen" && cacheKinds == expected
+        }
         if modelCapabilities.modelFamily == "deepseek_v4" {
             return modelCapabilities.deepseekV4Pool?.expectedCacheKinds == cacheKinds
         }
@@ -2994,6 +3022,20 @@ actor ModelRuntime: ModelRuntimeServing {
 
     nonisolated static func isValidMLXCacheLimitMB(_ megabytes: Int) -> Bool {
         (0 ... maximumMLXCacheLimitMB).contains(megabytes)
+    }
+
+    /// Freed-buffer reuse budget for the low-memory tier. Larger Macs retain
+    /// MLX's default until their workload has been qualified with a smaller cap.
+    /// Preserve explicit values (including zero) for normal startup validation.
+    nonisolated static func resolvedMLXCacheLimitMB(
+        configured: Int?, physicalMemoryBytes: UInt64
+    ) -> Int? {
+        if let configured { return configured }
+        guard physicalMemoryBytes > 0, physicalMemoryBytes <= 8 * 1024 * 1024 * 1024 else {
+            return nil
+        }
+        // Divide before converting: the result is at most 256 MiB.
+        return Int(physicalMemoryBytes / (32 * 1024 * 1024))
     }
 
     /// Bounds MLX's buffer cache. Must run before the model loads; see
@@ -3282,7 +3324,10 @@ maxTokens: 1,
             if expectedArchitecture == "DeepseekV4ForCausalLM" { return deepseekV4Pool != nil }
             return architectures.contains(expectedArchitecture)
         }()
-        let architectureVerified = allowlistedArchitectureVerified || deepseekV4Pool != nil
+        let ordinaryHybridOnly = bonsai2BHybridDecoderArchitectureVerified(
+            modelID: modelID, configObject: configObject
+        )
+        let architectureVerified = ordinaryHybridOnly || allowlistedArchitectureVerified || deepseekV4Pool != nil
             || qwen35HybridDecoderArchitectureVerified(
             modelID: modelID,
             configJSONData: configJSONData
@@ -3292,9 +3337,37 @@ maxTokens: 1,
             requiresMoEDispatch: (configJSONData.flatMap(Self.pagedKVConfigRequiresMoE) ?? false)
                 || Self.pagedKVModelIDLooksLikeExpertModel(modelID),
             hybridDecoderArchitectureVerified: architectureVerified,
+            ordinaryHybridOnly: ordinaryHybridOnly,
             sparseAttention: sparseAttention,
             deepseekV4Pool: deepseekV4Pool
         )
+    }
+
+    private nonisolated static func bonsai2BHybridDecoderArchitectureVerified(
+        modelID: String?, configObject: [String: Any]?
+    ) -> Bool {
+        func integer(_ value: Any?, equals expected: Int) -> Bool {
+            guard let number = value as? NSNumber else { return false }
+            return String(cString: number.objCType) != "c" && number.doubleValue == Double(expected)
+        }
+        guard modelID?.lowercased() == "prism-ml/ternary-bonsai-2-2b-mlx-2bit",
+              let config = configObject,
+              integer(config["schema_version"], equals: 2),
+              config["model_type"] as? String == "prism_hadamard_qwen35",
+              config["base_model_type"] as? String == "qwen3_5",
+              config["tensor_namespace"] as? String == "mlx-vlm-qwen3_5",
+              let text = config["text_config"] as? [String: Any],
+              text["model_type"] as? String == "qwen3_5_text",
+              integer(text["num_hidden_layers"], equals: 24),
+              integer(text["full_attention_interval"], equals: 4),
+              integer(text["mtp_num_hidden_layers"], equals: 0),
+              let dedicated = text["mtp_use_dedicated_embeddings"] as? NSNumber,
+              String(cString: dedicated.objCType) == "c", !dedicated.boolValue,
+              let layers = text["layer_types"] as? [String], layers.count == 24
+        else { return false }
+        return layers.enumerated().allSatisfy { index, layer in
+            layer == ((index + 1).isMultiple(of: 4) ? "full_attention" : "linear_attention")
+        }
     }
 
     private nonisolated static func qwen35HybridDecoderArchitectureVerified(
@@ -3338,6 +3411,7 @@ maxTokens: 1,
         runtimeCacheClass: String,
         modelCapabilities: PagedKVRuntimeModelCapabilities
     ) -> String? {
+        guard !modelCapabilities.ordinaryHybridOnly else { return nil }
         if runtimeCacheClass == "KVCacheSimple" {
             return "paged_kv"
         }
@@ -3450,6 +3524,7 @@ maxTokens: 1,
         draftModelLoadPath: String? = nil,
         numDraftTokens: Int = 3,
         speculativeCacheWrapValidated: Bool = false,
+        mlxCacheLimitMB: Int? = nil,
         maxContextTokensOverride: Int? = nil,
         kvBitsOverride: Int? = nil,
         pagedKVConfig: PagedKVConfig = .defaults(),
@@ -3496,6 +3571,16 @@ maxTokens: 1,
         switchMaxBatchByTarget: [String: Int] = [:],
         switchContextProvenanceModelIDs: Set<String> = []
     ) async throws {
+        if let mlxCacheLimitMB, !Self.isValidMLXCacheLimitMB(mlxCacheLimitMB) {
+            throw ModelRuntimeLoadError(
+                target: modelID ?? "<unset>", reason: "mlx_cache_limit_mb must be in 0...\(Self.maximumMLXCacheLimitMB)")
+        }
+        let hardwareServingRowCap = ProviderCapacity.boundedServingRows(ProviderCapacity.maxConcurrencyOverrideLimit)
+        self.hardwareServingRowCap = hardwareServingRowCap
+        self.mlxCacheLimitMBForLoading = Self.resolvedMLXCacheLimitMB(
+            configured: mlxCacheLimitMB,
+            physicalMemoryBytes: ProcessInfo.processInfo.physicalMemory
+        )
         let normalizedDraftModelID = Self.nonEmpty(draftModelID)
         let normalizedDraftModelLoadPath = Self.nonEmpty(draftModelLoadPath)
         self.modelID = modelID
@@ -3577,7 +3662,7 @@ maxTokens: 1,
             runtimeCacheClass: Self.pagedKVUnavailableCacheClass
         )
         self.conversationCache = ConversationCache()
-        let boundedMaxBatch = min(max(1, maxBatch), ProviderCapacity.maxConcurrencyOverrideLimit)
+        let boundedMaxBatch = min(max(1, maxBatch), hardwareServingRowCap)
         self.maxBatch = boundedMaxBatch
         self.maxBatchBeforePolicyCeiling = boundedMaxBatch
         self.inferenceGate = AsyncSemaphore(value: boundedMaxBatch)
@@ -3648,6 +3733,11 @@ maxTokens: 1,
             return
         }
 
+        // One setup boundary for serve, self-test and native benchmark callers.
+        // A nil-model or preloaded test runtime must not initialize Metal.
+        if let applied = Self.applyMLXCacheLimit(megabytes: mlxCacheLimitMBForLoading) {
+            FileHandle.standardError.write(Data("mlx_cache_limit_bytes=\(applied)\n".utf8))
+        }
         let targetLoadPath = modelLoadPath ?? modelID
         let candidateNativeMTPLoad: NativeMTPRuntimeLoadResult?
         let candidateNativeMTPDisabledReason: NativeMTPStatusReason
@@ -3944,6 +4034,7 @@ maxTokens: 1,
         testNativeMTPAdmissionRequestObserver: (@Sendable (String?, NativeMTPRuntimeAdmission, Int) -> Void)? = nil,
         warmSwapEnabled: Bool,
         swapDrainTimeoutSeconds: Int = 30,
+        testDrainTiming: DrainTiming? = nil,
         providerStatus: ProviderStatus? = nil,
         catalogModelIDAlias: String? = nil,
         targetAuthorities: [String: ModelRuntimeTargetAuthority] = [:],
@@ -4125,6 +4216,10 @@ maxTokens: 1,
         self.warmSwapEnabled = warmSwapEnabled
         self.swapDrainTimeoutSeconds = swapDrainTimeoutSeconds
         self.providerStatus = providerStatus
+        if let testDrainTiming {
+            self.drainNowMilliseconds = testDrainTiming.nowMilliseconds
+            self.drainPollSleep = testDrainTiming.pollSleep
+        }
         self.loader = loader
         self.testLoader = testLoader
         self.testCompletion = testCompletion
@@ -5333,7 +5428,8 @@ maxTokens: 1,
         let maxContextTokens = adoptionKnobs?.maxContext ?? maxContextTokens
         let kvBitsOverride = adoptionKnobs?.kvBits ?? kvBitsOverride
         let prefillStepSize = prefillStepSize
-        return Task.detached { [weak self, testLoader, drainTimeoutSeconds, providerStatus, configuredDraftModelID, configuredDraftModelLoadPath, numDraftTokens, maxContextTokens, kvBitsOverride, prefillStepSize, targetAuthority, adoptionKnobs] in
+        let mlxCacheLimitMB = mlxCacheLimitMBForLoading
+        return Task.detached { [weak self, testLoader, drainTimeoutSeconds, providerStatus, configuredDraftModelID, configuredDraftModelLoadPath, numDraftTokens, maxContextTokens, kvBitsOverride, prefillStepSize, mlxCacheLimitMB, targetAuthority, adoptionKnobs] in
             guard let self else { return }
             do {
                 let container: ModelContainer?
@@ -5378,6 +5474,10 @@ maxTokens: 1,
                 } else {
                     guard let targetAuthority else {
                         throw ModelRuntimeLoadError(target: "signed catalog identity unavailable for \(targetModelID)")
+                    }
+                    // Nil-model startup defers Metal setup until its first signed load.
+                    if let applied = Self.applyMLXCacheLimit(megabytes: mlxCacheLimitMB) {
+                        FileHandle.standardError.write(Data("mlx_cache_limit_bytes=\(applied)\n".utf8))
                     }
                     let visionModelID = self.nativeVisionSelectionModelID(for: targetModelID)
                     let loaded = try await Self.loadLocalContainer(
@@ -5837,7 +5937,7 @@ maxTokens: 1,
         servedSlotsResolver = resolver
         if let rowsBeforePolicyCeiling {
             maxBatchBeforePolicyCeiling = min(
-                max(maxBatch, rowsBeforePolicyCeiling), ProviderCapacity.maxConcurrencyOverrideLimit
+                max(maxBatch, rowsBeforePolicyCeiling), hardwareServingRowCap
             )
         }
     }
@@ -5989,17 +6089,51 @@ maxTokens: 1,
         batchedToken: Int,
         otherRowsAloneTokens: [Int]
     ) async throws -> (nearTie: Bool, margin: Float?, reason: String) {
-        try Task.checkCancellation()
-        guard let container = currentContainer else { return (false, nil, "model_unavailable") }
-        let reference = try await container.perform { context in
+        try await withExclusiveContinuousBatchingSelfCheck { runtime in
+            guard let container = runtime.currentContainer else { return (false, nil, "model_unavailable") }
+            let reference = try await container.perform { context in
+                try Task.checkCancellation()
+                return try PagedKVRuntimeParityProbe.serialReference(model: context.model, prompt: prompt + sharedPrefix)
+            }
             try Task.checkCancellation()
-            return try PagedKVRuntimeParityProbe.serialReference(model: context.model, prompt: prompt + sharedPrefix)
+            return ContinuousBatchingSelfCheck.divergenceVerdict(
+                reference: reference, aloneToken: aloneToken, batchedToken: batchedToken,
+                otherRowsAloneTokens: otherRowsAloneTokens
+            )
         }
+    }
+
+    /// The operation starts on this actor only after exclusive admission and
+    /// identity checks, so it captures no stale container while queued. Awaiting
+    /// its native body (including BlockingInferenceExecutor's continuation) keeps
+    /// the permit through cancellation until that work actually returns.
+    func withExclusiveContinuousBatchingSelfCheck<T: Sendable>(
+        _ operation: @escaping @Sendable (isolated ModelRuntime) async throws -> T
+    ) async throws -> T {
+        let gate = inferenceGate
+        let generation = selfCheckGeneration
+        return try await gate.withExclusivePermit {
+            try await self.performExclusiveContinuousBatchingSelfCheck(
+                expectedGeneration: generation, gate: gate, operation: operation
+            )
+        }
+    }
+
+    private func performExclusiveContinuousBatchingSelfCheck<T: Sendable>(
+        expectedGeneration: Int,
+        gate: AsyncSemaphore,
+        operation: @Sendable (isolated ModelRuntime) async throws -> T
+    ) async throws -> T {
         try Task.checkCancellation()
-        return ContinuousBatchingSelfCheck.divergenceVerdict(
-            reference: reference, aloneToken: aloneToken, batchedToken: batchedToken,
-            otherRowsAloneTokens: otherRowsAloneTokens
-        )
+        guard expectedGeneration == selfCheckGeneration, gate === inferenceGate, state == .ready else {
+            throw CancellationError()
+        }
+        let result = try await operation(self)
+        try Task.checkCancellation()
+        guard expectedGeneration == selfCheckGeneration, gate === inferenceGate, state == .ready else {
+            throw CancellationError()
+        }
+        return result
     }
 
     /// Runs `prompts` together on the attached scheduler at temperature 0 and
@@ -6015,10 +6149,56 @@ maxTokens: 1,
         idPrefix: String,
         cohort: Bool = false
     ) async throws -> ContinuousBatchingSelfCheckBatchRun {
+        let gate = inferenceGate
+        let generation = selfCheckGeneration
+        return try await gate.withExclusivePermit {
+            try await self.runExclusiveContinuousBatchingSelfCheckBatch(
+                prompts: prompts, maxOutputTokens: maxOutputTokens, idPrefix: idPrefix,
+                cohort: cohort, expectedGeneration: generation, gate: gate)
+        }
+    }
+
+    private func runExclusiveContinuousBatchingSelfCheckBatch(
+        prompts: [[Int]], maxOutputTokens: Int, idPrefix: String, cohort: Bool,
+        expectedGeneration: Int, gate: AsyncSemaphore
+    ) async throws -> ContinuousBatchingSelfCheckBatchRun {
         try Task.checkCancellation()
+        guard expectedGeneration == selfCheckGeneration else { throw CancellationError() }
+        guard prompts.count <= maxBatch else {
+            throw ContinuousBatchSchedulerError.requestFailed("self_check_row_cap_exceeded")
+        }
         guard let scheduler = continuousBatchScheduler else {
             throw ContinuousBatchSchedulerError.requestFailed("self_check_scheduler_unavailable")
         }
+        let ids = prompts.indices.map { "\(idPrefix)-\($0)" }
+        let result: Result<ContinuousBatchingSelfCheckBatchRun, Error>
+        do {
+            result = .success(try await performContinuousBatchingSelfCheckBatch(
+                prompts: prompts, maxOutputTokens: maxOutputTokens, idPrefix: idPrefix,
+                cohort: cohort, scheduler: scheduler))
+        } catch {
+            result = .failure(error)
+        }
+        do {
+            // A canceled submit can finish before KV retirement. Detached cleanup
+            // is shielded from caller cancellation while exclusivity is held.
+            try await Task.detached {
+                try await scheduler.cancelAndAwaitSelfCheckCleanup(requestIDs: ids)
+            }.value
+        } catch {
+            await gate.failClosed()
+            throw error
+        }
+        return try result.get()
+    }
+
+    private func performContinuousBatchingSelfCheckBatch(
+        prompts: [[Int]],
+        maxOutputTokens: Int,
+        idPrefix: String,
+        cohort: Bool, scheduler: ContinuousBatchScheduler
+    ) async throws -> ContinuousBatchingSelfCheckBatchRun {
+        try Task.checkCancellation()
         let ids = prompts.indices.map { "\(idPrefix)-\($0)" }
         let start = Date()
         let outputs = try await withTaskCancellationHandler {
@@ -6617,7 +6797,7 @@ maxTokens: 1,
         }
         // SPEC-001-R011: a swap drain does not wait out local work.
         await providerStatus.preemptAdmittedLocalWork()
-        let drainStartMs = Int64(Date().timeIntervalSince1970 * 1000)
+        let drainStartMs = drainNowMilliseconds()
         let timeoutMs = Int64(timeoutSeconds * 1000)
         while !Task.isCancelled {
             let snapshot = await providerStatus.snapshot()
@@ -6626,11 +6806,11 @@ maxTokens: 1,
             if !providerInFlight && !runtimeInFlight {
                 return false
             }
-            let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+            let nowMs = drainNowMilliseconds()
             if nowMs - drainStartMs >= timeoutMs {
                 return true
             }
-            try? await Task.sleep(nanoseconds: 50_000_000)
+            await drainPollSleep()
         }
         return false
     }
@@ -6677,19 +6857,19 @@ maxTokens: 1,
         if let adoptionKnobs {
             maxContextTokens = adoptionKnobs.maxContext
             kvBitsOverride = adoptionKnobs.kvBits
-            maxBatchBeforePolicyCeiling = adoptionKnobs.maxBatch
+            maxBatchBeforePolicyCeiling = min(max(1, adoptionKnobs.maxBatch), hardwareServingRowCap)
         }
         // The rebuilt scheduler never has more rows than the new model's
         // signed policy ceiling (SPEC-038 FR-CB11 v0.3.22).
         maxBatch = Self.rowsUnderPolicyCeiling(
-            rows: maxBatchBeforePolicyCeiling,
+            rows: min(maxBatchBeforePolicyCeiling, hardwareServingRowCap),
             ceiling: servedSlotsManaged ? continuousBatchingPolicyServedSlotCeiling(modelSHA256: modelHash) : nil
         )
         // A managed provider serves the owner pin or one slot until the new
         // model's self-check (or its stored result) decides.
         let swapServedSlots: Int? = servedSlotsManaged
             ? min(ownerPinnedServedSlots ?? 1, maxBatch)
-            : adoptionKnobs?.maxBatch
+            : adoptionKnobs.map { min(max(1, $0.maxBatch), maxBatch) }
         if let swapServedSlots {
             servedSlotLimit = swapServedSlots
             await inferenceGate.resize(to: swapServedSlots, stamp: swapGeneration)
@@ -8257,6 +8437,30 @@ maxTokens: 1,
         shouldCancel: @escaping @Sendable () -> Bool,
         drainCancelled: DrainCancelToken
     ) async throws -> CompletionResult? {
+        guard capability.isRequested, capability.unsupportedReason == nil,
+              !capability.shouldUseSerialPath, case .attached = pagedKVAttachDecision else { return nil }
+        let gate = inferenceGate
+        return try await Self.withDrainAndClientCancellation(drainCancelled, shouldCancel: shouldCancel) {
+            try await gate.withPermit {
+                try Task.checkCancellation()
+                try drainCancelled.check()
+                if shouldCancel() { throw CancellationError() }
+                return try await self.admittedContinuousBatchCompletion(request: request, snapshot: snapshot, capability: capability,
+                        nativeMTPAdmission: nativeMTPAdmission, completionStartedAt: completionStartedAt,
+                        shouldCancel: shouldCancel, drainCancelled: drainCancelled)
+            }
+        }
+    }
+
+    private func admittedContinuousBatchCompletion(
+        request: ChatCompletionRequest,
+        snapshot: RuntimeSnapshot,
+        capability: ContinuousBatchingCapability,
+        nativeMTPAdmission: NativeMTPRuntimeAdmission,
+        completionStartedAt: Date,
+        shouldCancel: @escaping @Sendable () -> Bool,
+        drainCancelled: DrainCancelToken
+    ) async throws -> CompletionResult? {
         guard capability.isRequested,
               capability.unsupportedReason == nil,
               !capability.shouldUseSerialPath,
@@ -8413,16 +8617,21 @@ maxTokens: 1,
             // Non-streaming receipts report full generation latency as TTFT
             // (SPEC-015): the buyer sees nothing before the whole body.
             result = try await Self.withDrainAndClientCancellation(drainCancelled, shouldCancel: shouldCancel) {
-                try await scheduler.submit(submission.schedulerRequest)
+                try await scheduler.submit(submission.schedulerRequest, admissionWaitPolicy: .callerBounded)
             }
         } catch {
+            let submissionError = await Self.continuousBatchFailureAfterRetirement(
+                (error as? ContinuousBatchSchedulerError)?.asAPIError() ?? error,
+                scheduler: scheduler, requestID: schedulerRequestID, gate: inferenceGate
+            )
             if let lease {
                 await conversationCache.abort(lease)
             }
+            let error = submissionError
             // SPEC-038 AC-25: one shared scheduler-error map, so the
             // non-streaming and streaming paths cannot drift.
             CBTrace.log(schedulerRequestID, "rt_cb_threw \(type(of: error))")
-            throw (error as? ContinuousBatchSchedulerError)?.asAPIError() ?? error
+            throw error
         }
         CBTrace.log(schedulerRequestID, "rt_cb_returned status=\(result.terminalStatus)")
         do {
@@ -8502,6 +8711,9 @@ maxTokens: 1,
             } else if let lease {
                 await conversationCache.abort(lease)
             }
+            try await Self.verifyContinuousBatchRequestRetirement(
+                scheduler: scheduler, requestID: schedulerRequestID, gate: inferenceGate
+            )
             nativeMTPRequestShapeCapture?.record(
                 request: request,
                 snapshot: snapshot,
@@ -8523,7 +8735,9 @@ maxTokens: 1,
             if let lease {
                 await conversationCache.abort(lease)
             }
-            throw error
+            throw await Self.continuousBatchFailureAfterRetirement(
+                error, scheduler: scheduler, requestID: schedulerRequestID, gate: inferenceGate
+            )
         }
     }
 
@@ -8758,6 +8972,35 @@ maxTokens: 1,
         idleCancellation: DrainCancelToken,
         onChunk: @escaping @Sendable (StreamChunk) -> Void
     ) async throws -> CompletionResult? {
+        guard capability.isRequested, capability.unsupportedReason == nil,
+              !capability.shouldUseSerialPath, case .attached = pagedKVAttachDecision else { return nil }
+        let gate = inferenceGate
+        return try await Self.withDrainAndClientCancellation(drainCancelled, shouldCancel: { shouldCancel() || idleCancellation.isFired }) {
+            try await gate.withPermit {
+                try Task.checkCancellation()
+                try drainCancelled.check()
+                if shouldCancel() { throw CancellationError() }
+                return try await self.admittedContinuousBatchStreamingCompletion(request: request, snapshot: snapshot, capability: capability,
+                        nativeMTPAdmission: nativeMTPAdmission, completionStartedAt: completionStartedAt,
+                        shouldCancel: shouldCancel, drainCancelled: drainCancelled, structuredAccumulator: structuredAccumulator,
+                        idleState: idleState, idleCancellation: idleCancellation, onChunk: onChunk)
+            }
+        }
+    }
+
+    private func admittedContinuousBatchStreamingCompletion(
+        request: ChatCompletionRequest,
+        snapshot: RuntimeSnapshot,
+        capability: ContinuousBatchingCapability,
+        nativeMTPAdmission: NativeMTPRuntimeAdmission,
+        completionStartedAt: Date,
+        shouldCancel: @escaping @Sendable () -> Bool,
+        drainCancelled: DrainCancelToken,
+        structuredAccumulator: StructuredStreamingContentAccumulator,
+        idleState: StructuredStreamingIdleState,
+        idleCancellation: DrainCancelToken,
+        onChunk: @escaping @Sendable (StreamChunk) -> Void
+    ) async throws -> CompletionResult? {
         guard !request.containsNonTextMessageContentPart else { return nil }
         guard capability.isRequested,
               capability.unsupportedReason == nil,
@@ -8921,7 +9164,7 @@ maxTokens: 1,
                 drainCancelled,
                 shouldCancel: { shouldCancel() || idleCancellation.isFired }
             ) {
-                try await scheduler.submit(submission.schedulerRequest, tokenSink: { event in
+                try await scheduler.submit(submission.schedulerRequest, admissionWaitPolicy: .callerBounded, tokenSink: { event in
                     guard !drainCancelled.isFired,
                           !shouldCancel(),
                           !idleCancellation.isFired
@@ -8945,12 +9188,17 @@ maxTokens: 1,
                 })
             }
         } catch {
+            let submissionError = await Self.continuousBatchFailureAfterRetirement(
+                (error as? ContinuousBatchSchedulerError)?.asAPIError() ?? error,
+                scheduler: scheduler, requestID: schedulerRequestID, gate: inferenceGate
+            )
             if let lease {
                 await conversationCache.abort(lease)
             }
+            let error = submissionError
             // SPEC-038 AC-25: one shared scheduler-error map, so the
             // streaming and non-streaming paths cannot drift.
-            throw (error as? ContinuousBatchSchedulerError)?.asAPIError() ?? error
+            throw error
         }
         do {
             if let error = streamState.error() {
@@ -9066,6 +9314,9 @@ maxTokens: 1,
             } else if let lease {
                 await conversationCache.abort(lease)
             }
+            try await Self.verifyContinuousBatchRequestRetirement(
+                scheduler: scheduler, requestID: schedulerRequestID, gate: inferenceGate
+            )
             nativeMTPRequestShapeCapture?.record(
                 request: request,
                 snapshot: snapshot,
@@ -9087,6 +9338,44 @@ maxTokens: 1,
             if let lease {
                 await conversationCache.abort(lease)
             }
+            throw await Self.continuousBatchFailureAfterRetirement(
+                error, scheduler: scheduler, requestID: schedulerRequestID, gate: inferenceGate
+            )
+        }
+    }
+
+    /// A failed submit or returned terminal result can precede retained-cache
+    /// retirement. Keep the caller's shared permit through cleanup even when
+    /// its task was canceled; surviving duplicates retain ownership of the row.
+    nonisolated static func continuousBatchFailureAfterRetirement(
+        _ failure: Error,
+        scheduler: ContinuousBatchScheduler,
+        requestID: String,
+        gate: AsyncSemaphore
+    ) async -> Error {
+        do {
+            try await verifyContinuousBatchRequestRetirement(
+                scheduler: scheduler, requestID: requestID, gate: gate
+            )
+            return failure
+        } catch {
+            return error
+        }
+    }
+
+    /// Every post-submit exit checks retirement and scheduler health after its
+    /// cache ownership work. Discard can fail without throwing to its caller.
+    nonisolated static func verifyContinuousBatchRequestRetirement(
+        scheduler: ContinuousBatchScheduler,
+        requestID: String,
+        gate: AsyncSemaphore
+    ) async throws {
+        do {
+            try await Task.detached {
+                try await scheduler.awaitRequestRetirement(requestID: requestID)
+            }.value
+        } catch {
+            await gate.failClosed()
             throw error
         }
     }
@@ -11169,22 +11458,22 @@ maxTokens: 1,
     func continuousBatchingSelfCheckSerialTPS(
         prompts: [[Int]], maxTokens: Int
     ) async throws -> ContinuousBatchingSelfCheckSerialRate {
-        guard let container = currentContainer else {
-            throw ContinuousBatchSchedulerError.requestFailed("self_check_model_unavailable")
-        }
-        let maxContextTokens = maxContextTokens
-        let kvBitsOverride = kvBitsOverride
-        let prefillStepSize = prefillStepSize
-        let blockingInferenceExecutor = blockingInferenceExecutor
-        var tokens = 0
-        var seconds = 0.0
-        var decodeTokens = 0
-        var decodeSeconds = 0.0
-        for prompt in prompts {
-            try Task.checkCancellation()
-            let start = Date()
-            let result: BlockingGenerateResult = try await inferenceGate.withPermit {
-                try await container.perform { context in
+        try await withExclusiveContinuousBatchingSelfCheck { runtime in
+            guard let container = runtime.currentContainer else {
+                throw ContinuousBatchSchedulerError.requestFailed("self_check_model_unavailable")
+            }
+            let maxContextTokens = runtime.maxContextTokens
+            let kvBitsOverride = runtime.kvBitsOverride
+            let prefillStepSize = runtime.prefillStepSize
+            let blockingInferenceExecutor = runtime.blockingInferenceExecutor
+            var tokens = 0
+            var seconds = 0.0
+            var decodeTokens = 0
+            var decodeSeconds = 0.0
+            for prompt in prompts {
+                try Task.checkCancellation()
+                let start = Date()
+                let result: BlockingGenerateResult = try await container.perform { context in
                     let lmInput = LMInput(text: LMInput.Text(tokens: MLXArray(prompt.map(Int32.init))))
                     let parameters = try Self.makeServeGenerateParameters(
                         model: context.model,
@@ -11204,19 +11493,19 @@ maxTokens: 1,
                         })
                     }
                 }
+                try Task.checkCancellation()
+                seconds += Date().timeIntervalSince(start)
+                tokens += result.generationTokenCount
+                if result.generationTokenCount > 1, result.generateTime > 0 {
+                    decodeTokens += result.generationTokenCount - 1
+                    decodeSeconds += result.generateTime
+                }
             }
-            try Task.checkCancellation()
-            seconds += Date().timeIntervalSince(start)
-            tokens += result.generationTokenCount
-            if result.generationTokenCount > 1, result.generateTime > 0 {
-                decodeTokens += result.generationTokenCount - 1
-                decodeSeconds += result.generateTime
-            }
+            return ContinuousBatchingSelfCheckSerialRate(
+                decodeTPS: decodeSeconds > 0 ? Double(decodeTokens) / decodeSeconds : 0,
+                endToEndTPS: seconds > 0 ? Double(tokens) / seconds : 0
+            )
         }
-        return ContinuousBatchingSelfCheckSerialRate(
-            decodeTPS: decodeSeconds > 0 ? Double(decodeTokens) / decodeSeconds : 0,
-            endToEndTPS: seconds > 0 ? Double(tokens) / seconds : 0
-        )
     }
 
     func measureStartupThroughput(maxTokens: Int = ModelRuntime.startupThroughputProbeMaxTokens) async -> Double {
@@ -11503,10 +11792,26 @@ maxTokens: maxTokens,
             let after = try NativeVisionProfile.load(
                 modelID: NativeVisionProfile.modelID, directory: directory, artifactSHA256: before?.artifactSHA256)
             guard before == after else { throw NativeVisionProfile.identityError() }
+        } else if usesPrismVLMContainer(
+            configJSONData: try Data(contentsOf: directory.appendingPathComponent("config.json"))
+        ) {
+            // Prism keeps the vendor vision tower and packed Hadamard projections.
+            // Selecting its loader does not advertise a qualified vision profile.
+            container = try await VLMModelFactory.shared.loadContainer(from: directory, using: tokenizerLoader)
+            // Deferred vision weights belong to the factory's private snapshot.
+            // Admission must hash the same bytes that the container will read.
+            return (container, try await container.modelDirectory)
         } else {
             container = try await LLMModelFactory.shared.loadContainer(from: directory, using: tokenizerLoader)
         }
         return (container, directory)
+    }
+
+    nonisolated static func usesPrismVLMContainer(configJSONData: Data) -> Bool {
+        guard let config = try? JSONSerialization.jsonObject(with: configJSONData) as? [String: Any] else {
+            return false
+        }
+        return config["model_type"] as? String == "prism_hadamard_qwen35"
     }
 
     struct NativeMTPRunningBuildIdentity: Equatable, Sendable {
@@ -14091,14 +14396,27 @@ maxTokens: maxTokens,
 
     static func templateAdditionalContext(
         supportsThinkingToggle: Bool,
-        supportsPreserveThinking: Bool = false
+        supportsPreserveThinking: Bool = false,
+        enableThinking: Bool = false
     ) -> [String: any Sendable]? {
         guard supportsThinkingToggle else { return nil }
-        var context: [String: any Sendable] = ["enable_thinking": false]
+        var context: [String: any Sendable] = ["enable_thinking": enableThinking]
         if supportsPreserveThinking {
             context["preserve_thinking"] = true
         }
         return context
+    }
+
+    /// SPEC-018-R010: only a model-owned Prism capability permits this opt-in.
+    /// Buyer aliases and a template's variable alone do not establish it.
+    static func bonsaiThinkingEnabled(
+        for request: ChatCompletionRequest, supportsBonsaiThinking: Bool
+    ) -> Bool {
+        guard supportsBonsaiThinking,
+              !request.containsNonTextMessageContentPart,
+              case .text = request.responseFormat else { return false }
+        if case .array(let tools)? = request.promptSource.tools, !tools.isEmpty { return false }
+        return ["high", "xhigh", "max"].contains(request.reasoningEffort ?? "")
     }
 
     /// Validate media before processor work, test generation seams or dispatch.
@@ -14146,7 +14464,8 @@ maxTokens: maxTokens,
         templateSupportsThinkingToggle: Bool = false,
         templateSupportsPreserveThinking: Bool = false,
         nativeVisionProfile: NativeVisionProfile? = nil,
-        toolSelectionModelID: String? = nil
+        toolSelectionModelID: String? = nil,
+        supportsBonsaiThinking: Bool = false
     ) throws -> UserInput {
         if let input = try validateNativeVisionRequest(request, profile: nativeVisionProfile) {
             return try NativeVisionProfile.userInput(from: input)
@@ -14190,7 +14509,9 @@ maxTokens: maxTokens,
         }
         var additionalContext = Self.templateAdditionalContext(
             supportsThinkingToggle: templateSupportsThinkingToggle,
-            supportsPreserveThinking: templateSupportsPreserveThinking
+            supportsPreserveThinking: templateSupportsPreserveThinking,
+            enableThinking: Self.bonsaiThinkingEnabled(
+                for: request, supportsBonsaiThinking: supportsBonsaiThinking)
         )
         // SPEC-018 §3.12: normalize against the loaded family, including
         // when the buyer uses an alias. Templates without the variable ignore it.
@@ -14281,7 +14602,8 @@ maxTokens: maxTokens,
             templateSupportsThinkingToggle: templateSupportsThinkingToggle,
             templateSupportsPreserveThinking: templateSupportsPreserveThinking,
             nativeVisionProfile: nativeVisionProfile,
-            toolSelectionModelID: toolSelectionModelID
+            toolSelectionModelID: toolSelectionModelID,
+            supportsBonsaiThinking: context.model is PrismHadamardQwen35
         )
         let lmInput: LMInput
         do {
@@ -14353,7 +14675,8 @@ maxTokens: maxTokens,
         templateSupportsThinkingToggle: Bool,
         templateSupportsPreserveThinking: Bool,
         toolSelectionModelID: String?,
-        templateToolFormat: String? = nil
+        templateToolFormat: String? = nil,
+        supportsBonsaiThinking: Bool = false
     ) async throws -> (tokens: [Int], toolCallPrefill: String?) {
         let plan = GrammarConstraintState.isRequired(request) ? nil : try toolCallPrefill(for: request, toolSelectionModelID: toolSelectionModelID)
         let grammar = try resolvedToolGrammar(for: request, templateToolFormat: templateToolFormat)
@@ -14361,7 +14684,8 @@ maxTokens: maxTokens,
             for: request,
             templateSupportsThinkingToggle: templateSupportsThinkingToggle,
             templateSupportsPreserveThinking: templateSupportsPreserveThinking,
-            toolSelectionModelID: toolSelectionModelID
+            toolSelectionModelID: toolSelectionModelID,
+            supportsBonsaiThinking: supportsBonsaiThinking
         )
         let lmInput: LMInput
         do {

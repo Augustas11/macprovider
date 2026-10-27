@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.61
+**Version:** 0.1.62
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.61",
+  "version": "0.1.62",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -504,12 +504,14 @@ The authorized dependency tuple is exact:
 
 | Repository | Fork tag | Revision | Upstream base |
 |---|---|---|---|
-| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.10.13` | `b128c37f26d2cbd58700c0ebf3a761f1df7b5415` | fork `3.32.3-macprovider.10.1` (`87dc5159c87d73f4d7abd524fbdd17760cf56285`) on fork `3.32.3-macprovider.10` (`b4077dcb28336b388f3d09be2a091c12f8e179aa`) on `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
+| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.10.15` | `3905a1b0499f0f38c0f94a008034a0362b9e3dca` | fork `3.32.3-macprovider.10.1` (`87dc5159c87d73f4d7abd524fbdd17760cf56285`) on fork `3.32.3-macprovider.10` (`b4077dcb28336b388f3d09be2a091c12f8e179aa`) on `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
 | `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.9` | `29d3b93375cc56cd2649b40e4310a8bc445e9874` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
 | `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.4` | `2f512e3997349c8648f5d7c5113eb2c825aa242d` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
 
-The mlx-swift-lm row is the immutable fork candidate tag `3.32.3-macprovider.10.13`
-(commit `b128c37f…`, branch `campaign/2144-native-mtp`), on
+The mlx-swift-lm row is the immutable combined fork tag `3.32.3-macprovider.10.15`
+(commit `3905a1b0499f0f38c0f94a008034a0362b9e3dca`, branch `campaign/2144-native-mtp`). It preserves
+both the GLM candidate `3.32.3-macprovider.10.13` (`b128c37f…`) and the Prism
+loader `3.32.3-macprovider.10.14` (`9b2766ee…`), each based on
 `3.32.3-macprovider.10.5` (`c8be0f61…`). Following oMLX packed same-depth
 verification, it shares GLM indexer projections only through the existing
 vector-stable kernel when that kernel covers the shape. Normalization, attention,
@@ -525,8 +527,18 @@ and seed-only proposal path. Neither tested multi-row design meets the goal
 throughput floor, so the native active-row bound remains one. Tag `.10.13`
 retains copied-chain regressions for accepted-prefix lengths zero, one and two;
 those tests do not grant deeper serving admission.
-This candidate needs fresh GLM token/state parity and R015 qualification before
-admission; its tag is not qualification evidence. Tag
+The `.10.13` GLM candidate's changed verifier requires fresh GLM token/state
+parity and R015 qualification before admission; a fork tag is not qualification
+evidence. MTP-13 governs any source-equivalence identity-only rebind from the
+measured candidate to the combined tag.
+The Prism additions are the schema-2 signed-Hadamard VLM loader, owned
+full-artifact snapshots, lazy vision loading and row-safe attention masks.
+The `.10.14` source tree is identical to the parity-qualified `bd5f45f1…`
+baseline. Custom Hadamard and convolution experiments without established
+end-to-end throughput gains are excluded. These additions do not admit a catalog
+model, change a signed batching/MTP policy, or claim 8 GB or vendor quality
+qualification.
+
 `3.32.3-macprovider.10.5` consists of `3.32.3-macprovider.10.4` (`676a62a4…`) plus batched DeepSeek-V4 attention,
 compressor/indexer projections and per-row rotary offsets, keys-only windows
 and geometric pool storage (0.1.55, Related: #2111). The prior tag adds
@@ -2068,7 +2080,7 @@ the journey must include its independent and combined evidence.
 | `native-mtp-serving` | `DECISION_REQUIRED` | `@Augustas11` | `#1770` | Authority acceptance, release-candidate review, and signed real-hardware journey evidence for the first production tuple. |
 | First Qwen-family MTP artifact | `UNKNOWN` | `@Augustas11` | `#1770` | Legally/provenance-clean immutable model, tokenizer, MTP manifest, and exact hashes. |
 | MLX dependency tuple | `RESOLVED_FOR_TUPLE` | `@Augustas11` | `#1906` | The operator's permanent fork model (MTP-3) replaces the upstream-release requirement. MTP-3 names the exact three-fork tuple; each rebase passes the runbook's per-rebase acceptance gate and a SPEC revision. |
-| GLM-5.3-Flash `glm5_next_mtp_v1` tuple | `DECISION_REQUIRED` | `@Augustas11` | `#2029` | Pending: the `JOURNEY-NATIVE-MTP-SERVING` run on the final tagged tuple (mlx-swift-lm `3.32.3-macprovider.10.13`) and the GLM R015 record, which complete the R003 review record. Implemented in the campaign branch: the observer, sidecar parsing, v2 projection reader, SPEC-023 v0.22.27 widths, the fork's MTP-1 drafter and packed verification, and the provider drafter load path, admission gate and paged packed verification. |
+| GLM-5.3-Flash `glm5_next_mtp_v1` tuple | `DECISION_REQUIRED` | `@Augustas11` | `#2029` | Pending: the `JOURNEY-NATIVE-MTP-SERVING` run on the final tagged tuple (mlx-swift-lm `3.32.3-macprovider.10.15`) and the GLM R015 record, which complete the R003 review record. Implemented in the campaign branch: the observer, sidecar parsing, v2 projection reader, SPEC-023 v0.22.27 widths, the fork's MTP-1 drafter and packed verification, and the provider drafter load path, admission gate and paged packed verification. |
 | First MLX-native MXFP8 artifact | `UNKNOWN` | `@Augustas11` | `#1770` | SPEC-023/SPEC-010 format, fit, quality, license, provenance, and hardware evidence. |
 | Batched-verify numerical parity | `RESOLVED_FOR_TUPLE` | `@Augustas11` | `#1770` | The qmv-to-qmm switch at 12 packed verify tokens cannot occur for the first tuple: `max_native_active_rows` is 1 and depth is 1, so a packed verify is at most 2 tokens, and rows above the bound ride the ordinary forward at depth zero. A tuple whose bound times `proposal_depth + 1` reaches 12 must decide between a bounded drift allowance and kernel-matched verification before it can be signed. |
 | Depth-1 throughput value | `RESOLVED_FOR_TUPLE` | `@Augustas11` | `#1770` | The 2026-10-06 quiet R015 (policy `e24cb7bc…`, amended 0.1.25 gates) passed every cell for the A3B Studio tuple: one-slot decode ratio 1.19-1.28 with corrected lower bounds +18% to +26%, gated s2/s8 cells non-inferior. The value is one-slot only; the R007 bound of 1 keeps native off above it. |
@@ -2108,6 +2120,12 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.62 (2026-10-27)** — R003 names the combined fork tag
+  `3.32.3-macprovider.10.15` (`3905a1b0499f0f38c0f94a008034a0362b9e3dca`), preserving the GLM packed
+  projection and depth-one MTP work from `.10.13` together with the Prism loader
+  from `.10.14`. Prior qualification records retain their measured source and
+  identity; MTP-13 governs any source-equivalence identity-only rebind.
+
 - **0.1.61 (2026-10-27)** — Corrects the campaign qualification bootstrap:
   digest-matched LAB R005/formal R015/sustained evidence records the actual
   executable and measured source. The signed CLI cut uses MTP-13 identity-only
@@ -2144,7 +2162,12 @@ requests.
   the signed sampled profile is selected. R015 adds mode-independent privacy-safe
   v2 observations, distinct projected/measured eligibility, and identical frozen
   modeled arrivals across full ordinary/mixed CB loads; v1 remains compatible.
-
+  R003 also names `3.32.3-macprovider.10.14`
+  (`9b2766ee…`) for the native Prism schema-2 loader, owned snapshots, lazy
+  vision and row-safe attention masks. The tree equals the tested `bd5f45f1…`
+  baseline; unproven custom-kernel experiments are excluded. The mlx-swift and
+  MLX core pins stay unchanged. Catalog admission, 8 GB fit, vendor quality,
+  signed serving policy and journey qualification remain separate gates.
 - **0.1.57 (2026-10-25)** — R009 (MTP-9): a native-MTP GLM-5-Next row reuses
   a SPEC-024-R005 prompt snapshot together with the MTP head state taken at
   it, on its own CB row, and stays native; any other snapshot is a miss for

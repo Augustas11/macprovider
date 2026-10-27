@@ -1978,6 +1978,13 @@ final class ContinuousBatchTokenDelivery: @unchecked Sendable {
     }
 }
 
+/// The first owner of a request ID chooses its admission deadline. Duplicate
+/// waiters attach to that owner without changing its policy.
+enum ContinuousBatchAdmissionWaitPolicy: Sendable {
+    case configuredTimeout
+    case callerBounded
+}
+
 enum ContinuousBatchSchedulerError: Error, Equatable {
     case unsupported(String)
     /// Pre-admission queue pressure: the request was refused before any
@@ -2367,6 +2374,9 @@ actor ContinuousBatchScheduler {
     private var activeDecode: [String: Row] = [:]
     private var requestWaiters: [String: [Waiter]] = [:]
     private var knownRequests: [String: RequestFingerprint] = [:]
+    // Row dictionaries may lose an entry before its awaited native release.
+    // Counts also cover rejected retained-cache cleanup and same-ID retries.
+    private var requestRetirementCounts: [String: Int] = [:]
     private var terminalResults: [String: ContinuousBatchSchedulerResult] = [:]
     private var disabledNativeMTPTupleFences: Set<NativeMTPTupleFence> = []
     private var nativeMTPRowsWithStagedMutation: Set<String> = []
@@ -2462,6 +2472,7 @@ actor ContinuousBatchScheduler {
 
     func submit(
         _ request: ContinuousBatchSchedulerRequest,
+        admissionWaitPolicy: ContinuousBatchAdmissionWaitPolicy = .configuredTimeout,
         tokenSink: @escaping ContinuousBatchSchedulerTokenSink = { _ in }
     ) async throws -> ContinuousBatchSchedulerResult {
         do {
@@ -2589,6 +2600,7 @@ actor ContinuousBatchScheduler {
                 enqueue(
                     request,
                     admissionSequence: admissionSequence,
+                    admissionWaitPolicy: admissionWaitPolicy,
                     waiterID: waiterID,
                     continuation: continuation,
                     delivery: delivery
@@ -2693,7 +2705,7 @@ actor ContinuousBatchScheduler {
         while pendingBindingChecks > 0 || !waiting.isEmpty || !admittingRequests.isEmpty
             || !activePrompt.isEmpty || !activeDecode.isEmpty || !pendingTerminalDeliveries.isEmpty
             || !stoppingActiveWaiters.isEmpty || !deferredTerminalCompletions.isEmpty
-            || pumpRunning || backendCancellationPending {
+            || !requestRetirementCounts.isEmpty || pumpRunning || backendCancellationPending {
             let now = DispatchTime.now().uptimeNanoseconds
             if now >= deadline {
                 if forcedCancellation {
@@ -2746,8 +2758,59 @@ actor ContinuousBatchScheduler {
             && pendingTerminalDeliveries.isEmpty
             && stoppingActiveWaiters.isEmpty
             && deferredTerminalCompletions.isEmpty
+            && requestRetirementCounts.isEmpty
             && !pumpRunning
             && !backendCancellationPending
+    }
+
+    /// Called from an uncancelled task before an errored buyer releases its
+    /// inference permit. A surviving duplicate owns cancellation; this barrier
+    /// neither cancels its row nor waits for unrelated scheduler work.
+    func awaitRequestRetirement(requestID: String) async throws {
+        while true {
+            guard !cleanupFailedClosed else {
+                throw ContinuousBatchSchedulerError.unsupported(
+                    "continuous_batching_scheduler_failed_closed"
+                )
+            }
+            guard requestRetirementCounts[requestID] != nil else { return }
+            ensurePump()
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+    }
+
+    private func beginRequestRetirement(_ requestID: String) {
+        requestRetirementCounts[requestID, default: 0] += 1
+    }
+
+    private func endRequestRetirement(_ requestID: String) {
+        if let count = requestRetirementCounts[requestID], count > 1 {
+            requestRetirementCounts[requestID] = count - 1
+        } else {
+            requestRetirementCounts.removeValue(forKey: requestID)
+        }
+    }
+
+    /// The caller holds exclusive inference access and invokes this from an
+    /// uncancelled task: finishing a canceled submit is not native retirement.
+    /// Unlike drain(), this barrier leaves the scheduler available afterward.
+    func cancelAndAwaitSelfCheckCleanup(requestIDs: [String]) async throws {
+        for requestID in requestIDs {
+            cancel(requestID: requestID)
+        }
+        if !isQuiescentForNativeMTPProbe() && !cleanupFailedClosed {
+            startBackendCancellation()
+            ensurePump()
+        }
+        while true {
+            guard !cleanupFailedClosed else {
+                throw ContinuousBatchSchedulerError.unsupported(
+                    "continuous_batching_scheduler_failed_closed"
+                )
+            }
+            if isQuiescentForNativeMTPProbe() { return }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
     }
 
     func isQuiescentForNativeMTPProbe() -> Bool {
@@ -2761,6 +2824,7 @@ actor ContinuousBatchScheduler {
             && pendingTerminalDeliveries.isEmpty
             && stoppingActiveWaiters.isEmpty
             && deferredTerminalCompletions.isEmpty
+            && requestRetirementCounts.isEmpty
             && !pumpRunning
             && !backendCancellationPending
     }
@@ -2815,6 +2879,7 @@ actor ContinuousBatchScheduler {
     private func enqueue(
         _ request: ContinuousBatchSchedulerRequest,
         admissionSequence: UInt64,
+        admissionWaitPolicy: ContinuousBatchAdmissionWaitPolicy,
         waiterID: UUID,
         continuation: CheckedContinuation<ContinuousBatchSchedulerResult, Error>,
         delivery: ContinuousBatchTokenDelivery
@@ -2993,6 +3058,7 @@ actor ContinuousBatchScheduler {
             return
         }
         }
+        beginRequestRetirement(request.id)
         knownRequests[request.id] = requestFingerprint
         requestAdmissionSequences[request.id] = admissionSequence
         requestWaiters[request.id, default: []].append(Waiter(
@@ -3001,7 +3067,9 @@ actor ContinuousBatchScheduler {
             delivery: delivery
         ))
         waiting.append(request)
-        beginQueueWait(requestID: request.id)
+        if case .configuredTimeout = admissionWaitPolicy {
+            beginQueueWait(requestID: request.id)
+        }
         ensurePump()
     }
 
@@ -3090,6 +3158,7 @@ actor ContinuousBatchScheduler {
         cancelledIDs.remove(requestID)
         let waiters = requestWaiters.removeValue(forKey: requestID) ?? []
         await discardUnacceptedRetainedCache(for: request)
+        endRequestRetirement(requestID)
         for waiter in waiters {
             waiter.delivery.finish()
             waiter.continuation.resume(throwing: ContinuousBatchSchedulerError.queueWaitTimedOut)
@@ -3102,6 +3171,8 @@ actor ContinuousBatchScheduler {
         CBTrace.log(requestID, "sch_cancel_waiter")
         guard stoppingWaiterIDs.insert(waiterID).inserted else { return }
         if let delivered = deliveredRetainedOwners.removeValue(forKey: waiterID) {
+            beginRequestRetirement(requestID)
+            defer { endRequestRetirement(requestID) }
             stoppingWaiterIDs.remove(waiterID)
             await discardRetainedCache(delivered.retained, conversationKey: delivered.conversationKey)
             return
@@ -3135,6 +3206,8 @@ actor ContinuousBatchScheduler {
 
     private func finishStoppedWaiter(requestID: String, waiterID: UUID) async {
         guard stoppingWaiterIDs.remove(waiterID) != nil else { return }
+        beginRequestRetirement(requestID)
+        defer { endRequestRetirement(requestID) }
         if var pending = pendingTerminalDeliveries[requestID],
            pending.remainingWaiterIDs.contains(waiterID),
            let index = pending.waiters.firstIndex(where: { $0.id == waiterID }) {
@@ -3659,14 +3732,20 @@ actor ContinuousBatchScheduler {
               Self.nativeMTPSystemMemoryHeadroomAdmits(reservedAfter: nextReserved, sample: sample) else {
             // SPEC-048 R012: say which bound refused, with every number.
             let floor = sample.map { max(1, $0.physicalBytes / 10) }
-            try? FileHandle.standardError.write(contentsOf: Data(
-                ("event=native_mtp_round_reservation_refused requested_bytes=\(bytes) reserved_before_bytes=\(nativeMTPReservedRoundBytes) "
-                    + "outstanding_reservations=\(nativeMTPRoundByteReservations.count) capacity_bytes=\(configuration.nativeMTPRoundByteCapacity) "
-                    + "available_bytes=\(sample.map { String($0.availableBytes) } ?? "unavailable") "
-                    + "physical_bytes=\(sample.map { String($0.physicalBytes) } ?? "unavailable") "
-                    + "floor_bytes=\(floor.map(String.init) ?? "unavailable") "
-                    + "reason=\(overflow ? "overflow" : nextReserved > configuration.nativeMTPRoundByteCapacity ? "capacity" : "system_headroom")\n").utf8
-            ))
+            let availableBytes: String = sample.map { String($0.availableBytes) } ?? "unavailable"
+            let physicalBytes: String = sample.map { String($0.physicalBytes) } ?? "unavailable"
+            let floorBytes: String = floor.map { String($0) } ?? "unavailable"
+            let reason: String = overflow ? "overflow"
+                : nextReserved > configuration.nativeMTPRoundByteCapacity ? "capacity" : "system_headroom"
+            let message: String = [
+                "event=native_mtp_round_reservation_refused requested_bytes=\(bytes) reserved_before_bytes=\(nativeMTPReservedRoundBytes) ",
+                "outstanding_reservations=\(nativeMTPRoundByteReservations.count) capacity_bytes=\(configuration.nativeMTPRoundByteCapacity) ",
+                "available_bytes=\(availableBytes) ",
+                "physical_bytes=\(physicalBytes) ",
+                "floor_bytes=\(floorBytes) ",
+                "reason=\(reason)\n",
+            ].joined()
+            try? FileHandle.standardError.write(contentsOf: Data(message.utf8))
             throw ContinuousBatchSchedulerError.requestFailed("continuous_batching_native_mtp_round_memory_exhausted")
         }
         let id = UUID()
@@ -6140,7 +6219,11 @@ actor ContinuousBatchScheduler {
 
     private func scheduleDiscardUnacceptedRetainedCache(for request: ContinuousBatchSchedulerRequest) {
         guard let retained = request.retainedPagedKVSequence else { return }
-        Task { await self.discardRetainedCache(retained) }
+        beginRequestRetirement(request.id)
+        Task {
+            await self.discardRetainedCache(retained)
+            self.endRequestRetirement(request.id)
+        }
     }
 
     private func finish(
@@ -6256,6 +6339,7 @@ actor ContinuousBatchScheduler {
         waiters: [Waiter]
     ) {
         guard !waiters.isEmpty else {
+            if result.retainedCache != nil { beginRequestRetirement(requestID) }
             finalizeTerminalResult(requestID: requestID, result: result, waiters: [])
             if let retainedCache = result.retainedCache {
                 Task {
@@ -6263,6 +6347,7 @@ actor ContinuousBatchScheduler {
                         retainedCache.retainedSequence,
                         conversationKey: result.conversationKey
                     )
+                    self.endRequestRetirement(requestID)
                 }
             }
             return
@@ -6306,6 +6391,8 @@ actor ContinuousBatchScheduler {
     }
 
     private func finalizePendingTerminal(requestID: String, pending: PendingTerminalDelivery) async {
+        beginRequestRetirement(requestID)
+        defer { endRequestRetirement(requestID) }
         let result: ContinuousBatchSchedulerResult
         if pending.deliveryOutcomes.values.contains(true) {
             result = pending.result
@@ -6348,6 +6435,7 @@ actor ContinuousBatchScheduler {
         deliveryOutcomes: [UUID: Bool]? = nil
     ) {
         backend.finish(requestID: requestID)
+        endRequestRetirement(requestID)
         terminalResultOrder.append(requestID)
         terminalResults[requestID] = result.withSettlementDisposition(
             result.settlementDisposition == .eligibleOwner ? .nonSettlingReplay : .notEligible

@@ -1,11 +1,21 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.31
+Version: v0.3.33
 Status: draft (normative contract; runtime enablement is default-on per Mac behind the FR-CB10 on-device self-check, v0.3.15)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.3.33 (2026-10-27, bounded 8 GiB serving and probe residency, Related: #2154):**
+FR-CB11 bounds every serving row allocation and grant to three rows on Macs
+with positive physical RAM at most 8 GiB, retaining tighter limits. FR-CB1
+uses caller-bounded production admission without the diagnostic scheduler's
+30-second queue deadline. FR-CB10 holds exclusive residency until cancelled
+probe work and its native retirement finish; cleanup failure keeps admission
+closed for that runtime. AC-25 distinguishes caller cancellation from an
+explicit diagnostic queue timeout. The v0.3.32 allocator-cache default in
+FR-CB2 remains unchanged.
+
 **Change log v0.3.31 (2026-10-25, GLM-5-Next cached turns on CB rows, Related: #2143):**
 FR-CB4 admits a second usable handoff: a GLM-5-Next prompt snapshot
 (SPEC-024-R005). Under the unchanged AC-26 grant a positive-cached GLM turn
@@ -708,6 +718,18 @@ bounded configured value (benchmark default `2 x slots_total`, not a permanent
 policy). Relay and local HTTP admission MUST share one admission policy and
 one capacity accounting; they MUST NOT maintain independent unbounded queues.
 
+Production relay and direct HTTP requests MUST acquire the same bounded
+runtime admission guard before CB prompt preparation, keeping active
+preparation and inference within the served row count. Waiting production
+requests use caller-bounded admission: they wait for capacity until admitted
+or cancelled by the caller/outer request lifecycle, subject to the queue's
+count and retained-payload bounds. They MUST NOT fail merely because the
+scheduler's diagnostic queue deadline elapsed, and MUST NOT retry rejected
+CB work through serial inference. The configured scheduler queue-wait timeout
+(default 30 seconds) remains available to diagnostics and explicitly timed
+scheduler callers; caller-bounded admission changes no wire field or receipt
+semantics.
+
 Admission MUST be gated by **paged-block-pool availability, not slot count
 alone.** A request MUST NOT be admitted to prefill/decode unless the SPEC-039
 engine can reserve the blocks the row's **initial footprint — prompt plus a
@@ -723,6 +745,17 @@ is an upper bound on rows, and pool availability is the admission-time gate
 underneath it (FR-CB17).
 
 ### FR-CB2 - decode-first separate phases with bounded batched prefill (SPEC-038-R002)
+
+Native runtime startup on Macs with at most 8 GiB physical RAM MUST default
+MLX's freed-buffer allocator cache to physical RAM divided by 32 (256 MiB on
+an 8 GiB Mac), before loading the model. Explicit `mlx_cache_limit_mb` values,
+including zero, override this default and MUST pass the existing range check.
+Larger-memory devices retain their existing default. This is a buffer-reuse
+budget, not an active weights/KV limit, a row-cap grant or permission to bypass
+the memory floor. It MUST NOT turn continuous batching off or raise signed
+admission ceilings. Native serve, self-test and benchmark loading MUST use
+the same selection; preloaded/test runtimes MUST NOT reset process allocator
+state.
 
 The scheduler MUST keep prompt processing (prefill) and decode as separate
 phases; it MUST NOT combine arbitrary prefill and one-token decode work into
@@ -1473,8 +1506,9 @@ buyer traffic. No extra runtime enable flag is introduced.
    removes the grant. While a new
    runtime identity is checked, a Mac with an older grant for the same model
    and hardware keeps serving it (`prior_grant_pending_recheck`).
-3. The check MUST NOT block serving. It runs only while no request is in
-   flight after an idle interval and abandons a step when a request arrives;
+3. The check MUST yield to serving under the retirement rules below. It runs
+   only while no request is in flight after an idle interval and abandons a
+   step when a request arrives;
    completed steps persist, so a busy Mac resumes where it stopped, and
    consecutive deferrals back off (doubling, at most 15 minutes).
    (v0.3.23) **Admission hold.** A check on a key with no stored decision
@@ -1500,9 +1534,18 @@ buyer traffic. No extra runtime enable flag is introduced.
    consecutive check-bound yield up to 20 minutes. Completed exactness probes
    and completed serial/batch throughput pairs persist, so an unfinished width resumes
    without repeating completed work. Cancelled or incomplete inference results
-   MUST NOT become measurements or grant decisions. At the bound admission re-opens
-   even if the check has not returned (it is cancelled, yields to the first
-   buyer request, and the ladder resumes at the next idle window or hold).
+   MUST NOT become measurements or grant decisions. At the bound the check
+   is cancelled and yields to the first buyer request; the ladder resumes at
+   the next idle window or hold. Cancellation or a logical task return alone
+   MUST NOT reopen residency admission: exclusive probe ownership covers both
+   serial and CB probe work until all native work has retired and temporary
+   row/KV state has been released. Buyers, including their prompt preparation,
+   MUST NOT overlap that residency. Cleanup MUST complete independently of the
+   cancelled caller before the exclusive guard is released. If retirement or
+   cleanup cannot be proved complete, the runtime MUST permanently keep
+   admission closed rather than release the guard or resume serving on that
+   resident model. This retirement rule applies to idle probes as well as
+   admission-hold probes.
    Holds are at least 2 minutes apart, counted from the end of the previous
    one. The prior grant keeps serving until the check decides. A hold MUST
    NOT start under an operator pause, while the provider is draining,
@@ -1641,11 +1684,12 @@ from 2 runs an exactness probe through the production scheduler:
 
 ### FR-CB11 - Entry 110 capacity mapping (SPEC-038-R011)
 
-The scheduler's maximum active decode rows MUST equal the persisted Entry 110
+The scheduler's maximum active decode rows MUST equal the effective Entry 110
+concurrency after the bounds below apply to the persisted
 `max_concurrency_override` for the detected hardware class; it MUST NOT
 synthesize new tiers or advertise capacity above it. The three quantities -
 advertised slots, active batch rows, and waiting-queue depth - MUST remain
-distinct: `slots_total` equals the validated persisted Entry 110 concurrency,
+distinct: `slots_total` equals the validated, bounded Entry 110 concurrency,
 active accepted/runnable work MUST be `<= slots_total`, and queued work MUST
 NOT inflate `slots_total`. `slots_free` MUST be derived from validated active
 capacity minus active accepted/runnable work. Internal prompt-batch,
@@ -1657,8 +1701,9 @@ NOT change `slots_total`.
 
 1. An owner-pinned `max_concurrency_override` (config with
    `max_concurrency_source: owner`, `MACPROVIDER_MAX_CONCURRENCY_OVERRIDE`, or
-   `--max-batch`) MUST be served as written, except that it is never served
-   above the self-check's `verified_k` (FR-CB10 item 4); the FR-CB10
+   `--max-batch`) retains its configured intent, but MUST NOT be served above
+   the physical-memory bound in item 6, the signed ceiling in item 5, or the
+   self-check's `verified_k` (FR-CB10 item 4); the FR-CB10
    self-check otherwise only turns batching on or off. A config value without `max_concurrency_source`,
    or with `autotune`, is autotune-derived.
 2. Otherwise, with a draft model configured or the emergency off set, the
@@ -1674,12 +1719,13 @@ NOT change `slots_total`.
    the scheduler is not rebuilt, and the relay admits at most `slots_total`
    requests; the scheduler admits at most `slots_total` buyer rows (relay
    or direct HTTP) through its own bounded queue, retained-token budget,
-   wait timeout and cancellation, so batched buyer rows never exceed the
-   verified count. Self-check rows may use every scheduler row, and a buyer
+   caller-bounded wait and cancellation (FR-CB1), so batched buyer rows never
+   exceed the verified count. Self-check rows may use every scheduler row, and a buyer
    row is not admitted beside self-check rows (the self-check yields to the
-   buyer). Serial-routed buyer requests (features the batch cannot
-   represent) keep their own gate, also sized to `slots_total`, as before
-   v0.3.15. Both limits change in place, and each step of a live change
+   buyer after native retirement). Serial-routed buyer requests (features
+   the batch cannot represent) use the same runtime admission guard as CB
+   preparation and inference, sized to `slots_total`. Serving limits change
+   in place, and each step of a live change
    re-checks the swap generation so a stale result never resizes a gate or
    caps a swapped-in scheduler. An owner-pinned provider with a signed
    positive entry also keeps its pin while its self-check runs; an
@@ -1704,9 +1750,23 @@ NOT change `slots_total`.
    bound that grows when the ceiling is raised or removed re-runs the ladder
    (FR-CB10 item 1). An entry without it changes nothing.
 
-Loopback runtimes (SPEC-046) and autotune children keep their configured
-count. The coordinator's `pool.max_concurrency_ceiling` still clamps routed
-slots.
+6. **(v0.3.33)** On a Mac with positive physical RAM at most 8 GiB, no
+   scheduler or serving gate may be built or resized above three rows. The
+   count MUST remain within `1...max_concurrency_override_limit`; any tighter
+   memory-fit, signed-policy, or verified-grant bound otherwise applicable to
+   that serving path still applies.
+   This bound covers owner-pinned, autotune-derived, default, provisional,
+   stored and prior grants at initialization, warm swap, adoption and rebuild;
+   an owner pin's original intent is retained but cannot bypass it. Unknown
+   physical RAM (zero) and RAM above 8 GiB add no tier-specific cap. A readable
+   uncatalogued model MAY supply a memory-fit recommendation only when its
+   config and positive, representable actual artifact bytes come from the
+   verified loaded artifact binding; missing or unbound artifact information
+   MUST NOT manufacture a fit from a catalog fallback.
+
+Loopback runtimes (SPEC-046) and autotune children keep their configured count
+subject to item 6. The coordinator's `pool.max_concurrency_ceiling` still
+clamps routed slots.
 
 ### FR-CB12 - SPEC-028 classic-draft mutual exclusion (SPEC-038-R012)
 
@@ -2052,7 +2112,7 @@ snapshot-binding requirements to buyer-visible behavior:
 |---|---|---|
 | Prompt leaves no room for one output token before admission | The batched output budget is the remaining context (`max_context_tokens - prompt_tokens`), an explicit `max_tokens` clamped to it, so prompt + budget never exceeds the served context; when no output token fits the provider rejects with HTTP 413 `context_length_exceeded` (`param: max_tokens`). On the coordinator relay it is `error_context_exceeded` (coordinator 413 `context_exceeds_capacity` on non-streaming and pre-commit streaming attempts; not retried, not failed over, not breaker-qualifying). The provider log line is `event=batching_rejected code=context_length_exceeded` with the prompt, output, and cap token counts. | Zero credit / zero debit (SPEC-005 X-1); receipt per SPEC-015 §7.6. |
 | Queue full before admission | Reject through the existing client-visible backpressure/error surface; include bounded retry guidance (`Retry-After` or equivalent) when the gateway surface supports it. On direct HTTP that is `continuous_batching_stream_backpressure` with `Retry-After`; on the coordinator relay it is SPEC-001 FR-27 `error_queue_full` (re-route, else 503 with the gateway's `Retry-After`). No request state may be retained except non-receipt diagnostics. | Non-settling; no receipt. |
-| Queue wait timeout before admission | Reject as queue timeout, not model failure. The response/log MUST distinguish timeout from scheduler crash and from unsupported tuple. On direct HTTP the code is `continuous_batching_queue_wait_timeout`; on the coordinator relay it is SPEC-001 FR-27 `error_queue_full`, and the provider log keeps the distinct code. | Non-settling; no receipt. |
+| Explicitly timed diagnostic queue wait expires before admission | Reject as queue timeout, not model failure. Production caller-bounded waiting does not expire on this diagnostic deadline. The response/log MUST distinguish timeout from scheduler crash and from unsupported tuple. On direct HTTP the code is `continuous_batching_queue_wait_timeout`; on the coordinator relay it is SPEC-001 FR-27 `error_queue_full`, and the provider log keeps the distinct code. | Non-settling; no receipt. |
 | Unsupported tuple before admission | Strict mode fails preflight; explicit permissive/canary mode MAY serial-route with reason-coded telemetry. | Serial route settles only if the serial request succeeds; rejected path emits no receipt. |
 | Duplicate stable request ID before acceptance | Deterministically attach to the existing queued request or reject as duplicate; MUST NOT create a second accepted unit of work. | At most one settling owner. |
 | Duplicate stable request ID after acceptance | Deterministically reattach/replay the existing terminal result, or reject as non-settling replay when retention has rolled; MUST NOT duplicate inference or settlement. | At most one receipt. |
@@ -2378,14 +2438,19 @@ hardware-capability run or a static-review obligation. Every
   emitted for stitched failed+retried output.
 - **AC-25 API-visible lifecycle semantics (FR-CB1, FR-CB6, FR-CB9, FR-CB13,
   FR-CB15):** through the real HTTP/relay serving surface, not only scheduler
-  units, prove queue-full backpressure, queue-timeout rejection, unsupported
+  units, prove queue-full backpressure, caller-bounded waiting beyond the
+  diagnostic scheduler deadline and cancellation while waiting, unsupported
   tuple strict failure, permissive/canary serial-route telemetry, duplicate
   stable request ID before and after acceptance, reconnect/replay after a
   terminal result, client cancellation before and after first buyer-visible
   output, post-admission scheduler failure before and after side effects,
   successful usage finalization, and warm-swap/operator-disable drain. Each
   case MUST have exactly one terminal outcome, the correct settling/non-settling
-  disposition, and no duplicate receipt.
+  disposition, and no duplicate receipt. An explicitly timed diagnostic
+  scheduler call MUST separately prove queue-timeout rejection; this is not
+  a production HTTP/relay timeout requirement. The proof MUST also show that
+  self-check cancellation retains exclusive residency until native retirement
+  and cleanup complete, and that failed cleanup never reopens admission.
 - **AC-26 retained paged-KV sticky serving path (FR-CB4, FR-CB6, FR-CB15,
   SPEC-039 FR-PKV10):** before sticky/cross-turn batching with positive
   `cached_prompt_tokens` can enter `canary`, a packaged real-serving proof MUST

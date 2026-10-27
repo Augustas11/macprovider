@@ -355,7 +355,9 @@ public struct AppConfig: Equatable, Sendable {
     // MLX buffer-cache ceiling in MiB. MLX defaults it to its memory limit, so
     // freed GPU buffers accumulate for the life of the process (Studio live
     // provider 2026-09-24: 50 GB fresh -> ~130 GB under traffic -> kernel
-    // memory kill). Unset keeps MLX's default; 0 disables the cache.
+    // memory kill). Unset uses RAM/32 on native Macs with at most 8 GiB
+    // (256 MiB at 8 GiB); larger Macs retain MLX's default. Explicit 0
+    // disables the buffer cache. This does not limit active weights or KV.
     public var mlxCacheLimitMB: Int?
 
     // SPEC-038 FR-CB10: per-tuple acceptance coverage. Descriptor membership

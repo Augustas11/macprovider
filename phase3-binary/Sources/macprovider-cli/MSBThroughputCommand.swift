@@ -130,6 +130,12 @@ struct MSBThroughputCommand: AsyncParsableCommand {
     var runs: Int = 5
 
     @Option(
+        name: .customLong("mlx-cache-limit-mb"),
+        help: "Optional MLX freed-buffer cache limit in MiB, applied before model loading. Unset uses physical RAM / 32 on Macs with at most 8 GiB; larger Macs retain MLX defaults."
+    )
+    var mlxCacheLimitMB: Int?
+
+    @Option(
         name: .customLong("block-size-tokens"),
         help: "Paged-KV logical block size in tokens. Defaults to the production PagedKVConfig value."
     )
@@ -153,6 +159,13 @@ struct MSBThroughputCommand: AsyncParsableCommand {
     )
     var outputDir: String = "state/perf"
 
+    func validateHardwareRowCount(physicalMemoryBytes: UInt64 = ProcessInfo.processInfo.physicalMemory) throws {
+        let bound = ProviderCapacity.boundedServingRows(rows, physicalMemoryBytes: physicalMemoryBytes)
+        guard rows <= bound else {
+            throw ValidationError("--rows \(rows) exceeds the device's memory row cap \(bound); no model was loaded")
+        }
+    }
+
     func run() async throws {
         guard let modelID = model ?? ProcessInfo.processInfo.environment["MACPROVIDER_MODEL"],
               !modelID.isEmpty else {
@@ -169,7 +182,18 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             throw ExitCode(2)
         }
 
-        let runtime = try await ModelRuntime(modelID: modelID)
+        try validateHardwareRowCount()
+
+        if let mlxCacheLimitMB, !ModelRuntime.isValidMLXCacheLimitMB(mlxCacheLimitMB) {
+            throw ValidationError("--mlx-cache-limit-mb must be in 0...\(ModelRuntime.maximumMLXCacheLimitMB)")
+        }
+        defer {
+            let peak = msbLifetimePeakPhysFootprintMB(pid: getpid()).map(String.init) ?? "unavailable"
+            FileHandle.standardError.write(Data(
+                "msb-throughput: lifetime_peak_phys_footprint_mib=\(peak)\n".utf8
+            ))
+        }
+        let runtime = try await ModelRuntime(modelID: modelID, mlxCacheLimitMB: mlxCacheLimitMB)
         guard await runtime.isLoaded else {
             FileHandle.standardError.write(Data("msb-throughput: failed to load model \(modelID)\n".utf8))
             throw ExitCode(1)
@@ -305,7 +329,10 @@ struct MSBThroughputCommand: AsyncParsableCommand {
                     prompts: prompts,
                     decodeSteps: decodeTokens,
                     compiled: compiledThisRun,
-                    cacheKinds: cacheKinds
+                    cacheKinds: cacheKinds,
+                    // Match serve/parity prefill boundaries so throughput does
+                    // not allocate a whole long prompt in one forward.
+                    maxPromptChunkTokens: ContinuousBatchSchedulerConfiguration.defaultPromptChunkTokens
                 ).batched
             case .serialParallel:
                 FileHandle.standardError.write(Data(
@@ -386,16 +413,17 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         FileHandle.standardOutput.write(json)
         FileHandle.standardOutput.write(Data("\n".utf8))
 
-        FileHandle.standardError.write(Data((
-            "msb-throughput: model=\(modelTag) engine=\(engine.rawValue) compile=\(compiledThisRun) " +
-            "rows=\(rows) block=\(blockSizeTokens) " +
-            "serial_tps_p50=\(decodeBenchFormatTPS(serialP50)) " +
-            "engine_1row_tps_p50=\(decodeBenchFormatTPS(engineSingleP50)) " +
-            "aggregate_tps_p50=\(decodeBenchFormatTPS(aggregateP50)) " +
-            "uplift_vs_1row=\(String(format: "%.2fx", upliftVsSingle)) " +
-            "aggregate_vs_serial=\(String(format: "%.2fx", aggregateVsSerial)) " +
-            "peak_rss_mb=\(peakRSSMB)\n"
-        ).utf8))
+        let summary: String = [
+            "msb-throughput: model=\(modelTag) engine=\(engine.rawValue) compile=\(compiledThisRun) ",
+            "rows=\(rows) block=\(blockSizeTokens) ",
+            "serial_tps_p50=\(decodeBenchFormatTPS(serialP50)) ",
+            "engine_1row_tps_p50=\(decodeBenchFormatTPS(engineSingleP50)) ",
+            "aggregate_tps_p50=\(decodeBenchFormatTPS(aggregateP50)) ",
+            "uplift_vs_1row=\(String(format: "%.2fx", upliftVsSingle)) ",
+            "aggregate_vs_serial=\(String(format: "%.2fx", aggregateVsSerial)) ",
+            "peak_rss_mb=\(peakRSSMB)\n",
+        ].joined()
+        FileHandle.standardError.write(Data(summary.utf8))
 
         guard !stdoutOnly else { return }
         let fileURL: URL
@@ -2026,15 +2054,16 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         let json = try encoder.encode(report)
         FileHandle.standardOutput.write(json)
         FileHandle.standardOutput.write(Data("\n".utf8))
-        FileHandle.standardError.write(Data((
-            "msb-throughput: hybrid-window model=\(modelTag) rows=\(rows) " +
-            "prompt_tokens=\(lengths.min() ?? 0)-\(lengths.max() ?? 0) decode_tokens=\(decodeTokens) " +
-            "window=\(candidateWindow) reference_repeats=\(referenceRepeats) " +
-            "rows_exact=\(rowMatches.filter { $0 }.count)/\(rows) " +
-            "w1_tps_p50=\(decodeBenchFormatTPS(referenceP50)) " +
-            "w\(candidateWindow)_tps_p50=\(decodeBenchFormatTPS(candidateP50)) " +
-            "pass=\(pass) peak_rss_mb=\(peakRSSMB)\n"
-        ).utf8))
+        let summary: String = [
+            "msb-throughput: hybrid-window model=\(modelTag) rows=\(rows) ",
+            "prompt_tokens=\(lengths.min() ?? 0)-\(lengths.max() ?? 0) decode_tokens=\(decodeTokens) ",
+            "window=\(candidateWindow) reference_repeats=\(referenceRepeats) ",
+            "rows_exact=\(rowMatches.filter { $0 }.count)/\(rows) ",
+            "w1_tps_p50=\(decodeBenchFormatTPS(referenceP50)) ",
+            "w\(candidateWindow)_tps_p50=\(decodeBenchFormatTPS(candidateP50)) ",
+            "pass=\(pass) peak_rss_mb=\(peakRSSMB)\n",
+        ].joined()
+        FileHandle.standardError.write(Data(summary.utf8))
         if !stdoutOnly {
             let fileURL: URL
             if let explicitPath = output {

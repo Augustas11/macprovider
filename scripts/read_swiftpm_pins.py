@@ -42,11 +42,11 @@ EXPECTED_LOCATIONS = {
 # scripts: the upstream watch imports these names, and a test checks them
 # against the SPEC-048 fork table.
 SPEC048_MLX_SWIFT_LM_FORK = "https://github.com/Augustas11/mlx-swift-lm"
-# Fork tag 3.32.3-macprovider.10.13 (campaign/2144-native-mtp):
+# Fork tag 3.32.3-macprovider.10.15 combines GLM MTP 10.13 and Prism 10.14:
 # 3.32.3-macprovider.10.5 (c8be0f61) plus covered GLM indexer
 # projection batching; attention and unsupported projections remain row-local.
-SPEC048_MLX_SWIFT_LM_TAG = "3.32.3-macprovider.10.13"
-SPEC048_MLX_SWIFT_LM_REVISION = "b128c37f26d2cbd58700c0ebf3a761f1df7b5415"
+SPEC048_MLX_SWIFT_LM_TAG = "3.32.3-macprovider.10.15"
+SPEC048_MLX_SWIFT_LM_REVISION = "3905a1b0499f0f38c0f94a008034a0362b9e3dca"
 SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE = "3b339ad6e3b3f44c8121ecff5131c7fd55e075e6"
 SPEC048_MLX_SWIFT_FORK = "https://github.com/Augustas11/mlx-swift"
 SPEC048_MLX_SWIFT_TAG = "0.32.3-macprovider.9"
