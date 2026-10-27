@@ -336,6 +336,9 @@ for result, expected in ((static_result, ""), (live_result, "41")):
     assert extracted.stdout.splitlines() == [expected, expected], extracted
 namespace, x, clock = remote_recovery_case(phase="provider_stable", watchdog=True, changed_pid=True)
 namespace["installed_identity"] = lambda _: {"binary_sha256": "a" * 64}
+# Simulate a real replacement process: OS process enumeration agrees with the
+# new status PID, but the previously stable journal still belongs to PID41.
+namespace["cli_processes"] = lambda _: [99]
 try:
     namespace["provenance"](x, "digest")
 except RuntimeError as exc:
