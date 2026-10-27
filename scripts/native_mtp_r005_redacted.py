@@ -65,11 +65,12 @@ def sequences(positions):
         ('ordinary_top1_sha256','ordinary_top1'),('native_top1_sha256','native_top1'))}
 
 
-def project_acceptance(result,policy,corpus,entry,*,raw_result_sha256,policy_sha256,corpus_sha256,custody):
+def project_acceptance(result,policy,corpus,entry,*,raw_result_sha256,policy_sha256,corpus_sha256,custody,measurement_source=None):
     # No pass flag or redacted substitute can enter this producer gate.
     from native_mtp_binding_bundle import validate_acceptance, validate_measurement_identity
-    validate_measurement_identity(result,entry,label="R005 private acceptance")
-    require(policy.get("provider_commit")==entry["source_commit"],"R005 exact signed candidate source differs")
+    identity = measurement_source if measurement_source is not None else entry
+    validate_measurement_identity(result,identity,label="R005 private acceptance")
+    require(policy.get("provider_commit")==identity["source_commit"],"R005 measured source differs")
     validate_acceptance(result,policy,corpus,entry,policy_sha=policy_sha256,corpus_sha=corpus_sha256)
     output=[]
     for case in result['cases']:
@@ -82,7 +83,7 @@ def project_acceptance(result,policy,corpus,entry,*,raw_result_sha256,policy_sha
             'completion_tokens':len(positions),'selected_count':len(selected),'positions':numeric(positions),
             'selected_positions':numeric(selected),'visible_sequences':sequences(positions),'selected_sequences':sequences(selected)})
     value={'schema':SCHEMA,'identity':{key:policy[key] if key in policy else entry[key] for key in sorted(IDENTITY)},
-        'measured_source_commit':policy['provider_commit'],'measurement_identity':result['measurement_identity'],
+        'measured_source_commit':policy['provider_commit'],'measurement_identity':identity.get('measurement_identity',result.get('measurement_identity')),
         'raw_result_sha256':raw_result_sha256,
         'policy_sha256':policy_sha256,'corpus_sha256':corpus_sha256,'custody':custody,'cases':output,
         'native_compared_positions':result['native_compared_positions'],
@@ -99,9 +100,15 @@ def validate_projection(value,entry):
     require(isinstance(value,dict) and set(value)==FIELDS and value['schema']==SCHEMA,'R005 projection fields')
     require(value['private_data_reopened_by_public_validator'] is False and value['independent_hardware_attestation'] is False,'R005 custody limit')
     for key in ('raw_result_sha256','policy_sha256','corpus_sha256'):require(hexvalue(value[key]),'R005 raw digest')
-    require(hexvalue(value['measured_source_commit'],40) and value['measured_source_commit']==entry['source_commit'],'R005 exact signed candidate source differs')
+    require(hexvalue(value['measured_source_commit'],40),'R005 measured source malformed')
     from native_mtp_binding_bundle import validate_measurement_identity
-    validate_measurement_identity(value,entry,label='R005 public projection')
+    identity = entry
+    measured = value['measurement_identity']
+    if isinstance(measured,dict) and 'decode_path_digest' in measured:
+        identity = {'measurement_identity':measured,'decode_path_digest':entry['decode_path_digest']}
+    else:
+        require(value['measured_source_commit']==entry['source_commit'],'R005 exact signed candidate source differs')
+    validate_measurement_identity(value,identity,label='R005 public projection')
     require(value['raw_result_sha256']==entry['correctness_evidence_sha256'],'R005 original result differs from admission')
     custody=value['custody']
     require(isinstance(custody,dict) and set(custody)=={'commit','record_sha256'}

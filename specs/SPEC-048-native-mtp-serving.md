@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.60
+**Version:** 0.1.61
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.60",
+  "version": "0.1.61",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -1466,8 +1466,8 @@ listed file is missing or changes without a regenerated digest.
   guarded unchanged-greedy-scope transaction nor its rollback obligations.
   Expanded GLM sampled/tools/reasoning scope retains the final tag and fleet
   recommendation gate and requires genuine R005 token/state proof and passing
-  R015 qualification, including the preregistered privacy-reviewed v2
-  observation and fresh paired replay. Recipe assembly and offline projection
+  R015 qualification on the digest-matched LAB build. Recipe assembly and
+  offline projection
   supply neither correctness nor performance evidence.
   JOURNEY-NATIVE-MTP-SERVING also permits its narrow authenticated post-cut
   redacted draft-asset delivery through the existing protected serving-journey
@@ -1541,67 +1541,19 @@ For each qualified tuple, production enablement requires all of the following:
     is the released CLI. Publishing earlier would turn native MTP off for
     every tuple on the older CLI.
 
-**Qualification bootstrap order (0.1.59).** A signed collector candidate and
-qualification of a changed decoder are separate dependencies. They MUST be
-ordered as follows, without withdrawing an already-enabled native-MTP tuple:
-
-1. Obtain the collector-capable signed acceptance candidate through
-   `scripts/ops/cli-release.sh` (`status`, `next`, then the documented
-   `next --run` cut and signed-byte-verification steps). Stop before fleet
-   promotion or any native-policy change. The candidate signature authenticates
-   its bytes; it supplies no missing R005/R015 evidence or production admission.
-   A candidate-only cut is not final tagging, recommendation or activation.
-2. Collect the preregistered v2 observation on a signed runtime already
-   admissible for the incumbent qualified scope. Collection preserves live
-   native MTP, ordinary CB, request eligibility and the signed row/depth bounds.
-   The capture runtime need not be the later replay runtime: MTP-15 binds their
-   source identities separately. Any pre-promotion collector installation MUST
-   satisfy MTP-13's existing unchanged-greedy-scope signed-pair requirements
-   through `scripts/ops/`; no newly qualified greedy parent may be inferred
-   from the candidate signature or an identity-only rebind.
-3. After truthful privacy review of that capture, qualify the exact changed
-   signed candidate in isolated Studio loopback before changing its production
-   policy. Retain the real capture source, candidate source and signed-byte
-   identities. Run the genuine R005 proof, formal R015 matrix, sustained cell
-   and fresh paired representative replay, plus the other tuple-specific gates
-   above. Observation, exploratory cells and offline projection replace none
-   of them. An isolated candidate MUST NOT join the live coordinator merely
-   to produce the missing observation or qualification.
-   The signed executable MUST carry an isolated qualification entry point,
-   `native-mtp-qualify`, for R005 acceptance, formal R015 matrix/sustained and
-   representative replay. It MUST NOT join a coordinator or expose the LAB
-   serving overrides. Qualification mode MUST reject exploratory policies.
-   Before model/device work it MUST validate its running code signature and
-   derive `measurement_identity.binary_sha256` from its executable bytes and
-   `measurement_identity.binary_cdhash` from its code-signing identity; neither
-   value may come from command arguments or supplied evidence. R005 results,
-   the formal R015 header and every matrix/sustained record, and representative-
-   replay headers and runs MUST retain that identity. Resuming a sustained phase MUST reject a
-   matrix produced by different executable bytes. Qualification consumers MUST
-   compare both fields with the independently authenticated acceptance-candidate
-   SHA-256/CDHash, and require the candidate source identity. A source-equivalent
-   LAB build, a later signed projection, or a caller identity assertion cannot
-   substitute for measurements from the exact signed candidate.
-   The qualification archive MUST retain `bench.jsonl`, `bench-policy.json`
-   and rederived `bench-analysis.json` for formal R015, separately from
-   representative `replay.json`, `replay-policy.json` and `analysis.json`.
-   Existing matrix, sustained, replay and correctness gates remain required.
-4. Only after qualification and review may the existing release and catalog
-   trains advance through their remaining gates and activate the qualified
-   policy. Final tag/recommendation, signed journeys, release verification and
-   exact-pair recovery requirements remain unchanged.
-   A fully qualified expanded publication MAY use the exact committed signed
-   predecessor directly under SPEC-023-R017; it need not first fabricate an
-   unchanged-greedy identity-only parent for the changed candidate. The normal
-   final-tag/recommendation and authenticated serving gates still apply.
-
-If no collector-capable signed runtime can satisfy step 2, signing the changed
-decoder does not break the cycle. The prerequisite is a reviewed collector-only
-source/cut order that preserves the incumbent qualified decode behavior and
-satisfies MTP-13 before observation. Until that prerequisite exists, the new
-qualification remains pending; the incumbent native-MTP policy stays enabled.
-This order adds no publication exception or evidence waiver and does not
-authorize bypassing a refusing ops step.
+**Qualification and release identity (0.1.61).** R005 correctness, the formal
+R015 matrix and its sustained phase MAY run on an isolated LAB build whose
+embedded decode-path digest equals the reviewed PR head's recomputed digest.
+The immutable evidence MUST retain the actual measured source, LAB binary
+SHA-256, CDHash when present, and embedded decode-path digest. Consumers MUST
+recompute source digest equality rather than require the later signed CLI's
+executable identity. A CLI cut changes only identity binding: MTP-13's
+authenticated identity-only rebind binds its signed SHA-256/CDHash to that
+qualification without remeasurement. Raw policies and records retain their
+original measured source. Neither representative replay, a v2 collector, a
+fresh signed predecessor nor a signed-only qualification command is an added
+prerequisite. All existing R005/R015 numerical and tuple gates, signed release,
+journey, catalog publication and recovery obligations remain unchanged.
 
 Failure or revocation of any tuple-specific gate MUST remove or disable only that
 tuple's native-MTP eligibility and MUST preserve ordinary decode. No partial
@@ -1903,7 +1855,9 @@ MUST be no more than 5%, and the corrected lower bound for ordinary-row
 throughput change MUST be no worse than -5%, against the same load with MTP
 disabled. This is in addition to R007's ready-to-decode wait bound.
 
-**Privacy-safe v2 observation and paired replay.** The opt-in
+**Optional privacy-safe v2 observation and paired replay.** This optional
+observation surface is not a prerequisite for R005 or formal R015
+qualification. When used, its claims follow the rules below. The opt-in
 `macprovider.native-mtp-request-shape-capture.v2` records successful persistable
 completions with the provider's actual `off` or `auto` mode unchanged. Its role
 is `request_shape_observation_only`: an observed ordinary or native completion
@@ -2154,21 +2108,16 @@ requests.
 
 ## 9. Changelog and history
 
-- **0.1.60 (2026-10-27)** — MTP-14 requires an isolated qualification entry
-  point in the signed acceptance executable. Runtime-derived executable
-  SHA-256/CDHash bind R005, formal R015/sustained and representative replay
-  to the independently authenticated candidate. LAB/source-only substitution
-  is rejected; serving isolation, numerical gates and ops order are retained.
+- **0.1.61 (2026-10-27)** — Corrects the campaign qualification bootstrap:
+  digest-matched LAB R005/formal R015/sustained evidence records the actual
+  executable and measured source. The signed CLI cut uses MTP-13 identity-only
+  rebind, without remeasurement. Removes campaign-added signed-only,
+  collector/replay and fresh-signed-predecessor prerequisites.
 
-- **0.1.59 (2026-10-26)** — MTP-14 separates a collector-capable signed
-  candidate cut from changed-decoder qualification and production activation.
-  Genuine MTP-on observation requires an independently admissible collector;
-  isolated signed-candidate R005/R015 and representative replay precede policy
-  changes. Existing signed-pair, qualification and release gates are preserved;
-  a missing collector-only source/cut prerequisite remains pending. MTP-2
-  raises the GLM adapter's implementation ceiling to four native active rows,
-  leaving the signed deployment bound at one; a future signed higher bound
-  requires its complete per-bound R015 qualification before publication.
+- **0.1.59–0.1.60 (2026-10-26–27)** — The initial signed-only qualification
+  bootstrap was superseded by 0.1.61. The GLM implementation ceiling remains
+  four with signed row/depth bounds one/one; higher bounds require existing
+  per-bound R015 qualification.
 
 - **0.1.58 (2026-10-26)** — Reconciles the sampled-profile campaign with the
   0.1.57 R009 prompt/head snapshot contract; its SPEC-024-R005 and SPEC-038

@@ -22,9 +22,10 @@ the private engineering archive; the evidence code reads stays under
 - No unreleased local binary is joined to the live coordinator (SPEC-048 R014
   item 9).
 
-## Representative request-shape observations
+## Optional representative request-shape observations
 
-The existing v1 collector remains off-only. To observe an already-serving
+These observations are optional and do not gate the campaign R005/formal
+R015 qualification. The existing v1 collector remains off-only. To observe an already-serving
 qualified tuple without changing its actual `off`/`auto` mode, explicitly select
 `MACPROVIDER_NATIVE_MTP_SHAPE_CAPTURE_SCHEMA=v2` with the existing capture-directory
 opt-in and bounded record/byte limits. A mode change starts a new capture file.
@@ -62,8 +63,12 @@ candidate assets and existing trusted signing key. It cannot establish
 qualification from a caller-supplied success flag. Its first phase retains the
 already-qualified greedy request scope, one native row, depth one and all four
 CB slots. The later sampled phase preserves that signed CLI and additionally
-requires genuine R005 results, preregistered privacy-reviewed v2 capture and
-fresh paired replay, hosted negative tests and the complete freeze audit.
+requires genuine R005 and formal R015 matrix/sustained results from the
+digest-matched LAB build, hosted negative tests and the complete freeze audit.
+The LAB archive retains its measured source and executable SHA-256/CDHash
+(when present), plus the embedded decode-path digest in `qualification/source.json`.
+The final signed cut uses the MTP-13 identity-only rebind; no measurements are
+repeated after that cut and no fresh signed predecessor is a qualification gate.
 Final tagging and live recommendation remain required for the sampled phase.
 
 The helper accepts the closed input schema enforced by

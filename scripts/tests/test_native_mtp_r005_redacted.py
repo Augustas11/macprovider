@@ -51,8 +51,24 @@ class ProjectionTests(unittest.TestCase):
 
     def test_source_equivalence_cannot_replace_exact_signed_measurement(self):
         raw=self.raw();raw[3]['source_commit']='9'*40
-        with self.assertRaisesRegex(ValueError,'exact signed candidate source'):
+        with self.assertRaisesRegex(ValueError,'measured source differs'):
             self.project(raw)
+
+    def test_lab_projection_preserves_measured_identity_across_signed_rebind(self):
+        result,policy,corpus,entry = self.raw()
+        entry['decode_path_digest'] = 'd'*64
+        entry['source_commit'] = '9'*40
+        result.pop('measurement_identity')
+        source = {'source_commit':policy['provider_commit'], 'decode_path_digest':'d'*64,
+                  'measurement_identity':{'binary_sha256':'7'*64,'binary_cdhash':None,'decode_path_digest':'d'*64}}
+        value = n.project_acceptance(result,policy,corpus,entry,raw_result_sha256='f'*64,
+            policy_sha256='e'*64,corpus_sha256='d'*64,custody={'commit':'a'*40,'record_sha256':'b'*64},
+            measurement_source=source)
+        self.assertEqual(value['measurement_identity'],source['measurement_identity'])
+        self.assertEqual(value['measured_source_commit'],policy['provider_commit'])
+        n.validate_projection(value,entry)
+        value['measurement_identity']['decode_path_digest']='e'*64
+        with self.assertRaises(ValueError): n.validate_projection(value,entry)
 
     def test_raw_mismatch_cannot_project_even_if_pass_true(self):
         raw=self.raw();raw[0]['cases'][0]['positions'][0]['native_token']=999

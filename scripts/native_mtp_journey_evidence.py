@@ -519,6 +519,53 @@ def validate_representative_serving_policy(bundle: Bundle, entry: dict, policy: 
             fail(str(error))
 
 
+def validate_formal_serving_policy(bundle: Bundle, entry: dict, policy: bytes, steps: dict) -> None:
+    """Reopen digest-matched LAB qualification without requiring a collector."""
+    core = _serving_contract_module("native_mtp_binding_bundle.py")
+    reuse = _source_equivalence_module()
+    with tempfile.TemporaryDirectory(prefix="native-mtp-serving-formal.") as directory:
+        q = Path(directory)
+        for name in ("bench-policy.json", "bench.jsonl", "bench-analysis.json", "source.json"):
+            (q / name).write_bytes(bundle.require("observations/qualification/" + name))
+        if (q / "bench-policy.json").read_bytes() != policy:
+            fail("formal qualification policy differs from sidecar policy")
+        source = parse_json((q / "source.json").read_bytes(), "qualification source")
+        if not isinstance(source, dict) or set(source) != {"source_commit", "decode_path_digest", "measurement_identity"}:
+            fail("qualification source binding")
+        if source["decode_path_digest"] != entry["decode_path_digest"]:
+            fail("qualification LAB decode digest differs from admitted source")
+        try:
+            reuse.verify_source_equivalence(ROOT, source["source_commit"], entry["source_commit"],
+                source["decode_path_digest"], entry["decode_path_digest"],
+                request_feature_profile=entry["request_feature_profile"])
+            core.validate_formal_bench(q, stage=ROOT, entry=entry, identity=source)
+            hashes = {"batch_evidence_sha256": sha256((q / "bench.jsonl").read_bytes()),
+                      "performance_evidence_sha256": sha256((q / "bench-analysis.json").read_bytes()),
+                      "benchmark_policy_sha256": sha256(policy)}
+            if any(entry[key] != value for key, value in hashes.items()):
+                fail("formal qualification digests differ from sidecar")
+            details = steps["step-14-studio-and-tier-benchmark"]["details"]
+            keys = set(hashes) | {"correctness_evidence_sha256", "security_negative_evidence_sha256"}
+            if details.get("qualification_sha256") != {key: entry[key] for key in keys}:
+                fail("step14 qualification digests differ from sidecar")
+            projection_bytes = bundle.require("observations/r005-numeric-projection.json")
+            projection = parse_json(projection_bytes, "R005 numeric projection")
+            numeric = _serving_contract_module("native_mtp_r005_redacted.py")
+            verified = numeric.validate_projection(projection, entry)
+            if projection["measurement_identity"] != source["measurement_identity"] or verified["measured_source_commit"] != source["source_commit"]:
+                fail("R005 and formal LAB source/executable differ")
+            if verified["projection_sha256"] != sha256(projection_bytes):
+                fail("R005 numeric projection is not canonical")
+            r005 = steps["step-04-serial-token-oracle"]["details"]
+            if r005.get("r005_numeric_projection_sha256") != verified["projection_sha256"]:
+                fail("step04 numeric projection digest differs")
+            for key, field in (("r005_result_sha256", "raw_result_sha256"), ("r005_policy_sha256", "policy_sha256"), ("r005_corpus_sha256", "corpus_sha256")):
+                if r005.get(key) != verified[field]:
+                    fail("step04 R005 projected custody digest differs")
+        except (core.BindingBundleError, reuse.SourceEquivalenceError, ValueError) as error:
+            fail(str(error))
+
+
 def compose_serving(bundle: Bundle, *, captured_at: str, expires_at: str | None = None) -> dict[str, Any]:
     captured = parse_timestamp(captured_at, "captured_at")
     expires = parse_timestamp(expires_at, "expires_at") if expires_at else captured + timedelta(days=EXPIRY_DAYS[SERVING])
@@ -543,7 +590,9 @@ def compose_serving(bundle: Bundle, *, captured_at: str, expires_at: str | None 
     if policy_body.get("schema") == "macprovider.native-mtp-post-gateway-replay-policy.v1":
         validate_representative_serving_policy(bundle, entry, policy, steps)
     elif policy_body.get("schema") == R015_POLICY_SCHEMA:
-        if policy_body.get("provider_commit") != entry["source_commit"]:
+        if "observations/qualification/source.json" in bundle.files:
+            validate_formal_serving_policy(bundle, entry, policy, steps)
+        elif policy_body.get("provider_commit") != entry["source_commit"]:
             if "qualification-reuse.json" not in bundle.files:
                 fail("r015-policy.json provider_commit must equal the selected sidecar entry source_commit or carry verified qualification source reuse")
             validate_qualification_source_reuse(bundle,entry,policy,policy_body)

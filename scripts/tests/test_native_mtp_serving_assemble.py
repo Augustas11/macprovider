@@ -143,7 +143,7 @@ class AssemblyTests(unittest.TestCase):
             self.assertEqual(canary['details']['diagnostic_observation_sha256'],a.sha(a.canonical(observations['diagnostic_observations'])))
             self.assertIn('steps/step-12-native-canary.json',receipt['files'])
             for name in ('bench.jsonl','bench-analysis.json'):
-                self.assertIn('observations/representative/'+name,receipt['files'])
+                self.assertIn('observations/qualification/'+name,receipt['files'])
 
     def prepared(self,base):
         prepared=base/'prepared';prepared.mkdir()
@@ -237,7 +237,7 @@ class AssemblyTests(unittest.TestCase):
 
     def test_historical_w3_fork_requires_exact_mechanical_source_bridge(self):
         with tempfile.TemporaryDirectory() as d:
-            base=Path(d);q=base/'qualification';q.mkdir();(q/'replay-policy.json').write_bytes(b'{}')
+            base=Path(d);q=base/'qualification';q.mkdir();(q/'bench-policy.json').write_bytes(b'{}')
             entry=dict(model_key='zai-org/glm-5.3-flash',ram_bytes=256*(1<<30),qualified_slots=4,max_native_active_rows=1,
                 proposal_depth=1,max_prompt_tokens=4096,ordinary_baseline={'artifact_hash':'a'*64},artifact_hash='b'*64,
                 tokenizer_sha256='c'*64,runtime_revision='NEW',source_commit='e'*40,decode_path_digest='f'*64,

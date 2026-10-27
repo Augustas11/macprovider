@@ -213,14 +213,32 @@ def validate_acceptance(result: dict, policy: dict, corpus: dict, tuple_entry: d
 
 
 def validate_measurement_identity(record: dict, identity: dict, *, label: str) -> None:
-    """Bind runtime-measured bytes to the independently authenticated candidate.
+    """Preserve the measured executable; qualification follows decode identity.
 
-    Source-equivalent LAB bytes are deliberately insufficient: qualification
-    must have run inside the signed executable intended for promotion.
+    LAB archives bind their executable and embedded digest in source.json.
+    Signed qualification remains compatible but is not required for a CLI cut.
     """
+    measured = record.get("measurement_identity") if isinstance(record, dict) else None
+    if "measurement_identity" in identity:
+        expected = identity["measurement_identity"]
+        require(isinstance(expected, dict) and set(expected) == {
+            "binary_sha256", "binary_cdhash", "decode_path_digest"}
+            and isinstance(expected["binary_sha256"], str)
+            and re.fullmatch(r"[0-9a-f]{64}", expected["binary_sha256"]) is not None
+            and (expected["binary_cdhash"] is None or isinstance(expected["binary_cdhash"], str)
+                 and re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", expected["binary_cdhash"]) is not None)
+            and expected["decode_path_digest"] == identity["decode_path_digest"],
+            label + " LAB executable/decode identity mismatch")
+        # The existing LAB runners predate runtime identity fields. Their
+        # frozen archive source binding supplies identity, without rewriting
+        # raw measurements. If a runner emitted it, it must agree as well.
+        require(measured is None or measured == expected or measured == {
+            key: expected[key] for key in ("binary_sha256", "binary_cdhash")},
+            label + " LAB measurement executable identity mismatch")
+        return
     expected = {"binary_sha256": identity["reproducible_build_sha256"],
                 "binary_cdhash": identity["live_executable_cdhash"]}
-    require(isinstance(record, dict) and record.get("measurement_identity") == expected,
+    require(isinstance(record, dict) and measured == expected,
             label + " signed measurement executable identity mismatch")
 
 
@@ -231,7 +249,7 @@ def validate_formal_bench(q: Path, *, stage: Path, entry: dict, identity: dict) 
     require(policy.get("schema") == "macprovider.native-mtp-r015-policy.v1",
             "formal R015 policy required")
     require(policy.get("provider_commit") == identity["source_commit"],
-            "formal R015 signed candidate source mismatch")
+            "formal R015 measured candidate source mismatch")
     for field, expected in {
         "model_id": entry["model_key"],
         "target_sha256": entry["ordinary_baseline"]["artifact_hash"],
@@ -246,7 +264,7 @@ def validate_formal_bench(q: Path, *, stage: Path, entry: dict, identity: dict) 
         require(policy.get(field) == expected, "formal R015 tuple/artifact binding mismatch")
     header, runs = analyzer._load_jsonl(q / "bench.jsonl")
     require(header.get("provider_commit") == identity["source_commit"],
-            "formal R015 signed candidate source mismatch")
+            "formal R015 measured candidate source mismatch")
     validate_measurement_identity(header, identity, label="R015 header")
     require(bool(runs) and any(run.get("sustained") is True for run in runs),
             "formal R015 sustained records required")
@@ -430,12 +448,14 @@ def _qualification(stage: Path, bundle: Path, entry: dict, recipe: dict, *, repo
     acceptance = read_json(q / "acceptance.json")
     policy = read_json(q / "acceptance-policy.json")
     corpus = read_json(q / "acceptance-corpus.json")
-    validate_measurement_identity(acceptance, identity, label="R005")
-    require(policy.get("provider_commit") == identity["source_commit"],
-            "R005 signed candidate source mismatch")
-    validate_acceptance(acceptance, policy, corpus, entry, policy_sha=digest(q / "acceptance-policy.json"), corpus_sha=digest(q / "acceptance-corpus.json"))
     source = read_json(q / "source.json")
-    require(set(source) == {"source_commit", "decode_path_digest"} and source["source_commit"] == policy["provider_commit"], "qualification source binding")
+    require(set(source) == {"source_commit", "decode_path_digest", "measurement_identity"}
+            and source["source_commit"] == policy["provider_commit"], "qualification source binding")
+    measured_identity = dict(source)
+    require(source["decode_path_digest"] == entry["decode_path_digest"],
+            "qualification LAB decode digest differs from admitted source")
+    validate_measurement_identity(acceptance, measured_identity, label="R005")
+    validate_acceptance(acceptance, policy, corpus, entry, policy_sha=digest(q / "acceptance-policy.json"), corpus_sha=digest(q / "acceptance-corpus.json"))
     # Caller source digest assertions are insufficient: recompute at lab commit.
     original_repo = Path(repo)
     equivalence = _module(stage, "native_mtp_source_equivalence.py")
@@ -446,15 +466,16 @@ def _qualification(stage: Path, bundle: Path, entry: dict, recipe: dict, *, repo
     except equivalence.SourceEquivalenceError as error:
         raise BindingBundleError(str(error)) from error
     require(policy["mlx_fork_revision"] == entry["runtime_revision"], "qualification runtime mismatch")
-    validate_formal_bench(q, stage=stage, entry=entry, identity=identity)
-    representative = validate_representative_replay(q, stage=stage, repo=original_repo,
-        current_source=identity["source_commit"], entry=entry, scratch=stage.parent, identity=identity)
+    validate_formal_bench(q, stage=stage, entry=entry, identity=measured_identity)
+    performance = {"batch_evidence_sha256": digest(q / "bench.jsonl"),
+                   "performance_evidence_sha256": digest(q / "bench-analysis.json"),
+                   "benchmark_policy_sha256": digest(q / "bench-policy.json")}
     security_source = read_json(q / "security-actions.json").get("source_commit")
     require(isinstance(security_source, str) and re.fullmatch(r"[0-9a-f]{40}", security_source) is not None, "security CI full source commit required")
     final_source = read_json(bundle / "inputs.json")["identity"]["source_commit"]
     require(git(original_repo, "rev-parse", f"{security_source}^{{tree}}") == git(original_repo, "rev-parse", f"{final_source}^{{tree}}"), "security CI/audit tree differs from merged reviewed source")
     security_sha = validate_security_artifact(q, repo=original_repo, source={"source_commit": security_source}, recipe=recipe, prior_evidence=entry["security_negative_evidence_sha256"])
-    return {"security_negative_evidence_sha256": security_sha, "correctness_evidence_sha256": digest(q / "acceptance.json"), **representative}
+    return {"security_negative_evidence_sha256": security_sha, "correctness_evidence_sha256": digest(q / "acceptance.json"), **performance}
 
 
 @_closed_errors

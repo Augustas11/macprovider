@@ -156,7 +156,7 @@ def benchmark(root,config,entry,core):
         require(policy['provider_commit']==equivalence.W3_SOURCE and policy.get('mlx_fork_revision')==equivalence.OLD_FORK
                 and entry['runtime_revision']==equivalence.NEW_FORK and source_proof is not None,
                 'W3 runtime fork differs without exact product-source proof')
-    require(result.get('benchmark_policy_sha256')==sha(read(q/'replay-policy.json')),'representative qualification hash differs')
+    require(result.get('benchmark_policy_sha256')==sha(read(q/'bench-policy.json')),'formal qualification hash differs')
     return step('14','studio-and-tier-benchmark',{'benchmark_preregistered':True,'material_production_economics_gate':True,
         'all_advertised_hardware_tiers':True},{'advertised_scope':[{'hardware_class':entry['hardware_class'],'ram_bytes':entry['ram_bytes'],
         'qualified_slots':entry['qualified_slots']}],'w3_provider_commit':policy['provider_commit'],
@@ -225,23 +225,22 @@ def prepare(root,config,output):
     custody=numeric.verify_private_custody(Path(config['custody_repo']),config['custody_commit'],config['custody_record'],expected)
     projection=numeric.project_acceptance(*(strict(read(q/name,64*(1<<20))) for name in ('acceptance.json','acceptance-policy.json','acceptance-corpus.json')),entry,
         raw_result_sha256=expected['acceptance.json'],policy_sha256=expected['acceptance-policy.json'],
-        corpus_sha256=expected['acceptance-corpus.json'],custody=custody)
+        corpus_sha256=expected['acceptance-corpus.json'],custody=custody,measurement_source=load(q/'source.json'))
     files['observations/r005-numeric-projection.json']=canonical(projection)
     steps['step-04-serial-token-oracle']['details'].update({
         'sampled_acceptance_result_sha256':projection['raw_result_sha256'],
         'r005_result_sha256':projection['raw_result_sha256'],'r005_policy_sha256':projection['policy_sha256'],
         'r005_corpus_sha256':projection['corpus_sha256'],'r005_numeric_projection_sha256':sha(canonical(projection))})
     # Original policies and frozen qualification source proofs stay truthful.
-    files['r015-policy.json']=read(q/'replay-policy.json')
+    files['r015-policy.json']=read(q/'bench-policy.json')
     for name in ('qualification-reuse.json','qualification-origin-native-mtp-admission.json'):
         candidate=q/name
         if candidate.exists():files[name]=read(candidate)
     files['observations/w3-analysis.json']=read(config['w3_analysis'])
     files['observations/w3-policy.json']=read(config['w3_policy'])
     files['observations/w3-runs.jsonl']=read(config['w3_runs'])
-    for name in ('capture.json','tuple-bounds.json','projection-plan.json','privacy-review.json','preregistration.json',
-                 'bench-policy.json','bench.jsonl','bench-analysis.json','replay.json','replay-policy.json','analysis.json','source.json'):
-        files['observations/representative/'+name]=read(q/name)
+    for name in ('bench-policy.json','bench.jsonl','bench-analysis.json','source.json'):
+        files['observations/qualification/'+name]=read(q/name)
     files['observations/negative-cases.json']=canonical(negatives)
     for key,value in steps.items():files['steps/'+key+'.json']=canonical(value)
     privacy=module(root,'privacy_class_beta_journey_evidence')

@@ -312,5 +312,34 @@ class SignedQualificationServingTests(unittest.TestCase):
         core.validate_representative_replay.assert_not_called()
 
 
+class FormalLabServingTests(unittest.TestCase):
+    def bundle(self, *, digest="d" * 64):
+        source = {"source_commit":"a" * 40, "decode_path_digest":digest,
+                  "measurement_identity":{"binary_sha256":"b" * 64,"binary_cdhash":None,"decode_path_digest":digest}}
+        files = {"observations/qualification/" + name: b"{}" for name in
+                 ("bench-policy.json", "bench.jsonl", "bench-analysis.json")}
+        files["observations/qualification/source.json"] = json.dumps(source).encode()
+        return contract.Bundle("serving", files, b"")
+
+    def test_formal_lab_path_requires_no_capture_or_replay_files(self):
+        core = mock.Mock(BindingBundleError=ValueError)
+        core.validate_formal_bench.side_effect = ValueError("formal analyzer reached")
+        reuse = mock.Mock(SourceEquivalenceError=RuntimeError)
+        entry = {"source_commit":"f" * 40,"decode_path_digest":"d" * 64,"request_feature_profile":"native_mtp_sampled_text_v1"}
+        with mock.patch.object(contract,"_serving_contract_module",return_value=core), \
+             mock.patch.object(contract,"_source_equivalence_module",return_value=reuse):
+            with self.assertRaisesRegex(contract.NativeMTPEvidenceError,"formal analyzer reached"):
+                contract.validate_formal_serving_policy(self.bundle(), entry, b"{}", {})
+        measured = core.validate_formal_bench.call_args.kwargs["identity"]
+        self.assertEqual(measured["source_commit"], "a" * 40)
+        self.assertIsNone(measured["measurement_identity"]["binary_cdhash"])
+        core.validate_representative_replay.assert_not_called()
+
+    def test_changed_lab_digest_is_rejected_before_formal_analysis(self):
+        entry = {"source_commit":"f" * 40,"decode_path_digest":"d" * 64,"request_feature_profile":"native_mtp_sampled_text_v1"}
+        with self.assertRaisesRegex(contract.NativeMTPEvidenceError,"LAB decode digest"):
+            contract.validate_formal_serving_policy(self.bundle(digest="e" * 64), entry, b"{}", {})
+
+
 if __name__ == "__main__":
     unittest.main()

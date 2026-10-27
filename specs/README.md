@@ -31,7 +31,7 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-020 | Provider autoupdate | v0.1.29 | normative | pending | pending: 7 | [SPEC-020-provider-autoupdate.md](SPEC-020-provider-autoupdate.md) |
 | SPEC-021 | MALIBU rewards emission ledger | 0.5.0 | draft | complete | pending: 12 | [SPEC-021-malibu-emission-ledger.md](SPEC-021-malibu-emission-ledger.md) |
 | SPEC-022 | Verified model settlement | v0.4.9 | draft | complete | pending: 16 | [SPEC-022-verified-model-settlement.md](SPEC-022-verified-model-settlement.md) |
-| SPEC-023 | Installer-Integrated Autotune Recommend | v0.22.37 | normative | pending | conformant: 2, pending: 24 | [SPEC-023-installer-autotune-recommend.md](SPEC-023-installer-autotune-recommend.md) |
+| SPEC-023 | Installer-Integrated Autotune Recommend | v0.22.38 | normative | pending | conformant: 2, pending: 24 | [SPEC-023-installer-autotune-recommend.md](SPEC-023-installer-autotune-recommend.md) |
 | SPEC-024 | Prefix-cache billing and provider-local cache isolation | 0.2.13 | normative | pending | pending: 5 | [SPEC-024-prefix-cache-billing.md](SPEC-024-prefix-cache-billing.md) |
 | SPEC-025 | Native Mac App (signed `.dmg`, native Mac app with menu-bar presence) | v0.46.0 | draft | pending | pending: 21 | [SPEC-025-native-mac-app.md](SPEC-025-native-mac-app.md) |
 | SPEC-026 | Browserless Provider Onboarding (one-click Launch Provider) | v0.30.1 | draft | pending | pending corpus migration | [SPEC-026-browserless-provider-onboarding.md](SPEC-026-browserless-provider-onboarding.md) |
@@ -56,7 +56,7 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-045 | Local Consumer Endpoint Mode | 0.2.0 | draft | complete | conformant: 1, pending: 7 | [SPEC-045-local-consumer-endpoint-mode.md](SPEC-045-local-consumer-endpoint-mode.md) |
 | SPEC-046 | Provider BYOM Discovery | 0.5.0 | draft | complete | pending: 9 | [SPEC-046-provider-byom-discovery.md](SPEC-046-provider-byom-discovery.md) |
 | SPEC-047 | Network Model Admission | 0.2.9 | draft | complete | conformant: 4, pending: 8 | [SPEC-047-network-model-admission.md](SPEC-047-network-model-admission.md) |
-| SPEC-048 | Native Multi-Token Prediction Serving | 0.1.60 | draft | complete | pending: 16 | [SPEC-048-native-mtp-serving.md](SPEC-048-native-mtp-serving.md) |
+| SPEC-048 | Native Multi-Token Prediction Serving | 0.1.61 | draft | complete | pending: 16 | [SPEC-048-native-mtp-serving.md](SPEC-048-native-mtp-serving.md) |
 | SPEC-049 | Operator-Constrained Privacy Class | 0.8.0 | draft | complete | pending: 36 | [SPEC-049-operator-constrained-privacy-class.md](SPEC-049-operator-constrained-privacy-class.md) |
 | SPEC-050 | MALIBU Stake Allowance | 0.1.2 | draft | complete | pending: 14 | [SPEC-050-malibu-stake-allowance.md](SPEC-050-malibu-stake-allowance.md) |
 | SPEC-051 | Multi-Mac Shard Groups | 0.2.6 | draft | complete | pending: 30 | [SPEC-051-multi-mac-shard-groups.md](SPEC-051-multi-mac-shard-groups.md) |

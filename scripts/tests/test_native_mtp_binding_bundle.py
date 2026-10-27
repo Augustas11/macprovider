@@ -295,7 +295,7 @@ class FullyQualifiedPredecessorTests(unittest.TestCase):
             (q / name).write_bytes(m.canonical({}))
         (q / "acceptance.json").write_bytes(m.canonical({"measurement_identity": {
             "binary_sha256": "0" * 64, "binary_cdhash": self.identity["live_executable_cdhash"]}}))
-        with self.assertRaisesRegex(m.BindingBundleError, "R005 signed measurement"):
+        with self.assertRaisesRegex(m.BindingBundleError, "regular JSON file required"):
             self.derive()
 
 
@@ -403,9 +403,41 @@ class SignedMeasurementTests(unittest.TestCase):
         for name in ("acceptance.json", "acceptance-policy.json", "acceptance-corpus.json"):
             (self.q / "qualification" / name).write_bytes(m.canonical({}))
         with mock.patch.object(m, "validate_acceptance") as numerical:
-            with self.assertRaisesRegex(m.BindingBundleError, "R005 signed measurement"):
+            with self.assertRaisesRegex(m.BindingBundleError, "regular JSON file required"):
                 m._qualification(Path("."), self.q, self.entry, {}, repo=Path("."))
             numerical.assert_not_called()
+
+
+class LabQualificationIdentityTests(unittest.TestCase):
+    def identity(self):
+        return {"source_commit": "c" * 40, "decode_path_digest": "d" * 64,
+                "measurement_identity": {"binary_sha256": "a" * 64, "binary_cdhash": None,
+                                         "decode_path_digest": "d" * 64}}
+
+    def test_lab_archive_binds_identity_without_rewriting_old_raw_records(self):
+        identity = self.identity()
+        m.validate_measurement_identity({}, identity, label="LAB")
+        m.validate_measurement_identity({"measurement_identity": identity["measurement_identity"]}, identity, label="LAB")
+
+    def test_digest_mismatch_or_foreign_runtime_is_rejected(self):
+        identity = self.identity()
+        for field, bad in (("binary_sha256", "bad"), ("binary_cdhash", "bad"), ("decode_path_digest", "f" * 64)):
+            changed = copy.deepcopy(identity); changed["measurement_identity"][field] = bad
+            with self.subTest(field=field), self.assertRaises(m.BindingBundleError):
+                m.validate_measurement_identity({}, changed, label="LAB")
+        with self.assertRaises(m.BindingBundleError):
+            m.validate_measurement_identity({"measurement_identity": {"binary_sha256": "e" * 64}}, identity, label="LAB")
+
+    def test_formal_lab_matrix_is_independent_of_later_signed_binary(self):
+        fixture = SignedMeasurementTests(); fixture.setUp()
+        try:
+            fixture.identity = self.identity()
+            fixture.header.pop("measurement_identity")
+            for run in fixture.runs: run.pop("measurement_identity")
+            fixture.check_bench()
+            fixture.analyzer.analyze.assert_called_once()
+        finally:
+            fixture.doCleanups()
 
 
 class SecurityArtifactTests(unittest.TestCase):
