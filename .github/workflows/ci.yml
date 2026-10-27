@@ -755,12 +755,25 @@ jobs:
           fi
           cli="$build_dir/release/macprovider-cli"
           "$cli" native-mtp-qualify --help
-          for lab_command in native-mtp-bench native-mtp-hardware-e2e native-mtp-journey-e2e native-mtp-request-shape-replay; do
-            if "$cli" "$lab_command" --help >/dev/null 2>&1; then
-              echo "LAB command exposed in Release: $lab_command" >&2
-              exit 1
-            fi
-          done
+          # --help can exit zero for an unknown token via the default serve
+          # command. Inspect the compiled parser tree, including hidden nodes.
+          "$cli" --experimental-dump-help >"$build_dir/command-tree.json"
+          python3 - "$build_dir/command-tree.json" <<'PYTHON'
+          import json
+          import sys
+          root = json.load(open(sys.argv[1]))["command"]
+          commands = {node["commandName"]: node for node in root["subcommands"]}
+          qualification = commands["native-mtp-qualify"]
+          assert {node["commandName"] for node in qualification["subcommands"]} == {"acceptance", "bench", "replay"}
+          forbidden = {"native-mtp-bench", "native-mtp-hardware-e2e", "native-mtp-journey-e2e", "native-mtp-request-shape-replay", "glm-parity", "shard-bench", "dsv4-parity"}
+          def check(node):
+              assert node["commandName"] not in forbidden, node["commandName"]
+              assert not forbidden.intersection((node.get("aliases") or [])), node["commandName"]
+              for child in node.get("subcommands", []):
+                  check(child)
+          check(root)
+          print("Release qualification registration and LAB isolation: PASS")
+          PYTHON
 
   spec-015-acceptance:
     name: spec-015-acceptance
