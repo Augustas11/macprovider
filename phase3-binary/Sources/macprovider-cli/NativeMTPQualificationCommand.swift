@@ -2,6 +2,7 @@ import ArgumentParser
 import CryptoKit
 import Darwin
 import Foundation
+import MacProviderCore
 import Security
 
 /// Only the explicit isolated command opens this task-local scope. A provider
