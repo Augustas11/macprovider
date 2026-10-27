@@ -8612,27 +8612,18 @@ maxTokens: 1,
                 try await scheduler.submit(submission.schedulerRequest, admissionWaitPolicy: .callerBounded)
             }
         } catch {
-            let submissionError = error
-            var retirementError: Error?
-            do {
-                // Waiter cancellation precedes native retirement. Keep the shared
-                // permit until this ID retires, without canceling surviving duplicates.
-                try await Task.detached {
-                    try await scheduler.awaitRequestRetirement(requestID: schedulerRequestID)
-                }.value
-            } catch {
-                retirementError = error
-                await inferenceGate.failClosed()
-            }
+            let submissionError = await Self.continuousBatchFailureAfterRetirement(
+                (error as? ContinuousBatchSchedulerError)?.asAPIError() ?? error,
+                scheduler: scheduler, requestID: schedulerRequestID, gate: inferenceGate
+            )
             if let lease {
                 await conversationCache.abort(lease)
             }
-            if let retirementError { throw retirementError }
             let error = submissionError
             // SPEC-038 AC-25: one shared scheduler-error map, so the
             // non-streaming and streaming paths cannot drift.
             CBTrace.log(schedulerRequestID, "rt_cb_threw \(type(of: error))")
-            throw (error as? ContinuousBatchSchedulerError)?.asAPIError() ?? error
+            throw error
         }
         CBTrace.log(schedulerRequestID, "rt_cb_returned status=\(result.terminalStatus)")
         do {
@@ -8733,7 +8724,9 @@ maxTokens: 1,
             if let lease {
                 await conversationCache.abort(lease)
             }
-            throw error
+            throw await Self.continuousBatchFailureAfterRetirement(
+                error, scheduler: scheduler, requestID: schedulerRequestID, gate: inferenceGate
+            )
         }
     }
 
@@ -9146,26 +9139,17 @@ maxTokens: 1,
                 })
             }
         } catch {
-            let submissionError = error
-            var retirementError: Error?
-            do {
-                // Waiter cancellation precedes native retirement. Keep the shared
-                // permit until this ID retires, without canceling surviving duplicates.
-                try await Task.detached {
-                    try await scheduler.awaitRequestRetirement(requestID: schedulerRequestID)
-                }.value
-            } catch {
-                retirementError = error
-                await inferenceGate.failClosed()
-            }
+            let submissionError = await Self.continuousBatchFailureAfterRetirement(
+                (error as? ContinuousBatchSchedulerError)?.asAPIError() ?? error,
+                scheduler: scheduler, requestID: schedulerRequestID, gate: inferenceGate
+            )
             if let lease {
                 await conversationCache.abort(lease)
             }
-            if let retirementError { throw retirementError }
             let error = submissionError
             // SPEC-038 AC-25: one shared scheduler-error map, so the
             // streaming and non-streaming paths cannot drift.
-            throw (error as? ContinuousBatchSchedulerError)?.asAPIError() ?? error
+            throw error
         }
         do {
             if let error = streamState.error() {
@@ -9302,7 +9286,29 @@ maxTokens: 1,
             if let lease {
                 await conversationCache.abort(lease)
             }
-            throw error
+            throw await Self.continuousBatchFailureAfterRetirement(
+                error, scheduler: scheduler, requestID: schedulerRequestID, gate: inferenceGate
+            )
+        }
+    }
+
+    /// A failed submit or returned terminal result can precede retained-cache
+    /// retirement. Keep the caller's shared permit through cleanup even when
+    /// its task was canceled; surviving duplicates retain ownership of the row.
+    nonisolated static func continuousBatchFailureAfterRetirement(
+        _ failure: Error,
+        scheduler: ContinuousBatchScheduler,
+        requestID: String,
+        gate: AsyncSemaphore
+    ) async -> Error {
+        do {
+            try await Task.detached {
+                try await scheduler.awaitRequestRetirement(requestID: requestID)
+            }.value
+            return failure
+        } catch {
+            await gate.failClosed()
+            return error
         }
     }
 

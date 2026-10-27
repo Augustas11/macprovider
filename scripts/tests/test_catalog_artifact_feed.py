@@ -2572,6 +2572,12 @@ class HermeticRelease:
         source_path = self.catalog / "rate-card-source.json"
         source = json.loads(source_path.read_text())
         rows = {key for key in admitted if key in source["rows"]}
+        card_path = self.catalog / "rate-card.json"
+        card = json.loads(card_path.read_text())
+        # A staged candidate can introduce a class-expanded rate without an
+        # explicit source row. Rewind that materialized row as well.
+        rows |= {catalog_release.normalize_model_key(key) for key in admitted
+                 if catalog_release.normalize_model_key(key) in card["rows"]}
         acks_path = self.catalog / "acknowledged-pricing-moves.json"
         if acks_path.exists():
             acks = json.loads(acks_path.read_text())
@@ -2586,8 +2592,6 @@ class HermeticRelease:
         for row in rows:
             source["rows"].pop(row, None)
         source_path.write_text(json.dumps(source, indent=2, sort_keys=True) + "\n")
-        card_path = self.catalog / "rate-card.json"
-        card = json.loads(card_path.read_text())
         for row in rows:
             card["rows"].pop(row, None)
         card["version"] = catalog_release.rate_card_projection_hash(card)
