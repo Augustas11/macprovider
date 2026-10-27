@@ -2650,11 +2650,21 @@ func TestProviderAuthV2ReceiptRotationRejectsSecondChangeDuringPreviousGrace(t *
 	secondRotationPubkey := bytes.Repeat([]byte{0x63}, 32)
 	oldConn := authV2ProviderWithReceiptKey(t, h.HTTP.URL, oldPubkey)
 	defer oldConn.Close()
+	// The helper enqueues state_update after auth_response. Wait for that
+	// receipt-key commit before advancing time or starting the next session.
+	eventually(t, func() bool {
+		got := fetchPoolz(t, h.HTTP.URL)
+		return len(got.Pool) == 1 && got.Pool[0].ReceiptPubkey != nil && *got.Pool[0].ReceiptPubkey == base64.StdEncoding.EncodeToString(oldPubkey)
+	})
 
 	rotatedAt := clock.Now().Add(100 * time.Second)
 	clock.Set(rotatedAt)
 	firstRotationConn := authV2ProviderWithReceiptKey(t, h.HTTP.URL, firstRotationPubkey)
 	defer firstRotationConn.Close()
+	eventually(t, func() bool {
+		got := fetchPoolz(t, h.HTTP.URL)
+		return len(got.Pool) == 1 && got.Pool[0].ReceiptPubkey != nil && *got.Pool[0].ReceiptPubkey == base64.StdEncoding.EncodeToString(firstRotationPubkey)
+	})
 
 	secondConn, response := authV2ProviderWithReceiptKeyExpectResponseAndMaybeStateUpdate(t, h.HTTP.URL, secondRotationPubkey, true)
 	defer secondConn.Close()
