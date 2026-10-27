@@ -440,6 +440,39 @@ class LabQualificationIdentityTests(unittest.TestCase):
             fixture.doCleanups()
 
 
+class QualificationMeasuredTupleTests(unittest.TestCase):
+    def test_measured_tuple_reaches_both_analyzers_without_rewriting_source(self):
+        source = {"source_commit": "a" * 40, "decode_path_digest": "b" * 64,
+                  "measurement_identity": {"binary_sha256": "c" * 64}}
+        original = copy.deepcopy(source)
+        entry = {"runtime_revision": "current", "security_negative_evidence_sha256": "d" * 64}
+        measured = {**entry, "runtime_revision": "measured"}
+        policy = {"provider_commit": source["source_commit"], "mlx_fork_revision": "measured"}
+        equivalence = mock.Mock()
+        equivalence.SourceEquivalenceError = ValueError
+        equivalence.measurement_tuple.return_value = measured
+        def read(path):
+            return {"inputs.json": {"identity": {"source_commit": "e" * 40}},
+                    "source.json": source, "acceptance-policy.json": policy,
+                    "acceptance.json": {}, "acceptance-corpus.json": {},
+                    "security-actions.json": {"source_commit": "e" * 40}}[path.name]
+        with mock.patch.object(m, "read_json", side_effect=read), \
+             mock.patch.object(m, "_module", return_value=equivalence), \
+             mock.patch.object(m, "digest", return_value="f" * 64), \
+             mock.patch.object(m, "git", return_value=b"same-tree"), \
+             mock.patch.object(m, "validate_measurement_identity") as identity_check, \
+             mock.patch.object(m, "validate_acceptance") as acceptance, \
+             mock.patch.object(m, "validate_formal_bench") as formal, \
+             mock.patch.object(m, "validate_security_artifact", return_value="f" * 64):
+            m._qualification(Path("stage"), Path("bundle"), entry, {}, repo=Path("repo"))
+        self.assertIs(acceptance.call_args.args[3], measured)
+        self.assertIs(formal.call_args.kwargs["entry"], measured)
+        self.assertEqual(formal.call_args.kwargs["identity"], original)
+        self.assertEqual(identity_check.call_args.args[1], original)
+        self.assertEqual(source, original)
+        self.assertEqual(entry["runtime_revision"], "current")
+
+
 class SecurityArtifactTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)

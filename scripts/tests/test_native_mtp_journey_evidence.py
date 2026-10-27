@@ -335,10 +335,17 @@ class FormalLabServingTests(unittest.TestCase):
         self.assertIsNone(measured["measurement_identity"]["binary_cdhash"])
         core.validate_representative_replay.assert_not_called()
 
-    def test_changed_lab_digest_is_rejected_before_formal_analysis(self):
+    def test_changed_lab_digest_requires_reviewed_reuse_before_formal_analysis(self):
         entry = {"source_commit":"f" * 40,"decode_path_digest":"d" * 64,"request_feature_profile":"native_mtp_sampled_text_v1"}
-        with self.assertRaisesRegex(contract.NativeMTPEvidenceError,"LAB decode digest"):
-            contract.validate_formal_serving_policy(self.bundle(digest="e" * 64), entry, b"{}", {})
+        core = mock.Mock(BindingBundleError=ValueError)
+        reuse = mock.Mock(SourceEquivalenceError=RuntimeError)
+        reuse.measurement_tuple.side_effect = RuntimeError("source raw decode identity differs")
+        with mock.patch.object(contract,"_serving_contract_module",return_value=core), \
+             mock.patch.object(contract,"_source_equivalence_module",return_value=reuse):
+            with self.assertRaisesRegex(contract.NativeMTPEvidenceError,"source raw decode identity"):
+                contract.validate_formal_serving_policy(self.bundle(digest="e" * 64), entry, b"{}", {})
+        core.validate_formal_bench.assert_not_called()
+
 
 
 if __name__ == "__main__":

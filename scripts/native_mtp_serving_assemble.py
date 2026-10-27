@@ -152,10 +152,14 @@ def benchmark(root,config,entry,core):
     measured_digest=equivalence.source_decode_digest(root,policy['provider_commit'])
     source_proof=equivalence.verify_source_equivalence(root,policy['provider_commit'],entry['source_commit'],measured_digest,entry['decode_path_digest'],
         request_feature_profile=entry['request_feature_profile'])
-    if policy.get('mlx_fork_revision')!=entry['runtime_revision']:
-        require(policy['provider_commit']==equivalence.W3_SOURCE and policy.get('mlx_fork_revision')==equivalence.OLD_FORK
-                and entry['runtime_revision']==equivalence.NEW_FORK and source_proof is not None,
-                'W3 runtime fork differs without exact product-source proof')
+    if policy['provider_commit']==equivalence.INTEGRATION_MEASURED_SOURCE:
+        equivalence.measurement_tuple(root,policy['provider_commit'],entry['source_commit'],
+            measured_digest,entry,policy['mlx_fork_revision'])
+    else:
+        if policy.get('mlx_fork_revision')!=entry['runtime_revision']:
+            require(policy['provider_commit']==equivalence.W3_SOURCE and policy.get('mlx_fork_revision')==equivalence.OLD_FORK
+                    and entry['runtime_revision']==equivalence.NEW_FORK and source_proof is not None,
+                    'W3 runtime fork differs without exact product-source proof')
     require(result.get('benchmark_policy_sha256')==sha(read(q/'bench-policy.json')),'formal qualification hash differs')
     return step('14','studio-and-tier-benchmark',{'benchmark_preregistered':True,'material_production_economics_gate':True,
         'all_advertised_hardware_tiers':True},{'advertised_scope':[{'hardware_class':entry['hardware_class'],'ram_bytes':entry['ram_bytes'],

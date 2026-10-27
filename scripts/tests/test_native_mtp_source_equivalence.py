@@ -192,4 +192,107 @@ class HistoricalSampledBridgeTests(unittest.TestCase):
         self.decoder=self.decoder.replace(b'== Self.sampledRequestFeatureProfile',b'!= Self.sampledRequestFeatureProfile')
         with self.assertRaisesRegex(M.SourceEquivalenceError,'profile decoder changed'):self.run_bridge()
 
-if __name__=='__main__':unittest.main()
+
+
+class IntegrationReuseTests(unittest.TestCase):
+    """The new bridge is a closed reviewed merge, not a generic waiver."""
+    def setUp(self):
+        ContractTests.setUp(self)
+        self.measured = M.INTEGRATION_MEASURED_SOURCE
+        self.reviewed = M.INTEGRATION_REVIEWED_SOURCE
+        self.manifest = encoded({'schema_version':'macprovider.decode-path-manifest.v1',
+            'files':['Sources/test.swift'],'dependencies':['mlx-swift-lm']})
+        self.old_resolved = encoded({'pins':[{'identity':'mlx-swift-lm','state':{'revision':M.NEW_FORK}}]})
+        self.new_resolved = encoded({'pins':[{'identity':'mlx-swift-lm','state':{'revision':M.INTEGRATION_FORK}}]})
+        self.scope = copy.deepcopy(M.INTEGRATION_SCOPE)
+        self.old = b'let reviewedTokenPath = 1\n'
+        self.new = b'let reviewedTokenPath = 1\nlet unrelatedAdmissionOwnership = 2\n'
+        self.blobs = {}
+        for source, code, resolved in ((self.measured,self.old,self.old_resolved),
+                (self.reviewed,self.new,self.new_resolved),(self.current,self.new,self.new_resolved)):
+            self.blobs[source,'phase3-binary/decode-path-manifest.json'] = self.manifest
+            self.blobs[source,'phase3-binary/Package.resolved'] = resolved
+            self.blobs[source,'phase3-binary/Sources/test.swift'] = code
+            for path, value in self.build.items(): self.blobs[source,path] = value
+        self.contract = {'schema_version':M.INTEGRATION_SCHEMA,
+            'measured_source_commit':self.measured,'reviewed_source_commit':self.reviewed,
+            'tuple':self.scope,'measured_runtime_revision':M.NEW_FORK,
+            'current_runtime_revision':M.INTEGRATION_FORK,'manifest_sha256':M.sha(self.manifest),
+            'package_resolved':{'measured_sha256':M.sha(self.old_resolved),'current_sha256':M.sha(self.new_resolved)},
+            'files':{'Sources/test.swift':{'measured_sha256':M.sha(self.old),'current_sha256':M.sha(self.new)}},
+            'build_inputs':{path:{'measured_sha256':M.sha(value),'current_sha256':M.sha(value)}
+                for path,value in self.build.items()},'reviewed_behavior':['Exact isolated GLM tuple, no contention claim.']}
+        self.repin()
+
+    blob = ContractTests.blob
+
+    def repin(self):
+        self.raw = encoded(self.contract)
+        self.blobs[self.current,M.INTEGRATION_CONTRACT_PATH] = self.raw
+        self.blobs[self.current,M.RECIPE_PATH] = encoded({'schema_version':'macprovider.native-mtp-binding-recipe.v1',
+            'model_key':'zai-org/glm-5.3-flash','source_inputs':{M.INTEGRATION_CONTRACT_PATH:M.sha(self.raw)}})
+
+    def run_proof(self, profile=M.PROFILE):
+        with patch.object(M,'git_blob',side_effect=self.blob), patch.object(M,'integration_scope',return_value=self.scope):
+            old = M.source_decode_digest(Path('.'),self.measured)
+            new = M.source_decode_digest(Path('.'),self.current)
+            return M.verify_source_equivalence(Path('.'),self.measured,self.current,old,new,
+                request_feature_profile=profile)
+
+    def entry(self):
+        with patch.object(M,'git_blob',side_effect=self.blob):
+            digest = M.source_decode_digest(Path('.'),self.current)
+        return dict(self.scope, runtime_revision=M.INTEGRATION_FORK,decode_path_digest=digest,
+            ordinary_baseline={'artifact_hash':self.scope['artifact_hash'],'qualified_slots':4,'decode_path':'ordinary'})
+
+    def measured_tuple(self, entry):
+        with patch.object(M,'git_blob',side_effect=self.blob), patch.object(M,'integration_scope',return_value=self.scope):
+            digest = M.source_decode_digest(Path('.'),self.measured)
+            return M.measurement_tuple(Path('.'),self.measured,self.current,digest,entry,M.NEW_FORK)
+
+    def test_exact_reviewed_integration_passes_and_preserves_raw_runtime(self):
+        self.assertEqual(self.run_proof(),M.sha(self.raw))
+        entry = self.entry(); original = copy.deepcopy(entry)
+        measured = self.measured_tuple(entry)
+        self.assertEqual(entry, original)
+        self.assertEqual(measured, dict(entry,runtime_revision=M.NEW_FORK))
+
+    def test_changed_production_cannot_be_waived_even_by_repinning_contract(self):
+        value = self.new+b'let changedVerify = true\n'
+        self.blobs[self.current,'phase3-binary/Sources/test.swift'] = value
+        self.contract['files']['Sources/test.swift']['current_sha256'] = M.sha(value); self.repin()
+        with self.assertRaisesRegex(M.SourceEquivalenceError,'reviewed merge'): self.run_proof()
+
+    def test_changed_dependency_cannot_be_waived_even_by_repinning_contract(self):
+        value = self.new_resolved.replace(M.INTEGRATION_FORK.encode(),b'f'*40)
+        self.blobs[self.current,'phase3-binary/Package.resolved'] = value
+        self.contract['package_resolved']['current_sha256'] = M.sha(value); self.repin()
+        with self.assertRaisesRegex(M.SourceEquivalenceError,'reviewed merge'): self.run_proof()
+
+    def test_scope_change_or_foreign_artifacts_refused(self):
+        for field, value in [('max_native_active_rows',2),('proposal_depth',2),('qualified_slots',8),
+                ('max_prompt_tokens',8192),('artifact_hash','f'*64),('tokenizer_sha256','e'*64),
+                ('request_feature_profile','native_mtp_greedy_text_v1')]:
+            entry = self.entry(); entry[field] = value
+            with self.subTest(field=field), self.assertRaises(M.SourceEquivalenceError): self.measured_tuple(entry)
+
+    def test_profile_reuse_is_not_a_greedy_or_unknown_profile_exemption(self):
+        for profile in (None,'native_mtp_greedy_text_v1','unknown'):
+            with self.subTest(profile=profile), self.assertRaisesRegex(M.SourceEquivalenceError,'source/profile'):
+                self.run_proof(profile)
+
+    def test_new_release_build_flags_cannot_be_waived(self):
+        path = 'phase3-binary/Package.swift'; value = b'.define("DEBUG")\n'
+        self.blobs[self.current,path] = value
+        self.contract['build_inputs'][path]['current_sha256'] = M.sha(value); self.repin()
+        with self.assertRaisesRegex(M.SourceEquivalenceError,'reviewed merge'): self.run_proof()
+
+    def test_contract_pin_and_closed_shape_required(self):
+        self.blobs[self.current,M.INTEGRATION_CONTRACT_PATH] += b' '
+        with self.assertRaisesRegex(M.SourceEquivalenceError,'not recipe pinned'): self.run_proof()
+        self.contract['waiver'] = True; self.repin()
+        with self.assertRaisesRegex(M.SourceEquivalenceError,'fields differ'): self.run_proof()
+
+
+if __name__ == '__main__':
+    unittest.main()

@@ -452,21 +452,21 @@ def _qualification(stage: Path, bundle: Path, entry: dict, recipe: dict, *, repo
     require(set(source) == {"source_commit", "decode_path_digest", "measurement_identity"}
             and source["source_commit"] == policy["provider_commit"], "qualification source binding")
     measured_identity = dict(source)
-    require(source["decode_path_digest"] == entry["decode_path_digest"],
-            "qualification LAB decode digest differs from admitted source")
-    validate_measurement_identity(acceptance, measured_identity, label="R005")
-    validate_acceptance(acceptance, policy, corpus, entry, policy_sha=digest(q / "acceptance-policy.json"), corpus_sha=digest(q / "acceptance-corpus.json"))
-    # Caller source digest assertions are insufficient: recompute at lab commit.
+    # Raw acceptance/formal evidence keeps the measured digest and dependency.
+    # A changed current identity is accepted only through the exact committed
+    # behavior-reuse contract, with the admitted tuple independently checked.
     original_repo = Path(repo)
     equivalence = _module(stage, "native_mtp_source_equivalence.py")
     try:
-        equivalence.verify_source_equivalence(original_repo, source["source_commit"],
+        measured_entry = equivalence.measurement_tuple(original_repo, source["source_commit"],
             read_json(bundle / "inputs.json")["identity"]["source_commit"],
-            source["decode_path_digest"], entry["decode_path_digest"], request_feature_profile=entry["request_feature_profile"])
+            source["decode_path_digest"], entry, policy["mlx_fork_revision"])
     except equivalence.SourceEquivalenceError as error:
         raise BindingBundleError(str(error)) from error
-    require(policy["mlx_fork_revision"] == entry["runtime_revision"], "qualification runtime mismatch")
-    validate_formal_bench(q, stage=stage, entry=entry, identity=measured_identity)
+    validate_measurement_identity(acceptance, measured_identity, label="R005")
+    validate_acceptance(acceptance, policy, corpus, measured_entry,
+        policy_sha=digest(q / "acceptance-policy.json"), corpus_sha=digest(q / "acceptance-corpus.json"))
+    validate_formal_bench(q, stage=stage, entry=measured_entry, identity=measured_identity)
     performance = {"batch_evidence_sha256": digest(q / "bench.jsonl"),
                    "performance_evidence_sha256": digest(q / "bench-analysis.json"),
                    "benchmark_policy_sha256": digest(q / "bench-policy.json")}

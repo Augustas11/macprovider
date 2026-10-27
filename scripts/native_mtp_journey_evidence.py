@@ -532,13 +532,11 @@ def validate_formal_serving_policy(bundle: Bundle, entry: dict, policy: bytes, s
         source = parse_json((q / "source.json").read_bytes(), "qualification source")
         if not isinstance(source, dict) or set(source) != {"source_commit", "decode_path_digest", "measurement_identity"}:
             fail("qualification source binding")
-        if source["decode_path_digest"] != entry["decode_path_digest"]:
-            fail("qualification LAB decode digest differs from admitted source")
         try:
-            reuse.verify_source_equivalence(ROOT, source["source_commit"], entry["source_commit"],
-                source["decode_path_digest"], entry["decode_path_digest"],
-                request_feature_profile=entry["request_feature_profile"])
-            core.validate_formal_bench(q, stage=ROOT, entry=entry, identity=source)
+            measured_policy = parse_json((q / "bench-policy.json").read_bytes(), "formal policy")
+            measured_entry = reuse.measurement_tuple(ROOT, source["source_commit"], entry["source_commit"],
+                source["decode_path_digest"], entry, measured_policy.get("mlx_fork_revision"))
+            core.validate_formal_bench(q, stage=ROOT, entry=measured_entry, identity=source)
             hashes = {"batch_evidence_sha256": sha256((q / "bench.jsonl").read_bytes()),
                       "performance_evidence_sha256": sha256((q / "bench-analysis.json").read_bytes()),
                       "benchmark_policy_sha256": sha256(policy)}
