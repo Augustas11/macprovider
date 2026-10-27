@@ -541,6 +541,20 @@ final class ServingKnobsConfigTests: XCTestCase {
         XCTAssertEqual(clearCount, 1)
     }
 
+    func testChunkedPrefillClearsTemporaryBuffersOnlyAtPromptCompletion() {
+        var clearCount = 0
+        // A boundary-only chunk and its unchanged continuation must not flush
+        // allocations between forwards. The final prompt chunk releases them,
+        // matching serial prefill before decode starts.
+        for final in [false, false, false, true] {
+            ModelRuntime.clearMLXBufferCacheAfterPrefill(isFinalChunk: final) {
+                clearCount += 1
+            }
+            XCTAssertEqual(clearCount, final ? 1 : 0)
+        }
+        XCTAssertEqual(clearCount, 1)
+    }
+
     func testContinuousBatchQueueWaitTimeoutEnvironmentOverridesYAML() throws {
         let config = try ConfigLoader.load(
             cli: CLIOverrides(),

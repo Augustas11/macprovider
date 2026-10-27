@@ -151,7 +151,7 @@ final class KVDiskTierTests: XCTestCase {
     func testPurgeClearsHotTierAndFencesOutstandingLease() async throws {
         let tier = makeTier(root: makeRoot())
         let activated = await tier.activateForControlPlane(); XCTAssertTrue(activated)
-        let cache = ConversationCache()
+        let cache = makeConversationCacheForTest()
         await tier.store.setHotPurgeHooks(
             single: { key in await cache.purgeHot(conversationKey: key) },
             all: { await cache.purgeAllHot() })
@@ -199,7 +199,7 @@ final class KVDiskTierTests: XCTestCase {
     func testPurgeAllClearsHotTier() async throws {
         let tier = makeTier(root: makeRoot())
         let activated = await tier.activateForControlPlane(); XCTAssertTrue(activated)
-        let cache = ConversationCache()
+        let cache = makeConversationCacheForTest()
         await tier.store.setHotPurgeHooks(
             single: { key in await cache.purgeHot(conversationKey: key) },
             all: { await cache.purgeAllHot() })
@@ -262,7 +262,7 @@ final class KVDiskTierTests: XCTestCase {
     func testHotOnlyPurgeAdvancesWatermarkAndFencesQueuedSnapshot() async throws {
         let tier = makeTier(root: makeRoot())
         let __act = await tier.activateForControlPlane(); XCTAssertTrue(__act)
-        let cache = ConversationCache()
+        let cache = makeConversationCacheForTest()
         await tier.store.setHotPurgeHooks(
             single: { key in await cache.purgeHot(conversationKey: key) },
             all: { await cache.purgeAllHot() })
@@ -362,7 +362,7 @@ final class KVDiskTierTests: XCTestCase {
     func testHighWatermarkCapPurgeClearsHotTier() async throws {
         let tier = makeTier(root: makeRoot())
         let __act = await tier.activateForControlPlane(); XCTAssertTrue(__act)
-        let cache = ConversationCache()
+        let cache = makeConversationCacheForTest()
         await tier.store.setHotPurgeHooks(
             single: { key in await cache.purgeHot(conversationKey: key) },
             all: { await cache.purgeAllHot() })

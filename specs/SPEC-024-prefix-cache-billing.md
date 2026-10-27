@@ -1,8 +1,20 @@
 # SPEC-024 - Prefix-cache billing and provider-local cache isolation
 
-**Version:** 0.2.13 (2026-10-25, GLM-5-Next prompt snapshots on continuous-batching rows)
+**Version:** 0.2.14 (2026-10-26, bounded agent snapshot retention)
 **Status:** **Billing arithmetic (§4 ledger / §5 rate card / §6 formula) MOVED to SPEC-005 v0.6** (canonical). SPEC-024 **retains** the `cached_prompt_tokens` **wire field** (§3, a SPEC-002 addendum), the **buyer-visible** mirror field (§8, a SPEC-006 addendum), the fraud model (§7), and the provider-local cache-**isolation** baseline (§11–§16) — none of which SPEC-005 **re-owns** (SPEC-005 §5.3.1 does fold in the §14 coordinator cross-check *gates* as billing-eligibility rules, but SPEC-024 remains their canonical home).
 **Depends on:** SPEC-002 v1.5.2 (coordinator-provider wire), SPEC-004 v0.3.2 (sticky affinity; FR-SR-2 provider-visibility carve-out), SPEC-005 v0.6.10 (billing — the canonical owner of prefix-cache billing arithmetic, formula, ledger columns, and rate-card keys), SPEC-006 v0.9.39 (buyer API; §1.3 conversation-key derivation + survivability (b) carve-out + OpenAI nested usage), SPEC-008 v0.4.1 (Tier-2 trust; §2.2 invariant (b) carve-out permitting the provider-visible derived conversation_key), SPEC-018 v0.2.4 (tool calling)
+
+**Change log v0.2.14 (2026-10-26, Related: #2153, Related: #2143):**
+- **FR-CI4 / FR-CI2a / SPEC-024-R005.** Agent retention defaults to 64 entries,
+  2,000,000 total tokens and 72-hour reuse eligibility. These are ceilings, not
+  memory commitments: actual target, recurrent-checkpoint and MTP-head tensor
+  bytes also bound hot residency. Preserve the full CB pool/slots, the maximum
+  native-MTP verify window and SPEC-048-R012's 10% system free-memory floor;
+  evict or decline cache residency rather than shrinking serving capacity.
+- Eligible prompt snapshots may use SPEC-037's encrypted, lossless versioned
+  snapshot codec. Restore MUST preserve the exact state, metadata and R005
+  provenance; the same `begin()` predicate decides reuse after promotion.
+  Disk quotas, the free-space floor and purge fencing remain mandatory.
 
 **Change log v0.2.13 (2026-10-25, Related: #2143 — GLM-5-Next prompt snapshots on CB rows):**
 - **SPEC-024-R005 / FR-CI2a.** A GLM-5-Next continuous-batching row publishes its
@@ -498,8 +510,8 @@ prompt is a **miss** (`prompt_snapshot_diverged` or `nothing_new`), and its laye
 trimmed. A hit resumes prefill at `S` and reports `cached_prompt_tokens = S`. With
 deterministic decoding a resumed turn MUST produce the same greedy tokens as a fresh prefill of
 the full prompt (AC-CI-6). Snapshot entries count against the FR-CI4 conversation and token caps
-like any other entry (one snapshot per entry, `S` tokens) and are never written to the SPEC-037
-disk tier. A DeepSeek V4 continuous-batching row captures the same snapshot when its prefill
+like any other entry (one snapshot per entry, `S` tokens). Eligible allowlisted snapshots may
+use the SPEC-037 versioned snapshot disk codec; unsupported classes remain memory-only. A DeepSeek V4 continuous-batching row captures the same snapshot when its prefill
 reaches `S` and publishes only that snapshot at a normal terminal (never a retained or decoded
 cache; no captured snapshot publishes nothing); the next keyed turn serial-routes under the
 SPEC-038 AC-26 fence and reuses it there. GLM-5-Next serial turns snapshot as above.
@@ -566,7 +578,13 @@ provenance — the provider does not see `sticky_result`; whether that reuse is 
 separate coordinator-side decision (§3 layering / FR-CI11).
 
 **FR-CI4 (lifecycle bounds).** The cache MUST bound reuse-**eligibility** (shipped: a TTL,
-default 900 s, and LRU eviction on a per-provider conversation-count cap and total-token cap).
+default 259,200 s, and LRU eviction on per-provider caps of 64 conversations and 2,000,000
+tokens, plus actual tensor-byte and available-memory limits). Hit access refreshes recency;
+on equal recency the shorter prefix is evicted first. Hot tensor residency MUST stay below
+min(8 GiB, 1/32 of physical memory) and below available memory after reserving the full configured CB
+pool/slots, complete native-MTP verify windows, bounded disk staging, conservative slack and
+the SPEC-048-R012 10% physical-memory floor. Unknown or insufficient headroom declines cache
+residency or promotion; it MUST NOT reduce CB slots or native-MTP capacity.
 The shipped TTL sweep is **lazy** — it runs only on the next `begin()`, so an idle process MAY
 physically retain expired KV in memory beyond the TTL until the next request; *eligibility* is
 TTL-bounded even though *physical retention* is not. These bounds are IMPL-tunable; the

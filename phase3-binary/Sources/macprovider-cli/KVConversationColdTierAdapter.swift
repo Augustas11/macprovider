@@ -10,6 +10,7 @@ import MLXLMCommon
 enum KVBuildIdentity {
     static let abiEpoch = 1
     static let recurrentABIEpoch = 2
+    static let promptSnapshotABIEpoch = 3
     /// The REAL pinned mlx-swift-lm git revision (HIGH-8). Bump on any dependency
     /// change: `KVBuildIdentityDriftTests` parses Package.resolved and fails CI if
     /// this drifts from the resolved pin. A different pin ⇒ a different ABI ⇒ all
@@ -78,6 +79,7 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
     private let writeStagingMaxBytes: Int
     private let maxEntryBytes: Int
     private let stagingMaxBytes: Int
+    private let memoryBudget: ConversationCacheMemoryBudget
     /// Aggregate write-live reservation (Item 3, FR-KVP3 RAM-DoS bound). ONE budget
     /// (`writeStagingMaxBytes`) covers all write-side memory held simultaneously —
     /// every pending snapshot's deep copy plus the active serializer/codec buffers.
@@ -171,7 +173,8 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
          writeStagingMaxBytes: Int = KVDiskCacheStoreConfig.writeStagingHardMax,
          maxEntryBytes: Int = KVDiskCacheStoreConfig.writeStagingHardMax,
          stagingMaxBytes: Int = KVDiskCacheStoreConfig.promotionCeilingHardMax,
-         incarnation: String = UUID().uuidString) {
+         incarnation: String = UUID().uuidString,
+         memoryBudget: ConversationCacheMemoryBudget = .system) {
         self.store = store
         self.namespaceID = namespaceID
         self.eligibilityTTLSeconds = eligibilityTTLSeconds
@@ -179,6 +182,7 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
         self.maxEntryBytes = maxEntryBytes
         self.stagingMaxBytes = stagingMaxBytes
         self.incarnation = incarnation
+        self.memoryBudget = memoryBudget
     }
 
     /// Cache the current key epoch (store epoch observer). Called synchronously on
@@ -271,6 +275,18 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
         return true
     }
 
+    /// codec-v3 constructor topology can be seeded from empty model caches: no
+    /// GPU forward and no tensor copies are needed for first-restart promotion.
+    @discardableResult
+    func seedPromptSnapshotTemplate(servedModelID: String, layers: [KVCache]) -> Bool {
+        guard let template = KVPromptSnapshotCodec.template(layers: layers) else { return false }
+        templateLock.lock()
+        geometryTemplates[servedModelID] = template
+        recurrentGeometryTemplates.removeValue(forKey: servedModelID)
+        templateLock.unlock()
+        return true
+    }
+
     /// Test-only: whether a live-model geometry template is present for the served model.
     func hasGeometryTemplateForTest(servedModelID: String) -> Bool {
         templateLock.lock(); defer { templateLock.unlock() }
@@ -310,8 +326,9 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
         recurrentLayouts: [KVRecurrentLayerRecord] = []
     ) -> KVRuntimeIdentity {
         let recurrent = !recurrentLayouts.isEmpty
+        let prompt = template.first?.layoutVersion == 3
         return KVRuntimeIdentity(
-            codecID: recurrent ? KVDiskCacheFormat.recurrentCodecID : KVDiskCacheFormat.codecID,
+            codecID: prompt ? KVDiskCacheFormat.promptSnapshotCodecID : (recurrent ? KVDiskCacheFormat.recurrentCodecID : KVDiskCacheFormat.codecID),
             recurrentLayerLayouts: recurrentLayouts,
             namespaceID: namespaceID,
             keyEpoch: epoch,
@@ -323,10 +340,10 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
             tokenizerID: identity.tokenizerID,
             tokenizerConfigSHA256: identity.tokenizerConfigSHA256,
             chatTemplateSHA256: identity.chatTemplateSHA256,
-            abiEpoch: recurrent ? KVBuildIdentity.recurrentABIEpoch : KVBuildIdentity.abiEpoch,
+            abiEpoch: prompt ? KVBuildIdentity.promptSnapshotABIEpoch : (recurrent ? KVBuildIdentity.recurrentABIEpoch : KVBuildIdentity.abiEpoch),
             mlxSwiftLMRevision: KVBuildIdentity.mlxSwiftLMRevision,
             mlxVersion: KVBuildIdentity.mlxVersion,
-            cacheClass: recurrent ? KVDiskCacheFormat.recurrentCacheClass : (KVDiskCacheFormat.allowlistedCacheClasses.first ?? "KVCacheSimple"),
+            cacheClass: prompt ? KVDiskCacheFormat.promptSnapshotCacheClass : (recurrent ? KVDiskCacheFormat.recurrentCacheClass : (KVDiskCacheFormat.allowlistedCacheClasses.first ?? "KVCacheSimple")),
             layerCount: template.count,
             layers: template,
             kvBits: identity.kvBits,
@@ -358,6 +375,7 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
         restoreLock.unlock()
         guard claimed else { return nil }
         defer { restoreLock.lock(); restoreInFlight = false; restoreLock.unlock() }
+        guard memoryBudget.admitsStaging(bytes: stagingMaxBytes) else { return nil }
         let epoch = await store.currentEpoch
         let runtime = promotionRuntime(
             identity: identity, template: template, epoch: epoch,
@@ -366,7 +384,11 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
             rawKey: conversationKey, runtime: runtime, nowMillis: Self.nowMillis(), emitHitEvent: false)
         guard let result, case let .hit(hit) = result else { return nil }
         let restored: ConversationCacheLayers
-        if let decodedV2 = hit.decodedV2 {
+        if let prompt = hit.promptSnapshot {
+            guard let snapshot = KVPromptSnapshotCodec.restore(prompt) else { return nil }
+            memoryBudget.observe(layers: snapshot, tokenCount: hit.tokens.count)
+            restored = snapshot
+        } else if let decodedV2 = hit.decodedV2 {
             guard let recurrent = KVRecurrentCacheSerialization.restore(decodedV2) else { return nil }
             restored = recurrent
         } else {
@@ -383,7 +405,7 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
             modelSHA256: identity.modelSHA256 ?? "",
             catalogRevision: identity.catalogRevision,
             kvBits: identity.kvBits,
-            codecID: hit.decodedV2 == nil ? KVDiskCacheFormat.codecID : KVDiskCacheFormat.recurrentCodecID,
+            codecID: hit.promptSnapshot != nil ? KVDiskCacheFormat.promptSnapshotCodecID : (hit.decodedV2 == nil ? KVDiskCacheFormat.codecID : KVDiskCacheFormat.recurrentCodecID),
             createdAtMillis: hit.createdAtMillis,
             eligibleUntilMillis: hit.eligibleUntilMillis)
     }
@@ -422,9 +444,10 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
         // relay/tier2 request, or mid-generation `kvBits` quantization. Emit a
         // `disk_write_skipped(unsupported_cache_class)` carrying the runtime class
         // name, then still fail safe to miss (return nil) as before.
-        let hasRecurrent = ConversationCacheLayers.hasRecurrentLayers(layers.layers)
+        let prompt = layers.promptSnapshot
+        let hasRecurrent = !prompt && ConversationCacheLayers.hasRecurrentLayers(layers.layers)
         let caches = layers.layers as? [KVCacheSimple]
-        guard caches != nil || hasRecurrent else {
+        guard prompt || caches != nil || hasRecurrent else {
             // Report the FIRST layer that is NOT KVCacheSimple: for a heterogeneous
             // array whose layer 0 IS KVCacheSimple but a later layer fails the cast,
             // reporting layer 0's class would be misleadingly "KVCacheSimple". Fall
@@ -438,7 +461,7 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
         // HIGH-5 — estimate the decoded size from GEOMETRY (no byte copy) and skip an
         // oversized snapshot BEFORE the deep copy, so a huge cache can never be copied
         // only to be rejected by the store.
-        let estimatedDecoded = hasRecurrent
+        let estimatedDecoded = prompt ? KVPromptSnapshotCodec.estimatedLength(layers, tokens: fullTokens) : hasRecurrent
             ? KVRecurrentCacheSerialization.estimatedDecodedLength(
                 layers: layers.layers, checkpoints: layers.recurrentCheckpoints,
                 tokenCount: fullTokens.count)
@@ -458,7 +481,7 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
         // FR-KVP9 / write-side budget: an entry that could never be promoted MUST
         // NOT be written. Skip BEFORE the deep copy (SPEC-037 §3). The silent
         // KVS-01a drops were oversize prompts, not this ceiling on the 1600-token class.
-        let (promotionEstimate, promotionOverflow) = estimatedDecoded.multipliedReportingOverflow(by: hasRecurrent ? 2 : 1)
+        let (promotionEstimate, promotionOverflow) = estimatedDecoded.multipliedReportingOverflow(by: hasRecurrent || prompt ? 2 : 1)
         guard !promotionOverflow, promotionEstimate <= stagingMaxBytes else {
             FileHandle.standardError.write(Data("event=kv_disk_cache action=capture_skipped reason=exceeds_promotion_ceiling decoded=\(estimatedDecoded) required=\(promotionOverflow ? "overflow" : String(promotionEstimate)) cap=\(stagingMaxBytes) knob=staging_max_bytes\n".utf8))
             Task { [store] in await store.notePromotionCeilingSkipped(rawKey: conversationKey) }
@@ -478,7 +501,8 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
         // snapshot as a single-release token and released once by the persist Task
         // (completion, cancellation, or displacement). Multiple indices therefore cannot
         // each retain a ceiling-sized snapshot concurrently.
-        guard reserveWriteLive(writeFootprint, volumeBytes: estimatedDecoded) else {
+        guard memoryBudget.admitsStaging(bytes: writeFootprint),
+              reserveWriteLive(writeFootprint, volumeBytes: estimatedDecoded) else {
             Task { [store] in await store.noteWriteBudgetSkipped(rawKey: conversationKey) }
             return nil
         }
@@ -490,13 +514,22 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
         let payloads: [KVLayerPayload]
         let payloadsV2: [KVCacheLayerPayload]
         let checkpointPayloads: [KVRecurrentCheckpointPayload]
-        if hasRecurrent {
+        let promptPayload: KVPromptSnapshotPayload?
+        if prompt {
+            guard let snapshot = KVPromptSnapshotCodec.capture(layers, tokens: fullTokens) else { return nil }
+            promptPayload = snapshot
+            payloads = []
+            payloadsV2 = []
+            checkpointPayloads = []
+        } else if hasRecurrent {
+            promptPayload = nil
             guard let recurrent = KVRecurrentCacheSerialization.snapshot(
                 layers: layers.layers, checkpoints: layers.recurrentCheckpoints) else { return nil }
             payloads = []
             payloadsV2 = recurrent.layers
             checkpointPayloads = recurrent.checkpoints
         } else {
+            promptPayload = nil
             guard let caches, let serialized = KVCacheSerialization.snapshotLayers(caches) else { return nil }
             payloads = serialized
             payloadsV2 = []
@@ -506,7 +539,10 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
         // Learn/refresh the live-model geometry template for future promotions.
         let template: [KVLayerGeometry]
         let recurrentTemplate: [KVRecurrentLayerRecord]
-        if hasRecurrent,
+        if prompt, let topology = KVPromptSnapshotCodec.template(layers: layers.layers) {
+            template = topology
+            recurrentTemplate = []
+        } else if hasRecurrent,
            let geometry = KVRecurrentCacheSerialization.geometry(
                layers: layers.layers, checkpoints: layers.recurrentCheckpoints) {
             template = geometry.layers.map { record in
@@ -538,7 +574,7 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
         seqLock.unlock()
 
         let writeIdentity = KVWriteIdentity(
-            codecID: hasRecurrent ? KVDiskCacheFormat.recurrentCodecID : KVDiskCacheFormat.codecID,
+            codecID: prompt ? KVDiskCacheFormat.promptSnapshotCodecID : (hasRecurrent ? KVDiskCacheFormat.recurrentCodecID : KVDiskCacheFormat.codecID),
             requestModel: identity.requestModel,
             servedModelID: identity.servedModelID,
             modelSHA256: identity.modelSHA256 ?? "",
@@ -546,11 +582,11 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
             tokenizerID: identity.tokenizerID,
             tokenizerConfigSHA256: identity.tokenizerConfigSHA256,
             chatTemplateSHA256: identity.chatTemplateSHA256,
-            abiEpoch: hasRecurrent ? KVBuildIdentity.recurrentABIEpoch : KVBuildIdentity.abiEpoch,
+            abiEpoch: prompt ? KVBuildIdentity.promptSnapshotABIEpoch : (hasRecurrent ? KVBuildIdentity.recurrentABIEpoch : KVBuildIdentity.abiEpoch),
             mlxSwiftLMRevision: KVBuildIdentity.mlxSwiftLMRevision,
             mlxVersion: KVBuildIdentity.mlxVersion,
-            cacheClass: hasRecurrent ? KVDiskCacheFormat.recurrentCacheClass : (payloads.first?.classID ?? "KVCacheSimple"),
-            layerCount: hasRecurrent ? payloadsV2.count : payloads.count,
+            cacheClass: prompt ? KVDiskCacheFormat.promptSnapshotCacheClass : (hasRecurrent ? KVDiskCacheFormat.recurrentCacheClass : (payloads.first?.classID ?? "KVCacheSimple")),
+            layerCount: prompt ? layers.layers.count : (hasRecurrent ? payloadsV2.count : payloads.count),
             kvBits: identity.kvBits,
             kvGroupSize: identity.kvGroupSize,
             kvQuantMode: identity.kvQuantMode,
@@ -570,6 +606,7 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
             layers: payloads,
             layersV2: payloadsV2,
             recurrentCheckpoints: checkpointPayloads,
+            promptSnapshot: promptPayload,
             identity: writeIdentity,
             sampledPurgeGeneration: sampledPurgeGeneration,
             commitSequence: seq,
@@ -625,6 +662,7 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
         _ = try? await store.writeColdSnapshot(
             rawKey: snapshot.rawKey, tokens: snapshot.tokens, layers: snapshot.layers,
             layersV2: snapshot.layersV2, recurrentCheckpoints: snapshot.recurrentCheckpoints,
+            promptSnapshot: snapshot.promptSnapshot,
             identity: snapshot.identity, sampledPurgeGeneration: snapshot.sampledPurgeGeneration,
             commitSequence: snapshot.commitSequence,
             createdAtMillis: snapshot.createdAtMillis, eligibleUntilMillis: snapshot.eligibleUntilMillis,

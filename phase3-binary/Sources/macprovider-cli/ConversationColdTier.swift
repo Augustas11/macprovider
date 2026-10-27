@@ -200,6 +200,7 @@ struct ConversationColdSnapshot: Sendable {
     let layers: [KVLayerPayload]
     let layersV2: [KVCacheLayerPayload]
     let recurrentCheckpoints: [KVRecurrentCheckpointPayload]
+    let promptSnapshot: KVPromptSnapshotPayload?
     let identity: KVWriteIdentity
     let sampledPurgeGeneration: Int
     /// Monotonic per-index commit sequence, allocated synchronously under the hot
@@ -219,6 +220,7 @@ struct ConversationColdSnapshot: Sendable {
     init(rawKey: String, tokens: [Int32], layers: [KVLayerPayload],
          layersV2: [KVCacheLayerPayload] = [],
          recurrentCheckpoints: [KVRecurrentCheckpointPayload] = [],
+         promptSnapshot: KVPromptSnapshotPayload? = nil,
          identity: KVWriteIdentity,
          sampledPurgeGeneration: Int, commitSequence: Int, createdAtMillis: Int,
          eligibleUntilMillis: Int, incarnation: String, reservedWriteBytes: Int = 0) {
@@ -227,6 +229,7 @@ struct ConversationColdSnapshot: Sendable {
         self.layers = layers
         self.layersV2 = layersV2
         self.recurrentCheckpoints = recurrentCheckpoints
+        self.promptSnapshot = promptSnapshot
         self.identity = identity
         self.sampledPurgeGeneration = sampledPurgeGeneration
         self.commitSequence = commitSequence
