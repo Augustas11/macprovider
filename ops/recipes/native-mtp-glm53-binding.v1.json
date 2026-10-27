@@ -31,7 +31,7 @@
     "NativeMTPAdmissionSidecarTests.testReleaseEnvelopeRejectsNativeActiveRowBoundOutsideQualifiedSlots"
   ],
   "source_inputs": {
-    "ops/recipes/native-mtp-glm53-integration-reuse.v1.json": "973de5a4cf98dfcbf6c7622825dc430490ea97e3d903d5ea74027d6861928445",
+    "ops/recipes/native-mtp-glm53-integration-reuse.v1.json": "39f0a7d315969aeb9318acd350f2505883566a35072b112ef23bf34e1f46b49d",
     "ops/recipes/native-mtp-glm53-lab-source-equivalence.v1.json": "e55765b281afa7eb68cc211eed941b3254effb2cd668ddd17ce4eb6c3a064cb6",
     "phase3-binary/catalog/autotune/autotune-artifacts-source.json": "dfd111330e85f16ad9045c14cf9b9a35be56f8c984c1fd9644bc63c0555d8b49",
     "phase3-binary/catalog/autotune/continuous-batching-policy-source.json": "6330433bee1f2c5f035d9d4fad0253c28cdd1e19f6913e8757e2033b2cffa334",

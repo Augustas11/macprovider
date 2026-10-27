@@ -347,6 +347,66 @@ class FormalLabServingTests(unittest.TestCase):
         core.validate_formal_bench.assert_not_called()
 
 
+    def projection_fixture(self):
+        from scripts.tests.test_native_mtp_r005_redacted import ProjectionTests, n
+        raw, policy, corpus, entry = ProjectionTests().raw()
+        raw.pop("measurement_identity")
+        source = {"source_commit": policy["provider_commit"], "decode_path_digest": "d" * 64,
+                  "measurement_identity": {"binary_sha256": "7" * 64, "binary_cdhash": None,
+                                           "decode_path_digest": "d" * 64}}
+        entry.update(source_commit="f" * 40, decode_path_digest="e" * 64)
+        measured = dict(entry, source_commit=source["source_commit"], decode_path_digest="d" * 64)
+        projection = n.project_acceptance(raw, policy, corpus, measured, raw_result_sha256="f" * 64,
+            policy_sha256="e" * 64, corpus_sha256="d" * 64,
+            custody={"commit": "a" * 40, "record_sha256": "b" * 64}, measurement_source=source)
+        files = {"observations/qualification/" + name: b"{}" for name in
+                 ("bench-policy.json", "bench.jsonl", "bench-analysis.json")}
+        files["observations/qualification/source.json"] = json.dumps(source).encode()
+        for key in ("batch_evidence_sha256", "performance_evidence_sha256", "benchmark_policy_sha256"):
+            entry[key] = contract.sha256(b"{}")
+        entry["security_negative_evidence_sha256"] = "9" * 64
+        keys = ("batch_evidence_sha256", "performance_evidence_sha256", "benchmark_policy_sha256",
+                "correctness_evidence_sha256", "security_negative_evidence_sha256")
+        steps = {"step-14-studio-and-tier-benchmark": {"details": {
+            "qualification_sha256": {key: entry[key] for key in keys}}},
+            "step-04-serial-token-oracle": {"details": {
+                "r005_numeric_projection_sha256": contract.sha256(n.canonical(projection)),
+                "r005_result_sha256": projection["raw_result_sha256"],
+                "r005_policy_sha256": projection["policy_sha256"],
+                "r005_corpus_sha256": projection["corpus_sha256"]}}}
+        return n, source, entry, measured, projection, files, steps
+
+    def check_projection(self, fixture):
+        n, source, entry, measured, projection, files, steps = fixture
+        files["observations/r005-numeric-projection.json"] = n.canonical(projection)
+        core = mock.Mock(BindingBundleError=ValueError)
+        reuse = mock.Mock(SourceEquivalenceError=RuntimeError)
+        reuse.measurement_tuple.return_value = measured
+        with mock.patch.object(contract, "_source_equivalence_module", return_value=reuse), \
+             mock.patch.object(contract, "_serving_contract_module", side_effect=lambda name:
+                 n if name == "native_mtp_r005_redacted.py" else core):
+            contract.validate_formal_serving_policy(contract.Bundle("serving", files, b""), entry, b"{}", steps)
+        self.assertEqual(reuse.measurement_tuple.call_args.args[1:4],
+                         (source["source_commit"], entry["source_commit"], source["decode_path_digest"]))
+        self.assertIs(core.validate_formal_bench.call_args.kwargs["entry"], measured)
+
+    def test_true_lab_projection_uses_verified_measured_identity(self):
+        fixture = self.projection_fixture()
+        before = copy.deepcopy(fixture[2])
+        self.check_projection(fixture)
+        self.assertEqual(fixture[2], before)
+
+    def test_foreign_projection_digest_or_source_is_rejected(self):
+        for field in ("decode_path_digest", "measured_source_commit"):
+            fixture = self.projection_fixture()
+            if field == "decode_path_digest":
+                fixture[4]["measurement_identity"][field] = "e" * 64
+            else:
+                fixture[4][field] = "9" * 40
+            with self.subTest(field=field), self.assertRaises(contract.NativeMTPEvidenceError):
+                self.check_projection(fixture)
+
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -255,7 +255,10 @@ class IntegrationReuseTests(unittest.TestCase):
         entry = self.entry(); original = copy.deepcopy(entry)
         measured = self.measured_tuple(entry)
         self.assertEqual(entry, original)
-        self.assertEqual(measured, dict(entry,runtime_revision=M.NEW_FORK))
+        with patch.object(M,'git_blob',side_effect=self.blob):
+            digest = M.source_decode_digest(Path('.'),self.measured)
+        self.assertEqual(measured, dict(entry,runtime_revision=M.NEW_FORK,
+            decode_path_digest=digest,source_commit=self.measured))
 
     def test_changed_production_cannot_be_waived_even_by_repinning_contract(self):
         value = self.new+b'let changedVerify = true\n'
@@ -272,7 +275,7 @@ class IntegrationReuseTests(unittest.TestCase):
     def test_scope_change_or_foreign_artifacts_refused(self):
         for field, value in [('max_native_active_rows',2),('proposal_depth',2),('qualified_slots',8),
                 ('max_prompt_tokens',8192),('artifact_hash','f'*64),('tokenizer_sha256','e'*64),
-                ('request_feature_profile','native_mtp_greedy_text_v1')]:
+                ('request_feature_profile','native_mtp_greedy_text_v1'),('metallib_sha256','f'*64)]:
             entry = self.entry(); entry[field] = value
             with self.subTest(field=field), self.assertRaises(M.SourceEquivalenceError): self.measured_tuple(entry)
 

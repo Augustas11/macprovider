@@ -549,7 +549,7 @@ def validate_formal_serving_policy(bundle: Bundle, entry: dict, policy: bytes, s
             projection_bytes = bundle.require("observations/r005-numeric-projection.json")
             projection = parse_json(projection_bytes, "R005 numeric projection")
             numeric = _serving_contract_module("native_mtp_r005_redacted.py")
-            verified = numeric.validate_projection(projection, entry)
+            verified = numeric.validate_projection(projection, measured_entry)
             if projection["measurement_identity"] != source["measurement_identity"] or verified["measured_source_commit"] != source["source_commit"]:
                 fail("R005 and formal LAB source/executable differ")
             if verified["projection_sha256"] != sha256(projection_bytes):

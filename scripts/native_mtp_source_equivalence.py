@@ -47,6 +47,7 @@ INTEGRATION_SCOPE = {
     "tokenizer_sha256": "19e773648cb4e65de8660ea6365e10acca112d42a854923df93db4a6f333a82d",
     "qualified_slots": 4, "max_native_active_rows": 1,
     "proposal_depth": 1, "max_prompt_tokens": 4096,
+    "metallib_sha256": "589e56e0794dcf6fcebf7f7edbda562404653e606d6ac9bb9bdf7025a608a094",
 }
 BUILD_PATHS = {"phase3-binary/Package.swift", "phase3-binary/dist/package.sh", ".github/workflows/acceptance-candidate.yml"}
 LAB_CONDITION = b"DEBUG || MACPROVIDER_LAB_HARNESS"
@@ -347,7 +348,8 @@ def measurement_tuple(root: Path, measured: str, current: str, measured_digest: 
                     "artifact_hash": contract["tuple"]["artifact_hash"], "qualified_slots": 4, "decode_path": "ordinary"}.items())
                 and entry["runtime_revision"] == INTEGRATION_FORK and measured_runtime == NEW_FORK,
                 "integration measurement runtime/artifact differs")
-        return dict(entry, runtime_revision=measured_runtime)
+        return dict(entry, runtime_revision=measured_runtime,
+                    decode_path_digest=measured_digest, source_commit=measured)
     require(measured_runtime == entry["runtime_revision"], "qualification runtime mismatch")
     return entry
 

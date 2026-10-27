@@ -125,6 +125,7 @@
     "max_native_active_rows": 1,
     "max_prompt_tokens": 4096,
     "max_verification_positions_per_committed_milli": 2500,
+    "metallib_sha256": "589e56e0794dcf6fcebf7f7edbda562404653e606d6ac9bb9bdf7025a608a094",
     "model_key": "zai-org/glm-5.3-flash",
     "mtp_family_adapter": "glm5_next_mtp_v1",
     "mtp_head_count": 1,
