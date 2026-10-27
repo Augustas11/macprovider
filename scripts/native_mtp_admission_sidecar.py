@@ -305,8 +305,8 @@ def validate_entry(entry: object, path: str) -> dict:
         fail(f"{path}.max_native_active_rows", "exceeds qualified_slots")
     if entry["request_feature_profile"] not in PROFILES:
         fail(f"{path}.request_feature_profile", "unsupported")
-    # SPEC-048 MTP-2: the glm5_next drafter proposes greedily only.
-    if entry["mtp_family_adapter"] in {"glm5_next_mtp_v1", "deepseek_v4_dspark_v1"} and entry["request_feature_profile"] != "native_mtp_greedy_text_v1":
+    # DSpark is greedy-only; embedded layout does not restrict GLM sampling.
+    if entry["mtp_family_adapter"] == "deepseek_v4_dspark_v1" and entry["request_feature_profile"] != "native_mtp_greedy_text_v1":
         fail(f"{path}.request_feature_profile", f'{entry["mtp_family_adapter"]} is greedy only')
     if entry["mtp_family_adapter"] == "deepseek_v4_dspark_v1":
         if entry["mtp_head_count"] != 3:

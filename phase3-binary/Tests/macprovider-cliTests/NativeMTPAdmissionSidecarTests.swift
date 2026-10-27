@@ -1710,10 +1710,9 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         XCTAssertEqual(try MLXSnapshotIdentity.compute(directory: captured.targetURL).digest, fixture.authority.hash)
     }
 
-    /// SPEC-048 MTP-2: the glm5_next drafter proposes greedily only, so a
-    /// `glm5_next_mtp_v1` entry that signs the sampled profile is rejected;
-    /// the greedy profile loads, and Qwen keeps both profiles.
-    func testEmbeddedGLMAdapterIsAdmittedOnlyWithTheGreedyProfile() throws {
+    /// Greedy GLM proposals use exact target-sample matching. Only a signed
+    /// sampled profile grants sampled admission; the greedy profile keeps it off.
+    func testEmbeddedGLMAdapterAdmitsTheSignedSampledProfile() throws {
         let sampled = try makeReleaseEnvelopeFixture(
             prepareSnapshot: { base in try Self.embeddedLayout(base) },
             entryEdit: {
@@ -1722,7 +1721,16 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
             }
         )
         defer { try? FileManager.default.removeItem(at: sampled.base.root) }
-        XCTAssertEqual(try rejectedReleaseEnvelopeError(sampled), .invalidValue("$.entries[0].request_feature_profile"))
+        let sampledCapability = try NativeMTPAdmissionSidecar.load(
+            sidecarData: sampled.sidecarData,
+            signatureData: sampled.signatureData,
+            snapshotRoot: sampled.base.snapshot,
+            context: sampled.context,
+            trustedKeyring: sampled.base.trustedKeyring,
+            resolvedArtifactAuthority: sampled.authority
+        )
+        XCTAssertTrue(sampledCapability.supportsSampling)
+        XCTAssertEqual(sampledCapability.maxNativeActiveRows, 1)
 
         let greedy = try makeReleaseEnvelopeFixture(
             prepareSnapshot: { base in try Self.embeddedLayout(base) },
@@ -1744,12 +1752,26 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
 
         XCTAssertEqual(
             NativeMTPAdmissionSidecar.allowedRequestFeatureProfiles(familyAdapter: "glm5_next_mtp_v1"),
-            ["native_mtp_greedy_text_v1"]
+            ["native_mtp_greedy_text_v1", "native_mtp_sampled_text_v1"]
         )
         XCTAssertEqual(
             NativeMTPAdmissionSidecar.allowedRequestFeatureProfiles(familyAdapter: "qwen3_5_mtp_v1"),
             ["native_mtp_greedy_text_v1", "native_mtp_sampled_text_v1"]
         )
+    }
+
+    func testEmbeddedArtifactLayoutDoesNotConflateRequestProfiles() {
+        let sampledProfiles: Set<String> = ["native_mtp_greedy_text_v1", "native_mtp_sampled_text_v1"]
+        for family in ["glm5_next_mtp_v1", "qwen3_5_mtp_v1"] {
+            XCTAssertEqual(NativeMTPAdmissionSidecar.allowedRequestFeatureProfiles(familyAdapter: family), sampledProfiles)
+        }
+        XCTAssertEqual(
+            NativeMTPAdmissionSidecar.allowedRequestFeatureProfiles(familyAdapter: "deepseek_v4_dspark_v1"),
+            ["native_mtp_greedy_text_v1"]
+        )
+        for family in ["glm5_next_mtp_v1", "deepseek_v4_dspark_v1"] {
+            XCTAssertEqual(NativeMTPAdmissionSidecar.sourceLayout(forFamilyAdapter: family), "checkpoint_mtp")
+        }
     }
 
     /// SPEC-048 MTP-2 (0.1.43): a glm5_next tuple signs at most one native

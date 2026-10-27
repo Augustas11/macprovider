@@ -305,6 +305,15 @@ class NativeMTPAdmissionSidecarTests(unittest.TestCase):
 
 
 class DeepseekDSparkAdmissionTests(unittest.TestCase):
+    def test_third_entry_preserves_glm_sampled_qualification(self):
+        sampled = glm_tuple()
+        sampled["entry"]["request_feature_profile"] = "native_mtp_sampled_text_v1"
+        controls = json.loads(build([resolved_tuple(), sampled], release_input()))["entries"]
+        entries = json.loads(build([resolved_tuple(), dspark_tuple(), sampled], release_input()))["entries"]
+        self.assertEqual(entries[1:], controls)
+        self.assertEqual(entries[0]["request_feature_profile"], "native_mtp_greedy_text_v1")
+        self.assertEqual(entries[2]["request_feature_profile"], "native_mtp_sampled_text_v1")
+
     def test_third_entry_preserves_qwen_and_glm_bytes(self):
         controls = json.loads(build([resolved_tuple(), glm_tuple()], release_input()))["entries"]
         entries = json.loads(build([resolved_tuple(), dspark_tuple(), glm_tuple()], release_input()))["entries"]
@@ -399,14 +408,17 @@ class NativeMTPAdmissionMultiEntryTests(unittest.TestCase):
             identity(build(self.qwen, release_input()))["native_mtp_admission_tuple_sha256"][0],
         )
 
-    def test_glm_tuple_signs_only_the_greedy_profile(self):
-        # SPEC-048 MTP-2: the glm5_next drafter proposes greedily only.
+    def test_glm_tuple_signs_greedy_and_sampled_profiles(self):
+        # Greedy proposals are verified against the ordinary target sampler.
         body = json.loads(build([self.qwen, self.glm], release_input()))
         self.assertEqual(body["entries"][1]["request_feature_profile"], "native_mtp_greedy_text_v1")
         sampled = copy.deepcopy(self.glm)
         sampled["entry"]["request_feature_profile"] = "native_mtp_sampled_text_v1"
-        with self.assertRaisesRegex(SidecarError, "greedy only"):
-            build([self.qwen, sampled], release_input())
+        sampled_body = json.loads(build([self.qwen, sampled], release_input()))
+        self.assertEqual(sampled_body["entries"][1]["request_feature_profile"], "native_mtp_sampled_text_v1")
+        self.assertEqual(sampled_body["entries"][1]["max_native_active_rows"], 1)
+        # Profile qualification is part of the signed tuple identity.
+        self.assertNotEqual(identity(canonical_bytes(body)), identity(canonical_bytes(sampled_body)))
         # Qwen may still sign the sampled profile.
         self.assertEqual(body["entries"][0]["request_feature_profile"], self.qwen["entry"]["request_feature_profile"])
 

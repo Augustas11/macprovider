@@ -526,10 +526,10 @@ enum NativeMTPAdmissionSidecar {
         familyAdapter == embeddedMTPFamilyAdapter ? 1 : nil
     }
 
-    /// The only `request_feature_profile` values a family adapter may sign
-    /// Both embedded adapters propose greedily; Qwen keeps its signed profiles.
+    /// DSpark is qualified for greedy requests only. GLM and Qwen preserve
+    /// their signed sampled profiles independently of their artifact layout.
     static func allowedRequestFeatureProfiles(familyAdapter: String) -> Set<String> {
-        embeddedMTPFamilyAdapters.contains(familyAdapter) ? [greedyRequestFeatureProfile] : requestFeatureProfiles
+        familyAdapter == deepseekDSparkFamilyAdapter ? [greedyRequestFeatureProfile] : requestFeatureProfiles
     }
 
     /// SPEC-048-R002 (0.1.35/0.1.36): the release entry carries no layout, so
