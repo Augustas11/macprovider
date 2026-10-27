@@ -14536,7 +14536,7 @@ maxTokens: maxTokens,
             ? toolSelectionModelID ?? request.model
             : request.model
         let grammar = request.outputTraits.toolGrammar ?? ToolCallGrammar.family(modelID: renderModelID)
-        if grammar == .lfm2, Self.hasEnabledTools(request.promptSource.tools) {
+        if grammar == .lfm2, selection != .none, Self.hasEnabledTools(request.promptSource.tools) {
             try ToolSelectionPolicy.validateLFMNames(ToolSelectionPolicy.schemas(request))
         }
         let chat = try ToolPromptRenderer.renderMessages(messages, grammar: grammar)

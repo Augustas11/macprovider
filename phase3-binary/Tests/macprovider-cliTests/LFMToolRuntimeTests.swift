@@ -82,6 +82,29 @@ final class LFMToolRuntimeTests: XCTestCase {
         }
     }
 
+    func testNoneDoesNotValidateUnrenderedLFMToolNames() throws {
+        for choice in ["none", "auto"] {
+            let request = try ChatCompletionRequest.parse(data: JSONSerialization.data(withJSONObject: [
+                "model": model, "messages": [["role": "user", "content": "Answer in plain text."]],
+                "tool_choice": choice,
+                "tools": [["type": "function", "function": [
+                    "name": "get-weather", "parameters": ["type": "object"],
+                ]]],
+            ]))
+            if choice == "none" {
+                XCTAssertNoThrow(try ToolSelectionPolicy.validateRequest(
+                    request, loadedModelID: model, runtime: "mlx_cache"))
+                let prepared = try ModelRuntime.userInput(for: request)
+                XCTAssertNil(prepared.tools)
+                XCTAssertFalse(try render(prepared).contains("get-weather"))
+            } else {
+                XCTAssertThrowsError(try ModelRuntime.userInput(for: request)) { error in
+                    XCTAssertEqual((error as? APIError)?.code, "unsupported_tool_schema")
+                }
+            }
+        }
+    }
+
     func testStreamingHoldsNativeEnvelopeUntilItsActualClose() {
         var emitter = NativeToolCallStreamEmitter(modelID: model, allowedFunctionNames: ["weather"])
         let output = "Here. <|tool_call_start|>[weather(city='Oslo')]<|tool_call_end|>"
