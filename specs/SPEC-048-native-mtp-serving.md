@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.62
+**Version:** 0.1.63
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.62",
+  "version": "0.1.63",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -1165,7 +1165,7 @@ prefill (never inside a verification round) together with the prompt token
 its last entry consumed. It is draft-side only: restoring it can change
 proposals and acceptance, never the target's tokens, which the target
 verifies as on any native row. A failed, cancelled, or pre-output-fallback native row publishes
-nothing and aborts its lease. **(0.1.58)** SPEC-037's versioned prompt-snapshot
+nothing and aborts its lease. **(0.1.63)** SPEC-037's versioned prompt-snapshot
 codec may persist the complete SPEC-024-R005 target/head pair, including exact
 raw tensor bytes, metadata, resume-boundary provenance and folded prompt token.
 A restored native turn MUST pass the same target/head reuse checks as a RAM
