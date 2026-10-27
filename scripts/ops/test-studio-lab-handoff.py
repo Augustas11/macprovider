@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 from contextlib import redirect_stdout
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -62,11 +63,12 @@ class Mocks:
                     "journal_phase": None, "provider_loaded": False, "watchdog_loaded": False,
                     "provider_processes": []}
         if action == "recover":
+            assert _kwargs.get("timeout", "missing") is None, "recovery has an elapsed-time ceiling"
             if self.recover_error:
                 raise handoff.Refusal(self.recover_error)
             self.events.append("studio:watchdog_verified")
             return {"ok": True, "phase": "provider_stable", "status": {}}
-        if action == "provenance":
+        if action in {"provenance", "static_provenance"}:
             return {"ok": True, "installed": {}, "launch": {}, "status": {}}
         if action == "finish":
             return {"ok": True, "phase": "restored", "status": {}}
@@ -175,6 +177,44 @@ with tempfile.TemporaryDirectory() as tmp:
         finally:
             restore(original)
 
+        # A failed published-release proof cannot bootstrap/resume any provider.
+        events = []
+        mocks = Mocks(events)
+        original = install(mocks, events)
+        def reject_published(*_):
+            raise handoff.Refusal("unpublished binary")
+        handoff.verify_published = reject_published
+        try:
+            try:
+                handoff.run_restore(loaded, digest)
+            except handoff.Refusal as exc:
+                assert "unpublished" in str(exc)
+            else:
+                raise AssertionError("unpublished binary proceeded")
+            assert "studio:static_provenance" in events and "studio:recover" not in events
+        finally:
+            restore(original)
+
+        # Failed retries preserve an already-durable runner intent, including when
+        # the runner is active and the error happens before the provider is rechecked.
+        for phase in ("runner_starting", "runner_active", "restored"):
+            handoff.write_local_journal(digest, phase)
+            events = []
+            mocks = Mocks(events, runner_active=True, recover_error="transient recovery refusal")
+            original = install(mocks, events)
+            try:
+                try:
+                    handoff.run_restore(loaded, digest)
+                except handoff.Refusal as exc:
+                    assert "transient" in str(exc)
+                else:
+                    raise AssertionError("recovery failure unexpectedly proceeded")
+                assert handoff.local_phase(digest) == phase
+                assert "pearl:start" not in events
+            finally:
+                restore(original)
+        handoff.write_local_journal(digest, "armed")
+
         # Immutable snapshot drift and a foreign provider both stop before Pearl can be touched.
         for refusal in ("immutable config hash differs", "foreign provider process"):
             events = []
@@ -187,7 +227,8 @@ with tempfile.TemporaryDirectory() as tmp:
                     assert refusal in str(exc)
                 else:
                     raise AssertionError("drift unexpectedly proceeded")
-                assert events == ["lock:codex-xfamily-regress", "pearl:status", "studio:recover"], events
+                assert events == ["lock:codex-xfamily-regress", "pearl:status", "studio:static_provenance",
+                                  f"published:1.8.274:{loaded['studio']['install_dir']}", "studio:recover"], events
                 assert handoff.local_phase(digest) == "armed"
                 assert inherited_handoff.read_bytes() == handoff_bytes
             finally:
@@ -204,7 +245,8 @@ with tempfile.TemporaryDirectory() as tmp:
                 assert "runner start failed" in str(exc)
             else:
                 raise AssertionError("runner failure unexpectedly completed")
-            assert events == ["lock:codex-xfamily-regress", "pearl:status", "studio:recover",
+            assert events == ["lock:codex-xfamily-regress", "pearl:status", "studio:static_provenance",
+                              f"published:1.8.274:{loaded['studio']['install_dir']}", "studio:recover",
                               "studio:watchdog_verified", "studio:provenance",
                               f"published:1.8.274:{loaded['studio']['install_dir']}", "pearl:start"], events
             assert handoff.local_phase(digest) == "runner_starting"
@@ -232,4 +274,99 @@ with tempfile.TemporaryDirectory() as tmp:
             else:
                 os.environ[key] = value
 
-print("studio-lab-handoff offline manifest guards: PASS")
+def remote_recovery_case(*, phase="provider_bootstrapped", watchdog=False,
+                         ready_after=0, log_progress=False, die_at=None, changed_pid=False):
+    """Execute the real embedded recovery loop with only OS boundaries mocked."""
+    namespace = {}
+    exec(handoff.REMOTE, namespace)
+    clock = [0]
+    journal = {"schema_version": handoff.SCHEMA, "manifest_sha256": "digest", "phase": phase,
+               "provider_pid": 41 if phase == "provider_stable" else None,
+               "provider_start_us": 42 if phase == "provider_stable" else None}
+    x = manifest()["studio"]
+    namespace.update(check_static=lambda _: "/binary", handoff=lambda _: None,
+                     load_journal=lambda *_: journal, put=lambda *_: None,
+                     launch_loaded=lambda label: label == x["launch_label"] or watchdog,
+                     cli_processes=lambda _: [] if die_at is not None and clock[0] >= die_at else [41],
+                     resume=lambda _: None,
+                     provider_log_progress=lambda _: (clock[0] if log_progress else 0,))
+    def snapshot(_):
+        return {"binary_version": x["binary_version"], "model": x["model"],
+                "model_loaded": clock[0] >= ready_after, "network_state": "buyer_serving",
+                "continuous_batching": {"active": True, "policy": {"cached_turns_authorized": True}},
+                "service_instance": {"pid": 99 if changed_pid else 41, "process_start_us": 42}}
+    def launch(*_args, **_kwargs):
+        nonlocal watchdog
+        watchdog = True
+    namespace.update(status=snapshot, subprocess=SimpleNamespace(run=launch),
+                     os=SimpleNamespace(path=SimpleNamespace(exists=lambda _: True), getuid=lambda: 501),
+                     time=SimpleNamespace(monotonic=lambda: clock[0], sleep=lambda seconds: clock.__setitem__(0, clock[0] + seconds)))
+    return namespace, x, clock
+
+
+# The embedded prelaunch action only observes immutable installed identity; it has
+# no provider process claim and cannot bootstrap or resume anything.
+namespace = {}
+exec(handoff.REMOTE, namespace)
+static_events = []
+namespace.update(check_static=lambda _: static_events.append("check_static") or "/binary",
+                 installed_identity=lambda _: static_events.append("installed_identity") or {"binary_sha256": "a" * 64},
+                 resume=lambda _: (_ for _ in ()).throw(AssertionError("static action resumed provider")),
+                 subprocess=SimpleNamespace(run=lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("static action launched process"))))
+out = io.StringIO()
+with redirect_stdout(out):
+    namespace["main"](json.dumps({"action": "static_provenance", "studio": manifest()["studio"], "manifest_sha256": "digest"}))
+static_result = json.loads(out.getvalue())
+assert static_events == ["check_static", "installed_identity"]
+assert static_result["stage"] == "prelaunch_static"
+assert static_result["launch"]["pid"] is None and static_result["status"]["service_instance"]["pid"] is None
+
+# A responding, unchanged, unready status is a stall; actual new log output is progress.
+namespace, x, clock = remote_recovery_case(ready_after=10000)
+try:
+    namespace["recover"](x, "digest")
+except RuntimeError as exc:
+    assert "progress" in str(exc) and clock[0] == 1800, (exc, clock)
+else:
+    raise AssertionError("unchanged nonready status masked the stall")
+namespace, x, clock = remote_recovery_case(ready_after=2200, log_progress=True)
+assert namespace["recover"](x, "digest")["phase"] == "provider_stable"
+assert clock[0] >= 2320  # Longer than the former outer2040s deadline, while progressing.
+namespace, x, clock = remote_recovery_case()
+snapshot = namespace["status"]
+def briefly_unready(port):
+    value = snapshot(port)
+    if clock[0] == 10:
+        value["model_loaded"] = False
+    return value
+namespace["status"] = briefly_unready
+assert namespace["recover"](x, "digest")["phase"] == "provider_stable"
+assert clock[0] == 135  # Requires a new full stability interval after recovery.
+
+# A matching stable journal survives a provenance/Pearl retry, but cannot adopt another process.
+namespace, x, clock = remote_recovery_case(phase="provider_stable", watchdog=True)
+assert namespace["recover"](x, "digest")["phase"] == "provider_stable"
+assert clock[0] == 0
+namespace, x, clock = remote_recovery_case(phase="provider_stable", watchdog=True, changed_pid=True)
+try:
+    namespace["recover"](x, "digest")
+except RuntimeError as exc:
+    assert "journal" in str(exc) or "identity" in str(exc)
+else:
+    raise AssertionError("stable retry adopted another provider")
+namespace, x, clock = remote_recovery_case(watchdog=True)
+try:
+    namespace["recover"](x, "digest")
+except RuntimeError as exc:
+    assert "watchdog loaded before" in str(exc)
+else:
+    raise AssertionError("early foreign watchdog was accepted")
+namespace, x, clock = remote_recovery_case(ready_after=10000, die_at=10)
+try:
+    namespace["recover"](x, "digest")
+except RuntimeError as exc:
+    assert "process" in str(exc) and clock[0] == 10, (exc, clock)
+else:
+    raise AssertionError("provider death did not fail immediately")
+
+print("studio-lab-handoff offline manifest and recovery guards: PASS")

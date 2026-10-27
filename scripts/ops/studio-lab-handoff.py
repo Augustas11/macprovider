@@ -176,7 +176,7 @@ def env_host(name: str) -> str:
 
 
 def ssh(host: str, program: str, payload: dict[str, Any], *, identity_env: str,
-        known_hosts_env: str = "", timeout: int = 45) -> dict[str, Any]:
+        known_hosts_env: str = "", timeout: int | None = 45) -> dict[str, Any]:
     """Run fixed Python supplied on stdin; none of the manifest becomes argv."""
     command = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15"]
     identity = os.environ.get(identity_env, "")
@@ -205,7 +205,7 @@ def ssh(host: str, program: str, payload: dict[str, Any], *, identity_env: str,
 
 
 REMOTE = r'''
-import hashlib,json,os,re,socket,stat,subprocess,sys,time
+import hashlib,json,os,plistlib,re,socket,stat,subprocess,sys,time
 from pathlib import Path
 def bad(m): raise RuntimeError(m)
 def strict(raw,what):
@@ -291,35 +291,55 @@ def resume(sock):
 def inspect(x,msha):
  b=check_static(x); h=handoff(x); j=load_journal(x["journal_path"],msha)
  return {"ok":True,"handoff":h,"journal_phase":None if j is None else j["phase"],"provider_loaded":launch_loaded(x["launch_label"]),"watchdog_loaded":launch_loaded(x["watchdog_label"]),"provider_processes":cli_processes(b)}
+def provider_log_progress(x):
+ p=plistlib.loads(regular(x["provider_plist_path"],8*1024*1024)); stamps=[]
+ for k in ("StandardOutPath","StandardErrorPath"):
+  name=p.get(k)
+  if not isinstance(name,str): continue
+  try:
+   s=Path(name).stat()
+   if stat.S_ISREG(s.st_mode): stamps.append((s.st_dev,s.st_ino,s.st_size))
+  except FileNotFoundError: pass
+ return tuple(stamps)
 def recover(x,msha):
  b=check_static(x); handoff(x); j=load_journal(x["journal_path"],msha)
  pl=launch_loaded(x["launch_label"]); wl=launch_loaded(x["watchdog_label"]); procs=cli_processes(b)
  if j is None:
   if pl or wl or procs: bad("foreign or unexpected provider state before journal arm")
   j={"schema_version":"macprovider.studio_lab_handoff_recovery.v1","manifest_sha256":msha,"phase":"armed","provider_pid":None,"provider_start_us":None}; put(x["journal_path"],j)
- if j["phase"]=="restored":
+ if j["phase"] in {"provider_stable","restored"}:
   s=status(x["status_port"])
-  if not (pl and wl and s and ready(s,x)): bad("restored journal does not match stable provider")
-  return {"ok":True,"phase":"restored","status":s}
+  if not (pl and wl and s and ready(s,x)): bad("stable journal does not match stable provider")
+  if (get(s,"service_instance.pid"),get(s,"service_instance.process_start_us"))!=(j["provider_pid"],j["provider_start_us"]) or procs!=[j["provider_pid"]]: bad("stable journal provider identity differs")
+  return {"ok":True,"phase":j["phase"],"status":s}
  if wl: bad("watchdog loaded before provider stability journal")
  if not pl:
   if procs: bad("foreign provider process before bootstrap")
   subprocess.run(["launchctl","bootstrap","gui/%s"%os.getuid(),x["provider_plist_path"]],check=True)
   j.update(phase="provider_bootstrapped"); put(x["journal_path"],j)
- stable_since=None; seen=None; resumed=False; last_control=time.monotonic()
+ stable_since=None; seen=None; resumed=False; last_progress=time.monotonic(); states=set(); logs=provider_log_progress(x); process_seen=None
  while True:
+  processes=cli_processes(b)
+  if len(processes)>1: bad("unexpected provider processes during recovery")
+  if process_seen is not None and processes!=[process_seen]: bad("provider process died or changed during recovery")
+  if processes and process_seen is None: process_seen=processes[0]; last_progress=time.monotonic()
   s=status(x["status_port"])
-  if s is not None: last_control=time.monotonic()
+  if s is not None:
+   # Repeated polling/telemetry is not progress; only previously unseen lifecycle states count.
+   state=tuple(json.dumps(get(s,k),sort_keys=True) for k in ("model_loaded","network_state","lifecycle.operator_paused","continuous_batching.active","continuous_batching.policy.cached_turns_authorized","service_instance.pid","service_instance.process_start_us"))
+   if state not in states: states.add(state); last_progress=time.monotonic()
+  current_logs=provider_log_progress(x)
+  if current_logs!=logs: logs=current_logs; last_progress=time.monotonic()
   if not resumed and os.path.exists(x["control_socket"]):
-   resume(x["control_socket"]); resumed=True; last_control=time.monotonic()
+   resume(x["control_socket"]); resumed=True; last_progress=time.monotonic()
   if resumed and s and ready(s,x):
    pid=get(s,"service_instance.pid"); start=get(s,"service_instance.process_start_us")
    if cli_processes(b)!=[pid]: bad("provider process identity differs")
    stamp=(pid,start)
-   if stamp!=seen: seen=stamp; stable_since=time.monotonic(); j.update(phase="provider_bootstrapped",provider_pid=pid,provider_start_us=start); put(x["journal_path"],j)
+   if stamp!=seen or stable_since is None: seen=stamp; stable_since=time.monotonic(); j.update(phase="provider_bootstrapped",provider_pid=pid,provider_start_us=start); put(x["journal_path"],j)
    if time.monotonic()-stable_since>=120: break
   else: stable_since=None
-  if time.monotonic()-last_control>=1800: bad("provider made no status or control-socket progress for 30 minutes")
+  if time.monotonic()-last_progress>=1800: bad("provider made no lifecycle or log progress for 30 minutes")
   time.sleep(5)
  if not launch_loaded(x["watchdog_label"]): subprocess.run(["launchctl","bootstrap","gui/%s"%os.getuid(),x["watchdog_plist_path"]],check=True)
  s=status(x["status_port"])
@@ -337,6 +357,8 @@ def provenance(x,msha):
  if not j or j["phase"] not in {"provider_stable","restored"} or not (ready(s,x) and launch_loaded(x["launch_label"])): bad("provider is not stable for provenance")
  pid=get(s,"service_instance.pid")
  if cli_processes(b)!=[pid]: bad("provider process identity differs for provenance")
+ return {"ok":True,"installed":installed_identity(b),"launch":{"pid":pid,"executable_path":b},"status":s}
+def installed_identity(b):
  out=subprocess.run(["codesign","-d","--arch","arm64","-vvv",b],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,check=True).stdout
  fields={}
  for line in out.splitlines():
@@ -344,13 +366,18 @@ def provenance(x,msha):
   if sep and k in {"Identifier","TeamIdentifier","CDHash"}: fields[k]=v.strip()
  if set(fields)!={"Identifier","TeamIdentifier","CDHash"}: bad("installed code identity incomplete")
  version=subprocess.run([b,"--version"],stdout=subprocess.PIPE,text=True,check=True).stdout.strip()
- return {"ok":True,"installed":{"binary_version":version,"binary_sha256":digest(b),"identifier":fields["Identifier"],"team_id":fields["TeamIdentifier"],"cdhash":fields["CDHash"].lower()},"launch":{"pid":pid,"executable_path":b},"status":s}
+ return {"binary_version":version,"binary_sha256":digest(b),"identifier":fields["Identifier"],"team_id":fields["TeamIdentifier"],"cdhash":fields["CDHash"].lower()}
+def static_provenance(x):
+ b=check_static(x)
+ # No process exists yet: null PIDs explicitly make no running-provider claim.
+ return {"ok":True,"stage":"prelaunch_static","installed":installed_identity(b),"launch":{"pid":None,"executable_path":b},"status":{"service_instance":{"pid":None}}}
 def main(raw):
  p=strict(raw.encode(),"payload"); x=p["studio"]; a=p["action"]
  if a=="inspect": return print(json.dumps(inspect(x,p["manifest_sha256"]),sort_keys=True))
  if a=="recover": return print(json.dumps(recover(x,p["manifest_sha256"]),sort_keys=True))
  if a=="finish": return print(json.dumps(finish(x,p["manifest_sha256"]),sort_keys=True))
  if a=="provenance": return print(json.dumps(provenance(x,p["manifest_sha256"]),sort_keys=True))
+ if a=="static_provenance": return print(json.dumps(static_provenance(x),sort_keys=True))
  bad("invalid action")
 '''
 
@@ -369,7 +396,7 @@ def main(raw):
 
 
 def remote_action(studio_host: str, manifest: dict[str, Any], manifest_sha: str, action: str,
-                  *, timeout: int = 45) -> dict[str, Any]:
+                  *, timeout: int | None = 45) -> dict[str, Any]:
     return ssh(studio_host, REMOTE, {"action": action, "studio": manifest["studio"],
                                      "manifest_sha256": manifest_sha}, identity_env="STUDIO_SSH_KEY", timeout=timeout)
 
@@ -456,19 +483,26 @@ def run_restore(manifest: dict[str, Any], manifest_sha: str) -> dict[str, Any]:
                         identity_env="PEARL_SSH_IDENTITY", known_hosts_env="PEARL_SSH_KNOWN_HOSTS")
     if runner_before.get("runner_active") is True and previous not in {"runner_starting", "runner_active", "restored"}:
         refuse("buyer runner is already active outside this recovery journal")
-    write_local_journal(manifest_sha, "armed")
-    recovered = remote_action(studio, manifest, manifest_sha, "recover", timeout=READY_STALL_SECONDS + STABLE_SECONDS + 120)
+    if previous is None:
+        write_local_journal(manifest_sha, "armed")
+    probe = remote_action(studio, manifest, manifest_sha, "static_provenance")
+    verify_published(EXPECTED_VERSION, probe, manifest["studio"]["install_dir"])
+    # The remote loop owns the progress stall detector; recovery has no elapsed-time ceiling.
+    recovered = remote_action(studio, manifest, manifest_sha, "recover", timeout=None)
     if recovered.get("phase") not in {"provider_stable", "restored"}:
         refuse("provider did not reach a durable stable recovery phase")
-    write_local_journal(manifest_sha, "provider_stable")
+    if previous not in {"runner_starting", "runner_active", "restored"}:
+        write_local_journal(manifest_sha, "provider_stable")
     probe = remote_action(studio, manifest, manifest_sha, "provenance")
     verify_published(EXPECTED_VERSION, probe, manifest["studio"]["install_dir"])
-    write_local_journal(manifest_sha, "runner_starting")
+    if previous not in {"runner_active", "restored"}:
+        write_local_journal(manifest_sha, "runner_starting")
     runner = ssh(pearl, PEARL, {"action": "start", "unit": RUNNER}, identity_env="PEARL_SSH_IDENTITY",
                  known_hosts_env="PEARL_SSH_KNOWN_HOSTS")
     if runner.get("runner_active") is not True:
         refuse("Pearl buyer runner did not become active")
-    write_local_journal(manifest_sha, "runner_active")
+    if previous != "restored":
+        write_local_journal(manifest_sha, "runner_active")
     finished = remote_action(studio, manifest, manifest_sha, "finish")
     if finished.get("phase") != "restored":
         refuse("remote recovery journal did not reach restored")
