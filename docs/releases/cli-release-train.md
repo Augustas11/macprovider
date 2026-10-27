@@ -135,6 +135,65 @@ This bootstrap dependency remains unresolved; no qualification exemption,
 stale-evidence rebind or MTP-off deployment is authorized by this train record.
 The exploratory goal matrix does not constitute admission qualification.
 
+## Following CLI release — net changes vs 1.8.274 (tracked 2026-10-27)
+
+The 1.8.274 candidate was cut at `f8b6856e5`. It contains #2162 (chat-first
+navigation, merged Models destination, embedded Terminal), but **not** the
+changes below. Cut merged rows in the next candidate after 1.8.274 is promoted;
+rows marked `in progress` remain excluded until they merge.
+
+| PR | Issue | Provider-side change | Status |
+|---|---|---|---|
+| [#2169](https://github.com/Augustas11/macprovider/pull/2169) | #2164 | Malibu.app **Create, Agents and Tasks**. Sidebar: Chat, Terminal, Create, Agents, Tasks, Models, Earn. **Agents** run on this Mac's model (local work, SPEC-001-R011) or a Malibu network model on the buyer key; read-only workspace tools plus user-configured stdio MCP servers with per-call approval. **Tasks** schedule agent runs while the app is open (caps, pre-approved tools only, local 0600 transcripts kept out of diagnostics). **Create**: vendored MIT SDXL-Turbo runtime (`MacProviderImageGen`, no new package dependency) behind a loopback-only, local-app-origin `POST /v1/images/generations`. A local creative hold fences customer admission, unloads the LLM, generates, keeps the image model warm for 120 s, then restores the LLM, CB and native MTP exactly as before. Delayed restores re-register with the coordinator, and an operator pause is preserved. SPEC-025 v0.45.0/v0.46.0 (R017–R021); SPEC-001 v1.9.49 (R011/R014). | merged (`0239dd1de`); next CLI/app cut after 1.8.274; signed live acceptance pending |
+
+| [#2175](https://github.com/Augustas11/macprovider/pull/2175) | [#2171](https://github.com/Augustas11/macprovider/issues/2171) | Recover expired prepared update handoffs after an operator pause/resume supersedes the lifecycle operation; preserve operator pause and existing identity/dead-owner guards. `recover-update` explains helper fencing and enabling disabled LaunchAgents before bootstrap. | in progress; not in the 1.8.274 candidate; include in the following CLI cut only after merge and green required checks; signed release acceptance pending |
+
+**#2171 recovery tracking:** issue closed at operator request; implementation
+and remaining acceptance stay tracked by PR #2175 and this train. The PR has
+regression coverage for coordinator/self-update handoffs, operator lifecycle
+supersession, pause preservation, restored startup and refusal guards. Three
+review lanes passed. CI found a SPEC-020 header/manifest version mismatch;
+`df0a093f7` aligns both to v0.1.30 and starts fresh CI. Swift execution and
+required PR approval remain pending; no merged or released fix is claimed.
+Before promotion, verify with the signed candidate on the designated Studio
+that an expired activating marker plus a dead-owner prepared handoff and a
+superseding operator pause recovers without editing lifecycle files, retains
+the pause, and permits restored startup and buyer serving after explicit
+operator resume. Confirm the documented LaunchAgent enable/bootstrap steps.
+No decode-path code changes; reuse existing inference qualification.
+
+**Release impact (#2169):** `ModelRuntime.swift` gained the creative hold and
+restore, so the embedded decode-path digest changes. Token generation and
+output filtering are unchanged. After the cut, rebind the native-MTP admission
+set to the new decode path identity-only (AGENTS.md rule 2; no R015 rerun),
+through `scripts/ops/catalog-activate.sh`, as #2170 did for 1.8.274. #2169
+changes no coordinator or gateway code and needs no Pearl runtime payload.
+
+**#2164 evidence before the cut:**
+- **Goal metric**, measured first on the 16 GB M3 lab Mac (SDXL-Turbo, 4 steps):
+
+  | Size and precision | Time per image | Peak memory |
+  |---|---|---|
+  | 512 px, fp16 | 12.3 s | 10.2 GB |
+  | 512 px, quantized | 17.0 s | 7.4 GB |
+  | 1024 px, fp16 | 29.0 s | 13.3 GB |
+
+- **Real-weights lab end-to-end** on the same Mac (isolated loopback, `--no-join`, Qwen3-8B loaded):
+  - a request without local-app origin got **403**
+  - the first image returned **200 in 177 s**, including the first-use download of 6.94 GB of fp16 weights
+  - the warm second image returned **200 in 5 s**
+  - after the 120 s window and the restore, status matched the pre-hold state and a local chat request answered
+  - CB and native MTP were inactive in that lab config, so restoring them is proven by the ModelRuntime, ContinuousBatch and NativeMTP suites
+- **Studio suites:** 953 app tests; CLI LocalImage 26, ModelRuntime 116, NativeMTP 432, ContinuousBatch 371 and CoordinatorClientTests 260, all with 0 failures.
+- **Audit:** three lanes, three rounds. The final code-lane HIGH was fixed with regression tests.
+
+Before promoting the signed cut, verify with released bytes on a provider that is
+serving paying buyers:
+- One Create image on a 16 GB Mac pauses and then resumes customer serving. The
+  provider re-registers, and CB and native MTP state are unchanged afterwards.
+- One Agents run uses an MCP tool and gets the approval prompt.
+- One scheduled Task fires once.
+
 ## Coding-agent privacy release acceptance — issue 2157
 
 [#2165](https://github.com/Augustas11/macprovider/pull/2165) merged as
