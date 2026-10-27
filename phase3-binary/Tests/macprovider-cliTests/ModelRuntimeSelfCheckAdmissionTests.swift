@@ -109,7 +109,139 @@ final class ModelRuntimeSelfCheckAdmissionTests: XCTestCase {
         try await gate.withPermit { }
     }
 
-    private func makeRuntime(backend: SelfCheckRetirementBackend) -> ModelRuntime {
+    func testSerialAndDivergenceEntriesQueueExclusivelyBeforeModelAccess() async throws {
+        let runtime = makeRuntime(backend: SelfCheckRetirementBackend())
+        _ = await runtime.applyServedSlots(3)
+        let gate = await runtime.serialInferenceGate
+        let buyerEntered = SelfCheckAdmissionLatch()
+        let releaseBuyer = SelfCheckAdmissionLatch()
+        defer { Task { await releaseBuyer.open() } }
+        let buyer = Task {
+            try await gate.withPermit {
+                await buyerEntered.open()
+                await releaseBuyer.wait()
+            }
+        }
+        await buyerEntered.wait()
+        // This fixture has no container: reaching model access before exclusive
+        // admission would return immediately instead of joining the gate queue.
+        let serial = Task { try await runtime.continuousBatchingSelfCheckSerialTPS(prompts: [[1]], maxTokens: 2) }
+        try await eventually { await gate.queuedWaiterCount() == 1 }
+        let divergence = Task {
+            try await runtime.continuousBatchingSelfCheckDivergence(
+                prompt: [1], sharedPrefix: [], aloneToken: 1, batchedToken: 2, otherRowsAloneTokens: [])
+        }
+        try await eventually { await gate.queuedWaiterCount() == 2 }
+        serial.cancel()
+        divergence.cancel()
+        do { _ = try await serial.value; XCTFail("queued serial probe must cancel before model access") }
+        catch is CancellationError {}
+        do { _ = try await divergence.value; XCTFail("queued divergence probe must cancel before model access") }
+        catch is CancellationError {}
+        let queued = await gate.queuedWaiterCount()
+        XCTAssertEqual(queued, 0)
+        await releaseBuyer.open()
+        try await buyer.value
+    }
+
+    func testCanceledSerialProbeAdmissionBlocksBuyerPathsUntilNativeBodyRetires() async throws {
+        let runtime = makeRuntime(backend: SelfCheckRetirementBackend())
+        _ = await runtime.applyServedSlots(3)
+        let gate = await runtime.serialInferenceGate
+        let nativeEntered = SelfCheckAdmissionLatch()
+        let releaseNative = SelfCheckAdmissionLatch()
+        let cancellationObserved = SelfCheckAdmissionLatch()
+        let probeState = SelfCheckProbeState()
+        defer { Task { await releaseNative.open() } }
+        let probe = Task {
+            do {
+                try await runtime.withExclusiveContinuousBatchingSelfCheck { _ in
+                    await nativeEntered.open()
+                    // Like the blocking executor's continuation, this native
+                    // body acknowledges cancellation before it actually retires.
+                    await withTaskCancellationHandler {
+                        await releaseNative.wait()
+                    } onCancel: {
+                        Task { await cancellationObserved.open() }
+                    }
+                }
+                await probeState.markReturned()
+            } catch {
+                await probeState.markReturned()
+                throw error
+            }
+        }
+        await nativeEntered.wait()
+        let serialBuyer = SelfCheckBuyerState()
+        let batchBuyer = SelfCheckBuyerState()
+        // Serial and attached-CB buyers both acquire this same shared gate.
+        let serial = Task { try await gate.withPermit { await serialBuyer.enter(nativeRows: 0) } }
+        try await eventually { await gate.queuedWaiterCount() == 1 }
+        let batch = Task { try await gate.withPermit { await batchBuyer.enter(nativeRows: 0) } }
+        try await eventually { await gate.queuedWaiterCount() == 2 }
+        let nextProbeEntered = SelfCheckProbeState()
+        let nextProbe = Task {
+            try await runtime.withExclusiveContinuousBatchingSelfCheck { _ in
+                await nextProbeEntered.markReturned()
+            }
+        }
+        try await eventually { await gate.queuedWaiterCount() == 3 }
+        probe.cancel()
+        await cancellationObserved.wait()
+        let serialStarted = await serialBuyer.entered
+        let batchStarted = await batchBuyer.entered
+        let nextProbeStarted = await nextProbeEntered.returned
+        let returnedBeforeRetirement = await probeState.returned
+        XCTAssertFalse(serialStarted)
+        XCTAssertFalse(batchStarted)
+        XCTAssertFalse(nextProbeStarted)
+        XCTAssertFalse(returnedBeforeRetirement)
+        await releaseNative.open()
+        do { try await probe.value; XCTFail("canceled native probe must not publish evidence") }
+        catch is CancellationError {}
+        try await serial.value
+        try await batch.value
+        try await nextProbe.value
+        try await gate.withPermit { }
+    }
+
+    func testQueuedSelfCheckRejectsChangedModelGenerationBeforeNativeBody() async throws {
+        let runtime = makeRuntime(backend: SelfCheckRetirementBackend(), warmSwapEnabled: true)
+        let gate = await runtime.serialInferenceGate
+        let buyerEntered = SelfCheckAdmissionLatch()
+        let releaseBuyer = SelfCheckAdmissionLatch()
+        let nativeEntered = SelfCheckProbeState()
+        defer { Task { await releaseBuyer.open() } }
+        let buyer = Task {
+            try await gate.withPermit {
+                await buyerEntered.open()
+                await releaseBuyer.wait()
+            }
+        }
+        await buyerEntered.wait()
+        let probe = Task {
+            try await runtime.withExclusiveContinuousBatchingSelfCheck { _ in
+                await nativeEntered.markReturned()
+            }
+        }
+        try await eventually { await gate.queuedWaiterCount() == 1 }
+        // The existing test loader changes the actual self-check generation;
+        // no new production test hook or fabricated generation is involved.
+        let swap = try await runtime.beginSwap(targetModelID: "mlx-community/Qwen-Replacement")
+        try await swap.value
+        let swapped = await runtime.currentSnapshot()
+        XCTAssertEqual(swapped.state, .ready)
+        XCTAssertEqual(swapped.modelID, "mlx-community/Qwen-Replacement")
+        await releaseBuyer.open()
+        try await buyer.value
+        do { try await probe.value; XCTFail("old-generation probe must reject before native preparation") }
+        catch is CancellationError {}
+        let prepared = await nativeEntered.returned
+        XCTAssertFalse(prepared)
+        try await runtime.withExclusiveContinuousBatchingSelfCheck { _ in }
+    }
+
+    private func makeRuntime(backend: SelfCheckRetirementBackend, warmSwapEnabled: Bool = false) -> ModelRuntime {
         let modelID = "mlx-community/Qwen-Test"
         let modelSHA = String(repeating: "a", count: 64)
         let proof = PagedKVHardwareSizingProof(
@@ -130,13 +262,14 @@ final class ModelRuntimeSelfCheckAdmissionTests: XCTestCase {
             pagedKVConfig: PagedKVConfig(enabled: true, blockSizeTokens: 32, maxPhysicalBlocks: 64),
             maxBatch: 3, continuousBatchingMode: .on,
             continuousBatchingDurableReplayAuthorityAvailable: true,
-            warmSwapEnabled: false,
+            warmSwapEnabled: warmSwapEnabled,
             pagedKVObservedRuntimeIdentity: identity,
             pagedKVHardwareSizingProof: proof,
             pagedKVRuntimeCacheClass: "KVCacheSimple",
             pagedKVSchedulerBackendInstalled: true,
             continuousBatchingBackend: backend,
-            loader: { _ in throw SelfCheckAdmissionTestError.unexpectedLoad })
+            loader: { _ in throw SelfCheckAdmissionTestError.unexpectedLoad },
+            testLoader: warmSwapEnabled ? { target in (target, modelSHA) } : nil)
     }
 
     private func eventually(_ condition: @escaping () async -> Bool) async throws {

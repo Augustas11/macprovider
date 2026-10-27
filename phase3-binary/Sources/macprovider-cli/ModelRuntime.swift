@@ -6113,17 +6113,51 @@ maxTokens: 1,
         batchedToken: Int,
         otherRowsAloneTokens: [Int]
     ) async throws -> (nearTie: Bool, margin: Float?, reason: String) {
-        try Task.checkCancellation()
-        guard let container = currentContainer else { return (false, nil, "model_unavailable") }
-        let reference = try await container.perform { context in
+        try await withExclusiveContinuousBatchingSelfCheck { runtime in
+            guard let container = runtime.currentContainer else { return (false, nil, "model_unavailable") }
+            let reference = try await container.perform { context in
+                try Task.checkCancellation()
+                return try PagedKVRuntimeParityProbe.serialReference(model: context.model, prompt: prompt + sharedPrefix)
+            }
             try Task.checkCancellation()
-            return try PagedKVRuntimeParityProbe.serialReference(model: context.model, prompt: prompt + sharedPrefix)
+            return ContinuousBatchingSelfCheck.divergenceVerdict(
+                reference: reference, aloneToken: aloneToken, batchedToken: batchedToken,
+                otherRowsAloneTokens: otherRowsAloneTokens
+            )
         }
+    }
+
+    /// The operation starts on this actor only after exclusive admission and
+    /// identity checks, so it captures no stale container while queued. Awaiting
+    /// its native body (including BlockingInferenceExecutor's continuation) keeps
+    /// the permit through cancellation until that work actually returns.
+    func withExclusiveContinuousBatchingSelfCheck<T: Sendable>(
+        _ operation: @escaping @Sendable (isolated ModelRuntime) async throws -> T
+    ) async throws -> T {
+        let gate = inferenceGate
+        let generation = selfCheckGeneration
+        return try await gate.withExclusivePermit {
+            try await self.performExclusiveContinuousBatchingSelfCheck(
+                expectedGeneration: generation, gate: gate, operation: operation
+            )
+        }
+    }
+
+    private func performExclusiveContinuousBatchingSelfCheck<T: Sendable>(
+        expectedGeneration: Int,
+        gate: AsyncSemaphore,
+        operation: @Sendable (isolated ModelRuntime) async throws -> T
+    ) async throws -> T {
         try Task.checkCancellation()
-        return ContinuousBatchingSelfCheck.divergenceVerdict(
-            reference: reference, aloneToken: aloneToken, batchedToken: batchedToken,
-            otherRowsAloneTokens: otherRowsAloneTokens
-        )
+        guard expectedGeneration == selfCheckGeneration, gate === inferenceGate, state == .ready else {
+            throw CancellationError()
+        }
+        let result = try await operation(self)
+        try Task.checkCancellation()
+        guard expectedGeneration == selfCheckGeneration, gate === inferenceGate, state == .ready else {
+            throw CancellationError()
+        }
+        return result
     }
 
     /// Runs `prompts` together on the attached scheduler at temperature 0 and
@@ -11432,22 +11466,22 @@ maxTokens: 1,
     func continuousBatchingSelfCheckSerialTPS(
         prompts: [[Int]], maxTokens: Int
     ) async throws -> ContinuousBatchingSelfCheckSerialRate {
-        guard let container = currentContainer else {
-            throw ContinuousBatchSchedulerError.requestFailed("self_check_model_unavailable")
-        }
-        let maxContextTokens = maxContextTokens
-        let kvBitsOverride = kvBitsOverride
-        let prefillStepSize = prefillStepSize
-        let blockingInferenceExecutor = blockingInferenceExecutor
-        var tokens = 0
-        var seconds = 0.0
-        var decodeTokens = 0
-        var decodeSeconds = 0.0
-        for prompt in prompts {
-            try Task.checkCancellation()
-            let start = Date()
-            let result: BlockingGenerateResult = try await inferenceGate.withPermit {
-                try await container.perform { context in
+        try await withExclusiveContinuousBatchingSelfCheck { runtime in
+            guard let container = runtime.currentContainer else {
+                throw ContinuousBatchSchedulerError.requestFailed("self_check_model_unavailable")
+            }
+            let maxContextTokens = runtime.maxContextTokens
+            let kvBitsOverride = runtime.kvBitsOverride
+            let prefillStepSize = runtime.prefillStepSize
+            let blockingInferenceExecutor = runtime.blockingInferenceExecutor
+            var tokens = 0
+            var seconds = 0.0
+            var decodeTokens = 0
+            var decodeSeconds = 0.0
+            for prompt in prompts {
+                try Task.checkCancellation()
+                let start = Date()
+                let result: BlockingGenerateResult = try await container.perform { context in
                     let lmInput = LMInput(text: LMInput.Text(tokens: MLXArray(prompt.map(Int32.init))))
                     let parameters = try Self.makeServeGenerateParameters(
                         model: context.model,
@@ -11467,19 +11501,19 @@ maxTokens: 1,
                         })
                     }
                 }
+                try Task.checkCancellation()
+                seconds += Date().timeIntervalSince(start)
+                tokens += result.generationTokenCount
+                if result.generationTokenCount > 1, result.generateTime > 0 {
+                    decodeTokens += result.generationTokenCount - 1
+                    decodeSeconds += result.generateTime
+                }
             }
-            try Task.checkCancellation()
-            seconds += Date().timeIntervalSince(start)
-            tokens += result.generationTokenCount
-            if result.generationTokenCount > 1, result.generateTime > 0 {
-                decodeTokens += result.generationTokenCount - 1
-                decodeSeconds += result.generateTime
-            }
+            return ContinuousBatchingSelfCheckSerialRate(
+                decodeTPS: decodeSeconds > 0 ? Double(decodeTokens) / decodeSeconds : 0,
+                endToEndTPS: seconds > 0 ? Double(tokens) / seconds : 0
+            )
         }
-        return ContinuousBatchingSelfCheckSerialRate(
-            decodeTPS: decodeSeconds > 0 ? Double(decodeTokens) / decodeSeconds : 0,
-            endToEndTPS: seconds > 0 ? Double(tokens) / seconds : 0
-        )
     }
 
     func measureStartupThroughput(maxTokens: Int = ModelRuntime.startupThroughputProbeMaxTokens) async -> Double {
