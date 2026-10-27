@@ -36,6 +36,7 @@ Subcommands (stdlib only; run with `python3 -I`):
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import concurrent.futures
 import json
 import math
@@ -283,14 +284,17 @@ def cmd_calibrate(args) -> int:
 
 # ---------------------------------------------------------------- run
 
-def run_cell(args, cal, length, turns, rows, rep, out) -> None:
+def run_cell(args, cal, length, turns, rows, rep, out) -> bool:
     tag = f"{args.run_id}-L{length}-T{turns}-R{rows}-p{rep}"
     n = 4 if rows == "4" else 1
     convs = [conversation(length, turns, row, cal, tag) for row in range(n)]
     timeout = max(300.0, 4 * n * length / args.prefill_rate)
     order = ("split", "warm", "plain") if rep % 2 == 0 else ("plain", "split", "warm")
+    completed = True
 
     def emit(mode, rec, row):
+        nonlocal completed
+        completed = completed and not rec.get("error") and bool(rec.get("finish_reason"))
         rec.update({"cell": tag, "L": length, "T": turns, "rows": rows, "rep": rep, "mode": mode, "row": row})
         out.write(json.dumps(rec) + "\n")
         out.flush()
@@ -315,6 +319,7 @@ def run_cell(args, cal, length, turns, rows, rep, out) -> None:
                 futures = [pool.submit(measured, args, convs[row], tag, mode, row, timeout, cal) for row in range(n)]
                 for row, future in enumerate(futures):
                     emit(mode, future.result(), row)
+    return completed
 
 
 def measured(args, messages, tag, mode, row, timeout, cal) -> dict:
@@ -325,12 +330,13 @@ def measured(args, messages, tag, mode, row, timeout, cal) -> dict:
 
 
 def cmd_run(args) -> int:
-    cal = json.load(open(args.calibration))
+    with open(args.calibration, encoding="utf-8") as calibration:
+        cal = json.load(calibration)
     if not cal.get("passed"):
         print("refusing: calibration did not pass", file=sys.stderr)
         return 3
     cells = LEGS[args.leg]
-    done = 0
+    done, failed = 0, 0
     with open(args.out, "a", encoding="utf-8") as out:
         for length, turns, rows, reps, *first in cells:
             for rep in range(first[0] if first else 0, (first[0] if first else 0) + reps):
@@ -339,11 +345,13 @@ def cmd_run(args) -> int:
                     print(f"skip L={length} T={turns} rows={rows} rep={rep}: {remaining:.0f}s left", file=sys.stderr)
                     continue
                 t0 = time.time()
-                run_cell(args, cal, length, turns, rows, rep, out)
+                if not run_cell(args, cal, length, turns, rows, rep, out):
+                    failed += 1
                 done += 1
                 print(f"cell L={length} T={turns} rows={rows} rep={rep} took {time.time()-t0:.0f}s", file=sys.stderr)
-    print(json.dumps({"leg": args.leg, "cells_run": done}))
-    return 0 if done else 1
+    expected = sum(cell[3] for cell in cells)
+    print(json.dumps({"leg": args.leg, "cells_run": done, "cells_expected": expected, "cells_failed": failed}))
+    return 0 if done == expected and failed == 0 else 1
 
 
 # ---------------------------------------------------------------- analyze
@@ -427,7 +435,8 @@ def median(xs):
 
 
 def cmd_analyze(args) -> int:
-    runs = [json.loads(l) for l in open(args.runs, encoding="utf-8") if l.strip()]
+    with open(args.runs, encoding="utf-8") as records:
+        runs = [json.loads(l) for l in records if l.strip()]
     by_rid = {r["request_id"]: r for r in runs}
     submit, active, complete = {}, {}, {}
     chunks: dict[str, list[dict]] = {}
@@ -482,7 +491,29 @@ def cmd_analyze(args) -> int:
     cells = {}
     for rec in runs:
         cells.setdefault((rec["L"], rec["T"], rec["rows"]), {}).setdefault(rec["mode"], []).append(rec)
-    table, checks = [], {}
+    # A bounded window may end between cells or even rows. Partial output is
+    # useful evidence, but cannot certify the requested measurement matrix.
+    expected = Counter()
+    for length, turns, rows, reps, *first in LEGS[args.leg]:
+        start = first[0] if first else 0
+        for rep in range(start, start + reps):
+            for mode in ("split", "warm", "plain"):
+                for row_index in range(4 if rows == "4" else 1):
+                    expected[(length, turns, rows, rep, mode, row_index)] += 1
+    observed = Counter((r.get("L"), r.get("T"), r.get("rows"), r.get("rep"),
+                        r.get("mode"), r.get("row")) for r in runs)
+    table, checks = [], {
+        "complete_matrix": observed == expected,
+        "unique_request_ids": len(by_rid) == len(runs),
+    }
+    def positive_finite(value):
+        return isinstance(value, (int, float)) and math.isfinite(value) and value > 0
+
+    for rec in runs:
+        label = rec["request_id"]
+        checks[f"{label}.completed"] = not rec.get("error") and bool(rec.get("finish_reason"))
+        checks[f"{label}.client_ttft"] = positive_finite(rec.get("ttft_s"))
+        checks[f"{label}.server_ttft"] = positive_finite(rec.get("server_ttft_ms"))
     for (length, turns, rows), modes in sorted(cells.items(), key=lambda kv: (kv[0][0], str(kv[0][2]), kv[0][1])):
         row = {"L": length, "T": turns, "rows": rows}
         for mode, recs in modes.items():
@@ -533,6 +564,7 @@ def cmd_analyze(args) -> int:
     }
     report = {
         "schema": "macprovider.glm53-coldmiss-2153.v1",
+        "leg": args.leg,
         "cells": table,
         "chunk_cost_fit_ms": {"intercept_ms": fit[0], "per_token_ms": fit[1], "per_token_per_mtoken_offset_ms": fit[2],
                               "n": len(solo)} if fit else None,
@@ -575,6 +607,7 @@ def main() -> int:
     p = sub.add_parser("analyze")
     p.add_argument("--runs", required=True)
     p.add_argument("--serve-log", required=True)
+    p.add_argument("--leg", choices=sorted(LEGS), default="after")
     args = parser.parse_args()
     return {"plan": cmd_plan, "selftest": cmd_selftest, "calibrate": cmd_calibrate,
             "run": cmd_run, "retention": cmd_retention, "analyze": cmd_analyze}[args.cmd](args)
