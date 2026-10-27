@@ -109,4 +109,55 @@ final class NativeMTPQualificationTests: XCTestCase {
         }
     }
 
+    func testReplayWriterSerializesMeasuredIdentityOnEverySignedRecord() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let identity = NativeMTPMeasurementIdentity(binarySHA256: String(repeating: "1", count: 64), binaryCDHash: String(repeating: "2", count: 40))
+        try NativeMTPQualificationScope.$identity.withValue(identity) {
+            let writer = try NativeMTPRequestShapeReplayWriter(url: url)
+            defer { try? writer.close() }
+            for type in ["header", "run", "pending"] {
+                try writer.write(["schema": "macprovider.native-mtp-request-shape-replay.v2", "record_type": type,
+                    "measurement_identity": ["binary_sha256": "caller", "binary_cdhash": "caller"]])
+            }
+        }
+        let signedRecords = try readRecords(url)
+        XCTAssertEqual(signedRecords.count, 3)
+        for record in signedRecords { XCTAssertEqual(record["measurement_identity"] as? [String: String], identity.document) }
+        let researchWriter = try NativeMTPRequestShapeReplayWriter(url: url)
+        try researchWriter.write(["record_type": "header"])
+        try researchWriter.close()
+        XCTAssertEqual(try readRecords(url).count, 1)
+        XCTAssertNil(try readRecords(url)[0]["measurement_identity"])
+    }
+
+    func testBenchWriterSerializesMeasuredIdentityOnMatrixAndSustainedRecords() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let identity = NativeMTPMeasurementIdentity(binarySHA256: String(repeating: "3", count: 64), binaryCDHash: String(repeating: "4", count: 40))
+        try NativeMTPQualificationScope.$identity.withValue(identity) {
+            let writer = try NativeMTPJSONLWriter(url: url, append: false)
+            defer { try? writer.close() }
+            let records: [[String: Any]] = [["record_type": "header"], ["record_type": "run", "sustained": false], ["record_type": "run", "sustained": true]]
+            for var record in records {
+                record["measurement_identity"] = ["binary_sha256": "caller", "binary_cdhash": "caller"]
+                try writer.write(record)
+            }
+        }
+        let signedRecords = try readRecords(url)
+        XCTAssertEqual(signedRecords.count, 3)
+        for record in signedRecords { XCTAssertEqual(record["measurement_identity"] as? [String: String], identity.document) }
+        let researchWriter = try NativeMTPJSONLWriter(url: url, append: false)
+        try researchWriter.write(["record_type": "header"])
+        try researchWriter.close()
+        XCTAssertEqual(try readRecords(url).count, 1)
+        XCTAssertNil(try readRecords(url)[0]["measurement_identity"])
+    }
+
+    private func readRecords(_ url: URL) throws -> [[String: Any]] {
+        try String(contentsOf: url, encoding: .utf8).split(whereSeparator: \.isNewline).map { line in
+            try XCTUnwrap(JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any])
+        }
+    }
+
 }

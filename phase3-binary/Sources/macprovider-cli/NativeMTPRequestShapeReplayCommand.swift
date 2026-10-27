@@ -3210,7 +3210,7 @@ struct NativeMTPRequestShapeReplayRunResult {
     }
 }
 
-private final class NativeMTPRequestShapeReplayWriter {
+final class NativeMTPRequestShapeReplayWriter {
     private let handle: FileHandle
 
     init(url: URL) throws {
@@ -3223,7 +3223,7 @@ private final class NativeMTPRequestShapeReplayWriter {
     }
 
     func write(_ object: [String: Any]) throws {
-        let normalized = Self.normalized(object)
+        let normalized = Self.normalized(NativeMTPQualificationScope.bind(object))
         var data = try JSONSerialization.data(withJSONObject: normalized, options: [.sortedKeys, .withoutEscapingSlashes])
         data.append(0x0a)
         try handle.write(contentsOf: data)

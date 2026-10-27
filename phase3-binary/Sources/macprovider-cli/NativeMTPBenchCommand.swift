@@ -1990,7 +1990,7 @@ struct NativeMTPExistingEvidence {
     }
 }
 
-private final class NativeMTPJSONLWriter {
+final class NativeMTPJSONLWriter {
     private let handle: FileHandle
 
     init(url: URL, append: Bool) throws {
