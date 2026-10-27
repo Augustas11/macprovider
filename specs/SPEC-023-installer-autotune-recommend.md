@@ -1,12 +1,19 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.22.36
+version: v0.22.37
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-10-02
 lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-change invariants). CONFORMANCE `depends_on` does not list SPEC-005; the lockstep is recorded in prose only, avoiding a dependency cycle (SPEC-005 likewise does not list SPEC-023 in its `depends_on`).
 
 ## Change log
+
+- **v0.22.37 (2026-10-27, Related: #2144)** — R017 clarifies that normal
+  fully qualified expanded publication may start from the exact committed
+  signed predecessor without an identity-only candidate parent. The candidate
+  still needs its final published tag/recommendation, actual signed-executable
+  qualification and authenticated serving proof. The identity-only exception
+  remains unchanged and cannot qualify changed decode behavior.
 
 - **v0.22.36 (2026-10-26, Related: #2144)** — R017 permits only a
   reviewed, deterministic native-binding assembly recipe to resolve signed
@@ -2105,6 +2112,16 @@ app release, through the operator-local catalog-content lane
    SPEC-048-R015 qualification including its preregistered privacy-reviewed v2
    observation and fresh paired replay. An identity-only recipe MUST NOT add
    sampled, tools or reasoning eligibility or increase row/depth bounds.
+   The expanded phase does not require an identity-only candidate parent.
+   When no such parent exists, the predecessor release MUST be byte-equal to
+   the committed signed predecessor at the frozen reviewed source, including
+   its complete feed inventory; the committed predecessor ledger is retained.
+   The parent receipt MUST be null and the parent bundle absent. The assembler
+   MUST still reopen full exact-candidate R005, formal R015 matrix/sustained
+   and representative replay, and independently authenticate the normal
+   published candidate and serving proof. A supplied identity-only parent
+   retains the existing exact identity/version and receipt checks. This path
+   grants no pre-promotion publication or unchanged-decode qualification.
    Neither phase treats an assembly or offline projection as qualification.
    Every other R017 rule, signature check, ledger/predecessor check, pricing
    gate, CB gate, trust-root check and exact rollback requirement applies

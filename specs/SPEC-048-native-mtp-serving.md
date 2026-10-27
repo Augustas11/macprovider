@@ -1590,6 +1590,10 @@ ordered as follows, without withdrawing an already-enabled native-MTP tuple:
    trains advance through their remaining gates and activate the qualified
    policy. Final tag/recommendation, signed journeys, release verification and
    exact-pair recovery requirements remain unchanged.
+   A fully qualified expanded publication MAY use the exact committed signed
+   predecessor directly under SPEC-023-R017; it need not first fabricate an
+   unchanged-greedy identity-only parent for the changed candidate. The normal
+   final-tag/recommendation and authenticated serving gates still apply.
 
 If no collector-capable signed runtime can satisfy step 2, signing the changed
 decoder does not break the cycle. The prerequisite is a reviewed collector-only

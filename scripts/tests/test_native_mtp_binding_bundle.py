@@ -164,6 +164,141 @@ class BindingCoreTests(unittest.TestCase):
             git.assert_not_called()
 
 
+class FullyQualifiedPredecessorTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
+        root = Path(self.temp.name)
+        self.stage, self.bundle = root / "source", root / "bundle"
+        self.bundle.mkdir()
+        self.cat = self.stage / m.CATALOG
+        self.static = self.stage / m.STATIC
+        self.cat.mkdir(parents=True); self.static.mkdir(parents=True)
+        for name in m.RELEASE_FILES:
+            target = self.cat if name in {"release.json", "trusted-keys.json", "tier2-catalog.json"} else self.static
+            (target / name).write_bytes(m.canonical({"committed_asset": name}))
+        (self.cat / "release-ledger.json").write_bytes(b"committed ledger\n")
+        self.commit = "c" * 40
+        self.identity = {"provider_revision": self.commit, "source_commit": self.commit,
+                         "reproducible_build_sha256": "a" * 64, "live_executable_cdhash": "b" * 40,
+                         "metallib_sha256": "d" * 64}
+        self.inputs = {"schema_version": "macprovider.native-mtp-binding-input.v1",
+                       "phase": "expanded_glm_sampled", "release_id": "qualified-published-candidate",
+                       "generated_at": "2026-10-27T00:00:00Z", "candidate_version": "1.8.277",
+                       "identity": self.identity, "parent_receipt_sha256": None}
+        self.bounds = {"request_feature_profile": "native_mtp_sampled_text_v1", "proposal_depth": 1,
+                       "max_native_active_rows": 1, "max_prompt_tokens": 4096, "qualified_slots": 4}
+        self.recipe = {"source_inputs": {}, "model_key": "zai-org/glm-5.3-flash",
+                       "phases": {"expanded_glm_sampled": self.bounds}}
+        self.entry = dict(self.bounds, model_key=self.recipe["model_key"])
+        (self.cat / "native-mtp-admission-release.json").write_bytes(m.canonical({"entry": {}, "signer_key_id": "fixture"}))
+        (self.cat / "native-mtp-admission-tuple.json").write_bytes(m.canonical([{"entry": self.entry}]))
+        m._flat(self.stage, self.bundle / "previous")
+
+    def prepare(self):
+        m._prepare_predecessor(self.bundle, repo=Path("."), commit=self.commit,
+                               stage=self.stage, inputs=self.inputs)
+
+    def derive(self):
+        (self.bundle / "inputs.json").write_bytes(m.canonical(self.inputs))
+        self.calls = []
+        dp = mock.Mock()
+        dp.compute.return_value = "e" * 64
+        dp.resolved_revisions.return_value = {"mlx-swift-lm": "f" * 40}
+        with mock.patch.object(m, "_module", return_value=dp), \
+             mock.patch.object(m, "_environment", return_value={}), \
+             mock.patch.object(m, "_run", side_effect=lambda args, **kwargs: self.calls.append(args)) as run, \
+             mock.patch.object(m, "git", return_value=(self.cat / "tier2-catalog.json").read_bytes()):
+            m._derive(self.bundle, repo=Path("."), commit=self.commit,
+                      recipe=self.recipe, stage=self.stage, sign=True)
+        return run
+
+    def test_fresh_qualified_path_retains_committed_ledger(self):
+        with mock.patch.object(m, "verify_bundle") as parent:
+            self.prepare()
+            parent.assert_not_called()
+        self.assertEqual((self.cat / "release-ledger.json").read_bytes(), b"committed ledger\n")
+
+    def test_fresh_qualified_path_still_requires_full_qualification_before_generate(self):
+        def qualified(*args, **kwargs):
+            self.calls.append(["qualification"])
+            return {"correctness_evidence_sha256": "1" * 64}
+        with mock.patch.object(m, "_qualification", side_effect=qualified) as qualification:
+            run = self.derive()
+        qualification.assert_called_once()
+        generated = next(index for index, command in enumerate(self.calls) if "generate" in command)
+        self.assertLess(self.calls.index(["qualification"]), generated)
+        derived = m.read_json(self.cat / "native-mtp-admission-tuple.json")[0]["entry"]
+        self.assertEqual(derived["correctness_evidence_sha256"], "1" * 64)
+        self.assertEqual((self.cat / "release-ledger.json").read_bytes(), b"committed ledger\n")
+
+    def test_fresh_qualified_path_rejects_any_predecessor_byte_change(self):
+        previous = self.bundle / "previous"
+        for name in sorted(m.RELEASE_FILES):
+            original = (previous / name).read_bytes()
+            (previous / name).write_bytes(original + b" ")
+            with self.subTest(name=name), self.assertRaisesRegex(m.BindingBundleError, "differs from committed release"):
+                self.prepare()
+            (previous / name).write_bytes(original)
+
+    def test_fresh_qualified_path_rejects_extra_predecessor_member(self):
+        (self.bundle / "previous" / "unreviewed.json").write_text("{}")
+        with self.assertRaisesRegex(m.BindingBundleError, "differs from committed release"):
+            self.prepare()
+
+    def test_nonnull_receipt_without_parent_cannot_use_fresh_path(self):
+        self.inputs["parent_receipt_sha256"] = "a" * 64
+        with self.assertRaisesRegex(m.BindingBundleError, "receipt requires verified parent"):
+            self.prepare()
+
+    def test_null_receipt_rejects_orphan_parent_or_dangling_symlink(self):
+        parent = self.bundle / "parent"
+        parent.mkdir()
+        with self.assertRaisesRegex(m.BindingBundleError, "orphan parent"):
+            self.prepare()
+        parent.rmdir(); parent.symlink_to(self.bundle / "missing-parent")
+        with self.assertRaisesRegex(m.BindingBundleError, "orphan parent"):
+            self.prepare()
+
+    def test_exact_greedy_parent_route_is_preserved(self):
+        parent_path = self.bundle / "parent"; parent_path.mkdir()
+        (parent_path / "inputs.json").write_bytes(m.canonical(self.inputs))
+        ledger = parent_path / "ledger.json"; ledger.write_bytes(b"verified parent ledger\n")
+        self.inputs["parent_receipt_sha256"] = "a" * 64
+        parent = mock.Mock(phase="identity_only_greedy", receipt_sha256="a" * 64,
+                           release_dir=self.bundle / "previous", ledger_path=ledger)
+        with mock.patch.object(m, "verify_bundle", return_value=parent) as verify:
+            self.prepare()
+        verify.assert_called_once_with(parent_path, repo=Path("."), commit=self.commit, recipe_path=m.RECIPE_PATH)
+        self.assertEqual((self.cat / "release-ledger.json").read_bytes(), b"verified parent ledger\n")
+
+    def test_parent_route_still_requires_exact_signed_candidate_identity(self):
+        parent_path = self.bundle / "parent"; parent_path.mkdir()
+        different = copy.deepcopy(self.inputs)
+        different["identity"]["reproducible_build_sha256"] = "0" * 64
+        (parent_path / "inputs.json").write_bytes(m.canonical(different))
+        self.inputs["parent_receipt_sha256"] = "a" * 64
+        parent = mock.Mock(phase="identity_only_greedy", receipt_sha256="a" * 64,
+                           release_dir=self.bundle / "previous")
+        with mock.patch.object(m, "verify_bundle", return_value=parent), \
+             self.assertRaisesRegex(m.BindingBundleError, "retain exact signed CLI identity"):
+            self.prepare()
+
+    def test_fresh_path_without_numerical_qualification_stops_before_generation(self):
+        with self.assertRaisesRegex(m.BindingBundleError, "regular JSON file required"):
+            self.derive()
+        self.assertTrue(any("restamp" in command for command in self.calls))
+        self.assertFalse(any("generate" in command for command in self.calls))
+
+    def test_fresh_path_wrong_signed_measurement_identity_is_not_qualified(self):
+        q = self.bundle / "qualification"; q.mkdir()
+        for name in ("acceptance-policy.json", "acceptance-corpus.json"):
+            (q / name).write_bytes(m.canonical({}))
+        (q / "acceptance.json").write_bytes(m.canonical({"measurement_identity": {
+            "binary_sha256": "0" * 64, "binary_cdhash": self.identity["live_executable_cdhash"]}}))
+        with self.assertRaisesRegex(m.BindingBundleError, "R005 signed measurement"):
+            self.derive()
+
+
 class SignedMeasurementTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)

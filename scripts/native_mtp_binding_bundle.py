@@ -515,6 +515,40 @@ def _flat(stage: Path, target: Path) -> None:
         shutil.copyfile(source, target / name)
 
 
+def _prepare_predecessor(bundle: Path, *, repo: Path, commit: str, stage: Path, inputs: dict) -> None:
+    """Select the reviewed predecessor before any source restamp or mutation.
+
+    A fully qualified published candidate may start from the committed release
+    without an identity-only parent. Its numerical and authenticated serving
+    gates still run; this route never lends old qualification to changed code.
+    """
+    parent_path = bundle / "parent"
+    parent_present = parent_path.exists() or parent_path.is_symlink()
+    if inputs["phase"] != "expanded_glm_sampled":
+        require(inputs["parent_receipt_sha256"] is None and not parent_present,
+                "identity phase cannot replace ledger predecessor")
+        return
+    if inputs["parent_receipt_sha256"] is None:
+        require(not parent_present, "fully qualified phase cannot have an orphan parent")
+        with tempfile.TemporaryDirectory(prefix="native-binding-predecessor-") as directory:
+            committed = Path(directory) / "committed"
+            _flat(stage, committed)
+            require(inventory(bundle / "previous") == inventory(committed),
+                    "fully qualified predecessor differs from committed release")
+        # Keep the committed release ledger; no identity-only transition occurs.
+        return
+    require(parent_present, "expanded parent receipt requires verified parent")
+    parent = verify_bundle(parent_path, repo=repo, commit=commit, recipe_path=RECIPE_PATH)
+    require(parent.phase == "identity_only_greedy" and inputs["parent_receipt_sha256"] == parent.receipt_sha256,
+            "expanded phase requires exact greedy binding predecessor")
+    require(inventory(bundle / "previous") == inventory(parent.release_dir),
+            "expanded predecessor differs from verified parent")
+    parent_inputs = read_json(parent_path / "inputs.json")
+    require(inputs["identity"] == parent_inputs["identity"] and inputs["candidate_version"] == parent_inputs["candidate_version"],
+            "expanded phase must retain exact signed CLI identity")
+    shutil.copyfile(parent.ledger_path, stage / CATALOG / "release-ledger.json")
+
+
 def _derive(bundle: Path, *, repo: Path, commit: str, recipe: dict, stage: Path, sign: bool = False) -> None:
     if not stage.exists():
         _archive(repo, commit, stage)
@@ -531,15 +565,7 @@ def _derive(bundle: Path, *, repo: Path, commit: str, recipe: dict, stage: Path,
     cat = stage / CATALOG
     previous = bundle / "previous"
     require((previous / "trusted-keys.json").read_bytes() == (cat / "trusted-keys.json").read_bytes(), "recipe cannot replace predecessor trust roots")
-    if inputs["phase"] == "expanded_glm_sampled":
-        parent = verify_bundle(bundle / "parent", repo=repo, commit=commit, recipe_path=RECIPE_PATH)
-        require(parent.phase == "identity_only_greedy" and inputs["parent_receipt_sha256"] == parent.receipt_sha256, "expanded phase requires exact greedy binding predecessor")
-        require(inventory(previous) == inventory(parent.release_dir), "expanded predecessor differs from verified parent")
-        parent_inputs = read_json(bundle / "parent/inputs.json")
-        require(inputs["identity"] == parent_inputs["identity"] and inputs["candidate_version"] == parent_inputs["candidate_version"], "expanded phase must retain exact signed CLI identity")
-        shutil.copyfile(parent.ledger_path, cat / "release-ledger.json")
-    else:
-        require(inputs["parent_receipt_sha256"] is None and not (bundle / "parent").exists(), "identity phase cannot replace ledger predecessor")
+    _prepare_predecessor(bundle, repo=repo, commit=commit, stage=stage, inputs=inputs)
     env = _environment(repo, commit, previous)
     env["GIT_WORK_TREE"] = str(stage)
     _run([sys.executable, stage / "scripts/catalog-release.py", "restamp", "--release-id", inputs["release_id"], "--generated-at", inputs["generated_at"]], cwd=stage, env=env)
