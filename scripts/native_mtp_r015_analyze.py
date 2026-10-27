@@ -112,9 +112,7 @@ POLICY_KEYS = {
 # admission policy must carry, so the analyzer never judges a policy the bench
 # would refuse.
 FIXED_METHODOLOGY = {
-    "quantization": "4bit",
     "cache_mode": "paged_kv_mixed",
-    "proposal_depth": 1,
     "run_order": "seeded_random_counterbalanced",
     "prompt_corpus": "deterministic_synthetic_unique_v2",
     "exclusion_rules": "none",
@@ -189,6 +187,16 @@ def _policy_contract_violations(policy: dict) -> list[str]:
     for key, expected in FIXED_METHODOLOGY.items():
         if policy.get(key) != expected or isinstance(policy.get(key), bool):
             violations.append(f"methodology_not_frozen:{key}")
+    # Match the implemented tuple families without widening the existing
+    # affine GLM/Qwen depth-one contract. DSpark's mixed-MX tuple supports
+    # depths 1...5; all numerical thresholds remain frozen below.
+    quantization = policy.get("quantization")
+    if quantization not in ("4bit", "mlx_mxfp4_mxfp8"):
+        violations.append("methodology_not_frozen:quantization")
+    depth = policy.get("proposal_depth")
+    maximum_depth = 5 if quantization == "mlx_mxfp4_mxfp8" else 1
+    if not (_is_int(depth) and 1 <= depth <= maximum_depth):
+        violations.append("methodology_not_frozen:proposal_depth")
     # Field types and ranges, mirroring NativeMTPBenchPolicy.load.
     hex64 = re.compile(r"^[0-9a-f]{64}$")
     hex40 = re.compile(r"^[0-9a-f]{40}$")

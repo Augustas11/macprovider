@@ -179,7 +179,7 @@ def main():
         }
     gate_tps = rows.get(cb["gate_rows"], {}).get("aggregate_tps_p50")
     parity_ok = [rows.get(n, {}).get("parity_pass") for n in cb["parity_rows"]]
-    if not isinstance(gate_tps, (int, float)) or not math.isfinite(gate_tps) or None in parity_ok:
+    if invalid or not isinstance(gate_tps, (int, float)) or not math.isfinite(gate_tps) or None in parity_ok:
         cb_decision = "INCOMPLETE"
     elif gate_tps >= cb["gate_aggregate_tps"] and all(parity_ok):
         cb_decision = "PASS"

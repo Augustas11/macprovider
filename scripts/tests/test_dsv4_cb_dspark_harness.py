@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -36,6 +37,12 @@ class DeepseekCBDSparkHarnessTests(unittest.TestCase):
         for line in (HARNESS / 'dsv4-cbds-manifest.sha256').read_text().splitlines():
             digest, name = line.split('  ', 1)
             self.assertEqual(hashlib.sha256((HARNESS / name).read_bytes()).hexdigest(), digest, name)
+
+    def test_candidate_digest_matches_generated_runtime_identity(self):
+        source = (ROOT / 'phase3-binary/Sources/macprovider-cli/DecodePathIdentity.generated.swift').read_text()
+        marker = re.search(r'macprovider\.decode-path-digest\.v1:([0-9a-f]{64})', source)
+        self.assertIsNotNone(marker)
+        self.assertEqual(self.policy['runtime_under_test']['decode_path_digest'], marker.group(1))
 
     def summary(self, directory):
         return json.loads(subprocess.check_output(
@@ -88,6 +95,25 @@ class DeepseekCBDSparkHarnessTests(unittest.TestCase):
             value['aggregateTPSRuns'][1] = float('nan')
             p.write_text(json.dumps(value))
             self.assertEqual(self.summary(directory)['cb_gate']['decision'], 'INCOMPLETE')
+
+    def test_cb_requires_every_throughput_cell_even_outside_gate_row(self):
+        for rows in (1, 2, 4, 8):
+            for invalid in ('missing', 'malformed', 'wrong_rows'):
+                with self.subTest(rows=rows, invalid=invalid), tempfile.TemporaryDirectory() as tmp:
+                    directory = Path(tmp)
+                    self.write_cb(directory)
+                    path = directory / f'throughput-r{rows}.json'
+                    if invalid == 'missing':
+                        path.unlink()
+                    elif invalid == 'malformed':
+                        path.write_text('{')
+                    else:
+                        value = json.loads(path.read_text())
+                        value['rows'] = 16
+                        path.write_text(json.dumps(value))
+                    result = self.summary(directory)['cb_gate']
+                    self.assertEqual(result['decision'], 'INCOMPLETE')
+                    self.assertIn(f'throughput-r{rows}', result['invalid_or_missing_cells'])
 
     @staticmethod
     def reference_runs():

@@ -33,6 +33,33 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
         result = self._run_case()
         self.assertEqual(result["overall_status"], "PASS")
 
+    def test_dspark_mixed_mx_policies_use_existing_r015_gates(self):
+        for depth in (1, 2, 3, 5):
+            with self.subTest(depth=depth):
+                result = self._run_case(policy_overrides={
+                    "quantization": "mlx_mxfp4_mxfp8", "proposal_depth": depth,
+                })
+                self.assertEqual(result["overall_status"], "PASS", result)
+
+    def test_policy_depth_and_quantization_remain_closed(self):
+        # Existing affine GLM/Qwen policies remain depth one; only the mixed
+        # representation used by DSpark admits the implemented depth range.
+        invalid = [
+            ("4bit", 2), ("4bit", 5), ("mlx_mxfp8", 1),
+            ("mlx_mxfp4_mxfp8", 0), ("mlx_mxfp4_mxfp8", 6),
+            ("mlx_mxfp4_mxfp8", True), ("mlx_mxfp4_mxfp8", 1.0),
+        ]
+        for quantization, depth in invalid:
+            with self.subTest(quantization=quantization, depth=depth):
+                result = self._run_case(policy_overrides={
+                    "quantization": quantization, "proposal_depth": depth,
+                })
+                self.assertEqual(result["overall_status"], "FAIL")
+                self.assertTrue(any(
+                    item in result["matrix_violations"] for item in (
+                        "methodology_not_frozen:quantization", "methodology_not_frozen:proposal_depth",
+                    )), result)
+
     def test_throughput_bound_fail(self):
         result = self._run_case(native_tps=112.0)
         self.assertEqual(result["overall_status"], "FAIL")
