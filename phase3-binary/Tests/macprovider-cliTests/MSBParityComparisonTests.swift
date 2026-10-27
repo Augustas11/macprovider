@@ -3,6 +3,18 @@ import ArgumentParser
 @testable import macprovider_cli
 
 final class MSBParityComparisonTests: XCTestCase {
+    func testDiagnosticRejectsFourthRowOnEightGiBBeforeModelLoading() throws {
+        let eightGiB: UInt64 = 8 * 1024 * 1024 * 1024
+        let four = try MSBThroughputCommand.parse(["--model", "/nonexistent-row-cap-fixture", "--rows", "4"])
+        XCTAssertThrowsError(try four.validateHardwareRowCount(physicalMemoryBytes: eightGiB)) { error in
+            XCTAssertTrue(error is ValidationError)
+            XCTAssertTrue(String(describing: error).contains("memory row cap 3"))
+        }
+        let three = try MSBThroughputCommand.parse(["--rows", "3"])
+        XCTAssertNoThrow(try three.validateHardwareRowCount(physicalMemoryBytes: eightGiB))
+        XCTAssertNoThrow(try four.validateHardwareRowCount(physicalMemoryBytes: eightGiB + 1))
+    }
+
     func testOptionalMLXCacheLimitParsing() throws {
         XCTAssertNil(try MSBThroughputCommand.parse([]).mlxCacheLimitMB)
         XCTAssertEqual(try MSBThroughputCommand.parse(["--mlx-cache-limit-mb", "256"]).mlxCacheLimitMB, 256)

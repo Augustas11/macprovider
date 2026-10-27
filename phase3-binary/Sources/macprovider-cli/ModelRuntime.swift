@@ -2154,6 +2154,7 @@ actor ModelRuntime: ModelRuntimeServing {
     private var continuousBatchingSelfCheckReport: ContinuousBatchingSelfCheckReport?
     // Only real native runtimes select this; preloaded/test runtimes leave it nil.
     private(set) var mlxCacheLimitMBForLoading: Int? = nil
+    private var hardwareServingRowCap = ProviderCapacity.maxConcurrencyOverrideLimit
     private let warmSwapEnabled: Bool
     private let swapDrainTimeoutSeconds: Int
     struct DrainTiming: Sendable {
@@ -3531,6 +3532,8 @@ maxTokens: 1,
             throw ModelRuntimeLoadError(
                 target: modelID ?? "<unset>", reason: "mlx_cache_limit_mb must be in 0...\(Self.maximumMLXCacheLimitMB)")
         }
+        let hardwareServingRowCap = ProviderCapacity.boundedServingRows(ProviderCapacity.maxConcurrencyOverrideLimit)
+        self.hardwareServingRowCap = hardwareServingRowCap
         self.mlxCacheLimitMBForLoading = Self.resolvedMLXCacheLimitMB(
             configured: mlxCacheLimitMB,
             physicalMemoryBytes: ProcessInfo.processInfo.physicalMemory
@@ -3621,7 +3624,7 @@ maxTokens: 1,
             runtimeCacheClass: Self.pagedKVUnavailableCacheClass
         )
         self.conversationCache = ConversationCache()
-        let boundedMaxBatch = min(max(1, maxBatch), ProviderCapacity.maxConcurrencyOverrideLimit)
+        let boundedMaxBatch = min(max(1, maxBatch), hardwareServingRowCap)
         self.maxBatch = boundedMaxBatch
         self.maxBatchBeforePolicyCeiling = boundedMaxBatch
         self.inferenceGate = AsyncSemaphore(value: boundedMaxBatch)
@@ -5916,7 +5919,7 @@ maxTokens: 1,
         servedSlotsResolver = resolver
         if let rowsBeforePolicyCeiling {
             maxBatchBeforePolicyCeiling = min(
-                max(maxBatch, rowsBeforePolicyCeiling), ProviderCapacity.maxConcurrencyOverrideLimit
+                max(maxBatch, rowsBeforePolicyCeiling), hardwareServingRowCap
             )
         }
     }
@@ -6094,10 +6097,56 @@ maxTokens: 1,
         idPrefix: String,
         cohort: Bool = false
     ) async throws -> ContinuousBatchingSelfCheckBatchRun {
+        let gate = inferenceGate
+        let generation = selfCheckGeneration
+        return try await gate.withExclusivePermit {
+            try await self.runExclusiveContinuousBatchingSelfCheckBatch(
+                prompts: prompts, maxOutputTokens: maxOutputTokens, idPrefix: idPrefix,
+                cohort: cohort, expectedGeneration: generation, gate: gate)
+        }
+    }
+
+    private func runExclusiveContinuousBatchingSelfCheckBatch(
+        prompts: [[Int]], maxOutputTokens: Int, idPrefix: String, cohort: Bool,
+        expectedGeneration: Int, gate: AsyncSemaphore
+    ) async throws -> ContinuousBatchingSelfCheckBatchRun {
         try Task.checkCancellation()
+        guard expectedGeneration == selfCheckGeneration else { throw CancellationError() }
+        guard prompts.count <= maxBatch else {
+            throw ContinuousBatchSchedulerError.requestFailed("self_check_row_cap_exceeded")
+        }
         guard let scheduler = continuousBatchScheduler else {
             throw ContinuousBatchSchedulerError.requestFailed("self_check_scheduler_unavailable")
         }
+        let ids = prompts.indices.map { "\(idPrefix)-\($0)" }
+        let result: Result<ContinuousBatchingSelfCheckBatchRun, Error>
+        do {
+            result = .success(try await performContinuousBatchingSelfCheckBatch(
+                prompts: prompts, maxOutputTokens: maxOutputTokens, idPrefix: idPrefix,
+                cohort: cohort, scheduler: scheduler))
+        } catch {
+            result = .failure(error)
+        }
+        do {
+            // A canceled submit can finish before KV retirement. Detached cleanup
+            // is shielded from caller cancellation while exclusivity is held.
+            try await Task.detached {
+                try await scheduler.cancelAndAwaitSelfCheckCleanup(requestIDs: ids)
+            }.value
+        } catch {
+            await gate.failClosed()
+            throw error
+        }
+        return try result.get()
+    }
+
+    private func performContinuousBatchingSelfCheckBatch(
+        prompts: [[Int]],
+        maxOutputTokens: Int,
+        idPrefix: String,
+        cohort: Bool, scheduler: ContinuousBatchScheduler
+    ) async throws -> ContinuousBatchingSelfCheckBatchRun {
+        try Task.checkCancellation()
         let ids = prompts.indices.map { "\(idPrefix)-\($0)" }
         let start = Date()
         let outputs = try await withTaskCancellationHandler {
@@ -6756,19 +6805,19 @@ maxTokens: 1,
         if let adoptionKnobs {
             maxContextTokens = adoptionKnobs.maxContext
             kvBitsOverride = adoptionKnobs.kvBits
-            maxBatchBeforePolicyCeiling = adoptionKnobs.maxBatch
+            maxBatchBeforePolicyCeiling = min(max(1, adoptionKnobs.maxBatch), hardwareServingRowCap)
         }
         // The rebuilt scheduler never has more rows than the new model's
         // signed policy ceiling (SPEC-038 FR-CB11 v0.3.22).
         maxBatch = Self.rowsUnderPolicyCeiling(
-            rows: maxBatchBeforePolicyCeiling,
+            rows: min(maxBatchBeforePolicyCeiling, hardwareServingRowCap),
             ceiling: servedSlotsManaged ? continuousBatchingPolicyServedSlotCeiling(modelSHA256: modelHash) : nil
         )
         // A managed provider serves the owner pin or one slot until the new
         // model's self-check (or its stored result) decides.
         let swapServedSlots: Int? = servedSlotsManaged
             ? min(ownerPinnedServedSlots ?? 1, maxBatch)
-            : adoptionKnobs?.maxBatch
+            : adoptionKnobs.map { min(max(1, $0.maxBatch), maxBatch) }
         if let swapServedSlots {
             servedSlotLimit = swapServedSlots
             await inferenceGate.resize(to: swapServedSlots, stamp: swapGeneration)
@@ -8336,6 +8385,30 @@ maxTokens: 1,
         shouldCancel: @escaping @Sendable () -> Bool,
         drainCancelled: DrainCancelToken
     ) async throws -> CompletionResult? {
+        guard capability.isRequested, capability.unsupportedReason == nil,
+              !capability.shouldUseSerialPath, case .attached = pagedKVAttachDecision else { return nil }
+        let gate = inferenceGate
+        return try await Self.withDrainAndClientCancellation(drainCancelled, shouldCancel: shouldCancel) {
+            try await gate.withPermit {
+                try Task.checkCancellation()
+                try drainCancelled.check()
+                if shouldCancel() { throw CancellationError() }
+                return try await self.admittedContinuousBatchCompletion(request: request, snapshot: snapshot, capability: capability,
+                        nativeMTPAdmission: nativeMTPAdmission, completionStartedAt: completionStartedAt,
+                        shouldCancel: shouldCancel, drainCancelled: drainCancelled)
+            }
+        }
+    }
+
+    private func admittedContinuousBatchCompletion(
+        request: ChatCompletionRequest,
+        snapshot: RuntimeSnapshot,
+        capability: ContinuousBatchingCapability,
+        nativeMTPAdmission: NativeMTPRuntimeAdmission,
+        completionStartedAt: Date,
+        shouldCancel: @escaping @Sendable () -> Bool,
+        drainCancelled: DrainCancelToken
+    ) async throws -> CompletionResult? {
         guard capability.isRequested,
               capability.unsupportedReason == nil,
               !capability.shouldUseSerialPath,
@@ -8494,12 +8567,26 @@ maxTokens: 1,
             // Non-streaming receipts report full generation latency as TTFT
             // (SPEC-015): the buyer sees nothing before the whole body.
             result = try await Self.withDrainAndClientCancellation(drainCancelled, shouldCancel: shouldCancel) {
-                try await scheduler.submit(submission.schedulerRequest)
+                try await scheduler.submit(submission.schedulerRequest, admissionWaitPolicy: .callerBounded)
             }
         } catch {
+            let submissionError = error
+            var retirementError: Error?
+            do {
+                // Waiter cancellation precedes native retirement. Keep the shared
+                // permit until this ID retires, without canceling surviving duplicates.
+                try await Task.detached {
+                    try await scheduler.awaitRequestRetirement(requestID: schedulerRequestID)
+                }.value
+            } catch {
+                retirementError = error
+                await inferenceGate.failClosed()
+            }
             if let lease {
                 await conversationCache.abort(lease)
             }
+            if let retirementError { throw retirementError }
+            let error = submissionError
             // SPEC-038 AC-25: one shared scheduler-error map, so the
             // non-streaming and streaming paths cannot drift.
             CBTrace.log(schedulerRequestID, "rt_cb_threw \(type(of: error))")
@@ -8799,6 +8886,35 @@ maxTokens: 1,
         idleCancellation: DrainCancelToken,
         onChunk: @escaping @Sendable (StreamChunk) -> Void
     ) async throws -> CompletionResult? {
+        guard capability.isRequested, capability.unsupportedReason == nil,
+              !capability.shouldUseSerialPath, case .attached = pagedKVAttachDecision else { return nil }
+        let gate = inferenceGate
+        return try await Self.withDrainAndClientCancellation(drainCancelled, shouldCancel: { shouldCancel() || idleCancellation.isFired }) {
+            try await gate.withPermit {
+                try Task.checkCancellation()
+                try drainCancelled.check()
+                if shouldCancel() { throw CancellationError() }
+                return try await self.admittedContinuousBatchStreamingCompletion(request: request, snapshot: snapshot, capability: capability,
+                        nativeMTPAdmission: nativeMTPAdmission, completionStartedAt: completionStartedAt,
+                        shouldCancel: shouldCancel, drainCancelled: drainCancelled, structuredAccumulator: structuredAccumulator,
+                        idleState: idleState, idleCancellation: idleCancellation, onChunk: onChunk)
+            }
+        }
+    }
+
+    private func admittedContinuousBatchStreamingCompletion(
+        request: ChatCompletionRequest,
+        snapshot: RuntimeSnapshot,
+        capability: ContinuousBatchingCapability,
+        nativeMTPAdmission: NativeMTPRuntimeAdmission,
+        completionStartedAt: Date,
+        shouldCancel: @escaping @Sendable () -> Bool,
+        drainCancelled: DrainCancelToken,
+        structuredAccumulator: StructuredStreamingContentAccumulator,
+        idleState: StructuredStreamingIdleState,
+        idleCancellation: DrainCancelToken,
+        onChunk: @escaping @Sendable (StreamChunk) -> Void
+    ) async throws -> CompletionResult? {
         guard !request.containsNonTextMessageContentPart else { return nil }
         guard capability.isRequested,
               capability.unsupportedReason == nil,
@@ -8964,7 +9080,7 @@ maxTokens: 1,
                 drainCancelled,
                 shouldCancel: { shouldCancel() || idleCancellation.isFired }
             ) {
-                try await scheduler.submit(submission.schedulerRequest, tokenSink: { event in
+                try await scheduler.submit(submission.schedulerRequest, admissionWaitPolicy: .callerBounded, tokenSink: { event in
                     guard !drainCancelled.isFired,
                           !shouldCancel(),
                           !idleCancellation.isFired
@@ -8988,9 +9104,23 @@ maxTokens: 1,
                 })
             }
         } catch {
+            let submissionError = error
+            var retirementError: Error?
+            do {
+                // Waiter cancellation precedes native retirement. Keep the shared
+                // permit until this ID retires, without canceling surviving duplicates.
+                try await Task.detached {
+                    try await scheduler.awaitRequestRetirement(requestID: schedulerRequestID)
+                }.value
+            } catch {
+                retirementError = error
+                await inferenceGate.failClosed()
+            }
             if let lease {
                 await conversationCache.abort(lease)
             }
+            if let retirementError { throw retirementError }
+            let error = submissionError
             // SPEC-038 AC-25: one shared scheduler-error map, so the
             // streaming and non-streaming paths cannot drift.
             throw (error as? ContinuousBatchSchedulerError)?.asAPIError() ?? error

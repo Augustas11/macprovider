@@ -159,6 +159,13 @@ struct MSBThroughputCommand: AsyncParsableCommand {
     )
     var outputDir: String = "state/perf"
 
+    func validateHardwareRowCount(physicalMemoryBytes: UInt64 = ProcessInfo.processInfo.physicalMemory) throws {
+        let bound = ProviderCapacity.boundedServingRows(rows, physicalMemoryBytes: physicalMemoryBytes)
+        guard rows <= bound else {
+            throw ValidationError("--rows \(rows) exceeds the device's memory row cap \(bound); no model was loaded")
+        }
+    }
+
     func run() async throws {
         guard let modelID = model ?? ProcessInfo.processInfo.environment["MACPROVIDER_MODEL"],
               !modelID.isEmpty else {
@@ -174,6 +181,8 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             ))
             throw ExitCode(2)
         }
+
+        try validateHardwareRowCount()
 
         if let mlxCacheLimitMB, !ModelRuntime.isValidMLXCacheLimitMB(mlxCacheLimitMB) {
             throw ValidationError("--mlx-cache-limit-mb must be in 0...\(ModelRuntime.maximumMLXCacheLimitMB)")
