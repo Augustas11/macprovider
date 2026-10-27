@@ -44,12 +44,14 @@ for repository reference work. Its `mlx_vlm/convert.py` supports `--mtp`,
 `--mtp-output`, four-bit affine quantization and a pinned source revision:
 
 ```sh
-python -m mlx_vlm.convert --hf-path Qwen/Qwen3.8-27B \
-  --revision 1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0 \
+python -m mlx_vlm.convert --hf-path "$SOURCE_SNAPSHOT" \
   --mlx-path "$TARGET_OUTPUT" -q --q-bits 4 --q-group-size 64 --q-mode affine \
   --mtp --mtp-output "$DRAFTER_OUTPUT"
 ```
 
+Set `SOURCE_SNAPSHOT` to the pre-staged local snapshot of the exact official
+revision above; verify its inventory before conversion. Conversion is the first
+step of the assigned hardware window, never part of network/disk staging.
 This is a future hardware-window command, not a command run during coding.
 Set output directories in private lab storage. Keep the exact original
 config/template/tokenizer and source inventory; distribute license and notices,
@@ -77,10 +79,13 @@ placeholders, never publishable artifact-feed entries.
 
 The official root is `qwen3_5` / `Qwen3_5ForConditionalGeneration`, with a dense
 `qwen3_5_text` decoder. `ModelRuntime` already maps the exact catalog key to
-that architecture. Fork `Augustas11/mlx-swift-lm` at
-`9b2766ee4f4271669e58429e6eb1251e22e5ecaa` registers it in LLM/VLM factories;
+that architecture. Fork `Augustas11/mlx-swift-lm` at the original mapping-review
+pin `9b2766ee4f4271669e58429e6eb1251e22e5ecaa` registers it in LLM/VLM factories;
 `Libraries/MLXLLM/Models/Qwen35.swift` and the matching MLXVLM implementation
-already accept this geometry:
+already accept this geometry. The current post-#2152 fork pin is
+`3905a1b0499f0f38c0f94a008034a0362b9e3dca`; its Qwen/common-MTP files are
+unchanged from that original mapping review (the intervening fork diff changes
+only GLM5Next source/tests):
 
 | Official property | Existing implementation / difference from incumbent |
 |---|---|
@@ -104,9 +109,9 @@ MoE dispatch, decoder or dependency pin is warranted before measurement.
 
 ## CB and native MTP (slices 4–5)
 
-`ModelRuntime.pagedKVHybridModelIsAllowlisted` already accepts this exact key
-and architecture; its topology validator checks hybrid layer geometry and the
-dense branch needs no expert dispatch. `PagedKVRuntimeBridgeTests` already
+`ModelRuntime.pagedKVModelCapabilities` already accepts this exact key and
+architecture through `hybridArchitectureAllowlist`; attach/parity gates remain
+required, and the dense branch needs no expert dispatch. `PagedKVRuntimeBridgeTests` already
 includes this key. Retain those gates and FR-CB10 row selection unchanged.
 Architecture recognition is not signed CB authorization: the current signed CB
 policy has no Qwen3.8 entry. The window must prove actual scheduler rows and
@@ -114,10 +119,11 @@ bind the converted target identity before adding its measured policy entry in
 this same campaign. Preserve current Qwen3.6 and GLM entries.
 
 The source ships MTP; it is not optional for this intake. Existing dense draft
-support and `qwen3_5_mtp_v1` separate-artifact selection can be reused. Keep
-slice 5 pending until the multi-family campaign PR #2152 merges, then rebase
-and bind the newly converted target and drafter without replacing other
-entries. No new SPEC-048 acceptance gates are introduced. Qualify on the lab
+support and `qwen3_5_mtp_v1` separate-artifact selection can be reused.
+PR #2152 merged as `202ff416c`, and this campaign is rebased on it.
+Bind the converted target and drafter through that multi-family framework
+without replacing other entries; actual artifact bindings remain window work.
+No new SPEC-048 acceptance gates are introduced. Qualify on the lab
 build; a signed CLI cut only rebinds identity.
 
 ## Catalog preparation and intake disposition (slice 7)
@@ -156,7 +162,11 @@ operator's decision; no automatic tradeoff or CB/MTP withdrawal.
 
 ## One-window plan (slice 8; not executed)
 
-Coding-only restrictions remain in effect. Hardware starts only in the
+Network/disk-only source staging is authorized before the window: download
+the exact official BF16 revision without loading weights, using GPU, taking a
+live lock or disturbing the active campaign. Queue position is after #2151 and
+LFM #2173; conversion remains the first step of this campaign's assigned window.
+Hardware starts only in the
 assigned guarded Studio window, after host identity and exclusive ownership
 are verified using existing lab controls. No live provider or coordinator
 mutation; lab binary is isolated with `--no-join`. Build source plus lab
@@ -172,7 +182,8 @@ are the changed prompt-preparation lines; decoder/fork math is unchanged.
 New target/drafter identity and official template distinguish this acceptance
 from the incumbent's records. Do not repeat unrelated accepted cells.
 
-1. **Preparation.** After the prerequisite merge/rebase, freeze provider and
+1. **Conversion first.** With #2152 merged/rebased and the staged source
+   inventory verified, freeze provider and
    dependency commits, decode digest, lab binary hash, conversion environment,
    target/drafter manifests and exact official tokenizer/template hashes.
    The existing conversion has dropped MTP, so convert using the pinned command above; verify all 15 MTP tensors were
