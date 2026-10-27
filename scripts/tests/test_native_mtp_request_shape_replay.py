@@ -382,6 +382,42 @@ class NativeMTPRequestShapeReplayTests(unittest.TestCase):
             self.assertEqual(analysis["overall_status"], "PASS")
             self.assertEqual(analysis["paired_blocks"], 10)
 
+    def test_signed_measurement_identity_is_accepted_but_malformed_identity_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            policy = self._write_policy(root)
+            output = self._write_replay_result(root, policy)
+            records = [json.loads(line) for line in output.read_text().splitlines()]
+            identity = {"binary_sha256": "a" * 64, "binary_cdhash": "b" * 40}
+            for record in records:
+                record["measurement_identity"] = identity
+            output.write_text("\n".join(json.dumps(record) for record in records) + "\n")
+            header, _ = replay._load_replay_runs(output, json.loads(policy.read_text()), replay._sha256_file(policy), None)
+            self.assertEqual(header["measurement_identity"], identity)
+            for invalid in ({}, None, dict(identity, binary_sha256="a" * 63),
+                            dict(identity, binary_cdhash="B" * 40), dict(identity, extra="untrusted")):
+                records[0]["measurement_identity"] = invalid
+                output.write_text("\n".join(json.dumps(record) for record in records) + "\n")
+                with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "measurement_identity_invalid"):
+                    replay._load_replay_runs(output, json.loads(policy.read_text()), replay._sha256_file(policy), None)
+
+    def test_signed_replay_cannot_mix_unbound_or_different_binary_runs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            policy = self._write_policy(root)
+            output = self._write_replay_result(root, policy)
+            records = [json.loads(line) for line in output.read_text().splitlines()]
+            identity = {"binary_sha256": "a" * 64, "binary_cdhash": "b" * 40}
+            for record in records:
+                record["measurement_identity"] = identity
+            for index in range(1, len(records)):
+                for invalid in (None, dict(identity, binary_cdhash="c" * 40)):
+                    records[index]["measurement_identity"] = invalid
+                    output.write_text("\n".join(json.dumps(record) for record in records) + "\n")
+                    with self.subTest(index=index, invalid=invalid), self.assertRaisesRegex(ValueError, "measurement_identity_mismatch"):
+                        replay._load_replay_runs(output, json.loads(policy.read_text()), replay._sha256_file(policy), None)
+                records[index]["measurement_identity"] = identity
+
     def test_convert_v2_replay_preserves_projected_pre_capacity_shape(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -212,6 +212,52 @@ def validate_acceptance(result: dict, policy: dict, corpus: dict, tuple_entry: d
     require(visible >= 6400 and result.get("native_compared_positions") == visible, "R005 compared position floor")
 
 
+def validate_measurement_identity(record: dict, identity: dict, *, label: str) -> None:
+    """Bind runtime-measured bytes to the independently authenticated candidate.
+
+    Source-equivalent LAB bytes are deliberately insufficient: qualification
+    must have run inside the signed executable intended for promotion.
+    """
+    expected = {"binary_sha256": identity["reproducible_build_sha256"],
+                "binary_cdhash": identity["live_executable_cdhash"]}
+    require(isinstance(record, dict) and record.get("measurement_identity") == expected,
+            label + " signed measurement executable identity mismatch")
+
+
+def validate_formal_bench(q: Path, *, stage: Path, entry: dict, identity: dict) -> None:
+    """Reopen the formal R015 matrix and sustained window, never a summary."""
+    analyzer = _module(stage, "native_mtp_r015_analyze.py")
+    policy = read_json(q / "bench-policy.json")
+    require(policy.get("schema") == "macprovider.native-mtp-r015-policy.v1",
+            "formal R015 policy required")
+    require(policy.get("provider_commit") == identity["source_commit"],
+            "formal R015 signed candidate source mismatch")
+    for field, expected in {
+        "model_id": entry["model_key"],
+        "target_sha256": entry["ordinary_baseline"]["artifact_hash"],
+        "mtp_sha256": entry["artifact_hash"],
+        "tokenizer_sha256": entry["tokenizer_sha256"],
+        "mlx_fork_revision": entry["runtime_revision"],
+        "qualified_slots": entry["qualified_slots"],
+        "max_native_active_rows": entry["max_native_active_rows"],
+        "proposal_depth": entry["proposal_depth"],
+        "maximum_prompt_tokens": entry["max_prompt_tokens"],
+    }.items():
+        require(policy.get(field) == expected, "formal R015 tuple/artifact binding mismatch")
+    header, runs = analyzer._load_jsonl(q / "bench.jsonl")
+    require(header.get("provider_commit") == identity["source_commit"],
+            "formal R015 signed candidate source mismatch")
+    validate_measurement_identity(header, identity, label="R015 header")
+    require(bool(runs) and any(run.get("sustained") is True for run in runs),
+            "formal R015 sustained records required")
+    for run in runs:
+        validate_measurement_identity(run, identity, label="R015 run")
+    result = analyzer.analyze(q / "bench.jsonl", q / "bench-policy.json")
+    require(result.get("overall_status") == "PASS", "formal R015 analyzer gate failed")
+    require(read_json(q / "bench-analysis.json") == result,
+            "formal R015 supplied analysis is not the rederived result")
+
+
 def validate_acceptance_rows(cases: list, corpus_cases: list) -> int:
     """Shared full numeric validation; prefix resumption never trusts pass flags."""
     visible = 0
@@ -334,7 +380,7 @@ def validate_security_artifact(q: Path, *, repo: Path, source: dict, recipe: dic
 
 
 def validate_representative_replay(q: Path, *, stage: Path, repo: Path, current_source: str,
-                                   entry: dict, scratch: Path) -> dict:
+                                   entry: dict, scratch: Path, identity: dict) -> dict:
     """Recompute representative v2 projection, real paired runs and analysis."""
     original_repo = Path(repo)
     equivalence = _module(stage, "native_mtp_source_equivalence.py")
@@ -351,6 +397,9 @@ def validate_representative_replay(q: Path, *, stage: Path, repo: Path, current_
     projected_policy, projected_plan = replay.project_capture(q / "capture.json", q / "tuple-bounds.json", blocks=len(frozen_plan["blocks"]), privacy_review_id=privacy["privacy_review_id"], privacy_reviewed_at=privacy["privacy_reviewed_at"], preregistration_digest=digest(q / "preregistration.json"), seed=frozen_policy["seed"], sampling_plan_id=sample["sampling_plan_id"], sample_period_start=sample["sample_period_start"], sample_period_end=sample["sample_period_end"], bench_policy_path=q / "bench-policy.json")
     require(projected_policy == frozen_policy and projected_plan == frozen_plan, "capture projection does not rederive frozen policy/plan")
     replay_header, _ = replay._load_replay_runs(q / "replay.json", frozen_policy, digest(q / "replay-policy.json"), digest(q / "capture.json"))
+    validate_measurement_identity(replay_header, identity, label="representative replay")
+    require(replay_header.get("provider_commit") == identity["source_commit"],
+            "representative replay signed candidate source mismatch")
     require(replay_header["mixed_rows"] == entry["qualified_slots"] and replay_header["max_native_active_rows"] == entry["max_native_active_rows"] and replay_header["tuple_bounds_sha256"] == digest(q / "tuple-bounds.json") and replay_header["bench_policy_sha256"] == digest(q / "bench-policy.json"), "R015 full-slot/frozen-input binding mismatch")
     expected_artifacts = {"model_id": entry["model_key"], "target_sha256": entry["ordinary_baseline"]["artifact_hash"],
                           "mtp_sha256": entry["artifact_hash"], "tokenizer_sha256": entry["tokenizer_sha256"]}
@@ -377,9 +426,13 @@ def validate_representative_replay(q: Path, *, stage: Path, repo: Path, current_
 
 def _qualification(stage: Path, bundle: Path, entry: dict, recipe: dict, *, repo: Path) -> dict:
     q = bundle / "qualification"
+    identity = read_json(bundle / "inputs.json")["identity"]
     acceptance = read_json(q / "acceptance.json")
     policy = read_json(q / "acceptance-policy.json")
     corpus = read_json(q / "acceptance-corpus.json")
+    validate_measurement_identity(acceptance, identity, label="R005")
+    require(policy.get("provider_commit") == identity["source_commit"],
+            "R005 signed candidate source mismatch")
     validate_acceptance(acceptance, policy, corpus, entry, policy_sha=digest(q / "acceptance-policy.json"), corpus_sha=digest(q / "acceptance-corpus.json"))
     source = read_json(q / "source.json")
     require(set(source) == {"source_commit", "decode_path_digest"} and source["source_commit"] == policy["provider_commit"], "qualification source binding")
@@ -393,8 +446,9 @@ def _qualification(stage: Path, bundle: Path, entry: dict, recipe: dict, *, repo
     except equivalence.SourceEquivalenceError as error:
         raise BindingBundleError(str(error)) from error
     require(policy["mlx_fork_revision"] == entry["runtime_revision"], "qualification runtime mismatch")
+    validate_formal_bench(q, stage=stage, entry=entry, identity=identity)
     representative = validate_representative_replay(q, stage=stage, repo=original_repo,
-        current_source=read_json(bundle / "inputs.json")["identity"]["source_commit"], entry=entry, scratch=stage.parent)
+        current_source=identity["source_commit"], entry=entry, scratch=stage.parent, identity=identity)
     security_source = read_json(q / "security-actions.json").get("source_commit")
     require(isinstance(security_source, str) and re.fullmatch(r"[0-9a-f]{40}", security_source) is not None, "security CI full source commit required")
     final_source = read_json(bundle / "inputs.json")["identity"]["source_commit"]

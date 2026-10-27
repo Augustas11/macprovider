@@ -104,7 +104,7 @@ class AssemblyTests(unittest.TestCase):
                 path=base/f'canary-{index}';path.write_bytes(a.canonical(value));canaries.append(str(path))
             for name in ('acceptance.json','acceptance-policy.json','acceptance-corpus.json','replay-policy.json',
                          'capture.json','tuple-bounds.json','projection-plan.json','privacy-review.json','preregistration.json',
-                         'bench-policy.json','replay.json','analysis.json','source.json'):(q/name).write_bytes(b'{}')
+                         'bench-policy.json','bench.jsonl','bench-analysis.json','replay.json','analysis.json','source.json'):(q/name).write_bytes(b'{}')
             config.pop('lab')
             config.update(schema=a.SCHEMA,entry_index=0,lab_records=[str(base/'lab')],
                           qualification_bundle=str(base),canary_observations=canaries,
@@ -142,6 +142,8 @@ class AssemblyTests(unittest.TestCase):
             self.assertTrue(canary['checks']['compute_integrity_claimed_path_diagnostic_inconclusive'])
             self.assertEqual(canary['details']['diagnostic_observation_sha256'],a.sha(a.canonical(observations['diagnostic_observations'])))
             self.assertIn('steps/step-12-native-canary.json',receipt['files'])
+            for name in ('bench.jsonl','bench-analysis.json'):
+                self.assertIn('observations/representative/'+name,receipt['files'])
 
     def prepared(self,base):
         prepared=base/'prepared';prepared.mkdir()

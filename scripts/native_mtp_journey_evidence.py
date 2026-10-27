@@ -439,14 +439,16 @@ def validate_representative_serving_policy(bundle: Bundle, entry: dict, policy: 
         representative = scratch / "representative"
         representative.mkdir()
         names = {"capture.json", "tuple-bounds.json", "projection-plan.json", "privacy-review.json",
-                 "preregistration.json", "bench-policy.json", "replay.json", "replay-policy.json", "analysis.json", "source.json"}
+                 "preregistration.json", "bench-policy.json", "bench.jsonl", "bench-analysis.json",
+                 "replay.json", "replay-policy.json", "analysis.json", "source.json"}
         for name in names:
             (representative / name).write_bytes(bundle.require("observations/representative/" + name))
         if (representative / "replay-policy.json").read_bytes() != policy:
             fail("representative policy bytes differ from sidecar-bound r015-policy.json")
         try:
+            core.validate_formal_bench(representative, stage=ROOT, entry=entry, identity=entry)
             hashes = core.validate_representative_replay(representative, stage=ROOT, repo=ROOT,
-                current_source=entry["source_commit"], entry=entry, scratch=scratch)
+                current_source=entry["source_commit"], entry=entry, scratch=scratch, identity=entry)
         except (core.BindingBundleError, ValueError) as error:
             fail(str(error))
         if any(entry[key] != value for key, value in hashes.items()):

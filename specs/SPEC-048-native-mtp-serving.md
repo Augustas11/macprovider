@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.59
+**Version:** 0.1.60
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.59",
+  "version": "0.1.60",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -1567,6 +1567,25 @@ ordered as follows, without withdrawing an already-enabled native-MTP tuple:
    above. Observation, exploratory cells and offline projection replace none
    of them. An isolated candidate MUST NOT join the live coordinator merely
    to produce the missing observation or qualification.
+   The signed executable MUST carry an isolated qualification entry point,
+   `native-mtp-qualify`, for R005 acceptance, formal R015 matrix/sustained and
+   representative replay. It MUST NOT join a coordinator or expose the LAB
+   serving overrides. Qualification mode MUST reject exploratory policies.
+   Before model/device work it MUST validate its running code signature and
+   derive `measurement_identity.binary_sha256` from its executable bytes and
+   `measurement_identity.binary_cdhash` from its code-signing identity; neither
+   value may come from command arguments or supplied evidence. R005 results,
+   the formal R015 header and every matrix/sustained record, and representative-
+   replay headers and runs MUST retain that identity. Resuming a sustained phase MUST reject a
+   matrix produced by different executable bytes. Qualification consumers MUST
+   compare both fields with the independently authenticated acceptance-candidate
+   SHA-256/CDHash, and require the candidate source identity. A source-equivalent
+   LAB build, a later signed projection, or a caller identity assertion cannot
+   substitute for measurements from the exact signed candidate.
+   The qualification archive MUST retain `bench.jsonl`, `bench-policy.json`
+   and rederived `bench-analysis.json` for formal R015, separately from
+   representative `replay.json`, `replay-policy.json` and `analysis.json`.
+   Existing matrix, sustained, replay and correctness gates remain required.
 4. Only after qualification and review may the existing release and catalog
    trains advance through their remaining gates and activate the qualified
    policy. Final tag/recommendation, signed journeys, release verification and
@@ -2130,6 +2149,12 @@ the text-only path without image inputs; that does not admit multimodal buyer
 requests.
 
 ## 9. Changelog and history
+
+- **0.1.60 (2026-10-27)** — MTP-14 requires an isolated qualification entry
+  point in the signed acceptance executable. Runtime-derived executable
+  SHA-256/CDHash bind R005, formal R015/sustained and representative replay
+  to the independently authenticated candidate. LAB/source-only substitution
+  is rejected; serving isolation, numerical gates and ops order are retained.
 
 - **0.1.59 (2026-10-26)** — MTP-14 separates a collector-capable signed
   candidate cut from changed-decoder qualification and production activation.

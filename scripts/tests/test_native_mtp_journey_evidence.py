@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from datetime import datetime, timezone
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -283,6 +284,32 @@ class ReleaseEvidenceTest(unittest.TestCase):
         bad = dict(evidence, base_commit=self.head, target_commit=self.head)
         with self.assertRaises(contract.NativeMTPEvidenceError):
             contract.validate_release_git(self.repo.root, bad)
+
+
+class SignedQualificationServingTests(unittest.TestCase):
+    def bundle(self):
+        names = {"capture.json", "tuple-bounds.json", "projection-plan.json", "privacy-review.json",
+                 "preregistration.json", "bench-policy.json", "bench.jsonl", "bench-analysis.json",
+                 "replay.json", "replay-policy.json", "analysis.json", "source.json"}
+        return contract.Bundle("serving", {"observations/representative/" + name: b"{}" for name in names}, b"")
+
+    def test_formal_signed_records_are_required_in_serving_archive(self):
+        for name in ("bench.jsonl", "bench-analysis.json"):
+            bundle = self.bundle(); del bundle.files["observations/representative/" + name]
+            with self.subTest(name=name), self.assertRaisesRegex(contract.NativeMTPEvidenceError, name):
+                contract.validate_representative_serving_policy(bundle, {}, b"{}", {})
+
+    def test_foreign_formal_measurement_blocks_protected_serving_validation(self):
+        core = mock.Mock()
+        core.BindingBundleError = ValueError
+        core.validate_formal_bench.side_effect = ValueError("R015 signed measurement executable identity mismatch")
+        entry = {"source_commit": "a" * 40, "reproducible_build_sha256": "b" * 64,
+                 "live_executable_cdhash": "c" * 40}
+        with mock.patch.object(contract, "_serving_contract_module", return_value=core):
+            with self.assertRaisesRegex(contract.NativeMTPEvidenceError, "signed measurement executable identity"):
+                contract.validate_representative_serving_policy(self.bundle(), entry, b"{}", {})
+        self.assertIs(core.validate_formal_bench.call_args.kwargs["identity"], entry)
+        core.validate_representative_replay.assert_not_called()
 
 
 if __name__ == "__main__":

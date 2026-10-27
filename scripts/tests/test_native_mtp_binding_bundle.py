@@ -164,6 +164,115 @@ class BindingCoreTests(unittest.TestCase):
             git.assert_not_called()
 
 
+class SignedMeasurementTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
+        self.q = Path(self.temp.name)
+        self.identity = {"source_commit": "c" * 40, "reproducible_build_sha256": "a" * 64,
+                         "live_executable_cdhash": "b" * 40}
+        self.measured = {"binary_sha256": "a" * 64, "binary_cdhash": "b" * 40}
+        self.entry = {"model_key": "zai-org/glm-5.3-flash", "ordinary_baseline": {"artifact_hash": "d" * 64},
+                      "artifact_hash": "d" * 64, "tokenizer_sha256": "e" * 64,
+                      "runtime_revision": "f" * 40, "qualified_slots": 4, "max_native_active_rows": 1,
+                      "proposal_depth": 1, "max_prompt_tokens": 4096}
+        self.policy = {"schema": "macprovider.native-mtp-r015-policy.v1", "provider_commit": "c" * 40,
+                       "model_id": self.entry["model_key"], "target_sha256": "d" * 64,
+                       "mtp_sha256": "d" * 64, "tokenizer_sha256": "e" * 64,
+                       "mlx_fork_revision": "f" * 40, "qualified_slots": 4, "max_native_active_rows": 1,
+                       "proposal_depth": 1, "maximum_prompt_tokens": 4096}
+        self.header = {"provider_commit": "c" * 40, "measurement_identity": copy.deepcopy(self.measured)}
+        self.runs = [{"sustained": sustained, "measurement_identity": copy.deepcopy(self.measured)}
+                     for sustained in (False, True)]
+        self.analyzer = mock.Mock()
+        self.analyzer.analyze.return_value = {"overall_status": "PASS", "cells": ["actual rederived cells"]}
+        (self.q / "bench-analysis.json").write_bytes(m.canonical(self.analyzer.analyze.return_value))
+
+    def check_bench(self):
+        (self.q / "bench-policy.json").write_bytes(m.canonical(self.policy))
+        self.analyzer._load_jsonl.return_value = (self.header, self.runs)
+        with mock.patch.object(m, "_module", return_value=self.analyzer):
+            m.validate_formal_bench(self.q, stage=Path("."), entry=self.entry, identity=self.identity)
+
+    def test_formal_matrix_and_sustained_reopen_the_analyzer(self):
+        self.check_bench()
+        self.analyzer.analyze.assert_called_once_with(self.q / "bench.jsonl", self.q / "bench-policy.json")
+
+    def test_missing_runtime_identity_cannot_be_replaced_by_source_identity(self):
+        with self.assertRaisesRegex(m.BindingBundleError, "signed measurement executable"):
+            m.validate_measurement_identity({"source_commit": "c" * 40}, self.identity, label="R005")
+
+    def test_source_equivalent_lab_sha_or_cdhash_rejected(self):
+        for field in ("binary_sha256", "binary_cdhash"):
+            measured = dict(self.measured); measured[field] = "0" * len(measured[field])
+            with self.subTest(field=field), self.assertRaisesRegex(m.BindingBundleError, "signed measurement executable"):
+                m.validate_measurement_identity({"measurement_identity": measured}, self.identity, label="R005")
+
+    def test_identity_is_an_exact_object(self):
+        for value in (None, [], dict(self.measured, source_commit="c" * 40)):
+            with self.subTest(value=value), self.assertRaisesRegex(m.BindingBundleError, "signed measurement executable"):
+                m.validate_measurement_identity({"measurement_identity": value}, self.identity, label="replay")
+
+    def test_each_matrix_and_sustained_run_requires_current_executable(self):
+        for index in range(2):
+            original = self.runs[index].pop("measurement_identity")
+            with self.subTest(index=index), self.assertRaisesRegex(m.BindingBundleError, "R015 run signed measurement"):
+                self.check_bench()
+            self.runs[index]["measurement_identity"] = original
+        self.analyzer.analyze.assert_not_called()
+
+    def test_sustained_from_a_different_binary_is_rejected(self):
+        self.runs[1]["measurement_identity"]["binary_cdhash"] = "0" * 40
+        with self.assertRaisesRegex(m.BindingBundleError, "R015 run signed measurement"):
+            self.check_bench()
+
+    def test_header_from_a_different_binary_is_rejected(self):
+        self.header["measurement_identity"]["binary_sha256"] = "0" * 64
+        with self.assertRaisesRegex(m.BindingBundleError, "R015 header signed measurement"):
+            self.check_bench()
+
+    def test_same_binary_record_cannot_claim_other_source(self):
+        for record in (self.policy, self.header):
+            record["provider_commit"] = "0" * 40
+            with self.assertRaisesRegex(m.BindingBundleError, "candidate source mismatch"):
+                self.check_bench()
+            record["provider_commit"] = "c" * 40
+
+    def test_exploratory_policy_is_not_formal_qualification(self):
+        self.policy["schema"] = "macprovider.native-mtp-exploratory-policy.v1"
+        with self.assertRaisesRegex(m.BindingBundleError, "formal R015 policy required"):
+            self.check_bench()
+
+    def test_tuple_or_artifact_substitution_fails(self):
+        self.policy["max_native_active_rows"] = 2
+        with self.assertRaisesRegex(m.BindingBundleError, "tuple/artifact binding"):
+            self.check_bench()
+
+    def test_sustained_is_required_even_if_summary_claims_pass(self):
+        self.runs.pop()
+        with self.assertRaisesRegex(m.BindingBundleError, "sustained records required"):
+            self.check_bench()
+
+    def test_actual_analyzer_failure_beats_supplied_pass(self):
+        self.analyzer.analyze.return_value = {"overall_status": "FAIL"}
+        with self.assertRaisesRegex(m.BindingBundleError, "analyzer gate failed"):
+            self.check_bench()
+
+    def test_supplied_analysis_must_equal_recomputed_result(self):
+        (self.q / "bench-analysis.json").write_bytes(m.canonical({"overall_status": "PASS"}))
+        with self.assertRaisesRegex(m.BindingBundleError, "not the rederived result"):
+            self.check_bench()
+
+    def test_r005_unbound_runtime_identity_rejected_before_numerical_validation(self):
+        (self.q / "qualification").mkdir()
+        (self.q / "inputs.json").write_bytes(m.canonical({"identity": self.identity}))
+        for name in ("acceptance.json", "acceptance-policy.json", "acceptance-corpus.json"):
+            (self.q / "qualification" / name).write_bytes(m.canonical({}))
+        with mock.patch.object(m, "validate_acceptance") as numerical:
+            with self.assertRaisesRegex(m.BindingBundleError, "R005 signed measurement"):
+                m._qualification(Path("."), self.q, self.entry, {}, repo=Path("."))
+            numerical.assert_not_called()
+
+
 class SecurityArtifactTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)

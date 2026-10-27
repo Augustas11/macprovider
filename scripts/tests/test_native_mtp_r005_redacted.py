@@ -22,6 +22,8 @@ class ProjectionTests(unittest.TestCase):
             case['ordinary_terminal']=case['native_terminal']=terminal
         result.update(accepted=100,rejected=100,near_tied_positions=6400)
         entry['correctness_evidence_sha256']='f'*64
+        entry.update(source_commit=policy['provider_commit'],reproducible_build_sha256='1'*64,live_executable_cdhash='2'*40)
+        result['measurement_identity']={'binary_sha256':'1'*64,'binary_cdhash':'2'*40}
         return result,policy,corpus,entry
 
     def project(self,raw=None):
@@ -40,6 +42,18 @@ class ProjectionTests(unittest.TestCase):
             self.assertNotIn(forbidden,encoded)
         self.assertEqual(len(value['cases']),200)
 
+    def test_unsigned_or_foreign_raw_measurement_cannot_project(self):
+        for field in (None,'binary_sha256','binary_cdhash'):
+            raw=self.raw()
+            if field is None:raw[0].pop('measurement_identity')
+            else:raw[0]['measurement_identity'][field]='9'*(64 if field=='binary_sha256' else 40)
+            with self.subTest(field=field),self.assertRaises(ValueError):self.project(raw)
+
+    def test_source_equivalence_cannot_replace_exact_signed_measurement(self):
+        raw=self.raw();raw[3]['source_commit']='9'*40
+        with self.assertRaisesRegex(ValueError,'exact signed candidate source'):
+            self.project(raw)
+
     def test_raw_mismatch_cannot_project_even_if_pass_true(self):
         raw=self.raw();raw[0]['cases'][0]['positions'][0]['native_token']=999
         with self.assertRaises(ValueError):self.project(raw)
@@ -52,6 +66,10 @@ class ProjectionTests(unittest.TestCase):
         original,entry=self.project()
         changes=[lambda v:v.update(private_data_reopened_by_public_validator=True),
                  lambda v:v.update(raw_result_sha256='0'*64),
+                 lambda v:v.pop('measurement_identity'),
+                 lambda v:v['measurement_identity'].update(binary_sha256='9'*64),
+                 lambda v:v['measurement_identity'].update(binary_cdhash='9'*40),
+                 lambda v:v.update(measured_source_commit='9'*40),
                  lambda v:v['cases'][0]['positions'][0].update(max_abs_difference=0.1),
                  lambda v:v['cases'][0]['positions'][0].update(ordinary_gap=float('nan')),
                  lambda v:v['cases'][0]['positions'][0].update(ordinary_token=1),

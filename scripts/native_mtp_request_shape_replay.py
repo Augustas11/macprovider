@@ -68,6 +68,7 @@ ANALYZER_PATHS = {"ordinary": "mtp_disabled", "native_mtp": "observed_mixed"}
 EXPECTED_TARGET_STOP_CONTROL = "lab_decode_output_cap_by_request_id"
 EXPECTED_COMPLETION_LENGTH_BINDING = "effective_max_output_tokens drives admission; LAB decode output caps bind measured generation to target_completion_tokens without cancellation; exact measured match is required for qualification"
 REPLAY_HEADER_KEYS = {
+    "measurement_identity",
     "schema",
     "record_type",
     "provider_commit",
@@ -102,6 +103,7 @@ REPLAY_HEADER_V2_KEYS = REPLAY_HEADER_KEYS | {
     "capture_build_cdhash", "capture_cli_version", "tuple_bounds_sha256", "arrival_schedule",
 }
 REPLAY_RUN_KEYS = {
+    "measurement_identity",
     "schema",
     "record_type",
     "policy_sha256",
@@ -1344,6 +1346,17 @@ def _load_replay_runs(path: Path, policy: dict, policy_sha: str, capture_sha256:
         failures.append("missing_replay_header")
     else:
         replay_schema = header.get("schema")
+        # Historical LAB records remain readable for research. Qualification
+        # consumers require this identity and match it to the signed candidate.
+        if "measurement_identity" in header:
+            measured = header["measurement_identity"]
+            if (not isinstance(measured, dict)
+                    or set(measured) != {"binary_sha256", "binary_cdhash"}
+                    or not isinstance(measured.get("binary_sha256"), str)
+                    or re.fullmatch(r"[0-9a-f]{64}", measured["binary_sha256"]) is None
+                    or not isinstance(measured.get("binary_cdhash"), str)
+                    or re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", measured["binary_cdhash"]) is None):
+                failures.append("header_measurement_identity_invalid")
         if header.get("policy_sha256") != policy_sha:
             failures.append("header_policy_sha256_mismatch")
         for key in ("sample_digest_sha256", "preregistration_digest_sha256", "privacy_review_id"):
@@ -1394,6 +1407,8 @@ def _load_replay_runs(path: Path, policy: dict, policy_sha: str, capture_sha256:
     if not runs:
         failures.append("missing_replay_runs")
     for run_index, run in enumerate(runs):
+        if header is not None and run.get("measurement_identity") != header.get("measurement_identity"):
+            failures.append(f"run[{run_index}]:measurement_identity_mismatch")
         if header is not None and run.get("schema") != header.get("schema"):
             failures.append(f"run[{run_index}]:schema_mismatch")
         if run.get("policy_sha256") != policy_sha:

@@ -240,7 +240,7 @@ def prepare(root,config,output):
     files['observations/w3-policy.json']=read(config['w3_policy'])
     files['observations/w3-runs.jsonl']=read(config['w3_runs'])
     for name in ('capture.json','tuple-bounds.json','projection-plan.json','privacy-review.json','preregistration.json',
-                 'bench-policy.json','replay.json','replay-policy.json','analysis.json','source.json'):
+                 'bench-policy.json','bench.jsonl','bench-analysis.json','replay.json','replay-policy.json','analysis.json','source.json'):
         files['observations/representative/'+name]=read(q/name)
     files['observations/negative-cases.json']=canonical(negatives)
     for key,value in steps.items():files['steps/'+key+'.json']=canonical(value)
