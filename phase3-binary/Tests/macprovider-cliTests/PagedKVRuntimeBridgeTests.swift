@@ -191,6 +191,9 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
             )
         }
         let verified = try capabilities(config)
+        for sameIdentity in [id, id.lowercased(), "PRISM-ml/TERnary-BONSAI-2-2b-MLX-2BIT"] {
+            XCTAssertEqual(try capabilities(config, modelID: sameIdentity), verified, sameIdentity)
+        }
         XCTAssertEqual(verified.modelFamily, "qwen")
         XCTAssertTrue(verified.hybridDecoderArchitectureVerified)
         XCTAssertTrue(verified.ordinaryHybridOnly)

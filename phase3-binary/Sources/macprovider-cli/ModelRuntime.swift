@@ -3349,7 +3349,7 @@ maxTokens: 1,
             guard let number = value as? NSNumber else { return false }
             return String(cString: number.objCType) != "c" && number.doubleValue == Double(expected)
         }
-        guard modelID == "prism-ml/Ternary-Bonsai-2-2B-mlx-2bit",
+        guard modelID?.lowercased() == "prism-ml/ternary-bonsai-2-2b-mlx-2bit",
               let config = configObject,
               integer(config["schema_version"], equals: 2),
               config["model_type"] as? String == "prism_hadamard_qwen35",
