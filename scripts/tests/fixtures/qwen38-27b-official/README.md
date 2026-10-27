@@ -88,3 +88,21 @@ must be judged against the official reference, not inferred from unused config
 labels. `Qwen35MoE.swift`/`Qwen35FusedMoE.swift` and `Qwen3MoE.swift` routing
 are not this dense model's execution path. No new architecture registration,
 MoE dispatch, decoder or dependency pin is warranted before measurement.
+
+## CB and native MTP (slices 4–5)
+
+`ModelRuntime.pagedKVHybridModelIsAllowlisted` already accepts this exact key
+and architecture; its topology validator checks hybrid layer geometry and the
+dense branch needs no expert dispatch. `PagedKVRuntimeBridgeTests` already
+includes this key. Retain those gates and FR-CB10 row selection unchanged.
+Architecture recognition is not signed CB authorization: the current signed CB
+policy has no Qwen3.8 entry. The window must prove actual scheduler rows and
+bind the converted target identity before adding its measured policy entry in
+this same campaign. Preserve current Qwen3.6 and GLM entries.
+
+The source ships MTP; it is not optional for this intake. Existing dense draft
+support and `qwen3_5_mtp_v1` separate-artifact selection can be reused. Keep
+slice 5 pending until the multi-family campaign PR #2152 merges, then rebase
+and bind the newly converted target and drafter without replacing other
+entries. No new SPEC-048 acceptance gates are introduced. Qualify on the lab
+build; a signed CLI cut only rebinds identity.
