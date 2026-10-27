@@ -1469,54 +1469,41 @@ func TestProviderEarningsViewFallbackIsOneSnapshot(t *testing.T) {
 	}
 }
 
-// Every bucket is reached by passes that are cut by their deadline after a
-// few attempts, even when the attempted buckets keep conflicting: a queue's
-// cursor moves only past buckets a pass actually attempted.
-func TestProviderEarningsRollupDeadlineCutPassesReachEveryBucket(t *testing.T) {
+// Every bucket is reached when each pass is canceled after one read, even
+// when attempted buckets remain dirty: a queue's cursor moves only past
+// buckets the pass actually attempted, not the rest of its selected work.
+func TestProviderEarningsRollupCanceledPassesReachEveryBucket(t *testing.T) {
 	_, store := newRequestAndBillingStores(t)
 	const n = 15
 	for i := 0; i < n; i++ {
 		insertRollupCredit(t, store.db, rollupCredit{requestID: fmt.Sprintf("q-%d", i), provider: fmt.Sprintf("p-%02d", i), ts: "2026-09-16T05:00:00.000000000Z", model: "m", credits: 1})
 	}
 	attempted := map[string]bool{}
-	reads := 0
-	store.earningsRollupAfterRead = func(provider, hour string) {
-		attempted[provider] = true
-		reads++
-		time.Sleep(60 * time.Millisecond)
-		// Every attempt loses to a write, so nothing ever leaves the queue.
-		if _, err := store.db.Exec(`UPDATE ledger_request_credits SET provider_credits = provider_credits + 1 WHERE provider_id = ?`, provider); err != nil {
-			t.Error(err)
+	for pass := 0; pass < n; pass++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		reads := 0
+		store.earningsRollupAfterRead = func(provider, hour string) {
+			attempted[provider] = true
+			reads++
+			// Keep every bucket dirty and cut the pass at a known boundary.
+			// A wall-clock deadline can instead interrupt the next read before
+			// this hook, legitimately advancing a cursor this map never sees.
+			if _, err := store.db.Exec(`UPDATE ledger_request_credits SET provider_credits = provider_credits + 1 WHERE provider_id = ?`, provider); err != nil {
+				t.Error(err)
+			}
+			cancel()
 		}
-	}
-	// Twenty passes that reach a bucket read without reaching a new bucket
-	// fail the test. A pass whose deadline expires before any bucket read
-	// (selection alone can take 150ms under -race) says nothing either way
-	// and is not counted; the pass cap only stops a run that never reads.
-	for pass, stalled := 0, 0; len(attempted) < n && stalled < 20; pass++ {
-		if pass >= 2000 {
-			t.Fatalf("no bucket read in %d deadline-cut passes", pass)
-		}
-		before, readsBefore := len(attempted), reads
-		ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 		got, err := store.RefreshProviderEarningsRollup(ctx, n)
 		cancel()
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got.Recomputed != 0 {
-			t.Fatalf("pass %d recomputed %d; fixture expects only conflicts", pass, got.Recomputed)
+		if reads != 1 || !got.More || got.Recomputed != 0 {
+			t.Fatalf("pass %d: reads=%d result=%+v; want one read, no recomputes, and more work", pass, reads, got)
 		}
-		switch {
-		case reads == readsBefore:
-		case len(attempted) == before:
-			stalled++
-		default:
-			stalled = 0
+		if len(attempted) != pass+1 {
+			t.Fatalf("pass %d reached %d distinct buckets; want %d (selected tails were skipped)", pass, len(attempted), pass+1)
 		}
-	}
-	if len(attempted) != n {
-		t.Fatalf("attempted %d/%d buckets across deadline-cut passes; selected tails were skipped", len(attempted), n)
 	}
 }
 
