@@ -2152,6 +2152,8 @@ actor ModelRuntime: ModelRuntimeServing {
     /// tuple. Reset to pending on every swap.
     private var continuousBatchingSelfCheck: ContinuousBatchingSelfCheckState = .pending
     private var continuousBatchingSelfCheckReport: ContinuousBatchingSelfCheckReport?
+    // Only real native runtimes select this; preloaded/test runtimes leave it nil.
+    private(set) var mlxCacheLimitMBForLoading: Int? = nil
     private let warmSwapEnabled: Bool
     private let swapDrainTimeoutSeconds: Int
     struct DrainTiming: Sendable {
@@ -3010,6 +3012,20 @@ actor ModelRuntime: ModelRuntimeServing {
         (0 ... maximumMLXCacheLimitMB).contains(megabytes)
     }
 
+    /// Freed-buffer reuse budget for the low-memory tier. Larger Macs retain
+    /// MLX's default until their workload has been qualified with a smaller cap.
+    /// Preserve explicit values (including zero) for normal startup validation.
+    nonisolated static func resolvedMLXCacheLimitMB(
+        configured: Int?, physicalMemoryBytes: UInt64
+    ) -> Int? {
+        if let configured { return configured }
+        guard physicalMemoryBytes > 0, physicalMemoryBytes <= 8 * 1024 * 1024 * 1024 else {
+            return nil
+        }
+        // Divide before converting: the result is at most 256 MiB.
+        return Int(physicalMemoryBytes / (32 * 1024 * 1024))
+    }
+
     /// Bounds MLX's buffer cache. Must run before the model loads; see
     /// `AppConfig.mlxCacheLimitMB`. Serve startup rejects an out-of-range value
     /// first (`isValidMLXCacheLimitMB`), so `nil` here only means "not set".
@@ -3464,6 +3480,7 @@ maxTokens: 1,
         draftModelLoadPath: String? = nil,
         numDraftTokens: Int = 3,
         speculativeCacheWrapValidated: Bool = false,
+        mlxCacheLimitMB: Int? = nil,
         maxContextTokensOverride: Int? = nil,
         kvBitsOverride: Int? = nil,
         pagedKVConfig: PagedKVConfig = .defaults(),
@@ -3510,6 +3527,14 @@ maxTokens: 1,
         switchMaxBatchByTarget: [String: Int] = [:],
         switchContextProvenanceModelIDs: Set<String> = []
     ) async throws {
+        if let mlxCacheLimitMB, !Self.isValidMLXCacheLimitMB(mlxCacheLimitMB) {
+            throw ModelRuntimeLoadError(
+                target: modelID ?? "<unset>", reason: "mlx_cache_limit_mb must be in 0...\(Self.maximumMLXCacheLimitMB)")
+        }
+        self.mlxCacheLimitMBForLoading = Self.resolvedMLXCacheLimitMB(
+            configured: mlxCacheLimitMB,
+            physicalMemoryBytes: ProcessInfo.processInfo.physicalMemory
+        )
         let normalizedDraftModelID = Self.nonEmpty(draftModelID)
         let normalizedDraftModelLoadPath = Self.nonEmpty(draftModelLoadPath)
         self.modelID = modelID
@@ -3667,6 +3692,11 @@ maxTokens: 1,
             return
         }
 
+        // One setup boundary for serve, self-test and native benchmark callers.
+        // A nil-model or preloaded test runtime must not initialize Metal.
+        if let applied = Self.applyMLXCacheLimit(megabytes: mlxCacheLimitMBForLoading) {
+            FileHandle.standardError.write(Data("mlx_cache_limit_bytes=\(applied)\n".utf8))
+        }
         let targetLoadPath = modelLoadPath ?? modelID
         let candidateNativeMTPLoad: NativeMTPRuntimeLoadResult?
         let candidateNativeMTPDisabledReason: NativeMTPStatusReason
@@ -5377,7 +5407,8 @@ maxTokens: 1,
         let maxContextTokens = adoptionKnobs?.maxContext ?? maxContextTokens
         let kvBitsOverride = adoptionKnobs?.kvBits ?? kvBitsOverride
         let prefillStepSize = prefillStepSize
-        return Task.detached { [weak self, testLoader, drainTimeoutSeconds, providerStatus, configuredDraftModelID, configuredDraftModelLoadPath, numDraftTokens, maxContextTokens, kvBitsOverride, prefillStepSize, targetAuthority, adoptionKnobs] in
+        let mlxCacheLimitMB = mlxCacheLimitMBForLoading
+        return Task.detached { [weak self, testLoader, drainTimeoutSeconds, providerStatus, configuredDraftModelID, configuredDraftModelLoadPath, numDraftTokens, maxContextTokens, kvBitsOverride, prefillStepSize, mlxCacheLimitMB, targetAuthority, adoptionKnobs] in
             guard let self else { return }
             do {
                 let container: ModelContainer?
@@ -5422,6 +5453,10 @@ maxTokens: 1,
                 } else {
                     guard let targetAuthority else {
                         throw ModelRuntimeLoadError(target: "signed catalog identity unavailable for \(targetModelID)")
+                    }
+                    // Nil-model startup defers Metal setup until its first signed load.
+                    if let applied = Self.applyMLXCacheLimit(megabytes: mlxCacheLimitMB) {
+                        FileHandle.standardError.write(Data("mlx_cache_limit_bytes=\(applied)\n".utf8))
                     }
                     let visionModelID = self.nativeVisionSelectionModelID(for: targetModelID)
                     let loaded = try await Self.loadLocalContainer(

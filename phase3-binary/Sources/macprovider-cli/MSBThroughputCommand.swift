@@ -131,7 +131,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
 
     @Option(
         name: .customLong("mlx-cache-limit-mb"),
-        help: "Optional MLX freed-buffer cache limit in MiB, applied before model loading. Unset preserves the existing limit."
+        help: "Optional MLX freed-buffer cache limit in MiB, applied before model loading. Unset uses physical RAM / 32 on Macs with at most 8 GiB; larger Macs retain MLX defaults."
     )
     var mlxCacheLimitMB: Int?
 
@@ -184,8 +184,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
                 "msb-throughput: lifetime_peak_phys_footprint_mib=\(peak)\n".utf8
             ))
         }
-        ModelRuntime.applyMLXCacheLimit(megabytes: mlxCacheLimitMB)
-        let runtime = try await ModelRuntime(modelID: modelID)
+        let runtime = try await ModelRuntime(modelID: modelID, mlxCacheLimitMB: mlxCacheLimitMB)
         guard await runtime.isLoaded else {
             FileHandle.standardError.write(Data("msb-throughput: failed to load model \(modelID)\n".utf8))
             throw ExitCode(1)

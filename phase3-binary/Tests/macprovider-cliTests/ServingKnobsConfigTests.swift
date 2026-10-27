@@ -460,7 +460,46 @@ final class ServingKnobsConfigTests: XCTestCase {
             fileExists: { _ in true },
             readFile: { _ in "" }
         )
-        XCTAssertNil(unset.mlxCacheLimitMB, "unset keeps MLX's own default")
+        XCTAssertNil(unset.mlxCacheLimitMB, "unset preserves operator intent; runtime selects the RAM default")
+    }
+
+    func testMLXCacheDefaultUsesExactPhysicalMemoryBoundaryWithoutOverflow() {
+        let gib: UInt64 = 1024 * 1024 * 1024
+        for (ram, expected) in [(UInt64(0), nil), (4 * gib, 128), (8 * gib, 256),
+                                (8 * gib + 1, nil), (16 * gib, nil), (256 * gib, nil),
+                                (UInt64.max, nil)] as [(UInt64, Int?)] {
+            XCTAssertEqual(ModelRuntime.resolvedMLXCacheLimitMB(
+                configured: nil, physicalMemoryBytes: ram), expected, "RAM bytes=\(ram)")
+        }
+    }
+
+    func testExplicitMLXCacheSelectionIsNeverReplacedByRAMDefault() {
+        for ram: UInt64 in [0, 8 * 1024 * 1024 * 1024, UInt64.max] {
+            for explicit in [0, 1, 256, 4096, ModelRuntime.maximumMLXCacheLimitMB, -1, Int.max] {
+                XCTAssertEqual(ModelRuntime.resolvedMLXCacheLimitMB(
+                    configured: explicit, physicalMemoryBytes: ram), explicit)
+            }
+        }
+    }
+
+    func testNilModelRetainsCacheSelectionForFirstSignedWarmLoadWithoutMetal() async throws {
+        for configured in [nil, 0, 256] as [Int?] {
+            let runtime = try await ModelRuntime(modelID: nil, mlxCacheLimitMB: configured)
+            let deferred = await runtime.mlxCacheLimitMBForLoading
+            XCTAssertEqual(deferred, ModelRuntime.resolvedMLXCacheLimitMB(
+                configured: configured, physicalMemoryBytes: ProcessInfo.processInfo.physicalMemory))
+        }
+    }
+
+    func testInvalidNativeMLXCacheLimitFailsBeforeAnyModelOrMetalLoad() async {
+        for invalid in [-1, ModelRuntime.maximumMLXCacheLimitMB + 1, Int.max] {
+            do {
+                _ = try await ModelRuntime(modelID: nil, mlxCacheLimitMB: invalid)
+                XCTFail("Invalid explicit cache limit must be rejected: \(invalid)")
+            } catch {
+                XCTAssertTrue(error is ModelRuntimeLoadError)
+            }
+        }
     }
 
     func testApplyMLXCacheLimitIgnoresUnsetOrOutOfRange() {

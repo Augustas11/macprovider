@@ -3084,9 +3084,6 @@ struct ServeCommand: AsyncParsableCommand {
                    let mb = ModelRuntime.applyMLXCommandBufferBudget(modelFamily: family) {
                     FileHandle.standardError.write(Data("mlx_max_mb_per_buffer=\(mb) family=\(family)\n".utf8))
                 }
-                if let applied = ModelRuntime.applyMLXCacheLimit(megabytes: resolved.mlxCacheLimitMB) {
-                    FileHandle.standardError.write(Data("mlx_cache_limit_bytes=\(applied)\n".utf8))
-                }
                 ModelRuntime.logsStructuredFailurePreview = resolved.logLevel == .debug || resolved.logLevel == .trace
                 modelRuntime = try await ModelRuntime(
                     modelID: resolved.model,
@@ -3095,6 +3092,7 @@ struct ServeCommand: AsyncParsableCommand {
                     draftModelLoadPath: verifiedDraftModelLoadPath,
                     numDraftTokens: resolved.numDraftTokens,
                     speculativeCacheWrapValidated: speculativeCacheWrapValidated,
+                    mlxCacheLimitMB: resolved.mlxCacheLimitMB,
                     maxContextTokensOverride: resolved.maxContextOverride,
                     kvBitsOverride: effectiveKVBits,
                     pagedKVConfig: resolved.pagedKV.withFamilyDefaults(modelFamily: localModelFamily ?? "").sizedToCover(
@@ -4616,6 +4614,7 @@ struct SelfTestCommand: AsyncParsableCommand {
         let runtime = try await ModelRuntime(
             modelID: resolved.model,
             modelLoadPath: preflight.runtimeBinding?.loadPath ?? Self.modelLoadPath(for: resolved),
+            mlxCacheLimitMB: resolved.mlxCacheLimitMB,
             maxContextTokensOverride: resolved.maxContextOverride,
             verifiedModelArtifactSHA256: resolved.modelArtifactSHA256,
             verifiedModelLoadSHA256: preflight.runtimeBinding?.loadSHA256

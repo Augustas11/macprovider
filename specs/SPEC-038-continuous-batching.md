@@ -1,6 +1,6 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.31
+Version: v0.3.32
 Status: draft (normative contract; runtime enablement is default-on per Mac behind the FR-CB10 on-device self-check, v0.3.15)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
@@ -723,6 +723,17 @@ is an upper bound on rows, and pool availability is the admission-time gate
 underneath it (FR-CB17).
 
 ### FR-CB2 - decode-first separate phases with bounded batched prefill (SPEC-038-R002)
+
+Native runtime startup on Macs with at most 8 GiB physical RAM MUST default
+MLX's freed-buffer allocator cache to physical RAM divided by 32 (256 MiB on
+an 8 GiB Mac), before loading the model. Explicit `mlx_cache_limit_mb` values,
+including zero, override this default and MUST pass the existing range check.
+Larger-memory devices retain their existing default. This is a buffer-reuse
+budget, not an active weights/KV limit, a row-cap grant or permission to bypass
+the memory floor. It MUST NOT turn continuous batching off or raise signed
+admission ceilings. Native serve, self-test and benchmark loading MUST use
+the same selection; preloaded/test runtimes MUST NOT reset process allocator
+state.
 
 The scheduler MUST keep prompt processing (prefill) and decode as separate
 phases; it MUST NOT combine arbitrary prefill and one-token decode work into
