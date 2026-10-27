@@ -1224,6 +1224,11 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             self.clearDecodeSession()
             return outputs
         }
+        // Match serial serving: release reusable temporary buffers after a
+        // whole prompt, while keeping all live row/snapshot arrays intact.
+        // Intermediate boundary chunks retain their existing allocation plan.
+        ModelRuntime.clearMLXBufferCacheAfterPrefill(
+            isFinalChunk: inputs.contains { $0.isFinalChunk })
         CBTrace.logPreparation(
             nil,
             "prefill_group_end rows=\(inputs.count) ids=\(inputs.map(\.requestID).joined(separator: ","))"

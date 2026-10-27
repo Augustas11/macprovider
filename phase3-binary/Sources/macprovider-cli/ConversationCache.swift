@@ -171,6 +171,157 @@ final class ConversationCacheLease: @unchecked Sendable {
     }
 }
 
+/// Opportunistic retention uses only memory left after full serving capacity.
+/// Counting every tensor reference separately is conservative when snapshots share
+/// immutable buffers. Pool growth is reserved at the larger of full slots and the
+/// configured physical token pool; draft state is charged alongside target state.
+final class ConversationCacheMemoryBudget: @unchecked Sendable {
+    static let system = ConversationCacheMemoryBudget()
+    private let lock = NSLock()
+    private let probe: NativeMTPRoundSystemMemoryProbe
+    private var contextTokens = 0
+    private var slots = 0
+    private var residentTokens = 0
+    private var verifyBytes = 0
+    private var bytesPerToken = 0
+    private var fixedRowBytes = 0
+
+    init(probe: NativeMTPRoundSystemMemoryProbe = .system) {
+        self.probe = probe
+    }
+
+    func configure(maxContextTokens: Int, slots: Int, residentTokens: Int, verifyBytes: Int) {
+        lock.lock(); defer { lock.unlock() }
+        self.contextTokens = max(0, maxContextTokens)
+        self.slots = max(0, slots)
+        self.residentTokens = max(0, residentTokens)
+        self.verifyBytes = max(0, verifyBytes)
+    }
+
+    static func tensorBytes(_ layers: ConversationCacheLayers) -> Int {
+        // `state` may expose only a valid-token slice; `innerState()` also
+        // includes the cache's retained allocation padding (e.g. GLM latent).
+        var arrays = layers.layers.flatMap { $0.innerState() }
+        arrays += layers.recurrentCheckpoints.flatMap { $0.states.values.flatMap { $0 } }
+        arrays += layers.nativeMTPDrafter?.cache.flatMap { $0.innerState() } ?? []
+        return arrays.reduce(0) { saturatedAdd($0, $1.nbytes) }
+    }
+
+    struct Geometry {
+        var fixedRowBytes = 0
+        var bytesPerToken = 0
+    }
+
+    /// GLM latent columns and pooled keys grow; raw indexer keys/gates do not.
+    /// Reserve the maximum pending + rewind window even for a short seed, and
+    /// one allocation step of latent padding. Only metadata is inspected.
+    static func glmGeometry(
+        latentBytesPerToken: Int, pooledBytesPerKey: Int,
+        rawKeyBytesPerToken: Int, rawGateBytesPerToken: Int,
+        kpool: Int, maxTrim: Int, step: Int
+    ) -> Geometry {
+        guard kpool > 0, maxTrim >= 0, step > 0 else {
+            return Geometry(fixedRowBytes: Int.max, bytesPerToken: Int.max)
+        }
+        let rawCapacity = saturatedAdd(saturatedMultiply(kpool - 1, 2), maxTrim)
+        let rawWidth = saturatedAdd(rawKeyBytesPerToken, rawGateBytesPerToken)
+        let padding = saturatedMultiply(step - 1, latentBytesPerToken)
+        let pooledDensity = pooledBytesPerKey / kpool + (pooledBytesPerKey % kpool == 0 ? 0 : 1)
+        return Geometry(
+            fixedRowBytes: saturatedAdd(padding, saturatedMultiply(rawCapacity, rawWidth)),
+            bytesPerToken: saturatedAdd(latentBytesPerToken, pooledDensity))
+    }
+
+    func observe(geometry: Geometry) {
+        lock.lock(); defer { lock.unlock() }
+        fixedRowBytes = max(fixedRowBytes, geometry.fixedRowBytes)
+        bytesPerToken = max(bytesPerToken, geometry.bytesPerToken)
+    }
+
+    func observe(layers: ConversationCacheLayers, tokenCount: Int) {
+        guard tokenCount > 0 else { return }
+        var geometry = Geometry()
+        let targetAndDraft = layers.layers + (layers.nativeMTPDrafter?.cache ?? [])
+        for layer in targetAndDraft {
+            let backing = layer.innerState().reduce(0) { Self.saturatedAdd($0, $1.nbytes) }
+            let part: Geometry
+            if layer is ArraysCache {
+                part = Geometry(fixedRowBytes: backing)
+            } else if let glm = layer as? GLM5NextAttentionCache {
+                let state = glm.state
+                func rowBytes(_ index: Int) -> Int {
+                    let array = state[index]
+                    return array.size > 0 && array.ndim == 3 && array.dim(1) > 0
+                        ? array.nbytes / array.dim(1) : 0
+                }
+                let latentWidth = glm.offset > 0 ? state[0].nbytes / glm.offset : 0
+                let pooledWidth = rowBytes(1)
+                // A seed before the first full pool has only pending raw keys.
+                // A pool-aligned seed may have only folded keys. Their widths
+                // are identical; pooled width is a conservative fallback.
+                let rawKeyWidth = max(rowBytes(2), rowBytes(4), pooledWidth)
+                let rawGateWidth = max(rowBytes(3), rowBytes(5), pooledWidth)
+                part = Self.glmGeometry(
+                    latentBytesPerToken: latentWidth, pooledBytesPerKey: max(pooledWidth, rawKeyWidth),
+                    rawKeyBytesPerToken: rawKeyWidth, rawGateBytesPerToken: rawGateWidth,
+                    kpool: glm.kpool, maxTrim: glm.maxTrim, step: glm.step)
+            } else {
+                let logical = layer.state.reduce(0) { Self.saturatedAdd($0, $1.nbytes) }
+                part = Geometry(
+                    fixedRowBytes: max(0, backing - logical),
+                    bytesPerToken: logical / tokenCount + (logical % tokenCount == 0 ? 0 : 1))
+            }
+            geometry.fixedRowBytes = Self.saturatedAdd(geometry.fixedRowBytes, part.fixedRowBytes)
+            geometry.bytesPerToken = Self.saturatedAdd(geometry.bytesPerToken, part.bytesPerToken)
+        }
+        observe(geometry: geometry)
+    }
+
+    /// Both disk directions are independently capped at 1 GiB by SPEC-037.
+    /// Reserve them even while idle so retention never consumes staging capacity.
+    func hotByteLimit() -> Int {
+        availableRetentionBytes(additionalBytes: 2 * 1024 * 1024 * 1024)
+    }
+
+    func admitsStaging(bytes: Int) -> Bool {
+        guard bytes >= 0 else { return false }
+        return availableRetentionBytes(additionalBytes: max(2 * 1024 * 1024 * 1024, bytes)) > 0
+    }
+
+    private func availableRetentionBytes(additionalBytes: Int) -> Int {
+        guard let sample = probe.sample(), sample.physicalBytes > 0, sample.availableBytes >= 0 else { return 0 }
+        lock.lock()
+        let poolTokens = max(residentTokens, Self.saturatedMultiply(contextTokens, slots))
+        // Before the first observed state, decline speculative allocations for a
+        // configured serving runtime. Geometry seeding can establish the bound.
+        let unknown = poolTokens > 0 && bytesPerToken == 0 && fixedRowBytes == 0
+        let rowStateBytes = Self.saturatedAdd(
+            Self.saturatedMultiply(poolTokens, bytesPerToken), Self.saturatedMultiply(fixedRowBytes, slots))
+        // A load-time seed has only target state. The native head is strictly a
+        // subset of GLM target topology; reserve another target-sized copy until
+        // (and conservatively after) a complete snapshot is observed.
+        let targetAndHeadBytes = verifyBytes > 0 ? Self.saturatedMultiply(rowStateBytes, 2) : rowStateBytes
+        let servingBytes = Self.saturatedAdd(targetAndHeadBytes, verifyBytes)
+        lock.unlock()
+        guard !unknown else { return 0 }
+        let floor = sample.physicalBytes / 10 + (sample.physicalBytes % 10 == 0 ? 0 : 1)
+        let servingWithSlack = Self.saturatedAdd(servingBytes, servingBytes / 20)
+        let reserved = Self.saturatedAdd(Self.saturatedAdd(floor, servingWithSlack), additionalBytes)
+        guard sample.availableBytes > reserved else { return 0 }
+        return min(8 * 1024 * 1024 * 1024, sample.physicalBytes / 32, sample.availableBytes - reserved)
+    }
+
+    private static func saturatedAdd(_ lhs: Int, _ rhs: Int) -> Int {
+        let (value, overflow) = lhs.addingReportingOverflow(rhs)
+        return overflow ? Int.max : value
+    }
+
+    private static func saturatedMultiply(_ lhs: Int, _ rhs: Int) -> Int {
+        let (value, overflow) = lhs.multipliedReportingOverflow(by: rhs)
+        return overflow ? Int.max : value
+    }
+}
+
 actor ConversationCache {
     static let lcpThreshold = 32
 
@@ -181,9 +332,9 @@ actor ConversationCache {
 
         static func fromEnvironment(_ environment: [String: String] = ProcessInfo.processInfo.environment) -> Config {
             Config(
-                maxConversations: Self.positiveInt(environment["MACPROVIDER_CONV_CACHE_MAX_CONVERSATIONS"]) ?? 8,
-                maxTokens: Self.positiveInt(environment["MACPROVIDER_CONV_CACHE_MAX_TOKENS"]) ?? 200_000,
-                ttlSeconds: TimeInterval(Self.positiveInt(environment["MACPROVIDER_CONV_CACHE_TTL_MINUTES"]) ?? 15) * 60
+                maxConversations: Self.positiveInt(environment["MACPROVIDER_CONV_CACHE_MAX_CONVERSATIONS"]) ?? 64,
+                maxTokens: Self.positiveInt(environment["MACPROVIDER_CONV_CACHE_MAX_TOKENS"]) ?? 2_000_000,
+                ttlSeconds: TimeInterval(Self.positiveInt(environment["MACPROVIDER_CONV_CACHE_TTL_MINUTES"]) ?? 4_320) * 60
             )
         }
 
@@ -206,6 +357,7 @@ actor ConversationCache {
     }
 
     private let config: Config
+    nonisolated let memoryBudget: ConversationCacheMemoryBudget
     private var entries: [String: Entry] = [:]
     private var busyKeys: Set<String> = []
     private var waiters: [String: [(id: UUID, continuation: CheckedContinuation<Void, Never>)]] = [:]
@@ -218,8 +370,10 @@ actor ConversationCache {
     /// Within-process purge-all generation.
     private var globalPurgeGen = 0
 
-    init(config: Config = .fromEnvironment(), coldTier: (any ConversationColdTier)? = nil) {
+    init(config: Config = .fromEnvironment(), coldTier: (any ConversationColdTier)? = nil,
+         memoryBudget: ConversationCacheMemoryBudget = ConversationCacheMemoryBudget()) {
         self.config = config
+        self.memoryBudget = memoryBudget
         self.coldTier = coldTier
     }
 
@@ -254,6 +408,7 @@ actor ConversationCache {
 
         let keyHash = Self.keyHash(key)
         await sweepExpired(now: now)
+        await enforceLimits()
         guard authorized() else { releaseTurn(key); return nil }
 
         // SPEC-037 FR-KVP8 — sample the purge stamps at lease acquisition. The
@@ -517,6 +672,7 @@ actor ConversationCache {
             releaseTurn(lease.key)
             return
         }
+        memoryBudget.observe(layers: cache, tokenCount: fullTokens.count)
         entries[lease.key] = Entry(
             canonicalPromptTokens: fullTokens,
             kvCache: cache,
@@ -540,11 +696,7 @@ actor ConversationCache {
         // SPEC-037 FR-KVP3 — snapshot-at-commit while the lease is still held: the
         // synchronous deep copy is the only hot-path cost; the disk write is
         // deferred so the hot commit never blocks on I/O.
-        if cache.promptSnapshot {
-            // SPEC-024 FR-CI2a: prompt snapshots stay in RAM; the SPEC-037 disk
-            // codec does not encode window, pool or recurrent snapshot layers.
-            log("event=conv_cache action=cold_snapshot_skipped key_hash=\(lease.keyHash) reason=prompt_snapshot")
-        } else if let coldTier, let cold, cold.eligible,
+        if let coldTier, let cold, cold.eligible,
            let snapshot = coldTier.captureSnapshot(
                conversationKey: lease.key, layers: cache, fullTokens: fullTokens,
                sampledPurgeGeneration: lease.sampledPurgeGeneration, identity: cold.identity,
@@ -746,13 +898,33 @@ actor ConversationCache {
     }
 
     private func enforceLimits() async {
-        while entries.count > config.maxConversations || currentStats().tokens > config.maxTokens {
-            guard let victim = entries.min(by: { lhs, rhs in lhs.value.lastUsedAt < rhs.value.lastUsedAt })?.key else {
+        while entries.count > config.maxConversations || currentStats().tokens > config.maxTokens
+            || residentBytes() > memoryBudget.hotByteLimit() {
+            guard let victim = entries.min(by: { lhs, rhs in
+                if lhs.value.lastUsedAt != rhs.value.lastUsedAt {
+                    return lhs.value.lastUsedAt < rhs.value.lastUsedAt
+                }
+                if lhs.value.tokenCount != rhs.value.tokenCount {
+                    return lhs.value.tokenCount < rhs.value.tokenCount
+                }
+                return lhs.key < rhs.key
+            })?.key else {
                 return
             }
             let evicted = entries.removeValue(forKey: victim)
             await evicted?.kvCache.discardRetainedPagedKV(conversationKey: victim)
             log("event=conv_cache action=evict key_hash=\(Self.keyHash(victim)) reason=lru")
+        }
+    }
+
+    private func residentBytes() -> Int {
+        entries.values.reduce(0) { total, entry in
+            let tensors = ConversationCacheMemoryBudget.tensorBytes(entry.kvCache)
+            let (tokenBytes, tokenOverflow) = entry.canonicalPromptTokens.count.multipliedReportingOverflow(by: MemoryLayout<Int32>.stride)
+            let (entryBytes, entryOverflow) = tensors.addingReportingOverflow(tokenBytes)
+            if tokenOverflow || entryOverflow { return Int.max }
+            let (bytes, overflow) = total.addingReportingOverflow(entryBytes)
+            return overflow ? Int.max : bytes
         }
     }
 

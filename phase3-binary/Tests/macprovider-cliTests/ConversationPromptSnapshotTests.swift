@@ -15,7 +15,7 @@ final class ConversationPromptSnapshotTests: XCTestCase {
     // MARK: - begin() acceptance rules (no model)
 
     func testSnapshotEntryServesOnlyAnExtendingPrompt() async throws {
-        let cache = ConversationCache(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+        let cache = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
         let stored = int32Range(0..<64)
         let layers = try await seedSnapshot(cache, key: "conv:snapshot", tokens: stored)
 
@@ -33,7 +33,7 @@ final class ConversationPromptSnapshotTests: XCTestCase {
     /// SPEC-001-R013: a request cancelled before its entry is inserted
     /// publishes nothing, and its key is free for the next request.
     func testCommitOfACancelledRequestPublishesNothing() async throws {
-        let cache = ConversationCache(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+        let cache = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
         let stored = int32Range(0..<64)
         let lease = try Self.unwrap(await cache.begin(conversationKey: "conv:cancelled", incomingTokens: stored,
                                                    modelID: "model-a", kvBits: nil))
@@ -48,7 +48,7 @@ final class ConversationPromptSnapshotTests: XCTestCase {
     }
 
     func testSnapshotEntryMissesWhenThePromptDivergesInsideIt() async throws {
-        let cache = ConversationCache(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+        let cache = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
         let stored = int32Range(0..<64)
         _ = try await seedSnapshot(cache, key: "conv:diverged", tokens: stored)
         // lcp = 63 >= the reuse threshold, but one stored token is not shared.
@@ -61,7 +61,7 @@ final class ConversationPromptSnapshotTests: XCTestCase {
     }
 
     func testSnapshotEntryMissesWhenNothingIsNew() async throws {
-        let cache = ConversationCache(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+        let cache = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
         let stored = int32Range(0..<64)
         _ = try await seedSnapshot(cache, key: "conv:same", tokens: stored)
         let miss = try Self.unwrap(await cache.begin(conversationKey: "conv:same", incomingTokens: stored,
@@ -71,7 +71,7 @@ final class ConversationPromptSnapshotTests: XCTestCase {
     }
 
     func testSnapshotEntriesCountAgainstTheTokenCap() async throws {
-        let cache = ConversationCache(config: .init(maxConversations: 8, maxTokens: 100, ttlSeconds: 900))
+        let cache = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 100, ttlSeconds: 900))
         _ = try await seedSnapshot(cache, key: "conv:first", tokens: int32Range(0..<64))
         _ = try await seedSnapshot(cache, key: "conv:second", tokens: int32Range(0..<64))
         let stats = await cache.snapshotStats()
@@ -82,7 +82,7 @@ final class ConversationPromptSnapshotTests: XCTestCase {
     /// The same layer classes without the snapshot flag keep every existing
     /// rejection: a rotating window misses, an untrimmable pool misses.
     func testUnflaggedRotatingAndPoolEntriesStillMiss() async {
-        let cache = ConversationCache(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+        let cache = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
         let stored = int32Range(0..<64)
         for (key, layer) in [("conv:rotating", RotatingKVCache(maxSize: 8, keep: 0) as KVCache),
                              ("conv:pool", DeepseekV4PoolCache(ratio: 4) as KVCache)] {
@@ -97,7 +97,7 @@ final class ConversationPromptSnapshotTests: XCTestCase {
 
     /// An ordinary trimmable entry still trims back to a diverging prompt.
     func testUnflaggedTrimmableEntryStillTrimsOnDivergence() async {
-        let cache = ConversationCache(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+        let cache = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
         let stored = int32Range(0..<64)
         let seed = await cache.begin(conversationKey: "conv:simple", incomingTokens: stored, modelID: "model-a", kvBits: nil)
         let layer = KVCacheSimple()
@@ -204,7 +204,7 @@ final class ConversationPromptSnapshotTests: XCTestCase {
     /// chunk plans would differ, so it is a miss. A serial snapshot, even on
     /// a boundary, ran another plan.
     func testResumeBoundaryLeaseMissesASnapshotOffTheIncomingPromptsBoundaries() async throws {
-        let cache = ConversationCache(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+        let cache = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
         let stored = int32Range(0..<64)
         func seed(_ key: String, plan: Bool = true) async throws -> ConversationCacheLayers {
             let lease = try Self.unwrap(await cache.begin(conversationKey: key, incomingTokens: stored,
@@ -251,7 +251,7 @@ final class ConversationPromptSnapshotTests: XCTestCase {
     /// incoming prompt's token there; anything else is a miss, never a
     /// reselection. An ordinary lease ignores the head state.
     func testNativeLeaseReusesASnapshotOnlyWithMatchingHeadState() async throws {
-        let cache = ConversationCache(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+        let cache = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
         let stored = int32Range(0..<64)
         let marker: Int32 = 61
         let extended = stored + [marker] + int32Range(200..<230)
@@ -318,7 +318,7 @@ final class ConversationPromptSnapshotTests: XCTestCase {
             let model = try Self.tinyDeepseekV4()
             let context = ModelContext(configuration: .init(id: "deepseek/deepseek-v4-flash"), model: model,
                                        processor: FixtureProcessor(), tokenizer: NoMarkerTokenizer())
-            let cache = ConversationCache(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+            let cache = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
             let key = "conv:dsv4-two-turn"
             let turn1 = (0..<2100).map { Int32(($0 * 7 + 3) % 128) }
 
@@ -374,7 +374,7 @@ final class ConversationPromptSnapshotTests: XCTestCase {
             let model = try Self.tinyDeepseekV4()
             let context = ModelContext(configuration: .init(id: "deepseek/deepseek-v4-flash"), model: model,
                                        processor: FixtureProcessor(), tokenizer: NoMarkerTokenizer())
-            let cache = ConversationCache(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+            let cache = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
             let key = "conv:dsv4-cancel"
             // Snapshot target 6144: three 2048-token reference chunks.
             let prompt = (0..<6200).map { Int32(($0 * 7 + 3) % 128) }
@@ -441,7 +441,7 @@ final class ConversationPromptSnapshotTests: XCTestCase {
                                        processor: FixtureProcessor(), tokenizer: tokenizer)
             let (system, user, assistant, observation) = (Int32(63), Int32(60), Int32(61), Int32(62))
             let think: Int32 = 5
-            let cache = ConversationCache(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+            let cache = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
             let key = "conv:glm-two-turn"
             let systemText: [Int32] = (0..<40).map { Int32(($0 * 7 + 3) % 56) }
             let userText: [Int32] = (0..<20).map { Int32(($0 * 5 + 1) % 56) }
