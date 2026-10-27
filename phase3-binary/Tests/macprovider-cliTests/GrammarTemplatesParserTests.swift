@@ -134,6 +134,7 @@ final class GrammarTemplatesParserTests: XCTestCase {
     private func requestCall(name: String, family: ToolCallGrammar) -> String {
         switch family {
         case .qwen: return "<tool_call>{\"name\":\"" + name + "\",\"arguments\":{\"city\":\"Paris\"}}</tool_call>"
+        case .lfm2: return "<|tool_call_start|>[" + name + "(city=\"Paris\")]<|tool_call_end|>"
         case .llama3: return "{\"name\":\"" + name + "\",\"parameters\":{\"city\":\"Paris\"}}"
         case .glm: return "<tool_call>" + name + "<arg_key>city</arg_key><arg_value>Paris</arg_value></tool_call>"
         case .gemma4: return "<|tool_call>call:" + name + "{<|\"|>city<|\"|>:<|\"|>Paris<|\"|>}<tool_call|>"
@@ -178,6 +179,7 @@ final class GrammarTemplatesParserTests: XCTestCase {
         ])])
         let examples: [(ToolCallGrammar, String)] = [
             (.qwen, #"<tool_call>{"name":"f","arguments":{"city":"Paris","data":[{"ok":true}]}}</tool_call>"#),
+            (.lfm2, #"<|tool_call_start|>[f(city="Paris",data=[{"ok":true}])]<|tool_call_end|>"#),
             (.llama3, #"{"name":"f","parameters":{"city":"Paris","data":[{"ok":true}]}}"#),
             (.glm, #"<tool_call>f<arg_key>city</arg_key><arg_value>Paris</arg_value><arg_key>data</arg_key><arg_value>[{"ok":true}]</arg_value></tool_call>"#),
             (.gemma4, "<|tool_call>call:f{<|\"|>city<|\"|>:<|\"|>Paris<|\"|>,<|\"|>data<|\"|>:[{<|\"|>ok<|\"|>:true}]}<tool_call|>"),

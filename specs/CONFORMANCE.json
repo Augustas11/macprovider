@@ -62,7 +62,7 @@
     {
       "spec_id": "SPEC-003",
       "title": "Open Onboarding: Distribution, Lifecycle & Onboarding UX",
-      "version": "0.12.3",
+      "version": "0.12.4",
       "path": "specs/SPEC-003-open-onboarding.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -504,7 +504,7 @@
     {
       "spec_id": "SPEC-018",
       "title": "Agentic tool calling (provider-side response synthesis)",
-      "version": "0.3.9",
+      "version": "0.3.10",
       "path": "specs/SPEC-018-agentic-tool-calling.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -564,7 +564,7 @@
     {
       "spec_id": "SPEC-020",
       "title": "Provider autoupdate",
-      "version": "v0.1.29",
+      "version": "v0.1.30",
       "path": "specs/SPEC-020-provider-autoupdate.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -665,7 +665,7 @@
     {
       "spec_id": "SPEC-023",
       "title": "Installer-Integrated Autotune Recommend",
-      "version": "v0.22.35",
+      "version": "v0.22.36",
       "path": "specs/SPEC-023-installer-autotune-recommend.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -1101,7 +1101,7 @@
     {
       "spec_id": "SPEC-038",
       "title": "Continuous batching for concurrent provider inference",
-      "version": "v0.3.31",
+      "version": "v0.3.33",
       "path": "specs/SPEC-038-continuous-batching.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1136,7 +1136,7 @@
     {
       "spec_id": "SPEC-039",
       "title": "Paged KV / paged-attention engine",
-      "version": "v0.1.24",
+      "version": "v0.1.25",
       "path": "specs/SPEC-039-paged-kv-attention-engine.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1477,7 +1477,7 @@
     {
       "spec_id": "SPEC-048",
       "title": "Native Multi-Token Prediction Serving",
-      "version": "0.1.57",
+      "version": "0.1.58",
       "path": "specs/SPEC-048-native-mtp-serving.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -2570,6 +2570,27 @@
       }
     },
     {
+      "requirement_id": "SPEC-018-R010",
+      "spec_id": "SPEC-018",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func bonsaiThinkingEnabled",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func preparedRequestInput",
+        "phase3-binary/Sources/macprovider-cli/ServeDecodePath.swift:static func makeContinuousBatchTextPreparationLane"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/ModelRuntimePromptContextTests.swift:final class ModelRuntimePromptContextTests"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2154",
+        "rationale": "Explicit high/xhigh/max enables thinking for the loaded Prism Bonsai model on text requests without tools. Native/reference quality evaluation, buyer UX acceptance and signed release remain pending."
+      }
+    },
+    {
       "requirement_id": "SPEC-020-R001",
       "spec_id": "SPEC-020",
       "state": "pending",
@@ -2788,6 +2809,9 @@
         "scripts/test-watchdog-inline-drift.sh:WATCHDOG_EOF",
         "phase3-binary/Tests/macprovider-cliTests/ExpiredPreparedHandoffRecoveryTests.swift::testStartupRecoversBeforeFenceExitsAndNextProcessAcquiresFreshLease",
         "phase3-binary/Tests/macprovider-cliTests/ExpiredPreparedHandoffRecoveryTests.swift::testRecoverCommandRetiresPreparedLeaseAndPreservesReadinessMarker",
+        "phase3-binary/Tests/macprovider-cliTests/ExpiredPreparedHandoffRecoveryTests.swift::testOperatorLifecycleSupersedesExpiredHandoffWithoutLosingPause",
+        "phase3-binary/Tests/macprovider-cliTests/ExpiredPreparedHandoffRecoveryTests.swift::testOperatorSupersessionDoesNotBypassDeadlinesOrLiveOwner",
+        "phase3-binary/Tests/macprovider-cliTests/ExpiredPreparedHandoffRecoveryTests.swift::testRecoveryOutputExplainsFencingEnableAndPause",
         "phase3-binary/Tests/macprovider-cliTests/ExpiredPreparedHandoffRecoveryTests.swift::testPreviouslyTranslatedRollbackAndFailedServeRemainRecoverable",
         "phase3-binary/Tests/macprovider-cliTests/ExpiredPreparedHandoffRecoveryTests.swift::testHistoricalSelfUpdateWithoutLifecycleProviderUsesConfiguredProvider",
         "phase3-binary/Tests/macprovider-cliTests/ExpiredPreparedHandoffRecoveryTests.swift::testLiveOwnerFutureTransactionAndUnexpiredHandoffAreUntouched",

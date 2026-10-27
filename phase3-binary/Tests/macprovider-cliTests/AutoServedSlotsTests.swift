@@ -43,7 +43,7 @@ final class AutoServedSlotsTests: XCTestCase {
         AutoServedSlots.plan(
             configuredSlots: configured, source: source, draftConfigured: draft,
             emergencyOff: emergencyOff, provisionalPolicyEntry: provisional,
-            recommendedSlots: { recommended }
+            recommendedSlots: { recommended }, physicalMemoryBytes: 16 * 1_073_741_824
         )
     }
 
@@ -66,13 +66,13 @@ final class AutoServedSlotsTests: XCTestCase {
     func testProvisionalGrantStaysWithinAComputableMemoryFit() {
         let bounded = AutoServedSlots.plan(
             configuredSlots: 8, source: nil, draftConfigured: false, emergencyOff: false,
-            provisionalPolicyEntry: true, recommendedSlots: { 4 }, memoryFitKnown: true
+            provisionalPolicyEntry: true, recommendedSlots: { 4 }, memoryFitKnown: true, physicalMemoryBytes: 16 * 1_073_741_824
         )
         XCTAssertEqual(bounded.rows, 4)
         XCTAssertEqual(bounded.initialServed, 4)
         let unknown = AutoServedSlots.plan(
             configuredSlots: 8, source: nil, draftConfigured: false, emergencyOff: false,
-            provisionalPolicyEntry: true, recommendedSlots: { 4 }, memoryFitKnown: false
+            provisionalPolicyEntry: true, recommendedSlots: { 4 }, memoryFitKnown: false, physicalMemoryBytes: 16 * 1_073_741_824
         )
         XCTAssertEqual(unknown.rows, 8)
         XCTAssertEqual(unknown.initialServed, 8)
@@ -139,7 +139,7 @@ final class AutoServedSlotsTests: XCTestCase {
             AutoServedSlots.plan(
                 configuredSlots: configured, source: source, draftConfigured: false, emergencyOff: false,
                 provisionalPolicyEntry: provisional, recommendedSlots: { recommended },
-                memoryFitKnown: memoryFitKnown, policyCeiling: ceiling
+                memoryFitKnown: memoryFitKnown, policyCeiling: ceiling, physicalMemoryBytes: 16 * 1_073_741_824
             )
         }
         // Self-check pending: the ladder's rows stop at the ceiling.
@@ -190,12 +190,12 @@ final class AutoServedSlotsTests: XCTestCase {
         for (configured, source, draft, off, provisional, recommended, fit) in inputs {
             let before = AutoServedSlots.plan(
                 configuredSlots: configured, source: source, draftConfigured: draft, emergencyOff: off,
-                provisionalPolicyEntry: provisional, recommendedSlots: { recommended }, memoryFitKnown: fit
+                provisionalPolicyEntry: provisional, recommendedSlots: { recommended }, memoryFitKnown: fit, physicalMemoryBytes: 16 * 1_073_741_824
             )
             let after = AutoServedSlots.plan(
                 configuredSlots: configured, source: source, draftConfigured: draft, emergencyOff: off,
                 provisionalPolicyEntry: provisional, recommendedSlots: { recommended }, memoryFitKnown: fit,
-                policyCeiling: nil
+                policyCeiling: nil, physicalMemoryBytes: 16 * 1_073_741_824
             )
             XCTAssertEqual(before, after)
         }

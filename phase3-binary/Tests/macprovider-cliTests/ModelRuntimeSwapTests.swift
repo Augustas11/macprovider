@@ -1592,17 +1592,24 @@ final class ModelRuntimeSwapTests: XCTestCase {
 
     func testDrainTimeoutCancelsInFlightRequests() async throws {
         let probe = InFlightProbe()
+        let clock = DrainDeadlineTestClock()
+        let (completionGate, completionContinuation) = AsyncStream<Void>.makeStream()
+        defer { completionContinuation.finish() }
         let providerStatus = makeProviderStatus(modelID: "old-model", modelHash: "old-hash")
         let runtime = makeRuntime(
             modelID: "old-model",
             modelHash: "old-hash",
             warmSwapEnabled: true,
             swapDrainTimeoutSeconds: 5,
+            drainClock: clock,
             loader: { target in (target, "new-hash") },
             completion: { snapshot, _ in
                 await probe.markStarted(modelID: snapshot.modelID)
-                try await Task.sleep(nanoseconds: 15_000_000_000)
-                return CompletionResult(content: "too-late", finishReason: "stop", promptTokens: 1, completionTokens: 1, settlementDisposition: .eligibleOwner)
+                // Cancellation ends the suspended stream; it has no natural
+                // completion deadline that could race the drain deadline.
+                for await _ in completionGate { }
+                await probe.markCancelled()
+                throw CancellationError()
             }
         )
         await runtime.setProviderStatus(providerStatus)
@@ -1622,15 +1629,47 @@ final class ModelRuntimeSwapTests: XCTestCase {
             await probe.startedModelID != nil
         }
 
-        let began = Date()
         let swapTask = try await runtime.beginSwap(targetModelID: "new-model")
+        defer {
+            swapTask.cancel()
+            clock.resumePending()
+            completionTask.cancel()
+        }
+        try await waitUntil { clock.sleepCount == 1 }
+        guard clock.sleepCount == 1 else { return }
+        clock.wake(at: 4_999)
+        // A second suspended poll proves the real drain loop evaluated the
+        // pre-deadline instant and kept this request alive.
+        try await waitUntil {
+            let cancelled = await probe.wasCancelled
+            return clock.sleepCount == 2 || cancelled
+        }
+        guard clock.sleepCount == 2 else {
+            XCTFail("drain cancelled before the configured deadline")
+            return
+        }
+        let cancelledBeforeDeadline = await probe.wasCancelled
+        XCTAssertFalse(cancelledBeforeDeadline)
+        let drainingSnapshot = await runtime.currentSnapshot()
+        XCTAssertEqual(drainingSnapshot.state, .draining)
+        XCTAssertEqual(drainingSnapshot.modelID, "old-model")
+        clock.wake(at: 5_000)
+        try await waitUntil {
+            let cancelled = await probe.wasCancelled
+            return cancelled || clock.sleepCount > 2
+        }
+        guard await probe.wasCancelled else {
+            XCTFail("drain did not cancel at the configured deadline")
+            return
+        }
         try await swapTask.value
 
         do {
             _ = try await completionTask.value
             XCTFail("Expected drain-timeout cancellation")
         } catch is DrainCancelledError {
-            XCTAssertLessThan(Date().timeIntervalSince(began), 5.4)
+            let cancelledAtDeadline = await probe.wasCancelled
+            XCTAssertTrue(cancelledAtDeadline)
         }
         let snapshot = await runtime.currentSnapshot()
         XCTAssertEqual(snapshot.state, .ready)
@@ -1999,6 +2038,7 @@ final class ModelRuntimeSwapTests: XCTestCase {
         draftModelID: String? = nil,
         warmSwapEnabled: Bool,
         swapDrainTimeoutSeconds: Int = 30,
+        drainClock: DrainDeadlineTestClock? = nil,
         targetAuthorities: [String: ModelRuntimeTargetAuthority] = [:],
         authorizedSwitchModelIDs: [String] = [],
         loader: @escaping @Sendable (String) async throws -> (String, String?) = { target in (target, nil) },
@@ -2012,6 +2052,12 @@ final class ModelRuntimeSwapTests: XCTestCase {
             draftModelID: draftModelID,
             warmSwapEnabled: warmSwapEnabled,
             swapDrainTimeoutSeconds: swapDrainTimeoutSeconds,
+            testDrainTiming: drainClock.map { clock in
+                ModelRuntime.DrainTiming(
+                    nowMilliseconds: { clock.nowMilliseconds },
+                    pollSleep: { await clock.sleep() }
+                )
+            },
             targetAuthorities: targetAuthorities,
             authorizedSwitchModelIDs: authorizedSwitchModelIDs,
             loader: { _ in throw TestError.unexpectedContainerLoader },
@@ -2164,6 +2210,7 @@ private actor InFlightProbe {
     private var _startedModelID: String?
     private var _startedDraftModelID: String?
     private var _canFinish = false
+    private(set) var wasCancelled = false
 
     var startedModelID: String? { _startedModelID }
     var startedDraftModelID: String? { _startedDraftModelID }
@@ -2176,6 +2223,64 @@ private actor InFlightProbe {
 
     func allowFinish() {
         _canFinish = true
+    }
+
+    func markCancelled() { wasCancelled = true }
+}
+
+/// The test controls only drain polling; completion cancellation still travels
+/// through the runtime's real in-flight registration and cancellation handler.
+private final class DrainDeadlineTestClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var milliseconds: Int64 = 0
+    private var sleeps = 0
+    private var pending: CheckedContinuation<Void, Never>?
+    private var closed = false
+
+    var nowMilliseconds: Int64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return milliseconds
+    }
+
+    var sleepCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return sleeps
+    }
+
+    func sleep() async {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            if closed {
+                lock.unlock()
+                continuation.resume()
+                return
+            }
+            precondition(pending == nil)
+            pending = continuation
+            sleeps += 1
+            lock.unlock()
+        }
+    }
+
+    func wake(at milliseconds: Int64) {
+        lock.lock()
+        precondition(pending != nil)
+        self.milliseconds = milliseconds
+        let continuation = pending
+        pending = nil
+        lock.unlock()
+        continuation?.resume()
+    }
+
+    func resumePending() {
+        lock.lock()
+        closed = true
+        let continuation = pending
+        pending = nil
+        lock.unlock()
+        continuation?.resume()
     }
 }
 

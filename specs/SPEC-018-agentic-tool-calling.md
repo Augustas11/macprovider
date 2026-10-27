@@ -1,6 +1,6 @@
 # SPEC-018 — Agentic tool calling (provider-side response synthesis)
 
-**Version:** 0.3.9 (2026-10-27, additive LFM2 tool grammar; Related: #2154)
+**Version:** 0.3.10 (2026-10-27, additive LFM2 tool grammar; preserves explicit Bonsai thinking opt-in; Related: #2154)
 **Depends on:** SPEC-001 v1.6, SPEC-002 v1.5.5, SPEC-006 v0.9, SPEC-008 (Pillar A model-hash trust layer — referenced by §10a), SPEC-011 v0.5 (warm-swap heartbeat `model_hash` — referenced by §10a), SPEC-015 v0.4 (receipts canonical output binding — see AC-17 and §N.5)
 **Status:** **LOCKED** at v0.2.10 by the streaming cleanup-rewrite byte-domain clarification. Previously LOCKED at v0.2.9 by the serial-turn `parallel_tool_calls` amendment (omitted/`false` stop after the first complete valid tool). Previously LOCKED at v0.2.8 by the #1594 OpenRouter-aligned AC-53 amendment (no independent messages[] count cap). Previously LOCKED at v0.2.7 by the Qwen3-Coder function-XML tool-call grammar amendment (documents the `<function=…><parameter=…>` XML body that Qwen3-Coder emits as a Qwen-row §3.1 body-grammar alternative, with OpenAI/MCP name charset; pending IMPL/conformance already landed on branch `fix/qwen3coder-toolcall-parse`); previously LOCKED at v0.2.6 by #784 C2b admission-timeout reconciliation — v0.2.4 spec PR #202 and IMPL PR #209 both landed (multi-turn acceptance, token-incremental streaming, `tool_call_id` validation, 1 MiB/2 MiB byte caps). v0.2.5 adds gpt-oss/OpenAI Harmony response parsing as a pending implementation/conformance gap. codex 4-lane r4 0/0/0; Claude blind-spot r2 0/0/0. SPEC-019 already depends on this as "LOCKED". The former "LOCK CANDIDATE pending PR" line was never flipped after merge. (Resolved gap, 2026-07-14, runbook item 15: AC-45's `X-MacProvider-Streaming-Mode` header — set by the coordinator on streaming `200` responses — was stripped by the public gateway's blanket `X-MacProvider-*` filter, making the "header absent" fail condition live on `api.malibu.tech`. Fixed by adding the header to the SPEC-006 v0.9.9 § 5.4 response-pass-through allowlist and un-stripping it at the gateway, validated against AC-45's closed enum. Chosen over scoping AC-45 to the coordinator surface because buyers hit the gateway, so scoping would have left AC-45's buyer-visible promise unmet. AC-45's normative text is unchanged; this is a documentation reconciliation, not a lock amendment. Residual: the coordinator currently emits the diagnostic only on the streaming success path — non-streaming AC-45 emission is a separate coordinator-side completeness item, out of scope for the gateway-strip fix.)
 
@@ -17,6 +17,12 @@ SPEC-018 is the **provider-side response synthesis contract** for OpenAI-wire to
 **Money-path**: all v0.2 changes preserve v0.1.5 settlement protection (`FaultBreakerQualifying` + zero credits on malformed streams via `billing_recorder.go:176` + `formula.go:112`).
 
 ## Change log
+
+- **v0.3.9 (2026-10-27, Related: #2154):** §3.12 adds an explicit
+  thinking opt-in for the loaded Prism Bonsai-2 family, so vendor-protocol
+  quality evaluation can use its reasoning mode. Registers `SPEC-018-R010`.
+  Defaults, other model families, declared-tool requests and structured
+  output retain thinking disabled.
 
 - **v0.3.8 (2026-10-26, Related: #2107):** New §3.14. Control tokens enter a
   prompt only where the chat template or reference encoder writes them;
@@ -1012,6 +1018,22 @@ v0.3.2: when the request carries `response_format` `json_object` or
 `json_schema`, the provider passes `low` whatever the buyer sent, and
 templates with `enable_thinking` render with it `false` (as for every
 request), so the reply starts with the JSON where the template allows it.
+
+**Bonsai thinking opt-in (v0.3.9, SPEC-018-R010).** The unconditional
+thinking-off rule above is amended only for a loaded native
+`PrismHadamardQwen35` model whose template supports `enable_thinking`.
+An explicit `reasoning_effort` of `high`, `xhigh` or `max` MUST set
+`enable_thinking: true` for a text-only request with `response_format: text`
+and no declared tools. Omitted effort, `none`, `minimal`, `low` and `medium`
+MUST retain `enable_thinking: false`. Any nonempty tools declaration keeps
+thinking disabled, including `tool_choice: none`, as does any structured
+response format. The capability comes from the actual loaded model type,
+never a buyer-supplied model name or alias, and is captured for the owning
+model's alternate text-preparation lane. Serial and alternate prompt
+preparation MUST produce the same thinking mode. Other model types retain
+the preceding rules. Generated reasoning uses the existing split, stop,
+usage and receipt rules in this section; this opt-in is not quality
+qualification or permission to advertise an unqualified capability.
 
 **History reasoning (v0.3.7).** An assistant history message's
 `reasoning_content` (from Chat Completions or a SPEC-006-R025 Responses

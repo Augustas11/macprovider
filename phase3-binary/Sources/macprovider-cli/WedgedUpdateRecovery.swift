@@ -214,6 +214,11 @@ struct WedgedUpdateRecovery {
             guard let handoff = record.startupHandoff,
                   let lifecycle = try lifecycleStore.current(),
                   lifecycle.operationID == record.operationID
+                    // An operator command may supersede the updater's lifecycle
+                    // operation without retiring its prepared lease. Authority
+                    // still comes from the matching marker/handoff below and
+                    // the expiry + dead-owner checks under the lease lock.
+                    || lifecycle.writer == .operatorCommand
                     || (marker.transactionState == .awaitingPreviousReadiness
                         && lifecycle.writer == .installer
                         && lifecycle.state == .rollbackInProgress

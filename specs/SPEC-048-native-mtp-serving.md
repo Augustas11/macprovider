@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.57
+**Version:** 0.1.58
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.57",
+  "version": "0.1.58",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -493,18 +493,24 @@ The authorized dependency tuple is exact:
 
 | Repository | Fork tag | Revision | Upstream base |
 |---|---|---|---|
-| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.10.5` | `c8be0f618df1e0df230137a3cbe932aa798d602b` | fork `3.32.3-macprovider.10.1` (`87dc5159c87d73f4d7abd524fbdd17760cf56285`) on fork `3.32.3-macprovider.10` (`b4077dcb28336b388f3d09be2a091c12f8e179aa`) on `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
+| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.10.14` | `9b2766ee4f4271669e58429e6eb1251e22e5ecaa` | fork `3.32.3-macprovider.10.1` (`87dc5159c87d73f4d7abd524fbdd17760cf56285`) on fork `3.32.3-macprovider.10` (`b4077dcb28336b388f3d09be2a091c12f8e179aa`) on `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
 | `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.9` | `29d3b93375cc56cd2649b40e4310a8bc445e9874` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
 | `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.4` | `2f512e3997349c8648f5d7c5113eb2c825aa242d` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
 
-The mlx-swift-lm row is the immutable fork tag `3.32.3-macprovider.10.5`
-(commit `c8be0f61…`, branch `campaign/2111-dsv4-cb`): tag
-`3.32.3-macprovider.10.4` (`676a62a4…`) plus batched DeepSeek-V4 attention,
-compressor/indexer projections and per-row rotary offsets, keys-only windows
-and geometric pool storage (0.1.55, Related: #2111). The prior tag adds
-row-owned continuous batching to the serial DeepSeek-V4 port on the epic
-#2029 tag `3.32.3-macprovider.10.1` (`87dc5159…`, `glm53/tuple-0324`).
-`phase3-binary/Package.resolved` resolves the new revision exactly.
+The mlx-swift-lm row is the immutable fork tag `3.32.3-macprovider.10.14`
+(commit `9b2766ee…`, campaign #2154), on `3.32.3-macprovider.10.5`
+(`c8be0f61…`). It adds the Prism schema-2 signed-Hadamard VLM loader,
+owned full-artifact snapshots, lazy vision loading and row-safe attention masks.
+Its complete source tree is identical to the parity-qualified `bd5f45f1…`
+baseline. Custom Hadamard and convolution experiments without established
+end-to-end throughput gains are excluded. This pin does not admit a catalog
+model, change a signed batching/MTP policy, or claim 8 GB or vendor quality
+qualification.
+
+The 10.5 base adds batched DeepSeek-V4 attention, compressor/indexer projections
+and per-row rotary offsets, keys-only windows and geometric pool storage
+(0.1.55, Related: #2111). Earlier ancestry and historical qualification records
+remain unchanged. `phase3-binary/Package.resolved` resolves the row exactly.
 `3.32.3-macprovider.10.2` remains an unrelated GLM candidate outside the tuple.
 A production build MUST NOT resolve an untagged mlx-swift-lm revision;
 `scripts/check-upstream-throughput-blockers.sh` verifies that the row's tag
@@ -1883,7 +1889,7 @@ the journey must include its independent and combined evidence.
 | `native-mtp-serving` | `DECISION_REQUIRED` | `@Augustas11` | `#1770` | Authority acceptance, release-candidate review, and signed real-hardware journey evidence for the first production tuple. |
 | First Qwen-family MTP artifact | `UNKNOWN` | `@Augustas11` | `#1770` | Legally/provenance-clean immutable model, tokenizer, MTP manifest, and exact hashes. |
 | MLX dependency tuple | `RESOLVED_FOR_TUPLE` | `@Augustas11` | `#1906` | The operator's permanent fork model (MTP-3) replaces the upstream-release requirement. MTP-3 names the exact three-fork tuple; each rebase passes the runbook's per-rebase acceptance gate and a SPEC revision. |
-| GLM-5.3-Flash `glm5_next_mtp_v1` tuple | `DECISION_REQUIRED` | `@Augustas11` | `#2029` | Pending: the `JOURNEY-NATIVE-MTP-SERVING` run on the final tagged tuple (mlx-swift-lm `3.32.3-macprovider.10.5`) and the GLM R015 record, which complete the R003 review record. Implemented in the campaign branch: the observer, sidecar parsing, v2 projection reader, SPEC-023 v0.22.27 widths, the fork's MTP-1 drafter and packed verification, and the provider drafter load path, admission gate and paged packed verification. |
+| GLM-5.3-Flash `glm5_next_mtp_v1` tuple | `DECISION_REQUIRED` | `@Augustas11` | `#2029` | Pending: the `JOURNEY-NATIVE-MTP-SERVING` run on the final tagged tuple (mlx-swift-lm `3.32.3-macprovider.10.14`) and the GLM R015 record, which complete the R003 review record. Implemented in the campaign branch: the observer, sidecar parsing, v2 projection reader, SPEC-023 v0.22.27 widths, the fork's MTP-1 drafter and packed verification, and the provider drafter load path, admission gate and paged packed verification. |
 | First MLX-native MXFP8 artifact | `UNKNOWN` | `@Augustas11` | `#1770` | SPEC-023/SPEC-010 format, fit, quality, license, provenance, and hardware evidence. |
 | Batched-verify numerical parity | `RESOLVED_FOR_TUPLE` | `@Augustas11` | `#1770` | The qmv-to-qmm switch at 12 packed verify tokens cannot occur for the first tuple: `max_native_active_rows` is 1 and depth is 1, so a packed verify is at most 2 tokens, and rows above the bound ride the ordinary forward at depth zero. A tuple whose bound times `proposal_depth + 1` reaches 12 must decide between a bounded drift allowance and kernel-matched verification before it can be signed. |
 | Depth-1 throughput value | `RESOLVED_FOR_TUPLE` | `@Augustas11` | `#1770` | The 2026-10-06 quiet R015 (policy `e24cb7bc…`, amended 0.1.25 gates) passed every cell for the A3B Studio tuple: one-slot decode ratio 1.19-1.28 with corrected lower bounds +18% to +26%, gated s2/s8 cells non-inferior. The value is one-slot only; the R007 bound of 1 keeps native off above it. |
@@ -1923,6 +1929,12 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.58 (2026-10-26)** — R003: names `3.32.3-macprovider.10.14`
+  (`9b2766ee…`) for the native Prism schema-2 loader, owned snapshots, lazy
+  vision and row-safe attention masks. The tree equals the tested `bd5f45f1…`
+  baseline; unproven custom-kernel experiments are excluded. The mlx-swift and
+  MLX core pins stay unchanged. Catalog admission, 8 GB fit, vendor quality,
+  signed serving policy and journey qualification remain separate gates.
 - **0.1.57 (2026-10-25)** — R009 (MTP-9): a native-MTP GLM-5-Next row reuses
   a SPEC-024-R005 prompt snapshot together with the MTP head state taken at
   it, on its own CB row, and stays native; any other snapshot is a miss for

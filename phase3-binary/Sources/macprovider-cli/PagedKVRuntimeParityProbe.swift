@@ -780,19 +780,24 @@ enum PagedKVRuntimeParityProbe {
         out.reserveCapacity(nNew)
         let chunkSize = max(1, prefillStepSize)
         var promptOffset = 0
+        // Wrapper models may implement only the primary text/state interface.
+        // Keep all per-sequence state (including rotary deltas) across chunks.
+        var state: LMOutput.State?
         while promptTokens.count - promptOffset > chunkSize {
             let end = promptOffset + chunkSize
             let chunk = MLXArray(promptTokens[promptOffset..<end].map { Int32($0) })
                 .reshaped([1, chunkSize])
-            _ = model(chunk, cache: cache)
+            let output = model(LMInput.Text(tokens: chunk), cache: cache, state: state)
+            state = output.state
             eval(cache.flatMap { $0.state })
             promptOffset = end
         }
         let remainder = Array(promptTokens[promptOffset...])
         var y = MLXArray(remainder.map { Int32($0) }).reshaped([1, remainder.count])
         for _ in 0 ..< nNew {
-            let logits = model(y, cache: cache)
-            let next = lastTokenArgmax(logits)
+            let output = model(LMInput.Text(tokens: y), cache: cache, state: state)
+            state = output.state
+            let next = lastTokenArgmax(output.logits)
             eval(cache.flatMap { $0.state })
             out.append(Int(next))
             y = MLXArray([next]).reshaped([1, 1])
@@ -966,7 +971,7 @@ enum PagedKVRuntimeParityProbe {
         try Task.checkCancellation()
         let cache = try model.newCache(parameters: nil)
         let tokens = MLXArray(prompt.map(Int32.init)).reshaped([1, prompt.count])
-        let logits = model(tokens, cache: cache)
+        let logits = model(LMInput.Text(tokens: tokens), cache: cache, state: nil).logits
         try Task.checkCancellation()
         let vocab = logits.dim(logits.ndim - 1)
         let flat = logits.reshaped([-1, vocab])

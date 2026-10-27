@@ -1110,7 +1110,8 @@ final class ContinuousBatchingSelfCheckTests: XCTestCase {
         // (provisional grant), so a restart on a new build never drops it to one.
         let plan = AutoServedSlots.plan(
             configuredSlots: 8, source: nil, draftConfigured: false, emergencyOff: false,
-            provisionalPolicyEntry: true, recommendedSlots: { 16 }
+            provisionalPolicyEntry: true, recommendedSlots: { 16 },
+            physicalMemoryBytes: 256 * 1_073_741_824
         )
         XCTAssertEqual(plan.initialServed, 8)
         XCTAssertGreaterThanOrEqual(plan.rows, 8)

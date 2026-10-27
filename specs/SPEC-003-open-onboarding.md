@@ -1,6 +1,6 @@
 # SPEC-003 — Open Onboarding: Distribution, Lifecycle & Onboarding UX
 
-**Version:** 0.12.3 (2026-10-17, issue #2036 installer hardening: the health gate never executes served bytes; streamed download caps)
+**Version:** 0.12.4 (2026-10-27, conditional catalog-eligible Bonsai-2 2B default on 8 GB hardware)
 
 **Change log v0.12.3 (2026-10-17, issue #2036):** SPEC-003-R003: the install.sh consumer-health gate never executes the served installer. It requires the served bytes to equal the release's repository `dist/install.sh` and runs that copy's discovery. `install.sh` and the gate stream every release-host download under a hard byte cap and keep no partial file.
 
@@ -977,9 +977,14 @@ options:
 
 | RAM | Recommended models | Default |
 |---|---|---|
-| 8 GB | `mlx-community/Llama-3.2-3B-Instruct-4bit` (~2 GB) | Llama 3.2 3B |
+| 8 GB | `prism-ml/Ternary-Bonsai-2-2B-mlx-2bit`; existing eligible models including `mlx-community/Llama-3.2-3B-Instruct-4bit` (~2 GB) | Bonsai-2 2B only when paid-eligible under SPEC-023 §4.1/§5; otherwise the existing eligible recommendation (including Llama 3.2 3B) |
 | 16 GB | Llama 3.2 3B (~2 GB), `mlx-community/Qwen2.5-7B-Instruct-4bit` (~4 GB) | Qwen 2.5 7B |
 | 24 GB+ | Llama 3.2 3B, Qwen 2.5 7B, `mlx-community/Qwen2.5-14B-Instruct-4bit` (~8 GB) | Qwen 2.5 14B |
+
+The 8 GB preference uses the signed-catalog recommendation/apply path, not
+an unconditional model override. Listed-only, absent or ineligible Bonsai rows
+retain the existing recommendation fallback. This row does not grant catalog
+promotion, buyer qualification or a runtime feature bypass.
 
 The installer prints the model name, approximate download size, and
 estimated context window. The user selects by number, or chooses

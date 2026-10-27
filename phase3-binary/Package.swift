@@ -17,7 +17,7 @@ let package = Package(
         )
     ],
     dependencies: [
-        // Fork tag 3.32.3-macprovider.10.5 (branch campaign/2111-dsv4-cb), on tag
+        // Fork tag 3.32.3-macprovider.10.14 (campaign #2154), on 10.5, on tag
         // 3.32.3-macprovider.10.4 (676a62a4), on tag 3.32.3-macprovider.10.3, then
         // 3.32.3-macprovider.10.1 (branch glm53/tuple-0324, on 3.32.3-macprovider.10):
         // upstream mlx-swift-lm 3.32.3 plus the 3.32.3-macprovider.9 stack (the
@@ -38,9 +38,14 @@ let package = Package(
         // multi-token pooling continuation. 10.5 shares attention, compressor/indexer
         // projections and rotary offsets across rows, with keys-only windows and
         // geometric pool storage; other family decode paths are unchanged.
+        // Campaign #2154 adds the schema-2 Prism Hadamard VLM loader on 10.5,
+        // preserving the packed basis and tied head, with an owned full-artifact
+        // snapshot, lazy vision loading and row-safe attention masks. Experiments
+        // without measured throughput gains are excluded from the tagged tree.
+        // Ordinary model registrations and batching admission are unchanged.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "c8be0f618df1e0df230137a3cbe932aa798d602b"
+            revision: "9b2766ee4f4271669e58429e6eb1251e22e5ecaa"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",

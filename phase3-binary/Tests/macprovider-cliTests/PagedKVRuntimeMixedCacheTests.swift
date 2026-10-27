@@ -7,6 +7,14 @@ import MLXNN
 import XCTest
 
 final class PagedKVRuntimeMixedCacheTests: XCTestCase {
+    private static var hasMetallib: Bool {
+        let bundle = Bundle(for: PagedKVRuntimeMixedCacheTests.self)
+        return PagedKVMetallibGate.defaultMetallibExists(
+            bundleURL: bundle.resourceURL,
+            executableURL: bundle.executableURL
+        ) || PagedKVMetallibGate.defaultMetallibExists()
+    }
+
     /// Every MLX evaluation of the native-MTP round runs under the backend's
     /// target container lock, the lock every forward takes. A helper that
     /// evaluates (drafter state, lab digests) fails closed outside it.
@@ -209,7 +217,7 @@ final class PagedKVRuntimeMixedCacheTests: XCTestCase {
     }
 
     func testMixedCacheIsolationProbeCoversLockstepWindowBeforePeerRejoin() async throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
+        guard Self.hasMetallib else {
             throw XCTSkip("MLX default metallib is unavailable in this test host")
         }
 
@@ -265,7 +273,7 @@ final class PagedKVRuntimeMixedCacheTests: XCTestCase {
     }
 
     func testMixedMambaAndPagedAttentionCachesShareForwardAndRetainRowState() async throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
+        guard Self.hasMetallib else {
             throw XCTSkip("MLX default metallib is unavailable in this test host")
         }
 
@@ -391,7 +399,7 @@ final class PagedKVRuntimeMixedCacheTests: XCTestCase {
     }
 
     func testHybridRowSnapshotsRecurrentStateAndMaterializesSerialCache() async throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
+        guard Self.hasMetallib else {
             throw XCTSkip("MLX default metallib is unavailable in this test host")
         }
 
@@ -482,7 +490,7 @@ final class PagedKVRuntimeMixedCacheTests: XCTestCase {
     }
 
     func testEqualOffsetEqualLengthPrefillUsesSharedForwardForMixedCacheAndIsolatesRows() async throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
+        guard Self.hasMetallib else {
             throw XCTSkip("MLX default metallib is unavailable in this test host")
         }
 
@@ -550,7 +558,7 @@ final class PagedKVRuntimeMixedCacheTests: XCTestCase {
     /// SPEC-038 FR-CB2: rows at different prompt offsets with one chunk
     /// length share one forward, and each row keeps only its own state.
     func testRaggedOffsetEqualLengthPrefillSharesForwardForMixedCacheAndIsolatesRows() async throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
+        guard Self.hasMetallib else {
             throw XCTSkip("MLX default metallib is unavailable in this test host")
         }
 
@@ -634,7 +642,7 @@ final class PagedKVRuntimeMixedCacheTests: XCTestCase {
     /// and are released (their paged KV took the chunk in place, so a retry
     /// would append it twice). Later ragged groups prefill serially.
     func testRaggedPrefillThatBypassesPerRowAttentionFailsItsRowsAndLaterGroupsRunSerially() async throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
+        guard Self.hasMetallib else {
             throw XCTSkip("MLX default metallib is unavailable in this test host")
         }
 
@@ -723,7 +731,7 @@ final class PagedKVRuntimeMixedCacheTests: XCTestCase {
     }
 
     func testUnequalLengthPrefillUsesSerialForwardsForMixedCache() async throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
+        guard Self.hasMetallib else {
             throw XCTSkip("MLX default metallib is unavailable in this test host")
         }
 
@@ -776,7 +784,7 @@ final class PagedKVRuntimeMixedCacheTests: XCTestCase {
     }
 
     func testCachePackingIncompatibilityFallsBackToIsolatedSerialPrefill() async throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
+        guard Self.hasMetallib else {
             throw XCTSkip("MLX default metallib is unavailable in this test host")
         }
 
@@ -869,7 +877,7 @@ final class PagedKVRuntimeMixedCacheTests: XCTestCase {
     }
 
     func testBackendLevelStateDiscardsSharedAttemptAndFallsBackPerRow() async throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
+        guard Self.hasMetallib else {
             throw XCTSkip("MLX default metallib is unavailable in this test host")
         }
 
@@ -967,7 +975,7 @@ final class PagedKVRuntimeMixedCacheTests: XCTestCase {
     /// attention layers plus recurrent layers restored from the checkpoint at
     /// exactly the handoff length, and refuses anything else.
     func testHybridRetainedInstallRestoresRecurrentStateFromCheckpoint() async throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
+        guard Self.hasMetallib else {
             throw XCTSkip("MLX default metallib is unavailable in this test host")
         }
 

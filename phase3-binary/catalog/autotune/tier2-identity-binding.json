@@ -1,6 +1,6 @@
 {
-  "autotune_candidates_sha256": "2081234bb9d78c97568d2bcc7614e78b7c7e4874218bd1172d8251df79f2bd60",
-  "generated_at": "2026-10-26T13:17:00Z",
+  "autotune_candidates_sha256": "568dfb349b0e42a00863a5d5800ef11927afeaebcb1df69cd2f2bc3e7d899a39",
+  "generated_at": "2026-10-27T07:38:00Z",
   "models": [
     {
       "catalog_key": "zai-org/glm-5.3-flash",
@@ -136,6 +136,13 @@
       "sha256": "8a8786e902127e9175f5be0d7c8bcf4dd32323a0521e4d9a20761608a07a6d05"
     },
     {
+      "catalog_key": "prism-ml/ternary-bonsai-2-2b-mlx-2bit",
+      "min_ram_gb": 3,
+      "model_id": "prism-ml/Ternary-Bonsai-2-2B-mlx-2bit",
+      "model_revision": "1c6cbae21f8c38830ce337972b46fdae7b18eaaa",
+      "sha256": "fe25aaa59aeb54f5ce080818b28808286d26283a61200cb1efb377ac7db62262"
+    },
+    {
       "catalog_key": "deepseek/deepseek-v4-flash",
       "min_ram_gb": 195,
       "model_id": "TensorFold/DeepSeek-V4-Flash-0731-MXFP4-MLX",
@@ -144,6 +151,6 @@
     }
   ],
   "policy_version": "autotune-policy-v1",
-  "release_id": "published-2026-10-26-glm53-qwen36-native-mtp-v274",
+  "release_id": "published-2026-10-27-bonsai2b-candidate-v1",
   "schema_version": "macprovider.tier2-identity-binding.v1"
 }
