@@ -198,6 +198,15 @@ final class ConversationCacheMemoryBudget: @unchecked Sendable {
         self.verifyBytes = max(0, verifyBytes)
     }
 
+    /// Call only after the previous model's requests have drained and its hot
+    /// entries have been purged. Geometry is conservative within one model
+    /// generation; carrying its maxima into another family can disable reuse.
+    func resetGeometryForModelChange() {
+        lock.lock(); defer { lock.unlock() }
+        bytesPerToken = 0
+        fixedRowBytes = 0
+    }
+
     static func tensorBytes(_ layers: ConversationCacheLayers) -> Int {
         // `state` may expose only a valid-token slice; `innerState()` also
         // includes the cache's retained allocation padding (e.g. GLM latent).
