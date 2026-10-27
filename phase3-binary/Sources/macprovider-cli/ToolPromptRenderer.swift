@@ -60,8 +60,10 @@ enum ToolPromptRenderer {
                     // Templates write names (and, in XML/GLM/Gemma grammars,
                     // keys) unquoted: keep them inside the OpenAI charset so
                     // history cannot forge call markup.
-                    guard ToolCallParser.isValidToolFunctionName(call.functionName) else {
-                        throw APIError(status: 400, message: "Tool history names are outside the tool-call grammar", code: "invalid_tools")
+                    guard grammar == .lfm2
+                        ? ToolCallGrammar.isLFMIdentifier(call.functionName)
+                        : ToolCallParser.isValidToolFunctionName(call.functionName) else {
+                        throw APIError(status: 400, message: "Tool history names are outside the tool-call grammar", code: grammar == .lfm2 ? "unsupported_tool_schema" : "invalid_tools")
                     }
                     namesByCallID[call.id] = call.functionName
                     return MLXLMCommon.ToolCall(
@@ -91,9 +93,11 @@ enum ToolPromptRenderer {
         }
         // Gemma 4 writes nested object keys unquoted too, so every depth is
         // held to the charset there; other templates quote nested keys.
-        guard object.keys.allSatisfy(ToolCallParser.isValidToolParameterName),
+        guard object.keys.allSatisfy({ grammar == .lfm2
+            ? ToolCallGrammar.isLFMIdentifier($0)
+            : ToolCallParser.isValidToolParameterName($0) }),
               grammar != .gemma4 || nestedKeysAreSafe(parsed) else {
-            throw APIError(status: 400, message: "Tool history names are outside the tool-call grammar", code: "invalid_tools")
+            throw APIError(status: 400, message: "Tool history names are outside the tool-call grammar", code: grammar == .lfm2 ? "unsupported_tool_schema" : "invalid_tools")
         }
         return object.mapValues(templateValue)
     }

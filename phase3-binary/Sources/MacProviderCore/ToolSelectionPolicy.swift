@@ -105,6 +105,10 @@ public enum ToolSelectionPolicy {
 
     public static func validateRequest(_ request: ChatCompletionRequest, loadedModelID: String?, runtime: String) throws {
         let mode = try selection(request.promptSource.toolChoice)
+        if loadedModelID.flatMap(ToolCallGrammar.family(modelID:)) == .lfm2,
+           case .array(let tools)? = request.promptSource.tools, !tools.isEmpty, mode != .none {
+            try validateLFMNames(schemas(request))
+        }
         guard mode.holdsOutput else { return }
         guard runtime == "mlx_cache", !mode.requiresCall || loadedModelID.flatMap(ToolCallGrammar.family(modelID:)) != nil else {
             throw unsupported("This model/runtime does not support the requested tool selection")
@@ -117,6 +121,26 @@ public enum ToolSelectionPolicy {
             throw unsupported("Guaranteed tool selection requires text response_format and no custom stop strings")
         }
         _ = try schemas(request)
+    }
+
+    public static func validateLFMNames(_ schemas: [String: JSONValue]) throws {
+        for (name, schema) in schemas {
+            guard ToolCallGrammar.isLFMIdentifier(name) else {
+                throw APIError(status: 400, message: "LFM function names must be ASCII Python identifiers", code: "unsupported_tool_schema", param: "tools")
+            }
+            guard case .object(let object) = schema else { continue }
+            var keys: Set<String> = []
+            if case .object(let properties)? = object["properties"] { keys.formUnion(properties.keys) }
+            if case .array(let required)? = object["required"] {
+                for value in required { if case .string(let key) = value { keys.insert(key) } }
+            }
+            if case .array(let values)? = object["enum"] {
+                for value in values { if case .object(let fields) = value { keys.formUnion(fields.keys) } }
+            }
+            guard keys.allSatisfy(ToolCallGrammar.isLFMIdentifier) else {
+                throw APIError(status: 400, message: "LFM argument names must be ASCII Python identifiers", code: "unsupported_tool_schema", param: "tools")
+            }
+        }
     }
 
     public static func schemas(_ request: ChatCompletionRequest) throws -> [String: JSONValue] {

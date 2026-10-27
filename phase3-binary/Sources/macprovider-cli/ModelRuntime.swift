@@ -8301,7 +8301,7 @@ maxTokens: 1,
         }
 
         let maxContextTokens = maxContextTokens
-        let stopTokenFilter = snapshot.nativeVisionProfile == nil
+        let rawStopTokenFilter = snapshot.nativeVisionProfile == nil
             ? stopTokenFilter : NativeVisionProfile.stopTokenFilter
         let selectionModelID = toolSelectionModelID(snapshot)
         CBTrace.logPreparation(schedulerRequestID, "rt_cb_prepare_begin path=complete")
@@ -8314,6 +8314,7 @@ maxTokens: 1,
             drainCancelled: drainCancelled,
             promptSnapshotCachedTurnsAttachable: continuousBatchCachedTurnsAccepted
         )
+        let stopTokenFilter = Self.toolAwareStopTokenFilter(rawStopTokenFilter, grammar: Self.toolGrammar(for: request))
         CBTrace.logPreparation(schedulerRequestID, "rt_cb_prepare_end path=complete tokens=\(prepared.promptTokens.count)")
 
         try drainCancelled.check()
@@ -8765,7 +8766,7 @@ maxTokens: 1,
         }
 
         let maxContextTokens = maxContextTokens
-        let stopTokenFilter = snapshot.nativeVisionProfile == nil
+        let rawStopTokenFilter = snapshot.nativeVisionProfile == nil
             ? stopTokenFilter : NativeVisionProfile.stopTokenFilter
         let selectionModelID = toolSelectionModelID(snapshot)
         let requestStops = request.stop
@@ -8779,6 +8780,7 @@ maxTokens: 1,
             drainCancelled: drainCancelled,
             promptSnapshotCachedTurnsAttachable: continuousBatchCachedTurnsAccepted
         )
+        let stopTokenFilter = Self.toolAwareStopTokenFilter(rawStopTokenFilter, grammar: Self.toolGrammar(for: request))
         CBTrace.logPreparation(schedulerRequestID, "rt_cb_prepare_end path=stream tokens=\(prepared.promptTokens.count)")
 
         try drainCancelled.check()
@@ -9429,6 +9431,7 @@ maxTokens: boundedMaxTokens,
                         nativeVisionProfile: snapshot.nativeVisionProfile,
                         toolSelectionModelID: selectionModelID
                     )
+                    let stopTokenFilter = Self.toolAwareStopTokenFilter(stopTokenFilter, grammar: Self.toolGrammar(for: request))
                     let grammarConstraint = try GrammarConstraintState.prepare(
                         request: request, tokenizer: context.tokenizer, configuration: context.configuration,
                         eosTokenIDs: Self.generationStopTokenIDs(for: context))
@@ -10322,6 +10325,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         nativeVisionProfile: snapshot.nativeVisionProfile,
                         toolSelectionModelID: selectionModelID
                     )
+                    let stopTokenFilter = Self.toolAwareStopTokenFilter(stopTokenFilter, grammar: Self.toolGrammar(for: request))
                     let grammarConstraint = try GrammarConstraintState.prepare(
                         request: request, tokenizer: context.tokenizer, configuration: context.configuration,
                         eosTokenIDs: Self.generationStopTokenIDs(for: context))
@@ -13093,6 +13097,15 @@ maxTokens: maxTokens,
         return earliest?.stop
     }
 
+    /// Native call markers are parser framing, even when the tokenizer marks
+    /// them special. Strip the model's other control tokens as usual.
+    static func toolAwareStopTokenFilter(_ filter: StopTokenFilter, grammar: ToolCallGrammar?) -> StopTokenFilter {
+        guard grammar == .lfm2 else { return filter }
+        return StopTokenFilter(tokens: filter.tokens.filter {
+            $0 != "<|tool_call_start|>" && $0 != "<|tool_call_end|>"
+        })
+    }
+
     static func applyOutputFilters(
         _ text: String,
         stopTokenFilter: StopTokenFilter,
@@ -14204,6 +14217,9 @@ maxTokens: maxTokens,
             ? toolSelectionModelID ?? request.model
             : request.model
         let grammar = request.outputTraits.toolGrammar ?? ToolCallGrammar.family(modelID: renderModelID)
+        if grammar == .lfm2, Self.hasEnabledTools(request.promptSource.tools) {
+            try ToolSelectionPolicy.validateLFMNames(ToolSelectionPolicy.schemas(request))
+        }
         let chat = try ToolPromptRenderer.renderMessages(messages, grammar: grammar)
         let tools: [[String: Any]]?
         switch selection {
@@ -14225,14 +14241,14 @@ maxTokens: maxTokens,
         if let effort = request.templateReasoningEffort(for: toolSelectionModelID ?? request.model) {
             additionalContext = (additionalContext ?? [:]).merging(["reasoning_effort": effort]) { _, new in new }
         }
-        // GLM templates render assistant `reasoning_content` back as
+        // GLM and LFM templates render assistant `reasoning_content` back as
         // `<think>…</think>` (interleaved thinking in tool loops). Only a
         // request that carries reasoning takes the raw-message path, so every
-        // other GLM prompt keeps its structured chat input unchanged.
-        let glmHistoryReasoning = grammar == .glm && messages.contains {
+        // other prompt keeps its structured chat input unchanged.
+        let nativeHistoryReasoning = (grammar == .glm || grammar == .lfm2) && messages.contains {
             $0.role == .assistant && $0.reasoningContent?.isEmpty == false
         }
-        if grammar == .dsml || glmHistoryReasoning {
+        if grammar == .dsml || nativeHistoryReasoning {
             // Chat.Message has no reasoning field. Preserve it in the raw
             // messages and let the template or reference encoder decide which
             // turns keep it.
@@ -15251,6 +15267,10 @@ struct NativeToolCallStreamEmitter {
             startDelimiter = "<|tool_call>"
             endDelimiter = "<tool_call|>"
             argumentKey = "arguments"
+        case .lfm2?:
+            startDelimiter = "<|tool_call_start|>"
+            endDelimiter = "<|tool_call_end|>"
+            argumentKey = "arguments"
         case .dsml?:
             startDelimiter = DeepseekV4Encoding.toolCallsStart
             endDelimiter = DeepseekV4Encoding.toolCallsEnd
@@ -15367,7 +15387,12 @@ struct NativeToolCallStreamEmitter {
         sawToolDelimiter = true
         guard !completedValidToolCall else { return }
         var candidate = String(text[start...])
-        if grammar != .llama3 {
+        if grammar == .lfm2 {
+            // The end marker can occur inside a quoted argument. Only the
+            // complete list envelope, including its actual close, may stop.
+            candidate = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard candidate.hasSuffix(endDelimiter) else { return }
+        } else if grammar != .llama3 {
             guard let end = candidate.range(of: endDelimiter) else { return }
             candidate = String(candidate[..<end.upperBound])
         }
