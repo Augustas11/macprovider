@@ -52,17 +52,17 @@
 #   9 live_probe              provider /v1/status: continuous_batching active;
 #                             native_mtp enabled+eligible|active unless explicitly
 #                             selecting a CB-only proof below
-#  10 gateway_proof           one real buyer request through the gateway that moves the
-#                             target provider's active serving-path counter
-#                             (CB shared_forward_calls when CB is active);
-#                             expires after 24 h
-#  10a cached_turns           SPEC-038 AC-26: when the live signed CB policy grants cached
+#   9a cached_turns           SPEC-038 AC-26: when the live signed CB policy grants cached
 #                             turns to the provider's tuple (/v1/status
 #                             continuous_batching.policy.cached_turns_authorized), the
 #                             provider config carries continuous_batching_cached_turns: true
 #                             and the running provider started after that config was
 #                             written; otherwise a manual config edit plus provider restart
-#  11 buyer_serving_e2e      evidence (e) an activation recorded as owed (SPEC-023-R017
+#  10 gateway_proof           one real buyer request through the gateway that moves the
+#                             target provider's active serving-path counter
+#                             (CB shared_forward_calls when CB is active);
+#                             expires after 24 h
+#  11 buyer_serving_e2e       evidence (e) an activation recorded as owed (SPEC-023-R017
 #                             5(e)): no connected provider served the newly buyer-serving
 #                             model, so the provider release that first serves it owes a
 #                             canary restart onto the live release, one buyer request through
@@ -742,6 +742,58 @@ for i in \$(seq 1 24); do curl -sf -m 5 \"\$COORDINATOR_URL/healthz\" && exit 0;
     fi
   fi
 
+  # SPEC-038 AC-26 / FR-CB4 (v0.2.8): once the live signed CB policy grants
+  # cached turns to the provider's tuple (status cached_turns_authorized), the
+  # provider opts in with continuous_batching_cached_turns. Done only when the
+  # flag is in the provider config and the provider listening on the status
+  # port started after that config was written, so the flag is loaded. Runs
+  # before the gateway proof so the proof is served with the flag loaded.
+  local p_cached_authorized="" p_cached_flag=""
+  p_cached_authorized="$(json_field "$OPS_TMP_DIR/pstatus.json" 'd["continuous_batching"]["policy"]["cached_turns_authorized"]')"
+  if [ "$p_status_ok" = true ] && [ "$p_cached_authorized" = true ]; then
+    # off: flag absent or false; set: on in the config but not loaded yet;
+    # loaded: the listening provider started after the config was last written.
+    p_cached_flag="$(studio_ssh 'python3 - '"$STUDIO_STATUS_PORT"' <<"PY"
+import os, re, subprocess, sys, time
+cfg = os.path.expanduser("~/.config/macprovider/config.yaml")
+on = False
+for line in open(cfg):
+    m = re.match(r"continuous_batching_cached_turns\s*:\s*(.*?)\s*(#.*)?$", line.rstrip("\n"))
+    if m:
+        on = m.group(1).strip("\"").lower() in ("true", "yes", "on", "1")
+if not on:
+    sys.exit(print("off"))
+pids = subprocess.run(["lsof", "-nP", "-t", "-iTCP:" + sys.argv[1], "-sTCP:LISTEN"], capture_output=True, text=True).stdout.split()
+start = subprocess.run(["ps", "-o", "lstart=", "-p", pids[0]], capture_output=True, text=True, env=dict(os.environ, LC_ALL="C")).stdout.split() if pids else []
+started = time.mktime(time.strptime(" ".join(start), "%a %b %d %H:%M:%S %Y")) if start else 0
+print("loaded" if started > os.stat(cfg).st_mtime else "set")
+PY' 2>/dev/null || true)"
+  fi
+  fact provider_cached_turns_authorized "$p_cached_authorized"
+  fact provider_cached_turns_flag "$p_cached_flag"
+  if [ "$p_status_ok" != true ]; then
+    # Unreadable status is unknown, never "no grant".
+    step cached_turns unknown "provider status unreadable"
+  elif [ "$p_cached_authorized" != true ]; then
+    step cached_turns "done" "no signed cached-turns grant for the provider's tuple"
+  elif [ "$p_cached_flag" = loaded ]; then
+    step cached_turns "done" "signed grant live and continuous_batching_cached_turns loaded"
+  elif [ "$p_cached_flag" != off ] && [ "$p_cached_flag" != set ]; then
+    step cached_turns blocked "signed grant live; provider config unreadable"
+    set_next cached_turns blocked "Read the provider config" "" \
+      "the provider config could not be read over STUDIO_SSH; it is never assumed to carry the flag"
+  else
+    step cached_turns pending "signed grant live; provider flag $p_cached_flag"
+    set_next cached_turns manual "Turn continuous_batching_cached_turns on for the provider and restart it" \
+"# SPEC-038 FR-CB4 / AC-26: the signed policy now grants cached turns to this tuple.
+# Back up the config, replace any existing key, then restart the provider once.
+ssh \"\$STUDIO_SSH\" 'set -e; c=~/.config/macprovider/config.yaml; cp -p \"\$c\" \"\$c.bak-cached-turns-\$(date -u +%Y%m%dT%H%M%SZ)\"; sed -i \"\" \"/^continuous_batching_cached_turns[[:space:]]*:/d\" \"\$c\"; [ -z \"\$(tail -c1 \"\$c\")\" ] || echo >> \"\$c\"; printf \"continuous_batching_cached_turns: true\\n\" >> \"\$c\"; launchctl kickstart -k gui/\$(id -u)/live.malibu.provider'
+# then /v1/status: catalog.release_id == $R, lifecycle serving_buyers, continuous_batching.active=true,
+# continuous_batching.policy.cached_turns_authorized=true; serve start logs event=batching_cached_turns action=enabled" \
+      "the live signed CB policy records cached_turns_accepted for the provider's tuple"
+    next_meta cached_turns "docs/runbooks/continuous-batching-enable-gate.md" "the provider restart only: requests it would serve go to other providers of its model or wait for its restart and model load"
+  fi
+
   # The proof expires, and legacy generic request-counter markers are not enough
   # once continuous batching is active: a fresh marker must carry the scheduler
   # shared_forward_calls delta from the provider-attributed buyer request.
@@ -764,44 +816,6 @@ for i in \$(seq 1 24); do curl -sf -m 5 \"\$COORDINATOR_URL/healthz\" && exit 0;
         "scripts/ops/catalog-activate.sh _gateway-proof"
     fi
     next_meta gateway_proof "AGENTS.md#hard-rules--activation-evidence-and-campaign-discipline"
-  fi
-
-  # SPEC-038 AC-26 / FR-CB4 (v0.2.8): once the live signed CB policy grants
-  # cached turns to the provider's tuple (status cached_turns_authorized), the
-  # provider opts in with continuous_batching_cached_turns. Done only when the
-  # flag is in the provider config and the running provider started after
-  # that config was written, so the flag is loaded.
-  local p_cached_authorized="" p_cached_flag=""
-  p_cached_authorized="$(json_field "$OPS_TMP_DIR/pstatus.json" 'd["continuous_batching"]["policy"]["cached_turns_authorized"]')"
-  if [ "$p_cached_authorized" = true ]; then
-    # off: flag absent; set: in the config but not loaded yet; loaded: the
-    # listening provider started after the config was last written.
-    p_cached_flag="$(studio_ssh 'python3 - '"$STUDIO_STATUS_PORT"' <<"PY"
-import os, re, subprocess, sys, time
-cfg = os.path.expanduser("~/.config/macprovider/config.yaml")
-if not any(re.fullmatch(r"continuous_batching_cached_turns:\s*true\s*", line.rstrip("\n")) for line in open(cfg)):
-    sys.exit(print("off"))
-pids = subprocess.run(["lsof", "-nP", "-t", "-iTCP:" + sys.argv[1], "-sTCP:LISTEN"], capture_output=True, text=True).stdout.split()
-start = subprocess.run(["ps", "-o", "lstart=", "-p", pids[0]], capture_output=True, text=True).stdout.split() if pids else []
-started = time.mktime(time.strptime(" ".join(start), "%a %b %d %H:%M:%S %Y")) if start else 0
-print("loaded" if started > os.stat(cfg).st_mtime else "set")
-PY' 2>/dev/null || true)"
-  fi
-  fact provider_cached_turns_authorized "$p_cached_authorized"
-  fact provider_cached_turns_flag "$p_cached_flag"
-  if [ "$p_cached_authorized" != true ]; then
-    step cached_turns "done" "no signed cached-turns grant for the provider's tuple (cached_turns_authorized=${p_cached_authorized:-unknown})"
-  elif [ "$p_cached_flag" = loaded ]; then
-    step cached_turns "done" "signed grant live and continuous_batching_cached_turns loaded"
-  else
-    step cached_turns pending "signed grant live; provider flag ${p_cached_flag:-unreadable}"
-    set_next cached_turns manual "Turn continuous_batching_cached_turns on for the provider and restart it" \
-"# SPEC-038 FR-CB4 / AC-26: the signed policy now grants cached turns to this tuple.
-ssh \"\$STUDIO_SSH\" 'grep -q \"^continuous_batching_cached_turns:\" ~/.config/macprovider/config.yaml || printf \"continuous_batching_cached_turns: true\\n\" >> ~/.config/macprovider/config.yaml; launchctl kickstart -k gui/\$(id -u)/live.malibu.provider'
-# then /v1/status: catalog.release_id == $R, lifecycle serving_buyers, continuous_batching.active=true,
-# continuous_batching.policy.cached_turns_authorized=true; serve start logs event=batching_cached_turns action=enabled" \
-      "the live signed CB policy records cached_turns_accepted for the provider's tuple"
-    next_meta cached_turns "docs/runbooks/continuous-batching-enable-gate.md" "the provider restart only: requests it would serve go to other providers of its model or wait for its restart and model load"
   fi
 
   # SPEC-023 §16.11 rule 4 before evidence (e): the DeepSeek-V4-Flash window is
