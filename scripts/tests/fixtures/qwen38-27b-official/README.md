@@ -25,7 +25,7 @@ paid eligibility, promotion or a tier-default winner.
 
 No official Qwen-owned MLX build of this checkpoint was found in the official
 model listing. Use the pinned official BF16 source; do not substitute the
-existing community quantization. `source-manifest.json` records all 31 files,
+existing community quantization. `source-manifest.json` records all 32 files,
 55,586,114,863 total source bytes, 55,563,006,776 shard bytes and
 55,562,855,904 tensor bytes. The source weights alone exceed both tier
 allowances, so source BF16 is not the serving artifact. Four-bit converted
@@ -106,3 +106,36 @@ slice 5 pending until the multi-family campaign PR #2152 merges, then rebase
 and bind the newly converted target and drafter without replacing other
 entries. No new SPEC-048 acceptance gates are introduced. Qualify on the lab
 build; a signed CLI cut only rebinds identity.
+
+## Catalog preparation and intake disposition (slice 7)
+
+Reuse the existing key, `class-32b`, explicit prompt/cache-hit/completion price
+row `192000 / 48000 / 2000000` credits/Mtok, matching `rewards.rate_card` row,
+and demand-rank row (rank30, weight0.4, target5). Those are existing published
+values, not fresh market measurements. Native source restriction remains
+`mlx_cache`. The current recommendable row and its community artifact are
+unchanged; they are not qualification of the new official-derived conversion.
+
+SPEC-023 §16.8 preparation decision: **pending, no add/promote/default change**.
+This is not a release-bound `macprovider.intake-decision` manifest. Do not
+invent source-frame digests, demand/provider/buyer counts, rank, artifact
+identity, memory peak or admission status to populate one. When output identity
+and measurements exist, update the artifact/candidate/CB/MTP bindings together
+in this campaign and use the generator's actual release transition rules. A
+required §16.8 decision must retain authentic source frames and thresholds and
+be bound to the shared release. Preserve pricing/billing parity and incumbent
+fallback. Existing admission is not silently demoted to stage an unknown hash.
+
+The supervisor's default decision is pending the paired quality/throughput
+comparison. Do not add an unconditional Qwen3.8 preference now. After the
+comparison, implement only the measured winner for 32–48 GB after existing
+paid-eligibility checks, using the Bonsai eligibility-first fallback pattern.
+Record both models' quality scores, serial/CB buyer tok/s, TTFT and memory in
+the PR's default-decision table. A model that cannot serve completed buyer
+answers within the existing advisory target (10 output tok/s and 3s 4k TTFT)
+is flagged as unusable for this default decision; do not lower those targets to
+manufacture a winner. These are comparison criteria, not new admission gates.
+If quality is tied/inconclusive, retain the incumbent. If the quality winner
+misses usability, report that tradeoff and retain the incumbent pending the
+operator's decision; no automatic tradeoff or CB/MTP withdrawal.
+
