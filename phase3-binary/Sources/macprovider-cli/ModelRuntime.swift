@@ -7171,13 +7171,14 @@ maxTokens: 1,
         )
     }
 
-    /// Every guaranteed-call profile identity resolves through its catalog
-    /// alias, not only Qwen3.6: the coordinator capability advertises the
-    /// catalog id, so the request check must use the same identity.
+    /// Model-owned prompt profiles resolve through the configured catalog
+    /// identity while its model remains loaded. A buyer-provided alias never
+    /// establishes a profile, and a warm-swapped model keeps its own identity.
     static func toolSelectionModelID(loadedModelID: String?, configuredModelID: String?, catalogModelIDAlias: String?) -> String? {
         guard let loadedModelID, loadedModelID == configuredModelID,
               let alias = catalogModelIDAlias?.trimmingCharacters(in: .whitespacesAndNewlines),
-              ToolSelectionPolicy.guaranteedCallProfile(modelID: alias) != nil
+              (ToolSelectionPolicy.guaranteedCallProfile(modelID: alias) != nil
+                || ChatCompletionRequest.usesQwen38Template(modelID: alias))
         else { return loadedModelID }
         return alias
     }

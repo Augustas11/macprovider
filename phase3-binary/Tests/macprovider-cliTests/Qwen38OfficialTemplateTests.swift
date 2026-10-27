@@ -96,6 +96,35 @@ final class Qwen38OfficialTemplateTests: XCTestCase {
         }
     }
 
+    func testConfiguredCatalogIdentityKeepsQwen38PromptProfileUnderLocalLoad() throws {
+        let configured = "configured-model"
+        let identity = ModelRuntime.toolSelectionModelID(
+            loadedModelID: configured, configuredModelID: configured,
+            catalogModelIDAlias: Self.officialModel)
+        XCTAssertEqual(identity, Self.officialModel)
+        let request = try request(model: Self.officialModel, effort: "high", history: true)
+        request.outputState.resolve(RequestOutputTraits(toolGrammar: .qwen))
+        let prepared = try input(request, loadedModel: identity)
+        XCTAssertEqual(prepared.additionalContext?["reasoning_effort"] as? String, "xhigh")
+        XCTAssertTrue(try render(prepared).contains("PRESERVED_TOOL_REASONING"))
+
+        let swapped = ModelRuntime.toolSelectionModelID(
+            loadedModelID: "qwen/qwen3.6-35b-a3b", configuredModelID: configured,
+            catalogModelIDAlias: Self.officialModel)
+        XCTAssertEqual(swapped, "qwen/qwen3.6-35b-a3b")
+        let other = try input(request, loadedModel: swapped)
+        XCTAssertEqual(other.additionalContext?["reasoning_effort"] as? String, "high")
+        XCTAssertFalse(DefaultMessageGenerator().generate(from: other).contains {
+            ($0["reasoning_content"] as? String) == "PRESERVED_TOOL_REASONING"
+        })
+        XCTAssertEqual(ModelRuntime.toolSelectionModelID(
+            loadedModelID: configured, configuredModelID: configured,
+            catalogModelIDAlias: "buyer-alias"), configured)
+        XCTAssertNil(ModelRuntime.toolSelectionModelID(
+            loadedModelID: nil, configuredModelID: configured,
+            catalogModelIDAlias: Self.officialModel))
+    }
+
     func testToolLoopPreservesOfficialReasoningAndFunctionXML() throws {
         let rendered = try render(input(request(history: true)))
         XCTAssertEqual(rendered.components(separatedBy: "PRESERVED_TOOL_REASONING").count, 2)
