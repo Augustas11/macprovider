@@ -44,7 +44,7 @@ SECURITY_CASES = {
         'testExternalTensorReferenceCannotReplaceRequiredInlineOffsets'],
 }
 INPUT_KEYS = {'schema','entry_index','sidecar','lab_records','environment','qualification_bundle',
-              'w3_policy','w3_runs','w3_analysis','accounting_ordinary','accounting_native','canary_observations',
+              'w3_policy','w3_runs','w3_analysis','accounting_ordinary','accounting_native','canary_observations','diagnostic_observations',
               'captured_at','custody_repo','custody_commit','custody_record'}
 
 
@@ -209,15 +209,16 @@ def prepare(root,config,output):
     steps[second['step_id']]=second;steps[third['step_id']]=third
     ordinary_sample=load(config['accounting_ordinary']);native_sample=load(config['accounting_native'])
     samples=[load(p) for p in config['canary_observations']]
-    for sample in [ordinary_sample,native_sample,*samples]:assert_candidate(sample,entry)
-    for value in (collector.compare_accounting(ordinary_sample,native_sample),collector.compare_canary(samples)):
+    diagnostics=load(config['diagnostic_observations'])
+    for sample in [ordinary_sample,native_sample,*samples,diagnostics]:assert_candidate(sample,entry)
+    for value in (collector.compare_accounting(ordinary_sample,native_sample),collector.compare_canary(samples,diagnostics)):
         require(value.get('status')=='pass' and all(value['checks'].values()),'actual protocol comparison pending/failed')
         steps[value['step_id']]=value
     fourteenth,analysis=benchmark(root,config,entry,core);steps[fourteenth['step_id']]=fourteenth
     numeric=module(root,'native_mtp_r005_redacted')
     expected={key:sha(read(config[key],64*(1<<20))) for key in ('w3_policy','w3_runs','w3_analysis','environment')}
     for index,path in enumerate(config['lab_records']):expected[f'lab_record_{index}']=sha(read(path))
-    for key in ('accounting_ordinary','accounting_native'):expected[key]=sha(read(config[key]))
+    for key in ('accounting_ordinary','accounting_native','diagnostic_observations'):expected[key]=sha(read(config[key]))
     for index,path in enumerate(config['canary_observations']):expected[f'canary_observation_{index}']=sha(read(path))
     for name in ('acceptance.json','acceptance-policy.json','acceptance-corpus.json'):
         expected[name]=sha(read(q/name,64*(1<<20)))

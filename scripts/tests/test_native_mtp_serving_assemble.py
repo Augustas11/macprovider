@@ -15,6 +15,7 @@ sys.path.insert(0,str(REPO/'scripts'));sys.path.insert(0,str(REPO))
 spec=importlib.util.spec_from_file_location('assemble',Path(__file__).resolve().parents[1]/'native_mtp_serving_assemble.py')
 a=importlib.util.module_from_spec(spec);spec.loader.exec_module(a)
 from scripts.tests import test_native_mtp_journey_evidence as fixtures
+from scripts.tests import test_native_mtp_serving_collect as collector_fixtures
 import native_mtp_journey_evidence as contract
 privacy_spec=importlib.util.spec_from_file_location('assembly_privacy',Path(__file__).resolve().parents[1]/'privacy_class_beta_journey_evidence.py')
 privacy=importlib.util.module_from_spec(privacy_spec);sys.modules[privacy_spec.name]=privacy;privacy_spec.loader.exec_module(privacy)
@@ -72,6 +73,75 @@ class AssemblyTests(unittest.TestCase):
         entry=dict(reproducible_build_sha256='a'*64,live_executable_cdhash='b'*40)
         a.assert_candidate({'candidate':{'binary_sha256':'a'*64,'cdhash':'b'*40}},entry)
         with self.assertRaises(ValueError):a.assert_candidate({'candidate':{'binary_sha256':'c'*64,'cdhash':'b'*40}},entry)
+
+    def test_prepare_consumes_actual_diagnostics_and_binds_private_custody(self):
+        self.prepare_protocol_observations()
+
+    def test_prepare_rejects_missing_or_foreign_diagnostics(self):
+        self.prepare_protocol_observations(missing=True)
+        self.prepare_protocol_observations(foreign=True)
+
+    def prepare_protocol_observations(self, *, missing=False, foreign=False):
+        # Other independently tested gates are fixtures; use the real protocol
+        # comparators here to catch omissions at their assembly boundary.
+        with tempfile.TemporaryDirectory() as d:
+            base=Path(d);q=base/'qualification';q.mkdir()
+            env,entry,lab=self.environment()
+            entry.update(model_key='zai-org/glm-5.3-flash',quantization={'kind':'affine'},
+                         source_commit='c'*40,decode_path_digest='b'*64,
+                         request_feature_profile='native_mtp_sampled_text_v1',
+                         reproducible_build_sha256='binary',live_executable_cdhash='cd')
+            observations={'accounting_ordinary':collector_fixtures.sample('ordinary'),
+                          'accounting_native':collector_fixtures.sample('native'),
+                          'diagnostic_observations':collector_fixtures.diagnostics(),
+                          'environment':env,'lab':lab}
+            if foreign:observations['diagnostic_observations']['candidate']['cdhash']='foreign'
+            config={key:str(base/key) for key in ('sidecar','w3_policy','w3_runs','w3_analysis',*observations)}
+            for key,value in observations.items():(base/key).write_bytes(a.canonical(value))
+            for key in ('sidecar','w3_policy','w3_runs','w3_analysis'):(base/key).write_bytes(b'{}')
+            canaries=[]
+            for index,value in enumerate(collector_fixtures.canaries()):
+                path=base/f'canary-{index}';path.write_bytes(a.canonical(value));canaries.append(str(path))
+            for name in ('acceptance.json','acceptance-policy.json','acceptance-corpus.json','replay-policy.json',
+                         'capture.json','tuple-bounds.json','projection-plan.json','privacy-review.json','preregistration.json',
+                         'bench-policy.json','replay.json','analysis.json','source.json'):(q/name).write_bytes(b'{}')
+            config.pop('lab')
+            config.update(schema=a.SCHEMA,entry_index=0,lab_records=[str(base/'lab')],
+                          qualification_bundle=str(base),canary_observations=canaries,
+                          captured_at='2026-10-27T00:00:00Z',custody_repo=str(base),
+                          custody_commit='d'*40,custody_record='custody.json')
+            if missing:config.pop('diagnostic_observations')
+            lab_steps={key:json.loads(fixtures.step_bytes(key,checks,{'raw_result_sha256':'e'*64}))
+                       for key,checks in fixtures.serving_checks().items()
+                       if any(key.startswith(f'step-{i:02d}-') for i in range(4,11))}
+            lab_adapter=mock.Mock(CANON={str(i):key for i,key in enumerate(lab_steps)})
+            lab_adapter.adapt_record.return_value=lab_steps
+            bound_contract=mock.Mock(MAX_BUNDLE_FILES=contract.MAX_BUNDLE_FILES)
+            bound_contract.validated_sidecar_entry.return_value=(entry,'f'*64)
+            equivalence=mock.Mock();equivalence.verify_source_equivalence.return_value=None
+            numeric=mock.Mock()
+            numeric.project_acceptance.return_value={key:'a'*64 for key in ('raw_result_sha256','policy_sha256','corpus_sha256')}
+            modules={'native_mtp_journey_evidence':bound_contract,'native_mtp_binding_bundle':mock.Mock(),
+                     'native_mtp_journey_lab_steps':lab_adapter,'native_mtp_serving_collect':collector_fixtures.m,
+                     'native_mtp_source_equivalence':equivalence,'native_mtp_r005_redacted':numeric,
+                     'privacy_class_beta_journey_evidence':privacy}
+            with mock.patch.object(a,'module',side_effect=lambda root,name:modules[name]), \
+                 mock.patch.object(a,'security_cases',return_value={}), \
+                 mock.patch.object(a,'benchmark',return_value=(a.step('14','studio-and-tier-benchmark',{'actual':True},{}),{})):
+                if missing or foreign:
+                    with self.assertRaisesRegex(ValueError,'inputs fields' if missing else 'binary/CDHash differs'):
+                        a.prepare(REPO,config,base/'out')
+                    numeric.verify_private_custody.assert_not_called()
+                    return
+                receipt=a.prepare(REPO,config,base/'out')
+            expected=numeric.verify_private_custody.call_args.args[3]
+            self.assertEqual(expected['diagnostic_observations'],a.sha((base/'diagnostic_observations').read_bytes()))
+            canary=a.load(base/'out/steps/step-12-native-canary.json')
+            self.assertEqual(canary['status'],'pass')
+            self.assertTrue(canary['checks']['losslessness_claimed_path_diagnostic_inconclusive'])
+            self.assertTrue(canary['checks']['compute_integrity_claimed_path_diagnostic_inconclusive'])
+            self.assertEqual(canary['details']['diagnostic_observation_sha256'],a.sha(a.canonical(observations['diagnostic_observations'])))
+            self.assertIn('steps/step-12-native-canary.json',receipt['files'])
 
     def prepared(self,base):
         prepared=base/'prepared';prepared.mkdir()
