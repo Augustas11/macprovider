@@ -219,7 +219,9 @@ def title(source,digest):
 
 
 def matching_runs(source,digest,root):
-    runs=pages(f'repos/{REPO}/actions/workflows/{WORKFLOW}/runs?event=workflow_dispatch&head_sha={source}','workflow_runs')
+    # Dispatch runs on reviewed main, which may be newer than the candidate.
+    # The immutable title binds candidate source and uploaded archive bytes.
+    runs=pages(f'repos/{REPO}/actions/workflows/{WORKFLOW}/runs?event=workflow_dispatch','workflow_runs')
     hits=[r for r in runs if r.get('display_title')==title(source,digest)]
     require(len(hits)<=1,'multiple dispatch runs match immutable upload identity')
     if not hits:return None
@@ -227,6 +229,7 @@ def matching_runs(source,digest,root):
     control=run.get('head_sha')
     require(isinstance(control,str) and re.fullmatch(r'[0-9a-f]{40}',control),'invalid signed journey control commit')
     require(subprocess.run(['git','merge-base','--is-ancestor',control,'origin/main'],cwd=root,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0,'journey controls are not reviewed merged main')
+    require(subprocess.run(['git','merge-base','--is-ancestor',source,control],cwd=root,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0,'candidate source is not an ancestor of journey controls')
     run_identity(run,control,WORKFLOW_PATH,'workflow_dispatch')
     require(run.get('display_title')==title(source,digest),'dispatch title differs')
     return run

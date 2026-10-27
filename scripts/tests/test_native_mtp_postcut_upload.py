@@ -146,6 +146,26 @@ class PostcutTests(unittest.TestCase):
         with mock.patch.object(tool,'pages',return_value=rows[:1]),mock.patch.object(tool,'gh',return_value=row),mock.patch.object(tool.subprocess,'run',return_value=SimpleNamespace(returncode=0)):
             with self.assertRaisesRegex(ValueError,'provenance'):tool.matching_runs(self.source,'1'*64,self.root)
 
+    def test_run_discovery_uses_fingerprint_when_main_advances(self):
+        fingerprint=tool.title(self.source,'1'*64)
+        row=dict(id=9,display_title=fingerprint,path=tool.WORKFLOW_PATH,head_sha=self.control,
+                 head_branch='main',event='workflow_dispatch',repository={'full_name':tool.REPO})
+        def listing(path,key):
+            self.assertEqual(key,'workflow_runs')
+            self.assertNotIn('head_sha=',path)
+            return [row]
+        with mock.patch.object(tool,'pages',side_effect=listing),mock.patch.object(tool,'gh',return_value=row), \
+             mock.patch.object(tool.subprocess,'run',return_value=SimpleNamespace(returncode=0)) as ancestry:
+            self.assertEqual(tool.matching_runs(self.source,'1'*64,self.root),row)
+        self.assertEqual(ancestry.call_args_list[1].args[0],['git','merge-base','--is-ancestor',self.source,self.control])
+
+    def test_run_discovery_rejects_unrelated_candidate(self):
+        row=dict(id=9,display_title=tool.title(self.source,'1'*64),head_sha=self.control)
+        with mock.patch.object(tool,'pages',return_value=[row]),mock.patch.object(tool,'gh',return_value=row), \
+             mock.patch.object(tool.subprocess,'run',side_effect=[SimpleNamespace(returncode=0),SimpleNamespace(returncode=1)]):
+            with self.assertRaisesRegex(ValueError,'candidate source is not an ancestor'):
+                tool.matching_runs(self.source,'1'*64,self.root)
+
     def test_cli_records_only_successful_authenticated_signed_run(self):
         text=(SCRIPTS/'ops/cli-release.sh').read_text()
         start=text.index('native_mtp_postcut() {');body=text[start:text.index('\n}',start)+2]
