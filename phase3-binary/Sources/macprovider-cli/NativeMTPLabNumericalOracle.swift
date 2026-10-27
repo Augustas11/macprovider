@@ -1,4 +1,3 @@
-#if DEBUG || MACPROVIDER_LAB_HARNESS
 import Foundation
 
 /// One ordinary/native request pair. Full vectors survive only until the
@@ -365,4 +364,3 @@ final class NativeMTPLabNumericalOracle: @unchecked Sendable {
             error: nil)
     }
 }
-#endif

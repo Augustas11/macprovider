@@ -2163,12 +2163,12 @@ actor ModelRuntime: ModelRuntimeServing {
     private let testSpeculativeCompletion: (@Sendable (RuntimeSnapshot, ChatCompletionRequest) async throws -> CompletionResult)?
     private let testSpeculativeStream: (@Sendable (RuntimeSnapshot, ChatCompletionRequest) async throws -> CompletionResult)?
     private let nativeMTPRequestShapeCapture: NativeMTPRequestShapeCapture?
-    #if DEBUG || MACPROVIDER_LAB_HARNESS
     private var labNativeMTPCommitTimingObserver: NativeMTPLabCommittedTokenTimingObserver?
     private var labNativeMTPDecodeOutputCap: NativeMTPLabDecodeOutputCap?
+    #if DEBUG || MACPROVIDER_LAB_HARNESS
     private var labJourneyWithdrawnCapability: NativeMTPCapability?
-    private var labNativeMTPConversationCacheObserver: NativeMTPLabConversationCacheObserver?
     #endif
+    private var labNativeMTPConversationCacheObserver: NativeMTPLabConversationCacheObserver?
 
     var loadedModelID: String? {
         currentModelID
@@ -3563,13 +3563,8 @@ maxTokens: 1,
             fputs("event=native_mtp_request_shape_capture outcome=disabled reason=\(error)\n", stderr)
             self.nativeMTPRequestShapeCapture = nil
         }
-        #if DEBUG || MACPROVIDER_LAB_HARNESS
-        self.testNativeMTPAdmissionObserver = testNativeMTPAdmissionObserver
-        self.testNativeMTPAdmissionRequestObserver = testNativeMTPAdmissionRequestObserver
-        #else
-        self.testNativeMTPAdmissionObserver = nil
-        self.testNativeMTPAdmissionRequestObserver = nil
-        #endif
+        self.testNativeMTPAdmissionObserver = NativeMTPQualificationScope.permitsFixtureHooks ? testNativeMTPAdmissionObserver : nil
+        self.testNativeMTPAdmissionRequestObserver = NativeMTPQualificationScope.permitsFixtureHooks ? testNativeMTPAdmissionRequestObserver : nil
         self.pagedKVRuntimeProber = .live
         self.continuousBatchReplayAuthority = ContinuousBatchRuntimeReplayAuthority()
         self.pagedKVAttachDecision = Self.pagedKVRuntimeCapabilityDecision(
@@ -3986,15 +3981,9 @@ maxTokens: 1,
         self.currentDraftModelID = normalizedDraftModelID
         self.currentDraftTargetModelID = normalizedDraftModelID == nil ? nil : modelID
         self.currentDraftContainer = nil
-        #if DEBUG || MACPROVIDER_LAB_HARNESS
-        self.currentNativeMTPDrafterContainer = nativeMTPDrafterContainer
-        self.currentNativeMTPCapability = nativeMTPDrafterContainer == nil ? nil : nativeMTPCapability
-        #else
-        self.currentNativeMTPDrafterContainer = nil
-        self.currentNativeMTPCapability = nil
-        #endif
-        #if DEBUG || MACPROVIDER_LAB_HARNESS
-        self.currentNativeMTPAdmissionCapability = nativeMTPDrafterContainer == nil
+        self.currentNativeMTPDrafterContainer = NativeMTPQualificationScope.permitsFixtureHooks ? nativeMTPDrafterContainer : nil
+        self.currentNativeMTPCapability = NativeMTPQualificationScope.permitsFixtureHooks && nativeMTPDrafterContainer != nil ? nativeMTPCapability : nil
+        self.currentNativeMTPAdmissionCapability = !NativeMTPQualificationScope.permitsFixtureHooks || nativeMTPDrafterContainer == nil
             ? nil
             : labNativeMTPAdmissionCapability
         self.nativeMTPStatusResetGeneration = self.currentNativeMTPAdmissionCapability == nil ? 0 : 1
@@ -4004,9 +3993,6 @@ maxTokens: 1,
             mode: nativeMTPMode,
             resetGeneration: self.nativeMTPStatusResetGeneration
         )
-        #else
-        self.currentNativeMTPAdmissionCapability = nil
-        #endif
         self.currentContinuousBatchTextPreparationLane = testContinuousBatchTextPreparationLane
         self.currentNativeMTPTupleOffer = nil
         self.currentNativeMTPSelfTestInput = nil
@@ -4068,15 +4054,9 @@ maxTokens: 1,
         // prebuilt paged-KV attach evidence. A release provider ignores caller-supplied
         // identity/proof/backend flags and can only attach from real on-device measurement,
         // so this test initializer can never become a self-authored-evidence bypass.
-        #if DEBUG || MACPROVIDER_LAB_HARNESS
-        let effectiveObservedIdentity = pagedKVObservedRuntimeIdentity
-        let effectiveSizingProof = pagedKVHardwareSizingProof
-        let effectiveBackendInstalled = pagedKVSchedulerBackendInstalled
-        #else
-        let effectiveObservedIdentity: PagedKVObservedRuntimeIdentity? = nil
-        let effectiveSizingProof: PagedKVHardwareSizingProof? = nil
-        let effectiveBackendInstalled = false
-        #endif
+        let effectiveObservedIdentity = NativeMTPQualificationScope.permitsFixtureHooks ? pagedKVObservedRuntimeIdentity : nil
+        let effectiveSizingProof = NativeMTPQualificationScope.permitsFixtureHooks ? pagedKVHardwareSizingProof : nil
+        let effectiveBackendInstalled = NativeMTPQualificationScope.permitsFixtureHooks && pagedKVSchedulerBackendInstalled
         self.pagedKVObservedRuntimeIdentity = effectiveObservedIdentity
         self.pagedKVHardwareSizingProof = effectiveSizingProof
         self.pagedKVSchedulerBackendInstalled = effectiveBackendInstalled
@@ -4085,13 +4065,8 @@ maxTokens: 1,
         self.nativeMTPCapability = nativeMTPCapability
         self.nativeMTPSchedulerSupported = nativeMTPSchedulerSupported
         self.nativeMTPRequestShapeCapture = nil
-        #if DEBUG || MACPROVIDER_LAB_HARNESS
-        self.testNativeMTPAdmissionObserver = testNativeMTPAdmissionObserver
-        self.testNativeMTPAdmissionRequestObserver = testNativeMTPAdmissionRequestObserver
-        #else
-        self.testNativeMTPAdmissionObserver = nil
-        self.testNativeMTPAdmissionRequestObserver = nil
-        #endif
+        self.testNativeMTPAdmissionObserver = NativeMTPQualificationScope.permitsFixtureHooks ? testNativeMTPAdmissionObserver : nil
+        self.testNativeMTPAdmissionRequestObserver = NativeMTPQualificationScope.permitsFixtureHooks ? testNativeMTPAdmissionRequestObserver : nil
         // Defense-in-depth: only DEBUG/test builds may inject a non-`.live` prober. A
         // release provider always re-derives evidence via the real on-device `.live`
         // probes, so an injected prober can never revive the "self-authored" attach path.
@@ -8365,7 +8340,6 @@ maxTokens: 1,
                     ? prepared.promptResumeBoundaries : nil
             )
             : nil
-        #if DEBUG || MACPROVIDER_LAB_HARNESS
         recordLabNativeMTPConversationCacheBegin(
             request: request,
             surface: "attached_complete",
@@ -8373,7 +8347,6 @@ maxTokens: 1,
             lease: lease,
             modelHasRecurrentLayers: prepared.modelHasRecurrentLayers
         )
-        #endif
         CBTrace.log(schedulerRequestID, "rt_cb_lease cached=\(lease?.cachedPromptTokens ?? -1)")
         if conversationCacheAllowed,
            try await serialRouteCanaryCachedHitMissingRetainedHandoff(
@@ -8879,7 +8852,6 @@ maxTokens: 1,
                     ? prepared.promptResumeBoundaries : nil
             )
             : nil
-        #if DEBUG || MACPROVIDER_LAB_HARNESS
         recordLabNativeMTPConversationCacheBegin(
             request: request,
             surface: "attached_stream",
@@ -8887,7 +8859,6 @@ maxTokens: 1,
             lease: lease,
             modelHasRecurrentLayers: prepared.modelHasRecurrentLayers
         )
-        #endif
         if conversationCacheAllowed,
            try await serialRouteCanaryCachedHitMissingRetainedHandoff(
             lease,
@@ -9411,16 +9382,12 @@ maxTokens: boundedMaxTokens,
         guard let container = snapshot.container else {
             throw APIError(status: 503, message: "Model not loaded", type: "server_error", code: "model_not_loaded")
         }
-        #if DEBUG || MACPROVIDER_LAB_HARNESS
         let labSerialHooks = try Self.labSerialDecodeHooks(
             requestID: request.requestID,
             outputCap: labNativeMTPDecodeOutputCap,
             timingObserver: labNativeMTPCommitTimingObserver
         )
         let labConversationCacheObserver = labNativeMTPConversationCacheObserver
-        #else
-        let labSerialHooks: LabSerialDecodeHooks? = nil
-        #endif
         if labSerialHooks != nil, HarmonyResponseParser.isHarmonyModelID(request.model) {
             throw Self.labSerialDecodeHookUnsupported("harmony_visible_prefix_accounting")
         }
@@ -9565,7 +9532,6 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             fleetGrant: request.fleetCacheGrant
                         )
                         : nil
-                    #if DEBUG || MACPROVIDER_LAB_HARNESS
                     if let labConversationCacheObserver {
                         labConversationCacheObserver.record(NativeMTPLabConversationCacheObserver.event(
                             requestID: request.requestID,
@@ -9577,7 +9543,6 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             modelHasRecurrentLayers: try ConversationCacheLayers.hasRecurrentLayers(context.model.newCache(parameters: nil))
                         ))
                     }
-                    #endif
                         do {
                             let generationContext = Self.harmonyTerminalPreservingContext(from: context, modelID: request.model)
                             let kvCache: [KVCache]
@@ -9655,13 +9620,9 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                 schemas: Self.autoToolParameterSchemas(from: request.promptSource.tools)
                             )
                             let serialToolStopApplies = Self.serialToolStopApplies(request)
-                            #if DEBUG || MACPROVIDER_LAB_HARNESS
                             let labCommitTracker = labSerialHooks.map {
                                 LabSerialCommitTracker(requestID: $0.requestID, observer: $0.timingObserver)
                             }
-                            #else
-                            let labCommitTracker: LabSerialCommitTracker? = nil
-                            #endif
                             var labSerialHookError: APIError?
                             var requestStopObservationError: APIError?
                             var stoppedByRequestStop = false
@@ -10287,16 +10248,12 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
         guard let container = snapshot.container else {
             throw APIError(status: 503, message: "Model not loaded", type: "server_error", code: "model_not_loaded")
         }
-        #if DEBUG || MACPROVIDER_LAB_HARNESS
         let labSerialHooks = try Self.labSerialDecodeHooks(
             requestID: request.requestID,
             outputCap: labNativeMTPDecodeOutputCap,
             timingObserver: labNativeMTPCommitTimingObserver
         )
         let labConversationCacheObserver = labNativeMTPConversationCacheObserver
-        #else
-        let labSerialHooks: LabSerialDecodeHooks? = nil
-        #endif
         if labSerialHooks != nil, HarmonyResponseParser.isHarmonyModelID(request.model) {
             throw Self.labSerialDecodeHookUnsupported("harmony_visible_prefix_accounting")
         }
@@ -10528,7 +10485,6 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             fleetGrant: request.fleetCacheGrant
                         )
                         : nil
-                    #if DEBUG || MACPROVIDER_LAB_HARNESS
                     if let labConversationCacheObserver {
                         labConversationCacheObserver.record(NativeMTPLabConversationCacheObserver.event(
                             requestID: request.requestID,
@@ -10540,7 +10496,6 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             modelHasRecurrentLayers: try ConversationCacheLayers.hasRecurrentLayers(generationContext.model.newCache(parameters: nil))
                         ))
                     }
-                    #endif
                     // A cancel or failure during prefill (snapshot, checkpoint,
                     // iterator construction) aborts the lease below; nothing is
                     // committed for a request that did not finish.
@@ -10605,13 +10560,9 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         var harmonyObservedFinalTokenCount = 0
                         var harmonyObservedTokenCount = 0
                         var labSerialHookError: APIError?
-                        #if DEBUG || MACPROVIDER_LAB_HARNESS
                         let labCommitTracker = labSerialHooks.map {
                             LabSerialCommitTracker(requestID: $0.requestID, observer: $0.timingObserver)
                         }
-                        #else
-                        let labCommitTracker: LabSerialCommitTracker? = nil
-                        #endif
 
                         // SPEC-037 FR-KVP2.5: speculative-decode routing is determined
                         // BEFORE conversationCache.begin() (block above, ahead of the
@@ -12180,7 +12131,6 @@ maxTokens: maxTokens,
         return "event=native_mtp_serve_path_admission status=rejected reason_code=\(reasonCode) artifact_role=\(artifactRole)\n"
     }
 
-    #if DEBUG || MACPROVIDER_LAB_HARNESS
     struct NativeMTPHardwareE2EServePathLoad: @unchecked Sendable {
         let targetContainer: ModelContainer
         let drafterContainer: MTPDrafterContainer
@@ -12227,7 +12177,6 @@ maxTokens: maxTokens,
             drafterContainer: load.drafterContainer
         )
     }
-    #endif
 
     private struct NativeMTPRevocationAdmissionState {
         let revokedTupleSHA256: Set<String>
@@ -13169,31 +13118,20 @@ maxTokens: maxTokens,
     struct LabSerialDecodeHooks: Sendable {
         let requestID: String
         let outputCap: Int?
-        #if DEBUG || MACPROVIDER_LAB_HARNESS
         let timingObserver: NativeMTPLabCommittedTokenTimingObserver?
-        #endif
     }
 
     final class LabSerialCommitTracker: @unchecked Sendable {
         private let requestID: String
-        #if DEBUG || MACPROVIDER_LAB_HARNESS
         private let observer: NativeMTPLabCommittedTokenTimingObserver?
-        #endif
         private var committedOutputCount = 0
 
-        #if DEBUG || MACPROVIDER_LAB_HARNESS
         init(requestID: String, observer: NativeMTPLabCommittedTokenTimingObserver?) {
             self.requestID = requestID
             self.observer = observer
         }
-        #else
-        init(requestID: String) {
-            self.requestID = requestID
-        }
-        #endif
 
         func record(outputCount: Int) {
-            #if DEBUG || MACPROVIDER_LAB_HARNESS
             guard let observer else {
                 committedOutputCount = max(committedOutputCount, outputCount)
                 return
@@ -13204,14 +13142,9 @@ maxTokens: maxTokens,
                 observer.record(requestID: requestID, ordinal: ordinal, outputCount: ordinal + 1)
             }
             committedOutputCount = boundedOutputCount
-            #else
-            committedOutputCount = max(committedOutputCount, outputCount)
-            _ = requestID
-            #endif
         }
     }
 
-    #if DEBUG || MACPROVIDER_LAB_HARNESS
     private func recordLabNativeMTPConversationCacheBegin(
         request: ChatCompletionRequest,
         surface: String,
@@ -13230,9 +13163,7 @@ maxTokens: maxTokens,
             modelHasRecurrentLayers: modelHasRecurrentLayers
         ))
     }
-    #endif
 
-    #if DEBUG || MACPROVIDER_LAB_HARNESS
     static func labSerialDecodeHooks(
         requestID: String?,
         outputCap: NativeMTPLabDecodeOutputCap?,
@@ -13248,7 +13179,6 @@ maxTokens: maxTokens,
             timingObserver: timingObserver
         )
     }
-    #endif
 
     static func labSerialVisibleCommitCount(
         modelID: String,
@@ -16036,7 +15966,6 @@ final class StreamedFlag: @unchecked Sendable {
     }
 }
 
-#if DEBUG || MACPROVIDER_LAB_HARNESS
 extension ModelRuntime {
     /// Lab harness entry point: runs the same live parity + batched-isolation/MoE
     /// probes and measurement that the production load path runs, so lab runtimes
@@ -16063,6 +15992,49 @@ extension ModelRuntime {
             parityProbe: parityProbe,
             moeProbe: moeProbe
         )
+    }
+}
+
+#if !DEBUG && !MACPROVIDER_LAB_HARNESS
+extension ModelRuntime {
+    func installLabNativeMTPDecodeOutputCap(_ cap: NativeMTPLabDecodeOutputCap?) async -> Bool {
+        guard NativeMTPQualificationScope.permitsFixtureHooks else { return false }
+        labNativeMTPDecodeOutputCap = cap
+        if let continuousBatchScheduler {
+            await continuousBatchScheduler.installLabNativeMTPDecodeOutputCap(cap)
+        }
+        return true
+    }
+
+    func installLabNativeMTPLoadGateRecorder(_ recorder: NativeMTPLoadGateRecorder?) async -> Bool {
+        guard NativeMTPQualificationScope.permitsFixtureHooks else { return false }
+        guard let continuousBatchScheduler else { return false }
+        await continuousBatchScheduler.installLabNativeMTPLoadGateRecorder(recorder)
+        return true
+    }
+
+    func installLabNativeMTPNumericalOracle(
+        _ oracle: NativeMTPLabNumericalOracle?, role: NativeMTPLabNumericalOracle.Role
+    ) async -> Bool {
+        guard NativeMTPQualificationScope.permitsFixtureHooks else { return false }
+        guard let continuousBatchScheduler else { return false }
+        let binding = oracle.map { NativeMTPLabNumericalOracle.Binding(oracle: $0, role: role) }
+        return await continuousBatchScheduler.installLabNativeMTPNumericalOracle(binding)
+    }
+
+    func installLabNativeMTPCommitTimingObserver(_ observer: NativeMTPLabCommittedTokenTimingObserver?) async -> Bool {
+        guard NativeMTPQualificationScope.permitsFixtureHooks else { return false }
+        labNativeMTPCommitTimingObserver = observer
+        if let continuousBatchScheduler {
+            await continuousBatchScheduler.installLabNativeMTPCommitTimingObserver(observer)
+        }
+        return true
+    }
+
+    func installLabNativeMTPConversationCacheObserver(_ observer: NativeMTPLabConversationCacheObserver?) async -> Bool {
+        guard NativeMTPQualificationScope.permitsFixtureHooks else { return false }
+        labNativeMTPConversationCacheObserver = observer
+        return true
     }
 }
 #endif

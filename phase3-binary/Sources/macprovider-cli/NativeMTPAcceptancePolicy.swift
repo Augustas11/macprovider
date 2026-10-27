@@ -1,4 +1,3 @@
-#if DEBUG || MACPROVIDER_LAB_HARNESS
 import CoreFoundation
 import CryptoKit
 import Foundation
@@ -129,4 +128,3 @@ struct NativeMTPAcceptancePolicy: Sendable {
 
     private static func invalid(_ reason: String) -> ValidationError { .invalid(reason) }
 }
-#endif

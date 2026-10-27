@@ -1,4 +1,3 @@
-#if DEBUG || MACPROVIDER_LAB_HARNESS
 import CryptoKit
 import Foundation
 import MacProviderCore
@@ -74,4 +73,3 @@ enum NativeMTPJourneySignedInputs {
             signatureData: signature, trustedKeyring: keyring, resolvedArtifactAuthority: authority)
     }
 }
-#endif

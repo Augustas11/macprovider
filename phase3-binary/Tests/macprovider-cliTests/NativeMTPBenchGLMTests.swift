@@ -179,14 +179,14 @@ final class NativeMTPBenchGLMTests: XCTestCase {
     func testToolCallParityIgnoresGeneratedIDsButPreservesModelOutput() {
         let ordinary = ToolCall(id: "call_ordinary", functionName: "read_file", arguments: "{\"path\":\"main.swift\"}")
         let native = ToolCall(id: "call_native", functionName: ordinary.functionName, arguments: ordinary.arguments)
-        XCTAssertTrue(NativeMTPBenchCommand.toolCallsHaveParity([ordinary], [native]))
-        XCTAssertTrue(NativeMTPBenchCommand.toolCallsHaveParity(nil, []))
-        XCTAssertFalse(NativeMTPBenchCommand.toolCallsHaveParity([ordinary], []))
+        XCTAssertTrue(NativeMTPBenchRunner.toolCallsHaveParity([ordinary], [native]))
+        XCTAssertTrue(NativeMTPBenchRunner.toolCallsHaveParity(nil, []))
+        XCTAssertFalse(NativeMTPBenchRunner.toolCallsHaveParity([ordinary], []))
         let otherName = ToolCall(id: native.id, functionName: "write_file", arguments: native.arguments)
         let otherArguments = ToolCall(id: native.id, functionName: native.functionName, arguments: "{\"path\":\"other.swift\"}")
-        XCTAssertFalse(NativeMTPBenchCommand.toolCallsHaveParity([ordinary], [otherName]))
-        XCTAssertFalse(NativeMTPBenchCommand.toolCallsHaveParity([ordinary], [otherArguments]))
-        XCTAssertFalse(NativeMTPBenchCommand.toolCallsHaveParity([ordinary, otherName], [otherName, native]))
+        XCTAssertFalse(NativeMTPBenchRunner.toolCallsHaveParity([ordinary], [otherName]))
+        XCTAssertFalse(NativeMTPBenchRunner.toolCallsHaveParity([ordinary], [otherArguments]))
+        XCTAssertFalse(NativeMTPBenchRunner.toolCallsHaveParity([ordinary, otherName], [otherName, native]))
     }
 
     func testPolicyListParsesSeveralFrozenPolicies() throws {

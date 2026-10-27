@@ -6,7 +6,6 @@ import Foundation
 import MacProviderCore
 import MLXLMCommon
 
-#if DEBUG || MACPROVIDER_LAB_HARNESS
 struct NativeMTPRequestShapeReplayCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "native-mtp-request-shape-replay",
@@ -3283,4 +3282,3 @@ private extension Array where Element == [String: Any] {
         return true
     }
 }
-#endif

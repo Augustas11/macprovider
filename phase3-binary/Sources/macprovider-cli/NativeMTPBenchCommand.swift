@@ -8,7 +8,6 @@ import MLXLMCommon
 
 // Lab-only: compiled out of plain release builds, command type and
 // registration included, so a production binary carries no lab surface.
-#if DEBUG || MACPROVIDER_LAB_HARNESS
 struct NativeMTPBenchCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "native-mtp-bench",
@@ -73,10 +72,10 @@ struct NativeMTPBenchCommand: AsyncParsableCommand {
         // Before any MLX device use: the family's command-buffer budget and
         // cache limit, as serve and the journey harness set them. The
         // policy-only check never touches MLX, so it skips this.
+        try NativeMTPHardwareE2ERunner.requireStudioHost()
         if !validatePolicyOnly {
             NativeMTPHardwareE2ERunner.applyServeProcessSetup(rootPath: root)
         }
-        try NativeMTPHardwareE2ERunner.requireStudioHost()
         guard providerCommit.range(of: #"^[0-9a-f]{40}$"#, options: .regularExpression) != nil else {
             throw ValidationError("--provider-commit must be lowercase 40-hex")
         }
@@ -240,7 +239,7 @@ final class NativeMTPBenchIdentityCache {
     }
 }
 
-private final class NativeMTPBenchRunner {
+final class NativeMTPBenchRunner {
     private let root: URL
     private let modelID: String
     private let policyURL: URL
@@ -1813,6 +1812,8 @@ struct NativeMTPExistingEvidence {
               (record["max_tokens"] as? NSNumber)?.intValue == cell.maxTokens else {
             throw reject("shape does not match cell \(cellID)")
         }
+        if let identity = NativeMTPQualificationScope.identity,
+           record["measurement_identity"] as? [String: String] != identity.document { throw reject("measurement executable differs") }
         let inRange: Bool
         if sustained {
             inRange = !warmup && cellID == policy.sustainedCellID && block >= 0
@@ -1881,6 +1882,10 @@ struct NativeMTPExistingEvidence {
         var pathsByMatrixBlock: [String: [Int: Set<String>]] = [:]
         var pathsByWarmup: [String: [Int: Set<String>]] = [:]
         var pathsBySustainedBlock: [String: [Int: Set<String>]] = [:]
+        if let identity = NativeMTPQualificationScope.identity,
+           header["measurement_identity"] as? [String: String] != identity.document {
+            throw NativeMTPBenchError.assertionFailed("existing --out measurement executable differs")
+        }
         var sustainedSeconds: [String: Double] = [:]
         var nextSustainedBlock: [String: Int] = [:]
         var seen: Set<String> = []
@@ -1999,7 +2004,7 @@ private final class NativeMTPJSONLWriter {
     }
 
     func write(_ object: [String: Any]) throws {
-        let normalized = object.mapValues { value -> Any in
+        let normalized = NativeMTPQualificationScope.bind(object).mapValues { value -> Any in
             if let optional = value as? OptionalProtocol, optional.isNil { return NSNull() }
             return value
         }
@@ -2226,4 +2231,3 @@ enum NativeMTPBenchError: Error, CustomStringConvertible {
         }
     }
 }
-#endif

@@ -1,4 +1,3 @@
-#if DEBUG || MACPROVIDER_LAB_HARNESS
 import Foundation
 import MacProviderCore
 import MLXLMCommon
@@ -119,4 +118,3 @@ enum NativeMTPAcceptanceCorpusBuilder {
         return object
     }
 }
-#endif

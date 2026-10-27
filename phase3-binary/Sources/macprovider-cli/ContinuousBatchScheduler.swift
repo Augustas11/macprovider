@@ -2392,6 +2392,12 @@ actor ContinuousBatchScheduler {
     /// every named row is queued, then consumes them in that order.
     private var labBatchComposition: [String]?
     #endif
+    #if !DEBUG && !MACPROVIDER_LAB_HARNESS
+    private var labNativeMTPLoadGateRecorder: NativeMTPLoadGateRecorder?
+    private var labNativeMTPCommitTimingObserver: NativeMTPLabCommittedTokenTimingObserver?
+    private var labNativeMTPNumericalOracle: NativeMTPLabNumericalOracle.Binding?
+    private var labNativeMTPDecodeOutputCap: NativeMTPLabDecodeOutputCap?
+    #endif
     private var nativeMTPLoadGateCalmRounds = 0
     static let nativeMTPLoadGateReleaseRounds = 8
     private var pendingTerminalDeliveries: [String: PendingTerminalDelivery] = [:]
@@ -3474,11 +3480,9 @@ actor ContinuousBatchScheduler {
 
     private func remainingDecodeOutputTokens(for row: Row) -> Int {
         var remaining = row.request.maxOutputTokens - row.generatedTokens.count
-        #if DEBUG || MACPROVIDER_LAB_HARNESS
         if let cap = labNativeMTPDecodeOutputCap?.cap(requestID: row.request.id) {
             remaining = min(remaining, cap - row.generatedTokens.count)
         }
-        #endif
         return max(0, remaining)
     }
 
@@ -4686,9 +4690,7 @@ actor ContinuousBatchScheduler {
                 active.nativeMTPFixtureProposalsConsumed = true
                 activeDecode[item.row.request.id] = active
             }
-            #if DEBUG || MACPROVIDER_LAB_HARNESS
             labNativeMTPLoadGateRecorder?.recordNativeRound(requestID: item.row.request.id)
-            #endif
             for candidate in candidatesByID[item.row.request.id] ?? [] {
                 guard activeDecode[item.row.request.id] != nil else { break }
                 await applyToken(candidate.tokenID, to: item.row)
@@ -4897,11 +4899,9 @@ actor ContinuousBatchScheduler {
             activeDecode[row.request.id]?.nativeMTPFusedOrdinaryDecode = fusedIDs.contains(row.request.id)
         }
         let nativeRows = allNativeRows.filter { !fusedIDs.contains($0.request.id) }.compactMap { activeDecode[$0.request.id] }
-        #if DEBUG || MACPROVIDER_LAB_HARNESS
         if !fusedIDs.isEmpty {
             labNativeMTPLoadGateRecorder?.recordHeldRound(requestIDs: fusedIDs)
         }
-        #endif
         guard !nativeRows.isEmpty else {
             await runOrdinaryDecodeStep(rows: rows.compactMap { activeDecode[$0.request.id] })
             return
@@ -5304,7 +5304,6 @@ actor ContinuousBatchScheduler {
     /// it must; the caller performs that release/finish.
     private func advanceDecodeRow(_ token: Int, requestID: String) -> DecodeRowCompletion? {
         guard var row = activeDecode[requestID] else { return nil }
-        #if DEBUG || MACPROVIDER_LAB_HARNESS
         if let binding = labNativeMTPNumericalOracle,
            row.request.serialToolStopObserver?.stopTokenCount == nil {
             guard binding.oracle.select(
@@ -5312,7 +5311,6 @@ actor ContinuousBatchScheduler {
                 position: row.generatedTokens.count, tokenID: token)
             else { return .failed(errorCode: "native_mtp_lab_numerical_oracle_failed") }
         }
-        #endif
         if row.nativeMTPFusedOrdinaryDecode, row.nativeMTPAdaptation != nil {
             row.nativeMTPAdaptation?.recordRound(NativeMTPRoundWork(
                 acceptedProposalPrefixCount: 0, proposalCount: 0, committedTokenCount: 1))
@@ -5366,7 +5364,6 @@ actor ContinuousBatchScheduler {
 
         let firstVisibleIndex = row.outputTokens.count
         row.outputTokens.append(contentsOf: visibleTokens)
-        #if DEBUG || MACPROVIDER_LAB_HARNESS
         if !visibleTokens.isEmpty {
             for offset in visibleTokens.indices {
                 labNativeMTPCommitTimingObserver?.record(
@@ -5377,14 +5374,12 @@ actor ContinuousBatchScheduler {
                 )
             }
         }
-        #endif
         if row.request.serialToolStopObserver?.observe(visibleTokens) == true {
             // Match the existing asynchronous stopEarly boundary: the token
             // that completed the call is visible, and the next applied token
             // closes the row. Finalization truncates to the recorded boundary.
             earlyStopIDs.insert(row.request.id)
         }
-        #if DEBUG || MACPROVIDER_LAB_HARNESS
         if let binding = labNativeMTPNumericalOracle {
             for (offset, token) in visibleTokens.enumerated() {
                 if let stop = row.request.serialToolStopObserver?.stopTokenCount,
@@ -5395,7 +5390,6 @@ actor ContinuousBatchScheduler {
                 else { return .failed(errorCode: "native_mtp_lab_numerical_oracle_failed") }
             }
         }
-        #endif
         activeDecode[row.request.id] = row
         CBTrace.log(row.request.id, "sch_active")
         if !deliverVisibleTokens(
@@ -6224,8 +6218,8 @@ actor ContinuousBatchScheduler {
 
     private func complete(requestID: String, result: ContinuousBatchSchedulerResult) {
         rowProgressEvents &+= 1
-        #if DEBUG || MACPROVIDER_LAB_HARNESS
         labNativeMTPLoadGateRecorder?.recordTerminal(requestID: requestID, status: result.terminalStatus)
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
         labJourneyResourceObserver?.record(.init(requestID: requestID, status: result.terminalStatus.rawValue,
             errorCode: result.errorCode, emittedTokens: result.emittedTokens,
             hasRetainedCache: result.retainedCache != nil, hasSerialCache: result.serialConversationCache != nil))
@@ -6233,7 +6227,6 @@ actor ContinuousBatchScheduler {
         CBTrace.log(requestID, "sch_complete status=\(result.terminalStatus) waiters=\(requestWaiters[requestID]?.count ?? 0) stopping=\(stoppingActiveWaiters.values.contains(where: { $0.requestID == requestID }))")
         endQueueWait(requestID: requestID)
         guard terminalResults[requestID] == nil, pendingTerminalDeliveries[requestID] == nil else { return }
-        #if DEBUG || MACPROVIDER_LAB_HARNESS
         if let binding = labNativeMTPNumericalOracle {
             binding.oracle.finishRequest(
                 role: binding.role, requestID: requestID,
@@ -6245,7 +6238,6 @@ actor ContinuousBatchScheduler {
                 selectedTokenIDs: Array(result.generatedTokens.prefix(
                     result.serialToolStopTokenCount ?? result.generatedTokens.count)))
         }
-        #endif
         requestAdmissionSequences.removeValue(forKey: requestID)
         let waiters = requestWaiters.removeValue(forKey: requestID) ?? []
         if stoppingActiveWaiters.values.contains(where: { $0.requestID == requestID }) {
@@ -6786,7 +6778,6 @@ actor ContinuousBatchScheduler {
     }
 }
 
-#if DEBUG || MACPROVIDER_LAB_HARNESS
 /// Lab-only SPEC-048-R015 gated-cell evidence, taken from the scheduler's own
 /// R007 in-flight gate decisions: rounds in which an admitted native row was
 /// held at depth zero (riding the ordinary forward), and how each hold ended —
@@ -6925,4 +6916,96 @@ final class NativeMTPLoadGateRecorder: @unchecked Sendable {
         return summary
     }
 }
+
+#if !DEBUG && !MACPROVIDER_LAB_HARNESS
+extension ContinuousBatchScheduler {
+    func installLabNativeMTPLoadGateRecorder(_ recorder: NativeMTPLoadGateRecorder?) {
+        guard NativeMTPQualificationScope.permitsFixtureHooks else { return }
+        labNativeMTPLoadGateRecorder = recorder
+    }
+
+    func installLabNativeMTPNumericalOracle(_ binding: NativeMTPLabNumericalOracle.Binding?) -> Bool {
+        guard NativeMTPQualificationScope.permitsFixtureHooks else { return false }
+        guard let pagedBackend = backend as? PagedKVSharedForwardBackend else { return false }
+        pagedBackend.installLabNativeMTPNumericalOracle(binding)
+        labNativeMTPNumericalOracle = binding
+        return true
+    }
+
+    func installLabNativeMTPCommitTimingObserver(_ observer: NativeMTPLabCommittedTokenTimingObserver?) {
+        guard NativeMTPQualificationScope.permitsFixtureHooks else { return }
+        labNativeMTPCommitTimingObserver = observer
+    }
+
+    func installLabNativeMTPDecodeOutputCap(_ cap: NativeMTPLabDecodeOutputCap?) {
+        guard NativeMTPQualificationScope.permitsFixtureHooks else { return }
+        labNativeMTPDecodeOutputCap = cap
+    }
+}
+#endif
+
+#if !DEBUG && !MACPROVIDER_LAB_HARNESS
+final class NativeMTPLabCommittedTokenTimingObserver: @unchecked Sendable {
+    struct Event: Equatable, Sendable {
+        let requestID: String
+        let monotonicNanoseconds: UInt64
+        /// Zero-based ordinal in the buyer-visible output token stream.
+        let ordinal: Int
+        /// Buyer-visible output token count after this commit is applied.
+        let outputCount: Int
+        var tokenID: Int? = nil
+    }
+
+    private let lock = NSLock()
+    private var events: [Event] = []
+    private let captureTokenIDs: Bool
+
+    init(captureTokenIDs: Bool = false) {
+        self.captureTokenIDs = captureTokenIDs
+    }
+
+    func record(requestID: String, ordinal: Int, outputCount: Int, tokenID: Int? = nil) {
+        lock.lock()
+        events.append(Event(
+            requestID: requestID,
+            monotonicNanoseconds: DispatchTime.now().uptimeNanoseconds,
+            ordinal: ordinal,
+            outputCount: outputCount,
+            tokenID: captureTokenIDs ? tokenID : nil
+        ))
+        lock.unlock()
+    }
+
+    func snapshot() -> [Event] {
+        lock.lock()
+        defer { lock.unlock() }
+        return events
+    }
+}
+
+final class NativeMTPLabDecodeOutputCap: @unchecked Sendable {
+    private let lock = NSLock()
+    private var capsByRequestID: [String: Int]
+
+    init(capsByRequestID: [String: Int]) {
+        self.capsByRequestID = capsByRequestID.mapValues { max(0, $0) }
+    }
+
+    func cap(requestID: String) -> Int? {
+        lock.lock()
+        defer { lock.unlock() }
+        return capsByRequestID[requestID]
+    }
+
+    func setCap(_ cap: Int?, requestID: String) {
+        lock.lock()
+        if let cap {
+            capsByRequestID[requestID] = max(0, cap)
+        } else {
+            capsByRequestID.removeValue(forKey: requestID)
+        }
+        lock.unlock()
+    }
+}
+
 #endif

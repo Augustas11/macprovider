@@ -902,8 +902,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     /// groups take the serial path.
     private var raggedPrefillAttentionBypassed = false
     private var cancellationWaiters: [CheckedContinuation<Void, Never>] = []
-    #if DEBUG || MACPROVIDER_LAB_HARNESS
     private var labNativeMTPNumericalOracle: NativeMTPLabNumericalOracle.Binding?
+    #if DEBUG || MACPROVIDER_LAB_HARNESS
     private var labNativeMTPStateDigestObserver: NativeMTPStateDigestObserver?
     private var nativeMTPDrafterRecomputeDigests: [String: String] = [:]
     private var labNativeMTPCommittedPrefixTokens: [String: [Int]] = [:]
@@ -1069,14 +1069,12 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                                     "continuous_batching_invalid_logits_shape"
                                 )
                             }
-                            #if DEBUG || MACPROVIDER_LAB_HARNESS
                             for (index, input) in inputs.enumerated() where input.sampleFirstToken {
                                 self.labCaptureTargetLogits(
                                     requestID: input.requestID, position: input.samplerStep,
                                     tokenIDs: [sampledTokens![index]],
                                     logits: output.logits[index, -1, 0...].reshaped(1, -1))
                             }
-                            #endif
                         } else {
                             sampledTokens = nil
                         }
@@ -1176,13 +1174,11 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                                 logits: output.logits[0..., -1, 0...],
                                 rows: [Self.samplerRow(input)]
                             ).asArray(Int.self).first
-                            #if DEBUG || MACPROVIDER_LAB_HARNESS
                             if let sampledToken {
                                 self.labCaptureTargetLogits(
                                     requestID: input.requestID, position: input.samplerStep,
                                     tokenIDs: [sampledToken], logits: output.logits[0..., -1, 0...])
                             }
-                            #endif
                         } else {
                             sampledToken = nil
                         }
@@ -1688,7 +1684,6 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                     )
                 }
             )
-            #if DEBUG || MACPROVIDER_LAB_HARNESS
             for (row, tokens) in zip(output.rows, topTokenIDsByRow) {
                 let input = inputs[row.map.rowIndex]
                 // Construct this capture view only when the observer is active.
@@ -1701,7 +1696,6 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                         logits: concatenated([row.proposalLogits, row.bonusLogits], axis: 0), speculative: true)
                 }
             }
-            #endif
             return zip(output.rows, topTokenIDsByRow).map { row, targetTopTokenIDs in
                 let input = inputs[row.map.rowIndex]
                 return NativeMTPVerifiedRow(
@@ -1751,8 +1745,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                     inputs: inputs,
                     transactions: [:]
                 )
-                self.labResolveNumericalOracleRound(inputs)
-                #endif
+                    #endif
                 return
             }
             let transactions = try self.consumeNativeMTPPendingTransactions(for: inputs)
@@ -1829,8 +1822,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             for (input, _) in committing {
                 self.invalidateDecodeSession(containing: input.requestID)
             }
-            #if DEBUG || MACPROVIDER_LAB_HARNESS
             self.labResolveNumericalOracleRound(inputs)
+            #if DEBUG || MACPROVIDER_LAB_HARNESS
             try self.recordNativeMTPStateDigest(
                 phase: .afterFinalize,
                 inputs: inputs,
@@ -1841,7 +1834,6 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         }
     }
 
-    #if DEBUG || MACPROVIDER_LAB_HARNESS
     func installLabNativeMTPNumericalOracle(_ binding: NativeMTPLabNumericalOracle.Binding?) {
         lock.lock()
         labNativeMTPNumericalOracle = binding
@@ -1879,6 +1871,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         }
     }
 
+
+    #if DEBUG || MACPROVIDER_LAB_HARNESS
     func installLabNativeMTPStateDigestObserver(_ observer: NativeMTPStateDigestObserver?) {
         lock.lock()
         labNativeMTPStateDigestObserver = observer
@@ -2527,14 +2521,12 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 guard stepTokens.count == supportedInputs.count else {
                     throw ContinuousBatchSchedulerError.unsupported("continuous_batching_invalid_logits_shape")
                 }
-                #if DEBUG || MACPROVIDER_LAB_HARNESS
                 for index in supportedInputs.indices {
                     labCaptureTargetLogits(
                         requestID: supportedInputs[index].requestID,
                         position: supportedInputs[index].samplerStep + stepIndex,
                         tokenIDs: [stepTokens[index]], logits: logits[index, -1, 0...].reshaped(1, -1))
                 }
-                #endif
                 for index in supportedInputs.indices {
                     collected[index].append(stepTokens[index])
                 }
@@ -2589,14 +2581,12 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 guard stepSampled.count == supportedInputs.count else {
                     throw ContinuousBatchSchedulerError.unsupported("continuous_batching_invalid_logits_shape")
                 }
-                #if DEBUG || MACPROVIDER_LAB_HARNESS
                 for index in supportedInputs.indices {
                     labCaptureTargetLogits(
                         requestID: supportedInputs[index].requestID,
                         position: supportedInputs[index].samplerStep + stepIndex,
                         tokenIDs: [stepSampled[index]], logits: output.logits[index, -1, 0...].reshaped(1, -1))
                 }
-                #endif
                 if !captureIndices.isEmpty {
                     guard let hidden = output.state?[mtpLastHiddenStatesKey],
                           hidden.ndim == 3,

@@ -716,7 +716,7 @@ jobs:
   swift-package-lock:
     name: phase3-binary (locked SwiftPM resolve)
     runs-on: macos-26
-    timeout-minutes: 15
+    timeout-minutes: 35
     needs: changes
     # Same path gate as swift-tests: Package.resolved lives under
     # phase3-binary/, and a Go-only PR cannot drift the Swift lock.
@@ -737,6 +737,30 @@ jobs:
 
       - name: Verify locked Package.resolved under the release toolchain
         run: bash scripts/verify-swift-package-lock.sh
+
+      - name: Compile isolated qualification in plain Release configuration
+        working-directory: phase3-binary
+        timeout-minutes: 25
+        run: |
+          set -euo pipefail
+          build_dir="$RUNNER_TEMP/native-mtp-release-compile"
+          build_log="$RUNNER_TEMP/native-mtp-release-compile.log"
+          if ! xcodebuild -scheme macprovider-cli -configuration Release \
+              SWIFT_ACTIVE_COMPILATION_CONDITIONS='' OTHER_SWIFT_FLAGS='' \
+              -destination 'generic/platform=macOS' -derivedDataPath "$build_dir" \
+              -onlyUsePackageVersionsFromResolvedFile -skipPackagePluginValidation \
+              -skipMacroValidation build >"$build_log" 2>&1; then
+            tail -200 "$build_log"
+            exit 1
+          fi
+          cli="$build_dir/Build/Products/Release/macprovider-cli"
+          "$cli" native-mtp-qualify --help
+          for lab_command in native-mtp-bench native-mtp-hardware-e2e native-mtp-journey-e2e native-mtp-request-shape-replay; do
+            if "$cli" "$lab_command" --help >/dev/null 2>&1; then
+              echo "LAB command exposed in Release: $lab_command" >&2
+              exit 1
+            fi
+          done
 
   spec-015-acceptance:
     name: spec-015-acceptance

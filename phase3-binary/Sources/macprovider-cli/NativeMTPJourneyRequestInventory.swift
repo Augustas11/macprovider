@@ -1,4 +1,3 @@
-#if DEBUG || MACPROVIDER_LAB_HARNESS
 import CryptoKit
 import Foundation
 import MacProviderCore
@@ -50,4 +49,3 @@ final class NativeMTPJourneyRequestInventory {
     static func sha(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }
     private static func invalid() -> NativeMTPHardwareE2EError { .assertionFailed("journey request differs from immutable production-parsed inventory") }
 }
-#endif

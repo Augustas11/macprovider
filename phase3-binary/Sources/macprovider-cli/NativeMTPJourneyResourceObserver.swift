@@ -1,4 +1,3 @@
-#if DEBUG || MACPROVIDER_LAB_HARNESS
 import Foundation
 
 /// Faults are request-scoped, reduce capacity only, and never exist in release builds.
@@ -48,4 +47,3 @@ final class NativeMTPJourneyResourceObserver: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }; return terminals
     }
 }
-#endif

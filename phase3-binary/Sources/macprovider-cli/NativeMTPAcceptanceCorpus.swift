@@ -1,4 +1,3 @@
-#if DEBUG || MACPROVIDER_LAB_HARNESS
 import CoreFoundation
 import CryptoKit
 import Foundation
@@ -136,4 +135,3 @@ struct NativeMTPAcceptanceCorpus: Sendable {
         return number.boolValue
     }
 }
-#endif

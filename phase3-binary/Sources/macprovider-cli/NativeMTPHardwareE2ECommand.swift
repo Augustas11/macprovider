@@ -10,7 +10,6 @@ import Tokenizers
 
 // Lab-only: compiled out of plain release builds, command type and
 // registration included, so a production binary carries no lab surface.
-#if DEBUG || MACPROVIDER_LAB_HARNESS
 let nativeMTPHardwareDefaultModelID = "mlx-community/Qwen3.5-9B-4bit"
 
 /// The native-MTP family a hardware fixture exercises, chosen from the
@@ -495,6 +494,7 @@ final class NativeMTPHardwareE2ERunner {
         ordinaryAdmissionRecorder: NativeMTPHardwareAdmissionRecorder?,
         nativeAdmissionRecorder: NativeMTPHardwareAdmissionRecorder?
     ) async throws -> NativeMTPHardwareRuntimeFixture {
+        guard NativeMTPQualificationScope.permitsFixtureHooks else { throw NativeMTPHardwareE2EError.assertionFailed("isolated qualification scope required") }
         let targetDirectory = root.appendingPathComponent("target", isDirectory: true)
         let mtpDirectory = self.mtpDirectory
         try requireDirectory(targetDirectory)
@@ -628,6 +628,7 @@ final class NativeMTPHardwareE2ERunner {
         ordinaryAdmissionRecorder: NativeMTPHardwareAdmissionRecorder?,
         nativeAdmissionRecorder: NativeMTPHardwareAdmissionRecorder?
     ) async throws -> NativeMTPHardwareRuntimePair {
+        guard NativeMTPQualificationScope.permitsFixtureHooks else { throw NativeMTPHardwareE2EError.assertionFailed("isolated qualification scope required") }
         let targetDirectory = root.appendingPathComponent("target", isDirectory: true)
         let mtpDirectory = self.mtpDirectory
         try requireDirectory(targetDirectory)
@@ -1425,4 +1426,3 @@ private final class NativeMTPHardwareStreamRecorder: @unchecked Sendable {
         return chunks
     }
 }
-#endif

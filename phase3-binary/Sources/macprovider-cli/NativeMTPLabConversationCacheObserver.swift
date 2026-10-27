@@ -1,4 +1,3 @@
-#if DEBUG || MACPROVIDER_LAB_HARNESS
 import Foundation
 
 final class NativeMTPLabConversationCacheObserver: @unchecked Sendable {
@@ -105,4 +104,3 @@ final class NativeMTPLabConversationCacheObserver: @unchecked Sendable {
         )
     }
 }
-#endif

@@ -121,7 +121,7 @@ class AdapterTests(unittest.TestCase):
         # every production byte remains a historical qualification snapshot.
         # Evidence reuse is separately enforced by source-equivalence checks.
         hooks = {
-            "ModelRuntime.swift": ("labSerialDecodeHooks", "labNativeMTPCommitTimingObserver"),
+            "ModelRuntime.swift": ("labSetJourneyVerificationCapacityAvailable", "labJourneyWithdrawnCapability", "installLabNativeMTPProposalOverride"),
             "ContinuousBatchScheduler.swift": ("labJourneyReservationContext", "labJourneyResourceObserver"),
         }
         for name, identifiers in hooks.items():
@@ -130,6 +130,15 @@ class AdapterTests(unittest.TestCase):
             for identifier in identifiers:
                 self.assertIn(identifier, after, (name, identifier))
                 self.assertFalse(identifier in release, (name, identifier))
+
+    def test_release_measurement_installers_require_isolated_scope(self):
+        runtime = (BASE / "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift").read_text()
+        release_installers = runtime[runtime.index("#if !DEBUG && !MACPROVIDER_LAB_HARNESS"):]
+        for name in ("installLabNativeMTPDecodeOutputCap", "installLabNativeMTPLoadGateRecorder", "installLabNativeMTPNumericalOracle", "installLabNativeMTPCommitTimingObserver", "installLabNativeMTPConversationCacheObserver"):
+            function = release_installers[release_installers.index("    func " + name):]
+            self.assertIn("guard NativeMTPQualificationScope.permitsFixtureHooks else { return false }", function[:function.index("\n    }")])
+        self.assertIn("let effectiveObservedIdentity = NativeMTPQualificationScope.permitsFixtureHooks ? pagedKVObservedRuntimeIdentity : nil", runtime)
+        self.assertIn("let effectiveSizingProof = NativeMTPQualificationScope.permitsFixtureHooks ? pagedKVHardwareSizingProof : nil", runtime)
 
     def test_release_reservation_function_is_byte_identical(self):
         changed = (BASE / "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift").read_text()

@@ -29,6 +29,15 @@ LAB_FLAG_REFERENCE_SURFACES = {
 }
 CLI_SOURCES = ROOT / "phase3-binary" / "Sources" / "macprovider-cli"
 LAB_GUARD = "DEBUG || " + FORBIDDEN
+QUALIFICATION_GUARD = LAB_GUARD + " || MACPROVIDER_SIGNED_QUALIFICATION"
+SIGNED_ONLY_GUARD = "!DEBUG && !" + FORBIDDEN
+QUALIFICATION_SYMBOLS = {
+    "NativeMTPHardwareE2ECommand", "NativeMTPBenchCommand", "NativeMTPRequestShapeReplayCommand",
+    "NativeMTPLabDecodeOutputCap", "NativeMTPLabCommittedTokenTimingObserver",
+    "NativeMTPLabConversationCacheObserver", "installLabNativeMTPConversationCacheObserver",
+    "labNativeMTPConversationCacheObserver", "recordLabNativeMTPConversationCacheBegin",
+    "installLabNativeMTPDecodeOutputCap", "installLabNativeMTPCommitTimingObserver",
+}
 # Lab-only command types: every declaration and every reference, including
 # the subcommand registration, must sit inside the lab guard so a plain
 # release build compiles none of them.
@@ -59,18 +68,18 @@ LAB_HOOK_SYMBOLS = (
 )
 
 
-def _unguarded_references(text: str, names: tuple[str, ...]) -> list[int]:
+def _unguarded_references(text: str, names: tuple[str, ...], *, qualification_helpers: bool = False) -> list[int]:
     """Line numbers naming `names` outside an active `#if LAB_GUARD` branch."""
-    stack: list[bool] = []  # True while inside the lab-guarded (non-#else) branch
+    stack: list[str | None] = []  # Active exact compile guards only.
     offenders: list[int] = []
     for lineno, line in enumerate(text.splitlines(), 1):
         stripped = line.strip()
         if stripped.startswith("#if "):
-            stack.append(stripped[len("#if "):].strip() == LAB_GUARD)
+            stack.append(stripped[len("#if "):].strip())
             continue
         if stripped.startswith("#elseif") or stripped == "#else":
             if stack:
-                stack[-1] = False
+                stack[-1] = None
             continue
         if stripped == "#endif":
             if stack:
@@ -78,8 +87,13 @@ def _unguarded_references(text: str, names: tuple[str, ...]) -> list[int]:
             continue
         if stripped.startswith("//") or stripped.startswith("///"):
             continue
-        if any(name in line for name in names) and not any(stack):
-            offenders.append(lineno)
+        for name in names:
+            if name not in line:
+                continue
+            guarded = LAB_GUARD in stack or (name in QUALIFICATION_SYMBOLS and qualification_helpers)
+            if not guarded:
+                offenders.append(lineno)
+                break
     return offenders
 
 
@@ -222,7 +236,7 @@ class NativeMTPLabFlagGuardTests(unittest.TestCase):
     def test_unknown_flag_reference_path_is_not_permitted(self) -> None:
         self.assertFalse(_permitted_flag_reference(ROOT / "scripts" / "new-proof.py", FORBIDDEN))
 
-    def test_lab_commands_and_registration_are_compiled_out_of_release(self) -> None:
+    def test_qualification_helpers_do_not_expose_lab_serving_mutations(self) -> None:
         offenders: list[str] = []
         declared: set[str] = set()
         for path in sorted(CLI_SOURCES.rglob("*.swift")):
@@ -230,10 +244,24 @@ class NativeMTPLabFlagGuardTests(unittest.TestCase):
             for name in LAB_COMMAND_TYPES:
                 if f"struct {name}" in text:
                     declared.add(name)
-            for lineno in _unguarded_references(text, LAB_COMMAND_TYPES + LAB_HOOK_SYMBOLS):
+            for lineno in _unguarded_references(text, LAB_COMMAND_TYPES + LAB_HOOK_SYMBOLS, qualification_helpers=True):
                 offenders.append(f"{path.relative_to(ROOT)}:{lineno}")
         self.assertEqual(set(LAB_COMMAND_TYPES), declared)
         self.assertEqual([], offenders, "Lab-only native MTP commands must be declared and registered only under the lab guard.")
+
+    def test_signed_entry_has_only_isolated_qualification_children(self) -> None:
+        source = (CLI_SOURCES / "MacProviderCLI.swift").read_text()
+        lab_registration = source[source.index("private static func labSubcommands"):source.index("struct LifecycleStateCommand")]
+        self.assertIn("#if " + LAB_GUARD, lab_registration)
+        self.assertNotIn("MACPROVIDER_SIGNED_QUALIFICATION", lab_registration)
+        qualification = (CLI_SOURCES / "NativeMTPQualificationCommand.swift").read_text()
+        self.assertIn("NativeMTPSignedAcceptanceCommand.self, NativeMTPSignedBenchCommand.self, NativeMTPSignedReplayCommand.self", qualification)
+        self.assertNotIn("ServeCommand.self", qualification)
+        self.assertIn("@TaskLocal static var identity", qualification)
+        self.assertIn("SecCodeCopySelf", qualification)
+        self.assertIn("SecStaticCodeCheckValidity", qualification)
+        self.assertIn("initial.st_ino == final.st_ino", qualification)
+        self.assertIn("flags.uint32Value & 2 == 0", qualification)
 
     def test_guard_scanner_flags_unguarded_registration(self) -> None:
         guarded = f"#if {LAB_GUARD}\nlet a = NativeMTPBenchCommand.self\n#endif\n"

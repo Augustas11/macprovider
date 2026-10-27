@@ -545,7 +545,7 @@ enum CBTrace {
         return enabled || (environment["MACPROVIDER_LAB_OFFLINE"] == "1"
             && environment["MACPROVIDER_NATIVE_MTP_E2E"] == "1")
         #else
-        return enabled
+        return enabled || NativeMTPQualificationScope.identity != nil
         #endif
     }()
 
