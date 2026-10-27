@@ -14518,14 +14518,15 @@ maxTokens: maxTokens,
         if let effort = request.templateReasoningEffort(for: toolSelectionModelID ?? request.model) {
             additionalContext = (additionalContext ?? [:]).merging(["reasoning_effort": effort]) { _, new in new }
         }
-        // GLM templates render assistant `reasoning_content` back as
-        // `<think>…</think>` (interleaved thinking in tool loops). Only a
-        // request that carries reasoning takes the raw-message path, so every
-        // other GLM prompt keeps its structured chat input unchanged.
-        let glmHistoryReasoning = grammar == .glm && messages.contains {
+        // GLM and the exact Qwen3.8 template render `reasoning_content`
+        // back as `<think>…</think>` during tool loops. Only requests carrying
+        // reasoning take this raw-message path; other prompts stay unchanged.
+        let historyReasoning = (grammar == .glm
+            || (grammar == .qwen && ChatCompletionRequest.usesQwen38Template(
+                modelID: toolSelectionModelID ?? request.model))) && messages.contains {
             $0.role == .assistant && $0.reasoningContent?.isEmpty == false
         }
-        if grammar == .dsml || glmHistoryReasoning {
+        if grammar == .dsml || historyReasoning {
             // Chat.Message has no reasoning field. Preserve it in the raw
             // messages and let the template or reference encoder decide which
             // turns keep it.
