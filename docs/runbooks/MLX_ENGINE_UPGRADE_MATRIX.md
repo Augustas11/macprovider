@@ -34,7 +34,7 @@ needs a SPEC revision.
 
 | Fork | Upstream | Tag scheme | Current tag | Revision | Upstream base |
 | --- | --- | --- | --- | --- | --- |
-| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.10.9.2` | `0c0e58fc1091cb6a9552706bedcaac5dd6257e8e` | `3.32.3` (`3b339ad6…`) |
+| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.10.9.3` | `812285f88faa403a980ada6e64711de875bab364` | `3.32.3` (`3b339ad6…`) |
 | `Augustas11/mlx-swift` | `ml-explore/mlx-swift` | `<upstream>-macprovider.<n>` | `0.32.3-macprovider.9` | `29d3b93375cc56cd2649b40e4310a8bc445e9874` | `0.32.3` (`19601207…`) |
 | `Augustas11/mlx` (MLX core) | `ml-explore/mlx` | `v<upstream>-macprovider.<n>` | `v0.32.4-macprovider.4` | `2f512e3997349c8648f5d7c5113eb2c825aa242d` | `v0.32.4` (`36969c09…`) |
 
@@ -50,7 +50,7 @@ the mlx-swift-lm fork keeps upstream's tools version.
 Every rebase replays these stacks and drops any patch upstream now carries
 (record which, and why it is equivalent).
 
-mlx-swift-lm (`3.32.3..0c0e58fc`, tag `3.32.3-macprovider.10.9.2`, branch
+mlx-swift-lm (`3.32.3..812285f8`, tag `3.32.3-macprovider.10.9.3`, branch
 `campaign/2111-dsv4-fidelity`): tag `3.32.3-macprovider.10.5` (`c8be0f61`)
 plus DeepSeek-V4 fidelity to DeepSeek's reference and embedded DSpark with
 exact packed verification. 10.5 is tag
