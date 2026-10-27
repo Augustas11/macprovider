@@ -8703,6 +8703,9 @@ maxTokens: 1,
             } else if let lease {
                 await conversationCache.abort(lease)
             }
+            try await Self.verifyContinuousBatchRequestRetirement(
+                scheduler: scheduler, requestID: schedulerRequestID, gate: inferenceGate
+            )
             nativeMTPRequestShapeCapture?.record(
                 request: request,
                 snapshot: snapshot,
@@ -9265,6 +9268,9 @@ maxTokens: 1,
             } else if let lease {
                 await conversationCache.abort(lease)
             }
+            try await Self.verifyContinuousBatchRequestRetirement(
+                scheduler: scheduler, requestID: schedulerRequestID, gate: inferenceGate
+            )
             nativeMTPRequestShapeCapture?.record(
                 request: request,
                 snapshot: snapshot,
@@ -9302,13 +9308,29 @@ maxTokens: 1,
         gate: AsyncSemaphore
     ) async -> Error {
         do {
+            try await verifyContinuousBatchRequestRetirement(
+                scheduler: scheduler, requestID: requestID, gate: gate
+            )
+            return failure
+        } catch {
+            return error
+        }
+    }
+
+    /// Every post-submit exit checks retirement and scheduler health after its
+    /// cache ownership work. Discard can fail without throwing to its caller.
+    nonisolated static func verifyContinuousBatchRequestRetirement(
+        scheduler: ContinuousBatchScheduler,
+        requestID: String,
+        gate: AsyncSemaphore
+    ) async throws {
+        do {
             try await Task.detached {
                 try await scheduler.awaitRequestRetirement(requestID: requestID)
             }.value
-            return failure
         } catch {
             await gate.failClosed()
-            return error
+            throw error
         }
     }
 
