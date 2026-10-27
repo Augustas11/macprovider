@@ -6555,6 +6555,12 @@ final class AutotuneRecommendTests: XCTestCase {
             revision: "773a7da77e569019bb0fd17a554b263738d669a3",
             json: #"{"max_position_embeddings":131072,"num_hidden_layers":24,"hidden_size":2880,"num_attention_heads":64,"num_key_value_heads":8,"head_dim":64,"layer_types":["sliding_attention","full_attention","sliding_attention","full_attention","sliding_attention","full_attention","sliding_attention","full_attention","sliding_attention","full_attention","sliding_attention","full_attention","sliding_attention","full_attention","sliding_attention","full_attention","sliding_attention","full_attention","sliding_attention","full_attention","sliding_attention","full_attention","sliding_attention","full_attention"]}"#
         ),
+        // Pinned Bonsai config.json SHA-256:
+        // f8d80cb7fd148b8841e63051c337d2758b4bc16243c577d35eaab6779534b591.
+        "prism-ml/ternary-bonsai-2-2b-mlx-2bit": (
+            revision: "1c6cbae21f8c38830ce337972b46fdae7b18eaaa",
+            json: #"{"text_config":{"model_type":"qwen3_5_text","max_position_embeddings":262144,"num_hidden_layers":24,"hidden_size":2048,"num_attention_heads":8,"num_key_value_heads":2,"head_dim":256,"full_attention_interval":4,"layer_types":["linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention"],"linear_conv_kernel_dim":4,"linear_key_head_dim":128,"linear_num_key_heads":16,"linear_num_value_heads":16,"linear_value_head_dim":128}}"#
+        ),
         "qwen/qwen3-30b-a3b-instruct-2507": (
             revision: "e9675aa3ca5f900ccef55267914466d55ab325fa",
             json: #"{"max_position_embeddings":262144,"num_hidden_layers":48,"hidden_size":2048,"num_attention_heads":32,"num_key_value_heads":4,"head_dim":128}"#

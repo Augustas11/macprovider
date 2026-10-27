@@ -660,8 +660,16 @@ class RateCardSourceTest(unittest.TestCase):
             key for key, row in CANDIDATE_OBJ["rows"].items()
             if row["runtime_status"] == "recommendable"
         }
-        # Listed rows need a verified primary artifact, not a rate_class.
-        self.assertEqual(set(classes), recommendable)
+        # Pricing a staged artifact does not admit it for recommendation.
+        staged = {"prism-ml/ternary-bonsai-2-2b-mlx-2bit"}
+        demand = catalog_release.validate_demand(DEMAND_BYTES)["rows"]
+        for key in staged:
+            self.assertEqual(CANDIDATE_OBJ["rows"][key]["runtime_status"], "candidate")
+            self.assertIs(demand[key]["recommendable"], False)
+            self.assertIsNone(demand[key]["rank"])
+        # All recommendable rows remain class-bound; only this explicit staged
+        # candidate extends the priced set. Listed rows need no rate_class.
+        self.assertEqual(set(classes), recommendable | staged)
         source = catalog_release.validate_rate_card_source(RATE_CARD_SOURCE_BYTES)
         expanded = catalog_release.expand_rate_card(source, classes, CANDIDATE_OBJ)
         self.assertEqual(expanded, RATE_CARD_BYTES)
