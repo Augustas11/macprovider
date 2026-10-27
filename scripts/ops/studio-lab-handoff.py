@@ -356,8 +356,11 @@ def provenance(x,msha):
  b=check_static(x); j=load_journal(x["journal_path"],msha); s=status(x["status_port"])
  if not j or j["phase"] not in {"provider_stable","restored"} or not (ready(s,x) and launch_loaded(x["launch_label"])): bad("provider is not stable for provenance")
  pid=get(s,"service_instance.pid")
- if cli_processes(b)!=[pid]: bad("provider process identity differs for provenance")
- return {"ok":True,"installed":installed_identity(b),"launch":{"pid":pid,"executable_path":b},"status":s}
+ if (pid,get(s,"service_instance.process_start_us"))!=(j["provider_pid"],j["provider_start_us"]) or cli_processes(b)!=[pid]: bad("provider process identity differs for provenance")
+ # The shared release helper consumes a flat dotted PID key. Keep the native
+ # nested status, and adapt only this independently verified process identity.
+ release_status=dict(s); release_status["service_instance.pid"]=pid
+ return {"ok":True,"installed":installed_identity(b),"launch":{"pid":pid,"executable_path":b},"status":release_status}
 def installed_identity(b):
  out=subprocess.run(["codesign","-d","--arch","arm64","-vvv",b],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,check=True).stdout
  fields={}
@@ -370,7 +373,7 @@ def installed_identity(b):
 def static_provenance(x):
  b=check_static(x)
  # No process exists yet: null PIDs explicitly make no running-provider claim.
- return {"ok":True,"stage":"prelaunch_static","installed":installed_identity(b),"launch":{"pid":None,"executable_path":b},"status":{"service_instance":{"pid":None}}}
+ return {"ok":True,"stage":"prelaunch_static","installed":installed_identity(b),"launch":{"pid":None,"executable_path":b},"status":{"service_instance":{"pid":None},"service_instance.pid":None}}
 def main(raw):
  p=strict(raw.encode(),"payload"); x=p["studio"]; a=p["action"]
  if a=="inspect": return print(json.dumps(inspect(x,p["manifest_sha256"]),sort_keys=True))

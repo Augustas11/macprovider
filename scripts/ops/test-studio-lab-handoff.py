@@ -5,6 +5,7 @@ import io
 import hashlib
 import json
 import os
+import subprocess
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -320,6 +321,27 @@ static_result = json.loads(out.getvalue())
 assert static_events == ["check_static", "installed_identity"]
 assert static_result["stage"] == "prelaunch_static"
 assert static_result["launch"]["pid"] is None and static_result["status"]["service_instance"]["pid"] is None
+
+# Exercise the real shell helper's flat dotted-key extraction, rather than mocking
+# verify_published. Preserve the native nested status alongside the adapter field.
+namespace, x, clock = remote_recovery_case(phase="provider_stable", watchdog=True)
+namespace["installed_identity"] = lambda _: {"binary_sha256": "a" * 64}
+live_result = namespace["provenance"](x, "digest")
+helper = ROOT / "scripts/ops/lib/published-provider-identity.sh"
+for result, expected in ((static_result, ""), (live_result, "41")):
+    assert result["status"]["service_instance"]["pid"] == result["launch"]["pid"]
+    script = '. "$1"; probe="$(cat)"; _published_provider_json_get "$probe" \'d["launch"]["pid"]\'; _published_provider_json_get "$probe" \'d["status"]["service_instance.pid"]\''
+    extracted = subprocess.run(["bash", "-c", script, "bash", str(helper)],
+                               input=json.dumps(result), text=True, capture_output=True, check=True)
+    assert extracted.stdout.splitlines() == [expected, expected], extracted
+namespace, x, clock = remote_recovery_case(phase="provider_stable", watchdog=True, changed_pid=True)
+namespace["installed_identity"] = lambda _: {"binary_sha256": "a" * 64}
+try:
+    namespace["provenance"](x, "digest")
+except RuntimeError as exc:
+    assert "identity differs" in str(exc)
+else:
+    raise AssertionError("release adapter accepted a PID outside the stability journal")
 
 # A responding, unchanged, unready status is a stall; actual new log output is progress.
 namespace, x, clock = remote_recovery_case(ready_after=10000)
