@@ -1,9 +1,145 @@
 import XCTest
 import Jinja
 import MacProviderCore
+import MLXLMCommon
+import MLX
+import MLXVLM
 @testable import macprovider_cli
 
 final class ModelRuntimePromptContextTests: XCTestCase {
+    func testBonsaiThinkingRequiresModelOwnedCapabilityAndExplicitHighEffort() throws {
+        for model in ["prism-ml/Ternary-Bonsai-2-4B-mlx-2bit", "buyer-alias", "/local/model"] {
+            for effort in [nil, "none", "minimal", "low", "medium", "high", "xhigh", "max"] as [String?] {
+                for capability in [false, true] {
+                    let request = try bonsaiRequest(model: model, effort: effort)
+                    let input = try ModelRuntime.userInput(
+                        for: request, templateSupportsThinkingToggle: true,
+                        supportsBonsaiThinking: capability)
+                    let enabled = capability && ["high", "xhigh", "max"].contains(effort ?? "")
+                    XCTAssertEqual(input.additionalContext?["enable_thinking"] as? Bool, enabled,
+                                   "\(model), \(effort ?? "omitted"), \(capability)")
+                }
+            }
+        }
+        let request = try bonsaiRequest(effort: "high")
+        let input = try ModelRuntime.userInput(for: request, supportsBonsaiThinking: true)
+        XCTAssertNil(input.additionalContext?["enable_thinking"], "The template must support the toggle")
+    }
+
+    func testBonsaiThinkingStaysOffForStructuredOutputAndDeclaredTools() throws {
+        let tool: [String: Any] = ["type": "function", "function": [
+            "name": "lookup", "parameters": ["type": "object", "properties": [:]],
+        ]]
+        let cases: [[String: Any]] = [
+            ["response_format": ["type": "json_object"]],
+            ["response_format": ["type": "json_schema", "json_schema": [
+                "name": "answer", "schema": ["type": "object", "properties": [:]],
+            ]]],
+            ["tools": [tool]],
+            ["tools": [tool], "tool_choice": "auto"],
+            ["tools": [tool], "tool_choice": "none"],
+            ["tools": [tool], "tool_choice": "required"],
+            ["tools": [tool], "tool_choice": ["type": "function", "function": ["name": "lookup"]]],
+        ]
+        for effort in ["high", "xhigh", "max"] {
+            for extra in cases {
+                let request = try bonsaiRequest(effort: effort, extra: extra)
+                let input = try ModelRuntime.userInput(
+                    for: request, templateSupportsThinkingToggle: true, supportsBonsaiThinking: true)
+                XCTAssertEqual(input.additionalContext?["enable_thinking"] as? Bool, false)
+            }
+        }
+        let emptyTools = try bonsaiRequest(effort: "high", extra: ["tools": []])
+        XCTAssertTrue(ModelRuntime.bonsaiThinkingEnabled(for: emptyTools, supportsBonsaiThinking: true))
+    }
+
+    func testRealBonsaiTokenizerThinkingPrefixAndDefaultTokenIdentity() async throws {
+        let paths = ProcessInfo.processInfo.environment["MACPROVIDER_TOKENIZER_DIRS"]?
+            .split(separator: "\n").map(String.init) ?? []
+        guard let path = paths.first(where: { path in
+            guard let data = try? Data(contentsOf: URL(fileURLWithPath: path).appendingPathComponent("config.json")) else { return false }
+            return ModelRuntime.usesPrismVLMContainer(configJSONData: data)
+        }) else { throw XCTSkip("A Bonsai artifact is not configured in MACPROVIDER_TOKENIZER_DIRS") }
+        let tokenizer = try await ChatTemplateCompatTokenizerLoader().load(from: URL(fileURLWithPath: path))
+        let config = try tinyPrismConfiguration()
+        let processor = BonsaiPromptTestProcessor(tokenizer: tokenizer)
+        let prismContext = ModelContext(
+            configuration: ModelConfiguration(id: "/local/artifact"),
+            model: try PrismHadamardQwen35(config), processor: processor, tokenizer: tokenizer)
+        let ordinaryContext = ModelContext(
+            configuration: ModelConfiguration(id: "prism-ml/Ternary-Bonsai-2-4B-mlx-2bit"),
+            model: Qwen35(config.base), processor: processor, tokenizer: tokenizer)
+        let messages: [[String: any Sendable]] = [["role": "user", "content": "What is 2+2?"]]
+        let disabled = try tokenizer.applyChatTemplate(
+            messages: messages, tools: nil, additionalContext: ["enable_thinking": false])
+        for effort in [nil, "none", "minimal", "low", "medium", "high", "xhigh", "max"] as [String?] {
+            let request = try bonsaiRequest(effort: effort)
+            let input = try ModelRuntime.userInput(
+                for: request, templateSupportsThinkingToggle: true, supportsBonsaiThinking: true)
+            let tokens = try tokenizer.applyChatTemplate(
+                messages: messages, tools: nil, additionalContext: input.additionalContext)
+            let (serial, _) = try await ModelRuntime.preparedRequestInput(
+                for: request, context: prismContext, templateSupportsThinkingToggle: true,
+                templateSupportsPreserveThinking: false, toolSelectionModelID: "/local/artifact")
+            let (alternate, _) = try await ModelRuntime.preparedRequestTokens(
+                for: request, processor: processor, tokenizer: tokenizer,
+                templateSupportsThinkingToggle: true, templateSupportsPreserveThinking: false,
+                toolSelectionModelID: "/local/artifact", supportsBonsaiThinking: true)
+            XCTAssertEqual(serial.text.tokens.asArray(Int.self), tokens)
+            XCTAssertEqual(alternate, tokens)
+            let (ordinary, _) = try await ModelRuntime.preparedRequestInput(
+                for: request, context: ordinaryContext, templateSupportsThinkingToggle: true,
+                templateSupportsPreserveThinking: false,
+                toolSelectionModelID: "prism-ml/Ternary-Bonsai-2-4B-mlx-2bit")
+            XCTAssertEqual(ordinary.text.tokens.asArray(Int.self), disabled,
+                           "A model name must not opt an ordinary Qwen model into Bonsai thinking")
+            if ["high", "xhigh", "max"].contains(effort ?? "") {
+                XCTAssertTrue(ReasoningOutput.promptLeavesThinkOpen(tokenizer.decode(tokenIds: Array(tokens.suffix(16)))))
+                XCTAssertNotEqual(tokens, disabled)
+            } else {
+                XCTAssertEqual(tokens, disabled, "\(effort ?? "omitted") changed the default prompt")
+            }
+        }
+    }
+
+    private func tinyPrismConfiguration() throws -> PrismHadamardQwen35Configuration {
+        // No forward pass or model weights are needed to establish the loaded type.
+        let object: [String: Any] = [
+            "model_type": "prism_hadamard_qwen35", "schema_version": 2,
+            "base_model_type": "qwen3_5", "tensor_namespace": "mlx-vlm-qwen3_5",
+            "gdn_activation_layout": "grouped",
+            "quantization": ["bits": 2, "group_size": 128, "mode": "affine"],
+            "modules": [["path": "model.embed_tokens", "block": 512,
+                         "embedding": true, "dtype": "float16"]],
+            "text_config": [
+                "model_type": "qwen3_5_text", "hidden_size": 512,
+                "num_hidden_layers": 2, "intermediate_size": 512,
+                "num_attention_heads": 1, "num_key_value_heads": 1,
+                "head_dim": 128, "linear_num_value_heads": 1,
+                "linear_num_key_heads": 1, "linear_key_head_dim": 128,
+                "linear_value_head_dim": 128, "linear_conv_kernel_dim": 4,
+                "vocab_size": 4, "full_attention_interval": 2, "tie_word_embeddings": true,
+            ],
+            "vision_config": [
+                "model_type": "qwen3_5", "depth": 1, "hidden_size": 8,
+                "intermediate_size": 16, "out_hidden_size": 512,
+                "num_heads": 1, "patch_size": 16, "spatial_merge_size": 1,
+                "temporal_patch_size": 1, "num_position_embeddings": 8,
+            ],
+        ]
+        return try JSONDecoder().decode(PrismHadamardQwen35Configuration.self,
+                                       from: JSONSerialization.data(withJSONObject: object))
+    }
+
+    private func bonsaiRequest(
+        model: String = "buyer-alias", effort: String? = nil, extra: [String: Any] = [:]
+    ) throws -> ChatCompletionRequest {
+        var body: [String: Any] = ["model": model, "messages": [["role": "user", "content": "What is 2+2?"]]]
+        if let effort { body["reasoning_effort"] = effort }
+        body.merge(extra) { _, new in new }
+        return try ChatCompletionRequest.parse(data: JSONSerialization.data(withJSONObject: body))
+    }
+
     func testThinkingCapableTemplatesDisableFlagRegardlessOfModelFamily() throws {
         let artifact = try artifactDirectory(
             chatTemplate: #"{% if enable_thinking is defined and enable_thinking is false %}<think></think>{% endif %}{% if preserve_thinking %}preserve{% endif %}"#
@@ -241,5 +377,16 @@ final class ModelRuntimePromptContextTests: XCTestCase {
             try Data(tokenizerConfig.utf8).write(to: directory.appendingPathComponent("tokenizer_config.json"))
         }
         return directory
+    }
+}
+
+private struct BonsaiPromptTestProcessor: UserInputProcessor {
+    let tokenizer: any MLXLMCommon.Tokenizer
+
+    func prepare(input: UserInput) throws -> LMInput {
+        let tokens = try tokenizer.applyChatTemplate(
+            messages: DefaultMessageGenerator().generate(from: input), tools: nil,
+            additionalContext: input.additionalContext)
+        return LMInput(tokens: MLXArray(tokens.map(Int32.init)))
     }
 }

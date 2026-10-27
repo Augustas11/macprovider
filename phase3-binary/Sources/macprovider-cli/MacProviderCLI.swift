@@ -2795,7 +2795,8 @@ struct ServeCommand: AsyncParsableCommand {
             "event=continuous_batching_policy action=resolved status=\(continuousBatchingPolicy.status.rawValue) entries=\(policyEntries.count) revocations=\(continuousBatchingPolicy.selection.revocations.count) emergency_off=\(emergencyOffOverride)\n".utf8
         ))
         // Facts shared by the automatic slot count and the R018 item 9 bound.
-        let servedConfigJSONData = resolved.modelArtifactPath.flatMap {
+        let servedFitArtifactPath = startupPreflight.runtimeBinding?.loadPath ?? resolved.modelArtifactPath
+        let servedConfigJSONData = servedFitArtifactPath.flatMap {
             try? Data(contentsOf: URL(fileURLWithPath: $0, isDirectory: true).appendingPathComponent("config.json"))
         }
         let servedCatalogMinRAMGB = (try? AutotuneStaticInputs.decodeSignedStaticCandidateCatalog(
@@ -2808,7 +2809,7 @@ struct ServeCommand: AsyncParsableCommand {
                 .first
         }
         let servedWeightsBytes = ProviderContextWorkflow.liveModelFacts(
-            artifactPath: resolved.modelArtifactPath
+            artifactPath: servedFitArtifactPath
         ).weightsBytes
         // SPEC-023-R009 / SPEC-038-R011 (v0.3.15): scheduler rows are the
         // memory-fit recommendation for this Mac; the served count starts at
@@ -2832,7 +2833,8 @@ struct ServeCommand: AsyncParsableCommand {
                 memoryGB: memoryGB,
                 catalogMinRAMGB: servedCatalogMinRAMGB,
                 contextTokens: servedContextTokens,
-                weightsBytes: servedWeightsBytes
+                weightsBytes: servedWeightsBytes,
+                verifiedArtifactBinding: startupPreflight.runtimeBinding != nil
             )
             let policyCeiling = AutoServedSlots.policyServedSlotCeiling(
                 continuousBatchingPolicy,
@@ -3092,9 +3094,6 @@ struct ServeCommand: AsyncParsableCommand {
                    let mb = ModelRuntime.applyMLXCommandBufferBudget(modelFamily: family) {
                     FileHandle.standardError.write(Data("mlx_max_mb_per_buffer=\(mb) family=\(family)\n".utf8))
                 }
-                if let applied = ModelRuntime.applyMLXCacheLimit(megabytes: resolved.mlxCacheLimitMB) {
-                    FileHandle.standardError.write(Data("mlx_cache_limit_bytes=\(applied)\n".utf8))
-                }
                 ModelRuntime.logsStructuredFailurePreview = resolved.logLevel == .debug || resolved.logLevel == .trace
                 modelRuntime = try await ModelRuntime(
                     modelID: resolved.model,
@@ -3103,6 +3102,7 @@ struct ServeCommand: AsyncParsableCommand {
                     draftModelLoadPath: verifiedDraftModelLoadPath,
                     numDraftTokens: resolved.numDraftTokens,
                     speculativeCacheWrapValidated: speculativeCacheWrapValidated,
+                    mlxCacheLimitMB: resolved.mlxCacheLimitMB,
                     maxContextTokensOverride: resolved.maxContextOverride,
                     kvBitsOverride: effectiveKVBits,
                     pagedKVConfig: resolved.pagedKV.withFamilyDefaults(modelFamily: localModelFamily ?? "").sizedToCover(
@@ -4624,6 +4624,7 @@ struct SelfTestCommand: AsyncParsableCommand {
         let runtime = try await ModelRuntime(
             modelID: resolved.model,
             modelLoadPath: preflight.runtimeBinding?.loadPath ?? Self.modelLoadPath(for: resolved),
+            mlxCacheLimitMB: resolved.mlxCacheLimitMB,
             maxContextTokensOverride: resolved.maxContextOverride,
             verifiedModelArtifactSHA256: resolved.modelArtifactSHA256,
             verifiedModelLoadSHA256: preflight.runtimeBinding?.loadSHA256

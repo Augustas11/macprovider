@@ -1,7 +1,9 @@
 # SPEC-039 — Paged KV / paged-attention engine
 
-Version: v0.1.24
-Status: draft (normative design). v0.1.24 permits direct row-owned cache
+Version: v0.1.25
+Status: draft (normative design). v0.1.25 adds the provisional, exact
+Bonsai-2 2B ordinary-hybrid identity below; production attach and
+qualification remain pending. v0.1.24 permits direct row-owned cache
 updates and bounded pipelined DeepSeek decode under SPEC-038 v0.3.30;
 failed rows and stopped rows with untrimmed lookahead are discarded.
 v0.1.23 defines the `deepseek_v4`
@@ -846,6 +848,29 @@ be individually measured before it is added. The v1 allowlist is:
   identity are recorded under `docs/evidence/`; until then attach fails
   closed with `paged_fallback_parity`. (v0.1.20) Evidence recorded under
   `docs/evidence/glm53-flash-t4-2026-10-17/` (README lists each record).
+
+
+- (v0.1.25, provisional, SPEC-first) only
+  `prism-ml/Ternary-Bonsai-2-2B-mlx-2bit`, with `schema_version == 2`,
+  `model_type == "prism_hadamard_qwen35"`, `base_model_type == "qwen3_5"`,
+  and `tensor_namespace == "mlx-vlm-qwen3_5"`. Its `text_config` MUST have
+  `model_type == "qwen3_5_text"`, exactly 24 hidden layers, and
+  `full_attention_interval == 4`: every fourth `layer_types` entry is
+  `full_attention`, all others `linear_attention`. Runtime caches MUST match
+  this same 24-layer order, with `KVCacheSimple` at full-attention indices and
+  `MambaCache` elsewhere. `mtp_num_hidden_layers` MUST be zero and
+  `mtp_use_dedicated_embeddings` false; this exception authorizes ordinary CB
+  only, never native MTP. The 4B variant, aliases and other Prism identities
+  remain excluded. This provisional exception permits evaluation by the real
+  attach-time parity/isolation probes and automatic FR-CB10 self-check; it is
+  not measured PASS evidence, a signed grant, or production qualification.
+  Existing artifact identity, hardware sizing, parity and row-isolation gates
+  remain mandatory; absent proof, attach fails closed. The 513-token/48-token
+  lab proof and three-row parity/isolation pass are recorded in
+  `docs/evidence/bonsai2b-hybrid-2026-10-27.json`: exact serial/standalone/
+  batched parity at three rows and cancellation isolation passed without
+  swap growth. Production attach and automatic self-check remain pending;
+  the lab result does not authorize skipping their runtime gates.
 
 Membership is per identity and evidence-gated, never per architecture. A
 same-architecture identity is admitted only after it individually passes the

@@ -49,6 +49,11 @@ final class Build1PrivateAuthorityTests: XCTestCase {
            let next = json.range(of: "\"nvidia/nemotron-3-nano-30b-a3b\":", range: start.upperBound..<json.endIndex) {
             json.removeSubrange(start.lowerBound..<next.lowerBound)
         }
+        // Bonsai was staged after this authority's historical catalog stamp.
+        if let start = json.range(of: "\"prism-ml/ternary-bonsai-2-2b-mlx-2bit\":"),
+           let next = json.range(of: "\"qwen/qwen3-30b-a3b-instruct-2507\":", range: start.upperBound..<json.endIndex) {
+            json.removeSubrange(start.lowerBound..<next.lowerBound)
+        }
         // The last row: drop it with its leading comma, keeping the rows object's brace.
         if let start = json.range(of: ",\"zai-org/glm-5.3-flash\":"),
            let end = json.range(of: "}},\"source\":\"operator_curated_autotune_candidate_catalog\"",
