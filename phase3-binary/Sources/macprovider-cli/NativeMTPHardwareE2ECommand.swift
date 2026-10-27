@@ -8,8 +8,8 @@ import MLXLMCommon
 import MLXLLM
 import Tokenizers
 
-// Lab-only: compiled out of plain release builds, command type and
-// registration included, so a production binary carries no lab surface.
+// Measurement helpers are shared with isolated signed qualification.
+// Legacy top-level command registration remains LAB-only.
 let nativeMTPHardwareDefaultModelID = "mlx-community/Qwen3.5-9B-4bit"
 
 /// The native-MTP family a hardware fixture exercises, chosen from the

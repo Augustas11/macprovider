@@ -6,8 +6,8 @@ import Foundation
 import MacProviderCore
 import MLXLMCommon
 
-// Lab-only: compiled out of plain release builds, command type and
-// registration included, so a production binary carries no lab surface.
+// Measurement helpers are shared with isolated signed qualification.
+// Legacy top-level command registration remains LAB-only.
 struct NativeMTPBenchCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "native-mtp-bench",
