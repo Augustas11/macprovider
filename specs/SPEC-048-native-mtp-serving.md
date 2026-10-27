@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.58
+**Version:** 0.1.62
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.58",
+  "version": "0.1.62",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -90,8 +90,8 @@ Accepted journey id: `JOURNEY-NATIVE-MTP-SERVING`.
 - training or converting an MTP head;
 - probabilistic (rejection-sampling) speculative acceptance; sampled rows are
   verified only by target-sample exact match (MTP-5);
-- tools, structured output, logprobs, penalties, conversation-cache reuse, or
-  disk-cache reuse on the v0.1 native-MTP path;
+- grammar-constrained tools, structured output, logprobs, penalties,
+  conversation-cache reuse, or disk-cache reuse on the v0.1 native-MTP path;
 - vision or image inputs, even when an admitted artifact originated from a
   vision-language model;
 - custom MXFP8 Metal kernels or a second inference runtime;
@@ -371,15 +371,26 @@ do not apply to this adapter; these do:
   maximum block size 2: the last committed token plus one proposal, so
   `max_proposal_depth = 1`), shares the target's last sparse-attention top-k
   selection as the model config's `index_share_for_mtp_iteration` requires,
-  and is admitted only with `request_feature_profile =
-  "native_mtp_greedy_text_v1"`. (0.1.43) A `glm5_next_mtp_v1` tuple signs
+  and admits `request_feature_profile =
+  "native_mtp_greedy_text_v1"` or `"native_mtp_sampled_text_v1"`. The sampled
+  profile uses the existing R005 row/position-keyed target-sample exact-match
+  verifier, following mlx-vlm `e9af376626b04ba0cdad23b1476fd7a4a583d721`
+  (`_mtp_acceptance_walk`, positioned target sampling); it does not replace
+  the ordinary sampler or relax seeded token parity. (0.1.43) A `glm5_next_mtp_v1` tuple signs
   `max_native_active_rows` 1, as the first Qwen3.6 tuple does: on the M3
   Ultra (provider native path, packed verification in continuous batching,
   depth 1, greedy, 256 tokens) one native row decoded at 1.27x ordinary
   (48.4 vs 38.2 tok/s, acceptance 0.889), while four native rows decoded at
   0.79x ordinary continuous batching (51.5 vs 65.6 tok/s, acceptance 0.870).
-  The sidecar loader and generator reject a larger bound for this adapter;
-  further rows take ordinary decode under the R007 load gate. R004, R012,
+  (0.1.59) The adapter's implementation ceiling is four native active rows;
+  the sidecar loader and generator accept only integer bounds from one through
+  `min(4, qualified_slots)`. This capability is not qualification: the current
+  signed deployment bound remains one. Publishing any larger bound requires
+  a new frozen R015 policy and passing native-eligible evidence for every
+  requested row count through that bound, including exact token/state parity,
+  packed mixed-row verification and the existing throughput gates. Gated cells
+  and source tests cannot raise the signed bound. Rows above the actual signed
+  bound still take ordinary decode under the R007 load gate. R004, R012,
   R014, and R015 apply unchanged.
 - *Provider load and admission (0.1.40).* The provider builds the drafter
   inside the loaded target: a parameterless model created from the target's
@@ -493,24 +504,47 @@ The authorized dependency tuple is exact:
 
 | Repository | Fork tag | Revision | Upstream base |
 |---|---|---|---|
-| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.10.14` | `9b2766ee4f4271669e58429e6eb1251e22e5ecaa` | fork `3.32.3-macprovider.10.1` (`87dc5159c87d73f4d7abd524fbdd17760cf56285`) on fork `3.32.3-macprovider.10` (`b4077dcb28336b388f3d09be2a091c12f8e179aa`) on `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
+| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.10.15` | `3905a1b0499f0f38c0f94a008034a0362b9e3dca` | fork `3.32.3-macprovider.10.1` (`87dc5159c87d73f4d7abd524fbdd17760cf56285`) on fork `3.32.3-macprovider.10` (`b4077dcb28336b388f3d09be2a091c12f8e179aa`) on `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
 | `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.9` | `29d3b93375cc56cd2649b40e4310a8bc445e9874` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
 | `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.4` | `2f512e3997349c8648f5d7c5113eb2c825aa242d` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
 
-The mlx-swift-lm row is the immutable fork tag `3.32.3-macprovider.10.14`
-(commit `9b2766ee…`, campaign #2154), on `3.32.3-macprovider.10.5`
-(`c8be0f61…`). It adds the Prism schema-2 signed-Hadamard VLM loader,
-owned full-artifact snapshots, lazy vision loading and row-safe attention masks.
-Its complete source tree is identical to the parity-qualified `bd5f45f1…`
+The mlx-swift-lm row is the immutable combined fork tag `3.32.3-macprovider.10.15`
+(commit `3905a1b0499f0f38c0f94a008034a0362b9e3dca`, branch `campaign/2144-native-mtp`). It preserves
+both the GLM candidate `3.32.3-macprovider.10.13` (`b128c37f…`) and the Prism
+loader `3.32.3-macprovider.10.14` (`9b2766ee…`), each based on
+`3.32.3-macprovider.10.5` (`c8be0f61…`). Following oMLX packed same-depth
+verification, it shares GLM indexer projections only through the existing
+vector-stable kernel when that kernel covers the shape. Normalization, attention,
+unsupported projections and cache rollback remain row-local. This accommodation
+is required because MLX fallback attention can change its numerical reduction
+route when its batch shape changes. Single-row and ordinary decode retain their
+routes. The eight-flattened-token exactness bound remains intact.
+The campaign tested the existing `GLM5NextMTPDraftModel.chainPacked` head
+at depth two following SGLang `ad950cd` positive-depth tuning. All four two-row
+profiles preserved exact parity but reached only 0.795–0.860× ordinary CB.
+The product adapter was removed: GLM retains its registered depth-one drafter
+and seed-only proposal path. Neither tested multi-row design meets the goal
+throughput floor, so the native active-row bound remains one. Tag `.10.13`
+retains copied-chain regressions for accepted-prefix lengths zero, one and two;
+those tests do not grant deeper serving admission.
+The `.10.13` GLM candidate's changed verifier requires fresh GLM token/state
+parity and R015 qualification before admission; a fork tag is not qualification
+evidence. MTP-13 governs any source-equivalence identity-only rebind from the
+measured candidate to the combined tag.
+The Prism additions are the schema-2 signed-Hadamard VLM loader, owned
+full-artifact snapshots, lazy vision loading and row-safe attention masks.
+The `.10.14` source tree is identical to the parity-qualified `bd5f45f1…`
 baseline. Custom Hadamard and convolution experiments without established
-end-to-end throughput gains are excluded. This pin does not admit a catalog
+end-to-end throughput gains are excluded. These additions do not admit a catalog
 model, change a signed batching/MTP policy, or claim 8 GB or vendor quality
 qualification.
 
-The 10.5 base adds batched DeepSeek-V4 attention, compressor/indexer projections
-and per-row rotary offsets, keys-only windows and geometric pool storage
-(0.1.55, Related: #2111). Earlier ancestry and historical qualification records
-remain unchanged. `phase3-binary/Package.resolved` resolves the row exactly.
+`3.32.3-macprovider.10.5` consists of `3.32.3-macprovider.10.4` (`676a62a4…`) plus batched DeepSeek-V4 attention,
+compressor/indexer projections and per-row rotary offsets, keys-only windows
+and geometric pool storage (0.1.55, Related: #2111). The prior tag adds
+row-owned continuous batching to the serial DeepSeek-V4 port on the epic
+#2029 tag `3.32.3-macprovider.10.1` (`87dc5159…`, `glm53/tuple-0324`).
+`phase3-binary/Package.resolved` resolves the new revision exactly.
 `3.32.3-macprovider.10.2` remains an unrelated GLM candidate outside the tuple.
 A production build MUST NOT resolve an untagged mlx-swift-lm revision;
 `scripts/check-upstream-throughput-blockers.sh` verifies that the row's tag
@@ -590,7 +624,9 @@ Authorized surface:
   `GLM5NextLatentCache` / `GLM5NextBatchedLatentCache` protocols and
   `GLM5NextLatentCacheBatch` (batched rows: projections run on every row
   together and each row attends against its own latent cache, bitwise equal
-  to its serial decode while a forward carries at most 8 flattened tokens),
+  to its serial decode for qualified fused shapes while a forward carries
+  at most 8 flattened tokens). This bound is not qualification for arbitrary
+  fallback shapes; every served artifact still requires R005/R015 parity.
   the fused decode kernels for rows of up to 8 tokens (`GLM5NextDecodeKernels.swift`: KDA step,
   hyper-connection decode, MoE routing and expert kernels, DSA token selection,
   multi-qmv projections with explicit thread layout), the per-channel gated
@@ -735,9 +771,25 @@ SPEC-023-R024 entry carries `request_feature_profile =
 selects ordinary with reason `sampling`. The remaining generation-affecting
 allowlist is: absent/default `top_k`, absent/zero `min_p`, zero frequency and
 presence penalties, absent/default-one repetition penalty, `n == 1`, no logit
-bias, no `logprobs` or `top_logprobs`, no reasoning/thinking toggle or chat
-template kwargs, no tools/tool choice/tool-call history, plain-text response
-format, no Harmony protocol, and text-only messages. The allowed transport or
+bias, no `logprobs` or `top_logprobs`, plain-text response format, no Harmony
+protocol, and text-only messages. For `glm5_next_mtp_v1`, only the signed
+`native_mtp_sampled_text_v1` profile also admits ordinary-parser-supported
+`reasoning_effort`, tool definitions, tool-call history (including assistant
+reasoning content), and unconstrained `tool_choice`
+`auto`/`none`. Omitted or true `parallel_tool_calls` is supported. Explicit false
+remains ordinary: the native transaction currently finalizes before the
+serial-tool output observer detects the first complete call. Required/named
+tools and any active grammar mask remain ordinary. The GLM greedy profile keeps
+its prior plain-text scope, including its no-tools/history/reasoning boundary,
+until a signed sampled profile is selected; a new binary alone does not widen
+that profile. Other adapters retain their no-tools/history/reasoning boundary.
+Unknown chat-template kwargs remain ordinary. GLM uses the same rendered prompt,
+row-position target sampler and
+ordinary output parser as non-native decode, following oMLX
+`78fa08bc1aef7290c93c83bb70811547763ebf33` (rendered-prefix processing and
+first-stop handling). Tool/reasoning markers themselves do not disable drafting;
+only the target-verified prefix is emitted, with ordinary token stop handling.
+No mutable grammar processor is advanced by discarded drafts. The allowed transport or
 limit keys are `model`, `messages`, `max_tokens`, `max_completion_tokens`,
 `stream`, `stream_options` containing only `include_usage`, `stop`, and `user`;
 they retain ordinary validation. A `seed` is eligible only where the ordinary
@@ -1350,6 +1402,40 @@ listed file is missing or changes without a regenerated digest.
   behavior change, as applied in #2136 and #2141. Admission still requires
   exact matching bindings; identity-only rebind does not bypass a mismatch,
   signed publishing, or revocation.
+  Reused qualification artifacts MUST retain the source identity of their
+  actual measurements, including the original benchmark policy's
+  `provider_commit`; rebinding the sidecar MUST NOT rewrite that field or
+  relabel historical timings as measurements of the new CLI. A separate
+  authenticated reuse record MUST bind those original artifacts and their
+  measured source to the reviewed target source and signed CLI identity,
+  with the tuple-specific evidence that its draft/verify/commit behavior and
+  qualification scope are unchanged. Matching recomputed decode-path digests
+  may establish unchanged decode identity across a squash commit; a changed
+  digest requires the reviewed behavior analysis above, not an assertion of
+  source equality. Raw evidence, original identities, reuse proof and current
+  signed bindings MUST all validate before composition or signing. A changed
+  sampled verifier or expanded request profile does not inherit historical
+  greedy correctness or performance evidence.
+  A representative-policy sidecar retains the actual post-gateway replay
+  policy bytes and schema as its benchmark-policy binding. Its signed journey
+  separately retains and reanalyzes the original R015 matrix policy, runs and
+  analysis, with their true measured source, while rederiving the privacy-safe
+  representative projection and fresh paired replay. An exact reviewed
+  test-only dependency revision change or LAB-only source delta may establish
+  reuse mechanically under the reviewed recipe; it does not authorize a
+  different request profile, hardware, bounds, Metal library or production
+  draft/verify/commit behavior.
+  Public R005 evidence MAY use the closed numeric redaction produced only
+  after the existing full private acceptance validator passes. It preserves
+  every numerical gate and case/position/selection coverage, whole-sequence
+  commitments and exact raw result/policy/corpus SHA-256 identities, the true
+  measured source, and a durable private Git-commit custody reference. Raw
+  prompts, token IDs and per-token hashes MUST remain private. The protected
+  signer revalidates that closed projection, arithmetic, coverage, source and
+  authenticated transport provenance; it MUST explicitly record that it does
+  not reopen the private raw bytes or provide independent hardware
+  attestation. A custody commitment alone cannot replace either the full
+  producer validation or the public numeric validation.
 - R015 requalification is required only when a change alters how the qualified
   tuple drafts, verifies, or commits tokens. Before requesting that rerun,
   list the existing qualification evidence and name the changed decode-path
@@ -1366,6 +1452,43 @@ listed file is missing or changes without a regenerated digest.
   `source_commit`. The release tag `v<binaryVersion>` of that commit names it.
   The live coordinator recommends that release or a later one. The identity fields stay
   in every entry as provenance (dual-field).
+  The sole pre-promotion exception is an identity-only rebind of an already
+  qualified, one-row, depth-one greedy tuple inside the guarded matched signed
+  binary/policy transaction exposed by `scripts/ops/`. Its target MUST be the
+  exact reviewed main-source acceptance CLI cut: a successful protected
+  `acceptance-candidate.yml` run, signature-verified acceptance envelope,
+  checksums, source commit, binary SHA-256, CDHash and embedded decode-path
+  digest all match the frozen transaction and signed-byte verification record.
+  The independently verified prior published signed binary, signed policy and
+  self-test bank MUST remain available for exact-pair rollback; the transaction
+  MUST preserve CB, prior request-feature scope, model inventory, qualification
+  evidence, row/depth bounds and ordinary context, with independent recovery
+  custody before pause. Only identity/provenance bindings may change. The
+  candidate's final release tag and fleet recommendation are not prerequisites
+  for this bounded canary transaction: the existing CLI train requires its
+  physical canary and in-scope e2e before final tagging/promotion. Normal catalog
+  publication, wider sampled/tools/reasoning eligibility and increased bounds
+  retain the general tag/recommendation gate above. This exception neither
+  admits a local unsigned/unreleased build nor satisfies an e2e/journey gate;
+  every later release and qualification gate remains mandatory.
+  The signed native-binding bundle MAY be assembled after the campaign merge
+  from the narrow reviewed deterministic recipe in SPEC-023-R017; all emitted
+  bytes MUST match independent reconstruction from its committed inputs and
+  verified signed CLI identity. That assembly exception changes neither this
+  guarded unchanged-greedy-scope transaction nor its rollback obligations.
+  Expanded GLM sampled/tools/reasoning scope retains the final tag and fleet
+  recommendation gate and requires genuine R005 token/state proof and passing
+  R015 qualification on the digest-matched LAB build. Recipe assembly and
+  offline projection
+  supply neither correctness nor performance evidence.
+  JOURNEY-NATIVE-MTP-SERVING also permits its narrow authenticated post-cut
+  redacted draft-asset delivery through the existing protected serving-journey
+  workflow. The workflow MUST authenticate the exact reviewed merged source,
+  successful protected acceptance candidate and CI run, signed candidate bytes
+  and full closed evidence inventory before recomputing and signing the
+  genuine journey result. Transport does not satisfy a journey step, R005,
+  R015, a live e2e gate or conformance promotion; the ordinary committed-evidence
+  route remains available.
 
 SPEC-023 autotune recommendation, SPEC-032 hardware-evidence performance
 measurement, and every ordinary catalog gate seed MUST force
@@ -1429,6 +1552,20 @@ For each qualified tuple, production enablement requires all of the following:
     or more than 256 exceptions ship only after the CLI cut that reads them
     is the released CLI. Publishing earlier would turn native MTP off for
     every tuple on the older CLI.
+
+**Qualification and release identity (0.1.61).** R005 correctness, the formal
+R015 matrix and its sustained phase MAY run on an isolated LAB build whose
+embedded decode-path digest equals the reviewed PR head's recomputed digest.
+The immutable evidence MUST retain the actual measured source, LAB binary
+SHA-256, CDHash when present, and embedded decode-path digest. Consumers MUST
+recompute source digest equality rather than require the later signed CLI's
+executable identity. A CLI cut changes only identity binding: MTP-13's
+authenticated identity-only rebind binds its signed SHA-256/CDHash to that
+qualification without remeasurement. Raw policies and records retain their
+original measured source. Neither representative replay, a v2 collector, a
+fresh signed predecessor nor a signed-only qualification command is an added
+prerequisite. All existing R005/R015 numerical and tuple gates, signed release,
+journey, catalog publication and recovery obligations remain unchanged.
 
 Failure or revocation of any tuple-specific gate MUST remove or disable only that
 tuple's native-MTP eligibility and MUST preserve ordinary decode. No partial
@@ -1730,6 +1867,60 @@ MUST be no more than 5%, and the corrected lower bound for ordinary-row
 throughput change MUST be no worse than -5%, against the same load with MTP
 disabled. This is in addition to R007's ready-to-decode wait bound.
 
+**Optional privacy-safe v2 observation and paired replay.** This optional
+observation surface is not a prerequisite for R005 or formal R015
+qualification. When used, its claims follow the rules below. The opt-in
+`macprovider.native-mtp-request-shape-capture.v2` records successful persistable
+completions with the provider's actual `off` or `auto` mode unchanged. Its role
+is `request_shape_observation_only`: an observed ordinary or native completion
+is not a measured ordinary control. Collection MUST NOT filter on candidate
+eligibility, tools, sampling, observed path, or available native capacity.
+SPEC-049 nonpersistable requests produce no request-derived record or counter;
+sampling claims MUST disclose that population boundary and all omissions.
+The existing v1 schema, off-only collection guards and formats remain unchanged;
+absent schema selection still chooses v1. Explicit v2 selection does not alter
+the signed request profile or admit broader traffic.
+
+V2 MUST preserve normalized parsed controls and actual served family, geometry,
+anonymous cache relationships and source identity without raw prompt/tool text,
+function names or recoverable cache keys. Capture timestamps MUST NOT be used
+as latency or original-arrival evidence.
+The `observed_selector_reason`, `observed_selector_eligible` and
+`observed_effective_path` fields describe actual capture-time selection only.
+The bound candidate plan separately supplies `projected_selector_reason` and
+`projected_selector_eligible` before capacity checks; fresh paired runs supply
+actual measured admissions and paths. These facts MUST NOT be substituted for
+one another. The >=10% request/token floors use candidate pre-capacity R004
+shape shares. Capacity fallback remains measured ordinary work, not claimed
+native admission. Known ineligible controls remain in both full paired loads
+and representative denominators.
+
+V2 capture requires the matching closed v2 projection-plan and replay schemas.
+Strict validation MUST bind exact capture, tuple-bounds, complete sanitized
+projection, bench-policy and analysis-policy bytes, preserving capture-build
+identity separately from replay-build identity. Sampling and analysis rules
+are preregistered before collection; a durable truthful privacy review binds
+the captured bytes, omissions and reviewed fields. Missing source identity,
+unknown family/control states, unresolved tool choices or other unreproducible
+shapes remain counted
+and make qualification `PENDING_UNREPRODUCIBLE_CAPTURE`; they MUST NOT silently
+become known ordinary or eligible shapes. The production parser remains
+authoritative before execution.
+
+Both ordinary and mixed replay use the same frozen modeled stagger, in capture
+sequence and cache-conflict order across the full qualified CB slots. Its
+wave-local offset is index times the bound bench-policy `arrival_interval_ms`,
+positive when qualified slots exceed the signed native-row bound. Capture
+completion order does not reconstruct real arrival concurrency. Replay MUST
+NOT split waves by eligible-row count to manufacture admission: the native cap
+counts all active buyer rows, including ordinary rows. Fresh executions retain
+all paired blocks and existing completion, cache, concurrency and corrected
+metric gates. Conversion to the existing final analyzer contract preserves
+projected pre-capacity shape shares separately from measured paths and uses
+only fresh paired timings; offline projection remains
+`PENDING_REAL_LAB_REPLAY`. Observation or schema validation does not qualify,
+release, promote or activate a tuple.
+
 The 256 GB Mac Studio is mandatory for the large-host issue campaign but does
 not prove any lower RAM tier. Every hardware/RAM tier advertised for the tuple
 requires its own fit, correctness, capacity, and sustained evidence. Sanitized
@@ -1889,7 +2080,7 @@ the journey must include its independent and combined evidence.
 | `native-mtp-serving` | `DECISION_REQUIRED` | `@Augustas11` | `#1770` | Authority acceptance, release-candidate review, and signed real-hardware journey evidence for the first production tuple. |
 | First Qwen-family MTP artifact | `UNKNOWN` | `@Augustas11` | `#1770` | Legally/provenance-clean immutable model, tokenizer, MTP manifest, and exact hashes. |
 | MLX dependency tuple | `RESOLVED_FOR_TUPLE` | `@Augustas11` | `#1906` | The operator's permanent fork model (MTP-3) replaces the upstream-release requirement. MTP-3 names the exact three-fork tuple; each rebase passes the runbook's per-rebase acceptance gate and a SPEC revision. |
-| GLM-5.3-Flash `glm5_next_mtp_v1` tuple | `DECISION_REQUIRED` | `@Augustas11` | `#2029` | Pending: the `JOURNEY-NATIVE-MTP-SERVING` run on the final tagged tuple (mlx-swift-lm `3.32.3-macprovider.10.14`) and the GLM R015 record, which complete the R003 review record. Implemented in the campaign branch: the observer, sidecar parsing, v2 projection reader, SPEC-023 v0.22.27 widths, the fork's MTP-1 drafter and packed verification, and the provider drafter load path, admission gate and paged packed verification. |
+| GLM-5.3-Flash `glm5_next_mtp_v1` tuple | `DECISION_REQUIRED` | `@Augustas11` | `#2029` | Pending: the `JOURNEY-NATIVE-MTP-SERVING` run on the final tagged tuple (mlx-swift-lm `3.32.3-macprovider.10.15`) and the GLM R015 record, which complete the R003 review record. Implemented in the campaign branch: the observer, sidecar parsing, v2 projection reader, SPEC-023 v0.22.27 widths, the fork's MTP-1 drafter and packed verification, and the provider drafter load path, admission gate and paged packed verification. |
 | First MLX-native MXFP8 artifact | `UNKNOWN` | `@Augustas11` | `#1770` | SPEC-023/SPEC-010 format, fit, quality, license, provenance, and hardware evidence. |
 | Batched-verify numerical parity | `RESOLVED_FOR_TUPLE` | `@Augustas11` | `#1770` | The qmv-to-qmm switch at 12 packed verify tokens cannot occur for the first tuple: `max_native_active_rows` is 1 and depth is 1, so a packed verify is at most 2 tokens, and rows above the bound ride the ordinary forward at depth zero. A tuple whose bound times `proposal_depth + 1` reaches 12 must decide between a bounded drift allowance and kernel-matched verification before it can be signed. |
 | Depth-1 throughput value | `RESOLVED_FOR_TUPLE` | `@Augustas11` | `#1770` | The 2026-10-06 quiet R015 (policy `e24cb7bc…`, amended 0.1.25 gates) passed every cell for the A3B Studio tuple: one-slot decode ratio 1.19-1.28 with corrected lower bounds +18% to +26%, gated s2/s8 cells non-inferior. The value is one-slot only; the R007 bound of 1 keeps native off above it. |
@@ -1929,7 +2120,49 @@ requests.
 
 ## 9. Changelog and history
 
-- **0.1.58 (2026-10-26)** — R003: names `3.32.3-macprovider.10.14`
+- **0.1.62 (2026-10-27)** — R003 names the combined fork tag
+  `3.32.3-macprovider.10.15` (`3905a1b0499f0f38c0f94a008034a0362b9e3dca`), preserving the GLM packed
+  projection and depth-one MTP work from `.10.13` together with the Prism loader
+  from `.10.14`. Prior qualification records retain their measured source and
+  identity; MTP-13 governs any source-equivalence identity-only rebind.
+
+- **0.1.61 (2026-10-27)** — Corrects the campaign qualification bootstrap:
+  digest-matched LAB R005/formal R015/sustained evidence records the actual
+  executable and measured source. The signed CLI cut uses MTP-13 identity-only
+  rebind, without remeasurement. Removes campaign-added signed-only,
+  collector/replay and fresh-signed-predecessor prerequisites.
+
+- **0.1.59–0.1.60 (2026-10-26–27)** — The initial signed-only qualification
+  bootstrap was superseded by 0.1.61. The GLM implementation ceiling remains
+  four with signed row/depth bounds one/one; higher bounds require existing
+  per-bound R015 qualification.
+
+- **0.1.58 (2026-10-26)** — Reconciles the sampled-profile campaign with the
+  0.1.57 R009 prompt/head snapshot contract; its SPEC-024-R005 and SPEC-038
+  AC-26 proof and signed cached-turns grant remain required. R013 cross-references
+  SPEC-023-R017's narrow reviewed deterministic native-binding assembly exception
+  without relaxing
+  signed publication, qualification, unchanged-scope canary or exact rollback
+  gates. R002/R004: allow the existing signed sampled
+  profile for GLM-5-Next using R005 exact target-sample matching (mlx-vlm
+  positioned sampling reference). Greedy signatures remain greedy-only; the
+  signed native-row bound remains one pending campaign R015 qualification.
+  R003 binds the packed GLM projection candidate `3.32.3-macprovider.10.13`
+  (`b128c37f…`); new qualification is required for its changed verifier.
+  The exactness description explicitly scopes the fused-shape envelope;
+  arbitrary fallback fixtures do not inherit qualification. The existing
+  recursive packed head was tested at depth two following SGLang positive-depth
+  tuning. Its 0.795–0.860× two-row throughput missed the ordinary-CB floor,
+  so its product adapter was removed and signed depth and row limits remain one.
+  R004 also admits unconstrained GLM tools/history and ordinary reasoning effort
+  following oMLX rendered-prefix semantics. Active grammar and explicit serial
+  tool-call stopping remain ordinary. The campaign fixture now uses the actual
+  production reasoning control instead of ignored chat-template kwargs.
+  The existing GLM greedy profile retains its prior plain-text scope until
+  the signed sampled profile is selected. R015 adds mode-independent privacy-safe
+  v2 observations, distinct projected/measured eligibility, and identical frozen
+  modeled arrivals across full ordinary/mixed CB loads; v1 remains compatible.
+  R003 also names `3.32.3-macprovider.10.14`
   (`9b2766ee…`) for the native Prism schema-2 loader, owned snapshots, lazy
   vision and row-safe attention masks. The tree equals the tested `bd5f45f1…`
   baseline; unproven custom-kernel experiments are excluded. The mlx-swift and
@@ -1940,6 +2173,7 @@ requests.
   it, on its own CB row, and stays native; any other snapshot is a miss for
   it rather than an ordinary reselection. Draft-side head state may enter the
   snapshot entry. No other family or path changes. Related: #2143.
+
 - **0.1.56 (2026-10-25)** — R003/R013/R014/R015: align requalification with
   AGENTS.md HARD RULE 2 and the identity-only rebinds in #2136 and #2141.
   Qualified tuples reuse evidence when a digest or CLI/runtime identity changes

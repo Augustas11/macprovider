@@ -7250,6 +7250,93 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertEqual(committedProposalTokenCount, 0)
     }
 
+    func testNativeMTPConfidenceParksOnlyRejectingRowAndRetriesAfterThirtyTwoCommits() async throws {
+        let gate = AsyncGate()
+        let config = try NativeMTPAdaptationConfig(qualifiedMaximumDepth: 1,
+            decreaseThresholdPPM: 500_000, increaseThresholdPPM: 900_000,
+            maxVerificationPositionsPerCommittedMilli: 4_000)
+        let backend = ScriptedBackend(
+            scripts: ["low": Array(repeating: 8, count: 400), "high": Array(repeating: 7, count: 400),
+                      "ordinary": Array(repeating: 9, count: 400)],
+            prefillTokens: ["low": 8, "high": 7, "ordinary": 9], prefillGate: gate,
+            repeatedNativeProposals: ["low": [6], "high": [7]])
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 512)
+        let scheduler = try await makeScheduler(descriptor: Self.descriptor(maxPhysicalBlocks: 512),
+            maxActiveRows: 3, tokenDeliveryBufferLimit: 512, maxPrefillRowsPerIteration: 3,
+            backend: backend, allocator: allocator)
+        let low = Task { try await scheduler.submit(Self.nativeRequest(id: "low", promptTokens: [1],
+            maxOutputTokens: 130, proposals: [], maximumDepth: 1, adaptationConfig: config)) }
+        try await eventually { await backend.prefillCallCount() == 1 }
+        let high = Task { try await scheduler.submit(Self.nativeRequest(id: "high", promptTokens: [1],
+            maxOutputTokens: 220, proposals: [], maximumDepth: 1, adaptationConfig: config)) }
+        let ordinary = Task { try await scheduler.submit(ContinuousBatchSchedulerRequest(id: "ordinary",
+            conversationKey: "", promptTokens: [1], maxOutputTokens: 220, temperature: 0, topP: 1)) }
+        try await eventually { await scheduler.metrics().waitingCount >= 2 }
+        await gate.open()
+        let lowResult = try await low.value
+        let highResult = try await high.value
+        let ordinaryResult = try await ordinary.value
+        XCTAssertEqual(lowResult.outputTokens, Array(repeating: 8, count: 130))
+        XCTAssertEqual(highResult.outputTokens, Array(repeating: 7, count: 220))
+        XCTAssertEqual(ordinaryResult.outputTokens, Array(repeating: 9, count: 220))
+        let captures = await backend.decodeCaptureFlags()
+        XCTAssertTrue(captures.contains { $0["low"] == true && $0["ordinary"] == false })
+        // A healthy row only takes ordinary for its last output token, when
+        // no proposal plus bonus fits the remaining budget.
+        XCTAssertLessThanOrEqual(captures.filter { $0["high"] != nil }.count, 1)
+        let proposals = await backend.nativeProposalBatches().flatMap { $0 }.filter { $0.requestID == "low" }
+        // First token comes from prefill; 64 rejected commits park this row,
+        // and the next 32 ordinary commits restore its positive-depth probe.
+        XCTAssertTrue(proposals.contains { $0.samplerStep == 65 - 1 })
+        XCTAssertFalse(proposals.contains { (65..<97).contains($0.samplerStep) })
+        XCTAssertTrue(proposals.contains { $0.samplerStep == 97 && $0.maximumProposalDepth == 1 })
+        XCTAssertNotNil(lowResult.nativeMTPCounters)
+        let freeBlocks = await allocator.freeBlockCount()
+        XCTAssertEqual(freeBlocks, 512)
+    }
+
+    func testNativeMTPConfidenceTupleBreakerSurvivesShortRequestsWithoutParkingAnotherTuple() async throws {
+        let config = try NativeMTPAdaptationConfig(qualifiedMaximumDepth: 1,
+            decreaseThresholdPPM: 500_000, increaseThresholdPPM: 900_000,
+            maxVerificationPositionsPerCommittedMilli: 4_000)
+        let ids = (0..<193).map { "short-\($0)" }
+        let backend = ScriptedBackend(scripts: Dictionary(uniqueKeysWithValues: (ids + ["other", "integrity"]).map { ($0, [8, 8, 8]) }),
+            prefillTokens: Dictionary(uniqueKeysWithValues: (ids + ["other", "integrity"]).map { ($0, 8) }),
+            repeatedNativeProposals: Dictionary(uniqueKeysWithValues: (ids + ["other", "integrity"]).map { ($0, [6]) }))
+        let scheduler = try await makeScheduler(maxActiveRows: 1, backend: backend)
+        let fence = Self.nativeMTPFence()
+        for id in ids {
+            if id == "short-64" {
+                // Deliberate R016 rejection fixtures keep their signed depth
+                // even while the buyer tuple is parked in ordinary decode.
+                let probe = try await scheduler.submit(Self.nativeRequest(id: "integrity", promptTokens: [1],
+                    maxOutputTokens: 3, proposals: [], maximumDepth: 1, nativeMTPTupleFence: fence,
+                    adaptationConfig: config, integrityProbe: true))
+                XCTAssertEqual(probe.outputTokens, [8, 8, 8])
+            }
+            let result = try await scheduler.submit(Self.nativeRequest(id: id, promptTokens: [1],
+                maxOutputTokens: 3, proposals: [], maximumDepth: 1, nativeMTPTupleFence: fence,
+                adaptationConfig: config))
+            XCTAssertEqual(result.outputTokens, [8, 8, 8])
+        }
+        let other = try await scheduler.submit(Self.nativeRequest(id: "other", promptTokens: [1],
+            maxOutputTokens: 3, proposals: [], maximumDepth: 1,
+            nativeMTPTupleFence: Self.nativeMTPFence(admission: String(repeating: "b", count: 64)),
+            adaptationConfig: config))
+        XCTAssertEqual(other.outputTokens, [8, 8, 8])
+        let proposed = await backend.nativeProposalBatches().flatMap { $0 }.map(\.requestID)
+        XCTAssertFalse(proposed.contains("short-64"))
+        XCTAssertTrue(proposed.contains("short-128"))
+        XCTAssertFalse(proposed.contains("short-192"))
+        XCTAssertTrue(proposed.contains("other"))
+        XCTAssertTrue(proposed.contains("integrity"))
+        let captures = await backend.decodeCaptureFlags()
+        XCTAssertTrue(captures.contains { $0["short-64"] == true })
+        // A second violating window holds drafting at zero without changing
+        // native request identity, failing output, or suppressing another tuple.
+        XCTAssertTrue(captures.contains { $0["short-192"] == true })
+    }
+
     func testNativeMTPLoadGateHoldsDepthZeroAboveBoundAndRestoresWithHysteresis() async throws {
         let backend = ScriptedBackend(
             scripts: ["gated": Array(100..<160), "ordinary": [31, 32, 33, 34]],
@@ -8750,7 +8837,9 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         completeWindowBytesByDepth: [Int]? = nil,
         directive: NativeMTPAdaptationDirective? = nil,
         nativeMTPTupleFence: NativeMTPTupleFence? = nil,
-        maximumActiveRows: Int = Int.max
+        maximumActiveRows: Int = Int.max,
+        adaptationConfig: NativeMTPAdaptationConfig? = nil,
+        integrityProbe: Bool = false
     ) -> ContinuousBatchSchedulerRequest {
         let bytesByDepth = completeWindowBytesByDepth
             ?? Array(repeating: completeWindowBytes, count: maximumDepth + 1)
@@ -8767,8 +8856,10 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             nativeMTPCompleteWindowBytesByDepth: bytesByDepth,
             nativeMTPMaximumActiveRows: maximumActiveRows,
             nativeMTPTupleFence: nativeMTPTupleFence,
+            nativeMTPIntegrityProbe: integrityProbe,
             nativeMTPProposalTokens: proposals,
-            nativeMTPAdaptationDirective: directive
+            nativeMTPAdaptationDirective: directive,
+            nativeMTPAdaptationConfig: adaptationConfig
         )
     }
 
@@ -9465,6 +9556,7 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
     private let rowFailures: Set<String>
     private let nativeTargetTopTokens: [String: [Int]]
     private let nativeTargetTopTokensByStep: [String: [[Int]]]
+    private let repeatedNativeProposals: [String: [Int]]?
     private let nativeProposalGate: AsyncGate?
     private let nativeProposalError: (any Error)?
     private let nativeProposalErrorAfterCall: Int?
@@ -9532,6 +9624,7 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
         rowFailures: Set<String> = [],
         nativeTargetTopTokens: [String: [Int]] = [:],
         nativeTargetTopTokensByStep: [String: [[Int]]] = [:],
+        repeatedNativeProposals: [String: [Int]]? = nil,
         nativeProposalGate: AsyncGate? = nil,
         nativeProposalError: (any Error)? = nil,
         nativeProposalErrorAfterCall: Int? = nil,
@@ -9564,6 +9657,7 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
         self.rowFailures = rowFailures
         self.nativeTargetTopTokens = nativeTargetTopTokens
         self.nativeTargetTopTokensByStep = nativeTargetTopTokensByStep
+        self.repeatedNativeProposals = repeatedNativeProposals
         self.nativeProposalGate = nativeProposalGate
         self.nativeProposalError = nativeProposalError
         self.nativeProposalErrorAfterCall = nativeProposalErrorAfterCall
@@ -9694,6 +9788,11 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
         }
         if let nativeProposalError {
             throw nativeProposalError
+        }
+        if let repeatedNativeProposals {
+            return Dictionary(uniqueKeysWithValues: rows.map {
+                ($0.requestID, Array((repeatedNativeProposals[$0.requestID] ?? []).prefix($0.maximumProposalDepth)))
+            })
         }
         return nil
     }

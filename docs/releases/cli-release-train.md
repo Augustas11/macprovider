@@ -116,6 +116,25 @@ similar-name processes survived a 46-second negative check. These ad-hoc test
 bundles use an exact fixture-code allowlist; the unmodified production Team-ID
 gate rejects them. Repeat signed-byte acceptance before release promotion.
 
+
+## Native-MTP campaign release readiness
+
+Related: #2144; campaign PR #2152 remains in progress and is not a merged
+release-train row. Refresh both trains and tags before assigning the next
+provider identity; the campaign currently stages 1.8.274, while 1.8.273 is a
+coordinator runtime identity.
+
+Retain one native row, depth one and four ordinary CB slots. Sampled, tools,
+history and reasoning eligibility requires genuine R005 correctness, applicable
+R015 qualification, representative replay and signed serving evidence. The
+combined production prefix-cache change invalidates the campaign's earlier
+identity-only greedy carry-forward assumption; that record is withdrawn.
+The existing representative-collector deployment depends on a newly qualified
+signed greedy parent, while that qualification requires representative replay.
+This bootstrap dependency remains unresolved; no qualification exemption,
+stale-evidence rebind or MTP-off deployment is authorized by this train record.
+The exploratory goal matrix does not constitute admission qualification.
+
 ## Following CLI release — net changes vs 1.8.274 (tracked 2026-10-27)
 
 The 1.8.274 candidate was cut at `f8b6856e5`. It contains #2162 (chat-first

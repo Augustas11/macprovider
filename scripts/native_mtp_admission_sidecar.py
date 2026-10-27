@@ -289,16 +289,13 @@ def validate_entry(entry: object, path: str) -> dict:
     _str(entry["hardware_class"], f"{path}.hardware_class", HARDWARE_CLASS)
     _int(entry["ram_bytes"], f"{path}.ram_bytes", 1, INT_MAX)
     bound = _int(entry["max_native_active_rows"], f"{path}.max_native_active_rows", 1, 8)
-    # SPEC-048 MTP-2 (0.1.43): glm5_next serves native MTP on one active row.
-    if entry["mtp_family_adapter"] == "glm5_next_mtp_v1" and bound > 1:
-        fail(f"{path}.max_native_active_rows", "glm5_next_mtp_v1 signs at most 1 native active row")
+    # Implementation ceiling; signed policy stays at its independently qualified bound.
+    if entry["mtp_family_adapter"] == "glm5_next_mtp_v1" and bound > 4:
+        fail(f"{path}.max_native_active_rows", "glm5_next_mtp_v1 supports at most 4 native active rows")
     if bound > slots:
         fail(f"{path}.max_native_active_rows", "exceeds qualified_slots")
     if entry["request_feature_profile"] not in PROFILES:
         fail(f"{path}.request_feature_profile", "unsupported")
-    # SPEC-048 MTP-2: the glm5_next drafter proposes greedily only.
-    if entry["mtp_family_adapter"] == "glm5_next_mtp_v1" and entry["request_feature_profile"] != "native_mtp_greedy_text_v1":
-        fail(f"{path}.request_feature_profile", "glm5_next_mtp_v1 is greedy only")
     _int(entry["max_prompt_tokens"], f"{path}.max_prompt_tokens", 1, 1_048_576)
     low = _int(entry["decrease_threshold_ppm"], f"{path}.decrease_threshold_ppm", 0, 1_000_000)
     high = _int(entry["increase_threshold_ppm"], f"{path}.increase_threshold_ppm", 0, 1_000_000)

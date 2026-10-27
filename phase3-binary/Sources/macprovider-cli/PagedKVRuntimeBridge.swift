@@ -871,6 +871,28 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         if start < widths.count { groups.append(start ..< widths.count) }
         return groups
     }
+    /// oMLX fused_batch.advance groups equal draft depths before verification.
+    /// Keep every row's real width and the vector-kernel token cap. MTP-7
+    /// requires oldest-ready rows first, so cohorts stop at a width change
+    /// instead of moving a later compatible row ahead of an older row.
+    static func packedVerifyGroups(widths: [Int], maxTokens: Int) -> [[Int]] {
+        var groups: [[Int]] = []
+        var start = 0
+        while start < widths.count {
+            let width = widths[start]
+            // Division avoids overflow even for an unbounded test limit.
+            // An individually wider row still runs alone, as before.
+            let rowLimit = max(1, maxTokens / max(1, width))
+            var end = start + 1
+            while end < widths.count, end - start < rowLimit, widths[end] == width {
+                end += 1
+            }
+            groups.append(Array(start..<end))
+            start = end
+        }
+        return groups
+    }
+
     private var activeOperations = 0
     private var cancelRequested = false
     /// Set once a ragged prefill forward attended outside
@@ -880,6 +902,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     /// groups take the serial path.
     private var raggedPrefillAttentionBypassed = false
     private var cancellationWaiters: [CheckedContinuation<Void, Never>] = []
+    private var labNativeMTPNumericalOracle: NativeMTPLabNumericalOracle.Binding?
     #if DEBUG || MACPROVIDER_LAB_HARNESS
     private var labNativeMTPStateDigestObserver: NativeMTPStateDigestObserver?
     private var nativeMTPDrafterRecomputeDigests: [String: String] = [:]
@@ -1046,6 +1069,12 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                                     "continuous_batching_invalid_logits_shape"
                                 )
                             }
+                            for (index, input) in inputs.enumerated() where input.sampleFirstToken {
+                                self.labCaptureTargetLogits(
+                                    requestID: input.requestID, position: input.samplerStep,
+                                    tokenIDs: [sampledTokens![index]],
+                                    logits: output.logits[index, -1, 0...].reshaped(1, -1))
+                            }
                         } else {
                             sampledTokens = nil
                         }
@@ -1145,6 +1174,11 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                                 logits: output.logits[0..., -1, 0...],
                                 rows: [Self.samplerRow(input)]
                             ).asArray(Int.self).first
+                            if let sampledToken {
+                                self.labCaptureTargetLogits(
+                                    requestID: input.requestID, position: input.samplerStep,
+                                    tokenIDs: [sampledToken], logits: output.logits[0..., -1, 0...])
+                            }
                         } else {
                             sampledToken = nil
                         }
@@ -1525,19 +1559,21 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
 
         clearDecodeSession()
         let ordered = inputs.sorted { $0.packedRowIndex < $1.packedRowIndex }
-        let groups = Self.verifyGroups(
+        let groups = Self.packedVerifyGroups(
             widths: ordered.map(\.verifiedInputTokenCount),
             maxTokens: serializesPaddedRows ? 1 : maxVerifyTokensPerForward
         )
         guard groups.count > 1 else {
-            return try await verifyNativeMTPPackedGroup(rows: inputs)
+            return try await verifyNativeMTPPackedGroup(rows: ordered)
         }
         var verifiedRows: [NativeMTPVerifiedRow] = []
         for group in groups {
-            // Each group verifies as its own packed round, rows re-indexed
-            // from 0; results keep the round's packed row indices.
-            let groupInputs = ordered[group].enumerated().map { index, input in
-                ContinuousBatchNativeMTPVerifyInput(
+            // Depth cohorts keep each query's serial width, avoiding both
+            // wasted padding and batch-shape-dependent kernel selection.
+            // Re-index only within the cohort, then restore scheduler identity.
+            let groupInputs = group.enumerated().map { index, originalIndex in
+                let input = ordered[originalIndex]
+                return ContinuousBatchNativeMTPVerifyInput(
                     requestID: input.requestID,
                     currentToken: input.currentToken,
                     proposalTokens: input.proposalTokens,
@@ -1558,7 +1594,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             verifiedRows += groupRows.map { row in
                 NativeMTPVerifiedRow(
                     schedulerRowID: row.schedulerRowID,
-                    packedRowIndex: ordered[group.lowerBound + row.packedRowIndex].packedRowIndex,
+                    packedRowIndex: ordered[group[row.packedRowIndex]].packedRowIndex,
                     proposedTokenIDs: row.proposedTokenIDs,
                     targetTopTokenIDs: row.targetTopTokenIDs
                 )
@@ -1648,6 +1684,18 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                     )
                 }
             )
+            for (row, tokens) in zip(output.rows, topTokenIDsByRow) {
+                let input = inputs[row.map.rowIndex]
+                // Construct this capture view only when the observer is active.
+                self.lock.lock()
+                let binding = self.labNativeMTPNumericalOracle
+                self.lock.unlock()
+                if binding?.oracle.wantsCapture(requestID: input.requestID, position: input.samplerStep) == true {
+                    self.labCaptureTargetLogits(
+                        requestID: input.requestID, position: input.samplerStep, tokenIDs: tokens,
+                        logits: concatenated([row.proposalLogits, row.bonusLogits], axis: 0), speculative: true)
+                }
+            }
             return zip(output.rows, topTokenIDsByRow).map { row, targetTopTokenIDs in
                 let input = inputs[row.map.rowIndex]
                 return NativeMTPVerifiedRow(
@@ -1697,7 +1745,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                     inputs: inputs,
                     transactions: [:]
                 )
-                #endif
+                    #endif
                 return
             }
             let transactions = try self.consumeNativeMTPPendingTransactions(for: inputs)
@@ -1774,6 +1822,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             for (input, _) in committing {
                 self.invalidateDecodeSession(containing: input.requestID)
             }
+            self.labResolveNumericalOracleRound(inputs)
             #if DEBUG || MACPROVIDER_LAB_HARNESS
             try self.recordNativeMTPStateDigest(
                 phase: .afterFinalize,
@@ -1784,6 +1833,44 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             #endif
         }
     }
+
+    func installLabNativeMTPNumericalOracle(_ binding: NativeMTPLabNumericalOracle.Binding?) {
+        lock.lock()
+        labNativeMTPNumericalOracle = binding
+        lock.unlock()
+    }
+
+    private func labCaptureTargetLogits(
+        requestID: String, position: Int, tokenIDs: [Int], logits: MLXArray,
+        speculative: Bool = false
+    ) {
+        lock.lock()
+        let binding = labNativeMTPNumericalOracle
+        lock.unlock()
+        guard let binding, binding.oracle.wantsCapture(requestID: requestID, position: position) else { return }
+        for (offset, token) in tokenIDs.enumerated() {
+            let step = position + offset
+            guard binding.oracle.wantsCapture(requestID: requestID, position: step) else { break }
+            // No extra evaluation, transfer or graph retention unless installed.
+            let vector = logits[offset].asType(.float32).asArray(Float.self)
+            binding.oracle.capture(
+                role: binding.role, requestID: requestID, position: step,
+                tokenID: token, logits: vector, speculative: speculative)
+        }
+    }
+
+    private func labResolveNumericalOracleRound(_ inputs: [ContinuousBatchNativeMTPFinalizeInput]) {
+        lock.lock()
+        let binding = labNativeMTPNumericalOracle
+        lock.unlock()
+        guard let binding, binding.role == .native else { return }
+        for input in inputs {
+            binding.oracle.resolveNativeRound(
+                requestID: input.requestID,
+                acceptedTokenIDs: input.shouldCommit ? input.acceptedTokenIDs : nil)
+        }
+    }
+
 
     #if DEBUG || MACPROVIDER_LAB_HARNESS
     func installLabNativeMTPStateDigestObserver(_ observer: NativeMTPStateDigestObserver?) {
@@ -2443,6 +2530,12 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                     throw ContinuousBatchSchedulerError.unsupported("continuous_batching_invalid_logits_shape")
                 }
                 for index in supportedInputs.indices {
+                    labCaptureTargetLogits(
+                        requestID: supportedInputs[index].requestID,
+                        position: supportedInputs[index].samplerStep + stepIndex,
+                        tokenIDs: [stepTokens[index]], logits: logits[index, -1, 0...].reshaped(1, -1))
+                }
+                for index in supportedInputs.indices {
                     collected[index].append(stepTokens[index])
                 }
                 try throwIfCancelRequested()
@@ -2517,6 +2610,12 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 ).asArray(Int.self)
                 guard stepSampled.count == supportedInputs.count else {
                     throw ContinuousBatchSchedulerError.unsupported("continuous_batching_invalid_logits_shape")
+                }
+                for index in supportedInputs.indices {
+                    labCaptureTargetLogits(
+                        requestID: supportedInputs[index].requestID,
+                        position: supportedInputs[index].samplerStep + stepIndex,
+                        tokenIDs: [stepSampled[index]], logits: output.logits[index, -1, 0...].reshaped(1, -1))
                 }
                 if !captureIndices.isEmpty {
                     guard let hidden = output.state?[mtpLastHiddenStatesKey],

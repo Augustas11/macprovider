@@ -300,7 +300,10 @@ func (h *scoringHarness) fakeScorer(providerID, assignedID string, conn net.Conn
 		}
 		if strings.Contains(req.OutputText, "CHEAP") {
 			result.Top1Matches = 55
-			result.SumLogprob = -160
+			// Fail both greedy and sampled bands: sampled verification ignores
+			// top-1 and its cold log-probability floor is lower than greedy's.
+			// Otherwise random probe ordering can make this cheater pass.
+			result.SumLogprob = -700
 		}
 		if _, short := h.short.Load(providerID); short {
 			result.ScoredTokens, result.Top1Matches, result.SumLogprob = 4, 4, -1
@@ -337,6 +340,26 @@ func (h *scoringHarness) state(providerID string) computeintegrity.VerificationS
 		return ""
 	}
 	return st.State
+}
+
+func TestComputeScoringFixtureDistinguishesCheaterAtEachScoredTemperature(t *testing.T) {
+	h := newScoringHarness(t, map[string]string{"scorer": "github:1"}, nil)
+	p, _ := h.registry.Resolve("scorer", "as-scorer")
+	for _, temperature := range []float64{0, 0.7} {
+		body, _ := json.Marshal(map[string]any{"model": scoringModel, "temperature": temperature})
+		band := computeintegrity.PriorBand(computeintegrity.SamplingClassFor(temperature))
+		for _, output := range []string{"HONEST output", "CHEAP output"} {
+			result, ok := h.engine.score(context.Background(), scoringCandidate(p), body, output, "", false)
+			if !ok {
+				t.Fatal("fixture scorer did not answer")
+			}
+			measurement := computeintegrity.Measurement{ScoredTokens: result.ScoredTokens, Top1Matches: result.Top1Matches, SumLogprob: result.SumLogprob}
+			inBand, _ := band.Evaluate(measurement)
+			if !measurement.Valid() || inBand != (output == "HONEST output") {
+				t.Fatalf("temperature %v output %q: valid=%v in_band=%v", temperature, output, measurement.Valid(), inBand)
+			}
+		}
+	}
 }
 
 func TestComputeScoringHonestProvidersPassAndCheaterFailsWithHold(t *testing.T) {
@@ -397,7 +420,9 @@ func TestComputeScoringHonestProvidersPassAndCheaterFailsWithHold(t *testing.T) 
 	if got := h.state("cheat"); got != computeintegrity.VerificationRecovering && got != computeintegrity.VerificationFailed {
 		t.Fatalf("after cooldown state = %s", got)
 	}
-	for j := 0; j < 12 && h.state("cheat") == computeintegrity.VerificationRecovering; j++ {
+	// A contended SQLite commit can defer the cooldown transition. Retry
+	// until recovery has actually opened its hold and completed.
+	for j := 0; j < 12 && (len(h.holds.snapshot()) < 2 || h.state("cheat") == computeintegrity.VerificationRecovering); j++ {
 		h.round(20 * time.Minute)
 	}
 	if got := h.state("cheat"); got != computeintegrity.VerificationFailed {

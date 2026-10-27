@@ -94,6 +94,8 @@ echo "==> Building Release configuration (this takes ~5-10 min)..."
 BUILD_LOG="$PACKAGE_WORK_DIR/package-build.log"
 if ! xcodebuild -scheme macprovider-cli \
                 -configuration Release \
+                SWIFT_ACTIVE_COMPILATION_CONDITIONS='' \
+                OTHER_SWIFT_FLAGS='' \
                 -destination 'generic/platform=macOS' \
                 -derivedDataPath "$RELEASE_DIR" \
                 -onlyUsePackageVersionsFromResolvedFile \

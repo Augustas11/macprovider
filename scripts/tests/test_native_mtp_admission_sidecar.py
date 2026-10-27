@@ -73,7 +73,7 @@ def resolved_tuple():
 
 def glm_tuple():
     """A stand-in GLM-5.3-Flash tuple (SPEC-048 0.1.35 glm5_next_mtp_v1):
-    embedded MTP, depth 1, greedy only. Digests are placeholders."""
+    embedded MTP, depth 1, greedy profile. Digests are placeholders."""
     value = resolved_tuple()
     entry = value["entry"]
     entry["model_key"] = GLM_KEY
@@ -319,24 +319,30 @@ class NativeMTPAdmissionMultiEntryTests(unittest.TestCase):
             identity(build(self.qwen, release_input()))["native_mtp_admission_tuple_sha256"][0],
         )
 
-    def test_glm_tuple_signs_only_the_greedy_profile(self):
-        # SPEC-048 MTP-2: the glm5_next drafter proposes greedily only.
+    def test_glm_tuple_signs_greedy_and_sampled_profiles(self):
+        # Greedy proposals are verified against the ordinary target sampler.
         body = json.loads(build([self.qwen, self.glm], release_input()))
         self.assertEqual(body["entries"][1]["request_feature_profile"], "native_mtp_greedy_text_v1")
         sampled = copy.deepcopy(self.glm)
         sampled["entry"]["request_feature_profile"] = "native_mtp_sampled_text_v1"
-        with self.assertRaisesRegex(SidecarError, "greedy only"):
-            build([self.qwen, sampled], release_input())
+        sampled_body = json.loads(build([self.qwen, sampled], release_input()))
+        self.assertEqual(sampled_body["entries"][1]["request_feature_profile"], "native_mtp_sampled_text_v1")
+        self.assertEqual(sampled_body["entries"][1]["max_native_active_rows"], 1)
+        # Profile qualification is part of the signed tuple identity.
+        self.assertNotEqual(identity(canonical_bytes(body)), identity(canonical_bytes(sampled_body)))
         # Qwen may still sign the sampled profile.
         self.assertEqual(body["entries"][0]["request_feature_profile"], self.qwen["entry"]["request_feature_profile"])
 
-    def test_glm_tuple_signs_at_most_one_native_active_row(self):
-        # SPEC-048 MTP-2 (0.1.43): 4 rows decoded at 0.79x ordinary.
+    def test_glm_implementation_ceiling_preserves_current_policy_and_permits_future_bounds(self):
         body = json.loads(build([self.qwen, self.glm], release_input()))
         self.assertEqual(body["entries"][1]["max_native_active_rows"], 1)
-        wide = copy.deepcopy(self.glm)
-        wide["entry"]["max_native_active_rows"] = 2
-        with self.assertRaisesRegex(SidecarError, "at most 1 native active row"):
+        for bound in (2, 4):
+            wide = copy.deepcopy(self.glm)
+            wide["entry"]["max_native_active_rows"] = bound
+            wider = json.loads(build([self.qwen, wide], release_input()))
+            self.assertEqual(wider["entries"][1]["max_native_active_rows"], bound)
+        wide["entry"]["max_native_active_rows"] = 5
+        with self.assertRaisesRegex(SidecarError, "at most 4 native active rows"):
             build([self.qwen, wide], release_input())
 
     def test_duplicate_or_empty_tuple_lists_fail_closed(self):

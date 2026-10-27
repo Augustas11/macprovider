@@ -13,13 +13,99 @@ the private engineering archive; the evidence code reads stays under
 
 ## Preconditions
 
-- The campaign PR is merged default-off after the full lab campaign passed, and
+- The campaign implementation ships enabled after the full lab campaign passed;
+  eligibility still requires its qualified signed deployment profile, and
   its freeze audit over the full diff had 0 Critical, 0 High and 0 Medium
   findings.
 - The corrected continuous-batching policy entry for the tuple exists. It is an
   external input to this campaign.
 - No unreleased local binary is joined to the live coordinator (SPEC-048 R014
   item 9).
+
+## Optional representative request-shape observations
+
+These observations are optional and do not gate the campaign R005/formal
+R015 qualification. The existing v1 collector remains off-only. To observe an already-serving
+qualified tuple without changing its actual `off`/`auto` mode, explicitly select
+`MACPROVIDER_NATIVE_MTP_SHAPE_CAPTURE_SCHEMA=v2` with the existing capture-directory
+opt-in and bounded record/byte limits. A mode change starts a new capture file.
+The old signed GLM greedy profile keeps its plain-text scope on the new binary;
+expanded tools/history/reasoning and sampling require the signed sampled profile.
+Observation neither broadens admission nor activates an unqualified tuple.
+
+Before collection, durably preregister the persistable population, period,
+limits, omission accounting and modeled replay schedule. Review the exact
+sanitized capture/status bytes for privacy before projection. Preserve observed
+selection/path separately from candidate pre-capacity shape eligibility and
+fresh measured admission. Unknown or unreproducible controls leave qualification
+pending; do not drop their request/token weight or collect nonpersistable data.
+
+Use the matching v2 projection/replay with exact capture, tuple-bounds and policy
+bindings, including the existing bench-policy bytes. Execute fresh ordinary and
+mixed paired loads across the full qualified CB slots with the same frozen
+wave-index-times-`arrival_interval_ms` stagger and cache-conflict ordering.
+Capture completion order is not an observed arrival schedule. Count ordinary
+rows toward the signed native cap; do not split waves by native eligibility.
+An observation is not an ordinary control, and offline projection remains
+`PENDING_REAL_LAB_REPLAY`. SPEC-048 R015's existing representative, mixed-load
+and promotion gates still apply.
+
+## Post-cut native binding assembly
+
+A CLI cut fixes binary SHA-256, CDHash and shipped Metal identity after the
+campaign source is merged. Use only the committed
+`ops/recipes/native-mtp-glm53-binding.v1.json` to derive those bindings without
+another source change. Arbitrary local catalog directories remain refused.
+
+Keep input records and bundles outside the checkout in operator-controlled
+storage. The helper verifies the exact merged source, authenticated signed
+candidate assets and existing trusted signing key. It cannot establish
+qualification from a caller-supplied success flag. Its first phase retains the
+already-qualified greedy request scope, one native row, depth one and all four
+CB slots. The later sampled phase preserves that signed CLI and additionally
+requires genuine R005 and formal R015 matrix/sustained results from the
+digest-matched LAB build, hosted negative tests and the complete freeze audit.
+The LAB archive retains its measured source and executable SHA-256/CDHash
+(when present), plus the embedded decode-path digest in `qualification/source.json`.
+The final signed cut uses the MTP-13 identity-only rebind; no measurements are
+repeated after that cut and no fresh signed predecessor is a qualification gate.
+Final tagging and live recommendation remain required for the sampled phase.
+
+The helper accepts the closed input schema enforced by
+`native_mtp_binding_bundle.py`; use `derive --help` for its required paths.
+`derive` materializes feed bytes for the matched-pair intent to pin, and returns
+`DERIVED_UNSEALED`; it grants no activation authority. After the exact intent
+and signed-byte records are included, `seal` signs the inventory and rederives
+all feeds. `verify` repeats derivation and validates every referenced proof:
+
+```bash
+python3 scripts/native_mtp_binding_bundle.py verify \
+  --bundle "$binding_bundle" --repo "$PWD" --commit "$campaign_source" \
+  --recipe ops/recipes/native-mtp-glm53-binding.v1.json
+```
+
+Set `CATALOG_NATIVE_BINDING_BUNDLE` in the private ops environment and use the
+existing entry point in order:
+
+```bash
+scripts/ops/catalog-activate.sh status
+scripts/ops/catalog-activate.sh next
+scripts/ops/catalog-activate.sh next --run
+```
+
+For the first phase, also provide the exact private `CATALOG_SIGNED_PAIR_PLAN`.
+The matched transaction arms independent recovery before pausing, retains the
+prior signed binary and policy, and uses a terminal acknowledgement before
+releasing custody. Reconciliation takes priority over candidate freshness.
+Never substitute a generic provider restart for this pair transaction.
+
+The content train freezes the bundle, revalidates it under its publication
+lease, and ships only the flat verified release feeds. Its derived ledger is
+subject to the existing predecessor, exclusion, Tier-2 history, pricing,
+coverage, coordinator dry-load, custody, rollback and exact-byte gates.
+Signing a bundle does not bypass any of them. The second phase still uses the
+ordinary final-tag/recommendation publish gate and requires a real attributed
+gateway request with unchanged accounting and settlement.
 
 ## Order
 

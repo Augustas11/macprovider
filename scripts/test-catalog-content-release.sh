@@ -564,12 +564,14 @@ STUB
 # The reviewed repository (tooling + committed release) at one commit.
 # ---------------------------------------------------------------------------
 R="$T/repo"
-mkdir -p "$R/scripts/lib" "$R/ops/pearl-updater" "$R/phase3-binary/catalog/autotune" "$R/phase3-binary/dist/static"
+mkdir -p "$R/scripts/lib" "$R/ops/pearl-updater" "$R/ops/recipes" "$R/phase3-binary/catalog/autotune" "$R/phase3-binary/dist/static"
 cp "$root/scripts/catalog-content-release.sh" "$root/scripts/pearl_autotune_deploy_lock.py" \
    "$root/scripts/catalog-verifier-bundle.txt" "$root/scripts/autotune_window.py" \
    "$root/scripts/openrouter_pricing_engine.py" "$root/scripts/cb_release_baselines.py" \
    "$root/scripts/native_mtp_admission_sidecar.py" "$root/scripts/native_mtp_revocation_slots.py" \
    "$root/scripts/buyer_ux_conformance.py" "$root/scripts/sign-catalog.go" "$R/scripts/"
+cp "$root/scripts/native_mtp_binding_bundle.py" "$root/scripts/native_mtp_signed_serving_proof.py" "$R/scripts/"
+cp "$root/ops/recipes/native-mtp-glm53-binding.v1.json" "$R/ops/recipes/"
 # A macOS checkout tags files with extended attributes (com.apple.provenance);
 # bsdtar would ship them as AppleDouble ._<name> members, which Pearl's GNU tar
 # (emulated by the fake ssh) extracts as extra files beside the reviewed tools.

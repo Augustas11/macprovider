@@ -2671,7 +2671,7 @@ actor CoordinatorClient {
     // connection and the group cancels its sibling, so the error unwinds to
     // runReconnectLoop exactly as before.
     private func receiveLoop(_ socket: ProviderWebSocketTask) async throws {
-        let (inbox, continuation) = AsyncStream.makeStream(
+        let (inbox, continuation) = AsyncThrowingStream<URLSessionWebSocketTask.Message, Error>.makeStream(
             of: URLSessionWebSocketTask.Message.self,
             bufferingPolicy: .unbounded
         )
@@ -2685,27 +2685,30 @@ actor CoordinatorClient {
             // `continuation` (both Sendable), never `self`, so nothing here
             // hops onto the actor and stalls the next receive().
             group.addTask {
-                defer { continuation.finish() }
-                while !Task.isCancelled {
-                    let message: URLSessionWebSocketTask.Message
-                    do {
+                do {
+                    while !Task.isCancelled {
+                        let message: URLSessionWebSocketTask.Message
                         message = try await socket.receive()
-                    } catch {
-                        Self.keepaliveDebug("ws_receive_error error=\(error)")
-                        throw error
+                        guard backlog.add(CoordinatorInboundBacklog.byteCount(of: message)) else {
+                            Self.keepaliveDebug("ws_inbound_backlog_exceeded limit=\(backlog.limitBytes)")
+                            throw CoordinatorInboundBacklogExceeded(limitBytes: backlog.limitBytes)
+                        }
+                        continuation.yield(message)
                     }
-                    guard backlog.add(CoordinatorInboundBacklog.byteCount(of: message)) else {
-                        Self.keepaliveDebug("ws_inbound_backlog_exceeded limit=\(backlog.limitBytes)")
-                        throw CoordinatorInboundBacklogExceeded(limitBytes: backlog.limitBytes)
-                    }
-                    continuation.yield(message)
+                    continuation.finish()
+                } catch {
+                    // Finishing normally here lets the drainer win group.next()
+                    // and masks a socket failure as a clean disconnect.
+                    continuation.finish(throwing: error)
+                    Self.keepaliveDebug("ws_receive_error error=\(error)")
+                    throw error
                 }
             }
 
             // Drainer task: serial handle() preserves frame ordering. The actor
             // hop on self.handle is the serialization point and is race-free.
             group.addTask { [self] in
-                for await message in inbox {
+                for try await message in inbox {
                     try Task.checkCancellation()
                     defer { backlog.remove(CoordinatorInboundBacklog.byteCount(of: message)) }
                     try await handle(message)
@@ -2856,6 +2859,8 @@ actor CoordinatorClient {
             try await inferenceRelay.handleInferenceRequest(dict)
         case LosslessnessProbeProtocol.requestType, LosslessnessProbeProtocol.encryptedRequestType:
             try await handleLosslessnessProbeRequest(dict)
+        case "compute_integrity_probe_v1.request", "compute_integrity_probe_v1.encrypted_request":
+            try await handleNativePathProbeRequest(dict, profile: NativePathProbeProtocol.compute)
         case "cancel_request":
             guard wsTunneledMode, let inferenceRelay else {
                 try await sendNAK(
@@ -3846,6 +3851,51 @@ actor CoordinatorClient {
         return wholeSeconds.date(from: raw)
     }
 
+    private func handleNativePathProbeRequest(_ message: [String: Any], profile: String) async throws {
+        do { try await handleEnabledNativePathProbeRequest(message, profile: profile) }
+        catch {
+            try await sendNAK(inReplyTo: message["type"] as? String ?? profile + ".request", code: "invalid_message", message: "invalid native diagnostic request")
+        }
+    }
+
+    private func handleEnabledNativePathProbeRequest(_ message: [String: Any], profile: String) async throws {
+        guard coordinatorSessionAccepted else { throw LosslessnessProbeError.invalidEnvelope }
+        let encrypted = message["type"] as? String == profile + ".encrypted_request"
+        let requestID = message["request_id"] as? String
+        let outer: [String: Any]
+        if encrypted {
+            guard let tier2Session, let requestID else { throw LosslessnessProbeError.invalidEnvelope }
+            outer = try tier2Session.openLosslessnessProbeRequestPayload(message: message, requestID: requestID, profile: profile).outerEnvelope
+        } else {
+            guard tier2Session == nil else { throw LosslessnessProbeError.invalidEnvelope }
+            outer = message
+        }
+        try await finishNativePathProbeRequest(outer, profile: profile, encryptedRequestID: encrypted ? requestID : nil)
+    }
+
+    private func finishNativePathProbeRequest(_ outer: [String: Any], profile: String, encryptedRequestID: String?) async throws {
+        guard coordinatorSessionAccepted else { throw LosslessnessProbeError.invalidEnvelope }
+        let request = try NativePathProbeProtocol.decode(outer, profile: profile)
+        guard encryptedRequestID == nil || encryptedRequestID == request.probeID else { throw LosslessnessProbeError.invalidEnvelope }
+        let epoch = connectionEpoch
+        let snapshot = await modelRuntime.currentSnapshot()
+        guard connectionEpoch == epoch, coordinatorSessionAccepted else { throw LosslessnessProbeError.invalidEnvelope }
+        var actual: [String: Any] = [:]
+        if let offer = snapshot.nativeMTPTupleOffer, let identity = nativeMTPTupleOfferWireIdentity(for: offer) {
+            actual = ["model_id": offer.runtimeTuple.modelID, "target_model_hash": offer.runtimeTuple.modelHash,
+                      "target_generation": offer.targetGeneration, "tokenizer_identity": offer.runtimeTuple.tokenizerDigest,
+                      "native_mtp_runtime_tuple_sha256": identity.nativeMTPRuntimeTupleSHA256]
+        }
+        // R021/R018 always reject the missing independently trusted execution
+        // binding before any measurement. Capability is NOT an actual path:
+        // actual_decode_path remains null, even with a known current tuple.
+        let result = try NativePathProbeProtocol.result(request, actual: actual)
+        if let encryptedRequestID {
+            guard let tier2Session else { throw LosslessnessProbeError.invalidEnvelope }
+            try await send(tier2Session.sealLosslessnessProbeResult(requestID: encryptedRequestID, outerEnvelope: result, profile: profile))
+        } else { try await send(result) }
+    }
+
     private func handleLosslessnessProbeRequest(_ message: [String: Any]) async throws {
         guard appConfig.losslessnessProbeEnabled else {
             try await sendNAK(
@@ -3895,6 +3945,10 @@ actor CoordinatorClient {
         }
 
         let requestEnvelope = try LosslessnessProbeProtocol.decodeEnvelope(outer, expectedType: LosslessnessProbeProtocol.requestType)
+        if requestEnvelope.payload["decode_path"] as? String == "native_mtp" {
+            try await finishNativePathProbeRequest(outer, profile: LosslessnessProbeProtocol.version, encryptedRequestID: encryptedRequestID)
+            return
+        }
         let requestPayload = try LosslessnessProbeProtocol.decodeRequestPayload(requestEnvelope.payload)
         if let encryptedRequestID, encryptedRequestID != requestEnvelope.probeID {
             try await sendNAK(inReplyTo: LosslessnessProbeProtocol.encryptedRequestType, code: "invalid_message", message: "losslessness encrypted request_id must match probe_id")

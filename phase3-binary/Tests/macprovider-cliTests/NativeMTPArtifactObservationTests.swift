@@ -1159,6 +1159,50 @@ final class NativeMTPArtifactObservationTests: XCTestCase {
         }
     }
 
+    func testCompressedContainerIsRejectedBeforeAnyTensorAllocation() throws {
+        let config = #"{"torch_dtype":"bfloat16","text_config":{"mtp_num_hidden_layers":2}}"#
+        // Gzip and ZIP magic are not a safetensors header length. No decoder is
+        // invoked: even a compressed stream advertising an enormous expansion
+        // must be rejected by the bounded metadata parser before tensor load.
+        for prefix in [
+            [UInt8(0x1f), 0x8b, 0x08, 0x00, 0xff, 0xff, 0xff, 0xff],
+            [0x50, 0x4b, 0x03, 0x04, 0xff, 0xff, 0xff, 0xff],
+        ] {
+            try withRawFixture(configData: Data(config.utf8),
+                               safetensors: [("model.safetensors", Data(prefix))]) { directory in
+                XCTAssertThrowsError(try NativeMTPArtifactObserver.observe(directory: directory)) { error in
+                    guard case .malformedSafetensors(let reason) = error as? NativeMTPArtifactObservationError else {
+                        return XCTFail("unexpected error \(error)")
+                    }
+                    XCTAssertTrue(reason.contains("header length"))
+                }
+            }
+        }
+    }
+
+    func testExternalTensorReferenceCannotReplaceRequiredInlineOffsets() throws {
+        let config = #"{"torch_dtype":"bfloat16","text_config":{"mtp_num_hidden_layers":2}}"#
+        for reference in ["https://example.invalid/weights", "file:///private/weights", "../weights"] {
+            let object: [String: Any] = [
+                "model.layers.0.mlp.down_proj.weight": [
+                    "dtype": "BF16", "shape": [1, 1], "data_file": reference,
+                ],
+            ]
+            let header = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+            var length = UInt64(header.count).littleEndian
+            var bytes = withUnsafeBytes(of: &length) { Data($0) }
+            bytes.append(header)
+            try withRawFixture(configData: Data(config.utf8),
+                               safetensors: [("model.safetensors", bytes)]) { directory in
+                XCTAssertThrowsError(try NativeMTPArtifactObserver.observe(directory: directory)) { error in
+                    guard case .malformedSafetensors = error as? NativeMTPArtifactObservationError else {
+                        return XCTFail("unexpected error \(error)")
+                    }
+                }
+            }
+        }
+    }
+
     private enum LayerCountPlacement {
         case root
         case textConfig
