@@ -2797,6 +2797,13 @@ struct AutotuneRecommendEngine {
                 && score.eligible
                 && (minRAMGB(of: score).map(Self.isRAMClassOnboardingSKU) ?? false)
         }
+        // SPEC-023 §4.1: eligibility remains authoritative; this exact
+        // catalog identity is preferred only on the 8 GB tier.
+        func preferred8GBModel(_ score: AutotuneCandidateScore) -> Bool {
+            request.hardware.memoryGB == 8 && score.eligible
+                && score.catalogKey.lowercased() == "prism-ml/ternary-bonsai-2-2b-mlx-2bit"
+        }
+        let eightGBPreferenceActive = scoredUnsorted.contains(where: preferred8GBModel)
         // The earning-potential tiebreakers shared by the sort and, below, the
         // §6 transcript. Kept identical so the two never diverge.
         func rawScoreOrdering(_ a: AutotuneCandidateScore, _ b: AutotuneCandidateScore) -> Bool {
@@ -2815,10 +2822,12 @@ struct AutotuneRecommendEngine {
         let scored = scoredUnsorted
         .sorted { a, b in
             if a.eligible != b.eligible { return a.eligible && !b.eligible }
+            let preferA = preferred8GBModel(a)
+            let preferB = preferred8GBModel(b)
+            if preferA != preferB { return preferA }
             // RAM-class-matched rows outrank the demoted onboarding SKU
-            // regardless of raw score; this is the only place the score order
-            // is overridden, and it is a stable per-row key so the sort stays
-            // transitive.
+            // regardless of raw score. Both policy overrides use stable
+            // per-row keys so the sort stays transitive.
             let demoteA = ramClassDemoted(a)
             let demoteB = ramClassDemoted(b)
             if demoteA != demoteB { return !demoteA }
@@ -2831,10 +2840,18 @@ struct AutotuneRecommendEngine {
             if next.eligible {
                 // The selected row keeps the stable
                 // `selected_best_expected_earning_potential` slug (the Malibu
-                // app validates the pick against it); §4.1 surfaces the policy
-                // on the DEMOTED onboarding SKU instead, whose reason is the one
-                // that would otherwise be inaccurate.
-                if ramClassDemoted(next) {
+                // app validates the pick against it). Human summaries and
+                // displaced-row reasons describe policy overrides truthfully.
+                if eightGBPreferenceActive {
+                    if preferred8GBModel(next) {
+                        next.explanation.lostReason = "selected_best_expected_earning_potential"
+                        next.explanation.summary = "Selected by the 8 GB model-tier preference after paid eligibility checks."
+                    } else {
+                        next.explanation.lostReason = "deprioritized_8gb_model_tier_preference"
+                        next.explanation.summary = "Eligible, but the 8 GB policy prefers Bonsai-2 2B on this Mac."
+                    }
+                    next.why = next.explanation.summary
+                } else if ramClassDemoted(next) {
                     next.explanation.lostReason = "deprioritized_ram_class_onboarding_sku"
                     next.explanation.summary = "Eligible, but reserved as the 8 GB onboarding model; this Mac has memory for a RAM-class model."
                 } else if offset == 0 {

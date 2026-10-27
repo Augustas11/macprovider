@@ -183,6 +183,100 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertFalse(eightB.eligible)
     }
 
+    private static let bonsai2BKey = "prism-ml/ternary-bonsai-2-2b-mlx-2bit"
+
+    private func makeBonsaiPreferenceRequest(
+        memoryGB: Int = 8, modelKey: String = AutotuneRecommendTests.bonsai2BKey
+    ) throws -> AutotuneRecommendRequest {
+        var request = try makeSmallDenseRequest(
+            memoryGB: memoryGB,
+            benchmarkTPS: [Self.threeBKey: 38.5, Self.eightBKey: 17.2, Self.qwen8BKey: 8.45]
+        )
+        // Synthetic signed-input projection: no production catalog publication.
+        var candidate = try XCTUnwrap(request.candidateCatalog.rows[Self.threeBKey])
+        candidate.modelID = "prism-ml/Ternary-Bonsai-2-2B-mlx-2bit"
+        candidate.minRAMGB = 3
+        request.candidateCatalog.rows[modelKey] = candidate
+        request.demandRank.rows[modelKey] = request.demandRank.rows[Self.threeBKey]
+        request.rateCard.rows[modelKey] = try XCTUnwrap(request.rateCard.rowForRecommendation(modelKey: Self.threeBKey)?.row)
+        var benchmark = try XCTUnwrap(request.benchmarks[Self.threeBKey])
+        benchmark.modelKey = modelKey
+        benchmark.modelID = candidate.modelID
+        benchmark.sustainedTPS = 5 // Deliberately lower earnings than incumbent.
+        request.benchmarks[modelKey] = benchmark
+        return request
+    }
+
+    func test8GBPrefersEligibleBonsaiDespiteLowerEarningsWithTruthfulExplanation() throws {
+        let request = try makeBonsaiPreferenceRequest()
+        let result = AutotuneRecommendEngine().recommend(request)
+        let winner = try XCTUnwrap(result.selectedCandidate)
+        let incumbent = try XCTUnwrap(result.allCandidates.first { $0.catalogKey == Self.threeBKey })
+        XCTAssertEqual(winner.catalogKey, Self.bonsai2BKey)
+        XCTAssertTrue(winner.eligible)
+        XCTAssertLessThan(winner.rawScore, incumbent.rawScore)
+        XCTAssertLessThan(winner.rank, incumbent.rank)
+        XCTAssertEqual(winner.explanation.lostReason, "selected_best_expected_earning_potential")
+        XCTAssertEqual(winner.explanation.summary, "Selected by the 8 GB model-tier preference after paid eligibility checks.")
+        XCTAssertEqual(incumbent.explanation.lostReason, "deprioritized_8gb_model_tier_preference")
+        XCTAssertEqual(incumbent.explanation.summary, "Eligible, but the 8 GB policy prefers Bonsai-2 2B on this Mac.")
+        XCTAssertEqual(winner.why, winner.explanation.summary)
+        XCTAssertEqual(incumbent.why, incumbent.explanation.summary)
+        XCTAssertEqual(winner.explanation.expectedEarningPotentialScore, winner.rawScore)
+        XCTAssertEqual(incumbent.explanation.expectedEarningPotentialScore, incumbent.rawScore)
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(result.jsonString().utf8)) as? [String: Any])
+        let selected = try XCTUnwrap(root["selected_explanation"] as? [String: Any])
+        XCTAssertEqual(selected["summary"] as? String, winner.explanation.summary)
+        let alternatives = try XCTUnwrap(root["alternative_explanations"] as? [[String: Any]])
+        let incumbentAlternative = try XCTUnwrap(alternatives.first { $0["model"] as? String == incumbent.model })
+        XCTAssertEqual(incumbentAlternative["summary"] as? String, incumbent.explanation.summary)
+        XCTAssertEqual(incumbentAlternative["lost_reason"] as? String, incumbent.explanation.lostReason)
+    }
+
+    func test8GBBonsaiPreferenceRetainsEveryEligibilityFallback() throws {
+        for failure in ["absent", "listed", "swap", "integrity", "demand", "headroom", "thermal", "unverified"] {
+            var request = try makeBonsaiPreferenceRequest()
+            switch failure {
+            case "absent":
+                request.candidateCatalog.rows.removeValue(forKey: Self.bonsai2BKey)
+                request.demandRank.rows.removeValue(forKey: Self.bonsai2BKey)
+            case "listed": request.candidateCatalog.rows[Self.bonsai2BKey]?.runtimeStatus = "listed"
+            case "swap": request.benchmarks[Self.bonsai2BKey]?.swapDetected = true
+            case "integrity": request.benchmarks[Self.bonsai2BKey]?.artifactSHA256 = String(repeating: "0", count: 64)
+            case "demand": request.demandRank.rows[Self.bonsai2BKey]?.recommendable = false
+            case "headroom": request.candidateCatalog.rows[Self.bonsai2BKey]?.minRAMGB = 5
+            case "thermal": request.benchmarks[Self.bonsai2BKey]?.thermalThrottleDetected = true
+            case "unverified": request.candidateCatalog.rows[Self.bonsai2BKey]?.modelRevision = nil
+            default: XCTFail("unknown fixture")
+            }
+            let result = AutotuneRecommendEngine().recommend(request)
+            XCTAssertEqual(result.selectedCandidate?.catalogKey, Self.threeBKey, failure)
+            XCTAssertFalse(result.selectedCandidate?.explanation.summary.contains("model-tier preference") ?? true, failure)
+        }
+    }
+
+    func testBonsaiPreferenceUsesOnlyExactCaseNormalizedCatalogKey() throws {
+        let actualCase = try makeBonsaiPreferenceRequest(modelKey: "PRISM-ML/Ternary-Bonsai-2-2B-MLX-2BIT")
+        XCTAssertEqual(AutotuneRecommendEngine().recommend(actualCase).selectedCandidate?.catalogKey, "PRISM-ML/Ternary-Bonsai-2-2B-MLX-2BIT")
+        for alias in ["bonsai-2b", "prism-ml/ternary-bonsai-2-4b-mlx-2bit", Self.bonsai2BKey + "-other"] {
+            let request = try makeBonsaiPreferenceRequest(modelKey: alias)
+            XCTAssertEqual(AutotuneRecommendEngine().recommend(request).selectedCandidate?.catalogKey, Self.threeBKey, alias)
+        }
+    }
+
+    func test16GBKeepsRAMClassPolicyEvenWithFasterEligibleBonsai() throws {
+        var request = try makeBonsaiPreferenceRequest(memoryGB: 16)
+        request.benchmarks[Self.bonsai2BKey]?.sustainedTPS = 1_000
+        let result = AutotuneRecommendEngine().recommend(request)
+        XCTAssertEqual(result.selectedCandidate?.catalogKey, Self.eightBKey)
+        let bonsai = try XCTUnwrap(result.allCandidates.first { $0.catalogKey == Self.bonsai2BKey })
+        XCTAssertTrue(bonsai.eligible)
+        XCTAssertGreaterThan(bonsai.rawScore, try XCTUnwrap(result.selectedCandidate).rawScore)
+        XCTAssertEqual(bonsai.explanation.lostReason, "deprioritized_ram_class_onboarding_sku")
+        let twelveGB = try makeBonsaiPreferenceRequest(memoryGB: 12)
+        XCTAssertEqual(AutotuneRecommendEngine().recommend(twelveGB).selectedCandidate?.catalogKey, Self.threeBKey)
+    }
+
     func testBakedNemotronInputsArePaidRecommendable() throws {
         let modelKey = "nvidia/nemotron-3-nano-30b-a3b"
         let demand = try AutotuneStaticInputs.decodeDemandRank(Data(AutotuneStaticInputs.bakedDemandRankJSON.utf8))

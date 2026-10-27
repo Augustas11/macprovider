@@ -1,12 +1,16 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.22.35
+version: v0.22.36
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-10-02
 lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-change invariants). CONFORMANCE `depends_on` does not list SPEC-005; the lockstep is recorded in prose only, avoiding a dependency cycle (SPEC-005 likewise does not list SPEC-023 in its `depends_on`).
 
 ## Change log
+
+- **v0.22.36 (2026-10-27)** — SPEC-023-R007 adds the exact 8 GB Bonsai-2
+  2B preference below, strictly after paid eligibility. This selector policy
+  does not list, promote, price, or qualify a catalog identity.
 
 - **v0.22.35 (2026-10-24, Related: #2127)** — Registers
   `SPEC-023-R027`: paid-yield recommendation and calibration probes derive
@@ -2365,7 +2369,7 @@ raw_score = payout × measured_sustained_tps
 
 Rewriting published `demand_weight` is **not** a 16 GB guarantee: `cold_start_floor = 0.15` lifts any global max-norm `< 0.15` back to 0.15, so Llama 8B and 3B can flatten again. #1483 is the Score-A belt.
 
-**SPEC-023-R023 — Full-economics payout ranking.** The Score-A `raw_score` payout term MUST be the provider's full unrounded economics `(completion_rate_per_mtok + R × effective_prompt_rate) × global_multiplier × provider_share`, where `R` (the prompt:completion token ratio, a compile-time constant `= 0.5`) and `C` (the prompt cache-hit fraction, `= 0.0` for this revision) are named constants, `effective_prompt_rate = (1 − C) × prompt_rate_per_mtok + C × prompt_cache_hit_rate_per_mtok`, `global_multiplier = global_multiplier_ppm / 1_000_000`, and `provider_share = provider_share_bps / 10_000`. Both `global_multiplier_ppm` and `provider_share_bps` MUST be applied. Ranking MUST compare this payout (and the derived `raw_score`) on its **unrounded** value: two rows whose true economics differ by less than the 6-decimal JSON precision MUST NOT collapse into a rounded tie. The 6-decimal rounding is applied ONLY at the JSON-visible `raw_score` / earning-potential output fields, never to the ordering key. The full `raw_score` is this payout term multiplied by `measured_sustained_tps`, `max(demand_weight, cold_start_floor)`, and the bounded supply-deficit multiplier — throughput and demand are multiplicative score inputs, not merely tiebreakers. Ranking MUST compare the unrounded `raw_score`; rows with a genuinely equal unrounded `raw_score` then break by `measured_sustained_tps`, then `max(demand_weight, cold_start_floor)`, then model key ascending (the §4.1 RAM-class demotion is the only override of this order). At `C = 0.0` the cached-prompt term is present but contributes nothing; a future revision setting `C > 0` from a measured cache-hit signal activates it without a formula change. Selector-policy only: this reprices nothing and requires no signed-feed or coordinator change.
+**SPEC-023-R023 — Full-economics payout ranking.** The Score-A `raw_score` payout term MUST be the provider's full unrounded economics `(completion_rate_per_mtok + R × effective_prompt_rate) × global_multiplier × provider_share`, where `R` (the prompt:completion token ratio, a compile-time constant `= 0.5`) and `C` (the prompt cache-hit fraction, `= 0.0` for this revision) are named constants, `effective_prompt_rate = (1 − C) × prompt_rate_per_mtok + C × prompt_cache_hit_rate_per_mtok`, `global_multiplier = global_multiplier_ppm / 1_000_000`, and `provider_share = provider_share_bps / 10_000`. Both `global_multiplier_ppm` and `provider_share_bps` MUST be applied. Ranking MUST compare this payout (and the derived `raw_score`) on its **unrounded** value: two rows whose true economics differ by less than the 6-decimal JSON precision MUST NOT collapse into a rounded tie. The 6-decimal rounding is applied ONLY at the JSON-visible `raw_score` / earning-potential output fields, never to the ordering key. The full `raw_score` is this payout term multiplied by `measured_sustained_tps`, `max(demand_weight, cold_start_floor)`, and the bounded supply-deficit multiplier — throughput and demand are multiplicative score inputs, not merely tiebreakers. Ranking MUST compare the unrounded `raw_score`; rows with a genuinely equal unrounded `raw_score` then break by `measured_sustained_tps`, then `max(demand_weight, cold_start_floor)`, then model key ascending (the §4.1 RAM-tier preferences are the only overrides of this order). At `C = 0.0` the cached-prompt term is present but contributes nothing; a future revision setting `C > 0` from a measured cache-hit signal activates it without a formula change. Selector-policy only: this reprices nothing and requires no signed-feed or coordinator change.
 
 **Score-B (FeedSchema-B CLI, later belt):** MUST NOT activate until FeedSchema-B has published `or_completion_tokens_30d` on every recommendable row (same bridge CLI + coordinator parser + previous-stable gate as AC-MKT-9). Until then the shipped CLI remains Score-A. When Score-B is active it ranks §4 `eligible_rows` using published `or_completion_tokens_30d`. If Score-B is active and that field is missing on any `eligible_row`, fail closed (do not 0-fill, do not emit `1/|n|`).
 
@@ -2444,7 +2448,31 @@ This is a selector-policy rule, not a rate-card or catalog change. It reprices n
 
 **Hard-gate carve-out.** Eligibility is evaluated by §5 first. A RAM-class-matched row that fails a **hard** §5 gate (`swap_detected`, `thermal_throttle_detected`, the buyer-TTFT ceiling, insufficient headroom, or any integrity/trust block) is not eligible and therefore does not count as "an eligible RAM-class-matched row". When **every** RAM-class-matched row fails a hard gate, the rule does not fire and the onboarding SKU may again be the pick, so a 16 GB Mac that genuinely cannot sustain a dense 8B row still receives a paid recommendation. **Advisory** signals never veto eligibility (§5: `tps_below_gate`, `ttft_above_gate`, Warning-majority memory pressure, `swap_observed_under_load` advisory) and therefore MUST NOT send a 16 GB Mac back to the onboarding SKU.
 
-**8 GB path unchanged.** The rule is inert below 16 GB. On an 8 GB Mac the RAM-class-matched rows (`min_ram_gb = 12`) fail `hardware_fits` (`12 > 8 - 4`) and are ineligible, so Llama 3.2 3B remains the 8 GB default (Entry 116 / SPEC-003). No catalog republish or rate-card edit is required for either path.
+**8 GB preference (SPEC-023-R007).** On exactly 8 GB hardware, the exact
+case-normalized catalog key `prism-ml/ternary-bonsai-2-2b-mlx-2bit` ranks
+before all other eligible rows only when it passes every existing §5 paid
+eligibility gate. This is a stable per-row sort key, applied after eligibility;
+all other eligible rows retain their economics order. A missing, candidate,
+listed, blocked, unpriced, unverified, unfitting or unhealthy Bonsai row gains
+no preference. The ordinary eligible ranking and incumbent fallback remain
+available. Other hardware tiers, including the 16 GB+ rule above, are unchanged.
+In particular a Bonsai row with `min_ram_gb <= 4` is an onboarding SKU under
+that existing rule. This preference creates no signed catalog promotion and
+remains ineffective until genuine catalog/demand promotion and local paid
+eligibility are satisfied; SPEC-023 §16.3 and the campaign's actual buyer-UX
+acceptance gates remain mandatory.
+
+The winner retains `selected_best_expected_earning_potential` solely as the
+legacy selection discriminator required by installed Malibu readers; under a
+policy override it does not assert the maximum raw economic score. Its human
+summary MUST say `Selected by the 8 GB model-tier preference after paid
+eligibility checks.` Every displaced eligible row MUST use
+`deprioritized_8gb_model_tier_preference` and explain the tier preference,
+never falsely claim lower earnings. Candidate `why` MUST use the same truthful
+policy summary for both winner and displaced rows. Numeric raw and earning scores remain
+unchanged. Selected and alternative explanation bindings (§6) still apply.
+The SPEC-003 8 GB default is conditional on these gates, with the existing
+eligible model as fallback; changing this selector alone publishes no feeds.
 
 ## 5. Eligibility gates (mandatory pre-filter)
 

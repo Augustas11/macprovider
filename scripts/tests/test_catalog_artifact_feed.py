@@ -606,6 +606,43 @@ class ArtifactSourceTest(unittest.TestCase):
         self.assertEqual(first, canonical(json.loads(first)))
 
 
+class Bonsai2BCandidateStagingTest(unittest.TestCase):
+    """A verified artifact must not imply buyer admission or recommendation."""
+
+    KEY = "prism-ml/ternary-bonsai-2-2b-mlx-2bit"
+
+    def test_candidate_identity_and_measured_artifact_remain_bound(self):
+        row = CANDIDATE_OBJ["rows"][self.KEY]
+        source = catalog_release.validate_artifact_source(ARTIFACT_SOURCE_BYTES, CANDIDATE_OBJ)
+        model = source["models"][self.KEY]
+        artifact = model["artifacts"][model["primary_artifact_id"]]
+        self.assertEqual(row["model_id"], "prism-ml/Ternary-Bonsai-2-2B-mlx-2bit")
+        self.assertEqual(row["model_revision"], "1c6cbae21f8c38830ce337972b46fdae7b18eaaa")
+        self.assertEqual(row["model_sha256"], "fe25aaa59aeb54f5ce080818b28808286d26283a61200cb1efb377ac7db62262")
+        self.assertEqual(row["min_ram_gb"], 3)
+        self.assertEqual(artifact["min_ram_gb"], 3)
+        self.assertEqual(artifact["size_bytes"], 1213282532)
+        self.assertEqual(artifact["allowed_runtime_sources"], ["mlx_cache"])
+        self.assertEqual(artifact["runtime_format"], "mlx_safetensors")
+        self.assertEqual(artifact["verification_status"], "verified")
+        self.assertEqual(model["rate_class"], "class-3b")
+        self.assertEqual(row["bench_gate"]["min_sustained_tps"], 44.0326)
+        self.assertEqual(row["bench_gate"]["max_4k_ttft_ms"], 12458)
+        self.assertIn("12457.35 ms", row["bench_gate"]["provenance"]["notes"])
+        self.assertFalse(any("bonsai" in key and "4b" in key for key in CANDIDATE_OBJ["rows"]))
+
+    def test_staging_has_no_demand_or_admission_transition(self):
+        self.assertEqual(CANDIDATE_OBJ["rows"][self.KEY]["runtime_status"], "candidate")
+        demand = catalog_release.validate_demand(DEMAND_BYTES)["rows"][self.KEY]
+        self.assertEqual(demand, {"demand_weight": 0, "min_provider_target": 0,
+                                  "rank": None, "recommendable": False})
+        current = catalog_release.candidate_admission_tiers(CANDIDATE_OBJ)
+        previous = dict(current)
+        previous.pop(self.KEY)
+        self.assertEqual(catalog_release.intake_transitions(previous, current), [])
+        catalog_release.require_intake_decision(CANDIDATE_OBJ, previous, None, activation=False)
+
+
 class RateCardSourceTest(unittest.TestCase):
     """SPEC-023 §3.3.1 rules 3-9 (AC-CAT-8, AC-CAT-9, AC-CAT-10, AC-CAT-14)."""
 
