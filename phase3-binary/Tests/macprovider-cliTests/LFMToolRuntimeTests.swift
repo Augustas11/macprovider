@@ -33,9 +33,8 @@ final class LFMToolRuntimeTests: XCTestCase {
         let template = try Template(ChatTemplateCompatibility.rewrite(source).template,
                                     with: .init(lstripBlocks: true, trimBlocks: true))
         let messages = DefaultMessageGenerator().generate(from: input)
-        let plain = try JSONSerialization.jsonObject(with: JSONSerialization.data(withJSONObject: messages))
         return try template.render([
-            "messages": try Value(any: plain), "bos_token": .string("<|startoftext|>"),
+            "messages": .array(try messages.map { try Value(any: $0) }), "bos_token": .string("<|startoftext|>"),
             "add_generation_prompt": .boolean(true),
         ])
     }
