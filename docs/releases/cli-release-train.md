@@ -127,15 +127,18 @@ rows marked `in progress` remain excluded until they merge.
 |---|---|---|---|
 | [#2169](https://github.com/Augustas11/macprovider/pull/2169) | #2164 | Malibu.app **Create, Agents and Tasks**. Sidebar: Chat, Terminal, Create, Agents, Tasks, Models, Earn. **Agents** run on this Mac's model (local work, SPEC-001-R011) or a Malibu network model on the buyer key; read-only workspace tools plus user-configured stdio MCP servers with per-call approval. **Tasks** schedule agent runs while the app is open (caps, pre-approved tools only, local 0600 transcripts kept out of diagnostics). **Create**: vendored MIT SDXL-Turbo runtime (`MacProviderImageGen`, no new package dependency) behind a loopback-only, local-app-origin `POST /v1/images/generations`. A local creative hold fences customer admission, unloads the LLM, generates, keeps the image model warm for 120 s, then restores the LLM, CB and native MTP exactly as before. Delayed restores re-register with the coordinator, and an operator pause is preserved. SPEC-025 v0.45.0/v0.46.0 (R017–R021); SPEC-001 v1.9.49 (R011/R014). | merged (`0239dd1de`); next CLI/app cut after 1.8.274; signed live acceptance pending |
 
-| [#2175](https://github.com/Augustas11/macprovider/pull/2175) | [#2171](https://github.com/Augustas11/macprovider/issues/2171) | Recover expired prepared update handoffs after an operator pause/resume supersedes the lifecycle operation; preserve operator pause and existing identity/dead-owner guards. `recover-update` explains helper fencing and enabling disabled LaunchAgents before bootstrap. | in progress; not in the 1.8.274 candidate; include in the following CLI cut only after merge and green required checks; signed release acceptance pending |
+| [#2175](https://github.com/Augustas11/macprovider/pull/2175) | [#2171](https://github.com/Augustas11/macprovider/issues/2171) | Recover expired prepared update handoffs after an operator pause/resume supersedes the lifecycle operation; preserve operator pause and existing identity/dead-owner guards. `recover-update` explains helper fencing and enabling disabled LaunchAgents before bootstrap. | merged (`521a40199`); all 28 CI checks green; next CLI/app cut after 1.8.274; signed release acceptance pending |
 
-**#2171 recovery tracking:** issue closed at operator request; implementation
-and remaining acceptance stay tracked by PR #2175 and this train. The PR has
-regression coverage for coordinator/self-update handoffs, operator lifecycle
-supersession, pause preservation, restored startup and refusal guards. Three
-review lanes passed. CI found a SPEC-020 header/manifest version mismatch;
-`df0a093f7` aligns both to v0.1.30 and starts fresh CI. Swift execution and
-required PR approval remain pending; no merged or released fix is claimed.
+**#2171 recovery tracking:** issue closed at operator request; PR #2175
+merged as `521a40199` on 2026-10-27 after `antfleet-ops` approved the exact
+head `787bc9508` and all 28 checks in
+[CI run 40452783122](https://github.com/Augustas11/macprovider/actions/runs/40452783122)
+passed, including all four Swift test shards, Malibu app recovery tests,
+`spec-index` and `ci-required`. Regression coverage includes coordinator and
+self-update handoffs, operator lifecycle supersession, pause preservation,
+restored startup and refusal guards. Three review lanes passed. SPEC-020 and
+its manifest both record v0.1.30. The fix is merged; signed release and live
+acceptance remain pending in this train.
 Before promotion, verify with the signed candidate on the designated Studio
 that an expired activating marker plus a dead-owner prepared handoff and a
 superseding operator pause recovers without editing lifecycle files, retains
