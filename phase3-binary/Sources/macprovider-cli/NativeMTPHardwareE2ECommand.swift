@@ -8,9 +8,8 @@ import MLXLMCommon
 import MLXLLM
 import Tokenizers
 
-// Lab-only: compiled out of plain release builds, command type and
-// registration included, so a production binary carries no lab surface.
-#if DEBUG || MACPROVIDER_LAB_HARNESS
+// Measurement helpers are shared with isolated signed qualification.
+// Legacy top-level command registration remains LAB-only.
 let nativeMTPHardwareDefaultModelID = "mlx-community/Qwen3.5-9B-4bit"
 
 /// The native-MTP family a hardware fixture exercises, chosen from the
@@ -49,7 +48,7 @@ struct NativeMTPHardwareE2EFamily: Equatable, Sendable {
     )
 
     /// The lab tuple's `request_feature_profile`: sampled where the family
-    /// may sign it (Qwen3.5), greedy only for `glm5_next` (SPEC-048 MTP-2).
+    /// may sign it (Qwen3.5 and GLM-5-Next, SPEC-048 MTP-2).
     var requestFeatureProfile: String {
         NativeMTPAdmissionSidecar.allowedRequestFeatureProfiles(familyAdapter: familyAdapter)
             .contains(NativeMTPAdmissionSidecar.sampledRequestFeatureProfile)
@@ -84,6 +83,9 @@ struct NativeMTPHardwareE2EFamily: Equatable, Sendable {
     /// nil when the harness's slot count is used. glm5_next signs 1: at four
     /// rows native MTP decoded at 0.79x ordinary in window A2 (1.27x at one).
     var signedMaxNativeActiveRows: Int? { self == .glm5Next ? 1 : nil }
+    var implementationMaxNativeActiveRows: Int? {
+        NativeMTPAdmissionSidecar.maxNativeActiveRowsBound(familyAdapter: familyAdapter)
+    }
 
     /// Whether the tuple admits sampled rows to native MTP.
     var admitsSampledRows: Bool { requestFeatureProfile == NativeMTPAdmissionSidecar.sampledRequestFeatureProfile }
@@ -256,11 +258,14 @@ final class NativeMTPHardwareE2ERunner {
     private let modelID: String
     private let maxBatch: Int
     private let maxNativeActiveRows: Int
+    private let proposalDepth: Int
     private let maxPromptTokens: Int
     private let maxPhysicalBlocks: Int
+    private let signedJourneyInputs: String?
     private let verifyServePath: Bool
     /// Lab throughput phase completion tokens per row; 0 skips it.
     private let throughputTokens: Int
+    private let diagnosticEligibilityBypass: Bool
     /// Detected from `target/config.json`; Qwen3.5 when unreadable, so an
     /// unrecognized target fails the family check in the fixture load.
     let family: NativeMTPHardwareE2EFamily
@@ -282,19 +287,25 @@ final class NativeMTPHardwareE2ERunner {
         modelID: String = NativeMTPHardwareE2ERunner.defaultModelID,
         maxBatch: Int = 2,
         maxNativeActiveRows: Int? = nil,
+        proposalDepth: Int = 1,
         maxPromptTokens: Int = 1_048_576,
         maxPhysicalBlocks: Int = 512,
         verifyServePath: Bool = false,
-        throughputTokens: Int = 0
+        throughputTokens: Int = 0,
+        diagnosticEligibilityBypass: Bool = false,
+        signedJourneyInputs: String? = nil
     ) {
         root = URL(fileURLWithPath: (rootPath as NSString).expandingTildeInPath, isDirectory: true)
             .standardizedFileURL
         self.modelID = modelID
         self.maxBatch = maxBatch
+        self.proposalDepth = proposalDepth
         self.maxPromptTokens = maxPromptTokens
         self.maxPhysicalBlocks = maxPhysicalBlocks
+        self.signedJourneyInputs = signedJourneyInputs
         self.verifyServePath = verifyServePath
         self.throughputTokens = throughputTokens
+        self.diagnosticEligibilityBypass = diagnosticEligibilityBypass
         let family = NativeMTPHardwareE2EFamily.detect(configJSONData: try? Data(
             contentsOf: root.appendingPathComponent("target/config.json")
         )) ?? .qwen35
@@ -483,6 +494,7 @@ final class NativeMTPHardwareE2ERunner {
         ordinaryAdmissionRecorder: NativeMTPHardwareAdmissionRecorder?,
         nativeAdmissionRecorder: NativeMTPHardwareAdmissionRecorder?
     ) async throws -> NativeMTPHardwareRuntimeFixture {
+        guard NativeMTPQualificationScope.permitsFixtureHooks else { throw NativeMTPHardwareE2EError.assertionFailed("isolated qualification scope required") }
         let targetDirectory = root.appendingPathComponent("target", isDirectory: true)
         let mtpDirectory = self.mtpDirectory
         try requireDirectory(targetDirectory)
@@ -496,16 +508,27 @@ final class NativeMTPHardwareE2ERunner {
         let tokenizerSHA = try sha256(of: root.appendingPathComponent("target/tokenizer.json"))
         let manifestSHA = try sha256(of: mtpDirectory.appendingPathComponent("config.json"))
         let machine = MachineFingerprinter().sample()
-        let signedAdmission = try makeAndValidateAdmission(
-            targetIdentity: targetIdentity,
-            mtpIdentity: mtpIdentity,
-            machine: machine,
-            maxContextTokens: maxContextTokens
-        )
+        let signedAdmission: NativeMTPHardwareSignedAdmission
+        if let signedJourneyInputs {
+            try require(!diagnosticEligibilityBypass && !verifyServePath,
+                        "signed-policy LAB execution forbids eligibility bypass and test build-identity injection")
+            signedAdmission = try NativeMTPJourneySignedInputs.load(
+                directory: URL(fileURLWithPath: ConfigLoader.expandTilde(signedJourneyInputs)),
+                artifactRoot: root, modelID: modelID, target: targetIdentity,
+                machine: machine, slots: maxBatch)
+        } else {
+            signedAdmission = try makeAndValidateAdmission(
+                targetIdentity: targetIdentity, mtpIdentity: mtpIdentity,
+                machine: machine, maxContextTokens: maxContextTokens)
+        }
         let admission = signedAdmission.capability
         try require(admission.targetArtifactSHA256 == targetIdentity.digest, "target digest admission mismatch")
         try require(admission.mtpArtifactSHA256 == mtpIdentity.digest, "MTP digest admission mismatch")
-        try require(admission.maxProposalDepth == 1, "unexpected proposal depth")
+        try require(admission.maxProposalDepth == proposalDepth, "unexpected proposal depth")
+        if signedJourneyInputs != nil {
+            try require(admission.maxPromptTokens == maxPromptTokens, "signed prompt cap mismatch")
+            try require(admission.maxNativeActiveRows == maxNativeActiveRows, "signed native row bound mismatch")
+        }
         try require(admission.selfTestChallengeBank.challengeBankPath == "native-mtp-selftest-bank.json", "bad self-test bank")
         let capability = NativeMTPCapability(
             admitted: true,
@@ -523,8 +546,9 @@ final class NativeMTPHardwareE2ERunner {
             completeWindowBytesByDepth: admission.completeWindowBytesByDepth,
             family: admission.familyAdapter,
             throughputDeltaPPM: admission.throughputDeltaPPM,
-            maximumNativeActiveRows: admission.maxNativeActiveRows,
-            supportsSampling: admission.supportsSampling
+            maximumNativeActiveRows: diagnosticEligibilityBypass ? maxNativeActiveRows : admission.maxNativeActiveRows,
+            supportsSampling: admission.supportsSampling || diagnosticEligibilityBypass,
+            adaptationConfig: admission.adaptationConfig
         )
         let servePathLoad: ModelRuntime.NativeMTPHardwareE2EServePathLoad?
         if verifyServePath {
@@ -604,16 +628,24 @@ final class NativeMTPHardwareE2ERunner {
         ordinaryAdmissionRecorder: NativeMTPHardwareAdmissionRecorder?,
         nativeAdmissionRecorder: NativeMTPHardwareAdmissionRecorder?
     ) async throws -> NativeMTPHardwareRuntimePair {
+        guard NativeMTPQualificationScope.permitsFixtureHooks else { throw NativeMTPHardwareE2EError.assertionFailed("isolated qualification scope required") }
         let targetDirectory = root.appendingPathComponent("target", isDirectory: true)
         let mtpDirectory = self.mtpDirectory
         try requireDirectory(targetDirectory)
         try requireDirectory(mtpDirectory)
-        let observedTargetIdentity = try MLXSnapshotIdentity.compute(directory: targetDirectory)
-        let observedMTPIdentity = family.embeddedMTP
-            ? observedTargetIdentity
-            : try MLXSnapshotIdentity.compute(directory: mtpDirectory)
-        try require(observedTargetIdentity == targetIdentity, "target identity changed during load")
-        try require(observedMTPIdentity == mtpIdentity, "MTP identity changed during load")
+        if diagnosticEligibilityBypass {
+            try require(targetIdentity.directory == targetDirectory.standardizedFileURL.resolvingSymlinksInPath()
+                && targetIdentity.isCurrent(), "target identity changed during diagnostic load")
+            try require(mtpIdentity.directory == mtpDirectory.standardizedFileURL.resolvingSymlinksInPath()
+                && mtpIdentity.isCurrent(), "MTP identity changed during diagnostic load")
+        } else {
+            let observedTargetIdentity = try MLXSnapshotIdentity.compute(directory: targetDirectory)
+            let observedMTPIdentity = family.embeddedMTP
+                ? observedTargetIdentity
+                : try MLXSnapshotIdentity.compute(directory: mtpDirectory)
+            try require(observedTargetIdentity == targetIdentity, "target identity changed during load")
+            try require(observedMTPIdentity == mtpIdentity, "MTP identity changed during load")
+        }
         // Run the same artifact observer the production enable path runs
         // (ModelRuntime native-MTP load) so lab evidence cannot pass on artifacts
         // that production would reject.
@@ -679,7 +711,13 @@ final class NativeMTPHardwareE2ERunner {
         let maximumBlockSize = await drafterContainer.perform { context in
             context.model.maximumBlockSize
         }
-        try require(maximumBlockSize == 2, "unexpected MTP maximum block size \(String(describing: maximumBlockSize))")
+        try require(
+            NativeMTPProposalBounds.fits(
+                maximumProposalDepth: proposalDepth,
+                maximumBlockSize: maximumBlockSize
+            ),
+            "MTP proposal depth \(proposalDepth) exceeds drafter maximum block size \(String(describing: maximumBlockSize))"
+        )
 
         let cacheKinds = try await targetContainer.perform { context in
             try context.model.newCache(parameters: nil as GenerateParameters?).map { cache in
@@ -1158,8 +1196,8 @@ final class NativeMTPHardwareE2ERunner {
             "mtp_family_adapter": family.familyAdapter,
             "mtp_state_class": "hybrid_stageable_rewindable",
             "mtp_head_count": 1,
-            "proposal_depth": 1,
-            "complete_window_bytes_by_depth": family.completeWindowBytesByDepth(maxContextTokens: maxContextTokens),
+            "proposal_depth": proposalDepth,
+            "complete_window_bytes_by_depth": family.completeWindowBytesByDepth(maxContextTokens: maxContextTokens, maxDepth: proposalDepth),
             "runtime_revision": Self.upstreamRevision,
             "provider_revision": Self.providerRevision,
             "source_commit": Self.providerRevision,
@@ -1169,7 +1207,7 @@ final class NativeMTPHardwareE2ERunner {
             "hardware_class": NativeMTPAdmissionSidecar.canonicalHardwareClass(machine.chip),
             "ram_bytes": machine.ramGB * 1_073_741_824,
             "qualified_slots": maxBatch,
-            "max_native_active_rows": maxNativeActiveRows,
+            "max_native_active_rows": diagnosticEligibilityBypass ? min(maxNativeActiveRows, family.signedMaxNativeActiveRows ?? maxNativeActiveRows) : maxNativeActiveRows,
             // A Qwen3.5 lab tuple qualifies sampled rows too (target-sample
             // exact match), so temperature cells measure the native path; a
             // glm5_next tuple is greedy only.
@@ -1388,4 +1426,3 @@ private final class NativeMTPHardwareStreamRecorder: @unchecked Sendable {
         return chunks
     }
 }
-#endif

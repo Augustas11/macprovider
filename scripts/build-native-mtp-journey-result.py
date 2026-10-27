@@ -61,6 +61,7 @@ def main(argv: list[str] | None = None) -> int:
     payload.add_argument("--source-sha", required=True)
     payload.add_argument("--evidence-sha", required=True)
     payload.add_argument("--output", required=True)
+    payload.add_argument("--postcut-provenance", help="Verified staged post-cut provenance; protected workflow transport only")
     args = parser.parse_args(argv)
     root = Path(args.root).resolve()
     try:
@@ -82,9 +83,29 @@ def main(argv: list[str] | None = None) -> int:
                 contract.validate_release_git(root, value)
             target = Path(args.output) if Path(args.output).is_absolute() else root / args.output
         else:
-            value = contract.build_payload(root, args.kind, args.evidence, source_sha=args.source_sha, evidence_sha=args.evidence_sha)
+            if args.postcut_provenance:
+                import native_mtp_postcut_evidence as postcut
+                if args.kind != contract.SERVING:
+                    raise contract.NativeMTPEvidenceError("post-cut transport is serving-only")
+                expected = args.evidence.removesuffix(contract.EVIDENCE_SUFFIX) + "/postcut-provenance.json"
+                if args.postcut_provenance != expected:
+                    raise contract.NativeMTPEvidenceError("post-cut provenance path differs")
+                provenance = postcut.load(root / expected)
+                if set(provenance) != postcut.FIELDS - {"files"} or provenance.get("source_sha") != args.source_sha:
+                    raise contract.NativeMTPEvidenceError("post-cut provenance source differs")
+                if contract.git(root,"rev-parse","HEAD").decode().strip() != args.evidence_sha:
+                    raise contract.NativeMTPEvidenceError("post-cut evidence controls differ")
+                contract.git(root,"merge-base","--is-ancestor",args.source_sha,args.evidence_sha)
+                postcut.verify_bindings(root,args.evidence,provenance)
+                data=(root / args.evidence).read_bytes()
+                evidence=contract.parse_json(data,args.evidence)
+                bundle=contract.validate_evidence(root,contract.SERVING,args.evidence,evidence)
+                value=contract.project_payload(contract.SERVING,evidence,args.evidence,contract.sha256(data),bundle,
+                                               source_sha=args.source_sha,evidence_sha=args.evidence_sha)
+            else:
+                value = contract.build_payload(root, args.kind, args.evidence, source_sha=args.source_sha, evidence_sha=args.evidence_sha)
             target = Path(args.output) if Path(args.output).is_absolute() else root / args.output
-    except contract.NativeMTPEvidenceError as exc:
+    except (contract.NativeMTPEvidenceError, ValueError, OSError) as exc:
         print(f"{PROG}: {exc}", file=sys.stderr)
         return 1
     write_json(target, value)

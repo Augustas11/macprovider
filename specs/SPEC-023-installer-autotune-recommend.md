@@ -1,6 +1,6 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.22.36
+version: v0.22.38
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-10-02
@@ -8,8 +8,24 @@ lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-
 
 ## Change log
 
-- **v0.22.36 (2026-10-27)** — SPEC-023-R007 adds the exact 8 GB Bonsai-2
-  2B preference below, strictly after paid eligibility. This selector policy
+- **v0.22.38 (2026-10-27, Related: #2144)** — Qualification uses digest-matched
+  LAB evidence, followed by MTP-13 signed identity-only rebind. No collector,
+  representative replay or fresh signed predecessor is added as a prerequisite.
+
+- **v0.22.37 (2026-10-27, Related: #2144)** — R017 clarifies that normal
+  fully qualified expanded publication may start from the exact committed
+  signed predecessor without an identity-only candidate parent. The candidate
+  still needs its final published tag/recommendation, digest-matched LAB
+  qualification and authenticated serving proof. The identity-only exception
+  remains unchanged and cannot qualify changed decode behavior.
+
+- **v0.22.36 (2026-10-26–27, Related: #2144)** — R017 permits only a
+  reviewed, deterministic native-binding assembly recipe to resolve signed
+  CLI identities that cannot exist before the campaign merge. The guarded
+  unchanged-scope canary and the final-tag expanded-profile publication remain
+  distinct; all existing integrity, qualification and activation gates apply.
+  SPEC-023-R007 also adds the exact 8 GB Bonsai-2 2B preference below, strictly
+  after paid eligibility. This selector policy
   does not list, promote, price, or qualify a catalog identity.
 
 - **v0.22.35 (2026-10-24, Related: #2127)** — Registers
@@ -2070,6 +2086,55 @@ app release, through the operator-local catalog-content lane
      different rate row without a reviewed acknowledgement.
    - `freshness-or-noop` — no content change against live (use renewal, or do
      nothing).
+   **Narrow native-binding assembly exception.** The `unverified-commit`
+   byte-equality rule above MAY be satisfied by deterministic reproduction
+   from a native-binding recipe committed at that reviewed `origin/main`
+   ancestor, rather than by committing the post-cut signed bundle itself.
+   This exception exists only for native-MTP bindings whose reviewed CLI
+   identity is unavailable before that commit; it is not a general release
+   directory override. The recipe MUST bind the exact committed predecessor,
+   predecessor ledger and serving-exclusion list, the intended tuple/profile
+   scope, every non-identity input, and the permitted identity substitutions.
+   The assembler MUST independently verify the signed CLI identity and
+   reconstruct every emitted member; activation MUST refuse unless the
+   proposed signed bundle is byte-equal to that reconstruction. The bundle's
+   signatures and existing wire schemas remain mandatory: the recipe adds no
+   feed fields, signer keys or trust roots. Only the recipe-declared native
+   bindings and the containing release metadata, signatures and ledger row
+   necessary to bind them MAY differ from the reviewed inputs. Unrelated
+   catalog, model inventory, prices, CB policy, trust roots and serving
+   exclusions MUST remain unchanged. Unknown inputs, undeclared substitutions,
+   extra bundle members or nonreproducible bytes yield `unverified-commit`.
+
+   Assembly has exactly two publication phases. First, the guarded signed
+   acceptance-candidate transaction in SPEC-048-R013 MAY perform only an
+   identity-only rebind of already-qualified one-row, depth-one greedy tuples,
+   preserving their prior request-feature scope and qualification evidence.
+   The protected acceptance run, signature-verified envelope and signed-byte
+   record MUST bind the exact reviewed source, binary SHA-256, CDHash,
+   embedded decode-path digest and other required runtime identities. Second,
+   an expanded GLM sampled profile MAY be assembled and published only after
+   the final signed CLI tag and fleet-recommendation gate in SPEC-048-R013,
+   genuine SPEC-048-R005 token/state correctness evidence, and passing
+   formal SPEC-048-R015 qualification from a digest-matched LAB build. An
+   identity-only recipe MUST NOT add
+   sampled, tools or reasoning eligibility or increase row/depth bounds.
+   The expanded phase does not require an identity-only candidate parent.
+   When no such parent exists, the predecessor release MUST be byte-equal to
+   the committed signed predecessor at the frozen reviewed source, including
+   its complete feed inventory; the committed predecessor ledger is retained.
+   The parent receipt MUST be null and the parent bundle absent. The assembler
+   MUST still reopen full digest-matched LAB R005 and formal R015
+   matrix/sustained, and independently authenticate the normal
+   published candidate and serving proof. A supplied identity-only parent
+   retains the existing exact identity/version and receipt checks. This path
+   grants no pre-promotion publication or unchanged-decode qualification.
+   Neither phase treats an assembly or offline projection as qualification.
+   Every other R017 rule, signature check, ledger/predecessor check, pricing
+   gate, CB gate, trust-root check and exact rollback requirement applies
+   unchanged; the guarded phase retains SPEC-048-R013's exact signed
+   binary/policy/self-test-bank rollback and recovery custody.
+
 2. **Live-binary dry-load.** Before activation the lane MUST prove the release
    loads in the running coordinator binary, using that binary's offline
    validator (`SPEC-008-R004`) with the host's live configuration and the
@@ -3320,6 +3385,17 @@ at preflight and under the lease yields a GO verdict listing it in
 that model (by hash, model id, or candidate key) is NO_GO on (e), and one that
 starts serving it between preflight and the lease stops the deploy before any
 mutation.
+
+For the native-binding assembly exception, a reviewed recipe reproduced from
+its exact committed inputs and an independently verified signed CLI identity
+passes only when every emitted member matches byte-for-byte and the selected
+publication phase's gates pass. A modified recipe, predecessor, ledger,
+exclusion list, undeclared member or identity substitution, unrelated content
+change, failed signature, or mismatched regenerated byte is refused before
+mutation. An acceptance candidate cannot expand a greedy tuple's request
+scope; an expanded sampled GLM bundle without its final tag/recommendation,
+R005 proof or formal R015 matrix/sustained proof is
+refused. These cases retain the same rollback and evidence obligations.
 
 AC-CAT-28 (`SPEC-023-R019`, pricing through the content lane): A committed
 release changing only row credits, adding a row, or removing a non-`default`

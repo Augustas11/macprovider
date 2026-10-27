@@ -22,6 +22,7 @@ import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
+from types import SimpleNamespace
 
 from scripts.tests.test_catalog_compare_live import (
     CANONICAL,
@@ -341,6 +342,104 @@ class ContentGateCommitTests(unittest.TestCase):
             result = cr.content_gate(self.release, live, bogus, commit=sha, now=NOW, repo=self.repo)
         self.assertNotIn("unverified-commit", {result["lane"]}, result)
         self.assertEqual(result["lane"], "freshness-or-noop", result)
+
+
+    def verified_bundle(self, **overrides):
+        fields = dict(release_dir=self.release, ledger_path=LEDGER,
+                      source_commit=self.sha, phase="identity_only_greedy",
+                      recipe_sha256="a" * 64, receipt_sha256="b" * 64)
+        fields.update(overrides)
+        return SimpleNamespace(**fields)
+
+    def binding_reasons(self, **kwargs):
+        return cr.content_gate_commit_reasons(
+            self.release, self.sha, self.repo,
+            native_binding_bundle=self.tmp / "bundle",
+            native_binding_recipe="recipes/native.json", **kwargs,
+        )
+
+    def test_binding_exception_requires_real_verifier_call(self) -> None:
+        change_content(self.release)
+        proof = self.verified_bundle()
+        with mock.patch.object(cr, "_verify_native_binding_bundle", return_value=proof) as verify:
+            self.assertEqual(self.binding_reasons(), [])
+        verify.assert_called_once_with(
+            self.tmp / "bundle", repo=self.repo, commit=self.sha,
+            recipe_path="recipes/native.json",
+        )
+        # No explicit recipe proof leaves the old byte-exact requirement intact.
+        self.assertTrue(cr.content_gate_commit_reasons(self.release, self.sha, self.repo))
+
+    def test_binding_rejects_failed_proof(self) -> None:
+        with mock.patch.object(cr, "_verify_native_binding_bundle", side_effect=ValueError("tampered receipt")):
+            self.assertEqual(self.binding_reasons(), ["native binding bundle: tampered receipt"])
+
+    def test_binding_rejects_wrong_release_source_or_phase(self) -> None:
+        for fields in (dict(release_dir=self.tmp / "other"),
+                       dict(source_commit="f" * 40), dict(phase="unchecked")):
+            with self.subTest(fields=fields), mock.patch.object(
+                cr, "_verify_native_binding_bundle", return_value=self.verified_bundle(**fields),
+            ):
+                self.assertTrue(self.binding_reasons())
+
+    def test_binding_cannot_bypass_ancestry(self) -> None:
+        with mock.patch.object(cr, "_verify_native_binding_bundle") as verify:
+            reasons = cr.content_gate_commit_reasons(
+                self.release, "f" * 40, self.repo, native_binding_bundle=self.tmp,
+                native_binding_recipe="recipes/native.json",
+            )
+        self.assertTrue(reasons)
+        verify.assert_not_called()
+
+    def test_binding_options_require_pair_and_commit(self) -> None:
+        reasons = cr.content_gate_commit_reasons(
+            self.release, self.sha, self.repo, native_binding_bundle=self.tmp,
+        )
+        self.assertTrue(reasons)
+        with self.assertRaisesRegex(ValueError, "requires --commit"):
+            cr.content_gate(self.release, self.release, LEDGER,
+                            native_binding_bundle=self.tmp, native_binding_recipe="recipes/native.json")
+
+    def test_binding_uses_verified_ledger_but_committed_exclusions(self) -> None:
+        catalog = self.repo / "phase3-binary/catalog/autotune"
+        (catalog / "not-buyer-serving.json").write_bytes(NO_EXCLUSIONS)
+        git(self.repo, "add", "phase3-binary/catalog/autotune/not-buyer-serving.json")
+        git(self.repo, "commit", "-q", "-m", "exclusions")
+        self.sha = git(self.repo, "rev-parse", "HEAD")
+        git(self.repo, "update-ref", "refs/remotes/origin/main", self.sha)
+        live = assemble(self.tmp / "live")
+        bogus = self.tmp / "bogus.json"
+        bogus.write_text("invalid")
+        with mock.patch.object(cr, "_verify_native_binding_bundle", return_value=self.verified_bundle()), \
+             mock.patch.object(cr, "verify_directory", return_value=None):
+            result = cr.content_gate(
+                self.release, live, bogus, commit=self.sha, now=NOW, repo=self.repo,
+                native_binding_bundle=self.tmp / "bundle", native_binding_recipe="recipes/native.json",
+            )
+        self.assertEqual(result["lane"], "freshness-or-noop", result)
+        # A valid bundle proof cannot supply or replace serving exclusions.
+        (catalog / "not-buyer-serving.json").unlink()
+        git(self.repo, "add", "phase3-binary/catalog/autotune/not-buyer-serving.json")
+        git(self.repo, "commit", "-q", "-m", "missing exclusions")
+        self.sha = git(self.repo, "rev-parse", "HEAD")
+        git(self.repo, "update-ref", "refs/remotes/origin/main", self.sha)
+        with mock.patch.object(cr, "_verify_native_binding_bundle", return_value=self.verified_bundle()), \
+             mock.patch.object(cr, "verify_directory", return_value=None):
+            result = cr.content_gate(
+                self.release, live, LEDGER, commit=self.sha, now=NOW, repo=self.repo,
+                native_binding_bundle=self.tmp / "bundle", native_binding_recipe="recipes/native.json",
+            )
+        self.assertEqual(result["lane"], "unverified-commit", result)
+
+    def test_binding_does_not_bypass_release_signature_gate(self) -> None:
+        live = assemble(self.tmp / "live")
+        with mock.patch.object(cr, "_verify_native_binding_bundle", return_value=self.verified_bundle()), \
+             mock.patch.object(cr, "verify_directory", side_effect=cr.CatalogError("signature mismatch")):
+            result = cr.content_gate(
+                self.release, live, LEDGER, commit=self.sha, now=NOW, repo=self.repo,
+                native_binding_bundle=self.tmp / "bundle", native_binding_recipe="recipes/native.json",
+            )
+        self.assertEqual(result["lane"], "invalid-release", result)
 
 
 class ServingClosureTests(unittest.TestCase):

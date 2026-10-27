@@ -5799,6 +5799,7 @@ def verify_directory(
         signed_feeds.append((artifact_path, artifacts))
     native_mtp_path = directory / NATIVE_MTP_ADMISSION_FEED_NAME
     native_mtp = native_mtp_obj = native_mtp_bank = None
+    _validate_native_mtp_release_closure(directory, native_mtp_path.exists())
     if native_mtp_path.exists():
         for name in (NATIVE_MTP_MANIFEST_NAME, NATIVE_MTP_BANK_NAME, f"{NATIVE_MTP_BANK_NAME}.sig"):
             if not (directory / name).exists():
@@ -6433,15 +6434,60 @@ def _git_show(repo: pathlib.Path, commit: str, path: str) -> bytes | None:
     return result.stdout if result.returncode == 0 else None
 
 
-def content_gate_commit_reasons(release: pathlib.Path, commit: str, repo: pathlib.Path = ROOT) -> list[str]:
+def _native_mtp_binding_module():
+    # Load the reviewed verifier shipped beside this catalog verifier. A caller
+    # cannot replace verification with an object or a claimed success boolean.
+    path = ROOT / "scripts" / "native_mtp_binding_bundle.py"
+    spec = importlib.util.spec_from_file_location("native_mtp_binding_bundle", path)
+    if spec is None or spec.loader is None:
+        raise ValueError("native binding bundle verifier is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _validate_native_mtp_release_closure(directory: pathlib.Path, native_mtp_present: bool) -> None:
+    try:
+        _native_mtp_binding_module().validate_release_directory(
+            directory, native_mtp_present=native_mtp_present,
+        )
+    except ValueError as exc:
+        fail(f"native MTP release file closure: {exc}")
+
+
+def _verify_native_binding_bundle(bundle: pathlib.Path, *, repo: pathlib.Path, commit: str, recipe_path: str):
+    module = _native_mtp_binding_module()
+    return module.verify_bundle(bundle, repo=repo, commit=commit, recipe_path=recipe_path)
+
+
+def _content_gate_commit_proof(
+    release: pathlib.Path, commit: str, repo: pathlib.Path = ROOT, *,
+    native_binding_bundle: pathlib.Path | None = None,
+    native_binding_recipe: str | None = None,
+) -> tuple[list[str], object | None]:
     if not HEX40.fullmatch(commit):
-        return [f"--commit must be a full 40-hex commit sha, got {commit!r}"]
+        return [f"--commit must be a full 40-hex commit sha, got {commit!r}"], None
     ancestor = subprocess.run(
         ["git", "-C", str(repo), "merge-base", "--is-ancestor", commit, "origin/main"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
     )
     if ancestor.returncode != 0:
-        return [f"commit {commit} is not an ancestor of origin/main"]
+        return [f"commit {commit} is not an ancestor of origin/main"], None
+    if (native_binding_bundle is None) != (native_binding_recipe is None):
+        return ["native binding bundle and committed recipe must be supplied together"], None
+    if native_binding_bundle is not None:
+        try:
+            verified = _verify_native_binding_bundle(
+                native_binding_bundle, repo=repo, commit=commit, recipe_path=native_binding_recipe,
+            )
+            if verified.release_dir.resolve() != release.resolve() or verified.source_commit != commit:
+                raise ValueError("verified native binding bundle does not match release and commit")
+            if verified.phase not in ("identity_only_greedy", "expanded_glm_sampled"):
+                raise ValueError("unknown native binding recipe phase")
+            return [], verified
+        except (ValueError, OSError) as exc:
+            return [f"native binding bundle: {exc}"], None
     reasons = []
     for name in _CONTENT_GATE_STATIC_FILES + _CONTENT_GATE_CATALOG_FILES:
         local = release / name
@@ -6450,8 +6496,20 @@ def content_gate_commit_reasons(release: pathlib.Path, commit: str, repo: pathli
             continue
         if not local.exists() or committed is None or local.read_bytes() != committed:
             reasons.append(f"{name} bytes differ from {_content_gate_committed_path(name)} at {commit}")
-    return reasons
+    return reasons, None
 
+
+
+def content_gate_commit_reasons(
+    release: pathlib.Path, commit: str, repo: pathlib.Path = ROOT, *,
+    native_binding_bundle: pathlib.Path | None = None,
+    native_binding_recipe: str | None = None,
+) -> list[str]:
+    reasons, _verified = _content_gate_commit_proof(
+        release, commit, repo, native_binding_bundle=native_binding_bundle,
+        native_binding_recipe=native_binding_recipe,
+    )
+    return reasons
 
 def _content_gate_invariants(directory: pathlib.Path) -> dict:
     """Fields a catalog-content release may never change (they need a provider-app release)."""
@@ -6932,7 +6990,13 @@ def content_gate(
     pricing_diff: bytes | None = None,
     pricing_diff_sha256: str | None = None,
     tier2_coordinator_config: pathlib.Path | None = None,
+    native_binding_bundle: pathlib.Path | None = None,
+    native_binding_recipe: str | None = None,
 ) -> dict:
+    if (native_binding_bundle is None) != (native_binding_recipe is None):
+        raise ValueError("native binding bundle and committed recipe must be supplied together")
+    if native_binding_bundle is not None and commit is None:
+        raise ValueError("native binding bundle requires --commit")
     now = now or datetime.now(timezone.utc)
     by_lane: dict[str, list[str]] = {lane: [] for lane in CONTENT_GATE_LANE_ORDER}
     try:
@@ -6975,12 +7039,18 @@ def content_gate(
     committed_ledger: tempfile._TemporaryFileWrapper | None = None
     ack_missing = False
     if commit is not None:
-        commit_reasons = content_gate_commit_reasons(release, commit, repo)
+        commit_reasons, verified_bundle = _content_gate_commit_proof(
+            release, commit, repo, native_binding_bundle=native_binding_bundle,
+            native_binding_recipe=native_binding_recipe,
+        )
         by_lane["unverified-commit"].extend(commit_reasons)
         if not commit_reasons:
             # The reviewed commit, not the operator's working tree, decides the
             # predecessor ledger and the serving exclusions (#1688).
-            ledger_bytes = _git_show(repo, commit, str(LEDGER_PATH.relative_to(ROOT)))
+            ledger_bytes = (
+                _git_show(repo, commit, str(LEDGER_PATH.relative_to(ROOT)))
+                if verified_bundle is None else verified_bundle.ledger_path.read_bytes()
+            )
             exclusions_data = _git_show(repo, commit, str(NOT_BUYER_SERVING_PATH.relative_to(ROOT)))
             if ledger_bytes is None or exclusions_data is None:
                 by_lane["unverified-commit"].append(
@@ -7058,6 +7128,8 @@ def cmd_content_gate(
     pricing_diff_path: pathlib.Path | None = None,
     pricing_diff_sha256: str | None = None,
     tier2_coordinator_config: pathlib.Path | None = None,
+    native_binding_bundle: pathlib.Path | None = None,
+    native_binding_recipe: str | None = None,
 ) -> int:
     if (pricing_diff_path is None) != (pricing_diff_sha256 is None):
         fail("content-gate: --pricing-diff and --pricing-diff-sha256 go together")
@@ -7074,6 +7146,7 @@ def cmd_content_gate(
             ack_data=None if ack_path is None else ack_path.read_bytes(),
             pricing_diff=None if pricing_diff_path is None else pricing_diff_path.read_bytes(),
             pricing_diff_sha256=pricing_diff_sha256, tier2_coordinator_config=tier2_coordinator_config,
+            native_binding_bundle=native_binding_bundle, native_binding_recipe=native_binding_recipe,
         )
     except (KeyError, TypeError, ValueError, AttributeError, OSError) as exc:
         fail(f"content-gate: malformed release input: {exc!r}")
@@ -7445,6 +7518,10 @@ def main() -> int:
         help="release-ledger.json (default: RELEASE/release-ledger.json, else the repository ledger)",
     )
     gate_parser.add_argument("--commit", help="full sha the release was cut from; must be an ancestor of origin/main")
+    gate_parser.add_argument("--native-binding-bundle", type=pathlib.Path,
+                             help="deterministic signed bundle verified against a committed native binding recipe")
+    gate_parser.add_argument("--native-binding-recipe",
+                             help="reviewed recipe path in --commit (requires --native-binding-bundle)")
     gate_parser.add_argument("--now", help="RFC3339 evaluation time (default: now, UTC)")
     gate_parser.add_argument(
         "--tier2-content-index",
@@ -7577,6 +7654,7 @@ def main() -> int:
             return cmd_content_gate(
                 args.release, args.live, args.ledger, args.commit, args.now, args.tier2_content_index,
                 args.acknowledged_moves, args.pricing_diff, args.pricing_diff_sha256, args.tier2_coordinator_config,
+                args.native_binding_bundle, args.native_binding_recipe,
             )
         elif args.command == "splice-coordinator-rate-card":
             cmd_splice_coordinator_rate_card(args.live_config, args.block, args.output)

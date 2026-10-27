@@ -26,6 +26,784 @@ set -euo pipefail
 export PATH="${CANARY_REMOTE_PATH_PREFIX:+$CANARY_REMOTE_PATH_PREFIX:}/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
 umask 077
 
+# Fixed transaction actor, dispatched only by the owning catalog controller.
+if [ "${1:-}" = signed-pair-engine ]; then
+  [ "$#" = 3 ] || exit 2
+  python3 -I - "$2" "$3" "${BASH_SOURCE[0]:--}" <<'SIGNED_PAIR_PY'
+"""Fixed Studio signed-pair actor. Embedded in the remote ops entry point.
+
+The root controller owns the Pearl lease and runner guardian. An uncertain
+cross-host commit isolates the provider; it never guesses which half won.
+"""
+import base64
+import ctypes
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import plistlib
+import re
+import shutil
+import socket
+import stat
+import subprocess
+import sys
+import tarfile
+import time
+import urllib.request
+
+
+class Refused(RuntimeError):
+    pass
+
+
+def require(ok, reason):
+    if not ok:
+        raise Refused(reason)
+
+
+def read_private(path):
+    path = Path(path)
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, 'rb') as source:
+        info = os.fstat(source.fileno())
+        require(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid()
+                and not info.st_mode & 0o077, 'unsafe private input')
+        return source.read()
+
+
+def put(path, value):
+    path = Path(path)
+    temporary = path.with_name(path.name + '.next-' + str(os.getpid()))
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, 'w') as target:
+        json.dump(value, target, sort_keys=True)
+        target.flush()
+        os.fsync(target.fileno())
+    os.replace(temporary, path)
+    fd = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def sha(path):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, 'rb') as source:
+        require(stat.S_ISREG(os.fstat(source.fileno()).st_mode), 'nonregular payload')
+        result = hashlib.sha256()
+        for block in iter(lambda: source.read(1024 * 1024), b''):
+            result.update(block)
+        return result.hexdigest()
+
+
+def field(body, key):
+    for part in key.split('.'):
+        body = body.get(part) if isinstance(body, dict) else None
+    return body
+
+
+def validate(j):
+    require(j['schema_version'] == 'macprovider.signed_native_pair.v1', 'journal schema')
+    require(re.fullmatch(r'[A-Za-z0-9_-]{1,80}', j['transaction_id']), 'transaction ID')
+    require(j['coordinator_url'] == 'https://coordinator.malibu.tech', 'coordinator target')
+    require(type(j['deadline_epoch']) is int and type(j['recovery_seconds']) is int
+            and 0 < j['recovery_seconds'] <= 3600, 'recovery bounds')
+    require(type(j['stable_seconds']) is int and j['stable_seconds'] >= 120, 'stable bound')
+    require(j['prior']['version'] != j['target']['version'], 'unchanged binary version')
+    require(j['prior']['request_feature_profile'] == 'native_mtp_greedy_text_v1'
+            and j['target']['request_feature_profile'] == j['prior']['request_feature_profile'], 'greedy permission scope')
+    require(re.fullmatch(r'[0-9a-f]{64}', j['target']['previous_window_sha256']), 'target compatibility window digest')
+    require(type(j['prior']['ordinary_context_tokens']) is int
+            and j['prior']['ordinary_context_tokens'] >= 4096
+            and j['target']['ordinary_context_tokens'] == j['prior']['ordinary_context_tokens'], 'ordinary context must be preserved')
+    for role in ('prior', 'target'):
+        identity = j[role]
+        provenance = identity['provenance']
+        require(provenance == 'reviewed_published_signed_release' or
+                (role == 'target' and provenance == 'reviewed_signed_acceptance_candidate'), 'unsigned or unauthorized payload')
+        if provenance == 'reviewed_signed_acceptance_candidate':
+            require(re.fullmatch(r'[1-9][0-9]*', str(identity['candidate_run_id'])), 'acceptance run identity')
+            for key in ('acceptance_manifest_sha256', 'acceptance_signature_sha256', 'checksums_sha256'):
+                require(re.fullmatch(r'[0-9a-f]{64}', identity[key]), 'acceptance evidence digest')
+        require(re.fullmatch(r'[0-9a-f]{40}', identity['source_commit']), 'source identity')
+        for key in ('binary_sha256', 'tarball_sha256', 'decode_path_digest', 'model_hash'):
+            require(re.fullmatch(r'[0-9a-f]{64}', identity[key]), 'payload identity')
+        require(re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', identity['cdhash']), 'CDHash')
+        require(identity['team_id'] and identity['signing_identifier'], 'signature identity')
+        required = {'/v1/native-mtp-admission', '/v1/native-mtp-admission.sig',
+                    '/v1/native-mtp-selftest-bank', '/v1/native-mtp-selftest-bank.sig',
+                    '/v1/native-mtp-artifact-manifest', '/v1/autotune-candidates',
+                    '/v1/autotune-candidates.sig', '/v1/catalog-artifacts', '/v1/catalog-artifacts.sig', '/v1/continuous-batching-policy',
+                    '/v1/continuous-batching-policy.sig'}
+        require(required <= identity['feed_sha256'].keys(), 'incomplete signed policy identities')
+        for endpoint, digest in identity['feed_sha256'].items():
+            require(re.fullmatch(r'/v1/[a-z0-9.-]+', endpoint)
+                    and re.fullmatch(r'[0-9a-f]{64}', digest), 'policy endpoint identity')
+    studio = j['studio']
+    require(studio['hardware_model'] == 'Mac15,14' and 'Studio' in studio['host_name'], 'designated Studio identity')
+    require(type(studio['status_port']) is int and 0 < studio['status_port'] < 65536, 'status port')
+    require(re.fullmatch(r'[A-Za-z0-9.-]+', studio['launchd_label']), 'launchd identity')
+    for key in ('install_dir', 'config_path', 'launchd_plist', 'ctl_socket', 'capture_dir'):
+        require(Path(studio[key]).is_absolute(), 'absolute Studio paths required')
+    reader = j['receipt_reader']
+    for key in ('host', 'user', 'server_host_key_alias'):
+        require(re.fullmatch(r'[A-Za-z0-9_.-]+', reader[key]) and not reader[key].startswith('-'), 'receipt SSH identity')
+    require(type(reader['port']) is int and 0 < reader['port'] < 65536, 'receipt SSH port')
+    for key in ('private_key_path', 'known_hosts_path'):
+        require(Path(reader[key]).is_absolute(), 'receipt SSH path')
+    # A key is a path into the operator secret store, never journal material.
+    require(Path(reader['private_key_path']).is_relative_to(Path.home() / '.config/macprovider/operator-secrets'),
+            'receipt private key must be in operator secret store')
+
+
+def receipt(j):
+    reader = j['receipt_reader']
+    key = Path(reader['private_key_path'])
+    read_private(key)
+    require(stat.S_IMODE(key.parent.stat().st_mode) == 0o700, 'receipt key directory permissions')
+    require(sha(reader['known_hosts_path']) == reader['known_hosts_sha256'], 'receipt SSH host keys changed')
+    result = run(['/usr/bin/ssh', '-F', '/dev/null', '-T', '-o', 'BatchMode=yes',
+                  '-o', 'IdentitiesOnly=yes', '-o', 'StrictHostKeyChecking=yes',
+                  '-o', 'ConnectTimeout=10', '-o', 'UserKnownHostsFile=' + reader['known_hosts_path'],
+                  '-o', 'HostKeyAlias=' + reader['server_host_key_alias'], '-i', str(key),
+                  '-p', str(reader['port']), reader['user'] + '@' + reader['host']])
+    require(len(result.stdout) <= 65536, 'oversized recovery receipt')
+    value = json.loads(result.stdout)
+    require(value['transaction_id'] == j['transaction_id'], 'receipt transaction mismatch')
+    return value
+
+
+def committed_receipt(j, value):
+    require(value['transaction_id'] == j['transaction_id'] and value['policy_phase'] == 'target_committed'
+            and value['target_release_id'] == j['target']['catalog_release_id']
+            and all(value['target_feed_sha256'].get(k) == v for k, v in j['target']['feed_sha256'].items()), 'Pearl commit receipt mismatch')
+
+
+def run(args, check=True):
+    return subprocess.run(args, check=check, stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE, text=True, timeout=30)
+
+
+def host(j):
+    require(sys.platform == 'darwin', 'Studio requires macOS')
+    require(run(['/usr/sbin/sysctl', '-n', 'hw.model']).stdout.strip()
+            == j['studio']['hardware_model'], 'hardware mismatch')
+    require(run(['/bin/hostname']).stdout.strip() == j['studio']['host_name'], 'host mismatch')
+
+
+def signed_binary(path, identity):
+    require(sha(path) == identity['binary_sha256'], 'binary bytes mismatch')
+    run(['/usr/bin/codesign', '--verify', '--strict', str(path)])
+    signature = run(['/usr/bin/codesign', '-d', '--verbose=4', str(path)])
+    output = signature.stdout + signature.stderr
+    for key, value in (('TeamIdentifier', identity['team_id']),
+                       ('Identifier', identity['signing_identifier']),
+                       ('CDHash', identity['cdhash'])):
+        require(value in re.findall(r'^' + re.escape(key) + r'=(.*)$', output, re.M),
+                'signed executable identity mismatch')
+    with open(path, 'rb') as source:
+        markers = set(re.findall(rb'macprovider\.decode-path-digest\.v1:([0-9a-f]{64})', source.read()))
+    require(markers == {identity['decode_path_digest'].encode()}, 'embedded decode path mismatch')
+
+
+def fetch(url):
+    request = urllib.request.Request(url, headers={'Accept': 'application/json'})
+    with urllib.request.urlopen(request, timeout=10) as response:
+        require(response.geturl() == url, 'policy redirect')
+        raw = response.read(16 * 1024 * 1024 + 1)
+        require(len(raw) <= 16 * 1024 * 1024, 'oversized policy')
+        return raw
+
+
+def policy(j, identity):
+    base = j['coordinator_url']
+    metadata = json.loads(fetch(base + '/v1/autotune-release'))
+    require(metadata.get('status') == 'live_verified'
+            and metadata.get('release_id') == identity['catalog_release_id'], 'current release mismatch')
+    for endpoint, expected in identity['feed_sha256'].items():
+        require(hashlib.sha256(fetch(base + endpoint)).hexdigest() == expected,
+                'public signed policy bytes mismatch')
+    # Reading metadata again prevents accepting a torn publication snapshot.
+    require(json.loads(fetch(base + '/v1/autotune-release')) == metadata, 'policy changed during proof')
+
+
+def status(j):
+    return json.loads(fetch('http://127.0.0.1:%d/v1/status' % j['studio']['status_port']))
+
+
+def paused(body):
+    return field(body, 'lifecycle.operator_paused') is True
+
+
+def readiness(body, identity, provider_sha, must_pause):
+    require(body.get('binary_version') == identity['version'] and body.get('model_loaded') is True,
+            'target not loaded')
+    require(hashlib.sha256(str(body.get('provider_id', '')).encode()).hexdigest() == provider_sha,
+            'provider identity changed')
+    require(body.get('model') == identity['model'] and body.get('model_hash') == identity['model_hash'], 'served model changed')
+    require(field(body, 'native_mtp.enabled') is True
+            and field(body, 'native_mtp.mode') in ('eligible', 'active'), 'native MTP not active')
+    for key, value in {'capacity.max_concurrency': 4, 'capacity.max_context_tokens': identity['ordinary_context_tokens'], 'continuous_batching.active': True,
+                       'continuous_batching.policy.load_status': 'live_verified',
+                       'continuous_batching.policy.authorized': True,
+                       'continuous_batching.policy.policy_sha256': identity['cb_policy_sha256'],
+                       'continuous_batching.policy.release_id': identity['catalog_release_id'],
+                       'continuous_batching.policy.tuple_sha256': identity['cb_tuple_sha256'],
+                       'continuous_batching.self_check.served_slots': 4,
+                       'continuous_batching.self_check_admission_hold.active': False,
+                       'continuous_batching.scheduler.slots_total': 4}.items():
+        require(field(body, key) == value, 'CB readiness mismatch: ' + key)
+    require(paused(body) == must_pause, 'operator pause mismatch')
+    require(body.get('requests_in_flight') == 0 if must_pause else
+            body.get('network_state') == 'buyer_serving', 'admission state mismatch')
+
+
+def control(j, frame):
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+        client.settimeout(15)
+        client.connect(j['studio']['ctl_socket'])
+        client.sendall((json.dumps({'type': frame}) + '\n').encode())
+        response = b''
+        while b'\n' not in response and len(response) < 65536:
+            block = client.recv(4096)
+            if not block:
+                break
+            response += block
+        # The fixed protocol acknowledges with accepted=true.
+        body = json.loads(response.split(b'\n')[0])
+        require(body.get('accepted') is True, 'control request refused')
+
+
+def job(j, operation, watchdog=False):
+    label = j['studio']['launchd_label'] + ('-watchdog' if watchdog else '')
+    domain = 'gui/%d' % os.getuid()
+    if operation == 'stop':
+        run(['/bin/launchctl', 'bootout', domain + '/' + label], check=False)
+        require(run(['/bin/launchctl', 'print', domain + '/' + label], check=False).returncode != 0,
+                'launchd job still running')
+    else:
+        if watchdog and run(['/bin/launchctl', 'print', domain + '/' + label], check=False).returncode == 0:
+            return
+        plist = (str(Path(j['studio']['launchd_plist']).with_name(label + '.plist'))
+                 if watchdog else j['studio']['launchd_plist'])
+        run(['/bin/launchctl', 'bootstrap', domain, plist])
+
+
+def process_id(j):
+    output = run(['/bin/launchctl', 'print', 'gui/%d/%s' %
+                  (os.getuid(), j['studio']['launchd_label'])]).stdout
+    found = re.search(r'^\s*pid = ([0-9]+)$', output, re.M)
+    require(found is not None, 'provider PID absent')
+    pid = found.group(1)
+    started = run(['/bin/ps', '-p', pid, '-o', 'lstart=']).stdout.strip()
+    require(started, 'provider process absent')
+    path = ctypes.create_string_buffer(4096)
+    libproc = ctypes.CDLL('/usr/lib/libproc.dylib')
+    require(libproc.proc_pidpath(int(pid), path, len(path)) > 0
+            and os.path.realpath(os.fsdecode(path.value)) == os.path.realpath(str(Path(j['studio']['install_dir']) / 'macprovider-cli'))
+            and run(['/bin/ps', '-p', pid, '-o', 'uid=']).stdout.strip() == str(os.getuid()), 'provider process identity mismatch')
+    return (pid, started)
+
+
+def capture(j, since, require_zero=False):
+    directory = Path(j['studio']['capture_dir'])
+    candidates = list(directory.glob('*.jsonl'))
+    require(len(candidates) == 1, 'capture session must contain one fresh file')
+    path = candidates[0]
+    require(path.stat().st_mtime >= since, 'stale capture header')
+    snapshot_path = Path(str(path) + '.status.json')
+    require(snapshot_path.stat().st_mtime >= since, 'stale capture status')
+    consistent = False
+    for _ in range(10):
+        status_bytes = read_private(snapshot_path)
+        raw = read_private(path)
+        if status_bytes == read_private(snapshot_path):
+            snapshot = json.loads(status_bytes)
+            if snapshot.get('jsonl_bytes_written') == len(raw):
+                consistent = True
+                break
+        time.sleep(.02)
+    require(consistent, 'capture snapshot is not consistent')
+    lines = raw.splitlines()
+    header_bytes = lines[0]
+    header = json.loads(header_bytes)
+    header_sha = hashlib.sha256(header_bytes).hexdigest()
+    expected_header = j.get('capture_header_sha256')
+    require(expected_header is None or expected_header == header_sha, 'capture header identity changed')
+    identity = j['target']
+    require(header.get('schema') == 'macprovider.native-mtp-request-shape-capture.v2'
+            and header.get('record_type') == 'header'
+            and header.get('capture_requires_native_mtp_off') is False
+            and header.get('native_mtp_mode') == 'auto'
+            and header.get('build_identity_complete') is True
+            and header.get('build_source_commit') == identity['source_commit']
+            and header.get('build_cdhash') == identity['cdhash']
+            and header.get('cli_version') == identity['version']
+            and header.get('max_records') == 1000 and header.get('max_bytes') == 10485760, 'capture v2 identity mismatch')
+    require(snapshot.get('schema') == 'macprovider.native-mtp-request-shape-capture.v2'
+            and snapshot.get('record_type') == 'status'
+            and snapshot.get('build_identity_complete') is True
+            and snapshot.get('jsonl_write_errors') == 0
+            and snapshot.get('status_write_errors') == 0
+            and snapshot.get('capture_file_name') == path.name
+            and snapshot.get('max_records') == 1000 and snapshot.get('max_bytes') == 10485760, 'capture v2 initialization not proven')
+    records = snapshot.get('successful_records')
+    attempts = snapshot.get('attempts')
+    written = snapshot.get('jsonl_bytes_written')
+    require(type(records) is int and 0 <= records <= 1000
+            and type(attempts) is int and attempts >= records
+            and type(written) is int and len(header_bytes) < written <= 10485760
+            and records == len(lines) - 1 and written == len(raw), 'capture counter/byte consistency')
+    if require_zero:
+        require(attempts == 0 and records == 0, 'fresh capture initialization proof is not zero')
+    return {'header_sha256': header_sha, 'file_name': path.name}
+
+
+def scoped_policy(j, role='target'):
+    raw = fetch(j['coordinator_url'] + '/v1/native-mtp-admission')
+    document = json.loads(raw)
+    entries = [e for e in document['entries'] if e['model_key'] == j[role]['model_key']]
+    require(len(entries) == 1, 'ambiguous model admission')
+    entry = entries[0]
+    require(entry['max_native_active_rows'] == 1 and entry['max_prompt_tokens'] == 4096
+            and entry['qualified_slots'] == 4 and entry['proposal_depth'] == 1
+            and entry['request_feature_profile'] == j['prior']['request_feature_profile']
+            and entry['decode_path_digest'] == j[role]['decode_path_digest'], 'MTP scope changed')
+
+
+def extract(j, directory):
+    archive = Path(j['target']['tarball_path'])
+    require(sha(archive) == j['target']['tarball_sha256'], 'released archive mismatch')
+    directory.mkdir(mode=0o700)
+    with tarfile.open(archive, 'r:gz') as source:
+        seen = set()
+        for member in source.getmembers():
+            path = Path(member.name)
+            normalized = os.path.normpath(member.name)
+            require(not path.is_absolute() and '..' not in path.parts
+                    and normalized not in seen and (member.isfile() or member.isdir()), 'unsafe archive')
+            seen.add(normalized)
+        for member in source.getmembers():
+            # Existing ops uses this portable API; do not depend on a newer
+            # Python extractall(filter=...) on the Studio. Never apply owner
+            # or special permission bits from archive headers.
+            source.extract(member, directory, set_attrs=False)
+    os.chmod(directory / 'macprovider-cli', 0o755)
+    signed_binary(directory / 'macprovider-cli', j['target'])
+    baked = json.loads((directory / 'catalog-release/release.json').read_text())
+    require(baked['release_id'] == j['target']['baked_catalog_release_id'], 'baked catalog identity mismatch')
+    if baked['release_id'] != j['target']['catalog_release_id']:
+        compatible_pair(j, baked['release_id'])
+
+
+def compatible_pair(j, baked_release):
+    decision = receipt(j)
+    require(decision.get('current_release_id') == j['target']['catalog_release_id']
+            and decision.get('window_source') == 'retained_disk_under_lease'
+            and decision.get('previous_window_sha256') == j['target']['previous_window_sha256']
+            and (baked_release == j['target']['catalog_release_id'] or
+                 (baked_release == j['prior']['catalog_release_id']
+                  and baked_release in decision.get('compatible_previous_release_ids', [])))
+            and decision.get('target_activation_verified') is True,
+            'reviewed compatible-previous target pair not verified')
+    for endpoint, digest in j['target']['feed_sha256'].items():
+        require(decision.get('target_feed_sha256', {}).get(endpoint) == digest,
+                'compatible target signed feed identity mismatch')
+    # Parent's fixed activation receipt exists only after served-byte and HUP
+    # journal gates. The reader separately reports the exact retained disk
+    # window under lease; it is not mislabeled as a runtime window snapshot.
+    policy(j, j['target'])
+
+
+def stable(j, role, must_pause, deadline, with_capture=False):
+    identity = j[role]
+    began = None
+    held_pid = None
+    while time.time() < deadline:
+        try:
+            current = process_id(j)
+            require(held_pid is None or current == held_pid, 'provider process restarted')
+            held_pid = current
+            readiness(status(j), identity, j['provider_id_sha256'], must_pause)
+            signed_binary(Path(j['studio']['install_dir']) / 'macprovider-cli', identity)
+            policy(j, identity)
+            if with_capture:
+                capture(j, j['capture_started_epoch'])
+                scoped_policy(j)
+            began = began or time.monotonic()
+            if time.monotonic() - began >= j['stable_seconds']:
+                return held_pid
+        except (Refused, OSError, ValueError, subprocess.SubprocessError):
+            # Losing an established identity/readiness proof is terminal.
+            if began is not None:
+                raise
+        time.sleep(2)
+    raise Refused('readiness deadline exceeded')
+
+
+
+def watchdog_lock(j):
+    directory = Path.home() / '.macprovider-canary-swap.lock'
+    try:
+        directory.mkdir(mode=0o700)
+        (directory / 'signed-pair-owner').write_text(j['transaction_id'])
+    except FileExistsError:
+        require((directory / 'signed-pair-owner').is_file()
+                and (directory / 'signed-pair-owner').read_text() == j['transaction_id'], 'foreign Studio swap lock')
+        try:
+            old = int((directory / 'pid').read_text())
+            if old != os.getpid():
+                os.kill(old, 0)
+                raise Refused('another signed-pair watchdog is active')
+        except ProcessLookupError:
+            pass
+    temporary = directory / ('pid.' + str(os.getpid()))
+    temporary.write_text(str(os.getpid()))
+    os.replace(temporary, directory / 'pid')
+    return directory
+
+
+def release_watchdog_lock(directory, tx):
+    require((directory / 'signed-pair-owner').read_text() == tx
+            and (directory / 'pid').read_text() == str(os.getpid()), 'watchdog lock owner changed')
+    (directory / 'pid').unlink()
+    (directory / 'signed-pair-owner').unlink()
+    directory.rmdir()
+
+
+
+def status_unstaged(encoded):
+    j = json.loads(base64.b64decode(encoded, validate=True))
+    validate(j)
+    host(j)
+    ready = False
+    try:
+        stage = Path(j['studio']['journal_path']).parent
+        require(not stage.exists() and not Path(j['studio']['remote_actor_path']).exists()
+                and not (Path.home() / '.macprovider-canary-swap.lock').exists(), 'partial or foreign Studio transaction')
+        signed_binary(Path(j['studio']['install_dir']) / 'macprovider-cli', j['prior'])
+        policy(j, j['prior'])
+        readiness(status(j), j['prior'], j['provider_id_sha256'], False)
+        process_id(j)
+        scoped_policy(j, 'prior')
+        ready = True
+    except (Refused, KeyError, OSError, ValueError, subprocess.SubprocessError):
+        pass
+    binding = {k: j[k] for k in ('transaction_id', 'prior', 'target', 'coordinator_url')}
+    print(json.dumps({'transaction_id': j['transaction_id'], 'target_release_id': j['target']['catalog_release_id'],
+                      'phase': 'prior_unchanged' if ready else 'unstaged_unverified', 'terminal_ready': ready,
+                      'identity_binding_sha256': hashlib.sha256(json.dumps(binding, sort_keys=True, separators=(',', ':')).encode()).hexdigest()}))
+
+
+def fence_action(j, directory):
+    owner_path = directory / 'studio-action-owner.json'
+    if not owner_path.exists():
+        return
+    owner = json.loads(read_private(owner_path))
+    require(owner['transaction_id'] == j['transaction_id'], 'action owner transaction mismatch')
+    pid = owner['pid']
+    if pid == os.getpid():
+        return
+    started = run(['/bin/ps', '-p', str(pid), '-o', 'lstart='], check=False).stdout.strip()
+    if not started:
+        return
+    command = run(['/bin/ps', '-p', str(pid), '-o', 'command='], check=False).stdout
+    uid = run(['/bin/ps', '-p', str(pid), '-o', 'uid='], check=False).stdout.strip()
+    if not (started == owner['start'] and uid == str(os.getuid())
+            and 'python3' in command and j['studio']['journal_path'] in command):
+        return  # Reused/unrelated PID is never a recovery kill target.
+    os.kill(pid, 9)
+
+
+def main(action, journal_path, script):
+    if action == 'status-unstaged':
+        return status_unstaged(journal_path)
+    journal_path = Path(journal_path)
+    raw = read_private(journal_path)
+    j = json.loads(raw)
+    validate(j)
+    host(j)
+    directory = journal_path.parent
+    info = directory.lstat()
+    require(stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid()
+            and not info.st_mode & 0o077, 'journal directory must be private')
+    state_path = directory / 'studio-state.json'
+    lock = (os.open(os.devnull, os.O_RDONLY) if action == 'status' else
+            os.open(directory / 'studio-action.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600))
+    watchdog_directory = None
+    if action == 'watchdog':
+        watchdog_directory = watchdog_lock(j)
+        put(directory / 'studio-watchdog-ready.json', {'transaction_id': j['transaction_id'], 'pid': os.getpid()})
+        while time.time() < j['deadline_epoch']:
+            if state_path.exists() and json.loads(read_private(state_path)).get('phase') in ('committed', 'restored'):
+                release_watchdog_lock(watchdog_directory, j['transaction_id'])
+                return
+            time.sleep(1)
+        fence_action(j, directory)
+        action = 'rollback'
+    with os.fdopen(lock, 'r' if action == 'status' else 'w') as guard:
+        if action != 'status':
+            fcntl.flock(guard, fcntl.LOCK_EX)
+        if action != 'status':
+            put(directory / 'studio-action-owner.json', {'transaction_id': j['transaction_id'], 'pid': os.getpid(),
+                'start': run(['/bin/ps', '-p', str(os.getpid()), '-o', 'lstart=']).stdout.strip()})
+        state = json.loads(read_private(state_path)) if state_path.exists() else {}
+        if action not in ('status', 'rollback') and not (action == 'commit' and state.get('phase') == 'committed'):
+            require(time.time() < j['deadline_epoch'], 'transaction work deadline expired')
+        require(not state or state['journal_sha256'] == hashlib.sha256(raw).hexdigest(), 'journal changed after arm')
+        def save(phase, **extra):
+            state.update(extra)
+            state.update(phase=phase, transaction_id=j['transaction_id'],
+                         journal_sha256=hashlib.sha256(raw).hexdigest())
+            put(state_path, state)
+        if action == 'status':
+            ready = False
+            phase = state.get('phase', 'staged')
+            try:
+                role = 'target' if phase == 'committed' else 'prior'
+                require(phase in ('committed', 'restored'), 'transaction not terminal')
+                identity = j[role]
+                signed_binary(Path(j['studio']['install_dir']) / 'macprovider-cli', identity)
+                policy(j, identity)
+                readiness(status(j), identity, j['provider_id_sha256'], False)
+                process_id(j)
+                if role == 'target':
+                    j['capture_started_epoch'] = state['capture_started_epoch']
+                    j['capture_header_sha256'] = state['capture_header_sha256']
+                    capture(j, j['capture_started_epoch'])
+                    scoped_policy(j)
+                ready = True
+            except (Refused, KeyError, OSError, ValueError, subprocess.SubprocessError):
+                pass
+            binding = {k: j[k] for k in ('transaction_id', 'prior', 'target', 'coordinator_url')}
+            print(json.dumps({'transaction_id': j['transaction_id'], 'target_release_id': j['target']['catalog_release_id'],
+                              'phase': phase, 'terminal_ready': ready,
+                              'identity_binding_sha256': hashlib.sha256(json.dumps(binding, sort_keys=True, separators=(',', ':')).encode()).hexdigest()}))
+            return
+        if action == 'commit' and state.get('phase') == 'committed':
+            policy(j, j['target'])
+            signed_binary(Path(j['studio']['install_dir']) / 'macprovider-cli', j['target'])
+            readiness(status(j), j['target'], j['provider_id_sha256'], False)
+            return
+        if action == 'preflight':
+            require(not state, 'transaction already exists')
+            readiness(status(j), j['prior'], j['provider_id_sha256'], False)
+            policy(j, j['prior'])
+            require(not Path(j['studio']['capture_dir']).exists(), 'capture directory reused')
+            return
+        if action == 'arm':
+            require(not state and time.time() < j['deadline_epoch'] <= time.time() + 3600, 'arm deadline')
+            require(receipt(j)['policy_phase'] == 'armed', 'independent Pearl guardian not armed')
+            launched = plistlib.loads(Path(j['studio']['launchd_plist']).read_bytes())
+            args = launched.get('ProgramArguments', [])
+            require(launched.get('Label') == j['studio']['launchd_label']
+                    and args and os.path.realpath(args[0]) == os.path.realpath(str(Path(j['studio']['install_dir']) / 'macprovider-cli'))
+                    and j['studio']['config_path'] in args, 'provider launch identity mismatch')
+            process_id(j)
+            shutil.copytree(j['studio']['install_dir'], directory / 'prior-payload', symlinks=True)
+            shutil.copy2(j['studio']['config_path'], directory / 'prior-config')
+            shutil.copy2(j['studio']['launchd_plist'], directory / 'prior-launchd.plist')
+            signed_binary(directory / 'prior-payload/macprovider-cli', j['prior'])
+            save('armed', prior_config_sha256=sha(directory / 'prior-config'),
+                 prior_plist_sha256=sha(directory / 'prior-launchd.plist'))
+            label = 'tech.malibu.signed-pair.' + j['transaction_id']
+            plist = {'Label': label, 'ProgramArguments': ['/bin/bash', script, 'signed-pair-engine', 'watchdog', str(journal_path)],
+                     'RunAtLoad': True, 'KeepAlive': {'SuccessfulExit': False},
+                     'StandardOutPath': str(directory / 'studio-watchdog.log'),
+                     'StandardErrorPath': str(directory / 'studio-watchdog.log')}
+            with open(directory / 'studio-watchdog.plist', 'wb') as target:
+                plistlib.dump(plist, target)
+            os.chmod(directory / 'studio-watchdog.plist', 0o600)
+            run(['/bin/launchctl', 'bootstrap', 'gui/%d' % os.getuid(), str(directory / 'studio-watchdog.plist')])
+            limit = time.monotonic() + 15
+            while not (directory / 'studio-watchdog-ready.json').exists():
+                require(time.monotonic() < limit, 'independent watchdog did not arm')
+                time.sleep(.1)
+            return
+        require(state, 'transaction not armed')
+        if action == 'prepare':
+            require(state['phase'] == 'armed', 'prepare phase')
+            policy(j, j['prior'])
+            readiness(status(j), j['prior'], j['provider_id_sha256'], False)
+            save('pausing')
+            control(j, 'pause_request')
+            while time.time() < j['deadline_epoch']:
+                body = status(j)
+                if paused(body) and body.get('requests_in_flight') == 0:
+                    break
+                time.sleep(1)
+            else:
+                raise Refused('drain deadline')
+            job(j, 'stop', watchdog=True)
+            job(j, 'stop')
+            save('prepared', pause_proven=True)
+        elif action == 'install':
+            require(state['phase'] == 'prepared', 'install phase')
+            policy(j, j['target'])
+            scoped_policy(j)
+            compatible_pair(j, j['target']['baked_catalog_release_id'])
+            target = directory / 'target-payload'
+            if not target.exists():
+                extract(j, target)
+            signed_binary(target / 'macprovider-cli', j['target'])
+            save('installing')
+            install = Path(j['studio']['install_dir'])
+            for name in ('macprovider-cli', 'mlx.metallib', 'compatibility-set.json',
+                         'THIRD-PARTY-NOTICES.txt', 'catalog-release', 'compatibility-set-local',
+                         'mlx-swift_Cmlx.bundle', 'swift-nio_NIOPosix.bundle'):
+                destination = install / name
+                if destination.is_dir():
+                    shutil.rmtree(destination)
+                elif destination.exists() or destination.is_symlink():
+                    destination.unlink()
+                source = target / name
+                if source.is_dir():
+                    shutil.copytree(source, destination)
+                elif source.exists():
+                    shutil.copy2(source, destination)
+            capture_dir = Path(j['studio']['capture_dir'])
+            capture_dir.mkdir(mode=0o700)
+            plist_path = Path(j['studio']['launchd_plist'])
+            plist = plistlib.loads(plist_path.read_bytes())
+            env = plist.setdefault('EnvironmentVariables', {})
+            env.update(MACPROVIDER_NATIVE_MTP_SHAPE_CAPTURE_DIR=str(capture_dir),
+                       MACPROVIDER_NATIVE_MTP_SHAPE_CAPTURE_SCHEMA='v2',
+                       MACPROVIDER_NATIVE_MTP_SHAPE_CAPTURE_MAX_RECORDS='1000',
+                       MACPROVIDER_NATIVE_MTP_SHAPE_CAPTURE_MAX_BYTES='10485760')
+            with open(plist_path, 'wb') as output:
+                plistlib.dump(plist, output)
+            require(sha(j['studio']['config_path']) == state['prior_config_sha256'], 'provider config drift')
+            signed_binary(install / 'macprovider-cli', j['target'])
+            # Native operator pause is persisted across provider restart.
+            compatible_pair(j, j['target']['baked_catalog_release_id'])
+            policy(j, j['target'])
+            save('installed', capture_started_epoch=time.time())
+            job(j, 'start')
+        elif action in ('ready', 'resume', 'prepare-commit'):
+            allowed = {'ready': 'installed', 'resume': 'ready', 'prepare-commit': 'resumed'}
+            require(state['phase'] == allowed[action], 'readiness phase')
+            j['capture_started_epoch'] = state['capture_started_epoch']
+            if action != 'ready':
+                j['capture_header_sha256'] = state['capture_header_sha256']
+            if action == 'resume':
+                readiness(status(j), j['target'], j['provider_id_sha256'], True)
+                capture(j, j['capture_started_epoch'])
+                policy(j, j['target'])
+                control(j, 'resume_request')
+            pid = stable(j, 'target', action == 'ready', j['deadline_epoch'], True)
+            proof = capture(j, j['capture_started_epoch'], require_zero=action == 'ready')
+            save({'ready': 'ready', 'resume': 'resumed', 'prepare-commit': 'commit_prepared'}[action], process_identity=pid,
+                 capture_header_sha256=proof['header_sha256'], capture_file_name=proof['file_name'])
+        elif action == 'commit':
+            require(state['phase'] == 'commit_prepared', 'commit phase')
+            committed_receipt(j, receipt(j))
+            policy(j, j['target'])
+            readiness(status(j), j['target'], j['provider_id_sha256'], False)
+            require(tuple(state['process_identity']) == process_id(j), 'target process changed')
+            job(j, 'start', watchdog=True)
+            save('committed')
+        elif action == 'rollback':
+            if state['phase'] in ('committed', 'restored'):
+                if watchdog_directory is not None:
+                    release_watchdog_lock(watchdog_directory, j['transaction_id'])
+                return
+            recovery_deadline = time.time() + j['recovery_seconds']
+            # An authoritative remote commit wins even when the controller
+            # died before relaying it. No local file can invent this decision.
+            try:
+                decision = receipt(j)
+            except (Refused, OSError, ValueError, subprocess.SubprocessError):
+                decision = {}
+            if decision.get('policy_phase') == 'target_committed':
+                try:
+                    committed_receipt(j, decision)
+                    require(state['phase'] in ('ready', 'resumed', 'commit_prepared'), 'target was never qualified')
+                    policy(j, j['target'])
+                    j['capture_started_epoch'] = state['capture_started_epoch']
+                    j['capture_header_sha256'] = state['capture_header_sha256']
+                    is_paused = paused(status(j))
+                    stable(j, 'target', is_paused, recovery_deadline, True)
+                    if is_paused:
+                        policy(j, j['target'])
+                        control(j, 'resume_request')
+                        stable(j, 'target', False, recovery_deadline, True)
+                    job(j, 'start', watchdog=True)
+                    save('committed', recovery='authoritative_remote_target_commit')
+                    if watchdog_directory is not None:
+                        release_watchdog_lock(watchdog_directory, j['transaction_id'])
+                    return
+                except (Refused, OSError, ValueError, subprocess.SubprocessError):
+                    job(j, 'stop', watchdog=True)
+                    job(j, 'stop')
+                    save('blocked', reason='committed_target_unhealthy_provider_stopped')
+                    raise
+            # Fence all target work before waiting for Pearl recovery. Do not
+            # start the old executable against CURRENT target policy.
+            pause_proven = state.get('pause_proven', False)
+            try:
+                control(j, 'pause_request')
+                pause_proven = pause_proven or paused(status(j))
+            except (Refused, OSError, ValueError):
+                pass
+            job(j, 'stop', watchdog=True)
+            job(j, 'stop')
+            save('awaiting_prior_policy', pause_proven=pause_proven)
+            require(pause_proven, 'persisted operator pause cannot be proven; provider remains stopped')
+            end = recovery_deadline
+            while True:
+                try:
+                    decision = receipt(j)
+                    require(decision.get('policy_phase') == 'prior_restored'
+                            and decision.get('prior_release_id') == j['prior']['catalog_release_id']
+                            and all(decision.get('prior_feed_sha256', {}).get(k) == v for k, v in j['prior']['feed_sha256'].items()), 'prior restore receipt mismatch')
+                    policy(j, j['prior'])
+                    break
+                except (Refused, OSError, ValueError, subprocess.SubprocessError):
+                    if time.time() >= end:
+                        save('blocked', reason='prior_public_policy_not_restored_provider_stopped')
+                        raise Refused('prior policy not restored; provider isolated; journal retained')
+                    time.sleep(2)
+            signed_binary(directory / 'prior-payload/macprovider-cli', j['prior'])
+            require(sha(directory / 'prior-config') == state['prior_config_sha256']
+                    and sha(directory / 'prior-launchd.plist') == state['prior_plist_sha256'], 'prior config changed')
+            install = Path(j['studio']['install_dir'])
+            if install.exists():
+                failed = directory / ('failed-payload-' + str(int(time.time())))
+                shutil.move(str(install), failed)
+            shutil.copytree(directory / 'prior-payload', install, symlinks=True)
+            shutil.copy2(directory / 'prior-config', j['studio']['config_path'])
+            shutil.copy2(directory / 'prior-launchd.plist', j['studio']['launchd_plist'])
+            policy(j, j['prior'])
+            job(j, 'start')
+            # The incumbent pause survives restart; prove the whole old tuple
+            # before resume, and retain identical PID throughout stable proof.
+            stable(j, 'prior', True, recovery_deadline)
+            policy(j, j['prior'])
+            control(j, 'resume_request')
+            stable(j, 'prior', False, recovery_deadline)
+            job(j, 'start', watchdog=True)
+            save('restored')
+            if watchdog_directory is not None:
+                release_watchdog_lock(watchdog_directory, j['transaction_id'])
+        else:
+            raise Refused('unknown signed-pair action')
+
+
+if __name__ == '__main__':
+    try:
+        require(len(sys.argv) == 4, 'signed-pair invocation')
+        main(sys.argv[1], sys.argv[2], sys.argv[3])
+    except (Refused, KeyError, ValueError, OSError, subprocess.SubprocessError) as error:
+        # Do not print URLs, commands, configuration or arbitrary error strings.
+        print('signed-pair refused: ' + type(error).__name__, file=sys.stderr)
+        sys.exit(6)
+SIGNED_PAIR_PY
+  exit $?
+fi
+
 MODE=swap
 case "${1:-}" in remove-owner-pin|restore-owner-pin) MODE="$1"; shift ;; esac
 if [ "$MODE" = swap ]; then

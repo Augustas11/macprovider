@@ -46,6 +46,7 @@ struct NativeMTPAdmissionCapability: Equatable, Sendable {
     /// SPEC-023-R024 `request_feature_profile` is the sampled profile: the
     /// tuple qualified target-sample exact-match verification (SPEC-048-R004).
     var supportsSampling: Bool = false
+    var adaptationConfig: NativeMTPAdaptationConfig? = nil
 }
 
 struct NativeMTPSelfTestChallengeBank: Equatable, Sendable {
@@ -517,17 +518,18 @@ enum NativeMTPAdmissionSidecar {
     static let maxQuantizationExceptions = 1024
     static let embeddedMTPFamilyAdapter = "glm5_next_mtp_v1"
 
-    /// The largest `max_native_active_rows` a family adapter may sign
-    /// (SPEC-048 MTP-2): 1 for `glm5_next_mtp_v1`; nil when only the
-    /// generic 1...8 range applies.
+    /// Implementation ceiling, not a qualification: an increased signed bound
+    /// still needs exact parity and R015 qualification at that bound. Existing
+    /// GLM policy remains one; other families retain the generic 1...8 range.
     static func maxNativeActiveRowsBound(familyAdapter: String) -> Int? {
-        familyAdapter == embeddedMTPFamilyAdapter ? 1 : nil
+        familyAdapter == embeddedMTPFamilyAdapter ? 4 : nil
     }
 
-    /// The only `request_feature_profile` values a family adapter may sign
-    /// (SPEC-048 MTP-2): `glm5_next_mtp_v1` is greedy only.
+    /// Greedy proposals also support sampled requests: acceptance compares each
+    /// proposal with the ordinary row sampler's target token at that position.
+    /// The signed profile still determines whether sampling is qualified.
     static func allowedRequestFeatureProfiles(familyAdapter: String) -> Set<String> {
-        familyAdapter == embeddedMTPFamilyAdapter ? [greedyRequestFeatureProfile] : requestFeatureProfiles
+        requestFeatureProfiles
     }
 
     /// SPEC-048-R002 (0.1.35/0.1.36): the release entry carries no layout, so
@@ -658,6 +660,7 @@ enum NativeMTPAdmissionSidecar {
         let revocationSignerKeyID: String
         let selfTest: NativeMTPSelfTestChallengeBank
         let admissionAllowed: Bool
+        var adaptationConfig: NativeMTPAdaptationConfig? = nil
 
         func withSidecarSHA256(_ sidecarSHA256: String) -> Parsed {
             Parsed(
@@ -693,7 +696,8 @@ enum NativeMTPAdmissionSidecar {
                 challengeBankSignerKeyID: challengeBankSignerKeyID,
                 revocationSignerKeyID: revocationSignerKeyID,
                 selfTest: selfTest,
-                admissionAllowed: admissionAllowed
+                admissionAllowed: admissionAllowed,
+                adaptationConfig: adaptationConfig
             )
         }
     }
@@ -1035,7 +1039,8 @@ enum NativeMTPAdmissionSidecar {
             revocationSignerKeyID: parsed.revocationSignerKeyID,
             selfTestChallengeBank: parsed.selfTest,
             capturedArtifacts: capturedArtifacts,
-            supportsSampling: parsed.requestProfile.sampling
+            supportsSampling: parsed.requestProfile.sampling,
+            adaptationConfig: parsed.adaptationConfig
         )
     }
 
@@ -1434,7 +1439,13 @@ enum NativeMTPAdmissionSidecar {
                 signerKeyID: challengeBankSignerKeyID,
                 signatureSHA256: ""
             ),
-            admissionAllowed: true
+            admissionAllowed: true,
+            adaptationConfig: try NativeMTPAdaptationConfig(
+                qualifiedMaximumDepth: selected.entry.proposalDepth,
+                decreaseThresholdPPM: UInt64(selected.entry.decreaseThresholdPPM),
+                increaseThresholdPPM: UInt64(selected.entry.increaseThresholdPPM),
+                maxVerificationPositionsPerCommittedMilli: UInt64(selected.entry.maxVerificationPositionsPerCommittedMilli)
+            )
         )
     }
 
@@ -1543,8 +1554,8 @@ enum NativeMTPAdmissionSidecar {
         }
         let qualifiedSlots = try requireInt(object, "qualified_slots", path: path, range: 2...8)
         let maxNativeActiveRows = try requireInt(object, "max_native_active_rows", path: path, range: 1...8)
-        // SPEC-048 MTP-2 (0.1.43): a glm5_next tuple serves native MTP on one
-        // active row; at four rows it decoded slower than ordinary batching.
+        // The adapter ceiling only establishes implementation support. A signed
+        // policy still binds the separately qualified native active-row count.
         if case .string(let adapter)? = object["mtp_family_adapter"],
            let bound = maxNativeActiveRowsBound(familyAdapter: adapter),
            maxNativeActiveRows > bound {

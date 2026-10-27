@@ -55,6 +55,164 @@ OPS_NAME=canary-swap
 
 usage() { sed -n '2,/^set -euo pipefail$/p' "${BASH_SOURCE[0]}" | sed -e '$d' -e 's/^# \{0,1\}//'; }
 
+# A fixed internal child of catalog-activate next --run. The parent owns the
+# live-ops lock, Pearl lease, signed release approval and runner guardian.
+if [ "${1:-}" = signed-pair ]; then
+  shift
+  pair_plan="" pair_action=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --plan) [ "$#" -ge 2 ] || exit 2; pair_plan="$2"; shift 2 ;;
+      --action) [ "$#" -ge 2 ] || exit 2; pair_action="$2"; shift 2 ;;
+      *) exit 2 ;;
+    esac
+  done
+  case "$pair_action" in preflight|arm|prepare|install|ready|resume|prepare-commit|commit|rollback|status) ;; *) exit 2 ;; esac
+  [ "${MACPROVIDER_OPS_ENTRYPOINT:-}" = 1 ] && [ -n "${MACPROVIDER_OPS_OWNER:-}" ] ||
+    refuse "signed-pair requires the owning catalog entrypoint"
+  python3 -I - "$pair_plan" "$pair_action" <<'PAIR_VALIDATE_PY' || refuse "invalid private signed-pair plan"
+import json, os, pathlib, re, stat, sys
+p=pathlib.Path(sys.argv[1]); fd=os.open(p,os.O_RDONLY|os.O_NOFOLLOW)
+with os.fdopen(fd) as stream:
+ info=os.fstat(stream.fileno())
+ if not stat.S_ISREG(info.st_mode) or info.st_uid!=os.getuid() or info.st_mode&0o077: raise ValueError('private plan')
+ j=json.load(stream)
+if j['schema_version']!='macprovider.signed_native_pair.v1' or not re.fullmatch('[A-Za-z0-9_-]{1,80}',j['transaction_id']): raise ValueError('schema')
+paths=[j['studio']['journal_path'],j['studio']['remote_actor_path'],j['target']['tarball_path']]
+if sys.argv[2] in ('preflight','arm'):
+ paths += [j['target']['local_tarball_path']]
+if sys.argv[2]=='arm':
+ paths += [j['receipt_reader']['private_key_path'],j['receipt_reader']['local_private_key_path'],j['receipt_reader']['known_hosts_path'],j['receipt_reader']['local_known_hosts_path']]
+for path in paths:
+ if not re.fullmatch(r'/[A-Za-z0-9_./-]+',path) or '..' in pathlib.Path(path).parts: raise ValueError('path')
+d=pathlib.Path(j['studio']['journal_path']).parent
+if d.name!='signed-pair-'+j['transaction_id'] or pathlib.Path(j['studio']['remote_actor_path']).parent!=d or pathlib.Path(j['target']['tarball_path']).parent!=d: raise ValueError('transaction staging directory')
+for key in (() if sys.argv[2]!='arm' else ('private_key_path','local_private_key_path')):
+ if '/.config/macprovider/operator-secrets/' not in j['receipt_reader'][key]: raise ValueError('key store')
+if sys.argv[2]=='arm' and pathlib.Path(j['receipt_reader']['private_key_path']).name!='signed-pair-'+j['transaction_id']+'.key': raise ValueError('key identity')
+PAIR_VALIDATE_PY
+  pair_get() { json_field "$pair_plan" "$1"; }
+  pair_tx="$(pair_get 'd["transaction_id"]')"
+  pair_remote="$(pair_get 'd["studio"]["journal_path"]')"
+  pair_actor="$(pair_get 'd["studio"]["remote_actor_path"]')"
+  pair_stage="${pair_remote%/*}"
+  require_studio_ssh
+  if [ "$pair_action" = status ]; then
+    if studio_ssh "test -f '$pair_actor' && test -f '$pair_remote'"; then
+      studio_ssh "bash '$pair_actor' signed-pair-engine status '$pair_remote'" > "$OPS_TMP_DIR/pair-status.json" || exit $?
+    else
+      pair_encoded="$(base64 < "$pair_plan" | tr -d '\n')"
+      studio_ssh "bash -s -- signed-pair-engine status-unstaged '$pair_encoded'" < "$OPS_DIR/lib/canary-swap-remote.sh" > "$OPS_TMP_DIR/pair-status.json" || exit $?
+    fi
+    python3 -I - "$pair_plan" "$OPS_TMP_DIR/pair-status.json" <<'PAIR_STATUS_PY'
+import hashlib,json,sys
+j=json.load(open(sys.argv[1]));s=json.load(open(sys.argv[2]));binding={k:j[k] for k in ('transaction_id','prior','target','coordinator_url')}
+expected=hashlib.sha256(json.dumps(binding,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+if s['transaction_id']!=j['transaction_id'] or s['identity_binding_sha256']!=expected: raise ValueError('remote identity mismatch')
+print(json.dumps(s))
+PAIR_STATUS_PY
+    exit $?
+  fi
+  if [ "$pair_action" = preflight ] || [ "$pair_action" = arm ]; then
+    # These bytes have passed the release train's signature/checksums gate.
+    pair_version="$(pair_get 'd["target"]["version"]')"
+    is_semver "$pair_version" || refuse "invalid target version"
+    pair_scope="cli-release-$pair_version"
+    pair_bytes="$(marker_field "$pair_scope" signed_byte_verification 'd.get("bytes_dir")')"
+    pair_checksums="$(marker_field "$pair_scope" signed_byte_verification 'd.get("checksums_sha256")')"
+    pair_archive="$(pair_get 'd["target"]["local_tarball_path"]')"
+    [ "$pair_archive" = "$pair_bytes/macprovider-cli-v$pair_version-darwin-arm64.tar.gz" ] || refuse "archive is not the verified release asset"
+    [ "$(shasum -a 256 "$pair_bytes/checksums.txt" | awk '{print $1}')" = "$pair_checksums" ] || refuse "signed checksums changed"
+    pair_want="$(pair_get 'd["target"]["tarball_sha256"]')"
+    pair_signed="$(awk -v a="macprovider-cli-v$pair_version-darwin-arm64.tar.gz" '$2 == a {print $1}' "$pair_bytes/checksums.txt")"
+    [ "$pair_want" = "$pair_signed" ] && [ "$(shasum -a 256 "$pair_archive" | awk '{print $1}')" = "$pair_want" ] || refuse "released archive digest mismatch"
+    [ "$(marker_field "$pair_scope" signed_byte_verification 'd.get("binary_sha256")')" = "$(pair_get 'd["target"]["binary_sha256"]')" ] || refuse "released binary digest mismatch"
+    pair_source="$(pair_get 'd["target"]["source_commit"]')"
+    is_sha40 "$pair_source" || refuse "invalid candidate source"
+    [ "$(marker_field "$pair_scope" signed_byte_verification 'd.get("candidate_sha")')" = "$pair_source" ] || refuse "signed candidate source binding mismatch"
+    pair_provenance="$(pair_get 'd["target"]["provenance"]')"
+    case "$pair_provenance" in
+      reviewed_signed_acceptance_candidate)
+        [ "$(gh_repo)" = Augustas11/macprovider ] || refuse "acceptance cut belongs to another repository"
+        pair_run="$(pair_get 'str(d["target"]["candidate_run_id"])')"
+        case "$pair_run" in ''|*[!0-9]*) refuse "invalid acceptance run identity" ;; esac
+        [ "$pair_run" != 0 ] && [ "$(marker_field "$pair_scope" signed_byte_verification 'str(d.get("run_id", ""))')" = "$pair_run" ] || refuse "acceptance run differs from signed-byte verification"
+        [ "$pair_checksums" = "$(pair_get 'd["target"]["checksums_sha256"]')" ] || refuse "acceptance checksums differ from frozen plan"
+        [ "$(marker_field "$pair_scope" signed_byte_verification 'd.get("compatibility_set_id")')" = "$(gh_repo):v$pair_version@$pair_source" ] || refuse "acceptance compatibility identity mismatch"
+        [ "$(shasum -a 256 "$pair_bytes/acceptance-candidate.json" | awk '{print $1}')" = "$(pair_get 'd["target"]["acceptance_manifest_sha256"]')" ] &&
+          [ "$(shasum -a 256 "$pair_bytes/acceptance-candidate.json.sig" | awk '{print $1}')" = "$(pair_get 'd["target"]["acceptance_signature_sha256"]')" ] || refuse "acceptance envelope differs from frozen plan"
+        gh api "repos/$(gh_repo)/actions/runs/$pair_run" > "$OPS_TMP_DIR/pair-acceptance-run.json" || refuse "cannot verify acceptance workflow identity"
+        python3 -I - "$OPS_TMP_DIR/pair-acceptance-run.json" "$pair_bytes/acceptance-candidate.json" "$pair_plan" "$(gh_repo)" <<'PAIR_CANDIDATE_RUN_PY' || refuse "acceptance workflow/source binding mismatch"
+import json,pathlib,re,sys
+run=json.loads(pathlib.Path(sys.argv[1]).read_text());envelope=json.loads(pathlib.Path(sys.argv[2]).read_text());plan=json.loads(pathlib.Path(sys.argv[3]).read_text());repo=sys.argv[4];target=plan['target']
+checks=(type(run.get('id')) is int and run['id']>0 and str(run['id'])==str(target['candidate_run_id']),
+ run.get('event')=='workflow_dispatch',run.get('status')=='completed',run.get('conclusion')=='success',
+ run.get('path')=='.github/workflows/acceptance-candidate.yml',run.get('head_branch')=='main',
+ run.get('repository',{}).get('full_name')==repo,
+ isinstance(run.get('head_sha'),str) and re.fullmatch('[0-9a-f]{40}',run['head_sha']) is not None,
+ type(run.get('run_attempt')) is int and run['run_attempt']>0,
+ envelope.get('candidate_ref')=='refs/heads/main',envelope.get('candidate_commit')==target['source_commit'],
+ envelope.get('control_commit')==run.get('head_sha'),envelope.get('run_id')==str(run.get('id')),
+ envelope.get('run_attempt')==run.get('run_attempt'),envelope.get('repository')==repo,
+ envelope.get('tag')=='v'+target['version'],envelope.get('channel')=='acceptance')
+if not all(checks): raise ValueError('acceptance run does not bind the exact signed envelope')
+PAIR_CANDIDATE_RUN_PY
+        pair_control="$(json_field "$OPS_TMP_DIR/pair-acceptance-run.json" 'd["head_sha"]')"
+        pair_attempt="$(json_field "$OPS_TMP_DIR/pair-acceptance-run.json" 'd["run_attempt"]')"
+        git -C "$REPO_ROOT" merge-base --is-ancestor "$pair_source" origin/main || refuse "candidate source is not reviewed main history"
+        # Reuse the existing domain-separated P-256 verifier. A provenance
+        # string or local build cannot substitute for this signed envelope.
+        python3 "$REPO_ROOT/scripts/acceptance-candidate-metadata.py" verify \
+          --input "$pair_bytes/acceptance-candidate.json" --signature "$pair_bytes/acceptance-candidate.json.sig" \
+          --public-key "$REPO_ROOT/security/acceptance-candidate-signing-public.pem" \
+          --checksums "$pair_bytes/checksums.txt" --repository "$(gh_repo)" --tag "v$pair_version" \
+          --candidate-ref refs/heads/main --candidate-commit "$pair_source" --control-commit "$pair_control" \
+          --run-id "$pair_run" --run-attempt "$pair_attempt" || refuse "acceptance envelope signature or byte binding failed"
+        ;;
+      reviewed_published_signed_release)
+        [ "$(git -C "$REPO_ROOT" rev-parse "refs/tags/v$pair_version^{commit}" 2>/dev/null)" = "$pair_source" ] || refuse "released source binding mismatch"
+        gh release view "v$pair_version" -R "$(gh_repo)" --json isDraft,isPrerelease,tagName > "$OPS_TMP_DIR/pair-public-release.json" || refuse "target is not published"
+        python3 -I - "$OPS_TMP_DIR/pair-public-release.json" "$pair_version" <<'PAIR_RELEASE_PY' || refuse "target must be a published stable release"
+import json,sys
+j=json.load(open(sys.argv[1]));sys.exit(0 if j['isDraft'] is False and j['isPrerelease'] is False and j['tagName']=='v'+sys.argv[2] else 1)
+PAIR_RELEASE_PY
+        ;;
+      *) refuse "target is neither a verified signed acceptance candidate nor a published signed release" ;;
+    esac
+    if [ "$pair_action" = preflight ]; then
+      python3 -I - "$pair_plan" <<'PAIR_PREFLIGHT_PY'
+import json,sys
+j=json.load(open(sys.argv[1]));print(json.dumps(dict(transaction_id=j['transaction_id'],target_release_id=j['target']['catalog_release_id'],deadline_epoch=j['deadline_epoch'],phase='provenance_verified')))
+PAIR_PREFLIGHT_PY
+      exit 0
+    fi
+    studio_ssh "umask 077; test ! -e '$pair_stage' && mkdir -m 700 '$pair_stage'" || refuse "transaction staging already exists or cannot be created"
+    studio_ssh "umask 077; cat > '$pair_remote'" < "$pair_plan" || refuse "cannot stage private journal"
+    studio_ssh "umask 077; cat > '$pair_actor'" < "$OPS_DIR/lib/canary-swap-remote.sh" || refuse "cannot stage fixed actor"
+    pair_remote_archive="$(pair_get 'd["target"]["tarball_path"]')"
+    studio_ssh "umask 077; cat > '$pair_remote_archive'" < "$pair_archive" || refuse "cannot stage released archive"
+    pair_key_local="$(pair_get 'd["receipt_reader"]["local_private_key_path"]')"
+    pair_key_remote="$(pair_get 'd["receipt_reader"]["private_key_path"]')"
+    pair_hosts_local="$(pair_get 'd["receipt_reader"]["local_known_hosts_path"]')"
+    pair_hosts_remote="$(pair_get 'd["receipt_reader"]["known_hosts_path"]')"
+    python3 -I - "$pair_key_local" <<'PAIR_KEY_PY' || refuse "unsafe receipt key source"
+import os,pathlib,stat,sys
+p=pathlib.Path(sys.argv[1]);s=p.lstat()
+if not stat.S_ISREG(s.st_mode) or stat.S_IMODE(s.st_mode)!=0o600 or s.st_uid!=os.getuid() or stat.S_IMODE(p.parent.stat().st_mode)!=0o700: raise ValueError('key permission')
+PAIR_KEY_PY
+    [ "$(shasum -a 256 "$pair_hosts_local" | awk '{print $1}')" = "$(pair_get 'd["receipt_reader"]["known_hosts_sha256"]')" ] || refuse "receipt host keys mismatch"
+    studio_ssh "umask 077; test ! -e '$pair_key_remote' && test -d '${pair_key_remote%/*}' && test \"\$(stat -f %Lp '${pair_key_remote%/*}')\" = 700 && cat > '$pair_key_remote' && chmod 600 '$pair_key_remote'" < "$pair_key_local" || refuse "cannot install private receipt key in operator store"
+    studio_ssh "umask 077; test ! -e '$pair_hosts_remote' && cat > '$pair_hosts_remote'" < "$pair_hosts_local" || refuse "cannot stage pinned receipt host keys"
+    studio_ssh "bash '$pair_actor' signed-pair-engine preflight '$pair_remote'" || refuse "Studio frozen preflight refused"
+  fi
+  studio_ssh "bash '$pair_actor' signed-pair-engine '$pair_action' '$pair_remote'" || exit $?
+  python3 -I - "$pair_plan" "$pair_action" <<'PAIR_RESULT_PY'
+import json,sys
+j=json.load(open(sys.argv[1]));print(json.dumps(dict(transaction_id=j['transaction_id'],target_release_id=j['target']['catalog_release_id'],deadline_epoch=j['deadline_epoch'],action=sys.argv[2],status='verified')))
+PAIR_RESULT_PY
+  exit 0
+fi
+
 CMD="${1:-}"
 [ "$#" -gt 0 ] && shift
 V=""

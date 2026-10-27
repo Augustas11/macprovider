@@ -1,12 +1,19 @@
 import contextlib
+import importlib.util
 import io
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 from scripts import native_mtp_post_gateway_replay_analyze as analyzer
-from scripts import native_mtp_request_shape_replay as replay
+
+REPLAY_PATH = Path(__file__).resolve().parents[1] / "native_mtp_request_shape_replay.py"
+REPLAY_SPEC = importlib.util.spec_from_file_location("native_mtp_request_shape_replay_copy", REPLAY_PATH)
+replay = importlib.util.module_from_spec(REPLAY_SPEC)
+sys.modules[REPLAY_SPEC.name] = replay
+REPLAY_SPEC.loader.exec_module(replay)
 
 
 class NativeMTPRequestShapeReplayTests(unittest.TestCase):
@@ -166,6 +173,163 @@ class NativeMTPRequestShapeReplayTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "duplicate JSON key"):
                 replay.load_capture(duplicate)
 
+    def test_v2_capture_projects_closed_rows_with_bound_family_and_modeled_schedule(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            header = self._v2_header()
+            shape = self._v2_shape("observed-native", observed_reason="eligible", observed_eligible=True,
+                                   observed_path="native_mtp")
+            shape["generated_completion_tokens"] = 81
+            capture = self._write_capture(root, [shape], header=header)
+            bounds = self._write_bounds(root, family_adapter="glm5_next_mtp_v1")
+            bench = self._write_bench_policy(root)
+            policy, plan = replay.project_capture(
+                capture, bounds, blocks=10, privacy_review_id="privacy-1770-r015",
+                privacy_reviewed_at="2026-10-07T00:00:00Z", preregistration_digest="a" * 64,
+                seed=48015, sampling_plan_id="r015-bounded-prospective-sample",
+                sample_period_start="2026-10-07T00:00:00Z", sample_period_end="2026-10-07T01:00:00Z",
+                bench_policy_path=bench,
+            )
+        self.assertEqual(plan["schema"], replay.PLAN_SCHEMA_V2)
+        self.assertEqual(plan["capture_header"], header)
+        self.assertEqual(plan["qualification_status"], "PENDING_REAL_LAB_REPLAY")
+        self.assertEqual(plan["arrival_schedule"], {
+            "kind": "modeled_preregistered_staggered_arrivals",
+            "source": "bench_policy.arrival_interval_ms", "arrival_interval_ms": 250,
+            "offset_rule": "wave_index_times_interval", "order": "capture_sequence",
+            "identical_across_paths": True,
+        })
+        row = plan["blocks"][0]["request_shape_templates"][0]
+        self.assertEqual(set(row), replay.REPLAY_SHAPE_V2_KEYS)
+        self.assertEqual(row["projected_selector_reason"], "eligible")
+        self.assertTrue(row["projected_selector_eligible"])
+        self.assertEqual(row["generated_completion_tokens"], 81)
+        analyzer_shape = replay._request_shape_for_analyzer(
+            row, {"schema": replay.REPLAY_RESULT_SCHEMA_V2, "target_sha256": "a" * 64},
+        )
+        self.assertEqual(analyzer_shape["shape_id"], "observed-native")
+        self.assertEqual(policy["schema"], replay.POLICY_SCHEMA)
+
+    def test_v2_unknown_control_is_retained_and_pending_not_dropped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            capture = self._write_capture(root, [self._v2_shape("unknown-family", family="unknown")], header=self._v2_header())
+            bounds = self._write_bounds(root, family_adapter="glm5_next_mtp_v1")
+            policy, plan = replay.project_capture(
+                capture, bounds, blocks=10, privacy_review_id="privacy-1770-r015",
+                privacy_reviewed_at="2026-10-07T00:00:00Z", preregistration_digest="a" * 64,
+                seed=48015, sampling_plan_id="r015-bounded-prospective-sample",
+                sample_period_start="2026-10-07T00:00:00Z", sample_period_end="2026-10-07T01:00:00Z",
+                bench_policy_path=self._write_bench_policy(root),
+            )
+        self.assertEqual(plan["qualification_status"], "PENDING_UNREPRODUCIBLE_CAPTURE")
+        self.assertEqual(plan["sample_report"]["captured_request_count"], 1)
+        self.assertEqual(len(plan["blocks"][0]["request_shape_templates"]), 1)
+        with self.assertRaisesRegex(ValueError, "pending_unreproducible_capture"):
+            replay._request_shape_for_analyzer(
+                plan["blocks"][0]["request_shape_templates"][0],
+                {"schema": replay.REPLAY_RESULT_SCHEMA_V2, "target_sha256": "a" * 64},
+            )
+
+    def test_v2_rejects_invalid_controls_and_missing_bench_binding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bad = self._v2_shape("bad", reasoning_state="arbitrary")
+            capture = self._write_capture(root, [bad], header=self._v2_header())
+            with self.assertRaisesRegex(ValueError, "reasoning_effort_state:field_invalid"):
+                replay.load_capture(capture)
+            good = self._write_capture(root, [self._v2_shape("good")], header=self._v2_header())
+            with self.assertRaisesRegex(ValueError, "requires --bench-policy"):
+                replay.project_capture(
+                    good, self._write_bounds(root, family_adapter="glm5_next_mtp_v1"), blocks=10,
+                    privacy_review_id="privacy-1770-r015", privacy_reviewed_at="2026-10-07T00:00:00Z",
+                    preregistration_digest="a" * 64, seed=48015,
+                    sampling_plan_id="r015-bounded-prospective-sample", sample_period_start="2026-10-07T00:00:00Z",
+                    sample_period_end="2026-10-07T01:00:00Z",
+                )
+
+    def test_v2_selector_projection_matches_production_family_and_sampler_guards(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sampled = replay.load_tuple_bounds(self._write_bounds(root, family_adapter="glm5_next_mtp_v1"), replay.CAPTURE_SCHEMA_V2)
+            greedy = dict(sampled, request_feature_profile="native_mtp_greedy_text_v1")
+            glm_serial = self._v2_shape(
+                "glm-serial", tools=True, tool_turn=True, parallel_state="false",
+                reasoning_state="low", effective_reasoning_effort="low",
+            )
+            glm_omitted = self._v2_shape("glm-omitted", tools=True, tool_turn=True)
+            glm_parallel = self._v2_shape(
+                "glm-parallel", tools=True, tool_turn=True, parallel_state="true",
+                reasoning_state="low", effective_reasoning_effort="low",
+            )
+            tool_qwen = self._v2_shape("qwen-tools", tools=True, family="qwen3_5_mtp_v1")
+            parallel = self._v2_shape("parallel", tools=True, parallel_state="true")
+            required = self._v2_shape("required", tools=True, tool_choice=True, tool_grammar_required=True)
+            required["tool_choice_kind"] = "required"
+            named = self._v2_shape("named", tools=True, tool_choice=True, tool_grammar_required=True, tool_choice_function_index=0)
+            named["tool_choice_kind"] = "function"
+            cases = [
+                (glm_serial, sampled, "tools"),
+                (glm_omitted, sampled, "eligible"),
+                (glm_parallel, sampled, "eligible"),
+                (glm_omitted, greedy, "tools"),
+                (tool_qwen, sampled, "tools"),
+                (parallel, sampled, "eligible"),
+                (required, sampled, "tools"),
+                (named, sampled, "tools"),
+                (self._v2_shape("top-p-zero", temperature=0, top_p=0), sampled, "eligible"),
+                (self._v2_shape("sampled", temperature=0.25, top_p=1), sampled, "eligible"),
+                (self._v2_shape("bad-top-p", temperature=0.25, top_p=1.01), sampled, "sampling"),
+            ]
+            for index, (row, bounds, expected) in enumerate(cases):
+                capture = self._write_capture(root, [row], header=self._v2_header())
+                _, shapes = replay.load_capture(capture)
+                self.assertEqual(replay.selector_reason(shapes[0], bounds), expected, msg=str(index))
+
+    def test_v2_rejects_each_malformed_closed_control_without_type_error(self):
+        cases = {
+            "observed_selector_reason": "not_a_selector_reason",
+            "observed_selector_eligible": "true",
+            "observed_effective_path": [],
+            "served_model_family": [],
+            "parallel_tool_calls_state": [],
+            "reasoning_effort_state": [],
+            "effective_reasoning_effort": [],
+            "tool_choice_function_index": [],
+            "tool_grammar_required": [],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for key, value in cases.items():
+                row = self._v2_shape("malformed-" + key)
+                row[key] = value
+                capture = self._write_capture(root, [row], header=self._v2_header())
+                with self.assertRaisesRegex(ValueError, key + ":field_invalid"):
+                    replay.load_capture(capture)
+
+    def test_v2_unknown_controls_keep_weight_but_project_ordinary_reason(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            unknown = self._v2_shape("unknown", family="unknown")
+            identity_missing = self._v2_shape("identity-missing")
+            identity_missing["served_model_hash_sha256"] = "unavailable"
+            capture = self._write_capture(root, [unknown, identity_missing], header=self._v2_header())
+            bounds_path = self._write_bounds(root, family_adapter="glm5_next_mtp_v1")
+            _, shapes = replay.load_capture(capture)
+            self.assertEqual(replay.selector_reason(shapes[0], replay.load_tuple_bounds(bounds_path, replay.CAPTURE_SCHEMA_V2)), "unknown_request_field")
+            _, plan = replay.project_capture(
+                capture, bounds_path, blocks=10, privacy_review_id="privacy-1770-r015",
+                privacy_reviewed_at="2026-10-07T00:00:00Z", preregistration_digest="a" * 64,
+                seed=48015, sampling_plan_id="r015-bounded-prospective-sample",
+                sample_period_start="2026-10-07T00:00:00Z", sample_period_end="2026-10-07T01:00:00Z",
+                bench_policy_path=self._write_bench_policy(root),
+            )
+        self.assertEqual(plan["qualification_status"], "PENDING_UNREPRODUCIBLE_CAPTURE")
+        templates = plan["blocks"][0]["request_shape_templates"]
+        self.assertEqual(len(templates), 2)
+        self.assertEqual(templates[0]["projected_selector_reason"], "unknown_request_field")
+        self.assertEqual(templates[1]["served_model_hash_sha256"], "unavailable")
+
     def test_projection_tool_refuses_to_claim_real_replay(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -217,6 +381,92 @@ class NativeMTPRequestShapeReplayTests(unittest.TestCase):
             analysis = analyzer.analyze(success_out, policy)
             self.assertEqual(analysis["overall_status"], "PASS")
             self.assertEqual(analysis["paired_blocks"], 10)
+
+    def test_signed_measurement_identity_is_accepted_but_malformed_identity_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            policy = self._write_policy(root)
+            output = self._write_replay_result(root, policy)
+            records = [json.loads(line) for line in output.read_text().splitlines()]
+            identity = {"binary_sha256": "a" * 64, "binary_cdhash": "b" * 40}
+            for record in records:
+                record["measurement_identity"] = identity
+            output.write_text("\n".join(json.dumps(record) for record in records) + "\n")
+            header, _ = replay._load_replay_runs(output, json.loads(policy.read_text()), replay._sha256_file(policy), None)
+            self.assertEqual(header["measurement_identity"], identity)
+            for invalid in ({}, None, dict(identity, binary_sha256="a" * 63),
+                            dict(identity, binary_cdhash="B" * 40), dict(identity, extra="untrusted")):
+                records[0]["measurement_identity"] = invalid
+                output.write_text("\n".join(json.dumps(record) for record in records) + "\n")
+                with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "measurement_identity_invalid"):
+                    replay._load_replay_runs(output, json.loads(policy.read_text()), replay._sha256_file(policy), None)
+
+    def test_signed_replay_cannot_mix_unbound_or_different_binary_runs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            policy = self._write_policy(root)
+            output = self._write_replay_result(root, policy)
+            records = [json.loads(line) for line in output.read_text().splitlines()]
+            identity = {"binary_sha256": "a" * 64, "binary_cdhash": "b" * 40}
+            for record in records:
+                record["measurement_identity"] = identity
+            for index in range(1, len(records)):
+                for invalid in (None, dict(identity, binary_cdhash="c" * 40)):
+                    records[index]["measurement_identity"] = invalid
+                    output.write_text("\n".join(json.dumps(record) for record in records) + "\n")
+                    with self.subTest(index=index, invalid=invalid), self.assertRaisesRegex(ValueError, "measurement_identity_mismatch"):
+                        replay._load_replay_runs(output, json.loads(policy.read_text()), replay._sha256_file(policy), None)
+                records[index]["measurement_identity"] = identity
+
+    def test_convert_v2_replay_preserves_projected_pre_capacity_shape(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            policy = self._write_policy(root)
+            replay_jsonl = self._write_v2_replay_result(root, policy)
+            records = replay.convert_replay_to_analyzer_jsonl(replay_jsonl, policy)
+        mixed = next(record for record in records if record.get("path") == "observed_mixed")
+        eligible = next(shape for shape in mixed["request_shapes"] if shape["shape_id"] == "eligible")
+        self.assertEqual(eligible["pre_capacity_selector_reason"], "mode_off")
+        self.assertFalse(eligible["pre_capacity_eligible"])
+        self.assertEqual(eligible["effective_path"], "native_mtp")
+
+    def test_convert_allows_only_glm_or_v2_capacity_downgrade_without_losing_candidate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            policy = self._write_policy(root)
+            v2_path = self._write_v2_replay_result(root, policy)
+            v2_records = [json.loads(line) for line in v2_path.read_text("utf-8").splitlines()]
+            v2_records[0]["request_shapes"][0]["projected_selector_reason"] = "eligible"
+            v2_records[0]["request_shapes"][0]["projected_selector_eligible"] = True
+            glm_path = self._write_replay_result(root, policy)
+            glm_records = [json.loads(line) for line in glm_path.read_text("utf-8").splitlines()]
+            glm_records[0]["model_id"] = "zai-org/glm-5.3-flash"
+            qwen_path = self._write_replay_result(root, policy)
+            qwen_records = [json.loads(line) for line in qwen_path.read_text("utf-8").splitlines()]
+            for records in (v2_records, glm_records, qwen_records):
+                for record in records:
+                    if record.get("record_type") == "run" and record.get("path") == "native_mtp":
+                        for row in record["admission_projection"]:
+                            if row["shape_id"] == "eligible":
+                                row.update({
+                                    "actual_selector_reason": "capacity_above_native_bound",
+                                    "actual_effective_path": "ordinary",
+                                    "matches": True,
+                                })
+                        record["ordinary_observed_requests"] += 1
+                        record["ordinary_observed_completion_tokens"] += 11
+                        record["ordinary_observed_interval_seconds"] = record["ordinary_observed_completion_tokens"] / 100
+            v2_path.write_text("".join(json.dumps(record, sort_keys=True) + "\n" for record in v2_records), "utf-8")
+            glm_path.write_text("".join(json.dumps(record, sort_keys=True) + "\n" for record in glm_records), "utf-8")
+            qwen_path.write_text("".join(json.dumps(record, sort_keys=True) + "\n" for record in qwen_records), "utf-8")
+            for replay_path in (v2_path, glm_path):
+                converted = replay.convert_replay_to_analyzer_jsonl(replay_path, policy)
+                mixed = next(record for record in converted if record.get("path") == "observed_mixed")
+                eligible = next(shape for shape in mixed["request_shapes"] if shape["shape_id"] == "eligible")
+                self.assertTrue(eligible["pre_capacity_eligible"])
+                self.assertEqual(eligible["effective_path"], "ordinary")
+            with self.assertRaisesRegex(ValueError, "actual_admission_mismatch"):
+                replay.convert_replay_to_analyzer_jsonl(qwen_path, policy)
 
     def test_convert_rejects_pending_projection_and_unsafe_actual_replay(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -546,13 +796,44 @@ class NativeMTPRequestShapeReplayTests(unittest.TestCase):
             "effective_path": "ordinary",
         }
 
-    def _write_capture(self, root, shapes):
+    def _write_capture(self, root, shapes, header=None):
         capture = root / "capture.jsonl"
         capture.write_text(
-            "\n".join(json.dumps(record, sort_keys=True) for record in [self._header(), *shapes]) + "\n",
+            "\n".join(json.dumps(record, sort_keys=True) for record in [header or self._header(), *shapes]) + "\n",
             "utf-8",
         )
         return capture
+
+    def _v2_header(self):
+        return {
+            **self._header(), "schema": replay.CAPTURE_SCHEMA_V2, "native_mtp_mode": "auto",
+            "capture_requires_native_mtp_off": False,
+            "sample_method": "opt_in_successful_persistable_completions_observation",
+            "capture_role": "request_shape_observation_only",
+        }
+
+    def _v2_shape(self, shape_id, *, observed_reason="eligible", observed_eligible=True,
+                  observed_path="ordinary", family="glm5_next_mtp_v1", parallel_state="absent",
+                  reasoning_state="absent", effective_reasoning_effort=None, tool_choice_function_index=None,
+                  tool_grammar_required=False, **shape_kwargs):
+        row = self._shape(shape_id, **shape_kwargs)
+        if not row["tool_choice_present"]:
+            row["tool_choice_kind"] = "absent"
+        for key in ("pre_capacity_selector_reason", "pre_capacity_eligible", "effective_path"):
+            row.pop(key)
+        row.update({
+            "schema": replay.CAPTURE_SCHEMA_V2,
+            "observed_selector_reason": observed_reason,
+            "observed_selector_eligible": observed_eligible,
+            "observed_effective_path": observed_path,
+            "served_model_family": family,
+            "parallel_tool_calls_state": parallel_state,
+            "reasoning_effort_state": reasoning_state,
+            "effective_reasoning_effort": effective_reasoning_effort,
+            "tool_choice_function_index": tool_choice_function_index,
+            "tool_grammar_required": tool_grammar_required,
+        })
+        return row
 
     def _write_bounds(self, root, **overrides):
         bounds = {
@@ -573,6 +854,11 @@ class NativeMTPRequestShapeReplayTests(unittest.TestCase):
         bounds.update(overrides)
         path = root / "bounds.json"
         path.write_text(json.dumps(bounds, sort_keys=True), "utf-8")
+        return path
+
+    def _write_bench_policy(self, root):
+        path = root / "bench-policy.json"
+        path.write_text(json.dumps({"arrival_interval_ms": 250, "slots": [1, 2], "max_native_active_rows": 1}), "utf-8")
         return path
 
     def _write_policy(self, root):
@@ -672,6 +958,51 @@ class NativeMTPRequestShapeReplayTests(unittest.TestCase):
                     ], mutate=mutate, mutate_completion=mutate_completion, mutate_run=mutate_run),
                 ])
         path = root / f"replay-{len(list(root.glob('replay-*.jsonl')))}.jsonl"
+        path.write_text("".join(json.dumps(record, sort_keys=True) + "\n" for record in records), "utf-8")
+        return path
+
+    def _write_v2_replay_result(self, root, policy):
+        path = self._write_replay_result(root, policy)
+        records = [json.loads(line) for line in path.read_text("utf-8").splitlines()]
+        header = records[0]
+        header.update({
+            "schema": replay.REPLAY_RESULT_SCHEMA_V2,
+            "capture_schema": replay.CAPTURE_SCHEMA_V2,
+            "capture_requires_native_mtp_off": False,
+            "capture_role": "request_shape_observation_only",
+            "capture_native_mtp_mode": "auto",
+            "capture_build_source_commit": "0" * 40,
+            "capture_build_cdhash": "a" * 64,
+            "capture_cli_version": "fixture-v2",
+            "tuple_bounds_sha256": "9" * 64,
+            "arrival_schedule": {
+                "kind": "modeled_preregistered_staggered_arrivals",
+                "source": "bench_policy.arrival_interval_ms",
+                "arrival_interval_ms": 250,
+                "offset_rule": "wave_index_times_interval",
+                "order": "capture_sequence",
+                "identical_across_paths": True,
+            },
+        })
+        for shape in header["request_shapes"]:
+            observed_reason = shape.pop("pre_capacity_selector_reason")
+            observed_eligible = shape.pop("pre_capacity_eligible")
+            observed_path = shape.pop("effective_path")
+            shape.update({
+                "observed_selector_reason": observed_reason,
+                "observed_selector_eligible": observed_eligible,
+                "observed_effective_path": observed_path,
+                "served_model_family": "glm5_next_mtp_v1",
+                "parallel_tool_calls_state": "absent",
+                "reasoning_effort_state": "absent",
+                "effective_reasoning_effort": None,
+                "tool_choice_function_index": None,
+                "tool_grammar_required": False,
+                "projected_selector_reason": observed_reason,
+                "projected_selector_eligible": observed_eligible,
+            })
+        for record in records[1:]:
+            record["schema"] = replay.REPLAY_RESULT_SCHEMA_V2
         path.write_text("".join(json.dumps(record, sort_keys=True) + "\n" for record in records), "utf-8")
         return path
 

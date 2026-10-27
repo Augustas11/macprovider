@@ -507,7 +507,19 @@ jobs:
       - name: Run Swift test shard ${{ matrix.shard }}/4
         working-directory: phase3-binary
         timeout-minutes: 20
-        run: python3 -u ../scripts/ci-swift-test-shard.py --shard ${{ matrix.shard }} --total 4
+        run: python3 -u ../scripts/ci-swift-test-shard.py --shard ${{ matrix.shard }} --total 4 --xunit shard-xunit.xml
+
+      # Retain the xUnit output even for a failing test shard. The artifact
+      # metadata binds the ZIP to this Actions run and checked-out source SHA.
+      - name: Upload Swift xUnit shard report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: swift-xunit-shard-${{ matrix.shard }}-${{ github.sha }}
+          path: phase3-binary/shard-xunit.xml
+          if-no-files-found: warn
+          include-hidden-files: false
+          retention-days: 7
 
   swift-journeys:
     # Hermetic BYOM journeys and Sparkle key checks, split out of the old
@@ -704,7 +716,7 @@ jobs:
   swift-package-lock:
     name: phase3-binary (locked SwiftPM resolve)
     runs-on: macos-26
-    timeout-minutes: 15
+    timeout-minutes: 35
     needs: changes
     # Same path gate as swift-tests: Package.resolved lives under
     # phase3-binary/, and a Go-only PR cannot drift the Swift lock.
@@ -725,6 +737,43 @@ jobs:
 
       - name: Verify locked Package.resolved under the release toolchain
         run: bash scripts/verify-swift-package-lock.sh
+
+      # Compile ordinary SwiftPM Release registration without overriding dependency
+      # macro flags. Signing and canonical dist/package.sh packaging remain
+      # release gates; this compile/isolation check does not prove either.
+      - name: Compile SwiftPM Release qualification command isolation
+        working-directory: phase3-binary
+        timeout-minutes: 25
+        run: |
+          set -euo pipefail
+          build_dir="$RUNNER_TEMP/native-mtp-release-compile"
+          build_log="$RUNNER_TEMP/native-mtp-release-compile.log"
+          if ! swift build -c release --product macprovider-cli \
+              --scratch-path "$build_dir" --disable-automatic-resolution >"$build_log" 2>&1; then
+            tail -200 "$build_log"
+            exit 1
+          fi
+          cli="$build_dir/release/macprovider-cli"
+          "$cli" native-mtp-qualify --help
+          # --help can exit zero for an unknown token via the default serve
+          # command. Inspect the compiled parser tree, including hidden nodes.
+          "$cli" --experimental-dump-help >"$build_dir/command-tree.json"
+          python3 - "$build_dir/command-tree.json" <<'PYTHON'
+          import json
+          import sys
+          root = json.load(open(sys.argv[1]))["command"]
+          commands = {node["commandName"]: node for node in root["subcommands"]}
+          qualification = commands["native-mtp-qualify"]
+          assert {node["commandName"] for node in qualification["subcommands"]} == {"acceptance", "bench", "replay"}
+          forbidden = {"native-mtp-bench", "native-mtp-hardware-e2e", "native-mtp-journey-e2e", "native-mtp-request-shape-replay", "glm-parity", "shard-bench", "dsv4-parity"}
+          def check(node):
+              assert node["commandName"] not in forbidden, node["commandName"]
+              assert not forbidden.intersection((node.get("aliases") or [])), node["commandName"]
+              for child in node.get("subcommands", []):
+                  check(child)
+          check(root)
+          print("Release qualification registration and LAB isolation: PASS")
+          PYTHON
 
   spec-015-acceptance:
     name: spec-015-acceptance

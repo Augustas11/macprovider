@@ -181,6 +181,35 @@ final class TerminalSessionTests: XCTestCase {
         XCTAssertEqual(result, "\(folder.resolvingSymlinksInPath().path)\n\(argument)\nisolated\ntyped input\n")
     }
 
+    func testPTYExitWaitRetainsStatusAfterNotReadyOrInterruptedWait() {
+        let pid: pid_t = 123
+        for transient in [pid_t(0), pid_t(-1)] {
+            let pending = EmbeddedTerminalProcess.pollChildExit(pid) { child, _, options in
+                XCTAssertEqual(child, pid)
+                XCTAssertEqual(options, WNOHANG)
+                errno = EINTR
+                return transient
+            }
+            XCTAssertEqual(pending, .pending)
+            let finished = EmbeddedTerminalProcess.pollChildExit(pid) { child, status, options in
+                XCTAssertEqual(child, pid)
+                XCTAssertEqual(options, WNOHANG)
+                status.pointee = 0
+                return child
+            }
+            XCTAssertEqual(finished, .finished(0))
+        }
+    }
+
+    func testPTYExitWaitDoesNotRetryWhenAnotherOwnerAlreadyReapedChild() {
+        let result = EmbeddedTerminalProcess.pollChildExit(123) { _, _, options in
+            XCTAssertEqual(options, WNOHANG)
+            errno = ECHILD
+            return -1
+        }
+        XCTAssertEqual(result, .finished(nil))
+    }
+
     func testQuitTerminatesActiveSession() async throws {
         let view = EmbeddedProcessTerminalView(frame: .init(x: 0, y: 0, width: 640, height: 400))
         view.startProcess(executable: "/bin/sleep", args: ["30"], environment: ["PATH=/usr/bin:/bin"])

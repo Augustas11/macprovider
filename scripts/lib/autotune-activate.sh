@@ -86,6 +86,7 @@ AA_LEASE_DIR=""
 AA_LEASE_HOLDER_PID=""
 AA_LEASE_SEQ=0
 AA_LEASE_LOST=0
+AA_SIGNED_PAIR_GUARD_DIR=""
 AA_COVERAGE_EXPECT=""
 AA_EVIDENCE_FAILURE=""
 AA_ROLLBACK_WINDOW="${AA_ROLLBACK_WINDOW:-}"
@@ -620,6 +621,10 @@ aa_install_helpers() {
 }
 
 aa_cleanup_remote_helpers() {
+  if [ -n "$AA_SIGNED_PAIR_GUARD_DIR" ]; then
+    # Recovery can outlive controller cleanup and still needs these helpers.
+    SSH "{ test -f '$AA_SIGNED_PAIR_GUARD_DIR/committed' || test -f '$AA_SIGNED_PAIR_GUARD_DIR/restored'; } && test -f '$AA_SIGNED_PAIR_GUARD_DIR/runner-retired' && test -f '$AA_SIGNED_PAIR_GUARD_DIR/reader-retired'" || return 0
+  fi
   if [ -n "${LOCK_HELPER_DIR:-}" ]; then
     # #1693: the pricing candidate's dedicated service-readable dir beside it.
     SSH "rm -rf '$LOCK_HELPER_DIR' '/tmp/macprovider-pricing-candidate.${LOCK_HELPER_DIR##*/macprovider-autotune-lock.}'" >/dev/null 2>&1 || true
@@ -1108,4 +1113,753 @@ aa_post_activation_evidence() {
     aa_rollback || true
     fatal "${AA_EVIDENCE_FAILURE:-post-activation evidence failed}"
   fi
+}
+
+# Independent Pearl policy recovery primitive. The owning transaction must
+# arm this before its first mutation and prove the complete pair before commit.
+_aa_signed_pair_guardian() {
+  cat <<'GUARDIAN_PY'
+import hashlib, json, os, pathlib, signal, stat, subprocess, sys, time
+
+def put(path, value):
+    temp = path.with_name(path.name + ".next")
+    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as out:
+        json.dump(value, out, sort_keys=True)
+        out.flush(); os.fsync(out.fileno())
+    os.replace(temp, path)
+    fd = os.open(path.parent, os.O_RDONLY)
+    try: os.fsync(fd)
+    finally: os.close(fd)
+
+def identity(pid):
+    try:
+        fields = pathlib.Path("/proc/%d/stat" % pid).read_text().rsplit(")", 1)[1].split()
+        return fields[19] if fields[0] != "Z" else None
+    except (OSError, IndexError): return None
+
+def digest(path):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, "rb") as src:
+        if not stat.S_ISREG(os.fstat(src.fileno()).st_mode):
+            raise ValueError("recovery input is not regular")
+        h = hashlib.sha256()
+        for chunk in iter(lambda: src.read(1024 * 1024), b""): h.update(chunk)
+        return h.hexdigest()
+
+def locks_held():
+    import fcntl
+    for fd, expected in ((8, "/run/lock/macprovider-pearl-updater.lock"),
+                         (9, "/opt/macprovider/.coordinator-deploy.lock")):
+        if os.readlink("/proc/self/fd/%d" % fd) != expected:
+            raise RuntimeError("guardian inherited wrong lock descriptor")
+        info = pathlib.Path("/proc/self/fdinfo/%d" % fd).read_text()
+        if not any(line.startswith("lock:") and "FLOCK" in line and "WRITE" in line for line in info.splitlines()):
+            raise RuntimeError("guardian descriptor holds no inherited flock")
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+def served(record, deadline):
+    import urllib.request
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *args): return None
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+    def get(url):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0: raise TimeoutError("served prior policy deadline")
+        with opener.open(url, timeout=min(5, remaining)) as response:
+            data = response.read(16777217)
+        if len(data) > 16777216: raise ValueError("oversized served feed")
+        return data
+    endpoints = {
+      "autotune-candidates.json":"autotune-candidates", "autotune-candidates.json.sig":"autotune-candidates.sig",
+      "demand-rank.json":"demand-rank", "demand-rank.json.sig":"demand-rank.sig",
+      "rate-card.json":"rate-card", "rate-card.json.sig":"rate-card.sig",
+      "continuous-batching-policy.json":"continuous-batching-policy",
+      "continuous-batching-policy.json.sig":"continuous-batching-policy.sig",
+      "autotune-artifacts.json":"catalog-artifacts", "autotune-artifacts.json.sig":"catalog-artifacts.sig",
+      "native-mtp-admission.json":"native-mtp-admission", "native-mtp-admission.json.sig":"native-mtp-admission.sig",
+      "native-mtp-artifact-manifest.json":"native-mtp-artifact-manifest",
+      "native-mtp-selftest-bank.json":"native-mtp-selftest-bank",
+      "native-mtp-selftest-bank.json.sig":"native-mtp-selftest-bank.sig"}
+    while time.monotonic() < deadline:
+        try:
+            release = json.loads(get("http://127.0.0.1:8443/v1/autotune-release"))
+            if release.get("status") != "live_verified" or release.get("release_id") != record["prior_release_id"]:
+                raise ValueError("prior release not live_verified")
+            for name, endpoint in endpoints.items():
+                if name in record["prior_files"] and hashlib.sha256(get("http://127.0.0.1:8443/v1/"+endpoint)).hexdigest() != record["prior_files"][name]:
+                    raise ValueError("prior signed served feed differs")
+            health = json.loads(get("http://127.0.0.1:8444/healthz"))
+            if health.get("native_mtp_canary_bank_release_id") != record["prior_release_id"] or health.get("native_mtp_canary_bank_sha256") != record["prior_files"]["native-mtp-selftest-bank.json"]:
+                raise ValueError("prior canary bank differs")
+            return
+        except (OSError, ValueError, TimeoutError):
+            if time.monotonic() >= deadline: break
+            time.sleep(min(.5, max(0, deadline-time.monotonic())))
+    raise TimeoutError("exact prior signed policy is not served")
+
+def descendants(pid):
+    result = []
+    try: children = pathlib.Path("/proc/%d/task/%d/children" % (pid, pid)).read_text().split()
+    except OSError: return result
+    for child in children:
+        result.extend(descendants(int(child))); result.append(int(child))
+    return result
+
+def fence(record):
+    pid = record["holder_pid"]
+    if identity(pid) != record["holder_start"]: return
+    os.kill(pid, signal.SIGSTOP)
+    victims = [(p, identity(p)) for p in descendants(pid) if p != os.getpid()]
+    for child, start in victims:
+        if start is not None and identity(child) == start:
+            try: os.kill(child, signal.SIGKILL)
+            except ProcessLookupError: pass
+    if identity(pid) == record["holder_start"]: os.kill(pid, signal.SIGKILL)
+    deadline = time.monotonic() + 15
+    while any(start is not None and identity(p) == start for p, start in victims):
+        if time.monotonic() >= deadline: raise RuntimeError("lease descendants remain")
+        time.sleep(.1)
+
+def main():
+    directory = pathlib.Path(sys.argv[1])
+    record = json.loads((directory / "journal.json").read_text())
+    if record["schema"] != "macprovider.signed-pair-pearl-recovery.v1":
+        raise ValueError("unknown journal schema")
+    locks_held()
+    put(directory / "ready.json", {"pid": os.getpid(), "start": identity(os.getpid())})
+    while True:
+        if (directory / "committed").exists(): return
+        if (directory / "recover-requested").exists() or identity(record["holder_pid"]) != record["holder_start"] or time.monotonic() >= record["deadline_monotonic"]: break
+        time.sleep(.2)
+    import fcntl
+    with open(directory / "decision.lock", "a", opener=lambda p,f:os.open(p,f,0o600)) as decision:
+        fcntl.flock(decision, fcntl.LOCK_EX)
+        if (directory / "committed").exists(): return
+        put(directory / "recovering.json", {"txid":record["txid"], "policy_phase":"restoring_prior"})
+    fence(record)
+    recovery_deadline = time.monotonic() + record["recovery_seconds"]
+    prior = pathlib.Path(record["root"]) / record["prior_current"]
+    for relative, sha in record["prior_files"].items():
+        if digest(prior / relative) != sha: raise RuntimeError("prior signed release bytes changed")
+    script = directory / "rollback.sh"
+    if digest(script) != record["rollback_sha256"]: raise RuntimeError("reviewed recovery script changed")
+    with open(directory / "rollback.log", "ab", opener=lambda p, f: os.open(p, f, 0o600)) as log:
+        child = subprocess.Popen(["/bin/bash", str(script), *record["rollback_args"]],
+                       stdout=log, stderr=log, pass_fds=(8, 9), start_new_session=True)
+        try:
+            if child.wait(timeout=max(.1,recovery_deadline-time.monotonic())) != 0:
+                raise RuntimeError("fixed prior policy recovery failed")
+        except subprocess.TimeoutExpired:
+            os.killpg(child.pid, signal.SIGKILL); child.wait()
+            raise RuntimeError("fixed prior policy recovery timed out")
+    root = pathlib.Path(record["root"])
+    if os.readlink(root / "current").removeprefix("./") != record["prior_current"]:
+        raise RuntimeError("prior current was not restored")
+    import base64
+    window = root / ".previous-target"
+    actual = window.read_bytes() if window.exists() else b""
+    if actual != base64.b64decode(record["prior_window_base64"], validate=True):
+        raise RuntimeError("prior window was not restored exactly")
+    served(record, recovery_deadline)
+    put(directory / "restored", {"txid":record["txid"], "policy_phase":"prior_restored",
+        "prior_current":record["prior_current"], "disk_restored":True, "served_policy_verified":True,
+        "prior_release_id":record["prior_release_id"], "prior_release_sha256":record["prior_files"]["release.json"],
+        "prior_admission_sha256":record["prior_files"]["native-mtp-admission.json"],
+        "prior_bank_sha256":record["prior_files"]["native-mtp-selftest-bank.json"],
+        "prior_files":record["prior_files"]})
+
+if __name__ == "__main__":
+    try: main()
+    except BaseException as error:
+        try: put(pathlib.Path(sys.argv[1]) / "blocked.json", {"error_type":type(error).__name__})
+        finally:
+            # Keep both inherited locks while recovery is unresolved.
+            while True: time.sleep(60)
+GUARDIAN_PY
+}
+
+# The recovery program is this tooling's fixed existing rollback renderer,
+# never an operator supplied command or environment callback.
+aa_signed_pair_arm() {
+  [ "${MACPROVIDER_OPS_ENTRYPOINT:-}" = 1 ] && [ "$AA_LOCK_MODE" = lease ] && [ "$AA_PRICING_TXN" = 0 ] ||
+    fatal "signed pair recovery requires the owned nonpricing content lease"
+  aa_lease_assert_held || fatal "signed pair recovery cannot borrow an absent lease"
+  local tx="$1" script="$AA_WORK_DIR/signed-pair-arm.sh" guardian="$AA_WORK_DIR/signed-pair-guardian.py"
+  case "$tx" in ""|*[!A-Za-z0-9_-]*) fatal "invalid signed pair transaction identity" ;; esac
+  [ -n "$LOCK_HELPER_DIR" ] && [ -z "$AA_SIGNED_PAIR_GUARD_DIR" ] || fatal "signed pair recovery already armed or helpers absent"
+  validate_release_ref "$CURRENT_TARGET" current no_empty
+  validate_release_ref "releases/$RELEASE_DIRNAME" target no_empty
+  case "$AA_LEASE_MAX_SECONDS:$AA_LEASE_ROLLBACK_SECONDS" in *[!0-9:]*|:*) fatal "invalid signed pair deadline" ;; esac
+  [ "$AA_LEASE_MAX_SECONDS" -ge 60 ] && [ "$AA_LEASE_MAX_SECONDS" -le 7200 ] &&
+    [ "$AA_LEASE_ROLLBACK_SECONDS" -ge 60 ] && [ "$AA_LEASE_ROLLBACK_SECONDS" -le 3600 ] || fatal "signed pair deadlines exceed reviewed bounds"
+  aa_render_rollback_script lease >"$AA_WORK_DIR/signed-pair-rollback.sh"
+  _aa_signed_pair_guardian >"$guardian"
+  AA_SIGNED_PAIR_GUARD_DIR="$LOCK_HELPER_DIR/signed-pair-$tx"
+  cat >"$script" <<'ARM_SH'
+set -euo pipefail
+python3 -I - "$@" <<'ARM_PY'
+import base64, hashlib, json, os, pathlib, stat, subprocess, sys, time
+(directory, root, prior, window, unit, helper, target, writer,
+ holder, seconds, recovery_seconds, txid, rollback_b64, guardian_b64) = sys.argv[1:]
+d = pathlib.Path(directory); d.mkdir(mode=0o700)
+root = pathlib.Path(root)
+if os.readlink(root / "current").removeprefix("./") != prior: raise RuntimeError("prior current moved")
+window_bytes = (root / ".previous-target").read_bytes() if (root / ".previous-target").exists() else b""
+if base64.b64encode(window_bytes).decode() != window: raise RuntimeError("prior window moved")
+files = {}
+for parent, directories, members in os.walk(root / prior, followlinks=False):
+    for name in directories + members:
+        path = pathlib.Path(parent) / name; mode = path.lstat().st_mode
+        if stat.S_ISLNK(mode) or not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):
+            raise RuntimeError("prior release contains unsafe member")
+        if stat.S_ISREG(mode): files[str(path.relative_to(root / prior))] = hashlib.sha256(path.read_bytes()).hexdigest()
+required = {"release.json", "native-mtp-admission.json", "native-mtp-admission.json.sig",
+ "native-mtp-artifact-manifest.json", "native-mtp-selftest-bank.json", "native-mtp-selftest-bank.json.sig",
+ "continuous-batching-policy.json", "continuous-batching-policy.json.sig"}
+if not required.issubset(files):
+    raise RuntimeError("prior signed native release is incomplete")
+for name, data in (("rollback.sh", rollback_b64), ("guardian.py", guardian_b64)):
+    fd = os.open(d / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "wb") as out:
+        out.write(base64.b64decode(data, validate=True)); out.flush(); os.fsync(out.fileno())
+start = pathlib.Path("/proc/%s/stat" % holder).read_text().rsplit(")", 1)[1].split()[19]
+record = {"schema":"macprovider.signed-pair-pearl-recovery.v1", "root":str(root), "txid":txid,
+ "prior_release_id":json.loads((root/prior/"release.json").read_text())["release_id"],
+ "prior_current":prior, "prior_window_base64":window, "prior_files":files,
+ "target_current":target, "holder_pid":int(holder), "holder_start":start,
+ "deadline":time.time()+int(seconds), "deadline_monotonic":time.monotonic()+int(seconds), "recovery_seconds":int(recovery_seconds),
+ "rollback_sha256":hashlib.sha256((d/"rollback.sh").read_bytes()).hexdigest(),
+ "rollback_args":[str(root),prior,window or "__EMPTY__",unit,helper,target,writer]}
+fd = os.open(d / "journal.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+with os.fdopen(fd,"w") as out:
+    json.dump(record,out,sort_keys=True); out.flush(); os.fsync(out.fileno())
+fd=os.open(d,os.O_RDONLY);os.fsync(fd);os.close(fd)
+runner_code = """import fcntl,json,os,pathlib,stat,subprocess,sys,tempfile
+p=pathlib.Path(sys.argv[1]);tx=p.name.removeprefix('signed-pair-')
+with (p/'runner-recovery.lock').open('a') as lock:
+ fcntl.flock(lock,fcntl.LOCK_EX)
+ receipt=p/'runner-restored';prior=None
+ if receipt.exists() or receipt.is_symlink():
+  st=receipt.lstat()
+  if not stat.S_ISREG(st.st_mode) or st.st_uid!=os.geteuid() or stat.S_IMODE(st.st_mode)!=0o600:raise RuntimeError('unsafe runner recovery receipt')
+  prior=json.loads(receipt.read_text())
+  if prior.get('transaction_id')!=tx or not isinstance(prior.get('runner_active'),bool):raise RuntimeError('foreign runner recovery receipt')
+ subprocess.run(['/usr/bin/systemctl','start','malibu-buyer-runner.service'],check=True,timeout=30,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+ r=subprocess.run(['/usr/bin/systemctl','is-active','malibu-buyer-runner.service'],check=True,timeout=10,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL)
+ if r.stdout.strip()!=b'active':raise RuntimeError('buyer runner did not become active')
+ if prior is None or prior['runner_active'] is not True:
+  fd,name=tempfile.mkstemp(prefix='runner-restored.',dir=p)
+  try:
+   with os.fdopen(fd,'w') as out:
+    json.dump({'runner_active':True,'transaction_id':tx},out);out.flush();os.fsync(out.fileno())
+   os.replace(name,receipt)
+   fd=os.open(p,os.O_RDONLY);os.fsync(fd);os.close(fd)
+  finally:
+   if os.path.exists(name):os.unlink(name)
+"""
+fd=os.open(d/'runner-recover.py',os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+with os.fdopen(fd,'w') as out:
+ out.write(runner_code);out.flush();os.fsync(out.fileno())
+runner_unit='malibu-signed-pair-'+txid
+subprocess.run(['/usr/bin/systemd-run','--quiet','--collect','--unit='+runner_unit,
+ '--on-active=%ds'%(int(seconds)+int(recovery_seconds)+30),'--timer-property=AccuracySec=1s',
+ '/usr/bin/python3','-I',str(d/'runner-recover.py'),str(d)],check=True,timeout=15)
+active=subprocess.run(['/usr/bin/systemctl','is-active',runner_unit+'.timer'],check=True,
+ stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=10).stdout.strip()
+if active!=b'active':raise RuntimeError('independent runner timer is not active')
+with open(d / "guardian.log","ab",opener=lambda p,f:os.open(p,f,0o600)) as log:
+    process=subprocess.Popen(["/usr/bin/python3","-I",str(d/"guardian.py"),str(d)],
+      start_new_session=True,stdin=subprocess.DEVNULL,stdout=log,stderr=log,pass_fds=(8,9))
+for _ in range(100):
+    if (d / "ready.json").is_file():
+        print(json.dumps({"armed":True,"guardian_pid":process.pid})); break
+    if process.poll() is not None: raise RuntimeError("guardian exited before arming")
+    time.sleep(.1)
+else: raise RuntimeError("guardian arming deadline exceeded")
+ARM_PY
+ARM_SH
+  aa_lease_run "$script" "$AA_WORK_DIR/signed-pair-arm.out" "$AA_WORK_DIR/signed-pair-arm.err" \
+    "$AA_SIGNED_PAIR_GUARD_DIR" "$REMOTE_AUTOTUNE_DIR" "$CURRENT_TARGET" "${ORIG_PREVIOUS_TARGET_B64:-}" \
+    "$COORDINATOR_UNIT" "$LOCK_HELPER" "releases/$RELEASE_DIRNAME" "$WINDOW_HELPER" "$AA_LEASE_HOLDER_PID" \
+    "$AA_LEASE_MAX_SECONDS" "$AA_LEASE_ROLLBACK_SECONDS" "$tx" "$(base64 <"$AA_WORK_DIR/signed-pair-rollback.sh" | tr -d '\n')" \
+    "$(base64 <"$guardian" | tr -d '\n')" || fatal "independent signed pair recovery could not be armed"
+}
+
+# Explicit abort revokes the owner before asking the independent guardian to
+# fence its lease worker. The local holder-loss watcher must not TERM this
+# recovery controller while it reads the durable guardian receipt.
+aa_signed_pair_recover() {
+  local tx="$1" deadline=$((SECONDS + AA_LEASE_ROLLBACK_SECONDS + 30))
+  [ "$AA_SIGNED_PAIR_GUARD_DIR" = "$LOCK_HELPER_DIR/signed-pair-$tx" ] || fatal "signed pair recovery identity mismatch"
+  [ -n "$AA_LEASE_DIR" ] || fatal "signed pair recovery has no owned lease"
+  if SSH "test -f '$AA_SIGNED_PAIR_GUARD_DIR/committed'"; then
+    SSH "cat '$AA_SIGNED_PAIR_GUARD_DIR/committed'"
+    return 2
+  fi
+  touch "$AA_LEASE_DIR/release-requested"
+  [ -z "$AA_LEASE_WATCHDOG_PID" ] || kill "$AA_LEASE_WATCHDOG_PID" 2>/dev/null || true
+  SSH "umask 077; : > '$AA_SIGNED_PAIR_GUARD_DIR/recover-requested'" || return 1
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if SSH "test -f '$AA_SIGNED_PAIR_GUARD_DIR/committed'"; then
+      SSH "cat '$AA_SIGNED_PAIR_GUARD_DIR/committed'"
+      return 2
+    fi
+    if SSH "test -f '$AA_SIGNED_PAIR_GUARD_DIR/restored'"; then
+      SSH "cat '$AA_SIGNED_PAIR_GUARD_DIR/restored'"
+      return 0
+    fi
+    if SSH "test -f '$AA_SIGNED_PAIR_GUARD_DIR/blocked.json'"; then return 1; fi
+    sleep 1
+  done
+  return 1
+}
+
+# The caller owns complete Studio pair + same-PID stable readiness. This step
+# durably decides the Pearl half only after the fixed buyer runner is active;
+# the Studio guardian must receive this exact receipt before retiring itself.
+aa_signed_pair_commit() {
+  local tx="$1" script="$AA_WORK_DIR/signed-pair-commit.sh"
+  [ "$AA_SIGNED_PAIR_GUARD_DIR" = "$LOCK_HELPER_DIR/signed-pair-$tx" ] || fatal "signed pair commit identity mismatch"
+  aa_lease_assert_held || fatal "signed pair commit lost its owned lease"
+  cat >"$script" <<'COMMIT_SH'
+set -euo pipefail
+python3 -I - "$@" <<'COMMIT_PY'
+import fcntl,hashlib,json,os,pathlib,subprocess,sys,time
+p=pathlib.Path(sys.argv[1]); txid=sys.argv[2]
+lock=open(p/'decision.lock','a',opener=lambda p,f:os.open(p,f,0o600))
+fcntl.flock(lock,fcntl.LOCK_EX)
+r=json.loads((p/'journal.json').read_text())
+if r['txid']!=txid or (p/'recover-requested').exists() or (p/'recovering.json').exists():
+    raise RuntimeError('signed pair recovery already owns the decision')
+if time.monotonic() >= r['deadline_monotonic']: raise RuntimeError('signed pair work deadline reached')
+ready=json.loads((p/'ready.json').read_text())
+def start(pid):
+    try:
+        v=pathlib.Path('/proc/%d/stat'%pid).read_text().rsplit(')',1)[1].split()
+        return v[19] if v[0]!='Z' else None
+    except OSError:return None
+if start(ready['pid'])!=ready['start']:raise RuntimeError('independent guardian is not active')
+root=pathlib.Path(r['root']); target=root/r['target_current']
+if os.readlink(root/'current').removeprefix('./')!=r['target_current']:
+    raise RuntimeError('target policy not current')
+active=subprocess.run(['/usr/bin/systemctl','is-active','malibu-buyer-runner.service'],
+    check=True,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=10).stdout.strip()
+if active!=b'active':raise RuntimeError('buyer runner not active')
+files={}
+for parent,dirs,names in os.walk(target,followlinks=False):
+    for name in names:
+        f=pathlib.Path(parent)/name
+        if f.is_symlink() or not f.is_file():raise RuntimeError('unsafe target release')
+        files[str(f.relative_to(target))]=hashlib.sha256(f.read_bytes()).hexdigest()
+proof=json.loads((p/'target_activation_verified').read_text())
+window=(root/'.previous-target').read_bytes() if (root/'.previous-target').exists() else b''
+if proof['txid']!=txid or proof['target_current']!=r['target_current'] or proof['target_files']!=files or proof['previous_window_sha256']!=hashlib.sha256(window).hexdigest():
+ raise RuntimeError('target activation proof changed before commit')
+receipt={'schema':'macprovider.signed-pair-pearl-commit.v1','txid':txid,
+ 'policy_phase':'target_committed','target_current':r['target_current'],
+ 'target_release_id':json.loads((target/'release.json').read_text())['release_id'],
+ 'target_files':files,'runner_active':True}
+fd=os.open(p/'committed.next',os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+with os.fdopen(fd,'w') as out:
+    json.dump(receipt,out,sort_keys=True);out.flush();os.fsync(out.fileno())
+os.replace(p/'committed.next',p/'committed')
+fd=os.open(p,os.O_RDONLY);os.fsync(fd);os.close(fd)
+print(json.dumps(receipt,sort_keys=True))
+COMMIT_PY
+COMMIT_SH
+  aa_lease_run "$script" "$AA_WORK_DIR/signed-pair-commit.out" "$AA_WORK_DIR/signed-pair-commit.err" \
+    "$AA_SIGNED_PAIR_GUARD_DIR" "$tx" || return 1
+  cat "$AA_WORK_DIR/signed-pair-commit.out"
+}
+
+# Called only after the Studio terminal ACK. A failed retirement keeps the
+# reviewed helper bundle and the fixed timer available for recovery.
+aa_signed_pair_runner_retire() {
+  local tx="$1" script="$AA_WORK_DIR/signed-pair-runner-retire.sh"
+  [ "$AA_SIGNED_PAIR_GUARD_DIR" = "$LOCK_HELPER_DIR/signed-pair-$tx" ] || fatal "signed pair runner identity mismatch"
+  cat >"$script" <<'RETIRE_SH'
+set -euo pipefail
+python3 -I - "$@" <<'RETIRE_PY'
+import json,os,pathlib,subprocess,sys
+p=pathlib.Path(sys.argv[1]);tx=sys.argv[2]
+r=json.loads((p/'journal.json').read_text())
+if r['txid']!=tx or not ((p/'committed').is_file() or (p/'restored').is_file()):
+ raise RuntimeError('signed pair has no terminal decision')
+def active():
+ r=subprocess.run(['/usr/bin/systemctl','is-active','malibu-buyer-runner.service'],check=True,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=10)
+ if r.stdout.strip()!=b'active':raise RuntimeError('buyer runner is not active')
+active()
+retired=p/'runner-retired'
+if retired.exists():
+ old=json.loads(retired.read_text())
+ if old!={'transaction_id':tx,'runner_active':True}:raise RuntimeError('foreign runner retirement receipt')
+timer=subprocess.run(['/usr/bin/systemctl','is-active','malibu-signed-pair-'+tx+'.timer'],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=10)
+if retired.exists() and timer.returncode==0:raise RuntimeError('retired runner timer became active again')
+if timer.returncode==0:
+ subprocess.run(['/usr/bin/systemctl','stop','malibu-signed-pair-'+tx+'.timer'],check=True,timeout=15)
+elif timer.returncode not in (3,4):raise RuntimeError('runner timer state unreadable')
+active()
+if retired.exists():raise SystemExit(0)
+fd=os.open(p/'runner-retired',os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+with os.fdopen(fd,'w') as out:
+ json.dump({'transaction_id':tx,'runner_active':True},out);out.flush();os.fsync(out.fileno())
+fd=os.open(p,os.O_RDONLY);os.fsync(fd);os.close(fd)
+RETIRE_PY
+RETIRE_SH
+  # Recovery fences the original lease; terminal retirement can reacquire
+  # ordinary deploy locks only through the calling ops controller's recovery.
+  _aa_signed_pair_terminal_run "$script" "$AA_WORK_DIR/signed-pair-runner-retire.out" "$AA_WORK_DIR/signed-pair-runner-retire.err" \
+    "$AA_SIGNED_PAIR_GUARD_DIR" "$tx" "$LOCK_HELPER"
+}
+
+# No request parameters, writes, or remote commands are accepted by the SSH
+# forced command. Its only authority is the one immutable transaction path.
+_aa_signed_pair_reader() {
+  cat <<'READER_PY'
+import hashlib,json,os,pathlib,re,stat,sys
+p=pathlib.Path(__file__).parent
+if os.environ.get('SSH_ORIGINAL_COMMAND',''):raise SystemExit('remote command refused')
+def load(name):
+ f=p/name
+ fd=os.open(f,os.O_RDONLY|os.O_NOFOLLOW)
+ with os.fdopen(fd) as src:
+  st=os.fstat(src.fileno())
+  if not stat.S_ISREG(st.st_mode) or st.st_uid!=os.geteuid() or stat.S_IMODE(st.st_mode)!=0o600:
+   raise ValueError('unsafe receipt')
+  return json.load(src)
+r=load('journal.json')
+endpoints={
+ 'autotune-candidates.json':'/v1/autotune-candidates','autotune-candidates.json.sig':'/v1/autotune-candidates.sig',
+ 'demand-rank.json':'/v1/demand-rank','demand-rank.json.sig':'/v1/demand-rank.sig',
+ 'rate-card.json':'/v1/rate-card','rate-card.json.sig':'/v1/rate-card.sig',
+ 'continuous-batching-policy.json':'/v1/continuous-batching-policy','continuous-batching-policy.json.sig':'/v1/continuous-batching-policy.sig',
+ 'autotune-artifacts.json':'/v1/catalog-artifacts','autotune-artifacts.json.sig':'/v1/catalog-artifacts.sig',
+ 'native-mtp-admission.json':'/v1/native-mtp-admission','native-mtp-admission.json.sig':'/v1/native-mtp-admission.sig',
+ 'native-mtp-artifact-manifest.json':'/v1/native-mtp-artifact-manifest',
+ 'native-mtp-selftest-bank.json':'/v1/native-mtp-selftest-bank','native-mtp-selftest-bank.json.sig':'/v1/native-mtp-selftest-bank.sig'}
+out={'schema':'macprovider.signed-pair-decision.v1','transaction_id':r['txid']}
+root=pathlib.Path(r['root'])
+current=os.readlink(root/'current').removeprefix('./')
+if not re.fullmatch(r'releases/[A-Za-z0-9._-]+',current):raise ValueError('unsafe current release reference')
+window_path=root/'.previous-target'
+window=window_path.read_bytes() if window_path.exists() else b''
+refs=[line.strip() for line in window.decode().splitlines() if line.strip() and not line.lstrip().startswith('#')]
+if len(refs)>3 or len(set(refs))!=len(refs):raise ValueError('invalid compatible previous window')
+previous=[]
+for ref in refs:
+ if not re.fullmatch(r'releases/[A-Za-z0-9._-]+',ref):raise ValueError('unsafe retained release reference')
+ previous.append(json.loads((root/ref/'release.json').read_text())['release_id'])
+current_id=json.loads((root/current/'release.json').read_text())['release_id']
+out.update(current_release_id=current_id,compatible_previous_release_ids=previous,
+ previous_window_sha256=hashlib.sha256(window).hexdigest(),window_source='retained_disk',target_activation_verified=False,
+ prior_release_id=r['prior_release_id'],prior_feed_sha256={url:r['prior_files'][name] for name,url in endpoints.items() if name in r['prior_files']})
+target=root/r['target_current']
+if (p/'target_activation_verified').is_file():
+ proof=load('target_activation_verified')
+ if proof['txid']==r['txid'] and proof['target_current']==current and proof['previous_window_sha256']==hashlib.sha256(window).hexdigest():
+  out['target_activation_verified']=True
+  out['target_activation_receipt']=proof
+  out['window_source']='retained_disk_under_lease'
+if target.is_dir():
+ target_files={}
+ for name,url in endpoints.items():
+  if (target/name).is_file():target_files[url]=hashlib.sha256((target/name).read_bytes()).hexdigest()
+ out.update(target_release_id=json.loads((target/'release.json').read_text())['release_id'],target_feed_sha256=target_files)
+if os.readlink(root/'current').removeprefix('./')!=current or (window_path.read_bytes() if window_path.exists() else b'')!=window:
+ raise ValueError('current/window changed during receipt read')
+if (p/'committed').exists():
+ receipt=load('committed')
+ if receipt['txid']!=r['txid'] or receipt['target_current']!=r['target_current']:raise ValueError('commit identity mismatch')
+ out.update(policy_phase='target_committed',target_release_id=receipt['target_release_id'],
+  target_feed_sha256={url:receipt['target_files'][name] for name,url in endpoints.items() if name in receipt['target_files']},receipt=receipt)
+elif (p/'restored').exists():
+ receipt=load('restored')
+ if receipt['txid']!=r['txid'] or receipt['prior_release_id']!=r['prior_release_id']:raise ValueError('restore identity mismatch')
+ out.update(policy_phase='prior_restored',prior_release_id=receipt['prior_release_id'],
+  prior_feed_sha256={url:receipt['prior_files'][name] for name,url in endpoints.items() if name in receipt['prior_files']},receipt=receipt)
+elif (p/'blocked.json').exists():out.update(policy_phase='blocked')
+elif (p/'recovering.json').exists():out.update(policy_phase='recovering')
+else:out.update(policy_phase='armed')
+print(json.dumps(out,sort_keys=True))
+READER_PY
+}
+
+# Generates only an ephemeral receipt-reader key in the operator secret store.
+# Private bytes are never part of a journal, argv, repository or tool output.
+# The parent stages this path to Studio with pinned host verification, then
+# proves the no-command reader from the independent Studio guardian.
+aa_signed_pair_reader_prepare() {
+  local tx="$1" secret_root="$HOME/.config/macprovider/operator-secrets" reader="$AA_WORK_DIR/signed-pair-reader.py"
+  local script="$AA_WORK_DIR/signed-pair-reader-install.sh" key_dir public_key
+  [ "$AA_SIGNED_PAIR_GUARD_DIR" = "$LOCK_HELPER_DIR/signed-pair-$tx" ] || fatal "signed pair reader identity mismatch"
+  aa_lease_assert_held || fatal "signed pair reader installation lost the owned lease"
+  AA_SIGNED_PAIR_READER_INTENT_PATH="$secret_root/signed-pair-$tx.intent.json"
+  key_dir="$(python3 - "$secret_root" "$tx" <<'SECRET_PY'
+import json,os,pathlib,stat,sys,tempfile
+p=pathlib.Path(sys.argv[1]);p.mkdir(mode=0o700,parents=True,exist_ok=True)
+st=p.lstat()
+if not stat.S_ISDIR(st.st_mode) or st.st_uid!=os.getuid() or stat.S_IMODE(st.st_mode)!=0o700:
+ raise RuntimeError('operator secret store is not private')
+intent=p/('signed-pair-'+sys.argv[2]+'.intent.json')
+if intent.exists() or intent.is_symlink():raise RuntimeError('owned reader key intent already exists; reconcile it first')
+d=pathlib.Path(tempfile.mkdtemp(prefix='signed-pair-'+sys.argv[2]+'-',dir=p))
+try:fd=os.open(intent,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+except BaseException:d.rmdir();raise
+with os.fdopen(fd,'w') as out:
+ json.dump({'transaction_id':sys.argv[2],'key_dir':str(d),'private_key_path':str(d/'receipt-reader'),'public_key_path':str(d/'receipt-reader.pub')},out)
+ out.flush();os.fsync(out.fileno())
+fd=os.open(p,os.O_RDONLY);os.fsync(fd);os.close(fd)
+print(d)
+SECRET_PY
+)" || fatal "cannot create private signed pair reader secret store"
+  AA_SIGNED_PAIR_READER_KEY_DIR="$key_dir"
+  ssh-keygen -q -t ed25519 -N '' -C "macprovider-signed-pair-$tx" -f "$key_dir/receipt-reader" || fatal "receipt key generation failed"
+  chmod 600 "$key_dir/receipt-reader" "$key_dir/receipt-reader.pub"
+  public_key="$(cat "$key_dir/receipt-reader.pub")"
+  _aa_signed_pair_reader >"$reader"
+  cat >"$script" <<'INSTALL_SH'
+set -euo pipefail
+python3 -I - "$@" <<'INSTALL_PY'
+import base64,fcntl,hashlib,json,os,pathlib,re,stat,sys
+p=pathlib.Path(sys.argv[1]);tx=sys.argv[2];key=sys.argv[3];code=base64.b64decode(sys.argv[4],validate=True)
+if json.loads((p/'journal.json').read_text())['txid']!=tx:raise RuntimeError('transaction identity changed')
+if not re.fullmatch(r'ssh-ed25519 [A-Za-z0-9+/=]+ macprovider-signed-pair-'+re.escape(tx),key):
+ raise ValueError('unexpected receipt reader public key')
+reader=p/'receipt-reader.py'
+fd=os.open(reader,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+with os.fdopen(fd,'wb') as out:out.write(code);out.flush();os.fsync(out.fileno())
+# Restrict covers current and future OpenSSH forwarding classes and user rc;
+# explicit legacy restrictions make the intended authority inspectable too.
+command='/usr/bin/python3 -I '+str(reader)
+if any(c not in 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789/_-.' for c in str(reader)):
+ raise ValueError('unsafe forced command path')
+line=('restrict,no-pty,no-agent-forwarding,no-port-forwarding,no-X11-forwarding,no-user-rc,'
+      'command="'+command+'" '+key+'\n').encode()
+ssh=pathlib.Path('/root/.ssh');ssh.mkdir(mode=0o700,exist_ok=True)
+st=ssh.lstat()
+if not stat.S_ISDIR(st.st_mode) or st.st_uid!=0 or stat.S_IMODE(st.st_mode)!=0o700:raise ValueError('unsafe root ssh directory')
+fd=os.open(p/'authorized-key-line',os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+with os.fdopen(fd,'wb') as out:out.write(line);out.flush();os.fsync(out.fileno())
+fd=os.open(p,os.O_RDONLY);os.fsync(fd);os.close(fd)
+auth=ssh/'authorized_keys'
+fd=os.open(auth,os.O_RDWR|os.O_APPEND|os.O_CREAT|os.O_NOFOLLOW,0o600)
+with os.fdopen(fd,'a+b') as out:
+ fcntl.flock(out,fcntl.LOCK_EX);st=os.fstat(out.fileno())
+ if not stat.S_ISREG(st.st_mode) or st.st_uid!=0 or stat.S_IMODE(st.st_mode)!=0o600:raise ValueError('unsafe authorized keys')
+ out.seek(0);old=out.read()
+ if line in old.splitlines(keepends=True):raise ValueError('duplicate transaction key')
+ if old and not old.endswith(b'\n'):raise ValueError('authorized keys lacks terminal newline')
+ out.write(line);out.flush();os.fsync(out.fileno())
+fd=os.open(p/'reader-installed',os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+with os.fdopen(fd,'w') as out:
+ json.dump({'transaction_id':tx,'reader_installed':True},out);out.flush();os.fsync(out.fileno())
+fd=os.open(p,os.O_RDONLY);os.fsync(fd);os.close(fd)
+print(json.dumps({'transaction_id':tx,'reader_installed':True,'reader_sha256':hashlib.sha256(code).hexdigest()}))
+INSTALL_PY
+INSTALL_SH
+  aa_lease_run "$script" "$AA_WORK_DIR/signed-pair-reader-install.out" "$AA_WORK_DIR/signed-pair-reader-install.err" \
+    "$AA_SIGNED_PAIR_GUARD_DIR" "$tx" "$public_key" "$(base64 <"$reader" | tr -d '\n')" || fatal "restricted signed pair reader installation failed"
+  python3 - "$tx" "$key_dir/receipt-reader" "$key_dir/receipt-reader.pub" <<'READER_META'
+import json,subprocess,sys
+fingerprint=subprocess.check_output(['ssh-keygen','-lf',sys.argv[3]],text=True).split()[1]
+print(json.dumps({'transaction_id':sys.argv[1],'private_key_path':sys.argv[2],'public_key_path':sys.argv[3],'public_key_fingerprint':fingerprint}))
+READER_META
+}
+
+# After normal commit this uses the still-owned lease. After recovery it takes
+# the same two locks afresh, never borrowing a lost lease or stealing a lock.
+_aa_signed_pair_terminal_run() {
+  [ "${MACPROVIDER_OPS_ENTRYPOINT:-}" = 1 ] && [ -n "${MACPROVIDER_OPS_OWNER:-}" ] || fatal "signed pair terminal work requires the owned ops entrypoint"
+  local script="$1" out="$2" err="$3"
+  shift 3
+  if aa_lease_assert_held; then
+    aa_lease_run "$script" "$out" "$err" "$@"
+  else
+    {
+      # shellcheck disable=SC2016 # expand only on the remote host
+      printf '%s\n' 'set -euo pipefail' 'python3 "$3" validate' \
+        'exec 8</run/lock/macprovider-pearl-updater.lock' 'flock -n 8' \
+        'exec 9</opt/macprovider/.coordinator-deploy.lock' 'flock -n 9'
+      cat "$script"
+    } >"$script.locked"
+    SSH bash -s -- "$@" <"$script.locked" >"$out" 2>"$err"
+  fi
+}
+
+aa_signed_pair_reader_retire() {
+  local tx="$1" script="$AA_WORK_DIR/signed-pair-reader-retire.sh"
+  [ "$AA_SIGNED_PAIR_GUARD_DIR" = "$LOCK_HELPER_DIR/signed-pair-$tx" ] || fatal "signed pair reader retirement identity mismatch"
+  cat >"$script" <<'READER_RETIRE_SH'
+set -euo pipefail
+python3 -I - "$@" <<'READER_RETIRE_PY'
+import fcntl,json,os,pathlib,stat,sys
+p=pathlib.Path(sys.argv[1]);tx=sys.argv[2]
+r=json.loads((p/'journal.json').read_text())
+if r['txid']!=tx or not ((p/'committed').is_file() or (p/'restored').is_file()):
+ raise RuntimeError('no terminal policy decision for reader retirement')
+def mark():
+ retired=p/'reader-retired'
+ if retired.exists():
+  if json.loads(retired.read_text())!={'transaction_id':tx,'authorization_removed':True}:raise RuntimeError('foreign reader retirement receipt')
+  return
+ fd=os.open(retired,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+ with os.fdopen(fd,'w') as out:
+  json.dump({'transaction_id':tx,'authorization_removed':True},out);out.flush();os.fsync(out.fileno())
+ fd=os.open(p,os.O_RDONLY);os.fsync(fd);os.close(fd)
+intent=p/'authorized-key-line'
+if not intent.exists() and not intent.is_symlink():
+ if (p/'reader-installed').exists():raise RuntimeError('installed reader lost authorization intent')
+ mark();raise SystemExit(0)
+line=intent.read_bytes()
+if not line.endswith(b' macprovider-signed-pair-'+tx.encode()+b'\n'):raise ValueError('receipt key identity mismatch')
+auth=pathlib.Path('/root/.ssh/authorized_keys')
+if not auth.exists() and not auth.is_symlink():mark();raise SystemExit(0)
+fd=os.open(auth,os.O_RDWR|os.O_NOFOLLOW)
+with os.fdopen(fd,'r+b') as out:
+ fcntl.flock(out,fcntl.LOCK_EX);st=os.fstat(out.fileno())
+ if not stat.S_ISREG(st.st_mode) or st.st_uid!=0 or stat.S_IMODE(st.st_mode)!=0o600:raise ValueError('unsafe authorized keys')
+ original=out.read();lines=original.splitlines(keepends=True);count=lines.count(line)
+ if count>1:raise ValueError('duplicate receipt key authorization')
+ if (p/'reader-retired').exists():
+  mark()
+  if count:raise RuntimeError('retired receipt key became authorized again')
+  raise SystemExit(0)
+ if count:
+  lines.remove(line);replacement_bytes=b''.join(lines)
+  temp=auth.with_name('authorized_keys.signed-pair-'+tx+'.next')
+  if temp.exists() or temp.is_symlink():
+   st_temp=temp.lstat()
+   if not stat.S_ISREG(st_temp.st_mode) or st_temp.st_uid!=0 or stat.S_IMODE(st_temp.st_mode)!=0o600 or temp.read_bytes()!=replacement_bytes:
+    raise RuntimeError('foreign staged key retirement bytes')
+  else:
+   fd=os.open(temp,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+   with os.fdopen(fd,'wb') as replacement:
+    replacement.write(replacement_bytes);replacement.flush();os.fsync(replacement.fileno())
+  if auth.lstat().st_ino!=st.st_ino:raise RuntimeError('authorized keys changed during retirement')
+  out.seek(0)
+  if out.read()!=original:raise RuntimeError('authorized keys bytes changed during retirement')
+  os.replace(temp,auth)
+  fd=os.open(auth.parent,os.O_RDONLY);os.fsync(fd);os.close(fd)
+mark()
+READER_RETIRE_PY
+READER_RETIRE_SH
+  _aa_signed_pair_terminal_run "$script" "$AA_WORK_DIR/signed-pair-reader-retire.out" "$AA_WORK_DIR/signed-pair-reader-retire.err" \
+    "$AA_SIGNED_PAIR_GUARD_DIR" "$tx" "$LOCK_HELPER" || return 1
+  if [ -n "${AA_SIGNED_PAIR_READER_KEY_DIR:-}" ]; then
+    python3 - "$HOME/.config/macprovider/operator-secrets" "$AA_SIGNED_PAIR_READER_KEY_DIR" "$tx" <<'SECRET_RETIRE'
+import os,pathlib,stat,sys
+root,p,tx=pathlib.Path(sys.argv[1]),pathlib.Path(sys.argv[2]),sys.argv[3]
+if p.parent!=root or not p.name.startswith('signed-pair-'+tx+'-'):raise ValueError('secret directory identity mismatch')
+intent=root/('signed-pair-'+tx+'.intent.json')
+if intent.exists() or intent.is_symlink():
+ st_intent=intent.lstat()
+ if not stat.S_ISREG(st_intent.st_mode) or st_intent.st_uid!=os.getuid() or stat.S_IMODE(st_intent.st_mode)!=0o600:raise ValueError('unsafe reader intent')
+ import json
+ record=json.loads(intent.read_text())
+ if record.get('transaction_id')!=tx or record.get('key_dir')!=str(p):raise ValueError('reader intent identity mismatch')
+if p.exists() or p.is_symlink():
+ st=p.lstat()
+ if not stat.S_ISDIR(st.st_mode) or st.st_uid!=os.getuid() or stat.S_IMODE(st.st_mode)!=0o700:raise ValueError('unsafe reader secret directory')
+ if not set(x.name for x in p.iterdir()).issubset({'receipt-reader','receipt-reader.pub'}):raise ValueError('unexpected reader secret files')
+ for name in ('receipt-reader','receipt-reader.pub'):
+  f=p/name
+  if not f.exists() and not f.is_symlink():continue
+  fs=f.lstat()
+  if not stat.S_ISREG(fs.st_mode) or fs.st_uid!=os.getuid() or stat.S_IMODE(fs.st_mode)!=0o600:raise ValueError('unsafe reader key file')
+  f.unlink()
+ p.rmdir()
+if intent.exists():intent.unlink()
+fd=os.open(root,os.O_RDONLY);os.fsync(fd);os.close(fd)
+SECRET_RETIRE
+  fi
+}
+
+aa_signed_pair_runner_stop() {
+  local tx="$1" script="$AA_WORK_DIR/signed-pair-runner-stop.sh"
+  [ "$AA_SIGNED_PAIR_GUARD_DIR" = "$LOCK_HELPER_DIR/signed-pair-$tx" ] || fatal "signed pair runner stop identity mismatch"
+  aa_lease_assert_held || fatal "signed pair runner stop lost its owned lease"
+  cat >"$script" <<'RUNNER_STOP_SH'
+set -euo pipefail
+python3 -I - "$@" <<'RUNNER_STOP_PY'
+import json,pathlib,subprocess,sys
+p=pathlib.Path(sys.argv[1]);tx=sys.argv[2]
+if json.loads((p/'journal.json').read_text())['txid']!=tx or not (p/'ready.json').is_file():
+ raise RuntimeError('independent pair guardian not armed')
+def active(unit):
+ r=subprocess.run(['/usr/bin/systemctl','is-active',unit],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=10)
+ return r.returncode==0 and r.stdout.strip()==b'active'
+if not active('malibu-signed-pair-'+tx+'.timer'):raise RuntimeError('independent runner timer not active')
+if not active('malibu-buyer-runner.service'):raise RuntimeError('incumbent buyer runner not active')
+subprocess.run(['/usr/bin/systemctl','stop','malibu-buyer-runner.service'],check=True,timeout=30)
+if active('malibu-buyer-runner.service'):raise RuntimeError('buyer runner did not stop')
+RUNNER_STOP_PY
+RUNNER_STOP_SH
+  aa_lease_run "$script" "$AA_WORK_DIR/signed-pair-runner-stop.out" "$AA_WORK_DIR/signed-pair-runner-stop.err" \
+    "$AA_SIGNED_PAIR_GUARD_DIR" "$tx"
+}
+
+aa_signed_pair_runner_restore() {
+  local tx="$1" script="$AA_WORK_DIR/signed-pair-runner-restore.sh"
+  [ "$AA_SIGNED_PAIR_GUARD_DIR" = "$LOCK_HELPER_DIR/signed-pair-$tx" ] || fatal "signed pair runner restore identity mismatch"
+  cat >"$script" <<'RUNNER_RESTORE_SH'
+set -euo pipefail
+python3 -I - "$@" <<'RUNNER_RESTORE_PY'
+import json,pathlib,subprocess,sys
+p=pathlib.Path(sys.argv[1]);tx=sys.argv[2]
+if json.loads((p/'journal.json').read_text())['txid']!=tx:raise RuntimeError('runner transaction identity mismatch')
+subprocess.run(['/usr/bin/python3','-I',str(p/'runner-recover.py'),str(p)],check=True,timeout=45)
+r=json.loads((p/'runner-restored').read_text())
+if r.get('runner_active') is not True or r.get('transaction_id')!=tx:raise RuntimeError('runner recovery receipt invalid')
+print(json.dumps(r,sort_keys=True))
+RUNNER_RESTORE_PY
+RUNNER_RESTORE_SH
+  _aa_signed_pair_terminal_run "$script" "$AA_WORK_DIR/signed-pair-runner-restore.out" "$AA_WORK_DIR/signed-pair-runner-restore.err" \
+    "$AA_SIGNED_PAIR_GUARD_DIR" "$tx" "$LOCK_HELPER" || return 1
+  cat "$AA_WORK_DIR/signed-pair-runner-restore.out"
+}
+
+# Positive target reload proof before the Studio starts the new executable.
+# The content owner additionally runs its existing journal/applied-config gate;
+# no boolean or caller supplied evidence can substitute for these byte checks.
+aa_signed_pair_activation_verified() {
+  local tx="$1" script="$AA_WORK_DIR/signed-pair-activation-verified.sh"
+  [ "$AA_SIGNED_PAIR_GUARD_DIR" = "$LOCK_HELPER_DIR/signed-pair-$tx" ] || fatal "signed pair activation identity mismatch"
+  aa_lease_assert_held || fatal "signed pair activation proof lost its owned lease"
+  cat >"$script" <<'VERIFIED_SH'
+set -euo pipefail
+python3 -I - "$@" <<'VERIFIED_PY'
+import fcntl,hashlib,json,os,pathlib,stat,sys,time
+p=pathlib.Path(sys.argv[1]);tx=sys.argv[2]
+lock=open(p/'decision.lock','a',opener=lambda p,f:os.open(p,f,0o600));fcntl.flock(lock,fcntl.LOCK_EX)
+r=json.loads((p/'journal.json').read_text())
+if r['txid']!=tx or (p/'recovering.json').exists() or (p/'recover-requested').exists():raise RuntimeError('recovery owns the signed pair')
+root=pathlib.Path(r['root']);target=root/r['target_current']
+if time.monotonic()>=r['deadline_monotonic'] or os.readlink(root/'current').removeprefix('./')!=r['target_current']:
+ raise RuntimeError('target current/deadline does not match transaction')
+window=(root/'.previous-target').read_bytes() if (root/'.previous-target').exists() else b''
+files={}
+for parent,dirs,names in os.walk(target,followlinks=False):
+ for name in dirs+names:
+  f=pathlib.Path(parent)/name;mode=f.lstat().st_mode
+  if stat.S_ISLNK(mode) or not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):raise ValueError('unsafe target release member')
+  if stat.S_ISREG(mode):files[str(f.relative_to(target))]=hashlib.sha256(f.read_bytes()).hexdigest()
+ns={'__name__':'signed_pair_policy_proof'}
+exec(compile((p/'guardian.py').read_text(),str(p/'guardian.py'),'exec'),ns)
+ns['locks_held']()
+check=dict(r,prior_release_id=json.loads((target/'release.json').read_text())['release_id'],prior_files=files)
+ns['served'](check,r['deadline_monotonic'])
+if os.readlink(root/'current').removeprefix('./')!=r['target_current'] or ((root/'.previous-target').read_bytes() if (root/'.previous-target').exists() else b'')!=window:
+ raise RuntimeError('target current/window moved during serving proof')
+receipt={'schema':'macprovider.signed-pair-target-activation.v1','txid':tx,
+ 'target_current':r['target_current'],'target_release_id':check['prior_release_id'],
+ 'previous_window_sha256':hashlib.sha256(window).hexdigest(),'target_files':files,
+ 'served_policy_verified':True,'loaded_canary_bank_verified':True}
+ns['put'](p/'target_activation_verified',receipt)
+print(json.dumps(receipt,sort_keys=True))
+VERIFIED_PY
+VERIFIED_SH
+  aa_lease_run "$script" "$AA_WORK_DIR/signed-pair-activation-verified.out" "$AA_WORK_DIR/signed-pair-activation-verified.err" \
+    "$AA_SIGNED_PAIR_GUARD_DIR" "$tx" || return 1
+  cat "$AA_WORK_DIR/signed-pair-activation-verified.out"
 }

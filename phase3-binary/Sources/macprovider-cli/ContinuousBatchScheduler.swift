@@ -590,6 +590,7 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
     /// packed target verification at depth zero.
     let nativeMTPProposalTokens: [Int]
     let nativeMTPAdaptationDirective: NativeMTPAdaptationDirective?
+    let nativeMTPAdaptationConfig: NativeMTPAdaptationConfig?
     /// Runtime-only: an on-device self-check row (SPEC-038 FR-CB10). Buyer
     /// rows are capped at the served slot count and are not admitted beside
     /// self-check rows; self-check rows may use every scheduler row. Excluded
@@ -640,6 +641,7 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
         nativeMTPIntegrityProbe: Bool = false,
         nativeMTPProposalTokens: [Int] = [],
         nativeMTPAdaptationDirective: NativeMTPAdaptationDirective? = nil,
+        nativeMTPAdaptationConfig: NativeMTPAdaptationConfig? = nil,
         selfCheckProbe: Bool = false,
         selfCheckCohort: ContinuousBatchSelfCheckCohort? = nil,
         ingestProvenance: KVIngestProvenance = .unknown
@@ -678,6 +680,7 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
         self.nativeMTPIntegrityProbe = self.decodePath == .nativeMTP && nativeMTPIntegrityProbe
         self.nativeMTPProposalTokens = nativeMTPProposalTokens
         self.nativeMTPAdaptationDirective = nativeMTPAdaptationDirective
+        self.nativeMTPAdaptationConfig = nativeMTPAdaptationConfig
         self.selfCheckProbe = selfCheckProbe
         self.selfCheckCohort = selfCheckProbe ? selfCheckCohort : nil
         self.ingestProvenance = ingestProvenance
@@ -1256,18 +1259,25 @@ final class NativeMTPLabCommittedTokenTimingObserver: @unchecked Sendable {
         let ordinal: Int
         /// Buyer-visible output token count after this commit is applied.
         let outputCount: Int
+        var tokenID: Int? = nil
     }
 
     private let lock = NSLock()
     private var events: [Event] = []
+    private let captureTokenIDs: Bool
 
-    func record(requestID: String, ordinal: Int, outputCount: Int) {
+    init(captureTokenIDs: Bool = false) {
+        self.captureTokenIDs = captureTokenIDs
+    }
+
+    func record(requestID: String, ordinal: Int, outputCount: Int, tokenID: Int? = nil) {
         lock.lock()
         events.append(Event(
             requestID: requestID,
             monotonicNanoseconds: DispatchTime.now().uptimeNanoseconds,
             ordinal: ordinal,
-            outputCount: outputCount
+            outputCount: outputCount,
+            tokenID: captureTokenIDs ? tokenID : nil
         ))
         lock.unlock()
     }
@@ -2238,6 +2248,8 @@ actor ContinuousBatchScheduler {
         var promptSnapshot: ContinuousBatchSerialConversationCache? = nil
         var decodePath: DecodePath = .ordinary
         var nativeMTPAdaptation: NativeMTPDepthAdaptationState?
+        var nativeMTPFusedOrdinaryDecode = false
+        var nativeMTPVerificationPositions: UInt64 = 0
         var nativeMTPDirective: NativeMTPAdaptationDirective?
         var nativeMTPTupleFence: NativeMTPTupleFence?
         var nativeMTPCounters: NativeMTPSelfTestCounters?
@@ -2374,17 +2386,27 @@ actor ContinuousBatchScheduler {
     /// `nativeMTPLoadGateReleaseRounds` consecutive decode rounds at or below
     /// it, so a row finishing and another arriving cannot flap the depth.
     private var nativeMTPLoadGateEngaged = false
+    private var nativeMTPTupleBreakers: [NativeMTPTupleFence: NativeMTPTupleCircuitBreakerState] = [:]
     #if DEBUG || MACPROVIDER_LAB_HARNESS
+    private var labJourneyResourceObserver: NativeMTPJourneyResourceObserver?
+    private var labJourneyReservationContext: (requestID: String, generatedTokens: Int, depth: Int)?
     private var labNativeMTPLoadGateRecorder: NativeMTPLoadGateRecorder?
     private var labNativeMTPProposalOverride: NativeMTPLabProposalOverride?
     private var labNativeMTPPhaseTrap: NativeMTPLabPhaseTrap?
     private var labNativeMTPPostoutputFault: NativeMTPLabPostoutputFault?
     private var labNativeMTPCommitTimingObserver: NativeMTPLabCommittedTokenTimingObserver?
+    private var labNativeMTPNumericalOracle: NativeMTPLabNumericalOracle.Binding?
     private var labNativeMTPDecodeOutputCap: NativeMTPLabDecodeOutputCap?
     /// Lab-only batch-composition fence. The journey harness installs the exact
     /// request order before submitting a batch; the pump stays stopped until
     /// every named row is queued, then consumes them in that order.
     private var labBatchComposition: [String]?
+    #endif
+    #if !DEBUG && !MACPROVIDER_LAB_HARNESS
+    private var labNativeMTPLoadGateRecorder: NativeMTPLoadGateRecorder?
+    private var labNativeMTPCommitTimingObserver: NativeMTPLabCommittedTokenTimingObserver?
+    private var labNativeMTPNumericalOracle: NativeMTPLabNumericalOracle.Binding?
+    private var labNativeMTPDecodeOutputCap: NativeMTPLabDecodeOutputCap?
     #endif
     private var nativeMTPLoadGateCalmRounds = 0
     static let nativeMTPLoadGateReleaseRounds = 8
@@ -3520,6 +3542,10 @@ actor ContinuousBatchScheduler {
             let remaining = remainingDecodeOutputTokens(for: row)
             guard remaining > 0 else { continue }
             window = min(window, remaining)
+            if row.nativeMTPFusedOrdinaryDecode, let adaptation = row.nativeMTPAdaptation,
+               adaptation.currentDepth == 0 {
+                window = min(window, Int(NativeMTPAdaptationConfig.epochCommittedTokens - adaptation.committedTokens))
+            }
             bounded = true
         }
         return bounded ? max(1, window) : 1
@@ -3527,11 +3553,9 @@ actor ContinuousBatchScheduler {
 
     private func remainingDecodeOutputTokens(for row: Row) -> Int {
         var remaining = row.request.maxOutputTokens - row.generatedTokens.count
-        #if DEBUG || MACPROVIDER_LAB_HARNESS
         if let cap = labNativeMTPDecodeOutputCap?.cap(requestID: row.request.id) {
             remaining = min(remaining, cap - row.generatedTokens.count)
         }
-        #endif
         return max(0, remaining)
     }
 
@@ -3581,11 +3605,52 @@ actor ContinuousBatchScheduler {
         let requestedDepth = row.nativeMTPDirective?.forcedDepth
             ?? row.nativeMTPAdaptation?.currentDepth
             ?? row.request.nativeMTPMaximumProposalDepth
+        let tupleDepth = row.request.nativeMTPIntegrityProbe
+            ? row.request.nativeMTPMaximumProposalDepth
+            : (row.nativeMTPTupleFence.flatMap { nativeMTPTupleBreakers[$0]?.directive.forcedDepth }
+                ?? row.request.nativeMTPMaximumProposalDepth)
         return min(
             max(0, requestedDepth),
+            max(0, tupleDepth),
             row.request.nativeMTPMaximumProposalDepth,
             remainingProposalCapacity
         )
+    }
+
+    private func initialNativeMTPAdaptation(for request: ContinuousBatchSchedulerRequest) -> NativeMTPDepthAdaptationState? {
+        // Integrity probes exercise every signed proposal position and must
+        // not train buyer acceptance policy from deliberate rejection fixtures.
+        guard request.decodePath == .nativeMTP, !request.nativeMTPIntegrityProbe,
+              let config = request.nativeMTPAdaptationConfig else { return nil }
+        var initialDepth = min(2, request.nativeMTPMaximumProposalDepth)
+        if let fence = request.nativeMTPTupleFence {
+            if nativeMTPTupleBreakers[fence] == nil {
+                nativeMTPTupleBreakers[fence] = NativeMTPTupleCircuitBreakerState(config: config, initialDepth: initialDepth)
+            }
+            initialDepth = min(initialDepth, nativeMTPTupleBreakers[fence]?.requestInitialDepth ?? initialDepth)
+        }
+        var adaptation = NativeMTPDepthAdaptationState(config: config, initialDepth: initialDepth)
+        if let directive = request.nativeMTPAdaptationDirective {
+            adaptation.applyTupleDirective(directive)
+        }
+        return adaptation
+    }
+
+    private func recordNativeMTPCompletedRequest(_ row: Row) {
+        guard row.usesNativeMTP, !row.request.nativeMTPIntegrityProbe,
+              terminalResults[row.request.id] == nil,
+              pendingTerminalDeliveries[row.request.id] == nil,
+              let fence = row.nativeMTPTupleFence,
+              var breaker = nativeMTPTupleBreakers[fence] else { return }
+        breaker.recordEligibleRequest(
+            committedTokens: row.nativeMTPCounters?.committedTokens ?? 0,
+            accepted: row.nativeMTPCounters?.acceptedTokens ?? 0,
+            proposed: NativeMTPDepthAdaptationState.saturatingAdd(
+                row.nativeMTPCounters?.acceptedTokens ?? 0,
+                row.nativeMTPCounters?.rejectedTokens ?? 0),
+            packedTargetVerificationPositions: row.nativeMTPVerificationPositions
+        )
+        nativeMTPTupleBreakers[fence] = breaker
     }
 
     private func nativeMTPFixtureProposalTokens(for row: Row, maximumDepth: Int) -> [Int] {
@@ -3618,6 +3683,44 @@ actor ContinuousBatchScheduler {
         return bytes
     }
 
+    #if DEBUG || MACPROVIDER_LAB_HARNESS
+    private func reserveNativeMTPRoundBytes(_ bytes: Int) throws -> NativeMTPRoundByteReservation {
+        guard bytes > 0 else {
+            throw ContinuousBatchSchedulerError.requestFailed("continuous_batching_native_mtp_window_bytes_unavailable")
+        }
+        let (nextReserved, overflow) = nativeMTPReservedRoundBytes.addingReportingOverflow(bytes)
+        let sample = configuration.nativeMTPRoundSystemMemoryProbe.sample()
+        let effectiveCapacity: Int
+        if let context = labJourneyReservationContext, let observer = labJourneyResourceObserver {
+            effectiveCapacity = observer.capacity(requestID: context.requestID,
+                generatedTokens: context.generatedTokens, realCapacity: configuration.nativeMTPRoundByteCapacity)
+            observer.record(.init(requestID: context.requestID, generatedTokens: context.generatedTokens,
+                depth: context.depth, bytes: bytes, reservedBefore: nativeMTPReservedRoundBytes,
+                capacity: effectiveCapacity, admitted: !overflow && nextReserved <= effectiveCapacity
+                    && Self.nativeMTPSystemMemoryHeadroomAdmits(reservedAfter: nextReserved, sample: sample)))
+        } else { effectiveCapacity = configuration.nativeMTPRoundByteCapacity }
+        guard !overflow,
+              nextReserved <= effectiveCapacity,
+              Self.nativeMTPSystemMemoryHeadroomAdmits(reservedAfter: nextReserved, sample: sample) else {
+            // SPEC-048 R012: say which bound refused, with every number.
+            let floor = sample.map { max(1, $0.physicalBytes / 10) }
+            try? FileHandle.standardError.write(contentsOf: Data(
+                ("event=native_mtp_round_reservation_refused requested_bytes=\(bytes) reserved_before_bytes=\(nativeMTPReservedRoundBytes) "
+                    + "outstanding_reservations=\(nativeMTPRoundByteReservations.count) capacity_bytes=\(effectiveCapacity) "
+                    + "available_bytes=\(sample.map { String($0.availableBytes) } ?? "unavailable") "
+                    + "physical_bytes=\(sample.map { String($0.physicalBytes) } ?? "unavailable") "
+                    + "floor_bytes=\(floor.map(String.init) ?? "unavailable") "
+                    + "reason=\(overflow ? "overflow" : nextReserved > effectiveCapacity ? "capacity" : "system_headroom")\n").utf8
+            ))
+            throw ContinuousBatchSchedulerError.requestFailed("continuous_batching_native_mtp_round_memory_exhausted")
+        }
+        let id = UUID()
+        nativeMTPReservedRoundBytes = nextReserved
+        nativeMTPRoundByteReservations[id] = bytes
+        return NativeMTPRoundByteReservation(id: id, bytes: bytes)
+    }
+
+    #else
     private func reserveNativeMTPRoundBytes(_ bytes: Int) throws -> NativeMTPRoundByteReservation {
         guard bytes > 0 else {
             throw ContinuousBatchSchedulerError.requestFailed("continuous_batching_native_mtp_window_bytes_unavailable")
@@ -3651,6 +3754,7 @@ actor ContinuousBatchScheduler {
         return NativeMTPRoundByteReservation(id: id, bytes: bytes)
     }
 
+    #endif
     /// SPEC-048 R012: the round's reservation fits above the 10% physical
     /// free-memory floor.
     static func nativeMTPSystemMemoryHeadroomAdmits(
@@ -3944,6 +4048,10 @@ actor ContinuousBatchScheduler {
                 }
                 let byteReservation: NativeMTPRoundByteReservation
                 do {
+                    #if DEBUG || MACPROVIDER_LAB_HARNESS
+                    labJourneyReservationContext = (row.request.id, row.generatedTokens.count, depth)
+                    defer { labJourneyReservationContext = nil }
+                    #endif
                     byteReservation = try reserveNativeMTPRoundBytes(completeWindowBytes)
                 } catch {
                     reservationFailure = error
@@ -4646,6 +4754,13 @@ actor ContinuousBatchScheduler {
                     active.nativeMTPCounters,
                     roundCounters
                 )
+                active.nativeMTPAdaptation?.recordRound(NativeMTPRoundWork(
+                    acceptedProposalPrefixCount: roundCounters.acceptedTokens,
+                    proposalCount: UInt64(clamping: proposalCount),
+                    committedTokenCount: roundCounters.committedTokens
+                ))
+                active.nativeMTPVerificationPositions = NativeMTPDepthAdaptationState.saturatingAdd(
+                    active.nativeMTPVerificationPositions, UInt64(clamping: item.input.verifiedInputTokenCount))
                 activeDecode[requestID] = active
             }
             if let consumed = reserved.first(where: { $0.row.request.id == item.row.request.id })?.consumedFixtureProposals,
@@ -4654,9 +4769,7 @@ actor ContinuousBatchScheduler {
                 active.nativeMTPFixtureProposalsConsumed = true
                 activeDecode[item.row.request.id] = active
             }
-            #if DEBUG || MACPROVIDER_LAB_HARNESS
             labNativeMTPLoadGateRecorder?.recordNativeRound(requestID: item.row.request.id)
-            #endif
             for candidate in candidatesByID[item.row.request.id] ?? [] {
                 guard activeDecode[item.row.request.id] != nil else { break }
                 await applyToken(candidate.tokenID, to: item.row)
@@ -4740,6 +4853,10 @@ actor ContinuousBatchScheduler {
     #if DEBUG || MACPROVIDER_LAB_HARNESS
     /// Lab-only: record the in-flight load gate's real decisions for R015
     /// gated-cell evidence. Never installed outside lab builds.
+    func installLabJourneyResourceObserver(_ observer: NativeMTPJourneyResourceObserver?) {
+        labJourneyResourceObserver = observer
+    }
+
     func installLabNativeMTPLoadGateRecorder(_ recorder: NativeMTPLoadGateRecorder?) {
         labNativeMTPLoadGateRecorder = recorder
     }
@@ -4750,6 +4867,14 @@ actor ContinuousBatchScheduler {
         labNativeMTPProposalOverride = override
     }
 
+
+    /// Lab-only numeric comparison of one ordinary/native request pair.
+    func installLabNativeMTPNumericalOracle(_ binding: NativeMTPLabNumericalOracle.Binding?) -> Bool {
+        guard let pagedBackend = backend as? PagedKVSharedForwardBackend else { return false }
+        pagedBackend.installLabNativeMTPNumericalOracle(binding)
+        labNativeMTPNumericalOracle = binding
+        return true
+    }
 
     /// Lab-only journey hook: attach the backend state digest observer that
     /// proves hidden KV/recurrent state across verification and finalize.
@@ -4837,25 +4962,30 @@ actor ContinuousBatchScheduler {
         }
         let allNativeRows = rows.filter(\.usesNativeMTP)
         updateNativeMTPLoadGate(nativeRows: allNativeRows)
-        // While the load gate holds native rows at depth zero, a native verify
-        // of one column is the ordinary decode step with extra transaction
+        // At load-gate or confidence depth zero, a native verify of one
+        // column is the ordinary decode step with extra transaction
         // cost, so those rows ride the ordinary lockstep forward instead and
         // the backend keeps their drafter columns for when depth returns.
         // Integrity probes are exempt from the gate and keep verifying.
-        let fusedIDs: Set<String> = nativeMTPLoadGateEngaged
-            ? Set(allNativeRows.filter { !$0.request.nativeMTPIntegrityProbe }.map(\.request.id))
-            : []
-        let nativeRows = allNativeRows.filter { !fusedIDs.contains($0.request.id) }
-        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        let fusedIDs = Set(allNativeRows.filter { row in
+            guard !row.request.nativeMTPIntegrityProbe else { return false }
+            // DeepInfer confidence scheduling: only this row parks drafting;
+            // the row retains native identity and its committed drafter columns.
+            return nativeMTPLoadGateEngaged
+                || (row.nativeMTPAdaptation != nil && nativeMTPMaximumProposalDepth(for: row) == 0)
+        }.map(\.request.id))
+        for row in rows {
+            activeDecode[row.request.id]?.nativeMTPFusedOrdinaryDecode = fusedIDs.contains(row.request.id)
+        }
+        let nativeRows = allNativeRows.filter { !fusedIDs.contains($0.request.id) }.compactMap { activeDecode[$0.request.id] }
         if !fusedIDs.isEmpty {
             labNativeMTPLoadGateRecorder?.recordHeldRound(requestIDs: fusedIDs)
         }
-        #endif
         guard !nativeRows.isEmpty else {
-            await runOrdinaryDecodeStep(rows: rows)
+            await runOrdinaryDecodeStep(rows: rows.compactMap { activeDecode[$0.request.id] })
             return
         }
-        let ordinaryRows = rows.filter { !$0.usesNativeMTP || fusedIDs.contains($0.request.id) }
+        let ordinaryRows = rows.filter { !$0.usesNativeMTP || fusedIDs.contains($0.request.id) }.compactMap { activeDecode[$0.request.id] }
         if rows.first.map({ $0.usesNativeMTP && !fusedIDs.contains($0.request.id) }) == true {
             await runNativeMTPDecodeStep(rows: nativeRows)
             guard !cleanupFailedClosed else { return }
@@ -5253,6 +5383,21 @@ actor ContinuousBatchScheduler {
     /// it must; the caller performs that release/finish.
     private func advanceDecodeRow(_ token: Int, requestID: String) -> DecodeRowCompletion? {
         guard var row = activeDecode[requestID] else { return nil }
+        if let binding = labNativeMTPNumericalOracle,
+           row.request.serialToolStopObserver?.stopTokenCount == nil {
+            guard binding.oracle.select(
+                role: binding.role, requestID: row.request.id,
+                position: row.generatedTokens.count, tokenID: token)
+            else { return .failed(errorCode: "native_mtp_lab_numerical_oracle_failed") }
+        }
+        if row.nativeMTPFusedOrdinaryDecode, row.nativeMTPAdaptation != nil {
+            row.nativeMTPAdaptation?.recordRound(NativeMTPRoundWork(
+                acceptedProposalPrefixCount: 0, proposalCount: 0, committedTokenCount: 1))
+            row.nativeMTPVerificationPositions = NativeMTPDepthAdaptationState.saturatingAdd(
+                row.nativeMTPVerificationPositions, 1)
+            row.nativeMTPCounters = Self.addNativeMTPCounters(row.nativeMTPCounters,
+                NativeMTPSelfTestCounters(acceptedTokens: 0, rejectedTokens: 0, bonusTokens: 1, committedTokens: 1))
+        }
         row.generatedTokens.append(token)
         row.currentToken = token
         row.pendingOutputTokens.append(token)
@@ -5298,22 +5443,31 @@ actor ContinuousBatchScheduler {
 
         let firstVisibleIndex = row.outputTokens.count
         row.outputTokens.append(contentsOf: visibleTokens)
-        #if DEBUG || MACPROVIDER_LAB_HARNESS
         if !visibleTokens.isEmpty {
             for offset in visibleTokens.indices {
                 labNativeMTPCommitTimingObserver?.record(
                     requestID: row.request.id,
                     ordinal: firstVisibleIndex + offset,
-                    outputCount: firstVisibleIndex + offset + 1
+                    outputCount: firstVisibleIndex + offset + 1,
+                    tokenID: visibleTokens[offset]
                 )
             }
         }
-        #endif
         if row.request.serialToolStopObserver?.observe(visibleTokens) == true {
             // Match the existing asynchronous stopEarly boundary: the token
             // that completed the call is visible, and the next applied token
             // closes the row. Finalization truncates to the recorded boundary.
             earlyStopIDs.insert(row.request.id)
+        }
+        if let binding = labNativeMTPNumericalOracle {
+            for (offset, token) in visibleTokens.enumerated() {
+                if let stop = row.request.serialToolStopObserver?.stopTokenCount,
+                   firstVisibleIndex + offset >= stop { break }
+                guard binding.oracle.emit(
+                    role: binding.role, requestID: row.request.id,
+                    ordinal: firstVisibleIndex + offset, tokenID: token)
+                else { return .failed(errorCode: "native_mtp_lab_numerical_oracle_failed") }
+            }
         }
         activeDecode[row.request.id] = row
         CBTrace.log(row.request.id, "sch_active")
@@ -5601,7 +5755,7 @@ actor ContinuousBatchScheduler {
                         request.recurrentCheckpointPositions.contains($0.tokenCount)
                     },
                     decodePath: request.decodePath,
-                    nativeMTPAdaptation: nil,
+                    nativeMTPAdaptation: initialNativeMTPAdaptation(for: request),
                     nativeMTPDirective: request.nativeMTPAdaptationDirective,
                     nativeMTPTupleFence: request.nativeMTPTupleFence,
                     nativeMTPFixtureProposalsConsumed: false
@@ -6078,6 +6232,7 @@ actor ContinuousBatchScheduler {
         errorCode: String?,
         serialConversationCache: ContinuousBatchSerialConversationCache? = nil
     ) {
+        recordNativeMTPCompletedRequest(row)
         earlyStopIDs.remove(row.request.id)
         record(status == .cancelled ? .cancelled : .stopped)
         let isSuccessful = status == .stop || status == .length
@@ -6114,6 +6269,7 @@ actor ContinuousBatchScheduler {
         errorCode: String?,
         retainedCache: ContinuousBatchRetainedCache?
     ) {
+        recordNativeMTPCompletedRequest(row)
         earlyStopIDs.remove(row.request.id)
         record(status == .cancelled ? .cancelled : .stopped)
         let isSuccessful = status == .stop || status == .length
@@ -6145,12 +6301,26 @@ actor ContinuousBatchScheduler {
 
     private func complete(requestID: String, result: ContinuousBatchSchedulerResult) {
         rowProgressEvents &+= 1
-        #if DEBUG || MACPROVIDER_LAB_HARNESS
         labNativeMTPLoadGateRecorder?.recordTerminal(requestID: requestID, status: result.terminalStatus)
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        labJourneyResourceObserver?.record(.init(requestID: requestID, status: result.terminalStatus.rawValue,
+            errorCode: result.errorCode, emittedTokens: result.emittedTokens,
+            hasRetainedCache: result.retainedCache != nil, hasSerialCache: result.serialConversationCache != nil))
         #endif
         CBTrace.log(requestID, "sch_complete status=\(result.terminalStatus) waiters=\(requestWaiters[requestID]?.count ?? 0) stopping=\(stoppingActiveWaiters.values.contains(where: { $0.requestID == requestID }))")
         endQueueWait(requestID: requestID)
         guard terminalResults[requestID] == nil, pendingTerminalDeliveries[requestID] == nil else { return }
+        if let binding = labNativeMTPNumericalOracle {
+            binding.oracle.finishRequest(
+                role: binding.role, requestID: requestID,
+                emittedCount: min(result.outputTokens.count, result.serialToolStopTokenCount ?? result.outputTokens.count),
+                completed: result.terminalStatus == .stop || result.terminalStatus == .length,
+                terminal: NativeMTPLabNumericalOracle.Terminal.classify(
+                    status: result.terminalStatus, stopCause: result.stopCause,
+                    toolBoundaryTokenCount: result.serialToolStopTokenCount),
+                selectedTokenIDs: Array(result.generatedTokens.prefix(
+                    result.serialToolStopTokenCount ?? result.generatedTokens.count)))
+        }
         requestAdmissionSequences.removeValue(forKey: requestID)
         let waiters = requestWaiters.removeValue(forKey: requestID) ?? []
         if stoppingActiveWaiters.values.contains(where: { $0.requestID == requestID }) {
@@ -6696,7 +6866,6 @@ actor ContinuousBatchScheduler {
     }
 }
 
-#if DEBUG || MACPROVIDER_LAB_HARNESS
 /// Lab-only SPEC-048-R015 gated-cell evidence, taken from the scheduler's own
 /// R007 in-flight gate decisions: rounds in which an admitted native row was
 /// held at depth zero (riding the ordinary forward), and how each hold ended —
@@ -6835,4 +7004,96 @@ final class NativeMTPLoadGateRecorder: @unchecked Sendable {
         return summary
     }
 }
+
+#if !DEBUG && !MACPROVIDER_LAB_HARNESS
+extension ContinuousBatchScheduler {
+    func installLabNativeMTPLoadGateRecorder(_ recorder: NativeMTPLoadGateRecorder?) {
+        guard NativeMTPQualificationScope.permitsFixtureHooks else { return }
+        labNativeMTPLoadGateRecorder = recorder
+    }
+
+    func installLabNativeMTPNumericalOracle(_ binding: NativeMTPLabNumericalOracle.Binding?) -> Bool {
+        guard NativeMTPQualificationScope.permitsFixtureHooks else { return false }
+        guard let pagedBackend = backend as? PagedKVSharedForwardBackend else { return false }
+        pagedBackend.installLabNativeMTPNumericalOracle(binding)
+        labNativeMTPNumericalOracle = binding
+        return true
+    }
+
+    func installLabNativeMTPCommitTimingObserver(_ observer: NativeMTPLabCommittedTokenTimingObserver?) {
+        guard NativeMTPQualificationScope.permitsFixtureHooks else { return }
+        labNativeMTPCommitTimingObserver = observer
+    }
+
+    func installLabNativeMTPDecodeOutputCap(_ cap: NativeMTPLabDecodeOutputCap?) {
+        guard NativeMTPQualificationScope.permitsFixtureHooks else { return }
+        labNativeMTPDecodeOutputCap = cap
+    }
+}
+#endif
+
+#if !DEBUG && !MACPROVIDER_LAB_HARNESS
+final class NativeMTPLabCommittedTokenTimingObserver: @unchecked Sendable {
+    struct Event: Equatable, Sendable {
+        let requestID: String
+        let monotonicNanoseconds: UInt64
+        /// Zero-based ordinal in the buyer-visible output token stream.
+        let ordinal: Int
+        /// Buyer-visible output token count after this commit is applied.
+        let outputCount: Int
+        var tokenID: Int? = nil
+    }
+
+    private let lock = NSLock()
+    private var events: [Event] = []
+    private let captureTokenIDs: Bool
+
+    init(captureTokenIDs: Bool = false) {
+        self.captureTokenIDs = captureTokenIDs
+    }
+
+    func record(requestID: String, ordinal: Int, outputCount: Int, tokenID: Int? = nil) {
+        lock.lock()
+        events.append(Event(
+            requestID: requestID,
+            monotonicNanoseconds: DispatchTime.now().uptimeNanoseconds,
+            ordinal: ordinal,
+            outputCount: outputCount,
+            tokenID: captureTokenIDs ? tokenID : nil
+        ))
+        lock.unlock()
+    }
+
+    func snapshot() -> [Event] {
+        lock.lock()
+        defer { lock.unlock() }
+        return events
+    }
+}
+
+final class NativeMTPLabDecodeOutputCap: @unchecked Sendable {
+    private let lock = NSLock()
+    private var capsByRequestID: [String: Int]
+
+    init(capsByRequestID: [String: Int]) {
+        self.capsByRequestID = capsByRequestID.mapValues { max(0, $0) }
+    }
+
+    func cap(requestID: String) -> Int? {
+        lock.lock()
+        defer { lock.unlock() }
+        return capsByRequestID[requestID]
+    }
+
+    func setCap(_ cap: Int?, requestID: String) {
+        lock.lock()
+        if let cap {
+            capsByRequestID[requestID] = max(0, cap)
+        } else {
+            capsByRequestID.removeValue(forKey: requestID)
+        }
+        lock.unlock()
+    }
+}
+
 #endif

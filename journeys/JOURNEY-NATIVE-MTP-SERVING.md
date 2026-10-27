@@ -17,7 +17,8 @@ Execution mode: provider-native-mtp-serving
 ## Purpose
 
 This journey defines the signed physical evidence required to enable one exact
-native-MTP serving tuple. It proves target-authoritative greedy output,
+native-MTP serving tuple. It proves target-authoritative output for the exact
+signed request profile (greedy, and sampled only when admitted by SPEC-048),
 transactional state, mixed-row scheduling, fail-closed admission, accounting
 invariance, and the preregistered real-hardware performance gate.
 
@@ -27,8 +28,12 @@ and does not make any SPEC-048 requirement conformant by itself.
 ## Out of scope
 
 - Classic external-draft speculation under SPEC-028.
-- Sampling, tools, structured output, logprobs, cache reuse, or multimodal
-  native-MTP requests.
+- Request controls or capabilities outside the tuple's signed SPEC-048-R004
+  profile, including structured output, logprobs, cache reuse and multimodal
+  native-MTP requests. Admitted sampled GLM requests and admitted tools/history
+  or reasoning controls are in scope only for their verified signed profile;
+  active grammar and explicit serial tool-call stopping retain ordinary
+  fallback. A journey for a greedy-only tuple does not admit those paths.
 - A general MXFP8 format or catalog contract outside SPEC-023/SPEC-010.
 - Live-coordinator testing with an unreleased local provider binary.
 
@@ -54,7 +59,12 @@ tuple:
    allocations before tensor load.
 4. `step-04-serial-token-oracle` — Compare native MTP with isolated ordinary
    greedy decode and prove identical token IDs, bytes, usage, and terminal
-   reasons across all/none/partial acceptance.
+   reasons across all/none/partial acceptance. When the signed profile admits
+   sampling, additionally execute SPEC-048-R005's row/position-keyed exact
+   target-sample oracle across its admitted controls, acceptance outcomes and
+   native/ordinary fallback boundaries, proving token, state, usage and
+   terminal parity. Sampled output MUST NOT be checked against greedy argmax
+   or represented as a greedy result; the greedy subproof remains required.
 5. `step-05-cache-state-boundary` — Force rejection at every proposal
    position and at an admitted cache or hybrid-state boundary; prove exact
    subsequent-token and state parity. State parity compares the row's
@@ -74,7 +84,9 @@ tuple:
 7. `step-07-mixed-multirow` — Run ordinary and native-MTP rows together at
    the tuple's maximum advertised slots with unequal offsets, depths,
    accepted prefixes, admission times, and completion times; prove no state,
-   output, terminal, or metric bleed.
+   output, terminal, or metric bleed. Cover the signed sampled/tools/history
+   and reasoning controls when admitted, together with known ineligible
+   controls that must remain ordinary; no untested control inherits eligibility.
 8. `step-08-capacity-and-depth-zero` — Exhaust verification-window capacity
    before output and after stickiness; prove pre-output fallback, in-path depth
    reduction to zero, bounded failure when depth zero cannot fit, and no memory
@@ -108,11 +120,41 @@ tuple:
 
 ## Required evidence contract
 
-The reviewed redacted evidence manifest MUST be committed under:
+The reviewed redacted evidence manifest MUST use this path, either committed
+through the ordinary reviewed-evidence route or delivered through the narrow
+post-cut route below:
 
 ```text
 journeys/evidence/native-mtp-serving-*.redacted.json
 ```
+
+**Authenticated post-cut delivery.** Evidence that can exist only after the
+reviewed campaign merge and signed CLI cut MAY be delivered as a redacted
+draft-release ZIP asset to the existing protected
+`.github/workflows/promote-signed-native-mtp-serving-journey.yml`, using its
+`postcut_asset_id`, `postcut_asset_sha256` and `postcut_release_id` inputs.
+The ZIP's closed `postcut-manifest.json`
+(`macprovider.native-mtp-postcut-evidence.v1`) MUST bind the repository, exact
+merged `source_sha`, protected acceptance run/attempt/tag, signed checksums and
+binary SHA-256, CDHash, decode-path and Metal-library digests, successful exact-
+source CI run, evidence path and complete per-file digest inventory. Only that
+manifest, the exact redacted evidence path and its same-prefix closed bundle
+may be present; its `postcut-provenance.json` MUST match the manifest without
+its file inventory and be bound by the bundle's existing manifest.
+
+The consumer MUST authenticate the draft release and asset id, digest and size,
+release target and reviewed source, require that source to equal its protected
+workflow's current reviewed main source, and verify successful exact-source
+protected acceptance and main-push CI runs. It MUST perform the standard full
+acceptance-directory and domain-separated acceptance-signature verification
+and match the sidecar's source, code identity, decode-path digest and Metal
+library to those verified bytes. It then executes the same genuine step,
+artifact, redaction, parity and performance validators, protected signer and
+signed-result validator as the committed route, exporting the full closed
+bundle. Missing or unauthenticated bytes fail closed; public-safe transport
+is not evidence that any step passed. This route adds no trust root and MUST
+NOT mutate `specs/CONFORMANCE.json`, waive conformance promotion or replace a
+required signed physical journey or live buyer e2e with an asset receipt.
 
 It is one manifest per exact tuple and MUST be the exact closed object below;
 unknown/missing/duplicate keys or wrong types fail before signing:
@@ -146,6 +188,15 @@ admission identity in this manifest. Every referenced artifact is an immutable
 canonical file in the reviewed bundle; paths and URLs are not evidence
 identities.
 
+Qualification reuse follows SPEC-048-R013: original measured artifacts retain
+truthful source identities, including `benchmark_policy.provider_commit`.
+A current sidecar's signed source is recorded separately; an authenticated
+reuse proof MUST bind the original evidence and measured source to that
+reviewed target and prove unchanged tuple decode behavior and scope. A source
+or binary identity rebind does not authorize rewriting old measurement
+identities, skipping source validation or borrowing greedy proof for an
+expanded sampled profile.
+
 The signer workflow may produce a generic signed journey-result only after the
 tuple binding, required steps, benchmark policy/result digests, redaction
 review, and every owner-spec requirement named in this journey all validate. A schema validator and
@@ -164,7 +215,9 @@ The redacted evidence and signed result MUST set these booleans to `true`:
 - `external_reference_rejected_verified`
 - `allocation_and_decompression_bounds_verified`
 - `ordinary_decode_remained_available_verified`
-- `exact_greedy_token_parity_verified`
+- `exact_greedy_token_parity_verified` (the genuine greedy subproof; sampled
+  profile parity is additionally mandatory in step 04 and is not relabeled as
+  this observation)
 - `exact_transaction_rewind_verified`
 - `streaming_and_terminal_parity_verified`
 - `mixed_multirow_isolation_verified`
