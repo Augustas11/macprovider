@@ -113,6 +113,81 @@ final class ExpiredPreparedHandoffRecoveryTests: XCTestCase {
         XCTAssertEqual(try fixture.lifecycleStore.current()?.writer, .installer)
     }
 
+    func testOperatorLifecycleSupersedesExpiredHandoffWithoutLosingPause() throws {
+        for coordinator in [false, true] {
+            for state in [ProviderLifecycleState.pausedByOperator, .servingBuyers, .degradedServing, .locallyReadyConnecting] {
+                let fixture = try Fixture(coordinator: coordinator, operatorState: state)
+                let superseding = try XCTUnwrap(try fixture.lifecycleStore.current())
+                XCTAssertNotEqual(superseding.operationID, fixture.operationID)
+                guard case .recovered(.restoredAwaitingReadiness, true) = fixture.recovery.recover() else {
+                    return XCTFail("operator lifecycle must not strand expired handoff: \(state)")
+                }
+                XCTAssertEqual(try String(contentsOf: fixture.binary), "old")
+                XCTAssertEqual(fixture.leaseStore.inspect(), .missing)
+                XCTAssertEqual(fixture.fenceCount, 1)
+                let translated = try XCTUnwrap(try fixture.lifecycleStore.current())
+                XCTAssertEqual(translated.writer, .installer)
+                XCTAssertEqual(translated.previousTransitionID, superseding.transitionID)
+                XCTAssertEqual(translated.operatorPauseRequested, state == .pausedByOperator)
+
+                // The restored process can pass preflight, acquire a fresh
+                // startup lease, and complete the ordinary lifecycle chain.
+                fixture.clock.pid = 3_333
+                try ServeCommand.recoverAbandonedStartupHandoffBeforeFencing(recovery: fixture.recovery)
+                XCTAssertFalse(try ServeCommand.fenceAuthorizedSelfUpdateReloadJobsAtStartup(
+                    loadPending: { try fixture.markerStore.readPending() },
+                    inspectLifecycleLease: { fixture.leaseStore.inspect() },
+                    currentExecutableURL: fixture.binary, targetVersion: "1.8.118",
+                    lifecycleEnvironment: fixture.clock.environment, fenceReloadJobs: {}
+                ))
+                let startup = "serve:after-operator-recovery"
+                _ = try fixture.lifecycleStore.transition(
+                    to: .startingProvider, reasonCode: "launchd_service_started", writer: .serve,
+                    providerID: "provider-test", operationID: startup
+                )
+                _ = try ServeCommand.acquireStartupLifecycleLease(
+                    store: fixture.leaseStore, operationID: startup, providerID: "provider-test", duration: 60
+                )
+                for next in [ProviderLifecycleState.importingCredentials, .validatingCatalog, .loadingModel, .locallyReadyConnecting] {
+                    _ = try fixture.lifecycleStore.transition(
+                        to: next, reasonCode: "startup_test", writer: .serve,
+                        providerID: "provider-test", operationID: startup
+                    )
+                }
+                let ready = try fixture.lifecycleStore.transition(
+                    to: state == .pausedByOperator ? .pausedByOperator : .servingBuyers,
+                    reasonCode: "startup_ready", writer: state == .pausedByOperator ? .operatorCommand : .serve,
+                    providerID: "provider-test", operationID: startup
+                )
+                XCTAssertEqual(ready.operatorPauseRequested, state == .pausedByOperator)
+                XCTAssertEqual(ready.state, state == .pausedByOperator ? .pausedByOperator : .servingBuyers)
+            }
+        }
+    }
+
+    func testOperatorSupersessionDoesNotBypassDeadlinesOrLiveOwner() throws {
+        for mode in ["owner", "deadline", "handoff"] {
+            let fixture = try Fixture(futureDeadline: mode == "deadline", operatorState: .pausedByOperator)
+            if mode == "owner" { fixture.clock.oldOwnerLive = true }
+            if mode == "handoff" { fixture.clock.wall -= 120_000; fixture.clock.monotonic -= 120_000_000_000 }
+            let before = try fixture.snapshot()
+            switch fixture.recovery.recover() {
+            case .recoveryRefused, .transactionActive: break
+            default: XCTFail("operator command must not bypass \(mode)")
+            }
+            XCTAssertEqual(try fixture.snapshot(), before)
+            XCTAssertEqual(fixture.fenceCount, 0)
+        }
+    }
+
+    func testRecoveryOutputExplainsFencingEnableAndPause() {
+        let message = RecoverUpdateCommand.recoveryMessage(markerRecovered: true)
+        for expected in ["fenced", "launchctl enable", "launchctl bootstrap", "launchctl kickstart", "live.malibu.provider", "operator pause flag is preserved"] {
+            XCTAssertTrue(message.contains(expected), expected)
+        }
+        XCTAssertFalse(RecoverUpdateCommand.recoveryMessage(markerRecovered: false).contains("were fenced"))
+    }
+
     func testPreviouslyTranslatedRollbackAndFailedServeRemainRecoverable() throws {
         for failedServe in [false, true] {
             let fixture = try Fixture(restored: true)
@@ -163,38 +238,46 @@ final class ExpiredPreparedHandoffRecoveryTests: XCTestCase {
     }
 
     func testMalformedMismatchedAndAdoptedAuthorityCannotBeRetired() throws {
-        for mode in ["operation", "provider", "service", "target", "digest", "corrupt", "unsafe", "marker"] {
-            let fixture = try Fixture(adopted: mode == "adopted")
-            if mode == "corrupt" {
-                try Data("{".utf8).write(to: fixture.leaseStore.url)
-            } else if mode == "unsafe" {
-                XCTAssertEqual(chmod(fixture.leaseStore.url.path, 0o644), 0)
-            } else if mode == "marker" {
-                try Data("{".utf8).write(to: fixture.markerStore.pendingURL)
-            } else if mode != "adopted" {
-                var json = try XCTUnwrap(JSONSerialization.jsonObject(
-                    with: Data(contentsOf: fixture.leaseStore.url)
-                ) as? [String: Any])
-                var handoff = try XCTUnwrap(json["startup_handoff"] as? [String: Any])
-                switch mode {
-                case "operation":
-                    json["operation_id"] = "self-update:different"
-                    handoff["operation_id"] = "self-update:different"
-                case "provider": handoff["provider_id"] = "different-provider"
-                case "service": handoff["service_identity"] = "other.service"
-                case "target": handoff["target_executable_path"] = "/tmp/different-cli"
-                case "digest": handoff["target_executable_sha256"] = String(repeating: "f", count: 64)
-                default: break
+        for operatorSuperseded in [false, true] {
+            for mode in ["operation", "provider", "service", "target", "digest", "corrupt", "unsafe", "marker", "commit-owner", "compatibility"] {
+                let fixture = try Fixture(operatorState: operatorSuperseded ? .pausedByOperator : nil)
+                if mode == "corrupt" {
+                    try Data("{".utf8).write(to: fixture.leaseStore.url)
+                } else if mode == "unsafe" {
+                    XCTAssertEqual(chmod(fixture.leaseStore.url.path, 0o644), 0)
+                } else if mode == "marker" {
+                    try Data("{".utf8).write(to: fixture.markerStore.pendingURL)
+                } else if mode == "commit-owner" || mode == "compatibility" {
+                    var markerJSON = try XCTUnwrap(JSONSerialization.jsonObject(
+                        with: Data(contentsOf: fixture.markerStore.pendingURL)
+                    ) as? [String: Any])
+                    markerJSON[mode == "commit-owner" ? "commit_owner" : "target_compatibility_set_id"] = "different"
+                    try JSONSerialization.data(withJSONObject: markerJSON).write(to: fixture.markerStore.pendingURL)
+                } else {
+                    var json = try XCTUnwrap(JSONSerialization.jsonObject(
+                        with: Data(contentsOf: fixture.leaseStore.url)
+                    ) as? [String: Any])
+                    var handoff = try XCTUnwrap(json["startup_handoff"] as? [String: Any])
+                    switch mode {
+                    case "operation":
+                        json["operation_id"] = "self-update:different"
+                        if !operatorSuperseded { handoff["operation_id"] = "self-update:different" }
+                    case "provider": handoff["provider_id"] = "different-provider"
+                    case "service": handoff["service_identity"] = "other.service"
+                    case "target": handoff["target_executable_path"] = "/tmp/different-cli"
+                    case "digest": handoff["target_executable_sha256"] = String(repeating: "f", count: 64)
+                    default: break
+                    }
+                    json["startup_handoff"] = handoff
+                    try JSONSerialization.data(withJSONObject: json).write(to: fixture.leaseStore.url)
                 }
-                json["startup_handoff"] = handoff
-                try JSONSerialization.data(withJSONObject: json).write(to: fixture.leaseStore.url)
+                let before = try fixture.snapshot()
+                guard case .recoveryRefused = fixture.recovery.recover() else {
+                    return XCTFail("must refuse \(mode)")
+                }
+                XCTAssertEqual(try fixture.snapshot(), before, mode)
+                XCTAssertEqual(fixture.fenceCount, 0)
             }
-            let before = try fixture.snapshot()
-            guard case .recoveryRefused = fixture.recovery.recover() else {
-                return XCTFail("must refuse \(mode)")
-            }
-            XCTAssertEqual(try fixture.snapshot(), before, mode)
-            XCTAssertEqual(fixture.fenceCount, 0)
         }
     }
 
@@ -241,11 +324,11 @@ final class ExpiredPreparedHandoffRecoveryTests: XCTestCase {
         let lifecycleStore: ProviderLifecycleStateStore
         let leaseStore: ProviderLifecycleLeaseStore
         let marker: AutoUpdatePendingMarker
-        let operationID = "self-update:bbbbbbbb-cccc-4ddd-8eee-ffffffffffff"
+        let operationID: String
         var record: ProviderLifecycleLeaseRecord?
         var fenceCount = 0
 
-        init(restored: Bool = false, futureDeadline: Bool = false, adopted: Bool = false, legacy: Bool = false) throws {
+        init(restored: Bool = false, futureDeadline: Bool = false, adopted: Bool = false, legacy: Bool = false, coordinator: Bool = false, operatorState: ProviderLifecycleState? = nil) throws {
             home = FileManager.default.temporaryDirectory.appendingPathComponent("expired-handoff-\(UUID())")
             try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
             let bin = home.appendingPathComponent("bin")
@@ -258,6 +341,7 @@ final class ExpiredPreparedHandoffRecoveryTests: XCTestCase {
             lifecycleStore = ProviderLifecycleStateStore(url: home.appendingPathComponent("lifecycle/state-v1.json"))
             leaseStore = ProviderLifecycleLeaseStore(url: home.appendingPathComponent("lifecycle/lease.json"), environment: clock.environment)
             let updateID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+            operationID = coordinator ? "autoupdate:\(updateID)" : "self-update:bbbbbbbb-cccc-4ddd-8eee-ffffffffffff"
             let backup = markerStore.rollbackBackupPath(binaryURL: binary, updateID: updateID)
             try Data("old".utf8).write(to: backup)
             let release = markerStore.releaseRollbackBackupPath(binaryURL: binary, updateID: updateID)
@@ -268,7 +352,7 @@ final class ExpiredPreparedHandoffRecoveryTests: XCTestCase {
                 sha256: AutoUpdateEvent.sha256Hex("old"),
                 markerDeadline: ISO8601DateFormatter().string(from: Date().addingTimeInterval(futureDeadline ? 300 : -60)),
                 releaseBackupPath: release.path, releaseBackupSHA256: AutoUpdateEvent.sha256Hex(""),
-                commitOwner: "self_update", targetCompatibilitySetID: legacy ? nil : Self.targetSet,
+                commitOwner: coordinator ? "coordinator" : "self_update", targetCompatibilitySetID: legacy ? nil : Self.targetSet,
                 targetCompatibilitySetSHA256: legacy ? nil : String(repeating: "a", count: 64),
                 previousVersion: legacy ? nil : "1.8.118", previousCompatibilitySetID: legacy ? nil : "Augustas11/macprovider:v1.8.118@" + String(repeating: "b", count: 40),
                 previousCompatibilitySetSHA256: legacy ? nil : String(repeating: "b", count: 64),
@@ -292,6 +376,22 @@ final class ExpiredPreparedHandoffRecoveryTests: XCTestCase {
                 record = try leaseStore.adoptStartupHandoff(
                     operationID: operationID, providerID: "provider-test", serviceIdentity: ServeCommand.providerLaunchdServiceIdentity
                 )
+            }
+            if let operatorState {
+                // An operator can overwrite the lifecycle while update startup
+                // authority remains prepared. Pause uses a valid predecessor.
+                _ = try lifecycleStore.transition(
+                    to: .servingBuyers, reasonCode: "operator_resume_confirmed", writer: .operatorCommand,
+                    providerID: "provider-test", compatibilitySetID: Self.targetSet,
+                    operationID: "operator-resume:test", operatorPaused: false
+                )
+                if operatorState != .servingBuyers {
+                    _ = try lifecycleStore.transition(
+                        to: operatorState, reasonCode: "operator_command_confirmed", writer: .operatorCommand,
+                        providerID: "provider-test", compatibilitySetID: Self.targetSet,
+                        operationID: "operator-pause:test", operatorPaused: operatorState == .pausedByOperator
+                    )
+                }
             }
             clock.wall += 120_000
             clock.monotonic += 120_000_000_000

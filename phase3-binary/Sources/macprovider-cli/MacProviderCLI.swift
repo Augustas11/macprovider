@@ -206,12 +206,20 @@ struct RecoverUpdateCommand: ParsableCommand {
             payload["marker_recovered"] = markerOutcome != nil
             payload["lifecycle_unfenced"] = lifecycleUnfenced
             payload["marker_result"] = Self.describe(markerOutcome)
-            payload["message"] = "recovered the abandoned transaction; run `serve` (or let launchd restart it) to return to serving"
+            payload["message"] = Self.recoveryMessage(markerRecovered: markerOutcome != nil)
         }
         try LifecycleStateStatusCommand.writeJSON(payload)
         if let failureExit {
             throw ExitCode(failureExit)
         }
+    }
+
+    static func recoveryMessage(markerRecovered: Bool) -> String {
+        var message = "Recovered the abandoned transaction; the operator pause flag is preserved. Run `serve` to start the restored provider; resume from Malibu or the provider control socket when ready to serve buyers if paused."
+        if markerRecovered {
+            message += " Reload LaunchAgent helpers were fenced before rollback. If provider LaunchAgents were disabled, re-enable each installed label (live.malibu.provider, live.malibu.provider-watchdog, or legacy live.streamvc.macprovider, live.streamvc.macprovider-watchdog) with `launchctl enable gui/$(id -u)/<label>` before `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/<label>.plist`. For an already loaded provider, use `launchctl kickstart -k gui/$(id -u)/<label>` instead of bootstrap."
+        }
+        return message
     }
 
     private static func describe(_ outcome: AutoUpdateOrphanRecoveryOutcome?) -> String {

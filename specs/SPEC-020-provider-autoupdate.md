@@ -1,6 +1,6 @@
 # SPEC-020 - Provider autoupdate
 
-Version: v0.1.29
+Version: v0.1.30
 Status: Normative; coordinator-independent recovery is reconciled and
 implementation remains nonconformant under issue #610. The production path ran
 the 2026-07-10 incident-recovery
@@ -1565,7 +1565,15 @@ shared mutation and update locks, require an expired pending-marker deadline,
 and validate the matching operation, provider, canonical service, target path,
 and installed executable identity. It MUST revalidate the structurally valid
 prepared lease under its exclusive lock and prove the old owner is gone before
-retiring that exact handoff. This prepared-handoff recovery MUST leave active
+retiring that exact handoff. An operator-command lifecycle record superseding
+that update MAY have a different operation ID, including a paused state; this
+MUST NOT block recovery once both deadlines have expired and the owner is dead.
+All marker/handoff operation, commit-owner, provider, service, path, hash and
+compatibility-set guards still apply. Recovery MUST preserve the operator pause
+flag. Successful `recover-update` output MUST explain that reload helpers were
+fenced and name the `launchctl enable` step before bootstrapping any disabled
+provider LaunchAgents.
+This prepared-handoff recovery MUST leave active
 transactions, live owners, adopted or unrelated handoffs, malformed or unsafe
 storage, and identity mismatches untouched. Existing exact-target adopted
 restart and guarded manual recovery of dead-owner adopted transactions remain
