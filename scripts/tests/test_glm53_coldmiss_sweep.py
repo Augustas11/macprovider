@@ -38,6 +38,11 @@ class AfterAcceptanceTests(unittest.TestCase):
                                   "cached_prompt_tokens": length - 100 if mode == "warm" else 0},
                         "error": None, "finish_reason": "length",
                         "ttft_s": 1.0, "wall_s": 1.5,
+                        "start_unix": 1002.0,
+                        **({"background": [
+                            {"error": None, "start_unix": 1000.0, "ttft_s": 1.0,
+                             "wall_s": 30.0, "stopped_early": True} for _ in range(3)
+                        ]} if rows == "4j" else {}),
                     })
 
     def analyze(self, records, traces=True):
@@ -87,6 +92,41 @@ class AfterAcceptanceTests(unittest.TestCase):
         code, report = self.analyze(self.records, traces=False)
         self.assertNotEqual(code, 0)
         self.assertFalse(report["passed"])
+
+    def test_every_cold_row_must_be_cold_and_correct_length(self):
+        for mode in ("split", "plain"):
+            for change in ("cache_hit", "nested_cache_hit", "wrong_length"):
+                with self.subTest(mode=mode, change=change):
+                    records = copy.deepcopy(self.records)
+                    row = next(r for r in records if r["rows"] == "4" and r["mode"] == mode)
+                    if change == "cache_hit":
+                        row["usage"]["cached_prompt_tokens"] = 7000
+                    elif change == "nested_cache_hit":
+                        row["usage"]["prompt_tokens_details"] = {"cached_tokens": 7000}
+                    else:
+                        row["usage"]["prompt_tokens"] = 100
+                    code, report = self.analyze(records)
+                    self.assertNotEqual(code, 0)
+                    self.assertFalse(report["passed"])
+
+    def test_join_requires_three_active_backgrounds(self):
+        for change in ("missing", "error", "late", "ended", "unmeasured"):
+            with self.subTest(change=change):
+                records = copy.deepcopy(self.records)
+                row = next(r for r in records if r["rows"] == "4j")
+                if change == "missing":
+                    row["background"].pop()
+                elif change == "error":
+                    row["background"][0]["error"] = "stream failed"
+                elif change == "late":
+                    row["background"][0]["ttft_s"] = 3.0
+                elif change == "ended":
+                    row["background"][0]["wall_s"] = 1.5
+                else:
+                    row["background"][0]["ttft_s"] = None
+                code, report = self.analyze(records)
+                self.assertNotEqual(code, 0)
+                self.assertFalse(report["passed"])
 
     def test_deadline_skipping_part_of_leg_is_not_success(self):
         calibration = self.root / "calibration.json"

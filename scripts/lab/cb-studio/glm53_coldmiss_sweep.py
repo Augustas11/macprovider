@@ -284,6 +284,25 @@ def cmd_calibrate(args) -> int:
 
 # ---------------------------------------------------------------- run
 
+def positive_finite(value) -> bool:
+    return isinstance(value, (int, float)) and math.isfinite(value) and value > 0
+
+
+def joining_rows_present(record) -> bool:
+    peers = record.get("background") or []
+    joined_at = record.get("start_unix")
+    if len(peers) != 3 or not positive_finite(joined_at):
+        return False
+    # Intentional cancellation after the measured request is expected. Prove
+    # each peer had generated a token and was still active at foreground entry.
+    return all(
+        not peer.get("error")
+        and all(positive_finite(peer.get(key)) for key in ("start_unix", "ttft_s", "wall_s"))
+        and peer["start_unix"] + peer["ttft_s"] <= joined_at
+        <= peer["start_unix"] + peer["wall_s"]
+        for peer in peers)
+
+
 def run_cell(args, cal, length, turns, rows, rep, out) -> bool:
     tag = f"{args.run_id}-L{length}-T{turns}-R{rows}-p{rep}"
     n = 4 if rows == "4" else 1
@@ -295,6 +314,8 @@ def run_cell(args, cal, length, turns, rows, rep, out) -> bool:
     def emit(mode, rec, row):
         nonlocal completed
         completed = completed and not rec.get("error") and bool(rec.get("finish_reason"))
+        if rows == "4j":
+            completed = completed and joining_rows_present(rec)
         rec.update({"cell": tag, "L": length, "T": turns, "rows": rows, "rep": rep, "mode": mode, "row": row})
         out.write(json.dumps(rec) + "\n")
         out.flush()
@@ -486,7 +507,9 @@ def cmd_analyze(args) -> int:
             rec["interleaved_decode_ms"] = sum(ms for t, ms in decode_hops if lo <= t <= hi)
         usage = rec.get("usage") or {}
         rec["prompt_tokens"] = usage.get("prompt_tokens")
-        rec["cached_prompt_tokens"] = usage.get("cached_prompt_tokens")
+        rec["cached_prompt_tokens"] = max(
+            usage.get("cached_prompt_tokens") or 0,
+            (usage.get("prompt_tokens_details") or {}).get("cached_tokens") or 0)
 
     cells = {}
     for rec in runs:
@@ -506,14 +529,18 @@ def cmd_analyze(args) -> int:
         "complete_matrix": observed == expected,
         "unique_request_ids": len(by_rid) == len(runs),
     }
-    def positive_finite(value):
-        return isinstance(value, (int, float)) and math.isfinite(value) and value > 0
-
     for rec in runs:
         label = rec["request_id"]
         checks[f"{label}.completed"] = not rec.get("error") and bool(rec.get("finish_reason"))
         checks[f"{label}.client_ttft"] = positive_finite(rec.get("ttft_s"))
         checks[f"{label}.server_ttft"] = positive_finite(rec.get("server_ttft_ms"))
+        checks[f"{label}.cache_status"] = (
+            rec["cached_prompt_tokens"] > 0 if rec.get("mode") == "warm"
+            else rec["cached_prompt_tokens"] == 0)
+        if rec.get("mode") in ("split", "plain"):
+            checks[f"{label}.length_within_5pct"] = abs((rec["prompt_tokens"] or 0) - rec["L"]) <= 0.05 * rec["L"]
+        if rec.get("rows") == "4j":
+            checks[f"{label}.three_decoding_peers"] = joining_rows_present(rec)
     for (length, turns, rows), modes in sorted(cells.items(), key=lambda kv: (kv[0][0], str(kv[0][2]), kv[0][1])):
         row = {"L": length, "T": turns, "rows": rows}
         for mode, recs in modes.items():
