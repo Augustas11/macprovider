@@ -247,6 +247,20 @@ final class NativeMTPLabNumericalOracleTests: XCTestCase {
         XCTAssertEqual(Terminal.classify(status: .requestFailed, stopCause: .modelStop, toolBoundaryTokenCount: 3), .other)
     }
 
+    func testReasoningObserverRequestStopUsesProductionMatchedStop() {
+        typealias Terminal = NativeMTPLabNumericalOracle.Terminal
+        // Reasoning-open caller stops share the serial-tool observer count.
+        let observed = Terminal.classify(status: .stop, stopCause: nil, toolBoundaryTokenCount: 2)
+        XCTAssertEqual(observed, .toolBoundary)
+        XCTAssertEqual(Terminal.applyingMatchedRequestStop("done", to: observed), .stopSequence)
+        // A request containing a stop is not proof that it actually matched:
+        // only CompletionResult.stopSequence supplies this argument.
+        XCTAssertEqual(Terminal.applyingMatchedRequestStop(nil, to: observed), .toolBoundary)
+        XCTAssertEqual(Terminal.applyingMatchedRequestStop(nil, to: .eos), .eos)
+        XCTAssertEqual(Terminal.applyingMatchedRequestStop(nil, to: .maxTokens), .maxTokens)
+        XCTAssertNil(Terminal.applyingMatchedRequestStop("done", to: nil))
+    }
+
     func testTerminalMetadataMatchesAndResetClearsIt() throws {
         let oracle = NativeMTPLabNumericalOracle()
         let terminals: [NativeMTPLabNumericalOracle.Terminal] = [.eos, .stopSequence, .maxTokens, .toolBoundary, .other]

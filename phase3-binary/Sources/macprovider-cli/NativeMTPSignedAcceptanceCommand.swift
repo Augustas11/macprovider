@@ -108,19 +108,24 @@ private struct NativeMTPSignedAcceptanceRunner {
                 let actual = try await native.complete(item.request)
                 let delta = NativeMTPStatusDelta(before: before, after: await native.currentSnapshot().nativeMTPStatus)
                 let comparison = oracle.summary()
+                let ordinaryTerminal = NativeMTPLabNumericalOracle.Terminal.applyingMatchedRequestStop(
+                    expected.stopSequence, to: comparison.ordinaryTerminal)
+                let nativeTerminal = NativeMTPLabNumericalOracle.Terminal.applyingMatchedRequestStop(
+                    actual.stopSequence, to: comparison.nativeTerminal)
                 let promptShape = NativeMTPAcceptanceCorpusBuilder.contains(expected.promptTokens, stratum: item.stratum)
                 let path = lastPath(recorder, item.id)
                 let admission = item.expectedNative ? path == .nativeMTP && delta.proposedTokens > 0 : path == .ordinary && delta.proposedTokens == 0
                 let outputParity = same(expected, actual)
-                let passed = promptShape && admission && outputParity && comparison.passed && comparison.retainedVectors == 0
+                let passed = promptShape && admission && outputParity && comparison.passed
+                    && ordinaryTerminal == nativeTerminal && comparison.retainedVectors == 0
                 let positionRecords = comparison.positions.map(Self.acceptancePositionDocument)
                 records.append([
                     "id": item.id, "stratum": item.stratum.rawValue,
                     "expected_native": item.expectedNative, "passed": passed,
                     "prompt_tokens": expected.promptTokens, "prompt_stratum_passed": promptShape,
                     "admission_passed": admission, "output_parity": outputParity,
-                    "ordinary_terminal": Self.jsonOptional(comparison.ordinaryTerminal?.rawValue),
-                    "native_terminal": Self.jsonOptional(comparison.nativeTerminal?.rawValue),
+                    "ordinary_terminal": Self.jsonOptional(ordinaryTerminal?.rawValue),
+                    "native_terminal": Self.jsonOptional(nativeTerminal?.rawValue),
                     "finish_reason": actual.finishReason,
                     "completion_tokens": actual.completionTokens,
                     "generated_completion_tokens": actual.generatedCompletionTokens,
@@ -145,7 +150,7 @@ private struct NativeMTPSignedAcceptanceRunner {
                     positions += comparison.positions.count
                     accepted += delta.acceptedTokens
                     rejected += delta.rejectedTokens
-                    if let terminal = comparison.nativeTerminal { terminals.insert(terminal.rawValue) }
+                    if let terminal = nativeTerminal { terminals.insert(terminal.rawValue) }
                     toolBoundary = toolBoundary || actual.toolCalls?.isEmpty == false
                     reasoningClose = reasoningClose || (
                         actual.reasoningContent?.isEmpty == false

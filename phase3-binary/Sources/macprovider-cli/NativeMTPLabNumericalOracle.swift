@@ -7,6 +7,14 @@ final class NativeMTPLabNumericalOracle: @unchecked Sendable {
     enum Terminal: String, Equatable, Sendable {
         case eos, stopSequence, maxTokens, toolBoundary, other
 
+        /// The canonical observer also stops reasoning text on caller stops;
+        /// its token count alone cannot distinguish that from a tool boundary.
+        /// Reconcile only with the production finalizer's actual matched stop.
+        static func applyingMatchedRequestStop(_ stopSequence: String?, to terminal: Terminal?) -> Terminal? {
+            guard terminal == .toolBoundary, stopSequence != nil else { return terminal }
+            return .stopSequence
+        }
+
         static func classify(
             status: ContinuousBatchSchedulerTerminalStatus,
             stopCause: ContinuousBatchSchedulerStopCause?, toolBoundaryTokenCount: Int?
