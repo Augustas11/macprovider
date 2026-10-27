@@ -143,7 +143,9 @@ class AdapterTests(unittest.TestCase):
     def test_release_reservation_function_is_byte_identical(self):
         changed = (BASE / "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift").read_text()
         start = "    private func reserveNativeMTPRoundBytes(_ bytes: Int) throws -> NativeMTPRoundByteReservation {"
-        expected_sha256 = '7cd62815b81a6772b8d018c2a71c3efcd56dc3c596289277630e1c4181f4df16'
+        # Integrated release snapshot: refusal logging uses typed intermediate
+        # values so Swift can typecheck it without changing reservation bounds.
+        expected_sha256 = 'b3d66b9e004db86433837b5995623a154c10243816fd4c2447b0cb7fc6f1db2b'
         release = changed[changed.index("    #else\n" + start)+len("    #else\n"):]
         self.assertEqual(hashlib.sha256(release[:release.index("    #endif\n")].encode()).hexdigest(), expected_sha256)
 
