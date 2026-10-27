@@ -30,6 +30,52 @@ private final class RuntimeBridgeChunkRecorder: @unchecked Sendable {
 }
 
 final class PagedKVRuntimeBridgeTests: XCTestCase {
+    func testParityProbeUsesStateAwareWrapperAcross513TokenPrefillAnd48TokenDecode() async throws {
+        try requireMetal()
+        let model = RuntimeBridgeStateOnlyProbeModel()
+        let container = ModelContainer(context: ModelContext(
+            configuration: ModelConfiguration(id: "state-only-probe"), model: model,
+            processor: StandInUserInputProcessor(), tokenizer: RuntimeBridgeFakeTokenizer()))
+        let result = await PagedKVRuntimeParityProbe.runParityProbe(
+            container: container, modelID: "state-only-probe",
+            blockSizeTokens: 32, maxPhysicalBlocks: 64,
+            promptTokens: Array(repeating: 3, count: 513), nNew: 48)
+        XCTAssertTrue(result.established, "stock and real paged gather must match through the wrapper")
+        XCTAssertEqual(result.nNew, 48)
+        XCTAssertEqual(result.nForwards, 49)
+        XCTAssertGreaterThan(result.gatherKernelCalls, 0)
+        XCTAssertGreaterThanOrEqual(result.maxLogicalBlocks, 3)
+        XCTAssertTrue(result.nonIdentityPermutation)
+        let forwards = model.forwards()
+        let expectedWidths = [512] + Array(repeating: 1, count: 48)
+        let expectedPositions: [Int?] = [nil] + (512..<560).map { Optional($0) }
+        let expectedRotaryDeltas = expectedPositions.map { $0.map { $0 + 7 } }
+        for paged in [false, true] {
+            let sequence = forwards.filter { $0.paged == paged }
+            XCTAssertEqual(sequence.map(\.width), expectedWidths)
+            XCTAssertEqual(sequence.map(\.incomingPosition), expectedPositions,
+                           "state from every prefill/decode forward belongs to the same sequence")
+            XCTAssertEqual(sequence.map(\.incomingRotaryDelta), expectedRotaryDeltas,
+                           "array-valued rotary state must survive every forward")
+            XCTAssertEqual(sequence.map(\.sampledToken), (0..<49).map {
+                (512 + $0) % 31
+            })
+        }
+    }
+
+    func testSerialReferenceUsesPrimaryStateAwareWrapperForward() throws {
+        try requireMetal()
+        let model = RuntimeBridgeStateOnlyProbeModel()
+        let reference = try PagedKVRuntimeParityProbe.serialReference(
+            model: model, prompt: Array(repeating: 3, count: 513))
+        XCTAssertEqual(reference.top1, 513 % 31)
+        let forwards = model.forwards()
+        XCTAssertEqual(forwards.count, 1)
+        XCTAssertEqual(forwards.first?.width, 513)
+        XCTAssertNil(forwards.first?.incomingPosition)
+        XCTAssertNil(forwards.first?.incomingRotaryDelta)
+    }
+
     // CPU-only scheduler fixtures change the process-wide default device. Pin
     // this Metal-backed class for each invocation so test order cannot route
     // GPU-only model kernels to the CPU. Explicit CPU scopes below still win.
@@ -7048,5 +7094,63 @@ private final class StepRecorder: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return stored
+    }
+}
+
+/// Deliberately implements only the primary text/state overload. Calling the
+/// optional array overload would hit LanguageModel's fatal default, as Prism did.
+private final class RuntimeBridgeStateOnlyProbeModel: Module, LanguageModel, KVCacheDimensionProvider {
+    struct Forward {
+        let width: Int
+        let incomingPosition: Int?
+        let incomingRotaryDelta: Int?
+        let sampledToken: Int
+        let paged: Bool
+    }
+    let kvHeads = [1]
+    private static let positionKey = LMOutput.Key<Int>("probe.position")
+    private static let rotaryDeltaKey = LMOutput.Key<MLXArray>("probe.rotary_deltas")
+    private let lock = NSLock()
+    private var recordedForwards: [Forward] = []
+
+    func prepare(
+        _ input: LMInput, cache: [KVCache], state: LMOutput.State?, prefill: PrefillParameters
+    ) throws -> PrepareResult { .tokens(input.text) }
+
+    func callAsFunction(_ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?) -> LMOutput {
+        let width = input.tokens.dim(1)
+        let incomingPosition = state?[Self.positionKey]
+        let incomingRotaryDelta = (state?[Self.rotaryDeltaKey]).map { Int($0.item(Int32.self)) }
+        let position = incomingPosition ?? 0
+        let tokens = input.tokens.asArray(Int32.self)
+        let keys = MLXArray(tokens.map(Float.init), [1, 1, width, 1])
+        let values = MLXArray(tokens.map { Float($0 + 100) }, [1, 1, width, 1])
+        for layer in cache ?? [] {
+            eval(attentionWithCacheUpdate(
+                queries: keys, keys: keys, values: values, cache: layer,
+                scale: 1, mask: width > 1 ? .causal : .none))
+        }
+        var logits = Array(repeating: Float(-1_000), count: width * 32)
+        for index in 0..<width {
+            logits[index * 32 + (position + index + 1) % 31] = 1_000
+        }
+        let nextPosition = position + width
+        let sampledToken = nextPosition % 31
+        lock.lock()
+        recordedForwards.append(Forward(
+            width: width, incomingPosition: incomingPosition,
+            incomingRotaryDelta: incomingRotaryDelta, sampledToken: sampledToken,
+            paged: cache?.first is PagedKVCache))
+        lock.unlock()
+        var outputState = LMOutput.State()
+        outputState[Self.positionKey] = nextPosition
+        outputState[Self.rotaryDeltaKey] = MLXArray(Int32(nextPosition + 7))
+        return LMOutput(logits: MLXArray(logits, [1, width, 32]), state: outputState)
+    }
+
+    func forwards() -> [Forward] {
+        lock.lock()
+        defer { lock.unlock() }
+        return recordedForwards
     }
 }
