@@ -4,6 +4,7 @@ import importlib.util
 import json
 from pathlib import Path
 import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -297,6 +298,34 @@ class IntegrationReuseTests(unittest.TestCase):
         with self.assertRaisesRegex(M.SourceEquivalenceError,'not recipe pinned'): self.run_proof()
         self.contract['waiver'] = True; self.repin()
         with self.assertRaisesRegex(M.SourceEquivalenceError,'fields differ'): self.run_proof()
+
+
+class ReviewedReleaseContractSelectionTests(unittest.TestCase):
+    def test_exact_signed_release_uses_colocated_reviewed_contract(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            script = root / 'scripts/native_mtp_source_equivalence.py'
+            script.parent.mkdir()
+            target = root / M.INTEGRATION_CONTRACT_PATH
+            target.parent.mkdir(parents=True)
+            target.write_bytes(b'reviewed contract')
+            with patch.object(M, '__file__', str(script)), patch.object(M, 'git_blob') as historical:
+                self.assertEqual(M._reviewed_contract_blob(root, M.INTEGRATION_REVIEWED_SOURCE,
+                    M.INTEGRATION_CONTRACT_PATH), b'reviewed contract')
+                historical.assert_not_called()
+                historical.return_value = b'git-bound contract'
+                self.assertEqual(M._reviewed_contract_blob(root, 'f' * 40,
+                    M.INTEGRATION_CONTRACT_PATH), b'git-bound contract')
+                historical.assert_called_once_with(root, 'f' * 40, M.INTEGRATION_CONTRACT_PATH)
+
+    def test_exact_release_cannot_select_other_paths_or_missing_contract(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.object(M, '__file__', str(root / 'scripts/verifier.py')):
+                with self.assertRaisesRegex(M.SourceEquivalenceError, 'unexpected reviewed contract path'):
+                    M._reviewed_contract_blob(root, M.INTEGRATION_REVIEWED_SOURCE, 'unreviewed.json')
+                with self.assertRaisesRegex(M.SourceEquivalenceError, 'contract missing or not regular'):
+                    M._reviewed_contract_blob(root, M.INTEGRATION_REVIEWED_SOURCE, M.RECIPE_PATH)
 
 
 if __name__ == '__main__':
