@@ -32,7 +32,7 @@ final class NativeMTPHardwareE2EDeepseekTests: XCTestCase {
                 "--proposal-depth", String(depth),
             ]).proposalDepth, depth)
         }
-        XCTAssertEqual(NativeMTPHardwareE2EFamily.glm5Next.maximumProposalDepth, 1)
+        XCTAssertEqual(NativeMTPHardwareE2EFamily.glm5Next.maximumProposalDepth, 2)
         XCTAssertEqual(NativeMTPHardwareE2EFamily.qwen35.maximumProposalDepth, 1)
     }
 
