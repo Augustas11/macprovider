@@ -9859,16 +9859,18 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         request: request,
                         admission: nativeMTPAdmission
                     )
-                    let lease = conversationCacheAllowed
-                        ? await conversationCache.begin(
-                            conversationKey: request.conversationKey,
-                            incomingTokens: promptTokenIds,
-                            modelID: request.model,
-                            kvBits: kvBitsOverride,
-                            cold: coldContext,
-                            fleetGrant: request.fleetCacheGrant
-                        )
-                        : nil
+                    let lease = Self.serialPromptSnapshotLease(
+                        conversationCacheAllowed
+                            ? await conversationCache.begin(
+                                conversationKey: request.conversationKey,
+                                incomingTokens: promptTokenIds,
+                                modelID: request.model,
+                                kvBits: kvBitsOverride,
+                                cold: coldContext,
+                                fleetGrant: request.fleetCacheGrant
+                            )
+                            : nil,
+                        model: context.model, prefillStepSize: prefillStepSize)
                     if let labConversationCacheObserver {
                         labConversationCacheObserver.record(NativeMTPLabConversationCacheObserver.event(
                             requestID: request.requestID,
@@ -10820,16 +10822,18 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         request: request,
                         admission: nativeMTPAdmission
                     )
-                    let lease = conversationCacheAllowed
-                        ? await conversationCache.begin(
-                            conversationKey: request.conversationKey,
-                            incomingTokens: promptTokenIds,
-                            modelID: request.model,
-                            kvBits: kvBitsOverride,
-                            cold: coldContext,
-                            fleetGrant: request.fleetCacheGrant
-                        )
-                        : nil
+                    let lease = Self.serialPromptSnapshotLease(
+                        conversationCacheAllowed
+                            ? await conversationCache.begin(
+                                conversationKey: request.conversationKey,
+                                incomingTokens: promptTokenIds,
+                                modelID: request.model,
+                                kvBits: kvBitsOverride,
+                                cold: coldContext,
+                                fleetGrant: request.fleetCacheGrant
+                            )
+                            : nil,
+                        model: context.model, prefillStepSize: prefillStepSize)
                     if let labConversationCacheObserver {
                         labConversationCacheObserver.record(NativeMTPLabConversationCacheObserver.event(
                             requestID: request.requestID,
@@ -13771,6 +13775,49 @@ maxTokens: maxTokens,
         return nil
     }
 
+    /// GLM serial serving keeps the keyless iterator's whole-stride prefill
+    /// and final multi-token forward. CB retains its separate role-marker plan.
+    nonisolated static func glm5NextSerialSnapshotStepSize(
+        model: any LanguageModel, prefillStepSize: Int
+    ) -> Int? {
+        guard model is GLM5NextModel || model is GLM5NextTextModel else { return nil }
+        return max(1, prefillStepSize)
+    }
+
+    nonisolated static func serialConversationPromptSnapshotPolicy(
+        model: any LanguageModel,
+        tokenizer: any MLXLMCommon.Tokenizer,
+        prefillStepSize: Int = 512,
+        modelID: String? = nil
+    ) -> ConversationPromptSnapshotPolicy? {
+        if let step = glm5NextSerialSnapshotStepSize(model: model, prefillStepSize: prefillStepSize) {
+            return .referencePlanBoundary(step: step)
+        }
+        return conversationPromptSnapshotPolicy(
+            model: model, tokenizer: tokenizer, prefillStepSize: prefillStepSize, modelID: modelID)
+    }
+
+    /// A CB marker snapshot can land on the serial grid while still having
+    /// reached it through different forwards. Reject its plan as well as an
+    /// off-grid legacy snapshot before any layers are installed. Keep the
+    /// acquired turn and its purge/grant fences; this request simply misses.
+    nonisolated static func serialPromptSnapshotLease(
+        _ lease: ConversationCacheLease?, model: any LanguageModel, prefillStepSize: Int
+    ) -> ConversationCacheLease? {
+        guard let lease, let reusable = lease.reusableCache,
+              let step = glm5NextSerialSnapshotStepSize(model: model, prefillStepSize: prefillStepSize),
+              reusable.resumeBoundaryPlan || lease.lcp % step != 0
+        else { return lease }
+        return ConversationCacheLease(
+            key: lease.key, keyHash: lease.keyHash, incomingTokens: lease.incomingTokens,
+            modelID: lease.modelID, kvBits: lease.kvBits,
+            reusableCache: nil, cachedPromptTokens: 0, lcp: 0, trimBy: 0,
+            sampledPurgeGeneration: lease.sampledPurgeGeneration,
+            localPurgeStamp: lease.localPurgeStamp, globalPurgeStamp: lease.globalPurgeStamp,
+            fleetGrant: lease.fleetGrant
+        )
+    }
+
     /// The snapshot length for `promptTokenIds`, or nil when it would be below
     /// the reuse threshold. Always `< promptTokenIds.count`.
     nonisolated static func conversationPromptSnapshotTokenCount(
@@ -13835,7 +13882,7 @@ maxTokens: maxTokens,
     ) throws -> SerialPromptSnapshot {
         let none = SerialPromptSnapshot(applies: false, layers: nil, tokenCount: 0, resumeAt: nil, state: state)
         guard lease != nil,
-              let policy = conversationPromptSnapshotPolicy(
+              let policy = serialConversationPromptSnapshotPolicy(
                 model: context.model, tokenizer: context.tokenizer, prefillStepSize: prefillStepSize, modelID: modelID)
         else { return none }
         let skipped = SerialPromptSnapshot(applies: true, layers: nil, tokenCount: 0, resumeAt: nil, state: state)
@@ -13884,8 +13931,9 @@ maxTokens: maxTokens,
         state: LMOutput.State? = nil,
         isCancelled: () -> Bool = { Task.isCancelled }
     ) throws -> (checkpoints: [RecurrentStateCheckpoint], resumeAt: Int?, state: LMOutput.State?) {
-        // Role checkpoints must not split the cold Qwen legacy prefill chunks.
-        guard qwen35SerialPromptSnapshotStepSize(model: context.model, modelID: modelID, prefillStepSize: prefillStepSize) == nil,
+        // Role checkpoints must not split the cold Qwen or GLM serial prefill chunks.
+        guard glm5NextSerialSnapshotStepSize(model: context.model, prefillStepSize: prefillStepSize) == nil,
+              qwen35SerialPromptSnapshotStepSize(model: context.model, modelID: modelID, prefillStepSize: prefillStepSize) == nil,
               let lease else { return ([], nil, state) }
         let positions = ConversationCache.recurrentCheckpointPositions(
             promptTokenIds: promptTokenIds,

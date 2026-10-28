@@ -471,13 +471,133 @@ final class ConversationPromptSnapshotTests: XCTestCase {
 
     func testGLM5NextSnapshotPolicyNeedsRoundTrippingRoleTokens() throws {
         try Self.requireMetal()
-        let tokenizer = MarkerTokenizer()
-        let glm = try Self.tinyGLM()
-        XCTAssertEqual(ModelRuntime.conversationPromptSnapshotPolicy(model: glm, tokenizer: tokenizer),
-                       .lastRoleMarker(tokenIDs: Set(MarkerTokenizer.markers.values.map(Int32.init)),
-                                       resumeTokenID: 61))
-        XCTAssertNil(ModelRuntime.conversationPromptSnapshotPolicy(model: glm, tokenizer: NoMarkerTokenizer()),
-                     "a tokenizer without the role tokens gets no policy")
+        try Device.withDefaultDevice(.gpu) {
+            let tokenizer = MarkerTokenizer()
+            let glm = try Self.tinyGLM()
+            XCTAssertEqual(ModelRuntime.conversationPromptSnapshotPolicy(model: glm, tokenizer: tokenizer),
+                           .lastRoleMarker(tokenIDs: Set(MarkerTokenizer.markers.values.map(Int32.init)),
+                                           resumeTokenID: 61))
+            XCTAssertNil(ModelRuntime.conversationPromptSnapshotPolicy(model: glm, tokenizer: NoMarkerTokenizer()),
+                         "a tokenizer without the role tokens gets no policy")
+        }
+    }
+
+    func testGLMSerialGridPolicyDoesNotAlterCBOrOtherFamilyPlans() throws {
+        try Self.requireMetal()
+        try Device.withDefaultDevice(.gpu) {
+            let glm = try Self.tinyGLM()
+            for step in [128, 512, 1024] {
+                XCTAssertEqual(ModelRuntime.serialConversationPromptSnapshotPolicy(
+                    model: glm, tokenizer: NoMarkerTokenizer(), prefillStepSize: step),
+                    .referencePlanBoundary(step: step))
+            }
+            let cbPolicy = ModelRuntime.conversationPromptSnapshotPolicy(model: glm, tokenizer: MarkerTokenizer())
+            XCTAssertEqual(cbPolicy, .lastRoleMarker(
+                tokenIDs: Set(MarkerTokenizer.markers.values.map(Int32.init)), resumeTokenID: 61))
+            XCTAssertEqual(ModelRuntime.continuousBatchPromptSnapshotPolicy(cbPolicy, cachedTurnsAttachable: true),
+                           .resumeMarker(tokenID: 61))
+            let qwen = try Self.tinyQwen35Models()
+            let otherModels: [any LanguageModel] = [qwen.text, qwen.dense, qwen.moe]
+            for model in otherModels {
+                XCTAssertNil(ModelRuntime.glm5NextSerialSnapshotStepSize(model: model, prefillStepSize: 512))
+                XCTAssertEqual(ModelRuntime.serialConversationPromptSnapshotPolicy(
+                    model: model, tokenizer: MarkerTokenizer(), modelID: "qwen/qwen3.5-27b"),
+                    ModelRuntime.conversationPromptSnapshotPolicy(
+                        model: model, tokenizer: MarkerTokenizer(), modelID: "qwen/qwen3.5-27b"))
+            }
+        }
+    }
+
+    func testGLMSerialSnapshotGridPreservesColdForwardShapesAndPositiveReuse() async throws {
+        let cache = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+        for (seedCount, nextCount, expectedHit) in [(985, 1000, 512), (1048, 1060, 1024),
+                                                   (985, 1126, 512), (1024, 1126, 512)] {
+            let key = "conv:glm-grid-\(seedCount)-\(nextCount)"
+            let seed = int32Range(0..<seedCount)
+            let snapshotCount = try XCTUnwrap(ModelRuntime.conversationPromptSnapshotTokenCount(
+                promptTokenIds: seed, policy: .referencePlanBoundary(step: 512)))
+            XCTAssertEqual(snapshotCount, expectedHit)
+            _ = try await seedSnapshot(cache, key: key, tokens: Array(seed.prefix(snapshotCount)))
+            let prompt = int32Range(0..<nextCount)
+            let lease = try Self.unwrap(await cache.begin(
+                conversationKey: key, incomingTokens: prompt, modelID: "model-a", kvBits: nil))
+            XCTAssertEqual(lease.cachedPromptTokens, expectedHit)
+            var cold: [Range<Int>] = []
+            var warm: [Range<Int>] = []
+            let coldCursor = try ModelRuntime.cancellableLocalPrefill(
+                tokenCount: nextCount, from: 0, stepSize: 512, isCancelled: { false }
+            ) { cold.append($0) }
+            let warmCursor = try ModelRuntime.cancellableLocalPrefill(
+                tokenCount: nextCount, from: lease.lcp, stepSize: 512, isCancelled: { false }
+            ) { warm.append($0) }
+            let prefix = stride(from: 0, to: snapshotCount, by: 512).map { $0..<($0 + 512) }
+            XCTAssertEqual(prefix + warm, cold)
+            XCTAssertEqual(coldCursor, warmCursor)
+            XCTAssertEqual(prompt.count - warmCursor, nextCount % 512 == 0 ? 512 : nextCount % 512)
+            await cache.abort(lease)
+        }
+        XCTAssertNil(ModelRuntime.conversationPromptSnapshotTokenCount(
+            promptTokenIds: int32Range(0..<512), policy: .referencePlanBoundary(step: 512)),
+            "an exact first stride stays the unchanged 512-token iterator tail")
+    }
+
+    func testGLMSerialRejectsCBAndOffGridSnapshotsBeforeInstallingLayers() throws {
+        try Self.requireMetal()
+        try Device.withDefaultDevice(.gpu) {
+            let glm = try Self.tinyGLM()
+            func lease(tokens: Int, cbPlan: Bool) -> ConversationCacheLease {
+                ConversationCacheLease(
+                    key: "conv:glm-plan", keyHash: "private-key-hash", incomingTokens: int32Range(0..<1126),
+                    modelID: "glm", kvBits: nil,
+                    reusableCache: ConversationCacheLayers([MambaCache()], promptSnapshot: true,
+                                                           resumeBoundaryPlan: cbPlan),
+                    cachedPromptTokens: tokens, lcp: tokens, trimBy: 0,
+                    sampledPurgeGeneration: 7, localPurgeStamp: 8, globalPurgeStamp: 9,
+                    reusableCanonicalPromptTokens: int32Range(0..<tokens))
+            }
+            for original in [lease(tokens: 983, cbPlan: false), lease(tokens: 1046, cbPlan: false),
+                             lease(tokens: 512, cbPlan: true)] {
+                let miss = try Self.unwrap(ModelRuntime.serialPromptSnapshotLease(
+                    original, model: glm, prefillStepSize: 512))
+                XCTAssertNil(miss.reusableCache)
+                XCTAssertEqual(miss.cachedPromptTokens, 0)
+                XCTAssertEqual(miss.lcp, 0)
+                XCTAssertNil(miss.reusableCanonicalPromptTokens)
+                XCTAssertEqual(miss.key, original.key)
+                XCTAssertEqual(miss.incomingTokens, original.incomingTokens)
+                XCTAssertEqual(miss.sampledPurgeGeneration, 7)
+                XCTAssertEqual(miss.localPurgeStamp, 8)
+                XCTAssertEqual(miss.globalPurgeStamp, 9)
+            }
+            let serial = lease(tokens: 512, cbPlan: false)
+            XCTAssertTrue(ModelRuntime.serialPromptSnapshotLease(serial, model: glm, prefillStepSize: 512) === serial)
+            let qwen = try Self.tinyQwen35Models().dense
+            let unrelated = lease(tokens: 983, cbPlan: true)
+            XCTAssertTrue(ModelRuntime.serialPromptSnapshotLease(unrelated, model: qwen, prefillStepSize: 512) === unrelated)
+            XCTAssertNil(ModelRuntime.serialPromptSnapshotLease(nil, model: glm, prefillStepSize: 512))
+        }
+    }
+
+    func testGLMSerialGridSkipsRoleCheckpointPrefill() async throws {
+        try Self.requireMetal()
+        try await Device.withDefaultDevice(.gpu) {
+            let glm = try Self.tinyGLM()
+            let context = ModelContext(configuration: .init(id: "glm"), model: glm,
+                                       processor: FixtureProcessor(), tokenizer: MarkerTokenizer())
+            let cache = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+            let prompt = Array(repeating: Int32(1), count: 1048)
+            let lease = try Self.unwrap(await cache.begin(
+                conversationKey: "conv:glm-no-role-checkpoint", incomingTokens: prompt, modelID: "glm", kvBits: nil))
+            let layers = try glm.newCache(parameters: nil)
+            let initialLayers = layers.map { $0.copy() }
+            let recurrent = try ModelRuntime.prefillRecurrentCheckpoints(
+                lease: lease, cache: layers, promptTokenIds: prompt, context: context,
+                prefillStepSize: 512, isCancelled: { true })
+            XCTAssertTrue(recurrent.checkpoints.isEmpty)
+            XCTAssertNil(recurrent.resumeAt)
+            Self.assertStatesEqual(layers, initialLayers, "suppressed GLM role checkpoint preserves initial cache state")
+            await cache.abort(lease)
+        }
     }
 
     // MARK: - DeepSeek V4 tiny fixture: resumed == fresh, bit for bit
@@ -486,6 +606,10 @@ final class ConversationPromptSnapshotTests: XCTestCase {
         try Self.requireMetal()
         try await Device.withDefaultDevice(.cpu) {
             let model = try Self.tinyDeepseekV4()
+            XCTAssertNil(ModelRuntime.glm5NextSerialSnapshotStepSize(model: model, prefillStepSize: 512))
+            XCTAssertEqual(ModelRuntime.serialConversationPromptSnapshotPolicy(
+                model: model, tokenizer: NoMarkerTokenizer()),
+                ModelRuntime.conversationPromptSnapshotPolicy(model: model, tokenizer: NoMarkerTokenizer()))
             let context = ModelContext(configuration: .init(id: "deepseek/deepseek-v4-flash"), model: model,
                                        processor: FixtureProcessor(), tokenizer: NoMarkerTokenizer())
             let cache = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
@@ -594,7 +718,7 @@ final class ConversationPromptSnapshotTests: XCTestCase {
     // MARK: - GLM-5-Next tiny model: resumed == fresh greedy tokens
 
     /// GLM-5-Next's linear-attention kernels are GPU-only, so this runs on the
-    /// default (Metal) device of a tiny randomly initialised model.
+    /// explicitly scoped Metal device of a tiny randomly initialised model.
     func testGLM5NextResumedTurnMatchesFreshPrefill() async throws {
         // Also probe beside the test bundle's own executable, where MLX looks.
         let testBundle = Bundle(for: Self.self)
@@ -604,7 +728,7 @@ final class ConversationPromptSnapshotTests: XCTestCase {
         else {
             throw XCTSkip("MLX default metallib is unavailable in this test host")
         }
-        do {
+        try await Device.withDefaultDevice(.gpu) {
             let model = try Self.tinyGLM()
             let tokenizer = MarkerTokenizer()
             let context = ModelContext(configuration: .init(id: "zai-org/glm-5.3-flash"), model: model,
@@ -613,7 +737,7 @@ final class ConversationPromptSnapshotTests: XCTestCase {
             let think: Int32 = 5
             let cache = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
             let key = "conv:glm-two-turn"
-            let systemText: [Int32] = (0..<40).map { Int32(($0 * 7 + 3) % 56) }
+            let systemText: [Int32] = (0..<1026).map { Int32(($0 * 7 + 3) % 56) }
             let userText: [Int32] = (0..<20).map { Int32(($0 * 5 + 1) % 56) }
             var history: [Int32] = [system]
             history += systemText
@@ -626,10 +750,10 @@ final class ConversationPromptSnapshotTests: XCTestCase {
             let work1 = try model.newCache(parameters: nil)
             let snap1 = try ModelRuntime.prefillPromptSnapshot(lease: lease1, cache: work1, promptTokenIds: turn1,
                                                            start: 0, context: context, prefillStepSize: 512)
-            XCTAssertEqual(snap1.tokenCount, history.count)
-            let reply = try Self.greedy(model, input: Array(turn1[history.count...]), cache: work1, count: 4)
+            XCTAssertEqual(snap1.tokenCount, 1024)
+            let reply = try Self.greedy(model, input: Array(turn1[snap1.tokenCount...]), cache: work1, count: 4)
             await cache.commit(lease1, cache: ConversationCacheLayers(try XCTUnwrap(snap1.layers), promptSnapshot: true),
-                               fullTokens: Array(turn1.prefix(history.count)))
+                               fullTokens: Array(turn1.prefix(snap1.tokenCount)))
 
             // Turn 2: the template re-renders the assistant turn after the marker,
             // then a tool result and a new generation prompt.
@@ -643,14 +767,14 @@ final class ConversationPromptSnapshotTests: XCTestCase {
             turn2 += [assistant, think]
             let lease2 = try Self.unwrap(await cache.begin(conversationKey: key, incomingTokens: turn2,
                                                         modelID: "glm", kvBits: nil))
-            XCTAssertEqual(lease2.cachedPromptTokens, history.count)
+            XCTAssertEqual(lease2.cachedPromptTokens, 1024)
             let resumedCache = try XCTUnwrap(lease2.reusableCache).layers
             let snap2 = try ModelRuntime.prefillPromptSnapshot(lease: lease2, cache: resumedCache, promptTokenIds: turn2,
                                                            start: lease2.lcp, context: context, prefillStepSize: 512)
-            XCTAssertEqual(snap2.tokenCount, turn2.count - 2)
+            XCTAssertEqual(snap2.tokenCount, 1024)
             let resumed = try Self.greedy(model, input: Array(turn2[snap2.tokenCount...]), cache: resumedCache, count: 8)
 
-            // Fresh keyed turn 2 (snapshot to its own marker) and a plain full prefill.
+            // Fresh keyed and keyless turns keep identical whole-stride forwards.
             let keyedFreshCache = try model.newCache(parameters: nil)
             let keyedFresh = try ModelRuntime.prefillPromptSnapshot(lease: lease2, cache: keyedFreshCache, promptTokenIds: turn2,
                                                                 start: 0, context: context, prefillStepSize: 512)

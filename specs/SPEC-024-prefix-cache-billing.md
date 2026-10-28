@@ -1,6 +1,6 @@
 # SPEC-024 - Prefix-cache billing and provider-local cache isolation
 
-**Version:** 0.2.15 (2026-10-28, shape-preserving serial prompt snapshots)
+**Version:** 0.2.16 (2026-10-28, GLM serial and continuous-batch snapshot separation)
 **Status:** **Billing arithmetic (§4 ledger / §5 rate card / §6 formula) MOVED to SPEC-005 v0.6** (canonical). SPEC-024 **retains** the `cached_prompt_tokens` **wire field** (§3, a SPEC-002 addendum), the **buyer-visible** mirror field (§8, a SPEC-006 addendum), the fraud model (§7), and the provider-local cache-**isolation** baseline (§11–§16) — none of which SPEC-005 **re-owns** (SPEC-005 §5.3.1 does fold in the §14 coordinator cross-check *gates* as billing-eligibility rules, but SPEC-024 remains their canonical home).
 **Depends on:** SPEC-002 v1.5.2 (coordinator-provider wire), SPEC-004 v0.3.2 (sticky affinity; FR-SR-2 provider-visibility carve-out), SPEC-005 v0.6.10 (billing — the canonical owner of prefix-cache billing arithmetic, formula, ledger columns, and rate-card keys), SPEC-006 v0.9.39 (buyer API; §1.3 conversation-key derivation + survivability (b) carve-out + OpenAI nested usage), SPEC-008 v0.4.1 (Tier-2 trust; §2.2 invariant (b) carve-out permitting the provider-visible derived conversation_key), SPEC-018 v0.2.4 (tool calling)
 
@@ -507,9 +507,19 @@ their positions are:
   (`min(2048, remaining − 1)` chunks from token 0, then the last token alone). A prefill that
   resumes at `S` therefore makes the same forward calls as a fresh prefill of the full prompt,
   and the resumed cache state MUST be bit-identical to the fresh one.
-- **GLM-5-Next:** `S` is the index of the last chat-role marker (`<|system|>`, `<|user|>`,
-  `<|assistant|>`, `<|observation|>`), i.e. the history before the generation prompt
-  `<|assistant|><think>`, which the next turn re-renders unchanged.
+- **GLM-5-Next serial requests:** for configured prefill stride `P`,
+  `S = P · ⌊(N − 1) / P⌋`. Snapshot prefill uses whole `P`-token forwards;
+  the iterator receives the original final remainder of at most `P` tokens,
+  preserving the unkeyed cold forward plan. Role-marker recurrent checkpoints
+  MUST NOT split that plan. A serial request MUST treat an off-grid snapshot
+  or a continuous-batch marker-plan snapshot as a miss before installing its
+  layers, while retaining the acquired conversation's purge and grant fences.
+- **GLM-5-Next continuous-batch requests:** `S` remains the index of the last
+  chat-role marker (`<|system|>`, `<|user|>`, `<|assistant|>`, `<|observation|>`),
+  i.e. the history before the generation prompt `<|assistant|><think>`, which
+  the next turn re-renders unchanged. Serial-grid snapshots MUST NOT be reused
+  as continuous-batch marker-plan snapshots. Native-head snapshot requirements
+  are unchanged.
 - **LFM2 / LFM2 MoE serial requests:** for configured prefill stride `P`,
   `S = P · ⌊(N − 1) / P⌋`. Cold and resumed requests use whole `P`-token
   forwards and reserve the final token for the iterator. Role markers MUST NOT
