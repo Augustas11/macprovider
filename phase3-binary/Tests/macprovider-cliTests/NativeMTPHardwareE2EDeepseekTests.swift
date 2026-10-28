@@ -105,9 +105,15 @@ final class NativeMTPHardwareE2EDeepseekTests: XCTestCase {
             .deletingLastPathComponent().deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("docs/research/spec048-r015/glm53-flash-r015-v2/policy.json")
-        var policy = try NativeMTPBenchPolicy.load(from: policyURL)
-        policy.quantization = "mlx_mxfp4_mxfp8"
-        policy.proposalDepth = 5
+        var fixture = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(contentsOf: policyURL)) as? [String: Any])
+        fixture["quantization"] = "mlx_mxfp4_mxfp8"
+        fixture["proposal_depth"] = 5
+        let fixtureURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString).appendingPathExtension("json")
+        defer { try? FileManager.default.removeItem(at: fixtureURL) }
+        try JSONSerialization.data(withJSONObject: fixture).write(to: fixtureURL)
+        var policy = try NativeMTPBenchPolicy.load(from: fixtureURL)
         XCTAssertNoThrow(try policy.validateFamily(.deepseekV4))
         XCTAssertThrowsError(try policy.validateFamily(.qwen35))
         XCTAssertThrowsError(try policy.validateFamily(.glm5Next))
