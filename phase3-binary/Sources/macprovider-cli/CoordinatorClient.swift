@@ -514,7 +514,7 @@ actor CoordinatorClient {
     typealias InstalledCompatibilityManifest = @Sendable (URL, String) -> CompatibilitySetManifest?
     typealias ReloadHelperFence = @Sendable () throws -> Void
 
-    static let binaryVersion = "1.8.274"
+    static let binaryVersion = "1.8.276"
     private static let keepaliveDebugEnabled = ProcessInfo.processInfo.environment["MACPROVIDER_KEEPALIVE_DEBUG"] == "1"
     private static let admissionCanaryHeartbeatOverridePathEnv = "MACPROVIDER_CANARY_HEARTBEAT_OVERRIDE_PATH"
     private static let admissionCanaryCoordinatorHostEnv = "MACPROVIDER_CANARY_COORDINATOR_HOST"
