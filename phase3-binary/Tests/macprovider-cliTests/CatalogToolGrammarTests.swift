@@ -32,6 +32,7 @@ final class CatalogToolGrammarTests: XCTestCase {
         Family(name: "Gemma-4", template: "chat-templates-2107/gemma-4-26b-a4b-it.jinja", grammar: .gemma4, callStart: "<|tool_call>", callEnd: "<tool_call|>"),
         Family(name: "Qwen3-8B", template: "chat-templates-2107/qwen3-8b.jinja", grammar: .qwen, callStart: "<tool_call>", callEnd: "</tool_call>"),
         Family(name: "Qwen3-Coder", template: "chat-templates-2107/qwen3-coder-30b-a3b-instruct.jinja", grammar: .qwen, callStart: "<tool_call>", callEnd: "</tool_call>"),
+        Family(name: "Qwen3.8-27B official", template: "qwen38-27b-official/chat_template.jinja", grammar: .qwen, callStart: "<tool_call>", callEnd: "</tool_call>"),
     ]
 
     private static let callID = "call_0123456789abcdef"

@@ -1,6 +1,6 @@
 # SPEC-018 — Agentic tool calling (provider-side response synthesis)
 
-**Version:** 0.3.9 (2026-10-27, explicit Bonsai thinking opt-in; Related: #2154)
+**Version:** 0.3.10 (2026-10-27, official Qwen3.8 effort and history compatibility; Related: #2154)
 **Depends on:** SPEC-001 v1.6, SPEC-002 v1.5.5, SPEC-006 v0.9, SPEC-008 (Pillar A model-hash trust layer — referenced by §10a), SPEC-011 v0.5 (warm-swap heartbeat `model_hash` — referenced by §10a), SPEC-015 v0.4 (receipts canonical output binding — see AC-17 and §N.5)
 **Status:** **LOCKED** at v0.2.10 by the streaming cleanup-rewrite byte-domain clarification. Previously LOCKED at v0.2.9 by the serial-turn `parallel_tool_calls` amendment (omitted/`false` stop after the first complete valid tool). Previously LOCKED at v0.2.8 by the #1594 OpenRouter-aligned AC-53 amendment (no independent messages[] count cap). Previously LOCKED at v0.2.7 by the Qwen3-Coder function-XML tool-call grammar amendment (documents the `<function=…><parameter=…>` XML body that Qwen3-Coder emits as a Qwen-row §3.1 body-grammar alternative, with OpenAI/MCP name charset; pending IMPL/conformance already landed on branch `fix/qwen3coder-toolcall-parse`); previously LOCKED at v0.2.6 by #784 C2b admission-timeout reconciliation — v0.2.4 spec PR #202 and IMPL PR #209 both landed (multi-turn acceptance, token-incremental streaming, `tool_call_id` validation, 1 MiB/2 MiB byte caps). v0.2.5 adds gpt-oss/OpenAI Harmony response parsing as a pending implementation/conformance gap. codex 4-lane r4 0/0/0; Claude blind-spot r2 0/0/0. SPEC-019 already depends on this as "LOCKED". The former "LOCK CANDIDATE pending PR" line was never flipped after merge. (Resolved gap, 2026-07-14, runbook item 15: AC-45's `X-MacProvider-Streaming-Mode` header — set by the coordinator on streaming `200` responses — was stripped by the public gateway's blanket `X-MacProvider-*` filter, making the "header absent" fail condition live on `api.malibu.tech`. Fixed by adding the header to the SPEC-006 v0.9.9 § 5.4 response-pass-through allowlist and un-stripping it at the gateway, validated against AC-45's closed enum. Chosen over scoping AC-45 to the coordinator surface because buyers hit the gateway, so scoping would have left AC-45's buyer-visible promise unmet. AC-45's normative text is unchanged; this is a documentation reconciliation, not a lock amendment. Residual: the coordinator currently emits the diagnostic only on the streaming success path — non-streaming AC-45 emission is a separate coordinator-side completeness item, out of scope for the gateway-strip fix.)
 
@@ -1004,8 +1004,12 @@ The v0.3.0 pass-through rule is **AMENDED v0.3.5 (Amendment 11)**: for the
 loaded GLM-5.3, gpt-oss and Qwen3.8 families, `none` and `minimal` MUST render
 as `low`, the lowest effort those templates support. GLM-5.3 accepts `low` and
 `high` (anything else renders `max`); gpt-oss supports `low`/`medium`/`high`;
-Qwen3.8 supports `low`/`medium`/`xhigh`. No other value is remapped, and an
-unknown family retains pass-through. The loaded model identity takes precedence
+Qwen3.8 supports `low`/`medium`/`xhigh`. **v0.3.10:** for the exact loaded
+Qwen3.8-27B identities (`qwen/qwen3.8-27b`, `qwen3.8-27b`, and
+`mlx-community/qwen3.8-27b-4bit`, case-insensitive), `high` and `max` MUST
+render as `xhigh`, the vendor template's highest supported level. Other
+identities retain their existing mapping; matching a namespace or a distill
+lookalike does not grant this mapping. An unknown family retains pass-through. The loaded model identity takes precedence
 over a buyer alias. DeepSeek-V4 retains its encoder mapping below, including
 `none` selecting chat mode. Qwen thinking-toggle families (including Qwen3.8),
 GLM-4.5, Nemotron-3 and Gemma-4 keep `enable_thinking: false`; templates that
@@ -1039,8 +1043,12 @@ it: the DeepSeek-V4 encoder (which keeps it for turns after the last user
 message, or every turn when tools are declared) and the GLM-5.3 template
 (which renders it as `<think>…</think>`; turns without it keep
 `<think></think>`). A GLM request without history reasoning keeps the
-structured chat input, so its prompt is unchanged. Other families ignore the
-field. It is prompt text, billed in `prompt_tokens` like any other.
+structured chat input, so its prompt is unchanged. **v0.3.10:** the exact
+loaded Qwen3.8-27B identities listed above MUST also preserve supplied assistant
+reasoning in the raw message path when using the Qwen grammar. The official
+pinned template consumes `reasoning_content` and applies `preserve_thinking`;
+requests without assistant reasoning retain their existing structured input.
+Other Qwen models and other families retain their existing behavior. It is prompt text, billed in `prompt_tokens` like any other.
 Registers `SPEC-018-R008`.
 
 **DeepSeek-V4 (v0.3.4).** The family ships no Jinja template; the provider

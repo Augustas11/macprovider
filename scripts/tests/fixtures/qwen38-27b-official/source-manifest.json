@@ -1,0 +1,221 @@
+{
+  "source_repo": "Qwen/Qwen3.8-27B",
+  "source_revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+  "license": "Apache-2.0",
+  "source_files": [
+    {
+      "path": ".gitattributes",
+      "size_bytes": 1570,
+      "git_blob_sha1": "52373fe24473b1aa44333d318f578ae6bf04b49b"
+    },
+    {
+      "path": "LICENSE",
+      "size_bytes": 11544,
+      "git_blob_sha1": "f938136e3adacfd92be087f6e113b5d6d97f678f"
+    },
+    {
+      "path": "README.md",
+      "size_bytes": 65012,
+      "git_blob_sha1": "bc8aa0e396cd029c21cd773cca21830d0ded28ec"
+    },
+    {
+      "path": "chat_template.jinja",
+      "size_bytes": 8952,
+      "git_blob_sha1": "c0c686f9c38d70d179fb7b5f5aa7530bc913dda3"
+    },
+    {
+      "path": "config.json",
+      "size_bytes": 4312,
+      "git_blob_sha1": "706cebd746c4b6f2b1d1f892630867acfdfd3df8"
+    },
+    {
+      "path": "crc32.txt",
+      "size_bytes": 238,
+      "git_blob_sha1": "6de5ee6a0c6596744baee911af0a5cdcb8d99a1e"
+    },
+    {
+      "path": "generation_config.json",
+      "size_bytes": 202,
+      "git_blob_sha1": "023756cfadf88e5bf69eefeee3e172f38c448d64"
+    },
+    {
+      "path": "merges.txt",
+      "size_bytes": 3353259,
+      "git_blob_sha1": "a494e019ca1502219fd0128658b979e5f05ae8e8"
+    },
+    {
+      "path": "model-00001-of-00018.safetensors",
+      "size_bytes": 3966730552,
+      "sha256": "ba0ce20aae489ad196733da5064bcdf159a1fe84f53336648196e1ebb7751b1c"
+    },
+    {
+      "path": "model-00002-of-00018.safetensors",
+      "size_bytes": 3043080328,
+      "sha256": "06a148c01bfbe3faa14a5f184a7ff29a706f7ae1c8b2705d2058e26d17a001fb"
+    },
+    {
+      "path": "model-00003-of-00018.safetensors",
+      "size_bytes": 2542796952,
+      "sha256": "2e1bf62cbcd406eaa64b60d10353e1f0ef4039d0976e56f05cabe953454f9968"
+    },
+    {
+      "path": "model-00004-of-00018.safetensors",
+      "size_bytes": 3988973152,
+      "sha256": "511e34063187882659753c4d93f3859f93c019fd438d8813071921c81d9a3f1a"
+    },
+    {
+      "path": "model-00005-of-00018.safetensors",
+      "size_bytes": 2099339864,
+      "sha256": "635cb53446dc74f219740fc59e18b774f877b803b9722e289ca62575a6efa701"
+    },
+    {
+      "path": "model-00006-of-00018.safetensors",
+      "size_bytes": 3979553696,
+      "sha256": "0bc5214fac607f0e6cc92eec3789d4b8559410ef9fce66621ba8158e8410dae0"
+    },
+    {
+      "path": "model-00007-of-00018.safetensors",
+      "size_bytes": 2108759344,
+      "sha256": "80b0c49033e9a0d5762562aa12f4acdb7f54da586f3d0110f28c48d91cf07892"
+    },
+    {
+      "path": "model-00008-of-00018.safetensors",
+      "size_bytes": 3979553696,
+      "sha256": "7192c5b66185d3592927daabee1cc19e6f6e0ce75988ee20e824b624765fda79"
+    },
+    {
+      "path": "model-00009-of-00018.safetensors",
+      "size_bytes": 2108759344,
+      "sha256": "af3c48cc37af44f3db6ae0579baf019180d48d9c527caa0a1f03ff85813a56d8"
+    },
+    {
+      "path": "model-00010-of-00018.safetensors",
+      "size_bytes": 3979553696,
+      "sha256": "163490a76f3bea3a40855b7efc04ce6d27afaf1a34f0bbde495b9491f76457c9"
+    },
+    {
+      "path": "model-00011-of-00018.safetensors",
+      "size_bytes": 2108759344,
+      "sha256": "5f3ae1b948aeee39da77aec558e8236cd65fe4d7cb7686a76bb007acc563c6d8"
+    },
+    {
+      "path": "model-00012-of-00018.safetensors",
+      "size_bytes": 3979553696,
+      "sha256": "a3de1c7114677a8f5ac5c4892c90e8238ea5c1e2038c80e757dfc87c3902ca55"
+    },
+    {
+      "path": "model-00013-of-00018.safetensors",
+      "size_bytes": 2108759344,
+      "sha256": "06ab79a41f74c9c5cb734816feb0c7fc364104b227165ee7391231e1155aa02a"
+    },
+    {
+      "path": "model-00014-of-00018.safetensors",
+      "size_bytes": 3979553696,
+      "sha256": "4138ed94603065ba884bbcadedb04d7718bb40117e85e6f5c6fc5b9c05b7a85b"
+    },
+    {
+      "path": "model-00015-of-00018.safetensors",
+      "size_bytes": 2108759344,
+      "sha256": "69224e27b9de4e7dbf6fc936c6eaae08447bda3b80a6c31a871ab451173afd22"
+    },
+    {
+      "path": "model-00016-of-00018.safetensors",
+      "size_bytes": 3979564040,
+      "sha256": "73cb9a1089fb6155cb648609478d6633be8a5c7d9ca5a05bc8925ce8a553cefe"
+    },
+    {
+      "path": "model-00017-of-00018.safetensors",
+      "size_bytes": 2108759344,
+      "sha256": "beb51f01056142ac4984bd800507b0dd0fd18de57f8e9ef6ea41d1a3598983a8"
+    },
+    {
+      "path": "model-00018-of-00018.safetensors",
+      "size_bytes": 3392197344,
+      "sha256": "1d3479509e21494658f9b64d317f5ea8e55c4025d28c702d6c4d0b356ce8ea06"
+    },
+    {
+      "path": "model.safetensors.index.json",
+      "size_bytes": 112216,
+      "git_blob_sha1": "da35e3c564457dface7d138f0b6cac284ff8958c"
+    },
+    {
+      "path": "preprocessor_config.json",
+      "size_bytes": 390,
+      "git_blob_sha1": "2ea84a437d448ff71b08df68fdd949d5cc4ebb64"
+    },
+    {
+      "path": "tokenizer.json",
+      "size_bytes": 12809320,
+      "sha256": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3"
+    },
+    {
+      "path": "tokenizer_config.json",
+      "size_bytes": 17928,
+      "git_blob_sha1": "5de744b3fca2129d7186979ae47c06be33903243"
+    },
+    {
+      "path": "video_preprocessor_config.json",
+      "size_bytes": 385,
+      "git_blob_sha1": "3ba673a5ad7d4d13f54155ecd38b2a94a6dac8fe"
+    },
+    {
+      "path": "vocab.json",
+      "size_bytes": 6722759,
+      "git_blob_sha1": "0aa0ce0658d60ac4a5d609f4eadb0e8e43514176"
+    }
+  ],
+  "source_total_bytes": 55586114863,
+  "source_weight_file_bytes": 55563006776,
+  "source_tensor_bytes": 55562855904,
+  "mtp_tensors": [
+    "mtp.fc.weight",
+    "mtp.layers.0.input_layernorm.weight",
+    "mtp.layers.0.mlp.down_proj.weight",
+    "mtp.layers.0.mlp.gate_proj.weight",
+    "mtp.layers.0.mlp.up_proj.weight",
+    "mtp.layers.0.post_attention_layernorm.weight",
+    "mtp.layers.0.self_attn.k_norm.weight",
+    "mtp.layers.0.self_attn.k_proj.weight",
+    "mtp.layers.0.self_attn.o_proj.weight",
+    "mtp.layers.0.self_attn.q_norm.weight",
+    "mtp.layers.0.self_attn.q_proj.weight",
+    "mtp.layers.0.self_attn.v_proj.weight",
+    "mtp.norm.weight",
+    "mtp.pre_fc_norm_embedding.weight",
+    "mtp.pre_fc_norm_hidden.weight"
+  ],
+  "conversion": {
+    "package": "mlx-vlm",
+    "version": "0.7.10",
+    "repository": "Blaizzy/mlx-vlm",
+    "commit": "8c061ef516e7f8b584c0d5b64f26b50d5806303b",
+    "mlx": "0.32.4",
+    "bits": 4,
+    "group_size": 64,
+    "mode": "affine",
+    "mtp": "separate_artifact",
+    "output_artifact_sha256": null,
+    "output_size_bytes": null,
+    "min_ram_gb": null,
+    "status": "pending_hardware_conversion_existing_artifact_dropped_mtp"
+  },
+  "fixture_sha256": {
+    "LICENSE": "bbedc3fda3305820b977265f01b8619d87570a6739de3a5582c3464840f1e57a",
+    "config.json": "191e0af232104ed8b65258cf3fb2b842e288008baca7633c11b82a1ac7203aab",
+    "chat_template.jinja": "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041",
+    "model.safetensors.index.json": "77042094076611b69791a610065f28b7013b8c621795fa86ddccc8bac7d1b9df"
+  },
+  "existing_catalog_conversion": {
+    "repository": "mlx-community/Qwen3.8-27B-4bit",
+    "revision": "10c35caafbb80f7dc6a7a432cdd11af10a6d4818",
+    "base_model": "Qwen/Qwen3.8-27B",
+    "converter": "mlx-vlm 0.6.8",
+    "size_bytes": 16081490933,
+    "snapshot_sha256": "8a8786e902127e9175f5be0d7c8bcf4dd32323a0521e4d9a20761608a07a6d05",
+    "index_sha256": "13b840162b4cb35c66fef7df072f7dbb4717908204364f5e5d9f9655a2758fa8",
+    "indexed_tensor_count": 2180,
+    "mtp_or_nextn_tensor_count": 0,
+    "separate_drafter_in_repository_tree": false,
+    "decision": "official BF16 fallback required because existing conversion dropped MTP; community conversions are otherwise reusable"
+  }
+}
