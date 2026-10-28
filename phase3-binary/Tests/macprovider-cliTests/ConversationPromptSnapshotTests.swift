@@ -113,6 +113,81 @@ final class ConversationPromptSnapshotTests: XCTestCase {
 
     // MARK: - Snapshot position
 
+    func testQwen35SnapshotPolicyRequiresTheLoadedDenseIdentityAndWrapper() throws {
+        try Self.requireMetal()
+        let models = try Self.tinyQwen35Models()
+        for step in [128, 512, 1024] {
+            XCTAssertEqual(ModelRuntime.conversationPromptSnapshotPolicy(
+                model: models.dense, tokenizer: NoMarkerTokenizer(), prefillStepSize: step,
+                modelID: "qwen/qwen3.5-27b"), .referencePlanBoundary(step: step))
+        }
+        let excludedIDs: [String?] = [nil, "qwen/qwen3.6-27b", "qwen/qwen3.5-35b-a3b"]
+        for id in excludedIDs {
+            XCTAssertNil(ModelRuntime.conversationPromptSnapshotPolicy(
+                model: models.dense, tokenizer: NoMarkerTokenizer(), modelID: id))
+        }
+        let excludedModels: [any LanguageModel] = [models.text, models.moe]
+        for model in excludedModels {
+            XCTAssertNil(ModelRuntime.qwen35SerialPromptSnapshotStepSize(
+                model: model, modelID: "qwen/qwen3.5-27b", prefillStepSize: 512))
+        }
+
+    }
+
+    func testQwen35PositiveSnapshotHitKeepsTheNoKeyLegacyTail() async throws {
+        let cache = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+        let seedPrompt = int32Range(0..<993)
+        let boundary = try XCTUnwrap(ModelRuntime.conversationPromptSnapshotTokenCount(
+            promptTokenIds: seedPrompt, policy: .referencePlanBoundary(step: 512)))
+        XCTAssertEqual(boundary, 512, "the role checkpoint at 986 must not split a legacy chunk")
+        _ = try await seedSnapshot(cache, key: "conv:qwen-legacy", tokens: Array(seedPrompt.prefix(boundary)))
+        let extensionPrompt = int32Range(0..<989) + int32Range(2000..<2027)
+        let lease = try Self.unwrap(await cache.begin(
+            conversationKey: "conv:qwen-legacy", incomingTokens: extensionPrompt, modelID: "model-a", kvBits: nil))
+        XCTAssertNotNil(lease.reusableCache)
+        XCTAssertEqual(lease.cachedPromptTokens, 512)
+        var coldChunks: [Range<Int>] = []
+        var warmChunks: [Range<Int>] = []
+        let coldCursor = try ModelRuntime.cancellableLocalPrefill(
+            tokenCount: extensionPrompt.count, from: 0, stepSize: 512, isCancelled: { false }
+        ) { coldChunks.append($0) }
+        let warmCursor = try ModelRuntime.cancellableLocalPrefill(
+            tokenCount: extensionPrompt.count, from: lease.lcp, stepSize: 512, isCancelled: { false }
+        ) { warmChunks.append($0) }
+        XCTAssertEqual(coldChunks, [0..<512])
+        XCTAssertTrue(warmChunks.isEmpty)
+        XCTAssertEqual(coldCursor, warmCursor)
+        XCTAssertEqual(extensionPrompt.count - warmCursor, 504,
+                       "both iterators receive the original 504-token tail, not 503 + 1")
+        await cache.abort(lease)
+    }
+
+    func testQwen35SnapshotsSkipRolePrefillAndDoNotPrefillWithoutAKey() async throws {
+        try Self.requireMetal()
+        let model = try Self.tinyQwen35Models().dense
+        let context = ModelContext(configuration: .init(id: "qwen/qwen3.5-27b"), model: model,
+                                   processor: FixtureProcessor(), tokenizer: NoMarkerTokenizer())
+        let cache = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+        var prompt = Array(repeating: Int32(1), count: 1016)
+        prompt[986] = 0 // NoMarkerTokenizer's role marker.
+        let lease = try Self.unwrap(await cache.begin(
+            conversationKey: "conv:qwen-no-role-prefill", incomingTokens: prompt, modelID: "qwen/qwen3.5-27b", kvBits: nil))
+        let layers: [KVCache] = [MambaCache()]
+        let recurrent = try ModelRuntime.prefillRecurrentCheckpoints(
+            lease: lease, cache: layers, promptTokenIds: prompt, context: context,
+            prefillStepSize: 512, modelID: "qwen/qwen3.5-27b", isCancelled: { true })
+        XCTAssertTrue(recurrent.checkpoints.isEmpty)
+        XCTAssertNil(recurrent.resumeAt)
+        let noKey = try ModelRuntime.prefillPromptSnapshot(
+            lease: nil, cache: layers, promptTokenIds: prompt, start: 0, context: context,
+            prefillStepSize: 512, modelID: "qwen/qwen3.5-27b", isCancelled: { true })
+        XCTAssertFalse(noKey.applies)
+        XCTAssertNil(noKey.resumeAt)
+        XCTAssertTrue(layers[0].state.isEmpty)
+        await cache.abort(lease)
+    }
+
+
     func testReferencePlanBoundaryIsTheLastWholeStepBeforeTheFinalToken() {
         let policy = ModelRuntime.ConversationPromptSnapshotPolicy.referencePlanBoundary(step: 2048)
         func count(_ n: Int) -> Int? {
@@ -503,6 +578,24 @@ final class ConversationPromptSnapshotTests: XCTestCase {
                                              promptSnapshot: true)
         await cache.commit(seed, cache: layers, fullTokens: tokens)
         return layers
+    }
+
+    private static func tinyQwen35Models() throws -> (
+        text: Qwen35TextModel, dense: Qwen35Model, moe: Qwen35MoEModel
+    ) {
+        let data = Data("""
+        {"model_type":"qwen3_5","hidden_size":16,"num_hidden_layers":2,
+         "intermediate_size":32,"num_attention_heads":2,"num_key_value_heads":1,
+         "head_dim":8,"linear_num_value_heads":2,"linear_num_key_heads":1,
+         "linear_key_head_dim":32,"linear_value_head_dim":32,"linear_conv_kernel_dim":2,
+         "rms_norm_eps":0.000001,"vocab_size":32,"max_position_embeddings":4096,
+         "tie_word_embeddings":false,"attention_bias":false,"full_attention_interval":2,
+         "rope_parameters":{"type":"default","rope_theta":100000.0,"partial_rotary_factor":0.25}}
+        """.utf8)
+        let decoder = JSONDecoder()
+        let wrapper = try decoder.decode(Qwen35Configuration.self, from: data)
+        return (Qwen35TextModel(try decoder.decode(Qwen35TextConfiguration.self, from: data)),
+                Qwen35Model(wrapper), Qwen35MoEModel(wrapper))
     }
 
     private func int32Range(_ range: Range<Int>) -> [Int32] { range.map(Int32.init) }

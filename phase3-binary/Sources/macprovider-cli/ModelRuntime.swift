@@ -9870,6 +9870,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             let recurrent = try Self.prefillRecurrentCheckpoints(
                                 lease: lease, cache: kvCache, promptTokenIds: promptTokenIds,
                                 context: generationContext, prefillStepSize: prefillStepSize,
+                                modelID: snapshot.modelID,
                                 isCancelled: { Task.isCancelled || shouldCancel() })
                             if let resumeAt = recurrent.resumeAt {
                                 iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[resumeAt...])))
@@ -9879,6 +9880,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                 lease: lease, cache: kvCache, promptTokenIds: promptTokenIds,
                                 start: promptTokenIds.count - iteratorInput.text.tokens.size,
                                 context: generationContext, prefillStepSize: prefillStepSize,
+                                modelID: snapshot.modelID,
                                 isCancelled: { Task.isCancelled || shouldCancel() })
                             if let resumeAt = promptSnapshot.resumeAt {
                                 iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[resumeAt...])))
@@ -10823,6 +10825,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         let recurrent = try Self.prefillRecurrentCheckpoints(
                             lease: lease, cache: kvCache, promptTokenIds: promptTokenIds,
                             context: generationContext, prefillStepSize: prefillStepSize,
+                            modelID: snapshot.modelID,
                             isCancelled: { Task.isCancelled || shouldCancel() })
                         if let resumeAt = recurrent.resumeAt {
                             iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[resumeAt...])))
@@ -10832,6 +10835,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             lease: lease, cache: kvCache, promptTokenIds: promptTokenIds,
                             start: promptTokenIds.count - iteratorInput.text.tokens.size,
                             context: generationContext, prefillStepSize: prefillStepSize,
+                            modelID: snapshot.modelID,
                             isCancelled: { Task.isCancelled || shouldCancel() })
                         if let resumeAt = promptSnapshot.resumeAt {
                             iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[resumeAt...])))
@@ -13680,10 +13684,28 @@ maxTokens: maxTokens,
 
     static let glm5NextRoleMarkers = ["<|system|>", "<|user|>", "<|assistant|>", "<|observation|>"]
 
+    /// Qwen's keyed prefill must not split a cold legacy-remainder chunk at
+    /// a role marker. Snapshot only whole strides, preserving the no-key
+    /// prefill and its final multi-token forward unchanged.
+    nonisolated static func qwen35SerialPromptSnapshotStepSize(
+        model: any LanguageModel,
+        modelID: String?,
+        prefillStepSize: Int
+    ) -> Int? {
+        guard modelID?.lowercased() == "qwen/qwen3.5-27b",
+              model is Qwen35Model, !(model is Qwen35MoEModel) else { return nil }
+        return max(1, prefillStepSize)
+    }
+
     nonisolated static func conversationPromptSnapshotPolicy(
         model: any LanguageModel,
-        tokenizer: any MLXLMCommon.Tokenizer
+        tokenizer: any MLXLMCommon.Tokenizer,
+        prefillStepSize: Int = 512,
+        modelID: String? = nil
     ) -> ConversationPromptSnapshotPolicy? {
+        if let step = qwen35SerialPromptSnapshotStepSize(model: model, modelID: modelID, prefillStepSize: prefillStepSize) {
+            return .referencePlanBoundary(step: step)
+        }
         if model is DeepseekV4Model {
             return .referencePlanBoundary(step: DeepseekV4Model.prefillStepSize)
         }
@@ -13745,11 +13767,13 @@ maxTokens: maxTokens,
         start: Int,
         context: ModelContext,
         prefillStepSize: Int,
+        modelID: String? = nil,
         isCancelled: () -> Bool = { Task.isCancelled }
     ) throws -> SerialPromptSnapshot {
         let none = SerialPromptSnapshot(applies: false, layers: nil, tokenCount: 0, resumeAt: nil)
         guard lease != nil,
-              let policy = conversationPromptSnapshotPolicy(model: context.model, tokenizer: context.tokenizer)
+              let policy = conversationPromptSnapshotPolicy(
+                model: context.model, tokenizer: context.tokenizer, prefillStepSize: prefillStepSize, modelID: modelID)
         else { return none }
         let skipped = SerialPromptSnapshot(applies: true, layers: nil, tokenCount: 0, resumeAt: nil)
         guard let target = conversationPromptSnapshotTokenCount(promptTokenIds: promptTokenIds, policy: policy),
@@ -13792,9 +13816,12 @@ maxTokens: maxTokens,
         promptTokenIds: [Int32],
         context: ModelContext,
         prefillStepSize: Int,
+        modelID: String? = nil,
         isCancelled: () -> Bool = { Task.isCancelled }
     ) throws -> (checkpoints: [RecurrentStateCheckpoint], resumeAt: Int?) {
-        guard let lease else { return ([], nil) }
+        // Role checkpoints must not split the cold Qwen legacy prefill chunks.
+        guard qwen35SerialPromptSnapshotStepSize(model: context.model, modelID: modelID, prefillStepSize: prefillStepSize) == nil,
+              let lease else { return ([], nil) }
         let positions = ConversationCache.recurrentCheckpointPositions(
             promptTokenIds: promptTokenIds,
             imStartTokenID: context.tokenizer.convertTokenToId("<|im_start|>").map(Int32.init),
