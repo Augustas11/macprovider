@@ -2322,6 +2322,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             labNativeMTPNextRound.removeAll()
             #endif
             if activeOperations == 0 {
+                // Cancellation is a barrier, not a terminal backend state.
+                cancelRequested = false
                 lock.unlock()
                 handlesToDiscard.forEach { contiguousCacheBridge?.discardContiguousCache(handle: $0) }
                 continuation.resume()
@@ -2359,6 +2361,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         if cancelRequested && activeOperations == 0 {
             waiters = cancellationWaiters
             cancellationWaiters.removeAll()
+            cancelRequested = false
         } else {
             waiters = []
         }
