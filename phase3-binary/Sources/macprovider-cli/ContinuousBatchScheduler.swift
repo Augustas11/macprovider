@@ -3125,7 +3125,7 @@ actor ContinuousBatchScheduler {
     /// wake directly: it happens only when the timeout task reaches the actor
     /// in the same turn the pump pulls the request into admission, which
     /// cannot be forced from outside the actor.
-    func expireQueueWait(requestID: String) async {
+    func expireQueueWait(requestID: String, atUptimeNanoseconds: UInt64? = nil) async {
         // A timeout task can reach here after `suspendQueueWaitTimeout`
         // cancelled it: cancellation does not unschedule a task that already
         // woke. Do not touch `queueWaitDeadlines` until the request is
@@ -3134,7 +3134,7 @@ actor ContinuousBatchScheduler {
         // deadline, and a `capacityExceeded` bounce would then re-arm with no
         // deadline at all — the unbounded wait this bound exists to remove.
         guard let deadline = queueWaitDeadlines[requestID],
-              DispatchTime.now().uptimeNanoseconds >= deadline,
+              (atUptimeNanoseconds ?? DispatchTime.now().uptimeNanoseconds) >= deadline,
               let index = waiting.firstIndex(where: { $0.id == requestID }) else { return }
         let request = waiting.remove(at: index)
         endQueueWait(requestID: requestID)
