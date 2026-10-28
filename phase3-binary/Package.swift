@@ -17,7 +17,7 @@ let package = Package(
         )
     ],
     dependencies: [
-        // Combined fork tag 3.32.3-macprovider.10.16.1 adds DeepSeek fidelity,
+        // Combined fork tag 3.32.3-macprovider.10.16.2 adds DeepSeek fidelity,
         // embedded DSpark and fused sparse attention from .10.9.3 to main .10.15.1.
         // LFM reference expert order is layered on tag 3.32.3-macprovider.10.15.
         // Fork tag 3.32.3-macprovider.10.15 combines GLM MTP (10.13) and
@@ -46,7 +46,7 @@ let package = Package(
         // compatible per-column attention while retaining row-owned caches.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "69844851a96a9ce5d93d47c40a7576834e3a00dd"
+            revision: "9a1c43f9da82c022cc14b6b8d19c3e3df4b33e1e"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",

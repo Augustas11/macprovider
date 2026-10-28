@@ -454,8 +454,8 @@ final class DeepseekV4ContinuousBatchBackend: ContinuousBatchSchedulerBackend, @
         }
     }
 
-    /// Batch pointwise target work across ragged rows and proposal positions;
-    /// each attention/compressor step retains ordinary serial cache geometry.
+    /// Map bounded ragged proposals through the exact target verifier.
+    /// The current fork uses ordinary decode per position until packed parity is qualified.
     func verifyNativeMTPPackedRound(
         rows inputs: [ContinuousBatchNativeMTPVerifyInput]
     ) async throws -> [NativeMTPVerifiedRow] {

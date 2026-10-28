@@ -43,8 +43,8 @@ EXPECTED_LOCATIONS = {
 # against the SPEC-048 fork table.
 SPEC048_MLX_SWIFT_LM_FORK = "https://github.com/Augustas11/mlx-swift-lm"
 # Combined main GLM/Prism/LFM .10.15.1 and DeepSeek fidelity/DSpark .10.9.3.
-SPEC048_MLX_SWIFT_LM_TAG = "3.32.3-macprovider.10.16.1"
-SPEC048_MLX_SWIFT_LM_REVISION = "69844851a96a9ce5d93d47c40a7576834e3a00dd"
+SPEC048_MLX_SWIFT_LM_TAG = "3.32.3-macprovider.10.16.2"
+SPEC048_MLX_SWIFT_LM_REVISION = "9a1c43f9da82c022cc14b6b8d19c3e3df4b33e1e"
 SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE = "3b339ad6e3b3f44c8121ecff5131c7fd55e075e6"
 SPEC048_MLX_SWIFT_FORK = "https://github.com/Augustas11/mlx-swift"
 SPEC048_MLX_SWIFT_TAG = "0.32.3-macprovider.9"
