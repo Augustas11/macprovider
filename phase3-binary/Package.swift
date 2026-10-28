@@ -17,6 +17,7 @@ let package = Package(
         )
     ],
     dependencies: [
+        // LFM reference expert order is layered on tag 3.32.3-macprovider.10.15.
         // Fork tag 3.32.3-macprovider.10.15 combines GLM MTP (10.13) and
         // Prism schema-2 loading, lazy vision and row-safe masks (10.14), on tag
         // 3.32.3-macprovider.10.5 (c8be0f61, campaign/2111-dsv4-cb), on tag
@@ -43,7 +44,7 @@ let package = Package(
         // compatible per-column attention while retaining row-owned caches.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "3905a1b0499f0f38c0f94a008034a0362b9e3dca"
+            revision: "36d24585f9373c2661f61f5e5b485c8d66c43a2b"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",
