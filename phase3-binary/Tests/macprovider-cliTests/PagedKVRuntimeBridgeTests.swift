@@ -295,6 +295,91 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertFalse(ModelRuntime.pagedKVModelCapabilities(modelID: id, configJSONData: nil).hybridDecoderArchitectureVerified)
     }
 
+    func testLFM25HybridRequiresExactIdentityAndOneSlotTopology() throws {
+        let id = "LiquidAI/LFM2.5-24B-A2B-MLX-4bit"
+        let config = Self.lfm25HybridConfig()
+        func capabilities(
+            _ object: [String: Any],
+            modelID: String = "LiquidAI/LFM2.5-24B-A2B-MLX-4bit"
+        ) throws -> PagedKVRuntimeModelCapabilities {
+            ModelRuntime.pagedKVModelCapabilities(
+                modelID: modelID,
+                configJSONData: try JSONSerialization.data(withJSONObject: object)
+            )
+        }
+
+        let verified = try capabilities(config)
+        XCTAssertEqual(verified.modelFamily, "lfm2")
+        XCTAssertTrue(verified.requiresMoEDispatch)
+        XCTAssertTrue(verified.hybridDecoderArchitectureVerified)
+        XCTAssertTrue(verified.ordinaryHybridOnly)
+        XCTAssertEqual(verified.recurrentStateLayout, .lfm25ShortConvOneSlot)
+        XCTAssertNil(ModelRuntime.nativeMTPAdmissionCacheClass(
+            runtimeCacheClass: "mixed", modelCapabilities: verified
+        ))
+        XCTAssertTrue(ModelRuntime.measuredMixedPagedKVTopology(
+            PagedKVRecurrentStateLayout.lfm25ExpectedCacheKinds,
+            modelCapabilities: verified
+        ))
+
+        var wrongTopology = config
+        wrongTopology["layer_types"] = Array(repeating: "conv", count: 40)
+        XCTAssertFalse(try capabilities(wrongTopology).hybridDecoderArchitectureVerified)
+        XCTAssertFalse(try capabilities(config, modelID: id + "-other").hybridDecoderArchitectureVerified)
+        XCTAssertFalse(try capabilities(config, modelID: "qwen/qwen3.5-35b-a3b").hybridDecoderArchitectureVerified)
+    }
+
+    func testLFM25OneSlotStatePackingSplitsRowsWithoutCrossRowState() throws {
+        try requireMetal()
+        func cache(_ values: [Float]) -> MambaCache {
+            let cache = MambaCache()
+            cache[0] = MLXArray(values, [1, values.count, 1])
+            return cache
+        }
+
+        let first = cache([1, 2])
+        let second = cache([3, 4])
+        let batch = MambaCache()
+        try PagedKVSharedForwardBackend.packMambaRows(
+            [first, second], into: batch, stateLayout: .lfm25ShortConvOneSlot
+        )
+        XCTAssertEqual(batch.state.count, 1)
+        eval(batch.state)
+        XCTAssertEqual(batch.state[0].asArray(Float.self), [1, 2, 3, 4])
+
+        batch.state = [MLXArray([11, 12, 13, 14], [2, 2, 1])]
+        PagedKVSharedForwardBackend.syncMambaRows(
+            from: batch, into: [first, second], stateLayout: .lfm25ShortConvOneSlot
+        )
+        eval(first.state, second.state)
+        XCTAssertEqual(first.state.count, 1)
+        XCTAssertEqual(second.state.count, 1)
+        XCTAssertEqual(first.state[0].asArray(Float.self), [11, 12])
+        XCTAssertEqual(second.state[0].asArray(Float.self), [13, 14])
+
+        let invalid = MambaCache()
+        invalid[0] = MLXArray([1], [1, 1, 1])
+        invalid[1] = MLXArray([2], [1, 1, 1])
+        XCTAssertThrowsError(try PagedKVSharedForwardBackend.packMambaRows(
+            [first, invalid], into: MambaCache(), stateLayout: .lfm25ShortConvOneSlot
+        ))
+    }
+
+    func testQwenMambaPackingRemainsTwoSlotByDefault() throws {
+        try requireMetal()
+        func cache(_ first: Float, _ second: Float) -> MambaCache {
+            let cache = MambaCache()
+            cache[0] = MLXArray([first], [1, 1, 1])
+            cache[1] = MLXArray([second], [1, 1, 1])
+            return cache
+        }
+
+        let batch = MambaCache()
+        try PagedKVSharedForwardBackend.packMambaRows([cache(1, 2), cache(3, 4)], into: batch)
+        XCTAssertEqual(batch.state.count, 2)
+        XCTAssertEqual(PagedKVRecurrentStateLayout.mambaTwoSlot.slotCount, 2)
+    }
+
     func testNativeMTPAdmissionCacheClassCanonicalizesOnlyVerifiedPagedRuntime() {
         let verified = PagedKVRuntimeModelCapabilities(
             modelFamily: "qwen",
@@ -5442,6 +5527,25 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
                     ($0 + 1).isMultiple(of: 4) ? "full_attention" : "linear_attention"
                 },
             ] as [String: Any],
+        ]
+    }
+
+    private static func lfm25HybridConfig() -> [String: Any] {
+        [
+            "model_type": "lfm2_moe",
+            "architectures": ["Lfm2MoeForCausalLM"],
+            "hidden_size": 2048,
+            "num_hidden_layers": 40,
+            "layer_types": (0..<40).map { index in
+                (index - 2).isMultiple(of: 4) ? "full_attention" : "conv"
+            },
+            "conv_L_cache": 3,
+            "conv_bias": false,
+            "num_attention_heads": 32,
+            "num_key_value_heads": 8,
+            "num_dense_layers": 2,
+            "num_experts": 64,
+            "num_experts_per_tok": 4,
         ]
     }
 

@@ -521,6 +521,28 @@ struct RecurrentStateSlotLayout: Equatable, Sendable {
     let dtype: DType
 }
 
+/// The recurrent state shape is an exact model-topology contract, not a
+/// property inferred from whichever Mamba slots happened to be populated.
+/// Qwen-family Mamba layers retain convolution and SSM state; LFM2.5 short
+/// convolution layers retain only their convolution history.
+enum PagedKVRecurrentStateLayout: Equatable, Sendable {
+    case mambaTwoSlot
+    case lfm25ShortConvOneSlot
+
+    var slotCount: Int {
+        switch self {
+        case .mambaTwoSlot: 2
+        case .lfm25ShortConvOneSlot: 1
+        }
+    }
+
+    /// The one-slot LFM2.5 topology ModelRuntime must verify before passing
+    /// `.lfm25ShortConvOneSlot` into this bridge.
+    static let lfm25ExpectedCacheKinds: [PagedKVSharedForwardBackend.CacheKind] = (0..<40).map {
+        ($0 - 2).isMultiple(of: 4) ? .pagedAttention : .recurrentMamba
+    }
+}
+
 struct PagedKVMTPPackedCacheExerciseResult: Equatable {
     let batchOffsetsBeforeUpdate: [Int]
     let hostBatchOffsetsBeforeUpdate: [Int]?
@@ -553,23 +575,26 @@ struct PagedKVMTPPackedCacheResolutionResult: Equatable {
 }
 
 final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unchecked Sendable {
-    /// `MambaCache` holds exactly two slots (conv state, SSM state).
-    static let mambaCacheSlotCount = 2
+    /// Legacy cache codecs serialize Qwen Mamba state as exactly two slots.
+    /// LFM's typed one-slot layout is selected only through
+    /// `recurrentStateLayout` at the ordinary-CB bridge boundary.
+    static let mambaCacheSlotCount = PagedKVRecurrentStateLayout.mambaTwoSlot.slotCount
 
     /// SPEC-038 AC-26: a checkpoint is installable only if it covers exactly the
-    /// model's recurrent layers, each with the `MambaCache` slot count, and every
+    /// model's recurrent layers, each with its verified state-slot count, and every
     /// slot is a single-row (batch 1) floating-point tensor of rank >= 2. All
     /// recurrent layers of one model share one state layout, so every layer
     /// must match the first; a layer that differs is corrupt or from another
     /// model.
     static func recurrentCheckpointLayoutIsValid(
         _ layouts: [Int: [RecurrentStateSlotLayout]],
-        recurrentLayerIndices: [Int]
+        recurrentLayerIndices: [Int],
+        stateLayout: PagedKVRecurrentStateLayout = .mambaTwoSlot
     ) -> Bool {
         guard let first = recurrentLayerIndices.first,
               Set(layouts.keys) == Set(recurrentLayerIndices),
               let reference = layouts[first],
-              reference.count == mambaCacheSlotCount
+              reference.count == stateLayout.slotCount
         else { return false }
         let slotsValid = reference.allSatisfy { slot in
             slot.shape.count >= 2
@@ -709,6 +734,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     private let maxPhysicalBlocks: Int
     private let poolEpoch: Int
     let cacheKinds: [CacheKind]
+    let recurrentStateLayout: PagedKVRecurrentStateLayout
     private let contiguousCacheBridge: (any PagedKVRuntimeCacheBridge)?
     /// When true, lockstep decode reuses a compiled `[B, 1]` graph over batched
     /// contiguous KV. Tests keep the default off so fake models are not traced.
@@ -921,6 +947,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         poolEpoch: Int,
         layerCount: Int,
         cacheKinds: [CacheKind]? = nil,
+        recurrentStateLayout: PagedKVRecurrentStateLayout = .mambaTwoSlot,
         contiguousCacheBridge: (any PagedKVRuntimeCacheBridge)? = nil,
         compiledDecode: Bool = false,
         drafterContainer: MTPDrafterContainer? = nil,
@@ -947,6 +974,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         self.maxPhysicalBlocks = maxPhysicalBlocks
         self.poolEpoch = poolEpoch
         self.cacheKinds = resolvedKinds
+        self.recurrentStateLayout = recurrentStateLayout
         self.contiguousCacheBridge = contiguousCacheBridge
         self.compiledDecode = compiledDecode
     }
@@ -961,6 +989,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         descriptor: PagedKVDescriptor,
         layerCount: Int,
         cacheKinds: [CacheKind]? = nil,
+        recurrentStateLayout: PagedKVRecurrentStateLayout = .mambaTwoSlot,
         contiguousCacheBridge: (any PagedKVRuntimeCacheBridge)? = nil,
         compiledDecode: Bool = false,
         drafterContainer: MTPDrafterContainer? = nil,
@@ -975,6 +1004,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             poolEpoch: descriptor.poolEpoch,
             layerCount: layerCount,
             cacheKinds: cacheKinds,
+            recurrentStateLayout: recurrentStateLayout,
             contiguousCacheBridge: contiguousCacheBridge,
             compiledDecode: compiledDecode,
             drafterContainer: drafterContainer,
@@ -1967,7 +1997,11 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         let layouts = recurrentCheckpoint.states.mapValues { slots in
             slots.map { RecurrentStateSlotLayout(shape: $0.shape, dtype: $0.dtype) }
         }
-        guard Self.recurrentCheckpointLayoutIsValid(layouts, recurrentLayerIndices: recurrentIndices) else {
+        guard Self.recurrentCheckpointLayoutIsValid(
+            layouts,
+            recurrentLayerIndices: recurrentIndices,
+            stateLayout: recurrentStateLayout
+        ) else {
             throw unavailable
         }
         var attention = handoff.caches.makeIterator()
@@ -4416,7 +4450,9 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     ) throws -> [PagedKVSharedLayerBatch] {
         guard let layerCount = rowCaches.first?.count,
               rowCaches.allSatisfy({ $0.count == layerCount }),
-              layerCount == cacheKinds.count
+              layerCount == cacheKinds.count,
+              recurrentStateLayout != .lfm25ShortConvOneSlot
+                || cacheKinds == PagedKVRecurrentStateLayout.lfm25ExpectedCacheKinds
         else {
             throw ContinuousBatchSchedulerError.unsupported("continuous_batching_invalid_cache_layout")
         }
@@ -4473,11 +4509,11 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 }
                 guard nativeMTP else {
                     let cache = MambaCache()
-                    try Self.packMambaRows(rows, into: cache)
+                    try Self.packMambaRows(rows, into: cache, stateLayout: recurrentStateLayout)
                     return PagedKVSharedLayerBatch(
                         cache: cache,
                         validateBatchStateClosure: {
-                            guard cache.state.count == 2,
+                            guard cache.state.count == self.recurrentStateLayout.slotCount,
                                   cache.state.allSatisfy({ $0.ndim >= 1 && $0.dim(0) == rows.count })
                             else {
                                 throw ContinuousBatchSchedulerError.unsupported(
@@ -4485,16 +4521,21 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                                 )
                             }
                         },
-                        syncRowsFromBatchClosure: { Self.syncMambaRows(from: cache, into: rows) },
+                        syncRowsFromBatchClosure: {
+                            Self.syncMambaRows(from: cache, into: rows, stateLayout: self.recurrentStateLayout)
+                        },
                         writebackCompiledInnerStateClosure: { compiledState, targets in
-                            guard targets.count == rows.count else {
+                            guard targets.count == rows.count,
+                                  compiledState.count == self.recurrentStateLayout.slotCount,
+                                  compiledState.allSatisfy({ $0.ndim >= 1 && $0.dim(0) == rows.count })
+                            else {
                                 throw ContinuousBatchSchedulerError.unsupported(
-                                    "continuous_batching_invalid_cache_layout"
+                                    "continuous_batching_invalid_mamba_state"
                                 )
                             }
                             cache.state = compiledState
-                            Self.syncMambaRows(from: cache, into: rows)
-                            try Self.packMambaRows(rows, into: cache)
+                            Self.syncMambaRows(from: cache, into: rows, stateLayout: self.recurrentStateLayout)
+                            try Self.packMambaRows(rows, into: cache, stateLayout: self.recurrentStateLayout)
                         },
                         pendingMTPResolutionsClosure: {
                             throw ContinuousBatchSchedulerError.unsupported(
@@ -4502,6 +4543,9 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                             )
                         }
                     )
+                }
+                guard recurrentStateLayout == .mambaTwoSlot else {
+                    throw ContinuousBatchSchedulerError.unsupported("native_mtp_unsupported_recurrent_layout")
                 }
                 let cache = try MTPPackedMambaBatchCache(rowCaches: rows)
                 return PagedKVSharedLayerBatch(
@@ -4542,16 +4586,22 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         return caches.lazy.compactMap { ($0 as? PagedMLALatentCache)?.binding.handle }.first
     }
 
-    private static func packMambaRows(_ rows: [MambaCache], into batch: MambaCache) throws {
+    static func packMambaRows(
+        _ rows: [MambaCache],
+        into batch: MambaCache,
+        stateLayout: PagedKVRecurrentStateLayout = .mambaTwoSlot
+    ) throws {
         let rowStates = rows.map(\.state)
-        let slotCount = rowStates.map(\.count).max() ?? 0
-        guard slotCount > 0 else { return }
-        for slot in 0 ..< slotCount {
+        guard rowStates.allSatisfy({ $0.isEmpty || $0.count == stateLayout.slotCount }) else {
+            throw ContinuousBatchSchedulerError.unsupported("continuous_batching_invalid_mamba_state")
+        }
+        guard rowStates.contains(where: { !$0.isEmpty }) else { return }
+        for slot in 0 ..< stateLayout.slotCount {
             guard let first = rowStates.first(where: { $0.indices.contains(slot) })?[slot] else {
                 throw ContinuousBatchSchedulerError.unsupported("continuous_batching_invalid_cache_layout")
             }
             // A one-token joining row has not run prefill, so its recurrent
-            // slots are empty. Qwen35 initializes those slots with zeros.
+            // state is empty. Its missing verified slots receive zero state.
             let slotArrays = rowStates.map { states in
                 states.indices.contains(slot)
                     ? states[slot]
@@ -4570,9 +4620,13 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         }
     }
 
-    private static func syncMambaRows(from batch: MambaCache, into rows: [MambaCache]) {
+    static func syncMambaRows(
+        from batch: MambaCache,
+        into rows: [MambaCache],
+        stateLayout: PagedKVRecurrentStateLayout = .mambaTwoSlot
+    ) {
         let batchedState = batch.state
-        guard batchedState.count == 2,
+        guard batchedState.count == stateLayout.slotCount,
               batchedState.allSatisfy({ $0.ndim >= 1 && $0.dim(0) == rows.count })
         else { return }
         for rowIndex in rows.indices {

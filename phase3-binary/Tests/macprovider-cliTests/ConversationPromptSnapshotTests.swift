@@ -113,6 +113,90 @@ final class ConversationPromptSnapshotTests: XCTestCase {
 
     // MARK: - Snapshot position
 
+    func testLFMPoliciesUseTheConfiguredReferenceGridWithoutRoleMarkers() throws {
+        try Self.requireMetal()
+        for model in try Self.tinyLFMModels() {
+            for step in [128, 512, 1024] {
+                XCTAssertEqual(ModelRuntime.lfmSerialReferencePrefillStepSize(model: model, prefillStepSize: step), step)
+                let policy = ModelRuntime.conversationPromptSnapshotPolicy(
+                    model: model, tokenizer: NoMarkerTokenizer(), prefillStepSize: step)
+                XCTAssertEqual(policy, .referencePlanBoundary(step: step))
+                XCTAssertEqual(ModelRuntime.conversationPromptSnapshotTokenCount(
+                    promptTokenIds: Array(repeating: 1, count: 1070), policy: policy), step * (1069 / step))
+            }
+        }
+    }
+
+    func testLFMReferencePrefillReservesOneTokenAtShortAndLongPromptLengths() throws {
+        for step in [128, 512, 1024] {
+            for count in [1, 10, step, step + 1, 1034, 1070, 8202] {
+                var chunks: [Range<Int>] = []
+                let cursor = try ModelRuntime.cancellableLocalPrefill(
+                    tokenCount: count, from: 0, stepSize: step, referenceStepSize: step,
+                    isCancelled: { false }
+                ) { chunks.append($0) }
+                XCTAssertEqual(cursor, count - 1)
+                XCTAssertTrue(chunks.allSatisfy { $0.count <= step })
+                XCTAssertEqual(chunks.flatMap { Array($0) }, Array(0..<(count - 1)))
+                if count == 1034, step == 512 {
+                    XCTAssertEqual(chunks, [0..<512, 512..<1024, 1024..<1033])
+                }
+            }
+        }
+    }
+
+    func testLFMPositiveSnapshotHitPreservesTheColdReferenceChunkPlan() async throws {
+        let cache = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+        let firstPrompt = int32Range(0..<1052)
+        // The assistant marker at 1048 must not split the reference grid.
+        let snapshotCount = try XCTUnwrap(ModelRuntime.conversationPromptSnapshotTokenCount(
+            promptTokenIds: firstPrompt, policy: .referencePlanBoundary(step: 512)))
+        XCTAssertEqual(snapshotCount, 1024)
+        _ = try await seedSnapshot(cache, key: "conv:lfm-grid", tokens: Array(firstPrompt.prefix(snapshotCount)))
+        let secondPrompt = int32Range(0..<1051) + int32Range(2000..<2019)
+        let lease = try Self.unwrap(await cache.begin(
+            conversationKey: "conv:lfm-grid", incomingTokens: secondPrompt, modelID: "model-a", kvBits: nil))
+        XCTAssertEqual(lease.cachedPromptTokens, 1024)
+        XCTAssertNotNil(lease.reusableCache)
+        var cold: [Range<Int>] = []
+        var resumed: [Range<Int>] = []
+        let coldCursor = try ModelRuntime.cancellableLocalPrefill(
+            tokenCount: secondPrompt.count, from: 0, stepSize: 512, referenceStepSize: 512,
+            isCancelled: { false }
+        ) { cold.append($0) }
+        let resumedCursor = try ModelRuntime.cancellableLocalPrefill(
+            tokenCount: secondPrompt.count, from: lease.lcp, stepSize: 512, referenceStepSize: 512,
+            isCancelled: { false }
+        ) { resumed.append($0) }
+        XCTAssertEqual(cold, [0..<512, 512..<1024, 1024..<1069])
+        XCTAssertEqual(resumed, Array(cold.dropFirst(2)))
+        XCTAssertEqual(coldCursor, resumedCursor)
+        await cache.abort(lease)
+    }
+
+    func testLFMPromptSnapshotsBypassRecurrentRoleBoundaryPrefill() async throws {
+        try Self.requireMetal()
+        for model in try Self.tinyLFMModels() {
+            let cache = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+            var prompt = Array(repeating: Int32(1), count: 1070)
+            prompt[1048] = 0 // NoMarkerTokenizer maps <|im_start|> to 0.
+            let lease = try Self.unwrap(await cache.begin(
+                conversationKey: "conv:lfm-no-role-prefill", incomingTokens: prompt, modelID: "lfm", kvBits: nil))
+            let context = ModelContext(configuration: .init(id: "lfm"), model: model,
+                                       processor: FixtureProcessor(), tokenizer: NoMarkerTokenizer())
+            let recurrent = MambaCache()
+            // Without the LFM guard, the role checkpoint would enter a forward
+            // (and throw this cancellation) before the grid snapshot is taken.
+            let result = try ModelRuntime.prefillRecurrentCheckpoints(
+                lease: lease, cache: [recurrent], promptTokenIds: prompt,
+                context: context, prefillStepSize: 512, isCancelled: { true })
+            XCTAssertTrue(result.checkpoints.isEmpty)
+            XCTAssertNil(result.resumeAt)
+            XCTAssertTrue(recurrent.state.isEmpty)
+            await cache.abort(lease)
+        }
+    }
+
     func testReferencePlanBoundaryIsTheLastWholeStepBeforeTheFinalToken() {
         let policy = ModelRuntime.ConversationPromptSnapshotPolicy.referencePlanBoundary(step: 2048)
         func count(_ n: Int) -> Int? {
@@ -506,6 +590,22 @@ final class ConversationPromptSnapshotTests: XCTestCase {
     }
 
     private func int32Range(_ range: Range<Int>) -> [Int32] { range.map(Int32.init) }
+
+    private static func tinyLFMModels() throws -> [any LanguageModel] {
+        let data = Data("""
+        {"model_type":"lfm2_moe","vocab_size":128,"hidden_size":16,
+         "intermediate_size":32,"moe_intermediate_size":16,"num_hidden_layers":2,
+         "num_experts":2,"num_experts_per_tok":1,"norm_topk_prob":true,
+         "num_attention_heads":2,"num_key_value_heads":1,"max_position_embeddings":2048,
+         "use_expert_bias":false,"num_dense_layers":1,"norm_eps":0.00001,
+         "conv_bias":false,"conv_L_cache":3,"full_attn_idxs":[1],
+         "block_multiple_of":16,"block_auto_adjust_ff_dim":false}
+        """.utf8)
+        return [
+            LFM2Model(try JSONDecoder().decode(LFM2Configuration.self, from: data)),
+            LFM2MoEModel(try JSONDecoder().decode(LFM2MoEConfiguration.self, from: data)),
+        ]
+    }
 
     /// `XCTUnwrap` takes an autoclosure, which cannot hold an `await`.
     /// MLX loads the default metallib even for the CPU device.
