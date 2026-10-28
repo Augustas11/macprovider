@@ -547,12 +547,12 @@ The authorized dependency tuple is exact:
 
 | Repository | Fork tag | Revision | Upstream base |
 |---|---|---|---|
-| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.10.16` | `b10a8b192fbaa5cdb3ebc96ff0136eee4dc333a9` | fork `3.32.3-macprovider.10.1` (`87dc5159c87d73f4d7abd524fbdd17760cf56285`) on fork `3.32.3-macprovider.10` (`b4077dcb28336b388f3d09be2a091c12f8e179aa`) on `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
+| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.10.16.1` | `69844851a96a9ce5d93d47c40a7576834e3a00dd` | fork `3.32.3-macprovider.10.1` (`87dc5159c87d73f4d7abd524fbdd17760cf56285`) on fork `3.32.3-macprovider.10` (`b4077dcb28336b388f3d09be2a091c12f8e179aa`) on `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
 | `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.9` | `29d3b93375cc56cd2649b40e4310a8bc445e9874` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
 | `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.4` | `2f512e3997349c8648f5d7c5113eb2c825aa242d` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
 
-The mlx-swift-lm row is the immutable combined fork tag `3.32.3-macprovider.10.16`
-(`b10a8b192fbaa5cdb3ebc96ff0136eee4dc333a9`). It combines the complete main pin
+The mlx-swift-lm row is the immutable combined fork tag `3.32.3-macprovider.10.16.1`
+(`69844851a96a9ce5d93d47c40a7576834e3a00dd`). It combines the complete main pin
 `3.32.3-macprovider.10.15.1` (`36d24585f9373c2661f61f5e5b485c8d66c43a2b`)
 with the DeepSeek-V4 fidelity, DSpark and fused sparse-attention work from
 `3.32.3-macprovider.10.9.3` (`812285f88faa403a980ada6e64711de875bab364`).
@@ -2295,7 +2295,7 @@ requests.
 
 - **0.1.65 (2026-10-28)** — R003 combines main's GLM/Qwen/Bonsai/LFM fork
   `3.32.3-macprovider.10.15.1` with DeepSeek fidelity, DSpark and fused sparse
-  attention from `.10.9.3` in `3.32.3-macprovider.10.16` (`b10a8b192fbaa5cdb3ebc96ff0136eee4dc333a9`).
+  attention from `.10.9.3` in `3.32.3-macprovider.10.16.1` (`69844851a96a9ce5d93d47c40a7576834e3a00dd`).
   Preserves both GLM sampled tools/reasoning scope and DeepSeek's documented
   reasoning controls. Qualification records keep their actual measured identities.
 
