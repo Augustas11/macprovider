@@ -183,10 +183,13 @@ def validate_release_build_inputs(blobs: dict[str, bytes]) -> None:
     package = blobs["phase3-binary/Package.swift"]
     require(b'MACPROVIDER_LAB_HARNESS' not in package and not re.search(rb'\.define\s*\(\s*"DEBUG"', package), "release package defines LAB or DEBUG")
     command = blobs["phase3-binary/dist/package.sh"]
-    # Explicit command-line settings override inherited Xcode compilation
-    # conditions/Swift flags. The complete reviewed script is also hash pinned.
-    required = (b"-configuration Release", b"SWIFT_ACTIVE_COMPILATION_CONDITIONS=''", b"OTHER_SWIFT_FLAGS=''")
-    require(all(value in command for value in required), "release build must explicitly exclude LAB/DEBUG compilation flags")
+    # Command-line build settings apply to every target, packages included, so
+    # the release command must not set compilation conditions or Swift flags at
+    # all; LAB/DEBUG stay excluded because neither the package nor the command
+    # defines them. The complete reviewed script is also hash pinned.
+    require(b"-configuration Release" in command, "release build must use the Release configuration")
+    require(not re.search(rb'(?:SWIFT_ACTIVE_COMPILATION_CONDITIONS|OTHER_SWIFT_FLAGS)\s*=', command),
+            "release command must not override compilation conditions or Swift flags")
     require(not re.search(rb'(?:-D[ \t]*|SWIFT_ACTIVE_COMPILATION_CONDITIONS[^\n]*)(?:DEBUG|MACPROVIDER_LAB_HARNESS)', command), "release command enables LAB or DEBUG")
     workflow = blobs[".github/workflows/acceptance-candidate.yml"]
     require(b'./package.sh "$TAG"' in workflow, "candidate workflow does not use reviewed package recipe")

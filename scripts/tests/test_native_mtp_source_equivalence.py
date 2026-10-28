@@ -47,7 +47,7 @@ class ContractTests(unittest.TestCase):
         self.old=b'let value = 1\n'
         self.new=b'#if DEBUG || MACPROVIDER_LAB_HARNESS\nlet lab = 1\n#endif\n'+self.old
         self.build={'phase3-binary/Package.swift':b'// package\n',
-            'phase3-binary/dist/package.sh':b"xcodebuild -configuration Release SWIFT_ACTIVE_COMPILATION_CONDITIONS='' OTHER_SWIFT_FLAGS=''\n",
+            'phase3-binary/dist/package.sh':b"xcodebuild -configuration Release\n",
             '.github/workflows/acceptance-candidate.yml':b'./package.sh "$TAG"\n'}
         self.contract={'schema_version':M.SCHEMA,'measured_source_commit':self.measured,'lab_patch_sha256':'e'*64,
             'manifest_sha256':M.sha(self.manifest),'package_resolved_sha256':M.sha(self.resolved),
@@ -114,10 +114,12 @@ class ContractTests(unittest.TestCase):
         self.contract['build_inputs'][key]=M.sha(value);self.repin()
         with self.assertRaisesRegex(M.SourceEquivalenceError,'enables LAB or DEBUG'):self.run_proof()
 
-    def test_missing_explicit_release_flags_refused(self):
-        key='phase3-binary/dist/package.sh';value=b'xcodebuild -configuration Release\n'
-        self.blobs[self.current,key]=value;self.contract['build_inputs'][key]=M.sha(value);self.repin()
-        with self.assertRaisesRegex(M.SourceEquivalenceError,'explicitly exclude'):self.run_proof()
+    def test_global_swift_setting_override_refused(self):
+        key='phase3-binary/dist/package.sh'
+        for value in (b"xcodebuild -configuration Release SWIFT_ACTIVE_COMPILATION_CONDITIONS=''\n",
+                      b"xcodebuild -configuration Release OTHER_SWIFT_FLAGS=''\n"):
+            self.blobs[self.current,key]=value;self.contract['build_inputs'][key]=M.sha(value);self.repin()
+            with self.assertRaisesRegex(M.SourceEquivalenceError,'must not override'):self.run_proof()
 
     def test_false_waiver_or_unknown_contract_field_refused(self):
         self.contract['unchanged']=True;self.repin()

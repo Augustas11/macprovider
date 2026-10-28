@@ -92,15 +92,13 @@ python3 "$REPO_ROOT/scripts/compatibility-set-manifest.py" validate \
 
 echo "==> Building Release configuration (this takes ~5-10 min)..."
 BUILD_LOG="$PACKAGE_WORK_DIR/package-build.log"
-# Build swift-syntax from the pinned Package.resolved checkout. With Xcode's
-# package prebuilts on (runner image macos-26-arm64/20261021 and later), the
-# MLXHuggingFaceMacros macro target in mlx-swift-lm never gets swift-syntax
-# modules and the release build fails to resolve SwiftCompilerPlugin.
-if ! xcodebuild -IDEPackageEnablePrebuilts=NO \
-                -scheme macprovider-cli \
+# No command-line SWIFT_ACTIVE_COMPILATION_CONDITIONS / OTHER_SWIFT_FLAGS:
+# xcodebuild applies those to every target, which strips SWIFT_PACKAGE and
+# package-declared Swift settings from dependencies and breaks the build.
+# Release defines neither DEBUG nor MACPROVIDER_LAB_HARNESS; lab builds add
+# the harness define only through `swift build -Xswiftc`.
+if ! xcodebuild -scheme macprovider-cli \
                 -configuration Release \
-                SWIFT_ACTIVE_COMPILATION_CONDITIONS='' \
-                OTHER_SWIFT_FLAGS='' \
                 -destination 'generic/platform=macOS' \
                 -derivedDataPath "$RELEASE_DIR" \
                 -onlyUsePackageVersionsFromResolvedFile \
