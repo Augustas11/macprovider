@@ -103,8 +103,17 @@ public struct ChatCompletionRequest: Sendable {
         templateReasoningEffort(for: model)
     }
 
-    /// SPEC-018 §3.12: templates without a none/minimal level receive their
-    /// lowest level. Other values and unknown families keep their behavior.
+    /// Exact identities whose Qwen3.8 template accepts low/medium/xhigh.
+    /// A buyer alias is resolved to the loaded identity before this check.
+    public static func usesQwen38Template(modelID: String) -> Bool {
+        switch modelID.lowercased() {
+        case "qwen/qwen3.8-27b", "qwen3.8-27b", "mlx-community/qwen3.8-27b-4bit": return true
+        default: return false
+        }
+    }
+
+    /// SPEC-018 §3.12: map unsupported efforts to the loaded template's levels.
+    /// Unknown families keep pass-through behavior.
     public func templateReasoningEffort(for modelID: String) -> String? {
         // SPEC-018 §3.12 (v0.3.2): a structured response_format renders with
         // the least reasoning the template takes, so the reply starts with
@@ -113,6 +122,10 @@ public struct ChatCompletionRequest: Sendable {
         // thinking off (`ModelRuntime.templateAdditionalContext`).
         if case .text = responseFormat {} else { return "low" }
         if let reasoningEffort {
+            if Self.usesQwen38Template(modelID: modelID),
+               reasoningEffort == "high" || reasoningEffort == "max" {
+                return "xhigh"
+            }
             if reasoningEffort == "none" || reasoningEffort == "minimal" {
                 let id = modelID.lowercased()
                 if id.contains("glm-5.3") || id.contains("gpt-oss") || id.contains("qwen3.8") {

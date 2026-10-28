@@ -1,8 +1,14 @@
 # SPEC-024 - Prefix-cache billing and provider-local cache isolation
 
-**Version:** 0.2.14 (2026-10-26, bounded agent snapshot retention)
+**Version:** 0.2.16 (2026-10-28, GLM serial and continuous-batch snapshot separation)
 **Status:** **Billing arithmetic (§4 ledger / §5 rate card / §6 formula) MOVED to SPEC-005 v0.6** (canonical). SPEC-024 **retains** the `cached_prompt_tokens` **wire field** (§3, a SPEC-002 addendum), the **buyer-visible** mirror field (§8, a SPEC-006 addendum), the fraud model (§7), and the provider-local cache-**isolation** baseline (§11–§16) — none of which SPEC-005 **re-owns** (SPEC-005 §5.3.1 does fold in the §14 coordinator cross-check *gates* as billing-eligibility rules, but SPEC-024 remains their canonical home).
 **Depends on:** SPEC-002 v1.5.2 (coordinator-provider wire), SPEC-004 v0.3.2 (sticky affinity; FR-SR-2 provider-visibility carve-out), SPEC-005 v0.6.10 (billing — the canonical owner of prefix-cache billing arithmetic, formula, ledger columns, and rate-card keys), SPEC-006 v0.9.39 (buyer API; §1.3 conversation-key derivation + survivability (b) carve-out + OpenAI nested usage), SPEC-008 v0.4.1 (Tier-2 trust; §2.2 invariant (b) carve-out permitting the provider-visible derived conversation_key), SPEC-018 v0.2.4 (tool calling)
+
+**Change log v0.2.15 (2026-10-28, Related: #2154):**
+- **FR-CI2a.** Typed LFM serial requests and the loaded canonical dense
+  `qwen/qwen3.5-27b` wrapper retain whole-stride prompt snapshots. Role-marker
+  splits cannot change the cold prefill chunk plan. Dense Qwen keeps its
+  existing multi-token final forward; unkeyed requests remain unchanged.
 
 **Change log v0.2.14 (2026-10-26, Related: #2153, Related: #2143):**
 - **FR-CI4 / FR-CI2a / SPEC-024-R005.** Agent retention defaults to 64 entries,
@@ -493,7 +499,7 @@ on the *distribution* of output, not a determinism guarantee.
 **FR-CI2a (extend-only prompt snapshot, v0.2.12 — SPEC-024-R004).** For a model family whose
 cache layers cannot be rewound to an arbitrary prefix, a conversation-keyed request MUST commit
 a *prompt snapshot*: a deep copy of every cache layer taken when prefill reached exactly `S`
-prompt tokens, stored with canonical tokens `prompt_token_ids[0..<S]`. The two families and
+prompt tokens, stored with canonical tokens `prompt_token_ids[0..<S]`. The covered families and
 their positions are:
 - **DeepSeek V4:** `S = 2048 · ⌊(N − 1) / 2048⌋` for an `N`-token prompt. Its ratio-4 overlap
   pools give the first window of each forward call no previous half-window, so pool contents
@@ -501,9 +507,30 @@ their positions are:
   (`min(2048, remaining − 1)` chunks from token 0, then the last token alone). A prefill that
   resumes at `S` therefore makes the same forward calls as a fresh prefill of the full prompt,
   and the resumed cache state MUST be bit-identical to the fresh one.
-- **GLM-5-Next:** `S` is the index of the last chat-role marker (`<|system|>`, `<|user|>`,
-  `<|assistant|>`, `<|observation|>`), i.e. the history before the generation prompt
-  `<|assistant|><think>`, which the next turn re-renders unchanged.
+- **GLM-5-Next serial requests:** for configured prefill stride `P`,
+  `S = P · ⌊(N − 1) / P⌋`. Snapshot prefill uses whole `P`-token forwards;
+  the iterator receives the original final remainder of at most `P` tokens,
+  preserving the unkeyed cold forward plan. Role-marker recurrent checkpoints
+  MUST NOT split that plan. A serial request MUST treat an off-grid snapshot
+  or a continuous-batch marker-plan snapshot as a miss before installing its
+  layers, while retaining the acquired conversation's purge and grant fences.
+- **GLM-5-Next continuous-batch requests:** `S` remains the index of the last
+  chat-role marker (`<|system|>`, `<|user|>`, `<|assistant|>`, `<|observation|>`),
+  i.e. the history before the generation prompt `<|assistant|><think>`, which
+  the next turn re-renders unchanged. Serial-grid snapshots MUST NOT be reused
+  as continuous-batch marker-plan snapshots. Native-head snapshot requirements
+  are unchanged.
+- **LFM2 / LFM2 MoE serial requests:** for configured prefill stride `P`,
+  `S = P · ⌊(N − 1) / P⌋`. Cold and resumed requests use whole `P`-token
+  forwards and reserve the final token for the iterator. Role markers MUST NOT
+  split this reference plan.
+- **Dense Qwen3.5-27B serial requests:** only the loaded canonical identity
+  `qwen/qwen3.5-27b` with the typed dense Qwen35 wrapper (not a MoE wrapper)
+  uses `S = P · ⌊(N − 1) / P⌋`. Snapshot prefill executes only whole strides;
+  the iterator receives the original final remainder of at most `P` tokens.
+  The unkeyed legacy-remainder plan and other Qwen models are unchanged.
+  Client-supplied aliases MUST NOT select this policy. Role-marker recurrent
+  checkpoints MUST NOT split this tuple's cold prefill chunks.
 `S` MUST be ≥ the LCP minimum, else nothing is committed. A snapshot entry MUST be reused only
 when the incoming prompt extends all `S` stored tokens (`LCP == S < N`, no trim); any other
 prompt is a **miss** (`prompt_snapshot_diverged` or `nothing_new`), and its layers are never
