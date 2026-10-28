@@ -46,6 +46,8 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertGreaterThan(result.gatherKernelCalls, 0)
         XCTAssertGreaterThanOrEqual(result.maxLogicalBlocks, 3)
         XCTAssertTrue(result.nonIdentityPermutation)
+        XCTAssertEqual(result.contiguousCacheRecordable, false,
+                       "float32 probe buffers prove ordinary gather parity but cannot enter the byte bridge")
         let forwards = model.forwards()
         let expectedWidths = [512] + Array(repeating: 1, count: 48)
         let expectedPositions: [Int?] = [nil] + (512..<560).map { Optional($0) }
@@ -352,6 +354,22 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         )
 
         XCTAssertNil(measurement)
+    }
+
+    func testUnsupportedContiguousMaterializationPreservesOrdinaryRuntimeMeasurement() throws {
+        let result = PagedKVRuntimeParityProbeResult(
+            established: true, nLayers: 2, nNew: 4, gatherKernelCalls: 16,
+            maxLogicalBlocks: 3, nonIdentityPermutation: true, contiguousCacheRecordable: false)
+        let measurement = ModelRuntime.measurePagedKVRuntime(
+            config: PagedKVConfig(enabled: true, blockSizeTokens: 32, maxPhysicalBlocks: 64),
+            modelID: "mlx-community/Qwen-Test", modelSHA256: String(repeating: "a", count: 64),
+            tokenizerSHA256: nil, chatTemplateSHA256: nil,
+            modelCapabilities: PagedKVRuntimeModelCapabilities(
+                modelFamily: "qwen", requiresMoEDispatch: false,
+                supportsContiguousCacheMaterialization: false),
+            parityProbe: result, moeProbe: Self.provenBatchedProbe(),
+            environment: Self.liveMeasurementEnvironment())
+        XCTAssertNotNil(measurement, "cache byte representation must not revoke a proven ordinary decode path")
     }
 
     func testProductionRuntimeMeasurementBuildsLiveIdentityAndSizingProof() throws {
@@ -4796,6 +4814,33 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         try await assertQwenPreparationLaneAdmitsWhileTargetLockIsHeld(streaming: true)
     }
 
+    func testUnrecordableCacheStillServesOrdinaryCBAndRefusesColdKeyedStrictAdmission() async throws {
+        try requireMetal()
+        let modelID = "mlx-community/Qwen-Test"
+        let backend = RuntimeBridgeScriptedBackend(scripts: [:])
+        let runtime = Self.attachedRuntime(
+            modelID: modelID, backend: backend,
+            modelCapabilities: PagedKVRuntimeModelCapabilities(
+                modelFamily: "qwen", requiresMoEDispatch: false,
+                supportsContiguousCacheMaterialization: false))
+        let ordinary = try Self.chatRequest(modelID: modelID, maxTokens: 2)
+            .withRequestID("unrecordable-ordinary")
+        let completion = try await runtime.complete(ordinary)
+        XCTAssertEqual(completion.content, "3 3")
+        let before = await backend.decodeCallCount()
+        XCTAssertGreaterThan(before, 0)
+        let keyed = try Self.chatRequest(modelID: modelID, maxTokens: 2)
+            .withRequestID("unrecordable-cold-keyed").withConversationKey("conv:never-seen")
+        do {
+            _ = try await runtime.complete(keyed)
+            XCTFail("strict keyed admission must reject before byte materialization")
+        } catch {
+            XCTAssertEqual((error as? APIError)?.code, "continuous_batching_paged_kv_handoff_unavailable")
+        }
+        let after = await backend.decodeCallCount()
+        XCTAssertEqual(before, after)
+    }
+
     func testAttachedModelRuntimeServesFreshGreedyRequestsThroughScheduler() async throws {
         try requireMetal()
 
@@ -6020,6 +6065,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         promptTokens: [Int32] = [3],
         container suppliedContainer: ModelContainer? = nil,
         preparationLane: ContinuousBatchTextPreparationLane? = nil,
+        modelCapabilities: PagedKVRuntimeModelCapabilities? = nil,
         warmSwapEnabled: Bool = false,
         testLoader: (@Sendable (String) async throws -> (String, String?))? = nil,
         testCompletion: (@Sendable (RuntimeSnapshot, ChatCompletionRequest) async throws -> CompletionResult)? = nil
@@ -6044,6 +6090,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
             pagedKVHardwareSizingProof: proof,
             pagedKVRuntimeCacheClass: "KVCacheSimple",
             pagedKVSchedulerBackendInstalled: true,
+            pagedKVModelCapabilities: modelCapabilities,
             container: container,
             continuousBatchingBackend: backend,
             testContinuousBatchTextPreparationLane: preparationLane,
