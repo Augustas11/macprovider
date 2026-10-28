@@ -1,38 +1,38 @@
 {
   "feeds": {
     "autotune-artifacts.json": {
-      "bytes": 16141,
-      "sha256": "d81ce2d8144e155a8d716d55e3b2b0a8f9181d27f6083b2d1c4ee49217713ca5",
+      "bytes": 16155,
+      "sha256": "3a019d40c4cfa90ec62cf275b4dc8a7cda8f3097013935789a9920ed69f6d712",
       "signer_key_id": "streamvc-autotune-static-v4",
-      "version": "published-2026-10-27-bonsai2b-candidate-v1"
+      "version": "published-2026-10-29-glm53-qwen36-native-mtp-v277"
     },
     "autotune-candidates.json": {
-      "bytes": 20070,
-      "sha256": "568dfb349b0e42a00863a5d5800ef11927afeaebcb1df69cd2f2bc3e7d899a39",
+      "bytes": 20077,
+      "sha256": "fcba46460ef8ce71e7a9927dd82675b1ec7462cbea8159c1db3afb29e8eb1615",
       "signer_key_id": "streamvc-autotune-static-v4",
-      "version": "published-2026-10-27-bonsai2b-candidate-v1"
+      "version": "published-2026-10-29-glm53-qwen36-native-mtp-v277"
     },
     "continuous-batching-policy.json": {
-      "bytes": 4926,
-      "sha256": "1acc7948cd699d78bd6527a0ea79e77167d2ef12c190aa3d863b522b3159b310",
+      "bytes": 4933,
+      "sha256": "cd8b370e57b3f6cf2d8b8b7bb3933dc9644b01bb5cf8e5940f8fe65f28a3ee9c",
       "signer_key_id": "streamvc-autotune-static-v4",
-      "version": "published-2026-10-27-bonsai2b-candidate-v1"
+      "version": "published-2026-10-29-glm53-qwen36-native-mtp-v277"
     },
     "demand-rank.json": {
-      "bytes": 2441,
-      "sha256": "1be4949838a230637ef9e6f0d7fedd417c5befb4c6b09490a588e769fab411c0",
+      "bytes": 2448,
+      "sha256": "4742d152fdbc3806b3cb7748721c72c678096076dc5fbf05d9ad3b67ab283986",
       "signer_key_id": "streamvc-autotune-static-v4",
-      "version": "published-2026-10-27-bonsai2b-candidate-v1"
+      "version": "published-2026-10-29-glm53-qwen36-native-mtp-v277"
     },
     "native-mtp-admission.json": {
-      "bytes": 45673,
-      "sha256": "f9ab112e63123fb599eaf1a8194f2fef003f971b90feed0a90b56425ee14a4bc",
+      "bytes": 45680,
+      "sha256": "39f01fb68b9b47dc5fce7c84e69a53a6b4f60a5daeeefb24bc3f0b16cd8a4103",
       "signer_key_id": "streamvc-autotune-static-v4",
-      "version": "published-2026-10-27-bonsai2b-candidate-v1"
+      "version": "published-2026-10-29-glm53-qwen36-native-mtp-v277"
     },
     "rate-card.json": {
       "bytes": 4447,
-      "sha256": "66474167251bb7a429a8d04cc8da72b46f493aeaf6de7028943ec5f4bd87787b",
+      "sha256": "eeeafa9ca18334e918a97e81cf5aecffe6eda2dc79ed5fca6a90873435cd8dd1",
       "signer_key_id": "streamvc-autotune-static-v4",
       "version": "10f735e38702e786a9da904b54c7d3764548e9ffbf09d562be1803a2ec26c20c"
     },
@@ -43,8 +43,8 @@
       "version": "macprovider-tier2-model-catalog-2026-10-23-deepseek-v4-flash-v1"
     }
   },
-  "generated_at": "2026-10-27T07:38:00Z",
+  "generated_at": "2026-10-28T23:11:00Z",
   "policy_version": "autotune-policy-v1",
-  "release_id": "published-2026-10-27-bonsai2b-candidate-v1",
+  "release_id": "published-2026-10-29-glm53-qwen36-native-mtp-v277",
   "schema_version": "macprovider.autotune-release.v1"
 }

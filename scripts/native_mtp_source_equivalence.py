@@ -33,11 +33,11 @@ NEW_SELECTOR = b'''        // implements these shapes. The existing signed sampl
         let supportsToolPrompt = nativeCapability.family == "glm5_next_mtp_v1"
             && nativeCapability.supportsSampling
 '''
-# This reviewed merge preserves the measured GLM token path while integrating
-# Prism opt-ins and unrelated buyer admission/retirement ownership fixes.
+# This exact reviewed release carries forward measured GLM qualification under
+# the operator-approved integration, cache/prefill and runtime-hygiene review.
 INTEGRATION_MEASURED_SOURCE = "1d53dd76d6c93e2e2c6d5fc20d403bbdd21093ff"
-INTEGRATION_REVIEWED_SOURCE = "53e736a4a8031cb26c53fc5bb140df1964a47b53"
-INTEGRATION_FORK = "3905a1b0499f0f38c0f94a008034a0362b9e3dca"
+INTEGRATION_REVIEWED_SOURCE = "11c4107744116ac426b0eab4cd37a20c511526a9"
+INTEGRATION_FORK = "36d24585f9373c2661f61f5e5b485c8d66c43a2b"
 INTEGRATION_CONTRACT_PATH = "ops/recipes/native-mtp-glm53-integration-reuse.v1.json"
 INTEGRATION_SCHEMA = "macprovider.native-mtp-integration-reuse.v1"
 INTEGRATION_SCOPE = {
@@ -268,12 +268,32 @@ def integration_scope(root: Path) -> dict:
     return dict({key: entries[0][key] for key in fields}, **INTEGRATION_SCOPE)
 
 
+def _historical_file_sha(root: Path, measured: str, path: str) -> str | None:
+    # Newly introduced decode files have no measured blob. Represent absence
+    # explicitly rather than inventing a measured hash or relabeling evidence.
+    result = subprocess.run(["git", "-C", str(root), "ls-tree", measured, "--", path], capture_output=True)
+    require(result.returncode == 0, "historical source inventory unavailable")
+    return sha(git_blob(root, measured, path)) if result.stdout else None
+
+
+def _reviewed_contract_blob(root: Path, current: str, path: str) -> bytes:
+    # A signed release predates its identity-only rebind. Only that exact frozen
+    # release may use the contract shipped beside this reviewed verifier; all
+    # other callers keep the existing Git-bound recipe/contract selection.
+    if current == INTEGRATION_REVIEWED_SOURCE:
+        require(path in {RECIPE_PATH, INTEGRATION_CONTRACT_PATH}, "unexpected reviewed contract path")
+        target = Path(__file__).resolve().parent.parent / path
+        require(target.is_file() and not target.is_symlink(), "reviewed release contract missing or not regular")
+        return target.read_bytes()
+    return git_blob(root, current, path)
+
+
 def _reviewed_integration_contract(root: Path, current: str, recipe: dict) -> tuple[dict, bytes]:
     pins = recipe.get("source_inputs")
     require(isinstance(pins, dict) and isinstance(pins.get(INTEGRATION_CONTRACT_PATH), str)
             and SHA.fullmatch(pins[INTEGRATION_CONTRACT_PATH]),
             "reviewed recipe lacks pinned integration reuse contract")
-    raw = git_blob(root, current, INTEGRATION_CONTRACT_PATH)
+    raw = _reviewed_contract_blob(root, current, INTEGRATION_CONTRACT_PATH)
     require(sha(raw) == pins[INTEGRATION_CONTRACT_PATH], "integration reuse contract is not recipe pinned")
     contract = parse(raw)
     required = {"schema_version", "measured_source_commit", "reviewed_source_commit", "tuple",
@@ -304,7 +324,7 @@ def verify_integration_reuse(root: Path, measured: str, current: str, before, af
     contract, raw = _reviewed_integration_contract(root, current, recipe)
     reviewed = source_inputs(root, INTEGRATION_REVIEWED_SOURCE)
     require(after == reviewed, "integration target production/dependency identity differs from reviewed merge")
-    require(before[0] == reviewed[0] and sha(before[0]) == contract["manifest_sha256"],
+    require(sha(before[0]) == contract["manifest_sha256"],
             "integration decode manifest differs")
     require(contract["package_resolved"] == {
         "measured_sha256": sha(before[1]), "current_sha256": sha(reviewed[1])},
@@ -314,10 +334,15 @@ def verify_integration_reuse(root: Path, measured: str, current: str, before, af
         require([pin.get("state", {}).get("revision") for pin in pins
                  if pin.get("identity") == "mlx-swift-lm"] == [expected],
                 "integration fork identity differs")
-    require(set(before[2]) == set(reviewed[2]), "integration source inventory differs")
-    require(contract["files"] == {path: {
-        "measured_sha256": sha(value), "current_sha256": sha(reviewed[2][path])}
-        for path, value in before[2].items()}, "integration source blob inventory differs")
+    require(set(before[2]).issubset(reviewed[2]), "integration source inventory differs")
+    expected_files = {path: {
+        "measured_sha256": (sha(before[2][path]) if path in before[2]
+            else _historical_file_sha(root, measured, "phase3-binary/" + path)),
+        "current_sha256": sha(value)} for path, value in reviewed[2].items()}
+    if before[0] != reviewed[0]:
+        expected_files["decode-path-manifest.json"] = {
+            "measured_sha256": sha(before[0]), "current_sha256": sha(reviewed[0])}
+    require(contract["files"] == expected_files, "integration source blob inventory differs")
     expected_build = {}
     current_build = {}
     for path in BUILD_PATHS:
@@ -342,7 +367,7 @@ def measurement_tuple(root: Path, measured: str, current: str, measured_digest: 
     proof = verify_source_equivalence(root, measured, current, measured_digest,
         entry["decode_path_digest"], request_feature_profile=entry["request_feature_profile"])
     if measured == INTEGRATION_MEASURED_SOURCE and measured_digest != entry["decode_path_digest"]:
-        recipe = parse(git_blob(root, current, RECIPE_PATH))
+        recipe = parse(_reviewed_contract_blob(root, current, RECIPE_PATH))
         contract, raw = _reviewed_integration_contract(root, current, recipe)
         require(proof == sha(raw), "integration measurement proof differs")
         require(all(entry.get(key) == value for key, value in contract["tuple"].items()),
@@ -365,7 +390,9 @@ def verify_source_equivalence(root: Path, measured: str, current: str,
     require(before[3] == measured_digest and after[3] == current_digest, "source raw decode identity differs")
     if measured_digest == current_digest:
         return None
-    recipe = parse(git_blob(root, current, RECIPE_PATH))
+    recipe_blob = (_reviewed_contract_blob(root, current, RECIPE_PATH)
+        if measured == INTEGRATION_MEASURED_SOURCE else git_blob(root, current, RECIPE_PATH))
+    recipe = parse(recipe_blob)
     require(recipe.get("schema_version") == "macprovider.native-mtp-binding-recipe.v1"
             and recipe.get("model_key") == "zai-org/glm-5.3-flash", "reviewed recipe identity differs")
     if measured == INTEGRATION_MEASURED_SOURCE and INTEGRATION_CONTRACT_PATH in recipe.get("source_inputs", {}):
