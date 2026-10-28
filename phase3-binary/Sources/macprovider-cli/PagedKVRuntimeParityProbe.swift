@@ -32,6 +32,8 @@ struct PagedKVRuntimeParityProbeResult: Sendable, Equatable {
     let nonIdentityPermutation: Bool
     /// Distinct proof for row-owned DeepSeek pools; never gather evidence.
     let rowPoolProof: DeepseekV4RowPoolParityProof?
+    /// Nil for cache families without contiguous K/V buffers (MLA/row pools).
+    let contiguousCacheRecordable: Bool?
 
     init(
         established: Bool,
@@ -41,7 +43,8 @@ struct PagedKVRuntimeParityProbeResult: Sendable, Equatable {
         gatherKernelCalls: Int,
         maxLogicalBlocks: Int,
         nonIdentityPermutation: Bool,
-        rowPoolProof: DeepseekV4RowPoolParityProof? = nil
+        rowPoolProof: DeepseekV4RowPoolParityProof? = nil,
+        contiguousCacheRecordable: Bool? = nil
     ) {
         self.established = established
         self.nLayers = nLayers
@@ -51,6 +54,7 @@ struct PagedKVRuntimeParityProbeResult: Sendable, Equatable {
         self.maxLogicalBlocks = maxLogicalBlocks
         self.nonIdentityPermutation = nonIdentityPermutation
         self.rowPoolProof = rowPoolProof
+        self.contiguousCacheRecordable = contiguousCacheRecordable
     }
 
     static func failClosed(nNew: Int) -> PagedKVRuntimeParityProbeResult {
@@ -204,8 +208,9 @@ enum PagedKVRuntimeParityProbe {
                 }
 
                 PagedKVCache.resetGatherDiagnostics()
+                var probeCaches: [KVCache] = []
                 let paged = try Self.greedyGenerate(model: model, promptTokens: promptTokens, nNew: nNew) {
-                    zip(stockLayout, kinds).map { _, kind in
+                    probeCaches = zip(stockLayout, kinds).map { _, kind in
                         if case .recurrentMamba = kind { return MambaCache() as KVCache }
                         if case .pagedMLA(let kpool) = kind {
                             return PagedMLALatentCache(
@@ -231,6 +236,11 @@ enum PagedKVRuntimeParityProbe {
                             attentionWindowTokens: window
                         )
                     }
+                    return probeCaches
+                }
+                let contiguousCaches = probeCaches.compactMap { $0 as? PagedKVCache }
+                let contiguousCacheRecordable: Bool? = contiguousCaches.isEmpty ? nil : contiguousCaches.allSatisfy {
+                    (try? $0.validateContiguousMaterializationLayout()) != nil
                 }
                 let calls = PagedKVCache.gatherKernelCalls
                 let maxBlocks = PagedKVCache.maxLogicalBlocksObserved
@@ -244,7 +254,8 @@ enum PagedKVRuntimeParityProbe {
                     nForwards: Self.prefillChunkForwards(promptTokens: promptTokens.count) + nNew,
                     gatherKernelCalls: calls,
                     maxLogicalBlocks: maxBlocks,
-                    nonIdentityPermutation: nonIdentity
+                    nonIdentityPermutation: nonIdentity,
+                    contiguousCacheRecordable: contiguousCacheRecordable
                 )
             }
         } catch {

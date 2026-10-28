@@ -272,6 +272,9 @@ extension ModelRuntime {
         maxContextTokens: Int,
         modelID: String?,
         modelSHA256: String?,
+        modelCapabilities: PagedKVRuntimeModelCapabilities = .init(
+            modelFamily: "unknown", requiresMoEDispatch: false
+        ),
         weightsGeneration: Int,
         kvBitsOverride: Int?,
         prefillStepSize: Int?,
@@ -334,7 +337,8 @@ extension ModelRuntime {
         // recurrent layers from a checkpoint. Off, a keyed hybrid row keeps the
         // serial-format materialize at terminal instead.
         let isHybrid = cacheKinds.contains(.recurrentMamba)
-        let contiguousCacheBridge = isHybrid && !cachedTurns ? nil : PagedKVRuntimeContiguousCacheBridge()
+        let contiguousCacheBridge = !modelCapabilities.supportsContiguousCacheMaterialization || (isHybrid && !cachedTurns)
+            ? nil : PagedKVRuntimeContiguousCacheBridge()
         let maxDecodeLockstepWindow = servePathDecodeLockstepWindow(cacheKinds: cacheKinds)
         let prefillGrouping = await continuousBatchPrefillGrouping(container: container, modelID: modelID)
         return makeContinuousBatchScheduler(

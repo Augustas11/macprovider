@@ -737,6 +737,8 @@ struct PagedKVRuntimeModelCapabilities: Equatable, Sendable {
     /// identity (SPEC-039 FR-PKV12), read from its `config.json`.
     let sparseAttention: PagedKVSparseAttentionLayout?
     let deepseekV4Pool: DeepseekV4PoolLayout?
+    /// Observed on this load; ordinary shared-forward parity is independent.
+    var supportsContiguousCacheMaterialization: Bool
 
     init(
         modelFamily: String,
@@ -744,7 +746,8 @@ struct PagedKVRuntimeModelCapabilities: Equatable, Sendable {
         hybridDecoderArchitectureVerified: Bool = false,
         ordinaryHybridOnly: Bool = false,
         sparseAttention: PagedKVSparseAttentionLayout? = nil,
-        deepseekV4Pool: DeepseekV4PoolLayout? = nil
+        deepseekV4Pool: DeepseekV4PoolLayout? = nil,
+        supportsContiguousCacheMaterialization: Bool = true
     ) {
         self.modelFamily = modelFamily
         self.requiresMoEDispatch = requiresMoEDispatch
@@ -752,6 +755,7 @@ struct PagedKVRuntimeModelCapabilities: Equatable, Sendable {
         self.ordinaryHybridOnly = ordinaryHybridOnly
         self.sparseAttention = sparseAttention
         self.deepseekV4Pool = deepseekV4Pool
+        self.supportsContiguousCacheMaterialization = supportsContiguousCacheMaterialization
     }
 
     /// Prompt tokens of the attach-time parity probes: 513 (the production
@@ -3852,6 +3856,9 @@ maxTokens: 1,
             modelCapabilities: modelCapabilities,
             runtimeCacheClass: runtimeCacheClass
         )
+        if let recordable = parityProbe?.contiguousCacheRecordable {
+            self.currentPagedKVModelCapabilities.supportsContiguousCacheMaterialization = recordable
+        }
         if let measurement = Self.measurePagedKVRuntime(
             config: self.pagedKVConfig,
             modelID: modelID,
@@ -3917,12 +3924,13 @@ maxTokens: 1,
             maxContextTokens: self.maxContextTokens,
             modelID: modelID,
             modelSHA256: self.currentModelHash,
+            modelCapabilities: self.currentPagedKVModelCapabilities,
             weightsGeneration: self.currentSpecDecodeGeneration,
             kvBitsOverride: self.kvBitsOverride,
             prefillStepSize: self.continuousBatchPromptChunkOverride,
             nativeMTPStatusSink: self.currentNativeMTPStatusSink,
             replayAuthority: self.continuousBatchReplayAuthority,
-            cachedTurns: self.continuousBatchingCachedTurns
+            cachedTurns: self.effectiveContinuousBatchingCachedTurns
         )
         if self.continuousBatchScheduler == nil {
             self.pagedKVSchedulerBackendInstalled = false
@@ -4408,7 +4416,8 @@ maxTokens: 1,
             rolloutMode: matchingEntry?.rollout.rawValue ?? ContinuousBatchingMode.off.rawValue,
             tupleSHA256: matchingEntry?.tupleSHA256,
             authorized: signedPolicyAuthorized,
-            cachedTurnsAuthorized: locallyAuthorized && matchingEntry?.tuple.cachedTurnsAccepted == true,
+            cachedTurnsAuthorized: locallyAuthorized && effectiveContinuousBatchingCachedTurns
+                && matchingEntry?.tuple.cachedTurnsAccepted == true,
             emergencyOffOverride: continuousBatchingEmergencyOffOverride,
             localProofResult: localProofResult,
             decisionReason: decisionReason
@@ -6628,12 +6637,13 @@ maxTokens: 1,
             maxContextTokens: maxContextTokens,
             modelID: currentModelID,
             modelSHA256: currentModelHash,
+            modelCapabilities: currentPagedKVModelCapabilities,
             weightsGeneration: currentSpecDecodeGeneration,
             kvBitsOverride: kvBitsOverride,
             prefillStepSize: continuousBatchPromptChunkOverride,
             nativeMTPStatusSink: currentNativeMTPStatusSink,
             replayAuthority: continuousBatchReplayAuthority,
-            cachedTurns: continuousBatchingCachedTurns
+            cachedTurns: effectiveContinuousBatchingCachedTurns
         )
         continuousBatchingDurableReplayAuthorityAvailable =
             continuousBatchScheduler != nil && continuousBatchReplayAuthority.durableAvailable
@@ -6743,10 +6753,15 @@ maxTokens: 1,
         snapshot: RuntimeSnapshot,
         emitTelemetry: Bool = true
     ) throws -> ContinuousBatchingCapability {
-        let capability = continuousBatchingCapability(
+        let ordinaryCapability = continuousBatchingCapability(
             draftConfigured: snapshot.hasTargetCompatibleDraft || currentDraftModelID != nil,
             requestHasStableRequestID: Self.requestHasStableRequestID(request),
             requestStateRepresentable: Self.requestStateRepresentable(request)
+        )
+        let capability = Self.keyedMaterializationCapability(
+            ordinaryCapability,
+            conversationKey: request.conversationKey,
+            supportsMaterialization: currentPagedKVModelCapabilities.supportsContiguousCacheMaterialization
         )
         // Telemetry is emitted once per request at preflight; execution paths
         // re-validate for fail-closed safety but must not re-log the same
@@ -6756,6 +6771,23 @@ maxTokens: 1,
         }
         try ContinuousBatchingPolicy.validateStrictStartup(capability)
         return capability
+    }
+
+    /// Fence cold keyed rows too: terminal serial-cache materialization uses
+    /// the same byte bridge even when persistent cached-turn batching is off.
+    nonisolated static func keyedMaterializationCapability(
+        _ capability: ContinuousBatchingCapability,
+        conversationKey: String?,
+        supportsMaterialization: Bool
+    ) -> ContinuousBatchingCapability {
+        guard capability.mode != .off, capability.unsupportedReason == nil,
+              hasReusableConversationKey(conversationKey), !supportsMaterialization
+        else { return capability }
+        return ContinuousBatchingCapability(
+            mode: capability.mode, maxActiveRows: capability.maxActiveRows,
+            queueLimit: capability.queueLimit, descriptor: capability.descriptor,
+            unsupportedReason: .stickyCacheHandoffUnavailable
+        )
     }
 
     func maxContextTokensForTest() -> Int {
@@ -6884,6 +6916,7 @@ maxTokens: 1,
             await inferenceGate.resize(to: swapServedSlots, stamp: swapGeneration)
         }
         await conversationCache.purgeAllHot()
+        conversationCache.memoryBudget.resetGeometryForModelChange()
         currentContainer = container
         if let previous = residentWeightsTicket {
             residentWeightsTicket = nil
@@ -6941,6 +6974,9 @@ maxTokens: 1,
             )
         } else {
             (parityProbe, moeProbe) = (nil, nil)
+        }
+        if let recordable = parityProbe?.contiguousCacheRecordable {
+            currentPagedKVModelCapabilities.supportsContiguousCacheMaterialization = recordable
         }
         if let measurement = Self.measurePagedKVRuntime(
             config: pagedKVConfig,
@@ -8343,7 +8379,7 @@ maxTokens: 1,
                       lease,
                       modelHasRecurrentLayers: modelHasRecurrentLayers
                   ),
-                  cachedTurnsEnabled: continuousBatchingCachedTurns,
+                  cachedTurnsEnabled: effectiveContinuousBatchingCachedTurns,
                   cachedTurnsAccepted: continuousBatchCachedTurnsAccepted
               )
         else {
@@ -8585,7 +8621,7 @@ maxTokens: 1,
             // A row that publishes a prompt snapshot publishes it in the serial
             // format and nothing else (SPEC-024 FR-CI2a); under R005 a GLM row
             // too short to carry one publishes nothing on either path.
-            keyedRowsCommitSerialFormat: (prepared.modelHasRecurrentLayers && !continuousBatchingCachedTurns)
+            keyedRowsCommitSerialFormat: (prepared.modelHasRecurrentLayers && !effectiveContinuousBatchingCachedTurns)
                 || publishedPromptSnapshotTokenCount != nil
                 || prepared.promptSnapshotAttachesToContinuousBatchRow,
             cachedPrefixRestoresNativeMTPDrafter: promptSnapshotCache?.nativeMTPDrafter != nil
@@ -9136,7 +9172,7 @@ maxTokens: 1,
             // A row that publishes a prompt snapshot publishes it in the serial
             // format and nothing else (SPEC-024 FR-CI2a); under R005 a GLM row
             // too short to carry one publishes nothing on either path.
-            keyedRowsCommitSerialFormat: (prepared.modelHasRecurrentLayers && !continuousBatchingCachedTurns)
+            keyedRowsCommitSerialFormat: (prepared.modelHasRecurrentLayers && !effectiveContinuousBatchingCachedTurns)
                 || publishedPromptSnapshotTokenCount != nil
                 || prepared.promptSnapshotAttachesToContinuousBatchRow,
             cachedPrefixRestoresNativeMTPDrafter: promptSnapshotCache?.nativeMTPDrafter != nil
@@ -9824,16 +9860,18 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         request: request,
                         admission: nativeMTPAdmission
                     )
-                    let lease = conversationCacheAllowed
-                        ? await conversationCache.begin(
-                            conversationKey: request.conversationKey,
-                            incomingTokens: promptTokenIds,
-                            modelID: request.model,
-                            kvBits: kvBitsOverride,
-                            cold: coldContext,
-                            fleetGrant: request.fleetCacheGrant
-                        )
-                        : nil
+                    let lease = Self.serialPromptSnapshotLease(
+                        conversationCacheAllowed
+                            ? await conversationCache.begin(
+                                conversationKey: request.conversationKey,
+                                incomingTokens: promptTokenIds,
+                                modelID: request.model,
+                                kvBits: kvBitsOverride,
+                                cold: coldContext,
+                                fleetGrant: request.fleetCacheGrant
+                            )
+                            : nil,
+                        model: context.model, prefillStepSize: prefillStepSize)
                     if let labConversationCacheObserver {
                         labConversationCacheObserver.record(NativeMTPLabConversationCacheObserver.event(
                             requestID: request.requestID,
@@ -9867,10 +9905,15 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             }
                             // A drain reaches these loops as task cancellation, after the
                             // wrapper has already surfaced DrainCancelledError.
+                            var iteratorState = Self.serialTextPrefillInitialState(
+                                model: generationContext.model,
+                                containsNonTextMessageContentPart: request.containsNonTextMessageContentPart)
                             let recurrent = try Self.prefillRecurrentCheckpoints(
                                 lease: lease, cache: kvCache, promptTokenIds: promptTokenIds,
                                 context: generationContext, prefillStepSize: prefillStepSize,
+                                modelID: snapshot.modelID, state: iteratorState,
                                 isCancelled: { Task.isCancelled || shouldCancel() })
+                            iteratorState = recurrent.state
                             if let resumeAt = recurrent.resumeAt {
                                 iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[resumeAt...])))
                             }
@@ -9879,7 +9922,9 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                 lease: lease, cache: kvCache, promptTokenIds: promptTokenIds,
                                 start: promptTokenIds.count - iteratorInput.text.tokens.size,
                                 context: generationContext, prefillStepSize: prefillStepSize,
+                                modelID: snapshot.modelID, state: iteratorState,
                                 isCancelled: { Task.isCancelled || shouldCancel() })
+                            iteratorState = promptSnapshot.state
                             if let resumeAt = promptSnapshot.resumeAt {
                                 iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[resumeAt...])))
                             }
@@ -9895,7 +9940,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                     isCancelled: { Task.isCancelled || shouldCancel() || drainCancelled.isFired }
                                 ) { range in
                                     let chunk = LMInput.Text(tokens: MLXArray(Array(promptTokenIds[range])))
-                                    _ = generationContext.model(chunk[text: .newAxis], cache: kvCache, state: nil)
+                                    iteratorState = generationContext.model(chunk[text: .newAxis], cache: kvCache, state: iteratorState).state
                                     eval(kvCache)
                                 }
                                 if resumeAt > start {
@@ -9909,7 +9954,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                     cache: kvCache),
                                 completePromptTokenIDs: parameters.repetitionPenalty == nil ? [] : promptTokenIds.map(Int.init))
                             let iterator = try TokenIterator(
-                                input: iteratorInput, model: generationContext.model, cache: kvCache,
+                                input: iteratorInput, model: generationContext.model, cache: kvCache, state: iteratorState,
                                 parameters: generation.parameters, components: grammarConstraint.map { constraint in
                                     generation.components.appendingLogitProcessor { GrammarLogitProcessor(constraint: constraint) }
                                 } ?? generation.components)
@@ -10778,16 +10823,18 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         request: request,
                         admission: nativeMTPAdmission
                     )
-                    let lease = conversationCacheAllowed
-                        ? await conversationCache.begin(
-                            conversationKey: request.conversationKey,
-                            incomingTokens: promptTokenIds,
-                            modelID: request.model,
-                            kvBits: kvBitsOverride,
-                            cold: coldContext,
-                            fleetGrant: request.fleetCacheGrant
-                        )
-                        : nil
+                    let lease = Self.serialPromptSnapshotLease(
+                        conversationCacheAllowed
+                            ? await conversationCache.begin(
+                                conversationKey: request.conversationKey,
+                                incomingTokens: promptTokenIds,
+                                modelID: request.model,
+                                kvBits: kvBitsOverride,
+                                cold: coldContext,
+                                fleetGrant: request.fleetCacheGrant
+                            )
+                            : nil,
+                        model: context.model, prefillStepSize: prefillStepSize)
                     if let labConversationCacheObserver {
                         labConversationCacheObserver.record(NativeMTPLabConversationCacheObserver.event(
                             requestID: request.requestID,
@@ -10820,10 +10867,15 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                 forceSimpleKV: forceSimpleKV)
                             iteratorInput = lmInput
                         }
+                        var iteratorState = Self.serialTextPrefillInitialState(
+                            model: generationContext.model,
+                            containsNonTextMessageContentPart: request.containsNonTextMessageContentPart)
                         let recurrent = try Self.prefillRecurrentCheckpoints(
                             lease: lease, cache: kvCache, promptTokenIds: promptTokenIds,
                             context: generationContext, prefillStepSize: prefillStepSize,
+                            modelID: snapshot.modelID, state: iteratorState,
                             isCancelled: { Task.isCancelled || shouldCancel() })
+                        iteratorState = recurrent.state
                         if let resumeAt = recurrent.resumeAt {
                             iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[resumeAt...])))
                         }
@@ -10832,7 +10884,9 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             lease: lease, cache: kvCache, promptTokenIds: promptTokenIds,
                             start: promptTokenIds.count - iteratorInput.text.tokens.size,
                             context: generationContext, prefillStepSize: prefillStepSize,
+                            modelID: snapshot.modelID, state: iteratorState,
                             isCancelled: { Task.isCancelled || shouldCancel() })
+                        iteratorState = promptSnapshot.state
                         if let resumeAt = promptSnapshot.resumeAt {
                             iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[resumeAt...])))
                         }
@@ -10848,7 +10902,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                 isCancelled: { Task.isCancelled || shouldCancel() || drainCancelled.isFired }
                             ) { range in
                                 let chunk = LMInput.Text(tokens: MLXArray(Array(promptTokenIds[range])))
-                                _ = generationContext.model(chunk[text: .newAxis], cache: kvCache, state: nil)
+                                iteratorState = generationContext.model(chunk[text: .newAxis], cache: kvCache, state: iteratorState).state
                                 eval(kvCache)
                             }
                             if resumeAt > start {
@@ -10892,7 +10946,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                 cache: kvCache),
                             completePromptTokenIDs: parameters.repetitionPenalty == nil ? [] : promptTokenIds.map(Int.init))
                         let iterator = try TokenIterator(
-                            input: iteratorInput, model: generationContext.model, cache: kvCache,
+                            input: iteratorInput, model: generationContext.model, cache: kvCache, state: iteratorState,
                             parameters: generation.parameters, components: grammarConstraint.map { constraint in
                                         generation.components.appendingLogitProcessor { GrammarLogitProcessor(constraint: constraint) }
                                     } ?? generation.components)
@@ -13636,8 +13690,12 @@ maxTokens: maxTokens,
 
     /// SPEC-038 AC-26: positive-cached turns may enter the scheduler for the
     /// requested tuple (operator flag on and the signed grant present).
+    private var effectiveContinuousBatchingCachedTurns: Bool {
+        continuousBatchingCachedTurns && currentPagedKVModelCapabilities.supportsContiguousCacheMaterialization
+    }
+
     private var continuousBatchCachedTurnsAccepted: Bool {
-        continuousBatchingCachedTurns
+        effectiveContinuousBatchingCachedTurns
             && continuousBatchingRequestedTuple().map {
                 continuousBatchingAcceptanceCoverage.coversCachedTurns($0)
             } == true
@@ -13680,10 +13738,28 @@ maxTokens: maxTokens,
 
     static let glm5NextRoleMarkers = ["<|system|>", "<|user|>", "<|assistant|>", "<|observation|>"]
 
+    /// Qwen's keyed prefill must not split a cold legacy-remainder chunk at
+    /// a role marker. Snapshot only whole strides, preserving the no-key
+    /// prefill and its final multi-token forward unchanged.
+    nonisolated static func qwen35SerialPromptSnapshotStepSize(
+        model: any LanguageModel,
+        modelID: String?,
+        prefillStepSize: Int
+    ) -> Int? {
+        guard modelID?.lowercased() == "qwen/qwen3.5-27b",
+              model is Qwen35Model, !(model is Qwen35MoEModel) else { return nil }
+        return max(1, prefillStepSize)
+    }
+
     nonisolated static func conversationPromptSnapshotPolicy(
         model: any LanguageModel,
-        tokenizer: any MLXLMCommon.Tokenizer
+        tokenizer: any MLXLMCommon.Tokenizer,
+        prefillStepSize: Int = 512,
+        modelID: String? = nil
     ) -> ConversationPromptSnapshotPolicy? {
+        if let step = qwen35SerialPromptSnapshotStepSize(model: model, modelID: modelID, prefillStepSize: prefillStepSize) {
+            return .referencePlanBoundary(step: step)
+        }
         if model is DeepseekV4Model {
             return .referencePlanBoundary(step: DeepseekV4Model.prefillStepSize)
         }
@@ -13698,6 +13774,49 @@ maxTokens: maxTokens,
             return ids.isEmpty ? nil : .lastRoleMarker(tokenIDs: Set(ids), resumeTokenID: roundTrip("<|assistant|>"))
         }
         return nil
+    }
+
+    /// GLM serial serving keeps the keyless iterator's whole-stride prefill
+    /// and final multi-token forward. CB retains its separate role-marker plan.
+    nonisolated static func glm5NextSerialSnapshotStepSize(
+        model: any LanguageModel, prefillStepSize: Int
+    ) -> Int? {
+        guard model is GLM5NextModel || model is GLM5NextTextModel else { return nil }
+        return max(1, prefillStepSize)
+    }
+
+    nonisolated static func serialConversationPromptSnapshotPolicy(
+        model: any LanguageModel,
+        tokenizer: any MLXLMCommon.Tokenizer,
+        prefillStepSize: Int = 512,
+        modelID: String? = nil
+    ) -> ConversationPromptSnapshotPolicy? {
+        if let step = glm5NextSerialSnapshotStepSize(model: model, prefillStepSize: prefillStepSize) {
+            return .referencePlanBoundary(step: step)
+        }
+        return conversationPromptSnapshotPolicy(
+            model: model, tokenizer: tokenizer, prefillStepSize: prefillStepSize, modelID: modelID)
+    }
+
+    /// A CB marker snapshot can land on the serial grid while still having
+    /// reached it through different forwards. Reject its plan as well as an
+    /// off-grid legacy snapshot before any layers are installed. Keep the
+    /// acquired turn and its purge/grant fences; this request simply misses.
+    nonisolated static func serialPromptSnapshotLease(
+        _ lease: ConversationCacheLease?, model: any LanguageModel, prefillStepSize: Int
+    ) -> ConversationCacheLease? {
+        guard let lease, let reusable = lease.reusableCache,
+              let step = glm5NextSerialSnapshotStepSize(model: model, prefillStepSize: prefillStepSize),
+              reusable.resumeBoundaryPlan || lease.lcp % step != 0
+        else { return lease }
+        return ConversationCacheLease(
+            key: lease.key, keyHash: lease.keyHash, incomingTokens: lease.incomingTokens,
+            modelID: lease.modelID, kvBits: lease.kvBits,
+            reusableCache: nil, cachedPromptTokens: 0, lcp: 0, trimBy: 0,
+            sampledPurgeGeneration: lease.sampledPurgeGeneration,
+            localPurgeStamp: lease.localPurgeStamp, globalPurgeStamp: lease.globalPurgeStamp,
+            fleetGrant: lease.fleetGrant
+        )
     }
 
     /// The snapshot length for `promptTokenIds`, or nil when it would be below
@@ -13723,6 +13842,18 @@ maxTokens: maxTokens,
         return count >= ConversationCache.lcpThreshold ? count : nil
     }
 
+    /// Text-only MLXVLM.Qwen35 prefixes have a zero M-RoPE delta, including after a
+    /// conversation-cache restore. The wrapper requires that anchor explicitly
+    /// once its attention cache is warm. Never infer an anchor for image input.
+    static func serialTextPrefillInitialState(
+        model: any LanguageModel, containsNonTextMessageContentPart: Bool
+    ) -> LMOutput.State? {
+        guard model is MLXVLM.Qwen35, !containsNonTextMessageContentPart else { return nil }
+        var state = LMOutput.State()
+        state[LMOutput.Key<MLXArray>("qwen35.ropeDeltas")] = MLXArray([Int32(0)])
+        return state
+    }
+
     /// SPEC-024 FR-CI2a serial prompt snapshot. With a lease on a snapshot
     /// family, prefill `cache` from `start` (the reused length, or 0) to the
     /// snapshot length and deep-copy every layer there. A reference-plan
@@ -13736,6 +13867,7 @@ maxTokens: maxTokens,
         let layers: [KVCache]?
         let tokenCount: Int
         let resumeAt: Int?
+        var state: LMOutput.State? = nil
     }
 
     static func prefillPromptSnapshot(
@@ -13745,13 +13877,16 @@ maxTokens: maxTokens,
         start: Int,
         context: ModelContext,
         prefillStepSize: Int,
+        modelID: String? = nil,
+        state: LMOutput.State? = nil,
         isCancelled: () -> Bool = { Task.isCancelled }
     ) throws -> SerialPromptSnapshot {
-        let none = SerialPromptSnapshot(applies: false, layers: nil, tokenCount: 0, resumeAt: nil)
+        let none = SerialPromptSnapshot(applies: false, layers: nil, tokenCount: 0, resumeAt: nil, state: state)
         guard lease != nil,
-              let policy = conversationPromptSnapshotPolicy(model: context.model, tokenizer: context.tokenizer)
+              let policy = serialConversationPromptSnapshotPolicy(
+                model: context.model, tokenizer: context.tokenizer, prefillStepSize: prefillStepSize, modelID: modelID)
         else { return none }
-        let skipped = SerialPromptSnapshot(applies: true, layers: nil, tokenCount: 0, resumeAt: nil)
+        let skipped = SerialPromptSnapshot(applies: true, layers: nil, tokenCount: 0, resumeAt: nil, state: state)
         guard let target = conversationPromptSnapshotTokenCount(promptTokenIds: promptTokenIds, policy: policy),
               target >= start
         else { return skipped }
@@ -13761,12 +13896,13 @@ maxTokens: maxTokens,
             guard start % reference == 0 else { return skipped }
             step = reference
         }
+        var currentState = state
         var cursor = start
         while cursor < target {
             if isCancelled() { throw CancellationError() }
             let end = min(cursor + step, target)
             let chunk = LMInput.Text(tokens: MLXArray(Array(promptTokenIds[cursor..<end])))
-            _ = context.model(chunk[text: .newAxis], cache: cache, state: nil)
+            currentState = context.model(chunk[text: .newAxis], cache: cache, state: currentState).state
             eval(cache)
             cursor = end
         }
@@ -13775,7 +13911,7 @@ maxTokens: maxTokens,
         let layers = cache.map { $0.copy() }
         eval(layers)
         return SerialPromptSnapshot(
-            applies: true, layers: layers, tokenCount: target, resumeAt: target > start ? target : nil)
+            applies: true, layers: layers, tokenCount: target, resumeAt: target > start ? target : nil, state: currentState)
     }
 
     /// SPEC-024 FR-CI2 hybrid reuse. For a keyed serial request on a model with
@@ -13792,17 +13928,23 @@ maxTokens: maxTokens,
         promptTokenIds: [Int32],
         context: ModelContext,
         prefillStepSize: Int,
+        modelID: String? = nil,
+        state: LMOutput.State? = nil,
         isCancelled: () -> Bool = { Task.isCancelled }
-    ) throws -> (checkpoints: [RecurrentStateCheckpoint], resumeAt: Int?) {
-        guard let lease else { return ([], nil) }
+    ) throws -> (checkpoints: [RecurrentStateCheckpoint], resumeAt: Int?, state: LMOutput.State?) {
+        // Role checkpoints must not split the cold Qwen or GLM serial prefill chunks.
+        guard glm5NextSerialSnapshotStepSize(model: context.model, prefillStepSize: prefillStepSize) == nil,
+              qwen35SerialPromptSnapshotStepSize(model: context.model, modelID: modelID, prefillStepSize: prefillStepSize) == nil,
+              let lease else { return ([], nil, state) }
         let positions = ConversationCache.recurrentCheckpointPositions(
             promptTokenIds: promptTokenIds,
             imStartTokenID: context.tokenizer.convertTokenToId("<|im_start|>").map(Int32.init),
             hybrid: ConversationCacheLayers.hasRecurrentLayers(cache),
             decode: { context.tokenizer.decode(tokenIds: $0) })
-        guard !positions.isEmpty else { return ([], nil) }
+        guard !positions.isEmpty else { return ([], nil, state) }
         let cachedTokens = lease.reusableCache == nil ? 0 : lease.lcp
         let reusable = lease.reusableCache?.recurrentCheckpoints ?? []
+        var currentState = state
         var cursor = cachedTokens
         var checkpoints: [RecurrentStateCheckpoint] = []
         for position in positions {
@@ -13817,7 +13959,7 @@ maxTokens: maxTokens,
                 if isCancelled() { throw CancellationError() }
                 let end = min(start + max(1, prefillStepSize), position)
                 let chunk = LMInput.Text(tokens: MLXArray(Array(promptTokenIds[start..<end])))
-                _ = context.model(chunk[text: .newAxis], cache: cache, state: nil)
+                currentState = context.model(chunk[text: .newAxis], cache: cache, state: currentState).state
                 asyncEval(cache)
                 start = end
             }
@@ -13825,11 +13967,11 @@ maxTokens: maxTokens,
             eval(cache)
             cursor = position
             guard let checkpoint = captureRecurrentCheckpoint(cache: cache, tokenCount: position) else {
-                return (checkpoints, cursor > cachedTokens ? cursor : nil)
+                return (checkpoints, cursor > cachedTokens ? cursor : nil, currentState)
             }
             checkpoints.append(checkpoint)
         }
-        return (checkpoints, cursor > cachedTokens ? cursor : nil)
+        return (checkpoints, cursor > cachedTokens ? cursor : nil, currentState)
     }
 
     /// SPEC-001-R011: prefills `[start, tokenCount)` in `stepSize` chunks,

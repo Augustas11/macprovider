@@ -442,6 +442,14 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
         else {
             throw PagedKVContiguousCacheBridgeError.blockTableMismatch
         }
+        try validateContiguousMaterializationLayout()
+    }
+
+    /// Buffer metadata only: the load-time probe advances its caches without
+    /// extending its dummy allocator table. Validate the byte bridge separately
+    /// from table ownership, without reading or converting tensor contents.
+    func validateContiguousMaterializationLayout() throws {
+        let blockCount = PagedKVBlockLayout.blockCount(tokens: storedTokens, blockSizeTokens: blockSizeTokens)
         guard blockCount > 0,
               let keyBuffer,
               let valueBuffer,
@@ -451,11 +459,17 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
                 == Self.firstBlockShape(valueBuffer, storedTokens: storedTokens, blockSizeTokens: blockSizeTokens),
               keyBuffer.dtype == valueBuffer.dtype
         else {
+            #if DEBUG || MACPROVIDER_LAB_HARNESS
+            CBTrace.log(nil, "cache_record_invalid_layer blocks=\(blockCount) stored=\(storedTokens) key_shape=\(keyBuffer?.shape.description ?? "nil") value_shape=\(valueBuffer?.shape.description ?? "nil") key_dtype=\(keyBuffer.map { String(describing: $0.dtype) } ?? "nil") value_dtype=\(valueBuffer.map { String(describing: $0.dtype) } ?? "nil")")
+            #endif
             throw PagedKVContiguousCacheBridgeError.invalidLayerState
         }
         do {
             _ = try Self.pagedDType(for: keyBuffer.dtype)
         } catch {
+            #if DEBUG || MACPROVIDER_LAB_HARNESS
+            CBTrace.log(nil, "cache_record_unsupported_dtype dtype=\(keyBuffer.dtype) key_shape=\(keyBuffer.shape) value_shape=\(valueBuffer.shape)")
+            #endif
             throw PagedKVContiguousCacheBridgeError.invalidLayerState
         }
     }
