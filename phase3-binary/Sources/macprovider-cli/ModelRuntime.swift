@@ -737,6 +737,8 @@ struct PagedKVRuntimeModelCapabilities: Equatable, Sendable {
     /// identity (SPEC-039 FR-PKV12), read from its `config.json`.
     let sparseAttention: PagedKVSparseAttentionLayout?
     let deepseekV4Pool: DeepseekV4PoolLayout?
+    /// Observed on this load; ordinary shared-forward parity is independent.
+    var supportsContiguousCacheMaterialization: Bool
 
     init(
         modelFamily: String,
@@ -744,7 +746,8 @@ struct PagedKVRuntimeModelCapabilities: Equatable, Sendable {
         hybridDecoderArchitectureVerified: Bool = false,
         ordinaryHybridOnly: Bool = false,
         sparseAttention: PagedKVSparseAttentionLayout? = nil,
-        deepseekV4Pool: DeepseekV4PoolLayout? = nil
+        deepseekV4Pool: DeepseekV4PoolLayout? = nil,
+        supportsContiguousCacheMaterialization: Bool = true
     ) {
         self.modelFamily = modelFamily
         self.requiresMoEDispatch = requiresMoEDispatch
@@ -752,6 +755,7 @@ struct PagedKVRuntimeModelCapabilities: Equatable, Sendable {
         self.ordinaryHybridOnly = ordinaryHybridOnly
         self.sparseAttention = sparseAttention
         self.deepseekV4Pool = deepseekV4Pool
+        self.supportsContiguousCacheMaterialization = supportsContiguousCacheMaterialization
     }
 
     /// Prompt tokens of the attach-time parity probes: 513 (the production
@@ -3852,6 +3856,9 @@ maxTokens: 1,
             modelCapabilities: modelCapabilities,
             runtimeCacheClass: runtimeCacheClass
         )
+        if let recordable = parityProbe?.contiguousCacheRecordable {
+            self.currentPagedKVModelCapabilities.supportsContiguousCacheMaterialization = recordable
+        }
         if let measurement = Self.measurePagedKVRuntime(
             config: self.pagedKVConfig,
             modelID: modelID,
@@ -3917,12 +3924,13 @@ maxTokens: 1,
             maxContextTokens: self.maxContextTokens,
             modelID: modelID,
             modelSHA256: self.currentModelHash,
+            modelCapabilities: self.currentPagedKVModelCapabilities,
             weightsGeneration: self.currentSpecDecodeGeneration,
             kvBitsOverride: self.kvBitsOverride,
             prefillStepSize: self.continuousBatchPromptChunkOverride,
             nativeMTPStatusSink: self.currentNativeMTPStatusSink,
             replayAuthority: self.continuousBatchReplayAuthority,
-            cachedTurns: self.continuousBatchingCachedTurns
+            cachedTurns: self.effectiveContinuousBatchingCachedTurns
         )
         if self.continuousBatchScheduler == nil {
             self.pagedKVSchedulerBackendInstalled = false
@@ -4408,7 +4416,8 @@ maxTokens: 1,
             rolloutMode: matchingEntry?.rollout.rawValue ?? ContinuousBatchingMode.off.rawValue,
             tupleSHA256: matchingEntry?.tupleSHA256,
             authorized: signedPolicyAuthorized,
-            cachedTurnsAuthorized: locallyAuthorized && matchingEntry?.tuple.cachedTurnsAccepted == true,
+            cachedTurnsAuthorized: locallyAuthorized && effectiveContinuousBatchingCachedTurns
+                && matchingEntry?.tuple.cachedTurnsAccepted == true,
             emergencyOffOverride: continuousBatchingEmergencyOffOverride,
             localProofResult: localProofResult,
             decisionReason: decisionReason
@@ -6628,12 +6637,13 @@ maxTokens: 1,
             maxContextTokens: maxContextTokens,
             modelID: currentModelID,
             modelSHA256: currentModelHash,
+            modelCapabilities: currentPagedKVModelCapabilities,
             weightsGeneration: currentSpecDecodeGeneration,
             kvBitsOverride: kvBitsOverride,
             prefillStepSize: continuousBatchPromptChunkOverride,
             nativeMTPStatusSink: currentNativeMTPStatusSink,
             replayAuthority: continuousBatchReplayAuthority,
-            cachedTurns: continuousBatchingCachedTurns
+            cachedTurns: effectiveContinuousBatchingCachedTurns
         )
         continuousBatchingDurableReplayAuthorityAvailable =
             continuousBatchScheduler != nil && continuousBatchReplayAuthority.durableAvailable
@@ -6743,10 +6753,15 @@ maxTokens: 1,
         snapshot: RuntimeSnapshot,
         emitTelemetry: Bool = true
     ) throws -> ContinuousBatchingCapability {
-        let capability = continuousBatchingCapability(
+        let ordinaryCapability = continuousBatchingCapability(
             draftConfigured: snapshot.hasTargetCompatibleDraft || currentDraftModelID != nil,
             requestHasStableRequestID: Self.requestHasStableRequestID(request),
             requestStateRepresentable: Self.requestStateRepresentable(request)
+        )
+        let capability = Self.keyedMaterializationCapability(
+            ordinaryCapability,
+            conversationKey: request.conversationKey,
+            supportsMaterialization: currentPagedKVModelCapabilities.supportsContiguousCacheMaterialization
         )
         // Telemetry is emitted once per request at preflight; execution paths
         // re-validate for fail-closed safety but must not re-log the same
@@ -6756,6 +6771,23 @@ maxTokens: 1,
         }
         try ContinuousBatchingPolicy.validateStrictStartup(capability)
         return capability
+    }
+
+    /// Fence cold keyed rows too: terminal serial-cache materialization uses
+    /// the same byte bridge even when persistent cached-turn batching is off.
+    nonisolated static func keyedMaterializationCapability(
+        _ capability: ContinuousBatchingCapability,
+        conversationKey: String?,
+        supportsMaterialization: Bool
+    ) -> ContinuousBatchingCapability {
+        guard capability.mode != .off, capability.unsupportedReason == nil,
+              hasReusableConversationKey(conversationKey), !supportsMaterialization
+        else { return capability }
+        return ContinuousBatchingCapability(
+            mode: capability.mode, maxActiveRows: capability.maxActiveRows,
+            queueLimit: capability.queueLimit, descriptor: capability.descriptor,
+            unsupportedReason: .stickyCacheHandoffUnavailable
+        )
     }
 
     func maxContextTokensForTest() -> Int {
@@ -6942,6 +6974,9 @@ maxTokens: 1,
             )
         } else {
             (parityProbe, moeProbe) = (nil, nil)
+        }
+        if let recordable = parityProbe?.contiguousCacheRecordable {
+            currentPagedKVModelCapabilities.supportsContiguousCacheMaterialization = recordable
         }
         if let measurement = Self.measurePagedKVRuntime(
             config: pagedKVConfig,
@@ -8343,7 +8378,7 @@ maxTokens: 1,
                       lease,
                       modelHasRecurrentLayers: modelHasRecurrentLayers
                   ),
-                  cachedTurnsEnabled: continuousBatchingCachedTurns,
+                  cachedTurnsEnabled: effectiveContinuousBatchingCachedTurns,
                   cachedTurnsAccepted: continuousBatchCachedTurnsAccepted
               )
         else {
@@ -8585,7 +8620,7 @@ maxTokens: 1,
             // A row that publishes a prompt snapshot publishes it in the serial
             // format and nothing else (SPEC-024 FR-CI2a); under R005 a GLM row
             // too short to carry one publishes nothing on either path.
-            keyedRowsCommitSerialFormat: (prepared.modelHasRecurrentLayers && !continuousBatchingCachedTurns)
+            keyedRowsCommitSerialFormat: (prepared.modelHasRecurrentLayers && !effectiveContinuousBatchingCachedTurns)
                 || publishedPromptSnapshotTokenCount != nil
                 || prepared.promptSnapshotAttachesToContinuousBatchRow,
             cachedPrefixRestoresNativeMTPDrafter: promptSnapshotCache?.nativeMTPDrafter != nil
@@ -9136,7 +9171,7 @@ maxTokens: 1,
             // A row that publishes a prompt snapshot publishes it in the serial
             // format and nothing else (SPEC-024 FR-CI2a); under R005 a GLM row
             // too short to carry one publishes nothing on either path.
-            keyedRowsCommitSerialFormat: (prepared.modelHasRecurrentLayers && !continuousBatchingCachedTurns)
+            keyedRowsCommitSerialFormat: (prepared.modelHasRecurrentLayers && !effectiveContinuousBatchingCachedTurns)
                 || publishedPromptSnapshotTokenCount != nil
                 || prepared.promptSnapshotAttachesToContinuousBatchRow,
             cachedPrefixRestoresNativeMTPDrafter: promptSnapshotCache?.nativeMTPDrafter != nil
@@ -13650,8 +13685,12 @@ maxTokens: maxTokens,
 
     /// SPEC-038 AC-26: positive-cached turns may enter the scheduler for the
     /// requested tuple (operator flag on and the signed grant present).
+    private var effectiveContinuousBatchingCachedTurns: Bool {
+        continuousBatchingCachedTurns && currentPagedKVModelCapabilities.supportsContiguousCacheMaterialization
+    }
+
     private var continuousBatchCachedTurnsAccepted: Bool {
-        continuousBatchingCachedTurns
+        effectiveContinuousBatchingCachedTurns
             && continuousBatchingRequestedTuple().map {
                 continuousBatchingAcceptanceCoverage.coversCachedTurns($0)
             } == true

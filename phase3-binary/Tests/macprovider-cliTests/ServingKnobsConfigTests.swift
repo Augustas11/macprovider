@@ -525,7 +525,11 @@ final class ServingKnobsConfigTests: XCTestCase {
 
     func testApplyMLXCacheLimitConvertsMegabytes() throws {
         // Setting the limit initializes the Metal device.
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
+        let bundle = Bundle(for: Self.self)
+        guard PagedKVMetallibGate.defaultMetallibExists()
+            || PagedKVMetallibGate.defaultMetallibExists(
+                bundleURL: bundle.resourceURL, executableURL: bundle.executableURL)
+        else {
             throw XCTSkip("MLX default metallib is unavailable in this test host")
         }
         XCTAssertEqual(ModelRuntime.applyMLXCacheLimit(megabytes: 2), 2 * 1024 * 1024)
@@ -1067,6 +1071,35 @@ final class ServingKnobsConfigTests: XCTestCase {
     // usable retained handoff, AND `cached_turns_accepted` on the covering
     // accepted tuple. Every other combination keeps the fence, with a reason
     // that says which condition failed.
+    func testUnsupportedMaterializationRoutesColdAndWarmKeyedRequestsWithoutDisablingOrdinaryCB() throws {
+        for mode in [ContinuousBatchingMode.canary, .on] {
+            let ordinary = ContinuousBatchingCapability(
+                mode: mode, maxActiveRows: 4, queueLimit: 8, descriptor: nil, unsupportedReason: nil)
+            for key in [nil, "", " \n\t"] as [String?] {
+                let unkeyed = ModelRuntime.keyedMaterializationCapability(
+                    ordinary, conversationKey: key, supportsMaterialization: false)
+                XCTAssertNil(unkeyed.unsupportedReason)
+                XCTAssertEqual(unkeyed.maxActiveRows, 4)
+            }
+            // The admission fence intentionally has no cache-hit input: both
+            // the first turn and a warm continuation need the same safe route.
+            let keyed = ModelRuntime.keyedMaterializationCapability(
+                ordinary, conversationKey: "conv:cold-or-warm", supportsMaterialization: false)
+            XCTAssertEqual(keyed.unsupportedReason, .stickyCacheHandoffUnavailable)
+            XCTAssertEqual(keyed.maxActiveRows, 4)
+            if mode == .on {
+                XCTAssertThrowsError(try ContinuousBatchingPolicy.validateStrictStartup(keyed)) { error in
+                    XCTAssertEqual((error as? APIError)?.code, "continuous_batching_paged_kv_handoff_unavailable")
+                }
+            } else {
+                XCTAssertNoThrow(try ContinuousBatchingPolicy.validateStrictStartup(keyed))
+                XCTAssertTrue(ContinuousBatchingPolicy.serialRouteTelemetryLine(keyed)?.contains("sticky_cache_handoff_unavailable") == true)
+            }
+            XCTAssertNil(ModelRuntime.keyedMaterializationCapability(
+                ordinary, conversationKey: "conv:recordable", supportsMaterialization: true).unsupportedReason)
+        }
+    }
+
     func testCachedTurnsFenceNeedsFlagHandoffAndAcceptedTuple() {
         for mode in [ContinuousBatchingMode.canary, .on] {
             func reason(handoff: Bool, flag: Bool, accepted: Bool, cached: Int = 32) -> ContinuousBatchingUnsupportedReason? {
