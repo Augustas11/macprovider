@@ -3,6 +3,7 @@ import MLX
 import MLXLLM
 import MLXLMCommon
 import MLXNN
+import MLXVLM
 @testable import MacProviderCore
 @testable import macprovider_cli
 import XCTest
@@ -112,6 +113,100 @@ final class ConversationPromptSnapshotTests: XCTestCase {
     }
 
     // MARK: - Snapshot position
+
+    func testRecurrentCheckpointPrefillCarriesPrimaryWrapperStateIntoDecode() async throws {
+        try Self.requireMetal()
+        let conversations = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+        var prompt = Array(repeating: Int32(1), count: 1070)
+        prompt[1048] = 0
+        let lease = try Self.unwrap(await conversations.begin(
+            conversationKey: "conv:state-only-wrapper", incomingTokens: prompt, modelID: "wrapper", kvBits: nil))
+        let model = CheckpointStateOnlyModel()
+        let context = ModelContext(configuration: .init(id: "wrapper"), model: model,
+                                   processor: FixtureProcessor(), tokenizer: NoMarkerTokenizer())
+        let cache: [KVCache] = [MambaCache()]
+        let result = try ModelRuntime.prefillRecurrentCheckpoints(
+            lease: lease, cache: cache, promptTokenIds: prompt, context: context, prefillStepSize: 512)
+        XCTAssertEqual(result.resumeAt, 1048)
+        XCTAssertEqual(result.checkpoints.map(\.tokenCount), [1048])
+        XCTAssertEqual(model.widths, [512, 512, 24])
+        XCTAssertEqual(model.incomingPositions, [nil, 512, 1024])
+        XCTAssertEqual(result.state?[CheckpointStateOnlyModel.positionKey], 1048)
+
+        var iterator = try TokenIterator(
+            input: LMInput(tokens: MLXArray(Array(prompt[1048...]))), model: model, cache: cache,
+            state: result.state, parameters: GenerateParameters(maxTokens: 2, temperature: 0))
+        XCTAssertNotNil(iterator.next())
+        XCTAssertNotNil(iterator.next())
+        XCTAssertEqual(model.widths, [512, 512, 24, 22, 1, 1])
+        XCTAssertEqual(model.incomingPositions, [nil, 512, 1024, 1048, 1070, 1071])
+        await conversations.abort(lease)
+    }
+
+    func testQwen35VLMTextOnlyRestoreSeedsZeroRotaryAnchorWithoutBuyerIdentity() throws {
+        try Self.requireMetal()
+        let model = try Self.tinyQwen35VLM()
+        let models = try Self.tinyQwen35Models()
+        let key = LMOutput.Key<MLXArray>("qwen35.ropeDeltas")
+        let state = ModelRuntime.serialTextPrefillInitialState(
+            model: model, containsNonTextMessageContentPart: false)
+        let delta = try XCTUnwrap(state?[key])
+        XCTAssertEqual(delta.shape, [1], "one rotary anchor for the single text sequence")
+        XCTAssertEqual(delta.dtype, .int32)
+        XCTAssertEqual(delta.item(Int32.self), 0)
+        XCTAssertNil(ModelRuntime.serialTextPrefillInitialState(
+            model: model, containsNonTextMessageContentPart: true))
+        let unrelatedModels: [any LanguageModel] = [models.text, models.dense, models.moe, CheckpointStateOnlyModel()]
+        for unrelated in unrelatedModels {
+            XCTAssertNil(ModelRuntime.serialTextPrefillInitialState(
+                model: unrelated, containsNonTextMessageContentPart: false))
+        }
+    }
+
+    func testRealQwen35VLMCheckpointChunksAndRestoredWarmCacheCarryRotaryAnchor() async throws {
+        try Self.requireMetal()
+        try await Device.withDefaultDevice(.gpu) {
+            let model = try Self.tinyQwen35VLM()
+            let conversations = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+            var prompt = Array(repeating: Int32(1), count: 70)
+            prompt[64] = 0
+            let lease = try Self.unwrap(await conversations.begin(
+                conversationKey: "conv:real-vlm-wrapper", incomingTokens: prompt, modelID: "local-artifact", kvBits: nil))
+            let context = ModelContext(configuration: .init(id: "local-artifact"), model: model,
+                                       processor: FixtureProcessor(), tokenizer: NoMarkerTokenizer())
+            let cache = try model.newCache(parameters: nil)
+            let state = ModelRuntime.serialTextPrefillInitialState(
+                model: model, containsNonTextMessageContentPart: false)
+            let checkpoint = try ModelRuntime.prefillRecurrentCheckpoints(
+                lease: lease, cache: cache, promptTokenIds: prompt, context: context,
+                prefillStepSize: 32, state: state)
+            XCTAssertEqual(checkpoint.resumeAt, 64)
+            XCTAssertEqual(checkpoint.checkpoints.map(\.tokenCount), [64])
+            XCTAssertEqual(cache.last?.offset, 64)
+            let key = LMOutput.Key<MLXArray>("qwen35.ropeDeltas")
+            XCTAssertEqual(try XCTUnwrap(checkpoint.state?[key]).item(Int32.self), 0)
+
+            // Restore the same KV without retaining the wrapper's per-call state.
+            // The real VLM prepare must reject nil, and accept the text-only anchor.
+            let restored = cache.map { $0.copy() }
+            eval(restored)
+            let tail = LMInput(tokens: MLXArray(Array(prompt[64...])))
+            XCTAssertThrowsError(try model.prepare(tail, cache: restored, state: nil, prefill: .init()))
+            let restoredState = ModelRuntime.serialTextPrefillInitialState(
+                model: model, containsNonTextMessageContentPart: false)
+            guard case .logits(let resumed) = try model.prepare(
+                tail, cache: restored, state: restoredState, prefill: .init()),
+                  case .logits(let carried) = try model.prepare(
+                tail, cache: cache, state: checkpoint.state, prefill: .init()) else {
+                return XCTFail("the VLM wrapper must return prepared logits")
+            }
+            XCTAssertTrue((resumed.logits .== carried.logits).all().item(Bool.self))
+            XCTAssertEqual(restored.last?.offset, prompt.count)
+            XCTAssertEqual(try XCTUnwrap(resumed.state?[key]).item(Int32.self), 0)
+            await conversations.abort(lease)
+        }
+    }
+
 
     func testQwen35SnapshotPolicyRequiresTheLoadedDenseIdentityAndWrapper() throws {
         try Self.requireMetal()
@@ -580,6 +675,25 @@ final class ConversationPromptSnapshotTests: XCTestCase {
         return layers
     }
 
+    private static func tinyQwen35VLM() throws -> MLXVLM.Qwen35 {
+        let data = Data("""
+        {"model_type":"qwen3_5_vl","image_token_id":500,"video_token_id":501,
+         "vision_start_token_id":502,"vision_end_token_id":503,"vocab_size":512,
+         "text_config":{"model_type":"qwen3_5","hidden_size":64,"num_hidden_layers":2,
+          "intermediate_size":128,"num_attention_heads":4,"num_key_value_heads":2,
+          "head_dim":32,"vocab_size":512,"full_attention_interval":2,
+          "linear_num_value_heads":4,"linear_num_key_heads":2,"linear_key_head_dim":32,
+          "linear_value_head_dim":32,"linear_conv_kernel_dim":4,"max_position_embeddings":4096,
+          "rope_parameters":{"type":"default","mrope_section":[8,4,4],
+                             "rope_theta":100000.0,"partial_rotary_factor":1.0}},
+         "vision_config":{"model_type":"qwen3_vl","depth":2,"hidden_size":32,
+          "intermediate_size":64,"out_hidden_size":64,"num_heads":2,"patch_size":16,
+          "spatial_merge_size":2,"temporal_patch_size":2,"num_position_embeddings":64}}
+        """.utf8)
+        let config = try JSONDecoder().decode(MLXVLM.Qwen35Configuration.self, from: data)
+        return withRandomState(MLXRandom.RandomState(seed: 1)) { MLXVLM.Qwen35(config) }
+    }
+
     private static func tinyQwen35Models() throws -> (
         text: Qwen35TextModel, dense: Qwen35Model, moe: Qwen35MoEModel
     ) {
@@ -593,7 +707,7 @@ final class ConversationPromptSnapshotTests: XCTestCase {
          "rope_parameters":{"type":"default","rope_theta":100000.0,"partial_rotary_factor":0.25}}
         """.utf8)
         let decoder = JSONDecoder()
-        let wrapper = try decoder.decode(Qwen35Configuration.self, from: data)
+        let wrapper = try decoder.decode(MLXLLM.Qwen35Configuration.self, from: data)
         return (Qwen35TextModel(try decoder.decode(Qwen35TextConfiguration.self, from: data)),
                 Qwen35Model(wrapper), Qwen35MoEModel(wrapper))
     }
@@ -769,4 +883,32 @@ private struct NoMarkerTokenizer: MLXLMCommon.Tokenizer {
     func applyChatTemplate(
         messages: [[String: any Sendable]], tools: [[String: any Sendable]]?, additionalContext: [String: any Sendable]?
     ) throws -> [Int] { [] }
+}
+
+/// Implements only the primary text/state interface: the legacy array overload
+/// must never be selected, and every forward records the state it received.
+private final class CheckpointStateOnlyModel: Module, LanguageModel, KVCacheDimensionProvider {
+    static let positionKey = LMOutput.Key<Int>("checkpoint.position")
+    let kvHeads = [1]
+    var widths: [Int] = []
+    var incomingPositions: [Int?] = []
+
+    func prepare(
+        _ input: LMInput, cache: [KVCache], state: LMOutput.State?, prefill: PrefillParameters
+    ) throws -> PrepareResult { .tokens(input.text) }
+
+    func callAsFunction(_ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?) -> LMOutput {
+        let width = input.tokens.dim(1)
+        let incoming = state?[Self.positionKey]
+        widths.append(width)
+        incomingPositions.append(incoming)
+        let position = (incoming ?? 0) + width
+        for case let layer as MambaCache in cache ?? [] {
+            layer[0] = MLXArray(Int32(position))
+            layer[1] = MLXArray(Int32(position))
+        }
+        var next = LMOutput.State()
+        next[Self.positionKey] = position
+        return LMOutput(logits: MLXArray.zeros([1, width, 4]), state: next)
+    }
 }
