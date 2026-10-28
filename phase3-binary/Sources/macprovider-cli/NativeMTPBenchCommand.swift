@@ -562,6 +562,7 @@ final class NativeMTPBenchRunner {
         _ corpus: NativeMTPFrozenDSparkCorpus,
         longPrompts: [Int: [Int]]
     ) async throws {
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
         guard layout.family == .deepseekV4, onlyCell == nil, phase != .sustained,
               !FileManager.default.fileExists(atPath: outURL.path) else {
             throw NativeMTPBenchError.invalidPolicy("frozen requests require DeepSeek, a fresh --out, and no sustained/only-cell selection")
@@ -641,8 +642,12 @@ final class NativeMTPBenchRunner {
                 throw NativeMTPBenchError.assertionFailed("native frozen group failed token parity or proposed no drafts: \(groupIndex)")
             }
         }
+        #else
+        throw NativeMTPBenchError.invalidPolicy("frozen requests require a debug or MACPROVIDER_LAB_HARNESS build")
+        #endif
     }
 
+    #if DEBUG || MACPROVIDER_LAB_HARNESS
     private struct FrozenResult: Sendable {
         let name: String
         let result: ContinuousBatchSchedulerResult
@@ -743,6 +748,7 @@ final class NativeMTPBenchRunner {
         }
         return FrozenWave(results: results, proposedTokens: delta.proposedTokens, record: record)
     }
+    #endif
 
     private func runCell(
         _ cell: NativeMTPBenchCell,

@@ -892,12 +892,14 @@ final class NativeMTPHardwareE2ERunner {
         if family == .deepseekV4 {
             let backend = DeepseekV4ContinuousBatchBackend(container: container,
                 nativeMTPDrafterContainer: drafterContainer)
+            #if DEBUG || MACPROVIDER_LAB_HARNESS
             if drafterContainer != nil {
                 let recorder = dsparkRoundRecorder
                 backend.installLabRoundObserver { requestID, proposed, accepted in
                     recorder.record(requestID: requestID, proposed: proposed, accepted: accepted)
                 }
             }
+            #endif
             return backend
         }
         return PagedKVSharedForwardBackend(container: container,
