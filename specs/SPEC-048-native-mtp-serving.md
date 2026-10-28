@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.63
+**Version:** 0.1.64
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.63",
+  "version": "0.1.64",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -506,11 +506,38 @@ The authorized dependency tuple is exact:
 
 | Repository | Fork tag | Revision | Upstream base |
 |---|---|---|---|
-| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.10.15` | `3905a1b0499f0f38c0f94a008034a0362b9e3dca` | fork `3.32.3-macprovider.10.1` (`87dc5159c87d73f4d7abd524fbdd17760cf56285`) on fork `3.32.3-macprovider.10` (`b4077dcb28336b388f3d09be2a091c12f8e179aa`) on `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
+| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.10.15.1` | `36d24585f9373c2661f61f5e5b485c8d66c43a2b` | fork `3.32.3-macprovider.10.1` (`87dc5159c87d73f4d7abd524fbdd17760cf56285`) on fork `3.32.3-macprovider.10` (`b4077dcb28336b388f3d09be2a091c12f8e179aa`) on `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
 | `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.9` | `29d3b93375cc56cd2649b40e4310a8bc445e9874` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
 | `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.4` | `2f512e3997349c8648f5d7c5113eb2c825aa242d` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
 
-The mlx-swift-lm row is the immutable combined fork tag `3.32.3-macprovider.10.15`
+The mlx-swift-lm row is the immutable LFM routing correction tag
+`3.32.3-macprovider.10.15.1`
+(`36d24585f9373c2661f61f5e5b485c8d66c43a2b`), directly on
+`3.32.3-macprovider.10.15`
+(`3905a1b0499f0f38c0f94a008034a0362b9e3dca`). Its production delta is
+limited to `LFM2MoE.swift`: expert selection takes the positive
+`argPartition` suffix, preserving the reference expert accumulation order,
+with its ordered-routing regression in `LFM2MoeRoutingTests.swift`.
+Shared forward, attention, cache and MTP sources, Qwen and GLM model sources,
+the Prism loader, and all transitive dependency pins MUST remain byte-identical
+to the parent. This is a correction within the existing upstream base, not an
+upstream rebase or a change to the mlx-swift or MLX core tuple rows.
+
+The LFM routing correction requires its own ordinary-serving token parity
+against the reference and cached-turn/shared-row acceptance. It does not
+qualify an LFM native-MTP tuple or expand any Qwen/GLM qualification scope.
+For previously qualified Qwen/GLM MTP tuples, MTP-13 governs reuse when review
+establishes that their draft/verify/commit behavior, artifacts, request profile,
+hardware and serving bounds are unchanged. A dependency identity change alone
+MUST NOT relabel historical results as measurements of this tag. Original
+measurement source, runtime identity and benchmark-policy `provider_commit`
+remain unchanged; any changed signed runtime/digest binding requires a separate
+authenticated identity-only reuse record under MTP-13. Existing R015 evidence
+is reused under those conditions, rather than regenerated for this LFM-only
+delta. The immutable tag MUST exist and resolve to the exact row revision
+before a production build; this declaration does not substitute for that gate.
+
+The parent is the immutable combined fork tag `3.32.3-macprovider.10.15`
 (commit `3905a1b0499f0f38c0f94a008034a0362b9e3dca`, branch `campaign/2144-native-mtp`). It preserves
 both the GLM candidate `3.32.3-macprovider.10.13` (`b128c37f…`) and the Prism
 loader `3.32.3-macprovider.10.14` (`9b2766ee…`), each based on
@@ -2089,7 +2116,7 @@ the journey must include its independent and combined evidence.
 | `native-mtp-serving` | `DECISION_REQUIRED` | `@Augustas11` | `#1770` | Authority acceptance, release-candidate review, and signed real-hardware journey evidence for the first production tuple. |
 | First Qwen-family MTP artifact | `UNKNOWN` | `@Augustas11` | `#1770` | Legally/provenance-clean immutable model, tokenizer, MTP manifest, and exact hashes. |
 | MLX dependency tuple | `RESOLVED_FOR_TUPLE` | `@Augustas11` | `#1906` | The operator's permanent fork model (MTP-3) replaces the upstream-release requirement. MTP-3 names the exact three-fork tuple; each rebase passes the runbook's per-rebase acceptance gate and a SPEC revision. |
-| GLM-5.3-Flash `glm5_next_mtp_v1` tuple | `DECISION_REQUIRED` | `@Augustas11` | `#2029` | Pending: the `JOURNEY-NATIVE-MTP-SERVING` run on the final tagged tuple (mlx-swift-lm `3.32.3-macprovider.10.15`) and the GLM R015 record, which complete the R003 review record. Implemented in the campaign branch: the observer, sidecar parsing, v2 projection reader, SPEC-023 v0.22.27 widths, the fork's MTP-1 drafter and packed verification, and the provider drafter load path, admission gate and paged packed verification. |
+| GLM-5.3-Flash `glm5_next_mtp_v1` tuple | `DECISION_REQUIRED` | `@Augustas11` | `#2029` | Pending: the `JOURNEY-NATIVE-MTP-SERVING` run on the R003-authorized tagged tuple and the GLM R015 record, which complete the R003 review record. An LFM-only tuple identity change follows MTP-13 and preserves the original measured GLM runtime/source identities. Implemented in the campaign branch: the observer, sidecar parsing, v2 projection reader, SPEC-023 v0.22.27 widths, the fork's MTP-1 drafter and packed verification, and the provider drafter load path, admission gate and paged packed verification. |
 | First MLX-native MXFP8 artifact | `UNKNOWN` | `@Augustas11` | `#1770` | SPEC-023/SPEC-010 format, fit, quality, license, provenance, and hardware evidence. |
 | Batched-verify numerical parity | `RESOLVED_FOR_TUPLE` | `@Augustas11` | `#1770` | The qmv-to-qmm switch at 12 packed verify tokens cannot occur for the first tuple: `max_native_active_rows` is 1 and depth is 1, so a packed verify is at most 2 tokens, and rows above the bound ride the ordinary forward at depth zero. A tuple whose bound times `proposal_depth + 1` reaches 12 must decide between a bounded drift allowance and kernel-matched verification before it can be signed. |
 | Depth-1 throughput value | `RESOLVED_FOR_TUPLE` | `@Augustas11` | `#1770` | The 2026-10-06 quiet R015 (policy `e24cb7bc…`, amended 0.1.25 gates) passed every cell for the A3B Studio tuple: one-slot decode ratio 1.19-1.28 with corrected lower bounds +18% to +26%, gated s2/s8 cells non-inferior. The value is one-slot only; the R007 bound of 1 keeps native off above it. |
@@ -2128,6 +2155,12 @@ the text-only path without image inputs; that does not admit multimodal buyer
 requests.
 
 ## 9. Changelog and history
+
+- **0.1.64 (2026-10-28)** — R003 names the LFM-only expert-order correction
+  `3.32.3-macprovider.10.15.1` (`36d24585f9373c2661f61f5e5b485c8d66c43a2b`)
+  on `.10.15`. Shared/Qwen/GLM sources and transitive pins remain unchanged.
+  Existing qualification retains its actual measured identity and scope;
+  MTP-13 governs identity-only rebinding without rerunning unchanged R015 cells.
 
 - **0.1.62 (2026-10-27)** — R003 names the combined fork tag
   `3.32.3-macprovider.10.15` (`3905a1b0499f0f38c0f94a008034a0362b9e3dca`), preserving the GLM packed

@@ -24,6 +24,8 @@ public enum ToolCallGrammar: String, Sendable, Equatable, CaseIterable {
     /// `<｜DSML｜parameter name="KEY" string="true|false">VALUE</｜DSML｜parameter>`
     /// (`encoding/encoding_dsv4.py`; the family has no Jinja template).
     case dsml
+    /// LFM2 Pythonic call list inside native tool-call delimiters.
+    case lfm2
 
     /// Catalog-family fallback. Families whose template has no tool support
     /// (Qwen2-VL) return nil, and so does any unknown family.
@@ -40,7 +42,18 @@ public enum ToolCallGrammar: String, Sendable, Equatable, CaseIterable {
         if id.contains("gemma-4") || id.contains("gemma4") { return .gemma4 }
         if id.contains("nemotron-3") || id.contains("nemotron3") { return .qwen }
         if id.contains("deepseek-v4") || id.contains("deepseek_v4") { return .dsml }
+        if id.contains("lfm2.5-24b-a2b") { return .lfm2 }
         return nil
+    }
+
+    /// LFM templates emit these names as unquoted Python keywords.
+    public static func isLFMIdentifier(_ value: String) -> Bool {
+        let keywords: Set<String> = ["False", "None", "True", "and", "as", "assert", "async", "await", "break", "class", "continue", "def", "del", "elif", "else", "except", "finally", "for", "from", "global", "if", "import", "in", "is", "lambda", "nonlocal", "not", "or", "pass", "raise", "return", "try", "while", "with", "yield"]
+        guard !keywords.contains(value) else { return false }
+        let bytes = Array(value.utf8)
+        guard let first = bytes.first,
+              (65...90).contains(first) || (97...122).contains(first) || first == 95 else { return false }
+        return bytes.allSatisfy { (65...90).contains($0) || (97...122).contains($0) || (48...57).contains($0) || $0 == 95 }
     }
 
     /// Grammar named by an mlx-swift-lm `ToolCallFormat` raw value, which the
@@ -52,6 +65,7 @@ public enum ToolCallGrammar: String, Sendable, Equatable, CaseIterable {
         case "llama3": return .llama3
         case "gemma4": return .gemma4
         case "gpt_oss": return .harmony
+        case "lfm2": return .lfm2
         default: return nil
         }
     }

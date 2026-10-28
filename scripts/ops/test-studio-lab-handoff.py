@@ -283,7 +283,7 @@ def remote_recovery_case(*, phase="provider_bootstrapped", watchdog=False,
     clock = [0]
     journal = {"schema_version": handoff.SCHEMA, "manifest_sha256": "digest", "phase": phase,
                "provider_pid": 41 if phase == "provider_stable" else None,
-               "provider_start_us": 42 if phase == "provider_stable" else None}
+               "provider_instance_id": "11111111-1111-4111-8111-111111111111" if phase == "provider_stable" else None}
     x = manifest()["studio"]
     namespace.update(check_static=lambda _: "/binary", handoff=lambda _: None,
                      load_journal=lambda *_: journal, put=lambda *_: None,
@@ -295,7 +295,7 @@ def remote_recovery_case(*, phase="provider_bootstrapped", watchdog=False,
         return {"binary_version": x["binary_version"], "model": x["model"],
                 "model_loaded": clock[0] >= ready_after, "network_state": "buyer_serving",
                 "continuous_batching": {"active": True, "policy": {"cached_turns_authorized": True}},
-                "service_instance": {"pid": 99 if changed_pid else 41, "process_start_us": 42}}
+                "service_instance": {"pid": 99 if changed_pid else 41, "instance_id": "11111111-1111-4111-8111-111111111111"}}
     def launch(*_args, **_kwargs):
         nonlocal watchdog
         watchdog = True
@@ -393,5 +393,112 @@ except RuntimeError as exc:
     assert "process" in str(exc) and clock[0] == 10, (exc, clock)
 else:
     raise AssertionError("provider death did not fail immediately")
+
+# Released service_instance has UUID/start text, not process_start_us. Refuse
+# missing/malformed UUIDs and a new instance even when the PID was reused.
+namespace, x, clock = remote_recovery_case(phase="provider_stable", watchdog=True)
+snapshot = namespace["status"]
+for value in (None, 42, "not-a-uuid", "22222222-2222-4222-8222-222222222222"):
+    def wrong_instance(port, value=value):
+        result = snapshot(port)
+        result["service_instance"]["instance_id"] = value
+        return result
+    namespace["status"] = wrong_instance
+    try:
+        namespace["recover"](x, "digest")
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("stable recovery accepted a different/missing instance")
+
+# An interrupted stability interval cannot rebind a bootstrap journal either.
+namespace, x, clock = remote_recovery_case()
+journal = namespace["load_journal"](None, None)
+journal.update(provider_pid=41, provider_instance_id="22222222-2222-4222-8222-222222222222")
+try:
+    namespace["recover"](x, "digest")
+except RuntimeError as exc:
+    assert "bootstrap journal" in str(exc)
+else:
+    raise AssertionError("bound bootstrap journal adopted another instance")
+
+# Migrate only the old controller's unbound bootstrap record. Bound journals
+# must fail closed rather than adopting a process under a different identity.
+namespace = {}
+exec(handoff.REMOTE, namespace)
+with tempfile.TemporaryDirectory() as tmp:
+    path = Path(tmp) / "journal.json"
+    legacy = {"schema_version": handoff.SCHEMA, "manifest_sha256": "digest",
+              "phase": "provider_bootstrapped", "provider_pid": None, "provider_start_us": None}
+    path.write_text(json.dumps(legacy))
+    os.chmod(path, 0o600)
+    migrated = namespace["load_journal"](str(path), "digest")
+    assert migrated["provider_instance_id"] is None and "provider_start_us" not in migrated
+    for change in ({"provider_pid": 41}, {"provider_start_us": 42}, {"phase": "provider_stable"}):
+        path.write_text(json.dumps(dict(legacy, **change)))
+        try:
+            namespace["load_journal"](str(path), "digest")
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("bound legacy identity was silently migrated")
+
+# Hash the real installed-file path: released CLI binaries exceed metadata limits.
+namespace = {}
+exec(handoff.REMOTE, namespace)
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    binary = root / "macprovider-cli"
+    binary.write_bytes(b"released-binary-fixture\n" * (9 * 1024 * 1024 // 24 + 1))
+    assert binary.stat().st_size > 8 * 1024 * 1024
+    x = manifest()["studio"]
+    x["install_dir"] = tmp
+    x["binary_sha256"] = hashlib.sha256(binary.read_bytes()).hexdigest()
+    for field in ("config", "provider_plist", "watchdog_plist"):
+        path = root / field
+        path.write_bytes(b"immutable fixture\n")
+        x[field + "_path"] = str(path)
+        x[field + "_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    def identity_command(args, **_kwargs):
+        if args[0] == "codesign" and "-d" in args:
+            return SimpleNamespace(stdout="Identifier=fixture\nTeamIdentifier=fixture-team\nCDHash=ABC123\n")
+        return SimpleNamespace(stdout=("1.8.274" if args[0] == str(binary) else x["hardware_model"]) + "\n")
+    namespace["subprocess"] = SimpleNamespace(PIPE=subprocess.PIPE, DEVNULL=subprocess.DEVNULL,
+                                             STDOUT=subprocess.STDOUT, run=identity_command)
+    assert namespace["check_static"](x) == str(binary)
+    static = namespace["static_provenance"](x)
+    assert static["installed"]["binary_sha256"] == x["binary_sha256"]
+    assert static["installed"]["binary_version"] == "1.8.274"
+    assert static["launch"]["pid"] is None
+
+    # Binary hashing is bounded in memory and still checks exact byte identity.
+    os_proxy = SimpleNamespace(**vars(os))
+    def bounded_read(fd, count):
+        assert count <= 1024 * 1024, count
+        return os.read(fd, count)
+    os_proxy.read = bounded_read
+    namespace["os"] = os_proxy
+    assert namespace["digest"](binary, 512 * 1024 * 1024) == x["binary_sha256"]
+    with binary.open("r+b") as file:
+        file.seek(-1, os.SEEK_END)
+        file.write(b"!")
+    try:
+        namespace["check_static"](x)
+    except RuntimeError as exc:
+        assert "hash differs" in str(exc), exc
+    else:
+        raise AssertionError("changed released binary unexpectedly accepted")
+
+    # Metadata keeps its smaller bound; oversized binaries refuse before reads.
+    for path, limit in ((binary, 8 * 1024 * 1024), (root / "oversize", 512 * 1024 * 1024)):
+        if not path.exists():
+            with path.open("wb") as file:
+                file.truncate(limit + 1)
+        try:
+            namespace["digest"](path, limit)
+        except RuntimeError as exc:
+            assert "unsafe file size" in str(exc), exc
+        else:
+            raise AssertionError("oversized immutable file unexpectedly accepted")
 
 print("studio-lab-handoff offline manifest and recovery guards: PASS")

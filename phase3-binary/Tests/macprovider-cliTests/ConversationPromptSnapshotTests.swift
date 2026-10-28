@@ -114,6 +114,146 @@ final class ConversationPromptSnapshotTests: XCTestCase {
 
     // MARK: - Snapshot position
 
+    func testQwen35SnapshotPolicyRequiresTheLoadedDenseIdentityAndWrapper() throws {
+        try Self.requireMetal()
+        let models = try Self.tinyQwen35Models()
+        for step in [128, 512, 1024] {
+            XCTAssertEqual(ModelRuntime.conversationPromptSnapshotPolicy(
+                model: models.dense, tokenizer: NoMarkerTokenizer(), prefillStepSize: step,
+                modelID: "qwen/qwen3.5-27b"), .referencePlanBoundary(step: step))
+        }
+        let excludedIDs: [String?] = [nil, "qwen/qwen3.6-27b", "qwen/qwen3.5-35b-a3b"]
+        for id in excludedIDs {
+            XCTAssertNil(ModelRuntime.conversationPromptSnapshotPolicy(
+                model: models.dense, tokenizer: NoMarkerTokenizer(), modelID: id))
+        }
+        let excludedModels: [any LanguageModel] = [models.text, models.moe]
+        for model in excludedModels {
+            XCTAssertNil(ModelRuntime.qwen35SerialPromptSnapshotStepSize(
+                model: model, modelID: "qwen/qwen3.5-27b", prefillStepSize: 512))
+        }
+        for model in try Self.tinyLFMModels() {
+            XCTAssertNil(ModelRuntime.qwen35SerialPromptSnapshotStepSize(
+                model: model, modelID: "qwen/qwen3.5-27b", prefillStepSize: 512))
+        }
+        XCTAssertNil(ModelRuntime.lfmSerialReferencePrefillStepSize(model: models.dense, prefillStepSize: 512),
+                     "Qwen must keep its legacy multi-token tail")
+    }
+
+    func testQwen35PositiveSnapshotHitKeepsTheNoKeyLegacyTail() async throws {
+        let cache = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+        let seedPrompt = int32Range(0..<993)
+        let boundary = try XCTUnwrap(ModelRuntime.conversationPromptSnapshotTokenCount(
+            promptTokenIds: seedPrompt, policy: .referencePlanBoundary(step: 512)))
+        XCTAssertEqual(boundary, 512, "the role checkpoint at 986 must not split a legacy chunk")
+        _ = try await seedSnapshot(cache, key: "conv:qwen-legacy", tokens: Array(seedPrompt.prefix(boundary)))
+        let extensionPrompt = int32Range(0..<989) + int32Range(2000..<2027)
+        let lease = try Self.unwrap(await cache.begin(
+            conversationKey: "conv:qwen-legacy", incomingTokens: extensionPrompt, modelID: "model-a", kvBits: nil))
+        XCTAssertNotNil(lease.reusableCache)
+        XCTAssertEqual(lease.cachedPromptTokens, 512)
+        var coldChunks: [Range<Int>] = []
+        var warmChunks: [Range<Int>] = []
+        let coldCursor = try ModelRuntime.cancellableLocalPrefill(
+            tokenCount: extensionPrompt.count, from: 0, stepSize: 512, isCancelled: { false }
+        ) { coldChunks.append($0) }
+        let warmCursor = try ModelRuntime.cancellableLocalPrefill(
+            tokenCount: extensionPrompt.count, from: lease.lcp, stepSize: 512, isCancelled: { false }
+        ) { warmChunks.append($0) }
+        XCTAssertEqual(coldChunks, [0..<512])
+        XCTAssertTrue(warmChunks.isEmpty)
+        XCTAssertEqual(coldCursor, warmCursor)
+        XCTAssertEqual(extensionPrompt.count - warmCursor, 504,
+                       "both iterators receive the original 504-token tail, not 503 + 1")
+        await cache.abort(lease)
+    }
+
+    func testQwen35SnapshotsSkipRolePrefillAndDoNotPrefillWithoutAKey() async throws {
+        try Self.requireMetal()
+        let model = try Self.tinyQwen35Models().dense
+        let context = ModelContext(configuration: .init(id: "qwen/qwen3.5-27b"), model: model,
+                                   processor: FixtureProcessor(), tokenizer: NoMarkerTokenizer())
+        let cache = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+        var prompt = Array(repeating: Int32(1), count: 1016)
+        prompt[986] = 0 // NoMarkerTokenizer's role marker.
+        let lease = try Self.unwrap(await cache.begin(
+            conversationKey: "conv:qwen-no-role-prefill", incomingTokens: prompt, modelID: "qwen/qwen3.5-27b", kvBits: nil))
+        let layers: [KVCache] = [MambaCache()]
+        let recurrent = try ModelRuntime.prefillRecurrentCheckpoints(
+            lease: lease, cache: layers, promptTokenIds: prompt, context: context,
+            prefillStepSize: 512, modelID: "qwen/qwen3.5-27b", isCancelled: { true })
+        XCTAssertTrue(recurrent.checkpoints.isEmpty)
+        XCTAssertNil(recurrent.resumeAt)
+        let noKey = try ModelRuntime.prefillPromptSnapshot(
+            lease: nil, cache: layers, promptTokenIds: prompt, start: 0, context: context,
+            prefillStepSize: 512, modelID: "qwen/qwen3.5-27b", isCancelled: { true })
+        XCTAssertFalse(noKey.applies)
+        XCTAssertNil(noKey.resumeAt)
+        XCTAssertTrue(layers[0].state.isEmpty)
+        await cache.abort(lease)
+    }
+
+    func testLFMPoliciesUseTheConfiguredReferenceGridWithoutRoleMarkers() throws {
+        try Self.requireMetal()
+        for model in try Self.tinyLFMModels() {
+            for step in [128, 512, 1024] {
+                XCTAssertEqual(ModelRuntime.lfmSerialReferencePrefillStepSize(model: model, prefillStepSize: step), step)
+                let policy = ModelRuntime.conversationPromptSnapshotPolicy(
+                    model: model, tokenizer: NoMarkerTokenizer(), prefillStepSize: step)
+                XCTAssertEqual(policy, .referencePlanBoundary(step: step))
+                XCTAssertEqual(ModelRuntime.conversationPromptSnapshotTokenCount(
+                    promptTokenIds: Array(repeating: 1, count: 1070), policy: policy), step * (1069 / step))
+            }
+        }
+    }
+
+    func testLFMReferencePrefillReservesOneTokenAtShortAndLongPromptLengths() throws {
+        for step in [128, 512, 1024] {
+            for count in [1, 10, step, step + 1, 1034, 1070, 8202] {
+                var chunks: [Range<Int>] = []
+                let cursor = try ModelRuntime.cancellableLocalPrefill(
+                    tokenCount: count, from: 0, stepSize: step, referenceStepSize: step,
+                    isCancelled: { false }
+                ) { chunks.append($0) }
+                XCTAssertEqual(cursor, count - 1)
+                XCTAssertTrue(chunks.allSatisfy { $0.count <= step })
+                XCTAssertEqual(chunks.flatMap { Array($0) }, Array(0..<(count - 1)))
+                if count == 1034, step == 512 {
+                    XCTAssertEqual(chunks, [0..<512, 512..<1024, 1024..<1033])
+                }
+            }
+        }
+    }
+
+    func testLFMPositiveSnapshotHitPreservesTheColdReferenceChunkPlan() async throws {
+        let cache = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+        let firstPrompt = int32Range(0..<1052)
+        // The assistant marker at 1048 must not split the reference grid.
+        let snapshotCount = try XCTUnwrap(ModelRuntime.conversationPromptSnapshotTokenCount(
+            promptTokenIds: firstPrompt, policy: .referencePlanBoundary(step: 512)))
+        XCTAssertEqual(snapshotCount, 1024)
+        _ = try await seedSnapshot(cache, key: "conv:lfm-grid", tokens: Array(firstPrompt.prefix(snapshotCount)))
+        let secondPrompt = int32Range(0..<1051) + int32Range(2000..<2019)
+        let lease = try Self.unwrap(await cache.begin(
+            conversationKey: "conv:lfm-grid", incomingTokens: secondPrompt, modelID: "model-a", kvBits: nil))
+        XCTAssertEqual(lease.cachedPromptTokens, 1024)
+        XCTAssertNotNil(lease.reusableCache)
+        var cold: [Range<Int>] = []
+        var resumed: [Range<Int>] = []
+        let coldCursor = try ModelRuntime.cancellableLocalPrefill(
+            tokenCount: secondPrompt.count, from: 0, stepSize: 512, referenceStepSize: 512,
+            isCancelled: { false }
+        ) { cold.append($0) }
+        let resumedCursor = try ModelRuntime.cancellableLocalPrefill(
+            tokenCount: secondPrompt.count, from: lease.lcp, stepSize: 512, referenceStepSize: 512,
+            isCancelled: { false }
+        ) { resumed.append($0) }
+        XCTAssertEqual(cold, [0..<512, 512..<1024, 1024..<1069])
+        XCTAssertEqual(resumed, Array(cold.dropFirst(2)))
+        XCTAssertEqual(coldCursor, resumedCursor)
+        await cache.abort(lease)
+    }
+
     func testRecurrentCheckpointPrefillCarriesPrimaryWrapperStateIntoDecode() async throws {
         try Self.requireMetal()
         let conversations = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
@@ -207,81 +347,28 @@ final class ConversationPromptSnapshotTests: XCTestCase {
         }
     }
 
-
-    func testQwen35SnapshotPolicyRequiresTheLoadedDenseIdentityAndWrapper() throws {
+    func testLFMPromptSnapshotsBypassRecurrentRoleBoundaryPrefill() async throws {
         try Self.requireMetal()
-        let models = try Self.tinyQwen35Models()
-        for step in [128, 512, 1024] {
-            XCTAssertEqual(ModelRuntime.conversationPromptSnapshotPolicy(
-                model: models.dense, tokenizer: NoMarkerTokenizer(), prefillStepSize: step,
-                modelID: "qwen/qwen3.5-27b"), .referencePlanBoundary(step: step))
+        for model in try Self.tinyLFMModels() {
+            let cache = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+            var prompt = Array(repeating: Int32(1), count: 1070)
+            prompt[1048] = 0 // NoMarkerTokenizer maps <|im_start|> to 0.
+            let lease = try Self.unwrap(await cache.begin(
+                conversationKey: "conv:lfm-no-role-prefill", incomingTokens: prompt, modelID: "lfm", kvBits: nil))
+            let context = ModelContext(configuration: .init(id: "lfm"), model: model,
+                                       processor: FixtureProcessor(), tokenizer: NoMarkerTokenizer())
+            let recurrent = MambaCache()
+            // Without the LFM guard, the role checkpoint would enter a forward
+            // (and throw this cancellation) before the grid snapshot is taken.
+            let result = try ModelRuntime.prefillRecurrentCheckpoints(
+                lease: lease, cache: [recurrent], promptTokenIds: prompt,
+                context: context, prefillStepSize: 512, isCancelled: { true })
+            XCTAssertTrue(result.checkpoints.isEmpty)
+            XCTAssertNil(result.resumeAt)
+            XCTAssertTrue(recurrent.state.isEmpty)
+            await cache.abort(lease)
         }
-        let excludedIDs: [String?] = [nil, "qwen/qwen3.6-27b", "qwen/qwen3.5-35b-a3b"]
-        for id in excludedIDs {
-            XCTAssertNil(ModelRuntime.conversationPromptSnapshotPolicy(
-                model: models.dense, tokenizer: NoMarkerTokenizer(), modelID: id))
-        }
-        let excludedModels: [any LanguageModel] = [models.text, models.moe]
-        for model in excludedModels {
-            XCTAssertNil(ModelRuntime.qwen35SerialPromptSnapshotStepSize(
-                model: model, modelID: "qwen/qwen3.5-27b", prefillStepSize: 512))
-        }
-
     }
-
-    func testQwen35PositiveSnapshotHitKeepsTheNoKeyLegacyTail() async throws {
-        let cache = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
-        let seedPrompt = int32Range(0..<993)
-        let boundary = try XCTUnwrap(ModelRuntime.conversationPromptSnapshotTokenCount(
-            promptTokenIds: seedPrompt, policy: .referencePlanBoundary(step: 512)))
-        XCTAssertEqual(boundary, 512, "the role checkpoint at 986 must not split a legacy chunk")
-        _ = try await seedSnapshot(cache, key: "conv:qwen-legacy", tokens: Array(seedPrompt.prefix(boundary)))
-        let extensionPrompt = int32Range(0..<989) + int32Range(2000..<2027)
-        let lease = try Self.unwrap(await cache.begin(
-            conversationKey: "conv:qwen-legacy", incomingTokens: extensionPrompt, modelID: "model-a", kvBits: nil))
-        XCTAssertNotNil(lease.reusableCache)
-        XCTAssertEqual(lease.cachedPromptTokens, 512)
-        var coldChunks: [Range<Int>] = []
-        var warmChunks: [Range<Int>] = []
-        let coldCursor = try ModelRuntime.cancellableLocalPrefill(
-            tokenCount: extensionPrompt.count, from: 0, stepSize: 512, isCancelled: { false }
-        ) { coldChunks.append($0) }
-        let warmCursor = try ModelRuntime.cancellableLocalPrefill(
-            tokenCount: extensionPrompt.count, from: lease.lcp, stepSize: 512, isCancelled: { false }
-        ) { warmChunks.append($0) }
-        XCTAssertEqual(coldChunks, [0..<512])
-        XCTAssertTrue(warmChunks.isEmpty)
-        XCTAssertEqual(coldCursor, warmCursor)
-        XCTAssertEqual(extensionPrompt.count - warmCursor, 504,
-                       "both iterators receive the original 504-token tail, not 503 + 1")
-        await cache.abort(lease)
-    }
-
-    func testQwen35SnapshotsSkipRolePrefillAndDoNotPrefillWithoutAKey() async throws {
-        try Self.requireMetal()
-        let model = try Self.tinyQwen35Models().dense
-        let context = ModelContext(configuration: .init(id: "qwen/qwen3.5-27b"), model: model,
-                                   processor: FixtureProcessor(), tokenizer: NoMarkerTokenizer())
-        let cache = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
-        var prompt = Array(repeating: Int32(1), count: 1016)
-        prompt[986] = 0 // NoMarkerTokenizer's role marker.
-        let lease = try Self.unwrap(await cache.begin(
-            conversationKey: "conv:qwen-no-role-prefill", incomingTokens: prompt, modelID: "qwen/qwen3.5-27b", kvBits: nil))
-        let layers: [KVCache] = [MambaCache()]
-        let recurrent = try ModelRuntime.prefillRecurrentCheckpoints(
-            lease: lease, cache: layers, promptTokenIds: prompt, context: context,
-            prefillStepSize: 512, modelID: "qwen/qwen3.5-27b", isCancelled: { true })
-        XCTAssertTrue(recurrent.checkpoints.isEmpty)
-        XCTAssertNil(recurrent.resumeAt)
-        let noKey = try ModelRuntime.prefillPromptSnapshot(
-            lease: nil, cache: layers, promptTokenIds: prompt, start: 0, context: context,
-            prefillStepSize: 512, modelID: "qwen/qwen3.5-27b", isCancelled: { true })
-        XCTAssertFalse(noKey.applies)
-        XCTAssertNil(noKey.resumeAt)
-        XCTAssertTrue(layers[0].state.isEmpty)
-        await cache.abort(lease)
-    }
-
 
     func testReferencePlanBoundaryIsTheLastWholeStepBeforeTheFinalToken() {
         let policy = ModelRuntime.ConversationPromptSnapshotPolicy.referencePlanBoundary(step: 2048)
@@ -491,13 +578,16 @@ final class ConversationPromptSnapshotTests: XCTestCase {
                     model: glm, tokenizer: NoMarkerTokenizer(), prefillStepSize: step),
                     .referencePlanBoundary(step: step))
             }
+            XCTAssertNil(ModelRuntime.lfmSerialReferencePrefillStepSize(model: glm, prefillStepSize: 512),
+                         "GLM keeps the keyless final multi-token forward")
             let cbPolicy = ModelRuntime.conversationPromptSnapshotPolicy(model: glm, tokenizer: MarkerTokenizer())
             XCTAssertEqual(cbPolicy, .lastRoleMarker(
                 tokenIDs: Set(MarkerTokenizer.markers.values.map(Int32.init)), resumeTokenID: 61))
             XCTAssertEqual(ModelRuntime.continuousBatchPromptSnapshotPolicy(cbPolicy, cachedTurnsAttachable: true),
                            .resumeMarker(tokenID: 61))
             let qwen = try Self.tinyQwen35Models()
-            let otherModels: [any LanguageModel] = [qwen.text, qwen.dense, qwen.moe]
+            var otherModels: [any LanguageModel] = [qwen.text, qwen.dense, qwen.moe]
+            otherModels += try Self.tinyLFMModels()
             for model in otherModels {
                 XCTAssertNil(ModelRuntime.glm5NextSerialSnapshotStepSize(model: model, prefillStepSize: 512))
                 XCTAssertEqual(ModelRuntime.serialConversationPromptSnapshotPolicy(
@@ -799,24 +889,7 @@ final class ConversationPromptSnapshotTests: XCTestCase {
         return layers
     }
 
-    private static func tinyQwen35VLM() throws -> MLXVLM.Qwen35 {
-        let data = Data("""
-        {"model_type":"qwen3_5_vl","image_token_id":500,"video_token_id":501,
-         "vision_start_token_id":502,"vision_end_token_id":503,"vocab_size":512,
-         "text_config":{"model_type":"qwen3_5","hidden_size":64,"num_hidden_layers":2,
-          "intermediate_size":128,"num_attention_heads":4,"num_key_value_heads":2,
-          "head_dim":32,"vocab_size":512,"full_attention_interval":2,
-          "linear_num_value_heads":4,"linear_num_key_heads":2,"linear_key_head_dim":32,
-          "linear_value_head_dim":32,"linear_conv_kernel_dim":4,"max_position_embeddings":4096,
-          "rope_parameters":{"type":"default","mrope_section":[8,4,4],
-                             "rope_theta":100000.0,"partial_rotary_factor":1.0}},
-         "vision_config":{"model_type":"qwen3_vl","depth":2,"hidden_size":32,
-          "intermediate_size":64,"out_hidden_size":64,"num_heads":2,"patch_size":16,
-          "spatial_merge_size":2,"temporal_patch_size":2,"num_position_embeddings":64}}
-        """.utf8)
-        let config = try JSONDecoder().decode(MLXVLM.Qwen35Configuration.self, from: data)
-        return withRandomState(MLXRandom.RandomState(seed: 1)) { MLXVLM.Qwen35(config) }
-    }
+    private func int32Range(_ range: Range<Int>) -> [Int32] { range.map(Int32.init) }
 
     private static func tinyQwen35Models() throws -> (
         text: Qwen35TextModel, dense: Qwen35Model, moe: Qwen35MoEModel
@@ -836,7 +909,42 @@ final class ConversationPromptSnapshotTests: XCTestCase {
                 Qwen35Model(wrapper), Qwen35MoEModel(wrapper))
     }
 
-    private func int32Range(_ range: Range<Int>) -> [Int32] { range.map(Int32.init) }
+    /// Same dimensions and rotary sections as upstream Qwen35ContinuationTests,
+    /// with two layers so one recurrent and one full-attention layer are exercised.
+    private static func tinyQwen35VLM() throws -> MLXVLM.Qwen35 {
+        let data = Data("""
+        {"model_type":"qwen3_5_vl","image_token_id":500,"video_token_id":501,
+         "vision_start_token_id":502,"vision_end_token_id":503,"vocab_size":512,
+         "text_config":{"model_type":"qwen3_5","hidden_size":64,"num_hidden_layers":2,
+          "intermediate_size":128,"num_attention_heads":4,"num_key_value_heads":2,
+          "head_dim":32,"vocab_size":512,"full_attention_interval":2,
+          "linear_num_value_heads":4,"linear_num_key_heads":2,"linear_key_head_dim":32,
+          "linear_value_head_dim":32,"linear_conv_kernel_dim":4,"max_position_embeddings":4096,
+          "rope_parameters":{"type":"default","mrope_section":[8,4,4],
+                             "rope_theta":100000.0,"partial_rotary_factor":1.0}},
+         "vision_config":{"model_type":"qwen3_vl","depth":2,"hidden_size":32,
+          "intermediate_size":64,"out_hidden_size":64,"num_heads":2,"patch_size":16,
+          "spatial_merge_size":2,"temporal_patch_size":2,"num_position_embeddings":64}}
+        """.utf8)
+        let config = try JSONDecoder().decode(MLXVLM.Qwen35Configuration.self, from: data)
+        return withRandomState(MLXRandom.RandomState(seed: 1)) { MLXVLM.Qwen35(config) }
+    }
+
+    private static func tinyLFMModels() throws -> [any LanguageModel] {
+        let data = Data("""
+        {"model_type":"lfm2_moe","vocab_size":128,"hidden_size":16,
+         "intermediate_size":32,"moe_intermediate_size":16,"num_hidden_layers":2,
+         "num_experts":2,"num_experts_per_tok":1,"norm_topk_prob":true,
+         "num_attention_heads":2,"num_key_value_heads":1,"max_position_embeddings":2048,
+         "use_expert_bias":false,"num_dense_layers":1,"norm_eps":0.00001,
+         "conv_bias":false,"conv_L_cache":3,"full_attn_idxs":[1],
+         "block_multiple_of":16,"block_auto_adjust_ff_dim":false}
+        """.utf8)
+        return [
+            LFM2Model(try JSONDecoder().decode(LFM2Configuration.self, from: data)),
+            LFM2MoEModel(try JSONDecoder().decode(LFM2MoEConfiguration.self, from: data)),
+        ]
+    }
 
     /// `XCTUnwrap` takes an autoclosure, which cannot hold an `await`.
     /// MLX loads the default metallib even for the CPU device.

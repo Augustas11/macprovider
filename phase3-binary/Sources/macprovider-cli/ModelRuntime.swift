@@ -731,8 +731,12 @@ struct PagedKVRuntimeModelCapabilities: Equatable, Sendable {
     let modelFamily: String
     let requiresMoEDispatch: Bool
     let hybridDecoderArchitectureVerified: Bool
-    /// The exact Bonsai-2 2B layout may evaluate ordinary CB gates only.
+    /// Exact hybrid tuples which can evaluate ordinary CB gates only.
     let ordinaryHybridOnly: Bool
+    /// The state shape the shared-forward bridge must preserve for a verified
+    /// recurrent hybrid. This remains two-slot unless the exact LFM2.5 tuple
+    /// below validates its short-convolution topology.
+    let recurrentStateLayout: PagedKVRecurrentStateLayout
     /// The verified sparse-attention layout of an allowlisted `glm5_next`
     /// identity (SPEC-039 FR-PKV12), read from its `config.json`.
     let sparseAttention: PagedKVSparseAttentionLayout?
@@ -745,6 +749,7 @@ struct PagedKVRuntimeModelCapabilities: Equatable, Sendable {
         requiresMoEDispatch: Bool,
         hybridDecoderArchitectureVerified: Bool = false,
         ordinaryHybridOnly: Bool = false,
+        recurrentStateLayout: PagedKVRecurrentStateLayout = .mambaTwoSlot,
         sparseAttention: PagedKVSparseAttentionLayout? = nil,
         deepseekV4Pool: DeepseekV4PoolLayout? = nil,
         supportsContiguousCacheMaterialization: Bool = true
@@ -753,6 +758,7 @@ struct PagedKVRuntimeModelCapabilities: Equatable, Sendable {
         self.requiresMoEDispatch = requiresMoEDispatch
         self.hybridDecoderArchitectureVerified = hybridDecoderArchitectureVerified
         self.ordinaryHybridOnly = ordinaryHybridOnly
+        self.recurrentStateLayout = recurrentStateLayout
         self.sparseAttention = sparseAttention
         self.deepseekV4Pool = deepseekV4Pool
         self.supportsContiguousCacheMaterialization = supportsContiguousCacheMaterialization
@@ -874,7 +880,8 @@ struct PagedKVRuntimeProber: Sendable {
         _ promptB: [Int],
         _ parityPromptA: [Int],
         _ parityPromptB: [Int],
-        _ cacheKinds: [PagedKVSharedForwardBackend.CacheKind]
+        _ cacheKinds: [PagedKVSharedForwardBackend.CacheKind],
+        _ recurrentStateLayout: PagedKVRecurrentStateLayout
     ) async -> PagedKVRuntimeMoEProbeResult
 
     static let live = PagedKVRuntimeProber(
@@ -888,7 +895,7 @@ struct PagedKVRuntimeProber: Sendable {
                 nNew: nNew
             )
         },
-        moe: { container, blockSizeTokens, maxPhysicalBlocks, poolEpoch, layerCount, promptA, promptB, parityPromptA, parityPromptB, cacheKinds in
+        moe: { container, blockSizeTokens, maxPhysicalBlocks, poolEpoch, layerCount, promptA, promptB, parityPromptA, parityPromptB, cacheKinds, recurrentStateLayout in
             await PagedKVRuntimeParityProbe.runMoEInputIsolationProbe(
                 container: container,
                 blockSizeTokens: blockSizeTokens,
@@ -899,7 +906,8 @@ struct PagedKVRuntimeProber: Sendable {
                 promptB: promptB,
                 parityPromptA: parityPromptA,
                 parityPromptB: parityPromptB,
-                cacheKinds: cacheKinds
+                cacheKinds: cacheKinds,
+                recurrentStateLayout: recurrentStateLayout
             )
         }
     )
@@ -2922,7 +2930,8 @@ actor ModelRuntime: ModelRuntimeServing {
                 promptB,
                 parityPromptA,
                 parityPromptB,
-                cacheKinds
+                cacheKinds,
+                modelCapabilities.recurrentStateLayout
             )
         } onIndistinguishable: { pairIndex in
             PagedKVRuntimeDiagnostics.log(
@@ -2979,6 +2988,10 @@ actor ModelRuntime: ModelRuntimeServing {
         modelCapabilities: PagedKVRuntimeModelCapabilities
     ) -> Bool {
         guard modelCapabilities.hybridDecoderArchitectureVerified else { return false }
+        if modelCapabilities.recurrentStateLayout == .lfm25ShortConvOneSlot {
+            return modelCapabilities.modelFamily == "lfm2"
+                && cacheKinds == PagedKVRecurrentStateLayout.lfm25ExpectedCacheKinds
+        }
         if modelCapabilities.ordinaryHybridOnly {
             let expected: [PagedKVSharedForwardBackend.CacheKind] = (0..<24).map {
                 ($0 + 1).isMultiple(of: 4) ? .pagedAttention : .recurrentMamba
@@ -3250,6 +3263,9 @@ maxTokens: 1,
         if normalizedLabels.contains(where: { $0.contains("llama") }) { return "llama" }
         if normalizedLabels.contains(where: { $0.contains("gptoss") }) { return "gpt_oss" }
         if normalizedLabels.contains(where: { $0.contains("gemma4") }) { return "gemma4" }
+        if normalizedLabels.contains(where: { $0 == "lfm2moe" || $0 == "lfm2moeforcausallm" }) {
+            return "lfm2"
+        }
         if normalizedLabels.contains(where: { $0.contains("glm4moe") }) { return "glm4_moe" }
         if normalizedLabels.contains(where: { $0.contains("nemotronh") }) { return "nemotron_h" }
         // GLM-5-Next (`glm5_next`, text model `glm5_next_text`): the SPEC-039
@@ -3330,9 +3346,14 @@ maxTokens: 1,
             if expectedArchitecture == "DeepseekV4ForCausalLM" { return deepseekV4Pool != nil }
             return architectures.contains(expectedArchitecture)
         }()
-        let ordinaryHybridOnly = bonsai2BHybridDecoderArchitectureVerified(
+        let lfm25HybridVerified = lfm25HybridDecoderArchitectureVerified(
             modelID: modelID, configObject: configObject
         )
+        let ordinaryHybridOnly = bonsai2BHybridDecoderArchitectureVerified(
+            modelID: modelID, configObject: configObject
+        ) || lfm25HybridVerified
+        let recurrentStateLayout: PagedKVRecurrentStateLayout = lfm25HybridVerified
+            ? .lfm25ShortConvOneSlot : .mambaTwoSlot
         let architectureVerified = ordinaryHybridOnly || allowlistedArchitectureVerified || deepseekV4Pool != nil
             || qwen35HybridDecoderArchitectureVerified(
             modelID: modelID,
@@ -3344,6 +3365,7 @@ maxTokens: 1,
                 || Self.pagedKVModelIDLooksLikeExpertModel(modelID),
             hybridDecoderArchitectureVerified: architectureVerified,
             ordinaryHybridOnly: ordinaryHybridOnly,
+            recurrentStateLayout: recurrentStateLayout,
             sparseAttention: sparseAttention,
             deepseekV4Pool: deepseekV4Pool
         )
@@ -3374,6 +3396,40 @@ maxTokens: 1,
         return layers.enumerated().allSatisfy { index, layer in
             layer == ((index + 1).isMultiple(of: 4) ? "full_attention" : "linear_attention")
         }
+    }
+
+    /// LFM2.5 has MambaCache instances only for its short-convolution layers,
+    /// but each records a single convolution-history tensor rather than the
+    /// two Qwen Mamba slots. This exact serving identity/config pair is the
+    /// only route to the one-slot ordinary-CB bridge; serial/oracle and
+    /// runtime parity gates still decide whether it attaches.
+    private nonisolated static func lfm25HybridDecoderArchitectureVerified(
+        modelID: String?, configObject: [String: Any]?
+    ) -> Bool {
+        func integer(_ value: Any?, equals expected: Int) -> Bool {
+            guard let number = value as? NSNumber else { return false }
+            return String(cString: number.objCType) != "c" && number.doubleValue == Double(expected)
+        }
+        let expectedLayerTypes = (0..<40).map { index in
+            (index - 2).isMultiple(of: 4) ? "full_attention" : "conv"
+        }
+        guard modelID?.lowercased() == "liquidai/lfm2.5-24b-a2b-mlx-4bit",
+              let config = configObject,
+              config["architectures"] as? [String] == ["Lfm2MoeForCausalLM"],
+              config["model_type"] as? String == "lfm2_moe",
+              integer(config["hidden_size"], equals: 2048),
+              integer(config["num_hidden_layers"], equals: 40),
+              config["layer_types"] as? [String] == expectedLayerTypes,
+              integer(config["conv_L_cache"], equals: 3),
+              let convBias = config["conv_bias"] as? NSNumber,
+              String(cString: convBias.objCType) == "c", !convBias.boolValue,
+              integer(config["num_attention_heads"], equals: 32),
+              integer(config["num_key_value_heads"], equals: 8),
+              integer(config["num_dense_layers"], equals: 2),
+              integer(config["num_experts"], equals: 64),
+              integer(config["num_experts_per_tok"], equals: 4)
+        else { return false }
+        return true
     }
 
     private nonisolated static func qwen35HybridDecoderArchitectureVerified(
@@ -8527,7 +8583,7 @@ maxTokens: 1,
         }
 
         let maxContextTokens = maxContextTokens
-        let stopTokenFilter = snapshot.nativeVisionProfile == nil
+        let rawStopTokenFilter = snapshot.nativeVisionProfile == nil
             ? stopTokenFilter : NativeVisionProfile.stopTokenFilter
         let selectionModelID = toolSelectionModelID(snapshot)
         CBTrace.logPreparation(schedulerRequestID, "rt_cb_prepare_begin path=complete")
@@ -8540,6 +8596,7 @@ maxTokens: 1,
             drainCancelled: drainCancelled,
             promptSnapshotCachedTurnsAttachable: continuousBatchCachedTurnsAccepted
         )
+        let stopTokenFilter = Self.toolAwareStopTokenFilter(rawStopTokenFilter, grammar: Self.toolGrammar(for: request))
         CBTrace.logPreparation(schedulerRequestID, "rt_cb_prepare_end path=complete tokens=\(prepared.promptTokens.count)")
 
         try drainCancelled.check()
@@ -9069,7 +9126,7 @@ maxTokens: 1,
         }
 
         let maxContextTokens = maxContextTokens
-        let stopTokenFilter = snapshot.nativeVisionProfile == nil
+        let rawStopTokenFilter = snapshot.nativeVisionProfile == nil
             ? stopTokenFilter : NativeVisionProfile.stopTokenFilter
         let selectionModelID = toolSelectionModelID(snapshot)
         let requestStops = request.stop
@@ -9083,6 +9140,7 @@ maxTokens: 1,
             drainCancelled: drainCancelled,
             promptSnapshotCachedTurnsAttachable: continuousBatchCachedTurnsAccepted
         )
+        let stopTokenFilter = Self.toolAwareStopTokenFilter(rawStopTokenFilter, grammar: Self.toolGrammar(for: request))
         CBTrace.logPreparation(schedulerRequestID, "rt_cb_prepare_end path=stream tokens=\(prepared.promptTokens.count)")
 
         try drainCancelled.check()
@@ -9775,6 +9833,7 @@ maxTokens: boundedMaxTokens,
                         nativeVisionProfile: snapshot.nativeVisionProfile,
                         toolSelectionModelID: selectionModelID
                     )
+                    let stopTokenFilter = Self.toolAwareStopTokenFilter(stopTokenFilter, grammar: Self.toolGrammar(for: request))
                     let grammarConstraint = try GrammarConstraintState.prepare(
                         request: request, tokenizer: context.tokenizer, configuration: context.configuration,
                         eosTokenIDs: Self.generationStopTokenIDs(for: context))
@@ -9928,15 +9987,18 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             if let resumeAt = promptSnapshot.resumeAt {
                                 iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[resumeAt...])))
                             }
-                            if isLocalRequest, !request.containsNonTextMessageContentPart {
+                            let lfmReferenceStep = Self.lfmSerialReferencePrefillStepSize(
+                                model: generationContext.model, prefillStepSize: prefillStepSize)
+                            if isLocalRequest || lfmReferenceStep != nil, !request.containsNonTextMessageContentPart {
                                 // SPEC-001-R011: a local prompt prefills in chunks with a
                                 // preemption check before each, so a buyer never waits on a
-                                // long local prefill. Buyer prefill keeps the model's own chunk plan
-                                // and stops on cancel through task cancellation (SPEC-001 FR-26).
+                                // long local prefill. LFM uses its fixed reference plan on
+                                // both request origins so a cache hit preserves forward shapes.
                                 let start = promptTokenIds.count - iteratorInput.text.tokens.size
                                 let resumeAt = try Self.cancellableLocalPrefill(
                                     tokenCount: promptTokenIds.count, from: start, stepSize: prefillStepSize,
-                                    referenceStepSize: generationContext.model is DeepseekV4Model ? DeepseekV4Model.prefillStepSize : nil,
+                                    referenceStepSize: lfmReferenceStep
+                                        ?? (generationContext.model is DeepseekV4Model ? DeepseekV4Model.prefillStepSize : nil),
                                     isCancelled: { Task.isCancelled || shouldCancel() || drainCancelled.isFired }
                                 ) { range in
                                     let chunk = LMInput.Text(tokens: MLXArray(Array(promptTokenIds[range])))
@@ -10668,6 +10730,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         nativeVisionProfile: snapshot.nativeVisionProfile,
                         toolSelectionModelID: selectionModelID
                     )
+                    let stopTokenFilter = Self.toolAwareStopTokenFilter(stopTokenFilter, grammar: Self.toolGrammar(for: request))
                     let grammarConstraint = try GrammarConstraintState.prepare(
                         request: request, tokenizer: context.tokenizer, configuration: context.configuration,
                         eosTokenIDs: Self.generationStopTokenIDs(for: context))
@@ -10890,15 +10953,18 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         if let resumeAt = promptSnapshot.resumeAt {
                             iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[resumeAt...])))
                         }
-                        if isLocalRequest, !request.containsNonTextMessageContentPart {
+                        let lfmReferenceStep = Self.lfmSerialReferencePrefillStepSize(
+                            model: generationContext.model, prefillStepSize: prefillStepSize)
+                        if isLocalRequest || lfmReferenceStep != nil, !request.containsNonTextMessageContentPart {
                             // SPEC-001-R011: a local prompt prefills in chunks with a
                             // preemption check before each, so a buyer never waits on a
-                            // long local prefill. Buyer prefill keeps the model's own chunk plan
-                            // and stops on cancel through task cancellation (SPEC-001 FR-26).
+                            // long local prefill. LFM uses its fixed reference plan on
+                            // both request origins so a cache hit preserves forward shapes.
                             let start = promptTokenIds.count - iteratorInput.text.tokens.size
                             let resumeAt = try Self.cancellableLocalPrefill(
                                 tokenCount: promptTokenIds.count, from: start, stepSize: prefillStepSize,
-                                referenceStepSize: generationContext.model is DeepseekV4Model ? DeepseekV4Model.prefillStepSize : nil,
+                                referenceStepSize: lfmReferenceStep
+                                    ?? (generationContext.model is DeepseekV4Model ? DeepseekV4Model.prefillStepSize : nil),
                                 isCancelled: { Task.isCancelled || shouldCancel() || drainCancelled.isFired }
                             ) { range in
                                 let chunk = LMInput.Text(tokens: MLXArray(Array(promptTokenIds[range])))
@@ -13475,6 +13541,15 @@ maxTokens: maxTokens,
         return earliest?.stop
     }
 
+    /// Native call markers are parser framing, even when the tokenizer marks
+    /// them special. Strip the model's other control tokens as usual.
+    static func toolAwareStopTokenFilter(_ filter: StopTokenFilter, grammar: ToolCallGrammar?) -> StopTokenFilter {
+        guard grammar == .lfm2 else { return filter }
+        return StopTokenFilter(tokens: filter.tokens.filter {
+            $0 != "<|tool_call_start|>" && $0 != "<|tool_call_end|>"
+        })
+    }
+
     static func applyOutputFilters(
         _ text: String,
         stopTokenFilter: StopTokenFilter,
@@ -13628,8 +13703,8 @@ maxTokens: maxTokens,
     /// reuse. Only families whose caches cannot be rewound to an arbitrary
     /// prefix take it; every other family keeps its FR-CI2 entry unchanged.
     enum ConversationPromptSnapshotPolicy: Equatable, Sendable {
-        /// DeepSeek V4: its ratio-4 overlap pools depend on forward-call
-        /// boundaries, so the snapshot sits on a boundary of the fixed
+        /// DeepSeek V4 pools and LFM short-convolution/MoE kernels depend on
+        /// forward-call shapes, so the snapshot sits on a boundary of the fixed
         /// reference prefill plan (`min(step, remaining - 1)` chunks from 0).
         /// The resumed prefill then runs the same calls as a fresh one.
         case referencePlanBoundary(step: Int)
@@ -13738,6 +13813,17 @@ maxTokens: maxTokens,
 
     static let glm5NextRoleMarkers = ["<|system|>", "<|user|>", "<|assistant|>", "<|observation|>"]
 
+    /// LFM short-convolution and MoE kernels depend on the forward shape.
+    /// Cold and resumed serial requests use the same fixed grid, reserving
+    /// the last token for the iterator, including on the network path.
+    nonisolated static func lfmSerialReferencePrefillStepSize(
+        model: any LanguageModel,
+        prefillStepSize: Int
+    ) -> Int? {
+        guard model is LFM2Model || model is LFM2MoEModel else { return nil }
+        return max(1, prefillStepSize)
+    }
+
     /// Qwen's keyed prefill must not split a cold legacy-remainder chunk at
     /// a role marker. Snapshot only whole strides, preserving the no-key
     /// prefill and its final multi-token forward unchanged.
@@ -13757,6 +13843,9 @@ maxTokens: maxTokens,
         prefillStepSize: Int = 512,
         modelID: String? = nil
     ) -> ConversationPromptSnapshotPolicy? {
+        if let step = lfmSerialReferencePrefillStepSize(model: model, prefillStepSize: prefillStepSize) {
+            return .referencePlanBoundary(step: step)
+        }
         if let step = qwen35SerialPromptSnapshotStepSize(model: model, modelID: modelID, prefillStepSize: prefillStepSize) {
             return .referencePlanBoundary(step: step)
         }
@@ -13932,8 +14021,10 @@ maxTokens: maxTokens,
         state: LMOutput.State? = nil,
         isCancelled: () -> Bool = { Task.isCancelled }
     ) throws -> (checkpoints: [RecurrentStateCheckpoint], resumeAt: Int?, state: LMOutput.State?) {
-        // Role checkpoints must not split the cold Qwen or GLM serial prefill chunks.
+        // A role boundary would split an LFM reference, Qwen legacy or GLM
+        // serial chunk and change its numerics. Snapshot only whole strides.
         guard glm5NextSerialSnapshotStepSize(model: context.model, prefillStepSize: prefillStepSize) == nil,
+              lfmSerialReferencePrefillStepSize(model: context.model, prefillStepSize: prefillStepSize) == nil,
               qwen35SerialPromptSnapshotStepSize(model: context.model, modelID: modelID, prefillStepSize: prefillStepSize) == nil,
               let lease else { return ([], nil, state) }
         let positions = ConversationCache.recurrentCheckpointPositions(
@@ -14669,6 +14760,9 @@ maxTokens: maxTokens,
             ? toolSelectionModelID ?? request.model
             : request.model
         let grammar = request.outputTraits.toolGrammar ?? ToolCallGrammar.family(modelID: renderModelID)
+        if grammar == .lfm2, selection != .none, Self.hasEnabledTools(request.promptSource.tools) {
+            try ToolSelectionPolicy.validateLFMNames(ToolSelectionPolicy.schemas(request))
+        }
         let chat = try ToolPromptRenderer.renderMessages(messages, grammar: grammar)
         let tools: [[String: Any]]?
         switch selection {
@@ -14692,10 +14786,9 @@ maxTokens: maxTokens,
         if let effort = request.templateReasoningEffort(for: toolSelectionModelID ?? request.model) {
             additionalContext = (additionalContext ?? [:]).merging(["reasoning_effort": effort]) { _, new in new }
         }
-        // GLM and the exact Qwen3.8 template render `reasoning_content`
-        // back as `<think>…</think>` during tool loops. Only requests carrying
-        // reasoning take this raw-message path; other prompts stay unchanged.
-        let historyReasoning = (grammar == .glm
+        // Each native template owns its reasoning-history scope. Preserve
+        // assistant reasoning only for the exact families that render it.
+        let historyReasoning = (grammar == .glm || grammar == .lfm2
             || (grammar == .qwen && ChatCompletionRequest.usesQwen38Template(
                 modelID: toolSelectionModelID ?? request.model))) && messages.contains {
             $0.role == .assistant && $0.reasoningContent?.isEmpty == false
@@ -15722,6 +15815,10 @@ struct NativeToolCallStreamEmitter {
             startDelimiter = "<|tool_call>"
             endDelimiter = "<tool_call|>"
             argumentKey = "arguments"
+        case .lfm2?:
+            startDelimiter = "<|tool_call_start|>"
+            endDelimiter = "<|tool_call_end|>"
+            argumentKey = "arguments"
         case .dsml?:
             startDelimiter = DeepseekV4Encoding.toolCallsStart
             endDelimiter = DeepseekV4Encoding.toolCallsEnd
@@ -15838,7 +15935,12 @@ struct NativeToolCallStreamEmitter {
         sawToolDelimiter = true
         guard !completedValidToolCall else { return }
         var candidate = String(text[start...])
-        if grammar != .llama3 {
+        if grammar == .lfm2 {
+            // The end marker can occur inside a quoted argument. Only the
+            // complete list envelope, including its actual close, may stop.
+            candidate = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard candidate.hasSuffix(endDelimiter) else { return }
+        } else if grammar != .llama3 {
             guard let end = candidate.range(of: endDelimiter) else { return }
             candidate = String(candidate[..<end.upperBound])
         }

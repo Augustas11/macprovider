@@ -289,7 +289,8 @@ enum PagedKVRuntimeParityProbe {
         promptB: [Int],
         parityPromptA: [Int]? = nil,
         parityPromptB: [Int]? = nil,
-        cacheKinds: [PagedKVSharedForwardBackend.CacheKind]? = nil
+        cacheKinds: [PagedKVSharedForwardBackend.CacheKind]? = nil,
+        recurrentStateLayout: PagedKVRecurrentStateLayout = .mambaTwoSlot
     ) async -> PagedKVRuntimeMoEProbeResult {
         guard layerCount > 0, promptA.count >= 1, promptB.count >= 1 else {
             return .failClosed
@@ -304,6 +305,7 @@ enum PagedKVRuntimeParityProbe {
                 promptA: parityPromptA ?? promptA,
                 promptB: parityPromptB ?? promptB,
                 cacheKinds: cacheKinds,
+                recurrentStateLayout: recurrentStateLayout,
                 nNew: sharedForwardParityTokens
             )
             let backend = PagedKVSharedForwardBackend(
@@ -312,7 +314,8 @@ enum PagedKVRuntimeParityProbe {
                 maxPhysicalBlocks: maxPhysicalBlocks,
                 poolEpoch: poolEpoch,
                 layerCount: layerCount,
-                cacheKinds: cacheKinds
+                cacheKinds: cacheKinds,
+                recurrentStateLayout: recurrentStateLayout
             )
             let allocator = try PagedKVBlockAllocator(
                 blockSizeTokens: blockSizeTokens,
@@ -588,6 +591,7 @@ enum PagedKVRuntimeParityProbe {
         promptA: [Int],
         promptB: [Int],
         cacheKinds: [PagedKVSharedForwardBackend.CacheKind]?,
+        recurrentStateLayout: PagedKVRecurrentStateLayout,
         nNew: Int
     ) async throws -> Bool {
         guard nNew > 0 else { return false }
@@ -615,6 +619,7 @@ enum PagedKVRuntimeParityProbe {
             poolEpoch: poolEpoch,
             layerCount: layerCount,
             cacheKinds: cacheKinds,
+            recurrentStateLayout: recurrentStateLayout,
             rows: [("shared-parity-a", promptA)],
             nNew: nNew
         )
@@ -626,6 +631,7 @@ enum PagedKVRuntimeParityProbe {
             poolEpoch: poolEpoch,
             layerCount: layerCount,
             cacheKinds: cacheKinds,
+            recurrentStateLayout: recurrentStateLayout,
             rows: [
                 ("shared-parity-a", promptA),
                 ("shared-parity-b", promptB),
@@ -642,6 +648,7 @@ enum PagedKVRuntimeParityProbe {
         poolEpoch: Int,
         layerCount: Int,
         cacheKinds: [PagedKVSharedForwardBackend.CacheKind]?,
+        recurrentStateLayout: PagedKVRecurrentStateLayout,
         rows: [(id: String, prompt: [Int])],
         nNew: Int
     ) async throws -> [String: [Int]] {
@@ -655,7 +662,8 @@ enum PagedKVRuntimeParityProbe {
             maxPhysicalBlocks: maxPhysicalBlocks,
             poolEpoch: poolEpoch,
             layerCount: layerCount,
-            cacheKinds: cacheKinds
+            cacheKinds: cacheKinds,
+            recurrentStateLayout: recurrentStateLayout
         )
         let allocator = try PagedKVBlockAllocator(
             blockSizeTokens: blockSizeTokens,

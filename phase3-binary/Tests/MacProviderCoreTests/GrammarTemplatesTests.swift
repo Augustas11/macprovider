@@ -119,6 +119,7 @@ final class GrammarTemplatesTests: XCTestCase {
     func testEveryFamilyHasACompleteCallLanguage() throws {
         let examples: [(ToolCallGrammar, String)] = [
             (.qwen, #"<tool_call>{"name":"weather","arguments":{"city":"Paris","count":2}}</tool_call>"#),
+            (.lfm2, #"<|tool_call_start|>[weather(city="Paris",count=2)]<|tool_call_end|>"#),
             (.llama3, #"{"name":"weather","parameters":{"city":"Paris","count":2}}"#),
             (.glm, "<tool_call>weather<arg_key>city</arg_key><arg_value>Paris</arg_value><arg_key>count</arg_key><arg_value>2</arg_value></tool_call>"),
             (.gemma4, "<|tool_call>call:weather{<|\"|>city<|\"|>:<|\"|>Paris<|\"|>,<|\"|>count<|\"|>:2}<tool_call|>"),

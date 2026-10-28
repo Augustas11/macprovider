@@ -229,7 +229,25 @@ def regular(p,limit):
  finally: os.close(f)
  if len(b)>limit or len(b)!=s.st_size: bad("unsafe file size: "+p.name)
  return b
-def digest(p,limit=8*1024*1024): return hashlib.sha256(regular(p,limit)).hexdigest()
+def digest(p,limit=8*1024*1024):
+ p=Path(p); s=p.lstat()
+ if not stat.S_ISREG(s.st_mode) or s.st_nlink!=1 or s.st_uid!=os.getuid() or s.st_mode&0o022: bad("unsafe file: "+p.name)
+ if s.st_size>limit: bad("unsafe file size: "+p.name)
+ def identity(v): return (v.st_dev,v.st_ino,v.st_size,v.st_mtime_ns,v.st_ctime_ns,v.st_mode,v.st_nlink,v.st_uid)
+ f=os.open(str(p),os.O_RDONLY|getattr(os,"O_NOFOLLOW",0))
+ try:
+  if identity(os.fstat(f))!=identity(s): bad("file changed: "+p.name)
+  h=hashlib.sha256(); total=0
+  while True:
+   chunk=os.read(f,min(1024*1024,limit-total+1))
+   if not chunk: break
+   total+=len(chunk)
+   if total>limit: bad("unsafe file size: "+p.name)
+   h.update(chunk)
+  if total!=s.st_size or identity(os.fstat(f))!=identity(s) or identity(p.lstat())!=identity(s): bad("file changed: "+p.name)
+  return h.hexdigest()
+ finally: os.close(f)
+def binary_digest(p): return digest(p,512*1024*1024)
 def put(p,d):
  p=Path(p); p.parent.mkdir(mode=0o700,parents=True,exist_ok=True)
  tmp=p.with_name("."+p.name+".tmp")
@@ -240,11 +258,17 @@ def load_journal(p,expect):
  q=Path(p)
  if not q.exists(): return None
  d=strict(regular(q,128*1024),"recovery journal")
- if set(d)!={"schema_version","manifest_sha256","phase","provider_pid","provider_start_us"}: bad("recovery journal fields differ")
+ # The previous controller never reached stability on this release. Only its
+ # unbound bootstrap journal may migrate; never adopt an old bound identity.
+ if set(d)=={"schema_version","manifest_sha256","phase","provider_pid","provider_start_us"}:
+  if d["phase"] not in {"armed","provider_bootstrapped"} or d["provider_pid"] is not None or d["provider_start_us"] is not None: bad("legacy recovery journal is already bound")
+  del d["provider_start_us"]; d["provider_instance_id"]=None
+ if set(d)!={"schema_version","manifest_sha256","phase","provider_pid","provider_instance_id"}: bad("recovery journal fields differ")
  if d["schema_version"]!="macprovider.studio_lab_handoff_recovery.v1" or d["manifest_sha256"]!=expect: bad("recovery journal does not belong to this manifest")
  if d["phase"] not in {"armed","provider_bootstrapped","provider_stable","restored"}: bad("recovery journal phase invalid")
- for k in ("provider_pid","provider_start_us"):
-  if d[k] is not None and (type(d[k]) is not int or d[k]<=0): bad("recovery journal process invalid")
+ if d["provider_pid"] is not None and (type(d["provider_pid"]) is not int or d["provider_pid"]<=0): bad("recovery journal process invalid")
+ if d["provider_instance_id"] is not None and not valid_instance(d["provider_instance_id"]): bad("recovery journal instance invalid")
+ if (d["provider_pid"] is None)!=(d["provider_instance_id"] is None): bad("recovery journal identity incomplete")
  return d
 def launch_loaded(label): return subprocess.run(["launchctl","print","gui/%s/%s"%(os.getuid(),label)],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0
 def cli_processes(binary):
@@ -261,17 +285,24 @@ def status(port):
 def get(d,path):
  for k in path.split("."): d=d.get(k) if isinstance(d,dict) else None
  return d
+def valid_instance(value):
+ # SPEC-025 service_instance.instance_id is the release's restart identity.
+ if not isinstance(value,str): return False
+ try: return str(__import__("uuid").UUID(value))==value
+ except ValueError: return False
 def ready(s,x):
  return (get(s,"binary_version")==x["binary_version"] and get(s,"model")==x["model"] and get(s,"model_loaded") is True and get(s,"lifecycle.operator_paused") is not True and
          get(s,"network_state")=="buyer_serving" and get(s,"continuous_batching.active") is True and
          get(s,"continuous_batching.policy.cached_turns_authorized") is True and
          type(get(s,"service_instance.pid")) is int and get(s,"service_instance.pid")>0 and
-         type(get(s,"service_instance.process_start_us")) is int and get(s,"service_instance.process_start_us")>0)
+         valid_instance(get(s,"service_instance.instance_id")))
 def check_static(x):
  if subprocess.run(["sysctl","-n","hw.model"],stdout=subprocess.PIPE,text=True,check=True).stdout.strip()!=x["hardware_model"]: bad("wrong hardware model")
  b=x["install_dir"]+"/macprovider-cli"
  for p,k in ((b,"binary_sha256"),(x["config_path"],"config_sha256"),(x["provider_plist_path"],"provider_plist_sha256"),(x["watchdog_plist_path"],"watchdog_plist_sha256")):
-  if digest(p)!=x[k]: bad("immutable %s hash differs"%k)
+  # Released CLI bytes exceed the metadata cap; hash them in bounded chunks.
+  actual=binary_digest(p) if k=="binary_sha256" else digest(p)
+  if actual!=x[k]: bad("immutable %s hash differs"%k)
  subprocess.run(["codesign","--verify","--strict",b],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=True)
  return b
 def handoff(x):
@@ -306,18 +337,21 @@ def recover(x,msha):
  pl=launch_loaded(x["launch_label"]); wl=launch_loaded(x["watchdog_label"]); procs=cli_processes(b)
  if j is None:
   if pl or wl or procs: bad("foreign or unexpected provider state before journal arm")
-  j={"schema_version":"macprovider.studio_lab_handoff_recovery.v1","manifest_sha256":msha,"phase":"armed","provider_pid":None,"provider_start_us":None}; put(x["journal_path"],j)
+  j={"schema_version":"macprovider.studio_lab_handoff_recovery.v1","manifest_sha256":msha,"phase":"armed","provider_pid":None,"provider_instance_id":None}; put(x["journal_path"],j)
  if j["phase"] in {"provider_stable","restored"}:
   s=status(x["status_port"])
   if not (pl and wl and s and ready(s,x)): bad("stable journal does not match stable provider")
-  if (get(s,"service_instance.pid"),get(s,"service_instance.process_start_us"))!=(j["provider_pid"],j["provider_start_us"]) or procs!=[j["provider_pid"]]: bad("stable journal provider identity differs")
+  if (get(s,"service_instance.pid"),get(s,"service_instance.instance_id"))!=(j["provider_pid"],j["provider_instance_id"]) or procs!=[j["provider_pid"]]: bad("stable journal provider identity differs")
   return {"ok":True,"phase":j["phase"],"status":s}
+ if j["provider_pid"] is not None:
+  s=status(x["status_port"])
+  if not s or (get(s,"service_instance.pid"),get(s,"service_instance.instance_id"))!=(j["provider_pid"],j["provider_instance_id"]) or procs!=[j["provider_pid"]]: bad("bootstrap journal provider identity differs")
  if wl: bad("watchdog loaded before provider stability journal")
  if not pl:
   if procs: bad("foreign provider process before bootstrap")
   subprocess.run(["launchctl","bootstrap","gui/%s"%os.getuid(),x["provider_plist_path"]],check=True)
   j.update(phase="provider_bootstrapped"); put(x["journal_path"],j)
- stable_since=None; seen=None; resumed=False; last_progress=time.monotonic(); states=set(); logs=provider_log_progress(x); process_seen=None
+ stable_since=None; seen=None; resumed=False; last_progress=time.monotonic(); states=set(); logs=provider_log_progress(x); process_seen=j["provider_pid"]
  while True:
   processes=cli_processes(b)
   if len(processes)>1: bad("unexpected provider processes during recovery")
@@ -326,37 +360,38 @@ def recover(x,msha):
   s=status(x["status_port"])
   if s is not None:
    # Repeated polling/telemetry is not progress; only previously unseen lifecycle states count.
-   state=tuple(json.dumps(get(s,k),sort_keys=True) for k in ("model_loaded","network_state","lifecycle.operator_paused","continuous_batching.active","continuous_batching.policy.cached_turns_authorized","service_instance.pid","service_instance.process_start_us"))
+   state=tuple(json.dumps(get(s,k),sort_keys=True) for k in ("model_loaded","network_state","lifecycle.operator_paused","continuous_batching.active","continuous_batching.policy.cached_turns_authorized","service_instance.pid","service_instance.instance_id"))
    if state not in states: states.add(state); last_progress=time.monotonic()
   current_logs=provider_log_progress(x)
   if current_logs!=logs: logs=current_logs; last_progress=time.monotonic()
   if not resumed and os.path.exists(x["control_socket"]):
    resume(x["control_socket"]); resumed=True; last_progress=time.monotonic()
   if resumed and s and ready(s,x):
-   pid=get(s,"service_instance.pid"); start=get(s,"service_instance.process_start_us")
+   pid=get(s,"service_instance.pid"); start=get(s,"service_instance.instance_id")
    if cli_processes(b)!=[pid]: bad("provider process identity differs")
    stamp=(pid,start)
-   if stamp!=seen or stable_since is None: seen=stamp; stable_since=time.monotonic(); j.update(phase="provider_bootstrapped",provider_pid=pid,provider_start_us=start); put(x["journal_path"],j)
+   if j["provider_pid"] is not None and stamp!=(j["provider_pid"],j["provider_instance_id"]): bad("bootstrap journal provider identity changed")
+   if stamp!=seen or stable_since is None: seen=stamp; stable_since=time.monotonic(); j.update(phase="provider_bootstrapped",provider_pid=pid,provider_instance_id=start); put(x["journal_path"],j)
    if time.monotonic()-stable_since>=120: break
   else: stable_since=None
   if time.monotonic()-last_progress>=1800: bad("provider made no lifecycle or log progress for 30 minutes")
   time.sleep(5)
  if not launch_loaded(x["watchdog_label"]): subprocess.run(["launchctl","bootstrap","gui/%s"%os.getuid(),x["watchdog_plist_path"]],check=True)
  s=status(x["status_port"])
- if not (ready(s,x) and launch_loaded(x["watchdog_label"]) and (get(s,"service_instance.pid"),get(s,"service_instance.process_start_us"))==seen): bad("provider changed while watchdog started")
- j.update(phase="provider_stable",provider_pid=seen[0],provider_start_us=seen[1]); put(x["journal_path"],j)
+ if not (ready(s,x) and launch_loaded(x["watchdog_label"]) and (get(s,"service_instance.pid"),get(s,"service_instance.instance_id"))==seen): bad("provider changed while watchdog started")
+ j.update(phase="provider_stable",provider_pid=seen[0],provider_instance_id=seen[1]); put(x["journal_path"],j)
  return {"ok":True,"phase":"provider_stable","status":s}
 def finish(x,msha):
  j=load_journal(x["journal_path"],msha); s=status(x["status_port"])
  if not j or j["phase"] not in {"provider_stable","restored"} or not (ready(s,x) and launch_loaded(x["launch_label"]) and launch_loaded(x["watchdog_label"])): bad("provider is not stable for recovery completion")
- if (get(s,"service_instance.pid"),get(s,"service_instance.process_start_us"))!=(j["provider_pid"],j["provider_start_us"]): bad("provider changed after stability")
+ if (get(s,"service_instance.pid"),get(s,"service_instance.instance_id"))!=(j["provider_pid"],j["provider_instance_id"]): bad("provider changed after stability")
  j["phase"]="restored"; put(x["journal_path"],j)
  return {"ok":True,"phase":"restored","status":s}
 def provenance(x,msha):
  b=check_static(x); j=load_journal(x["journal_path"],msha); s=status(x["status_port"])
  if not j or j["phase"] not in {"provider_stable","restored"} or not (ready(s,x) and launch_loaded(x["launch_label"])): bad("provider is not stable for provenance")
  pid=get(s,"service_instance.pid")
- if (pid,get(s,"service_instance.process_start_us"))!=(j["provider_pid"],j["provider_start_us"]) or cli_processes(b)!=[pid]: bad("provider process identity differs for provenance")
+ if (pid,get(s,"service_instance.instance_id"))!=(j["provider_pid"],j["provider_instance_id"]) or cli_processes(b)!=[pid]: bad("provider process identity differs for provenance")
  # The shared release helper consumes a flat dotted PID key. Keep the native
  # nested status, and adapt only this independently verified process identity.
  release_status=dict(s); release_status["service_instance.pid"]=pid
@@ -369,7 +404,7 @@ def installed_identity(b):
   if sep and k in {"Identifier","TeamIdentifier","CDHash"}: fields[k]=v.strip()
  if set(fields)!={"Identifier","TeamIdentifier","CDHash"}: bad("installed code identity incomplete")
  version=subprocess.run([b,"--version"],stdout=subprocess.PIPE,text=True,check=True).stdout.strip()
- return {"binary_version":version,"binary_sha256":digest(b),"identifier":fields["Identifier"],"team_id":fields["TeamIdentifier"],"cdhash":fields["CDHash"].lower()}
+ return {"binary_version":version,"binary_sha256":binary_digest(b),"identifier":fields["Identifier"],"team_id":fields["TeamIdentifier"],"cdhash":fields["CDHash"].lower()}
 def static_provenance(x):
  b=check_static(x)
  # No process exists yet: null PIDs explicitly make no running-provider claim.

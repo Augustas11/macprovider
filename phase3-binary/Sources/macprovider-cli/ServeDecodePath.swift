@@ -349,6 +349,7 @@ extension ModelRuntime {
                 descriptor: descriptor,
                 layerCount: cacheKinds.count,
                 cacheKinds: cacheKinds,
+                recurrentStateLayout: modelCapabilities.recurrentStateLayout,
                 contiguousCacheBridge: contiguousCacheBridge,
                 // Off on the serve path. A replayed `MLX.compile` step never
                 // re-runs `KVCacheSimple.update`'s Swift offset/grow logic, so

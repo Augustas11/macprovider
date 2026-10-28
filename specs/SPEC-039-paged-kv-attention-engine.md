@@ -1,8 +1,8 @@
 # SPEC-039 — Paged KV / paged-attention engine
 
-Version: v0.1.25
-Status: draft (normative design). v0.1.25 adds the provisional, exact
-Bonsai-2 2B ordinary-hybrid identity below; production attach and
+Version: v0.1.26
+Status: draft (normative design). v0.1.26 adds the provisional, exact
+LFM2.5 ordinary-hybrid identity below; production attach and
 qualification remain pending. v0.1.24 permits direct row-owned cache
 updates and bounded pipelined DeepSeek decode under SPEC-038 v0.3.30;
 failed rows and stopped rows with untrimmed lookahead are discarded.
@@ -871,6 +871,25 @@ be individually measured before it is added. The v1 allowlist is:
   batched parity at three rows and cancellation isolation passed without
   swap growth. Production attach and automatic self-check remain pending;
   the lab result does not authorize skipping their runtime gates.
+
+- (v0.1.26, provisional, SPEC-first) only
+  `LiquidAI/LFM2.5-24B-A2B-MLX-4bit`, with
+  `architectures == ["Lfm2MoeForCausalLM"]`, `model_type == "lfm2_moe"`,
+  `hidden_size == 2048`, 40 hidden layers, `conv_L_cache == 3`,
+  `conv_bias == false`, 32 attention heads, 8 key/value heads, 2 dense
+  layers, 64 experts, and 4 experts per token. `layer_types` MUST have
+  `full_attention` only at indices 2, 6, …, 38 and `conv` at every other
+  index. Runtime caches MUST match that exact 40-layer order, with
+  `KVCacheSimple` at those full-attention indices and `MambaCache` elsewhere.
+  Each non-empty recurrent LFM cache/checkpoint layer MUST contain exactly one
+  short-convolution state slot; an unknown, two-slot, or mixed recurrent state
+  fails closed. Fresh rows may begin with an empty recurrent cache and receive
+  the model's one slot during their first forward. This exception authorizes
+  ordinary CB evaluation only, never native MTP. Aliases, other LFM artifacts,
+  and any config/topology deviation remain excluded. It is not parity,
+  isolation, signed-policy, or production-qualification evidence: existing
+  identity, hardware-sizing, runtime parity, row-isolation, and FR-CB10 gates
+  remain mandatory and attach fails closed until they pass.
 
 Membership is per identity and evidence-gated, never per architecture. A
 same-architecture identity is admitted only after it individually passes the

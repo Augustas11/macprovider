@@ -22,6 +22,7 @@ public enum GrammarTemplates {
         guard selection.requiresCall else { return nil }
         guard let family else { return nil }
         let schemas = try ToolSelectionPolicy.schemas(request)
+        if family == .lfm2 { try ToolSelectionPolicy.validateLFMNames(schemas) }
         for value in schemas.values { try validateRequiredProperties(value) }
         if family == .glm || family == .dsml || family == .gemma4 {
             for value in schemas.values { try validateTaggedSchema(value) }
@@ -72,6 +73,17 @@ public enum GrammarTemplates {
             return .sequence(parts)
         case .gemma4:
             return .sequence([.literal("<|tool_call>call:" + name), schema(parameters, depth: 0, gemma: true), .literal("<tool_call|>")])
+        case .lfm2:
+            var parts: [ByteGrammar] = [.literal("<|tool_call_start|>[" + name + "(")]
+            if case .object(let object) = parameters {
+                let properties = objectProperties(object)
+                for (index, key) in properties.keys.sorted().enumerated() {
+                    if index > 0 { parts.append(.literal(",")) }
+                    parts += [.literal(key + "="), schema(properties[key]!)]
+                }
+            }
+            parts.append(.literal(")]<|tool_call_end|>"))
+            return .sequence(parts)
         case .harmony:
             return .sequence([.literal("<|start|>assistant to=functions." + name + "<|channel|>commentary<|message|>"), arguments, .literal("<|call|>")])
         }
