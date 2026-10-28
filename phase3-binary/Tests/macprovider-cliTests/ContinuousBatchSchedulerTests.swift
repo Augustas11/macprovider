@@ -4220,6 +4220,38 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertEqual(next.terminalStatus, .length, "cleanup must not permanently drain the scheduler")
     }
 
+    func testSelfCheckBackendCancellationThenNewAdmissionsSucceed() async throws {
+        let backend = LatchingCancellationBackend()
+        let scheduler = try await makeScheduler(maxActiveRows: 2, backend: backend)
+        let probe = Task {
+            try await scheduler.submit(.init(
+                id: "probe", conversationKey: "", promptTokens: [1], maxOutputTokens: 2
+            ))
+        }
+        try await eventually { await backend.probeIsDecoding() }
+        probe.cancel()
+        do {
+            _ = try await probe.value
+            XCTFail("expected canceled submit")
+        } catch is CancellationError {}
+
+        try await scheduler.cancelAndAwaitSelfCheckCleanup(requestIDs: ["probe"])
+        let cancellations = await backend.cancellationCount()
+        XCTAssertEqual(cancellations, 1, "the probe must exercise backend cancellation")
+        let rearmed = await backend.isRearmed()
+        XCTAssertTrue(rearmed, "the barrier must clear its cancellation latch")
+
+        async let first = scheduler.submit(.init(
+            id: "first", conversationKey: "", promptTokens: [2], maxOutputTokens: 2
+        ))
+        async let second = scheduler.submit(.init(
+            id: "second", conversationKey: "", promptTokens: [3], maxOutputTokens: 2
+        ))
+        let results = try await [first, second]
+        XCTAssertEqual(results.map(\.terminalStatus), [.length, .length])
+        try await eventually { await scheduler.isQuiescentForNativeMTPProbe() }
+    }
+
     // A request that is admitted to the queue but never reaches a slot inside
     // the deadline is rejected pre-admission: distinct error, non-settling, no
     // retained terminal result, no leaked waiter.
@@ -10146,6 +10178,69 @@ private actor WedgedCancellationBackend: ContinuousBatchSchedulerBackend {
     }
 
     func decodeCallCount() -> Int { decodeCalls }
+}
+
+/// Models the production barrier: reject new work while an operation drains,
+/// then re-arm before acknowledging cancellation to the scheduler.
+private actor LatchingCancellationBackend: ContinuousBatchSchedulerBackend {
+    private var cancelled = false
+    private var activeOperations = 0
+    private var cancellationCalls = 0
+    private var probeRelease: CheckedContinuation<Void, Never>?
+    private var cancellationWaiters: [CheckedContinuation<Void, Never>] = []
+
+    private func beginOperation() throws {
+        guard !cancelled else {
+            throw ContinuousBatchSchedulerError.unsupported("continuous_batching_backend_cancelled")
+        }
+        activeOperations += 1
+    }
+
+    private func endOperation() {
+        activeOperations -= 1
+        if cancelled && activeOperations == 0 {
+            cancelled = false
+            let waiters = cancellationWaiters
+            cancellationWaiters.removeAll()
+            for waiter in waiters { waiter.resume() }
+        }
+    }
+
+    func prefill(rows: [ContinuousBatchPrefillInput]) async throws -> [ContinuousBatchPrefillOutput] {
+        try beginOperation()
+        defer { endOperation() }
+        return rows.map {
+            .init(requestID: $0.requestID, sampledToken: $0.sampleFirstToken ? 1 : nil)
+        }
+    }
+
+    func decode(rows: [ContinuousBatchDecodeInput]) async throws -> [ContinuousBatchDecodeOutcome] {
+        try beginOperation()
+        defer { endOperation() }
+        if rows.contains(where: { $0.requestID == "probe" }) {
+            await withCheckedContinuation { probeRelease = $0 }
+        }
+        guard !cancelled else {
+            throw ContinuousBatchSchedulerError.unsupported("continuous_batching_backend_cancelled")
+        }
+        return rows.map { .output(.init(requestID: $0.requestID, token: 1)) }
+    }
+
+    func cancelInFlight() async {
+        cancellationCalls += 1
+        cancelled = true
+        probeRelease?.resume()
+        probeRelease = nil
+        if activeOperations == 0 {
+            cancelled = false
+        } else {
+            await withCheckedContinuation { cancellationWaiters.append($0) }
+        }
+    }
+
+    func probeIsDecoding() -> Bool { probeRelease != nil }
+    func cancellationCount() -> Int { cancellationCalls }
+    func isRearmed() -> Bool { !cancelled && activeOperations == 0 }
 }
 
 private actor DecodeLeaseSabotagingBackend: ContinuousBatchSchedulerBackend {

@@ -139,20 +139,20 @@ The exploratory goal matrix does not constitute admission qualification.
 
 The 1.8.274 candidate was cut at `f8b6856e5`. It contains #2162 (chat-first
 navigation, merged Models destination, embedded Terminal), but **not** the
-changes below. Cut merged rows in the next candidate after 1.8.274 is promoted (staged as 1.8.276; v1.8.275 is a Pearl runtime tag);
+changes below. Cut merged rows in the next candidate after 1.8.274 is promoted (staged as 1.8.277; v1.8.275 is a Pearl runtime tag, and the unpublished 1.8.276 candidate was withdrawn after its Studio canary latched the CB backend under buyer traffic, fixed in `1d5c7b05e`);
 rows marked `in progress` remain excluded until they merge.
 
 | PR | Issue | Provider-side change | Status |
 |---|---|---|---|
 | [#2169](https://github.com/Augustas11/macprovider/pull/2169) | #2164 | Malibu.app **Create, Agents and Tasks**. Sidebar: Chat, Terminal, Create, Agents, Tasks, Models, Earn. **Agents** run on this Mac's model (local work, SPEC-001-R011) or a Malibu network model on the buyer key; read-only workspace tools plus user-configured stdio MCP servers with per-call approval. **Tasks** schedule agent runs while the app is open (caps, pre-approved tools only, local 0600 transcripts kept out of diagnostics). **Create**: vendored MIT SDXL-Turbo runtime (`MacProviderImageGen`, no new package dependency) behind a loopback-only, local-app-origin `POST /v1/images/generations`. A local creative hold fences customer admission, unloads the LLM, generates, keeps the image model warm for 120 s, then restores the LLM, CB and native MTP exactly as before. Delayed restores re-register with the coordinator, and an operator pause is preserved. SPEC-025 v0.45.0/v0.46.0 (R017–R021); SPEC-001 v1.9.49 (R011/R014). | merged (`0239dd1de`); next CLI/app cut after 1.8.274; signed live acceptance pending |
 | [#2175](https://github.com/Augustas11/macprovider/pull/2175) | [#2171](https://github.com/Augustas11/macprovider/issues/2171) | Recover expired prepared update handoffs after an operator pause/resume supersedes the lifecycle operation; preserve operator pause and existing identity/dead-owner guards. `recover-update` explains helper fencing and enabling disabled LaunchAgents before bootstrap. | merged (`521a40199`); all 28 CI checks green; next CLI/app cut after 1.8.274; signed release acceptance pending |
-| [#2152](https://github.com/Augustas11/macprovider/pull/2152) | #2144 | Native MTP: shared iterator, multi-family gate, multi-entry sidecar; exact GLM sampled/tool-history MTP profiles | merged (`202ff416c`); in the 1.8.276 candidate |
-| [#2163](https://github.com/Augustas11/macprovider/pull/2163) | #2154 | Ternary-Bonsai 2B native loading for 8 GB Macs with bounded cache and CB rows | merged (`b422e0681`); in the 1.8.276 candidate |
-| [#2168](https://github.com/Augustas11/macprovider/pull/2168) | #2153 | Keyed agent-prefix snapshot retention within serving memory headroom | merged (`2aca0f374`); in the 1.8.276 candidate |
-| [#2177](https://github.com/Augustas11/macprovider/pull/2177) | #2153 | Prior model geometry no longer denies cache retention after a swap | merged (`82efc1628`); in the 1.8.276 candidate |
-| [#2179](https://github.com/Augustas11/macprovider/pull/2179) | #2154 | Cross-family fixes from the regression window: GLM cached-turn prefill stride alignment, Qwen3.5 VLM warm-cache anchor, FP32 caches keep ordinary CB with keyed conversations served serially | merged (`e7ccd0826`); in the 1.8.276 candidate |
-| [#2176](https://github.com/Augustas11/macprovider/pull/2176) | #2154 | Official Qwen3.8-27B template identity, reasoning-effort mapping and tool history (catalog activation separate) | merged (`1f61e8943`); in the 1.8.276 candidate |
-| [#2173](https://github.com/Augustas11/macprovider/pull/2173) | #2154 | Native LFM2.5 loader and tool conversations (catalog activation held on the quality gate) | merged (`4d68e41fb`); in the 1.8.276 candidate |
+| [#2152](https://github.com/Augustas11/macprovider/pull/2152) | #2144 | Native MTP: shared iterator, multi-family gate, multi-entry sidecar; exact GLM sampled/tool-history MTP profiles | merged (`202ff416c`); in the 1.8.277 candidate |
+| [#2163](https://github.com/Augustas11/macprovider/pull/2163) | #2154 | Ternary-Bonsai 2B native loading for 8 GB Macs with bounded cache and CB rows | merged (`b422e0681`); in the 1.8.277 candidate |
+| [#2168](https://github.com/Augustas11/macprovider/pull/2168) | #2153 | Keyed agent-prefix snapshot retention within serving memory headroom | merged (`2aca0f374`); in the 1.8.277 candidate |
+| [#2177](https://github.com/Augustas11/macprovider/pull/2177) | #2153 | Prior model geometry no longer denies cache retention after a swap | merged (`82efc1628`); in the 1.8.277 candidate |
+| [#2179](https://github.com/Augustas11/macprovider/pull/2179) | #2154 | Cross-family fixes from the regression window: GLM cached-turn prefill stride alignment, Qwen3.5 VLM warm-cache anchor, FP32 caches keep ordinary CB with keyed conversations served serially | merged (`e7ccd0826`); in the 1.8.277 candidate |
+| [#2176](https://github.com/Augustas11/macprovider/pull/2176) | #2154 | Official Qwen3.8-27B template identity, reasoning-effort mapping and tool history (catalog activation separate) | merged (`1f61e8943`); in the 1.8.277 candidate |
+| [#2173](https://github.com/Augustas11/macprovider/pull/2173) | #2154 | Native LFM2.5 loader and tool conversations (catalog activation held on the quality gate) | merged (`4d68e41fb`); in the 1.8.277 candidate |
 
 **#2171 recovery tracking:** issue closed at operator request; PR #2175
 merged as `521a40199` on 2026-10-27 after `antfleet-ops` approved the exact

@@ -692,7 +692,14 @@ final class DeepseekV4ContinuousBatchBackend: ContinuousBatchSchedulerBackend, @
         markCancelled()
         // ModelContainer serializes all forwards. Drain it before releasing
         // scheduler bindings even when cancellation races with a queued call.
-        await container.perform { _ in () }
+        await container.perform { _ in
+            self.rearmAfterCancellation()
+        }
+    }
+
+    private func rearmAfterCancellation() {
+        lock.lock(); defer { lock.unlock() }
+        cancelled = false
     }
 
     private func registerPrefill(_ ids: [String]) {

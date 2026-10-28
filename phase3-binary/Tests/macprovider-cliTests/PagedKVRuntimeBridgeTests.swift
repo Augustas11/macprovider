@@ -4156,6 +4156,40 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertTrue(cancellation.returned())
         XCTAssertEqual(backend.retainedRowCountForTest(), 0)
         await XCTAssertThrowsErrorAsync(try await allocator.materializeContiguousByteCache(handle))
+
+        // The active-operation path must re-arm after acknowledging the barrier.
+        let nextHandle = try await allocator.allocate(conversationKey: "after-cancel", maxTokens: 8)
+        _ = try await allocator.extend(nextHandle, by: 1)
+        let nextBinding = try await allocator.binding(for: nextHandle)
+        let next = try await backend.prefill(rows: [ContinuousBatchPrefillInput(
+            requestID: "after-cancel", promptTokens: [1], binding: nextBinding,
+            promptTokenOffset: 0, committedKVTokenCount: 0, targetKVTokenCount: 1,
+            isFinalChunk: true
+        )])
+        XCTAssertEqual(next.count, 1)
+        XCTAssertNil(next.first?.failureCode)
+        XCTAssertNotNil(next.first?.sampledToken)
+        backend.finish(requestID: "after-cancel")
+        try await allocator.release(nextHandle)
+        try await allocator.release(handle)
+    }
+
+    func testSharedForwardBackendCancellationWithoutActiveOperationsRearms() async throws {
+        try requireMetal()
+        let tiny = try Self.tinyQwen35Native()
+        let scheduler = try Self.makeScheduler(maxActiveRows: 2, backend: tiny.backend)
+        // Exercise the immediate barrier path repeatedly, including native MTP.
+        for path in [DecodePath.ordinary, .nativeMTP] {
+            await tiny.backend.base.cancelInFlight()
+            async let first = scheduler.submit(Self.tinyNativeRequest(
+                "first-\(path)", Self.tinyPrompt(length: 4, salt: 1), 3, decodePath: path))
+            async let second = scheduler.submit(Self.tinyNativeRequest(
+                "second-\(path)", Self.tinyPrompt(length: 4, salt: 2), 3, decodePath: path))
+            let results = try await [first, second]
+            XCTAssertEqual(results.map(\.terminalStatus), [.length, .length])
+            try await Self.eventually { await scheduler.isQuiescentForNativeMTPProbe() }
+            XCTAssertEqual(tiny.backend.base.retainedRowCountForTest(), 0)
+        }
     }
 
     func testSharedForwardBackendFinishPreservesRetainedPagedHandoffRecord() async throws {
@@ -6766,8 +6800,8 @@ private final class RuntimeBridgeBlockingModel: Module, LanguageModel, KVCacheDi
         let sequenceLength = input.tokens.dim(1)
         if let cache {
             let flatTokens = input.tokens.asArray(Int32.self).map(Int.init)
-            let keys = MLXArray(flatTokens.map(Float.init), [batch, 1, sequenceLength, 1])
-            let values = MLXArray(flatTokens.map { Float($0 + 100) }, [batch, 1, sequenceLength, 1])
+            let keys = MLXArray(flatTokens.map(Float.init), [batch, 1, sequenceLength, 1]).asType(.float16)
+            let values = MLXArray(flatTokens.map { Float($0 + 100) }, [batch, 1, sequenceLength, 1]).asType(.float16)
             for layer in cache {
                 // Attend through the cache like the served models.
                 let attended = attentionWithCacheUpdate(
