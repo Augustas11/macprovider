@@ -104,10 +104,9 @@ struct GLMParityCommand: AsyncParsableCommand {
         if let mb = ModelRuntime.applyMLXCommandBufferBudget(modelFamily: capabilities.modelFamily) {
             Self.progress(name, "mlx_max_mb_per_buffer=\(mb)")
         }
-        ModelRuntime.applyMLXCacheLimit(megabytes: mlxCacheLimitMB)
         Self.progress(name, "load start dir=\(directory.path) family=\(capabilities.modelFamily) oracles=\(references.count)")
         let loadStarted = Date()
-        let runtime = try await ModelRuntime(modelID: modelDir)
+        let runtime = try await ModelRuntime(modelID: modelDir, mlxCacheLimitMB: mlxCacheLimitMB)
         guard await runtime.isLoaded, let container = await runtime.currentSnapshot().container else {
             FileHandle.standardError.write(Data("\(name): failed to load \(modelDir)\n".utf8))
             throw ExitCode(1)

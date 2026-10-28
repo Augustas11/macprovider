@@ -404,7 +404,7 @@ EOF
   if [ "$published" = true ] &&
     [ "$(http_get "${MIRROR_LATEST_URL:-https://download.malibu.tech/releases/latest.json}" "$OPS_TMP_DIR/mirror-latest.json")" = "200" ]; then
     mirror_tag="$(json_field "$OPS_TMP_DIR/mirror-latest.json" 'd["tag_name"]')"
-    if [ "$mirror_tag" = "v$V" ]; then mirror_state=done; else mirror_state=pending; fi
+    if [ "$mirror_tag" = "v$V" ]; then mirror_state="done"; else mirror_state=pending; fi
   fi
   fact mirror_latest_tag "$mirror_tag"
 
@@ -774,6 +774,25 @@ MACPROVIDER_OPS_OWNER=<session-label> $OPS_DIR/canary-swap.sh swap --version $V
   # 7. in-scope e2e on the candidate (Promotion gate item 3).
   if [ "$published" = true ] || marker_candidate_matches e2e_gate "$ok_sha"; then
     step e2e_gate "done" "$(marker_field "$OPS_SCOPE" e2e_gate 'd.get("evidence")')"
+  elif [ -n "${NATIVE_MTP_POSTCUT_EVIDENCE:-}" ]; then
+    local postcut_state postcut_status
+    if ! postcut_state="$(python3 "$REPO_ROOT/scripts/native_mtp_postcut_upload.py" status \
+        --root "$REPO_ROOT" --evidence "$NATIVE_MTP_POSTCUT_EVIDENCE" \
+        --candidate-marker "$(marker_path "$OPS_SCOPE" signed_byte_verification)" \
+        --state-dir "$OPS_STATE_DIR/$OPS_SCOPE/native-mtp-postcut" 2>"$OPS_TMP_DIR/postcut.err")"; then
+      set_next native_mtp_postcut blocked "Verify public-safe post-cut evidence transport" "" "post-cut intent or authenticated run provenance is invalid"
+    else
+      postcut_status="$(printf '%s' "$postcut_state" | python3 -c 'import json,sys;print(json.load(sys.stdin)["status"])')"
+      step e2e_gate pending "post-cut transport: $postcut_status"
+      case "$postcut_status" in
+        absent|staged|success)
+          set_next native_mtp_postcut mutate "Upload public-safe native-MTP evidence or record its successful signed journey" \
+            "scripts/ops/cli-release.sh _native-mtp-postcut $V" ;;
+        running|dispatch_pending)
+          set_next native_mtp_postcut blocked "Wait for the authenticated native-MTP signed journey" "" "dispatch is pending or running; no duplicate upload or dispatch will be made" ;;
+        *) set_next native_mtp_postcut blocked "Inspect the failed native-MTP signed journey" "" "the immutable transport intent cannot be replaced" ;;
+      esac
+    fi
   else
     step e2e_gate pending ""
     set_next e2e_gate manual "Record the in-scope e2e evidence for candidate $ok_sha" \
@@ -1547,8 +1566,33 @@ PY
   log "staged v$V.json and v$V.json.sig in $dir on Pearl; the coordinator approves them within one challenge interval"
 }
 
+# One guarded transport action; e2e remains gated on a real successful signed
+# journey run, never on an upload acknowledgement or a dispatch request.
+native_mtp_postcut() {
+  local V="$1" result status run_id sha evidence
+  is_semver "$V" || refuse "invalid post-cut candidate version"
+  [ "${MACPROVIDER_OPS_ENTRYPOINT:-}" = 1 ] && [ -n "${MACPROVIDER_OPS_OWNER:-}" ] || refuse "post-cut transport requires next --run"
+  [ -n "${NATIVE_MTP_POSTCUT_EVIDENCE:-}" ] || refuse "post-cut evidence is unset"
+  OPS_SCOPE="cli-release-$V"
+  sha="$(marker_field "$OPS_SCOPE" signed_byte_verification 'd.get("candidate_sha")')"
+  result="$(python3 "$REPO_ROOT/scripts/native_mtp_postcut_upload.py" upload \
+    --root "$REPO_ROOT" --evidence "$NATIVE_MTP_POSTCUT_EVIDENCE" \
+    --candidate-marker "$(marker_path "$OPS_SCOPE" signed_byte_verification)" \
+    --state-dir "$OPS_STATE_DIR/$OPS_SCOPE/native-mtp-postcut")" || refuse "post-cut transport failed closed"
+  status="$(printf '%s' "$result" | python3 -c 'import json,sys;print(json.load(sys.stdin)["status"])')"
+  if [ "$status" = success ]; then
+    run_id="$(printf '%s' "$result" | python3 -c 'import json,sys;print(json.load(sys.stdin)["run_id"])')"
+    evidence="$(check_journey_run "$run_id" "$sha" "$V")"
+    mark_done "$OPS_SCOPE" e2e_gate "post-cut signed serving journey $run_id" \
+      "$(python3 -c 'import json,sys;print(json.dumps({"candidate_sha":sys.argv[1],"kind":"runs","runs":[json.loads(sys.argv[2])]}))' "$sha" "$evidence")"
+  else
+    log "post-cut transport $status; e2e remains pending"
+  fi
+}
+
 internal() {
   case "$1" in
+    _native-mtp-postcut) shift; native_mtp_postcut "$@" ;;
     _verify-candidate) shift; verify_candidate "$@" ;;
     _stage-privacy-identity) shift; stage_privacy_identity "$@" ;;
     _release-tag) shift; release_tag "$@" ;;

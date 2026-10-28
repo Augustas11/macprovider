@@ -335,7 +335,9 @@ final class ShardGroupAuditFixTests: XCTestCase {
     /// SPEC-051-R013: while a request is open, the member's next frame is due within
     /// its receive deadline even though the head keeps heartbeating.
     func testAnOpenRequestBoundsTheMembersWait() throws {
-        let links = try ShardBenchTestRig.ring(stages: 2, collapsed: true)
+        // Isolate the request deadline from hosted-runner heartbeat scheduling.
+        // Peer-death timing is covered by ShardStageLinkTests.
+        let links = try ShardBenchTestRig.ring(stages: 2, collapsed: true, missedHeartbeatLimit: 400)
         let stages = ShardBenchTestRig.stages(splits, total: 4)
         let started = Date()
         let tail = startTail(links, stage: stages[1])
@@ -343,6 +345,7 @@ final class ShardGroupAuditFixTests: XCTestCase {
         try links[0].upstream.send(try control(1))
         guard case .failure(let error) = tail() else { return XCTFail("the tail kept waiting") }
         XCTAssertEqual(error as? ShardLinkError, .receiveTimedOut)
+        XCTAssertGreaterThan(links[1].upstream.statistics.heartbeatsReceived, 0)
         XCTAssertLessThan(Date().timeIntervalSince(started), 15, "bounded by the 5 s receive deadline, not the idle wait")
     }
 

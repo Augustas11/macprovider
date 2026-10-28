@@ -40,7 +40,7 @@ struct MacProviderCLI: AsyncParsableCommand {
         commandName: "malibu-cli",
         abstract: "OpenAI-compatible Malibu (Mac Provider) inference CLI.",
         version: CoordinatorClient.binaryVersion,
-        subcommands: [ServeCommand.self, SelfTestCommand.self, StatusCommand.self, ProviderCommand.self, ClaimCommand.self, CreatorCommand.self, RestartCommand.self, UpdateCommand.self, UninstallCommand.self, ModelsCommand.self, AutotuneCommand.self, BootstrapAuthCommand.self, RotateKeyCommand.self, CredentialsCommand.self, LifecycleStateCommand.self, RecoverUpdateCommand.self, LifecycleLeaseCommand.self, Spec028CanaryCommand.self, Spec028BenchmarkCommand.self, LegacySpec028CanaryCommand.self, LegacySpec028BenchmarkCommand.self, DecodeBenchCommand.self] + labSubcommands() + [MSBThroughputCommand.self, MSBLoopbackCommand.self, MSBOllamaLoopbackCommand.self, MSBPerplexityCommand.self, MSBComputeScoreCommand.self, EnrollCommand.self, ReleasePayloadPreflightCommand.self, KVCacheCommand.self, DoctorCommand.self, PayoutAddressCommand.self, ConsumeCommand.self, RelayBlindKeyCommand.self] + fixtureSubcommands() + [PrivacyClassCommand.self, AppAttestCommand.self],
+        subcommands: [ServeCommand.self, SelfTestCommand.self, StatusCommand.self, ProviderCommand.self, ClaimCommand.self, CreatorCommand.self, RestartCommand.self, UpdateCommand.self, UninstallCommand.self, ModelsCommand.self, AutotuneCommand.self, BootstrapAuthCommand.self, RotateKeyCommand.self, CredentialsCommand.self, LifecycleStateCommand.self, RecoverUpdateCommand.self, LifecycleLeaseCommand.self, Spec028CanaryCommand.self, Spec028BenchmarkCommand.self, LegacySpec028CanaryCommand.self, LegacySpec028BenchmarkCommand.self, DecodeBenchCommand.self, NativeMTPQualificationCommand.self] + labSubcommands() + [MSBThroughputCommand.self, MSBLoopbackCommand.self, MSBOllamaLoopbackCommand.self, MSBPerplexityCommand.self, MSBComputeScoreCommand.self, EnrollCommand.self, ReleasePayloadPreflightCommand.self, KVCacheCommand.self, DoctorCommand.self, PayoutAddressCommand.self, ConsumeCommand.self, RelayBlindKeyCommand.self] + fixtureSubcommands() + [PrivacyClassCommand.self, AppAttestCommand.self],
         defaultSubcommand: ServeCommand.self
     )
 
@@ -206,12 +206,20 @@ struct RecoverUpdateCommand: ParsableCommand {
             payload["marker_recovered"] = markerOutcome != nil
             payload["lifecycle_unfenced"] = lifecycleUnfenced
             payload["marker_result"] = Self.describe(markerOutcome)
-            payload["message"] = "recovered the abandoned transaction; run `serve` (or let launchd restart it) to return to serving"
+            payload["message"] = Self.recoveryMessage(markerRecovered: markerOutcome != nil)
         }
         try LifecycleStateStatusCommand.writeJSON(payload)
         if let failureExit {
             throw ExitCode(failureExit)
         }
+    }
+
+    static func recoveryMessage(markerRecovered: Bool) -> String {
+        var message = "Recovered the abandoned transaction; the operator pause flag is preserved. Run `serve` to start the restored provider; resume from Malibu or the provider control socket when ready to serve buyers if paused."
+        if markerRecovered {
+            message += " Reload LaunchAgent helpers were fenced before rollback. If provider LaunchAgents were disabled, re-enable each installed label (live.malibu.provider, live.malibu.provider-watchdog, or legacy live.streamvc.macprovider, live.streamvc.macprovider-watchdog) with `launchctl enable gui/$(id -u)/<label>` before `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/<label>.plist`. For an already loaded provider, use `launchctl kickstart -k gui/$(id -u)/<label>` instead of bootstrap."
+        }
+        return message
     }
 
     private static func describe(_ outcome: AutoUpdateOrphanRecoveryOutcome?) -> String {
@@ -2787,7 +2795,8 @@ struct ServeCommand: AsyncParsableCommand {
             "event=continuous_batching_policy action=resolved status=\(continuousBatchingPolicy.status.rawValue) entries=\(policyEntries.count) revocations=\(continuousBatchingPolicy.selection.revocations.count) emergency_off=\(emergencyOffOverride)\n".utf8
         ))
         // Facts shared by the automatic slot count and the R018 item 9 bound.
-        let servedConfigJSONData = resolved.modelArtifactPath.flatMap {
+        let servedFitArtifactPath = startupPreflight.runtimeBinding?.loadPath ?? resolved.modelArtifactPath
+        let servedConfigJSONData = servedFitArtifactPath.flatMap {
             try? Data(contentsOf: URL(fileURLWithPath: $0, isDirectory: true).appendingPathComponent("config.json"))
         }
         let servedCatalogMinRAMGB = (try? AutotuneStaticInputs.decodeSignedStaticCandidateCatalog(
@@ -2800,7 +2809,7 @@ struct ServeCommand: AsyncParsableCommand {
                 .first
         }
         let servedWeightsBytes = ProviderContextWorkflow.liveModelFacts(
-            artifactPath: resolved.modelArtifactPath
+            artifactPath: servedFitArtifactPath
         ).weightsBytes
         // SPEC-023-R009 / SPEC-038-R011 (v0.3.15): scheduler rows are the
         // memory-fit recommendation for this Mac; the served count starts at
@@ -2824,7 +2833,8 @@ struct ServeCommand: AsyncParsableCommand {
                 memoryGB: memoryGB,
                 catalogMinRAMGB: servedCatalogMinRAMGB,
                 contextTokens: servedContextTokens,
-                weightsBytes: servedWeightsBytes
+                weightsBytes: servedWeightsBytes,
+                verifiedArtifactBinding: startupPreflight.runtimeBinding != nil
             )
             let policyCeiling = AutoServedSlots.policyServedSlotCeiling(
                 continuousBatchingPolicy,
@@ -3084,9 +3094,6 @@ struct ServeCommand: AsyncParsableCommand {
                    let mb = ModelRuntime.applyMLXCommandBufferBudget(modelFamily: family) {
                     FileHandle.standardError.write(Data("mlx_max_mb_per_buffer=\(mb) family=\(family)\n".utf8))
                 }
-                if let applied = ModelRuntime.applyMLXCacheLimit(megabytes: resolved.mlxCacheLimitMB) {
-                    FileHandle.standardError.write(Data("mlx_cache_limit_bytes=\(applied)\n".utf8))
-                }
                 ModelRuntime.logsStructuredFailurePreview = resolved.logLevel == .debug || resolved.logLevel == .trace
                 modelRuntime = try await ModelRuntime(
                     modelID: resolved.model,
@@ -3095,6 +3102,7 @@ struct ServeCommand: AsyncParsableCommand {
                     draftModelLoadPath: verifiedDraftModelLoadPath,
                     numDraftTokens: resolved.numDraftTokens,
                     speculativeCacheWrapValidated: speculativeCacheWrapValidated,
+                    mlxCacheLimitMB: resolved.mlxCacheLimitMB,
                     maxContextTokensOverride: resolved.maxContextOverride,
                     kvBitsOverride: effectiveKVBits,
                     pagedKVConfig: resolved.pagedKV.withFamilyDefaults(modelFamily: localModelFamily ?? "").sizedToCover(
@@ -4616,6 +4624,7 @@ struct SelfTestCommand: AsyncParsableCommand {
         let runtime = try await ModelRuntime(
             modelID: resolved.model,
             modelLoadPath: preflight.runtimeBinding?.loadPath ?? Self.modelLoadPath(for: resolved),
+            mlxCacheLimitMB: resolved.mlxCacheLimitMB,
             maxContextTokensOverride: resolved.maxContextOverride,
             verifiedModelArtifactSHA256: resolved.modelArtifactSHA256,
             verifiedModelLoadSHA256: preflight.runtimeBinding?.loadSHA256

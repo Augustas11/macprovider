@@ -30,6 +30,54 @@ private final class RuntimeBridgeChunkRecorder: @unchecked Sendable {
 }
 
 final class PagedKVRuntimeBridgeTests: XCTestCase {
+    func testParityProbeUsesStateAwareWrapperAcross513TokenPrefillAnd48TokenDecode() async throws {
+        try requireMetal()
+        let model = RuntimeBridgeStateOnlyProbeModel()
+        let container = ModelContainer(context: ModelContext(
+            configuration: ModelConfiguration(id: "state-only-probe"), model: model,
+            processor: StandInUserInputProcessor(), tokenizer: RuntimeBridgeFakeTokenizer()))
+        let result = await PagedKVRuntimeParityProbe.runParityProbe(
+            container: container, modelID: "state-only-probe",
+            blockSizeTokens: 32, maxPhysicalBlocks: 64,
+            promptTokens: Array(repeating: 3, count: 513), nNew: 48)
+        XCTAssertTrue(result.established, "stock and real paged gather must match through the wrapper")
+        XCTAssertEqual(result.nNew, 48)
+        XCTAssertEqual(result.nForwards, 49)
+        XCTAssertGreaterThan(result.gatherKernelCalls, 0)
+        XCTAssertGreaterThanOrEqual(result.maxLogicalBlocks, 3)
+        XCTAssertTrue(result.nonIdentityPermutation)
+        XCTAssertEqual(result.contiguousCacheRecordable, false,
+                       "float32 probe buffers prove ordinary gather parity but cannot enter the byte bridge")
+        let forwards = model.forwards()
+        let expectedWidths = [512] + Array(repeating: 1, count: 48)
+        let expectedPositions: [Int?] = [nil] + (512..<560).map { Optional($0) }
+        let expectedRotaryDeltas = expectedPositions.map { $0.map { $0 + 7 } }
+        for paged in [false, true] {
+            let sequence = forwards.filter { $0.paged == paged }
+            XCTAssertEqual(sequence.map(\.width), expectedWidths)
+            XCTAssertEqual(sequence.map(\.incomingPosition), expectedPositions,
+                           "state from every prefill/decode forward belongs to the same sequence")
+            XCTAssertEqual(sequence.map(\.incomingRotaryDelta), expectedRotaryDeltas,
+                           "array-valued rotary state must survive every forward")
+            XCTAssertEqual(sequence.map(\.sampledToken), (0..<49).map {
+                (512 + $0) % 31
+            })
+        }
+    }
+
+    func testSerialReferenceUsesPrimaryStateAwareWrapperForward() throws {
+        try requireMetal()
+        let model = RuntimeBridgeStateOnlyProbeModel()
+        let reference = try PagedKVRuntimeParityProbe.serialReference(
+            model: model, prompt: Array(repeating: 3, count: 513))
+        XCTAssertEqual(reference.top1, 513 % 31)
+        let forwards = model.forwards()
+        XCTAssertEqual(forwards.count, 1)
+        XCTAssertEqual(forwards.first?.width, 513)
+        XCTAssertNil(forwards.first?.incomingPosition)
+        XCTAssertNil(forwards.first?.incomingRotaryDelta)
+    }
+
     // CPU-only scheduler fixtures change the process-wide default device. Pin
     // this Metal-backed class for each invocation so test order cannot route
     // GPU-only model kernels to the CPU. Explicit CPU scopes below still win.
@@ -182,6 +230,158 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         ).hybridDecoderArchitectureVerified)
     }
 
+    func testBonsai2BHybridRequiresExactIdentitySchemaAndLayout() throws {
+        let id = "prism-ml/Ternary-Bonsai-2-2B-mlx-2bit"
+        let config = Self.bonsai2BHybridConfig()
+        func capabilities(_ object: [String: Any], modelID: String = "prism-ml/Ternary-Bonsai-2-2B-mlx-2bit") throws -> PagedKVRuntimeModelCapabilities {
+            ModelRuntime.pagedKVModelCapabilities(
+                modelID: modelID, configJSONData: try JSONSerialization.data(withJSONObject: object)
+            )
+        }
+        let verified = try capabilities(config)
+        for sameIdentity in [id, id.lowercased(), "PRISM-ml/TERnary-BONSAI-2-2b-MLX-2BIT"] {
+            XCTAssertEqual(try capabilities(config, modelID: sameIdentity), verified, sameIdentity)
+        }
+        XCTAssertEqual(verified.modelFamily, "qwen")
+        XCTAssertTrue(verified.hybridDecoderArchitectureVerified)
+        XCTAssertTrue(verified.ordinaryHybridOnly)
+        XCTAssertTrue(PagedKVAttachGate.supportsCacheClass(
+            "mixed", hybridDecoderArchitectureVerified: verified.hybridDecoderArchitectureVerified
+        ))
+        XCTAssertNil(ModelRuntime.nativeMTPAdmissionCacheClass(runtimeCacheClass: "mixed", modelCapabilities: verified))
+        XCTAssertNil(ModelRuntime.nativeMTPAdmissionCacheClass(runtimeCacheClass: "KVCacheSimple", modelCapabilities: verified))
+        let expected: [PagedKVSharedForwardBackend.CacheKind] = (0..<24).map {
+            ($0 + 1).isMultiple(of: 4) ? .pagedAttention : .recurrentMamba
+        }
+        XCTAssertTrue(ModelRuntime.measuredMixedPagedKVTopology(expected, modelCapabilities: verified))
+        XCTAssertFalse(ModelRuntime.measuredMixedPagedKVTopology(Array(expected.dropLast()), modelCapabilities: verified))
+        var swapped = expected
+        swapped.swapAt(0, 3)
+        XCTAssertFalse(ModelRuntime.measuredMixedPagedKVTopology(swapped, modelCapabilities: verified))
+        XCTAssertFalse(ModelRuntime.measuredMixedPagedKVTopology([.recurrentMamba, .pagedAttention], modelCapabilities: verified))
+        for impostor in ["prism-ml/Ternary-Bonsai-2-4B-mlx-2bit", "impostor/Ternary-Bonsai-2-2B-mlx-2bit", "bonsai-2b", id + "-other"] {
+            XCTAssertFalse(try capabilities(config, modelID: impostor).hybridDecoderArchitectureVerified, impostor)
+        }
+        for (key, wrong) in [
+            ("schema_version", 1 as Any), ("schema_version", 3 as Any),
+            ("schema_version", true as Any), ("schema_version", "2" as Any),
+            ("model_type", "qwen3_5" as Any), ("base_model_type", "qwen3_5_text" as Any),
+            ("tensor_namespace", "mlx-lm-qwen3_5" as Any)
+        ] {
+            var invalid = config
+            invalid[key] = wrong
+            XCTAssertFalse(try capabilities(invalid).hybridDecoderArchitectureVerified, key)
+        }
+        let text = try XCTUnwrap(config["text_config"] as? [String: Any])
+        var wrongOrder = try XCTUnwrap(text["layer_types"] as? [String])
+        wrongOrder.swapAt(0, 3)
+        for (key, wrong) in [
+            ("num_hidden_layers", 25 as Any), ("num_hidden_layers", "24" as Any),
+            ("full_attention_interval", 3 as Any), ("model_type", "qwen3_5" as Any),
+            ("mtp_num_hidden_layers", 1 as Any), ("mtp_num_hidden_layers", false as Any),
+            ("mtp_use_dedicated_embeddings", true as Any), ("mtp_use_dedicated_embeddings", 0 as Any), ("layer_types", wrongOrder as Any),
+            ("layer_types", Array(wrongOrder.dropLast()) as Any)
+        ] {
+            var invalidText = text
+            invalidText[key] = wrong
+            var invalid = config
+            invalid["text_config"] = invalidText
+            XCTAssertFalse(try capabilities(invalid).hybridDecoderArchitectureVerified, key)
+        }
+        for key in config.keys {
+            var invalid = config
+            invalid.removeValue(forKey: key)
+            XCTAssertFalse(try capabilities(invalid).hybridDecoderArchitectureVerified, key)
+        }
+        XCTAssertFalse(ModelRuntime.pagedKVModelCapabilities(modelID: id, configJSONData: Data("invalid".utf8)).hybridDecoderArchitectureVerified)
+        XCTAssertFalse(ModelRuntime.pagedKVModelCapabilities(modelID: id, configJSONData: nil).hybridDecoderArchitectureVerified)
+    }
+
+    func testLFM25HybridRequiresExactIdentityAndOneSlotTopology() throws {
+        let id = "LiquidAI/LFM2.5-24B-A2B-MLX-4bit"
+        let config = Self.lfm25HybridConfig()
+        func capabilities(
+            _ object: [String: Any],
+            modelID: String = "LiquidAI/LFM2.5-24B-A2B-MLX-4bit"
+        ) throws -> PagedKVRuntimeModelCapabilities {
+            ModelRuntime.pagedKVModelCapabilities(
+                modelID: modelID,
+                configJSONData: try JSONSerialization.data(withJSONObject: object)
+            )
+        }
+
+        let verified = try capabilities(config)
+        XCTAssertEqual(verified.modelFamily, "lfm2")
+        XCTAssertTrue(verified.requiresMoEDispatch)
+        XCTAssertTrue(verified.hybridDecoderArchitectureVerified)
+        XCTAssertTrue(verified.ordinaryHybridOnly)
+        XCTAssertEqual(verified.recurrentStateLayout, .lfm25ShortConvOneSlot)
+        XCTAssertNil(ModelRuntime.nativeMTPAdmissionCacheClass(
+            runtimeCacheClass: "mixed", modelCapabilities: verified
+        ))
+        XCTAssertTrue(ModelRuntime.measuredMixedPagedKVTopology(
+            PagedKVRecurrentStateLayout.lfm25ExpectedCacheKinds,
+            modelCapabilities: verified
+        ))
+
+        var wrongTopology = config
+        wrongTopology["layer_types"] = Array(repeating: "conv", count: 40)
+        XCTAssertFalse(try capabilities(wrongTopology).hybridDecoderArchitectureVerified)
+        XCTAssertFalse(try capabilities(config, modelID: id + "-other").hybridDecoderArchitectureVerified)
+        XCTAssertFalse(try capabilities(config, modelID: "qwen/qwen3.5-35b-a3b").hybridDecoderArchitectureVerified)
+    }
+
+    func testLFM25OneSlotStatePackingSplitsRowsWithoutCrossRowState() throws {
+        try requireMetal()
+        func cache(_ values: [Float]) -> MambaCache {
+            let cache = MambaCache()
+            cache[0] = MLXArray(values, [1, values.count, 1])
+            return cache
+        }
+
+        let first = cache([1, 2])
+        let second = cache([3, 4])
+        let batch = MambaCache()
+        try PagedKVSharedForwardBackend.packMambaRows(
+            [first, second], into: batch, stateLayout: .lfm25ShortConvOneSlot
+        )
+        XCTAssertEqual(batch.state.count, 1)
+        eval(batch.state)
+        XCTAssertEqual(batch.state[0].asArray(Float.self), [1, 2, 3, 4])
+
+        batch.state = [MLXArray([11, 12, 13, 14], [2, 2, 1])]
+        PagedKVSharedForwardBackend.syncMambaRows(
+            from: batch, into: [first, second], stateLayout: .lfm25ShortConvOneSlot
+        )
+        eval(first.state, second.state)
+        XCTAssertEqual(first.state.count, 1)
+        XCTAssertEqual(second.state.count, 1)
+        XCTAssertEqual(first.state[0].asArray(Float.self), [11, 12])
+        XCTAssertEqual(second.state[0].asArray(Float.self), [13, 14])
+
+        let invalid = MambaCache()
+        invalid[0] = MLXArray([1], [1, 1, 1])
+        invalid[1] = MLXArray([2], [1, 1, 1])
+        XCTAssertThrowsError(try PagedKVSharedForwardBackend.packMambaRows(
+            [first, invalid], into: MambaCache(), stateLayout: .lfm25ShortConvOneSlot
+        ))
+    }
+
+    func testQwenMambaPackingRemainsTwoSlotByDefault() throws {
+        try requireMetal()
+        func cache(_ first: Float, _ second: Float) -> MambaCache {
+            let cache = MambaCache()
+            cache[0] = MLXArray([first], [1, 1, 1])
+            cache[1] = MLXArray([second], [1, 1, 1])
+            return cache
+        }
+
+        let batch = MambaCache()
+        try PagedKVSharedForwardBackend.packMambaRows([cache(1, 2), cache(3, 4)], into: batch)
+        XCTAssertEqual(batch.state.count, 2)
+        XCTAssertEqual(PagedKVRecurrentStateLayout.mambaTwoSlot.slotCount, 2)
+    }
+
     func testNativeMTPAdmissionCacheClassCanonicalizesOnlyVerifiedPagedRuntime() {
         let verified = PagedKVRuntimeModelCapabilities(
             modelFamily: "qwen",
@@ -239,6 +439,22 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         )
 
         XCTAssertNil(measurement)
+    }
+
+    func testUnsupportedContiguousMaterializationPreservesOrdinaryRuntimeMeasurement() throws {
+        let result = PagedKVRuntimeParityProbeResult(
+            established: true, nLayers: 2, nNew: 4, gatherKernelCalls: 16,
+            maxLogicalBlocks: 3, nonIdentityPermutation: true, contiguousCacheRecordable: false)
+        let measurement = ModelRuntime.measurePagedKVRuntime(
+            config: PagedKVConfig(enabled: true, blockSizeTokens: 32, maxPhysicalBlocks: 64),
+            modelID: "mlx-community/Qwen-Test", modelSHA256: String(repeating: "a", count: 64),
+            tokenizerSHA256: nil, chatTemplateSHA256: nil,
+            modelCapabilities: PagedKVRuntimeModelCapabilities(
+                modelFamily: "qwen", requiresMoEDispatch: false,
+                supportsContiguousCacheMaterialization: false),
+            parityProbe: result, moeProbe: Self.provenBatchedProbe(),
+            environment: Self.liveMeasurementEnvironment())
+        XCTAssertNotNil(measurement, "cache byte representation must not revoke a proven ordinary decode path")
     }
 
     func testProductionRuntimeMeasurementBuildsLiveIdentityAndSizingProof() throws {
@@ -4683,6 +4899,33 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         try await assertQwenPreparationLaneAdmitsWhileTargetLockIsHeld(streaming: true)
     }
 
+    func testUnrecordableCacheStillServesOrdinaryCBAndRefusesColdKeyedStrictAdmission() async throws {
+        try requireMetal()
+        let modelID = "mlx-community/Qwen-Test"
+        let backend = RuntimeBridgeScriptedBackend(scripts: [:])
+        let runtime = Self.attachedRuntime(
+            modelID: modelID, backend: backend,
+            modelCapabilities: PagedKVRuntimeModelCapabilities(
+                modelFamily: "qwen", requiresMoEDispatch: false,
+                supportsContiguousCacheMaterialization: false))
+        let ordinary = try Self.chatRequest(modelID: modelID, maxTokens: 2)
+            .withRequestID("unrecordable-ordinary")
+        let completion = try await runtime.complete(ordinary)
+        XCTAssertEqual(completion.content, "3 3")
+        let before = await backend.decodeCallCount()
+        XCTAssertGreaterThan(before, 0)
+        let keyed = try Self.chatRequest(modelID: modelID, maxTokens: 2)
+            .withRequestID("unrecordable-cold-keyed").withConversationKey("conv:never-seen")
+        do {
+            _ = try await runtime.complete(keyed)
+            XCTFail("strict keyed admission must reject before byte materialization")
+        } catch {
+            XCTAssertEqual((error as? APIError)?.code, "continuous_batching_paged_kv_handoff_unavailable")
+        }
+        let after = await backend.decodeCallCount()
+        XCTAssertEqual(before, after)
+    }
+
     func testAttachedModelRuntimeServesFreshGreedyRequestsThroughScheduler() async throws {
         try requireMetal()
 
@@ -5315,6 +5558,42 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         )
     }
 
+    private static func bonsai2BHybridConfig() -> [String: Any] {
+        [
+            "schema_version": 2,
+            "model_type": "prism_hadamard_qwen35",
+            "base_model_type": "qwen3_5",
+            "tensor_namespace": "mlx-vlm-qwen3_5",
+            "text_config": [
+                "model_type": "qwen3_5_text", "num_hidden_layers": 24,
+                "full_attention_interval": 4, "mtp_num_hidden_layers": 0,
+                "mtp_use_dedicated_embeddings": false,
+                "layer_types": (0..<24).map {
+                    ($0 + 1).isMultiple(of: 4) ? "full_attention" : "linear_attention"
+                },
+            ] as [String: Any],
+        ]
+    }
+
+    private static func lfm25HybridConfig() -> [String: Any] {
+        [
+            "model_type": "lfm2_moe",
+            "architectures": ["Lfm2MoeForCausalLM"],
+            "hidden_size": 2048,
+            "num_hidden_layers": 40,
+            "layer_types": (0..<40).map { index in
+                (index - 2).isMultiple(of: 4) ? "full_attention" : "conv"
+            },
+            "conv_L_cache": 3,
+            "conv_bias": false,
+            "num_attention_heads": 32,
+            "num_key_value_heads": 8,
+            "num_dense_layers": 2,
+            "num_experts": 64,
+            "num_experts_per_tok": 4,
+        ]
+    }
+
     private static func qwen35HybridConfig(
         layerTypes: [String]? = nil,
         includeMTPMetadata: Bool = true
@@ -5890,6 +6169,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         promptTokens: [Int32] = [3],
         container suppliedContainer: ModelContainer? = nil,
         preparationLane: ContinuousBatchTextPreparationLane? = nil,
+        modelCapabilities: PagedKVRuntimeModelCapabilities? = nil,
         warmSwapEnabled: Bool = false,
         testLoader: (@Sendable (String) async throws -> (String, String?))? = nil,
         testCompletion: (@Sendable (RuntimeSnapshot, ChatCompletionRequest) async throws -> CompletionResult)? = nil
@@ -5914,6 +6194,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
             pagedKVHardwareSizingProof: proof,
             pagedKVRuntimeCacheClass: "KVCacheSimple",
             pagedKVSchedulerBackendInstalled: true,
+            pagedKVModelCapabilities: modelCapabilities,
             container: container,
             continuousBatchingBackend: backend,
             testContinuousBatchTextPreparationLane: preparationLane,
@@ -6964,5 +7245,63 @@ private final class StepRecorder: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return stored
+    }
+}
+
+/// Deliberately implements only the primary text/state overload. Calling the
+/// optional array overload would hit LanguageModel's fatal default, as Prism did.
+private final class RuntimeBridgeStateOnlyProbeModel: Module, LanguageModel, KVCacheDimensionProvider {
+    struct Forward {
+        let width: Int
+        let incomingPosition: Int?
+        let incomingRotaryDelta: Int?
+        let sampledToken: Int
+        let paged: Bool
+    }
+    let kvHeads = [1]
+    private static let positionKey = LMOutput.Key<Int>("probe.position")
+    private static let rotaryDeltaKey = LMOutput.Key<MLXArray>("probe.rotary_deltas")
+    private let lock = NSLock()
+    private var recordedForwards: [Forward] = []
+
+    func prepare(
+        _ input: LMInput, cache: [KVCache], state: LMOutput.State?, prefill: PrefillParameters
+    ) throws -> PrepareResult { .tokens(input.text) }
+
+    func callAsFunction(_ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?) -> LMOutput {
+        let width = input.tokens.dim(1)
+        let incomingPosition = state?[Self.positionKey]
+        let incomingRotaryDelta = (state?[Self.rotaryDeltaKey]).map { Int($0.item(Int32.self)) }
+        let position = incomingPosition ?? 0
+        let tokens = input.tokens.asArray(Int32.self)
+        let keys = MLXArray(tokens.map(Float.init), [1, 1, width, 1])
+        let values = MLXArray(tokens.map { Float($0 + 100) }, [1, 1, width, 1])
+        for layer in cache ?? [] {
+            eval(attentionWithCacheUpdate(
+                queries: keys, keys: keys, values: values, cache: layer,
+                scale: 1, mask: width > 1 ? .causal : .none))
+        }
+        var logits = Array(repeating: Float(-1_000), count: width * 32)
+        for index in 0..<width {
+            logits[index * 32 + (position + index + 1) % 31] = 1_000
+        }
+        let nextPosition = position + width
+        let sampledToken = nextPosition % 31
+        lock.lock()
+        recordedForwards.append(Forward(
+            width: width, incomingPosition: incomingPosition,
+            incomingRotaryDelta: incomingRotaryDelta, sampledToken: sampledToken,
+            paged: cache?.first is PagedKVCache))
+        lock.unlock()
+        var outputState = LMOutput.State()
+        outputState[Self.positionKey] = nextPosition
+        outputState[Self.rotaryDeltaKey] = MLXArray(Int32(nextPosition + 7))
+        return LMOutput(logits: MLXArray(logits, [1, width, 32]), state: outputState)
+    }
+
+    func forwards() -> [Forward] {
+        lock.lock()
+        defer { lock.unlock() }
+        return recordedForwards
     }
 }

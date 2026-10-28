@@ -128,7 +128,7 @@ final class KVConversationColdTierTests: XCTestCase {
         persisted.createdAtMillis = 1_000_000
         persisted.eligibleUntilMillis = 1_900_000
         fake.promoteResult = persisted
-        let cache = ConversationCache(config: Self.config)
+        let cache = makeConversationCacheForTest(config: Self.config)
         await cache.attachColdTier(fake)
         let hit = await cache.begin(conversationKey: "conv:kvs-synth:ttl", incomingTokens: int32Range(0..<65),
                                     modelID: "model-a", kvBits: nil,
@@ -149,7 +149,7 @@ final class KVConversationColdTierTests: XCTestCase {
     func testPromotedHitAccountingMatchesHotHit() async {
         let fake = FakeColdTier()
         fake.promoteResult = candidate(canonicalTokens: int32Range(0..<64), offset: 64)
-        let cache = ConversationCache(config: Self.config, coldTier: fake)
+        let cache = makeConversationCacheForTest(config: Self.config, coldTier: fake)
 
         let incoming = int32Range(0..<57) + int32Range(100..<112)   // LCP 57 vs the 64-token cold entry
         let hit = await cache.begin(
@@ -172,7 +172,7 @@ final class KVConversationColdTierTests: XCTestCase {
         let incoming = int32Range(0..<57) + int32Range(100..<112)
 
         // Tier disabled ⇒ cold-start miss, cached=0 (byte-identical to today).
-        let plain = ConversationCache(config: Self.config)
+        let plain = makeConversationCacheForTest(config: Self.config)
         let plainLease = await plain.begin(
             conversationKey: "conv:kvs-synth:x", incomingTokens: incoming, modelID: "model-a", kvBits: nil)
         XCTAssertEqual(plainLease?.cachedPromptTokens, 0)
@@ -181,7 +181,7 @@ final class KVConversationColdTierTests: XCTestCase {
         // Tier enabled + eligible ⇒ the only difference is hit availability.
         let fake = FakeColdTier()
         fake.promoteResult = candidate(canonicalTokens: int32Range(0..<64), offset: 64)
-        let enabled = ConversationCache(config: Self.config, coldTier: fake)
+        let enabled = makeConversationCacheForTest(config: Self.config, coldTier: fake)
         let hit = await enabled.begin(
             conversationKey: "conv:kvs-synth:x", incomingTokens: incoming, modelID: "model-a",
             kvBits: nil, cold: context(eligible: true))
@@ -195,7 +195,7 @@ final class KVConversationColdTierTests: XCTestCase {
     func testNonEligibleKeyNeitherPromotesNorPersists() async {
         let fake = FakeColdTier()
         fake.promoteResult = candidate(canonicalTokens: int32Range(0..<64), offset: 64)
-        let cache = ConversationCache(config: Self.config, coldTier: fake)
+        let cache = makeConversationCacheForTest(config: Self.config, coldTier: fake)
 
         let tokens = int32Range(0..<64)
         let lease = await cache.begin(
@@ -265,7 +265,7 @@ final class KVConversationColdTierTests: XCTestCase {
         try await store.activate()
         let adapter = KVConversationColdTierAdapter(
             store: store, namespaceID: "ns-test", eligibilityTTLSeconds: 900)
-        let cache = ConversationCache(config: Self.config)
+        let cache = makeConversationCacheForTest(config: Self.config)
         await cache.attachColdTier(adapter)
 
         // Gated key, but the context carries identityUnavailableReason (a live-identity
@@ -300,7 +300,7 @@ final class KVConversationColdTierTests: XCTestCase {
 
     func testGatedCommitCapturesSnapshotWithCommittedTokens() async {
         let fake = FakeColdTier()
-        let cache = ConversationCache(config: Self.config, coldTier: fake)
+        let cache = makeConversationCacheForTest(config: Self.config, coldTier: fake)
         let tokens = int32Range(0..<40)
         let lease = await cache.begin(
             conversationKey: "conv:kvs-synth:snap", incomingTokens: tokens, modelID: "model-a",
@@ -317,7 +317,7 @@ final class KVConversationColdTierTests: XCTestCase {
     /// captureSnapshot, not a wall-clock read taken after the deep copy.
     func testCaptureUsesExactCommitInstant() async {
         let fake = FakeColdTier()
-        let cache = ConversationCache(config: Self.config, coldTier: fake)
+        let cache = makeConversationCacheForTest(config: Self.config, coldTier: fake)
         let tokens = int32Range(0..<40)
         let lease = await cache.begin(
             conversationKey: "conv:kvs-synth:instant", incomingTokens: tokens, modelID: "model-a",
@@ -333,7 +333,7 @@ final class KVConversationColdTierTests: XCTestCase {
 
     func testSingleKeyPurgeFencesInFlightCommit() async {
         let fake = FakeColdTier()
-        let cache = ConversationCache(config: Self.config, coldTier: fake)
+        let cache = makeConversationCacheForTest(config: Self.config, coldTier: fake)
         let key = "conv:kvs-synth:fence"
         let tokens = int32Range(0..<64)
 
@@ -360,7 +360,7 @@ final class KVConversationColdTierTests: XCTestCase {
     /// that the hot tier held live state even when there is no resident RAM entry.
     func testSingleKeyPurgeCancelsPendingPersistAndReportsState() async {
         let fake = FakeColdTier()
-        let cache = ConversationCache(config: Self.config, coldTier: fake)
+        let cache = makeConversationCacheForTest(config: Self.config, coldTier: fake)
         let key = "conv:kvs-synth:pending"
 
         // Model a queued-but-unpublished persist for the key.
@@ -376,7 +376,7 @@ final class KVConversationColdTierTests: XCTestCase {
 
     func testPurgeAllFencesInFlightCommit() async {
         let fake = FakeColdTier()
-        let cache = ConversationCache(config: Self.config, coldTier: fake)
+        let cache = makeConversationCacheForTest(config: Self.config, coldTier: fake)
         let key = "conv:kvs-synth:fenceall"
         let tokens = int32Range(0..<64)
 
@@ -401,7 +401,7 @@ final class KVConversationColdTierTests: XCTestCase {
         let fake = FakeColdTier()
         // Cold entry too short: LCP < the 32 threshold ⇒ predicate rejects it.
         fake.promoteResult = candidate(canonicalTokens: int32Range(0..<10), offset: 10)
-        let cache = ConversationCache(config: Self.config, coldTier: fake)
+        let cache = makeConversationCacheForTest(config: Self.config, coldTier: fake)
         let incoming = int32Range(0..<10) + int32Range(50..<60)
         let lease = await cache.begin(
             conversationKey: "conv:kvs-synth:reject", incomingTokens: incoming, modelID: "model-a",
@@ -862,8 +862,9 @@ final class KVConversationColdTierTests: XCTestCase {
         let source = try String(contentsOfFile: "Sources/macprovider-cli/ModelRuntime.swift", encoding: .utf8)
         // Sampling components now wrap the cache-adjusted parameters. Pin the
         // complete data flow, not the former direct constructor spelling: the
-        // iterator must receive both fields from that same configuration.
-        let wired = #"let generation = Self\.serveGenerationConfiguration\(\s+parameters: Self\.serveIteratorParameters\(\s+parameters, forceSimpleKV: forceSimpleKV, reusedCache: lease\?\.reusableCache != nil,\s+cache: kvCache\),\s+completePromptTokenIDs: parameters\.repetitionPenalty == nil \? \[\] : promptTokenIds\.map\(Int\.init\)\)\s+let iterator = try TokenIterator\(\s+input: iteratorInput, model: generationContext\.model, cache: kvCache,\s+parameters: generation\.parameters, components: grammarConstraint\.map \{ constraint in\s+generation\.components\.appendingLogitProcessor \{ GrammarLogitProcessor\(constraint: constraint\) \}\s+\} \?\? generation\.components\)"#
+        // iterator must receive both fields from that same configuration, while
+        // retaining the VLM position state produced by serial prefill.
+        let wired = #"let generation = Self\.serveGenerationConfiguration\(\s+parameters: Self\.serveIteratorParameters\(\s+parameters, forceSimpleKV: forceSimpleKV, reusedCache: lease\?\.reusableCache != nil,\s+cache: kvCache\),\s+completePromptTokenIDs: parameters\.repetitionPenalty == nil \? \[\] : promptTokenIds\.map\(Int\.init\)\)\s+let iterator = try TokenIterator\(\s+input: iteratorInput, model: generationContext\.model, cache: kvCache, state: iteratorState,\s+parameters: generation\.parameters, components: grammarConstraint\.map \{ constraint in\s+generation\.components\.appendingLogitProcessor \{ GrammarLogitProcessor\(constraint: constraint\) \}\s+\} \?\? generation\.components\)"#
         let matches = try NSRegularExpression(pattern: wired).numberOfMatches(
             in: source, range: NSRange(source.startIndex..., in: source))
         XCTAssertEqual(matches, 2, "non-streaming and streaming serial serve must use serveIteratorParameters")
@@ -920,7 +921,7 @@ final class KVConversationColdTierTests: XCTestCase {
                 conversationKey: "conv:windowed"))
         XCTAssertTrue(keyed.allSatisfy { $0 is RotatingKVCache })
 
-        let cache = ConversationCache(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+        let cache = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
         let tokens = int32Range(0..<64)
         for layer in keyed {
             (layer as? RotatingKVCache)?.offset = tokens.count

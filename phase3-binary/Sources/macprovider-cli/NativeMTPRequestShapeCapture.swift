@@ -3,8 +3,16 @@ import Darwin
 import Foundation
 import MacProviderCore
 
+enum NativeMTPRequestShapeCaptureSchema: String, Sendable, Equatable {
+    case v1
+    case v2
+
+    var wireValue: String { "macprovider.native-mtp-request-shape-capture.\(rawValue)" }
+}
+
 struct NativeMTPRequestShapeCaptureConfig: Sendable, Equatable {
     static let directoryEnvironmentKey = "MACPROVIDER_NATIVE_MTP_SHAPE_CAPTURE_DIR"
+    static let schemaEnvironmentKey = "MACPROVIDER_NATIVE_MTP_SHAPE_CAPTURE_SCHEMA"
     static let maxRecordsEnvironmentKey = "MACPROVIDER_NATIVE_MTP_SHAPE_CAPTURE_MAX_RECORDS"
     static let maxBytesEnvironmentKey = "MACPROVIDER_NATIVE_MTP_SHAPE_CAPTURE_MAX_BYTES"
     static let hardMaxRecords = 1_000
@@ -13,17 +21,35 @@ struct NativeMTPRequestShapeCaptureConfig: Sendable, Equatable {
     let directory: URL
     let maxRecords: Int
     let maxBytes: Int
+    let schema: NativeMTPRequestShapeCaptureSchema
+
+    init(directory: URL, maxRecords: Int, maxBytes: Int, schema: NativeMTPRequestShapeCaptureSchema = .v1) {
+        self.directory = directory
+        self.maxRecords = maxRecords
+        self.maxBytes = maxBytes
+        self.schema = schema
+    }
 
     static func fromEnvironment(_ environment: [String: String] = ProcessInfo.processInfo.environment) throws -> NativeMTPRequestShapeCaptureConfig? {
         guard let rawDirectory = environment[directoryEnvironmentKey]?.trimmingCharacters(in: .whitespacesAndNewlines),
               !rawDirectory.isEmpty else {
             return nil
         }
+        let schema: NativeMTPRequestShapeCaptureSchema
+        if let rawSchema = environment[schemaEnvironmentKey] {
+            guard let parsed = NativeMTPRequestShapeCaptureSchema(rawValue: rawSchema) else {
+                throw NativeMTPRequestShapeCaptureError.invalidSchema
+            }
+            schema = parsed
+        } else {
+            schema = .v1
+        }
         let directory = URL(fileURLWithPath: ConfigLoader.expandTilde(rawDirectory), isDirectory: true)
         return NativeMTPRequestShapeCaptureConfig(
             directory: directory,
             maxRecords: try boundedInt(environment[maxRecordsEnvironmentKey], defaultValue: hardMaxRecords, upperBound: hardMaxRecords),
-            maxBytes: try boundedInt(environment[maxBytesEnvironmentKey], defaultValue: hardMaxBytes, upperBound: hardMaxBytes)
+            maxBytes: try boundedInt(environment[maxBytesEnvironmentKey], defaultValue: hardMaxBytes, upperBound: hardMaxBytes),
+            schema: schema
         )
     }
 
@@ -47,7 +73,13 @@ final class NativeMTPRequestShapeCapture: @unchecked Sendable {
     private let statusURL: URL
     private let statusHandle: FileHandle
     private let sampleWindowStartedAt: Date
-    private let sampleMethod = "opt_in_mtp_off_successful_ordinary_completions"
+    private let captureSchema: NativeMTPRequestShapeCaptureSchema
+    private let nativeMTPMode: NativeMTPMode
+    private var sampleMethod: String {
+        captureSchema == .v1
+            ? "opt_in_mtp_off_successful_ordinary_completions"
+            : "opt_in_successful_persistable_completions_observation"
+    }
     private let buildIdentityComplete: Bool
     private let anonymousGroupSalt = SymmetricKey(size: .bits256)
     private let maxRecords: Int
@@ -69,9 +101,11 @@ final class NativeMTPRequestShapeCapture: @unchecked Sendable {
         runningBuildIdentity: ModelRuntime.NativeMTPRunningBuildIdentity?,
         now: Date = Date()
     ) throws {
-        guard nativeMTPMode == .off else {
+        guard config.schema == .v2 || nativeMTPMode == .off else {
             throw NativeMTPRequestShapeCaptureError.requiresNativeMTPOff
         }
+        self.captureSchema = config.schema
+        self.nativeMTPMode = nativeMTPMode
         let directory = config.directory.standardizedFileURL
         try Self.prepareDirectory(directory)
         let captureFileName = Self.fileName(now: now)
@@ -86,12 +120,12 @@ final class NativeMTPRequestShapeCapture: @unchecked Sendable {
         self.maxRecords = min(max(1, config.maxRecords), NativeMTPRequestShapeCaptureConfig.hardMaxRecords)
         self.maxBytes = min(max(1024, config.maxBytes), NativeMTPRequestShapeCaptureConfig.hardMaxBytes)
 
-        let header: [String: Any] = [
-            "schema": Self.schema,
+        var header: [String: Any] = [
+            "schema": captureSchema.wireValue,
             "record_type": "header",
             "captured_at": Self.iso8601(now),
             "native_mtp_mode": nativeMTPMode.rawValue,
-            "capture_requires_native_mtp_off": true,
+            "capture_requires_native_mtp_off": captureSchema == .v1,
             "sample_method": sampleMethod,
             "sample_window_started_at": Self.iso8601(sampleWindowStartedAt),
             "served_identity": "per_record_sha256",
@@ -102,6 +136,9 @@ final class NativeMTPRequestShapeCapture: @unchecked Sendable {
             "max_records": self.maxRecords,
             "max_bytes": self.maxBytes,
         ]
+        if captureSchema == .v2 {
+            header["capture_role"] = "request_shape_observation_only"
+        }
         _ = try writeLocked(header)
         writeStatusLocked(now: now)
     }
@@ -132,7 +169,13 @@ final class NativeMTPRequestShapeCapture: @unchecked Sendable {
         defer { lock.unlock() }
         attempts += 1
         defer { writeStatusLocked(now: now) }
-        guard admission.effectivePath == .ordinary, admission.selection.nativeMTPReason == .modeOff else {
+        if captureSchema == .v1 || nativeMTPMode == .off {
+            guard admission.effectivePath == .ordinary, admission.selection.nativeMTPReason == .modeOff else {
+                skippedIneligible += 1
+                return
+            }
+        } else if admission.effectivePath == .classicDraftSpec {
+            // The existing ordinary/native replay has no classic-draft control.
             skippedIneligible += 1
             return
         }
@@ -154,6 +197,7 @@ final class NativeMTPRequestShapeCapture: @unchecked Sendable {
         }
         let sequence = recordsWritten + 1
         let payload = Self.payload(
+            schema: captureSchema,
             sequence: sequence,
             request: request,
             snapshot: snapshot,
@@ -176,6 +220,7 @@ final class NativeMTPRequestShapeCapture: @unchecked Sendable {
     }
 
     private static func payload(
+        schema: NativeMTPRequestShapeCaptureSchema,
         sequence: Int,
         request: ChatCompletionRequest,
         snapshot: RuntimeSnapshot,
@@ -219,7 +264,13 @@ final class NativeMTPRequestShapeCapture: @unchecked Sendable {
         let toolsPresent = !NativeMTPRequestShapeCapture.hasNoTools(request.promptSource.tools)
         let toolChoicePresent = !NativeMTPRequestShapeCapture.isAbsentOrNull(request.promptSource.toolChoice)
         let toolTurnStatePresent = request.messages.contains { $0.role == .tool || !($0.toolCalls?.isEmpty ?? true) }
-        let unknownTopLevelKeysPresent = !request.topLevelKeys.isSubset(of: NativeMTPSelector.admittedTopLevelKeys)
+        var understoodKeys = NativeMTPSelector.admittedTopLevelKeys
+        if schema == .v2 {
+            // Known controls remain known even when the observed signed profile
+            // keeps them ordinary. Candidate eligibility is projected separately.
+            understoodKeys.formUnion(["reasoning_effort", "parallel_tool_calls"])
+        }
+        let unknownTopLevelKeysPresent = !request.topLevelKeys.isSubset(of: understoodKeys)
         let unknownStreamOptionKeysPresent = !request.streamOptionKeys.isSubset(of: NativeMTPSelector.admittedStreamOptionKeys)
         let requestedMaxCompletionTokens: Any = request.maxTokens.map { $0 as Any } ?? NSNull()
         let structuredOutputRequested: Bool
@@ -228,8 +279,8 @@ final class NativeMTPRequestShapeCapture: @unchecked Sendable {
         } else {
             structuredOutputRequested = true
         }
-        return [
-            "schema": Self.schema,
+        var payload: [String: Any] = [
+            "schema": schema.wireValue,
             "record_type": "request_shape",
             "sequence": sequence,
             "shape_id": String(format: "shape-%06d", sequence),
@@ -300,6 +351,59 @@ final class NativeMTPRequestShapeCapture: @unchecked Sendable {
             "pre_capacity_eligible": preCapacityEligible,
             "effective_path": admission.effectivePath.rawValue,
         ]
+        if schema == .v2 {
+            payload.removeValue(forKey: "pre_capacity_selector_reason")
+            payload.removeValue(forKey: "pre_capacity_eligible")
+            payload.removeValue(forKey: "effective_path")
+            payload["observed_selector_reason"] = reason
+            payload["observed_selector_eligible"] = preCapacityEligible
+            payload["observed_effective_path"] = admission.effectivePath.rawValue
+            payload["served_model_family"] = servedModelFamily(snapshot)
+            payload["parallel_tool_calls_state"] = parallelToolCallsState(request)
+            payload["reasoning_effort_state"] = reasoningEffortState(request)
+            payload["effective_reasoning_effort"] = snapshot.modelID
+                .flatMap { request.templateReasoningEffort(for: $0) }.map { $0 as Any } ?? NSNull()
+            payload["tool_choice_function_index"] = toolChoiceFunctionIndex(request).map { $0 as Any } ?? NSNull()
+            payload["tool_grammar_required"] = (try? ToolSelectionPolicy.selection(request.promptSource.toolChoice))?.requiresCall ?? false
+        }
+        return payload
+    }
+
+    private static func servedModelFamily(_ snapshot: RuntimeSnapshot) -> String {
+        // A missing actual served model also makes template normalization
+        // unavailable. Never substitute the buyer's potentially aliased model.
+        guard snapshot.modelID != nil else { return "unknown" }
+        switch snapshot.nativeMTPCapability?.family {
+        case "glm5_next_mtp_v1"?: return "glm5_next_mtp_v1"
+        case "qwen3_5_mtp_v1"?: return "qwen3_5_mtp_v1"
+        default: return "unknown"
+        }
+    }
+
+    private static func parallelToolCallsState(_ request: ChatCompletionRequest) -> String {
+        if let value = request.parallelToolCalls { return value ? "true" : "false" }
+        return request.topLevelKeys.contains("parallel_tool_calls") ? "unknown" : "absent"
+    }
+
+    private static func reasoningEffortState(_ request: ChatCompletionRequest) -> String {
+        if let value = request.reasoningEffort {
+            return ChatCompletionRequest.acceptedReasoningEfforts.contains(value) ? value : "unknown"
+        }
+        // Production parsing permits null, unlike parallel_tool_calls.
+        return request.topLevelKeys.contains("reasoning_effort") ? "null" : "absent"
+    }
+
+    private static func toolChoiceFunctionIndex(_ request: ChatCompletionRequest) -> Int? {
+        guard let selection = try? ToolSelectionPolicy.selection(request.promptSource.toolChoice),
+              case .named(let selected) = selection,
+              case .array(let tools)? = request.promptSource.tools else { return nil }
+        let matches = tools.indices.filter { index in
+            guard case .object(let tool) = tools[index], tool["type"] == .string("function"),
+                  case .object(let function)? = tool["function"],
+                  case .string(let name)? = function["name"] else { return false }
+            return name == selected
+        }
+        return matches.count == 1 ? matches.first : nil
     }
 
     private func writeLocked(_ payload: [String: Any]) throws -> Bool {
@@ -317,7 +421,7 @@ final class NativeMTPRequestShapeCapture: @unchecked Sendable {
 
     private func writeStatusLocked(now: Date) {
         let payload: [String: Any] = [
-            "schema": Self.schema,
+            "schema": captureSchema.wireValue,
             "record_type": "status",
             "updated_at": Self.iso8601(now),
             "sample_method": sampleMethod,
@@ -700,4 +804,5 @@ enum NativeMTPRequestShapeCaptureError: Error, Equatable {
     case unsafeDirectory
     case outputFileExists
     case invalidLimit
+    case invalidSchema
 }

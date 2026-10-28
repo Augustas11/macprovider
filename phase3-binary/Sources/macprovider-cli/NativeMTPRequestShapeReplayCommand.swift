@@ -1,11 +1,11 @@
 import ArgumentParser
 import CryptoKit
+import CoreFoundation
 import Darwin
 import Foundation
 import MacProviderCore
 import MLXLMCommon
 
-#if DEBUG || MACPROVIDER_LAB_HARNESS
 struct NativeMTPRequestShapeReplayCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "native-mtp-request-shape-replay",
@@ -24,6 +24,12 @@ struct NativeMTPRequestShapeReplayCommand: AsyncParsableCommand {
 
     @Option(name: .customLong("bench-policy"), help: "Frozen Native MTP bench policy JSON for tuple/environment validation.")
     var benchPolicyPath: String
+
+    @Option(name: .customLong("projection-plan"), help: "Bound v2 sanitized projection plan; required only for v2 captures.")
+    var projectionPlanPath: String?
+
+    @Option(name: .customLong("tuple-bounds"), help: "Exact v2 tuple bounds bound by the projection plan.")
+    var tupleBoundsPath: String?
 
     @Option(name: .customLong("out"), help: "Output JSONL path.")
     var outPath: String
@@ -59,7 +65,9 @@ struct NativeMTPRequestShapeReplayCommand: AsyncParsableCommand {
             outPath: outPath,
             providerCommit: providerCommit,
             blocks: blocks,
-            modelID: modelID
+            modelID: modelID,
+            projectionPlanPath: projectionPlanPath,
+            tupleBoundsPath: tupleBoundsPath
         )
         try await runner.run()
     }
@@ -77,6 +85,8 @@ final class NativeMTPRequestShapeReplayRunner {
     private let blocks: Int
     private let modelID: String
     private let capture: NativeMTPRequestShapeReplayCapture
+    private let projection: NativeMTPReplayV2Projection?
+    private var outputSchema: String { capture.header.isV2 ? "macprovider.native-mtp-request-shape-replay.v2" : Self.schema }
     private let replayPolicy: NativeMTPPostGatewayReplayPolicy
     private let benchPolicy: NativeMTPBenchPolicy
     private let captureSHA256: String
@@ -91,7 +101,9 @@ final class NativeMTPRequestShapeReplayRunner {
         outPath: String,
         providerCommit: String,
         blocks: Int,
-        modelID: String
+        modelID: String,
+        projectionPlanPath: String? = nil,
+        tupleBoundsPath: String? = nil
     ) throws {
         self.root = URL(fileURLWithPath: ConfigLoader.expandTilde(rootPath), isDirectory: true).standardizedFileURL
         self.captureURL = URL(fileURLWithPath: ConfigLoader.expandTilde(capturePath)).standardizedFileURL
@@ -104,18 +116,68 @@ final class NativeMTPRequestShapeReplayRunner {
         self.captureSHA256 = try Self.sha256(of: self.captureURL)
         self.policySHA256 = try Self.sha256(of: self.replayPolicyURL)
         self.benchPolicySHA256 = try Self.sha256(of: self.benchPolicyURL)
-        self.capture = try NativeMTPRequestShapeReplayCapture.load(from: self.captureURL)
+        let captured = try NativeMTPRequestShapeReplayCapture.load(from: self.captureURL)
         self.replayPolicy = try NativeMTPPostGatewayReplayPolicy.load(from: self.replayPolicyURL)
         self.benchPolicy = try NativeMTPBenchPolicy.load(from: self.benchPolicyURL)
+        if captured.header.isV2 {
+            guard let projectionPlanPath, let tupleBoundsPath else {
+                throw NativeMTPRequestShapeReplayError.invalidCapture("v2 requires --projection-plan and --tuple-bounds")
+            }
+            let bound = try NativeMTPReplayV2Projection.load(
+                planURL: URL(fileURLWithPath: ConfigLoader.expandTilde(projectionPlanPath)),
+                tupleURL: URL(fileURLWithPath: ConfigLoader.expandTilde(tupleBoundsPath)),
+                capture: captured, captureSHA: captureSHA256, policySHA: policySHA256,
+                benchPolicySHA: benchPolicySHA256, sampleSHA: replayPolicy.sampleDigestSHA256,
+                arrivalIntervalMS: benchPolicy.arrivalIntervalMS, blocks: blocks, modelID: modelID)
+            self.projection = bound
+            self.capture = bound.capture
+        } else {
+            guard projectionPlanPath == nil, tupleBoundsPath == nil else {
+                throw NativeMTPRequestShapeReplayError.invalidCapture("v1 does not accept v2 projection inputs")
+            }
+            self.projection = nil
+            self.capture = captured
+        }
+    }
+
+    private var qualifiedSlots: Int {
+        benchPolicy.qualifiedSlots ?? NativeMTPRequestShapeReplayPlan.qualifiedSlots
+    }
+
+    private var maxNativeActiveRows: Int {
+        benchPolicy.maxNativeActiveRows ?? NativeMTPRequestShapeReplayPlan.maxNativeActiveRows
     }
 
     func run() async throws {
-        let targetDirectory = root.appendingPathComponent("target", isDirectory: true)
-        let mtpDirectory = root.appendingPathComponent("mtp", isDirectory: true)
+        // The replay fixture executes depth one; an exploratory bench policy
+        // for another depth cannot bind evidence from this executor.
+        guard benchPolicy.proposalDepth == 1 else {
+            throw NativeMTPBenchError.invalidPolicy("request-shape replay requires proposal_depth 1")
+        }
+        let layout = NativeMTPBenchFixtureLayout.resolve(root: root)
+        // Legacy separate-drafter policies may omit tuple bounds. Embedded
+        // families must never inherit those replay defaults as qualification.
+        if layout.family.embeddedMTP {
+            guard benchPolicy.qualifiedSlots != nil,
+                  let bound = benchPolicy.maxNativeActiveRows,
+                  let implementationBound = layout.family.implementationMaxNativeActiveRows,
+                  bound <= implementationBound else {
+                throw NativeMTPBenchError.invalidPolicy("embedded MTP replay requires explicit qualified_slots and a signed native-row bound")
+            }
+        }
+        if (capture.header.isV2 || layout.family.familyAdapter == "glm5_next_mtp_v1"),
+           qualifiedSlots > maxNativeActiveRows, benchPolicy.arrivalIntervalMS <= 0 {
+            throw NativeMTPBenchError.invalidPolicy("staggered replay requires arrival_interval_ms > 0 above the native-row bound")
+        }
+        try benchPolicy.validateFamily(layout.family)
+        let targetDirectory = layout.targetDirectory
+        let mtpDirectory = layout.mtpDirectory
         try Self.requireDirectory(targetDirectory)
         try Self.requireDirectory(mtpDirectory)
         let targetIdentity = try MLXSnapshotIdentity.compute(directory: targetDirectory)
-        let mtpIdentity = try MLXSnapshotIdentity.compute(directory: mtpDirectory)
+        let mtpIdentity = layout.family.embeddedMTP
+            ? targetIdentity
+            : try MLXSnapshotIdentity.compute(directory: mtpDirectory)
         let tokenizerSHA = try Self.sha256(of: targetDirectory.appendingPathComponent("tokenizer.json"))
         try benchPolicy.validateObserved(
             modelID: modelID,
@@ -132,17 +194,32 @@ final class NativeMTPRequestShapeReplayRunner {
         let plan = try NativeMTPRequestShapeReplayPlan.make(
             capture: capture,
             blocks: blocks,
-            seed: replayPolicy.seed
+            seed: replayPolicy.seed,
+            qualifiedSlots: qualifiedSlots,
+            maxNativeActiveRows: maxNativeActiveRows,
+            supportsSampling: layout.family.admitsSampledRows,
+            preserveTotalSlots: capture.header.isV2 || layout.family.familyAdapter == "glm5_next_mtp_v1"
         )
         let identityMismatches = capture.identityMismatches(targetSHA256: targetIdentity.digest)
+        let weightsManifest = capture.header.isV2 ? try ModelRuntime.modelWeightArtifactManifestHash(in: targetDirectory) : nil
+        let weightsMismatch = capture.header.isV2 && capture.shapes.contains { $0.servedWeightsManifestSHA256 != weightsManifest }
         try writer.write(header(targetIdentity: targetIdentity, mtpIdentity: mtpIdentity, tokenizerSHA256: tokenizerSHA))
-        if !identityMismatches.isEmpty {
+        if let projection, projection.family != layout.family.familyAdapter
+            || capture.shapes.contains(where: { $0.stringFeature("served_model_family") != projection.family }) {
+            try writer.write(pendingRecord(reason: "PENDING_UNREPRODUCIBLE_CAPTURE:family_adapter_mismatch", plan: plan))
+            return
+        }
+        if capture.header.isV2 && capture.header.object["build_identity_complete"] as? Bool != true {
+            try writer.write(pendingRecord(reason: "PENDING_UNREPRODUCIBLE_CAPTURE:missing_capture_build_identity", plan: plan))
+            return
+        }
+        if !identityMismatches.isEmpty || weightsMismatch {
             try writer.write(pendingRecord(reason: "capture_identity_mismatch", plan: plan, identityMismatches: identityMismatches))
             return
         }
         if !plan.sampleCoverageComplete {
             try writer.write(pendingRecord(reason: plan.pendingReason ?? "incomplete_sample_coverage", plan: plan))
-            if plan.runnableRowsPerBlock == 0 {
+            if capture.header.isV2 || plan.runnableRowsPerBlock == 0 {
                 return
             }
         }
@@ -154,7 +231,7 @@ final class NativeMTPRequestShapeReplayRunner {
                 let runtime = path == .nativeMTP ? fixture.runtimes.native : fixture.runtimes.ordinary
                 do {
                     let result = try await runPath(path, block: block, runtime: runtime, fixture: fixture, maxContextTokens: plan.maxContextTokens, sampleCoverageComplete: plan.sampleCoverageComplete)
-                    try writer.write(result.record(policySHA256: policySHA256, benchPolicySHA256: benchPolicySHA256, captureSHA256: captureSHA256))
+                    try writer.write(result.record(policySHA256: policySHA256, benchPolicySHA256: benchPolicySHA256, captureSHA256: captureSHA256, schema: outputSchema))
                 } catch NativeMTPRequestShapeReplayError.pending(let reason) {
                     try writer.write(pendingRecord(reason: "block_\(block.index)_\(path.rawValue)_pending:\(reason)", plan: plan))
                     return
@@ -165,15 +242,15 @@ final class NativeMTPRequestShapeReplayRunner {
 
     private func loadFixture(maxPromptTokens: Int, maxCompletionTokens: Int, maxContextTokens: Int) async throws -> NativeMTPHardwareRuntimeFixture {
         let maxBlocks = NativeMTPHardwareE2ERunner.sizedMaxPhysicalBlocks(
-            slots: NativeMTPRequestShapeReplayPlan.qualifiedSlots,
+            slots: qualifiedSlots,
             promptTokens: maxPromptTokens,
             outputTokens: maxCompletionTokens
         )
         let runner = NativeMTPHardwareE2ERunner(
             rootPath: root.path,
             modelID: modelID,
-            maxBatch: NativeMTPRequestShapeReplayPlan.qualifiedSlots,
-            maxNativeActiveRows: NativeMTPRequestShapeReplayPlan.maxNativeActiveRows,
+            maxBatch: qualifiedSlots,
+            maxNativeActiveRows: maxNativeActiveRows,
             maxPromptTokens: benchPolicy.maximumPromptTokens ?? 1_048_576,
             maxPhysicalBlocks: maxBlocks
         )
@@ -232,13 +309,19 @@ final class NativeMTPRequestShapeReplayRunner {
                     throw NativeMTPRequestShapeReplayError.pending("decode_output_cap_unavailable:\(path.rawValue)")
                 }
                 let results = try await withThrowingTaskGroup(of: NativeMTPRequestShapeReplayRequestResult.self) { group in
-                    for row in rowWave {
+                    for (arrivalIndex, row) in rowWave.enumerated() {
                         guard let request = requestsByID[row.requestID] else {
                             throw NativeMTPRequestShapeReplayError.assertionFailed("missing request for \(row.requestID)")
                         }
                         let targetCompletionTokens = block.row(requestID: request.requestID)?.targetCompletionTokens ?? request.maxTokens ?? 0
+                        let arrivalIntervalMS = (self.capture.header.isV2 || self.projection?.family == "glm5_next_mtp_v1"
+                            || NativeMTPBenchFixtureLayout.resolve(root: self.root).family.familyAdapter == "glm5_next_mtp_v1")
+                            ? self.benchPolicy.arrivalIntervalMS : 0
                         group.addTask {
-                            try await Self.runStreamingRequest(
+                            if arrivalIndex > 0, arrivalIntervalMS > 0 {
+                                try await Task.sleep(nanoseconds: UInt64(arrivalIndex) * UInt64(arrivalIntervalMS) * 1_000_000)
+                            }
+                            return try await Self.runStreamingRequest(
                                 request,
                                 runtime: runtime,
                                 timingObserver: timingObserver,
@@ -425,8 +508,8 @@ final class NativeMTPRequestShapeReplayRunner {
         mtpIdentity: MLXSnapshotIdentity,
         tokenizerSHA256: String
     ) -> [String: Any] {
-        [
-            "schema": Self.schema,
+        var value: [String: Any] = [
+            "schema": outputSchema,
             "record_type": "header",
             "provider_commit": providerCommit,
             "model_id": modelID,
@@ -442,8 +525,8 @@ final class NativeMTPRequestShapeReplayRunner {
             "capture_schema": capture.header.schema,
             "capture_requires_native_mtp_off": capture.header.captureRequiresNativeMTPOff,
             "run_order": "paired_random_counterbalanced",
-            "mixed_rows": NativeMTPRequestShapeReplayPlan.qualifiedSlots,
-            "max_native_active_rows": NativeMTPRequestShapeReplayPlan.maxNativeActiveRows,
+            "mixed_rows": qualifiedSlots,
+            "max_native_active_rows": maxNativeActiveRows,
             "cache_key_scope": "paired_block_and_path_isolated",
             "exports_raw_prompt_text": false,
             "exports_recoverable_cache_groups": false,
@@ -455,6 +538,16 @@ final class NativeMTPRequestShapeReplayRunner {
             "sample_filter_excluded_count": 0,
             "request_shapes": capture.shapes.map(\.sanitizedExport),
         ]
+        if let projection {
+            value["capture_role"] = capture.header.object["capture_role"]
+            value["capture_native_mtp_mode"] = capture.header.nativeMTPMode
+            value["capture_build_source_commit"] = capture.header.object["build_source_commit"]
+            value["capture_build_cdhash"] = capture.header.object["build_cdhash"]
+            value["capture_cli_version"] = capture.header.object["cli_version"]
+            value["tuple_bounds_sha256"] = projection.tupleSHA256
+            value["arrival_schedule"] = projection.arrivalSchedule
+        }
+        return value
     }
 
     private func pendingRecord(
@@ -463,7 +556,7 @@ final class NativeMTPRequestShapeReplayRunner {
         identityMismatches: [[String: Any]] = []
     ) -> [String: Any] {
         [
-            "schema": Self.schema,
+            "schema": outputSchema,
             "record_type": "pending",
             "status": "pending",
             "pending_reason": reason,
@@ -475,9 +568,9 @@ final class NativeMTPRequestShapeReplayRunner {
             "sample_coverage": plan.sampleCoverageExport,
             "identity_mismatches": identityMismatches,
             "blocks": blocks,
-            "qualified_slots": NativeMTPRequestShapeReplayPlan.qualifiedSlots,
-            "execution_shape": "ordered_waves_max_8_concurrent",
-            "max_native_active_rows": NativeMTPRequestShapeReplayPlan.maxNativeActiveRows,
+            "qualified_slots": qualifiedSlots,
+            "execution_shape": "ordered_waves_max_\(qualifiedSlots)_concurrent",
+            "max_native_active_rows": maxNativeActiveRows,
             "cache_key_scope": "paired_block_and_path_isolated",
             "request_shapes": capture.shapes.map(\.sanitizedExport),
         ]
@@ -790,6 +883,22 @@ final class NativeMTPRequestShapeReplayRunner {
             object["max_tokens"] = maxTokens
         }
         Self.applyCapturedLogitControls(from: row, to: &object)
+        if let parallel = row.stringFeature("parallel_tool_calls_state") {
+            switch parallel {
+            case "absent": break
+            case "true": object["parallel_tool_calls"] = true
+            case "false": object["parallel_tool_calls"] = false
+            default: throw NativeMTPRequestShapeReplayError.pending("PENDING_UNREPRODUCIBLE_CAPTURE:parallel_tool_calls")
+            }
+        }
+        if let effort = row.stringFeature("reasoning_effort_state") {
+            switch effort {
+            case "absent": break
+            case "null": object["reasoning_effort"] = NSNull()
+            case "unknown": throw NativeMTPRequestShapeReplayError.pending("PENDING_UNREPRODUCIBLE_CAPTURE:reasoning_effort")
+            default: object["reasoning_effort"] = effort
+            }
+        }
         if row.boolFeature("structured_output_requested") {
             object["response_format"] = Self.syntheticResponseFormat(for: row)
         }
@@ -880,7 +989,8 @@ final class NativeMTPRequestShapeReplayRunner {
         case "none", "auto", "required":
             return row.stringFeature("tool_choice_kind") ?? "auto"
         case "function":
-            return ["type": "function", "function": ["name": "replay_tool_0"]]
+            let index = row.jsonFeature("tool_choice_function_index").flatMap { ($0 as? NSNumber)?.intValue } ?? 0
+            return ["type": "function", "function": ["name": "replay_tool_\(index)"]]
         default:
             return "auto"
         }
@@ -1111,6 +1221,17 @@ final class NativeMTPRequestShapeReplayRunner {
         }, by: { $0.requestID ?? "" })
     }
 
+    static func admissionMatches(path: NativeMTPRequestShapeReplayPath, expectedReason: String,
+                                 expectedPath: String, actualReason: String, actualPath: String) -> Bool {
+        if expectedReason == actualReason && expectedPath == actualPath { return true }
+        // All in-flight buyer rows count against the native bound. Preserve the
+        // pre-capacity projection while accepting only this measured fallback.
+        return path == .nativeMTP && expectedReason == NativeMTPSelectorReason.eligible.rawValue
+            && expectedPath == DecodePath.nativeMTP.rawValue
+            && actualReason == NativeMTPSelectorReason.capacityAboveNativeBound.rawValue
+            && actualPath == DecodePath.ordinary.rawValue
+    }
+
     static func admissionProjectionRows(
         path: NativeMTPRequestShapeReplayPath,
         block: NativeMTPRequestShapeReplayBlock,
@@ -1177,7 +1298,8 @@ final class NativeMTPRequestShapeReplayRunner {
                 "actual_selector_reason": actualReason,
                 "expected_effective_path": expectedPath,
                 "actual_effective_path": actualPath,
-                "matches": expectedReason == actualReason && expectedPath == actualPath && budgetMatches && reproduced,
+                "matches": Self.admissionMatches(path: path, expectedReason: expectedReason, expectedPath: expectedPath,
+                    actualReason: actualReason, actualPath: actualPath) && budgetMatches && reproduced,
                 "reproduced": reproduced,
                 "pending_reason": combinedPending.map { $0 as Any } ?? NSNull(),
             ] as [String: Any]
@@ -1379,7 +1501,31 @@ final class NativeMTPRequestShapeReplayRunner {
         guard geometryMatches(responseSchemaGeometry(request.responseFormat), row.dictionaryFeature("response_schema_geometry")) else {
             return "response_schema_geometry_mismatch:\(row.requestID)"
         }
-        let unknownTopLevel = !request.topLevelKeys.isSubset(of: NativeMTPSelector.admittedTopLevelKeys)
+        if let parallel = row.stringFeature("parallel_tool_calls_state") {
+            let actual = request.topLevelKeys.contains("parallel_tool_calls")
+                ? request.parallelToolCalls.map { $0 ? "true" : "false" } ?? "unknown" : "absent"
+            guard actual == parallel else { return "parallel_tool_calls_mismatch:\(row.requestID)" }
+            let expectedEffort = row.stringFeature("reasoning_effort_state")
+            let actualEffort = request.topLevelKeys.contains("reasoning_effort") ? request.reasoningEffort ?? "null" : "absent"
+            guard actualEffort == expectedEffort,
+                  request.templateReasoningEffort(for: request.model) == row.jsonFeature("effective_reasoning_effort") as? String else {
+                return "reasoning_effort_mismatch:\(row.requestID)"
+            }
+            guard GrammarConstraintState.isRequired(request) == row.boolFeature("tool_grammar_required") else {
+                return "tool_grammar_required_mismatch:\(row.requestID)"
+            }
+            if row.stringFeature("tool_choice_kind") == "function" {
+                // Parsed named choice is also checked by production grammar;
+                // compare parsed JSON values without retaining any real name.
+                guard let expected = try? MacProviderCore.JSONValue.parse(Self.syntheticToolChoice(for: row)),
+                      request.promptSource.toolChoice == expected else {
+                    return "named_tool_choice_mismatch:\(row.requestID)"
+                }
+            }
+        }
+        var knownKeys = NativeMTPSelector.admittedTopLevelKeys
+        if row.stringFeature("served_model_family") != nil { knownKeys.formUnion(["reasoning_effort", "parallel_tool_calls"]) }
+        let unknownTopLevel = !request.topLevelKeys.isSubset(of: knownKeys)
         guard unknownTopLevel == row.boolFeature("unknown_top_level_keys_present") else {
             return "unknown_top_level_key_mismatch:\(row.requestID)"
         }
@@ -1623,6 +1769,345 @@ struct NativeMTPPostGatewayReplayPolicy {
     }
 }
 
+
+// v2 has a closed, independent wire contract. Legacy v1 bytes never enter it.
+enum NativeMTPReplayV2Validation {
+    static let captureSchema = "macprovider.native-mtp-request-shape-capture.v2"
+    static let controls: Set<String> = ["effective_reasoning_effort", "parallel_tool_calls_state", "reasoning_effort_state", "served_model_family", "tool_choice_function_index", "tool_grammar_required"]
+    static let headerKeys: Set<String> = ["build_cdhash", "build_identity_complete", "build_source_commit", "capture_requires_native_mtp_off", "capture_role", "captured_at", "cli_version", "max_bytes", "max_records", "native_mtp_mode", "record_type", "sample_method", "sample_window_started_at", "schema", "served_identity"]
+    static let shapeKeys: Set<String> = ["anonymous_cache_group_sha256", "assistant_tool_call_count", "captured_at", "completion_tokens", "conversation_cache_cached_prompt_tokens", "conversation_cache_lease", "conversation_cache_retained_handoff", "conversation_key_cache_only", "conversation_key_present", "effective_max_output_tokens", "effective_reasoning_effort", "frequency_penalty_nonzero", "generated_completion_tokens", "logit_bias_geometry", "logit_bias_present", "logit_controls_requested", "logprobs_requested", "min_p_nonzero", "multimodal_requested", "multiple_completions_requested", "native_mtp_served_snapshot_id_sha256", "native_mtp_target_generation", "native_mtp_tuple_sha256", "observed_effective_path", "observed_selector_eligible", "observed_selector_reason", "parallel_tool_calls_state", "presence_penalty_nonzero", "prompt_tokens", "reasoning_effort_state", "reasoning_or_template_model", "record_type", "repetition_penalty_nondefault", "requested_frequency_penalty", "requested_max_completion_tokens", "requested_min_p", "requested_n", "requested_presence_penalty", "requested_repetition_penalty", "requested_temperature", "requested_top_k", "requested_top_logprobs", "requested_top_p", "response_format_kind", "response_schema_geometry", "sampling_requested", "schema", "sequence", "served_model_family", "served_model_hash_sha256", "served_weights_manifest_sha256", "shape_id", "stop_sequence_utf8_length_buckets", "stop_sequence_utf8_lengths", "stop_sequences", "stream", "structured_output_requested", "tool_choice_function_index", "tool_choice_kind", "tool_choice_present", "tool_count", "tool_grammar_required", "tool_message_count", "tool_parameter_schema_geometries", "tool_turn_state_present", "tools_present", "top_k_present", "top_logprobs_requested", "unknown_request_fields_present", "unknown_stream_option_keys_present", "unknown_top_level_keys_present"]
+    static let tupleKeys: Set<String> = ["family_adapter", "has_qualified_row_mapped_transactions", "maximum_completion_tokens", "maximum_prompt_tokens", "maximum_proposal_depth", "request_feature_profile", "revocation_state_available", "supports_current_processor", "supports_current_state_cache", "supports_non_streaming", "supports_stop_sequences", "supports_streaming", "tuple_admitted", "tuple_revoked"]
+
+    static func fail(_ message: String) throws {
+        throw NativeMTPRequestShapeReplayError.invalidCapture(message)
+    }
+    static func exact(_ object: [String: Any], _ keys: Set<String>) throws {
+        guard Set(object.keys) == keys else { return try fail("v2 closed key set differs") }
+    }
+    static func boolean(_ value: Any?) -> Bool? {
+        guard let number = value as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else { return nil }
+        return number.boolValue
+    }
+    static func count(_ value: Any?) -> Int? {
+        guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+              number.doubleValue.isFinite, number.doubleValue >= 0,
+              number.doubleValue < Double(Int.max), Double(number.intValue) == number.doubleValue else { return nil }
+        return number.intValue
+    }
+    static func isHex(_ value: Any?, _ length: Int) -> Bool {
+        guard let value = value as? String else { return false }
+        return value.range(of: "^[0-9a-f]{\(length)}$", options: .regularExpression) != nil
+    }
+    static func header(_ object: [String: Any]) throws {
+        try exact(object, headerKeys)
+        guard object["schema"] as? String == captureSchema, object["record_type"] as? String == "header",
+              object["capture_role"] as? String == "request_shape_observation_only",
+              ["off", "auto"].contains(object["native_mtp_mode"] as? String ?? ""),
+              boolean(object["capture_requires_native_mtp_off"]) == false,
+              object["sample_method"] as? String == "opt_in_successful_persistable_completions_observation",
+              object["served_identity"] as? String == "per_record_sha256",
+              let complete = boolean(object["build_identity_complete"]),
+              let records = count(object["max_records"]), (1...1000).contains(records),
+              let bytes = count(object["max_bytes"]), (1024...10_485_760).contains(bytes) else {
+            return try fail("invalid v2 header")
+        }
+        for key in ["captured_at", "sample_window_started_at", "cli_version"] {
+            guard let value = object[key] as? String, !value.isEmpty else { return try fail("invalid v2 header string") }
+        }
+        let sourceOK = isHex(object["build_source_commit"], 40)
+        let cdhashOK = isHex(object["build_cdhash"], 40)
+        guard (sourceOK || object["build_source_commit"] as? String == "unavailable"),
+              (cdhashOK || object["build_cdhash"] as? String == "unavailable"),
+              complete == (sourceOK && cdhashOK) else { return try fail("invalid v2 capture build identity") }
+    }
+    static func shape(_ object: [String: Any], sequence: Int) throws {
+        try exact(object, shapeKeys)
+        guard object["schema"] as? String == captureSchema,
+              object["record_type"] as? String == "request_shape", count(object["sequence"]) == sequence,
+              let id = object["shape_id"] as? String, id.range(of: #"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"#, options: .regularExpression) != nil,
+              let timestamp = object["captured_at"] as? String, !timestamp.isEmpty,
+              let reason = object["observed_selector_reason"] as? String,
+              let parsedReason = NativeMTPSelectorReason(rawValue: reason),
+              boolean(object["observed_selector_eligible"]) == parsedReason.isEligible,
+              ["ordinary", "native_mtp"].contains(object["observed_effective_path"] as? String ?? ""),
+              object["observed_effective_path"] as? String != "native_mtp" || parsedReason.isEligible else {
+            return try fail("invalid v2 observed admission or sequence")
+        }
+        for key in ["stream", "sampling_requested", "multiple_completions_requested", "top_k_present", "min_p_nonzero",
+                    "frequency_penalty_nonzero", "presence_penalty_nonzero", "repetition_penalty_nondefault",
+                    "logit_bias_present", "tools_present", "tool_choice_present", "tool_turn_state_present",
+                    "structured_output_requested", "logprobs_requested", "top_logprobs_requested", "logit_controls_requested",
+                    "reasoning_or_template_model", "multimodal_requested", "unknown_request_fields_present",
+                    "unknown_top_level_keys_present", "unknown_stream_option_keys_present", "conversation_key_present",
+                    "conversation_key_cache_only", "conversation_cache_retained_handoff", "tool_grammar_required"] {
+            guard boolean(object[key]) != nil else { return try fail("invalid v2 boolean: \(key)") }
+        }
+        for key in ["native_mtp_target_generation", "stop_sequences", "tool_count", "tool_message_count",
+                    "assistant_tool_call_count", "conversation_cache_cached_prompt_tokens", "prompt_tokens",
+                    "completion_tokens", "generated_completion_tokens", "effective_max_output_tokens"] {
+            guard count(object[key]) != nil else { return try fail("invalid v2 count: \(key)") }
+        }
+        for key in ["requested_temperature", "requested_top_p", "requested_top_k", "requested_min_p",
+                    "requested_presence_penalty", "requested_frequency_penalty", "requested_repetition_penalty",
+                    "requested_n", "requested_max_completion_tokens", "requested_top_logprobs"] {
+            if object[key] is NSNull { continue }
+            guard let value = object[key] as? NSNumber, CFGetTypeID(value) != CFBooleanGetTypeID(), value.doubleValue.isFinite else {
+                return try fail("invalid v2 numeric control: \(key)")
+            }
+        }
+        guard let requestedN = count(object["requested_n"]), requestedN > 0,
+              boolean(object["multiple_completions_requested"]) == (requestedN != 1),
+              let prompt = count(object["prompt_tokens"]), prompt > 0,
+              let completion = count(object["completion_tokens"]), completion > 0,
+              let generated = count(object["generated_completion_tokens"]), generated >= completion,
+              let budget = count(object["effective_max_output_tokens"]), budget > 0, completion <= budget,
+              object["requested_max_completion_tokens"] is NSNull || (count(object["requested_max_completion_tokens"]) ?? 0) > 0,
+              let temperature = object["requested_temperature"] as? NSNumber, temperature.doubleValue >= 0,
+              let topP = object["requested_top_p"] as? NSNumber, (0...1).contains(topP.doubleValue),
+              boolean(object["sampling_requested"]) == (temperature.doubleValue != 0 || topP.doubleValue != 1),
+              ["text", "json_object", "json_schema"].contains(object["response_format_kind"] as? String ?? "") else {
+            return try fail("inconsistent v2 counts or sampler controls")
+        }
+        for key in ["served_model_hash_sha256", "served_weights_manifest_sha256"] {
+            guard isHex(object[key], 64) || object[key] as? String == "unavailable" else { return try fail("invalid v2 served identity") }
+        }
+        for key in ["native_mtp_tuple_sha256", "native_mtp_served_snapshot_id_sha256"] {
+            guard isHex(object[key], 64) || object[key] as? String == "none" else { return try fail("invalid v2 native identity") }
+        }
+        guard object["anonymous_cache_group_sha256"] is NSNull || isHex(object["anonymous_cache_group_sha256"], 64),
+              ["not_applicable", "miss", "hit", "missing"].contains(object["conversation_cache_lease"] as? String ?? ""),
+              ["glm5_next_mtp_v1", "qwen3_5_mtp_v1", "unknown"].contains(object["served_model_family"] as? String ?? ""),
+              ["absent", "true", "false", "unknown"].contains(object["parallel_tool_calls_state"] as? String ?? ""),
+              let effort = object["reasoning_effort_state"] as? String,
+              ["absent", "null", "none", "minimal", "low", "medium", "high", "xhigh", "max", "unknown"].contains(effort),
+              object["effective_reasoning_effort"] is NSNull || ChatCompletionRequest.acceptedReasoningEfforts.contains(object["effective_reasoning_effort"] as? String ?? ""),
+              effort != "unknown" || object["effective_reasoning_effort"] is NSNull,
+              let kind = object["tool_choice_kind"] as? String,
+              ["absent", "none", "auto", "required", "function", "string_other", "object_other", "other"].contains(kind),
+              boolean(object["tool_choice_present"]) == (kind != "absent") else { return try fail("invalid v2 normalized control") }
+        if kind == "function", !(object["tool_choice_function_index"] is NSNull) {
+            guard let index = count(object["tool_choice_function_index"]), let tools = count(object["tool_count"]), index < tools else {
+                return try fail("invalid v2 named function index")
+            }
+        } else if kind != "function", !(object["tool_choice_function_index"] is NSNull) {
+            return try fail("unexpected v2 named function index")
+        }
+        guard !["required", "function"].contains(kind) || boolean(object["tool_grammar_required"]) == true,
+              let geometries = object["tool_parameter_schema_geometries"] as? [[String: Any]],
+              geometries.count == count(object["tool_count"]),
+              let response = object["response_schema_geometry"] as? [String: Any],
+              let bias = object["logit_bias_geometry"] as? [String: Any],
+              let stops = object["stop_sequence_utf8_lengths"] as? [Any],
+              stops.count == count(object["stop_sequences"]), stops.allSatisfy({ (count($0) ?? 0) > 0 }),
+              let buckets = object["stop_sequence_utf8_length_buckets"] as? [String: Any],
+              buckets.values.allSatisfy({ count($0) != nil }) else { return try fail("invalid v2 geometry") }
+        let geometryKeys: Set<String> = ["byte_count", "max_depth", "object_count", "array_count", "property_count"]
+        for geometry in geometries + [response] {
+            try exact(geometry, geometryKeys)
+            guard geometry.values.allSatisfy({ count($0) != nil }) else { return try fail("invalid v2 schema geometry") }
+        }
+        let biasKeys: Set<String> = ["entry_count", "numeric_value_count", "positive_count", "negative_count", "zero_count", "min_value", "max_value", "max_abs_bucket"]
+        if count(bias["entry_count"]) == 0 && bias["numeric_value_count"] == nil {
+            try exact(bias, biasKeys.subtracting(["numeric_value_count"]))
+        } else { try exact(bias, biasKeys) }
+        for key in ["entry_count", "positive_count", "negative_count", "zero_count"] {
+            guard count(bias[key]) != nil else { return try fail("invalid v2 logit geometry count") }
+        }
+        for key in ["min_value", "max_value"] {
+            if bias[key] is NSNull { continue }
+            guard let number = bias[key] as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(), number.doubleValue.isFinite else {
+                return try fail("invalid v2 logit geometry value")
+            }
+        }
+        guard ["none", "0", "lt_1", "1_5", "5_20", "20_plus"].contains(bias["max_abs_bucket"] as? String ?? ""),
+              Set(buckets.keys).isSubset(of: ["0", "1_4", "5_16", "17_64", "65_plus"]),
+              buckets.values.compactMap(count).reduce(0, +) == stops.count else { return try fail("invalid v2 geometry bucket") }
+    }
+}
+
+struct NativeMTPReplayV2Projection {
+    let capture: NativeMTPRequestShapeReplayCapture
+    let family: String
+    let tupleSHA256: String
+    let arrivalSchedule: [String: Any]
+
+    // Same sorted compact ASCII JSON + newline as Python's _canonical_bytes.
+    // Python normalizes these two sampler fields to float; preserve every
+    // other captured numeric type while matching that canonical projection.
+    static func sampleDigest(_ rows: [[String: Any]]) throws -> String {
+        let normalized: Any = try rows.map { row in
+            var result = row
+            for key in ["requested_temperature", "requested_top_p"] {
+                guard let number = row[key] as? NSNumber,
+                      CFGetTypeID(number) != CFBooleanGetTypeID(), number.doubleValue.isFinite else {
+                    throw NativeMTPRequestShapeReplayError.invalidCapture("invalid projection sampler number")
+                }
+                result[key] = number.doubleValue
+            }
+            return result
+        }
+        func quoted(_ string: String) throws -> String {
+            let raw = try JSONSerialization.data(withJSONObject: string, options: [.fragmentsAllowed, .withoutEscapingSlashes])
+            let escaped = String(decoding: raw, as: UTF8.self)
+            return escaped.utf16.map { unit in
+                unit >= 128 ? String(format: "\\u%04x", unit) : String(UnicodeScalar(unit)!)
+            }.joined()
+        }
+        func encode(_ value: Any) throws -> String {
+            if value is NSNull { return "null" }
+            if let number = value as? NSNumber {
+                if CFGetTypeID(number) == CFBooleanGetTypeID() { return number.boolValue ? "true" : "false" }
+                guard number.doubleValue.isFinite else { throw NativeMTPRequestShapeReplayError.invalidCapture("nonfinite projection number") }
+                let type = String(cString: number.objCType)
+                return ["f", "d"].contains(type) ? String(number.doubleValue) : number.stringValue
+            }
+            if let string = value as? String { return try quoted(string) }
+            if let array = value as? [Any] { return "[" + (try array.map(encode)).joined(separator: ",") + "]" }
+            if let object = value as? [String: Any] {
+                return "{" + (try object.keys.sorted().map { try quoted($0) + ":" + encode(object[$0]!) }).joined(separator: ",") + "}"
+            }
+            throw NativeMTPRequestShapeReplayError.invalidCapture("unrepresentable projection JSON")
+        }
+        return SHA256.hash(data: Data((try encode(normalized) + "\n").utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    static func load(planURL: URL, tupleURL: URL, capture: NativeMTPRequestShapeReplayCapture,
+                     captureSHA: String, policySHA: String, benchPolicySHA: String, sampleSHA: String,
+                     arrivalIntervalMS: Int, blocks: Int, modelID: String) throws -> Self {
+        func read(_ url: URL) throws -> (Data, [String: Any]) {
+            let data = try Data(contentsOf: url)
+            try NativeMTPBenchJSON.rejectDuplicateKeys(data, label: "v2 projection input")
+            guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                throw NativeMTPRequestShapeReplayError.invalidCapture("v2 projection input must be object")
+            }
+            return (data, object)
+        }
+        let (_, plan) = try read(planURL)
+        let (tupleData, tuple) = try read(tupleURL)
+        try NativeMTPReplayV2Validation.exact(tuple, NativeMTPReplayV2Validation.tupleKeys)
+        for key in NativeMTPReplayV2Validation.tupleKeys.subtracting(["maximum_prompt_tokens", "maximum_completion_tokens", "maximum_proposal_depth", "request_feature_profile", "family_adapter"]) {
+            guard NativeMTPReplayV2Validation.boolean(tuple[key]) != nil else {
+                throw NativeMTPRequestShapeReplayError.invalidCapture("invalid v2 tuple boolean")
+            }
+        }
+        for key in ["maximum_prompt_tokens", "maximum_completion_tokens", "maximum_proposal_depth"] {
+            guard let count = NativeMTPReplayV2Validation.count(tuple[key]), count > 0 else {
+                throw NativeMTPRequestShapeReplayError.invalidCapture("invalid v2 tuple bound")
+            }
+        }
+        guard ["native_mtp_greedy_text_v1", "native_mtp_sampled_text_v1"].contains(tuple["request_feature_profile"] as? String ?? "") else {
+            throw NativeMTPRequestShapeReplayError.invalidCapture("invalid v2 tuple profile")
+        }
+        let tupleSHA = SHA256.hash(data: tupleData).map { String(format: "%02x", $0) }.joined()
+        try NativeMTPReplayV2Validation.exact(plan, ["schema", "qualification_status", "policy_sha256", "sample_digest_sha256", "source_capture_sha256", "tuple_bounds_sha256", "projection_stage", "capture_schema", "capture_header", "sample_report", "replay_requirements", "blocks", "arrival_schedule", "bench_policy_sha256"])
+        guard plan["schema"] as? String == "macprovider.native-mtp-request-shape-replay-plan.v2",
+              ["PENDING_REAL_LAB_REPLAY", "PENDING_UNREPRODUCIBLE_CAPTURE"].contains(plan["qualification_status"] as? String ?? ""),
+              plan["policy_sha256"] as? String == policySHA, plan["source_capture_sha256"] as? String == captureSHA,
+              plan["sample_digest_sha256"] as? String == sampleSHA, plan["tuple_bounds_sha256"] as? String == tupleSHA,
+              plan["bench_policy_sha256"] as? String == benchPolicySHA,
+              plan["capture_schema"] as? String == NativeMTPReplayV2Validation.captureSchema,
+              plan["projection_stage"] as? String == "offline_sanitized_shape_projection_only",
+              let capturedHeader = plan["capture_header"] as? [String: Any],
+              NSDictionary(dictionary: capturedHeader).isEqual(to: capture.header.object),
+              let family = tuple["family_adapter"] as? String,
+              ["glm5_next_mtp_v1", "qwen3_5_mtp_v1"].contains(family),
+              let schedule = plan["arrival_schedule"] as? [String: Any],
+              let plannedBlocks = plan["blocks"] as? [[String: Any]], plannedBlocks.count == blocks else {
+            throw NativeMTPRequestShapeReplayError.invalidCapture("v2 projection identity differs")
+        }
+        guard let report = plan["sample_report"] as? [String: Any],
+              let requirements = plan["replay_requirements"] as? [String: Any] else {
+            throw NativeMTPRequestShapeReplayError.invalidCapture("v2 sampling metadata missing")
+        }
+        try NativeMTPReplayV2Validation.exact(report, ["sampling_plan_id", "sample_period_start", "sample_period_end", "captured_request_count", "captured_completion_tokens", "projected_request_count_per_block", "representativeness_claim"])
+        try NativeMTPReplayV2Validation.exact(requirements, ["status", "reason", "must_provide"])
+        guard NativeMTPReplayV2Validation.count(report["captured_request_count"]) == capture.shapes.count,
+              NativeMTPReplayV2Validation.count(report["projected_request_count_per_block"]) == capture.shapes.count,
+              NativeMTPReplayV2Validation.count(report["captured_completion_tokens"]) == capture.shapes.reduce(0, { $0 + $1.completionTokens }),
+              requirements["status"] as? String == "PENDING",
+              let reason = requirements["reason"] as? String, !reason.isEmpty,
+              let provisions = requirements["must_provide"] as? [String], !provisions.isEmpty else {
+            throw NativeMTPRequestShapeReplayError.invalidCapture("v2 sampling weights or requirements differ")
+        }
+        for key in ["sampling_plan_id", "sample_period_start", "sample_period_end", "representativeness_claim"] {
+            guard let value = report[key] as? String, !value.isEmpty else {
+                throw NativeMTPRequestShapeReplayError.invalidCapture("v2 sampling metadata invalid")
+            }
+        }
+        try NativeMTPReplayV2Validation.exact(schedule, ["kind", "source", "arrival_interval_ms", "offset_rule", "order", "identical_across_paths"])
+        guard schedule["kind"] as? String == "modeled_preregistered_staggered_arrivals",
+              schedule["source"] as? String == "bench_policy.arrival_interval_ms",
+              NativeMTPReplayV2Validation.count(schedule["arrival_interval_ms"]) == arrivalIntervalMS,
+              schedule["offset_rule"] as? String == "wave_index_times_interval",
+              schedule["order"] as? String == "capture_sequence",
+              NativeMTPReplayV2Validation.boolean(schedule["identical_across_paths"]) == true else {
+            throw NativeMTPRequestShapeReplayError.invalidCapture("v2 modeled arrival schedule differs")
+        }
+        let capability = NativeMTPCapability(
+            admitted: tuple["tuple_admitted"] as! Bool, revoked: tuple["tuple_revoked"] as! Bool,
+            revocationStateAvailable: tuple["revocation_state_available"] as! Bool,
+            supportsCurrentProcessor: tuple["supports_current_processor"] as! Bool,
+            supportsCurrentStateCache: tuple["supports_current_state_cache"] as! Bool,
+            supportsStreaming: tuple["supports_streaming"] as! Bool, supportsNonStreaming: tuple["supports_non_streaming"] as! Bool,
+            supportsStopSequences: tuple["supports_stop_sequences"] as! Bool,
+            hasQualifiedRowMappedTransactions: tuple["has_qualified_row_mapped_transactions"] as! Bool,
+            maximumProposalDepth: NativeMTPReplayV2Validation.count(tuple["maximum_proposal_depth"])!,
+            maximumPromptTokens: NativeMTPReplayV2Validation.count(tuple["maximum_prompt_tokens"])!,
+            maximumCompletionTokens: NativeMTPReplayV2Validation.count(tuple["maximum_completion_tokens"])!,
+            family: family, supportsSampling: tuple["request_feature_profile"] as? String == "native_mtp_sampled_text_v1")
+        var boundShapes: [NativeMTPRequestShapeReplayShape] = []
+        var firstTemplates: [[String: Any]] = []
+        for (blockIndex, block) in plannedBlocks.enumerated() {
+            try NativeMTPReplayV2Validation.exact(block, ["block_index", "request_shape_templates", "metrics_status"])
+            guard NativeMTPReplayV2Validation.count(block["block_index"]) == blockIndex,
+                  block["metrics_status"] as? String == "PENDING_REAL_REPLAY",
+                  let templates = block["request_shape_templates"] as? [[String: Any]], templates.count == capture.shapes.count else {
+                throw NativeMTPRequestShapeReplayError.invalidCapture("v2 projection block differs")
+            }
+            if blockIndex == 0 { firstTemplates = templates }
+            for (index, shape) in capture.shapes.enumerated() {
+                var projected = templates[index]
+                guard let reason = projected.removeValue(forKey: "projected_selector_reason") as? String,
+                      NativeMTPSelectorReason(rawValue: reason) != nil,
+                      NativeMTPReplayV2Validation.boolean(projected.removeValue(forKey: "projected_selector_eligible")) == (reason == "eligible"),
+                      NSDictionary(dictionary: projected).isEqual(to: shape.sanitizedExport) else {
+                    throw NativeMTPRequestShapeReplayError.invalidCapture("v2 projection shape differs")
+                }
+                if blockIndex == 0 {
+                    let bound = try NativeMTPRequestShapeReplayShape(shape.captureObject, candidateReason: reason)
+                    let row = NativeMTPRequestShapeReplayRow(shape: bound, captureIndex: index, blockIndex: 0,
+                                                           supportsSampling: capability.supportsSampling)
+                    if row.pendingReason == nil {
+                        let base = try NativeMTPRequestShapeReplayRunner.makeRequest(modelID: modelID,
+                            requestID: row.requestID, prompt: "synthetic", maxTokens: row.requestedMaxCompletionTokens,
+                            temperature: row.temperature, topP: row.topP, stream: row.stream)
+                        let request = try NativeMTPRequestShapeReplayRunner.applySyntheticStandIn(for: row, to: base)
+                        guard request.templateReasoningEffort(for: modelID) == row.jsonFeature("effective_reasoning_effort") as? String,
+                              GrammarConstraintState.isRequired(request) == row.boolFeature("tool_grammar_required") else {
+                            throw NativeMTPRequestShapeReplayError.invalidCapture("v2 normalized controls contradict production parser")
+                        }
+                        let parsedReason = NativeMTPSelector.reason(request: request, mode: .auto, nativeCapability: capability)
+                        let projectedReason = bound.promptTokens > capability.maximumPromptTokens
+                            || bound.maxCompletionTokens > capability.maximumCompletionTokens
+                            ? NativeMTPSelectorReason.capabilityMismatch : parsedReason
+                        guard projectedReason.rawValue == reason else {
+                            throw NativeMTPRequestShapeReplayError.invalidCapture("v2 bound candidate projection contradicts production parser")
+                        }
+                    }
+                    boundShapes.append(bound)
+                } else if boundShapes[index].candidateReason != reason {
+                    throw NativeMTPRequestShapeReplayError.invalidCapture("v2 projection changes across paired blocks")
+                }
+            }
+        }
+        guard try sampleDigest(firstTemplates) == sampleSHA else {
+            throw NativeMTPRequestShapeReplayError.invalidCapture("v2 complete sanitized sample digest differs")
+        }
+        return Self(capture: NativeMTPRequestShapeReplayCapture(header: capture.header, shapes: boundShapes),
+                    family: family, tupleSHA256: tupleSHA, arrivalSchedule: schedule)
+    }
+}
+
 struct NativeMTPRequestShapeReplayCapture {
     let header: NativeMTPRequestShapeReplayHeader
     let shapes: [NativeMTPRequestShapeReplayShape]
@@ -1650,6 +2135,22 @@ struct NativeMTPRequestShapeReplayCapture {
                 }
                 header = try NativeMTPRequestShapeReplayHeader(object)
             case "request_shape":
+                guard let header, object["schema"] as? String == header.schema else {
+                    throw NativeMTPRequestShapeReplayError.invalidCapture("mixed capture schemas")
+                }
+                if header.isV2 {
+                    try NativeMTPReplayV2Validation.shape(object, sequence: shapes.count + 1)
+                    if header.nativeMTPMode == "off" {
+                        guard object["observed_selector_reason"] as? String == "mode_off",
+                              NativeMTPReplayV2Validation.boolean(object["observed_selector_eligible"]) == false,
+                              object["observed_effective_path"] as? String == "ordinary" else {
+                            throw NativeMTPRequestShapeReplayError.invalidCapture("v2 off observation contradicts header")
+                        }
+                    }
+                    guard !shapes.contains(where: { $0.shapeID == object["shape_id"] as? String }) else {
+                        throw NativeMTPRequestShapeReplayError.invalidCapture("repeated shape_id")
+                    }
+                }
                 shapes.append(try NativeMTPRequestShapeReplayShape(object))
             default:
                 throw NativeMTPRequestShapeReplayError.invalidCapture("unknown record_type on line \(offset + 1)")
@@ -1658,7 +2159,7 @@ struct NativeMTPRequestShapeReplayCapture {
         guard let header else {
             throw NativeMTPRequestShapeReplayError.invalidCapture("missing header")
         }
-        guard header.nativeMTPMode == "off", header.captureRequiresNativeMTPOff else {
+        guard header.isV2 || (header.nativeMTPMode == "off" && header.captureRequiresNativeMTPOff) else {
             throw NativeMTPRequestShapeReplayError.invalidCapture("capture must be recorded with native_mtp_mode off")
         }
         guard !shapes.isEmpty else {
@@ -1702,9 +2203,16 @@ struct NativeMTPRequestShapeReplayHeader {
     let schema: String
     let nativeMTPMode: String
     let captureRequiresNativeMTPOff: Bool
+    let object: [String: Any]
+    var isV2: Bool { schema == NativeMTPReplayV2Validation.captureSchema }
 
     init(_ object: [String: Any]) throws {
+        self.object = object
         self.schema = try Self.string(object, "schema")
+        if schema == NativeMTPReplayV2Validation.captureSchema { try NativeMTPReplayV2Validation.header(object) }
+        else if schema != NativeMTPRequestShapeCapture.schema {
+            throw NativeMTPRequestShapeReplayError.invalidCapture("unknown capture schema")
+        }
         self.nativeMTPMode = try Self.string(object, "native_mtp_mode")
         self.captureRequiresNativeMTPOff = try Self.bool(object, "capture_requires_native_mtp_off")
     }
@@ -1755,33 +2263,59 @@ struct NativeMTPRequestShapeReplayShape {
     let conversationCacheRetainedHandoff: Bool
     let anonymousCacheGroupSHA256: String?
     let features: [String: Any]
+    let captureObject: [String: Any]
+    let candidateReason: String?
+    var isV2: Bool { captureObject["schema"] as? String == NativeMTPReplayV2Validation.captureSchema }
 
-    init(_ object: [String: Any]) throws {
-        guard object["schema"] as? String == NativeMTPRequestShapeCapture.schema else {
+    init(_ object: [String: Any], candidateReason: String? = nil) throws {
+        self.captureObject = object
+        self.candidateReason = candidateReason
+        let v2 = object["schema"] as? String == NativeMTPReplayV2Validation.captureSchema
+        guard v2 || object["schema"] as? String == NativeMTPRequestShapeCapture.schema else {
             throw NativeMTPRequestShapeReplayError.invalidCapture("bad request_shape schema")
         }
+        if v2 { try NativeMTPReplayV2Validation.shape(object, sequence: NativeMTPReplayV2Validation.count(object["sequence"]) ?? 0) }
         self.shapeID = try Self.string(object, "shape_id")
         self.stream = try Self.bool(object, "stream")
-        self.servedModelHashSHA256 = try Self.hex64(object, "served_model_hash_sha256")
-        self.servedWeightsManifestSHA256 = try Self.hex64(object, "served_weights_manifest_sha256")
-        self.temperature = try Self.double(object, "requested_temperature")
-        self.topP = try Self.double(object, "requested_top_p")
+        self.servedModelHashSHA256 = v2 && object["served_model_hash_sha256"] as? String == "unavailable" ? "unavailable" : try Self.hex64(object, "served_model_hash_sha256")
+        self.servedWeightsManifestSHA256 = v2 && object["served_weights_manifest_sha256"] as? String == "unavailable" ? "unavailable" : try Self.hex64(object, "served_weights_manifest_sha256")
+        let temperature = try Self.double(object, "requested_temperature")
+        let topP = try Self.double(object, "requested_top_p")
+        self.temperature = temperature
+        self.topP = topP
+        guard try Self.bool(object, "sampling_requested") == (temperature != 0 || topP != 1) else {
+            throw NativeMTPRequestShapeReplayError.invalidCapture("sampling_requested_inconsistent")
+        }
         self.requestedMaxCompletionTokens = try Self.optionalNonnegativeInt(object, "requested_max_completion_tokens")
         self.maxCompletionTokens = try Self.positiveInt(object, "effective_max_output_tokens")
         self.promptTokens = try Self.positiveInt(object, "prompt_tokens")
         self.completionTokens = try Self.nonnegativeInt(object, "completion_tokens")
         self.targetCompletionTokens = self.completionTokens
         self.generatedCompletionTokens = try Self.nonnegativeInt(object, "generated_completion_tokens")
-        self.preCapacitySelectorReason = try Self.string(object, "pre_capacity_selector_reason")
-        self.preCapacityEligible = try Self.bool(object, "pre_capacity_eligible")
-        self.effectivePath = try Self.string(object, "effective_path")
+        self.preCapacitySelectorReason = try Self.string(object, v2 ? "observed_selector_reason" : "pre_capacity_selector_reason")
+        self.preCapacityEligible = try Self.bool(object, v2 ? "observed_selector_eligible" : "pre_capacity_eligible")
+        self.effectivePath = try Self.string(object, v2 ? "observed_effective_path" : "effective_path")
         self.conversationKeyPresent = try Self.bool(object, "conversation_key_present")
         self.conversationCacheOnly = try Self.bool(object, "conversation_key_cache_only")
         self.conversationCacheLease = try Self.string(object, "conversation_cache_lease")
         self.conversationCacheCachedPromptTokens = try Self.nonnegativeInt(object, "conversation_cache_cached_prompt_tokens")
         self.conversationCacheRetainedHandoff = try Self.bool(object, "conversation_cache_retained_handoff")
         self.anonymousCacheGroupSHA256 = try Self.optionalHex64(object, "anonymous_cache_group_sha256")
-        self.features = Self.sanitizedFeatures(object)
+        var features = Self.sanitizedFeatures(object)
+        if v2 { for key in NativeMTPReplayV2Validation.controls { features[key] = object[key] } }
+        self.features = features
+    }
+
+    var unreproducibleV2: Bool {
+        guard isV2 else { return false }
+        return servedModelHashSHA256 == "unavailable" || servedWeightsManifestSHA256 == "unavailable"
+            || stringFeature("served_model_family") == "unknown"
+            || stringFeature("parallel_tool_calls_state") == "unknown"
+            || stringFeature("reasoning_effort_state") == "unknown"
+            || ["string_other", "object_other", "other"].contains(stringFeature("tool_choice_kind") ?? "other")
+            || (stringFeature("tool_choice_kind") == "function" && jsonFeature("tool_choice_function_index") == nil)
+            || boolFeature("unknown_request_fields_present") || boolFeature("unknown_top_level_keys_present")
+            || boolFeature("unknown_stream_option_keys_present")
     }
 
     var metricsClass: NativeMTPRequestShapeReplayMetricsClass {
@@ -1808,7 +2342,15 @@ struct NativeMTPRequestShapeReplayShape {
     }
 
     var projectedSelectorReason: String {
-        if boolFeature("sampling_requested") { return NativeMTPSelectorReason.sampling.rawValue }
+        projectedSelectorReason(supportsSampling: false)
+    }
+
+    func projectedSelectorReason(supportsSampling: Bool) -> String {
+        if isV2 { return candidateReason ?? NativeMTPSelectorReason.unknownRequestField.rawValue }
+        if boolFeature("sampling_requested"),
+           !supportsSampling || !ContinuousBatchRowSampler.supports(temperature: temperature, topP: topP) {
+            return NativeMTPSelectorReason.sampling.rawValue
+        }
         if boolFeature("multiple_completions_requested") { return NativeMTPSelectorReason.multipleCompletions.rawValue }
         if boolFeature("logit_controls_requested") { return NativeMTPSelectorReason.logitControls.rawValue }
         if conversationKeyPresent && !conversationCacheOnly { return NativeMTPSelectorReason.conversationKey.rawValue }
@@ -1867,7 +2409,7 @@ struct NativeMTPRequestShapeReplayShape {
             "stream": stream,
             "requested_temperature": temperature,
             "requested_top_p": topP,
-            "requested_max_completion_tokens": requestedMaxCompletionTokens as Any,
+            "requested_max_completion_tokens": requestedMaxCompletionTokens.map { $0 as Any } ?? NSNull(),
             "effective_max_output_tokens": maxCompletionTokens,
             "prompt_tokens": promptTokens,
             "target_completion_tokens": targetCompletionTokens,
@@ -1881,10 +2423,22 @@ struct NativeMTPRequestShapeReplayShape {
             "conversation_cache_lease": conversationCacheLease,
             "conversation_cache_cached_prompt_tokens": conversationCacheCachedPromptTokens,
             "conversation_cache_retained_handoff": conversationCacheRetainedHandoff,
-            "anonymous_cache_group_sha256": anonymousCacheGroupSHA256 as Any,
+            "anonymous_cache_group_sha256": anonymousCacheGroupSHA256.map { $0 as Any } ?? NSNull(),
         ]
         for (key, value) in features {
             object[key] = value
+        }
+        if isV2 {
+            object.removeValue(forKey: "pre_capacity_selector_reason")
+            object.removeValue(forKey: "pre_capacity_eligible")
+            object.removeValue(forKey: "effective_path")
+            object["observed_selector_reason"] = preCapacitySelectorReason
+            object["observed_selector_eligible"] = preCapacityEligible
+            object["observed_effective_path"] = effectivePath
+            if let candidateReason {
+                object["projected_selector_reason"] = candidateReason
+                object["projected_selector_eligible"] = candidateReason == NativeMTPSelectorReason.eligible.rawValue
+            }
         }
         return object
     }
@@ -1982,6 +2536,8 @@ struct NativeMTPRequestShapeReplayPlan {
     static let qualifiedSlots = 8
     static let maxNativeActiveRows = 1
 
+    let qualifiedSlotCount: Int
+    let maxNativeRowCount: Int
     let blocks: [NativeMTPRequestShapeReplayBlock]
     let pendingReason: String?
     let promptTokenTarget: Int
@@ -2002,7 +2558,7 @@ struct NativeMTPRequestShapeReplayPlan {
             "sample_weight_total": sampleShapeCount,
             "projected_request_count_per_block": rowsPerBlock,
             "runnable_request_count_per_block": runnableRowsPerBlock,
-            "max_concurrent_requests": Self.qualifiedSlots,
+            "max_concurrent_requests": qualifiedSlotCount,
             "runnable_waves_per_block": runnableWavesPerBlock,
             "omitted_sample_shape_count": omittedSampleShapeCount,
             "pending_sample_shape_count": pendingSampleShapeCount,
@@ -2018,9 +2574,17 @@ struct NativeMTPRequestShapeReplayPlan {
     static func make(
         capture: NativeMTPRequestShapeReplayCapture,
         blocks: Int,
-        seed: Int
+        seed: Int,
+        qualifiedSlots: Int = Self.qualifiedSlots,
+        maxNativeActiveRows: Int = Self.maxNativeActiveRows,
+        supportsSampling: Bool = false,
+        preserveTotalSlots: Bool = false
     ) throws -> NativeMTPRequestShapeReplayPlan {
-        let rows = try projectedRows(capture.shapes)
+        guard (2...8).contains(qualifiedSlots),
+              (1...qualifiedSlots).contains(maxNativeActiveRows) else {
+            throw NativeMTPRequestShapeReplayError.invalidCapture("invalid replay slot or native-row bound")
+        }
+        let rows = try projectedRows(capture.shapes, supportsSampling: supportsSampling)
         let sampleShapeCount = capture.shapes.count
         let omittedSampleShapeCount = 0
         let pendingSampleReasons = rows.compactMap(\.pendingReason)
@@ -2039,11 +2603,16 @@ struct NativeMTPRequestShapeReplayPlan {
             NativeMTPRequestShapeReplayBlock(
                 index: index,
                 nativeFirst: nativeFirst[index],
-                rows: rows.map { $0.withBlock(index) }
+                rows: rows.map { $0.withBlock(index) },
+                qualifiedSlots: qualifiedSlots,
+                maxNativeActiveRows: maxNativeActiveRows,
+                preserveTotalSlots: preserveTotalSlots || capture.header.isV2
             )
         }
         let pending = rows.compactMap(\.pendingReason).first
         return NativeMTPRequestShapeReplayPlan(
+            qualifiedSlotCount: qualifiedSlots,
+            maxNativeRowCount: maxNativeActiveRows,
             blocks: plannedBlocks,
             pendingReason: pending,
             promptTokenTarget: promptTarget,
@@ -2073,7 +2642,9 @@ struct NativeMTPRequestShapeReplayPlan {
         return promptTarget + maxCompletion + 256
     }
 
-    private static func projectedRows(_ shapes: [NativeMTPRequestShapeReplayShape]) throws -> [NativeMTPRequestShapeReplayRow] {
+    private static func projectedRows(
+        _ shapes: [NativeMTPRequestShapeReplayShape], supportsSampling: Bool
+    ) throws -> [NativeMTPRequestShapeReplayRow] {
         guard !shapes.isEmpty else {
             throw NativeMTPRequestShapeReplayError.invalidCapture("no shapes to replay")
         }
@@ -2095,7 +2666,8 @@ struct NativeMTPRequestShapeReplayPlan {
                 shape: shape,
                 captureIndex: index,
                 blockIndex: 0,
-                nilMaxContextCoherent: nilMaxContextCoherent
+                nilMaxContextCoherent: nilMaxContextCoherent,
+                supportsSampling: supportsSampling
             )
         }
     }
@@ -2105,6 +2677,9 @@ struct NativeMTPRequestShapeReplayBlock {
     let index: Int
     let nativeFirst: Bool
     let rows: [NativeMTPRequestShapeReplayRow]
+    let qualifiedSlots: Int
+    let maxNativeActiveRows: Int
+    var preserveTotalSlots: Bool = false
     var runnableRows: [NativeMTPRequestShapeReplayRow] {
         rows.filter { $0.pendingReason == nil }
     }
@@ -2114,13 +2689,15 @@ struct NativeMTPRequestShapeReplayBlock {
         var current: [NativeMTPRequestShapeReplayRow] = []
         var cacheGroupsInCurrentWave: Set<String> = []
         var eligibleRowsInCurrentWave = 0
+        let preservesTotalSlots = preserveTotalSlots || rows.contains { $0.stringFeature("served_model_family") == "glm5_next_mtp_v1"
+            || $0.stringFeature("served_model_family") == "qwen3_5_mtp_v1" }
         for row in runnableRows {
             let cacheGroup = row.anonymousCacheGroupSHA256
             let cacheConflict = cacheGroup.map { cacheGroupsInCurrentWave.contains($0) } ?? false
-            let eligibleConflict = row.expectedSelectorReason == NativeMTPSelectorReason.eligible.rawValue
-                && eligibleRowsInCurrentWave >= NativeMTPRequestShapeReplayPlan.maxNativeActiveRows
+            let eligibleConflict = !preservesTotalSlots && row.expectedSelectorReason == NativeMTPSelectorReason.eligible.rawValue
+                && eligibleRowsInCurrentWave >= maxNativeActiveRows
             if !current.isEmpty
-                && (current.count >= NativeMTPRequestShapeReplayPlan.qualifiedSlots || cacheConflict || eligibleConflict) {
+                && (current.count >= qualifiedSlots || cacheConflict || eligibleConflict) {
                 waves.append(current)
                 current = []
                 cacheGroupsInCurrentWave = []
@@ -2182,7 +2759,8 @@ struct NativeMTPRequestShapeReplayRow {
         shape: NativeMTPRequestShapeReplayShape,
         captureIndex: Int,
         blockIndex: Int,
-        nilMaxContextCoherent: Bool = true
+        nilMaxContextCoherent: Bool = true,
+        supportsSampling: Bool = false
     ) {
         self.shapeID = shape.shapeID
         self.captureIndex = captureIndex
@@ -2201,8 +2779,10 @@ struct NativeMTPRequestShapeReplayRow {
         self.conversationCacheRetainedHandoff = shape.conversationCacheRetainedHandoff
         self.anonymousCacheGroupSHA256 = shape.anonymousCacheGroupSHA256
         self.requiresCacheProof = shape.conversationKeyPresent
-        let projectedReason = shape.projectedSelectorReason
-        if shape.conversationKeyPresent && shape.anonymousCacheGroupSHA256 == nil {
+        let projectedReason = shape.projectedSelectorReason(supportsSampling: supportsSampling)
+        if shape.unreproducibleV2 {
+            self.pendingReason = "PENDING_UNREPRODUCIBLE_CAPTURE:\(shape.shapeID)"
+        } else if shape.conversationKeyPresent && shape.anonymousCacheGroupSHA256 == nil {
             self.pendingReason = "cache_shape_missing_anonymous_group:\(shape.shapeID)"
         } else if (shape.conversationCacheLease == "hit" || shape.conversationCacheCachedPromptTokens > 0)
                     && shape.conversationCacheCachedPromptTokens < ConversationCache.lcpThreshold {
@@ -2229,7 +2809,8 @@ struct NativeMTPRequestShapeReplayRow {
         self.expectedSelectorReason = projectedReason
         self.syntheticStandIn = NativeMTPReplaySyntheticStandIn(reason: projectedReason, shape: shape)
         self.replayFeatures = shape.features
-        self.metricsClass = shape.metricsClass
+        self.metricsClass = projectedReason == NativeMTPSelectorReason.eligible.rawValue
+            ? .ordinaryBaseline : .mixedIneligible
         self.exportedShape = shape.sanitizedExport
     }
 
@@ -2569,7 +3150,7 @@ struct NativeMTPRequestShapeReplayRunResult {
     let admissionProjections: [[String: Any]]
     let cacheWarmupProofs: [[String: Any]]
 
-    func record(policySHA256: String, benchPolicySHA256: String, captureSHA256: String) -> [String: Any] {
+    func record(policySHA256: String, benchPolicySHA256: String, captureSHA256: String, schema: String = NativeMTPRequestShapeReplayRunner.schema) -> [String: Any] {
         let projectionMatches = admissionProjections.allSatisfy { row in
             (row["matches"] as? Bool) == true && (row["reproduced"] as? Bool) == true
         }
@@ -2579,7 +3160,7 @@ struct NativeMTPRequestShapeReplayRunResult {
             && requests.allSatisfy(\.committedTimingComplete)
             && projectionMatches
         return [
-            "schema": NativeMTPRequestShapeReplayRunner.schema,
+            "schema": schema,
             "record_type": "run",
             "policy_sha256": policySHA256,
             "bench_policy_sha256": benchPolicySHA256,
@@ -2629,7 +3210,7 @@ struct NativeMTPRequestShapeReplayRunResult {
     }
 }
 
-private final class NativeMTPRequestShapeReplayWriter {
+final class NativeMTPRequestShapeReplayWriter {
     private let handle: FileHandle
 
     init(url: URL) throws {
@@ -2642,7 +3223,7 @@ private final class NativeMTPRequestShapeReplayWriter {
     }
 
     func write(_ object: [String: Any]) throws {
-        let normalized = Self.normalized(object)
+        let normalized = Self.normalized(NativeMTPQualificationScope.bind(object))
         var data = try JSONSerialization.data(withJSONObject: normalized, options: [.sortedKeys, .withoutEscapingSlashes])
         data.append(0x0a)
         try handle.write(contentsOf: data)
@@ -2701,4 +3282,3 @@ private extension Array where Element == [String: Any] {
         return true
     }
 }
-#endif

@@ -17,9 +17,13 @@ let package = Package(
         )
     ],
     dependencies: [
-        // Fork tag 3.32.3-macprovider.10.9.3 (branch campaign/2111-dsv4-fidelity), on tag
-        // 3.32.3-macprovider.10.5 (c8be0f61), on tag 3.32.3-macprovider.10.4
-        // (676a62a4), on tag 3.32.3-macprovider.10.3, then
+        // Combined fork tag 3.32.3-macprovider.10.16 adds DeepSeek fidelity,
+        // embedded DSpark and fused sparse attention from .10.9.3 to main .10.15.1.
+        // LFM reference expert order is layered on tag 3.32.3-macprovider.10.15.
+        // Fork tag 3.32.3-macprovider.10.15 combines GLM MTP (10.13) and
+        // Prism schema-2 loading, lazy vision and row-safe masks (10.14), on tag
+        // 3.32.3-macprovider.10.5 (c8be0f61, campaign/2111-dsv4-cb), on tag
+        // 3.32.3-macprovider.10.4 (676a62a4), on tag 3.32.3-macprovider.10.3, then
         // 3.32.3-macprovider.10.1 (branch glm53/tuple-0324, on 3.32.3-macprovider.10):
         // upstream mlx-swift-lm 3.32.3 plus the 3.32.3-macprovider.9 stack (the
         // packed MTP verification, fused A3B MoE, GDN checkpoint and compiled
@@ -38,17 +42,11 @@ let package = Package(
         // 10.4 adds row-owned batched pool/window decode and corrects incomplete
         // multi-token pooling continuation. 10.5 shares attention, compressor/indexer
         // projections and rotary offsets across rows, with keys-only windows and
-        // geometric pool storage. 10.9 makes deepseek_v4 follow DeepSeek's
-        // inference/model.py: the ratio-4 overlap window carried across calls,
-        // the exact indexer top-k by default, float32 router, the kernel's
-        // blocked attention arithmetic with float32 sinks, compressor,
-        // expert SwiGLU/combine and head logits. 10.9.1 retains the embedded
-        // three-stage DSpark drafter and adds exact packed verification with
-        // confidence scheduling and cache-prefix transactions. Other family
-        // decode paths are unchanged.
+        // geometric pool storage. 10.10 batches GLM MTP indexer projections and
+        // compatible per-column attention while retaining row-owned caches.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "812285f88faa403a980ada6e64711de875bab364"
+            revision: "b10a8b192fbaa5cdb3ebc96ff0136eee4dc333a9"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",

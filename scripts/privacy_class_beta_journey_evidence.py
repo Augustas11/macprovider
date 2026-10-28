@@ -421,6 +421,12 @@ NON_HOST_SUFFIXES = frozenset({
 NON_HOST_TOKENS = frozenset({
     "live.malibu.provider.cli", "hw.model", "machdep.cpu", "quarantine.reason", "encryption.current", "bytes.fromhex",
 })
+# Fixed public tensor identifiers from reviewed native-MTP sidecars are not
+# hostnames. No free-form module name, URL, local path or suffix is exempt.
+PUBLIC_MTP_TENSOR_TOKEN_RE = re.compile(
+    r"^language_model\.(?:model(?:\.layers(?:\.[0-9]{1,4}\.(?:mlp(?:\.gate)?|self_attn\.indexer(?:\.wk)?))?)?"
+    r"|mtp\.[0-9]{1,4}\.block(?:\.(?:mlp|self_attn\.indexer(?:\.wk)?))?)$"
+)
 IPV6_CANDIDATE_RE = re.compile(r"(?<![0-9A-Za-z:])[0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f]{0,4}){2,7}(?![0-9A-Za-z:])")
 IPV4_RE = re.compile(r"(?<![0-9A-Za-z.])([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})(?![0-9.])")
 URL_HOST_RE = re.compile(r"(?i)\b[a-z][a-z0-9+.-]*://([^/:\s\"'<>]+)")
@@ -615,7 +621,7 @@ def assert_bundle_redacted(bundle: Bundle) -> None:
             token, suffix = match.group(1), match.group(2)
             if suffix.lower() in NON_HOST_SUFFIXES or token in NON_HOST_TOKENS or token == "com.apple" or token.startswith("com.apple."):
                 continue
-            if VERSION_TOKEN_RE.fullmatch(token) or TCP_FLAGS_TOKEN_RE.fullmatch(token):
+            if VERSION_TOKEN_RE.fullmatch(token) or TCP_FLAGS_TOKEN_RE.fullmatch(token) or PUBLIC_MTP_TENSOR_TOKEN_RE.fullmatch(token):
                 continue
             fail(f"reviewed bundle file {path} contains a hostname-shaped token")
         for match in IPV6_CANDIDATE_RE.finditer(text):

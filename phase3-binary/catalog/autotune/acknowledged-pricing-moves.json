@@ -26,6 +26,11 @@
       "model": "TensorFold/DeepSeek-V4-Flash-0731-MXFP4-MLX",
       "from_row": "default",
       "to_row": "deepseek/deepseek-v4-flash"
+    },
+    {
+      "model": "prism-ml/Ternary-Bonsai-2-2B-mlx-2bit",
+      "from_row": "default",
+      "to_row": "prism-ml/ternary-bonsai-2-2b-mlx-2bit"
     }
   ]
 }

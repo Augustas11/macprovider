@@ -106,8 +106,41 @@ POLICY_KEYS = {
     "provider_commit", "mlx_fork_revision", "quantization", "cache_mode", "proposal_depth",
     "run_order", "prompt_corpus", "exclusion_rules", "confidence_method",
     "max_native_active_rows", "qualified_slots", "temperature", "arrival_interval_ms",
-    "gated_cells", "maximum_prompt_tokens",
+    "gated_cells", "maximum_prompt_tokens", "top_p", "request_shape",
+    "diagnostic_eligibility_bypass",
 }
+REQUEST_PROFILE_DEFAULTS = {
+    "temperature": 0,
+    "top_p": 1,
+    "request_shape": "plain_text",
+    "diagnostic_eligibility_bypass": False,
+}
+
+
+def _request_profile_violations(record: dict, *, admission: bool) -> list[str]:
+    """Mirror the bench's optional sampler/fixture fields and safe defaults."""
+    violations = []
+    for key, low, high in (("temperature", 0, 2), ("top_p", 0, 1)):
+        if key not in record:
+            continue
+        value = record[key]
+        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                or not low <= value <= high or not math.isfinite(value)
+                or (key == "top_p" and value == 0)):
+            violations.append(f"field_invalid:{key}")
+    if "request_shape" in record and record["request_shape"] not in (
+        "plain_text", "tools_history_reasoning"
+    ):
+        violations.append("field_invalid:request_shape")
+    if "diagnostic_eligibility_bypass" in record:
+        bypass = record["diagnostic_eligibility_bypass"]
+        if not isinstance(bypass, bool):
+            violations.append("field_invalid:diagnostic_eligibility_bypass")
+        elif admission and bypass:
+            violations.append("diagnostic_eligibility_bypass_requires_exploratory")
+    return violations
+
+
 # Mirrors NativeMTPBenchPolicy.load: the frozen methodology and thresholds an
 # admission policy must carry, so the analyzer never judges a policy the bench
 # would refuse.
@@ -215,10 +248,7 @@ def _policy_contract_violations(policy: dict) -> list[str]:
             continue
         if not (_is_int(policy.get(key)) and minimum <= policy[key] <= SWIFT_INT_MAX):
             violations.append(f"field_invalid:{key}")
-    if "temperature" in policy:
-        t = policy["temperature"]
-        if isinstance(t, bool) or not isinstance(t, (int, float)) or not math.isfinite(t) or not 0 <= t <= 2:
-            violations.append("field_invalid:temperature")
+    violations.extend(_request_profile_violations(policy, admission=True))
     for key, low, high in (("slots", 1, 8), ("prompt_tokens", 1, None), ("max_tokens", 1, None)):
         values = policy.get(key)
         if not (isinstance(values, list) and values and all(_is_int(v) and v >= low and (high is None or v <= high) for v in values)
@@ -921,6 +951,29 @@ def analyze(jsonl_path: Path, policy_path: Path, exploratory_amended_gates: bool
             "reason": "policy_digest_mismatch",
             "expected_policy_sha256": policy_sha,
             "observed_policy_sha256": header.get("policy_sha256"),
+            "cells": [],
+        }
+    # Historical default-profile headers predate these fields. New profile
+    # declarations require the complete profile the bench now records; old
+    # headers may omit only values that resolve to the ordinary defaults.
+    require_profile_header = (
+        any(key in policy for key in REQUEST_PROFILE_DEFAULTS if key != "temperature")
+        or policy.get("temperature", 0) != 0
+    )
+    profile_mismatches = {}
+    for key, default in REQUEST_PROFILE_DEFAULTS.items():
+        expected = policy.get(key, default)
+        observed = header.get(key, None if require_profile_header else default)
+        if expected != observed:
+            profile_mismatches[key] = {"frozen": expected, "observed": observed}
+    profile_violations = _request_profile_violations(header, admission=not _is_exploratory(policy))
+    if profile_mismatches or profile_violations:
+        return {
+            "schema": "macprovider.native-mtp-r015-analysis.v1",
+            "overall_status": "FAIL",
+            "reason": "request_profile_mismatch",
+            "request_profile_mismatches": profile_mismatches,
+            "request_profile_violations": profile_violations,
             "cells": [],
         }
     bad_run_policy_records = [

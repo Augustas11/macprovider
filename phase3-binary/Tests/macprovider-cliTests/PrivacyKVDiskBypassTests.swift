@@ -68,13 +68,13 @@ final class PrivacyKVDiskBypassTests: XCTestCase {
 
         let tier = RecordingColdTier()
         tier.promoteResult = candidate(tokens: tokens(0 ..< 64))
-        let cache = ConversationCache(config: Self.cacheConfig, coldTier: tier)
+        let cache = makeConversationCacheForTest(config: Self.cacheConfig, coldTier: tier)
         let lease = try await XCTUnwrapAsync(await cache.begin(
             conversationKey: key, incomingTokens: tokens(0 ..< 72), modelID: "model-a", kvBits: nil, cold: cold))
         XCTAssertEqual(lease.cachedPromptTokens, 0, "no restore from disk")
         await cache.commit(lease, cache: layers(offset: 80), fullTokens: tokens(0 ..< 80), cold: cold)
 
-        let restarted = ConversationCache(config: Self.cacheConfig, coldTier: tier)
+        let restarted = makeConversationCacheForTest(config: Self.cacheConfig, coldTier: tier)
         let next = try await XCTUnwrapAsync(await restarted.begin(
             conversationKey: key, incomingTokens: tokens(0 ..< 96), modelID: "model-a", kvBits: nil, cold: cold))
         XCTAssertEqual(next.cachedPromptTokens, 0, "no restore after restart")
@@ -119,7 +119,7 @@ final class PrivacyKVDiskBypassTests: XCTestCase {
                 fromPayloads: [KVLayerPayload(
                     layerIndex: 0, classID: "KVCacheSimple", ndim: 4, dims: [1, 2, 1, 4], dtype: .f32,
                     cacheOffset: 1, keyBytes: Data(), valueBytes: Data())]))
-            let cache = ConversationCache(config: Self.cacheConfig, coldTier: adapter)
+            let cache = makeConversationCacheForTest(config: Self.cacheConfig, coldTier: adapter)
             let lease = try await XCTUnwrapAsync(await cache.begin(
                 conversationKey: key, incomingTokens: tokens(0 ..< 48), modelID: "model-a", kvBits: nil, cold: cold))
             XCTAssertEqual(lease.cachedPromptTokens, 0)
@@ -148,7 +148,7 @@ final class PrivacyKVDiskBypassTests: XCTestCase {
         XCTAssertTrue(cold.eligible)
 
         let writer = RecordingColdTier()
-        let cache = ConversationCache(config: Self.cacheConfig, coldTier: writer)
+        let cache = makeConversationCacheForTest(config: Self.cacheConfig, coldTier: writer)
         let first = try await XCTUnwrapAsync(await cache.begin(
             conversationKey: fleetKey, incomingTokens: tokens(0 ..< 56), modelID: "model-a", kvBits: nil,
             cold: cold, fleetGrant: grant))
@@ -158,7 +158,7 @@ final class PrivacyKVDiskBypassTests: XCTestCase {
 
         let reader = RecordingColdTier()
         reader.promoteResult = candidate(tokens: tokens(0 ..< 64))
-        let restarted = ConversationCache(config: Self.cacheConfig, coldTier: reader)
+        let restarted = makeConversationCacheForTest(config: Self.cacheConfig, coldTier: reader)
         let second = try await XCTUnwrapAsync(await restarted.begin(
             conversationKey: fleetKey, incomingTokens: tokens(0 ..< 64) + tokens(200 ..< 210),
             modelID: "model-a", kvBits: nil, cold: cold, fleetGrant: grant))

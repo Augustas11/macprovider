@@ -108,12 +108,13 @@ enum ToolCallParser {
                 return ParsedToolCalls(cleanedContent: nil, toolCalls: bare, leadingContent: nil)
             }
             result = parseQwenToolCalls(rawOutput: rawOutput, modelID: modelID, allowedFunctionNames: allowedFunctionNames, schemas: schemas)
-        case .glm?, .gemma4?, .llama3?, .dsml?:
+        case .glm?, .gemma4?, .llama3?, .dsml?, .lfm2?:
             do {
                 let calls: [ToolCall]
                 switch grammar {
                 case .glm?: calls = try parseTaggedCalls(rawOutput, start: "<tool_call>", end: "</tool_call>") { try glmCall($0, schemas: schemas) }
                 case .dsml?: calls = try parseDSMLCalls(rawOutput, schemas: schemas)
+                case .lfm2?: calls = try LFMToolCallParser.parse(rawOutput)
                 case .gemma4?: calls = try parseTaggedCalls(rawOutput, start: "<|tool_call>", end: "<tool_call|>") { try GemmaToolCallBridge.call($0, schemas: schemas) }
                 default: calls = try parseLlama3Calls(rawOutput)
                 }
@@ -147,6 +148,7 @@ enum ToolCallParser {
         case .gemma4?: return ["<|tool_call>"]
         case .llama3?: return ["<|python_tag|>", "{"]
         case .dsml?: return [DeepseekV4Encoding.toolCallsStart]
+        case .lfm2?: return [LFMToolCallParser.startMarker]
         case .harmony?, nil: return []
         }
     }

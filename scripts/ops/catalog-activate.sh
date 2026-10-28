@@ -52,6 +52,12 @@
 #   9 live_probe              provider /v1/status: continuous_batching active;
 #                             native_mtp enabled+eligible|active unless explicitly
 #                             selecting a CB-only proof below
+#   9a cached_turns           SPEC-038 AC-26: when the live signed CB policy grants cached
+#                             turns to the provider's tuple (/v1/status
+#                             continuous_batching.policy.cached_turns_authorized), the
+#                             provider config carries continuous_batching_cached_turns: true
+#                             and the running provider started after that config was
+#                             written; otherwise a manual config edit plus provider restart
 #  10 gateway_proof           one real buyer request through the gateway that moves the
 #                             target provider's active serving-path counter
 #                             (CB shared_forward_calls when CB is active);
@@ -119,6 +125,190 @@ QWEN_NATIVE_PROFILE=qwen36-native-mtp
 DSV4_WINDOW_PROFILE=dsv4-flash-window
 DSV4_WINDOW_DOWNTIME="Studio provider: GLM-5.3-Flash buyer traffic is unavailable from the GLM->DeepSeek restart through the DeepSeek-V4-Flash load (~167 GB), the conformance run (about 10-30 minutes at one serial slot), an optional operator hold while DSV4_WINDOW_HOLD_FILE exists (at most DSV4_WINDOW_HOLD_MAX_MINUTES, default 30, cap 60), and the restart and model load back to GLM; DeepSeek buyers are served during the window. Pearl is not restarted"
 
+# This optional intent selects a single matched signed binary/policy step.
+# It contains identities and private paths, never private key bytes.
+# Dynamic native bindings are accepted only after deterministic verification of
+# the one committed campaign recipe, never from arbitrary local catalog files.
+NATIVE_BINDING_RECIPE=ops/recipes/native-mtp-glm53-binding.v1.json
+CATALOG_TARGET_DIR="$REPO_ROOT/$AUTOTUNE"
+CATALOG_TARGET_INPUT="$REPO_ROOT/$AUTOTUNE/native-mtp-admission-release.json"
+
+native_binding_context() {
+  local commit="$1" receipt="$OPS_TMP_DIR/native-binding-proof.json"
+  CATALOG_TARGET_DIR="$REPO_ROOT/$AUTOTUNE"
+  CATALOG_TARGET_INPUT="$REPO_ROOT/$AUTOTUNE/native-mtp-admission-release.json"
+  [ -n "${CATALOG_NATIVE_BINDING_BUNDLE:-}" ] || return 0
+  [ "${CATALOG_NATIVE_BINDING_RECIPE:-$NATIVE_BINDING_RECIPE}" = "$NATIVE_BINDING_RECIPE" ] || return 1
+  MACPROVIDER_OPS_ENTRYPOINT=1 python3 -I "$REPO_ROOT/scripts/native_mtp_binding_bundle.py" verify \
+    --bundle "$CATALOG_NATIVE_BINDING_BUNDLE" --repo "$REPO_ROOT" --commit "$commit" \
+    --recipe "$NATIVE_BINDING_RECIPE" > "$receipt" 2> "$OPS_TMP_DIR/native-binding-proof.err" || return 1
+  CATALOG_TARGET_DIR="$(json_field "$receipt" 'd["release_dir"]')"
+  CATALOG_TARGET_INPUT="$(json_field "$receipt" 'd["release_input_path"]')"
+  fact native_binding_phase "$(json_field "$receipt" 'd["phase"]')"
+  fact native_binding_receipt_sha256 "$(json_field "$receipt" 'd["receipt_sha256"]')"
+  [ -d "$CATALOG_TARGET_DIR" ] && [ -f "$CATALOG_TARGET_INPUT" ]
+}
+
+signed_pair_state_dir() { printf '%s/%s/signed-native-pair' "$OPS_STATE_DIR" "$OPS_SCOPE"; }
+
+signed_pair_plan_sha() {
+  python3 - "${CATALOG_SIGNED_PAIR_PLAN:-}" "$R" <<'PAIR_PLAN'
+import hashlib,json,os,re,stat,sys
+p,rid=sys.argv[1:]
+f=os.open(p,os.O_RDONLY|os.O_NOFOLLOW)
+with os.fdopen(f,'rb') as stream:
+ st=os.fstat(stream.fileno())
+ if not stat.S_ISREG(st.st_mode) or st.st_uid!=os.getuid() or st.st_mode & 0o077: raise SystemExit(1)
+ raw=stream.read(1048577)
+if len(raw)>1048576:raise SystemExit(1)
+def unique(pairs):
+ d={}
+ for k,v in pairs:
+  if k in d:raise ValueError('duplicate intent field')
+  d[k]=v
+ return d
+d=json.loads(raw,object_pairs_hook=unique)
+if d.get('schema_version')!='macprovider.signed_native_pair.v1' or not re.fullmatch(r'[A-Za-z0-9_-]{1,80}',d.get('transaction_id','')):raise SystemExit(1)
+if d.get('target',{}).get('catalog_release_id')!=rid:raise SystemExit(1)
+print(hashlib.sha256(raw).hexdigest())
+PAIR_PLAN
+}
+
+# Read-only candidate-order proof. Call again under transaction custody before
+# publication with the freshly verified prior sidecar, never a cached verdict.
+signed_pair_decode_path_gate() {
+  local plan="$1" prior="$2" recommended="$3" version run_id marker run_json provenance
+  [ -n "$plan" ] && [ -f "$plan" ] && [ -f "$prior" ] &&
+    [ -n "${MACPROVIDER_OPS_OWNER:-}" ] && [ "$(gh_repo)" = Augustas11/macprovider ] || {
+      printf '%s\n' "blocked: signed-pair candidate proof prerequisites missing"; return 0;
+    }
+  provenance="$(json_field "$plan" 'd["target"]["provenance"]')"
+  if [ "$provenance" = reviewed_published_signed_release ]; then
+    python3 "$REPO_ROOT/scripts/decode_path_digest.py" --publish-gate \
+      "$CATALOG_TARGET_INPUT" "$CATALOG_TARGET_DIR/native-mtp-admission.json" "$recommended" 2>&1 ||
+      printf '%s\n' "blocked: decode-path publish gate failed"
+    return 0
+  fi
+  [ "$provenance" = reviewed_signed_acceptance_candidate ] || {
+    printf '%s\n' "blocked: signed-pair target provenance unknown"; return 0;
+  }
+  version="$(json_field "$plan" 'd["target"]["version"]')"
+  run_id="$(json_field "$plan" 'str(d["target"]["candidate_run_id"])')"
+  is_semver "$version" && [[ "$run_id" =~ ^[1-9][0-9]*$ ]] || {
+    printf '%s\n' "blocked: signed-pair candidate identity malformed"; return 0;
+  }
+  marker="$(marker_path "cli-release-$version" signed_byte_verification)"
+  run_json="$OPS_TMP_DIR/signed-pair-candidate-run.json"
+  [ -f "$marker" ] && gh api "repos/Augustas11/macprovider/actions/runs/$run_id" > "$run_json" 2>/dev/null || {
+    printf '%s\n' "blocked: signed-pair verified candidate run unavailable"; return 0;
+  }
+  MACPROVIDER_OPS_ENTRYPOINT=1 python3 "$REPO_ROOT/scripts/decode_path_digest.py" --publish-gate \
+    "$CATALOG_TARGET_INPUT" "$CATALOG_TARGET_DIR/native-mtp-admission.json" "$recommended" \
+    --signed-pair-plan "$plan" --signed-byte-verification "$marker" \
+    --signed-pair-run-json "$run_json" --signed-pair-prior-sidecar "$prior" 2>&1 ||
+    printf '%s\n' "blocked: signed-pair decode-path publish proof failed"
+}
+
+signed_pair_acknowledged() {
+  python3 - "$(signed_pair_state_dir)" "$(signed_pair_plan_sha)" <<'PAIR_ACK_CHECK'
+import json,os,pathlib,stat,sys
+p=pathlib.Path(sys.argv[1]);digest=sys.argv[2]
+def load(name):
+ f=os.open(p/name,os.O_RDONLY|os.O_NOFOLLOW)
+ with os.fdopen(f) as stream:
+  st=os.fstat(stream.fileno())
+  if not stat.S_ISREG(st.st_mode) or st.st_uid!=os.getuid() or st.st_mode & 0o077:raise SystemExit(1)
+  return json.load(stream)
+s=load('controller-state.json');a=load('terminal-ack.json')
+if set(a)!={'terminal_acknowledged','transaction_id','intent_sha256'} or a['terminal_acknowledged'] is not True or a['transaction_id']!=s['transaction_id'] or a['intent_sha256']!=s['intent_sha256'] or a['intent_sha256']!=digest or s['phase']!='terminal':raise SystemExit(1)
+PAIR_ACK_CHECK
+}
+
+signed_pair_probe() {
+  [ -n "${CATALOG_SIGNED_PAIR_PLAN:-}" ] || return 1
+  "$OPS_DIR/canary-swap.sh" signed-pair --plan "$CATALOG_SIGNED_PAIR_PLAN" --action status
+}
+
+signed_pair_reconcile() {
+  [ "${MACPROVIDER_OPS_ENTRYPOINT:-}" = 1 ] || refuse "signed pair reconciliation requires next --run"
+  local state_dir state_record values tx helper guard secret
+  state_dir="$(signed_pair_state_dir)"
+  state_record="$state_dir/controller-state.json"
+  signed_pair_probe > "$OPS_TMP_DIR/pair-terminal.json" || refuse "signed pair terminal status is unreadable"
+  [ "$(json_field "$OPS_TMP_DIR/pair-terminal.json" 'd.get("terminal_ready")')" = true ] ||
+    refuse "independent signed pair recovery has not proved a live matching terminal pair"
+  values="$(python3 - "$state_record" "$(signed_pair_plan_sha)" <<'PAIR_STATE'
+import json,os,re,stat,sys
+p,digest=sys.argv[1:]
+f=os.open(p,os.O_RDONLY|os.O_NOFOLLOW)
+with os.fdopen(f) as stream:
+ st=os.fstat(stream.fileno())
+ if not stat.S_ISREG(st.st_mode) or st.st_uid!=os.getuid() or st.st_mode & 0o077:raise SystemExit(1)
+ d=json.load(stream)
+if d['intent_sha256']!=digest:raise SystemExit(1)
+t=d['transaction_id'];h=d['helper_dir'];g=d['guard_dir'];k=d.get('reader_key_dir','')
+if not k:
+ intent=os.path.expanduser('~/.config/macprovider/operator-secrets/signed-pair-'+t+'.intent.json')
+ if os.path.lexists(intent):
+  f=os.open(intent,os.O_RDONLY|os.O_NOFOLLOW)
+  with os.fdopen(f) as stream:
+   st=os.fstat(stream.fileno())
+   if not stat.S_ISREG(st.st_mode) or st.st_uid!=os.getuid() or stat.S_IMODE(st.st_mode)!=0o600:raise SystemExit(1)
+   record=json.load(stream)
+  if record.get('transaction_id')!=t:raise SystemExit(1)
+  k=record['key_dir']
+if not re.fullmatch(r'[A-Za-z0-9_-]{1,80}',t) or not re.fullmatch(r'/tmp/macprovider-autotune-lock\.[A-Za-z0-9]+',h) or g!=h+'/signed-pair-'+t:raise SystemExit(1)
+if '\n' in k or (k and not k.startswith(os.path.expanduser('~/.config/macprovider/operator-secrets/signed-pair-'+t+'-'))):raise SystemExit(1)
+print('\n'.join([t,h,g,k]))
+PAIR_STATE
+)" || refuse "durable signed pair controller state is invalid"
+  tx="$(printf '%s\n' "$values" | sed -n 1p)"
+  helper="$(printf '%s\n' "$values" | sed -n 2p)"
+  guard="$(printf '%s\n' "$values" | sed -n 3p)"
+  secret="$(printf '%s\n' "$values" | sed -n 4p)"
+  SSH() { pearl_ssh "$@"; }
+  fatal() { refuse "$@"; }
+  AA_WORK_DIR="$OPS_TMP_DIR/pair-terminal"
+  mkdir -m 0700 "$AA_WORK_DIR"
+  . "$REPO_ROOT/scripts/lib/autotune-activate.sh"
+  LOCK_HELPER_DIR="$helper"
+  LOCK_HELPER="$helper/pearl_autotune_deploy_lock.py"
+  AA_SIGNED_PAIR_GUARD_DIR="$guard"
+  AA_SIGNED_PAIR_READER_KEY_DIR="$secret"
+  aa_signed_pair_runner_retire "$tx" || refuse "runner recovery retirement is pending"
+  aa_signed_pair_reader_retire "$tx" || refuse "receipt reader retirement is pending"
+  aa_cleanup_remote_helpers
+  python3 - "$state_record" "$state_dir/terminal-ack.json" <<'PAIR_ACK'
+import json,os,pathlib,sys
+r=json.load(open(sys.argv[1]));r['phase']='terminal';p=pathlib.Path(sys.argv[2]);t=p.with_name(p.name+'.next-'+str(os.getpid()))
+f=os.open(t,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+with os.fdopen(f,'w') as out:json.dump({'terminal_acknowledged':True,'transaction_id':r['transaction_id'],'intent_sha256':r['intent_sha256']},out);out.flush();os.fsync(out.fileno())
+os.replace(t,p)
+state=pathlib.Path(sys.argv[1]);temp=state.with_name(state.name+'.next-'+str(os.getpid()));f=os.open(temp,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+with os.fdopen(f,'w') as out:json.dump(r,out,sort_keys=True);out.flush();os.fsync(out.fileno())
+os.replace(temp,state);f=os.open(p.parent,os.O_RDONLY);os.fsync(f);os.close(f)
+PAIR_ACK
+}
+
+signed_pair_internal() {
+  [ "${MACPROVIDER_OPS_ENTRYPOINT:-}" = 1 ] || refuse "signed pair transition requires next --run"
+  local commit="$1" expected="$2" got
+  [ "$commit" = "$(origin_main_sha)" ] && [ "$commit" = "$(git -C "$REPO_ROOT" rev-parse HEAD)" ] || refuse "signed pair source moved"
+  native_binding_context "$commit" || refuse "native binding proof changed before publication"
+  got="$(signed_pair_plan_sha)" || refuse "signed pair intent is invalid"
+  [ "$got" = "$expected" ] || refuse "signed pair intent changed since status"
+  # Re-fetch under live-ops custody. The actor later independently proves the
+  # same prior signed bytes under the publication lease before pausing.
+  local prior="$OPS_TMP_DIR/signed-pair-prior-admission.json" health="$OPS_TMP_DIR/signed-pair-health.json" gate
+  [ "$(http_get "${COORDINATOR_URL%/}/v1/native-mtp-admission" "$prior")" = 200 ] &&
+    [ "$(http_get "${COORDINATOR_URL%/}/healthz" "$health")" = 200 ] || refuse "signed pair prior policy is unreadable"
+  gate="$(signed_pair_decode_path_gate "$CATALOG_SIGNED_PAIR_PLAN" "$prior" \
+    "$(json_field "$health" 'd.get("recommended_binary_version") or ""')")"
+  [ "$gate" = ok ] || refuse "signed pair decode-path proof changed before publication"
+  CATALOG_SIGNED_PAIR_INTENT_SHA256="$expected" CATALOG_SIGNED_PAIR_STATE_DIR="$(signed_pair_state_dir)" \
+    "$REPO_ROOT/scripts/catalog-content-release.sh" --deploy --commit "$commit"
+}
+
 qwen_journal_probe() {
   "$OPS_DIR/qwen-opencode-e2e.sh" _catalog-qwen36-journal
 }
@@ -170,6 +360,23 @@ release_live_lock() {
   [ -n "$OPS_LOCK_OWNER" ] || return 0
   local owner="$OPS_LOCK_OWNER" probe="$OPS_TMP_DIR/qwen-lock-journal.json" purpose=""
   purpose="$(live_lock_purpose 2>/dev/null || true)"
+  if [ "$purpose" = catalog-activate:signed_native_pair ]; then
+    if [ ! -e "$(signed_pair_state_dir)/controller-state.json" ]; then
+      OPS_LOCK_OWNER=""
+      "$OPS_DIR/live-lock.sh" release "$owner" >&2 || true
+      return 0
+    fi
+    if ! signed_pair_acknowledged ||
+       ! signed_pair_probe > "$OPS_TMP_DIR/pair-lock-terminal.json" 2>/dev/null ||
+       [ "$(json_field "$OPS_TMP_DIR/pair-lock-terminal.json" 'd.get("terminal_ready")')" != true ]; then
+      log "retaining the durable live-ops lock until signed pair recovery proves a live terminal pair"
+      OPS_LOCK_OWNER=""
+      return 0
+    fi
+    OPS_LOCK_OWNER=""
+    "$OPS_DIR/live-lock.sh" release "$owner" >&2 || true
+    return 0
+  fi
   if qwen_native_intent_present; then
     if [ "$purpose" != catalog-activate:qwen_restore ]; then
       "$OPS_DIR/live-lock.sh" acquire "$owner" \
@@ -210,7 +417,9 @@ release_live_lock() {
 }
 
 acquire_live_lock_for_step() {
-  if [ "$NEXT_ID" = qwen_restore ] || [ "$NEXT_ID" = qwen_prejournal_reconcile ]; then
+  if [ "$NEXT_ID" = signed_native_pair ] || [ "$NEXT_ID" = signed_native_pair_reconcile ]; then
+    "$OPS_DIR/live-lock.sh" acquire "$MACPROVIDER_OPS_OWNER" --purpose catalog-activate:signed_native_pair >&2
+  elif [ "$NEXT_ID" = qwen_restore ] || [ "$NEXT_ID" = qwen_prejournal_reconcile ]; then
     "$OPS_DIR/live-lock.sh" acquire "$MACPROVIDER_OPS_OWNER" \
       --purpose catalog-activate:qwen_restore >&2
   elif [ "$(live_lock_purpose 2>/dev/null || true)" = catalog-activate:qwen_restore ]; then
@@ -241,10 +450,20 @@ gather() {
   local main_sha head_sha R native_bound=false bank_rid verify_ok=false qwen_lock_purpose="" qwen_local_intent=false
   main_sha="$(origin_main_sha)"
   head_sha="$(git -C "$REPO_ROOT" rev-parse HEAD)"
-  R="$(json_field "$REPO_ROOT/$AUTOTUNE/release.json" 'd["release_id"]')"
-  [ -n "$R" ] || die "cannot read $AUTOTUNE/release.json"
-  OPS_SCOPE="catalog-$R"
-
+  if [ "$(live_lock_purpose 2>/dev/null || true)" = catalog-activate:signed_native_pair ] &&
+     [ -n "${CATALOG_SIGNED_PAIR_PLAN:-}" ]; then
+    # Recovery does not depend on still-valid candidate envelopes. The private
+    # intent and actor independently prove the already-journaled terminal pair.
+    R="$(json_field "$CATALOG_SIGNED_PAIR_PLAN" 'd["target"]["catalog_release_id"]')"
+    [[ "$R" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$ ]] || die "invalid recovery release identity"
+    OPS_SCOPE="catalog-$R"
+    if [ -f "$(signed_pair_state_dir)/controller-state.json" ]; then
+      step signed_native_pair_reconcile pending "signed pair journal awaits a live terminal acknowledgement"
+      set_next signed_native_pair_reconcile mutate "Reconcile the journaled signed binary/policy pair" \
+        "$OPS_DIR/catalog-activate.sh _signed-native-pair-reconcile"
+      return
+    fi
+  fi
   # A remote Qwen profile journal is authoritative. No catalog step, proof, or
   # activation is allowed to run ahead of restoration.
   qwen_lock_purpose="$(live_lock_purpose 2>/dev/null || true)"
@@ -358,16 +577,38 @@ gather() {
       return
     fi
   fi
+  if [ "$(live_lock_purpose 2>/dev/null || true)" = catalog-activate:signed_native_pair ] &&
+     [ -f "$(signed_pair_state_dir)/controller-state.json" ]; then
+    step signed_native_pair_reconcile pending "signed pair journal must reach an acknowledged live terminal pair"
+    set_next signed_native_pair_reconcile mutate "Reconcile the journaled signed binary/policy pair" \
+      "$OPS_DIR/catalog-activate.sh _signed-native-pair-reconcile"
+    next_meta signed_native_pair_reconcile "$MTP_DOC" "recovery only: restore the journaled released pair and buyer runner"
+    return
+  fi
+  # Mandatory recovery precedes all fresh catalog/binding reads: a later
+  # catalog candidate must not prevent restoration of an interrupted window.
+  if ! native_binding_context "$main_sha"; then
+    set_next native_binding_bundle blocked "Verify the committed native binding recipe" "" "signed bundle derivation or qualification proof failed"
+    return
+  fi
+  R="$(json_field "$CATALOG_TARGET_DIR/release.json" 'd["release_id"]')"
+  [ -n "$R" ] || die "cannot read $AUTOTUNE/release.json"
+  OPS_SCOPE="catalog-$R"
   fact origin_main_sha "$main_sha"
   fact checkout_is_origin_main "$([ "$head_sha" = "$main_sha" ] && echo true || echo false)"
   fact committed_release_id "$R"
-  if [ -n "$(json_field "$REPO_ROOT/$AUTOTUNE/release.json" 'd["feeds"]["native-mtp-admission.json"]["sha256"]')" ]; then
+  if [ -n "$(json_field "$CATALOG_TARGET_DIR/release.json" 'd["feeds"]["native-mtp-admission.json"]["sha256"]')" ]; then
     native_bound=true
   fi
   fact native_bound "$native_bound"
-  bank_rid="$(json_field "$REPO_ROOT/$AUTOTUNE/native-mtp-selftest-bank.json" 'd["release_id"]')"
+  bank_rid="$(json_field "$CATALOG_TARGET_DIR/native-mtp-selftest-bank.json" 'd["release_id"]')"
   fact committed_bank_release_id "$bank_rid"
-  if MACPROVIDER_REQUIRED_CB_BASELINE=studio-qwen3.6-a3b-v1 python3 "$REPO_ROOT/scripts/catalog-release.py" verify > "$OPS_TMP_DIR/verify.out" 2>&1; then
+  if [ -n "${CATALOG_NATIVE_BINDING_BUNDLE:-}" ]; then
+    if python3 "$REPO_ROOT/scripts/catalog-release.py" verify-directory --directory "$CATALOG_TARGET_DIR" \
+        --tier2-coordinator-config "$REPO_ROOT/phase4-coordinator/dist/coordinator.yaml" > "$OPS_TMP_DIR/verify.out" 2>&1; then
+      verify_ok=true
+    fi
+  elif MACPROVIDER_REQUIRED_CB_BASELINE=studio-qwen3.6-a3b-v1 python3 "$REPO_ROOT/scripts/catalog-release.py" verify > "$OPS_TMP_DIR/verify.out" 2>&1; then
     verify_ok=true
   fi
   fact catalog_release_verify "$verify_ok"
@@ -391,7 +632,7 @@ gather() {
   # Routes: a 200, or a JSON 404 from the coordinator itself, proves nginx
   # forwards the path; an nginx HTML 404 means the location block is missing.
   local missing="" feed route code
-  for feed in $(json_field "$REPO_ROOT/$AUTOTUNE/release.json" '" ".join(sorted(d["feeds"]))'); do
+  for feed in $(json_field "$CATALOG_TARGET_DIR/release.json" '" ".join(sorted(d["feeds"]))'); do
     route="$(feed_route "$feed")"
     [ -n "$route" ] || continue
     set -- "$route" "$route.sig"
@@ -416,7 +657,7 @@ gather() {
       live_bank_sha="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$OPS_TMP_DIR/bank.json")"
     fi
     local key_id
-    key_id="$(json_field "$REPO_ROOT/$AUTOTUNE/native-mtp-admission.json" 'd["revocation_signer_key_id"]')"
+    key_id="$(json_field "$CATALOG_TARGET_DIR/native-mtp-admission.json" 'd["revocation_signer_key_id"]')"
     if [ "$(http_get "$base/v1/native-mtp-revocations.$key_id.json" "$OPS_TMP_DIR/rev.json")" = "200" ]; then
       slot_exp="$(json_field "$OPS_TMP_DIR/rev.json" 'd["expires_at"]')"
       python3 -c 'import datetime,sys; e=datetime.datetime.strptime(sys.argv[1],"%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc); sys.exit(0 if e>datetime.datetime.now(datetime.timezone.utc) else 1)' "$slot_exp" 2>/dev/null &&
@@ -608,14 +849,29 @@ $owed_writer '$deploy_log' '$owed_dir' '$R'"
     # release (git-verified digest at its source commit) is the recommended CLI.
     local dp_gate="ok"
     if [ "$native_bound" = true ]; then
-      dp_gate="$(python3 "$REPO_ROOT/scripts/decode_path_digest.py" --publish-gate \
-        "$REPO_ROOT/$AUTOTUNE/native-mtp-admission-release.json" "$REPO_ROOT/$AUTOTUNE/native-mtp-admission.json" \
-        "$(json_field "$OPS_TMP_DIR/healthz.json" 'd.get("recommended_binary_version") or ""' 2>/dev/null)" 2>&1 ||
-        echo "blocked: decode-path publish gate failed")"
+      if [ -n "${CATALOG_SIGNED_PAIR_PLAN:-}" ]; then
+        dp_gate="$(signed_pair_decode_path_gate "$CATALOG_SIGNED_PAIR_PLAN" "$OPS_TMP_DIR/adm.json" \
+          "$(json_field "$OPS_TMP_DIR/healthz.json" 'd.get("recommended_binary_version") or ""' 2>/dev/null)")"
+      else
+        dp_gate="$(python3 "$REPO_ROOT/scripts/decode_path_digest.py" --publish-gate \
+          "$CATALOG_TARGET_INPUT" "$CATALOG_TARGET_DIR/native-mtp-admission.json" \
+          "$(json_field "$OPS_TMP_DIR/healthz.json" 'd.get("recommended_binary_version") or ""' 2>/dev/null)" 2>&1 ||
+          echo "blocked: decode-path publish gate failed")"
+      fi
     fi
     fact native_mtp_decode_path_publish_gate "$dp_gate"
     if [ "$dp_gate" != ok ]; then
       set_next catalog_activation blocked "Activate content release $R" "" "$dp_gate"
+    elif [ -n "${CATALOG_SIGNED_PAIR_PLAN:-}" ] && [ "$fresh" = true ] && [ "$go" = true ] && [ -z "$pricing" ]; then
+      local pair_sha
+      if [ "$head_sha" != "$main_sha" ] || ! pair_sha="$(signed_pair_plan_sha)"; then
+        set_next signed_native_pair blocked "Validate the matched signed release intent" "" "clean origin/main and an exact private target intent are required"
+      else
+        step signed_native_pair pending "released signed binary and signed policy must change under one recovery journal"
+        set_next signed_native_pair mutate "Install the matched signed native-MTP binary/policy pair" \
+          "$OPS_DIR/catalog-activate.sh _signed-native-pair $main_sha $pair_sha"
+        next_meta signed_native_pair "$MTP_DOC" "provider pause/drain, one released-binary restart and model load, then 120-second stability; independent exact-pair recovery is armed first; content publication uses one coordinator SIGHUP"
+      fi
     elif [ "$fresh" = true ] && { [ "$p_paused" = true ] || [ "$p_status_ok" = false ]; } &&
       { [ "$go" = true ] || printf '%s' "$lane_detail" | grep -q 'lane='; }; then
       set_next catalog_activation blocked "Activate content release $R" "" "$paused_why"
@@ -736,6 +992,58 @@ for i in \$(seq 1 24); do curl -sf -m 5 \"\$COORDINATOR_URL/healthz\" && exit 0;
     fi
   fi
 
+  # SPEC-038 AC-26 / FR-CB4 (v0.2.8): once the live signed CB policy grants
+  # cached turns to the provider's tuple (status cached_turns_authorized), the
+  # provider opts in with continuous_batching_cached_turns. Done only when the
+  # flag is in the provider config and the provider listening on the status
+  # port started after that config was written, so the flag is loaded. Runs
+  # before the gateway proof so the proof is served with the flag loaded.
+  local p_cached_authorized="" p_cached_flag=""
+  p_cached_authorized="$(json_field "$OPS_TMP_DIR/pstatus.json" 'd["continuous_batching"]["policy"]["cached_turns_authorized"]')"
+  if [ "$p_status_ok" = true ] && [ "$p_cached_authorized" = true ]; then
+    # off: flag absent or false; set: on in the config but not loaded yet;
+    # loaded: the listening provider started after the config was last written.
+    p_cached_flag="$(studio_ssh 'python3 - '"$STUDIO_STATUS_PORT"' <<"PY"
+import os, re, subprocess, sys, time
+cfg = os.path.expanduser("~/.config/macprovider/config.yaml")
+on = False
+for line in open(cfg):
+    m = re.match(r"continuous_batching_cached_turns\s*:\s*(.*?)\s*(#.*)?$", line.rstrip("\n"))
+    if m:
+        on = m.group(1).strip("\"").lower() in ("true", "yes", "on", "1")
+if not on:
+    sys.exit(print("off"))
+pids = subprocess.run(["lsof", "-nP", "-t", "-iTCP:" + sys.argv[1], "-sTCP:LISTEN"], capture_output=True, text=True).stdout.split()
+start = subprocess.run(["ps", "-o", "lstart=", "-p", pids[0]], capture_output=True, text=True, env=dict(os.environ, LC_ALL="C")).stdout.split() if pids else []
+started = time.mktime(time.strptime(" ".join(start), "%a %b %d %H:%M:%S %Y")) if start else 0
+print("loaded" if started > os.stat(cfg).st_mtime else "set")
+PY' 2>/dev/null || true)"
+  fi
+  fact provider_cached_turns_authorized "$p_cached_authorized"
+  fact provider_cached_turns_flag "$p_cached_flag"
+  if [ "$p_status_ok" != true ]; then
+    # Unreadable status is unknown, never "no grant".
+    step cached_turns unknown "provider status unreadable"
+  elif [ "$p_cached_authorized" != true ]; then
+    step cached_turns "done" "no signed cached-turns grant for the provider's tuple"
+  elif [ "$p_cached_flag" = loaded ]; then
+    step cached_turns "done" "signed grant live and continuous_batching_cached_turns loaded"
+  elif [ "$p_cached_flag" != off ] && [ "$p_cached_flag" != set ]; then
+    step cached_turns blocked "signed grant live; provider config unreadable"
+    set_next cached_turns blocked "Read the provider config" "" \
+      "the provider config could not be read over STUDIO_SSH; it is never assumed to carry the flag"
+  else
+    step cached_turns pending "signed grant live; provider flag $p_cached_flag"
+    set_next cached_turns manual "Turn continuous_batching_cached_turns on for the provider and restart it" \
+"# SPEC-038 FR-CB4 / AC-26: the signed policy now grants cached turns to this tuple.
+# Back up the config, replace any existing key, then restart the provider once.
+ssh \"\$STUDIO_SSH\" 'set -e; c=~/.config/macprovider/config.yaml; cp -p \"\$c\" \"\$c.bak-cached-turns-\$(date -u +%Y%m%dT%H%M%SZ)\"; sed -i \"\" \"/^continuous_batching_cached_turns[[:space:]]*:/d\" \"\$c\"; [ -z \"\$(tail -c1 \"\$c\")\" ] || echo >> \"\$c\"; printf \"continuous_batching_cached_turns: true\\n\" >> \"\$c\"; launchctl kickstart -k gui/\$(id -u)/live.malibu.provider'
+# then /v1/status: catalog.release_id == $R, lifecycle serving_buyers, continuous_batching.active=true,
+# continuous_batching.policy.cached_turns_authorized=true; serve start logs event=batching_cached_turns action=enabled" \
+      "the live signed CB policy records cached_turns_accepted for the provider's tuple"
+    next_meta cached_turns "docs/runbooks/continuous-batching-enable-gate.md" "the provider restart only: requests it would serve go to other providers of its model or wait for its restart and model load"
+  fi
+
   # The proof expires, and legacy generic request-counter markers are not enough
   # once continuous batching is active: a fresh marker must carry the scheduler
   # shared_forward_calls delta from the provider-attributed buyer request.
@@ -753,6 +1061,10 @@ for i in \$(seq 1 24); do curl -sf -m 5 \"\$COORDINATOR_URL/healthz\" && exit 0;
       set_next gateway_proof mutate "Adopt Qwen3.6, prove one paid native-MTP request, and restore GLM" \
         "$OPS_DIR/qwen-opencode-e2e.sh _catalog-qwen36-proof"
       NEXT_DOWNTIME="Studio provider buyer traffic is unavailable during bounded Qwen/GLM restart and model-load windows; Pearl is not restarted"
+    elif gateway_expanded_required; then
+      set_next gateway_proof mutate "Prove signed GLM sampled/tools/history/reasoning across all three buyer APIs" \
+        "scripts/ops/catalog-activate.sh _gateway-proof"
+      NEXT_DOWNTIME="Buyer runner pauses for bounded proof; provider serving, native MTP and continuous batching stay live"
     else
       set_next gateway_proof read "Send one real buyer request through the gateway" \
         "scripts/ops/catalog-activate.sh _gateway-proof"
@@ -930,6 +1242,7 @@ read_provider_status() {
 }
 
 native_mtp_forward_requirement() {
+  if gateway_expanded_required; then echo true; return; fi
   case "${CATALOG_REQUIRE_NATIVE_MTP_FORWARD:-false}" in
     false) echo false ;;
     true) echo true ;;
@@ -952,12 +1265,316 @@ PY
     refuse "Qwen3.6 gateway proof requires the already-held durable restoration lock"
 }
 
+gateway_expanded_code() {
+  cat <<'PYEXPANDED'
+import hashlib,json,os,re,stat,sys,time
+from pathlib import Path
+
+def need(ok,why):
+    if not ok:raise ValueError(why)
+def unique(pairs):
+    out={}
+    for k,v in pairs:need(k not in out,'duplicate JSON key');out[k]=v
+    return out
+def load(path):return json.loads(Path(path).read_bytes(),object_pairs_hook=unique)
+def digest(data):return hashlib.sha256(data).hexdigest()
+def emit(value):print(json.dumps(value,sort_keys=True,separators=(',',':')))
+FAMILIES=('chat','responses','messages');PROFILES=('sampled','tools','history','reasoning')
+PATHS={'chat':'/v1/chat/completions','responses':'/v1/responses','messages':'/v1/messages'}
+def shape(family,profile,model,nonce):
+    need(family in FAMILIES and profile in PROFILES and model=='zai-org/glm-5.3-flash','closed expanded proof shape')
+    prompt='Proof nonce '+nonce+'. Explain the example function in two short sentences.'
+    if profile=='tools':prompt='Proof nonce '+nonce+'. Read example.swift using read_file before answering. Call read_file now; the file contents are not in this conversation.'
+    fn={'name':'read_file','parameters':{'type':'object','properties':{'path':{'type':'string'}},'required':['path']}}
+    p={'model':model,'stream':False,'temperature':1 if profile in ('sampled','tools') else 0,'top_p':.95 if profile in ('sampled','tools') else 1}
+    if family=='chat':
+        p.update(max_tokens=256 if profile=='tools' else 64,seed=8516,messages=[{'role':'user','content':prompt}])
+        if profile in ('tools','history'):p.update(tools=[dict(type='function',function=fn)],tool_choice='auto',parallel_tool_calls=True)
+        if profile=='history':p['messages']=[{'role':'user','content':prompt},{'role':'assistant','content':'','tool_calls':[{'id':'call_proof','type':'function','function':{'name':'read_file','arguments':'{"path":"example.swift"}'}}]},{'role':'tool','tool_call_id':'call_proof','content':'func square(_ x: Int) -> Int { x * x }'},{'role':'user','content':'Explain that function.'}]
+        if profile in ('history','reasoning'):p['reasoning_effort']='high'
+    elif family=='responses':
+        p.update(max_output_tokens=256 if profile=='tools' else 64,store=False,input=[{'role':'user','content':prompt}])
+        if profile in ('tools','history'):p.update(tools=[dict(type='function',**fn)],tool_choice='auto',parallel_tool_calls=True)
+        if profile=='history':p['input'] += [{'type':'function_call','call_id':'call_proof','name':'read_file','arguments':'{"path":"example.swift"}'},{'type':'function_call_output','call_id':'call_proof','output':'func square(_ x: Int) -> Int { x * x }'},{'role':'user','content':'Explain that function.'}]
+        if profile in ('history','reasoning'):p['reasoning']={'effort':'high'}
+    else:
+        p.update(max_tokens=256 if profile=='tools' else 64,messages=[{'role':'user','content':prompt}])
+        if profile in ('tools','history'):p.update(tools=[{'name':'read_file','input_schema':fn['parameters']}],tool_choice={'type':'auto','disable_parallel_tool_use':False})
+        if profile=='history':p['messages'] += [{'role':'assistant','content':[{'type':'tool_use','id':'call_proof','name':'read_file','input':{'path':'example.swift'}}]},{'role':'user','content':[{'type':'tool_result','tool_use_id':'call_proof','content':'func square(_ x: Int) -> Int { x * x }'},{'type':'text','text':'Explain that function.'}]}]
+        if profile in ('history','reasoning'):p['thinking']={'type':'enabled','budget_tokens':1024}
+    return p
+
+def capture(path,since=-1,prefix=0):
+    p=Path(path);s=Path(str(p)+'.status.json')
+    for f in (p,s):
+        st=f.lstat();need(stat.S_ISREG(st.st_mode) and not f.is_symlink() and st.st_mode & 0o077==0 and 0<st.st_size<=10485760,'private bounded capture input')
+    for _ in range(10):
+        status=s.read_bytes();raw=p.read_bytes()
+        if status==s.read_bytes():
+            v=json.loads(status,object_pairs_hook=unique)
+            if v.get('jsonl_bytes_written')==len(raw):break
+        time.sleep(.02)
+    else:raise ValueError('capture snapshot raced')
+    lines=raw.splitlines();h=json.loads(lines[0],object_pairs_hook=unique)
+    need(h.get('schema')=='macprovider.native-mtp-request-shape-capture.v2' and h.get('capture_role')=='request_shape_observation_only' and h.get('native_mtp_mode')=='auto' and h.get('capture_requires_native_mtp_off') is False and h.get('build_identity_complete') is True,'actual native-on capture v2 required')
+    need(v.get('schema')==h['schema'] and v.get('record_type')=='status' and v.get('capture_file_name')==p.name and v.get('build_identity_complete') is True,'capture status identity')
+    need(type(v.get('successful_records')) is int and len(lines)==v['successful_records']+1 and v.get('attempts')==v['successful_records'],'capture attempts/records incomplete')
+    for k in ('skipped_ineligible','skipped_empty_completion','dropped_missing_effective_budget','dropped_after_record_limit','dropped_after_byte_limit','jsonl_write_errors','status_write_errors'):need(v.get(k)==0,'capture drop/error')
+    return dict(header=h,header_sha256=digest(lines[0]),status=v,bytes=len(raw),sha256=digest(raw),prefix_sha256=digest(raw[:prefix]),rows=[] if since<0 else [json.loads(x,object_pairs_hook=unique) for x in lines[1+since:]],file_identity=[p.stat().st_dev,p.stat().st_ino])
+
+def capture_custody(path,journal,expected_sha):
+    import ctypes,subprocess,plistlib
+    def private(p):
+        p=Path(p);st=p.lstat()
+        need(not p.is_symlink() and stat.S_ISREG(st.st_mode) and st.st_mode & 0o077==0 and st.st_size<=1048576,'private custody file')
+        return p.read_bytes()
+    raw=private(journal);need(digest(raw)==expected_sha,'signed-pair journal changed')
+    j=json.loads(raw,object_pairs_hook=unique);state=json.loads(private(Path(journal).parent/'studio-state.json'),object_pairs_hook=unique)
+    need(state.get('phase')=='committed' and state.get('journal_sha256')==expected_sha and state.get('transaction_id')==j['transaction_id'],'committed signed pair required')
+    p=Path(path);need(p.parent==Path(j['studio']['capture_dir']),'capture is outside the signed-pair launch directory')
+    snapshot=capture(path)
+    need(snapshot['header']['build_source_commit']==j['target']['source_commit'] and snapshot['header']['build_cdhash']==j['target']['cdhash'],'capture is not signed-pair candidate')
+    plist=plistlib.loads(private(j['studio']['launchd_plist']))
+    need(plist.get('Label')==j['studio']['launchd_label'],'launchd label changed')
+    env=plist.get('EnvironmentVariables',{})
+    need(env.get('MACPROVIDER_NATIVE_MTP_SHAPE_CAPTURE_DIR')==str(p.parent) and env.get('MACPROVIDER_NATIVE_MTP_SHAPE_CAPTURE_SCHEMA')=='v2','capture launch environment changed')
+    def run(args):return subprocess.run(args,check=True,capture_output=True,text=True,timeout=10,env=dict(os.environ,LC_ALL='C')).stdout
+    loaded=run(['/bin/launchctl','print','gui/%d/%s'%(os.getuid(),j['studio']['launchd_label'])])
+    found=re.search(r'^\s*pid = ([0-9]+)$',loaded,re.M);need(found is not None,'live provider PID absent');pid=found.group(1)
+    # Match loaded environment as well as the persisted plist; editing an unused
+    # plist cannot bind an unrelated capture session to the running process.
+    need(re.search(r'MACPROVIDER_NATIVE_MTP_SHAPE_CAPTURE_DIR\s*=>\s*'+re.escape(str(p.parent))+r'\s*$',loaded,re.M) is not None and re.search(r'MACPROVIDER_NATIVE_MTP_SHAPE_CAPTURE_SCHEMA\s*=>\s*v2\s*$',loaded,re.M) is not None,'loaded capture environment differs')
+    started=run(['/bin/ps','-p',pid,'-o','lstart=']).strip()
+    need(started and run(['/bin/ps','-p',pid,'-o','uid=']).strip()==str(os.getuid()),'provider process owner differs')
+    from datetime import datetime
+    began=time.mktime(time.strptime(started,'%a %b %d %H:%M:%S %Y'))
+    created=datetime.fromisoformat(snapshot['header']['sample_window_started_at'].replace('Z','+00:00')).timestamp()
+    need(began-2<=created<=time.time()+5,'capture predates the current provider process')
+    opened=run(['/usr/sbin/lsof','-a','-p',pid,'-Fn','--',str(p)])
+    need('n'+str(p) in opened.splitlines(),'current provider does not hold the capture file open')
+    buffer=ctypes.create_string_buffer(4096);libproc=ctypes.CDLL('/usr/lib/libproc.dylib')
+    need(libproc.proc_pidpath(int(pid),buffer,len(buffer))>0 and os.path.realpath(os.fsdecode(buffer.value))==os.path.realpath(str(Path(j['studio']['install_dir'])/'macprovider-cli')),'provider binary process path differs')
+    binary=Path(j['studio']['install_dir'])/'macprovider-cli'
+    need(digest(binary.read_bytes())==j['target']['binary_sha256'],'current provider signed candidate bytes differ')
+    run(['/usr/bin/codesign','--verify','--strict',str(binary)])
+    signed=subprocess.run(['/usr/bin/codesign','-d','--verbose=4',str(binary)],check=True,capture_output=True,text=True,timeout=10)
+    signature=signed.stdout+signed.stderr
+    need(j['target']['cdhash'] in re.findall(r'^CDHash=(.*)$',signature,re.M),'current provider CDHash differs')
+    snapshot['custody_sha256']=digest(json.dumps([expected_sha,[pid,started],snapshot['header_sha256']],separators=(',',':')).encode())
+    return snapshot
+
+def forbidden(v):
+    if isinstance(v,dict):return any('native_mtp' in k.lower() or 'nativemtp' in k.lower() or forbidden(x) for k,x in v.items())
+    if isinstance(v,list):return any(forbidden(x) for x in v)
+    if isinstance(v,str) and v.lstrip().startswith(('{','[')):
+        try:return forbidden(json.loads(v))
+        except ValueError:return True
+    return False
+
+def validate(directory,family,profile,rid,session,release,catalog_digest,repo,sidecar):
+    d=Path(directory);b=load(d/'before.json');a=load(d/'after.json');bc=load(d/'capture-before.json');ac=load(d/'capture-after.json')
+    need(b.get('requests_in_flight')==a.get('requests_in_flight')==0,'overlapping active request')
+    need(a['requests_total']-b['requests_total']==1 and a['errors_total']==b['errors_total'],'exclusive successful completion not proven')
+    for doc in (b,a):
+        need(doc['model']=='zai-org/glm-5.3-flash' and doc['safety_telemetry']['coordinator_session_id']==session and doc['catalog']['release_id']==release and doc['catalog']['digest']==catalog_digest,'provider identity drift')
+        need(doc['continuous_batching']['active'] is True and doc['native_mtp']['enabled'] is True,'CB/native serving lost')
+    n0=b['native_mtp'];n1=a['native_mtp']
+    need(n0['reset_generation']==n1['reset_generation'] and n1['requests_since_reset']-n0['requests_since_reset']==1 and n1['mtp_forwards']>n0['mtp_forwards'],'actual native admission/round absent')
+    need(n0['preoutput_fallbacks']==n1['preoutput_fallbacks'] and n0['postoutput_failures']==n1['postoutput_failures'],'native fallback/failure')
+    need(a['continuous_batching']['scheduler']['shared_forward_calls']>b['continuous_batching']['scheduler']['shared_forward_calls'],'CB forwards absent')
+    need(isinstance(bc.get('custody_sha256'),str) and re.fullmatch('[0-9a-f]{64}',bc['custody_sha256']) and bc['custody_sha256']==ac.get('custody_sha256'),'signed provider capture custody changed')
+    need(bc['header_sha256']==ac['header_sha256'] and bc['file_identity']==ac['file_identity'] and ac['prefix_sha256']==bc['sha256'],'capture custody changed')
+    need(ac['status']['successful_records']==bc['status']['successful_records']+1 and ac['status']['attempts']==bc['status']['attempts']+1 and len(ac['rows'])==1,'capture interval not singular')
+    row=ac['rows'][0]
+    sys.path.insert(0,str(Path(repo)/'scripts'))
+    import native_mtp_journey_evidence as journey
+    sidecar_bytes=Path(sidecar).read_bytes();sidecar_doc=json.loads(sidecar_bytes)
+    indexes=[i for i,e in enumerate(sidecar_doc['entries']) if e.get('model_key')=='zai-org/glm-5.3-flash']
+    need(len(indexes)==1,'unique signed GLM profile required')
+    entry,tuple_sha=journey.validated_sidecar_entry(sidecar_bytes,indexes[0])
+    need(entry['request_feature_profile']=='native_mtp_sampled_text_v1' and row.get('native_mtp_tuple_sha256')==tuple_sha,'actual signed sampled tuple differs')
+    need(ac['header']['build_source_commit']==entry['source_commit'] and ac['header']['build_cdhash']==entry['live_executable_cdhash'],'actual capture build differs from signed candidate')
+    need(row.get('served_model_hash_sha256')==entry['artifact_hash'] and isinstance(row.get('served_weights_manifest_sha256'),str) and re.fullmatch('[0-9a-f]{64}',row['served_weights_manifest_sha256']),'actual captured artifacts differ')
+    need(row.get('observed_effective_path')=='native_mtp' and row.get('observed_selector_eligible') is True and row.get('observed_selector_reason')=='eligible','actual captured native selection absent')
+    need(row.get('served_model_family')=='glm5_next_mtp_v1' and row.get('native_mtp_tuple_sha256') not in (None,'none') and row.get('unknown_request_fields_present') is False and row.get('conversation_key_present') is False,'unexpected captured request controls')
+    need(row.get('sampling_requested') is (profile in ('sampled','tools')) and row.get('requested_temperature')==(1 if profile in ('sampled','tools') else 0) and row.get('requested_top_p')==(.95 if profile in ('sampled','tools') else 1),'sampled controls changed')
+    need(row.get('tool_count')==(1 if profile in ('tools','history') else 0) and row.get('tool_turn_state_present') is (profile=='history'),'tools/history controls changed')
+    need(row.get('stream') is False and row.get('effective_max_output_tokens')==(256 if profile=='tools' else 64),'bounded nonstream proof controls differ')
+    if profile in ('tools','history'):need(row.get('tool_choice_kind')=='auto' and row.get('tool_grammar_required') is False and row.get('parallel_tool_calls_state') in ('true','absent'),'tool controls became forced or constrained')
+    if profile=='history':need(row.get('tool_message_count')==1 and row.get('assistant_tool_call_count')==1,'normalized tool history incomplete')
+    if profile in ('history','reasoning'):need(row.get('effective_reasoning_effort') in ('medium','high'),'reasoning disabled')
+    rows=load(d/'routes.json');need(len(rows)==1,'DB provider interval not singular');route=rows[0]
+    need(route.get('external_request_id')==rid and route.get('provider_assigned_id')==session and route.get('status')==200 and route.get('retried')==0,'actual routed request differs')
+    need(route.get('prompt_tokens')==row.get('prompt_tokens') and route.get('completion_tokens')==row.get('completion_tokens') and row.get('completion_tokens',0)>0,'capture/actual route tokens differ')
+    ledger=load(d/'ledger.json');verdict=load(d/'verdict.json')
+    need(len(ledger)==len(verdict)==1,'actual settlement rows absent/ambiguous')
+    need(not forbidden([rows,ledger,verdict]),'internal native fields entered billing/receipt rows')
+    l=ledger[0];v=verdict[0]
+    need(l['request_id']==v['request_id']==route['request_id'] and l.get('status')==200 and l.get('settled')==1 and l.get('quarantined')==0 and l.get('gross_credits',-1)>=0 and l.get('provider_credits',-1)>=0,'actual ledger not normally settled')
+    need(v.get('closed')==1 and v.get('receipt_present')==1 and v.get('receipt_result')=='valid' and v.get('settlement_outcome')=='verified','actual receipt verification/settlement absent')
+    body=load(d/'proof.json');usage=body.get('usage',{})
+    calls=[]
+    if family=='chat':calls=[x.get('function',{}) for x in body.get('choices',[{}])[0].get('message',{}).get('tool_calls',[])]
+    elif family=='responses':calls=[x for x in body.get('output',[]) if x.get('type')=='function_call']
+    else:calls=[dict(name=x.get('name'),arguments=x.get('input')) for x in body.get('content',[]) if x.get('type')=='tool_use']
+    actual_call=False
+    for call in calls:
+        if call.get('name')!='read_file':continue
+        args=call.get('arguments')
+        if isinstance(args,str):
+            try:args=json.loads(args)
+            except ValueError:continue
+        if isinstance(args,dict) and args.get('path')=='example.swift':actual_call=True
+    if profile=='tools':need(actual_call,'auto tool-call output absent')
+    prompt=usage.get('prompt_tokens',usage.get('input_tokens'));completion=usage.get('completion_tokens',usage.get('output_tokens'))
+    need(prompt==route['prompt_tokens']==l.get('prompt_tokens') and completion==route['completion_tokens']==l.get('completion_tokens'),'buyer usage/billing differ')
+    return dict(family=family,profile=profile,path=PATHS[family],actual_tool_call=actual_call,seed_forwarded=family=='chat',request_id=rid,served_session_sha256=digest(session.encode()),capture_header_sha256=bc['header_sha256'],capture_record_sha256=digest(json.dumps(row,sort_keys=True,separators=(',',':')).encode()),native_tuple_sha256=row['native_mtp_tuple_sha256'],request_log_sha256=digest(json.dumps(rows,sort_keys=True).encode()),settlement_rows_sha256=digest(json.dumps([ledger,verdict],sort_keys=True).encode()),native_admission_delta=1,cb_shared_forward_calls_delta=a['continuous_batching']['scheduler']['shared_forward_calls']-b['continuous_batching']['scheduler']['shared_forward_calls'],mtp_forwards_delta=n1['mtp_forwards']-n0['mtp_forwards'],requests_total_delta=1,actual_native_capture=True,settled=True,no_internal_native_billing_fields=True)
+
+if __name__=='__main__':
+    action=sys.argv[1]
+    if action=='shape':emit(shape(*sys.argv[2:]))
+    elif action=='capture':
+        bound=capture_custody(sys.argv[2],sys.argv[5],sys.argv[6]);value=capture(sys.argv[2],int(sys.argv[3]),int(sys.argv[4]));need(value['header_sha256']==bound['header_sha256'] and value['file_identity']==bound['file_identity'],'capture changed during process binding');value['custody_sha256']=bound['custody_sha256'];emit(value)
+    elif action=='validate':emit(validate(*sys.argv[2:]))
+    elif action=='marker':
+        m=load(sys.argv[2]);need(m.get('expanded_request_mix')=='glm53-expanded-v1','expanded mix marker missing')
+        cells=m.get('expanded_cells',[]);need(len(cells)==12 and {(c['family'],c['profile']) for c in cells}=={(f,p) for f in FAMILIES for p in PROFILES},'expanded mix incomplete')
+        need(all(c.get('actual_native_capture') is True and c.get('settled') is True and c.get('no_internal_native_billing_fields') is True and c.get('native_admission_delta')==1 and c.get('requests_total_delta')==1 and c.get('mtp_forwards_delta',0)>0 and c.get('cb_shared_forward_calls_delta',0)>0 and (c.get('profile')!='tools' or c.get('actual_tool_call') is True) for c in cells),'expanded mix unproven')
+        need(len({c['request_id'] for c in cells})==12 and len({c['served_session_sha256'] for c in cells})==1 and len({c['native_tuple_sha256'] for c in cells})==1,'expanded custody identity differs')
+    else:raise ValueError('unknown closed proof operation')
+PYEXPANDED
+}
+
+# Expanded signed GLM eligibility always receives the closed live proof mix.
+# No arbitrary endpoint/body is accepted and no provider serving mode changes.
+gateway_expanded_required() {
+  case "${PROBE_MODEL:-zai-org/glm-5.3-flash}" in zai-org/glm-5.3-flash) ;; *) return 1 ;; esac
+  python3 - "$CATALOG_TARGET_DIR/native-mtp-admission.json" <<'PY'
+import json,sys
+try:
+ d=json.load(open(sys.argv[1]));rows=[e for e in d['entries'] if e.get('model_key')=='zai-org/glm-5.3-flash']
+ assert len(rows)==1 and rows[0]['request_feature_profile']=='native_mtp_sampled_text_v1'
+except (OSError,ValueError,KeyError,AssertionError):sys.exit(1)
+PY
+}
+
+gateway_expanded_python() { python3 -c "$(gateway_expanded_code)" "$@"; }
+
+gateway_expanded_capture() {
+  local quoted
+  quoted="$(python3 -c 'import shlex,sys; print(shlex.quote(sys.stdin.read()))' <<< "$(gateway_expanded_code)")"
+  studio_ssh "python3 -c $quoted capture '$CATALOG_NATIVE_MTP_CAPTURE_FILE' '$2' '$3' '$expanded_journal' '$expanded_journal_sha'" > "$1"
+}
+
+gateway_expanded_proof() (
+  set -euo pipefail
+  umask 077
+  require_studio_ssh; require_pearl_ssh
+  local capture="${CATALOG_NATIVE_MTP_CAPTURE_FILE:-}" pdb="${PEARL_COORDINATOR_DB:-}"
+  local sqlite="${PEARL_SQLITE3:-/opt/macprovider-tools/sqlite-3.53.2/bin/sqlite3}"
+  [[ "$capture" =~ ^/[A-Za-z0-9._/-]+\.jsonl$ ]] && [[ "$pdb" =~ ^/[A-Za-z0-9._/-]+$ ]] && [[ "$sqlite" =~ ^/[A-Za-z0-9._/-]+$ ]] || refuse "expanded proof requires bounded private capture and coordinator DB paths"
+  local expanded_journal expanded_journal_sha
+  [ -f "${CATALOG_SIGNED_PAIR_PLAN:-}" ] || refuse "expanded proof requires the original committed signed-pair plan"
+  expanded_journal="$(json_field "$CATALOG_SIGNED_PAIR_PLAN" 'd["studio"]["journal_path"]')"
+  expanded_journal_sha="$(shasum -a 256 "$CATALOG_SIGNED_PAIR_PLAN" | awk '{print $1}')"
+  [[ "$expanded_journal" =~ ^/[A-Za-z0-9._/-]+$ ]] || refuse "invalid signed-pair journal path"
+  [ -f "${BUYER_TOKEN_FILE:-}" ] || refuse "BUYER_TOKEN_FILE is required"
+  [ "$(native_mtp_forward_requirement)" = true ] || refuse "expanded GLM proof requires native forwards"
+  # This branch is a mutate step solely for the existing live-ops lock and
+  # independent buyer-runner recovery. Serving/CB/native MTP remain live.
+  [ "${MACPROVIDER_OPS_ENTRYPOINT:-}" = 1 ] && [ -n "${MACPROVIDER_OPS_OWNER:-}" ] || refuse "expanded proof requires catalog ops entrypoint"
+  "$OPS_DIR/live-lock.sh" status > "$OPS_TMP_DIR/expanded-lock.json"
+  python3 - "$OPS_TMP_DIR/expanded-lock.json" "$MACPROVIDER_OPS_OWNER" <<'PYLOCK' || refuse "expanded proof requires the owned gateway_proof live-ops lock"
+import json,sys
+d=json.load(open(sys.argv[1]));l=d.get('lock') or {}
+assert d.get('held') is True and l.get('owner')==sys.argv[2] and l.get('purpose')=='catalog-activate:gateway_proof'
+PYLOCK
+  local nonce
+  nonce="$(python3 -c 'import uuid;print(uuid.uuid4().hex)')" || refuse "expanded proof nonce generation failed"
+  local unit="malibu-expanded-proof-$nonce" evidence_dir="$OPS_STATE_DIR/$OPS_SCOPE/expanded-gateway-attempts/$nonce"
+  mkdir -p "$evidence_dir"
+  chmod 700 "$evidence_dir"
+  restore_expanded_runner() {
+    local rc=$?
+    trap - EXIT HUP INT TERM
+    if ! pearl_ssh 'systemctl start malibu-buyer-runner.service && systemctl is-active --quiet malibu-buyer-runner.service'; then
+      log "expanded proof runner restart unverified; independent recovery remains armed"
+      exit 1
+    fi
+    pearl_ssh "systemctl stop '$unit.timer' '$unit.service' >/dev/null 2>&1 || true" || exit 1
+    exit "$rc"
+  }
+  trap restore_expanded_runner EXIT
+  trap 'exit 130' HUP INT TERM
+  pearl_ssh "systemd-run --unit='$unit' --on-active=2100s --timer-property=AccuracySec=1s /bin/systemctl start malibu-buyer-runner.service >/dev/null && systemctl is-active --quiet '$unit.timer' && systemctl stop malibu-buyer-runner.service"
+  local family profile attempt d beforeseq beforebytes lower sid release digest rid code endpoint poll validated
+  local gw results="$evidence_dir/expanded-cells.jsonl"
+  gw="$(gateway_url)" || refuse "expanded proof gateway resolution failed"
+  [ -n "$gw" ] || refuse "GATEWAY_URL required"
+  : > "$results"
+  for family in chat responses messages; do
+    case "$family" in chat) endpoint=/v1/chat/completions ;; responses) endpoint=/v1/responses ;; messages) endpoint=/v1/messages ;; esac
+    for profile in sampled tools history reasoning; do
+      validated=false
+      for attempt in 1 2; do
+        d="$evidence_dir/expanded-$family-$profile-$attempt"; mkdir -m 700 "$d"
+        read_provider_status "$d/before.json"
+        [ "$(json_field "$d/before.json" 'd["requests_in_flight"]')" = 0 ] || refuse "expanded proof waits for a naturally drained provider; no serving pause"
+        sid="$(json_field "$d/before.json" 'd["safety_telemetry"]["coordinator_session_id"]')"
+        [[ "$sid" =~ ^[A-Za-z0-9._-]+$ ]] || refuse "invalid private provider session"
+        release="$(json_field "$d/before.json" 'd["catalog"]["release_id"]')"
+        digest="$(json_field "$d/before.json" 'd["catalog"]["digest"]')"
+        [ "$release" = "$R" ] || refuse "expanded proof catalog release differs"
+        gateway_expanded_capture "$d/capture-before.json" -1 0
+        beforeseq="$(json_field "$d/capture-before.json" 'd["status"]["successful_records"]')"
+        beforebytes="$(json_field "$d/capture-before.json" 'd["bytes"]')"
+        [ "$(json_field "$d/capture-before.json" 'd["status"]["successful_records"] < d["status"]["max_records"] and d["bytes"] + 32768 < d["status"]["max_bytes"]')" = true ] || refuse "capture has no bounded proof capacity; use existing guarded capture initialization before sending a buyer request"
+        lower="$(pearl_ssh "'$sqlite' -readonly '$pdb' 'SELECT COALESCE(MAX(id),0) FROM request_log;'")"
+        [[ "$lower" =~ ^[0-9]+$ ]] || refuse "request log lower bound unavailable"
+        rid="$(python3 -c 'import uuid;print(uuid.uuid4())')"
+        gateway_expanded_python shape "$family" "$profile" zai-org/glm-5.3-flash "$rid" > "$d/request.json"
+        code="$(printf 'header = "Authorization: Bearer %s"\n' "$(tr -d '\r\n' < "$BUYER_TOKEN_FILE")" |
+          curl -sS --noproxy '*' -m 120 --config - -D "$d/proof.headers" -o "$d/proof.json" -w '%{http_code}' \
+          -H 'Content-Type: application/json' -H "X-Request-ID: $rid" --data-binary "@$d/request.json" "$gw$endpoint")" || code=000
+        [ "$code" = 200 ] || refuse "expanded proof HTTP failed; private attempt retained"
+        [ "$(awk -F': ' 'tolower($1)=="x-request-id"{gsub("\r","",$2);print $2}' "$d/proof.headers" | head -n1)" = "$rid" ] || refuse "expanded gateway request correlation differs"
+        for poll in 1 2 3 4 5 6; do
+          pearl_ssh "'$sqlite' -json -readonly '$pdb' \"SELECT * FROM request_log WHERE id > $lower AND provider_assigned_id = '$sid' ORDER BY id;\"" > "$d/routes.json"
+          pearl_ssh "'$sqlite' -json -readonly '$pdb' \"SELECT l.* FROM ledger_request_credits l JOIN request_log r ON r.request_id=l.request_id WHERE r.external_request_id='$rid' ORDER BY l.id;\"" > "$d/ledger.json"
+          pearl_ssh "'$sqlite' -json -readonly '$pdb' \"SELECT v.* FROM settlement_receipt_verdicts v JOIN request_log r ON r.request_id=v.request_id WHERE r.external_request_id='$rid' ORDER BY v.id;\"" > "$d/verdict.json"
+          [ "$(json_field "$d/verdict.json" 'bool(d) and all(x.get("closed") == 1 for x in d)')" = true ] && break
+          [ "$poll" = 6 ] || sleep 2
+        done
+        # Close custody after the complete DB/settlement bracket, catching other
+        # arrivals that started while asynchronous accounting completed.
+        read_provider_status "$d/after.json"
+        gateway_expanded_capture "$d/capture-after.json" "$beforeseq" "$beforebytes"
+        if gateway_expanded_python validate "$d" "$family" "$profile" "$rid" "$sid" "$release" "$digest" "$REPO_ROOT" "$CATALOG_TARGET_DIR/native-mtp-admission.json" > "$d/validated.json" 2> "$d/validation.err"; then
+          cat "$d/validated.json" >> "$results"; validated=true; break
+        fi
+        # Only naturally absent auto tool output may be repeated. Every paid
+        # failure and its real accounting/capture artifacts remain private.
+        [ "$profile" = tools ] && [ "$attempt" = 1 ] && tail -n1 "$d/validation.err" | grep -q '^ValueError: auto tool-call output absent$' || refuse "expanded request actual path/settlement proof failed; private attempt retained"
+      done
+      [ "$validated" = true ] || refuse "bounded auto tool-call attempts exhausted"
+    done
+  done
+  local metadata
+  metadata="$(python3 - "$results" "$rid" "$release" "$digest" <<'PY'
+import json,sys
+rows=[json.loads(x) for x in open(sys.argv[1])]
+print(json.dumps({'request_id':sys.argv[2],'sent_request_id':sys.argv[2],'served_by_canary':True,'proof_model':'zai-org/glm-5.3-flash','catalog_release_id':sys.argv[3],'catalog_digest':sys.argv[4],'native_mtp_forward_required':True,'mtp_forwards_delta':sum(x['mtp_forwards_delta'] for x in rows),'requests_total_delta':12,'cb_shared_forward_calls_delta':sum(x['cb_shared_forward_calls_delta'] for x in rows),'expanded_request_mix':'glm53-expanded-v1','expanded_cells':rows}))
+PY
+)"
+  mark_done "$OPS_SCOPE" gateway_proof "Expanded signed GLM sampled/tools/history/reasoning: 12 provider-attributed real buyer proofs across Chat/Responses/Messages; actual native captures and settled rows verified" "$metadata"
+)
+
 gateway_proof_marker_valid() {
   local scope="$1" cb_active="$2" require_mtp="$3" expected_model="${4:-}" expected_release="${5:-}" expected_digest="${6:-}" path
   path="$(marker_path "$scope" gateway_proof)"
   [ -f "$path" ] || return 1
   [ -n "$(find "$path" -mmin -1440 2>/dev/null)" ] || return 1
-  python3 - "$path" "$cb_active" "$require_mtp" "$expected_model" "$expected_release" "$expected_digest" <<'PY'
+  python3 - "$path" "$cb_active" "$require_mtp" "$expected_model" "$expected_release" "$expected_digest" <<'PY' || return 1
 import json, pathlib, sys
 path, cb_active, require_mtp, model, release, digest = sys.argv[1:7]
 try:
@@ -991,6 +1608,11 @@ if model == "qwen/qwen3.6-35b-a3b":
     if not isinstance(value, str) or len(value) != 64 or any(c not in "0123456789abcdef" for c in value):
         sys.exit(1)
 PY
+  if gateway_expanded_required; then
+    gateway_expanded_python marker "$path" || return 1
+    [ "$(json_field "$path" 'd.get("catalog_release_id")')" = "$expected_release" ] &&
+      [ "$(json_field "$path" 'd.get("catalog_digest")')" = "$expected_digest" ] || return 1
+  fi
 }
 
 qwen_proof_pending_path() {
@@ -1286,6 +1908,7 @@ proof_moved() {
 # response carries no attribution. Prints status, request id and counter
 # deltas only; the session id itself is never printed.
 gateway_proof() {
+  if gateway_expanded_required; then gateway_expanded_proof; return; fi
   local gw model token_file require_mtp
   gw="$(gateway_url)"
   [ -n "$gw" ] || refuse "GATEWAY_URL is unset"
@@ -1543,10 +2166,13 @@ buc_internal() {
 
 internal() {
   case "$1" in
+    _signed-native-pair) shift; native_binding_context "$(origin_main_sha)" || refuse "native binding proof is invalid"; R="$(json_field "$CATALOG_TARGET_DIR/release.json" 'd["release_id"]')"; OPS_SCOPE="catalog-$R"; signed_pair_internal "$@" ;;
+    _signed-native-pair-reconcile) R="$(json_field "$CATALOG_SIGNED_PAIR_PLAN" 'd["target"]["catalog_release_id"]')"; OPS_SCOPE="catalog-$R"; signed_pair_reconcile ;;
     _qwen-lock-reconcile) reconcile_qwen_restore_lock ;;
     _buyer-ux-conformance) shift; buc_internal "$@" ;;
     _gateway-proof)
-      R="$(json_field "$REPO_ROOT/$AUTOTUNE/release.json" 'd["release_id"]')"
+      native_binding_context "$(origin_main_sha)" || refuse "native binding proof is invalid"
+      R="$(json_field "$CATALOG_TARGET_DIR/release.json" 'd["release_id"]')"
       OPS_SCOPE="catalog-$R"
       gateway_proof ;;
     *) usage >&2; exit 2 ;;

@@ -592,6 +592,81 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
         hot = self._run_case(policy_overrides={"temperature": 3})
         self.assertIn("field_invalid:temperature", hot["matrix_violations"])
 
+    def test_request_profiles_accept_defaults_sampled_and_tools(self):
+        profiles = [
+            {},
+            {"temperature": 1, "top_p": 0.95},
+            {"request_shape": "tools_history_reasoning"},
+            {"temperature": 1, "top_p": 0.95, "request_shape": "tools_history_reasoning",
+             "diagnostic_eligibility_bypass": False},
+        ]
+        for profile in profiles:
+            with self.subTest(profile=profile):
+                result = self._run_case(
+                    policy_overrides=profile,
+                    header_overrides={**analyzer.REQUEST_PROFILE_DEFAULTS, **profile},
+                )
+                self.assertEqual(result["overall_status"], "PASS")
+        # Historical default-policy headers omit every profile field.
+        self.assertEqual(self._run_case()["overall_status"], "PASS")
+
+    def test_request_profile_policy_fields_are_strict(self):
+        invalid = {
+            "top_p": [True, False, 0, -0.1, 1.01, "0.95", None, float("inf"), 10 ** 400],
+            "request_shape": ["tools", "", True, 0, None, []],
+            "diagnostic_eligibility_bypass": [0, 1, "false", None],
+        }
+        for field, values in invalid.items():
+            for value in values:
+                with self.subTest(field=field, value=value):
+                    # Inspect the contract directly for non-finite constants;
+                    # strict JSON loading separately rejects their encoding.
+                    with tempfile.TemporaryDirectory() as tmp:
+                        _, policy_path = self._write_case(Path(tmp))
+                        policy = json.loads(policy_path.read_text())
+                    policy[field] = value
+                    self.assertIn(f"field_invalid:{field}", analyzer._policy_contract_violations(policy))
+        result = self._run_case(policy_overrides={"diagnostic_eligibility_bypass": True})
+        self.assertIn("diagnostic_eligibility_bypass_requires_exploratory", result["matrix_violations"])
+        depth = self._run_case(policy_overrides={"proposal_depth": 2})
+        self.assertIn("methodology_not_frozen:proposal_depth", depth["matrix_violations"])
+
+    def test_request_profile_header_must_match_frozen_policy(self):
+        profile = {"temperature": 1, "top_p": 0.95, "request_shape": "tools_history_reasoning",
+                   "diagnostic_eligibility_bypass": False}
+        header = {**analyzer.REQUEST_PROFILE_DEFAULTS, **profile}
+        for field, value in {"temperature": 0, "top_p": 1, "request_shape": "plain_text",
+                             "diagnostic_eligibility_bypass": True}.items():
+            with self.subTest(field=field):
+                result = self._run_case(policy_overrides=profile, header_overrides={**header, field: value})
+                self.assertEqual(result["reason"], "request_profile_mismatch")
+                self.assertIn(field, result["request_profile_mismatches"])
+        missing = self._run_case(policy_overrides=profile)
+        self.assertEqual(missing["reason"], "request_profile_mismatch")
+        self.assertEqual(set(missing["request_profile_mismatches"]), set(profile))
+
+    def test_legacy_profile_header_cannot_assert_nondefault_or_invalid_values(self):
+        for field, value in {"temperature": 1, "top_p": 0.95, "request_shape": "tools_history_reasoning",
+                             "diagnostic_eligibility_bypass": True}.items():
+            with self.subTest(field=field):
+                result = self._run_case(header_overrides={field: value})
+                self.assertEqual(result["reason"], "request_profile_mismatch")
+        for field, value in {"temperature": False, "top_p": True,
+                             "request_shape": [], "diagnostic_eligibility_bypass": 0}.items():
+            with self.subTest(invalid_field=field):
+                result = self._run_case(header_overrides={field: value})
+                self.assertEqual(result["reason"], "request_profile_mismatch")
+                self.assertIn(f"field_invalid:{field}", result["request_profile_violations"])
+
+    def test_matching_exploratory_profile_never_yields_admission(self):
+        profile = {"temperature": 1, "top_p": 0.95, "request_shape": "tools_history_reasoning",
+                   "diagnostic_eligibility_bypass": True}
+        result = self._run_case(
+            exploratory_policy=True, blocks_written=3, policy_overrides=profile,
+            header_overrides=profile,
+        )
+        self.assertEqual(result["overall_status"], "EXPLORATORY_NO_VERDICT")
+
     def test_v5_sustained_window_must_be_one_run(self):
         with tempfile.TemporaryDirectory() as tmp:
             jsonl_path, policy_path = self._write_case(Path(tmp))
@@ -908,6 +983,7 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
         header_ram_gb=256,
         exploratory_policy=False,
         header_exploratory=None,
+        header_overrides=None,
         policy_overrides=None,
         gated_native_overrides=None,
         order_override=None,
@@ -998,6 +1074,7 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
         ]
         if not legacy:
             records[0]["run_metrics_version"] = 2
+        records[0].update(header_overrides or {})
         record_options = {"legacy": legacy, "legacy_multi": legacy_multi}
         cell_ids = [
             f"s{slots}-p{prompt}-o{output}"

@@ -68,7 +68,7 @@ public struct KVDiskCacheConfig: Equatable, Sendable {
     public static let defaultMaxBytes = 16 * 1024 * 1024 * 1024          // 16 GiB
     public static let defaultMaxEntries = 64
     public static let defaultMaxEntryBytes = 2 * 1024 * 1024 * 1024      // 2 GiB
-    public static let defaultRetentionMinutes = 60
+    public static let defaultRetentionMinutes = 4_320
     public static let defaultStagingMaxBytes = 256 * 1024 * 1024        // 256 MiB
     public static let defaultWriteStagingMaxBytes = 256 * 1024 * 1024   // 256 MiB
     /// Hosts with at least this much unified memory default both staging

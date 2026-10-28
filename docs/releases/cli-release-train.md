@@ -71,6 +71,7 @@ Live fleet target: **1.8.272**. Include the merged changes below in the next CLI
 | PR | Issue | Provider-side change | Status |
 |---|---|---|---|
 | #2158 | #2155 | Malibu.app retires duplicate app/menu-bar instances after updates: launch-time version election, successor readiness acknowledgement, 35-second quit deadline and forced stale-app exit after 40 seconds; newer running app survives an older rollback launch (SPEC-025-R013/R014). | merged (`79c1c81f6`); next CLI/app cut; signed live acceptance pending |
+| #2172 | #2155 | Peer discovery and per-signal identity validation follow the running signed app across activation renames and arbitrary bundle moves, so a legacy app without a handshake reaches the existing 40-second forced-exit deadline. | next CLI/app cut; isolated Studio GUI acceptance PASS; signed release acceptance pending |
 | #2161 | #2160 (closed) | Provider-local `/v1/messages` for Claude Code: tools, thinking, JSON/SSE errors and stop metadata over the shared runtime; local priority, cancellation and unbilled accounting; status capability (SPEC-001-R009/R011, SPEC-025-R015). | merged (`9678fc21d`); next CLI/app cut; signed live acceptance pending |
 | #2145 | #2143 | GLM-5.3-Flash prompt-snapshot prefix-cache reuse on CB rows with native MTP under the signed cached-turns grant (SPEC-024-R005); touches `ServeDecodePath.swift`, so the decode-path digest changes; identity-only native-MTP admission rebind after the cut. | merged (`b1faa879b`); next CLI/app cut |
 | #2149 | #854 | Heartbeat liveness loss requests a socket reconnect while the process and model stay resident; a separate 60-second deadline keeps fatal recovery for stalled local teardown. | merged (`1a058e801`); next CLI/app cut |
@@ -105,6 +106,102 @@ leave exactly one Malibu process and one menu-bar icon, including a hung old
 quit drain and pre-handoff legacy duplicates. Verify that an older rollback
 launch preserves the newer running app and that app handoff keeps the launchd
 provider running. This source merge is not live-update acceptance.
+
+PR #2172 repairs the legacy activation-rename discovery gap in #2158. Isolated
+Studio GUI bundles compiled from the production handoff source passed a legacy
+hung-quit update (41.02 seconds from successor launch), same-version second
+launch and older rollback, each with one surviving process and one logged
+status item. The provider PID stayed unchanged. Untrusted same-bundle and
+similar-name processes survived a 46-second negative check. These ad-hoc test
+bundles use an exact fixture-code allowlist; the unmodified production Team-ID
+gate rejects them. Repeat signed-byte acceptance before release promotion.
+
+
+## Native-MTP campaign release readiness
+
+Related: #2144; campaign PR #2152 remains in progress and is not a merged
+release-train row. Refresh both trains and tags before assigning the next
+provider identity; the campaign currently stages 1.8.274, while 1.8.273 is a
+coordinator runtime identity.
+
+Retain one native row, depth one and four ordinary CB slots. Sampled, tools,
+history and reasoning eligibility requires genuine R005 correctness, applicable
+R015 qualification, representative replay and signed serving evidence. The
+combined production prefix-cache change invalidates the campaign's earlier
+identity-only greedy carry-forward assumption; that record is withdrawn.
+The existing representative-collector deployment depends on a newly qualified
+signed greedy parent, while that qualification requires representative replay.
+This bootstrap dependency remains unresolved; no qualification exemption,
+stale-evidence rebind or MTP-off deployment is authorized by this train record.
+The exploratory goal matrix does not constitute admission qualification.
+
+## Following CLI release — net changes vs 1.8.274 (tracked 2026-10-27)
+
+The 1.8.274 candidate was cut at `f8b6856e5`. It contains #2162 (chat-first
+navigation, merged Models destination, embedded Terminal), but **not** the
+changes below. Cut merged rows in the next candidate after 1.8.274 is promoted (staged as 1.8.276; v1.8.275 is a Pearl runtime tag);
+rows marked `in progress` remain excluded until they merge.
+
+| PR | Issue | Provider-side change | Status |
+|---|---|---|---|
+| [#2169](https://github.com/Augustas11/macprovider/pull/2169) | #2164 | Malibu.app **Create, Agents and Tasks**. Sidebar: Chat, Terminal, Create, Agents, Tasks, Models, Earn. **Agents** run on this Mac's model (local work, SPEC-001-R011) or a Malibu network model on the buyer key; read-only workspace tools plus user-configured stdio MCP servers with per-call approval. **Tasks** schedule agent runs while the app is open (caps, pre-approved tools only, local 0600 transcripts kept out of diagnostics). **Create**: vendored MIT SDXL-Turbo runtime (`MacProviderImageGen`, no new package dependency) behind a loopback-only, local-app-origin `POST /v1/images/generations`. A local creative hold fences customer admission, unloads the LLM, generates, keeps the image model warm for 120 s, then restores the LLM, CB and native MTP exactly as before. Delayed restores re-register with the coordinator, and an operator pause is preserved. SPEC-025 v0.45.0/v0.46.0 (R017–R021); SPEC-001 v1.9.49 (R011/R014). | merged (`0239dd1de`); next CLI/app cut after 1.8.274; signed live acceptance pending |
+| [#2175](https://github.com/Augustas11/macprovider/pull/2175) | [#2171](https://github.com/Augustas11/macprovider/issues/2171) | Recover expired prepared update handoffs after an operator pause/resume supersedes the lifecycle operation; preserve operator pause and existing identity/dead-owner guards. `recover-update` explains helper fencing and enabling disabled LaunchAgents before bootstrap. | merged (`521a40199`); all 28 CI checks green; next CLI/app cut after 1.8.274; signed release acceptance pending |
+| [#2152](https://github.com/Augustas11/macprovider/pull/2152) | #2144 | Native MTP: shared iterator, multi-family gate, multi-entry sidecar; exact GLM sampled/tool-history MTP profiles | merged (`202ff416c`); in the 1.8.276 candidate |
+| [#2163](https://github.com/Augustas11/macprovider/pull/2163) | #2154 | Ternary-Bonsai 2B native loading for 8 GB Macs with bounded cache and CB rows | merged (`b422e0681`); in the 1.8.276 candidate |
+| [#2168](https://github.com/Augustas11/macprovider/pull/2168) | #2153 | Keyed agent-prefix snapshot retention within serving memory headroom | merged (`2aca0f374`); in the 1.8.276 candidate |
+| [#2177](https://github.com/Augustas11/macprovider/pull/2177) | #2153 | Prior model geometry no longer denies cache retention after a swap | merged (`82efc1628`); in the 1.8.276 candidate |
+| [#2179](https://github.com/Augustas11/macprovider/pull/2179) | #2154 | Cross-family fixes from the regression window: GLM cached-turn prefill stride alignment, Qwen3.5 VLM warm-cache anchor, FP32 caches keep ordinary CB with keyed conversations served serially | merged (`e7ccd0826`); in the 1.8.276 candidate |
+| [#2176](https://github.com/Augustas11/macprovider/pull/2176) | #2154 | Official Qwen3.8-27B template identity, reasoning-effort mapping and tool history (catalog activation separate) | merged (`1f61e8943`); in the 1.8.276 candidate |
+| [#2173](https://github.com/Augustas11/macprovider/pull/2173) | #2154 | Native LFM2.5 loader and tool conversations (catalog activation held on the quality gate) | merged (`4d68e41fb`); in the 1.8.276 candidate |
+
+**#2171 recovery tracking:** issue closed at operator request; PR #2175
+merged as `521a40199` on 2026-10-27 after `antfleet-ops` approved the exact
+head `787bc9508` and all 28 checks in
+[CI run 40452783122](https://github.com/Augustas11/macprovider/actions/runs/40452783122)
+passed, including all four Swift test shards, Malibu app recovery tests,
+`spec-index` and `ci-required`. Regression coverage includes coordinator and
+self-update handoffs, operator lifecycle supersession, pause preservation,
+restored startup and refusal guards. Three review lanes passed. SPEC-020 and
+its manifest both record v0.1.30. The fix is merged; signed release and live
+acceptance remain pending in this train.
+Before promotion, verify with the signed candidate on the designated Studio
+that an expired activating marker plus a dead-owner prepared handoff and a
+superseding operator pause recovers without editing lifecycle files, retains
+the pause, and permits restored startup and buyer serving after explicit
+operator resume. Confirm the documented LaunchAgent enable/bootstrap steps.
+No decode-path code changes; reuse existing inference qualification.
+
+**Release impact (#2169):** `ModelRuntime.swift` gained the creative hold and
+restore, so the embedded decode-path digest changes. Token generation and
+output filtering are unchanged. After the cut, rebind the native-MTP admission
+set to the new decode path identity-only (AGENTS.md rule 2; no R015 rerun),
+through `scripts/ops/catalog-activate.sh`, as #2170 did for 1.8.274. #2169
+changes no coordinator or gateway code and needs no Pearl runtime payload.
+
+**#2164 evidence before the cut:**
+- **Goal metric**, measured first on the 16 GB M3 lab Mac (SDXL-Turbo, 4 steps):
+
+  | Size and precision | Time per image | Peak memory |
+  |---|---|---|
+  | 512 px, fp16 | 12.3 s | 10.2 GB |
+  | 512 px, quantized | 17.0 s | 7.4 GB |
+  | 1024 px, fp16 | 29.0 s | 13.3 GB |
+
+- **Real-weights lab end-to-end** on the same Mac (isolated loopback, `--no-join`, Qwen3-8B loaded):
+  - a request without local-app origin got **403**
+  - the first image returned **200 in 177 s**, including the first-use download of 6.94 GB of fp16 weights
+  - the warm second image returned **200 in 5 s**
+  - after the 120 s window and the restore, status matched the pre-hold state and a local chat request answered
+  - CB and native MTP were inactive in that lab config, so restoring them is proven by the ModelRuntime, ContinuousBatch and NativeMTP suites
+- **Studio suites:** 953 app tests; CLI LocalImage 26, ModelRuntime 116, NativeMTP 432, ContinuousBatch 371 and CoordinatorClientTests 260, all with 0 failures.
+- **Audit:** three lanes, three rounds. The final code-lane HIGH was fixed with regression tests.
+
+Before promoting the signed cut, verify with released bytes on a provider that is
+serving paying buyers:
+- One Create image on a 16 GB Mac pauses and then resumes customer serving. The
+  provider re-registers, and CB and native MTP state are unchanged afterwards.
+- One Agents run uses an MCP tool and gets the approval prompt.
+- One scheduled Task fires once.
 
 ## Coding-agent privacy release acceptance — issue 2157
 
@@ -1281,6 +1378,7 @@ mainland-provider installer handoff.
 - **Carry-forward CF-240-E2E (1.8.240, candidate `7c3485159`, run 38064120168):** carry forward CF-238-E2E. 1.8.240 changes no decode-path line: #1956 only gives the native-MTP self-check's ordinary-reference request IDs a per-run nonce, so durable replay claims no longer reject native-MTP admission on every restart after the first (the 1.8.238 `selftest_execution_failed` regression from #1947). Live on the exact signed candidate, 2026-10-10: payload-only swap of the designated Studio provider at 16:07Z, which is a restart; afterwards native MTP is `enabled`, mode `eligible`, reason `active` (it admitted after the restart, which 1.8.238 could not do), CB self-check `granted` 8 slots, startup probe 80.5 tok/s; `canary_smoke --probe` recorded binary 1.8.240, exact compatibility set, coordinator connected, CB active, paged KV attached, self-check grant, plus a gateway proof.
 - **Carry-forward CF-242-E2E (1.8.242, candidate `27ae5dc84`, run 38702366766):** carry forward the pre-merge Studio e2e of the decode-path changes this cut ships, plus CF-240-E2E for everything else. Decode-path lines changed since 1.8.240 and their evidence: #1974 (CB decode and verify rows bounded below the device vector limit; Studio M3 Ultra throughput and isolation evidence in the PR), #1953 (hybrid decode lockstep window 16; Studio M3 Ultra window-1 vs window-16 proof in `docs/research/hybrid-decode-window/`), #1960 (self-check ladder bounded by the queue limit; unit tests), #1966 and #1964 (serial decode stops before hidden post-stop tokens; buyer stop strings stay outside hidden Harmony channels; unit tests). Live on the exact signed candidate, 2026-10-15: signed-tarball swap of an M5 32GB house provider (Llama 3.2 3B), which rejoined buyer-serving; `canary_smoke --probe` recorded binary 1.8.242, exact compatibility set, coordinator connected, paged KV attached, CB policy `live_verified` with local proof passed and no emergency-off, self-check measured `single_row` (the same result this Mac measured on 1.8.240), plus a gateway proof attributed to the canary through the coordinator request log on the serial path. The Studio was unreachable for this cut, so its CB grant on 1.8.242 is read from the fleet after promotion. Privacy code identity admitted from the signed release metadata.
 - **Carry-forward CF-248-E2E (1.8.248, candidate `ea2a0cbbf`, run 38873164595):** carry forward CF-242-E2E for unchanged paths plus the pre-merge evidence of every provider-side change in this cut: #1980 (stricter CB self-check exactness probe; Studio M3 Ultra validation on 2026-10-16: with the production decode row bound the probe grants `verified_k=16`, without it divergent rows are flagged at k=12 and the grant stops at 11), #1986 (cross-provider scoring; real-chip threshold validation on M5, M1 and M3 Ultra, same-chip and cross-chip honest outputs 100% inside the cold prior and above the hard floors, 3-bit/2-bit substitutes detected, zero drift under concurrent load), #2020 (tool selection), #2022 (image input), #2024 (code-bound posture key and Malibu.app attestor), #2025 (fleet KV persistence) and #2026 (provider-local Responses API): each merged with its tests, three-lane audit and green CI. Live on the exact signed candidate, 2026-10-16: signed-tarball swap of the Studio provider (M3 Ultra, macOS 27, Qwen3.6-35B-A3B) at 09:21Z; on startup the #1980 probe re-measured every width 2..16 conformant and kept the 8-slot grant (`verified_k=16`); `canary_smoke --probe` recorded binary 1.8.248, exact compatibility set, coordinator connected, CB active, paged KV attached, self-check granted 8 slots, plus a gateway proof. Privacy code identity admitted from the signed release metadata.
+- **Carry-forward CF-274-E2E (1.8.274, candidate `f8b6856e5`, run 40304491363):** carry forward CF-272-E2E for unchanged kernels, runtime pins (mlx-swift-lm `c8be0f61`) and the release metallib `3d9b4a74…` (byte-identical in the 1.8.274 tarball, so every signed CB policy entry still matches), plus the pre-merge evidence of each provider-side change: #2167 (prompt segment encoding and token-ID output structure, SPEC-018-R009; 643-test Studio Swift run including Metal and real-tokenizer suites, three-lane audit at the 3-round cap, hosted CI green), #2145 (GLM CB prompt snapshots with exact cold/warm parity, Studio GPU parity, three-lane audit 0/0/0), #2165 (managed coding-agent privacy envelope; its coordinator half shipped in Pearl runtime v1.8.275, which this canary requires) and the Malibu app changes in the rows above. The exact signed candidate passed signed-byte verification on 2026-10-26 (checksums `24083588…`; CLI SHA-256 `e677067e…`, CDHash `7df4dfb2…`). The first guarded `scripts/ops/canary-swap.sh` swap rolled back: after model load the candidate's privacy key records named three endpoint families that coordinator v1.8.273 rejected (`unrecognized auth message`), and the provider's auth watchdog exited after three rejections. After Pearl runtime v1.8.275 went live, the second swap passed on the Studio (M3 Ultra, GLM-5.3-Flash, CB live): model loaded in 454 s, buyer-serving at 13:08:44Z, 120 s crash hold passed. `canary_smoke --probe` recorded the exact candidate compatibility identity, coordinator connected, policy `live_verified`, local proof passed, paged KV attached, CB self-check granted, and a provider-attributed paid GLM-5.3-Flash gateway proof with CB active. The embedded decode-path digest moves to `0b9ffe09…`; the native-MTP admission set is rebound identity-only by #2170 (operator ruling; no R015 rerun). No new qualification or benchmark is asserted by this carry-forward.
 - **Carry-forward CF-272-E2E (1.8.272, candidate `28c062427`, run 40146768804):** carry forward CF-270-E2E for unchanged kernels, runtime pins (mlx-swift-lm `c8be0f61`) and the release metallib `3d9b4a74…` (byte-identical in the 1.8.272 tarball, so every signed CB policy entry still matches and no CB rebind is needed), plus the pre-merge evidence of each provider-side change: #2137 (provider WebSocket receive limit 64 MiB, SPEC-001-R012; new Go frame-limit tests on coordinator, buyer, tier2 and gateway, Swift `CoordinatorWebSocketMessageLimitTests` in CI, three-lane audit in 3 rounds; coordinator half live in runtime v1.8.271) and #2138 (buyer cancel stops prompt prefill within one chunk, SPEC-001-R013; `PrefillCancellationTests` and Metal-gated `ConversationPromptSnapshotTests` in CI). #2140 (`28c062427`, coordinator-only) is the release source tip because it landed while the first 1.8.272 signer (run 40142899739, cut at `1dde22532`) was waiting, and that run refused on main drift; it changes no provider byte. The embedded decode-path digest moves to `4d04a3f3…` (#2138 touched `ModelRuntime.swift`), so the native-MTP admission set is rebound identity-only after the release (operator ruling; no R015 rerun). The exact signed candidate passed signed-byte verification on 2026-10-25 (checksums `601bd666…`; CLI SHA-256 `e1145988…`, CDHash `5c068c04…`). The guarded `scripts/ops/canary-swap.sh` swap put it on the Studio (M3 Ultra, DeepSeek V4-Flash, owner concurrency 1, CB off by design: no signed DeepSeek CB entry) with the Pearl buyer runner stopped for the whole window: restarted 01:37:55Z, model loaded in 303 s, buyer-serving at 01:43:10Z, 120 s crash hold passed; installed binary SHA-256 and CDHash equal the signed candidate. After zero in-flight, `canary_smoke --probe` recorded at 01:46:05Z: exact candidate compatibility identity, coordinator connected, policy `live_verified`, local proof passed, paged KV attached, `cb_serial_no_policy_entry`, and a provider-attributed paid DeepSeek V4-Flash gateway proof. No new qualification or benchmark is asserted by this carry-forward.
 - **Carry-forward CF-270-E2E (1.8.270, candidate `48cf25db2`, run 40104446783):** carry forward CF-262-E2E for unchanged kernels and the release metallib `3d9b4a74…` (byte-identical in the 1.8.270 tarball, so every signed CB policy entry still matches), plus the pre-merge evidence of each provider-side change: #2129 (autotune readiness for large candidates and signed candidate aliases; 360 targeted Studio Swift tests, spec governance), #2130 (`none`/`minimal` reasoning effort renders as `low`; 217-test Studio CPU suite, three-lane audit 0/0/0), #2131 (grammar-constrained `tool_choice` required/named and strict `json_schema` for every catalog grammar; Grammar/parser/CB/ToolSelection/BuyerUX/StructuredOutput/DeepseekV4 suites, release build digest match, three-lane audit at the 3-round cap with its one round-3 MEDIUM fixed and regression-tested), #2133 (reasoning round trip on all buyer surfaces, keepalives, prompt-sized first token; gateway/coordinator suites, race tests, three-lane audit), #2134 (DeepSeek V4 CB backend, off without a signed entry, and extend-only prompt snapshots; Studio M3 Ultra two-turn warm/cold parity on DeepSeek V4-Flash serial and GLM-5.3-Flash, three-lane audit 0/0/0 with 2 LOWs carried) and `afd62110e` (test-only clock pin). The runtime pin moves to mlx-swift-lm fork `c8be0f61` (`3.32.3-macprovider.10.5`); the embedded decode-path digest is `6471812e…`, so the native-MTP admission set is rebound identity-only after the release (operator ruling; no R015 rerun). The exact signed candidate passed signed-byte verification on 2026-10-24 (checksums `e4817ce9…`; CLI SHA-256 `9ba7eb5d…`, CDHash `e36d108f…`). The guarded `scripts/ops/canary-swap.sh` swap put it on the Studio (M3 Ultra, DeepSeek V4-Flash `TensorFold/DeepSeek-V4-Flash-0731-MXFP4-MLX`, owner concurrency 1, CB off by design: no signed DeepSeek CB entry); buyer-serving at 16:18:33Z, 120 s crash hold passed. `canary_smoke --probe` recorded at 16:23:02Z: exact candidate compatibility identity, coordinator connected, policy `live_verified`, local proof passed, paged KV attached, `cb_serial_no_policy_entry` (#2135), and a provider-attributed paid DeepSeek V4-Flash gateway proof (HTTP 200, `requests_total` +1, serial). No new qualification or benchmark is asserted by this carry-forward.
 - **Carry-forward CF-262-E2E (1.8.262, candidate `92e39cf5f`, run 39927039135):** carry forward CF-261-E2E for unchanged kernels and the release metallib `3d9b4a74…`, plus the pre-merge evidence of each provider-side change. The runtime pin moves to mlx-swift-lm `baec1724` (tag `3.32.3-macprovider.10.3`), which adds the `deepseek_v4` model and pool cache and makes a value-identical `GLM5Next` constructor refactor. #2109, #2116, #2117 and #2118 (buyer API compatibility: template-driven tool rendering, per-grammar tool-call parsers, reasoning split, capability routing). They carry their three-lane audits; a post-merge Codex re-audit of #2109/#2116 confirmed 8 MEDIUM findings and #2118 fixed them, with its own audit at 0/0/0. #2115 (`glm5_next` 2048-token CB prompt chunks). #2108 (shard groups; fake-Pearl VM acceptance 61 PASS / 0 FAIL / 1 GAP, freeze audit closed at the round cap). #2112 (DeepSeek V4 serving, DSV4 prompt encoder, DSML tool calls and reasoning: freeze audit round 2 at 0/0/0 in all three lanes; the Studio loopback buyer-UX conformance passed twice, the second time on the final build `4912b2b63` on 2026-10-23, with `messages_beta_thinking` deferred to the gateway; GLM-5.3-Flash R015 v3.1 PASS on that build, informational for the identity-only rebind). The exact signed candidate passed signed-byte verification on 2026-10-23. The first guarded `scripts/ops/canary-swap.sh` canary, at 09:59Z, rolled back automatically: the candidate bakes the catalog release `published-2026-10-23-deepseek-v4-flash-listed-v1`, which was not yet live (`rate_card_update_required`). That release was activated through `scripts/ops/catalog-activate.sh` after #2119 added its pricing acknowledgement. The second canary restarted on 1.8.262 at 13:10:14Z, loaded GLM-5.3-Flash in 460 s, became buyer-serving at 13:18:07Z and passed its 120 s crash hold. The installed binary SHA-256 `58745fcd…` matches the signed candidate; CDHash `68c393b4…`. `canary_smoke --probe` recorded: exact candidate compatibility identity, coordinator connected, CB active, paged KV attached, policy `live_verified`, local proof passed, self-check granted 4 slots on metallib `3d9b4a74…`, and a provider-attributed GLM-5.3-Flash gateway proof. The proof accepts `reasoning_content` since `87921a3f8`, because with #2109's reasoning split a 32-token GLM proof is all reasoning. The embedded decode-path digest is `565617…`; the native-MTP admission rebind to this release follows it. No new qualification or benchmark is asserted by this carry-forward.

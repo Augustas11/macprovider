@@ -51,7 +51,7 @@ final class KVDiskTier: @unchecked Sendable {
     init(
         config: KVDiskCacheConfig,
         namespaceID: String,
-        eligibilityTTLSeconds: Int = 900,
+        eligibilityTTLSeconds: Int = 3 * 24 * 60 * 60,
         keychain: any KVKeychain = KVSecItemKeychain(),
         sink: any KVEventSink = KVStderrEventSink()
     ) {
@@ -79,7 +79,7 @@ final class KVDiskTier: @unchecked Sendable {
     /// is not enabled AND there is no provider identity to namespace a store
     /// with — i.e. nothing to activate. Purge/status callers that need a store
     /// even while disabled pass an explicit namespaceID via `init`.
-    static func make(config: KVDiskCacheConfig, providerID: String?, eligibilityTTLSeconds: Int = 900) -> KVDiskTier? {
+    static func make(config: KVDiskCacheConfig, providerID: String?, eligibilityTTLSeconds: Int = 3 * 24 * 60 * 60) -> KVDiskTier? {
         guard let providerID, !providerID.isEmpty else { return nil }
         return KVDiskTier(config: config, namespaceID: providerID, eligibilityTTLSeconds: eligibilityTTLSeconds)
     }

@@ -6,6 +6,7 @@ scripts/cb_release_baselines.py
 scripts/openrouter_pricing_engine.py
 scripts/native_mtp_admission_sidecar.py
 scripts/native_mtp_revocation_slots.py
+scripts/native_mtp_binding_bundle.py
 scripts/sign-catalog.go
 scripts/autotune_window.py
 scripts/buyer_ux_conformance.py

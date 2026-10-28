@@ -2392,15 +2392,10 @@ FROM audit_log`).Scan(&eventType, &providerID, &payloadJSON); err != nil {
 	if !ok {
 		t.Fatalf("loading_window_ms type=%T payload=%#v", payload["loading_window_ms"], payload)
 	}
-	// SPEC-002 v1.3.5 §7.10.2 R-7.10.6 — loading_window_ms is the
-	// wall-clock duration from prior LoadingStartedAt to the
-	// completion heartbeat. Phase 2C stamps both on coordinator clock;
-	// a positive value confirms the prior+completion heartbeats
-	// actually flowed through ApplyHeartbeat. A zero would silently
-	// pass the prior type-only assertion even if the loading-state
-	// pipeline regressed.
-	if loadingWindowMs <= 0 {
-		t.Fatalf("loading_window_ms=%v, want > 0 (positive wall-clock duration)", loadingWindowMs)
+	// The payload stores whole milliseconds. Two valid coordinator-stamped
+	// heartbeats may land in the same millisecond, so zero is representable.
+	if loadingWindowMs < 0 {
+		t.Fatalf("loading_window_ms=%v, want non-negative wall-clock duration", loadingWindowMs)
 	}
 	if _, ok := payload["drain_inflight_count_estimate"]; ok {
 		t.Fatalf("drain_inflight_count_estimate must be omitted: %#v", payload)
@@ -2655,11 +2650,21 @@ func TestProviderAuthV2ReceiptRotationRejectsSecondChangeDuringPreviousGrace(t *
 	secondRotationPubkey := bytes.Repeat([]byte{0x63}, 32)
 	oldConn := authV2ProviderWithReceiptKey(t, h.HTTP.URL, oldPubkey)
 	defer oldConn.Close()
+	// The helper enqueues state_update after auth_response. Wait for that
+	// receipt-key commit before advancing time or starting the next session.
+	eventually(t, func() bool {
+		got := fetchPoolz(t, h.HTTP.URL)
+		return len(got.Pool) == 1 && got.Pool[0].ReceiptPubkey != nil && *got.Pool[0].ReceiptPubkey == base64.StdEncoding.EncodeToString(oldPubkey)
+	})
 
 	rotatedAt := clock.Now().Add(100 * time.Second)
 	clock.Set(rotatedAt)
 	firstRotationConn := authV2ProviderWithReceiptKey(t, h.HTTP.URL, firstRotationPubkey)
 	defer firstRotationConn.Close()
+	eventually(t, func() bool {
+		got := fetchPoolz(t, h.HTTP.URL)
+		return len(got.Pool) == 1 && got.Pool[0].ReceiptPubkey != nil && *got.Pool[0].ReceiptPubkey == base64.StdEncoding.EncodeToString(firstRotationPubkey)
+	})
 
 	secondConn, response := authV2ProviderWithReceiptKeyExpectResponseAndMaybeStateUpdate(t, h.HTTP.URL, secondRotationPubkey, true)
 	defer secondConn.Close()

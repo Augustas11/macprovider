@@ -224,10 +224,41 @@ final class PagedKVCacheStorageTests: XCTestCase {
         XCTAssertThrowsError(try stepped.validateRecordable(table: binding.currentTable))
     }
 
+    func testContiguousMaterializationChecksBuffersWithoutRequiringProbeTableAdvance() throws {
+        try requireMetal()
+        for dtype in [DType.float16, .bfloat16] {
+            let cache = makeCache(blockSizeTokens: 4, maxPhysicalBlocks: 8, reconstructViaGather: false)
+            cache.state = [Self.tokens(start: 0, count: 5, salt: 0).asType(dtype),
+                           Self.tokens(start: 0, count: 5, salt: 1).asType(dtype)]
+            XCTAssertNoThrow(try cache.validateContiguousMaterializationLayout())
+            // A probe has buffers but deliberately retains its empty allocator
+            // table. Ordinary recording still enforces that ownership boundary.
+            XCTAssertThrowsError(try cache.validateRecordable(table: cache.binding.currentTable))
+        }
+    }
+
+    func testContiguousMaterializationRejectsFloat32MixedTypesAndInvalidShapes() throws {
+        try requireMetal()
+        let cache = makeCache(blockSizeTokens: 4, maxPhysicalBlocks: 8, reconstructViaGather: false)
+        XCTAssertThrowsError(try cache.validateContiguousMaterializationLayout())
+        let keys = Self.tokens(start: 0, count: 5, salt: 0)
+        let values = Self.tokens(start: 0, count: 5, salt: 1)
+        cache.state = [keys.asType(.float32), values.asType(.float32)]
+        XCTAssertThrowsError(try cache.validateContiguousMaterializationLayout())
+        cache.state = [keys, values.asType(.bfloat16)]
+        XCTAssertThrowsError(try cache.validateContiguousMaterializationLayout())
+        cache.state = [keys, MLXArray.zeros([1, 3, 5, 3], dtype: .float16)]
+        XCTAssertThrowsError(try cache.validateContiguousMaterializationLayout())
+    }
+
     // MARK: - Helpers
 
     private func requireMetal() throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
+        let bundle = Bundle(for: Self.self)
+        guard PagedKVMetallibGate.defaultMetallibExists()
+            || PagedKVMetallibGate.defaultMetallibExists(
+                bundleURL: bundle.resourceURL, executableURL: bundle.executableURL)
+        else {
             throw XCTSkip("MLX default metallib is unavailable in this test host")
         }
     }

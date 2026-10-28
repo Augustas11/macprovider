@@ -488,6 +488,86 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertEqual(unsplit, [56, 60], "the plan before the fix ran through 36")
     }
 
+    /// Boundary partitions do not spend another round-robin turn or decode
+    /// window; one original group may extend the bounded turn budget.
+    func testResumeBoundaryContinuesBeforeDecodeOrAnotherPromptRow() async throws {
+        let (events, inputs) = try await boundaryContinuationEvents(boundaries: [2, 5, 9])
+        let boundary = try XCTUnwrap(events.firstIndex(of: "prefill:cold:2"))
+        XCTAssertEqual(events[boundary + 1], "prefill:cold:3",
+                       "the next original chunk must run before a peer or decode window")
+        XCTAssertEqual(events[boundary + 2], "prefill:cold:4",
+                       "one original group may extend the turn beyond its remaining three tokens")
+        XCTAssertEqual(events[boundary + 3], "decode:decoding",
+                       "the turn must yield immediately after its one-group extension")
+        let cold = inputs.filter { $0.requestID == "cold" }
+        XCTAssertEqual(cold.map { $0.promptTokenOffset + $0.promptTokens.count }, [2, 5, 9, 12])
+        XCTAssertEqual(cold.map(\.promptTokens.count), [2, 3, 4, 3],
+                       "continuing a turn must never repartition the numerical chunks")
+    }
+
+    func testResumeBoundaryExtendsOnceRatherThanShrinkingTheFollowingChunkToFit() async throws {
+        let (events, inputs) = try await boundaryContinuationEvents(boundaries: [2, 9])
+        let boundary = try XCTUnwrap(events.firstIndex(of: "prefill:cold:2"))
+        XCTAssertEqual(events[boundary + 1], "prefill:cold:7",
+                       "run the unchanged seven-token chunk despite the six-token remainder")
+        XCTAssertEqual(events[boundary + 2], "decode:decoding",
+                       "the turn must yield immediately after its one-group extension")
+        let cold = inputs.filter { $0.requestID == "cold" }
+        XCTAssertEqual(cold.map(\.promptTokens.count), [2, 7, 3])
+        XCTAssertEqual(cold.map(\.promptTokenOffset), [0, 2, 9])
+    }
+
+    func testResumeBoundaryKeepsDefaultSizedChunkInTheSameTurn() async throws {
+        let (events, inputs) = try await boundaryContinuationEvents(
+            boundaries: [2, 2_050], chunkTokens: 2_048, promptCount: 2_052, snapshotAt: 2_050)
+        let boundary = try XCTUnwrap(events.firstIndex(of: "prefill:cold:2"))
+        XCTAssertEqual(events[boundary + 1], "prefill:cold:2048",
+                       "the two-token boundary must not buy another decode window at the production chunk size")
+        XCTAssertEqual(events[boundary + 2], "decode:decoding",
+                       "the 2050-token turn must yield before its final two tokens")
+        let cold = inputs.filter { $0.requestID == "cold" }
+        XCTAssertEqual(cold.map(\.promptTokens.count), [2, 2_048, 2])
+        XCTAssertEqual(cold.map(\.promptTokenOffset), [0, 2, 2_050])
+    }
+
+    private func boundaryContinuationEvents(
+        boundaries: [Int], chunkTokens: Int = 8, promptCount: Int = 12, snapshotAt: Int = 9
+    ) async throws
+        -> (events: [String], inputs: [ContinuousBatchPrefillInput]) {
+        let backend = ScriptedBackend(
+            scripts: ["decoding": Array(repeating: 10, count: 20), "cold": [7], "peer": [8]],
+            promptSnapshotBackend: true)
+        let blocks = max(16, (2 * promptCount + 3) / 4 + 16)
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: blocks)
+        let scheduler = try await makeScheduler(
+            descriptor: Self.descriptor(blockSizeTokens: 4, maxPhysicalBlocks: blocks),
+            maxActiveRows: 3, maxPromptChunkTokens: chunkTokens,
+            // This fixture checks forward order, not delivery backpressure.
+            // Hold all 22 output tokens even if the sink worker is descheduled.
+            tokenDeliveryBufferLimit: 64,
+            maxPrefillRowsPerIteration: 3, maxPrefillTokensPerIteration: chunkTokens,
+            prefillGrouping: .ungrouped, backend: backend, allocator: allocator)
+        let installed = await scheduler.installLabBatchComposition(["decoding", "cold", "peer"])
+        XCTAssertTrue(installed)
+        let decoding = Task {
+            try await scheduler.submit(.init(
+                id: "decoding", conversationKey: "", promptTokens: [1], maxOutputTokens: 20))
+        }
+        let cold = Task {
+            try await scheduler.submit(.init(
+                id: "cold", conversationKey: "conv:cold", promptTokens: Array(1...promptCount),
+                maxOutputTokens: 1, temperature: 0.0,
+                promptSnapshotTokenCount: snapshotAt, promptResumeBoundaries: boundaries))
+        }
+        let peer = Task {
+            try await scheduler.submit(.init(
+                id: "peer", conversationKey: "", promptTokens: Array(1...chunkTokens), maxOutputTokens: 1))
+        }
+        let results = try await [decoding.value, cold.value, peer.value]
+        XCTAssertTrue(results.allSatisfy { $0.terminalStatus == .length })
+        return await (backend.events(), backend.prefillInputs())
+    }
+
     /// A snapshot whose length is not the cached length is never admitted.
     func testPositiveCachedTurnWithAMismatchedSnapshotIsRefused() async throws {
         let backend = ScriptedBackend(scripts: ["bad": [7]], promptSnapshotBackend: true)
@@ -939,7 +1019,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             allocator: allocator,
             contiguousCacheBridge: bridge
         )
-        let conversationCache = ConversationCache(
+        let conversationCache = makeConversationCacheForTest(
             config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900)
         )
         let key = "conv:hybrid"
@@ -1066,7 +1146,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             allocator: allocator,
             contiguousCacheBridge: bridge
         )
-        let conversationCache = ConversationCache(
+        let conversationCache = makeConversationCacheForTest(
             config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900)
         )
         let key = "conv:hybrid-sole-reply-end"
@@ -1140,7 +1220,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             allocator: allocator,
             contiguousCacheBridge: HeadlessRetainedCacheBridge()
         )
-        let conversationCache = ConversationCache(
+        let conversationCache = makeConversationCacheForTest(
             config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900)
         )
         let key = "conv:dense"
@@ -1673,6 +1753,9 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
 
         XCTAssertEqual(replay.settlementDisposition, .nonSettlingReplay)
         XCTAssertNil(replay.retainedCache)
+        try await scheduler.awaitRequestRetirement(requestID: "owner")
+        let freeAfterReplayRetirement = await allocator.freeBlockCount()
+        XCTAssertEqual(freeAfterReplayRetirement, 16)
         try await assertRetainedDiscarded(retained, allocator: allocator, expectedFreeBlockCount: 16)
     }
 
@@ -1795,7 +1878,9 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertEqual(result.terminalStatus, .requestFailed)
         XCTAssertEqual(result.errorCode, "continuous_batching_stream_delivery_timed_out")
         XCTAssertNil(result.retainedCache)
-        try await eventually { await fixture.allocator.freeBlockCount() == 32 }
+        try await fixture.scheduler.awaitRequestRetirement(requestID: "sticky-hit")
+        let freeAfterDeliveryRetirement = await fixture.allocator.freeBlockCount()
+        XCTAssertEqual(freeAfterDeliveryRetirement, 32)
         await sinkGate.open()
     }
 
@@ -1805,7 +1890,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             promptCount: 40,
             retainedTokenCount: 40
         )
-        let conversationCache = ConversationCache(
+        let conversationCache = makeConversationCacheForTest(
             config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900)
         )
         let seedTokens = Array(0..<40).map(Int32.init)
@@ -1919,7 +2004,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         let terminalCommitTargets = await backend.terminalCommitTargets()
         XCTAssertEqual(terminalCommitTargets, ["sticky-hit": 43])
 
-        let conversationCache = ConversationCache(
+        let conversationCache = makeConversationCacheForTest(
             config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900)
         )
         if let retainedCache = result.retainedCache {
@@ -3721,6 +3806,420 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertEqual(mismatch?["retryable"] as? Bool, false)
     }
 
+    func testCallerBoundedAdmissionOutlivesDeadlineAndCancelsCleanly() async throws {
+        let gate = AsyncGate()
+        let backend = ScriptedBackend(scripts: ["held": [1], "queued": [2]], prefillGate: gate)
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 1, queueLimit: 4,
+            queueWaitTimeoutNanoseconds: 30_000_000, backend: backend
+        )
+        let held = Task {
+            try await scheduler.submit(.init(id: "held", conversationKey: "", promptTokens: [1], maxOutputTokens: 1))
+        }
+        try await eventually { await backend.prefillCallCount() == 1 }
+        let queued = Task {
+            try await scheduler.submit(
+                .init(id: "queued", conversationKey: "", promptTokens: [2], maxOutputTokens: 1),
+                admissionWaitPolicy: .callerBounded
+            )
+        }
+        try await eventually { await scheduler.metrics().waitingCount == 1 }
+        try await Task.sleep(nanoseconds: 100_000_000)
+        let waiting = await scheduler.metrics()
+        XCTAssertEqual(waiting.waitingCount, 1)
+        XCTAssertFalse(waiting.diagnostics.contains(.queueWaitTimedOut))
+        queued.cancel()
+        do {
+            _ = try await queued.value
+            XCTFail("expected caller cancellation")
+        } catch is CancellationError {}
+        await gate.open()
+        _ = try await held.value
+        try await scheduler.cancelAndAwaitSelfCheckCleanup(requestIDs: ["queued"])
+        let cleaned = await scheduler.metrics()
+        XCTAssertEqual(cleaned.waitingCount, 0)
+        let quiescent = await scheduler.isQuiescentForNativeMTPProbe()
+        XCTAssertTrue(quiescent)
+    }
+
+    func testAdmissionWaitPolicyBelongsToFirstOwnerInBothOrders() async throws {
+        for callerBoundedOwner in [true, false] {
+            let gate = AsyncGate()
+            let backend = ScriptedBackend(scripts: ["held": [1], "shared": [2]], prefillGate: gate)
+            let scheduler = try await makeScheduler(
+                maxActiveRows: 1, queueLimit: 4,
+                queueWaitTimeoutNanoseconds: 100_000_000, backend: backend
+            )
+            let held = Task {
+                try await scheduler.submit(.init(id: "held", conversationKey: "", promptTokens: [1], maxOutputTokens: 1))
+            }
+            try await eventually { await backend.prefillCallCount() == 1 }
+            let request = ContinuousBatchSchedulerRequest(
+                id: "shared", conversationKey: "", promptTokens: [2], maxOutputTokens: 1
+            )
+            let owner = Task {
+                try await scheduler.submit(request, admissionWaitPolicy: callerBoundedOwner ? .callerBounded : .configuredTimeout)
+            }
+            try await eventually { await scheduler.metrics().waitingCount == 1 }
+            let duplicate = Task {
+                try await scheduler.submit(request, admissionWaitPolicy: callerBoundedOwner ? .configuredTimeout : .callerBounded)
+            }
+            try await eventually { await scheduler.metrics().attachedWaiters == 3 }
+            try await Task.sleep(nanoseconds: 200_000_000)
+            if callerBoundedOwner {
+                let stillWaiting = await scheduler.metrics()
+                XCTAssertEqual(stillWaiting.waitingCount, 1)
+                XCTAssertFalse(stillWaiting.diagnostics.contains(.queueWaitTimedOut))
+                await gate.open()
+                let first = try await owner.value
+                let second = try await duplicate.value
+                XCTAssertEqual(first.generatedTokens, second.generatedTokens)
+                let dispositions = [first.settlementDisposition, second.settlementDisposition]
+                XCTAssertEqual(dispositions.filter { $0 == .eligibleOwner }.count, 1)
+                XCTAssertEqual(dispositions.filter { $0 == .nonSettlingReplay }.count, 1)
+                let calls = await backend.prefillCallCount()
+                XCTAssertEqual(calls, 2, "one prefill per request ID")
+                let replay = try await scheduler.submit(request, admissionWaitPolicy: .configuredTimeout)
+                XCTAssertEqual(replay.settlementDisposition, .nonSettlingReplay)
+                let afterReplay = await backend.prefillCallCount()
+                XCTAssertEqual(afterReplay, calls)
+            } else {
+                for task in [owner, duplicate] {
+                    do {
+                        _ = try await task.value
+                        XCTFail("both waiters must retain the owner's configured deadline")
+                    } catch ContinuousBatchSchedulerError.queueWaitTimedOut {}
+                }
+                let calls = await backend.prefillCallCount()
+                XCTAssertEqual(calls, 1, "expired request must never run")
+                await gate.open()
+            }
+            _ = try await held.value
+            try await scheduler.cancelAndAwaitSelfCheckCleanup(requestIDs: ["shared"])
+        }
+    }
+
+    func testCompleteReturnedFailureHoldsPermitThroughRetainedDiscard() async throws {
+        try await assertReturnedFailureHoldsPermitThroughRetainedDiscard(streamedTokens: 0)
+    }
+
+    func testStreamReturnedFailureHoldsPermitThroughRetainedDiscard() async throws {
+        try await assertReturnedFailureHoldsPermitThroughRetainedDiscard(streamedTokens: 1)
+    }
+
+    private func assertReturnedFailureHoldsPermitThroughRetainedDiscard(streamedTokens: Int) async throws {
+        let discardBridge = BlockingRetirementDiscardBridge()
+        defer { discardBridge.release() }
+        let allocator = try PagedKVBlockAllocator(
+            blockSizeTokens: 4, maxPhysicalBlocks: 16, contiguousCacheBridge: discardBridge
+        )
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 1,
+            tokenDeliveryTimeoutNanoseconds: 20_000_000,
+            backend: ScriptedBackend(scripts: ["returned-failure": [7]]),
+            allocator: allocator,
+            contiguousCacheBridge: HeadlessRetainedCacheBridge()
+        )
+        let gate = AsyncSemaphore(value: 1)
+        let sinkGate = AsyncGate()
+        defer { Task { await sinkGate.open() } }
+        let returned = CompletionFlag()
+        let finished = CompletionFlag()
+        let buyer = Task {
+            defer { Task { await finished.markComplete() } }
+            try await gate.withPermit {
+                let result = try await scheduler.submit(.init(
+                    id: "returned-failure", conversationKey: "conversation-1",
+                    promptTokens: [1], maxOutputTokens: 1
+                ), tokenSink: { _ in await sinkGate.wait() })
+                XCTAssertEqual(result.terminalStatus, .requestFailed)
+                XCTAssertEqual(result.errorCode, "continuous_batching_stream_delivery_timed_out")
+                XCTAssertNil(result.retainedCache, "discard remains scheduler-owned")
+                await returned.markComplete()
+                throw await ModelRuntime.continuousBatchFailureAfterRetirement(
+                    ModelRuntime.terminalFailureError(
+                        code: result.errorCode!, streamedTokens: streamedTokens
+                    ),
+                    scheduler: scheduler, requestID: result.requestID, gate: gate
+                )
+            }
+        }
+        try await eventually { await returned.isComplete && discardBridge.hasEntered }
+        let exclusiveEntered = CompletionFlag()
+        let exclusive = Task {
+            try await gate.withExclusivePermit { await exclusiveEntered.markComplete() }
+        }
+        try await eventually { await gate.queuedWaiterCount() == 1 }
+        buyer.cancel()
+        let finishedBeforeDiscard = await finished.isComplete
+        let exclusiveBeforeDiscard = await exclusiveEntered.isComplete
+        XCTAssertFalse(finishedBeforeDiscard, "returned failure must retain shared admission until discard finishes")
+        XCTAssertFalse(exclusiveBeforeDiscard)
+        discardBridge.release()
+        do {
+            try await buyer.value
+            XCTFail("expected the original terminal failure")
+        } catch let error as APIError {
+            XCTAssertEqual(error.code, "continuous_batching_stream_delivery_timed_out")
+            XCTAssertEqual(error.inferenceRan, streamedTokens > 0)
+        }
+        try await exclusive.value
+        let freeBlocks = await allocator.freeBlockCount()
+        XCTAssertEqual(freeBlocks, 16)
+    }
+
+    func testCompleteReturnedFailureClosesAdmissionWhenRetirementFails() async throws {
+        try await assertReturnedFailureClosesAdmissionWhenRetirementFails(streamedTokens: 0)
+    }
+
+    func testStreamReturnedFailureClosesAdmissionWhenRetirementFails() async throws {
+        try await assertReturnedFailureClosesAdmissionWhenRetirementFails(streamedTokens: 1)
+    }
+
+    private func assertReturnedFailureClosesAdmissionWhenRetirementFails(streamedTokens: Int) async throws {
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 16)
+        let scheduler = ContinuousBatchScheduler(
+            configuration: Self.configuration(maxActiveRows: 1), allocator: allocator,
+            backend: PrefillReleaseSabotagingBackend(allocator: allocator),
+            replayAuthority: TestReplayAuthority()
+        )
+        let gate = AsyncSemaphore(value: 1)
+        let returned = CompletionFlag()
+        let continueFailure = AsyncGate()
+        defer { Task { await continueFailure.open() } }
+        let buyer = Task {
+            try await gate.withPermit {
+                let result = try await scheduler.submit(.init(
+                    id: "cleanup", conversationKey: "", promptTokens: [1, 2], maxOutputTokens: 0
+                ))
+                XCTAssertEqual(result.terminalStatus, .requestFailed)
+                XCTAssertEqual(result.errorCode, "continuous_batching_cleanup_failed")
+                await returned.markComplete()
+                await continueFailure.wait()
+                throw await ModelRuntime.continuousBatchFailureAfterRetirement(
+                    ModelRuntime.terminalFailureError(
+                        code: result.errorCode!, streamedTokens: streamedTokens
+                    ),
+                    scheduler: scheduler, requestID: result.requestID, gate: gate
+                )
+            }
+        }
+        try await eventually { await returned.isComplete }
+        let exclusive = Task { try await gate.withExclusivePermit { XCTFail("cleanup failure must reject queued inference") } }
+        try await eventually { await gate.queuedWaiterCount() == 1 }
+        await continueFailure.open()
+        do {
+            try await buyer.value
+            XCTFail("retirement failure must supersede the returned failure")
+        } catch ContinuousBatchSchedulerError.unsupported(let reason) {
+            XCTAssertEqual(reason, "continuous_batching_scheduler_failed_closed")
+        }
+        do {
+            try await exclusive.value
+            XCTFail("queued inference must fail closed")
+        } catch AsyncSemaphore.AdmissionError.closed {}
+        do {
+            try await gate.withPermit { XCTFail("failed admission must remain closed") }
+            XCTFail("later inference must fail closed")
+        } catch AsyncSemaphore.AdmissionError.closed {}
+    }
+
+    func testCompleteSuccessfulTerminalClosesAdmissionWhenRetainedDiscardFails() async throws {
+        try await assertSuccessfulTerminalRetirement(stream: false, failDiscard: true)
+    }
+
+    func testStreamSuccessfulTerminalClosesAdmissionWhenRetainedDiscardFails() async throws {
+        try await assertSuccessfulTerminalRetirement(stream: true, failDiscard: true)
+    }
+
+    func testHealthySuccessfulTerminalRetirementKeepsAdmissionOpen() async throws {
+        try await assertSuccessfulTerminalRetirement(stream: false, failDiscard: false)
+        try await assertSuccessfulTerminalRetirement(stream: true, failDiscard: false)
+    }
+
+    private func assertSuccessfulTerminalRetirement(stream: Bool, failDiscard: Bool) async throws {
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 16)
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 1, backend: ScriptedBackend(scripts: ["success": [7]]),
+            allocator: allocator, contiguousCacheBridge: HeadlessRetainedCacheBridge()
+        )
+        let gate = AsyncSemaphore(value: 1)
+        let returned = CompletionFlag()
+        let tokenDelivered = CompletionFlag()
+        let continueCleanup = AsyncGate()
+        defer { Task { await continueCleanup.open() } }
+        let buyer = Task {
+            try await gate.withPermit {
+                let result = try await scheduler.submit(.init(
+                    id: "success", conversationKey: "conversation-1",
+                    promptTokens: [1], maxOutputTokens: 1
+                ), tokenSink: { _ in
+                    if stream { await tokenDelivered.markComplete() }
+                })
+                XCTAssertEqual(result.terminalStatus, .length)
+                let retained = try XCTUnwrap(result.retainedCache)
+                XCTAssertFalse(ModelRuntime.retainedCacheIsCommittable(
+                    retained, modelHasRecurrentLayers: true, canonicalTokenCount: 2
+                ), "a missing recurrent checkpoint must take the discard branch")
+                await returned.markComplete()
+                await continueCleanup.wait()
+                if failDiscard {
+                    // Drop delivery acknowledgement only in this fault fixture:
+                    // the real allocator rejects its mismatched owner key.
+                    // cancelRetainedCacheDelivery records rather than throws it.
+                    await scheduler.cancelRetainedCacheDelivery(
+                        retained.withDeliveryID(nil), conversationKey: "wrong-owner"
+                    )
+                } else {
+                    await scheduler.cancelRetainedCacheDelivery(retained, conversationKey: result.conversationKey)
+                }
+                try await ModelRuntime.verifyContinuousBatchRequestRetirement(
+                    scheduler: scheduler, requestID: result.requestID, gate: gate
+                )
+            }
+        }
+        try await eventually { await returned.isComplete }
+        let serialEntered = CompletionFlag()
+        let serial = Task { try await gate.withPermit { await serialEntered.markComplete() } }
+        try await eventually { await gate.queuedWaiterCount() == 1 }
+        let exclusiveEntered = CompletionFlag()
+        let exclusive = Task { try await gate.withExclusivePermit { await exclusiveEntered.markComplete() } }
+        try await eventually { await gate.queuedWaiterCount() == 2 }
+        await continueCleanup.open()
+        if failDiscard {
+            do {
+                try await buyer.value
+                XCTFail("a successful terminal result cannot hide failed cache retirement")
+            } catch ContinuousBatchSchedulerError.unsupported(let reason) {
+                XCTAssertEqual(reason, "continuous_batching_scheduler_failed_closed")
+            }
+            for waiter in [serial, exclusive] {
+                do {
+                    try await waiter.value
+                    XCTFail("shared and exclusive inference must reject failed cleanup")
+                } catch AsyncSemaphore.AdmissionError.closed {}
+            }
+            let serialStarted = await serialEntered.isComplete
+            let exclusiveStarted = await exclusiveEntered.isComplete
+            XCTAssertFalse(serialStarted)
+            XCTAssertFalse(exclusiveStarted)
+            do {
+                try await gate.withPermit { XCTFail("later inference must remain closed") }
+                XCTFail("expected permanently closed admission")
+            } catch AsyncSemaphore.AdmissionError.closed {}
+        } else {
+            try await buyer.value
+            try await serial.value
+            try await exclusive.value
+            let freeBlocks = await allocator.freeBlockCount()
+            XCTAssertEqual(freeBlocks, 16)
+        }
+        let delivered = await tokenDelivered.isComplete
+        XCTAssertEqual(delivered, stream, "stream cleanup failure occurs after buyer-visible output")
+    }
+
+    func testBuyerRetirementWaitsForItsNativeRowButNotAnotherBuyer() async throws {
+        let backend = RequestRetirementGateBackend()
+        let scheduler = try await makeScheduler(maxActiveRows: 2, backend: backend)
+        // Rejected/unsubmitted IDs do not create a synthetic retirement wait.
+        try await scheduler.awaitRequestRetirement(requestID: "never-enqueued")
+        let target = Task {
+            try await scheduler.submit(.init(id: "target", conversationKey: "", promptTokens: [1], maxOutputTokens: 2))
+        }
+        try await eventually { await backend.hasEntered("target") }
+        target.cancel()
+        do {
+            _ = try await target.value
+            XCTFail("expected canceled buyer")
+        } catch is CancellationError {}
+        let finished = CompletionFlag()
+        let retirement = Task.detached {
+            try await scheduler.awaitRequestRetirement(requestID: "target")
+            await finished.markComplete()
+        }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        let prematurelyFinished = await finished.isComplete
+        XCTAssertFalse(prematurelyFinished, "submit cancellation precedes native retirement")
+        let survivor = Task {
+            try await scheduler.submit(.init(id: "survivor", conversationKey: "", promptTokens: [1], maxOutputTokens: 2))
+        }
+        await backend.release("target")
+        try await eventually { await backend.hasEntered("survivor") }
+        try await eventually { await finished.isComplete }
+        try await retirement.value
+        let stillRunning = await scheduler.metrics()
+        XCTAssertEqual(stillRunning.activeDecodeRows, 1)
+        let cancellations = await backend.cancellationCount()
+        XCTAssertEqual(cancellations, 0, "one buyer must not cancel the shared backend")
+        await backend.release("survivor")
+        let result = try await survivor.value
+        XCTAssertEqual(result.terminalStatus, .length)
+    }
+
+    func testCanceledDuplicateRetirementDoesNotCancelSurvivingOwner() async throws {
+        let backend = RequestRetirementGateBackend()
+        let scheduler = try await makeScheduler(maxActiveRows: 1, backend: backend)
+        let request = ContinuousBatchSchedulerRequest(
+            id: "target", conversationKey: "", promptTokens: [1], maxOutputTokens: 2
+        )
+        let owner = Task { try await scheduler.submit(request) }
+        try await eventually { await backend.hasEntered("target") }
+        let duplicate = Task { try await scheduler.submit(request) }
+        try await eventually { await scheduler.metrics().attachedWaiters == 2 }
+        duplicate.cancel()
+        do {
+            _ = try await duplicate.value
+            XCTFail("expected canceled duplicate")
+        } catch is CancellationError {}
+        let finished = CompletionFlag()
+        let retirement = Task.detached {
+            try await scheduler.awaitRequestRetirement(requestID: request.id)
+            await finished.markComplete()
+        }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        let prematurelyFinished = await finished.isComplete
+        XCTAssertFalse(prematurelyFinished)
+        await backend.release("target")
+        let result = try await owner.value
+        try await retirement.value
+        XCTAssertEqual(result.terminalStatus, .length)
+        XCTAssertEqual(result.settlementDisposition, .eligibleOwner)
+        let decodeCalls = await backend.decodeCallCount()
+        let cancellations = await backend.cancellationCount()
+        XCTAssertEqual(decodeCalls, 1)
+        XCTAssertEqual(cancellations, 0)
+    }
+
+    func testSelfCheckCleanupWaitsForNativeCancellationAcknowledgementAndRemainsUsable() async throws {
+        let backend = WedgedCancellationBackend()
+        let scheduler = try await makeScheduler(maxActiveRows: 1, backend: backend)
+        let active = Task {
+            try await scheduler.submit(.init(id: "probe", conversationKey: "", promptTokens: [1], maxOutputTokens: 2))
+        }
+        try await eventually { await backend.decodeCallCount() == 1 }
+        active.cancel()
+        do {
+            _ = try await active.value
+            XCTFail("expected canceled submit")
+        } catch is CancellationError {}
+        let completed = CompletionFlag()
+        let cleanup = Task.detached {
+            try await scheduler.cancelAndAwaitSelfCheckCleanup(requestIDs: ["probe"])
+            await completed.markComplete()
+        }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        let finishedBeforeAcknowledgement = await completed.isComplete
+        let quiescentBeforeAcknowledgement = await scheduler.isQuiescentForNativeMTPProbe()
+        XCTAssertFalse(finishedBeforeAcknowledgement)
+        XCTAssertFalse(quiescentBeforeAcknowledgement)
+        await backend.acknowledgeCancellation()
+        try await cleanup.value
+        let quiescent = await scheduler.isQuiescentForNativeMTPProbe()
+        XCTAssertTrue(quiescent)
+        let next = try await scheduler.submit(.init(id: "next", conversationKey: "", promptTokens: [1], maxOutputTokens: 1))
+        XCTAssertEqual(next.terminalStatus, .length, "cleanup must not permanently drain the scheduler")
+    }
+
     // A request that is admitted to the queue but never reaches a slot inside
     // the deadline is rejected pre-admission: distinct error, non-settling, no
     // retained terminal result, no leaked waiter.
@@ -4978,6 +5477,19 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertEqual(result.errorCode, "continuous_batching_cleanup_failed")
         XCTAssertEqual(result.outputTokens, [])
         XCTAssertEqual(result.snapshot?.modelSHA256, Self.modelSHA)
+
+        do {
+            try await scheduler.awaitRequestRetirement(requestID: "cleanup")
+            XCTFail("buyer retirement must fail closed after native cleanup failure")
+        } catch ContinuousBatchSchedulerError.unsupported(let reason) {
+            XCTAssertEqual(reason, "continuous_batching_scheduler_failed_closed")
+        }
+        do {
+            try await scheduler.cancelAndAwaitSelfCheckCleanup(requestIDs: ["cleanup"])
+            XCTFail("cleanup barrier must not report quiescence after retirement failure")
+        } catch ContinuousBatchSchedulerError.unsupported(let reason) {
+            XCTAssertEqual(reason, "continuous_batching_scheduler_failed_closed")
+        }
 
         do {
             _ = try await scheduler.submit(.init(
@@ -6818,6 +7330,93 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertEqual(committedProposalTokenCount, 0)
     }
 
+    func testNativeMTPConfidenceParksOnlyRejectingRowAndRetriesAfterThirtyTwoCommits() async throws {
+        let gate = AsyncGate()
+        let config = try NativeMTPAdaptationConfig(qualifiedMaximumDepth: 1,
+            decreaseThresholdPPM: 500_000, increaseThresholdPPM: 900_000,
+            maxVerificationPositionsPerCommittedMilli: 4_000)
+        let backend = ScriptedBackend(
+            scripts: ["low": Array(repeating: 8, count: 400), "high": Array(repeating: 7, count: 400),
+                      "ordinary": Array(repeating: 9, count: 400)],
+            prefillTokens: ["low": 8, "high": 7, "ordinary": 9], prefillGate: gate,
+            repeatedNativeProposals: ["low": [6], "high": [7]])
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 512)
+        let scheduler = try await makeScheduler(descriptor: Self.descriptor(maxPhysicalBlocks: 512),
+            maxActiveRows: 3, tokenDeliveryBufferLimit: 512, maxPrefillRowsPerIteration: 3,
+            backend: backend, allocator: allocator)
+        let low = Task { try await scheduler.submit(Self.nativeRequest(id: "low", promptTokens: [1],
+            maxOutputTokens: 130, proposals: [], maximumDepth: 1, adaptationConfig: config)) }
+        try await eventually { await backend.prefillCallCount() == 1 }
+        let high = Task { try await scheduler.submit(Self.nativeRequest(id: "high", promptTokens: [1],
+            maxOutputTokens: 220, proposals: [], maximumDepth: 1, adaptationConfig: config)) }
+        let ordinary = Task { try await scheduler.submit(ContinuousBatchSchedulerRequest(id: "ordinary",
+            conversationKey: "", promptTokens: [1], maxOutputTokens: 220, temperature: 0, topP: 1)) }
+        try await eventually { await scheduler.metrics().waitingCount >= 2 }
+        await gate.open()
+        let lowResult = try await low.value
+        let highResult = try await high.value
+        let ordinaryResult = try await ordinary.value
+        XCTAssertEqual(lowResult.outputTokens, Array(repeating: 8, count: 130))
+        XCTAssertEqual(highResult.outputTokens, Array(repeating: 7, count: 220))
+        XCTAssertEqual(ordinaryResult.outputTokens, Array(repeating: 9, count: 220))
+        let captures = await backend.decodeCaptureFlags()
+        XCTAssertTrue(captures.contains { $0["low"] == true && $0["ordinary"] == false })
+        // A healthy row only takes ordinary for its last output token, when
+        // no proposal plus bonus fits the remaining budget.
+        XCTAssertLessThanOrEqual(captures.filter { $0["high"] != nil }.count, 1)
+        let proposals = await backend.nativeProposalBatches().flatMap { $0 }.filter { $0.requestID == "low" }
+        // First token comes from prefill; 64 rejected commits park this row,
+        // and the next 32 ordinary commits restore its positive-depth probe.
+        XCTAssertTrue(proposals.contains { $0.samplerStep == 65 - 1 })
+        XCTAssertFalse(proposals.contains { (65..<97).contains($0.samplerStep) })
+        XCTAssertTrue(proposals.contains { $0.samplerStep == 97 && $0.maximumProposalDepth == 1 })
+        XCTAssertNotNil(lowResult.nativeMTPCounters)
+        let freeBlocks = await allocator.freeBlockCount()
+        XCTAssertEqual(freeBlocks, 512)
+    }
+
+    func testNativeMTPConfidenceTupleBreakerSurvivesShortRequestsWithoutParkingAnotherTuple() async throws {
+        let config = try NativeMTPAdaptationConfig(qualifiedMaximumDepth: 1,
+            decreaseThresholdPPM: 500_000, increaseThresholdPPM: 900_000,
+            maxVerificationPositionsPerCommittedMilli: 4_000)
+        let ids = (0..<193).map { "short-\($0)" }
+        let backend = ScriptedBackend(scripts: Dictionary(uniqueKeysWithValues: (ids + ["other", "integrity"]).map { ($0, [8, 8, 8]) }),
+            prefillTokens: Dictionary(uniqueKeysWithValues: (ids + ["other", "integrity"]).map { ($0, 8) }),
+            repeatedNativeProposals: Dictionary(uniqueKeysWithValues: (ids + ["other", "integrity"]).map { ($0, [6]) }))
+        let scheduler = try await makeScheduler(maxActiveRows: 1, backend: backend)
+        let fence = Self.nativeMTPFence()
+        for id in ids {
+            if id == "short-64" {
+                // Deliberate R016 rejection fixtures keep their signed depth
+                // even while the buyer tuple is parked in ordinary decode.
+                let probe = try await scheduler.submit(Self.nativeRequest(id: "integrity", promptTokens: [1],
+                    maxOutputTokens: 3, proposals: [], maximumDepth: 1, nativeMTPTupleFence: fence,
+                    adaptationConfig: config, integrityProbe: true))
+                XCTAssertEqual(probe.outputTokens, [8, 8, 8])
+            }
+            let result = try await scheduler.submit(Self.nativeRequest(id: id, promptTokens: [1],
+                maxOutputTokens: 3, proposals: [], maximumDepth: 1, nativeMTPTupleFence: fence,
+                adaptationConfig: config))
+            XCTAssertEqual(result.outputTokens, [8, 8, 8])
+        }
+        let other = try await scheduler.submit(Self.nativeRequest(id: "other", promptTokens: [1],
+            maxOutputTokens: 3, proposals: [], maximumDepth: 1,
+            nativeMTPTupleFence: Self.nativeMTPFence(admission: String(repeating: "b", count: 64)),
+            adaptationConfig: config))
+        XCTAssertEqual(other.outputTokens, [8, 8, 8])
+        let proposed = await backend.nativeProposalBatches().flatMap { $0 }.map(\.requestID)
+        XCTAssertFalse(proposed.contains("short-64"))
+        XCTAssertTrue(proposed.contains("short-128"))
+        XCTAssertFalse(proposed.contains("short-192"))
+        XCTAssertTrue(proposed.contains("other"))
+        XCTAssertTrue(proposed.contains("integrity"))
+        let captures = await backend.decodeCaptureFlags()
+        XCTAssertTrue(captures.contains { $0["short-64"] == true })
+        // A second violating window holds drafting at zero without changing
+        // native request identity, failing output, or suppressing another tuple.
+        XCTAssertTrue(captures.contains { $0["short-192"] == true })
+    }
+
     func testNativeMTPLoadGateHoldsDepthZeroAboveBoundAndRestoresWithHysteresis() async throws {
         let backend = ScriptedBackend(
             scripts: ["gated": Array(100..<160), "ordinary": [31, 32, 33, 34]],
@@ -8326,7 +8925,9 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         completeWindowBytesByDepth: [Int]? = nil,
         directive: NativeMTPAdaptationDirective? = nil,
         nativeMTPTupleFence: NativeMTPTupleFence? = nil,
-        maximumActiveRows: Int = Int.max
+        maximumActiveRows: Int = Int.max,
+        adaptationConfig: NativeMTPAdaptationConfig? = nil,
+        integrityProbe: Bool = false
     ) -> ContinuousBatchSchedulerRequest {
         let bytesByDepth = completeWindowBytesByDepth
             ?? Array(repeating: completeWindowBytes, count: maximumDepth + 1)
@@ -8343,8 +8944,10 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             nativeMTPCompleteWindowBytesByDepth: bytesByDepth,
             nativeMTPMaximumActiveRows: maximumActiveRows,
             nativeMTPTupleFence: nativeMTPTupleFence,
+            nativeMTPIntegrityProbe: integrityProbe,
             nativeMTPProposalTokens: proposals,
-            nativeMTPAdaptationDirective: directive
+            nativeMTPAdaptationDirective: directive,
+            nativeMTPAdaptationConfig: adaptationConfig
         )
     }
 
@@ -8721,6 +9324,44 @@ private actor CompletionFlag {
     }
 }
 
+/// This test's retained terminal owner reaches the allocator bridge after
+/// delivery returns its failure. Holding native discard reproduces the residency
+/// overlap without loading a model or adding a scheduler-only test hook.
+private final class BlockingRetirementDiscardBridge: PagedKVContiguousCacheBridge, @unchecked Sendable {
+    private let condition = NSCondition()
+    private var entered = false
+    private var released = false
+
+    var hasEntered: Bool {
+        condition.lock()
+        defer { condition.unlock() }
+        return entered
+    }
+
+    func materializeContiguousByteCache(
+        handle: PagedKVBlockTableHandle, table: PagedKVBlockTable
+    ) throws -> PagedKVMaterializedByteCache {
+        throw BackendFailure()
+    }
+
+    func discardContiguousCache(handle: PagedKVBlockTableHandle) {
+        condition.lock()
+        defer { condition.unlock() }
+        entered = true
+        let deadline = Date().addingTimeInterval(5)
+        while !released {
+            if !condition.wait(until: deadline) { break }
+        }
+    }
+
+    func release() {
+        condition.lock()
+        released = true
+        condition.broadcast()
+        condition.unlock()
+    }
+}
+
 private actor SecondDecodeGateBackend: ContinuousBatchSchedulerBackend {
     private let secondDecodeGate: AsyncGate
     private var decodeCalls = 0
@@ -9003,6 +9644,7 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
     private let rowFailures: Set<String>
     private let nativeTargetTopTokens: [String: [Int]]
     private let nativeTargetTopTokensByStep: [String: [[Int]]]
+    private let repeatedNativeProposals: [String: [Int]]?
     private let nativeProposalGate: AsyncGate?
     private let nativeProposalError: (any Error)?
     private let nativeProposalErrorAfterCall: Int?
@@ -9070,6 +9712,7 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
         rowFailures: Set<String> = [],
         nativeTargetTopTokens: [String: [Int]] = [:],
         nativeTargetTopTokensByStep: [String: [[Int]]] = [:],
+        repeatedNativeProposals: [String: [Int]]? = nil,
         nativeProposalGate: AsyncGate? = nil,
         nativeProposalError: (any Error)? = nil,
         nativeProposalErrorAfterCall: Int? = nil,
@@ -9102,6 +9745,7 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
         self.rowFailures = rowFailures
         self.nativeTargetTopTokens = nativeTargetTopTokens
         self.nativeTargetTopTokensByStep = nativeTargetTopTokensByStep
+        self.repeatedNativeProposals = repeatedNativeProposals
         self.nativeProposalGate = nativeProposalGate
         self.nativeProposalError = nativeProposalError
         self.nativeProposalErrorAfterCall = nativeProposalErrorAfterCall
@@ -9232,6 +9876,11 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
         }
         if let nativeProposalError {
             throw nativeProposalError
+        }
+        if let repeatedNativeProposals {
+            return Dictionary(uniqueKeysWithValues: rows.map {
+                ($0.requestID, Array((repeatedNativeProposals[$0.requestID] ?? []).prefix($0.maximumProposalDepth)))
+            })
         }
         return nil
     }
@@ -9428,6 +10077,39 @@ private final class RequestFinishRecorder: @unchecked Sendable {
 }
 
 private struct BackendFailure: Error {}
+
+private actor RequestRetirementGateBackend: ContinuousBatchSchedulerBackend {
+    private let target = AsyncGate()
+    private let survivor = AsyncGate()
+    private var entered: Set<String> = []
+    private var decodeCalls = 0
+    private var cancellations = 0
+
+    func prefill(rows: [ContinuousBatchPrefillInput]) async throws -> [ContinuousBatchPrefillOutput] {
+        rows.map {
+            ContinuousBatchPrefillOutput(requestID: $0.requestID, sampledToken: $0.sampleFirstToken ? 1 : nil)
+        }
+    }
+
+    func decode(rows: [ContinuousBatchDecodeInput]) async throws -> [ContinuousBatchDecodeOutcome] {
+        decodeCalls += 1
+        for row in rows {
+            entered.insert(row.requestID)
+            if row.requestID == "target" { await target.wait() }
+            if row.requestID == "survivor" { await survivor.wait() }
+        }
+        return rows.map { .output(ContinuousBatchDecodeOutput(requestID: $0.requestID, token: 2)) }
+    }
+
+    func cancelInFlight() async { cancellations += 1 }
+    func hasEntered(_ requestID: String) -> Bool { entered.contains(requestID) }
+    func decodeCallCount() -> Int { decodeCalls }
+    func cancellationCount() -> Int { cancellations }
+    func release(_ requestID: String) async {
+        if requestID == "target" { await target.open() }
+        if requestID == "survivor" { await survivor.open() }
+    }
+}
 
 private actor WedgedCancellationBackend: ContinuousBatchSchedulerBackend {
     private let decodeRelease = AsyncGate()

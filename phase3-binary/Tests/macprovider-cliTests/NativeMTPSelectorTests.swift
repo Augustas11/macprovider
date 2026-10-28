@@ -186,6 +186,114 @@ final class NativeMTPSelectorTests: XCTestCase {
         }
     }
 
+    func testGLMAdmitsUnconstrainedToolsHistoryAndReasoning() throws {
+        let tools: [[String: Any]] = [["type": "function", "function": [
+            "name": "lookup", "parameters": ["type": "object", "properties": [:]],
+        ]]]
+        let history: [[String: Any]] = [
+            ["role": "user", "content": "Look it up."],
+            ["role": "assistant", "content": "", "reasoning_content": "I should use lookup.",
+             "tool_calls": [["id": "call_lookup0000000001", "type": "function",
+                             "function": ["name": "lookup", "arguments": "{}"]]]],
+            ["role": "tool", "tool_call_id": "call_lookup0000000001", "content": "42"],
+            ["role": "user", "content": "Explain the result."],
+        ]
+        for choice in ["auto", "none"] {
+            let request = try makeRequest(extra: [
+                "tools": tools, "tool_choice": choice, "messages": history,
+                "reasoning_effort": "high", "parallel_tool_calls": true,
+            ])
+            XCTAssertEqual(request.reasoningEffort, "high")
+            XCTAssertEqual(request.messages[1].reasoningContent, "I should use lookup.")
+            XCTAssertEqual(NativeMTPSelector.reason(
+                request: request, mode: .auto,
+                nativeCapability: admittedCapability(supportsSampling: true, family: "glm5_next_mtp_v1")
+            ), .eligible, choice)
+            // A family without this qualification retains the unknown-field gate.
+            XCTAssertEqual(NativeMTPSelector.reason(
+                request: request, mode: .auto,
+                nativeCapability: admittedCapability(family: "qwen3_5_mtp_v1")
+            ), .unknownRequestField, choice)
+        }
+        for parallel in [nil, true] as [Bool?] {
+            var extra: [String: Any] = ["tools": tools]
+            if let parallel { extra["parallel_tool_calls"] = parallel }
+            XCTAssertEqual(NativeMTPSelector.reason(
+                request: try makeRequest(extra: extra), mode: .auto,
+                nativeCapability: admittedCapability(supportsSampling: true, family: "glm5_next_mtp_v1")
+            ), .eligible)
+        }
+        let serialTool = try makeRequest(extra: ["tools": tools, "parallel_tool_calls": false])
+        XCTAssertEqual(NativeMTPSelector.reason(
+            request: serialTool, mode: .auto,
+            nativeCapability: admittedCapability(supportsSampling: true, family: "glm5_next_mtp_v1")
+        ), .tools)
+        let toolsOnly = try makeRequest(extra: ["tools": tools])
+        XCTAssertEqual(NativeMTPSelector.reason(
+            request: toolsOnly, mode: .auto, nativeCapability: admittedCapability()
+        ), .tools)
+    }
+
+    func testGLMGreedyProfileIdentityRebindKeepsPriorShapeScope() throws {
+        let tools: [[String: Any]] = [["type": "function", "function": [
+            "name": "lookup", "parameters": ["type": "object"],
+        ]]]
+        let cases: [([String: Any], NativeMTPSelectorReason)] = [
+            (["tools": tools], .tools),
+            (["tool_choice": "none"], .tools),
+            (["reasoning_effort": "high"], .unknownRequestField),
+            (["reasoning_effort": NSNull()], .unknownRequestField),
+            (["parallel_tool_calls": true], .unknownRequestField),
+            (["parallel_tool_calls": false], .unknownRequestField),
+            (["messages": [
+                ["role": "assistant", "content": "", "tool_calls": [[
+                    "id": "call_lookup0000000001", "type": "function",
+                    "function": ["name": "lookup", "arguments": "{}"],
+                ]]],
+                ["role": "tool", "tool_call_id": "call_lookup0000000001", "content": "42"],
+            ]], .tools),
+        ]
+        for (extra, expected) in cases {
+            XCTAssertEqual(NativeMTPSelector.reason(
+                request: try makeRequest(extra: extra), mode: .auto,
+                nativeCapability: admittedCapability(family: "glm5_next_mtp_v1")
+            ), expected, String(describing: extra.keys))
+        }
+        XCTAssertEqual(NativeMTPSelector.reason(
+            request: try makeRequest(), mode: .auto,
+            nativeCapability: admittedCapability(family: "glm5_next_mtp_v1")
+        ), .eligible, "old greedy plain-text scope remains active")
+        XCTAssertEqual(NativeMTPSelector.reason(
+            request: try makeRequest(extra: ["reasoning_effort": "high"]), mode: .auto,
+            nativeCapability: admittedCapability(supportsSampling: true, family: "glm5_next_mtp_v1")
+        ), .eligible, "sampled signed profile authorizes expanded scope even at temperature zero")
+    }
+
+    func testGLMStillRejectsStatefulToolGrammarAndUnknownTemplateControls() throws {
+        let tools: [[String: Any]] = [["type": "function", "function": [
+            "name": "lookup", "parameters": ["type": "object", "properties": [:]],
+        ]]]
+        let constrainedChoices: [Any] = ["required", ["type": "function", "function": ["name": "lookup"]]]
+        for choice in constrainedChoices {
+            let request = try makeRequest(extra: ["tools": tools, "tool_choice": choice])
+            XCTAssertTrue(GrammarConstraintState.isRequired(request))
+            XCTAssertEqual(NativeMTPSelector.reason(
+                request: request, mode: .auto,
+                nativeCapability: admittedCapability(supportsSampling: true, family: "glm5_next_mtp_v1")
+            ), .tools)
+        }
+        let unknownControls: [[String: Any]] = [
+            ["chat_template_kwargs": ["enable_thinking": true]],
+            ["thinking_budget": 32],
+        ]
+        for extra in unknownControls {
+            XCTAssertEqual(NativeMTPSelector.reason(
+                request: try makeRequest(extra: extra), mode: .auto,
+                nativeCapability: admittedCapability(supportsSampling: true, family: "glm5_next_mtp_v1")
+            ), .unknownRequestField)
+        }
+    }
+
     func testQualifiedCapabilityAdmitsMaxCompletionTokensAlias() throws {
         let request = try makeRequest(extra: ["max_completion_tokens": 64])
         let selection = ModelRuntime.decodePath(
@@ -848,6 +956,26 @@ final class NativeMTPSelectorTests: XCTestCase {
         XCTAssertEqual(downgraded.selection.nativeMTPReason, .capacityAboveNativeBound)
     }
 
+    func testSignedAdaptationConfigurationSurvivesSelectionAndSchedulerSubmission() throws {
+        let config = try NativeMTPAdaptationConfig(qualifiedMaximumDepth: 4,
+            decreaseThresholdPPM: 600_000, increaseThresholdPPM: 850_000,
+            maxVerificationPositionsPerCommittedMilli: 2_000)
+        let request = try makeRequest().withRequestID("adaptation-forwarding")
+        let capability = admittedCapability(maximumProposalDepth: 4, adaptationConfig: config)
+        let admission = NativeMTPRuntimeAdmission.resolve(
+            selection: DecodePathSelection(path: .nativeMTP, nativeMTPReason: .eligible),
+            capability: capability, schedulerSupportsNativeMTP: true)
+        let fence = NativeMTPTupleFence(admissionTupleSHA256: String(repeating: "a", count: 64),
+            servedSnapshotID: "snapshot", targetGeneration: 1)
+        let bound = admission.binding(to: fence)
+        let submission = try ModelRuntime.continuousBatchSubmission(for: request, promptTokens: [1],
+            maxOutputTokens: 128, nativeMTPAdmission: bound)
+        XCTAssertEqual(bound.adaptationConfig, config)
+        XCTAssertEqual(submission.schedulerRequest.nativeMTPAdaptationConfig, config)
+        XCTAssertEqual(submission.schedulerRequest.nativeMTPMaximumProposalDepth, 4)
+        XCTAssertEqual(submission.schedulerRequest.nativeMTPTupleFence, fence)
+    }
+
     private func admittedCapability(
         supportsStreaming: Bool = true,
         supportsNonStreaming: Bool = true,
@@ -857,7 +985,8 @@ final class NativeMTPSelectorTests: XCTestCase {
         maximumCompletionTokens: Int = 4096,
         maximumNativeActiveRows: Int = Int.max,
         supportsSampling: Bool = false,
-        family: String? = nil
+        family: String? = nil,
+        adaptationConfig: NativeMTPAdaptationConfig? = nil
     ) -> NativeMTPCapability {
         NativeMTPCapability(
             admitted: true,
@@ -874,7 +1003,8 @@ final class NativeMTPSelectorTests: XCTestCase {
             maximumCompletionTokens: maximumCompletionTokens,
             family: family,
             maximumNativeActiveRows: maximumNativeActiveRows,
-            supportsSampling: supportsSampling
+            supportsSampling: supportsSampling,
+            adaptationConfig: adaptationConfig
         )
     }
 

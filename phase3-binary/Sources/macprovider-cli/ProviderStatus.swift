@@ -223,6 +223,20 @@ struct ProviderCapacity: Sendable {
     /// to its own ceiling independently.
     static let maxConcurrencyOverrideLimit = 32
 
+    /// The qualified 8 GiB memory tier supports at most three serving rows.
+    /// Zero is unknown; larger tiers retain the ordinary serving bounds.
+    static func memoryTierRowCap(physicalMemoryBytes: UInt64) -> Int? {
+        physicalMemoryBytes > 0 && physicalMemoryBytes <= 8 * 1_073_741_824 ? 3 : nil
+    }
+
+    static func boundedServingRows(
+        _ requested: Int,
+        physicalMemoryBytes: UInt64 = ProcessInfo.processInfo.physicalMemory
+    ) -> Int {
+        min(max(1, requested), maxConcurrencyOverrideLimit,
+            memoryTierRowCap(physicalMemoryBytes: physicalMemoryBytes) ?? maxConcurrencyOverrideLimit)
+    }
+
     let ramGB: Int
     let ramTier: String
     let maxContextTokens: Int

@@ -521,6 +521,28 @@ struct RecurrentStateSlotLayout: Equatable, Sendable {
     let dtype: DType
 }
 
+/// The recurrent state shape is an exact model-topology contract, not a
+/// property inferred from whichever Mamba slots happened to be populated.
+/// Qwen-family Mamba layers retain convolution and SSM state; LFM2.5 short
+/// convolution layers retain only their convolution history.
+enum PagedKVRecurrentStateLayout: Equatable, Sendable {
+    case mambaTwoSlot
+    case lfm25ShortConvOneSlot
+
+    var slotCount: Int {
+        switch self {
+        case .mambaTwoSlot: 2
+        case .lfm25ShortConvOneSlot: 1
+        }
+    }
+
+    /// The one-slot LFM2.5 topology ModelRuntime must verify before passing
+    /// `.lfm25ShortConvOneSlot` into this bridge.
+    static let lfm25ExpectedCacheKinds: [PagedKVSharedForwardBackend.CacheKind] = (0..<40).map {
+        ($0 - 2).isMultiple(of: 4) ? .pagedAttention : .recurrentMamba
+    }
+}
+
 struct PagedKVMTPPackedCacheExerciseResult: Equatable {
     let batchOffsetsBeforeUpdate: [Int]
     let hostBatchOffsetsBeforeUpdate: [Int]?
@@ -553,23 +575,26 @@ struct PagedKVMTPPackedCacheResolutionResult: Equatable {
 }
 
 final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unchecked Sendable {
-    /// `MambaCache` holds exactly two slots (conv state, SSM state).
-    static let mambaCacheSlotCount = 2
+    /// Legacy cache codecs serialize Qwen Mamba state as exactly two slots.
+    /// LFM's typed one-slot layout is selected only through
+    /// `recurrentStateLayout` at the ordinary-CB bridge boundary.
+    static let mambaCacheSlotCount = PagedKVRecurrentStateLayout.mambaTwoSlot.slotCount
 
     /// SPEC-038 AC-26: a checkpoint is installable only if it covers exactly the
-    /// model's recurrent layers, each with the `MambaCache` slot count, and every
+    /// model's recurrent layers, each with its verified state-slot count, and every
     /// slot is a single-row (batch 1) floating-point tensor of rank >= 2. All
     /// recurrent layers of one model share one state layout, so every layer
     /// must match the first; a layer that differs is corrupt or from another
     /// model.
     static func recurrentCheckpointLayoutIsValid(
         _ layouts: [Int: [RecurrentStateSlotLayout]],
-        recurrentLayerIndices: [Int]
+        recurrentLayerIndices: [Int],
+        stateLayout: PagedKVRecurrentStateLayout = .mambaTwoSlot
     ) -> Bool {
         guard let first = recurrentLayerIndices.first,
               Set(layouts.keys) == Set(recurrentLayerIndices),
               let reference = layouts[first],
-              reference.count == mambaCacheSlotCount
+              reference.count == stateLayout.slotCount
         else { return false }
         let slotsValid = reference.allSatisfy { slot in
             slot.shape.count >= 2
@@ -709,6 +734,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     private let maxPhysicalBlocks: Int
     private let poolEpoch: Int
     let cacheKinds: [CacheKind]
+    let recurrentStateLayout: PagedKVRecurrentStateLayout
     private let contiguousCacheBridge: (any PagedKVRuntimeCacheBridge)?
     /// When true, lockstep decode reuses a compiled `[B, 1]` graph over batched
     /// contiguous KV. Tests keep the default off so fake models are not traced.
@@ -871,6 +897,28 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         if start < widths.count { groups.append(start ..< widths.count) }
         return groups
     }
+    /// oMLX fused_batch.advance groups equal draft depths before verification.
+    /// Keep every row's real width and the vector-kernel token cap. MTP-7
+    /// requires oldest-ready rows first, so cohorts stop at a width change
+    /// instead of moving a later compatible row ahead of an older row.
+    static func packedVerifyGroups(widths: [Int], maxTokens: Int) -> [[Int]] {
+        var groups: [[Int]] = []
+        var start = 0
+        while start < widths.count {
+            let width = widths[start]
+            // Division avoids overflow even for an unbounded test limit.
+            // An individually wider row still runs alone, as before.
+            let rowLimit = max(1, maxTokens / max(1, width))
+            var end = start + 1
+            while end < widths.count, end - start < rowLimit, widths[end] == width {
+                end += 1
+            }
+            groups.append(Array(start..<end))
+            start = end
+        }
+        return groups
+    }
+
     private var activeOperations = 0
     private var cancelRequested = false
     /// Set once a ragged prefill forward attended outside
@@ -880,6 +928,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     /// groups take the serial path.
     private var raggedPrefillAttentionBypassed = false
     private var cancellationWaiters: [CheckedContinuation<Void, Never>] = []
+    private var labNativeMTPNumericalOracle: NativeMTPLabNumericalOracle.Binding?
     #if DEBUG || MACPROVIDER_LAB_HARNESS
     private var labNativeMTPStateDigestObserver: NativeMTPStateDigestObserver?
     private var nativeMTPDrafterRecomputeDigests: [String: String] = [:]
@@ -898,6 +947,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         poolEpoch: Int,
         layerCount: Int,
         cacheKinds: [CacheKind]? = nil,
+        recurrentStateLayout: PagedKVRecurrentStateLayout = .mambaTwoSlot,
         contiguousCacheBridge: (any PagedKVRuntimeCacheBridge)? = nil,
         compiledDecode: Bool = false,
         drafterContainer: MTPDrafterContainer? = nil,
@@ -924,6 +974,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         self.maxPhysicalBlocks = maxPhysicalBlocks
         self.poolEpoch = poolEpoch
         self.cacheKinds = resolvedKinds
+        self.recurrentStateLayout = recurrentStateLayout
         self.contiguousCacheBridge = contiguousCacheBridge
         self.compiledDecode = compiledDecode
     }
@@ -938,6 +989,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         descriptor: PagedKVDescriptor,
         layerCount: Int,
         cacheKinds: [CacheKind]? = nil,
+        recurrentStateLayout: PagedKVRecurrentStateLayout = .mambaTwoSlot,
         contiguousCacheBridge: (any PagedKVRuntimeCacheBridge)? = nil,
         compiledDecode: Bool = false,
         drafterContainer: MTPDrafterContainer? = nil,
@@ -952,6 +1004,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             poolEpoch: descriptor.poolEpoch,
             layerCount: layerCount,
             cacheKinds: cacheKinds,
+            recurrentStateLayout: recurrentStateLayout,
             contiguousCacheBridge: contiguousCacheBridge,
             compiledDecode: compiledDecode,
             drafterContainer: drafterContainer,
@@ -1045,6 +1098,12 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                                 throw ContinuousBatchSchedulerError.unsupported(
                                     "continuous_batching_invalid_logits_shape"
                                 )
+                            }
+                            for (index, input) in inputs.enumerated() where input.sampleFirstToken {
+                                self.labCaptureTargetLogits(
+                                    requestID: input.requestID, position: input.samplerStep,
+                                    tokenIDs: [sampledTokens![index]],
+                                    logits: output.logits[index, -1, 0...].reshaped(1, -1))
                             }
                         } else {
                             sampledTokens = nil
@@ -1145,6 +1204,11 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                                 logits: output.logits[0..., -1, 0...],
                                 rows: [Self.samplerRow(input)]
                             ).asArray(Int.self).first
+                            if let sampledToken {
+                                self.labCaptureTargetLogits(
+                                    requestID: input.requestID, position: input.samplerStep,
+                                    tokenIDs: [sampledToken], logits: output.logits[0..., -1, 0...])
+                            }
                         } else {
                             sampledToken = nil
                         }
@@ -1190,6 +1254,11 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             self.clearDecodeSession()
             return outputs
         }
+        // Match serial serving: release reusable temporary buffers after a
+        // whole prompt, while keeping all live row/snapshot arrays intact.
+        // Intermediate boundary chunks retain their existing allocation plan.
+        ModelRuntime.clearMLXBufferCacheAfterPrefill(
+            isFinalChunk: inputs.contains { $0.isFinalChunk })
         CBTrace.logPreparation(
             nil,
             "prefill_group_end rows=\(inputs.count) ids=\(inputs.map(\.requestID).joined(separator: ","))"
@@ -1525,19 +1594,21 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
 
         clearDecodeSession()
         let ordered = inputs.sorted { $0.packedRowIndex < $1.packedRowIndex }
-        let groups = Self.verifyGroups(
+        let groups = Self.packedVerifyGroups(
             widths: ordered.map(\.verifiedInputTokenCount),
             maxTokens: serializesPaddedRows ? 1 : maxVerifyTokensPerForward
         )
         guard groups.count > 1 else {
-            return try await verifyNativeMTPPackedGroup(rows: inputs)
+            return try await verifyNativeMTPPackedGroup(rows: ordered)
         }
         var verifiedRows: [NativeMTPVerifiedRow] = []
         for group in groups {
-            // Each group verifies as its own packed round, rows re-indexed
-            // from 0; results keep the round's packed row indices.
-            let groupInputs = ordered[group].enumerated().map { index, input in
-                ContinuousBatchNativeMTPVerifyInput(
+            // Depth cohorts keep each query's serial width, avoiding both
+            // wasted padding and batch-shape-dependent kernel selection.
+            // Re-index only within the cohort, then restore scheduler identity.
+            let groupInputs = group.enumerated().map { index, originalIndex in
+                let input = ordered[originalIndex]
+                return ContinuousBatchNativeMTPVerifyInput(
                     requestID: input.requestID,
                     currentToken: input.currentToken,
                     proposalTokens: input.proposalTokens,
@@ -1558,7 +1629,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             verifiedRows += groupRows.map { row in
                 NativeMTPVerifiedRow(
                     schedulerRowID: row.schedulerRowID,
-                    packedRowIndex: ordered[group.lowerBound + row.packedRowIndex].packedRowIndex,
+                    packedRowIndex: ordered[group[row.packedRowIndex]].packedRowIndex,
                     proposedTokenIDs: row.proposedTokenIDs,
                     targetTopTokenIDs: row.targetTopTokenIDs
                 )
@@ -1648,6 +1719,18 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                     )
                 }
             )
+            for (row, tokens) in zip(output.rows, topTokenIDsByRow) {
+                let input = inputs[row.map.rowIndex]
+                // Construct this capture view only when the observer is active.
+                self.lock.lock()
+                let binding = self.labNativeMTPNumericalOracle
+                self.lock.unlock()
+                if binding?.oracle.wantsCapture(requestID: input.requestID, position: input.samplerStep) == true {
+                    self.labCaptureTargetLogits(
+                        requestID: input.requestID, position: input.samplerStep, tokenIDs: tokens,
+                        logits: concatenated([row.proposalLogits, row.bonusLogits], axis: 0), speculative: true)
+                }
+            }
             return zip(output.rows, topTokenIDsByRow).map { row, targetTopTokenIDs in
                 let input = inputs[row.map.rowIndex]
                 return NativeMTPVerifiedRow(
@@ -1697,7 +1780,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                     inputs: inputs,
                     transactions: [:]
                 )
-                #endif
+                    #endif
                 return
             }
             let transactions = try self.consumeNativeMTPPendingTransactions(for: inputs)
@@ -1774,6 +1857,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             for (input, _) in committing {
                 self.invalidateDecodeSession(containing: input.requestID)
             }
+            self.labResolveNumericalOracleRound(inputs)
             #if DEBUG || MACPROVIDER_LAB_HARNESS
             try self.recordNativeMTPStateDigest(
                 phase: .afterFinalize,
@@ -1784,6 +1868,44 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             #endif
         }
     }
+
+    func installLabNativeMTPNumericalOracle(_ binding: NativeMTPLabNumericalOracle.Binding?) {
+        lock.lock()
+        labNativeMTPNumericalOracle = binding
+        lock.unlock()
+    }
+
+    private func labCaptureTargetLogits(
+        requestID: String, position: Int, tokenIDs: [Int], logits: MLXArray,
+        speculative: Bool = false
+    ) {
+        lock.lock()
+        let binding = labNativeMTPNumericalOracle
+        lock.unlock()
+        guard let binding, binding.oracle.wantsCapture(requestID: requestID, position: position) else { return }
+        for (offset, token) in tokenIDs.enumerated() {
+            let step = position + offset
+            guard binding.oracle.wantsCapture(requestID: requestID, position: step) else { break }
+            // No extra evaluation, transfer or graph retention unless installed.
+            let vector = logits[offset].asType(.float32).asArray(Float.self)
+            binding.oracle.capture(
+                role: binding.role, requestID: requestID, position: step,
+                tokenID: token, logits: vector, speculative: speculative)
+        }
+    }
+
+    private func labResolveNumericalOracleRound(_ inputs: [ContinuousBatchNativeMTPFinalizeInput]) {
+        lock.lock()
+        let binding = labNativeMTPNumericalOracle
+        lock.unlock()
+        guard let binding, binding.role == .native else { return }
+        for input in inputs {
+            binding.oracle.resolveNativeRound(
+                requestID: input.requestID,
+                acceptedTokenIDs: input.shouldCommit ? input.acceptedTokenIDs : nil)
+        }
+    }
+
 
     #if DEBUG || MACPROVIDER_LAB_HARNESS
     func installLabNativeMTPStateDigestObserver(_ observer: NativeMTPStateDigestObserver?) {
@@ -1875,7 +1997,11 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         let layouts = recurrentCheckpoint.states.mapValues { slots in
             slots.map { RecurrentStateSlotLayout(shape: $0.shape, dtype: $0.dtype) }
         }
-        guard Self.recurrentCheckpointLayoutIsValid(layouts, recurrentLayerIndices: recurrentIndices) else {
+        guard Self.recurrentCheckpointLayoutIsValid(
+            layouts,
+            recurrentLayerIndices: recurrentIndices,
+            stateLayout: recurrentStateLayout
+        ) else {
             throw unavailable
         }
         var attention = handoff.caches.makeIterator()
@@ -2351,7 +2477,10 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 initialOffset: $0.committedKVTokenCount
             )
         }
-        if supportedInputs.count > 1 && rowStates.contains(where: { $0.state != nil }) {
+        let invariantStateModel = model as? any BatchInvariantDecodeStateModel
+        let hasBatchedState = supportedInputs.count > 1
+            && (invariantStateModel != nil || rowStates.contains(where: { $0.state != nil }))
+        if hasBatchedState && invariantStateModel == nil {
             return supportedInputs.map { ContinuousBatchDecodeOutcome.rowFailure(requestID: $0.requestID) }
         }
         // Native rows riding this forward need the target hidden state of
@@ -2360,8 +2489,12 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         let captureIndices = drafterContainer == nil
             ? []
             : supportedInputs.indices.filter { supportedInputs[$0].captureNativeMTPDrafterColumns }
-        if !captureIndices.isEmpty && rowStates.contains(where: { $0.state != nil }) {
+        if !captureIndices.isEmpty && (hasBatchedState || rowStates.contains(where: { $0.state != nil })) {
             return supportedInputs.map { ContinuousBatchDecodeOutcome.rowFailure(requestID: $0.requestID) }
+        }
+        func discardAdvancedRows() {
+            storeDecodeSession(nil)
+            for input in supportedInputs { removeRowState(for: input.requestID) }
         }
         var capturedColumns: [Int: [(token: Int, hidden: MLXArray)]] = [:]
 
@@ -2382,6 +2515,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         }
         let cachesAsKV = batchedCaches.map(\.cache)
         let canCompile = compiledDecode
+            && !hasBatchedState
             && captureIndices.isEmpty
             && cacheKinds.allSatisfy({ $0 == .pagedAttention })
             && rowStates.allSatisfy({ $0.state == nil })
@@ -2435,6 +2569,12 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                     throw ContinuousBatchSchedulerError.unsupported("continuous_batching_invalid_logits_shape")
                 }
                 for index in supportedInputs.indices {
+                    labCaptureTargetLogits(
+                        requestID: supportedInputs[index].requestID,
+                        position: supportedInputs[index].samplerStep + stepIndex,
+                        tokenIDs: [stepTokens[index]], logits: logits[index, -1, 0...].reshaped(1, -1))
+                }
+                for index in supportedInputs.indices {
                     collected[index].append(stepTokens[index])
                 }
                 try throwIfCancelRequested()
@@ -2461,7 +2601,19 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 let tokenInput = MLXArray(currentTokens.map(Int32.init)).reshaped([supportedInputs.count, 1])
                 let text = LMInput.Text(tokens: tokenInput)
                 let stepState: LMOutput.State?
-                if captureIndices.isEmpty {
+                if hasBatchedState, let invariantStateModel {
+                    do {
+                        stepState = try invariantStateModel.batchDecodeState(
+                            rowStates.map(\.state),
+                            cacheOffsets: supportedInputs.map { $0.committedKVTokenCount + stepIndex }
+                        )
+                    } catch {
+                        // A later merge failure must not leave an earlier step's
+                        // advanced cache available for a retry at the old offset.
+                        if stepIndex > 0 { discardAdvancedRows() }
+                        return supportedInputs.map { .rowFailure(requestID: $0.requestID) }
+                    }
+                } else if captureIndices.isEmpty {
                     stepState = supportedInputs.count == 1 ? rowStates[0].state : nil
                 } else {
                     var emit = LMOutput.State()
@@ -2470,6 +2622,16 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 }
                 let output = withPreparedCache(cachesAsKV, lengths: text.sequenceLengths) {
                     model(text, cache: cachesAsKV, state: stepState)
+                }
+                if hasBatchedState, let invariantStateModel, let stepState {
+                    do {
+                        try invariantStateModel.validateBatchDecodeState(output.state, against: stepState)
+                    } catch {
+                        // Forward already mutated the batch cache. Publish no
+                        // tokens, and never reuse that cache with retained state.
+                        discardAdvancedRows()
+                        return supportedInputs.map { .rowFailure(requestID: $0.requestID) }
+                    }
                 }
                 if notePaddedAttentionBypass(batchedCaches, phase: "decode") {
                     // Fail closed before sampling; the rows' caches already
@@ -2488,6 +2650,12 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 guard stepSampled.count == supportedInputs.count else {
                     throw ContinuousBatchSchedulerError.unsupported("continuous_batching_invalid_logits_shape")
                 }
+                for index in supportedInputs.indices {
+                    labCaptureTargetLogits(
+                        requestID: supportedInputs[index].requestID,
+                        position: supportedInputs[index].samplerStep + stepIndex,
+                        tokenIDs: [stepSampled[index]], logits: output.logits[index, -1, 0...].reshaped(1, -1))
+                }
                 if !captureIndices.isEmpty {
                     guard let hidden = output.state?[mtpLastHiddenStatesKey],
                           hidden.ndim == 3,
@@ -2504,7 +2672,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                     }
                 } else if supportedInputs.count == 1 {
                     rowStates[0].state = output.state
-                } else if output.state != nil {
+                } else if !hasBatchedState && output.state != nil {
                     return supportedInputs.map { ContinuousBatchDecodeOutcome.rowFailure(requestID: $0.requestID) }
                 }
                 for index in supportedInputs.indices {
@@ -3951,9 +4119,10 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     func installRowStateForTest(
         caches: [KVCache],
         requestID: String,
-        binding: PagedKVStorageBinding
+        binding: PagedKVStorageBinding,
+        state: LMOutput.State? = nil
     ) throws {
-        try setRowState(RowState(caches: caches, state: nil), for: requestID, binding: binding)
+        try setRowState(RowState(caches: caches, state: state), for: requestID, binding: binding)
     }
 
     func lockstepInnerStateNonEmptyForTest() -> Bool {
@@ -4281,7 +4450,9 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     ) throws -> [PagedKVSharedLayerBatch] {
         guard let layerCount = rowCaches.first?.count,
               rowCaches.allSatisfy({ $0.count == layerCount }),
-              layerCount == cacheKinds.count
+              layerCount == cacheKinds.count,
+              recurrentStateLayout != .lfm25ShortConvOneSlot
+                || cacheKinds == PagedKVRecurrentStateLayout.lfm25ExpectedCacheKinds
         else {
             throw ContinuousBatchSchedulerError.unsupported("continuous_batching_invalid_cache_layout")
         }
@@ -4338,11 +4509,11 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 }
                 guard nativeMTP else {
                     let cache = MambaCache()
-                    try Self.packMambaRows(rows, into: cache)
+                    try Self.packMambaRows(rows, into: cache, stateLayout: recurrentStateLayout)
                     return PagedKVSharedLayerBatch(
                         cache: cache,
                         validateBatchStateClosure: {
-                            guard cache.state.count == 2,
+                            guard cache.state.count == self.recurrentStateLayout.slotCount,
                                   cache.state.allSatisfy({ $0.ndim >= 1 && $0.dim(0) == rows.count })
                             else {
                                 throw ContinuousBatchSchedulerError.unsupported(
@@ -4350,16 +4521,21 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                                 )
                             }
                         },
-                        syncRowsFromBatchClosure: { Self.syncMambaRows(from: cache, into: rows) },
+                        syncRowsFromBatchClosure: {
+                            Self.syncMambaRows(from: cache, into: rows, stateLayout: self.recurrentStateLayout)
+                        },
                         writebackCompiledInnerStateClosure: { compiledState, targets in
-                            guard targets.count == rows.count else {
+                            guard targets.count == rows.count,
+                                  compiledState.count == self.recurrentStateLayout.slotCount,
+                                  compiledState.allSatisfy({ $0.ndim >= 1 && $0.dim(0) == rows.count })
+                            else {
                                 throw ContinuousBatchSchedulerError.unsupported(
-                                    "continuous_batching_invalid_cache_layout"
+                                    "continuous_batching_invalid_mamba_state"
                                 )
                             }
                             cache.state = compiledState
-                            Self.syncMambaRows(from: cache, into: rows)
-                            try Self.packMambaRows(rows, into: cache)
+                            Self.syncMambaRows(from: cache, into: rows, stateLayout: self.recurrentStateLayout)
+                            try Self.packMambaRows(rows, into: cache, stateLayout: self.recurrentStateLayout)
                         },
                         pendingMTPResolutionsClosure: {
                             throw ContinuousBatchSchedulerError.unsupported(
@@ -4367,6 +4543,9 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                             )
                         }
                     )
+                }
+                guard recurrentStateLayout == .mambaTwoSlot else {
+                    throw ContinuousBatchSchedulerError.unsupported("native_mtp_unsupported_recurrent_layout")
                 }
                 let cache = try MTPPackedMambaBatchCache(rowCaches: rows)
                 return PagedKVSharedLayerBatch(
@@ -4407,16 +4586,22 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         return caches.lazy.compactMap { ($0 as? PagedMLALatentCache)?.binding.handle }.first
     }
 
-    private static func packMambaRows(_ rows: [MambaCache], into batch: MambaCache) throws {
+    static func packMambaRows(
+        _ rows: [MambaCache],
+        into batch: MambaCache,
+        stateLayout: PagedKVRecurrentStateLayout = .mambaTwoSlot
+    ) throws {
         let rowStates = rows.map(\.state)
-        let slotCount = rowStates.map(\.count).max() ?? 0
-        guard slotCount > 0 else { return }
-        for slot in 0 ..< slotCount {
+        guard rowStates.allSatisfy({ $0.isEmpty || $0.count == stateLayout.slotCount }) else {
+            throw ContinuousBatchSchedulerError.unsupported("continuous_batching_invalid_mamba_state")
+        }
+        guard rowStates.contains(where: { !$0.isEmpty }) else { return }
+        for slot in 0 ..< stateLayout.slotCount {
             guard let first = rowStates.first(where: { $0.indices.contains(slot) })?[slot] else {
                 throw ContinuousBatchSchedulerError.unsupported("continuous_batching_invalid_cache_layout")
             }
             // A one-token joining row has not run prefill, so its recurrent
-            // slots are empty. Qwen35 initializes those slots with zeros.
+            // state is empty. Its missing verified slots receive zero state.
             let slotArrays = rowStates.map { states in
                 states.indices.contains(slot)
                     ? states[slot]
@@ -4435,9 +4620,13 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         }
     }
 
-    private static func syncMambaRows(from batch: MambaCache, into rows: [MambaCache]) {
+    static func syncMambaRows(
+        from batch: MambaCache,
+        into rows: [MambaCache],
+        stateLayout: PagedKVRecurrentStateLayout = .mambaTwoSlot
+    ) {
         let batchedState = batch.state
-        guard batchedState.count == 2,
+        guard batchedState.count == stateLayout.slotCount,
               batchedState.allSatisfy({ $0.ndim >= 1 && $0.dim(0) == rows.count })
         else { return }
         for rowIndex in rows.indices {

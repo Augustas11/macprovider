@@ -1,13 +1,13 @@
 import ArgumentParser
+import CoreFoundation
 import CryptoKit
 import Darwin
 import Foundation
 import MacProviderCore
 import MLXLMCommon
 
-// Lab-only: compiled out of plain release builds, command type and
-// registration included, so a production binary carries no lab surface.
-#if DEBUG || MACPROVIDER_LAB_HARNESS
+// Measurement helpers are shared with isolated signed qualification.
+// Legacy top-level command registration remains LAB-only.
 struct NativeMTPBenchCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "native-mtp-bench",
@@ -22,7 +22,10 @@ struct NativeMTPBenchCommand: AsyncParsableCommand {
     var modelID: String = nativeMTPHardwareDefaultModelID
 
     @Option(name: .customLong("policy"), help: "Frozen preregistration policy JSON.")
-    var policyPath: String
+    var policyPath: String?
+
+    @Option(name: .customLong("policy-list"), parsing: .upToNextOption, help: "Exploratory policy files run sequentially in this process; outputs are --out.policy-N.jsonl.")
+    var policyList: [String] = []
 
     @Option(name: .customLong("out"), help: "Output JSONL path.")
     var outPath: String
@@ -54,51 +57,79 @@ struct NativeMTPBenchCommand: AsyncParsableCommand {
     )
     var validateOnly = false
 
+    @Flag(
+        name: .customLong("validate-policy-only"),
+        help: "--validate-only without any MLX/Metal use, safe beside a serving provider. Requires --identity-cache."
+    )
+    var validatePolicyOnly = false
+
+    @Option(
+        name: .customLong("identity-cache"),
+        help: "--validate-policy-only: per-file SHA-256 cache keyed by the full file stamp (inode, size, mtime, ctime); a miss is read outside the page cache."
+    )
+    var identityCachePath: String?
+
     func run() async throws {
         let environment = ProcessInfo.processInfo.environment
         guard environment["MACPROVIDER_NATIVE_MTP_E2E"] == "1" else {
             FileHandle.standardError.write(Data("native-mtp-bench: set MACPROVIDER_NATIVE_MTP_E2E=1 on the Mac Studio\n".utf8))
             throw ExitCode(2)
         }
-        // Before any MLX device use (the host check samples the GPU): the
-        // family's command-buffer budget and cache limit, as serve and the
-        // journey harness set them.
-        NativeMTPHardwareE2ERunner.applyServeProcessSetup(rootPath: root)
+        guard validatePolicyOnly == (identityCachePath != nil), !(validatePolicyOnly && validateOnly) else {
+            throw ValidationError("--validate-policy-only requires --identity-cache and excludes --validate-only")
+        }
+        // Before any MLX device use: the family's command-buffer budget and
+        // cache limit, as serve and the journey harness set them. The
+        // policy-only check never touches MLX, so it skips this.
         try NativeMTPHardwareE2ERunner.requireStudioHost()
+        if !validatePolicyOnly {
+            NativeMTPHardwareE2ERunner.applyServeProcessSetup(rootPath: root)
+        }
         guard providerCommit.range(of: #"^[0-9a-f]{40}$"#, options: .regularExpression) != nil else {
             throw ValidationError("--provider-commit must be lowercase 40-hex")
         }
-        let bench = try await NativeMTPBenchRunner(
-            rootPath: root,
-            modelID: modelID,
-            policyPath: policyPath,
-            outPath: outPath,
-            onlyCell: onlyCell,
-            providerCommit: providerCommit,
-            phase: phase
-        )
-        if let requestsPath {
-            guard let requestsSHA256 else { throw ValidationError("--requests requires --requests-sha256") }
-            let corpus = try NativeMTPFrozenDSparkCorpus.load(
-                from: URL(fileURLWithPath: requestsPath), expectedSHA256: requestsSHA256)
-            let longPrompts = try longTokenIDsPath.map {
-                try NativeMTPFrozenDSparkCorpus.loadLongPrompts(from: URL(fileURLWithPath: $0))
-            } ?? [:]
-            if validateOnly {
-                try bench.validate()
-            } else {
-                try await bench.runFrozenRequests(corpus, longPrompts: longPrompts)
-            }
-            return
+        guard (policyPath != nil) != !policyList.isEmpty else {
+            throw ValidationError("supply exactly one of --policy or --policy-list")
         }
-        guard requestsSHA256 == nil, longTokenIDsPath == nil else {
+        guard requestsPath != nil || (requestsSHA256 == nil && longTokenIDsPath == nil) else {
             throw ValidationError("--requests-sha256 and --long-token-ids require --requests")
         }
-        if validateOnly {
-            try bench.validate()
-            return
+        guard requestsPath == nil || policyList.isEmpty else {
+            throw ValidationError("--requests requires a single --policy")
         }
-        try await bench.run()
+        let paths = policyPath.map { [$0] } ?? policyList
+        let identityCache = identityCachePath.map {
+            NativeMTPBenchIdentityCache(persistentURL: URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath))
+        } ?? (policyList.isEmpty ? nil : NativeMTPBenchIdentityCache())
+        for (index, path) in paths.enumerated() {
+            if !policyList.isEmpty {
+                let policy = try NativeMTPBenchPolicy.load(from: URL(fileURLWithPath: (path as NSString).expandingTildeInPath))
+                guard policy.exploratory, phase == .matrix else {
+                    throw ValidationError("--policy-list requires exploratory policies and --phase matrix")
+                }
+            }
+            let bench = try await NativeMTPBenchRunner(
+                rootPath: root,
+                modelID: modelID,
+                policyPath: path,
+                outPath: policyList.isEmpty ? outPath : "\(outPath).policy-\(index).jsonl",
+                onlyCell: onlyCell,
+                providerCommit: providerCommit,
+                phase: phase,
+                identityCache: identityCache
+            )
+            if let requestsPath {
+                guard let requestsSHA256 else { throw ValidationError("--requests requires --requests-sha256") }
+                let corpus = try NativeMTPFrozenDSparkCorpus.load(
+                    from: URL(fileURLWithPath: requestsPath), expectedSHA256: requestsSHA256)
+                let longPrompts = try longTokenIDsPath.map {
+                    try NativeMTPFrozenDSparkCorpus.loadLongPrompts(from: URL(fileURLWithPath: $0))
+                } ?? [:]
+                if validateOnly || validatePolicyOnly { try bench.validate() }
+                else { try await bench.runFrozenRequests(corpus, longPrompts: longPrompts) }
+            } else if validateOnly || validatePolicyOnly { try bench.validate() }
+            else { try await bench.run() }
+        }
     }
 }
 
@@ -254,7 +285,57 @@ struct NativeMTPFrozenDSparkCorpus: Sendable {
     }
 }
 
-private final class NativeMTPBenchRunner {
+/// Same-process reuse: every reuse checks inode/ctime/size/mtime and
+/// additions/removals against the exact snapshot just hashed by this command.
+/// With `persistentURL` (`--validate-policy-only` only), a file's hash is also
+/// reused across processes while its full stamp is unchanged, so the
+/// pre-downtime check reads a large snapshot once, not once per window.
+final class NativeMTPBenchIdentityCache {
+    struct Entry: Codable, Equatable {
+        let stamp: MLXSnapshotIdentity.FileStamp
+        let sha256: String
+    }
+
+    private var identities: [URL: MLXSnapshotIdentity] = [:]
+    private let persistentURL: URL?
+
+    init(persistentURL: URL? = nil) {
+        self.persistentURL = persistentURL
+    }
+
+    func identity(directory: URL) throws -> MLXSnapshotIdentity {
+        let key = directory.standardizedFileURL.resolvingSymlinksInPath()
+        if let identity = identities[key] {
+            guard identity.isCurrent() else {
+                throw NativeMTPBenchError.assertionFailed("snapshot changed between diagnostic policies")
+            }
+            return identity
+        }
+        let identity = try persistentURL.map { try Self.persistentIdentity(directory: key, store: $0) }
+            ?? MLXSnapshotIdentity.compute(directory: directory)
+        identities[key] = identity
+        return identity
+    }
+
+    private static func persistentIdentity(directory: URL, store: URL) throws -> MLXSnapshotIdentity {
+        // An unreadable or malformed store is an empty one: every file is read.
+        var all = (try? JSONDecoder().decode([String: [Entry]].self, from: Data(contentsOf: store))) ?? [:]
+        let known = all[directory.path] ?? []
+        var fresh: [Entry] = []
+        let identity = try MLXSnapshotIdentity.compute(directory: directory) { stamp, read in
+            let sha = try known.first(where: { $0.stamp == stamp })?.sha256 ?? read()
+            fresh.append(Entry(stamp: stamp, sha256: sha))
+            return sha
+        }
+        all[directory.path] = fresh
+        try FileManager.default.createDirectory(at: store.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try JSONEncoder().encode(all).write(to: store, options: [.atomic])
+        chmod(store.path, 0o600)
+        return identity
+    }
+}
+
+final class NativeMTPBenchRunner {
     private let root: URL
     private let modelID: String
     private let policyURL: URL
@@ -264,6 +345,7 @@ private final class NativeMTPBenchRunner {
     private let phase: NativeMTPBenchPhase
     private let policy: NativeMTPBenchPolicy
     private let policySHA256: String
+    private let identityCache: NativeMTPBenchIdentityCache?
     /// The native runtime's scheduler load-gate recorder for the current
     /// cell fixture (SPEC-048-R015 gated-cell evidence).
     private var nativeLoadGateRecorder: NativeMTPLoadGateRecorder?
@@ -275,7 +357,8 @@ private final class NativeMTPBenchRunner {
         outPath: String,
         onlyCell: String?,
         providerCommit: String,
-        phase: NativeMTPBenchPhase
+        phase: NativeMTPBenchPhase,
+        identityCache: NativeMTPBenchIdentityCache? = nil
     ) async throws {
         self.root = URL(fileURLWithPath: (rootPath as NSString).expandingTildeInPath, isDirectory: true)
             .standardizedFileURL
@@ -287,6 +370,7 @@ private final class NativeMTPBenchRunner {
         self.onlyCell = onlyCell
         self.providerCommit = providerCommit
         self.phase = phase
+        self.identityCache = identityCache
         self.policySHA256 = try Self.sha256(of: self.policyURL)
         self.policy = try NativeMTPBenchPolicy.load(from: self.policyURL)
         self.layout = NativeMTPBenchFixtureLayout.resolve(root: self.root)
@@ -302,6 +386,18 @@ private final class NativeMTPBenchRunner {
     /// load, then a one-line summary. No MLX model is loaded.
     func validate() throws {
         let checked = try preflight()
+        // Both request forms a cell builds (prompt sizing, then the run),
+        // through the production request parser; no model or tokenizer.
+        for cell in policy.matrixCells {
+            _ = try NativeMTPBenchRequests.make(
+                modelID: modelID, requestID: "prompt-sizing", prompt: "validate", maxTokens: 1,
+                temperature: 0, requestShape: policy.requestShape
+            )
+            _ = try NativeMTPBenchRequests.make(
+                modelID: modelID, requestID: "validate-\(cell.id)", prompt: "validate", maxTokens: cell.maxTokens,
+                temperature: policy.temperature, topP: policy.topP, requestShape: policy.requestShape
+            )
+        }
         let summary: [String: Any] = [
             "validate_only": "pass",
             "family": layout.family.modelFamily,
@@ -313,6 +409,16 @@ private final class NativeMTPBenchRunner {
             "cells": policy.matrixCells.map(\.id),
             "sustained_cell_id": policy.sustainedCellID,
             "existing_records": checked.existing.hasRecords,
+            "observed_environment": [
+                "hw_model": checked.environment.hwModel,
+                "chip": checked.environment.chip,
+                "ram_gb": checked.environment.ramGB,
+                "os_build": checked.environment.osBuild,
+                "xcode_build_version": checked.environment.xcodeBuildVersion,
+                "swift_version": checked.environment.swiftVersion,
+                "provider_commit": checked.environment.providerCommit,
+                "mlx_fork_revision": NativeMTPHardwareE2ERunner.upstreamRevision,
+            ] as [String: Any],
         ]
         FileHandle.standardOutput.write(try JSONSerialization.data(withJSONObject: summary, options: [.sortedKeys]))
         FileHandle.standardOutput.write(Data("\n".utf8))
@@ -342,11 +448,11 @@ private final class NativeMTPBenchRunner {
         let mtpDirectory = layout.mtpDirectory
         try Self.requireDirectory(targetDirectory)
         try Self.requireDirectory(mtpDirectory)
-        let targetIdentity = try MLXSnapshotIdentity.compute(directory: targetDirectory)
+        let targetIdentity = try identityCache?.identity(directory: targetDirectory) ?? MLXSnapshotIdentity.compute(directory: targetDirectory)
         // An embedded MTP layer is the target artifact: one identity, hashed once.
         let mtpIdentity = layout.family.embeddedMTP
             ? targetIdentity
-            : try MLXSnapshotIdentity.compute(directory: mtpDirectory)
+            : try identityCache?.identity(directory: mtpDirectory) ?? MLXSnapshotIdentity.compute(directory: mtpDirectory)
         let tokenizerSHA = try Self.sha256(of: targetDirectory.appendingPathComponent("tokenizer.json"))
         try policy.validateObserved(modelID: modelID, targetSHA256: targetIdentity.digest, mtpSHA256: mtpIdentity.digest, tokenizerSHA256: tokenizerSHA)
         let environment = NativeMTPBenchEnvironment.capture(providerCommit: providerCommit)
@@ -400,6 +506,16 @@ private final class NativeMTPBenchRunner {
 
     func run() async throws {
         let checked = try preflight()
+        // This command runs no serving listener. Scope the explicit laboratory
+        // eligibility override to this exploratory benchmark process only.
+        let diagnosticKey = "MACPROVIDER_MTP_BENCH_DIAGNOSTIC_ELIGIBILITY"
+        let previousDiagnostic = ProcessInfo.processInfo.environment[diagnosticKey]
+        if policy.diagnosticEligibilityBypass { setenv(diagnosticKey, "1", 1) }
+        else { unsetenv(diagnosticKey) }
+        defer {
+            if let previousDiagnostic { setenv(diagnosticKey, previousDiagnostic, 1) }
+            else { unsetenv(diagnosticKey) }
+        }
         let targetIdentity = checked.targetIdentity
         let mtpIdentity = checked.mtpIdentity
         let tokenizerSHA = checked.tokenizerSHA256
@@ -635,6 +751,17 @@ private final class NativeMTPBenchRunner {
         completedWarmups: Set<Int>
     ) async throws {
         let fixture = try await fixture(for: cell)
+        // Independent ceiling for each short diagnostic cell, including all
+        // paired blocks. The outer guarded controller restores live serving
+        // when this child exits, including a stalled GPU task.
+        let cellWatchdog: DispatchSourceTimer? = policy.diagnosticEligibilityBypass ? DispatchSource.makeTimerSource(queue: .global()) : nil
+        cellWatchdog?.schedule(deadline: .now() + 180)
+        cellWatchdog?.setEventHandler {
+            FileHandle.standardError.write(Data("native-mtp-bench: diagnostic cell exceeded 180 seconds\n".utf8))
+            _exit(124)
+        }
+        cellWatchdog?.resume()
+        defer { cellWatchdog?.cancel() }
         // Every block's prompts are sized before the first timed run, so no
         // block starts after an idle GPU gap its partner run did not have.
         // Sized between blocks, the first run of each block measured about
@@ -746,9 +873,10 @@ private final class NativeMTPBenchRunner {
             modelID: modelID,
             maxBatch: qualifiedSlots,
             maxNativeActiveRows: policy.maxNativeActiveRows(for: cell),
+            proposalDepth: policy.proposalDepth,
             maxPromptTokens: policy.maximumPromptTokens ?? 1_048_576,
             maxPhysicalBlocks: maxBlocks,
-            proposalDepth: policy.proposalDepth
+            diagnosticEligibilityBypass: policy.diagnosticEligibilityBypass
         )
         let fixture = try await runner.loadRuntimeFixture(
             maxContextTokens: cell.promptTokens + cell.maxTokens + 256,
@@ -775,6 +903,10 @@ private final class NativeMTPBenchRunner {
         writer: NativeMTPJSONLWriter?,
         warmup: Bool
     ) async throws -> NativeMTPBenchRunResult {
+        let tokenObserver = NativeMTPLabCommittedTokenTimingObserver(captureTokenIDs: true)
+        guard await runtime.installLabNativeMTPCommitTimingObserver(tokenObserver) else {
+            throw NativeMTPBenchError.assertionFailed("token parity observer requires the continuous-batch scheduler")
+        }
         let statusBefore = await runtime.currentSnapshot().nativeMTPStatus
         let memorySampler = NativeMTPMemorySampler()
         memorySampler.start()
@@ -782,6 +914,8 @@ private final class NativeMTPBenchRunner {
         let thermalStart = ProcessInfo.processInfo.thermalState.label
         let modelID = self.modelID
         let temperature = policy.temperature
+        let topP = policy.topP
+        let requestShape = policy.requestShape
         let arrivalIntervalNanoseconds = UInt64(policy.arrivalIntervalMS) * 1_000_000
         let results = try await withThrowingTaskGroup(of: NativeMTPBenchRequestResult.self) { group in
             for (index, prompt) in prompts.enumerated() {
@@ -792,14 +926,16 @@ private final class NativeMTPBenchRunner {
                     // Both paths use the same request ID (separate runtimes),
                     // so a sampled row draws the same seeded stream on each.
                     let requestID = "\(cell.id)-b\(block)-r\(index)"
-                    let request = try Self.makeRequest(
+                    let request = try NativeMTPBenchRequests.make(
                         modelID: modelID,
                         requestID: requestID,
                         prompt: prompt,
                         maxTokens: cell.maxTokens,
-                        temperature: temperature
+                        temperature: temperature,
+                        topP: topP,
+                        requestShape: requestShape
                     )
-                    return try await Self.runStreamingRequest(request, runtime: runtime)
+                    return try await Self.runStreamingRequest(request, runtime: runtime, tokenObserver: tokenObserver)
                 }
             }
             var values: [NativeMTPBenchRequestResult] = []
@@ -912,6 +1048,7 @@ private final class NativeMTPBenchRunner {
         let thinkingToggle = snapshot.templateSupportsThinkingToggle
         let preserveThinking = snapshot.templateSupportsPreserveThinking
         let modelID = self.modelID
+        let requestShape = policy.requestShape
         let lower = Int(ceil(Double(cell.promptTokens) * 0.98))
         var upper = Int(floor(Double(cell.promptTokens) * 1.02))
         var target = cell.promptTokens
@@ -923,12 +1060,13 @@ private final class NativeMTPBenchRunner {
         let finalTarget = target
         return try await container.perform { context in
             func servedCount(_ text: String) async throws -> Int {
-                let request = try Self.makeRequest(
+                let request = try NativeMTPBenchRequests.make(
                     modelID: modelID,
                     requestID: "prompt-sizing",
                     prompt: text,
                     maxTokens: 1,
-                    temperature: 0
+                    temperature: 0,
+                    requestShape: requestShape
                 )
                 let input = try ModelRuntime.userInput(
                     for: request,
@@ -962,11 +1100,24 @@ private final class NativeMTPBenchRunner {
     private func parityMismatch(ordinary: NativeMTPBenchRunResult, native: NativeMTPBenchRunResult) -> Bool {
         guard ordinary.requests.count == native.requests.count else { return true }
         for (lhs, rhs) in zip(ordinary.requests, native.requests) {
+            if lhs.outputTokenIDs.isEmpty || lhs.outputTokenIDs != rhs.outputTokenIDs { return true }
             if lhs.completion.content != rhs.completion.content { return true }
             if lhs.completion.reasoningContent != rhs.completion.reasoningContent { return true }
             if lhs.completion.completionTokens != rhs.completion.completionTokens { return true }
+            if !Self.toolCallsHaveParity(lhs.completion.toolCalls, rhs.completion.toolCalls) { return true }
+            if lhs.completion.finishReason != rhs.completion.finishReason { return true }
         }
         return false
+    }
+
+    static func toolCallsHaveParity(_ lhs: [ToolCall]?, _ rhs: [ToolCall]?) -> Bool {
+        // Parser-generated UUIDs are response metadata. The model's ordered
+        // function names and exact argument bytes must still match.
+        let lhs = lhs ?? []
+        let rhs = rhs ?? []
+        return lhs.count == rhs.count && zip(lhs, rhs).allSatisfy { pair in
+            pair.0.functionName == pair.1.functionName && pair.0.arguments == pair.1.arguments
+        }
     }
 
     private func baseHeader(
@@ -999,6 +1150,10 @@ private final class NativeMTPBenchRunner {
             "qualified_slots": policy.qualifiedSlots.map { $0 as Any } ?? NSNull(),
             "maximum_prompt_tokens": policy.maximumPromptTokens.map { $0 as Any } ?? NSNull(),
             "temperature": policy.temperature,
+            "top_p": policy.topP,
+            "request_shape": policy.requestShape,
+            "diagnostic_eligibility_bypass": policy.diagnosticEligibilityBypass,
+            "proposal_depth": policy.proposalDepth,
             "arrival_interval_ms": policy.arrivalIntervalMS,
             // 2: run records carry decode-only throughput (SPEC-048-R015).
             // 3: effective_paths carry each admission's other_active_rows.
@@ -1008,26 +1163,7 @@ private final class NativeMTPBenchRunner {
         ]
     }
 
-    private static func makeRequest(
-        modelID: String,
-        requestID: String,
-        prompt: String,
-        maxTokens: Int,
-        temperature: Double
-    ) throws -> ChatCompletionRequest {
-        let object: [String: Any] = [
-            "model": modelID,
-            "messages": [["role": "user", "content": prompt]],
-            "max_tokens": maxTokens,
-            "temperature": temperature,
-            "top_p": 1.0,
-            "stream": true,
-        ]
-        let data = try JSONSerialization.data(withJSONObject: object)
-        return try ChatCompletionRequest.parse(data: data).withRequestID(requestID)
-    }
-
-    private static func runStreamingRequest(_ request: ChatCompletionRequest, runtime: ModelRuntime) async throws -> NativeMTPBenchRequestResult {
+    private static func runStreamingRequest(_ request: ChatCompletionRequest, runtime: ModelRuntime, tokenObserver: NativeMTPLabCommittedTokenTimingObserver) async throws -> NativeMTPBenchRequestResult {
         guard let requestID = request.requestID else {
             throw NativeMTPBenchError.assertionFailed("request missing id")
         }
@@ -1052,7 +1188,8 @@ private final class NativeMTPBenchRunner {
             completion: completion,
             wallSeconds: end.timeIntervalSince(start),
             ttftSeconds: timing.ttftSeconds,
-            interTokenGaps: timing.interTokenGaps
+            interTokenGaps: timing.interTokenGaps,
+            outputTokenIDs: tokenObserver.snapshot().filter { $0.requestID == requestID }.sorted { $0.ordinal < $1.ordinal }.compactMap(\.tokenID)
         )
     }
 
@@ -1085,6 +1222,48 @@ private final class NativeMTPBenchRunner {
         var buffer = [CChar](repeating: 0, count: size)
         guard sysctlbyname(name, &buffer, &size, nil, 0) == 0 else { return nil }
         return String(cString: buffer)
+    }
+}
+
+/// The bench's request for one profile. Parsed by the production validator,
+/// so a profile the runtime would refuse fails before any model load.
+enum NativeMTPBenchRequests {
+    static func make(
+        modelID: String,
+        requestID: String,
+        prompt: String,
+        maxTokens: Int,
+        temperature: Double,
+        topP: Double = 1,
+        requestShape: String = "plain_text"
+    ) throws -> ChatCompletionRequest {
+        var object: [String: Any] = [
+            "model": modelID,
+            "messages": [["role": "user", "content": prompt]],
+            "max_tokens": maxTokens,
+            "temperature": temperature,
+            "top_p": topP,
+            "stream": true,
+        ]
+        if requestShape == "tools_history_reasoning" {
+            object["tools"] = [["type": "function", "function": [
+                "name": "read_file", "description": "Read a project source file.",
+                "parameters": ["type": "object", "properties": ["path": ["type": "string"]], "required": ["path"]],
+            ]]]
+            object["messages"] = [
+                ["role": "user", "content": "Read the project file before answering."],
+                ["role": "assistant", "content": "", "tool_calls": [[
+                    "id": "call_baselinereadfile0001", "type": "function", "function": ["name": "read_file", "arguments": "{\"path\":\"main.swift\"}"],
+                ]]],
+                ["role": "tool", "tool_call_id": "call_baselinereadfile0001", "content": "func main() { print(42) }"],
+                ["role": "user", "content": prompt],
+            ]
+            // Use the production-rendered reasoning control; chat_template_kwargs
+            // is not consumed by the request parser and would be a no-op here.
+            object["reasoning_effort"] = "high"
+        }
+        let data = try JSONSerialization.data(withJSONObject: object)
+        return try ChatCompletionRequest.parse(data: data).withRequestID(requestID)
     }
 }
 
@@ -1185,6 +1364,7 @@ private struct NativeMTPBenchRequestResult: Sendable {
     let wallSeconds: TimeInterval
     let ttftSeconds: TimeInterval?
     let interTokenGaps: [TimeInterval]
+    let outputTokenIDs: [Int]
 
     /// SPEC-048 parity covers every generated token, so a SPEC-018 §3.12
     /// reasoning split is hashed too: reasoning, a NUL, then content. Without
@@ -1275,6 +1455,7 @@ private struct NativeMTPBenchRunResult {
                 return [
                     "request_id": request.requestID,
                     "content_sha256": request.contentSHA256,
+                    "output_token_ids": request.outputTokenIDs,
                     "completion_tokens": request.completion.completionTokens,
                     "committed_tps": perRequestTPS[index],
                     "decode_tps": perRequestDecodeTPS[index].map { $0 as Any } ?? NSNull(),
@@ -1551,10 +1732,16 @@ struct NativeMTPBenchPolicy {
     /// admission policy; absent in a pilot means the bound equals each cell's
     /// qualified slot count (gate never engages).
     let maxNativeActiveRows: Int?
+    let proposalDepth: Int
     /// Request temperature for every row of both paths (default greedy). A
     /// sampled row's seed derives from its request ID, which both paths
     /// share, so seeded parity is still a token-identity comparison.
     let temperature: Double
+    let topP: Double
+    let requestShape: String
+    /// Only the exploratory lab command may bypass admission eligibility;
+    /// every record names the bypass and cannot qualify a production tuple.
+    let diagnosticEligibilityBypass: Bool
     /// Staggered arrival: row `i` of a block starts `i *` this many
     /// milliseconds after the block, so load crosses the native active-row
     /// bound mid-flight. Zero submits every row at once.
@@ -1562,7 +1749,6 @@ struct NativeMTPBenchPolicy {
     /// Exploratory policies relax the R015 minimums for pilots; every record is
     /// stamped `exploratory` and the analyzer refuses an admission verdict.
     let exploratory: Bool
-    var proposalDepth: Int = 1
     var quantization: String = "4bit"
 
     static func load(from url: URL) throws -> NativeMTPBenchPolicy {
@@ -1579,7 +1765,7 @@ struct NativeMTPBenchPolicy {
             "provider_commit", "mlx_fork_revision", "quantization", "cache_mode", "proposal_depth",
             "run_order", "prompt_corpus", "exclusion_rules", "confidence_method",
             "max_native_active_rows", "qualified_slots", "temperature", "arrival_interval_ms",
-            "gated_cells", "maximum_prompt_tokens",
+            "gated_cells", "maximum_prompt_tokens", "top_p", "request_shape", "diagnostic_eligibility_bypass",
         ]
         let unknown = Set(object.keys).subtracting(allowed)
         guard unknown.isEmpty else { throw NativeMTPBenchError.invalidPolicy("unknown keys: \(unknown.sorted())") }
@@ -1627,18 +1813,26 @@ struct NativeMTPBenchPolicy {
             maxNativeActiveRows: object["max_native_active_rows"] == nil
                 ? nil
                 : try intAtLeast(object, "max_native_active_rows", 1),
+            proposalDepth: try intAtLeast(object, "proposal_depth", 1),
             temperature: try samplingTemperature(object, "temperature"),
+            topP: try topPValue(object),
+            requestShape: try requestShapeValue(object),
+            diagnosticEligibilityBypass: try diagnosticBypassValue(object, exploratory: exploratory),
             arrivalIntervalMS: object["arrival_interval_ms"] == nil
                 ? 0
                 : try nonnegativeInt(object, "arrival_interval_ms"),
             exploratory: exploratory,
-            proposalDepth: try intAtLeast(object, "proposal_depth", 1),
             quantization: try string(object, "quantization")
         )
         try policy.validateMatrix()
         guard (1...5).contains(policy.proposalDepth),
               ["4bit", "mlx_mxfp4_mxfp8"].contains(policy.quantization) else {
             throw NativeMTPBenchError.invalidPolicy("unsupported quantization or proposal_depth")
+        }
+        if policy.quantization == "4bit" {
+            guard policy.proposalDepth == 1 || (exploratory && policy.proposalDepth == 2) else {
+                throw NativeMTPBenchError.invalidPolicy("proposal_depth must equal 1 outside a depth-2 exploratory policy")
+            }
         }
         let fixedMethodology: [String: AnyHashable] = [
             "cache_mode": "paged_kv_mixed",
@@ -1656,6 +1850,34 @@ struct NativeMTPBenchPolicy {
             throw NativeMTPBenchError.invalidPolicy("sustained_cell_id must match a matrix cell")
         }
         return policy
+    }
+
+    private static func topPValue(_ object: [String: Any]) throws -> Double {
+        guard let value = object["top_p"] else { return 1 }
+        guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+              number.doubleValue.isFinite, number.doubleValue > 0, number.doubleValue <= 1 else {
+            throw NativeMTPBenchError.invalidPolicy("top_p must be within (0, 1]")
+        }
+        return number.doubleValue
+    }
+
+    private static func requestShapeValue(_ object: [String: Any]) throws -> String {
+        guard let value = object["request_shape"] else { return "plain_text" }
+        guard let shape = value as? String, ["plain_text", "tools_history_reasoning"].contains(shape) else {
+            throw NativeMTPBenchError.invalidPolicy("request_shape must be plain_text or tools_history_reasoning")
+        }
+        return shape
+    }
+
+    private static func diagnosticBypassValue(_ object: [String: Any], exploratory: Bool) throws -> Bool {
+        guard let value = object["diagnostic_eligibility_bypass"] else { return false }
+        guard let number = value as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else {
+            throw NativeMTPBenchError.invalidPolicy("diagnostic_eligibility_bypass must be boolean")
+        }
+        guard !number.boolValue || exploratory else {
+            throw NativeMTPBenchError.invalidPolicy("diagnostic eligibility bypass requires exploratory schema")
+        }
+        return number.boolValue
     }
 
     /// SPEC-048-R015 preregistered, counterbalanced run order: per cell, half
@@ -1683,20 +1905,25 @@ struct NativeMTPBenchPolicy {
     }
 
     /// The fixture family's own tuple limits, checked before any model load:
-    /// a greedy-only family (glm5_next) routes sampled rows to ordinary
-    /// decode, and a family that signs a native active-row bound measures at
+    /// an unsupported sampled profile routes rows to ordinary decode, and
+    /// a family that signs a native active-row bound measures at
     /// most that bound, so either mismatch could only fail after the load.
     func validateFamily(_ family: NativeMTPHardwareE2EFamily) throws {
         guard proposalDepth <= family.maximumProposalDepth,
               quantization == family.quantizationLabel else {
             throw NativeMTPBenchError.invalidPolicy("quantization or proposal_depth does not match \(family.familyAdapter)")
         }
-        if !family.admitsSampledRows, temperature > 0 {
+        if family != .deepseekV4, proposalDepth > 1 {
+            guard exploratory, family == .glm5Next, let bound = maxNativeActiveRows, bound <= 2 else {
+                throw NativeMTPBenchError.invalidPolicy("depth-2 exploration requires glm5_next and max_native_active_rows at most 2")
+            }
+        }
+        if !family.admitsSampledRows, (temperature > 0 || topP != 1), !diagnosticEligibilityBypass {
             throw NativeMTPBenchError.invalidPolicy(
                 "temperature must be 0: \(family.familyAdapter) admits greedy rows only"
             )
         }
-        if let signed = family.signedMaxNativeActiveRows, !exploratory {
+        if let signed = family.implementationMaxNativeActiveRows, !exploratory {
             guard let bound = maxNativeActiveRows, bound <= signed else {
                 throw NativeMTPBenchError.invalidPolicy(
                     "max_native_active_rows must be at most \(signed) for \(family.familyAdapter)"
@@ -1880,6 +2107,8 @@ struct NativeMTPExistingEvidence {
               (record["max_tokens"] as? NSNumber)?.intValue == cell.maxTokens else {
             throw reject("shape does not match cell \(cellID)")
         }
+        if let identity = NativeMTPQualificationScope.identity,
+           record["measurement_identity"] as? [String: String] != identity.document { throw reject("measurement executable differs") }
         let inRange: Bool
         if sustained {
             inRange = !warmup && cellID == policy.sustainedCellID && block >= 0
@@ -1948,6 +2177,10 @@ struct NativeMTPExistingEvidence {
         var pathsByMatrixBlock: [String: [Int: Set<String>]] = [:]
         var pathsByWarmup: [String: [Int: Set<String>]] = [:]
         var pathsBySustainedBlock: [String: [Int: Set<String>]] = [:]
+        if let identity = NativeMTPQualificationScope.identity,
+           header["measurement_identity"] as? [String: String] != identity.document {
+            throw NativeMTPBenchError.assertionFailed("existing --out measurement executable differs")
+        }
         var sustainedSeconds: [String: Double] = [:]
         var nextSustainedBlock: [String: Int] = [:]
         var seen: Set<String> = []
@@ -2052,7 +2285,7 @@ struct NativeMTPExistingEvidence {
     }
 }
 
-private final class NativeMTPJSONLWriter {
+final class NativeMTPJSONLWriter {
     private let handle: FileHandle
 
     init(url: URL, append: Bool) throws {
@@ -2066,7 +2299,7 @@ private final class NativeMTPJSONLWriter {
     }
 
     func write(_ object: [String: Any]) throws {
-        let normalized = object.mapValues { value -> Any in
+        let normalized = NativeMTPQualificationScope.bind(object).mapValues { value -> Any in
             if let optional = value as? OptionalProtocol, optional.isNil { return NSNull() }
             return value
         }
@@ -2293,4 +2526,3 @@ enum NativeMTPBenchError: Error, CustomStringConvertible {
         }
     }
 }
-#endif

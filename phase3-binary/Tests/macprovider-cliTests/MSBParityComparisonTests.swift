@@ -3,6 +3,42 @@ import ArgumentParser
 @testable import macprovider_cli
 
 final class MSBParityComparisonTests: XCTestCase {
+    func testDiagnosticRejectsFourthRowOnEightGiBBeforeModelLoading() throws {
+        let eightGiB: UInt64 = 8 * 1024 * 1024 * 1024
+        let four = try MSBThroughputCommand.parse(["--model", "/nonexistent-row-cap-fixture", "--rows", "4"])
+        XCTAssertThrowsError(try four.validateHardwareRowCount(physicalMemoryBytes: eightGiB)) { error in
+            XCTAssertTrue(error is ValidationError)
+            XCTAssertTrue(String(describing: error).contains("memory row cap 3"))
+        }
+        let three = try MSBThroughputCommand.parse(["--rows", "3"])
+        XCTAssertNoThrow(try three.validateHardwareRowCount(physicalMemoryBytes: eightGiB))
+        XCTAssertNoThrow(try four.validateHardwareRowCount(physicalMemoryBytes: eightGiB + 1))
+    }
+
+    func testOptionalMLXCacheLimitParsing() throws {
+        XCTAssertNil(try MSBThroughputCommand.parse([]).mlxCacheLimitMB)
+        XCTAssertEqual(try MSBThroughputCommand.parse(["--mlx-cache-limit-mb", "256"]).mlxCacheLimitMB, 256)
+        XCTAssertThrowsError(try MSBThroughputCommand.parse([
+            "--mlx-cache-limit-mb", "999999999999999999999999999999"
+        ]))
+    }
+
+    func testInvalidMLXCacheLimitsFailBeforeModelLoading() async throws {
+        for value in [-1, ModelRuntime.maximumMLXCacheLimitMB + 1, Int.max] {
+            let command = try MSBThroughputCommand.parse([
+                "--model", "/nonexistent-msb-cache-limit-fixture",
+                "--mlx-cache-limit-mb=\(value)"
+            ])
+            do {
+                try await command.run()
+                XCTFail("invalid cache limit was accepted")
+            } catch {
+                XCTAssertTrue(error is ValidationError, "expected cache validation before loading: \(error)")
+                XCTAssertTrue(String(describing: error).contains("--mlx-cache-limit-mb"))
+            }
+        }
+    }
+
     func testQualificationDefaultsToProductionUncompiledDecode() throws {
         XCTAssertFalse(try MSBThroughputCommand.parse([]).compile)
         XCTAssertFalse(try MSBThroughputCommand.parse(["--no-compile"]).compile)

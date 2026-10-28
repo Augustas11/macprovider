@@ -4228,6 +4228,546 @@
       "intake_decision_sha256": null,
       "native_mtp_admission_sha256": "fbb9d9fe492300658ba9b0bd7522e1456d42a7f0cee99c587778f88f6da8df80",
       "policy_version": "autotune-policy-v1"
+    },
+    "published-2026-10-26-glm53-qwen36-native-mtp-v274": {
+      "artifact_bindings": [
+        {
+          "artifact_id": "mlx-mxfp4",
+          "hash": "58ee40d4c0bc436695d1d8d6a6cdfdb0326ec37f25e13ec98ea1d5c0878e732c",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "model_key": "deepseek/deepseek-v4-flash"
+        },
+        {
+          "artifact_id": "mlx-4bit",
+          "hash": "b245e39f1476907653e3fe1897bba36b0e2a90c471828a9e13b5fdf3e1b6db01",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "model_key": "google-gemma-4-26b-a4b-it"
+        },
+        {
+          "artifact_id": "mlx-4bit",
+          "hash": "67b26d6b1c50dc8836ab3705b06276a43c74c8f66247f9b112e232b58abbd99f",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "model_key": "meta-llama/llama-3.1-8b-instruct"
+        },
+        {
+          "artifact_id": "gguf-q4-k-m",
+          "hash": "6c1a2b41161032677be168d354123594c0e6e67d2b9227c84f296ad037c728ff",
+          "hash_algorithm": "macprovider.gguf-file.v1",
+          "model_key": "meta-llama/llama-3.2-3b-instruct"
+        },
+        {
+          "artifact_id": "mlx-4bit",
+          "hash": "e7e5bff4248768b4db7a53afb3b514ba5867b800f63d1abd0330eaf08e54aa90",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "model_key": "meta-llama/llama-3.2-3b-instruct"
+        },
+        {
+          "artifact_id": "mlx-4bit",
+          "hash": "5c65f865d25fa86c34bab436334c13307496e0e905cd0a6c8bef33312cc12773",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "model_key": "mlx-community/qwen2-vl-2b-instruct-4bit"
+        },
+        {
+          "artifact_id": "mlx-4bit",
+          "hash": "1bc78f214f9a042eaeb290b1fa4cb29915df1028f79d8479266349166c40a71f",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "model_key": "nvidia/nemotron-3-nano-30b-a3b"
+        },
+        {
+          "artifact_id": "mlx-4bit",
+          "hash": "c8b99b694c6730ebcb86a8b2277f8c441c99c6275d4bedf9d3913b7e9d2b6156",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "model_key": "openai/gpt-oss-120b"
+        },
+        {
+          "artifact_id": "mlx-mxfp4-q8",
+          "hash": "f25592861e0b7f4eb8489d9103214f3f0dc4f798bb0e4e0cd817ff2f4191f1b1",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "model_key": "openai/gpt-oss-20b"
+        },
+        {
+          "artifact_id": "mlx-4bit",
+          "hash": "a0ca3d59f301f08ae4c4c2010b07f80b890d35f4e8562c213b1d01aed8328e42",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "model_key": "qwen/qwen3-30b-a3b-instruct-2507"
+        },
+        {
+          "artifact_id": "mlx-4bit",
+          "hash": "7777cf15fbd096d66ccec5f0f76ec915eb4800f4f3e8dd899d1b4ae3041387ae",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "model_key": "qwen/qwen3.5-27b"
+        },
+        {
+          "artifact_id": "mlx-4bit",
+          "hash": "893c5fd5a4f6adf19a97faeff19d67f2b7a5d8c29e81cd857bd5949ce0b31e43",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "model_key": "qwen/qwen3.5-35b-a3b"
+        },
+        {
+          "artifact_id": "mlx-4bit",
+          "hash": "518ef47c298783d8547b50406e84548e5bf7705b82355a38f9eaef1368817931",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "model_key": "qwen/qwen3.6-27b"
+        },
+        {
+          "artifact_id": "mlx-4bit",
+          "hash": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "model_key": "qwen/qwen3.6-35b-a3b"
+        },
+        {
+          "artifact_id": "mlx-4bit",
+          "hash": "8a8786e902127e9175f5be0d7c8bcf4dd32323a0521e4d9a20761608a07a6d05",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "model_key": "qwen/qwen3.8-27b"
+        },
+        {
+          "artifact_id": "mlx-4bit",
+          "hash": "b7749cc57f37f7e9239d0f9b091bcffe6d7629e48af75e8cb84c1cdca1780973",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "model_key": "qwen2.5-coder-32b-instruct"
+        },
+        {
+          "artifact_id": "mlx-4bit",
+          "hash": "69169cceb643f108755f96dba26d8647862e38a7f82cb1b5b25aff8f204967aa",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "model_key": "qwen3-32b"
+        },
+        {
+          "artifact_id": "mlx-4bit",
+          "hash": "1f591f9c4fb38d05ea2d879d89a6eeab485c23a04eb75e3e0a289db9d95ec877",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "model_key": "qwen3-8b"
+        },
+        {
+          "artifact_id": "mlx-4bit",
+          "hash": "10adb5da9840c8fe0e3036b10f6e2f8f34b41c615f3925b4132302e9cdbab9c0",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "model_key": "qwen3-coder-30b-a3b-instruct"
+        },
+        {
+          "artifact_id": "mlx-4bit",
+          "hash": "7fbf8e5005fbdadbf1d345a04b7d283ad20aec959ee001bc4b0dc902ea7f11ed",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "model_key": "z-ai/glm-4.5-air"
+        },
+        {
+          "artifact_id": "mlx-oq4e-mtp",
+          "hash": "7299b6a71a38490e378e9eb6524c426392aa96e3fd561007e0540134bbef48f9",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "model_key": "zai-org/glm-5.3-flash"
+        }
+      ],
+      "feeds": {
+        "autotune-artifacts.json": {
+          "bytes": 15398,
+          "sha256": "76be20cca36e9837832d404c55dd99789e558a36f06c88010d3b4907ca7a7561",
+          "signer_key_id": "streamvc-autotune-static-v4",
+          "version": "published-2026-10-26-glm53-qwen36-native-mtp-v274"
+        },
+        "autotune-candidates.json": {
+          "bytes": 19161,
+          "sha256": "2081234bb9d78c97568d2bcc7614e78b7c7e4874218bd1172d8251df79f2bd60",
+          "signer_key_id": "streamvc-autotune-static-v4",
+          "version": "published-2026-10-26-glm53-qwen36-native-mtp-v274"
+        },
+        "continuous-batching-policy.json": {
+          "bytes": 4949,
+          "sha256": "e315b8f4724549b2613c35bbfde65ff06698fc56b124e258372f35126a8686f6",
+          "signer_key_id": "streamvc-autotune-static-v4",
+          "version": "published-2026-10-26-glm53-qwen36-native-mtp-v274"
+        },
+        "demand-rank.json": {
+          "bytes": 2330,
+          "sha256": "14925a21ba45bb082ea95e7bdf221805cf1a6c9bc16a888090905deebaa7a4c8",
+          "signer_key_id": "streamvc-autotune-static-v4",
+          "version": "published-2026-10-26-glm53-qwen36-native-mtp-v274"
+        },
+        "native-mtp-admission.json": {
+          "bytes": 45680,
+          "sha256": "09a8a5402979f797b6e4a56dedb5539fa917b71213231f55dce7de2b5ad8c5f7",
+          "signer_key_id": "streamvc-autotune-static-v4",
+          "version": "published-2026-10-26-glm53-qwen36-native-mtp-v274"
+        },
+        "rate-card.json": {
+          "bytes": 4247,
+          "sha256": "2015aa9ae33cb439924c7bae3f508ddc1c1c6cdeb2fe9413056c62a8ed389f07",
+          "signer_key_id": "streamvc-autotune-static-v4",
+          "version": "0caf108454f303cecbf2f271665641a1f7e3f5d0d0724f67f4979b5d20681387"
+        },
+        "tier2-catalog.json": {
+          "bytes": 8223,
+          "sha256": "8c64863d3c05d91b40ae98990dd0723248af6adac4e0d9615a9b9e0cbf9bcf11",
+          "signer_key_id": "tier2-coordinator-key:707a860299e6a37f",
+          "version": "macprovider-tier2-model-catalog-2026-10-23-deepseek-v4-flash-v1"
+        }
+      },
+      "generated_at": "2026-10-26T13:17:00Z",
+      "intake_decision_sha256": null,
+      "native_mtp_admission_sha256": "09a8a5402979f797b6e4a56dedb5539fa917b71213231f55dce7de2b5ad8c5f7",
+      "policy_version": "autotune-policy-v1"
+    },
+    "published-2026-10-27-bonsai2b-candidate-v1": {
+      "artifact_bindings": [
+        {
+          "artifact_id": "mlx-mxfp4",
+          "hash": "58ee40d4c0bc436695d1d8d6a6cdfdb0326ec37f25e13ec98ea1d5c0878e732c",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "model_key": "deepseek/deepseek-v4-flash"
+        },
+        {
+          "artifact_id": "mlx-4bit",
+          "hash": "b245e39f1476907653e3fe1897bba36b0e2a90c471828a9e13b5fdf3e1b6db01",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "model_key": "google-gemma-4-26b-a4b-it"
+        },
+        {
+          "artifact_id": "mlx-4bit",
+          "hash": "67b26d6b1c50dc8836ab3705b06276a43c74c8f66247f9b112e232b58abbd99f",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "model_key": "meta-llama/llama-3.1-8b-instruct"
+        },
+        {
+          "artifact_id": "gguf-q4-k-m",
+          "hash": "6c1a2b41161032677be168d354123594c0e6e67d2b9227c84f296ad037c728ff",
+          "hash_algorithm": "macprovider.gguf-file.v1",
+          "model_key": "meta-llama/llama-3.2-3b-instruct"
+        },
+        {
+          "artifact_id": "mlx-4bit",
+          "hash": "e7e5bff4248768b4db7a53afb3b514ba5867b800f63d1abd0330eaf08e54aa90",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "model_key": "meta-llama/llama-3.2-3b-instruct"
+        },
+        {
+          "artifact_id": "mlx-4bit",
+          "hash": "5c65f865d25fa86c34bab436334c13307496e0e905cd0a6c8bef33312cc12773",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "model_key": "mlx-community/qwen2-vl-2b-instruct-4bit"
+        },
+        {
+          "artifact_id": "mlx-4bit",
+          "hash": "1bc78f214f9a042eaeb290b1fa4cb29915df1028f79d8479266349166c40a71f",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "model_key": "nvidia/nemotron-3-nano-30b-a3b"
+        },
+        {
+          "artifact_id": "mlx-4bit",
+          "hash": "c8b99b694c6730ebcb86a8b2277f8c441c99c6275d4bedf9d3913b7e9d2b6156",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "model_key": "openai/gpt-oss-120b"
+        },
+        {
+          "artifact_id": "mlx-mxfp4-q8",
+          "hash": "f25592861e0b7f4eb8489d9103214f3f0dc4f798bb0e4e0cd817ff2f4191f1b1",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "model_key": "openai/gpt-oss-20b"
+        },
+        {
+          "artifact_id": "mlx-2bit",
+          "hash": "fe25aaa59aeb54f5ce080818b28808286d26283a61200cb1efb377ac7db62262",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "model_key": "prism-ml/ternary-bonsai-2-2b-mlx-2bit"
+        },
+        {
+          "artifact_id": "mlx-4bit",
+          "hash": "a0ca3d59f301f08ae4c4c2010b07f80b890d35f4e8562c213b1d01aed8328e42",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "model_key": "qwen/qwen3-30b-a3b-instruct-2507"
+        },
+        {
+          "artifact_id": "mlx-4bit",
+          "hash": "7777cf15fbd096d66ccec5f0f76ec915eb4800f4f3e8dd899d1b4ae3041387ae",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "model_key": "qwen/qwen3.5-27b"
+        },
+        {
+          "artifact_id": "mlx-4bit",
+          "hash": "893c5fd5a4f6adf19a97faeff19d67f2b7a5d8c29e81cd857bd5949ce0b31e43",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "model_key": "qwen/qwen3.5-35b-a3b"
+        },
+        {
+          "artifact_id": "mlx-4bit",
+          "hash": "518ef47c298783d8547b50406e84548e5bf7705b82355a38f9eaef1368817931",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "model_key": "qwen/qwen3.6-27b"
+        },
+        {
+          "artifact_id": "mlx-4bit",
+          "hash": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "model_key": "qwen/qwen3.6-35b-a3b"
+        },
+        {
+          "artifact_id": "mlx-4bit",
+          "hash": "8a8786e902127e9175f5be0d7c8bcf4dd32323a0521e4d9a20761608a07a6d05",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "model_key": "qwen/qwen3.8-27b"
+        },
+        {
+          "artifact_id": "mlx-4bit",
+          "hash": "b7749cc57f37f7e9239d0f9b091bcffe6d7629e48af75e8cb84c1cdca1780973",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "model_key": "qwen2.5-coder-32b-instruct"
+        },
+        {
+          "artifact_id": "mlx-4bit",
+          "hash": "69169cceb643f108755f96dba26d8647862e38a7f82cb1b5b25aff8f204967aa",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "model_key": "qwen3-32b"
+        },
+        {
+          "artifact_id": "mlx-4bit",
+          "hash": "1f591f9c4fb38d05ea2d879d89a6eeab485c23a04eb75e3e0a289db9d95ec877",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "model_key": "qwen3-8b"
+        },
+        {
+          "artifact_id": "mlx-4bit",
+          "hash": "10adb5da9840c8fe0e3036b10f6e2f8f34b41c615f3925b4132302e9cdbab9c0",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "model_key": "qwen3-coder-30b-a3b-instruct"
+        },
+        {
+          "artifact_id": "mlx-4bit",
+          "hash": "7fbf8e5005fbdadbf1d345a04b7d283ad20aec959ee001bc4b0dc902ea7f11ed",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "model_key": "z-ai/glm-4.5-air"
+        },
+        {
+          "artifact_id": "mlx-oq4e-mtp",
+          "hash": "7299b6a71a38490e378e9eb6524c426392aa96e3fd561007e0540134bbef48f9",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "model_key": "zai-org/glm-5.3-flash"
+        }
+      ],
+      "feeds": {
+        "autotune-artifacts.json": {
+          "bytes": 16141,
+          "sha256": "d81ce2d8144e155a8d716d55e3b2b0a8f9181d27f6083b2d1c4ee49217713ca5",
+          "signer_key_id": "streamvc-autotune-static-v4",
+          "version": "published-2026-10-27-bonsai2b-candidate-v1"
+        },
+        "autotune-candidates.json": {
+          "bytes": 20070,
+          "sha256": "568dfb349b0e42a00863a5d5800ef11927afeaebcb1df69cd2f2bc3e7d899a39",
+          "signer_key_id": "streamvc-autotune-static-v4",
+          "version": "published-2026-10-27-bonsai2b-candidate-v1"
+        },
+        "continuous-batching-policy.json": {
+          "bytes": 4926,
+          "sha256": "1acc7948cd699d78bd6527a0ea79e77167d2ef12c190aa3d863b522b3159b310",
+          "signer_key_id": "streamvc-autotune-static-v4",
+          "version": "published-2026-10-27-bonsai2b-candidate-v1"
+        },
+        "demand-rank.json": {
+          "bytes": 2441,
+          "sha256": "1be4949838a230637ef9e6f0d7fedd417c5befb4c6b09490a588e769fab411c0",
+          "signer_key_id": "streamvc-autotune-static-v4",
+          "version": "published-2026-10-27-bonsai2b-candidate-v1"
+        },
+        "native-mtp-admission.json": {
+          "bytes": 45673,
+          "sha256": "f9ab112e63123fb599eaf1a8194f2fef003f971b90feed0a90b56425ee14a4bc",
+          "signer_key_id": "streamvc-autotune-static-v4",
+          "version": "published-2026-10-27-bonsai2b-candidate-v1"
+        },
+        "rate-card.json": {
+          "bytes": 4447,
+          "sha256": "66474167251bb7a429a8d04cc8da72b46f493aeaf6de7028943ec5f4bd87787b",
+          "signer_key_id": "streamvc-autotune-static-v4",
+          "version": "10f735e38702e786a9da904b54c7d3764548e9ffbf09d562be1803a2ec26c20c"
+        },
+        "tier2-catalog.json": {
+          "bytes": 8223,
+          "sha256": "8c64863d3c05d91b40ae98990dd0723248af6adac4e0d9615a9b9e0cbf9bcf11",
+          "signer_key_id": "tier2-coordinator-key:707a860299e6a37f",
+          "version": "macprovider-tier2-model-catalog-2026-10-23-deepseek-v4-flash-v1"
+        }
+      },
+      "generated_at": "2026-10-27T07:38:00Z",
+      "intake_decision_sha256": null,
+      "native_mtp_admission_sha256": "f9ab112e63123fb599eaf1a8194f2fef003f971b90feed0a90b56425ee14a4bc",
+      "policy_version": "autotune-policy-v1"
+    },
+    "published-2026-10-27-glm53-cached-turns-v274": {
+      "artifact_bindings": [
+        {
+          "artifact_id": "mlx-mxfp4",
+          "hash": "58ee40d4c0bc436695d1d8d6a6cdfdb0326ec37f25e13ec98ea1d5c0878e732c",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "model_key": "deepseek/deepseek-v4-flash"
+        },
+        {
+          "artifact_id": "mlx-4bit",
+          "hash": "b245e39f1476907653e3fe1897bba36b0e2a90c471828a9e13b5fdf3e1b6db01",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "model_key": "google-gemma-4-26b-a4b-it"
+        },
+        {
+          "artifact_id": "mlx-4bit",
+          "hash": "67b26d6b1c50dc8836ab3705b06276a43c74c8f66247f9b112e232b58abbd99f",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "model_key": "meta-llama/llama-3.1-8b-instruct"
+        },
+        {
+          "artifact_id": "gguf-q4-k-m",
+          "hash": "6c1a2b41161032677be168d354123594c0e6e67d2b9227c84f296ad037c728ff",
+          "hash_algorithm": "macprovider.gguf-file.v1",
+          "model_key": "meta-llama/llama-3.2-3b-instruct"
+        },
+        {
+          "artifact_id": "mlx-4bit",
+          "hash": "e7e5bff4248768b4db7a53afb3b514ba5867b800f63d1abd0330eaf08e54aa90",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "model_key": "meta-llama/llama-3.2-3b-instruct"
+        },
+        {
+          "artifact_id": "mlx-4bit",
+          "hash": "5c65f865d25fa86c34bab436334c13307496e0e905cd0a6c8bef33312cc12773",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "model_key": "mlx-community/qwen2-vl-2b-instruct-4bit"
+        },
+        {
+          "artifact_id": "mlx-4bit",
+          "hash": "1bc78f214f9a042eaeb290b1fa4cb29915df1028f79d8479266349166c40a71f",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "model_key": "nvidia/nemotron-3-nano-30b-a3b"
+        },
+        {
+          "artifact_id": "mlx-4bit",
+          "hash": "c8b99b694c6730ebcb86a8b2277f8c441c99c6275d4bedf9d3913b7e9d2b6156",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "model_key": "openai/gpt-oss-120b"
+        },
+        {
+          "artifact_id": "mlx-mxfp4-q8",
+          "hash": "f25592861e0b7f4eb8489d9103214f3f0dc4f798bb0e4e0cd817ff2f4191f1b1",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "model_key": "openai/gpt-oss-20b"
+        },
+        {
+          "artifact_id": "mlx-4bit",
+          "hash": "a0ca3d59f301f08ae4c4c2010b07f80b890d35f4e8562c213b1d01aed8328e42",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "model_key": "qwen/qwen3-30b-a3b-instruct-2507"
+        },
+        {
+          "artifact_id": "mlx-4bit",
+          "hash": "7777cf15fbd096d66ccec5f0f76ec915eb4800f4f3e8dd899d1b4ae3041387ae",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "model_key": "qwen/qwen3.5-27b"
+        },
+        {
+          "artifact_id": "mlx-4bit",
+          "hash": "893c5fd5a4f6adf19a97faeff19d67f2b7a5d8c29e81cd857bd5949ce0b31e43",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "model_key": "qwen/qwen3.5-35b-a3b"
+        },
+        {
+          "artifact_id": "mlx-4bit",
+          "hash": "518ef47c298783d8547b50406e84548e5bf7705b82355a38f9eaef1368817931",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "model_key": "qwen/qwen3.6-27b"
+        },
+        {
+          "artifact_id": "mlx-4bit",
+          "hash": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "model_key": "qwen/qwen3.6-35b-a3b"
+        },
+        {
+          "artifact_id": "mlx-4bit",
+          "hash": "8a8786e902127e9175f5be0d7c8bcf4dd32323a0521e4d9a20761608a07a6d05",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "model_key": "qwen/qwen3.8-27b"
+        },
+        {
+          "artifact_id": "mlx-4bit",
+          "hash": "b7749cc57f37f7e9239d0f9b091bcffe6d7629e48af75e8cb84c1cdca1780973",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "model_key": "qwen2.5-coder-32b-instruct"
+        },
+        {
+          "artifact_id": "mlx-4bit",
+          "hash": "69169cceb643f108755f96dba26d8647862e38a7f82cb1b5b25aff8f204967aa",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "model_key": "qwen3-32b"
+        },
+        {
+          "artifact_id": "mlx-4bit",
+          "hash": "1f591f9c4fb38d05ea2d879d89a6eeab485c23a04eb75e3e0a289db9d95ec877",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "model_key": "qwen3-8b"
+        },
+        {
+          "artifact_id": "mlx-4bit",
+          "hash": "10adb5da9840c8fe0e3036b10f6e2f8f34b41c615f3925b4132302e9cdbab9c0",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "model_key": "qwen3-coder-30b-a3b-instruct"
+        },
+        {
+          "artifact_id": "mlx-4bit",
+          "hash": "7fbf8e5005fbdadbf1d345a04b7d283ad20aec959ee001bc4b0dc902ea7f11ed",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "model_key": "z-ai/glm-4.5-air"
+        },
+        {
+          "artifact_id": "mlx-oq4e-mtp",
+          "hash": "7299b6a71a38490e378e9eb6524c426392aa96e3fd561007e0540134bbef48f9",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "model_key": "zai-org/glm-5.3-flash"
+        }
+      ],
+      "feeds": {
+        "autotune-artifacts.json": {
+          "bytes": 15388,
+          "sha256": "921857783714242bb346a90802709265a5839c9c52ef29a403666077bb13c00b",
+          "signer_key_id": "streamvc-autotune-static-v4",
+          "version": "published-2026-10-27-glm53-cached-turns-v274"
+        },
+        "autotune-candidates.json": {
+          "bytes": 19156,
+          "sha256": "90700d6438bf6c22fca9b19f23756340cbb1e2b5edfd2303e923c70a349629a4",
+          "signer_key_id": "streamvc-autotune-static-v4",
+          "version": "published-2026-10-27-glm53-cached-turns-v274"
+        },
+        "continuous-batching-policy.json": {
+          "bytes": 4928,
+          "sha256": "921a76fb91024433ee32b01333b3533a0dab8b1790a16dbf58d80a4672beeaea",
+          "signer_key_id": "streamvc-autotune-static-v4",
+          "version": "published-2026-10-27-glm53-cached-turns-v274"
+        },
+        "demand-rank.json": {
+          "bytes": 2325,
+          "sha256": "c0e50966c1102b19895268ddfc7b953ced558af7b3e7e7eeaec58289294dbaab",
+          "signer_key_id": "streamvc-autotune-static-v4",
+          "version": "published-2026-10-27-glm53-cached-turns-v274"
+        },
+        "native-mtp-admission.json": {
+          "bytes": 45675,
+          "sha256": "c67a7d4d1605af2750124516bef235d3aded7f84f628eec8c923af9ba1c8c904",
+          "signer_key_id": "streamvc-autotune-static-v4",
+          "version": "published-2026-10-27-glm53-cached-turns-v274"
+        },
+        "rate-card.json": {
+          "bytes": 4247,
+          "sha256": "e1e18e07af8e88f24d28cc3dd7efef5fe56894e43631798b41e0dc9abbcbc34e",
+          "signer_key_id": "streamvc-autotune-static-v4",
+          "version": "0caf108454f303cecbf2f271665641a1f7e3f5d0d0724f67f4979b5d20681387"
+        },
+        "tier2-catalog.json": {
+          "bytes": 8223,
+          "sha256": "8c64863d3c05d91b40ae98990dd0723248af6adac4e0d9615a9b9e0cbf9bcf11",
+          "signer_key_id": "tier2-coordinator-key:707a860299e6a37f",
+          "version": "macprovider-tier2-model-catalog-2026-10-23-deepseek-v4-flash-v1"
+        }
+      },
+      "generated_at": "2026-10-27T00:39:00Z",
+      "intake_decision_sha256": null,
+      "native_mtp_admission_sha256": "c67a7d4d1605af2750124516bef235d3aded7f84f628eec8c923af9ba1c8c904",
+      "policy_version": "autotune-policy-v1"
     }
   },
   "schema_version": "macprovider.autotune-release-ledger.v4",

@@ -22,6 +22,7 @@ const (
 	toolGrammarGemma4  = "gemma4"
 	toolGrammarHarmony = "harmony"
 	toolGrammarDSML    = "dsml"
+	toolGrammarLFM2    = "lfm2"
 )
 
 func toolGrammarFamily(model string) string {
@@ -45,6 +46,8 @@ func toolGrammarFamily(model string) string {
 		return toolGrammarQwen
 	case strings.Contains(id, "deepseek-v4"), strings.Contains(id, "deepseek_v4"):
 		return toolGrammarDSML
+	case strings.Contains(id, "lfm2.5-24b-a2b"):
+		return toolGrammarLFM2
 	}
 	return ""
 }

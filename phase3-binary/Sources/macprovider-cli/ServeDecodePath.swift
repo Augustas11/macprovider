@@ -2,6 +2,7 @@ import Foundation
 import MacProviderCore
 import MLX
 import MLXLMCommon
+import MLXVLM
 
 // SPEC-048-R013 (0.1.51): the production continuous-batching decode path
 // configuration — backend construction, compiled-decode mode, cache bridge,
@@ -164,11 +165,15 @@ extension ModelRuntime {
         let processor = await container.processor
         let tokenizer = await container.tokenizer
         let configuration = await container.configuration
+        let supportsBonsaiThinking = await container.perform { context in
+            context.model is PrismHadamardQwen35
+        }
         return ContinuousBatchTextPreparationLane(
             processor: processor,
             tokenizer: tokenizer,
             configuration: configuration,
-            hasRecurrentLayers: resolvedCacheKinds.contains(.recurrentMamba)
+            hasRecurrentLayers: resolvedCacheKinds.contains(.recurrentMamba),
+            supportsBonsaiThinking: supportsBonsaiThinking
         )
     }
 
@@ -267,6 +272,9 @@ extension ModelRuntime {
         maxContextTokens: Int,
         modelID: String?,
         modelSHA256: String?,
+        modelCapabilities: PagedKVRuntimeModelCapabilities = .init(
+            modelFamily: "unknown", requiresMoEDispatch: false
+        ),
         weightsGeneration: Int,
         kvBitsOverride: Int?,
         prefillStepSize: Int?,
@@ -331,7 +339,8 @@ extension ModelRuntime {
         // recurrent layers from a checkpoint. Off, a keyed hybrid row keeps the
         // serial-format materialize at terminal instead.
         let isHybrid = cacheKinds.contains(.recurrentMamba)
-        let contiguousCacheBridge = isHybrid && !cachedTurns ? nil : PagedKVRuntimeContiguousCacheBridge()
+        let contiguousCacheBridge = !modelCapabilities.supportsContiguousCacheMaterialization || (isHybrid && !cachedTurns)
+            ? nil : PagedKVRuntimeContiguousCacheBridge()
         let maxDecodeLockstepWindow = servePathDecodeLockstepWindow(cacheKinds: cacheKinds)
         let prefillGrouping = await continuousBatchPrefillGrouping(container: container, modelID: modelID)
         return makeContinuousBatchScheduler(
@@ -342,6 +351,7 @@ extension ModelRuntime {
                 descriptor: descriptor,
                 layerCount: cacheKinds.count,
                 cacheKinds: cacheKinds,
+                recurrentStateLayout: modelCapabilities.recurrentStateLayout,
                 contiguousCacheBridge: contiguousCacheBridge,
                 // Off on the serve path. A replayed `MLX.compile` step never
                 // re-runs `KVCacheSimple.update`'s Swift offset/grow logic, so
@@ -569,6 +579,7 @@ extension ModelRuntime {
                 nativeMTPCompleteWindowBytesByDepth: nativeMTPAdmission?.completeWindowBytesByDepth ?? [],
                 nativeMTPMaximumActiveRows: nativeMTPAdmission?.maximumNativeActiveRows ?? 0,
                 nativeMTPTupleFence: nativeMTPAdmission?.tupleFence,
+                nativeMTPAdaptationConfig: nativeMTPAdmission?.adaptationConfig,
                 ingestProvenance: request.ingestProvenance
             )
         )

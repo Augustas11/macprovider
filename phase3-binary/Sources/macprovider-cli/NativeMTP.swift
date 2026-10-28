@@ -45,6 +45,7 @@ struct NativeMTPCapability: Sendable, Equatable {
     /// The signed tuple qualified sampled rows (SPEC-023-R024
     /// `native_mtp_sampled_text_v1`); greedy-only tuples route them ordinary.
     let supportsSampling: Bool
+    let adaptationConfig: NativeMTPAdaptationConfig?
 
     init(
         admitted: Bool,
@@ -63,7 +64,8 @@ struct NativeMTPCapability: Sendable, Equatable {
         family: String? = nil,
         throughputDeltaPPM: Int = 0,
         maximumNativeActiveRows: Int = Int.max,
-        supportsSampling: Bool = false
+        supportsSampling: Bool = false,
+        adaptationConfig: NativeMTPAdaptationConfig? = nil
     ) {
         self.admitted = admitted
         self.revoked = revoked
@@ -82,6 +84,7 @@ struct NativeMTPCapability: Sendable, Equatable {
         self.throughputDeltaPPM = throughputDeltaPPM
         self.maximumNativeActiveRows = max(1, maximumNativeActiveRows)
         self.supportsSampling = supportsSampling
+        self.adaptationConfig = adaptationConfig
     }
 
     static let unavailable = NativeMTPCapability(
@@ -233,13 +236,21 @@ struct NativeMTPSelector: Sendable {
         guard request.stop.isEmpty || nativeCapability.supportsStopSequences else {
             return .capabilityMismatch
         }
-        // DeepSeek's documented reasoning effort changes prompt encoding before
-        // prefill; the signed adapter still uses the same greedy decode path.
-        // Other adapters retain their closed request feature allowlist.
-        let admittedKeys = nativeCapability.family == NativeMTPAdmissionSidecar.deepseekDSparkFamilyAdapter
-            ? admittedTopLevelKeys.union(["reasoning_effort"])
-            : admittedTopLevelKeys
-        guard request.topLevelKeys.isSubset(of: admittedKeys),
+        // oMLX's rendered-prompt eligibility: tool/history and reasoning tokens
+        // use the ordinary parser after target verification. Only the GLM adapter
+        // implements these shapes. The existing signed sampled profile also
+        // authorizes their expanded scope; an identity-only release rebind of
+        // the old greedy profile must preserve its prior text-only scope.
+        let supportsToolPrompt = nativeCapability.family == "glm5_next_mtp_v1"
+            && nativeCapability.supportsSampling
+        var eligibleKeys = admittedTopLevelKeys
+        if supportsToolPrompt {
+            eligibleKeys.formUnion(["reasoning_effort", "parallel_tool_calls"])
+        }
+        if nativeCapability.family == NativeMTPAdmissionSidecar.deepseekDSparkFamilyAdapter {
+            eligibleKeys.insert("reasoning_effort")
+        }
+        guard request.topLevelKeys.isSubset(of: eligibleKeys),
               request.streamOptionKeys.isSubset(of: admittedStreamOptionKeys) else {
             return .unknownRequestField
         }
@@ -279,9 +290,13 @@ struct NativeMTPSelector: Sendable {
         guard case .text = request.responseFormat else {
             return .structuredOutput
         }
-        guard hasNoTools(request.promptSource.tools),
-              isAbsentOrNull(request.promptSource.toolChoice),
-              !hasToolTurnState(request.messages) else {
+        // Grammar processors are mutable target-sampler state. Until the
+        // verifier snapshots them, required/named tools must remain ordinary.
+        guard !GrammarConstraintState.isRequired(request),
+              !request.stopsAfterFirstCompleteToolCall else { return .tools }
+        guard supportsToolPrompt || (hasNoTools(request.promptSource.tools)
+              && isAbsentOrNull(request.promptSource.toolChoice)
+              && !hasToolTurnState(request.messages)) else {
             return .tools
         }
         guard isAbsentNullOrFalse(request.promptSource.logprobs),
@@ -375,6 +390,7 @@ struct NativeMTPRuntimeAdmission: Sendable, Equatable {
     let completeWindowBytesByDepth: [Int]
     let maximumNativeActiveRows: Int
     let tupleFence: NativeMTPTupleFence?
+    var adaptationConfig: NativeMTPAdaptationConfig? = nil
 
     var usesNativeMTP: Bool {
         effectivePath == .nativeMTP
@@ -446,7 +462,8 @@ struct NativeMTPRuntimeAdmission: Sendable, Equatable {
             maximumCompletionTokens: capability.maximumCompletionTokens,
             completeWindowBytesByDepth: capability.completeWindowBytesByDepth,
             maximumNativeActiveRows: capability.maximumNativeActiveRows,
-            tupleFence: nil
+            tupleFence: nil,
+            adaptationConfig: capability.adaptationConfig
         )
     }
 
@@ -502,7 +519,8 @@ struct NativeMTPRuntimeAdmission: Sendable, Equatable {
             maximumCompletionTokens: maximumCompletionTokens,
             completeWindowBytesByDepth: completeWindowBytesByDepth,
             maximumNativeActiveRows: maximumNativeActiveRows,
-            tupleFence: usesNativeMTP ? fence : nil
+            tupleFence: usesNativeMTP ? fence : nil,
+            adaptationConfig: adaptationConfig
         )
     }
 }

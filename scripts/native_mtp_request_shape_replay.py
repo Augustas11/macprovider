@@ -21,6 +21,8 @@ from typing import Any
 
 CAPTURE_SCHEMA = "macprovider.native-mtp-request-shape-capture.v1"
 PLAN_SCHEMA = "macprovider.native-mtp-request-shape-replay-plan.v1"
+CAPTURE_SCHEMA_V2 = "macprovider.native-mtp-request-shape-capture.v2"
+PLAN_SCHEMA_V2 = "macprovider.native-mtp-request-shape-replay-plan.v2"
 POLICY_SCHEMA = "macprovider.native-mtp-post-gateway-replay-policy.v1"
 POLICY_ISSUE = "SPEC-048-R015-post-gateway-replay"
 CONFIDENCE_METHOD = "paired_block_bootstrap_holm_v1"
@@ -60,11 +62,13 @@ SANITIZED_TEXT_KEYS = {
 LEASE_STATES = {"not_applicable", "miss", "hit", "missing"}
 
 REPLAY_RESULT_SCHEMA = "macprovider.native-mtp-request-shape-replay.v1"
+REPLAY_RESULT_SCHEMA_V2 = "macprovider.native-mtp-request-shape-replay.v2"
 ANALYZER_JSONL_SCHEMA = "macprovider.native-mtp-post-gateway-replay.v1"
 ANALYZER_PATHS = {"ordinary": "mtp_disabled", "native_mtp": "observed_mixed"}
 EXPECTED_TARGET_STOP_CONTROL = "lab_decode_output_cap_by_request_id"
 EXPECTED_COMPLETION_LENGTH_BINDING = "effective_max_output_tokens drives admission; LAB decode output caps bind measured generation to target_completion_tokens without cancellation; exact measured match is required for qualification"
 REPLAY_HEADER_KEYS = {
+    "measurement_identity",
     "schema",
     "record_type",
     "provider_commit",
@@ -94,7 +98,12 @@ REPLAY_HEADER_KEYS = {
     "sample_filter_excluded_count",
     "request_shapes",
 }
+REPLAY_HEADER_V2_KEYS = REPLAY_HEADER_KEYS | {
+    "capture_role", "capture_native_mtp_mode", "capture_build_source_commit",
+    "capture_build_cdhash", "capture_cli_version", "tuple_bounds_sha256", "arrival_schedule",
+}
 REPLAY_RUN_KEYS = {
+    "measurement_identity",
     "schema",
     "record_type",
     "policy_sha256",
@@ -187,6 +196,14 @@ REPLAY_FEATURE_KEYS = {
     "unknown_stream_option_keys_present",
 }
 REPLAY_SHAPE_KEYS = REPLAY_BASE_SHAPE_KEYS | REPLAY_FEATURE_KEYS
+REPLAY_SHAPE_V2_KEYS = (REPLAY_SHAPE_KEYS - {
+    "pre_capacity_selector_reason", "pre_capacity_eligible", "effective_path",
+}) | {
+    "observed_selector_reason", "observed_selector_eligible", "observed_effective_path",
+    "served_model_family", "parallel_tool_calls_state", "reasoning_effort_state",
+    "effective_reasoning_effort", "tool_choice_function_index", "tool_grammar_required",
+    "projected_selector_reason", "projected_selector_eligible",
+}
 REPLAY_COMPLETION_KEYS = {
     "request_id",
     "target_completion_tokens",
@@ -281,6 +298,7 @@ CAPTURE_HEADER_KEYS = {
     "max_records",
     "max_bytes",
 }
+CAPTURE_HEADER_V2_KEYS = CAPTURE_HEADER_KEYS | {"capture_role"}
 CAPTURE_SHAPE_KEYS = {
     "schema",
     "record_type",
@@ -348,6 +366,27 @@ CAPTURE_SHAPE_KEYS = {
     "pre_capacity_eligible",
     "effective_path",
 }
+CAPTURE_V1_OBSERVATION_KEYS = {
+    "pre_capacity_selector_reason", "pre_capacity_eligible", "effective_path",
+}
+CAPTURE_V2_CONTROL_KEYS = {
+    "observed_selector_reason", "observed_selector_eligible", "observed_effective_path",
+    "served_model_family", "parallel_tool_calls_state", "reasoning_effort_state",
+    "effective_reasoning_effort", "tool_choice_function_index", "tool_grammar_required",
+}
+CAPTURE_SHAPE_V2_KEYS = (CAPTURE_SHAPE_KEYS - CAPTURE_V1_OBSERVATION_KEYS) | CAPTURE_V2_CONTROL_KEYS
+V2_MODEL_FAMILIES = {"glm5_next_mtp_v1", "qwen3_5_mtp_v1", "unknown"}
+V2_PARALLEL_TOOL_CALLS_STATES = {"absent", "true", "false", "unknown"}
+V2_REASONING_EFFORT_STATES = {"absent", "null", "none", "minimal", "low", "medium", "high", "xhigh", "max", "unknown"}
+V2_EFFECTIVE_REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+V2_TOOL_CHOICE_KINDS = {"absent", "none", "auto", "required", "function", "string_other", "object_other", "other"}
+SELECTOR_REASONS = {
+    "eligible", "mode_off", "classic_draft_configured", "sampling", "multiple_completions", "tools",
+    "structured_output", "logprobs", "logit_controls", "reasoning_or_template", "unknown_request_field",
+    "conversation_key", "multimodal", "unsupported_processor", "unsupported_state_cache",
+    "insufficient_verification_capacity", "capacity_above_native_bound", "capability_mismatch",
+    "tuple_not_admitted", "tuple_revoked", "revocation_state_unavailable",
+}
 TUPLE_KEYS = {
     "maximum_prompt_tokens",
     "maximum_completion_tokens",
@@ -363,6 +402,7 @@ TUPLE_KEYS = {
     "tuple_revoked",
     "revocation_state_available",
 }
+TUPLE_V2_KEYS = TUPLE_KEYS | {"family_adapter"}
 
 
 def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict:
@@ -466,9 +506,11 @@ def _require_count(record: dict, key: str, path: str, failures: list[str], *, po
 
 @dataclass(frozen=True)
 class CapturedShape:
+    capture_schema: str
     shape_id: str
     prompt_tokens: int
     completion_tokens: int
+    generated_completion_tokens: int
     requested_max_completion_tokens: int | None
     effective_max_output_tokens: int
     conversation_key_present: bool
@@ -505,12 +547,92 @@ class CapturedShape:
     unknown_top_level_keys_present: bool
     unknown_stream_option_keys_present: bool
     sanitized_geometry: dict[str, object]
+    v2_controls: dict[str, object]
+
+
+def _v2_shape_violations(record: dict, path: str) -> list[str]:
+    failures: list[str] = []
+    observed_reason = record.get("observed_selector_reason")
+    if not isinstance(observed_reason, str) or observed_reason not in SELECTOR_REASONS:
+        failures.append(f"{path}.observed_selector_reason:field_invalid")
+    observed_eligible = record.get("observed_selector_eligible")
+    if not isinstance(observed_eligible, bool):
+        failures.append(f"{path}.observed_selector_eligible:field_invalid")
+    elif isinstance(observed_reason, str) and observed_reason in SELECTOR_REASONS and observed_eligible != (observed_reason == "eligible"):
+        failures.append(f"{path}.observed_selector_eligible:field_invalid")
+    if not isinstance(record.get("observed_effective_path"), str) or record.get("observed_effective_path") not in {"ordinary", "native_mtp"}:
+        failures.append(f"{path}.observed_effective_path:field_invalid")
+    if record.get("observed_effective_path") == "native_mtp" and record.get("observed_selector_eligible") is not True:
+        failures.append(f"{path}.native_path_without_eligible_observation")
+    if not isinstance(record.get("served_model_family"), str) or record.get("served_model_family") not in V2_MODEL_FAMILIES:
+        failures.append(f"{path}.served_model_family:field_invalid")
+    if not isinstance(record.get("parallel_tool_calls_state"), str) or record.get("parallel_tool_calls_state") not in V2_PARALLEL_TOOL_CALLS_STATES:
+        failures.append(f"{path}.parallel_tool_calls_state:field_invalid")
+    if not isinstance(record.get("reasoning_effort_state"), str) or record.get("reasoning_effort_state") not in V2_REASONING_EFFORT_STATES:
+        failures.append(f"{path}.reasoning_effort_state:field_invalid")
+    effective_reasoning_effort = record.get("effective_reasoning_effort")
+    if effective_reasoning_effort is not None and (not isinstance(effective_reasoning_effort, str) or effective_reasoning_effort not in V2_EFFECTIVE_REASONING_EFFORTS):
+        failures.append(f"{path}.effective_reasoning_effort:field_invalid")
+    if record.get("reasoning_effort_state") == "unknown" and effective_reasoning_effort is not None:
+        failures.append(f"{path}.effective_reasoning_effort:field_invalid")
+    index = record.get("tool_choice_function_index")
+    if index is not None and (not _is_count(index)):
+        failures.append(f"{path}.tool_choice_function_index:field_invalid")
+    if not isinstance(record.get("tool_grammar_required"), bool):
+        failures.append(f"{path}.tool_grammar_required:field_invalid")
+    kind = record.get("tool_choice_kind")
+    if not isinstance(kind, str) or kind not in V2_TOOL_CHOICE_KINDS:
+        failures.append(f"{path}.tool_choice_kind:field_invalid")
+    elif isinstance(record.get("tool_choice_present"), bool) and record["tool_choice_present"] != (kind != "absent"):
+        failures.append(f"{path}.tool_choice_present:field_invalid")
+    if isinstance(kind, str) and kind in {"required", "function"} and record.get("tool_grammar_required") is not True:
+        failures.append(f"{path}.tool_grammar_required:field_invalid")
+    if kind == "function":
+        count = record.get("tool_count")
+        if index is not None and (_is_count(count) and index >= count):
+            failures.append(f"{path}.tool_choice_function_index:field_invalid")
+    elif index is not None:
+        failures.append(f"{path}.tool_choice_function_index:field_invalid")
+    return failures
+
+
+def _v2_unreproducible(shape: CapturedShape) -> bool:
+    values = shape.v2_controls
+    return (
+        not isinstance(shape.sanitized_geometry.get("served_model_hash_sha256"), str)
+        or not HEX64.match(shape.sanitized_geometry["served_model_hash_sha256"])
+        or not isinstance(shape.sanitized_geometry.get("served_weights_manifest_sha256"), str)
+        or not HEX64.match(shape.sanitized_geometry["served_weights_manifest_sha256"])
+        or values.get("served_model_family") == "unknown"
+        or values.get("parallel_tool_calls_state") == "unknown"
+        or values.get("reasoning_effort_state") == "unknown"
+        or (shape.sanitized_geometry.get("tool_choice_kind") == "function" and values.get("tool_choice_function_index") is None)
+        or str(shape.sanitized_geometry.get("tool_choice_kind", "")).endswith("_other")
+        or shape.unknown_request_fields_present
+    )
 
 
 def _shape_from_record(record: object, path: str) -> tuple[CapturedShape | None, list[str]]:
-    failures = _strict_object(record, CAPTURE_SHAPE_KEYS, path)
     if not isinstance(record, dict):
-        return None, failures
+        return None, _strict_object(record, CAPTURE_SHAPE_KEYS, path)
+    capture_schema = record.get("schema")
+    v2_controls: dict[str, object] = {}
+    if capture_schema == CAPTURE_SCHEMA_V2:
+        failures = _strict_object(record, CAPTURE_SHAPE_V2_KEYS, path)
+        failures.extend(_v2_shape_violations(record, path))
+        v2_controls = {key: record.get(key) for key in CAPTURE_V2_CONTROL_KEYS}
+        normalized = dict(record)
+        for key in CAPTURE_V2_CONTROL_KEYS:
+            normalized.pop(key, None)
+        normalized.update({
+            "schema": CAPTURE_SCHEMA,
+            "pre_capacity_selector_reason": record.get("observed_selector_reason"),
+            "pre_capacity_eligible": record.get("observed_selector_eligible"),
+            "effective_path": record.get("observed_effective_path"),
+        })
+        record = normalized
+    else:
+        failures = _strict_object(record, CAPTURE_SHAPE_KEYS, path)
     failures.extend(_privacy_violations(record, path))
     if record.get("schema") != CAPTURE_SCHEMA or record.get("record_type") != "request_shape":
         failures.append(f"{path}:schema_invalid")
@@ -518,7 +640,7 @@ def _shape_from_record(record: object, path: str) -> tuple[CapturedShape | None,
         failures.append(f"{path}.shape_id:field_invalid")
     prompt_tokens = _require_count(record, "prompt_tokens", path, failures, positive=True)
     completion_tokens = _require_count(record, "completion_tokens", path, failures, positive=True)
-    _require_count(record, "generated_completion_tokens", path, failures)
+    generated_completion_tokens = _require_count(record, "generated_completion_tokens", path, failures)
     requested_max_completion_tokens_raw = record.get("requested_max_completion_tokens")
     if requested_max_completion_tokens_raw is None:
         requested_max_completion_tokens = None
@@ -611,6 +733,8 @@ def _shape_from_record(record: object, path: str) -> tuple[CapturedShape | None,
         "response_schema_geometry",
         "requested_top_logprobs",
         "anonymous_cache_group_sha256",
+        "served_model_hash_sha256",
+        "served_weights_manifest_sha256",
     }
     sanitized_geometry = {key: record.get(key) for key in sanitized_geometry_keys if key in record}
     requested_n = _require_count(record, "requested_n", path, failures, positive=True)
@@ -621,9 +745,11 @@ def _shape_from_record(record: object, path: str) -> tuple[CapturedShape | None,
     if failures:
         return None, failures
     return CapturedShape(
+        capture_schema=capture_schema,
         shape_id=record["shape_id"],
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
+        generated_completion_tokens=generated_completion_tokens,
         requested_max_completion_tokens=requested_max_completion_tokens,
         effective_max_output_tokens=effective_max_output_tokens,
         conversation_key_present=key_present,
@@ -639,6 +765,7 @@ def _shape_from_record(record: object, path: str) -> tuple[CapturedShape | None,
         captured_pre_capacity_selector_reason=captured_reason,
         captured_pre_capacity_eligible=captured_eligible,
         sanitized_geometry=sanitized_geometry,
+        v2_controls=v2_controls,
         **bools,
     ), []
 
@@ -657,9 +784,10 @@ def load_capture(path: Path) -> tuple[dict, list[CapturedShape]]:
                 failures.append(f"{path}:{lineno}:record_not_object")
                 continue
             if record.get("record_type") == "header":
-                failures.extend(_strict_object(record, CAPTURE_HEADER_KEYS, f"{path}:{lineno}:header"))
+                header_keys = CAPTURE_HEADER_V2_KEYS if record.get("schema") == CAPTURE_SCHEMA_V2 else CAPTURE_HEADER_KEYS
+                failures.extend(_strict_object(record, header_keys, f"{path}:{lineno}:header"))
                 failures.extend(_privacy_violations(record, f"{path}:{lineno}:header"))
-                if record.get("schema") != CAPTURE_SCHEMA:
+                if record.get("schema") not in {CAPTURE_SCHEMA, CAPTURE_SCHEMA_V2}:
                     failures.append(f"{path}:{lineno}:header_schema_invalid")
                 if header is not None:
                     failures.append(f"{path}:{lineno}:duplicate_header")
@@ -674,11 +802,23 @@ def load_capture(path: Path) -> tuple[dict, list[CapturedShape]]:
     if header is None:
         failures.append("missing_header")
     else:
-        missing = sorted(CAPTURE_HEADER_KEYS - set(header))
+        header_schema = header.get("schema")
+        header_keys = CAPTURE_HEADER_V2_KEYS if header_schema == CAPTURE_SCHEMA_V2 else CAPTURE_HEADER_KEYS
+        missing = sorted(header_keys - set(header))
         if missing:
             failures.append("header_missing_fields:" + ",".join(missing))
-        if header.get("native_mtp_mode") != "off" or header.get("capture_requires_native_mtp_off") is not True:
-            failures.append("header_capture_not_mtp_off")
+        if header_schema == CAPTURE_SCHEMA:
+            if header.get("native_mtp_mode") != "off" or header.get("capture_requires_native_mtp_off") is not True:
+                failures.append("header_capture_not_mtp_off")
+        elif header_schema == CAPTURE_SCHEMA_V2:
+            if header.get("capture_role") != "request_shape_observation_only":
+                failures.append("header_capture_role_invalid")
+            if header.get("native_mtp_mode") not in {"off", "auto"} or header.get("capture_requires_native_mtp_off") is not False:
+                failures.append("header_capture_mode_invalid")
+            if header.get("sample_method") != "opt_in_successful_persistable_completions_observation":
+                failures.append("header_sample_method_invalid")
+        else:
+            failures.append("header_schema_invalid")
         for key in ("captured_at",):
             if not (isinstance(header.get(key), str) and ISO_DATEISH.match(header[key])):
                 failures.append(f"header_{key}_invalid")
@@ -687,14 +827,17 @@ def load_capture(path: Path) -> tuple[dict, list[CapturedShape]]:
                 failures.append(f"header_{key}_invalid")
     if not shapes:
         failures.append("missing_shapes")
+    elif header is not None and any(shape.capture_schema != header.get("schema") for shape in shapes):
+        failures.append("mixed_capture_schemas")
     if failures:
         raise ValueError("capture invalid: " + "; ".join(sorted(set(failures))))
     return header or {}, shapes
 
 
-def load_tuple_bounds(path: Path) -> dict:
+def load_tuple_bounds(path: Path, capture_schema: str = CAPTURE_SCHEMA) -> dict:
     value = _read_json(path)
-    failures = _strict_object(value, TUPLE_KEYS, "tuple")
+    tuple_keys = TUPLE_V2_KEYS if capture_schema == CAPTURE_SCHEMA_V2 else TUPLE_KEYS
+    failures = _strict_object(value, tuple_keys, "tuple")
     failures.extend(_privacy_violations(value, "tuple"))
     if isinstance(value, dict):
         for key in ("maximum_prompt_tokens", "maximum_completion_tokens"):
@@ -707,9 +850,45 @@ def load_tuple_bounds(path: Path) -> dict:
         for key in TUPLE_KEYS - {"maximum_prompt_tokens", "maximum_completion_tokens", "maximum_proposal_depth", "request_feature_profile"}:
             if not isinstance(value.get(key), bool):
                 failures.append(f"tuple.{key}:field_invalid")
+        if capture_schema == CAPTURE_SCHEMA_V2 and value.get("family_adapter") not in {"glm5_next_mtp_v1", "qwen3_5_mtp_v1"}:
+            failures.append("tuple.family_adapter:field_invalid")
     if failures:
         raise ValueError("tuple bounds invalid: " + "; ".join(sorted(set(failures))))
     return value
+
+
+def _v2_arrival_schedule(bench_policy_path: Path | None) -> tuple[dict, str]:
+    if bench_policy_path is None:
+        raise ValueError("v2 capture requires --bench-policy")
+    policy = _read_json(bench_policy_path)
+    if not isinstance(policy, dict):
+        raise ValueError("bench policy invalid: not_object")
+    interval = policy.get("arrival_interval_ms")
+    slots = policy.get("slots")
+    cap = policy.get("max_native_active_rows")
+    if not (_is_count(interval) and isinstance(slots, list) and slots and all(_is_count(slot) and slot > 0 for slot in slots) and _is_count(cap) and cap > 0):
+        raise ValueError("bench policy invalid: arrival_interval_ms_or_capacity")
+    if any(slot > cap for slot in slots) and interval <= 0:
+        raise ValueError("bench policy invalid: arrival_interval_ms_required_for_gated_cells")
+    return ({
+        "kind": "modeled_preregistered_staggered_arrivals",
+        "source": "bench_policy.arrival_interval_ms",
+        "arrival_interval_ms": interval,
+        "offset_rule": "wave_index_times_interval",
+        "order": "capture_sequence",
+        "identical_across_paths": True,
+    }, _sha256_file(bench_policy_path))
+
+
+def _valid_v2_arrival_schedule(value: object) -> bool:
+    return value == {
+        "kind": "modeled_preregistered_staggered_arrivals",
+        "source": "bench_policy.arrival_interval_ms",
+        "arrival_interval_ms": value.get("arrival_interval_ms") if isinstance(value, dict) else None,
+        "offset_rule": "wave_index_times_interval",
+        "order": "capture_sequence",
+        "identical_across_paths": True,
+    } and isinstance(value, dict) and _is_count(value["arrival_interval_ms"]) and value["arrival_interval_ms"] >= 0
 
 
 def _sampler_supports(temperature: float, top_p: float) -> bool:
@@ -742,6 +921,8 @@ def selector_reason(shape: CapturedShape, tuple_bounds: dict) -> str:
         return "capability_mismatch"
     if shape.stop_sequences > 0 and not tuple_bounds["supports_stop_sequences"]:
         return "capability_mismatch"
+    if shape.capture_schema == CAPTURE_SCHEMA_V2:
+        return _v2_selector_reason(shape, tuple_bounds)
     if shape.unknown_request_fields_present:
         return "unknown_request_field"
     if shape.sampling_requested and (
@@ -768,6 +949,68 @@ def selector_reason(shape: CapturedShape, tuple_bounds: dict) -> str:
     if shape.tools_present:
         return "tools"
     if shape.logprobs_requested:
+        return "logprobs"
+    if shape.logit_bias_present:
+        return "logit_controls"
+    if shape.reasoning_or_template_model:
+        return "reasoning_or_template"
+    if shape.conversation_key_present and shape.conversation_key_cache_only:
+        if shape.conversation_cache_lease == "miss" and shape.conversation_cache_cached_prompt_tokens == 0 and not shape.conversation_cache_retained_handoff:
+            return _eligible_or_bound_mismatch(shape, tuple_bounds)
+        return "conversation_key"
+    return _eligible_or_bound_mismatch(shape, tuple_bounds)
+
+
+def _v2_selector_reason(shape: CapturedShape, tuple_bounds: dict) -> str:
+    """Mirror the production NativeMTPSelector's request-shaped guards for v2."""
+    controls = shape.v2_controls
+    family = controls["served_model_family"]
+    parallel = controls["parallel_tool_calls_state"]
+    reasoning = controls["reasoning_effort_state"]
+    tool_kind = shape.sanitized_geometry.get("tool_choice_kind")
+    supports_tool_prompt = (
+        family == "glm5_next_mtp_v1"
+        and tuple_bounds["request_feature_profile"] == "native_mtp_sampled_text_v1"
+    )
+
+    # Production permits the extra request keys only for the GLM sampled adapter.
+    if family == "unknown" or parallel == "unknown" or reasoning == "unknown":
+        return "unknown_request_field"
+    if not supports_tool_prompt and (parallel != "absent" or reasoning != "absent"):
+        return "unknown_request_field"
+    if shape.unknown_request_fields_present:
+        return "unknown_request_field"
+    if shape.requested_temperature != 0.0 or shape.requested_top_p != 1.0:
+        if (
+            tuple_bounds["request_feature_profile"] != "native_mtp_sampled_text_v1"
+            or not _sampler_supports(shape.requested_temperature, shape.requested_top_p)
+        ):
+            return "sampling"
+    if shape.requested_n != 1:
+        return "multiple_completions"
+    if (
+        shape.presence_penalty_nonzero
+        or shape.frequency_penalty_nonzero
+        or shape.top_k_present
+        or shape.min_p_nonzero
+        or shape.repetition_penalty_nondefault
+    ):
+        return "logit_controls"
+    if shape.conversation_key_present and not shape.conversation_key_cache_only:
+        return "conversation_key"
+    if shape.multimodal_requested:
+        return "multimodal"
+    if shape.structured_output_requested:
+        return "structured_output"
+    if controls["tool_grammar_required"] or tool_kind in {"required", "function"}:
+        return "tools"
+    # ChatCompletionRequest.stopsAfterFirstCompleteToolCall is true only for
+    # an explicit false; omitted and true retain OpenAI's parallel default.
+    if parallel == "false":
+        return "tools"
+    if not supports_tool_prompt and (shape.tools_present or shape.tool_choice_present or shape.tool_turn_state_present):
+        return "tools"
+    if shape.logprobs_requested or shape.top_logprobs_requested:
         return "logprobs"
     if shape.logit_bias_present:
         return "logit_controls"
@@ -807,6 +1050,34 @@ def analyzer_shape_template(shape: CapturedShape, tuple_bounds: dict) -> dict:
     return result
 
 
+def _v2_plan_shape_template(shape: CapturedShape, projection: dict, tuple_bounds: dict) -> dict:
+    """The v2 plan carries the complete sanitized replay row, never a live admission claim."""
+    result = dict(projection)
+    result.update({
+        "served_model_hash_sha256": shape.sanitized_geometry["served_model_hash_sha256"],
+        "served_weights_manifest_sha256": shape.sanitized_geometry["served_weights_manifest_sha256"],
+        "target_completion_tokens": shape.completion_tokens,
+        "generated_completion_tokens": shape.generated_completion_tokens,
+        "observed_selector_reason": shape.v2_controls["observed_selector_reason"],
+        "observed_selector_eligible": shape.v2_controls["observed_selector_eligible"],
+        "observed_effective_path": shape.v2_controls["observed_effective_path"],
+        "served_model_family": shape.v2_controls["served_model_family"],
+        "parallel_tool_calls_state": shape.v2_controls["parallel_tool_calls_state"],
+        "reasoning_effort_state": shape.v2_controls["reasoning_effort_state"],
+        "effective_reasoning_effort": shape.v2_controls["effective_reasoning_effort"],
+        "tool_choice_function_index": shape.v2_controls["tool_choice_function_index"],
+        "tool_grammar_required": shape.v2_controls["tool_grammar_required"],
+        "projected_selector_reason": selector_reason(shape, tuple_bounds),
+        "projected_selector_eligible": selector_reason(shape, tuple_bounds) == "eligible",
+    })
+    for key in CAPTURE_V1_OBSERVATION_KEYS:
+        result.pop(key, None)
+    missing = sorted(REPLAY_SHAPE_V2_KEYS - set(result))
+    if missing:
+        raise ValueError("v2 plan shape missing fields: " + ",".join(missing))
+    return result
+
+
 def build_policy(privacy_review_id: str, privacy_reviewed_at: str, preregistration_digest: str, sample_digest: str, seed: int) -> dict:
     if not (SAFE_ID.match(privacy_review_id) and ISO_DATEISH.match(privacy_reviewed_at) and HEX64.match(preregistration_digest)):
         raise ValueError("invalid privacy/preregistration metadata")
@@ -838,19 +1109,25 @@ def project_capture(
     sampling_plan_id: str,
     sample_period_start: str,
     sample_period_end: str,
+    bench_policy_path: Path | None = None,
 ) -> tuple[dict, dict]:
     if blocks < MIN_BLOCKS:
         raise ValueError(f"blocks must be >= {MIN_BLOCKS}")
     if not (SAFE_ID.match(sampling_plan_id) and ISO_DATEISH.match(sample_period_start) and ISO_DATEISH.match(sample_period_end)):
         raise ValueError("invalid sampling plan metadata")
     capture_header, shapes = load_capture(capture_path)
-    tuple_bounds = load_tuple_bounds(tuple_bounds_path)
+    capture_schema = capture_header["schema"]
+    tuple_bounds = load_tuple_bounds(tuple_bounds_path, capture_schema)
+    arrival_schedule, bench_policy_sha256 = (
+        _v2_arrival_schedule(bench_policy_path) if capture_schema == CAPTURE_SCHEMA_V2 else (None, None)
+    )
     capture_mode_mismatches = []
-    for shape in shapes:
-        if shape.captured_pre_capacity_selector_reason != "mode_off":
-            capture_mode_mismatches.append(f"{shape.shape_id}:selector_reason={shape.captured_pre_capacity_selector_reason}")
-        if shape.captured_pre_capacity_eligible:
-            capture_mode_mismatches.append(f"{shape.shape_id}:captured_eligible_under_mtp_off")
+    if capture_schema == CAPTURE_SCHEMA:
+        for shape in shapes:
+            if shape.captured_pre_capacity_selector_reason != "mode_off":
+                capture_mode_mismatches.append(f"{shape.shape_id}:selector_reason={shape.captured_pre_capacity_selector_reason}")
+            if shape.captured_pre_capacity_eligible:
+                capture_mode_mismatches.append(f"{shape.shape_id}:captured_eligible_under_mtp_off")
     if capture_mode_mismatches:
         raise ValueError("capture did not prove native-MTP-off ordinary service: " + "; ".join(capture_mode_mismatches))
     sample_projection = [
@@ -892,25 +1169,45 @@ def project_capture(
             "unknown_request_fields_present": shape.unknown_request_fields_present,
             "unknown_top_level_keys_present": shape.unknown_top_level_keys_present,
             "unknown_stream_option_keys_present": shape.unknown_stream_option_keys_present,
-            "pre_capacity_selector_reason": selector_reason(shape, tuple_bounds),
-            **shape.sanitized_geometry,
+            **({
+                "generated_completion_tokens": shape.generated_completion_tokens,
+                "observed_selector_reason": shape.v2_controls["observed_selector_reason"],
+                "observed_selector_eligible": shape.v2_controls["observed_selector_eligible"],
+                "observed_effective_path": shape.v2_controls["observed_effective_path"],
+                "served_model_family": shape.v2_controls["served_model_family"],
+                "parallel_tool_calls_state": shape.v2_controls["parallel_tool_calls_state"],
+                "reasoning_effort_state": shape.v2_controls["reasoning_effort_state"],
+                "effective_reasoning_effort": shape.v2_controls["effective_reasoning_effort"],
+                "tool_choice_function_index": shape.v2_controls["tool_choice_function_index"],
+                "tool_grammar_required": shape.v2_controls["tool_grammar_required"],
+            } if capture_schema == CAPTURE_SCHEMA_V2 else {
+                "pre_capacity_selector_reason": selector_reason(shape, tuple_bounds),
+            }),
         }
         for shape in shapes
     ]
-    sample_digest = _digest(sample_projection)
+    request_shapes = [
+        _v2_plan_shape_template(shape, projection, tuple_bounds)
+        if capture_schema == CAPTURE_SCHEMA_V2 else analyzer_shape_template(shape, tuple_bounds)
+        for shape, projection in zip(shapes, sample_projection)
+    ]
+    sample_digest = _digest(request_shapes if capture_schema == CAPTURE_SCHEMA_V2 else sample_projection)
     policy = build_policy(privacy_review_id, privacy_reviewed_at, preregistration_digest, sample_digest, seed)
     policy_sha = _digest(policy)
-    request_shapes = [analyzer_shape_template(shape, tuple_bounds) for shape in shapes]
+    unreproducible = capture_schema == CAPTURE_SCHEMA_V2 and any(
+        _v2_unreproducible(shape) or shape.v2_controls["served_model_family"] != tuple_bounds["family_adapter"]
+        for shape in shapes
+    )
     plan = {
-        "schema": PLAN_SCHEMA,
-        "qualification_status": "PENDING_REAL_LAB_REPLAY",
+        "schema": PLAN_SCHEMA_V2 if capture_schema == CAPTURE_SCHEMA_V2 else PLAN_SCHEMA,
+        "qualification_status": "PENDING_UNREPRODUCIBLE_CAPTURE" if unreproducible else "PENDING_REAL_LAB_REPLAY",
         "policy_sha256": policy_sha,
         "sample_digest_sha256": sample_digest,
         "source_capture_sha256": _sha256_file(capture_path),
         "tuple_bounds_sha256": _sha256_file(tuple_bounds_path),
         "projection_stage": "offline_sanitized_shape_projection_only",
-        "capture_schema": CAPTURE_SCHEMA,
-        "capture_header": {
+        "capture_schema": capture_schema,
+        "capture_header": capture_header if capture_schema == CAPTURE_SCHEMA_V2 else {
             "captured_at": capture_header["captured_at"],
             "native_mtp_mode": capture_header["native_mtp_mode"],
             "capture_requires_native_mtp_off": capture_header["capture_requires_native_mtp_off"],
@@ -949,6 +1246,9 @@ def project_capture(
             for block_index in range(blocks)
         ],
     }
+    if capture_schema == CAPTURE_SCHEMA_V2:
+        plan["bench_policy_sha256"] = bench_policy_sha256
+        plan["arrival_schedule"] = arrival_schedule
     return policy, plan
 
 
@@ -1019,20 +1319,21 @@ def _load_policy_for_analyzer(path: Path) -> tuple[dict, str]:
 
 def _load_replay_runs(path: Path, policy: dict, policy_sha: str, capture_sha256: str | None) -> tuple[dict, list[dict]]:
     records = _load_jsonl_records(path)
-    if records[0].get("schema") == PLAN_SCHEMA or records[0].get("projection_stage") == "offline_sanitized_shape_projection_only":
+    if records[0].get("schema") in {PLAN_SCHEMA, PLAN_SCHEMA_V2} or records[0].get("projection_stage") == "offline_sanitized_shape_projection_only":
         raise ValueError("replay evidence is projection-only, not actual NativeMTPRequestShapeReplayCommand output")
     header: dict | None = None
     runs: list[dict] = []
     failures: list[str] = []
     for index, record in enumerate(records, 1):
-        if record.get("schema") != REPLAY_RESULT_SCHEMA:
+        if record.get("schema") not in {REPLAY_RESULT_SCHEMA, REPLAY_RESULT_SCHEMA_V2}:
             failures.append(f"line {index}:schema_invalid")
             continue
         record_type = record.get("record_type")
         if record_type == "header":
             if header is not None:
                 failures.append(f"line {index}:duplicate_header")
-            failures.extend(_strict_object(record, REPLAY_HEADER_KEYS, f"line {index}:header"))
+            header_keys = REPLAY_HEADER_V2_KEYS if record.get("schema") == REPLAY_RESULT_SCHEMA_V2 else REPLAY_HEADER_KEYS
+            failures.extend(_strict_object(record, header_keys, f"line {index}:header"))
             header = record
         elif record_type == "run":
             failures.extend(_strict_object(record, REPLAY_RUN_KEYS, f"line {index}:run"))
@@ -1044,6 +1345,18 @@ def _load_replay_runs(path: Path, policy: dict, policy_sha: str, capture_sha256:
     if header is None:
         failures.append("missing_replay_header")
     else:
+        replay_schema = header.get("schema")
+        # Historical LAB records remain readable for research. Qualification
+        # consumers require this identity and match it to the signed candidate.
+        if "measurement_identity" in header:
+            measured = header["measurement_identity"]
+            if (not isinstance(measured, dict)
+                    or set(measured) != {"binary_sha256", "binary_cdhash"}
+                    or not isinstance(measured.get("binary_sha256"), str)
+                    or re.fullmatch(r"[0-9a-f]{64}", measured["binary_sha256"]) is None
+                    or not isinstance(measured.get("binary_cdhash"), str)
+                    or re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", measured["binary_cdhash"]) is None):
+                failures.append("header_measurement_identity_invalid")
         if header.get("policy_sha256") != policy_sha:
             failures.append("header_policy_sha256_mismatch")
         for key in ("sample_digest_sha256", "preregistration_digest_sha256", "privacy_review_id"):
@@ -1053,8 +1366,21 @@ def _load_replay_runs(path: Path, policy: dict, policy_sha: str, capture_sha256:
             failures.append("header_bench_policy_sha256_invalid")
         if capture_sha256 is not None and header.get("capture_sha256") != capture_sha256:
             failures.append("header_capture_sha256_mismatch")
-        if header.get("capture_schema") != CAPTURE_SCHEMA or header.get("capture_requires_native_mtp_off") is not True:
-            failures.append("header_capture_binding_invalid")
+        if replay_schema == REPLAY_RESULT_SCHEMA:
+            if header.get("capture_schema") != CAPTURE_SCHEMA or header.get("capture_requires_native_mtp_off") is not True:
+                failures.append("header_capture_binding_invalid")
+        elif replay_schema == REPLAY_RESULT_SCHEMA_V2:
+            if header.get("capture_schema") != CAPTURE_SCHEMA_V2 or header.get("capture_requires_native_mtp_off") is not False:
+                failures.append("header_capture_binding_invalid")
+            if header.get("capture_role") != "request_shape_observation_only" or header.get("capture_native_mtp_mode") not in {"off", "auto"}:
+                failures.append("header_capture_v2_metadata_invalid")
+            for key in ("tuple_bounds_sha256",):
+                if not (isinstance(header.get(key), str) and HEX64.match(header[key])):
+                    failures.append(f"header_{key}_invalid")
+            if not _valid_v2_arrival_schedule(header.get("arrival_schedule")):
+                failures.append("header_arrival_schedule_invalid")
+        else:
+            failures.append("header_schema_invalid")
         if header.get("exports_raw_prompt_text") is not False or header.get("exports_recoverable_cache_groups") is not False:
             failures.append("header_privacy_exports_invalid")
         if header.get("run_order") != "paired_random_counterbalanced":
@@ -1081,6 +1407,10 @@ def _load_replay_runs(path: Path, policy: dict, policy_sha: str, capture_sha256:
     if not runs:
         failures.append("missing_replay_runs")
     for run_index, run in enumerate(runs):
+        if header is not None and run.get("measurement_identity") != header.get("measurement_identity"):
+            failures.append(f"run[{run_index}]:measurement_identity_mismatch")
+        if header is not None and run.get("schema") != header.get("schema"):
+            failures.append(f"run[{run_index}]:schema_mismatch")
         if run.get("policy_sha256") != policy_sha:
             failures.append(f"run[{run_index}]:policy_sha256_mismatch")
         if header is not None and run.get("bench_policy_sha256") != header.get("bench_policy_sha256"):
@@ -1248,7 +1578,72 @@ def _validate_replay_shape_metadata(shape: dict, failures: list[str]) -> None:
         failures.append("unknown_request_fields_present_inconsistent")
 
 
+def _v2_replay_shape_as_v1(shape: dict) -> dict:
+    failures = _strict_object(shape, REPLAY_SHAPE_V2_KEYS, "request_shape")
+    failures.extend(_v2_shape_violations(shape, "request_shape"))
+    if not isinstance(shape.get("projected_selector_reason"), str) or not isinstance(shape.get("projected_selector_eligible"), bool):
+        failures.append("request_shape.projected_selector:field_invalid")
+    if failures:
+        raise ValueError("request_shape invalid: " + "; ".join(sorted(set(failures))))
+    common = dict(shape)
+    for key in CAPTURE_V2_CONTROL_KEYS | {"projected_selector_reason", "projected_selector_eligible"}:
+        common.pop(key, None)
+    common.update({
+        "pre_capacity_selector_reason": "mode_off",
+        "pre_capacity_eligible": False,
+        "effective_path": "ordinary",
+    })
+    common_failures: list[str] = []
+    _validate_replay_shape_metadata(common, common_failures)
+    if common_failures:
+        raise ValueError("request_shape invalid: " + "; ".join(sorted(set(common_failures))))
+    controls = {key: shape.get(key) for key in CAPTURE_V2_CONTROL_KEYS}
+    synthetic = CapturedShape(
+        capture_schema=CAPTURE_SCHEMA_V2, shape_id=str(shape["shape_id"]),
+        prompt_tokens=int(shape["prompt_tokens"]), completion_tokens=int(shape["completion_tokens"]),
+        generated_completion_tokens=int(shape["generated_completion_tokens"]),
+        requested_max_completion_tokens=shape.get("requested_max_completion_tokens"),
+        effective_max_output_tokens=int(shape["effective_max_output_tokens"]),
+        conversation_key_present=bool(shape["conversation_key_present"]),
+        conversation_key_cache_only=bool(shape["conversation_key_cache_only"]),
+        conversation_cache_lease=str(shape["conversation_cache_lease"]),
+        conversation_cache_cached_prompt_tokens=int(shape["conversation_cache_cached_prompt_tokens"]),
+        conversation_cache_retained_handoff=bool(shape["conversation_cache_retained_handoff"]),
+        stream=bool(shape["stream"]), stop_sequences=int(shape["stop_sequences"]),
+        requested_temperature=float(shape["requested_temperature"]), requested_top_p=float(shape["requested_top_p"]),
+        requested_n=int(shape["requested_n"]), sampling_requested=bool(shape["sampling_requested"]),
+        multiple_completions_requested=bool(shape["multiple_completions_requested"]), top_k_present=bool(shape["top_k_present"]),
+        min_p_nonzero=bool(shape["min_p_nonzero"]), frequency_penalty_nonzero=bool(shape["frequency_penalty_nonzero"]),
+        presence_penalty_nonzero=bool(shape["presence_penalty_nonzero"]), repetition_penalty_nondefault=bool(shape["repetition_penalty_nondefault"]),
+        logit_bias_present=bool(shape["logit_bias_present"]), tools_present=bool(shape["tools_present"]),
+        tool_choice_present=bool(shape["tool_choice_present"]), tool_turn_state_present=bool(shape["tool_turn_state_present"]),
+        structured_output_requested=bool(shape["structured_output_requested"]), response_format_kind=str(shape["response_format_kind"]),
+        logprobs_requested=bool(shape["logprobs_requested"]), top_logprobs_requested=bool(shape["top_logprobs_requested"]),
+        logit_controls_requested=bool(shape["logit_controls_requested"]), reasoning_or_template_model=bool(shape["reasoning_or_template_model"]),
+        multimodal_requested=bool(shape["multimodal_requested"]), unknown_request_fields_present=bool(shape["unknown_request_fields_present"]),
+        captured_pre_capacity_selector_reason=str(shape["observed_selector_reason"]),
+        captured_pre_capacity_eligible=bool(shape["observed_selector_eligible"]),
+        unknown_top_level_keys_present=bool(shape["unknown_top_level_keys_present"]),
+        unknown_stream_option_keys_present=bool(shape["unknown_stream_option_keys_present"]),
+        sanitized_geometry={
+            "served_model_hash_sha256": shape["served_model_hash_sha256"],
+            "served_weights_manifest_sha256": shape["served_weights_manifest_sha256"],
+        },
+        v2_controls=controls,
+    )
+    if _v2_unreproducible(synthetic):
+        raise ValueError("pending_unreproducible_capture")
+    common.update({
+        "pre_capacity_selector_reason": shape["projected_selector_reason"],
+        "pre_capacity_eligible": shape["projected_selector_eligible"],
+        "effective_path": "ordinary",
+    })
+    return common
+
+
 def _request_shape_for_analyzer(shape: object, header: dict) -> dict:
+    if isinstance(shape, dict) and header.get("schema") == REPLAY_RESULT_SCHEMA_V2:
+        shape = _v2_replay_shape_as_v1(shape)
     failures = _strict_object(shape, REPLAY_SHAPE_KEYS, "request_shape")
     if not isinstance(shape, dict):
         raise ValueError("request_shape invalid: " + "; ".join(failures))
@@ -1503,7 +1898,7 @@ def _validate_cache_observations(run: dict, rows: list[dict], shapes_by_id: dict
         raise ValueError("replay cache observation invalid: " + "; ".join(sorted(set(failures))))
 
 
-def _admission_rows(run: dict, run_label: str) -> list[dict]:
+def _admission_rows(run: dict, run_label: str, *, allow_capacity_downgrade: bool = False) -> list[dict]:
     failures: list[str] = []
     rows: list[dict] = []
     seen: set[str] = set()
@@ -1527,7 +1922,18 @@ def _admission_rows(run: dict, run_label: str) -> list[dict]:
             failures.append(f"{run_label}.admission[{index}]:row_unreproduced")
         if item.get("actual_selector_reason") in {None, "missing"} or item.get("actual_effective_path") in {None, "missing"}:
             failures.append(f"{run_label}.admission[{index}]:actual_admission_missing")
-        if item.get("matches") is not True:
+        exact_admission = (
+            item.get("expected_selector_reason") == item.get("actual_selector_reason")
+            and item.get("expected_effective_path") == item.get("actual_effective_path")
+        )
+        capacity_downgrade = (
+            allow_capacity_downgrade
+            and item.get("expected_selector_reason") == "eligible"
+            and item.get("expected_effective_path") == "native_mtp"
+            and item.get("actual_selector_reason") == "capacity_above_native_bound"
+            and item.get("actual_effective_path") == "ordinary"
+        )
+        if item.get("matches") is not True or not (exact_admission or capacity_downgrade):
             failures.append(f"{run_label}.admission[{index}]:actual_admission_mismatch")
         if item.get("budget_matches") is not True:
             failures.append(f"{run_label}.admission[{index}]:budget_mismatch")
@@ -1558,10 +1964,17 @@ def _admission_rows(run: dict, run_label: str) -> list[dict]:
     return rows
 
 
-def _metrics_from_run(run: dict, ordinary_request_ids: set[str], run_label: str) -> dict:
+def _allows_capacity_downgrade(header: dict) -> bool:
+    if header.get("schema") == REPLAY_RESULT_SCHEMA_V2:
+        return True
+    model_id = header.get("model_id")
+    return isinstance(model_id, str) and "glm-5.3-flash" in model_id.lower()
+
+
+def _metrics_from_run(run: dict, ordinary_request_ids: set[str], run_label: str, *, allow_capacity_downgrade: bool = False) -> dict:
     timings = _indexed_completion_timings(run, run_label)
     wall_seconds = float(run["wall_seconds"])
-    if set(timings) != {row["request_id"] for row in _admission_rows(run, run_label)}:
+    if set(timings) != {row["request_id"] for row in _admission_rows(run, run_label, allow_capacity_downgrade=allow_capacity_downgrade)}:
         raise ValueError(f"replay timing invalid: {run_label}:timing_admission_request_id_mismatch")
     if not ordinary_request_ids:
         raise ValueError(f"replay timing invalid: {run_label}:missing_ordinary_rows")
@@ -1607,6 +2020,8 @@ def convert_replay_to_analyzer_jsonl(
 ) -> list[dict]:
     policy, policy_sha = _load_policy_for_analyzer(policy_path)
     header, runs = _load_replay_runs(replay_path, policy, policy_sha, capture_sha256)
+    is_v2 = header.get("schema") == REPLAY_RESULT_SCHEMA_V2
+    allow_capacity_downgrade = _allows_capacity_downgrade(header)
     shape_templates_by_id: dict[str, dict] = {}
     replay_shapes_by_id: dict[str, dict] = {}
     shape_budgets_by_id: dict[str, int] = {}
@@ -1645,7 +2060,9 @@ def convert_replay_to_analyzer_jsonl(
         if extra:
             failures.append(f"block {block_index}:extra_path:{','.join(extra)}")
             continue
-        mixed_rows = _admission_rows(paths["native_mtp"], f"block[{block_index}].native_mtp")
+        mixed_rows = _admission_rows(
+            paths["native_mtp"], f"block[{block_index}].native_mtp", allow_capacity_downgrade=allow_capacity_downgrade,
+        )
         disabled_rows = _admission_rows(paths["ordinary"], f"block[{block_index}].ordinary")
         _validate_cache_observations(paths["native_mtp"], mixed_rows, replay_shapes_by_id, f"block[{block_index}].native_mtp")
         _validate_cache_observations(paths["ordinary"], disabled_rows, replay_shapes_by_id, f"block[{block_index}].ordinary")
@@ -1695,8 +2112,20 @@ def convert_replay_to_analyzer_jsonl(
                 failures.append(f"block {block_index}:shape {shape_id}:eligible_reason_without_native_path")
                 block_failed = True
             base = dict(shape_templates_by_id[shape_id])
-            base["pre_capacity_selector_reason"] = mixed_reason
-            base["pre_capacity_eligible"] = eligible
+            if is_v2:
+                base["pre_capacity_selector_reason"] = replay_shapes_by_id[shape_id]["projected_selector_reason"]
+                base["pre_capacity_eligible"] = replay_shapes_by_id[shape_id]["projected_selector_eligible"]
+            elif (
+                allow_capacity_downgrade
+                and mixed_reason == "capacity_above_native_bound"
+                and mixed_path == "ordinary"
+                and {(row["expected_selector_reason"], row["expected_effective_path"]) for row in mixed_by_shape[shape_id]} == {("eligible", "native_mtp")}
+            ):
+                base["pre_capacity_selector_reason"] = "eligible"
+                base["pre_capacity_eligible"] = True
+            else:
+                base["pre_capacity_selector_reason"] = mixed_reason
+                base["pre_capacity_eligible"] = eligible
             mixed_shape = dict(base)
             mixed_shape["effective_path"] = mixed_path
             disabled_shape = dict(base)
@@ -1708,7 +2137,10 @@ def convert_replay_to_analyzer_jsonl(
         disabled_ordinary_ids = {row["request_id"] for row in disabled_rows if row["actual_effective_path"] == "ordinary"}
         mixed_ordinary_ids = {row["request_id"] for row in mixed_rows if row["actual_effective_path"] == "ordinary"}
         disabled_metrics = _metrics_from_run(paths["ordinary"], disabled_ordinary_ids, f"block[{block_index}].ordinary")
-        mixed_metrics = _metrics_from_run(paths["native_mtp"], mixed_ordinary_ids, f"block[{block_index}].native_mtp")
+        mixed_metrics = _metrics_from_run(
+            paths["native_mtp"], mixed_ordinary_ids, f"block[{block_index}].native_mtp",
+            allow_capacity_downgrade=allow_capacity_downgrade,
+        )
         for path_name, shapes, metrics in (
             ("mtp_disabled", analyzer_shapes_disabled, disabled_metrics),
             ("observed_mixed", analyzer_shapes_mixed, mixed_metrics),
@@ -1740,6 +2172,7 @@ def main(argv: list[str] | None = None) -> int:
     project = sub.add_parser("project")
     project.add_argument("--capture", type=Path, required=True)
     project.add_argument("--tuple-bounds", type=Path, required=True)
+    project.add_argument("--bench-policy", type=Path, required=False)
     project.add_argument("--policy-out", type=Path, required=True)
     project.add_argument("--plan-out", type=Path, required=True)
     project.add_argument("--privacy-review-id", required=True)
@@ -1771,6 +2204,7 @@ def main(argv: list[str] | None = None) -> int:
                 sampling_plan_id=args.sampling_plan_id,
                 sample_period_start=args.sample_period_start,
                 sample_period_end=args.sample_period_end,
+                bench_policy_path=args.bench_policy,
             )
             _write_json(args.policy_out, policy)
             _write_json(args.plan_out, plan)

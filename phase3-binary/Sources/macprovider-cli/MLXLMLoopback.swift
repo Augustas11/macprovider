@@ -318,7 +318,7 @@ enum MLXSnapshotIdentityError: Error, Equatable, CustomStringConvertible {
 /// the file identity of every file it covers, so a later change fails closed
 /// without re-hashing.
 struct MLXSnapshotIdentity: Equatable, Sendable {
-    struct FileStamp: Equatable, Sendable {
+    struct FileStamp: Equatable, Sendable, Codable {
         let relativePath: String
         let size: Int64
         let device: Int64
@@ -358,13 +358,23 @@ struct MLXSnapshotIdentity: Equatable, Sendable {
     /// ctime) must equal the directory listing's before and after the read,
     /// and the whole listing is re-read after hashing. A replaced, rewritten,
     /// added, or removed file fails closed (SPEC-010-R009(a)).
-    static func compute(directory: URL, deadline: Date? = nil) throws -> MLXSnapshotIdentity {
+    ///
+    /// `fileSHA256` lets a lab caller supply a file's hash for an unchanged
+    /// stamp; it receives a closure that reads the file (outside the page
+    /// cache) when it has none. Every stamp check above still applies.
+    static func compute(
+        directory: URL,
+        deadline: Date? = nil,
+        fileSHA256: ((FileStamp, () throws -> String) throws -> String)? = nil
+    ) throws -> MLXSnapshotIdentity {
         let resolved = directory.resolvingSymlinksInPath().standardizedFileURL
         let before = try stamps(of: resolved, deadline: deadline)
         var manifest = ""
         for stamp in before {
             try HuggingFaceSnapshotDownloader.assertDeadlineActive(deadline)
-            let sha = try hashFile(root: resolved, stamp: stamp, deadline: deadline)
+            let sha = try fileSHA256.map { supply in
+                try supply(stamp) { try hashFile(root: resolved, stamp: stamp, deadline: deadline, uncached: true) }
+            } ?? hashFile(root: resolved, stamp: stamp, deadline: deadline)
             manifest += "\(stamp.relativePath)\n\(stamp.size)\n\(sha)\n"
         }
         guard try stamps(of: resolved, deadline: deadline) == before else {
@@ -374,11 +384,12 @@ struct MLXSnapshotIdentity: Equatable, Sendable {
         return MLXSnapshotIdentity(directory: resolved, digest: digest, files: before)
     }
 
-    private static func hashFile(root: URL, stamp: FileStamp, deadline: Date?) throws -> String {
+    private static func hashFile(root: URL, stamp: FileStamp, deadline: Date?, uncached: Bool = false) throws -> String {
         let path = root.path + "/" + stamp.relativePath
         let fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
         guard fd >= 0 else { throw MLXSnapshotIdentityError.unreadable("open failed") }
         defer { close(fd) }
+        if uncached { _ = fcntl(fd, F_NOCACHE, 1) }
         func current() throws -> FileStamp {
             var info = stat()
             guard fstat(fd, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG, info.st_nlink <= 1 else {

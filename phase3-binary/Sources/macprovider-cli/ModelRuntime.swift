@@ -396,6 +396,7 @@ actor ContinuousBatchTextPreparationLane {
     private let tokenizer: any MLXLMCommon.Tokenizer
     private let configuration: ModelConfiguration
     private let hasRecurrentLayers: Bool
+    private let supportsBonsaiThinking: Bool
 #if DEBUG
     private var preparationEntryCount = 0
 #endif
@@ -404,12 +405,14 @@ actor ContinuousBatchTextPreparationLane {
         processor: any UserInputProcessor,
         tokenizer: any MLXLMCommon.Tokenizer,
         configuration: ModelConfiguration,
-        hasRecurrentLayers: Bool
+        hasRecurrentLayers: Bool,
+        supportsBonsaiThinking: Bool = false
     ) {
         self.processor = processor
         self.tokenizer = tokenizer
         self.configuration = configuration
         self.hasRecurrentLayers = hasRecurrentLayers
+        self.supportsBonsaiThinking = supportsBonsaiThinking
     }
 
     func prepare(
@@ -427,6 +430,7 @@ actor ContinuousBatchTextPreparationLane {
         let tokenizer = tokenizer
         let configuration = configuration
         let hasRecurrentLayers = hasRecurrentLayers
+        let supportsBonsaiThinking = supportsBonsaiThinking
         return try await serial.withPermit {
             try Task.checkCancellation()
             try drainCancelled.check()
@@ -437,7 +441,8 @@ actor ContinuousBatchTextPreparationLane {
                 templateSupportsThinkingToggle: templateSupportsThinkingToggle,
                 templateSupportsPreserveThinking: templateSupportsPreserveThinking,
                 toolSelectionModelID: toolSelectionModelID,
-                templateToolFormat: configuration.toolCallFormat?.rawValue
+                templateToolFormat: configuration.toolCallFormat?.rawValue,
+                supportsBonsaiThinking: supportsBonsaiThinking
             )
             try Task.checkCancellation()
             try drainCancelled.check()
@@ -726,23 +731,37 @@ struct PagedKVRuntimeModelCapabilities: Equatable, Sendable {
     let modelFamily: String
     let requiresMoEDispatch: Bool
     let hybridDecoderArchitectureVerified: Bool
+    /// Exact hybrid tuples which can evaluate ordinary CB gates only.
+    let ordinaryHybridOnly: Bool
+    /// The state shape the shared-forward bridge must preserve for a verified
+    /// recurrent hybrid. This remains two-slot unless the exact LFM2.5 tuple
+    /// below validates its short-convolution topology.
+    let recurrentStateLayout: PagedKVRecurrentStateLayout
     /// The verified sparse-attention layout of an allowlisted `glm5_next`
     /// identity (SPEC-039 FR-PKV12), read from its `config.json`.
     let sparseAttention: PagedKVSparseAttentionLayout?
     let deepseekV4Pool: DeepseekV4PoolLayout?
+    /// Observed on this load; ordinary shared-forward parity is independent.
+    var supportsContiguousCacheMaterialization: Bool
 
     init(
         modelFamily: String,
         requiresMoEDispatch: Bool,
         hybridDecoderArchitectureVerified: Bool = false,
+        ordinaryHybridOnly: Bool = false,
+        recurrentStateLayout: PagedKVRecurrentStateLayout = .mambaTwoSlot,
         sparseAttention: PagedKVSparseAttentionLayout? = nil,
-        deepseekV4Pool: DeepseekV4PoolLayout? = nil
+        deepseekV4Pool: DeepseekV4PoolLayout? = nil,
+        supportsContiguousCacheMaterialization: Bool = true
     ) {
         self.modelFamily = modelFamily
         self.requiresMoEDispatch = requiresMoEDispatch
         self.hybridDecoderArchitectureVerified = hybridDecoderArchitectureVerified
+        self.ordinaryHybridOnly = ordinaryHybridOnly
+        self.recurrentStateLayout = recurrentStateLayout
         self.sparseAttention = sparseAttention
         self.deepseekV4Pool = deepseekV4Pool
+        self.supportsContiguousCacheMaterialization = supportsContiguousCacheMaterialization
     }
 
     /// Prompt tokens of the attach-time parity probes: 513 (the production
@@ -861,7 +880,8 @@ struct PagedKVRuntimeProber: Sendable {
         _ promptB: [Int],
         _ parityPromptA: [Int],
         _ parityPromptB: [Int],
-        _ cacheKinds: [PagedKVSharedForwardBackend.CacheKind]
+        _ cacheKinds: [PagedKVSharedForwardBackend.CacheKind],
+        _ recurrentStateLayout: PagedKVRecurrentStateLayout
     ) async -> PagedKVRuntimeMoEProbeResult
 
     static let live = PagedKVRuntimeProber(
@@ -875,7 +895,7 @@ struct PagedKVRuntimeProber: Sendable {
                 nNew: nNew
             )
         },
-        moe: { container, blockSizeTokens, maxPhysicalBlocks, poolEpoch, layerCount, promptA, promptB, parityPromptA, parityPromptB, cacheKinds in
+        moe: { container, blockSizeTokens, maxPhysicalBlocks, poolEpoch, layerCount, promptA, promptB, parityPromptA, parityPromptB, cacheKinds, recurrentStateLayout in
             await PagedKVRuntimeParityProbe.runMoEInputIsolationProbe(
                 container: container,
                 blockSizeTokens: blockSizeTokens,
@@ -886,7 +906,8 @@ struct PagedKVRuntimeProber: Sendable {
                 promptB: promptB,
                 parityPromptA: parityPromptA,
                 parityPromptB: parityPromptB,
-                cacheKinds: cacheKinds
+                cacheKinds: cacheKinds,
+                recurrentStateLayout: recurrentStateLayout
             )
         }
     )
@@ -2147,8 +2168,21 @@ actor ModelRuntime: ModelRuntimeServing {
     /// tuple. Reset to pending on every swap.
     private var continuousBatchingSelfCheck: ContinuousBatchingSelfCheckState = .pending
     private var continuousBatchingSelfCheckReport: ContinuousBatchingSelfCheckReport?
+    // Only real native runtimes select this; preloaded/test runtimes leave it nil.
+    private(set) var mlxCacheLimitMBForLoading: Int? = nil
+    private var hardwareServingRowCap = ProviderCapacity.maxConcurrencyOverrideLimit
     private let warmSwapEnabled: Bool
     private let swapDrainTimeoutSeconds: Int
+    struct DrainTiming: Sendable {
+        let nowMilliseconds: @Sendable () -> Int64
+        let pollSleep: @Sendable () async -> Void
+    }
+    private var drainNowMilliseconds: @Sendable () -> Int64 = {
+        Int64(Date().timeIntervalSince1970 * 1000)
+    }
+    private var drainPollSleep: @Sendable () async -> Void = {
+        try? await Task.sleep(nanoseconds: 50_000_000)
+    }
     private var providerStatus: ProviderStatus?
     private var signalContinuations: [UUID: AsyncStream<SwapSignal>.Continuation] = [:]
     private var nextInFlightID: Int = 0
@@ -2163,11 +2197,12 @@ actor ModelRuntime: ModelRuntimeServing {
     private let testSpeculativeCompletion: (@Sendable (RuntimeSnapshot, ChatCompletionRequest) async throws -> CompletionResult)?
     private let testSpeculativeStream: (@Sendable (RuntimeSnapshot, ChatCompletionRequest) async throws -> CompletionResult)?
     private let nativeMTPRequestShapeCapture: NativeMTPRequestShapeCapture?
-    #if DEBUG || MACPROVIDER_LAB_HARNESS
     private var labNativeMTPCommitTimingObserver: NativeMTPLabCommittedTokenTimingObserver?
     private var labNativeMTPDecodeOutputCap: NativeMTPLabDecodeOutputCap?
-    private var labNativeMTPConversationCacheObserver: NativeMTPLabConversationCacheObserver?
+    #if DEBUG || MACPROVIDER_LAB_HARNESS
+    private var labJourneyWithdrawnCapability: NativeMTPCapability?
     #endif
+    private var labNativeMTPConversationCacheObserver: NativeMTPLabConversationCacheObserver?
 
     var loadedModelID: String? {
         currentModelID
@@ -2895,7 +2930,8 @@ actor ModelRuntime: ModelRuntimeServing {
                 promptB,
                 parityPromptA,
                 parityPromptB,
-                cacheKinds
+                cacheKinds,
+                modelCapabilities.recurrentStateLayout
             )
         } onIndistinguishable: { pairIndex in
             PagedKVRuntimeDiagnostics.log(
@@ -2952,6 +2988,16 @@ actor ModelRuntime: ModelRuntimeServing {
         modelCapabilities: PagedKVRuntimeModelCapabilities
     ) -> Bool {
         guard modelCapabilities.hybridDecoderArchitectureVerified else { return false }
+        if modelCapabilities.recurrentStateLayout == .lfm25ShortConvOneSlot {
+            return modelCapabilities.modelFamily == "lfm2"
+                && cacheKinds == PagedKVRecurrentStateLayout.lfm25ExpectedCacheKinds
+        }
+        if modelCapabilities.ordinaryHybridOnly {
+            let expected: [PagedKVSharedForwardBackend.CacheKind] = (0..<24).map {
+                ($0 + 1).isMultiple(of: 4) ? .pagedAttention : .recurrentMamba
+            }
+            return modelCapabilities.modelFamily == "qwen" && cacheKinds == expected
+        }
         if modelCapabilities.modelFamily == "deepseek_v4" {
             return modelCapabilities.deepseekV4Pool?.expectedCacheKinds == cacheKinds
         }
@@ -2993,6 +3039,20 @@ actor ModelRuntime: ModelRuntimeServing {
 
     nonisolated static func isValidMLXCacheLimitMB(_ megabytes: Int) -> Bool {
         (0 ... maximumMLXCacheLimitMB).contains(megabytes)
+    }
+
+    /// Freed-buffer reuse budget for the low-memory tier. Larger Macs retain
+    /// MLX's default until their workload has been qualified with a smaller cap.
+    /// Preserve explicit values (including zero) for normal startup validation.
+    nonisolated static func resolvedMLXCacheLimitMB(
+        configured: Int?, physicalMemoryBytes: UInt64
+    ) -> Int? {
+        if let configured { return configured }
+        guard physicalMemoryBytes > 0, physicalMemoryBytes <= 8 * 1024 * 1024 * 1024 else {
+            return nil
+        }
+        // Divide before converting: the result is at most 256 MiB.
+        return Int(physicalMemoryBytes / (32 * 1024 * 1024))
     }
 
     /// Bounds MLX's buffer cache. Must run before the model loads; see
@@ -3086,8 +3146,10 @@ actor ModelRuntime: ModelRuntimeServing {
     }
 
     nonisolated static func clearMLXBufferCacheAfterPrefill(
+        isFinalChunk: Bool = true,
         using clear: () -> Void = { Memory.clearCache() }
     ) {
+        guard isFinalChunk else { return }
         clear()
     }
 
@@ -3201,6 +3263,9 @@ maxTokens: 1,
         if normalizedLabels.contains(where: { $0.contains("llama") }) { return "llama" }
         if normalizedLabels.contains(where: { $0.contains("gptoss") }) { return "gpt_oss" }
         if normalizedLabels.contains(where: { $0.contains("gemma4") }) { return "gemma4" }
+        if normalizedLabels.contains(where: { $0 == "lfm2moe" || $0 == "lfm2moeforcausallm" }) {
+            return "lfm2"
+        }
         if normalizedLabels.contains(where: { $0.contains("glm4moe") }) { return "glm4_moe" }
         if normalizedLabels.contains(where: { $0.contains("nemotronh") }) { return "nemotron_h" }
         // GLM-5-Next (`glm5_next`, text model `glm5_next_text`): the SPEC-039
@@ -3281,7 +3346,15 @@ maxTokens: 1,
             if expectedArchitecture == "DeepseekV4ForCausalLM" { return deepseekV4Pool != nil }
             return architectures.contains(expectedArchitecture)
         }()
-        let architectureVerified = allowlistedArchitectureVerified || deepseekV4Pool != nil
+        let lfm25HybridVerified = lfm25HybridDecoderArchitectureVerified(
+            modelID: modelID, configObject: configObject
+        )
+        let ordinaryHybridOnly = bonsai2BHybridDecoderArchitectureVerified(
+            modelID: modelID, configObject: configObject
+        ) || lfm25HybridVerified
+        let recurrentStateLayout: PagedKVRecurrentStateLayout = lfm25HybridVerified
+            ? .lfm25ShortConvOneSlot : .mambaTwoSlot
+        let architectureVerified = ordinaryHybridOnly || allowlistedArchitectureVerified || deepseekV4Pool != nil
             || qwen35HybridDecoderArchitectureVerified(
             modelID: modelID,
             configJSONData: configJSONData
@@ -3291,9 +3364,72 @@ maxTokens: 1,
             requiresMoEDispatch: (configJSONData.flatMap(Self.pagedKVConfigRequiresMoE) ?? false)
                 || Self.pagedKVModelIDLooksLikeExpertModel(modelID),
             hybridDecoderArchitectureVerified: architectureVerified,
+            ordinaryHybridOnly: ordinaryHybridOnly,
+            recurrentStateLayout: recurrentStateLayout,
             sparseAttention: sparseAttention,
             deepseekV4Pool: deepseekV4Pool
         )
+    }
+
+    private nonisolated static func bonsai2BHybridDecoderArchitectureVerified(
+        modelID: String?, configObject: [String: Any]?
+    ) -> Bool {
+        func integer(_ value: Any?, equals expected: Int) -> Bool {
+            guard let number = value as? NSNumber else { return false }
+            return String(cString: number.objCType) != "c" && number.doubleValue == Double(expected)
+        }
+        guard modelID?.lowercased() == "prism-ml/ternary-bonsai-2-2b-mlx-2bit",
+              let config = configObject,
+              integer(config["schema_version"], equals: 2),
+              config["model_type"] as? String == "prism_hadamard_qwen35",
+              config["base_model_type"] as? String == "qwen3_5",
+              config["tensor_namespace"] as? String == "mlx-vlm-qwen3_5",
+              let text = config["text_config"] as? [String: Any],
+              text["model_type"] as? String == "qwen3_5_text",
+              integer(text["num_hidden_layers"], equals: 24),
+              integer(text["full_attention_interval"], equals: 4),
+              integer(text["mtp_num_hidden_layers"], equals: 0),
+              let dedicated = text["mtp_use_dedicated_embeddings"] as? NSNumber,
+              String(cString: dedicated.objCType) == "c", !dedicated.boolValue,
+              let layers = text["layer_types"] as? [String], layers.count == 24
+        else { return false }
+        return layers.enumerated().allSatisfy { index, layer in
+            layer == ((index + 1).isMultiple(of: 4) ? "full_attention" : "linear_attention")
+        }
+    }
+
+    /// LFM2.5 has MambaCache instances only for its short-convolution layers,
+    /// but each records a single convolution-history tensor rather than the
+    /// two Qwen Mamba slots. This exact serving identity/config pair is the
+    /// only route to the one-slot ordinary-CB bridge; serial/oracle and
+    /// runtime parity gates still decide whether it attaches.
+    private nonisolated static func lfm25HybridDecoderArchitectureVerified(
+        modelID: String?, configObject: [String: Any]?
+    ) -> Bool {
+        func integer(_ value: Any?, equals expected: Int) -> Bool {
+            guard let number = value as? NSNumber else { return false }
+            return String(cString: number.objCType) != "c" && number.doubleValue == Double(expected)
+        }
+        let expectedLayerTypes = (0..<40).map { index in
+            (index - 2).isMultiple(of: 4) ? "full_attention" : "conv"
+        }
+        guard modelID?.lowercased() == "liquidai/lfm2.5-24b-a2b-mlx-4bit",
+              let config = configObject,
+              config["architectures"] as? [String] == ["Lfm2MoeForCausalLM"],
+              config["model_type"] as? String == "lfm2_moe",
+              integer(config["hidden_size"], equals: 2048),
+              integer(config["num_hidden_layers"], equals: 40),
+              config["layer_types"] as? [String] == expectedLayerTypes,
+              integer(config["conv_L_cache"], equals: 3),
+              let convBias = config["conv_bias"] as? NSNumber,
+              String(cString: convBias.objCType) == "c", !convBias.boolValue,
+              integer(config["num_attention_heads"], equals: 32),
+              integer(config["num_key_value_heads"], equals: 8),
+              integer(config["num_dense_layers"], equals: 2),
+              integer(config["num_experts"], equals: 64),
+              integer(config["num_experts_per_tok"], equals: 4)
+        else { return false }
+        return true
     }
 
     private nonisolated static func qwen35HybridDecoderArchitectureVerified(
@@ -3337,6 +3473,7 @@ maxTokens: 1,
         runtimeCacheClass: String,
         modelCapabilities: PagedKVRuntimeModelCapabilities
     ) -> String? {
+        guard !modelCapabilities.ordinaryHybridOnly else { return nil }
         if runtimeCacheClass == "KVCacheSimple" {
             return "paged_kv"
         }
@@ -3449,6 +3586,7 @@ maxTokens: 1,
         draftModelLoadPath: String? = nil,
         numDraftTokens: Int = 3,
         speculativeCacheWrapValidated: Bool = false,
+        mlxCacheLimitMB: Int? = nil,
         maxContextTokensOverride: Int? = nil,
         kvBitsOverride: Int? = nil,
         pagedKVConfig: PagedKVConfig = .defaults(),
@@ -3495,6 +3633,16 @@ maxTokens: 1,
         switchMaxBatchByTarget: [String: Int] = [:],
         switchContextProvenanceModelIDs: Set<String> = []
     ) async throws {
+        if let mlxCacheLimitMB, !Self.isValidMLXCacheLimitMB(mlxCacheLimitMB) {
+            throw ModelRuntimeLoadError(
+                target: modelID ?? "<unset>", reason: "mlx_cache_limit_mb must be in 0...\(Self.maximumMLXCacheLimitMB)")
+        }
+        let hardwareServingRowCap = ProviderCapacity.boundedServingRows(ProviderCapacity.maxConcurrencyOverrideLimit)
+        self.hardwareServingRowCap = hardwareServingRowCap
+        self.mlxCacheLimitMBForLoading = Self.resolvedMLXCacheLimitMB(
+            configured: mlxCacheLimitMB,
+            physicalMemoryBytes: ProcessInfo.processInfo.physicalMemory
+        )
         let normalizedDraftModelID = Self.nonEmpty(draftModelID)
         let normalizedDraftModelLoadPath = Self.nonEmpty(draftModelLoadPath)
         self.modelID = modelID
@@ -3562,13 +3710,8 @@ maxTokens: 1,
             fputs("event=native_mtp_request_shape_capture outcome=disabled reason=\(error)\n", stderr)
             self.nativeMTPRequestShapeCapture = nil
         }
-        #if DEBUG || MACPROVIDER_LAB_HARNESS
-        self.testNativeMTPAdmissionObserver = testNativeMTPAdmissionObserver
-        self.testNativeMTPAdmissionRequestObserver = testNativeMTPAdmissionRequestObserver
-        #else
-        self.testNativeMTPAdmissionObserver = nil
-        self.testNativeMTPAdmissionRequestObserver = nil
-        #endif
+        self.testNativeMTPAdmissionObserver = NativeMTPQualificationScope.permitsFixtureHooks ? testNativeMTPAdmissionObserver : nil
+        self.testNativeMTPAdmissionRequestObserver = NativeMTPQualificationScope.permitsFixtureHooks ? testNativeMTPAdmissionRequestObserver : nil
         self.pagedKVRuntimeProber = .live
         self.continuousBatchReplayAuthority = ContinuousBatchRuntimeReplayAuthority()
         self.pagedKVAttachDecision = Self.pagedKVRuntimeCapabilityDecision(
@@ -3581,7 +3724,7 @@ maxTokens: 1,
             runtimeCacheClass: Self.pagedKVUnavailableCacheClass
         )
         self.conversationCache = ConversationCache()
-        let boundedMaxBatch = min(max(1, maxBatch), ProviderCapacity.maxConcurrencyOverrideLimit)
+        let boundedMaxBatch = min(max(1, maxBatch), hardwareServingRowCap)
         self.maxBatch = boundedMaxBatch
         self.maxBatchBeforePolicyCeiling = boundedMaxBatch
         self.inferenceGate = AsyncSemaphore(value: boundedMaxBatch)
@@ -3652,6 +3795,11 @@ maxTokens: 1,
             return
         }
 
+        // One setup boundary for serve, self-test and native benchmark callers.
+        // A nil-model or preloaded test runtime must not initialize Metal.
+        if let applied = Self.applyMLXCacheLimit(megabytes: mlxCacheLimitMBForLoading) {
+            FileHandle.standardError.write(Data("mlx_cache_limit_bytes=\(applied)\n".utf8))
+        }
         let targetLoadPath = modelLoadPath ?? modelID
         let candidateNativeMTPLoad: NativeMTPRuntimeLoadResult?
         let candidateNativeMTPDisabledReason: NativeMTPStatusReason
@@ -3764,6 +3912,9 @@ maxTokens: 1,
             modelCapabilities: modelCapabilities,
             runtimeCacheClass: runtimeCacheClass
         )
+        if let recordable = parityProbe?.contiguousCacheRecordable {
+            self.currentPagedKVModelCapabilities.supportsContiguousCacheMaterialization = recordable
+        }
         if let measurement = Self.measurePagedKVRuntime(
             config: self.pagedKVConfig,
             modelID: modelID,
@@ -3829,12 +3980,13 @@ maxTokens: 1,
             maxContextTokens: self.maxContextTokens,
             modelID: modelID,
             modelSHA256: self.currentModelHash,
+            modelCapabilities: self.currentPagedKVModelCapabilities,
             weightsGeneration: self.currentSpecDecodeGeneration,
             kvBitsOverride: self.kvBitsOverride,
             prefillStepSize: self.continuousBatchPromptChunkOverride,
             nativeMTPStatusSink: self.currentNativeMTPStatusSink,
             replayAuthority: self.continuousBatchReplayAuthority,
-            cachedTurns: self.continuousBatchingCachedTurns
+            cachedTurns: self.effectiveContinuousBatchingCachedTurns
         )
         if self.continuousBatchScheduler == nil {
             self.pagedKVSchedulerBackendInstalled = false
@@ -3948,6 +4100,7 @@ maxTokens: 1,
         testNativeMTPAdmissionRequestObserver: (@Sendable (String?, NativeMTPRuntimeAdmission, Int) -> Void)? = nil,
         warmSwapEnabled: Bool,
         swapDrainTimeoutSeconds: Int = 30,
+        testDrainTiming: DrainTiming? = nil,
         providerStatus: ProviderStatus? = nil,
         catalogModelIDAlias: String? = nil,
         targetAuthorities: [String: ModelRuntimeTargetAuthority] = [:],
@@ -3964,6 +4117,7 @@ maxTokens: 1,
         continuousBatchingBackend: (any ContinuousBatchSchedulerBackend)? = nil,
         continuousBatchPrefillGrouping: ContinuousBatchPrefillGroupingRule? = nil,
         testContinuousBatchTextPreparationLane: ContinuousBatchTextPreparationLane? = nil,
+        testConversationCacheMemoryBudget: ConversationCacheMemoryBudget? = nil,
         pagedKVRuntimeProber: PagedKVRuntimeProber = .live,
         loader: @escaping @Sendable (String) async throws -> (ModelContainer, String, String?),
         testLoader: (@Sendable (String) async throws -> (String, String?))? = nil,
@@ -3985,15 +4139,9 @@ maxTokens: 1,
         self.currentDraftModelID = normalizedDraftModelID
         self.currentDraftTargetModelID = normalizedDraftModelID == nil ? nil : modelID
         self.currentDraftContainer = nil
-        #if DEBUG || MACPROVIDER_LAB_HARNESS
-        self.currentNativeMTPDrafterContainer = nativeMTPDrafterContainer
-        self.currentNativeMTPCapability = nativeMTPDrafterContainer == nil ? nil : nativeMTPCapability
-        #else
-        self.currentNativeMTPDrafterContainer = nil
-        self.currentNativeMTPCapability = nil
-        #endif
-        #if DEBUG || MACPROVIDER_LAB_HARNESS
-        self.currentNativeMTPAdmissionCapability = nativeMTPDrafterContainer == nil
+        self.currentNativeMTPDrafterContainer = NativeMTPQualificationScope.permitsFixtureHooks ? nativeMTPDrafterContainer : nil
+        self.currentNativeMTPCapability = NativeMTPQualificationScope.permitsFixtureHooks && nativeMTPDrafterContainer != nil ? nativeMTPCapability : nil
+        self.currentNativeMTPAdmissionCapability = !NativeMTPQualificationScope.permitsFixtureHooks || nativeMTPDrafterContainer == nil
             ? nil
             : labNativeMTPAdmissionCapability
         self.nativeMTPStatusResetGeneration = self.currentNativeMTPAdmissionCapability == nil ? 0 : 1
@@ -4003,9 +4151,6 @@ maxTokens: 1,
             mode: nativeMTPMode,
             resetGeneration: self.nativeMTPStatusResetGeneration
         )
-        #else
-        self.currentNativeMTPAdmissionCapability = nil
-        #endif
         self.currentContinuousBatchTextPreparationLane = testContinuousBatchTextPreparationLane
         self.currentNativeMTPTupleOffer = nil
         self.currentNativeMTPSelfTestInput = nil
@@ -4067,15 +4212,9 @@ maxTokens: 1,
         // prebuilt paged-KV attach evidence. A release provider ignores caller-supplied
         // identity/proof/backend flags and can only attach from real on-device measurement,
         // so this test initializer can never become a self-authored-evidence bypass.
-        #if DEBUG || MACPROVIDER_LAB_HARNESS
-        let effectiveObservedIdentity = pagedKVObservedRuntimeIdentity
-        let effectiveSizingProof = pagedKVHardwareSizingProof
-        let effectiveBackendInstalled = pagedKVSchedulerBackendInstalled
-        #else
-        let effectiveObservedIdentity: PagedKVObservedRuntimeIdentity? = nil
-        let effectiveSizingProof: PagedKVHardwareSizingProof? = nil
-        let effectiveBackendInstalled = false
-        #endif
+        let effectiveObservedIdentity = NativeMTPQualificationScope.permitsFixtureHooks ? pagedKVObservedRuntimeIdentity : nil
+        let effectiveSizingProof = NativeMTPQualificationScope.permitsFixtureHooks ? pagedKVHardwareSizingProof : nil
+        let effectiveBackendInstalled = NativeMTPQualificationScope.permitsFixtureHooks && pagedKVSchedulerBackendInstalled
         self.pagedKVObservedRuntimeIdentity = effectiveObservedIdentity
         self.pagedKVHardwareSizingProof = effectiveSizingProof
         self.pagedKVSchedulerBackendInstalled = effectiveBackendInstalled
@@ -4084,13 +4223,8 @@ maxTokens: 1,
         self.nativeMTPCapability = nativeMTPCapability
         self.nativeMTPSchedulerSupported = nativeMTPSchedulerSupported
         self.nativeMTPRequestShapeCapture = nil
-        #if DEBUG || MACPROVIDER_LAB_HARNESS
-        self.testNativeMTPAdmissionObserver = testNativeMTPAdmissionObserver
-        self.testNativeMTPAdmissionRequestObserver = testNativeMTPAdmissionRequestObserver
-        #else
-        self.testNativeMTPAdmissionObserver = nil
-        self.testNativeMTPAdmissionRequestObserver = nil
-        #endif
+        self.testNativeMTPAdmissionObserver = NativeMTPQualificationScope.permitsFixtureHooks ? testNativeMTPAdmissionObserver : nil
+        self.testNativeMTPAdmissionRequestObserver = NativeMTPQualificationScope.permitsFixtureHooks ? testNativeMTPAdmissionRequestObserver : nil
         // Defense-in-depth: only DEBUG/test builds may inject a non-`.live` prober. A
         // release provider always re-derives evidence via the real on-device `.live`
         // probes, so an injected prober can never revive the "self-authored" attach path.
@@ -4129,7 +4263,13 @@ maxTokens: 1,
             observedRuntimeIdentity: effectiveObservedIdentity
         )
         self.continuousBatchScheduler = nil
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        self.conversationCache = ConversationCache(
+            memoryBudget: testConversationCacheMemoryBudget ?? ConversationCacheMemoryBudget()
+        )
+        #else
         self.conversationCache = ConversationCache()
+        #endif
         self.maxBatch = boundedMaxBatch
         self.maxBatchBeforePolicyCeiling = boundedMaxBatch
         self.inferenceGate = AsyncSemaphore(value: boundedMaxBatch)
@@ -4149,6 +4289,10 @@ maxTokens: 1,
         self.warmSwapEnabled = warmSwapEnabled
         self.swapDrainTimeoutSeconds = swapDrainTimeoutSeconds
         self.providerStatus = providerStatus
+        if let testDrainTiming {
+            self.drainNowMilliseconds = testDrainTiming.nowMilliseconds
+            self.drainPollSleep = testDrainTiming.pollSleep
+        }
         self.loader = loader
         self.testLoader = testLoader
         self.testCompletion = testCompletion
@@ -4328,7 +4472,8 @@ maxTokens: 1,
             rolloutMode: matchingEntry?.rollout.rawValue ?? ContinuousBatchingMode.off.rawValue,
             tupleSHA256: matchingEntry?.tupleSHA256,
             authorized: signedPolicyAuthorized,
-            cachedTurnsAuthorized: locallyAuthorized && matchingEntry?.tuple.cachedTurnsAccepted == true,
+            cachedTurnsAuthorized: locallyAuthorized && effectiveContinuousBatchingCachedTurns
+                && matchingEntry?.tuple.cachedTurnsAccepted == true,
             emergencyOffOverride: continuousBatchingEmergencyOffOverride,
             localProofResult: localProofResult,
             decisionReason: decisionReason
@@ -5357,7 +5502,8 @@ maxTokens: 1,
         let maxContextTokens = adoptionKnobs?.maxContext ?? maxContextTokens
         let kvBitsOverride = adoptionKnobs?.kvBits ?? kvBitsOverride
         let prefillStepSize = prefillStepSize
-        return Task.detached { [weak self, testLoader, drainTimeoutSeconds, providerStatus, configuredDraftModelID, configuredDraftModelLoadPath, numDraftTokens, maxContextTokens, kvBitsOverride, prefillStepSize, targetAuthority, adoptionKnobs] in
+        let mlxCacheLimitMB = mlxCacheLimitMBForLoading
+        return Task.detached { [weak self, testLoader, drainTimeoutSeconds, providerStatus, configuredDraftModelID, configuredDraftModelLoadPath, numDraftTokens, maxContextTokens, kvBitsOverride, prefillStepSize, mlxCacheLimitMB, targetAuthority, adoptionKnobs] in
             guard let self else { return }
             do {
                 let container: ModelContainer?
@@ -5402,6 +5548,10 @@ maxTokens: 1,
                 } else {
                     guard let targetAuthority else {
                         throw ModelRuntimeLoadError(target: "signed catalog identity unavailable for \(targetModelID)")
+                    }
+                    // Nil-model startup defers Metal setup until its first signed load.
+                    if let applied = Self.applyMLXCacheLimit(megabytes: mlxCacheLimitMB) {
+                        FileHandle.standardError.write(Data("mlx_cache_limit_bytes=\(applied)\n".utf8))
                     }
                     let visionModelID = self.nativeVisionSelectionModelID(for: targetModelID)
                     let loaded = try await Self.loadLocalContainer(
@@ -5861,7 +6011,7 @@ maxTokens: 1,
         servedSlotsResolver = resolver
         if let rowsBeforePolicyCeiling {
             maxBatchBeforePolicyCeiling = min(
-                max(maxBatch, rowsBeforePolicyCeiling), ProviderCapacity.maxConcurrencyOverrideLimit
+                max(maxBatch, rowsBeforePolicyCeiling), hardwareServingRowCap
             )
         }
     }
@@ -6013,17 +6163,51 @@ maxTokens: 1,
         batchedToken: Int,
         otherRowsAloneTokens: [Int]
     ) async throws -> (nearTie: Bool, margin: Float?, reason: String) {
-        try Task.checkCancellation()
-        guard let container = currentContainer else { return (false, nil, "model_unavailable") }
-        let reference = try await container.perform { context in
+        try await withExclusiveContinuousBatchingSelfCheck { runtime in
+            guard let container = runtime.currentContainer else { return (false, nil, "model_unavailable") }
+            let reference = try await container.perform { context in
+                try Task.checkCancellation()
+                return try PagedKVRuntimeParityProbe.serialReference(model: context.model, prompt: prompt + sharedPrefix)
+            }
             try Task.checkCancellation()
-            return try PagedKVRuntimeParityProbe.serialReference(model: context.model, prompt: prompt + sharedPrefix)
+            return ContinuousBatchingSelfCheck.divergenceVerdict(
+                reference: reference, aloneToken: aloneToken, batchedToken: batchedToken,
+                otherRowsAloneTokens: otherRowsAloneTokens
+            )
         }
+    }
+
+    /// The operation starts on this actor only after exclusive admission and
+    /// identity checks, so it captures no stale container while queued. Awaiting
+    /// its native body (including BlockingInferenceExecutor's continuation) keeps
+    /// the permit through cancellation until that work actually returns.
+    func withExclusiveContinuousBatchingSelfCheck<T: Sendable>(
+        _ operation: @escaping @Sendable (isolated ModelRuntime) async throws -> T
+    ) async throws -> T {
+        let gate = inferenceGate
+        let generation = selfCheckGeneration
+        return try await gate.withExclusivePermit {
+            try await self.performExclusiveContinuousBatchingSelfCheck(
+                expectedGeneration: generation, gate: gate, operation: operation
+            )
+        }
+    }
+
+    private func performExclusiveContinuousBatchingSelfCheck<T: Sendable>(
+        expectedGeneration: Int,
+        gate: AsyncSemaphore,
+        operation: @Sendable (isolated ModelRuntime) async throws -> T
+    ) async throws -> T {
         try Task.checkCancellation()
-        return ContinuousBatchingSelfCheck.divergenceVerdict(
-            reference: reference, aloneToken: aloneToken, batchedToken: batchedToken,
-            otherRowsAloneTokens: otherRowsAloneTokens
-        )
+        guard expectedGeneration == selfCheckGeneration, gate === inferenceGate, state == .ready else {
+            throw CancellationError()
+        }
+        let result = try await operation(self)
+        try Task.checkCancellation()
+        guard expectedGeneration == selfCheckGeneration, gate === inferenceGate, state == .ready else {
+            throw CancellationError()
+        }
+        return result
     }
 
     /// Runs `prompts` together on the attached scheduler at temperature 0 and
@@ -6039,10 +6223,56 @@ maxTokens: 1,
         idPrefix: String,
         cohort: Bool = false
     ) async throws -> ContinuousBatchingSelfCheckBatchRun {
+        let gate = inferenceGate
+        let generation = selfCheckGeneration
+        return try await gate.withExclusivePermit {
+            try await self.runExclusiveContinuousBatchingSelfCheckBatch(
+                prompts: prompts, maxOutputTokens: maxOutputTokens, idPrefix: idPrefix,
+                cohort: cohort, expectedGeneration: generation, gate: gate)
+        }
+    }
+
+    private func runExclusiveContinuousBatchingSelfCheckBatch(
+        prompts: [[Int]], maxOutputTokens: Int, idPrefix: String, cohort: Bool,
+        expectedGeneration: Int, gate: AsyncSemaphore
+    ) async throws -> ContinuousBatchingSelfCheckBatchRun {
         try Task.checkCancellation()
+        guard expectedGeneration == selfCheckGeneration else { throw CancellationError() }
+        guard prompts.count <= maxBatch else {
+            throw ContinuousBatchSchedulerError.requestFailed("self_check_row_cap_exceeded")
+        }
         guard let scheduler = continuousBatchScheduler else {
             throw ContinuousBatchSchedulerError.requestFailed("self_check_scheduler_unavailable")
         }
+        let ids = prompts.indices.map { "\(idPrefix)-\($0)" }
+        let result: Result<ContinuousBatchingSelfCheckBatchRun, Error>
+        do {
+            result = .success(try await performContinuousBatchingSelfCheckBatch(
+                prompts: prompts, maxOutputTokens: maxOutputTokens, idPrefix: idPrefix,
+                cohort: cohort, scheduler: scheduler))
+        } catch {
+            result = .failure(error)
+        }
+        do {
+            // A canceled submit can finish before KV retirement. Detached cleanup
+            // is shielded from caller cancellation while exclusivity is held.
+            try await Task.detached {
+                try await scheduler.cancelAndAwaitSelfCheckCleanup(requestIDs: ids)
+            }.value
+        } catch {
+            await gate.failClosed()
+            throw error
+        }
+        return try result.get()
+    }
+
+    private func performContinuousBatchingSelfCheckBatch(
+        prompts: [[Int]],
+        maxOutputTokens: Int,
+        idPrefix: String,
+        cohort: Bool, scheduler: ContinuousBatchScheduler
+    ) async throws -> ContinuousBatchingSelfCheckBatchRun {
+        try Task.checkCancellation()
         let ids = prompts.indices.map { "\(idPrefix)-\($0)" }
         let start = Date()
         let outputs = try await withTaskCancellationHandler {
@@ -6466,12 +6696,13 @@ maxTokens: 1,
             maxContextTokens: maxContextTokens,
             modelID: currentModelID,
             modelSHA256: currentModelHash,
+            modelCapabilities: currentPagedKVModelCapabilities,
             weightsGeneration: currentSpecDecodeGeneration,
             kvBitsOverride: kvBitsOverride,
             prefillStepSize: continuousBatchPromptChunkOverride,
             nativeMTPStatusSink: currentNativeMTPStatusSink,
             replayAuthority: continuousBatchReplayAuthority,
-            cachedTurns: continuousBatchingCachedTurns
+            cachedTurns: effectiveContinuousBatchingCachedTurns
         )
         continuousBatchingDurableReplayAuthorityAvailable =
             continuousBatchScheduler != nil && continuousBatchReplayAuthority.durableAvailable
@@ -6581,10 +6812,15 @@ maxTokens: 1,
         snapshot: RuntimeSnapshot,
         emitTelemetry: Bool = true
     ) throws -> ContinuousBatchingCapability {
-        let capability = continuousBatchingCapability(
+        let ordinaryCapability = continuousBatchingCapability(
             draftConfigured: snapshot.hasTargetCompatibleDraft || currentDraftModelID != nil,
             requestHasStableRequestID: Self.requestHasStableRequestID(request),
             requestStateRepresentable: Self.requestStateRepresentable(request)
+        )
+        let capability = Self.keyedMaterializationCapability(
+            ordinaryCapability,
+            conversationKey: request.conversationKey,
+            supportsMaterialization: currentPagedKVModelCapabilities.supportsContiguousCacheMaterialization
         )
         // Telemetry is emitted once per request at preflight; execution paths
         // re-validate for fail-closed safety but must not re-log the same
@@ -6594,6 +6830,23 @@ maxTokens: 1,
         }
         try ContinuousBatchingPolicy.validateStrictStartup(capability)
         return capability
+    }
+
+    /// Fence cold keyed rows too: terminal serial-cache materialization uses
+    /// the same byte bridge even when persistent cached-turn batching is off.
+    nonisolated static func keyedMaterializationCapability(
+        _ capability: ContinuousBatchingCapability,
+        conversationKey: String?,
+        supportsMaterialization: Bool
+    ) -> ContinuousBatchingCapability {
+        guard capability.mode != .off, capability.unsupportedReason == nil,
+              hasReusableConversationKey(conversationKey), !supportsMaterialization
+        else { return capability }
+        return ContinuousBatchingCapability(
+            mode: capability.mode, maxActiveRows: capability.maxActiveRows,
+            queueLimit: capability.queueLimit, descriptor: capability.descriptor,
+            unsupportedReason: .stickyCacheHandoffUnavailable
+        )
     }
 
     func maxContextTokensForTest() -> Int {
@@ -6644,7 +6897,7 @@ maxTokens: 1,
         }
         // SPEC-001-R011: a swap drain does not wait out local work.
         await providerStatus.preemptAdmittedLocalWork()
-        let drainStartMs = Int64(Date().timeIntervalSince1970 * 1000)
+        let drainStartMs = drainNowMilliseconds()
         let timeoutMs = Int64(timeoutSeconds * 1000)
         while !Task.isCancelled {
             let snapshot = await providerStatus.snapshot()
@@ -6653,11 +6906,11 @@ maxTokens: 1,
             if !providerInFlight && !runtimeInFlight {
                 return false
             }
-            let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+            let nowMs = drainNowMilliseconds()
             if nowMs - drainStartMs >= timeoutMs {
                 return true
             }
-            try? await Task.sleep(nanoseconds: 50_000_000)
+            await drainPollSleep()
         }
         return false
     }
@@ -6704,24 +6957,25 @@ maxTokens: 1,
         if let adoptionKnobs {
             maxContextTokens = adoptionKnobs.maxContext
             kvBitsOverride = adoptionKnobs.kvBits
-            maxBatchBeforePolicyCeiling = adoptionKnobs.maxBatch
+            maxBatchBeforePolicyCeiling = min(max(1, adoptionKnobs.maxBatch), hardwareServingRowCap)
         }
         // The rebuilt scheduler never has more rows than the new model's
         // signed policy ceiling (SPEC-038 FR-CB11 v0.3.22).
         maxBatch = Self.rowsUnderPolicyCeiling(
-            rows: maxBatchBeforePolicyCeiling,
+            rows: min(maxBatchBeforePolicyCeiling, hardwareServingRowCap),
             ceiling: servedSlotsManaged ? continuousBatchingPolicyServedSlotCeiling(modelSHA256: modelHash) : nil
         )
         // A managed provider serves the owner pin or one slot until the new
         // model's self-check (or its stored result) decides.
         let swapServedSlots: Int? = servedSlotsManaged
             ? min(ownerPinnedServedSlots ?? 1, maxBatch)
-            : adoptionKnobs?.maxBatch
+            : adoptionKnobs.map { min(max(1, $0.maxBatch), maxBatch) }
         if let swapServedSlots {
             servedSlotLimit = swapServedSlots
             await inferenceGate.resize(to: swapServedSlots, stamp: swapGeneration)
         }
         await conversationCache.purgeAllHot()
+        conversationCache.memoryBudget.resetGeometryForModelChange()
         currentContainer = container
         if let previous = residentWeightsTicket {
             residentWeightsTicket = nil
@@ -6779,6 +7033,9 @@ maxTokens: 1,
             )
         } else {
             (parityProbe, moeProbe) = (nil, nil)
+        }
+        if let recordable = parityProbe?.contiguousCacheRecordable {
+            currentPagedKVModelCapabilities.supportsContiguousCacheMaterialization = recordable
         }
         if let measurement = Self.measurePagedKVRuntime(
             config: pagedKVConfig,
@@ -7018,13 +7275,14 @@ maxTokens: 1,
         )
     }
 
-    /// Every guaranteed-call profile identity resolves through its catalog
-    /// alias, not only Qwen3.6: the coordinator capability advertises the
-    /// catalog id, so the request check must use the same identity.
+    /// Model-owned prompt profiles resolve through the configured catalog
+    /// identity while its model remains loaded. A buyer-provided alias never
+    /// establishes a profile, and a warm-swapped model keeps its own identity.
     static func toolSelectionModelID(loadedModelID: String?, configuredModelID: String?, catalogModelIDAlias: String?) -> String? {
         guard let loadedModelID, loadedModelID == configuredModelID,
               let alias = catalogModelIDAlias?.trimmingCharacters(in: .whitespacesAndNewlines),
-              ToolSelectionPolicy.guaranteedCallProfile(modelID: alias) != nil
+              (ToolSelectionPolicy.guaranteedCallProfile(modelID: alias) != nil
+                || ChatCompletionRequest.usesQwen38Template(modelID: alias))
         else { return loadedModelID }
         return alias
     }
@@ -8180,7 +8438,7 @@ maxTokens: 1,
                       lease,
                       modelHasRecurrentLayers: modelHasRecurrentLayers
                   ),
-                  cachedTurnsEnabled: continuousBatchingCachedTurns,
+                  cachedTurnsEnabled: effectiveContinuousBatchingCachedTurns,
                   cachedTurnsAccepted: continuousBatchCachedTurnsAccepted
               )
         else {
@@ -8284,6 +8542,30 @@ maxTokens: 1,
         shouldCancel: @escaping @Sendable () -> Bool,
         drainCancelled: DrainCancelToken
     ) async throws -> CompletionResult? {
+        guard capability.isRequested, capability.unsupportedReason == nil,
+              !capability.shouldUseSerialPath, case .attached = pagedKVAttachDecision else { return nil }
+        let gate = inferenceGate
+        return try await Self.withDrainAndClientCancellation(drainCancelled, shouldCancel: shouldCancel) {
+            try await gate.withPermit {
+                try Task.checkCancellation()
+                try drainCancelled.check()
+                if shouldCancel() { throw CancellationError() }
+                return try await self.admittedContinuousBatchCompletion(request: request, snapshot: snapshot, capability: capability,
+                        nativeMTPAdmission: nativeMTPAdmission, completionStartedAt: completionStartedAt,
+                        shouldCancel: shouldCancel, drainCancelled: drainCancelled)
+            }
+        }
+    }
+
+    private func admittedContinuousBatchCompletion(
+        request: ChatCompletionRequest,
+        snapshot: RuntimeSnapshot,
+        capability: ContinuousBatchingCapability,
+        nativeMTPAdmission: NativeMTPRuntimeAdmission,
+        completionStartedAt: Date,
+        shouldCancel: @escaping @Sendable () -> Bool,
+        drainCancelled: DrainCancelToken
+    ) async throws -> CompletionResult? {
         guard capability.isRequested,
               capability.unsupportedReason == nil,
               !capability.shouldUseSerialPath,
@@ -8304,7 +8586,7 @@ maxTokens: 1,
         }
 
         let maxContextTokens = maxContextTokens
-        let stopTokenFilter = snapshot.nativeVisionProfile == nil
+        let rawStopTokenFilter = snapshot.nativeVisionProfile == nil
             ? stopTokenFilter : NativeVisionProfile.stopTokenFilter
         let selectionModelID = toolSelectionModelID(snapshot)
         CBTrace.logPreparation(schedulerRequestID, "rt_cb_prepare_begin path=complete")
@@ -8317,6 +8599,7 @@ maxTokens: 1,
             drainCancelled: drainCancelled,
             promptSnapshotCachedTurnsAttachable: continuousBatchCachedTurnsAccepted
         )
+        let stopTokenFilter = Self.toolAwareStopTokenFilter(rawStopTokenFilter, grammar: Self.toolGrammar(for: request))
         CBTrace.logPreparation(schedulerRequestID, "rt_cb_prepare_end path=complete tokens=\(prepared.promptTokens.count)")
 
         try drainCancelled.check()
@@ -8338,6 +8621,7 @@ maxTokens: 1,
             resolved: tokenBoundedNativeMTPAdmission
         )
         let preparedPromptTokenIDs = prepared.promptTokens.map(Int32.init)
+        configureConversationCacheMemoryBudget()
         let coldContext = coldContext(for: request, snapshot: snapshot)
         let batchKVBits = Self.effectiveKVBits(
             configured: kvBitsOverride,
@@ -8367,7 +8651,6 @@ maxTokens: 1,
                     ? prepared.promptResumeBoundaries : nil
             )
             : nil
-        #if DEBUG || MACPROVIDER_LAB_HARNESS
         recordLabNativeMTPConversationCacheBegin(
             request: request,
             surface: "attached_complete",
@@ -8375,7 +8658,6 @@ maxTokens: 1,
             lease: lease,
             modelHasRecurrentLayers: prepared.modelHasRecurrentLayers
         )
-        #endif
         CBTrace.log(schedulerRequestID, "rt_cb_lease cached=\(lease?.cachedPromptTokens ?? -1)")
         if conversationCacheAllowed,
            try await serialRouteCanaryCachedHitMissingRetainedHandoff(
@@ -8399,7 +8681,7 @@ maxTokens: 1,
             // A row that publishes a prompt snapshot publishes it in the serial
             // format and nothing else (SPEC-024 FR-CI2a); under R005 a GLM row
             // too short to carry one publishes nothing on either path.
-            keyedRowsCommitSerialFormat: (prepared.modelHasRecurrentLayers && !continuousBatchingCachedTurns)
+            keyedRowsCommitSerialFormat: (prepared.modelHasRecurrentLayers && !effectiveContinuousBatchingCachedTurns)
                 || publishedPromptSnapshotTokenCount != nil
                 || prepared.promptSnapshotAttachesToContinuousBatchRow,
             cachedPrefixRestoresNativeMTPDrafter: promptSnapshotCache?.nativeMTPDrafter != nil
@@ -8442,16 +8724,21 @@ maxTokens: 1,
             // Non-streaming receipts report full generation latency as TTFT
             // (SPEC-015): the buyer sees nothing before the whole body.
             result = try await Self.withDrainAndClientCancellation(drainCancelled, shouldCancel: shouldCancel) {
-                try await scheduler.submit(submission.schedulerRequest)
+                try await scheduler.submit(submission.schedulerRequest, admissionWaitPolicy: .callerBounded)
             }
         } catch {
+            let submissionError = await Self.continuousBatchFailureAfterRetirement(
+                (error as? ContinuousBatchSchedulerError)?.asAPIError() ?? error,
+                scheduler: scheduler, requestID: schedulerRequestID, gate: inferenceGate
+            )
             if let lease {
                 await conversationCache.abort(lease)
             }
+            let error = submissionError
             // SPEC-038 AC-25: one shared scheduler-error map, so the
             // non-streaming and streaming paths cannot drift.
             CBTrace.log(schedulerRequestID, "rt_cb_threw \(type(of: error))")
-            throw (error as? ContinuousBatchSchedulerError)?.asAPIError() ?? error
+            throw error
         }
         CBTrace.log(schedulerRequestID, "rt_cb_returned status=\(result.terminalStatus)")
         do {
@@ -8531,6 +8818,9 @@ maxTokens: 1,
             } else if let lease {
                 await conversationCache.abort(lease)
             }
+            try await Self.verifyContinuousBatchRequestRetirement(
+                scheduler: scheduler, requestID: schedulerRequestID, gate: inferenceGate
+            )
             nativeMTPRequestShapeCapture?.record(
                 request: request,
                 snapshot: snapshot,
@@ -8552,7 +8842,9 @@ maxTokens: 1,
             if let lease {
                 await conversationCache.abort(lease)
             }
-            throw error
+            throw await Self.continuousBatchFailureAfterRetirement(
+                error, scheduler: scheduler, requestID: schedulerRequestID, gate: inferenceGate
+            )
         }
     }
 
@@ -8569,6 +8861,37 @@ maxTokens: 1,
 
     /// Lab-only R015 hook: record the attached scheduler's in-flight load-gate
     /// decisions. Returns false when no scheduler is attached.
+    /// Resource-negative fixture: only withdraws verification capacity on an idle
+    /// isolated LAB runtime. Restore is the exact saved capability, never caller data.
+    func labSetJourneyVerificationCapacityAvailable(_ available: Bool) -> Bool {
+        guard inFlightCancellations.isEmpty else { return false }
+        if available {
+            guard let saved = labJourneyWithdrawnCapability else { return false }
+            currentNativeMTPCapability = saved
+            labJourneyWithdrawnCapability = nil
+            return true
+        }
+        guard labJourneyWithdrawnCapability == nil, let c = currentNativeMTPCapability else { return false }
+        labJourneyWithdrawnCapability = c
+        currentNativeMTPCapability = NativeMTPCapability(
+            admitted: c.admitted, revoked: c.revoked, revocationStateAvailable: c.revocationStateAvailable,
+            supportsCurrentProcessor: c.supportsCurrentProcessor, supportsCurrentStateCache: c.supportsCurrentStateCache,
+            supportsStreaming: c.supportsStreaming, supportsNonStreaming: c.supportsNonStreaming,
+            supportsStopSequences: c.supportsStopSequences, hasQualifiedRowMappedTransactions: c.hasQualifiedRowMappedTransactions,
+            maximumProposalDepth: 0, maximumPromptTokens: c.maximumPromptTokens,
+            maximumCompletionTokens: c.maximumCompletionTokens, completeWindowBytesByDepth: c.completeWindowBytesByDepth,
+            family: c.family, throughputDeltaPPM: c.throughputDeltaPPM,
+            maximumNativeActiveRows: c.maximumNativeActiveRows, supportsSampling: c.supportsSampling,
+            adaptationConfig: c.adaptationConfig)
+        return true
+    }
+
+    func installLabJourneyResourceObserver(_ observer: NativeMTPJourneyResourceObserver?) async -> Bool {
+        guard let continuousBatchScheduler else { return false }
+        await continuousBatchScheduler.installLabJourneyResourceObserver(observer)
+        return true
+    }
+
     func installLabNativeMTPLoadGateRecorder(_ recorder: NativeMTPLoadGateRecorder?) async -> Bool {
         guard let continuousBatchScheduler else { return false }
         await continuousBatchScheduler.installLabNativeMTPLoadGateRecorder(recorder)
@@ -8581,6 +8904,15 @@ maxTokens: 1,
         guard let continuousBatchScheduler else { return false }
         await continuousBatchScheduler.installLabNativeMTPProposalOverride(override)
         return true
+    }
+
+    /// Lab-only numeric comparison using this runtime's normal scheduler.
+    func installLabNativeMTPNumericalOracle(
+        _ oracle: NativeMTPLabNumericalOracle?, role: NativeMTPLabNumericalOracle.Role
+    ) async -> Bool {
+        guard let continuousBatchScheduler else { return false }
+        let binding = oracle.map { NativeMTPLabNumericalOracle.Binding(oracle: $0, role: role) }
+        return await continuousBatchScheduler.installLabNativeMTPNumericalOracle(binding)
     }
 
     /// Lab-only journey hook: install the hidden-state digest observer on the
@@ -8747,6 +9079,35 @@ maxTokens: 1,
         idleCancellation: DrainCancelToken,
         onChunk: @escaping @Sendable (StreamChunk) -> Void
     ) async throws -> CompletionResult? {
+        guard capability.isRequested, capability.unsupportedReason == nil,
+              !capability.shouldUseSerialPath, case .attached = pagedKVAttachDecision else { return nil }
+        let gate = inferenceGate
+        return try await Self.withDrainAndClientCancellation(drainCancelled, shouldCancel: { shouldCancel() || idleCancellation.isFired }) {
+            try await gate.withPermit {
+                try Task.checkCancellation()
+                try drainCancelled.check()
+                if shouldCancel() { throw CancellationError() }
+                return try await self.admittedContinuousBatchStreamingCompletion(request: request, snapshot: snapshot, capability: capability,
+                        nativeMTPAdmission: nativeMTPAdmission, completionStartedAt: completionStartedAt,
+                        shouldCancel: shouldCancel, drainCancelled: drainCancelled, structuredAccumulator: structuredAccumulator,
+                        idleState: idleState, idleCancellation: idleCancellation, onChunk: onChunk)
+            }
+        }
+    }
+
+    private func admittedContinuousBatchStreamingCompletion(
+        request: ChatCompletionRequest,
+        snapshot: RuntimeSnapshot,
+        capability: ContinuousBatchingCapability,
+        nativeMTPAdmission: NativeMTPRuntimeAdmission,
+        completionStartedAt: Date,
+        shouldCancel: @escaping @Sendable () -> Bool,
+        drainCancelled: DrainCancelToken,
+        structuredAccumulator: StructuredStreamingContentAccumulator,
+        idleState: StructuredStreamingIdleState,
+        idleCancellation: DrainCancelToken,
+        onChunk: @escaping @Sendable (StreamChunk) -> Void
+    ) async throws -> CompletionResult? {
         guard !request.containsNonTextMessageContentPart else { return nil }
         guard capability.isRequested,
               capability.unsupportedReason == nil,
@@ -8768,7 +9129,7 @@ maxTokens: 1,
         }
 
         let maxContextTokens = maxContextTokens
-        let stopTokenFilter = snapshot.nativeVisionProfile == nil
+        let rawStopTokenFilter = snapshot.nativeVisionProfile == nil
             ? stopTokenFilter : NativeVisionProfile.stopTokenFilter
         let selectionModelID = toolSelectionModelID(snapshot)
         let requestStops = request.stop
@@ -8782,6 +9143,7 @@ maxTokens: 1,
             drainCancelled: drainCancelled,
             promptSnapshotCachedTurnsAttachable: continuousBatchCachedTurnsAccepted
         )
+        let stopTokenFilter = Self.toolAwareStopTokenFilter(rawStopTokenFilter, grammar: Self.toolGrammar(for: request))
         CBTrace.logPreparation(schedulerRequestID, "rt_cb_prepare_end path=stream tokens=\(prepared.promptTokens.count)")
 
         try drainCancelled.check()
@@ -8812,6 +9174,7 @@ maxTokens: 1,
             resolved: tokenBoundedNativeMTPAdmission
         )
         let preparedPromptTokenIDs = prepared.promptTokens.map(Int32.init)
+        configureConversationCacheMemoryBudget()
         let coldContext = coldContext(for: request, snapshot: snapshot)
         let batchKVBits = Self.effectiveKVBits(
             configured: kvBitsOverride,
@@ -8841,7 +9204,6 @@ maxTokens: 1,
                     ? prepared.promptResumeBoundaries : nil
             )
             : nil
-        #if DEBUG || MACPROVIDER_LAB_HARNESS
         recordLabNativeMTPConversationCacheBegin(
             request: request,
             surface: "attached_stream",
@@ -8849,7 +9211,6 @@ maxTokens: 1,
             lease: lease,
             modelHasRecurrentLayers: prepared.modelHasRecurrentLayers
         )
-        #endif
         if conversationCacheAllowed,
            try await serialRouteCanaryCachedHitMissingRetainedHandoff(
             lease,
@@ -8872,7 +9233,7 @@ maxTokens: 1,
             // A row that publishes a prompt snapshot publishes it in the serial
             // format and nothing else (SPEC-024 FR-CI2a); under R005 a GLM row
             // too short to carry one publishes nothing on either path.
-            keyedRowsCommitSerialFormat: (prepared.modelHasRecurrentLayers && !continuousBatchingCachedTurns)
+            keyedRowsCommitSerialFormat: (prepared.modelHasRecurrentLayers && !effectiveContinuousBatchingCachedTurns)
                 || publishedPromptSnapshotTokenCount != nil
                 || prepared.promptSnapshotAttachesToContinuousBatchRow,
             cachedPrefixRestoresNativeMTPDrafter: promptSnapshotCache?.nativeMTPDrafter != nil
@@ -8912,7 +9273,7 @@ maxTokens: 1,
                 drainCancelled,
                 shouldCancel: { shouldCancel() || idleCancellation.isFired }
             ) {
-                try await scheduler.submit(submission.schedulerRequest, tokenSink: { event in
+                try await scheduler.submit(submission.schedulerRequest, admissionWaitPolicy: .callerBounded, tokenSink: { event in
                     guard !drainCancelled.isFired,
                           !shouldCancel(),
                           !idleCancellation.isFired
@@ -8936,12 +9297,17 @@ maxTokens: 1,
                 })
             }
         } catch {
+            let submissionError = await Self.continuousBatchFailureAfterRetirement(
+                (error as? ContinuousBatchSchedulerError)?.asAPIError() ?? error,
+                scheduler: scheduler, requestID: schedulerRequestID, gate: inferenceGate
+            )
             if let lease {
                 await conversationCache.abort(lease)
             }
+            let error = submissionError
             // SPEC-038 AC-25: one shared scheduler-error map, so the
             // streaming and non-streaming paths cannot drift.
-            throw (error as? ContinuousBatchSchedulerError)?.asAPIError() ?? error
+            throw error
         }
         do {
             if let error = streamState.error() {
@@ -9057,6 +9423,9 @@ maxTokens: 1,
             } else if let lease {
                 await conversationCache.abort(lease)
             }
+            try await Self.verifyContinuousBatchRequestRetirement(
+                scheduler: scheduler, requestID: schedulerRequestID, gate: inferenceGate
+            )
             nativeMTPRequestShapeCapture?.record(
                 request: request,
                 snapshot: snapshot,
@@ -9078,6 +9447,44 @@ maxTokens: 1,
             if let lease {
                 await conversationCache.abort(lease)
             }
+            throw await Self.continuousBatchFailureAfterRetirement(
+                error, scheduler: scheduler, requestID: schedulerRequestID, gate: inferenceGate
+            )
+        }
+    }
+
+    /// A failed submit or returned terminal result can precede retained-cache
+    /// retirement. Keep the caller's shared permit through cleanup even when
+    /// its task was canceled; surviving duplicates retain ownership of the row.
+    nonisolated static func continuousBatchFailureAfterRetirement(
+        _ failure: Error,
+        scheduler: ContinuousBatchScheduler,
+        requestID: String,
+        gate: AsyncSemaphore
+    ) async -> Error {
+        do {
+            try await verifyContinuousBatchRequestRetirement(
+                scheduler: scheduler, requestID: requestID, gate: gate
+            )
+            return failure
+        } catch {
+            return error
+        }
+    }
+
+    /// Every post-submit exit checks retirement and scheduler health after its
+    /// cache ownership work. Discard can fail without throwing to its caller.
+    nonisolated static func verifyContinuousBatchRequestRetirement(
+        scheduler: ContinuousBatchScheduler,
+        requestID: String,
+        gate: AsyncSemaphore
+    ) async throws {
+        do {
+            try await Task.detached {
+                try await scheduler.awaitRequestRetirement(requestID: requestID)
+            }.value
+        } catch {
+            await gate.failClosed()
             throw error
         }
     }
@@ -9373,16 +9780,12 @@ maxTokens: boundedMaxTokens,
         guard let container = snapshot.container else {
             throw APIError(status: 503, message: "Model not loaded", type: "server_error", code: "model_not_loaded")
         }
-        #if DEBUG || MACPROVIDER_LAB_HARNESS
         let labSerialHooks = try Self.labSerialDecodeHooks(
             requestID: request.requestID,
             outputCap: labNativeMTPDecodeOutputCap,
             timingObserver: labNativeMTPCommitTimingObserver
         )
         let labConversationCacheObserver = labNativeMTPConversationCacheObserver
-        #else
-        let labSerialHooks: LabSerialDecodeHooks? = nil
-        #endif
         if labSerialHooks != nil, HarmonyResponseParser.isHarmonyModelID(request.model) {
             throw Self.labSerialDecodeHookUnsupported("harmony_visible_prefix_accounting")
         }
@@ -9400,6 +9803,7 @@ maxTokens: boundedMaxTokens,
         let conversationCache = conversationCache
         // SPEC-037 stage 5 — per-request cold-tier context, captured before the
         // nonisolated inference closure (nil unless the disk tier is attached).
+        configureConversationCacheMemoryBudget()
         let coldContext = coldContext(for: request, snapshot: snapshot)
         let inferenceGate = inferenceGate
         let blockingInferenceExecutor = blockingInferenceExecutor
@@ -9432,6 +9836,7 @@ maxTokens: boundedMaxTokens,
                         nativeVisionProfile: snapshot.nativeVisionProfile,
                         toolSelectionModelID: selectionModelID
                     )
+                    let stopTokenFilter = Self.toolAwareStopTokenFilter(stopTokenFilter, grammar: Self.toolGrammar(for: request))
                     let grammarConstraint = try GrammarConstraintState.prepare(
                         request: request, tokenizer: context.tokenizer, configuration: context.configuration,
                         eosTokenIDs: Self.generationStopTokenIDs(for: context))
@@ -9517,17 +9922,18 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         request: request,
                         admission: nativeMTPAdmission
                     )
-                    let lease = conversationCacheAllowed
-                        ? await conversationCache.begin(
-                            conversationKey: request.conversationKey,
-                            incomingTokens: promptTokenIds,
-                            modelID: request.model,
-                            kvBits: kvBitsOverride,
-                            cold: coldContext,
-                            fleetGrant: request.fleetCacheGrant
-                        )
-                        : nil
-                    #if DEBUG || MACPROVIDER_LAB_HARNESS
+                    let lease = Self.serialPromptSnapshotLease(
+                        conversationCacheAllowed
+                            ? await conversationCache.begin(
+                                conversationKey: request.conversationKey,
+                                incomingTokens: promptTokenIds,
+                                modelID: request.model,
+                                kvBits: kvBitsOverride,
+                                cold: coldContext,
+                                fleetGrant: request.fleetCacheGrant
+                            )
+                            : nil,
+                        model: context.model, prefillStepSize: prefillStepSize)
                     if let labConversationCacheObserver {
                         labConversationCacheObserver.record(NativeMTPLabConversationCacheObserver.event(
                             requestID: request.requestID,
@@ -9539,7 +9945,6 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             modelHasRecurrentLayers: try ConversationCacheLayers.hasRecurrentLayers(context.model.newCache(parameters: nil))
                         ))
                     }
-                    #endif
                         do {
                             let generationContext = Self.harmonyTerminalPreservingContext(from: context, modelID: request.model)
                             let kvCache: [KVCache]
@@ -9562,10 +9967,15 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             }
                             // A drain reaches these loops as task cancellation, after the
                             // wrapper has already surfaced DrainCancelledError.
+                            var iteratorState = Self.serialTextPrefillInitialState(
+                                model: generationContext.model,
+                                containsNonTextMessageContentPart: request.containsNonTextMessageContentPart)
                             let recurrent = try Self.prefillRecurrentCheckpoints(
                                 lease: lease, cache: kvCache, promptTokenIds: promptTokenIds,
                                 context: generationContext, prefillStepSize: prefillStepSize,
+                                modelID: snapshot.modelID, state: iteratorState,
                                 isCancelled: { Task.isCancelled || shouldCancel() })
+                            iteratorState = recurrent.state
                             if let resumeAt = recurrent.resumeAt {
                                 iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[resumeAt...])))
                             }
@@ -9574,23 +9984,28 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                 lease: lease, cache: kvCache, promptTokenIds: promptTokenIds,
                                 start: promptTokenIds.count - iteratorInput.text.tokens.size,
                                 context: generationContext, prefillStepSize: prefillStepSize,
+                                modelID: snapshot.modelID, state: iteratorState,
                                 isCancelled: { Task.isCancelled || shouldCancel() })
+                            iteratorState = promptSnapshot.state
                             if let resumeAt = promptSnapshot.resumeAt {
                                 iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[resumeAt...])))
                             }
-                            if isLocalRequest, !request.containsNonTextMessageContentPart {
+                            let lfmReferenceStep = Self.lfmSerialReferencePrefillStepSize(
+                                model: generationContext.model, prefillStepSize: prefillStepSize)
+                            if isLocalRequest || lfmReferenceStep != nil, !request.containsNonTextMessageContentPart {
                                 // SPEC-001-R011: a local prompt prefills in chunks with a
                                 // preemption check before each, so a buyer never waits on a
-                                // long local prefill. Buyer prefill keeps the model's own chunk plan
-                                // and stops on cancel through task cancellation (SPEC-001 FR-26).
+                                // long local prefill. LFM uses its fixed reference plan on
+                                // both request origins so a cache hit preserves forward shapes.
                                 let start = promptTokenIds.count - iteratorInput.text.tokens.size
                                 let resumeAt = try Self.cancellableLocalPrefill(
                                     tokenCount: promptTokenIds.count, from: start, stepSize: prefillStepSize,
-                                    referenceStepSize: generationContext.model is DeepseekV4Model ? DeepseekV4Model.prefillStepSize : nil,
+                                    referenceStepSize: lfmReferenceStep
+                                        ?? (generationContext.model is DeepseekV4Model ? DeepseekV4Model.prefillStepSize : nil),
                                     isCancelled: { Task.isCancelled || shouldCancel() || drainCancelled.isFired }
                                 ) { range in
                                     let chunk = LMInput.Text(tokens: MLXArray(Array(promptTokenIds[range])))
-                                    _ = generationContext.model(chunk[text: .newAxis], cache: kvCache, state: nil)
+                                    iteratorState = generationContext.model(chunk[text: .newAxis], cache: kvCache, state: iteratorState).state
                                     eval(kvCache)
                                 }
                                 if resumeAt > start {
@@ -9604,7 +10019,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                     cache: kvCache),
                                 completePromptTokenIDs: parameters.repetitionPenalty == nil ? [] : promptTokenIds.map(Int.init))
                             let iterator = try TokenIterator(
-                                input: iteratorInput, model: generationContext.model, cache: kvCache,
+                                input: iteratorInput, model: generationContext.model, cache: kvCache, state: iteratorState,
                                 parameters: generation.parameters, components: grammarConstraint.map { constraint in
                                     generation.components.appendingLogitProcessor { GrammarLogitProcessor(constraint: constraint) }
                                 } ?? generation.components)
@@ -9617,13 +10032,9 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                 schemas: Self.autoToolParameterSchemas(from: request.promptSource.tools)
                             )
                             let serialToolStopApplies = Self.serialToolStopApplies(request)
-                            #if DEBUG || MACPROVIDER_LAB_HARNESS
                             let labCommitTracker = labSerialHooks.map {
                                 LabSerialCommitTracker(requestID: $0.requestID, observer: $0.timingObserver)
                             }
-                            #else
-                            let labCommitTracker: LabSerialCommitTracker? = nil
-                            #endif
                             var labSerialHookError: APIError?
                             var requestStopObservationError: APIError?
                             var stoppedByRequestStop = false
@@ -10249,16 +10660,12 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
         guard let container = snapshot.container else {
             throw APIError(status: 503, message: "Model not loaded", type: "server_error", code: "model_not_loaded")
         }
-        #if DEBUG || MACPROVIDER_LAB_HARNESS
         let labSerialHooks = try Self.labSerialDecodeHooks(
             requestID: request.requestID,
             outputCap: labNativeMTPDecodeOutputCap,
             timingObserver: labNativeMTPCommitTimingObserver
         )
         let labConversationCacheObserver = labNativeMTPConversationCacheObserver
-        #else
-        let labSerialHooks: LabSerialDecodeHooks? = nil
-        #endif
         if labSerialHooks != nil, HarmonyResponseParser.isHarmonyModelID(request.model) {
             throw Self.labSerialDecodeHookUnsupported("harmony_visible_prefix_accounting")
         }
@@ -10287,6 +10694,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
         let isLocalRequest = localRegistrationIDs.contains(handle.registrationID)
         let conversationCache = conversationCache
         // SPEC-037 stage 5 — per-request cold-tier context (streaming endpoint).
+        configureConversationCacheMemoryBudget()
         let coldContext = coldContext(for: request, snapshot: snapshot)
         let inferenceGate = inferenceGate
         let blockingInferenceExecutor = blockingInferenceExecutor
@@ -10325,6 +10733,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         nativeVisionProfile: snapshot.nativeVisionProfile,
                         toolSelectionModelID: selectionModelID
                     )
+                    let stopTokenFilter = Self.toolAwareStopTokenFilter(stopTokenFilter, grammar: Self.toolGrammar(for: request))
                     let grammarConstraint = try GrammarConstraintState.prepare(
                         request: request, tokenizer: context.tokenizer, configuration: context.configuration,
                         eosTokenIDs: Self.generationStopTokenIDs(for: context))
@@ -10480,17 +10889,18 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         request: request,
                         admission: nativeMTPAdmission
                     )
-                    let lease = conversationCacheAllowed
-                        ? await conversationCache.begin(
-                            conversationKey: request.conversationKey,
-                            incomingTokens: promptTokenIds,
-                            modelID: request.model,
-                            kvBits: kvBitsOverride,
-                            cold: coldContext,
-                            fleetGrant: request.fleetCacheGrant
-                        )
-                        : nil
-                    #if DEBUG || MACPROVIDER_LAB_HARNESS
+                    let lease = Self.serialPromptSnapshotLease(
+                        conversationCacheAllowed
+                            ? await conversationCache.begin(
+                                conversationKey: request.conversationKey,
+                                incomingTokens: promptTokenIds,
+                                modelID: request.model,
+                                kvBits: kvBitsOverride,
+                                cold: coldContext,
+                                fleetGrant: request.fleetCacheGrant
+                            )
+                            : nil,
+                        model: context.model, prefillStepSize: prefillStepSize)
                     if let labConversationCacheObserver {
                         labConversationCacheObserver.record(NativeMTPLabConversationCacheObserver.event(
                             requestID: request.requestID,
@@ -10502,7 +10912,6 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             modelHasRecurrentLayers: try ConversationCacheLayers.hasRecurrentLayers(generationContext.model.newCache(parameters: nil))
                         ))
                     }
-                    #endif
                     // A cancel or failure during prefill (snapshot, checkpoint,
                     // iterator construction) aborts the lease below; nothing is
                     // committed for a request that did not finish.
@@ -10524,10 +10933,15 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                 forceSimpleKV: forceSimpleKV)
                             iteratorInput = lmInput
                         }
+                        var iteratorState = Self.serialTextPrefillInitialState(
+                            model: generationContext.model,
+                            containsNonTextMessageContentPart: request.containsNonTextMessageContentPart)
                         let recurrent = try Self.prefillRecurrentCheckpoints(
                             lease: lease, cache: kvCache, promptTokenIds: promptTokenIds,
                             context: generationContext, prefillStepSize: prefillStepSize,
+                            modelID: snapshot.modelID, state: iteratorState,
                             isCancelled: { Task.isCancelled || shouldCancel() })
+                        iteratorState = recurrent.state
                         if let resumeAt = recurrent.resumeAt {
                             iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[resumeAt...])))
                         }
@@ -10536,23 +10950,28 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             lease: lease, cache: kvCache, promptTokenIds: promptTokenIds,
                             start: promptTokenIds.count - iteratorInput.text.tokens.size,
                             context: generationContext, prefillStepSize: prefillStepSize,
+                            modelID: snapshot.modelID, state: iteratorState,
                             isCancelled: { Task.isCancelled || shouldCancel() })
+                        iteratorState = promptSnapshot.state
                         if let resumeAt = promptSnapshot.resumeAt {
                             iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[resumeAt...])))
                         }
-                        if isLocalRequest, !request.containsNonTextMessageContentPart {
+                        let lfmReferenceStep = Self.lfmSerialReferencePrefillStepSize(
+                            model: generationContext.model, prefillStepSize: prefillStepSize)
+                        if isLocalRequest || lfmReferenceStep != nil, !request.containsNonTextMessageContentPart {
                             // SPEC-001-R011: a local prompt prefills in chunks with a
                             // preemption check before each, so a buyer never waits on a
-                            // long local prefill. Buyer prefill keeps the model's own chunk plan
-                            // and stops on cancel through task cancellation (SPEC-001 FR-26).
+                            // long local prefill. LFM uses its fixed reference plan on
+                            // both request origins so a cache hit preserves forward shapes.
                             let start = promptTokenIds.count - iteratorInput.text.tokens.size
                             let resumeAt = try Self.cancellableLocalPrefill(
                                 tokenCount: promptTokenIds.count, from: start, stepSize: prefillStepSize,
-                                referenceStepSize: generationContext.model is DeepseekV4Model ? DeepseekV4Model.prefillStepSize : nil,
+                                referenceStepSize: lfmReferenceStep
+                                    ?? (generationContext.model is DeepseekV4Model ? DeepseekV4Model.prefillStepSize : nil),
                                 isCancelled: { Task.isCancelled || shouldCancel() || drainCancelled.isFired }
                             ) { range in
                                 let chunk = LMInput.Text(tokens: MLXArray(Array(promptTokenIds[range])))
-                                _ = generationContext.model(chunk[text: .newAxis], cache: kvCache, state: nil)
+                                iteratorState = generationContext.model(chunk[text: .newAxis], cache: kvCache, state: iteratorState).state
                                 eval(kvCache)
                             }
                             if resumeAt > start {
@@ -10567,13 +10986,9 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         var harmonyObservedFinalTokenCount = 0
                         var harmonyObservedTokenCount = 0
                         var labSerialHookError: APIError?
-                        #if DEBUG || MACPROVIDER_LAB_HARNESS
                         let labCommitTracker = labSerialHooks.map {
                             LabSerialCommitTracker(requestID: $0.requestID, observer: $0.timingObserver)
                         }
-                        #else
-                        let labCommitTracker: LabSerialCommitTracker? = nil
-                        #endif
 
                         // SPEC-037 FR-KVP2.5: speculative-decode routing is determined
                         // BEFORE conversationCache.begin() (block above, ahead of the
@@ -10600,7 +11015,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                 cache: kvCache),
                             completePromptTokenIDs: parameters.repetitionPenalty == nil ? [] : promptTokenIds.map(Int.init))
                         let iterator = try TokenIterator(
-                            input: iteratorInput, model: generationContext.model, cache: kvCache,
+                            input: iteratorInput, model: generationContext.model, cache: kvCache, state: iteratorState,
                             parameters: generation.parameters, components: grammarConstraint.map { constraint in
                                         generation.components.appendingLogitProcessor { GrammarLogitProcessor(constraint: constraint) }
                                     } ?? generation.components)
@@ -10913,14 +11328,26 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
         )
     }
 
+    private func configureConversationCacheMemoryBudget() {
+        let (poolTokens, overflow) = pagedKVConfig.blockSizeTokens.multipliedReportingOverflow(
+            by: pagedKVConfig.maxPhysicalBlocks)
+        conversationCache.memoryBudget.configure(
+            maxContextTokens: maxContextTokens,
+            slots: servedSlotLimit,
+            residentTokens: overflow ? Int.max : poolTokens,
+            verifyBytes: Self.nativeMTPRoundByteCapacity(from: currentNativeMTPAdmissionCapability) ?? 0)
+    }
+
     func attachKVDiskTier(_ tier: KVDiskTier) async {
         coldTierUnsupportedReason = nil
+        configureConversationCacheMemoryBudget()
         let adapter = KVConversationColdTierAdapter(
             store: tier.store, namespaceID: tier.namespaceID,
             eligibilityTTLSeconds: tier.eligibilityTTLSeconds,
             writeStagingMaxBytes: tier.config.writeStagingMaxBytes,
             maxEntryBytes: tier.config.maxEntryBytes,
-            stagingMaxBytes: tier.config.stagingMaxBytes)
+            stagingMaxBytes: tier.config.stagingMaxBytes,
+            memoryBudget: conversationCache.memoryBudget)
         await conversationCache.attachColdTier(adapter)
         // CRITICAL-2: keep the adapter's cached epoch in step with the store so
         // captureSnapshot stamps the epoch at commit time. Seeds immediately.
@@ -10961,6 +11388,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
         let kvBitsOverride = kvBitsOverride
         let prefillStepSize = prefillStepSize
         let blockingInferenceExecutor = blockingInferenceExecutor
+        let memoryBudget = conversationCache.memoryBudget
         let result: KVDiskSeedResult? = try? await inferenceGate.withPermit {
             try await container.perform { context -> KVDiskSeedResult in
                 let input = UserInput(chat: [.user("warmup")])
@@ -10997,6 +11425,11 @@ maxTokens: 1,
                 // rather than leaving every eligible request to skip observably but
                 // silently at attach time. Log-only: the per-request observable skip in
                 // captureSnapshot still covers correctness.
+                memoryBudget.observe(
+                    layers: ConversationCacheLayers(kvCache), tokenCount: max(1, kvCache.map(\.offset).max() ?? 0))
+                if adapter.seedPromptSnapshotTemplate(servedModelID: servedModelID, layers: kvCache) {
+                    return KVDiskSeedResult(template: nil, unsupportedCacheClass: nil)
+                }
                 if adapter.seedTemplate(servedModelID: servedModelID, layers: kvCache) {
                     return KVDiskSeedResult(template: nil, unsupportedCacheClass: nil)
                 }
@@ -11180,22 +11613,22 @@ maxTokens: 1,
     func continuousBatchingSelfCheckSerialTPS(
         prompts: [[Int]], maxTokens: Int
     ) async throws -> ContinuousBatchingSelfCheckSerialRate {
-        guard let container = currentContainer else {
-            throw ContinuousBatchSchedulerError.requestFailed("self_check_model_unavailable")
-        }
-        let maxContextTokens = maxContextTokens
-        let kvBitsOverride = kvBitsOverride
-        let prefillStepSize = prefillStepSize
-        let blockingInferenceExecutor = blockingInferenceExecutor
-        var tokens = 0
-        var seconds = 0.0
-        var decodeTokens = 0
-        var decodeSeconds = 0.0
-        for prompt in prompts {
-            try Task.checkCancellation()
-            let start = Date()
-            let result: BlockingGenerateResult = try await inferenceGate.withPermit {
-                try await container.perform { context in
+        try await withExclusiveContinuousBatchingSelfCheck { runtime in
+            guard let container = runtime.currentContainer else {
+                throw ContinuousBatchSchedulerError.requestFailed("self_check_model_unavailable")
+            }
+            let maxContextTokens = runtime.maxContextTokens
+            let kvBitsOverride = runtime.kvBitsOverride
+            let prefillStepSize = runtime.prefillStepSize
+            let blockingInferenceExecutor = runtime.blockingInferenceExecutor
+            var tokens = 0
+            var seconds = 0.0
+            var decodeTokens = 0
+            var decodeSeconds = 0.0
+            for prompt in prompts {
+                try Task.checkCancellation()
+                let start = Date()
+                let result: BlockingGenerateResult = try await container.perform { context in
                     let lmInput = LMInput(text: LMInput.Text(tokens: MLXArray(prompt.map(Int32.init))))
                     let parameters = try Self.makeServeGenerateParameters(
                         model: context.model,
@@ -11215,19 +11648,19 @@ maxTokens: 1,
                         })
                     }
                 }
+                try Task.checkCancellation()
+                seconds += Date().timeIntervalSince(start)
+                tokens += result.generationTokenCount
+                if result.generationTokenCount > 1, result.generateTime > 0 {
+                    decodeTokens += result.generationTokenCount - 1
+                    decodeSeconds += result.generateTime
+                }
             }
-            try Task.checkCancellation()
-            seconds += Date().timeIntervalSince(start)
-            tokens += result.generationTokenCount
-            if result.generationTokenCount > 1, result.generateTime > 0 {
-                decodeTokens += result.generationTokenCount - 1
-                decodeSeconds += result.generateTime
-            }
+            return ContinuousBatchingSelfCheckSerialRate(
+                decodeTPS: decodeSeconds > 0 ? Double(decodeTokens) / decodeSeconds : 0,
+                endToEndTPS: seconds > 0 ? Double(tokens) / seconds : 0
+            )
         }
-        return ContinuousBatchingSelfCheckSerialRate(
-            decodeTPS: decodeSeconds > 0 ? Double(decodeTokens) / decodeSeconds : 0,
-            endToEndTPS: seconds > 0 ? Double(tokens) / seconds : 0
-        )
     }
 
     func measureStartupThroughput(maxTokens: Int = ModelRuntime.startupThroughputProbeMaxTokens) async -> Double {
@@ -11514,10 +11947,26 @@ maxTokens: maxTokens,
             let after = try NativeVisionProfile.load(
                 modelID: NativeVisionProfile.modelID, directory: directory, artifactSHA256: before?.artifactSHA256)
             guard before == after else { throw NativeVisionProfile.identityError() }
+        } else if usesPrismVLMContainer(
+            configJSONData: try Data(contentsOf: directory.appendingPathComponent("config.json"))
+        ) {
+            // Prism keeps the vendor vision tower and packed Hadamard projections.
+            // Selecting its loader does not advertise a qualified vision profile.
+            container = try await VLMModelFactory.shared.loadContainer(from: directory, using: tokenizerLoader)
+            // Deferred vision weights belong to the factory's private snapshot.
+            // Admission must hash the same bytes that the container will read.
+            return (container, try await container.modelDirectory)
         } else {
             container = try await LLMModelFactory.shared.loadContainer(from: directory, using: tokenizerLoader)
         }
         return (container, directory)
+    }
+
+    nonisolated static func usesPrismVLMContainer(configJSONData: Data) -> Bool {
+        guard let config = try? JSONSerialization.jsonObject(with: configJSONData) as? [String: Any] else {
+            return false
+        }
+        return config["model_type"] as? String == "prism_hadamard_qwen35"
     }
 
     struct NativeMTPRunningBuildIdentity: Equatable, Sendable {
@@ -12019,7 +12468,8 @@ maxTokens: maxTokens,
                 family: admissionCapability.familyAdapter,
                 throughputDeltaPPM: admissionCapability.throughputDeltaPPM,
                 maximumNativeActiveRows: admissionCapability.maxNativeActiveRows,
-                supportsSampling: admissionCapability.supportsSampling
+                supportsSampling: admissionCapability.supportsSampling,
+                adaptationConfig: admissionCapability.adaptationConfig
             )
             let runtimeTuple = NativeMTPPublishedRuntimeTuple(
                 modelID: selfTestRuntimeTuple.modelID,
@@ -12142,7 +12592,6 @@ maxTokens: maxTokens,
         return "event=native_mtp_serve_path_admission status=rejected reason_code=\(reasonCode) artifact_role=\(artifactRole)\n"
     }
 
-    #if DEBUG || MACPROVIDER_LAB_HARNESS
     struct NativeMTPHardwareE2EServePathLoad: @unchecked Sendable {
         let targetContainer: ModelContainer
         let drafterContainer: MTPDrafterContainer
@@ -12189,7 +12638,6 @@ maxTokens: maxTokens,
             drafterContainer: load.drafterContainer
         )
     }
-    #endif
 
     private struct NativeMTPRevocationAdmissionState {
         let revokedTupleSHA256: Set<String>
@@ -13141,6 +13589,15 @@ maxTokens: maxTokens,
         return earliest?.stop
     }
 
+    /// Native call markers are parser framing, even when the tokenizer marks
+    /// them special. Strip the model's other control tokens as usual.
+    static func toolAwareStopTokenFilter(_ filter: StopTokenFilter, grammar: ToolCallGrammar?) -> StopTokenFilter {
+        guard grammar == .lfm2 else { return filter }
+        return StopTokenFilter(tokens: filter.tokens.filter {
+            $0 != "<|tool_call_start|>" && $0 != "<|tool_call_end|>"
+        })
+    }
+
     static func applyOutputFilters(
         _ text: String,
         stopTokenFilter: StopTokenFilter,
@@ -13175,31 +13632,20 @@ maxTokens: maxTokens,
     struct LabSerialDecodeHooks: Sendable {
         let requestID: String
         let outputCap: Int?
-        #if DEBUG || MACPROVIDER_LAB_HARNESS
         let timingObserver: NativeMTPLabCommittedTokenTimingObserver?
-        #endif
     }
 
     final class LabSerialCommitTracker: @unchecked Sendable {
         private let requestID: String
-        #if DEBUG || MACPROVIDER_LAB_HARNESS
         private let observer: NativeMTPLabCommittedTokenTimingObserver?
-        #endif
         private var committedOutputCount = 0
 
-        #if DEBUG || MACPROVIDER_LAB_HARNESS
         init(requestID: String, observer: NativeMTPLabCommittedTokenTimingObserver?) {
             self.requestID = requestID
             self.observer = observer
         }
-        #else
-        init(requestID: String) {
-            self.requestID = requestID
-        }
-        #endif
 
         func record(outputCount: Int) {
-            #if DEBUG || MACPROVIDER_LAB_HARNESS
             guard let observer else {
                 committedOutputCount = max(committedOutputCount, outputCount)
                 return
@@ -13210,14 +13656,9 @@ maxTokens: maxTokens,
                 observer.record(requestID: requestID, ordinal: ordinal, outputCount: ordinal + 1)
             }
             committedOutputCount = boundedOutputCount
-            #else
-            committedOutputCount = max(committedOutputCount, outputCount)
-            _ = requestID
-            #endif
         }
     }
 
-    #if DEBUG || MACPROVIDER_LAB_HARNESS
     private func recordLabNativeMTPConversationCacheBegin(
         request: ChatCompletionRequest,
         surface: String,
@@ -13236,9 +13677,7 @@ maxTokens: maxTokens,
             modelHasRecurrentLayers: modelHasRecurrentLayers
         ))
     }
-    #endif
 
-    #if DEBUG || MACPROVIDER_LAB_HARNESS
     static func labSerialDecodeHooks(
         requestID: String?,
         outputCap: NativeMTPLabDecodeOutputCap?,
@@ -13254,7 +13693,6 @@ maxTokens: maxTokens,
             timingObserver: timingObserver
         )
     }
-    #endif
 
     static func labSerialVisibleCommitCount(
         modelID: String,
@@ -13313,8 +13751,8 @@ maxTokens: maxTokens,
     /// reuse. Only families whose caches cannot be rewound to an arbitrary
     /// prefix take it; every other family keeps its FR-CI2 entry unchanged.
     enum ConversationPromptSnapshotPolicy: Equatable, Sendable {
-        /// DeepSeek V4: its ratio-4 overlap pools depend on forward-call
-        /// boundaries, so the snapshot sits on a boundary of the fixed
+        /// DeepSeek V4 pools and LFM short-convolution/MoE kernels depend on
+        /// forward-call shapes, so the snapshot sits on a boundary of the fixed
         /// reference prefill plan (`min(step, remaining - 1)` chunks from 0).
         /// The resumed prefill then runs the same calls as a fresh one.
         case referencePlanBoundary(step: Int)
@@ -13375,8 +13813,12 @@ maxTokens: maxTokens,
 
     /// SPEC-038 AC-26: positive-cached turns may enter the scheduler for the
     /// requested tuple (operator flag on and the signed grant present).
+    private var effectiveContinuousBatchingCachedTurns: Bool {
+        continuousBatchingCachedTurns && currentPagedKVModelCapabilities.supportsContiguousCacheMaterialization
+    }
+
     private var continuousBatchCachedTurnsAccepted: Bool {
-        continuousBatchingCachedTurns
+        effectiveContinuousBatchingCachedTurns
             && continuousBatchingRequestedTuple().map {
                 continuousBatchingAcceptanceCoverage.coversCachedTurns($0)
             } == true
@@ -13419,10 +13861,42 @@ maxTokens: maxTokens,
 
     static let glm5NextRoleMarkers = ["<|system|>", "<|user|>", "<|assistant|>", "<|observation|>"]
 
+    /// LFM short-convolution and MoE kernels depend on the forward shape.
+    /// Cold and resumed serial requests use the same fixed grid, reserving
+    /// the last token for the iterator, including on the network path.
+    nonisolated static func lfmSerialReferencePrefillStepSize(
+        model: any LanguageModel,
+        prefillStepSize: Int
+    ) -> Int? {
+        guard model is LFM2Model || model is LFM2MoEModel else { return nil }
+        return max(1, prefillStepSize)
+    }
+
+    /// Qwen's keyed prefill must not split a cold legacy-remainder chunk at
+    /// a role marker. Snapshot only whole strides, preserving the no-key
+    /// prefill and its final multi-token forward unchanged.
+    nonisolated static func qwen35SerialPromptSnapshotStepSize(
+        model: any LanguageModel,
+        modelID: String?,
+        prefillStepSize: Int
+    ) -> Int? {
+        guard modelID?.lowercased() == "qwen/qwen3.5-27b",
+              model is Qwen35Model, !(model is Qwen35MoEModel) else { return nil }
+        return max(1, prefillStepSize)
+    }
+
     nonisolated static func conversationPromptSnapshotPolicy(
         model: any LanguageModel,
-        tokenizer: any MLXLMCommon.Tokenizer
+        tokenizer: any MLXLMCommon.Tokenizer,
+        prefillStepSize: Int = 512,
+        modelID: String? = nil
     ) -> ConversationPromptSnapshotPolicy? {
+        if let step = lfmSerialReferencePrefillStepSize(model: model, prefillStepSize: prefillStepSize) {
+            return .referencePlanBoundary(step: step)
+        }
+        if let step = qwen35SerialPromptSnapshotStepSize(model: model, modelID: modelID, prefillStepSize: prefillStepSize) {
+            return .referencePlanBoundary(step: step)
+        }
         if model is DeepseekV4Model {
             return .referencePlanBoundary(step: DeepseekV4Model.prefillStepSize)
         }
@@ -13437,6 +13911,49 @@ maxTokens: maxTokens,
             return ids.isEmpty ? nil : .lastRoleMarker(tokenIDs: Set(ids), resumeTokenID: roundTrip("<|assistant|>"))
         }
         return nil
+    }
+
+    /// GLM serial serving keeps the keyless iterator's whole-stride prefill
+    /// and final multi-token forward. CB retains its separate role-marker plan.
+    nonisolated static func glm5NextSerialSnapshotStepSize(
+        model: any LanguageModel, prefillStepSize: Int
+    ) -> Int? {
+        guard model is GLM5NextModel || model is GLM5NextTextModel else { return nil }
+        return max(1, prefillStepSize)
+    }
+
+    nonisolated static func serialConversationPromptSnapshotPolicy(
+        model: any LanguageModel,
+        tokenizer: any MLXLMCommon.Tokenizer,
+        prefillStepSize: Int = 512,
+        modelID: String? = nil
+    ) -> ConversationPromptSnapshotPolicy? {
+        if let step = glm5NextSerialSnapshotStepSize(model: model, prefillStepSize: prefillStepSize) {
+            return .referencePlanBoundary(step: step)
+        }
+        return conversationPromptSnapshotPolicy(
+            model: model, tokenizer: tokenizer, prefillStepSize: prefillStepSize, modelID: modelID)
+    }
+
+    /// A CB marker snapshot can land on the serial grid while still having
+    /// reached it through different forwards. Reject its plan as well as an
+    /// off-grid legacy snapshot before any layers are installed. Keep the
+    /// acquired turn and its purge/grant fences; this request simply misses.
+    nonisolated static func serialPromptSnapshotLease(
+        _ lease: ConversationCacheLease?, model: any LanguageModel, prefillStepSize: Int
+    ) -> ConversationCacheLease? {
+        guard let lease, let reusable = lease.reusableCache,
+              let step = glm5NextSerialSnapshotStepSize(model: model, prefillStepSize: prefillStepSize),
+              reusable.resumeBoundaryPlan || lease.lcp % step != 0
+        else { return lease }
+        return ConversationCacheLease(
+            key: lease.key, keyHash: lease.keyHash, incomingTokens: lease.incomingTokens,
+            modelID: lease.modelID, kvBits: lease.kvBits,
+            reusableCache: nil, cachedPromptTokens: 0, lcp: 0, trimBy: 0,
+            sampledPurgeGeneration: lease.sampledPurgeGeneration,
+            localPurgeStamp: lease.localPurgeStamp, globalPurgeStamp: lease.globalPurgeStamp,
+            fleetGrant: lease.fleetGrant
+        )
     }
 
     /// The snapshot length for `promptTokenIds`, or nil when it would be below
@@ -13462,6 +13979,18 @@ maxTokens: maxTokens,
         return count >= ConversationCache.lcpThreshold ? count : nil
     }
 
+    /// Text-only MLXVLM.Qwen35 prefixes have a zero M-RoPE delta, including after a
+    /// conversation-cache restore. The wrapper requires that anchor explicitly
+    /// once its attention cache is warm. Never infer an anchor for image input.
+    static func serialTextPrefillInitialState(
+        model: any LanguageModel, containsNonTextMessageContentPart: Bool
+    ) -> LMOutput.State? {
+        guard model is MLXVLM.Qwen35, !containsNonTextMessageContentPart else { return nil }
+        var state = LMOutput.State()
+        state[LMOutput.Key<MLXArray>("qwen35.ropeDeltas")] = MLXArray([Int32(0)])
+        return state
+    }
+
     /// SPEC-024 FR-CI2a serial prompt snapshot. With a lease on a snapshot
     /// family, prefill `cache` from `start` (the reused length, or 0) to the
     /// snapshot length and deep-copy every layer there. A reference-plan
@@ -13475,6 +14004,7 @@ maxTokens: maxTokens,
         let layers: [KVCache]?
         let tokenCount: Int
         let resumeAt: Int?
+        var state: LMOutput.State? = nil
     }
 
     static func prefillPromptSnapshot(
@@ -13484,13 +14014,16 @@ maxTokens: maxTokens,
         start: Int,
         context: ModelContext,
         prefillStepSize: Int,
+        modelID: String? = nil,
+        state: LMOutput.State? = nil,
         isCancelled: () -> Bool = { Task.isCancelled }
     ) throws -> SerialPromptSnapshot {
-        let none = SerialPromptSnapshot(applies: false, layers: nil, tokenCount: 0, resumeAt: nil)
+        let none = SerialPromptSnapshot(applies: false, layers: nil, tokenCount: 0, resumeAt: nil, state: state)
         guard lease != nil,
-              let policy = conversationPromptSnapshotPolicy(model: context.model, tokenizer: context.tokenizer)
+              let policy = serialConversationPromptSnapshotPolicy(
+                model: context.model, tokenizer: context.tokenizer, prefillStepSize: prefillStepSize, modelID: modelID)
         else { return none }
-        let skipped = SerialPromptSnapshot(applies: true, layers: nil, tokenCount: 0, resumeAt: nil)
+        let skipped = SerialPromptSnapshot(applies: true, layers: nil, tokenCount: 0, resumeAt: nil, state: state)
         guard let target = conversationPromptSnapshotTokenCount(promptTokenIds: promptTokenIds, policy: policy),
               target >= start
         else { return skipped }
@@ -13500,12 +14033,13 @@ maxTokens: maxTokens,
             guard start % reference == 0 else { return skipped }
             step = reference
         }
+        var currentState = state
         var cursor = start
         while cursor < target {
             if isCancelled() { throw CancellationError() }
             let end = min(cursor + step, target)
             let chunk = LMInput.Text(tokens: MLXArray(Array(promptTokenIds[cursor..<end])))
-            _ = context.model(chunk[text: .newAxis], cache: cache, state: nil)
+            currentState = context.model(chunk[text: .newAxis], cache: cache, state: currentState).state
             eval(cache)
             cursor = end
         }
@@ -13514,7 +14048,7 @@ maxTokens: maxTokens,
         let layers = cache.map { $0.copy() }
         eval(layers)
         return SerialPromptSnapshot(
-            applies: true, layers: layers, tokenCount: target, resumeAt: target > start ? target : nil)
+            applies: true, layers: layers, tokenCount: target, resumeAt: target > start ? target : nil, state: currentState)
     }
 
     /// SPEC-024 FR-CI2 hybrid reuse. For a keyed serial request on a model with
@@ -13531,17 +14065,25 @@ maxTokens: maxTokens,
         promptTokenIds: [Int32],
         context: ModelContext,
         prefillStepSize: Int,
+        modelID: String? = nil,
+        state: LMOutput.State? = nil,
         isCancelled: () -> Bool = { Task.isCancelled }
-    ) throws -> (checkpoints: [RecurrentStateCheckpoint], resumeAt: Int?) {
-        guard let lease else { return ([], nil) }
+    ) throws -> (checkpoints: [RecurrentStateCheckpoint], resumeAt: Int?, state: LMOutput.State?) {
+        // A role boundary would split an LFM reference, Qwen legacy or GLM
+        // serial chunk and change its numerics. Snapshot only whole strides.
+        guard glm5NextSerialSnapshotStepSize(model: context.model, prefillStepSize: prefillStepSize) == nil,
+              lfmSerialReferencePrefillStepSize(model: context.model, prefillStepSize: prefillStepSize) == nil,
+              qwen35SerialPromptSnapshotStepSize(model: context.model, modelID: modelID, prefillStepSize: prefillStepSize) == nil,
+              let lease else { return ([], nil, state) }
         let positions = ConversationCache.recurrentCheckpointPositions(
             promptTokenIds: promptTokenIds,
             imStartTokenID: context.tokenizer.convertTokenToId("<|im_start|>").map(Int32.init),
             hybrid: ConversationCacheLayers.hasRecurrentLayers(cache),
             decode: { context.tokenizer.decode(tokenIds: $0) })
-        guard !positions.isEmpty else { return ([], nil) }
+        guard !positions.isEmpty else { return ([], nil, state) }
         let cachedTokens = lease.reusableCache == nil ? 0 : lease.lcp
         let reusable = lease.reusableCache?.recurrentCheckpoints ?? []
+        var currentState = state
         var cursor = cachedTokens
         var checkpoints: [RecurrentStateCheckpoint] = []
         for position in positions {
@@ -13556,7 +14098,7 @@ maxTokens: maxTokens,
                 if isCancelled() { throw CancellationError() }
                 let end = min(start + max(1, prefillStepSize), position)
                 let chunk = LMInput.Text(tokens: MLXArray(Array(promptTokenIds[start..<end])))
-                _ = context.model(chunk[text: .newAxis], cache: cache, state: nil)
+                currentState = context.model(chunk[text: .newAxis], cache: cache, state: currentState).state
                 asyncEval(cache)
                 start = end
             }
@@ -13564,11 +14106,11 @@ maxTokens: maxTokens,
             eval(cache)
             cursor = position
             guard let checkpoint = captureRecurrentCheckpoint(cache: cache, tokenCount: position) else {
-                return (checkpoints, cursor > cachedTokens ? cursor : nil)
+                return (checkpoints, cursor > cachedTokens ? cursor : nil, currentState)
             }
             checkpoints.append(checkpoint)
         }
-        return (checkpoints, cursor > cachedTokens ? cursor : nil)
+        return (checkpoints, cursor > cachedTokens ? cursor : nil, currentState)
     }
 
     /// SPEC-001-R011: prefills `[start, tokenCount)` in `stepSize` chunks,
@@ -14167,14 +14709,27 @@ maxTokens: maxTokens,
 
     static func templateAdditionalContext(
         supportsThinkingToggle: Bool,
-        supportsPreserveThinking: Bool = false
+        supportsPreserveThinking: Bool = false,
+        enableThinking: Bool = false
     ) -> [String: any Sendable]? {
         guard supportsThinkingToggle else { return nil }
-        var context: [String: any Sendable] = ["enable_thinking": false]
+        var context: [String: any Sendable] = ["enable_thinking": enableThinking]
         if supportsPreserveThinking {
             context["preserve_thinking"] = true
         }
         return context
+    }
+
+    /// SPEC-018-R010: only a model-owned Prism capability permits this opt-in.
+    /// Buyer aliases and a template's variable alone do not establish it.
+    static func bonsaiThinkingEnabled(
+        for request: ChatCompletionRequest, supportsBonsaiThinking: Bool
+    ) -> Bool {
+        guard supportsBonsaiThinking,
+              !request.containsNonTextMessageContentPart,
+              case .text = request.responseFormat else { return false }
+        if case .array(let tools)? = request.promptSource.tools, !tools.isEmpty { return false }
+        return ["high", "xhigh", "max"].contains(request.reasoningEffort ?? "")
     }
 
     /// Validate media before processor work, test generation seams or dispatch.
@@ -14222,7 +14777,8 @@ maxTokens: maxTokens,
         templateSupportsThinkingToggle: Bool = false,
         templateSupportsPreserveThinking: Bool = false,
         nativeVisionProfile: NativeVisionProfile? = nil,
-        toolSelectionModelID: String? = nil
+        toolSelectionModelID: String? = nil,
+        supportsBonsaiThinking: Bool = false
     ) throws -> UserInput {
         if let input = try validateNativeVisionRequest(request, profile: nativeVisionProfile) {
             return try NativeVisionProfile.userInput(from: input)
@@ -14252,6 +14808,9 @@ maxTokens: maxTokens,
             ? toolSelectionModelID ?? request.model
             : request.model
         let grammar = request.outputTraits.toolGrammar ?? ToolCallGrammar.family(modelID: renderModelID)
+        if grammar == .lfm2, selection != .none, Self.hasEnabledTools(request.promptSource.tools) {
+            try ToolSelectionPolicy.validateLFMNames(ToolSelectionPolicy.schemas(request))
+        }
         let chat = try ToolPromptRenderer.renderMessages(messages, grammar: grammar)
         let tools: [[String: Any]]?
         switch selection {
@@ -14266,21 +14825,23 @@ maxTokens: maxTokens,
         }
         var additionalContext = Self.templateAdditionalContext(
             supportsThinkingToggle: templateSupportsThinkingToggle,
-            supportsPreserveThinking: templateSupportsPreserveThinking
+            supportsPreserveThinking: templateSupportsPreserveThinking,
+            enableThinking: Self.bonsaiThinkingEnabled(
+                for: request, supportsBonsaiThinking: supportsBonsaiThinking)
         )
         // SPEC-018 §3.12: normalize against the loaded family, including
         // when the buyer uses an alias. Templates without the variable ignore it.
         if let effort = request.templateReasoningEffort(for: toolSelectionModelID ?? request.model) {
             additionalContext = (additionalContext ?? [:]).merging(["reasoning_effort": effort]) { _, new in new }
         }
-        // GLM templates render assistant `reasoning_content` back as
-        // `<think>…</think>` (interleaved thinking in tool loops). Only a
-        // request that carries reasoning takes the raw-message path, so every
-        // other GLM prompt keeps its structured chat input unchanged.
-        let glmHistoryReasoning = grammar == .glm && messages.contains {
+        // Each native template owns its reasoning-history scope. Preserve
+        // assistant reasoning only for the exact families that render it.
+        let historyReasoning = (grammar == .glm || grammar == .lfm2
+            || (grammar == .qwen && ChatCompletionRequest.usesQwen38Template(
+                modelID: toolSelectionModelID ?? request.model))) && messages.contains {
             $0.role == .assistant && $0.reasoningContent?.isEmpty == false
         }
-        if grammar == .dsml || glmHistoryReasoning {
+        if grammar == .dsml || historyReasoning {
             // Chat.Message has no reasoning field. Preserve it in the raw
             // messages and let the template or reference encoder decide which
             // turns keep it.
@@ -14357,7 +14918,8 @@ maxTokens: maxTokens,
             templateSupportsThinkingToggle: templateSupportsThinkingToggle,
             templateSupportsPreserveThinking: templateSupportsPreserveThinking,
             nativeVisionProfile: nativeVisionProfile,
-            toolSelectionModelID: toolSelectionModelID
+            toolSelectionModelID: toolSelectionModelID,
+            supportsBonsaiThinking: context.model is PrismHadamardQwen35
         )
         let lmInput: LMInput
         do {
@@ -14429,7 +14991,8 @@ maxTokens: maxTokens,
         templateSupportsThinkingToggle: Bool,
         templateSupportsPreserveThinking: Bool,
         toolSelectionModelID: String?,
-        templateToolFormat: String? = nil
+        templateToolFormat: String? = nil,
+        supportsBonsaiThinking: Bool = false
     ) async throws -> (tokens: [Int], toolCallPrefill: String?) {
         let plan = GrammarConstraintState.isRequired(request) ? nil : try toolCallPrefill(for: request, toolSelectionModelID: toolSelectionModelID)
         let grammar = try resolvedToolGrammar(for: request, templateToolFormat: templateToolFormat)
@@ -14437,7 +15000,8 @@ maxTokens: maxTokens,
             for: request,
             templateSupportsThinkingToggle: templateSupportsThinkingToggle,
             templateSupportsPreserveThinking: templateSupportsPreserveThinking,
-            toolSelectionModelID: toolSelectionModelID
+            toolSelectionModelID: toolSelectionModelID,
+            supportsBonsaiThinking: supportsBonsaiThinking
         )
         let lmInput: LMInput
         do {
@@ -15299,6 +15863,10 @@ struct NativeToolCallStreamEmitter {
             startDelimiter = "<|tool_call>"
             endDelimiter = "<tool_call|>"
             argumentKey = "arguments"
+        case .lfm2?:
+            startDelimiter = "<|tool_call_start|>"
+            endDelimiter = "<|tool_call_end|>"
+            argumentKey = "arguments"
         case .dsml?:
             startDelimiter = DeepseekV4Encoding.toolCallsStart
             endDelimiter = DeepseekV4Encoding.toolCallsEnd
@@ -15415,7 +15983,12 @@ struct NativeToolCallStreamEmitter {
         sawToolDelimiter = true
         guard !completedValidToolCall else { return }
         var candidate = String(text[start...])
-        if grammar != .llama3 {
+        if grammar == .lfm2 {
+            // The end marker can occur inside a quoted argument. Only the
+            // complete list envelope, including its actual close, may stop.
+            candidate = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard candidate.hasSuffix(endDelimiter) else { return }
+        } else if grammar != .llama3 {
             guard let end = candidate.range(of: endDelimiter) else { return }
             candidate = String(candidate[..<end.upperBound])
         }
@@ -16042,7 +16615,6 @@ final class StreamedFlag: @unchecked Sendable {
     }
 }
 
-#if DEBUG || MACPROVIDER_LAB_HARNESS
 extension ModelRuntime {
     /// Lab harness entry point: runs the same live parity + batched-isolation/MoE
     /// probes and measurement that the production load path runs, so lab runtimes
@@ -16069,6 +16641,49 @@ extension ModelRuntime {
             parityProbe: parityProbe,
             moeProbe: moeProbe
         )
+    }
+}
+
+#if !DEBUG && !MACPROVIDER_LAB_HARNESS
+extension ModelRuntime {
+    func installLabNativeMTPDecodeOutputCap(_ cap: NativeMTPLabDecodeOutputCap?) async -> Bool {
+        guard NativeMTPQualificationScope.permitsFixtureHooks else { return false }
+        labNativeMTPDecodeOutputCap = cap
+        if let continuousBatchScheduler {
+            await continuousBatchScheduler.installLabNativeMTPDecodeOutputCap(cap)
+        }
+        return true
+    }
+
+    func installLabNativeMTPLoadGateRecorder(_ recorder: NativeMTPLoadGateRecorder?) async -> Bool {
+        guard NativeMTPQualificationScope.permitsFixtureHooks else { return false }
+        guard let continuousBatchScheduler else { return false }
+        await continuousBatchScheduler.installLabNativeMTPLoadGateRecorder(recorder)
+        return true
+    }
+
+    func installLabNativeMTPNumericalOracle(
+        _ oracle: NativeMTPLabNumericalOracle?, role: NativeMTPLabNumericalOracle.Role
+    ) async -> Bool {
+        guard NativeMTPQualificationScope.permitsFixtureHooks else { return false }
+        guard let continuousBatchScheduler else { return false }
+        let binding = oracle.map { NativeMTPLabNumericalOracle.Binding(oracle: $0, role: role) }
+        return await continuousBatchScheduler.installLabNativeMTPNumericalOracle(binding)
+    }
+
+    func installLabNativeMTPCommitTimingObserver(_ observer: NativeMTPLabCommittedTokenTimingObserver?) async -> Bool {
+        guard NativeMTPQualificationScope.permitsFixtureHooks else { return false }
+        labNativeMTPCommitTimingObserver = observer
+        if let continuousBatchScheduler {
+            await continuousBatchScheduler.installLabNativeMTPCommitTimingObserver(observer)
+        }
+        return true
+    }
+
+    func installLabNativeMTPConversationCacheObserver(_ observer: NativeMTPLabConversationCacheObserver?) async -> Bool {
+        guard NativeMTPQualificationScope.permitsFixtureHooks else { return false }
+        labNativeMTPConversationCacheObserver = observer
+        return true
     }
 }
 #endif

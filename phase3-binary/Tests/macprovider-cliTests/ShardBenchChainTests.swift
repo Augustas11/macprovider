@@ -155,9 +155,11 @@ enum ShardBenchTestRig {
     /// A connected loopback pair: (accepted side, dialing side). With `signers` the
     /// pair is an hmac-sha256 link whose two ends ran their key agreement.
     static func pair(
-        epoch: UInt64 = ShardBenchTestRig.epoch, signers: (accepted: ShardMemberSigner, dialed: ShardMemberSigner)? = nil
+        epoch: UInt64 = ShardBenchTestRig.epoch, signers: (accepted: ShardMemberSigner, dialed: ShardMemberSigner)? = nil,
+        missedHeartbeatLimit: Int = 4
     ) throws -> (ShardStageLink, ShardStageLink) {
-        let link = configuration(epoch: epoch, protection: signers == nil ? .crc32c : .hmacSHA256)
+        var link = configuration(epoch: epoch, protection: signers == nil ? .crc32c : .hmacSHA256)
+        link.missedHeartbeatLimit = missedHeartbeatLimit
         let listener = try ShardStageListener(host: "127.0.0.1", port: 0)
         let dialed = try ShardStageLink.connect(host: "127.0.0.1", port: listener.port, timeout: 5, configuration: link)
         let accepted = try listener.accept(timeout: 5, configuration: link)
@@ -189,18 +191,20 @@ enum ShardBenchTestRig {
     /// Links for a ring of `stages` stages, indexed by stage. With two stages and
     /// `collapsed`, one link carries both directions. With `signers` (one per stage)
     /// every link is hmac-sha256, authenticated by the stages it joins.
-    static func ring(stages: Int, collapsed: Bool = false, signers: [ShardMemberSigner]? = nil) throws -> [ShardBenchLinks] {
+    static func ring(
+        stages: Int, collapsed: Bool = false, signers: [ShardMemberSigner]? = nil, missedHeartbeatLimit: Int = 4
+    ) throws -> [ShardBenchLinks] {
         func joining(accepted: Int, dialed: Int) -> (accepted: ShardMemberSigner, dialed: ShardMemberSigner)? {
             signers.map { ($0[accepted], $0[dialed]) }
         }
         if stages == 2, collapsed {
-            let (tail, head) = try pair(signers: joining(accepted: 1, dialed: 0))
+            let (tail, head) = try pair(signers: joining(accepted: 1, dialed: 0), missedHeartbeatLimit: missedHeartbeatLimit)
             return [ShardBenchLinks(upstream: head, downstream: head), ShardBenchLinks(upstream: tail, downstream: tail)]
         }
         // forward[i] joins stage i (dialing) to stage i+1 (accepting); back joins the
         // tail (dialing) to the head (accepting).
-        let forward = try (0..<(stages - 1)).map { try pair(signers: joining(accepted: $0 + 1, dialed: $0)) }
-        let back = try pair(signers: joining(accepted: 0, dialed: stages - 1))
+        let forward = try (0..<(stages - 1)).map { try pair(signers: joining(accepted: $0 + 1, dialed: $0), missedHeartbeatLimit: missedHeartbeatLimit) }
+        let back = try pair(signers: joining(accepted: 0, dialed: stages - 1), missedHeartbeatLimit: missedHeartbeatLimit)
         return (0..<stages).map { index in
             let upstream = index == 0 ? back.0 : forward[index - 1].0
             let downstream = index == stages - 1 ? back.1 : forward[index].1

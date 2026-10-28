@@ -15,13 +15,14 @@ not add steps of its own:
 | `air-provider.sh` | designated disconnected Air: signed 1.8.258 recovery to released 1.8.260, persistent signed-catalog Qwen3-8B adoption, four-slot paid proof and enrollment in the running buyer runner | this README (`Air recovery and adoption`) |
 | `studio-owner-pin.sh` | one-time removal of the Studio GLM provider's `4/owner` concurrency pin after authenticating the published signed CLI >= 1.8.260, its checksummed artifact, exact LaunchAgent/process identity and a live-verified tuple matching the reviewed four-slot policy bytes; journal-first scoped rollback, watchdog restoration, 20-minute readiness bound, accepted-PID/crash hold and provider-attributed native-MTP gateway proof | `docs/releases/cli-release-train.md` |
 | `studio-lab-window.sh` | bounded offline Studio diagnostic, profiler-only or full-matrix qualification job with fixed reviewed arguments and immutable-input completion identity; published-provider authentication, journal-first pause/drain, exact process/watchdog restoration and durable controller-loss recovery while the buyer runner remains active | `docs/runbooks/studio-lab-window.md` |
+| `studio-lab-handoff.py` | recovery-only restoration of the retained `paused_live_unloaded` Studio handoff from an explicit private all-cells-complete, root-armed, hash-pinned manifest; verifies the original signed provider for 120 seconds before it starts only the stopped buyer runner, and retains both handoff and campaign lock | private handoff record |
 | `live-lock.sh` | one live actor at a time | rollout rule 3 |
 | `privacy-activate.sh` | existing signed identity approval; durable rollback | `docs/runbooks/privacy-network-activation.md`, SPEC-049 §8.3 |
 
 Tests (offline): `test-ops-guard.sh`, `test-live-lock.sh`,
 `test-runbook-commands.sh`, `test-entrypoints.sh`, `test-canary-swap.sh`,
 `test-studio-owner-pin.sh`, `test-studio-owner-pin-provenance.sh`,
-`test-studio-lab-window-controller.sh`.
+`test-studio-lab-window-controller.sh`, `test-studio-lab-handoff.py`.
 
 ## Air recovery and adoption
 

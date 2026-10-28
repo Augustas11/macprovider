@@ -92,6 +92,11 @@ python3 "$REPO_ROOT/scripts/compatibility-set-manifest.py" validate \
 
 echo "==> Building Release configuration (this takes ~5-10 min)..."
 BUILD_LOG="$PACKAGE_WORK_DIR/package-build.log"
+# No command-line SWIFT_ACTIVE_COMPILATION_CONDITIONS / OTHER_SWIFT_FLAGS:
+# xcodebuild applies those to every target, which strips SWIFT_PACKAGE and
+# package-declared Swift settings from dependencies and breaks the build.
+# Release defines neither DEBUG nor MACPROVIDER_LAB_HARNESS; lab builds add
+# the harness define only through `swift build -Xswiftc`.
 if ! xcodebuild -scheme macprovider-cli \
                 -configuration Release \
                 -destination 'generic/platform=macOS' \

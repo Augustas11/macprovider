@@ -404,6 +404,8 @@ class EffectiveDiffTests(unittest.TestCase):
         # OpenRouter slug onto the zai-org/glm-5.3-flash row.
         # #2111: the DeepSeek-V4-Flash listed cut moves its served artifact id
         # onto the deepseek/deepseek-v4-flash row.
+        # #2163: the Bonsai 2B candidate cut prices its exact served artifact
+        # through a class row without admitting it for recommendation.
         self.assertEqual(
             cr.load_pricing_move_acks(committed, "committed"),
             {
@@ -412,6 +414,7 @@ class EffectiveDiffTests(unittest.TestCase):
                 ("Jundot/GLM-5.3-Flash-oQ4e-mtp", "default", "zai-org/glm-5.3-flash"),
                 ("z-ai/glm-5.3-flash", "default", "zai-org/glm-5.3-flash"),
                 ("TensorFold/DeepSeek-V4-Flash-0731-MXFP4-MLX", "default", "deepseek/deepseek-v4-flash"),
+                ("prism-ml/Ternary-Bonsai-2-2B-mlx-2bit", "default", "prism-ml/ternary-bonsai-2-2b-mlx-2bit"),
             },
         )
         for bad in (

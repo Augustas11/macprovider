@@ -4,14 +4,15 @@ import MacProviderCore
 
 /// SPEC-023-R009 / SPEC-038-R011 (v0.3.15): the slot count `serve` runs.
 ///
-/// Precedence: an owner-pinned `max_concurrency_override` is served as written;
+/// Precedence: an owner-pinned `max_concurrency_override` retains its intent;
 /// a draft model or the emergency off forces 1 (SPEC-028 FR-4); otherwise the
 /// on-device continuous-batching self-check (`ContinuousBatchingSelfCheck`)
 /// picks the count, at most the memory-fit recommendation for this Mac. Until
 /// it decides, serve runs one slot, or the configured count when a signed
 /// positive policy entry names the served model (provisional grant). A signed
 /// `max_served_slots` (SPEC-038 FR-CB11 v0.3.22) caps every one of these,
-/// the owner pin included; it never raises a count.
+/// the owner pin included; the physical-memory tier also bounds every branch.
+/// Neither bound raises a count.
 enum AutoServedSlots {
     /// MLX's quantized matmul switches from the vector kernel (qmv) to the
     /// matrix kernel (qmm) above 5 rows. On M1/M2 GPUs (Ultra excepted) rows
@@ -44,9 +45,12 @@ enum AutoServedSlots {
         provisionalPolicyEntry: Bool,
         recommendedSlots: () -> Int,
         memoryFitKnown: Bool = false,
-        policyCeiling: Int? = nil
+        policyCeiling: Int? = nil,
+        physicalMemoryBytes: UInt64 = ProcessInfo.processInfo.physicalMemory
     ) -> Plan {
-        let ceiling = max(1, policyCeiling ?? .max)
+        let ceiling = ProviderCapacity.boundedServingRows(
+            policyCeiling ?? .max, physicalMemoryBytes: physicalMemoryBytes
+        )
         let configured = ProviderCapacity.servedSlotCount(maxConcurrencyOverride: configuredSlots)
         if source == .owner {
             // The pin itself stays as written: a warm swap to another model
@@ -94,7 +98,13 @@ enum AutoServedSlots {
         if isAppleM1M2NonUltra(chip: chip) {
             slots = min(slots, appleM1M2NonUltraRowCap)
         }
-        return min(max(1, slots), ProviderCapacity.maxConcurrencyOverrideLimit)
+        // Convert only representable positive GiB values; unknown/overflowing
+        // memory preserves the ordinary hard cap rather than wrapping to 8 GiB.
+        let memoryBytes = UInt64(exactly: memoryGB).flatMap { gib -> UInt64? in
+            let bytes = gib.multipliedReportingOverflow(by: 1_073_741_824)
+            return bytes.overflow ? nil : bytes.partialValue
+        } ?? 0
+        return ProviderCapacity.boundedServingRows(slots, physicalMemoryBytes: memoryBytes)
     }
 
     static func isAppleM1M2NonUltra(chip: String) -> Bool {
@@ -130,22 +140,31 @@ enum AutoServedSlots {
 
 extension AutoServedSlots {
     /// `AutotuneModelContextCap.memoryFitBatchDepth` at the served context for
-    /// the configured artifact; nil when its geometry or catalog row is unknown.
+    /// the configured artifact. Uncatalogued models require an explicitly
+    /// verified binding and actual artifact bytes; unknown geometry stays nil.
     static func memoryFitSlots(
         configJSONData: Data?,
         memoryGB: Int,
         catalogMinRAMGB: Int?,
         contextTokens: Int,
-        weightsBytes: UInt64?
+        weightsBytes: UInt64?,
+        verifiedArtifactBinding: Bool = false
     ) -> Int? {
-        guard let configJSONData, let catalogMinRAMGB else { return nil }
+        guard let configJSONData else { return nil }
+        let artifactBytes = weightsBytes.flatMap {
+            $0 > 0 && $0 <= UInt64(Int.max) ? Int($0) : nil
+        }
+        guard catalogMinRAMGB != nil || (verifiedArtifactBinding && artifactBytes != nil) else {
+            return nil
+        }
         return AutotuneModelContextCap.memoryFitBatchDepth(
             configData: configJSONData,
             verifiedConfigSHA256: SHA256.hash(data: configJSONData).map { String(format: "%02x", $0) }.joined(),
             hardwareMemoryGB: memoryGB,
-            catalogMinRAMGB: catalogMinRAMGB,
+            // Actual verified bytes take precedence over this catalog fallback.
+            catalogMinRAMGB: catalogMinRAMGB ?? 1,
             calibrationContextTokens: contextTokens,
-            verifiedArtifactSizeBytes: weightsBytes.flatMap { $0 > 0 && $0 <= UInt64(Int.max) ? Int($0) : nil }
+            verifiedArtifactSizeBytes: artifactBytes
         )
     }
 }

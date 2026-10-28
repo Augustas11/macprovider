@@ -109,17 +109,45 @@ final class EmbeddedTerminalProcess {
         source.setEventHandler { [weak self] in
             MainActor.assumeIsolated {
                 guard let self else { return }
-                var status: Int32 = 0
-                let result = waitpid(pid, &status, WNOHANG)
-                self.running = false
                 self.monitor?.cancel()
                 self.monitor = nil
-                // Let EOF drain buffered terminal output before closing IO.
-                self.delegate?.processDidExit(exitCode: result == pid ? status : nil)
+                self.reapExitedChild(pid)
             }
         }
         monitor = source
         source.resume()
+    }
+
+    private func reapExitedChild(_ pid: pid_t) {
+        switch Self.pollChildExit(pid) {
+        case .pending:
+            // An exit notification can precede a waitable status; signals can
+            // also interrupt waitpid. Yield instead of losing that status or
+            // blocking AppKit while waiting for it.
+            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(10)) { [weak self] in
+                self?.reapExitedChild(pid)
+            }
+        case .finished(let status):
+            running = false
+            // Let EOF drain buffered terminal output before closing IO.
+            delegate?.processDidExit(exitCode: status)
+        }
+    }
+
+    enum ChildExitPoll: Equatable {
+        case pending
+        case finished(Int32?)
+    }
+
+    static func pollChildExit(
+        _ pid: pid_t,
+        wait: (pid_t, UnsafeMutablePointer<Int32>, Int32) -> pid_t = { waitpid($0, $1, $2) }
+    ) -> ChildExitPoll {
+        var status: Int32 = 0
+        let result = wait(pid, &status, WNOHANG)
+        let waitError = errno
+        if result == 0 || (result == -1 && waitError == EINTR) { return .pending }
+        return .finished(result == pid ? status : nil)
     }
 
     func send(data: ArraySlice<UInt8>) {

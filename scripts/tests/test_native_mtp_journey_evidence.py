@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from datetime import datetime, timezone
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -283,6 +284,128 @@ class ReleaseEvidenceTest(unittest.TestCase):
         bad = dict(evidence, base_commit=self.head, target_commit=self.head)
         with self.assertRaises(contract.NativeMTPEvidenceError):
             contract.validate_release_git(self.repo.root, bad)
+
+
+class SignedQualificationServingTests(unittest.TestCase):
+    def bundle(self):
+        names = {"capture.json", "tuple-bounds.json", "projection-plan.json", "privacy-review.json",
+                 "preregistration.json", "bench-policy.json", "bench.jsonl", "bench-analysis.json",
+                 "replay.json", "replay-policy.json", "analysis.json", "source.json"}
+        return contract.Bundle("serving", {"observations/representative/" + name: b"{}" for name in names}, b"")
+
+    def test_formal_signed_records_are_required_in_serving_archive(self):
+        for name in ("bench.jsonl", "bench-analysis.json"):
+            bundle = self.bundle(); del bundle.files["observations/representative/" + name]
+            with self.subTest(name=name), self.assertRaisesRegex(contract.NativeMTPEvidenceError, name):
+                contract.validate_representative_serving_policy(bundle, {}, b"{}", {})
+
+    def test_foreign_formal_measurement_blocks_protected_serving_validation(self):
+        core = mock.Mock()
+        core.BindingBundleError = ValueError
+        core.validate_formal_bench.side_effect = ValueError("R015 signed measurement executable identity mismatch")
+        entry = {"source_commit": "a" * 40, "reproducible_build_sha256": "b" * 64,
+                 "live_executable_cdhash": "c" * 40}
+        with mock.patch.object(contract, "_serving_contract_module", return_value=core):
+            with self.assertRaisesRegex(contract.NativeMTPEvidenceError, "signed measurement executable identity"):
+                contract.validate_representative_serving_policy(self.bundle(), entry, b"{}", {})
+        self.assertIs(core.validate_formal_bench.call_args.kwargs["identity"], entry)
+        core.validate_representative_replay.assert_not_called()
+
+
+class FormalLabServingTests(unittest.TestCase):
+    def bundle(self, *, digest="d" * 64):
+        source = {"source_commit":"a" * 40, "decode_path_digest":digest,
+                  "measurement_identity":{"binary_sha256":"b" * 64,"binary_cdhash":None,"decode_path_digest":digest}}
+        files = {"observations/qualification/" + name: b"{}" for name in
+                 ("bench-policy.json", "bench.jsonl", "bench-analysis.json")}
+        files["observations/qualification/source.json"] = json.dumps(source).encode()
+        return contract.Bundle("serving", files, b"")
+
+    def test_formal_lab_path_requires_no_capture_or_replay_files(self):
+        core = mock.Mock(BindingBundleError=ValueError)
+        core.validate_formal_bench.side_effect = ValueError("formal analyzer reached")
+        reuse = mock.Mock(SourceEquivalenceError=RuntimeError)
+        entry = {"source_commit":"f" * 40,"decode_path_digest":"d" * 64,"request_feature_profile":"native_mtp_sampled_text_v1"}
+        with mock.patch.object(contract,"_serving_contract_module",return_value=core), \
+             mock.patch.object(contract,"_source_equivalence_module",return_value=reuse):
+            with self.assertRaisesRegex(contract.NativeMTPEvidenceError,"formal analyzer reached"):
+                contract.validate_formal_serving_policy(self.bundle(), entry, b"{}", {})
+        measured = core.validate_formal_bench.call_args.kwargs["identity"]
+        self.assertEqual(measured["source_commit"], "a" * 40)
+        self.assertIsNone(measured["measurement_identity"]["binary_cdhash"])
+        core.validate_representative_replay.assert_not_called()
+
+    def test_changed_lab_digest_requires_reviewed_reuse_before_formal_analysis(self):
+        entry = {"source_commit":"f" * 40,"decode_path_digest":"d" * 64,"request_feature_profile":"native_mtp_sampled_text_v1"}
+        core = mock.Mock(BindingBundleError=ValueError)
+        reuse = mock.Mock(SourceEquivalenceError=RuntimeError)
+        reuse.measurement_tuple.side_effect = RuntimeError("source raw decode identity differs")
+        with mock.patch.object(contract,"_serving_contract_module",return_value=core), \
+             mock.patch.object(contract,"_source_equivalence_module",return_value=reuse):
+            with self.assertRaisesRegex(contract.NativeMTPEvidenceError,"source raw decode identity"):
+                contract.validate_formal_serving_policy(self.bundle(digest="e" * 64), entry, b"{}", {})
+        core.validate_formal_bench.assert_not_called()
+
+
+    def projection_fixture(self):
+        from scripts.tests.test_native_mtp_r005_redacted import ProjectionTests, n
+        raw, policy, corpus, entry = ProjectionTests().raw()
+        raw.pop("measurement_identity")
+        source = {"source_commit": policy["provider_commit"], "decode_path_digest": "d" * 64,
+                  "measurement_identity": {"binary_sha256": "7" * 64, "binary_cdhash": None,
+                                           "decode_path_digest": "d" * 64}}
+        entry.update(source_commit="f" * 40, decode_path_digest="e" * 64)
+        measured = dict(entry, source_commit=source["source_commit"], decode_path_digest="d" * 64)
+        projection = n.project_acceptance(raw, policy, corpus, measured, raw_result_sha256="f" * 64,
+            policy_sha256="e" * 64, corpus_sha256="d" * 64,
+            custody={"commit": "a" * 40, "record_sha256": "b" * 64}, measurement_source=source)
+        files = {"observations/qualification/" + name: b"{}" for name in
+                 ("bench-policy.json", "bench.jsonl", "bench-analysis.json")}
+        files["observations/qualification/source.json"] = json.dumps(source).encode()
+        for key in ("batch_evidence_sha256", "performance_evidence_sha256", "benchmark_policy_sha256"):
+            entry[key] = contract.sha256(b"{}")
+        entry["security_negative_evidence_sha256"] = "9" * 64
+        keys = ("batch_evidence_sha256", "performance_evidence_sha256", "benchmark_policy_sha256",
+                "correctness_evidence_sha256", "security_negative_evidence_sha256")
+        steps = {"step-14-studio-and-tier-benchmark": {"details": {
+            "qualification_sha256": {key: entry[key] for key in keys}}},
+            "step-04-serial-token-oracle": {"details": {
+                "r005_numeric_projection_sha256": contract.sha256(n.canonical(projection)),
+                "r005_result_sha256": projection["raw_result_sha256"],
+                "r005_policy_sha256": projection["policy_sha256"],
+                "r005_corpus_sha256": projection["corpus_sha256"]}}}
+        return n, source, entry, measured, projection, files, steps
+
+    def check_projection(self, fixture):
+        n, source, entry, measured, projection, files, steps = fixture
+        files["observations/r005-numeric-projection.json"] = n.canonical(projection)
+        core = mock.Mock(BindingBundleError=ValueError)
+        reuse = mock.Mock(SourceEquivalenceError=RuntimeError)
+        reuse.measurement_tuple.return_value = measured
+        with mock.patch.object(contract, "_source_equivalence_module", return_value=reuse), \
+             mock.patch.object(contract, "_serving_contract_module", side_effect=lambda name:
+                 n if name == "native_mtp_r005_redacted.py" else core):
+            contract.validate_formal_serving_policy(contract.Bundle("serving", files, b""), entry, b"{}", steps)
+        self.assertEqual(reuse.measurement_tuple.call_args.args[1:4],
+                         (source["source_commit"], entry["source_commit"], source["decode_path_digest"]))
+        self.assertIs(core.validate_formal_bench.call_args.kwargs["entry"], measured)
+
+    def test_true_lab_projection_uses_verified_measured_identity(self):
+        fixture = self.projection_fixture()
+        before = copy.deepcopy(fixture[2])
+        self.check_projection(fixture)
+        self.assertEqual(fixture[2], before)
+
+    def test_foreign_projection_digest_or_source_is_rejected(self):
+        for field in ("decode_path_digest", "measured_source_commit"):
+            fixture = self.projection_fixture()
+            if field == "decode_path_digest":
+                fixture[4]["measurement_identity"][field] = "e" * 64
+            else:
+                fixture[4][field] = "9" * 40
+            with self.subTest(field=field), self.assertRaises(contract.NativeMTPEvidenceError):
+                self.check_projection(fixture)
+
 
 
 if __name__ == "__main__":

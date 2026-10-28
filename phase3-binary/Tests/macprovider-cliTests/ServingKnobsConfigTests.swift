@@ -460,7 +460,46 @@ final class ServingKnobsConfigTests: XCTestCase {
             fileExists: { _ in true },
             readFile: { _ in "" }
         )
-        XCTAssertNil(unset.mlxCacheLimitMB, "unset keeps MLX's own default")
+        XCTAssertNil(unset.mlxCacheLimitMB, "unset preserves operator intent; runtime selects the RAM default")
+    }
+
+    func testMLXCacheDefaultUsesExactPhysicalMemoryBoundaryWithoutOverflow() {
+        let gib: UInt64 = 1024 * 1024 * 1024
+        for (ram, expected) in [(UInt64(0), nil), (4 * gib, 128), (8 * gib, 256),
+                                (8 * gib + 1, nil), (16 * gib, nil), (256 * gib, nil),
+                                (UInt64.max, nil)] as [(UInt64, Int?)] {
+            XCTAssertEqual(ModelRuntime.resolvedMLXCacheLimitMB(
+                configured: nil, physicalMemoryBytes: ram), expected, "RAM bytes=\(ram)")
+        }
+    }
+
+    func testExplicitMLXCacheSelectionIsNeverReplacedByRAMDefault() {
+        for ram: UInt64 in [0, 8 * 1024 * 1024 * 1024, UInt64.max] {
+            for explicit in [0, 1, 256, 4096, ModelRuntime.maximumMLXCacheLimitMB, -1, Int.max] {
+                XCTAssertEqual(ModelRuntime.resolvedMLXCacheLimitMB(
+                    configured: explicit, physicalMemoryBytes: ram), explicit)
+            }
+        }
+    }
+
+    func testNilModelRetainsCacheSelectionForFirstSignedWarmLoadWithoutMetal() async throws {
+        for configured in [nil, 0, 256] as [Int?] {
+            let runtime = try await ModelRuntime(modelID: nil, mlxCacheLimitMB: configured)
+            let deferred = await runtime.mlxCacheLimitMBForLoading
+            XCTAssertEqual(deferred, ModelRuntime.resolvedMLXCacheLimitMB(
+                configured: configured, physicalMemoryBytes: ProcessInfo.processInfo.physicalMemory))
+        }
+    }
+
+    func testInvalidNativeMLXCacheLimitFailsBeforeAnyModelOrMetalLoad() async {
+        for invalid in [-1, ModelRuntime.maximumMLXCacheLimitMB + 1, Int.max] {
+            do {
+                _ = try await ModelRuntime(modelID: nil, mlxCacheLimitMB: invalid)
+                XCTFail("Invalid explicit cache limit must be rejected: \(invalid)")
+            } catch {
+                XCTAssertTrue(error is ModelRuntimeLoadError)
+            }
+        }
     }
 
     func testApplyMLXCacheLimitIgnoresUnsetOrOutOfRange() {
@@ -486,7 +525,11 @@ final class ServingKnobsConfigTests: XCTestCase {
 
     func testApplyMLXCacheLimitConvertsMegabytes() throws {
         // Setting the limit initializes the Metal device.
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
+        let bundle = Bundle(for: Self.self)
+        guard PagedKVMetallibGate.defaultMetallibExists()
+            || PagedKVMetallibGate.defaultMetallibExists(
+                bundleURL: bundle.resourceURL, executableURL: bundle.executableURL)
+        else {
             throw XCTSkip("MLX default metallib is unavailable in this test host")
         }
         XCTAssertEqual(ModelRuntime.applyMLXCacheLimit(megabytes: 2), 2 * 1024 * 1024)
@@ -499,6 +542,20 @@ final class ServingKnobsConfigTests: XCTestCase {
             clearCount += 1
         }
 
+        XCTAssertEqual(clearCount, 1)
+    }
+
+    func testChunkedPrefillClearsTemporaryBuffersOnlyAtPromptCompletion() {
+        var clearCount = 0
+        // A boundary-only chunk and its unchanged continuation must not flush
+        // allocations between forwards. The final prompt chunk releases them,
+        // matching serial prefill before decode starts.
+        for final in [false, false, false, true] {
+            ModelRuntime.clearMLXBufferCacheAfterPrefill(isFinalChunk: final) {
+                clearCount += 1
+            }
+            XCTAssertEqual(clearCount, final ? 1 : 0)
+        }
         XCTAssertEqual(clearCount, 1)
     }
 
@@ -873,27 +930,32 @@ final class ServingKnobsConfigTests: XCTestCase {
             "event=cb_queue_limit_clamped configured=16 effective=8 rows=1"
         )
 
-        let plan = AutoServedSlots.plan(
-            configuredSlots: nil,
-            source: nil,
-            draftConfigured: false,
-            emergencyOff: false,
-            provisionalPolicyEntry: true,
-            recommendedSlots: { 8 },
-            memoryFitKnown: true,
-            policyCeiling: 4
-        )
-        XCTAssertEqual(plan.rows, 4)
-        let capability = ContinuousBatchingPolicy.configurationCapability(
-            mode: .canary,
-            maxBatch: plan.rows,
-            queueLimit: 16,
-            kvBits: nil,
-            draftConfigured: false
-        )
-        XCTAssertEqual(capability.maxActiveRows, 4)
-        XCTAssertEqual(capability.queueLimit, 16, "the configured value serves once the rows hold it")
-        XCTAssertNil(ContinuousBatchingPolicy.queueLimitClampEvent(configured: 16, maxActiveRows: 4))
+        // The signed ceiling permits four rows on the Studio tier, while
+        // the 8 GiB physical-memory bound keeps the same policy at three.
+        for (memoryGiB, expectedRows) in [(256, 4), (8, 3)] {
+            let plan = AutoServedSlots.plan(
+                configuredSlots: nil,
+                source: nil,
+                draftConfigured: false,
+                emergencyOff: false,
+                provisionalPolicyEntry: true,
+                recommendedSlots: { 8 },
+                memoryFitKnown: true,
+                policyCeiling: 4,
+                physicalMemoryBytes: UInt64(memoryGiB) * 1_073_741_824
+            )
+            XCTAssertEqual(plan.rows, expectedRows)
+            let capability = ContinuousBatchingPolicy.configurationCapability(
+                mode: .canary,
+                maxBatch: plan.rows,
+                queueLimit: 16,
+                kvBits: nil,
+                draftConfigured: false
+            )
+            XCTAssertEqual(capability.maxActiveRows, expectedRows)
+            XCTAssertEqual(capability.queueLimit, 16, "the configured value serves once the rows hold it")
+            XCTAssertNil(ContinuousBatchingPolicy.queueLimitClampEvent(configured: 16, maxActiveRows: expectedRows))
+        }
         XCTAssertNil(ContinuousBatchingPolicy.queueLimitClampEvent(configured: nil, maxActiveRows: 1))
     }
 
@@ -1009,6 +1071,35 @@ final class ServingKnobsConfigTests: XCTestCase {
     // usable retained handoff, AND `cached_turns_accepted` on the covering
     // accepted tuple. Every other combination keeps the fence, with a reason
     // that says which condition failed.
+    func testUnsupportedMaterializationRoutesColdAndWarmKeyedRequestsWithoutDisablingOrdinaryCB() throws {
+        for mode in [ContinuousBatchingMode.canary, .on] {
+            let ordinary = ContinuousBatchingCapability(
+                mode: mode, maxActiveRows: 4, queueLimit: 8, descriptor: nil, unsupportedReason: nil)
+            for key in [nil, "", " \n\t"] as [String?] {
+                let unkeyed = ModelRuntime.keyedMaterializationCapability(
+                    ordinary, conversationKey: key, supportsMaterialization: false)
+                XCTAssertNil(unkeyed.unsupportedReason)
+                XCTAssertEqual(unkeyed.maxActiveRows, 4)
+            }
+            // The admission fence intentionally has no cache-hit input: both
+            // the first turn and a warm continuation need the same safe route.
+            let keyed = ModelRuntime.keyedMaterializationCapability(
+                ordinary, conversationKey: "conv:cold-or-warm", supportsMaterialization: false)
+            XCTAssertEqual(keyed.unsupportedReason, .stickyCacheHandoffUnavailable)
+            XCTAssertEqual(keyed.maxActiveRows, 4)
+            if mode == .on {
+                XCTAssertThrowsError(try ContinuousBatchingPolicy.validateStrictStartup(keyed)) { error in
+                    XCTAssertEqual((error as? APIError)?.code, "continuous_batching_paged_kv_handoff_unavailable")
+                }
+            } else {
+                XCTAssertNoThrow(try ContinuousBatchingPolicy.validateStrictStartup(keyed))
+                XCTAssertTrue(ContinuousBatchingPolicy.serialRouteTelemetryLine(keyed)?.contains("sticky_cache_handoff_unavailable") == true)
+            }
+            XCTAssertNil(ModelRuntime.keyedMaterializationCapability(
+                ordinary, conversationKey: "conv:recordable", supportsMaterialization: true).unsupportedReason)
+        }
+    }
+
     func testCachedTurnsFenceNeedsFlagHandoffAndAcceptedTuple() {
         for mode in [ContinuousBatchingMode.canary, .on] {
             func reason(handoff: Bool, flag: Bool, accepted: Bool, cached: Int = 32) -> ContinuousBatchingUnsupportedReason? {

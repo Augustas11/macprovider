@@ -1,0 +1,118 @@
+{
+  "build_inputs": {
+    ".github/workflows/acceptance-candidate.yml": "dff39e1ba163919f433168eed5c6a56706ced81157e3f3a7cf62dbc432a35704",
+    "phase3-binary/Package.swift": "e72b6ff2af83d1ae2e9f69d660b0c928a1d8f245f11ac7b1636162db2a441465",
+    "phase3-binary/dist/package.sh": "882cff840e35f43560653b454207957d77c6fded9895518e2d039aee00dfc2a4"
+  },
+  "files": {
+    "Sources/MacProviderCore/GrammarAutomaton.swift": {
+      "current_sha256": "0e13ece0686a5e996bcf9fabccfc031c1fc74a20c9eb2b2458a16a00abfb589b",
+      "measured_sha256": "0e13ece0686a5e996bcf9fabccfc031c1fc74a20c9eb2b2458a16a00abfb589b"
+    },
+    "Sources/MacProviderCore/GrammarTemplates.swift": {
+      "current_sha256": "6033b14e0952330e5a7e06771c61b88be143d1dd4417d1380f8b61b811f80d87",
+      "measured_sha256": "6033b14e0952330e5a7e06771c61b88be143d1dd4417d1380f8b61b811f80d87"
+    },
+    "Sources/MacProviderCore/GrammarTokenTable.swift": {
+      "current_sha256": "30bcc2f68b60255b389e4bf9516dba7434c9cf25649b6792507cf7179458aafd",
+      "measured_sha256": "30bcc2f68b60255b389e4bf9516dba7434c9cf25649b6792507cf7179458aafd"
+    },
+    "Sources/MacProviderCore/PagedKVEngine.swift": {
+      "current_sha256": "dc6f6c9bec7eb63d3673aef86d0caa7b3a18c0430a717aa7e72ea5de6ed4fff7",
+      "measured_sha256": "dc6f6c9bec7eb63d3673aef86d0caa7b3a18c0430a717aa7e72ea5de6ed4fff7"
+    },
+    "Sources/MacProviderCore/ToolCallGrammar.swift": {
+      "current_sha256": "e62cc9c6e73bae9edc879801b5696d58c8ef4c6c151d8d171a50b419ef4a9e59",
+      "measured_sha256": "e62cc9c6e73bae9edc879801b5696d58c8ef4c6c151d8d171a50b419ef4a9e59"
+    },
+    "Sources/macprovider-cli/CompiledDecode.swift": {
+      "current_sha256": "2c653a55a2faa954d98d00acf3dd2c07b11d50f9e1511826efbe0ece9d16bafe",
+      "measured_sha256": "2c653a55a2faa954d98d00acf3dd2c07b11d50f9e1511826efbe0ece9d16bafe"
+    },
+    "Sources/macprovider-cli/ContinuousBatchRowSampler.swift": {
+      "current_sha256": "501b58cdf9eecf1626edeeca96352311465786582c636fc9b089e32f5e9f12d4",
+      "measured_sha256": "501b58cdf9eecf1626edeeca96352311465786582c636fc9b089e32f5e9f12d4"
+    },
+    "Sources/macprovider-cli/ContinuousBatchScheduler.swift": {
+      "current_sha256": "16a73903d0df9a35f8619ff13b7b658997b0d50208efe82fbc6603dbf36fbe9f",
+      "measured_sha256": "6395a984e62e9b5a6c7f8211c40f4796c62c655c4d98d3690722b1b673b2bac9"
+    },
+    "Sources/macprovider-cli/DeepseekV4ContinuousBatchBackend.swift": {
+      "current_sha256": "11f841ce58803abe62c12ec9e655c7cfc202a780ea24d4634b36d062d5d26039",
+      "measured_sha256": "11f841ce58803abe62c12ec9e655c7cfc202a780ea24d4634b36d062d5d26039"
+    },
+    "Sources/macprovider-cli/DeepseekV4RuntimeParityProbe.swift": {
+      "current_sha256": "2e8cb08329a8e27d23289c772ae264095237f8b4457683bbd0b81ddea0603ac7",
+      "measured_sha256": "2e8cb08329a8e27d23289c772ae264095237f8b4457683bbd0b81ddea0603ac7"
+    },
+    "Sources/macprovider-cli/GrammarConstraintState.swift": {
+      "current_sha256": "6288ca2158496ad46fd79689ddb1148637c3f396a297f018d83208071e4f741f",
+      "measured_sha256": "6288ca2158496ad46fd79689ddb1148637c3f396a297f018d83208071e4f741f"
+    },
+    "Sources/macprovider-cli/ModelRuntime.swift": {
+      "current_sha256": "7531678e6c2e9ee39a90b05417d93b645ed0e8762f88d27916048681fa356de7",
+      "measured_sha256": "66bee05e13b5d32bd043e08d267b258055f2057884b949d7b27656c4fc0a0bee"
+    },
+    "Sources/macprovider-cli/NativeMTP.swift": {
+      "current_sha256": "e388f7ebe77a465bf8646ea01c0786c595cec904d96f09791258b3bfe73a6f29",
+      "measured_sha256": "e388f7ebe77a465bf8646ea01c0786c595cec904d96f09791258b3bfe73a6f29"
+    },
+    "Sources/macprovider-cli/NativeMTPAcceptance.swift": {
+      "current_sha256": "bb7a2f5f8f3168035b21a1552b79b8493451871c086f8a64d97d9f9fb78a9f76",
+      "measured_sha256": "bb7a2f5f8f3168035b21a1552b79b8493451871c086f8a64d97d9f9fb78a9f76"
+    },
+    "Sources/macprovider-cli/NativeMTPAdaptation.swift": {
+      "current_sha256": "5116eb87699a82d29a71f4ecfcdc1879e0bf64a62858ee38311437001a4e03e4",
+      "measured_sha256": "5116eb87699a82d29a71f4ecfcdc1879e0bf64a62858ee38311437001a4e03e4"
+    },
+    "Sources/macprovider-cli/PagedKVCache.swift": {
+      "current_sha256": "b0be4ff54015892a0994eb5d157085e7c5787e849215d7fba1ea8f09749b5eba",
+      "measured_sha256": "b0be4ff54015892a0994eb5d157085e7c5787e849215d7fba1ea8f09749b5eba"
+    },
+    "Sources/macprovider-cli/PagedKVRuntimeBridge.swift": {
+      "current_sha256": "cd37d12e4b6bd56b4d13b677b610c677777a9a74617800be22cef0367c3b4764",
+      "measured_sha256": "cd37d12e4b6bd56b4d13b677b610c677777a9a74617800be22cef0367c3b4764"
+    },
+    "Sources/macprovider-cli/PagedMLACache.swift": {
+      "current_sha256": "08d3271ae8c3cb4eef547dc6a6a65bfd4ac4fcc238b3bd8cb1fa237f08ddbf7c",
+      "measured_sha256": "08d3271ae8c3cb4eef547dc6a6a65bfd4ac4fcc238b3bd8cb1fa237f08ddbf7c"
+    },
+    "Sources/macprovider-cli/ServeDecodePath.swift": {
+      "current_sha256": "f60be08e0cb6c057f10689c97c2ec2839215235b0a739cef99952f31c0d17fc6",
+      "measured_sha256": "f60be08e0cb6c057f10689c97c2ec2839215235b0a739cef99952f31c0d17fc6"
+    }
+  },
+  "historical_sampled_bridge": {
+    "files": {
+      "Sources/MacProviderCore/GrammarAutomaton.swift": "0e13ece0686a5e996bcf9fabccfc031c1fc74a20c9eb2b2458a16a00abfb589b",
+      "Sources/MacProviderCore/GrammarTemplates.swift": "6033b14e0952330e5a7e06771c61b88be143d1dd4417d1380f8b61b811f80d87",
+      "Sources/MacProviderCore/GrammarTokenTable.swift": "30bcc2f68b60255b389e4bf9516dba7434c9cf25649b6792507cf7179458aafd",
+      "Sources/MacProviderCore/PagedKVEngine.swift": "dc6f6c9bec7eb63d3673aef86d0caa7b3a18c0430a717aa7e72ea5de6ed4fff7",
+      "Sources/MacProviderCore/ToolCallGrammar.swift": "e62cc9c6e73bae9edc879801b5696d58c8ef4c6c151d8d171a50b419ef4a9e59",
+      "Sources/macprovider-cli/CompiledDecode.swift": "2c653a55a2faa954d98d00acf3dd2c07b11d50f9e1511826efbe0ece9d16bafe",
+      "Sources/macprovider-cli/ContinuousBatchRowSampler.swift": "501b58cdf9eecf1626edeeca96352311465786582c636fc9b089e32f5e9f12d4",
+      "Sources/macprovider-cli/ContinuousBatchScheduler.swift": "39dabba6aae8b712647e757be913e83dd84745e64fdef2ef2ab3339c05a89243",
+      "Sources/macprovider-cli/DeepseekV4ContinuousBatchBackend.swift": "11f841ce58803abe62c12ec9e655c7cfc202a780ea24d4634b36d062d5d26039",
+      "Sources/macprovider-cli/DeepseekV4RuntimeParityProbe.swift": "2e8cb08329a8e27d23289c772ae264095237f8b4457683bbd0b81ddea0603ac7",
+      "Sources/macprovider-cli/GrammarConstraintState.swift": "6288ca2158496ad46fd79689ddb1148637c3f396a297f018d83208071e4f741f",
+      "Sources/macprovider-cli/ModelRuntime.swift": "f72d091ff68d7d25f71fbe8bcf1a69938d636dcc0a1d306f26ffcdc9fc4c1627",
+      "Sources/macprovider-cli/NativeMTP.swift": "0fd824d8eed9f57a61f08f40537dcc01b703508bdac102020791dbe9410815a6",
+      "Sources/macprovider-cli/NativeMTPAcceptance.swift": "bb7a2f5f8f3168035b21a1552b79b8493451871c086f8a64d97d9f9fb78a9f76",
+      "Sources/macprovider-cli/NativeMTPAdaptation.swift": "5116eb87699a82d29a71f4ecfcdc1879e0bf64a62858ee38311437001a4e03e4",
+      "Sources/macprovider-cli/PagedKVCache.swift": "b0be4ff54015892a0994eb5d157085e7c5787e849215d7fba1ea8f09749b5eba",
+      "Sources/macprovider-cli/PagedKVRuntimeBridge.swift": "487449213ecf47dfe1a01d74b21d2ba2b8f6bc7982549ab0aa155f385fb6c1cd",
+      "Sources/macprovider-cli/PagedMLACache.swift": "08d3271ae8c3cb4eef547dc6a6a65bfd4ac4fcc238b3bd8cb1fa237f08ddbf7c",
+      "Sources/macprovider-cli/ServeDecodePath.swift": "f60be08e0cb6c057f10689c97c2ec2839215235b0a739cef99952f31c0d17fc6"
+    },
+    "fork_inventory_sha256": "8ef61de52000ea20d5884e3e1567e15dbc87baa3f39c3c210b39d91f1c6b88c7",
+    "measured_source_commit": "d2c8df79e812c6e02f2aaba1e366b742aa52ef4a",
+    "package_resolved_sha256": "31cbb6827bdb232abdb2255b99f924c290b869b9bd3361adf3597bcac34b5075",
+    "package_swift_sha256": "008eba49c3f36656ab102e7e44a6214f0b73b773b37901f1a54ee43e54f252b5",
+    "profile_decoder_sha256": "d9ad6059916ebe27b7194d386616fa0c145f3eac98091ab1a2d3d806833cefa5"
+  },
+  "lab_patch_sha256": "add9da966b8cdd5223420c9520aff266815c1a2a38b93b3965ec5d1820f0c545",
+  "manifest_sha256": "16c715066cdda8b7efb379becd192f9dfd22c252089f2260f3ffb8eb225f3287",
+  "measured_source_commit": "6507121b05b166e94ed473dd9eb981fc9ec5f18e",
+  "package_resolved_sha256": "2e6e1f6337da072e75d80acc7a0cb632bd973f64689730f327063935b09e16aa",
+  "schema_version": "macprovider.native-mtp-lab-source-equivalence.v1"
+}

@@ -26,7 +26,9 @@ final class ReasoningEffortTests: XCTestCase {
         for model in models {
             for effort in ChatCompletionRequest.acceptedReasoningEfforts {
                 let request = try request(model: model, effort: effort)
-                let expected = ["none", "minimal"].contains(effort) ? "low" : effort
+                let expected = ["none", "minimal"].contains(effort) ? "low"
+                    : (ChatCompletionRequest.usesQwen38Template(modelID: model)
+                        && ["high", "max"].contains(effort) ? "xhigh" : effort)
                 XCTAssertEqual(request.templateReasoningEffort, expected, "\(model): \(effort)")
                 let input = try ModelRuntime.userInput(for: request)
                 XCTAssertEqual(input.additionalContext?["reasoning_effort"] as? String, expected)
@@ -69,7 +71,8 @@ final class ReasoningEffortTests: XCTestCase {
         ]]]
         for model in ["zai-org/glm-5.3-flash", "openai/gpt-oss-20b", "qwen/qwen3.8-27b", "deepseek/deepseek-v4-flash", "unknown"] {
             XCTAssertEqual(try request(model: model, extra: ["tools": tools]).templateReasoningEffort, "low")
-            XCTAssertEqual(try request(model: model, effort: "high", extra: ["tools": tools]).templateReasoningEffort, "high")
+            XCTAssertEqual(try request(model: model, effort: "high", extra: ["tools": tools]).templateReasoningEffort,
+                           ChatCompletionRequest.usesQwen38Template(modelID: model) ? "xhigh" : "high")
             let formats: [[String: Any]] = [
                 ["type": "json_object"],
                 ["type": "json_schema", "json_schema": ["name": "answer", "schema": ["type": "object"]]],

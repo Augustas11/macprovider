@@ -153,6 +153,8 @@ type Server struct {
 	canaryCorrByModel             map[string]*liveCorrelationEpoch
 	canarySharedDispatch          map[string]sharedCanaryDispatch
 	canaryBankGeneration          uint64
+	nativePathDispatchMu          sync.Mutex
+	nativePathPending             sync.Map // provider/session/profile -> *nativePathPending
 	losslessnessPending           sync.Map
 	losslessnessNonceIndex        sync.Map
 	losslessnessDigestIndex       sync.Map
@@ -2109,6 +2111,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/admin/providers", s.handleAdminProviders)
 	mux.HandleFunc("/admin/providers/", s.handleAdminProviders)
 	mux.HandleFunc("/admin/onboarding", s.handleAdminOnboarding)
+	mux.HandleFunc("/admin/native-mtp-path-diagnostic", s.handleAdminNativePathProbe)
 	mux.HandleFunc("/admin/compute-integrity", s.handleAdminComputeIntegrity)
 	mux.HandleFunc("/admin/compute-integrity/", s.handleAdminComputeIntegrity)
 	mux.HandleFunc("/admin/provisional", s.handleAdminProvisional)
@@ -5037,6 +5040,8 @@ func (s *Server) handleMessage(conn net.Conn, providerID, assignedID string, pay
 		s.handleNativeMTPCanaryResult(providerID, assignedID, payload)
 	case losslessnessResultType, losslessnessEncryptedResultType:
 		s.handleLosslessnessProbeResult(providerID, assignedID, payload)
+	case "compute_integrity_probe_v1.result", "compute_integrity_probe_v1.encrypted_result":
+		s.handleComputeNativePathProbeResult(providerID, assignedID, payload)
 	case computeScoreResultType:
 		s.handleComputeScoreResult(providerID, assignedID, payload)
 	case shardgroup.TypeRegister:

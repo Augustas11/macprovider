@@ -174,6 +174,38 @@ final class GLM5NextCBPromptSnapshotTests: XCTestCase {
             assertEqualStates(warmHead, coldHead, "MTP head state after prefill")
         }
 
+        // codec-v3 must preserve the exact real six-slot GLM cache and paired
+        // MTP head, not just a synthetic tensor fixture. Install its restored
+        // serial layers into the same production CB backend and run turn 2.
+        let canonical = Array(turn1.prefix(s1)).map(Int32.init)
+        let cached = ConversationCacheLayers(snapshot.layers, promptSnapshot: true,
+            nativeMTPDrafter: snapshot.nativeMTPDrafter, resumeBoundaryPlan: true)
+        let estimate = try XCTUnwrap(KVPromptSnapshotCodec.estimatedLength(cached, tokens: canonical))
+        let archive = try XCTUnwrap(KVPromptSnapshotCodec.capture(cached, tokens: canonical),
+                                   "real GLM target/head state must be disk serializable")
+        let encoded = try KVPromptSnapshotCodec.encodeSegments(archive).reduce(into: Data()) { $0.append($1) }
+        XCTAssertEqual(encoded.count, estimate)
+        let decoded = try KVPromptSnapshotCodec.decode(encoded,
+            expectedLayers: KVPromptSnapshotCodec.records(archive), tokenCount: s1)
+        let disk = try XCTUnwrap(KVPromptSnapshotCodec.restore(decoded))
+        assertEqualRawStates(disk.layers.map { $0.state }, storedState, "disk target snapshot bytes")
+        if let storedHead {
+            assertEqualRawStates(try XCTUnwrap(disk.nativeMTPDrafter).cache.map { $0.state },
+                                 storedHead, "disk MTP snapshot bytes")
+        }
+        let diskSnapshot = ContinuousBatchSerialConversationCache(layers: disk.layers,
+            recurrentCheckpoints: [], tokenCount: s1, promptSnapshot: true,
+            nativeMTPDrafter: disk.nativeMTPDrafter)
+        let diskWarm = try await rows.run("disk-warm", prompt: turn2, snapshotAt: nil,
+                                         steps: Self.decodeSteps, resume: diskSnapshot)
+        XCTAssertEqual(diskWarm.chunkEnds, warm.chunkEnds)
+        XCTAssertEqual(diskWarm.tokens, cold.tokens, "disk resume greedy tokens diverged from cold CB")
+        assertEqualRawStates(diskWarm.finalLayers, cold.finalLayers, "disk resume target parity")
+        if native {
+            assertEqualRawStates(try XCTUnwrap(diskWarm.finalHead), try XCTUnwrap(cold.finalHead),
+                                 "disk resume native MTP head parity")
+        }
+
         // The rows' writes never reached the stored snapshot.
         assertEqualStates(snapshot.layers.map { $0.state }, storedState, "stored snapshot")
         if let storedHead, let head = snapshot.nativeMTPDrafter {
@@ -307,6 +339,20 @@ final class GLM5NextCBPromptSnapshotTests: XCTestCase {
                 let same = x.shape == y.shape && x.dtype == y.dtype
                     && (x.size == 0 || all(x .== y).item(Bool.self))
                 XCTAssertTrue(same, "\(label) layer \(layer) slot \(slot)", file: file, line: line)
+            }
+        }
+    }
+
+    private func assertEqualRawStates(_ lhs: [[MLXArray]], _ rhs: [[MLXArray]], _ label: String,
+                                      file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertEqual(lhs.count, rhs.count, label, file: file, line: line)
+        for (layer, (left, right)) in zip(lhs, rhs).enumerated() {
+            XCTAssertEqual(left.count, right.count, label, file: file, line: line)
+            for (slot, (a, b)) in zip(left, right).enumerated() {
+                XCTAssertEqual(a.shape, b.shape, "\(label) layer \(layer) slot \(slot)", file: file, line: line)
+                XCTAssertEqual(a.dtype, b.dtype, label, file: file, line: line)
+                XCTAssertEqual(a.asData(access: .copy).data, b.asData(access: .copy).data,
+                               "\(label) layer \(layer) slot \(slot)", file: file, line: line)
             }
         }
     }
