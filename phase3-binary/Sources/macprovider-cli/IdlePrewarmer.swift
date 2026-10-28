@@ -202,11 +202,11 @@ actor IdlePrewarmer {
         cancelInflight(logRealRequest: true)
     }
 
-    func runOneTickForTest() async {
-        await runTick()
+    func runOneTickForTest(now: Date? = nil) async {
+        await runTick(now: now)
     }
 
-    private func runTick() async {
+    private func runTick(now: Date? = nil) async {
         guard !shouldStopTick() else { return }
         guard inflight == nil else { return }
         guard config.enabled else {
@@ -221,7 +221,7 @@ actor IdlePrewarmer {
             return
         }
 
-        let idleSeconds = await providerStatus.secondsSinceLastActivityOrPrewarm()
+        let idleSeconds = await providerStatus.secondsSinceLastActivityOrPrewarm(now: now ?? Date())
         guard !shouldStopTick() else { return }
         guard idleSeconds >= config.idleThresholdSeconds else {
             logSkipped("not_idle_yet")
@@ -257,7 +257,7 @@ actor IdlePrewarmer {
             logSkipped("busy")
             return
         }
-        let finalIdleSeconds = await providerStatus.secondsSinceLastActivityOrPrewarm()
+        let finalIdleSeconds = await providerStatus.secondsSinceLastActivityOrPrewarm(now: now ?? Date())
         guard !shouldStopTick() else { return }
         guard finalIdleSeconds >= config.idleThresholdSeconds else {
             logSkipped("not_idle_yet")

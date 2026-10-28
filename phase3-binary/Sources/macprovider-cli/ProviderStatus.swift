@@ -950,8 +950,7 @@ actor ProviderStatus {
         max(0, Date().timeIntervalSince(lastActivityAt))
     }
 
-    func secondsSinceLastActivityOrPrewarm() -> Double {
-        let now = Date()
+    func secondsSinceLastActivityOrPrewarm(now: Date = Date()) -> Double {
         let secondsSinceActivity = max(0, now.timeIntervalSince(lastActivityAt))
         guard let lastPrewarmAt else { return secondsSinceActivity }
         return min(secondsSinceActivity, max(0, now.timeIntervalSince(lastPrewarmAt)))
