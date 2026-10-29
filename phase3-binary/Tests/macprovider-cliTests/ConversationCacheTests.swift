@@ -451,6 +451,91 @@ final class ConversationCacheTests: XCTestCase {
         }
     }
 
+    func testLiveGLMSnapshotSurvivesOversizedLogicalPoolAtFourSlots() async throws {
+        let gib = 1024 * 1024 * 1024
+        // 256 GiB Studio, ~175 GB resident model. Free + inactive + purgeable
+        // pages from the live defect sample; no model or tensor evaluation.
+        let available = (4_223_692 + 371_987 + 28_736) * 16_384
+        let tokens = int32Range(0..<4_598)
+        var layers: [KVCache] = []
+        for index in 0..<45 {
+            if index % 4 == 3 {
+                let layer = GLM5NextAttentionCache(kpool: 4)
+                layer.state = [
+                    MLXArray.zeros([1, 1, 4_608, 512], dtype: .bfloat16, stream: .cpu),
+                    MLXArray.zeros([1, 1_149, 128], dtype: .bfloat16, stream: .cpu),
+                    MLXArray.zeros([1, 2, 128], dtype: .bfloat16, stream: .cpu),
+                    MLXArray.zeros([1, 2, 128], dtype: .bfloat16, stream: .cpu),
+                    MLXArray.zeros([1, 19, 128], dtype: .bfloat16, stream: .cpu),
+                    MLXArray.zeros([1, 19, 128], dtype: .bfloat16, stream: .cpu),
+                ]
+                layer.offset = tokens.count
+                layers.append(layer)
+            } else {
+                let layer = MambaCache()
+                layer.state = [
+                    MLXArray.zeros([1, 3, 24_576], dtype: .bfloat16, stream: .cpu),
+                    MLXArray.zeros([1, 64, 128, 128], dtype: .float32, stream: .cpu),
+                ]
+                layer.offset = tokens.count
+                layers.append(layer)
+            }
+        }
+        let snapshot = ConversationCacheLayers(layers, promptSnapshot: true, resumeBoundaryPlan: true)
+        let entryBytes = ConversationCacheMemoryBudget.tensorBytes(snapshot) + tokens.count * 4
+        XCTAssertEqual(entryBytes, 202_896_600)
+        // Live ordinary CB has no admitted native capability. Also exercise a
+        // native verify window: its existing target/head reserve must survive.
+        for verifyBytes in [0, gib] {
+            let budget = ConversationCacheMemoryBudget(probe: .init(identity: "live-glm-\(verifyBytes)") {
+                .init(availableBytes: available, physicalBytes: 256 * gib)
+            })
+            budget.configure(maxContextTokens: 200_000, slots: 4,
+                             residentTokens: 102_400 * 256, verifyBytes: verifyBytes)
+            budget.observe(layers: snapshot, tokenCount: tokens.count)
+            XCTAssertEqual(budget.hotByteLimit(), 8 * gib)
+            XCTAssertTrue(budget.admitsStaging(bytes: gib))
+            let cache = makeConversationCacheForTest(memoryBudget: budget)
+            let lease = await cache.begin(conversationKey: "conv:live-glm", incomingTokens: tokens,
+                                          modelID: "glm-live", kvBits: nil)
+            await cache.commit(try XCTUnwrap(lease), cache: snapshot, fullTokens: tokens)
+            let stats = await cache.snapshotStats()
+            XCTAssertEqual(stats.entries, 1)
+            let warm = await cache.begin(conversationKey: "conv:live-glm", incomingTokens: tokens + [7],
+                                         modelID: "glm-live", kvBits: nil)
+            XCTAssertEqual(warm?.cachedPromptTokens, tokens.count)
+            if let warm { await cache.abort(warm) }
+        }
+    }
+
+    func testLogicalPoolCapStillReservesFullRowsAndFailsClosedUnderPressure() {
+        let gib = 1024 * 1024 * 1024
+        let physical = 256 * gib
+        let floor = physical / 10 + 1
+        // Full four-row GLM geometry from the live model, not 48 sparse layers.
+        let fixed = 34 * (3 * 24_576 * 2 + 64 * 128 * 128 * 4) + 11 * 272_384
+        let density = 11 * 1_088
+        let serving = 800_000 * density + fixed * 4
+        let reserved = floor + serving + serving / 20 + 2 * gib
+        for pool in [65_536, 800_000, 26_214_400, Int.max] {
+            for extra in [0, 1, 4_096] {
+                let budget = ConversationCacheMemoryBudget(probe: .init(identity: "pool-floor-\(pool)-\(extra)") {
+                    .init(availableBytes: reserved + extra, physicalBytes: physical)
+                })
+                budget.configure(maxContextTokens: 200_000, slots: 4, residentTokens: pool, verifyBytes: 0)
+                budget.observe(geometry: .init(fixedRowBytes: fixed, bytesPerToken: density))
+                XCTAssertEqual(budget.hotByteLimit(), extra)
+                XCTAssertEqual(budget.admitsStaging(bytes: gib), extra > 0)
+            }
+        }
+        let overflow = ConversationCacheMemoryBudget(probe: .init(identity: "row-overflow") {
+            .init(availableBytes: physical, physicalBytes: physical)
+        })
+        overflow.configure(maxContextTokens: Int.max, slots: 4, residentTokens: 1, verifyBytes: 0)
+        overflow.observe(geometry: .init(bytesPerToken: density))
+        XCTAssertEqual(overflow.hotByteLimit(), 0)
+    }
+
     func testGLMPromptSnapshotBudgetCountsPaddedTargetAndHeadBuffers() throws {
         try XCTSkipUnless(ProcessInfo.processInfo.environment["KV_ENABLE_MLX_TESTS"] == "1",
                           "requires MLX runtime (set KV_ENABLE_MLX_TESTS=1 on a capable host)")

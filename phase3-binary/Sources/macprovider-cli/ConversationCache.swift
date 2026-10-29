@@ -173,8 +173,8 @@ final class ConversationCacheLease: @unchecked Sendable {
 
 /// Opportunistic retention uses only memory left after full serving capacity.
 /// Counting every tensor reference separately is conservative when snapshots share
-/// immutable buffers. Pool growth is reserved at the larger of full slots and the
-/// configured physical token pool; draft state is charged alongside target state.
+/// immutable buffers. Pool buffers grow on demand: reserve full served rows, not
+/// unused logical pool capacity; draft state is charged alongside target state.
 final class ConversationCacheMemoryBudget: @unchecked Sendable {
     static let system = ConversationCacheMemoryBudget()
     private let lock = NSLock()
@@ -300,7 +300,13 @@ final class ConversationCacheMemoryBudget: @unchecked Sendable {
     private func availableRetentionBytes(additionalBytes: Int) -> Int {
         guard let sample = probe.sample(), sample.physicalBytes > 0, sample.availableBytes >= 0 else { return 0 }
         lock.lock()
-        let poolTokens = max(residentTokens, Self.saturatedMultiply(contextTokens, slots))
+        // The paged pool is a logical admission ceiling, not an eager allocation.
+        // At most `slots` rows can grow to `contextTokens` concurrently. A larger
+        // pool cannot create extra rows; retained entries are charged separately.
+        // Keep full-row capacity even for a smaller pool (contiguous fallback),
+        // and retain the pool bound when serving dimensions are not configured.
+        let servedTokens = Self.saturatedMultiply(contextTokens, slots)
+        let poolTokens = servedTokens > 0 ? servedTokens : residentTokens
         // Before the first observed state, decline speculative allocations for a
         // configured serving runtime. Geometry seeding can establish the bound.
         let unknown = poolTokens > 0 && bytesPerToken == 0 && fixedRowBytes == 0
