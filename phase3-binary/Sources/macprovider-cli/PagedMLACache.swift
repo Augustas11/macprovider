@@ -226,7 +226,7 @@ final class PagedMLALatentCache: GLM5NextLatentCache, CustomDebugStringConvertib
     private var rawCount: Int { (foldedKeys?.dim(1) ?? 0) + (pendingKeys?.dim(1) ?? 0) }
     private var indexed: Bool { pooledCount > 0 || rawCount > 0 }
 
-    fileprivate func exactTrimCount(_ n: Int) -> Int {
+    private func exactTrimCount(_ n: Int) -> Int {
         var m = min(max(n, 0), offset)
         guard indexed else { return m }
         while m > 0 {
@@ -427,64 +427,19 @@ final class PagedMLALatentCache: GLM5NextLatentCache, CustomDebugStringConvertib
 /// its row's valid columns (`stagedValidTokenBudget`) and writes nothing for
 /// the padding, as the fork's batch does.
 final class PagedMLABatchLayerCache: GLM5NextBatchedLatentCache, MTPPackedVerificationCache, @unchecked Sendable {
-    final class PendingMTPResolution: @unchecked Sendable {
+    struct PendingMTPResolution {
         let rowCache: PagedMLALatentCache
-        private var staged: PagedMLALatentCache?
-        private let lock = NSLock()
+        let staged: PagedMLALatentCache
         let inputTokenCount: Int
         let proposalTokenCount: Int
         let appendedTokenCount: Int
 
-        init(rowCache: PagedMLALatentCache, staged: PagedMLALatentCache,
-             inputTokenCount: Int, proposalTokenCount: Int, appendedTokenCount: Int) {
-            self.rowCache = rowCache
-            self.staged = staged
-            self.inputTokenCount = inputTokenCount
-            self.proposalTokenCount = proposalTokenCount
-            self.appendedTokenCount = appendedTokenCount
-        }
-
-        /// Reusable commits retain the original staged verification state.
         func stageCommit(inputCount: Int) throws -> [MLXArray] {
-            lock.lock()
-            defer { lock.unlock() }
-            let staged = try validatedStage(inputCount: inputCount)
-            guard inputCount > 0 else { return [] }
-            return try publish(staged.concreteCopy(), inputCount: inputCount)
-        }
-
-        /// Production removes the pending transaction before dispatching its
-        /// layers, so it can transfer this staging cache exactly once.
-        func consumeStageCommit(inputCount: Int) throws -> [MLXArray] {
-            lock.lock()
-            defer { lock.unlock() }
-            let staged = try validatedStage(inputCount: inputCount)
-            guard inputCount > 0 else {
-                self.staged = nil
-                return []
-            }
-            let arrays = try publish(staged, inputCount: inputCount)
-            self.staged = nil
-            return arrays
-        }
-
-        private func validatedStage(inputCount: Int) throws -> PagedMLALatentCache {
             guard inputCount >= 0, inputCount <= inputTokenCount else {
                 throw ContinuousBatchSchedulerError.unsupported("native_mtp_finalize_input_count_mismatch")
             }
-            guard let staged else {
-                throw ContinuousBatchSchedulerError.unsupported("native_mtp_paged_mla_resolution_consumed")
-            }
-            // Validate before consuming or trimming; rejected commits leave
-            // both the live row and the reusable staged state untouched.
-            let drop = appendedTokenCount - inputCount
-            guard inputCount == 0 || (drop >= 0 && staged.exactTrimCount(drop) == drop) else {
-                throw ContinuousBatchSchedulerError.unsupported("native_mtp_paged_mla_trim_shortfall")
-            }
-            return staged
-        }
-
-        private func publish(_ committed: PagedMLALatentCache, inputCount: Int) throws -> [MLXArray] {
+            guard inputCount > 0 else { return [] }
+            let committed = staged.concreteCopy()
             let drop = appendedTokenCount - inputCount
             guard committed.trim(drop) == drop else {
                 throw ContinuousBatchSchedulerError.unsupported("native_mtp_paged_mla_trim_shortfall")
