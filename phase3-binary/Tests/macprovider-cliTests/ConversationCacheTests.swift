@@ -452,59 +452,79 @@ final class ConversationCacheTests: XCTestCase {
     }
 
     func testLiveGLMSnapshotSurvivesOversizedLogicalPoolAtFourSlots() async throws {
-        let gib = 1024 * 1024 * 1024
-        // 256 GiB Studio, ~175 GB resident model. Free + inactive + purgeable
-        // pages from the live defect sample; no model or tensor evaluation.
-        let available = (4_223_692 + 371_987 + 28_736) * 16_384
-        let tokens = int32Range(0..<4_598)
-        var layers: [KVCache] = []
-        for index in 0..<45 {
-            if index % 4 == 3 {
-                let layer = GLM5NextAttentionCache(kpool: 4)
-                layer.state = [
-                    MLXArray.zeros([1, 1, 4_608, 512], dtype: .bfloat16, stream: .cpu),
-                    MLXArray.zeros([1, 1_149, 128], dtype: .bfloat16, stream: .cpu),
-                    MLXArray.zeros([1, 2, 128], dtype: .bfloat16, stream: .cpu),
-                    MLXArray.zeros([1, 2, 128], dtype: .bfloat16, stream: .cpu),
-                    MLXArray.zeros([1, 19, 128], dtype: .bfloat16, stream: .cpu),
-                    MLXArray.zeros([1, 19, 128], dtype: .bfloat16, stream: .cpu),
-                ]
-                layer.offset = tokens.count
-                layers.append(layer)
-            } else {
-                let layer = MambaCache()
-                layer.state = [
-                    MLXArray.zeros([1, 3, 24_576], dtype: .bfloat16, stream: .cpu),
-                    MLXArray.zeros([1, 64, 128, 128], dtype: .float32, stream: .cpu),
-                ]
-                layer.offset = tokens.count
-                layers.append(layer)
+        // XCTest async tasks need their own task-local CPU device scope.
+        try await Device.withDefaultDevice(Device(.cpu)) {
+            let gib = 1024 * 1024 * 1024
+            // 256 GiB Studio, ~175 GB resident model. Free + inactive + purgeable
+            // pages from the live defect sample; no model or tensor evaluation.
+            let available = (4_223_692 + 371_987 + 28_736) * 16_384
+            let tokens = int32Range(0..<4_598)
+            var layers: [KVCache] = []
+            for index in 0..<45 {
+                if index % 4 == 3 {
+                    // Preserve the GLM tensor layouts in a metadata-only container:
+                    // GLM's state getter creates an empty scalar-backed array
+                    // that requires Metal even when only reading byte counts.
+                    let layer = ArraysCache(size: 6)
+                    layer.state = [
+                        MLXArray.arange(2_359_296, dtype: .float32, stream: .cpu)
+                            .asType(.bfloat16, stream: .cpu).reshaped([1, 1, 4_608, 512], stream: .cpu),
+                        MLXArray.arange(147_072, dtype: .float32, stream: .cpu)
+                            .asType(.bfloat16, stream: .cpu).reshaped([1, 1_149, 128], stream: .cpu),
+                        MLXArray.arange(256, dtype: .float32, stream: .cpu)
+                            .asType(.bfloat16, stream: .cpu).reshaped([1, 2, 128], stream: .cpu),
+                        MLXArray.arange(256, dtype: .float32, stream: .cpu)
+                            .asType(.bfloat16, stream: .cpu).reshaped([1, 2, 128], stream: .cpu),
+                        MLXArray.arange(2_432, dtype: .float32, stream: .cpu)
+                            .asType(.bfloat16, stream: .cpu).reshaped([1, 19, 128], stream: .cpu),
+                        MLXArray.arange(2_432, dtype: .float32, stream: .cpu)
+                            .asType(.bfloat16, stream: .cpu).reshaped([1, 19, 128], stream: .cpu),
+                    ]
+                    layer.offset = tokens.count
+                    layers.append(layer)
+                } else {
+                    let layer = MambaCache()
+                    layer.state = [
+                        MLXArray.arange(73_728, dtype: .float32, stream: .cpu)
+                            .asType(.bfloat16, stream: .cpu).reshaped([1, 3, 24_576], stream: .cpu),
+                        MLXArray.arange(1_048_576, dtype: .float32, stream: .cpu)
+                            .asType(.float32, stream: .cpu).reshaped([1, 64, 128, 128], stream: .cpu),
+                    ]
+                    layer.offset = tokens.count
+                    layers.append(layer)
+                }
             }
-        }
-        let snapshot = ConversationCacheLayers(layers, promptSnapshot: true, resumeBoundaryPlan: true)
-        let entryBytes = ConversationCacheMemoryBudget.tensorBytes(snapshot) + tokens.count * 4
-        XCTAssertEqual(entryBytes, 202_896_600)
-        // Live ordinary CB has no admitted native capability. Also exercise a
-        // native verify window: its existing target/head reserve must survive.
-        for verifyBytes in [0, gib] {
-            let budget = ConversationCacheMemoryBudget(probe: .init(identity: "live-glm-\(verifyBytes)") {
-                .init(availableBytes: available, physicalBytes: 256 * gib)
-            })
-            budget.configure(maxContextTokens: 200_000, slots: 4,
-                             residentTokens: 102_400 * 256, verifyBytes: verifyBytes)
-            budget.observe(layers: snapshot, tokenCount: tokens.count)
-            XCTAssertEqual(budget.hotByteLimit(), 8 * gib)
-            XCTAssertTrue(budget.admitsStaging(bytes: gib))
-            let cache = makeConversationCacheForTest(memoryBudget: budget)
-            let lease = await cache.begin(conversationKey: "conv:live-glm", incomingTokens: tokens,
-                                          modelID: "glm-live", kvBits: nil)
-            await cache.commit(try XCTUnwrap(lease), cache: snapshot, fullTokens: tokens)
-            let stats = await cache.snapshotStats()
-            XCTAssertEqual(stats.entries, 1)
-            let warm = await cache.begin(conversationKey: "conv:live-glm", incomingTokens: tokens + [7],
-                                         modelID: "glm-live", kvBits: nil)
-            XCTAssertEqual(warm?.cachedPromptTokens, tokens.count)
-            if let warm { await cache.abort(warm) }
+            let snapshot = ConversationCacheLayers(layers, promptSnapshot: true, resumeBoundaryPlan: true)
+            let entryBytes = ConversationCacheMemoryBudget.tensorBytes(snapshot) + tokens.count * 4
+            XCTAssertEqual(entryBytes, 202_896_600)
+            // Live ordinary CB has no admitted native capability. Also exercise a
+            // native verify window: its existing target/head reserve must survive.
+            for verifyBytes in [0, gib] {
+                let budget = ConversationCacheMemoryBudget(probe: .init(identity: "live-glm-\(verifyBytes)") {
+                    .init(availableBytes: available, physicalBytes: 256 * gib)
+                })
+                budget.configure(maxContextTokens: 200_000, slots: 4,
+                                 residentTokens: 102_400 * 256, verifyBytes: verifyBytes)
+                let sparse = ConversationCacheMemoryBudget.glmGeometry(
+                    latentBytesPerToken: 1_024, pooledBytesPerKey: 256,
+                    rawKeyBytesPerToken: 256, rawGateBytesPerToken: 256,
+                    kpool: 4, maxTrim: 16, step: 256)
+                budget.observe(geometry: .init(
+                    fixedRowBytes: 34 * (3 * 24_576 * 2 + 64 * 128 * 128 * 4) + 11 * sparse.fixedRowBytes,
+                    bytesPerToken: 11 * sparse.bytesPerToken))
+                XCTAssertEqual(budget.hotByteLimit(), 8 * gib)
+                XCTAssertTrue(budget.admitsStaging(bytes: gib))
+                let cache = makeConversationCacheForTest(memoryBudget: budget)
+                let lease = await cache.begin(conversationKey: "conv:live-glm", incomingTokens: tokens,
+                                              modelID: "glm-live", kvBits: nil)
+                await cache.commit(try XCTUnwrap(lease), cache: snapshot, fullTokens: tokens)
+                let stats = await cache.snapshotStats()
+                XCTAssertEqual(stats.entries, 1)
+                let warm = await cache.begin(conversationKey: "conv:live-glm", incomingTokens: tokens + [7],
+                                             modelID: "glm-live", kvBits: nil)
+                XCTAssertEqual(warm?.cachedPromptTokens, tokens.count)
+                if let warm { await cache.abort(warm) }
+            }
         }
     }
 
