@@ -471,9 +471,17 @@ final class NativeMTPBenchRunner {
         // paired blocks. The outer guarded controller restores live serving
         // when this child exits, including a stalled GPU task.
         let cellWatchdog: DispatchSourceTimer? = policy.diagnosticEligibilityBypass ? DispatchSource.makeTimerSource(queue: .global()) : nil
-        cellWatchdog?.schedule(deadline: .now() + 180)
+        #if MACPROVIDER_LAB_HARNESS
+        // Four p1536/o512 rows need more than 180 seconds for two complete
+        // counterbalanced blocks. This ceiling is confined to LAB builds;
+        // signed qualification still requires a formal, non-diagnostic policy.
+        let diagnosticCellSeconds = 900
+        #else
+        let diagnosticCellSeconds = 180
+        #endif
+        cellWatchdog?.schedule(deadline: .now() + .seconds(diagnosticCellSeconds))
         cellWatchdog?.setEventHandler {
-            FileHandle.standardError.write(Data("native-mtp-bench: diagnostic cell exceeded 180 seconds\n".utf8))
+            FileHandle.standardError.write(Data("native-mtp-bench: diagnostic cell exceeded \(diagnosticCellSeconds) seconds\n".utf8))
             _exit(124)
         }
         cellWatchdog?.resume()
