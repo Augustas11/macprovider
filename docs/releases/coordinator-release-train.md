@@ -1,5 +1,27 @@
 # Coordinator Release Train — Pearl coordinator / gateway
 
+## Release coordination update — 2026-10-29
+
+Provider CLI 1.8.277 is promoted; its shipped changes, native-MTP runtime rebind
+and release-match guard are recorded in the
+[dated release notes](provider-cli-1.8.277-notes.md). Provider promotion does not
+establish that every pending coordinator/gateway change below is deployed.
+
+`7c55c5ed2` adds coordinator support for the next CLI's conversation-cache
+counters: bounded per-model telemetry history across disconnects and admin
+reporting of observed-window rates. Include it in the next coordinator runtime
+update as well as the next provider cut; neither side alone establishes the
+complete telemetry path. Counters are observe-only and do not change routing,
+billing or qualification. Live telemetry acceptance remains pending.
+
+The next provider cut changes the embedded decode digest and therefore needs
+its own native-MTP identity rebind. Catalog activation must match the final
+signed release, including `runtime_revision`; the release-match guard in
+`7848d292b` / `2b0161a7c` rejects stale or ambiguous entries. `0933ce211`
+waives only the specifically authorized serving-journey export, not qualification
+or release-match gates. These catalog/tooling changes are not evidence of a
+coordinator runtime deployment or sampled GLM admission.
+
 ## Coding-agent privacy — pending runtime inclusion (2026-10-26)
 
 | PR | Issue | Coordinator/gateway change | Status |
