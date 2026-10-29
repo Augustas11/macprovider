@@ -60,6 +60,8 @@ final class InstalledProviderReadoptionTests: XCTestCase {
         XCTAssertEqual(agent.snapshot.serviceInstanceID, "after-update")
         XCTAssertEqual(agent.snapshot.networkState, "buyer_serving")
         XCTAssertEqual(agent.snapshot.state, .serving)
+        XCTAssertEqual(agent.snapshot.compatibilitySetID, "Augustas11/macprovider:v1.8.277@lab-fixture")
+        XCTAssertNil(AgentSnapshotPresenter.updateTargetVersion(agent.snapshot))
         XCTAssertFalse(AgentSnapshotPresenter.updateAvailable(agent.snapshot))
     }
 
@@ -117,11 +119,12 @@ final class InstalledProviderReadoptionTests: XCTestCase {
         {
           "provider_id": "provider-a",
           "binary_version": "\(version)",
+          "compatibility_set_id": "Augustas11/macprovider:v1.8.277@lab-fixture",
           "network_state": "\(networkState)",
           "local_status_contract": {
             "version": 1, "minimum_reader_version": 1,
             "lifecycle_owner": "macprovider_cli",
-            "capabilities": ["service_instance_v1", "status_observation_v1", "buyer_serving_authority_v1", "credential_status_v1", "model_status_v1"]
+            "capabilities": ["service_instance_v1", "status_observation_v1", "buyer_serving_authority_v1", "credential_status_v1", "model_status_v1", "compatibility_set_v1"]
           },
           "observation": {"id": "observation-\(instance)", "observed_at": "\(timestamp)", "valid_for_ms": 5000},
           "service_instance": {

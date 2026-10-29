@@ -353,7 +353,7 @@ final class ProviderDiagnosticFindingTests: XCTestCase {
             ("loading_model", nil, "language model is loading", "automatically"),
             ("paused_by_operator", nil, "Provider is paused", "Resume"),
             ("coordinator_unavailable", nil, "coordinator is unreachable", "automatic"),
-            ("authentication_required", "provider_token_expired", "provider token expired", "automatically"),
+            ("authentication_required", "provider_token_expired", "provider access token expired", "automatically"),
             ("starting_provider", nil, "updating or restarting", "automatically"),
             ("update_in_progress", nil, "updating or restarting", "automatically"),
         ]
@@ -370,7 +370,7 @@ final class ProviderDiagnosticFindingTests: XCTestCase {
             XCTAssertTrue(lines.contains(hint), lines)
             XCTAssertFalse(lines.contains("Cause unknown"), lines)
             if state == "authentication_required" {
-                XCTAssertTrue(AgentSnapshotPresenter.credentialLine(snapshot).contains("provider token expired"))
+                XCTAssertTrue(AgentSnapshotPresenter.credentialLine(snapshot).contains("provider access token expired"))
             }
         }
     }
@@ -394,7 +394,7 @@ final class ProviderDiagnosticFindingTests: XCTestCase {
         let now = Date()
         for (reason, expected) in [
             ("authentication_required", "the network requires fresh provider access"),
-            ("provider_token_expired", "provider token expired"),
+            ("provider_token_expired", "provider access token expired"),
             ("bootstrap_token_expired", "setup access token expired"),
         ] {
             var snapshot = freshStatusSnapshot(now: now)
@@ -403,6 +403,8 @@ final class ProviderDiagnosticFindingTests: XCTestCase {
             let cause = AgentSnapshotPresenter.knownAvailabilityCause(snapshot, at: now) ?? ""
             XCTAssertTrue(cause.contains(expected), cause)
             XCTAssertFalse(cause.contains("[redacted]"), cause)
+            // Findings and exported diagnostics apply the log redactor again.
+            XCTAssertEqual(LogTailBuffer.redacted(cause), cause)
         }
     }
 
