@@ -91,12 +91,12 @@ final class LocalImageGenerationTests: XCTestCase {
                 for available in [UInt64(0), UInt64(64_000_000_000)] {
                     let d = LocalImageMemoryDecision.evaluate(physicalBytes: UInt64(gib) * 1_073_741_824, availableBytes: available, pixels: pixels)
                     XCTAssertEqual(d.quantized, gib <= 16)
-                    XCTAssertEqual(d.requiresHold, available == 0)
+                    XCTAssertEqual(d.requiresHold, gib <= 16 || available == 0)
                     XCTAssertEqual(d.unavailableReason != nil, gib <= 8 || (pixels == 1024 && gib < 32))
                 }
             }
         }
-        for (gib, pixels, threshold): (Int, Int, UInt64) in [(16, 512, 8_900_000_000), (32, 512, 11_700_000_000), (32, 1024, 14_800_000_000)] {
+        for (gib, pixels, threshold): (Int, Int, UInt64) in [(32, 512, 11_700_000_000), (32, 1024, 14_800_000_000)] {
             XCTAssertTrue(LocalImageMemoryDecision.evaluate(physicalBytes: UInt64(gib) * 1_073_741_824, availableBytes: threshold - 1, pixels: pixels).requiresHold)
             XCTAssertFalse(LocalImageMemoryDecision.evaluate(physicalBytes: UInt64(gib) * 1_073_741_824, availableBytes: threshold, pixels: pixels).requiresHold)
         }
@@ -238,7 +238,7 @@ final class LocalImageGenerationTests: XCTestCase {
 
     func testSufficientMemoryDoesNotPauseOrUnloadLanguage() async throws {
         let events = ImageEvents()
-        let service = service(events: events, available: 32_000_000_000)
+        let service = service(events: events, available: 32_000_000_000, physical: 32 * 1_073_741_824)
         _ = try await service.generate(request()); await service.restore()
         let values = await events.values
         XCTAssertEqual(values, ["prepare", "generate", "unload_image"])
@@ -262,6 +262,44 @@ final class LocalImageGenerationTests: XCTestCase {
         let paused = await status.operatorPauseFence
         XCTAssertTrue(paused)
         let admission = await status.beginRequestIfAccepting()
+        XCTAssertNil(admission)
+    }
+
+    func testPaused16GBGenerationUnloadsLanguageEvenWithHighAvailableMemory() async throws {
+        let status = ProviderStatus(modelID: "fixture", modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: 1))
+        let runtime = ModelRuntime(modelID: "fixture", warmSwapEnabled: false,
+            loader: { _ in throw CocoaError(.fileReadUnknown) },
+            testLoader: { ($0, "fixture-hash") },
+            testCompletion: { _, _ in throw CocoaError(.fileReadUnknown) })
+        await runtime.setProviderStatus(status)
+        await status.setOperatorPauseFence(true)
+        let loadedBefore = await runtime.isLoaded
+        XCTAssertTrue(loadedBefore, "Operator pause preserves the resident language model")
+        let service = LocalImageGeneration(backend: PausedCreativeImageBackend(runtime: runtime, status: status),
+            lifecycle: LocalCreativeLifecycle(
+                pause: { await status.setLocalCreativeHold(true) },
+                drain: {
+                    let drained = await status.waitUntilDrained(timeoutSeconds: 1, preemptingLocal: true)
+                    XCTAssertTrue(drained)
+                },
+                unloadLanguage: { try await runtime.unloadForLocalCreativeHold() },
+                restoreLanguage: { try await runtime.restoreAfterLocalCreativeHold() },
+                resume: { await status.setLocalCreativeHold(false) }),
+            physicalBytes: 16 * 1_073_741_824, availableBytes: { 16 * 1_073_741_824 })
+        _ = try await service.generate(request())
+        let loadedWhileWarm = await runtime.isLoaded
+        XCTAssertFalse(loadedWhileWarm)
+        await service.restore()
+        let loadedAfter = await runtime.isLoaded
+        let pausedAfter = await status.operatorPauseFence
+        let heldAfter = await status.localCreativeHold
+        let imageState = await service.state
+        let admission = await status.beginRequestIfAccepting()
+        XCTAssertTrue(loadedAfter, "Restore retains the existing resident-on-pause semantics")
+        XCTAssertTrue(pausedAfter)
+        XCTAssertFalse(heldAfter)
+        XCTAssertEqual(imageState, .idle)
         XCTAssertNil(admission)
     }
 
@@ -462,11 +500,12 @@ final class LocalImageGenerationTests: XCTestCase {
     }
 
     private func service(events: ImageEvents, failure: Bool = false, blocking: Bool = false,
-                         available: UInt64 = 0, warmNanoseconds: UInt64 = 120_000_000_000) -> LocalImageGeneration {
+                         available: UInt64 = 0, physical: UInt64 = 16 * 1_073_741_824,
+                         warmNanoseconds: UInt64 = 120_000_000_000) -> LocalImageGeneration {
         LocalImageGeneration(backend: FakeImageBackend(events: events, failure: failure, blocking: blocking),
             lifecycle: LocalCreativeLifecycle(pause: { await events.add("pause") }, drain: { await events.add("drain") },
                 unloadLanguage: { await events.add("unload_language") }, restoreLanguage: { try Task.checkCancellation(); await events.add("restore_language") },
-                resume: { await events.add("resume") }), physicalBytes: 16 * 1_073_741_824,
+                resume: { await events.add("resume") }), physicalBytes: physical,
             availableBytes: { available }, warmNanoseconds: warmNanoseconds)
     }
 }
@@ -555,4 +594,20 @@ private actor ImageCompletionBoundary {
         await withCheckedContinuation { continuation = $0 }
     }
     func release() { continuation?.resume(); continuation = nil }
+}
+
+private struct PausedCreativeImageBackend: LocalImageBackend {
+    let runtime: ModelRuntime
+    let status: ProviderStatus
+    func prepare(quantized: Bool, progress: @escaping @Sendable (Int64, Int64) -> Void) async throws {
+        let loaded = await runtime.isLoaded
+        let held = await status.localCreativeHold
+        let paused = await status.operatorPauseFence
+        XCTAssertFalse(loaded, "Unload must complete before image weights are prepared")
+        XCTAssertTrue(held)
+        XCTAssertTrue(paused)
+        XCTAssertTrue(quantized)
+    }
+    func generate(_ request: LocalImageRequest) async throws -> Data { Data("png".utf8) }
+    func unload() async {}
 }

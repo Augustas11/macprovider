@@ -367,6 +367,40 @@ if grep -F 'kickstart -k' "$TMP/launchctl.log" >/dev/null; then
   echo "failed /v1/status fetch must not trigger watchdog kickstart" >&2
   exit 1
 fi
+# A successful answer resets the streak, even when health still fails.
+WATCHDOG_TEST_STATUS_EXIT=0
+WATCHDOG_TEST_STATUS_BODY='{"status":"ready","lifecycle":{"operator_paused":false}}'
+export WATCHDOG_TEST_STATUS_EXIT WATCHDOG_TEST_STATUS_BODY
+run_watchdog
+[ ! -e "$TMP/home/.local/share/macprovider-watchdog/state/status_no_answer" ]
+# Connection failure and timeout share the bounded no-answer path. Two ticks
+# defer; the third requests restart. Each run is a fresh watchdog process.
+WATCHDOG_TEST_STATUS_EXIT=28
+export WATCHDOG_TEST_STATUS_EXIT
+: > "$TMP/launchctl.log"
+for tick in 1 2; do
+  run_watchdog
+  if grep -F 'kickstart -k' "$TMP/launchctl.log" >/dev/null; then
+    echo "status timeout tick $tick must not restart before the bound" >&2
+    exit 1
+  fi
+done
+run_watchdog
+grep -F 'kickstart -k' "$TMP/launchctl.log" >/dev/null
+rm -f "$TMP/home/.local/share/macprovider-watchdog/state/last_kick"
+# A creative hold answer clears even a saturated no-answer streak and vetoes.
+WATCHDOG_TEST_STATUS_EXIT=0
+WATCHDOG_TEST_STATUS_BODY='{"status":"unavailable","lifecycle":{"operator_paused":false},"local_image_generation":{"state":"generating"}}'
+export WATCHDOG_TEST_STATUS_EXIT WATCHDOG_TEST_STATUS_BODY
+: > "$TMP/launchctl.log"
+run_watchdog
+[ ! -e "$TMP/home/.local/share/macprovider-watchdog/state/status_no_answer" ]
+! grep -F 'kickstart -k' "$TMP/launchctl.log" >/dev/null
+WATCHDOG_TEST_STATUS_EXIT=28
+export WATCHDOG_TEST_STATUS_EXIT
+run_watchdog
+! grep -F 'kickstart -k' "$TMP/launchctl.log" >/dev/null
+rm -f "$TMP/home/.local/share/macprovider-watchdog/state/status_no_answer"
 unset WATCHDOG_TEST_STATUS_EXIT
 
 : > "$TMP/logs/watchdog.log"
@@ -486,6 +520,11 @@ for mode in foreign none noise owned; do
 done
 # The pause is the operator_paused boolean the serve process honors at
 # startup; a paused_by_operator state without it is not a pause.
+# A persisted pause vetoes all three timeout ticks before status is consulted.
+for tick in 1 2 3; do
+  listener_case owned paused no-kick 28
+  [ ! -e "$TMP/home/.local/share/macprovider-watchdog/state/status_no_answer" ]
+done
 listener_case foreign paused_state kick
 # A record that fails the Swift store's file or schema invariants is not a pause.
 for record in symlink mode644 hardlink no_authority bad_version float_version int_paused null_paused no_sequence bad_paused_type oversized; do
