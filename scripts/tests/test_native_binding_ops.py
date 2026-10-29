@@ -8,6 +8,8 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
+from types import SimpleNamespace
 from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parents[1]
@@ -57,8 +59,9 @@ print(json.dumps(dict(lane='catalog-content',ok=True,commit_block_sha256='block'
         (self.tools / 'native_mtp_binding_bundle.py').write_text('''import json,os,pathlib,sys
 args=sys.argv; b=pathlib.Path(args[args.index('--bundle')+1]);
 if os.environ.get('REJECT_PROOF'):raise SystemExit(1)
+if os.environ.get('VERIFY_ARGS'):open(os.environ['VERIFY_ARGS'],'w').write(json.dumps(args[1:]))
 if os.environ.get('MUTATE_ORIGINAL'):pathlib.Path(os.environ['MUTATE_ORIGINAL']).write_text('changed-after-freeze')
-print(json.dumps(dict(release_dir=str(b/'release'),ledger_path=str(b/'derived/release-ledger.json'),phase='identity_only_greedy',receipt_sha256='a'*64,release_input_path=str(b/'derived/native-mtp-admission-release.json'))))
+print(json.dumps(dict(release_dir=str(b/'release'),ledger_path=str(b/'derived/release-ledger.json'),phase='identity_only_greedy',receipt_sha256='a'*64,release_input_path=str(b/'derived/native-mtp-admission-release.json'),serving_journey=os.environ.get('SERVING_JOURNEY','signed export required'))))
 ''')
         self.bundle = self.root / 'caller-bundle'
         (self.bundle / 'release').mkdir(parents=True)
@@ -181,10 +184,143 @@ json_field() { python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));print(
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines(), [str(self.bundle / 'release'), str(self.bundle / 'derived/native-mtp-admission-release.json'), str(self.root / 'catalog'), str(self.root / 'catalog/native-mtp-admission-release.json')])
 
+    def test_ops_context_reports_waiver_only_after_full_verification(self):
+        shutil.copytree(self.tools, self.root / 'scripts')
+        code = """set -eu
+REPO_ROOT="$TEST_ROOT"; AUTOTUNE=catalog; OPS_TMP_DIR="$TEST_ROOT"
+NATIVE_BINDING_RECIPE="$TEST_RECIPE"; CATALOG_NATIVE_BINDING_BUNDLE="$TEST_BUNDLE"
+fact() { printf '%s: %s\n' "$1" "$2"; }
+json_field() { python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));print(eval(sys.argv[2]))' "$1" "$2"; }
+"""
+        code += function(OPS, 'native_binding_context') + '\nnative_binding_context publication\n'
+        log = self.root / 'verify-args.json'
+        env = dict(TEST_ROOT=str(self.root), TEST_RECIPE=RECIPE,
+                   TEST_BUNDLE=str(self.bundle), SERVING_JOURNEY='waived (operator, 2026-10-29)',
+                   VERIFY_ARGS=str(log))
+        result = self.shell(code, env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('serving_journey: waived (operator, 2026-10-29)', result.stdout)
+        args = json.loads(log.read_text())
+        self.assertEqual(args[args.index('--commit') + 1], 'publication')
+        result = self.shell(code, dict(env, REJECT_PROOF='1'))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn('serving_journey:', result.stdout)
+
+    def test_catalog_revalidates_waiver_after_full_bundle_verification(self):
+        from scripts.tests.test_catalog_compare_live import cr
+        (self.bundle / 'proof').mkdir()
+        (self.bundle / 'proof/journey-waiver.json').write_text('{}')
+        inputs = {'phase': 'expanded_glm_sampled'}
+        proof = object()
+        module = SimpleNamespace(
+            read_json=mock.Mock(return_value=inputs),
+            verify_bundle=mock.Mock(return_value=proof),
+            validate_journey_waiver=mock.Mock(return_value='waived (operator, 2026-10-29)'),
+            require=lambda condition, reason: None if condition else (_ for _ in ()).throw(ValueError(reason)),
+        )
+        with mock.patch.object(cr, '_native_mtp_binding_module', return_value=module):
+            self.assertIs(cr._verify_native_binding_bundle(
+                self.bundle, repo=self.repo, commit=self.commit, recipe_path=RECIPE), proof)
+        module.verify_bundle.assert_called_once_with(
+            self.bundle, repo=self.repo, commit=self.commit, recipe_path=RECIPE)
+        module.validate_journey_waiver.assert_called_once_with(
+            self.bundle, inputs, self.bundle / 'release/native-mtp-admission.json')
+        module.validate_journey_waiver.return_value = 'signed export required'
+        with mock.patch.object(cr, '_native_mtp_binding_module', return_value=module), \
+             self.assertRaisesRegex(ValueError, 'exact operator journey waiver'):
+            cr._verify_native_binding_bundle(
+                self.bundle, repo=self.repo, commit=self.commit, recipe_path=RECIPE)
+        module.validate_journey_waiver.reset_mock()
+        module.verify_bundle.side_effect = ValueError('signature mismatch')
+        with mock.patch.object(cr, '_native_mtp_binding_module', return_value=module), \
+             self.assertRaisesRegex(ValueError, 'signature mismatch'):
+            cr._verify_native_binding_bundle(
+                self.bundle, repo=self.repo, commit=self.commit, recipe_path=RECIPE)
+        module.validate_journey_waiver.assert_not_called()
+
     def test_signed_pair_reverifies_bundle_before_publish_dispatch(self):
         text = function(OPS, 'signed_pair_internal')
         self.assertLess(text.index('native_binding_context "$commit"'), text.index('catalog-content-release.sh'))
         self.assertIn('--deploy --commit "$commit"', text)
+
+    def release_match_preflight(self, bound='true', verdict='ok', exit_code=0, run=False):
+        tools = self.root / 'matcher-repo/scripts'
+        tools.mkdir(parents=True)
+        (tools / 'native_mtp_release_match.py').write_text(
+            'import json, os, sys\n'
+            "open(os.environ['MATCH_ARGS'], 'w').write(json.dumps(sys.argv[1:]))\n"
+            "print(os.environ['MATCH_VERDICT'])\n"
+            "raise SystemExit(int(os.environ['MATCH_EXIT']))\n")
+        code = '''set -eu
+REPO_ROOT="$TEST_MATCH_REPO"; OPS_STATE_DIR="$TEST_ROOT/state"
+CATALOG_TARGET_INPUT="$TEST_ROOT/input.json"; CATALOG_TARGET_DIR="$TEST_ROOT/release"
+NEXT_ID=""; NEXT_KIND=""; NEXT_REASON=""; NEXT_CMD=""; NEXT_TITLE=""
+fact() { printf 'FACT %s=%s\\n' "$1" "$2"; }
+step() { printf 'STEP %s %s %s\\n' "$1" "$2" "$3"; }
+'''
+        common = SCRIPTS / 'ops/lib/common.sh'
+        code += function(common, 'set_next') + '\n'
+        code += function(OPS, 'native_mtp_release_preflight') + '\n'
+        code += 'native_mtp_release_preflight "$TEST_BOUND" || true\n'
+        code += 'printf "NEXT %s %s %s\\n" "$NEXT_ID" "$NEXT_KIND" "$NEXT_REASON"\n'
+        if run:
+            # Exercise only the shared blocked-step dispatcher with fake
+            # effects. Never source or invoke an ops entry point or lock.
+            code += '''
+print_next() { :; }
+refuse() { echo "REFUSED: $*" >&2; exit 3; }
+acquire_live_lock_for_step() { echo LOCK_REACHED >&2; exit 90; }
+'''
+            code += function(common, 'run_next') + '\nrun_next\n'
+        env = dict(TEST_ROOT=str(self.root), TEST_MATCH_REPO=str(tools.parent),
+                   TEST_BOUND=bound, MATCH_ARGS=str(self.root / 'matcher-args.json'),
+                   MATCH_VERDICT=verdict, MATCH_EXIT=str(exit_code))
+        return self.shell(code, env)
+
+    def test_native_release_match_preflight_reports_success_and_verified_input_paths(self):
+        result = self.release_match_preflight()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('FACT native_mtp_release_match_gate=ok', result.stdout)
+        self.assertIn('STEP native_mtp_release_match done', result.stdout)
+        self.assertNotIn('NEXT native_mtp_release_match blocked', result.stdout)
+        self.assertEqual(json.loads((self.root / 'matcher-args.json').read_text()),
+                         ['--release-input', str(self.root / 'input.json'), '--admission',
+                          str(self.root / 'release/native-mtp-admission.json'), '--repo',
+                          str(self.root / 'matcher-repo'), '--state-dir', str(self.root / 'state')])
+
+    def test_native_release_match_preflight_blocks_next_run_without_reaching_lock(self):
+        result = self.release_match_preflight(
+            verdict='blocked: runtime_revision differs from signed release', exit_code=1, run=True)
+        self.assertEqual(result.returncode, 3, result.stderr)
+        self.assertIn('STEP native_mtp_release_match blocked', result.stdout)
+        self.assertIn('runtime_revision', result.stderr)
+        self.assertNotIn('LOCK_REACHED', result.stderr)
+
+    def test_native_release_match_preflight_fails_closed_on_unexpected_output(self):
+        result = self.release_match_preflight(verdict='unknown', exit_code=0)
+        self.assertIn('NEXT native_mtp_release_match blocked', result.stdout)
+
+    def test_native_release_match_preflight_fails_closed_on_nonzero_even_if_output_is_ok(self):
+        result = self.release_match_preflight(verdict='ok', exit_code=1)
+        self.assertIn('NEXT native_mtp_release_match blocked', result.stdout)
+
+    def test_non_native_release_skips_matcher(self):
+        result = self.release_match_preflight(bound='false', exit_code=99)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('release is not native-bound', result.stdout)
+        self.assertFalse((self.root / 'matcher-args.json').exists())
+
+    def test_native_release_match_is_before_fresh_steps_and_rechecks_signed_pair(self):
+        gather = function(OPS, 'gather')
+        gate = gather.index('native_mtp_release_preflight "$native_bound" || return 0')
+        self.assertLess(gate, gather.index('set_next revocation_slots mutate'))
+        self.assertLess(gate, gather.index('if [ "$live_rid" = "$R" ]; then'))
+        self.assertLess(gate, gather.index('set_next signed_native_pair mutate'))
+        # Recovery intentionally precedes candidate validation.
+        self.assertLess(gather.index('set_next signed_native_pair_reconcile mutate'), gate)
+        pair = function(OPS, 'signed_pair_internal')
+        self.assertLess(pair.index('native_mtp_release_preflight true'),
+                        pair.index('catalog-content-release.sh'))
 
     def test_final_byte_manifest_accepts_verified_derived_bundle(self):
         result, work = self.assemble()

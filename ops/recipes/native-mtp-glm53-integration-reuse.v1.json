@@ -5,22 +5,22 @@
       "measured_sha256": "e7772e58c413182709f9a08c76509f5939843263019b5c68c1ffb830c7fe4d7c"
     },
     "phase3-binary/Package.swift": {
-      "current_sha256": "19cc044e3df6d1a5079689152d20a84235afc59f966aaf1336b0f309728c987e",
+      "current_sha256": "8ef9a9c487be30ac572aa2ea18084ea7f94c1af9e22fe3eb353c984547adebac",
       "measured_sha256": "133ba2c96fbbfd0b4765340daabf82746257ef64c52dd36fdf5dc4457826ec83"
     },
     "phase3-binary/dist/package.sh": {
-      "current_sha256": "882cff840e35f43560653b454207957d77c6fded9895518e2d039aee00dfc2a4",
+      "current_sha256": "72a9745df3d1a3400263eacc261a60d6fcc2af31de0f8bd609f8654f9f9e4a43",
       "measured_sha256": "882cff840e35f43560653b454207957d77c6fded9895518e2d039aee00dfc2a4"
     }
   },
-  "current_runtime_revision": "3905a1b0499f0f38c0f94a008034a0362b9e3dca",
+  "current_runtime_revision": "36d24585f9373c2661f61f5e5b485c8d66c43a2b",
   "files": {
     "Sources/MacProviderCore/GrammarAutomaton.swift": {
       "current_sha256": "0e13ece0686a5e996bcf9fabccfc031c1fc74a20c9eb2b2458a16a00abfb589b",
       "measured_sha256": "0e13ece0686a5e996bcf9fabccfc031c1fc74a20c9eb2b2458a16a00abfb589b"
     },
     "Sources/MacProviderCore/GrammarTemplates.swift": {
-      "current_sha256": "6033b14e0952330e5a7e06771c61b88be143d1dd4417d1380f8b61b811f80d87",
+      "current_sha256": "27795b48f0adc462bd482090e8ff2a543db9326d797dbd91dce3f9bce47ed840",
       "measured_sha256": "6033b14e0952330e5a7e06771c61b88be143d1dd4417d1380f8b61b811f80d87"
     },
     "Sources/MacProviderCore/GrammarTokenTable.swift": {
@@ -28,11 +28,11 @@
       "measured_sha256": "30bcc2f68b60255b389e4bf9516dba7434c9cf25649b6792507cf7179458aafd"
     },
     "Sources/MacProviderCore/PagedKVEngine.swift": {
-      "current_sha256": "dc6f6c9bec7eb63d3673aef86d0caa7b3a18c0430a717aa7e72ea5de6ed4fff7",
+      "current_sha256": "25270cc29fcb3fad39cd91e2995fc72b72c3fc697e4d86279bde003bde00f4c7",
       "measured_sha256": "dc6f6c9bec7eb63d3673aef86d0caa7b3a18c0430a717aa7e72ea5de6ed4fff7"
     },
     "Sources/MacProviderCore/ToolCallGrammar.swift": {
-      "current_sha256": "e62cc9c6e73bae9edc879801b5696d58c8ef4c6c151d8d171a50b419ef4a9e59",
+      "current_sha256": "5f3dbeb2a1e9d2e2f2bf3c165a3f7f385a4eab0e580fbd92421feaba11f8459b",
       "measured_sha256": "e62cc9c6e73bae9edc879801b5696d58c8ef4c6c151d8d171a50b419ef4a9e59"
     },
     "Sources/macprovider-cli/CompiledDecode.swift": {
@@ -44,11 +44,19 @@
       "measured_sha256": "501b58cdf9eecf1626edeeca96352311465786582c636fc9b089e32f5e9f12d4"
     },
     "Sources/macprovider-cli/ContinuousBatchScheduler.swift": {
-      "current_sha256": "d7f5e8786fb8df580b12cb46f72da26abfd57119a7d3c742674eb9851b0ed629",
+      "current_sha256": "562a672c2b367939a497741bac9f7c7c95adae576e330ded57b3cb92528a8c24",
       "measured_sha256": "c165bdf6fe57a51ee8433b7e94f1ed5ccb7cb311592a273cab692afb4b67c21c"
     },
+    "Sources/macprovider-cli/ConversationCache.swift": {
+      "current_sha256": "ac0abdd08786c8bef0c74d0672bc352b801eee337f8f196e20fb4602756b3cb3",
+      "measured_sha256": "65a658e2511bcc756e3e71a820222ede9674a11828bd40374baf9463bd87373d"
+    },
+    "Sources/macprovider-cli/ConversationColdTier.swift": {
+      "current_sha256": "cef44a49afdb7a653fb7fb3d1f0b00bde6b4eb1002247b8ad19239120026a4bf",
+      "measured_sha256": "2abc34429ac489479839e69fbf31ace2dc2462c0dc254491eb3215811b3b4702"
+    },
     "Sources/macprovider-cli/DeepseekV4ContinuousBatchBackend.swift": {
-      "current_sha256": "11f841ce58803abe62c12ec9e655c7cfc202a780ea24d4634b36d062d5d26039",
+      "current_sha256": "91acb9febac3a6d864212a7f831b9c4cddb78f41e34bcb2dcddd9f9b935135c6",
       "measured_sha256": "11f841ce58803abe62c12ec9e655c7cfc202a780ea24d4634b36d062d5d26039"
     },
     "Sources/macprovider-cli/DeepseekV4RuntimeParityProbe.swift": {
@@ -59,8 +67,24 @@
       "current_sha256": "ddf68b9411507c38ca38583d3d93f47efe6365e65115c2dcebcfda53636437ed",
       "measured_sha256": "ddf68b9411507c38ca38583d3d93f47efe6365e65115c2dcebcfda53636437ed"
     },
+    "Sources/macprovider-cli/KVConversationColdTierAdapter.swift": {
+      "current_sha256": "ea70ff733359cf9a19a4de6fa033e75d3142803bf41f869672a9f7706ec66e0a",
+      "measured_sha256": "7981587faa19293fe39c4a18fe3946905b55c261604ee11fc8301baae70b9aa4"
+    },
+    "Sources/macprovider-cli/KVDiskCacheFormat.swift": {
+      "current_sha256": "6e7ed859eb5d3d2960e5dfe0df514d6e74d54f1d090571e92b7a419e3ffe5ce9",
+      "measured_sha256": "4758f12253f4ec5a8240fc2bbfc231f0913be2145c36ead7ba0e4a0344cdc035"
+    },
+    "Sources/macprovider-cli/KVDiskCacheStore.swift": {
+      "current_sha256": "243e52ef512be3a33a511805c287ce025953ece75976047d8ae115abdd3304c7",
+      "measured_sha256": "51e0bb29d8d8ba350838aa6d0d58d37b3a38e50ea657c863adec01bd8b7a0370"
+    },
+    "Sources/macprovider-cli/KVPromptSnapshotCodec.swift": {
+      "current_sha256": "cff6a90a7d2f5429551d7a22edf06906d33ba4671548e9fe4eb6e7c5f070b58b",
+      "measured_sha256": null
+    },
     "Sources/macprovider-cli/ModelRuntime.swift": {
-      "current_sha256": "8889737e5f1a0171c5ff977cbda3f8845e859bc5c22d05848506d4648264fa37",
+      "current_sha256": "e9ea9af4263b36ca3c5059f1a81274f89c949ca9f703b9398545a0294f05bf36",
       "measured_sha256": "7352e13694b47da9ef7539598b3fbf975ac3d05c64ee7c55b2ee693998c92e75"
     },
     "Sources/macprovider-cli/NativeMTP.swift": {
@@ -76,11 +100,11 @@
       "measured_sha256": "5116eb87699a82d29a71f4ecfcdc1879e0bf64a62858ee38311437001a4e03e4"
     },
     "Sources/macprovider-cli/PagedKVCache.swift": {
-      "current_sha256": "b0be4ff54015892a0994eb5d157085e7c5787e849215d7fba1ea8f09749b5eba",
+      "current_sha256": "c4d361aefb9a4236c175d0ab6b6bc3eb2a1c9194ae84d28c1da738bf8366179c",
       "measured_sha256": "b0be4ff54015892a0994eb5d157085e7c5787e849215d7fba1ea8f09749b5eba"
     },
     "Sources/macprovider-cli/PagedKVRuntimeBridge.swift": {
-      "current_sha256": "e509cc9f033fe787f14369c85a5d51c1749460d00ae7a5f0ea0741fcab154db1",
+      "current_sha256": "34e669ab8ef3f207e13366f21f49fb9d3248ca7ee473effb7745919d5b493940",
       "measured_sha256": "6f614c3a9db40539458a6fa54c6cd16c229d36a1b5886f55a35678d979116af6"
     },
     "Sources/macprovider-cli/PagedMLACache.swift": {
@@ -88,24 +112,35 @@
       "measured_sha256": "08d3271ae8c3cb4eef547dc6a6a65bfd4ac4fcc238b3bd8cb1fa237f08ddbf7c"
     },
     "Sources/macprovider-cli/ServeDecodePath.swift": {
-      "current_sha256": "b21beda39d8f9a343b63e39924f57a443f0bcb4607abfb1933aa6448945fdd0b",
+      "current_sha256": "48335a80b5889b1397e542eced647cf39e2df1bf925c0c4ee2927a93b69440bf",
       "measured_sha256": "389634f35b09580744854ee8ec8bd4963b374ffa82e41d1879cd187a52c45123"
+    },
+    "decode-path-manifest.json": {
+      "current_sha256": "14bad17c45131989f0b83d99257954372f0c2d874901c887ad9c2c2fab091bc0",
+      "measured_sha256": "16c715066cdda8b7efb379becd192f9dfd22c252089f2260f3ffb8eb225f3287"
     }
   },
   "manifest_sha256": "16c715066cdda8b7efb379becd192f9dfd22c252089f2260f3ffb8eb225f3287",
   "measured_runtime_revision": "b128c37f26d2cbd58700c0ebf3a761f1df7b5415",
   "measured_source_commit": "1d53dd76d6c93e2e2c6d5fc20d403bbdd21093ff",
   "package_resolved": {
-    "current_sha256": "48e066244bf1de7148e39be0b11e68ad1f2ac86c6caaa61188d7e0f985a4ddff",
+    "current_sha256": "748ee154b8edfbe9013116febda40d33f618c4914e99b282969f28e61cbd06e2",
     "measured_sha256": "2e6e1f6337da072e75d80acc7a0cb632bd973f64689730f327063935b09e16aa"
   },
   "reviewed_behavior": [
     "GLM5Next model source and tests are byte-identical at measured b128c37 and combined 3905a1b; Prism shared materialization and packed state contracts retain default GLM branches.",
     "Provider main integration changes request admission and retirement ownership under competing work; it does not change the isolated GLM tuple draft, target verification, token commitment, signed bounds or parser paths.",
     "Qualification remains isolated same-row GLM evidence at its actual LAB source, runtime and executable. No contention performance or Prism qualification is inferred.",
-    "Target source must retain the exact reviewed production, dependency and release build inventory. Signed release SHA-256, CDHash, metallib and current admission remain independently bound."
+    "Target source must retain the exact reviewed production, dependency and release build inventory. Signed release SHA-256, CDHash, metallib and current admission remain independently bound.",
+    "Operator-approved MTP-13 identity-only rebind to signed v1.8.277 source 11c4107744116ac426b0eab4cd37a20c511526a9; no R015 or other requalification. Measured source, runtime and existing measured blob hashes remain unchanged; null measured hashes identify files absent at measurement.",
+    "Cache retention (#2168, #2177): keyed agent-prefix snapshots stay within memory headroom; six cells and 257 Studio checks. The decode manifest adds conversation/cold-tier/cache codec inputs, recorded with actual measured/current hashes and explicit absence where no historical blob exists.",
+    "Cross-family regression window 2026-10-27 (#2179): GLM cached-prefill stride alignment, Qwen3.5 VLM warm anchor and FP32 paged-KV refusal preserve exact baseline token parity against 1.8.274 for all tested families; GLM eight native-versus-ordinary pairs exact with 450/559 proposals accepted, Qwen3.6 four native-versus-ordinary pairs exact. Evidence: CF-277-E2E in docs/releases/cli-release-train.md and the 2026-10-27 cross-family regression records.",
+    "The current mlx-swift-lm pin 36d24585 includes the reviewed family loader/template and cache changes carried by CF-277-E2E (#2163, #2173, #2176, #2179); baseline token parity and GLM/Qwen3.6 native exactness are reused. No LFM coding-quality or Bonsai tool-loop qualification is claimed.",
+    "Release-build repair ef34cda033dac6b884b30a3948093da1a5f53c2a removes global SWIFT_ACTIVE_COMPILATION_CONDITIONS and OTHER_SWIFT_FLAGS overrides, preserving dependency SWIFT_PACKAGE and declared settings. Studio adversarial verification is recorded in CF-277-E2E; release validation still refuses any such override and any DEBUG/LAB enablement.",
+    "CB cancel re-arm 1d5c7b05e820446ec105bbfeb881d2faddfb6d64 resets the paged latch only at zero active operations and the DeepSeek latch inside its serialized barrier, retaining scheduler forced-drain failure closure. Studio focused regressions 3 passed; ContinuousBatchSchedulerTests 214 passed; CLI PagedKV suites 162 executed with 9 gated skips; PagedKVEngineTests 48 passed. Removing resets reproduced admission and active/idle bridge failures. Evidence: commit trailers and CF-277-E2E.",
+    "This review pins exact production/dependency/build bytes of 1.8.277, not arbitrary future source or behavior. Signed admission artifact, profile, bounds, binary SHA-256, CDHash and release metallib are independently checked."
   ],
-  "reviewed_source_commit": "53e736a4a8031cb26c53fc5bb140df1964a47b53",
+  "reviewed_source_commit": "11c4107744116ac426b0eab4cd37a20c511526a9",
   "schema_version": "macprovider.native-mtp-integration-reuse.v1",
   "tuple": {
     "artifact_hash": "7299b6a71a38490e378e9eb6524c426392aa96e3fd561007e0540134bbef48f9",

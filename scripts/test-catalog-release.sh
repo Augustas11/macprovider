@@ -331,6 +331,10 @@ expected_history = {
     "published-2026-10-26-glm53-qwen36-native-mtp-v274",
     # Retained when the Bonsai-2 2B candidate identity is staged.
     "published-2026-10-27-glm53-cached-turns-v274",
+    # Superseded by the identity-only native-MTP rebind to CLI 1.8.277.
+    "published-2026-10-27-bonsai2b-candidate-v1",
+    # Superseded by the runtime-pin repair for the same CLI identity.
+    "published-2026-10-29-glm53-qwen36-native-mtp-v277",
     current_release_id,
 }
 if set(ledger["releases"]) != expected_history:

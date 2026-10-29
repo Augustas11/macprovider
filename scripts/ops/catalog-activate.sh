@@ -14,6 +14,8 @@
 # docs/runbooks/catalog-release-decision-tree.md "Content lane"):
 #   1 catalog_verify          committed release passes catalog-release.py verify;
 #                             a native-bound release's self-test bank names its release_id
+#  1a native_mtp_release_match every signed entry matches the verified release payload
+#                             and its source pin, compatibility tuple, digest and metallib
 #   2 revocation_slots        native-bound: publish revocations when no signed slot
 #                             is served (publish-native-mtp-revocations.sh --deploy)
 #   3 nginx_routes            every feed the release binds is routed to the coordinator
@@ -146,7 +148,33 @@ native_binding_context() {
   CATALOG_TARGET_INPUT="$(json_field "$receipt" 'd["release_input_path"]')"
   fact native_binding_phase "$(json_field "$receipt" 'd["phase"]')"
   fact native_binding_receipt_sha256 "$(json_field "$receipt" 'd["receipt_sha256"]')"
+  fact serving_journey "$(json_field "$receipt" 'd.get("serving_journey", "signed export required")')"
   [ -d "$CATALOG_TARGET_DIR" ] && [ -f "$CATALOG_TARGET_INPUT" ]
+}
+
+# Match all provider admission fields against independently verified release
+# bytes before selecting any fresh native-bound step. Recovery journals above
+# this gate remain recoverable even when a later candidate is invalid.
+native_mtp_release_preflight() {
+  local native_bound="$1" verdict="ok"
+  if [ "$native_bound" = true ]; then
+    if ! verdict="$(python3 "$REPO_ROOT/scripts/native_mtp_release_match.py" \
+        --release-input "$CATALOG_TARGET_INPUT" \
+        --admission "$CATALOG_TARGET_DIR/native-mtp-admission.json" \
+        --repo "$REPO_ROOT" --state-dir "$OPS_STATE_DIR" 2>&1)"; then
+      case "$verdict" in
+        blocked:*) ;;
+        *) verdict="blocked: release matcher verification failed: ${verdict:-no diagnostic}" ;;
+      esac
+    fi
+  fi
+  fact native_mtp_release_match_gate "$verdict"
+  if [ "$verdict" != ok ]; then
+    step native_mtp_release_match blocked "$verdict"
+    set_next native_mtp_release_match blocked "Verify native-MTP admission against the signed release" "" "$verdict"
+    return 1
+  fi
+  step native_mtp_release_match done "$([ "$native_bound" = true ] && echo 'every signed admission entry matches the verified release' || echo 'release is not native-bound')"
 }
 
 signed_pair_state_dir() { printf '%s/%s/signed-native-pair' "$OPS_STATE_DIR" "$OPS_SCOPE"; }
@@ -295,6 +323,7 @@ signed_pair_internal() {
   local commit="$1" expected="$2" got
   [ "$commit" = "$(origin_main_sha)" ] && [ "$commit" = "$(git -C "$REPO_ROOT" rev-parse HEAD)" ] || refuse "signed pair source moved"
   native_binding_context "$commit" || refuse "native binding proof changed before publication"
+  native_mtp_release_preflight true || refuse "native-MTP release matcher refused publication: $NEXT_REASON"
   got="$(signed_pair_plan_sha)" || refuse "signed pair intent is invalid"
   [ "$got" = "$expected" ] || refuse "signed pair intent changed since status"
   # Re-fetch under live-ops custody. The actor later independently proves the
@@ -725,6 +754,7 @@ PY
     set_next catalog_verify blocked "Fix the committed catalog release" "MACPROVIDER_REQUIRED_CB_BASELINE=studio-qwen3.6-a3b-v1 python3 scripts/catalog-release.py verify" \
       "verify=$verify_ok; native-bound bank release_id '$bank_rid' must equal '$R'"
   fi
+  native_mtp_release_preflight "$native_bound" || return 0
   if [ -z "$base" ]; then
     set_next live_state blocked "Read live coordinator state" "" "COORDINATOR_URL is unset"
   fi

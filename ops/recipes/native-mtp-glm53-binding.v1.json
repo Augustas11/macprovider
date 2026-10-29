@@ -31,15 +31,15 @@
     "NativeMTPAdmissionSidecarTests.testReleaseEnvelopeRejectsNativeActiveRowBoundOutsideQualifiedSlots"
   ],
   "source_inputs": {
-    "ops/recipes/native-mtp-glm53-integration-reuse.v1.json": "39f0a7d315969aeb9318acd350f2505883566a35072b112ef23bf34e1f46b49d",
+    "ops/recipes/native-mtp-glm53-integration-reuse.v1.json": "ff3a6b9874b6f13336bcb685a6a81d1cca27eb7c80dc322d2bcefa2242df3f78",
     "ops/recipes/native-mtp-glm53-lab-source-equivalence.v1.json": "e55765b281afa7eb68cc211eed941b3254effb2cd668ddd17ce4eb6c3a064cb6",
     "phase3-binary/catalog/autotune/autotune-artifacts-source.json": "dfd111330e85f16ad9045c14cf9b9a35be56f8c984c1fd9644bc63c0555d8b49",
     "phase3-binary/catalog/autotune/continuous-batching-policy-source.json": "6330433bee1f2c5f035d9d4fad0253c28cdd1e19f6913e8757e2033b2cffa334",
-    "phase3-binary/catalog/autotune/native-mtp-admission-release.json": "96fd8e0d13ce93982a1ee702e7d72f597a9a9714107238916339a7960fcb28d2",
-    "phase3-binary/catalog/autotune/native-mtp-admission-tuple.json": "0f74c535506588fabb2da33d740e06d2d0d71a8d5ec65f1bc29f4623255620a8",
+    "phase3-binary/catalog/autotune/native-mtp-admission-release.json": "1bfdcd74d2ed558719f9b306f8a1adae34937b4c71c85e7d3e0e6ee223c82e83",
+    "phase3-binary/catalog/autotune/native-mtp-admission-tuple.json": "775f593cc76917c99379bb14d129ac58143e38789ee4d0b531b0b629fe9d01a7",
     "phase3-binary/catalog/autotune/native-mtp-artifact-manifest.json": "92a047c3caac2910ca117218affd02d6215eab8d022bbf1a9654869f16b851b6",
-    "phase3-binary/catalog/autotune/native-mtp-selftest-bank.json": "770146938cd5f412665e79b9ae0e706bd2f8242308200d3b8883ec4092b7cecd",
-    "phase3-binary/catalog/autotune/rate-card-source.json": "56fcb03eaadc6142de0513e6be7525e41b92c635e8ce09d8069fc4e188920985",
+    "phase3-binary/catalog/autotune/native-mtp-selftest-bank.json": "01bc56e47b555ecca1e45e87cf8442ea0ada6ed84b89b87b463f8c510e47c5d1",
+    "phase3-binary/catalog/autotune/rate-card-source.json": "1af8ce435aea309462756b198c43decefbf670bdd7bb198a3f4cd04f1c1187b9",
     "phase3-binary/catalog/autotune/trusted-keys.json": "da1ca2cb3788ee4e63982808bb90223ae0040ec150cb6fa6e9af04e52c773de6"
   }
 }

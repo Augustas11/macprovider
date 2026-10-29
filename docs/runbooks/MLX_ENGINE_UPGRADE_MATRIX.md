@@ -45,6 +45,16 @@ submodule commit pins core (`Source/Cmlx/mlx-c` stays upstream). Swift 6.3 is
 the effective minimum for the graph (mlx-swift declares tools version 6.3);
 the mlx-swift-lm fork keeps upstream's tools version.
 
+### Current tuple delta
+
+As of 2026-10-29, `Package.resolved` and SPEC-048 R003 select
+`3.32.3-macprovider.10.15.1`, not the historical `.10.5` stack described below.
+The combined `.10.15` parent carries the GLM packed-verification and Prism
+loader work; `.10.15.1` corrects LFM MoE expert accumulation order. The
+mlx-swift and core pins are unchanged. The detailed stack below records the
+older base; the current SPEC-048 R003 tuple and its delta description govern
+the additional patches and qualification scope.
+
 ### Patch inventory
 
 Every rebase replays these stacks and drops any patch upstream now carries
@@ -331,6 +341,69 @@ results in the evidence header.
 | Core provenance | The core MLX revision carried by `mlx-swift` is recorded; a newer standalone core release is not claimed unless it is actually bundled. |
 
 Pin bumps that change tokenizer cleanup rules must re-run the table-driven incremental cleanup oracle in `StreamingEmitterCleanupRewriteTests`.
+
+## Serving-family snapshot — 2026-10-29
+
+This snapshot reads main at `7c55c5ed2`; it is not a new qualification result.
+Every runtime cell marked **T** uses the exact common production fork tuple in
+[Fork model](#fork-model): mlx-swift-lm **3.32.3-macprovider.10.15.1**
+(`36d24585f9373c2661f61f5e5b485c8d66c43a2b`), mlx-swift
+**0.32.3-macprovider.9** (`29d3b93375cc56cd2649b40e4310a8bc445e9874`),
+and MLX core **v0.32.4-macprovider.4**
+(`2f512e3997349c8648f5d7c5113eb2c825aa242d`). MLXLLM and MLXVLM below are
+modules from that same mlx-swift-lm fork, not separate engines or pins.
+
+CB support means the exact identity may attempt attach and the runtime
+parity/isolation/self-check gates; it does not assert a live slot grant for
+all machines. Signed CB grants are tuple-specific. Prefix retention means
+keyed KV/snapshot reuse under SPEC-024 and the memory budget, not guaranteed
+residency or a guaranteed hit. **Unknown** explicitly marks unestablished
+family-specific live acceptance. The catalog's `recommendable` status alone
+does not establish current deployment.
+
+| Serving family / catalog keys | Runtime engine and fork pin | CB status | Native MTP and profile | Prefix retention |
+| --- | --- | --- | --- | --- |
+| GLM-5.3-Flash — `zai-org/glm-5.3-flash` | MLXLLM `glm5_next`, T | Exact KDA/DSA hybrid admitted; signed four-slot grant with `cached_turns_accepted=true`. | Greedy live: `glm5_next_mtp_v1`, `native_mtp_greedy_text_v1`, depth one, one native row. Sampled qualification pending #2144. | Whole-stride serial prompt snapshots; role-marker CB snapshots under the signed cached-turn grant (SPEC-024-R005). Agent snapshots obey headroom bounds. |
+| Qwen3.6 — `qwen/qwen3.6-27b`, `qwen/qwen3.6-35b-a3b` | MLXLLM Qwen3.5 dense/MoE implementations, T | Exact hybrid identities admitted. Signed policy entries cover 35B-A3B; their cached-turn grant is false. Current live slots otherwise unknown. | Signed 35B-A3B entry: `qwen3_5_mtp_v1`, `native_mtp_sampled_text_v1`, depth one, one native row. No 27B entry; current live use unknown. | Keyed recurrent checkpoints/prompt snapshots; CB cached-turn admission remains independently gated. Family-wide live retention unknown. |
+| gpt-oss — `openai/gpt-oss-20b`, `openai/gpt-oss-120b` | MLXLLM `gpt_oss` / Harmony handling, T | Only exact 120B mixed sliding/full-attention identity admitted. 20B is excluded from this paged-CB exception; live slots unknown. | No signed admission/profile. | Keyed hot-cache eligibility follows runtime trim/checkpoint support; ordinary contiguous disk seed is unsupported for mixed caches. Family-specific live retention unknown. |
+| Llama — `meta-llama/llama-3.1-8b-instruct`, `meta-llama/llama-3.2-3b-instruct` | MLXLLM Llama, T | Base contiguous fp16 KV route eligible; no signed family grant in current CB policy. Live slots unknown. | No signed admission/profile. | Standard keyed contiguous-KV reuse; persistence only for supported unquantized cache classes. Current live retention unknown. |
+| LFM2.5 — `LiquidAI/LFM2.5-24B-A2B-MLX-4bit` (prepared, absent from current candidate catalog) | MLXLLM `LFM2MoE`, T | Exact 40-layer one-slot short-convolution hybrid provisionally admitted for ordinary-CB evaluation. Qualification/activation unknown; catalog quality gate remains pending. | Ordinary-only exception; no signed native-MTP admission/profile. | Fixed reference-plan prompt snapshots for serial serving. Live acceptance unknown. |
+| Qwen3.8 — `qwen/qwen3.8-27b` | MLXLLM Qwen3.5 dense implementation with Qwen3.8 template/identity handling, T | Exact hybrid identity admitted; no signed CB policy entry. Live slots unknown. | No signed admission/profile. | Keyed checkpoint reuse subject to actual cache support; family-specific live retention unknown. |
+| Bonsai — `prism-ml/ternary-bonsai-2-2b-mlx-2bit` (`candidate`) | MLXVLM `PrismHadamardQwen35` schema-2 loader, T | Exact 24-layer hybrid, ordinary-only provisional exception; three-row lab parity recorded. Production attach/self-check pending. | No head in the admitted config; no native-MTP admission/profile. | Owned artifact/cache snapshots and bounded keyed retention; production retention unknown. |
+| DeepSeek V4 — `deepseek/deepseek-v4-flash` | MLXLLM `deepseek_v4`, row-owned pools, T | Catalog advertises serial serving. Row-pool CB implementation exists; production enablement pending #2151. | No registered provider adapter or signed admission/profile. | Fixed 2048-token reference-plan snapshots; ordinary CB row snapshots implemented. Live CB retention unknown. |
+| Qwen3.5 — `qwen/qwen3.5-27b`, `qwen/qwen3.5-35b-a3b` | MLXLLM Qwen3.5 dense/MoE, T | Exact hybrid identities admitted; no signed CB policy entry. Live slots unknown. | Adapter code does not grant these identities admission; no signed profile. | Keyed checkpoints; 27B serial snapshots preserve whole prefill strides. FP32 keyed paths remain serial. Current live retention unknown. |
+| Qwen3 dense — `qwen3-8b`, `qwen3-32b` | MLXLLM Qwen3, T | Contiguous fp16 KV eligible; signed four-slot entry for `qwen3-8b` has cached turns false. 32B live slots unknown. | No signed admission/profile. | Standard keyed contiguous-KV reuse; CB cached-turn grant remains separate. Current live retention unknown. |
+| Qwen3 MoE/Coder — `qwen/qwen3-30b-a3b-instruct-2507`, `qwen3-coder-30b-a3b-instruct` | MLXLLM Qwen3 MoE, T | Base Qwen route requires measured MoE isolation and exact attach/self-check; no signed policy entry. Live slots unknown. | No signed admission/profile. | Standard keyed reuse where cache trim/ownership permits; family-specific live retention unknown. |
+| Qwen2.5 Coder — `qwen2.5-coder-32b-instruct` | MLXLLM Qwen2, T | Base contiguous fp16 Qwen route eligible; no signed policy entry. Live slots unknown. | No signed admission/profile. | Standard keyed contiguous-KV reuse; current live retention unknown. |
+| Qwen2-VL — `mlx-community/qwen2-vl-2b-instruct-4bit` | MLXVLM Qwen2-VL, `qwen2vl-inline-v1`, T | Family recognition alone is not a qualified vision-CB tuple; current CB acceptance unknown. | No signed admission/profile. | Vision profile identity remains part of reuse eligibility; current family-specific retention unknown. |
+| Gemma 4 — `google-gemma-4-26b-a4b-it` | MLXLLM Gemma 4, T | `gemma4` outside recognized paged-CB families; serial fallback. | No signed admission/profile. | Mixed runtime caches cannot use the ordinary contiguous disk seed; hot retention/live acceptance unknown. |
+| GLM-4.5-Air — `z-ai/glm-4.5-air` | MLXLLM `glm4_moe`, T | Outside recognized paged-CB families; serial fallback. | No signed admission/profile. | Family-specific retention unknown. |
+| Nemotron — `nvidia/nemotron-3-nano-30b-a3b` | MLXLLM `nemotron_h`, T | Outside recognized paged-CB families; serial fallback. | No signed admission/profile. | Recurrent cache eligibility is runtime-gated; ordinary contiguous disk seed unsupported. Live retention unknown. |
+
+Catalog coverage: all 21 keys in
+[`autotune-candidates.json`](../../phase3-binary/catalog/autotune/autotune-candidates.json)
+are covered above, including the candidate Bonsai row; LFM2.5 is an additional
+prepared-family row, not an asserted catalog activation. The current
+`not-buyer-serving.json` exclusion list is empty.
+
+Factual authorities:
+
+- [SPEC-039](../../specs/SPEC-039-paged-kv-attention-engine.md), FR-PKV12, and
+  [`PagedKVAttachGate`](../../phase3-binary/Sources/MacProviderCore/PagedKVEngine.swift)
+  define family/cache admission; `ModelRuntime.pagedKVModelCapabilities` defines
+  exact hybrid identities, and `ModelRuntime` selects the LLM/VLM loader.
+- [CB policy](../../phase3-binary/catalog/autotune/continuous-batching-policy.json)
+  and [native admission](../../phase3-binary/catalog/autotune/native-mtp-admission.json)
+  establish checked-in signed grants, not independent proof of live use.
+- [SPEC-024](../../specs/SPEC-024-prefix-cache-billing.md), FR-CI2/FR-CI2a and R005,
+  and `ModelRuntime` snapshot policies define retention. `ConversationCache.swift`
+  enforces ownership and budget; `5c730ebf8` / `8d5c45109` refine reachable-capacity
+  budgeting and its regression coverage. `7c55c5ed2` adds counters, not a retention
+  guarantee.
+- [SPEC-048 R003](../../specs/SPEC-048-native-mtp-serving.md) and
+  [`Package.resolved`](../../phase3-binary/Package.resolved) bind T. See the
+  [release narrative](../releases/provider-cli-1.8.277-notes.md) for promotion,
+  the current GLM profile boundary, and next-cut identity rebinding.
 
 ## Token-exact model and protocol matrix
 

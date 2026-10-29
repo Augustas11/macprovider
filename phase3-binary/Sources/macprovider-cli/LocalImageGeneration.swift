@@ -41,7 +41,10 @@ struct LocalImageMemoryDecision: Equatable, Sendable {
         } else if physicalBytes < required {
             reason = "Not enough unified memory for image generation and its 1.5 GB safety margin."
         } else { reason = nil }
-        return Self(quantized: quantized, requiresHold: availableBytes < required, unavailableReason: reason)
+        // Serialize model residency on 16 GB machines. The instantaneous sample
+        // includes reclaimable pages and is not a reservation, including when
+        // an operator pause has fenced buyers but kept the LLM loaded.
+        return Self(quantized: quantized, requiresHold: quantized || availableBytes < required, unavailableReason: reason)
     }
 }
 

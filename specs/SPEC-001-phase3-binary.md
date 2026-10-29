@@ -1693,6 +1693,38 @@ advisory observability signal that carries no buyer-serving authority. A reader 
 is absent and MUST suppress all typed fields when the minimum reader exceeds its
 supported version. An absent envelope is the legacy-reader path.
 
+**Conversation-cache diagnostics (Related: #2153).** `GET /v1/status` adds
+`conversation_cache` (capability `conversation_cache_counters_v1`), also
+carried by the existing provider heartbeat. Its
+`process_id` identifies the counter epoch; `models` is an array keyed by
+`model_id`. Cumulative counters survive cache clears and model unloads within
+that process: `lookups`, `hits`, `cached_prompt_tokens`, `misses` and `evictions`
+(reason-to-count maps), `cold_snapshot_skips`, `disk_hits`, and `disk_writes`.
+Disk writes count successful committed writes, not queued attempts. Miss reasons
+retain the cache's existing diagnostic vocabulary; LRU evictions distinguish
+`lru_count_limit`, `lru_token_limit`, and `lru_byte_limit`. Current gauges are
+`entries`, `tokens`, `bytes`, and `hot_byte_limit` (the shared computed hot-tier
+budget, repeated per model, not a per-model allocation). When multiple limits
+bind, one eviction reason is charged per victim in count, token, byte priority.
+These are observe-only diagnostics and carry no billing, routing, admission,
+or buyer cache-credit authority. Existing status fields remain unchanged.
+The coordinator projects observations per provider and model only on the
+operator-authenticated `/admin/providers` list/detail surface. With
+`cache_history=1`, `conversation_cache_history` includes bounded, volatile
+coordinator receipt-time samples (up to 24 hours at minute resolution plus
+latest, capped at 8 MiB per provider); `conversation_cache` is the latest
+observation. Session-independent retention survives disconnects and serves
+offline operator views, bounded globally to 128 providers, 8192 samples and
+64 MiB in addition to bounded live-provider histories. The telemetry carrier
+accepts up to 256 lifetime models and 256 KiB per payload; data beyond those
+supported bounds is omitted rather than blocking an inference heartbeat.
+Rates use adjacent
+samples from the same process epoch and disclose actual observed coverage;
+missing baselines, process resets, and coordinator restarts are not zero traffic.
+`scripts/ops/cache-hit-report.py` reads that operator surface, follows pagination,
+and reports per-model hit rate, cached tokens per lookup, misses and evictions
+for the requested window without inspecting provider logs.
+
 `network_state` for a catalog-verified, locally ready serve process is
 `buyer_serving` when `/v1/pool/check?details=readiness` returns
 `buyer_serving=true`, `not_buyer_serving` when it returns `false`, and

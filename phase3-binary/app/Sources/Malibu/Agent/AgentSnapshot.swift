@@ -147,6 +147,7 @@ struct AgentSnapshot: Equatable {
     var advertisedMaxConcurrency: Int?
     /// Continuous batching and native MTP state (#2054 Provider screen).
     var providerEngine: ProviderEngineStatus? = nil
+    var localImageGenerationState: String? = nil
     var catalogState: String?
     var catalogReleaseID: String?
     var catalogDigest: String?
@@ -376,6 +377,7 @@ struct AgentSnapshot: Equatable {
         lifecycleLeaseOperationID = nil
         lifecycleLeaseExpiresWallMS = nil
         providerEngine = nil
+        localImageGenerationState = nil
         if currentModelIDFromStatus {
             currentModelID = nil
         }
@@ -1800,7 +1802,11 @@ enum AgentSnapshotPresenter {
 
     static func credentialLine(_ s: AgentSnapshot) -> String {
         guard s.isCredentialStatusCurrent() else {
-            return "Provider access expired · checking again"
+            return "Provider access status expired · waiting for fresh local provider status"
+        }
+        if s.lifecycleState == "authentication_required",
+           s.hasCurrentContractValidatedStatusObservation() {
+            return knownAvailabilityCause(s) ?? "Provider access requires authentication · retry"
         }
         switch s.credentialState {
         case "ready":
@@ -1857,7 +1863,7 @@ enum AgentSnapshotPresenter {
             return "Recovery approved · finish activation in Malibu"
         }
         guard s.isLocalStatusObservationCurrent() else {
-            return "Network verification expired · checking again"
+            return "Network verification status expired · waiting for fresh local provider status"
         }
         switch (s.admissionIdentityState, s.coordinatorIdentityAdmissionMode) {
         case ("ready", "signature"):
@@ -2080,6 +2086,10 @@ enum AgentSnapshotPresenter {
     }
 
     static func compatibilitySetLine(_ s: AgentSnapshot) -> String {
+        if let update = cliUpdateStatusLine(s), s.cliUpdateInProgress || s.providerSoftwareRepairInProgress
+            || s.lifecycleState == "update_in_progress" || s.lifecycleState == "rollback_in_progress" {
+            return [s.cliVersion.map { "v\($0)" }, update].compactMap { $0 }.joined(separator: " · ")
+        }
         if let target = updateTargetVersion(s) {
             return "Update to v\(target) available"
         }
@@ -2124,7 +2134,9 @@ enum AgentSnapshotPresenter {
     }
 
     static func updateTargetVersion(_ s: AgentSnapshot) -> String? {
-        ProviderCLIVersion.updateTarget(
+        guard !s.cliUpdateInProgress, !s.providerSoftwareRepairInProgress,
+              s.lifecycleState != "update_in_progress", s.lifecycleState != "rollback_in_progress" else { return nil }
+        return ProviderCLIVersion.updateTarget(
             current: s.cliVersion,
             recommended: s.coordinatorRecommendedVersion,
             latestRelease: s.latestReleaseVersion
@@ -2148,8 +2160,12 @@ enum AgentSnapshotPresenter {
         var seen = Set<String>()
         return s.diagnosticFindings.compactMap { finding in
             var parts = [diagnosticTitle(finding), LogTailBuffer.redacted(finding.userMessage)]
-            if finding.signatureID == .serveUnresponsive, !hasNetworkStateEvidence(finding) {
-                parts.append("Cause unknown")
+            if finding.signatureID == .serveUnresponsive {
+                if let cause = knownAvailabilityCause(s) {
+                    if cause != finding.userMessage { parts.append(cause) }
+                } else if !hasNetworkStateEvidence(finding) {
+                    parts.append("Cause unknown")
+                }
             }
             parts.append(contentsOf: diagnosticContext(finding, snapshot: s))
             let line = parts.joined(separator: " · ")
@@ -2199,7 +2215,7 @@ enum AgentSnapshotPresenter {
             }
             return PublicStatus(
                 title: serveUnresponsiveTitle(finding),
-                detail: serveUnresponsiveDetail(finding),
+                detail: knownAvailabilityCause(s) ?? serveUnresponsiveDetail(finding),
                 safeNextAction: "Keep Malibu open while status updates. Export diagnostics if this persists.",
                 executableAction: .exportDiagnostics
             )
@@ -2304,6 +2320,50 @@ enum AgentSnapshotPresenter {
         case .autoupdateDisabled:
             return "Automatic updates"
         }
+    }
+
+    /// Diagnose only current provider facts; an expired observation cannot
+    /// establish why a new process is unavailable. App-owned update state is
+    /// independent of the local status lease.
+    static func knownAvailabilityCause(_ s: AgentSnapshot, at now: Date = Date()) -> String? {
+        if s.cliUpdateInProgress || s.providerSoftwareRepairInProgress {
+            return "Provider software is updating or restarting. Status refreshes automatically when it returns."
+        }
+        guard s.hasCurrentContractValidatedStatusObservation(at: now) else { return nil }
+        if ["update_in_progress", "rollback_in_progress", "watchdog_recovery", "starting_provider"].contains(s.lifecycleState ?? "") {
+            return "Provider software is updating or restarting. Status refreshes automatically when it returns."
+        }
+        if ["holding_customers", "downloading", "generating", "warm", "restoring"].contains(s.localImageGenerationState ?? "")
+            || s.lifecycleReason == "local_creative_hold" {
+            return "Image creation is holding customer work. Stop Create or wait for customer work to restore."
+        }
+        if s.lifecycleOperatorPaused == true || s.lifecycleState == "paused_by_operator" {
+            return "Provider is paused. Choose Resume when ready."
+        }
+        if s.lifecycleState == "loading_model" {
+            return "The language model is loading. Customer work resumes automatically when loading completes."
+        }
+        if ["coordinator_unavailable", "network_offline"].contains(s.networkState ?? "")
+            || ["coordinator_unavailable", "network_offline"].contains(s.lifecycleState ?? "") {
+            return "The coordinator is unreachable. Reconnection is automatic; check the network if this persists."
+        }
+        if s.lifecycleState == "authentication_required" || s.credentialState == "expired" {
+            let rawReason = s.lifecycleState == "authentication_required"
+                ? s.lifecycleReason ?? "the provider requires authentication"
+                : "saved provider access is expired"
+            let reason: String
+            switch rawReason {
+            case "authentication_required": reason = "the network requires fresh provider access"
+            case "provider_token_expired": reason = "provider access token expired"
+            case "bootstrap_token_expired": reason = "setup access token expired"
+            default:
+                // Unknown text may contain secrets. Only exact known reason
+                // codes bypass redaction and become fixed display strings.
+                reason = ShellText.display(LogTailBuffer.redacted(rawReason).replacingOccurrences(of: "_", with: " "))
+            }
+            return "Provider access expired: \(reason). The provider retries access automatically; unlock or restore saved access if this persists."
+        }
+        return nil
     }
 
     private static func diagnosticContext(
@@ -2446,7 +2506,10 @@ enum AgentSnapshotPresenter {
             return isActive(s) ? "Version unknown" : "Not running"
         }
         var parts = ["v\(current)"]
-        if let target = updateTargetVersion(s) {
+        if s.cliUpdateInProgress || s.providerSoftwareRepairInProgress
+            || s.lifecycleState == "update_in_progress" || s.lifecycleState == "rollback_in_progress" {
+            parts.append(cliUpdateStatusLine(s) ?? "Provider software is restarting…")
+        } else if let target = updateTargetVersion(s) {
             parts.append("→ v\(target) available")
         } else if compatibilityRepairAvailable(s) {
             parts.append("provider software update required")
@@ -2461,7 +2524,7 @@ enum AgentSnapshotPresenter {
     }
 
     static func cliUpdateStatusLine(_ s: AgentSnapshot) -> String? {
-        if s.cliUpdateInProgress {
+        if s.cliUpdateInProgress || s.lifecycleState == "update_in_progress" || s.lifecycleState == "rollback_in_progress" {
             return "Installing latest provider software…"
         }
         if s.providerSoftwareRepairInProgress {
@@ -2478,6 +2541,10 @@ enum AgentSnapshotPresenter {
 
     static func cliVersionMenuLine(_ s: AgentSnapshot) -> String? {
         guard let current = s.cliVersion else { return nil }
+        if s.cliUpdateInProgress || s.providerSoftwareRepairInProgress
+            || s.lifecycleState == "update_in_progress" || s.lifecycleState == "rollback_in_progress" {
+            return "Provider software v\(current) · \(cliUpdateStatusLine(s) ?? "Restarting…")"
+        }
         if let target = updateTargetVersion(s) {
             return "Provider software v\(current) · v\(target) available"
         }

@@ -18,6 +18,73 @@ final class ConversationCacheTests: XCTestCase {
         Device.setDefault(device: Device(.cpu))
     }
 
+    func testCountersAccumulateHitsMissesAndPreserveModelsAfterPurge() async throws {
+        let cache = makeConversationCacheForTest()
+        let tokens = int32Range(0..<64)
+        let seedValue = await cache.begin(
+            conversationKey: "private-conversation", incomingTokens: tokens, modelID: "model-a", kvBits: nil)
+        let seed = try XCTUnwrap(seedValue)
+        await cache.commit(seed, cache: ConversationCacheLayers([trimmableCache(offset: 64)]), fullTokens: tokens)
+        let resident = await cache.countersSnapshot()
+        XCTAssertEqual(resident.models.first?.entries, 1)
+        XCTAssertEqual(resident.models.first?.tokens, 64)
+        XCTAssertGreaterThanOrEqual(resident.models.first?.bytes ?? 0, 256)
+        XCTAssertGreaterThan(resident.models.first?.hotByteLimit ?? 0, 0)
+        let hitValue = await cache.begin(conversationKey: "private-conversation", incomingTokens: tokens + [65], modelID: "model-a", kvBits: nil)
+        let hit = try XCTUnwrap(hitValue)
+        await cache.commit(hit, cache: ConversationCacheLayers([trimmableCache(offset: 65)]), fullTokens: tokens + [65])
+        await cache.purgeAllHot()
+        let nextValue = await cache.begin(conversationKey: "other", incomingTokens: tokens, modelID: "model-b", kvBits: nil)
+        let next = try XCTUnwrap(nextValue)
+        await cache.abort(next)
+        let snapshot = await cache.countersSnapshot()
+        let model = try XCTUnwrap(snapshot.models.first { $0.modelID == "model-a" })
+        XCTAssertEqual(model.lookups, 2)
+        XCTAssertEqual(model.hits, 1)
+        XCTAssertEqual(model.cachedPromptTokens, 64)
+        XCTAssertEqual(model.misses, ["cold_start": 1])
+        XCTAssertEqual(model.evictions, ["purge_all": 1])
+        XCTAssertEqual(model.coldSnapshotSkips, 2)
+        XCTAssertEqual(model.entries, 0)
+        XCTAssertEqual(model.bytes, 0)
+        XCTAssertEqual(snapshot.models.map(\.modelID), ["model-a", "model-b"])
+        XCTAssertFalse(String(describing: snapshot.jsonObject).contains("private-conversation"))
+        XCTAssertEqual(snapshot.jsonObject["process_id"] as? String, resident.jsonObject["process_id"] as? String)
+    }
+
+    func testCountersDistinguishCapacityEvictionsAndTTLMisses() async throws {
+        let tokens = int32Range(0..<64)
+        let noMemory = ConversationCacheMemoryBudget(probe: .init(identity: "no-headroom") {
+            NativeMTPRoundSystemMemorySample(availableBytes: 0, physicalBytes: 64 * 1024 * 1024 * 1024)
+        })
+        let fixtures: [(ConversationCache.Config, ConversationCacheMemoryBudget, String, Int)] = [
+            (.init(maxConversations: 1, maxTokens: 1000, ttlSeconds: 60), conversationCacheTestMemoryBudget(), "lru_count_limit", 2),
+            (.init(maxConversations: 8, maxTokens: 63, ttlSeconds: 60), conversationCacheTestMemoryBudget(), "lru_token_limit", 1),
+            (.init(maxConversations: 8, maxTokens: 1000, ttlSeconds: 60), noMemory, "lru_byte_limit", 1),
+        ]
+        for (config, budget, reason, count) in fixtures {
+            let cache = makeConversationCacheForTest(config: config, memoryBudget: budget)
+            for index in 0..<count {
+                let value = await cache.begin(conversationKey: "key-\(index)", incomingTokens: tokens, modelID: "m", kvBits: nil)
+                let lease = try XCTUnwrap(value)
+                await cache.commit(lease, cache: ConversationCacheLayers([trimmableCache(offset: 64)]), fullTokens: tokens)
+            }
+            let snapshot = await cache.countersSnapshot()
+            XCTAssertEqual(snapshot.models.first?.evictions, [reason: 1])
+        }
+        let cache = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 1000, ttlSeconds: 60))
+        let start = Date(timeIntervalSince1970: 1000)
+        let seedValue = await cache.begin(conversationKey: "ttl", incomingTokens: tokens, modelID: "m", kvBits: nil, now: start)
+        let seed = try XCTUnwrap(seedValue)
+        await cache.commit(seed, cache: ConversationCacheLayers([trimmableCache(offset: 64)]), fullTokens: tokens, now: start)
+        let missValue = await cache.begin(conversationKey: "ttl", incomingTokens: tokens + [65], modelID: "m", kvBits: nil, now: start.addingTimeInterval(61))
+        let miss = try XCTUnwrap(missValue)
+        await cache.abort(miss)
+        let snapshot = await cache.countersSnapshot()
+        XCTAssertEqual(snapshot.models.first?.misses, ["cold_start": 1, "ttl": 1])
+        XCTAssertEqual(snapshot.models.first?.evictions, ["ttl": 1])
+    }
+
     func testRevokedFleetGrantCannotBeginOrPublishAfterPurge() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -101,6 +168,9 @@ final class ConversationCacheTests: XCTestCase {
         let bitsSwap = await cache.begin(conversationKey: "conv:test", incomingTokens: tokens + [99], modelID: "model-a", kvBits: 8)
         XCTAssertEqual(bitsSwap?.cachedPromptTokens, 0)
         await cache.abort(bitsSwap!)
+        let counters = await cache.countersSnapshot()
+        XCTAssertEqual(counters.models.first { $0.modelID == "model-b" }?.misses["model_swap"], 1)
+        XCTAssertEqual(counters.models.first { $0.modelID == "model-a" }?.misses["kvbits_swap"], 1)
     }
 
     func testTTLAndNonTrimmableMiss() async {
@@ -449,6 +519,111 @@ final class ConversationCacheTests: XCTestCase {
                            "even corrected geometry cannot spend full-slot/head/verify/floor reserves")
             XCTAssertFalse(budget.admitsStaging(bytes: gib))
         }
+    }
+
+    func testLiveGLMSnapshotSurvivesOversizedLogicalPoolAtFourSlots() async throws {
+        // XCTest async tasks need their own task-local CPU device scope.
+        try await Device.withDefaultDevice(Device(.cpu)) {
+            let gib = 1024 * 1024 * 1024
+            // 256 GiB Studio, ~175 GB resident model. Free + inactive + purgeable
+            // pages from the live defect sample; no model or tensor evaluation.
+            let available = (4_223_692 + 371_987 + 28_736) * 16_384
+            let tokens = int32Range(0..<4_598)
+            var layers: [KVCache] = []
+            for index in 0..<45 {
+                if index % 4 == 3 {
+                    // Preserve the GLM tensor layouts in a metadata-only container:
+                    // GLM's state getter creates an empty scalar-backed array
+                    // that requires Metal even when only reading byte counts.
+                    let layer = ArraysCache(size: 6)
+                    layer.state = [
+                        MLXArray.arange(2_359_296, dtype: .float32, stream: .cpu)
+                            .asType(.bfloat16, stream: .cpu).reshaped([1, 1, 4_608, 512], stream: .cpu),
+                        MLXArray.arange(147_072, dtype: .float32, stream: .cpu)
+                            .asType(.bfloat16, stream: .cpu).reshaped([1, 1_149, 128], stream: .cpu),
+                        MLXArray.arange(256, dtype: .float32, stream: .cpu)
+                            .asType(.bfloat16, stream: .cpu).reshaped([1, 2, 128], stream: .cpu),
+                        MLXArray.arange(256, dtype: .float32, stream: .cpu)
+                            .asType(.bfloat16, stream: .cpu).reshaped([1, 2, 128], stream: .cpu),
+                        MLXArray.arange(2_432, dtype: .float32, stream: .cpu)
+                            .asType(.bfloat16, stream: .cpu).reshaped([1, 19, 128], stream: .cpu),
+                        MLXArray.arange(2_432, dtype: .float32, stream: .cpu)
+                            .asType(.bfloat16, stream: .cpu).reshaped([1, 19, 128], stream: .cpu),
+                    ]
+                    layer.offset = tokens.count
+                    layers.append(layer)
+                } else {
+                    let layer = MambaCache()
+                    layer.state = [
+                        MLXArray.arange(73_728, dtype: .float32, stream: .cpu)
+                            .asType(.bfloat16, stream: .cpu).reshaped([1, 3, 24_576], stream: .cpu),
+                        MLXArray.arange(1_048_576, dtype: .float32, stream: .cpu)
+                            .asType(.float32, stream: .cpu).reshaped([1, 64, 128, 128], stream: .cpu),
+                    ]
+                    layer.offset = tokens.count
+                    layers.append(layer)
+                }
+            }
+            let snapshot = ConversationCacheLayers(layers, promptSnapshot: true, resumeBoundaryPlan: true)
+            let entryBytes = ConversationCacheMemoryBudget.tensorBytes(snapshot) + tokens.count * 4
+            XCTAssertEqual(entryBytes, 202_896_600)
+            // Live ordinary CB has no admitted native capability. Also exercise a
+            // native verify window: its existing target/head reserve must survive.
+            for verifyBytes in [0, gib] {
+                let budget = ConversationCacheMemoryBudget(probe: .init(identity: "live-glm-\(verifyBytes)") {
+                    .init(availableBytes: available, physicalBytes: 256 * gib)
+                })
+                budget.configure(maxContextTokens: 200_000, slots: 4,
+                                 residentTokens: 102_400 * 256, verifyBytes: verifyBytes)
+                let sparse = ConversationCacheMemoryBudget.glmGeometry(
+                    latentBytesPerToken: 1_024, pooledBytesPerKey: 256,
+                    rawKeyBytesPerToken: 256, rawGateBytesPerToken: 256,
+                    kpool: 4, maxTrim: 16, step: 256)
+                budget.observe(geometry: .init(
+                    fixedRowBytes: 34 * (3 * 24_576 * 2 + 64 * 128 * 128 * 4) + 11 * sparse.fixedRowBytes,
+                    bytesPerToken: 11 * sparse.bytesPerToken))
+                XCTAssertEqual(budget.hotByteLimit(), 8 * gib)
+                XCTAssertTrue(budget.admitsStaging(bytes: gib))
+                let cache = makeConversationCacheForTest(memoryBudget: budget)
+                let lease = await cache.begin(conversationKey: "conv:live-glm", incomingTokens: tokens,
+                                              modelID: "glm-live", kvBits: nil)
+                await cache.commit(try XCTUnwrap(lease), cache: snapshot, fullTokens: tokens)
+                let stats = await cache.snapshotStats()
+                XCTAssertEqual(stats.entries, 1)
+                let warm = await cache.begin(conversationKey: "conv:live-glm", incomingTokens: tokens + [7],
+                                             modelID: "glm-live", kvBits: nil)
+                XCTAssertEqual(warm?.cachedPromptTokens, tokens.count)
+                if let warm { await cache.abort(warm) }
+            }
+        }
+    }
+
+    func testLogicalPoolCapStillReservesFullRowsAndFailsClosedUnderPressure() {
+        let gib = 1024 * 1024 * 1024
+        let physical = 256 * gib
+        let floor = physical / 10 + 1
+        // Full four-row GLM geometry from the live model, not 48 sparse layers.
+        let fixed = 34 * (3 * 24_576 * 2 + 64 * 128 * 128 * 4) + 11 * 272_384
+        let density = 11 * 1_088
+        let serving = 800_000 * density + fixed * 4
+        let reserved = floor + serving + serving / 20 + 2 * gib
+        for pool in [65_536, 800_000, 26_214_400, Int.max] {
+            for extra in [0, 1, 4_096] {
+                let budget = ConversationCacheMemoryBudget(probe: .init(identity: "pool-floor-\(pool)-\(extra)") {
+                    .init(availableBytes: reserved + extra, physicalBytes: physical)
+                })
+                budget.configure(maxContextTokens: 200_000, slots: 4, residentTokens: pool, verifyBytes: 0)
+                budget.observe(geometry: .init(fixedRowBytes: fixed, bytesPerToken: density))
+                XCTAssertEqual(budget.hotByteLimit(), extra)
+                XCTAssertEqual(budget.admitsStaging(bytes: gib), extra > 0)
+            }
+        }
+        let overflow = ConversationCacheMemoryBudget(probe: .init(identity: "row-overflow") {
+            .init(availableBytes: physical, physicalBytes: physical)
+        })
+        overflow.configure(maxContextTokens: Int.max, slots: 4, residentTokens: 1, verifyBytes: 0)
+        overflow.observe(geometry: .init(bytesPerToken: density))
+        XCTAssertEqual(overflow.hotByteLimit(), 0)
     }
 
     func testGLMPromptSnapshotBudgetCountsPaddedTargetAndHeadBuffers() throws {

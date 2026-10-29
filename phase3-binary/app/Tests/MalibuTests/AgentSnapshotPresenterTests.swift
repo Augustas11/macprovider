@@ -2179,8 +2179,9 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         )
 
         XCTAssertEqual(AgentSnapshotPresenter.publicStatus(snapshot).title, "Provider is ready")
-        XCTAssertTrue(AgentSnapshotPresenter.diagnosticFindingLines(snapshot)
+        XCTAssertFalse(AgentSnapshotPresenter.diagnosticFindingLines(snapshot)
             .joined(separator: "\n").contains("macprovider-cli recover-update"))
+        XCTAssertFalse(snapshot.diagnosticFindings.contains { $0.signatureID == .startupHandoffRecoveryRequired })
     }
 
     func testHomeACLDiagnosticFindingShowsRepairPendingWithoutRepairCTA() {

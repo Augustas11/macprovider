@@ -131,6 +131,7 @@ LEDGER_SCHEMA_V4 = "macprovider.autotune-release-ledger.v4"
 NATIVE_MTP_ADMISSION_FEED_NAME = "native-mtp-admission.json"
 NATIVE_MTP_MANIFEST_NAME = "native-mtp-artifact-manifest.json"
 NATIVE_MTP_BANK_NAME = "native-mtp-selftest-bank.json"
+PACKAGE_RESOLVED_PATH = ROOT / "phase3-binary" / "Package.resolved"
 NATIVE_MTP_TUPLE_INPUT_PATH = CATALOG_DIR / "native-mtp-admission-tuple.json"
 NATIVE_MTP_RELEASE_INPUT_PATH = CATALOG_DIR / "native-mtp-admission-release.json"
 NATIVE_MTP_BOUND_LEDGER_FEEDS = ARTIFACT_BOUND_LEDGER_FEEDS | {NATIVE_MTP_ADMISSION_FEED_NAME}
@@ -2698,6 +2699,28 @@ def validate_native_mtp_admission(
     return body
 
 
+def require_native_mtp_runtime_pin(body: dict) -> None:
+    """A source-tree release must admit the runtime compiled by SwiftPM.
+
+    Keep this in the source generation/verification path: a historical signed
+    release directory need not match the verifier checkout's current runtime.
+    """
+    try:
+        resolved = json.loads(PACKAGE_RESOLVED_PATH.read_text("utf-8"))
+        pins = [pin for pin in resolved["pins"] if pin["identity"] == "mlx-swift-lm"]
+        revision = pins[0]["state"]["revision"] if len(pins) == 1 else None
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        fail(f"native-MTP runtime_revision: cannot read mlx-swift-lm pin from Package.resolved: {error}")
+    if not isinstance(revision, str) or re.fullmatch(r"[0-9a-f]{40}", revision) is None:
+        fail("native-MTP runtime_revision: Package.resolved must have exactly one valid mlx-swift-lm pin")
+    for index, entry in enumerate(body["entries"]):
+        if entry["runtime_revision"] != revision:
+            fail(
+                f"native-MTP entries[{index}].runtime_revision {entry['runtime_revision']!r} "
+                f"differs from Package.resolved mlx-swift-lm pin {revision!r}"
+            )
+
+
 def resolve_native_mtp_admission(
     candidate_obj: dict,
     artifact_obj: dict | None,
@@ -2721,6 +2744,7 @@ def resolve_native_mtp_admission(
         )
     except generator.SidecarError as error:
         fail(f"generate: native-MTP admission: {error}")
+    require_native_mtp_runtime_pin(generator.strict_json_loads(sidecar.decode("utf-8")))
     manifest_bytes = (CATALOG_DIR / NATIVE_MTP_MANIFEST_NAME).read_bytes()
     bank = (CATALOG_DIR / NATIVE_MTP_BANK_NAME).read_bytes()
     body = validate_native_mtp_admission(
@@ -6458,7 +6482,15 @@ def _validate_native_mtp_release_closure(directory: pathlib.Path, native_mtp_pre
 
 def _verify_native_binding_bundle(bundle: pathlib.Path, *, repo: pathlib.Path, commit: str, recipe_path: str):
     module = _native_mtp_binding_module()
-    return module.verify_bundle(bundle, repo=repo, commit=commit, recipe_path=recipe_path)
+    verified = module.verify_bundle(bundle, repo=repo, commit=commit, recipe_path=recipe_path)
+    if (bundle / "proof/journey-waiver.json").exists():
+        # The serving export is the only waived proof. Reopen its exact
+        # release/sidecar binding after the complete inventory verification.
+        module.require(module.validate_journey_waiver(
+            bundle, module.read_json(bundle / "inputs.json"),
+            bundle / "release/native-mtp-admission.json") == "waived (operator, 2026-10-29)",
+            "binding requires the exact operator journey waiver")
+    return verified
 
 
 def _content_gate_commit_proof(

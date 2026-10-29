@@ -490,8 +490,8 @@ def validate_serving_qualification(bundle: Path, *, repo: Path, source_commit: s
     bundle, repo = Path(bundle).resolve(), Path(repo).resolve()
     recipe, _ = _recipe(repo, source_commit, RECIPE_PATH)
     inputs = read_json(bundle / "inputs.json")
-    require(inputs.get("phase") == "expanded_glm_sampled" and inputs.get("identity", {}).get("source_commit") == source_commit,
-            "qualification bundle source/phase mismatch")
+    require(inputs.get("phase") == "expanded_glm_sampled", "qualification bundle source/phase mismatch")
+    _validate_candidate_source(repo, source_commit, inputs)
     require((bundle / "release/native-mtp-admission.json").read_bytes() == Path(sidecar_path).read_bytes(),
             "qualification sidecar differs from derived signed release")
     with tempfile.TemporaryDirectory(prefix="native-serving-qualification-") as directory:
@@ -570,6 +570,79 @@ def _prepare_predecessor(bundle: Path, *, repo: Path, commit: str, stage: Path, 
     shutil.copyfile(parent.ledger_path, stage / CATALOG / "release-ledger.json")
 
 
+def _sign_file(path: Path, *, stage: Path, key_id: str) -> bytes:
+    """Sign with the existing raw Ed25519 key without compiling Swift.
+
+    Node's built-in crypto keeps the seed in memory; only its file path enters
+    the child environment. The existing catalog verifier independently checks
+    the signature against the committed keyring before it is installed.
+    """
+    key = Path(os.environ.get("AUTOTUNE_STATIC_PRIVATE_KEY_PATH",
+               str(Path.home() / ".config/macprovider/keys/autotune-static-v4.private.base64")))
+    require(key.is_file() and not key.is_symlink() and (key.stat().st_mode & 0o777) in {0o400, 0o600},
+            "operator signing key permissions")
+    require(not key.resolve().is_relative_to(stage.resolve())
+            and not key.resolve().is_relative_to(Path(__file__).resolve().parents[1]),
+            "operator signing key must be outside checkout")
+    cr = _module(stage, "catalog-release.py")
+    keys = cr.keyring(stage / CATALOG / "trusted-keys.json")
+    require(key_id in keys, "bundle signer is not a reviewed active/bridge key")
+    script = r'''import {readFileSync} from 'node:fs';
+import {createPrivateKey,createPublicKey,sign,verify} from 'node:crypto';
+const e=process.env;
+const text=readFileSync(e.KEY_FILE,'utf8').trim();
+if(!/^[A-Za-z0-9+/]{43}=$/.test(text))throw Error('invalid raw Ed25519 key');
+const seed=Buffer.from(text,'base64');
+if(seed.length!==32)throw Error('invalid raw Ed25519 key');
+const key=createPrivateKey({key:Buffer.concat([Buffer.from('302e020100300506032b657004220420','hex'),seed]),format:'der',type:'pkcs8'});
+const publicKey=createPublicKey(key);
+const expected=Buffer.concat([Buffer.from('302a300506032b6570032100','hex'),Buffer.from(e.PUBLIC_B64,'base64')]);
+if(!publicKey.export({format:'der',type:'spki'}).equals(expected))throw Error('untrusted signing key');
+const message=readFileSync(e.INPUT_PATH);
+const signature=sign(null,message,key);
+if(!verify(null,message,publicKey,signature))throw Error('signature verification failed');
+process.stdout.write(signature.toString('base64'));
+'''
+    signature_b64 = _run(["node", "--input-type=module", "-e", script], env=dict(
+        os.environ, KEY_FILE=str(key.resolve()), INPUT_PATH=str(path.resolve()),
+        PUBLIC_B64=base64.b64encode(keys[key_id]).decode())).decode().strip()
+    signature = base64.b64decode(signature_b64, validate=True)
+    cr.verify_ed25519(keys[key_id], signature, path.read_bytes(), "binding signature")
+    return canonical({"key_id": key_id, "alg": "ed25519", "signature": signature_b64})
+
+
+def _validate_candidate_source(repo: Path, commit: str, inputs: dict) -> None:
+    """Keep recipe authority separate from the one frozen signed release.
+
+    The reviewed reuse bridge postdates v1.8.277. Only that exact sampled cut
+    may retain its immutable source while using a later reviewed recipe; all
+    qualification and signed-release checks still bind the retained source.
+    """
+    identity = inputs["identity"]
+    source = identity["source_commit"]
+    require(identity["provider_revision"] == source, "candidate merged source mismatch")
+    if source == commit:
+        return
+    require(inputs["phase"] == "expanded_glm_sampled"
+            and inputs["candidate_version"] == "1.8.277"
+            and source == "11c4107744116ac426b0eab4cd37a20c511526a9",
+            "candidate merged source mismatch")
+    _run(["git", "-C", repo, "merge-base", "--is-ancestor", source, commit])
+
+
+def _release_decode_identity(stage: Path, *, repo: Path, commit: str, inputs: dict) -> tuple[str, str]:
+    dp = _module(stage, "decode_path_digest.py")
+    source = inputs["identity"]["source_commit"]
+    if source == commit:
+        return dp.compute(stage / "phase3-binary"), dp.resolved_revisions(stage / "phase3-binary")["mlx-swift-lm"]
+    # Recipe/tooling may advance; the admitted executable's decode identity may
+    # not. Compute both fields from the exact immutable signed source archive.
+    with tempfile.TemporaryDirectory(prefix="native-binding-signed-source-") as directory:
+        signed = Path(directory) / "source"
+        _archive(repo, source, signed)
+        return dp.compute(signed / "phase3-binary"), dp.resolved_revisions(signed / "phase3-binary")["mlx-swift-lm"]
+
+
 def _derive(bundle: Path, *, repo: Path, commit: str, recipe: dict, stage: Path, sign: bool = False) -> None:
     if not stage.exists():
         _archive(repo, commit, stage)
@@ -581,7 +654,7 @@ def _derive(bundle: Path, *, repo: Path, commit: str, recipe: dict, stage: Path,
     require(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{1,119}", inputs["release_id"]) is not None, "unsafe release identity")
     identity = inputs["identity"]
     require(set(identity) == IDENTITY_KEYS | {"metallib_sha256"}, "identity input fields")
-    require(identity["source_commit"] == identity["provider_revision"] == commit, "candidate merged source mismatch")
+    _validate_candidate_source(repo, commit, inputs)
     require(re.fullmatch(r"[0-9a-f]{64}", identity["reproducible_build_sha256"]) is not None and re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", identity["live_executable_cdhash"]) is not None and re.fullmatch(r"[0-9a-f]{64}", identity["metallib_sha256"]) is not None, "candidate identity malformed")
     cat = stage / CATALOG
     previous = bundle / "previous"
@@ -590,10 +663,7 @@ def _derive(bundle: Path, *, repo: Path, commit: str, recipe: dict, stage: Path,
     env = _environment(repo, commit, previous)
     env["GIT_WORK_TREE"] = str(stage)
     _run([sys.executable, stage / "scripts/catalog-release.py", "restamp", "--release-id", inputs["release_id"], "--generated-at", inputs["generated_at"]], cwd=stage, env=env)
-    dp = _module(stage, "decode_path_digest.py")
-    path_digest = dp.compute(stage / "phase3-binary")
-    revisions = dp.resolved_revisions(stage / "phase3-binary")
-    runtime = revisions["mlx-swift-lm"]
+    path_digest, runtime = _release_decode_identity(stage, repo=repo, commit=commit, inputs=inputs)
     release_path = cat / "native-mtp-admission-release.json"
     release = read_json(release_path)
     release["provider_decode_path_digest"] = path_digest
@@ -627,10 +697,51 @@ def _derive(bundle: Path, *, repo: Path, commit: str, recipe: dict, stage: Path,
                 shutil.copyfile(bundle / "release" / name, stage / STATIC / name)
     _run(tool + ["generate", "--signer-key-id", release["signer_key_id"], "--previous-release-dir", previous], cwd=stage, env=env)
     if sign:
-        _run(["bash", stage / "scripts/resign-autotune-static.sh"], cwd=stage, env=env)
+        signatures = {}
+        for name in sorted(name for name in RELEASE_FILES if name.endswith(".sig")):
+            signatures[name] = _sign_file(stage / STATIC / name[:-4], stage=stage, key_id=release["signer_key_id"])
+        for name, signature in signatures.items():
+            (stage / STATIC / name).write_bytes(signature)
+        # Rebind the ledger to the freshly verified deterministic signatures.
+        _run(tool + ["generate", "--signer-key-id", release["signer_key_id"], "--previous-release-dir", previous], cwd=stage, env=env)
     _run(tool + ["verify", "--previous-release-dir", previous], cwd=stage, env=env)
     require((cat / "tier2-catalog.json").read_bytes() == git(repo, "show", f"{commit}:{CATALOG}/tier2-catalog.json"), "recipe cannot change Tier2 payload")
     _run(tool + ["verify-directory", "--directory", previous, "--tier2-coordinator-config", stage / "phase4-coordinator/dist/coordinator.yaml"], cwd=stage, env=env)
+
+
+def validate_journey_waiver(bundle: Path, inputs: dict, sidecar: Path) -> str:
+    """Accept only the operator's one sampled-release serving-export exception.
+
+    This record is part of the signed inventory. It grants no qualification,
+    signing, release-match, publication, custody or rollback authority.
+    """
+    waiver = bundle / "proof/journey-waiver.json"
+    if not waiver.exists() and not waiver.is_symlink():
+        return "signed export required"
+    record = read_json(waiver)
+    require(isinstance(record, dict) and set(record) == {
+        "schema_version", "decision", "date", "sidecar_sha256", "release_tag",
+        "source_commit", "reason", "follow_up"}, "journey waiver fields")
+    require(record["schema_version"] == "macprovider.native-mtp-serving-journey-waiver.v1"
+            and record["decision"] == "Waive it" and record["date"] == "2026-10-29"
+            and isinstance(record["reason"], str) and bool(record["reason"].strip())
+            and record["follow_up"] == "build the journey controller", "journey waiver operator decision")
+    require(inputs["phase"] == "expanded_glm_sampled"
+            and inputs["candidate_version"] == "1.8.277"
+            and record["release_tag"] == "v1.8.277"
+            and record["source_commit"] == inputs["identity"]["source_commit"]
+            == "11c4107744116ac426b0eab4cd37a20c511526a9", "journey waiver release/source mismatch")
+    require(record["sidecar_sha256"] == digest(sidecar), "journey waiver sidecar mismatch")
+    return "waived (operator, 2026-10-29)"
+
+
+def _copy_journey_waiver(source: Path, bundle: Path, repo: Path) -> None:
+    source = Path(source)
+    require(not source.is_symlink() and source.is_file(), "regular journey waiver required")
+    require(not source.resolve().is_relative_to(repo.resolve()), "journey waiver must be outside checkout")
+    destination = bundle / "proof/journey-waiver.json"
+    require(not destination.exists() and not destination.is_symlink(), "journey waiver already supplied")
+    shutil.copyfile(source, destination)
 
 
 def _candidate_gate(stage: Path, bundle: Path, inputs: dict) -> None:
@@ -666,9 +777,10 @@ def _candidate_gate(stage: Path, bundle: Path, inputs: dict) -> None:
         # publish gate using these verified paths. A bundle cannot attest it.
         version = dp.verify_release_input(read_json(release))
         require(version == inputs["candidate_version"] and dp._tag_commit(version) == inputs["identity"]["source_commit"], "expanded phase requires normal published source tag")
-        serving = _module(stage, "native_mtp_signed_serving_proof.py")
-        serving.verify_serving_proof(bundle / "proof/serving-journey",
-            Path(os.environ["BINDING_REPO_INTERNAL"]), inputs["identity"]["source_commit"], sidecar)
+        if validate_journey_waiver(bundle, inputs, sidecar) == "signed export required":
+            serving = _module(stage, "native_mtp_signed_serving_proof.py")
+            serving.verify_serving_proof(bundle / "proof/serving-journey",
+                Path(os.environ["BINDING_REPO_INTERNAL"]), inputs["identity"]["source_commit"], sidecar)
 
 
 @_closed_errors
@@ -720,7 +832,7 @@ def verify_bundle(bundle_dir: Path, *, repo: Path, commit: str, recipe_path: str
 
 
 @_closed_errors
-def derive_bundle(*, repo: Path, commit: str, recipe_path: str, inputs: Path, previous_release_dir: Path, proof_dir: Path | None, output: Path, qualification_dir: Path | None = None, parent_bundle: Path | None = None) -> dict:
+def derive_bundle(*, repo: Path, commit: str, recipe_path: str, inputs: Path, previous_release_dir: Path, proof_dir: Path | None, output: Path, qualification_dir: Path | None = None, parent_bundle: Path | None = None, journey_waiver: Path | None = None) -> dict:
     """Materialize signed feeds for the existing matched-pair plan to pin.
 
     DERIVED_UNSEALED is deliberately not an activation receipt. It resolves the
@@ -734,6 +846,7 @@ def derive_bundle(*, repo: Path, commit: str, recipe_path: str, inputs: Path, pr
     _copy_tree(previous_release_dir, output / "previous")
     if proof_dir is not None: _copy_tree(proof_dir, output / "proof")
     else: (output / "proof").mkdir()
+    if journey_waiver is not None: _copy_journey_waiver(journey_waiver, output, repo)
     if qualification_dir is not None: _copy_tree(qualification_dir, output / "qualification")
     if parent_bundle is not None: _copy_tree(parent_bundle, output / "parent")
     with tempfile.TemporaryDirectory(prefix="native-binding-build-") as scratch:
@@ -746,6 +859,7 @@ def derive_bundle(*, repo: Path, commit: str, recipe_path: str, inputs: Path, pr
             if old_repo is None: os.environ.pop("BINDING_REPO_INTERNAL", None)
             else: os.environ["BINDING_REPO_INTERNAL"] = old_repo
         _flat(stage, output / "release")
+        validate_journey_waiver(output, read_json(output / "inputs.json"), output / "release/native-mtp-admission.json")
         (output / "derived").mkdir()
         for name in ("native-mtp-admission-release.json", "native-mtp-admission-tuple.json", "release-ledger.json"):
             shutil.copyfile(stage / CATALOG / name, output / "derived" / name)
@@ -759,14 +873,8 @@ def seal_bundle(bundle: Path, *, repo: Path, commit: str, recipe_path: str) -> V
     value = read_json(bundle / "inputs.json")
     manifest = {"schema_version": "macprovider.native-mtp-binding-bundle.v1", "source_commit": commit, "recipe_path": recipe_path, "recipe_sha256": recipe_sha, "phase": value["phase"], "inputs_sha256": digest(bundle / "inputs.json"), "predecessor_receipt_sha256": value["parent_receipt_sha256"], "files": inventory(bundle)}
     (bundle / "manifest.json").write_bytes(canonical(manifest))
-    # Same CryptoKit raw Ed25519 and private-key store as the existing
-    # resign-autotune-static.sh; keys never enter arguments, output or bundle.
-    key = os.environ.get("AUTOTUNE_STATIC_PRIVATE_KEY_PATH", str(Path.home() / ".config/macprovider/keys/autotune-static-v4.private.base64"))
-    require(Path(key).is_file() and not Path(key).is_symlink() and (Path(key).stat().st_mode & 0o777) in {0o400, 0o600}, "operator signing key permissions")
-    env = dict(os.environ, KEY_FILE=key, INPUT_PATH=str((bundle / "manifest.json").resolve()))
-    swift = 'import CryptoKit\nimport Foundation\nlet e=ProcessInfo.processInfo.environment\nlet k=try Curve25519.Signing.PrivateKey(rawRepresentation: Data(base64Encoded: String(contentsOfFile:e["KEY_FILE"]!).trimmingCharacters(in:.whitespacesAndNewlines))!)\nprint(try k.signature(for:Data(contentsOf:URL(fileURLWithPath:e["INPUT_PATH"]!))).base64EncodedString())'
-    signature = _run(["swift", "-e", swift], env=env).decode().strip()
-    (bundle / "manifest.json.sig").write_bytes(canonical({"key_id": "streamvc-autotune-static-v4", "alg": "ed25519", "signature": signature}))
+    (bundle / "manifest.json.sig").write_bytes(_sign_file(
+        bundle / "manifest.json", stage=repo, key_id="streamvc-autotune-static-v4"))
     return verify_bundle(bundle, repo=repo, commit=commit, recipe_path=recipe_path)
 
 
@@ -790,6 +898,7 @@ def main(argv=None):
             cmd.add_argument("--proof-dir", type=Path, required=verb == "build")
             cmd.add_argument("--qualification-dir", type=Path)
             cmd.add_argument("--parent-bundle", type=Path)
+            cmd.add_argument("--journey-waiver", type=Path, help="external operator waiver for this exact sampled sidecar/release only")
     args = parser.parse_args(argv)
     try:
         if args.command == "verify":
@@ -798,8 +907,13 @@ def main(argv=None):
             result = seal_bundle(args.bundle, repo=args.repo, commit=args.commit, recipe_path=args.recipe)
         else:
             function = derive_bundle if args.command == "derive" else build_bundle
-            result = function(repo=args.repo, commit=args.commit, recipe_path=args.recipe, inputs=args.inputs, previous_release_dir=args.previous_release_dir, proof_dir=args.proof_dir, output=args.out, qualification_dir=args.qualification_dir, parent_bundle=args.parent_bundle)
-        print(json.dumps(asdict(result) if isinstance(result, VerifiedBundle) else result, default=str, sort_keys=True))
+            result = function(repo=args.repo, commit=args.commit, recipe_path=args.recipe, inputs=args.inputs, previous_release_dir=args.previous_release_dir, proof_dir=args.proof_dir, output=args.out, qualification_dir=args.qualification_dir, parent_bundle=args.parent_bundle, journey_waiver=args.journey_waiver)
+        report = asdict(result) if isinstance(result, VerifiedBundle) else result
+        if isinstance(result, VerifiedBundle):
+            bundle = args.bundle if args.command in {"verify", "seal"} else args.out
+            report["serving_journey"] = validate_journey_waiver(
+                bundle, read_json(bundle / "inputs.json"), bundle / "release/native-mtp-admission.json") if result.phase == "expanded_glm_sampled" else "not required"
+        print(json.dumps(report, default=str, sort_keys=True))
         return 0
     except (ValueError, OSError, KeyError, TypeError) as exc:
         print(json.dumps({"status": "FAIL", "error": str(exc)}, sort_keys=True))

@@ -44,6 +44,7 @@ VALIDATE = 5400
 ROOT = Path(__file__).resolve().parents[2]
 # Command Line Tools (the Studio's xcode-select default) ship no Metal compiler.
 # Every successful Studio metallib build used the full Xcode developer dir.
+RELEASE_MACOSX_DEPLOYMENT_TARGET = "14.0"
 XCODE_DEVELOPER_DIR = Path.home() / "Applications/Xcode.app/Contents/Developer"
 
 
@@ -628,11 +629,36 @@ def run_acceptance(m):
             raise Refusal("acceptance result case provenance differs")
 
 
-def lab_env(kind):
+def qualify_metallib(m):
+    """Record the compiled AIR target before allowing any qualification cell."""
+    package = Path(m["source"]) / "phase3-binary"
+    packaging = (package / "dist/package.sh").read_text()
+    targets = re.findall(r'export MACOSX_DEPLOYMENT_TARGET="\$\{MACOSX_DEPLOYMENT_TARGET:-([0-9.]+)\}"', packaging)
+    if targets != [RELEASE_MACOSX_DEPLOYMENT_TARGET]:
+        raise Refusal("release packaging deployment target changed; align lab inputs first")
+    library = package / ".build/arm64-apple-macosx/release/mlx.metallib"
+    strings = run(["/usr/bin/strings", "-a", str(library)], timeout=60).decode(errors="replace")
+    actual = sorted(set(re.findall(r"air64(?:_v[0-9]+)?-apple-macosx([0-9]+(?:\.[0-9]+)+)", strings)))
+    def version(value):
+        parts = tuple(map(int, value.split(".")))
+        return parts + (0,) * (3 - len(parts))
+    passed = bool(actual) and all(version(value) == version(targets[0]) for value in actual)
+    record = {"release_macosx_deployment_target": targets[0], "lab_metallib_air_targets": actual,
+              "lab_metallib_sha256": sha(library.read_bytes()), "passed": passed}
+    put(Path(m["dir"]) / "metallib-qualification.json", record)
+    print(json.dumps(record), flush=True)
+    if not passed:
+        raise Refusal("lab metallib AIR target differs from release packaging target or is unavailable")
+
+
+def lab_env(kind, source=None):
     environment = {"HOME": str(Path.home()), "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
-                   "MACPROVIDER_NATIVE_MTP_E2E": "1"}
+                   "MACPROVIDER_NATIVE_MTP_E2E": "1",
+                   "MACOSX_DEPLOYMENT_TARGET": RELEASE_MACOSX_DEPLOYMENT_TARGET}
     if kind in ("metal", "fork-tests", "acceptance-tests"):
         environment["DEVELOPER_DIR"] = str(XCODE_DEVELOPER_DIR)
+    if kind == "metal" and source is not None:
+        environment["MLX_SWIFT_CHECKOUT"] = str(Path(source) / "phase3-binary/.build/checkouts/mlx-swift")
     return environment
 
 
@@ -690,7 +716,7 @@ def grouped(m, kind, timeout):
                               kind, str(d / "manifest.json"), str(d / "command-done.json")],
                              pass_fds=(read_fd,), start_new_session=True,
                              stdin=subprocess.DEVNULL, stdout=open(d / "lab.log", "ab"),
-                             stderr=subprocess.STDOUT, env=lab_env(kind))
+                             stderr=subprocess.STDOUT, env=lab_env(kind, m["source"]))
     os.close(read_fd)
     try:
         with open(d / "transaction.lock", "a") as lock:
@@ -1265,6 +1291,7 @@ def main():
             # metallib load) before argument validation. A rejected commit
             # therefore proves the lab binary finds its metallib without a model.
             m = json.loads(Path(sys.argv[2]).read_text())
+            qualify_metallib(m)
             command = fixed_command(dict(m, cell="s1-p512-o128"), "cell")
             command[command.index("--provider-commit") + 1] = "metal-check"
             command[command.index("--out") + 1] = str(Path(m["dir"]) / "metalcheck.jsonl")

@@ -1,6 +1,6 @@
 # SPEC-020 - Provider autoupdate
 
-Version: v0.1.30
+Version: v0.1.31
 Status: Normative; coordinator-independent recovery is reconciled and
 implementation remains nonconformant under issue #610. The production path ran
 the 2026-07-10 incident-recovery
@@ -1568,8 +1568,13 @@ prepared lease under its exclusive lock and prove the old owner is gone before
 retiring that exact handoff. An operator-command lifecycle record superseding
 that update MAY have a different operation ID, including a paused state; this
 MUST NOT block recovery once both deadlines have expired and the owner is dead.
-All marker/handoff operation, commit-owner, provider, service, path, hash and
-compatibility-set guards still apply. Recovery MUST preserve the operator pause
+A serve reconnect observation MAY also supersede the lifecycle operation and
+compatibility set when it names the same provider, a `serve:` operation and
+either the pending transaction's target or previous compatibility set, and its
+transition timestamp is within the prepared handoff's issue/expiry window.
+Other foreign or stale lifecycle operations MUST remain refused.
+All marker/handoff operation, commit-owner, provider, service, path and hash
+guards still apply. Recovery MUST preserve the operator pause
 flag. Successful `recover-update` output MUST explain that reload helpers were
 fenced and name the `launchctl enable` step before bootstrapping any disabled
 provider LaunchAgents.
@@ -1587,8 +1592,10 @@ already awaiting readiness. A process that restored its executable on disk
 MUST leave serving to a fresh process of the restored release; it MUST NOT
 claim that its in-memory target is the previous release. Startup diagnostics
 and Malibu MUST name `macprovider-cli recover-update` when recovery remains
-blocked. The watchdog MAY surface the same command while deferring to the CLI
-recovery owner, but MUST NOT acquire rollback authority or add update-recovery
+blocked. On a pending-marker tick in a supported consumer topology, the watchdog MUST
+delegate to the installed CLI's `recover-update --prepared-handoff-only` path.
+The CLI retains all validation and rollback authority; the watchdog MUST NOT
+interpret handoff authority, restore bytes itself or add update-recovery
 restarts. Launchd retains ownership of ordinary process-exit restarts.
 
 After an authorized launchd target adopts the startup handoff, it MUST retain
@@ -1795,6 +1802,11 @@ Deferred to v0.3.0 or later:
   evidence beyond local update integrity.
 
 ## Change log
+
+- v0.1.31 (2026-10-29): Prepared-handoff rollback accepts same-provider
+  reconnect observations within the handoff window for the transaction's
+  previous or target set. Consumer watchdog ticks delegate abandoned-handoff
+  recovery to the installed CLI without gaining rollback or restart authority.
 
 - v0.1.28 (2026-10-17): R-4.14 applies the operator-pause and lease vetoes
   to every restart-recommending path, including a lost or unprovable listener,

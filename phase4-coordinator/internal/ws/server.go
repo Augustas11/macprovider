@@ -6616,6 +6616,7 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 			LastAutoupdateEvent:       hb.LastAutoupdateEvent,
 			HardwareCapacity:          poolHardwareCapacity(hb.HardwareSummary),
 			SafetyTelemetry:           hb.SafetyTelemetry,
+			ConversationCache:         hb.ConversationCache,
 			At:                        s.now(),
 		})
 		if heartbeatResult.OK {

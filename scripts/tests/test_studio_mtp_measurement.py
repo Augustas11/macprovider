@@ -18,10 +18,43 @@ SPEC.loader.exec_module(M)
 class MeasurementTests(unittest.TestCase):
     def test_metal_step_uses_xcode_developer_dir(self):
         grouped = __import__("inspect").getsource(M.grouped)
-        self.assertIn("env=lab_env(kind)", grouped)
+        self.assertIn('env=lab_env(kind, m["source"])', grouped)
         self.assertEqual(M.lab_env("metal")["DEVELOPER_DIR"], str(M.XCODE_DEVELOPER_DIR))
         self.assertNotIn("DEVELOPER_DIR", M.lab_env("build"))
         self.assertTrue(str(M.XCODE_DEVELOPER_DIR).endswith("Applications/Xcode.app/Contents/Developer"))
+
+    def test_lab_build_and_metal_inputs_match_release(self):
+        for kind in ("build", "metal"):
+            self.assertEqual(M.lab_env(kind)["MACOSX_DEPLOYMENT_TARGET"], "14.0")
+        self.assertEqual(M.lab_env("metal", "/campaign")["MLX_SWIFT_CHECKOUT"],
+                         "/campaign/phase3-binary/.build/checkouts/mlx-swift")
+        self.assertIn("qualify_metallib(m)", __import__("inspect").getsource(M.main))
+
+    def test_metallib_air_target_guard_records_and_refuses_drift(self):
+        for target, passed in ((b"air64-apple-macosx14.0.0", True),
+                               (b"air64_v26-apple-macosx14.0.0air.static_init", True),
+                               (b"air64_v28-apple-macosx26.5.0", False),
+                               (b"air64-apple-macosx14.0.0 air64-apple-macosx26.5.0", False),
+                               (b"no AIR target", False)):
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as tmp:
+                source = Path(tmp)
+                package = source / "phase3-binary"
+                (package / "dist").mkdir(parents=True)
+                (package / "dist/package.sh").write_bytes(
+                    (M.ROOT / "phase3-binary/dist/package.sh").read_bytes())
+                library = package / ".build/arm64-apple-macosx/release/mlx.metallib"
+                library.parent.mkdir(parents=True)
+                library.write_bytes(b"test library")
+                m = {"source": tmp, "dir": tmp}
+                with patch.object(M, "run", return_value=target):
+                    if passed:
+                        M.qualify_metallib(m)
+                    else:
+                        with self.assertRaises(M.Refusal):
+                            M.qualify_metallib(m)
+                record = json.loads((source / "metallib-qualification.json").read_text())
+                self.assertEqual(record["passed"], passed)
+                self.assertEqual(record["lab_metallib_sha256"], M.sha(b"test library"))
 
     def test_fork_cohort_tests_use_fixed_xcode_command_inside_window(self):
         command = M.fixed_command({"source": "/campaign", "dir": "/window"}, "fork-tests")

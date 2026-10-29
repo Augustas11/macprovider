@@ -16,6 +16,7 @@ import pathlib
 import shutil
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from scripts.tests import test_catalog_artifact_feed as artifact_tests
 
@@ -29,6 +30,10 @@ NATIVE_RELEASE_ID = "published-2026-10-06-native-mtp-v1"
 def tuple_input() -> dict:
     value = json.loads(FORMAL_TUPLE.read_text())
     entry = value["entry"]
+    resolved = json.loads(catalog_release.PACKAGE_RESOLVED_PATH.read_text())
+    runtime = next(pin["state"]["revision"] for pin in resolved["pins"] if pin["identity"] == "mlx-swift-lm")
+    entry["runtime_revision"] = runtime
+    entry["ordinary_baseline"]["runtime_revision"] = runtime
     for index, key in enumerate(sorted(k for k, v in entry.items() if v == "0" * 64)):
         entry[key] = f"{index + 1:x}" * 64
     for key in ("provider_revision",):
@@ -161,6 +166,36 @@ class NativeMTPAdmissionReleaseTest(unittest.TestCase):
             (swapped / "native-mtp-artifact-manifest.json").write_bytes(b'{"swapped":true}')
             with self.assertRaisesRegex(catalog_release.CatalogError, "artifact_manifest_sha256"):
                 catalog_release.verify_directory(swapped, allow_expired_tier2=True)
+
+    def test_generate_rejects_tuple_runtime_different_from_package_pin(self):
+        with self.activated() as harness:
+            previous = harness.stage(harness.root / "previous")
+            self.write_native_inputs(harness)
+            tuple_path = harness.catalog / "native-mtp-admission-tuple.json"
+            stale = json.loads(tuple_path.read_text())
+            stale["entry"]["runtime_revision"] = "0" * 40
+            stale["entry"]["ordinary_baseline"]["runtime_revision"] = "0" * 40
+            tuple_path.write_text(json.dumps(stale))
+            harness.bump(NATIVE_RELEASE_ID, "2026-10-06T00:00:00Z")
+            with self.assertRaisesRegex(catalog_release.CatalogError, "runtime_revision.*Package.resolved mlx-swift-lm pin"):
+                catalog_release.generate(harness.KEY_ID, previous_release_dir=previous)
+
+    def test_verify_rejects_release_after_runtime_pin_changes(self):
+        with self.activated() as harness:
+            previous = harness.stage(harness.root / "previous")
+            self.write_native_inputs(harness)
+            self.cut_native(harness, previous)
+            # The signed feed still verifies, but the new source-tree build
+            # would reject its runtime tuple. Catch this before publication.
+            resolved = json.loads(catalog_release.PACKAGE_RESOLVED_PATH.read_text())
+            for pin in resolved["pins"]:
+                if pin["identity"] == "mlx-swift-lm":
+                    pin["state"]["revision"] = "0" * 40
+            changed_pin = harness.root / "Package.resolved"
+            changed_pin.write_text(json.dumps(resolved))
+            with patch.object(catalog_release, "PACKAGE_RESOLVED_PATH", changed_pin):
+                with self.assertRaisesRegex(catalog_release.CatalogError, "runtime_revision.*Package.resolved mlx-swift-lm pin"):
+                    catalog_release.verify()
 
     def test_release_input_must_name_this_release_and_bind_the_committed_bank(self):
         with self.activated() as harness:

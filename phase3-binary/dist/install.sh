@@ -12123,7 +12123,9 @@ write_watchdog_script() {
 # Health verdict: the exact launchd service PID must own the configured local
 # listener and its /v1/health endpoint must answer. /v1/health returns non-2xx
 # for degraded/draining/unavailable states, so a provider stuck reporting
-# unavailable after the watchdog is armed is restartable. Coordinator TCP
+# unavailable after the watchdog is armed is restartable unless operator
+# pause or an active local image creation phase intentionally holds buyers.
+# Coordinator TCP
 # reachability is advisory logging only; a missing ESTABLISHED coordinator
 # connection no longer causes a kick by itself. Update and rollback
 # transactions are resolved by their installer/CLI owner, not by this watchdog.
@@ -12164,6 +12166,10 @@ LOG_PATH="$LOG_DIR/watchdog.log"
 STATE_DIR="${MACPROVIDER_WATCHDOG_STATE_DIR:-$HOME/.local/share/macprovider-watchdog/state}"
 ARMED_FILE="$STATE_DIR/armed"
 LAST_KICK_FILE="$STATE_DIR/last_kick"
+# Three consecutive unanswered status probes from the same armed process are
+# a wedge, even if that process still owns its listener (for example SIGSTOP).
+STATUS_NO_ANSWER_TICK_LIMIT=3
+STATUS_NO_ANSWER_FILE="$STATE_DIR/status_no_answer"
 # SPEC-025 §5.4 / RFC-001 F5 supervisor-telemetry beacon. The beacon file is the
 # single overwrite-OK artifact the CLI reads (hardened) and projects onto its
 # heartbeat as last_supervisor_event; observability-only, no restart/update
@@ -12567,6 +12573,7 @@ local_status_restart_recommended() {
     ''|*[!0-9]*) return 1 ;;
   esac
   if operator_pause_recorded; then
+    rm -f "$STATUS_NO_ANSWER_FILE"
     log "provider process $provider_pid is operator-paused per the persisted lifecycle record; watchdog never restarts a paused provider"
     return 1
   fi
@@ -12579,14 +12586,40 @@ local_status_restart_recommended() {
   fi
   case "$listener_rc" in
     0) : ;;
-    1) return 0 ;;
+    1) rm -f "$STATUS_NO_ANSWER_FILE"; return 0 ;;
     *)
+      rm -f "$STATUS_NO_ANSWER_FILE"
       log "provider process $provider_pid listener ownership on port $port is indeterminate (probe failed or timed out); not treating it as lost"
       return 1
       ;;
   esac
   curl_bin="${MACPROVIDER_CURL:-/usr/bin/curl}"
-  status_body="$("$curl_bin" -fsS --max-time 2 "http://127.0.0.1:${port}/v1/status" 2>/dev/null)" || return 1
+  if ! status_body="$("$curl_bin" -fsS --max-time 2 "http://127.0.0.1:${port}/v1/status" 2>/dev/null)"; then
+    no_answer_boot="$(current_boot_id || true)"
+    [ -n "$no_answer_boot" ] || return 1
+    no_answer_count=0
+    no_answer_identity=""
+    if [ -f "$STATUS_NO_ANSWER_FILE" ]; then
+      read -r no_answer_identity no_answer_count < "$STATUS_NO_ANSWER_FILE" || true
+    fi
+    if [ "$no_answer_identity" != "$no_answer_boot:$provider_pid" ]; then
+      no_answer_count=0
+    fi
+    case "$no_answer_count" in
+      0|1|2|3) : ;;
+      *) no_answer_count=0 ;;
+    esac
+    if [ "$no_answer_count" -lt "$STATUS_NO_ANSWER_TICK_LIMIT" ]; then
+      no_answer_count=$((no_answer_count + 1))
+    fi
+    printf '%s %s\n' "$no_answer_boot:$provider_pid" "$no_answer_count" > "$STATUS_NO_ANSWER_FILE"
+    log "provider process $provider_pid owns listener but status gave no answer ($no_answer_count/$STATUS_NO_ANSWER_TICK_LIMIT consecutive ticks)"
+    [ "$no_answer_count" -ge "$STATUS_NO_ANSWER_TICK_LIMIT" ]
+    return $?
+  fi
+  # Any successful answer breaks the no-answer streak, including a creative
+  # hold or a malformed body, neither of which proves an unresponsive process.
+  rm -f "$STATUS_NO_ANSWER_FILE"
   STATUS_BODY="$status_body" "${MACPROVIDER_PYTHON3:-python3}" <<'PY'
 import json
 import os
@@ -12606,6 +12639,15 @@ if not isinstance(operator_paused, bool):
     sys.exit(1)
 
 if operator_paused or lifecycle.get("state") == "paused_by_operator":
+    sys.exit(1)
+
+# A creative hold deliberately unloads the language model while keeping the
+# provider process alive. Recovery-required is deliberately excluded: failed
+# restoration must remain eligible for the ordinary health restart path.
+creative = body.get("local_image_generation")
+if isinstance(creative, dict) and creative.get("state") in (
+    "holding_customers", "downloading", "generating", "warm", "restoring",
+):
     sys.exit(1)
 
 sys.exit(0 if body.get("status") == "unavailable" else 1)
@@ -13117,6 +13159,14 @@ autoupdate_recovery_tick() {
   if [ ! -e "$pending_path" ] && [ ! -L "$pending_path" ]; then
     return 0
   fi
+  # The installed CLI remains the sole rollback owner. It validates both
+  # deadlines, dead owner, provider identity and all marker/lease bindings;
+  # refusal is a no-op. Never interpret authority or restart services here.
+  if [ -x "$BINARY_PATH" ]; then
+    if "$BINARY_PATH" recover-update --prepared-handoff-only >> "$LOG_PATH" 2>&1; then
+      log "autoupdate prepared-handoff recovery checked by CLI; exit-restart remains owned by launchd"
+    fi
+  fi
   log "autoupdate recovery deferred: pending marker exists; transaction owner must resolve update/rollback state; if provider startup remains blocked, run macprovider-cli recover-update; watchdog does not restart for update recovery"
   # Record the intended kind; main() emits exactly one beacon per tick (a restart
   # this tick, if any, takes priority over a deferral).
@@ -13144,6 +13194,7 @@ run_tick() {
   PROVIDER_ID_SEEN=1
   provider_pid="$(provider_process_pid || true)"
   if [ -z "$provider_pid" ]; then
+    rm -f "$STATUS_NO_ANSWER_FILE"
     # No validated launchd PID: the provider service is not running. Per
     # SPEC-020 R-4.14 the launchd provider-service KeepAlive is the SINGLE
     # exit-restart owner; the watchdog no longer kickstarts here. This removes
@@ -13245,6 +13296,7 @@ run_tick() {
     fi
     return 0
   fi
+  rm -f "$STATUS_NO_ANSWER_FILE"
   armed_boot=""
   if [ -f "$ARMED_FILE" ]; then
     armed_boot="$(cat "$ARMED_FILE" 2>/dev/null || true)"
