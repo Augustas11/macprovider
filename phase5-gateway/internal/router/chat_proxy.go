@@ -2011,6 +2011,24 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 			settleCancelled()
 			return
 		}
+		// A complete buffered terminal frame may contain generated output and
+		// usage. Deliver it before classifying a transport failure so the same
+		// delivered bytes and metering facts reach the existing settlement path.
+		pendingLines, pendingErr := ordering.flush()
+		if pendingErr != nil {
+			writeSSEError(w, "Upstream stream returned invalid event ordering", "api_error", "stream_malformed")
+			if flusher != nil {
+				flusher.Flush()
+			}
+			poisonDedupeCapture(w)
+			settleTruncated()
+			return
+		}
+		for _, pending := range pendingLines {
+			if !processLine(pending) {
+				return
+			}
+		}
 		// #760: a phase budget (first_token / stream_ceiling) expiring cancels
 		// the upstream, which surfaces here as a read error. That is a TIMEOUT,
 		// not a provider disconnect: it must settle through the same

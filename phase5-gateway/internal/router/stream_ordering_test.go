@@ -1,6 +1,7 @@
 package router
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"strings"
@@ -206,5 +207,51 @@ func TestStreamOrderingRawTerminalIsBoundedAndUnchanged(t *testing.T) {
 	_, err = s.observe([]byte(strings.Repeat(" ", maxStreamingLineBytes) + "\n"))
 	if err == nil {
 		t.Fatal("cumulative pending terminal must stay bounded")
+	}
+}
+
+func TestStreamOrderingFinishThenUsageHasDistinctSDKEvents(t *testing.T) {
+	for _, newline := range []string{"\n", "\r\n"} {
+		t.Run(strings.ReplaceAll(newline, "\n", "LF"), func(t *testing.T) {
+			frames := []string{
+				`data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}`,
+				`data: {"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`,
+				`data: [DONE]`,
+			}
+			var s streamOrdering
+			var wire strings.Builder
+			for _, frame := range frames {
+				for _, line := range []string{frame + newline, newline} {
+					if s.done {
+						break
+					}
+					out, err := s.observe([]byte(line))
+					if err != nil {
+						t.Fatal(err)
+					}
+					for _, part := range out {
+						wire.Write(part)
+					}
+				}
+			}
+			body := strings.ReplaceAll(wire.String(), "\r\n", "\n")
+			events := strings.Split(strings.TrimSpace(body), "\n\n")
+			if len(events) != 3 {
+				t.Fatalf("SDK event count=%d wire=%q", len(events), wire.String())
+			}
+			for _, event := range events {
+				payload := strings.TrimSpace(strings.TrimPrefix(event, "data:"))
+				if payload == "[DONE]" {
+					continue
+				}
+				var decoded map[string]any
+				if err := json.Unmarshal([]byte(payload), &decoded); err != nil {
+					t.Fatalf("SDK event JSON invalid: %v wire=%q", err, wire.String())
+				}
+			}
+			if !strings.Contains(events[0], `"usage"`) || !strings.Contains(events[1], `"finish_reason":"stop"`) || events[2] != "data: [DONE]" {
+				t.Fatalf("wrong ordering: %q", events)
+			}
+		})
 	}
 }

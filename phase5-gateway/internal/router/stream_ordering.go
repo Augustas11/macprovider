@@ -16,20 +16,25 @@ type streamOrdering struct {
 	preserveIncompleteTools bool
 	rawFinish               []byte
 	split                   bool
+	finishFrameOpen         bool
 }
 
 func (s *streamOrdering) observe(line []byte) ([][]byte, error) {
 	data, ok := sseDataValue(string(bytes.TrimSpace(line)))
 	if !ok {
-		if s.finish != nil && !s.split {
+		if s.finish != nil && !s.split && s.finishFrameOpen {
 			if len(s.rawFinish)+len(line) > maxStreamingLineBytes+4 {
 				return nil, errors.New("terminal frame buffer exceeded")
 			}
 			s.rawFinish = append(s.rawFinish, line...)
+			if len(bytes.TrimSpace(line)) == 0 {
+				s.finishFrameOpen = false
+			}
 			return nil, nil
 		}
 		return [][]byte{line}, nil
 	}
+	s.finishFrameOpen = false
 	if s.done {
 		return nil, errors.New("provider data after stream terminal")
 	}
@@ -95,6 +100,7 @@ func (s *streamOrdering) observe(line []byte) ([][]byte, error) {
 	}
 	s.finish = event
 	s.rawFinish = append([]byte(nil), line...)
+	s.finishFrameOpen = true
 	return nil, nil
 }
 
