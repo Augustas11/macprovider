@@ -1911,6 +1911,9 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 	}
 	ordering := streamOrdering{preserveIncompleteTools: anthropicMessagesAdapterFromContext(r.Context()) != nil}
 	forwardLine := func(line []byte) bool {
+		if anthropicMessagesAdapterFromContext(r.Context()) != nil {
+			return processLine(line)
+		}
 		lines, err := ordering.observe(line)
 		if err != nil {
 			if adapter := anthropicMessagesAdapterFromContext(r.Context()); adapter != nil && adapter.stream {

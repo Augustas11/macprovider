@@ -6,7 +6,7 @@ import (
 	"errors"
 )
 
-// streamOrdering holds only the terminal choice, leaving generated deltas
+// streamOrdering holds one terminal frame, leaving earlier generated deltas
 // incremental. Some providers materialize tools after their stop snapshot.
 // Delay that snapshot until DONE/EOF so clients never stop before the tools.
 type streamOrdering struct {
@@ -14,11 +14,20 @@ type streamOrdering struct {
 	tools                   bool
 	done                    bool
 	preserveIncompleteTools bool
+	rawFinish               []byte
+	split                   bool
 }
 
 func (s *streamOrdering) observe(line []byte) ([][]byte, error) {
 	data, ok := sseDataValue(string(bytes.TrimSpace(line)))
 	if !ok {
+		if s.finish != nil && !s.split {
+			if len(s.rawFinish)+len(line) > maxStreamingLineBytes+4 {
+				return nil, errors.New("terminal frame buffer exceeded")
+			}
+			s.rawFinish = append(s.rawFinish, line...)
+			return nil, nil
+		}
 		return [][]byte{line}, nil
 	}
 	if s.done {
@@ -30,7 +39,13 @@ func (s *streamOrdering) observe(line []byte) ([][]byte, error) {
 			return nil, err
 		}
 		s.done = true
-		return append(out, line), nil
+		// The read loop stops at DONE, so emit its event separator too.
+		newline := []byte("\n")
+		if bytes.HasSuffix(line, []byte("\r\n")) {
+			newline = []byte("\r\n")
+		}
+		doneLine := append(append([]byte(nil), line...), newline...)
+		return append(out, doneLine), nil
 	}
 	if anthropicRawHasDuplicateKeys([]byte(data)) {
 		return nil, errors.New("duplicate streaming JSON keys")
@@ -66,29 +81,46 @@ func (s *streamOrdering) observe(line []byte) ([][]byte, error) {
 		return nil, errors.New("invalid streaming finish reason")
 	}
 	if reason == "" {
+		if s.finish != nil && !s.split && len(delta) > 0 {
+			prior, err := s.splitFinish()
+			if err != nil {
+				return nil, err
+			}
+			return append(prior, line), nil
+		}
 		return [][]byte{line}, nil
 	}
 	if s.finish != nil {
 		return nil, errors.New("duplicate streaming finish")
 	}
-	terminal := make(map[string]any, len(event))
-	for k, v := range event {
-		terminal[k] = v
-	}
-	index := choice["index"]
-	if index == nil {
-		index = 0
-	}
-	terminal["choices"] = []any{map[string]any{"index": index, "delta": map[string]any{}, "finish_reason": reason}}
-	// Usage belongs to the original frame and must not be counted twice.
-	delete(terminal, "usage")
-	s.finish = terminal
+	s.finish = event
+	s.rawFinish = append([]byte(nil), line...)
+	return nil, nil
+}
+
+func (s *streamOrdering) splitFinish() ([][]byte, error) {
+	event := s.finish
+	choice := event["choices"].([]any)[0].(map[string]any)
+	reason := choice["finish_reason"]
 	choice["finish_reason"] = nil
 	encoded, err := json.Marshal(event)
 	if err != nil {
 		return nil, err
 	}
-	return [][]byte{append(append([]byte("data: "), encoded...), '\n')}, nil
+	// Keep only terminal metadata; delta and usage have crossed the wire once.
+	terminal := make(map[string]any, len(event))
+	for k, v := range event {
+		terminal[k] = v
+	}
+	terminal["choices"] = []any{map[string]any{"index": choice["index"], "delta": map[string]any{}, "finish_reason": reason}}
+	delete(terminal, "usage")
+	s.finish = terminal
+	s.split = true
+	delta, _ := choice["delta"].(map[string]any)
+	if len(delta) == 0 && event["usage"] == nil {
+		return nil, nil
+	}
+	return [][]byte{append(append([]byte("data: "), encoded...), '\n', '\n')}, nil
 }
 
 func (s *streamOrdering) flush() ([][]byte, error) {
@@ -109,6 +141,12 @@ func (s *streamOrdering) flush() ([][]byte, error) {
 		}
 	default:
 		return nil, errors.New("unsupported streaming finish reason")
+	}
+	if !s.split && choice["finish_reason"] == reason {
+		raw := s.rawFinish
+		s.finish = nil
+		s.rawFinish = nil
+		return [][]byte{raw}, nil
 	}
 	encoded, err := json.Marshal(s.finish)
 	if err != nil {

@@ -60,11 +60,11 @@ func TestResponsesTerminalIsLastDespiteLateProviderData(t *testing.T) {
 func TestStreamOrderingPreservesUsageAndRejectsAmbiguousTerminals(t *testing.T) {
 	var ordering streamOrdering
 	first, err := ordering.observe([]byte(`data: {"choices":[{"index":0,"delta":{"content":"x"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}` + "\n"))
-	if err != nil || len(first) != 1 || !strings.Contains(string(first[0]), `"usage"`) || strings.Contains(string(first[0]), `"finish_reason":"stop"`) {
+	if err != nil || len(first) != 0 {
 		t.Fatalf("initial=%s err=%v", first, err)
 	}
 	done, err := ordering.observe([]byte("data: [DONE]\n"))
-	if err != nil || len(done) != 2 || strings.Contains(string(done[0]), `"usage"`) || !strings.Contains(string(done[0]), `"finish_reason":"stop"`) {
+	if err != nil || len(done) != 2 || !strings.Contains(string(done[0]), `"usage"`) || !strings.Contains(string(done[0]), `"finish_reason":"stop"`) {
 		t.Fatalf("terminal=%s err=%v", done, err)
 	}
 	if _, err = ordering.observe([]byte(`data: {"choices":[{"delta":{"content":"late"}}]}`)); err == nil {
@@ -184,5 +184,27 @@ func TestStreamingTruncatedToolsFailChatAndResponses(t *testing.T) {
 				t.Fatalf("truncated Responses succeeded: %s", responses)
 			}
 		})
+	}
+}
+
+func TestStreamOrderingRawTerminalIsBoundedAndUnchanged(t *testing.T) {
+	var s streamOrdering
+	raw := []byte("data: { \"choices\": [{\"delta\":{\"content\":\"ok\"}, \"finish_reason\":\"stop\"}] }\r\n")
+	_, err := s.observe(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.observe([]byte("\r\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	flushed, err := s.flush()
+	if err != nil || len(flushed) != 1 || string(flushed[0]) != string(raw)+"\r\n" {
+		t.Fatalf("ordinary terminal bytes changed: %q %v", flushed, err)
+	}
+	_, _ = s.observe(raw)
+	_, err = s.observe([]byte(strings.Repeat(" ", maxStreamingLineBytes) + "\n"))
+	if err == nil {
+		t.Fatal("cumulative pending terminal must stay bounded")
 	}
 }
