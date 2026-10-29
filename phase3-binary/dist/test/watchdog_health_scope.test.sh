@@ -308,6 +308,34 @@ do
   fi
 done
 
+# Create intentionally makes /v1/health unavailable while the process owns
+# the listener. Every creative phase, including warm and restoration, must
+# preserve the request and its in-memory error/progress state.
+for creative_state in holding_customers downloading generating warm restoring; do
+  : > "$TMP/logs/watchdog.log"
+  : > "$TMP/launchctl.log"
+  WATCHDOG_TEST_STATUS_BODY="{\"status\":\"unavailable\",\"lifecycle\":{\"operator_paused\":false,\"state\":\"serving_buyers\"},\"local_image_generation\":{\"state\":\"$creative_state\"}}"
+  export WATCHDOG_TEST_STATUS_BODY
+  run_watchdog
+  grep -F 'failed local /v1/health after arming, but /v1/status does not recommend watchdog restart' "$TMP/logs/watchdog.log" >/dev/null
+  if grep -F 'kickstart -k' "$TMP/launchctl.log" >/dev/null; then
+    echo "creative state $creative_state must not trigger watchdog kickstart" >&2
+    exit 1
+  fi
+done
+
+# A failed restoration and malformed/unknown creative state cannot mask a
+# genuinely unavailable process. Clear cooldown between expected restarts.
+for creative_json in '{"state":"recovery_required"}' '{"state":"idle"}' '{"state":"unknown"}' 'null' '"bad"'; do
+  rm -f "$TMP/home/.local/share/macprovider-watchdog/state/last_kick"
+  : > "$TMP/launchctl.log"
+  WATCHDOG_TEST_STATUS_BODY="{\"status\":\"unavailable\",\"lifecycle\":{\"operator_paused\":false,\"state\":\"serving_buyers\"},\"local_image_generation\":$creative_json}"
+  export WATCHDOG_TEST_STATUS_BODY
+  run_watchdog
+  grep -F 'kickstart -k' "$TMP/launchctl.log" >/dev/null
+done
+rm -f "$TMP/home/.local/share/macprovider-watchdog/state/last_kick"
+
 for status_body in \
   'not-json' \
   '{"status":"unavailable"}' \

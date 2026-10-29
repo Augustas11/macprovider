@@ -108,6 +108,7 @@ final class MalibuAgent: ObservableObject {
 
     init(
         initialSnapshot: AgentSnapshot = .empty,
+        initialProviderStartFailure: String? = nil,
         projectionEligibleForMetrics: Bool = false,
         cliUpdateRunner: @escaping @Sendable (
             _ installedVersion: String?,
@@ -151,6 +152,7 @@ final class MalibuAgent: ObservableObject {
         self.appAttestEnrollment = appAttestEnrollment
         self.privacyCodeBoundAttestorFactory = privacyCodeBoundAttestorFactory
         snapshot = initialSnapshot
+        providerStartFailure = initialProviderStartFailure
         providerProjectionEligible = projectionEligibleForMetrics
         self.cliUpdateRunner = cliUpdateRunner
         self.providerSoftwareRepairRunner = providerSoftwareRepairRunner
@@ -718,6 +720,13 @@ final class MalibuAgent: ObservableObject {
         providerStartFailure = nil
         await releaseSpawnedChildForLaunchdMonitor()
         startProviderLogTail()
+        monitorsLaunchdProvider = true
+        // An app attaching during an update may see only startup failures.
+        // Keep observing even when this initial attempt returns a diagnostic
+        // or times out; the replacement service can recover without relaunch.
+        defer {
+            if !isShuttingDown { startHealthPolling(port: port) }
+        }
         let deadline = Date().addingTimeInterval(max(1, timeout))
         let pollInterval: TimeInterval = 2
         while Date() < deadline {
@@ -727,7 +736,6 @@ final class MalibuAgent: ObservableObject {
                 await applyProviderSnapshot(port: port)
                 await refreshAdmissionIdentityRecoveryDiagnosis()
                 await attachInstalledProviderControlIfAvailable()
-                startHealthPolling(port: port)
                 scheduleAppAttestEnrollment()
                 return snapshot.state == .serving
             }
@@ -782,9 +790,26 @@ final class MalibuAgent: ObservableObject {
     private func applyProviderSnapshot(port: Int) async {
         async let healthTask = InstalledProviderMonitor.fetchHealth(port: port)
         let status = await InstalledProviderMonitor.fetchStatus(port: port)
-        let healthReady = applyHealthCounters(await healthTask)
-        let launchdPID = monitorsLaunchdProvider ? InstalledProviderMonitor.launchdServicePID() : nil
-        let expectedProviderID = ProviderConfig.readProviderID()
+        await applyInstalledProviderObservation(
+            status: status,
+            health: await healthTask,
+            expectedProviderID: ProviderConfig.readProviderID(),
+            launchdPID: InstalledProviderMonitor.launchdServicePID(),
+            liveCodeMatches: ProviderCredentialHandoffRunner.validatedInstalledProcessMatches(pid:)
+        )
+        refreshLatestReleaseIfNeeded()
+    }
+
+    /// Accept a replacement service only after the same provider, launchd PID
+    /// and installed executable checks used for initial attachment pass again.
+    func applyInstalledProviderObservation(
+        status: InstalledProviderMonitor.StatusSnapshot?,
+        health: InstalledProviderMonitor.HealthSnapshot?,
+        expectedProviderID: String?,
+        launchdPID: Int?,
+        liveCodeMatches: (pid_t) -> Bool
+    ) async {
+        let healthReady = applyHealthCounters(health)
         if let rewardActivityProviderID, rewardActivityProviderID != expectedProviderID {
             // Configuration identity changed even if the live process has not
             // yet passed identity matching. Never show the prior provider's
@@ -796,13 +821,34 @@ final class MalibuAgent: ObservableObject {
             return InstalledProviderMonitor.serviceIdentityMatches(
                 fetched,
                 expectedProviderID: expectedProviderID,
-                launchdPID: InstalledProviderMonitor.launchdServicePID(),
-                liveCodeMatches: ProviderCredentialHandoffRunner.validatedInstalledProcessMatches(pid:)
+                launchdPID: launchdPID,
+                liveCodeMatches: liveCodeMatches
             )
         } ?? false
         var hardFailClosed = false
         let identityMismatch = status != nil && !identityMatched
         if let status, let expectedProviderID, identityMatched {
+            let serviceChanged = snapshot.serviceInstanceID != status.serviceInstanceID
+                || snapshot.servicePID != status.servicePID
+            if serviceChanged {
+                // A connection to the previous service must not hold the new
+                // service's metrics/referral channel open or deliver old frames.
+                let previousControl = control
+                control = nil
+                controlSocketPath = nil
+                eventStreamTask?.cancel()
+                eventStreamTask = nil
+                metricsPoller?.cancel()
+                metricsPoller = nil
+                markReferralControlDisconnected()
+                lastRequestsRateSample = nil
+                snapshot.invalidateLocalStatusObservation()
+                snapshot.diagnosticFindings = []
+                if let previousControl {
+                    Task { await previousControl.close() }
+                }
+            }
+            providerStartFailure = nil
             localStatusMissStartedAt = nil
             applyLocalProviderIdentity(expectedProviderID)
             snapshot.localStatusContractVersion = status.contractVersion
@@ -870,6 +916,7 @@ final class MalibuAgent: ObservableObject {
             providerProjectionEligible = true
             snapshot.advertisedMaxConcurrency = status.advertisedMaxConcurrency
             snapshot.providerEngine = status.engine
+            snapshot.localImageGenerationState = status.localImageGenerationState
             snapshot.catalogState = status.catalogState
             snapshot.catalogReleaseID = status.catalogReleaseID
             snapshot.catalogDigest = status.catalogDigest
@@ -881,9 +928,7 @@ final class MalibuAgent: ObservableObject {
             if let version = status.binaryVersion {
                 snapshot.cliVersion = ProviderCLIVersion.normalize(version)
             }
-            if let recommended = status.recommendedVersion {
-                snapshot.coordinatorRecommendedVersion = ProviderCLIVersion.normalize(recommended)
-            }
+            snapshot.coordinatorRecommendedVersion = status.recommendedVersion.map(ProviderCLIVersion.normalize)
             if snapshot.hasTrustedReferralBoundary() {
                 if snapshot.referralAvailability == .unsupported {
                     snapshot.referralAvailability = .unavailable
@@ -922,7 +967,6 @@ final class MalibuAgent: ObservableObject {
             hardFailClosed: hardFailClosed,
             identityMismatch: hardFailClosed && identityMismatch
         )
-        refreshLatestReleaseIfNeeded()
         refreshDiagnosticFindings()
     }
 
@@ -930,14 +974,6 @@ final class MalibuAgent: ObservableObject {
         if localStatusMissStartedAt == nil {
             localStatusMissStartedAt = now
         }
-    }
-
-    private func shouldInvalidateHeldLocalStatus(now: Date = Date()) -> Bool {
-        LocalStatusObservationPolicy.shouldInvalidateAfterLocalPollMiss(
-            missStartedAt: localStatusMissStartedAt,
-            now: now,
-            launchdPID: monitorsLaunchdProvider ? InstalledProviderMonitor.launchdServicePID() : nil
-        )
     }
 
     private func refreshCredentialDiagnosis() async {
@@ -1188,41 +1224,17 @@ final class MalibuAgent: ObservableObject {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: LocalStatusObservationPolicy.pollIntervalNanoseconds)
                 guard let self else { return }
-                if await InstalledProviderMonitor.isHealthy(port: port) {
-                    await self.applyProviderSnapshot(port: port)
+                guard !Task.isCancelled, !self.isShuttingDown else { return }
+                // Health is intentionally 503 while paused, loading or holding
+                // customers for Create. Status still identifies the new service
+                // and explains its state, so never gate observation on health.
+                await self.applyProviderSnapshot(port: port)
+                if self.snapshot.servicePID != nil {
                     await self.attachInstalledProviderControlIfAvailable()
                     try? await self.control?.send(.metricsRequest)
                     try? await self.control?.send(.statusRequest)
                     await self.requestReferralStatusIfDue()
-                    // Retries a failed App Attest enrollment while Malibu stays
-                    // open; the enrollment's own persisted backoff and the
-                    // single-task guard bound how often it runs.
                     await self.scheduleAppAttestEnrollment()
-                } else if self.monitorsLaunchdProvider {
-                    await MainActor.run {
-                        let pidGone = InstalledProviderMonitor.launchdServicePID() == nil
-                        if self.shouldInvalidateHeldLocalStatus() {
-                            self.snapshot.invalidateLocalStatusObservation(clearBuyerServingHold: pidGone)
-                            if pidGone {
-                                self.invalidateProviderProjectionFreshness()
-                                if let failure = self.diagnosedProviderFailure(includingLaunchdState: true) {
-                                    self.providerStartFailure = failure
-                                    self.snapshot.state = .error
-                                    self.snapshot.lastError = failure
-                                } else {
-                                    self.snapshot.state = .reconnecting
-                                    self.snapshot.lastError = ProviderLogDiagnostics.timeoutMessage(
-                                        logHint: ProviderLogDiagnostics.logHint()
-                                    )
-                                }
-                            } else {
-                                self.refreshDiagnosticFindings()
-                            }
-                        } else {
-                            self.noteLocalStatusPollMiss()
-                            self.refreshDiagnosticFindings()
-                        }
-                    }
                 }
             }
         }
