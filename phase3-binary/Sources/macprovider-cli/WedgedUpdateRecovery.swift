@@ -197,6 +197,27 @@ struct WedgedUpdateRecovery {
         return .recovered(markerOutcome: markerOutcome, lifecycleUnfenced: lifecycleUnfenced)
     }
 
+    /// Like operator supersession (#2171), reconnect writes are observations,
+    /// not handoff authority. Only the same provider's serve operation, written
+    /// during this prepared window and naming a transaction set, may supersede
+    /// it. Expiry, dead-owner, marker and executable checks remain mandatory.
+    private static func isReconnectSupersession(
+        _ lifecycle: ProviderLifecycleStateRecord,
+        record: ProviderLifecycleLeaseRecord,
+        marker: AutoUpdatePendingMarker
+    ) -> Bool {
+        guard let handoff = record.startupHandoff,
+              lifecycle.writer == .serve,
+              lifecycle.providerID == handoff.providerID,
+              lifecycle.operationID?.hasPrefix("serve:") == true,
+              let date = lifecycle.transitionDate,
+              let set = lifecycle.compatibilitySetID,
+              set == marker.targetCompatibilitySetID || set == marker.previousCompatibilitySetID else { return false }
+        let milliseconds = date.timeIntervalSince1970 * 1_000
+        return milliseconds >= Double(handoff.issuedWallMilliseconds)
+            && milliseconds <= Double(handoff.expiresWallMilliseconds)
+    }
+
     private func recoverPreparedHandoff(
         _ record: ProviderLifecycleLeaseRecord,
         pending: AutoUpdatePendingMarker?
@@ -214,6 +235,7 @@ struct WedgedUpdateRecovery {
             guard let handoff = record.startupHandoff,
                   let lifecycle = try lifecycleStore.current(),
                   lifecycle.operationID == record.operationID
+                    || Self.isReconnectSupersession(lifecycle, record: record, marker: marker)
                     // An operator command may supersede the updater's lifecycle
                     // operation without retiring its prepared lease. Authority
                     // still comes from the matching marker/handoff below and
@@ -229,7 +251,8 @@ struct WedgedUpdateRecovery {
                   handoff.serviceIdentity == ServeCommand.providerLaunchdServiceIdentity,
                   marker.targetPath == handoff.targetExecutablePath,
                   lifecycle.compatibilitySetID == nil
-                    || marker.targetCompatibilitySetID == lifecycle.compatibilitySetID,
+                    || marker.targetCompatibilitySetID == lifecycle.compatibilitySetID
+                    || Self.isReconnectSupersession(lifecycle, record: record, marker: marker),
                   (marker.commitOwner == "coordinator"
                     && record.operationID == "autoupdate:\(marker.updateID)")
                     || (marker.commitOwner == "self_update"

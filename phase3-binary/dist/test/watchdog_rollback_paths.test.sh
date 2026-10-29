@@ -152,12 +152,37 @@ EOF
   fi
 }
 
+assert_tick_delegates_only_to_cli_recovery() {
+  script="$1"
+  root="$2"
+  make_fixture "$root"
+  cat > "$root/bin/macprovider-cli" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$HOME/recovery-calls"
+[ "$*" = 'recover-update --prepared-handoff-only' ] || exit 99
+# Stand in for the CLI's validated rollback; the watchdog owns no mutations.
+exit "${RECOVERY_TEST_STATUS:-0}"
+EOF
+  chmod +x "$root/bin/macprovider-cli"
+  for status in 0 4; do
+    RECOVERY_TEST_STATUS="$status" invoke_reconcile "$script" "$root"
+  done
+  [ "$(wc -l < "$root/home/recovery-calls" | tr -d ' ')" = 2 ]
+  [ -e "$root/home/.local/share/macprovider/autoupdate/pending.json" ]
+  if grep -E '^(bootout|bootstrap|kickstart)( |$)' "$root/launchctl.log" >/dev/null; then
+    echo "delegated recovery must not introduce watchdog restarts" >&2
+    exit 1
+  fi
+}
+
 for script_name in standalone inline; do
   if [ "$script_name" = standalone ]; then
     script="$STANDALONE"
   else
     script="$INLINE"
   fi
+
+  assert_tick_delegates_only_to_cli_recovery "$script" "$TMP/$script_name-delegation"
 
   # Exercise the exact status predicate in both distributed copies. Creative
   # holds veto health restarts; recovery_required keeps recovery possible.

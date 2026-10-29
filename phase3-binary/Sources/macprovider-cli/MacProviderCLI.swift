@@ -169,6 +169,9 @@ struct RecoverUpdateCommand: ParsableCommand {
         abstract: "Clear a wedged, abandoned auto-update transaction (expired restoring_previous / rollback_in_progress) so the provider can serve again. Safe to run from a fresh CLI while serve is down; a genuinely in-progress update/rollback is left untouched."
     )
 
+    @Flag(help: "Recover only abandoned prepared startup handoffs (watchdog delegation).")
+    var preparedHandoffOnly = false
+
     func run() throws {
         let recovery = WedgedUpdateRecovery(
             markerStore: AutoUpdateMarkerStore(),
@@ -177,7 +180,7 @@ struct RecoverUpdateCommand: ParsableCommand {
                 cli: CLIOverrides(), resolveCredentials: false
             ).providerID
         )
-        let outcome = recovery.recover()
+        let outcome = recovery.recover(requirePreparedHandoff: preparedHandoffOnly)
         var payload: [String: Any] = ["command": "recover-update"]
         var failureExit: Int32?
         switch outcome {

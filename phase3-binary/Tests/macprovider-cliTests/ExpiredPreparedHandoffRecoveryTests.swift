@@ -113,6 +113,55 @@ final class ExpiredPreparedHandoffRecoveryTests: XCTestCase {
         XCTAssertEqual(try fixture.lifecycleStore.current()?.writer, .installer)
     }
 
+    func testCoordinatorReconnectDuringPreparedHandoffRecoversOnAutomaticStartupTick() throws {
+        for coordinator in [false, true] {
+            let fixture = try Fixture(coordinator: coordinator, operatorState: .servingBuyers)
+            let handoff = try XCTUnwrap(fixture.record?.startupHandoff)
+            // The incumbent reconnects with its own serve operation and the
+            // previous installed set while the replacement handoff is prepared.
+            _ = try fixture.lifecycleStore.transition(
+                to: .coordinatorUnavailable, reasonCode: "coordinator_connection_lost", writer: .serve,
+                providerID: "provider-test", compatibilitySetID: fixture.marker.previousCompatibilitySetID,
+                operationID: "serve:incumbent", now: Date(timeIntervalSince1970: Double(handoff.issuedWallMilliseconds + 1_000) / 1_000)
+            )
+            _ = try fixture.lifecycleStore.transition(
+                to: .locallyReadyConnecting, reasonCode: "coordinator_reconnecting", writer: .serve,
+                providerID: "provider-test", compatibilitySetID: fixture.marker.previousCompatibilitySetID,
+                operationID: "serve:incumbent", now: Date(timeIntervalSince1970: Double(handoff.issuedWallMilliseconds + 2_000) / 1_000)
+            )
+            XCTAssertThrowsError(try ServeCommand.recoverAbandonedStartupHandoffBeforeFencing(recovery: fixture.recovery))
+            XCTAssertEqual(try String(contentsOf: fixture.binary), "old")
+            XCTAssertEqual(fixture.leaseStore.inspect(), .missing)
+            XCTAssertEqual(try fixture.markerStore.readPending()?.transactionState, .awaitingPreviousReadiness)
+            XCTAssertEqual(try fixture.lifecycleStore.current()?.writer, .installer)
+            try ServeCommand.recoverAbandonedStartupHandoffBeforeFencing(recovery: fixture.recovery)
+        }
+    }
+
+    func testReconnectCannotAuthorizeForeignOrStaleLifecycle() throws {
+        for mode in ["operation", "provider", "compatibility", "before", "after", "owner", "deadline", "live-handoff"] {
+            let fixture = try Fixture(futureDeadline: mode == "deadline", coordinator: true, operatorState: .servingBuyers)
+            if mode == "owner" { fixture.clock.oldOwnerLive = true }
+            if mode == "live-handoff" { fixture.clock.wall -= 120_000; fixture.clock.monotonic -= 120_000_000_000 }
+            let handoff = try XCTUnwrap(fixture.record?.startupHandoff)
+            let milliseconds = mode == "before" ? handoff.issuedWallMilliseconds - 1_000
+                : mode == "after" ? handoff.expiresWallMilliseconds + 1_000 : handoff.issuedWallMilliseconds + 1_000
+            _ = try fixture.lifecycleStore.transition(
+                to: .coordinatorUnavailable, reasonCode: "coordinator_connection_lost", writer: .serve,
+                providerID: mode == "provider" ? "foreign-provider" : "provider-test",
+                compatibilitySetID: mode == "compatibility" ? "foreign-set" : fixture.marker.previousCompatibilitySetID,
+                operationID: mode == "operation" ? "autoupdate:foreign" : "serve:incumbent",
+                now: Date(timeIntervalSince1970: Double(milliseconds) / 1_000)
+            )
+            let before = try fixture.snapshot()
+            switch fixture.recovery.recover(requirePreparedHandoff: true) {
+            case .recoveryRefused, .transactionActive, .ownerLive: break
+            default: return XCTFail("must refuse foreign/stale/live reconnect: \(mode)")
+            }
+            XCTAssertEqual(try fixture.snapshot(), before)
+        }
+    }
+
     func testOperatorLifecycleSupersedesExpiredHandoffWithoutLosingPause() throws {
         for coordinator in [false, true] {
             for state in [ProviderLifecycleState.pausedByOperator, .servingBuyers, .degradedServing, .locallyReadyConnecting] {
