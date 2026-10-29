@@ -85,6 +85,7 @@ def verify_entries(admission: dict, scope: dict, identity: dict) -> None:
     baseline = scope.get('entries')
     require(isinstance(entries, list) and entries, 'entries', 'nonempty admission set required')
     require(isinstance(baseline, list) and baseline, 'scope', 'signed release contains no native-MTP scope')
+    contexts = set()
     for entry in entries:
         require(isinstance(entry, dict), 'entries', 'entry object required')
         # Narrow candidates one field at a time so an operator sees the actual
@@ -98,6 +99,11 @@ def verify_entries(admission: dict, scope: dict, identity: dict) -> None:
         for field in IDENTITY_FIELDS:
             require(isinstance(entry.get(field), str) and entry[field] == identity[field], field,
                     f"{entry['model_key']} differs from verified release identity")
+        # The provider rejects the whole set if two entries select the same
+        # runtime context, even when their wider admission sort keys differ.
+        context = tuple(entry[field] for field in SCOPE_FIELDS + IDENTITY_FIELDS)
+        require(context not in contexts, 'entries', f"{entry['model_key']} has ambiguous matching entries")
+        contexts.add(context)
 
 
 def release_directory(repo: pathlib.Path, state: pathlib.Path, explicit: pathlib.Path | None, version: str) -> pathlib.Path:

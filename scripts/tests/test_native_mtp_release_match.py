@@ -61,6 +61,11 @@ class ReleaseMatchTests(unittest.TestCase):
         with self.assertRaisesRegex(MATCH.MatchError, 'qualified_slots'):
             MATCH.verify_entries(self.admission, self.scope, self.identity)
 
+    def test_duplicate_matching_context_rejected_even_with_distinct_sort_keys(self):
+        self.admission['entries'].append(dict(self.entry, artifact_id='other', proposal_depth=2))
+        with self.assertRaisesRegex(MATCH.MatchError, 'entries.*ambiguous'):
+            MATCH.verify_entries(self.admission, self.scope, self.identity)
+
     def test_empty_or_missing_scope_fails_closed(self):
         for admission, scope in [({}, self.scope), ({'entries': []}, self.scope), (self.admission, {})]:
             with self.subTest(admission=admission), self.assertRaises(MATCH.MatchError):
