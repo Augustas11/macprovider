@@ -2354,7 +2354,7 @@ enum AgentSnapshotPresenter {
             let reason: String
             switch rawReason {
             case "authentication_required": reason = "the network requires fresh provider access"
-            case "provider_token_expired": reason = "provider token expired"
+            case "provider_token_expired": reason = "provider access token expired"
             case "bootstrap_token_expired": reason = "setup access token expired"
             default:
                 // Unknown text may contain secrets. Only exact known reason
