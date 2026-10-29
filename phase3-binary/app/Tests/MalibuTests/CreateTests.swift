@@ -94,8 +94,48 @@ final class CreateTests: XCTestCase {
             XCTAssertEqual(request.url?.host, "127.0.0.1")
             XCTAssertEqual(request.value(forHTTPHeaderField: "X-MacProvider-Origin"), "local-app")
             XCTAssertNil(request.value(forHTTPHeaderField: "Authorization"))
-            if path == "/v1/images/generations" { XCTAssertEqual(request.timeoutInterval, 3600) }
+            if path == "/v1/images/generations" { XCTAssertEqual(request.timeoutInterval, 24 * 60 * 60) }
         }
+    }
+
+    func testGenerationAllowsFirstRunDownloadWithoutDelayingStopOrStatusRequests() throws {
+        let config = LocalCreateTransport.sessionConfiguration()
+        XCTAssertEqual(config.timeoutIntervalForRequest, 24 * 60 * 60)
+        XCTAssertEqual(config.timeoutIntervalForResource, 24 * 60 * 60)
+        let endpoint = try ChatEndpoint(port: 8080)
+        let cancel = LocalCreateTransport.request(at: endpoint, path: "/v1/images/generations/cancel", body: Data())
+        XCTAssertEqual(cancel.timeoutInterval, 60)
+    }
+
+    func testTransportFailuresExplainLostConnectionRestartAndTimeout() async throws {
+        let home = try temporaryHome(); defer { try? FileManager.default.removeItem(at: home) }
+        let transport = FakeCreateTransport(); transport.current = try status()
+        let store = CreateStore(transport: transport, gallery: CreateGallery(home: home))
+        store.prompt = "A landscape"; await store.refresh(port: 8080)
+        for (code, cause) in [(URLError.networkConnectionLost, "connection to the local provider was lost"),
+                              (.cannotConnectToHost, "may be restarting"),
+                              (.timedOut, "timed out")] {
+            let failure = URLError(code)
+            transport.generationFailure = failure
+            store.generate(); await store.waitForGeneration()
+            XCTAssertTrue(store.notice?.contains(cause) == true)
+            XCTAssertTrue(store.notice?.contains(failure.localizedDescription) == true)
+            XCTAssertTrue(store.images.isEmpty)
+            XCTAssertTrue(store.canGenerate)
+        }
+    }
+
+    func testNonTransportFailureIncludesDescriptionAndCancelledTransportRemainsCancellation() async throws {
+        let failure = NSError(domain: NSCocoaErrorDomain, code: NSFileWriteNoPermissionError,
+                              userInfo: [NSLocalizedDescriptionKey: "Pictures access denied"])
+        XCTAssertTrue(CreateStore.creationFailureMessage(failure).contains("Pictures access denied"))
+        let home = try temporaryHome(); defer { try? FileManager.default.removeItem(at: home) }
+        let transport = FakeCreateTransport(); transport.current = try status()
+        transport.generationFailure = URLError(.cancelled)
+        let store = CreateStore(transport: transport, gallery: CreateGallery(home: home))
+        store.prompt = "A landscape"; await store.refresh(port: 8080)
+        store.generate(); await store.waitForGeneration()
+        XCTAssertEqual(store.notice, "Creation cancelled. Restoring customer work.")
     }
 
     func testGallerySavesPNGAtPicturesMalibuWithOwnerOnlyPermissionsAndUniqueNames() throws {
@@ -152,7 +192,7 @@ final class CreateTests: XCTestCase {
         let transport = FakeCreateTransport(); transport.image = try png(); transport.current = try status()
         let store = CreateStore(transport: transport, gallery: CreateGallery(home: home))
         store.prompt = "A landscape"; await store.refresh(port: 8080)
-        transport.generationFailure = .busy
+        transport.generationFailure = CreateFailure.busy
         store.generate(); await store.waitForGeneration()
         XCTAssertTrue(store.images.isEmpty)
         XCTAssertEqual(store.notice, CreateFailure.busy.localizedDescription)
@@ -186,7 +226,7 @@ final class CreateTests: XCTestCase {
 private final class FakeCreateTransport: CreateTransport {
     var current: CreateStatus?
     var failure: CreateFailure?
-    var generationFailure: CreateFailure?
+    var generationFailure: Error?
     var image = Data()
     var block = false
     var cancelCount = 0

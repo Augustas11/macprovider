@@ -106,12 +106,22 @@ enum ProviderDiagnosticFindingAggregator {
         var findings: [ProviderDiagnosticFinding] = []
         findings.append(contentsOf: statusFindings(snapshot, hasFreshStatus: hasFreshStatus, now: now))
         findings.append(contentsOf: diagnosticCredentialFindings(snapshot, now: now))
+        let hasRecoveredStartup = hasFreshStatus
+            && snapshot.networkState == "buyer_serving"
+            && !snapshot.cliUpdateInProgress
+            && !snapshot.providerSoftwareRepairInProgress
+            && !["update_in_progress", "rollback_in_progress", "watchdog_recovery"].contains(snapshot.lifecycleState ?? "")
         findings.append(contentsOf: logFindings(
             providerLogLines: providerLogLines,
             watchdogLogLines: watchdogLogLines,
             launchdNeedsRepair: launchdNeedsRepair,
             now: now
-        ))
+        ).filter { finding in
+            // A current admitted serve process proves startup is no longer
+            // blocked. Retained log tails are historical, not a new failure.
+            // Keep model verification, admission and installer warnings.
+            !(hasRecoveredStartup && finding.signatureID == .startupHandoffRecoveryRequired)
+        })
         if !hasFreshStatus {
             findings.append(contentsOf: doctorReportFindings.filter { $0.signatureID == .serveUnresponsive })
             findings.append(contentsOf: appPollingHistoryFindings)
@@ -166,7 +176,8 @@ enum ProviderDiagnosticFindingAggregator {
                 ProviderDiagnosticFinding(
                     signatureID: .serveUnresponsive,
                     source: .status,
-                    userMessage: "Provider local status is unavailable or stale.",
+                    userMessage: AgentSnapshotPresenter.knownAvailabilityCause(snapshot, at: now)
+                        ?? "Provider local status is unavailable or stale.",
                     evidence: snapshot.statusObservationID.map { "observation.id=\($0)" },
                     observedAt: snapshot.statusObservedAt ?? now
                 )
@@ -201,7 +212,7 @@ enum ProviderDiagnosticFindingAggregator {
             findings.append(ProviderDiagnosticFinding(
                 signatureID: .autoupdateInProgress,
                 source: .status,
-                userMessage: "Provider software update is in progress.",
+                userMessage: "Provider software is updating or restarting. Status refreshes automatically when it returns.",
                 evidence: snapshot.lifecycleState.map { "lifecycle.state=\($0)" }
                     ?? localUpdateRepairEvidence(snapshot),
                 observedAt: snapshot.statusObservedAt ?? now
@@ -212,12 +223,23 @@ enum ProviderDiagnosticFindingAggregator {
             findings.append(ProviderDiagnosticFinding(
                 signatureID: .serveUnresponsive,
                 source: .status,
-                userMessage: "Provider is not confirmed available for customer work.",
+                userMessage: AgentSnapshotPresenter.knownAvailabilityCause(snapshot, at: now)
+                    ?? "Provider is not confirmed available for customer work.",
                 evidence: snapshot.networkState.map { "network_state=\($0)" },
                 observedAt: snapshot.statusObservedAt ?? now
             ))
         default:
             break
+        }
+        if let cause = AgentSnapshotPresenter.knownAvailabilityCause(snapshot, at: now),
+           !findings.contains(where: { $0.signatureID == .serveUnresponsive || $0.signatureID == .autoupdateInProgress }) {
+            findings.append(ProviderDiagnosticFinding(
+                signatureID: .serveUnresponsive,
+                source: .status,
+                userMessage: cause,
+                evidence: snapshot.lifecycleState.map { "lifecycle.state=\($0)" },
+                observedAt: snapshot.statusObservedAt ?? now
+            ))
         }
         return findings
     }
@@ -254,7 +276,7 @@ enum ProviderDiagnosticFindingAggregator {
             ProviderDiagnosticFinding(
                 signatureID: .autoupdateInProgress,
                 source: .status,
-                userMessage: "Provider software update is in progress.",
+                userMessage: "Provider software is updating or restarting. Status refreshes automatically when it returns.",
                 evidence: localUpdateRepairEvidence(snapshot),
                 observedAt: snapshot.statusObservedAt ?? now
             )

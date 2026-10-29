@@ -112,20 +112,24 @@ final class LocalCreateTransport: CreateTransport {
     private let session: URLSession
     private var operationID: UUID?
     private let redirect = CreateNoRedirect()
-    init() {
+    // Match the provider downloader's 24-hour first-run weight download budget.
+    static let generationTimeout: TimeInterval = 24 * 60 * 60
+    static func sessionConfiguration() -> URLSessionConfiguration {
         let config = URLSessionConfiguration.ephemeral
         config.connectionProxyDictionary = [:]; config.httpShouldSetCookies = false
         config.urlCache = nil; config.requestCachePolicy = .reloadIgnoringLocalCacheData
-        config.timeoutIntervalForRequest = 60; config.timeoutIntervalForResource = 3600
-        session = URLSession(configuration: config)
+        config.timeoutIntervalForRequest = generationTimeout
+        config.timeoutIntervalForResource = generationTimeout
+        return config
     }
+    init() { session = URLSession(configuration: Self.sessionConfiguration()) }
     deinit { session.invalidateAndCancel() }
     static func request(at endpoint: ChatEndpoint, path: String, body: Data?, operationID: UUID? = nil) -> URLRequest {
         var request = URLRequest(url: endpoint.url(path))
         request.httpMethod = "POST"
         request.setValue("local-app", forHTTPHeaderField: "X-MacProvider-Origin")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        if path == "/v1/images/generations" { request.timeoutInterval = 3600 }
+        request.timeoutInterval = path == "/v1/images/generations" ? generationTimeout : 60
         if let operationID { request.setValue(operationID.uuidString, forHTTPHeaderField: "X-MacProvider-Image-Operation-ID") }
         request.httpBody = body
         return request

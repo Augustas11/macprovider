@@ -55,8 +55,10 @@ final class CreateStore: ObservableObject {
                     self.images.insert(image, at: 0)
                 } catch is CancellationError {
                     self.notice = "Creation cancelled. Restoring customer work."
+                } catch let error as URLError where error.code == .cancelled {
+                    self.notice = "Creation cancelled. Restoring customer work."
                 } catch {
-                    self.notice = (error as? CreateFailure)?.localizedDescription ?? "The image could not be created or saved. Try again."
+                    self.notice = Self.creationFailureMessage(error)
                 }
                 await self.refresh(port: endpoint.port)
             }
@@ -70,6 +72,23 @@ final class CreateStore: ObservableObject {
             notice = "Creation cancelled. Restoring customer work."
         } catch { notice = "Cancellation could not be confirmed. Try Stop again." }
         await refresh(port: endpoint.port)
+    }
+    static func creationFailureMessage(_ error: Error) -> String {
+        if let failure = error as? CreateFailure { return failure.localizedDescription }
+        let detail = ShellText.display(error.localizedDescription)
+        if let transport = error as? URLError {
+            switch transport.code {
+            case .timedOut:
+                return "Image creation timed out while waiting for the local provider. \(detail)"
+            case .networkConnectionLost:
+                return "The connection to the local provider was lost. The provider may have restarted. \(detail)"
+            case .cannotConnectToHost, .cannotFindHost:
+                return "The local provider could not be reached. It may be restarting. \(detail)"
+            default:
+                return "Image creation could not connect to the local provider. \(detail)"
+            }
+        }
+        return "The image could not be created or saved. \(detail)"
     }
     func waitForGeneration() async { await task?.value }
 }

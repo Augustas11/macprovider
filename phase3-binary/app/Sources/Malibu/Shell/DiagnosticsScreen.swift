@@ -79,7 +79,7 @@ enum DiagnosticsPresentation {
     static func statusRows(_ s: AgentSnapshot, appVersion: String) -> [Row] {
         var rows = [
             Row(title: String(localized: "Malibu app", comment: "Diagnostics row"), value: appVersion),
-            Row(title: String(localized: "Provider software", comment: "Diagnostics row"), value: AgentSnapshotPresenter.compatibilitySetLine(s)),
+            Row(title: String(localized: "Provider software", comment: "Diagnostics row"), value: providerSoftwareLine(s)),
             Row(title: String(localized: "Status contract", comment: "Diagnostics row"), value: AgentSnapshotPresenter.statusContractLine(s)),
         ]
         if let lifecycle = AgentSnapshotPresenter.lifecycleLine(s) {
@@ -87,6 +87,12 @@ enum DiagnosticsPresentation {
         }
         rows.append(Row(title: String(localized: "Customer slots", comment: "Diagnostics row"), value: AgentSnapshotPresenter.advertisedCapacityLine(s)))
         return rows
+    }
+
+    static func providerSoftwareLine(_ s: AgentSnapshot) -> String {
+        let status = AgentSnapshotPresenter.compatibilitySetLine(s)
+        guard let version = s.cliVersion else { return status }
+        return status.hasPrefix("v\(version) ·") ? "Running \(status)" : "Running v\(version) · \(status)"
     }
 
     struct FilteredLog: Equatable {
@@ -108,7 +114,7 @@ enum DiagnosticsPresentation {
         var hidden = 0
         for line in lines {
             let lower = line.lowercased()
-            if lower.contains("idle_prewarm") {
+            if lower.contains("idle_prewarm"), !problemMarkers.contains(where: lower.contains) {
                 hidden += 1
                 continue
             }
@@ -116,6 +122,12 @@ enum DiagnosticsPresentation {
                 continue
             }
             kept.append(ShellText.display(line, maxLength: maxLogLineLength))
+        }
+        // Keep the pane useful even when all recent activity is routine.
+        // Problems retain priority, including failures in idle-prewarm lines.
+        if kept.isEmpty {
+            kept = lines.suffix(maxLogLines).map { ShellText.display($0, maxLength: maxLogLineLength) }
+            hidden = 0
         }
         return FilteredLog(lines: Array(kept.suffix(maxLogLines)), hiddenIdlePrewarm: hidden)
     }
@@ -149,7 +161,7 @@ struct DiagnosticsScreen: View {
     let onExportDiagnostics: () -> Void
     let onResetProvider: () -> Void
     @State private var tab: DiagnosticsPresentation.Tab = .findings
-    @State private var logFilter: DiagnosticsPresentation.LogFilter = .all
+    @State private var logFilter: DiagnosticsPresentation.LogFilter = .problems
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -179,6 +191,10 @@ struct DiagnosticsScreen: View {
         case .findings:
             ScrollView {
                 VStack(alignment: .leading, spacing: 8) {
+                    if agent.snapshot.hasCurrentContractValidatedStatusObservation(),
+                       agent.snapshot.lifecycleOperatorPaused == true || agent.snapshot.lifecycleState == "paused_by_operator" {
+                        Button("Resume") { Task { await agent.resume() } }
+                    }
                     ForEach(Array(DiagnosticsPresentation.findings(agent.snapshot).enumerated()), id: \.offset) { _, line in
                         Text(line)
                             .font(.callout)
@@ -262,6 +278,10 @@ struct DiagnosticsScreen: View {
                 .foregroundStyle(.secondary)
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 1) {
+                    if filtered.lines.isEmpty {
+                        Text("No recent provider log lines. Start the provider to see activity here.")
+                            .font(.caption)
+                    }
                     ForEach(Array(filtered.lines.enumerated()), id: \.offset) { _, line in
                         Text(line)
                             .font(.caption.monospaced())

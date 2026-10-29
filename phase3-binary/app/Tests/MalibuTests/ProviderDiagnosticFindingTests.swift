@@ -311,6 +311,123 @@ final class ProviderDiagnosticFindingTests: XCTestCase {
         XCTAssertFalse(text.contains("must-not-export"), text)
     }
 
+    func testFreshBuyerServingClearsHistoricalStartupFailureButKeepsVerificationAndUpdateWarnings() {
+        let now = Date()
+        var snapshot = freshStatusSnapshot(now: now)
+        let lines = [
+            "self-update startup handoff recovery refused: old service target mismatch",
+            "model artifact hash mismatch",
+            "model catalog provenance envelope is stale",
+            "auto_update_enabled: false",
+        ]
+        var findings = ProviderDiagnosticFindingAggregator.aggregate(
+            snapshot: snapshot, providerLogLines: lines, watchdogLogLines: [], now: now
+        )
+        XCTAssertFalse(findings.contains { $0.signatureID == .startupHandoffRecoveryRequired })
+        XCTAssertTrue(findings.contains { $0.signatureID == .artifactHashMismatch })
+        XCTAssertTrue(findings.contains { $0.signatureID == .staleModelCatalog })
+        XCTAssertTrue(findings.contains { $0.signatureID == .autoupdateDisabled })
+
+        snapshot.networkState = "not_buyer_serving"
+        findings = ProviderDiagnosticFindingAggregator.aggregate(
+            snapshot: snapshot, providerLogLines: lines, watchdogLogLines: [], now: now
+        )
+        XCTAssertTrue(findings.contains { $0.signatureID == .startupHandoffRecoveryRequired })
+        snapshot.networkState = "buyer_serving"
+        snapshot.cliUpdateInProgress = true
+        findings = ProviderDiagnosticFindingAggregator.aggregate(
+            snapshot: snapshot, providerLogLines: lines, watchdogLogLines: [], now: now
+        )
+        XCTAssertTrue(findings.contains { $0.signatureID == .startupHandoffRecoveryRequired })
+        snapshot.cliUpdateInProgress = false
+        snapshot.statusObservationFresh = false
+        findings = ProviderDiagnosticFindingAggregator.aggregate(
+            snapshot: snapshot, providerLogLines: lines, watchdogLogLines: [], now: now
+        )
+        XCTAssertTrue(findings.contains { $0.signatureID == .startupHandoffRecoveryRequired })
+    }
+
+    func testAvailabilityFindingsNameCurrentCausesAndRecoveryHints() {
+        let now = Date()
+        let cases: [(String, String?, String, String)] = [
+            ("loading_model", nil, "language model is loading", "automatically"),
+            ("paused_by_operator", nil, "Provider is paused", "Resume"),
+            ("coordinator_unavailable", nil, "coordinator is unreachable", "automatic"),
+            ("authentication_required", "provider_token_expired", "provider token expired", "automatically"),
+            ("starting_provider", nil, "updating or restarting", "automatically"),
+            ("update_in_progress", nil, "updating or restarting", "automatically"),
+        ]
+        for (state, reason, cause, hint) in cases {
+            var snapshot = freshStatusSnapshot(now: now)
+            snapshot.lifecycleState = state
+            snapshot.lifecycleReason = reason
+            snapshot.networkState = "not_buyer_serving"
+            snapshot.diagnosticFindings = ProviderDiagnosticFindingAggregator.aggregate(
+                snapshot: snapshot, providerLogLines: [], watchdogLogLines: [], now: now
+            )
+            let lines = AgentSnapshotPresenter.diagnosticFindingLines(snapshot).joined(separator: "\n")
+            XCTAssertTrue(lines.contains(cause), lines)
+            XCTAssertTrue(lines.contains(hint), lines)
+            XCTAssertFalse(lines.contains("Cause unknown"), lines)
+            if state == "authentication_required" {
+                XCTAssertTrue(AgentSnapshotPresenter.credentialLine(snapshot).contains("provider token expired"))
+            }
+        }
+    }
+
+    func testCreativeHoldFindingsExplainEveryActiveState() {
+        let now = Date()
+        for state in ["holding_customers", "downloading", "generating", "warm", "restoring"] {
+            var snapshot = freshStatusSnapshot(now: now)
+            snapshot.localImageGenerationState = state
+            snapshot.diagnosticFindings = ProviderDiagnosticFindingAggregator.aggregate(
+                snapshot: snapshot, providerLogLines: [], watchdogLogLines: [], now: now
+            )
+            let lines = AgentSnapshotPresenter.diagnosticFindingLines(snapshot).joined(separator: "\n")
+            XCTAssertTrue(lines.contains("Image creation is holding customer work"), lines)
+            XCTAssertTrue(lines.contains("Stop Create or wait"), lines)
+            XCTAssertFalse(lines.contains("Cause unknown"), lines)
+        }
+    }
+
+    func testKnownAuthenticationReasonCodesUseSafeDisplayStrings() {
+        let now = Date()
+        for (reason, expected) in [
+            ("authentication_required", "the network requires fresh provider access"),
+            ("provider_token_expired", "provider token expired"),
+            ("bootstrap_token_expired", "setup access token expired"),
+        ] {
+            var snapshot = freshStatusSnapshot(now: now)
+            snapshot.lifecycleState = "authentication_required"
+            snapshot.lifecycleReason = reason
+            let cause = AgentSnapshotPresenter.knownAvailabilityCause(snapshot, at: now) ?? ""
+            XCTAssertTrue(cause.contains(expected), cause)
+            XCTAssertFalse(cause.contains("[redacted]"), cause)
+        }
+    }
+
+    func testAuthenticationReasonIsRedactedBeforeHumanizing() {
+        let now = Date()
+        var snapshot = freshStatusSnapshot(now: now)
+        snapshot.lifecycleState = "authentication_required"
+        snapshot.lifecycleReason = "provider_token=must-not-display"
+        let cause = AgentSnapshotPresenter.knownAvailabilityCause(snapshot, at: now) ?? ""
+        XCTAssertFalse(cause.contains("must-not-display"), cause)
+        XCTAssertTrue(cause.contains("[redacted]"), cause)
+    }
+
+    func testExpiredStatusDoesNotReuseOldAvailabilityCause() {
+        let now = Date()
+        var snapshot = freshStatusSnapshot(now: now.addingTimeInterval(-120))
+        snapshot.lifecycleState = "loading_model"
+        snapshot.localImageGenerationState = "generating"
+        XCTAssertNil(AgentSnapshotPresenter.knownAvailabilityCause(snapshot, at: now))
+        snapshot.invalidateLocalStatusObservation()
+        XCTAssertNil(snapshot.localImageGenerationState)
+        snapshot.cliUpdateInProgress = true
+        XCTAssertTrue(AgentSnapshotPresenter.knownAvailabilityCause(snapshot, at: now)?.contains("updating or restarting") == true)
+    }
+
     private func freshStatusSnapshot(now: Date) -> AgentSnapshot {
         var snapshot = AgentSnapshot.empty
         snapshot.state = .serving

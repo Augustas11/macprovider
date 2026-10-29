@@ -481,6 +481,48 @@ final class ShellScreensTests: XCTestCase {
         XCTAssertEqual(DiagnosticsPresentation.filteredLog(lines, filter: .problems).lines, ["coordinator join failed: timeout"])
     }
 
+    func testDiagnosticsLogFilterFallsBackToRecentLinesWhenNoProblemsExist() {
+        let lines = Array(repeating: "idle_prewarm skipped", count: 400)
+        for filter in DiagnosticsPresentation.LogFilter.allCases {
+            let result = DiagnosticsPresentation.filteredLog(lines, filter: filter)
+            XCTAssertEqual(result.lines.count, DiagnosticsPresentation.maxLogLines)
+            XCTAssertEqual(result.lines.last, "idle_prewarm skipped")
+            XCTAssertEqual(result.hiddenIdlePrewarm, 0)
+        }
+        XCTAssertEqual(DiagnosticsPresentation.filteredLog(["provider ready"], filter: .problems).lines, ["provider ready"])
+    }
+
+    func testDiagnosticsLogProblemsIncludeIdlePrewarmFailures() {
+        let lines = ["idle_prewarm skipped", "idle_prewarm error: insufficient memory", "provider ready"]
+        let result = DiagnosticsPresentation.filteredLog(lines, filter: .problems)
+        XCTAssertEqual(result.lines, ["idle_prewarm error: insufficient memory"])
+        XCTAssertEqual(result.hiddenIdlePrewarm, 1)
+    }
+
+    func testDiagnosticsSoftwareStatusShowsRunningVersionDuringAndAfterUpdate() {
+        var snapshot = AgentSnapshot.empty
+        snapshot.cliVersion = "1.8.274"
+        snapshot.latestReleaseVersion = "1.8.277"
+        snapshot.cliUpdateInProgress = true
+        var value = DiagnosticsPresentation.providerSoftwareLine(snapshot)
+        XCTAssertTrue(value.contains("Running v1.8.274"), value)
+        XCTAssertTrue(value.contains("Installing"), value)
+        XCTAssertFalse(value.contains("available"), value)
+        XCTAssertNil(AgentSnapshotPresenter.updateTargetVersion(snapshot))
+        XCTAssertTrue(AgentSnapshotPresenter.cliVersionLine(snapshot).contains("Installing"))
+        XCTAssertTrue(AgentSnapshotPresenter.cliVersionMenuLine(snapshot)?.contains("Installing") == true)
+        XCTAssertFalse(AgentSnapshotPresenter.cliVersionMenuLine(snapshot)?.contains("up to date") == true)
+        snapshot.cliUpdateInProgress = false
+        snapshot.cliVersion = "1.8.277"
+        value = DiagnosticsPresentation.providerSoftwareLine(snapshot)
+        XCTAssertTrue(value.contains("Running v1.8.277"), value)
+        XCTAssertTrue(value.contains("up to date"), value)
+        XCTAssertFalse(value.contains("available"), value)
+        snapshot.lifecycleState = "update_in_progress"
+        XCTAssertNil(AgentSnapshotPresenter.updateTargetVersion(snapshot))
+        XCTAssertTrue(DiagnosticsPresentation.providerSoftwareLine(snapshot).contains("Installing"))
+    }
+
     func testDiagnosticsAlwaysOffersExportAndResetAndNamesNoFindingsHonestly() {
         let strings = DiagnosticsPresentation.screenStrings(.empty, appVersion: "1.8.256")
         XCTAssertTrue(strings.contains(DashboardCopy.exportDiagnosticsTitle))

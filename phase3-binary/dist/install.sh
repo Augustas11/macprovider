@@ -12123,7 +12123,9 @@ write_watchdog_script() {
 # Health verdict: the exact launchd service PID must own the configured local
 # listener and its /v1/health endpoint must answer. /v1/health returns non-2xx
 # for degraded/draining/unavailable states, so a provider stuck reporting
-# unavailable after the watchdog is armed is restartable. Coordinator TCP
+# unavailable after the watchdog is armed is restartable unless operator
+# pause or an active local image creation phase intentionally holds buyers.
+# Coordinator TCP
 # reachability is advisory logging only; a missing ESTABLISHED coordinator
 # connection no longer causes a kick by itself. Update and rollback
 # transactions are resolved by their installer/CLI owner, not by this watchdog.
@@ -12606,6 +12608,15 @@ if not isinstance(operator_paused, bool):
     sys.exit(1)
 
 if operator_paused or lifecycle.get("state") == "paused_by_operator":
+    sys.exit(1)
+
+# A creative hold deliberately unloads the language model while keeping the
+# provider process alive. Recovery-required is deliberately excluded: failed
+# restoration must remain eligible for the ordinary health restart path.
+creative = body.get("local_image_generation")
+if isinstance(creative, dict) and creative.get("state") in (
+    "holding_customers", "downloading", "generating", "warm", "restoring",
+):
     sys.exit(1)
 
 sys.exit(0 if body.get("status") == "unavailable" else 1)

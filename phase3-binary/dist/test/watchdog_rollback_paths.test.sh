@@ -159,6 +159,26 @@ for script_name in standalone inline; do
     script="$INLINE"
   fi
 
+  # Exercise the exact status predicate in both distributed copies. Creative
+  # holds veto health restarts; recovery_required keeps recovery possible.
+  python3 - "$script" <<'PYTEST'
+import json
+import os
+import subprocess
+import sys
+
+text = open(sys.argv[1], encoding="utf-8").read()
+function = text.split("local_status_restart_recommended() {", 1)[1]
+predicate = function.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+for state in ("holding_customers", "downloading", "generating", "warm", "restoring", "recovery_required", "idle"):
+    body = {"status": "unavailable", "lifecycle": {"operator_paused": False, "state": "serving_buyers"},
+            "local_image_generation": {"state": state}}
+    result = subprocess.run([sys.executable, "-"], input=predicate, text=True,
+                            env={**os.environ, "STATUS_BODY": json.dumps(body)}, check=False)
+    expected = 0 if state in ("recovery_required", "idle") else 1
+    assert result.returncode == expected, (sys.argv[1], state, result.returncode)
+PYTEST
+
   assert_repeated_failed_startup_is_observe_only "$script" "$TMP/failed-startup-$script_name"
 
   make_fixture "$TMP/no-rollback-$script_name"

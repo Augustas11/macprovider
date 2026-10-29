@@ -104,6 +104,7 @@ enum InstalledProviderMonitor {
         /// Continuous batching and native MTP state from `/v1/status`, for the
         /// Provider screen (#2054). nil when the CLI does not report them.
         var engine: ProviderEngineStatus? = nil
+        var localImageGenerationState: String? = nil
     }
 
     static func readHTTPPort(paths: ProviderPaths = .current) -> Int? {
@@ -975,7 +976,10 @@ enum InstalledProviderMonitor {
             admissionIdentityRecoveryAction: trustTypedFields && trustAdmissionIdentity
                 ? stringValue(admissionIdentity["recovery_action"])
                 : nil,
-            engine: trustTypedFields ? ProviderEngineStatus.decode(status: object) : nil
+            engine: trustTypedFields ? ProviderEngineStatus.decode(status: object) : nil,
+            localImageGenerationState: trustTypedFields
+                ? stringValue((object["local_image_generation"] as? [String: Any])?["state"])
+                : nil
         )
     }
 
