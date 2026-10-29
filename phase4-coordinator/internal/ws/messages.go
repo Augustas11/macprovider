@@ -352,8 +352,9 @@ type AuthModelHashSession struct {
 }
 
 type Heartbeat struct {
-	ToolSelectionCapabilities []pool.ToolSelectionCapability `json:"tool_selection_capabilities,omitempty"`
-	VisionRuntimeCapabilities []pool.VisionRuntimeCapability `json:"vision_runtime_capabilities,omitempty"`
+	ConversationCache         *pool.ConversationCacheTelemetry `json:"conversation_cache,omitempty"`
+	ToolSelectionCapabilities []pool.ToolSelectionCapability   `json:"tool_selection_capabilities,omitempty"`
+	VisionRuntimeCapabilities []pool.VisionRuntimeCapability   `json:"vision_runtime_capabilities,omitempty"`
 
 	Type                    string                             `json:"type"`
 	Status                  string                             `json:"status"`
@@ -2071,6 +2072,13 @@ func ParseHeartbeat(payload []byte) (Heartbeat, HeartbeatPresence, string, error
 			return Heartbeat{}, presence, "safety_telemetry.observed_at", err
 		}
 		hb.SafetyTelemetry = &telemetry
+	}
+	if v, ok := raw["conversation_cache"]; ok && string(v) != "null" {
+		var cache pool.ConversationCacheTelemetry
+		// Observe-only: malformed optional cache telemetry never fences inference.
+		if len(v) <= 256*1024 && json.Unmarshal(v, &cache) == nil && cache.Valid() {
+			hb.ConversationCache = &cache
+		}
 	}
 	if v, ok := raw["cb_self_check"]; ok && string(v) != "null" {
 		selfCheck, err := parseCBSelfCheck(v)

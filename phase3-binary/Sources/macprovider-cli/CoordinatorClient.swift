@@ -7686,6 +7686,7 @@ actor CoordinatorClient {
         }
         // SPEC-038 v0.3.15: the on-device CB self-check state, for the release
         // canary and operators. Absent until a self-check exists.
+        payload["conversation_cache"] = await modelRuntime.conversationCacheCounters().jsonObject
         let engineRuntimeSnapshot = await modelRuntime.currentSnapshot()
         payload["tool_selection_capabilities"] = Self.toolSelectionCapabilities(
             wireModelID: coordinatorWireModelID(for: engineRuntimeSnapshot.modelID),

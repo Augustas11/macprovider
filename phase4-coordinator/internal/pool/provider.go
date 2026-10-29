@@ -358,6 +358,9 @@ type Provider struct {
 	// operators so remote canaries can enforce queue, memory, thermal, restart,
 	// and runtime invariants without a provider-local network route.
 	SafetyTelemetry *ProviderSafetyTelemetry `json:"safety_telemetry,omitempty"`
+	// Operator-only cache observations; never serialize on buyer surfaces.
+	conversationCache        *ConversationCacheObservation
+	conversationCacheHistory []ConversationCacheObservation
 	// CBSelfCheck is the provider's latest SPEC-038 v0.3.15 on-device
 	// continuous-batching self-check state, reported on heartbeats. It is
 	// observability for operators and release canaries; routing still uses
@@ -959,10 +962,11 @@ func (p Provider) SortKey() string {
 }
 
 type Registry struct {
-	mu        sync.RWMutex
-	providers map[string]*Provider
-	sessions  map[string]*Provider
-	endpoints map[string]config.ProviderConfig
+	conversationCaches map[string]retainedConversationCache
+	mu                 sync.RWMutex
+	providers          map[string]*Provider
+	sessions           map[string]*Provider
+	endpoints          map[string]config.ProviderConfig
 	// buyerServing, when set, decides whether a provider passes the coordinator's
 	// REQUEST-INDEPENDENT buyer-routability gates (RoutingEligible + transport-
 	// reachable + positive context window + not Tier-2-excluded) for the FR-CAN22
@@ -1324,6 +1328,8 @@ func (r *Registry) RegisterAtDetailed(p *Provider, conn net.Conn, now time.Time)
 		// The invariant this delete still preserves is per-provider
 		// attribution only.
 		delete(r.seenModelsByProvider, p.ProviderID)
+		p.conversationCache = existing.conversationCache
+		p.conversationCacheHistory = existing.conversationCacheHistory
 		// Phase 3 CODE-M1 / ARCH-M1: preserve verified MDA proof across
 		// reconnect when the SE key still matches the bound hash.
 		MigrateMDAProofFrom(existing, p)
@@ -1331,6 +1337,10 @@ func (r *Registry) RegisterAtDetailed(p *Provider, conn net.Conn, now time.Time)
 		if r.stageReceiptPublicationLocked(nil, p, now) == RegisterRefusalReceiptRotationGraceActive {
 			return nil, false, RegisterRefusalReceiptRotationGraceActive
 		}
+	}
+	if retained, ok := r.conversationCaches[p.ProviderID]; ok && retained.latest != nil && now.Sub(retained.latest.ObservedAt) <= 24*time.Hour {
+		p.conversationCache = retained.latest
+		p.conversationCacheHistory = retained.history
 	}
 	p.conn = conn
 	if p.Tier == "" {
@@ -3131,6 +3141,7 @@ type HeartbeatUpdate struct {
 	LastAutoupdateEvent json.RawMessage
 	HardwareCapacity    *ProviderHardwareCapacity
 	SafetyTelemetry     *ProviderSafetyTelemetry
+	ConversationCache   *ConversationCacheTelemetry
 	At                  time.Time
 }
 
@@ -3209,6 +3220,10 @@ func (r *Registry) applyHeartbeatLocked(providerID, assignedID string, hb Heartb
 	priorLoadingState := p.LastLoadingState
 	priorLoadingStartedAt := p.LoadingStartedAt
 	p.LastHeartbeatAt = hb.At
+	p.recordConversationCache(hb.ConversationCache, hb.At)
+	if hb.ConversationCache.Valid() {
+		r.retainConversationCacheLocked(p, hb.At)
+	}
 	// Absence withdraws guarantees, including after a runtime/model change.
 	p.ToolSelectionCapabilities = hb.ToolSelectionCapabilities
 	p.VisionRuntimeCapabilities = hb.VisionRuntimeCapabilities

@@ -216,6 +216,8 @@ struct ConversationColdSnapshot: Sendable {
     /// displacement, and released exactly once by the persist Task. 0 for a snapshot
     /// that carries no reservation (e.g. a test double).
     let reservedWriteBytes: Int
+    /// Called only after the disk store reports a durable committed write.
+    var onPersisted: (@Sendable () async -> Void)? = nil
 
     init(rawKey: String, tokens: [Int32], layers: [KVLayerPayload],
          layersV2: [KVCacheLayerPayload] = [],

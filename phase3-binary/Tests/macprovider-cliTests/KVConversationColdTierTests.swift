@@ -164,6 +164,27 @@ final class KVConversationColdTierTests: XCTestCase {
         XCTAssertEqual(fake.finishedOutcomes.count, 1)
         XCTAssertTrue(fake.finishedOutcomes.first?.accepted ?? false, "accepted promotion emits disk_hit")
         await cache.abort(hit!)
+        let counters = await cache.countersSnapshot()
+        XCTAssertEqual(counters.models.first?.diskHits, 1)
+        XCTAssertEqual(counters.models.first?.hits, 1)
+        XCTAssertEqual(counters.models.first?.cachedPromptTokens, 57)
+    }
+
+    func testDiskWriteCounterWaitsForSuccessfulPersistenceCallback() async throws {
+        let fake = FakeColdTier()
+        let cache = makeConversationCacheForTest(config: Self.config, coldTier: fake)
+        let value = await cache.begin(conversationKey: "conv:kvs-synth:counters", incomingTokens: int32Range(0..<64),
+                                      modelID: "model-a", kvBits: nil, cold: context(eligible: true))
+        let lease = try XCTUnwrap(value)
+        await cache.commit(lease, cache: ConversationCacheLayers([trimmableCache(offset: 64)]),
+                           fullTokens: int32Range(0..<64), cold: context(eligible: true))
+        let queued = await cache.countersSnapshot()
+        XCTAssertEqual(queued.models.first?.diskWrites, 0)
+        let pending = try XCTUnwrap(fake.enqueued.first)
+        XCTAssertNotNil(pending.onPersisted)
+        await pending.onPersisted?()
+        let committed = await cache.countersSnapshot()
+        XCTAssertEqual(committed.models.first?.diskWrites, 1)
     }
 
     // MARK: - AC-7: availability difference — enabled promotes, disabled misses
@@ -454,10 +475,11 @@ final class KVConversationColdTierTests: XCTestCase {
         let (adapter, _) = makeAdapter(writeStagingMaxBytes: 4096)
         XCTAssertTrue(adapter.reserveWriteLive(500))
         XCTAssertEqual(adapter.writeLiveBytesForTest, 500)
-        let snap = ConversationColdSnapshot(
+        var snap = ConversationColdSnapshot(
             rawKey: "conv:kvs-synth:release", tokens: [], layers: [],
             identity: FakeColdTier.writeIdentity, sampledPurgeGeneration: 0, commitSequence: 1,
             createdAtMillis: 0, eligibleUntilMillis: 0, incarnation: "i", reservedWriteBytes: 500)
+        snap.onPersisted = { XCTFail("inactive store must not count a committed write") }
         adapter.enqueuePersist(snap)
         await adapter.drainPendingPersists(timeoutSeconds: 5)
         XCTAssertEqual(adapter.writeLiveBytesForTest, 0, "persist Task releases the single-release reservation exactly once")

@@ -42,6 +42,7 @@ protocol ModelRuntimeServing: Actor {
     /// Optional provider-status snapshot for runtimes backed by the MLX KV
     /// disk tier. Loopback and fixture runtimes use the default nil result.
     func kvDiskTierSnapshot() async -> RuntimeKVDiskTierSnapshot?
+    func conversationCacheCounters() async -> ConversationCacheCountersSnapshot
     /// Identity/status surface the serve command reads to build ProviderStatus.
     /// The concrete MLX `ModelRuntime` witnesses these with actor-isolated
     /// members; loopback runtimes report their own GGUF-file identity. Every
@@ -283,6 +284,7 @@ extension ModelRuntimeServing {
     }
 
     func kvDiskTierSnapshot() async -> RuntimeKVDiskTierSnapshot? { nil }
+    func conversationCacheCounters() async -> ConversationCacheCountersSnapshot { .init() }
 
     func complete(_ request: ChatCompletionRequest) async throws -> CompletionResult {
         try await complete(request, shouldCancel: { false })
@@ -11500,6 +11502,10 @@ maxTokens: 1,
     }
 
     /// A snapshot of the hot (RAM) conversation cache residency for `kv-cache status`.
+    func conversationCacheCounters() async -> ConversationCacheCountersSnapshot {
+        await conversationCache.countersSnapshot()
+    }
+
     func hotConversationStats() async -> (entries: Int, tokens: Int) {
         await conversationCache.snapshotStats()
     }

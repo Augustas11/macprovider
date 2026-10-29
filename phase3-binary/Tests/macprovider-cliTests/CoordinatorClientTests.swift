@@ -5372,6 +5372,10 @@ final class CoordinatorClientTests: XCTestCase {
                 hardwareSummary["bandwidth_gb_per_s"] != nil,
             "hardware_summary should publish at least one capacity field: \(hardwareSummary)"
         )
+        let cache = try XCTUnwrap(heartbeat["conversation_cache"] as? [String: Any])
+        XCTAssertEqual(Set(cache.keys), ["process_id", "models"])
+        XCTAssertEqual(cache["process_id"] as? String, ConversationCacheCountersSnapshot.processID)
+        XCTAssertNotNil(cache["models"] as? [[String: Any]])
         var heartbeatWithoutHardware = heartbeat
         heartbeatWithoutHardware.removeValue(forKey: "hardware_summary")
         // SPEC-001-R006: the engine profile rides every MLX heartbeat; its
@@ -5417,7 +5421,7 @@ final class CoordinatorClientTests: XCTestCase {
         let heartbeatJSON = Self.jsonString(heartbeatWithoutHardware)
         let helloJSON = Self.jsonString(helloWithoutCapabilities)
         let expectedHeartbeat = """
-        {"avg_latency_ms_since_last":null,"max_concurrency":1,"max_context_tokens":20000,"model_id":"model-a","model_params_b":0,"ram_gb":\(capacity.ramGB),"requests_served_since_last":0,"slots_free":1,"slots_total":1,"status":"ready","throughput_tps_estimate":0,"throughput_tps_since_last":null,"type":"heartbeat"}
+        {"avg_latency_ms_since_last":null,"conversation_cache":{"models":[],"process_id":"\(ConversationCacheCountersSnapshot.processID)"},"max_concurrency":1,"max_context_tokens":20000,"model_id":"model-a","model_params_b":0,"ram_gb":\(capacity.ramGB),"requests_served_since_last":0,"slots_free":1,"slots_total":1,"status":"ready","throughput_tps_estimate":0,"throughput_tps_since_last":null,"type":"heartbeat"}
         """
         let expectedHello = """
         {"attestation":null,"binary_version":"\(CoordinatorClient.binaryVersion)","hostname":"\(Host.current().localizedName ?? "unknown")","max_concurrency":1,"max_context_tokens":20000,"model_hash":"\(String(repeating: "a", count: 64))","model_id":"model-a","model_params_b":0,"provider_id":"provider-test","ram_gb":\(capacity.ramGB),"throughput_tps_estimate":0,"tier":1,"type":"hello","version":1}

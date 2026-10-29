@@ -18,6 +18,73 @@ final class ConversationCacheTests: XCTestCase {
         Device.setDefault(device: Device(.cpu))
     }
 
+    func testCountersAccumulateHitsMissesAndPreserveModelsAfterPurge() async throws {
+        let cache = makeConversationCacheForTest()
+        let tokens = int32Range(0..<64)
+        let seedValue = await cache.begin(
+            conversationKey: "private-conversation", incomingTokens: tokens, modelID: "model-a", kvBits: nil)
+        let seed = try XCTUnwrap(seedValue)
+        await cache.commit(seed, cache: ConversationCacheLayers([trimmableCache(offset: 64)]), fullTokens: tokens)
+        let resident = await cache.countersSnapshot()
+        XCTAssertEqual(resident.models.first?.entries, 1)
+        XCTAssertEqual(resident.models.first?.tokens, 64)
+        XCTAssertGreaterThanOrEqual(resident.models.first?.bytes ?? 0, 256)
+        XCTAssertGreaterThan(resident.models.first?.hotByteLimit ?? 0, 0)
+        let hitValue = await cache.begin(conversationKey: "private-conversation", incomingTokens: tokens + [65], modelID: "model-a", kvBits: nil)
+        let hit = try XCTUnwrap(hitValue)
+        await cache.commit(hit, cache: ConversationCacheLayers([trimmableCache(offset: 65)]), fullTokens: tokens + [65])
+        await cache.purgeAllHot()
+        let nextValue = await cache.begin(conversationKey: "other", incomingTokens: tokens, modelID: "model-b", kvBits: nil)
+        let next = try XCTUnwrap(nextValue)
+        await cache.abort(next)
+        let snapshot = await cache.countersSnapshot()
+        let model = try XCTUnwrap(snapshot.models.first { $0.modelID == "model-a" })
+        XCTAssertEqual(model.lookups, 2)
+        XCTAssertEqual(model.hits, 1)
+        XCTAssertEqual(model.cachedPromptTokens, 64)
+        XCTAssertEqual(model.misses, ["cold_start": 1])
+        XCTAssertEqual(model.evictions, ["purge_all": 1])
+        XCTAssertEqual(model.coldSnapshotSkips, 2)
+        XCTAssertEqual(model.entries, 0)
+        XCTAssertEqual(model.bytes, 0)
+        XCTAssertEqual(snapshot.models.map(\.modelID), ["model-a", "model-b"])
+        XCTAssertFalse(String(describing: snapshot.jsonObject).contains("private-conversation"))
+        XCTAssertEqual(snapshot.jsonObject["process_id"] as? String, resident.jsonObject["process_id"] as? String)
+    }
+
+    func testCountersDistinguishCapacityEvictionsAndTTLMisses() async throws {
+        let tokens = int32Range(0..<64)
+        let noMemory = ConversationCacheMemoryBudget(probe: .init(identity: "no-headroom") {
+            NativeMTPRoundSystemMemorySample(availableBytes: 0, physicalBytes: 64 * 1024 * 1024 * 1024)
+        })
+        let fixtures: [(ConversationCache.Config, ConversationCacheMemoryBudget, String, Int)] = [
+            (.init(maxConversations: 1, maxTokens: 1000, ttlSeconds: 60), conversationCacheTestMemoryBudget(), "lru_count_limit", 2),
+            (.init(maxConversations: 8, maxTokens: 63, ttlSeconds: 60), conversationCacheTestMemoryBudget(), "lru_token_limit", 1),
+            (.init(maxConversations: 8, maxTokens: 1000, ttlSeconds: 60), noMemory, "lru_byte_limit", 1),
+        ]
+        for (config, budget, reason, count) in fixtures {
+            let cache = makeConversationCacheForTest(config: config, memoryBudget: budget)
+            for index in 0..<count {
+                let value = await cache.begin(conversationKey: "key-\(index)", incomingTokens: tokens, modelID: "m", kvBits: nil)
+                let lease = try XCTUnwrap(value)
+                await cache.commit(lease, cache: ConversationCacheLayers([trimmableCache(offset: 64)]), fullTokens: tokens)
+            }
+            let snapshot = await cache.countersSnapshot()
+            XCTAssertEqual(snapshot.models.first?.evictions, [reason: 1])
+        }
+        let cache = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 1000, ttlSeconds: 60))
+        let start = Date(timeIntervalSince1970: 1000)
+        let seedValue = await cache.begin(conversationKey: "ttl", incomingTokens: tokens, modelID: "m", kvBits: nil, now: start)
+        let seed = try XCTUnwrap(seedValue)
+        await cache.commit(seed, cache: ConversationCacheLayers([trimmableCache(offset: 64)]), fullTokens: tokens, now: start)
+        let missValue = await cache.begin(conversationKey: "ttl", incomingTokens: tokens + [65], modelID: "m", kvBits: nil, now: start.addingTimeInterval(61))
+        let miss = try XCTUnwrap(missValue)
+        await cache.abort(miss)
+        let snapshot = await cache.countersSnapshot()
+        XCTAssertEqual(snapshot.models.first?.misses, ["cold_start": 1, "ttl": 1])
+        XCTAssertEqual(snapshot.models.first?.evictions, ["ttl": 1])
+    }
+
     func testRevokedFleetGrantCannotBeginOrPublishAfterPurge() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -101,6 +168,9 @@ final class ConversationCacheTests: XCTestCase {
         let bitsSwap = await cache.begin(conversationKey: "conv:test", incomingTokens: tokens + [99], modelID: "model-a", kvBits: 8)
         XCTAssertEqual(bitsSwap?.cachedPromptTokens, 0)
         await cache.abort(bitsSwap!)
+        let counters = await cache.countersSnapshot()
+        XCTAssertEqual(counters.models.first { $0.modelID == "model-b" }?.misses["model_swap"], 1)
+        XCTAssertEqual(counters.models.first { $0.modelID == "model-a" }?.misses["kvbits_swap"], 1)
     }
 
     func testTTLAndNonTrimmableMiss() async {

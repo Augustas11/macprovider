@@ -14,24 +14,26 @@ import (
 )
 
 type adminProviderView struct {
-	ProviderID         string     `json:"provider_id"`
-	Presence           string     `json:"presence"`
-	AssignedID         string     `json:"assigned_id,omitempty"`
-	BinaryVersion      string     `json:"binary_version,omitempty"`
-	CompatibilitySetID string     `json:"compatibility_set_id,omitempty"`
-	ModelID            string     `json:"model_id,omitempty"`
-	ModelLoaded        bool       `json:"model_loaded,omitempty"`
-	ModelHash          string     `json:"model_hash,omitempty"`
-	State              string     `json:"state,omitempty"`
-	AuthState          string     `json:"auth_state,omitempty"`
-	ConnectedAt        *time.Time `json:"connected_at,omitempty"`
-	LastHeartbeatAt    *time.Time `json:"last_heartbeat_at,omitempty"`
-	LastActivityAt     *time.Time `json:"last_activity_at,omitempty"`
-	LastSeenAt         time.Time  `json:"last_seen_at"`
-	RoutingEligible    bool       `json:"routing_eligible"`
-	RecentEvents       int        `json:"recent_event_count,omitempty"`
-	Diagnostic         string     `json:"diagnostic,omitempty"`
-	DiagnosticAt       *time.Time `json:"diagnostic_at,omitempty"`
+	ConversationCache        *pool.ConversationCacheObservation  `json:"conversation_cache,omitempty"`
+	ConversationCacheHistory []pool.ConversationCacheObservation `json:"conversation_cache_history,omitempty"`
+	ProviderID               string                              `json:"provider_id"`
+	Presence                 string                              `json:"presence"`
+	AssignedID               string                              `json:"assigned_id,omitempty"`
+	BinaryVersion            string                              `json:"binary_version,omitempty"`
+	CompatibilitySetID       string                              `json:"compatibility_set_id,omitempty"`
+	ModelID                  string                              `json:"model_id,omitempty"`
+	ModelLoaded              bool                                `json:"model_loaded,omitempty"`
+	ModelHash                string                              `json:"model_hash,omitempty"`
+	State                    string                              `json:"state,omitempty"`
+	AuthState                string                              `json:"auth_state,omitempty"`
+	ConnectedAt              *time.Time                          `json:"connected_at,omitempty"`
+	LastHeartbeatAt          *time.Time                          `json:"last_heartbeat_at,omitempty"`
+	LastActivityAt           *time.Time                          `json:"last_activity_at,omitempty"`
+	LastSeenAt               time.Time                           `json:"last_seen_at"`
+	RoutingEligible          bool                                `json:"routing_eligible"`
+	RecentEvents             int                                 `json:"recent_event_count,omitempty"`
+	Diagnostic               string                              `json:"diagnostic,omitempty"`
+	DiagnosticAt             *time.Time                          `json:"diagnostic_at,omitempty"`
 	// Operator-only classification fields projected from live pool.Provider
 	// (and, for the durable scalars, from the offline LastKnown snapshot).
 	// These stay behind operator auth and are never surfaced buyer-side.
@@ -163,10 +165,16 @@ func (s *Server) writeAdminProviderList(w http.ResponseWriter, r *http.Request) 
 			break
 		}
 		if p, ok := live[snap.ProviderID]; ok {
-			out = append(out, adminViewWithDiagnostic(adminViewFromLive(p), snap))
+			view := adminViewWithDiagnostic(adminViewFromLive(p), snap)
+			if r.URL.Query().Get("cache_history") == "1" {
+				_, view.ConversationCacheHistory = p.ConversationCacheObservations()
+			}
+			out = append(out, view)
 		} else {
 			snap.Presence = "offline"
-			out = append(out, adminViewFromLastKnown(snap))
+			view := adminViewFromLastKnown(snap)
+			s.addRetainedConversationCache(&view, r)
+			out = append(out, view)
 		}
 		lastSnap = &known[i]
 	}
@@ -192,6 +200,9 @@ func (s *Server) writeAdminProviderDetail(w http.ResponseWriter, r *http.Request
 	var view adminProviderView
 	if p, ok := s.pool.Resolve(providerID, ""); ok && s.isProviderTransportConnected(p) {
 		view = adminViewFromLive(p)
+		if r.URL.Query().Get("cache_history") == "1" {
+			_, view.ConversationCacheHistory = p.ConversationCacheObservations()
+		}
 		snap, found, err := s.connectionEvents.GetLastKnown(ctx, providerID)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": map[string]any{"message": "last-known lookup failed", "code": "events_store_error"}})
@@ -230,6 +241,9 @@ func (s *Server) writeAdminProviderDetail(w http.ResponseWriter, r *http.Request
 		}
 	}
 
+	if view.ConversationCache == nil {
+		s.addRetainedConversationCache(&view, r)
+	}
 	events, err := s.connectionEvents.ListEvents(ctx, providerID, 20)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": map[string]any{"message": "event list failed", "code": "events_store_error"}})
@@ -296,6 +310,7 @@ func adminViewFromLive(p pool.Provider) adminProviderView {
 		EngineProfile:            p.EngineProfile,
 		NativeMTPCanary:          p.NativeMTPCanary,
 	}
+	view.ConversationCache = p.ConversationCacheObservation()
 	if !p.ConnectedAt.IsZero() {
 		t := p.ConnectedAt.UTC()
 		view.ConnectedAt = &t
@@ -357,4 +372,8 @@ func adminViewFromLastKnown(snap providerevents.LastKnown) adminProviderView {
 		AdmissionEvidenceStale:   snap.AdmissionEvidenceStale,
 		AdmissionSandboxed:       snap.AdmissionSandboxed,
 	}
+}
+
+func (s *Server) addRetainedConversationCache(view *adminProviderView, r *http.Request) {
+	view.ConversationCache, view.ConversationCacheHistory = s.pool.RetainedConversationCache(view.ProviderID, s.now(), r.URL.Query().Get("cache_history") == "1")
 }

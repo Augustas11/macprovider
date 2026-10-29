@@ -337,6 +337,38 @@ final class ConversationCacheMemoryBudget: @unchecked Sendable {
     }
 }
 
+/// Cumulative counters live on the cache actor; snapshots contain no tensors or keys.
+struct ConversationCacheModelCounters: Sendable {
+    var modelID: String
+    var lookups: UInt64 = 0
+    var hits: UInt64 = 0
+    var cachedPromptTokens: UInt64 = 0
+    var misses: [String: UInt64] = [:]
+    var evictions: [String: UInt64] = [:]
+    var coldSnapshotSkips: UInt64 = 0
+    var diskHits: UInt64 = 0
+    var diskWrites: UInt64 = 0
+    var entries = 0
+    var tokens = 0
+    var bytes = 0
+    var hotByteLimit = 0
+
+    var jsonObject: [String: Any] {
+        ["model_id": modelID, "lookups": lookups, "hits": hits,
+         "cached_prompt_tokens": cachedPromptTokens, "misses": misses, "evictions": evictions,
+         "cold_snapshot_skips": coldSnapshotSkips, "disk_hits": diskHits, "disk_writes": diskWrites,
+         "entries": entries, "tokens": tokens, "bytes": bytes, "hot_byte_limit": hotByteLimit]
+    }
+}
+
+struct ConversationCacheCountersSnapshot: Sendable {
+    static let processID = UUID().uuidString.lowercased()
+    var models: [ConversationCacheModelCounters] = []
+    var jsonObject: [String: Any] {
+        ["process_id": Self.processID, "models": models.map(\.jsonObject)]
+    }
+}
+
 actor ConversationCache {
     static let lcpThreshold = 32
 
@@ -384,6 +416,7 @@ actor ConversationCache {
     private var localPurgeGen: [String: Int] = [:]
     /// Within-process purge-all generation.
     private var globalPurgeGen = 0
+    private var counters: [String: ConversationCacheModelCounters] = [:]
 
     init(config: Config = .fromEnvironment(), coldTier: (any ConversationColdTier)? = nil,
          memoryBudget: ConversationCacheMemoryBudget = ConversationCacheMemoryBudget()) {
@@ -422,6 +455,7 @@ actor ConversationCache {
         guard authorized() else { releaseTurn(key); return nil }
 
         let keyHash = Self.keyHash(key)
+        let expired = entries[key].map { now.timeIntervalSince($0.storedAt) > config.ttlSeconds } ?? false
         await sweepExpired(now: now)
         await enforceLimits()
         guard authorized() else { releaseTurn(key); return nil }
@@ -473,6 +507,7 @@ actor ConversationCache {
             let promoFencedGlobal = globalPurgeGen > globalPurgeStamp
             if promoFencedLocal || promoFencedGlobal || !authorized() {
                 await coldTier.finishPromotion(candidate, accepted: false, rejectionReason: "purged_during_promotion")
+                recordMiss(modelID: modelID, reason: "purged_during_promotion")
                 log("event=conv_cache action=miss key_hash=\(keyHash) reason=purged_during_promotion")
                 return stampedLease(reusableCache: nil, cachedPromptTokens: 0, lcp: 0, trimBy: 0)
             }
@@ -484,6 +519,7 @@ actor ConversationCache {
             } ?? createdAt
             let originalStoredAt = min(createdAt, deadlineBound)
             guard now.timeIntervalSince(originalStoredAt) <= config.ttlSeconds else {
+                recordMiss(modelID: modelID, reason: "ttl")
                 await coldTier.finishPromotion(candidate, accepted: false, rejectionReason: "expired_during_promotion")
                 return stampedLease(reusableCache: nil, cachedPromptTokens: 0, lcp: 0, trimBy: 0)
             }
@@ -503,6 +539,7 @@ actor ConversationCache {
             if let coldTier, let cold, cold.identityUnavailableReason != nil {
                 await coldTier.noteReadIdentityUnavailable(conversationKey: key)
             }
+            recordMiss(modelID: modelID, reason: expired ? "ttl" : "cold_start")
             log("event=conv_cache action=miss key_hash=\(keyHash) reason=cold_start")
             return stampedLease(reusableCache: nil, cachedPromptTokens: 0, lcp: 0, trimBy: 0)
         }
@@ -510,6 +547,7 @@ actor ConversationCache {
         // Predicate miss on a promoted candidate is `disk_promote_rejected` (§5
         // row 25); on a resident hot candidate it is the shipped hot miss.
         func predicateMiss(_ reason: String) async -> ConversationCacheLease {
+            recordMiss(modelID: modelID, reason: reason)
             if let promotionCandidate {
                 await coldTier?.finishPromotion(promotionCandidate, accepted: false, rejectionReason: reason)
             }
@@ -640,6 +678,12 @@ actor ConversationCache {
             releaseTurn(key)
             return nil
         }
+        updateCounters(modelID: modelID) {
+            Self.increment(&$0.lookups)
+            Self.increment(&$0.hits)
+            Self.increment(&$0.cachedPromptTokens, by: UInt64(min(reuseLength, incomingTokens.count)))
+            if promotionCandidate != nil { Self.increment(&$0.diskHits) }
+        }
         let stats = currentStats()
         let checkpointField = (restoreCheckpoint ?? retainedCheckpoint).map { " recurrent_checkpoint=\($0.tokenCount)" }
             ?? (entry.kvCache.promptSnapshot ? " prompt_snapshot=true" : "")
@@ -718,16 +762,26 @@ actor ConversationCache {
                nowMillis: Int(now.timeIntervalSince1970 * 1000)) {
             // The adapter owns the persist Task (one pending per index, purge-all
             // cancellation, bounded shutdown drain). Non-blocking (CRITICAL-2/HIGH-5).
-            coldTier.enqueuePersist(snapshot)
+            var observedSnapshot = snapshot
+            // Capture only identity: the lease can retain live GPU cache arrays.
+            let persistedModelID = lease.modelID
+            observedSnapshot.onPersisted = { [weak self] in
+                await self?.recordDiskWrite(modelID: persistedModelID)
+            }
+            coldTier.enqueuePersist(observedSnapshot)
         } else if let coldTier, let cold, cold.identityUnavailableReason != nil {
             // FR-KVP12: a gated commit whose live identity is unavailable emits
             // disk_write_skipped(identity_unavailable) before failing safe to skip.
+            updateCounters(modelID: lease.modelID) { Self.increment(&$0.coldSnapshotSkips) }
             await coldTier.noteWriteSkippedIdentityUnavailable(conversationKey: lease.key)
         } else if coldTier == nil {
+            updateCounters(modelID: lease.modelID) { Self.increment(&$0.coldSnapshotSkips) }
             log("event=conv_cache action=cold_unattached key_hash=\(lease.keyHash)")
         } else if let cold, !cold.eligible {
+            updateCounters(modelID: lease.modelID) { Self.increment(&$0.coldSnapshotSkips) }
             log("event=conv_cache action=cold_ineligible key_hash=\(lease.keyHash) gated_identity_missing=\(cold.identityUnavailableReason != nil)")
         } else {
+            updateCounters(modelID: lease.modelID) { Self.increment(&$0.coldSnapshotSkips) }
             log("event=conv_cache action=cold_snapshot_skipped key_hash=\(lease.keyHash)")
         }
         releaseTurn(lease.key)
@@ -747,6 +801,7 @@ actor ConversationCache {
         guard !key.isEmpty else { return false }
         localPurgeGen[key, default: 0] += 1
         let removed = entries.removeValue(forKey: key)
+        if let removed { recordEviction(modelID: removed.modelID, reason: "purge") }
         await removed?.kvCache.discardRetainedPagedKV(conversationKey: key)
         let hadHot = removed != nil
         let hadPending = await coldTier?.cancelPendingPersist(conversationKey: key) ?? false
@@ -762,6 +817,7 @@ actor ConversationCache {
         let removed = entries
         entries.removeAll()
         for (key, entry) in removed {
+            recordEviction(modelID: entry.modelID, reason: "purge_all")
             await entry.kvCache.discardRetainedPagedKV(conversationKey: key)
         }
         await coldTier?.cancelPendingPersists()
@@ -812,6 +868,54 @@ actor ConversationCache {
 
     func snapshotStats() -> (entries: Int, tokens: Int) {
         currentStats()
+    }
+
+    /// One actor turn copies counters and gauges without evaluating MLX arrays.
+    func countersSnapshot() -> ConversationCacheCountersSnapshot {
+        var models = counters
+        let limit = memoryBudget.hotByteLimit()
+        for entry in entries.values {
+            var model = models[entry.modelID] ?? ConversationCacheModelCounters(modelID: entry.modelID)
+            model.entries += 1
+            model.tokens += entry.tokenCount
+            let tensorBytes = ConversationCacheMemoryBudget.tensorBytes(entry.kvCache)
+            let (tokenBytes, overflow) = entry.canonicalPromptTokens.count.multipliedReportingOverflow(by: MemoryLayout<Int32>.stride)
+            let (entryBytes, entryOverflow) = tensorBytes.addingReportingOverflow(tokenBytes)
+            let (total, totalOverflow) = model.bytes.addingReportingOverflow(entryBytes)
+            model.bytes = overflow || entryOverflow || totalOverflow ? Int.max : total
+            models[entry.modelID] = model
+        }
+        return ConversationCacheCountersSnapshot(models: models.keys.sorted().map {
+            var model = models[$0]!
+            model.hotByteLimit = limit
+            return model
+        })
+    }
+
+    private static func increment(_ value: inout UInt64, by amount: UInt64 = 1) {
+        let (sum, overflow) = value.addingReportingOverflow(amount)
+        value = overflow ? UInt64.max : sum
+    }
+
+    private func updateCounters(modelID: String, _ update: (inout ConversationCacheModelCounters) -> Void) {
+        var model = counters[modelID] ?? ConversationCacheModelCounters(modelID: modelID)
+        update(&model)
+        counters[modelID] = model
+    }
+
+    private func recordMiss(modelID: String, reason: String) {
+        updateCounters(modelID: modelID) {
+            Self.increment(&$0.lookups)
+            Self.increment(&$0.misses[reason, default: 0])
+        }
+    }
+
+    private func recordEviction(modelID: String, reason: String) {
+        updateCounters(modelID: modelID) { Self.increment(&$0.evictions[reason, default: 0]) }
+    }
+
+    private func recordDiskWrite(modelID: String) {
+        updateCounters(modelID: modelID) { Self.increment(&$0.diskWrites) }
     }
 
     /// The largest checkpoint the incoming prompt still shares (`tokenCount <= lcp`).
@@ -907,6 +1011,7 @@ actor ConversationCache {
         for (key, entry) in expired {
             guard let current = entries[key], current.kvCache === entry.kvCache else { continue }
             entries.removeValue(forKey: key)
+            recordEviction(modelID: entry.modelID, reason: "ttl")
             await entry.kvCache.discardRetainedPagedKV(conversationKey: key)
             log("event=conv_cache action=evict key_hash=\(Self.keyHash(key)) reason=ttl_\(Int(config.ttlSeconds / 60))min")
         }
@@ -926,9 +1031,12 @@ actor ConversationCache {
             })?.key else {
                 return
             }
+            let reason = entries.count > config.maxConversations ? "lru_count_limit"
+                : (currentStats().tokens > config.maxTokens ? "lru_token_limit" : "lru_byte_limit")
             let evicted = entries.removeValue(forKey: victim)
+            if let evicted { recordEviction(modelID: evicted.modelID, reason: reason) }
             await evicted?.kvCache.discardRetainedPagedKV(conversationKey: victim)
-            log("event=conv_cache action=evict key_hash=\(Self.keyHash(victim)) reason=lru")
+            log("event=conv_cache action=evict key_hash=\(Self.keyHash(victim)) reason=\(reason)")
         }
     }
 

@@ -4,6 +4,24 @@ import XCTest
 @testable import macprovider_cli
 
 final class ProviderStatusTests: XCTestCase {
+    func testStatusConversationCacheContractAndGoldenModel() async throws {
+        let status = ProviderStatus(modelID: "m", modelLoaded: true, capacity: makeCapacity())
+        let snapshot = await status.snapshot()
+        let counters = ConversationCacheCountersSnapshot(models: [ConversationCacheModelCounters(modelID: "m")])
+        let body = RouterHandler.statusResponse(snapshot, providerID: "p", coordinatorURL: nil, conversationCacheCounters: counters)
+        let cache = try XCTUnwrap(body["conversation_cache"] as? [String: Any])
+        XCTAssertEqual(Set(cache.keys), ["process_id", "models"])
+        XCTAssertNotNil(UUID(uuidString: try XCTUnwrap(cache["process_id"] as? String)))
+        let models = try XCTUnwrap(cache["models"] as? [[String: Any]])
+        let encoded = try JSONSerialization.data(withJSONObject: models, options: [.sortedKeys])
+        XCTAssertEqual(String(decoding: encoded, as: UTF8.self),
+            "[{\"bytes\":0,\"cached_prompt_tokens\":0,\"cold_snapshot_skips\":0,\"disk_hits\":0,\"disk_writes\":0,\"entries\":0,\"evictions\":{},\"hits\":0,\"hot_byte_limit\":0,\"lookups\":0,\"misses\":{},\"model_id\":\"m\",\"tokens\":0}]")
+        let contract = try XCTUnwrap(body["local_status_contract"] as? [String: Any])
+        XCTAssertTrue((contract["capabilities"] as? [String] ?? []).contains("conversation_cache_counters_v1"))
+        XCTAssertNotNil(body["continuous_batching"])
+        XCTAssertEqual(body["model"] as? String, "m")
+    }
+
     private struct FixedMemoryPressureProvider: MemoryPressureProviding {
         let value: ProviderMemoryPressure
         func currentMemoryPressure() -> ProviderMemoryPressure { value }

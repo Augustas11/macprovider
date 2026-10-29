@@ -659,7 +659,7 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
     private func doWrite(_ snapshot: ConversationColdSnapshot) async {
         // No restamping: the identity already carries the epoch captured at commit,
         // and the commit sequence was allocated under the hot lease (CRITICAL-2).
-        _ = try? await store.writeColdSnapshot(
+        let result = try? await store.writeColdSnapshot(
             rawKey: snapshot.rawKey, tokens: snapshot.tokens, layers: snapshot.layers,
             layersV2: snapshot.layersV2, recurrentCheckpoints: snapshot.recurrentCheckpoints,
             promptSnapshot: snapshot.promptSnapshot,
@@ -667,6 +667,7 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
             commitSequence: snapshot.commitSequence,
             createdAtMillis: snapshot.createdAtMillis, eligibleUntilMillis: snapshot.eligibleUntilMillis,
             incarnation: snapshot.incarnation, nowMillis: Self.nowMillis())
+        if case .committed? = result { await snapshot.onPersisted?() }
     }
 
     func cancelPendingPersist(conversationKey: String) async -> Bool {
