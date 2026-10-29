@@ -193,7 +193,11 @@ class NativeMTPAdmissionReleaseTest(unittest.TestCase):
                     pin["state"]["revision"] = "0" * 40
             changed_pin = harness.root / "Package.resolved"
             changed_pin.write_text(json.dumps(resolved))
+            staged = self.stage_native(harness, harness.root / "published-before-pin-change")
             with patch.object(catalog_release, "PACKAGE_RESOLVED_PATH", changed_pin):
+                # Published bytes retain their original runtime identity. This
+                # directory proof must not admit them for the changed source.
+                catalog_release.verify_directory(staged, allow_expired_tier2=True)
                 with self.assertRaisesRegex(catalog_release.CatalogError, "runtime_revision.*Package.resolved mlx-swift-lm pin"):
                     catalog_release.verify()
 
