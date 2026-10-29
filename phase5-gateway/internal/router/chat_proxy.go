@@ -1594,7 +1594,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		cancelCoordinator()
 		s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, 0, maxUsageTokens, "gateway_estimated", "invalid_provider_response", reservationWindow, resp)
 	}
-	forwardLine := func(line []byte) bool {
+	processLine := func(line []byte) bool {
 		select {
 		case <-r.Context().Done():
 			settleCancelled()
@@ -1793,7 +1793,10 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 					// #1570: a coordinator terminal error frame keeps its
 					// code. Rewriting provider_error to stream_malformed hid
 					// the real failure. Settlement is unchanged.
-					if code, errType, message, ok := coordinatorStreamTerminalError(terminalCode); ok {
+					if terminalCode == "context_length_exceeded" || terminalCode == "context_exceeds_capacity" {
+						_, normalized := clientContextOverflow(http.StatusBadRequest, []byte(data))
+						_, _ = fmt.Fprintf(w, "data: %s\n\n", normalized)
+					} else if code, errType, message, ok := coordinatorStreamTerminalError(terminalCode); ok {
 						writeSSEErrorWithReason(w, message, errType, code, terminalSSEErrorReason(data))
 					} else {
 						writeSSEError(w, "Upstream stream returned malformed data", "api_error", "stream_malformed")
@@ -1906,6 +1909,36 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		}
 		return true
 	}
+	ordering := streamOrdering{preserveIncompleteTools: anthropicMessagesAdapterFromContext(r.Context()) != nil}
+	forwardLine := func(line []byte) bool {
+		lines, err := ordering.observe(line)
+		if err != nil {
+			if adapter := anthropicMessagesAdapterFromContext(r.Context()); adapter != nil && adapter.stream {
+				adapter.emitInvalidProviderResponse("Upstream stream returned invalid event ordering")
+				if flusher != nil {
+					flusher.Flush()
+				}
+				poisonDedupeCapture(w)
+				cancelCoordinator()
+				s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, gatewayContentEstimatedCompletion(), maxUsageTokens, "gateway_estimated", "invalid_provider_response", reservationWindow, resp)
+				return false
+			}
+			writeSSEError(w, "Upstream stream returned invalid event ordering", "api_error", "stream_malformed")
+			if flusher != nil {
+				flusher.Flush()
+			}
+			poisonDedupeCapture(w)
+			cancelCoordinator()
+			s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, gatewayContentEstimatedCompletion(), maxUsageTokens, "gateway_estimated", "stream_malformed", reservationWindow, resp)
+			return false
+		}
+		for _, ordered := range lines {
+			if !processLine(ordered) {
+				return false
+			}
+		}
+		return true
+	}
 	// The keepalive goroutine runs only while this goroutine waits on the
 	// upstream: every line, terminal path and finalization below runs with
 	// the keepalive held, and keepalives stop before it is released.
@@ -1954,6 +1987,10 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		if len(line) > 0 {
 			if !forwardLine(line) {
 				return
+			}
+			if ordering.done {
+				drainFacadeSettlementTrailers(r.Context(), reader, resp, cancelCoordinator)
+				break
 			}
 			if line[len(line)-1] == '\n' {
 				eventOpen = strings.TrimSpace(string(line)) != ""
@@ -2035,6 +2072,21 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 	if terminalStructuredErrorCode != "" {
 		refundTerminalStructuredError()
 		return
+	}
+	terminalLines, orderingErr := ordering.flush()
+	if orderingErr != nil {
+		writeSSEError(w, "Upstream stream returned invalid event ordering", "api_error", "stream_malformed")
+		if flusher != nil {
+			flusher.Flush()
+		}
+		poisonDedupeCapture(w)
+		s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, gatewayContentEstimatedCompletion(), maxUsageTokens, "gateway_estimated", "stream_malformed", reservationWindow, resp)
+		return
+	}
+	for _, line := range terminalLines {
+		if !processLine(line) {
+			return
+		}
 	}
 	if adapter := anthropicMessagesAdapterFromContext(r.Context()); adapter != nil && adapter.stream && !adapter.streamDone {
 		if err := adapter.validateStreamComplete(); err != nil {
@@ -2261,8 +2313,9 @@ func (s *Server) passThroughNoProviderCoordinatorError(w http.ResponseWriter, r 
 	// must be restored explicitly via gatewayRetryAfterByCode or the buyer
 	// loses the backoff signal entirely, not just its precision.
 	setGatewayRetryAfter(w, resp.StatusCode, openAIErrorCode(body), coordinatorErrorRetryable(resp.StatusCode, body))
-	w.WriteHeader(resp.StatusCode)
-	_, _ = w.Write(body)
+	clientStatus, clientBody := clientContextOverflow(resp.StatusCode, body)
+	w.WriteHeader(clientStatus)
+	_, _ = w.Write(clientBody)
 }
 
 func demandNoProviderCoordinatorErrorSettlesAsProviderFailure(resp *http.Response, body []byte) bool {
@@ -2403,8 +2456,9 @@ func (s *Server) passThroughReceiptEligibleProviderError(w http.ResponseWriter, 
 	// body and attach the gateway-owned Retry-After hint accordingly (see
 	// passThroughNoProviderCoordinatorError for the same pattern).
 	setGatewayRetryAfter(w, resp.StatusCode, openAIErrorCode(body), coordinatorErrorRetryable(resp.StatusCode, body))
-	w.WriteHeader(resp.StatusCode)
-	_, _ = w.Write(body)
+	clientStatus, clientBody := clientContextOverflow(resp.StatusCode, body)
+	w.WriteHeader(clientStatus)
+	_, _ = w.Write(clientBody)
 }
 
 func isNullUsageProviderError(body []byte) bool {

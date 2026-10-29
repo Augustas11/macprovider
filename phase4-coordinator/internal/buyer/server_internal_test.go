@@ -944,7 +944,7 @@ func TestRetryableByCodeClassification(t *testing.T) {
 var coordinatorEmittedErrorCodes = []string{
 	"allowance_exhausted", "allowance_unavailable", "quota_exhausted",
 	"autotune_feed_not_found", "byte_cap_exceeded", "catalog_not_found",
-	"context_exceeds_capacity", "duplicate_tool_call_id", "idempotency_key_body_mismatch",
+	"context_length_exceeded", "context_exceeds_capacity", "duplicate_tool_call_id", "idempotency_key_body_mismatch",
 	"idempotency_key_replayed", "idempotency_reservation_failed", "idempotency_unavailable",
 	"image_input_too_large", "invalid_image_input", "invalid_internal_max_output_tokens", "invalid_json", "invalid_request", "invalid_tool_call_id",
 	"invalid_tools", "json_schema_invalid_const_or_enum_type", "json_schema_invalid_name",

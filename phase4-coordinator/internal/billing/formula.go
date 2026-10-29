@@ -3,6 +3,7 @@ package billing
 import (
 	"log/slog"
 	"math"
+	"sort"
 	"strings"
 )
 
@@ -116,6 +117,28 @@ func normalizeServedAlias(namespace, key string) string {
 	default:
 		return key
 	}
+}
+
+// ModelAliases lists existing explicit identities accepted by routing for model.
+// It deliberately does not synthesize the unbounded namespace/suffix spellings.
+func ModelAliases(model string) []string {
+	normalized := NormalizeModelKey(model)
+	candidates := map[string]bool{normalized: true}
+	if slash := strings.LastIndexByte(normalized, '/'); slash >= 0 {
+		candidates[normalized[slash+1:]] = true
+	}
+	for alias, canonical := range exactModelKeyAliases {
+		candidates[alias] = true
+		candidates[canonical] = true
+	}
+	aliases := make([]string, 0)
+	for alias := range candidates {
+		if alias != "" && !strings.EqualFold(alias, model) && ModelsEquivalent(alias, model) {
+			aliases = append(aliases, alias)
+		}
+	}
+	sort.Strings(aliases)
+	return aliases
 }
 
 // ModelsEquivalent reports whether two buyer/provider model identifiers

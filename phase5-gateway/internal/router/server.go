@@ -469,6 +469,9 @@ func sanitizeModelsResponse(body map[string]any, poolID string) {
 		clean := make(map[string]any, len(model)+1)
 		var rawMembers any
 		for key, value := range model {
+			if key == "aliases" && poolID != "" {
+				continue
+			}
 			if key == "members" {
 				rawMembers = value
 				continue
@@ -502,6 +505,31 @@ func sanitizeModelsResponse(body map[string]any, poolID string) {
 		clean["compute_integrity"] = makeModelComputeIntegrityUnavailableStatus()
 		modelIDCounts[id]++
 		candidates = append(candidates, sanitizedModelCandidate{id: id, entry: clean, rawMembers: rawMembers})
+	}
+	// Alias claims must not shadow listed IDs or ambiguously name multiple rows.
+	aliasOwners := map[string]int{}
+	listedIDs := map[string]bool{}
+	for _, candidate := range candidates {
+		listedIDs[strings.ToLower(candidate.id)] = true
+	}
+	for _, candidate := range candidates {
+		if aliases, ok := candidate.entry["aliases"].([]any); ok {
+			for _, alias := range aliases {
+				aliasOwners[strings.ToLower(alias.(string))]++
+			}
+		}
+	}
+	for _, candidate := range candidates {
+		if aliases, ok := candidate.entry["aliases"].([]any); ok {
+			clean := make([]any, 0, len(aliases))
+			for _, alias := range aliases {
+				key := strings.ToLower(alias.(string))
+				if !listedIDs[key] && aliasOwners[key] == 1 {
+					clean = append(clean, alias)
+				}
+			}
+			candidate.entry["aliases"] = clean
+		}
 	}
 	sanitized := make([]any, 0, len(candidates))
 	modelIDs := make(map[string]struct{}, len(candidates))
@@ -572,6 +600,25 @@ func sanitizeModelEntryValue(key string, value any) (any, bool) {
 		return value, valueIsBool(value)
 	case "capabilities":
 		return sanitizeModelCapabilities(value)
+	case "aliases":
+		raw, ok := value.([]any)
+		if !ok || len(raw) > 64 {
+			return nil, false
+		}
+		clean := make([]any, 0, len(raw))
+		seen := map[string]bool{}
+		for _, item := range raw {
+			alias, ok := item.(string)
+			if !ok || !isPublicModelID(alias) || strings.HasPrefix(strings.ToLower(alias), "pool/") {
+				continue
+			}
+			key := strings.ToLower(alias)
+			if !seen[key] {
+				clean = append(clean, alias)
+				seen[key] = true
+			}
+		}
+		return clean, true
 	case "supported_parameters":
 		return sanitizeSupportedParameters(value)
 	default:
@@ -1552,7 +1599,8 @@ var gatewayRetryableByCode = map[string]bool{
 // code must be explicitly triaged into one set or the other rather than
 // silently defaulting to false.
 var gatewayPermanentCodes = map[string]bool{
-	"method_not_allowed": true, "invalid_window": true, "invalid_kill_switch": true,
+	"context_length_exceeded": true,
+	"method_not_allowed":      true, "invalid_window": true, "invalid_kill_switch": true,
 	"invalid_kill_switch_version": true, "invalid_capacity_signal": true,
 	"byom_non_settlement_unavailable": true,
 	"invalid_operator_token":          true, "invalid_demo_token": true, "missing_bearer_token": true,

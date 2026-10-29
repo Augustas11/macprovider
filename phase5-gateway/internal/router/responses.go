@@ -1113,6 +1113,12 @@ func (a *responsesAdapter) translateNonStreamingResponse(body []byte) ([]byte, e
 }
 
 func (a *responsesAdapter) handleChatStreamLine(line string) {
+	if a.streamTerminal {
+		if data, ok := sseDataValue(strings.TrimSpace(line)); ok && data != "[DONE]" {
+			a.writeErr = fmt.Errorf("provider data after Responses terminal")
+		}
+		return
+	}
 	trimmed := strings.TrimRight(line, "\r\n")
 	if strings.TrimSpace(trimmed) == "" {
 		return
