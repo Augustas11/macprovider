@@ -118,6 +118,7 @@ var spec018RetryableByCode = map[string]bool{
 	"model_not_found":                                         false,
 	"request_canceled":                                        false,
 	"context_exceeds_capacity":                                false,
+	"context_length_exceeded":                                 false,
 	"unsupported_content_shape":                               false,
 	"unsupported_media":                                       false,
 	"invalid_image_input":                                     false,
@@ -2354,6 +2355,7 @@ type modelsResponse struct {
 }
 
 type modelEntry struct {
+	Aliases          []string                    `json:"aliases,omitempty"`
 	ID               string                      `json:"id"`
 	Object           string                      `json:"object"`
 	Created          int64                       `json:"created"`
@@ -2456,6 +2458,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 
 	data := make([]modelEntry, 0, len(models))
 	for _, entry := range models {
+		entry.Aliases = billing.ModelAliases(entry.ID)
 		s.applyBuyerUXConformance(&entry)
 		finishModelCapabilities(&entry)
 		data = append(data, entry)
@@ -3232,7 +3235,7 @@ func (s *Server) forwardStreamSequence(
 				writeToolSelectionError(w)
 				return
 			}
-			writeStreamForwardError(w, dispatched.nativeResult)
+			writeStreamForwardError(w, dispatched.nativeResult, dispatched.tr.attempt.Error)
 		},
 		logRetryAttempt: func(dispatched dispatchedAttempt, state *forwardState) {
 			receiptState, hasReceiptState, err := logAttemptWithReceiptState(state.provider, dispatched.tr.status, dispatched.tr.attempt, state.explicitRetries)
@@ -3825,7 +3828,7 @@ func (s *Server) forwardHTTPSequence(
 					w.Header().Set("X-MacProvider-Provider", state.provider.ProviderID)
 					w.Header().Set(engineResponseHeader, providerEngineClass(state.provider))
 					w.Header().Set("X-MacProvider-Route", state.provider.AssignedID)
-					writeError(w, http.StatusRequestEntityTooLarge, "context_exceeds_capacity", "Request exceeds provider context capacity")
+					writeError(w, http.StatusRequestEntityTooLarge, "context_exceeds_capacity", httpContextOverflowMessage(respBody))
 					cancelAttempt()
 					return dispatchedAttempt{}, false
 				}
@@ -4900,6 +4903,8 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 						override = nil
 					}
 					writeSSEErrorWithRetryable(w, endErrorMessage(end), end.Status, override, requestID)
+				} else if end.Status == "error_context_exceeded" {
+					writeSSEContextOverflow(w, end.Error)
 				} else {
 					writeSSEProviderFailure(w, providerFailureReason(end.Status), requestID)
 				}
@@ -5367,7 +5372,7 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 			if providerTS, ok := trustedProviderTerminalStateTS(resp.Header.Get(receiptTerminalStateTSHeaderName), started, time.Now().UTC()); ok {
 				terminalTS = providerTS
 			}
-			attempt.Error = "Request exceeds provider context capacity"
+			attempt.Error = httpContextOverflowMessage(respBody)
 			attempt.ErrorCode = code
 			attempt.SettlementReceipt = normalizeReceiptHeaderValue(resp.Header.Get("X-MacProvider-Receipt"))
 			attempt.SettlementOutput = settlementOutputForContentAt("", nil, nil, billing.TerminalStateProviderError, terminalTS)
@@ -6892,7 +6897,7 @@ func statusForForwardResult(result wsForwardResult) int {
 	}
 }
 
-func writeStreamForwardError(w http.ResponseWriter, result wsForwardResult) {
+func writeStreamForwardError(w http.ResponseWriter, result wsForwardResult, contextDetail ...string) {
 	switch result {
 	case wsForwardTimedOut:
 		writeError(w, http.StatusGatewayTimeout, "provider_timeout", "Selected provider timed out; buyer should retry")
@@ -6901,7 +6906,11 @@ func writeStreamForwardError(w http.ResponseWriter, result wsForwardResult) {
 	case wsForwardProviderDisconnected:
 		writeError(w, http.StatusBadGateway, "provider_disconnected", "Selected provider disconnected; buyer should retry")
 	case wsForwardContextExceeded:
-		writeError(w, http.StatusRequestEntityTooLarge, "context_exceeds_capacity", "Request exceeds provider context capacity")
+		detail := ""
+		if len(contextDetail) > 0 {
+			detail = contextDetail[0]
+		}
+		writeError(w, http.StatusRequestEntityTooLarge, "context_exceeds_capacity", contextOverflowMessage(detail))
 	case wsForwardRequestTooLarge:
 		writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", providerFrameTooLargeMessage)
 	case wsForwardCancelled, wsForwardProviderDisconnectedCommitted:
@@ -8666,7 +8675,7 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 			return pool.Provider{}, &routeError{status: http.StatusTooManyRequests, code: "provisional_quota_exceeded", message: "All otherwise eligible metered providers are over request quota"}
 		}
 		if result.Counts[routing.ReasonContextTooSmall] > 0 {
-			return pool.Provider{}, &routeError{status: http.StatusRequestEntityTooLarge, code: "context_exceeds_capacity", message: "Request exceeds provider context capacity"}
+			return pool.Provider{}, &routeError{status: http.StatusRequestEntityTooLarge, code: "context_exceeds_capacity", message: pinnedContextOverflowMessage(checker.contextRejectedCapacity)}
 		}
 		if tier2Cfg.RequireHashVerified && (result.Counts[routing.ReasonTier2HashRequired] > 0 || len(result.HashMismatches) > 0) {
 			return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "tier2_hash_verified_required", message: "No hash-verified provider available for model `" + req.Model + "`.", typ: "server_error"}
@@ -9734,7 +9743,7 @@ func (s *Server) validatePinnedProviderForRequestWithState(p pool.Provider, mode
 		return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: unavailableMessage}
 	}
 	if p.MaxContextTokens < estimatedTokens {
-		return pool.Provider{}, &routeError{status: http.StatusRequestEntityTooLarge, code: "context_exceeds_capacity", message: "Request exceeds pinned provider context capacity"}
+		return pool.Provider{}, &routeError{status: http.StatusRequestEntityTooLarge, code: "context_exceeds_capacity", message: pinnedContextOverflowMessage(p.MaxContextTokens)}
 	}
 	if !routingEligibleForRoute(p, poolView) {
 		if providerForRoute(p, poolView).SlotQueueEligible() {
@@ -10335,7 +10344,7 @@ func validatePinnedProvider(p pool.Provider, model string, estimatedTokens int, 
 		return pool.Provider{}, &routeError{status: http.StatusNotFound, code: "model_not_found", message: "Pinned provider serves different model"}
 	}
 	if p.MaxContextTokens < estimatedTokens {
-		return pool.Provider{}, &routeError{status: http.StatusRequestEntityTooLarge, code: "context_exceeds_capacity", message: "Request exceeds pinned provider context capacity"}
+		return pool.Provider{}, &routeError{status: http.StatusRequestEntityTooLarge, code: "context_exceeds_capacity", message: pinnedContextOverflowMessage(p.MaxContextTokens)}
 	}
 	if !p.RoutingEligible() {
 		return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: unavailableMessage}
@@ -10405,6 +10414,8 @@ func (s *Server) checkQuota(provider pool.Provider) bool {
 // can apply SPEC-002 + SPEC-004 FR-SR-18 composition gates without
 // importing buyer-internal types. Phase C step 2 wiring.
 type eligibilityCtx struct {
+	// Largest advertised window among this request's context-refused candidates.
+	contextRejectedCapacity      int
 	s                            *Server
 	state                        *forwardState
 	routeAdmissionCtx            context.Context
@@ -10521,7 +10532,11 @@ func (c *eligibilityCtx) ProviderMeetsRoutingQuality(p pool.Provider) bool {
 }
 
 func (c *eligibilityCtx) ProviderContextSufficient(p pool.Provider) bool {
-	return p.MaxContextTokens >= c.estimatedTokens
+	sufficient := p.MaxContextTokens >= c.estimatedTokens
+	if !sufficient && p.MaxContextTokens > c.contextRejectedCapacity {
+		c.contextRejectedCapacity = p.MaxContextTokens
+	}
+	return sufficient
 }
 
 // Tier2Decision mirrors the inline tier2 branch in the pre-Phase-C
@@ -11438,6 +11453,9 @@ func endErrorMessage(end providerws.InferenceResponseEnd) string {
 }
 
 func requestLogEndErrorMessage(end providerws.InferenceResponseEnd) string {
+	if end.Status == "error_context_exceeded" {
+		return contextOverflowMessage(end.Error)
+	}
 	status := endErrorMessage(end)
 	detail := sanitizeRequestLogText(end.Error)
 	if detail == "" {
@@ -11631,7 +11649,7 @@ func terminalSSEErrorCodeFromLine(line []byte) string {
 func writeWSEndError(w http.ResponseWriter, end providerws.InferenceResponseEnd) {
 	switch end.Status {
 	case "error_context_exceeded":
-		writeError(w, wsEndHTTPStatus(end.Status), "context_exceeds_capacity", "Request exceeds provider context capacity")
+		writeError(w, wsEndHTTPStatus(end.Status), "context_exceeds_capacity", contextOverflowMessage(end.Error))
 	case "error_model_not_loaded", "error_queue_full":
 		writeError(w, wsEndHTTPStatus(end.Status), "no_provider_available", "Selected provider is not reachable")
 	case "tool_selection_validation_failed":

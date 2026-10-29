@@ -224,7 +224,7 @@ func testHTTPContextExceededDoesNotRetryOrFault(t *testing.T, stream bool) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("X-MacProvider-Receipt", receipt)
 		w.WriteHeader(http.StatusRequestEntityTooLarge)
-		_, _ = w.Write([]byte(`{"error":{"message":"request exceeds served context","type":"context_length_exceeded","param":"max_tokens","code":"context_length_exceeded"}}`))
+		_, _ = w.Write([]byte(`{"error":{"message":"Prompt length (9000 tokens) exceeds this provider's safe capacity (8192 tokens).","type":"context_length_exceeded","param":"max_tokens","code":"context_length_exceeded"}}`))
 	}))
 	defer badUpstream.Close()
 
@@ -270,6 +270,9 @@ func testHTTPContextExceededDoesNotRetryOrFault(t *testing.T, stream bool) {
 	}
 	if !bytes.Contains(rr.Body.Bytes(), []byte(`"code":"context_exceeds_capacity"`)) || !bytes.Contains(rr.Body.Bytes(), []byte(`"type":"invalid_request_error"`)) || !bytes.Contains(rr.Body.Bytes(), []byte(`"retryable":false`)) {
 		t.Fatalf("body=%s, want canonical non-retryable context capacity error", rr.Body.String())
+	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte("maximum context length is 8192 tokens")) {
+		t.Fatalf("provider capacity lost: %s", rr.Body.String())
 	}
 	if bytes.Contains(rr.Body.Bytes(), []byte(`"usage"`)) {
 		t.Fatalf("body=%s, want null/absent usage on context rejection", rr.Body.String())

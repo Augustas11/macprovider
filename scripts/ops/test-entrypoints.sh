@@ -99,7 +99,46 @@ printf 'token=%s key=%s\n' "${GH_TOKEN:-}" "${MALIBU_DOWNLOAD_SSH_KEY:-}" > "$FA
 printf '{"tag_name": "%s"}\n' "$2" > "$FAKE_PEARL/svc/mirror-latest.json"
 FAKEMIRROR
 chmod +x "$W/scripts/publish-release-mirror.sh"
-git -C "$W" -c user.name=t -c user.email=t@example.invalid add -A scripts/ops scripts/publish-release-mirror.sh docs/releases/cli-release-train.md \
+# Catalog orchestration uses a verified-release double, not a fake signed CLI.
+# Real signature/payload/matcher verification belongs to
+# scripts/tests/test_native_mtp_release_match.py. Keep this stub inside W only;
+# reject unexpected argv or identities instead of silently passing new callers.
+cat > "$W/scripts/native_mtp_release_match.py" <<'FAKEMATCH'
+import json
+import os
+from pathlib import Path
+import sys
+
+repo = Path(__file__).resolve().parents[1]
+expected = [
+    '--release-input', str(repo / 'phase3-binary/catalog/autotune/native-mtp-admission-release.json'),
+    '--admission', str(repo / 'phase3-binary/catalog/autotune/native-mtp-admission.json'),
+    '--repo', str(repo), '--state-dir', str(repo.parent / 'state'),
+]
+actual = sys.argv[1:]
+if len(actual) == len(expected):
+    actual = [str(Path(value).resolve()) if index % 2 else value
+              for index, value in enumerate(actual)]
+if actual != expected:
+    print('blocked: fixture release matcher received unexpected arguments')
+    sys.exit(1)
+release = json.loads(Path(expected[1]).read_text())
+admission = json.loads(Path(expected[3]).read_text())
+identity = release.get('entry')
+if not isinstance(identity, dict) or not identity or not any(
+    all(row.get(key) == value for key, value in identity.items())
+    for row in admission.get('entries', [])
+):
+    print('blocked: fixture release identity is absent from admission')
+    sys.exit(1)
+verdict = os.environ.get('FAKE_NATIVE_MTP_RELEASE_MATCH', 'ok')
+if verdict not in ('ok', 'blocked: fixture signed release mismatch'):
+    print('blocked: fixture release matcher received unknown verdict')
+    sys.exit(1)
+print(verdict)
+sys.exit(0 if verdict == 'ok' else 1)
+FAKEMATCH
+git -C "$W" -c user.name=t -c user.email=t@example.invalid add -A scripts/ops scripts/publish-release-mirror.sh scripts/native_mtp_release_match.py docs/releases/cli-release-train.md \
   ops/pearl-updater/release-signing-public.pem phase4-coordinator/dist/compatibility-revoked-ids.txt
 git -C "$W" -c user.name=t -c user.email=t@example.invalid commit -q -m "test: working-tree ops scripts"
 git -C "$W" -c user.name=t -c user.email=t@example.invalid tag -a v9.0.0 -m "live runtime"
@@ -1709,6 +1748,13 @@ printf 'test-buyer-token\n' > "$tmp/token"
 export BUYER_TOKEN_FILE="$tmp/token" PROBE_MODEL=test/model
 R="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["release_id"])' "$W/phase3-binary/catalog/autotune/release.json")"
 status_doc $CAND true
+FAKE_NATIVE_MTP_RELEASE_MATCH='blocked: fixture signed release mismatch' \
+  run_rc 0 "catalog stops before probes when signed release verification fails" scripts/ops/catalog-activate.sh status
+expect_next native_mtp_release_match:blocked
+case "$(next_field reason)" in
+  *"fixture signed release mismatch"*) ok ;;
+  *) bad "catalog release mismatch reason: $(next_field reason)" ;;
+esac
 # CB-only admission must not require absent MTP heads, but neither an unset
 # requirement nor an explicitly native proof may silently become CB-only.
 python3 - "$tmp/svc/status.json" <<'PYCBONLY'
@@ -1719,6 +1765,7 @@ d["native_mtp"].update(enabled=False, mode="unsupported")
 open(p, "w").write(json.dumps(d))
 PYCBONLY
 CATALOG_REQUIRE_NATIVE_MTP_FORWARD=false run_rc 0 "CB-only live probe accepts active CB without MTP heads" scripts/ops/catalog-activate.sh status
+if [ "$(state_of native_mtp_release_match)" = done ]; then ok; else bad "verified fixture release did not clear release matcher"; fi
 if [ "$(state_of live_probe)" = done ]; then ok; else bad "CB-only live probe demanded native MTP"; fi
 run_rc 0 "default live probe preserves native requirement" scripts/ops/catalog-activate.sh status
 if [ "$(state_of live_probe)" = pending ]; then ok; else bad "default live probe lost native requirement"; fi

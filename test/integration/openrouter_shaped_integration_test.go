@@ -90,16 +90,28 @@ func TestOpenRouterShapedLongContextWithinAdvertisedMax(t *testing.T) {
 	}
 }
 
-// A prompt that really exceeds every provider's context is a clean 413.
-func TestOpenRouterShapedOverContextIsClean413(t *testing.T) {
+// A prompt that exceeds every provider window triggers agent compaction.
+func TestOpenRouterShapedOverContextIsClean400(t *testing.T) {
 	s := newScenario(t, scenarioOpts{seedAccount: true})
 	prompt := strings.Repeat("alpha bravo charlie delta echo foxtrot ", 2000)
 	status, _, body := s.chatRequest(nil, `{"model":"llama-3.2-3b-instruct","max_tokens":32,"messages":[{"role":"user","content":"`+prompt+`"}]}`)
-	if status != http.StatusRequestEntityTooLarge {
-		t.Fatalf("status=%d want 413 body=%s", status, string(body))
+	if status != http.StatusBadRequest {
+		t.Fatalf("status=%d want 400 body=%s", status, string(body))
 	}
-	if got := openRouterShapedErrorCode(t, body); got != "context_exceeds_capacity" {
-		t.Fatalf("code=%q want context_exceeds_capacity", got)
+	if got := openRouterShapedErrorCode(t, body); got != "context_length_exceeded" {
+		t.Fatalf("code=%q want context_length_exceeded", got)
+	}
+	var envelope struct {
+		Error struct {
+			Type, Message string
+			Retryable     bool
+		}
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.Error.Type != "invalid_request_error" || envelope.Error.Retryable || !strings.Contains(envelope.Error.Message, "maximum context length is 8192 tokens") {
+		t.Fatalf("unexpected context compaction error: %s", body)
 	}
 }
 

@@ -1,7 +1,9 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.69 (2026-10-26, distinguish default-mode disclosures from the opt-in privacy class; Related: #2156)
+**Version:** 0.9.70 (2026-10-29, agent-client stream, context-error and model-alias compatibility)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.6.28, SPEC-003 v0.7, SPEC-004 v0.3.2
+
+**Change log v0.9.70 (2026-10-29):** Clarify terminal stream ordering, context-overflow errors for agent compaction, and discovery of existing model aliases. These changes do not establish deployed compatibility or expand routing equivalence.
 
 **Change log v0.9.69 (2026-10-26, Related: #2156):** Scope §1.6, §5.10, and §22 plaintext and non-claim disclosures to default mode. Public privacy, docs, and signup disclosures distinguish the opt-in SPEC-049 privacy class without changing its claims, assurance labels, routing, or retention contract.
 
@@ -1563,6 +1565,14 @@ Carried items (mixed carried / resolved): (1) `response_byte_cap_exceeded` has a
 
 ### 5.3 `GET /v1/models`
 
+Each model entry MAY include an `aliases` string array containing finite,
+explicit aliases already accepted by coordinator model equivalence for that
+entry's `id`. Discovery MUST NOT introduce a new routing equivalence or infer
+aliases from substrings. The gateway MUST validate alias identifiers and omit
+aliases that collide with another listed model ID or are claimed by distinct
+model entries. Pool-model views MUST NOT inherit public-model aliases. Clients
+may continue using the canonical `id`; alias discovery is additive.
+
 `GET /v1/models` returns public model availability.
 
 Authentication:
@@ -1886,6 +1896,20 @@ Normative rules:
 - Gateway sanitizer for `/v1/models` MUST NOT run on this path.
 
 ### 5.4 `POST /v1/chat/completions`
+
+For SSE Chat Completions, every content, reasoning and tool-call delta for a
+choice MUST precede that choice's `finish_reason` chunk. A choice that emitted
+tool calls MUST finish with `finish_reason: "tool_calls"`. The gateway MUST
+hold terminal choices until upstream completion so late deltas can be emitted
+before the finish chunk without buffering the complete answer. If a malformed
+stream cannot be reordered safely within its bounds, the gateway MUST emit an
+explicit stream error; it MUST NOT silently discard the delta or claim success.
+Usage-only chunks may follow a finish chunk, before `[DONE]`.
+
+For `/v1/responses`, output deltas MUST precede the corresponding
+`response.output_item.done`; `response.completed` MUST follow all output items
+and be the final successful event. Data received after the upstream terminal
+marker MUST NOT generate additional successful output events.
 
 `POST /v1/chat/completions` is the primary OpenAI-compatible inference endpoint.
 
@@ -4259,6 +4283,20 @@ A coordinator-issued `500` with `code: "route_snapshot_failed"` (a SPEC-022 pre-
 405 Method Not Allowed MUST use `type: "invalid_request_error"` and `code: "method_not_allowed"`.
 
 413 Payload Too Large MUST use `type: "invalid_request_error"` and `code: "request_too_large"`. The gateway rejects an oversized body with this 413 only after a bounded drain of the unread body (at most 8 MiB in total), so a reverse proxy that streams a body within that bound receives the 413 instead of a connection reset.
+
+### 17.1.1 Context overflow for agent compaction
+
+A request rejected because its prompt exceeds the selected model's context
+MUST return HTTP `400`, `type: "invalid_request_error"`,
+`code: "context_length_exceeded"`, and `retryable: false` on the OpenAI
+endpoints, including `/v1/responses`. Its message MUST contain
+`maximum context length is N tokens`, where N is the authoritative rejected
+capacity, not an estimate of prompt length. The coordinator MUST preserve the
+numeric limit when translating a provider's context error. Arbitrary provider
+error text MUST NOT be exposed to recover that limit. Byte-size request limits
+remain HTTP `413 request_too_large`. If HTTP headers have already been sent,
+the same context error MUST use the endpoint's terminal stream-error envelope
+instead of a successful completion.
 
 ### 17.2 Model unknown
 

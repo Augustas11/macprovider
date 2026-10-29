@@ -2341,10 +2341,10 @@ func TestContextExceededReceiptRequiresProviderAttributedZeroSettlement(t *testi
 
 				resp := postChat(t, h, fullKey, body, nil)
 
-				if resp.Code != http.StatusRequestEntityTooLarge {
+				if resp.Code != http.StatusBadRequest {
 					t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
 				}
-				assertErrorCode(t, resp.Body.String(), "context_exceeds_capacity")
+				assertErrorCode(t, resp.Body.String(), "context_length_exceeded")
 				wantReceipt := ""
 				if providerReached {
 					wantReceipt = receipt
@@ -7503,6 +7503,7 @@ func TestBYOMNonSettlementUnavailableIsPermanent(t *testing.T) {
 // the CURRENT known set has no silent gaps, and giving the next audit
 // round a single, greppable checklist to diff a fresh sweep against.
 var gatewayEmittedErrorCodes = []string{
+	"context_length_exceeded",
 	"account_blocked", "account_concurrency_exceeded", "account_create_failed",
 	"account_lookup_failed", "account_request_rate_exceeded", "admin_state_write_failed",
 	"api_key_issuance_failed", "api_key_lookup_failed", "api_key_not_found",
