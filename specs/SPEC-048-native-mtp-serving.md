@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.65
+**Version:** 0.1.66
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.65",
+  "version": "0.1.66",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -547,15 +547,17 @@ The authorized dependency tuple is exact:
 
 | Repository | Fork tag | Revision | Upstream base |
 |---|---|---|---|
-| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.10.16.2` | `9a1c43f9da82c022cc14b6b8d19c3e3df4b33e1e` | fork `3.32.3-macprovider.10.1` (`87dc5159c87d73f4d7abd524fbdd17760cf56285`) on fork `3.32.3-macprovider.10` (`b4077dcb28336b388f3d09be2a091c12f8e179aa`) on `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
+| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.10.16.3` | `fe1875d1cde32dc1e87efb9a8fc62eafc53536e3` | fork `3.32.3-macprovider.10.1` (`87dc5159c87d73f4d7abd524fbdd17760cf56285`) on fork `3.32.3-macprovider.10` (`b4077dcb28336b388f3d09be2a091c12f8e179aa`) on `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
 | `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.9` | `29d3b93375cc56cd2649b40e4310a8bc445e9874` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
 | `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.4` | `2f512e3997349c8648f5d7c5113eb2c825aa242d` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
 
-The mlx-swift-lm row is the immutable combined fork tag `3.32.3-macprovider.10.16.2`
-(`9a1c43f9da82c022cc14b6b8d19c3e3df4b33e1e`). It combines the complete main pin
+The mlx-swift-lm row is the immutable combined fork tag `3.32.3-macprovider.10.16.3`
+(`fe1875d1cde32dc1e87efb9a8fc62eafc53536e3`). It combines the complete main pin
 `3.32.3-macprovider.10.15.1` (`36d24585f9373c2661f61f5e5b485c8d66c43a2b`)
 with the DeepSeek-V4 fidelity, DSpark and fused sparse-attention work from
 `3.32.3-macprovider.10.9.3` (`812285f88faa403a980ada6e64711de875bab364`).
+The successor shares MXFP8 projection weight tiles across two to eight DeepSeek
+rows while preserving the pinned single-vector accumulation order and fallback.
 It preserves the GLM packed indexer/depth-one MTP, Qwen3.6, Prism Bonsai loader
 and LFM reference expert order. The mlx-swift and MLX core tuple rows and
 transitive pins are unchanged. Focused cross-family fork regressions and the
@@ -2297,6 +2299,10 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.66 (2026-10-30)** — Pins the combined fork with the bounded MXFP8
+  multi-row projection path. Unsupported layouts retain their existing path;
+  the exact-parity and four-row 2.0x qualification gates remain unchanged.
+  This pin does not publish a DeepSeek CB or native-MTP admission.
 - **0.1.65 (2026-10-28)** — R003 combines main's GLM/Qwen/Bonsai/LFM fork
   `3.32.3-macprovider.10.15.1` with DeepSeek fidelity, DSpark and fused sparse
   attention from `.10.9.3` in `3.32.3-macprovider.10.16.2` (`9a1c43f9da82c022cc14b6b8d19c3e3df4b33e1e`).

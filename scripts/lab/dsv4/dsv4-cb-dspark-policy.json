@@ -25,9 +25,9 @@
   },
   "runtime_under_test": {
     "pr": 2151,
-    "fork_tag": "3.32.3-macprovider.10.16.2",
-    "fork_commit": "9a1c43f9da82c022cc14b6b8d19c3e3df4b33e1e",
-    "decode_path_digest": "81ad3e4a6e8f8698e1be9ae69474af689bd308eb6eb4b1d6112a069306908503",
+    "fork_tag": "3.32.3-macprovider.10.16.3",
+    "fork_commit": "fe1875d1cde32dc1e87efb9a8fc62eafc53536e3",
+    "decode_path_digest": "340366d406d6a7a11dc82d84845425492c560785edd7302dd2d7d029c4acd51e",
     "metallib_sha256": "3d9b4a747758128cc5418e62c5ad8e282a11b0d436423537137e013beaa1261b"
   },
   "cb": {
