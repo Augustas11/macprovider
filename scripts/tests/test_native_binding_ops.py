@@ -8,6 +8,8 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
+from types import SimpleNamespace
 from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parents[1]
@@ -57,8 +59,9 @@ print(json.dumps(dict(lane='catalog-content',ok=True,commit_block_sha256='block'
         (self.tools / 'native_mtp_binding_bundle.py').write_text('''import json,os,pathlib,sys
 args=sys.argv; b=pathlib.Path(args[args.index('--bundle')+1]);
 if os.environ.get('REJECT_PROOF'):raise SystemExit(1)
+if os.environ.get('VERIFY_ARGS'):open(os.environ['VERIFY_ARGS'],'w').write(json.dumps(args[1:]))
 if os.environ.get('MUTATE_ORIGINAL'):pathlib.Path(os.environ['MUTATE_ORIGINAL']).write_text('changed-after-freeze')
-print(json.dumps(dict(release_dir=str(b/'release'),ledger_path=str(b/'derived/release-ledger.json'),phase='identity_only_greedy',receipt_sha256='a'*64,release_input_path=str(b/'derived/native-mtp-admission-release.json'))))
+print(json.dumps(dict(release_dir=str(b/'release'),ledger_path=str(b/'derived/release-ledger.json'),phase='identity_only_greedy',receipt_sha256='a'*64,release_input_path=str(b/'derived/native-mtp-admission-release.json'),serving_journey=os.environ.get('SERVING_JOURNEY','signed export required'))))
 ''')
         self.bundle = self.root / 'caller-bundle'
         (self.bundle / 'release').mkdir(parents=True)
@@ -180,6 +183,60 @@ json_field() { python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));print(
         result = self.shell(code, dict(TEST_ROOT=str(self.root), TEST_RECIPE=RECIPE, TEST_BUNDLE=str(self.bundle)))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines(), [str(self.bundle / 'release'), str(self.bundle / 'derived/native-mtp-admission-release.json'), str(self.root / 'catalog'), str(self.root / 'catalog/native-mtp-admission-release.json')])
+
+    def test_ops_context_reports_waiver_only_after_full_verification(self):
+        shutil.copytree(self.tools, self.root / 'scripts')
+        code = """set -eu
+REPO_ROOT="$TEST_ROOT"; AUTOTUNE=catalog; OPS_TMP_DIR="$TEST_ROOT"
+NATIVE_BINDING_RECIPE="$TEST_RECIPE"; CATALOG_NATIVE_BINDING_BUNDLE="$TEST_BUNDLE"
+fact() { printf '%s: %s\n' "$1" "$2"; }
+json_field() { python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));print(eval(sys.argv[2]))' "$1" "$2"; }
+"""
+        code += function(OPS, 'native_binding_context') + '\nnative_binding_context publication\n'
+        log = self.root / 'verify-args.json'
+        env = dict(TEST_ROOT=str(self.root), TEST_RECIPE=RECIPE,
+                   TEST_BUNDLE=str(self.bundle), SERVING_JOURNEY='waived (operator, 2026-10-29)',
+                   VERIFY_ARGS=str(log))
+        result = self.shell(code, env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('serving_journey: waived (operator, 2026-10-29)', result.stdout)
+        args = json.loads(log.read_text())
+        self.assertEqual(args[args.index('--commit') + 1], 'publication')
+        result = self.shell(code, dict(env, REJECT_PROOF='1'))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn('serving_journey:', result.stdout)
+
+    def test_catalog_revalidates_waiver_after_full_bundle_verification(self):
+        from scripts.tests.test_catalog_compare_live import cr
+        (self.bundle / 'proof').mkdir()
+        (self.bundle / 'proof/journey-waiver.json').write_text('{}')
+        inputs = {'phase': 'expanded_glm_sampled'}
+        proof = object()
+        module = SimpleNamespace(
+            read_json=mock.Mock(return_value=inputs),
+            verify_bundle=mock.Mock(return_value=proof),
+            validate_journey_waiver=mock.Mock(return_value='waived (operator, 2026-10-29)'),
+            require=lambda condition, reason: None if condition else (_ for _ in ()).throw(ValueError(reason)),
+        )
+        with mock.patch.object(cr, '_native_mtp_binding_module', return_value=module):
+            self.assertIs(cr._verify_native_binding_bundle(
+                self.bundle, repo=self.repo, commit=self.commit, recipe_path=RECIPE), proof)
+        module.verify_bundle.assert_called_once_with(
+            self.bundle, repo=self.repo, commit=self.commit, recipe_path=RECIPE)
+        module.validate_journey_waiver.assert_called_once_with(
+            self.bundle, inputs, self.bundle / 'release/native-mtp-admission.json')
+        module.validate_journey_waiver.return_value = 'signed export required'
+        with mock.patch.object(cr, '_native_mtp_binding_module', return_value=module), \
+             self.assertRaisesRegex(ValueError, 'exact operator journey waiver'):
+            cr._verify_native_binding_bundle(
+                self.bundle, repo=self.repo, commit=self.commit, recipe_path=RECIPE)
+        module.validate_journey_waiver.reset_mock()
+        module.verify_bundle.side_effect = ValueError('signature mismatch')
+        with mock.patch.object(cr, '_native_mtp_binding_module', return_value=module), \
+             self.assertRaisesRegex(ValueError, 'signature mismatch'):
+            cr._verify_native_binding_bundle(
+                self.bundle, repo=self.repo, commit=self.commit, recipe_path=RECIPE)
+        module.validate_journey_waiver.assert_not_called()
 
     def test_signed_pair_reverifies_bundle_before_publish_dispatch(self):
         text = function(OPS, 'signed_pair_internal')

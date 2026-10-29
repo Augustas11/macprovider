@@ -1,4 +1,5 @@
 """Bounded model-free recipe/oracle tests; mocked API replies are not live proof."""
+import base64
 import copy
 import hashlib
 import importlib.util
@@ -164,6 +165,205 @@ class BindingCoreTests(unittest.TestCase):
             git.assert_not_called()
 
 
+class JourneyWaiverTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.bundle = self.root / "bundle"
+        (self.bundle / "proof").mkdir(parents=True)
+        self.stage = self.root / "source"
+        self.sidecar = self.stage / m.STATIC / "native-mtp-admission.json"
+        self.sidecar.parent.mkdir(parents=True)
+        self.sidecar.write_bytes(b"exact sampled sidecar")
+        release = self.stage / m.CATALOG / "native-mtp-admission-release.json"
+        release.parent.mkdir(parents=True); release.write_text("{}")
+        self.inputs = {"phase": "expanded_glm_sampled", "candidate_version": "1.8.277",
+                       "identity": {"source_commit": "11c4107744116ac426b0eab4cd37a20c511526a9"}}
+        self.record = {"schema_version": "macprovider.native-mtp-serving-journey-waiver.v1",
+                       "decision": "Waive it", "date": "2026-10-29",
+                       "sidecar_sha256": m.digest(self.sidecar), "release_tag": "v1.8.277",
+                       "source_commit": self.inputs["identity"]["source_commit"],
+                       "reason": "Serving journey workflow has no runs and needs a controller.",
+                       "follow_up": "build the journey controller"}
+        self.waiver = self.bundle / "proof/journey-waiver.json"
+        self.dp = mock.Mock()
+        self.dp.verify_release_input.return_value = "1.8.277"
+        self.dp._tag_commit.return_value = self.inputs["identity"]["source_commit"]
+        self.serving = mock.Mock()
+        self.serving.verify_serving_proof.side_effect = ValueError("signed serving proof absent")
+
+    def write(self):
+        self.waiver.write_bytes(m.canonical(self.record))
+
+    def candidate(self):
+        def module(_, name):
+            return self.serving if name == "native_mtp_signed_serving_proof.py" else self.dp
+        with mock.patch.object(m, "_module", side_effect=module), \
+             mock.patch.dict(m.os.environ, {"BINDING_REPO_INTERNAL": str(self.root)}):
+            m._candidate_gate(self.stage, self.bundle, self.inputs)
+
+    def test_exact_waiver_substitutes_only_the_serving_export(self):
+        self.write(); self.candidate()
+        self.dp.verify_release_input.assert_called_once()
+        self.dp._tag_commit.assert_called_once_with("1.8.277")
+        self.serving.verify_serving_proof.assert_not_called()
+        self.assertEqual(m.validate_journey_waiver(self.bundle, self.inputs, self.sidecar),
+                         "waived (operator, 2026-10-29)")
+        self.assertEqual(m.inventory(self.bundle)["proof/journey-waiver.json"], m.digest(self.waiver))
+
+    def test_missing_waiver_still_requires_export(self):
+        with self.assertRaisesRegex(ValueError, "signed serving proof absent"):
+            self.candidate()
+        self.serving.verify_serving_proof.assert_called_once()
+
+    def test_other_sidecar_is_refused(self):
+        self.write(); self.sidecar.write_bytes(b"another sampled sidecar")
+        with self.assertRaisesRegex(m.BindingBundleError, "sidecar mismatch"):
+            self.candidate()
+
+    def test_other_release_or_source_is_refused(self):
+        for field, value in (("release_tag", "v1.8.278"), ("source_commit", "a" * 40)):
+            with self.subTest(field=field):
+                old = self.record[field]; self.record[field] = value; self.write()
+                with self.assertRaisesRegex(m.BindingBundleError, "release/source mismatch"):
+                    self.candidate()
+                self.record[field] = old
+        self.write(); self.inputs["candidate_version"] = "1.8.278"
+        with self.assertRaisesRegex(m.BindingBundleError, "release/source mismatch"):
+            m.validate_journey_waiver(self.bundle, self.inputs, self.sidecar)
+
+    def test_waiver_cannot_skip_release_identity_checks(self):
+        self.write(); self.dp.verify_release_input.side_effect = ValueError("invalid signed release")
+        with self.assertRaisesRegex(ValueError, "invalid signed release"):
+            self.candidate()
+        self.dp.verify_release_input.side_effect = None
+        self.dp._tag_commit.return_value = "a" * 40
+        with self.assertRaisesRegex(m.BindingBundleError, "normal published source tag"):
+            self.candidate()
+
+    def test_waiver_cannot_skip_manifest_signature(self):
+        self.write()
+        # Fail at the actual inventory-signature verifier, before derivation.
+        (self.bundle / "release").mkdir(); (self.bundle / "previous").mkdir()
+        (self.bundle / "derived").mkdir()
+        for folder in ("release", "previous"):
+            for name in m.RELEASE_FILES:
+                (self.bundle / folder / name).write_bytes(b"fixture")
+        for name in ("native-mtp-admission-release.json", "native-mtp-admission-tuple.json", "release-ledger.json"):
+            (self.bundle / "derived" / name).write_bytes(b"fixture")
+        self.inputs["parent_receipt_sha256"] = None
+        (self.bundle / "inputs.json").write_bytes(m.canonical(self.inputs))
+        commit = self.inputs["identity"]["source_commit"]
+        manifest = {"schema_version": "macprovider.native-mtp-binding-bundle.v1", "source_commit": commit,
+                    "recipe_path": m.RECIPE_PATH, "recipe_sha256": "a" * 64,
+                    "phase": "expanded_glm_sampled", "inputs_sha256": m.digest(self.bundle / "inputs.json"),
+                    "predecessor_receipt_sha256": None, "files": m.inventory(self.bundle)}
+        (self.bundle / "manifest.json").write_bytes(m.canonical(manifest))
+        (self.bundle / "manifest.json.sig").write_bytes(b"signature fixture")
+        cr = mock.Mock()
+        cr.parse_sidecar.return_value = ("trusted", b"signature")
+        cr.keyring.return_value = {"trusted": b"public key"}
+        cr.verify_ed25519.side_effect = ValueError("invalid inventory signature")
+        with mock.patch.object(m, "_recipe", return_value=({}, "a" * 64)), \
+             mock.patch.object(m, "_archive"), mock.patch.object(m, "_module", return_value=cr), \
+             mock.patch.object(m, "_derive") as derive:
+            with self.assertRaisesRegex(ValueError, "invalid inventory signature"):
+                m.verify_bundle(self.bundle, repo=self.root, commit=commit, recipe_path=m.RECIPE_PATH)
+            derive.assert_not_called()
+
+    def test_external_record_is_required_and_symlinks_refused(self):
+        self.write()
+        with self.assertRaisesRegex(m.BindingBundleError, "outside checkout"):
+            m._copy_journey_waiver(self.waiver, self.bundle, self.root)
+        link = self.root / "waiver-link.json"; link.symlink_to(self.waiver)
+        with self.assertRaisesRegex(m.BindingBundleError, "regular journey waiver"):
+            m._copy_journey_waiver(link, self.bundle, self.stage)
+
+
+class RetainedSignedSourceTests(unittest.TestCase):
+    def setUp(self):
+        self.source = "11c4107744116ac426b0eab4cd37a20c511526a9"
+        self.commit = "a" * 40
+        self.inputs = {"phase": "expanded_glm_sampled", "candidate_version": "1.8.277",
+                       "identity": {"source_commit": self.source, "provider_revision": self.source}}
+
+    def test_exact_release_source_requires_ancestry_to_recipe_commit(self):
+        with mock.patch.object(m, "_run") as run:
+            m._validate_candidate_source(Path("repo"), self.commit, self.inputs)
+        run.assert_called_once_with(["git", "-C", Path("repo"), "merge-base", "--is-ancestor", self.source, self.commit])
+        with mock.patch.object(m, "_run", side_effect=m.BindingBundleError("source is not ancestor")):
+            with self.assertRaisesRegex(m.BindingBundleError, "not ancestor"):
+                m._validate_candidate_source(Path("repo"), self.commit, self.inputs)
+
+    def test_other_phase_version_source_or_revision_cannot_retain_source(self):
+        for field, value in (("phase", "identity_only_greedy"), ("candidate_version", "1.8.278"),
+                             ("source_commit", "b" * 40), ("provider_revision", "b" * 40)):
+            with self.subTest(field=field):
+                inputs = copy.deepcopy(self.inputs)
+                target = inputs["identity"] if field in inputs["identity"] else inputs
+                target[field] = value
+                with mock.patch.object(m, "_run") as run, self.assertRaisesRegex(m.BindingBundleError, "candidate merged source mismatch"):
+                    m._validate_candidate_source(Path("repo"), self.commit, inputs)
+                run.assert_not_called()
+
+    def test_same_source_preserves_existing_identity_phase(self):
+        self.inputs["phase"] = "identity_only_greedy"
+        with mock.patch.object(m, "_run") as run:
+            m._validate_candidate_source(Path("repo"), self.source, self.inputs)
+        run.assert_not_called()
+
+    def test_decode_digest_and_runtime_come_from_signed_source_archive(self):
+        with tempfile.TemporaryDirectory() as directory:
+            stage = Path(directory) / "publication"
+            (stage / "phase3-binary").mkdir(parents=True)
+            (stage / "phase3-binary/identity").write_text("later recipe source")
+            def archive(repo, commit, target):
+                self.assertEqual(commit, self.source)
+                (target / "phase3-binary").mkdir(parents=True)
+                (target / "phase3-binary/identity").write_text("signed release")
+            dp = mock.Mock()
+            dp.compute.side_effect = lambda root: "signed digest" if (root / "identity").read_text() == "signed release" else "wrong digest"
+            dp.resolved_revisions.side_effect = lambda root: {"mlx-swift-lm": (root / "identity").read_text()}
+            with mock.patch.object(m, "_module", return_value=dp), mock.patch.object(m, "_archive", side_effect=archive) as archived:
+                result = m._release_decode_identity(stage, repo=Path("repo"), commit=self.commit, inputs=self.inputs)
+            self.assertEqual(result, ("signed digest", "signed release"))
+            archived.assert_called_once()
+
+
+class BindingSigningTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.key = self.root / "test-key.base64"
+        # RFC 8032 public test vector, never an operator key.
+        seed = bytes.fromhex("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60")
+        self.public = bytes.fromhex("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a")
+        self.key.write_bytes(base64.b64encode(seed)); self.key.chmod(0o600)
+        self.message = self.root / "message.json"; self.message.write_bytes(b"binding message")
+        self.cr = m._module(HERE.parent, "catalog-release.py")
+
+    def sign(self, public=None):
+        with mock.patch.object(m, "_module", return_value=self.cr), \
+             mock.patch.object(self.cr, "keyring", return_value={"fixture": public or self.public}), \
+             mock.patch.dict(m.os.environ, {"AUTOTUNE_STATIC_PRIVATE_KEY_PATH": str(self.key)}):
+            return m._sign_file(self.message, stage=HERE.parent, key_id="fixture")
+
+    def test_node_signature_is_verified_by_existing_catalog_verifier(self):
+        result = json.loads(self.sign())
+        self.assertEqual(result["key_id"], "fixture")
+        self.cr.verify_ed25519(self.public, base64.b64decode(result["signature"]),
+                              self.message.read_bytes(), "test signer")
+
+    def test_wrong_trusted_key_is_refused(self):
+        with self.assertRaisesRegex(m.BindingBundleError, "prerequisite failed: node"):
+            self.sign(public=b"x" * 32)
+
+    def test_key_permissions_still_apply(self):
+        self.key.chmod(0o644)
+        with self.assertRaisesRegex(m.BindingBundleError, "signing key permissions"):
+            self.sign()
+
+
 class FullyQualifiedPredecessorTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
@@ -205,6 +405,7 @@ class FullyQualifiedPredecessorTests(unittest.TestCase):
         dp.compute.return_value = "e" * 64
         dp.resolved_revisions.return_value = {"mlx-swift-lm": "f" * 40}
         with mock.patch.object(m, "_module", return_value=dp), \
+             mock.patch.object(m, "_sign_file", return_value=b"fixture signature"), \
              mock.patch.object(m, "_environment", return_value={}), \
              mock.patch.object(m, "_run", side_effect=lambda args, **kwargs: self.calls.append(args)) as run, \
              mock.patch.object(m, "git", return_value=(self.cat / "tier2-catalog.json").read_bytes()):
@@ -284,6 +485,9 @@ class FullyQualifiedPredecessorTests(unittest.TestCase):
             self.prepare()
 
     def test_fresh_path_without_numerical_qualification_stops_before_generation(self):
+        proof = self.bundle / "proof"; proof.mkdir()
+        # Presence of a waiver is not numerical qualification authority.
+        (proof / "journey-waiver.json").write_bytes(m.canonical({"decision": "Waive it"}))
         with self.assertRaisesRegex(m.BindingBundleError, "regular JSON file required"):
             self.derive()
         self.assertTrue(any("restamp" in command for command in self.calls))
@@ -518,6 +722,8 @@ class SecurityArtifactTests(unittest.TestCase):
         with self.assertRaisesRegex(m.BindingBundleError,"successful security CI"): self.check()
 
     def test_missing_required_negative_case_fails(self):
+        proof = self.q / "proof"; proof.mkdir()
+        (proof / "journey-waiver.json").write_bytes(m.canonical({"decision": "Waive it"}))
         self.recipe["security_required_cases"].append("ScopeTests.testNeverRan")
         with self.assertRaisesRegex(m.BindingBundleError,"missing or skipped"): self.check()
 

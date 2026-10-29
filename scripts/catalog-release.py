@@ -6482,7 +6482,15 @@ def _validate_native_mtp_release_closure(directory: pathlib.Path, native_mtp_pre
 
 def _verify_native_binding_bundle(bundle: pathlib.Path, *, repo: pathlib.Path, commit: str, recipe_path: str):
     module = _native_mtp_binding_module()
-    return module.verify_bundle(bundle, repo=repo, commit=commit, recipe_path=recipe_path)
+    verified = module.verify_bundle(bundle, repo=repo, commit=commit, recipe_path=recipe_path)
+    if (bundle / "proof/journey-waiver.json").exists():
+        # The serving export is the only waived proof. Reopen its exact
+        # release/sidecar binding after the complete inventory verification.
+        module.require(module.validate_journey_waiver(
+            bundle, module.read_json(bundle / "inputs.json"),
+            bundle / "release/native-mtp-admission.json") == "waived (operator, 2026-10-29)",
+            "binding requires the exact operator journey waiver")
+    return verified
 
 
 def _content_gate_commit_proof(

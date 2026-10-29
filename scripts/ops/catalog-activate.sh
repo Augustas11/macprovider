@@ -148,6 +148,7 @@ native_binding_context() {
   CATALOG_TARGET_INPUT="$(json_field "$receipt" 'd["release_input_path"]')"
   fact native_binding_phase "$(json_field "$receipt" 'd["phase"]')"
   fact native_binding_receipt_sha256 "$(json_field "$receipt" 'd["receipt_sha256"]')"
+  fact serving_journey "$(json_field "$receipt" 'd.get("serving_journey", "signed export required")')"
   [ -d "$CATALOG_TARGET_DIR" ] && [ -f "$CATALOG_TARGET_INPUT" ]
 }
 
