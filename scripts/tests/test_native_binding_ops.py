@@ -186,6 +186,85 @@ json_field() { python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));print(
         self.assertLess(text.index('native_binding_context "$commit"'), text.index('catalog-content-release.sh'))
         self.assertIn('--deploy --commit "$commit"', text)
 
+    def release_match_preflight(self, bound='true', verdict='ok', exit_code=0, run=False):
+        tools = self.root / 'matcher-repo/scripts'
+        tools.mkdir(parents=True)
+        (tools / 'native_mtp_release_match.py').write_text(
+            'import json, os, sys\n'
+            "open(os.environ['MATCH_ARGS'], 'w').write(json.dumps(sys.argv[1:]))\n"
+            "print(os.environ['MATCH_VERDICT'])\n"
+            "raise SystemExit(int(os.environ['MATCH_EXIT']))\n")
+        code = '''set -eu
+REPO_ROOT="$TEST_MATCH_REPO"; OPS_STATE_DIR="$TEST_ROOT/state"
+CATALOG_TARGET_INPUT="$TEST_ROOT/input.json"; CATALOG_TARGET_DIR="$TEST_ROOT/release"
+NEXT_ID=""; NEXT_KIND=""; NEXT_REASON=""; NEXT_CMD=""; NEXT_TITLE=""
+fact() { printf 'FACT %s=%s\\n' "$1" "$2"; }
+step() { printf 'STEP %s %s %s\\n' "$1" "$2" "$3"; }
+'''
+        common = SCRIPTS / 'ops/lib/common.sh'
+        code += function(common, 'set_next') + '\n'
+        code += function(OPS, 'native_mtp_release_preflight') + '\n'
+        code += 'native_mtp_release_preflight "$TEST_BOUND" || true\n'
+        code += 'printf "NEXT %s %s %s\\n" "$NEXT_ID" "$NEXT_KIND" "$NEXT_REASON"\n'
+        if run:
+            # Exercise only the shared blocked-step dispatcher with fake
+            # effects. Never source or invoke an ops entry point or lock.
+            code += '''
+print_next() { :; }
+refuse() { echo "REFUSED: $*" >&2; exit 3; }
+acquire_live_lock_for_step() { echo LOCK_REACHED >&2; exit 90; }
+'''
+            code += function(common, 'run_next') + '\nrun_next\n'
+        env = dict(TEST_ROOT=str(self.root), TEST_MATCH_REPO=str(tools.parent),
+                   TEST_BOUND=bound, MATCH_ARGS=str(self.root / 'matcher-args.json'),
+                   MATCH_VERDICT=verdict, MATCH_EXIT=str(exit_code))
+        return self.shell(code, env)
+
+    def test_native_release_match_preflight_reports_success_and_verified_input_paths(self):
+        result = self.release_match_preflight()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('FACT native_mtp_release_match_gate=ok', result.stdout)
+        self.assertIn('STEP native_mtp_release_match done', result.stdout)
+        self.assertNotIn('NEXT native_mtp_release_match blocked', result.stdout)
+        self.assertEqual(json.loads((self.root / 'matcher-args.json').read_text()),
+                         ['--release-input', str(self.root / 'input.json'), '--admission',
+                          str(self.root / 'release/native-mtp-admission.json'), '--repo',
+                          str(self.root / 'matcher-repo'), '--state-dir', str(self.root / 'state')])
+
+    def test_native_release_match_preflight_blocks_next_run_without_reaching_lock(self):
+        result = self.release_match_preflight(
+            verdict='blocked: runtime_revision differs from signed release', exit_code=1, run=True)
+        self.assertEqual(result.returncode, 3, result.stderr)
+        self.assertIn('STEP native_mtp_release_match blocked', result.stdout)
+        self.assertIn('runtime_revision', result.stderr)
+        self.assertNotIn('LOCK_REACHED', result.stderr)
+
+    def test_native_release_match_preflight_fails_closed_on_unexpected_output(self):
+        result = self.release_match_preflight(verdict='unknown', exit_code=0)
+        self.assertIn('NEXT native_mtp_release_match blocked', result.stdout)
+
+    def test_native_release_match_preflight_fails_closed_on_nonzero_even_if_output_is_ok(self):
+        result = self.release_match_preflight(verdict='ok', exit_code=1)
+        self.assertIn('NEXT native_mtp_release_match blocked', result.stdout)
+
+    def test_non_native_release_skips_matcher(self):
+        result = self.release_match_preflight(bound='false', exit_code=99)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('release is not native-bound', result.stdout)
+        self.assertFalse((self.root / 'matcher-args.json').exists())
+
+    def test_native_release_match_is_before_fresh_steps_and_rechecks_signed_pair(self):
+        gather = function(OPS, 'gather')
+        gate = gather.index('native_mtp_release_preflight "$native_bound" || return 0')
+        self.assertLess(gate, gather.index('set_next revocation_slots mutate'))
+        self.assertLess(gate, gather.index('if [ "$live_rid" = "$R" ]; then'))
+        self.assertLess(gate, gather.index('set_next signed_native_pair mutate'))
+        # Recovery intentionally precedes candidate validation.
+        self.assertLess(gather.index('set_next signed_native_pair_reconcile mutate'), gate)
+        pair = function(OPS, 'signed_pair_internal')
+        self.assertLess(pair.index('native_mtp_release_preflight true'),
+                        pair.index('catalog-content-release.sh'))
+
     def test_final_byte_manifest_accepts_verified_derived_bundle(self):
         result, work = self.assemble()
         self.assertEqual(result.returncode, 0, result.stderr)

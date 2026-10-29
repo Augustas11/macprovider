@@ -273,6 +273,16 @@ SPEC-048-R014 item 10 orders this rebind:
    - the release tag `v<binaryVersion>` does not name that commit;
    - the live coordinator does not yet recommend that release or a later one.
 
+Before any fresh native-bound activation step, `catalog-activate.sh status`
+reports `native_mtp_release_match_gate` and the `native_mtp_release_match`
+step. The verifier checks every signed entry against the verified signed
+release payload and compatibility manifest: model key, artifact hash, runtime
+revision from the source commit's `Package.resolved`, hardware class, RAM bytes,
+qualified slots, embedded decode digest and payload metallib hash. A mismatch
+names its field and blocks `next --run`, including an already-live release or
+a signed binary/policy pair; the check runs again under live-ops custody before
+publication. Interrupted-operation recovery remains available.
+
 After this, a provider on a pre-0.1.51 CLI rejects the admission set and serves
 ordinary decode until it updates. From then on, cuts with an unchanged digest
 need no admission step.
