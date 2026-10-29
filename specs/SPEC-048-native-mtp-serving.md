@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.64
+**Version:** 0.1.65
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.64",
+  "version": "0.1.65",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -1074,6 +1074,14 @@ improvement gate. Only native-eligible cells set or justify the bound; a gated
 cell (slot count above the bound) passing MTP-15 non-inferiority shows the
 gate is safe there and never raises the bound. A larger bound needs a new
 frozen policy whose native-eligible cells cover it.
+
+For GLM sparse-layer verification, a consumed pending transaction MAY transfer
+its isolated staged state into the committed row instead of copying that state
+a second time. The transfer MUST be single-use, reject another consumption
+before mutating the row, and preserve exact accepted-prefix trimming. Abort
+and invalid retained counts MUST leave the committed row unchanged. Reusable
+resolution callers retain independent copy semantics. This optimization does
+not raise the signed native active-row bound or relax R005/R015 qualification.
 
 Native MTP MUST use SPEC-038 FCFS admission and shared-iteration fairness; it
 MUST NOT create a second priority queue or skip an older ready ordinary row for
@@ -2156,6 +2164,10 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.65 (2026-10-29)** — R007 permits single-use transfer of isolated GLM
+  staged sparse-layer state after finalize validation, preserving reusable
+  copy semantics, exact trimming and abort isolation. Native row bounds and
+  R005/R015 qualification remain unchanged.
 - **0.1.64 (2026-10-28)** — R003 names the LFM-only expert-order correction
   `3.32.3-macprovider.10.15.1` (`36d24585f9373c2661f61f5e5b485c8d66c43a2b`)
   on `.10.15`. Shared/Qwen/GLM sources and transitive pins remain unchanged.

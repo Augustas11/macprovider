@@ -166,6 +166,78 @@ final class PagedMLALatentCacheTests: XCTestCase {
         assertStatesEqual(cache.state, before, "original changed by its copy")
     }
 
+    func testConsumingCommitMatchesReusableCommitAndIsolatesArrays() throws {
+        try requireMetal()
+        var rng = SplitMix(seed: 2144)
+        for prefix in [7, 10, 13] {
+            let original = makeCache()
+            apply(original, randomInputs(length: prefix, rng: &rng))
+            let reusableRow = original.concreteCopy()
+            let consumedRow = original.concreteCopy()
+            let staged = original.concreteCopy()
+            apply(staged, randomInputs(length: 4, rng: &rng))
+            let reusable = PagedMLABatchLayerCache.PendingMTPResolution(
+                rowCache: reusableRow, staged: staged.concreteCopy(),
+                inputTokenCount: 4, proposalTokenCount: 3, appendedTokenCount: 4)
+            // Repeated choices must always start from the full staged state.
+            for retained in [1, 4, 2] {
+                _ = try reusable.stageCommit(inputCount: retained)
+                let expected = staged.concreteCopy()
+                XCTAssertEqual(expected.trim(4 - retained), 4 - retained)
+                XCTAssertEqual(reusableRow.offset, prefix + retained)
+                assertStatesEqual(reusableRow.state, expected.state, "reusable retained=\(retained)")
+            }
+
+            let consumed = PagedMLABatchLayerCache.PendingMTPResolution(
+                rowCache: consumedRow, staged: staged,
+                inputTokenCount: 4, proposalTokenCount: 3, appendedTokenCount: 4)
+            let before = consumedRow.state
+            for invalid in [-1, 5] {
+                XCTAssertThrowsError(try consumed.consumeStageCommit(inputCount: invalid))
+                XCTAssertEqual(consumedRow.offset, prefix)
+                assertStatesEqual(consumedRow.state, before, "invalid consume")
+            }
+            _ = try consumed.consumeStageCommit(inputCount: 2)
+            assertStatesEqual(consumedRow.state, reusableRow.state, "consume parity")
+            XCTAssertEqual(consumedRow.offset, reusableRow.offset)
+            XCTAssertThrowsError(try consumed.consumeStageCommit(inputCount: 2))
+            XCTAssertThrowsError(try consumed.stageCommit(inputCount: 2))
+
+            // Adoption keeps independent MLXArray wrappers even if an old
+            // staging reference writes into the same allocated capacity.
+            let committed = consumedRow.state
+            apply(staged, randomInputs(length: 1, rng: &rng))
+            XCTAssertEqual(consumedRow.offset, prefix + 2)
+            assertStatesEqual(consumedRow.state, committed, "staged append changed committed row")
+            assertStatesEqual(consumedRow.state, reusableRow.state, "staged array isolation")
+        }
+    }
+
+    func testConsumingAbortAndTrimFailureLeaveRowUntouched() throws {
+        try requireMetal()
+        var rng = SplitMix(seed: 2145)
+        let row = makeCache()
+        apply(row, randomInputs(length: 7, rng: &rng))
+        let before = row.state
+        let abort = PagedMLABatchLayerCache.PendingMTPResolution(
+            rowCache: row, staged: row.concreteCopy(),
+            inputTokenCount: 2, proposalTokenCount: 1, appendedTokenCount: 2)
+        XCTAssertTrue(try abort.consumeStageCommit(inputCount: 0).isEmpty)
+        XCTAssertThrowsError(try abort.consumeStageCommit(inputCount: 1))
+        XCTAssertEqual(row.offset, 7)
+        assertStatesEqual(row.state, before, "consuming abort")
+
+        let malformed = PagedMLABatchLayerCache.PendingMTPResolution(
+            rowCache: row, staged: row.concreteCopy(),
+            inputTokenCount: 2, proposalTokenCount: 1, appendedTokenCount: 100)
+        XCTAssertThrowsError(try malformed.consumeStageCommit(inputCount: 1))
+        // Failure must not consume or trim the stage; a zero-count abort is
+        // still valid, and neither attempt publishes a row mutation.
+        XCTAssertTrue(try malformed.consumeStageCommit(inputCount: 0).isEmpty)
+        XCTAssertEqual(row.offset, 7)
+        assertStatesEqual(row.state, before, "failed trim")
+    }
+
     /// The reference is the fork's own packed path over stock caches:
     /// `GLM5NextLatentCacheBatch` working copies written with each row's valid
     /// columns only, then `GLM5NextLatentRowTransaction.stageCommit(retaining:)`.

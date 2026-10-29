@@ -745,6 +745,25 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     /// inside one: forwards, sampling, drafter state, lab digests.
     private var targetLockHolders = 0
 
+    private struct PackedDrafterCapability {
+        let maximumBlockSize: Int?
+    }
+    // The container is immutable for this backend's lifetime. The wrapper
+    // distinguishes an unchecked model from a checked, unbounded drafter.
+    private var packedDrafterCapability: PackedDrafterCapability?
+
+    private func cachedPackedDrafterCapability() -> PackedDrafterCapability? {
+        lock.lock()
+        defer { lock.unlock() }
+        return packedDrafterCapability
+    }
+
+    private func cachePackedDrafterCapability(_ capability: PackedDrafterCapability) {
+        lock.lock()
+        defer { lock.unlock() }
+        packedDrafterCapability = capability
+    }
+
     fileprivate func enterTargetLock() {
         lock.lock()
         targetLockHolders += 1
@@ -1534,12 +1553,20 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
 
         // The drafter already proposed each row's next token in the round
         // that last advanced it (prefill or finalize), so proposal is a host
-        // lookup. The drafter is consulted only to bound the depth.
-        let maximumBlockSize = try await drafterContainer.perform { context -> Int? in
-            guard context.model is any MTPPackedStatefulDrafterModel else {
-                throw ContinuousBatchSchedulerError.unsupported("native_mtp_packed_drafter_required")
+        // lookup. Check the immutable drafter's capability once, including
+        // an unbounded (nil) block size, without awaiting under the lock.
+        let maximumBlockSize: Int?
+        if let capability = cachedPackedDrafterCapability() {
+            maximumBlockSize = capability.maximumBlockSize
+        } else {
+            let checked = try await drafterContainer.perform { context -> Int? in
+                guard context.model is any MTPPackedStatefulDrafterModel else {
+                    throw ContinuousBatchSchedulerError.unsupported("native_mtp_packed_drafter_required")
+                }
+                return context.model.maximumBlockSize
             }
-            return context.model.maximumBlockSize
+            cachePackedDrafterCapability(PackedDrafterCapability(maximumBlockSize: checked))
+            maximumBlockSize = checked
         }
         // A row returning from load-gate depth zero first catches its drafter
         // up on the columns it committed through the ordinary forward, so
@@ -4927,7 +4954,7 @@ private enum NativeMTPPendingLayerResolution {
         case .pagedAttention(let resolution):
             try resolution.stageCommit(inputCount: inputCount)
         case .pagedMLA(let resolution):
-            try resolution.stageCommit(inputCount: inputCount)
+            try resolution.consumeStageCommit(inputCount: inputCount)
         case .recurrent(let resolution):
             try resolution.stageCommit(retaining: inputCount)
         }
