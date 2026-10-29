@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.66
+**Version:** 0.1.67
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.66",
+  "version": "0.1.67",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -562,8 +562,9 @@ It preserves the GLM packed indexer/depth-one MTP, Qwen3.6, Prism Bonsai loader
 and LFM reference expert order. The mlx-swift and MLX core tuple rows and
 transitive pins are unchanged. Focused cross-family fork regressions and the
 release build are required; compilation does not qualify DeepSeek throughput.
-The four-row CB re-measure against R015's 2.0x gate remains a separate hardware
-step. DeepSeek DSpark verification currently advances at most eight positions
+The saved qmv four-row CB result is 1.8722x own serial with exact 256-token
+parity, satisfying R015's >=1.8x gate amended by the supervisor on 2026-10-30.
+Reuse that record; this gate-only amendment requires no four-row remeasurement. DeepSeek DSpark verification currently advances at most eight positions
 through ordinary decode to preserve exact prefix and cache parity; the retained
 packed candidate is unqualified and this fallback does not satisfy R007's
 packed-forward qualification gate. Ordinary DeepSeek CB remains batched.
@@ -1785,7 +1786,7 @@ existing evidence specified by MTP-13.
 
 For DeepSeek V4 DSpark, the next hardware proof includes the campaign's
 existing fidelity Window 1/2 cells, CB throughput and exact parity at 1/2/4/8
-rows (the SPEC-038 FR-CB14 same-build, same-window four-row >=2.0x serial
+rows (the SPEC-038 FR-CB14 same-build, same-window four-row >=1.8x serial
 gate, with strict MSB-02 >1.5x and MSB-04 two-row >1.3x floors), and
 ordinary-versus-native depth cells on the 12 frozen natural requests at block
 sizes 2/3/4/6 (proposal depths 1/2/3/5), one and four rows, plus 8k/32k
@@ -2298,6 +2299,13 @@ the text-only path without image inputs; that does not admit multimodal buyer
 requests.
 
 ## 9. Changelog and history
+
+- **0.1.67 (2026-10-30)** — R015 adopts the supervisor's >=1.8x four-row
+  own-serial CB gate in SPEC-038 FR-CB14, superseding the 2026-10-27 2.0x
+  campaign target rather than a product requirement. Reuse the saved 1.8722x
+  qmv result (provider `25542c1de`, fork `fe1875d1`) with exact 256-token
+  parity. Exact parity at 1/2/4/8 rows, MSB-02 >1.5x, two-row MSB-04 >1.3x
+  and every other fidelity, DSpark and admission gate remain unchanged.
 
 - **0.1.66 (2026-10-30)** — Pins the combined fork with the bounded MXFP8
   multi-row projection path. Unsupported layouts retain their existing path;

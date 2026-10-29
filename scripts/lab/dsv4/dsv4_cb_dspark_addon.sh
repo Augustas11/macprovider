@@ -3,7 +3,7 @@
 # live provider already paused, drained and booted out by that controller, and
 # after its job d (12 coding prompts) has stopped its loopback serve, run
 #   (1) the DeepSeek CB gate on the #2151 build: msb-throughput aggregate decode
-#       tok/s at 1, 2, 4, 8 rows vs serial, gate >= 2.0x same-window serial at 4 rows, and exact
+#       tok/s at 1, 2, 4, 8 rows vs serial, gate >= 1.8x same-window serial at 4 rows, and exact
 #       token parity at 1, 2, 4, 8 rows;
 #   (2) the DSpark reference lane on the corrected mlx-vlm target;
 #   (3) native frozen-request integrity probes and separate R015 benches.

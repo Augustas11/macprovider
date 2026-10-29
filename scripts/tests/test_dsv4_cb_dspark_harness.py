@@ -85,7 +85,7 @@ class DeepseekCBDSparkHarnessTests(unittest.TestCase):
             self.assertEqual(self.summary(directory)['cb_gate']['decision'], 'INCOMPLETE')
 
     def test_cb_gate_uses_same_build_serial_ratio_instead_of_reference_tps(self):
-        for aggregate, serial, expected in ((60, 30, 'PASS'), (70, 40, 'FAIL')):
+        for aggregate, serial, expected in ((60, 30, 'PASS'), (54, 30, 'PASS'), (53.999, 30, 'FAIL'), (45.22325348755279, 24.155681340279664, 'PASS'), (70, 40, 'FAIL')):
             with self.subTest(aggregate=aggregate, serial=serial), tempfile.TemporaryDirectory() as tmp:
                 directory = Path(tmp)
                 self.write_cb(directory)
@@ -98,7 +98,7 @@ class DeepseekCBDSparkHarnessTests(unittest.TestCase):
                 gate = self.summary(directory)['cb_gate']
                 self.assertEqual(gate['decision'], expected)
                 self.assertEqual(gate['gate_serial_speedup'], aggregate / serial)
-                self.assertEqual(gate['bar_tps'], 2 * serial)
+                self.assertEqual(gate['bar_tps'], 1.8 * serial)
 
     def test_cb_msb04_floor_is_strict_even_when_four_rows_pass(self):
         with tempfile.TemporaryDirectory() as tmp:
