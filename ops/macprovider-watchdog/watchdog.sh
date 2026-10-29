@@ -1029,6 +1029,14 @@ autoupdate_recovery_tick() {
   if [ ! -e "$pending_path" ] && [ ! -L "$pending_path" ]; then
     return 0
   fi
+  # The installed CLI remains the sole rollback owner. It validates both
+  # deadlines, dead owner, provider identity and all marker/lease bindings;
+  # refusal is a no-op. Never interpret authority or restart services here.
+  if [ -x "$BINARY_PATH" ]; then
+    if "$BINARY_PATH" recover-update --prepared-handoff-only >> "$LOG_PATH" 2>&1; then
+      log "autoupdate prepared-handoff recovery checked by CLI; exit-restart remains owned by launchd"
+    fi
+  fi
   log "autoupdate recovery deferred: pending marker exists; transaction owner must resolve update/rollback state; if provider startup remains blocked, run macprovider-cli recover-update; watchdog does not restart for update recovery"
   # Record the intended kind; main() emits exactly one beacon per tick (a restart
   # this tick, if any, takes priority over a deferral).

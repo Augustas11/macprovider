@@ -1,5 +1,13 @@
 # CLI Release Train — control surface
 
+## Release narrative update — 2026-10-29
+
+The dated [1.8.277 release and next-cut notes](provider-cli-1.8.277-notes.md)
+record promotion, withdrawal/rollback history, runtime identity corrections and
+main content for the next cut. Read that snapshot before interpreting the older
+candidate sections below. This narrative update leaves parsed control rows
+unchanged; it does not itself advance a release-tooling step.
+
 **This file is the single source of truth for provider CLI releases.** Work happens
 across many sessions and agents; before cutting, testing, or promoting a CLI
 build, read this file, and after any release-affecting action update it in the
