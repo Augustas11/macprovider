@@ -65,6 +65,35 @@ final class GLMParityCommandTests: XCTestCase {
         XCTAssertEqual(comparison.maxAbsLogitDiff, 0)
     }
 
+    func testTopFiveDetectsUnseenCandidateDespiteMatchingArgmax() {
+        let comparison = GLMParityComparison(
+            oracleGreedy: [1], oracleTopIdx: [Array(1...16)],
+            oracleTopLogit: [(0..<16).map { Float(16 - $0) }],
+            tokens: [1], argmaxTokens: [1],
+            gatheredLogits: [(0..<16).map { Float(16 - $0) }],
+            candidateTopFive: [[1, 2, 3, 4, 99]]
+        )
+        XCTAssertEqual(comparison.top1Agreement, 1)
+        XCTAssertEqual(comparison.maxAbsLogitDiff, 0)
+        XCTAssertEqual(comparison.top5Compared, 1)
+        XCTAssertEqual(comparison.top5Agreement, 0)
+        XCTAssertEqual(comparison.top5MismatchSteps, [0])
+        XCTAssertEqual(comparison.candidateTopFive, [[1, 2, 3, 4, 99]])
+        XCTAssertEqual(comparison.oracleTopTwoGaps, [1])
+    }
+
+    func testTopFiveComparesSetsWithoutRequiringSameRankOrder() {
+        let comparison = GLMParityComparison(
+            oracleGreedy: [1], oracleTopIdx: [[1, 2, 3, 4, 5]],
+            oracleTopLogit: [[5, 4, 3, 2, 1]],
+            tokens: [1], argmaxTokens: [1], gatheredLogits: [[5, 4, 3, 2, 1]],
+            candidateTopFive: [[1, 5, 4, 3, 2]]
+        )
+        XCTAssertEqual(comparison.top5Compared, 1)
+        XCTAssertEqual(comparison.top5Agreement, 1)
+        XCTAssertTrue(comparison.top5MismatchSteps.isEmpty)
+    }
+
     func testOracleDecodesConverterJSONAndRejectsBadShapes() throws {
         func oracle(_ body: String) throws -> GLMParityOracle {
             try JSONDecoder().decode(GLMParityOracle.self, from: Data(body.utf8))
