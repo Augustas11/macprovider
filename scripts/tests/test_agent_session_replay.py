@@ -73,6 +73,7 @@ class FakeGateway:
         self.cache_ratio = 0.95
         self.gap = {}  # request_no -> seconds slept between two deltas
         self.status = {}  # request_no -> HTTP status returned instead of a stream
+        self.redirect = {}  # request_no -> (HTTP status, destination URL)
         self.cut = set()  # request_nos whose stream ends before completion
         self.first_token_delay = {}  # request_no -> seconds
         self.bodies = []
@@ -87,6 +88,12 @@ class FakeGateway:
             def log_message(self, *args):
                 pass
 
+            def do_GET(self):
+                with gateway.lock:
+                    gateway.headers.append(dict(self.headers))
+                self.send_response(204)
+                self.end_headers()
+
             def do_POST(self):
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 with gateway.lock:
@@ -97,6 +104,13 @@ class FakeGateway:
                     first_for_key = key not in gateway.seen_keys
                     gateway.seen_keys.add(key)
                 chat = self.path.endswith("/chat/completions")
+                if no in gateway.redirect:
+                    status, location = gateway.redirect[no]
+                    self.send_response(status)
+                    self.send_header("Location", location)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
                 if no in gateway.status:
                     payload = json.dumps({"error": {"code": "no_provider_available", "message": "busy"}}).encode()
                     self.send_response(gateway.status[no])
@@ -250,6 +264,30 @@ class ParseRolloutTest(unittest.TestCase):
 
 
 class ReplaySLOTest(ReplayTestCase):
+    def test_authenticated_cross_origin_redirects_never_send_credentials(self):
+        destination = FakeGateway()
+        self.addCleanup(destination.close)
+        for no, status in enumerate((301, 302, 303, 307, 308), 1):
+            with self.subTest(status=status):
+                self.gw.redirect[no] = (status, destination.base_url + "/responses")
+                result = replay.stream_request(self.gw.base_url + "/responses", {}, "synthetic-key", 2, "responses")
+                self.assertEqual(result["http_status"], status)
+                self.assertTrue(replay.is_failure(result))
+                self.assertFalse(result["completed"])
+                self.assertIsNotNone(result["error"])
+        self.assertEqual(destination.headers, [])
+        self.assertEqual(destination.bodies, [])
+
+    def test_authenticated_redirect_fails_replay_gate(self):
+        self.gw.redirect[1] = (302, self.gw.base_url + "/responses")
+        key_file = self.dir / "key"
+        key_file.write_text("synthetic-key")
+        code, summary, turns, _ = self.run_replay("--api-key-file", str(key_file))
+        self.assertEqual(code, 1)
+        self.assertFalse(summary["pass"])
+        self.assertEqual(turns[0]["attempts"][0]["http_status"], 302)
+        self.assertIn("stream_cut", turns[0]["breaches"])
+
     def test_clean_run_passes(self):
         code, summary, turns, _ = self.run_replay()
         self.assertEqual(code, 0, summary["breaches"])

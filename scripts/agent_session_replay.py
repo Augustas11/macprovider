@@ -401,6 +401,12 @@ def aggressor_text(tokens: int, rng: random.Random) -> str:
 # --------------------------------------------------------------- streaming
 
 
+class RefuseRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        # urllib otherwise forwards Authorization even across origins/schemes.
+        return None
+
+
 def stream_request(url: str, body: dict[str, Any], api_key: str | None, timeout: float, api: str, on_first_token=None) -> dict[str, Any]:
     """POST one streaming request and measure it. Never raises for HTTP or
     stream failures; they are recorded on the result."""
@@ -426,9 +432,11 @@ def stream_request(url: str, body: dict[str, Any], api_key: str | None, timeout:
     first = last = None
     max_gap = 0.0
     try:
-        resp = urllib.request.urlopen(req, timeout=timeout)
+        opener = urllib.request.build_opener(RefuseRedirects()) if api_key else urllib.request.build_opener()
+        resp = opener.open(req, timeout=timeout)
     except urllib.error.HTTPError as exc:
         result["http_status"] = exc.code
+        result["cut"] = 300 <= exc.code < 400
         try:
             result["error"] = exc.read(400).decode("utf-8", "replace")
         except Exception:  # noqa: BLE001 - body is diagnostic only
