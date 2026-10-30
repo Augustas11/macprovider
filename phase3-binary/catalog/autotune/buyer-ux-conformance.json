@@ -3,6 +3,10 @@
     "deepseek/deepseek-v4-flash": {
       "model": "TensorFold/DeepSeek-V4-Flash-0731-MXFP4-MLX",
       "release_id": "published-2026-10-23-deepseek-v4-flash-recommendable-v1"
+    },
+    "zai-org/glm-5.3-flash-abliterated": {
+      "model": "grant-ai/GLM-5.3-Flash-Abliterated-MLX-4bit",
+      "release_id": "published-2026-10-30-glm53-flash-abliterated-recommendable-v1"
     }
   },
   "records": {

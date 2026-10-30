@@ -373,6 +373,25 @@
         "residency_gb": "167",
         "projected_tps": "33"
       }
+    },
+    {
+      "source_model_id": "z-ai/glm-5.3-flash-abliterated",
+      "canonical_model_id": "zai-org/glm-5.3-flash-abliterated",
+      "serving_path": {
+        "verification_status": "verified",
+        "reference": "https://huggingface.co/grant-ai/GLM-5.3-Flash-Abliterated-MLX-4bit"
+      },
+      "license": {
+        "commercial_permitted": true,
+        "source_url": "https://huggingface.co/grant-ai/GLM-5.3-Flash-Abliterated-MLX-4bit",
+        "verification_note": "The pinned artifact's model card (revision cbf4e8bd) declares the MIT license of its zai-org/GLM-5.3-Flash base."
+      },
+      "profile": {
+        "kind": "broad_fleet",
+        "active_params_b": "18",
+        "residency_gb": "186",
+        "projected_tps": "40"
+      }
     }
   ],
   "cache_hit_fraction": "0.25",

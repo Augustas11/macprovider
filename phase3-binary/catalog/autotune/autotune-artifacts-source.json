@@ -544,6 +544,31 @@
       },
       "primary_artifact_id": "mlx-oq4e-mtp",
       "rate_class": "class-120b-moe"
+    },
+    "zai-org/glm-5.3-flash-abliterated": {
+      "artifacts": {
+        "mlx-oq4-abliterated-mtp": {
+          "allowed_runtime_sources": [
+            "mlx_cache"
+          ],
+          "hash": "d47ec628ddfd67813ab9a9439a152e19d5f648ae3f05cfe6b2094eb9fb67fc4c",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "min_ram_gb": 234,
+          "notes": "Abliterated GLM-5.3-Flash build (#2189), MIT, base zai-org/GLM-5.3-Flash via Blackfrost-Research/GLM-5.3-Flash-DERISKED-BF16 (single-shot residual direction subtraction; the MTP layer is transplanted from the clean BF16). Same glm5_next architecture, layer count, next-N layer, tokenizer and generation config as zai-org/glm-5.3-flash; oQ mixed 4/5/6/8-bit g64. Its chat template renders the GLM-5.3-Flash reference byte for byte for every provider message shape. min_ram_gb kept at the GLM-5.3-Flash value (185.9 GB of weights vs 185.9 GB). Snapshot-manifest hash recomputed from the Hugging Face API at the pinned revision with scripts/catalog-hash-sweep.py (45 files).",
+          "quantization": "oq4-mixed-4-5-6-8bit-g64",
+          "runtime_format": "mlx_safetensors",
+          "size_bytes": 185943689218,
+          "source_ref": {
+            "kind": "huggingface_revision",
+            "repo_id": "grant-ai/GLM-5.3-Flash-Abliterated-MLX-4bit",
+            "revision": "cbf4e8bd80e9227aa0a60c19b550bef6b390c04c"
+          },
+          "verification_status": "verified",
+          "verified_at": "2026-10-30"
+        }
+      },
+      "primary_artifact_id": "mlx-oq4-abliterated-mtp",
+      "rate_class": "class-120b-moe"
     }
   },
   "schema_version": "macprovider.autotune-artifacts-source.v1",

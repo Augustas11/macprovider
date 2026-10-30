@@ -600,6 +600,8 @@ def normalize_model_key(model: str) -> str:
 EXACT_MODEL_KEY_ALIASES = {
     "z-ai/glm-5.3-flash": "zai-org/glm-5.3-flash",
     "jundot/glm-5.3-flash-oq4e-mtp": "zai-org/glm-5.3-flash",
+    "z-ai/glm-5.3-flash-abliterated": "zai-org/glm-5.3-flash-abliterated",
+    "grant-ai/glm-5.3-flash-abliterated-mlx": "zai-org/glm-5.3-flash-abliterated",
     "tensorfold/deepseek-v4-flash-0731-mxfp4-mlx": "deepseek/deepseek-v4-flash",
     "deepseek-ai/deepseek-v4-flash-0731": "deepseek/deepseek-v4-flash",
 }

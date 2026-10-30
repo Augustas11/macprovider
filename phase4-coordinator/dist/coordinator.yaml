@@ -468,6 +468,10 @@ rewards:
       prompt_credits_per_mtok: 18500         # $0.0185/M
       prompt_cache_hit_credits_per_mtok: 5500 # $0.0055/M prefix-cache hit
       completion_credits_per_mtok: 88000     # $0.088/M
+    zai-org/glm-5.3-flash-abliterated:     # #2189 abliterated GLM-5.3-Flash build — own labelled row at the zai-org/glm-5.3-flash price
+      prompt_credits_per_mtok: 18500         # $0.0185/M
+      prompt_cache_hit_credits_per_mtok: 5500 # $0.0055/M prefix-cache hit
+      completion_credits_per_mtok: 88000     # $0.088/M
 
 # SPEC-015 / SPEC-022 settlement policy.
 #

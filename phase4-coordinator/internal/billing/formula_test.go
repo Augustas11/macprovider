@@ -127,13 +127,15 @@ func TestRateFor_NormalizesGLM53FlashAliasesExactly(t *testing.T) {
 	}
 }
 
-// The alias table holds whole normalized keys for GLM-5.3-Flash and
-// DeepSeek-V4-Flash only, so no other model's normalization can change
-// through it.
+// The alias table holds whole normalized keys for GLM-5.3-Flash, its
+// abliterated build (#2189) and DeepSeek-V4-Flash only, so no other model's
+// normalization can change through it.
 func TestExactModelKeyAliasesAreOnlyTheCatalogIdentities(t *testing.T) {
 	want := map[string]string{
 		"z-ai/glm-5.3-flash":                          "zai-org/glm-5.3-flash",
 		"jundot/glm-5.3-flash-oq4e-mtp":               "zai-org/glm-5.3-flash",
+		"z-ai/glm-5.3-flash-abliterated":              "zai-org/glm-5.3-flash-abliterated",
+		"grant-ai/glm-5.3-flash-abliterated-mlx":      "zai-org/glm-5.3-flash-abliterated",
 		"tensorfold/deepseek-v4-flash-0731-mxfp4-mlx": "deepseek/deepseek-v4-flash",
 		"deepseek-ai/deepseek-v4-flash-0731":          "deepseek/deepseek-v4-flash",
 	}

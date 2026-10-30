@@ -478,3 +478,18 @@ func TestDemandTelemetryKnowsGLM53FlashIdentitiesExactly(t *testing.T) {
 		}
 	}
 }
+
+// #2189: the abliterated GLM-5.3-Flash build's catalog key, slug and served
+// artifact id are recorded as themselves, never folded into GLM-5.3-Flash.
+func TestDemandTelemetryKnowsGLM53FlashAbliteratedIdentitiesExactly(t *testing.T) {
+	for _, model := range []string{"zai-org/glm-5.3-flash-abliterated", "z-ai/glm-5.3-flash-abliterated", "grant-ai/GLM-5.3-Flash-Abliterated-MLX-4bit"} {
+		if got := sanitizeDemandModelID(model); got != model {
+			t.Errorf("sanitizeDemandModelID(%q) = %q, want the model itself", model, got)
+		}
+	}
+	for _, model := range []string{"zai-org/glm-5.3-flash-abliteratedx", "grant-ai/glm-5.3-flash-abliterated-mlx-4bit"} {
+		if got := sanitizeDemandModelID(model); got != demandUnknownModelID {
+			t.Errorf("sanitizeDemandModelID(%q) = %q, want %q", model, got, demandUnknownModelID)
+		}
+	}
+}
