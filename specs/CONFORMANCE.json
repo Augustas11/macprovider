@@ -3810,7 +3810,7 @@
         "phase3-binary/Tests/macprovider-cliTests/ConversationPromptSnapshotTests.swift:testSnapshotEntryServesOnlyAnExtendingPrompt",
         "phase3-binary/Tests/macprovider-cliTests/ConversationPromptSnapshotTests.swift:testSnapshotEntryMissesWhenThePromptDivergesInsideIt",
         "phase3-binary/Tests/macprovider-cliTests/ConversationPromptSnapshotTests.swift:testUnflaggedRotatingAndPoolEntriesStillMiss",
-        "phase3-binary/Tests/macprovider-cliTests/ConversationPromptSnapshotTests.swift:testDeepseekV4ResumedTurnMatchesFreshPrefillExactlyOnCPU",
+        "phase3-binary/Tests/macprovider-cliTests/ConversationPromptSnapshotTests.swift:testDeepseekV4ResumedTurnMatchesFreshPrefillExactlyOnGPU",
         "phase3-binary/Tests/macprovider-cliTests/ConversationPromptSnapshotTests.swift:testGLM5NextResumedTurnMatchesFreshPrefill",
         "phase3-binary/Tests/macprovider-cliTests/ConversationCacheTests.swift:testPromptSnapshotIsCapturedByTheColdTier",
         "phase3-binary/Tests/macprovider-cliTests/PagedMLALatentCacheTests.swift:testPromptSnapshotConversionEqualsAndExtendsLikeTheStockCacheOnCPU",
