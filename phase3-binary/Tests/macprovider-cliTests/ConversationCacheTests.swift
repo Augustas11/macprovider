@@ -598,6 +598,88 @@ final class ConversationCacheTests: XCTestCase {
         }
     }
 
+    func testLongGLMConversationBudgetPreservesServingFloors() {
+        let gib = 1024 * 1024 * 1024
+        let physical = 256 * gib
+        let available = (4_223_692 + 371_987 + 28_736) * 16_384
+        let sparse = ConversationCacheMemoryBudget.glmGeometry(
+            latentBytesPerToken: 512 * 2, pooledBytesPerKey: 128 * 2,
+            rawKeyBytesPerToken: 128 * 2, rawGateBytesPerToken: 128 * 2,
+            kpool: 4, maxTrim: 16, step: 256)
+        let recurrentBytes = 34 * (3 * 24_576 * 2 + 64 * 128 * 128 * 4)
+        let density = 11 * sparse.bytesPerToken
+        let fixed = recurrentBytes + 11 * sparse.fixedRowBytes
+        XCTAssertEqual(recurrentBytes, 147_619_840)
+        XCTAssertEqual(density, 11_968)
+        let serving = 800_000 * density + fixed * 4
+        let reserved = physical / 10 + 1 + serving + serving / 20 + 2 * gib
+        for (tokens, expectedBytes) in [(100_000, 1_347_816_064), (128_000, 1_683_032_064)] {
+            let entryBytes = fixed + tokens * (density + MemoryLayout<Int32>.stride)
+            XCTAssertEqual(entryBytes, expectedBytes)
+            XCTAssertGreaterThan(2 * (recurrentBytes + tokens * (density + 4)),
+                                 KVDiskCacheStoreConfig.promotionCeilingHardMax)
+            for (freeBytes, expectedLimit) in [(available, 8 * gib), (reserved, 0),
+                                              (reserved + entryBytes - 1, entryBytes - 1),
+                                              (reserved + entryBytes, entryBytes)] {
+                let budget = ConversationCacheMemoryBudget(probe: .init(identity: "long-glm-\(tokens)-\(freeBytes)") {
+                    .init(availableBytes: freeBytes, physicalBytes: physical)
+                })
+                budget.configure(maxContextTokens: 200_000, slots: 4,
+                                 residentTokens: 26_214_400, verifyBytes: 0)
+                budget.observe(geometry: .init(fixedRowBytes: fixed, bytesPerToken: density))
+                XCTAssertEqual(budget.hotByteLimit(), expectedLimit)
+                XCTAssertEqual(entryBytes <= budget.hotByteLimit(), expectedLimit >= entryBytes)
+            }
+        }
+        let overflow = ConversationCacheMemoryBudget(probe: .init(identity: "long-glm-overflow") {
+            .init(availableBytes: physical, physicalBytes: physical)
+        })
+        overflow.configure(maxContextTokens: Int.max, slots: 4, residentTokens: 26_214_400, verifyBytes: 0)
+        overflow.observe(geometry: .init(fixedRowBytes: fixed, bytesPerToken: density))
+        XCTAssertEqual(overflow.hotByteLimit(), 0)
+    }
+
+    func testLongPromptRemainsHotWhenColdCaptureIsRefused() async throws {
+        try await Device.withDefaultDevice(Device(.cpu)) {
+            let gib = 1024 * 1024 * 1024
+            for (count, expectedBytes) in [(100_000, 1_347_816_064), (128_000, 1_683_032_064)] {
+                let budget = ConversationCacheMemoryBudget(probe: .init(identity: "long-refused-cold-\(count)") {
+                    .init(availableBytes: (4_223_692 + 371_987 + 28_736) * 16_384,
+                          physicalBytes: 256 * gib)
+                })
+                budget.configure(maxContextTokens: 200_000, slots: 4,
+                                 residentTokens: 26_214_400, verifyBytes: 0)
+                let coldTier = FakeConversationColdTier(refuseCapture: true)
+                let cache = makeConversationCacheForTest(coldTier: coldTier, memoryBudget: budget)
+                let tokens = int32Range(0..<count)
+                // Lazy CPU metadata carriers reproduce the GLM byte geometry;
+                // no tensor values are evaluated or model loaded.
+                let attention = KVCacheSimple()
+                attention.state = (0..<2).map { _ in
+                    MLXArray.arange(count * 1_496, dtype: .float32, stream: .cpu)
+                        .reshaped([1, 1, count, 1_496], stream: .cpu)
+                }
+                let fixed = ArraysCache(size: 1)
+                fixed.state = [MLXArray.arange(150_616_064 / 4, dtype: .float32, stream: .cpu)]
+                let snapshot = ConversationCacheLayers([attention, fixed], promptSnapshot: true,
+                                                       resumeBoundaryPlan: true)
+                XCTAssertEqual(ConversationCacheMemoryBudget.tensorBytes(snapshot) + count * 4, expectedBytes)
+                let lease = await cache.begin(conversationKey: "conv:long-refused", incomingTokens: tokens,
+                                              modelID: "model-a", kvBits: nil, cold: coldContext(eligible: true))
+                await cache.commit(try XCTUnwrap(lease), cache: snapshot, fullTokens: tokens,
+                                   cold: coldContext(eligible: true))
+                XCTAssertEqual(coldTier.captureAttemptCount, 1)
+                XCTAssertEqual(coldTier.enqueueCount, 0)
+                let stats = await cache.snapshotStats()
+                XCTAssertEqual(stats.entries, 1)
+                let hit = await cache.begin(conversationKey: "conv:long-refused", incomingTokens: tokens + [7],
+                                            modelID: "model-a", kvBits: nil, cold: coldContext(eligible: true))
+                XCTAssertEqual(hit?.cachedPromptTokens, count)
+                if let hit { await cache.abort(hit) }
+            }
+        }
+    }
+
     func testLogicalPoolCapStillReservesFullRowsAndFailsClosedUnderPressure() {
         let gib = 1024 * 1024 * 1024
         let physical = 256 * gib
@@ -1416,8 +1498,19 @@ private actor RetainedDiscardGate {
 
 private final class FakeConversationColdTier: ConversationColdTier, @unchecked Sendable {
     private let lock = NSLock()
+    private let refuseCapture: Bool
+    private var captureAttempts = 0
     private var captures: [ConversationColdSnapshot] = []
     private var enqueues: [ConversationColdSnapshot] = []
+
+    init(refuseCapture: Bool = false) {
+        self.refuseCapture = refuseCapture
+    }
+
+    var captureAttemptCount: Int {
+        lock.lock(); defer { lock.unlock() }
+        return captureAttempts
+    }
 
     var captureCount: Int {
         lock.lock()
@@ -1445,6 +1538,9 @@ private final class FakeConversationColdTier: ConversationColdTier, @unchecked S
         identity: KVIdentityCore,
         nowMillis: Int
     ) -> ConversationColdSnapshot? {
+        lock.lock(); defer { lock.unlock() }
+        captureAttempts += 1
+        guard !refuseCapture else { return nil }
         let snapshot = ConversationColdSnapshot(
             rawKey: conversationKey,
             tokens: fullTokens,
@@ -1456,9 +1552,7 @@ private final class FakeConversationColdTier: ConversationColdTier, @unchecked S
             eligibleUntilMillis: nowMillis,
             incarnation: "test"
         )
-        lock.lock()
         captures.append(snapshot)
-        lock.unlock()
         return snapshot
     }
 
