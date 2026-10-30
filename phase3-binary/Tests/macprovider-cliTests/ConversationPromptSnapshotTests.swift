@@ -10,7 +10,8 @@ import XCTest
 
 /// SPEC-024 FR-CI2a: extend-only prompt snapshots for families whose caches
 /// cannot be rewound (DeepSeek V4 windows and pools, GLM-5-Next sparse and
-/// recurrent layers). DeepSeek V4 runs on the CPU device; GLM-5-Next's
+/// recurrent layers). Full-reference-chunk DeepSeek V4 fixtures run on the
+/// GPU; the shorter off-plan fixture retains CPU coverage. GLM-5-Next's
 /// linear-attention kernels exist only on the GPU.
 final class ConversationPromptSnapshotTests: XCTestCase {
     // MARK: - begin() acceptance rules (no model)
@@ -705,9 +706,10 @@ final class ConversationPromptSnapshotTests: XCTestCase {
 
     // MARK: - DeepSeek V4 tiny fixture: resumed == fresh, bit for bit
 
-    func testDeepseekV4ResumedTurnMatchesFreshPrefillExactlyOnCPU() async throws {
+    func testDeepseekV4ResumedTurnMatchesFreshPrefillExactlyOnGPU() async throws {
         try Self.requireMetal()
-        try await Device.withDefaultDevice(.cpu) {
+        // Keep the real 32768-token plan without a long CPU quantized prefill.
+        try await Device.withDefaultDevice(.gpu) {
             let model = try Self.tinyDeepseekV4()
             XCTAssertNil(ModelRuntime.glm5NextSerialSnapshotStepSize(model: model, prefillStepSize: 512))
             XCTAssertEqual(ModelRuntime.serialConversationPromptSnapshotPolicy(
@@ -770,7 +772,8 @@ final class ConversationPromptSnapshotTests: XCTestCase {
     /// snapshot, and the aborted lease commits nothing.
     func testDeepseekV4PromptSnapshotStopsWithinOneChunkOnCancelAndCommitsNothing() async throws {
         try Self.requireMetal()
-        try await Device.withDefaultDevice(.cpu) {
+        // Exercise a complete reference chunk on the production Metal device.
+        try await Device.withDefaultDevice(.gpu) {
             let model = try Self.tinyDeepseekV4()
             let context = ModelContext(configuration: .init(id: "deepseek/deepseek-v4-flash"), model: model,
                                        processor: FixtureProcessor(), tokenizer: NoMarkerTokenizer())
