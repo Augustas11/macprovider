@@ -547,13 +547,13 @@ The authorized dependency tuple is exact:
 
 | Repository | Fork tag | Revision | Upstream base |
 |---|---|---|---|
-| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.10.16.4` | `9bb7ab139e438f5d80b045fd5e97ab6b24d72164` | fork `3.32.3-macprovider.10.1` (`87dc5159c87d73f4d7abd524fbdd17760cf56285`) on fork `3.32.3-macprovider.10` (`b4077dcb28336b388f3d09be2a091c12f8e179aa`) on `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
+| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.10.16.5` | `939d938cdb6ef8bdc61facf0face5fead843863f` | fork `3.32.3-macprovider.10.1` (`87dc5159c87d73f4d7abd524fbdd17760cf56285`) on fork `3.32.3-macprovider.10` (`b4077dcb28336b388f3d09be2a091c12f8e179aa`) on `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
 | `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.9` | `29d3b93375cc56cd2649b40e4310a8bc445e9874` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
 | `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.4` | `2f512e3997349c8648f5d7c5113eb2c825aa242d` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
 
-The mlx-swift-lm row is the immutable combined fork tag `3.32.3-macprovider.10.16.4`
-(`9bb7ab139e438f5d80b045fd5e97ab6b24d72164`), succeeding
-`3.32.3-macprovider.10.16.3` (`fe1875d1cde32dc1e87efb9a8fc62eafc53536e3`).
+The mlx-swift-lm row is the immutable combined fork tag `3.32.3-macprovider.10.16.5`
+(`939d938cdb6ef8bdc61facf0face5fead843863f`), succeeding
+`3.32.3-macprovider.10.16.4` (`9bb7ab139e438f5d80b045fd5e97ab6b24d72164`).
 It retains the complete main GLM packed indexer/depth-one MTP, Qwen3.6,
 Prism Bonsai loader and LFM reference expert order, plus DeepSeek's fused
 sparse attention and shared MXFP8 projection weight tiles. The mlx-swift and
@@ -569,7 +569,11 @@ split. The 8192-token Window 1a comparison against the unchanged reference
 passes with exact captured hidden states across all 43 layers. DeepSeek's
 public DSpark verifier selects packed verification for at most eight total
 positions; real-artifact prefix, hidden-state, rollback and continuation
-exactness checks pass. Ordinary DeepSeek CB remains batched. These fidelity
+exactness checks pass on `.10.16.4` (`9bb7ab139e438f5d80b045fd5e97ab6b24d72164`).
+The `.10.16.5` successor retains that GPU packed body byte-identically and
+uses the scalar reference fallback on CPU, where packed reduction order can
+differ. CPU fallback and focused successor regressions require fresh checks.
+Ordinary DeepSeek CB remains batched. These fidelity
 and packed exactness proofs do not establish native DSpark depth/R015
 performance qualification, which remains pending.
 
@@ -2310,11 +2314,13 @@ requests.
 
 ## 9. Changelog and history
 
-- **0.1.68 (2026-10-30)** — R003 pins the `.10.16.4` reference-arithmetic
+- **0.1.68 (2026-10-30)** — R003 pins the `.10.16.5` reference-arithmetic
   and packed-verification successor. DeepSeek uses whole reference prefill
   chunks bounded at 32768 tokens, retains the full final forward's logits and
   snapshots only earlier whole chunks. Window 1a captured hidden states and
-  packed artifact prefix/state checks pass; native DSpark depth/R015 and the
+  packed artifact prefix/state checks pass on the `.10.16.4` predecessor;
+  the successor adds a CPU-only scalar fallback with an unchanged GPU packed
+  body. Native DSpark depth/R015 and the
   remaining campaign gates are still pending. The accepted four-row qmv record
   retains its original measured identity and is reused without remeasurement.
 
