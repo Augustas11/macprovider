@@ -1,7 +1,14 @@
 {
-  "autotune_candidates_sha256": "e31d5e9a8d1dc9022cf1f008d8cd545c10a68b6b717910a15494ccb68ff37265",
-  "generated_at": "2026-10-29T01:00:00Z",
+  "autotune_candidates_sha256": "e5bfa2a0915c011d994ebee7fb2b18c111614cc5a8d2156b662caed19645ef8d",
+  "generated_at": "2026-10-30T05:30:00Z",
   "models": [
+    {
+      "catalog_key": "zai-org/glm-5.3-flash-abliterated",
+      "min_ram_gb": 234,
+      "model_id": "grant-ai/GLM-5.3-Flash-Abliterated-MLX-4bit",
+      "model_revision": "cbf4e8bd80e9227aa0a60c19b550bef6b390c04c",
+      "sha256": "d47ec628ddfd67813ab9a9439a152e19d5f648ae3f05cfe6b2094eb9fb67fc4c"
+    },
     {
       "catalog_key": "zai-org/glm-5.3-flash",
       "min_ram_gb": 234,
@@ -151,6 +158,6 @@
     }
   ],
   "policy_version": "autotune-policy-v1",
-  "release_id": "published-2026-10-29-glm53-qwen36-native-mtp-v277-runtime",
+  "release_id": "published-2026-10-30-glm53-flash-abliterated-listed-v1",
   "schema_version": "macprovider.tier2-identity-binding.v1"
 }
