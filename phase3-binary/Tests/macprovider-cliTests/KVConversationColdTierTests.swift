@@ -448,7 +448,7 @@ final class KVConversationColdTierTests: XCTestCase {
         let store = KVDiskCacheStore(config: config, keychain: KVInMemoryKeychain(), sink: KVRecordingEventSink())
         let adapter = KVConversationColdTierAdapter(
             store: store, namespaceID: "ns-adapter", eligibilityTTLSeconds: 900,
-            writeStagingMaxBytes: writeStagingMaxBytes)
+            writeStagingMaxBytes: writeStagingMaxBytes, memoryBudget: conversationCacheTestMemoryBudget())
         return (adapter, store)
     }
 

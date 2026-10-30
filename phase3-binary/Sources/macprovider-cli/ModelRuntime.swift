@@ -11340,12 +11340,15 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
     func attachKVDiskTier(_ tier: KVDiskTier) async {
         coldTierUnsupportedReason = nil
         configureConversationCacheMemoryBudget()
+        await tier.store.bindMemoryBudget(conversationCache.memoryBudget)
         let adapter = KVConversationColdTierAdapter(
             store: tier.store, namespaceID: tier.namespaceID,
             eligibilityTTLSeconds: tier.eligibilityTTLSeconds,
             writeStagingMaxBytes: tier.config.writeStagingMaxBytes,
             maxEntryBytes: tier.config.maxEntryBytes,
             stagingMaxBytes: tier.config.stagingMaxBytes,
+            adaptiveStaging: tier.config.adaptiveStaging,
+            adaptiveWriteStaging: tier.config.adaptiveWriteStaging,
             memoryBudget: conversationCache.memoryBudget)
         await conversationCache.attachColdTier(adapter)
         // CRITICAL-2: keep the adapter's cached epoch in step with the store so

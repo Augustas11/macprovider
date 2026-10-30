@@ -286,8 +286,9 @@ final class ConversationCacheMemoryBudget: @unchecked Sendable {
         observe(geometry: geometry)
     }
 
-    /// Both disk directions are independently capped at 1 GiB by SPEC-037.
-    /// Reserve them even while idle so retention never consumes staging capacity.
+    /// Preserve the baseline 1 GiB allowance per disk direction while idle.
+    /// Larger adaptive staging separately protects the full hot allowance before
+    /// admitting a copy, using the current measured headroom below.
     func hotByteLimit() -> Int {
         availableRetentionBytes(additionalBytes: 2 * 1024 * 1024 * 1024)
     }
@@ -297,8 +298,28 @@ final class ConversationCacheMemoryBudget: @unchecked Sendable {
         return availableRetentionBytes(additionalBytes: max(2 * 1024 * 1024 * 1024, bytes)) > 0
     }
 
+    /// Per-direction disk staging headroom. Protect the full hot allowance as
+    /// well as serving capacity, then split the remainder equally between the
+    /// one aggregate writer and the one promotion. Never extrapolate a laptop's
+    /// small staging allowance from a large Studio's physical memory.
+    func stagingByteLimit() -> Int {
+        guard let headroom = measuredHeadroom() else { return 0 }
+        let hotAllowance = min(8 * 1024 * 1024 * 1024, headroom.physical / 32)
+        guard headroom.bytes > hotAllowance else { return 0 }
+        let tierCap = headroom.physical < 64 * 1024 * 1024 * 1024
+            ? 256 * 1024 * 1024 : 4 * 1024 * 1024 * 1024
+        return min(tierCap, headroom.physical / 32, (headroom.bytes - hotAllowance) / 2)
+    }
+
     private func availableRetentionBytes(additionalBytes: Int) -> Int {
-        guard let sample = probe.sample(), sample.physicalBytes > 0, sample.availableBytes >= 0 else { return 0 }
+        guard let headroom = measuredHeadroom(), headroom.bytes > additionalBytes else { return 0 }
+        return min(8 * 1024 * 1024 * 1024, headroom.physical / 32, headroom.bytes - additionalBytes)
+    }
+
+    /// Free-memory measurement after the system floor and all reachable rows,
+    /// before either retention or disk staging. Unknown geometry fails closed.
+    private func measuredHeadroom() -> (physical: Int, bytes: Int)? {
+        guard let sample = probe.sample(), sample.physicalBytes > 0, sample.availableBytes >= 0 else { return nil }
         lock.lock()
         // The paged pool is a logical admission ceiling, not an eager allocation.
         // At most `slots` rows can grow to `contextTokens` concurrently. A larger
@@ -318,12 +339,12 @@ final class ConversationCacheMemoryBudget: @unchecked Sendable {
         let targetAndHeadBytes = verifyBytes > 0 ? Self.saturatedMultiply(rowStateBytes, 2) : rowStateBytes
         let servingBytes = Self.saturatedAdd(targetAndHeadBytes, verifyBytes)
         lock.unlock()
-        guard !unknown else { return 0 }
+        guard !unknown else { return nil }
         let floor = sample.physicalBytes / 10 + (sample.physicalBytes % 10 == 0 ? 0 : 1)
         let servingWithSlack = Self.saturatedAdd(servingBytes, servingBytes / 20)
-        let reserved = Self.saturatedAdd(Self.saturatedAdd(floor, servingWithSlack), additionalBytes)
-        guard sample.availableBytes > reserved else { return 0 }
-        return min(8 * 1024 * 1024 * 1024, sample.physicalBytes / 32, sample.availableBytes - reserved)
+        let reserved = Self.saturatedAdd(floor, servingWithSlack)
+        guard sample.availableBytes > reserved else { return nil }
+        return (sample.physicalBytes, sample.availableBytes - reserved)
     }
 
     private static func saturatedAdd(_ lhs: Int, _ rhs: Int) -> Int {

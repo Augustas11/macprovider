@@ -113,6 +113,21 @@ final class KVDiskCacheConfigTests: XCTestCase {
         XCTAssertTrue(c.errors.contains { $0.contains("enabled") })
     }
 
+    func testAbsentStagingOverridesEnableMeasuredAdmissionIndependently() {
+        let automatic = resolve()
+        XCTAssertTrue(automatic.adaptiveStaging)
+        XCTAssertTrue(automatic.adaptiveWriteStaging)
+        let readOnly = resolve(cli: KVDiskCacheCLIOverrides(stagingMaxBytes: 1000))
+        XCTAssertFalse(readOnly.adaptiveStaging)
+        XCTAssertTrue(readOnly.adaptiveWriteStaging)
+        let writeOnly = resolve(env: ["MACPROVIDER_KV_DISK_CACHE_WRITE_STAGING_MAX_BYTES": "1000"])
+        XCTAssertTrue(writeOnly.adaptiveStaging)
+        XCTAssertFalse(writeOnly.adaptiveWriteStaging)
+        let yaml = resolve(yaml: ["staging_max_bytes": 1000, "write_staging_max_bytes": 2000])
+        XCTAssertFalse(yaml.adaptiveStaging)
+        XCTAssertFalse(yaml.adaptiveWriteStaging)
+    }
+
     func testStagingCeilingHardMax() {
         let over = 1024 * 1024 * 1024 + 1
         let c = resolve(cli: KVDiskCacheCLIOverrides(enabled: true, stagingMaxBytes: over))

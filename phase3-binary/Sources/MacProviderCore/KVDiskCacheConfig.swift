@@ -19,6 +19,10 @@ public struct KVDiskCacheConfig: Equatable, Sendable {
     public var stagingMaxBytes: Int
     /// Write/snapshot staging ceiling (FR-KVP3): hard max 1 GiB; same default.
     public var writeStagingMaxBytes: Int
+    /// Resolved absent overrides use a measured serving-memory reserve. Numeric
+    /// values remain the legacy defaults for status/backward compatibility.
+    public var adaptiveStaging: Bool = false
+    public var adaptiveWriteStaging: Bool = false
     public var minFreeBytes: Int
     public var promotionMaxSeconds: Int
     public var shutdownDrainSeconds: Int
@@ -225,7 +229,11 @@ public enum KVDiskCacheConfigResolver {
         resolvePositive(&config.promotionMaxSeconds, cli.promotionMaxSeconds,
                         rawInt("promotion_max_seconds", "MACPROVIDER_KV_DISK_CACHE_PROMOTION_MAX_S"), "promotion_max_seconds", ">0", fail)
 
-        // staging_max_bytes: >0 and ≤ 1 GiB hard (default by host memory, above).
+        config.adaptiveStaging = cli.stagingMaxBytes == nil
+            && rawInt("staging_max_bytes", "MACPROVIDER_KV_DISK_CACHE_STAGING_MAX_BYTES") == nil
+        config.adaptiveWriteStaging = cli.writeStagingMaxBytes == nil
+            && rawInt("write_staging_max_bytes", "MACPROVIDER_KV_DISK_CACHE_WRITE_STAGING_MAX_BYTES") == nil
+        // Explicit overrides remain ≤ 1 GiB; absent values use measured admission.
         resolveBounded(&config.stagingMaxBytes, cli.stagingMaxBytes,
                        rawInt("staging_max_bytes", "MACPROVIDER_KV_DISK_CACHE_STAGING_MAX_BYTES"),
                        "staging_max_bytes", min: 1, max: KVDiskCacheConfig.hardStagingMaxBytes,
