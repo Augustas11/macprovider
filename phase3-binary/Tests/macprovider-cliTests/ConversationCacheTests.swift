@@ -598,6 +598,38 @@ final class ConversationCacheTests: XCTestCase {
         }
     }
 
+    func testReported108kGLMEntryFitsDefaultHotRetentionAfter2185() {
+        let gib = 1 << 30
+        let physical = 256 * gib
+        let available = (4_223_692 + 371_987 + 28_736) * 16_384
+        let fixed = 150_616_064 // recurrent state + GLM padding/raw windows
+        let density = 11_968
+        let reachableRowBytes = 800_000 * density + 4 * fixed
+        let reserved = (physical + 9) / 10 + reachableRowBytes + reachableRowBytes / 20 + 2 * gib
+        XCTAssertEqual(reachableRowBytes, 10_176_864_256)
+        XCTAssertEqual(reserved, 40_320_981_811)
+        let config = ConversationCache.Config.fromEnvironment([:])
+        XCTAssertEqual(config.maxConversations, 64)
+        XCTAssertEqual(config.maxTokens, 2_000_000)
+        let budget = ConversationCacheMemoryBudget(probe: .init(identity: "reported-108k") {
+            .init(availableBytes: available, physicalBytes: physical)
+        })
+        budget.configure(maxContextTokens: 200_000, slots: 4,
+                         residentTokens: 26_214_400, verifyBytes: 0)
+        budget.observe(geometry: .init(fixedRowBytes: fixed, bytesPerToken: density))
+        XCTAssertEqual(budget.hotByteLimit(), 8 * gib)
+        // The emitted decoded length includes codec metadata. Either this exact
+        // measured entry or the padded tensor estimate fits the hot byte bound.
+        XCTAssertLessThan(1_445_244_936, budget.hotByteLimit())
+        for tokens in [108_380, 114_000] {
+            XCTAssertLessThan(fixed + tokens * (density + 4), budget.hotByteLimit())
+            XCTAssertLessThan(tokens, config.maxTokens)
+        }
+        // Before #2185, reserving the logical pool instead of reachable rows
+        // consumed over 300 GB: the same measured host had no hot allowance.
+        XCTAssertGreaterThan(26_214_400 * density, available)
+    }
+
     func testLongGLMConversationBudgetPreservesServingFloors() {
         let gib = 1024 * 1024 * 1024
         let physical = 256 * gib
