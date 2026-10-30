@@ -25,6 +25,7 @@ final class CatalogToolGrammarTests: XCTestCase {
 
     private static let families: [Family] = [
         Family(name: "GLM-5.3", template: "glm53-chat-template/chat_template.jinja", grammar: .glm, callStart: "<tool_call>", callEnd: "</tool_call>"),
+        Family(name: "GLM-5.3-Abliterated", template: "glm53-abliterated-chat-template/chat_template.jinja", grammar: .glm, callStart: "<tool_call>", callEnd: "</tool_call>"),
         Family(name: "GLM-4.5", template: "chat-templates-2107/glm-4.5-air.jinja", grammar: .glm, callStart: "<tool_call>", callEnd: "</tool_call>"),
         Family(name: "Llama-3.1", template: "chat-templates-2107/llama-3.1-8b-instruct.jinja", grammar: .llama3, callStart: "{\"name\"", callEnd: "}}"),
         Family(name: "Llama-3.2", template: "chat-templates-2107/llama-3.2-3b-instruct.jinja", grammar: .llama3, callStart: "{\"name\"", callEnd: "}}"),
@@ -160,6 +161,8 @@ final class CatalogToolGrammarTests: XCTestCase {
         XCTAssertEqual(ToolCallGrammar.resolved(templateFormat: "llama3", modelID: "local/alias"), .llama3)
         XCTAssertEqual(ToolCallGrammar.resolved(templateFormat: "xml_function", modelID: "local/alias"), .qwen)
         XCTAssertEqual(ToolCallGrammar.resolved(templateFormat: nil, modelID: "Jundot/GLM-5.3-Flash-oQ4e-mtp"), .glm)
+        XCTAssertEqual(ToolCallGrammar.resolved(templateFormat: nil, modelID: "zai-org/glm-5.3-flash-abliterated"), .glm)
+        XCTAssertEqual(ToolCallGrammar.resolved(templateFormat: nil, modelID: "grant-ai/GLM-5.3-Flash-Abliterated-MLX-4bit"), .glm)
         XCTAssertNil(ToolCallGrammar.resolved(templateFormat: "json", modelID: "mlx-community/Qwen2-VL-2B-Instruct-4bit"))
     }
 

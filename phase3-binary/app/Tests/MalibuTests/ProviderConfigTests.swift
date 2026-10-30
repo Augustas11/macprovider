@@ -153,10 +153,18 @@ final class ProviderConfigParserTests: XCTestCase {
                 let contents = try String(contentsOf: snapshot)
                 XCTAssertEqual(contents, original)
                 XCTAssertFalse(contents.contains("provider_token"))
+                // A protected_file store lives next to the config the CLI reads,
+                // so the handoff copy must share the real config's directory.
+                XCTAssertEqual(
+                    snapshot.deletingLastPathComponent().standardizedFileURL.path,
+                    paths.configFile.deletingLastPathComponent().standardizedFileURL.path
+                )
             }
         )
 
         XCTAssertEqual(try String(contentsOf: paths.configFile), original)
+        let leftovers = try FileManager.default.contentsOfDirectory(atPath: paths.configFile.deletingLastPathComponent().path)
+        XCTAssertFalse(leftovers.contains { $0.hasPrefix(".credential-handoff-") })
         XCTAssertTrue(FileManager.default.fileExists(atPath: paths.appMarkerFile.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: ProviderConfig.credentialCustodyMarker(paths: paths).path))
         let configured = await ProviderConfig.isConfigured(paths: paths)

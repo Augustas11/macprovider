@@ -375,7 +375,9 @@ enum ProviderConfig {
         }
 
         guard let token else {
-            let snapshot = paths.appSupport.appendingPathComponent(
+            // The CLI finds a protected_file credential store next to the config
+            // it is given, so the handoff copy must sit beside the real config.
+            let snapshot = paths.configFile.deletingLastPathComponent().appendingPathComponent(
                 ".credential-handoff-\(UUID().uuidString).yaml"
             )
             defer { try? fm.removeItem(at: snapshot) }
