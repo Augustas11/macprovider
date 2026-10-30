@@ -14440,6 +14440,11 @@ maxTokens: maxTokens,
         globalHitStop: Bool = false,
         toolCallPrefill: String?
     ) throws -> ParsedGeneratedOutput {
+        #if MACPROVIDER_LAB_HARNESS
+        if case .complete = mode {
+            try LabOutputTokenCapture.record(request: request, tokenIDs: generatedTokenIDs)
+        }
+        #endif
         guard HarmonyResponseParser.isHarmonyModelID(request.model) else {
             if try ToolSelectionPolicy.selection(request.promptSource.toolChoice).requiresCall,
                case .complete(let finishReason) = mode, finishReason == "length" {
