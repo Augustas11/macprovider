@@ -69,6 +69,9 @@ struct NativeMTPBenchCommand: AsyncParsableCommand {
     )
     var identityCachePath: String?
 
+    @Option(name: .customLong("lab-cb-inputs"), help: "Isolated lab only: immutable retained CB evidence and authorized identity rebind directory.")
+    var labCBInputsPath: String?
+
     func run() async throws {
         let environment = ProcessInfo.processInfo.environment
         guard environment["MACPROVIDER_NATIVE_MTP_E2E"] == "1" else {
@@ -116,7 +119,9 @@ struct NativeMTPBenchCommand: AsyncParsableCommand {
                 onlyCell: onlyCell,
                 providerCommit: providerCommit,
                 phase: phase,
-                identityCache: identityCache
+                identityCache: identityCache,
+                labCBInputs: labCBInputsPath.map { NativeMTPLabCBInputs(
+                    directory: URL(fileURLWithPath: ConfigLoader.expandTilde($0)), providerCommit: providerCommit) }
             )
             if let requestsPath {
                 guard let requestsSHA256 else { throw ValidationError("--requests requires --requests-sha256") }
@@ -346,6 +351,7 @@ final class NativeMTPBenchRunner {
     private let policy: NativeMTPBenchPolicy
     private let policySHA256: String
     private let identityCache: NativeMTPBenchIdentityCache?
+    private let labCBInputs: NativeMTPLabCBInputs?
     /// The native runtime's scheduler load-gate recorder for the current
     /// cell fixture (SPEC-048-R015 gated-cell evidence).
     private var nativeLoadGateRecorder: NativeMTPLoadGateRecorder?
@@ -358,7 +364,8 @@ final class NativeMTPBenchRunner {
         onlyCell: String?,
         providerCommit: String,
         phase: NativeMTPBenchPhase,
-        identityCache: NativeMTPBenchIdentityCache? = nil
+        identityCache: NativeMTPBenchIdentityCache? = nil,
+        labCBInputs: NativeMTPLabCBInputs? = nil
     ) async throws {
         self.root = URL(fileURLWithPath: (rootPath as NSString).expandingTildeInPath, isDirectory: true)
             .standardizedFileURL
@@ -371,6 +378,7 @@ final class NativeMTPBenchRunner {
         self.providerCommit = providerCommit
         self.phase = phase
         self.identityCache = identityCache
+        self.labCBInputs = labCBInputs
         self.policySHA256 = try Self.sha256(of: self.policyURL)
         self.policy = try NativeMTPBenchPolicy.load(from: self.policyURL)
         self.layout = NativeMTPBenchFixtureLayout.resolve(root: self.root)
@@ -882,7 +890,8 @@ final class NativeMTPBenchRunner {
             proposalDepth: policy.proposalDepth,
             maxPromptTokens: policy.maximumPromptTokens ?? 1_048_576,
             maxPhysicalBlocks: maxBlocks,
-            diagnosticEligibilityBypass: policy.diagnosticEligibilityBypass
+            diagnosticEligibilityBypass: policy.diagnosticEligibilityBypass,
+            labCBInputs: labCBInputs
         )
         let fixture = try await runner.loadRuntimeFixture(
             maxContextTokens: cell.promptTokens + cell.maxTokens + 256,

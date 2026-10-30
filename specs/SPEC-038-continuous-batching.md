@@ -1,11 +1,16 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.36
+Version: v0.3.37
 Status: draft (normative contract; runtime enablement is default-on per Mac behind the FR-CB10 on-device self-check, v0.3.15)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.3.37 (2026-10-30, DeepSeek encoder identity, Related: #2111):**
+DeepSeek V4's chat-template identity binds the real reference encoder bytes
+ported by its built-in renderer, rather than an absent Jinja template.
+The signed policy schema and exact tuple matching remain unchanged.
+
 **Change log v0.3.36 (2026-10-30, supervisor gate decision, Related: #2111):**
 FR-CB14's four-row DeepSeek campaign threshold is >=1.8x own serial.
 The supervisor's 2026-10-30 decision supersedes the 2026-10-27 2.0x
@@ -1444,6 +1449,15 @@ met the SPEC-039 FR-PKV13 overhead ceiling on the packaged build. Acceptance
 coverage is therefore the per-tuple gate that keeps a path over the ceiling
 from serving real traffic. Derived or per-boot descriptor fields (parity label,
 pool epoch) remain the descriptor's job.
+
+For `deepseek_v4`, the built-in renderer ports the artifact's
+`encoding/encoding_dsv4.py` instead of using a Jinja template. Its
+chat-template SHA-256 MUST hash `encoding/encoding_dsv4.py`, a NUL byte,
+then that file's actual bytes, only when the file's raw SHA-256 equals the
+reference encoder revision implemented by the renderer. A missing or
+different encoder leaves the template identity unavailable; a synthetic
+hash or an unrelated Jinja file MUST NOT stand in for it. This identity
+rule does not change rendering, signed-policy schema, or other families.
 
 The signed SPEC-023 policy is distribution authority, not local proof. A
 policy record with `rollout` `canary` or `on` authorizes the exact tuple only

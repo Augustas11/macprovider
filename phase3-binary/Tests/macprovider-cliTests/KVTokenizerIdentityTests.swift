@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 @testable import macprovider_cli
 import XCTest
@@ -75,5 +76,43 @@ final class KVTokenizerIdentityTests: XCTestCase {
         XCTAssertEqual(ModelRuntime.tokenizerIdentityHashes(in: a).config,
                        ModelRuntime.tokenizerIdentityHashes(in: b).config,
                        "identical tokenizer bytes ⇒ identical hash (tokenizer-derived, not model-derived)")
+    }
+
+    func testDeepseekRequiresItsSupportedReferenceEncoder() throws {
+        let dir = makeDir()
+        write(dir, "config.json", #"{"model_type":"deepseek_v4"}"#)
+        write(dir, "chat_template.jinja", "unrelated template")
+        XCTAssertNil(ModelRuntime.tokenizerIdentityHashes(in: dir).template)
+        try FileManager.default.createDirectory(at: dir.appendingPathComponent("encoding"), withIntermediateDirectories: true)
+        write(dir, "encoding/encoding_dsv4.py", "unsupported encoder revision")
+        XCTAssertNil(ModelRuntime.tokenizerIdentityHashes(in: dir).template)
+
+        write(dir, "config.json", #"{"model_type":"another_family"}"#)
+        XCTAssertNotNil(ModelRuntime.tokenizerIdentityHashes(in: dir).template,
+                        "other families retain their existing Jinja identity")
+    }
+
+    func testDeepseekArtifactTemplateIdentityUsesRealEncoderBytes() throws {
+        guard let path = ProcessInfo.processInfo.environment["DSV4_TOKENIZER_DIR"] else {
+            throw XCTSkip("set DSV4_TOKENIZER_DIR for the actual DeepSeek encoder identity check")
+        }
+        let artifact = URL(fileURLWithPath: path)
+        let name = "encoding/encoding_dsv4.py"
+        let encoder = try Data(contentsOf: artifact.appendingPathComponent(name))
+        func hash(_ data: Data) -> String {
+            SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        }
+        XCTAssertEqual(hash(encoder), DeepseekV4Encoding.referenceEncoderSHA256)
+        let expected = hash(Data((name + "\u{0}").utf8) + encoder)
+        XCTAssertEqual(ModelRuntime.tokenizerIdentityHashes(in: artifact).template, expected)
+
+        let copy = makeDir()
+        write(copy, "config.json", #"{"model_type":"deepseek_v4"}"#)
+        try FileManager.default.createDirectory(at: copy.appendingPathComponent("encoding"), withIntermediateDirectories: true)
+        try encoder.write(to: copy.appendingPathComponent(name))
+        XCTAssertEqual(ModelRuntime.tokenizerIdentityHashes(in: copy).template, expected)
+        try (encoder + Data([0])).write(to: copy.appendingPathComponent(name))
+        XCTAssertNil(ModelRuntime.tokenizerIdentityHashes(in: copy).template,
+                     "an encoder revision not implemented by the renderer must fail closed")
     }
 }

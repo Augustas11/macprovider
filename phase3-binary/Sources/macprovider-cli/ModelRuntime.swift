@@ -4058,6 +4058,8 @@ maxTokens: 1,
         templateSupportsThinkingToggle: Bool = false,
         templateSupportsPreserveThinking: Bool = false,
         weightsManifestSHA256: String? = nil,
+        tokenizerConfigSHA256: String? = nil,
+        chatTemplateSHA256: String? = nil,
         draftModelID: String? = nil,
         numDraftTokens: Int = 3,
         speculativeCacheWrapValidated: Bool = false,
@@ -4179,8 +4181,8 @@ maxTokens: 1,
         self.currentModelHash = modelHash
         self.currentModelHashAlgorithm = modelHashAlgorithm
         self.currentWeightsManifestSHA256 = weightsManifestSHA256
-        self.currentTokenizerConfigSHA256 = nil
-        self.currentChatTemplateSHA256 = nil
+        self.currentTokenizerConfigSHA256 = tokenizerConfigSHA256
+        self.currentChatTemplateSHA256 = chatTemplateSHA256
         self.configuredTemplateSupportsThinkingToggle = templateSupportsThinkingToggle
         self.currentTemplateSupportsThinkingToggle = templateSupportsThinkingToggle
         self.configuredTemplateSupportsPreserveThinking = templateSupportsThinkingToggle
@@ -4244,8 +4246,8 @@ maxTokens: 1,
             config: pagedKVConfig,
             modelID: modelID,
             modelHash: modelHash,
-            tokenizerSHA256: nil,
-            chatTemplateSHA256: nil,
+            tokenizerSHA256: tokenizerConfigSHA256,
+            chatTemplateSHA256: chatTemplateSHA256,
             kvBitsOverride: kvBitsOverride,
             runtimeCacheClass: pagedKVRuntimeCacheClass,
             modelCapabilities: resolvedPagedKVModelCapabilities,
@@ -4257,8 +4259,8 @@ maxTokens: 1,
             decision: self.pagedKVAttachDecision,
             modelID: modelID,
             modelSHA256: modelHash,
-            tokenizerSHA256: nil,
-            chatTemplateSHA256: nil,
+            tokenizerSHA256: tokenizerConfigSHA256,
+            chatTemplateSHA256: chatTemplateSHA256,
             kvBitsOverride: kvBitsOverride,
             runtimeCacheClass: pagedKVRuntimeCacheClass,
             modelCapabilities: resolvedPagedKVModelCapabilities,
@@ -13405,7 +13407,8 @@ maxTokens: maxTokens,
     ///   `tokenizer.json` (whichever are present). Nil when neither exists.
     /// - template hash: SHA-256 over a dedicated chat-template file if present, else
     ///   over the `chat_template` field inside `tokenizer_config.json`. Nil when no
-    ///   chat template is discoverable.
+    ///   chat template is discoverable. DeepSeek V4 binds its real reference
+    ///   encoder bytes instead, after checking the renderer's supported revision.
     static func tokenizerIdentityHashes(in directory: URL) -> (config: String?, template: String?) {
         let fm = FileManager.default
         func bytes(_ name: String) -> Data? {
@@ -13427,6 +13430,16 @@ maxTokens: maxTokens,
             }
         }
         let configHash = configAny ? hex(configData) : nil
+
+        if let config = bytes("config.json"),
+           let object = try? JSONSerialization.jsonObject(with: config) as? [String: Any],
+           object["model_type"] as? String == "deepseek_v4" {
+            let name = "encoding/encoding_dsv4.py"
+            guard let encoder = bytes(name), hex(encoder) == DeepseekV4Encoding.referenceEncoderSHA256 else {
+                return (configHash, nil)
+            }
+            return (configHash, hex(Data((name + "\u{0}").utf8) + encoder))
+        }
 
         var templateData: Data?
         for name in ["chat_template.jinja", "chat_template.json", "chat_template.txt"] {
