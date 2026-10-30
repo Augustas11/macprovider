@@ -63,23 +63,136 @@ func TestStreamCeilingNeverBelowLegacyWall(t *testing.T) {
 func TestAdaptiveDecodeIdleTimeoutExtendsSlowModelClasses(t *testing.T) {
 	cfg := config.Default()
 	cfg.Timeouts.StreamingIdleMS = 500
+	cfg.Timeouts.FirstTokenPrefillTokensPerSecond = 0 // isolate legacy decode-rate classes
 
-	if got, want := adaptiveDecodeIdleTimeout("llama", cfg), 500*time.Millisecond; got != want {
+	if got, want := adaptiveDecodeIdleTimeout("llama", cfg, 0), 500*time.Millisecond; got != want {
 		t.Fatalf("unknown model idle timeout=%s want configured %s", got, want)
 	}
 
 	unbounded := cfg
 	unbounded.Timeouts.StreamingIdleMS = 0
-	if got := adaptiveDecodeIdleTimeout("mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit", unbounded); got != 0 {
+	if got := adaptiveDecodeIdleTimeout("mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit", unbounded, 200000); got != 0 {
 		t.Fatalf("unbounded 30B idle timeout=%s want no timeout sentinel", got)
 	}
 
-	got := adaptiveDecodeIdleTimeout("mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit", cfg)
+	got := adaptiveDecodeIdleTimeout("mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit", cfg, 0)
 	if got <= cfg.StreamingIdleTimeout() {
 		t.Fatalf("30B idle timeout=%s want greater than configured %s", got, cfg.StreamingIdleTimeout())
 	}
 	if got > decodeIdleSlowModelMax {
 		t.Fatalf("30B idle timeout=%s exceeds cap %s", got, decodeIdleSlowModelMax)
+	}
+}
+
+// Context-based allowance covers a concurrent prefill, including models whose
+// IDs carry no parameter count. Legacy decode-only values remain unchanged.
+func TestAdaptiveDecodeIdleTimeoutSharedPrefill(t *testing.T) {
+	cfg := config.Default()
+	cfg.Timeouts.StreamingIdleMS = 10000
+	for _, tc := range []struct {
+		model   string
+		context int64
+		want    time.Duration
+	}{
+		{"zai-org/GLM-5.3-Flash", 200000, 60 * time.Second},
+		{"zai-org/GLM-5.3-Flash-abliterated", 200000, 60 * time.Second},
+		{"future-model-with-no-size-in-id", 100000, 60 * time.Second},
+		{"llama", 1, 10 * time.Second},
+		{"model-20b", 1, 10 * time.Second},
+		{"model-24b", 1, 10 * time.Second},
+		{"model-30b", 1, 20 * time.Second},
+		{"model-32b", 1, 20 * time.Second},
+		{"model-70b", 1, 29411764710 * time.Nanosecond},
+		{"model-72b", 1, 29411764710 * time.Nanosecond},
+		{"model-30b", 200000, 60 * time.Second},
+		{"unknown", 2501, 26 * time.Second},
+		{"unknown", 1<<63 - 1, 60 * time.Second},
+		{"unknown", -1, 60 * time.Second},
+		{"unknown", 0, 60 * time.Second},
+	} {
+		t.Run(tc.model+"/"+strconv.FormatInt(tc.context, 10), func(t *testing.T) {
+			if got := adaptiveDecodeIdleTimeout(tc.model, cfg, tc.context); got != tc.want {
+				t.Fatalf("idle=%s want %s", got, tc.want)
+			}
+		})
+	}
+	cfg.Timeouts.StreamingIdleMS = 90000
+	if got := adaptiveDecodeIdleTimeout("unknown", cfg, 200000); got != 90*time.Second {
+		t.Fatalf("configured floor lost: %s", got)
+	}
+	cfg.Timeouts.StreamingIdleMS = 0
+	if got := adaptiveDecodeIdleTimeout("unknown", cfg, 200000); got != 0 {
+		t.Fatalf("unbounded sentinel lost: %s", got)
+	}
+	cfg.Timeouts.StreamingIdleMS = 10000
+	cfg.Timeouts.FirstTokenPrefillTokensPerSecond = 0
+	if got := adaptiveDecodeIdleTimeout("unknown", cfg, 200000); got != 10*time.Second {
+		t.Fatalf("invalid rate must not remove idle bound: %s", got)
+	}
+}
+
+func TestSharedPrefillIdleAllowanceUsesServingContextAndStillCutsDeadStream(t *testing.T) {
+	for _, dead := range []bool{false, true} {
+		t.Run(strconv.FormatBool(dead), func(t *testing.T) {
+			client := seamStreamingUpstreamCtx(func(pw *io.PipeWriter, ctx context.Context) {
+				_, _ = pw.Write([]byte(`data: {"id":"c","choices":[{"delta":{"content":"x"}}]}` + "\n\n"))
+				if dead {
+					endlessFrameStream(40*time.Millisecond, `: keepalive`+"\n\n")(pw, ctx)
+					return
+				}
+				select {
+				case <-ctx.Done():
+					_ = pw.CloseWithError(ctx.Err())
+					return
+				case <-time.After(800 * time.Millisecond):
+				}
+				_, _ = pw.Write([]byte(`data: {"id":"c","choices":[{"delta":{"content":"after prefill"}}]}` + "\n\n"))
+				_, _ = pw.Write([]byte("data: [DONE]\n\n"))
+				_ = pw.Close()
+			})
+			// A short prompt on one row must inherit the larger serving grant:
+			// another row may prefill it. Scale the rate for a two-second test.
+			h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+				cfg.Timeouts.StreamingIdleMS = 400
+				cfg.Timeouts.FirstTokenPrefillTokensPerSecond = 100000
+			}, WithHTTPClient(client), func(s *Server) {
+				s.poolz.body.ServingMaxContextTokens = map[string]int{"zai-org/GLM-5.3-Flash": 200000}
+			})
+			key := createAccountAndKey(t, store, cfg, "acct_shared_prefill")
+			started := time.Now()
+			resp := postChat(t, h, key, `{"model":"zai-org/GLM-5.3-Flash","stream":true,"max_tokens":500,"messages":[{"role":"user","content":"hi"}]}`, nil)
+			body := resp.Body.String()
+			if dead {
+				if !strings.Contains(body, `"code":"provider_timeout"`) || time.Since(started) > 5*time.Second {
+					t.Fatalf("dead stream must be cut within bounded allowance: %.600q", body)
+				}
+			} else if !strings.Contains(body, "after prefill") || strings.Contains(body, "provider_timeout") {
+				t.Fatalf("healthy decode stall exceeded base but should survive: %.600q", body)
+			}
+		})
+	}
+}
+
+func TestSharedPrefillIdleAllowanceWithoutStatusMetadata(t *testing.T) {
+	client := seamStreamingUpstreamCtx(func(pw *io.PipeWriter, ctx context.Context) {
+		_, _ = pw.Write([]byte(`data: {"id":"c","choices":[{"delta":{"content":"x"}}]}` + "\n\n"))
+		select {
+		case <-ctx.Done():
+			_ = pw.CloseWithError(ctx.Err())
+			return
+		case <-time.After(800 * time.Millisecond):
+		}
+		_, _ = pw.Write([]byte(`data: {"id":"c","choices":[{"delta":{"content":"after prefill"}}]}` + "\n\n"))
+		_, _ = pw.Write([]byte("data: [DONE]\n\n"))
+		_ = pw.Close()
+	})
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Timeouts.StreamingIdleMS = 400
+	}, WithHTTPClient(client))
+	key := createAccountAndKey(t, store, cfg, "acct_shared_prefill_no_status")
+	resp := postChat(t, h, key, `{"model":"zai-org/GLM-5.3-Flash","stream":true,"max_tokens":500,"messages":[{"role":"user","content":"hi"}]}`, nil)
+	if body := resp.Body.String(); !strings.Contains(body, "after prefill") || strings.Contains(body, "provider_timeout") {
+		t.Fatalf("missing status metadata must allow shared prefill stall: %.600q", body)
 	}
 }
 
@@ -508,6 +621,7 @@ func TestWedgedAfterContentDiesAtDecodeIdle(t *testing.T) {
 	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
 		cfg.Coordinator.BuyerURL = "http://coordinator.test"
 		cfg.Timeouts.StreamingIdleMS = 400
+		cfg.Timeouts.FirstTokenPrefillTokensPerSecond = 0 // isolate content/decode-only deadline
 		cfg.Timeouts.FirstTokenSeconds = 300
 		cfg.Timeouts.CoordinatorRequestSeconds = 300
 		cfg.Timeouts.StreamCeilingFloorSeconds = 300
@@ -714,6 +828,7 @@ func TestContentProgressKeepsStreamAliveAcrossIdleBudget(t *testing.T) {
 		// 400ms of idle budget, 1s+ of streaming: only per-frame content
 		// progress can carry it to [DONE].
 		cfg.Timeouts.StreamingIdleMS = 400
+		cfg.Timeouts.FirstTokenPrefillTokensPerSecond = 0 // isolate content-progress resets
 	}, WithHTTPClient(client))
 	key := createAccountAndKey(t, store, cfg, "acct_progress")
 
@@ -750,6 +865,7 @@ func TestSlowThirtyBContentProgressUsesAdaptiveDecodeIdleBudget(t *testing.T) {
 	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
 		cfg.Coordinator.BuyerURL = "http://coordinator.test"
 		cfg.Timeouts.StreamingIdleMS = 500
+		cfg.Timeouts.FirstTokenPrefillTokensPerSecond = 0 // isolate content/decode-only deadline
 		cfg.Timeouts.FirstTokenSeconds = 30
 		cfg.Timeouts.CoordinatorRequestSeconds = 30
 		cfg.Timeouts.StreamCeilingFloorSeconds = 30

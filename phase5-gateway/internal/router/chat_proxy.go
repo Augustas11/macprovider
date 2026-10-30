@@ -1406,7 +1406,16 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 	// Arming decode-idle at open made a long prefill expire as decode_idle,
 	// so production had to raise streaming_idle_ms to the prefill budget and
 	// lost decode-idle protection.
-	idleTimeout := adaptiveDecodeIdleTimeout(model, s.cfg)
+	// A concurrent row's prefill can pause this row's decode. Use the served
+	// context grant when already known. Without it, this prompt cannot bound a
+	// different row's prefill: use the bounded fallback, without a new RPC.
+	s.mu.RLock()
+	contextTokens := int64(s.poolz.body.ServingMaxContextTokens[model])
+	s.mu.RUnlock()
+	if contextTokens > 0 {
+		contextTokens = max(contextTokens, promptEstimate)
+	}
+	idleTimeout := adaptiveDecodeIdleTimeout(model, s.cfg, contextTokens)
 	var progressDeadline time.Time
 	var emitted int64
 	var serializedEmitted int64
@@ -2202,17 +2211,35 @@ func streamingProgressDeadline(idleTimeout time.Duration) time.Time {
 	return time.Now().Add(idleTimeout)
 }
 
-func adaptiveDecodeIdleTimeout(model string, cfg config.Config) time.Duration {
+func adaptiveDecodeIdleTimeout(model string, cfg config.Config, contextTokens int64) time.Duration {
 	base := cfg.StreamingIdleTimeout()
 	if base <= 0 {
 		return base
 	}
-	expectedTPS, ok := expectedDecodeTokensPerSecond(model)
-	if !ok || expectedTPS <= 0 {
-		return base
+	var adaptive time.Duration
+	if expectedTPS, ok := expectedDecodeTokensPerSecond(model); ok && expectedTPS > 0 {
+		perToken := time.Duration(math.Ceil(float64(time.Second) / expectedTPS))
+		adaptive = perToken * decodeIdleSlowModelProgressTokens
 	}
-	perToken := time.Duration(math.Ceil(float64(time.Second) / expectedTPS))
-	adaptive := perToken * decodeIdleSlowModelProgressTokens
+	// Decode rate alone cannot predict shared-provider stalls: a different row
+	// may be prefilling the entire served context. Reuse the configured prefill
+	// rate, independently of the model's spelling or active-parameter count.
+	// Saturate before multiplying so even an extreme context cannot overflow.
+	if rate := int64(cfg.Timeouts.FirstTokenPrefillTokensPerSecond); rate > 0 {
+		// Metadata is opportunistically cached by status endpoints. Missing
+		// metadata must not reintroduce the short-row/long-prefill failure.
+		prefill := decodeIdleSlowModelMax
+		if contextTokens > 0 {
+			seconds := contextTokens / rate
+			if contextTokens%rate != 0 {
+				seconds++
+			}
+			if seconds < int64(decodeIdleSlowModelMax/time.Second) {
+				prefill = time.Duration(seconds) * time.Second
+			}
+		}
+		adaptive = max(adaptive, prefill)
+	}
 	if adaptive > decodeIdleSlowModelMax {
 		adaptive = decodeIdleSlowModelMax
 	}
