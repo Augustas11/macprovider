@@ -254,6 +254,28 @@ struct NativeMTPHardwareSignedAdmission {
     let resolvedArtifactAuthority: NativeMTPResolvedArtifactAuthority
 }
 
+/// One campaign owns weights only. Runtime/KV/backend state never enters this slot.
+actor NativeMTPBenchResident<Value: Sendable> {
+    private var identity: String?
+    private var loaded: Task<Value, Error>?
+
+    func value(identity requested: String, load: @escaping @Sendable () async throws -> Value) async throws -> Value {
+        guard identity == nil || identity == requested else {
+            throw NativeMTPHardwareE2EError.assertionFailed("resident target identity changed")
+        }
+        if let loaded { return try await loaded.value }
+        identity = requested
+        let task = Task { try await load() }
+        loaded = task
+        return try await task.value
+    }
+}
+
+struct NativeMTPBenchResidentWeights: @unchecked Sendable {
+    let container: ModelContainer
+    let ticket: WiredMemoryTicket
+}
+
 struct NativeMTPHardwareRuntimePair: @unchecked Sendable {
     let ordinary: ModelRuntime
     let native: ModelRuntime
@@ -338,6 +360,7 @@ final class NativeMTPHardwareE2ERunner {
     private let dsparkRoundRecorder = NativeMTPDSparkRoundRecorder()
     private let diagnosticEligibilityBypass: Bool
     private let labCBInputs: NativeMTPLabCBInputs?
+    private let residentTarget: NativeMTPBenchResident<NativeMTPBenchResidentWeights>?
     /// Detected from `target/config.json`; Qwen3.5 when unreadable, so an
     /// unrecognized target fails the family check in the fixture load.
     let family: NativeMTPHardwareE2EFamily
@@ -366,7 +389,8 @@ final class NativeMTPHardwareE2ERunner {
         throughputTokens: Int = 0,
         diagnosticEligibilityBypass: Bool = false,
         signedJourneyInputs: String? = nil,
-        labCBInputs: NativeMTPLabCBInputs? = nil
+        labCBInputs: NativeMTPLabCBInputs? = nil,
+        residentTarget: NativeMTPBenchResident<NativeMTPBenchResidentWeights>? = nil
     ) {
         root = URL(fileURLWithPath: (rootPath as NSString).expandingTildeInPath, isDirectory: true)
             .standardizedFileURL
@@ -380,6 +404,7 @@ final class NativeMTPHardwareE2ERunner {
         self.throughputTokens = throughputTokens
         self.diagnosticEligibilityBypass = diagnosticEligibilityBypass
         self.labCBInputs = labCBInputs
+        self.residentTarget = residentTarget
         let family = NativeMTPHardwareE2EFamily.detect(configJSONData: try? Data(
             contentsOf: root.appendingPathComponent("target/config.json")
         )) ?? .qwen35
@@ -731,7 +756,7 @@ final class NativeMTPHardwareE2ERunner {
         let mtpDirectory = self.mtpDirectory
         try requireDirectory(targetDirectory)
         try requireDirectory(mtpDirectory)
-        if diagnosticEligibilityBypass {
+        if diagnosticEligibilityBypass || residentTarget != nil {
             try require(targetIdentity.directory == targetDirectory.standardizedFileURL.resolvingSymlinksInPath()
                 && targetIdentity.isCurrent(), "target identity changed during diagnostic load")
             try require(mtpIdentity.directory == mtpDirectory.standardizedFileURL.resolvingSymlinksInPath()
@@ -783,10 +808,26 @@ final class NativeMTPHardwareE2ERunner {
             targetContainer = servePathLoad.targetContainer
             drafterContainer = servePathLoad.drafterContainer
         } else {
-            targetContainer = try await LLMModelFactory.shared.loadContainer(
-                from: targetDirectory,
-                using: ChatTemplateCompatTokenizerLoader()
-            )
+            if let residentTarget {
+                #if DEBUG || MACPROVIDER_LAB_HARNESS
+                try require(family == .deepseekV4 && NativeMTPQualificationScope.permitsFixtureHooks,
+                    "resident campaign requires isolated DeepSeek lab scope")
+                let weights = try await residentTarget.value(identity: targetDirectory.path + ":" + targetIdentity.digest) {
+                    let container = try await LLMModelFactory.shared.loadContainer(
+                        from: targetDirectory, using: ChatTemplateCompatTokenizerLoader())
+                    guard let ticket = await ModelRuntime.startResidentWeightsTicket(modelFamily: "deepseek_v4") else {
+                        throw NativeMTPHardwareE2EError.assertionFailed("resident campaign weights ticket unavailable")
+                    }
+                    return NativeMTPBenchResidentWeights(container: container, ticket: ticket)
+                }
+                targetContainer = weights.container
+                #else
+                throw NativeMTPHardwareE2EError.assertionFailed("resident campaign requires lab build")
+                #endif
+            } else {
+                targetContainer = try await LLMModelFactory.shared.loadContainer(
+                    from: targetDirectory, using: ChatTemplateCompatTokenizerLoader())
+            }
             let drafterPresent = await ModelRuntime.nativeMTPDrafterPresent(
                 familyAdapter: family.familyAdapter,
                 targetContainer: targetContainer
@@ -803,9 +844,16 @@ final class NativeMTPHardwareE2ERunner {
         // One target is loaded and shared by the ordinary and native
         // runtimes (the embedded drafter is parameterless); keep it resident
         // as serve does.
-        let residentWeights = family.holdsResidentWeights
-            ? await ModelRuntime.startResidentWeightsTicket(modelFamily: family.modelFamily)
-            : nil
+        let residentWeights: WiredMemoryTicket?
+        if let residentTarget {
+            let weights = try await residentTarget.value(identity: targetDirectory.path + ":" + targetIdentity.digest) {
+                throw NativeMTPHardwareE2EError.assertionFailed("resident target was not loaded")
+            }
+            residentWeights = weights.ticket
+        } else {
+            residentWeights = family.holdsResidentWeights
+                ? await ModelRuntime.startResidentWeightsTicket(modelFamily: family.modelFamily) : nil
+        }
         if family.holdsResidentWeights {
             try require(residentWeights != nil, "\(family.modelFamily) target could not start its resident-weights ticket")
         }

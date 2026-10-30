@@ -72,6 +72,17 @@ struct NativeMTPBenchCommand: AsyncParsableCommand {
     @Option(name: .customLong("lab-cb-inputs"), help: "Isolated lab only: immutable retained CB evidence and authorized identity rebind directory.")
     var labCBInputsPath: String?
 
+    @Option(name: .customLong("lab-campaign"), help: "LAB-only frozen native campaign manifest; keeps target weights resident and creates fresh per-cell runtimes.")
+    var labCampaignPath: String?
+
+    private static var isLabBuild: Bool {
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        true
+        #else
+        false
+        #endif
+    }
+
     func run() async throws {
         let environment = ProcessInfo.processInfo.environment
         guard environment["MACPROVIDER_NATIVE_MTP_E2E"] == "1" else {
@@ -90,6 +101,56 @@ struct NativeMTPBenchCommand: AsyncParsableCommand {
         }
         guard providerCommit.range(of: #"^[0-9a-f]{40}$"#, options: .regularExpression) != nil else {
             throw ValidationError("--provider-commit must be lowercase 40-hex")
+        }
+        if let labCampaignPath {
+            try NativeMTPBenchCampaign.requireScope(labBuild: Self.isLabBuild,
+                permitted: NativeMTPQualificationScope.permitsFixtureHooks)
+            guard policyPath == nil, policyList.isEmpty, requestsPath == nil,
+                  requestsSHA256 == nil, longTokenIDsPath == nil, onlyCell == nil,
+                  !validateOnly, !validatePolicyOnly, phase == .all, let labCBInputsPath else {
+                throw ValidationError("--lab-campaign excludes other run selectors and requires --lab-cb-inputs")
+            }
+            let manifest = try NativeMTPBenchCampaign.load(path: labCampaignPath)
+            let journalURL = URL(fileURLWithPath: ConfigLoader.expandTilde(outPath)).standardizedFileURL
+            guard !FileManager.default.fileExists(atPath: journalURL.path),
+                  !manifest.steps.contains(where: { $0.out == journalURL.path || $0.policy == journalURL.path }) else {
+                throw ValidationError("campaign --out must be a fresh journal distinct from step outputs and inputs")
+            }
+            try FileManager.default.createDirectory(at: journalURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let journal = try NativeMTPJSONLWriter(url: journalURL, append: false)
+            defer { try? journal.close() }
+            try journal.write(["schema": "macprovider.native-mtp-resident-campaign-run.v1",
+                "record_type": "header", "provider_commit": providerCommit,
+                "manifest_sha256": NativeMTPLabCBInputs.sha(try Data(contentsOf:
+                    URL(fileURLWithPath: ConfigLoader.expandTilde(labCampaignPath))))])
+            let resident = NativeMTPBenchResident<NativeMTPBenchResidentWeights>()
+            let identities = manifest.identityCache.map {
+                NativeMTPBenchIdentityCache(persistentURL: URL(fileURLWithPath: $0))
+            } ?? NativeMTPBenchIdentityCache()
+            for step in manifest.steps {
+                try NativeMTPBenchCampaign.verifyFile(step.policy, sha: step.policySHA256)
+                try journal.write(["record_type": "step_start", "kind": step.kind, "depth": step.depth,
+                    "out": step.out, "policy_sha256": step.policySHA256])
+                let bench = try await NativeMTPBenchRunner(rootPath: root, modelID: modelID,
+                    policyPath: step.policy, outPath: step.out, onlyCell: nil,
+                    providerCommit: providerCommit, phase: step.kind == "sustained" ? .sustained : .matrix,
+                    identityCache: identities,
+                    labCBInputs: NativeMTPLabCBInputs(directory: URL(fileURLWithPath: ConfigLoader.expandTilde(labCBInputsPath)),
+                        providerCommit: providerCommit), residentTarget: resident)
+                if step.kind == "frozen" {
+                    let corpus = try NativeMTPFrozenDSparkCorpus.load(from: URL(fileURLWithPath: step.requests!),
+                        expectedSHA256: step.requestsSHA256!)
+                    try NativeMTPBenchCampaign.verifyFile(step.longTokenIDs!, sha: step.longTokenIDsSHA256!)
+                    let prompts = try NativeMTPFrozenDSparkCorpus.loadLongPrompts(from: URL(fileURLWithPath: step.longTokenIDs!))
+                    guard Set(prompts.keys) == Set([8192, 32768]) else {
+                        throw ValidationError("campaign long prompts must be exactly 8192 and 32768")
+                    }
+                    try await bench.runFrozenRequests(corpus, longPrompts: prompts)
+                } else { try await bench.run() }
+                try journal.write(["record_type": "step_complete", "kind": step.kind,
+                    "depth": step.depth, "out": step.out, "policy_sha256": step.policySHA256])
+            }
+            return
         }
         guard (policyPath != nil) != !policyList.isEmpty else {
             throw ValidationError("supply exactly one of --policy or --policy-list")
@@ -134,6 +195,125 @@ struct NativeMTPBenchCommand: AsyncParsableCommand {
                 else { try await bench.runFrozenRequests(corpus, longPrompts: longPrompts) }
             } else if validateOnly || validatePolicyOnly { try bench.validate() }
             else { try await bench.run() }
+        }
+    }
+}
+
+/// Explicit isolated campaign plan. Each step delegates to an existing runner;
+/// formal policy-list restrictions and measurement rules remain unchanged.
+struct NativeMTPBenchCampaign: Decodable {
+    struct Step: Decodable {
+        let kind: String
+        let depth: Int
+        let policy: String
+        let policySHA256: String
+        let out: String
+        let requests: String?
+        let requestsSHA256: String?
+        let longTokenIDs: String?
+        let longTokenIDsSHA256: String?
+        enum CodingKeys: String, CodingKey {
+            case kind, depth, policy, out, requests
+            case policySHA256 = "policy_sha256"
+            case requestsSHA256 = "requests_sha256"
+            case longTokenIDs = "long_token_ids"
+            case longTokenIDsSHA256 = "long_token_ids_sha256"
+        }
+    }
+    let schema: String
+    let steps: [Step]
+    let identityCache: String?
+    enum CodingKeys: String, CodingKey {
+        case schema, steps
+        case identityCache = "identity_cache"
+    }
+
+    static func requireScope(labBuild: Bool, permitted: Bool) throws {
+        guard labBuild && permitted else {
+            throw ValidationError("resident native campaign requires isolated lab scope")
+        }
+    }
+
+    static func load(path: String) throws -> Self {
+        let data = try Data(contentsOf: URL(fileURLWithPath: ConfigLoader.expandTilde(path)))
+        guard data.count <= 1_048_576 else { throw ValidationError("campaign manifest too large") }
+        try NativeMTPBenchJSON.rejectDuplicateKeys(data, label: "campaign manifest")
+        let plan = try JSONDecoder().decode(Self.self, from: data)
+        try plan.validateStructure()
+        for step in plan.steps {
+            try verifyFile(step.policy, sha: step.policySHA256)
+            if step.kind != "sustained", FileManager.default.fileExists(atPath: step.out) {
+                throw ValidationError("campaign requires fresh frozen and matrix outputs: \(step.out)")
+            }
+            let policy = try NativeMTPBenchPolicy.load(from: URL(fileURLWithPath: step.policy))
+            guard policy.proposalDepth == step.depth, !policy.exploratory,
+                  !policy.diagnosticEligibilityBypass, policy.blocks == 10,
+                  policy.sustainedSeconds == 1800, policy.slots == [1, 2, 3, 4] else {
+                throw ValidationError("campaign requires unchanged formal four-row/ten-block/1800s policy")
+            }
+            if step.kind == "frozen" {
+                try verifyFile(step.requests!, sha: step.requestsSHA256!)
+                try verifyFile(step.longTokenIDs!, sha: step.longTokenIDsSHA256!)
+                guard (policy.maximumPromptTokens ?? 0) >= 32768 else {
+                    throw ValidationError("frozen long contexts require a policy admitting 32768 prompt tokens")
+                }
+            } else {
+                guard policy.matrixCells.count == 16 else {
+                    throw ValidationError("campaign R015 requires all sixteen cells per depth")
+                }
+            }
+        }
+        return plan
+    }
+
+    func validateStructure() throws {
+        let depths = [1, 2, 3, 5]
+        guard schema == "macprovider.native-mtp-resident-campaign.v1", steps.count == 12,
+              steps.map(\.kind) == [String](repeating: "frozen", count: 4)
+                + [String](repeating: "matrix", count: 4) + [String](repeating: "sustained", count: 4),
+              steps.map(\.depth) == depths + depths + depths else {
+            throw ValidationError("campaign order must be frozen, matrix, sustained at depths 1/2/3/5")
+        }
+        let inputs = steps.flatMap { [$0.policy] + [$0.requests, $0.longTokenIDs].compactMap { $0 } }
+            + (identityCache.map { [$0] } ?? [])
+        guard inputs.allSatisfy({ $0.hasPrefix("/") && URL(fileURLWithPath: $0).standardizedFileURL.path == $0 }) else {
+            throw ValidationError("campaign input paths must be absolute and canonical")
+        }
+        let inputPaths = Set(inputs)
+        var outputs = Set<String>()
+        for (index, step) in steps.enumerated() {
+            guard step.out.hasPrefix("/"), URL(fileURLWithPath: step.out).standardizedFileURL.path == step.out,
+                  !inputPaths.contains(step.out) else {
+                throw ValidationError("campaign outputs must be canonical and distinct from every input")
+            }
+            if index < 8 {
+                guard outputs.insert(step.out).inserted else {
+                    throw ValidationError("campaign frozen and matrix outputs must be distinct")
+                }
+            } else {
+                let matrix = steps[index - 4]
+                guard step.out == matrix.out, step.policy == matrix.policy,
+                      step.policySHA256 == matrix.policySHA256 else {
+                    throw ValidationError("sustained must reuse its depth's exact matrix policy/output")
+                }
+            }
+            if step.kind == "frozen" {
+                guard step.requests?.hasPrefix("/") == true,
+                      step.requestsSHA256 == "01bb9294714fcc95c7dc8540b460c309f8c5ff782214d24b3e95d4e4297b9383",
+                      step.longTokenIDs?.hasPrefix("/") == true,
+                      step.longTokenIDsSHA256 == "1d64f1cd35c336489c5c00edc65fa69740735250300bf26b7c960feaa3d41bc5" else {
+                    throw ValidationError("campaign frozen inputs require immutable request and long-token hashes")
+                }
+            } else if step.requests != nil || step.requestsSHA256 != nil || step.longTokenIDs != nil || step.longTokenIDsSHA256 != nil {
+                throw ValidationError("R015 steps cannot supply frozen-request selectors")
+            }
+        }
+    }
+
+    static func verifyFile(_ path: String, sha: String) throws {
+        guard sha.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil,
+              NativeMTPLabCBInputs.sha(try Data(contentsOf: URL(fileURLWithPath: path))) == sha else {
+            throw ValidationError("campaign immutable input checksum mismatch: \(path)")
         }
     }
 }
@@ -352,6 +532,7 @@ final class NativeMTPBenchRunner {
     private let policySHA256: String
     private let identityCache: NativeMTPBenchIdentityCache?
     private let labCBInputs: NativeMTPLabCBInputs?
+    private let residentTarget: NativeMTPBenchResident<NativeMTPBenchResidentWeights>?
     /// The native runtime's scheduler load-gate recorder for the current
     /// cell fixture (SPEC-048-R015 gated-cell evidence).
     private var nativeLoadGateRecorder: NativeMTPLoadGateRecorder?
@@ -365,7 +546,8 @@ final class NativeMTPBenchRunner {
         providerCommit: String,
         phase: NativeMTPBenchPhase,
         identityCache: NativeMTPBenchIdentityCache? = nil,
-        labCBInputs: NativeMTPLabCBInputs? = nil
+        labCBInputs: NativeMTPLabCBInputs? = nil,
+        residentTarget: NativeMTPBenchResident<NativeMTPBenchResidentWeights>? = nil
     ) async throws {
         self.root = URL(fileURLWithPath: (rootPath as NSString).expandingTildeInPath, isDirectory: true)
             .standardizedFileURL
@@ -379,6 +561,7 @@ final class NativeMTPBenchRunner {
         self.phase = phase
         self.identityCache = identityCache
         self.labCBInputs = labCBInputs
+        self.residentTarget = residentTarget
         self.policySHA256 = try Self.sha256(of: self.policyURL)
         self.policy = try NativeMTPBenchPolicy.load(from: self.policyURL)
         self.layout = NativeMTPBenchFixtureLayout.resolve(root: self.root)
@@ -582,12 +765,13 @@ final class NativeMTPBenchRunner {
         verifiedTargetIdentity = checked.targetIdentity
         let longest = max(corpus.requests.map { $0.tokenIDs.count }.max() ?? 1,
             longPrompts.keys.max() ?? 1)
-        let fixture = try await fixture(for: .init(slots: 4, promptTokens: longest, maxTokens: 256))
+        var mappingFixture: NativeMTPHardwareRuntimeFixture? = try await fixture(
+            for: .init(slots: 4, promptTokens: longest, maxTokens: 256))
         // Verify the frozen IDs against the production request mapping, including
         // thinking-mode encoding, before submitting any measured token probe.
         for item in corpus.requests {
             let body = try item.request(modelID: modelID, maxTokens: 256)
-            let ids = try await fixture.runtimes.targetContainer.perform { context in
+            let ids = try await mappingFixture!.runtimes.targetContainer.perform { context in
                 let input = try ModelRuntime.userInput(for: body)
                 return try await context.processor.prepare(input: input).text.tokens.asArray(Int.self)
             }
@@ -595,6 +779,8 @@ final class NativeMTPBenchRunner {
                 throw NativeMTPBenchError.assertionFailed("frozen production prompt IDs differ: \(item.name)")
             }
         }
+        let sharedFrozenFixture = residentTarget == nil ? mappingFixture : nil
+        mappingFixture = nil
         let writer = try NativeMTPJSONLWriter(url: outURL, append: false)
         defer { try? writer.close() }
         try writer.write([
@@ -623,6 +809,12 @@ final class NativeMTPBenchRunner {
             })
         }
         for (groupIndex, group) in groups.enumerated() {
+            let fixture: NativeMTPHardwareRuntimeFixture
+            if let sharedFrozenFixture { fixture = sharedFrozenFixture }
+            else {
+                fixture = try await self.fixture(for: .init(slots: group.count,
+                    promptTokens: group.map { $0.tokenIDs.count }.max() ?? 1, maxTokens: 256))
+            }
             let ordinary = try await frozenWave(group, groupIndex: groupIndex,
                 runtime: fixture.runtimes.ordinary, nativeDepth: nil, roundRecorder: nil)
             let native = try await frozenWave(group, groupIndex: groupIndex,
@@ -891,7 +1083,7 @@ final class NativeMTPBenchRunner {
             maxPromptTokens: policy.maximumPromptTokens ?? 1_048_576,
             maxPhysicalBlocks: maxBlocks,
             diagnosticEligibilityBypass: policy.diagnosticEligibilityBypass,
-            labCBInputs: labCBInputs
+            labCBInputs: labCBInputs, residentTarget: residentTarget
         )
         let fixture = try await runner.loadRuntimeFixture(
             maxContextTokens: cell.promptTokens + cell.maxTokens + 256,
