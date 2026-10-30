@@ -31,6 +31,16 @@
       "model": "prism-ml/Ternary-Bonsai-2-2B-mlx-2bit",
       "from_row": "default",
       "to_row": "prism-ml/ternary-bonsai-2-2b-mlx-2bit"
+    },
+    {
+      "model": "grant-ai/GLM-5.3-Flash-Abliterated-MLX-4bit",
+      "from_row": "default",
+      "to_row": "zai-org/glm-5.3-flash-abliterated"
+    },
+    {
+      "model": "z-ai/glm-5.3-flash-abliterated",
+      "from_row": "default",
+      "to_row": "zai-org/glm-5.3-flash-abliterated"
     }
   ]
 }

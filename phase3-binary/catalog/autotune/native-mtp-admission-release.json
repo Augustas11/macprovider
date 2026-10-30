@@ -2,16 +2,16 @@
   "challenge_bank_signer_key_id": "streamvc-autotune-static-v4",
   "entry": {
     "artifact_manifest_sha256": "92a047c3caac2910ca117218affd02d6215eab8d022bbf1a9654869f16b851b6",
-    "challenge_bank_sha256": "13a73c4422bc95e91c20c7efdb14e7439fe3f65c08bbd14a38616837ca0cb041",
+    "challenge_bank_sha256": "9cb8b902d0d331137c2c92d1bdd651e1b8a7d06da161f112faa2bc61aa0789d9",
     "live_executable_cdhash": "736ebf356e3ae950392651d7f0677e2e0c50d7d8",
     "provider_revision": "11c4107744116ac426b0eab4cd37a20c511526a9",
     "reproducible_build_sha256": "5ef947b59cfe33d819031d65df9da13da9ef3658a94d46ff37bcd7af6dfab3c0",
     "source_commit": "11c4107744116ac426b0eab4cd37a20c511526a9"
   },
-  "expires_at": "2027-01-27T05:30:00Z",
-  "issued_at": "2026-10-30T05:30:00Z",
+  "expires_at": "2027-01-27T06:00:00Z",
+  "issued_at": "2026-10-30T06:00:00Z",
   "provider_decode_path_digest": "27d5e3e2ea04cd5d9cc7800b85d521af4e35a06acb75754c8924d9b63dc2e8b0",
-  "release_id": "published-2026-10-30-glm53-flash-abliterated-listed-v1",
+  "release_id": "published-2026-10-30-glm53-flash-abliterated-recommendable-v1",
   "revocation_signer_key_id": "streamvc-autotune-static-v4",
   "schema_version": "macprovider.native-mtp-admission-release-input.v1",
   "signer_key_id": "streamvc-autotune-static-v4"

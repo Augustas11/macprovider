@@ -1,8 +1,17 @@
 {
-  "catalog_id": "macprovider-tier2-model-catalog-2026-10-23-deepseek-v4-flash-v1",
+  "catalog_id": "macprovider-tier2-model-catalog-2026-10-30-glm53-flash-abliterated-v1",
   "expires_at": "2026-12-25T00:00:00Z",
-  "issued_at": "2026-10-23T20:30:00Z",
+  "issued_at": "2026-10-30T06:00:00Z",
   "models": [
+    {
+      "artifact_kind": "mlx_weight_file",
+      "hash_scope": "macprovider.snapshot-manifest.v1",
+      "model_id": "grant-ai/GLM-5.3-Flash-Abliterated-MLX-4bit",
+      "min_ram_gb": 234,
+      "notes": "Buyer-serving candidate zai-org/glm-5.3-flash-abliterated (#2189 abliterated GLM-5.3-Flash build, native glm5_next engine); identity from signed SPEC-023 row.",
+      "sha256": "d47ec628ddfd67813ab9a9439a152e19d5f648ae3f05cfe6b2094eb9fb67fc4c",
+      "source": "operator-curated"
+    },
     {
       "artifact_kind": "mlx_weight_file",
       "hash_scope": "macprovider.snapshot-manifest.v1",
@@ -187,7 +196,7 @@
   "signature": {
     "alg": "Ed25519",
     "key_id": "catalog-key-2026q2",
-    "sig": "wHzyJhNAcf20zUhwglgeMrVRXCpa8wsYdfSKXIlfuGKZl1Z3QNIsTpuyh7HbaXPLiR6gMdiULxQ6IJx5rQyLCg"
+    "sig": "D8QGBsQBAAG5Rw-RsjlZ6xygFjHNQ-gd2sqGdtWijQyXNWGB9y3NPqISzHAD4e9x8v_PESEaHMtWTv1C79vfBA"
   },
   "version": 1
 }

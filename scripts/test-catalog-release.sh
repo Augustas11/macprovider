@@ -337,6 +337,8 @@ expected_history = {
     "published-2026-10-29-glm53-qwen36-native-mtp-v277",
     # Superseded when the abliterated GLM-5.3-Flash build is listed.
     "published-2026-10-29-glm53-qwen36-native-mtp-v277-runtime",
+    # Superseded by the abliterated GLM-5.3-Flash promotion to recommendable.
+    "published-2026-10-30-glm53-flash-abliterated-listed-v1",
     current_release_id,
 }
 if set(ledger["releases"]) != expected_history:
