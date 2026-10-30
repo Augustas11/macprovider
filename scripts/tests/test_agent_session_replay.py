@@ -7,6 +7,7 @@ import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest import mock
 
 from scripts import agent_session_replay as replay
 
@@ -74,6 +75,11 @@ class FakeGateway:
         self.gap = {}  # request_no -> seconds slept between two deltas
         self.status = {}  # request_no -> HTTP status returned instead of a stream
         self.redirect = {}  # request_no -> (HTTP status, destination URL)
+        self.truncated_chunk = set()
+        self.truncated_length = set()
+        self.truncated_terminal_chunk = set()
+        self.complete_terminal_chunk = set()
+        self.malformed_event = {}  # request_no -> raw SSE data payload
         self.cut = set()  # request_nos whose stream ends before completion
         self.first_token_delay = {}  # request_no -> seconds
         self.bodies = []
@@ -119,12 +125,47 @@ class FakeGateway:
                     self.end_headers()
                     self.wfile.write(payload)
                     return
+                if (no in gateway.malformed_event or no in gateway.truncated_length
+                        or no in gateway.truncated_terminal_chunk or no in gateway.complete_terminal_chunk):
+                    if chat:
+                        events = [{"choices": [{"delta": {"content": "ok"}}]},
+                                  {"choices": [], "usage": {"prompt_tokens": 100, "completion_tokens": 1,
+                                                           "prompt_tokens_details": {"cached_tokens": 99}}}]
+                    else:
+                        events = [{"type": "response.output_text.delta", "delta": "ok"},
+                                  {"type": "response.completed", "response": {"usage": {
+                                      "input_tokens": 100, "output_tokens": 1, "input_tokens_details": {"cached_tokens": 99}}}}]
+                    payload = b"".join(b"data: " + json.dumps(event).encode() + b"\n\n" for event in events)
+                    if chat:
+                        payload += b"data: [DONE]\n\n"
+                    if no in gateway.malformed_event:
+                        payload = b"data: " + gateway.malformed_event[no] + b"\n\n" + payload
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/event-stream")
+                    if no in gateway.truncated_terminal_chunk or no in gateway.complete_terminal_chunk:
+                        self.send_header("Transfer-Encoding", "chunked")
+                        payload = f"{len(payload):x}\r\n".encode() + payload + b"\r\n"
+                        if no in gateway.complete_terminal_chunk:
+                            payload += b"0\r\n\r\n"
+                    else:
+                        self.send_header("Content-Length", str(len(payload) + (10 if no in gateway.truncated_length else 0)))
+                    self.send_header("Connection", "close")
+                    self.end_headers()
+                    self.wfile.write(payload)
+                    self.close_connection = True
+                    return
                 prompt = len(json.dumps(body.get("messages") or body.get("input"))) // 4 + len(body.get("instructions", "")) // 4
                 cached = 0 if first_for_key else int(prompt * gateway.cache_ratio)
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.send_header("Connection", "close")
+                if no in gateway.truncated_chunk:
+                    self.send_header("Transfer-Encoding", "chunked")
                 self.end_headers()
+                if no in gateway.truncated_chunk:
+                    self.wfile.write(b"5\r\ndata")
+                    self.close_connection = True
+                    return
 
                 def send(obj):
                     self.wfile.write(b"data: " + (obj if isinstance(obj, bytes) else json.dumps(obj).encode()) + b"\n\n")
@@ -264,6 +305,109 @@ class ParseRolloutTest(unittest.TestCase):
 
 
 class ReplaySLOTest(ReplayTestCase):
+    def test_truncated_chunk_is_recorded_and_fails_gate(self):
+        self.gw.truncated_chunk.add(1)
+        code, summary, turns, _ = self.run_replay()
+        self.assertEqual(code, 1)
+        self.assertEqual(summary["requests_replayed"], 4)
+        self.assertEqual(summary["requests_expected"], 4)
+        self.assertEqual(summary["worker_errors"], [])
+        self.assertIn("IncompleteRead", turns[0]["attempts"][0]["error"])
+        self.assertIn("stream_cut", turns[0]["breaches"])
+
+    def test_malformed_sse_is_recorded_and_fails_gate(self):
+        cases = {
+            "responses": [[], None, "bad", {"type": []}, {"type": "response.completed", "response": []},
+                          {"type": "response.completed", "response": {"usage": [1]}},
+                          {"type": "response.completed", "response": {"usage": {"input_tokens_details": []}}},
+                          {"type": "response.completed", "response": {"usage": {"output_tokens": "3"}}},
+                          {"type": "response.output_text.delta", "delta": {"bad": "object"}},
+                          {"type": "response.function_call_arguments.delta", "delta": 42}],
+            "chat": [[], {"choices": {}}, {"choices": [1]}, {"choices": [{"delta": []}]},
+                     {"usage": []}, {"usage": {"prompt_tokens_details": []}}, {"usage": {"completion_tokens": {}}},
+                     {"choices": [{"delta": {"tool_calls": "bad"}}]},
+                     {"choices": [{"delta": {"tool_calls": [1]}}]},
+                     {"choices": [{"delta": {"tool_calls": [{"function": []}]}}]},
+                     {"choices": [{"delta": {"tool_calls": [{"function": {"arguments": 42}}]}}]}],
+        }
+        cases["chat"] += [{"choices": [{"delta": {field: {"bad": "object"}}}]} for field in ("content", "reasoning_content", "reasoning")]
+        for api, events in cases.items():
+            for event in events + [b"{invalid"]:
+                with self.subTest(api=api, event=event):
+                    no = len(self.gw.bodies) + 1
+                    self.gw.malformed_event[no] = event if isinstance(event, bytes) else json.dumps(event).encode()
+                    code, summary, turns, _ = self.run_replay("--api", api)
+                    self.assertEqual(code, 1)
+                    self.assertEqual(summary["requests_replayed"], 4)
+                    self.assertEqual(summary["worker_errors"], [])
+                    self.assertIn("stream_cut", turns[0]["breaches"])
+                    self.assertIsNotNone(turns[0]["attempts"][0]["error"])
+
+    def test_truncated_content_length_fails_despite_sse_completion(self):
+        for api in ("responses", "chat"):
+            with self.subTest(api=api):
+                self.gw.truncated_length.add(len(self.gw.bodies) + 1)
+                code, summary, turns, _ = self.run_replay("--api", api)
+                self.assertEqual(code, 1)
+                self.assertEqual(summary["requests_replayed"], 4)
+                self.assertEqual(summary["worker_errors"], [])
+                self.assertIn("stream_cut", turns[0]["breaches"])
+                self.assertIn("IncompleteRead", turns[0]["attempts"][0]["error"])
+
+    def test_truncated_chunk_fails_despite_sse_completion(self):
+        for api in ("responses", "chat"):
+            with self.subTest(api=api):
+                self.gw.truncated_terminal_chunk.add(len(self.gw.bodies) + 1)
+                code, summary, turns, _ = self.run_replay("--api", api)
+                self.assertEqual(code, 1)
+                self.assertEqual(summary["worker_errors"], [])
+                self.assertIn("IncompleteRead", turns[0]["attempts"][0]["error"])
+
+    def test_complete_framed_response_with_terminal_event_passes(self):
+        for api, prefix in (("responses", {"type": "response.created"}), ("chat", {"choices": []})):
+            for chunked in (False, True):
+                with self.subTest(api=api, chunked=chunked):
+                    no = len(self.gw.bodies) + 1
+                    self.gw.malformed_event[no] = json.dumps(prefix).encode()
+                    if chunked:
+                        self.gw.complete_terminal_chunk.add(no)
+                    code, summary, _, _ = self.run_replay("--api", api)
+                    self.assertEqual(code, 0, summary["breaches"])
+                    self.assertTrue(summary["pass"])
+
+    def test_zero_replayed_requests_fails_without_worker_exception(self):
+        with mock.patch.object(replay.Replay, "_session"):
+            code, summary, turns, _ = self.run_replay()
+        self.assertEqual(code, 1)
+        self.assertEqual(turns, [])
+        self.assertEqual(summary["requests_replayed"], 0)
+        self.assertEqual(summary["requests_expected"], 4)
+        self.assertEqual(summary["breach_counts"], {"request_count": 1})
+
+    def test_unexpected_session_exception_and_partial_run_fail_gate(self):
+        original = replay.Replay._body
+
+        def fail_after_first(runner, items, cache_key):
+            if runner.records:
+                raise RuntimeError("synthetic worker failure")
+            return original(runner, items, cache_key)
+
+        with mock.patch.object(replay.Replay, "_body", fail_after_first):
+            code, summary, turns, _ = self.run_replay()
+        self.assertEqual(code, 1)
+        self.assertEqual(len(turns), 1)
+        self.assertEqual(summary["requests_replayed"], 1)
+        self.assertEqual(summary["breach_counts"], {"request_count": 1, "worker_exception": 1})
+        self.assertEqual(summary["worker_errors"][0]["error"], "RuntimeError")
+
+    def test_unexpected_aggressor_exception_fails_complete_session_run(self):
+        with mock.patch.object(replay.Replay, "_aggressor", side_effect=RuntimeError("synthetic failure")):
+            code, summary, _, _ = self.run_replay("--aggressor-prefill-tokens", "500")
+        self.assertEqual(code, 1)
+        self.assertEqual(summary["requests_replayed"], 4)
+        self.assertEqual(summary["breach_counts"], {"worker_exception": 4})
+        self.assertEqual({error["role"] for error in summary["worker_errors"]}, {"aggressor"})
+
     def test_authenticated_cross_origin_redirects_never_send_credentials(self):
         destination = FakeGateway()
         self.addCleanup(destination.close)

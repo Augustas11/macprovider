@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import http.client
 import json
 import random
 import statistics
@@ -407,6 +408,57 @@ class RefuseRedirects(urllib.request.HTTPRedirectHandler):
         return None
 
 
+def validate_sse_event(event: Any, api: str) -> None:
+    def obj(value: Any, label: str) -> dict[str, Any]:
+        if not isinstance(value, dict):
+            raise ValueError(f"{label} must be an object")
+        return value
+
+    obj(event, "SSE event")
+    if event.get("error") is not None:
+        obj(event["error"], "error")
+    if api == "responses":
+        if not isinstance(event.get("type"), str):
+            raise ValueError("SSE event type must be a string")
+        if event["type"] in TOKEN_DELTA_EVENTS and not isinstance(event.get("delta"), str):
+            raise ValueError("token delta must be a string")
+        response = obj(event["response"], "response") if event.get("response") is not None else {}
+        usage = response.get("usage")
+        token_fields = ("input_tokens", "output_tokens")
+        details_field = "input_tokens_details"
+    else:
+        choices = event.get("choices")
+        if choices is not None:
+            if not isinstance(choices, list):
+                raise ValueError("choices must be an array")
+            for choice in choices:
+                obj(choice, "choice")
+                if choice.get("delta") is not None:
+                    delta = obj(choice["delta"], "delta")
+                    for field in ("content", "reasoning_content", "reasoning"):
+                        if delta.get(field) is not None and not isinstance(delta[field], str):
+                            raise ValueError(f"delta.{field} must be a string")
+                    if delta.get("tool_calls") is not None:
+                        if not isinstance(delta["tool_calls"], list):
+                            raise ValueError("delta.tool_calls must be an array")
+                        for call in delta["tool_calls"]:
+                            obj(call, "tool call")
+                            if call.get("function") is not None:
+                                function = obj(call["function"], "tool call function")
+                                for field in ("name", "arguments"):
+                                    if function.get(field) is not None and not isinstance(function[field], str):
+                                        raise ValueError(f"tool call function.{field} must be a string")
+        usage = event.get("usage")
+        token_fields = ("prompt_tokens", "completion_tokens")
+        details_field = "prompt_tokens_details"
+    if usage is not None:
+        obj(usage, "usage")
+        details = obj(usage[details_field], details_field) if usage.get(details_field) is not None else {}
+        for field, value in [(k, usage.get(k)) for k in token_fields] + [("cached_tokens", details.get("cached_tokens"))]:
+            if value is not None and (type(value) is not int or value < 0):
+                raise ValueError(f"{field} must be a nonnegative integer")
+
+
 def stream_request(url: str, body: dict[str, Any], api_key: str | None, timeout: float, api: str, on_first_token=None) -> dict[str, Any]:
     """POST one streaming request and measure it. Never raises for HTTP or
     stream failures; they are recorded on the result."""
@@ -444,7 +496,7 @@ def stream_request(url: str, body: dict[str, Any], api_key: str | None, timeout:
         finally:
             exc.close()
         return result
-    except (urllib.error.URLError, OSError) as exc:
+    except (urllib.error.URLError, OSError, http.client.HTTPException) as exc:
         result["error"] = f"connect: {exc}"
         result["cut"] = True
         return result
@@ -459,11 +511,13 @@ def stream_request(url: str, body: dict[str, Any], api_key: str | None, timeout:
                 if payload == "[DONE]":
                     if api == "chat" and result["error"] is None:
                         result["completed"] = True
+                    # Framed bodies must finish their HTTP framing too, so a
+                    # truncated body cannot be hidden by an SSE terminal event.
+                    if resp.chunked or resp.length is not None:
+                        continue
                     break
-                try:
-                    event = json.loads(payload)
-                except json.JSONDecodeError:
-                    continue
+                event = json.loads(payload)
+                validate_sse_event(event, api)
                 now = time.monotonic()
                 is_token = False
                 usage = None
@@ -505,7 +559,15 @@ def stream_request(url: str, body: dict[str, Any], api_key: str | None, timeout:
                     else:
                         max_gap = max(max_gap, now - last)
                     last = now
-    except (OSError, ValueError) as exc:
+            else:
+                # HTTPResponse.readline() silently accepts short fixed-length
+                # bodies; its chunked peek can also swallow IncompleteRead at
+                # the next chunk boundary. Check framing at premature EOF.
+                if resp.chunked and resp.chunk_left is not None:
+                    raise http.client.IncompleteRead(b"")
+                if resp.length not in (None, 0):
+                    raise http.client.IncompleteRead(b"", resp.length)
+    except (OSError, ValueError, http.client.HTTPException) as exc:
         result["error"] = f"stream: {exc}"
     if result["error"] is not None or not result["completed"]:
         result["completed"] = False
@@ -572,7 +634,7 @@ def context_bucket(tokens: int | None) -> str:
     return ">128k"
 
 
-def summarize(records: list[dict[str, Any]], args: argparse.Namespace, meta: dict[str, Any]) -> dict[str, Any]:
+def summarize(records: list[dict[str, Any]], args: argparse.Namespace, meta: dict[str, Any], expected_requests: int, worker_errors: list[dict[str, Any]]) -> dict[str, Any]:
     counts = {"stream_cut": 0, "http_429": 0, "http_5xx": 0, "retries": 0}
     buckets: dict[str, dict[str, Any]] = {}
     breaches = []
@@ -611,6 +673,11 @@ def summarize(records: list[dict[str, Any]], args: argparse.Namespace, meta: dic
             "ttft_max_s": round(max(b["ttft_s"]), 3) if b["ttft_s"] else None,
             "decode_tps_p50": round(statistics.median(b["decode_tps"]), 2) if b["decode_tps"] else None,
         }
+    replayed = sum(1 for r in records if r["role"] == "session")
+    if replayed == 0 or replayed != expected_requests:
+        breaches.append({"role": "run", "session": None, "turn": None, "breach": "request_count"})
+    for error in worker_errors:
+        breaches.append(dict(error, breach="worker_exception"))
     breach_counts: dict[str, int] = {}
     for b in breaches:
         breach_counts[b["breach"]] = breach_counts.get(b["breach"], 0) + 1
@@ -622,7 +689,9 @@ def summarize(records: list[dict[str, Any]], args: argparse.Namespace, meta: dic
         "sessions": args.sessions,
         "aggressor_prefill_tokens": args.aggressor_prefill_tokens,
         "max_context": args.max_context,
-        "requests_replayed": sum(1 for r in records if r["role"] == "session"),
+        "requests_expected": expected_requests,
+        "requests_replayed": replayed,
+        "worker_errors": worker_errors,
         "aggressor_requests": sum(1 for r in records if r["role"] == "aggressor"),
         "slo": {
             "min_cache_ratio": args.min_cache_ratio,
@@ -648,6 +717,7 @@ class Replay:
         self.api_key = api_key
         self.lock = threading.Lock()
         self.records: list[dict[str, Any]] = []
+        self.worker_errors: list[dict[str, Any]] = []
         self.run_id = f"{int(time.time())}-{random.randrange(1 << 30):08x}"
         self.url = args.base_url.rstrip("/") + ("/responses" if args.api == "responses" else "/chat/completions")
         self.model = args.model or meta.get("model")
@@ -658,6 +728,16 @@ class Replay:
         if self.args.api == "responses":
             return build_responses_body(self.meta, items, self.model, cache_key)
         return build_chat_body(self.meta, items, self.model, cache_key)
+
+    def _worker(self, role: str, session: int, turn: int | None = None) -> None:
+        try:
+            if role == "session":
+                self._session(session)
+            else:
+                self._aggressor(session, turn)
+        except BaseException as exc:  # Thread failures must reach the run verdict.
+            with self.lock:
+                self.worker_errors.append({"role": role, "session": session, "turn": turn, "error": type(exc).__name__})
 
     def _send(self, body: dict[str, Any], on_first_token=None) -> list[dict[str, Any]]:
         attempts = []
@@ -707,7 +787,7 @@ class Replay:
                 def on_first(fired=fired, turn=turn) -> None:
                     if not fired.is_set():
                         fired.set()
-                        t = threading.Thread(target=self._aggressor, args=(session, turn), daemon=True)
+                        t = threading.Thread(target=self._worker, args=("aggressor", session, turn), daemon=True)
                         with self.lock:
                             self.agg_threads.append(t)
                         t.start()
@@ -733,7 +813,7 @@ class Replay:
         out_dir.mkdir(parents=True, exist_ok=True)
         with open(out_dir / "turns.jsonl", "w", encoding="utf-8") as handle:
             self.out_handle = handle
-            threads = [threading.Thread(target=self._session, args=(i,), daemon=True) for i in range(self.args.sessions)]
+            threads = [threading.Thread(target=self._worker, args=("session", i), daemon=True) for i in range(self.args.sessions)]
             for t in threads:
                 t.start()
             for t in threads:
@@ -746,7 +826,7 @@ class Replay:
                 for t in pending:
                     t.join()
             self.out_handle = None
-        summary = summarize(self.records, self.args, self.meta)
+        summary = summarize(self.records, self.args, self.meta, len(self.requests) * self.args.sessions, self.worker_errors)
         (out_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
         return summary
 
