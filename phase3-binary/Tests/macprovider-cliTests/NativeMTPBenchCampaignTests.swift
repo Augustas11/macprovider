@@ -13,6 +13,60 @@ final class NativeMTPBenchCampaignTests: XCTestCase {
         XCTAssertThrowsError(try decode(reordered).validateStructure())
     }
 
+    func testFrozenGroupSelectionPreservesOriginalIndicesAndLegacyCoverage() throws {
+        XCTAssertEqual(try NativeMTPBenchCampaign.selectedFrozenGroupIndices(nil), Array(0..<19))
+        XCTAssertEqual(try NativeMTPBenchCampaign.selectedFrozenGroupIndices(Array(12..<19)),
+            [12, 13, 14, 15, 16, 17, 18])
+        XCTAssertEqual(try NativeMTPBenchCampaign.selectedFrozenGroupIndices([0, 18]), [0, 18])
+        // The caller may validate against its derived corpus geometry too.
+        XCTAssertEqual(try NativeMTPBenchCampaign.selectedFrozenGroupIndices(nil, totalGroupCount: 3), [0, 1, 2])
+        XCTAssertThrowsError(try NativeMTPBenchCampaign.selectedFrozenGroupIndices([3], totalGroupCount: 3))
+        XCTAssertThrowsError(try NativeMTPBenchCampaign.selectedFrozenGroupIndices(nil, totalGroupCount: 0))
+    }
+
+    func testFrozenGroupSelectionRejectsEmptyDuplicateUnorderedAndOutOfRangeIndices() {
+        for selection in [[], [12, 12], [13, 12], [-1], [19]] as [[Int]] {
+            XCTAssertThrowsError(try NativeMTPBenchCampaign.selectedFrozenGroupIndices(selection),
+                "invalid selection: \(selection)")
+        }
+    }
+
+    func testManifestFrozenGroupSelectorValidationPrecedesInputLoading() throws {
+        var selected = steps()
+        selected[0]["frozen_group_indices"] = Array(12..<19)
+        XCTAssertEqual(try decode(selected).steps[0].frozenGroupIndices, Array(12..<19))
+        XCTAssertNil(try decode(steps()).steps[0].frozenGroupIndices)
+        XCTAssertNoThrow(try decode(selected).validateStructure())
+        for invalid in [[], [12, 12], [13, 12], [-1], [19]] as [[Int]] {
+            var records = steps()
+            records[0]["frozen_group_indices"] = invalid
+            XCTAssertThrowsError(try decode(records).validateStructure())
+        }
+        for index in [4, 8] {
+            var records = steps()
+            records[index]["frozen_group_indices"] = [12]
+            XCTAssertThrowsError(try decode(records).validateStructure())
+        }
+        for invalid in ["12", [12.5], [true]] as [Any] {
+            var records = steps()
+            records[0]["frozen_group_indices"] = invalid
+            XCTAssertThrowsError(try decode(records))
+        }
+
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        var records = steps()
+        records[0]["frozen_group_indices"] = [] as [Int]
+        let manifest = root.appendingPathComponent("invalid-selector.json")
+        try JSONSerialization.data(withJSONObject: ["schema": "macprovider.native-mtp-resident-campaign.v1",
+            "steps": records]).write(to: manifest)
+        XCTAssertThrowsError(try NativeMTPBenchCampaign.load(path: manifest.path)) {
+            XCTAssertTrue(String(describing: $0).contains("frozen_group_indices"),
+                "selector rejection must precede opening nonexistent policy/model inputs")
+        }
+    }
+
     func testManifestRequiresDistinctFrozenAndMatrixOutputsAndExactSustainedBinding() throws {
         var duplicate = steps()
         duplicate[1]["out"] = duplicate[0]["out"]

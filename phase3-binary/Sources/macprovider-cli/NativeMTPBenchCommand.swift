@@ -145,7 +145,8 @@ struct NativeMTPBenchCommand: AsyncParsableCommand {
                     guard Set(prompts.keys) == Set([8192, 32768]) else {
                         throw ValidationError("campaign long prompts must be exactly 8192 and 32768")
                     }
-                    try await bench.runFrozenRequests(corpus, longPrompts: prompts)
+                    try await bench.runFrozenRequests(corpus, longPrompts: prompts,
+                        groupIndices: step.frozenGroupIndices)
                 } else { try await bench.run() }
                 try journal.write(["record_type": "step_complete", "kind": step.kind,
                     "depth": step.depth, "out": step.out, "policy_sha256": step.policySHA256])
@@ -212,12 +213,14 @@ struct NativeMTPBenchCampaign: Decodable {
         let requestsSHA256: String?
         let longTokenIDs: String?
         let longTokenIDsSHA256: String?
+        let frozenGroupIndices: [Int]?
         enum CodingKeys: String, CodingKey {
             case kind, depth, policy, out, requests
             case policySHA256 = "policy_sha256"
             case requestsSHA256 = "requests_sha256"
             case longTokenIDs = "long_token_ids"
             case longTokenIDsSHA256 = "long_token_ids_sha256"
+            case frozenGroupIndices = "frozen_group_indices"
         }
     }
     let schema: String
@@ -266,6 +269,22 @@ struct NativeMTPBenchCampaign: Decodable {
         return plan
     }
 
+    /// Preserve original group indices while recording missing groups in a fresh output.
+    static func selectedFrozenGroupIndices(
+        _ requested: [Int]?, totalGroupCount: Int = 19
+    ) throws -> [Int] {
+        guard totalGroupCount > 0 else {
+            throw ValidationError("frozen group count must be positive")
+        }
+        guard let requested else { return Array(0..<totalGroupCount) }
+        guard !requested.isEmpty,
+              requested.allSatisfy({ (0..<totalGroupCount).contains($0) }),
+              zip(requested, requested.dropFirst()).allSatisfy({ $0.0 < $0.1 }) else {
+            throw ValidationError("frozen_group_indices must be nonempty, strictly ascending, and within the frozen group range")
+        }
+        return requested
+    }
+
     func validateStructure() throws {
         let depths = [1, 2, 3, 5]
         guard schema == "macprovider.native-mtp-resident-campaign.v1", steps.count == 12,
@@ -282,6 +301,11 @@ struct NativeMTPBenchCampaign: Decodable {
         let inputPaths = Set(inputs)
         var outputs = Set<String>()
         for (index, step) in steps.enumerated() {
+            if step.kind == "frozen" {
+                _ = try Self.selectedFrozenGroupIndices(step.frozenGroupIndices)
+            } else if step.frozenGroupIndices != nil {
+                throw ValidationError("frozen_group_indices is allowed only on frozen steps")
+            }
             guard step.out.hasPrefix("/"), URL(fileURLWithPath: step.out).standardizedFileURL.path == step.out,
                   !inputPaths.contains(step.out) else {
                 throw ValidationError("campaign outputs must be canonical and distinct from every input")
@@ -751,13 +775,30 @@ final class NativeMTPBenchRunner {
     /// exact token IDs before decoding text and does not stand in for R015.
     func runFrozenRequests(
         _ corpus: NativeMTPFrozenDSparkCorpus,
-        longPrompts: [Int: [Int]]
+        longPrompts: [Int: [Int]],
+        groupIndices: [Int]? = nil
     ) async throws {
         #if DEBUG || MACPROVIDER_LAB_HARNESS
         guard layout.family == .deepseekV4, onlyCell == nil, phase != .sustained,
               !FileManager.default.fileExists(atPath: outURL.path) else {
             throw NativeMTPBenchError.invalidPolicy("frozen requests require DeepSeek, a fresh --out, and no sustained/only-cell selection")
         }
+        var groups = corpus.requests.map { [$0] }
+        for stratum in ["prose", "reasoning", "code"] {
+            groups.append(corpus.requests.filter { $0.stratum == stratum })
+        }
+        for count in longPrompts.keys.sorted() {
+            let item = NativeMTPFrozenDSparkCorpus.Request(name: "long-\(count)",
+                stratum: "synthetic_long", tokenIDs: longPrompts[count]!, body: Data())
+            groups.append([item])
+            groups.append((0..<4).map { row in
+                .init(name: "long-\(count)-r\(row)", stratum: "synthetic_long",
+                    tokenIDs: item.tokenIDs, body: Data())
+            })
+        }
+        let selectedGroups = try NativeMTPBenchCampaign.selectedFrozenGroupIndices(
+            groupIndices, totalGroupCount: groups.count
+        )
         let checked = try preflight()
         guard corpus.tokenizerSHA256 == checked.tokenizerSHA256 else {
             throw NativeMTPBenchError.assertionFailed("frozen corpus tokenizer identity mismatch")
@@ -790,25 +831,15 @@ final class NativeMTPBenchRunner {
             "target_sha256": checked.targetIdentity.digest, "tokenizer_sha256": checked.tokenizerSHA256,
             "provider_commit": providerCommit, "mlx_fork_revision": policy.mlxForkRevision,
             "requested_maximum_proposal_depth": policy.proposalDepth,
+            "selected_group_indices": selectedGroups,
+            "total_group_count": groups.count,
             "long_prompt_token_counts": longPrompts.keys.sorted(),
             "long_prompt_token_sha256": Dictionary(uniqueKeysWithValues: longPrompts.map {
                 (String($0.key), NativeMTPSelfTest.tokenDigest($0.value))
             }),
         ])
-        var groups = corpus.requests.map { [$0] }
-        for stratum in ["prose", "reasoning", "code"] {
-            groups.append(corpus.requests.filter { $0.stratum == stratum })
-        }
-        for count in longPrompts.keys.sorted() {
-            let item = NativeMTPFrozenDSparkCorpus.Request(name: "long-\(count)",
-                stratum: "synthetic_long", tokenIDs: longPrompts[count]!, body: Data())
-            groups.append([item])
-            groups.append((0..<4).map { row in
-                .init(name: "long-\(count)-r\(row)", stratum: "synthetic_long",
-                    tokenIDs: item.tokenIDs, body: Data())
-            })
-        }
-        for (groupIndex, group) in groups.enumerated() {
+        for groupIndex in selectedGroups {
+            let group = groups[groupIndex]
             let fixture: NativeMTPHardwareRuntimeFixture
             if let sharedFrozenFixture { fixture = sharedFrozenFixture }
             else {
@@ -871,7 +902,9 @@ final class NativeMTPBenchRunner {
         let ids = requests.map { "frozen-g\(groupIndex)-\($0.name)" }
         let timing = NativeMTPLabCommittedTokenTimingObserver()
         guard await runtime.installLabNativeMTPCommitTimingObserver(timing),
-              await runtime.installLabBatchComposition(ids) else {
+              await runtime.installLabBatchComposition(
+                ids, nativeIntegrityProbes: requests.count > 1 && nativeDepth != nil
+              ) else {
             throw NativeMTPBenchError.assertionFailed("native frozen timing/composition observer unavailable")
         }
         let before = await runtime.currentSnapshot().nativeMTPStatus

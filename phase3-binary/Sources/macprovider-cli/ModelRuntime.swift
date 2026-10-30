@@ -8961,9 +8961,13 @@ maxTokens: 1,
 
     /// Lab-only journey hook: freeze one exact batch composition before any
     /// prefill/decode work starts. Returns false unless the scheduler is idle.
-    func installLabBatchComposition(_ requestIDs: [String]?) async -> Bool {
+    func installLabBatchComposition(
+        _ requestIDs: [String]?, nativeIntegrityProbes: Bool = false
+    ) async -> Bool {
         guard let continuousBatchScheduler else { return false }
-        return await continuousBatchScheduler.installLabBatchComposition(requestIDs)
+        return await continuousBatchScheduler.installLabBatchComposition(
+            requestIDs, nativeIntegrityProbes: nativeIntegrityProbes
+        )
     }
 
     /// Lab-only JOURNEY-NATIVE-MTP-SERVING step-10 hook: publish a new
