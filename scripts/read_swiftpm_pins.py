@@ -42,9 +42,9 @@ EXPECTED_LOCATIONS = {
 # scripts: the upstream watch imports these names, and a test checks them
 # against the SPEC-048 fork table.
 SPEC048_MLX_SWIFT_LM_FORK = "https://github.com/Augustas11/mlx-swift-lm"
-# Combined main GLM/Prism/LFM .10.15.1 and DeepSeek fidelity/DSpark .10.9.3.
-SPEC048_MLX_SWIFT_LM_TAG = "3.32.3-macprovider.10.16.3"
-SPEC048_MLX_SWIFT_LM_REVISION = "fe1875d1cde32dc1e87efb9a8fc62eafc53536e3"
+# Combined main GLM/Prism/LFM APIs, DeepSeek reference arithmetic and packed DSpark.
+SPEC048_MLX_SWIFT_LM_TAG = "3.32.3-macprovider.10.16.4"
+SPEC048_MLX_SWIFT_LM_REVISION = "9bb7ab139e438f5d80b045fd5e97ab6b24d72164"
 SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE = "3b339ad6e3b3f44c8121ecff5131c7fd55e075e6"
 SPEC048_MLX_SWIFT_FORK = "https://github.com/Augustas11/mlx-swift"
 SPEC048_MLX_SWIFT_TAG = "0.32.3-macprovider.9"

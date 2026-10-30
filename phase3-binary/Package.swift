@@ -17,7 +17,8 @@ let package = Package(
         )
     ],
     dependencies: [
-        // Fork tag 3.32.3-macprovider.10.16.3 shares MXFP8 projection tiles across DeepSeek rows.
+        // Fork tag 3.32.3-macprovider.10.16.4 aligns DeepSeek reference arithmetic and packed verification.
+        // It retains .10.16.3 shared MXFP8 projection tiles across DeepSeek rows.
         // It retains .10.16.2: fidelity, DSpark and fused attention on main .10.15.1.
         // LFM reference expert order is layered on tag 3.32.3-macprovider.10.15.
         // Fork tag 3.32.3-macprovider.10.15 combines GLM MTP (10.13) and
@@ -46,7 +47,7 @@ let package = Package(
         // compatible per-column attention while retaining row-owned caches.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "fe1875d1cde32dc1e87efb9a8fc62eafc53536e3"
+            revision: "9bb7ab139e438f5d80b045fd5e97ab6b24d72164"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",

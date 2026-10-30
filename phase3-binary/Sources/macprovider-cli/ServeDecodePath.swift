@@ -249,7 +249,7 @@ extension ModelRuntime {
                     prefillGrouping: prefillGrouping
                 ),
                 maxDecodeRowsPerForward: schedulerDecodeRowBound(configured: maxDecodeRowsPerForward, backend: backend),
-                referencePrefillStepSize: backend is DeepseekV4ContinuousBatchBackend ? 2048 : nil
+                referencePrefillStepSize: backend is DeepseekV4ContinuousBatchBackend ? DeepseekV4ContinuousBatchBackend.prefillChunkTokens : nil
             ),
             allocator: allocator,
             backend: backend,

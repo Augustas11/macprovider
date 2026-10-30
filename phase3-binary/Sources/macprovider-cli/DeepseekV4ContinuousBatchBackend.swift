@@ -10,7 +10,7 @@ import MacProviderCore
 /// caches; native verification publishes only an exactly retained cache prefix.
 final class DeepseekV4ContinuousBatchBackend: ContinuousBatchSchedulerBackend, @unchecked Sendable {
     static let maxDecodeRows = 8
-    static let prefillChunkTokens = 2_048
+    static let prefillChunkTokens = DeepseekV4Model.prefillStepSize
     static let nativeMTPDrafterColumnCap = 1_024
     private struct Row {
         var caches: [KVCache]
@@ -55,10 +55,10 @@ final class DeepseekV4ContinuousBatchBackend: ContinuousBatchSchedulerBackend, @
         self.nativeMTPVerifyTokenBudget = max(1, nativeMTPVerifyTokenBudget)
     }
 
-    /// The reference leaves the final prompt token in a separate forward.
+    /// Preserve the full-context reference geometry within each bounded chunk.
     static func prefillEnd(offset: Int, promptCount: Int) -> Int {
         guard offset < promptCount else { return offset }
-        return offset + (promptCount - offset == 1 ? 1 : min(prefillChunkTokens, promptCount - offset - 1))
+        return offset + min(prefillChunkTokens, promptCount - offset)
     }
 
     private func ownedRow(id: String, offset: Int, model: DeepseekV4Model) throws -> Row {
@@ -95,7 +95,8 @@ final class DeepseekV4ContinuousBatchBackend: ContinuousBatchSchedulerBackend, @
                     guard (!input.nativeMTPPromptPrefill || self.nativeMTPDrafterContainer != nil),
                           !input.promptTokens.isEmpty,
                           input.promptTokens.count <= Self.prefillChunkTokens,
-                          !input.isFinalChunk || input.promptTokens.count == 1,
+                          input.isFinalChunk || input.promptTokens.count == Self.prefillChunkTokens,
+                          input.promptTokenOffset % Self.prefillChunkTokens == 0,
                           input.sampleFirstToken == input.isFinalChunk,
                           input.promptTokenOffset == input.committedKVTokenCount,
                           input.targetKVTokenCount == input.committedKVTokenCount + input.promptTokens.count,

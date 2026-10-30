@@ -63,7 +63,7 @@ final class DeepseekV4BackendFixtureTests: XCTestCase {
         }
     }
 
-    func testDeepseekV4SchedulerMatchesSerialAcross2048ReferenceBoundaryOnCPU() async throws {
+    func testDeepseekV4SchedulerMatchesFullContextSerialOnCPU() async throws {
         try await Device.withDefaultDevice(.cpu) {
             let model = try tiny()
             let prompts = [2049, 2067].enumerated().map { salt, count in
@@ -82,7 +82,7 @@ final class DeepseekV4BackendFixtureTests: XCTestCase {
             let configuration = ContinuousBatchSchedulerConfiguration(descriptor: descriptor, tuple: tuple,
                 moePromotionEvidenceAvailable: true, maxActiveRows: 2, decodeHeadroomTokens: 8,
                 maxPrefillRowsPerIteration: 2, maxPrefillTokensPerIteration: 64, maxPromptChunkTokens: 32,
-                referencePrefillStepSize: 2048,
+                referencePrefillStepSize: DeepseekV4Model.prefillStepSize,
                 // CPU fixture prefill can exceed the production admission deadline.
                 queueWaitTimeoutNanoseconds: 600_000_000_000,
                 snapshot: .init(modelID: tuple.modelID, modelSHA256: tuple.modelSHA256, weightsGeneration: 1),
@@ -274,19 +274,22 @@ final class DeepseekV4BackendFixtureTests: XCTestCase {
     private func serial(_ model: DeepseekV4Model, prompt: [Int], count: Int) throws -> [Int] {
         let cache = try model.newCache(parameters: nil)
         var offset = 0
-        while prompt.count - offset > 1 {
-            let end = min(offset + 2048, prompt.count - 1)
-            _ = model(MLXArray(prompt[offset..<end].map(Int32.init)).reshaped([1, end - offset]), cache: cache)
+        var finalLogits: MLXArray?
+        while offset < prompt.count {
+            let end = DeepseekV4ContinuousBatchBackend.prefillEnd(offset: offset, promptCount: prompt.count)
+            finalLogits = model(MLXArray(prompt[offset..<end].map(Int32.init)).reshaped([1, end - offset]), cache: cache)
             eval(cache)
             offset = end
         }
-        var current = prompt.last!
+        var logits = try XCTUnwrap(finalLogits)
         var result: [Int] = []
-        for _ in 0..<count {
-            let logits = model(MLXArray([Int32(current)]).reshaped([1, 1]), cache: cache)
-            current = argMax(logits[0, -1], axis: -1).item(Int.self)
+        while result.count < count {
+            let current = argMax(logits[0, -1], axis: -1).item(Int.self)
             eval(cache)
             result.append(current)
+            if result.count < count {
+                logits = model(MLXArray([Int32(current)]).reshaped([1, 1]), cache: cache)
+            }
         }
         return result
     }

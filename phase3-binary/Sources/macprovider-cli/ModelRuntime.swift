@@ -10004,6 +10004,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                     tokenCount: promptTokenIds.count, from: start, stepSize: prefillStepSize,
                                     referenceStepSize: lfmReferenceStep
                                         ?? (generationContext.model is DeepseekV4Model ? DeepseekV4Model.prefillStepSize : nil),
+                                    leaveFinalReferenceChunk: generationContext.model is DeepseekV4Model,
                                     isCancelled: { Task.isCancelled || shouldCancel() || drainCancelled.isFired }
                                 ) { range in
                                     let chunk = LMInput.Text(tokens: MLXArray(Array(promptTokenIds[range])))
@@ -10970,6 +10971,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                 tokenCount: promptTokenIds.count, from: start, stepSize: prefillStepSize,
                                 referenceStepSize: lfmReferenceStep
                                     ?? (generationContext.model is DeepseekV4Model ? DeepseekV4Model.prefillStepSize : nil),
+                                leaveFinalReferenceChunk: generationContext.model is DeepseekV4Model,
                                 isCancelled: { Task.isCancelled || shouldCancel() || drainCancelled.isFired }
                             ) { range in
                                 let chunk = LMInput.Text(tokens: MLXArray(Array(promptTokenIds[range])))
@@ -14122,25 +14124,27 @@ maxTokens: maxTokens,
     /// SPEC-001-R011: prefills `[start, tokenCount)` in `stepSize` chunks,
     /// checking `isCancelled` before each chunk, and leaves the final
     /// (at most `stepSize`) tokens for the TokenIterator, exactly as its own
-    /// prefill would. With a model reference step, leave only the final token
-    /// and use that fixed step instead of the configured chunk size. Returns
+    /// prefill would. LFM retains its final-token reference plan. DeepSeek
+    /// leaves its whole final reference chunk for prepare, which owns the
+    /// logits-producing forward. Returns
     /// the index the iterator continues from.
     static func cancellableLocalPrefill(
         tokenCount: Int,
         from start: Int,
         stepSize: Int,
         referenceStepSize: Int? = nil,
+        leaveFinalReferenceChunk: Bool = false,
         isCancelled: () -> Bool,
         prefill: (Range<Int>) throws -> Void
     ) throws -> Int {
         let step = max(1, referenceStepSize ?? stepSize)
-        // DeepSeek-V4's ratio-4 pools depend on forward-call boundaries. Match
-        // its prepare/oracle plan even when local preemption prefills first.
-        let remainder = referenceStepSize == nil ? step : 1
+        // Full-context DeepSeek prefill must not discard the final chunk's
+        // logits or replace that forward with a single-token remainder.
+        let remainder = referenceStepSize == nil || leaveFinalReferenceChunk ? step : 1
         var cursor = max(0, start)
         while tokenCount - cursor > remainder {
             if isCancelled() { throw CancellationError() }
-            let count = min(step, tokenCount - cursor - 1)
+            let count = leaveFinalReferenceChunk ? step : min(step, tokenCount - cursor - 1)
             try prefill(cursor ..< cursor + count)
             cursor += count
         }

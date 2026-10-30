@@ -7084,7 +7084,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             descriptor: Self.descriptor(blockSizeTokens: 128, maxPhysicalBlocks: 64),
             tuple: Self.tuple(), maxActiveRows: 2, decodeHeadroomTokens: 1,
             maxPrefillRowsPerIteration: 2, maxPrefillTokensPerIteration: 128,
-            maxPromptChunkTokens: 64, referencePrefillStepSize: 2048,
+            maxPromptChunkTokens: 64, referencePrefillStepSize: DeepseekV4ContinuousBatchBackend.prefillChunkTokens,
             allowsRaggedPrefillOffsets: true,
             snapshot: .init(modelID: Self.modelID, modelSHA256: Self.modelSHA, weightsGeneration: 1)
         )
@@ -7099,7 +7099,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             promptTokens: Array(repeating: 3, count: 4096), maxOutputTokens: 1))
         XCTAssertEqual(result.outputTokens, [77])
         let chunks = await backend.prefillChunks(id: "deepseek")
-        XCTAssertEqual(chunks, [2048, 2047, 1])
+        XCTAssertEqual(chunks, [4096])
     }
 
     private static let modelID = "mlx-community/Qwen-Test"

@@ -34,7 +34,7 @@ needs a SPEC revision.
 
 | Fork | Upstream | Tag scheme | Current tag | Revision | Upstream base |
 | --- | --- | --- | --- | --- | --- |
-| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.10.16.3` | `fe1875d1cde32dc1e87efb9a8fc62eafc53536e3` | `3.32.3` (`3b339ad6…`) |
+| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.10.16.4` | `9bb7ab139e438f5d80b045fd5e97ab6b24d72164` | `3.32.3` (`3b339ad6…`) |
 | `Augustas11/mlx-swift` | `ml-explore/mlx-swift` | `<upstream>-macprovider.<n>` | `0.32.3-macprovider.9` | `29d3b93375cc56cd2649b40e4310a8bc445e9874` | `0.32.3` (`19601207…`) |
 | `Augustas11/mlx` (MLX core) | `ml-explore/mlx` | `v<upstream>-macprovider.<n>` | `v0.32.4-macprovider.4` | `2f512e3997349c8648f5d7c5113eb2c825aa242d` | `v0.32.4` (`36969c09…`) |
 
@@ -47,26 +47,29 @@ the mlx-swift-lm fork keeps upstream's tools version.
 
 ### Current tuple delta
 
-As of 2026-10-29, `Package.resolved` and SPEC-048 R003 select
-`3.32.3-macprovider.10.15.1`, not the historical `.10.5` stack described below.
-The combined `.10.15` parent carries the GLM packed-verification and Prism
-loader work; `.10.15.1` corrects LFM MoE expert accumulation order. The
-mlx-swift and core pins are unchanged. The detailed stack below records the
-older base; the current SPEC-048 R003 tuple and its delta description govern
-the additional patches and qualification scope.
+As of 2026-10-30, `Package.resolved` and SPEC-048 R003 select
+`3.32.3-macprovider.10.16.4` (`9bb7ab139e438f5d80b045fd5e97ab6b24d72164`).
+It retains the combined GLM packed-verification, Prism loader, LFM expert-order
+and DeepSeek CB work, then aligns DeepSeek's arithmetic and bounded full-context
+prefill with the QAT-off reference and selects its artifact-tested packed
+verifier. DeepSeek's final prefill chunk remains whole, bounded at 32768 tokens;
+prompt snapshots retain only earlier whole chunks. Native DSpark depth/R015
+qualification remains separate and pending. The mlx-swift and core pins are
+unchanged. Historical measurements retain their actual dependency identities.
 
 ### Patch inventory
 
 Every rebase replays these stacks and drops any patch upstream now carries
 (record which, and why it is equivalent).
 
-mlx-swift-lm (`3.32.3..fe1875d1`, tag `3.32.3-macprovider.10.16.3`, branch
-`campaign/2111-dsv4-fidelity`): tag `3.32.3-macprovider.10.5` (`c8be0f61`)
+mlx-swift-lm (`3.32.3..9bb7ab13`, tag `3.32.3-macprovider.10.16.4`, branch
+`codex/2151-fidelity-resume`): tag `3.32.3-macprovider.10.5` (`c8be0f61`)
 plus main’s GLM packed projections, Prism/Bonsai loader and LFM expert-order
 correction from `3.32.3-macprovider.10.15.1`, together with DeepSeek-V4 fidelity to DeepSeek's reference and embedded DSpark with
-exact ordinary-prefix verification. The successor shares MXFP8 projection
-tiles across two to eight DeepSeek vectors, preserving the pinned serial
-reduction order; throughput qualification remains separate. 10.5 is tag
+exact packed-prefix verification. The current successor also corrects
+reference norm, rotary, hyper-connection, router and indexer arithmetic; it
+retains shared MXFP8 projection tiles across two to eight DeepSeek vectors.
+Throughput qualification remains separate. 10.5 is tag
 `3.32.3-macprovider.10.4` (`676a62a4`) plus
 shared attention/compressor/indexer work, per-row rotary offsets, keys-only
 windows and geometric pool storage. 10.4 is `3.32.3-macprovider.10.3` (`baec1724`,

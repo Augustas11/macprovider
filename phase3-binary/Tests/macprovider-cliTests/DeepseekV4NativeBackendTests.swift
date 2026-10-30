@@ -75,17 +75,12 @@ final class DeepseekV4NativeBackendTests: XCTestCase {
                     handles.append(handle)
                     let binding = try await allocator.binding(for: handle)
                     bindings.append(binding)
-                    let prefix = try await backend.prefill(rows: [.init(requestID: id,
-                        promptTokens: Array(prompt.dropLast()), binding: binding, promptTokenOffset: 0,
-                        committedKVTokenCount: 0, targetKVTokenCount: count - 1, isFinalChunk: false)])
-                    XCTAssertNil(prefix[0].failureCode)
                     let final = try await backend.prefill(rows: [.init(requestID: id,
-                        promptTokens: [prompt.last!], binding: binding, promptTokenOffset: count - 1,
-                        committedKVTokenCount: count - 1, targetKVTokenCount: count, isFinalChunk: true)])
+                        promptTokens: prompt, binding: binding, promptTokenOffset: 0,
+                        committedKVTokenCount: 0, targetKVTokenCount: count, isFinalChunk: true)])
                     XCTAssertNil(final[0].failureCode)
                     let cache = try model.newCache(parameters: nil)
-                    _ = model(MLXArray(prompt.dropLast().map(Int32.init)).reshaped([1, count - 1]), cache: cache)
-                    _ = model(MLXArray([Int32(prompt.last!)]).reshaped([1, 1]), cache: cache)
+                    _ = model(MLXArray(prompt.map(Int32.init)).reshaped([1, count]), cache: cache)
                     eval(cache)
                     serialCaches.append(cache)
                 }
@@ -161,14 +156,9 @@ final class DeepseekV4NativeBackendTests: XCTestCase {
             let handle = try await allocator.allocate(conversationKey: "draft", maxTokens: 128,
                 initialTokens: prompt.count)
             let binding = try await allocator.binding(for: handle)
-            let firstChunk = try await backend.prefill(rows: [.init(requestID: "draft",
-                promptTokens: Array(prompt.dropLast()), binding: binding, promptTokenOffset: 0,
-                committedKVTokenCount: 0, targetKVTokenCount: prompt.count - 1,
-                isFinalChunk: false, nativeMTPPromptPrefill: true)])
-            XCTAssertNil(firstChunk[0].failureCode)
             let finalChunk = try await backend.prefill(rows: [.init(requestID: "draft",
-                promptTokens: [prompt.last!], binding: binding, promptTokenOffset: prompt.count - 1,
-                committedKVTokenCount: prompt.count - 1, targetKVTokenCount: prompt.count,
+                promptTokens: prompt, binding: binding, promptTokenOffset: 0,
+                committedKVTokenCount: 0, targetKVTokenCount: prompt.count,
                 isFinalChunk: true, nativeMTPPromptPrefill: true)])
             XCTAssertNil(finalChunk[0].failureCode)
             var generated = [try XCTUnwrap(finalChunk[0].sampledToken)]
@@ -216,13 +206,14 @@ final class DeepseekV4NativeBackendTests: XCTestCase {
                 generated += selected.map(\.tokenID)
             }
             let reference = try model.newCache(parameters: nil)
-            _ = model(MLXArray(prompt.dropLast().map(Int32.init)).reshaped([1, prompt.count - 1]), cache: reference)
-            var current = prompt.last!
+            var logits = model(MLXArray(prompt.map(Int32.init)).reshaped([1, prompt.count]), cache: reference)
             var expected: [Int] = []
-            for _ in generated.indices {
-                let logits = model(MLXArray([Int32(current)]).reshaped([1, 1]), cache: reference)
-                current = argMax(logits[0, -1, 0...], axis: -1).item(Int.self)
+            while expected.count < generated.count {
+                let current = argMax(logits[0, -1, 0...], axis: -1).item(Int.self)
                 expected.append(current)
+                if expected.count < generated.count {
+                    logits = model(MLXArray([Int32(current)]).reshaped([1, 1]), cache: reference)
+                }
             }
             eval(reference)
             XCTAssertEqual(generated, expected)

@@ -383,6 +383,19 @@ final class ConversationPromptSnapshotTests: XCTestCase {
         XCTAssertEqual(count(28_500), 26_624)
     }
 
+    func testDeepseekV4SnapshotGridLeavesTheWholeFinalReferenceChunk() {
+        let step = DeepseekV4Model.prefillStepSize
+        let policy = ModelRuntime.ConversationPromptSnapshotPolicy.referencePlanBoundary(step: step)
+        for n in [1, 1024, 8192, step] {
+            XCTAssertNil(ModelRuntime.conversationPromptSnapshotTokenCount(
+                promptTokenIds: Array(repeating: 1, count: n), policy: policy))
+        }
+        for (n, expected) in [(step + 1, step), (2 * step, step), (2 * step + 1, 2 * step)] {
+            XCTAssertEqual(ModelRuntime.conversationPromptSnapshotTokenCount(
+                promptTokenIds: Array(repeating: 1, count: n), policy: policy), expected)
+        }
+    }
+
     func testLastRoleMarkerIsTheGenerationPromptStart() {
         let policy = ModelRuntime.ConversationPromptSnapshotPolicy.lastRoleMarker(tokenIDs: [60, 61, 62])
         let prompt: [Int32] = [60] + Array(repeating: 1, count: 40) + [61] + Array(repeating: 2, count: 9) + [61, 5]
@@ -704,9 +717,12 @@ final class ConversationPromptSnapshotTests: XCTestCase {
                                        processor: FixtureProcessor(), tokenizer: NoMarkerTokenizer())
             let cache = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
             let key = "conv:dsv4-two-turn"
-            let turn1 = (0..<2100).map { Int32(($0 * 7 + 3) % 128) }
+            let step = DeepseekV4Model.prefillStepSize
+            XCTAssertEqual(ModelRuntime.conversationPromptSnapshotPolicy(
+                model: model, tokenizer: NoMarkerTokenizer()), .referencePlanBoundary(step: step))
+            let turn1 = (0..<(step + 52)).map { Int32(($0 * 7 + 3) % 128) }
 
-            // Turn 1, keyed miss: snapshot at 2048, generate, commit the snapshot.
+            // Turn 1, keyed miss: snapshot after one whole reference chunk.
             let lease1 = try Self.unwrap(await cache.begin(conversationKey: key, incomingTokens: turn1,
                                                         modelID: "dsv4", kvBits: nil))
             XCTAssertNil(lease1.reusableCache)
@@ -714,34 +730,34 @@ final class ConversationPromptSnapshotTests: XCTestCase {
             let snap1 = try ModelRuntime.prefillPromptSnapshot(lease: lease1, cache: work1, promptTokenIds: turn1,
                                                            start: 0, context: context, prefillStepSize: 512)
             XCTAssertTrue(snap1.applies)
-            XCTAssertEqual(snap1.tokenCount, 2048)
-            XCTAssertEqual(snap1.resumeAt, 2048)
-            let reply = try Self.greedyReference(model, input: Array(turn1[2048...]), cache: work1, count: 6)
+            XCTAssertEqual(snap1.tokenCount, step)
+            XCTAssertEqual(snap1.resumeAt, step)
+            let reply = try Self.greedyReference(model, input: Array(turn1[step...]), cache: work1, count: 6)
             await cache.commit(lease1, cache: ConversationCacheLayers(try XCTUnwrap(snap1.layers), promptSnapshot: true),
-                               fullTokens: Array(turn1.prefix(2048)))
+                               fullTokens: Array(turn1.prefix(step)))
 
-            // Turn 2 extends turn 1 past the next reference boundary.
+            // Turn 2 reuses that same whole-chunk snapshot; its final chunk remains intact.
             let replyTokens: [Int32] = reply.map(Int32.init)
             let followUp: [Int32] = (0..<2200).map { Int32(($0 * 11 + 5) % 128) }
             let turn2: [Int32] = turn1 + replyTokens + followUp
             let lease2 = try Self.unwrap(await cache.begin(conversationKey: key, incomingTokens: turn2,
                                                         modelID: "dsv4", kvBits: nil))
-            XCTAssertEqual(lease2.cachedPromptTokens, 2048)
+            XCTAssertEqual(lease2.cachedPromptTokens, step)
             let resumedCache = try XCTUnwrap(lease2.reusableCache).layers
             let snap2 = try ModelRuntime.prefillPromptSnapshot(lease: lease2, cache: resumedCache, promptTokenIds: turn2,
                                                            start: lease2.lcp, context: context, prefillStepSize: 512)
-            XCTAssertEqual(snap2.tokenCount, 4096)
-            XCTAssertEqual(snap2.resumeAt, 4096)
+            XCTAssertEqual(snap2.tokenCount, step)
+            XCTAssertEqual(snap2.resumeAt, step)
 
             // A fresh reference-plan prefill to the same boundary holds the same state.
             let freshCache = try model.newCache(parameters: nil)
-            for range in [0..<2048, 2048..<4096] {
+            for range in [0..<step] {
                 _ = model(MLXArray(Array(turn2[range])).reshaped([1, range.count]), cache: freshCache)
                 eval(freshCache)
             }
             Self.assertStatesEqual(try XCTUnwrap(snap2.layers), freshCache, "turn-2 snapshot vs fresh")
 
-            let resumed = try Self.greedyReference(model, input: Array(turn2[4096...]), cache: resumedCache, count: 8)
+            let resumed = try Self.greedyReference(model, input: Array(turn2[step...]), cache: resumedCache, count: 8)
             let fresh = try Self.greedyReference(model, input: turn2, cache: try model.newCache(parameters: nil), count: 8)
             XCTAssertEqual(resumed, fresh)
             await cache.abort(lease2)
@@ -760,8 +776,8 @@ final class ConversationPromptSnapshotTests: XCTestCase {
                                        processor: FixtureProcessor(), tokenizer: NoMarkerTokenizer())
             let cache = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
             let key = "conv:dsv4-cancel"
-            // Snapshot target 6144: three 2048-token reference chunks.
-            let prompt = (0..<6200).map { Int32(($0 * 7 + 3) % 128) }
+            // Snapshot target is two whole reference chunks.
+            let prompt = (0..<(2 * DeepseekV4Model.prefillStepSize + 56)).map { Int32(($0 * 7 + 3) % 128) }
             let lease = try Self.unwrap(await cache.begin(conversationKey: key, incomingTokens: prompt,
                                                        modelID: "dsv4", kvBits: nil))
             let work = try model.newCache(parameters: nil)
@@ -794,11 +810,10 @@ final class ConversationPromptSnapshotTests: XCTestCase {
             let model = try Self.tinyDeepseekV4()
             let prompt = (0..<2200).map { Int32(($0 * 7 + 3) % 128) }
             let onPlan = try model.newCache(parameters: nil)
-            _ = model(MLXArray(Array(prompt[0..<2048])).reshaped([1, 2048]), cache: onPlan)
-            _ = model(MLXArray(Array(prompt[2048..<2199])).reshaped([1, 151]), cache: onPlan)
+            _ = model(MLXArray(prompt).reshaped([1, prompt.count]), cache: onPlan)
             let offPlan = try model.newCache(parameters: nil)
             _ = model(MLXArray(Array(prompt[0..<2047])).reshaped([1, 2047]), cache: offPlan)
-            _ = model(MLXArray(Array(prompt[2047..<2199])).reshaped([1, 152]), cache: offPlan)
+            _ = model(MLXArray(Array(prompt[2047...])).reshaped([1, prompt.count - 2047]), cache: offPlan)
             eval(onPlan + offPlan)
             let differs = zip(onPlan, offPlan).contains { lhs, rhs in
                 zip(lhs.state, rhs.state).contains { !Self.equal($0, $1) }
@@ -981,17 +996,18 @@ final class ConversationPromptSnapshotTests: XCTestCase {
     /// at the prompt length, which trips KVCacheStorage's debug-only
     /// offset-alignment assertion (release builds infer the minimum).
     private static func greedyReference(_ model: DeepseekV4Model, input: [Int32], cache: [KVCache], count: Int) throws -> [Int] {
-        guard case .tokens(let rest) = try model.prepare(
+        guard case .logits(let prepared) = try model.prepare(
             LMInput(tokens: MLXArray(input)), cache: cache, state: nil, prefill: .init())
         else { throw XCTSkip("unexpected prepare result") }
-        var current = rest.tokens.reshaped([1, -1])
+        var logits = prepared.logits
         var tokens: [Int] = []
         while tokens.count < count {
-            let logits = model(current, cache: cache)
             let next = argMax(logits[0, -1], axis: -1).item(Int.self)
             eval(cache)
             tokens.append(next)
-            current = MLXArray([Int32(next)]).reshaped([1, 1])
+            if tokens.count < count {
+                logits = model(MLXArray([Int32(next)]).reshaped([1, 1]), cache: cache)
+            }
         }
         return tokens
     }
