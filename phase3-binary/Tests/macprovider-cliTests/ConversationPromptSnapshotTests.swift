@@ -745,11 +745,12 @@ final class ConversationPromptSnapshotTests: XCTestCase {
             let lease2 = try Self.unwrap(await cache.begin(conversationKey: key, incomingTokens: turn2,
                                                         modelID: "dsv4", kvBits: nil))
             XCTAssertEqual(lease2.cachedPromptTokens, step)
+            XCTAssertEqual(lease2.lcp, step, "the restored lease already reaches the snapshot boundary")
             let resumedCache = try XCTUnwrap(lease2.reusableCache).layers
             let snap2 = try ModelRuntime.prefillPromptSnapshot(lease: lease2, cache: resumedCache, promptTokenIds: turn2,
                                                            start: lease2.lcp, context: context, prefillStepSize: 512)
             XCTAssertEqual(snap2.tokenCount, step)
-            XCTAssertEqual(snap2.resumeAt, step)
+            XCTAssertNil(snap2.resumeAt, "no additional prefill ran when the target equals the restored lease boundary")
 
             // A fresh reference-plan prefill to the same boundary holds the same state.
             let freshCache = try model.newCache(parameters: nil)

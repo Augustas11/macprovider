@@ -145,6 +145,7 @@ final class DeepseekV4NativeBackendTests: XCTestCase {
         try await Device.withDefaultDevice(.cpu) {
             let config = try tinyDSparkConfiguration()
             let model = DeepseekV4Model(config)
+            XCTAssertTrue(model.batchesExactly, "the native backend fixture must support exact CB")
             model.train(false)
             let container = ModelContainer(context: ModelContext(configuration: .init(id: "deepseek-v4-tiny"),
                 model: model, processor: NativeBackendFixtureProcessor(), tokenizer: NativeBackendFixtureTokenizer()))
@@ -275,6 +276,7 @@ final class DeepseekV4NativeBackendTests: XCTestCase {
 
     private func tinyDSparkTarget() throws -> DeepseekV4Model {
         let model = DeepseekV4Model(try tinyDSparkConfiguration())
+        XCTAssertTrue(model.batchesExactly, "the native backend fixture must support exact CB")
         model.train(false)
         return model
     }
@@ -289,6 +291,9 @@ final class DeepseekV4NativeBackendTests: XCTestCase {
               object["vocab_size"] as? Int == 128, object["sliding_window"] as? Int == 8 else {
             throw ContinuousBatchSchedulerError.unsupported("deepseek_v4_tiny_fixture_required")
         }
+        // CB requires the exact indexer; approximate HISA has separate fork coverage.
+        object["index_block"] = 0
+        object["index_keep"] = 0
         object["compress_ratios"] = Array((object["compress_ratios"] as! [Int]).prefix(4)) + [0, 0, 0]
         object["dspark_target_layer_ids"] = [1, 2, 3]
         object["dspark_block_size"] = 5

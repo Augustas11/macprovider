@@ -26,15 +26,20 @@ final class DeepseekV4BackendFixtureTests: XCTestCase {
         }
         let directory = URL(fileURLWithPath: path, isDirectory: true)
         let data = try Data(contentsOf: directory.appendingPathComponent("config.json"))
-        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         // Fail before loading weights if an operator accidentally names a real model.
         guard object["hidden_size"] as? Int == 64, object["num_hidden_layers"] as? Int == 4,
               object["vocab_size"] as? Int == 128, object["sliding_window"] as? Int == 8 else {
             throw ContinuousBatchSchedulerError.unsupported("deepseek_v4_tiny_fixture_required")
         }
-        let config = try JSONDecoder().decode(DeepseekV4Configuration.self, from: data)
+        // CB requires the exact indexer; approximate HISA has separate fork coverage.
+        object["index_block"] = 0
+        object["index_keep"] = 0
+        let config = try JSONDecoder().decode(DeepseekV4Configuration.self,
+            from: JSONSerialization.data(withJSONObject: object))
         let base = try JSONDecoder().decode(BaseConfiguration.self, from: data)
         let model = DeepseekV4Model(config)
+        XCTAssertTrue(model.batchesExactly, "the backend fixture must support exact CB")
         try loadWeights(modelDirectory: directory, model: model, perLayerQuantization: base.perLayerQuantization)
         model.train(false)
         return model
