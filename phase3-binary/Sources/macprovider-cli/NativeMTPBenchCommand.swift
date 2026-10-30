@@ -867,6 +867,22 @@ final class NativeMTPBenchRunner {
                 record["group_index"] = groupIndex
                 record["stratum"] = group[0].stratum
                 record["parity_pass"] = equal
+                if !equal {
+                    // Preserve the first divergence for teacher-forced replay;
+                    // hashes alone cannot isolate a multi-row target mismatch.
+                    record["parity_mismatches"] = zip(ordinary.results, native.results).compactMap { pair -> [String: Any]? in
+                        let lhs = pair.0.result, rhs = pair.1.result
+                        guard lhs.generatedTokens != rhs.generatedTokens || lhs.terminalStatus != rhs.terminalStatus else { return nil }
+                        let first = zip(lhs.generatedTokens, rhs.generatedTokens).enumerated()
+                            .first { $0.element.0 != $0.element.1 }?.offset
+                        return ["name": pair.0.name,
+                            "first_mismatch_index": first.map { $0 as Any } ?? NSNull(),
+                            "ordinary_token_ids": lhs.generatedTokens,
+                            "native_token_ids": rhs.generatedTokens,
+                            "ordinary_terminal_status": lhs.terminalStatus.rawValue,
+                            "native_terminal_status": rhs.terminalStatus.rawValue]
+                    }
+                }
                 try writer.write(record)
             }
             guard equal, native.proposedTokens > 0 else {
