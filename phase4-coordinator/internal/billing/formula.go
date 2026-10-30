@@ -92,6 +92,12 @@ func NormalizeModelKey(model string) string {
 var exactModelKeyAliases = map[string]string{
 	"z-ai/glm-5.3-flash":            "zai-org/glm-5.3-flash",
 	"jundot/glm-5.3-flash-oq4e-mtp": "zai-org/glm-5.3-flash",
+	// The abliterated GLM-5.3-Flash build is its own labelled catalog key
+	// (#2189): its OpenRouter-style slug and its served artifact (the
+	// "-4bit" suffix is already stripped) bill as that key, never as
+	// zai-org/glm-5.3-flash.
+	"z-ai/glm-5.3-flash-abliterated":         "zai-org/glm-5.3-flash-abliterated",
+	"grant-ai/glm-5.3-flash-abliterated-mlx": "zai-org/glm-5.3-flash-abliterated",
 	// DeepSeek-V4-Flash's served artifact and its upstream release (#2111).
 	"tensorfold/deepseek-v4-flash-0731-mxfp4-mlx": "deepseek/deepseek-v4-flash",
 	"deepseek-ai/deepseek-v4-flash-0731":          "deepseek/deepseek-v4-flash",

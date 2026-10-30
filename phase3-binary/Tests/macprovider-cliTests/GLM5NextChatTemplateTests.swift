@@ -48,7 +48,20 @@ final class GLM5NextChatTemplateTests: XCTestCase {
     /// .applyChatTemplate`): messages, add_generation_prompt, tools, the
     /// additional context, and the tokenizer config's special tokens.
     func testRenderingEqualsTheJinja2ReferenceByteForByte() throws {
-        let original = try String(contentsOf: Self.fixtures.appendingPathComponent("chat_template.jinja"), encoding: .utf8)
+        try assertRendersReference(Self.fixtures.appendingPathComponent("chat_template.jinja"))
+    }
+
+    /// #2189: the abliterated build's template drops the `break`s, uses `+`
+    /// for one concatenation and renders a non-string non-list content with
+    /// `{{ content }}`. For every message the provider builds (string
+    /// content), it renders the GLM-5.3-Flash reference byte for byte.
+    func testAbliteratedTemplateRendersTheSameReference() throws {
+        try assertRendersReference(Self.fixtures.deletingLastPathComponent()
+            .appendingPathComponent("glm53-abliterated-chat-template/chat_template.jinja"))
+    }
+
+    private func assertRendersReference(_ templateURL: URL) throws {
+        let original = try String(contentsOf: templateURL, encoding: .utf8)
         let template = try Template(
             ChatTemplateCompatibility.rewrite(original).template,
             with: .init(lstripBlocks: true, trimBlocks: true)
