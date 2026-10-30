@@ -733,15 +733,40 @@ jobs:
           persist-credentials: false
 
       - name: Select Xcode 26.6 (match acceptance-candidate / release toolchain)
-        run: sudo xcode-select -s /Applications/Xcode_26.6.app/Contents/Developer
+        id: xcode
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo xcode-select -s /Applications/Xcode_26.6.app/Contents/Developer
+          xcodebuild -version
+          echo "hash=$(xcodebuild -version | shasum -a 256 | cut -c1-16)" >> "$GITHUB_OUTPUT"
 
       - name: Verify locked Package.resolved under the release toolchain
         run: bash scripts/verify-swift-package-lock.sh
+
+      - name: Restore SwiftPM Release cache
+        id: spm-release-cache
+        # Pinned to actions/cache v4.2.2 (restore half; saved below on a miss).
+        # The `spm-release-` prefix keeps this Release scratch path apart from
+        # the debug `spm-` .build cache of the swift test shards; neither key
+        # family is a prefix of the other, so restore-keys never cross.
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ${{ runner.temp }}/native-mtp-release-compile
+          key: spm-release-${{ runner.os }}-xcode-${{ steps.xcode.outputs.hash }}-${{ hashFiles('phase3-binary/Package.resolved', 'phase3-binary/Package.swift') }}
+          # A pin change restores the nearest prior cache for the SAME Xcode so
+          # only changed packages rebuild. Never fall back across toolchains: a
+          # .build from another Swift fails with "module compiled with Swift
+          # X cannot be imported" (Modules-tool macro plugins), so a toolchain
+          # change starts cold.
+          restore-keys: |
+            spm-release-${{ runner.os }}-xcode-${{ steps.xcode.outputs.hash }}-
 
       # Compile ordinary SwiftPM Release registration without overriding dependency
       # macro flags. Signing and canonical dist/package.sh packaging remain
       # release gates; this compile/isolation check does not prove either.
       - name: Compile SwiftPM Release qualification command isolation
+        id: release-build
         working-directory: phase3-binary
         timeout-minutes: 25
         run: |
@@ -774,6 +799,15 @@ jobs:
           check(root)
           print("Release qualification registration and LAB isolation: PASS")
           PYTHON
+
+      - name: Save SwiftPM Release cache
+        # Only after the Release compile and isolation check succeeded, and only
+        # on a miss, so a broken or partial scratch path is never cached.
+        if: ${{ always() && steps.release-build.outcome == 'success' && steps.spm-release-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ${{ runner.temp }}/native-mtp-release-compile
+          key: spm-release-${{ runner.os }}-xcode-${{ steps.xcode.outputs.hash }}-${{ hashFiles('phase3-binary/Package.resolved', 'phase3-binary/Package.swift') }}
 
   spec-015-acceptance:
     name: spec-015-acceptance
