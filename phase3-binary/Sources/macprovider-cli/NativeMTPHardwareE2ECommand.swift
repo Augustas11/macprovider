@@ -1014,6 +1014,14 @@ final class NativeMTPHardwareE2ERunner {
             nativeVisionProfile: nil,
             cacheKinds: await ModelRuntime.pagedKVCacheKinds(container: targetContainer)
         )
+        // DeepSeek prefills one row at a time. The frozen long-context cohort
+        // must wait for earlier rows without changing the production deadline.
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        let queueWaitTimeoutMS: Int? = family == .deepseekV4
+            ? ContinuousBatchSchedulerConfiguration.maximumQueueWaitTimeoutMS : nil
+        #else
+        let queueWaitTimeoutMS: Int? = nil
+        #endif
         return ModelRuntime(
             modelID: modelID,
             modelHash: modelSHA,
@@ -1024,6 +1032,7 @@ final class NativeMTPHardwareE2ERunner {
             prefillStepSize: family == .deepseekV4 ? 2048 : 512,
             maxBatch: maxBatch,
             continuousBatchingMode: .on,
+            continuousBatchQueueWaitTimeoutMS: queueWaitTimeoutMS,
             continuousBatchingCachedTurns: continuousBatchingCachedTurns,
             continuousBatchingPolicyLoadResult: labCBPolicy ?? ContinuousBatchingPolicyLoadResult(
                 selection: .emptyOff, status: .absentFallback, policySHA256: nil, signerKeyID: nil),
