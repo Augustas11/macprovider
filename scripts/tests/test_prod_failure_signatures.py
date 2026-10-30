@@ -71,8 +71,56 @@ class SignatureTest(unittest.TestCase):
         s = run(PROVIDER)
         self.assertEqual(s["capture_skipped_ceiling"]["count"], 2)
         self.assertEqual(s["capture_skipped_ceiling"]["examples"], ["t:1", "req-p9"])
-        self.assertEqual(s["conv_cache_empty_long_hit"], {"count": 1, "examples": ["kh-long"]})
-        self.assertEqual(run(PROVIDER, long_prompt_tokens=32768)["conv_cache_empty_long_hit"]["count"], 2)
+        # An isolated low-reuse hit can follow a large tool result or a cold
+        # start; it is not evidence of repeated turn-retention failure.
+        self.assertEqual(s["conv_cache_empty_long_hit"], {"count": 0, "examples": []})
+
+    def test_healthy_single_session_hit_with_no_remaining_entries(self):
+        line = ("event=conv_cache action=hit key_hash=healthy cached_prompt_tokens=100000 "
+                "prompt_tokens=100001 lcp=100000 conv_cache_entries=0 conv_cache_tokens=0\n")
+        result = sig.scan([("t", [line, line])])
+        self.assertEqual(result["total"], 0)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "healthy.log"
+            path.write_text(line)
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(sig.main([str(path), "--fail-on-any"]), 0)
+
+    def test_repeated_low_reuse_after_lru_and_ceiling_skip(self):
+        hit = ("event=conv_cache action=hit key_hash=long cached_prompt_tokens=32169 "
+               "prompt_tokens=108000 conv_cache_entries=2")
+        lines = [hit,
+                 "event=conv_cache action=evict key_hash=long reason=lru_token_limit",
+                 "event=kv_disk_cache action=capture_skipped reason=exceeds_promotion_ceiling",
+                 hit.replace("108000", "109000")]
+        s = run("\n".join(lines))
+        self.assertEqual(s["conv_cache_empty_long_hit"], {"count": 1, "examples": ["long"]})
+        self.assertEqual(s["capture_skipped_ceiling"]["count"], 1)
+
+    def test_low_reuse_hits_must_be_consecutive_for_the_same_key(self):
+        low = ("event=conv_cache action=hit key_hash=a cached_prompt_tokens=32169 "
+               "prompt_tokens=108000 conv_cache_entries=0")
+        healthy = low.replace("cached_prompt_tokens=32169", "cached_prompt_tokens=107999")
+        miss = "event=conv_cache action=miss key_hash=a reason=cold_start"
+        for middle in (healthy, miss):
+            with self.subTest(middle=middle):
+                s = run("\n".join([low, middle, low]))
+                self.assertEqual(s["conv_cache_empty_long_hit"]["count"], 0)
+        s = run("\n".join([low, low.replace("key_hash=a", "key_hash=b")]))
+        self.assertEqual(s["conv_cache_empty_long_hit"]["count"], 0)
+        s = run("\n".join([low, low.replace("key_hash=a", "key_hash=b"), low]))
+        self.assertEqual(s["conv_cache_empty_long_hit"], {"count": 1, "examples": ["a"]})
+
+    def test_low_reuse_requires_long_context_and_valid_token_counts(self):
+        for tokens in ("cached_prompt_tokens=1 prompt_tokens=40000",
+                       "cached_prompt_tokens=bad prompt_tokens=108000",
+                       "cached_prompt_tokens=-1 prompt_tokens=108000",
+                       "cached_prompt_tokens=32169 prompt_tokens=bad"):
+            with self.subTest(tokens=tokens):
+                line = f"event=conv_cache action=hit key_hash=a {tokens} conv_cache_entries=0\n"
+                self.assertEqual(run(line * 2)["conv_cache_empty_long_hit"]["count"], 0)
+        line = "event=conv_cache action=hit key_hash=a cached_prompt_tokens=1000 prompt_tokens=40000\n"
+        self.assertEqual(run(line * 2, long_prompt_tokens=32768)["conv_cache_empty_long_hit"]["count"], 1)
 
     def test_clean_logs_have_no_signatures(self):
         clean = "\n".join(GATEWAY_TEXT.splitlines()[-1:] + PROVIDER.splitlines()[4:5])

@@ -11,8 +11,8 @@ gateway's slog lines (text `key=value` or JSON) and the provider's
                              window after one of that account's timeouts
   capture_skipped_ceiling    provider `action=capture_skipped
                              reason=exceeds_promotion_ceiling`
-  conv_cache_empty_long_hit  provider `event=conv_cache action=hit` with
-                             conv_cache_entries=0 and prompt_tokens over the limit
+  conv_cache_empty_long_hit  consecutive long hits for the same key reusing
+                             less than 90% of the prompt (legacy signature name)
 
 Prints JSON with counts and example ids. With --fail-on-any, exits 1 when any
 signature is present.
@@ -118,6 +118,7 @@ def scan(sources: Iterable[tuple[str, Iterable[str]]], window_seconds: float = 6
     timeouts: dict[str, float | None] = {}  # request_id -> earliest time
     statuses_429: dict[str, float | None] = {}
     client_of: dict[str, str] = {}
+    low_reuse_by_key: dict[str, bool] = {}
     lines_scanned = 0
 
     def note(sig: str, ident: str) -> None:
@@ -156,10 +157,23 @@ def scan(sources: Iterable[tuple[str, Iterable[str]]], window_seconds: float = 6
         if fields.get("action") == "capture_skipped" and fields.get("reason") == "exceeds_promotion_ceiling":
             note("capture_skipped_ceiling", ident)
         if fields.get("event") == "conv_cache" and fields.get("action") == "hit":
-            entries = _int(fields.get("conv_cache_entries"))
+            key = fields.get("key_hash")
             prompt = _int(fields.get("prompt_tokens"))
-            if entries == 0 and prompt is not None and prompt > long_prompt_tokens:
+            cached = _int(fields.get("cached_prompt_tokens"))
+            low_reuse = (prompt is not None and prompt > long_prompt_tokens and prompt > 0
+                         and cached is not None and 0 <= cached < prompt * 0.9)
+            # The active cache entry is leased out before a hit logs the
+            # remaining entries. Zero is healthy for one active conversation.
+            # Repeated static-prefix-only hits expose lost turn retention,
+            # including the hit -> LRU eviction -> ceiling skip -> hit cycle.
+            if key and low_reuse and low_reuse_by_key.get(key, False):
                 note("conv_cache_empty_long_hit", ident)
+            if key:
+                low_reuse_by_key[key] = low_reuse
+        elif fields.get("event") == "conv_cache" and fields.get("action") == "miss":
+            # A miss breaks consecutive hits; LRU eviction between turns does
+            # not, since that is precisely the retention failure being found.
+            low_reuse_by_key.pop(fields.get("key_hash"), None)
 
     # A 429 counts once, against the most recent earlier timeout of the same client.
     timeout_events = sorted(
