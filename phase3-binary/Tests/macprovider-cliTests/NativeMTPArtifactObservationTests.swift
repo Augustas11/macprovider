@@ -4,13 +4,24 @@ import XCTest
 
 final class NativeMTPArtifactObservationTests: XCTestCase {
     func testDeepseekDSparkMixedMXObservationAndManifest() throws {
-        let quantization: [String: Any] = [
+        var quantization: [String: Any] = [
             "mode": "mxfp4", "bits": 4, "group_size": 32,
             "model.embed_tokens": false, "embed": false, "head": false, "lm_head": false,
             "mtp.0.block.attn.wkv": ["mode": "mxfp8", "bits": 8, "group_size": 32],
             "mtp.0.attn.wkv": ["mode": "mxfp8", "bits": 8, "group_size": 32],
             "mtp.1.attn.wkv": ["mode": "mxfp8", "bits": 8, "group_size": 32],
         ]
+        // Real TensorFold config: vendor projection aliases coexist with the
+        // exact w1/w2/w3 keys that the pinned loader actually consults.
+        let sharedProjections = [("gate_proj", "w1"), ("down_proj", "w2"), ("up_proj", "w3")]
+        for (vendor, loader) in sharedProjections {
+            let mx8: [String: Any] = ["mode": "mxfp8", "bits": 8, "group_size": 32]
+            quantization["model.layers.0.ffn.shared_experts.\(vendor)"] = mx8
+            quantization["layers.0.ffn.shared_experts.\(loader)"] = mx8
+            quantization["mtp.0.ffn.shared_experts.\(vendor)"] = mx8
+            quantization["mtp.0.block.ffn.shared_experts.\(vendor)"] = mx8
+            quantization["mtp.0.ffn.shared_experts.\(loader)"] = mx8
+        }
         var config: [String: Any] = [
             "model_type": "deepseek_v4", "architectures": ["DeepseekV4ForCausalLM"],
             "num_hidden_layers": 3, "compress_ratios": [0, 4, 128, 0, 0, 0],
@@ -18,9 +29,10 @@ final class NativeMTPArtifactObservationTests: XCTestCase {
             "dspark_target_layer_ids": [0, 1, 2], "dspark_markov_rank": 256,
             "quantization": quantization,
         ]
-        let tensors = [
+        var tensors = [
             tensor("embed.weight", dtype: "BF16", shape: [32, 32]),
             tensor("head.weight", dtype: "BF16", shape: [32, 32]),
+            tensor("layers.0.ffn.gate.tid2eid", dtype: "I64", shape: [32, 6]),
             tensor("mtp.0.attn.wkv.weight", dtype: "U32", shape: [2, 8]),
             tensor("mtp.0.attn.wkv.scales", dtype: "U8", shape: [2, 1]),
             tensor("mtp.1.attn.wkv.weight", dtype: "U32", shape: [2, 8]),
@@ -28,6 +40,12 @@ final class NativeMTPArtifactObservationTests: XCTestCase {
             tensor("mtp.2.ffn.experts.0.w1.weight", dtype: "U32", shape: [2, 4]),
             tensor("mtp.2.ffn.experts.0.w1.scales", dtype: "U8", shape: [2, 1]),
         ]
+        for (_, loader) in sharedProjections {
+            tensors.append(tensor("layers.0.ffn.shared_experts.\(loader).weight", dtype: "U32", shape: [2, 8]))
+            tensors.append(tensor("layers.0.ffn.shared_experts.\(loader).scales", dtype: "U8", shape: [2, 1]))
+            tensors.append(tensor("mtp.0.ffn.shared_experts.\(loader).weight", dtype: "U32", shape: [2, 8]))
+            tensors.append(tensor("mtp.0.ffn.shared_experts.\(loader).scales", dtype: "U8", shape: [2, 1]))
+        }
         func observe(_ config: [String: Any], _ tensors: [TensorFixture]) throws -> NativeMTPArtifactPairObservation {
             var result: NativeMTPArtifactPairObservation?
             try withRawFixture(configData: JSONSerialization.data(withJSONObject: config),
@@ -45,10 +63,47 @@ final class NativeMTPArtifactObservationTests: XCTestCase {
         XCTAssertEqual(manifest.unquantizedExceptions, ["target/embed", "target/head"])
         XCTAssertFalse(manifest.perLayerExceptions.contains("target/mtp.2.ffn.switch_mlp.gate_proj"))
         XCTAssertEqual(observed.target.tensorPairs.first { $0.weightName == "mtp.2.ffn.switch_mlp.gate_proj.weight" }?.bitsPerValue, 4)
-        XCTAssertEqual(manifest.perLayerExceptions.count, 2)
+        XCTAssertEqual(manifest.perLayerExceptions.count, 8)
         XCTAssertEqual(manifest.manifestSHA256, try NativeMTPArtifactObserver.mixedMXRepresentation(for: observed).manifestSHA256)
+        for (vendor, loader) in sharedProjections {
+            let alias = "model.layers.0.ffn.shared_experts.\(vendor)"
+            XCTAssertEqual(observed.target.tensorPairs.first {
+                $0.weightName == "layers.0.ffn.shared_experts.\(loader).weight"
+            }?.bitsPerValue, 8)
+            for replacement in [false as Any?, nil] {
+                var invalid = quantization
+                invalid["layers.0.ffn.shared_experts.\(loader)"] = replacement
+                var invalidConfig = config
+                invalidConfig["quantization"] = invalid
+                XCTAssertThrowsError(try observe(invalidConfig, tensors)) { error in
+                    XCTAssertEqual(error as? NativeMTPArtifactObservationError,
+                        .unsupportedQuantization("deepseek_v4 conflicting alias \(alias)"))
+                }
+            }
+        }
+        for (vendor, loader) in sharedProjections {
+            XCTAssertEqual(observed.target.tensorPairs.first {
+                $0.weightName == "mtp.0.ffn.shared_experts.\(loader).weight"
+            }?.bitsPerValue, 8)
+            for replacement in [false as Any?, nil] {
+                var invalid = quantization
+                invalid["mtp.0.ffn.shared_experts.\(loader)"] = replacement
+                var invalidConfig = config
+                invalidConfig["quantization"] = invalid
+                XCTAssertThrowsError(try observe(invalidConfig, tensors)) { error in
+                    let expected = ["mtp.0.ffn.shared_experts.\(vendor)", "mtp.0.block.ffn.shared_experts.\(vendor)"]
+                    XCTAssertTrue(expected.contains { alias in
+                        error as? NativeMTPArtifactObservationError == .unsupportedQuantization("deepseek_v4 conflicting alias \(alias)")
+                    })
+                }
+            }
+        }
+        // Int64 is accepted only for routing IDs, never a floating router weight.
+        XCTAssertThrowsError(try observe(config, tensors + [
+            tensor("layers.0.ffn.gate.weight", dtype: "I64", shape: [2, 2]),
+        ]))
         var wrongScale = tensors
-        wrongScale[3] = tensor("mtp.0.attn.wkv.scales", dtype: "BF16", shape: [2, 1])
+        wrongScale[4] = tensor("mtp.0.attn.wkv.scales", dtype: "BF16", shape: [2, 1])
         XCTAssertThrowsError(try observe(config, wrongScale))
         var conflicting = quantization
         conflicting["lm_head"] = ["mode": "mxfp8", "bits": 8, "group_size": 32]
@@ -1390,6 +1445,8 @@ final class NativeMTPArtifactObservationTests: XCTestCase {
             return 2
         case "F32", "U32", "I32":
             return 4
+        case "I64":
+            return 8
         default:
             return 1
         }

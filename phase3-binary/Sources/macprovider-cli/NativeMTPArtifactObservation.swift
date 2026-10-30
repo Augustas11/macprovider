@@ -488,6 +488,13 @@ enum NativeMTPArtifactObserver {
             else if canonical == "lm_head" { canonical = "head" }
             else if canonical.hasPrefix("model.layers.") { canonical = String(canonical.dropFirst(6)) }
             else if canonical.hasPrefix("mtp.") { canonical = canonical.replacingOccurrences(of: ".block.", with: ".") }
+            // Vendor aliases name shared projections like switch-MLP
+            // projections; target and embedded-MTP loader keys use w1/w2/w3.
+            if canonical.contains(".ffn.shared_experts."),
+               let projection = canonical.split(separator: ".").last.map(String.init),
+               let loaderProjection = ["gate_proj": "w1", "down_proj": "w2", "up_proj": "w3"][projection] {
+                canonical = String(canonical.dropLast(projection.count)) + loaderProjection
+            }
             if canonical != module {
                 // These vendor aliases never participate in exact-path loader
                 // lookup. Require equivalence, then bind only the effective key.
@@ -554,8 +561,12 @@ enum NativeMTPArtifactObserver {
                     || path.contains(".ffn.gate.") || path.contains(".compressor.")
                     || path.contains(".indexer.weights_proj.") || path.contains(".markov_head.")
                     || path.contains(".confidence_head.") || path.hasSuffix(".tid2eid")
+                // The checkpoint stores routing IDs as int64; sanitize casts
+                // only tid2eid to int32 before the loader uses them.
+                let elementBytes = path.hasSuffix(".tid2eid") && tensor.dtype == "I64"
+                    ? 8 : bytesPerElement(tensor.dtype)
                 guard allowed, isFloatingWeightDType(tensor.dtype) || path.hasSuffix(".tid2eid"),
-                      checkedMultiply(tensor.elementCount, bytesPerElement(tensor.dtype)) == tensor.byteCount else {
+                      checkedMultiply(tensor.elementCount, elementBytes) == tensor.byteCount else {
                     throw NativeMTPArtifactObservationError.incompatibleSafetensorsHeaders("deepseek_v4 floating tensor \(tensor.name)")
                 }
                 if path.hasSuffix(".weight"), tensor.shape.count >= 2 { floating.insert(module) }
