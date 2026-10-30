@@ -14872,7 +14872,10 @@ maxTokens: maxTokens,
             messages = Self.withLeadingSystemInstruction("Call the declared function \(name) using the native tool-call format described above. \(callCountInstruction) Return only calls to that function; arguments must match its schema.", to: messages)
         case .none:
             messages = Self.withLeadingSystemInstruction("Do not call any function or tool. Respond with assistant text.", to: messages)
-        case .auto: break
+        case .auto:
+            if supportsBonsaiThinking, Self.hasEnabledTools(request.promptSource.tools) {
+                messages = Self.withLeadingSystemInstruction("Only call declared functions using the native tool-call format described above. After emitting tool calls, wait for actual tool responses before continuing.", to: messages)
+            }
         }
         // Tool history goes through the loaded template (SPEC-018 §3.6). A
         // profiled identity is the loaded model even under a local alias.
