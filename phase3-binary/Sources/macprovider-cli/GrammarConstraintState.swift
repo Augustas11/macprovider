@@ -242,17 +242,38 @@ final class GrammarConstraintState: @unchecked Sendable, Equatable {
             let bytes = raw ? Array(piece.utf8) : try GrammarTokenBytes.decode(piece: piece, encoding: encoding)
             if !bytes.isEmpty { result[id] = bytes }
         }
+        let vocabulary: [(String, Int)]
         if let vocab = model["vocab"] as? [String: Int] {
-            for (piece, id) in vocab { try add(piece, id) }
+            vocabulary = vocab.map { ($0.key, $0.value) }
         } else if let vocab = model["vocab"] as? [[Any]] {
-            for (id, entry) in vocab.enumerated() {
+            vocabulary = try vocab.enumerated().map { id, entry in
                 guard let piece = entry.first as? String else { throw Compiled.error("Invalid tokenizer piece") }
-                try add(piece, id)
+                return (piece, id)
             }
         } else { throw Compiled.error("Unsupported tokenizer vocabulary") }
+        var addedByID: [Int: String] = [:]
+        var addedByPiece: [String: Int] = [:]
         for added in root["added_tokens"] as? [[String: Any]] ?? [] {
-            if let piece = added["content"] as? String, let id = added["id"] as? Int { try add(piece, id, raw: true) }
+            guard let piece = added["content"] as? String, let id = added["id"] as? Int,
+                  id >= 0, id < 300_000,
+                  addedByID[id].map({ $0 == piece }) ?? true,
+                  addedByPiece[piece].map({ $0 == id }) ?? true else {
+                throw Compiled.error("Conflicting or invalid added tokenizer piece")
+            }
+            addedByID[id] = piece
+            addedByPiece[piece] = id
         }
+        // Registered added tokens use their literal bytes even when also in
+        // the base vocabulary (DeepSeek's BOS/EOS/pad are such entries).
+        // Validate every mapping before decoding, so aliases cannot overwrite IDs.
+        for (piece, id) in vocabulary {
+            guard addedByID[id].map({ $0 == piece }) ?? true,
+                  addedByPiece[piece].map({ $0 == id }) ?? true else {
+                throw Compiled.error("Conflicting added tokenizer piece")
+            }
+        }
+        for (piece, id) in vocabulary { try add(piece, id, raw: addedByID[id] == piece) }
+        for (id, piece) in addedByID { try add(piece, id, raw: true) }
         return result
     }
 
