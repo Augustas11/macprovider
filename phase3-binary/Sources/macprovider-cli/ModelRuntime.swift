@@ -2204,6 +2204,16 @@ actor ModelRuntime: ModelRuntimeServing {
     private var labNativeMTPDecodeOutputCap: NativeMTPLabDecodeOutputCap?
     #if DEBUG || MACPROVIDER_LAB_HARNESS
     private var labJourneyWithdrawnCapability: NativeMTPCapability?
+    private var testMLXCacheLimitApplication: (@Sendable (String?, SwapState) -> Void)?
+    private var testAfterSwapReady: (@Sendable (String) async -> Void)?
+
+    func setMLXCacheLimitSwapHooksForTest(
+        application: @escaping @Sendable (String?, SwapState) -> Void,
+        afterReady: (@Sendable (String) async -> Void)? = nil
+    ) {
+        testMLXCacheLimitApplication = application
+        testAfterSwapReady = afterReady
+    }
     #endif
     private var labNativeMTPConversationCacheObserver: NativeMTPLabConversationCacheObserver?
 
@@ -3106,6 +3116,12 @@ actor ModelRuntime: ModelRuntimeServing {
     private func applyMLXCacheLimitForModelLoad(
         _ target: String?, preservingResidentModel: Bool = false
     ) {
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        if let testMLXCacheLimitApplication {
+            testMLXCacheLimitApplication(cachePolicyModelID(for: target), state)
+            return
+        }
+        #endif
         let targetID = cachePolicyModelID(for: target)
         let residentID = preservingResidentModel ? cachePolicyModelID(for: currentModelID) : nil
         let lfmID = "liquidai/lfm2.5-24b-a2b-mlx-4bit"
@@ -3130,6 +3146,16 @@ actor ModelRuntime: ModelRuntimeServing {
         if let applied {
             FileHandle.standardError.write(Data("mlx_cache_limit_bytes=\(applied)\n".utf8))
         }
+    }
+
+    private func finalizeMLXCacheLimitAfterSwap(_ target: String?, nativeLoad: Bool) {
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        if testMLXCacheLimitApplication != nil {
+            applyMLXCacheLimitForModelLoad(target)
+            return
+        }
+        #endif
+        if nativeLoad { applyMLXCacheLimitForModelLoad(target) }
     }
 
     /// Families served with the process wired limit at Metal's recommended
@@ -5715,11 +5741,7 @@ maxTokens: 1,
                     modelCapabilities: modelCapabilities,
                     adoptionKnobs: adoptionKnobs
                 )
-                if testLoader == nil { await self.applyMLXCacheLimitForModelLoad(modelID) }
             } catch {
-                if testLoader == nil {
-                    await self.applyMLXCacheLimitForModelLoad(self.currentModelID)
-                }
                 await self.failSwap(reason: String(describing: error))
             }
         }
@@ -7174,8 +7196,14 @@ maxTokens: 1,
         currentDraftModelID = draftModelID
         currentDraftTargetModelID = draftModelID == nil ? nil : modelID
         currentDraftContainer = draftContainer
+        // Finalize the budget before publishing readiness: a later swap must
+        // never have its LFM cap overwritten by this generation's completion.
+        finalizeMLXCacheLimitAfterSwap(modelID, nativeLoad: testLoader == nil && container != nil)
         state = .ready
         targetModelID = nil
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        if let testAfterSwapReady { await testAfterSwapReady(modelID) }
+        #endif
         if let draftFailureReason {
             Self.logDraftSwapFailure(
                 targetModelID: modelID,
@@ -7220,6 +7248,7 @@ maxTokens: 1,
             return
         }
         let target = targetModelID ?? ""
+        finalizeMLXCacheLimitAfterSwap(currentModelID, nativeLoad: testLoader == nil)
         state = .failed
         signal(SwapSignal(targetModelID: target, outcome: .failed(reason: reason)))
         state = .ready

@@ -34,10 +34,10 @@ needs a SPEC revision.
 
 | Fork | Upstream | Tag scheme | Current tag | Revision | Upstream base |
 | --- | --- | --- | --- | --- | --- |
-| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.11` | `4a4f5ad97ae895d5600699d0fd066e4734202597` | `3.32.3` (`3b339ad6…`) |
-| `Augustas11/mlx-swift` | `ml-explore/mlx-swift` | `<upstream>-macprovider.<n>` | `0.32.3-macprovider.10` | `d8045e6f22f5b5a32a146578820192a7969c7de6` | `0.32.3` (`19601207…`) |
-| `Augustas11/mlx` (MLX core) | `ml-explore/mlx` | `v<upstream>-macprovider.<n>` | `v0.32.4-macprovider.5` | `abeaff9cbc785910897be06cf4c68d30308c08d8` | `v0.32.4` (`36969c09…`) |
-| `Augustas11/mlx-c` | `ml-explore/mlx-c` | `v<upstream>-macprovider.<n>` | `v0.6.0-macprovider.1` | `e603f75d429cccc1877909dc545fe34985c2cf6e` | pinned base `ebc88f10…` |
+| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.12` | `f75f92b0e85958a3219d295e1906a1a0889e6702` | `3.32.3` (`3b339ad6…`) |
+| `Augustas11/mlx-swift` | `ml-explore/mlx-swift` | `<upstream>-macprovider.<n>` | `0.32.3-macprovider.11` | `c774cb0934c7503bc3fe1c3d1afbe44c728e8891` | `0.32.3` (`19601207…`) |
+| `Augustas11/mlx` (MLX core) | `ml-explore/mlx` | `v<upstream>-macprovider.<n>` | `v0.32.4-macprovider.6` | `51edbb37620aef7c860ab5d7cdb7bf5b14333da2` | `v0.32.4` (`36969c09…`) |
+| `Augustas11/mlx-c` | `ml-explore/mlx-c` | `v<upstream>-macprovider.<n>` | `v0.6.0-macprovider.2` | `2b1ff2b5b5129a6115771da32e1bac3b6b01ab01` | pinned base `ebc88f10…` |
 
 Tags are immutable: a change is a new `<n>`, never a moved tag. Each link pins
 by full revision: `phase3-binary/Package.swift` pins mlx-swift-lm, its manifest
@@ -55,6 +55,8 @@ The previous LM already carries the expert-order correction; it is not
 reapplied. Default-false Swift/C/core routing and single-token decode preserve
 the existing arithmetic for GLM, Qwen and DeepSeek projections. LFM MoE alone
 opts its model-owned linear projections into vendor prefill reduction order.
+The Python binding retains its existing nine-argument API and passes false
+for the new option; it does not change the Python reference route.
 The detailed stacks below are historical context. GLM/Qwen exact-output
 engine-matrix checks run on the Studio after its current lab window; local
 LFM evidence and default-route unit checks do not substitute for those cells.

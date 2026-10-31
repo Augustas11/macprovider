@@ -17,9 +17,10 @@ let package = Package(
         )
     ],
     dependencies: [
-        // Tag 3.32.3-macprovider.11 adds LFM-only reference-prefill arithmetic
+        // Tag 3.32.3-macprovider.12 adds LFM-only reference-prefill arithmetic
         // on 3.32.3-macprovider.10.15.1 (reference expert order). Other models
-        // retain the default route; single-token decode is unchanged.
+        // retain the default route; single-token decode is unchanged. The core
+        // Python binding preserves its existing arity and passes the option false.
         // Fork tag 3.32.3-macprovider.10.15 combines GLM MTP (10.13) and
         // Prism schema-2 loading, lazy vision and row-safe masks (10.14), on tag
         // 3.32.3-macprovider.10.5 (c8be0f61, campaign/2111-dsv4-cb), on tag
@@ -30,8 +31,8 @@ let package = Package(
         // MTP verification step commits upstream does not carry, and upstream
         // #631 with every Qwen3.5 trace declaring the arrays it reads as
         // compile state) and the GLM-5-Next text model with batched rows. It
-        // resolves the Augustas11/mlx-swift fork (tag 0.32.3-macprovider.10, MLX
-        // core v0.32.4-macprovider.5 and mlx-c v0.6.0-macprovider.1). Core keeps
+        // resolves the Augustas11/mlx-swift fork (tag 0.32.3-macprovider.11, MLX
+        // core v0.32.4-macprovider.6 and mlx-c v0.6.0-macprovider.2). Core keeps
         // small-M quantized matmuls on one kernel route so a row decodes the same tokens alone
         // and inside a continuous batch (the startup batched-isolation gate),
         // erases a freed compiled function from every thread's compile cache
@@ -46,7 +47,7 @@ let package = Package(
         // compatible per-column attention while retaining row-owned caches.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "4a4f5ad97ae895d5600699d0fd066e4734202597"
+            revision: "f75f92b0e85958a3219d295e1906a1a0889e6702"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",

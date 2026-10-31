@@ -506,10 +506,10 @@ The authorized dependency tuple is exact:
 
 | Repository | Fork tag | Revision | Upstream base |
 |---|---|---|---|
-| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.11` | `4a4f5ad97ae895d5600699d0fd066e4734202597` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
-| `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.10` | `d8045e6f22f5b5a32a146578820192a7969c7de6` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
-| `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.5` | `abeaff9cbc785910897be06cf4c68d30308c08d8` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
-| `https://github.com/Augustas11/mlx-c` | `v0.6.0-macprovider.1` | `e603f75d429cccc1877909dc545fe34985c2cf6e` | `ml-explore/mlx-c` pinned base (`ebc88f10caa1b625e6b581437a8dea6df8a70085`) |
+| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.12` | `f75f92b0e85958a3219d295e1906a1a0889e6702` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
+| `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.11` | `c774cb0934c7503bc3fe1c3d1afbe44c728e8891` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
+| `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.6` | `51edbb37620aef7c860ab5d7cdb7bf5b14333da2` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
+| `https://github.com/Augustas11/mlx-c` | `v0.6.0-macprovider.2` | `2b1ff2b5b5129a6115771da32e1bac3b6b01ab01` | `ml-explore/mlx-c` pinned base (`ebc88f10caa1b625e6b581437a8dea6df8a70085`) |
 
 The tuple adds LFM2 MoE reference-prefill arithmetic to the previously pinned
 mlx-swift-lm `3.32.3-macprovider.10.15.1`
@@ -521,7 +521,9 @@ arithmetic using each row's sequence length while covering all flattened
 rows. Single-token decode and projections without the opt-in retain the
 previous batch-invariant route. The Swift fork pins both the core and C
 forks by full submodule revision; mlx-c's standalone core fetch uses the same
-core revision. This is a bounded arithmetic correction, not an upstream rebase.
+core revision. The existing nine-argument Python binding calls the C++
+primitive with the opt-in false, preserving its route and public arity.
+This is a bounded arithmetic correction, not an upstream rebase.
 
 The LFM correction requires ordinary-serving exact token parity against the
 reference and cached-turn/shared-row acceptance. It does not qualify an LFM

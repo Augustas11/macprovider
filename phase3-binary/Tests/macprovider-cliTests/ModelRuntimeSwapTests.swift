@@ -1307,6 +1307,58 @@ final class ModelRuntimeSwapTests: XCTestCase {
         XCTAssertEqual(completion.content, "old-model:old-draft")
     }
 
+    func testLFMCachePolicyFinalizesBeforeReadyAndCannotOverwriteNewerSwap() async throws {
+        let lfm = "liquidai/lfm2.5-24b-a2b"
+        let gate = CachePolicyReadyGate()
+        let recorder = CachePolicySwapRecorder()
+        let runtime = makeRuntime(modelID: lfm, warmSwapEnabled: true)
+        await runtime.setMLXCacheLimitSwapHooksForTest(application: { modelID, state in
+            recorder.apply(modelID: modelID, state: state)
+        }) { modelID in
+            if modelID == "other-model" { await gate.pause() }
+        }
+        defer { Task { await gate.release() } }
+
+        let oldSwap = try await runtime.beginSwap(targetModelID: "other-model")
+        try await waitUntil { await gate.isPaused }
+        let first = await runtime.currentSnapshot()
+        XCTAssertEqual(first.state, .ready)
+        XCTAssertEqual(recorder.modelIDs, ["other-model"])
+        XCTAssertEqual(recorder.states, [.draining], "Cache policy must finalize before readiness")
+
+        // The old completion is still suspended after readiness while a new
+        // generation finishes loading LFM. Releasing it must not restore the
+        // old model's larger cache budget.
+        let newerSwap = try await runtime.beginSwap(targetModelID: lfm)
+        try await newerSwap.value
+        XCTAssertEqual(recorder.limitBytes, 512 * 1024 * 1024)
+        await gate.release()
+        try await oldSwap.value
+        let final = await runtime.currentSnapshot()
+        XCTAssertEqual(final.modelID, lfm)
+        XCTAssertEqual(recorder.modelIDs, ["other-model", lfm])
+        XCTAssertEqual(recorder.states, [.draining, .draining])
+        XCTAssertEqual(recorder.limitBytes, 512 * 1024 * 1024)
+    }
+
+    func testLFMCachePolicyRestoresIncumbentBeforeFailedSwapPublishesReady() async throws {
+        let lfm = "liquidai/lfm2.5-24b-a2b"
+        let recorder = CachePolicySwapRecorder()
+        let runtime = makeRuntime(modelID: lfm, warmSwapEnabled: true) { _ in
+            throw TestError.loadFailed
+        }
+        await runtime.setMLXCacheLimitSwapHooksForTest(application: { modelID, state in
+            recorder.apply(modelID: modelID, state: state)
+        })
+        try await runtime.beginSwap(targetModelID: "failed-model").value
+        let snapshot = await runtime.currentSnapshot()
+        XCTAssertEqual(snapshot.state, .ready)
+        XCTAssertEqual(snapshot.modelID, lfm)
+        XCTAssertEqual(recorder.modelIDs, [lfm])
+        XCTAssertEqual(recorder.states, [.loading])
+        XCTAssertEqual(recorder.limitBytes, 512 * 1024 * 1024)
+    }
+
     func testLoadFailureRollsBack() async throws {
         let runtime = makeRuntime(modelID: "old-model", modelHash: "old-hash", warmSwapEnabled: true) { _ in
             try await Task.sleep(nanoseconds: 50_000_000)
@@ -2313,6 +2365,58 @@ private final class DrainDeadlineTestClock: @unchecked Sendable {
         pending = nil
         lock.unlock()
         continuation?.resume()
+    }
+}
+
+private actor CachePolicyReadyGate {
+    private var continuation: CheckedContinuation<Void, Never>?
+    private(set) var isPaused = false
+    private var released = false
+
+    func pause() async {
+        guard !released else { return }
+        await withCheckedContinuation { continuation in
+            self.continuation = continuation
+            isPaused = true
+        }
+    }
+
+    func release() {
+        released = true
+        continuation?.resume()
+        continuation = nil
+    }
+}
+
+private final class CachePolicySwapRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var applications: [(String?, SwapState)] = []
+    private var bytes = 4 * 1024 * 1024 * 1024
+
+    func apply(modelID: String?, state: SwapState) {
+        lock.lock()
+        defer { lock.unlock() }
+        applications.append((modelID, state))
+        bytes = ModelRuntime.modelScopedMLXCacheLimitBytes(
+            modelID: modelID, baselineBytes: 4 * 1024 * 1024 * 1024)
+    }
+
+    var modelIDs: [String?] {
+        lock.lock()
+        defer { lock.unlock() }
+        return applications.map { $0.0 }
+    }
+
+    var states: [SwapState] {
+        lock.lock()
+        defer { lock.unlock() }
+        return applications.map { $0.1 }
+    }
+
+    var limitBytes: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return bytes
     }
 }
 
