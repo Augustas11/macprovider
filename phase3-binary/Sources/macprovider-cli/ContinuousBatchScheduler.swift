@@ -3708,9 +3708,11 @@ actor ContinuousBatchScheduler {
             let physicalText: String = sample.map { String($0.physicalBytes) } ?? "unavailable"
             let floorText: String = floor.map { String($0) } ?? "unavailable"
             let reason: String = overflow ? "overflow" : nextReserved > effectiveCapacity ? "capacity" : "system_headroom"
-            let message: String = "event=native_mtp_round_reservation_refused requested_bytes=\(bytes) reserved_before_bytes=\(nativeMTPReservedRoundBytes) "
-                + "outstanding_reservations=\(nativeMTPRoundByteReservations.count) capacity_bytes=\(effectiveCapacity) "
-                + "available_bytes=\(availableText) physical_bytes=\(physicalText) floor_bytes=\(floorText) reason=\(reason)\n"
+            let message: String = [
+                "event=native_mtp_round_reservation_refused requested_bytes=\(bytes) reserved_before_bytes=\(nativeMTPReservedRoundBytes) ",
+                "outstanding_reservations=\(nativeMTPRoundByteReservations.count) capacity_bytes=\(effectiveCapacity) ",
+                "available_bytes=\(availableText) physical_bytes=\(physicalText) floor_bytes=\(floorText) reason=\(reason)\n",
+            ].joined()
             try? FileHandle.standardError.write(contentsOf: Data(message.utf8))
             throw ContinuousBatchSchedulerError.requestFailed("continuous_batching_native_mtp_round_memory_exhausted")
         }
@@ -5822,9 +5824,10 @@ actor ContinuousBatchScheduler {
             }
         }
 
+        let turnBudget = prefillTurnTokenBudget()
         let selected = configuration.allowsRaggedPrefillOffsets
-            ? selectRaggedPrefillGroup()
-            : selectEqualOffsetPrefillGroup()
+            ? selectRaggedPrefillGroup(tokenBudget: turnBudget)
+            : selectEqualOffsetPrefillGroup(tokenBudget: turnBudget)
         guard !selected.isEmpty else { return madeProgress }
 
         // A resume boundary is a numerical partition, not another scheduling
@@ -5834,7 +5837,7 @@ actor ContinuousBatchScheduler {
         // extra iteration budget); then yield. Never shrink a chunk to fit:
         // that would change the GLM cold/warm kernel route (SPEC-024-R005).
         var group = selected
-        var remainingTokens = configuration.maxPrefillTokensPerIteration
+        var remainingTokens = turnBudget
         while !group.isEmpty {
             let consumed = group.reduce(0) { $0 + $1.end - $1.row.prefillCursor }
             let progressed = await runPrefillGroup(group)
@@ -5850,7 +5853,7 @@ actor ContinuousBatchScheduler {
             // Build an original-shaped group under the unchanged forward
             // budget. If it crosses the turn budget, it is the sole bounded
             // extension: remainingTokens becomes negative and the turn ends.
-            var availableTokens = configuration.maxPrefillTokensPerIteration
+            var availableTokens = turnBudget
             let chunkLimit = min(configuration.maxPromptChunkTokens, configuration.maxPrefillTokensPerIteration)
             for item in group {
                 guard let row = activePrompt[item.row.request.id],
@@ -6048,7 +6051,23 @@ actor ContinuousBatchScheduler {
     /// Rows at one prompt offset whose own balanced chunks have the head's
     /// length. Every row keeps the chunk it prefills alone, so grouping never
     /// changes a row's chunk partition.
-    private func selectEqualOffsetPrefillGroup() -> [(row: Row, end: Int)] {
+    /// Prefill tokens one turn may take. While rows decode, the configured
+    /// budget bounds how long a turn stalls them. With no row decoding, a
+    /// turn stalls nobody, so rows that arrived together prefill in one
+    /// shared forward of up to `maxPrefillRowsPerIteration` chunks: their
+    /// first tokens and decode windows line up instead of each later row's
+    /// prefill splitting the earlier rows' windows. The first row's TTFT
+    /// grows by at most that many chunks.
+    private func prefillTurnTokenBudget() -> Int {
+        let budget = configuration.maxPrefillTokensPerIteration
+        guard activeDecode.isEmpty, configuration.referencePrefillStepSize == nil else { return budget }
+        let chunk = min(configuration.maxPromptChunkTokens, budget)
+        let (cohort, overflow) = chunk.multipliedReportingOverflow(by: configuration.maxPrefillRowsPerIteration)
+        guard !overflow else { return budget }
+        return max(budget, min(cohort, ContinuousBatchSchedulerConfiguration.maximumPrefillTokensPerIteration))
+    }
+
+    private func selectEqualOffsetPrefillGroup(tokenBudget: Int) -> [(row: Row, end: Int)] {
         let chunkLimit = min(configuration.maxPromptChunkTokens, configuration.maxPrefillTokensPerIteration)
         var selected: [(row: Row, end: Int)] = []
         var selectedOffset: Int?
@@ -6058,14 +6077,14 @@ actor ContinuousBatchScheduler {
             guard selected.count < configuration.maxPrefillRowsPerIteration,
                   let row = activePrompt[id]
             else { continue }
-            guard configuration.maxPrefillTokensPerIteration - selectedTokenCount > 0 else { break }
+            guard tokenBudget - selectedTokenCount > 0 else { break }
             let end = prefillEnd(for: row, maxChunkTokens: chunkLimit)
             let chunkCount = end - row.prefillCursor
             guard chunkCount > 0 else { continue }
             if let selectedOffset, let selectedChunkCount {
                 guard row.prefillCursor == selectedOffset,
                       chunkCount == selectedChunkCount,
-                      selectedTokenCount + chunkCount <= configuration.maxPrefillTokensPerIteration
+                      selectedTokenCount + chunkCount <= tokenBudget
                 else { continue }
             } else {
                 selectedOffset = row.prefillCursor
@@ -6082,7 +6101,7 @@ actor ContinuousBatchScheduler {
 
     /// Rows at any prompt offsets that all prefill the same chunk length in
     /// one shared forward (SPEC-038 FR-CB2 ragged shared prefill).
-    private func selectRaggedPrefillGroup() -> [(row: Row, end: Int)] {
+    private func selectRaggedPrefillGroup(tokenBudget: Int) -> [(row: Row, end: Int)] {
         let chunkLimit = min(configuration.maxPromptChunkTokens, configuration.maxPrefillTokensPerIteration)
         var candidates: [ContinuousBatchPrefillCandidate] = []
         var rowsByID: [String: Row] = [:]
@@ -6106,7 +6125,7 @@ actor ContinuousBatchScheduler {
         guard let group = ContinuousBatchPrefillGrouping.select(
             candidates,
             maxRows: configuration.maxPrefillRowsPerIteration,
-            tokenBudget: configuration.maxPrefillTokensPerIteration,
+            tokenBudget: tokenBudget,
             minimumGroupedChunkTokens: configuration.prefillGrouping.minimumGroupedChunkTokens
         ) else {
             return []

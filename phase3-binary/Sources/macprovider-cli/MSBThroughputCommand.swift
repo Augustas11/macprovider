@@ -714,7 +714,8 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         recurrentStateLayout: PagedKVRecurrentStateLayout,
         maxPromptChunkTokens: Int? = nil,
         maxDecodeLockstepWindow: Int? = nil,
-        requestedOutputTokens: Int? = nil
+        requestedOutputTokens: Int? = nil,
+        staggerAfterFirstRow: Bool = false
     ) async throws -> SchedulerRunDetail {
         // The final prefill samples one untimed token. Throughput callers ask
         // for `decodeSteps` timed tokens beyond it; parity callers override
@@ -733,10 +734,18 @@ struct MSBThroughputCommand: AsyncParsableCommand {
 
         func submitAll() async throws -> [(Int, ContinuousBatchSchedulerResult, MSBSchedulerRowTiming)] {
             try await withThrowingTaskGroup(of: (Int, ContinuousBatchSchedulerResult, MSBSchedulerRowTiming).self) { group in
+                let firstTokens = prompts.map { _ in FirstTokenBox() }
                 for (index, prompt) in prompts.enumerated() {
+                    // Staggered: later rows join once row 0 is decoding, so
+                    // rows decode at different KV offsets (padded forwards).
+                    if staggerAfterFirstRow && index == 1 {
+                        while firstTokens[0].at == nil {
+                            try await Task.sleep(nanoseconds: 5_000_000)
+                        }
+                    }
                     group.addTask {
                         let started = Date()
-                        let firstToken = FirstTokenBox()
+                        let firstToken = firstTokens[index]
                         let result = try await scheduler.submit(
                             ContinuousBatchSchedulerRequest(
                                 id: "msb-sched-\(index)-\(UUID().uuidString)",
@@ -874,6 +883,12 @@ struct MSBThroughputCommand: AsyncParsableCommand {
                 moePromotionEvidenceAvailable: true,
                 maxActiveRows: max(1, maxActiveRows),
                 decodeHeadroomTokens: 1,
+                // The serve path's prefill row bound and decode steps per hop
+                // while a prompt prefills (`productionContinuousBatchSchedulerConfiguration`).
+                maxPrefillRowsPerIteration: min(
+                    max(1, maxActiveRows),
+                    ContinuousBatchSchedulerConfiguration.defaultPrefillRowsPerIteration
+                ),
                 maxPromptChunkTokens: max(1, maxPromptChunkTokens),
                 referencePrefillStepSize: Self.isDeepseekV4Pool(cacheKinds) ? DeepseekV4Model.prefillStepSize : nil,
                 snapshot: ContinuousBatchSchedulerSnapshot(
@@ -886,7 +901,10 @@ struct MSBThroughputCommand: AsyncParsableCommand {
                         max(1, maxDecodeLockstepWindow),
                         ModelRuntime.servePathDecodeLockstepWindow(cacheKinds: cacheKinds)
                     )
-                    : max(1, maxDecodeLockstepWindow)
+                    : max(1, maxDecodeLockstepWindow),
+                maxDecodeStepsWhilePrefilling: ModelRuntime.decodeStepsWhilePrefilling(
+                    promptChunkTokens: max(1, maxPromptChunkTokens)
+                )
             ),
             allocator: allocator,
             backend: backend,
@@ -1538,6 +1556,9 @@ struct MSBThroughputCommand: AsyncParsableCommand {
                 requestedOutputTokens: compared
             ))
         }
+        // Rows that arrive together now prefill as one cohort at equal
+        // offsets; later rows join after row 0 decodes, so parity still
+        // covers rows at different KV offsets.
         let twoRow = try await runSchedulerDecode(
             container: container,
             prompts: prompts,
@@ -1546,7 +1567,8 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             cacheKinds: cacheKinds,
             recurrentStateLayout: recurrentStateLayout,
             maxPromptChunkTokens: parityPrefillStepSize,
-            requestedOutputTokens: compared
+            requestedOutputTokens: compared,
+            staggerAfterFirstRow: true
         )
         peakRSSMB = max(peakRSSMB, memoryRSSMB())
         let serialRows = serialRuns.map(\.generatedTokens)
