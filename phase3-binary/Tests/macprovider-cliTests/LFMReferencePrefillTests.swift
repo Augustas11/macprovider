@@ -1,10 +1,19 @@
 import Foundation
+import MacProviderCore
 import MLX
 import MLXLLM
 import MLXNN
 import XCTest
 
 final class LFMReferencePrefillTests: XCTestCase {
+    override func setUpWithError() throws {
+        let bundle = Bundle(for: Self.self)
+        guard PagedKVMetallibGate.defaultMetallibExists()
+            || PagedKVMetallibGate.defaultMetallibExists(
+                bundleURL: bundle.resourceURL, executableURL: bundle.executableURL)
+        else { throw XCTSkip("MLX default metallib is unavailable") }
+    }
+
     func testOrdinaryQuantizationKeepsTheExistingRoute() throws {
         try Device.withDefaultDevice(.cpu) {
             let ordinary = Linear(64, 32, bias: false)

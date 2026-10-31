@@ -368,6 +368,8 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     }
 
     func testMSBHarnessSelectsOneSlotOnlyForLoadedLFMAndExactCacheTopology() throws {
+        // Concrete LFM initialization still needs MLX's Metal library.
+        try requireMetal()
         try Device.withDefaultDevice(.cpu) {
             let attentionLayers = (0..<40).filter { ($0 - 2).isMultiple(of: 4) }
             let config = try JSONDecoder().decode(LFM2Configuration.self, from: Data("""
