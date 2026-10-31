@@ -531,7 +531,7 @@ native-MTP tuple or expand Qwen/GLM qualification scope. Existing LFM evidence
 establishes 256-token exactness at 1k/8k/32k prompts, row isolation and a
 four-row scheduler gain of 26.43%. These are ordinary-serving observations,
 not signed production admission. GLM/Qwen exact-output engine-matrix checks
-remain required on the Studio after its current lab window.
+remain required on the designated Studio.
 
 For previously qualified Qwen/GLM MTP tuples, MTP-13 governs reuse when review
 establishes that their draft/verify/commit behavior, artifacts, request profile,

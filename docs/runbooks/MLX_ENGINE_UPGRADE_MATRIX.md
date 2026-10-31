@@ -58,8 +58,8 @@ opts its model-owned linear projections into vendor prefill reduction order.
 The Python binding retains its existing nine-argument API and passes false
 for the new option; it does not change the Python reference route.
 The detailed stacks below are historical context. GLM/Qwen exact-output
-engine-matrix checks run on the Studio after its current lab window; local
-LFM evidence and default-route unit checks do not substitute for those cells.
+engine-matrix checks remain required on the designated Studio; local LFM
+evidence and default-route unit checks do not substitute for those cells.
 
 ### Patch inventory
 
