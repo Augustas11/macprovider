@@ -131,7 +131,8 @@ LEDGER_SCHEMA_V4 = "macprovider.autotune-release-ledger.v4"
 NATIVE_MTP_ADMISSION_FEED_NAME = "native-mtp-admission.json"
 NATIVE_MTP_MANIFEST_NAME = "native-mtp-artifact-manifest.json"
 NATIVE_MTP_BANK_NAME = "native-mtp-selftest-bank.json"
-PACKAGE_RESOLVED_PATH = ROOT / "phase3-binary" / "Package.resolved"
+PACKAGE_RESOLVED_REPO_PATH = "phase3-binary/Package.resolved"
+PACKAGE_RESOLVED_PATH = ROOT / PACKAGE_RESOLVED_REPO_PATH
 NATIVE_MTP_TUPLE_INPUT_PATH = CATALOG_DIR / "native-mtp-admission-tuple.json"
 NATIVE_MTP_RELEASE_INPUT_PATH = CATALOG_DIR / "native-mtp-admission-release.json"
 NATIVE_MTP_BOUND_LEDGER_FEEDS = ARTIFACT_BOUND_LEDGER_FEEDS | {NATIVE_MTP_ADMISSION_FEED_NAME}
@@ -2715,23 +2716,35 @@ def mlx_swift_lm_pin(resolved_text: str, where: str) -> str:
 
 def bound_release_package_resolved(source_commit: object) -> str | None:
     """Package.resolved at the provider release the admission is bound to,
-    or None when that commit is not in this checkout (shallow clones)."""
+    or None only when that commit is not in this checkout (shallow clones).
+    Any other lookup failure refuses instead of falling back."""
     if not isinstance(source_commit, str) or re.fullmatch(r"[0-9a-f]{40}", source_commit) is None:
+        fail(f"native-MTP release input: source_commit {source_commit!r} is not a full lowercase commit id")
+
+    def git(*args: str) -> subprocess.CompletedProcess:
+        try:
+            return subprocess.run(
+                ["git", "-C", str(ROOT), *args],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=30,
+            )
+        except (OSError, subprocess.TimeoutExpired, ValueError) as error:
+            fail(f"native-MTP runtime_revision: git {args[0]} for bound release {source_commit} failed: {error}")
+
+    if git("cat-file", "-e", f"{source_commit}^{{commit}}").returncode != 0:
         return None
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(ROOT), "show", f"{source_commit}:phase3-binary/Package.resolved"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            timeout=30,
+    shown = git("show", f"{source_commit}:{PACKAGE_RESOLVED_REPO_PATH}")
+    if shown.returncode != 0:
+        fail(
+            f"native-MTP runtime_revision: cannot read {PACKAGE_RESOLVED_REPO_PATH} at bound release "
+            f"{source_commit}: {shown.stderr.strip()}"
         )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    return result.stdout if result.returncode == 0 else None
+    return shown.stdout
 
 
-def require_native_mtp_runtime_pin(body: dict, source_commit: object = None) -> None:
+def require_native_mtp_runtime_pin(body: dict, source_commit: object) -> None:
     """A source-tree release must admit the runtime its bound provider
     release compiled.
 
@@ -2785,10 +2798,10 @@ def resolve_native_mtp_admission(
     except generator.SidecarError as error:
         fail(f"generate: native-MTP admission: {error}")
     release_input = generator.strict_json_loads(NATIVE_MTP_RELEASE_INPUT_PATH.read_text("utf-8"))
-    require_native_mtp_runtime_pin(
-        generator.strict_json_loads(sidecar.decode("utf-8")),
-        release_input.get("entry", {}).get("source_commit") if isinstance(release_input, dict) else None,
-    )
+    release_entry = release_input.get("entry") if isinstance(release_input, dict) else None
+    if not isinstance(release_entry, dict):
+        fail(f"generate: {NATIVE_MTP_RELEASE_INPUT_PATH.name} has no entry object")
+    require_native_mtp_runtime_pin(generator.strict_json_loads(sidecar.decode("utf-8")), release_entry.get("source_commit"))
     manifest_bytes = (CATALOG_DIR / NATIVE_MTP_MANIFEST_NAME).read_bytes()
     bank = (CATALOG_DIR / NATIVE_MTP_BANK_NAME).read_bytes()
     body = validate_native_mtp_admission(
