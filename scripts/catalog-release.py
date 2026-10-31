@@ -2716,8 +2716,8 @@ def mlx_swift_lm_pin(resolved_text: str, where: str) -> str:
 
 def bound_release_package_resolved(source_commit: object) -> str | None:
     """Package.resolved at the provider release the admission is bound to,
-    or None only when that commit is not in this checkout (shallow clones).
-    Any other lookup failure refuses instead of falling back."""
+    or None only when a shallow checkout lacks that commit. Any other lookup
+    failure, including a commit absent from a full checkout, refuses."""
     if not isinstance(source_commit, str) or re.fullmatch(r"[0-9a-f]{40}", source_commit) is None:
         fail(f"native-MTP release input: source_commit {source_commit!r} is not a full lowercase commit id")
 
@@ -2733,8 +2733,13 @@ def bound_release_package_resolved(source_commit: object) -> str | None:
         except (OSError, subprocess.TimeoutExpired, ValueError) as error:
             fail(f"native-MTP runtime_revision: git {args[0]} for bound release {source_commit} failed: {error}")
 
+    shallow = git("rev-parse", "--is-shallow-repository")
+    if shallow.returncode != 0 or shallow.stdout.strip() not in ("true", "false"):
+        fail(f"native-MTP runtime_revision: {ROOT} is not a readable git checkout: {shallow.stderr.strip()}")
     if git("cat-file", "-e", f"{source_commit}^{{commit}}").returncode != 0:
-        return None
+        if shallow.stdout.strip() == "true":
+            return None
+        fail(f"native-MTP runtime_revision: bound release {source_commit} is not a commit of this repository")
     shown = git("show", f"{source_commit}:{PACKAGE_RESOLVED_REPO_PATH}")
     if shown.returncode != 0:
         fail(
@@ -2797,10 +2802,17 @@ def resolve_native_mtp_admission(
         )
     except generator.SidecarError as error:
         fail(f"generate: native-MTP admission: {error}")
-    release_input = generator.strict_json_loads(NATIVE_MTP_RELEASE_INPUT_PATH.read_text("utf-8"))
+    try:
+        release_input = generator.strict_json_loads(NATIVE_MTP_RELEASE_INPUT_PATH.read_text("utf-8"))
+    except (OSError, ValueError, generator.SidecarError) as error:
+        fail(f"generate: cannot read {NATIVE_MTP_RELEASE_INPUT_PATH.name}: {error}")
     release_entry = release_input.get("entry") if isinstance(release_input, dict) else None
     if not isinstance(release_entry, dict):
         fail(f"generate: {NATIVE_MTP_RELEASE_INPUT_PATH.name} has no entry object")
+    # source_commit selects the runtime pin; it must be the signed provider
+    # build the entry binds, not a free choice.
+    if release_entry.get("source_commit") != release_entry.get("provider_revision"):
+        fail(f"generate: {NATIVE_MTP_RELEASE_INPUT_PATH.name} entry source_commit differs from provider_revision")
     require_native_mtp_runtime_pin(generator.strict_json_loads(sidecar.decode("utf-8")), release_entry.get("source_commit"))
     manifest_bytes = (CATALOG_DIR / NATIVE_MTP_MANIFEST_NAME).read_bytes()
     bank = (CATALOG_DIR / NATIVE_MTP_BANK_NAME).read_bytes()
