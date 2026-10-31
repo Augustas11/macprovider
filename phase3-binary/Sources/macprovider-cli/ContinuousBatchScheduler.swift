@@ -3704,14 +3704,14 @@ actor ContinuousBatchScheduler {
               Self.nativeMTPSystemMemoryHeadroomAdmits(reservedAfter: nextReserved, sample: sample) else {
             // SPEC-048 R012: say which bound refused, with every number.
             let floor = sample.map { max(1, $0.physicalBytes / 10) }
-            try? FileHandle.standardError.write(contentsOf: Data(
-                ("event=native_mtp_round_reservation_refused requested_bytes=\(bytes) reserved_before_bytes=\(nativeMTPReservedRoundBytes) "
-                    + "outstanding_reservations=\(nativeMTPRoundByteReservations.count) capacity_bytes=\(effectiveCapacity) "
-                    + "available_bytes=\(sample.map { String($0.availableBytes) } ?? "unavailable") "
-                    + "physical_bytes=\(sample.map { String($0.physicalBytes) } ?? "unavailable") "
-                    + "floor_bytes=\(floor.map(String.init) ?? "unavailable") "
-                    + "reason=\(overflow ? "overflow" : nextReserved > effectiveCapacity ? "capacity" : "system_headroom")\n").utf8
-            ))
+            let availableText: String = sample.map { String($0.availableBytes) } ?? "unavailable"
+            let physicalText: String = sample.map { String($0.physicalBytes) } ?? "unavailable"
+            let floorText: String = floor.map { String($0) } ?? "unavailable"
+            let reason: String = overflow ? "overflow" : nextReserved > effectiveCapacity ? "capacity" : "system_headroom"
+            let message: String = "event=native_mtp_round_reservation_refused requested_bytes=\(bytes) reserved_before_bytes=\(nativeMTPReservedRoundBytes) "
+                + "outstanding_reservations=\(nativeMTPRoundByteReservations.count) capacity_bytes=\(effectiveCapacity) "
+                + "available_bytes=\(availableText) physical_bytes=\(physicalText) floor_bytes=\(floorText) reason=\(reason)\n"
+            try? FileHandle.standardError.write(contentsOf: Data(message.utf8))
             throw ContinuousBatchSchedulerError.requestFailed("continuous_batching_native_mtp_round_memory_exhausted")
         }
         let id = UUID()
