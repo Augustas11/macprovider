@@ -1,7 +1,9 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.71 (2026-10-31, auto-prefix keys partitioned by prompt_cache_key)
+**Version:** 0.9.72 (2026-10-31, decode progress for held tool calls)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.6.28, SPEC-003 v0.7, SPEC-004 v0.3.2
+
+**Change log v0.9.72 (2026-10-31, Related: #2192):** Amend SPEC-006-R026. A provider holds a tool call until it is complete (SPEC-018), so a tool-only turn sent no frame for 9-51 s under concurrent prefill and decode-idle cut it. Streaming requests now send `X-MacProvider-Decode-Progress: 1`, and the gateway consumes the coordinator's `: macprovider-decode-progress` comment (SPEC-001-R015): it re-bases an armed decode-idle deadline, never arms one, and is never forwarded. Buyer bytes are unchanged.
 
 **Change log v0.9.71 (2026-10-31, Related: #2192):** Amend SPEC-006-R014 (§5.4.1). When a Chat or Responses request carries a string `prompt_cache_key` of at most 256 bytes, the auto-prefix tag is partitioned by it, so concurrent agent sessions that share one scaffold no longer share one provider conversation key. Sharing a key serialized their turns on the provider and evicted each other's cached prefix. Requests without the field keep the v0.9.31 tag. The Responses translation does not forward the field in the chat body.
 
@@ -5310,6 +5312,17 @@ translated events, never inside one. SSE comment lines are ignored by
 conforming parsers (WHATWG SSE; the OpenAI and Anthropic SDK decoders skip
 lines starting with `:`). Keepalives are not content: they never re-arm the
 first-token or decode-idle deadlines.
+
+Decode progress (v0.9.72). Every streaming request to the coordinator MUST
+carry `X-MacProvider-Decode-Progress: 1`. The coordinator then writes a
+`: macprovider-decode-progress` comment line while the provider generates
+output it holds back (SPEC-001-R015). The gateway MUST consume that line and
+never forward it, so the buyer's bytes are unchanged. It is decode progress,
+not content: it re-bases an armed decode-idle deadline as a content frame does,
+but it never arms decode-idle, never disarms the first-token phase and never
+counts toward billing estimates or TTFT. Bound: the provider and the
+coordinator each send it at most once per second, and the stream ceiling still
+applies from the first byte of the request.
 
 First-token deadline. The first-token phase (armed when streaming headers
 commit) MUST be `first_token + ceil(estimated_prompt_tokens /

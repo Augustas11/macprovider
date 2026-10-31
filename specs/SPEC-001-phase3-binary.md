@@ -1,6 +1,19 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.49 (2026-10-26, local image generation)
+**Version:** 1.9.50 (2026-10-31, decode progress for held output)
+
+**Change log v1.9.50 (2026-10-31, Related: #2192):**
+Adds `SPEC-001-R015`. The provider holds a tool call until it is complete, to
+emit canonical arguments, drop a duplicate call and check byte caps on the
+whole call (SPEC-018), and holds structured-output content until it validates
+(SPEC-019). Nothing reached the gateway during the hold, so under concurrent
+prefill a tool-only turn went 9-51 s without a frame and the gateway's
+decode-idle timer cut it. The provider now sends a byte-free
+`inference_response_progress` frame (§6.6) at most once per second while
+tokens are generated into held output; the coordinator turns it into a
+decode-progress comment for an opted-in gateway (SPEC-006-R026). Held output
+and every buyer-visible byte, receipt, chunk sequence and settlement are
+unchanged.
 
 **Change log v1.9.49 (2026-10-26, Related: #2164):**
 Adds SPEC-001-R014 for loopback-only SDXL-Turbo image generation and amends
@@ -2533,6 +2546,28 @@ sizes, the complete hold/warm/restore sequence, failure and cancellation
 restoration, single flight, status and manifest verification. Real-weights
 lab acceptance remains a separate pending gate.
 
+**SPEC-001-R015 — Decode progress for held output.** While a streaming
+request generates tokens into output the provider holds back (a tool call held
+until it is complete, or structured-output content held until it validates),
+the provider MUST send `inference_response_progress` (§6.6) at most once per
+second. The first held step starts the clock and any buyer-visible chunk
+restarts it, so a hold shorter than one second sends none. The frame carries
+only `type` and `request_id`: no `seq`, no output bytes, no usage. It is not a
+chunk. It never changes `chunks_sent`, the SPEC-015 delivered-prefix or
+receipt binding, or SPEC-041 relay-blind digests. It is sent in plaintext on
+every session, Tier-2 included, since it carries no content; privacy-class and
+relay-blind requests do not send it. The held output itself is unchanged: the
+call is still emitted whole, canonical and capped (SPEC-018), and a direct HTTP
+stream writes nothing for it.
+
+The coordinator MUST accept the frame only for a streaming request active on
+the sending session and drop it otherwise without closing the session. For a
+caller that sent `X-MacProvider-Decode-Progress: 1` on an incremental stream,
+it writes one SSE comment line `: macprovider-decode-progress` between whole
+events, after headers commit and before `[DONE]`, at most once per second,
+outside delivered-output accounting. It writes nothing for any other caller or
+streaming mode. The gateway consumes the line under SPEC-006-R026.
+
 **SPEC-001-R010 — Exact loaded-model token utilities.** `POST /v1/tokenize`,
 `POST /v1/detokenize` and `POST /v1/apply-template` MUST use the tokenizer/template of the
 selected loaded model. Each operation MUST bind lookup, execution and result to
@@ -3555,6 +3590,19 @@ sent as the final chunk before `inference_response_end`.
 `inference_response_chunk` with `seq: 0` containing the complete JSON
 response body (same shape as § 6.2 non-streaming response). The `data`
 field contains the raw JSON string (no `data: ` prefix, no SSE framing).
+
+#### inference_response_progress (P→C)
+
+(v1.9.50, `SPEC-001-R015`) Sent at most once per second while a streaming
+request generates tokens into output the provider holds back. It is not a
+chunk and carries no output.
+
+```json
+{
+  "type": "inference_response_progress",
+  "request_id": "req-550e8400-e29b-41d4-a716-446655440000"
+}
+```
 
 #### inference_response_end (P→C)
 

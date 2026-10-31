@@ -754,6 +754,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			// signed-finality capability, set together.
 			s.setCoordinatorChatContext(upReq.Header, r, subject.AccountID)
 			advertiseCapacityShed429(upReq.Header)
+			if chat.Stream {
+				upReq.Header.Set(decodeProgressCapabilityHeader, "1")
+			}
 			if upReq.Header.Get(routingGitHubIDsHeader) == "unavailable" {
 				return nil, errRoutingIdentityUnavailable
 			}
@@ -1993,6 +1996,16 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 			settleIdleTimeout(false)
 			return
 		}
+		// SPEC-006-R026 / SPEC-001-R015: decode progress for a held tool
+		// call. It is consumed here, never forwarded, and re-bases an armed
+		// decode-idle deadline exactly as a content frame does. It never arms
+		// one, so the first-token phase is unchanged.
+		if isDecodeProgressLine(line) {
+			line = nil
+			if !progressDeadline.IsZero() {
+				progressDeadline = streamingProgressDeadline(idleTimeout)
+			}
+		}
 		// A phase deadline cancels the upstream mid-read, so the last line
 		// can be a torn SSE frame. Forwarding it would splice the terminal
 		// error envelope onto a partial frame the buyer cannot parse.
@@ -2209,6 +2222,18 @@ func drainFacadeSettlementTrailers(ctx context.Context, reader *bufio.Reader, re
 // absolute content-progress deadline the read loop carries. It preserves the
 // legacy "no idle timeout" sentinel: a non-positive budget yields the zero
 // time, which readStreamingLineWithIdleTimeout treats as unbounded.
+// decodeProgressCapabilityHeader opts a streaming request into coordinator
+// decode-progress comments (SPEC-006-R026, SPEC-001-R015).
+const decodeProgressCapabilityHeader = "X-MacProvider-Decode-Progress"
+
+// decodeProgressSSEComment is the coordinator's decode-progress line. It is a
+// lone SSE comment line written between whole events.
+var decodeProgressSSEComment = []byte(": macprovider-decode-progress")
+
+func isDecodeProgressLine(line []byte) bool {
+	return bytes.Equal(bytes.TrimRight(line, "\r\n"), decodeProgressSSEComment)
+}
+
 func streamingProgressDeadline(idleTimeout time.Duration) time.Time {
 	if idleTimeout <= 0 {
 		return time.Time{}

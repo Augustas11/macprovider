@@ -5014,6 +5014,8 @@ func (s *Server) handleMessage(conn net.Conn, providerID, assignedID string, pay
 		s.handleAEADRekeyCommitted(providerID, assignedID, payload)
 	case "inference_response_chunk":
 		s.handleInferenceChunk(providerID, assignedID, payload)
+	case "inference_response_progress":
+		s.handleInferenceProgress(providerID, assignedID, payload)
 	case "inference_response_validation":
 		s.handleInferenceValidation(providerID, assignedID, payload)
 	case "inference_response_end":

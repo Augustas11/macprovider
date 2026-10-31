@@ -1671,6 +1671,9 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 // A buyer that disconnects mid-stream cancels generation
                 // (the runtime stops; a loopback runtime cancels upstream).
                 let completion = try await modelRuntime.stream(request, with: handle, shouldCancel: { disconnect.isDisconnected || localLease?.isPreempted == true }) { chunk in
+                    // SPEC-001-R015: progress is a relay-only signal; the
+                    // direct HTTP stream's bytes are unchanged.
+                    if chunk.isProgress { return }
                     emittedBuyerToken.set()
                     switch chunk {
                     case .content(let text):
@@ -1708,6 +1711,8 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                                 finishReason: NSNull()
                             )
                         )
+                    case .progress:
+                        break
                     }
                 }
                 await providerStatus.finishRequest(startedAt: startedAt, completion: completion, failed: false, localLease: localLease)

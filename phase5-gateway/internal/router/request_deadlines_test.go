@@ -973,3 +973,96 @@ func TestStructuredStreamingTimeoutUsesCause(t *testing.T) {
 		}
 	})
 }
+
+// SPEC-006-R026 / SPEC-001-R015: while the provider holds a tool call, the
+// coordinator sends decode-progress comment lines. They re-base an armed
+// decode-idle deadline, the buyer never sees them, and the gateway asks for
+// them on every streaming request. Without them the same hold is cut.
+func TestDecodeProgressKeepsHeldToolCallAliveAndIsNotForwarded(t *testing.T) {
+	for _, withProgress := range []bool{true, false} {
+		t.Run(strconv.FormatBool(withProgress), func(t *testing.T) {
+			var capability string
+			stream := seamStreamingUpstreamCtx(func(pw *io.PipeWriter, ctx context.Context) {
+				_, _ = pw.Write([]byte(`data: {"id":"c","choices":[{"delta":{"reasoning_content":"plan"}}]}` + "\n\n"))
+				// A 1.2 s hold against a 400 ms decode-idle budget.
+				for i := 0; i < 8; i++ {
+					select {
+					case <-ctx.Done():
+						_ = pw.CloseWithError(ctx.Err())
+						return
+					case <-time.After(150 * time.Millisecond):
+					}
+					if withProgress {
+						if _, err := pw.Write([]byte(": macprovider-decode-progress\n")); err != nil {
+							return
+						}
+					}
+				}
+				_, _ = pw.Write([]byte(`data: {"id":"c","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\"city\":\"A\"}"}}]}}]}` + "\n\n"))
+				_, _ = pw.Write([]byte(`data: {"id":"c","choices":[{"delta":{},"finish_reason":"tool_calls"}]}` + "\n\n"))
+				_, _ = pw.Write([]byte("data: [DONE]\n\n"))
+				_ = pw.Close()
+			})
+			client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				capability = r.Header.Get(decodeProgressCapabilityHeader)
+				return stream.Transport.RoundTrip(r)
+			})}
+			h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+				cfg.Coordinator.BuyerURL = "http://coordinator.test"
+				cfg.Timeouts.StreamingIdleMS = 400
+				cfg.Timeouts.FirstTokenPrefillTokensPerSecond = 0 // isolate the decode-only deadline
+				cfg.Timeouts.FirstTokenSeconds = 300
+				cfg.Timeouts.CoordinatorRequestSeconds = 300
+				cfg.Timeouts.StreamCeilingFloorSeconds = 300
+				cfg.Timeouts.StreamCeilingMaxSeconds = 900
+			}, WithHTTPClient(client))
+			key := createAccountAndKey(t, store, cfg, "acct_decode_progress_"+strconv.FormatBool(withProgress))
+			resp := postChat(t, h, key, `{"model":"llama","stream":true,"max_tokens":500,"messages":[{"role":"user","content":"hi"}]}`, nil)
+			body := resp.Body.String()
+			if capability != "1" {
+				t.Fatalf("streaming request must opt in to decode progress; header=%q", capability)
+			}
+			if strings.Contains(body, "macprovider-decode-progress") {
+				t.Fatalf("decode progress reached the buyer: %.600q", body)
+			}
+			if withProgress {
+				if !strings.Contains(body, `"name":"lookup"`) || strings.Contains(body, "provider_timeout") {
+					t.Fatalf("held tool call with progress must complete: %.600q", body)
+				}
+				return
+			}
+			if !strings.Contains(body, `"code":"provider_timeout"`) {
+				t.Fatalf("a silent hold past decode idle must still be cut: %.600q", body)
+			}
+		})
+	}
+}
+
+// Decode progress is not content: before the first content frame it arms no
+// decode-idle deadline, so the first-token phase alone governs prefill.
+func TestDecodeProgressBeforeContentArmsNoDecodeIdle(t *testing.T) {
+	client := seamStreamingUpstreamCtx(func(pw *io.PipeWriter, ctx context.Context) {
+		_, _ = pw.Write([]byte(`data: {"id":"c","choices":[{"delta":{"role":"assistant","content":""}}]}` + "\n\n"))
+		_, _ = pw.Write([]byte(": macprovider-decode-progress\n"))
+		select {
+		case <-ctx.Done():
+			_ = pw.CloseWithError(ctx.Err())
+			return
+		case <-time.After(900 * time.Millisecond):
+		}
+		_, _ = pw.Write([]byte(`data: {"id":"c","choices":[{"delta":{"content":"done"}}]}` + "\n\n"))
+		_, _ = pw.Write([]byte("data: [DONE]\n\n"))
+		_ = pw.Close()
+	})
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Timeouts.StreamingIdleMS = 400
+		cfg.Timeouts.FirstTokenPrefillTokensPerSecond = 0
+		cfg.Timeouts.FirstTokenSeconds = 300
+	}, WithHTTPClient(client))
+	key := createAccountAndKey(t, store, cfg, "acct_decode_progress_prefill")
+	resp := postChat(t, h, key, `{"model":"llama","stream":true,"max_tokens":500,"messages":[{"role":"user","content":"hi"}]}`, nil)
+	if body := resp.Body.String(); !strings.Contains(body, `"content":"done"`) || strings.Contains(body, "provider_timeout") || strings.Contains(body, "macprovider-decode-progress") {
+		t.Fatalf("progress before content must not arm decode idle or reach the buyer: %.600q", body)
+	}
+}
