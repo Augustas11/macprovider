@@ -132,7 +132,7 @@ struct NativeMTPBenchCommand: AsyncParsableCommand {
                 try journal.write(["record_type": "step_start", "kind": step.kind, "depth": step.depth,
                     "out": step.out, "policy_sha256": step.policySHA256])
                 let bench = try await NativeMTPBenchRunner(rootPath: root, modelID: modelID,
-                    policyPath: step.policy, outPath: step.out, onlyCell: nil,
+                    policyPath: step.policy, outPath: step.out, onlyCell: step.onlyCell,
                     providerCommit: providerCommit, phase: step.kind == "sustained" ? .sustained : .matrix,
                     identityCache: identities,
                     labCBInputs: NativeMTPLabCBInputs(directory: URL(fileURLWithPath: ConfigLoader.expandTilde(labCBInputsPath)),
@@ -214,6 +214,7 @@ struct NativeMTPBenchCampaign: Decodable {
         let longTokenIDs: String?
         let longTokenIDsSHA256: String?
         let frozenGroupIndices: [Int]?
+        let onlyCell: String?
         enum CodingKeys: String, CodingKey {
             case kind, depth, policy, out, requests
             case policySHA256 = "policy_sha256"
@@ -221,6 +222,7 @@ struct NativeMTPBenchCampaign: Decodable {
             case longTokenIDs = "long_token_ids"
             case longTokenIDsSHA256 = "long_token_ids_sha256"
             case frozenGroupIndices = "frozen_group_indices"
+            case onlyCell = "only_cell"
         }
     }
     let schema: String
@@ -249,7 +251,8 @@ struct NativeMTPBenchCampaign: Decodable {
                 throw ValidationError("campaign requires fresh frozen and matrix outputs: \(step.out)")
             }
             let policy = try NativeMTPBenchPolicy.load(from: URL(fileURLWithPath: step.policy))
-            guard policy.proposalDepth == step.depth, !policy.exploratory,
+            guard policy.proposalDepth == step.depth,
+                  policy.exploratory == (plan.isSpeedProbe && step.kind == "matrix"),
                   !policy.diagnosticEligibilityBypass, policy.blocks == 10,
                   policy.sustainedSeconds == 1800, policy.slots == [1, 2, 3, 4] else {
                 throw ValidationError("campaign requires unchanged formal four-row/ten-block/1800s policy")
@@ -259,6 +262,10 @@ struct NativeMTPBenchCampaign: Decodable {
                 try verifyFile(step.longTokenIDs!, sha: step.longTokenIDsSHA256!)
                 guard (policy.maximumPromptTokens ?? 0) >= 32768 else {
                     throw ValidationError("frozen long contexts require a policy admitting 32768 prompt tokens")
+                }
+            } else if plan.isSpeedProbe {
+                guard let cell = step.onlyCell, policy.cell(id: cell) != nil else {
+                    throw ValidationError("speed probe selected cell must exist in its exploratory policy")
                 }
             } else {
                 guard policy.matrixCells.count == 16 else {
@@ -285,13 +292,27 @@ struct NativeMTPBenchCampaign: Decodable {
         return requested
     }
 
+    var isSpeedProbe: Bool { schema == "macprovider.native-mtp-resident-speed.v1" }
+
     func validateStructure() throws {
         let depths = [1, 2, 3, 5]
-        guard schema == "macprovider.native-mtp-resident-campaign.v1", steps.count == 12,
-              steps.map(\.kind) == [String](repeating: "frozen", count: 4)
-                + [String](repeating: "matrix", count: 4) + [String](repeating: "sustained", count: 4),
-              steps.map(\.depth) == depths + depths + depths else {
-            throw ValidationError("campaign order must be frozen, matrix, sustained at depths 1/2/3/5")
+        if isSpeedProbe {
+            guard steps.count == 3, steps.map(\.kind) == ["frozen", "matrix", "matrix"],
+                  steps.allSatisfy({ $0.depth == 1 }), steps[0].frozenGroupIndices == nil,
+                  steps[0].onlyCell == nil,
+                  steps[1].onlyCell == "s1-p1536-o128", steps[2].onlyCell == "s4-p1024-o256" else {
+                throw ValidationError("speed probe requires all nineteen frozen D1 groups then exact single1536/four1024 cells")
+            }
+        } else {
+            guard schema == "macprovider.native-mtp-resident-campaign.v1", steps.count == 12,
+                  steps.map(\.kind) == [String](repeating: "frozen", count: 4)
+                    + [String](repeating: "matrix", count: 4) + [String](repeating: "sustained", count: 4),
+                  steps.map(\.depth) == depths + depths + depths else {
+                throw ValidationError("campaign order must be frozen, matrix, sustained at depths 1/2/3/5")
+            }
+            guard steps.allSatisfy({ $0.onlyCell == nil }) else {
+                throw ValidationError("formal campaign cannot select individual cells")
+            }
         }
         let inputs = steps.flatMap { [$0.policy] + [$0.requests, $0.longTokenIDs].compactMap { $0 } }
             + (identityCache.map { [$0] } ?? [])

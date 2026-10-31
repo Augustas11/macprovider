@@ -111,6 +111,65 @@ final class NativeMTPBenchCampaignTests: XCTestCase {
         XCTAssertEqual(try String(contentsOf: existing), "retained measurement")
     }
 
+    func testSpeedManifestRequiresAllNineteenD1GroupsAndExactTwoGoalCells() throws {
+        let speed = "macprovider.native-mtp-resident-speed.v1"
+        let records = speedSteps()
+        XCTAssertNoThrow(try decode(records, schema: speed).validateStructure())
+        XCTAssertThrowsError(try decode(records).validateStructure())
+        XCTAssertThrowsError(try decode(steps(), schema: speed).validateStructure())
+        for selector in [[0], Array(0..<19)] {
+            var changed = records
+            changed[0]["frozen_group_indices"] = selector
+            XCTAssertThrowsError(try decode(changed, schema: speed).validateStructure())
+        }
+        for index in records.indices {
+            var changed = records
+            changed[index]["depth"] = 2
+            XCTAssertThrowsError(try decode(changed, schema: speed).validateStructure())
+        }
+        var swapped = records
+        swapped.swapAt(1, 2)
+        XCTAssertThrowsError(try decode(swapped, schema: speed).validateStructure())
+        var formal = steps()
+        formal[4]["only_cell"] = "s1-p1536-o128"
+        XCTAssertThrowsError(try decode(formal).validateStructure())
+    }
+
+    func testSpeedManifestRejectsOutputCollisionsAndExistingResults() throws {
+        let speed = "macprovider.native-mtp-resident-speed.v1"
+        var records = speedSteps()
+        records[1]["out"] = records[0]["out"]
+        XCTAssertThrowsError(try decode(records, schema: speed).validateStructure())
+        records = speedSteps()
+        records[2]["out"] = records[0]["requests"]
+        XCTAssertThrowsError(try decode(records, schema: speed).validateStructure())
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let policy = root.appendingPathComponent("policy.json")
+        let existing = root.appendingPathComponent("retained.jsonl")
+        try Data("policy not parsed".utf8).write(to: policy)
+        try Data("original".utf8).write(to: existing)
+        records = speedSteps()
+        records[0]["policy"] = policy.path
+        records[0]["policy_sha256"] = NativeMTPLabCBInputs.sha(try Data(contentsOf: policy))
+        records[0]["out"] = existing.path
+        let manifest = root.appendingPathComponent("speed.json")
+        try JSONSerialization.data(withJSONObject: ["schema": speed, "steps": records]).write(to: manifest)
+        XCTAssertThrowsError(try NativeMTPBenchCampaign.load(path: manifest.path)) {
+            XCTAssertTrue(String(describing: $0).contains("fresh frozen and matrix outputs"))
+        }
+        XCTAssertEqual(try String(contentsOf: existing), "original")
+    }
+
+    private func speedSteps() -> [[String: Any]] {
+        var records = [steps()[0], steps()[4], steps()[4]]
+        records[1]["only_cell"] = "s1-p1536-o128"
+        records[2]["only_cell"] = "s4-p1024-o256"
+        records[2]["out"] = "/campaign/four1024.jsonl"
+        return records
+    }
+
     actor Counter {
         private var count = 0
         func next() -> Int { count += 1; return count }
@@ -133,9 +192,9 @@ final class NativeMTPBenchCampaignTests: XCTestCase {
         } catch { }
     }
 
-    private func decode(_ steps: [[String: Any]]) throws -> NativeMTPBenchCampaign {
+    private func decode(_ steps: [[String: Any]], schema: String = "macprovider.native-mtp-resident-campaign.v1") throws -> NativeMTPBenchCampaign {
         try JSONDecoder().decode(NativeMTPBenchCampaign.self, from: JSONSerialization.data(
-            withJSONObject: ["schema": "macprovider.native-mtp-resident-campaign.v1", "steps": steps]))
+            withJSONObject: ["schema": schema, "steps": steps]))
     }
 
     private func steps() -> [[String: Any]] {

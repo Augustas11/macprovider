@@ -106,7 +106,7 @@ final class DeepseekV4ContinuousBatchBackend: ContinuousBatchSchedulerBackend, @
                     let tokens = MLXArray(input.promptTokens.map(Int32.init)).reshaped([1, input.promptTokens.count])
                     var state = LMOutput.State()
                     state[mtpEmitFlagKey] = input.nativeMTPPromptPrefill
-                    let output = model(.init(tokens: tokens), cache: row.caches, state: state)
+                    let output = model.prefillLastOutput(.init(tokens: tokens), cache: row.caches, state: state)
                     let logits = output.logits
                     let sampledArray = input.sampleFirstToken ? ContinuousBatchRowSampler.sample(
                         logits: logits[0..., -1, 0...], rows: [.init(temperature: input.temperature,
@@ -132,6 +132,7 @@ final class DeepseekV4ContinuousBatchBackend: ContinuousBatchSchedulerBackend, @
                     outputs.append(ContinuousBatchPrefillOutput(requestID: input.requestID, failureCode: "continuous_batching_prefill_failed"))
                 }
             }
+            Memory.clearCache()
             return outputs
         }
     }
