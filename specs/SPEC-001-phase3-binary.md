@@ -15,6 +15,11 @@ decode-progress comment for an opted-in gateway (SPEC-006-R026). Held output
 and every buyer-visible byte, receipt, chunk sequence and settlement are
 unchanged.
 
+Amends `SPEC-001-R013`: a continuous-batching row cut or cancelled after it
+joined decode keeps its prompt snapshot as the conversation entry instead of
+dropping the entry, so the gateway's retry of the cut turn hits the cache. A
+row cancelled during prefill still commits nothing.
+
 **Change log v1.9.49 (2026-10-26, Related: #2164):**
 Adds SPEC-001-R014 for loopback-only SDXL-Turbo image generation and amends
 R009/R011 to admit explicitly marked local-app creative work. A bounded
@@ -1539,6 +1544,18 @@ single-pass vision path) stops when that forward returns:
   snapshot or a recurrent checkpoint; its lease is aborted. A serial request
   cancelled at any point before its entry is inserted publishes nothing; the
   commit checks the request's cancel with no suspension before insertion.
+- *Cancelled during decode (v1.9.50).* A continuous-batching row that
+  finished prefill and joined decode, then is cut or cancelled (a
+  `cancel_request`, a local client disconnect, or the structured idle stop),
+  keeps the prompt snapshot it took when prefill finished: that turn's
+  conversation entry becomes the snapshot (prompt tokens only), so a retry of
+  the same turn resumes from it. The decode tail is never stored. The
+  snapshot is the deep copy taken at the end of prefill, never state that was
+  being written. It is kept only when it is a prompt snapshot shorter than and
+  a prefix of this turn's prompt, the lease is not fenced by a purge or an
+  invalid fleet grant, and the request did not end in a drain. Any other
+  failure aborts the lease as before. A turn that already committed or
+  aborted its own entry never puts the snapshot back.
 - *Drain.* A drain that coincides with a cancel ends the request as a drain.
 - *Terminal and settlement.* A request cancelled during prefill ends with the
   terminal a cancel before the first token already produced:

@@ -854,6 +854,55 @@ actor ConversationCache {
         releaseTurn(lease.key)
     }
 
+    /// SPEC-001-R013 (v1.9.50): a continuous-batching row cut or cancelled
+    /// during decode keeps the prompt snapshot it captured when prefill reached
+    /// it, instead of losing the conversation's whole entry. The snapshot is a
+    /// deep copy taken before decode, so no state that was mid-write is
+    /// published; only the uncommitted decode tail is dropped. The request's
+    /// own cancel is the reason this runs, so unlike `commit` it does not
+    /// refuse a cancelled task; purge fences still apply. Anything but an
+    /// unretained prompt snapshot over a prefix of the leased prompt is an
+    /// ordinary abort.
+    func keepPromptSnapshotAfterCancel(
+        _ lease: ConversationCacheLease, snapshot: ConversationCacheLayers, snapshotTokens: [Int32], now: Date = Date()
+    ) async {
+        await lease.reusableCache?.discardRetainedPagedKV(conversationKey: lease.key)
+        defer { releaseTurn(lease.key) }
+        guard snapshot.promptSnapshot,
+              snapshot.retainedPagedKVSequence == nil,
+              snapshotTokens.count >= Self.lcpThreshold,
+              snapshotTokens.count < lease.incomingTokens.count,
+              lease.incomingTokens.starts(with: snapshotTokens)
+        else {
+            log("event=conv_cache action=cancel_snapshot_rejected key_hash=\(lease.keyHash) tokens=\(snapshotTokens.count)")
+            return
+        }
+        guard !isFenced(lease) else {
+            log("event=conv_cache action=cancel_snapshot_fenced key_hash=\(lease.keyHash)")
+            return
+        }
+        if let old = entries.removeValue(forKey: lease.key) {
+            await old.kvCache.discardRetainedPagedKV(conversationKey: lease.key)
+        }
+        memoryBudget.observe(layers: snapshot, tokenCount: snapshotTokens.count)
+        entries[lease.key] = Entry(
+            canonicalPromptTokens: snapshotTokens,
+            kvCache: snapshot,
+            modelID: lease.modelID,
+            kvBits: lease.kvBits,
+            storedAt: now,
+            lastUsedAt: now,
+            tokenCount: snapshotTokens.count
+        )
+        await enforceLimits()
+        if isFenced(lease), let current = entries[lease.key], current.kvCache === snapshot {
+            entries.removeValue(forKey: lease.key)
+            log("event=conv_cache action=cancel_snapshot_fenced key_hash=\(lease.keyHash)")
+            return
+        }
+        log("event=conv_cache action=cancel_kept_prompt_snapshot key_hash=\(lease.keyHash) tokens=\(snapshotTokens.count)")
+    }
+
     /// A retained paged-KV entry (including a hybrid one with recurrent
     /// checkpoints) cannot serve the serial path, so it is discarded here and the
     /// serial request misses; only a serial-format entry is put back.

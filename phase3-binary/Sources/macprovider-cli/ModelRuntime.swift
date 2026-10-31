@@ -8693,6 +8693,38 @@ maxTokens: 1,
         return lease.recurrentCheckpoint?.tokenCount == lease.cachedPromptTokens
     }
 
+    /// SPEC-001-R013 (v1.9.50): ends a CB row's cache lease after the row
+    /// failed or was cut. A row cut or cancelled after it joined decode keeps
+    /// its prompt snapshot (prompt tokens only, a deep copy taken when prefill
+    /// finished), so the retry of the same turn hits the cache. The decode tail
+    /// is dropped. Any other failure, and a row cancelled during prefill,
+    /// aborts the lease as before.
+    static func endContinuousBatchLeaseAfterFailure(
+        _ lease: ConversationCacheLease?,
+        cancelled: Bool,
+        handoff: ContinuousBatchPromptSnapshotHandoff,
+        promptTokenIDs: [Int32],
+        resumeBoundaryPlan: Bool,
+        conversationCache: ConversationCache
+    ) async {
+        guard let lease else { return }
+        guard cancelled, let snapshot = handoff.take(), snapshot.tokenCount <= promptTokenIDs.count else {
+            await conversationCache.abort(lease)
+            return
+        }
+        await conversationCache.keepPromptSnapshotAfterCancel(
+            lease,
+            snapshot: ConversationCacheLayers(
+                snapshot.layers,
+                recurrentCheckpoints: snapshot.recurrentCheckpoints,
+                promptSnapshot: true,
+                nativeMTPDrafter: snapshot.nativeMTPDrafter,
+                resumeBoundaryPlan: resumeBoundaryPlan
+            ),
+            snapshotTokens: Array(promptTokenIDs.prefix(snapshot.tokenCount))
+        )
+    }
+
     /// The stored checkpoints a hybrid cached turn hands the scheduler: every
     /// one at or below the cached length (they are a prefix of this prompt).
     /// Empty unless the lease resumes a retained hybrid entry.
@@ -8873,6 +8905,7 @@ maxTokens: 1,
             detokenizer: detokenizer,
             stopTokenFilter: stopTokenFilter
         )
+        let promptSnapshotHandoff = ContinuousBatchPromptSnapshotHandoff()
         let submission = try Self.continuousBatchSubmission(
             for: request,
             promptTokens: prepared.promptTokens,
@@ -8886,6 +8919,7 @@ maxTokens: 1,
             promptSnapshotTokenCount: publishedPromptSnapshotTokenCount,
             retainedRecurrentCheckpoints: Self.retainedRecurrentCheckpoints(for: lease),
             promptSnapshotCache: promptSnapshotCache,
+            promptSnapshotHandoff: promptSnapshotHandoff,
             publishesPromptSnapshotOnly: prepared.promptSnapshotAttachesToContinuousBatchRow,
             promptResumeBoundaries: prepared.promptResumeBoundaries,
             serialToolStopObserver: serialToolStop,
@@ -8905,9 +8939,14 @@ maxTokens: 1,
                 (error as? ContinuousBatchSchedulerError)?.asAPIError() ?? error,
                 scheduler: scheduler, requestID: schedulerRequestID, gate: inferenceGate
             )
-            if let lease {
-                await conversationCache.abort(lease)
-            }
+            await Self.endContinuousBatchLeaseAfterFailure(
+                lease,
+                cancelled: !drainCancelled.isFired && (error is CancellationError || shouldCancel()),
+                handoff: promptSnapshotHandoff,
+                promptTokenIDs: preparedPromptTokenIDs,
+                resumeBoundaryPlan: prepared.promptSnapshotAttachesToContinuousBatchRow,
+                conversationCache: conversationCache
+            )
             let error = submissionError
             // SPEC-038 AC-25: one shared scheduler-error map, so the
             // non-streaming and streaming paths cannot drift.
@@ -8941,6 +8980,9 @@ maxTokens: 1,
             let completion = try Self.validateStructuredCompletion(finalized.completion, request: request)
             let generatedTokens = finalized.generatedTokens
             let canonicalTokenCount = preparedPromptTokenIDs.count + generatedTokens.count
+            // The turn now commits or aborts its own entry; a later failure
+            // must not put the prompt snapshot back over it.
+            _ = promptSnapshotHandoff.take()
             if !finalized.truncatedAtSerialStop,
                let lease, let retainedCache = result.retainedCache,
                Self.retainedCacheIsCommittable(
@@ -9018,9 +9060,15 @@ maxTokens: 1,
                     conversationKey: result.conversationKey
                 )
             }
-            if let lease {
-                await conversationCache.abort(lease)
-            }
+            await Self.endContinuousBatchLeaseAfterFailure(
+                lease,
+                cancelled: !drainCancelled.isFired
+                    && (error is CancellationError || shouldCancel()),
+                handoff: promptSnapshotHandoff,
+                promptTokenIDs: preparedPromptTokenIDs,
+                resumeBoundaryPlan: prepared.promptSnapshotAttachesToContinuousBatchRow,
+                conversationCache: conversationCache
+            )
             throw await Self.continuousBatchFailureAfterRetirement(
                 error, scheduler: scheduler, requestID: schedulerRequestID, gate: inferenceGate
             )
@@ -9423,6 +9471,7 @@ maxTokens: 1,
             admitted: tokenBoundedNativeMTPAdmission,
             resolved: nativeMTPAdmission
         )
+        let promptSnapshotHandoff = ContinuousBatchPromptSnapshotHandoff()
         let submission = try Self.continuousBatchSubmission(
             for: request,
             promptTokens: prepared.promptTokens,
@@ -9436,6 +9485,7 @@ maxTokens: 1,
             promptSnapshotTokenCount: publishedPromptSnapshotTokenCount,
             retainedRecurrentCheckpoints: Self.retainedRecurrentCheckpoints(for: lease),
             promptSnapshotCache: promptSnapshotCache,
+            promptSnapshotHandoff: promptSnapshotHandoff,
             publishesPromptSnapshotOnly: prepared.promptSnapshotAttachesToContinuousBatchRow,
             promptResumeBoundaries: prepared.promptResumeBoundaries,
             serialToolStopObserver: serialToolStop,
@@ -9480,9 +9530,15 @@ maxTokens: 1,
                 (error as? ContinuousBatchSchedulerError)?.asAPIError() ?? error,
                 scheduler: scheduler, requestID: schedulerRequestID, gate: inferenceGate
             )
-            if let lease {
-                await conversationCache.abort(lease)
-            }
+            await Self.endContinuousBatchLeaseAfterFailure(
+                lease,
+                cancelled: !drainCancelled.isFired
+                    && (error is CancellationError || shouldCancel() || idleCancellation.isFired),
+                handoff: promptSnapshotHandoff,
+                promptTokenIDs: preparedPromptTokenIDs,
+                resumeBoundaryPlan: prepared.promptSnapshotAttachesToContinuousBatchRow,
+                conversationCache: conversationCache
+            )
             let error = submissionError
             // SPEC-038 AC-25: one shared scheduler-error map, so the
             // streaming and non-streaming paths cannot drift.
@@ -9551,6 +9607,9 @@ maxTokens: 1,
             }
             let generatedTokens = finalized.generatedTokens
             let canonicalTokenCount = preparedPromptTokenIDs.count + generatedTokens.count
+            // The turn now commits or aborts its own entry; a later failure
+            // must not put the prompt snapshot back over it.
+            _ = promptSnapshotHandoff.take()
             if !finalized.truncatedAtSerialStop,
                let lease, let retainedCache = result.retainedCache,
                Self.retainedCacheIsCommittable(
@@ -9628,9 +9687,15 @@ maxTokens: 1,
                     conversationKey: result.conversationKey
                 )
             }
-            if let lease {
-                await conversationCache.abort(lease)
-            }
+            await Self.endContinuousBatchLeaseAfterFailure(
+                lease,
+                cancelled: !drainCancelled.isFired
+                    && (error is CancellationError || shouldCancel() || idleCancellation.isFired),
+                handoff: promptSnapshotHandoff,
+                promptTokenIDs: preparedPromptTokenIDs,
+                resumeBoundaryPlan: prepared.promptSnapshotAttachesToContinuousBatchRow,
+                conversationCache: conversationCache
+            )
             throw await Self.continuousBatchFailureAfterRetirement(
                 error, scheduler: scheduler, requestID: schedulerRequestID, gate: inferenceGate
             )

@@ -14369,7 +14369,10 @@
         "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func cancellableLocalPrefill",
         "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:private static func collectSpeculativeText",
         "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:private func processCancellations",
-        "phase3-binary/Sources/macprovider-cli/InferenceRelay.swift:func handleCancelRequest"
+        "phase3-binary/Sources/macprovider-cli/InferenceRelay.swift:func handleCancelRequest",
+        "phase3-binary/Sources/macprovider-cli/ConversationCache.swift:func keepPromptSnapshotAfterCancel(",
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:final class ContinuousBatchPromptSnapshotHandoff",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func endContinuousBatchLeaseAfterFailure("
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/PrefillCancellationTests.swift:func testClientCancelStopsChunkedPrefillWithinOneChunkAndReleasesTheSlot",
@@ -14384,7 +14387,10 @@
         "phase3-binary/Tests/macprovider-cliTests/ConversationPromptSnapshotTests.swift:func testCommitOfACancelledRequestPublishesNothing",
         "phase3-binary/Tests/macprovider-cliTests/LocalRequestPriorityTests.swift:func testLocalPrefillChecksPreemptionBetweenChunks",
         "phase4-coordinator/internal/ws/relay_test.go:func TestRelayCancelSendsCancelRequest",
-        "phase4-coordinator/internal/ws/cancel_delivered_boundary_test.go:func TestRelayContextCancelBeforeRegistrationCarriesEmptyBoundary"
+        "phase4-coordinator/internal/ws/cancel_delivered_boundary_test.go:func TestRelayContextCancelBeforeRegistrationCarriesEmptyBoundary",
+        "phase3-binary/Tests/macprovider-cliTests/ConversationCacheTests.swift:func testCancelledTurnKeepsItsPromptSnapshotForTheRetry",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:func testRowCancelledDuringDecodeHandsOffItsPromptSnapshot",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:func testRowCancelledDuringPrefillHandsOffNoSnapshot"
       ],
       "journeys": [],
       "evidence": [],

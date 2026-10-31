@@ -426,6 +426,62 @@ final class ConversationCacheTests: XCTestCase {
         if let hit { await cache.abort(hit) }
     }
 
+    /// SPEC-001-R013 (v1.9.50): a CB turn cut during decode keeps its prompt
+    /// snapshot, so the retry of the same turn hits the cache; the decode
+    /// tail is never stored. A fenced lease or a snapshot that is not a strict
+    /// prefix of this turn's prompt is dropped, as `abort` would.
+    func testCancelledTurnKeepsItsPromptSnapshotForTheRetry() async throws {
+        let cache = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 10_000, ttlSeconds: 900))
+        let now = Date(timeIntervalSince1970: 1_000)
+        func begin(_ key: String, _ tokens: [Int32]) async throws -> ConversationCacheLease {
+            let lease = await cache.begin(conversationKey: key, incomingTokens: tokens,
+                                          modelID: "model-a", kvBits: nil, now: now)
+            return try XCTUnwrap(lease)
+        }
+        let first = int32Range(0..<40)
+        let turn = int32Range(0..<64)
+        let firstLease = try await begin("conv:cut", first)
+        await cache.commit(firstLease, cache: ConversationCacheLayers(
+            [trimmableCache(offset: 40)], promptSnapshot: true), fullTokens: first, now: now)
+
+        let cut = try await begin("conv:cut", turn)
+        XCTAssertEqual(cut.cachedPromptTokens, 40)
+        await cache.keepPromptSnapshotAfterCancel(
+            cut, snapshot: ConversationCacheLayers([trimmableCache(offset: 60)], promptSnapshot: true),
+            snapshotTokens: Array(turn.prefix(60)), now: now)
+        let retry = try await begin("conv:cut", turn)
+        XCTAssertEqual(retry.cachedPromptTokens, 60, "the retry resumes from the cut turn's prompt snapshot")
+        await cache.abort(retry)
+
+        // Not a strict prefix of the turn's prompt: rejected, nothing kept.
+        let diverged = try await begin("conv:bad", turn)
+        await cache.keepPromptSnapshotAfterCancel(
+            diverged, snapshot: ConversationCacheLayers([trimmableCache(offset: 60)], promptSnapshot: true),
+            snapshotTokens: Array(turn.prefix(59)) + [9_999], now: now)
+        let afterDiverged = try await begin("conv:bad", turn)
+        XCTAssertEqual(afterDiverged.cachedPromptTokens, 0)
+        await cache.abort(afterDiverged)
+
+        // Not a prompt snapshot (a decode-time cache): rejected.
+        let tail = try await begin("conv:tail", turn)
+        await cache.keepPromptSnapshotAfterCancel(
+            tail, snapshot: ConversationCacheLayers([trimmableCache(offset: 60)]),
+            snapshotTokens: Array(turn.prefix(60)), now: now)
+        let afterTail = try await begin("conv:tail", turn)
+        XCTAssertEqual(afterTail.cachedPromptTokens, 0)
+        await cache.abort(afterTail)
+
+        // A purge during the turn fences it: nothing kept.
+        let fenced = try await begin("conv:fenced", turn)
+        await cache.purgeAllHot()
+        await cache.keepPromptSnapshotAfterCancel(
+            fenced, snapshot: ConversationCacheLayers([trimmableCache(offset: 60)], promptSnapshot: true),
+            snapshotTokens: Array(turn.prefix(60)), now: now)
+        let afterFence = try await begin("conv:fenced", turn)
+        XCTAssertEqual(afterFence.cachedPromptTokens, 0)
+        await cache.abort(afterFence)
+    }
+
     func testLRUProtectsLongPrefixOnRecencyTie() async throws {
         let cache = makeConversationCacheForTest(config: .init(maxConversations: 2, maxTokens: 10_000, ttlSeconds: 900))
         let now = Date(timeIntervalSince1970: 1_000)
