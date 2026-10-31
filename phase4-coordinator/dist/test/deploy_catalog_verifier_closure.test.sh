@@ -175,14 +175,25 @@ fi
 # poison Python imports or neutralize ledger evolution through ambient state.
 mkdir "$tmp/pinned-repository" "$tmp/python-poison"
 printf '%s\n' 'raise SystemExit("poisoned json import")' > "$tmp/python-poison/json.py"
-GIT_NO_REPLACE_OBJECTS=1 git -C "$REPO_ROOT" archive --format=tar HEAD \
+# The fixture is the committed published catalog snapshot. A campaign can
+# change SwiftPM before cutting a replacement admission, so HEAD is not yet a
+# coherent release source. Production deploy still verifies its signed commit.
+catalog_commit="$(GIT_NO_REPLACE_OBJECTS=1 git -C "$REPO_ROOT" log -1 --format=%H HEAD -- phase3-binary/catalog/autotune/release.json)"
+[ -n "$catalog_commit" ] || fail "missing catalog snapshot commit"
+GIT_NO_REPLACE_OBJECTS=1 git -C "$REPO_ROOT" archive --format=tar "$catalog_commit" \
+  | tar -xf - -C "$tmp/pinned-repository"
+cmp "$CANONICAL/release.json" "$tmp/pinned-repository/phase3-binary/catalog/autotune/release.json" \
+  || fail "catalog fixture does not match the committed published snapshot"
+# Exercise the current verifier against that snapshot, including its complete
+# dependency closure, rather than testing an older verifier implementation.
+GIT_NO_REPLACE_OBJECTS=1 git -C "$REPO_ROOT" archive --format=tar HEAD scripts \
   | tar -xf - -C "$tmp/pinned-repository"
 pinned_git_dir="$(git -C "$REPO_ROOT" rev-parse --absolute-git-dir)"
 if ! OPENSSL_BIN=/does/not/exist CATALOG_RELEASE_BASE_REF=HEAD PYTHONPATH="$tmp/python-poison" \
   env -u OPENSSL_BIN -u MACPROVIDER_INTAKE_AUDIT_DIR \
     GIT_DIR="$pinned_git_dir" \
     GIT_NO_REPLACE_OBJECTS=1 \
-    CATALOG_RELEASE_BASE_REF="HEAD^" \
+    CATALOG_RELEASE_BASE_REF="$catalog_commit^" \
     python3 -I "$tmp/pinned-repository/scripts/catalog-release.py" verify > "$tmp/repository-verify.out" 2>&1; then
   cat "$tmp/repository-verify.out" >&2
   fail "immutable repository verification failed under hostile ambient overrides"

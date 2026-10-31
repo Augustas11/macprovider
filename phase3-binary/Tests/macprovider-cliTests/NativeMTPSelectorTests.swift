@@ -98,6 +98,45 @@ final class NativeMTPSelectorTests: XCTestCase {
         XCTAssertEqual(selection.nativeMTPReason, .eligible)
     }
 
+    func testDeepseekReasoningEffortOnlyChangesPromptEligibility() throws {
+        for effort: Any in [NSNull(), "none", "high"] {
+            let request = try makeRequest(extra: ["reasoning_effort": effort])
+            let selection = NativeMTPSelector.select(
+                request: request,
+                draftConfigured: false,
+                draftLoaded: false,
+                numDraftTokens: nil,
+                nativeMTPMode: .auto,
+                nativeCapability: admittedCapability(family: "deepseek_v4_dspark_v1")
+            )
+            XCTAssertEqual(selection.path, .nativeMTP, "\(effort)")
+            XCTAssertEqual(selection.nativeMTPReason, .eligible, "\(effort)")
+        }
+    }
+
+    func testDeepseekPromptAllowancePreservesOtherAdaptersAndRejectsArbitraryTemplateFields() throws {
+        for family in ["glm5_next_mtp_v1", "qwen3_5_mtp_v1"] {
+            let reason = NativeMTPSelector.reason(
+                request: try makeRequest(extra: ["reasoning_effort": "high"]),
+                mode: .auto,
+                nativeCapability: admittedCapability(family: family)
+            )
+            XCTAssertEqual(reason, .unknownRequestField, family)
+        }
+        for extra: [String: Any] in [
+            ["reasoning_effort": "high", "chat_template_kwargs": ["enable_thinking": true]],
+            ["enable_thinking": true],
+            ["reasoning_effort": "none", "metadata": ["trace": "local"]],
+        ] {
+            let reason = NativeMTPSelector.reason(
+                request: try makeRequest(extra: extra),
+                mode: .auto,
+                nativeCapability: admittedCapability(family: "deepseek_v4_dspark_v1")
+            )
+            XCTAssertEqual(reason, .unknownRequestField)
+        }
+    }
+
     func testSupportedSamplingParametersSelectNativeMTP() throws {
         let cases: [(String, [String: Any])] = [
             ("temperature", ["temperature": 0.7]),

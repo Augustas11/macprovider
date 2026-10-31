@@ -74,6 +74,12 @@ git -C "$tmp/work" tag -d "v$CAND" >/dev/null 2>&1 || true
 W="$tmp/work"
 git -C "$W" checkout -q --detach "$(git -C "$SRC_REPO" rev-parse HEAD)"
 git -C "$W" checkout -q -B main
+# The catalog fixture is an existing signed release, independent of the new
+# candidate's fork. Preserve its real published SwiftPM identity in W only;
+# source release verification remains strict and the operator tree is untouched.
+CATALOG_COMMIT="$(GIT_NO_REPLACE_OBJECTS=1 git -C "$SRC_REPO" log -1 --format=%H HEAD -- phase3-binary/catalog/autotune/release.json)"
+GIT_NO_REPLACE_OBJECTS=1 git -C "$SRC_REPO" show "$CATALOG_COMMIT:phase3-binary/Package.resolved" \
+  > "$W/phase3-binary/Package.resolved"
 rm -rf "$W/scripts/ops"
 cp -R "$OPS_SRC" "$W/scripts/ops"
 find "$W/scripts/ops" -name '__pycache__' -prune -exec rm -rf {} +
@@ -138,7 +144,7 @@ if verdict not in ('ok', 'blocked: fixture signed release mismatch'):
 print(verdict)
 sys.exit(0 if verdict == 'ok' else 1)
 FAKEMATCH
-git -C "$W" -c user.name=t -c user.email=t@example.invalid add -A scripts/ops scripts/publish-release-mirror.sh scripts/native_mtp_release_match.py docs/releases/cli-release-train.md \
+git -C "$W" -c user.name=t -c user.email=t@example.invalid add -A scripts/ops scripts/publish-release-mirror.sh scripts/native_mtp_release_match.py docs/releases/cli-release-train.md phase3-binary/Package.resolved \
   ops/pearl-updater/release-signing-public.pem phase4-coordinator/dist/compatibility-revoked-ids.txt
 git -C "$W" -c user.name=t -c user.email=t@example.invalid commit -q -m "test: working-tree ops scripts"
 git -C "$W" -c user.name=t -c user.email=t@example.invalid tag -a v9.0.0 -m "live runtime"

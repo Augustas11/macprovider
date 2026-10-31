@@ -606,7 +606,6 @@ python3 "$metadata" validate-provider-payload --directory "$work/provider"
 # The acceptance signer must preserve and parse those exact bytes rather than
 # imposing the compact acceptance-envelope format on them.
 mkdir "$work/pearl-catalog"
-python3 "$root/scripts/catalog-release.py" verify
 cp "$root/phase3-binary/catalog/autotune/release.json" \
   "$root/phase3-binary/catalog/autotune/trusted-keys.json" \
   "$root/phase3-binary/catalog/autotune/tier2-catalog.json" \
@@ -627,6 +626,14 @@ if python3 -c 'import json,sys; sys.exit(0 if "native-mtp-admission.json" in jso
     cp "$root/phase3-binary/dist/static/$name" "$work/pearl-catalog/"
   done
 fi
+# This fixture is the already-published signed catalog, not a release of the
+# candidate source tree. Its runtime pin may precede Package.resolved; verify
+# its exact directory bindings without claiming admission for the new build.
+awk '/^tier2:/{on=1; next} on&&/^[^[:space:]#]/{on=0} on&&$1=="catalog_public_key:"{print $2}' \
+  "$root/phase4-coordinator/dist/coordinator.yaml" > "$work/tier2-catalog.pub"
+[ -s "$work/tier2-catalog.pub" ] || fail "missing Tier-2 catalog trust root"
+python3 "$root/scripts/catalog-release.py" verify-directory \
+  --directory "$work/pearl-catalog" --tier2-public-key-file "$work/tier2-catalog.pub"
 cat > "$work/pearl-compatibility.json.tmp" <<EOF
 {"schema_version":"macprovider.compatibility-set-envelope.v1","signatures":[{"algorithm":"fixture"}],"signed":{"compatibility_set_id":"Augustas11/macprovider:${tag}@${candidate_commit}","components":{"provider_cli":{"version":"1.8.31"}},"release":{"commit":"${candidate_commit}","repository":"Augustas11/macprovider","tag":"${tag}","version":"1.8.33"}}}
 EOF

@@ -17,6 +17,9 @@ let package = Package(
         )
     ],
     dependencies: [
+        // Campaign fork retains .10.16.7 arithmetic and computes only serving prefill last logits.
+        // It retains .10.16.3 shared MXFP8 projection tiles across DeepSeek rows.
+        // It retains .10.16.2: fidelity, DSpark and fused attention on main .10.15.1.
         // LFM reference expert order is layered on tag 3.32.3-macprovider.10.15.
         // Fork tag 3.32.3-macprovider.10.15 combines GLM MTP (10.13) and
         // Prism schema-2 loading, lazy vision and row-safe masks (10.14), on tag
@@ -44,7 +47,7 @@ let package = Package(
         // compatible per-column attention while retaining row-owned caches.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "36d24585f9373c2661f61f5e5b485c8d66c43a2b"
+            revision: "f5823de424efe63218925a810b0387eea300c91f"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",

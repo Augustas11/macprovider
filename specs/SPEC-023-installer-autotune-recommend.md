@@ -1,12 +1,17 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.22.38
+version: v0.22.39
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-10-02
 lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-change invariants). CONFORMANCE `depends_on` does not list SPEC-005; the lockstep is recorded in prose only, avoiding a dependency cycle (SPEC-005 likewise does not list SPEC-023 in its `depends_on`).
 
 ## Change log
+
+- **v0.22.39 (2026-10-28, Related: #2111)** — R024 admits the
+  `mlx_mxfp4_mxfp8` vendor-native DeepSeek representation, with uint32 packed
+  weights, uint8 E8M0 scales and group32 blocks, subject to SPEC-048's exact
+  module observation and combined hardware gate. No signed entry is added.
 
 - **v0.22.38 (2026-10-27, Related: #2144)** — Qualification uses digest-matched
   LAB evidence, followed by MTP-13 signed identity-only rebind. No collector,
@@ -3738,10 +3743,10 @@ unsigned JSON integers and never floats.
 `quantization` is exactly `{kind, packed_data_dtype, packed_layout,
 scale_dtype, scale_layout, block_size_elements, alignment_bytes, padding_rule,
 unquantized_exceptions, per_layer_exceptions,
-representation_manifest_sha256}`. `kind` is `base`, `mlx_mxfp8`, or
-`mlx_affine`. `packed_data_dtype` is `none|uint8|uint32`; `packed_layout` is
+representation_manifest_sha256}`. `kind` is `base`, `mlx_mxfp8`, `mlx_affine`, or
+`mlx_mxfp4_mxfp8`. `packed_data_dtype` is `none|uint8|uint32`; `packed_layout` is
 `none|mlx_array_native_v1`; `scale_dtype` is
-`none|float16|float32|bfloat16`; `scale_layout` is `none|per_block`;
+`none|float16|float32|bfloat16|uint8`; `scale_layout` is `none|per_block`;
 `block_size_elements` is null or integer `1..1024`; `alignment_bytes` is null
 or a power of two `1..4096`; `padding_rule` is
 `none|zero_pad_to_alignment`; and the manifest is a lowercase `sha256`.
@@ -3757,7 +3762,10 @@ quantization kind. The
 the target and MTP configs; override widths are `4`, `5`, `6`, or `8` bits
 (v0.22.27; `4` or `8` before) and group sizes are `32`, `64`, or `128`. Any
 other width fails closed. The `unquantized_exceptions` array names every
-config entry whose value is exactly `false`. Consumers MUST fail closed above
+config entry whose value is exactly `false`. For `mlx_mxfp4_mxfp8`, it also
+names loader-defined floating module exceptions (including head, embeddings,
+compressor, router and Markov/confidence weights) which the observer verifies
+as unpacked floating tensors. Consumers MUST fail closed above
 the array bound, on unsorted or duplicate arrays, on an invalid prefix, or when
 the arrays do not match the observed target/MTP artifacts.
 
@@ -3776,6 +3784,19 @@ passes the SPEC-048-R012 `1.01x` perplexity, one-point task, 5% fit-error, and
 admits only global width `4`, represented to the runtime as
 `mlx_affine_4bit` for both target and MTP. Compressed-tensors FP8, TorchAO
 FP8, GGUF, a name containing `FP8`, or another microscaling format is invalid.
+
+`mlx_mxfp4_mxfp8` requires `packed_data_dtype=uint32`,
+`packed_layout=mlx_array_native_v1`, `scale_dtype=uint8` (E8M0 block scales),
+`scale_layout=per_block`, `block_size_elements=32`, `alignment_bytes=null`,
+and `padding_rule=none`. SPEC-048-R002/R012 owns the exact DeepSeek DSpark
+module mapping: MXFP4 routed experts and MXFP8 attention/shared/main
+projections, with floating exceptions. The consumer recomputes its canonical
+representation manifest and validates each header pair; config labels alone
+are insufficient. Target-embedded MTP uses a shared-target marker rather than
+duplicating weights in the representation. This exact vendor representation
+adds no independent generic MXFP8 admission and changes no existing Qwen/GLM
+entry. Signing requires the combined correctness, throughput, TTFT and memory
+proof in SPEC-048; no pending evidence placeholder is releasable.
 
 For `mlx_affine`, `representation_manifest_sha256` is SHA-256 of the UTF-8
 bytes of the canonical representation manifest:

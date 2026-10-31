@@ -3411,6 +3411,124 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertEqual(buyerAfter.generatedTokens, [31, 32])
     }
 
+    func testLabFourRowNativeProbeCompositionKeepsBuyersExcluded() async throws {
+        let ids = ["probe-0", "probe-1", "probe-2", "probe-3"]
+        let gate = RuntimeBridgeTestGate()
+        let backend = RuntimeBridgeScriptedBackend(
+            scripts: Dictionary(uniqueKeysWithValues: (ids + ["buyer-after"]).map { ($0, [11]) }),
+            nativeProposalScripts: Dictionary(uniqueKeysWithValues: ids.map { ($0, [[12]]) }),
+            prefillGate: gate
+        )
+        let scheduler = try Self.makeScheduler(maxActiveRows: 4, backend: backend,
+            maxPhysicalBlocks: 64, maxPrefillRowsPerIteration: 4)
+        let installed = await scheduler.installLabBatchComposition(ids, nativeIntegrityProbes: true)
+        XCTAssertTrue(installed)
+        var tasks: [Task<ContinuousBatchSchedulerResult, Error>] = []
+        for (index, id) in ids.enumerated() {
+            tasks.append(Task {
+                try await scheduler.submitNativeMTPIntegrityProbe(Self.schedulerRequest(
+                    id: id, promptTokens: [10], maxOutputTokens: 3,
+                    decodePath: .nativeMTP, nativeMTPMaximumProposalDepth: 1,
+                    nativeMTPIntegrityProbe: true))
+            })
+            if index < 3 {
+                try await Self.eventually { await scheduler.metrics().waitingCount == index + 1 }
+                let calls = await backend.prefillCallCount()
+                XCTAssertEqual(calls, 0, "no partial native group may prefill")
+            }
+        }
+        try await Self.eventually { await gate.waitingCount() == 1 }
+        do {
+            _ = try await scheduler.submit(Self.schedulerRequest(
+                id: "buyer", promptTokens: [20], maxOutputTokens: 1))
+            XCTFail("buyers must remain excluded during the entire lab group")
+        } catch {
+            XCTAssertEqual(error as? ContinuousBatchSchedulerError, .backpressure)
+        }
+        for id in ["outsider", ids[0]] {
+            do {
+                _ = try await scheduler.submitNativeMTPIntegrityProbe(Self.schedulerRequest(
+                    id: id, promptTokens: [10], maxOutputTokens: 3,
+                    decodePath: .nativeMTP, nativeMTPMaximumProposalDepth: 1,
+                    nativeMTPIntegrityProbe: true))
+                XCTFail("unlisted and duplicate group probes must be refused")
+            } catch {
+                XCTAssertEqual(error as? ContinuousBatchSchedulerError, .backpressure)
+            }
+        }
+        await gate.open()
+        for task in tasks {
+            let result = try await task.value
+            XCTAssertEqual(result.terminalStatus, .length)
+            XCTAssertEqual(result.nativeMTPCounters?.acceptedTokens, 1)
+        }
+        let quiescent = await scheduler.isQuiescentForNativeMTPProbe()
+        XCTAssertTrue(quiescent)
+        let buyer = try await scheduler.submit(Self.schedulerRequest(
+            id: "buyer-after", promptTokens: [20], maxOutputTokens: 1))
+        XCTAssertEqual(buyer.generatedTokens, [11])
+    }
+
+    func testLabNativeProbeCompositionCancellationRetiresIncompleteGroup() async throws {
+        let backend = RuntimeBridgeScriptedBackend(scripts: ["buyer-after": [21]])
+        let scheduler = try Self.makeScheduler(maxActiveRows: 4, backend: backend)
+        let installed = await scheduler.installLabBatchComposition(
+            ["first", "second", "third", "fourth"], nativeIntegrityProbes: true)
+        XCTAssertTrue(installed)
+        let first = Task {
+            try await scheduler.submitNativeMTPIntegrityProbe(Self.schedulerRequest(
+                id: "first", promptTokens: [10], maxOutputTokens: 3,
+                decodePath: .nativeMTP, nativeMTPMaximumProposalDepth: 1,
+                nativeMTPIntegrityProbe: true))
+        }
+        try await Self.eventually { await scheduler.metrics().waitingCount == 1 }
+        first.cancel()
+        do {
+            _ = try await first.value
+            XCTFail("cancelled group member should throw")
+        } catch is CancellationError {
+        }
+        let quiescent = await scheduler.isQuiescentForNativeMTPProbe()
+        XCTAssertTrue(quiescent, "incomplete composition and all row resources must retire")
+        let buyer = try await scheduler.submit(Self.schedulerRequest(
+            id: "buyer-after", promptTokens: [20], maxOutputTokens: 1))
+        XCTAssertEqual(buyer.generatedTokens, [21])
+    }
+
+    func testLabNativeProbeCompositionRequiresIdleBoundedGroupAndOneDepth() async throws {
+        let backend = RuntimeBridgeScriptedBackend(scripts: [:])
+        let scheduler = try Self.makeScheduler(maxActiveRows: 4, backend: backend)
+        for ids in [["one"], ["a", "a"], ["a", "b", "c", "d", "e"]] {
+            let installed = await scheduler.installLabBatchComposition(ids, nativeIntegrityProbes: true)
+            XCTAssertFalse(installed)
+        }
+        let installed = await scheduler.installLabBatchComposition(
+            ["first", "second"], nativeIntegrityProbes: true)
+        XCTAssertTrue(installed)
+        let first = Task {
+            try await scheduler.submitNativeMTPIntegrityProbe(Self.schedulerRequest(
+                id: "first", promptTokens: [10], maxOutputTokens: 3,
+                decodePath: .nativeMTP, nativeMTPMaximumProposalDepth: 1,
+                nativeMTPIntegrityProbe: true))
+        }
+        try await Self.eventually { await scheduler.metrics().waitingCount == 1 }
+        do {
+            _ = try await scheduler.submitNativeMTPIntegrityProbe(Self.schedulerRequest(
+                id: "second", promptTokens: [10], maxOutputTokens: 3,
+                decodePath: .nativeMTP, nativeMTPMaximumProposalDepth: 2,
+                nativeMTPIntegrityProbe: true))
+            XCTFail("group members must use exactly one proposal depth")
+        } catch {
+            XCTAssertEqual(error as? ContinuousBatchSchedulerError, .backpressure)
+        }
+        let replaced = await scheduler.installLabBatchComposition(["replacement", "peer"], nativeIntegrityProbes: true)
+        XCTAssertFalse(replaced)
+        first.cancel()
+        do { _ = try await first.value } catch is CancellationError {}
+        let quiescent = await scheduler.isQuiescentForNativeMTPProbe()
+        XCTAssertTrue(quiescent)
+    }
+
     /// The self-test probe ID is deterministic (`native-mtp-selftest-<challenge>`)
     /// and the replay authority is durable across restarts. A probe that
     /// claimed it would find its own earlier claim after the next restart,

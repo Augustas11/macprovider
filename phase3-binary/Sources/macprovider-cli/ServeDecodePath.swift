@@ -249,7 +249,7 @@ extension ModelRuntime {
                     prefillGrouping: prefillGrouping
                 ),
                 maxDecodeRowsPerForward: schedulerDecodeRowBound(configured: maxDecodeRowsPerForward, backend: backend),
-                referencePrefillStepSize: backend is DeepseekV4ContinuousBatchBackend ? 2048 : nil
+                referencePrefillStepSize: backend is DeepseekV4ContinuousBatchBackend ? DeepseekV4ContinuousBatchBackend.prefillChunkTokens : nil
             ),
             allocator: allocator,
             backend: backend,
@@ -322,12 +322,14 @@ extension ModelRuntime {
         if cacheKinds.contains(where: \.isDeepseekV4Pool) {
             return makeContinuousBatchScheduler(
                 decision: decision, tuple: tuple,
-                backend: DeepseekV4ContinuousBatchBackend(container: container),
+                backend: DeepseekV4ContinuousBatchBackend(
+                    container: container, nativeMTPDrafterContainer: nativeMTPDrafterContainer
+                ),
                 maxBatch: maxBatch, queueLimit: queueLimit, queueWaitTimeoutMS: queueWaitTimeoutMS,
                 prefillTokensPerIteration: prefillTokensPerIteration, maxContextTokens: maxContextTokens,
                 modelID: modelID, modelSHA256: modelSHA256, weightsGeneration: weightsGeneration,
                 prefillStepSize: 2048, maxDecodeLockstepWindow: ContinuousBatchSchedulerConfiguration.defaultDecodeLockstepWindow,
-                nativeMTPRoundByteCapacity: nil, nativeMTPStatusSink: nativeMTPStatusSink,
+                nativeMTPRoundByteCapacity: nativeMTPRoundByteCapacity, nativeMTPStatusSink: nativeMTPStatusSink,
                 prefillGrouping: .unconstrained, maxDecodeRowsPerForward: min(8, continuousBatchDecodeRowBound(cacheKinds: cacheKinds)),
                 replayAuthority: replayAuthority
             )

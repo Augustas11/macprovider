@@ -122,9 +122,12 @@ final class IdlePrewarmerTests: XCTestCase {
         try await Task.sleep(nanoseconds: 90_000_000)
         await fixture.prewarmer.runOneTickForTest()
         try await waitUntil { await fixture.probe.calls == 1 }
-        try await waitUntil { (await fixture.status.snapshot()).lastPrewarmAt != nil }
+        try await waitUntil { fixture.events.names.contains("idle_prewarm_completed") }
+        let completed = await fixture.status.snapshot()
+        let prewarmAt = try XCTUnwrap(completed.lastPrewarmAt)
 
-        await fixture.prewarmer.runOneTickForTest()
+        // Check recency at a fixed instant, independent of CI scheduling delays.
+        await fixture.prewarmer.runOneTickForTest(now: prewarmAt)
 
         let calls = await fixture.probe.calls
         XCTAssertEqual(calls, 1)

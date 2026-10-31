@@ -247,6 +247,9 @@ struct NativeMTPSelector: Sendable {
         if supportsToolPrompt {
             eligibleKeys.formUnion(["reasoning_effort", "parallel_tool_calls"])
         }
+        if nativeCapability.family == NativeMTPAdmissionSidecar.deepseekDSparkFamilyAdapter {
+            eligibleKeys.insert("reasoning_effort")
+        }
         guard request.topLevelKeys.isSubset(of: eligibleKeys),
               request.streamOptionKeys.isSubset(of: admittedStreamOptionKeys) else {
             return .unknownRequestField

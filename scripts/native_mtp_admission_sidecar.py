@@ -211,7 +211,7 @@ def _timestamp(value: object, path: str) -> datetime:
 def validate_quantization(q: object, path: str) -> None:
     q = _exact_keys(q, QUANTIZATION_KEYS, path)
     kind = q["kind"]
-    if kind not in {"base", "mlx_affine", "mlx_mxfp8"}:
+    if kind not in {"base", "mlx_affine", "mlx_mxfp8", "mlx_mxfp4_mxfp8"}:
         fail(f"{path}.kind", "unsupported")
     _sorted_unique(q["unquantized_exceptions"], f"{path}.unquantized_exceptions", MAX_QUANTIZATION_EXCEPTIONS, EXCEPTION)
     _sorted_unique(q["per_layer_exceptions"], f"{path}.per_layer_exceptions", MAX_QUANTIZATION_EXCEPTIONS, EXCEPTION)
@@ -230,6 +230,15 @@ def validate_quantization(q: object, path: str) -> None:
                 fail(f"{path}.{key}", f"must be {value!r} for mlx_affine")
         if q["block_size_elements"] not in (32, 64, 128) or isinstance(q["block_size_elements"], bool):
             fail(f"{path}.block_size_elements", "must be 32, 64, or 128 for mlx_affine")
+    elif kind == "mlx_mxfp4_mxfp8":
+        expected = {
+            "packed_data_dtype": "uint32", "packed_layout": "mlx_array_native_v1",
+            "scale_dtype": "uint8", "scale_layout": "per_block",
+            "block_size_elements": 32, "alignment_bytes": None, "padding_rule": "none",
+        }
+        for key, value in expected.items():
+            if q[key] != value or isinstance(q[key], bool):
+                fail(f"{path}.{key}", f"must be {value!r} for mlx_mxfp4_mxfp8")
     elif kind == "base":
         for key in ("packed_data_dtype", "packed_layout", "scale_dtype", "scale_layout", "padding_rule"):
             if q[key] != "none":
@@ -296,6 +305,16 @@ def validate_entry(entry: object, path: str) -> dict:
         fail(f"{path}.max_native_active_rows", "exceeds qualified_slots")
     if entry["request_feature_profile"] not in PROFILES:
         fail(f"{path}.request_feature_profile", "unsupported")
+    # DSpark is greedy-only; embedded layout does not restrict GLM sampling.
+    if entry["mtp_family_adapter"] == "deepseek_v4_dspark_v1" and entry["request_feature_profile"] != "native_mtp_greedy_text_v1":
+        fail(f"{path}.request_feature_profile", f'{entry["mtp_family_adapter"]} is greedy only')
+    if entry["mtp_family_adapter"] == "deepseek_v4_dspark_v1":
+        if entry["mtp_head_count"] != 3:
+            fail(f"{path}.mtp_head_count", "deepseek_v4_dspark_v1 requires 3 stages")
+        if depth > 5:
+            fail(f"{path}.proposal_depth", "deepseek_v4_dspark_v1 supports at most 5 proposals")
+        if not isinstance(entry["quantization"], dict) or entry["quantization"].get("kind") != "mlx_mxfp4_mxfp8":
+            fail(f"{path}.quantization.kind", "deepseek_v4_dspark_v1 requires mixed MX packing")
     _int(entry["max_prompt_tokens"], f"{path}.max_prompt_tokens", 1, 1_048_576)
     low = _int(entry["decrease_threshold_ppm"], f"{path}.decrease_threshold_ppm", 0, 1_000_000)
     high = _int(entry["increase_threshold_ppm"], f"{path}.increase_threshold_ppm", 0, 1_000_000)

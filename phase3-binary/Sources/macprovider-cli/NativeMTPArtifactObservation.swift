@@ -47,6 +47,7 @@ enum NativeMTPObservedArtifactFormat: Equatable, Sendable {
     case unquantized(dtype: String)
     case mlxAffine4(bits: Int, groupSize: Int)
     case mlxMXFP8(bits: Int, groupSize: Int)
+    case mlxMXFP4MXFP8
 
     var sidecarQuantizationLabel: String {
         switch self {
@@ -56,6 +57,8 @@ enum NativeMTPObservedArtifactFormat: Equatable, Sendable {
             return "mlx_affine_4bit"
         case .mlxMXFP8:
             return "mlx_mxfp8"
+        case .mlxMXFP4MXFP8:
+            return "mlx_mxfp4_mxfp8"
         }
     }
 }
@@ -201,15 +204,78 @@ enum NativeMTPArtifactObserver {
         fileManager: FileManager = .default
     ) throws -> NativeMTPArtifactPairObservation {
         let config = try loadConfig(directory: targetDirectory)
-        let hiddenLayers = try glm5NextHiddenLayerCount(in: config)
+        let isDSpark = config["model_type"] as? String == "deepseek_v4"
+        let hiddenLayers = try isDSpark ? deepseekV4HiddenLayerCount(in: config) : glm5NextHiddenLayerCount(in: config)
         let observation = try observe(
             directory: targetDirectory,
             config: config,
-            layerCount: 1,
+            layerCount: isDSpark ? 3 : 1,
             fileManager: fileManager,
-            tensorNamePolicy: .glm5Next(hiddenLayers: hiddenLayers)
+            tensorNamePolicy: isDSpark ? .deepseekV4(hiddenLayers: hiddenLayers) : .glm5Next(hiddenLayers: hiddenLayers)
         )
         return NativeMTPArtifactPairObservation(target: observation, mtp: observation, embedded: true)
+    }
+
+    private static func deepseekV4HiddenLayerCount(in config: [String: Any]) throws -> Int {
+        guard config["architectures"] as? [String] == ["DeepseekV4ForCausalLM"],
+              let layers = intValue(config["num_hidden_layers"]), (3...1024).contains(layers),
+              let ratios = config["compress_ratios"] as? [Any], ratios.count == layers + 3,
+              ratios.suffix(3).allSatisfy({ intValue($0) == 0 }),
+              ratios.prefix(layers).allSatisfy({ [0, 4, 128].contains(intValue($0) ?? -1) }),
+              intValue(config["dspark_block_size"]) == 5,
+              let noise = intValue(config["dspark_noise_token_id"]), noise >= 0,
+              let vocabulary = intValue(config["vocab_size"]), noise < vocabulary,
+              let captures = config["dspark_target_layer_ids"] as? [Any],
+              captures.compactMap({ intValue($0) }) == Array((layers - 3)..<layers),
+              captures.count == 3,
+              intValue(config["dspark_markov_rank"]) == 256 else {
+            throw NativeMTPArtifactObservationError.malformedConfig("deepseek_v4 DSpark identity")
+        }
+        return layers
+    }
+
+    /// The artifact digest binds weight bytes; this manifest binds each loader
+    /// module's MX mode, block width, and explicit floating exceptions.
+    static func mixedMXRepresentation(
+        for observation: NativeMTPArtifactPairObservation
+    ) throws -> NativeMTPAffineRepresentation {
+        guard observation.embedded,
+              observation.target == observation.mtp,
+              observation.target.format == .mlxMXFP4MXFP8 else {
+            throw NativeMTPArtifactObservationError.unsupportedQuantization("mixed MX requires embedded DeepSeek DSpark")
+        }
+        let artifact = observation.target
+        let exceptions = artifact.affineModuleOverrides.keys.map { "target/\($0)" }.sorted()
+        let floating = artifact.unquantizedModules.map { "target/\($0)" }.sorted()
+        guard exceptions.count <= maxQuantizationExceptions, floating.count <= maxQuantizationExceptions,
+              exceptions.allSatisfy(isAdmissionExceptionName), floating.allSatisfy(isAdmissionExceptionName) else {
+            throw NativeMTPArtifactObservationError.unsupportedQuantization("deepseek_v4 exception bounds")
+        }
+        var modules: [String: RFC8785JCS.Value] = [:]
+        for (name, value) in artifact.affineModuleOverrides {
+            modules[name] = .object([
+                "mode": .rawString(value.bits == 4 ? "mxfp4" : "mxfp8"),
+                "bits": .int(value.bits), "group_size": .int(value.groupSize),
+            ])
+        }
+        let manifest = RFC8785JCS.Value.object([
+            "schema": .rawString("macprovider.native-mtp-representation.v1"),
+            "target": .object([
+                "kind": .rawString("mlx_mxfp4_mxfp8"),
+                "bits": .int(4), "group_size": .int(32), "mode": .rawString("mxfp4"),
+                "overrides": .object(modules),
+                "unquantized": .array(artifact.unquantizedModules.sorted().map(RFC8785JCS.Value.rawString)),
+            ]),
+            "mtp": .object(["shared_with_target": .bool(true)]),
+        ])
+        let bytes = Data(try RFC8785JCS.canonicalStringRawStrings(manifest).utf8)
+        return NativeMTPAffineRepresentation(
+            manifestBytes: bytes,
+            manifestSHA256: SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined(),
+            perLayerExceptions: exceptions,
+            unquantizedExceptions: floating,
+            groupSize: 32
+        )
     }
 
     /// The exact GLM-5-Next config identity SPEC-048-R002 admits, returning
@@ -375,6 +441,9 @@ enum NativeMTPArtifactObserver {
         unquantizedModules: [String]
     ) {
         if let quantization = try quantizationMetadata(in: config) {
+            if case .deepseekV4 = policy {
+                return try observeDeepseekMX(quantization: quantization, tensors: tensors, policy: policy)
+            }
             return try observeQuantizedFormat(
                 quantization: quantization,
                 representation: representationManifest(quantization: quantization, config: config),
@@ -385,6 +454,130 @@ enum NativeMTPArtifactObserver {
         let dtype = try explicitUnquantizedDType(in: config)
         try validateUnquantizedHeaders(dtype: dtype, tensors: tensors)
         return (.unquantized(dtype: dtype), [], [:], [])
+    }
+
+    private static func deepseekLoaderPath(_ name: String) -> String {
+        var parts = name.split(separator: ".").map(String.init)
+        if parts.count == 7, ["layers", "mtp"].contains(parts[0]),
+           parts[2] == "ffn", parts[3] == "experts", Int(parts[4]) != nil,
+           let projection = ["w1": "gate_proj", "w2": "down_proj", "w3": "up_proj"][parts[5]] {
+            parts = Array(parts.prefix(3)) + ["switch_mlp", projection, parts[6]]
+        }
+        var mapped = parts.joined(separator: ".")
+        for branch in ["attn", "ffn", "head"] {
+            for parameter in ["fn", "base", "scale"] {
+                mapped = mapped.replacingOccurrences(of: "hc_\(branch)_\(parameter)", with: "\(branch == "head" ? "hc_head" : branch + "_hc").\(parameter)")
+            }
+        }
+        return mapped
+    }
+
+    private static func observeDeepseekMX(
+        quantization: [String: Any], tensors: [SafetensorsTensor], policy: TensorNamePolicy
+    ) throws -> (format: NativeMTPObservedArtifactFormat, tensorPairs: [NativeMTPObservedTensorPair],
+                  moduleOverrides: [String: NativeMTPAffineModuleOverride], unquantizedModules: [String]) {
+        guard quantizationMode(quantization) == "mxfp4", intValue(quantization["bits"]) == 4,
+              intValue(quantization["group_size"]) == 32 else {
+            throw NativeMTPArtifactObservationError.unsupportedQuantization("deepseek_v4 requires global mxfp4 group32")
+        }
+        var overrides: [String: NativeMTPAffineModuleOverride] = [:]
+        var unquantized: Set<String> = []
+        for (module, value) in quantization where !quantizationGlobalKeys.contains(module) {
+            var canonical = module
+            if canonical == "model.embed_tokens" { canonical = "embed" }
+            else if canonical == "lm_head" { canonical = "head" }
+            else if canonical.hasPrefix("model.layers.") { canonical = String(canonical.dropFirst(6)) }
+            else if canonical.hasPrefix("mtp.") { canonical = canonical.replacingOccurrences(of: ".block.", with: ".") }
+            // Vendor aliases name shared projections like switch-MLP
+            // projections; target and embedded-MTP loader keys use w1/w2/w3.
+            if canonical.contains(".ffn.shared_experts."),
+               let projection = canonical.split(separator: ".").last.map(String.init),
+               let loaderProjection = ["gate_proj": "w1", "down_proj": "w2", "up_proj": "w3"][projection] {
+                canonical = String(canonical.dropLast(projection.count)) + loaderProjection
+            }
+            if canonical != module {
+                // These vendor aliases never participate in exact-path loader
+                // lookup. Require equivalence, then bind only the effective key.
+                guard let effective = quantization[canonical],
+                      (value as? NSObject)?.isEqual(effective) == true else {
+                    throw NativeMTPArtifactObservationError.unsupportedQuantization("deepseek_v4 conflicting alias \(module)")
+                }
+                continue
+            }
+            if let flag = value as? Bool, !flag { unquantized.insert(module); continue }
+            guard let q = value as? [String: Any], Set(q.keys) == ["bits", "group_size", "mode"],
+                  intValue(q["group_size"]) == 32, let bits = intValue(q["bits"]),
+                  (bits == 4 && q["mode"] as? String == "mxfp4")
+                    || (bits == 8 && q["mode"] as? String == "mxfp8") else {
+                throw NativeMTPArtifactObservationError.unsupportedQuantization("deepseek_v4 MX override \(module)")
+            }
+            let expert = module.contains(".ffn.switch_mlp.")
+                && ["gate_proj", "down_proj", "up_proj"].contains(module.split(separator: ".").last.map(String.init) ?? "")
+            let projection = module.contains(".attn.w") || module.contains(".attn.indexer.wq_b")
+                || module.contains(".ffn.shared_experts.") || module == "mtp.0.main_proj"
+            let expectedBits = expert ? 4 : 8
+            guard expert || projection, bits == expectedBits else {
+                throw NativeMTPArtifactObservationError.unsupportedQuantization("deepseek_v4 MX mode \(module)")
+            }
+            overrides[module] = .init(bits: bits, groupSize: 32)
+        }
+        var byName: [String: SafetensorsTensor] = [:]
+        for tensor in tensors {
+            guard byName.updateValue(tensor, forKey: tensor.name) == nil else {
+                throw NativeMTPArtifactObservationError.incompatibleSafetensorsHeaders("duplicate deepseek_v4 tensor")
+            }
+        }
+        var consumed: Set<String> = []
+        var usedOverrides: Set<String> = []
+        var floating: Set<String> = []
+        var pairs: [NativeMTPObservedTensorPair] = []
+        var stages: Set<Int> = []
+        for tensor in tensors where !tensor.name.hasSuffix(".scales") {
+            let path = loaderPath(tensor.name, policy: policy)
+            let module = path.hasSuffix(".weight") ? String(path.dropLast(7)) : path
+            if tensor.name.hasPrefix("mtp."), let stage = Int(tensor.name.split(separator: ".")[1]) { stages.insert(stage) }
+            let scaleName = tensor.name.hasSuffix(".weight") ? String(tensor.name.dropLast(7)) + ".scales" : ""
+            if let scale = byName[scaleName] {
+                let isExpert = module.contains(".ffn.switch_mlp.")
+                let q = overrides[module] ?? NativeMTPAffineModuleOverride(bits: 4, groupSize: 32)
+                guard (overrides[module] != nil || isExpert), !unquantized.contains(module),
+                      tensor.dtype == "U32", scale.dtype == "U8", tensor.shape.count >= 2,
+                      scale.shape.count == tensor.shape.count,
+                      Array(scale.shape.dropLast()) == Array(tensor.shape.dropLast()),
+                      let columns = checkedMultiply(tensor.shape.last!, 32 / q.bits),
+                      columns % 32 == 0, scale.shape.last == columns / 32,
+                      checkedMultiply(tensor.elementCount, 4) == tensor.byteCount,
+                      scale.elementCount == scale.byteCount else {
+                    throw NativeMTPArtifactObservationError.incompatibleSafetensorsHeaders("deepseek_v4 MX pair \(tensor.name)")
+                }
+                if overrides[module] != nil { usedOverrides.insert(module) }
+                consumed.insert(scaleName)
+                pairs.append(.init(weightName: path, scaleName: loaderPath(scaleName, policy: policy),
+                    packedDType: "U32", scaleDType: "U8", packedShape: tensor.shape, scaleShape: scale.shape,
+                    bitsPerValue: q.bits, groupSize: 32, logicalInputColumns: columns, paddedInputColumns: columns))
+            } else {
+                let allowed = tensor.shape.count == 1 || unquantized.contains(module)
+                    || ["embed", "head"].contains(module) || path.contains("_hc.") || path.contains("hc_head.")
+                    || path.contains(".ffn.gate.") || path.contains(".compressor.")
+                    || path.contains(".indexer.weights_proj.") || path.contains(".markov_head.")
+                    || path.contains(".confidence_head.") || path.hasSuffix(".tid2eid")
+                // The checkpoint stores routing IDs as int64; sanitize casts
+                // only tid2eid to int32 before the loader uses them.
+                let elementBytes = path.hasSuffix(".tid2eid") && tensor.dtype == "I64"
+                    ? 8 : bytesPerElement(tensor.dtype)
+                guard allowed, isFloatingWeightDType(tensor.dtype) || path.hasSuffix(".tid2eid"),
+                      checkedMultiply(tensor.elementCount, elementBytes) == tensor.byteCount else {
+                    throw NativeMTPArtifactObservationError.incompatibleSafetensorsHeaders("deepseek_v4 floating tensor \(tensor.name)")
+                }
+                if path.hasSuffix(".weight"), tensor.shape.count >= 2 { floating.insert(module) }
+            }
+        }
+        guard stages == [0, 1, 2], !pairs.isEmpty, usedOverrides == Set(overrides.keys),
+              consumed == Set(tensors.filter { $0.name.hasSuffix(".scales") }.map(\.name)),
+              unquantized.isSubset(of: floating), floating.contains("head"), floating.contains("embed") else {
+            throw NativeMTPArtifactObservationError.incompatibleSafetensorsHeaders("deepseek_v4 incomplete MX manifest")
+        }
+        return (.mlxMXFP4MXFP8, pairs, overrides, floating.sorted())
     }
 
     private static func explicitUnquantizedDType(in config: [String: Any]) throws -> String {
@@ -716,6 +909,8 @@ enum NativeMTPArtifactObserver {
             return name.hasPrefix("language_model.") ? name : "language_model." + name
         case .mtp:
             return name.hasPrefix("mtp.") ? name : "mtp." + name
+        case .deepseekV4:
+            return deepseekLoaderPath(name)
         case .glm5Next:
             // Only post-sanitize checkpoints are admitted (validateTensorName),
             // on which the GLM5Next sanitizer is the identity.
@@ -839,6 +1034,7 @@ enum NativeMTPArtifactObserver {
         /// SPEC-048-R002 `glm5_next_mtp_v1` embedded checkpoint; carries
         /// `text_config.num_hidden_layers` for the next-N key check.
         case glm5Next(hiddenLayers: Int)
+        case deepseekV4(hiddenLayers: Int)
     }
 
     private static let glm5NextVisionPrefixes = ["vision_model.", "vision_tower.", "visual.", "model.visual."]
@@ -902,6 +1098,22 @@ enum NativeMTPArtifactObserver {
             guard !name.lowercased(with: nil).contains("mtp."),
                   path.hasPrefix("language_model.model.") || path.hasPrefix("language_model.lm_head.") else {
                 throw NativeMTPArtifactObservationError.incompatibleSafetensorsHeaders("target tensor namespace \(name)")
+            }
+        case .deepseekV4(let hiddenLayers):
+            let parts = name.split(separator: ".")
+            if ["embed.weight", "head.weight", "norm.weight", "hc_head_fn", "hc_head_base", "hc_head_scale",
+                "hc_head.fn", "hc_head.base", "hc_head.scale"].contains(name) { return }
+            guard parts.count >= 3, let layer = Int(parts[1]), String(layer) == parts[1],
+                  (parts[0] == "layers" && (0..<hiddenLayers).contains(layer))
+                    || (parts[0] == "mtp" && (0..<3).contains(layer)) else {
+                throw NativeMTPArtifactObservationError.incompatibleSafetensorsHeaders("deepseek_v4 tensor namespace \(name)")
+            }
+            let roots: Set<Substring> = ["attn", "ffn", "attn_norm", "ffn_norm", "attn_hc", "ffn_hc",
+                "hc_attn_fn", "hc_attn_base", "hc_attn_scale", "hc_ffn_fn", "hc_ffn_base", "hc_ffn_scale"]
+            let additions: Set<Substring> = layer == 0 ? ["main_proj", "main_norm"]
+                : (layer == 2 ? ["markov_head", "confidence_head", "hc_head", "norm", "hc_head_fn", "hc_head_base", "hc_head_scale"] : [])
+            guard roots.contains(parts[2]) || (parts[0] == "mtp" && additions.contains(parts[2])) else {
+                throw NativeMTPArtifactObservationError.incompatibleSafetensorsHeaders("deepseek_v4 tensor namespace \(name)")
             }
         case .glm5Next(let hiddenLayers):
             try validateGLM5NextTensorName(name, hiddenLayers: hiddenLayers)

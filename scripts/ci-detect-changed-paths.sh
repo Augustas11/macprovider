@@ -73,7 +73,8 @@ classify() {
       docs/research/spec048-r015/glm53-flash-r015-v2/policy.json|\
       docs/evidence/glm53-flash-t4-2026-10-17/README.md|\
       scripts/*.swift|scripts/fixtures/*|scripts/tests/fixtures/*|\
-      scripts/lab/1690-m6/testdata/*|scripts/lab/privacy-class-beta/extract-primary-evidence.py|\
+      scripts/lab/1690-m6/testdata/*|scripts/lab/dsv4/dsv4-dspark-requests.json|\
+      scripts/lab/privacy-class-beta/extract-primary-evidence.py|\
       scripts/ci-detect-changed-paths.sh|scripts/ci-swift-test-shard.py|\
       scripts/test-malibu-sparkle-generator-integration.sh|\
       scripts/test-malibu-sparkle-validator-integration.sh|\

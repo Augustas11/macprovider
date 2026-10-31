@@ -3848,24 +3848,26 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             let backend = ScriptedBackend(scripts: ["held": [1], "shared": [2]], prefillGate: gate)
             let scheduler = try await makeScheduler(
                 maxActiveRows: 1, queueLimit: 4,
-                queueWaitTimeoutNanoseconds: 100_000_000, backend: backend
+                queueWaitTimeoutNanoseconds: 60_000_000_000, backend: backend
             )
             let held = Task {
                 try await scheduler.submit(.init(id: "held", conversationKey: "", promptTokens: [1], maxOutputTokens: 1))
             }
-            try await eventually { await backend.prefillCallCount() == 1 }
+            try await eventually(timeoutNanoseconds: 10_000_000_000) { await backend.prefillCallCount() == 1 }
             let request = ContinuousBatchSchedulerRequest(
                 id: "shared", conversationKey: "", promptTokens: [2], maxOutputTokens: 1
             )
             let owner = Task {
                 try await scheduler.submit(request, admissionWaitPolicy: callerBoundedOwner ? .callerBounded : .configuredTimeout)
             }
-            try await eventually { await scheduler.metrics().waitingCount == 1 }
+            try await eventually(timeoutNanoseconds: 10_000_000_000) { await scheduler.metrics().waitingCount == 1 }
             let duplicate = Task {
                 try await scheduler.submit(request, admissionWaitPolicy: callerBoundedOwner ? .configuredTimeout : .callerBounded)
             }
-            try await eventually { await scheduler.metrics().attachedWaiters == 3 }
-            try await Task.sleep(nanoseconds: 200_000_000)
+            try await eventually(timeoutNanoseconds: 10_000_000_000) { await scheduler.metrics().attachedWaiters == 3 }
+            // Expire only after both waiters attach, independent of CI scheduling.
+            // Caller-bounded ownership has no deadline, so this must be a no-op there.
+            await scheduler.expireQueueWait(requestID: "shared", atUptimeNanoseconds: .max)
             if callerBoundedOwner {
                 let stillWaiting = await scheduler.metrics()
                 XCTAssertEqual(stillWaiting.waitingCount, 1)
@@ -7082,7 +7084,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             descriptor: Self.descriptor(blockSizeTokens: 128, maxPhysicalBlocks: 64),
             tuple: Self.tuple(), maxActiveRows: 2, decodeHeadroomTokens: 1,
             maxPrefillRowsPerIteration: 2, maxPrefillTokensPerIteration: 128,
-            maxPromptChunkTokens: 64, referencePrefillStepSize: 2048,
+            maxPromptChunkTokens: 64, referencePrefillStepSize: DeepseekV4ContinuousBatchBackend.prefillChunkTokens,
             allowsRaggedPrefillOffsets: true,
             snapshot: .init(modelID: Self.modelID, modelSHA256: Self.modelSHA, weightsGeneration: 1)
         )
@@ -7097,7 +7099,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             promptTokens: Array(repeating: 3, count: 4096), maxOutputTokens: 1))
         XCTAssertEqual(result.outputTokens, [77])
         let chunks = await backend.prefillChunks(id: "deepseek")
-        XCTAssertEqual(chunks, [2048, 2047, 1])
+        XCTAssertEqual(chunks, [4096])
     }
 
     private static let modelID = "mlx-community/Qwen-Test"
@@ -8151,6 +8153,10 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         )
         let recorder = NativeMTPLoadGateRecorder()
         await scheduler.installLabNativeMTPLoadGateRecorder(recorder)
+        // Both rows must be admitted together so the native row actually
+        // exceeds its one-row bound, regardless of task scheduling order.
+        let installed = await scheduler.installLabBatchComposition(["gated", "ordinary"])
+        XCTAssertTrue(installed)
 
         let native = Task {
             try await scheduler.submit(Self.nativeRequest(
@@ -8188,6 +8194,10 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         )
         let recorder = NativeMTPLoadGateRecorder()
         await scheduler.installLabNativeMTPLoadGateRecorder(recorder)
+        // Both rows must be admitted together so the native row actually
+        // exceeds its one-row bound, regardless of task scheduling order.
+        let installed = await scheduler.installLabBatchComposition(["gated", "ordinary"])
+        XCTAssertTrue(installed)
 
         let native = Task {
             try await scheduler.submit(Self.nativeRequest(

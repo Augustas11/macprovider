@@ -2,6 +2,7 @@ import ArgumentParser
 import CryptoKit
 import Foundation
 import MLX
+import MLXLLM
 import MLXLMCommon
 import MacProviderCore
 
@@ -65,13 +66,9 @@ struct GLMParityCommand: AsyncParsableCommand {
         /// The GLM reference lane: full chunks with the last one included,
         /// raw logits compared.
         case glm
-        /// mlx-vlm `generate_step` (the `dsv4-reference` lane): chunks of
-        /// `min(step, remaining - 1)` while more than one prompt token is
-        /// left, then the last token alone; log-softmax in the model dtype
-        /// compared, which is what that lane's `top_logprob` holds. DeepSeek
-        /// V4's compressor pools windows per call, so the chunk plan changes
-        /// its output and must match the reference's.
-        case vlmGenerateStep
+        /// DeepSeek's QAT-off reference uses the model's bounded full-context
+        /// preparation plan. Compare log-softmax with the oracle top_logprob.
+        case deepseekReference
 
         var name: String { self == .glm ? "glm-parity" : "dsv4-parity" }
     }
@@ -142,7 +139,7 @@ struct GLMParityCommand: AsyncParsableCommand {
             requiresMoEDispatch: capabilities.requiresMoEDispatch,
             mlxSwiftLMRevision: KVBuildIdentity.mlxSwiftLMRevision,
             mlxSwiftRevision: KVBuildIdentity.mlxSwiftRevision,
-            prefillStepSize: prefillStepSize,
+            prefillStepSize: mode == .deepseekReference ? DeepseekV4Model.prefillStepSize : prefillStepSize,
             mlxCacheLimitMB: mlxCacheLimitMB,
             stepsRequested: steps,
             loadSeconds: loadSeconds,
@@ -177,7 +174,7 @@ struct GLMParityCommand: AsyncParsableCommand {
             func readout(_ logits: MLXArray) -> MLXArray {
                 switch mode {
                 case .glm: logits.asType(.float32)
-                case .vlmGenerateStep: (logits - logSumExp(logits, axis: -1, keepDims: true)).asType(.float32)
+                case .deepseekReference: (logits - logSumExp(logits, axis: -1, keepDims: true)).asType(.float32)
                 }
             }
             Stream().synchronize()
@@ -187,18 +184,26 @@ struct GLMParityCommand: AsyncParsableCommand {
             // final prompt position.
             let prefillStarted = Date()
             var lastLogits: MLXArray?
-            var start = 0
-            while start < promptTokens.count {
-                let remaining = promptTokens.count - start
-                let length = mode == .vlmGenerateStep && remaining > 1
-                    ? min(stepSize, remaining - 1) : min(stepSize, remaining)
-                let end = start + length
-                let chunk = MLXArray(promptTokens[start ..< end].map(Int32.init)).reshaped([1, end - start])
-                let logits = readout(model(chunk, cache: cache)[0, -1, 0...])
+            switch mode {
+            case .deepseekReference:
+                let input = LMInput(tokens: MLXArray(promptTokens.map(Int32.init)))
+                guard case .logits(let prepared) = try model.prepare(
+                    input, cache: cache, state: nil, prefill: .init(stepSize: stepSize))
+                else { throw GLMParityError.unexpectedPrepareResult }
+                let logits = readout(prepared.logits[0, -1, 0...])
                 eval(logits)
-                if mode == .vlmGenerateStep { eval(cache) }
+                eval(cache)
                 lastLogits = logits
-                start = end
+            case .glm:
+                var start = 0
+                while start < promptTokens.count {
+                    let end = start + min(stepSize, promptTokens.count - start)
+                    let chunk = MLXArray(promptTokens[start ..< end].map(Int32.init)).reshaped([1, end - start])
+                    let logits = readout(model(chunk, cache: cache)[0, -1, 0...])
+                    eval(logits)
+                    lastLogits = logits
+                    start = end
+                }
             }
             guard let prefillLogits = lastLogits else { throw GLMParityError.emptyPrompt }
             let prefillSeconds = Date().timeIntervalSince(prefillStarted)
@@ -210,29 +215,43 @@ struct GLMParityCommand: AsyncParsableCommand {
                 guard step < logitSteps else { return nil }
                 return take(logits, MLXArray(reference.topIdx[step].map(Int32.init)))
             }
+            // Rank the entire candidate vocabulary: gathering only oracle IDs
+            // cannot detect an unseen token entering the candidate top five.
+            func topFive(_ logits: MLXArray, step: Int) -> MLXArray? {
+                guard step < logitSteps, reference.topIdx[step].count >= 5 else { return nil }
+                return argSort(-logits, axis: -1)[0 ..< min(5, logits.size)]
+            }
             var tokens: [Int] = []
+            var freeTopFive: [[Int]] = []
             var freeLogits: [[Float]] = []
             var pendingToken = argMax(prefillLogits, axis: -1)
             var pendingGathered = gathered(prefillLogits, step: 0)
-            asyncEval([pendingToken] + (pendingGathered.map { [$0] } ?? []))
+            var pendingTopFive = topFive(prefillLogits, step: 0)
+            asyncEval([pendingToken] + (pendingGathered.map { [$0] } ?? [])
+                + (pendingTopFive.map { [$0] } ?? []))
             let decodeStarted = Date()
             var firstTokenAt = decodeStarted
             for step in 0 ..< decodeSteps {
                 var nextToken: MLXArray?
                 var nextGathered: MLXArray?
+                var nextTopFive: MLXArray?
                 if step + 1 < decodeSteps {
                     let logits = readout(model(pendingToken.reshaped([1, 1]), cache: cache)[0, -1, 0...])
                     let token = argMax(logits, axis: -1)
                     nextToken = token
                     nextGathered = gathered(logits, step: step + 1)
-                    asyncEval([token] + (nextGathered.map { [$0] } ?? []))
+                    nextTopFive = topFive(logits, step: step + 1)
+                    asyncEval([token] + (nextGathered.map { [$0] } ?? [])
+                        + (nextTopFive.map { [$0] } ?? []))
                 }
                 tokens.append(pendingToken.item(Int.self))
                 if let pendingGathered { freeLogits.append(pendingGathered.asArray(Float.self)) }
+                if step < logitSteps { freeTopFive.append(pendingTopFive?.asArray(Int.self) ?? []) }
                 if step == 0 { firstTokenAt = Date() }
                 guard let nextToken else { break }
                 pendingToken = nextToken
                 pendingGathered = nextGathered
+                pendingTopFive = nextTopFive
             }
             Stream().synchronize()
             let decodeEnded = Date()
@@ -244,7 +263,8 @@ struct GLMParityCommand: AsyncParsableCommand {
                 oracleTopLogit: Array(reference.topLogit.prefix(logitSteps)),
                 tokens: tokens,
                 argmaxTokens: tokens,
-                gatheredLogits: freeLogits
+                gatheredLogits: freeLogits,
+                candidateTopFive: freeTopFive
             )
 
             // Teacher-forced pass: only needed when the free run left the
@@ -252,6 +272,8 @@ struct GLMParityCommand: AsyncParsableCommand {
             var forced: GLMParityComparison?
             if freeComparison.firstDivergence != nil {
                 var forcedTops = [argMax(prefillLogits, axis: -1).item(Int.self)]
+                var forcedTopFive = logitSteps > 0
+                    ? [topFive(prefillLogits, step: 0)?.asArray(Int.self) ?? []] : []
                 var forcedLogits: [[Float]] = gathered(prefillLogits, step: 0).map { [$0.asArray(Float.self)] } ?? []
                 for step in 1 ..< decodeSteps {
                     let fed = MLXArray([Int32(reference.greedy[step - 1])]).reshaped([1, 1])
@@ -263,6 +285,9 @@ struct GLMParityCommand: AsyncParsableCommand {
                     } else {
                         eval(top)
                     }
+                    if step < logitSteps {
+                        forcedTopFive.append(topFive(logits, step: step)?.asArray(Int.self) ?? [])
+                    }
                     forcedTops.append(top.item(Int.self))
                 }
                 forced = GLMParityComparison(
@@ -271,7 +296,8 @@ struct GLMParityCommand: AsyncParsableCommand {
                     oracleTopLogit: Array(reference.topLogit.prefix(logitSteps)),
                     tokens: forcedTops,
                     argmaxTokens: forcedTops,
-                    gatheredLogits: forcedLogits
+                    gatheredLogits: forcedLogits,
+                    candidateTopFive: forcedTopFive
                 )
             }
 
@@ -324,8 +350,8 @@ struct GLMParityCommand: AsyncParsableCommand {
 
 /// `dsv4-parity` — lab-only greedy parity of DeepSeek V4 against the
 /// `dsv4-reference` oracles (#2111, slice 4). The `glm-parity` harness with
-/// the reference lane's mlx-vlm `generate_step` chunking and log-softmax
-/// comparison (`GLMParityCommand.Mode.vlmGenerateStep`). The oracle JSON
+/// the QAT-off reference lane's bounded full-context serving preparation and
+/// log-softmax comparison (`GLMParityCommand.Mode.deepseekReference`). The oracle JSON
 /// comes from `scripts/lab/cb-studio/glm53_oracle_json.py`, which maps the
 /// `.npz` `top_logprob` array to `top_logit`.
 struct DSV4ParityCommand: AsyncParsableCommand {
@@ -346,9 +372,9 @@ struct DSV4ParityCommand: AsyncParsableCommand {
 
     @Option(
         name: .customLong("prefill-step-size"),
-        help: "Prompt chunk size. Default 2048, the dsv4-reference lane's prefill_step_size."
+        help: "Requested prefill step size; DeepSeek serving retains its bounded reference plan."
     )
-    var prefillStepSize: Int = 2048
+    var prefillStepSize: Int = DeepseekV4Model.prefillStepSize
 
     @Option(
         name: .customLong("mlx-cache-limit-mb"),
@@ -362,17 +388,19 @@ struct DSV4ParityCommand: AsyncParsableCommand {
     func run() async throws {
         try await GLMParityCommand.runParity(
             modelDir: modelDir, oracle: oracle, steps: steps, prefillStepSize: prefillStepSize,
-            mlxCacheLimitMB: mlxCacheLimitMB, output: output, mode: .vlmGenerateStep)
+            mlxCacheLimitMB: mlxCacheLimitMB, output: output, mode: .deepseekReference)
     }
 }
 
 enum GLMParityError: Error, CustomStringConvertible {
     case emptyPrompt
+    case unexpectedPrepareResult
     case invalidOracle(String)
 
     var description: String {
         switch self {
         case .emptyPrompt: "oracle prompt is empty"
+        case .unexpectedPrepareResult: "DeepSeek preparation did not return logits"
         case .invalidOracle(let reason): "invalid oracle: \(reason)"
         }
     }
@@ -418,6 +446,11 @@ struct GLMParityComparison: Codable, Equatable, Sendable {
     let matchingTokens: Int
     let top1Compared: Int
     let top1Agreement: Int
+    let top5Compared: Int
+    let top5Agreement: Int
+    let top5MismatchSteps: [Int]
+    let candidateTopFive: [[Int]]
+    let oracleTopTwoGaps: [Double]
     let maxAbsLogitDiff: Double?
     let maxAbsLogitDiffPerStep: [Double]
     let tokens: [Int]
@@ -428,7 +461,8 @@ struct GLMParityComparison: Codable, Equatable, Sendable {
         oracleTopLogit: [[Float]],
         tokens: [Int],
         argmaxTokens: [Int],
-        gatheredLogits: [[Float]]
+        gatheredLogits: [[Float]],
+        candidateTopFive: [[Int]] = []
     ) {
         let compared = min(oracleGreedy.count, tokens.count)
         comparedTokens = compared
@@ -437,6 +471,18 @@ struct GLMParityComparison: Codable, Equatable, Sendable {
         let top1Steps = min(oracleTopIdx.count, argmaxTokens.count)
         top1Compared = top1Steps
         top1Agreement = (0 ..< top1Steps).filter { argmaxTokens[$0] == oracleTopIdx[$0].first }.count
+        self.candidateTopFive = candidateTopFive
+        let top5Steps = (0 ..< min(oracleTopIdx.count, candidateTopFive.count)).filter {
+            $0 < compared && oracleTopIdx[$0].count >= 5 && candidateTopFive[$0].count == 5
+        }
+        top5Compared = top5Steps.count
+        top5MismatchSteps = top5Steps.filter {
+            Set(oracleTopIdx[$0].prefix(5)) != Set(candidateTopFive[$0])
+        }
+        top5Agreement = top5Compared - top5MismatchSteps.count
+        oracleTopTwoGaps = oracleTopLogit.prefix(top1Steps).compactMap {
+            $0.count >= 2 ? Double($0[0]) - Double($0[1]) : nil
+        }
         let perStep = zip(gatheredLogits, oracleTopLogit).map { mine, theirs in
             zip(mine, theirs).map { Double(abs($0 - $1)) }.max() ?? 0
         }

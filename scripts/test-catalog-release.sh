@@ -1,12 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+SOURCE_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+TMP="$(umask 077 && mktemp -d -t macprovider-catalog-test.XXXXXXXX)"
+trap 'rm -rf "$TMP"' EXIT
+# These signature, generated-byte and hostile-input tests use the committed
+# published catalog. Keep its real runtime pin in a throwaway current-source
+# fixture so a candidate fork does not mask the rejection each test exercises.
+ROOT="$TMP/repository"
+mkdir "$ROOT"
+GIT_NO_REPLACE_OBJECTS=1 git -C "$SOURCE_ROOT" archive --format=tar HEAD | tar -xf - -C "$ROOT"
+catalog_commit="$(GIT_NO_REPLACE_OBJECTS=1 git -C "$SOURCE_ROOT" log -1 --format=%H HEAD -- phase3-binary/catalog/autotune/release.json)"
+GIT_NO_REPLACE_OBJECTS=1 git -C "$SOURCE_ROOT" show "$catalog_commit:phase3-binary/Package.resolved" \
+  > "$ROOT/phase3-binary/Package.resolved"
+export GIT_DIR="$(git -C "$SOURCE_ROOT" rev-parse --absolute-git-dir)"
+export GIT_NO_REPLACE_OBJECTS=1
 VERIFY="$ROOT/scripts/catalog-release.py"
 CANONICAL="$ROOT/phase3-binary/catalog/autotune"
 STATIC="$ROOT/phase3-binary/dist/static"
-TMP="$(umask 077 && mktemp -d -t macprovider-catalog-test.XXXXXXXX)"
-trap 'rm -rf "$TMP"' EXIT
 
 fail() {
   echo "FAIL: $*" >&2
