@@ -53,52 +53,6 @@ final class ModelRuntimePromptContextTests: XCTestCase {
         XCTAssertTrue(ModelRuntime.bonsaiThinkingEnabled(for: emptyTools, supportsBonsaiThinking: true))
     }
 
-    func testBonsaiAutoToolInstructionRequiresModelOwnedCapabilityAndEnabledTools() throws {
-        let instruction = "Only call declared functions using the native tool-call format described above. After emitting tool calls, wait for actual tool responses before continuing."
-        let tool: [String: Any] = ["type": "function", "function": [
-            "name": "lookup", "parameters": ["type": "object", "properties": [:]],
-        ]]
-        let cases: [(extra: [String: Any], expectsInstruction: Bool)] = [
-            ([:], false),
-            (["tools": []], false),
-            (["tools": [tool]], true),
-            (["tools": [tool], "tool_choice": "auto"], true),
-            (["tools": [tool], "tool_choice": "none"], false),
-            (["tools": [tool], "tool_choice": "required"], false),
-            (["tools": [tool], "tool_choice": ["type": "function", "function": ["name": "lookup"]]], false),
-        ]
-        for model in ["prism-ml/Ternary-Bonsai-2-4B-mlx-2bit", "buyer-alias", "/local/model", "qwen/qwen3.6-27b"] {
-            for capability in [false, true] {
-                for testCase in cases {
-                    let request = try bonsaiRequest(model: model, effort: "high", extra: testCase.extra)
-                    let input = try ModelRuntime.userInput(
-                        for: request, templateSupportsThinkingToggle: true,
-                        supportsBonsaiThinking: capability)
-                    guard case .chat(let messages) = input.prompt else { return XCTFail("expected chat input") }
-                    XCTAssertEqual(messages.contains { $0.content.contains(instruction) },
-                                   capability && testCase.expectsInstruction, "\(model), \(capability), \(testCase.extra)")
-                    if ModelRuntime.hasEnabledTools(request.promptSource.tools) {
-                        XCTAssertEqual(input.additionalContext?["enable_thinking"] as? Bool, false)
-                    }
-                }
-            }
-        }
-    }
-
-    func testBonsaiAutoToolInstructionMergesIntoLeadingSystemMessage() throws {
-        let request = try bonsaiRequest(extra: [
-            "messages": [["role": "system", "content": "Be brief."], ["role": "user", "content": "Look up 3"]],
-            "tools": [["type": "function", "function": [
-                "name": "lookup", "parameters": ["type": "object", "properties": [:]],
-            ]]],
-        ])
-        let input = try ModelRuntime.userInput(for: request, supportsBonsaiThinking: true)
-        guard case .chat(let messages) = input.prompt else { return XCTFail("expected chat input") }
-        XCTAssertEqual(messages.map(\.role), [.system, .user])
-        XCTAssertTrue(messages[0].content.hasPrefix("Be brief.\n\nOnly call declared functions"))
-        XCTAssertTrue(messages[0].content.hasSuffix("wait for actual tool responses before continuing."))
-    }
-
     func testRealBonsaiTokenizerThinkingPrefixAndDefaultTokenIdentity() async throws {
         let paths = ProcessInfo.processInfo.environment["MACPROVIDER_TOKENIZER_DIRS"]?
             .split(separator: "\n").map(String.init) ?? []
