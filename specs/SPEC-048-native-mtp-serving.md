@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.65
+**Version:** 0.1.66
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.65",
+  "version": "0.1.66",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -506,12 +506,20 @@ The authorized dependency tuple is exact:
 
 | Repository | Fork tag | Revision | Upstream base |
 |---|---|---|---|
-| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.12` | `f75f92b0e85958a3219d295e1906a1a0889e6702` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
+| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.13` | `5ee4333a8c052d9d0afc58db66b8976ea5fa398e` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
 | `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.11` | `c774cb0934c7503bc3fe1c3d1afbe44c728e8891` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
 | `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.6` | `51edbb37620aef7c860ab5d7cdb7bf5b14333da2` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
 | `https://github.com/Augustas11/mlx-c` | `v0.6.0-macprovider.2` | `2b1ff2b5b5129a6115771da32e1bac3b6b01ab01` | `ml-explore/mlx-c` pinned base (`ebc88f10caa1b625e6b581437a8dea6df8a70085`) |
 
-The tuple adds LFM2 MoE reference-prefill arithmetic to the previously pinned
+`3.32.3-macprovider.13` is one commit on `3.32.3-macprovider.12`
+(`f75f92b0e85958a3219d295e1906a1a0889e6702`): GPT-OSS attention passes its
+per-head sinks to a cache that conforms to `KVCacheSinkAttentionProtocol`,
+so a batched cache attends rows at different key offsets each over its own
+keys (SPEC-038 FR-CB2) instead of the model calling SDPA over the padded
+batch. Caches that do not conform, and every other model, keep the previous
+path.
+
+`3.32.3-macprovider.12` added LFM2 MoE reference-prefill arithmetic to the previously pinned
 mlx-swift-lm `3.32.3-macprovider.10.15.1`
 (`36d24585f9373c2661f61f5e5b485c8d66c43a2b`). The LM change opts only
 LFM2 MoE model-owned linear projections into the reference route. The Swift
@@ -2161,6 +2169,10 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.66 (2026-11-01)** — R003 names mlx-swift-lm `3.32.3-macprovider.13`
+  (`5ee4333a8c052d9d0afc58db66b8976ea5fa398e`): GPT-OSS sink attention
+  through batched caches. Swift, C and core pins are unchanged. A native-MTP
+  admission bound to `.12` rebinds identity only (MTP-13).
 - **0.1.65 (2026-10-31)** — R003 names the LFM-only reference-prefill tuple
   across LM, Swift, C and core. Default-false routing and single-token decode
   preserve existing model behavior; signed admission and cross-model hardware

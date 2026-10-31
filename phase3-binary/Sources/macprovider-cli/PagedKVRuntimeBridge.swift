@@ -4977,7 +4977,7 @@ private enum NativeMTPPendingLayerResolution {
     }
 }
 
-private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheAttentionProtocol, @unchecked Sendable {
+private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAttentionProtocol, @unchecked Sendable {
     fileprivate struct PendingMTPResolution {
         let rowCache: PagedKVCache
         let inputTokenCount: Int
@@ -5237,6 +5237,30 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheAttenti
         scale: Float,
         mask: MLXFast.ScaledDotProductAttentionMaskMode
     ) -> MLXArray {
+        attendRows(queries: queries, keys: incomingKeys, values: incomingValues, scale: scale, mask: mask, sinks: nil)
+    }
+
+    /// GPT-OSS attention with per-head sinks takes the same per-row route:
+    /// every split row's call carries the sinks the model's own call would.
+    func updateAndAttend(
+        queries: MLXArray,
+        keys incomingKeys: MLXArray,
+        values incomingValues: MLXArray,
+        scale: Float,
+        mask: MLXFast.ScaledDotProductAttentionMaskMode,
+        sinks: MLXArray
+    ) -> MLXArray {
+        attendRows(queries: queries, keys: incomingKeys, values: incomingValues, scale: scale, mask: mask, sinks: sinks)
+    }
+
+    private func attendRows(
+        queries: MLXArray,
+        keys incomingKeys: MLXArray,
+        values incomingValues: MLXArray,
+        scale: Float,
+        mask: MLXFast.ScaledDotProductAttentionMaskMode,
+        sinks: MLXArray?
+    ) -> MLXArray {
         let queryTokens = queries.dim(2)
         let packedRows = preparedMTPPackedRowMaps?.map { (queryOffset: $0.queryOffset, inputCount: $0.inputCount) }
         let offsetsBefore = preUpdateOffsets
@@ -5246,7 +5270,9 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheAttenti
         let (keys, values) = update(keys: incomingKeys, values: incomingValues)
         insideUpdateAndAttend = false
         func batched() -> MLXArray {
-            MLXFast.scaledDotProductAttention(queries: queries, keys: keys, values: values, scale: scale, mask: mask)
+            MLXFast.scaledDotProductAttention(
+                queries: queries, keys: keys, values: values, scale: scale, mask: mask, sinks: sinks
+            )
         }
         // Each row's keys start at column 0 of the buffer: its whole history,
         // or for a sliding-window row its presented suffix.
@@ -5334,7 +5360,8 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheAttenti
                 keys: keys[row ..< row + 1, 0..., ..<extent.keyTokens, 0...],
                 values: values[row ..< row + 1, 0..., ..<extent.keyTokens, 0...],
                 scale: scale,
-                mask: rowMask
+                mask: rowMask,
+                sinks: sinks
             )
             let paddedColumns = queryTokens - extent.queryTokens
             guard paddedColumns > 0 else { return attended }

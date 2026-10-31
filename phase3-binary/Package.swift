@@ -17,6 +17,9 @@ let package = Package(
         )
     ],
     dependencies: [
+        // Tag 3.32.3-macprovider.13 (5ee4333a) routes GPT-OSS attention with
+        // its sinks through a conforming batched cache
+        // (KVCacheSinkAttentionProtocol), one commit on 3.32.3-macprovider.12.
         // Tag 3.32.3-macprovider.12 adds LFM-only reference-prefill arithmetic
         // on 3.32.3-macprovider.10.15.1 (reference expert order). Other models
         // retain the default route; single-token decode is unchanged. The core
@@ -47,7 +50,7 @@ let package = Package(
         // compatible per-column attention while retaining row-owned caches.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "f75f92b0e85958a3219d295e1906a1a0889e6702"
+            revision: "5ee4333a8c052d9d0afc58db66b8976ea5fa398e"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",
