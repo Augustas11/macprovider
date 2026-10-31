@@ -111,13 +111,18 @@ final class NativeMTPBenchCampaignTests: XCTestCase {
         XCTAssertEqual(try String(contentsOf: existing), "retained measurement")
     }
 
-    func testSpeedManifestRequiresAllNineteenD1GroupsAndExactTwoGoalCells() throws {
+    func testSpeedManifestSupportsBoundedFrozenResumeAndExactTwoGoalCells() throws {
         let speed = "macprovider.native-mtp-resident-speed.v1"
         let records = speedSteps()
         XCTAssertNoThrow(try decode(records, schema: speed).validateStructure())
         XCTAssertThrowsError(try decode(records).validateStructure())
         XCTAssertThrowsError(try decode(steps(), schema: speed).validateStructure())
-        for selector in [[0], Array(0..<19)] {
+        for selector in [[0], Array(13..<19), Array(0..<19)] {
+            var changed = records
+            changed[0]["frozen_group_indices"] = selector
+            XCTAssertNoThrow(try decode(changed, schema: speed).validateStructure())
+        }
+        for selector in [[], [13, 13], [14, 13], [-1], [19]] as [[Int]] {
             var changed = records
             changed[0]["frozen_group_indices"] = selector
             XCTAssertThrowsError(try decode(changed, schema: speed).validateStructure())

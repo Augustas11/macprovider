@@ -298,10 +298,10 @@ struct NativeMTPBenchCampaign: Decodable {
         let depths = [1, 2, 3, 5]
         if isSpeedProbe {
             guard steps.count == 3, steps.map(\.kind) == ["frozen", "matrix", "matrix"],
-                  steps.allSatisfy({ $0.depth == 1 }), steps[0].frozenGroupIndices == nil,
+                  steps.allSatisfy({ $0.depth == 1 }),
                   steps[0].onlyCell == nil,
                   steps[1].onlyCell == "s1-p1536-o128", steps[2].onlyCell == "s4-p1024-o256" else {
-                throw ValidationError("speed probe requires all nineteen frozen D1 groups then exact single1536/four1024 cells")
+                throw ValidationError("speed probe requires frozen D1 groups then exact single1536/four1024 cells")
             }
         } else {
             guard schema == "macprovider.native-mtp-resident-campaign.v1", steps.count == 12,
