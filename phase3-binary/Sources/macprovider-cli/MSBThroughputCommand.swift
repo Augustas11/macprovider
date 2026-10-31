@@ -204,13 +204,15 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             throw ExitCode(1)
         }
 
-        let cacheKinds = try await container.perform { context in
-            try Self.msbCacheKinds(model: context.model)
+        let cacheTopology = try await container.perform { context in
+            try Self.msbCacheTopology(model: context.model)
         }
-        guard let cacheKinds, !cacheKinds.isEmpty else {
+        guard let cacheTopology else {
             FileHandle.standardError.write(Data("msb-throughput: model reports unsupported cache topology\n".utf8))
             throw ExitCode(1)
         }
+        let cacheKinds = cacheTopology.cacheKinds
+        let recurrentStateLayout = cacheTopology.recurrentStateLayout
         let pooled = Self.isDeepseekV4Pool(cacheKinds)
         if pooled {
             try Self.validateDeepseekV4Harness(engine: engine, scenario: scenario, compiled: compile, rows: rows)
@@ -229,34 +231,34 @@ struct MSBThroughputCommand: AsyncParsableCommand {
                 return
             }
         case .msb03:
-            try await runMSB03(modelID: modelID, container: container, layerCount: layerCount, cacheKinds: cacheKinds)
+            try await runMSB03(modelID: modelID, container: container, layerCount: layerCount, cacheKinds: cacheKinds, recurrentStateLayout: recurrentStateLayout)
             return
         case .msb05:
             try await runMSB05(modelID: modelID, container: container, layerCount: layerCount)
             return
         case .parity:
-            try await runParity(modelID: modelID, container: container, layerCount: layerCount, cacheKinds: cacheKinds)
+            try await runParity(modelID: modelID, container: container, layerCount: layerCount, cacheKinds: cacheKinds, recurrentStateLayout: recurrentStateLayout)
             return
         case .isolation:
-            try await runIsolation(modelID: modelID, container: container, layerCount: layerCount, cacheKinds: cacheKinds)
+            try await runIsolation(modelID: modelID, container: container, layerCount: layerCount, cacheKinds: cacheKinds, recurrentStateLayout: recurrentStateLayout)
             return
         case .replay:
-            try await runReplay(modelID: modelID, container: container, layerCount: layerCount, cacheKinds: cacheKinds)
+            try await runReplay(modelID: modelID, container: container, layerCount: layerCount, cacheKinds: cacheKinds, recurrentStateLayout: recurrentStateLayout)
             return
         case .drain:
-            try await runDrain(modelID: modelID, container: container, layerCount: layerCount, cacheKinds: cacheKinds)
+            try await runDrain(modelID: modelID, container: container, layerCount: layerCount, cacheKinds: cacheKinds, recurrentStateLayout: recurrentStateLayout)
             return
         case .raggedPrefill:
-            try await runRaggedPrefillParity(modelID: modelID, container: container, cacheKinds: cacheKinds)
+            try await runRaggedPrefillParity(modelID: modelID, container: container, cacheKinds: cacheKinds, recurrentStateLayout: recurrentStateLayout)
             return
         case .leftovers:
-            try await runIsolation(modelID: modelID, container: container, layerCount: layerCount, cacheKinds: cacheKinds)
-            try await runReplay(modelID: modelID, container: container, layerCount: layerCount, cacheKinds: cacheKinds)
-            try await runDrain(modelID: modelID, container: container, layerCount: layerCount, cacheKinds: cacheKinds)
-            try await runParity(modelID: modelID, container: container, layerCount: layerCount, cacheKinds: cacheKinds)
+            try await runIsolation(modelID: modelID, container: container, layerCount: layerCount, cacheKinds: cacheKinds, recurrentStateLayout: recurrentStateLayout)
+            try await runReplay(modelID: modelID, container: container, layerCount: layerCount, cacheKinds: cacheKinds, recurrentStateLayout: recurrentStateLayout)
+            try await runDrain(modelID: modelID, container: container, layerCount: layerCount, cacheKinds: cacheKinds, recurrentStateLayout: recurrentStateLayout)
+            try await runParity(modelID: modelID, container: container, layerCount: layerCount, cacheKinds: cacheKinds, recurrentStateLayout: recurrentStateLayout)
             return
         case .hybridWindow:
-            try await runHybridWindow(modelID: modelID, container: container, cacheKinds: cacheKinds)
+            try await runHybridWindow(modelID: modelID, container: container, cacheKinds: cacheKinds, recurrentStateLayout: recurrentStateLayout)
             return
         }
 
@@ -321,7 +323,8 @@ struct MSBThroughputCommand: AsyncParsableCommand {
                     prompts: prompts,
                     decodeSteps: decodeTokens,
                     compiled: compiledThisRun,
-                    cacheKinds: cacheKinds
+                    cacheKinds: cacheKinds,
+                    recurrentStateLayout: recurrentStateLayout
                 )
             case .scheduler:
                 return try await runSchedulerDecode(
@@ -330,6 +333,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
                     decodeSteps: decodeTokens,
                     compiled: compiledThisRun,
                     cacheKinds: cacheKinds,
+                    recurrentStateLayout: recurrentStateLayout,
                     // Match serve/parity prefill boundaries so throughput does
                     // not allocate a whole long prompt in one forward.
                     maxPromptChunkTokens: ContinuousBatchSchedulerConfiguration.defaultPromptChunkTokens
@@ -488,8 +492,30 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         var currentToken: Int
     }
 
-    private static func msbCacheKinds(model: any LanguageModel) throws -> [PagedKVSharedForwardBackend.CacheKind]? {
-        PagedKVSharedForwardBackend.CacheKind.kinds(from: try model.newCache(parameters: nil))
+    static func labRecurrentStateLayout(
+        model: any LanguageModel,
+        cacheKinds: [PagedKVSharedForwardBackend.CacheKind]
+    ) -> PagedKVRecurrentStateLayout {
+        // A local model path has no canonical model ID. Select the LFM layout
+        // only from the loaded concrete model and its exact physical cache
+        // topology; every unknown topology remains on the fail-closed default.
+        guard cacheKinds == PagedKVRecurrentStateLayout.lfm25ExpectedCacheKinds,
+              model is LFM2MoEModel || model is LFM2Model
+        else {
+            return .mambaTwoSlot
+        }
+        return .lfm25ShortConvOneSlot
+    }
+
+    private static func msbCacheTopology(
+        model: any LanguageModel
+    ) throws -> (cacheKinds: [PagedKVSharedForwardBackend.CacheKind], recurrentStateLayout: PagedKVRecurrentStateLayout)? {
+        guard let cacheKinds = PagedKVSharedForwardBackend.CacheKind.kinds(
+            from: try model.newCache(parameters: nil)
+        ), !cacheKinds.isEmpty else {
+            return nil
+        }
+        return (cacheKinds, labRecurrentStateLayout(model: model, cacheKinds: cacheKinds))
     }
 
     private static func pagedAttentionLayerCount(_ cacheKinds: [PagedKVSharedForwardBackend.CacheKind]) -> Int {
@@ -517,6 +543,24 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         return sliding.count == cacheKinds.count ? "RotatingKVCache" : "mixed"
     }
 
+    private func makeHarnessBackend(
+        container: ModelContainer,
+        cacheKinds: [PagedKVSharedForwardBackend.CacheKind],
+        recurrentStateLayout: PagedKVRecurrentStateLayout,
+        compiled: Bool
+    ) -> PagedKVSharedForwardBackend {
+        PagedKVSharedForwardBackend(
+            container: container,
+            blockSizeTokens: blockSizeTokens,
+            maxPhysicalBlocks: maxPhysicalBlocks,
+            poolEpoch: 1,
+            layerCount: cacheKinds.count,
+            cacheKinds: cacheKinds,
+            recurrentStateLayout: recurrentStateLayout,
+            compiledDecode: compiled
+        )
+    }
+
     /// Drive `PagedKVSharedForwardBackend.prefill` + a decode loop over
     /// `prompts.count` rows, mirroring `ContinuousBatchScheduler.runDecodeStep`
     /// bookkeeping exactly. Prefill (untimed) commits each whole prompt and samples
@@ -527,16 +571,14 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         prompts: [[Int]],
         decodeSteps: Int,
         compiled: Bool,
-        cacheKinds: [PagedKVSharedForwardBackend.CacheKind]
+        cacheKinds: [PagedKVSharedForwardBackend.CacheKind],
+        recurrentStateLayout: PagedKVRecurrentStateLayout
     ) async throws -> BatchedRunResult {
-        let backend = PagedKVSharedForwardBackend(
+        let backend = makeHarnessBackend(
             container: container,
-            blockSizeTokens: blockSizeTokens,
-            maxPhysicalBlocks: maxPhysicalBlocks,
-            poolEpoch: 1,
-            layerCount: cacheKinds.count,
             cacheKinds: cacheKinds,
-            compiledDecode: compiled
+            recurrentStateLayout: recurrentStateLayout,
+            compiled: compiled
         )
         let allocator = try PagedKVBlockAllocator(
             blockSizeTokens: blockSizeTokens,
@@ -635,6 +677,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         decodeSteps: Int,
         compiled: Bool,
         cacheKinds: [PagedKVSharedForwardBackend.CacheKind],
+        recurrentStateLayout: PagedKVRecurrentStateLayout,
         maxPromptChunkTokens: Int? = nil,
         maxDecodeLockstepWindow: Int? = nil,
         requestedOutputTokens: Int? = nil
@@ -646,6 +689,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         let (scheduler, backend) = try makeHarnessScheduler(
             container: container,
             cacheKinds: cacheKinds,
+            recurrentStateLayout: recurrentStateLayout,
             compiled: compiled,
             maxActiveRows: max(1, prompts.count),
             maxPromptChunkTokens: maxPromptChunkTokens ?? max(1, promptTokens),
@@ -723,6 +767,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
     private func makeHarnessScheduler(
         container: ModelContainer,
         cacheKinds: [PagedKVSharedForwardBackend.CacheKind],
+        recurrentStateLayout: PagedKVRecurrentStateLayout,
         compiled: Bool,
         maxActiveRows: Int,
         maxPromptChunkTokens: Int,
@@ -764,14 +809,11 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         if Self.isDeepseekV4Pool(cacheKinds) {
             inner = DeepseekV4ContinuousBatchBackend(container: container)
         } else {
-            inner = PagedKVSharedForwardBackend(
+            inner = makeHarnessBackend(
                 container: container,
-                blockSizeTokens: blockSizeTokens,
-                maxPhysicalBlocks: maxPhysicalBlocks,
-                poolEpoch: 1,
-                layerCount: cacheKinds.count,
                 cacheKinds: cacheKinds,
-                compiledDecode: compiled
+                recurrentStateLayout: recurrentStateLayout,
+                compiled: compiled
             )
         }
         let backend = MSBSchedulerWindowTimingBackend(inner: inner)
@@ -1013,7 +1055,8 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         modelID: String,
         container: ModelContainer,
         layerCount: Int,
-        cacheKinds: [PagedKVSharedForwardBackend.CacheKind]
+        cacheKinds: [PagedKVSharedForwardBackend.CacheKind],
+        recurrentStateLayout: PagedKVRecurrentStateLayout
     ) async throws {
         let lengths = msb03PromptLengths()
         let prompts = try await buildPrompts(container: container, lengths: lengths)
@@ -1044,6 +1087,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             decodeSteps: decodeTokens,
             compiled: compile,
             cacheKinds: cacheKinds,
+            recurrentStateLayout: recurrentStateLayout,
             maxPromptChunkTokens: 512
         )
         for _ in 0..<runs {
@@ -1053,6 +1097,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
                 decodeSteps: decodeTokens,
                 compiled: compile,
                 cacheKinds: cacheKinds,
+                recurrentStateLayout: recurrentStateLayout,
                 maxPromptChunkTokens: 512
             )
             try assertHealthy(single.batched, expectedRows: 1, expectedTokens: decodeTokens, label: "msb03-single")
@@ -1065,6 +1110,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             decodeSteps: decodeTokens,
             compiled: compile,
             cacheKinds: cacheKinds,
+            recurrentStateLayout: recurrentStateLayout,
             maxPromptChunkTokens: 512
         )
         for _ in 0..<runs {
@@ -1074,6 +1120,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
                 decodeSteps: decodeTokens,
                 compiled: compile,
                 cacheKinds: cacheKinds,
+                recurrentStateLayout: recurrentStateLayout,
                 maxPromptChunkTokens: 512
             )
             try assertHealthy(batched.batched, expectedRows: lengths.count, expectedTokens: decodeTokens, label: "msb03-ragged")
@@ -1248,7 +1295,8 @@ struct MSBThroughputCommand: AsyncParsableCommand {
     private func runRaggedPrefillParity(
         modelID: String,
         container: ModelContainer,
-        cacheKinds: [PagedKVSharedForwardBackend.CacheKind]
+        cacheKinds: [PagedKVSharedForwardBackend.CacheKind],
+        recurrentStateLayout: PagedKVRecurrentStateLayout
     ) async throws {
         typealias Chunk = (row: Int, start: Int, end: Int)
         let lengths = [1100, 800, 650]
@@ -1271,14 +1319,11 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         let sets = max(1, runs)
 
         func run(prompts: [[Int]], calls: [[Chunk]]) async throws -> [[Int]] {
-            let backend = PagedKVSharedForwardBackend(
+            let backend = makeHarnessBackend(
                 container: container,
-                blockSizeTokens: blockSizeTokens,
-                maxPhysicalBlocks: maxPhysicalBlocks,
-                poolEpoch: 1,
-                layerCount: cacheKinds.count,
                 cacheKinds: cacheKinds,
-                compiledDecode: false
+                recurrentStateLayout: recurrentStateLayout,
+                compiled: false
             )
             let allocator = try PagedKVBlockAllocator(
                 blockSizeTokens: blockSizeTokens,
@@ -1420,7 +1465,8 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         modelID: String,
         container: ModelContainer,
         layerCount: Int,
-        cacheKinds: [PagedKVSharedForwardBackend.CacheKind]
+        cacheKinds: [PagedKVSharedForwardBackend.CacheKind],
+        recurrentStateLayout: PagedKVRecurrentStateLayout
     ) async throws {
         let compared = parityTokens
         let parityPrefillStepSize = ContinuousBatchSchedulerConfiguration.defaultPromptChunkTokens
@@ -1441,6 +1487,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
                 decodeSteps: compared,
                 compiled: compile,
                 cacheKinds: cacheKinds,
+                recurrentStateLayout: recurrentStateLayout,
                 maxPromptChunkTokens: parityPrefillStepSize,
                 requestedOutputTokens: compared
             ))
@@ -1451,6 +1498,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             decodeSteps: compared,
             compiled: compile,
             cacheKinds: cacheKinds,
+            recurrentStateLayout: recurrentStateLayout,
             maxPromptChunkTokens: parityPrefillStepSize,
             requestedOutputTokens: compared
         )
@@ -1531,13 +1579,15 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         modelID: String,
         container: ModelContainer,
         layerCount: Int,
-        cacheKinds: [PagedKVSharedForwardBackend.CacheKind]
+        cacheKinds: [PagedKVSharedForwardBackend.CacheKind],
+        recurrentStateLayout: PagedKVRecurrentStateLayout
     ) async throws {
         let prompts = try await buildDistinctPrompts(container: container, count: 2, tokens: promptTokens)
         let decodeSteps = max(8, min(decodeTokens, 32))
         let (scheduler, _) = try makeHarnessScheduler(
             container: container,
             cacheKinds: cacheKinds,
+            recurrentStateLayout: recurrentStateLayout,
             compiled: compile,
             maxActiveRows: 2,
             maxPromptChunkTokens: max(1, promptTokens),
@@ -1626,7 +1676,8 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         modelID: String,
         container: ModelContainer,
         layerCount: Int,
-        cacheKinds: [PagedKVSharedForwardBackend.CacheKind]
+        cacheKinds: [PagedKVSharedForwardBackend.CacheKind],
+        recurrentStateLayout: PagedKVRecurrentStateLayout
     ) async throws {
         let prompt = try await buildDistinctPrompts(container: container, count: 1, tokens: promptTokens)[0]
         let decodeSteps = max(8, min(decodeTokens, 32))
@@ -1634,6 +1685,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         let (scheduler, _) = try makeHarnessScheduler(
             container: container,
             cacheKinds: cacheKinds,
+            recurrentStateLayout: recurrentStateLayout,
             compiled: compile,
             maxActiveRows: 1,
             maxPromptChunkTokens: max(1, promptTokens),
@@ -1707,13 +1759,15 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         modelID: String,
         container: ModelContainer,
         layerCount: Int,
-        cacheKinds: [PagedKVSharedForwardBackend.CacheKind]
+        cacheKinds: [PagedKVSharedForwardBackend.CacheKind],
+        recurrentStateLayout: PagedKVRecurrentStateLayout
     ) async throws {
         let prompts = try await buildDistinctPrompts(container: container, count: 3, tokens: promptTokens)
         let decodeSteps = max(8, min(decodeTokens, 32))
         let (scheduler, _) = try makeHarnessScheduler(
             container: container,
             cacheKinds: cacheKinds,
+            recurrentStateLayout: recurrentStateLayout,
             compiled: compile,
             maxActiveRows: 2,
             maxPromptChunkTokens: max(1, promptTokens),
@@ -1944,7 +1998,8 @@ struct MSBThroughputCommand: AsyncParsableCommand {
     private func runHybridWindow(
         modelID: String,
         container: ModelContainer,
-        cacheKinds: [PagedKVSharedForwardBackend.CacheKind]
+        cacheKinds: [PagedKVSharedForwardBackend.CacheKind],
+        recurrentStateLayout: PagedKVRecurrentStateLayout
     ) async throws {
         let chunk = ContinuousBatchSchedulerConfiguration.defaultPromptChunkTokens
         guard cacheKinds.contains(.recurrentMamba) else {
@@ -1986,10 +2041,12 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         let decodedTokens = Double(rows * decodeTokens)
         for _ in 0..<runs {
             let reference = try await runFixedBatchWindow(
-                container: container, prompts: prompts, window: 1, cacheKinds: cacheKinds
+                container: container, prompts: prompts, window: 1, cacheKinds: cacheKinds,
+                recurrentStateLayout: recurrentStateLayout
             )
             let candidate = try await runFixedBatchWindow(
-                container: container, prompts: prompts, window: candidateWindow, cacheKinds: cacheKinds
+                container: container, prompts: prompts, window: candidateWindow, cacheKinds: cacheKinds,
+                recurrentStateLayout: recurrentStateLayout
             )
             if let first = referenceTokens {
                 referenceRepeats = referenceRepeats && reference.tokens == first
@@ -2095,17 +2152,15 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         container: ModelContainer,
         prompts: [[Int]],
         window: Int,
-        cacheKinds: [PagedKVSharedForwardBackend.CacheKind]
+        cacheKinds: [PagedKVSharedForwardBackend.CacheKind],
+        recurrentStateLayout: PagedKVRecurrentStateLayout
     ) async throws -> FixedBatchWindowRun {
         let chunk = ContinuousBatchSchedulerConfiguration.defaultPromptChunkTokens
-        let backend = PagedKVSharedForwardBackend(
+        let backend = makeHarnessBackend(
             container: container,
-            blockSizeTokens: blockSizeTokens,
-            maxPhysicalBlocks: maxPhysicalBlocks,
-            poolEpoch: 1,
-            layerCount: cacheKinds.count,
             cacheKinds: cacheKinds,
-            compiledDecode: false
+            recurrentStateLayout: recurrentStateLayout,
+            compiled: false
         )
         let allocator = try PagedKVBlockAllocator(
             blockSizeTokens: blockSizeTokens,
