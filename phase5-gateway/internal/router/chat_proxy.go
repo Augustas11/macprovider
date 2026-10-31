@@ -35,6 +35,7 @@ type chatRequest struct {
 	Stream         bool              `json:"stream"`
 	ResponseFormat json.RawMessage   `json:"response_format"`
 	Tools          json.RawMessage   `json:"tools"`
+	PromptCacheKey json.RawMessage   `json:"prompt_cache_key"`
 }
 
 type tokenUsage struct {
@@ -694,7 +695,11 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// provider cache identity. Their ciphertext can share a plaintext prefix,
 	// and the provider-side privacy contract explicitly rejects cache grants.
 	if relayBlindExecutionFor(r) == nil {
-		internalConversation, convIsAutoPrefix, invalidConvTag = s.chatConversationKey(upCtx, r, subject, authn.Demo, chat.Messages, chat.Tools)
+		cacheKey := promptCacheKeyString(chat.PromptCacheKey)
+		if adapter := responsesAdapterFromContext(r.Context()); adapter != nil && adapter.promptCacheKey != "" {
+			cacheKey = adapter.promptCacheKey
+		}
+		internalConversation, convIsAutoPrefix, invalidConvTag = s.chatConversationKey(upCtx, r, subject, authn.Demo, chat.Messages, chat.Tools, cacheKey)
 	}
 	if invalidConvTag {
 		s.refundWalletAwareReservation(subject, requestID(r))
@@ -3756,6 +3761,33 @@ func prefixConversationTag(messages []json.RawMessage, tools json.RawMessage) (s
 	return "auto.prefix." + hex.EncodeToString(sum[:16]), true
 }
 
+// maxPromptCacheKeyBytes bounds the buyer prompt_cache_key that partitions the
+// auto-prefix tag. Longer or non-string values are ignored, not rejected, so
+// clients that send one keep working with the unpartitioned scaffold key.
+const maxPromptCacheKeyBytes = 256
+
+func promptCacheKeyString(raw json.RawMessage) string {
+	var key string
+	if len(bytes.TrimSpace(raw)) == 0 || json.Unmarshal(raw, &key) != nil {
+		return ""
+	}
+	key = strings.TrimSpace(key)
+	if len(key) > maxPromptCacheKeyBytes {
+		return ""
+	}
+	return key
+}
+
+// partitionPrefixConversationTag folds a buyer prompt_cache_key into an
+// auto.prefix.* tag. The result keeps the reserved auto.prefix. form.
+func partitionPrefixConversationTag(tag, promptCacheKey string) string {
+	if promptCacheKey == "" {
+		return tag
+	}
+	sum := sha256.Sum256([]byte(tag + "\nprompt_cache_key\n" + promptCacheKey))
+	return "auto.prefix." + hex.EncodeToString(sum[:16])
+}
+
 func normalizeAutoPrefixTools(tools json.RawMessage) json.RawMessage {
 	trimmed := bytes.TrimSpace(tools)
 	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
@@ -3787,7 +3819,13 @@ func normalizeAutoPrefixTools(tools json.RawMessage) json.RawMessage {
 //     routing.sticky_enabled. isAutoPrefix=true; caller sets
 //     X-MacProvider-Internal-Conv-Cache (coordinator reads for cache context,
 //     skips applySticky/stickyStore). Demo MUST NOT receive a key.
-func (s *Server) chatConversationKey(ctx context.Context, r *http.Request, subject usageSubject, demo bool, messages []json.RawMessage, tools json.RawMessage) (key string, isAutoPrefix bool, invalidTag bool) {
+//
+// promptCacheKey is the buyer's OpenAI prompt_cache_key, already bounded by
+// promptCacheKeyString. When present it partitions the auto-prefix tag
+// (SPEC-006-R014): agent clients send one key per session, and sessions that
+// share a scaffold must not share one provider conversation, which serializes
+// their turns and evicts each other's prefix.
+func (s *Server) chatConversationKey(ctx context.Context, r *http.Request, subject usageSubject, demo bool, messages []json.RawMessage, tools json.RawMessage, promptCacheKey string) (key string, isAutoPrefix bool, invalidTag bool) {
 	if s.cfg.Routing.StickyEnabled && !demo {
 		if raw := r.Header.Get("X-MacProvider-Conversation"); raw != "" {
 			tag := strings.TrimSpace(raw)
@@ -3808,7 +3846,7 @@ func (s *Server) chatConversationKey(ctx context.Context, r *http.Request, subje
 	// the coordinator sticky paths never see it.
 	if !demo && subject.AccountID != "" && strings.TrimSpace(s.cfg.Auth.KeyHashSecret) != "" {
 		if tag, ok := prefixConversationTag(messages, tools); ok {
-			return s.deriveConversationKey(subject.AccountID, tag), true, false
+			return s.deriveConversationKey(subject.AccountID, partitionPrefixConversationTag(tag, promptCacheKey)), true, false
 		}
 	}
 	return "", false, false

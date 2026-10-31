@@ -36,6 +36,9 @@ type responsesAdapter struct {
 	toolChoice        any
 	textFormat        any
 	parallelToolCalls bool
+	// promptCacheKey partitions the auto-prefix conversation key; it is not
+	// forwarded in the translated chat body.
+	promptCacheKey string
 	// customToolNames are Responses `custom` tools served as a function with
 	// one string argument `input` (SPEC-006 §19, #2107 D9).
 	customToolNames map[string]bool
@@ -300,6 +303,7 @@ func (a *responsesAdapter) translateRequest(body []byte) ([]byte, *responsesTran
 		Include            json.RawMessage  `json:"include"`
 		Truncation         *string          `json:"truncation"`
 		Background         *bool            `json:"background"`
+		PromptCacheKey     json.RawMessage  `json:"prompt_cache_key"`
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
 		return nil, &responsesTranslationError{code: "invalid_request", message: "Malformed JSON"}
@@ -382,6 +386,7 @@ func (a *responsesAdapter) translateRequest(body []byte) ([]byte, *responsesTran
 		return nil, &responsesTranslationError{code: "invalid_request", message: "Could not encode translated request"}
 	}
 	a.model = req.Model
+	a.promptCacheKey = promptCacheKeyString(req.PromptCacheKey)
 	a.instructions = req.Instructions
 	a.maxOutputTokens = req.MaxOutputTokens
 	a.stream = req.Stream

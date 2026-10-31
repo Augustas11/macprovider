@@ -152,7 +152,7 @@
     {
       "spec_id": "SPEC-006",
       "title": "Buyer API Gateway: Mac Provider's first public buyer surface",
-      "version": "0.9.70",
+      "version": "0.9.71",
       "path": "specs/SPEC-006-buyer-api.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -7142,11 +7142,13 @@
       "state": "pending",
       "implementation": [
         "phase5-gateway/internal/router/chat_proxy.go:prefixConversationTag",
-        "phase5-gateway/internal/router/chat_proxy.go:chatConversationKey"
+        "phase5-gateway/internal/router/chat_proxy.go:chatConversationKey",
+        "phase5-gateway/internal/router/chat_proxy.go:partitionPrefixConversationTag"
       ],
       "tests": [
         "phase5-gateway/internal/router/server_test.go:TestPrefixConversationTagHelpers",
-        "phase5-gateway/internal/router/server_test.go:TestPrefixCacheConversationSharesToolsAcrossUsers"
+        "phase5-gateway/internal/router/server_test.go:TestPrefixCacheConversationSharesToolsAcrossUsers",
+        "phase5-gateway/internal/router/server_test.go:TestAutoPrefixKeyPartitionsByPromptCacheKey"
       ],
       "journeys": [],
       "evidence": [],
