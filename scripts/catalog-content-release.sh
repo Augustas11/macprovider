@@ -1014,7 +1014,8 @@ VALS
 # owed by that provider release and recorded in the verdict
 # (buyer_serving_e2e_owed), re-checked under the lease. The live side is judged with the not-buyer-serving.json that was
 # in force for it: the one committed with the reviewed release the live
-# release is (compare-live) or descends from, found on origin/main history.
+# release is (compare-live) or descends from, found on origin/main history
+# (for a bundle-published release, with its first committed ledger row).
 live_exclusions() { # <out>: that exclusion list, or fail
   local key
   key="$(python3 -c '
@@ -1052,6 +1053,24 @@ for commit in commits:  # newest first
     # its pinned rows, so an empty list is its historically exact set.
     open(out, "wb").write(excl if excl is not None else
                           b'{"models": [], "schema_version": "macprovider.not-buyer-serving.v1"}\n')
+    print(commit)
+    raise SystemExit(0)
+# A release published from a native-MTP binding bundle never commits its
+# release.json; it reaches origin/main only as a release-ledger row. Use the
+# exclusions committed with the first origin/main ledger that records it.
+LEDGER = "phase3-binary/catalog/autotune/release-ledger.json"
+commits = subprocess.run(["git", "-C", repo, "log", "--reverse", "--format=%H", "origin/main", "--", LEDGER],
+                         capture_output=True, text=True, check=True).stdout.split()
+for commit in commits:  # oldest first
+    raw = show(commit, LEDGER)
+    try:
+        recorded = key in json.loads(raw)["releases"] if raw else False
+    except (ValueError, KeyError, TypeError):
+        recorded = False
+    excl = show(commit, EXCL) if recorded else None
+    if excl is None:
+        continue
+    open(out, "wb").write(excl)
     print(commit)
     raise SystemExit(0)
 raise SystemExit(2)
