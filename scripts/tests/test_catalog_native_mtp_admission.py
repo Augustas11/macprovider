@@ -197,6 +197,43 @@ class NativeMTPAdmissionReleaseTest(unittest.TestCase):
                 with self.assertRaisesRegex(catalog_release.CatalogError, "runtime_revision.*Package.resolved mlx-swift-lm pin"):
                     catalog_release.verify()
 
+    def test_verify_binds_runtime_pin_to_the_bound_release_commit(self):
+        # Main may move the mlx-swift-lm pin before the next CLI cut; the
+        # admission keeps matching the provider build its release input binds.
+        head = catalog_release.subprocess.run(
+            ["git", "-C", str(ROOT), "rev-parse", "HEAD"], stdout=catalog_release.subprocess.PIPE, text=True, check=True,
+        ).stdout.strip()
+        committed = catalog_release.subprocess.run(
+            ["git", "-C", str(ROOT), "show", f"HEAD:{catalog_release.PACKAGE_RESOLVED_PATH.relative_to(ROOT).as_posix()}"],
+            stdout=catalog_release.subprocess.PIPE, text=True, check=True,
+        ).stdout
+        if committed != catalog_release.PACKAGE_RESOLVED_PATH.read_text():
+            self.skipTest("Package.resolved has uncommitted changes")
+        with self.activated() as harness:
+            previous = harness.stage(harness.root / "previous")
+            self.write_native_inputs(harness)
+            release_path = harness.catalog / "native-mtp-admission-release.json"
+            bound = json.loads(release_path.read_text())
+            bound["entry"]["source_commit"] = head
+            bound["entry"]["provider_revision"] = head
+            release_path.write_text(json.dumps(bound))
+            self.cut_native(harness, previous)
+            resolved = json.loads(committed)
+            for pin in resolved["pins"]:
+                if pin["identity"] == "mlx-swift-lm":
+                    pin["state"]["revision"] = "0" * 40
+            moved_pin = harness.root / "Package.resolved"
+            moved_pin.write_text(json.dumps(resolved))
+            with patch.object(catalog_release, "PACKAGE_RESOLVED_PATH", moved_pin), \
+                    patch.object(catalog_release, "bound_release_package_resolved", lambda commit: committed if commit == head else None):
+                catalog_release.verify()
+            stale = json.loads(release_path.read_text())
+            stale["entry"]["source_commit"] = "a" * 40
+            release_path.write_text(json.dumps(stale))
+            with patch.object(catalog_release, "PACKAGE_RESOLVED_PATH", moved_pin):
+                with self.assertRaisesRegex(catalog_release.CatalogError, "runtime_revision.*Package.resolved mlx-swift-lm pin"):
+                    catalog_release.verify()
+
     def test_release_input_must_name_this_release_and_bind_the_committed_bank(self):
         with self.activated() as harness:
             previous = harness.stage(harness.root / "previous")

@@ -2701,25 +2701,63 @@ def validate_native_mtp_admission(
     return body
 
 
-def require_native_mtp_runtime_pin(body: dict) -> None:
-    """A source-tree release must admit the runtime compiled by SwiftPM.
-
-    Keep this in the source generation/verification path: a historical signed
-    release directory need not match the verifier checkout's current runtime.
-    """
+def mlx_swift_lm_pin(resolved_text: str, where: str) -> str:
     try:
-        resolved = json.loads(PACKAGE_RESOLVED_PATH.read_text("utf-8"))
+        resolved = json.loads(resolved_text)
         pins = [pin for pin in resolved["pins"] if pin["identity"] == "mlx-swift-lm"]
         revision = pins[0]["state"]["revision"] if len(pins) == 1 else None
-    except (OSError, ValueError, KeyError, TypeError) as error:
-        fail(f"native-MTP runtime_revision: cannot read mlx-swift-lm pin from Package.resolved: {error}")
+    except (ValueError, KeyError, TypeError) as error:
+        fail(f"native-MTP runtime_revision: cannot read mlx-swift-lm pin from {where}: {error}")
     if not isinstance(revision, str) or re.fullmatch(r"[0-9a-f]{40}", revision) is None:
-        fail("native-MTP runtime_revision: Package.resolved must have exactly one valid mlx-swift-lm pin")
+        fail(f"native-MTP runtime_revision: {where} must have exactly one valid mlx-swift-lm pin")
+    return revision
+
+
+def bound_release_package_resolved(source_commit: object) -> str | None:
+    """Package.resolved at the provider release the admission is bound to,
+    or None when that commit is not in this checkout (shallow clones)."""
+    if not isinstance(source_commit, str) or re.fullmatch(r"[0-9a-f]{40}", source_commit) is None:
+        return None
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(ROOT), "show", f"{source_commit}:phase3-binary/Package.resolved"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return result.stdout if result.returncode == 0 else None
+
+
+def require_native_mtp_runtime_pin(body: dict, source_commit: object = None) -> None:
+    """A source-tree release must admit the runtime its bound provider
+    release compiled.
+
+    The release input binds one signed provider build (source_commit). Its
+    runtime is the mlx-swift-lm pin at that commit, not at the checkout's
+    HEAD: main may move the pin before the next CLI cut, and the admission
+    must keep matching the binary that serves until the cut rebinds it.
+    When the bound commit is not in this checkout, fall back to the working
+    tree. A historical signed release directory need not match either.
+    """
+    bound = bound_release_package_resolved(source_commit)
+    if bound is not None:
+        revision = mlx_swift_lm_pin(bound, f"Package.resolved at bound release {source_commit}")
+        where = f"the bound release {source_commit} Package.resolved mlx-swift-lm pin"
+    else:
+        try:
+            text = PACKAGE_RESOLVED_PATH.read_text("utf-8")
+        except OSError as error:
+            fail(f"native-MTP runtime_revision: cannot read mlx-swift-lm pin from Package.resolved: {error}")
+        revision = mlx_swift_lm_pin(text, "Package.resolved")
+        where = "Package.resolved mlx-swift-lm pin"
     for index, entry in enumerate(body["entries"]):
         if entry["runtime_revision"] != revision:
             fail(
                 f"native-MTP entries[{index}].runtime_revision {entry['runtime_revision']!r} "
-                f"differs from Package.resolved mlx-swift-lm pin {revision!r}"
+                f"differs from {where} {revision!r}"
             )
 
 
@@ -2746,7 +2784,11 @@ def resolve_native_mtp_admission(
         )
     except generator.SidecarError as error:
         fail(f"generate: native-MTP admission: {error}")
-    require_native_mtp_runtime_pin(generator.strict_json_loads(sidecar.decode("utf-8")))
+    release_input = generator.strict_json_loads(NATIVE_MTP_RELEASE_INPUT_PATH.read_text("utf-8"))
+    require_native_mtp_runtime_pin(
+        generator.strict_json_loads(sidecar.decode("utf-8")),
+        release_input.get("entry", {}).get("source_commit") if isinstance(release_input, dict) else None,
+    )
     manifest_bytes = (CATALOG_DIR / NATIVE_MTP_MANIFEST_NAME).read_bytes()
     bank = (CATALOG_DIR / NATIVE_MTP_BANK_NAME).read_bytes()
     body = validate_native_mtp_admission(
