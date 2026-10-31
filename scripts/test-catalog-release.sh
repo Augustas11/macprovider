@@ -87,8 +87,10 @@ expect_rejected() {
 }
 
 python3 "$VERIFY" verify
-# A new source cut must refuse a runtime mismatch, even though the committed
-# publication above remains verifiable with its original identity.
+# The admission's runtime pin is read at the release input's bound provider
+# commit, so moving the working-tree pin alone keeps the bound release
+# valid, while a tuple runtime that differs from the bound commit's pin must
+# refuse a new source cut.
 cp "$ROOT/phase3-binary/Package.resolved" "$TMP/Package.resolved"
 python3 - "$ROOT/phase3-binary/Package.resolved" <<'PY_PIN'
 import json
@@ -101,12 +103,29 @@ for pin in resolved["pins"]:
         pin["state"]["revision"] = "0" * 40
 path.write_text(json.dumps(resolved))
 PY_PIN
+python3 "$VERIFY" verify >/dev/null 2>&1 \
+  || fail "a moved working-tree pin refused a release bound to its provider commit"
+mv "$TMP/Package.resolved" "$ROOT/phase3-binary/Package.resolved"
+TUPLE_INPUT="$CANONICAL/native-mtp-admission-tuple.json"
+cp "$TUPLE_INPUT" "$TMP/native-mtp-admission-tuple.json"
+python3 - "$TUPLE_INPUT" <<'PY_TUPLE'
+import json
+import pathlib
+import sys
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text())
+entries = value if isinstance(value, list) else [value]
+for item in entries:
+    item["entry"]["runtime_revision"] = "0" * 40
+    item["entry"]["ordinary_baseline"]["runtime_revision"] = "0" * 40
+path.write_text(json.dumps(value))
+PY_TUPLE
 if python3 "$VERIFY" generate >"$TMP/runtime-pin.out" 2>&1; then
   fail "source generation accepted a mismatched native-MTP runtime pin"
 fi
-grep -q "differs from Package.resolved mlx-swift-lm pin '0000000000000000000000000000000000000000'" \
-  "$TMP/runtime-pin.out"
-mv "$TMP/Package.resolved" "$ROOT/phase3-binary/Package.resolved"
+grep -q "runtime_revision '0000000000000000000000000000000000000000' differs from the bound release" \
+  "$TMP/runtime-pin.out" || fail "unexpected runtime-pin refusal: $(cat "$TMP/runtime-pin.out")"
+mv "$TMP/native-mtp-admission-tuple.json" "$TUPLE_INPUT"
 echo "PASS: source generation refuses a mismatched native-MTP runtime pin"
 python3 - "$VERIFY" "$CANONICAL" "$STATIC" "$ROOT/phase4-coordinator/dist/coordinator.yaml" <<'PY'
 import importlib.util
