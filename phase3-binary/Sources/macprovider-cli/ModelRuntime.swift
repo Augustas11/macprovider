@@ -5363,6 +5363,8 @@ maxTokens: 1,
         self.currentModelID = nil
         currentDraftModelID = nil
         currentDraftTargetModelID = nil
+        // Creative inference inherits the process budget, not the unloaded LFM cap.
+        finalizeMLXCacheLimitAfterSwap(nil, nativeLoad: hadMLXModel)
         await providerStatus?.markLanguageUnloadedForCreativeHold()
         if let ticket = residentWeightsTicket { residentWeightsTicket = nil; _ = await ticket.end() }
         // Fixture runtimes own no MLX allocations and must not initialize a GPU.
@@ -5509,6 +5511,7 @@ maxTokens: 1,
         currentModelID = nil
         currentDraftModelID = nil
         currentDraftTargetModelID = nil
+        finalizeMLXCacheLimitAfterSwap(nil, nativeLoad: testLoader == nil)
         await conversationCache.purgeAllHot()
         if let ticket = residentWeightsTicket { residentWeightsTicket = nil; _ = await ticket.end() }
         await providerStatus?.markLanguageUnloadedForCreativeHold()
@@ -5522,8 +5525,12 @@ maxTokens: 1,
         if let reload = creativeNativeReloadForTest { return try await reload() }
         #endif
         guard let authority = targetAuthority(for: target),
-              let directory = try? Self.localModelDirectory(for: authority.modelArgument),
-              let load = await Self.loadNativeMTPDrafterIfAdmitted(
+              let directory = try? Self.localModelDirectory(for: authority.modelArgument) else {
+            throw ModelRuntimeLoadError(target: target, reason: "native MTP restoration admission failed")
+        }
+        // A creative hold released the language model's budget before unloading.
+        applyMLXCacheLimitForModelLoad(target)
+        guard let load = await Self.loadNativeMTPDrafterIfAdmitted(
                 mode: nativeMTPMode,
                 targetModelID: target,
                 targetModelRevision: authority.artifactSHA256,

@@ -1359,6 +1359,56 @@ final class ModelRuntimeSwapTests: XCTestCase {
         XCTAssertEqual(recorder.limitBytes, 512 * 1024 * 1024)
     }
 
+    func testLFMCachePolicyReleasesForCreativeHoldAndReappliesOnRestore() async throws {
+        let lfm = "liquidai/lfm2.5-24b-a2b"
+        let recorder = CachePolicySwapRecorder()
+        let runtime = makeRuntime(modelID: "other-model", warmSwapEnabled: true,
+                                  completion: { _, _ in throw TestError.loadFailed })
+        await runtime.setMLXCacheLimitSwapHooksForTest(application: { modelID, state in
+            recorder.apply(modelID: modelID, state: state)
+        })
+        try await runtime.beginSwap(targetModelID: lfm).value
+        XCTAssertEqual(recorder.limitBytes, 512 * 1024 * 1024)
+
+        try await runtime.unloadForLocalCreativeHold()
+        let unloaded = await runtime.currentSnapshot()
+        XCTAssertNil(unloaded.modelID)
+        XCTAssertEqual(recorder.modelIDs, [lfm, nil])
+        XCTAssertEqual(recorder.limitBytes, 4 * 1024 * 1024 * 1024)
+
+        try await runtime.restoreAfterLocalCreativeHold()
+        let restored = await runtime.currentSnapshot()
+        XCTAssertEqual(restored.modelID, lfm)
+        XCTAssertEqual(recorder.modelIDs, [lfm, nil, lfm])
+        XCTAssertEqual(recorder.limitBytes, 512 * 1024 * 1024)
+    }
+
+    func testLFMCachePolicyReleasesAfterFailedCreativeRestore() async throws {
+        let lfm = "liquidai/lfm2.5-24b-a2b"
+        let recorder = CachePolicySwapRecorder()
+        let runtime = makeRuntime(modelID: lfm, warmSwapEnabled: true) { _ in
+            throw TestError.loadFailed
+        }
+        await runtime.setMLXCacheLimitSwapHooksForTest(application: { modelID, state in
+            recorder.apply(modelID: modelID, state: state)
+        })
+        try await runtime.unloadForLocalCreativeHold()
+        XCTAssertEqual(recorder.modelIDs, [nil])
+
+        do {
+            try await runtime.restoreAfterLocalCreativeHold()
+            XCTFail("The failed restoration must keep the language model unloaded")
+        } catch {}
+        let snapshot = await runtime.currentSnapshot()
+        XCTAssertNil(snapshot.modelID)
+        XCTAssertEqual(recorder.modelIDs, [nil, nil, nil],
+                       "Both swap failure and partial-restore cleanup must release the policy")
+        XCTAssertEqual(recorder.limitBytes, 4 * 1024 * 1024 * 1024)
+        await runtime.abandonLocalCreativeHold()
+        XCTAssertEqual(recorder.modelIDs.last, .some(nil))
+        XCTAssertEqual(recorder.limitBytes, 4 * 1024 * 1024 * 1024)
+    }
+
     func testLoadFailureRollsBack() async throws {
         let runtime = makeRuntime(modelID: "old-model", modelHash: "old-hash", warmSwapEnabled: true) { _ in
             try await Task.sleep(nanoseconds: 50_000_000)
