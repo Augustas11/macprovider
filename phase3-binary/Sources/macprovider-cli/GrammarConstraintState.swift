@@ -10,11 +10,19 @@ import MLXLMCommon
 final class GrammarConstraintState: @unchecked Sendable, Equatable {
     static func == (lhs: GrammarConstraintState, rhs: GrammarConstraintState) -> Bool { lhs === rhs }
 
-    var fingerprint: String { compiled.fingerprint }
+    var fingerprint: String {
+        callOpenTokenID.map { compiled.fingerprint + ":call-open:\($0)" } ?? compiled.fingerprint
+    }
     private let compiled: Compiled
     private let lock = NSLock()
     private var state: Int
     private var reasoning: Bool
+    /// SPEC-018-R002 declared-function guard for an auto tool turn: sampling
+    /// is untouched until the `<tool_call>` control token opens a call, then
+    /// the grammar admits only a declared function name. Once the name is
+    /// closed the guard waits for the next call again.
+    private let callOpenTokenID: Int?
+    private var awaitingCall: Bool
     private var reasoningTail: [UInt8] = []
     private var failure: APIError?
     private static let close = Array("</think>".utf8)
@@ -140,14 +148,37 @@ final class GrammarConstraintState: @unchecked Sendable, Equatable {
         reasoningProductivePrefixes = reasoningOpen && closeTokenID == nil ? try compiled.reasoningProductivePrefixes() : []
         state = compiled.automaton.initialState
         reasoning = reasoningOpen
+        callOpenTokenID = nil
+        awaitingCall = false
     }
 
-    private init(compiled: Compiled, reasoningOpen: Bool, closeTokenID: Int?) throws {
+    private init(compiled: Compiled, reasoningOpen: Bool, closeTokenID: Int?, callOpenTokenID: Int? = nil) throws {
         self.compiled = compiled
         self.closeTokenID = closeTokenID
         reasoningProductivePrefixes = reasoningOpen && closeTokenID == nil ? try compiled.reasoningProductivePrefixes() : []
         state = compiled.automaton.initialState
         reasoning = reasoningOpen
+        self.callOpenTokenID = callOpenTokenID
+        awaitingCall = callOpenTokenID != nil
+    }
+
+    /// The function-XML call header after `<tool_call>`: optional whitespace,
+    /// `<function=`, one declared name, `>`. Bytes after `>` stay free so a
+    /// merged `>\n` token remains legal; reaching them releases the guard.
+    static func declaredFunctionHeader(names: [String]) -> ByteGrammar {
+        .sequence([
+            .zeroOrMore(.bytes(Set(" \t\r\n".utf8))), .literal("<function="),
+            .choice(names.sorted().map { .literal($0) }), .literal(">"),
+            .zeroOrMore(.bytes(Set(0...255))),
+        ])
+    }
+
+    /// Test seam for the guard with a synthetic vocabulary.
+    static func declaredFunctionGuard(names: [String], tokens: [Int: [UInt8]], eosTokenIDs: Set<Int>,
+                                      callOpenTokenID: Int) throws -> GrammarConstraintState {
+        try GrammarConstraintState(
+            compiled: Compiled(grammar: declaredFunctionHeader(names: names), tokens: tokens, eos: eosTokenIDs),
+            reasoningOpen: false, closeTokenID: nil, callOpenTokenID: callOpenTokenID)
     }
 
     static func isRequired(_ request: ChatCompletionRequest) -> Bool {
@@ -157,18 +188,36 @@ final class GrammarConstraintState: @unchecked Sendable, Equatable {
         return true
     }
 
+    /// `guardsDeclaredFunctions` comes from the loaded model type (the Prism
+    /// Bonsai-2 function-XML family), never from a buyer-supplied model name.
     static func prepare(request: ChatCompletionRequest, tokenizer: any MLXLMCommon.Tokenizer,
-                        configuration: ModelConfiguration, eosTokenIDs: Set<Int>) throws -> GrammarConstraintState? {
+                        configuration: ModelConfiguration, eosTokenIDs: Set<Int>,
+                        guardsDeclaredFunctions: Bool = false) throws -> GrammarConstraintState? {
         do {
-            return try prepareChecked(request: request, tokenizer: tokenizer, configuration: configuration, eosTokenIDs: eosTokenIDs)
+            if isRequired(request) {
+                guard let language = try GrammarTemplates.grammar(for: request, traits: request.outputTraits) else { return nil }
+                return try prepareChecked(
+                    grammar: .sequence([.zeroOrMore(.bytes(Set(" \t\r\n".utf8))), language]), request: request,
+                    tokenizer: tokenizer, configuration: configuration, eosTokenIDs: eosTokenIDs, callOpenTokenID: nil)
+            }
         } catch let error as APIError { throw error }
         catch { throw Compiled.error("Unable to prepare the local tokenizer for constrained output") }
+        guard guardsDeclaredFunctions, !request.outputTraits.reasoningOpen,
+              (try? ToolSelectionPolicy.selection(request.promptSource.toolChoice)) == .auto,
+              ModelRuntime.hasEnabledTools(request.promptSource.tools),
+              let names = (try? ToolSelectionPolicy.schemas(request)).map({ Array($0.keys) }), !names.isEmpty,
+              let callOpenTokenID = ControlTokenTable.of(tokenizer)?.idsByText["<tool_call>"] else { return nil }
+        // The guard narrows sampling only. If it cannot be compiled (tokenizer
+        // shape, grammar limits) the request keeps unconstrained sampling and
+        // the parser still rejects any undeclared function (fail closed).
+        return try? prepareChecked(
+            grammar: declaredFunctionHeader(names: names), request: request, tokenizer: tokenizer,
+            configuration: configuration, eosTokenIDs: eosTokenIDs, callOpenTokenID: callOpenTokenID)
     }
 
-    private static func prepareChecked(request: ChatCompletionRequest, tokenizer: any MLXLMCommon.Tokenizer,
-                                       configuration: ModelConfiguration, eosTokenIDs: Set<Int>) throws -> GrammarConstraintState? {
-        guard isRequired(request), let language = try GrammarTemplates.grammar(for: request, traits: request.outputTraits) else { return nil }
-        let grammar = ByteGrammar.sequence([.zeroOrMore(.bytes(Set(" \t\r\n".utf8))), language])
+    private static func prepareChecked(grammar: ByteGrammar, request: ChatCompletionRequest, tokenizer: any MLXLMCommon.Tokenizer,
+                                       configuration: ModelConfiguration, eosTokenIDs: Set<Int>,
+                                       callOpenTokenID: Int?) throws -> GrammarConstraintState? {
         let directory: URL
         switch configuration.tokenizerSource {
         case .directory(let url)?: directory = url
@@ -189,14 +238,16 @@ final class GrammarConstraintState: @unchecked Sendable, Equatable {
         cache.lock.lock()
         defer { cache.lock.unlock() }
         if let compiled = cache.entries[key] {
-            return try GrammarConstraintState(compiled: compiled, reasoningOpen: request.outputTraits.reasoningOpen, closeTokenID: closeTokenID)
+            return try GrammarConstraintState(compiled: compiled, reasoningOpen: request.outputTraits.reasoningOpen,
+                                              closeTokenID: closeTokenID, callOpenTokenID: callOpenTokenID)
         }
         let pieces = try vocabulary(data: data, tokenizer: tokenizer)
         let compiled = try Compiled(grammar: grammar, tokens: pieces, eos: eosTokenIDs)
         // A small bounded cache; model/tokenizer identity includes the full file.
         if cache.entries.count >= 2 { cache.entries.removeAll() }
         cache.entries[key] = compiled
-        return try GrammarConstraintState(compiled: compiled, reasoningOpen: request.outputTraits.reasoningOpen, closeTokenID: closeTokenID)
+        return try GrammarConstraintState(compiled: compiled, reasoningOpen: request.outputTraits.reasoningOpen,
+                                          closeTokenID: closeTokenID, callOpenTokenID: callOpenTokenID)
     }
 
     /// Read actual vocabulary IDs, including holes and raw added/special tokens.
@@ -291,6 +342,8 @@ final class GrammarConstraintState: @unchecked Sendable, Equatable {
     func mask(logits: MLXArray) -> MLXArray {
         lock.lock()
         defer { lock.unlock() }
+        // Outside a call header the guard leaves the model's logits unchanged.
+        if awaitingCall, failure == nil { return logits }
         let vocab = logits.dim(-1)
         var allowed: [Int] = []
         do {
@@ -314,6 +367,10 @@ final class GrammarConstraintState: @unchecked Sendable, Equatable {
         lock.lock()
         defer { lock.unlock() }
         guard failure == nil else { return }
+        if awaitingCall {
+            if token == callOpenTokenID { awaitingCall = false; state = compiled.automaton.initialState }
+            return
+        }
         if compiled.eos.contains(token) {
             if !reasoning, compiled.automaton.accepting(state: state) { return }
             if !reasoning, let bytes = compiled.tokens[token],
@@ -330,6 +387,8 @@ final class GrammarConstraintState: @unchecked Sendable, Equatable {
             return
         }
         state = next.state; reasoning = next.reasoning; reasoningTail = next.tail
+        // The header language accepts only after `>` closes a declared name.
+        if callOpenTokenID != nil, compiled.automaton.accepting(state: state) { awaitingCall = true }
     }
 
     func validate() throws {
