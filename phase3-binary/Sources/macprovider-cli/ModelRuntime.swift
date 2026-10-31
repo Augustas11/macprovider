@@ -521,7 +521,7 @@ actor ContinuousBatchTextPreparationLane {
                     ),
                     modelHasRecurrentLayers: hybrid,
                     toolCallPrefill: toolCallPrefill,
-                    grammarConstraint: try GrammarConstraintState.prepare(request: request, tokenizer: tokenizer, configuration: configuration, eosTokenIDs: modelStopTokenIDs)
+                    grammarConstraint: try GrammarConstraintState.prepare(request: request, tokenizer: tokenizer, configuration: configuration, eosTokenIDs: modelStopTokenIDs, guardsDeclaredFunctions: supportsBonsaiThinking)
                 ),
                 ModelRuntime.StreamingDetokenizer(tokenizer: tokenizer)
             )
@@ -7678,7 +7678,8 @@ maxTokens: 1,
                     )
                     _ = try GrammarConstraintState.prepare(
                         request: request, tokenizer: context.tokenizer, configuration: context.configuration,
-                        eosTokenIDs: Self.generationStopTokenIDs(for: context))
+                        eosTokenIDs: Self.generationStopTokenIDs(for: context),
+                        guardsDeclaredFunctions: context.model is PrismHadamardQwen35)
                     let count = prepared.text.tokens.size
                     try Self.validatePromptTokenCount(count, maxContextTokens: maxContextTokens)
                     return count
@@ -7795,7 +7796,7 @@ maxTokens: 1,
                     ),
                     modelHasRecurrentLayers: hybrid,
                     toolCallPrefill: toolCallPrefill,
-                    grammarConstraint: try GrammarConstraintState.prepare(request: request, tokenizer: tokenizer, configuration: context.configuration, eosTokenIDs: Self.generationStopTokenIDs(for: context)),
+                    grammarConstraint: try GrammarConstraintState.prepare(request: request, tokenizer: tokenizer, configuration: context.configuration, eosTokenIDs: Self.generationStopTokenIDs(for: context), guardsDeclaredFunctions: context.model is PrismHadamardQwen35),
                     promptSnapshotTokenCount: Self.nonEmpty(request.conversationKey) == nil ? nil
                         : Self.conversationPromptSnapshotTokenCount(
                             promptTokenIds: promptTokens.map(Int32.init),
@@ -10088,7 +10089,8 @@ maxTokens: boundedMaxTokens,
                     let stopTokenFilter = Self.toolAwareStopTokenFilter(stopTokenFilter, grammar: Self.toolGrammar(for: request))
                     let grammarConstraint = try GrammarConstraintState.prepare(
                         request: request, tokenizer: context.tokenizer, configuration: context.configuration,
-                        eosTokenIDs: Self.generationStopTokenIDs(for: context))
+                        eosTokenIDs: Self.generationStopTokenIDs(for: context),
+                        guardsDeclaredFunctions: context.model is PrismHadamardQwen35)
                     // Cancelled during preparation (client gone, or local
                     // work preempted under SPEC-001-R011): release the gate.
                     try Task.checkCancellation()
@@ -10996,7 +10998,8 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                     let stopTokenFilter = Self.toolAwareStopTokenFilter(stopTokenFilter, grammar: Self.toolGrammar(for: request))
                     let grammarConstraint = try GrammarConstraintState.prepare(
                         request: request, tokenizer: context.tokenizer, configuration: context.configuration,
-                        eosTokenIDs: Self.generationStopTokenIDs(for: context))
+                        eosTokenIDs: Self.generationStopTokenIDs(for: context),
+                        guardsDeclaredFunctions: context.model is PrismHadamardQwen35)
                     // Cancelled during preparation (client gone, or local
                     // work preempted under SPEC-001-R011): release the gate.
                     try Task.checkCancellation()
@@ -15022,10 +15025,7 @@ maxTokens: maxTokens,
             messages = Self.withLeadingSystemInstruction("Call the declared function \(name) using the native tool-call format described above. \(callCountInstruction) Return only calls to that function; arguments must match its schema.", to: messages)
         case .none:
             messages = Self.withLeadingSystemInstruction("Do not call any function or tool. Respond with assistant text.", to: messages)
-        case .auto:
-            if supportsBonsaiThinking, Self.hasEnabledTools(request.promptSource.tools) {
-                messages = Self.withLeadingSystemInstruction("Only call declared functions using the native tool-call format described above. After emitting tool calls, wait for actual tool responses before continuing.", to: messages)
-            }
+        case .auto: break
         }
         // Tool history goes through the loaded template (SPEC-018 §3.6). A
         // profiled identity is the loaded model even under a local alias.
