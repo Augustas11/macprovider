@@ -1343,12 +1343,12 @@ note "ok: GO when a live exclusion of a pinned model is dropped (e)"
 git -C "$R" update-ref refs/remotes/origin/main "$COMMIT"
 setup_env; touch "$CCR_TEST_CTL/compare-regression"; expect_no_go "live release matches no reviewed commit (e)" buyer_serving_e2e
 # A native-binding bundle release never commits its release.json: its live
-# exclusions are the ones on origin/main at its ledger row's generated_at.
+# exclusions come from the first origin/main commit whose ledger records it.
 setup_env; printf 'test-bundle-v1\n' >"$CCR_TEST_CTL/compare-match"
 expect_no_go "bundle release with no committed ledger row (e)" buyer_serving_e2e
 python3 - "$R/phase3-binary/catalog/autotune/release-ledger.json" >"$T/bundle-ledger.json" <<'PY'
 import json, sys
-d = json.load(open(sys.argv[1])); d["releases"]["test-bundle-v1"] = {"stub": True, "generated_at": "2099-01-01T00:00:00Z"}
+d = json.load(open(sys.argv[1])); d["releases"]["test-bundle-v1"] = {"stub": True}
 print(json.dumps(d, indent=2, sort_keys=True))
 PY
 rm -f "$T/live-index"
@@ -1359,9 +1359,9 @@ BUNDLE_ROW_COMMIT="$(git -C "$R" commit-tree "$(GIT_INDEX_FILE="$T/live-index" g
 git -C "$R" update-ref refs/remotes/origin/main "$BUNDLE_ROW_COMMIT"
 run preflight
 if [ "$(verdict_check buyer_serving_e2e)" != true ] || ! grep -q "live exclusions from ${BUNDLE_ROW_COMMIT:0:12}" "$T/out"; then
-  fail "a bundle release recorded only in the ledger must take the exclusions in force at its generated_at (rc=$RC): $(cat "$T/out")"
+  fail "a bundle release recorded only in the ledger must take that commit's exclusions (rc=$RC): $(cat "$T/out")"
 fi
-note "ok: bundle release live exclusions are the ones in force at its generated_at (e)"
+note "ok: bundle release live exclusions come from its first committed ledger row (e)"
 rm -f "$CCR_TEST_CTL/compare-match"
 git -C "$R" update-ref refs/remotes/origin/main "$COMMIT"
 
