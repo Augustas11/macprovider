@@ -3862,7 +3862,23 @@ maxTokens: 1,
 
         // One setup boundary for serve, self-test and native benchmark callers.
         // A nil-model or preloaded test runtime must not initialize Metal.
-        applyMLXCacheLimitForModelLoad(modelID)
+        let cacheModelID = Self.modelCachePolicyID(
+            target: modelID, configuredModelID: modelID,
+            verifiedCatalogModelID: verifiedCatalogModelID)
+        let initialCacheLimit: Int?
+        if let cacheModelID, Self.lfm25MLXCacheModelIDs.contains(cacheModelID.lowercased()) {
+            let previous = Memory.cacheLimit
+            self.mlxCacheLimitBeforeLFM25 = previous
+            let baseline = mlxCacheLimitMBForLoading.map { $0 * 1024 * 1024 } ?? previous
+            let bytes = Self.modelScopedMLXCacheLimitBytes(modelID: cacheModelID, baselineBytes: baseline)
+            Memory.cacheLimit = bytes
+            initialCacheLimit = bytes
+        } else {
+            initialCacheLimit = Self.applyMLXCacheLimit(megabytes: mlxCacheLimitMBForLoading)
+        }
+        if let initialCacheLimit {
+            FileHandle.standardError.write(Data("mlx_cache_limit_bytes=\(initialCacheLimit)\n".utf8))
+        }
         let targetLoadPath = modelLoadPath ?? modelID
         let candidateNativeMTPLoad: NativeMTPRuntimeLoadResult?
         let candidateNativeMTPDisabledReason: NativeMTPStatusReason
