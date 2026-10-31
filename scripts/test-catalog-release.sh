@@ -1,12 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+SOURCE_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+TMP="$(umask 077 && mktemp -d -t macprovider-catalog-test.XXXXXXXX)"
+trap 'rm -rf "$TMP"' EXIT
+# These signature, generated-byte and hostile-input tests use the committed
+# published catalog. Keep its real runtime pin in a throwaway current-source
+# fixture so a candidate fork does not mask the rejection each test exercises.
+ROOT="$TMP/repository"
+mkdir "$ROOT"
+GIT_NO_REPLACE_OBJECTS=1 git -C "$SOURCE_ROOT" archive --format=tar HEAD | tar -xf - -C "$ROOT"
+catalog_commit="$(GIT_NO_REPLACE_OBJECTS=1 git -C "$SOURCE_ROOT" log -1 --format=%H HEAD -- phase3-binary/catalog/autotune/release.json)"
+GIT_NO_REPLACE_OBJECTS=1 git -C "$SOURCE_ROOT" show "$catalog_commit:phase3-binary/Package.resolved" \
+  > "$ROOT/phase3-binary/Package.resolved"
+export GIT_DIR="$(git -C "$SOURCE_ROOT" rev-parse --absolute-git-dir)"
+export GIT_NO_REPLACE_OBJECTS=1
 VERIFY="$ROOT/scripts/catalog-release.py"
 CANONICAL="$ROOT/phase3-binary/catalog/autotune"
 STATIC="$ROOT/phase3-binary/dist/static"
-TMP="$(umask 077 && mktemp -d -t macprovider-catalog-test.XXXXXXXX)"
-trap 'rm -rf "$TMP"' EXIT
 
 fail() {
   echo "FAIL: $*" >&2
@@ -76,6 +87,27 @@ expect_rejected() {
 }
 
 python3 "$VERIFY" verify
+# A new source cut must refuse a runtime mismatch, even though the committed
+# publication above remains verifiable with its original identity.
+cp "$ROOT/phase3-binary/Package.resolved" "$TMP/Package.resolved"
+python3 - "$ROOT/phase3-binary/Package.resolved" <<'PY_PIN'
+import json
+import pathlib
+import sys
+path = pathlib.Path(sys.argv[1])
+resolved = json.loads(path.read_text())
+for pin in resolved["pins"]:
+    if pin["identity"] == "mlx-swift-lm":
+        pin["state"]["revision"] = "0" * 40
+path.write_text(json.dumps(resolved))
+PY_PIN
+if python3 "$VERIFY" generate >"$TMP/runtime-pin.out" 2>&1; then
+  fail "source generation accepted a mismatched native-MTP runtime pin"
+fi
+grep -q "differs from Package.resolved mlx-swift-lm pin '0000000000000000000000000000000000000000'" \
+  "$TMP/runtime-pin.out"
+mv "$TMP/Package.resolved" "$ROOT/phase3-binary/Package.resolved"
+echo "PASS: source generation refuses a mismatched native-MTP runtime pin"
 python3 - "$VERIFY" "$CANONICAL" "$STATIC" "$ROOT/phase4-coordinator/dist/coordinator.yaml" <<'PY'
 import importlib.util
 import base64
@@ -1422,5 +1454,57 @@ python3 "$VERIFY" check-tier2-binding --require-serving \
   --rate-card "$STATIC/rate-card.json" \
   --tier2 "$CANONICAL/tier2-catalog.json" \
   --exclusions "$CANONICAL/not-buyer-serving.json"
+
+# Unsigned LFM intake must be ready for the existing release validators without
+# mutating or signing the currently published catalog.
+python3 - "$VERIFY" "$ROOT/phase3-binary/catalog/intake/lfm25-24b" <<'PY'
+import hashlib
+import importlib.util
+import json
+import pathlib
+import sys
+
+spec = importlib.util.spec_from_file_location("lfm_catalog_release", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+staging = pathlib.Path(sys.argv[2])
+candidate = module.validate_candidate((staging / "autotune-candidates.json").read_bytes())
+artifacts = module.validate_artifact_source(
+    (staging / "autotune-artifacts-source.json").read_bytes(), candidate
+)
+demand = module.validate_demand((staging / "demand-rank.json").read_bytes())
+source = module.validate_rate_card_source((staging / "rate-card-source.json").read_bytes())
+rates = module.expand_rate_card(source, module.artifact_rate_classes(artifacts), candidate)
+assert rates == (staging / "rate-card.json").read_bytes(), "LFM staged rate projection drift"
+module.validate_release_inputs(candidate, demand, module.validate_rate_card(rates))
+
+key = "liquidai/lfm2.5-24b-a2b"
+row = candidate["rows"][key]
+artifact = artifacts["models"][key]["artifacts"]["mlx-4bit"]
+manifest = json.loads((staging / "artifact-manifest.json").read_text())
+files = manifest["files"]
+assert len(files) == 12 and len({item["path"] for item in files}) == 12
+payload = "".join(
+    f'{item["path"]}\n{item["size_bytes"]}\n{item["sha256"]}\n'
+    for item in sorted(files, key=lambda item: item["path"])
+).encode()
+digest = hashlib.sha256(payload).hexdigest()
+assert digest == manifest["sha256"] == row["model_sha256"] == artifact["hash"]
+assert digest == "0b2d5786b538be629070b39dfed805bf903768f95aa70591fd4cfe4f803a8992"
+assert sum(item["size_bytes"] for item in files) == manifest["size_bytes"] == artifact["size_bytes"]
+assert row["model_id"] == manifest["model_id"] == artifact["source_ref"]["repo_id"]
+assert row["model_revision"] == manifest["model_revision"] == artifact["source_ref"]["revision"]
+assert row["model_revision"] == "667408d494bde191c2cb9dd4f4549827816b9275"
+assert row["min_ram_gb"] == artifact["min_ram_gb"] == 20
+assert row["runtime_status"] == "candidate"
+assert artifact["allowed_runtime_sources"] == ["mlx_cache"]
+assert artifacts["models"][key]["rate_class"] == "class-20b-moe"
+assert source["rows"][key] == source["classes"]["class-20b-moe"]
+assert demand["rows"][key] == {
+    "demand_weight": 0, "min_provider_target": 0, "rank": None, "recommendable": False
+}
+assert not (staging / "intake-decision.json").exists(), "candidate staging is not a listed admission"
+print("PASS: unsigned LFM candidate identity, pricing, sizing and admission boundary")
+PY
 
 echo "PASS: catalog release generation and trust failures are locked"

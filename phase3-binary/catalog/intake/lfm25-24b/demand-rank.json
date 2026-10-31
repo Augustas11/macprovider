@@ -1,0 +1,16 @@
+{
+  "cold_start_floor": 0.15,
+  "diversification_band": 0.85,
+  "generated_at": "2026-10-31T04:00:00Z",
+  "policy_version": "autotune-policy-v1",
+  "rows": {
+    "liquidai/lfm2.5-24b-a2b": {
+      "demand_weight": 0,
+      "min_provider_target": 0,
+      "rank": null,
+      "recommendable": false
+    }
+  },
+  "source": "openrouter_completion_token_rank_operator_curated",
+  "version": "staged-2026-10-31-lfm25-24b-candidate-v1"
+}

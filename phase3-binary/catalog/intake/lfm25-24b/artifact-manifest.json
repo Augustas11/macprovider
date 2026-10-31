@@ -1,0 +1,69 @@
+{
+  "files": [
+    {
+      "path": ".gitattributes",
+      "sha256": "34448b82c17d60fec9b65b1f093c115ddbaadc04beb1b0140b6bfed2e012a930",
+      "size_bytes": 1570
+    },
+    {
+      "path": "LICENSE",
+      "sha256": "4d28ca14dedc0b3d0fcc2b3339f0e79931faa33874f3d24f522183a8fc70068c",
+      "size_bytes": 10574
+    },
+    {
+      "path": "README.md",
+      "sha256": "28b1d52bd0bf07c8f1c69e0c1b948c95fbe677884b34e0da716bd3d8cb222f8b",
+      "size_bytes": 3688
+    },
+    {
+      "path": "chat_template.jinja",
+      "sha256": "aadd425edb1d42fe9288e5de3624c21c1c03099129b9cfea5978f1bc67222c0a",
+      "size_bytes": 5496
+    },
+    {
+      "path": "config.json",
+      "sha256": "4901707c3cef43e3cf68a0dedc3e39687de43413cab30578a32c63c643984244",
+      "size_bytes": 2148
+    },
+    {
+      "path": "generation_config.json",
+      "sha256": "d1ecad152cd278e57220364423f5a5b19350f1e6e230ff82281a5c23a3173f16",
+      "size_bytes": 329
+    },
+    {
+      "path": "model-00001-of-00003.safetensors",
+      "sha256": "17e953456c62314a498f1ef5ee8a5f1b51ac83f6b6bb684f160dde4f92cd11c0",
+      "size_bytes": 5318453801
+    },
+    {
+      "path": "model-00002-of-00003.safetensors",
+      "sha256": "c3ae09dba31b3786c325425435021cf5d5bf06c1a79acb31a741e15a47e5bb14",
+      "size_bytes": 5344895125
+    },
+    {
+      "path": "model-00003-of-00003.safetensors",
+      "sha256": "9814144af5045ea8c96e2f1352148fdbe9f8a0085b76df6d6760efbe916e9840",
+      "size_bytes": 2903945409
+    },
+    {
+      "path": "model.safetensors.index.json",
+      "sha256": "7887b03265aef7824c8e5b9a51667e486f889749240d8c59a95f3cd899e86e4a",
+      "size_bytes": 80192
+    },
+    {
+      "path": "tokenizer.json",
+      "sha256": "695be7802a0e4b8a81048f0ff5ebb7fc811a0ba5a6be63dbb24deb5a81096f41",
+      "size_bytes": 17905598
+    },
+    {
+      "path": "tokenizer_config.json",
+      "sha256": "11f1de897317b489dd09199284528382eeb17f566398b16e2039bb2266d26b09",
+      "size_bytes": 363
+    }
+  ],
+  "hash_algorithm": "macprovider.snapshot-manifest.v1",
+  "model_id": "LiquidAI/LFM2.5-24B-A2B-MLX-4bit",
+  "model_revision": "667408d494bde191c2cb9dd4f4549827816b9275",
+  "sha256": "0b2d5786b538be629070b39dfed805bf903768f95aa70591fd4cfe4f803a8992",
+  "size_bytes": 13585304293
+}

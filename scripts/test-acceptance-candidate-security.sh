@@ -606,7 +606,16 @@ python3 "$metadata" validate-provider-payload --directory "$work/provider"
 # The acceptance signer must preserve and parse those exact bytes rather than
 # imposing the compact acceptance-envelope format on them.
 mkdir "$work/pearl-catalog"
-python3 "$root/scripts/catalog-release.py" verify
+# Verify the committed publication with its publication-time runtime identity.
+# Candidate source generation still requires the current SwiftPM pin.
+mkdir "$work/published-repository"
+GIT_NO_REPLACE_OBJECTS=1 git -C "$root" archive --format=tar HEAD \
+  | tar -xf - -C "$work/published-repository"
+catalog_commit="$(GIT_NO_REPLACE_OBJECTS=1 git -C "$root" log -1 --format=%H HEAD -- phase3-binary/catalog/autotune/release.json)"
+GIT_NO_REPLACE_OBJECTS=1 git -C "$root" show "$catalog_commit:phase3-binary/Package.resolved" \
+  > "$work/published-repository/phase3-binary/Package.resolved"
+GIT_DIR="$(git -C "$root" rev-parse --absolute-git-dir)" GIT_NO_REPLACE_OBJECTS=1 \
+  python3 "$work/published-repository/scripts/catalog-release.py" verify
 cp "$root/phase3-binary/catalog/autotune/release.json" \
   "$root/phase3-binary/catalog/autotune/trusted-keys.json" \
   "$root/phase3-binary/catalog/autotune/tier2-catalog.json" \

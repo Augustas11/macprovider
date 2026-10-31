@@ -11,6 +11,8 @@ SCRIPT = Path(__file__).resolve().parents[1] / "check_mlx_core_streams.py"
 OPS_H = """
 namespace mlx::core {
 array add(const array& a, const array& b, StreamOrDevice s = {});
+array quantized_matmul(array x, array w, array scales, array biases, bool transpose,
+    int group_size, int bits, const char* mode, StreamOrDevice s = {}, bool reference_prefill = false);
 array multiply(const array& a, const array& b, StreamOrDevice s = {});
 array equal(const array& a, const array& b, StreamOrDevice s = {});
 array astype(array a, Dtype dtype, StreamOrDevice s = {});
@@ -60,6 +62,29 @@ array f(const array& x, StreamOrDevice s /* = {} */) {
 }
 """)
         self.assertEqual(scan(root), [])
+
+    def test_quantized_prefill_option_preserves_the_stream_slot(self):
+        root = ops_cpp("""
+array f(const array& x, StreamOrDevice s) {
+  auto old = quantized_matmul(x, x, x, x, true, 64, 4, mode, s);
+  return quantized_matmul(x, x, x, x, true, 64, 4, mode, s, true);
+}
+std::vector<array> QuantizedMatmul::jvp(array x) {
+  return {quantized_matmul(x, x, x, x, true, 64, 4, mode, stream(), reference_prefill_)};
+}
+""")
+        self.assertEqual(scan(root), [])
+
+    def test_quantized_prefill_option_does_not_hide_wrong_or_missing_stream(self):
+        root = ops_cpp("""
+array f(const array& x, StreamOrDevice s) {
+  auto missing = quantized_matmul(x, x, x, x, true, 64, 4, mode);
+  auto wrong = quantized_matmul(x, x, x, x, true, 64, 4, mode, Device::gpu, true);
+  return quantized_matmul(x, x, x, x, true, 64, 4, mode, other, s);
+}
+""")
+        findings = scan(root)
+        self.assertEqual(len(findings), 3, findings)
 
     def test_call_without_the_stream_is_reported(self):
         root = ops_cpp("""
