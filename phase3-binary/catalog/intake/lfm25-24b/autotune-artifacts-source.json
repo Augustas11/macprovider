@@ -1,0 +1,31 @@
+{
+  "models": {
+    "liquidai/lfm2.5-24b-a2b": {
+      "artifacts": {
+        "mlx-4bit": {
+          "allowed_runtime_sources": [
+            "mlx_cache"
+          ],
+          "hash": "0b2d5786b538be629070b39dfed805bf903768f95aa70591fd4cfe4f803a8992",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "min_ram_gb": 20,
+          "notes": "Official native LFM2 MoE affine 4-bit group-size-64 snapshot; all 12 per-file SHA-256 and sizes are in artifact-manifest.json. Requires model-scoped 512 MiB MLX cache cap. License is LFM Open License v1.0 with separate provider/operator commercial eligibility and redistribution obligations; verified identity is not unrestricted license eligibility or production admission.",
+          "quantization": "4bit",
+          "runtime_format": "mlx_safetensors",
+          "size_bytes": 13585304293,
+          "source_ref": {
+            "kind": "huggingface_revision",
+            "repo_id": "LiquidAI/LFM2.5-24B-A2B-MLX-4bit",
+            "revision": "667408d494bde191c2cb9dd4f4549827816b9275"
+          },
+          "verification_status": "verified",
+          "verified_at": "2026-10-31"
+        }
+      },
+      "primary_artifact_id": "mlx-4bit",
+      "rate_class": "class-20b-moe"
+    }
+  },
+  "schema_version": "macprovider.autotune-artifacts-source.v1",
+  "source": "operator_curated_autotune_artifact_catalog"
+}

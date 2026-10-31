@@ -1,13 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+SOURCE_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+TMP="$(umask 077 && mktemp -d -t macprovider-gate-matrix.XXXXXXXX)"
+trap 'rm -rf "$TMP"' EXIT
+# The matrix authenticates the committed published catalog, whose signed
+# runtime identity can precede the candidate fork. Use its publication pin
+# only in this isolated fixture; production source verification stays strict.
+ROOT="$TMP/repository"
+mkdir "$ROOT"
+GIT_NO_REPLACE_OBJECTS=1 git -C "$SOURCE_ROOT" archive --format=tar HEAD | tar -xf - -C "$ROOT"
+catalog_commit="$(GIT_NO_REPLACE_OBJECTS=1 git -C "$SOURCE_ROOT" log -1 --format=%H HEAD -- phase3-binary/catalog/autotune/release.json)"
+GIT_NO_REPLACE_OBJECTS=1 git -C "$SOURCE_ROOT" show "$catalog_commit:phase3-binary/Package.resolved" \
+  > "$ROOT/phase3-binary/Package.resolved"
+GIT_DIR="$(git -C "$SOURCE_ROOT" rev-parse --absolute-git-dir)"
+export GIT_DIR GIT_NO_REPLACE_OBJECTS=1
 AUDIT="$ROOT/scripts/audit-autotune-gate-matrix.py"
 CANDIDATE="$ROOT/phase3-binary/catalog/autotune/autotune-candidates.json"
 MIN_GENERATED_AT="2026-07-25T18:05:00Z"
 AS_OF="2026-07-30T12:00:00Z"
-TMP="$(umask 077 && mktemp -d -t macprovider-gate-matrix.XXXXXXXX)"
-trap 'rm -rf "$TMP"' EXIT
 
 python3 - "$AUDIT" "$CANDIDATE" "$TMP/complete.json" <<'PY'
 import copy

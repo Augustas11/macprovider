@@ -2172,6 +2172,7 @@ actor ModelRuntime: ModelRuntimeServing {
     private var continuousBatchingSelfCheckReport: ContinuousBatchingSelfCheckReport?
     // Only real native runtimes select this; preloaded/test runtimes leave it nil.
     private(set) var mlxCacheLimitMBForLoading: Int? = nil
+    private var mlxCacheLimitBeforeLFM25: Int?
     private var hardwareServingRowCap = ProviderCapacity.maxConcurrencyOverrideLimit
     private let warmSwapEnabled: Bool
     private let swapDrainTimeoutSeconds: Int
@@ -2203,6 +2204,16 @@ actor ModelRuntime: ModelRuntimeServing {
     private var labNativeMTPDecodeOutputCap: NativeMTPLabDecodeOutputCap?
     #if DEBUG || MACPROVIDER_LAB_HARNESS
     private var labJourneyWithdrawnCapability: NativeMTPCapability?
+    private var testMLXCacheLimitApplication: (@Sendable (String?, SwapState) -> Void)?
+    private var testAfterSwapReady: (@Sendable (String) async -> Void)?
+
+    func setMLXCacheLimitSwapHooksForTest(
+        application: @escaping @Sendable (String?, SwapState) -> Void,
+        afterReady: (@Sendable (String) async -> Void)? = nil
+    ) {
+        testMLXCacheLimitApplication = application
+        testAfterSwapReady = afterReady
+    }
     #endif
     private var labNativeMTPConversationCacheObserver: NativeMTPLabConversationCacheObserver?
 
@@ -3069,6 +3080,84 @@ actor ModelRuntime: ModelRuntimeServing {
         return bytes
     }
 
+    /// The 20 GiB LFM2.5 admission was measured with at most 512 MiB of
+    /// reusable MLX buffers. An explicit smaller budget remains authoritative.
+    private nonisolated static let lfm25MLXCacheModelIDs: Set<String> = [
+        "liquidai/lfm2.5-24b-a2b", "liquidai/lfm2.5-24b-a2b-mlx-4bit",
+    ]
+
+    nonisolated static func modelScopedMLXCacheLimitBytes(
+        modelID: String?, baselineBytes: Int
+    ) -> Int {
+        guard let modelID, lfm25MLXCacheModelIDs.contains(modelID.lowercased()) else {
+            return baselineBytes
+        }
+        return min(baselineBytes, 512 * 1024 * 1024)
+    }
+
+    nonisolated static func modelCachePolicyID(
+        target: String?, configuredModelID: String?, verifiedCatalogModelID: String?
+    ) -> String? {
+        if let target, lfm25MLXCacheModelIDs.contains(target.lowercased()) { return target }
+        if let target, target == configuredModelID, let verifiedCatalogModelID {
+            return verifiedCatalogModelID
+        }
+        return target
+    }
+
+    private func cachePolicyModelID(for target: String?) -> String? {
+        Self.modelCachePolicyID(
+            target: target, configuredModelID: modelID,
+            verifiedCatalogModelID: verifiedCatalogArtifactSHA256 == nil ? nil : catalogModelIDAlias)
+    }
+
+    /// Keep the incumbent LFM budget until a swap has drained it. Restore
+    /// the pre-LFM process budget when another model takes ownership.
+    private func applyMLXCacheLimitForModelLoad(
+        _ target: String?, preservingResidentModel: Bool = false
+    ) {
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        if let testMLXCacheLimitApplication {
+            testMLXCacheLimitApplication(cachePolicyModelID(for: target), state)
+            return
+        }
+        #endif
+        let targetID = cachePolicyModelID(for: target)
+        let residentID = preservingResidentModel ? cachePolicyModelID(for: currentModelID) : nil
+        let lfmID = "liquidai/lfm2.5-24b-a2b-mlx-4bit"
+        let requiresLFMCap = [targetID, residentID].compactMap { $0?.lowercased() }
+            .contains(where: Self.lfm25MLXCacheModelIDs.contains)
+        let configuredBytes = mlxCacheLimitMBForLoading.map { $0 * 1024 * 1024 }
+        let applied: Int?
+        if requiresLFMCap {
+            if mlxCacheLimitBeforeLFM25 == nil { mlxCacheLimitBeforeLFM25 = Memory.cacheLimit }
+            let baseline = configuredBytes ?? mlxCacheLimitBeforeLFM25 ?? Memory.cacheLimit
+            let bytes = Self.modelScopedMLXCacheLimitBytes(modelID: lfmID, baselineBytes: baseline)
+            Memory.cacheLimit = bytes
+            applied = bytes
+        } else if let previous = mlxCacheLimitBeforeLFM25 {
+            let bytes = configuredBytes ?? previous
+            Memory.cacheLimit = bytes
+            mlxCacheLimitBeforeLFM25 = nil
+            applied = bytes
+        } else {
+            applied = Self.applyMLXCacheLimit(megabytes: mlxCacheLimitMBForLoading)
+        }
+        if let applied {
+            FileHandle.standardError.write(Data("mlx_cache_limit_bytes=\(applied)\n".utf8))
+        }
+    }
+
+    private func finalizeMLXCacheLimitAfterSwap(_ target: String?, nativeLoad: Bool) {
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        if testMLXCacheLimitApplication != nil {
+            applyMLXCacheLimitForModelLoad(target)
+            return
+        }
+        #endif
+        if nativeLoad { applyMLXCacheLimitForModelLoad(target) }
+    }
+
     /// Families served with the process wired limit at Metal's recommended
     /// working set for as long as the model is loaded. DeepSeek V4-Flash
     /// (~167 GB of MXFP4/MXFP8 weights) sits as close to the working set as
@@ -3799,8 +3888,22 @@ maxTokens: 1,
 
         // One setup boundary for serve, self-test and native benchmark callers.
         // A nil-model or preloaded test runtime must not initialize Metal.
-        if let applied = Self.applyMLXCacheLimit(megabytes: mlxCacheLimitMBForLoading) {
-            FileHandle.standardError.write(Data("mlx_cache_limit_bytes=\(applied)\n".utf8))
+        let cacheModelID = Self.modelCachePolicyID(
+            target: modelID, configuredModelID: modelID,
+            verifiedCatalogModelID: verifiedCatalogModelID)
+        let initialCacheLimit: Int?
+        if let cacheModelID, Self.lfm25MLXCacheModelIDs.contains(cacheModelID.lowercased()) {
+            let previous = Memory.cacheLimit
+            self.mlxCacheLimitBeforeLFM25 = previous
+            let baseline = mlxCacheLimitMBForLoading.map { $0 * 1024 * 1024 } ?? previous
+            let bytes = Self.modelScopedMLXCacheLimitBytes(modelID: cacheModelID, baselineBytes: baseline)
+            Memory.cacheLimit = bytes
+            initialCacheLimit = bytes
+        } else {
+            initialCacheLimit = Self.applyMLXCacheLimit(megabytes: mlxCacheLimitMBForLoading)
+        }
+        if let initialCacheLimit {
+            FileHandle.standardError.write(Data("mlx_cache_limit_bytes=\(initialCacheLimit)\n".utf8))
         }
         let targetLoadPath = modelLoadPath ?? modelID
         let candidateNativeMTPLoad: NativeMTPRuntimeLoadResult?
@@ -5260,6 +5363,8 @@ maxTokens: 1,
         self.currentModelID = nil
         currentDraftModelID = nil
         currentDraftTargetModelID = nil
+        // Creative inference inherits the process budget, not the unloaded LFM cap.
+        finalizeMLXCacheLimitAfterSwap(nil, nativeLoad: hadMLXModel)
         await providerStatus?.markLanguageUnloadedForCreativeHold()
         if let ticket = residentWeightsTicket { residentWeightsTicket = nil; _ = await ticket.end() }
         // Fixture runtimes own no MLX allocations and must not initialize a GPU.
@@ -5406,6 +5511,7 @@ maxTokens: 1,
         currentModelID = nil
         currentDraftModelID = nil
         currentDraftTargetModelID = nil
+        finalizeMLXCacheLimitAfterSwap(nil, nativeLoad: testLoader == nil)
         await conversationCache.purgeAllHot()
         if let ticket = residentWeightsTicket { residentWeightsTicket = nil; _ = await ticket.end() }
         await providerStatus?.markLanguageUnloadedForCreativeHold()
@@ -5419,8 +5525,12 @@ maxTokens: 1,
         if let reload = creativeNativeReloadForTest { return try await reload() }
         #endif
         guard let authority = targetAuthority(for: target),
-              let directory = try? Self.localModelDirectory(for: authority.modelArgument),
-              let load = await Self.loadNativeMTPDrafterIfAdmitted(
+              let directory = try? Self.localModelDirectory(for: authority.modelArgument) else {
+            throw ModelRuntimeLoadError(target: target, reason: "native MTP restoration admission failed")
+        }
+        // A creative hold released the language model's budget before unloading.
+        applyMLXCacheLimitForModelLoad(target)
+        guard let load = await Self.loadNativeMTPDrafterIfAdmitted(
                 mode: nativeMTPMode,
                 targetModelID: target,
                 targetModelRevision: authority.artifactSHA256,
@@ -5504,8 +5614,7 @@ maxTokens: 1,
         let maxContextTokens = adoptionKnobs?.maxContext ?? maxContextTokens
         let kvBitsOverride = adoptionKnobs?.kvBits ?? kvBitsOverride
         let prefillStepSize = prefillStepSize
-        let mlxCacheLimitMB = mlxCacheLimitMBForLoading
-        return Task.detached { [weak self, testLoader, drainTimeoutSeconds, providerStatus, configuredDraftModelID, configuredDraftModelLoadPath, numDraftTokens, maxContextTokens, kvBitsOverride, prefillStepSize, mlxCacheLimitMB, targetAuthority, adoptionKnobs] in
+        return Task.detached { [weak self, testLoader, drainTimeoutSeconds, providerStatus, configuredDraftModelID, configuredDraftModelLoadPath, numDraftTokens, maxContextTokens, kvBitsOverride, prefillStepSize, targetAuthority, adoptionKnobs] in
             guard let self else { return }
             do {
                 let container: ModelContainer?
@@ -5552,9 +5661,7 @@ maxTokens: 1,
                         throw ModelRuntimeLoadError(target: "signed catalog identity unavailable for \(targetModelID)")
                     }
                     // Nil-model startup defers Metal setup until its first signed load.
-                    if let applied = Self.applyMLXCacheLimit(megabytes: mlxCacheLimitMB) {
-                        FileHandle.standardError.write(Data("mlx_cache_limit_bytes=\(applied)\n".utf8))
-                    }
+                    await self.applyMLXCacheLimitForModelLoad(targetModelID, preservingResidentModel: true)
                     let visionModelID = self.nativeVisionSelectionModelID(for: targetModelID)
                     let loaded = try await Self.loadLocalContainer(
                         from: targetAuthority.modelArgument,
@@ -7096,8 +7203,14 @@ maxTokens: 1,
         currentDraftModelID = draftModelID
         currentDraftTargetModelID = draftModelID == nil ? nil : modelID
         currentDraftContainer = draftContainer
+        // Finalize the budget before publishing readiness: a later swap must
+        // never have its LFM cap overwritten by this generation's completion.
+        finalizeMLXCacheLimitAfterSwap(modelID, nativeLoad: testLoader == nil && container != nil)
         state = .ready
         targetModelID = nil
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        if let testAfterSwapReady { await testAfterSwapReady(modelID) }
+        #endif
         if let draftFailureReason {
             Self.logDraftSwapFailure(
                 targetModelID: modelID,
@@ -7142,6 +7255,7 @@ maxTokens: 1,
             return
         }
         let target = targetModelID ?? ""
+        finalizeMLXCacheLimitAfterSwap(currentModelID, nativeLoad: testLoader == nil)
         state = .failed
         signal(SwapSignal(targetModelID: target, outcome: .failed(reason: reason)))
         state = .ready

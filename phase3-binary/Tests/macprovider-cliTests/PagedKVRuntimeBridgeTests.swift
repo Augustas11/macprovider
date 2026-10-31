@@ -367,6 +367,78 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         ))
     }
 
+    func testMSBHarnessSelectsOneSlotOnlyForLoadedLFMAndExactCacheTopology() throws {
+        // Concrete LFM initialization still needs MLX's Metal library.
+        try requireMetal()
+        try Device.withDefaultDevice(.cpu) {
+            let attentionLayers = (0..<40).filter { ($0 - 2).isMultiple(of: 4) }
+            let config = try JSONDecoder().decode(LFM2Configuration.self, from: Data("""
+            {
+              "model_type": "lfm2",
+              "vocab_size": 8,
+              "hidden_size": 4,
+              "num_hidden_layers": 40,
+              "num_attention_heads": 1,
+              "num_key_value_heads": 1,
+              "norm_eps": 0.00001,
+              "conv_bias": false,
+              "conv_L_cache": 3,
+              "full_attn_idxs": \(attentionLayers)
+            }
+            """.utf8))
+            let lfm = LFM2Model(config)
+            let cacheKinds = try XCTUnwrap(PagedKVSharedForwardBackend.CacheKind.kinds(
+                from: lfm.newCache(parameters: nil)
+            ))
+            XCTAssertEqual(cacheKinds, PagedKVRecurrentStateLayout.lfm25ExpectedCacheKinds)
+            let layout = MSBThroughputCommand.labRecurrentStateLayout(
+                model: lfm, cacheKinds: cacheKinds
+            )
+            XCTAssertEqual(layout, .lfm25ShortConvOneSlot)
+
+            // An admitted row can have no state before its first prefill. It
+            // receives the verified zero state and survives after another row
+            // is evicted from the next packing pass.
+            let resident = MambaCache()
+            resident[0] = MLXArray([1, 2], [1, 2, 1])
+            let admitted = MambaCache()
+            let batch = MambaCache()
+            try PagedKVSharedForwardBackend.packMambaRows(
+                [resident, admitted], into: batch, stateLayout: layout
+            )
+            eval(batch.state)
+            XCTAssertEqual(batch.state.count, 1)
+            XCTAssertEqual(batch.state[0].asArray(Float.self), [1, 2, 0, 0])
+
+            batch.state = [MLXArray([9, 10, 11, 12], [2, 2, 1])]
+            PagedKVSharedForwardBackend.syncMambaRows(
+                from: batch, into: [resident, admitted], stateLayout: layout
+            )
+            let survivorBatch = MambaCache()
+            try PagedKVSharedForwardBackend.packMambaRows(
+                [admitted], into: survivorBatch, stateLayout: layout
+            )
+            eval(admitted.state, survivorBatch.state)
+            XCTAssertEqual(admitted.state[0].asArray(Float.self), [11, 12])
+            XCTAssertEqual(survivorBatch.state[0].asArray(Float.self), [11, 12])
+
+            var mixedTopology = cacheKinds
+            mixedTopology[2] = .recurrentMamba
+            XCTAssertEqual(
+                MSBThroughputCommand.labRecurrentStateLayout(model: lfm, cacheKinds: mixedTopology),
+                .mambaTwoSlot,
+                "a concrete LFM class alone must not override a mixed cache topology"
+            )
+
+            let unknown = RuntimeBridgeStateOnlyProbeModel()
+            XCTAssertEqual(
+                MSBThroughputCommand.labRecurrentStateLayout(model: unknown, cacheKinds: cacheKinds),
+                .mambaTwoSlot,
+                "an unknown concrete model must retain the fail-closed two-slot default"
+            )
+        }
+    }
+
     func testQwenMambaPackingRemainsTwoSlotByDefault() throws {
         try requireMetal()
         func cache(_ first: Float, _ second: Float) -> MambaCache {

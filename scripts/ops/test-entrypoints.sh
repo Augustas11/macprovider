@@ -74,6 +74,13 @@ git -C "$tmp/work" tag -d "v$CAND" >/dev/null 2>&1 || true
 W="$tmp/work"
 git -C "$W" checkout -q --detach "$(git -C "$SRC_REPO" rev-parse HEAD)"
 git -C "$W" checkout -q -B main
+# These offline orchestration cases use the committed published catalog.
+# Preserve its publication-time pin inside this isolated repository fixture;
+# production source generation and verification keep the candidate pin strict.
+catalog_commit="$(GIT_NO_REPLACE_OBJECTS=1 git -C "$SRC_REPO" log -1 --format=%H HEAD -- phase3-binary/catalog/autotune/release.json)"
+GIT_NO_REPLACE_OBJECTS=1 git -C "$SRC_REPO" show "$catalog_commit:phase3-binary/Package.resolved" \
+  > "$W/phase3-binary/Package.resolved"
+git -C "$W" add phase3-binary/Package.resolved
 rm -rf "$W/scripts/ops"
 cp -R "$OPS_SRC" "$W/scripts/ops"
 find "$W/scripts/ops" -name '__pycache__' -prune -exec rm -rf {} +

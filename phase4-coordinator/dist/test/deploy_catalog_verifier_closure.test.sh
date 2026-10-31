@@ -177,6 +177,11 @@ mkdir "$tmp/pinned-repository" "$tmp/python-poison"
 printf '%s\n' 'raise SystemExit("poisoned json import")' > "$tmp/python-poison/json.py"
 GIT_NO_REPLACE_OBJECTS=1 git -C "$REPO_ROOT" archive --format=tar HEAD \
   | tar -xf - -C "$tmp/pinned-repository"
+# This fixture verifies the committed publication, whose signed runtime may
+# precede the candidate fork. Production deploy still checks its signed source.
+catalog_commit="$(GIT_NO_REPLACE_OBJECTS=1 git -C "$REPO_ROOT" log -1 --format=%H HEAD -- phase3-binary/catalog/autotune/release.json)"
+GIT_NO_REPLACE_OBJECTS=1 git -C "$REPO_ROOT" show "$catalog_commit:phase3-binary/Package.resolved" \
+  > "$tmp/pinned-repository/phase3-binary/Package.resolved"
 pinned_git_dir="$(git -C "$REPO_ROOT" rev-parse --absolute-git-dir)"
 if ! OPENSSL_BIN=/does/not/exist CATALOG_RELEASE_BASE_REF=HEAD PYTHONPATH="$tmp/python-poison" \
   env -u OPENSSL_BIN -u MACPROVIDER_INTAKE_AUDIT_DIR \

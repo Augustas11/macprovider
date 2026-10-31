@@ -9,6 +9,10 @@ from pathlib import Path
 
 from scripts import read_swiftpm_pins
 from scripts.read_swiftpm_pins import (
+    SPEC048_MLX_C_FORK,
+    SPEC048_MLX_C_REVISION,
+    SPEC048_MLX_C_TAG,
+    SPEC048_MLX_C_UPSTREAM_BASE,
     SPEC048_MLX_CORE_FORK,
     SPEC048_MLX_CORE_REVISION,
     SPEC048_MLX_CORE_TAG,
@@ -94,7 +98,7 @@ class SwiftPMPinParsingTests(unittest.TestCase):
         payload = json.loads(fixture.read_text())
         payload["pins"][1]["location"] = "https://github.com/Augustas11/mlx-swift-lm.git"
         payload["pins"][1]["state"] = {
-            "revision": "36d24585f9373c2661f61f5e5b485c8d66c43a2b"
+            "revision": "f75f92b0e85958a3219d295e1906a1a0889e6702"
         }
         with tempfile.TemporaryDirectory() as temporary:
             resolved = Path(temporary) / "Package.resolved"
@@ -104,11 +108,11 @@ class SwiftPMPinParsingTests(unittest.TestCase):
 
         self.assertEqual(
             pins["mlx_swift_lm"],
-            "36d24585f9373c2661f61f5e5b485c8d66c43a2b",
+            "f75f92b0e85958a3219d295e1906a1a0889e6702",
         )
         self.assertEqual(
             pins["mlx_swift_lm_revision"],
-            "36d24585f9373c2661f61f5e5b485c8d66c43a2b",
+            "f75f92b0e85958a3219d295e1906a1a0889e6702",
         )
 
     def test_fails_closed_when_spec048_fork_uses_unreviewed_revision(self):
@@ -142,7 +146,7 @@ class SwiftPMPinParsingTests(unittest.TestCase):
         payload = json.loads(fixture.read_text())
         payload["pins"][0]["location"] = "https://github.com/Augustas11/mlx-swift"
         payload["pins"][0]["state"] = {
-            "revision": "29d3b93375cc56cd2649b40e4310a8bc445e9874"
+            "revision": "c774cb0934c7503bc3fe1c3d1afbe44c728e8891"
         }
         with tempfile.TemporaryDirectory() as temporary:
             resolved = Path(temporary) / "Package.resolved"
@@ -150,9 +154,9 @@ class SwiftPMPinParsingTests(unittest.TestCase):
 
             pins = read_pins(resolved)
 
-        self.assertEqual(pins["mlx_swift"], "29d3b93375cc56cd2649b40e4310a8bc445e9874")
+        self.assertEqual(pins["mlx_swift"], "c774cb0934c7503bc3fe1c3d1afbe44c728e8891")
         self.assertEqual(
-            pins["mlx_swift_revision"], "29d3b93375cc56cd2649b40e4310a8bc445e9874"
+            pins["mlx_swift_revision"], "c774cb0934c7503bc3fe1c3d1afbe44c728e8891"
         )
 
     def test_fails_closed_when_mlx_swift_fork_uses_unreviewed_revision(self):
@@ -173,7 +177,7 @@ class SwiftPMPinParsingTests(unittest.TestCase):
         payload = json.loads(fixture.read_text())
         payload["pins"][0]["location"] = "https://github.com/Augustas11/mlx-swift"
         payload["pins"][0]["state"] = {
-            "revision": "29d3b93375cc56cd2649b40e4310a8bc445e9874",
+            "revision": "c774cb0934c7503bc3fe1c3d1afbe44c728e8891",
             "version": "0.32.3",
         }
         with tempfile.TemporaryDirectory() as temporary:
@@ -188,10 +192,10 @@ class SwiftPMPinParsingTests(unittest.TestCase):
         pins = read_pins(resolved)
 
         self.assertEqual(
-            pins["mlx_swift_lm_revision"], "36d24585f9373c2661f61f5e5b485c8d66c43a2b"
+            pins["mlx_swift_lm_revision"], "f75f92b0e85958a3219d295e1906a1a0889e6702"
         )
         self.assertEqual(
-            pins["mlx_swift_revision"], "29d3b93375cc56cd2649b40e4310a8bc445e9874"
+            pins["mlx_swift_revision"], "c774cb0934c7503bc3fe1c3d1afbe44c728e8891"
         )
 
     def test_fails_closed_when_upstream_mlx_swift_lm_is_revision_only(self):
@@ -329,6 +333,7 @@ class ReviewedForkTupleSourceTests(unittest.TestCase):
             SPEC048_MLX_SWIFT_LM_REVISION, SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE,
             SPEC048_MLX_SWIFT_REVISION, SPEC048_MLX_SWIFT_UPSTREAM_BASE,
             SPEC048_MLX_CORE_REVISION, SPEC048_MLX_CORE_UPSTREAM_BASE,
+            SPEC048_MLX_C_REVISION, SPEC048_MLX_C_UPSTREAM_BASE,
         ):
             with self.subTest(value=value):
                 self.assertRegex(value, r"^[0-9a-f]{40}$")
@@ -344,6 +349,7 @@ class ReviewedForkTupleSourceTests(unittest.TestCase):
             (SPEC048_MLX_SWIFT_LM_FORK, SPEC048_MLX_SWIFT_LM_TAG, SPEC048_MLX_SWIFT_LM_REVISION, SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE),
             (SPEC048_MLX_SWIFT_FORK, SPEC048_MLX_SWIFT_TAG, SPEC048_MLX_SWIFT_REVISION, SPEC048_MLX_SWIFT_UPSTREAM_BASE),
             (SPEC048_MLX_CORE_FORK, SPEC048_MLX_CORE_TAG, SPEC048_MLX_CORE_REVISION, SPEC048_MLX_CORE_UPSTREAM_BASE),
+            (SPEC048_MLX_C_FORK, SPEC048_MLX_C_TAG, SPEC048_MLX_C_REVISION, SPEC048_MLX_C_UPSTREAM_BASE),
         ):
             with self.subTest(fork=fork):
                 cells = [cell.strip() for cell in rows[fork].split("|")]
