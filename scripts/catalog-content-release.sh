@@ -1015,7 +1015,8 @@ VALS
 # (buyer_serving_e2e_owed), re-checked under the lease. The live side is judged with the not-buyer-serving.json that was
 # in force for it: the one committed with the reviewed release the live
 # release is (compare-live) or descends from, found on origin/main history
-# (for a bundle-published release, with its first committed ledger row).
+# (for a bundle-published release, the list in force at its ledger row's
+# generated_at).
 live_exclusions() { # <out>: that exclusion list, or fail
   local key
   key="$(python3 -c '
@@ -1056,24 +1057,28 @@ for commit in commits:  # newest first
     print(commit)
     raise SystemExit(0)
 # A release published from a native-MTP binding bundle never commits its
-# release.json; it reaches origin/main only as a release-ledger row. Use the
-# exclusions committed with the first origin/main ledger that records it.
+# release.json; it reaches origin/main only as a release-ledger row, which
+# may be committed after publication. Judge it with the exclusion list that
+# was in force on origin/main when it was generated (row generated_at), not
+# with the one beside the row.
+import re
 LEDGER = "phase3-binary/catalog/autotune/release-ledger.json"
-commits = subprocess.run(["git", "-C", repo, "log", "--reverse", "--format=%H", "origin/main", "--", LEDGER],
-                         capture_output=True, text=True, check=True).stdout.split()
-for commit in commits:  # oldest first
-    raw = show(commit, LEDGER)
-    try:
-        recorded = key in json.loads(raw)["releases"] if raw else False
-    except (ValueError, KeyError, TypeError):
-        recorded = False
-    excl = show(commit, EXCL) if recorded else None
-    if excl is None:
-        continue
-    open(out, "wb").write(excl)
-    print(commit)
-    raise SystemExit(0)
-raise SystemExit(2)
+raw = show("origin/main", LEDGER)
+try:
+    row = json.loads(raw)["releases"].get(key) if raw else None
+    generated_at = row.get("generated_at") if isinstance(row, dict) else None
+except (ValueError, KeyError, TypeError, AttributeError):
+    generated_at = None
+if not isinstance(generated_at, str) or not re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", generated_at):
+    raise SystemExit(2)
+anchor = subprocess.run(["git", "-C", repo, "rev-list", "-1", "--before=" + generated_at, "origin/main"],
+                        capture_output=True, text=True, check=True).stdout.strip()
+excl = show(anchor, EXCL) if anchor else None
+# Before #1688 there was no exclusion list; an empty one is that exact set.
+open(out, "wb").write(excl if excl is not None else
+                      b'{"models": [], "schema_version": "macprovider.not-buyer-serving.v1"}\n')
+print(anchor or "none")
+raise SystemExit(0)
 PY
 }
 
