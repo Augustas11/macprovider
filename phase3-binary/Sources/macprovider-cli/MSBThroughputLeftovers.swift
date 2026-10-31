@@ -2,6 +2,27 @@ import ArgumentParser
 import CryptoKit
 import Foundation
 
+/// Scheduler throughput spans delivered first token through completed submit,
+/// including scheduler work and any later row's overlapping prefill.
+struct MSBSchedulerRowTiming: Sendable {
+    let submittedAt: Date
+    let firstTokenAt: Date
+    let completedAt: Date
+
+    var ttftSeconds: Double { firstTokenAt.timeIntervalSince(submittedAt) }
+
+    func throughputSample(outputTokens: Int) throws -> MSBAggregateThroughputInput {
+        guard outputTokens > 0, firstTokenAt >= submittedAt, completedAt > firstTokenAt else {
+            throw MSBAggregateThroughputError.invalidSample
+        }
+        return MSBAggregateThroughputInput(
+            decodedTokens: outputTokens - 1,
+            decodeStartedAt: firstTokenAt,
+            decodeEndedAt: completedAt
+        )
+    }
+}
+
 /// FR-CB15 leftover scenarios on top of equal-length MSB-02/04 throughput.
 enum MSBThroughputScenario: String, Codable, ExpressibleByArgument, CaseIterable {
     case throughput

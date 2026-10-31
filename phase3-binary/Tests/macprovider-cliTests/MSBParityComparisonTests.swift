@@ -3,6 +3,37 @@ import ArgumentParser
 @testable import macprovider_cli
 
 final class MSBParityComparisonTests: XCTestCase {
+    func testSchedulerThroughputIncludesStaggeredRowsAndCompletionWork() throws {
+        let start = Date(timeIntervalSince1970: 100)
+        let first = MSBSchedulerRowTiming(
+            submittedAt: start, firstTokenAt: start.addingTimeInterval(2),
+            completedAt: start.addingTimeInterval(12)
+        )
+        let second = MSBSchedulerRowTiming(
+            submittedAt: start, firstTokenAt: start.addingTimeInterval(5),
+            completedAt: start.addingTimeInterval(14)
+        )
+        let aggregate = try msbAggregateThroughput([
+            first.throughputSample(outputTokens: 257), second.throughputSample(outputTokens: 257)
+        ])
+        XCTAssertEqual(first.ttftSeconds, 2)
+        XCTAssertEqual(second.ttftSeconds, 5)
+        XCTAssertEqual(aggregate.totalDecodedTokens, 512)
+        XCTAssertEqual(aggregate.commonWallSeconds, 12)
+        XCTAssertEqual(aggregate.aggregateTokensPerSecond, 512.0 / 12, accuracy: 0.000001)
+    }
+
+    func testSchedulerTimingRejectsMissingDecodeWindowAndReversedDelivery() {
+        let start = Date(timeIntervalSince1970: 100)
+        let timing = MSBSchedulerRowTiming(submittedAt: start, firstTokenAt: start, completedAt: start)
+        XCTAssertThrowsError(try timing.throughputSample(outputTokens: 257))
+        let reversed = MSBSchedulerRowTiming(
+            submittedAt: start, firstTokenAt: start.addingTimeInterval(-1),
+            completedAt: start.addingTimeInterval(1)
+        )
+        XCTAssertThrowsError(try reversed.throughputSample(outputTokens: 257))
+    }
+
     func testDiagnosticRejectsFourthRowOnEightGiBBeforeModelLoading() throws {
         let eightGiB: UInt64 = 8 * 1024 * 1024 * 1024
         let four = try MSBThroughputCommand.parse(["--model", "/nonexistent-row-cap-fixture", "--rows", "4"])
