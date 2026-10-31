@@ -35,6 +35,7 @@ type chatRequest struct {
 	Stream         bool              `json:"stream"`
 	ResponseFormat json.RawMessage   `json:"response_format"`
 	Tools          json.RawMessage   `json:"tools"`
+	PromptCacheKey json.RawMessage   `json:"prompt_cache_key"`
 }
 
 type tokenUsage struct {
@@ -694,7 +695,11 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// provider cache identity. Their ciphertext can share a plaintext prefix,
 	// and the provider-side privacy contract explicitly rejects cache grants.
 	if relayBlindExecutionFor(r) == nil {
-		internalConversation, convIsAutoPrefix, invalidConvTag = s.chatConversationKey(upCtx, r, subject, authn.Demo, chat.Messages, chat.Tools)
+		cacheKey := promptCacheKeyString(chat.PromptCacheKey)
+		if adapter := responsesAdapterFromContext(r.Context()); adapter != nil && adapter.promptCacheKey != "" {
+			cacheKey = adapter.promptCacheKey
+		}
+		internalConversation, convIsAutoPrefix, invalidConvTag = s.chatConversationKey(upCtx, r, subject, authn.Demo, chat.Messages, chat.Tools, cacheKey)
 	}
 	if invalidConvTag {
 		s.refundWalletAwareReservation(subject, requestID(r))
@@ -749,6 +754,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			// signed-finality capability, set together.
 			s.setCoordinatorChatContext(upReq.Header, r, subject.AccountID)
 			advertiseCapacityShed429(upReq.Header)
+			if chat.Stream {
+				upReq.Header.Set(decodeProgressCapabilityHeader, "1")
+			}
 			if upReq.Header.Get(routingGitHubIDsHeader) == "unavailable" {
 				return nil, errRoutingIdentityUnavailable
 			}
@@ -1406,7 +1414,16 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 	// Arming decode-idle at open made a long prefill expire as decode_idle,
 	// so production had to raise streaming_idle_ms to the prefill budget and
 	// lost decode-idle protection.
-	idleTimeout := adaptiveDecodeIdleTimeout(model, s.cfg)
+	// A concurrent row's prefill can pause this row's decode. Use the served
+	// context grant when already known. Without it, this prompt cannot bound a
+	// different row's prefill: use the bounded fallback, without a new RPC.
+	s.mu.RLock()
+	contextTokens := int64(s.poolz.body.ServingMaxContextTokens[model])
+	s.mu.RUnlock()
+	if contextTokens > 0 {
+		contextTokens = max(contextTokens, promptEstimate)
+	}
+	idleTimeout := adaptiveDecodeIdleTimeout(model, s.cfg, contextTokens)
 	var progressDeadline time.Time
 	var emitted int64
 	var serializedEmitted int64
@@ -1979,6 +1996,16 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 			settleIdleTimeout(false)
 			return
 		}
+		// SPEC-006-R026 / SPEC-001-R015: decode progress for a held tool
+		// call. It is consumed here, never forwarded, and re-bases an armed
+		// decode-idle deadline exactly as a content frame does. It never arms
+		// one, so the first-token phase is unchanged.
+		if isDecodeProgressLine(line) {
+			line = nil
+			if !progressDeadline.IsZero() {
+				progressDeadline = streamingProgressDeadline(idleTimeout)
+			}
+		}
 		// A phase deadline cancels the upstream mid-read, so the last line
 		// can be a torn SSE frame. Forwarding it would splice the terminal
 		// error envelope onto a partial frame the buyer cannot parse.
@@ -2195,6 +2222,18 @@ func drainFacadeSettlementTrailers(ctx context.Context, reader *bufio.Reader, re
 // absolute content-progress deadline the read loop carries. It preserves the
 // legacy "no idle timeout" sentinel: a non-positive budget yields the zero
 // time, which readStreamingLineWithIdleTimeout treats as unbounded.
+// decodeProgressCapabilityHeader opts a streaming request into coordinator
+// decode-progress comments (SPEC-006-R026, SPEC-001-R015).
+const decodeProgressCapabilityHeader = "X-MacProvider-Decode-Progress"
+
+// decodeProgressSSEComment is the coordinator's decode-progress line. It is a
+// lone SSE comment line written between whole events.
+var decodeProgressSSEComment = []byte(": macprovider-decode-progress")
+
+func isDecodeProgressLine(line []byte) bool {
+	return bytes.Equal(bytes.TrimRight(line, "\r\n"), decodeProgressSSEComment)
+}
+
 func streamingProgressDeadline(idleTimeout time.Duration) time.Time {
 	if idleTimeout <= 0 {
 		return time.Time{}
@@ -2202,17 +2241,35 @@ func streamingProgressDeadline(idleTimeout time.Duration) time.Time {
 	return time.Now().Add(idleTimeout)
 }
 
-func adaptiveDecodeIdleTimeout(model string, cfg config.Config) time.Duration {
+func adaptiveDecodeIdleTimeout(model string, cfg config.Config, contextTokens int64) time.Duration {
 	base := cfg.StreamingIdleTimeout()
 	if base <= 0 {
 		return base
 	}
-	expectedTPS, ok := expectedDecodeTokensPerSecond(model)
-	if !ok || expectedTPS <= 0 {
-		return base
+	var adaptive time.Duration
+	if expectedTPS, ok := expectedDecodeTokensPerSecond(model); ok && expectedTPS > 0 {
+		perToken := time.Duration(math.Ceil(float64(time.Second) / expectedTPS))
+		adaptive = perToken * decodeIdleSlowModelProgressTokens
 	}
-	perToken := time.Duration(math.Ceil(float64(time.Second) / expectedTPS))
-	adaptive := perToken * decodeIdleSlowModelProgressTokens
+	// Decode rate alone cannot predict shared-provider stalls: a different row
+	// may be prefilling the entire served context. Reuse the configured prefill
+	// rate, independently of the model's spelling or active-parameter count.
+	// Saturate before multiplying so even an extreme context cannot overflow.
+	if rate := int64(cfg.Timeouts.FirstTokenPrefillTokensPerSecond); rate > 0 {
+		// Metadata is opportunistically cached by status endpoints. Missing
+		// metadata must not reintroduce the short-row/long-prefill failure.
+		prefill := decodeIdleSlowModelMax
+		if contextTokens > 0 {
+			seconds := contextTokens / rate
+			if contextTokens%rate != 0 {
+				seconds++
+			}
+			if seconds < int64(decodeIdleSlowModelMax/time.Second) {
+				prefill = time.Duration(seconds) * time.Second
+			}
+		}
+		adaptive = max(adaptive, prefill)
+	}
 	if adaptive > decodeIdleSlowModelMax {
 		adaptive = decodeIdleSlowModelMax
 	}
@@ -3729,6 +3786,33 @@ func prefixConversationTag(messages []json.RawMessage, tools json.RawMessage) (s
 	return "auto.prefix." + hex.EncodeToString(sum[:16]), true
 }
 
+// maxPromptCacheKeyBytes bounds the buyer prompt_cache_key that partitions the
+// auto-prefix tag. Longer or non-string values are ignored, not rejected, so
+// clients that send one keep working with the unpartitioned scaffold key.
+const maxPromptCacheKeyBytes = 256
+
+func promptCacheKeyString(raw json.RawMessage) string {
+	var key string
+	if len(bytes.TrimSpace(raw)) == 0 || json.Unmarshal(raw, &key) != nil {
+		return ""
+	}
+	key = strings.TrimSpace(key)
+	if len(key) > maxPromptCacheKeyBytes {
+		return ""
+	}
+	return key
+}
+
+// partitionPrefixConversationTag folds a buyer prompt_cache_key into an
+// auto.prefix.* tag. The result keeps the reserved auto.prefix. form.
+func partitionPrefixConversationTag(tag, promptCacheKey string) string {
+	if promptCacheKey == "" {
+		return tag
+	}
+	sum := sha256.Sum256([]byte(tag + "\nprompt_cache_key\n" + promptCacheKey))
+	return "auto.prefix." + hex.EncodeToString(sum[:16])
+}
+
 func normalizeAutoPrefixTools(tools json.RawMessage) json.RawMessage {
 	trimmed := bytes.TrimSpace(tools)
 	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
@@ -3760,7 +3844,13 @@ func normalizeAutoPrefixTools(tools json.RawMessage) json.RawMessage {
 //     routing.sticky_enabled. isAutoPrefix=true; caller sets
 //     X-MacProvider-Internal-Conv-Cache (coordinator reads for cache context,
 //     skips applySticky/stickyStore). Demo MUST NOT receive a key.
-func (s *Server) chatConversationKey(ctx context.Context, r *http.Request, subject usageSubject, demo bool, messages []json.RawMessage, tools json.RawMessage) (key string, isAutoPrefix bool, invalidTag bool) {
+//
+// promptCacheKey is the buyer's OpenAI prompt_cache_key, already bounded by
+// promptCacheKeyString. When present it partitions the auto-prefix tag
+// (SPEC-006-R014): agent clients send one key per session, and sessions that
+// share a scaffold must not share one provider conversation, which serializes
+// their turns and evicts each other's prefix.
+func (s *Server) chatConversationKey(ctx context.Context, r *http.Request, subject usageSubject, demo bool, messages []json.RawMessage, tools json.RawMessage, promptCacheKey string) (key string, isAutoPrefix bool, invalidTag bool) {
 	if s.cfg.Routing.StickyEnabled && !demo {
 		if raw := r.Header.Get("X-MacProvider-Conversation"); raw != "" {
 			tag := strings.TrimSpace(raw)
@@ -3781,7 +3871,7 @@ func (s *Server) chatConversationKey(ctx context.Context, r *http.Request, subje
 	// the coordinator sticky paths never see it.
 	if !demo && subject.AccountID != "" && strings.TrimSpace(s.cfg.Auth.KeyHashSecret) != "" {
 		if tag, ok := prefixConversationTag(messages, tools); ok {
-			return s.deriveConversationKey(subject.AccountID, tag), true, false
+			return s.deriveConversationKey(subject.AccountID, partitionPrefixConversationTag(tag, promptCacheKey)), true, false
 		}
 	}
 	return "", false, false

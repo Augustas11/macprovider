@@ -480,6 +480,7 @@ final class CatalogToolGrammarTests: XCTestCase {
                     case .reasoning(let text): reasoning += text
                     case .content(let text): content += text
                     case .toolCallDelta: XCTFail("GLM calls are emitted whole by the final parser")
+                    case .progress: break
                     }
                 }
             )

@@ -75,7 +75,7 @@ final class StreamingSettlementBindingTests: XCTestCase {
                 switch $0 {
                 case .content(let text): contentDeltas.append(text)
                 case .toolCallDelta: toolDeltaCount += 1
-                case .reasoning: break
+                case .reasoning, .progress: break
                 }
             }
         )
@@ -95,7 +95,7 @@ final class StreamingSettlementBindingTests: XCTestCase {
                 switch $0 {
                 case .content(let text): contentDeltas.append(text)
                 case .toolCallDelta: toolDeltaCount += 1
-                case .reasoning: break
+                case .reasoning, .progress: break
                 }
             }
         )

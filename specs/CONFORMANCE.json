@@ -9,7 +9,7 @@
     {
       "spec_id": "SPEC-001",
       "title": "Phase 3 Binary: Mac Provider Inference CLI",
-      "version": "1.9.49",
+      "version": "1.9.50",
       "path": "specs/SPEC-001-phase3-binary.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -152,7 +152,7 @@
     {
       "spec_id": "SPEC-006",
       "title": "Buyer API Gateway: Mac Provider's first public buyer surface",
-      "version": "0.9.70",
+      "version": "0.9.72",
       "path": "specs/SPEC-006-buyer-api.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -1040,7 +1040,7 @@
     {
       "spec_id": "SPEC-037",
       "title": "KV survival across provider restarts (encrypted provider-local disk tier)",
-      "version": "v0.2.3",
+      "version": "v0.2.4",
       "path": "specs/SPEC-037-kv-survival-restart.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -7142,11 +7142,13 @@
       "state": "pending",
       "implementation": [
         "phase5-gateway/internal/router/chat_proxy.go:prefixConversationTag",
-        "phase5-gateway/internal/router/chat_proxy.go:chatConversationKey"
+        "phase5-gateway/internal/router/chat_proxy.go:chatConversationKey",
+        "phase5-gateway/internal/router/chat_proxy.go:partitionPrefixConversationTag"
       ],
       "tests": [
         "phase5-gateway/internal/router/server_test.go:TestPrefixConversationTagHelpers",
-        "phase5-gateway/internal/router/server_test.go:TestPrefixCacheConversationSharesToolsAcrossUsers"
+        "phase5-gateway/internal/router/server_test.go:TestPrefixCacheConversationSharesToolsAcrossUsers",
+        "phase5-gateway/internal/router/server_test.go:TestAutoPrefixKeyPartitionsByPromptCacheKey"
       ],
       "journeys": [],
       "evidence": [],
@@ -14367,7 +14369,10 @@
         "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func cancellableLocalPrefill",
         "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:private static func collectSpeculativeText",
         "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:private func processCancellations",
-        "phase3-binary/Sources/macprovider-cli/InferenceRelay.swift:func handleCancelRequest"
+        "phase3-binary/Sources/macprovider-cli/InferenceRelay.swift:func handleCancelRequest",
+        "phase3-binary/Sources/macprovider-cli/ConversationCache.swift:func keepPromptSnapshotAfterCancel(",
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:final class ContinuousBatchPromptSnapshotHandoff",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func endContinuousBatchLeaseAfterFailure("
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/PrefillCancellationTests.swift:func testClientCancelStopsChunkedPrefillWithinOneChunkAndReleasesTheSlot",
@@ -14382,7 +14387,10 @@
         "phase3-binary/Tests/macprovider-cliTests/ConversationPromptSnapshotTests.swift:func testCommitOfACancelledRequestPublishesNothing",
         "phase3-binary/Tests/macprovider-cliTests/LocalRequestPriorityTests.swift:func testLocalPrefillChecksPreemptionBetweenChunks",
         "phase4-coordinator/internal/ws/relay_test.go:func TestRelayCancelSendsCancelRequest",
-        "phase4-coordinator/internal/ws/cancel_delivered_boundary_test.go:func TestRelayContextCancelBeforeRegistrationCarriesEmptyBoundary"
+        "phase4-coordinator/internal/ws/cancel_delivered_boundary_test.go:func TestRelayContextCancelBeforeRegistrationCarriesEmptyBoundary",
+        "phase3-binary/Tests/macprovider-cliTests/ConversationCacheTests.swift:func testCancelledTurnKeepsItsPromptSnapshotForTheRetry",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:func testRowCancelledDuringDecodeHandsOffItsPromptSnapshot",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:func testRowCancelledDuringPrefillHandsOffNoSnapshot"
       ],
       "journeys": [],
       "evidence": [],
@@ -14645,14 +14653,17 @@
         "phase5-gateway/internal/router/wholesale_stream.go:func startWholesaleKeepalives",
         "phase5-gateway/internal/router/wholesale_stream.go:func (s *wholesaleStreamWriter) writeKeepalive",
         "phase5-gateway/internal/router/responses.go:func (a *responsesAdapter) writeSSEComment",
-        "phase5-gateway/internal/router/anthropic_messages.go:func (a *anthropicMessagesAdapter) writeSSEComment"
+        "phase5-gateway/internal/router/anthropic_messages.go:func (a *anthropicMessagesAdapter) writeSSEComment",
+        "phase5-gateway/internal/router/chat_proxy.go:func isDecodeProgressLine"
       ],
       "tests": [
         "phase5-gateway/internal/config/first_token_prompt_test.go:func TestFirstTokenTimeoutForPrompt",
         "phase5-gateway/internal/router/agent_harness_stream_test.go:func TestStreamingKeepalivesReachEveryBuyerOnAllSurfaces",
         "phase5-gateway/internal/router/agent_harness_stream_test.go:func TestFastStreamCarriesNoKeepaliveForOrdinaryBuyers",
         "phase5-gateway/internal/router/agent_harness_stream_test.go:func TestFirstTokenBudgetScalesWithPromptSize",
-        "phase5-gateway/internal/router/wholesale_partner_test.go:func TestWholesaleStreamInjectsUsageAndKeepalive"
+        "phase5-gateway/internal/router/wholesale_partner_test.go:func TestWholesaleStreamInjectsUsageAndKeepalive",
+        "phase5-gateway/internal/router/request_deadlines_test.go:func TestDecodeProgressKeepsHeldToolCallAliveAndIsNotForwarded",
+        "phase5-gateway/internal/router/request_deadlines_test.go:func TestDecodeProgressBeforeContentArmsNoDecodeIdle"
       ],
       "journeys": [],
       "evidence": [],
@@ -15418,6 +15429,33 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/2164",
         "rationale": "Local image generation source, verified weight manifest and fake-backend contract tests are present. Low-memory coverage uses fixtures. Real-weights designated Mac Studio acceptance and released-provider acceptance remain pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-001-R015",
+      "spec_id": "SPEC-001",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:final class HeldOutputProgress",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:struct SerialStreamingTextEmitter",
+        "phase3-binary/Sources/macprovider-cli/InferenceRelay.swift:private static func sendProgress",
+        "phase4-coordinator/internal/ws/relay.go:func (s *Server) handleInferenceProgress",
+        "phase4-coordinator/internal/buyer/server.go:func (s *Server) forwardWSStreaming("
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/HeldToolCallProgressTests.swift:func testHeldToolCallSendsProgressAndLeavesTheCallBytesUnchanged",
+        "phase3-binary/Tests/macprovider-cliTests/HeldToolCallProgressTests.swift:func testRelayBatcherNeverTurnsProgressIntoAFrame",
+        "phase3-binary/Tests/macprovider-cliTests/HeldToolCallProgressTests.swift:func testVisibleOutputRestartsTheHoldClock",
+        "phase4-coordinator/internal/ws/inference_progress_test.go:func TestInferenceProgressSignalsOnlyTheActiveStream",
+        "phase4-coordinator/internal/buyer/decode_progress_internal_test.go:func TestForwardWSStreamingWritesDecodeProgressOnlyWhenNegotiated"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2192",
+        "rationale": "Provider, coordinator and gateway paths are implemented with unit tests. Live once the coordinator and gateway runtime release and a signed CLI cut both ship, and the long-session replay shows no decode_idle_cut during held GLM tool calls under concurrent prefill."
       }
     },
     {

@@ -1291,7 +1291,7 @@ final class NativeMTPChunkTimeRecorder: @unchecked Sendable {
         switch chunk {
         case .content(let text), .reasoning(let text):
             if !text.isEmpty { append(time) }
-        case .toolCallDelta:
+        case .toolCallDelta, .progress:
             break
         }
     }

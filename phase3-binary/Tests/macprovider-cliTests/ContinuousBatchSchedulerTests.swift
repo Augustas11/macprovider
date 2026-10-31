@@ -421,6 +421,54 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertEqual(snapshots["snap"], [36])
     }
 
+    /// SPEC-001-R013 (v1.9.50): a keyed row cancelled after it joined decode
+    /// still publishes nothing as its result, but hands its prompt snapshot to
+    /// the caller, which keeps it in place of the whole conversation entry.
+    func testRowCancelledDuringDecodeHandsOffItsPromptSnapshot() async throws {
+        let decodeGate = AsyncGate()
+        let backend = ScriptedBackend(scripts: ["cut": [7, 8, 9]], decodeGate: decodeGate, promptSnapshotBackend: true)
+        let scheduler = try await makeScheduler(maxActiveRows: 1, maxPromptChunkTokens: 16, backend: backend)
+        let handoff = ContinuousBatchPromptSnapshotHandoff()
+        let task = Task {
+            try await scheduler.submit(.init(
+                id: "cut", conversationKey: "conv:cut", promptTokens: Array(1...40),
+                maxOutputTokens: 3, temperature: 0.0, promptSnapshotTokenCount: 36,
+                promptSnapshotHandoff: handoff
+            ))
+        }
+        try await eventually { await backend.decodeCallCount() == 1 }
+        await scheduler.cancel(requestID: "cut")
+        await decodeGate.open()
+        let result = try await task.value
+        XCTAssertEqual(result.terminalStatus, .cancelled)
+        XCTAssertNil(result.serialConversationCache)
+        let kept = try XCTUnwrap(handoff.take())
+        XCTAssertTrue(kept.promptSnapshot)
+        XCTAssertEqual(kept.tokenCount, 36)
+        XCTAssertNil(handoff.take(), "the snapshot is handed off once")
+    }
+
+    /// SPEC-001-R013: a row cancelled during prefill hands off no snapshot.
+    func testRowCancelledDuringPrefillHandsOffNoSnapshot() async throws {
+        let gate = AsyncGate()
+        let backend = ScriptedBackend(scripts: ["early": [7, 8]], prefillGate: gate, promptSnapshotBackend: true)
+        let scheduler = try await makeScheduler(maxActiveRows: 1, maxPromptChunkTokens: 16, backend: backend)
+        let handoff = ContinuousBatchPromptSnapshotHandoff()
+        let task = Task {
+            try await scheduler.submit(.init(
+                id: "early", conversationKey: "conv:early", promptTokens: Array(1...40),
+                maxOutputTokens: 2, temperature: 0.0, promptSnapshotTokenCount: 36,
+                promptSnapshotHandoff: handoff
+            ))
+        }
+        try await eventually { await backend.prefillCallCount() == 1 }
+        await scheduler.cancel(requestID: "early")
+        await gate.open()
+        let result = try await task.value
+        XCTAssertEqual(result.terminalStatus, .cancelled)
+        XCTAssertNil(handoff.take())
+    }
+
     /// SPEC-024-R005 / SPEC-038 AC-26: a positive-cached turn carrying a
     /// GLM-5-Next prompt snapshot gets a table already counting the snapshot
     /// tokens, installs the snapshot, prefills only the rest of the prompt and
