@@ -3184,6 +3184,19 @@ func (p *Provider) ignoreProviderOccupancy(state State, slotsFree int, thermal b
 		p.ignoredLowerReadyReport = false
 		return false
 	}
+	if p.queueFullHold && state == StateReady && slotsFree > 0 {
+		// The refusal and this report share the Mac's ordered stream, so a
+		// free seat here opened after the refusal: typically a chat cut before
+		// its first token that the Mac retired after the coordinator restored
+		// its seat. Waiting for the next forwarded completion instead shed
+		// every retry until a long decode finished (#2192). Coordinator
+		// ownership stays; the lower of the two counts applies.
+		p.capacitySafetyHold = false
+		p.queueFullHold = false
+		if slotsFree < p.SlotsFree {
+			p.SlotsFree = slotsFree
+		}
+	}
 	return p.forwardedInFlight > 0 || p.awaitingReadyOccupancy || p.capacitySafetyHold
 }
 
