@@ -87,8 +87,21 @@ expect_rejected() {
 }
 
 python3 "$VERIFY" verify
-# A new source cut must refuse a runtime mismatch, even though the committed
-# publication above remains verifiable with its original identity.
+# The admission's runtime pin is read at the release input's bound provider
+# commit, so moving the working-tree pin alone keeps a bound release valid.
+# A bound commit absent from the checkout falls back to the working tree,
+# and a mismatch there must refuse a new source cut.
+RELEASE_INPUT="$CANONICAL/native-mtp-admission-release.json"
+cp "$RELEASE_INPUT" "$TMP/native-mtp-admission-release.json"
+python3 - "$RELEASE_INPUT" <<'PY_BOUND'
+import json
+import pathlib
+import sys
+path = pathlib.Path(sys.argv[1])
+release = json.loads(path.read_text())
+release["entry"]["source_commit"] = "f" * 40
+path.write_text(json.dumps(release))
+PY_BOUND
 cp "$ROOT/phase3-binary/Package.resolved" "$TMP/Package.resolved"
 python3 - "$ROOT/phase3-binary/Package.resolved" <<'PY_PIN'
 import json
@@ -107,6 +120,7 @@ fi
 grep -q "differs from Package.resolved mlx-swift-lm pin '0000000000000000000000000000000000000000'" \
   "$TMP/runtime-pin.out"
 mv "$TMP/Package.resolved" "$ROOT/phase3-binary/Package.resolved"
+mv "$TMP/native-mtp-admission-release.json" "$RELEASE_INPUT"
 echo "PASS: source generation refuses a mismatched native-MTP runtime pin"
 python3 - "$VERIFY" "$CANONICAL" "$STATIC" "$ROOT/phase4-coordinator/dist/coordinator.yaml" <<'PY'
 import importlib.util
