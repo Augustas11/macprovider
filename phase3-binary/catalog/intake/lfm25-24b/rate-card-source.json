@@ -1,0 +1,27 @@
+{
+  "classes": {
+    "class-20b-moe": {
+      "completion_rate_per_mtok": 100000,
+      "prompt_cache_hit_rate_per_mtok": 12500,
+      "prompt_rate_per_mtok": 50000
+    }
+  },
+  "generated_at": "2026-10-31T04:00:00Z",
+  "global_multiplier_ppm": 1000000,
+  "policy_version": "autotune-policy-v1",
+  "provider_share_bps": 9000,
+  "rows": {
+    "default": {
+      "completion_rate_per_mtok": 1000000,
+      "prompt_cache_hit_rate_per_mtok": 125000,
+      "prompt_rate_per_mtok": 500000
+    },
+    "liquidai/lfm2.5-24b-a2b": {
+      "completion_rate_per_mtok": 100000,
+      "prompt_cache_hit_rate_per_mtok": 12500,
+      "prompt_rate_per_mtok": 50000
+    }
+  },
+  "schema_version": "macprovider.rate-card-source.v1",
+  "usd_per_million_credits": 1.0
+}

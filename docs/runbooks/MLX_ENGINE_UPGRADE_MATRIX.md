@@ -24,36 +24,40 @@ Every run must attach:
 
 ## Fork model
 
-The production MLX runtime is three operator-owned forks under `Augustas11`.
+The production MLX runtime is four operator-owned forks under `Augustas11`.
 They are the permanent production runtime: MacProvider makes no upstream
 contributions and does not wait for upstream to carry its patches. Each
-upstream release MacProvider adopts is a rebase of all three patch stacks onto
+upstream release MacProvider adopts is a rebase of all four patch stacks onto
 the new upstream tags, new fork tags, and a pass of the per-rebase acceptance
 gate below. SPEC-048 MTP-3 (R003) names the exact authorized tuple; a new tuple
 needs a SPEC revision.
 
 | Fork | Upstream | Tag scheme | Current tag | Revision | Upstream base |
 | --- | --- | --- | --- | --- | --- |
-| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.10.15.1` | `36d24585f9373c2661f61f5e5b485c8d66c43a2b` | `3.32.3` (`3b339ad6…`) |
-| `Augustas11/mlx-swift` | `ml-explore/mlx-swift` | `<upstream>-macprovider.<n>` | `0.32.3-macprovider.9` | `29d3b93375cc56cd2649b40e4310a8bc445e9874` | `0.32.3` (`19601207…`) |
-| `Augustas11/mlx` (MLX core) | `ml-explore/mlx` | `v<upstream>-macprovider.<n>` | `v0.32.4-macprovider.4` | `2f512e3997349c8648f5d7c5113eb2c825aa242d` | `v0.32.4` (`36969c09…`) |
+| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.11` | `4a4f5ad97ae895d5600699d0fd066e4734202597` | `3.32.3` (`3b339ad6…`) |
+| `Augustas11/mlx-swift` | `ml-explore/mlx-swift` | `<upstream>-macprovider.<n>` | `0.32.3-macprovider.10` | `d8045e6f22f5b5a32a146578820192a7969c7de6` | `0.32.3` (`19601207…`) |
+| `Augustas11/mlx` (MLX core) | `ml-explore/mlx` | `v<upstream>-macprovider.<n>` | `v0.32.4-macprovider.5` | `abeaff9cbc785910897be06cf4c68d30308c08d8` | `v0.32.4` (`36969c09…`) |
+| `Augustas11/mlx-c` | `ml-explore/mlx-c` | `v<upstream>-macprovider.<n>` | `v0.6.0-macprovider.1` | `e603f75d429cccc1877909dc545fe34985c2cf6e` | pinned base `ebc88f10…` |
 
 Tags are immutable: a change is a new `<n>`, never a moved tag. Each link pins
-the next by full revision: `phase3-binary/Package.swift` pins mlx-swift-lm,
-mlx-swift-lm's manifest pins mlx-swift, and mlx-swift's `Source/Cmlx/mlx`
-submodule commit pins core (`Source/Cmlx/mlx-c` stays upstream). Swift 6.3 is
-the effective minimum for the graph (mlx-swift declares tools version 6.3);
-the mlx-swift-lm fork keeps upstream's tools version.
+by full revision: `phase3-binary/Package.swift` pins mlx-swift-lm, its manifest
+pins mlx-swift, and mlx-swift's `Source/Cmlx/mlx` and `Source/Cmlx/mlx-c`
+submodules pin core and C. The C fork's standalone core fetch pins the same
+core revision. Swift 6.3 is the effective minimum for the graph.
 
 ### Current tuple delta
 
-As of 2026-10-29, `Package.resolved` and SPEC-048 R003 select
-`3.32.3-macprovider.10.15.1`, not the historical `.10.5` stack described below.
-The combined `.10.15` parent carries the GLM packed-verification and Prism
-loader work; `.10.15.1` corrects LFM MoE expert accumulation order. The
-mlx-swift and core pins are unchanged. The detailed stack below records the
-older base; the current SPEC-048 R003 tuple and its delta description govern
-the additional patches and qualification scope.
+As of 2026-10-31, `Package.resolved` and SPEC-048 R003 select the tuple above.
+It applies the LFM-only reference-prefill opt-in on the prior pinned LM
+`3.32.3-macprovider.10.15.1` (`36d24585…`), Swift `0.32.3-macprovider.9`
+(`29d3b933…`), core `v0.32.4-macprovider.4` (`2f512e39…`) and C `ebc88f10…`.
+The previous LM already carries the expert-order correction; it is not
+reapplied. Default-false Swift/C/core routing and single-token decode preserve
+the existing arithmetic for GLM, Qwen and DeepSeek projections. LFM MoE alone
+opts its model-owned linear projections into vendor prefill reduction order.
+The detailed stacks below are historical context. GLM/Qwen exact-output
+engine-matrix checks run on the Studio after its current lab window; local
+LFM evidence and default-route unit checks do not substitute for those cells.
 
 ### Patch inventory
 
@@ -121,9 +125,11 @@ overloads the headers declare, and inspects every body with a caller stream: a
 `StreamOrDevice` or `Stream` parameter (by value or reference), or a primitive
 rule (`Class::vjp`/`jvp`/`vmap`, or any body using `stream()`). In those bodies
 it fails on a call to one of those ops (plain or `mlx::core::`-qualified; a
-local lambda that shadows an op name is not the op) whose last argument is not
-the caller's stream or an alias of it (a device such as `Device::gpu` is not),
-and on any operator overload applied to an array value, read per statement so
+local lambda that shadows an op name is not the op) whose stream argument is
+not the caller's stream or an alias of it (a device such as `Device::gpu` is
+not). The stream argument is normally last; `quantized_matmul` preserves its
+existing stream slot before the optional `reference_prefill` argument. It also
+fails on any operator overload applied to an array value, read per statement so
 an expression split across lines is still one expression. It fails closed on
 missing files or an empty scan. It is a lexical check, not a C++ parser: code
 that hides an op behind a macro or a template the scan does not expand is out

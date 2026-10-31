@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.64
+**Version:** 0.1.65
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.64",
+  "version": "0.1.65",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -506,36 +506,39 @@ The authorized dependency tuple is exact:
 
 | Repository | Fork tag | Revision | Upstream base |
 |---|---|---|---|
-| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.10.15.1` | `36d24585f9373c2661f61f5e5b485c8d66c43a2b` | fork `3.32.3-macprovider.10.1` (`87dc5159c87d73f4d7abd524fbdd17760cf56285`) on fork `3.32.3-macprovider.10` (`b4077dcb28336b388f3d09be2a091c12f8e179aa`) on `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
-| `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.9` | `29d3b93375cc56cd2649b40e4310a8bc445e9874` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
-| `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.4` | `2f512e3997349c8648f5d7c5113eb2c825aa242d` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
+| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.11` | `4a4f5ad97ae895d5600699d0fd066e4734202597` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
+| `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.10` | `d8045e6f22f5b5a32a146578820192a7969c7de6` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
+| `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.5` | `abeaff9cbc785910897be06cf4c68d30308c08d8` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
+| `https://github.com/Augustas11/mlx-c` | `v0.6.0-macprovider.1` | `e603f75d429cccc1877909dc545fe34985c2cf6e` | `ml-explore/mlx-c` pinned base (`ebc88f10caa1b625e6b581437a8dea6df8a70085`) |
 
-The mlx-swift-lm row is the immutable LFM routing correction tag
-`3.32.3-macprovider.10.15.1`
-(`36d24585f9373c2661f61f5e5b485c8d66c43a2b`), directly on
-`3.32.3-macprovider.10.15`
-(`3905a1b0499f0f38c0f94a008034a0362b9e3dca`). Its production delta is
-limited to `LFM2MoE.swift`: expert selection takes the positive
-`argPartition` suffix, preserving the reference expert accumulation order,
-with its ordered-routing regression in `LFM2MoeRoutingTests.swift`.
-Shared forward, attention, cache and MTP sources, Qwen and GLM model sources,
-the Prism loader, and all transitive dependency pins MUST remain byte-identical
-to the parent. This is a correction within the existing upstream base, not an
-upstream rebase or a change to the mlx-swift or MLX core tuple rows.
+The tuple adds LFM2 MoE reference-prefill arithmetic to the previously pinned
+mlx-swift-lm `3.32.3-macprovider.10.15.1`
+(`36d24585f9373c2661f61f5e5b485c8d66c43a2b`). The LM change opts only
+LFM2 MoE model-owned linear projections into the reference route. The Swift
+and C layers carry an explicit default-false setting; the existing C entry
+point retains its ABI and default behavior. Core selects vendor prefill
+arithmetic using each row's sequence length while covering all flattened
+rows. Single-token decode and projections without the opt-in retain the
+previous batch-invariant route. The Swift fork pins both the core and C
+forks by full submodule revision; mlx-c's standalone core fetch uses the same
+core revision. This is a bounded arithmetic correction, not an upstream rebase.
 
-The LFM routing correction requires its own ordinary-serving token parity
-against the reference and cached-turn/shared-row acceptance. It does not
-qualify an LFM native-MTP tuple or expand any Qwen/GLM qualification scope.
+The LFM correction requires ordinary-serving exact token parity against the
+reference and cached-turn/shared-row acceptance. It does not qualify an LFM
+native-MTP tuple or expand Qwen/GLM qualification scope. Existing LFM evidence
+establishes 256-token exactness at 1k/8k/32k prompts, row isolation and a
+four-row scheduler gain of 26.43%. These are ordinary-serving observations,
+not signed production admission. GLM/Qwen exact-output engine-matrix checks
+remain required on the Studio after its current lab window.
+
 For previously qualified Qwen/GLM MTP tuples, MTP-13 governs reuse when review
 establishes that their draft/verify/commit behavior, artifacts, request profile,
 hardware and serving bounds are unchanged. A dependency identity change alone
-MUST NOT relabel historical results as measurements of this tag. Original
+MUST NOT relabel historical results as measurements of this tuple. Original
 measurement source, runtime identity and benchmark-policy `provider_commit`
-remain unchanged; any changed signed runtime/digest binding requires a separate
-authenticated identity-only reuse record under MTP-13. Existing R015 evidence
-is reused under those conditions, rather than regenerated for this LFM-only
-delta. The immutable tag MUST exist and resolve to the exact row revision
-before a production build; this declaration does not substitute for that gate.
+remain unchanged; a changed signed runtime/digest binding requires a separate
+authenticated identity-only reuse record under MTP-13. Immutable tags MUST
+exist and resolve to the exact row revisions before a production build.
 
 The parent is the immutable combined fork tag `3.32.3-macprovider.10.15`
 (commit `3905a1b0499f0f38c0f94a008034a0362b9e3dca`, branch `campaign/2144-native-mtp`). It preserves
@@ -2156,6 +2159,10 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.65 (2026-10-31)** — R003 names the LFM-only reference-prefill tuple
+  across LM, Swift, C and core. Default-false routing and single-token decode
+  preserve existing model behavior; signed admission and cross-model hardware
+  qualification remain separate gates.
 - **0.1.64 (2026-10-28)** — R003 names the LFM-only expert-order correction
   `3.32.3-macprovider.10.15.1` (`36d24585f9373c2661f61f5e5b485c8d66c43a2b`)
   on `.10.15`. Shared/Qwen/GLM sources and transitive pins remain unchanged.

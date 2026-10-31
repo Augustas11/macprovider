@@ -1,0 +1,27 @@
+{
+  "generated_at": "2026-10-31T04:00:00Z",
+  "policy_version": "autotune-policy-v1",
+  "rows": {
+    "liquidai/lfm2.5-24b-a2b": {
+      "bench_gate": {
+        "max_4k_ttft_ms": 30000,
+        "min_sustained_tps": 10,
+        "provenance": {
+          "hardware": "Apple M5 32GB",
+          "measured_at": "2026-10-31",
+          "notes": "Native serial reference parity: exact 256/256 at 1k, 8k and 32k. Four-row serving-shaped scheduler decode 51.26 tok/s versus serial 40.54 (+26.43%). Advisory 4k TTFT ceiling is policy, not a measured 4k result.",
+          "source": "runtime_validated_only"
+        }
+      },
+      "min_bandwidth_tier": "C",
+      "min_ram_gb": 20,
+      "model_id": "LiquidAI/LFM2.5-24B-A2B-MLX-4bit",
+      "model_revision": "667408d494bde191c2cb9dd4f4549827816b9275",
+      "model_sha256": "0b2d5786b538be629070b39dfed805bf903768f95aa70591fd4cfe4f803a8992",
+      "notes": "Unsigned candidate staging only; no listed admission, default selection, signed CB grant or recommendation. Native MLX runtime. min_ram_gb=20 requires the model-scoped 512 MiB MLX freed-buffer cache cap; capped peak footprint 16.426 GiB rounded up to 20 GiB, plus the separate 4 GiB catalog reserve (24 GiB eligibility). Physical 24 GiB hardware fit remains untested. LFM Open License v1.0: commercial use condition applies separately to Malibu and every provider (annual revenue under US$10 million); preserve license and notices. Required coding quality and buyer-UX activation gates remain pending.",
+      "runtime_status": "candidate"
+    }
+  },
+  "source": "operator_curated_autotune_candidate_catalog",
+  "version": "staged-2026-10-31-lfm25-24b-candidate-v1"
+}

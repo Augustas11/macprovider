@@ -18,8 +18,8 @@ rules (``Class::vjp``/``jvp``/``vmap``, or any body using ``stream()``), the
 primitive's ``stream()``, and reports:
 
 - a call to one of those functions (unqualified or ``mlx::core::``-style
-  qualified) whose last argument is not the caller's stream or an alias of
-  it;
+  qualified) whose stream argument is not the caller's stream or an alias
+  of it (normally last; quantized_matmul keeps stream before reference_prefill);
 - an operator overload applied to an array value (a parameter or local of
   type ``array`` or ``std::vector<array>``, an element of one, or the result
   of a stream-taking call).
@@ -259,7 +259,10 @@ def scan_text(source: str, text: str, ops: set[str], operators: set[str]) -> tup
             open_index = call.end() - 1
             close_index = matching(body, open_index, "(", ")")
             arguments = split_arguments(body[open_index + 1 : close_index])
-            if arguments and stream_argument.match(arguments[-1]):
+            # The reference-prefill option follows the existing stream slot so
+            # old quantized_matmul calls keep their argument positions.
+            stream_index = 8 if call.group(2) == "quantized_matmul" and len(arguments) == 10 else -1
+            if arguments and stream_argument.match(arguments[stream_index]):
                 continue
             line = first_line + body[: call.start()].count("\n")
             snippet = " ".join(body[call.start() : close_index + 1].split())[:100]

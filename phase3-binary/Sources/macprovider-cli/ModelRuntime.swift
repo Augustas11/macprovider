@@ -2172,6 +2172,7 @@ actor ModelRuntime: ModelRuntimeServing {
     private var continuousBatchingSelfCheckReport: ContinuousBatchingSelfCheckReport?
     // Only real native runtimes select this; preloaded/test runtimes leave it nil.
     private(set) var mlxCacheLimitMBForLoading: Int? = nil
+    private var mlxCacheLimitBeforeLFM25: Int?
     private var hardwareServingRowCap = ProviderCapacity.maxConcurrencyOverrideLimit
     private let warmSwapEnabled: Bool
     private let swapDrainTimeoutSeconds: Int
@@ -3069,6 +3070,68 @@ actor ModelRuntime: ModelRuntimeServing {
         return bytes
     }
 
+    /// The 20 GiB LFM2.5 admission was measured with at most 512 MiB of
+    /// reusable MLX buffers. An explicit smaller budget remains authoritative.
+    private nonisolated static let lfm25MLXCacheModelIDs: Set<String> = [
+        "liquidai/lfm2.5-24b-a2b", "liquidai/lfm2.5-24b-a2b-mlx-4bit",
+    ]
+
+    nonisolated static func modelScopedMLXCacheLimitBytes(
+        modelID: String?, baselineBytes: Int
+    ) -> Int {
+        guard let modelID, lfm25MLXCacheModelIDs.contains(modelID.lowercased()) else {
+            return baselineBytes
+        }
+        return min(baselineBytes, 512 * 1024 * 1024)
+    }
+
+    nonisolated static func modelCachePolicyID(
+        target: String?, configuredModelID: String?, verifiedCatalogModelID: String?
+    ) -> String? {
+        if let target, lfm25MLXCacheModelIDs.contains(target.lowercased()) { return target }
+        if let target, target == configuredModelID, let verifiedCatalogModelID {
+            return verifiedCatalogModelID
+        }
+        return target
+    }
+
+    private func cachePolicyModelID(for target: String?) -> String? {
+        Self.modelCachePolicyID(
+            target: target, configuredModelID: modelID,
+            verifiedCatalogModelID: verifiedCatalogArtifactSHA256 == nil ? nil : catalogModelIDAlias)
+    }
+
+    /// Keep the incumbent LFM budget until a swap has drained it. Restore
+    /// the pre-LFM process budget when another model takes ownership.
+    private func applyMLXCacheLimitForModelLoad(
+        _ target: String?, preservingResidentModel: Bool = false
+    ) {
+        let targetID = cachePolicyModelID(for: target)
+        let residentID = preservingResidentModel ? cachePolicyModelID(for: currentModelID) : nil
+        let lfmID = "liquidai/lfm2.5-24b-a2b-mlx-4bit"
+        let requiresLFMCap = [targetID, residentID].compactMap { $0?.lowercased() }
+            .contains(where: Self.lfm25MLXCacheModelIDs.contains)
+        let configuredBytes = mlxCacheLimitMBForLoading.map { $0 * 1024 * 1024 }
+        let applied: Int?
+        if requiresLFMCap {
+            if mlxCacheLimitBeforeLFM25 == nil { mlxCacheLimitBeforeLFM25 = Memory.cacheLimit }
+            let baseline = configuredBytes ?? mlxCacheLimitBeforeLFM25 ?? Memory.cacheLimit
+            let bytes = Self.modelScopedMLXCacheLimitBytes(modelID: lfmID, baselineBytes: baseline)
+            Memory.cacheLimit = bytes
+            applied = bytes
+        } else if let previous = mlxCacheLimitBeforeLFM25 {
+            let bytes = configuredBytes ?? previous
+            Memory.cacheLimit = bytes
+            mlxCacheLimitBeforeLFM25 = nil
+            applied = bytes
+        } else {
+            applied = Self.applyMLXCacheLimit(megabytes: mlxCacheLimitMBForLoading)
+        }
+        if let applied {
+            FileHandle.standardError.write(Data("mlx_cache_limit_bytes=\(applied)\n".utf8))
+        }
+    }
+
     /// Families served with the process wired limit at Metal's recommended
     /// working set for as long as the model is loaded. DeepSeek V4-Flash
     /// (~167 GB of MXFP4/MXFP8 weights) sits as close to the working set as
@@ -3799,9 +3862,7 @@ maxTokens: 1,
 
         // One setup boundary for serve, self-test and native benchmark callers.
         // A nil-model or preloaded test runtime must not initialize Metal.
-        if let applied = Self.applyMLXCacheLimit(megabytes: mlxCacheLimitMBForLoading) {
-            FileHandle.standardError.write(Data("mlx_cache_limit_bytes=\(applied)\n".utf8))
-        }
+        applyMLXCacheLimitForModelLoad(modelID)
         let targetLoadPath = modelLoadPath ?? modelID
         let candidateNativeMTPLoad: NativeMTPRuntimeLoadResult?
         let candidateNativeMTPDisabledReason: NativeMTPStatusReason
@@ -5504,8 +5565,7 @@ maxTokens: 1,
         let maxContextTokens = adoptionKnobs?.maxContext ?? maxContextTokens
         let kvBitsOverride = adoptionKnobs?.kvBits ?? kvBitsOverride
         let prefillStepSize = prefillStepSize
-        let mlxCacheLimitMB = mlxCacheLimitMBForLoading
-        return Task.detached { [weak self, testLoader, drainTimeoutSeconds, providerStatus, configuredDraftModelID, configuredDraftModelLoadPath, numDraftTokens, maxContextTokens, kvBitsOverride, prefillStepSize, mlxCacheLimitMB, targetAuthority, adoptionKnobs] in
+        return Task.detached { [weak self, testLoader, drainTimeoutSeconds, providerStatus, configuredDraftModelID, configuredDraftModelLoadPath, numDraftTokens, maxContextTokens, kvBitsOverride, prefillStepSize, targetAuthority, adoptionKnobs] in
             guard let self else { return }
             do {
                 let container: ModelContainer?
@@ -5552,9 +5612,7 @@ maxTokens: 1,
                         throw ModelRuntimeLoadError(target: "signed catalog identity unavailable for \(targetModelID)")
                     }
                     // Nil-model startup defers Metal setup until its first signed load.
-                    if let applied = Self.applyMLXCacheLimit(megabytes: mlxCacheLimitMB) {
-                        FileHandle.standardError.write(Data("mlx_cache_limit_bytes=\(applied)\n".utf8))
-                    }
+                    await self.applyMLXCacheLimitForModelLoad(targetModelID, preservingResidentModel: true)
                     let visionModelID = self.nativeVisionSelectionModelID(for: targetModelID)
                     let loaded = try await Self.loadLocalContainer(
                         from: targetAuthority.modelArgument,
@@ -5641,7 +5699,11 @@ maxTokens: 1,
                     modelCapabilities: modelCapabilities,
                     adoptionKnobs: adoptionKnobs
                 )
+                if testLoader == nil { await self.applyMLXCacheLimitForModelLoad(modelID) }
             } catch {
+                if testLoader == nil {
+                    await self.applyMLXCacheLimitForModelLoad(self.currentModelID)
+                }
                 await self.failSwap(reason: String(describing: error))
             }
         }

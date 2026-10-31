@@ -1,4 +1,3 @@
-#if MACPROVIDER_LAB_HARNESS
 import Foundation
 import MLX
 import MLXLLM
@@ -6,6 +5,23 @@ import MLXNN
 import XCTest
 
 final class LFMReferencePrefillTests: XCTestCase {
+    func testOrdinaryQuantizationKeepsTheExistingRoute() throws {
+        try Device.withDefaultDevice(.cpu) {
+            let ordinary = Linear(64, 32, bias: false)
+            let quantized = try XCTUnwrap(ordinary.toQuantized(
+                groupSize: 64, bits: 4, mode: .affine) as? QuantizedLinear)
+            XCTAssertFalse(ordinary.referencePrefill)
+            XCTAssertFalse(quantized.referencePrefill)
+            let input = MLXArray(Array(repeating: Float(0.25), count: 2 * 3 * 64))
+                .reshaped([2, 3, 64])
+            let implicit = quantized(input)
+            let explicit = quantizedMM(input, quantized.weight,
+                scales: quantized.scales, biases: quantized.biases,
+                transpose: true, groupSize: 64, bits: 4, referencePrefill: false)
+            XCTAssertEqual(implicit.asArray(Float.self), explicit.asArray(Float.self))
+        }
+    }
+
     func testLFMQuantizationKeepsReferencePrefillOnEveryLinearProjection() throws {
         try Device.withDefaultDevice(.cpu) {
             let config = try JSONDecoder().decode(LFM2MoEConfiguration.self, from: Data("""
@@ -32,4 +48,3 @@ final class LFMReferencePrefillTests: XCTestCase {
         }
     }
 }
-#endif

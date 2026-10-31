@@ -473,6 +473,37 @@ final class ServingKnobsConfigTests: XCTestCase {
         }
     }
 
+    func testLFM25ModelCacheCapPreservesSmallerLimitsAndOtherModels() {
+        let mib = 1024 * 1024
+        for baseline in [0, 128 * mib, 512 * mib, 4096 * mib, Int.max] {
+            for lfm in ["liquidai/lfm2.5-24b-a2b", "LiquidAI/LFM2.5-24B-A2B-MLX-4bit"] {
+                XCTAssertEqual(ModelRuntime.modelScopedMLXCacheLimitBytes(
+                    modelID: lfm, baselineBytes: baseline), min(baseline, 512 * mib))
+            }
+            for other in [nil, "mlx-community/Llama-3.2-3B-Instruct-4bit", "glm5_next",
+                          "qwen", "deepseek_v4", "other/LFM2.5-24B-A2B",
+                          "LiquidAI/LFM2.5-24B-A2B-MLX-8bit"] as [String?] {
+                XCTAssertEqual(ModelRuntime.modelScopedMLXCacheLimitBytes(
+                    modelID: other, baselineBytes: baseline), baseline)
+            }
+        }
+    }
+
+    func testLFM25CachePolicyUsesVerifiedAliasOnlyForItsConfiguredLocalPath() {
+        let lfm = "liquidai/lfm2.5-24b-a2b"
+        let path = "/local/snapshot"
+        XCTAssertEqual(ModelRuntime.modelCachePolicyID(
+            target: path, configuredModelID: path, verifiedCatalogModelID: lfm), lfm)
+        XCTAssertEqual(ModelRuntime.modelCachePolicyID(
+            target: path, configuredModelID: path, verifiedCatalogModelID: nil), path)
+        XCTAssertEqual(ModelRuntime.modelCachePolicyID(
+            target: "qwen", configuredModelID: path, verifiedCatalogModelID: lfm), "qwen")
+        XCTAssertEqual(ModelRuntime.modelCachePolicyID(
+            target: lfm, configuredModelID: path, verifiedCatalogModelID: "qwen"), lfm)
+        XCTAssertNil(ModelRuntime.modelCachePolicyID(
+            target: nil, configuredModelID: nil, verifiedCatalogModelID: lfm))
+    }
+
     func testExplicitMLXCacheSelectionIsNeverReplacedByRAMDefault() {
         for ram: UInt64 in [0, 8 * 1024 * 1024 * 1024, UInt64.max] {
             for explicit in [0, 1, 256, 4096, ModelRuntime.maximumMLXCacheLimitMB, -1, Int.max] {

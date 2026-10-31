@@ -49,6 +49,31 @@ final class MLXCoreStreamPropagationTests: XCTestCase {
         )
     }
 
+    func testResolvedCBridgeIsTheReviewedForkRevision() throws {
+        let pins = try String(
+            contentsOf: Self.repositoryRoot.appendingPathComponent("scripts/read_swiftpm_pins.py"),
+            encoding: .utf8)
+        let pattern = try NSRegularExpression(pattern: #"SPEC048_MLX_C_REVISION = "([0-9a-f]{40})""#)
+        guard let match = pattern.firstMatch(in: pins, range: NSRange(pins.startIndex..., in: pins)),
+              let range = Range(match.range(at: 1), in: pins) else {
+            return XCTFail("SPEC048_MLX_C_REVISION missing")
+        }
+        let reviewed = String(pins[range])
+        let gitlink = try run("/usr/bin/env", ["git", "-C", Self.mlxSwiftCheckout.path,
+            "ls-tree", "HEAD", "Source/Cmlx/mlx-c"])
+        XCTAssertEqual(gitlink.status, 0, gitlink.output)
+        XCTAssertTrue(gitlink.output.contains("commit \(reviewed)"), gitlink.output)
+        let cRoot = Self.mlxSwiftCheckout.appendingPathComponent("Source/Cmlx/mlx-c")
+        let head = try run("/usr/bin/env", ["git", "-C", cRoot.path, "rev-parse", "HEAD"])
+        XCTAssertEqual(head.status, 0, head.output)
+        XCTAssertEqual(head.output.trimmingCharacters(in: .whitespacesAndNewlines), reviewed)
+        let remote = try run("/usr/bin/env", ["git", "-C", Self.mlxSwiftCheckout.path,
+            "config", "-f", ".gitmodules", "--get", "submodule.submodules/mlx-c.url"])
+        XCTAssertEqual(remote.status, 0, remote.output)
+        XCTAssertEqual(remote.output.trimmingCharacters(in: .whitespacesAndNewlines),
+            "https://github.com/Augustas11/mlx-c")
+    }
+
     func testResolvedCoreIsTheReviewedForkRevision() throws {
         try requireResolvedCore()
         let pins = try String(
