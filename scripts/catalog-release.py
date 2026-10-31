@@ -2714,37 +2714,25 @@ def mlx_swift_lm_pin(resolved_text: str, where: str) -> str:
     return revision
 
 
-def bound_release_package_resolved(source_commit: object) -> str | None:
-    """Package.resolved at the provider release the admission is bound to,
-    or None only when a shallow checkout lacks that commit. Any other lookup
-    failure, including a commit absent from a full checkout, refuses."""
+def bound_release_package_resolved(source_commit: object) -> str:
+    """Package.resolved at the provider release the admission is bound to.
+    A commit this repository lacks, or any git failure, refuses."""
     if not isinstance(source_commit, str) or re.fullmatch(r"[0-9a-f]{40}", source_commit) is None:
         fail(f"native-MTP release input: source_commit {source_commit!r} is not a full lowercase commit id")
-
-    def git(*args: str) -> subprocess.CompletedProcess:
-        try:
-            return subprocess.run(
-                ["git", "-C", str(ROOT), *args],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                timeout=30,
-            )
-        except (OSError, subprocess.TimeoutExpired, ValueError) as error:
-            fail(f"native-MTP runtime_revision: git {args[0]} for bound release {source_commit} failed: {error}")
-
-    shallow = git("rev-parse", "--is-shallow-repository")
-    if shallow.returncode != 0 or shallow.stdout.strip() not in ("true", "false"):
-        fail(f"native-MTP runtime_revision: {ROOT} is not a readable git checkout: {shallow.stderr.strip()}")
-    if git("cat-file", "-e", f"{source_commit}^{{commit}}").returncode != 0:
-        if shallow.stdout.strip() == "true":
-            return None
-        fail(f"native-MTP runtime_revision: bound release {source_commit} is not a commit of this repository")
-    shown = git("show", f"{source_commit}:{PACKAGE_RESOLVED_REPO_PATH}")
+    try:
+        shown = subprocess.run(
+            ["git", "-C", str(ROOT), "show", f"{source_commit}:{PACKAGE_RESOLVED_REPO_PATH}"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired, ValueError) as error:
+        fail(f"native-MTP runtime_revision: git show for bound release {source_commit} failed: {error}")
     if shown.returncode != 0:
         fail(
             f"native-MTP runtime_revision: cannot read {PACKAGE_RESOLVED_REPO_PATH} at bound release "
-            f"{source_commit}: {shown.stderr.strip()}"
+            f"{source_commit} (verification needs a full-history checkout): {shown.stderr.strip()}"
         )
     return shown.stdout
 
@@ -2757,25 +2745,16 @@ def require_native_mtp_runtime_pin(body: dict, source_commit: object) -> None:
     runtime is the mlx-swift-lm pin at that commit, not at the checkout's
     HEAD: main may move the pin before the next CLI cut, and the admission
     must keep matching the binary that serves until the cut rebinds it.
-    When the bound commit is not in this checkout, fall back to the working
-    tree. A historical signed release directory need not match either.
+    A historical signed release directory is not checked here.
     """
-    bound = bound_release_package_resolved(source_commit)
-    if bound is not None:
-        revision = mlx_swift_lm_pin(bound, f"Package.resolved at bound release {source_commit}")
-        where = f"the bound release {source_commit} Package.resolved mlx-swift-lm pin"
-    else:
-        try:
-            text = PACKAGE_RESOLVED_PATH.read_text("utf-8")
-        except OSError as error:
-            fail(f"native-MTP runtime_revision: cannot read mlx-swift-lm pin from Package.resolved: {error}")
-        revision = mlx_swift_lm_pin(text, "Package.resolved")
-        where = "Package.resolved mlx-swift-lm pin"
+    revision = mlx_swift_lm_pin(
+        bound_release_package_resolved(source_commit), f"Package.resolved at bound release {source_commit}"
+    )
     for index, entry in enumerate(body["entries"]):
         if entry["runtime_revision"] != revision:
             fail(
                 f"native-MTP entries[{index}].runtime_revision {entry['runtime_revision']!r} "
-                f"differs from {where} {revision!r}"
+                f"differs from the bound release {source_commit} Package.resolved mlx-swift-lm pin {revision!r}"
             )
 
 

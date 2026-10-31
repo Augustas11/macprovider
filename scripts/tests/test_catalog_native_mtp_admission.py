@@ -206,14 +206,13 @@ class NativeMTPAdmissionReleaseTest(unittest.TestCase):
             moved_pin.write_text(json.dumps(resolved))
             with patch.object(catalog_release, "PACKAGE_RESOLVED_PATH", moved_pin):
                 catalog_release.verify()
-            # A full checkout without the bound commit refuses; only a
-            # shallow one falls back to the working tree.
+            # A bound commit this repository lacks refuses.
             stale = json.loads(release_path.read_text())
             stale["entry"]["source_commit"] = "a" * 40
             stale["entry"]["provider_revision"] = "a" * 40
             release_path.write_text(json.dumps(stale))
             with patch.object(catalog_release, "PACKAGE_RESOLVED_PATH", moved_pin):
-                with self.assertRaisesRegex(catalog_release.CatalogError, "is not a commit of this repository"):
+                with self.assertRaisesRegex(catalog_release.CatalogError, "cannot read phase3-binary/Package.resolved at bound release"):
                     catalog_release.verify()
             unbound = json.loads(release_path.read_text())
             unbound["entry"]["source_commit"] = head
