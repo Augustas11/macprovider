@@ -7661,6 +7661,20 @@ maxTokens: 1,
         return Array(canonicalTokens.prefix(coveredTokenCount))
     }
 
+    /// A row truncated at the serial tool stop decoded tokens its completion
+    /// drops, so a cache covering generated tokens must not be committed. A
+    /// prompt snapshot covers only prompt tokens, which the truncation never
+    /// touches; dropping it made every turn that ended on an early tool stop
+    /// re-prefill its whole prompt on the next turn.
+    nonisolated static func serialConversationCacheCommittable(
+        truncatedAtSerialStop: Bool,
+        promptSnapshot: Bool,
+        coveredTokenCount: Int,
+        promptTokenCount: Int
+    ) -> Bool {
+        !truncatedAtSerialStop || (promptSnapshot && coveredTokenCount <= promptTokenCount)
+    }
+
     /// Tokenizer decode for CB streaming. Must not take `ModelContainer`:
     /// compiled lockstep already holds that hop, and a per-token `perform`
     /// behind the delivery buffer is what turned longer canary streams into
@@ -8786,8 +8800,13 @@ maxTokens: 1,
                     fullTokens: preparedPromptTokenIDs + generatedTokens.map(Int32.init)
                 )
                 await scheduler.acknowledgeRetainedCacheDelivery(retainedCache)
-            } else if !finalized.truncatedAtSerialStop,
-                      let lease, let serialCache = result.serialConversationCache,
+            } else if let lease, let serialCache = result.serialConversationCache,
+                      Self.serialConversationCacheCommittable(
+                          truncatedAtSerialStop: finalized.truncatedAtSerialStop,
+                          promptSnapshot: serialCache.promptSnapshot,
+                          coveredTokenCount: serialCache.tokenCount,
+                          promptTokenCount: preparedPromptTokenIDs.count
+                      ),
                       let fullTokens = Self.serialConversationCacheCommitTokens(
                           canonicalTokens: preparedPromptTokenIDs + generatedTokens.map(Int32.init),
                           coveredTokenCount: serialCache.tokenCount
@@ -9391,8 +9410,13 @@ maxTokens: 1,
                     fullTokens: preparedPromptTokenIDs + generatedTokens.map(Int32.init)
                 )
                 await scheduler.acknowledgeRetainedCacheDelivery(retainedCache)
-            } else if !finalized.truncatedAtSerialStop,
-                      let lease, let serialCache = result.serialConversationCache,
+            } else if let lease, let serialCache = result.serialConversationCache,
+                      Self.serialConversationCacheCommittable(
+                          truncatedAtSerialStop: finalized.truncatedAtSerialStop,
+                          promptSnapshot: serialCache.promptSnapshot,
+                          coveredTokenCount: serialCache.tokenCount,
+                          promptTokenCount: preparedPromptTokenIDs.count
+                      ),
                       let fullTokens = Self.serialConversationCacheCommitTokens(
                           canonicalTokens: preparedPromptTokenIDs + generatedTokens.map(Int32.init),
                           coveredTokenCount: serialCache.tokenCount

@@ -1357,6 +1357,21 @@ final class ConversationCacheTests: XCTestCase {
         XCTAssertNil(ModelRuntime.serialConversationCacheCommitTokens(canonicalTokens: canonical, coveredTokenCount: 91))
     }
 
+    /// A row stopped early at a serial tool boundary still publishes its prompt
+    /// snapshot (prompt tokens only); a cache covering generated tokens does not.
+    func testSerialStopTruncationKeepsOnlyPromptSnapshotCommittable() {
+        XCTAssertTrue(ModelRuntime.serialConversationCacheCommittable(
+            truncatedAtSerialStop: false, promptSnapshot: false, coveredTokenCount: 120, promptTokenCount: 100))
+        XCTAssertTrue(ModelRuntime.serialConversationCacheCommittable(
+            truncatedAtSerialStop: true, promptSnapshot: true, coveredTokenCount: 98, promptTokenCount: 100))
+        XCTAssertTrue(ModelRuntime.serialConversationCacheCommittable(
+            truncatedAtSerialStop: true, promptSnapshot: true, coveredTokenCount: 100, promptTokenCount: 100))
+        XCTAssertFalse(ModelRuntime.serialConversationCacheCommittable(
+            truncatedAtSerialStop: true, promptSnapshot: true, coveredTokenCount: 101, promptTokenCount: 100))
+        XCTAssertFalse(ModelRuntime.serialConversationCacheCommittable(
+            truncatedAtSerialStop: true, promptSnapshot: false, coveredTokenCount: 90, promptTokenCount: 100))
+    }
+
     /// A batched hybrid first turn commits attention covering all but the last
     /// sampled token, empty recurrent layers and its checkpoints; `begin` must
     /// trim the attention layers exactly onto the largest checkpoint, including
