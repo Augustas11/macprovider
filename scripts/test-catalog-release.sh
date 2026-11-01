@@ -399,6 +399,9 @@ expected_history = {
     "published-2026-11-01-glm53-flash-abliterated-cb-mtp-v277",
     # Superseded by the same set with the abliterated model in the projection.
     "published-2026-11-01-glm53-flash-abliterated-cb-mtp-v280",
+    # Published by a signed pair that rolled back on a stale plan CB tuple;
+    # its release directory name stays taken on Pearl.
+    "published-2026-11-01-glm53-flash-abliterated-cb-mtp-v280-r2",
     current_release_id,
 }
 if set(ledger["releases"]) != expected_history:
