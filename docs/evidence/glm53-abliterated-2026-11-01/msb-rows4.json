@@ -1,0 +1,62 @@
+{
+  "aggregateCVPct" : 0.06621957156666634,
+  "aggregateTPSRuns" : [
+    66.37253641465377,
+    66.419427231922,
+    66.33158837456472
+  ],
+  "aggregateTPSp50" : 66.37253641465377,
+  "aggregateUpliftVsPagedSingleRow" : 1.643179176290307,
+  "aggregateVsProductionSerial" : 1.5759276922964944,
+  "blockSizeTokens" : 256,
+  "compiled" : false,
+  "decodeTokensPerRow" : 128,
+  "engine" : "paged",
+  "layerCount" : 11,
+  "maxPhysicalBlocks" : 1024,
+  "mlxSwiftLMPin" : "mlxlm-36d24585f937",
+  "modelID" : "<models>\/grant-ai--GLM-5.3-Flash-Abliterated-MLX-4bit\/cbf4e8bd80e9227aa0a60c19b550bef6b390c04c\/d47ec628ddfd67813ab9a9439a152e19d5f648ae3f05cfe6b2094eb9fb67fc4c",
+  "modelTag" : "d47ec628ddfd67813ab9a9439a152e19d5f648ae3f05cfe6b2094eb9fb67fc4c",
+  "pagedSingleRowCVPct" : 0.08570009903855388,
+  "pagedSingleRowTPSRuns" : [
+    40.3927565370555,
+    40.43268038309272,
+    40.363727185063546
+  ],
+  "pagedSingleRowTPSp50" : 40.3927565370555,
+  "peakPhysFootprintMB" : 181812,
+  "peakRSSMB" : 163156,
+  "perRowFractionOfPagedSingleRow" : 0.41079479407257674,
+  "perRowTPSp50" : 16.59313410366344,
+  "productionSerialCVPct" : 0.06329448048795057,
+  "productionSerialPromptTokens" : 1024,
+  "productionSerialTPSRuns" : [
+    42.0756291828833,
+    42.11648588897724,
+    42.12570264147331
+  ],
+  "productionSerialTPSp50" : 42.11648588897724,
+  "productionSerialTTFTSecondsRuns" : [
+    3.1129859685897827,
+    3.113529086112976,
+    3.1128820180892944
+  ],
+  "promptTokenLengths" : [
+    1024,
+    1024,
+    1024,
+    1024
+  ],
+  "promptTokenSHA256" : [
+    "c2d6e0a41c032e905401737f80cfeaf532576de3aef86f3382067663f683b3dd",
+    "bb27f683b1bd122f66d900e82379da023fe1014bda15ede6d18f4741f834c1ac",
+    "3923e437beaf0f76bb205078aa2ff48ff22f47f09b7c84d8d0d9a2fd9d820620",
+    "4c073ae313b6b2c55fd68f7629d3f6b683d0ebb16feb4e4e90de8b2fb4862067"
+  ],
+  "promptTokensPerRow" : 1024,
+  "rows" : 4,
+  "runs" : 3,
+  "scenario" : "throughput",
+  "schemaVersion" : 4,
+  "timestamp" : "2026-10-31T21:44:17Z"
+}

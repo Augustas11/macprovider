@@ -1136,7 +1136,7 @@
     {
       "spec_id": "SPEC-039",
       "title": "Paged KV / paged-attention engine",
-      "version": "v0.1.26",
+      "version": "v0.1.27",
       "path": "specs/SPEC-039-paged-kv-attention-engine.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -6013,7 +6013,8 @@
         "phase3-binary/Tests/macprovider-cliTests/PagedKVSlidingWindowTests.swift:testPagedSingleTokenDecodePastWindowPresentsOnlyWindow",
         "phase3-binary/Tests/macprovider-cliTests/PagedKVSlidingWindowTests.swift:testPagedMultiTokenPrefillPastWindowMatchesRotatingPresentation",
         "phase3-binary/Tests/macprovider-cliTests/PagedKVSlidingWindowTests.swift:testBatchedEqualLengthDecodePastWindowUsesPresentedWindow",
-        "phase3-binary/Tests/macprovider-cliTests/DeepseekV4ContinuousBatchTests.swift:final class DeepseekV4ContinuousBatchTests"
+        "phase3-binary/Tests/macprovider-cliTests/DeepseekV4ContinuousBatchTests.swift:final class DeepseekV4ContinuousBatchTests",
+        "phase3-binary/Tests/macprovider-cliTests/GLM5NextPagedKVWiringTests.swift:testAbliteratedCatalogIdentityCarriesTheSameSparseLayout"
       ],
       "journeys": [],
       "evidence": [
