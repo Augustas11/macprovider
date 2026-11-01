@@ -302,8 +302,13 @@ final class ConversationCacheMemoryBudget: @unchecked Sendable {
     /// well as serving capacity, then split the remainder equally between the
     /// one aggregate writer and the one promotion. Never extrapolate a laptop's
     /// small staging allowance from a large Studio's physical memory.
-    func stagingByteLimit() -> Int {
-        guard let headroom = measuredHeadroom() else { return 0 }
+    /// `creditingBytes` adds back memory the caller already holds for the
+    /// staging being checked (a captured write snapshot's deep copy), so that
+    /// copy is not charged against its own limit when re-measured at write.
+    func stagingByteLimit(creditingBytes: Int = 0) -> Int {
+        guard let measured = measuredHeadroom() else { return 0 }
+        let headroom = (physical: measured.physical,
+                        bytes: Self.saturatedAdd(measured.bytes, max(0, creditingBytes)))
         let hotAllowance = min(8 * 1024 * 1024 * 1024, headroom.physical / 32)
         guard headroom.bytes > hotAllowance else { return 0 }
         let tierCap = headroom.physical < 64 * 1024 * 1024 * 1024

@@ -40,6 +40,23 @@ final class ConversationCacheStagingBudgetTests: XCTestCase {
         XCTAssertEqual(budget(physical: physical, available: reserved - 1).stagingByteLimit(), 0)
     }
 
+    /// A captured write snapshot's own deep copy is resident when the store
+    /// re-measures at write time. Crediting it restores the capture-time limit,
+    /// so an entry admitted at capture is not refused for counting itself (#2196 audit).
+    func testWriteTimeLimitCreditsTheSnapshotsOwnReservation() {
+        let physical = 256 * gib
+        let serving = 800_000 * 11_968 + 4 * 150_616_064
+        let reserved = (physical + 9) / 10 + serving + serving / 20 + 8 * gib
+        let extraAtCapture = 3 * gib
+        let atCapture = budget(physical: physical, available: reserved + extraAtCapture).stagingByteLimit()
+        XCTAssertEqual(atCapture, extraAtCapture / 2)
+        let copy = atCapture * 9 / 10
+        let afterCopy = budget(physical: physical, available: reserved + extraAtCapture - copy)
+        XCTAssertLessThan(afterCopy.stagingByteLimit(), copy)
+        XCTAssertEqual(afterCopy.stagingByteLimit(creditingBytes: copy), atCapture)
+        XCTAssertEqual(afterCopy.stagingByteLimit(creditingBytes: -1), afterCopy.stagingByteLimit())
+    }
+
     func testSmallMemoryTiersCannotAdmitLongGLMStagingEvenWhenIdle() {
         for memory in [8, 16, 32] {
             let result = ConversationCacheMemoryBudget(probe: .init(identity: "small-\(memory)") {

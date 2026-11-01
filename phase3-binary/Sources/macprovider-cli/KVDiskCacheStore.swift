@@ -332,14 +332,16 @@ actor KVDiskCacheStore {
         memoryBudget = budget
     }
 
-    func promotionStagingLimit() -> Int {
+    func promotionStagingLimit(creditingBytes: Int = 0) -> Int {
         KVDiskStagingPolicy.limit(configured: config.stagingMaxBytes,
-            adaptive: config.adaptiveStaging, measured: memoryBudget?.stagingByteLimit())
+            adaptive: config.adaptiveStaging,
+            measured: memoryBudget?.stagingByteLimit(creditingBytes: creditingBytes))
     }
 
-    func writeStagingLimit() -> Int {
+    func writeStagingLimit(creditingBytes: Int = 0) -> Int {
         KVDiskStagingPolicy.limit(configured: config.writeStagingMaxBytes,
-            adaptive: config.adaptiveWriteStaging, measured: memoryBudget?.stagingByteLimit())
+            adaptive: config.adaptiveWriteStaging,
+            measured: memoryBudget?.stagingByteLimit(creditingBytes: creditingBytes))
     }
     private let keys: KVKeyManager
     private let sink: any KVEventSink
@@ -913,11 +915,13 @@ actor KVDiskCacheStore {
         let promotionMultiplier = snapshot.identity.codecID == KVDiskCacheFormat.codecID ? 1 : 2
         let (promotionBytes, promotionOverflow) = decodedLength.multipliedReportingOverflow(by: promotionMultiplier)
         guard !promotionOverflow,
-              promotionBytes <= promotionStagingLimit() else {
+              // The snapshot's own deep copy is already resident; credit it
+              // back so re-measuring free memory does not charge it twice.
+              promotionBytes <= promotionStagingLimit(creditingBytes: snapshot.reservedWriteBytes) else {
             return skip(.exceedsPromotionCeiling, snapshot)
         }
         // Write-live budget (RAM-DoS bound).
-        let writeCeiling = writeStagingLimit()
+        let writeCeiling = writeStagingLimit(creditingBytes: snapshot.reservedWriteBytes)
         guard decodedLength <= writeCeiling, snapshot.reservedWriteBytes <= writeCeiling else {
             return skip(.exceedsPromotionCeiling, snapshot)
         }
