@@ -1,8 +1,16 @@
 # SPEC-024 - Prefix-cache billing and provider-local cache isolation
 
-**Version:** 0.2.16 (2026-10-28, GLM serial and continuous-batch snapshot separation)
+**Version:** 0.2.17 (2026-11-01, quantized reusable serial conversation KV)
 **Status:** **Billing arithmetic (§4 ledger / §5 rate card / §6 formula) MOVED to SPEC-005 v0.6** (canonical). SPEC-024 **retains** the `cached_prompt_tokens` **wire field** (§3, a SPEC-002 addendum), the **buyer-visible** mirror field (§8, a SPEC-006 addendum), the fraud model (§7), and the provider-local cache-**isolation** baseline (§11–§16) — none of which SPEC-005 **re-owns** (SPEC-005 §5.3.1 does fold in the §14 coordinator cross-check *gates* as billing-eligibility rules, but SPEC-024 remains their canonical home).
 **Depends on:** SPEC-002 v1.5.2 (coordinator-provider wire), SPEC-004 v0.3.2 (sticky affinity; FR-SR-2 provider-visibility carve-out), SPEC-005 v0.6.10 (billing — the canonical owner of prefix-cache billing arithmetic, formula, ledger columns, and rate-card keys), SPEC-006 v0.9.39 (buyer API; §1.3 conversation-key derivation + survivability (b) carve-out + OpenAI nested usage), SPEC-008 v0.4.1 (Tier-2 trust; §2.2 invariant (b) carve-out permitting the provider-visible derived conversation_key), SPEC-018 v0.2.4 (tool calling)
+
+**Change log v0.2.17 (2026-11-01, Related: #965):**
+- **SPEC-024-R006 / FR-CI2.** A conversation-keyed serial request honours the
+  configured `kv_bits` again. mlx-swift-lm 3.32.3 (PR #453) fixes the #312
+  cache-ownership bug only inside that package, so the provider quantizes the
+  reusable cache it owns and never gives its iterator `kv_bits`. Every serial
+  commit's attention offsets must equal its canonical token ledger. Cold-tier
+  eligible requests, image requests and continuous-batching rows keep fp16.
 
 **Change log v0.2.15 (2026-10-28, Related: #2154):**
 - **FR-CI2a.** Typed LFM serial requests and the loaded canonical dense
@@ -496,6 +504,29 @@ bit-for-bit identical *sampled output*: the shipped default is stochastic sampli
 runs of a stochastic request will differ. Reuse is a performance optimization with no effect
 on the *distribution* of output, not a determinism guarantee.
 
+**SPEC-024-R006 (quantized reusable serial conversation KV, v0.2.17).** When the provider
+runs with `kv_bits` set, a conversation-keyed serial request whose model's uncapped serve
+cache is entirely `KVCacheSimple` MUST keep that quantization:
+- **Ownership.** On a turn without a reusable entry the provider prefills the prompt at fp16 up
+  to its last token, then converts every prefilled `KVCacheSimple` layer of the cache it will
+  commit to `QuantizedKVCache` itself; a reused quantized entry extends in place. The iterator
+  gets no `kv_bits`. An iterator never quantizes a leased cache, because
+  mlx-swift-lm's iterator writes quantized layers to storage the caller cannot see
+  (mlx-swift-lm #312; the 3.32.3 fix shares that storage only inside the package).
+- **Ledger.** Before a serial commit, every `KVCacheSimple` or `QuantizedKVCache` layer's offset
+  MUST equal the committed canonical token count. An end-of-sequence token the iterator fed to
+  the cache but the generation loop left out of the output is trimmed. That count comes from
+  how the decode loop ended (an end-of-sequence break leaves one; a callback stop or
+  `max_tokens` leaves none), never from the finish reason or stripped output text: the ledger
+  holds raw generated token IDs, so a stripped stop sequence never shifts it. Any other mismatch
+  aborts the commit (a miss next turn, never stale state). This applies at fp16 too. A request
+  without a conversation lease commits nothing and runs no ledger check.
+- **Scope.** A cold-tier-eligible request (SPEC-037), a request with image content, a model whose
+  serve cache has any rotating, recurrent or model-specific layer, and every continuous-batching
+  row keep fp16 for keyed reuse. Continuous batching and paged KV still refuse `kv_bits`
+  (SPEC-038). Keyless requests are unchanged. The FR-CI2 `kvBits` equality predicate keeps a
+  quantized entry from serving an unquantized lease and the reverse.
+
 **FR-CI2a (extend-only prompt snapshot, v0.2.12 — SPEC-024-R004).** For a model family whose
 cache layers cannot be rewound to an arbitrary prefix, a conversation-keyed request MUST commit
 a *prompt snapshot*: a deep copy of every cache layer taken when prefill reached exactly `S`
@@ -892,6 +923,14 @@ Prefix-cache reuse MUST NOT be enabled on a path where the conversation key is b
   snapshot it runs the resumed row's chunks, and the two hold bit-identical state; a cold
   prefill that runs one chunk through the snapshot position (the plan before the boundaries)
   holds different state there, and a lease off the incoming prompt's boundaries misses.
+- **AC-CI-9 (quantized reusable serial KV, SPEC-024-R006).** On a real full-attention model with
+  `kv_bits = 8`, a two-turn keyed conversation hits the hot cache on turn two and recalls a fact
+  placed at the end of turn one; the committed entry is `QuantizedKVCache` with every offset equal
+  to its ledger, including after an end-of-sequence stop. A cancelled turn commits no entry. The
+  iterator-owned path on the pinned mlx-swift-lm still leaves the caller's cache short of the
+  ledger, and the ledger check refuses it. A cold-tier-eligible keyed request stays fp16 and its
+  real-model entry persists and promotes through the encrypted store; quantized layers are never
+  captured.
 - **AC-CI-7 (keyed serial trimmable allocation, SPEC-024-R001).** A conversation-keyed serial
   request on a full-attention model MUST allocate `KVCacheSimple` (or another class that
   remains trimmable after `offset >= maxContextTokens`). A keyless request MUST keep the

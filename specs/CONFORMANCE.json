@@ -694,7 +694,7 @@
     {
       "spec_id": "SPEC-024",
       "title": "Prefix-cache billing and provider-local cache isolation",
-      "version": "0.2.16",
+      "version": "0.2.17",
       "path": "specs/SPEC-024-prefix-cache-billing.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -3866,6 +3866,44 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/2143",
         "rationale": "GLM-5-Next keyed agent turns on continuous-batching rows published no conversation-cache entry and could not resume a cached prefix on CB, so every turn re-prefilled its full history. Under the SPEC-038 AC-26 grant, GLM CB rows now publish the FR-CI2a prompt snapshot (with MTP head state on native rows) and positive-cached turns install it into their own CB row. CPU and tiny-model Metal tests cover it; pending the Studio GPU parity and MTP-versus-ordinary window, the AC-26 relay/billing/settlement proof and the signed cached_turns_accepted grant."
+      }
+    },
+    {
+      "requirement_id": "SPEC-024-R006",
+      "spec_id": "SPEC-024",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:effectiveKVBits",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:providerOwnedConversationKVBits",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:providerOwnedConversationCache",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:reconcileConversationCacheLedger",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:serialDecodeUnreturnedTokenCount",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:serveIteratorParameters"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/ConversationKVQuantizationTests.swift:testSerialConversationKeepsConfiguredKVBitsUnlessColdTierOrImage",
+        "phase3-binary/Tests/macprovider-cliTests/ConversationKVQuantizationTests.swift:testLeasedConversationIteratorNeverQuantizes",
+        "phase3-binary/Tests/macprovider-cliTests/ConversationKVQuantizationTests.swift:testProviderOwnedConversationCacheQuantizesPrefilledSimpleLayersOnly",
+        "phase3-binary/Tests/macprovider-cliTests/ConversationKVQuantizationTests.swift:testLedgerReconcileTrimsTheStrippedStopToken",
+        "phase3-binary/Tests/macprovider-cliTests/ConversationKVQuantizationTests.swift:testLedgerReconcileRefusesAStaleShortCache",
+        "phase3-binary/Tests/macprovider-cliTests/ConversationKVQuantizationTests.swift:testDecodeUnreturnedTokenCountFollowsTheDecodeLoopsOwnStop",
+        "phase3-binary/Tests/macprovider-cliTests/ConversationKVQuantizationTests.swift:testStopSequenceTurnCommitsWithItsTokensInTheLedger",
+        "phase3-binary/Tests/macprovider-cliTests/ConversationKVQuantizationTests.swift:testLedgerReconcileChecksKVCacheSimpleSubclasses",
+        "phase3-binary/Tests/macprovider-cliTests/ConversationKVQuantizationTests.swift:testProviderOwnedKVBitsProbesTheServeCacheShape",
+        "phase3-binary/Tests/macprovider-cliTests/ConversationKVQuantizationTests.swift:testQuantizedEntryHitsOnlyTheSameKVBitsAndTrimsByLedger",
+        "phase3-binary/Tests/macprovider-cliTests/ConversationKVQuantizationTests.swift:testColdTierSkipsQuantizedLayers",
+        "phase3-binary/Tests/macprovider-cliTests/ConversationKVQuantizationRealModelTests.swift:testServeQuantizedConversationRecallsLateTurnOneFact",
+        "phase3-binary/Tests/macprovider-cliTests/ConversationKVQuantizationRealModelTests.swift:testCancelledQuantizedTurnCommitsNoPartialCache",
+        "phase3-binary/Tests/macprovider-cliTests/ConversationKVQuantizationRealModelTests.swift:testIteratorOwnedQuantizationStillLeavesCallerCacheStale",
+        "phase3-binary/Tests/macprovider-cliTests/ConversationKVQuantizationRealModelTests.swift:testColdTierEligibleConversationPersistsAndPromotesRealModelEntry"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/965",
+        "rationale": "Keyed serial requests dropped configured kv_bits because mlx-swift-lm's iterator quantizes into storage the caller cannot see (#312, fixed upstream only inside the package). The serial path now owns quantization of its reusable cache and checks offsets against the committed ledger. Real-model gates run on a local full-attention model; pending a signed journey."
       }
     },
     {
