@@ -17,7 +17,9 @@ let package = Package(
         )
     ],
     dependencies: [
-        // Tag 3.32.3-macprovider.12 adds LFM-only reference-prefill arithmetic
+        // Tag 3.32.3-macprovider.18 (#2201) adds the Qwen2-VL token-only text
+        // forward and keeps Nemotron-H Mamba activations in the model dtype, on
+        // 3.32.3-macprovider.12. Tag 3.32.3-macprovider.12 adds LFM-only reference-prefill arithmetic
         // on 3.32.3-macprovider.10.15.1 (reference expert order). Other models
         // retain the default route; single-token decode is unchanged. The core
         // Python binding preserves its existing arity and passes the option false.
@@ -47,7 +49,7 @@ let package = Package(
         // compatible per-column attention while retaining row-owned caches.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "f75f92b0e85958a3219d295e1906a1a0889e6702"
+            revision: "c1ef060e2d55643b7963d49a294866678c0bbe20"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",
