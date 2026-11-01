@@ -64,7 +64,9 @@ jobs:
           repository: ${{ github.repository }}
           ref: ${{ github.event.inputs.candidate_sha }}
           path: candidate
-          fetch-depth: 1
+          # Full history: catalog-release verifies native-MTP admission against the
+          # bound provider release commit, which a depth-1 clone does not contain.
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Verify exact candidate branch and main control commit
