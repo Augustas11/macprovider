@@ -38,10 +38,12 @@
 #                       The caller validates it; empty = exact prior window.
 #   AA_ROLLBACK_POST_HOOK optional fn run after the remote rollback returns;
 #                       it reads AA_ROLLBACK_RC and AA_ROLLBACK_OUT.
-#   AA_COVERAGE_EXPECT  optional (refuse policy + override): sha256 of the
-#                       canonical `uncovered` list the operator's override
-#                       record describes; the publish aborts pre-mutation when
-#                       its own under-lock coverage differs.
+#   AA_COVERAGE_EXPECT  optional (refuse policy + override): autotune_window.py
+#                       coverage-digest of the `uncovered` list the operator's
+#                       override record describes (release, sha, provider
+#                       count; not momentary routing eligibility); the publish
+#                       aborts pre-mutation when its own under-lock coverage
+#                       differs.
 #   AA_PRICING_TXN      0 (default) or 1 (lease mode only; #1693 SPEC-023-R019):
 #                       the release also replaces the live base coordinator.yaml
 #                       rate_card block. The gate snippet must leave the spliced
@@ -844,7 +846,7 @@ fi
 # An override is bound to the coverage it logged (${10}: sha256 of the canonical
 # uncovered list); coverage that moved since the record was written aborts.
 if [ "$cov_rc" -ne 0 ] && [ -n "${10:-}" ]; then
-  cov_digest="$(printf '%s' "$cov_json" | python3 -c 'import hashlib,json,sys; u=json.load(sys.stdin)["uncovered"]; print(hashlib.sha256(json.dumps(sorted(u, key=lambda x: json.dumps(x, sort_keys=True)), sort_keys=True).encode()).hexdigest())')" || cov_digest=unknown
+  cov_digest="$(printf '%s' "$cov_json" | python3 -I "$window" coverage-digest)" || cov_digest=unknown
   if [ "$cov_digest" != "${10}" ]; then
     rm -rf "$root/releases/$final" >/dev/null 2>&1 || true
     abort_pre_mutation "under-lock window coverage differs from the logged override record; not mutating"

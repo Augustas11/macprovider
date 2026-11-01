@@ -168,6 +168,22 @@ class SignedPairInterfaceTests(unittest.TestCase):
         self.assertLess(body.index('aa_signed_pair_reverify_blocked'), body.index('--action rollback'))
         self.assertLess(body.index('--action rollback'), body.index('aa_signed_pair_reader_retire'))
 
+    def test_override_record_and_under_lock_publish_use_one_digest(self):
+        # pair3 2026-11-01: the record and the under-lock check must agree on a
+        # coverage that differs only in momentary routing eligibility.
+        recorded = {'uncovered': [{'providers': 1, 'release_id': 'r', 'routing_eligible': 0, 'sha': 'f' * 64}], 'covered': []}
+        live = {'uncovered': [{'providers': 1, 'release_id': 'r', 'routing_eligible': 1, 'sha': 'f' * 64}], 'covered': []}
+        coverage = self.write('coverage.json', recorded)
+        code = CONTENT.read_text().split('_override_out="$(python3 - ', 1)[1].split("<<'PY'\n", 1)[1].split('\nPY\n', 1)[0]
+        made = subprocess.run([sys.executable, '-c', code, 'reason', str(coverage), 'incoming', 'releases/live', 'live',
+                               'c' * 40, str(ROOT / 'scripts')], capture_output=True, text=True, timeout=5)
+        self.assertEqual(made.returncode, 0, made.stderr)
+        line = [l for l in PEARL.read_text().splitlines() if l.startswith('  cov_digest=')][0]
+        under = subprocess.run(['bash', '-c', 'window="$1"; cov_json="$2"\n' + line + '\nprintf %s "$cov_digest"',
+                                'publish', ROOT / 'scripts/autotune_window.py', json.dumps(live)],
+                               capture_output=True, text=True)
+        self.assertEqual(under.stdout, made.stdout.splitlines()[0])
+
     def test_root_and_transport_transaction_id_domains_agree(self):
         # Every root-accepted ID must be transport-accepted before recovery custody.
         self.plan['transaction_id'] = 'a' * 81

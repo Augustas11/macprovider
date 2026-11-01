@@ -2566,9 +2566,11 @@ if [ "$AA_COVERAGE_OVERRIDE" = 1 ]; then
   # scripts/lib/catalog-window-override.sh primitive. It describes the
   # coverage computed UNDER the lease, and the publish refuses (pre-mutation)
   # if its own under-lock coverage differs (AA_COVERAGE_EXPECT).
-  _override_out="$(python3 - "$CATALOG_WINDOW_OVERRIDE_REASON" "$WORK/coverage.json" "$RELEASE_DIRNAME" "$CURRENT_TARGET" "$LIVE_ID" "$COMMIT" <<'PY'
-import base64, hashlib, json, sys
-reason, coverage_path, incoming, live_target, live_id, commit = sys.argv[1:]
+  _override_out="$(python3 - "$CATALOG_WINDOW_OVERRIDE_REASON" "$WORK/coverage.json" "$RELEASE_DIRNAME" "$CURRENT_TARGET" "$LIVE_ID" "$COMMIT" "$SCRIPT_DIR" <<'PY'
+import base64, json, sys
+reason, coverage_path, incoming, live_target, live_id, commit, script_dir = sys.argv[1:]
+sys.path.insert(0, script_dir)
+from autotune_window import coverage_digest
 with open(coverage_path) as f:
     coverage = json.load(f)
 uncovered = coverage["uncovered"]
@@ -2580,8 +2582,7 @@ record = {
     "live": {"target": live_target, "release_id": live_id},
     "commit": commit,
 }
-canonical = json.dumps(sorted(uncovered, key=lambda x: json.dumps(x, sort_keys=True)), sort_keys=True)
-print(hashlib.sha256(canonical.encode()).hexdigest())
+print(coverage_digest(uncovered))
 print(base64.b64encode(json.dumps(record, sort_keys=True).encode("ascii")).decode("ascii"))
 PY
 )" || fatal "could not build the window coverage override record"
