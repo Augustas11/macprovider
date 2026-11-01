@@ -165,15 +165,15 @@ extension ModelRuntime {
         let processor = await container.processor
         let tokenizer = await container.tokenizer
         let configuration = await container.configuration
-        let supportsBonsaiThinking = await container.perform { context in
-            context.model is PrismHadamardQwen35
+        let isPrismBonsai = await container.perform { context in
+            ModelRuntime.isPrismBonsai(context.model)
         }
         return ContinuousBatchTextPreparationLane(
             processor: processor,
             tokenizer: tokenizer,
             configuration: configuration,
             hasRecurrentLayers: resolvedCacheKinds.contains(.recurrentMamba),
-            supportsBonsaiThinking: supportsBonsaiThinking
+            isPrismBonsai: isPrismBonsai
         )
     }
 

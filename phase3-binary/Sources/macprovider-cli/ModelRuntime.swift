@@ -445,7 +445,8 @@ actor ContinuousBatchTextPreparationLane {
     private let tokenizer: any MLXLMCommon.Tokenizer
     private let configuration: ModelConfiguration
     private let hasRecurrentLayers: Bool
-    private let supportsBonsaiThinking: Bool
+    /// `ModelRuntime.isPrismBonsai` of the loaded model, read once at lane creation.
+    private let isPrismBonsai: Bool
 #if DEBUG
     private var preparationEntryCount = 0
 #endif
@@ -455,13 +456,13 @@ actor ContinuousBatchTextPreparationLane {
         tokenizer: any MLXLMCommon.Tokenizer,
         configuration: ModelConfiguration,
         hasRecurrentLayers: Bool,
-        supportsBonsaiThinking: Bool = false
+        isPrismBonsai: Bool = false
     ) {
         self.processor = processor
         self.tokenizer = tokenizer
         self.configuration = configuration
         self.hasRecurrentLayers = hasRecurrentLayers
-        self.supportsBonsaiThinking = supportsBonsaiThinking
+        self.isPrismBonsai = isPrismBonsai
     }
 
     func prepare(
@@ -479,7 +480,7 @@ actor ContinuousBatchTextPreparationLane {
         let tokenizer = tokenizer
         let configuration = configuration
         let hasRecurrentLayers = hasRecurrentLayers
-        let supportsBonsaiThinking = supportsBonsaiThinking
+        let isPrismBonsai = isPrismBonsai
         return try await serial.withPermit {
             try Task.checkCancellation()
             try drainCancelled.check()
@@ -491,7 +492,7 @@ actor ContinuousBatchTextPreparationLane {
                 templateSupportsPreserveThinking: templateSupportsPreserveThinking,
                 toolSelectionModelID: toolSelectionModelID,
                 templateToolFormat: configuration.toolCallFormat?.rawValue,
-                supportsBonsaiThinking: supportsBonsaiThinking
+                supportsBonsaiThinking: isPrismBonsai
             )
             try Task.checkCancellation()
             try drainCancelled.check()
@@ -521,7 +522,7 @@ actor ContinuousBatchTextPreparationLane {
                     ),
                     modelHasRecurrentLayers: hybrid,
                     toolCallPrefill: toolCallPrefill,
-                    grammarConstraint: try GrammarConstraintState.prepare(request: request, tokenizer: tokenizer, configuration: configuration, eosTokenIDs: modelStopTokenIDs)
+                    grammarConstraint: try GrammarConstraintState.prepare(request: request, tokenizer: tokenizer, configuration: configuration, eosTokenIDs: modelStopTokenIDs, guardsDeclaredFunctions: isPrismBonsai)
                 ),
                 ModelRuntime.StreamingDetokenizer(tokenizer: tokenizer)
             )
@@ -7678,7 +7679,8 @@ maxTokens: 1,
                     )
                     _ = try GrammarConstraintState.prepare(
                         request: request, tokenizer: context.tokenizer, configuration: context.configuration,
-                        eosTokenIDs: Self.generationStopTokenIDs(for: context))
+                        eosTokenIDs: Self.generationStopTokenIDs(for: context),
+                        guardsDeclaredFunctions: Self.isPrismBonsai(context.model))
                     let count = prepared.text.tokens.size
                     try Self.validatePromptTokenCount(count, maxContextTokens: maxContextTokens)
                     return count
@@ -7795,7 +7797,7 @@ maxTokens: 1,
                     ),
                     modelHasRecurrentLayers: hybrid,
                     toolCallPrefill: toolCallPrefill,
-                    grammarConstraint: try GrammarConstraintState.prepare(request: request, tokenizer: tokenizer, configuration: context.configuration, eosTokenIDs: Self.generationStopTokenIDs(for: context)),
+                    grammarConstraint: try GrammarConstraintState.prepare(request: request, tokenizer: tokenizer, configuration: context.configuration, eosTokenIDs: Self.generationStopTokenIDs(for: context), guardsDeclaredFunctions: Self.isPrismBonsai(context.model)),
                     promptSnapshotTokenCount: Self.nonEmpty(request.conversationKey) == nil ? nil
                         : Self.conversationPromptSnapshotTokenCount(
                             promptTokenIds: promptTokens.map(Int32.init),
@@ -10088,7 +10090,8 @@ maxTokens: boundedMaxTokens,
                     let stopTokenFilter = Self.toolAwareStopTokenFilter(stopTokenFilter, grammar: Self.toolGrammar(for: request))
                     let grammarConstraint = try GrammarConstraintState.prepare(
                         request: request, tokenizer: context.tokenizer, configuration: context.configuration,
-                        eosTokenIDs: Self.generationStopTokenIDs(for: context))
+                        eosTokenIDs: Self.generationStopTokenIDs(for: context),
+                        guardsDeclaredFunctions: Self.isPrismBonsai(context.model))
                     // Cancelled during preparation (client gone, or local
                     // work preempted under SPEC-001-R011): release the gate.
                     try Task.checkCancellation()
@@ -10996,7 +10999,8 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                     let stopTokenFilter = Self.toolAwareStopTokenFilter(stopTokenFilter, grammar: Self.toolGrammar(for: request))
                     let grammarConstraint = try GrammarConstraintState.prepare(
                         request: request, tokenizer: context.tokenizer, configuration: context.configuration,
-                        eosTokenIDs: Self.generationStopTokenIDs(for: context))
+                        eosTokenIDs: Self.generationStopTokenIDs(for: context),
+                        guardsDeclaredFunctions: Self.isPrismBonsai(context.model))
                     // Cancelled during preparation (client gone, or local
                     // work preempted under SPEC-001-R011): release the gate.
                     try Task.checkCancellation()
@@ -14942,6 +14946,10 @@ maxTokens: maxTokens,
         return context
     }
 
+    /// The one predicate for Prism Bonsai-2 behavior (thinking opt-in and the
+    /// declared-function guard): the loaded model type, never a model name.
+    static func isPrismBonsai(_ model: any LanguageModel) -> Bool { model is PrismHadamardQwen35 }
+
     /// SPEC-018-R010: only a model-owned Prism capability permits this opt-in.
     /// Buyer aliases and a template's variable alone do not establish it.
     static func bonsaiThinkingEnabled(
@@ -15141,7 +15149,7 @@ maxTokens: maxTokens,
             templateSupportsPreserveThinking: templateSupportsPreserveThinking,
             nativeVisionProfile: nativeVisionProfile,
             toolSelectionModelID: toolSelectionModelID,
-            supportsBonsaiThinking: context.model is PrismHadamardQwen35
+            supportsBonsaiThinking: isPrismBonsai(context.model)
         )
         let lmInput: LMInput
         do {
