@@ -228,7 +228,7 @@ final class ConversationKVQuantizationRealModelTests: XCTestCase {
         let adapter = KVConversationColdTierAdapter(
             store: store, namespaceID: "ns-kv-quant-real", eligibilityTTLSeconds: 900,
             writeStagingMaxBytes: config.writeStagingMaxBytes, maxEntryBytes: config.maxEntryBytes,
-            stagingMaxBytes: config.stagingMaxBytes)
+            stagingMaxBytes: config.stagingMaxBytes, memoryBudget: conversationCacheTestMemoryBudget())
         adapter.cacheEpoch(await store.currentEpoch)
         let identity = KVIdentityCore(
             requestModel: Self.modelID, servedModelID: Self.modelID, modelSHA256: String(repeating: "b", count: 64),
