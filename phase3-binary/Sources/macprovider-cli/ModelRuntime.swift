@@ -1946,7 +1946,7 @@ actor ModelRuntime: ModelRuntimeServing {
     /// (rotating miss, recurrent checkpoints, prompt snapshots) stay unchanged.
     nonisolated static func providerOwnedConversationKVBits(_ kvBits: Int?, model: any LanguageModel) -> Int? {
         guard let kvBits,
-              let cache = try? model.newCache(parameters: GenerateParameters(maxKVSize: nil)),
+              let cache = try? model.newCache(parameters: GenerateParameters()),
               !cache.isEmpty,
               cache.allSatisfy({ type(of: $0) == KVCacheSimple.self })
         else { return nil }
