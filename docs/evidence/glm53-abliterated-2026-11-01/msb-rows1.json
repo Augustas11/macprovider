@@ -1,0 +1,56 @@
+{
+  "aggregateCVPct" : 0.014895871254979778,
+  "aggregateTPSRuns" : [
+    40.32711516719327,
+    40.33681237467318,
+    40.325820236245946
+  ],
+  "aggregateTPSp50" : 40.32711516719327,
+  "aggregateUpliftVsPagedSingleRow" : 0.9999876811227064,
+  "aggregateVsProductionSerial" : 0.9621674508746272,
+  "blockSizeTokens" : 256,
+  "compiled" : false,
+  "decodeTokensPerRow" : 128,
+  "engine" : "paged",
+  "layerCount" : 11,
+  "maxPhysicalBlocks" : 1024,
+  "mlxSwiftLMPin" : "mlxlm-36d24585f937",
+  "modelID" : "<models>\/grant-ai--GLM-5.3-Flash-Abliterated-MLX-4bit\/cbf4e8bd80e9227aa0a60c19b550bef6b390c04c\/d47ec628ddfd67813ab9a9439a152e19d5f648ae3f05cfe6b2094eb9fb67fc4c",
+  "modelTag" : "d47ec628ddfd67813ab9a9439a152e19d5f648ae3f05cfe6b2094eb9fb67fc4c",
+  "pagedSingleRowCVPct" : 0.005222333703499599,
+  "pagedSingleRowTPSRuns" : [
+    40.327611958096526,
+    40.32839957851572,
+    40.32442240998159
+  ],
+  "pagedSingleRowTPSp50" : 40.327611958096526,
+  "peakPhysFootprintMB" : 181186,
+  "peakRSSMB" : 159568,
+  "perRowFractionOfPagedSingleRow" : 0.9999876811227064,
+  "perRowTPSp50" : 40.32711516719327,
+  "productionSerialCVPct" : 0.0855905720914789,
+  "productionSerialPromptTokens" : 1024,
+  "productionSerialTPSRuns" : [
+    41.895880949006774,
+    41.91278257286215,
+    41.964735440373175
+  ],
+  "productionSerialTPSp50" : 41.91278257286215,
+  "productionSerialTTFTSecondsRuns" : [
+    3.1139349937438965,
+    3.1127160787582397,
+    3.114116907119751
+  ],
+  "promptTokenLengths" : [
+    1024
+  ],
+  "promptTokenSHA256" : [
+    "c2d6e0a41c032e905401737f80cfeaf532576de3aef86f3382067663f683b3dd"
+  ],
+  "promptTokensPerRow" : 1024,
+  "rows" : 1,
+  "runs" : 3,
+  "scenario" : "throughput",
+  "schemaVersion" : 4,
+  "timestamp" : "2026-10-31T21:37:20Z"
+}

@@ -73,9 +73,10 @@ class MaxServedSlotsGeneratorTest(unittest.TestCase):
         self.policy = catalog_release.validate_cb_policy(CB_POLICY_BYTES, CANDIDATE_BYTES, CANDIDATE_OBJ)
         self.assertTrue(self.policy["entries"], "committed policy has entries to extend")
 
-    def test_committed_policy_caps_qualified_glm_and_qwen8_at_four(self):
+    def test_committed_policy_caps_qualified_glm_builds_and_qwen8_at_four(self):
         ceilings = {entry["model_key"]: entry.get("max_served_slots") for entry in self.policy["entries"]}
         self.assertEqual(ceilings.pop(GLM_KEY), 4)
+        self.assertEqual(ceilings.pop("zai-org/glm-5.3-flash-abliterated"), 4)
         self.assertEqual(ceilings.pop("qwen3-8b"), 4)
         self.assertTrue(ceilings, "committed policy keeps its uncapped entries")
         self.assertEqual(set(ceilings.values()), {None})
