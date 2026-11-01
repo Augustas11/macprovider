@@ -310,6 +310,8 @@ struct Spec028CanaryCommand: AsyncParsableCommand {
                         chunkCounter.increment()
                     case .toolCallDelta, .reasoning:
                         chunkCounter.increment()
+                    case .progress:
+                        break
                     }
                 }
                 await runtime.unregisterInFlight(handle.registrationID)

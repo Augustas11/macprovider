@@ -85,6 +85,11 @@ type RelayStream struct {
 	Done        <-chan InferenceResponseEnd
 	Errors      <-chan error
 	Validations <-chan RelayBlindValidation
+	// Progress signals SPEC-001-R015 decode progress: the provider is
+	// generating output it holds back (a whole tool call). It carries no
+	// bytes. At most one signal is pending; a reader that ignores it loses
+	// nothing.
+	Progress <-chan struct{}
 	// CancelTerminal yields the provider's "cancelled" terminal frame after a
 	// buyer_disconnected cancel_request. The frame arrives after the request is
 	// retired, and it carries the provider's buyer_cancel receipt.
@@ -306,6 +311,7 @@ type relayActive struct {
 	done                chan InferenceResponseEnd
 	errs                chan error
 	validations         chan RelayBlindValidation
+	progress            chan struct{}
 	relayBlind          *RelayBlindDispatchContext
 	deliveredOutput     *deliveredOutputBoundary
 	validationSeen      bool
@@ -747,6 +753,7 @@ func (ps *providerSession) addActive(requestID string, maxConcurrency int, strea
 		done:             make(chan InferenceResponseEnd, 1),
 		errs:             make(chan error, 1),
 		validations:      make(chan RelayBlindValidation, 2),
+		progress:         make(chan struct{}, 1),
 	}
 	ps.active[requestID] = active
 	return active, nil
@@ -2054,11 +2061,38 @@ func (s *Server) dispatchInference(ctx context.Context, provider pool.Provider, 
 		Done:             done,
 		Errors:           active.errs,
 		Validations:      active.validations,
+		Progress:         active.progress,
 		CancelTerminal:   active.cancelTerminal,
 		noCancelTerminal: active.noCancelTerminal,
 		cancel:           cancel,
 		deliveredOutput:  active.deliveredOutput,
 	}, nil
+}
+
+// handleInferenceProgress consumes a SPEC-001-R015 inference_response_progress
+// frame. It carries only a request ID, so it is accepted in plaintext on every
+// session (Tier-2 included) and never closes one. It counts only for a
+// streaming request active on the sending session; anything else is dropped
+// without logging, since a late progress frame is expected after a terminal.
+func (s *Server) handleInferenceProgress(providerID, assignedID string, payload []byte) {
+	var frame struct {
+		RequestID string `json:"request_id"`
+	}
+	if err := json.Unmarshal(payload, &frame); err != nil || frame.RequestID == "" || containsControlChar(frame.RequestID) {
+		return
+	}
+	session, ok := s.sessionFor(providerID, assignedID)
+	if !ok {
+		return
+	}
+	active, ok := session.activeFor(frame.RequestID)
+	if !ok || !active.stream || active.progress == nil {
+		return
+	}
+	select {
+	case active.progress <- struct{}{}:
+	default:
+	}
 }
 
 func (s *Server) handleInferenceChunk(providerID, assignedID string, payload []byte) {

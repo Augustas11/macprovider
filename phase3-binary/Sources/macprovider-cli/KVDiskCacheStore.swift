@@ -168,6 +168,8 @@ struct KVWriteSnapshot: Sendable {
     let eligibleUntilMillis: Int
     /// Creating write's incarnation identifier (ownership-checked DEK cleanup).
     let incarnation: String
+    /// Aggregate snapshot + seal reservation retained by the serving adapter.
+    var reservedWriteBytes: Int = 0
 }
 
 /// A successful read: decoded tokens + restored per-layer state, plus telemetry.
@@ -236,6 +238,8 @@ struct KVDiskCacheStoreConfig: Sendable {
     var minFreeBytes: Int
     var promotionMaxSeconds: Int
     var eligibilityTTLSeconds: Int      // hot-tier TTL, for the inspection surface
+    var adaptiveStaging: Bool = false
+    var adaptiveWriteStaging: Bool = false
     /// Non-evictable metadata reserve (FR-KVP7): default 4 MiB.
     var metadataReserveBytes: Int = 4 * 1024 * 1024
     /// Background retention sweep interval, seconds (M-12). 0 ⇒ no timer (opportunistic
@@ -320,6 +324,25 @@ enum KVStoreError: Error, Equatable {
 
 actor KVDiskCacheStore {
     private let config: KVDiskCacheStoreConfig
+    private var memoryBudget: ConversationCacheMemoryBudget?
+
+    /// Bind before attaching this store to a serving runtime. Geometry belongs
+    /// to that runtime's cache, not the process-wide fallback probe.
+    func bindMemoryBudget(_ budget: ConversationCacheMemoryBudget) {
+        memoryBudget = budget
+    }
+
+    func promotionStagingLimit(creditingBytes: Int = 0) -> Int {
+        KVDiskStagingPolicy.limit(configured: config.stagingMaxBytes,
+            adaptive: config.adaptiveStaging,
+            measured: memoryBudget?.stagingByteLimit(creditingBytes: creditingBytes))
+    }
+
+    func writeStagingLimit(creditingBytes: Int = 0) -> Int {
+        KVDiskStagingPolicy.limit(configured: config.writeStagingMaxBytes,
+            adaptive: config.adaptiveWriteStaging,
+            measured: memoryBudget?.stagingByteLimit(creditingBytes: creditingBytes))
+    }
     private let keys: KVKeyManager
     private let sink: any KVEventSink
     private let naming: KVKeychainNaming
@@ -469,7 +492,9 @@ actor KVDiskCacheStore {
 
     // MARK: Init
 
-    init(config: KVDiskCacheStoreConfig, keychain: any KVKeychain, sink: any KVEventSink = KVStderrEventSink()) {
+    init(config: KVDiskCacheStoreConfig, keychain: any KVKeychain, sink: any KVEventSink = KVStderrEventSink(),
+         memoryBudget: ConversationCacheMemoryBudget? = nil) {
+        self.memoryBudget = memoryBudget
         self.config = config
         self.keys = KVKeyManager(keychain: keychain, namespaceID: config.namespaceID)
         self.naming = KVKeychainNaming(namespaceID: config.namespaceID)
@@ -890,12 +915,16 @@ actor KVDiskCacheStore {
         let promotionMultiplier = snapshot.identity.codecID == KVDiskCacheFormat.codecID ? 1 : 2
         let (promotionBytes, promotionOverflow) = decodedLength.multipliedReportingOverflow(by: promotionMultiplier)
         guard !promotionOverflow,
-              promotionBytes <= config.stagingMaxBytes,
-              promotionBytes <= KVDiskCacheStoreConfig.promotionCeilingHardMax else {
+              // The snapshot's own deep copy is already resident; credit it
+              // back so re-measuring free memory does not charge it twice.
+              promotionBytes <= promotionStagingLimit(creditingBytes: snapshot.reservedWriteBytes) else {
             return skip(.exceedsPromotionCeiling, snapshot)
         }
         // Write-live budget (RAM-DoS bound).
-        guard decodedLength <= config.writeStagingMaxBytes else { return skip(.exceedsPromotionCeiling, snapshot) }
+        let writeCeiling = writeStagingLimit(creditingBytes: snapshot.reservedWriteBytes)
+        guard decodedLength <= writeCeiling, snapshot.reservedWriteBytes <= writeCeiling else {
+            return skip(.exceedsPromotionCeiling, snapshot)
+        }
         guard decodedLength <= config.maxEntryBytes else { return skip(.perEntryCap, snapshot) }
 
         // Estimate on-disk size (ciphertext ≈ plaintext + per-chunk framing/tag).
@@ -1505,7 +1534,7 @@ actor KVDiskCacheStore {
         // matching the write-side admission (FR-KVP3/FR-KVP9).
         let promotionMultiplier = manifest.codecID == KVDiskCacheFormat.codecID ? 1 : 2
         let (promotionBytes, promotionOverflow) = manifest.decodedLength.multipliedReportingOverflow(by: promotionMultiplier)
-        guard !promotionOverflow, promotionBytes <= config.stagingMaxBytes else {
+        guard !promotionOverflow, promotionBytes <= promotionStagingLimit() else {
             emitMiss(.diskMissBudget, detail: .exceedsPromotionCeiling, prefix: prefix)
             return .miss(.diskMissBudget, .exceedsPromotionCeiling)
         }
@@ -1521,7 +1550,7 @@ actor KVDiskCacheStore {
         let deadline = Date().addingTimeInterval(TimeInterval(config.promotionMaxSeconds))
         let started = Date()
         let blobURL = dir.appendingPathComponent("gen-\(manifest.generation).blob")
-        let stagingCeiling = config.stagingMaxBytes
+        let stagingCeiling = promotionStagingLimit()
 
         // CRITICAL-1(b): snapshot the admission epoch + purge high-watermark under actor
         // isolation so the post-decode re-fence can detect a purge/rotation that revoked
@@ -1649,7 +1678,7 @@ actor KVDiskCacheStore {
         promptSnapshot: KVPromptSnapshotPayload? = nil,
         identity: KVWriteIdentity,
         sampledPurgeGeneration: Int, commitSequence: Int, createdAtMillis: Int, eligibleUntilMillis: Int,
-        incarnation: String, nowMillis: Int
+        incarnation: String, nowMillis: Int, reservedWriteBytes: Int = 0
     ) throws -> KVWriteResult {
         guard activated else { return .skipped(.ioError) }
         if let detail = quarantined { return .skipped(detail) }
@@ -1670,7 +1699,8 @@ actor KVDiskCacheStore {
             rawKey: rawKey, indexHMAC: index, tokens: tokens, layers: layers,
             layersV2: layersV2, recurrentCheckpoints: recurrentCheckpoints, promptSnapshot: promptSnapshot, identity: identity,
             sampledPurgeGeneration: sampledPurgeGeneration, commitSequence: commitSequence,
-            createdAtMillis: createdAtMillis, eligibleUntilMillis: eligibleUntilMillis, incarnation: incarnation)
+            createdAtMillis: createdAtMillis, eligibleUntilMillis: eligibleUntilMillis, incarnation: incarnation,
+            reservedWriteBytes: reservedWriteBytes)
         return try write(snapshot, nowMillis: nowMillis)
     }
 

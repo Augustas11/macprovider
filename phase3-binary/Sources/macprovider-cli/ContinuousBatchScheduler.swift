@@ -562,6 +562,10 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
     /// The row installs it at admission and prefills the rest of the prompt.
     /// Runtime-only; excluded from the idempotency fingerprint.
     let promptSnapshotCache: ContinuousBatchSerialConversationCache?
+    /// SPEC-001-R013 (v1.9.50): receives this row's prompt snapshot when the
+    /// row joins decode, so a caller that cancels it during decode can keep
+    /// the snapshot. Runtime-only; excluded from the idempotency fingerprint.
+    let promptSnapshotHandoff: ContinuousBatchPromptSnapshotHandoff?
     /// Runtime-only token grammar; excluded from the wire fingerprint.
     let grammarConstraint: GrammarConstraintState?
     /// Stable grammar/tokenizer identity fences replay across distinct constraints.
@@ -629,6 +633,7 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
         promptSnapshotTokenCount: Int? = nil,
         retainedRecurrentCheckpoints: [RecurrentStateCheckpoint] = [],
         promptSnapshotCache: ContinuousBatchSerialConversationCache? = nil,
+        promptSnapshotHandoff: ContinuousBatchPromptSnapshotHandoff? = nil,
         publishesPromptSnapshotOnly: Bool = false,
         promptResumeBoundaries: [Int] = [],
         grammarConstraint: GrammarConstraintState? = nil,
@@ -669,6 +674,7 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
         self.promptResumeBoundaries = Set(promptResumeBoundaries.filter { $0 > 0 && $0 < promptTokens.count }).sorted()
         self.retainedRecurrentCheckpoints = retainedRecurrentCheckpoints
         self.promptSnapshotCache = promptSnapshotCache?.promptSnapshot == true ? promptSnapshotCache : nil
+        self.promptSnapshotHandoff = promptSnapshotHandoff
         self.grammarConstraint = grammarConstraint
         self.grammarFingerprint = grammarConstraint?.fingerprint
         self.serialToolStopObserver = serialToolStopObserver
@@ -706,6 +712,37 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
 enum ContinuousBatchSchedulerStopCause: String, Sendable, Equatable {
     case modelStop = "model_stop"
     case requestStop = "request_stop"
+}
+
+/// SPEC-001-R013 (v1.9.50): hands a row's prompt snapshot to its caller once
+/// the row joins decode, that is once its whole prompt is prefilled. A caller
+/// whose row is then cut or cancelled keeps the snapshot (prompt tokens only)
+/// instead of losing the conversation's cache entry. A row cancelled during
+/// prefill never publishes one. Equality ignores identity, like the stop
+/// observer: it is not part of request semantics.
+final class ContinuousBatchPromptSnapshotHandoff: @unchecked Sendable, Equatable {
+    private let lock = NSLock()
+    private var snapshot: ContinuousBatchSerialConversationCache?
+
+    func publish(_ snapshot: ContinuousBatchSerialConversationCache) {
+        guard snapshot.promptSnapshot else { return }
+        lock.lock()
+        self.snapshot = snapshot
+        lock.unlock()
+    }
+
+    /// The decoding row's prompt snapshot, once; nil when none was published.
+    func take() -> ContinuousBatchSerialConversationCache? {
+        lock.lock()
+        defer { lock.unlock() }
+        let taken = snapshot
+        snapshot = nil
+        return taken
+    }
+
+    static func == (lhs: ContinuousBatchPromptSnapshotHandoff, rhs: ContinuousBatchPromptSnapshotHandoff) -> Bool {
+        true
+    }
 }
 
 /// Thread-safe runtime-only observer owned by the canonical scheduler row.
@@ -6171,6 +6208,9 @@ actor ContinuousBatchScheduler {
         if remainingDecodeOutputTokens(for: row) == 0 {
             await finishTerminal(row, status: .length)
         } else if let sampledToken {
+            if let snapshot = row.promptSnapshot {
+                row.request.promptSnapshotHandoff?.publish(snapshot)
+            }
             activeDecode[row.request.id] = row
             CBTrace.log(row.request.id, "sch_active")
             record(.joinedDecode)

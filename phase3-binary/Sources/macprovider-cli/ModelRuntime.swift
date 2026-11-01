@@ -79,6 +79,52 @@ enum StreamChunk: Sendable {
     case toolCallDelta(StreamToolCallDelta)
     /// SPEC-018 §3.12 reasoning text (`delta.reasoning_content`).
     case reasoning(String)
+    /// SPEC-001-R015: tokens are being generated into output the stream holds
+    /// back (a tool call held until it is complete, or structured content held
+    /// until validation). It carries no bytes and never reaches a buyer; the
+    /// relay turns it into an `inference_response_progress` frame.
+    case progress
+
+    var isProgress: Bool {
+        if case .progress = self { return true }
+        return false
+    }
+}
+
+/// SPEC-001-R015: rate-limits progress for held output. The first held step
+/// starts the clock; later held steps signal at most once per `interval`. A
+/// visible chunk resets it, so progress is sent only during a silent hold.
+final class HeldOutputProgress: @unchecked Sendable {
+    static let interval: TimeInterval = 1
+    private let lock = NSLock()
+    private let clock: @Sendable () -> Date
+    private var lastSignalAt: Date?
+
+    init(clock: @escaping @Sendable () -> Date = { Date() }) {
+        self.clock = clock
+    }
+
+    /// One generation step whose output was held. True when a progress
+    /// signal is due.
+    func heldStep() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        let now = clock()
+        guard let last = lastSignalAt else {
+            lastSignalAt = now
+            return false
+        }
+        guard now.timeIntervalSince(last) >= Self.interval else { return false }
+        lastSignalAt = now
+        return true
+    }
+
+    /// Output reached the stream: the next hold starts a new clock.
+    func visibleOutput() {
+        lock.lock()
+        lastSignalAt = nil
+        lock.unlock()
+    }
 }
 
 struct StreamToolCallDelta: Sendable {
@@ -173,7 +219,8 @@ final class ContinuousBatchFirstTokenClock: @unchecked Sendable {
     /// replaying another waiter's tokens (`replay`) never mark it.
     func markingFirstChunk<Chunk>(replay: Bool, _ onChunk: @escaping (Chunk) -> Void) -> (Chunk) -> Void {
         { chunk in
-            if !replay { self.mark() }
+            // A progress signal carries no buyer-visible output.
+            if !replay, (chunk as? StreamChunk)?.isProgress != true { self.mark() }
             onChunk(chunk)
         }
     }
@@ -7775,6 +7822,20 @@ maxTokens: 1,
         return Array(canonicalTokens.prefix(coveredTokenCount))
     }
 
+    /// A row truncated at the serial tool stop decoded tokens its completion
+    /// drops, so a cache covering generated tokens must not be committed. A
+    /// prompt snapshot covers only prompt tokens, which the truncation never
+    /// touches; dropping it made every turn that ended on an early tool stop
+    /// re-prefill its whole prompt on the next turn.
+    nonisolated static func serialConversationCacheCommittable(
+        truncatedAtSerialStop: Bool,
+        promptSnapshot: Bool,
+        coveredTokenCount: Int,
+        promptTokenCount: Int
+    ) -> Bool {
+        !truncatedAtSerialStop || (promptSnapshot && coveredTokenCount <= promptTokenCount)
+    }
+
     /// Tokenizer decode for CB streaming. Must not take `ModelContainer`:
     /// compiled lockstep already holds that hop, and a per-token `perform`
     /// behind the delivery buffer is what turned longer canary streams into
@@ -8632,6 +8693,38 @@ maxTokens: 1,
         return lease.recurrentCheckpoint?.tokenCount == lease.cachedPromptTokens
     }
 
+    /// SPEC-001-R013 (v1.9.50): ends a CB row's cache lease after the row
+    /// failed or was cut. A row cut or cancelled after it joined decode keeps
+    /// its prompt snapshot (prompt tokens only, a deep copy taken when prefill
+    /// finished), so the retry of the same turn hits the cache. The decode tail
+    /// is dropped. Any other failure, and a row cancelled during prefill,
+    /// aborts the lease as before.
+    static func endContinuousBatchLeaseAfterFailure(
+        _ lease: ConversationCacheLease?,
+        cancelled: Bool,
+        handoff: ContinuousBatchPromptSnapshotHandoff,
+        promptTokenIDs: [Int32],
+        resumeBoundaryPlan: Bool,
+        conversationCache: ConversationCache
+    ) async {
+        guard let lease else { return }
+        guard cancelled, let snapshot = handoff.take(), snapshot.tokenCount <= promptTokenIDs.count else {
+            await conversationCache.abort(lease)
+            return
+        }
+        await conversationCache.keepPromptSnapshotAfterCancel(
+            lease,
+            snapshot: ConversationCacheLayers(
+                snapshot.layers,
+                recurrentCheckpoints: snapshot.recurrentCheckpoints,
+                promptSnapshot: true,
+                nativeMTPDrafter: snapshot.nativeMTPDrafter,
+                resumeBoundaryPlan: resumeBoundaryPlan
+            ),
+            snapshotTokens: Array(promptTokenIDs.prefix(snapshot.tokenCount))
+        )
+    }
+
     /// The stored checkpoints a hybrid cached turn hands the scheduler: every
     /// one at or below the cached length (they are a prefix of this prompt).
     /// Empty unless the lease resumes a retained hybrid entry.
@@ -8812,6 +8905,7 @@ maxTokens: 1,
             detokenizer: detokenizer,
             stopTokenFilter: stopTokenFilter
         )
+        let promptSnapshotHandoff = ContinuousBatchPromptSnapshotHandoff()
         let submission = try Self.continuousBatchSubmission(
             for: request,
             promptTokens: prepared.promptTokens,
@@ -8825,6 +8919,7 @@ maxTokens: 1,
             promptSnapshotTokenCount: publishedPromptSnapshotTokenCount,
             retainedRecurrentCheckpoints: Self.retainedRecurrentCheckpoints(for: lease),
             promptSnapshotCache: promptSnapshotCache,
+            promptSnapshotHandoff: promptSnapshotHandoff,
             publishesPromptSnapshotOnly: prepared.promptSnapshotAttachesToContinuousBatchRow,
             promptResumeBoundaries: prepared.promptResumeBoundaries,
             serialToolStopObserver: serialToolStop,
@@ -8844,9 +8939,14 @@ maxTokens: 1,
                 (error as? ContinuousBatchSchedulerError)?.asAPIError() ?? error,
                 scheduler: scheduler, requestID: schedulerRequestID, gate: inferenceGate
             )
-            if let lease {
-                await conversationCache.abort(lease)
-            }
+            await Self.endContinuousBatchLeaseAfterFailure(
+                lease,
+                cancelled: !drainCancelled.isFired && (error is CancellationError || shouldCancel()),
+                handoff: promptSnapshotHandoff,
+                promptTokenIDs: preparedPromptTokenIDs,
+                resumeBoundaryPlan: prepared.promptSnapshotAttachesToContinuousBatchRow,
+                conversationCache: conversationCache
+            )
             let error = submissionError
             // SPEC-038 AC-25: one shared scheduler-error map, so the
             // non-streaming and streaming paths cannot drift.
@@ -8880,6 +8980,9 @@ maxTokens: 1,
             let completion = try Self.validateStructuredCompletion(finalized.completion, request: request)
             let generatedTokens = finalized.generatedTokens
             let canonicalTokenCount = preparedPromptTokenIDs.count + generatedTokens.count
+            // The turn now commits or aborts its own entry; a later failure
+            // must not put the prompt snapshot back over it.
+            _ = promptSnapshotHandoff.take()
             if !finalized.truncatedAtSerialStop,
                let lease, let retainedCache = result.retainedCache,
                Self.retainedCacheIsCommittable(
@@ -8900,8 +9003,13 @@ maxTokens: 1,
                     fullTokens: preparedPromptTokenIDs + generatedTokens.map(Int32.init)
                 )
                 await scheduler.acknowledgeRetainedCacheDelivery(retainedCache)
-            } else if !finalized.truncatedAtSerialStop,
-                      let lease, let serialCache = result.serialConversationCache,
+            } else if let lease, let serialCache = result.serialConversationCache,
+                      Self.serialConversationCacheCommittable(
+                          truncatedAtSerialStop: finalized.truncatedAtSerialStop,
+                          promptSnapshot: serialCache.promptSnapshot,
+                          coveredTokenCount: serialCache.tokenCount,
+                          promptTokenCount: preparedPromptTokenIDs.count
+                      ),
                       let fullTokens = Self.serialConversationCacheCommitTokens(
                           canonicalTokens: preparedPromptTokenIDs + generatedTokens.map(Int32.init),
                           coveredTokenCount: serialCache.tokenCount
@@ -8952,9 +9060,15 @@ maxTokens: 1,
                     conversationKey: result.conversationKey
                 )
             }
-            if let lease {
-                await conversationCache.abort(lease)
-            }
+            await Self.endContinuousBatchLeaseAfterFailure(
+                lease,
+                cancelled: !drainCancelled.isFired
+                    && (error is CancellationError || shouldCancel()),
+                handoff: promptSnapshotHandoff,
+                promptTokenIDs: preparedPromptTokenIDs,
+                resumeBoundaryPlan: prepared.promptSnapshotAttachesToContinuousBatchRow,
+                conversationCache: conversationCache
+            )
             throw await Self.continuousBatchFailureAfterRetirement(
                 error, scheduler: scheduler, requestID: schedulerRequestID, gate: inferenceGate
             )
@@ -9357,6 +9471,7 @@ maxTokens: 1,
             admitted: tokenBoundedNativeMTPAdmission,
             resolved: nativeMTPAdmission
         )
+        let promptSnapshotHandoff = ContinuousBatchPromptSnapshotHandoff()
         let submission = try Self.continuousBatchSubmission(
             for: request,
             promptTokens: prepared.promptTokens,
@@ -9370,6 +9485,7 @@ maxTokens: 1,
             promptSnapshotTokenCount: publishedPromptSnapshotTokenCount,
             retainedRecurrentCheckpoints: Self.retainedRecurrentCheckpoints(for: lease),
             promptSnapshotCache: promptSnapshotCache,
+            promptSnapshotHandoff: promptSnapshotHandoff,
             publishesPromptSnapshotOnly: prepared.promptSnapshotAttachesToContinuousBatchRow,
             promptResumeBoundaries: prepared.promptResumeBoundaries,
             serialToolStopObserver: serialToolStop,
@@ -9414,9 +9530,15 @@ maxTokens: 1,
                 (error as? ContinuousBatchSchedulerError)?.asAPIError() ?? error,
                 scheduler: scheduler, requestID: schedulerRequestID, gate: inferenceGate
             )
-            if let lease {
-                await conversationCache.abort(lease)
-            }
+            await Self.endContinuousBatchLeaseAfterFailure(
+                lease,
+                cancelled: !drainCancelled.isFired
+                    && (error is CancellationError || shouldCancel() || idleCancellation.isFired),
+                handoff: promptSnapshotHandoff,
+                promptTokenIDs: preparedPromptTokenIDs,
+                resumeBoundaryPlan: prepared.promptSnapshotAttachesToContinuousBatchRow,
+                conversationCache: conversationCache
+            )
             let error = submissionError
             // SPEC-038 AC-25: one shared scheduler-error map, so the
             // streaming and non-streaming paths cannot drift.
@@ -9485,6 +9607,9 @@ maxTokens: 1,
             }
             let generatedTokens = finalized.generatedTokens
             let canonicalTokenCount = preparedPromptTokenIDs.count + generatedTokens.count
+            // The turn now commits or aborts its own entry; a later failure
+            // must not put the prompt snapshot back over it.
+            _ = promptSnapshotHandoff.take()
             if !finalized.truncatedAtSerialStop,
                let lease, let retainedCache = result.retainedCache,
                Self.retainedCacheIsCommittable(
@@ -9505,8 +9630,13 @@ maxTokens: 1,
                     fullTokens: preparedPromptTokenIDs + generatedTokens.map(Int32.init)
                 )
                 await scheduler.acknowledgeRetainedCacheDelivery(retainedCache)
-            } else if !finalized.truncatedAtSerialStop,
-                      let lease, let serialCache = result.serialConversationCache,
+            } else if let lease, let serialCache = result.serialConversationCache,
+                      Self.serialConversationCacheCommittable(
+                          truncatedAtSerialStop: finalized.truncatedAtSerialStop,
+                          promptSnapshot: serialCache.promptSnapshot,
+                          coveredTokenCount: serialCache.tokenCount,
+                          promptTokenCount: preparedPromptTokenIDs.count
+                      ),
                       let fullTokens = Self.serialConversationCacheCommitTokens(
                           canonicalTokens: preparedPromptTokenIDs + generatedTokens.map(Int32.init),
                           coveredTokenCount: serialCache.tokenCount
@@ -9557,9 +9687,15 @@ maxTokens: 1,
                     conversationKey: result.conversationKey
                 )
             }
-            if let lease {
-                await conversationCache.abort(lease)
-            }
+            await Self.endContinuousBatchLeaseAfterFailure(
+                lease,
+                cancelled: !drainCancelled.isFired
+                    && (error is CancellationError || shouldCancel() || idleCancellation.isFired),
+                handoff: promptSnapshotHandoff,
+                promptTokenIDs: preparedPromptTokenIDs,
+                resumeBoundaryPlan: prepared.promptSnapshotAttachesToContinuousBatchRow,
+                conversationCache: conversationCache
+            )
             throw await Self.continuousBatchFailureAfterRetirement(
                 error, scheduler: scheduler, requestID: schedulerRequestID, gate: inferenceGate
             )
@@ -10604,9 +10740,20 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
         let held = StructuredStreamingContentAccumulator(enabled: true)
         let startedAt = Date()
         let firstChunk = ContinuousBatchFirstTokenClock()
+        let heldProgress = HeldOutputProgress()
         var completion = try await streamPrepared(request, with: handle, shouldCancel: shouldCancel) { chunk in
-            if case .content(let text) = chunk { held.append(text) }
-            else { firstChunk.mark(); onChunk(chunk) }
+            switch chunk {
+            case .content(let text):
+                held.append(text)
+                // SPEC-001-R015: held JSON still shows decode progress.
+                if heldProgress.heldStep() { onChunk(.progress) }
+            case .progress:
+                onChunk(chunk)
+            case .reasoning, .toolCallDelta:
+                heldProgress.visibleOutput()
+                firstChunk.mark()
+                onChunk(chunk)
+            }
         }
         if let error = held.error { throw error }
         completion = try Self.validateStructuredStreamingCompletion(completion, request: request, buyerVisibleContent: held.content)
@@ -11454,12 +11601,15 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
     func attachKVDiskTier(_ tier: KVDiskTier) async {
         coldTierUnsupportedReason = nil
         configureConversationCacheMemoryBudget()
+        await tier.store.bindMemoryBudget(conversationCache.memoryBudget)
         let adapter = KVConversationColdTierAdapter(
             store: tier.store, namespaceID: tier.namespaceID,
             eligibilityTTLSeconds: tier.eligibilityTTLSeconds,
             writeStagingMaxBytes: tier.config.writeStagingMaxBytes,
             maxEntryBytes: tier.config.maxEntryBytes,
             stagingMaxBytes: tier.config.stagingMaxBytes,
+            adaptiveStaging: tier.config.adaptiveStaging,
+            adaptiveWriteStaging: tier.config.adaptiveWriteStaging,
             memoryBudget: conversationCache.memoryBudget)
         await conversationCache.attachColdTier(adapter)
         // CRITICAL-2: keep the adapter's cached epoch in step with the store so
@@ -15635,11 +15785,14 @@ struct SerialStreamingTextEmitter {
     private(set) var reconciledToolCalls: [ToolCall] = []
     private let holdsCleanupPatternPrefixes: Bool
     private let holdsCleanupDecoderPendingPrefixes: Bool
+    /// SPEC-001-R015: progress while a tool call is held whole.
+    private let heldProgress: HeldOutputProgress
 
     init(
         request: ChatCompletionRequest,
         holdsCleanupPatternPrefixes: Bool = true,
-        holdsCleanupDecoderPendingPrefixes: Bool = false
+        holdsCleanupDecoderPendingPrefixes: Bool = false,
+        heldProgress: HeldOutputProgress = HeldOutputProgress()
     ) {
         let grammar = ModelRuntime.toolGrammar(for: request)
         streamToolsIncrementally = ModelRuntime.hasEnabledTools(request.promptSource.tools)
@@ -15654,6 +15807,7 @@ struct SerialStreamingTextEmitter {
         )
         self.holdsCleanupPatternPrefixes = holdsCleanupPatternPrefixes
         self.holdsCleanupDecoderPendingPrefixes = holdsCleanupDecoderPendingPrefixes
+        self.heldProgress = heldProgress
     }
 
     /// One decoded prefix of the generation (`streamingSafePrefix` of every
@@ -15665,6 +15819,7 @@ struct SerialStreamingTextEmitter {
         onChunk: (StreamChunk) -> Void
     ) -> Step {
         var candidate = candidate
+        var emittedVisible = false
         if reasoningOpen {
             // SPEC-018 §3.12: reasoning streams as `reasoning_content`; only
             // the text after `</think>` reaches content, tools and JSON mode.
@@ -15678,6 +15833,7 @@ struct SerialStreamingTextEmitter {
             if !delta.isEmpty {
                 emittedReasoning += delta
                 idleState.noteContent()
+                emittedVisible = true
                 onChunk(.reasoning(delta))
             }
             guard split.closed else { return .more }
@@ -15697,6 +15853,7 @@ struct SerialStreamingTextEmitter {
             let visibleContent = toolStreamer.visibleContentPrefix(of: stableText)
             let toolEvents = toolStreamer.observe(stableText)
             defer { toolEvents.forEach(onChunk) }
+            emittedVisible = emittedVisible || !toolEvents.isEmpty
             if !visibleContent.isEmpty || !toolStreamer.suppressesAssistantContent {
                 let delta = delta(to: visibleContent)
                 if !delta.isEmpty {
@@ -15705,9 +15862,18 @@ struct SerialStreamingTextEmitter {
                     }
                     idleState.noteContent()
                     noteEmitted(delta)
+                    emittedVisible = true
                     onChunk(.content(delta))
                 }
                 lastEmittedDecodedText = visibleContent
+            }
+            // SPEC-001-R015: the call is held whole (canonical arguments,
+            // duplicate drop, byte caps), so a step that only grew it sends a
+            // byte-free progress signal at most once per second.
+            if emittedVisible {
+                heldProgress.visibleOutput()
+            } else if toolStreamer.suppressesAssistantContent, heldProgress.heldStep() {
+                onChunk(.progress)
             }
             if stopsAfterFirstCompleteToolCall, toolStreamer.hasCompletedValidToolCall {
                 return .toolCallComplete

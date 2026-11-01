@@ -151,6 +151,48 @@ func TestQueueFullHoldClearsOnNextForwardedCompletion(t *testing.T) {
 	}
 }
 
+func TestQueueFullHoldClearsOnReadyFreeReportWhileChatsInFlight(t *testing.T) {
+	// #2192: a chat cut before its first token had its seat restored before
+	// the Mac retired it, so the next dispatch was refused. Another chat is
+	// still decoding. The Mac's later ready/free report reopens routing at
+	// the lower of the two counts; busy and thermal reports do not.
+	registry := NewRegistry(nil)
+	provider := &Provider{ProviderID: "p1", AssignedID: "s1", State: StateReady, SlotsFree: 4, SlotsTotal: 4}
+	registry.Register(provider, nil)
+	registry.ConsumeForwardedSlot("p1", "s1")
+	registry.ConsumeForwardedSlot("p1", "s1")
+	registry.RestoreForwardedSlot("p1", "s1")
+	registry.ConsumeForwardedSlot("p1", "s1")
+	registry.MarkForwardedSlotFull("p1", "s1", true)
+	if got, _ := registry.Resolve("p1", "s1"); got.RoutingEligible() {
+		t.Fatal("queue-full refusal did not hold routing")
+	}
+	busy := 0
+	registry.ApplyStateUpdate("p1", "s1", StateUpdate{State: StateBusy, SlotsFree: &busy})
+	if got, _ := registry.Resolve("p1", "s1"); got.RoutingEligible() {
+		t.Fatal("busy report cleared the queue-full hold")
+	}
+	free := 2
+	registry.ApplyStateUpdate("p1", "s1", StateUpdate{State: StateReady, SlotsFree: &free})
+	got, _ := registry.Resolve("p1", "s1")
+	if !got.RoutingEligible() || got.SlotsFree != 2 {
+		t.Fatalf("ready/free report with a chat in flight: routing=%v slots_free=%d, want true/2", got.RoutingEligible(), got.SlotsFree)
+	}
+	if registry.ForwardedInFlight("p1", "s1") != 1 {
+		t.Fatal("clearing the hold changed the in-flight count")
+	}
+
+	registry.ConsumeForwardedSlot("p1", "s1")
+	thermalFree := 0
+	registry.ApplyStateUpdate("p1", "s1", StateUpdate{State: StateBusy, Reason: "thermal_throttled", SlotsFree: &thermalFree})
+	registry.ConsumeForwardedSlot("p1", "s1")
+	registry.MarkForwardedSlotFull("p1", "s1", true)
+	registry.ApplyStateUpdate("p1", "s1", StateUpdate{State: StateReady, SlotsFree: &free})
+	if got, _ := registry.Resolve("p1", "s1"); got.RoutingEligible() {
+		t.Fatal("ready report with chats in flight cleared a thermal hold")
+	}
+}
+
 func TestStaleLowerReadyReportKeepsRestoredSeats(t *testing.T) {
 	// #1906: a heartbeat built while the Mac still counted two finished chats
 	// arrives after the coordinator restored them. It must not strand those

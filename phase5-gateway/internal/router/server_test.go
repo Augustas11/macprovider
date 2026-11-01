@@ -4584,6 +4584,85 @@ func TestAutoPrefixKeyDoesNotActivateStickyWhenStickyEnabled(t *testing.T) {
 	}
 }
 
+// TestAutoPrefixKeyPartitionsByPromptCacheKey pins SPEC-006-R014: agent
+// sessions that share a scaffold but send different prompt_cache_key values
+// get different provider conversation keys, on both Chat and Responses, and a
+// session keeps one key across its turns.
+func TestAutoPrefixKeyPartitionsByPromptCacheKey(t *testing.T) {
+	var captured []string
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path == "/internal/routing" {
+			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{"sticky":{"enabled":false}}`), nil
+		}
+		body, _ := io.ReadAll(r.Body)
+		if strings.Contains(string(body), "prompt_cache_key") && strings.Contains(string(body), "\"input\"") {
+			t.Errorf("Responses prompt_cache_key must not be forwarded in the translated chat body: %s", body)
+		}
+		captured = append(captured, r.Header.Get("X-MacProvider-Internal-Conv-Cache"))
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{"id":"chatcmpl_1","object":"chat.completion","usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7},"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`), nil
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Coordinator.OperatorURL = "http://operator.test"
+		cfg.Features.ResponsesAPIEnabled = true
+	}, WithHTTPClient(client))
+	const account = "acct_auto_prefix_prompt_cache_key"
+	fullKey := createAccountAndKey(t, store, cfg, account)
+	send := func(path, body string) {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+fullKey)
+		req.Header.Set("Content-Type", "application/json")
+		resp := httptest.NewRecorder()
+		h.ServeHTTP(resp, req)
+		if resp.Code != http.StatusOK {
+			t.Fatalf("%s status=%d body=%s", path, resp.Code, resp.Body.String())
+		}
+	}
+	chat := func(key, question string) string {
+		return `{"model":"llama","max_tokens":20,"prompt_cache_key":` + key + `,"messages":[{"role":"system","content":"agent scaffold"},{"role":"user","content":"` + question + `"}]}`
+	}
+	responses := func(key, question string) string {
+		return `{"model":"llama","max_output_tokens":20,"store":false,"prompt_cache_key":` + key + `,"instructions":"agent scaffold","input":"` + question + `"}`
+	}
+	send("/v1/chat/completions", chat(`"session-a"`, "turn one"))
+	send("/v1/chat/completions", chat(`"session-a"`, "turn two"))
+	send("/v1/chat/completions", chat(`"session-b"`, "turn one"))
+	send("/v1/chat/completions", chat(`null`, "turn one"))
+	send("/v1/chat/completions", chat(`"`+strings.Repeat("k", maxPromptCacheKeyBytes+1)+`"`, "turn one"))
+	send("/v1/responses", responses(`"session-a"`, "turn one"))
+	send("/v1/responses", responses(`"session-b"`, "turn one"))
+	if len(captured) != 7 {
+		t.Fatalf("captured %d upstream requests, want 7", len(captured))
+	}
+	for i, got := range captured {
+		if got == "" {
+			t.Fatalf("request %d: Internal-Conv-Cache must be set", i)
+		}
+	}
+	scaffoldTag, ok := prefixConversationTag([]json.RawMessage{
+		json.RawMessage(`{"role":"system","content":"agent scaffold"}`),
+		json.RawMessage(`{"role":"user","content":"turn one"}`),
+	}, nil)
+	if !ok {
+		t.Fatal("prefixConversationTag must succeed")
+	}
+	unpartitioned := expectedConversationKey("test-key-hash-secret", account, scaffoldTag)
+	sessionA := expectedConversationKey("test-key-hash-secret", account, partitionPrefixConversationTag(scaffoldTag, "session-a"))
+	if captured[0] != sessionA || captured[1] != sessionA {
+		t.Fatalf("session-a turns = %q, %q; want both %q", captured[0], captured[1], sessionA)
+	}
+	if captured[2] == sessionA || captured[2] == unpartitioned {
+		t.Fatalf("session-b key %q must differ from session-a and the unpartitioned key", captured[2])
+	}
+	if captured[3] != unpartitioned || captured[4] != unpartitioned {
+		t.Fatalf("null or oversized prompt_cache_key must keep the unpartitioned key; got %q, %q want %q", captured[3], captured[4], unpartitioned)
+	}
+	if captured[5] == captured[6] || captured[5] == unpartitioned {
+		t.Fatalf("Responses prompt_cache_key must partition the key: %q vs %q (unpartitioned %q)", captured[5], captured[6], unpartitioned)
+	}
+}
+
 func TestWhitespaceConversationTagRejectedWhenStickyEnabled(t *testing.T) {
 	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
 		cfg.Coordinator.BuyerURL = "http://coordinator.test"

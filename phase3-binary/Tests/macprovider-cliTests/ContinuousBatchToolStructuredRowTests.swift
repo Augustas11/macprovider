@@ -965,8 +965,11 @@ private final class ChunkSink: @unchecked Sendable {
     func normalized() -> [String] {
         lock.lock()
         defer { lock.unlock() }
-        return chunks.map { chunk in
+        // SPEC-001-R015 progress is timing-dependent and carries no bytes.
+        return chunks.compactMap { chunk -> String? in
             switch chunk {
+            case .progress:
+                return nil
             case .content(let text):
                 return "content:\(text)"
             case .toolCallDelta(let delta):

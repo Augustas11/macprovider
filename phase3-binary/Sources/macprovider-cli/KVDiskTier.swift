@@ -70,9 +70,11 @@ final class KVDiskTier: @unchecked Sendable {
             minFreeBytes: config.minFreeBytes,
             promotionMaxSeconds: config.promotionMaxSeconds,
             eligibilityTTLSeconds: eligibilityTTLSeconds)
+        storeConfig.adaptiveStaging = config.adaptiveStaging
+        storeConfig.adaptiveWriteStaging = config.adaptiveWriteStaging
         // M-12: run a background retention sweep every 5 minutes while active.
         storeConfig.retentionSweepSeconds = 300
-        self.store = KVDiskCacheStore(config: storeConfig, keychain: keychain, sink: sink)
+        self.store = KVDiskCacheStore(config: storeConfig, keychain: keychain, sink: sink, memoryBudget: .system)
     }
 
     /// Build a coordinator from resolved app config. Returns nil when the tier
@@ -210,6 +212,7 @@ final class KVDiskTier: @unchecked Sendable {
             + " directory=\(config.directory)"
             + " max_bytes=\(config.maxBytes) max_entries=\(config.maxEntries) max_entry_bytes=\(config.maxEntryBytes)"
             + " staging_max_bytes=\(config.stagingMaxBytes) write_staging_max_bytes=\(config.writeStagingMaxBytes)"
+            + " adaptive_staging=\(config.adaptiveStaging) adaptive_write_staging=\(config.adaptiveWriteStaging)"
             + " reuse_eligibility_ttl_seconds=\(eligibilityTTLSeconds)"
             + " retention_minutes=\(config.retentionMinutes)(cleanup_only)"
             + " synthetic_gate=conv:kvs-synth:+direct_http"

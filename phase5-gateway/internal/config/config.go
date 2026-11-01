@@ -209,6 +209,13 @@ type TimeoutsConfig struct {
 	// legacy wall keeps its non-streaming bound unchanged.
 	NonStreamRequestSeconds int `yaml:"non_stream_request_seconds"`
 	StreamingIdleMS         int `yaml:"streaming_idle_ms"`
+	// DecodeIdleSharedPrefillMaxMS caps the decode-idle allowance granted
+	// while another row on a shared provider may be prefilling the served
+	// context (SPEC-006-R026): context tokens /
+	// first_token_prefill_tokens_per_second, at most this value, never below
+	// streaming_idle_ms. 0 disables the context allowance without touching
+	// first-token scaling.
+	DecodeIdleSharedPrefillMaxMS int `yaml:"decode_idle_shared_prefill_max_ms"`
 }
 
 type SettlementConfig struct {
@@ -467,6 +474,8 @@ func Default() Config {
 			StreamCeilingMaxSeconds:     3600,
 			NonStreamRequestSeconds:     0, // inherit coordinator_request_seconds
 			StreamingIdleMS:             10000,
+			// One full served-context prefill on a shared provider (#2192).
+			DecodeIdleSharedPrefillMaxMS: 60000,
 
 			// Conservative: DeepSeek-V4 prefills ~280 tok/s on a Studio.
 			FirstTokenPrefillTokensPerSecond: 100,
@@ -745,7 +754,8 @@ func (c Config) Validate() error {
 	if c.Timeouts.CoordinatorConnectSeconds <= 0 || c.Timeouts.CoordinatorAdmissionSeconds <= 0 ||
 		c.Timeouts.FirstTokenSeconds < 0 || c.Timeouts.StreamCeilingFloorSeconds <= 0 ||
 		c.Timeouts.StreamCeilingPerTokenMS <= 0 || c.Timeouts.StreamCeilingMaxSeconds <= 0 ||
-		c.Timeouts.NonStreamRequestSeconds < 0 || c.Timeouts.FirstTokenPrefillTokensPerSecond < 0 {
+		c.Timeouts.NonStreamRequestSeconds < 0 || c.Timeouts.FirstTokenPrefillTokensPerSecond < 0 ||
+		c.Timeouts.DecodeIdleSharedPrefillMaxMS < 0 {
 		return fmt.Errorf("timeouts phase budgets must be positive")
 	}
 	if c.Timeouts.CoordinatorAdmissionSeconds < c.Timeouts.CoordinatorConnectSeconds {
