@@ -1,6 +1,7 @@
 import Foundation
 import MLX
 import MLXLMCommon
+import MLXNN
 @testable import MacProviderCore
 @testable import macprovider_cli
 import XCTest
@@ -99,6 +100,45 @@ final class ConversationKVQuantizationTests: XCTestCase {
         XCTAssertFalse(ModelRuntime.reconcileConversationCacheLedger(
             layers, ledgerTokenCount: 10, unreturnedTokenCount: 1))
         XCTAssertEqual(layers[0].offset, 10)
+    }
+
+    /// The ledger check covers every KVCacheSimple subclass: a ChunkedKVCache
+    /// short of the ledger refuses the commit instead of escaping the check.
+    func testLedgerReconcileChecksKVCacheSimpleSubclasses() {
+        let chunked = ChunkedKVCache()
+        chunked.offset = 6
+        XCTAssertFalse(ModelRuntime.reconcileConversationCacheLedger(
+            [offsetCache(10), chunked], ledgerTokenCount: 10, unreturnedTokenCount: 0))
+        chunked.offset = 11
+        let simple = offsetCache(11)
+        XCTAssertTrue(ModelRuntime.reconcileConversationCacheLedger(
+            [simple, chunked], ledgerTokenCount: 10, unreturnedTokenCount: 1))
+        XCTAssertEqual([simple.offset, chunked.offset], [10, 10])
+        let rotating = RotatingKVCache(maxSize: 64)
+        XCTAssertTrue(ModelRuntime.reconcileConversationCacheLedger(
+            [offsetCache(10), rotating], ledgerTokenCount: 10, unreturnedTokenCount: 0),
+            "a rotating layer is not an exact-offset layer")
+    }
+
+    /// The eligibility probe is the serve cache: the same parameters and
+    /// forceSimpleKV the committed cache is built with.
+    func testProviderOwnedKVBitsProbesTheServeCacheShape() {
+        let capped = GenerateParameters(maxKVSize: 4096, kvBits: 8)
+        let plain = DimensionModel(layers: 2)
+        XCTAssertEqual(ModelRuntime.providerOwnedConversationKVBits(
+            8, model: plain, serveParameters: capped, forceSimpleKV: true), 8)
+        XCTAssertNil(ModelRuntime.providerOwnedConversationKVBits(
+            8, model: plain, serveParameters: capped, forceSimpleKV: false),
+            "a capped serve cache is rotating")
+        XCTAssertNil(ModelRuntime.providerOwnedConversationKVBits(
+            nil, model: plain, serveParameters: capped, forceSimpleKV: true))
+        // A model whose newCache reads serve-time kvBits: default parameters
+        // would build KVCacheSimple, the serve parameters do not.
+        let kvBitsAware = KVBitsAwareModel(layers: 2)
+        XCTAssertNil(ModelRuntime.providerOwnedConversationKVBits(
+            8, model: kvBitsAware, serveParameters: capped, forceSimpleKV: true))
+        XCTAssertEqual(ModelRuntime.providerOwnedConversationKVBits(
+            8, model: kvBitsAware, serveParameters: GenerateParameters(), forceSimpleKV: true), 8)
     }
 
     /// The accepted delta comes from how the decode loop ended, not from the
@@ -229,6 +269,38 @@ final class ConversationKVQuantizationTests: XCTestCase {
         guard PagedKVMetallibGate.defaultMetallibExists(
             bundleURL: testBundle.resourceURL, executableURL: testBundle.executableURL) else {
             throw XCTSkip("MLX default metallib is unavailable in this test host")
+        }
+    }
+
+    /// Stock `KVCacheDimensionProvider.newCache`: rotating when capped, simple otherwise.
+    private final class DimensionModel: Module, LanguageModel, KVCacheDimensionProvider {
+        let kvHeads: [Int]
+        init(layers: Int) {
+            kvHeads = Array(repeating: 1, count: layers)
+            super.init()
+        }
+        func prepare(
+            _ input: LMInput, cache: [KVCache], state: LMOutput.State?, prefill: PrefillParameters
+        ) throws -> PrepareResult {
+            fatalError("only newCache is exercised")
+        }
+    }
+
+    /// Builds a non-simple layer when the serve parameters carry kvBits (as
+    /// FalconH1 builds QuantizedKVCache from kvBits).
+    private final class KVBitsAwareModel: Module, LanguageModel, KVCacheDimensionProvider {
+        let kvHeads: [Int]
+        init(layers: Int) {
+            kvHeads = Array(repeating: 1, count: layers)
+            super.init()
+        }
+        func newCache(parameters: GenerateParameters?) -> [KVCache] {
+            kvHeads.map { _ in parameters?.kvBits == nil ? KVCacheSimple() : RotatingKVCache(maxSize: 64) }
+        }
+        func prepare(
+            _ input: LMInput, cache: [KVCache], state: LMOutput.State?, prefill: PrefillParameters
+        ) throws -> PrepareResult {
+            fatalError("only newCache is exercised")
         }
     }
 

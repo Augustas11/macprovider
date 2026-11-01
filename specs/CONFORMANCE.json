@@ -3888,6 +3888,8 @@
         "phase3-binary/Tests/macprovider-cliTests/ConversationKVQuantizationTests.swift:testLedgerReconcileRefusesAStaleShortCache",
         "phase3-binary/Tests/macprovider-cliTests/ConversationKVQuantizationTests.swift:testDecodeUnreturnedTokenCountFollowsTheDecodeLoopsOwnStop",
         "phase3-binary/Tests/macprovider-cliTests/ConversationKVQuantizationTests.swift:testStopSequenceTurnCommitsWithItsTokensInTheLedger",
+        "phase3-binary/Tests/macprovider-cliTests/ConversationKVQuantizationTests.swift:testLedgerReconcileChecksKVCacheSimpleSubclasses",
+        "phase3-binary/Tests/macprovider-cliTests/ConversationKVQuantizationTests.swift:testProviderOwnedKVBitsProbesTheServeCacheShape",
         "phase3-binary/Tests/macprovider-cliTests/ConversationKVQuantizationTests.swift:testQuantizedEntryHitsOnlyTheSameKVBitsAndTrimsByLedger",
         "phase3-binary/Tests/macprovider-cliTests/ConversationKVQuantizationTests.swift:testColdTierSkipsQuantizedLayers",
         "phase3-binary/Tests/macprovider-cliTests/ConversationKVQuantizationRealModelTests.swift:testServeQuantizedConversationRecallsLateTurnOneFact",

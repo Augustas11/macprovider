@@ -1941,12 +1941,17 @@ actor ModelRuntime: ModelRuntimeServing {
     }
 
     /// `kvBits` for a conversation cache the serial path owns: only models whose
-    /// whole uncapped serve cache is plain `KVCacheSimple`. Sliding-window,
+    /// whole serve cache is plain `KVCacheSimple`. The probe is built by
+    /// `serveCache` from the request's own serve parameters and `forceSimpleKV`,
+    /// so it has the layer classes the committed cache will have (a capacity or
+    /// `kvBits` that changes `newCache` changes the probe too). Sliding-window,
     /// recurrent and model-specific caches keep fp16 so their reuse rules
     /// (rotating miss, recurrent checkpoints, prompt snapshots) stay unchanged.
-    nonisolated static func providerOwnedConversationKVBits(_ kvBits: Int?, model: any LanguageModel) -> Int? {
+    nonisolated static func providerOwnedConversationKVBits(
+        _ kvBits: Int?, model: any LanguageModel, serveParameters: GenerateParameters, forceSimpleKV: Bool
+    ) -> Int? {
         guard let kvBits,
-              let cache = try? model.newCache(parameters: GenerateParameters()),
+              let cache = try? serveCache(model: model, baseParameters: serveParameters, forceSimpleKV: forceSimpleKV),
               !cache.isEmpty,
               cache.allSatisfy({ type(of: $0) == KVCacheSimple.self })
         else { return nil }
@@ -1992,7 +1997,10 @@ actor ModelRuntime: ModelRuntimeServing {
     nonisolated static func reconcileConversationCacheLedger(
         _ cache: [KVCache], ledgerTokenCount: Int, unreturnedTokenCount: Int
     ) -> Bool {
-        let attention = cache.filter { type(of: $0) == KVCacheSimple.self || $0 is QuantizedKVCache }
+        // Every KVCacheSimple (including subclasses such as ChunkedKVCache, whose
+        // offset is still absolute) and QuantizedKVCache advances one position per
+        // fed token. RotatingKVCache subclasses neither and is not checked.
+        let attention = cache.filter { $0 is KVCacheSimple || $0 is QuantizedKVCache }
         guard unreturnedTokenCount >= 0,
               attention.allSatisfy({ $0.offset == ledgerTokenCount + unreturnedTokenCount }) else {
             let offsets = Set(attention.map(\.offset)).sorted()
@@ -10262,7 +10270,12 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                     )
                     // #965: a reusable conversation cache is quantized by this path,
                     // never by its iterator (mlx-swift-lm #312).
-                    let conversationKVBits = Self.providerOwnedConversationKVBits(kvBitsOverride, model: context.model)
+                    let conversationKVBits = Self.providerOwnedConversationKVBits(
+                        kvBitsOverride, model: context.model, serveParameters: parameters,
+                        forceSimpleKV: Self.forceSimpleKVCache(
+                            eligible: coldContext?.eligible == true,
+                            conversationKey: request.conversationKey,
+                            containsImage: request.containsNonTextMessageContentPart))
                     let lease = Self.serialPromptSnapshotLease(
                         conversationCacheAllowed
                             ? await conversationCache.begin(
@@ -11269,7 +11282,12 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                     )
                     // #965: a reusable conversation cache is quantized by this path,
                     // never by its iterator (mlx-swift-lm #312).
-                    let conversationKVBits = Self.providerOwnedConversationKVBits(kvBitsOverride, model: context.model)
+                    let conversationKVBits = Self.providerOwnedConversationKVBits(
+                        kvBitsOverride, model: context.model, serveParameters: parameters,
+                        forceSimpleKV: Self.forceSimpleKVCache(
+                            eligible: coldContext?.eligible == true,
+                            conversationKey: request.conversationKey,
+                            containsImage: request.containsNonTextMessageContentPart))
                     let lease = Self.serialPromptSnapshotLease(
                         conversationCacheAllowed
                             ? await conversationCache.begin(
