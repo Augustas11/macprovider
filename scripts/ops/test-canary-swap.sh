@@ -267,6 +267,18 @@ grep -qx resume_request "$T/state/frames" || die "healthy swap never resumed the
 [ ! -d "$HOME/.macprovider-canary-swap.lock" ] || die "canary-host lock not released"
 grep -q '"kernel_check": "passed"' "$T/ops-state/cli-release-$CAND/canary_swap.json" || die "no canary_swap record"
 
+# 2a. record-installed: the verified bytes already serve (installed by a signed
+#     native pair); the marker is recorded with no restart. The old version is refused.
+rm -f "$T/ops-state/cli-release-$CAND/canary_swap.json"; : >"$T/state/runner"
+run_rc 0 "record-installed adopts the serving candidate" "$SWAP" record-installed --version "$CAND"
+grep -q '"installed_by": "record-installed"' "$T/ops-state/cli-release-$CAND/canary_swap.json" || die "record-installed wrote no canary_swap record"
+[ ! -s "$T/state/runner" ] || die "record-installed touched the buyer runner"
+reset_install
+verify_bytes "$T/good.tar.gz"
+rm -f "$T/ops-state/cli-release-$CAND/canary_swap.json"
+run_rc 3 "record-installed refuses a canary on another binary" "$SWAP" record-installed --version "$CAND"
+[ ! -f "$T/ops-state/cli-release-$CAND/canary_swap.json" ] || die "record-installed recorded a binary the canary does not run"
+
 # 3. crash loop: the candidate restarts, the previous version comes back serving.
 reset_install
 verify_bytes "$T/good.tar.gz"

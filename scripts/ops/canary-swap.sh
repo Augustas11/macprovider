@@ -7,6 +7,7 @@
 # Usage:
 #   scripts/ops/canary-swap.sh check --version V [--tarball PATH]
 #   MACPROVIDER_OPS_OWNER=<label> scripts/ops/canary-swap.sh swap --version V
+#   MACPROVIDER_OPS_OWNER=<label> scripts/ops/canary-swap.sh record-installed --version V
 #
 # check (read-only, local): the archive holds only regular, relative members,
 #   and every shipped metallib (mlx.metallib and the SwiftPM bundle's
@@ -37,6 +38,11 @@
 #   the same pid alive it is bounded by CANARY_READY_TIMEOUT_S. The buyer runner is
 #   restarted on every exit. A successful swap records the canary_swap marker
 #   that `cli-release.sh next --done canary_smoke --probe` requires.
+# record-installed: the verified bytes are already on the canary (a signed
+#   native pair installs the same candidate under its own journal). Runs the
+#   check, then records the canary_swap marker only when the canary's installed
+#   macprovider-cli has the verified sha256 and /v1/status reports version V
+#   buyer_serving. Nothing is restarted.
 #
 # Env (or ~/.config/macprovider/ops.env): COORDINATOR_URL, STUDIO_SSH (local = this Mac),
 # STUDIO_SSH_KEY, STUDIO_STATUS_PORT, CANARY_RUNNER_STOP_CMD and
@@ -242,7 +248,7 @@ while [ "$#" -gt 0 ]; do
     *) usage >&2; exit 2 ;;
   esac
 done
-case "$CMD" in check|swap|recover-air|restore-air) ;; -h|--help) usage; exit 0 ;; *) usage >&2; exit 2 ;; esac
+case "$CMD" in check|swap|record-installed|recover-air|restore-air) ;; -h|--help) usage; exit 0 ;; *) usage >&2; exit 2 ;; esac
 if [ "$CMD" = recover-air ] || [ "$CMD" = restore-air ]; then
   [ "${MACPROVIDER_OPS_ENTRYPOINT:-}" = 1 ] && [ "$V" = 1.8.260 ] || refuse "Air recovery runs only through the guarded Air entrypoint"
   [ -n "${AIR_RECOVERY_PROVIDER_SHA256:-}" ] && [ -n "${AIR_RECOVERY_CONFIG:-}" ] && [ -n "${AIR_RECOVERY_BINARY_SHA256:-}" ] || refuse "Air recovery identity is missing"
@@ -405,6 +411,22 @@ check_candidate
 [ "$CMD" != swap ] || check_catalog_live
 
 require_studio_ssh
+if [ "$CMD" = record-installed ]; then
+  installed="$(studio_ssh "d=$(printf '%q' "${CANARY_INSTALL_DIR:-}"); shasum -a 256 \"\${d:-\$HOME/macprovider}/macprovider-cli\" | awk '{print \$1}'")" ||
+    refuse "cannot read the canary's installed macprovider-cli"
+  [ "$installed" = "$BINARY_SHA" ] || refuse "canary runs macprovider-cli $installed, not the verified v$V binary $BINARY_SHA"
+  served="$(studio_ssh "PATH=$(printf '%q' "${CANARY_REMOTE_PATH_PREFIX:+$CANARY_REMOTE_PATH_PREFIX:}")\$PATH curl -fsS -m 10 http://127.0.0.1:${STUDIO_STATUS_PORT}/v1/status" |
+    python3 -c 'import json,sys; b=json.load(sys.stdin); print(b.get("binary_version"), b.get("network_state"))')" ||
+    refuse "cannot read the canary /v1/status"
+  [ "$served" = "$V buyer_serving" ] || refuse "canary /v1/status reports '$served', not '$V buyer_serving'"
+  mark_done "$OPS_SCOPE" canary_swap "canary-swap.sh recorded the installed v$V" \
+    "$(printf '{"candidate_sha":"%s","checksums_sha256":"%s","tarball_sha256":"%s","binary_sha256":"%s","kernel_check":"passed","installed_by":"record-installed"}' \
+      "$(marker_field "$OPS_SCOPE" signed_byte_verification 'd.get("candidate_sha")')" \
+      "$(marker_field "$OPS_SCOPE" signed_byte_verification 'd.get("checksums_sha256")')" \
+      "$TARBALL_SHA" "$BINARY_SHA")"
+  log "canary runs the verified v$V; record it: scripts/ops/cli-release.sh next --done canary_smoke --probe"
+  exit 0
+fi
 record_air_result() {
   local action="$1" code="$2"
   case "$action:$code" in recover-air:0|recover-air:4|recover-air:5|restore-air:5) ;;
