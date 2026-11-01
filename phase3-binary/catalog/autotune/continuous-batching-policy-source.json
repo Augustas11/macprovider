@@ -62,7 +62,7 @@
       "model_key": "zai-org/glm-5.3-flash-abliterated",
       "model_sha256": "d47ec628ddfd67813ab9a9439a152e19d5f648ae3f05cfe6b2094eb9fb67fc4c",
       "provenance": {
-        "evidence_id": "glm53-abliterated-cb-mtp-2026-11-01-signed-1.8.277",
+        "evidence_id": "glm53-abliterated-d47ec628-cb-mtp-2026-11-01-signed-1.8.277-served-as-zai-org-glm-5.3-flash",
         "live_executable_cdhash": "736ebf356e3ae950392651d7f0677e2e0c50d7d8",
         "package_manifest_sha256": "5ef947b59cfe33d819031d65df9da13da9ef3658a94d46ff37bcd7af6dfab3c0",
         "provider_cli_version": "1.8.277",

@@ -34,7 +34,7 @@
     "ops/recipes/native-mtp-glm53-integration-reuse.v1.json": "ff3a6b9874b6f13336bcb685a6a81d1cca27eb7c80dc322d2bcefa2242df3f78",
     "ops/recipes/native-mtp-glm53-lab-source-equivalence.v1.json": "e55765b281afa7eb68cc211eed941b3254effb2cd668ddd17ce4eb6c3a064cb6",
     "phase3-binary/catalog/autotune/autotune-artifacts-source.json": "11ef6c5c44ffcd5da02690fe11e8c7aa7b071948f493974046c39c104434cc09",
-    "phase3-binary/catalog/autotune/continuous-batching-policy-source.json": "0e09faf99140bc4c793ba50fb0a6919aa3567ed745f78fed300059da78e2a26b",
+    "phase3-binary/catalog/autotune/continuous-batching-policy-source.json": "543d04a16333212ce2bb131b3ca011d53e4eb1dab28110649a7b6cdbb85d6b1b",
     "phase3-binary/catalog/autotune/native-mtp-admission-release.json": "59d5302c6e64b0fb531a06d01b06bed442a56bc9174b2f0c881190176d63aea3",
     "phase3-binary/catalog/autotune/native-mtp-admission-tuple.json": "100b2dc3d56303347efb5f530442026143d0052e07c3fb08781175db8c3c0b69",
     "phase3-binary/catalog/autotune/native-mtp-artifact-manifest.json": "92a047c3caac2910ca117218affd02d6215eab8d022bbf1a9654869f16b851b6",
