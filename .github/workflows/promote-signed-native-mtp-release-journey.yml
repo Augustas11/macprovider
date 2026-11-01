@@ -217,7 +217,7 @@ jobs:
           PY
 
       - name: Upload signed evidence artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: signed-native-mtp-release-journey-evidence-${{ steps.request.outputs.source_sha }}
           path: ${{ runner.temp }}/signed-native-mtp-release-journey-evidence/
