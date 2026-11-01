@@ -185,6 +185,14 @@ final class GrammarConstraintState: @unchecked Sendable, Equatable {
             reasoningOpen: reasoningOpen, closeTokenID: closeTokenID, callOpenTokenID: callOpenTokenID)
     }
 
+    /// Whether the loaded tool-call format prompts the function-XML header the
+    /// guard compiles. `format` is the load-resolved `configuration.toolCallFormat`
+    /// that also selects the request's tool grammar; Qwen 3.5 is prompted with
+    /// function-XML. Any other or unknown format leaves the request unguarded.
+    static func promptsFunctionXMLHeader(_ format: ToolCallFormat?) -> Bool {
+        format == .xmlFunction || format == .qwen35
+    }
+
     static func isRequired(_ request: ChatCompletionRequest) -> Bool {
         if case .text = request.responseFormat {
             return (try? ToolSelectionPolicy.selection(request.promptSource.toolChoice).requiresCall) == true
@@ -197,7 +205,9 @@ final class GrammarConstraintState: @unchecked Sendable, Equatable {
     /// Declared names reach the header grammar only through
     /// `ToolSelectionPolicy.schemas`, which admits `[A-Za-z0-9_-]{1,64}` and
     /// throws otherwise; an unsafe name therefore leaves the request unguarded
-    /// and the parser rejects any call to it. An auto turn never carries a call
+    /// and the parser rejects any call to it. The header is function-XML, so the
+    /// guard arms only when `promptsFunctionXMLHeader` accepts the loaded format.
+    /// An auto turn never carries a call
     /// prefill (`ModelRuntime.toolCallPrefill` is for required/named only), so
     /// the guard always starts outside a call.
     static func prepare(request: ChatCompletionRequest, tokenizer: any MLXLMCommon.Tokenizer,
@@ -212,7 +222,7 @@ final class GrammarConstraintState: @unchecked Sendable, Equatable {
             }
         } catch let error as APIError { throw error }
         catch { throw Compiled.error("Unable to prepare the local tokenizer for constrained output") }
-        guard guardsDeclaredFunctions,
+        guard guardsDeclaredFunctions, promptsFunctionXMLHeader(configuration.toolCallFormat),
               (try? ToolSelectionPolicy.selection(request.promptSource.toolChoice)) == .auto,
               ModelRuntime.hasEnabledTools(request.promptSource.tools),
               let names = (try? ToolSelectionPolicy.schemas(request)).map({ Array($0.keys) }), !names.isEmpty,

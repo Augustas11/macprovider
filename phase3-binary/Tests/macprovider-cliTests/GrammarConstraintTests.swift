@@ -352,7 +352,8 @@ final class GrammarConstraintTests: XCTestCase {
         }) else { throw XCTSkip("A Bonsai artifact is not configured in MACPROVIDER_TOKENIZER_DIRS") }
         let directory = URL(fileURLWithPath: path)
         let tokenizer = try await ChatTemplateCompatTokenizerLoader().load(from: directory)
-        let configuration = ModelConfiguration(directory: directory)
+        // The format the VLM factory resolves for a Bonsai (Qwen 3.5) load.
+        var configuration = ModelConfiguration(directory: directory, toolCallFormat: .qwen35)
         let eos: Set<Int> = [tokenizer.convertTokenToId("<|im_end|>")!, tokenizer.convertTokenToId("<|endoftext|>")!]
         let tool: [String: Any] = ["type": "function", "function": [
             "name": "get_weather", "parameters": ["type": "object", "properties": [
@@ -388,6 +389,22 @@ final class GrammarConstraintTests: XCTestCase {
         // Guaranteed selections keep their own full-call grammar.
         let required = try prepared(["tools": [tool], "tool_choice": "required"])
         XCTAssertFalse(required?.fingerprint.contains(":call-open:") ?? false)
+        // The header follows the loaded tool-call format, not the model type alone.
+        configuration.toolCallFormat = .xmlFunction
+        XCTAssertNotNil(try prepared(["tools": [tool]]))
+        for format in [nil, .json, .glm4] as [ToolCallFormat?] {
+            configuration.toolCallFormat = format
+            XCTAssertNil(try prepared(["tools": [tool]]), "\(String(describing: format)) does not prompt function-XML")
+        }
+    }
+
+    func testDeclaredFunctionGuardArmsOnlyForFunctionXMLFormats() {
+        XCTAssertTrue(GrammarConstraintState.promptsFunctionXMLHeader(.xmlFunction))
+        XCTAssertTrue(GrammarConstraintState.promptsFunctionXMLHeader(.qwen35))
+        XCTAssertFalse(GrammarConstraintState.promptsFunctionXMLHeader(nil))
+        for format in ToolCallFormat.allCases where format != .xmlFunction && format != .qwen35 {
+            XCTAssertFalse(GrammarConstraintState.promptsFunctionXMLHeader(format), format.rawValue)
+        }
     }
 }
 
