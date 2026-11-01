@@ -2600,8 +2600,82 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             var collected: [[Int]] = supportedInputs.map { _ in [] }
             let checkpointStops = decodeSteps > 1 && cacheKinds.contains(.recurrentMamba)
             var stopStepByRow: [Int: Int] = [:]
+            // Ordinary rows keep each step's sampled tokens on the device as
+            // the next step's input and queue that step before the host reads
+            // the previous one, so the GPU never waits on the host inside a
+            // window; the window end is its one draining sync. Rows that need
+            // host tokens before the next forward (recurrent stop
+            // checkpoints, drafter hidden capture, batched model state) read
+            // each step before queuing the next.
+            let pipelined = !checkpointStops && captureIndices.isEmpty && !hasBatchedState
+            var deviceTokens: MLXArray?
+            var pendingStep: (index: Int, sampled: MLXArray, logits: MLXArray, state: LMOutput.State?)?
+            /// Host side of one step. False ends the window early.
+            func readStep(
+                _ stepIndex: Int, sampled: MLXArray, logits: MLXArray, state: LMOutput.State?
+            ) throws -> Bool {
+                let stepSampled = sampled.asArray(Int.self)
+                guard stepSampled.count == supportedInputs.count else {
+                    throw ContinuousBatchSchedulerError.unsupported("continuous_batching_invalid_logits_shape")
+                }
+                for index in supportedInputs.indices {
+                    labCaptureTargetLogits(
+                        requestID: supportedInputs[index].requestID,
+                        position: supportedInputs[index].samplerStep + stepIndex,
+                        tokenIDs: [stepSampled[index]], logits: logits[index, -1, 0...].reshaped(1, -1))
+                }
+                if !captureIndices.isEmpty {
+                    guard let hidden = state?[mtpLastHiddenStatesKey],
+                          hidden.ndim == 3,
+                          hidden.dim(0) == supportedInputs.count,
+                          hidden.dim(1) >= 1
+                    else {
+                        throw ContinuousBatchSchedulerError.unsupported("native_mtp_missing_decode_hidden_state")
+                    }
+                    for index in captureIndices {
+                        capturedColumns[index, default: []].append((
+                            token: stepSampled[index],
+                            hidden: Self.detachedHiddenColumn(hidden, row: index)
+                        ))
+                    }
+                }
+                for index in supportedInputs.indices {
+                    collected[index].append(stepSampled[index])
+                }
+                if checkpointStops && stepIndex + 1 < decodeSteps {
+                    for (index, input) in supportedInputs.enumerated() {
+                        if stopStepByRow[index] == nil,
+                           Self.endsWithStopSequence(
+                               history: input.generatedTokens,
+                               window: collected[index],
+                               stopSequences: input.stopTokenSequences
+                           ) {
+                            stopStepByRow[index] = stepIndex
+                        }
+                        // After step i the state covers committed + i + 1
+                        // tokens. A model stop at step k is covered through
+                        // step k; a request stop also covers its stop token,
+                        // which step k + 1 feeds.
+                        guard let stopStep = stopStepByRow[index], stepIndex - stopStep <= 1 else { continue }
+                        windowCheckpoints[index, default: []].append(recurrentRowCheckpoint(
+                            batchedCaches,
+                            row: index,
+                            tokenCount: input.committedKVTokenCount + stepIndex + 1
+                        ))
+                    }
+                }
+                currentTokens = stepSampled
+                try throwIfCancelRequested()
+                if let onStep, !onStep(ContinuousBatchDecodeWindowStep(stepIndex: stepIndex, tokens: stepSampled)) {
+                    endedEarly = stepIndex + 1 < decodeSteps
+                    return false
+                }
+                return true
+            }
+            var stopped = false
             for stepIndex in 0 ..< decodeSteps {
-                let tokenInput = MLXArray(currentTokens.map(Int32.init)).reshaped([supportedInputs.count, 1])
+                let tokenInput = deviceTokens
+                    ?? MLXArray(currentTokens.map(Int32.init)).reshaped([supportedInputs.count, 1])
                 let text = LMInput.Text(tokens: tokenInput)
                 let stepState: LMOutput.State?
                 if hasBatchedState, let invariantStateModel {
@@ -2646,69 +2720,38 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                     return supportedInputs.map { ContinuousBatchDecodeOutcome.rowFailure(requestID: $0.requestID) }
                 }
                 try batchedCaches.forEach { try $0.validateBatchState() }
-                let stepSampled = ContinuousBatchRowSampler.sample(
-                    logits: output.logits[0..., -1, 0...],
+                let logits = output.logits
+                let sampled = ContinuousBatchRowSampler.sample(
+                    logits: logits[0..., -1, 0...],
                     rows: Self.samplerRows(supportedInputs, step: stepIndex)
-                ).asArray(Int.self)
-                guard stepSampled.count == supportedInputs.count else {
-                    throw ContinuousBatchSchedulerError.unsupported("continuous_batching_invalid_logits_shape")
-                }
-                for index in supportedInputs.indices {
-                    labCaptureTargetLogits(
-                        requestID: supportedInputs[index].requestID,
-                        position: supportedInputs[index].samplerStep + stepIndex,
-                        tokenIDs: [stepSampled[index]], logits: output.logits[index, -1, 0...].reshaped(1, -1))
-                }
-                if !captureIndices.isEmpty {
-                    guard let hidden = output.state?[mtpLastHiddenStatesKey],
-                          hidden.ndim == 3,
-                          hidden.dim(0) == supportedInputs.count,
-                          hidden.dim(1) >= 1
-                    else {
-                        throw ContinuousBatchSchedulerError.unsupported("native_mtp_missing_decode_hidden_state")
+                )
+                if captureIndices.isEmpty {
+                    if supportedInputs.count == 1 {
+                        rowStates[0].state = output.state
+                    } else if !hasBatchedState && output.state != nil {
+                        return supportedInputs.map { ContinuousBatchDecodeOutcome.rowFailure(requestID: $0.requestID) }
                     }
-                    for index in captureIndices {
-                        capturedColumns[index, default: []].append((
-                            token: stepSampled[index],
-                            hidden: Self.detachedHiddenColumn(hidden, row: index)
-                        ))
-                    }
-                } else if supportedInputs.count == 1 {
-                    rowStates[0].state = output.state
-                } else if !hasBatchedState && output.state != nil {
-                    return supportedInputs.map { ContinuousBatchDecodeOutcome.rowFailure(requestID: $0.requestID) }
                 }
-                for index in supportedInputs.indices {
-                    collected[index].append(stepSampled[index])
-                }
-                if checkpointStops && stepIndex + 1 < decodeSteps {
-                    for (index, input) in supportedInputs.enumerated() {
-                        if stopStepByRow[index] == nil,
-                           Self.endsWithStopSequence(
-                               history: input.generatedTokens,
-                               window: collected[index],
-                               stopSequences: input.stopTokenSequences
-                           ) {
-                            stopStepByRow[index] = stepIndex
+                if pipelined {
+                    let next = sampled.reshaped([supportedInputs.count, 1])
+                    asyncEval(next)
+                    deviceTokens = next
+                    if let previous = pendingStep {
+                        guard try readStep(
+                            previous.index, sampled: previous.sampled, logits: previous.logits, state: previous.state
+                        ) else {
+                            stopped = true
+                            break
                         }
-                        // After step i the state covers committed + i + 1
-                        // tokens. A model stop at step k is covered through
-                        // step k; a request stop also covers its stop token,
-                        // which step k + 1 feeds.
-                        guard let stopStep = stopStepByRow[index], stepIndex - stopStep <= 1 else { continue }
-                        windowCheckpoints[index, default: []].append(recurrentRowCheckpoint(
-                            batchedCaches,
-                            row: index,
-                            tokenCount: input.committedKVTokenCount + stepIndex + 1
-                        ))
                     }
-                }
-                currentTokens = stepSampled
-                try throwIfCancelRequested()
-                if let onStep, !onStep(ContinuousBatchDecodeWindowStep(stepIndex: stepIndex, tokens: stepSampled)) {
-                    endedEarly = stepIndex + 1 < decodeSteps
+                    pendingStep = (stepIndex, sampled, logits, output.state)
+                } else if try !readStep(stepIndex, sampled: sampled, logits: logits, state: output.state) {
+                    stopped = true
                     break
                 }
+            }
+            if !stopped, let last = pendingStep {
+                _ = try readStep(last.index, sampled: last.sampled, logits: last.logits, state: last.state)
             }
             sampledByRow = collected
             batchedCaches.forEach { $0.syncRowsFromBatch() }
@@ -4934,7 +4977,7 @@ private enum NativeMTPPendingLayerResolution {
     }
 }
 
-private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheAttentionProtocol, @unchecked Sendable {
+private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAttentionProtocol, @unchecked Sendable {
     fileprivate struct PendingMTPResolution {
         let rowCache: PagedKVCache
         let inputTokenCount: Int
@@ -5194,6 +5237,30 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheAttenti
         scale: Float,
         mask: MLXFast.ScaledDotProductAttentionMaskMode
     ) -> MLXArray {
+        attendRows(queries: queries, keys: incomingKeys, values: incomingValues, scale: scale, mask: mask, sinks: nil)
+    }
+
+    /// GPT-OSS attention with per-head sinks takes the same per-row route:
+    /// every split row's call carries the sinks the model's own call would.
+    func updateAndAttend(
+        queries: MLXArray,
+        keys incomingKeys: MLXArray,
+        values incomingValues: MLXArray,
+        scale: Float,
+        mask: MLXFast.ScaledDotProductAttentionMaskMode,
+        sinks: MLXArray
+    ) -> MLXArray {
+        attendRows(queries: queries, keys: incomingKeys, values: incomingValues, scale: scale, mask: mask, sinks: sinks)
+    }
+
+    private func attendRows(
+        queries: MLXArray,
+        keys incomingKeys: MLXArray,
+        values incomingValues: MLXArray,
+        scale: Float,
+        mask: MLXFast.ScaledDotProductAttentionMaskMode,
+        sinks: MLXArray?
+    ) -> MLXArray {
         let queryTokens = queries.dim(2)
         let packedRows = preparedMTPPackedRowMaps?.map { (queryOffset: $0.queryOffset, inputCount: $0.inputCount) }
         let offsetsBefore = preUpdateOffsets
@@ -5203,7 +5270,9 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheAttenti
         let (keys, values) = update(keys: incomingKeys, values: incomingValues)
         insideUpdateAndAttend = false
         func batched() -> MLXArray {
-            MLXFast.scaledDotProductAttention(queries: queries, keys: keys, values: values, scale: scale, mask: mask)
+            MLXFast.scaledDotProductAttention(
+                queries: queries, keys: keys, values: values, scale: scale, mask: mask, sinks: sinks
+            )
         }
         // Each row's keys start at column 0 of the buffer: its whole history,
         // or for a sliding-window row its presented suffix.
@@ -5291,7 +5360,8 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheAttenti
                 keys: keys[row ..< row + 1, 0..., ..<extent.keyTokens, 0...],
                 values: values[row ..< row + 1, 0..., ..<extent.keyTokens, 0...],
                 scale: scale,
-                mask: rowMask
+                mask: rowMask,
+                sinks: sinks
             )
             let paddedColumns = queryTokens - extent.queryTokens
             guard paddedColumns > 0 else { return attended }

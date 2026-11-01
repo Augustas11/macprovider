@@ -302,6 +302,13 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         var engineSingleRowTPS: [Double] = []
         var aggregateRunTPS: [Double] = []
         var perRowRunTPS: [Double] = []
+        var schedulerTTFTSecondsByRowRuns: [[Double]] = []
+        var schedulerBackendAggregateTPSRuns: [Double] = []
+        var schedulerFirstTokenOffsetSecondsByRowRuns: [[Double]] = []
+        var schedulerCompletionOffsetSecondsByRowRuns: [[Double]] = []
+        var schedulerBackendWindowSecondsRuns: [Double] = []
+        var schedulerBackendWindowCallsRuns: [Int] = []
+        var lastSchedulerRun: SchedulerRunDetail?
 
         func runEngineOnce(prompts: [[Int]]) async throws -> BatchedRunResult {
             switch engine {
@@ -327,7 +334,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
                     recurrentStateLayout: recurrentStateLayout
                 )
             case .scheduler:
-                return try await runSchedulerDecode(
+                let detail = try await runSchedulerDecode(
                     container: container,
                     prompts: prompts,
                     decodeSteps: decodeTokens,
@@ -337,7 +344,9 @@ struct MSBThroughputCommand: AsyncParsableCommand {
                     // Match serve/parity prefill boundaries so throughput does
                     // not allocate a whole long prompt in one forward.
                     maxPromptChunkTokens: ContinuousBatchSchedulerConfiguration.defaultPromptChunkTokens
-                ).batched
+                )
+                lastSchedulerRun = detail
+                return detail.batched
             case .serialParallel:
                 FileHandle.standardError.write(Data(
                     "msb-throughput: serial-parallel is only valid with --scenario msb05 (or as the implied engine for that scenario)\n".utf8
@@ -361,6 +370,19 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             let agg = try msbAggregateThroughput(r.rowSamples)
             aggregateRunTPS.append(agg.aggregateTokensPerSecond)
             perRowRunTPS.append(r.perRowTokensPerSecond)
+            if let detail = lastSchedulerRun {
+                schedulerTTFTSecondsByRowRuns.append(detail.firstTokenSecondsByRow)
+                schedulerBackendAggregateTPSRuns.append(detail.backendAggregateTokensPerSecond)
+                let start = detail.rowTimings.map(\.submittedAt).min()!
+                schedulerFirstTokenOffsetSecondsByRowRuns.append(
+                    detail.rowTimings.map { $0.firstTokenAt.timeIntervalSince(start) }
+                )
+                schedulerCompletionOffsetSecondsByRowRuns.append(
+                    detail.rowTimings.map { $0.completedAt.timeIntervalSince(start) }
+                )
+                schedulerBackendWindowSecondsRuns.append(detail.backendWindowSeconds)
+                schedulerBackendWindowCallsRuns.append(detail.backendWindowCalls)
+            }
             peakRSSMB = max(peakRSSMB, memoryRSSMB())
         }
 
@@ -374,7 +396,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
 
         let modelTag = modelID.split(separator: "/").last.map(String.init) ?? "model"
         let report = MSBThroughputReport(
-            schemaVersion: 4,
+            schemaVersion: engine == .scheduler ? 5 : 4,
             modelID: modelID,
             modelTag: modelTag,
             mlxSwiftLMPin: decodeBenchMLXPinTag(),
@@ -408,7 +430,15 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             timestamp: ISO8601DateFormatter().string(from: Date()),
             promptTokenSHA256: batchedPrompts.map(msbPromptTokenSHA256),
             productionSerialTTFTSecondsRuns: serialRunTTFTSeconds,
-            peakPhysFootprintMB: msbLifetimePeakPhysFootprintMB(pid: getpid())
+            peakPhysFootprintMB: msbLifetimePeakPhysFootprintMB(pid: getpid()),
+            schedulerTTFTSecondsByRowRuns: engine == .scheduler ? schedulerTTFTSecondsByRowRuns : nil,
+            schedulerBackendAggregateTPSRuns: engine == .scheduler ? schedulerBackendAggregateTPSRuns : nil,
+            schedulerDecodeLockstepWindow: engine == .scheduler
+                ? ModelRuntime.servePathDecodeLockstepWindow(cacheKinds: cacheKinds) : nil,
+            schedulerFirstTokenOffsetSecondsByRowRuns: engine == .scheduler ? schedulerFirstTokenOffsetSecondsByRowRuns : nil,
+            schedulerCompletionOffsetSecondsByRowRuns: engine == .scheduler ? schedulerCompletionOffsetSecondsByRowRuns : nil,
+            schedulerBackendWindowSecondsRuns: engine == .scheduler ? schedulerBackendWindowSecondsRuns : nil,
+            schedulerBackendWindowCallsRuns: engine == .scheduler ? schedulerBackendWindowCallsRuns : nil
         )
 
         let encoder = JSONEncoder()
@@ -474,6 +504,10 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         let usage: [MSBUsageRow]
         let tokensByRow: [[Int]]
         let firstTokenSecondsByRow: [Double]
+        let backendAggregateTokensPerSecond: Double
+        let rowTimings: [MSBSchedulerRowTiming]
+        let backendWindowSeconds: Double
+        let backendWindowCalls: Int
         let results: [ContinuousBatchSchedulerResult]
     }
 
@@ -669,8 +703,8 @@ struct MSBThroughputCommand: AsyncParsableCommand {
     }
 
     /// Production serve path: concurrent `ContinuousBatchScheduler.submit`.
-    /// Times only `decodeLockstepWindow` so prefill is excluded. Buyer CB stays
-    /// off; this is a local harness, not a coordinator join.
+    /// Uses the production window and first-delivery-to-completion wall time.
+    /// Backend-window time is retained only as an overhead diagnostic.
     private func runSchedulerDecode(
         container: ModelContainer,
         prompts: [[Int]],
@@ -680,7 +714,8 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         recurrentStateLayout: PagedKVRecurrentStateLayout,
         maxPromptChunkTokens: Int? = nil,
         maxDecodeLockstepWindow: Int? = nil,
-        requestedOutputTokens: Int? = nil
+        requestedOutputTokens: Int? = nil,
+        staggerAfterFirstRow: Bool = false
     ) async throws -> SchedulerRunDetail {
         // The final prefill samples one untimed token. Throughput callers ask
         // for `decodeSteps` timed tokens beyond it; parity callers override
@@ -693,15 +728,27 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             compiled: compiled,
             maxActiveRows: max(1, prompts.count),
             maxPromptChunkTokens: maxPromptChunkTokens ?? max(1, promptTokens),
-            maxDecodeLockstepWindow: maxDecodeLockstepWindow ?? decodeSteps
+            maxDecodeLockstepWindow: maxDecodeLockstepWindow
+                ?? ModelRuntime.servePathDecodeLockstepWindow(cacheKinds: cacheKinds)
         )
 
-        func submitAll() async throws -> [(Int, ContinuousBatchSchedulerResult, Double)] {
-            try await withThrowingTaskGroup(of: (Int, ContinuousBatchSchedulerResult, Double).self) { group in
+        func submitAll() async throws -> [(Int, ContinuousBatchSchedulerResult, MSBSchedulerRowTiming)] {
+            try await withThrowingTaskGroup(of: (Int, ContinuousBatchSchedulerResult, MSBSchedulerRowTiming).self) { group in
+                let firstTokens = prompts.map { _ in FirstTokenBox() }
                 for (index, prompt) in prompts.enumerated() {
+                    // Staggered: later rows join once row 0 is decoding, so
+                    // rows decode at different KV offsets (padded forwards).
+                    // Row 0 ending without a token (a throw or a failed
+                    // terminal) also ends the wait; the group then reports it.
+                    if staggerAfterFirstRow && index == 1 {
+                        while firstTokens[0].at == nil && !firstTokens[0].ended {
+                            try await Task.sleep(nanoseconds: 5_000_000)
+                        }
+                    }
                     group.addTask {
                         let started = Date()
-                        let firstToken = FirstTokenBox()
+                        let firstToken = firstTokens[index]
+                        defer { firstToken.end() }
                         let result = try await scheduler.submit(
                             ContinuousBatchSchedulerRequest(
                                 id: "msb-sched-\(index)-\(UUID().uuidString)",
@@ -713,11 +760,16 @@ struct MSBThroughputCommand: AsyncParsableCommand {
                             ),
                             tokenSink: { _ in firstToken.note() }
                         )
-                        let ttft = (firstToken.at ?? Date()).timeIntervalSince(started)
-                        return (index, result, ttft)
+                        let completed = Date()
+                        guard let delivered = firstToken.at else {
+                            throw MSBAggregateThroughputError.invalidSample
+                        }
+                        return (index, result, MSBSchedulerRowTiming(
+                            submittedAt: started, firstTokenAt: delivered, completedAt: completed
+                        ))
                     }
                 }
-                var results: [(Int, ContinuousBatchSchedulerResult, Double)] = []
+                var results: [(Int, ContinuousBatchSchedulerResult, MSBSchedulerRowTiming)] = []
                 for try await result in group {
                     results.append(result)
                 }
@@ -734,8 +786,12 @@ struct MSBThroughputCommand: AsyncParsableCommand {
               results.allSatisfy({
                   $0.terminalStatus == .length && $0.generatedTokens.count == totalOutputTokens
               }) else {
+            // Name each row's terminal so a failed cell can be diagnosed.
+            let rows = results.enumerated().map { index, result in
+                "row\(index)=\(result.terminalStatus):\(result.generatedTokens.count):\(result.errorCode ?? "none")"
+            }.joined(separator: " ")
             FileHandle.standardError.write(Data(
-                "msb-throughput: scheduler run produced incomplete or non-length terminals\n".utf8
+                "msb-throughput: scheduler run produced incomplete or non-length terminals expected_tokens=\(totalOutputTokens) \(rows)\n".utf8
             ))
             throw ExitCode(1)
         }
@@ -745,21 +801,23 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             "one_token_decode_calls=\(snapshot.decodeCalls)\n"
         ).utf8))
         let elapsed = Double(snapshot.windowNanoseconds) / 1_000_000_000
-        let decodeEnd = Date()
-        let decodeStart = decodeEnd.addingTimeInterval(-elapsed)
-        let samples = results.map { result in
-            MSBAggregateThroughputInput(
-                decodedTokens: max(result.generatedTokens.count - 1, 0),
-                decodeStartedAt: decodeStart,
-                decodeEndedAt: decodeEnd
-            )
+        let samples = try indexed.map { _, result, timing in
+            try timing.throughputSample(outputTokens: result.generatedTokens.count)
         }
+        let decodeStart = samples.map(\.decodeStartedAt).min()!
+        let decodeEnd = samples.map(\.decodeEndedAt).max()!
+        let backendAggregate = elapsed > 0
+            ? Double(samples.reduce(0) { $0 + $1.decodedTokens }) / elapsed : 0
         let usage = results.map(Self.usageRow)
         return SchedulerRunDetail(
             batched: BatchedRunResult(rowSamples: samples, decodeStart: decodeStart, decodeEnd: decodeEnd),
             usage: usage,
             tokensByRow: results.map(\.generatedTokens),
-            firstTokenSecondsByRow: indexed.map(\.2),
+            firstTokenSecondsByRow: indexed.map { $0.2.ttftSeconds },
+            backendAggregateTokensPerSecond: backendAggregate,
+            rowTimings: indexed.map(\.2),
+            backendWindowSeconds: elapsed,
+            backendWindowCalls: snapshot.windowCalls,
             results: results
         )
     }
@@ -828,6 +886,12 @@ struct MSBThroughputCommand: AsyncParsableCommand {
                 moePromotionEvidenceAvailable: true,
                 maxActiveRows: max(1, maxActiveRows),
                 decodeHeadroomTokens: 1,
+                // The serve path's prefill row bound and decode steps per hop
+                // while a prompt prefills (`productionContinuousBatchSchedulerConfiguration`).
+                maxPrefillRowsPerIteration: min(
+                    max(1, maxActiveRows),
+                    ContinuousBatchSchedulerConfiguration.defaultPrefillRowsPerIteration
+                ),
                 maxPromptChunkTokens: max(1, maxPromptChunkTokens),
                 referencePrefillStepSize: Self.isDeepseekV4Pool(cacheKinds) ? DeepseekV4Model.prefillStepSize : nil,
                 snapshot: ContinuousBatchSchedulerSnapshot(
@@ -840,7 +904,10 @@ struct MSBThroughputCommand: AsyncParsableCommand {
                         max(1, maxDecodeLockstepWindow),
                         ModelRuntime.servePathDecodeLockstepWindow(cacheKinds: cacheKinds)
                     )
-                    : max(1, maxDecodeLockstepWindow)
+                    : max(1, maxDecodeLockstepWindow),
+                maxDecodeStepsWhilePrefilling: ModelRuntime.decodeStepsWhilePrefilling(
+                    promptChunkTokens: max(1, maxPromptChunkTokens)
+                )
             ),
             allocator: allocator,
             backend: backend,
@@ -1492,6 +1559,9 @@ struct MSBThroughputCommand: AsyncParsableCommand {
                 requestedOutputTokens: compared
             ))
         }
+        // Rows that arrive together now prefill as one cohort at equal
+        // offsets; later rows join after row 0 decodes, so parity still
+        // covers rows at different KV offsets.
         let twoRow = try await runSchedulerDecode(
             container: container,
             prompts: prompts,
@@ -1500,7 +1570,8 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             cacheKinds: cacheKinds,
             recurrentStateLayout: recurrentStateLayout,
             maxPromptChunkTokens: parityPrefillStepSize,
-            requestedOutputTokens: compared
+            requestedOutputTokens: compared,
+            staggerAfterFirstRow: true
         )
         peakRSSMB = max(peakRSSMB, memoryRSSMB())
         let serialRows = serialRuns.map(\.generatedTokens)
@@ -1917,7 +1988,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         let aggregateP50 = decodeBenchPercentileTPS(aggregateRunTPS, p: 0.5)
         let modelTag = modelID.split(separator: "/").last.map(String.init) ?? "model"
         let report = MSBThroughputReport(
-            schemaVersion: 4,
+            schemaVersion: engine == "scheduler" ? 5 : 4,
             modelID: modelID,
             modelTag: modelTag,
             mlxSwiftLMPin: decodeBenchMLXPinTag(),
@@ -2469,6 +2540,15 @@ struct MSBThroughputReport: Codable, Sendable {
     /// Lifetime max phys footprint (includes Metal buffers, unlike RSS); the
     /// same measure `msb-loopback` reads from the external server pid.
     var peakPhysFootprintMB: Int? = nil
+    /// Scheduler delivery-to-completion measurements; backend-only numbers
+    /// remain separate so they cannot qualify a production throughput gain.
+    var schedulerTTFTSecondsByRowRuns: [[Double]]? = nil
+    var schedulerBackendAggregateTPSRuns: [Double]? = nil
+    var schedulerDecodeLockstepWindow: Int? = nil
+    var schedulerFirstTokenOffsetSecondsByRowRuns: [[Double]]? = nil
+    var schedulerCompletionOffsetSecondsByRowRuns: [[Double]]? = nil
+    var schedulerBackendWindowSecondsRuns: [Double]? = nil
+    var schedulerBackendWindowCallsRuns: [Int]? = nil
 }
 
 /// Times `decodeLockstepWindow` so scheduler-path MSB numbers exclude prefill.
@@ -2622,6 +2702,19 @@ private final class MSBThroughputReplayAuthority: ContinuousBatchSchedulerReplay
 private final class FirstTokenBox: @unchecked Sendable {
     private let lock = NSLock()
     private var recorded: Date?
+    private var finished = false
+
+    func end() {
+        lock.lock()
+        finished = true
+        lock.unlock()
+    }
+
+    var ended: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return finished
+    }
 
     func note() {
         lock.lock()
