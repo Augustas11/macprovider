@@ -738,14 +738,17 @@ struct MSBThroughputCommand: AsyncParsableCommand {
                 for (index, prompt) in prompts.enumerated() {
                     // Staggered: later rows join once row 0 is decoding, so
                     // rows decode at different KV offsets (padded forwards).
+                    // Row 0 ending without a token (a throw or a failed
+                    // terminal) also ends the wait; the group then reports it.
                     if staggerAfterFirstRow && index == 1 {
-                        while firstTokens[0].at == nil {
+                        while firstTokens[0].at == nil && !firstTokens[0].ended {
                             try await Task.sleep(nanoseconds: 5_000_000)
                         }
                     }
                     group.addTask {
                         let started = Date()
                         let firstToken = firstTokens[index]
+                        defer { firstToken.end() }
                         let result = try await scheduler.submit(
                             ContinuousBatchSchedulerRequest(
                                 id: "msb-sched-\(index)-\(UUID().uuidString)",
@@ -2699,6 +2702,19 @@ private final class MSBThroughputReplayAuthority: ContinuousBatchSchedulerReplay
 private final class FirstTokenBox: @unchecked Sendable {
     private let lock = NSLock()
     private var recorded: Date?
+    private var finished = false
+
+    func end() {
+        lock.lock()
+        finished = true
+        lock.unlock()
+    }
+
+    var ended: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return finished
+    }
 
     func note() {
         lock.lock()
