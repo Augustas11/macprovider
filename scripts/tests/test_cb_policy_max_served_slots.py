@@ -79,10 +79,33 @@ class MaxServedSlotsGeneratorTest(unittest.TestCase):
         self.assertEqual(ceilings.pop("qwen3-8b"), 4)
         self.assertTrue(ceilings, "committed policy keeps its uncapped entries")
         self.assertEqual(set(ceilings.values()), {None})
-        regenerated = catalog_release.default_cb_policy(
-            CANDIDATE_BYTES, CANDIDATE_OBJ, signer_key_id=self.policy["signer_key_id"]
-        )
+        # Source entries drafted ahead of the next signed release (#2200).
+        # The signing release removes them from this set; any other source
+        # drift still fails the byte comparison below.
+        unsigned_drafts = {("meta-llama/llama-3.1-8b-instruct", "apple-silicon:Apple M5:ram-32gb")}
+        source = catalog_release.cb_policy_source_entries()
+        drafted = {(entry["model_key"], entry["hardware_class"]) for entry in source}
+        signed = {(entry["model_key"], entry["hardware_class"]) for entry in self.policy["entries"]}
+        self.assertEqual(drafted - signed, unsigned_drafts)
+        original = catalog_release.cb_policy_source_entries
+        catalog_release.cb_policy_source_entries = lambda: [
+            dict(entry) for entry in source
+            if (entry["model_key"], entry["hardware_class"]) not in unsigned_drafts
+        ]
+        try:
+            regenerated = catalog_release.default_cb_policy(
+                CANDIDATE_BYTES, CANDIDATE_OBJ, signer_key_id=self.policy["signer_key_id"]
+            )
+        finally:
+            catalog_release.cb_policy_source_entries = original
         self.assertEqual(regenerated, CB_POLICY_BYTES.rstrip(b"\n"))
+        # A draft still passes the release validator with its ceiling.
+        drafted_policy = json.loads(catalog_release.default_cb_policy(
+            CANDIDATE_BYTES, CANDIDATE_OBJ, signer_key_id=self.policy["signer_key_id"]
+        ))
+        drafts = [entry for entry in drafted_policy["entries"]
+                  if (entry["model_key"], entry["hardware_class"]) in unsigned_drafts]
+        self.assertEqual([entry.get("max_served_slots") for entry in drafts], [4])
 
     def test_qwen8_policy_preserves_target_qualification_identity(self):
         entry = next(entry for entry in self.policy["entries"] if entry["model_key"] == "qwen3-8b")
