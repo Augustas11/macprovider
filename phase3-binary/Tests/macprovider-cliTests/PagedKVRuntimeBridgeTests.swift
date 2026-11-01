@@ -4173,6 +4173,155 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         }
     }
 
+    /// Pipelined decode reads step k only after step k + 1 is queued. When the
+    /// observer ends the window at step k, the window returns exactly the
+    /// tokens of steps 0...k (as the sequential path did), never the queued
+    /// step's tokens, and records no row state, so the extra forward's KV is
+    /// released with the cancelled rows.
+    func testPipelinedLockstepWindowEndsMidWindowWithObservedStepsOnly() async throws {
+        try requireMetal()
+        let descriptor = Self.bridgeDescriptor()
+        let model = RuntimeBridgeFakeModel(nextTokenByInput: [1: 4, 4: 5, 5: 6, 6: 9, 12: 7, 7: 8, 8: 10, 10: 11])
+        let container = ModelContainer(context: ModelContext(
+            configuration: ModelConfiguration(id: descriptor.modelID),
+            model: model,
+            processor: StandInUserInputProcessor(),
+            tokenizer: RuntimeBridgeFakeTokenizer()
+        ))
+        let backend = PagedKVSharedForwardBackend(container: container, descriptor: descriptor, layerCount: 1)
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: descriptor.blockSizeTokens, maxPhysicalBlocks: 16)
+        let aHandle = try await allocator.allocate(conversationKey: "row-a", maxTokens: 8)
+        let bHandle = try await allocator.allocate(conversationKey: "row-b", maxTokens: 8)
+        _ = try await allocator.extend(aHandle, by: 4)
+        _ = try await allocator.extend(bHandle, by: 4)
+        try await allocator.beginDecodeStep(aHandle)
+        try await allocator.beginDecodeStep(bHandle)
+        let steps = StepRecorder()
+        let window = try await backend.decodeLockstepWindow(
+            rows: [
+                try await Self.decodeInput(
+                    requestID: "row-a", currentToken: 1, handle: aHandle, allocator: allocator,
+                    committedKVTokenCount: 0, extendBy: 0, beginDecode: false, targetOffset: 4
+                ),
+                try await Self.decodeInput(
+                    requestID: "row-b", currentToken: 12, handle: bHandle, allocator: allocator,
+                    committedKVTokenCount: 0, extendBy: 0, beginDecode: false, targetOffset: 4
+                ),
+            ],
+            steps: 4,
+            onStep: { step in
+                steps.append(step)
+                return step.stepIndex < 1
+            }
+        )
+        try await allocator.endDecodeStep(aHandle)
+        try await allocator.endDecodeStep(bHandle)
+
+        var tokensByID: [String: [Int]] = [:]
+        for outcome in window {
+            guard case .output(let output) = outcome else {
+                XCTFail("expected window outputs, got \(outcome)")
+                return
+            }
+            tokensByID[output.requestID] = output.tokens
+        }
+        XCTAssertEqual(tokensByID["row-a"], [4, 5])
+        XCTAssertEqual(tokensByID["row-b"], [7, 8])
+        XCTAssertEqual(steps.steps().map(\.tokens), [[4, 7], [5, 8]])
+        // Steps 0 and 1, plus step 2 queued before step 1 was read. Its
+        // tokens ([6, 10]) are neither streamed nor returned.
+        XCTAssertEqual(model.forwardCallCount(), 3)
+        XCTAssertEqual(backend.retainedRowCountForTest(), 0)
+        backend.finish(requestID: "row-a")
+        backend.finish(requestID: "row-b")
+    }
+
+    /// A cancellation that lands while a pipelined window runs ends it at the
+    /// next step boundary: the window throws, no step after the cancel is
+    /// streamed, no row state survives, and the backend re-arms.
+    func testPipelinedLockstepWindowStopsAtStepBoundaryOnCancellation() async throws {
+        try requireMetal()
+        let descriptor = Self.bridgeDescriptor()
+        let model = RuntimeBridgeFakeModel(nextTokenByInput: [1: 4, 4: 5, 5: 6, 6: 9, 12: 7, 7: 8, 8: 10, 10: 11])
+        let container = ModelContainer(context: ModelContext(
+            configuration: ModelConfiguration(id: descriptor.modelID),
+            model: model,
+            processor: StandInUserInputProcessor(),
+            tokenizer: RuntimeBridgeFakeTokenizer()
+        ))
+        let backend = PagedKVSharedForwardBackend(container: container, descriptor: descriptor, layerCount: 1)
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: descriptor.blockSizeTokens, maxPhysicalBlocks: 16)
+        let aHandle = try await allocator.allocate(conversationKey: "row-a", maxTokens: 8)
+        let bHandle = try await allocator.allocate(conversationKey: "row-b", maxTokens: 8)
+        _ = try await allocator.extend(aHandle, by: 4)
+        _ = try await allocator.extend(bHandle, by: 4)
+        // Retained row state lets the observer see the cancel barrier land:
+        // `cancelInFlight` clears rows and sets the flag under one lock.
+        for (requestID, handle) in [("row-a", aHandle), ("row-b", bHandle)] {
+            let binding = try await allocator.binding(for: handle)
+            try backend.installRowStateForTest(
+                caches: [PagedKVCache(descriptor: descriptor, binding: binding, initialOffset: 0)],
+                requestID: requestID,
+                binding: binding
+            )
+        }
+        XCTAssertEqual(backend.retainedRowCountForTest(), 2)
+        try await allocator.beginDecodeStep(aHandle)
+        try await allocator.beginDecodeStep(bHandle)
+        let steps = StepRecorder()
+        let cancellation = RuntimeBridgeVoidTaskBox()
+        let rows = [
+            try await Self.decodeInput(
+                requestID: "row-a", currentToken: 1, handle: aHandle, allocator: allocator,
+                committedKVTokenCount: 0, extendBy: 0, beginDecode: false, targetOffset: 4
+            ),
+            try await Self.decodeInput(
+                requestID: "row-b", currentToken: 12, handle: bHandle, allocator: allocator,
+                committedKVTokenCount: 0, extendBy: 0, beginDecode: false, targetOffset: 4
+            ),
+        ]
+        do {
+            _ = try await backend.decodeLockstepWindow(rows: rows, steps: 4, onStep: { step in
+                steps.append(step)
+                if step.stepIndex == 0 {
+                    cancellation.set(Task { await backend.cancelInFlight() })
+                    let deadline = Date().addingTimeInterval(10)
+                    while backend.retainedRowCountForTest() != 0 && Date() < deadline {
+                        usleep(1_000)
+                    }
+                }
+                return true
+            })
+            XCTFail("a cancelled pipelined window must not return outputs")
+        } catch ContinuousBatchSchedulerError.unsupported(let code) {
+            XCTAssertEqual(code, "continuous_batching_backend_cancelled")
+        }
+        await cancellation.get()?.value
+        try await allocator.endDecodeStep(aHandle)
+        try await allocator.endDecodeStep(bHandle)
+
+        XCTAssertEqual(steps.steps().map(\.tokens), [[4, 7]])
+        XCTAssertEqual(backend.retainedRowCountForTest(), 0)
+
+        // The barrier re-arms: a fresh row decodes after the cancelled window.
+        let nextHandle = try await allocator.allocate(conversationKey: "after-cancel", maxTokens: 8)
+        let next = try await backend.decodeLockstepWindow(
+            rows: [try await Self.decodeInput(
+                requestID: "after-cancel", currentToken: 1, handle: nextHandle, allocator: allocator,
+                committedKVTokenCount: 0, extendBy: 2, beginDecode: true, targetOffset: 2
+            )],
+            steps: 2,
+            onStep: nil
+        )
+        try await allocator.endDecodeStep(nextHandle)
+        guard case .output(let output) = next.first else {
+            XCTFail("expected an output after the cancel barrier, got \(next)")
+            return
+        }
+        XCTAssertEqual(output.tokens, [4, 5])
+        backend.finish(requestID: "after-cancel")
+    }
+
     func testRealSharedForwardBackendCancelWaitsForActivePrefill() async throws {
         try requireMetal()
 
@@ -7334,6 +7483,23 @@ private final class RuntimeBridgeReplayAuthority: ContinuousBatchSchedulerReplay
         lock.lock()
         defer { lock.unlock() }
         keys.remove("\(key.requestID):\(key.fingerprintSHA256.base64EncodedString())")
+    }
+}
+
+private final class RuntimeBridgeVoidTaskBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var task: Task<Void, Never>?
+
+    func set(_ task: Task<Void, Never>) {
+        lock.lock()
+        self.task = task
+        lock.unlock()
+    }
+
+    func get() -> Task<Void, Never>? {
+        lock.lock()
+        defer { lock.unlock() }
+        return task
     }
 }
 
