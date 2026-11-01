@@ -199,6 +199,8 @@ struct Spec028BenchmarkCommand: AsyncParsableCommand {
                     switch chunk {
                     case .content, .toolCallDelta, .reasoning:
                         chunkCounter.increment()
+                    case .progress:
+                        break
                     }
                 }
                 await runtime.unregisterInFlight(handle.registrationID)

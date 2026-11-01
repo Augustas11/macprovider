@@ -1638,11 +1638,20 @@ actor InferenceRelay {
             batcher.enqueueDelta(["role": "assistant", "content": ""])
 
             let streamedToolArgs = StreamedToolCallArgs()
+            // SPEC-001-R015: a privacy-class or relay-blind stream sends no
+            // progress; its coordinator path would not consume it.
+            let sendsProgress = privacySealer == nil && relayBlindEvidence == nil && relayBlindClaim == nil
             // T3-01: accumulate content-token deltas until streamInterval tokens,
             // then emit one combined SSE frame. Tool-call deltas flush any pending
             // content immediately and are never batched. The batcher serializes
             // the @Sendable callback's state and its enqueue order.
             let completion = try await modelRuntime.stream(request, with: handle, shouldCancel: { state.isCancelled }) { chunk in
+                if chunk.isProgress {
+                    if sendsProgress {
+                        Self.sendProgress(requestID: requestID, state: state, sendFrame: sendFrame)
+                    }
+                    return
+                }
                 if case .toolCallDelta(let toolDelta) = chunk {
                     streamedToolArgs.note(toolDelta)
                 }
@@ -1982,6 +1991,21 @@ actor InferenceRelay {
             // withheld for good (R-14.6 missing evidence).
             state.relayBlindSettlement?.suppressReceiptAfterSendFailure()
             throw error
+        }
+    }
+
+    /// SPEC-001-R015: decode progress for output the stream holds back. It is
+    /// not a chunk: no `seq`, no `data`, no receipt or delivered-prefix
+    /// accounting, and it is never sealed (it carries only the request ID).
+    /// Ordering against chunks does not matter, so it is sent off the chunk
+    /// queue; the emitter already limits it to about once per second.
+    private static func sendProgress(requestID: String, state: RelayRequestState, sendFrame: @escaping SendFrame) {
+        guard !state.terminalSent, !state.isCancelled else { return }
+        Task {
+            try? await sendFrame([
+                "type": "inference_response_progress",
+                "request_id": requestID,
+            ])
         }
     }
 
@@ -2672,6 +2696,9 @@ final class RelayStreamBatcher: @unchecked Sendable {
             flushContentLocked()
             emittedToolCall = true
             enqueueLocked(deltaFrame(["tool_calls": [toolDelta.openAIDeltaDict()]]))
+        case .progress:
+            // SPEC-001-R015: never a chunk frame.
+            break
         }
     }
 

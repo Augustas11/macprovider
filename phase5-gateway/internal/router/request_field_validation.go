@@ -63,7 +63,7 @@ func validateRequestFieldNames(body []byte, names ...string) (map[string]json.Ra
 
 func validateChatRequestFieldNames(body []byte) error {
 	fields, err := validateRequestFieldNames(body,
-		"model", "messages", "max_tokens", "n", "stream", "response_format", "tools")
+		"model", "messages", "max_tokens", "n", "stream", "response_format", "tools", "prompt_cache_key")
 	if err != nil {
 		return err
 	}
@@ -83,7 +83,7 @@ func validateResponsesRequestFieldNames(body []byte) error {
 		"model", "input", "instructions", "tools", "tool_choice",
 		"max_output_tokens", "stream", "previous_response_id", "store",
 		"temperature", "top_p", "response_format", "text", "metadata", "user",
-		"reasoning", "parallel_tool_calls", "conversation", "include", "truncation", "background")
+		"reasoning", "parallel_tool_calls", "conversation", "include", "truncation", "background", "prompt_cache_key")
 	if err != nil {
 		return err
 	}

@@ -165,6 +165,11 @@ timeouts:
   # content-bearing frame, so prefill is bounded by first_token_seconds and
   # never by this value. Do not raise it to cover long prompts.
   streaming_idle_ms: 10000
+  # Decode-idle allowance while another row on a shared provider may be
+  # prefilling the served context (SPEC-006-R026): served context tokens /
+  # first_token_prefill_tokens_per_second, capped here, never below
+  # streaming_idle_ms. 0 turns it off without touching first-token scaling.
+  decode_idle_shared_prefill_max_ms: 60000
 
 retry_503:
   # Shared retry loop for transient coordinator admission failures. Keep this

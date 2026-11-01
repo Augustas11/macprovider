@@ -80,6 +80,18 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
     private let maxEntryBytes: Int
     private let stagingMaxBytes: Int
     private let memoryBudget: ConversationCacheMemoryBudget
+    private let adaptiveStaging: Bool
+    private let adaptiveWriteStaging: Bool
+
+    private func promotionStagingLimit() -> Int {
+        KVDiskStagingPolicy.limit(configured: stagingMaxBytes, adaptive: adaptiveStaging,
+            measured: memoryBudget.stagingByteLimit())
+    }
+
+    private func writeStagingLimit() -> Int {
+        KVDiskStagingPolicy.limit(configured: writeStagingMaxBytes, adaptive: adaptiveWriteStaging,
+            measured: memoryBudget.stagingByteLimit())
+    }
     /// Aggregate write-live reservation (Item 3, FR-KVP3 RAM-DoS bound). ONE budget
     /// (`writeStagingMaxBytes`) covers all write-side memory held simultaneously —
     /// every pending snapshot's deep copy plus the active serializer/codec buffers.
@@ -106,14 +118,17 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
     /// once via `releaseWriteLive`.
     func reserveWriteLive(_ estimate: Int, volumeBytes: Int? = nil) -> Bool {
         writeLiveLock.lock(); defer { writeLiveLock.unlock() }
-        guard writeLiveBytes + estimate <= writeStagingMaxBytes else { return false }
+        let ceiling = writeStagingLimit()
+        guard estimate >= 0, writeLiveBytes <= ceiling, estimate <= ceiling - writeLiveBytes else { return false }
         let volume = volumeBytes ?? estimate
         let now = Date()
         if now.timeIntervalSince(writeVolumeWindowStartedAt) >= Self.writeVolumeWindowSeconds {
             writeVolumeWindowStartedAt = now
             writeVolumeBytes = 0
         }
-        guard volume <= Self.writeVolumeWindowBytes - writeVolumeBytes else { return false }
+        let volumeCeiling = adaptiveWriteStaging ? max(Self.writeVolumeWindowBytes, ceiling) : Self.writeVolumeWindowBytes
+        guard volume >= 0, writeVolumeBytes <= volumeCeiling,
+              volume <= volumeCeiling - writeVolumeBytes else { return false }
         writeLiveBytes += estimate
         writeVolumeBytes += volume
         return true
@@ -173,6 +188,8 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
          writeStagingMaxBytes: Int = KVDiskCacheStoreConfig.writeStagingHardMax,
          maxEntryBytes: Int = KVDiskCacheStoreConfig.writeStagingHardMax,
          stagingMaxBytes: Int = KVDiskCacheStoreConfig.promotionCeilingHardMax,
+         adaptiveStaging: Bool = false,
+         adaptiveWriteStaging: Bool = false,
          incarnation: String = UUID().uuidString,
          memoryBudget: ConversationCacheMemoryBudget = .system) {
         self.store = store
@@ -183,6 +200,8 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
         self.stagingMaxBytes = stagingMaxBytes
         self.incarnation = incarnation
         self.memoryBudget = memoryBudget
+        self.adaptiveStaging = adaptiveStaging
+        self.adaptiveWriteStaging = adaptiveWriteStaging
     }
 
     /// Cache the current key epoch (store epoch observer). Called synchronously on
@@ -375,7 +394,7 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
         restoreLock.unlock()
         guard claimed else { return nil }
         defer { restoreLock.lock(); restoreInFlight = false; restoreLock.unlock() }
-        guard memoryBudget.admitsStaging(bytes: stagingMaxBytes) else { return nil }
+        guard promotionStagingLimit() > 0 else { return nil }
         let epoch = await store.currentEpoch
         let runtime = promotionRuntime(
             identity: identity, template: template, epoch: epoch,
@@ -482,14 +501,16 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
         // NOT be written. Skip BEFORE the deep copy (SPEC-037 §3). The silent
         // KVS-01a drops were oversize prompts, not this ceiling on the 1600-token class.
         let (promotionEstimate, promotionOverflow) = estimatedDecoded.multipliedReportingOverflow(by: hasRecurrent || prompt ? 2 : 1)
-        guard !promotionOverflow, promotionEstimate <= stagingMaxBytes else {
-            FileHandle.standardError.write(Data("event=kv_disk_cache action=capture_skipped reason=exceeds_promotion_ceiling decoded=\(estimatedDecoded) required=\(promotionOverflow ? "overflow" : String(promotionEstimate)) cap=\(stagingMaxBytes) knob=staging_max_bytes\n".utf8))
+        let promotionCeiling = promotionStagingLimit()
+        guard !promotionOverflow, promotionEstimate <= promotionCeiling else {
+            FileHandle.standardError.write(Data("event=kv_disk_cache action=capture_skipped reason=exceeds_promotion_ceiling decoded=\(estimatedDecoded) required=\(promotionOverflow ? "overflow" : String(promotionEstimate)) cap=\(promotionCeiling) knob=staging_max_bytes\n".utf8))
             Task { [store] in await store.notePromotionCeilingSkipped(rawKey: conversationKey) }
             return nil
         }
-        let writeFootprint = estimatedDecoded + activeSealFootprint(decoded: estimatedDecoded)
-        guard writeFootprint <= writeStagingMaxBytes else {
-            FileHandle.standardError.write(Data("event=kv_disk_cache action=capture_skipped reason=write_staging decoded=\(estimatedDecoded) footprint=\(writeFootprint) cap=\(writeStagingMaxBytes) knob=write_staging_max_bytes\n".utf8))
+        let (writeFootprint, writeOverflow) = estimatedDecoded.addingReportingOverflow(activeSealFootprint(decoded: estimatedDecoded))
+        let writeCeiling = writeStagingLimit()
+        guard !writeOverflow, writeFootprint <= writeCeiling else {
+            FileHandle.standardError.write(Data("event=kv_disk_cache action=capture_skipped reason=write_staging decoded=\(estimatedDecoded) footprint=\(writeFootprint) cap=\(writeCeiling) knob=write_staging_max_bytes\n".utf8))
             Task { [store] in await store.noteWriteBudgetSkipped(rawKey: conversationKey) }
             return nil
         }
@@ -501,8 +522,7 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
         // snapshot as a single-release token and released once by the persist Task
         // (completion, cancellation, or displacement). Multiple indices therefore cannot
         // each retain a ceiling-sized snapshot concurrently.
-        guard memoryBudget.admitsStaging(bytes: writeFootprint),
-              reserveWriteLive(writeFootprint, volumeBytes: estimatedDecoded) else {
+        guard reserveWriteLive(writeFootprint, volumeBytes: estimatedDecoded) else {
             Task { [store] in await store.noteWriteBudgetSkipped(rawKey: conversationKey) }
             return nil
         }
@@ -666,7 +686,8 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
             identity: snapshot.identity, sampledPurgeGeneration: snapshot.sampledPurgeGeneration,
             commitSequence: snapshot.commitSequence,
             createdAtMillis: snapshot.createdAtMillis, eligibleUntilMillis: snapshot.eligibleUntilMillis,
-            incarnation: snapshot.incarnation, nowMillis: Self.nowMillis())
+            incarnation: snapshot.incarnation, nowMillis: Self.nowMillis(),
+            reservedWriteBytes: snapshot.reservedWriteBytes)
         if case .committed? = result { await snapshot.onPersisted?() }
     }
 
