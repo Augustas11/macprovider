@@ -389,13 +389,14 @@ class NativeMTPProjectionManifestTests(unittest.TestCase):
     """SPEC-048 0.1.35 projection manifest: v1 for one model, v2 keyed by model_key."""
 
     def test_committed_projection_is_the_v2_bytes_of_its_models(self):
-        # The decode-path-bound set (CLI 1.8.261+) carries GLM-5.3-Flash and
-        # Qwen3.6, so the committed projection is the v2 keyed manifest.
+        # The decode-path-bound set (CLI 1.8.261+) carries GLM-5.3-Flash, its
+        # abliterated build and Qwen3.6, so the committed projection is the v2
+        # keyed manifest.
         committed = PROJECTION.read_bytes()
         body = json.loads(committed)
         self.assertEqual(body["schema_version"], PROJECTION_V2_SCHEMA)
         models = body["models"]
-        self.assertEqual(sorted(models), sorted([GLM_KEY, QWEN_KEY]))
+        self.assertEqual(sorted(models), sorted([GLM_KEY, GLM_KEY + "-abliterated", QWEN_KEY]))
         self.assertEqual(build_projection(models), committed)
         for key in models:
             self.assertEqual(read_projection(committed, sorted(models), key), models[key])
