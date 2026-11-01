@@ -397,6 +397,8 @@ expected_history = {
     "published-2026-10-30-glm53-flash-abliterated-recommendable-v1",
     # Superseded by the same admission set rebound to the CLI 1.8.280 decode path.
     "published-2026-11-01-glm53-flash-abliterated-cb-mtp-v277",
+    # Superseded by the same set with the abliterated model in the projection.
+    "published-2026-11-01-glm53-flash-abliterated-cb-mtp-v280",
     current_release_id,
 }
 if set(ledger["releases"]) != expected_history:

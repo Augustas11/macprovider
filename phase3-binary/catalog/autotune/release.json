@@ -1,38 +1,38 @@
 {
   "feeds": {
     "autotune-artifacts.json": {
-      "bytes": 17510,
-      "sha256": "33522740a7b4adbd8bfbd244be3ac5df947b311e625b627c0098c9269f10ab18",
+      "bytes": 17516,
+      "sha256": "2dd5c66e0d2a85a467ae88ad25b7327b412b9b253e375b5b0ddf35b323a4a5a7",
       "signer_key_id": "streamvc-autotune-static-v4",
-      "version": "published-2026-11-01-glm53-flash-abliterated-cb-mtp-v280"
+      "version": "published-2026-11-01-glm53-flash-abliterated-cb-mtp-v280-r2"
     },
     "autotune-candidates.json": {
-      "bytes": 21420,
-      "sha256": "67f49815e178536e3f067c7f7f6b74bd7ca7def09f4d855f0fee255023b012c0",
+      "bytes": 21423,
+      "sha256": "c7ccd57a0d7d702d008e44b53943a09d27bc6d6a8ceb0cc4b3c6040bb7b65df8",
       "signer_key_id": "streamvc-autotune-static-v4",
-      "version": "published-2026-11-01-glm53-flash-abliterated-cb-mtp-v280"
+      "version": "published-2026-11-01-glm53-flash-abliterated-cb-mtp-v280-r2"
     },
     "continuous-batching-policy.json": {
-      "bytes": 6159,
-      "sha256": "17075651388aaee696efa9475ccbe158c0d82e6454e4d0b51f41ff74bdcba651",
+      "bytes": 6162,
+      "sha256": "52e1a271aa8f942dd6e224da6217e8b3470d02f44d99f1c0b2f6369f465998b3",
       "signer_key_id": "streamvc-autotune-static-v4",
-      "version": "published-2026-11-01-glm53-flash-abliterated-cb-mtp-v280"
+      "version": "published-2026-11-01-glm53-flash-abliterated-cb-mtp-v280-r2"
     },
     "demand-rank.json": {
-      "bytes": 2571,
-      "sha256": "c6779151a6d2a968def111cdfcb9919513f702cd2381f93a8a3144544061415e",
+      "bytes": 2574,
+      "sha256": "b2c1f4cbe9879dc7f57f4ed773ce2edc54f2a6db66db6fc9eb56e6f8185fd08d",
       "signer_key_id": "streamvc-autotune-static-v4",
-      "version": "published-2026-11-01-glm53-flash-abliterated-cb-mtp-v280"
+      "version": "published-2026-11-01-glm53-flash-abliterated-cb-mtp-v280-r2"
     },
     "native-mtp-admission.json": {
-      "bytes": 83360,
-      "sha256": "1aa3a946198fae70d7cb5ed61f67b13a79f9fc528c8a7b953e96f1e8e621caed",
+      "bytes": 83363,
+      "sha256": "199a539a84752c4f92492e2aac629534b72765355b28be1d71b6c6695db25583",
       "signer_key_id": "streamvc-autotune-static-v4",
-      "version": "published-2026-11-01-glm53-flash-abliterated-cb-mtp-v280"
+      "version": "published-2026-11-01-glm53-flash-abliterated-cb-mtp-v280-r2"
     },
     "rate-card.json": {
       "bytes": 4643,
-      "sha256": "ed276c33a0c8f20bcd48cedc8c9eebab4e7b4c9a66d10f16199606f223dcf82d",
+      "sha256": "fa8b45073a9c43f5abae938c11882adc46edee994f29c2eb5a8058885a79049f",
       "signer_key_id": "streamvc-autotune-static-v4",
       "version": "d1115b736d21ac40818dbc2c4b2cf035f9c1ad181b6943003d17618d3a7493cb"
     },
@@ -43,8 +43,8 @@
       "version": "macprovider-tier2-model-catalog-2026-10-30-glm53-flash-abliterated-v1"
     }
   },
-  "generated_at": "2026-11-01T11:00:00Z",
+  "generated_at": "2026-11-01T18:10:00Z",
   "policy_version": "autotune-policy-v1",
-  "release_id": "published-2026-11-01-glm53-flash-abliterated-cb-mtp-v280",
+  "release_id": "published-2026-11-01-glm53-flash-abliterated-cb-mtp-v280-r2",
   "schema_version": "macprovider.autotune-release.v1"
 }
