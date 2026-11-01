@@ -97,31 +97,6 @@
       "requires_moe": true,
       "rollout": "canary",
       "tokenizer_sha256": "eec97aac7c5f9ba9159d4784222300eccf5ff2e6b4aeb193c8c939c912633510"
-    },
-    {
-      "cache_class": "KVCacheSimple",
-      "cached_turns_accepted": false,
-      "chat_template_sha256": "f32396c461223e11d7e329c4287755f5111973696ed2ec6b28c016923a274ad0",
-      "hardware_class": "apple-silicon:Apple M5:ram-32gb",
-      "kernel_identifier": "macprovider_paged_kv_gather_v1",
-      "kv_dtype": "fp16",
-      "max_served_slots": 4,
-      "metallib_sha256": "3f7e879bd2738ab635f178ccd0282fb4d0157f51694f942c54b5a3422aac9623",
-      "model_id": "meta-llama/llama-3.1-8b-instruct",
-      "model_key": "meta-llama/llama-3.1-8b-instruct",
-      "model_sha256": "67b26d6b1c50dc8836ab3705b06276a43c74c8f66247f9b112e232b58abbd99f",
-      "provenance": {
-        "evidence_id": "llama-3.1-8b-m5-32gb-20261101-cb2200-selfcheck",
-        "live_executable_cdhash": "e09ad788128d1dbf877cb2fd55d86c4dd48b1fa7",
-        "package_manifest_sha256": "c1c29e2f6162a6bfd0c051262192004aa8a314f69fd8a363cbad4dc670e84d67",
-        "provider_cli_version": "1.8.277",
-        "source": "operator_review",
-        "status": "qualified",
-        "studio_campaign_sha256": "bceeff97af0680a088b442cd44283bac225a3c4fba201a2b9085fcf44629f6b1"
-      },
-      "requires_moe": false,
-      "rollout": "on",
-      "tokenizer_sha256": "5ddc2e8418e64fe67f3fb48bb85f39fd6fc4ddeee4608382077bfbd59a83931a"
     }
   ],
   "schema_version": "macprovider.continuous-batching-policy-source.v1"
