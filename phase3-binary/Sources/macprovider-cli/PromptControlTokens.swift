@@ -1053,6 +1053,7 @@ extension StreamChunk {
         switch self {
         case .content(let text): return .content(ControlTextShield.strip(text))
         case .reasoning(let text): return .reasoning(ControlTextShield.strip(text))
+        case .progress: return .progress
         case .toolCallDelta(let delta):
             return .toolCallDelta(StreamToolCallDelta(
                 index: delta.index,

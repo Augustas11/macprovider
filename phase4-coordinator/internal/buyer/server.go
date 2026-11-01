@@ -460,6 +460,15 @@ const (
 	// the status shape of the caller's own request, so it is not gated on
 	// the service token.
 	capacityShed429CapabilityHeader = "X-MacProvider-Capacity-Shed-429"
+	// decodeProgressCapabilityHeader is how a gateway that consumes decode
+	// progress opts in (SPEC-001-R015, SPEC-006-R026). Only then does an
+	// incremental stream carry decodeProgressSSEComment lines, at most one per
+	// decodeProgressMinInterval, while the provider holds a tool call. Like
+	// the capacity-shed header it changes only the caller's own stream, so
+	// it is not gated on the service token.
+	decodeProgressCapabilityHeader = "X-MacProvider-Decode-Progress"
+	decodeProgressSSEComment       = ": macprovider-decode-progress\n"
+	decodeProgressMinInterval      = time.Second
 )
 
 const (
@@ -4754,8 +4763,31 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 	// (#2084 VM acceptance V-3).
 	buyerGone := r.Context().Done()
 	var afterDone <-chan time.Time
+	// SPEC-001-R015: one comment line between whole events, outside the
+	// delivered-output accounting. The gateway consumes it and never
+	// forwards it, so buyer bytes are unchanged.
+	var progress <-chan struct{}
+	if strings.TrimSpace(r.Header.Get(decodeProgressCapabilityHeader)) == "1" {
+		progress = relay.Progress
+	}
+	var lastProgressAt time.Time
+	writeDecodeProgress := func() {
+		now := time.Now()
+		if !committed || buyerReceivedDone || (!lastProgressAt.IsZero() && now.Sub(lastProgressAt) < decodeProgressMinInterval) {
+			return
+		}
+		if _, err := io.WriteString(w, decodeProgressSSEComment); err != nil {
+			return
+		}
+		lastProgressAt = now
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
 	for {
 		select {
+		case <-progress:
+			writeDecodeProgress()
 		case <-buyerGone:
 			if buyerReceivedDone && afterDone == nil {
 				buyerGone = nil

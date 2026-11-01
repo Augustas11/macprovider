@@ -1,7 +1,11 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.70 (2026-10-29, agent-client stream, context-error and model-alias compatibility)
+**Version:** 0.9.72 (2026-10-31, decode progress for held tool calls)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.6.28, SPEC-003 v0.7, SPEC-004 v0.3.2
+
+**Change log v0.9.72 (2026-10-31, Related: #2192):** Amend SPEC-006-R026. A provider holds a tool call until it is complete (SPEC-018), so a tool-only turn sent no frame for 9-51 s under concurrent prefill and decode-idle cut it. Streaming requests now send `X-MacProvider-Decode-Progress: 1`, and the gateway consumes the coordinator's `: macprovider-decode-progress` comment (SPEC-001-R015): it re-bases an armed decode-idle deadline, never arms one, and is never forwarded. Buyer bytes are unchanged. The decode-idle deadline also allows one shared-provider prefill of the served context: served context tokens / `first_token_prefill_tokens_per_second`, capped by `timeouts.decode_idle_shared_prefill_max_ms` (default 60000; 0 disables it without changing first-token scaling), and never below `streaming_idle_ms`. Missing context metadata takes the cap.
+
+**Change log v0.9.71 (2026-10-31, Related: #2192):** Amend SPEC-006-R014 (§5.4.1). When a Chat or Responses request carries a string `prompt_cache_key` of at most 256 bytes, the auto-prefix tag is partitioned by it, so concurrent agent sessions that share one scaffold no longer share one provider conversation key. Sharing a key serialized their turns on the provider and evicted each other's cached prefix. Requests without the field keep the v0.9.31 tag. The Responses translation does not forward the field in the chat body.
 
 **Change log v0.9.70 (2026-10-29):** Clarify terminal stream ordering, context-overflow errors for agent compaction, and discovery of existing model aliases. These changes do not establish deployed compatibility or expand routing equivalence.
 
@@ -564,7 +568,8 @@ changing them:
   `prompt_tokens_details.cached_tokens` for observed prefix reuse (§5.4, v0.9.30;
   SPEC-024 §8).
 - `SPEC-006-R014` — Auto-prefix tags hash the stable system+tools scaffold when
-  present so unique user questions share a ConversationCache key (§5.4.1, v0.9.31).
+  present so unique user questions share a ConversationCache key (§5.4.1, v0.9.31);
+  a buyer `prompt_cache_key` partitions the tag per session (v0.9.71).
 - `SPEC-006-R015` — Coordinator slot reservation is released on provider accept;
   occupancy after accept is the consumed pool snapshot plus heartbeat; bounded
   slot-queue deadline is at most 10 seconds (§7.8, v0.9.32).
@@ -2296,7 +2301,7 @@ Buyer opt-in source:
 - The gateway MUST trim leading/trailing whitespace, reject empty tags, reject tags longer than 128 bytes, and reject tags containing characters outside `[A-Za-z0-9._:-]` with HTTP 400, `type: "invalid_request_error"`, and `code: "invalid_conversation_tag"`. **(v0.9.8:)** trimming is Go `strings.TrimSpace` **Unicode**-whitespace semantics (matching § 1.3 step 3 and shipped `chat_proxy.go`), not ASCII-only — a reimplementation that trims only ASCII whitespace diverges on Unicode-whitespace-wrapped tags.
 - The gateway MUST silently ignore the tag when `routing.sticky_enabled: false` (200 OK, no error); it MUST NOT derive or forward a **sticky-affinity key** in the default config. Silent ignore (rather than rejection) lets portable buyer SDKs always include the header without breaking against operators running the default-off posture. **(v0.9.28:)** Even when `sticky_enabled: false` the gateway MUST still derive and forward an auto-prefix `X-MacProvider-Internal-Conv-Cache` for authenticated non-demo requests (see below), because this is a prefix-cache key, not a sticky-affinity key.
 - The gateway MUST derive the internal `conv:` value with the HMAC-SHA256 algorithm in § 1.3. Gateway-managed deterministic request-shape hashing and gateway-managed sticky cookies are intentionally rejected for v0.8 because they are less explicit, harder to audit, and broaden the auth/session surface. **(v0.9.28 carve-out:)** Prefix-cache auto tags are the v0.9.28 exception to that rejection. Auto tags MUST use the reserved `auto.prefix.*` namespace only, MUST NOT mint cookies, and MUST use the same HMAC keyed on the authenticated `account_id`. Hashing is applied to the canonical auto-prefix input below, not to arbitrary request shape. The v0.8 rejection of gateway-managed sticky cookies and sticky identity remains unconditional.
-- **(v0.9.28 auto-prefix algorithm — SPEC-006-R012, amended v0.9.31 / SPEC-006-R014:)** When no sticky key was derived for an authenticated non-demo chat completion request: (1) skip malformed `messages[]` objects that cannot be JSON-decoded to extract a role; (2) if no `role=="user"` message (case-insensitive) is found, do not derive a key; (3) collect the **scaffold** as every surviving message *before* the first user message, and take `tools` as the request `tools[]` JSON when it is a non-empty array (`null` and `[]` count as absent); (4) if the scaffold is non-empty **or** tools are present, `canonical_bytes = json.Marshal({"scaffold": scaffold, "tools": tools})` (omit `tools` when absent) — the first user message is **not** in this hash; (5) otherwise (user-only, no tools) `canonical_bytes = json.Marshal([]json.RawMessage(messages_through_first_user))` as in v0.9.28; (6) `prefix_hash = sha256(canonical_bytes)[:16]`; (7) `tag = "auto.prefix." + hex.EncodeToString(prefix_hash)`; (8) derive the `conv:` key with the § 1.3 HMAC using `account_id` and `tag`; (9) forward it as `X-MacProvider-Internal-Conv-Cache` (not `X-MacProvider-Internal-Conv`). Same scaffold across unique user questions ⇒ same tag ⇒ ConversationCache LCP can skip-prefill the shared prefix. Same first-user prefix across tool turns still shares a key. Different `account_id` ⇒ different key. This key MUST NOT activate SPEC-004 sticky affinity; coordinator `applySticky` / `stickyStore` MUST read only `X-MacProvider-Internal-Conv`.
+- **(v0.9.28 auto-prefix algorithm — SPEC-006-R012, amended v0.9.31 / SPEC-006-R014:)** When no sticky key was derived for an authenticated non-demo chat completion request: (1) skip malformed `messages[]` objects that cannot be JSON-decoded to extract a role; (2) if no `role=="user"` message (case-insensitive) is found, do not derive a key; (3) collect the **scaffold** as every surviving message *before* the first user message, and take `tools` as the request `tools[]` JSON when it is a non-empty array (`null` and `[]` count as absent); (4) if the scaffold is non-empty **or** tools are present, `canonical_bytes = json.Marshal({"scaffold": scaffold, "tools": tools})` (omit `tools` when absent) — the first user message is **not** in this hash; (5) otherwise (user-only, no tools) `canonical_bytes = json.Marshal([]json.RawMessage(messages_through_first_user))` as in v0.9.28; (6) `prefix_hash = sha256(canonical_bytes)[:16]`; (7) `tag = "auto.prefix." + hex.EncodeToString(prefix_hash)`; (7a) **(v0.9.71)** when the Chat or Responses body carries `prompt_cache_key` as a JSON string whose trimmed value is non-empty and at most 256 bytes, replace the tag with `"auto.prefix." + hex.EncodeToString(sha256(tag + "\nprompt_cache_key\n" + key)[:16])`; any other value leaves the tag unchanged and is not an error; (8) derive the `conv:` key with the § 1.3 HMAC using `account_id` and `tag`; (9) forward it as `X-MacProvider-Internal-Conv-Cache` (not `X-MacProvider-Internal-Conv`). Same scaffold across unique user questions ⇒ same tag ⇒ ConversationCache LCP can skip-prefill the shared prefix. Same first-user prefix across tool turns still shares a key. Different `account_id` ⇒ different key. This key MUST NOT activate SPEC-004 sticky affinity; coordinator `applySticky` / `stickyStore` MUST read only `X-MacProvider-Internal-Conv`.
 
 Gateway-to-coordinator transport:
 
@@ -5307,6 +5312,27 @@ translated events, never inside one. SSE comment lines are ignored by
 conforming parsers (WHATWG SSE; the OpenAI and Anthropic SDK decoders skip
 lines starting with `:`). Keepalives are not content: they never re-arm the
 first-token or decode-idle deadlines.
+
+Decode progress (v0.9.72). Every streaming request to the coordinator MUST
+carry `X-MacProvider-Decode-Progress: 1`. The coordinator then writes a
+`: macprovider-decode-progress` comment line while the provider generates
+output it holds back (SPEC-001-R015). The gateway MUST consume that line and
+never forward it, so the buyer's bytes are unchanged. It is decode progress,
+not content: it re-bases an armed decode-idle deadline as a content frame does,
+but it never arms decode-idle, never disarms the first-token phase and never
+counts toward billing estimates or TTFT. Bound: the provider and the
+coordinator each send it at most once per second, and the stream ceiling still
+applies from the first byte of the request.
+
+Shared-prefill decode-idle (v0.9.72). A row on a shared provider can wait while
+another row prefills the whole served context. The decode-idle deadline MUST
+therefore be the larger of `streaming_idle_ms` and `ceil(served_context_tokens /
+first_token_prefill_tokens_per_second)` seconds, the second term capped by
+`timeouts.decode_idle_shared_prefill_max_ms` (default 60000). When the served
+context is unknown the cap applies. Setting the cap to 0, or
+`first_token_prefill_tokens_per_second` to 0, leaves `streaming_idle_ms`; the
+cap does not change first-token scaling. With the defaults the allowance is
+60 s for any served context of 6,000 tokens or more.
 
 First-token deadline. The first-token phase (armed when streaming headers
 commit) MUST be `first_token + ceil(estimated_prompt_tokens /

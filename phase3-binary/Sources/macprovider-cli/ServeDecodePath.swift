@@ -165,15 +165,15 @@ extension ModelRuntime {
         let processor = await container.processor
         let tokenizer = await container.tokenizer
         let configuration = await container.configuration
-        let supportsBonsaiThinking = await container.perform { context in
-            context.model is PrismHadamardQwen35
+        let isPrismBonsai = await container.perform { context in
+            ModelRuntime.isPrismBonsai(context.model)
         }
         return ContinuousBatchTextPreparationLane(
             processor: processor,
             tokenizer: tokenizer,
             configuration: configuration,
             hasRecurrentLayers: resolvedCacheKinds.contains(.recurrentMamba),
-            supportsBonsaiThinking: supportsBonsaiThinking
+            isPrismBonsai: isPrismBonsai
         )
     }
 
@@ -536,6 +536,7 @@ extension ModelRuntime {
         promptSnapshotTokenCount: Int? = nil,
         retainedRecurrentCheckpoints: [RecurrentStateCheckpoint] = [],
         promptSnapshotCache: ContinuousBatchSerialConversationCache? = nil,
+        promptSnapshotHandoff: ContinuousBatchPromptSnapshotHandoff? = nil,
         publishesPromptSnapshotOnly: Bool = false,
         promptResumeBoundaries: [Int] = [],
         serialToolStopObserver: ContinuousBatchCanonicalStopObserver? = nil,
@@ -568,6 +569,7 @@ extension ModelRuntime {
                 promptSnapshotTokenCount: promptSnapshotTokenCount,
                 retainedRecurrentCheckpoints: retainedRecurrentCheckpoints,
                 promptSnapshotCache: promptSnapshotCache,
+                promptSnapshotHandoff: promptSnapshotHandoff,
                 publishesPromptSnapshotOnly: publishesPromptSnapshotOnly,
                 promptResumeBoundaries: promptResumeBoundaries,
                 grammarConstraint: grammarConstraint,

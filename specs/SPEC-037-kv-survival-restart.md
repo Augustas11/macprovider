@@ -1,6 +1,6 @@
 # SPEC-037 — KV survival across provider restarts (encrypted provider-local disk tier)
 
-Version: v0.2.3
+Version: v0.2.4
 Status: draft (v0.2 fleet/recurrent implementation and acceptance in progress)
 Owner: provider runtime / prefix-cache persistence
 Decision source: `docs/research/RESEARCH_233_KV_SURVIVAL_RESTART_MEMO.md` (landed decision memo, commit `d6881b14`)
@@ -40,7 +40,7 @@ below only for the allowlisted complete prompt-snapshot representation:
   coverage, metadata, tensor dimensions/lengths and total decoded byte bound
   before allocating MLX arrays. Unsupported, corrupt or incompatible state
   misses safely. Existing per-entry, aggregate write-live and single-promotion
-  staging bounds and the 1 GiB hard ceilings remain; v3 charges twice decoded
+  staging bounds remain, with the measured defaults in FR-KVP9; v3 charges twice decoded
   length for promotion (archive parsing or tensor materialization); write admission accounts
   for the complete codec/crypto footprint before copying. Available system
   memory additionally reserves full CB capacity, native verify windows and the
@@ -254,7 +254,8 @@ persistence-format test fixtures (§7).
   the snapshot records (fixture: AC-9).
 - **Write-side budget (RAM-DoS bound).** Before copying, the writer MUST
   estimate snapshot bytes from validated cache geometry; if the estimate
-  exceeds `write_staging_max_bytes` (default per the FR-KVP11 table; hard max 1 GiB), the
+  exceeds the effective write ceiling (measured default per FR-KVP9, or an explicit
+  `write_staging_max_bytes` ceiling), the
   per-entry byte cap, **or the FR-KVP9 promotion staging ceiling** (an
   entry that could never be promoted MUST NOT be written — detail
   `exceeds_promotion_ceiling`), the write is skipped
@@ -653,26 +654,29 @@ block, fail, or corrupt the request being served.
   key with a valid cold entry, during request admission for that key, under
   the same per-key serialization as `begin()` (FR-CI4a). Eager whole-store
   restoration at startup is forbidden.
-- Restore staging MUST stay within a **hard ceiling of 1 GiB** above the
-  selected hot-cache state (v0.1.3 normative; configuration may lower it,
-  never raise it above the hard ceiling). The **default is 1 GiB on hosts
-  with at least 64 GiB of physical memory and 256 MiB otherwise** (v0.2.1);
-  an explicit setting always wins.
-  Reads are chunked per §5a, verified-then-materialized
-  per layer, and MUST NOT hold a second full copy of the restored tensors
-  once promoted. The `disk_miss_budget` trigger is the entry's
-  `decoded_length` (§5a — the same geometry formula as the FR-KVP3
-  write-side estimate, so nothing writable is unpromotable) exceeding the
-  configured ceiling. **(v0.2.1)** A `kvsurv-codec-v2` restore holds the
-  decoded bytes and the materialized tensors at once, so its effective
-  staging is `2 × decoded_length`: write admission (FR-KVP3) and the
-  pre-decrypt read check both compare that product with the ceiling, and
-  the single promotion slot spans decode and MLX materialization. Q6 on the live Qwen tuple is unquantized
-  `KVCacheSimple` (~98 KiB/token); Q7 q4 is not the active representation,
-  so v0.1.3 raises this hard ceiling to 1 GiB to make the 8k FP16 class
-  configurable instead of adding a `QuantizedKVCache` codec. A further
-  raise, or a quantized-KV allowlist, remains a spec-revision decision,
-  not a configuration tweak.
+- With no explicit override, each disk direction uses measured staging
+  admission rather than a fixed 1 GiB ceiling. Reserve conservative geometry for
+  full configured serving-row capacity (including native verify/head state),
+  5% serving slack, 10% of physical RAM as the system
+  floor, and the full hot allowance (`min(8 GiB, physical RAM / 32)`). Split the
+  remaining measured available memory equally between the single promotion and
+  the aggregate writer. Each share MUST additionally be capped at physical RAM
+  / 32 and 4 GiB on hosts with at least 64 GiB RAM, or 256 MiB below that tier.
+  Unknown serving geometry, unavailable memory measurements, arithmetic overflow,
+  or exhausted reserve MUST decline staging. Sample before capture, aggregate
+  write reservation, persistence, and decrypt; never infer available RAM from
+  physical capacity alone. Explicit `staging_max_bytes` and
+  `write_staging_max_bytes` values retain their ≤1 GiB configuration bound and
+  may only LOWER the measured share. Each direction's absent override is
+  resolved independently.
+  Reads are chunked per §5a and verified before materialization. Codecs v2/v3
+  hold decoded bytes and a parsed archive or materialized tensors simultaneously,
+  so their admission is `2 × decoded_length`; codec v1 is charged once. Both
+  pre-copy admission and pre-decrypt read MUST enforce the same effective
+  promotion ceiling. Runtime decoding additionally checks actual peak staging.
+  The single promotion slot spans decode and MLX materialization. Write-live
+  admission includes the immutable snapshot and the streaming seal footprint;
+  all pending writes share one atomic reservation through persist completion.
 - Promoted entries count against the existing hot-tier budgets (2M
   tokens, entry cap); promotion MUST NOT raise any RAM ceiling. At most one
   promotion runs at a time namespace-wide (back-pressure; concurrent
@@ -746,8 +750,8 @@ YAML file → environment → CLI overrides. Exact surface (AC-9 fixtures):
 | `max_entries` | `MACPROVIDER_KV_DISK_CACHE_MAX_ENTRIES` | `--kv-disk-cache-max-entries` | 64 | > 0; invalid ⇒ tier disabled |
 | `max_entry_bytes` | `MACPROVIDER_KV_DISK_CACHE_MAX_ENTRY_BYTES` | `--kv-disk-cache-max-entry-bytes` | 2 GiB | > 0; invalid ⇒ tier disabled |
 | `retention_minutes` | `MACPROVIDER_KV_DISK_CACHE_RETENTION_MINUTES` | `--kv-disk-cache-retention-minutes` | 4320 | > 0; **cleanup deadline only — does NOT extend reuse eligibility, which is fixed at the hot-tier TTL (default 259200 s) and is not tunable here**; invalid ⇒ tier disabled |
-| `staging_max_bytes` | `MACPROVIDER_KV_DISK_CACHE_STAGING_MAX_BYTES` | `--kv-disk-cache-staging-max-bytes` | 1 GiB on hosts with ≥ 64 GiB memory, else 256 MiB | read/promotion side; ≤ 1 GiB hard (FR-KVP9); invalid ⇒ tier disabled |
-| `write_staging_max_bytes` | `MACPROVIDER_KV_DISK_CACHE_WRITE_STAGING_MAX_BYTES` | `--kv-disk-cache-write-staging-max-bytes` | 1 GiB on hosts with ≥ 64 GiB memory, else 256 MiB | write/snapshot side; ≤ 1 GiB hard (FR-KVP3); invalid ⇒ tier disabled |
+| `staging_max_bytes` | `MACPROVIDER_KV_DISK_CACHE_STAGING_MAX_BYTES` | `--kv-disk-cache-staging-max-bytes` | Measured reserve share (FR-KVP9) | read/promotion side; explicit >0 and ≤1 GiB lowers the measured share; invalid ⇒ tier disabled |
+| `write_staging_max_bytes` | `MACPROVIDER_KV_DISK_CACHE_WRITE_STAGING_MAX_BYTES` | `--kv-disk-cache-write-staging-max-bytes` | Measured reserve share (FR-KVP9) | aggregate write/snapshot side; explicit >0 and ≤1 GiB lowers the measured share; invalid ⇒ tier disabled |
 | `min_free_bytes` | `MACPROVIDER_KV_DISK_CACHE_MIN_FREE_BYTES` | `--kv-disk-cache-min-free-bytes` | 8 GiB | ≥ 1 GiB; invalid ⇒ tier disabled |
 | `promotion_max_seconds` | `MACPROVIDER_KV_DISK_CACHE_PROMOTION_MAX_S` | `--kv-disk-cache-promotion-max-s` | 5 | > 0; invalid ⇒ tier disabled |
 | `shutdown_drain_seconds` | `MACPROVIDER_KV_DISK_CACHE_SHUTDOWN_DRAIN_S` | `--kv-disk-cache-shutdown-drain-s` | 5 | ≥ 0; invalid ⇒ tier disabled |
@@ -1358,6 +1362,9 @@ the cache object's offset is preserved, not substituted for that boundary.
 The existing AAD projection (manifest minus blob SHA-256, then big-endian chunk
 ordinal) authenticates all added metadata. Original eligibility timestamps
 survive promotion and serial fallback. Write admission additionally caps decoded
-plaintext snapshots at 1 GiB per fixed 60-second process-local window, charged
-before copying and not refunded after displacement/failure. Existing aggregate
+plaintext snapshots per fixed 60-second process-local window: 1 GiB for an
+explicit write ceiling, or the greater of 1 GiB and the current measured write
+share for an adaptive default. The whole decoded entry is charged before copying
+and not refunded after displacement/failure. This allows one long entry without
+removing the churn bound. Existing aggregate
 staging, quota and promotion ceilings remain independently enforced.
