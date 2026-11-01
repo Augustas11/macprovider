@@ -396,17 +396,48 @@ def extract(j, directory):
     baked = json.loads((directory / 'catalog-release/release.json').read_text())
     require(baked['release_id'] == j['target']['baked_catalog_release_id'], 'baked catalog identity mismatch')
     if baked['release_id'] != j['target']['catalog_release_id']:
-        compatible_pair(j, baked['release_id'])
+        compatible_pair(j, baked['release_id'], baked)
 
 
-def compatible_pair(j, baked_release):
+def ledger_predecessor(j, baked_release, baked=None):
+    """The baked catalog is an earlier, untombstoned release in the target's
+    committed release ledger (staged beside the journal at arm), with the same
+    policy version. The ledger's target row must carry the signed target
+    admission feed digest; extracted baked bytes must match their row."""
+    path = Path(j['studio']['journal_path']).parent / 'target-release-ledger.json'
+    if not os.path.lexists(path):
+        return False
+    ledger = json.loads(read_private(path))
+    target_id = j['target']['catalog_release_id']
+    releases, tombstones = ledger.get('releases'), ledger.get('tombstones')
+    if not (ledger.get('schema_version') == 'macprovider.autotune-release-ledger.v4'
+            and isinstance(releases, dict) and isinstance(tombstones, dict)
+            and baked_release == j['target']['baked_catalog_release_id'] and baked_release != target_id
+            and baked_release not in tombstones and target_id not in tombstones):
+        return False
+    old, new = releases.get(baked_release), releases.get(target_id)
+    stamp = re.compile(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z')
+    if not (isinstance(old, dict) and isinstance(new, dict)
+            and new.get('native_mtp_admission_sha256') == j['target']['feed_sha256']['/v1/native-mtp-admission']
+            and old.get('policy_version') == new.get('policy_version')
+            and all(isinstance(row.get('generated_at'), str) and stamp.fullmatch(row['generated_at'])
+                    for row in (old, new))
+            and old['generated_at'] < new['generated_at']):
+        return False
+    return baked is None or (baked.get('release_id') == baked_release
+                             and baked.get('generated_at') == old['generated_at']
+                             and baked.get('policy_version') == old['policy_version'])
+
+
+def compatible_pair(j, baked_release, baked=None):
     decision = receipt(j)
     require(decision.get('current_release_id') == j['target']['catalog_release_id']
             and decision.get('window_source') == 'retained_disk_under_lease'
             and decision.get('previous_window_sha256') == j['target']['previous_window_sha256']
             and (baked_release == j['target']['catalog_release_id'] or
                  (baked_release == j['prior']['catalog_release_id']
-                  and baked_release in decision.get('compatible_previous_release_ids', [])))
+                  and baked_release in decision.get('compatible_previous_release_ids', []))
+                 or ledger_predecessor(j, baked_release, baked))
             and decision.get('target_activation_verified') is True,
             'reviewed compatible-previous target pair not verified')
     for endpoint, digest in j['target']['feed_sha256'].items():

@@ -208,6 +208,42 @@ class Tests(unittest.TestCase):
         with patch.dict(self.e,receipt=lambda j:decision,policy=Mock()):
             with self.assertRaises(self.e['Refused']): self.e['compatible_pair'](self.j,self.j['target']['baked_catalog_release_id'])
 
+    def test_compatible_baked_ledger_predecessor(self):
+        j=self.j;j['target']['baked_catalog_release_id']='release-baked'
+        decision=dict(current_release_id=j['target']['catalog_release_id'],window_source='retained_disk_under_lease',previous_window_sha256='9'*64,compatible_previous_release_ids=[j['prior']['catalog_release_id']],target_feed_sha256=j['target']['feed_sha256'],target_activation_verified=True)
+        baked=dict(release_id='release-baked',generated_at='2026-11-01T05:00:00Z',policy_version='p1')
+        def ledger():
+            return dict(schema_version='macprovider.autotune-release-ledger.v4',tombstones={},releases={
+                'release-baked':dict(generated_at='2026-11-01T05:00:00Z',policy_version='p1',native_mtp_admission_sha256='0'*64),
+                j['target']['catalog_release_id']:dict(generated_at='2026-11-01T11:00:00Z',policy_version='p1',
+                    native_mtp_admission_sha256=j['target']['feed_sha256']['/v1/native-mtp-admission'])})
+        with tempfile.TemporaryDirectory() as temp, patch.dict(self.e,receipt=lambda j:decision,policy=Mock()):
+            directory=Path(temp);j['studio']['journal_path']=str(directory/'journal.json')
+            path=directory/'target-release-ledger.json'
+            with self.assertRaises(self.e['Refused']): self.e['compatible_pair'](j,'release-baked')
+            def put(value):
+                path.write_text(json.dumps(value));os.chmod(path,0o600)
+            put(ledger())
+            self.e['compatible_pair'](j,'release-baked')
+            self.e['compatible_pair'](j,'release-baked',baked)
+            target=j['target']['catalog_release_id']
+            bad=[]
+            l=ledger();l['tombstones']['release-baked']={};bad.append((l,None))
+            l=ledger();l['releases'][target]['native_mtp_admission_sha256']='1'*64;bad.append((l,None))
+            l=ledger();l['releases']['release-baked']['generated_at']='2026-11-01T12:00:00Z';bad.append((l,None))
+            l=ledger();l['releases']['release-baked']['policy_version']='p2';bad.append((l,None))
+            l=ledger();l['schema_version']='macprovider.autotune-release-ledger.v3';bad.append((l,None))
+            l=ledger();del l['releases'][target];bad.append((l,None))
+            bad.append((ledger(),dict(baked,generated_at='2026-11-01T06:00:00Z')))
+            for value,doc in bad:
+                with self.subTest(value=value,doc=doc):
+                    put(value)
+                    with self.assertRaises(self.e['Refused']): self.e['compatible_pair'](j,'release-baked',doc)
+            put(ledger())
+            with self.assertRaises(self.e['Refused']): self.e['compatible_pair'](j,'release-other')
+            os.chmod(path,0o644)
+            with self.assertRaises(self.e['Refused']): self.e['compatible_pair'](j,'release-baked')
+
     def test_terminal_status_after_receipt_key_retirement(self):
         with tempfile.TemporaryDirectory() as temp:
             directory=Path(temp);os.chmod(directory,0o700)

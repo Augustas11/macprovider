@@ -195,6 +195,10 @@ PAIR_PREFLIGHT_PY
     studio_ssh "umask 077; cat > '$pair_actor'" < "$OPS_DIR/lib/canary-swap-remote.sh" || refuse "cannot stage fixed actor"
     pair_remote_archive="$(pair_get 'd["target"]["tarball_path"]')"
     studio_ssh "umask 077; cat > '$pair_remote_archive'" < "$pair_archive" || refuse "cannot stage released archive"
+    # The remote actor may accept a baked catalog only as a predecessor in the
+    # target's committed release ledger (canary-swap-remote.sh ledger_predecessor).
+    studio_ssh "umask 077; test ! -e '$pair_stage/target-release-ledger.json' && cat > '$pair_stage/target-release-ledger.json'" \
+      < "$REPO_ROOT/phase3-binary/catalog/autotune/release-ledger.json" || refuse "cannot stage target release ledger"
     pair_key_local="$(pair_get 'd["receipt_reader"]["local_private_key_path"]')"
     pair_key_remote="$(pair_get 'd["receipt_reader"]["private_key_path"]')"
     pair_hosts_local="$(pair_get 'd["receipt_reader"]["local_known_hosts_path"]')"

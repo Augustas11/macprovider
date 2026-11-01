@@ -75,3 +75,23 @@ Notes on the table:
 - `msb-rows{1,2,4}.json`, `leftovers.json`: local paths are replaced by `<models>` and `<lab>`.
 - The acceptance result (`589c433e…`, 5.1 MB) and the R015 records (`bench.jsonl`, `a1664b5f…`,
   7.9 MB) are kept with the operator's qualification records.
+
+## Self-test challenge and the CLI 1.8.280 rebind
+
+The provider's on-device self-check needs a bank entry for the exact tuple. The
+1.8.277 bank had none for `d47ec628…`, so a 1.8.280 provider refused the tuple
+with `challengeBankMismatch`.
+
+- Recorded 2026-11-01 11:24-11:30Z with `native-mtp-journey-e2e --selftest-only`, one model
+  load, no join and no serve port. The live provider was paused, drained and booted out for
+  the run, then restored (buyer_serving again at 11:43Z).
+- Harness: lab-harness build of the 1.8.280 source `11ea79dc3…` (`933d1178…`, embedded
+  decode-path digest `65094a61…`) with the signed 1.8.280 `mlx.metallib` (`3d9b4a74…`).
+- Three candidate texts, all with every provider-local check passing: counting 1.210x
+  (31 accepted / 0 rejected), Greek letters 1.020x, repeated line 1.209x. The bank takes the
+  counting text at the 1.20 floor, the same text the GLM-5.3-Flash entry uses, as
+  `native-mtp-selftest-glm53-flash-abliterated-0001`. The record is `bank-journey-v280.json`.
+- Release `published-2026-11-01-glm53-flash-abliterated-cb-mtp-v280` rebinds all three
+  admission entries to the signed 1.8.280 candidate by identity only (binary `66a4876e…`,
+  CDHash `7bbf5442…`, decode-path digest `65094a61…`, mlx-swift-lm `f75f92b0…`). The release
+  `mlx.metallib` is unchanged, so no measurement is repeated.

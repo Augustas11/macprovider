@@ -1,6 +1,6 @@
 {
-  "autotune_candidates_sha256": "61356e0ee8877e88fa9a83ce32a4d3d79817e44cc6fd8ee3aa9e83b6b3dca106",
-  "generated_at": "2026-11-01T05:00:00Z",
+  "autotune_candidates_sha256": "67f49815e178536e3f067c7f7f6b74bd7ca7def09f4d855f0fee255023b012c0",
+  "generated_at": "2026-11-01T11:00:00Z",
   "models": [
     {
       "catalog_key": "zai-org/glm-5.3-flash-abliterated",
@@ -158,6 +158,6 @@
     }
   ],
   "policy_version": "autotune-policy-v1",
-  "release_id": "published-2026-11-01-glm53-flash-abliterated-cb-mtp-v277",
+  "release_id": "published-2026-11-01-glm53-flash-abliterated-cb-mtp-v280",
   "schema_version": "macprovider.tier2-identity-binding.v1"
 }
