@@ -114,6 +114,28 @@ class SignedPairInterfaceTests(unittest.TestCase):
                                 capture_output=True, text=True)
         self.assertNotEqual(result.returncode, 0)
 
+    def test_acknowledged_transaction_does_not_shadow_a_new_plan(self):
+        # 2026-11-01: a reconciled abl-mtp-v280-pair left terminal custody in the
+        # release scope, so the retry plan (new transaction_id) was forced back
+        # into reconcile. Custody is per transaction.
+        common = ROOT / 'scripts/ops/lib/common.sh'
+        script = ('set -euo pipefail\nOPS_NAME=t\n' + function(common, 'die') + '\n' + function(common, 'json_field') +
+                  '\n' + function(CATALOG, 'signed_pair_state_dir') + '\nOPS_STATE_DIR=/s OPS_SCOPE=catalog-r\nsigned_pair_state_dir\n')
+        def run(plan):
+            env = dict(os.environ)
+            env.pop('CATALOG_SIGNED_PAIR_PLAN', None)
+            if plan:
+                env['CATALOG_SIGNED_PAIR_PLAN'] = str(plan)
+            result = subprocess.run(['bash', '-c', script], env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return result.stdout.strip()
+        first = run(self.plan_path)
+        self.plan['transaction_id'] = 'retry-2'
+        second = run(self.write('plan2.json', self.plan))
+        self.assertEqual(second, '/s/catalog-r/signed-native-pair/retry-2')
+        self.assertNotEqual(first, second)
+        self.assertEqual(run(None), '/s/catalog-r/signed-native-pair')
+
     def test_deadline_outside_studio_arm_window_refused_before_custody(self):
         import time
         def check(deadline):

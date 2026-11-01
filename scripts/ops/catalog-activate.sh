@@ -177,7 +177,19 @@ native_mtp_release_preflight() {
   step native_mtp_release_match done "$([ "$native_bound" = true ] && echo 'every signed admission entry matches the verified release' || echo 'release is not native-bound')"
 }
 
-signed_pair_state_dir() { printf '%s/%s/signed-native-pair' "$OPS_STATE_DIR" "$OPS_SCOPE"; }
+# Custody is per transaction: an acknowledged terminal transaction never blocks
+# a later plan (new transaction_id) for the same catalog release.
+signed_pair_state_dir() {
+  local tx=""
+  [ -n "${CATALOG_SIGNED_PAIR_PLAN:-}" ] && tx="$(json_field "$CATALOG_SIGNED_PAIR_PLAN" 'd["transaction_id"]' 2>/dev/null || true)"
+  # Without a readable plan, fall back to the scope root so legacy custody
+  # there still holds the lock closed.
+  if [[ "$tx" =~ ^[A-Za-z0-9_-]{1,80}$ ]]; then
+    printf '%s/%s/signed-native-pair/%s' "$OPS_STATE_DIR" "$OPS_SCOPE" "$tx"
+  else
+    printf '%s/%s/signed-native-pair' "$OPS_STATE_DIR" "$OPS_SCOPE"
+  fi
+}
 
 # R is local to gather(); the EXIT-trap lock release reaches this with only
 # the global OPS_SCOPE (catalog-<release id>) set.
