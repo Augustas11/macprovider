@@ -15,6 +15,9 @@
 //   --gpu-profile    GPU busy vs wall time per step (pipelined decode; --sync for
 //                    synchronous steps); with MLX_MAX_OPS_PER_BUFFER=0,
 //                    GPU time, bound bytes and bandwidth per kernel and family
+//   --prefill-profile  GPU busy vs wall over the prefill; with
+//                    MLX_MAX_OPS_PER_BUFFER=0, GPU time per kernel and family
+//                    (`--prefill-chunk N`, default 2048; the provider uses 512)
 //   --census         compute dispatches per decode step by kernel name
 //   --module-census  dispatches per module (MoE, dense FFN, KDA, DSA, head)
 //   --*-exact        fused vs op path exactness on the loaded weights
@@ -62,7 +65,7 @@ let profile = args.contains("--profile")
 let syncEach = args.contains("--sync")
 
 Memory.cacheLimit = 4096 << 20
-if ["--census", "--module-census", "--gpu-profile", "--batch-profile", "--mtp-census"].contains(where: CommandLine.arguments.contains) { DispatchCensus.install() }
+if ["--census", "--module-census", "--gpu-profile", "--batch-profile", "--mtp-census", "--prefill-profile"].contains(where: CommandLine.arguments.contains) { DispatchCensus.install() }
 
 if args.contains("--qmv-batch-sweep") {
     // MLX qmv at M = 1 and M = V vs glm5NextQMVBatch(V), 20 independent calls per eval.
@@ -501,17 +504,34 @@ let oracle: Oracle? = try optString("--oracle").map {
     try JSONDecoder().decode(Oracle.self, from: Data(contentsOf: URL(fileURLWithPath: $0)))
 }
 let promptTokens: MLXArray = oracle.map { MLXArray($0.prompt.map(Int32.init)).reshaped(1, -1) } ?? prompt
+// --prefill-chunk 512 is the provider's prefill_step_size; 2048 the earlier
+// evidence. --prefill-profile: GPU time per kernel over the whole prefill
+// (with MLX_MAX_OPS_PER_BUFFER=0), then exit.
+let prefillChunk = opt("--prefill-chunk", 2048)
+let prefillProfile = args.contains("--prefill-profile")
+if prefillProfile {
+    DispatchCensus.reset()
+    DispatchCensus.enabled = true
+}
 let pf0 = Date()
 var start = 0
 var last = MLXArray(0)
 while start < promptTokens.dim(1) {
-    let end = min(start + 2048, promptTokens.dim(1))
+    let end = min(start + prefillChunk, promptTokens.dim(1))
     last = model(promptTokens[0..., start ..< end], cache: cache)[0, -1, 0...].asType(.float32)
     eval(last)
     start = end
 }
 let pfs = Date().timeIntervalSince(pf0)
-print("prefill_tps=\(String(format: "%.1f", Double(promptTokens.dim(1)) / pfs))")
+print("prefill_tps=\(String(format: "%.1f", Double(promptTokens.dim(1)) / pfs)) prefill_s=\(String(format: "%.2f", pfs)) prompt=\(promptTokens.dim(1)) chunk=\(prefillChunk)")
+if prefillProfile {
+    DispatchCensus.enabled = false
+    DispatchCensus.group.wait()
+    let busy = DispatchCensus.busyPerStep(steps: 1)
+    print(String(format: "prefill-profile wall_s=%.2f gpu_busy_s=%.2f cmdbufs=%d dispatches=%d", pfs, busy, DispatchCensus.intervals.count, DispatchCensus.counts.values.reduce(0, +)))
+    if ProcessInfo.processInfo.environment["MLX_MAX_OPS_PER_BUFFER"] == "0" { DispatchCensus.gpuReport(steps: 1) }
+    exit(0)
+}
 
 var token = argMax(last, axis: -1)
 eval(token)
@@ -1040,7 +1060,7 @@ for step in 0 ..< steps {
 eval(pending)
 let ds = Date().timeIntervalSince(d0)
 print("decode_tps=\(String(format: "%.2f", Double(steps) / ds)) step_ms=\(stepTimes.prefix(8).map { String(format: "%.0f", $0 * 1000) }) peak_gb=\(Double(Memory.peakMemory) / 1e9)")
-print("tokens=\(tokens.prefix(32))")
+print("tokens=\(args.contains("--all-tokens") ? Array(tokens) : Array(tokens.prefix(32)))")
 if !topLogits.isEmpty { print("top_logits=\(topLogits)") }
 _ = ballast.count
 if let wiredTicket { _ = await wiredTicket.end() }
