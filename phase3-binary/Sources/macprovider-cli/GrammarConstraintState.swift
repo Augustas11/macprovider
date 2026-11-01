@@ -20,7 +20,8 @@ final class GrammarConstraintState: @unchecked Sendable, Equatable {
     /// SPEC-018-R002 declared-function guard for an auto tool turn: sampling
     /// is untouched until the `<tool_call>` control token opens a call, then
     /// the grammar admits only a declared function name. Once the name is
-    /// closed the guard waits for the next call again.
+    /// closed the guard waits for the next call again. An open reasoning block
+    /// is passed through; the guard arms when reasoning closes.
     private let callOpenTokenID: Int?
     private var awaitingCall: Bool
     private var reasoningTail: [UInt8] = []
@@ -155,7 +156,9 @@ final class GrammarConstraintState: @unchecked Sendable, Equatable {
     private init(compiled: Compiled, reasoningOpen: Bool, closeTokenID: Int?, callOpenTokenID: Int? = nil) throws {
         self.compiled = compiled
         self.closeTokenID = closeTokenID
-        reasoningProductivePrefixes = reasoningOpen && closeTokenID == nil ? try compiled.reasoningProductivePrefixes() : []
+        // The guard never constrains reasoning, so it needs no close-reachability set.
+        reasoningProductivePrefixes = reasoningOpen && closeTokenID == nil && callOpenTokenID == nil
+            ? try compiled.reasoningProductivePrefixes() : []
         state = compiled.automaton.initialState
         reasoning = reasoningOpen
         self.callOpenTokenID = callOpenTokenID
@@ -175,10 +178,11 @@ final class GrammarConstraintState: @unchecked Sendable, Equatable {
 
     /// Test seam for the guard with a synthetic vocabulary.
     static func declaredFunctionGuard(names: [String], tokens: [Int: [UInt8]], eosTokenIDs: Set<Int>,
-                                      callOpenTokenID: Int) throws -> GrammarConstraintState {
+                                      callOpenTokenID: Int, reasoningOpen: Bool = false,
+                                      closeTokenID: Int? = nil) throws -> GrammarConstraintState {
         try GrammarConstraintState(
             compiled: Compiled(grammar: declaredFunctionHeader(names: names), tokens: tokens, eos: eosTokenIDs),
-            reasoningOpen: false, closeTokenID: nil, callOpenTokenID: callOpenTokenID)
+            reasoningOpen: reasoningOpen, closeTokenID: closeTokenID, callOpenTokenID: callOpenTokenID)
     }
 
     static func isRequired(_ request: ChatCompletionRequest) -> Bool {
@@ -188,8 +192,14 @@ final class GrammarConstraintState: @unchecked Sendable, Equatable {
         return true
     }
 
-    /// `guardsDeclaredFunctions` comes from the loaded model type (the Prism
-    /// Bonsai-2 function-XML family), never from a buyer-supplied model name.
+    /// `guardsDeclaredFunctions` comes from the loaded model type
+    /// (`ModelRuntime.isPrismBonsai`), never from a buyer-supplied model name.
+    /// Declared names reach the header grammar only through
+    /// `ToolSelectionPolicy.schemas`, which admits `[A-Za-z0-9_-]{1,64}` and
+    /// throws otherwise; an unsafe name therefore leaves the request unguarded
+    /// and the parser rejects any call to it. An auto turn never carries a call
+    /// prefill (`ModelRuntime.toolCallPrefill` is for required/named only), so
+    /// the guard always starts outside a call.
     static func prepare(request: ChatCompletionRequest, tokenizer: any MLXLMCommon.Tokenizer,
                         configuration: ModelConfiguration, eosTokenIDs: Set<Int>,
                         guardsDeclaredFunctions: Bool = false) throws -> GrammarConstraintState? {
@@ -202,7 +212,7 @@ final class GrammarConstraintState: @unchecked Sendable, Equatable {
             }
         } catch let error as APIError { throw error }
         catch { throw Compiled.error("Unable to prepare the local tokenizer for constrained output") }
-        guard guardsDeclaredFunctions, !request.outputTraits.reasoningOpen,
+        guard guardsDeclaredFunctions,
               (try? ToolSelectionPolicy.selection(request.promptSource.toolChoice)) == .auto,
               ModelRuntime.hasEnabledTools(request.promptSource.tools),
               let names = (try? ToolSelectionPolicy.schemas(request)).map({ Array($0.keys) }), !names.isEmpty,
@@ -368,6 +378,15 @@ final class GrammarConstraintState: @unchecked Sendable, Equatable {
         defer { lock.unlock() }
         guard failure == nil else { return }
         if awaitingCall {
+            if reasoning {
+                // A `<tool_call>` inside reasoning is not a call; wait for the close.
+                if let closeTokenID { reasoning = token != closeTokenID; return }
+                guard let bytes = compiled.tokens[token] else { return }
+                let next = Self.reasoningTransition(prefix: reasoningTail.count, bytes: bytes)
+                if next.suffix != nil { reasoning = false; reasoningTail = [] }
+                else { reasoningTail = Array(Self.close.prefix(next.prefix)) }
+                return
+            }
             if token == callOpenTokenID { awaitingCall = false; state = compiled.automaton.initialState }
             return
         }
