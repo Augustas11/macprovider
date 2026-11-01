@@ -17,10 +17,11 @@ let package = Package(
         )
     ],
     dependencies: [
-        // Tag 3.32.3-macprovider.13 (5ee4333a) routes GPT-OSS attention with
-        // its sinks through a conforming batched cache
-        // (KVCacheSinkAttentionProtocol), one commit on 3.32.3-macprovider.12.
-        // Tag 3.32.3-macprovider.12 adds LFM-only reference-prefill arithmetic
+        // Tag 3.32.3-macprovider.19 (#2200) is one commit on .18 that routes GPT-OSS
+        // attention with its sinks through a conforming batched cache
+        // (KVCacheSinkAttentionProtocol). Tag 3.32.3-macprovider.18 (#2201) adds the Qwen2-VL token-only text
+        // forward and keeps Nemotron-H Mamba activations in the model dtype, on
+        // 3.32.3-macprovider.12. Tag 3.32.3-macprovider.12 adds LFM-only reference-prefill arithmetic
         // on 3.32.3-macprovider.10.15.1 (reference expert order). Other models
         // retain the default route; single-token decode is unchanged. The core
         // Python binding preserves its existing arity and passes the option false.
@@ -50,7 +51,7 @@ let package = Package(
         // compatible per-column attention while retaining row-owned caches.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "5ee4333a8c052d9d0afc58db66b8976ea5fa398e"
+            revision: "e06521b9c17f5836ddf43410ec8ef4c2346c56a4"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",

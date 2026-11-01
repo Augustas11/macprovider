@@ -177,10 +177,24 @@ native_mtp_release_preflight() {
   step native_mtp_release_match done "$([ "$native_bound" = true ] && echo 'every signed admission entry matches the verified release' || echo 'release is not native-bound')"
 }
 
-signed_pair_state_dir() { printf '%s/%s/signed-native-pair' "$OPS_STATE_DIR" "$OPS_SCOPE"; }
+# Custody is per transaction: an acknowledged terminal transaction never blocks
+# a later plan (new transaction_id) for the same catalog release.
+signed_pair_state_dir() {
+  local tx=""
+  [ -n "${CATALOG_SIGNED_PAIR_PLAN:-}" ] && tx="$(json_field "$CATALOG_SIGNED_PAIR_PLAN" 'd["transaction_id"]' 2>/dev/null || true)"
+  # Without a readable plan, fall back to the scope root so legacy custody
+  # there still holds the lock closed.
+  if [[ "$tx" =~ ^[A-Za-z0-9_-]{1,80}$ ]]; then
+    printf '%s/%s/signed-native-pair/%s' "$OPS_STATE_DIR" "$OPS_SCOPE" "$tx"
+  else
+    printf '%s/%s/signed-native-pair' "$OPS_STATE_DIR" "$OPS_SCOPE"
+  fi
+}
 
+# R is local to gather(); the EXIT-trap lock release reaches this with only
+# the global OPS_SCOPE (catalog-<release id>) set.
 signed_pair_plan_sha() {
-  python3 - "${CATALOG_SIGNED_PAIR_PLAN:-}" "$R" <<'PAIR_PLAN'
+  python3 - "${CATALOG_SIGNED_PAIR_PLAN:-}" "${OPS_SCOPE#catalog-}" <<'PAIR_PLAN'
 import hashlib,json,os,re,stat,sys
 p,rid=sys.argv[1:]
 f=os.open(p,os.O_RDONLY|os.O_NOFOLLOW)
@@ -200,6 +214,19 @@ if d.get('schema_version')!='macprovider.signed_native_pair.v1' or not re.fullma
 if d.get('target',{}).get('catalog_release_id')!=rid:raise SystemExit(1)
 print(hashlib.sha256(raw).hexdigest())
 PAIR_PLAN
+}
+
+# The Studio actor arms only when now < deadline_epoch <= now + 3600, and its
+# watchdog restores the incumbent at the deadline. Refuse a plan that cannot
+# arm, or cannot finish a drain, model load and two stability windows, before
+# any Pearl guardian, reader key or Studio staging is created.
+signed_pair_deadline_ok() {
+  python3 - "${CATALOG_SIGNED_PAIR_PLAN:-}" <<'PAIR_DEADLINE'
+import json,sys,time
+d=json.load(open(sys.argv[1]))['deadline_epoch'];now=time.time()
+if type(d) is not int or not now+1800<=d<=now+3600:
+ print('signed pair deadline_epoch %s is outside [now+1800, now+3600] (now %d); write a fresh plan with a new transaction_id'%(d,int(now)));raise SystemExit(1)
+PAIR_DEADLINE
 }
 
 # Read-only candidate-order proof. Call again under transaction custody before
@@ -247,6 +274,8 @@ def load(name):
   st=os.fstat(stream.fileno())
   if not stat.S_ISREG(st.st_mode) or st.st_uid!=os.getuid() or st.st_mode & 0o077:raise SystemExit(1)
   return json.load(stream)
+# No ack yet is the normal pending state, not an error to trace.
+if not (p/'terminal-ack.json').exists():raise SystemExit(1)
 s=load('controller-state.json');a=load('terminal-ack.json')
 if set(a)!={'terminal_acknowledged','transaction_id','intent_sha256'} or a['terminal_acknowledged'] is not True or a['transaction_id']!=s['transaction_id'] or a['intent_sha256']!=s['intent_sha256'] or a['intent_sha256']!=digest or s['phase']!='terminal':raise SystemExit(1)
 PAIR_ACK_CHECK
@@ -262,9 +291,6 @@ signed_pair_reconcile() {
   local state_dir state_record values tx helper guard secret
   state_dir="$(signed_pair_state_dir)"
   state_record="$state_dir/controller-state.json"
-  signed_pair_probe > "$OPS_TMP_DIR/pair-terminal.json" || refuse "signed pair terminal status is unreadable"
-  [ "$(json_field "$OPS_TMP_DIR/pair-terminal.json" 'd.get("terminal_ready")')" = true ] ||
-    refuse "independent signed pair recovery has not proved a live matching terminal pair"
   values="$(python3 - "$state_record" "$(signed_pair_plan_sha)" <<'PAIR_STATE'
 import json,os,re,stat,sys
 p,digest=sys.argv[1:]
@@ -303,6 +329,18 @@ PAIR_STATE
   LOCK_HELPER="$helper/pearl_autotune_deploy_lock.py"
   AA_SIGNED_PAIR_GUARD_DIR="$guard"
   AA_SIGNED_PAIR_READER_KEY_DIR="$secret"
+  aa_signed_pair_reverify_blocked "$tx" || refuse "blocked Pearl prior recovery could not be reverified"
+  # Pearl decides first; the Studio actor follows that receipt. A Studio half
+  # that is not terminal runs the reviewed rollback, which leaves an untouched
+  # incumbent serving and restores only an installed target.
+  signed_pair_probe > "$OPS_TMP_DIR/pair-terminal.json" || refuse "signed pair terminal status is unreadable"
+  if [ "$(json_field "$OPS_TMP_DIR/pair-terminal.json" 'd.get("terminal_ready")')" != true ]; then
+    "$OPS_DIR/canary-swap.sh" signed-pair --plan "$CATALOG_SIGNED_PAIR_PLAN" --action rollback >&2 ||
+      refuse "Studio signed pair recovery did not reach a terminal pair"
+    signed_pair_probe > "$OPS_TMP_DIR/pair-terminal.json" || refuse "signed pair terminal status is unreadable"
+  fi
+  [ "$(json_field "$OPS_TMP_DIR/pair-terminal.json" 'd.get("terminal_ready")')" = true ] ||
+    refuse "independent signed pair recovery has not proved a live matching terminal pair"
   aa_signed_pair_runner_retire "$tx" || refuse "runner recovery retirement is pending"
   aa_signed_pair_reader_retire "$tx" || refuse "receipt reader retirement is pending"
   aa_cleanup_remote_helpers
@@ -326,6 +364,7 @@ signed_pair_internal() {
   native_mtp_release_preflight true || refuse "native-MTP release matcher refused publication: $NEXT_REASON"
   got="$(signed_pair_plan_sha)" || refuse "signed pair intent is invalid"
   [ "$got" = "$expected" ] || refuse "signed pair intent changed since status"
+  got="$(signed_pair_deadline_ok)" || refuse "$got"
   # Re-fetch under live-ops custody. The actor later independently proves the
   # same prior signed bytes under the publication lease before pausing.
   local prior="$OPS_TMP_DIR/signed-pair-prior-admission.json" health="$OPS_TMP_DIR/signed-pair-health.json" gate
@@ -894,8 +933,11 @@ $owed_writer '$deploy_log' '$owed_dir' '$R'"
       set_next catalog_activation blocked "Activate content release $R" "" "$dp_gate"
     elif [ -n "${CATALOG_SIGNED_PAIR_PLAN:-}" ] && [ "$fresh" = true ] && [ "$go" = true ] && [ -z "$pricing" ]; then
       local pair_sha
+      local pair_deadline
       if [ "$head_sha" != "$main_sha" ] || ! pair_sha="$(signed_pair_plan_sha)"; then
         set_next signed_native_pair blocked "Validate the matched signed release intent" "" "clean origin/main and an exact private target intent are required"
+      elif ! pair_deadline="$(signed_pair_deadline_ok)"; then
+        set_next signed_native_pair blocked "Validate the matched signed release intent" "" "$pair_deadline"
       else
         step signed_native_pair pending "released signed binary and signed policy must change under one recovery journal"
         set_next signed_native_pair mutate "Install the matched signed native-MTP binary/policy pair" \

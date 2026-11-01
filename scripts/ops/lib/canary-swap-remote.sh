@@ -239,6 +239,8 @@ def paused(body):
 
 
 def readiness(body, identity, provider_sha, must_pause):
+    if must_pause is None:  # recovery of an untouched incumbent: either state
+        must_pause = paused(body)
     require(body.get('binary_version') == identity['version'] and body.get('model_loaded') is True,
             'target not loaded')
     require(hashlib.sha256(str(body.get('provider_id', '')).encode()).hexdigest() == provider_sha,
@@ -282,8 +284,13 @@ def job(j, operation, watchdog=False):
     domain = 'gui/%d' % os.getuid()
     if operation == 'stop':
         run(['/bin/launchctl', 'bootout', domain + '/' + label], check=False)
-        require(run(['/bin/launchctl', 'print', domain + '/' + label], check=False).returncode != 0,
-                'launchd job still running')
+        # bootout can return while the job is still exiting (EINPROGRESS); a
+        # loaded provider unloads its model before exit and launchd SIGKILLs
+        # it after ExitTimeOut, so wait for the job to leave the domain.
+        limit = time.monotonic() + 90
+        while run(['/bin/launchctl', 'print', domain + '/' + label], check=False).returncode == 0:
+            require(time.monotonic() < limit, 'launchd job still running')
+            time.sleep(1)
     else:
         if watchdog and run(['/bin/launchctl', 'print', domain + '/' + label], check=False).returncode == 0:
             return
@@ -396,17 +403,48 @@ def extract(j, directory):
     baked = json.loads((directory / 'catalog-release/release.json').read_text())
     require(baked['release_id'] == j['target']['baked_catalog_release_id'], 'baked catalog identity mismatch')
     if baked['release_id'] != j['target']['catalog_release_id']:
-        compatible_pair(j, baked['release_id'])
+        compatible_pair(j, baked['release_id'], baked)
 
 
-def compatible_pair(j, baked_release):
+def ledger_predecessor(j, baked_release, baked=None):
+    """The baked catalog is an earlier, untombstoned release in the target's
+    committed release ledger (staged beside the journal at arm), with the same
+    policy version. The ledger's target row must carry the signed target
+    admission feed digest; extracted baked bytes must match their row."""
+    path = Path(j['studio']['journal_path']).parent / 'target-release-ledger.json'
+    if not os.path.lexists(path):
+        return False
+    ledger = json.loads(read_private(path))
+    target_id = j['target']['catalog_release_id']
+    releases, tombstones = ledger.get('releases'), ledger.get('tombstones')
+    if not (ledger.get('schema_version') == 'macprovider.autotune-release-ledger.v4'
+            and isinstance(releases, dict) and isinstance(tombstones, dict)
+            and baked_release == j['target']['baked_catalog_release_id'] and baked_release != target_id
+            and baked_release not in tombstones and target_id not in tombstones):
+        return False
+    old, new = releases.get(baked_release), releases.get(target_id)
+    stamp = re.compile(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z')
+    if not (isinstance(old, dict) and isinstance(new, dict)
+            and new.get('native_mtp_admission_sha256') == j['target']['feed_sha256']['/v1/native-mtp-admission']
+            and old.get('policy_version') == new.get('policy_version')
+            and all(isinstance(row.get('generated_at'), str) and stamp.fullmatch(row['generated_at'])
+                    for row in (old, new))
+            and old['generated_at'] < new['generated_at']):
+        return False
+    return baked is None or (baked.get('release_id') == baked_release
+                             and baked.get('generated_at') == old['generated_at']
+                             and baked.get('policy_version') == old['policy_version'])
+
+
+def compatible_pair(j, baked_release, baked=None):
     decision = receipt(j)
     require(decision.get('current_release_id') == j['target']['catalog_release_id']
             and decision.get('window_source') == 'retained_disk_under_lease'
             and decision.get('previous_window_sha256') == j['target']['previous_window_sha256']
             and (baked_release == j['target']['catalog_release_id'] or
                  (baked_release == j['prior']['catalog_release_id']
-                  and baked_release in decision.get('compatible_previous_release_ids', [])))
+                  and baked_release in decision.get('compatible_previous_release_ids', []))
+                 or ledger_predecessor(j, baked_release, baked))
             and decision.get('target_activation_verified') is True,
             'reviewed compatible-previous target pair not verified')
     for endpoint, digest in j['target']['feed_sha256'].items():
@@ -416,6 +454,75 @@ def compatible_pair(j, baked_release):
     # journal gates. The reader separately reports the exact retained disk
     # window under lease; it is not mislabeled as a runtime window snapshot.
     policy(j, j['target'])
+
+
+# The install action replaces exactly these names; nothing else is payload.
+PAYLOAD_NAMES = ('macprovider-cli', 'mlx.metallib', 'compatibility-set.json',
+                 'THIRD-PARTY-NOTICES.txt', 'catalog-release', 'compatibility-set-local',
+                 'mlx-swift_Cmlx.bundle', 'swift-nio_NIOPosix.bundle')
+
+
+def payload_tree(root):
+    out = {}
+    for name in PAYLOAD_NAMES:
+        top = Path(root) / name
+        paths = [top] if os.path.lexists(top) else []
+        if top.is_dir() and not top.is_symlink():
+            for parent, dirs, names in os.walk(top, followlinks=False):
+                paths.extend(Path(parent) / n for n in dirs + names)
+        for path in paths:
+            mode = path.lstat().st_mode
+            key = str(path.relative_to(root))
+            out[key] = ('link:' + os.readlink(path) if stat.S_ISLNK(mode) else 'dir' if stat.S_ISDIR(mode)
+                        else sha(path) if stat.S_ISREG(mode) else 'special')
+    return out
+
+
+def prior_untouched(j, directory, state):
+    """The installed payload, config and launchd plist still equal the
+    arm-time backup: nothing of the target was installed."""
+    try:
+        return ((directory / 'prior-payload').is_dir() and 'prior_plist_sha256' in state
+                and payload_tree(j['studio']['install_dir']) == payload_tree(directory / 'prior-payload')
+                and sha(j['studio']['config_path']) == state['prior_config_sha256']
+                and sha(j['studio']['launchd_plist']) == state['prior_plist_sha256'])
+    except (Refused, OSError, ValueError):
+        return False
+
+
+def persisted_pause(j):
+    """The provider persists operator pause in its lifecycle record and
+    restores it on restart (operator_pause_restored_after_admission). Read it
+    only once the job is out of the domain, so no writer can race the read."""
+    path = Path(j['studio'].get('lifecycle_state_path')
+                or Path.home() / 'Library/Application Support/macprovider/lifecycle/state-v1.json')
+    try:
+        return json.loads(read_private(path)).get('operator_paused') is True
+    except (Refused, OSError, ValueError):
+        return False
+
+
+def signed_binary_ok(j):
+    try:
+        signed_binary(Path(j['studio']['install_dir']) / 'macprovider-cli', j['prior'])
+        return True
+    except (Refused, OSError, ValueError, subprocess.SubprocessError):
+        return False
+
+
+def await_prior_policy(j, end):
+    while True:
+        try:
+            decision = receipt(j)
+            require(decision.get('policy_phase') == 'prior_restored'
+                    and decision.get('prior_release_id') == j['prior']['catalog_release_id']
+                    and all(decision.get('prior_feed_sha256', {}).get(k) == v for k, v in j['prior']['feed_sha256'].items()), 'prior restore receipt mismatch')
+            policy(j, j['prior'])
+            return
+        except (Refused, OSError, ValueError, subprocess.SubprocessError):
+            if time.time() >= end:
+                raise
+            time.sleep(2)
 
 
 def stable(j, role, must_pause, deadline, with_capture=False):
@@ -564,7 +671,15 @@ def main(action, journal_path, script):
             phase = state.get('phase', 'staged')
             try:
                 role = 'target' if phase == 'committed' else 'prior'
-                require(phase in ('committed', 'restored'), 'transaction not terminal')
+                if phase == 'staged':
+                    # Arm records 'armed' before its first Studio change, so a
+                    # staged journal with no watchdog left the incumbent intact.
+                    require(not (directory / 'studio-watchdog-ready.json').exists()
+                            and run(['/bin/launchctl', 'print', 'gui/%d/tech.malibu.signed-pair.%s'
+                                     % (os.getuid(), j['transaction_id'])], check=False).returncode != 0,
+                            'staged transaction has a watchdog')
+                    phase = 'prior_unchanged'
+                require(phase in ('committed', 'restored', 'prior_unchanged'), 'transaction not terminal')
                 identity = j[role]
                 signed_binary(Path(j['studio']['install_dir']) / 'macprovider-cli', identity)
                 policy(j, identity)
@@ -637,6 +752,8 @@ def main(action, journal_path, script):
                 time.sleep(1)
             else:
                 raise Refused('drain deadline')
+            # The pause is proven now; a later stop failure must not lose it.
+            save('pausing', pause_proven=True)
             job(j, 'stop', watchdog=True)
             job(j, 'stop')
             save('prepared', pause_proven=True)
@@ -740,6 +857,28 @@ def main(action, journal_path, script):
                     job(j, 'stop')
                     save('blocked', reason='committed_target_unhealthy_provider_stopped')
                     raise
+            if signed_binary_ok(j) and prior_untouched(j, directory, state):
+                # Nothing was installed. Never stop or reload the incumbent:
+                # prove the prior policy, (re)start only a job that is not
+                # loaded, and resume only after the exact prior tuple is proven.
+                try:
+                    await_prior_policy(j, recovery_deadline)
+                except (Refused, OSError, ValueError, subprocess.SubprocessError):
+                    save('blocked', reason='prior_public_policy_not_restored_incumbent_untouched')
+                    raise Refused('prior policy not restored; incumbent payload untouched; journal retained')
+                domain = 'gui/%d/%s' % (os.getuid(), j['studio']['launchd_label'])
+                if run(['/bin/launchctl', 'print', domain], check=False).returncode != 0:
+                    job(j, 'start')
+                stable(j, 'prior', None, recovery_deadline)
+                if paused(status(j)):
+                    policy(j, j['prior'])
+                    control(j, 'resume_request')
+                    stable(j, 'prior', False, recovery_deadline)
+                job(j, 'start', watchdog=True)
+                save('restored', recovery='prior_payload_untouched')
+                if watchdog_directory is not None:
+                    release_watchdog_lock(watchdog_directory, j['transaction_id'])
+                return
             # Fence all target work before waiting for Pearl recovery. Do not
             # start the old executable against CURRENT target policy.
             pause_proven = state.get('pause_proven', False)
@@ -750,6 +889,9 @@ def main(action, journal_path, script):
                 pass
             job(j, 'stop', watchdog=True)
             job(j, 'stop')
+            # A stopped provider has no socket to ask; its persisted record
+            # is the pause it will restore on restart.
+            pause_proven = pause_proven or persisted_pause(j)
             save('awaiting_prior_policy', pause_proven=pause_proven)
             require(pause_proven, 'persisted operator pause cannot be proven; provider remains stopped')
             end = recovery_deadline
@@ -798,7 +940,9 @@ if __name__ == '__main__':
         main(sys.argv[1], sys.argv[2], sys.argv[3])
     except (Refused, KeyError, ValueError, OSError, subprocess.SubprocessError) as error:
         # Do not print URLs, commands, configuration or arbitrary error strings.
-        print('signed-pair refused: ' + type(error).__name__, file=sys.stderr)
+        # Refused reasons are this actor's fixed literals, so they are printed.
+        print('signed-pair refused: ' + type(error).__name__
+              + (': ' + str(error) if type(error) is Refused else ''), file=sys.stderr)
         sys.exit(6)
 SIGNED_PAIR_PY
   exit $?

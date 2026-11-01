@@ -99,6 +99,126 @@ class SignedPairInterfaceTests(unittest.TestCase):
         result = self.python(CATALOG, 'PAIR_ACK_CHECK', state, digest)
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_lock_release_hashes_plan_without_gather_local_release_id(self):
+        # 2026-11-01: the EXIT-trap lock release ran signed_pair_plan_sha after
+        # gather() returned, so "$R" was unbound under set -u.
+        script = ('set -euo pipefail\n' + function(CATALOG, 'signed_pair_plan_sha') + '\n' +
+                  'OPS_SCOPE="catalog-$1"; unset R; signed_pair_plan_sha\n')
+        result = subprocess.run(['bash', '-c', script, 'test', self.plan['target']['catalog_release_id']],
+                                env=dict(os.environ, CATALOG_SIGNED_PAIR_PLAN=str(self.plan_path)),
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), hashlib.sha256(self.plan_path.read_bytes()).hexdigest())
+        result = subprocess.run(['bash', '-c', script, 'test', 'another-release'],
+                                env=dict(os.environ, CATALOG_SIGNED_PAIR_PLAN=str(self.plan_path)),
+                                capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_acknowledged_transaction_does_not_shadow_a_new_plan(self):
+        # 2026-11-01: a reconciled abl-mtp-v280-pair left terminal custody in the
+        # release scope, so the retry plan (new transaction_id) was forced back
+        # into reconcile. Custody is per transaction.
+        common = ROOT / 'scripts/ops/lib/common.sh'
+        script = ('set -euo pipefail\nOPS_NAME=t\n' + function(common, 'die') + '\n' + function(common, 'json_field') +
+                  '\n' + function(CATALOG, 'signed_pair_state_dir') + '\nOPS_STATE_DIR=/s OPS_SCOPE=catalog-r\nsigned_pair_state_dir\n')
+        def run(plan):
+            env = dict(os.environ)
+            env.pop('CATALOG_SIGNED_PAIR_PLAN', None)
+            if plan:
+                env['CATALOG_SIGNED_PAIR_PLAN'] = str(plan)
+            result = subprocess.run(['bash', '-c', script], env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return result.stdout.strip()
+        first = run(self.plan_path)
+        self.plan['transaction_id'] = 'retry-2'
+        second = run(self.write('plan2.json', self.plan))
+        self.assertEqual(second, '/s/catalog-r/signed-native-pair/retry-2')
+        self.assertNotEqual(first, second)
+        self.assertEqual(run(None), '/s/catalog-r/signed-native-pair')
+
+    def signed_static(self):
+        """Published feed bytes matching the plan target, as the intent check reads them."""
+        static = self.root / 'static'
+        static.mkdir(exist_ok=True)
+        target = self.plan['target']
+        policy = {'entries': [{'model_key': target['model_key'], 'model_sha256': target['model_hash'],
+                               'tuple_sha256': target['cb_tuple_sha256']}]}
+        (static / 'continuous-batching-policy.json').write_text(json.dumps(policy))
+        feeds = {}
+        for endpoint in sorted(target['feed_sha256']):
+            name = endpoint.removeprefix('/v1/')
+            sig = name.endswith('.sig')
+            base = name[:-4] if sig else name
+            file = static / ({'catalog-artifacts': 'autotune-artifacts'}.get(base, base) + '.json' + ('.sig' if sig else ''))
+            if not file.exists():
+                file.write_text(endpoint)
+            feeds[endpoint] = hashlib.sha256(file.read_bytes()).hexdigest()
+        target['feed_sha256'] = feeds
+        target['cb_policy_sha256'] = feeds['/v1/continuous-batching-policy']
+        self.plan_path = self.write('plan.json', self.plan)
+        return static
+
+    def test_intent_refuses_a_cb_tuple_from_another_release(self):
+        # 2026-11-02 pair5 carried v280's CB tuple into v280-r2 and could never
+        # pass the Studio readiness proof; it timed out after an hour's pause.
+        import time
+        self.plan['deadline_epoch'] = int(time.time()) + 3300
+        static = self.signed_static()
+        rid = self.plan['target']['catalog_release_id']
+        self.assertEqual(self.python(CONTENT, 'PAIR_INTENT', self.plan_path, rid, static).returncode, 0)
+        self.plan['target']['cb_tuple_sha256'] = 'f' * 64
+        self.plan_path = self.write('plan.json', self.plan)
+        self.assertNotEqual(self.python(CONTENT, 'PAIR_INTENT', self.plan_path, rid, static).returncode, 0)
+
+    def test_deadline_outside_studio_arm_window_refused_before_custody(self):
+        import time
+        def check(deadline):
+            self.plan['deadline_epoch'] = deadline
+            self.plan_path = self.write('plan.json', self.plan)
+            status = subprocess.run(['bash', '-c', function(CATALOG, 'signed_pair_deadline_ok') + '\nsigned_pair_deadline_ok\n'],
+                                    env=dict(os.environ, CATALOG_SIGNED_PAIR_PLAN=str(self.plan_path)),
+                                    capture_output=True, text=True)
+            prepare = self.python(CONTENT, 'PAIR_INTENT', self.plan_path, self.plan['target']['catalog_release_id'],
+                                  self.signed_static())
+            return status.returncode == 0, prepare.returncode == 0, status.stdout
+        now = int(time.time())
+        self.assertEqual(check(now + 3300)[:2], (True, True))
+        ok, armed, why = check(now + 72 * 3600)  # the abl-mtp-v280-pair plan
+        self.assertEqual((ok, armed), (False, False))
+        self.assertIn('outside [now+1800, now+3600]', why)
+        self.assertEqual(check(now - 10)[:2], (False, False))
+        self.assertFalse(check(now + 600)[0])
+
+    def test_pending_ack_is_quiet_not_a_traceback(self):
+        # 2026-11-01 pair2: the EXIT-trap lock check printed FileNotFoundError.
+        state = self.root / 'state'
+        digest = hashlib.sha256(self.plan_path.read_bytes()).hexdigest()
+        self.python(CONTENT, 'PAIR_DURABLE', state, 'reader_ready', 'test', digest,
+                    '/tmp/macprovider-autotune-lock.TEST123', '', self.plan_path)
+        result = self.python(CATALOG, 'PAIR_ACK_CHECK', state, digest)
+        self.assertEqual((result.returncode, result.stderr), (1, ''))
+
+    def test_reconcile_drives_studio_rollback_after_pearl_decision(self):
+        body = function(CATALOG, 'signed_pair_reconcile')
+        self.assertLess(body.index('aa_signed_pair_reverify_blocked'), body.index('--action rollback'))
+        self.assertLess(body.index('--action rollback'), body.index('aa_signed_pair_reader_retire'))
+
+    def test_override_record_and_under_lock_publish_use_one_digest(self):
+        # pair3 2026-11-01: the record and the under-lock check must agree on a
+        # coverage that differs only in momentary routing eligibility.
+        recorded = {'uncovered': [{'providers': 1, 'release_id': 'r', 'routing_eligible': 0, 'sha': 'f' * 64}], 'covered': []}
+        live = {'uncovered': [{'providers': 1, 'release_id': 'r', 'routing_eligible': 1, 'sha': 'f' * 64}], 'covered': []}
+        coverage = self.write('coverage.json', recorded)
+        code = CONTENT.read_text().split('_override_out="$(python3 - ', 1)[1].split("<<'PY'\n", 1)[1].split('\nPY\n', 1)[0]
+        made = subprocess.run([sys.executable, '-c', code, 'reason', str(coverage), 'incoming', 'releases/live', 'live',
+                               'c' * 40, str(ROOT / 'scripts')], capture_output=True, text=True, timeout=5)
+        self.assertEqual(made.returncode, 0, made.stderr)
+        line = [l for l in PEARL.read_text().splitlines() if l.startswith('  cov_digest=')][0]
+        under = subprocess.run(['bash', '-c', 'window="$1"; cov_json="$2"\n' + line + '\nprintf %s "$cov_digest"',
+                                'publish', ROOT / 'scripts/autotune_window.py', json.dumps(live)],
+                               capture_output=True, text=True)
+        self.assertEqual(under.stdout, made.stdout.splitlines()[0])
+
     def test_root_and_transport_transaction_id_domains_agree(self):
         # Every root-accepted ID must be transport-accepted before recovery custody.
         self.plan['transaction_id'] = 'a' * 81

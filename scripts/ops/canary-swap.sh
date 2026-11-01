@@ -7,6 +7,7 @@
 # Usage:
 #   scripts/ops/canary-swap.sh check --version V [--tarball PATH]
 #   MACPROVIDER_OPS_OWNER=<label> scripts/ops/canary-swap.sh swap --version V
+#   MACPROVIDER_OPS_OWNER=<label> scripts/ops/canary-swap.sh record-installed --version V
 #
 # check (read-only, local): the archive holds only regular, relative members,
 #   and every shipped metallib (mlx.metallib and the SwiftPM bundle's
@@ -17,7 +18,11 @@
 #   (release_id, release.json and rate-card.json generated_at) differs from
 #   what Pearl serves at COORDINATOR_URL /v1/autotune-release and /v1/rate-card:
 #   the canary would fail to join with rate_card_update_required (1.8.262).
-#   Activate the catalog first (scripts/ops/catalog-activate.sh).
+#   Activate the catalog first (scripts/ops/catalog-activate.sh). One exception,
+#   the CLI's own rule: Pearl serves a strictly newer release with the same
+#   policy_version and the same rate-card content version, generated no earlier
+#   than the baked rate card (a cut that packaged a first native-MTP admission
+#   scope, then the rebound catalog went live).
 # swap: only the verified candidate bytes recorded by cli-release.sh
 #   signed_byte_verification (the tarball sha256 must match the entry in that
 #   run's signed checksums.txt). check, then under the live-ops lock: stop the
@@ -33,6 +38,11 @@
 #   the same pid alive it is bounded by CANARY_READY_TIMEOUT_S. The buyer runner is
 #   restarted on every exit. A successful swap records the canary_swap marker
 #   that `cli-release.sh next --done canary_smoke --probe` requires.
+# record-installed: the verified bytes are already on the canary (a signed
+#   native pair installs the same candidate under its own journal). Runs the
+#   check, then records the canary_swap marker only when the canary's installed
+#   macprovider-cli has the verified sha256 and /v1/status reports version V
+#   buyer_serving. Nothing is restarted.
 #
 # Env (or ~/.config/macprovider/ops.env): COORDINATOR_URL, STUDIO_SSH (local = this Mac),
 # STUDIO_SSH_KEY, STUDIO_STATUS_PORT, CANARY_RUNNER_STOP_CMD and
@@ -99,7 +109,9 @@ PAIR_VALIDATE_PY
   require_studio_ssh
   if [ "$pair_action" = status ]; then
     if studio_ssh "test -f '$pair_actor' && test -f '$pair_remote'"; then
-      studio_ssh "bash '$pair_actor' signed-pair-engine status '$pair_remote'" > "$OPS_TMP_DIR/pair-status.json" || exit $?
+      # Read-only: the reviewed actor from this checkout reads the staged
+      # journal, so a status fix reaches a journal staged by an older actor.
+      studio_ssh "bash -s -- signed-pair-engine status '$pair_remote'" < "$OPS_DIR/lib/canary-swap-remote.sh" > "$OPS_TMP_DIR/pair-status.json" || exit $?
     else
       pair_encoded="$(base64 < "$pair_plan" | tr -d '\n')"
       studio_ssh "bash -s -- signed-pair-engine status-unstaged '$pair_encoded'" < "$OPS_DIR/lib/canary-swap-remote.sh" > "$OPS_TMP_DIR/pair-status.json" || exit $?
@@ -191,6 +203,10 @@ PAIR_PREFLIGHT_PY
     studio_ssh "umask 077; cat > '$pair_actor'" < "$OPS_DIR/lib/canary-swap-remote.sh" || refuse "cannot stage fixed actor"
     pair_remote_archive="$(pair_get 'd["target"]["tarball_path"]')"
     studio_ssh "umask 077; cat > '$pair_remote_archive'" < "$pair_archive" || refuse "cannot stage released archive"
+    # The remote actor may accept a baked catalog only as a predecessor in the
+    # target's committed release ledger (canary-swap-remote.sh ledger_predecessor).
+    studio_ssh "umask 077; test ! -e '$pair_stage/target-release-ledger.json' && cat > '$pair_stage/target-release-ledger.json'" \
+      < "$REPO_ROOT/phase3-binary/catalog/autotune/release-ledger.json" || refuse "cannot stage target release ledger"
     pair_key_local="$(pair_get 'd["receipt_reader"]["local_private_key_path"]')"
     pair_key_remote="$(pair_get 'd["receipt_reader"]["private_key_path"]')"
     pair_hosts_local="$(pair_get 'd["receipt_reader"]["local_known_hosts_path"]')"
@@ -205,7 +221,13 @@ PAIR_KEY_PY
     studio_ssh "umask 077; test ! -e '$pair_hosts_remote' && cat > '$pair_hosts_remote'" < "$pair_hosts_local" || refuse "cannot stage pinned receipt host keys"
     studio_ssh "bash '$pair_actor' signed-pair-engine preflight '$pair_remote'" || refuse "Studio frozen preflight refused"
   fi
-  studio_ssh "bash '$pair_actor' signed-pair-engine '$pair_action' '$pair_remote'" || exit $?
+  if [ "$pair_action" = rollback ]; then
+    # Recovery runs this checkout's reviewed actor on the staged journal, so a
+    # recovery fix reaches a transaction staged by an older actor.
+    studio_ssh "bash -s -- signed-pair-engine rollback '$pair_remote'" < "$OPS_DIR/lib/canary-swap-remote.sh" || exit $?
+  else
+    studio_ssh "bash '$pair_actor' signed-pair-engine '$pair_action' '$pair_remote'" || exit $?
+  fi
   python3 -I - "$pair_plan" "$pair_action" <<'PAIR_RESULT_PY'
 import json,sys
 j=json.load(open(sys.argv[1]));print(json.dumps(dict(transaction_id=j['transaction_id'],target_release_id=j['target']['catalog_release_id'],deadline_epoch=j['deadline_epoch'],action=sys.argv[2],status='verified')))
@@ -226,7 +248,7 @@ while [ "$#" -gt 0 ]; do
     *) usage >&2; exit 2 ;;
   esac
 done
-case "$CMD" in check|swap|recover-air|restore-air) ;; -h|--help) usage; exit 0 ;; *) usage >&2; exit 2 ;; esac
+case "$CMD" in check|swap|record-installed|recover-air|restore-air) ;; -h|--help) usage; exit 0 ;; *) usage >&2; exit 2 ;; esac
 if [ "$CMD" = recover-air ] || [ "$CMD" = restore-air ]; then
   [ "${MACPROVIDER_OPS_ENTRYPOINT:-}" = 1 ] && [ "$V" = 1.8.260 ] || refuse "Air recovery runs only through the guarded Air entrypoint"
   [ -n "${AIR_RECOVERY_PROVIDER_SHA256:-}" ] && [ -n "${AIR_RECOVERY_CONFIG:-}" ] && [ -n "${AIR_RECOVERY_BINARY_SHA256:-}" ] || refuse "Air recovery identity is missing"
@@ -330,7 +352,7 @@ check_catalog_live() {
     [ "$(http_get "$base/v1/rate-card" "$OPS_TMP_DIR/live-rate-card.json")" = 200 ] ||
     refuse "cannot read Pearl's live catalog from $base/v1/autotune-release and /v1/rate-card"
   verdict="$(python3 - "$payload/catalog-release" "$OPS_TMP_DIR/live-release.json" "$OPS_TMP_DIR/live-rate-card.json" <<'PY'
-import json, os, sys
+import datetime, json, os, sys
 cand, live_rel_path, live_card_path = sys.argv[1:4]
 def load(path):
     with open(path) as f:
@@ -341,20 +363,35 @@ try:
 except (OSError, ValueError) as exc:
     print("ERR unreadable catalog: %s" % exc); sys.exit(0)
 cid, lid = rel.get("release_id"), live_rel.get("release_id")
+def stamp(doc):
+    try:
+        return datetime.datetime.strptime(doc.get("generated_at"), "%Y-%m-%dT%H:%M:%SZ")
+    except (TypeError, ValueError):
+        return None
+# The provider takes a fetched feed only when its policy_version equals the
+# baked one and it is generated no earlier than the baked bytes; otherwise it
+# reports rate_card_update_required. A strictly newer live release is accepted
+# only with the same rate-card content version, so no baked price is un-activated.
+newer = (bool(cid) and cid != lid and rel.get("policy_version") == live_rel.get("policy_version") and
+         None not in (stamp(rel), stamp(live_rel)) and stamp(rel) < stamp(live_rel) and
+         (card is None or (card.get("version") == live_card.get("version") and
+                           None not in (stamp(card), stamp(live_card)) and stamp(card) <= stamp(live_card))))
 diffs = []
-if not cid or cid != lid:
-    diffs.append("release_id")
-if rel.get("generated_at") != live_rel.get("generated_at"):
-    diffs.append("release.json generated_at %s vs %s" % (rel.get("generated_at"), live_rel.get("generated_at")))
-if card is not None and (card.get("generated_at"), card.get("version")) != (live_card.get("generated_at"), live_card.get("version")):
-    diffs.append("rate-card.json generated_at/version %s vs %s" % (card.get("generated_at"), live_card.get("generated_at")))
+if not newer:
+    if not cid or cid != lid:
+        diffs.append("release_id")
+    if rel.get("generated_at") != live_rel.get("generated_at"):
+        diffs.append("release.json generated_at %s vs %s" % (rel.get("generated_at"), live_rel.get("generated_at")))
+    if card is not None and (card.get("generated_at"), card.get("version")) != (live_card.get("generated_at"), live_card.get("version")):
+        diffs.append("rate-card.json generated_at/version %s vs %s" % (card.get("generated_at"), live_card.get("generated_at")))
 print("%s %s %s %s" % ("DIFF" if diffs else "OK", cid or "<none>", lid or "<none>", "; ".join(diffs)))
 PY
 )"
   local kind cid lid diffs
   read -r kind cid lid diffs <<<"$verdict"
   case "$kind" in
-    OK) log "candidate bakes the catalog Pearl serves ($cid)" ;;
+    OK) if [ "$cid" = "$lid" ]; then log "candidate bakes the catalog Pearl serves ($cid)"
+        else log "candidate bakes catalog $cid; Pearl serves the newer $lid with the same policy and rate card"; fi ;;
     DIFF) refuse "candidate bakes catalog $cid; Pearl serves $lid: activate the catalog first (scripts/ops/catalog-activate.sh) [differs: $diffs]" ;;
     *) refuse "cannot compare the baked catalog with Pearl's: ${verdict#ERR }" ;;
   esac
@@ -374,6 +411,22 @@ check_candidate
 [ "$CMD" != swap ] || check_catalog_live
 
 require_studio_ssh
+if [ "$CMD" = record-installed ]; then
+  installed="$(studio_ssh "d=$(printf '%q' "${CANARY_INSTALL_DIR:-}"); shasum -a 256 \"\${d:-\$HOME/macprovider}/macprovider-cli\" | awk '{print \$1}'")" ||
+    refuse "cannot read the canary's installed macprovider-cli"
+  [ "$installed" = "$BINARY_SHA" ] || refuse "canary runs macprovider-cli $installed, not the verified v$V binary $BINARY_SHA"
+  served="$(studio_ssh "PATH=$(printf '%q' "${CANARY_REMOTE_PATH_PREFIX:+$CANARY_REMOTE_PATH_PREFIX:}")\$PATH curl -fsS -m 10 http://127.0.0.1:${STUDIO_STATUS_PORT}/v1/status" |
+    python3 -c 'import json,sys; b=json.load(sys.stdin); print(b.get("binary_version"), b.get("network_state"))')" ||
+    refuse "cannot read the canary /v1/status"
+  [ "$served" = "$V buyer_serving" ] || refuse "canary /v1/status reports '$served', not '$V buyer_serving'"
+  mark_done "$OPS_SCOPE" canary_swap "canary-swap.sh recorded the installed v$V" \
+    "$(printf '{"candidate_sha":"%s","checksums_sha256":"%s","tarball_sha256":"%s","binary_sha256":"%s","kernel_check":"passed","installed_by":"record-installed"}' \
+      "$(marker_field "$OPS_SCOPE" signed_byte_verification 'd.get("candidate_sha")')" \
+      "$(marker_field "$OPS_SCOPE" signed_byte_verification 'd.get("checksums_sha256")')" \
+      "$TARBALL_SHA" "$BINARY_SHA")"
+  log "canary runs the verified v$V; record it: scripts/ops/cli-release.sh next --done canary_smoke --probe"
+  exit 0
+fi
 record_air_result() {
   local action="$1" code="$2"
   case "$action:$code" in recover-air:0|recover-air:4|recover-air:5|restore-air:5) ;;

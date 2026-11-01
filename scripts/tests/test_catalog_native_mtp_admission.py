@@ -76,7 +76,10 @@ def bank_bytes(release_id: str = NATIVE_RELEASE_ID) -> bytes:
 
 
 class NativeMTPAdmissionReleaseTest(unittest.TestCase):
-    MANIFEST = b'{"schema_version":"macprovider.native-mtp-artifact-manifest.v1"}'
+    MANIFEST = catalog_release.NATIVE_MTP_SIDECAR_GENERATOR.build_projection(
+        {"qwen/qwen3.6-35b-a3b": {name: {"path": f"model/{name}", "sha256": "e" * 64}
+                                  for name in ("target", "mtp", "tokenizer", "manifest")}}
+    )
 
     @classmethod
     def setUpClass(cls):
@@ -234,6 +237,25 @@ class NativeMTPAdmissionReleaseTest(unittest.TestCase):
                 catalog_release.generate(harness.KEY_ID, previous_release_dir=previous)
             (harness.catalog / "native-mtp-admission-release.json").unlink()
             with self.assertRaisesRegex(catalog_release.CatalogError, "must be committed together"):
+                catalog_release.generate(harness.KEY_ID, previous_release_dir=previous)
+
+    def test_projection_must_name_every_admitted_model(self):
+        # v280 shipped a third admission entry over a two-model projection;
+        # the provider then rejected the whole admission set.
+        short = catalog_release.NATIVE_MTP_SIDECAR_GENERATOR.build_projection({
+            key: {name: {"path": f"{key}/{name}", "sha256": "e" * 64}
+                  for name in ("target", "mtp", "tokenizer", "manifest")}
+            for key in ("other/model-a", "other/model-b")
+        })
+        with self.activated() as harness:
+            previous = harness.stage(harness.root / "previous")
+            self.write_native_inputs(harness)
+            (harness.catalog / "native-mtp-artifact-manifest.json").write_bytes(short)
+            release = json.loads((harness.catalog / "native-mtp-admission-release.json").read_text())
+            release["entry"]["artifact_manifest_sha256"] = catalog_release.sha256(short)
+            (harness.catalog / "native-mtp-admission-release.json").write_text(json.dumps(release, indent=2))
+            harness.bump(NATIVE_RELEASE_ID, "2026-10-06T00:00:00Z")
+            with self.assertRaisesRegex(catalog_release.CatalogError, "exactly the sidecar's model keys"):
                 catalog_release.generate(harness.KEY_ID, previous_release_dir=previous)
 
     def test_a_later_release_cannot_drop_the_native_mtp_sidecar(self):

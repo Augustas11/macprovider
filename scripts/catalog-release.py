@@ -2687,6 +2687,15 @@ def validate_native_mtp_admission(
             fail(f"{entry_label}: artifact_manifest_sha256 does not match {NATIVE_MTP_MANIFEST_NAME}")
         if entry["challenge_bank_sha256"] != sha256(bank):
             fail(f"{entry_label}: challenge_bank_sha256 does not match {NATIVE_MTP_BANK_NAME}")
+        # The provider selects the entry's artifacts from the projection and
+        # rejects the whole admission set when the projection does not name
+        # exactly the sidecar's model keys (v280 shipped one model short).
+        try:
+            generator.read_projection(
+                manifest_bytes, [item["model_key"] for item in body["entries"]], entry["model_key"]
+            )
+        except (generator.SidecarError, UnicodeDecodeError, ValueError) as error:
+            fail(f"{entry_label}: {NATIVE_MTP_MANIFEST_NAME}: {error}")
     # The provider runs the self-test only from a bank that names the same
     # release as the admission set (ModelRuntime.loadNativeMTPSelfTestChallenge).
     # Enforced for releases cut from source; already-published directories

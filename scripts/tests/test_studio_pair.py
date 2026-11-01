@@ -6,7 +6,9 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import subprocess
 import tempfile
+import time
 import unittest
 from unittest.mock import Mock, patch
 
@@ -208,6 +210,42 @@ class Tests(unittest.TestCase):
         with patch.dict(self.e,receipt=lambda j:decision,policy=Mock()):
             with self.assertRaises(self.e['Refused']): self.e['compatible_pair'](self.j,self.j['target']['baked_catalog_release_id'])
 
+    def test_compatible_baked_ledger_predecessor(self):
+        j=self.j;j['target']['baked_catalog_release_id']='release-baked'
+        decision=dict(current_release_id=j['target']['catalog_release_id'],window_source='retained_disk_under_lease',previous_window_sha256='9'*64,compatible_previous_release_ids=[j['prior']['catalog_release_id']],target_feed_sha256=j['target']['feed_sha256'],target_activation_verified=True)
+        baked=dict(release_id='release-baked',generated_at='2026-11-01T05:00:00Z',policy_version='p1')
+        def ledger():
+            return dict(schema_version='macprovider.autotune-release-ledger.v4',tombstones={},releases={
+                'release-baked':dict(generated_at='2026-11-01T05:00:00Z',policy_version='p1',native_mtp_admission_sha256='0'*64),
+                j['target']['catalog_release_id']:dict(generated_at='2026-11-01T11:00:00Z',policy_version='p1',
+                    native_mtp_admission_sha256=j['target']['feed_sha256']['/v1/native-mtp-admission'])})
+        with tempfile.TemporaryDirectory() as temp, patch.dict(self.e,receipt=lambda j:decision,policy=Mock()):
+            directory=Path(temp);j['studio']['journal_path']=str(directory/'journal.json')
+            path=directory/'target-release-ledger.json'
+            with self.assertRaises(self.e['Refused']): self.e['compatible_pair'](j,'release-baked')
+            def put(value):
+                path.write_text(json.dumps(value));os.chmod(path,0o600)
+            put(ledger())
+            self.e['compatible_pair'](j,'release-baked')
+            self.e['compatible_pair'](j,'release-baked',baked)
+            target=j['target']['catalog_release_id']
+            bad=[]
+            l=ledger();l['tombstones']['release-baked']={};bad.append((l,None))
+            l=ledger();l['releases'][target]['native_mtp_admission_sha256']='1'*64;bad.append((l,None))
+            l=ledger();l['releases']['release-baked']['generated_at']='2026-11-01T12:00:00Z';bad.append((l,None))
+            l=ledger();l['releases']['release-baked']['policy_version']='p2';bad.append((l,None))
+            l=ledger();l['schema_version']='macprovider.autotune-release-ledger.v3';bad.append((l,None))
+            l=ledger();del l['releases'][target];bad.append((l,None))
+            bad.append((ledger(),dict(baked,generated_at='2026-11-01T06:00:00Z')))
+            for value,doc in bad:
+                with self.subTest(value=value,doc=doc):
+                    put(value)
+                    with self.assertRaises(self.e['Refused']): self.e['compatible_pair'](j,'release-baked',doc)
+            put(ledger())
+            with self.assertRaises(self.e['Refused']): self.e['compatible_pair'](j,'release-other')
+            os.chmod(path,0o644)
+            with self.assertRaises(self.e['Refused']): self.e['compatible_pair'](j,'release-baked')
+
     def test_terminal_status_after_receipt_key_retirement(self):
         with tempfile.TemporaryDirectory() as temp:
             directory=Path(temp);os.chmod(directory,0o700)
@@ -249,6 +287,142 @@ class Tests(unittest.TestCase):
                 with contextlib.redirect_stdout(output): self.e['main']('status',journal,str(SCRIPT))
             self.assertTrue(json.loads(output.getvalue())['terminal_ready'])
             self.assertFalse((directory/'studio-action.lock').exists())
+
+    def staged_status(self, directory, watchdog_rc=113):
+        raw=json.dumps(self.j).encode();path=directory/'journal.json';path.write_bytes(raw);os.chmod(path,0o600)
+        prior_body=body(self.j);prior_body['binary_version']=self.j['prior']['version'];prior_body['continuous_batching']['policy']['release_id']=self.j['prior']['catalog_release_id']
+        prior_body['continuous_batching']['policy']['policy_sha256']=self.j['prior']['cb_policy_sha256'];prior_body['continuous_batching']['policy']['tuple_sha256']=self.j['prior']['cb_tuple_sha256']
+        output=io.StringIO()
+        with patch.dict(self.e,host=Mock(),policy=Mock(),status=Mock(return_value=prior_body),signed_binary=Mock(),process_id=Mock(),
+                        run=Mock(return_value=Mock(returncode=watchdog_rc)),receipt=Mock(side_effect=AssertionError('no key read'))):
+            with contextlib.redirect_stdout(output): self.e['main']('status',path,str(SCRIPT))
+        return json.loads(output.getvalue())
+
+    def test_refused_arm_before_first_studio_change_is_prior_terminal(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory=Path(temp);os.chmod(directory,0o700)
+            result=self.staged_status(directory)
+            self.assertTrue(result['terminal_ready']);self.assertEqual(result['phase'],'prior_unchanged')
+            self.assertFalse((directory/'studio-state.json').exists())
+
+    def test_staged_with_watchdog_is_never_prior_terminal(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory=Path(temp);os.chmod(directory,0o700)
+            self.assertFalse(self.staged_status(directory,watchdog_rc=0)['terminal_ready'])
+            (directory/'studio-watchdog-ready.json').write_text('{}')
+            self.assertFalse(self.staged_status(directory)['terminal_ready'])
+
+    def test_arm_outside_one_hour_window_refused_with_reason(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory=Path(temp);os.chmod(directory,0o700)
+            self.j['deadline_epoch']=int(time.time())+72*3600
+            path=directory/'journal.json';path.write_bytes(json.dumps(self.j).encode());os.chmod(path,0o600)
+            with patch.dict(self.e,host=Mock(),receipt=Mock(side_effect=AssertionError('deadline precedes receipt'))):
+                with self.assertRaisesRegex(self.e['Refused'],'^arm deadline$'): self.e['main']('arm',path,str(SCRIPT))
+            self.assertFalse((directory/'studio-state.json').exists())
+
+    def test_refusal_reason_is_printed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path=Path(temp)/'journal.json';path.write_bytes(json.dumps(self.j).encode());os.chmod(path,0o600)
+            result=subprocess.run(['/bin/bash',str(SCRIPT),'signed-pair-engine','arm',str(path)],capture_output=True,text=True,timeout=60)
+            self.assertEqual(result.returncode,6)
+            self.assertRegex(result.stderr,r'signed-pair refused: Refused: (Studio requires macOS|hardware mismatch|host mismatch)')
+
+    def test_bootout_in_progress_is_waited_out(self):
+        # 2026-11-01 pair2: bootout returned while the provider was still exiting.
+        prints=iter([0,0,113]);calls=[]
+        def run(args,check=True):
+            calls.append(args[1])
+            return Mock(returncode=next(prints) if args[1]=='print' else 0)
+        with patch.dict(self.e,run=run),patch.object(self.e['time'],'sleep'):
+            self.e['job'](self.j,'stop')
+        self.assertEqual(calls,['bootout','print','print','print'])
+
+    def test_bootout_that_never_exits_still_refuses(self):
+        clock=iter([0,0,100,100])
+        with patch.dict(self.e,run=Mock(return_value=Mock(returncode=0))),patch.object(self.e['time'],'sleep'),\
+             patch.object(self.e['time'],'monotonic',side_effect=lambda:next(clock)):
+            with self.assertRaisesRegex(self.e['Refused'],'launchd job still running'): self.e['job'](self.j,'stop')
+
+    def test_drained_pause_survives_a_failed_stop(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory=Path(temp);os.chmod(directory,0o700)
+            raw=json.dumps(self.j).encode();path=directory/'journal.json';path.write_bytes(raw);os.chmod(path,0o600)
+            self.e['put'](directory/'studio-state.json',dict(phase='armed',transaction_id='test',journal_sha256=hashlib.sha256(raw).hexdigest()))
+            prior=body(self.j);prior['binary_version']=self.j['prior']['version']
+            with patch.dict(self.e,host=Mock(),policy=Mock(),readiness=Mock(),control=Mock(),status=Mock(return_value=body(self.j,True)),
+                            job=Mock(side_effect=self.e['Refused']('launchd job still running'))):
+                with self.assertRaises(self.e['Refused']): self.e['main']('prepare',path,str(SCRIPT))
+            state=json.loads((directory/'studio-state.json').read_text())
+            self.assertEqual((state['phase'],state['pause_proven']),('pausing',True))
+
+    def untouched(self, directory, change_payload=False, loaded=True, was_paused=True):
+        install=directory/'install';backup=directory/'prior-payload'
+        for root in (install,backup):
+            (root/'catalog-release').mkdir(parents=True);(root/'macprovider-cli').write_bytes(b'prior cli');(root/'catalog-release/release.json').write_text('{}')
+        (install/'runtime-cache').write_text('provider runtime file, not payload')
+        if change_payload:(install/'macprovider-cli').write_bytes(b'target cli')
+        config=directory/'config.yaml';config.write_text('c');plist=directory/'provider.plist';plist.write_text('p')
+        (directory/'prior-config').write_text('c');(directory/'prior-launchd.plist').write_text('p')
+        self.j['studio'].update(install_dir=str(install),config_path=str(config),launchd_plist=str(plist))
+        raw=json.dumps(self.j).encode();path=directory/'journal.json';path.write_bytes(raw);os.chmod(path,0o600)
+        self.e['put'](directory/'studio-state.json',dict(phase='awaiting_prior_policy',transaction_id='test',pause_proven=False,
+            journal_sha256=hashlib.sha256(raw).hexdigest(),prior_config_sha256=hashlib.sha256(b'c').hexdigest(),prior_plist_sha256=hashlib.sha256(b'p').hexdigest()))
+        decision=dict(transaction_id='test',policy_phase='prior_restored',prior_release_id=self.j['prior']['catalog_release_id'],prior_feed_sha256=self.j['prior']['feed_sha256'])
+        jobs=[];control=Mock();states=iter([was_paused,False])
+        with patch.dict(self.e,host=Mock(),receipt=lambda j:decision,policy=Mock(),signed_binary=Mock(),stable=Mock(),control=control,
+                        status=lambda j:body(j,next(states)),run=Mock(return_value=Mock(returncode=0 if loaded else 113,stdout='start')),
+                        job=lambda j,op,watchdog=False:jobs.append((op,watchdog))):
+            self.e['main']('rollback',path,str(SCRIPT))
+        return jobs,control,json.loads((directory/'studio-state.json').read_text())
+
+    def test_untouched_incumbent_is_resumed_never_stopped(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory=Path(temp);os.chmod(directory,0o700)
+            jobs,control,state=self.untouched(directory)
+            self.assertEqual(jobs,[('start',True)])
+            control.assert_called_once_with(self.j,'resume_request')
+            self.assertEqual((state['phase'],state['recovery']),('restored','prior_payload_untouched'))
+            self.assertEqual((directory/'install/macprovider-cli').read_bytes(),b'prior cli')
+
+    def test_untouched_stopped_incumbent_is_started_in_place(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory=Path(temp);os.chmod(directory,0o700)
+            jobs,_,state=self.untouched(directory,loaded=False,was_paused=False)
+            self.assertEqual(jobs,[('start',False),('start',True)])
+            self.assertEqual(state['phase'],'restored')
+            self.assertFalse(list(directory.glob('failed-payload-*')))
+
+    def test_installed_target_still_takes_fenced_restore(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory=Path(temp);os.chmod(directory,0o700)
+            jobs,_,state=self.untouched(directory,change_payload=True)
+            self.assertEqual(jobs[:2],[('stop',True),('stop',False)])
+            self.assertEqual(len(list(directory.glob('failed-payload-*'))),1)
+            self.assertEqual((directory/'install/macprovider-cli').read_bytes(),b'prior cli')
+            self.assertNotIn('recovery',state)
+
+    def test_stopped_provider_pause_is_read_from_its_lifecycle_record(self):
+        # 2026-11-01 pair2: the provider had persisted the pause (it came back
+        # operator_pause_restored_after_admission), but rollback asked only the
+        # gone ctl socket and isolated the provider as pause-unproven.
+        with tempfile.TemporaryDirectory() as temp:
+            directory=Path(temp);os.chmod(directory,0o700)
+            record=directory/'state-v1.json';record.write_text(json.dumps({'operator_paused':True}));os.chmod(record,0o600)
+            self.j['studio']['lifecycle_state_path']=str(record)
+            self.assertTrue(self.e['persisted_pause'](self.j))
+            record.write_text(json.dumps({'operator_paused':False}))
+            self.assertFalse(self.e['persisted_pause'](self.j))
+            os.chmod(record,0o644)
+            self.assertFalse(self.e['persisted_pause'](self.j))
+            record.write_text(json.dumps({'operator_paused':True}));os.chmod(record,0o600)
+            raw=json.dumps(self.j).encode();path=directory/'journal.json';path.write_bytes(raw);os.chmod(path,0o600)
+            self.e['put'](directory/'studio-state.json',dict(phase='pausing',transaction_id='test',journal_sha256=hashlib.sha256(raw).hexdigest(),pause_proven=False))
+            decision=dict(transaction_id='test',policy_phase='prior_restored',prior_release_id=self.j['prior']['catalog_release_id'],prior_feed_sha256=self.j['prior']['feed_sha256'])
+            with patch.dict(self.e,host=Mock(),receipt=lambda j:decision,control=Mock(side_effect=OSError('socket gone')),status=Mock(side_effect=OSError('down')),
+                            job=Mock(),policy=Mock(),signed_binary=Mock(side_effect=self.e['Refused']('stop here'))):
+                with self.assertRaisesRegex(self.e['Refused'],'stop here'): self.e['main']('rollback',path,str(SCRIPT))
+            self.assertTrue(json.loads((directory/'studio-state.json').read_text())['pause_proven'])
 
     def test_no_stage_after_reader_failure_proves_exact_prior_unchanged(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -230,6 +230,26 @@ printf '{"generated_at":"2026-10-21T00:00:00Z","version":"v-old"}\n' >"$T/coord/
 run_rc 3 "check refuses a rate card Pearl does not serve" "$SWAP" check --version "$CAND" --tarball "$T/good.tar.gz"
 grep -q "rate-card.json generated_at/version" "$T/err" || die "rate-card mismatch not named"
 mv "$T/rate-card.live" "$T/coord/v1/rate-card"
+# 1b. a cut that packaged a first native-MTP admission scope bakes a catalog
+#     older than the rebound one Pearl then serves. The provider accepts a newer
+#     fetched feed of the same policy, so check passes when the rate-card content
+#     version is the same; a changed price or an older/equal live stamp still refuses.
+cp "$T/coord/v1/autotune-release" "$T/release.live"
+cp "$T/coord/v1/rate-card" "$T/rate-card.live"
+printf '{"release_id":"rel-rebound","generated_at":"2026-10-24T06:00:00Z","status":"live_verified"}\n' >"$T/coord/v1/autotune-release"
+printf '{"generated_at":"2026-10-24T06:00:00Z","version":"v-new"}\n' >"$T/coord/v1/rate-card"
+run_rc 0 "check passes a baked catalog older than Pearl's rebound release" "$SWAP" check --version "$CAND" --tarball "$T/newcat.tar.gz"
+grep -q "Pearl serves the newer rel-rebound" "$T/err" || die "newer live release not named"
+printf '{"generated_at":"2026-10-24T06:00:00Z","version":"v-repriced"}\n' >"$T/coord/v1/rate-card"
+run_rc 3 "check refuses a newer live release whose rate card content differs" "$SWAP" check --version "$CAND" --tarball "$T/newcat.tar.gz"
+grep -q "differs: release_id" "$T/err" || die "repriced newer release not refused"
+printf '{"generated_at":"2026-10-22T06:00:00Z","version":"v-new"}\n' >"$T/coord/v1/rate-card"
+run_rc 3 "check refuses a live rate card older than the baked one" "$SWAP" check --version "$CAND" --tarball "$T/newcat.tar.gz"
+printf '{"release_id":"rel-rebound","generated_at":"2026-10-24T06:00:00Z","policy_version":"autotune-policy-v2","status":"live_verified"}\n' >"$T/coord/v1/autotune-release"
+printf '{"generated_at":"2026-10-24T06:00:00Z","version":"v-new"}\n' >"$T/coord/v1/rate-card"
+run_rc 3 "check refuses a newer live release of another policy_version" "$SWAP" check --version "$CAND" --tarball "$T/newcat.tar.gz"
+mv "$T/release.live" "$T/coord/v1/autotune-release"
+mv "$T/rate-card.live" "$T/coord/v1/rate-card"
 run_rc 3 "check refuses without COORDINATOR_URL" env -u COORDINATOR_URL "$SWAP" check --version "$CAND" --tarball "$T/good.tar.gz"
 run_rc 3 "check refuses an unreadable coordinator" env COORDINATOR_URL="$COORDINATOR_URL/missing" "$SWAP" check --version "$CAND" --tarball "$T/good.tar.gz"
 
@@ -246,6 +266,18 @@ grep -qx resume_request "$T/state/frames" || die "healthy swap never resumed the
 [ ! -f "$MACPROVIDER_LIVE_LOCK" ] || die "live-ops lock not released"
 [ ! -d "$HOME/.macprovider-canary-swap.lock" ] || die "canary-host lock not released"
 grep -q '"kernel_check": "passed"' "$T/ops-state/cli-release-$CAND/canary_swap.json" || die "no canary_swap record"
+
+# 2a. record-installed: the verified bytes already serve (installed by a signed
+#     native pair); the marker is recorded with no restart. The old version is refused.
+rm -f "$T/ops-state/cli-release-$CAND/canary_swap.json"; : >"$T/state/runner"
+run_rc 0 "record-installed adopts the serving candidate" "$SWAP" record-installed --version "$CAND"
+grep -q '"installed_by": "record-installed"' "$T/ops-state/cli-release-$CAND/canary_swap.json" || die "record-installed wrote no canary_swap record"
+[ ! -s "$T/state/runner" ] || die "record-installed touched the buyer runner"
+reset_install
+verify_bytes "$T/good.tar.gz"
+rm -f "$T/ops-state/cli-release-$CAND/canary_swap.json"
+run_rc 3 "record-installed refuses a canary on another binary" "$SWAP" record-installed --version "$CAND"
+[ ! -f "$T/ops-state/cli-release-$CAND/canary_swap.json" ] || die "record-installed recorded a binary the canary does not run"
 
 # 3. crash loop: the candidate restarts, the previous version comes back serving.
 reset_install

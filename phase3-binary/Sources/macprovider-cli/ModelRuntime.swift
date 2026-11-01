@@ -1922,12 +1922,96 @@ actor ModelRuntime: ModelRuntimeServing {
         false
     }
 
-    /// mlx-swift-lm #312: TokenIterator can replace its local cache array when
-    /// dynamic KV quantization begins, leaving a caller-owned reusable cache
-    /// without generated-token state. Quantization remains available for
-    /// one-shot requests, but reusable conversation keys fail closed to fp16.
-    static func effectiveKVBits(configured: Int?, conversationKey: String?, containsImage: Bool = false) -> Int? {
-        !containsImage && conversationKey == nil ? configured : nil
+    /// mlx-swift-lm #312: TokenIterator quantizes into its own cache storage, so
+    /// a caller-owned reusable cache never receives the generated-token state.
+    /// The fix upstream (3.32.3) shares that storage only inside the package.
+    /// The serial path therefore quantizes a reusable conversation cache itself
+    /// (`providerOwnedConversationCache`) and never hands its iterator `kvBits`;
+    /// it passes `serialQuantizedConversation`. Continuous-batching rows do not
+    /// (they never run with `kvBits`, `kv_bits_unsupported`), and neither does
+    /// a cold-tier-eligible request: SPEC-037 persists only unquantized caches.
+    static func effectiveKVBits(
+        configured: Int?,
+        conversationKey: String?,
+        containsImage: Bool = false,
+        serialQuantizedConversation: Bool = false
+    ) -> Int? {
+        guard !containsImage else { return nil }
+        return conversationKey == nil || serialQuantizedConversation ? configured : nil
+    }
+
+    /// `kvBits` for a conversation cache the serial path owns: only models whose
+    /// whole serve cache is plain `KVCacheSimple`. The probe is built by
+    /// `serveCache` from the request's own serve parameters and `forceSimpleKV`,
+    /// so it has the layer classes the committed cache will have (a capacity or
+    /// `kvBits` that changes `newCache` changes the probe too). Sliding-window,
+    /// recurrent and model-specific caches keep fp16 so their reuse rules
+    /// (rotating miss, recurrent checkpoints, prompt snapshots) stay unchanged.
+    nonisolated static func providerOwnedConversationKVBits(
+        _ kvBits: Int?, model: any LanguageModel, serveParameters: GenerateParameters, forceSimpleKV: Bool
+    ) -> Int? {
+        guard let kvBits,
+              let cache = try? serveCache(model: model, baseParameters: serveParameters, forceSimpleKV: forceSimpleKV),
+              !cache.isEmpty,
+              cache.allSatisfy({ type(of: $0) == KVCacheSimple.self })
+        else { return nil }
+        return kvBits
+    }
+
+    /// Quantize a caller-owned conversation cache in place of the iterator, so
+    /// the layers the conversation cache commits are the ones decode writes to.
+    /// An empty layer stays unquantized until a turn has prefilled into it.
+    nonisolated static func providerOwnedConversationCache(
+        _ cache: [KVCache], kvBits: Int?, groupSize: Int
+    ) throws -> [KVCache] {
+        guard let kvBits else { return cache }
+        return try cache.map { layer in
+            guard type(of: layer) == KVCacheSimple.self, let simple = layer as? KVCacheSimple, simple.offset > 0 else {
+                return layer
+            }
+            return try simple.toQuantized(groupSize: groupSize, bits: kvBits)
+        }
+    }
+
+    /// Tokens the serial decode loop fed to the cache but left out of its
+    /// result. mlx-swift-lm's synchronous loop feeds every token
+    /// `TokenIterator.next()` yields and drops only the one it breaks on as
+    /// end-of-sequence. A callback `.stop` (request stop, stop sequence, tool
+    /// call, Harmony terminal, cancellation) keeps its token, and an iterator
+    /// at `maxTokens` yields nothing more. The ledger holds raw generated token
+    /// IDs, so text a stop filter strips never changes this count.
+    nonisolated static func serialDecodeUnreturnedTokenCount(
+        stoppedByCallback: Bool, generatedTokenCount: Int, iteratorMaxTokens: Int?
+    ) -> Int {
+        if stoppedByCallback { return 0 }
+        if let iteratorMaxTokens, generatedTokenCount >= iteratorMaxTokens { return 0 }
+        return 1
+    }
+
+    /// The committed canonical tokens are the hot entry's ledger, and reuse trims
+    /// by ledger arithmetic, so every exact-offset attention layer must hold
+    /// exactly the ledger plus the tokens decode fed but did not return
+    /// (`serialDecodeUnreturnedTokenCount`); those positions are trimmed. Any
+    /// other disagreement (a layer short of the ledger is the mlx-swift-lm #312
+    /// stale cache) refuses the commit.
+    nonisolated static func reconcileConversationCacheLedger(
+        _ cache: [KVCache], ledgerTokenCount: Int, unreturnedTokenCount: Int
+    ) -> Bool {
+        // Every KVCacheSimple (including subclasses such as ChunkedKVCache, whose
+        // offset is still absolute) and QuantizedKVCache advances one position per
+        // fed token. RotatingKVCache subclasses neither and is not checked.
+        let attention = cache.filter { $0 is KVCacheSimple || $0 is QuantizedKVCache }
+        guard unreturnedTokenCount >= 0,
+              attention.allSatisfy({ $0.offset == ledgerTokenCount + unreturnedTokenCount }) else {
+            let offsets = Set(attention.map(\.offset)).sorted()
+            FileHandle.standardError.write(Data(
+                "event=conv_cache action=commit_rejected reason=cache_offset_ledger_mismatch tokens=\(ledgerTokenCount) unreturned=\(unreturnedTokenCount) offsets=\(offsets)\n".utf8))
+            return false
+        }
+        for layer in attention where unreturnedTokenCount > 0 {
+            guard layer.trim(unreturnedTokenCount) == unreturnedTokenCount else { return false }
+        }
+        return true
     }
 
     static func effectivePrefillStepSize(configured: Int, containsImage: Bool) -> Int {
@@ -2411,13 +2495,21 @@ actor ModelRuntime: ModelRuntimeServing {
     /// capped `maxKVSize`. The iterator must therefore see the same uncapped
     /// parameters the cache was built with (#1998). Prompt length is still bounded
     /// by `validatePromptTokenCount` before allocation.
+    /// A leased conversation cache is quantized by the serial path, never by the
+    /// iterator, whose quantized layers the lease would not see (#965,
+    /// mlx-swift-lm #312).
     nonisolated static func serveIteratorParameters(
-        _ base: GenerateParameters, forceSimpleKV: Bool, reusedCache: Bool, cache: [KVCache] = []
+        _ base: GenerateParameters, forceSimpleKV: Bool, reusedCache: Bool, cache: [KVCache] = [],
+        leasedConversationCache: Bool = false
     ) -> GenerateParameters {
-        explicitCacheIteratorParameters(
+        var parameters = explicitCacheIteratorParameters(
             cacheParameters(base, forceSimpleKV: forceSimpleKV || reusedCache),
             cache: cache
         )
+        if leasedConversationCache {
+            parameters.kvBits = nil
+        }
+        return parameters
     }
 
     /// Serial completion budget. A capped serve cache (`maxKVSize`, a
@@ -3449,6 +3541,7 @@ maxTokens: 1,
             "qwen/qwen3.6-35b-a3b": "Qwen3_5MoeForConditionalGeneration",
             "qwen/qwen3.8-27b": "Qwen3_5ForConditionalGeneration",
             "zai-org/glm-5.3-flash": "Glm5NextForConditionalGeneration",
+            "zai-org/glm-5.3-flash-abliterated": "Glm5NextForConditionalGeneration",
             "deepseek/deepseek-v4-flash": "DeepseekV4ForCausalLM",
         ]
         let configObject = configJSONData.flatMap {
@@ -10042,11 +10135,6 @@ maxTokens: boundedMaxTokens,
         }
 
         let maxContextTokens = maxContextTokens
-        let kvBitsOverride = Self.effectiveKVBits(
-            configured: kvBitsOverride,
-            conversationKey: request.conversationKey,
-            containsImage: request.containsNonTextMessageContentPart
-        )
         let speculativeCacheWrapValidated = speculativeCacheWrapValidated
         let prefillStepSize = Self.effectivePrefillStepSize(
             configured: prefillStepSize, containsImage: request.containsNonTextMessageContentPart)
@@ -10056,6 +10144,12 @@ maxTokens: boundedMaxTokens,
         // nonisolated inference closure (nil unless the disk tier is attached).
         configureConversationCacheMemoryBudget()
         let coldContext = coldContext(for: request, snapshot: snapshot)
+        let kvBitsOverride = Self.effectiveKVBits(
+            configured: kvBitsOverride,
+            conversationKey: request.conversationKey,
+            containsImage: request.containsNonTextMessageContentPart,
+            serialQuantizedConversation: coldContext?.eligible != true
+        )
         let inferenceGate = inferenceGate
         let blockingInferenceExecutor = blockingInferenceExecutor
         let stopTokenFilter = snapshot.nativeVisionProfile == nil
@@ -10174,13 +10268,21 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         request: request,
                         admission: nativeMTPAdmission
                     )
+                    // #965: a reusable conversation cache is quantized by this path,
+                    // never by its iterator (mlx-swift-lm #312).
+                    let conversationKVBits = Self.providerOwnedConversationKVBits(
+                        kvBitsOverride, model: context.model, serveParameters: parameters,
+                        forceSimpleKV: Self.forceSimpleKVCache(
+                            eligible: coldContext?.eligible == true,
+                            conversationKey: request.conversationKey,
+                            containsImage: request.containsNonTextMessageContentPart))
                     let lease = Self.serialPromptSnapshotLease(
                         conversationCacheAllowed
                             ? await conversationCache.begin(
                                 conversationKey: request.conversationKey,
                                 incomingTokens: promptTokenIds,
                                 modelID: request.model,
-                                kvBits: kvBitsOverride,
+                                kvBits: conversationKVBits,
                                 cold: coldContext,
                                 fleetGrant: request.fleetCacheGrant
                             )
@@ -10199,7 +10301,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                     }
                         do {
                             let generationContext = Self.harmonyTerminalPreservingContext(from: context, modelID: request.model)
-                            let kvCache: [KVCache]
+                            var kvCache: [KVCache]
                             var iteratorInput: LMInput
                             let forceSimpleKV = Self.forceSimpleKVCache(
                                 eligible: coldContext?.eligible == true,
@@ -10244,7 +10346,10 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             }
                             let lfmReferenceStep = Self.lfmSerialReferencePrefillStepSize(
                                 model: generationContext.model, prefillStepSize: prefillStepSize)
-                            if isLocalRequest || lfmReferenceStep != nil, !request.containsNonTextMessageContentPart {
+                            // #965: a quantized conversation cache prefills its prompt at fp16 up
+                            // to the last token, then this path quantizes it (as the iterator would).
+                            let ownsQuantizedConversationCache = lease != nil && conversationKVBits != nil
+                            if isLocalRequest || lfmReferenceStep != nil || ownsQuantizedConversationCache, !request.containsNonTextMessageContentPart {
                                 // SPEC-001-R011: a local prompt prefills in chunks with a
                                 // preemption check before each, so a buyer never waits on a
                                 // long local prefill. LFM uses its fixed reference plan on
@@ -10253,7 +10358,8 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                 let resumeAt = try Self.cancellableLocalPrefill(
                                     tokenCount: promptTokenIds.count, from: start, stepSize: prefillStepSize,
                                     referenceStepSize: lfmReferenceStep
-                                        ?? (generationContext.model is DeepseekV4Model ? DeepseekV4Model.prefillStepSize : nil),
+                                        ?? (generationContext.model is DeepseekV4Model ? DeepseekV4Model.prefillStepSize : nil)
+                                        ?? (ownsQuantizedConversationCache ? prefillStepSize : nil),
                                     isCancelled: { Task.isCancelled || shouldCancel() || drainCancelled.isFired }
                                 ) { range in
                                     let chunk = LMInput.Text(tokens: MLXArray(Array(promptTokenIds[range])))
@@ -10265,10 +10371,13 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                 }
                             }
 
+                            kvCache = try Self.providerOwnedConversationCache(
+                                kvCache, kvBits: ownsQuantizedConversationCache ? conversationKVBits : nil,
+                                groupSize: parameters.kvGroupSize)
                             let generation = Self.serveGenerationConfiguration(
                                 parameters: Self.serveIteratorParameters(
                                     parameters, forceSimpleKV: forceSimpleKV, reusedCache: lease?.reusableCache != nil,
-                                    cache: kvCache),
+                                    cache: kvCache, leasedConversationCache: lease != nil),
                                 completePromptTokenIDs: parameters.repetitionPenalty == nil ? [] : promptTokenIds.map(Int.init))
                             let iterator = try TokenIterator(
                                 input: iteratorInput, model: generationContext.model, cache: kvCache, state: iteratorState,
@@ -10289,6 +10398,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             }
                             var labSerialHookError: APIError?
                             var requestStopObservationError: APIError?
+                            var stoppedByDecodeCallback = false
                             var stoppedByRequestStop = false
                             let isHarmonyResponse = HarmonyResponseParser.isHarmonyModelID(request.model)
                             var harmonyFinalDetokenizer = NaiveStreamingDetokenizer(tokenizer: context.tokenizer)
@@ -10306,65 +10416,69 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             )
                             let result: BlockingGenerateResult = try await blockingInferenceExecutor.run { inferenceCancellation in
                                 BlockingGenerateResult(generate(input: iteratorInput, context: generationContext, iterator: iterator) { tokens in
-                                    if !tokens.isEmpty {
-                                        firstToken.recordIfMissing()
-                                        ModelLivenessTracker.shared.recordProgress()
-                                    }
-                                    if Task.isCancelled || inferenceCancellation.isCancelled || shouldCancel() || drainCancelled.isFired {
-                                        return GenerateDisposition.stop
-                                    }
-                                    do {
-                                        if try requestStopObserver.observe(generatedTokenIDs: tokens) {
-                                            stoppedByRequestStop = true
+                                    let disposition: GenerateDisposition = {
+                                        if !tokens.isEmpty {
+                                            firstToken.recordIfMissing()
+                                            ModelLivenessTracker.shared.recordProgress()
+                                        }
+                                        if Task.isCancelled || inferenceCancellation.isCancelled || shouldCancel() || drainCancelled.isFired {
                                             return GenerateDisposition.stop
                                         }
-                                    } catch let error as APIError {
-                                        requestStopObservationError = error
-                                        return GenerateDisposition.stop
-                                    } catch {
-                                        requestStopObservationError = Self.malformedHarmonyResponseError()
-                                        return GenerateDisposition.stop
-                                    }
-                                    if isHarmonyResponse,
-                                       tokens.last.map(Self.isHarmonyTerminalToken) == true {
-                                        return GenerateDisposition.stop
-                                    }
-                                    if let labSerialHooks, let labCommitTracker {
-                                        let outputCount: Int
                                         do {
-                                        outputCount = try Self.labSerialVisibleCommitCount(
-                                            modelID: request.model,
-                                            generatedTokenIDs: tokens,
-                                            decodedText: generationContext.tokenizer.decode(tokenIds: tokens),
-                                            emittedText: nil,
-                                            stopTokenFilter: stopTokenFilter,
-                                            requestStops: request.stop
-                                        )
+                                            if try requestStopObserver.observe(generatedTokenIDs: tokens) {
+                                                stoppedByRequestStop = true
+                                                return GenerateDisposition.stop
+                                            }
                                         } catch let error as APIError {
-                                            labSerialHookError = error
+                                            requestStopObservationError = error
                                             return GenerateDisposition.stop
                                         } catch {
-                                            labSerialHookError = Self.labSerialDecodeHookUnsupported("visible_prefix_accounting")
+                                            requestStopObservationError = Self.malformedHarmonyResponseError()
                                             return GenerateDisposition.stop
                                         }
-                                        labCommitTracker.record(outputCount: outputCount)
-                                        if let outputCap = labSerialHooks.outputCap, outputCount >= outputCap {
+                                        if isHarmonyResponse,
+                                           tokens.last.map(Self.isHarmonyTerminalToken) == true {
                                             return GenerateDisposition.stop
                                         }
-                                    }
-                                    if serialToolStopApplies,
-                                       Self.observeSerialToolStop(
-                                           &serialToolObserver,
-                                           decoded: generationContext.tokenizer.decode(tokenIds: tokens),
-                                           stopTokenFilter: stopTokenFilter,
-                                           requestStops: request.stop,
-                                           reasoningOpen: request.outputTraits.reasoningOpen,
-                                           guaranteedSelection: (try? ToolSelectionPolicy.selection(request.promptSource.toolChoice).requiresCall) == true
-                                       )
-                                    {
-                                        return GenerateDisposition.stop
-                                    }
-                                    return GenerateDisposition.more
+                                        if let labSerialHooks, let labCommitTracker {
+                                            let outputCount: Int
+                                            do {
+                                            outputCount = try Self.labSerialVisibleCommitCount(
+                                                modelID: request.model,
+                                                generatedTokenIDs: tokens,
+                                                decodedText: generationContext.tokenizer.decode(tokenIds: tokens),
+                                                emittedText: nil,
+                                                stopTokenFilter: stopTokenFilter,
+                                                requestStops: request.stop
+                                            )
+                                            } catch let error as APIError {
+                                                labSerialHookError = error
+                                                return GenerateDisposition.stop
+                                            } catch {
+                                                labSerialHookError = Self.labSerialDecodeHookUnsupported("visible_prefix_accounting")
+                                                return GenerateDisposition.stop
+                                            }
+                                            labCommitTracker.record(outputCount: outputCount)
+                                            if let outputCap = labSerialHooks.outputCap, outputCount >= outputCap {
+                                                return GenerateDisposition.stop
+                                            }
+                                        }
+                                        if serialToolStopApplies,
+                                           Self.observeSerialToolStop(
+                                               &serialToolObserver,
+                                               decoded: generationContext.tokenizer.decode(tokenIds: tokens),
+                                               stopTokenFilter: stopTokenFilter,
+                                               requestStops: request.stop,
+                                               reasoningOpen: request.outputTraits.reasoningOpen,
+                                               guaranteedSelection: (try? ToolSelectionPolicy.selection(request.promptSource.toolChoice).requiresCall) == true
+                                           )
+                                        {
+                                            return GenerateDisposition.stop
+                                        }
+                                        return GenerateDisposition.more
+                                    }()
+                                    stoppedByDecodeCallback = disposition == .stop
+                                    return disposition
                                 })
                             }
                             try drainCancelled.check()
@@ -10380,6 +10494,11 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             }
                             try grammarConstraint?.validate()
                             let resultTokenIDs = result.tokenIds
+                            let decodeUnreturnedTokenCount = Self.serialDecodeUnreturnedTokenCount(
+                                stoppedByCallback: stoppedByDecodeCallback,
+                                generatedTokenCount: resultTokenIDs.count,
+                                iteratorMaxTokens: iterator.maxTokens
+                            )
 
                         guard result.output.utf8.count <= ToolCallParser.SPEC018_ARGUMENTS_PER_RESPONSE_BYTE_CAP else {
                             throw APIError(
@@ -10495,6 +10614,13 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             guard Self.serialHybridCacheCanPublishTerminalCheckpoint(
                                 cache: kvCache,
                                 terminalModelStopStripped: terminalModelStopStripped
+                            ) else {
+                                await conversationCache.abort(lease)
+                                return completion
+                            }
+                            guard Self.reconcileConversationCacheLedger(
+                                kvCache, ledgerTokenCount: fullTokens.count,
+                                unreturnedTokenCount: decodeUnreturnedTokenCount
                             ) else {
                                 await conversationCache.abort(lease)
                                 return completion
@@ -10946,11 +11072,6 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
         }
 
         let maxContextTokens = maxContextTokens
-        let kvBitsOverride = Self.effectiveKVBits(
-            configured: kvBitsOverride,
-            conversationKey: request.conversationKey,
-            containsImage: request.containsNonTextMessageContentPart
-        )
         let speculativeCacheWrapValidated = speculativeCacheWrapValidated
         let prefillStepSize = Self.effectivePrefillStepSize(
             configured: prefillStepSize, containsImage: request.containsNonTextMessageContentPart)
@@ -10959,6 +11080,12 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
         // SPEC-037 stage 5 — per-request cold-tier context (streaming endpoint).
         configureConversationCacheMemoryBudget()
         let coldContext = coldContext(for: request, snapshot: snapshot)
+        let kvBitsOverride = Self.effectiveKVBits(
+            configured: kvBitsOverride,
+            conversationKey: request.conversationKey,
+            containsImage: request.containsNonTextMessageContentPart,
+            serialQuantizedConversation: coldContext?.eligible != true
+        )
         let inferenceGate = inferenceGate
         let blockingInferenceExecutor = blockingInferenceExecutor
         let stopTokenFilter = snapshot.nativeVisionProfile == nil
@@ -11153,13 +11280,21 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         request: request,
                         admission: nativeMTPAdmission
                     )
+                    // #965: a reusable conversation cache is quantized by this path,
+                    // never by its iterator (mlx-swift-lm #312).
+                    let conversationKVBits = Self.providerOwnedConversationKVBits(
+                        kvBitsOverride, model: context.model, serveParameters: parameters,
+                        forceSimpleKV: Self.forceSimpleKVCache(
+                            eligible: coldContext?.eligible == true,
+                            conversationKey: request.conversationKey,
+                            containsImage: request.containsNonTextMessageContentPart))
                     let lease = Self.serialPromptSnapshotLease(
                         conversationCacheAllowed
                             ? await conversationCache.begin(
                                 conversationKey: request.conversationKey,
                                 incomingTokens: promptTokenIds,
                                 modelID: request.model,
-                                kvBits: kvBitsOverride,
+                                kvBits: conversationKVBits,
                                 cold: coldContext,
                                 fleetGrant: request.fleetCacheGrant
                             )
@@ -11180,7 +11315,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                     // iterator construction) aborts the lease below; nothing is
                     // committed for a request that did not finish.
                     do {
-                        let kvCache: [KVCache]
+                        var kvCache: [KVCache]
                         var iteratorInput: LMInput
                         let forceSimpleKV = Self.forceSimpleKVCache(
                             eligible: coldContext?.eligible == true,
@@ -11222,7 +11357,10 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         }
                         let lfmReferenceStep = Self.lfmSerialReferencePrefillStepSize(
                             model: generationContext.model, prefillStepSize: prefillStepSize)
-                        if isLocalRequest || lfmReferenceStep != nil, !request.containsNonTextMessageContentPart {
+                        // #965: a quantized conversation cache prefills its prompt at fp16 up
+                        // to the last token, then this path quantizes it (as the iterator would).
+                        let ownsQuantizedConversationCache = lease != nil && conversationKVBits != nil
+                        if isLocalRequest || lfmReferenceStep != nil || ownsQuantizedConversationCache, !request.containsNonTextMessageContentPart {
                             // SPEC-001-R011: a local prompt prefills in chunks with a
                             // preemption check before each, so a buyer never waits on a
                             // long local prefill. LFM uses its fixed reference plan on
@@ -11231,7 +11369,8 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             let resumeAt = try Self.cancellableLocalPrefill(
                                 tokenCount: promptTokenIds.count, from: start, stepSize: prefillStepSize,
                                 referenceStepSize: lfmReferenceStep
-                                    ?? (generationContext.model is DeepseekV4Model ? DeepseekV4Model.prefillStepSize : nil),
+                                    ?? (generationContext.model is DeepseekV4Model ? DeepseekV4Model.prefillStepSize : nil)
+                                    ?? (ownsQuantizedConversationCache ? prefillStepSize : nil),
                                 isCancelled: { Task.isCancelled || shouldCancel() || drainCancelled.isFired }
                             ) { range in
                                 let chunk = LMInput.Text(tokens: MLXArray(Array(promptTokenIds[range])))
@@ -11243,6 +11382,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             }
                         }
 
+                        var stoppedByDecodeCallback = false
                         var stoppedByRequestStop = false
                         var stoppedBySerialToolCall = false
                         var textEmitter = SerialStreamingTextEmitter(request: request)
@@ -11273,10 +11413,13 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             allowedFunctionNames: Self.toolFunctionNames(from: request.promptSource.tools),
                             stopCandidates: stopTokenFilter.tokens
                         )
+                        kvCache = try Self.providerOwnedConversationCache(
+                            kvCache, kvBits: ownsQuantizedConversationCache ? conversationKVBits : nil,
+                            groupSize: parameters.kvGroupSize)
                         let generation = Self.serveGenerationConfiguration(
                             parameters: Self.serveIteratorParameters(
                                 parameters, forceSimpleKV: forceSimpleKV, reusedCache: lease?.reusableCache != nil,
-                                cache: kvCache),
+                                cache: kvCache, leasedConversationCache: lease != nil),
                             completePromptTokenIDs: parameters.repetitionPenalty == nil ? [] : promptTokenIds.map(Int.init))
                         let iterator = try TokenIterator(
                             input: iteratorInput, model: generationContext.model, cache: kvCache, state: iteratorState,
@@ -11287,105 +11430,109 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         try prefillScope.markPrefillDone()
                         let result: BlockingGenerateResult = try await blockingInferenceExecutor.run { inferenceCancellation in
                             BlockingGenerateResult(generate(input: iteratorInput, context: generationContext, iterator: iterator) { tokens in
-                                EgressPerfTraceKey.current?.recordDecodeCallbackEntry()
-                                // Round-2 code LOW: only start the decode timer
-                                // on a callback that actually carries a token.
-                                // An empty first callback would otherwise start
-                                // the clock during prefill and inflate the
-                                // measured decode window. Mirrors the
-                                // `if !tokens.isEmpty { firstToken.recordIfMissing() }`
-                                // guards elsewhere in this file.
-                                if !tokens.isEmpty {
-                                    decodeTimer.recordIfMissing()
-                                    ModelLivenessTracker.shared.recordProgress()
-                                }
-                                if Task.isCancelled || inferenceCancellation.isCancelled || shouldCancel() || drainCancelled.isFired || idleCancellation.isFired {
-                                    return .stop
-                                }
-                                if isHarmonyResponse {
-                                    do {
-                                        guard tokens.count >= harmonyObservedTokenCount else {
+                                let disposition: GenerateDisposition = {
+                                    EgressPerfTraceKey.current?.recordDecodeCallbackEntry()
+                                    // Round-2 code LOW: only start the decode timer
+                                    // on a callback that actually carries a token.
+                                    // An empty first callback would otherwise start
+                                    // the clock during prefill and inflate the
+                                    // measured decode window. Mirrors the
+                                    // `if !tokens.isEmpty { firstToken.recordIfMissing() }`
+                                    // guards elsewhere in this file.
+                                    if !tokens.isEmpty {
+                                        decodeTimer.recordIfMissing()
+                                        ModelLivenessTracker.shared.recordProgress()
+                                    }
+                                    if Task.isCancelled || inferenceCancellation.isCancelled || shouldCancel() || drainCancelled.isFired || idleCancellation.isFired {
+                                        return .stop
+                                    }
+                                    if isHarmonyResponse {
+                                        do {
+                                            guard tokens.count >= harmonyObservedTokenCount else {
+                                                streamingParseError = Self.malformedHarmonyResponseError()
+                                                return .stop
+                                            }
+                                            let newTokenIDs = Array(tokens.dropFirst(harmonyObservedTokenCount))
+                                            harmonyObservedTokenCount = tokens.count
+                                            let parsed = harmonyStreamingParser.parse(newTokenIDs: newTokenIDs)
+                                            if parsed.finalContentTokenCount > harmonyObservedFinalTokenCount {
+                                                harmonyObservedFinalTokenCount = parsed.finalContentTokenCount
+                                                idleState.noteContent()
+                                            }
+                                            let output = try Self.harmonyParsedOutput(
+                                                from: parsed,
+                                                decode: { context.tokenizer.decode(tokenIds: $0) },
+                                                stopTokenFilter: stopTokenFilter,
+                                                requestStops: request.stop,
+                                                countCompletionTokens: false
+                                            )
+                                            if output.hitStop {
+                                                stoppedByRequestStop = true
+                                                return .stop
+                                            }
+                                            if tokens.last.map(Self.isHarmonyTerminalToken) == true {
+                                                return .stop
+                                            }
+                                            return .more
+                                        } catch let error as APIError {
+                                            streamingParseError = error
+                                            return .stop
+                                        } catch {
                                             streamingParseError = Self.malformedHarmonyResponseError()
                                             return .stop
                                         }
-                                        let newTokenIDs = Array(tokens.dropFirst(harmonyObservedTokenCount))
-                                        harmonyObservedTokenCount = tokens.count
-                                        let parsed = harmonyStreamingParser.parse(newTokenIDs: newTokenIDs)
-                                        if parsed.finalContentTokenCount > harmonyObservedFinalTokenCount {
-                                            harmonyObservedFinalTokenCount = parsed.finalContentTokenCount
-                                            idleState.noteContent()
-                                        }
-                                        let output = try Self.harmonyParsedOutput(
-                                            from: parsed,
-                                            decode: { context.tokenizer.decode(tokenIds: $0) },
-                                            stopTokenFilter: stopTokenFilter,
-                                            requestStops: request.stop,
-                                            countCompletionTokens: false
-                                        )
-                                        if output.hitStop {
-                                            stoppedByRequestStop = true
+                                    }
+                                    let decoded = context.tokenizer.decode(tokenIds: tokens)
+                                    let candidate = Self.streamingSafePrefix(
+                                        decoded,
+                                        stopTokenFilter: stopTokenFilter,
+                                        requestStops: request.stop,
+                                        reasoningOpen: request.outputTraits.reasoningOpen
+                                    )
+                                    let step = textEmitter.step(
+                                        candidate: candidate,
+                                        structuredAccumulator: structuredAccumulator,
+                                        idleState: idleState,
+                                        onChunk: onChunk
+                                    )
+                                    if let labSerialHooks, let labCommitTracker {
+                                        let outputCount: Int
+                                        do {
+                                            outputCount = try Self.labSerialVisibleCommitCount(
+                                                modelID: request.model,
+                                                generatedTokenIDs: tokens,
+                                                decodedText: decoded,
+                                                emittedText: textEmitter.emittedContent,
+                                                stopTokenFilter: stopTokenFilter,
+                                                requestStops: request.stop
+                                            )
+                                        } catch let error as APIError {
+                                            labSerialHookError = error
+                                            return .stop
+                                        } catch {
+                                            labSerialHookError = Self.labSerialDecodeHookUnsupported("visible_prefix_accounting")
                                             return .stop
                                         }
-                                        if tokens.last.map(Self.isHarmonyTerminalToken) == true {
+                                        labCommitTracker.record(outputCount: outputCount)
+                                        if let outputCap = labSerialHooks.outputCap, outputCount >= outputCap {
                                             return .stop
                                         }
+                                    }
+                                    switch step {
+                                    case .more:
                                         return .more
-                                    } catch let error as APIError {
-                                        streamingParseError = error
+                                    case .requestStop:
+                                        stoppedByRequestStop = true
                                         return .stop
-                                    } catch {
-                                        streamingParseError = Self.malformedHarmonyResponseError()
+                                    case .toolCallComplete:
+                                        stoppedBySerialToolCall = true
                                         return .stop
-                                    }
-                                }
-                                let decoded = context.tokenizer.decode(tokenIds: tokens)
-                                let candidate = Self.streamingSafePrefix(
-                                    decoded,
-                                    stopTokenFilter: stopTokenFilter,
-                                    requestStops: request.stop,
-                                    reasoningOpen: request.outputTraits.reasoningOpen
-                                )
-                                let step = textEmitter.step(
-                                    candidate: candidate,
-                                    structuredAccumulator: structuredAccumulator,
-                                    idleState: idleState,
-                                    onChunk: onChunk
-                                )
-                                if let labSerialHooks, let labCommitTracker {
-                                    let outputCount: Int
-                                    do {
-                                        outputCount = try Self.labSerialVisibleCommitCount(
-                                            modelID: request.model,
-                                            generatedTokenIDs: tokens,
-                                            decodedText: decoded,
-                                            emittedText: textEmitter.emittedContent,
-                                            stopTokenFilter: stopTokenFilter,
-                                            requestStops: request.stop
-                                        )
-                                    } catch let error as APIError {
-                                        labSerialHookError = error
-                                        return .stop
-                                    } catch {
-                                        labSerialHookError = Self.labSerialDecodeHookUnsupported("visible_prefix_accounting")
+                                    case .structuredError:
                                         return .stop
                                     }
-                                    labCommitTracker.record(outputCount: outputCount)
-                                    if let outputCap = labSerialHooks.outputCap, outputCount >= outputCap {
-                                        return .stop
-                                    }
-                                }
-                                switch step {
-                                case .more:
-                                    return .more
-                                case .requestStop:
-                                    stoppedByRequestStop = true
-                                    return .stop
-                                case .toolCallComplete:
-                                    stoppedBySerialToolCall = true
-                                    return .stop
-                                case .structuredError:
-                                    return .stop
-                                }
+                                }()
+                                stoppedByDecodeCallback = disposition == .stop
+                                return disposition
                             })
                         }
                         // Warm-decode wall-time: from the first decoded token
@@ -11408,6 +11555,11 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         }
                         try grammarConstraint?.validate()
                         let resultTokenIDs = result.tokenIds
+                        let decodeUnreturnedTokenCount = Self.serialDecodeUnreturnedTokenCount(
+                            stoppedByCallback: stoppedByDecodeCallback,
+                            generatedTokenCount: resultTokenIDs.count,
+                            iteratorMaxTokens: iterator.maxTokens
+                        )
 
                         let final = Self.applyOutputFilters(
                             result.output,
@@ -11532,6 +11684,13 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             guard Self.serialHybridCacheCanPublishTerminalCheckpoint(
                                 cache: kvCache,
                                 terminalModelStopStripped: terminalModelStopStripped
+                            ) else {
+                                await conversationCache.abort(lease)
+                                return validated
+                            }
+                            guard Self.reconcileConversationCacheLedger(
+                                kvCache, ledgerTokenCount: fullTokens.count,
+                                unreturnedTokenCount: decodeUnreturnedTokenCount
                             ) else {
                                 await conversationCache.abort(lease)
                                 return validated
@@ -11772,6 +11931,10 @@ maxTokens: 1,
     /// A snapshot of the hot (RAM) conversation cache residency for `kv-cache status`.
     func conversationCacheCounters() async -> ConversationCacheCountersSnapshot {
         await conversationCache.countersSnapshot()
+    }
+
+    func conversationCacheEntryLedgerForTest(conversationKey: String) async -> (tokens: Int, offsets: [Int], classes: [String])? {
+        await conversationCache.entryLedgerForTest(conversationKey: conversationKey)
     }
 
     func hotConversationStats() async -> (entries: Int, tokens: Int) {

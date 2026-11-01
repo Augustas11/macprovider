@@ -11,6 +11,7 @@ import os
 import stat
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
@@ -435,3 +436,45 @@ class AdmittedJsonCoverageTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CoverageDigestTests(unittest.TestCase):
+    """The override binds stranded catalogs and provider counts, not load."""
+
+    # The v280 pair3 record (2026-11-01T15:55:13Z). The signed pair stopped the
+    # buyer runner at 15:55:53, the qwen36 provider's slots drained, and the
+    # under-lock coverage at 15:56:24 differed only in routing_eligible.
+    RECORDED = [{"providers": 1, "release_id": "published-2026-10-29-glm53-qwen36-native-mtp-v277",
+                 "routing_eligible": 0, "sha": "fcba46460ef8ce71e7a9927dd82675b1ec7462cbea8159c1db3afb29e8eb1615"}]
+
+    def under_lock(self, **change):
+        return [dict(self.RECORDED[0], **change)]
+
+    def digest_cli(self, uncovered):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), \
+             unittest.mock.patch("sys.stdin", io.TextIOWrapper(io.BytesIO(json.dumps({"uncovered": uncovered}).encode()))):
+            self.assertEqual(aw.main(["coverage-digest"]), 0)
+        return out.getvalue().strip()
+
+    def test_slot_saturation_change_keeps_the_override(self):
+        self.assertEqual(aw.coverage_digest(self.RECORDED), aw.coverage_digest(self.under_lock(routing_eligible=1)))
+        self.assertEqual(self.digest_cli(self.RECORDED), aw.coverage_digest(self.under_lock(routing_eligible=1)))
+
+    def test_coverage_changes_still_abort(self):
+        recorded = aw.coverage_digest(self.RECORDED)
+        self.assertNotEqual(recorded, aw.coverage_digest(self.under_lock(providers=2)))
+        self.assertNotEqual(recorded, aw.coverage_digest(self.under_lock(sha="0" * 64)))
+        self.assertNotEqual(recorded, aw.coverage_digest(self.under_lock(release_id="published-other")))
+        self.assertNotEqual(recorded, aw.coverage_digest(self.RECORDED + [
+            {"providers": 1, "release_id": "published-2026-11-01-glm53-flash-abliterated-cb-mtp-v277",
+             "routing_eligible": 1, "sha": "1" * 64}]))
+        self.assertNotEqual(recorded, aw.coverage_digest([]))
+
+    def test_order_does_not_matter(self):
+        other = {"providers": 2, "release_id": "r2", "routing_eligible": 0, "sha": "2" * 64}
+        self.assertEqual(aw.coverage_digest(self.RECORDED + [other]), aw.coverage_digest([other] + self.RECORDED))
+
+    def test_malformed_entry_refused(self):
+        with self.assertRaises(aw.WindowError):
+            aw.coverage_digest([{"release_id": "r", "sha": "a" * 64}])

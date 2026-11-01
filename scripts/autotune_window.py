@@ -375,6 +375,24 @@ def _coverage(args: argparse.Namespace) -> dict:
     return {"covered": [dict(r) for r in admissible], "uncovered": uncovered, "advertised_total": total}
 
 
+def coverage_digest(uncovered: list) -> str:
+    """sha256 an override record binds: which advertised catalogs are stranded
+    and by how many providers. routing_eligible is momentary saturation
+    (RoutingEligible = listing-eligible and a free slot), so a load change, such
+    as a signed pair stopping the buyer runner between the override record and
+    the under-lock publish, is not a coverage change and is left out."""
+    import hashlib
+    if not isinstance(uncovered, list):
+        raise WindowError("uncovered must be a list")
+    identity = []
+    for entry in uncovered:
+        if not isinstance(entry, dict) or not {"release_id", "sha", "providers"} <= set(entry):
+            raise WindowError("uncovered entry lacks release_id, sha or providers")
+        identity.append({"release_id": entry["release_id"], "sha": entry["sha"], "providers": entry["providers"]})
+    canonical = json.dumps(sorted(identity, key=lambda x: json.dumps(x, sort_keys=True)), sort_keys=True)
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -404,9 +422,19 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--group", default="macprovider", help=argparse.SUPPRESS)
     p.add_argument("--poolz-json", required=True, help="coordinator /poolz response body")
 
+    p = sub.add_parser("coverage-digest", help="print the override digest of a coverage JSON on stdin")
+    p.add_argument("--required-uid", type=int, default=0, help=argparse.SUPPRESS)
+    p.add_argument("--group", default="macprovider", help=argparse.SUPPRESS)
+
     args = parser.parse_args(argv)
     group: str | int = int(args.group) if args.group.isdigit() else args.group
     try:
+        if args.cmd == "coverage-digest":
+            data = sys.stdin.buffer.read(MAX_POOLZ_BYTES + 1)
+            if len(data) > MAX_POOLZ_BYTES:
+                raise WindowError("coverage JSON is too large")
+            print(coverage_digest(json.loads(data)["uncovered"]))
+            return 0
         if args.cmd == "coverage":
             result = _coverage(args)
             print(json.dumps(result, sort_keys=True))

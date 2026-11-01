@@ -38,10 +38,12 @@
 #                       The caller validates it; empty = exact prior window.
 #   AA_ROLLBACK_POST_HOOK optional fn run after the remote rollback returns;
 #                       it reads AA_ROLLBACK_RC and AA_ROLLBACK_OUT.
-#   AA_COVERAGE_EXPECT  optional (refuse policy + override): sha256 of the
-#                       canonical `uncovered` list the operator's override
-#                       record describes; the publish aborts pre-mutation when
-#                       its own under-lock coverage differs.
+#   AA_COVERAGE_EXPECT  optional (refuse policy + override): autotune_window.py
+#                       coverage-digest of the `uncovered` list the operator's
+#                       override record describes (release, sha, provider
+#                       count; not momentary routing eligibility); the publish
+#                       aborts pre-mutation when its own under-lock coverage
+#                       differs.
 #   AA_PRICING_TXN      0 (default) or 1 (lease mode only; #1693 SPEC-023-R019):
 #                       the release also replaces the live base coordinator.yaml
 #                       rate_card block. The gate snippet must leave the spliced
@@ -844,7 +846,7 @@ fi
 # An override is bound to the coverage it logged (${10}: sha256 of the canonical
 # uncovered list); coverage that moved since the record was written aborts.
 if [ "$cov_rc" -ne 0 ] && [ -n "${10:-}" ]; then
-  cov_digest="$(printf '%s' "$cov_json" | python3 -c 'import hashlib,json,sys; u=json.load(sys.stdin)["uncovered"]; print(hashlib.sha256(json.dumps(sorted(u, key=lambda x: json.dumps(x, sort_keys=True)), sort_keys=True).encode()).hexdigest())')" || cov_digest=unknown
+  cov_digest="$(printf '%s' "$cov_json" | python3 -I "$window" coverage-digest)" || cov_digest=unknown
   if [ "$cov_digest" != "${10}" ]; then
     rm -rf "$root/releases/$final" >/dev/null 2>&1 || true
     abort_pre_mutation "under-lock window coverage differs from the logged override record; not mutating"
@@ -1163,11 +1165,23 @@ def served(record, deadline):
     class NoRedirect(urllib.request.HTTPRedirectHandler):
         def redirect_request(self, *args): return None
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+    import urllib.error
     def get(url):
-        remaining = deadline - time.monotonic()
-        if remaining <= 0: raise TimeoutError("served prior policy deadline")
-        with opener.open(url, timeout=min(5, remaining)) as response:
-            data = response.read(16777217)
+        # One sweep is 17 loopback reads; the coordinator's per-client feed
+        # limit is 10/s with burst 10. Wait out a 429 and retry this read, or
+        # every restarted sweep is throttled again before it can finish.
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0: raise TimeoutError("served prior policy deadline")
+            try:
+                with opener.open(url, timeout=min(5, remaining)) as response:
+                    data = response.read(16777217)
+                break
+            except urllib.error.HTTPError as error:
+                if error.code != 429: raise
+                try: wait = float(error.headers.get("Retry-After") or 1)
+                except ValueError: wait = 1
+                time.sleep(min(max(wait, .1), 5, max(0, deadline - time.monotonic())))
         if len(data) > 16777216: raise ValueError("oversized served feed")
         return data
     endpoints = {
@@ -1413,6 +1427,67 @@ aa_signed_pair_recover() {
     sleep 1
   done
   return 1
+}
+
+# Reconcile-only. A guardian that ran the fixed rollback but could not prove the
+# served prior policy writes blocked.json and then holds the Pearl updater and
+# deploy locks forever. Stop only that exact blocked guardian, retake both
+# locks, and write the prior receipt only if the restored disk pair and the
+# served prior policy prove the same checks the guardian runs (its served()
+# verifier is reused). A commit, an existing receipt or a running guardian is
+# left untouched.
+aa_signed_pair_reverify_blocked() {
+  [ "${MACPROVIDER_OPS_ENTRYPOINT:-}" = 1 ] && [ -n "${MACPROVIDER_OPS_OWNER:-}" ] || fatal "signed pair reverification requires the owned ops entrypoint"
+  local tx="$1" script="$AA_WORK_DIR/signed-pair-reverify.sh" guardian_b64
+  [ "$AA_SIGNED_PAIR_GUARD_DIR" = "$LOCK_HELPER_DIR/signed-pair-$tx" ] || fatal "signed pair reverification identity mismatch"
+  guardian_b64="$(_aa_signed_pair_guardian | base64 | tr -d '\n')"
+  cat >"$script" <<'REVERIFY_SH'
+set -euo pipefail
+python3 "$3" validate
+python3 -I - "$1" "$2" "$4" <<'REVERIFY_PY'
+import base64,fcntl,hashlib,json,os,pathlib,signal,sys,time
+p=pathlib.Path(sys.argv[1]);tx=sys.argv[2]
+g={'__name__':'signed_pair_guardian'};exec(base64.b64decode(sys.argv[3]),g)
+r=json.loads((p/'journal.json').read_text())
+if r['txid']!=tx or r['schema']!='macprovider.signed-pair-pearl-recovery.v1':raise RuntimeError('reverify transaction identity mismatch')
+if (p/'committed').exists() or (p/'restored').exists():raise SystemExit(0)
+if not (p/'blocked.json').is_file() or json.loads((p/'recovering.json').read_text())!={'txid':tx,'policy_phase':'restoring_prior'}:
+ raise RuntimeError('guardian has not blocked after starting prior recovery')
+ready=json.loads((p/'ready.json').read_text());pid=ready['pid']
+if g['identity'](pid)==ready['start']:
+ command=pathlib.Path('/proc/%d/cmdline'%pid).read_bytes().split(b'\0')
+ if str(p/'guardian.py').encode() not in command:raise RuntimeError('blocked guardian identity mismatch')
+ os.kill(pid,signal.SIGKILL)
+ limit=time.monotonic()+15
+ while g['identity'](pid)==ready['start']:
+  if time.monotonic()>=limit:raise RuntimeError('blocked guardian did not stop')
+  time.sleep(.1)
+held=[]
+for path in ('/run/lock/macprovider-pearl-updater.lock','/opt/macprovider/.coordinator-deploy.lock'):
+ fd=os.open(path,os.O_RDONLY);held.append(fd);limit=time.monotonic()+30
+ while True:
+  try:fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB);break
+  except BlockingIOError:
+   if time.monotonic()>=limit:raise RuntimeError('Pearl deploy locks are held by another owner')
+   time.sleep(.5)
+root=pathlib.Path(r['root']);prior=root/r['prior_current']
+for relative,sha in r['prior_files'].items():
+ if g['digest'](prior/relative)!=sha:raise RuntimeError('prior signed release bytes changed')
+if os.readlink(root/'current').removeprefix('./')!=r['prior_current']:raise RuntimeError('prior current was not restored')
+window=root/'.previous-target'
+if (window.read_bytes() if window.exists() else b'')!=base64.b64decode(r['prior_window_base64'],validate=True):
+ raise RuntimeError('prior window was not restored exactly')
+g['served'](r,time.monotonic()+120)
+g['put'](p/'restored',{'txid':r['txid'],'policy_phase':'prior_restored',
+ 'prior_current':r['prior_current'],'disk_restored':True,'served_policy_verified':True,
+ 'prior_release_id':r['prior_release_id'],'prior_release_sha256':r['prior_files']['release.json'],
+ 'prior_admission_sha256':r['prior_files']['native-mtp-admission.json'],
+ 'prior_bank_sha256':r['prior_files']['native-mtp-selftest-bank.json'],
+ 'prior_files':r['prior_files'],'recovery':'reconcile_reverified_blocked_guardian'})
+REVERIFY_PY
+REVERIFY_SH
+  SSH bash -s -- "$AA_SIGNED_PAIR_GUARD_DIR" "$tx" "$LOCK_HELPER" "$guardian_b64" \
+    <"$script" >"$AA_WORK_DIR/signed-pair-reverify.out" 2>"$AA_WORK_DIR/signed-pair-reverify.err"
 }
 
 # The caller owns complete Studio pair + same-PID stable readiness. This step
