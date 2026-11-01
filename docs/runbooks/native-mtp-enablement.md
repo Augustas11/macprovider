@@ -94,6 +94,8 @@ scripts/ops/catalog-activate.sh next --run
 ```
 
 For the first phase, also provide the exact private `CATALOG_SIGNED_PAIR_PLAN`.
+Generate it with `scripts/ops/lib/signed-pair-plan.py build` and run its `check`
+right before `next --run` (`scripts/ops/README.md`, Signed native pair plan).
 The matched transaction arms independent recovery before pausing, retains the
 prior signed binary and policy, and uses a terminal acknowledgement before
 releasing custody. Reconciliation takes priority over candidate freshness.
