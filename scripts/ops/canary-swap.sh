@@ -215,7 +215,13 @@ PAIR_KEY_PY
     studio_ssh "umask 077; test ! -e '$pair_hosts_remote' && cat > '$pair_hosts_remote'" < "$pair_hosts_local" || refuse "cannot stage pinned receipt host keys"
     studio_ssh "bash '$pair_actor' signed-pair-engine preflight '$pair_remote'" || refuse "Studio frozen preflight refused"
   fi
-  studio_ssh "bash '$pair_actor' signed-pair-engine '$pair_action' '$pair_remote'" || exit $?
+  if [ "$pair_action" = rollback ]; then
+    # Recovery runs this checkout's reviewed actor on the staged journal, so a
+    # recovery fix reaches a transaction staged by an older actor.
+    studio_ssh "bash -s -- signed-pair-engine rollback '$pair_remote'" < "$OPS_DIR/lib/canary-swap-remote.sh" || exit $?
+  else
+    studio_ssh "bash '$pair_actor' signed-pair-engine '$pair_action' '$pair_remote'" || exit $?
+  fi
   python3 -I - "$pair_plan" "$pair_action" <<'PAIR_RESULT_PY'
 import json,sys
 j=json.load(open(sys.argv[1]));print(json.dumps(dict(transaction_id=j['transaction_id'],target_release_id=j['target']['catalog_release_id'],deadline_epoch=j['deadline_epoch'],action=sys.argv[2],status='verified')))

@@ -274,6 +274,8 @@ def load(name):
   st=os.fstat(stream.fileno())
   if not stat.S_ISREG(st.st_mode) or st.st_uid!=os.getuid() or st.st_mode & 0o077:raise SystemExit(1)
   return json.load(stream)
+# No ack yet is the normal pending state, not an error to trace.
+if not (p/'terminal-ack.json').exists():raise SystemExit(1)
 s=load('controller-state.json');a=load('terminal-ack.json')
 if set(a)!={'terminal_acknowledged','transaction_id','intent_sha256'} or a['terminal_acknowledged'] is not True or a['transaction_id']!=s['transaction_id'] or a['intent_sha256']!=s['intent_sha256'] or a['intent_sha256']!=digest or s['phase']!='terminal':raise SystemExit(1)
 PAIR_ACK_CHECK
@@ -289,9 +291,6 @@ signed_pair_reconcile() {
   local state_dir state_record values tx helper guard secret
   state_dir="$(signed_pair_state_dir)"
   state_record="$state_dir/controller-state.json"
-  signed_pair_probe > "$OPS_TMP_DIR/pair-terminal.json" || refuse "signed pair terminal status is unreadable"
-  [ "$(json_field "$OPS_TMP_DIR/pair-terminal.json" 'd.get("terminal_ready")')" = true ] ||
-    refuse "independent signed pair recovery has not proved a live matching terminal pair"
   values="$(python3 - "$state_record" "$(signed_pair_plan_sha)" <<'PAIR_STATE'
 import json,os,re,stat,sys
 p,digest=sys.argv[1:]
@@ -331,6 +330,17 @@ PAIR_STATE
   AA_SIGNED_PAIR_GUARD_DIR="$guard"
   AA_SIGNED_PAIR_READER_KEY_DIR="$secret"
   aa_signed_pair_reverify_blocked "$tx" || refuse "blocked Pearl prior recovery could not be reverified"
+  # Pearl decides first; the Studio actor follows that receipt. A Studio half
+  # that is not terminal runs the reviewed rollback, which leaves an untouched
+  # incumbent serving and restores only an installed target.
+  signed_pair_probe > "$OPS_TMP_DIR/pair-terminal.json" || refuse "signed pair terminal status is unreadable"
+  if [ "$(json_field "$OPS_TMP_DIR/pair-terminal.json" 'd.get("terminal_ready")')" != true ]; then
+    "$OPS_DIR/canary-swap.sh" signed-pair --plan "$CATALOG_SIGNED_PAIR_PLAN" --action rollback >&2 ||
+      refuse "Studio signed pair recovery did not reach a terminal pair"
+    signed_pair_probe > "$OPS_TMP_DIR/pair-terminal.json" || refuse "signed pair terminal status is unreadable"
+  fi
+  [ "$(json_field "$OPS_TMP_DIR/pair-terminal.json" 'd.get("terminal_ready")')" = true ] ||
+    refuse "independent signed pair recovery has not proved a live matching terminal pair"
   aa_signed_pair_runner_retire "$tx" || refuse "runner recovery retirement is pending"
   aa_signed_pair_reader_retire "$tx" || refuse "receipt reader retirement is pending"
   aa_cleanup_remote_helpers

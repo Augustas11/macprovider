@@ -328,6 +328,80 @@ class Tests(unittest.TestCase):
             self.assertEqual(result.returncode,6)
             self.assertRegex(result.stderr,r'signed-pair refused: Refused: (Studio requires macOS|hardware mismatch|host mismatch)')
 
+    def test_bootout_in_progress_is_waited_out(self):
+        # 2026-11-01 pair2: bootout returned while the provider was still exiting.
+        prints=iter([0,0,113]);calls=[]
+        def run(args,check=True):
+            calls.append(args[1])
+            return Mock(returncode=next(prints) if args[1]=='print' else 0)
+        with patch.dict(self.e,run=run),patch.object(self.e['time'],'sleep'):
+            self.e['job'](self.j,'stop')
+        self.assertEqual(calls,['bootout','print','print','print'])
+
+    def test_bootout_that_never_exits_still_refuses(self):
+        clock=iter([0,0,100,100])
+        with patch.dict(self.e,run=Mock(return_value=Mock(returncode=0))),patch.object(self.e['time'],'sleep'),\
+             patch.object(self.e['time'],'monotonic',side_effect=lambda:next(clock)):
+            with self.assertRaisesRegex(self.e['Refused'],'launchd job still running'): self.e['job'](self.j,'stop')
+
+    def test_drained_pause_survives_a_failed_stop(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory=Path(temp);os.chmod(directory,0o700)
+            raw=json.dumps(self.j).encode();path=directory/'journal.json';path.write_bytes(raw);os.chmod(path,0o600)
+            self.e['put'](directory/'studio-state.json',dict(phase='armed',transaction_id='test',journal_sha256=hashlib.sha256(raw).hexdigest()))
+            prior=body(self.j);prior['binary_version']=self.j['prior']['version']
+            with patch.dict(self.e,host=Mock(),policy=Mock(),readiness=Mock(),control=Mock(),status=Mock(return_value=body(self.j,True)),
+                            job=Mock(side_effect=self.e['Refused']('launchd job still running'))):
+                with self.assertRaises(self.e['Refused']): self.e['main']('prepare',path,str(SCRIPT))
+            state=json.loads((directory/'studio-state.json').read_text())
+            self.assertEqual((state['phase'],state['pause_proven']),('pausing',True))
+
+    def untouched(self, directory, change_payload=False, loaded=True, was_paused=True):
+        install=directory/'install';backup=directory/'prior-payload'
+        for root in (install,backup):
+            (root/'catalog-release').mkdir(parents=True);(root/'macprovider-cli').write_bytes(b'prior cli');(root/'catalog-release/release.json').write_text('{}')
+        (install/'runtime-cache').write_text('provider runtime file, not payload')
+        if change_payload:(install/'macprovider-cli').write_bytes(b'target cli')
+        config=directory/'config.yaml';config.write_text('c');plist=directory/'provider.plist';plist.write_text('p')
+        (directory/'prior-config').write_text('c');(directory/'prior-launchd.plist').write_text('p')
+        self.j['studio'].update(install_dir=str(install),config_path=str(config),launchd_plist=str(plist))
+        raw=json.dumps(self.j).encode();path=directory/'journal.json';path.write_bytes(raw);os.chmod(path,0o600)
+        self.e['put'](directory/'studio-state.json',dict(phase='awaiting_prior_policy',transaction_id='test',pause_proven=False,
+            journal_sha256=hashlib.sha256(raw).hexdigest(),prior_config_sha256=hashlib.sha256(b'c').hexdigest(),prior_plist_sha256=hashlib.sha256(b'p').hexdigest()))
+        decision=dict(transaction_id='test',policy_phase='prior_restored',prior_release_id=self.j['prior']['catalog_release_id'],prior_feed_sha256=self.j['prior']['feed_sha256'])
+        jobs=[];control=Mock();states=iter([was_paused,False])
+        with patch.dict(self.e,host=Mock(),receipt=lambda j:decision,policy=Mock(),signed_binary=Mock(),stable=Mock(),control=control,
+                        status=lambda j:body(j,next(states)),run=Mock(return_value=Mock(returncode=0 if loaded else 113,stdout='start')),
+                        job=lambda j,op,watchdog=False:jobs.append((op,watchdog))):
+            self.e['main']('rollback',path,str(SCRIPT))
+        return jobs,control,json.loads((directory/'studio-state.json').read_text())
+
+    def test_untouched_incumbent_is_resumed_never_stopped(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory=Path(temp);os.chmod(directory,0o700)
+            jobs,control,state=self.untouched(directory)
+            self.assertEqual(jobs,[('start',True)])
+            control.assert_called_once_with(self.j,'resume_request')
+            self.assertEqual((state['phase'],state['recovery']),('restored','prior_payload_untouched'))
+            self.assertEqual((directory/'install/macprovider-cli').read_bytes(),b'prior cli')
+
+    def test_untouched_stopped_incumbent_is_started_in_place(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory=Path(temp);os.chmod(directory,0o700)
+            jobs,_,state=self.untouched(directory,loaded=False,was_paused=False)
+            self.assertEqual(jobs,[('start',False),('start',True)])
+            self.assertEqual(state['phase'],'restored')
+            self.assertFalse(list(directory.glob('failed-payload-*')))
+
+    def test_installed_target_still_takes_fenced_restore(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory=Path(temp);os.chmod(directory,0o700)
+            jobs,_,state=self.untouched(directory,change_payload=True)
+            self.assertEqual(jobs[:2],[('stop',True),('stop',False)])
+            self.assertEqual(len(list(directory.glob('failed-payload-*'))),1)
+            self.assertEqual((directory/'install/macprovider-cli').read_bytes(),b'prior cli')
+            self.assertNotIn('recovery',state)
+
     def test_no_stage_after_reader_failure_proves_exact_prior_unchanged(self):
         with tempfile.TemporaryDirectory() as temp:
             home=Path(temp);stage=home/'signed-pair-test'

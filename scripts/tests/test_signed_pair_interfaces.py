@@ -154,6 +154,20 @@ class SignedPairInterfaceTests(unittest.TestCase):
         self.assertEqual(check(now - 10)[:2], (False, False))
         self.assertFalse(check(now + 600)[0])
 
+    def test_pending_ack_is_quiet_not_a_traceback(self):
+        # 2026-11-01 pair2: the EXIT-trap lock check printed FileNotFoundError.
+        state = self.root / 'state'
+        digest = hashlib.sha256(self.plan_path.read_bytes()).hexdigest()
+        self.python(CONTENT, 'PAIR_DURABLE', state, 'reader_ready', 'test', digest,
+                    '/tmp/macprovider-autotune-lock.TEST123', '', self.plan_path)
+        result = self.python(CATALOG, 'PAIR_ACK_CHECK', state, digest)
+        self.assertEqual((result.returncode, result.stderr), (1, ''))
+
+    def test_reconcile_drives_studio_rollback_after_pearl_decision(self):
+        body = function(CATALOG, 'signed_pair_reconcile')
+        self.assertLess(body.index('aa_signed_pair_reverify_blocked'), body.index('--action rollback'))
+        self.assertLess(body.index('--action rollback'), body.index('aa_signed_pair_reader_retire'))
+
     def test_root_and_transport_transaction_id_domains_agree(self):
         # Every root-accepted ID must be transport-accepted before recovery custody.
         self.plan['transaction_id'] = 'a' * 81
