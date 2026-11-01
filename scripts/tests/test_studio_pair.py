@@ -402,6 +402,28 @@ class Tests(unittest.TestCase):
             self.assertEqual((directory/'install/macprovider-cli').read_bytes(),b'prior cli')
             self.assertNotIn('recovery',state)
 
+    def test_stopped_provider_pause_is_read_from_its_lifecycle_record(self):
+        # 2026-11-01 pair2: the provider had persisted the pause (it came back
+        # operator_pause_restored_after_admission), but rollback asked only the
+        # gone ctl socket and isolated the provider as pause-unproven.
+        with tempfile.TemporaryDirectory() as temp:
+            directory=Path(temp);os.chmod(directory,0o700)
+            record=directory/'state-v1.json';record.write_text(json.dumps({'operator_paused':True}));os.chmod(record,0o600)
+            self.j['studio']['lifecycle_state_path']=str(record)
+            self.assertTrue(self.e['persisted_pause'](self.j))
+            record.write_text(json.dumps({'operator_paused':False}))
+            self.assertFalse(self.e['persisted_pause'](self.j))
+            os.chmod(record,0o644)
+            self.assertFalse(self.e['persisted_pause'](self.j))
+            record.write_text(json.dumps({'operator_paused':True}));os.chmod(record,0o600)
+            raw=json.dumps(self.j).encode();path=directory/'journal.json';path.write_bytes(raw);os.chmod(path,0o600)
+            self.e['put'](directory/'studio-state.json',dict(phase='pausing',transaction_id='test',journal_sha256=hashlib.sha256(raw).hexdigest(),pause_proven=False))
+            decision=dict(transaction_id='test',policy_phase='prior_restored',prior_release_id=self.j['prior']['catalog_release_id'],prior_feed_sha256=self.j['prior']['feed_sha256'])
+            with patch.dict(self.e,host=Mock(),receipt=lambda j:decision,control=Mock(side_effect=OSError('socket gone')),status=Mock(side_effect=OSError('down')),
+                            job=Mock(),policy=Mock(),signed_binary=Mock(side_effect=self.e['Refused']('stop here'))):
+                with self.assertRaisesRegex(self.e['Refused'],'stop here'): self.e['main']('rollback',path,str(SCRIPT))
+            self.assertTrue(json.loads((directory/'studio-state.json').read_text())['pause_proven'])
+
     def test_no_stage_after_reader_failure_proves_exact_prior_unchanged(self):
         with tempfile.TemporaryDirectory() as temp:
             home=Path(temp);stage=home/'signed-pair-test'

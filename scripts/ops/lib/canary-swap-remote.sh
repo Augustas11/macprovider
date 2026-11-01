@@ -490,6 +490,18 @@ def prior_untouched(j, directory, state):
         return False
 
 
+def persisted_pause(j):
+    """The provider persists operator pause in its lifecycle record and
+    restores it on restart (operator_pause_restored_after_admission). Read it
+    only once the job is out of the domain, so no writer can race the read."""
+    path = Path(j['studio'].get('lifecycle_state_path')
+                or Path.home() / 'Library/Application Support/macprovider/lifecycle/state-v1.json')
+    try:
+        return json.loads(read_private(path)).get('operator_paused') is True
+    except (Refused, OSError, ValueError):
+        return False
+
+
 def signed_binary_ok(j):
     try:
         signed_binary(Path(j['studio']['install_dir']) / 'macprovider-cli', j['prior'])
@@ -877,6 +889,9 @@ def main(action, journal_path, script):
                 pass
             job(j, 'stop', watchdog=True)
             job(j, 'stop')
+            # A stopped provider has no socket to ask; its persisted record
+            # is the pause it will restore on restart.
+            pause_proven = pause_proven or persisted_pause(j)
             save('awaiting_prior_policy', pause_proven=pause_proven)
             require(pause_proven, 'persisted operator pause cannot be proven; provider remains stopped')
             end = recovery_deadline
