@@ -2255,23 +2255,25 @@ func adaptiveDecodeIdleTimeout(model string, cfg config.Config, contextTokens in
 	// may be prefilling the entire served context. Reuse the configured prefill
 	// rate, independently of the model's spelling or active-parameter count.
 	// Saturate before multiplying so even an extreme context cannot overflow.
-	if rate := int64(cfg.Timeouts.FirstTokenPrefillTokensPerSecond); rate > 0 {
+	sharedMax := time.Duration(cfg.Timeouts.DecodeIdleSharedPrefillMaxMS) * time.Millisecond
+	if adaptive > decodeIdleSlowModelMax {
+		adaptive = decodeIdleSlowModelMax
+	}
+	if rate := int64(cfg.Timeouts.FirstTokenPrefillTokensPerSecond); rate > 0 && sharedMax > 0 {
 		// Metadata is opportunistically cached by status endpoints. Missing
 		// metadata must not reintroduce the short-row/long-prefill failure.
-		prefill := decodeIdleSlowModelMax
+		prefill := sharedMax
 		if contextTokens > 0 {
+			maxSeconds := int64(sharedMax / time.Second)
 			seconds := contextTokens / rate
 			if contextTokens%rate != 0 {
 				seconds++
 			}
-			if seconds < int64(decodeIdleSlowModelMax/time.Second) {
+			if seconds < maxSeconds {
 				prefill = time.Duration(seconds) * time.Second
 			}
 		}
 		adaptive = max(adaptive, prefill)
-	}
-	if adaptive > decodeIdleSlowModelMax {
-		adaptive = decodeIdleSlowModelMax
 	}
 	if adaptive > base {
 		return adaptive

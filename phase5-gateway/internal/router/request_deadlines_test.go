@@ -129,6 +129,25 @@ func TestAdaptiveDecodeIdleTimeoutSharedPrefill(t *testing.T) {
 	if got := adaptiveDecodeIdleTimeout("unknown", cfg, 200000); got != 10*time.Second {
 		t.Fatalf("invalid rate must not remove idle bound: %s", got)
 	}
+
+	// The shared-prefill allowance has its own knob (#2196 audit): 0 restores
+	// streaming_idle_ms without turning off first-token prompt scaling, and a
+	// larger cap is honoured instead of the fixed slow-model ceiling.
+	cfg.Timeouts.FirstTokenPrefillTokensPerSecond = 100
+	cfg.Timeouts.DecodeIdleSharedPrefillMaxMS = 0
+	if got := adaptiveDecodeIdleTimeout("zai-org/GLM-5.3-Flash", cfg, 200000); got != 10*time.Second {
+		t.Fatalf("disabled shared-prefill allowance idle=%s want streaming_idle_ms", got)
+	}
+	if got := cfg.FirstTokenTimeoutForPrompt(100000); got <= cfg.FirstTokenTimeout() {
+		t.Fatalf("first-token scaling must stay on when the shared-prefill allowance is off: %s", got)
+	}
+	cfg.Timeouts.DecodeIdleSharedPrefillMaxMS = 120000
+	if got := adaptiveDecodeIdleTimeout("zai-org/GLM-5.3-Flash", cfg, 200000); got != 120*time.Second {
+		t.Fatalf("raised shared-prefill cap idle=%s want 120s", got)
+	}
+	if got := adaptiveDecodeIdleTimeout("zai-org/GLM-5.3-Flash", cfg, 3000); got != 30*time.Second {
+		t.Fatalf("context below the cap idle=%s want 30s", got)
+	}
 }
 
 func TestSharedPrefillIdleAllowanceUsesServingContextAndStillCutsDeadStream(t *testing.T) {

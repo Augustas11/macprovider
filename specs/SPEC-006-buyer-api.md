@@ -3,7 +3,7 @@
 **Version:** 0.9.72 (2026-10-31, decode progress for held tool calls)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.6.28, SPEC-003 v0.7, SPEC-004 v0.3.2
 
-**Change log v0.9.72 (2026-10-31, Related: #2192):** Amend SPEC-006-R026. A provider holds a tool call until it is complete (SPEC-018), so a tool-only turn sent no frame for 9-51 s under concurrent prefill and decode-idle cut it. Streaming requests now send `X-MacProvider-Decode-Progress: 1`, and the gateway consumes the coordinator's `: macprovider-decode-progress` comment (SPEC-001-R015): it re-bases an armed decode-idle deadline, never arms one, and is never forwarded. Buyer bytes are unchanged.
+**Change log v0.9.72 (2026-10-31, Related: #2192):** Amend SPEC-006-R026. A provider holds a tool call until it is complete (SPEC-018), so a tool-only turn sent no frame for 9-51 s under concurrent prefill and decode-idle cut it. Streaming requests now send `X-MacProvider-Decode-Progress: 1`, and the gateway consumes the coordinator's `: macprovider-decode-progress` comment (SPEC-001-R015): it re-bases an armed decode-idle deadline, never arms one, and is never forwarded. Buyer bytes are unchanged. The decode-idle deadline also allows one shared-provider prefill of the served context: served context tokens / `first_token_prefill_tokens_per_second`, capped by `timeouts.decode_idle_shared_prefill_max_ms` (default 60000; 0 disables it without changing first-token scaling), and never below `streaming_idle_ms`. Missing context metadata takes the cap.
 
 **Change log v0.9.71 (2026-10-31, Related: #2192):** Amend SPEC-006-R014 (§5.4.1). When a Chat or Responses request carries a string `prompt_cache_key` of at most 256 bytes, the auto-prefix tag is partitioned by it, so concurrent agent sessions that share one scaffold no longer share one provider conversation key. Sharing a key serialized their turns on the provider and evicted each other's cached prefix. Requests without the field keep the v0.9.31 tag. The Responses translation does not forward the field in the chat body.
 
@@ -5323,6 +5323,16 @@ but it never arms decode-idle, never disarms the first-token phase and never
 counts toward billing estimates or TTFT. Bound: the provider and the
 coordinator each send it at most once per second, and the stream ceiling still
 applies from the first byte of the request.
+
+Shared-prefill decode-idle (v0.9.72). A row on a shared provider can wait while
+another row prefills the whole served context. The decode-idle deadline MUST
+therefore be the larger of `streaming_idle_ms` and `ceil(served_context_tokens /
+first_token_prefill_tokens_per_second)` seconds, the second term capped by
+`timeouts.decode_idle_shared_prefill_max_ms` (default 60000). When the served
+context is unknown the cap applies. Setting the cap to 0, or
+`first_token_prefill_tokens_per_second` to 0, leaves `streaming_idle_ms`; the
+cap does not change first-token scaling. With the defaults the allowance is
+60 s for any served context of 6,000 tokens or more.
 
 First-token deadline. The first-token phase (armed when streaming headers
 commit) MUST be `first_token + ceil(estimated_prompt_tokens /
