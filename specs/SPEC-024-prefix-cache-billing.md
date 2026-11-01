@@ -515,8 +515,12 @@ cache is entirely `KVCacheSimple` MUST keep that quantization:
   (mlx-swift-lm #312; the 3.32.3 fix shares that storage only inside the package).
 - **Ledger.** Before a serial commit, every `KVCacheSimple` or `QuantizedKVCache` layer's offset
   MUST equal the committed canonical token count. An end-of-sequence token the iterator fed to
-  the cache but the generation loop left out of the output is trimmed. Any other mismatch
-  aborts the commit (a miss next turn, never stale state). This applies at fp16 too.
+  the cache but the generation loop left out of the output is trimmed. That count comes from
+  how the decode loop ended (an end-of-sequence break leaves one; a callback stop or
+  `max_tokens` leaves none), never from the finish reason or stripped output text: the ledger
+  holds raw generated token IDs, so a stripped stop sequence never shifts it. Any other mismatch
+  aborts the commit (a miss next turn, never stale state). This applies at fp16 too. A request
+  without a conversation lease commits nothing and runs no ledger check.
 - **Scope.** A cold-tier-eligible request (SPEC-037), a request with image content, a model whose
   serve cache has any rotating, recurrent or model-specific layer, and every continuous-batching
   row keep fp16 for keyed reuse. Continuous batching and paged KV still refuse `kv_bits`

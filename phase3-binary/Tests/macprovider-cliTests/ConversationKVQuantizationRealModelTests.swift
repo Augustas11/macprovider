@@ -46,10 +46,13 @@ final class ConversationKVQuantizationRealModelTests: XCTestCase {
 
     private static let turnTwo = "What is the vault code? Reply with the four digit number only."
 
-    private static func request(_ messages: [[String: String]], key: String, maxTokens: Int = 24) throws -> ChatCompletionRequest {
-        let body: [String: Any] = ["model": modelID, "messages": messages, "max_tokens": maxTokens, "temperature": 0]
-        return try ChatCompletionRequest.parse(data: JSONSerialization.data(withJSONObject: body))
-            .withConversationKey(key)
+    private static func request(
+        _ messages: [[String: String]], key: String?, maxTokens: Int = 24, stop: [String]? = nil
+    ) throws -> ChatCompletionRequest {
+        var body: [String: Any] = ["model": modelID, "messages": messages, "max_tokens": maxTokens, "temperature": 0]
+        if let stop { body["stop"] = stop }
+        let request = try ChatCompletionRequest.parse(data: JSONSerialization.data(withJSONObject: body))
+        return key.map { request.withConversationKey($0) } ?? request
     }
 
     private func assertLedger(
@@ -132,7 +135,9 @@ final class ConversationKVQuantizationRealModelTests: XCTestCase {
             let generated = generate(input: input, context: context, iterator: iterator) { (_: [Int]) in GenerateDisposition.more }.tokenIds
             let prompt = input.text.tokens.size
             let accepted = ModelRuntime.reconcileConversationCacheLedger(
-                cache, ledgerTokenCount: prompt + generated.count, terminalModelStopStripped: true)
+                cache, ledgerTokenCount: prompt + generated.count,
+                unreturnedTokenCount: ModelRuntime.serialDecodeUnreturnedTokenCount(
+                    stoppedByCallback: false, generatedTokenCount: generated.count, iteratorMaxTokens: 16))
             return (prompt, generated.count, cache.map(\.offset), cache.contains { $0 is QuantizedKVCache }, accepted)
         }
         print("iterator-owned kv_bits=8 prompt=\(result.prompt) generated=\(result.generated) caller_offsets=\(Set(result.offsets))")
@@ -140,6 +145,67 @@ final class ConversationKVQuantizationRealModelTests: XCTestCase {
         XCTAssertFalse(result.quantized, "the caller's array never sees the iterator's quantized layers")
         XCTAssertTrue(result.offsets.allSatisfy { $0 < result.prompt + result.generated }, "caller cache misses generated tokens")
         XCTAssertFalse(result.accepted)
+    }
+
+    // Gate: a turn a multi-token buyer stop sequence ends commits its cache
+    // (the callback stop keeps every fed token in the raw ledger), and the next
+    // turn reuses it.
+    func testStopSequenceQuantizedTurnCommitsAndIsReused() async throws {
+        let container = try await loadContainer()
+        let runtime = runtime(container, kvBits: 8)
+        let key = "conv:kv-quant-stop-sequence"
+        let ask = "Count from 1 to 20 as digits separated by a comma and a space. Output only the list."
+        let first = try await runtime.complete(Self.request(
+            [["role": "user", "content": ask]], key: key, maxTokens: 96, stop: ["7, 8"]))
+        print("stop-sequence turn1=\(first.content.debugDescription) finish=\(first.finishReason)")
+        XCTAssertEqual(first.finishReason, "stop")
+        XCTAssertFalse(first.content.contains("7, 8"), "the stop sequence is stripped from the output")
+        XCTAssertTrue(first.content.contains("6, "), "decode reached the stop sequence: \(first.content)")
+        _ = try await assertLedger(runtime, key: key, cacheClass: "QuantizedKVCache")
+
+        let second = try await runtime.complete(Self.request([
+            ["role": "user", "content": ask],
+            ["role": "assistant", "content": first.content],
+            ["role": "user", "content": "Now say OK."],
+        ], key: key))
+        XCTAssertGreaterThanOrEqual(second.cachedPromptTokens, first.promptTokens, "turn two reuses the stop-sequence turn")
+        _ = try await assertLedger(runtime, key: key, cacheClass: "QuantizedKVCache")
+    }
+
+    // A keyless request with kv_bits holds no lease: the iterator owns its
+    // quantization, nothing commits, and no ledger check runs or logs.
+    func testOneShotKVBitsCompletionLogsNoCommitRejection() async throws {
+        let container = try await loadContainer()
+        let runtime = runtime(container, kvBits: 8)
+        let (completion, stderrText) = try await captureStandardError {
+            try await runtime.complete(Self.request(
+                [["role": "user", "content": Self.turnOne]], key: nil, maxTokens: 24))
+        }
+        XCTAssertGreaterThan(completion.completionTokens, 0)
+        XCTAssertFalse(stderrText.contains("commit_rejected"), stderrText)
+        XCTAssertFalse(stderrText.contains("cache_offset_ledger_mismatch"), stderrText)
+    }
+
+    private func captureStandardError<T>(_ operation: () async throws -> T) async throws -> (T, String) {
+        let pipe = Pipe()
+        let savedStderr = dup(STDERR_FILENO)
+        guard savedStderr >= 0 else { throw POSIXError(.EBADF) }
+        fflush(stderr)
+        guard dup2(pipe.fileHandleForWriting.fileDescriptor, STDERR_FILENO) >= 0 else {
+            close(savedStderr)
+            throw POSIXError(.EBADF)
+        }
+        let readHandle = pipe.fileHandleForReading
+        let reader = Task.detached { readHandle.readDataToEndOfFile() }
+        let result: Result<T, Error>
+        do { result = .success(try await operation()) } catch { result = .failure(error) }
+        fflush(stderr)
+        _ = dup2(savedStderr, STDERR_FILENO)
+        close(savedStderr)
+        pipe.fileHandleForWriting.closeFile()
+        let text = String(decoding: await reader.value, as: UTF8.self)
+        FileHandle.standardError.write(Data(text.utf8))
+        return (try result.get(), text)
     }
 
     // Gate: encrypted cold-tier persist and promote of a real-model entry. A
@@ -182,7 +248,9 @@ final class ConversationKVQuantizationRealModelTests: XCTestCase {
             let generated = generate(input: input, context: context, iterator: iterator) { (_: [Int]) in GenerateDisposition.more }
             let tokens = input.text.tokens.asArray(Int32.self) + generated.tokenIds.map(Int32.init)
             XCTAssertTrue(ModelRuntime.reconcileConversationCacheLedger(
-                cache, ledgerTokenCount: tokens.count, terminalModelStopStripped: true))
+                cache, ledgerTokenCount: tokens.count,
+                unreturnedTokenCount: ModelRuntime.serialDecodeUnreturnedTokenCount(
+                    stoppedByCallback: false, generatedTokenCount: generated.tokenIds.count, iteratorMaxTokens: 24)))
             let snapshot = adapter.captureSnapshot(
                 conversationKey: key, layers: ConversationCacheLayers(cache), fullTokens: tokens,
                 sampledPurgeGeneration: 0, identity: identity, nowMillis: Int(Date().timeIntervalSince1970 * 1000))

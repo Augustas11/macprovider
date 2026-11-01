@@ -72,7 +72,7 @@ final class ConversationKVQuantizationTests: XCTestCase {
     func testLedgerReconcileAcceptsExactOffsets() {
         let layers: [KVCache] = [offsetCache(10), offsetCache(10), ArraysCache(size: 1)]
         XCTAssertTrue(ModelRuntime.reconcileConversationCacheLedger(
-            layers, ledgerTokenCount: 10, terminalModelStopStripped: false))
+            layers, ledgerTokenCount: 10, unreturnedTokenCount: 0))
         XCTAssertEqual(layers[0].offset, 10)
     }
 
@@ -81,15 +81,60 @@ final class ConversationKVQuantizationTests: XCTestCase {
     func testLedgerReconcileTrimsTheStrippedStopToken() {
         let layers: [KVCache] = [offsetCache(11), offsetCache(11)]
         XCTAssertTrue(ModelRuntime.reconcileConversationCacheLedger(
-            layers, ledgerTokenCount: 10, terminalModelStopStripped: true))
+            layers, ledgerTokenCount: 10, unreturnedTokenCount: 1))
         XCTAssertEqual(layers.map(\.offset), [10, 10])
     }
 
     func testLedgerReconcileRefusesAnExtraPositionWithoutAStrippedStop() {
         let layers: [KVCache] = [offsetCache(11)]
         XCTAssertFalse(ModelRuntime.reconcileConversationCacheLedger(
-            layers, ledgerTokenCount: 10, terminalModelStopStripped: false))
+            layers, ledgerTokenCount: 10, unreturnedTokenCount: 0))
         XCTAssertEqual(layers[0].offset, 11, "a refused commit leaves the cache untouched")
+    }
+
+    /// A fed-but-dropped stop token must be in the cache: a layer that only
+    /// matches the ledger lost a position decode wrote.
+    func testLedgerReconcileRefusesAMissingFedStopToken() {
+        let layers: [KVCache] = [offsetCache(10)]
+        XCTAssertFalse(ModelRuntime.reconcileConversationCacheLedger(
+            layers, ledgerTokenCount: 10, unreturnedTokenCount: 1))
+        XCTAssertEqual(layers[0].offset, 10)
+    }
+
+    /// The accepted delta comes from how the decode loop ended, not from the
+    /// finish reason or stripped output text.
+    func testDecodeUnreturnedTokenCountFollowsTheDecodeLoopsOwnStop() {
+        // Natural end-of-sequence: the loop breaks on the fed token.
+        XCTAssertEqual(ModelRuntime.serialDecodeUnreturnedTokenCount(
+            stoppedByCallback: false, generatedTokenCount: 5, iteratorMaxTokens: 24), 1)
+        XCTAssertEqual(ModelRuntime.serialDecodeUnreturnedTokenCount(
+            stoppedByCallback: false, generatedTokenCount: 5, iteratorMaxTokens: nil), 1)
+        // Request stop token, multi-token stop sequence, tool call, Harmony
+        // terminal or cancellation: the callback stops after the token is kept.
+        XCTAssertEqual(ModelRuntime.serialDecodeUnreturnedTokenCount(
+            stoppedByCallback: true, generatedTokenCount: 5, iteratorMaxTokens: 24), 0)
+        XCTAssertEqual(ModelRuntime.serialDecodeUnreturnedTokenCount(
+            stoppedByCallback: true, generatedTokenCount: 24, iteratorMaxTokens: 24), 0)
+        // max_tokens: the iterator yields nothing more.
+        XCTAssertEqual(ModelRuntime.serialDecodeUnreturnedTokenCount(
+            stoppedByCallback: false, generatedTokenCount: 24, iteratorMaxTokens: 24), 0)
+        XCTAssertEqual(ModelRuntime.serialDecodeUnreturnedTokenCount(
+            stoppedByCallback: false, generatedTokenCount: 0, iteratorMaxTokens: 0), 0)
+    }
+
+    /// A buyer stop sequence spanning several tokens ends decode from the
+    /// callback. Its tokens stay in the raw ledger (only the output text is
+    /// stripped), so the cache matches the ledger exactly and the turn commits.
+    func testStopSequenceTurnCommitsWithItsTokensInTheLedger() {
+        let promptTokens = 40
+        let generated = [11, 12, 13, 14] // the last three spell the stop sequence
+        let ledger = promptTokens + generated.count
+        let layers: [KVCache] = [offsetCache(ledger), offsetCache(ledger)]
+        let unreturned = ModelRuntime.serialDecodeUnreturnedTokenCount(
+            stoppedByCallback: true, generatedTokenCount: generated.count, iteratorMaxTokens: 24)
+        XCTAssertTrue(ModelRuntime.reconcileConversationCacheLedger(
+            layers, ledgerTokenCount: ledger, unreturnedTokenCount: unreturned))
+        XCTAssertEqual(layers.map(\.offset), [ledger, ledger])
     }
 
     /// mlx-swift-lm #312 signature: the caller's layer stopped at the prompt
@@ -97,7 +142,7 @@ final class ConversationKVQuantizationTests: XCTestCase {
     func testLedgerReconcileRefusesAStaleShortCache() {
         let layers: [KVCache] = [offsetCache(6), offsetCache(10)]
         XCTAssertFalse(ModelRuntime.reconcileConversationCacheLedger(
-            layers, ledgerTokenCount: 10, terminalModelStopStripped: true))
+            layers, ledgerTokenCount: 10, unreturnedTokenCount: 1))
         XCTAssertEqual(layers.map(\.offset), [6, 10])
     }
 
@@ -105,10 +150,10 @@ final class ConversationKVQuantizationTests: XCTestCase {
         try requireMetallib()
         let quantized = try simpleCache(tokens: 11).toQuantized(groupSize: 64, bits: 8)
         XCTAssertTrue(ModelRuntime.reconcileConversationCacheLedger(
-            [quantized], ledgerTokenCount: 10, terminalModelStopStripped: true))
+            [quantized], ledgerTokenCount: 10, unreturnedTokenCount: 1))
         XCTAssertEqual(quantized.offset, 10)
         XCTAssertFalse(ModelRuntime.reconcileConversationCacheLedger(
-            [quantized], ledgerTokenCount: 12, terminalModelStopStripped: true))
+            [quantized], ledgerTokenCount: 12, unreturnedTokenCount: 1))
     }
 
     /// A quantized hot entry reuses only a quantized lease, and trims by the

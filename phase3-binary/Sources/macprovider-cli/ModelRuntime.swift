@@ -1968,25 +1968,40 @@ actor ModelRuntime: ModelRuntimeServing {
         }
     }
 
+    /// Tokens the serial decode loop fed to the cache but left out of its
+    /// result. mlx-swift-lm's synchronous loop feeds every token
+    /// `TokenIterator.next()` yields and drops only the one it breaks on as
+    /// end-of-sequence. A callback `.stop` (request stop, stop sequence, tool
+    /// call, Harmony terminal, cancellation) keeps its token, and an iterator
+    /// at `maxTokens` yields nothing more. The ledger holds raw generated token
+    /// IDs, so text a stop filter strips never changes this count.
+    nonisolated static func serialDecodeUnreturnedTokenCount(
+        stoppedByCallback: Bool, generatedTokenCount: Int, iteratorMaxTokens: Int?
+    ) -> Int {
+        if stoppedByCallback { return 0 }
+        if let iteratorMaxTokens, generatedTokenCount >= iteratorMaxTokens { return 0 }
+        return 1
+    }
+
     /// The committed canonical tokens are the hot entry's ledger, and reuse trims
     /// by ledger arithmetic, so every exact-offset attention layer must hold
-    /// exactly that many positions. A natural end-of-sequence stop feeds its
-    /// token to the cache but leaves it out of the ledger, so that one position
-    /// is trimmed. Any other disagreement (a layer short of the ledger is the
-    /// mlx-swift-lm #312 stale cache) refuses the commit.
+    /// exactly the ledger plus the tokens decode fed but did not return
+    /// (`serialDecodeUnreturnedTokenCount`); those positions are trimmed. Any
+    /// other disagreement (a layer short of the ledger is the mlx-swift-lm #312
+    /// stale cache) refuses the commit.
     nonisolated static func reconcileConversationCacheLedger(
-        _ cache: [KVCache], ledgerTokenCount: Int, terminalModelStopStripped: Bool
+        _ cache: [KVCache], ledgerTokenCount: Int, unreturnedTokenCount: Int
     ) -> Bool {
         let attention = cache.filter { type(of: $0) == KVCacheSimple.self || $0 is QuantizedKVCache }
-        let excess = terminalModelStopStripped ? 1 : 0
-        guard attention.allSatisfy({ $0.offset == ledgerTokenCount || $0.offset == ledgerTokenCount + excess }) else {
+        guard unreturnedTokenCount >= 0,
+              attention.allSatisfy({ $0.offset == ledgerTokenCount + unreturnedTokenCount }) else {
             let offsets = Set(attention.map(\.offset)).sorted()
             FileHandle.standardError.write(Data(
-                "event=conv_cache action=commit_rejected reason=cache_offset_ledger_mismatch tokens=\(ledgerTokenCount) offsets=\(offsets)\n".utf8))
+                "event=conv_cache action=commit_rejected reason=cache_offset_ledger_mismatch tokens=\(ledgerTokenCount) unreturned=\(unreturnedTokenCount) offsets=\(offsets)\n".utf8))
             return false
         }
-        for layer in attention where layer.offset > ledgerTokenCount {
-            guard layer.trim(layer.offset - ledgerTokenCount) == excess else { return false }
+        for layer in attention where unreturnedTokenCount > 0 {
+            guard layer.trim(unreturnedTokenCount) == unreturnedTokenCount else { return false }
         }
         return true
     }
@@ -10370,6 +10385,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             }
                             var labSerialHookError: APIError?
                             var requestStopObservationError: APIError?
+                            var stoppedByDecodeCallback = false
                             var stoppedByRequestStop = false
                             let isHarmonyResponse = HarmonyResponseParser.isHarmonyModelID(request.model)
                             var harmonyFinalDetokenizer = NaiveStreamingDetokenizer(tokenizer: context.tokenizer)
@@ -10387,65 +10403,69 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             )
                             let result: BlockingGenerateResult = try await blockingInferenceExecutor.run { inferenceCancellation in
                                 BlockingGenerateResult(generate(input: iteratorInput, context: generationContext, iterator: iterator) { tokens in
-                                    if !tokens.isEmpty {
-                                        firstToken.recordIfMissing()
-                                        ModelLivenessTracker.shared.recordProgress()
-                                    }
-                                    if Task.isCancelled || inferenceCancellation.isCancelled || shouldCancel() || drainCancelled.isFired {
-                                        return GenerateDisposition.stop
-                                    }
-                                    do {
-                                        if try requestStopObserver.observe(generatedTokenIDs: tokens) {
-                                            stoppedByRequestStop = true
+                                    let disposition: GenerateDisposition = {
+                                        if !tokens.isEmpty {
+                                            firstToken.recordIfMissing()
+                                            ModelLivenessTracker.shared.recordProgress()
+                                        }
+                                        if Task.isCancelled || inferenceCancellation.isCancelled || shouldCancel() || drainCancelled.isFired {
                                             return GenerateDisposition.stop
                                         }
-                                    } catch let error as APIError {
-                                        requestStopObservationError = error
-                                        return GenerateDisposition.stop
-                                    } catch {
-                                        requestStopObservationError = Self.malformedHarmonyResponseError()
-                                        return GenerateDisposition.stop
-                                    }
-                                    if isHarmonyResponse,
-                                       tokens.last.map(Self.isHarmonyTerminalToken) == true {
-                                        return GenerateDisposition.stop
-                                    }
-                                    if let labSerialHooks, let labCommitTracker {
-                                        let outputCount: Int
                                         do {
-                                        outputCount = try Self.labSerialVisibleCommitCount(
-                                            modelID: request.model,
-                                            generatedTokenIDs: tokens,
-                                            decodedText: generationContext.tokenizer.decode(tokenIds: tokens),
-                                            emittedText: nil,
-                                            stopTokenFilter: stopTokenFilter,
-                                            requestStops: request.stop
-                                        )
+                                            if try requestStopObserver.observe(generatedTokenIDs: tokens) {
+                                                stoppedByRequestStop = true
+                                                return GenerateDisposition.stop
+                                            }
                                         } catch let error as APIError {
-                                            labSerialHookError = error
+                                            requestStopObservationError = error
                                             return GenerateDisposition.stop
                                         } catch {
-                                            labSerialHookError = Self.labSerialDecodeHookUnsupported("visible_prefix_accounting")
+                                            requestStopObservationError = Self.malformedHarmonyResponseError()
                                             return GenerateDisposition.stop
                                         }
-                                        labCommitTracker.record(outputCount: outputCount)
-                                        if let outputCap = labSerialHooks.outputCap, outputCount >= outputCap {
+                                        if isHarmonyResponse,
+                                           tokens.last.map(Self.isHarmonyTerminalToken) == true {
                                             return GenerateDisposition.stop
                                         }
-                                    }
-                                    if serialToolStopApplies,
-                                       Self.observeSerialToolStop(
-                                           &serialToolObserver,
-                                           decoded: generationContext.tokenizer.decode(tokenIds: tokens),
-                                           stopTokenFilter: stopTokenFilter,
-                                           requestStops: request.stop,
-                                           reasoningOpen: request.outputTraits.reasoningOpen,
-                                           guaranteedSelection: (try? ToolSelectionPolicy.selection(request.promptSource.toolChoice).requiresCall) == true
-                                       )
-                                    {
-                                        return GenerateDisposition.stop
-                                    }
-                                    return GenerateDisposition.more
+                                        if let labSerialHooks, let labCommitTracker {
+                                            let outputCount: Int
+                                            do {
+                                            outputCount = try Self.labSerialVisibleCommitCount(
+                                                modelID: request.model,
+                                                generatedTokenIDs: tokens,
+                                                decodedText: generationContext.tokenizer.decode(tokenIds: tokens),
+                                                emittedText: nil,
+                                                stopTokenFilter: stopTokenFilter,
+                                                requestStops: request.stop
+                                            )
+                                            } catch let error as APIError {
+                                                labSerialHookError = error
+                                                return GenerateDisposition.stop
+                                            } catch {
+                                                labSerialHookError = Self.labSerialDecodeHookUnsupported("visible_prefix_accounting")
+                                                return GenerateDisposition.stop
+                                            }
+                                            labCommitTracker.record(outputCount: outputCount)
+                                            if let outputCap = labSerialHooks.outputCap, outputCount >= outputCap {
+                                                return GenerateDisposition.stop
+                                            }
+                                        }
+                                        if serialToolStopApplies,
+                                           Self.observeSerialToolStop(
+                                               &serialToolObserver,
+                                               decoded: generationContext.tokenizer.decode(tokenIds: tokens),
+                                               stopTokenFilter: stopTokenFilter,
+                                               requestStops: request.stop,
+                                               reasoningOpen: request.outputTraits.reasoningOpen,
+                                               guaranteedSelection: (try? ToolSelectionPolicy.selection(request.promptSource.toolChoice).requiresCall) == true
+                                           )
+                                        {
+                                            return GenerateDisposition.stop
+                                        }
+                                        return GenerateDisposition.more
+                                    }()
+                                    stoppedByDecodeCallback = disposition == .stop
+                                    return disposition
                                 })
                             }
                             try drainCancelled.check()
@@ -10461,6 +10481,11 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             }
                             try grammarConstraint?.validate()
                             let resultTokenIDs = result.tokenIds
+                            let decodeUnreturnedTokenCount = Self.serialDecodeUnreturnedTokenCount(
+                                stoppedByCallback: stoppedByDecodeCallback,
+                                generatedTokenCount: resultTokenIDs.count,
+                                iteratorMaxTokens: iterator.maxTokens
+                            )
 
                         guard result.output.utf8.count <= ToolCallParser.SPEC018_ARGUMENTS_PER_RESPONSE_BYTE_CAP else {
                             throw APIError(
@@ -10582,7 +10607,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             }
                             guard Self.reconcileConversationCacheLedger(
                                 kvCache, ledgerTokenCount: fullTokens.count,
-                                terminalModelStopStripped: terminalModelStopStripped
+                                unreturnedTokenCount: decodeUnreturnedTokenCount
                             ) else {
                                 await conversationCache.abort(lease)
                                 return completion
@@ -11339,6 +11364,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             }
                         }
 
+                        var stoppedByDecodeCallback = false
                         var stoppedByRequestStop = false
                         var stoppedBySerialToolCall = false
                         var textEmitter = SerialStreamingTextEmitter(request: request)
@@ -11386,105 +11412,109 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         try prefillScope.markPrefillDone()
                         let result: BlockingGenerateResult = try await blockingInferenceExecutor.run { inferenceCancellation in
                             BlockingGenerateResult(generate(input: iteratorInput, context: generationContext, iterator: iterator) { tokens in
-                                EgressPerfTraceKey.current?.recordDecodeCallbackEntry()
-                                // Round-2 code LOW: only start the decode timer
-                                // on a callback that actually carries a token.
-                                // An empty first callback would otherwise start
-                                // the clock during prefill and inflate the
-                                // measured decode window. Mirrors the
-                                // `if !tokens.isEmpty { firstToken.recordIfMissing() }`
-                                // guards elsewhere in this file.
-                                if !tokens.isEmpty {
-                                    decodeTimer.recordIfMissing()
-                                    ModelLivenessTracker.shared.recordProgress()
-                                }
-                                if Task.isCancelled || inferenceCancellation.isCancelled || shouldCancel() || drainCancelled.isFired || idleCancellation.isFired {
-                                    return .stop
-                                }
-                                if isHarmonyResponse {
-                                    do {
-                                        guard tokens.count >= harmonyObservedTokenCount else {
+                                let disposition: GenerateDisposition = {
+                                    EgressPerfTraceKey.current?.recordDecodeCallbackEntry()
+                                    // Round-2 code LOW: only start the decode timer
+                                    // on a callback that actually carries a token.
+                                    // An empty first callback would otherwise start
+                                    // the clock during prefill and inflate the
+                                    // measured decode window. Mirrors the
+                                    // `if !tokens.isEmpty { firstToken.recordIfMissing() }`
+                                    // guards elsewhere in this file.
+                                    if !tokens.isEmpty {
+                                        decodeTimer.recordIfMissing()
+                                        ModelLivenessTracker.shared.recordProgress()
+                                    }
+                                    if Task.isCancelled || inferenceCancellation.isCancelled || shouldCancel() || drainCancelled.isFired || idleCancellation.isFired {
+                                        return .stop
+                                    }
+                                    if isHarmonyResponse {
+                                        do {
+                                            guard tokens.count >= harmonyObservedTokenCount else {
+                                                streamingParseError = Self.malformedHarmonyResponseError()
+                                                return .stop
+                                            }
+                                            let newTokenIDs = Array(tokens.dropFirst(harmonyObservedTokenCount))
+                                            harmonyObservedTokenCount = tokens.count
+                                            let parsed = harmonyStreamingParser.parse(newTokenIDs: newTokenIDs)
+                                            if parsed.finalContentTokenCount > harmonyObservedFinalTokenCount {
+                                                harmonyObservedFinalTokenCount = parsed.finalContentTokenCount
+                                                idleState.noteContent()
+                                            }
+                                            let output = try Self.harmonyParsedOutput(
+                                                from: parsed,
+                                                decode: { context.tokenizer.decode(tokenIds: $0) },
+                                                stopTokenFilter: stopTokenFilter,
+                                                requestStops: request.stop,
+                                                countCompletionTokens: false
+                                            )
+                                            if output.hitStop {
+                                                stoppedByRequestStop = true
+                                                return .stop
+                                            }
+                                            if tokens.last.map(Self.isHarmonyTerminalToken) == true {
+                                                return .stop
+                                            }
+                                            return .more
+                                        } catch let error as APIError {
+                                            streamingParseError = error
+                                            return .stop
+                                        } catch {
                                             streamingParseError = Self.malformedHarmonyResponseError()
                                             return .stop
                                         }
-                                        let newTokenIDs = Array(tokens.dropFirst(harmonyObservedTokenCount))
-                                        harmonyObservedTokenCount = tokens.count
-                                        let parsed = harmonyStreamingParser.parse(newTokenIDs: newTokenIDs)
-                                        if parsed.finalContentTokenCount > harmonyObservedFinalTokenCount {
-                                            harmonyObservedFinalTokenCount = parsed.finalContentTokenCount
-                                            idleState.noteContent()
-                                        }
-                                        let output = try Self.harmonyParsedOutput(
-                                            from: parsed,
-                                            decode: { context.tokenizer.decode(tokenIds: $0) },
-                                            stopTokenFilter: stopTokenFilter,
-                                            requestStops: request.stop,
-                                            countCompletionTokens: false
-                                        )
-                                        if output.hitStop {
-                                            stoppedByRequestStop = true
+                                    }
+                                    let decoded = context.tokenizer.decode(tokenIds: tokens)
+                                    let candidate = Self.streamingSafePrefix(
+                                        decoded,
+                                        stopTokenFilter: stopTokenFilter,
+                                        requestStops: request.stop,
+                                        reasoningOpen: request.outputTraits.reasoningOpen
+                                    )
+                                    let step = textEmitter.step(
+                                        candidate: candidate,
+                                        structuredAccumulator: structuredAccumulator,
+                                        idleState: idleState,
+                                        onChunk: onChunk
+                                    )
+                                    if let labSerialHooks, let labCommitTracker {
+                                        let outputCount: Int
+                                        do {
+                                            outputCount = try Self.labSerialVisibleCommitCount(
+                                                modelID: request.model,
+                                                generatedTokenIDs: tokens,
+                                                decodedText: decoded,
+                                                emittedText: textEmitter.emittedContent,
+                                                stopTokenFilter: stopTokenFilter,
+                                                requestStops: request.stop
+                                            )
+                                        } catch let error as APIError {
+                                            labSerialHookError = error
+                                            return .stop
+                                        } catch {
+                                            labSerialHookError = Self.labSerialDecodeHookUnsupported("visible_prefix_accounting")
                                             return .stop
                                         }
-                                        if tokens.last.map(Self.isHarmonyTerminalToken) == true {
+                                        labCommitTracker.record(outputCount: outputCount)
+                                        if let outputCap = labSerialHooks.outputCap, outputCount >= outputCap {
                                             return .stop
                                         }
+                                    }
+                                    switch step {
+                                    case .more:
                                         return .more
-                                    } catch let error as APIError {
-                                        streamingParseError = error
+                                    case .requestStop:
+                                        stoppedByRequestStop = true
                                         return .stop
-                                    } catch {
-                                        streamingParseError = Self.malformedHarmonyResponseError()
+                                    case .toolCallComplete:
+                                        stoppedBySerialToolCall = true
                                         return .stop
-                                    }
-                                }
-                                let decoded = context.tokenizer.decode(tokenIds: tokens)
-                                let candidate = Self.streamingSafePrefix(
-                                    decoded,
-                                    stopTokenFilter: stopTokenFilter,
-                                    requestStops: request.stop,
-                                    reasoningOpen: request.outputTraits.reasoningOpen
-                                )
-                                let step = textEmitter.step(
-                                    candidate: candidate,
-                                    structuredAccumulator: structuredAccumulator,
-                                    idleState: idleState,
-                                    onChunk: onChunk
-                                )
-                                if let labSerialHooks, let labCommitTracker {
-                                    let outputCount: Int
-                                    do {
-                                        outputCount = try Self.labSerialVisibleCommitCount(
-                                            modelID: request.model,
-                                            generatedTokenIDs: tokens,
-                                            decodedText: decoded,
-                                            emittedText: textEmitter.emittedContent,
-                                            stopTokenFilter: stopTokenFilter,
-                                            requestStops: request.stop
-                                        )
-                                    } catch let error as APIError {
-                                        labSerialHookError = error
-                                        return .stop
-                                    } catch {
-                                        labSerialHookError = Self.labSerialDecodeHookUnsupported("visible_prefix_accounting")
+                                    case .structuredError:
                                         return .stop
                                     }
-                                    labCommitTracker.record(outputCount: outputCount)
-                                    if let outputCap = labSerialHooks.outputCap, outputCount >= outputCap {
-                                        return .stop
-                                    }
-                                }
-                                switch step {
-                                case .more:
-                                    return .more
-                                case .requestStop:
-                                    stoppedByRequestStop = true
-                                    return .stop
-                                case .toolCallComplete:
-                                    stoppedBySerialToolCall = true
-                                    return .stop
-                                case .structuredError:
-                                    return .stop
-                                }
+                                }()
+                                stoppedByDecodeCallback = disposition == .stop
+                                return disposition
                             })
                         }
                         // Warm-decode wall-time: from the first decoded token
@@ -11507,6 +11537,11 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         }
                         try grammarConstraint?.validate()
                         let resultTokenIDs = result.tokenIds
+                        let decodeUnreturnedTokenCount = Self.serialDecodeUnreturnedTokenCount(
+                            stoppedByCallback: stoppedByDecodeCallback,
+                            generatedTokenCount: resultTokenIDs.count,
+                            iteratorMaxTokens: iterator.maxTokens
+                        )
 
                         let final = Self.applyOutputFilters(
                             result.output,
@@ -11637,7 +11672,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             }
                             guard Self.reconcileConversationCacheLedger(
                                 kvCache, ledgerTokenCount: fullTokens.count,
-                                terminalModelStopStripped: terminalModelStopStripped
+                                unreturnedTokenCount: decodeUnreturnedTokenCount
                             ) else {
                                 await conversationCache.abort(lease)
                                 return validated

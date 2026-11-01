@@ -3877,6 +3877,7 @@
         "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:providerOwnedConversationKVBits",
         "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:providerOwnedConversationCache",
         "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:reconcileConversationCacheLedger",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:serialDecodeUnreturnedTokenCount",
         "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:serveIteratorParameters"
       ],
       "tests": [
@@ -3885,6 +3886,8 @@
         "phase3-binary/Tests/macprovider-cliTests/ConversationKVQuantizationTests.swift:testProviderOwnedConversationCacheQuantizesPrefilledSimpleLayersOnly",
         "phase3-binary/Tests/macprovider-cliTests/ConversationKVQuantizationTests.swift:testLedgerReconcileTrimsTheStrippedStopToken",
         "phase3-binary/Tests/macprovider-cliTests/ConversationKVQuantizationTests.swift:testLedgerReconcileRefusesAStaleShortCache",
+        "phase3-binary/Tests/macprovider-cliTests/ConversationKVQuantizationTests.swift:testDecodeUnreturnedTokenCountFollowsTheDecodeLoopsOwnStop",
+        "phase3-binary/Tests/macprovider-cliTests/ConversationKVQuantizationTests.swift:testStopSequenceTurnCommitsWithItsTokensInTheLedger",
         "phase3-binary/Tests/macprovider-cliTests/ConversationKVQuantizationTests.swift:testQuantizedEntryHitsOnlyTheSameKVBitsAndTrimsByLedger",
         "phase3-binary/Tests/macprovider-cliTests/ConversationKVQuantizationTests.swift:testColdTierSkipsQuantizedLayers",
         "phase3-binary/Tests/macprovider-cliTests/ConversationKVQuantizationRealModelTests.swift:testServeQuantizedConversationRecallsLateTurnOneFact",
