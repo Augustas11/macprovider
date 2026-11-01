@@ -132,7 +132,15 @@ scripts/ops/live-lock.sh acquire <label> --steal                 # only past the
   catalog release; `cli-release.sh` keeps `candidate_cut` blocked (NEXT
   `catalog-activate.sh status`) until Pearl's `/v1/autotune-release` reports
   it, and `canary-swap.sh` refuses (exit 3) a candidate whose baked catalog
-  Pearl does not serve. CI runs the preflight's offline pricing checks
+  Pearl does not serve. One exception follows the native-MTP order (a tuple's
+  first admission comes after the cut that packages its scope): when the only
+  difference from live is admission scope this cut packages, with rate card,
+  demand rank, candidate and artifact rows equal to live and CB entries added
+  only for those models (`lib/catalog-cut-scope.py`, fact `catalog_cut_scope`),
+  the cut is offered. Then rebind `native-mtp-admission-release.json` to the
+  new CLI and activate that catalog; `canary-swap.sh` accepts a live release
+  strictly newer than the baked one with the same policy and rate-card
+  content, and still refuses one older. CI runs the preflight's offline pricing checks
   (`scripts/catalog-pricing-preflight.py` in `make test-dist-catalog`: an
   unacknowledged rate-row move, `dist/coordinator.yaml` rate-card parity), so
   a catalog PR that `catalog-activate.sh` would refuse fails before merge.
