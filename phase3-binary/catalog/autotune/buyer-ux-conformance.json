@@ -274,6 +274,75 @@
       },
       "gateway": "https://api.malibu.tech/v1",
       "model": "Jundot/GLM-5.3-Flash-oQ4e-mtp"
+    },
+    "zai-org/glm-5.3-flash-abliterated": {
+      "capabilities": {
+        "base": true,
+        "messages": true,
+        "reasoning": false,
+        "response_format": true,
+        "responses": true,
+        "tool_choice": [
+          "auto",
+          "none",
+          "required",
+          "named"
+        ],
+        "tools": true
+      },
+      "checked_at": "2026-11-01T22:37:47Z",
+      "checks": {
+        "context_limit_error": {
+          "detail": "request_too_large",
+          "status": "pass"
+        },
+        "finish_reason": {
+          "detail": "length at max_tokens",
+          "status": "pass"
+        },
+        "json_object": {
+          "detail": "valid JSON object",
+          "status": "pass"
+        },
+        "messages_beta_thinking": {
+          "detail": "blocks ['thinking', 'text']",
+          "status": "pass"
+        },
+        "no_reasoning_leak": {
+          "detail": "reasoning model returned no reasoning_content",
+          "status": "fail"
+        },
+        "responses_function_tool": {
+          "detail": "function_call item",
+          "status": "pass"
+        },
+        "stop_sequences": {
+          "detail": "stopped at the stop sequence",
+          "status": "pass"
+        },
+        "stream_tool_deltas": {
+          "detail": "2 indexed call(s)",
+          "status": "pass"
+        },
+        "tool_round_trip": {
+          "detail": "answered from the tool result",
+          "status": "pass"
+        },
+        "tools_auto": {
+          "detail": "auto",
+          "status": "pass"
+        },
+        "tools_named": {
+          "detail": "named",
+          "status": "pass"
+        },
+        "tools_required": {
+          "detail": "required",
+          "status": "pass"
+        }
+      },
+      "gateway": "https://api.malibu.tech/v1",
+      "model": "grant-ai/GLM-5.3-Flash-Abliterated-MLX-4bit"
     }
   },
   "schema_version": "macprovider.buyer-ux-conformance.v1"
