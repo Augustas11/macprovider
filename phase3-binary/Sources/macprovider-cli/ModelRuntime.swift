@@ -1922,12 +1922,73 @@ actor ModelRuntime: ModelRuntimeServing {
         false
     }
 
-    /// mlx-swift-lm #312: TokenIterator can replace its local cache array when
-    /// dynamic KV quantization begins, leaving a caller-owned reusable cache
-    /// without generated-token state. Quantization remains available for
-    /// one-shot requests, but reusable conversation keys fail closed to fp16.
-    static func effectiveKVBits(configured: Int?, conversationKey: String?, containsImage: Bool = false) -> Int? {
-        !containsImage && conversationKey == nil ? configured : nil
+    /// mlx-swift-lm #312: TokenIterator quantizes into its own cache storage, so
+    /// a caller-owned reusable cache never receives the generated-token state.
+    /// The fix upstream (3.32.3) shares that storage only inside the package.
+    /// The serial path therefore quantizes a reusable conversation cache itself
+    /// (`providerOwnedConversationCache`) and never hands its iterator `kvBits`;
+    /// it passes `serialQuantizedConversation`. Continuous-batching rows do not
+    /// (they never run with `kvBits`, `kv_bits_unsupported`), and neither does
+    /// a cold-tier-eligible request: SPEC-037 persists only unquantized caches.
+    static func effectiveKVBits(
+        configured: Int?,
+        conversationKey: String?,
+        containsImage: Bool = false,
+        serialQuantizedConversation: Bool = false
+    ) -> Int? {
+        guard !containsImage else { return nil }
+        return conversationKey == nil || serialQuantizedConversation ? configured : nil
+    }
+
+    /// `kvBits` for a conversation cache the serial path owns: only models whose
+    /// whole uncapped serve cache is plain `KVCacheSimple`. Sliding-window,
+    /// recurrent and model-specific caches keep fp16 so their reuse rules
+    /// (rotating miss, recurrent checkpoints, prompt snapshots) stay unchanged.
+    nonisolated static func providerOwnedConversationKVBits(_ kvBits: Int?, model: any LanguageModel) -> Int? {
+        guard let kvBits,
+              let cache = try? model.newCache(parameters: GenerateParameters(maxKVSize: nil)),
+              !cache.isEmpty,
+              cache.allSatisfy({ type(of: $0) == KVCacheSimple.self })
+        else { return nil }
+        return kvBits
+    }
+
+    /// Quantize a caller-owned conversation cache in place of the iterator, so
+    /// the layers the conversation cache commits are the ones decode writes to.
+    /// An empty layer stays unquantized until a turn has prefilled into it.
+    nonisolated static func providerOwnedConversationCache(
+        _ cache: [KVCache], kvBits: Int?, groupSize: Int
+    ) throws -> [KVCache] {
+        guard let kvBits else { return cache }
+        return try cache.map { layer in
+            guard type(of: layer) == KVCacheSimple.self, let simple = layer as? KVCacheSimple, simple.offset > 0 else {
+                return layer
+            }
+            return try simple.toQuantized(groupSize: groupSize, bits: kvBits)
+        }
+    }
+
+    /// The committed canonical tokens are the hot entry's ledger, and reuse trims
+    /// by ledger arithmetic, so every exact-offset attention layer must hold
+    /// exactly that many positions. A natural end-of-sequence stop feeds its
+    /// token to the cache but leaves it out of the ledger, so that one position
+    /// is trimmed. Any other disagreement (a layer short of the ledger is the
+    /// mlx-swift-lm #312 stale cache) refuses the commit.
+    nonisolated static func reconcileConversationCacheLedger(
+        _ cache: [KVCache], ledgerTokenCount: Int, terminalModelStopStripped: Bool
+    ) -> Bool {
+        let attention = cache.filter { type(of: $0) == KVCacheSimple.self || $0 is QuantizedKVCache }
+        let excess = terminalModelStopStripped ? 1 : 0
+        guard attention.allSatisfy({ $0.offset == ledgerTokenCount || $0.offset == ledgerTokenCount + excess }) else {
+            let offsets = Set(attention.map(\.offset)).sorted()
+            FileHandle.standardError.write(Data(
+                "event=conv_cache action=commit_rejected reason=cache_offset_ledger_mismatch tokens=\(ledgerTokenCount) offsets=\(offsets)\n".utf8))
+            return false
+        }
+        for layer in attention where layer.offset > ledgerTokenCount {
+            guard layer.trim(layer.offset - ledgerTokenCount) == excess else { return false }
+        }
+        return true
     }
 
     static func effectivePrefillStepSize(configured: Int, containsImage: Bool) -> Int {
@@ -2411,13 +2472,21 @@ actor ModelRuntime: ModelRuntimeServing {
     /// capped `maxKVSize`. The iterator must therefore see the same uncapped
     /// parameters the cache was built with (#1998). Prompt length is still bounded
     /// by `validatePromptTokenCount` before allocation.
+    /// A leased conversation cache is quantized by the serial path, never by the
+    /// iterator, whose quantized layers the lease would not see (#965,
+    /// mlx-swift-lm #312).
     nonisolated static func serveIteratorParameters(
-        _ base: GenerateParameters, forceSimpleKV: Bool, reusedCache: Bool, cache: [KVCache] = []
+        _ base: GenerateParameters, forceSimpleKV: Bool, reusedCache: Bool, cache: [KVCache] = [],
+        leasedConversationCache: Bool = false
     ) -> GenerateParameters {
-        explicitCacheIteratorParameters(
+        var parameters = explicitCacheIteratorParameters(
             cacheParameters(base, forceSimpleKV: forceSimpleKV || reusedCache),
             cache: cache
         )
+        if leasedConversationCache {
+            parameters.kvBits = nil
+        }
+        return parameters
     }
 
     /// Serial completion budget. A capped serve cache (`maxKVSize`, a
@@ -10043,11 +10112,6 @@ maxTokens: boundedMaxTokens,
         }
 
         let maxContextTokens = maxContextTokens
-        let kvBitsOverride = Self.effectiveKVBits(
-            configured: kvBitsOverride,
-            conversationKey: request.conversationKey,
-            containsImage: request.containsNonTextMessageContentPart
-        )
         let speculativeCacheWrapValidated = speculativeCacheWrapValidated
         let prefillStepSize = Self.effectivePrefillStepSize(
             configured: prefillStepSize, containsImage: request.containsNonTextMessageContentPart)
@@ -10057,6 +10121,12 @@ maxTokens: boundedMaxTokens,
         // nonisolated inference closure (nil unless the disk tier is attached).
         configureConversationCacheMemoryBudget()
         let coldContext = coldContext(for: request, snapshot: snapshot)
+        let kvBitsOverride = Self.effectiveKVBits(
+            configured: kvBitsOverride,
+            conversationKey: request.conversationKey,
+            containsImage: request.containsNonTextMessageContentPart,
+            serialQuantizedConversation: coldContext?.eligible != true
+        )
         let inferenceGate = inferenceGate
         let blockingInferenceExecutor = blockingInferenceExecutor
         let stopTokenFilter = snapshot.nativeVisionProfile == nil
@@ -10175,13 +10245,16 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         request: request,
                         admission: nativeMTPAdmission
                     )
+                    // #965: a reusable conversation cache is quantized by this path,
+                    // never by its iterator (mlx-swift-lm #312).
+                    let conversationKVBits = Self.providerOwnedConversationKVBits(kvBitsOverride, model: context.model)
                     let lease = Self.serialPromptSnapshotLease(
                         conversationCacheAllowed
                             ? await conversationCache.begin(
                                 conversationKey: request.conversationKey,
                                 incomingTokens: promptTokenIds,
                                 modelID: request.model,
-                                kvBits: kvBitsOverride,
+                                kvBits: conversationKVBits,
                                 cold: coldContext,
                                 fleetGrant: request.fleetCacheGrant
                             )
@@ -10200,7 +10273,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                     }
                         do {
                             let generationContext = Self.harmonyTerminalPreservingContext(from: context, modelID: request.model)
-                            let kvCache: [KVCache]
+                            var kvCache: [KVCache]
                             var iteratorInput: LMInput
                             let forceSimpleKV = Self.forceSimpleKVCache(
                                 eligible: coldContext?.eligible == true,
@@ -10245,7 +10318,10 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             }
                             let lfmReferenceStep = Self.lfmSerialReferencePrefillStepSize(
                                 model: generationContext.model, prefillStepSize: prefillStepSize)
-                            if isLocalRequest || lfmReferenceStep != nil, !request.containsNonTextMessageContentPart {
+                            // #965: a quantized conversation cache prefills its prompt at fp16 up
+                            // to the last token, then this path quantizes it (as the iterator would).
+                            let ownsQuantizedConversationCache = lease != nil && conversationKVBits != nil
+                            if isLocalRequest || lfmReferenceStep != nil || ownsQuantizedConversationCache, !request.containsNonTextMessageContentPart {
                                 // SPEC-001-R011: a local prompt prefills in chunks with a
                                 // preemption check before each, so a buyer never waits on a
                                 // long local prefill. LFM uses its fixed reference plan on
@@ -10254,7 +10330,8 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                 let resumeAt = try Self.cancellableLocalPrefill(
                                     tokenCount: promptTokenIds.count, from: start, stepSize: prefillStepSize,
                                     referenceStepSize: lfmReferenceStep
-                                        ?? (generationContext.model is DeepseekV4Model ? DeepseekV4Model.prefillStepSize : nil),
+                                        ?? (generationContext.model is DeepseekV4Model ? DeepseekV4Model.prefillStepSize : nil)
+                                        ?? (ownsQuantizedConversationCache ? prefillStepSize : nil),
                                     isCancelled: { Task.isCancelled || shouldCancel() || drainCancelled.isFired }
                                 ) { range in
                                     let chunk = LMInput.Text(tokens: MLXArray(Array(promptTokenIds[range])))
@@ -10266,10 +10343,13 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                 }
                             }
 
+                            kvCache = try Self.providerOwnedConversationCache(
+                                kvCache, kvBits: ownsQuantizedConversationCache ? conversationKVBits : nil,
+                                groupSize: parameters.kvGroupSize)
                             let generation = Self.serveGenerationConfiguration(
                                 parameters: Self.serveIteratorParameters(
                                     parameters, forceSimpleKV: forceSimpleKV, reusedCache: lease?.reusableCache != nil,
-                                    cache: kvCache),
+                                    cache: kvCache, leasedConversationCache: lease != nil),
                                 completePromptTokenIDs: parameters.repetitionPenalty == nil ? [] : promptTokenIds.map(Int.init))
                             let iterator = try TokenIterator(
                                 input: iteratorInput, model: generationContext.model, cache: kvCache, state: iteratorState,
@@ -10495,6 +10575,13 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             }
                             guard Self.serialHybridCacheCanPublishTerminalCheckpoint(
                                 cache: kvCache,
+                                terminalModelStopStripped: terminalModelStopStripped
+                            ) else {
+                                await conversationCache.abort(lease)
+                                return completion
+                            }
+                            guard Self.reconcileConversationCacheLedger(
+                                kvCache, ledgerTokenCount: fullTokens.count,
                                 terminalModelStopStripped: terminalModelStopStripped
                             ) else {
                                 await conversationCache.abort(lease)
@@ -10947,11 +11034,6 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
         }
 
         let maxContextTokens = maxContextTokens
-        let kvBitsOverride = Self.effectiveKVBits(
-            configured: kvBitsOverride,
-            conversationKey: request.conversationKey,
-            containsImage: request.containsNonTextMessageContentPart
-        )
         let speculativeCacheWrapValidated = speculativeCacheWrapValidated
         let prefillStepSize = Self.effectivePrefillStepSize(
             configured: prefillStepSize, containsImage: request.containsNonTextMessageContentPart)
@@ -10960,6 +11042,12 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
         // SPEC-037 stage 5 — per-request cold-tier context (streaming endpoint).
         configureConversationCacheMemoryBudget()
         let coldContext = coldContext(for: request, snapshot: snapshot)
+        let kvBitsOverride = Self.effectiveKVBits(
+            configured: kvBitsOverride,
+            conversationKey: request.conversationKey,
+            containsImage: request.containsNonTextMessageContentPart,
+            serialQuantizedConversation: coldContext?.eligible != true
+        )
         let inferenceGate = inferenceGate
         let blockingInferenceExecutor = blockingInferenceExecutor
         let stopTokenFilter = snapshot.nativeVisionProfile == nil
@@ -11154,13 +11242,16 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         request: request,
                         admission: nativeMTPAdmission
                     )
+                    // #965: a reusable conversation cache is quantized by this path,
+                    // never by its iterator (mlx-swift-lm #312).
+                    let conversationKVBits = Self.providerOwnedConversationKVBits(kvBitsOverride, model: context.model)
                     let lease = Self.serialPromptSnapshotLease(
                         conversationCacheAllowed
                             ? await conversationCache.begin(
                                 conversationKey: request.conversationKey,
                                 incomingTokens: promptTokenIds,
                                 modelID: request.model,
-                                kvBits: kvBitsOverride,
+                                kvBits: conversationKVBits,
                                 cold: coldContext,
                                 fleetGrant: request.fleetCacheGrant
                             )
@@ -11181,7 +11272,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                     // iterator construction) aborts the lease below; nothing is
                     // committed for a request that did not finish.
                     do {
-                        let kvCache: [KVCache]
+                        var kvCache: [KVCache]
                         var iteratorInput: LMInput
                         let forceSimpleKV = Self.forceSimpleKVCache(
                             eligible: coldContext?.eligible == true,
@@ -11223,7 +11314,10 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         }
                         let lfmReferenceStep = Self.lfmSerialReferencePrefillStepSize(
                             model: generationContext.model, prefillStepSize: prefillStepSize)
-                        if isLocalRequest || lfmReferenceStep != nil, !request.containsNonTextMessageContentPart {
+                        // #965: a quantized conversation cache prefills its prompt at fp16 up
+                        // to the last token, then this path quantizes it (as the iterator would).
+                        let ownsQuantizedConversationCache = lease != nil && conversationKVBits != nil
+                        if isLocalRequest || lfmReferenceStep != nil || ownsQuantizedConversationCache, !request.containsNonTextMessageContentPart {
                             // SPEC-001-R011: a local prompt prefills in chunks with a
                             // preemption check before each, so a buyer never waits on a
                             // long local prefill. LFM uses its fixed reference plan on
@@ -11232,7 +11326,8 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             let resumeAt = try Self.cancellableLocalPrefill(
                                 tokenCount: promptTokenIds.count, from: start, stepSize: prefillStepSize,
                                 referenceStepSize: lfmReferenceStep
-                                    ?? (generationContext.model is DeepseekV4Model ? DeepseekV4Model.prefillStepSize : nil),
+                                    ?? (generationContext.model is DeepseekV4Model ? DeepseekV4Model.prefillStepSize : nil)
+                                    ?? (ownsQuantizedConversationCache ? prefillStepSize : nil),
                                 isCancelled: { Task.isCancelled || shouldCancel() || drainCancelled.isFired }
                             ) { range in
                                 let chunk = LMInput.Text(tokens: MLXArray(Array(promptTokenIds[range])))
@@ -11274,10 +11369,13 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                             allowedFunctionNames: Self.toolFunctionNames(from: request.promptSource.tools),
                             stopCandidates: stopTokenFilter.tokens
                         )
+                        kvCache = try Self.providerOwnedConversationCache(
+                            kvCache, kvBits: ownsQuantizedConversationCache ? conversationKVBits : nil,
+                            groupSize: parameters.kvGroupSize)
                         let generation = Self.serveGenerationConfiguration(
                             parameters: Self.serveIteratorParameters(
                                 parameters, forceSimpleKV: forceSimpleKV, reusedCache: lease?.reusableCache != nil,
-                                cache: kvCache),
+                                cache: kvCache, leasedConversationCache: lease != nil),
                             completePromptTokenIDs: parameters.repetitionPenalty == nil ? [] : promptTokenIds.map(Int.init))
                         let iterator = try TokenIterator(
                             input: iteratorInput, model: generationContext.model, cache: kvCache, state: iteratorState,
@@ -11537,6 +11635,13 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                 await conversationCache.abort(lease)
                                 return validated
                             }
+                            guard Self.reconcileConversationCacheLedger(
+                                kvCache, ledgerTokenCount: fullTokens.count,
+                                terminalModelStopStripped: terminalModelStopStripped
+                            ) else {
+                                await conversationCache.abort(lease)
+                                return validated
+                            }
                             guard let recurrentCheckpoints = Self.serialTerminalRecurrentCheckpoints(
                                 promptCheckpoints: recurrent.checkpoints,
                                 cache: kvCache,
@@ -11773,6 +11878,10 @@ maxTokens: 1,
     /// A snapshot of the hot (RAM) conversation cache residency for `kv-cache status`.
     func conversationCacheCounters() async -> ConversationCacheCountersSnapshot {
         await conversationCache.countersSnapshot()
+    }
+
+    func conversationCacheEntryLedgerForTest(conversationKey: String) async -> (tokens: Int, offsets: [Int], classes: [String])? {
+        await conversationCache.entryLedgerForTest(conversationKey: conversationKey)
     }
 
     func hotConversationStats() async -> (entries: Int, tokens: Int) {

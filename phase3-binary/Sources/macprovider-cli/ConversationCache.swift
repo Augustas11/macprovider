@@ -945,6 +945,15 @@ actor ConversationCache {
         currentStats()
     }
 
+    /// Test-only: the resident entry's ledger length, per-layer offsets and
+    /// cache classes for one key (#965 ledger checks).
+    func entryLedgerForTest(conversationKey: String) -> (tokens: Int, offsets: [Int], classes: [String])? {
+        entries[conversationKey].map { entry in
+            (entry.canonicalPromptTokens.count, entry.kvCache.layers.map(\.offset),
+             entry.kvCache.layers.map { String(describing: type(of: $0)) })
+        }
+    }
+
     /// One actor turn copies counters and gauges without evaluating MLX arrays.
     func countersSnapshot() -> ConversationCacheCountersSnapshot {
         var models = counters

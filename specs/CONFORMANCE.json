@@ -3869,6 +3869,39 @@
       }
     },
     {
+      "requirement_id": "SPEC-024-R006",
+      "spec_id": "SPEC-024",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:effectiveKVBits",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:providerOwnedConversationKVBits",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:providerOwnedConversationCache",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:reconcileConversationCacheLedger",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:serveIteratorParameters"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/ConversationKVQuantizationTests.swift:testSerialConversationKeepsConfiguredKVBitsUnlessColdTierOrImage",
+        "phase3-binary/Tests/macprovider-cliTests/ConversationKVQuantizationTests.swift:testLeasedConversationIteratorNeverQuantizes",
+        "phase3-binary/Tests/macprovider-cliTests/ConversationKVQuantizationTests.swift:testProviderOwnedConversationCacheQuantizesPrefilledSimpleLayersOnly",
+        "phase3-binary/Tests/macprovider-cliTests/ConversationKVQuantizationTests.swift:testLedgerReconcileTrimsTheStrippedStopToken",
+        "phase3-binary/Tests/macprovider-cliTests/ConversationKVQuantizationTests.swift:testLedgerReconcileRefusesAStaleShortCache",
+        "phase3-binary/Tests/macprovider-cliTests/ConversationKVQuantizationTests.swift:testQuantizedEntryHitsOnlyTheSameKVBitsAndTrimsByLedger",
+        "phase3-binary/Tests/macprovider-cliTests/ConversationKVQuantizationTests.swift:testColdTierSkipsQuantizedLayers",
+        "phase3-binary/Tests/macprovider-cliTests/ConversationKVQuantizationRealModelTests.swift:testServeQuantizedConversationRecallsLateTurnOneFact",
+        "phase3-binary/Tests/macprovider-cliTests/ConversationKVQuantizationRealModelTests.swift:testCancelledQuantizedTurnCommitsNoPartialCache",
+        "phase3-binary/Tests/macprovider-cliTests/ConversationKVQuantizationRealModelTests.swift:testIteratorOwnedQuantizationStillLeavesCallerCacheStale",
+        "phase3-binary/Tests/macprovider-cliTests/ConversationKVQuantizationRealModelTests.swift:testColdTierEligibleConversationPersistsAndPromotesRealModelEntry"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/965",
+        "rationale": "Keyed serial requests dropped configured kv_bits because mlx-swift-lm's iterator quantizes into storage the caller cannot see (#312, fixed upstream only inside the package). The serial path now owns quantization of its reusable cache and checks offsets against the committed ledger. Real-model gates run on a local full-attention model; pending a signed journey."
+      }
+    },
+    {
       "requirement_id": "SPEC-032-R001",
       "spec_id": "SPEC-032",
       "state": "conformant",

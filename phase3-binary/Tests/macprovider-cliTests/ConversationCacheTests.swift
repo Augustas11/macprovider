@@ -122,7 +122,7 @@ final class ConversationCacheTests: XCTestCase {
         XCTAssertNil(lease)
     }
 
-    func testQuantizedKVIsDisabledForReusableConversationKeys() {
+    func testKeyedKVBitsStayOffWithoutSerialOwnership() {
         XCTAssertNil(ModelRuntime.effectiveKVBits(configured: 8, conversationKey: "conv:buyer-1"))
         XCTAssertNil(ModelRuntime.effectiveKVBits(configured: 4, conversationKey: "   "))
         XCTAssertEqual(ModelRuntime.effectiveKVBits(configured: 8, conversationKey: nil), 8)
