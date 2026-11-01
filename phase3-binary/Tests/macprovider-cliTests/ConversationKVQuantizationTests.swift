@@ -17,6 +17,11 @@ final class ConversationKVQuantizationTests: XCTestCase {
         }
     }
 
+    override class func setUp() {
+        super.setUp()
+        Device.setDefault(device: Device(.cpu))
+    }
+
     func testSerialConversationKeepsConfiguredKVBitsUnlessColdTierOrImage() {
         XCTAssertEqual(ModelRuntime.effectiveKVBits(
             configured: 8, conversationKey: "conv:buyer-1", serialQuantizedConversation: true), 8)
@@ -45,6 +50,7 @@ final class ConversationKVQuantizationTests: XCTestCase {
     }
 
     func testProviderOwnedConversationCacheQuantizesPrefilledSimpleLayersOnly() throws {
+        try requireMetallib()
         let filled = simpleCache(tokens: 40)
         let empty = KVCacheSimple()
         let quantized = try filled.toQuantized(groupSize: 64, bits: 8)
@@ -96,6 +102,7 @@ final class ConversationKVQuantizationTests: XCTestCase {
     }
 
     func testLedgerReconcileChecksQuantizedLayers() throws {
+        try requireMetallib()
         let quantized = try simpleCache(tokens: 11).toQuantized(groupSize: 64, bits: 8)
         XCTAssertTrue(ModelRuntime.reconcileConversationCacheLedger(
             [quantized], ledgerTokenCount: 10, terminalModelStopStripped: true))
@@ -107,6 +114,7 @@ final class ConversationKVQuantizationTests: XCTestCase {
     /// A quantized hot entry reuses only a quantized lease, and trims by the
     /// ledger like an unquantized one.
     func testQuantizedEntryHitsOnlyTheSameKVBitsAndTrimsByLedger() async throws {
+        try requireMetallib()
         let cache = makeConversationCacheForTest(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
         let tokens = (0 ..< 64).map(Int32.init)
         let firstValue = await cache.begin(
@@ -138,6 +146,7 @@ final class ConversationKVQuantizationTests: XCTestCase {
 
     /// SPEC-037: quantized reusable state never reaches the disk tier.
     func testColdTierSkipsQuantizedLayers() async throws {
+        try requireMetallib()
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("kv-quant-cold-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -167,6 +176,15 @@ final class ConversationKVQuantizationTests: XCTestCase {
             nowMillis: Int(Date().timeIntervalSince1970 * 1000))
         XCTAssertNil(snapshot)
         await store.deactivate()
+    }
+
+    /// Building MLX tensors needs the default metallib even on the CPU device.
+    private func requireMetallib() throws {
+        let testBundle = Bundle(for: Self.self)
+        guard PagedKVMetallibGate.defaultMetallibExists(
+            bundleURL: testBundle.resourceURL, executableURL: testBundle.executableURL) else {
+            throw XCTSkip("MLX default metallib is unavailable in this test host")
+        }
     }
 
     private func same(_ lhs: KVCache?, _ rhs: KVCache) -> Bool {
