@@ -230,6 +230,26 @@ printf '{"generated_at":"2026-10-21T00:00:00Z","version":"v-old"}\n' >"$T/coord/
 run_rc 3 "check refuses a rate card Pearl does not serve" "$SWAP" check --version "$CAND" --tarball "$T/good.tar.gz"
 grep -q "rate-card.json generated_at/version" "$T/err" || die "rate-card mismatch not named"
 mv "$T/rate-card.live" "$T/coord/v1/rate-card"
+# 1b. a cut that packaged a first native-MTP admission scope bakes a catalog
+#     older than the rebound one Pearl then serves. The provider accepts a newer
+#     fetched feed of the same policy, so check passes when the rate-card content
+#     version is the same; a changed price or an older/equal live stamp still refuses.
+cp "$T/coord/v1/autotune-release" "$T/release.live"
+cp "$T/coord/v1/rate-card" "$T/rate-card.live"
+printf '{"release_id":"rel-rebound","generated_at":"2026-10-24T06:00:00Z","status":"live_verified"}\n' >"$T/coord/v1/autotune-release"
+printf '{"generated_at":"2026-10-24T06:00:00Z","version":"v-new"}\n' >"$T/coord/v1/rate-card"
+run_rc 0 "check passes a baked catalog older than Pearl's rebound release" "$SWAP" check --version "$CAND" --tarball "$T/newcat.tar.gz"
+grep -q "Pearl serves the newer rel-rebound" "$T/err" || die "newer live release not named"
+printf '{"generated_at":"2026-10-24T06:00:00Z","version":"v-repriced"}\n' >"$T/coord/v1/rate-card"
+run_rc 3 "check refuses a newer live release whose rate card content differs" "$SWAP" check --version "$CAND" --tarball "$T/newcat.tar.gz"
+grep -q "differs: release_id" "$T/err" || die "repriced newer release not refused"
+printf '{"generated_at":"2026-10-22T06:00:00Z","version":"v-new"}\n' >"$T/coord/v1/rate-card"
+run_rc 3 "check refuses a live rate card older than the baked one" "$SWAP" check --version "$CAND" --tarball "$T/newcat.tar.gz"
+printf '{"release_id":"rel-rebound","generated_at":"2026-10-24T06:00:00Z","policy_version":"autotune-policy-v2","status":"live_verified"}\n' >"$T/coord/v1/autotune-release"
+printf '{"generated_at":"2026-10-24T06:00:00Z","version":"v-new"}\n' >"$T/coord/v1/rate-card"
+run_rc 3 "check refuses a newer live release of another policy_version" "$SWAP" check --version "$CAND" --tarball "$T/newcat.tar.gz"
+mv "$T/release.live" "$T/coord/v1/autotune-release"
+mv "$T/rate-card.live" "$T/coord/v1/rate-card"
 run_rc 3 "check refuses without COORDINATOR_URL" env -u COORDINATOR_URL "$SWAP" check --version "$CAND" --tarball "$T/good.tar.gz"
 run_rc 3 "check refuses an unreadable coordinator" env COORDINATOR_URL="$COORDINATOR_URL/missing" "$SWAP" check --version "$CAND" --tarball "$T/good.tar.gz"
 

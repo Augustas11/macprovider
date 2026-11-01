@@ -16,7 +16,13 @@
 #   2 candidate_cut         acceptance-candidate.yml on the exact origin/main SHA,
 #                           promotion_ready=true, strict_post_migration; blocked until
 #                           origin/main's catalog release is the one Pearl serves
-#                           (/v1/autotune-release): activate it first (catalog-activate.sh)
+#                           (/v1/autotune-release): activate it first (catalog-activate.sh).
+#                           Exception: the difference is only native-MTP admission scope
+#                           that this cut packages, with rate card, demand rank, candidate
+#                           and artifact rows equal to live and CB entries added only for
+#                           those models (lib/catalog-cut-scope.py); the rebound catalog is
+#                           then activated before the canary swap (canary-swap.sh refuses
+#                           a baked catalog newer than Pearl's)
 #   3 candidate_env_approval  production-release approval (owner account)
 #   4 signed_byte_verification  checksums, pearl-release.json signature,
 #                           codesign CDHash/Team/Identifier vs provider_code_identity,
@@ -320,6 +326,21 @@ gather() {
   fi
   fact committed_catalog_release_id "$CATALOG_COMMITTED_RID"
   fact live_catalog_release_id "$CATALOG_LIVE_RID"
+  # A tuple's first native-MTP admission needs the cut that packages its scope
+  # (native-mtp-enablement.md "Order"), so committed != live may be cut first
+  # when that scope is the only difference (lib/catalog-cut-scope.py).
+  CATALOG_CUT_SCOPE=""
+  if [ -n "$CATALOG_COMMITTED_RID" ] && [ -n "$CATALOG_LIVE_RID" ] && [ "$CATALOG_COMMITTED_RID" != "$CATALOG_LIVE_RID" ]; then
+    local live_dir="$OPS_TMP_DIR/live-catalog" route
+    mkdir -p "$live_dir"
+    cp "$OPS_TMP_DIR/autotune-release.json" "$live_dir/autotune-release"
+    for route in rate-card demand-rank autotune-candidates catalog-artifacts continuous-batching-policy; do
+      [ "$(http_get "$(coordinator_url)/v1/$route" "$live_dir/$route")" = 200 ] || rm -f "$live_dir/$route"
+    done
+    CATALOG_CUT_SCOPE="$(python3 "$OPS_DIR/lib/catalog-cut-scope.py" --repo "$REPO_ROOT" --commit "$main_sha" \
+      --version "$V" --live-dir "$live_dir" 2>&1 | tail -n 1)" || true
+    fact catalog_cut_scope "$CATALOG_CUT_SCOPE"
+  fi
   # Repository-admission runtimes report the applied policy on /healthz.
   local policy_target=""
   [ ! -f "$OPS_TMP_DIR/healthz.json" ] ||
@@ -602,13 +623,16 @@ bash scripts/release-staged-version-policy.sh v$V" \
     if [ "$head_sha" != "$main_sha" ]; then
       set_next candidate_cut blocked "Cut the v$V candidate" "" \
         "run from a clean worktree whose HEAD is origin/main ($main_sha)"
-    elif [ -z "$CATALOG_COMMITTED_RID" ] || [ "$CATALOG_COMMITTED_RID" != "$CATALOG_LIVE_RID" ]; then
+    elif [ -z "$CATALOG_COMMITTED_RID" ] || { [ "$CATALOG_COMMITTED_RID" != "$CATALOG_LIVE_RID" ] &&
+        [ "${CATALOG_CUT_SCOPE%%:*}" != admission_scope_only ]; }; then
       set_next candidate_cut blocked "Activate the catalog before cutting v$V" "scripts/ops/catalog-activate.sh status" \
-        "origin/main's catalog release ${CATALOG_COMMITTED_RID:-<unreadable>} is not live on Pearl (serves ${CATALOG_LIVE_RID:-<unreadable>}); the candidate bakes it, so activate the catalog first"
+        "origin/main's catalog release ${CATALOG_COMMITTED_RID:-<unreadable>} is not live on Pearl (serves ${CATALOG_LIVE_RID:-<unreadable>}); the candidate bakes it, so activate the catalog first${CATALOG_CUT_SCOPE:+ (${CATALOG_CUT_SCOPE})}"
     elif remote_tag_exists "v$V"; then
       set_next candidate_cut blocked "Cut the v$V candidate" "" \
         "tag v$V already exists on origin; acceptance signing is forbidden for an existing tag"
     else
+      [ "$CATALOG_COMMITTED_RID" = "$CATALOG_LIVE_RID" ] ||
+        why="$why; origin/main's catalog $CATALOG_COMMITTED_RID differs from live $CATALOG_LIVE_RID only by native-MTP admission scope this cut packages (${CATALOG_CUT_SCOPE#*: }): after the cut, rebind native-mtp-admission-release.json to v$V and activate the catalog before the canary swap"
       set_next candidate_cut mutate "Cut the promotion-ready v$V candidate on the exact origin/main SHA" \
 "gh workflow run acceptance-candidate.yml -R $(gh_repo) --ref main \\
   -f candidate_ref=refs/heads/main -f candidate_sha=$main_sha -f tag=v$V \\

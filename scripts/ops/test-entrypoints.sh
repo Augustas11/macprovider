@@ -954,7 +954,88 @@ expect_next candidate_cut:blocked
 printf '{"release_id":"%s","status":"live_verified","feeds":{}}' "$COMMITTED_RID" > "$tmp/svc/autotune-release.json"
 MACPROVIDER_OPS_STATE_DIR="$tmp/state-catalog-cut" run_rc 0 "cli status with the committed catalog live" scripts/ops/cli-release.sh status
 expect_next candidate_cut:mutate
-rm -rf "$tmp/svc/autotune-release.json" "$tmp/state-catalog-cut"
+# A first native-MTP admission needs the cut that packages its scope
+# (native-mtp-enablement.md "Order"): when Pearl serves the previous release
+# and only that scope (plus CB entries for the same models) differs, the cut is
+# offered; any rate-card, demand or model-row difference keeps it blocked.
+# The fixture is the committed catalog's own parent release, whose feeds Pearl
+# serves byte for byte (verified against /v1/autotune-release digests).
+cut_scope_live() {  # cut_scope_live COMMIT: serve that commit's catalog as Pearl's
+  mkdir -p "$tmp/svc/routes"
+  python3 - "$W" "$1" "$tmp/svc" <<'PY'
+import hashlib, json, subprocess, sys
+w, commit, svc = sys.argv[1:4]
+show = lambda p: subprocess.check_output(["git", "-C", w, "show", f"{commit}:phase3-binary/catalog/autotune/{p}"])
+release = json.loads(show("release.json"))
+feeds = {}
+for name, key, route in [("rate-card.json", "rate_card", "rate-card"), ("demand-rank.json", "demand_rank", "demand-rank"),
+                         ("autotune-candidates.json", "autotune_candidates", "autotune-candidates"),
+                         ("autotune-artifacts.json", "catalog_artifacts", "catalog-artifacts"),
+                         ("continuous-batching-policy.json", "continuous_batching_policy", "continuous-batching-policy")]:
+    body = show(name)
+    open(f"{svc}/routes/v1_{route}", "wb").write(body)
+    feeds[key] = {"sha256": hashlib.sha256(body).hexdigest()}
+json.dump({"release_id": release["release_id"], "generated_at": release["generated_at"],
+           "policy_version": release["policy_version"], "status": "live_verified", "feeds": feeds},
+          open(f"{svc}/autotune-release.json", "w"))
+PY
+}
+SCOPE_PARENT="$(git -C "$W" log -2 --format=%H "$B" -- phase3-binary/catalog/autotune/release.json | sed -n 2p)"
+BOUND_COMMIT="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["entry"]["source_commit"])' "$W/phase3-binary/catalog/autotune/native-mtp-admission-release.json")"
+NEW_SCOPE="$(python3 - "$W" "$B" "$BOUND_COMMIT" <<'PY'
+import json, subprocess, sys
+w, head, bound = sys.argv[1:4]
+f = ("model_key", "artifact_hash", "hardware_class", "ram_bytes", "qualified_slots")
+load = lambda c: json.loads(subprocess.check_output(["git", "-C", w, "show", f"{c}:phase3-binary/catalog/autotune/native-mtp-admission.json"]))["entries"]
+packaged = {tuple(e.get(k) for k in f) for e in load(bound)}
+print(" ".join(sorted({e["model_key"] for e in load(head) if tuple(e.get(k) for k in f) not in packaged})))
+PY
+)"
+if [ -n "$NEW_SCOPE" ] && [ -n "$SCOPE_PARENT" ]; then
+  cut_scope_live "$SCOPE_PARENT"
+  MACPROVIDER_OPS_STATE_DIR="$tmp/state-catalog-cut" run_rc 0 "cli status with only new native-MTP scope not live" scripts/ops/cli-release.sh status
+  expect_next candidate_cut:mutate
+  [ "$(fact_of catalog_cut_scope)" = "admission_scope_only: $NEW_SCOPE" ] && ok || bad "cut scope fact: $(fact_of catalog_cut_scope)"
+  case "$(next_field reason)" in
+    *"only by native-MTP admission scope this cut packages ($NEW_SCOPE): after the cut, rebind native-mtp-admission-release.json to v$CAND"*) ok ;;
+    *) bad "scope-only cut reason: $(next_field reason)" ;;
+  esac
+  # A price that is not live keeps the cut blocked: the canary would bake it.
+  python3 - "$tmp/svc" <<'PY'
+import hashlib, json, sys
+svc = sys.argv[1]
+card = json.load(open(f"{svc}/routes/v1_rate-card"))
+row = next(iter(card["rows"].values()))
+row["prompt_rate_per_mtok"] += 1
+body = json.dumps(card).encode()
+open(f"{svc}/routes/v1_rate-card", "wb").write(body)
+rel = json.load(open(f"{svc}/autotune-release.json"))
+rel["feeds"]["rate_card"]["sha256"] = hashlib.sha256(body).hexdigest()
+json.dump(rel, open(f"{svc}/autotune-release.json", "w"))
+PY
+  MACPROVIDER_OPS_STATE_DIR="$tmp/state-catalog-cut" run_rc 0 "cli status with a rate card that is not live" scripts/ops/cli-release.sh status
+  expect_next candidate_cut:blocked
+  case "$(next_field reason)" in
+    *"is not live on Pearl"*"blocked: rate-card.json differs from live beyond its release stamps"*) ok ;;
+    *) bad "repriced cut reason: $(next_field reason)" ;;
+  esac
+  # A live feed that does not verify against /v1/autotune-release is refused.
+  cut_scope_live "$SCOPE_PARENT"
+  printf '{}' > "$tmp/svc/routes/v1_demand-rank"
+  MACPROVIDER_OPS_STATE_DIR="$tmp/state-catalog-cut" run_rc 0 "cli status with an unverified live feed" scripts/ops/cli-release.sh status
+  expect_next candidate_cut:blocked
+  case "$(next_field reason)" in
+    *"demand-rank does not verify against /v1/autotune-release"*) ok ;;
+    *) bad "unverified feed reason: $(next_field reason)" ;;
+  esac
+else
+  # Once a rebind packages every committed scope there is nothing to tolerate;
+  # scripts/tests/test_catalog_cut_scope.py covers the classifier on its own.
+  printf 'skip: committed catalog adds no admission scope beyond its bound release\n'
+fi
+rm -rf "$tmp/svc/autotune-release.json" "$tmp/svc/routes/v1_rate-card" "$tmp/svc/routes/v1_demand-rank" \
+  "$tmp/svc/routes/v1_autotune-candidates" "$tmp/svc/routes/v1_catalog-artifacts" \
+  "$tmp/svc/routes/v1_continuous-batching-policy" "$tmp/state-catalog-cut"
 
 # ==== cli-release (structured evidence) =======================================
 health v9.0.0 $LIVE
