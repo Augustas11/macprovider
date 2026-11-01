@@ -136,6 +136,40 @@ class SignedPairInterfaceTests(unittest.TestCase):
         self.assertNotEqual(first, second)
         self.assertEqual(run(None), '/s/catalog-r/signed-native-pair')
 
+    def signed_static(self):
+        """Published feed bytes matching the plan target, as the intent check reads them."""
+        static = self.root / 'static'
+        static.mkdir(exist_ok=True)
+        target = self.plan['target']
+        policy = {'entries': [{'model_key': target['model_key'], 'model_sha256': target['model_hash'],
+                               'tuple_sha256': target['cb_tuple_sha256']}]}
+        (static / 'continuous-batching-policy.json').write_text(json.dumps(policy))
+        feeds = {}
+        for endpoint in sorted(target['feed_sha256']):
+            name = endpoint.removeprefix('/v1/')
+            sig = name.endswith('.sig')
+            base = name[:-4] if sig else name
+            file = static / ({'catalog-artifacts': 'autotune-artifacts'}.get(base, base) + '.json' + ('.sig' if sig else ''))
+            if not file.exists():
+                file.write_text(endpoint)
+            feeds[endpoint] = hashlib.sha256(file.read_bytes()).hexdigest()
+        target['feed_sha256'] = feeds
+        target['cb_policy_sha256'] = feeds['/v1/continuous-batching-policy']
+        self.plan_path = self.write('plan.json', self.plan)
+        return static
+
+    def test_intent_refuses_a_cb_tuple_from_another_release(self):
+        # 2026-11-02 pair5 carried v280's CB tuple into v280-r2 and could never
+        # pass the Studio readiness proof; it timed out after an hour's pause.
+        import time
+        self.plan['deadline_epoch'] = int(time.time()) + 3300
+        static = self.signed_static()
+        rid = self.plan['target']['catalog_release_id']
+        self.assertEqual(self.python(CONTENT, 'PAIR_INTENT', self.plan_path, rid, static).returncode, 0)
+        self.plan['target']['cb_tuple_sha256'] = 'f' * 64
+        self.plan_path = self.write('plan.json', self.plan)
+        self.assertNotEqual(self.python(CONTENT, 'PAIR_INTENT', self.plan_path, rid, static).returncode, 0)
+
     def test_deadline_outside_studio_arm_window_refused_before_custody(self):
         import time
         def check(deadline):
@@ -144,7 +178,8 @@ class SignedPairInterfaceTests(unittest.TestCase):
             status = subprocess.run(['bash', '-c', function(CATALOG, 'signed_pair_deadline_ok') + '\nsigned_pair_deadline_ok\n'],
                                     env=dict(os.environ, CATALOG_SIGNED_PAIR_PLAN=str(self.plan_path)),
                                     capture_output=True, text=True)
-            prepare = self.python(CONTENT, 'PAIR_INTENT', self.plan_path, self.plan['target']['catalog_release_id'])
+            prepare = self.python(CONTENT, 'PAIR_INTENT', self.plan_path, self.plan['target']['catalog_release_id'],
+                                  self.signed_static())
             return status.returncode == 0, prepare.returncode == 0, status.stdout
         now = int(time.time())
         self.assertEqual(check(now + 3300)[:2], (True, True))

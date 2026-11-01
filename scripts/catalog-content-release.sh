@@ -342,9 +342,9 @@ ccr_signed_pair_prepare() {
   "$SCRIPT_DIR/ops/live-lock.sh" status | python3 -c 'import json,os,sys; r=(json.load(sys.stdin).get("lock") or {}); sys.exit(0 if r.get("owner")==os.environ.get("MACPROVIDER_OPS_OWNER") and r.get("purpose")=="catalog-activate:signed_native_pair" and r.get("pid_bound") is False else 1)' || fatal "signed pair does not own the durable live-ops lock"
   # The intent carries no private key. The lease-owned reader creates its
   # transaction key in the external operator secret store, before any pause.
-  SIGNED_PAIR_TXID="$(python3 - "$SIGNED_PAIR_PLAN" "$REL_ID" <<'PAIR_INTENT'
-import json,os,re,stat,sys
-p,rid=sys.argv[1:]
+  SIGNED_PAIR_TXID="$(python3 - "$SIGNED_PAIR_PLAN" "$REL_ID" "$SCRIPT_DIR/../phase3-binary/dist/static" <<'PAIR_INTENT'
+import hashlib,json,os,re,stat,sys
+p,rid,static=sys.argv[1:]
 f=os.open(p,os.O_RDONLY|os.O_NOFOLLOW)
 with os.fdopen(f) as stream:
  st=os.fstat(stream.fileno())
@@ -355,9 +355,20 @@ if not re.fullmatch(r'[A-Za-z0-9_-]{1,80}',t) or d.get('target',{}).get('catalog
 # Mirror the Studio actor arm window; refuse before any recovery custody.
 import time
 if type(d.get('deadline_epoch')) is not int or not time.time()<d['deadline_epoch']<=time.time()+3600: raise SystemExit(1)
+# The Studio readiness proof compares the served feeds and the CB tuple with
+# these target fields; a value copied from another release can never become
+# ready, so refuse it here instead of after an hour-long pause.
+target=d['target'];digest=lambda name:hashlib.sha256(open(os.path.join(static,name),'rb').read()).hexdigest()
+for endpoint,expected in target.get('feed_sha256',{}).items():
+ name=endpoint.removeprefix('/v1/');sig=name.endswith('.sig');base=name[:-4] if sig else name
+ if digest({'catalog-artifacts':'autotune-artifacts'}.get(base,base)+'.json'+('.sig' if sig else ''))!=expected: raise SystemExit(1)
+policy=json.load(open(os.path.join(static,'continuous-batching-policy.json')))
+if target.get('cb_policy_sha256')!=digest('continuous-batching-policy.json') or not any(
+  e.get('model_key')==target.get('model_key') and e.get('model_sha256')==target.get('model_hash')
+  and e.get('tuple_sha256')==target.get('cb_tuple_sha256') for e in policy.get('entries',[])): raise SystemExit(1)
 print(t)
 PAIR_INTENT
-)" || fatal "signed pair intent is unsafe, names another target release, or its deadline_epoch is outside the Studio arm window"
+)" || fatal "signed pair intent is unsafe, names another target release or other feed/CB tuple bytes, or its deadline_epoch is outside the Studio arm window"
   SIGNED_PAIR_INTENT_SHA="$(sha256_file "$SIGNED_PAIR_PLAN")"
   [ "$SIGNED_PAIR_INTENT_SHA" = "${CATALOG_SIGNED_PAIR_INTENT_SHA256:-}" ] || fatal "signed pair intent changed after status"
   ccr_signed_pair_state arming || fatal "durable signed pair custody could not be recorded"
