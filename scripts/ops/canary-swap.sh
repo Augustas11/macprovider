@@ -17,7 +17,11 @@
 #   (release_id, release.json and rate-card.json generated_at) differs from
 #   what Pearl serves at COORDINATOR_URL /v1/autotune-release and /v1/rate-card:
 #   the canary would fail to join with rate_card_update_required (1.8.262).
-#   Activate the catalog first (scripts/ops/catalog-activate.sh).
+#   Activate the catalog first (scripts/ops/catalog-activate.sh). One exception,
+#   the CLI's own rule: Pearl serves a strictly newer release with the same
+#   policy_version and the same rate-card content version, generated no earlier
+#   than the baked rate card (a cut that packaged a first native-MTP admission
+#   scope, then the rebound catalog went live).
 # swap: only the verified candidate bytes recorded by cli-release.sh
 #   signed_byte_verification (the tarball sha256 must match the entry in that
 #   run's signed checksums.txt). check, then under the live-ops lock: stop the
@@ -330,7 +334,7 @@ check_catalog_live() {
     [ "$(http_get "$base/v1/rate-card" "$OPS_TMP_DIR/live-rate-card.json")" = 200 ] ||
     refuse "cannot read Pearl's live catalog from $base/v1/autotune-release and /v1/rate-card"
   verdict="$(python3 - "$payload/catalog-release" "$OPS_TMP_DIR/live-release.json" "$OPS_TMP_DIR/live-rate-card.json" <<'PY'
-import json, os, sys
+import datetime, json, os, sys
 cand, live_rel_path, live_card_path = sys.argv[1:4]
 def load(path):
     with open(path) as f:
@@ -341,20 +345,35 @@ try:
 except (OSError, ValueError) as exc:
     print("ERR unreadable catalog: %s" % exc); sys.exit(0)
 cid, lid = rel.get("release_id"), live_rel.get("release_id")
+def stamp(doc):
+    try:
+        return datetime.datetime.strptime(doc.get("generated_at"), "%Y-%m-%dT%H:%M:%SZ")
+    except (TypeError, ValueError):
+        return None
+# The provider takes a fetched feed only when its policy_version equals the
+# baked one and it is generated no earlier than the baked bytes; otherwise it
+# reports rate_card_update_required. A strictly newer live release is accepted
+# only with the same rate-card content version, so no baked price is un-activated.
+newer = (bool(cid) and cid != lid and rel.get("policy_version") == live_rel.get("policy_version") and
+         None not in (stamp(rel), stamp(live_rel)) and stamp(rel) < stamp(live_rel) and
+         (card is None or (card.get("version") == live_card.get("version") and
+                           None not in (stamp(card), stamp(live_card)) and stamp(card) <= stamp(live_card))))
 diffs = []
-if not cid or cid != lid:
-    diffs.append("release_id")
-if rel.get("generated_at") != live_rel.get("generated_at"):
-    diffs.append("release.json generated_at %s vs %s" % (rel.get("generated_at"), live_rel.get("generated_at")))
-if card is not None and (card.get("generated_at"), card.get("version")) != (live_card.get("generated_at"), live_card.get("version")):
-    diffs.append("rate-card.json generated_at/version %s vs %s" % (card.get("generated_at"), live_card.get("generated_at")))
+if not newer:
+    if not cid or cid != lid:
+        diffs.append("release_id")
+    if rel.get("generated_at") != live_rel.get("generated_at"):
+        diffs.append("release.json generated_at %s vs %s" % (rel.get("generated_at"), live_rel.get("generated_at")))
+    if card is not None and (card.get("generated_at"), card.get("version")) != (live_card.get("generated_at"), live_card.get("version")):
+        diffs.append("rate-card.json generated_at/version %s vs %s" % (card.get("generated_at"), live_card.get("generated_at")))
 print("%s %s %s %s" % ("DIFF" if diffs else "OK", cid or "<none>", lid or "<none>", "; ".join(diffs)))
 PY
 )"
   local kind cid lid diffs
   read -r kind cid lid diffs <<<"$verdict"
   case "$kind" in
-    OK) log "candidate bakes the catalog Pearl serves ($cid)" ;;
+    OK) if [ "$cid" = "$lid" ]; then log "candidate bakes the catalog Pearl serves ($cid)"
+        else log "candidate bakes catalog $cid; Pearl serves the newer $lid with the same policy and rate card"; fi ;;
     DIFF) refuse "candidate bakes catalog $cid; Pearl serves $lid: activate the catalog first (scripts/ops/catalog-activate.sh) [differs: $diffs]" ;;
     *) refuse "cannot compare the baked catalog with Pearl's: ${verdict#ERR }" ;;
   esac
