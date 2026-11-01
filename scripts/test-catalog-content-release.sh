@@ -669,7 +669,8 @@ def main():
             print(json.dumps({"verdict": "regression", "reasons": ["stub"], "live_release_id": live["release_id"],
                               "incoming_release_id": rel["release_id"]}))
             sys.exit(3)
-        print(json.dumps({"verdict": "descends", "reasons": ["stub"], "matched_ledger_release": live["release_id"],
+        matched = (ctl / "compare-match").read_text().strip() if (ctl / "compare-match").exists() else live["release_id"]
+        print(json.dumps({"verdict": "descends", "reasons": ["stub"], "matched_ledger_release": matched,
                           "live_release_id": live["release_id"], "incoming_release_id": rel["release_id"]}))
         sys.exit(0)
     if cmd == "content-gate":
@@ -1341,6 +1342,28 @@ run preflight
 note "ok: GO when a live exclusion of a pinned model is dropped (e)"
 git -C "$R" update-ref refs/remotes/origin/main "$COMMIT"
 setup_env; touch "$CCR_TEST_CTL/compare-regression"; expect_no_go "live release matches no reviewed commit (e)" buyer_serving_e2e
+# A native-binding bundle release never commits its release.json: its live
+# exclusions come from the first origin/main commit whose ledger records it.
+setup_env; printf 'test-bundle-v1\n' >"$CCR_TEST_CTL/compare-match"
+expect_no_go "bundle release with no committed ledger row (e)" buyer_serving_e2e
+python3 - "$R/phase3-binary/catalog/autotune/release-ledger.json" >"$T/bundle-ledger.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1])); d["releases"]["test-bundle-v1"] = {"stub": True}
+print(json.dumps(d, indent=2, sort_keys=True))
+PY
+rm -f "$T/live-index"
+GIT_INDEX_FILE="$T/live-index" git -C "$R" read-tree refs/remotes/origin/main
+GIT_INDEX_FILE="$T/live-index" git -C "$R" update-index --cacheinfo \
+  "100644,$(git -C "$R" hash-object -w "$T/bundle-ledger.json"),phase3-binary/catalog/autotune/release-ledger.json"
+BUNDLE_ROW_COMMIT="$(git -C "$R" commit-tree "$(GIT_INDEX_FILE="$T/live-index" git -C "$R" write-tree)" -p refs/remotes/origin/main -m "record bundle row")"
+git -C "$R" update-ref refs/remotes/origin/main "$BUNDLE_ROW_COMMIT"
+run preflight
+if [ "$(verdict_check buyer_serving_e2e)" != true ] || ! grep -q "live exclusions from ${BUNDLE_ROW_COMMIT:0:12}" "$T/out"; then
+  fail "a bundle release recorded only in the ledger must take that commit's exclusions (rc=$RC): $(cat "$T/out")"
+fi
+note "ok: bundle release live exclusions come from its first committed ledger row (e)"
+rm -f "$CCR_TEST_CTL/compare-match"
+git -C "$R" update-ref refs/remotes/origin/main "$COMMIT"
 
 # ---------------------------------------------------------------------------
 # Deploy.
