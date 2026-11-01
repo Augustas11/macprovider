@@ -143,6 +143,21 @@ This bootstrap dependency remains unresolved; no qualification exemption,
 stale-evidence rebind or MTP-off deployment is authorized by this train record.
 The exploratory goal matrix does not constitute admission qualification.
 
+## Next CLI release — 1.8.280 (staged 2026-11-01)
+
+v1.8.278 and v1.8.279 are Pearl runtime tags, so the candidate after the
+published 1.8.277 carries 1.8.280. Tracking issue: #2193.
+
+| PR | Provider-side change | Status |
+|---|---|---|
+| [#2185](https://github.com/Augustas11/macprovider/pull/2185) | GLM agent-prefix snapshots kept within reachable serving capacity | merged; not live until this cut |
+| [#2196](https://github.com/Augustas11/macprovider/pull/2196) | Long coding-agent sessions stay cached past 100k tokens (provider half; gateway/coordinator half live in Pearl v1.8.279) | merged (`ecd6ecbeb`) |
+| [#2188](https://github.com/Augustas11/macprovider/pull/2188) | Bonsai auto tool turns stay within declared functions | merged (`71199109f`) |
+| [#2206](https://github.com/Augustas11/macprovider/pull/2206) | Abliterated GLM-5.3-Flash paged-KV allowlist line; signed CB/native-MTP entries for its tuple | merged (`36dcf5a5a`); the native-MTP release-scope gate needs this cut's packaged catalog |
+
+After promotion, the qualified CB and native-MTP tuples rebind to the 1.8.280
+CDHash and decode-path digest (identity only, no requalification).
+
 ## Following CLI release — net changes vs 1.8.274 (tracked 2026-10-27)
 
 The 1.8.274 candidate was cut at `f8b6856e5`. It contains #2162 (chat-first
