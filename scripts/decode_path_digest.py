@@ -288,8 +288,14 @@ def _verify_candidate_envelope(directory: Path, version: str, source: str, run: 
         raise DecodePathError("signed acceptance candidate envelope verification failed")
 
 
-def _verify_identity_only_decode(old: dict, new: dict) -> None:
-    """Reopen the closed source proof; signed bytes alone prove no behavior."""
+def _verify_identity_only_decode(old: dict, new: dict, candidate_bound: bool = False) -> None:
+    """Reopen the closed source proof; signed bytes alone prove no behavior.
+
+    A candidate-bound row (see _candidate_bound) is an identity-only rebind of
+    the unchanged qualification to the signed candidate's own committed
+    admission release: its decode digest and runtime pin are those the
+    candidate was cut and bound with, so it needs no requalification (MTP-13).
+    Metal-library bytes must still be unchanged."""
     for key, pattern in (("source_commit", r"[0-9a-f]{40}"),
                          ("decode_path_digest", r"[0-9a-f]{64}"),
                          ("runtime_revision", r"[0-9a-f]{40}"),
@@ -300,8 +306,11 @@ def _verify_identity_only_decode(old: dict, new: dict) -> None:
     # The source contract proves release-source equivalence, not arbitrary
     # changed runtime or Metal-library bytes. Such changes need their own
     # qualification before this pre-promotion exception can admit them.
-    if any(old[key] != new[key] for key in ("runtime_revision", "metallib_sha256")):
+    if old["metallib_sha256"] != new["metallib_sha256"] or (
+            not candidate_bound and old["runtime_revision"] != new["runtime_revision"]):
         raise DecodePathError("signed-pair candidate: runtime/Metal changes require independent qualification")
+    if candidate_bound:
+        return
     spec = importlib.util.spec_from_file_location(
         "signed_pair_source_equivalence", ROOT / "scripts/native_mtp_source_equivalence.py")
     if spec is None or spec.loader is None:
@@ -315,6 +324,24 @@ def _verify_identity_only_decode(old: dict, new: dict) -> None:
             request_feature_profile=new.get("request_feature_profile"))
     except (ValueError, OSError, subprocess.SubprocessError) as error:
         raise DecodePathError("signed-pair candidate: unchanged decode behavior is not proven") from error
+
+
+def _candidate_bound(row: dict, release_input: dict, sidecar: dict, target: dict, source: str) -> bool:
+    """The row carries exactly the signed candidate's committed admission
+    release binding: release id, source, binary, CDHash and decode digest."""
+    release_id = target.get("catalog_release_id")
+    entry = release_input.get("entry")
+    baseline = row.get("ordinary_baseline")
+    return (isinstance(release_id, str) and bool(release_id) and isinstance(entry, dict)
+            and release_input.get("release_id") == sidecar.get("release_id") == release_id
+            and row.get("source_commit") == row.get("provider_revision") == source
+            and row.get("reproducible_build_sha256") == target.get("binary_sha256")
+            and row.get("live_executable_cdhash") == target.get("cdhash")
+            and row.get("decode_path_digest") == target.get("decode_path_digest")
+            == release_input.get("provider_decode_path_digest")
+            and all(row.get(key) == value for key, value in entry.items())
+            and (baseline is None or (isinstance(baseline, dict)
+                                      and baseline.get("runtime_revision") == row.get("runtime_revision"))))
 
 
 def _signed_pair_publish_gate(release_input: dict, sidecar: Path, version: str,
@@ -416,34 +443,59 @@ def _signed_pair_publish_gate(release_input: dict, sidecar: Path, version: str,
                                 "/v1/continuous-batching-policy.sig")), "signed bank/CB recovery bindings missing")
     old_rows, new_rows = before.get("entries"), after.get("entries")
     require(isinstance(old_rows, list) and isinstance(new_rows, list) and bool(old_rows)
-            and len(old_rows) == len(new_rows), "model inventory changed")
+            and all(isinstance(row, dict) for row in old_rows + new_rows), "model inventory changed")
+    old_keys = [row.get("model_key") for row in old_rows]
+    new_keys = [row.get("model_key") for row in new_rows]
+    # Existing models stay; only rows for new model keys may be appended.
+    require(len(set(old_keys)) == len(old_keys) and len(set(new_keys)) == len(new_keys)
+            and set(old_keys) <= set(new_keys), "model inventory changed")
+    new_by_key = {row["model_key"]: row for row in new_rows}
     # Only binding/provenance may change, never qualification or shape scope.
     identity_keys = {"source_commit", "provider_revision", "reproducible_build_sha256", "live_executable_cdhash",
                      "decode_path_digest", "metallib_sha256", "runtime_revision", "challenge_bank_sha256", "artifact_manifest_sha256"}
+    def scope(row: dict) -> dict:
+        result = {key: value for key, value in row.items() if key not in identity_keys}
+        if isinstance(result.get("ordinary_baseline"), dict):
+            result["ordinary_baseline"] = {key: value for key, value in result["ordinary_baseline"].items()
+                                           if key not in ("provider_revision", "runtime_revision")}
+        return result
+    def one_row_greedy(row: dict) -> bool:
+        return (row.get("request_feature_profile") == "native_mtp_greedy_text_v1"
+                and type(row.get("proposal_depth")) is int and type(row.get("max_native_active_rows")) is int
+                and row["proposal_depth"] == row["max_native_active_rows"] == 1)
     selected = 0
-    for old, new in zip(old_rows, new_rows):
-        require(isinstance(old, dict) and isinstance(new, dict) and old.keys() == new.keys(), "entry schema changed")
-        def scope(row: dict) -> dict:
-            result = {key: value for key, value in row.items() if key not in identity_keys}
-            if isinstance(result.get("ordinary_baseline"), dict):
-                result["ordinary_baseline"] = {key: value for key, value in result["ordinary_baseline"].items()
-                                               if key != "provider_revision"}
-            return result
+    for old in old_rows:
+        new = new_by_key[old["model_key"]]
+        require(old.keys() == new.keys(), "entry schema changed")
         require(scope(old) == scope(new), "qualification or eligibility scope changed")
-        _verify_identity_only_decode(old, new)
+        for row in (old, new):
+            baseline = row.get("ordinary_baseline")
+            require(not isinstance(baseline, dict) or baseline.get("runtime_revision") in (None, row.get("runtime_revision")),
+                    "ordinary baseline runtime differs from its entry")
+        _verify_identity_only_decode(old, new, _candidate_bound(new, release_input, after, target, source))
         require(old.get("challenge_bank_sha256") == prior["feed_sha256"]["/v1/native-mtp-selftest-bank"]
                 and new.get("challenge_bank_sha256") == target["feed_sha256"]["/v1/native-mtp-selftest-bank"], "bank binding mismatch")
         if new.get("model_key") == target.get("model_key"):
             selected += 1
-            require(new.get("request_feature_profile") == "native_mtp_greedy_text_v1"
-                    and type(new.get("proposal_depth")) is int and type(new.get("max_native_active_rows")) is int
-                    and new["proposal_depth"] == new["max_native_active_rows"] == 1,
-                    "only existing one-row, depth-one greedy tuple may use candidate order")
+            require(one_row_greedy(new), "only existing one-row, depth-one greedy tuple may use candidate order")
             require(new.get("source_commit") == new.get("provider_revision") == source
                     and new.get("reproducible_build_sha256") == target["binary_sha256"]
                     and new.get("live_executable_cdhash") == target["cdhash"]
                     and new.get("decode_path_digest") == target["decode_path_digest"],
                     "selected tuple candidate identity mismatch")
+    for key in new_keys:
+        if key in old_keys:
+            continue
+        # An appended model carries its own committed qualification, bound only
+        # to this signed candidate; it can never be the selected pair tuple.
+        added = new_by_key[key]
+        require(key != target.get("model_key"), "selected tuple cannot be a new model")
+        require(set(added) == set(old_rows[0]), "entry schema changed")
+        require(one_row_greedy(added), "appended model exceeds one-row, depth-one greedy scope")
+        require(added.get("metallib_sha256") in {row.get("metallib_sha256") for row in old_rows},
+                "signed-pair candidate: runtime/Metal changes require independent qualification")
+        require(_candidate_bound(added, release_input, after, target, source), "appended model is not bound to the signed candidate")
+        require(added.get("challenge_bank_sha256") == target["feed_sha256"]["/v1/native-mtp-selftest-bank"], "bank binding mismatch")
     require(selected == 1, "selected tuple missing or ambiguous")
 
 

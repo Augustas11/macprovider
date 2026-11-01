@@ -180,6 +180,7 @@ class SignedPairPublishGateTests(unittest.TestCase):
         self.envelope = patch.object(tool, "_verify_candidate_envelope")
         self.verify = self.envelope.start()
         self.addCleanup(self.envelope.stop)
+        self.original_identity = tool._verify_identity_only_decode
         self.equivalence = patch.object(tool, "_verify_identity_only_decode")
         self.verify_decode = self.equivalence.start()
         self.addCleanup(self.equivalence.stop)
@@ -257,7 +258,68 @@ class SignedPairPublishGateTests(unittest.TestCase):
         with patch.object(tool, "_tag_commit", side_effect=AssertionError("premature final tag lookup")):
             self.assertEqual(self.gate(), "ok")
         self.verify.assert_called_once_with(self.bytes, self.version, self.source, self.run)
-        self.verify_decode.assert_called_once_with(self.old_row, self.row)
+        self.verify_decode.assert_called_once_with(self.old_row, self.row, False)
+
+    def bind_release(self, entries):
+        # The committed admission release names the plan's target catalog.
+        release_id = "published-test-v999"
+        self.target["catalog_release_id"] = release_id
+        release = json.loads(self.release.read_text("utf-8"))
+        release["release_id"] = release_id
+        self.write(self.release, release)
+        self.write(self.sidecar, {"release_id": release_id, "entries": entries})
+        self.target["feed_sha256"]["/v1/native-mtp-admission"] = tool._file_digest(self.sidecar)
+        self.refresh()
+
+    def appended(self, **changes):
+        return dict(self.row, model_key="glm-abliterated", performance_evidence_sha256="a" * 64, **changes)
+
+    def test_candidate_bound_rebind_appends_new_model_and_moves_runtime_pin(self):
+        self.equivalence.stop()
+        self.addCleanup(self.equivalence.start)
+        moved = dict(self.row, runtime_revision="6" * 40)
+        self.bind_release([moved, self.appended(runtime_revision="6" * 40)])
+        with patch.object(tool.importlib.util, "spec_from_file_location",
+                          side_effect=AssertionError("bound rebind reopened source equivalence")):
+            self.assertEqual(self.gate(), "ok")
+
+    def test_bound_rebind_is_passed_to_identity_proof(self):
+        self.bind_release([self.row])
+        self.assertEqual(self.gate(), "ok")
+        self.verify_decode.assert_called_once_with(self.old_row, self.row, True)
+
+    def test_unbound_runtime_pin_change_still_needs_independent_qualification(self):
+        self.equivalence.stop()
+        self.addCleanup(self.equivalence.start)
+        moved = dict(self.row, runtime_revision="6" * 40)
+        self.write(self.sidecar, {"entries": [moved]})
+        self.target["feed_sha256"]["/v1/native-mtp-admission"] = tool._file_digest(self.sidecar)
+        self.refresh()
+        with self.assertRaisesRegex(tool.DecodePathError, "runtime/Metal changes"):
+            self.gate()
+        self.bind_release([dict(moved, metallib_sha256="5" * 64)])
+        with self.assertRaisesRegex(tool.DecodePathError, "runtime/Metal changes"):
+            self.gate()
+
+    def test_inventory_may_only_append_bound_one_row_greedy_new_models(self):
+        cases = (([self.appended()], "model inventory changed"),
+                 ([self.row, self.row], "model inventory changed"),
+                 ([self.row, self.appended(live_executable_cdhash="0" * 40)], "not bound to the signed candidate"),
+                 ([self.row, self.appended(request_feature_profile="native_mtp_sampled_text_v1")], "greedy scope"),
+                 ([self.row, self.appended(max_native_active_rows=2)], "greedy scope"),
+                 ([self.row, self.appended(metallib_sha256="5" * 64)], "runtime/Metal changes"),
+                 ([self.row, self.appended(challenge_bank_sha256="0" * 64)], "bound to the signed candidate|bank binding"),
+                 ([self.row, dict(self.appended(), extra=True)], "entry schema changed"))
+        for entries, message in cases:
+            with self.subTest(message=message, count=len(entries)):
+                self.bind_release(entries)
+                with self.assertRaisesRegex(tool.DecodePathError, message):
+                    self.gate()
+        self.bind_release([self.row, self.appended()])
+        self.assertEqual(self.gate(), "ok")
+        self.write(self.release, dict(json.loads(self.release.read_text("utf-8")), release_id="other"))
+        with self.assertRaisesRegex(tool.DecodePathError, "not bound to the signed candidate"):
+            self.gate()
 
     def test_signed_candidate_cannot_inherit_changed_decode_qualification(self):
         self.verify_decode.side_effect = tool.DecodePathError("unchanged decode behavior is not proven")
@@ -356,6 +418,16 @@ class IdentityOnlyDecodeProofTests(unittest.TestCase):
             with self.subTest(changed=key):
                 with self.assertRaisesRegex(tool.DecodePathError, "runtime/Metal changes"):
                     tool._verify_identity_only_decode(self.old, dict(self.new, **{key: value}))
+
+    def test_candidate_bound_rebind_moves_pin_without_reopening_source_proof(self):
+        with patch.object(tool.importlib.util, "spec_from_file_location",
+                          side_effect=AssertionError("bound rebind reopened source equivalence")):
+            tool._verify_identity_only_decode(self.old, dict(self.new, runtime_revision="1" * 40), True)
+            with self.assertRaisesRegex(tool.DecodePathError, "runtime/Metal changes"):
+                tool._verify_identity_only_decode(self.old, dict(self.new, metallib_sha256="2" * 64), True)
+            old = dict(self.old); del old["runtime_revision"]
+            with self.assertRaisesRegex(tool.DecodePathError, "complete prior/current"):
+                tool._verify_identity_only_decode(old, self.new, True)
 
 
 if __name__ == "__main__":
