@@ -99,6 +99,39 @@ class SignedPairInterfaceTests(unittest.TestCase):
         result = self.python(CATALOG, 'PAIR_ACK_CHECK', state, digest)
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_lock_release_hashes_plan_without_gather_local_release_id(self):
+        # 2026-11-01: the EXIT-trap lock release ran signed_pair_plan_sha after
+        # gather() returned, so "$R" was unbound under set -u.
+        script = ('set -euo pipefail\n' + function(CATALOG, 'signed_pair_plan_sha') + '\n' +
+                  'OPS_SCOPE="catalog-$1"; unset R; signed_pair_plan_sha\n')
+        result = subprocess.run(['bash', '-c', script, 'test', self.plan['target']['catalog_release_id']],
+                                env=dict(os.environ, CATALOG_SIGNED_PAIR_PLAN=str(self.plan_path)),
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), hashlib.sha256(self.plan_path.read_bytes()).hexdigest())
+        result = subprocess.run(['bash', '-c', script, 'test', 'another-release'],
+                                env=dict(os.environ, CATALOG_SIGNED_PAIR_PLAN=str(self.plan_path)),
+                                capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_deadline_outside_studio_arm_window_refused_before_custody(self):
+        import time
+        def check(deadline):
+            self.plan['deadline_epoch'] = deadline
+            self.plan_path = self.write('plan.json', self.plan)
+            status = subprocess.run(['bash', '-c', function(CATALOG, 'signed_pair_deadline_ok') + '\nsigned_pair_deadline_ok\n'],
+                                    env=dict(os.environ, CATALOG_SIGNED_PAIR_PLAN=str(self.plan_path)),
+                                    capture_output=True, text=True)
+            prepare = self.python(CONTENT, 'PAIR_INTENT', self.plan_path, self.plan['target']['catalog_release_id'])
+            return status.returncode == 0, prepare.returncode == 0, status.stdout
+        now = int(time.time())
+        self.assertEqual(check(now + 3300)[:2], (True, True))
+        ok, armed, why = check(now + 72 * 3600)  # the abl-mtp-v280-pair plan
+        self.assertEqual((ok, armed), (False, False))
+        self.assertIn('outside [now+1800, now+3600]', why)
+        self.assertEqual(check(now - 10)[:2], (False, False))
+        self.assertFalse(check(now + 600)[0])
+
     def test_root_and_transport_transaction_id_domains_agree(self):
         # Every root-accepted ID must be transport-accepted before recovery custody.
         self.plan['transaction_id'] = 'a' * 81

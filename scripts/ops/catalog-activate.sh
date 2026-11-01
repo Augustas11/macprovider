@@ -179,8 +179,10 @@ native_mtp_release_preflight() {
 
 signed_pair_state_dir() { printf '%s/%s/signed-native-pair' "$OPS_STATE_DIR" "$OPS_SCOPE"; }
 
+# R is local to gather(); the EXIT-trap lock release reaches this with only
+# the global OPS_SCOPE (catalog-<release id>) set.
 signed_pair_plan_sha() {
-  python3 - "${CATALOG_SIGNED_PAIR_PLAN:-}" "$R" <<'PAIR_PLAN'
+  python3 - "${CATALOG_SIGNED_PAIR_PLAN:-}" "${OPS_SCOPE#catalog-}" <<'PAIR_PLAN'
 import hashlib,json,os,re,stat,sys
 p,rid=sys.argv[1:]
 f=os.open(p,os.O_RDONLY|os.O_NOFOLLOW)
@@ -200,6 +202,19 @@ if d.get('schema_version')!='macprovider.signed_native_pair.v1' or not re.fullma
 if d.get('target',{}).get('catalog_release_id')!=rid:raise SystemExit(1)
 print(hashlib.sha256(raw).hexdigest())
 PAIR_PLAN
+}
+
+# The Studio actor arms only when now < deadline_epoch <= now + 3600, and its
+# watchdog restores the incumbent at the deadline. Refuse a plan that cannot
+# arm, or cannot finish a drain, model load and two stability windows, before
+# any Pearl guardian, reader key or Studio staging is created.
+signed_pair_deadline_ok() {
+  python3 - "${CATALOG_SIGNED_PAIR_PLAN:-}" <<'PAIR_DEADLINE'
+import json,sys,time
+d=json.load(open(sys.argv[1]))['deadline_epoch'];now=time.time()
+if type(d) is not int or not now+1800<=d<=now+3600:
+ print('signed pair deadline_epoch %s is outside [now+1800, now+3600] (now %d); write a fresh plan with a new transaction_id'%(d,int(now)));raise SystemExit(1)
+PAIR_DEADLINE
 }
 
 # Read-only candidate-order proof. Call again under transaction custody before
@@ -303,6 +318,7 @@ PAIR_STATE
   LOCK_HELPER="$helper/pearl_autotune_deploy_lock.py"
   AA_SIGNED_PAIR_GUARD_DIR="$guard"
   AA_SIGNED_PAIR_READER_KEY_DIR="$secret"
+  aa_signed_pair_reverify_blocked "$tx" || refuse "blocked Pearl prior recovery could not be reverified"
   aa_signed_pair_runner_retire "$tx" || refuse "runner recovery retirement is pending"
   aa_signed_pair_reader_retire "$tx" || refuse "receipt reader retirement is pending"
   aa_cleanup_remote_helpers
@@ -326,6 +342,7 @@ signed_pair_internal() {
   native_mtp_release_preflight true || refuse "native-MTP release matcher refused publication: $NEXT_REASON"
   got="$(signed_pair_plan_sha)" || refuse "signed pair intent is invalid"
   [ "$got" = "$expected" ] || refuse "signed pair intent changed since status"
+  got="$(signed_pair_deadline_ok)" || refuse "$got"
   # Re-fetch under live-ops custody. The actor later independently proves the
   # same prior signed bytes under the publication lease before pausing.
   local prior="$OPS_TMP_DIR/signed-pair-prior-admission.json" health="$OPS_TMP_DIR/signed-pair-health.json" gate
@@ -894,8 +911,11 @@ $owed_writer '$deploy_log' '$owed_dir' '$R'"
       set_next catalog_activation blocked "Activate content release $R" "" "$dp_gate"
     elif [ -n "${CATALOG_SIGNED_PAIR_PLAN:-}" ] && [ "$fresh" = true ] && [ "$go" = true ] && [ -z "$pricing" ]; then
       local pair_sha
+      local pair_deadline
       if [ "$head_sha" != "$main_sha" ] || ! pair_sha="$(signed_pair_plan_sha)"; then
         set_next signed_native_pair blocked "Validate the matched signed release intent" "" "clean origin/main and an exact private target intent are required"
+      elif ! pair_deadline="$(signed_pair_deadline_ok)"; then
+        set_next signed_native_pair blocked "Validate the matched signed release intent" "" "$pair_deadline"
       else
         step signed_native_pair pending "released signed binary and signed policy must change under one recovery journal"
         set_next signed_native_pair mutate "Install the matched signed native-MTP binary/policy pair" \

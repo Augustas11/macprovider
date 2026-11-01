@@ -6,7 +6,9 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import subprocess
 import tempfile
+import time
 import unittest
 from unittest.mock import Mock, patch
 
@@ -285,6 +287,46 @@ class Tests(unittest.TestCase):
                 with contextlib.redirect_stdout(output): self.e['main']('status',journal,str(SCRIPT))
             self.assertTrue(json.loads(output.getvalue())['terminal_ready'])
             self.assertFalse((directory/'studio-action.lock').exists())
+
+    def staged_status(self, directory, watchdog_rc=113):
+        raw=json.dumps(self.j).encode();path=directory/'journal.json';path.write_bytes(raw);os.chmod(path,0o600)
+        prior_body=body(self.j);prior_body['binary_version']=self.j['prior']['version'];prior_body['continuous_batching']['policy']['release_id']=self.j['prior']['catalog_release_id']
+        prior_body['continuous_batching']['policy']['policy_sha256']=self.j['prior']['cb_policy_sha256'];prior_body['continuous_batching']['policy']['tuple_sha256']=self.j['prior']['cb_tuple_sha256']
+        output=io.StringIO()
+        with patch.dict(self.e,host=Mock(),policy=Mock(),status=Mock(return_value=prior_body),signed_binary=Mock(),process_id=Mock(),
+                        run=Mock(return_value=Mock(returncode=watchdog_rc)),receipt=Mock(side_effect=AssertionError('no key read'))):
+            with contextlib.redirect_stdout(output): self.e['main']('status',path,str(SCRIPT))
+        return json.loads(output.getvalue())
+
+    def test_refused_arm_before_first_studio_change_is_prior_terminal(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory=Path(temp);os.chmod(directory,0o700)
+            result=self.staged_status(directory)
+            self.assertTrue(result['terminal_ready']);self.assertEqual(result['phase'],'prior_unchanged')
+            self.assertFalse((directory/'studio-state.json').exists())
+
+    def test_staged_with_watchdog_is_never_prior_terminal(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory=Path(temp);os.chmod(directory,0o700)
+            self.assertFalse(self.staged_status(directory,watchdog_rc=0)['terminal_ready'])
+            (directory/'studio-watchdog-ready.json').write_text('{}')
+            self.assertFalse(self.staged_status(directory)['terminal_ready'])
+
+    def test_arm_outside_one_hour_window_refused_with_reason(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory=Path(temp);os.chmod(directory,0o700)
+            self.j['deadline_epoch']=int(time.time())+72*3600
+            path=directory/'journal.json';path.write_bytes(json.dumps(self.j).encode());os.chmod(path,0o600)
+            with patch.dict(self.e,host=Mock(),receipt=Mock(side_effect=AssertionError('deadline precedes receipt'))):
+                with self.assertRaisesRegex(self.e['Refused'],'^arm deadline$'): self.e['main']('arm',path,str(SCRIPT))
+            self.assertFalse((directory/'studio-state.json').exists())
+
+    def test_refusal_reason_is_printed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path=Path(temp)/'journal.json';path.write_bytes(json.dumps(self.j).encode());os.chmod(path,0o600)
+            result=subprocess.run(['/bin/bash',str(SCRIPT),'signed-pair-engine','arm',str(path)],capture_output=True,text=True,timeout=60)
+            self.assertEqual(result.returncode,6)
+            self.assertRegex(result.stderr,r'signed-pair refused: Refused: (Studio requires macOS|hardware mismatch|host mismatch)')
 
     def test_no_stage_after_reader_failure_proves_exact_prior_unchanged(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -595,7 +595,15 @@ def main(action, journal_path, script):
             phase = state.get('phase', 'staged')
             try:
                 role = 'target' if phase == 'committed' else 'prior'
-                require(phase in ('committed', 'restored'), 'transaction not terminal')
+                if phase == 'staged':
+                    # Arm records 'armed' before its first Studio change, so a
+                    # staged journal with no watchdog left the incumbent intact.
+                    require(not (directory / 'studio-watchdog-ready.json').exists()
+                            and run(['/bin/launchctl', 'print', 'gui/%d/tech.malibu.signed-pair.%s'
+                                     % (os.getuid(), j['transaction_id'])], check=False).returncode != 0,
+                            'staged transaction has a watchdog')
+                    phase = 'prior_unchanged'
+                require(phase in ('committed', 'restored', 'prior_unchanged'), 'transaction not terminal')
                 identity = j[role]
                 signed_binary(Path(j['studio']['install_dir']) / 'macprovider-cli', identity)
                 policy(j, identity)
@@ -829,7 +837,9 @@ if __name__ == '__main__':
         main(sys.argv[1], sys.argv[2], sys.argv[3])
     except (Refused, KeyError, ValueError, OSError, subprocess.SubprocessError) as error:
         # Do not print URLs, commands, configuration or arbitrary error strings.
-        print('signed-pair refused: ' + type(error).__name__, file=sys.stderr)
+        # Refused reasons are this actor's fixed literals, so they are printed.
+        print('signed-pair refused: ' + type(error).__name__
+              + (': ' + str(error) if type(error) is Refused else ''), file=sys.stderr)
         sys.exit(6)
 SIGNED_PAIR_PY
   exit $?

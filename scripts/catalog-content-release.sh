@@ -352,9 +352,12 @@ with os.fdopen(f) as stream:
  d=json.load(stream)
 t=d.get('transaction_id','')
 if not re.fullmatch(r'[A-Za-z0-9_-]{1,80}',t) or d.get('target',{}).get('catalog_release_id')!=rid: raise SystemExit(1)
+# Mirror the Studio actor arm window; refuse before any recovery custody.
+import time
+if type(d.get('deadline_epoch')) is not int or not time.time()<d['deadline_epoch']<=time.time()+3600: raise SystemExit(1)
 print(t)
 PAIR_INTENT
-)" || fatal "signed pair intent is unsafe or names another target release"
+)" || fatal "signed pair intent is unsafe, names another target release, or its deadline_epoch is outside the Studio arm window"
   SIGNED_PAIR_INTENT_SHA="$(sha256_file "$SIGNED_PAIR_PLAN")"
   [ "$SIGNED_PAIR_INTENT_SHA" = "${CATALOG_SIGNED_PAIR_INTENT_SHA256:-}" ] || fatal "signed pair intent changed after status"
   ccr_signed_pair_state arming || fatal "durable signed pair custody could not be recorded"

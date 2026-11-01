@@ -103,7 +103,9 @@ PAIR_VALIDATE_PY
   require_studio_ssh
   if [ "$pair_action" = status ]; then
     if studio_ssh "test -f '$pair_actor' && test -f '$pair_remote'"; then
-      studio_ssh "bash '$pair_actor' signed-pair-engine status '$pair_remote'" > "$OPS_TMP_DIR/pair-status.json" || exit $?
+      # Read-only: the reviewed actor from this checkout reads the staged
+      # journal, so a status fix reaches a journal staged by an older actor.
+      studio_ssh "bash -s -- signed-pair-engine status '$pair_remote'" < "$OPS_DIR/lib/canary-swap-remote.sh" > "$OPS_TMP_DIR/pair-status.json" || exit $?
     else
       pair_encoded="$(base64 < "$pair_plan" | tr -d '\n')"
       studio_ssh "bash -s -- signed-pair-engine status-unstaged '$pair_encoded'" < "$OPS_DIR/lib/canary-swap-remote.sh" > "$OPS_TMP_DIR/pair-status.json" || exit $?

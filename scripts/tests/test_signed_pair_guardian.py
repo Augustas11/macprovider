@@ -201,6 +201,48 @@ class PolicyProofTests(unittest.TestCase):
         with self.assertRaises(TimeoutError):
             self.proof(altered=True)
 
+    def test_feed_rate_limit_is_waited_out_not_restarted(self):
+        # Pearl 2026-11-01: 17 loopback reads per sweep against a 10/s burst-10
+        # limiter never completed while each 429 restarted the sweep.
+        import io
+        import time
+        import urllib.error
+        import urllib.request
+        names = ('autotune-candidates.json', 'autotune-candidates.json.sig', 'demand-rank.json',
+                 'demand-rank.json.sig', 'rate-card.json', 'rate-card.json.sig',
+                 'continuous-batching-policy.json', 'continuous-batching-policy.json.sig',
+                 'autotune-artifacts.json', 'autotune-artifacts.json.sig', 'native-mtp-admission.json',
+                 'native-mtp-admission.json.sig', 'native-mtp-artifact-manifest.json',
+                 'native-mtp-selftest-bank.json', 'native-mtp-selftest-bank.json.sig')
+        record = {'prior_release_id': 'old', 'prior_files': {n: hashlib.sha256(n.encode()).hexdigest() for n in names}}
+        endpoint = dict((name, path) for name, path in [
+            ('autotune-artifacts.json', 'catalog-artifacts'), ('autotune-artifacts.json.sig', 'catalog-artifacts.sig')])
+        bodies = {'http://127.0.0.1:8443/v1/' + endpoint.get(n, n.replace('.json', '')): n.encode() for n in names}
+        bodies['http://127.0.0.1:8443/v1/autotune-release'] = json.dumps({'release_id': 'old', 'status': 'live_verified'}).encode()
+        bodies['http://127.0.0.1:8444/healthz'] = json.dumps({'native_mtp_canary_bank_release_id': 'old',
+            'native_mtp_canary_bank_sha256': record['prior_files']['native-mtp-selftest-bank.json']}).encode()
+        tokens = [10]
+        class Limited:
+            def open(self, url, timeout):
+                if tokens[0] == 0:
+                    tokens[0] = 10
+                    raise urllib.error.HTTPError(url, 429, 'rate_limited', {'Retry-After': '0.1'}, None)
+                tokens[0] -= 1
+                return io.BytesIO(bodies[url])
+        with patch.object(urllib.request, 'build_opener', return_value=Limited()):
+            NS['served'](record, time.monotonic() + 5)
+
+    def test_other_http_errors_still_fail_closed(self):
+        import time
+        import urllib.error
+        import urllib.request
+        class Missing:
+            def open(self, url, timeout):
+                raise urllib.error.HTTPError(url, 404, 'missing', {}, None)
+        with patch.object(urllib.request, 'build_opener', return_value=Missing()):
+            with self.assertRaises(TimeoutError):
+                NS['served']({'prior_release_id': 'old', 'prior_files': {}}, time.monotonic() + .05)
+
     def test_fencing_stops_dispatch_before_killing_children(self):
         live = {17: 'owner-start', 18: 'child-start'}
         events = []
@@ -493,3 +535,86 @@ class SourceContractTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class BlockedGuardianReverifyTests(unittest.TestCase):
+    """aa_signed_pair_reverify_blocked: reconcile after a blocked guardian."""
+    CODE = SCRIPT.read_text().split("<<'REVERIFY_PY'\n", 1)[1].split('\nREVERIFY_PY', 1)[0]
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        base = Path(self.tmp.name)
+        self.p = base / 'signed-pair-pair'
+        self.p.mkdir()
+        self.root = base / 'catalog'
+        prior = self.root / 'releases/prior'
+        prior.mkdir(parents=True)
+        files = {}
+        for name in ('release.json', 'native-mtp-admission.json', 'native-mtp-selftest-bank.json'):
+            (prior / name).write_bytes(name.encode())
+            files[name] = hashlib.sha256(name.encode()).hexdigest()
+        (self.root / 'current').symlink_to('releases/prior')
+        (self.root / '.previous-target').write_bytes(b'releases/before\n')
+        self.locks = {path: base / Path(path).name for path in
+                      ('/run/lock/macprovider-pearl-updater.lock', '/opt/macprovider/.coordinator-deploy.lock')}
+        for lock in self.locks.values():
+            lock.touch()
+        self.record = {'schema': 'macprovider.signed-pair-pearl-recovery.v1', 'txid': 'pair', 'root': str(self.root),
+                       'prior_current': 'releases/prior', 'prior_release_id': 'old', 'prior_files': files,
+                       'prior_window_base64': base64.b64encode(b'releases/before\n').decode()}
+        (self.p / 'journal.json').write_text(json.dumps(self.record))
+        (self.p / 'ready.json').write_text(json.dumps({'pid': 2 ** 31 - 2, 'start': '1'}))
+        (self.p / 'recovering.json').write_text(json.dumps({'txid': 'pair', 'policy_phase': 'restoring_prior'}))
+        (self.p / 'blocked.json').write_text(json.dumps({'error_type': 'TimeoutError'}))
+
+    def reverify(self):
+        import io
+        import urllib.request
+        bodies = {'http://127.0.0.1:8443/v1/autotune-release': json.dumps({'release_id': 'old', 'status': 'live_verified'}).encode(),
+                  'http://127.0.0.1:8443/v1/native-mtp-admission': b'native-mtp-admission.json',
+                  'http://127.0.0.1:8443/v1/native-mtp-selftest-bank': b'native-mtp-selftest-bank.json',
+                  'http://127.0.0.1:8444/healthz': json.dumps({'native_mtp_canary_bank_release_id': 'old',
+                      'native_mtp_canary_bank_sha256': self.record['prior_files']['native-mtp-selftest-bank.json']}).encode()}
+        class Opener:
+            def open(self, url, timeout):
+                return io.BytesIO(bodies[url])
+        real_open = os.open
+        guardian = base64.b64encode(CODE.encode()).decode()
+        with patch.object(os, 'open', side_effect=lambda path, *a, **k: real_open(str(self.locks.get(str(path), path)), *a, **k)), \
+             patch.object(urllib.request, 'build_opener', return_value=Opener()), \
+             patch('sys.argv', ['reverify', str(self.p), 'pair', guardian]):
+            exec(compile(self.CODE, 'reverify', 'exec'), {'__name__': '__main__'})
+
+    def test_restored_disk_and_served_prior_get_receipt(self):
+        self.reverify()
+        receipt = json.loads((self.p / 'restored').read_text())
+        self.assertEqual(receipt['policy_phase'], 'prior_restored')
+        self.assertEqual(receipt['prior_release_id'], 'old')
+        self.assertEqual(receipt['recovery'], 'reconcile_reverified_blocked_guardian')
+
+    def test_commit_is_never_overridden(self):
+        (self.p / 'committed').write_text('{}')
+        with self.assertRaises(SystemExit) as stop:
+            self.reverify()
+        self.assertEqual(stop.exception.code, 0)
+        self.assertFalse((self.p / 'restored').exists())
+
+    def test_running_guardian_is_not_preempted(self):
+        (self.p / 'blocked.json').unlink()
+        with self.assertRaisesRegex(RuntimeError, 'has not blocked'):
+            self.reverify()
+        self.assertFalse((self.p / 'restored').exists())
+
+    def test_target_still_current_never_claims_prior(self):
+        (self.root / 'current').unlink()
+        (self.root / 'current').symlink_to('releases/target')
+        with self.assertRaisesRegex(RuntimeError, 'prior current was not restored'):
+            self.reverify()
+        self.assertFalse((self.p / 'restored').exists())
+
+    def test_changed_prior_bytes_never_claim_prior(self):
+        (self.root / 'releases/prior/release.json').write_bytes(b'changed')
+        with self.assertRaisesRegex(RuntimeError, 'prior signed release bytes changed'):
+            self.reverify()
+        self.assertFalse((self.p / 'restored').exists())
