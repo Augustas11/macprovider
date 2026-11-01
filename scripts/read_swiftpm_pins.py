@@ -45,8 +45,8 @@ SPEC048_MLX_SWIFT_LM_FORK = "https://github.com/Augustas11/mlx-swift-lm"
 # Qwen2-VL token-only forward and Nemotron-H dtype-preserving gated norm
 # (#2201) on 3.32.3-macprovider.12, the LFM-only reference-prefill opt-in on
 # 3.32.3-macprovider.10.15.1. Other model sources are unchanged.
-SPEC048_MLX_SWIFT_LM_TAG = "3.32.3-macprovider.14"
-SPEC048_MLX_SWIFT_LM_REVISION = "6f5e64b5cdf881c8ff540c454079808a57f1c057"
+SPEC048_MLX_SWIFT_LM_TAG = "3.32.3-macprovider.16"
+SPEC048_MLX_SWIFT_LM_REVISION = "cc14b1841051e83edb062e2085bf979d38e457ce"
 SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE = "3b339ad6e3b3f44c8121ecff5131c7fd55e075e6"
 SPEC048_MLX_SWIFT_FORK = "https://github.com/Augustas11/mlx-swift"
 SPEC048_MLX_SWIFT_TAG = "0.32.3-macprovider.11"
