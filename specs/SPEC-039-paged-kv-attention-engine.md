@@ -1,7 +1,9 @@
 # SPEC-039 — Paged KV / paged-attention engine
 
-Version: v0.1.26
-Status: draft (normative design). v0.1.26 adds the provisional, exact
+Version: v0.1.27
+Status: draft (normative design). v0.1.27 adds the FR-PKV12
+`zai-org/glm-5.3-flash-abliterated` identity (same `glm5_next` layout as the
+GLM-5.3-Flash entry). v0.1.26 adds the provisional, exact
 LFM2.5 ordinary-hybrid identity below; production attach and
 qualification remain pending. v0.1.24 permits direct row-owned cache
 updates and bounded pipelined DeepSeek decode under SPEC-038 v0.3.30;
@@ -78,6 +80,19 @@ is `RotatingKVCache` only because the serve path caps KV for memory attaches to
 paged mode (the block pool bounds memory), while a genuine sliding-window model
 stays fail-safe. IMPL lands with this revision.
 Owner: provider runtime / inference engine
+Change log v0.1.27 (2026-11-01): FR-PKV12 gains the catalog key
+`zai-org/glm-5.3-flash-abliterated` with `Glm5NextForConditionalGeneration`,
+the catalog model whose verified artifact is
+`grant-ai/GLM-5.3-Flash-Abliterated-MLX-4bit` @
+`cbf4e8bd80e9227aa0a60c19b550bef6b390c04c` (snapshot-manifest `d47ec628…`).
+It has the GLM-5.3-Flash `glm5_next` architecture fields, layer layout,
+tokenizer and set of quantization-override modules; its weights, some
+per-module bit widths and the chat template differ. The
+same config checks apply and the entry fails closed the same way. Its
+attach proof, MoE expert-dispatch isolation, msb-throughput rows 1/2/4 and
+scheduler leftovers on the signed 1.8.277 provider are recorded under
+`docs/evidence/glm53-abliterated-2026-11-01/`. Refines SPEC-039-R012.
+
 Change log v0.1.23 (2026-10-24): FR-PKV11/12 distinguish the
 `deepseek_v4` row-owned pooled-cache batching family from paged storage.
 The adapter reuses scheduler lifecycle and bounded capacity accounting while
@@ -848,6 +863,13 @@ be individually measured before it is added. The v1 allowlist is:
   identity are recorded under `docs/evidence/`; until then attach fails
   closed with `paged_fallback_parity`. (v0.1.20) Evidence recorded under
   `docs/evidence/glm53-flash-t4-2026-10-17/` (README lists each record).
+- (v0.1.27) the abliterated GLM-5.3-Flash identity
+  `zai-org/glm-5.3-flash-abliterated`, the catalog model whose verified
+  artifact is `grant-ai/GLM-5.3-Flash-Abliterated-MLX-4bit` @
+  `cbf4e8bd80e9227aa0a60c19b550bef6b390c04c`, with the same
+  `architectures[0]`, `model_type` and `text_config.model_type` requirements
+  as the entry above, keyed the same way (catalog model id plus exact
+  `architectures[0]`). Evidence: `docs/evidence/glm53-abliterated-2026-11-01/`.
 
 
 - (v0.1.25, provisional, SPEC-first) only
