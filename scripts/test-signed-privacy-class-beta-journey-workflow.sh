@@ -59,7 +59,7 @@ required_workflow = [
     "scripts/validate-signed-journey-result.py",
     "scripts/check_spec_governance.py --base-ref origin/main",
     "git diff --quiet -- specs/CONFORMANCE.json",
-    "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+    "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9",
     "retention-days: 1",
     "signed-privacy-class-beta-journey-evidence-${{ steps.request.outputs.source_sha }}",
     "macprovider.signed-privacy-class-beta-journey-evidence.v1",

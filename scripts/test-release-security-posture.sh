@@ -213,7 +213,7 @@ PEARL_VERIFY_UPLOAD_SEQUENCE = (
     "\n      - name: Upload unsigned build artifact\n"
 )
 UNSIGNED_UPLOAD_STEP = (
-    "        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a\n"
+    "        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9\n"
     "        with:\n"
     '          name: unsigned-release-${{ steps.release_source.outputs.commit }}\n'
     "          path: unsigned-release-inputs/\n"

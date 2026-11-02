@@ -53,7 +53,7 @@ required_workflow = [
     "scripts/sign-journey-result.py",
     "scripts/promote-signed-journey-result.py",
     "scripts/check_spec_governance.py --base-ref origin/main",
-    "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+    "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9",
     "retention-days: 1",
     "signed-network-model-admission-journey-promotion-${{ steps.request.outputs.source_sha }}-${{ steps.request.outputs.requirement_slug }}",
     "macprovider.signed-network-model-admission-journey-promotion.v1",
