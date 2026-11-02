@@ -143,7 +143,17 @@ This bootstrap dependency remains unresolved; no qualification exemption,
 stale-evidence rebind or MTP-off deployment is authorized by this train record.
 The exploratory goal matrix does not constitute admission qualification.
 
-## Next CLI release — 1.8.280 (staged 2026-11-01)
+## Next CLI release — after 1.8.280 (tracked 2026-11-02)
+
+1.8.280 is live fleet-wide and #2193 is closed. The next cut carries:
+
+| Item | Provider-side change | Status |
+|---|---|---|
+| [#2202](https://github.com/Augustas11/macprovider/pull/2202) | CB for the 32 GB rows (cohort prefill, on-device decode windows, GPT-OSS cache attention); mlx-swift-lm `3.32.3-macprovider.19` | merged (`7f7d6aa98`); the Llama-3.1-8B signed CB entry is added after the cut, bound to its CDHash |
+| [#2151](https://github.com/Augustas11/macprovider/pull/2151) | DeepSeek V4 with qualified CB | parked; joins when its lab gates pass |
+| Malibu app (`c27ec1482`, shipped in 1.8.280) | Import of an existing protected-file provider; Return sends in Chat | verify on the lab Mac after the next promotion |
+
+## Shipped CLI release — 1.8.280 (staged 2026-11-01)
 
 v1.8.278 and v1.8.279 are Pearl runtime tags, so the candidate after the
 published 1.8.277 carries 1.8.280. Tracking issue: #2193.
