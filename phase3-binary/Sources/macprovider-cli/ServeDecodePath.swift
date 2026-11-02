@@ -577,6 +577,7 @@ extension ModelRuntime {
                 decodePath: nativeMTPAdmission?.effectivePath ?? .ordinary,
                 nativeMTPMaximumProposalDepth: nativeMTPAdmission?.initialProposalDepth ?? 0,
                 nativeMTPCompleteWindowBytesByDepth: nativeMTPAdmission?.completeWindowBytesByDepth ?? [],
+                nativeMTPFamilyAdapter: nativeMTPAdmission?.familyAdapter,
                 nativeMTPMaximumActiveRows: nativeMTPAdmission?.maximumNativeActiveRows ?? 0,
                 nativeMTPTupleFence: nativeMTPAdmission?.tupleFence,
                 nativeMTPAdaptationConfig: nativeMTPAdmission?.adaptationConfig,

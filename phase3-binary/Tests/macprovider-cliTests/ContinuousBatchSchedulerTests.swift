@@ -8442,6 +8442,46 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertEqual(reservedRoundBytes, 0)
     }
 
+    /// SPEC-048 R012: a glm5_next round reserves the bytes it stages at the
+    /// row's own context when they exceed the signed ceiling (a ceiling
+    /// derived at a shorter context), so the byte capacity refuses depth 1
+    /// (two KDA state sets, about 295 MB) and the row verifies at depth 0
+    /// (one set); the same signed ceiling without the family proposes at
+    /// depth 1 (whose scripted round this fixture does not complete).
+    func testNativeMTPGLMRoundReservesStagedBytesAboveSignedCeiling() async throws {
+        for (family, expectedDepths) in [(NativeMTPStagedRoundBytes.glm5NextFamilyAdapter, [0]), (nil, [1])] {
+            let backend = ScriptedBackend(
+                scripts: [:],
+                prefillTokens: ["staged": 6],
+                nativeTargetTopTokens: ["staged": [7]]
+            )
+            let scheduler = try await makeScheduler(
+                maxActiveRows: 1,
+                nativeMTPRoundByteCapacity: 200_000_000,
+                backend: backend
+            )
+            let result = try await scheduler.submit(Self.nativeRequest(
+                id: "staged",
+                promptTokens: [1],
+                maxOutputTokens: 3,
+                stopTokenSequences: [[7]],
+                proposals: [7],
+                maximumDepth: 1,
+                completeWindowBytesByDepth: [16, 16],
+                familyAdapter: family
+            ))
+            if family != nil {
+                XCTAssertEqual(result.terminalStatus, .stop)
+            }
+            let proposalDepths = await backend.nativeProposalBatches().flatMap {
+                $0.map(\.maximumProposalDepth)
+            }
+            XCTAssertEqual(proposalDepths, expectedDepths, "family \(family ?? "nil")")
+            let reservedRoundBytes = await scheduler.nativeMTPReservedRoundBytesSnapshot()
+            XCTAssertEqual(reservedRoundBytes, 0)
+        }
+    }
+
     func testNativeMTPSystemHeadroomFailureReducesDepthBeforeProposal() async throws {
         let backend = ScriptedBackend(
             scripts: [:],
@@ -8999,7 +9039,8 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         nativeMTPTupleFence: NativeMTPTupleFence? = nil,
         maximumActiveRows: Int = Int.max,
         adaptationConfig: NativeMTPAdaptationConfig? = nil,
-        integrityProbe: Bool = false
+        integrityProbe: Bool = false,
+        familyAdapter: String? = nil
     ) -> ContinuousBatchSchedulerRequest {
         let bytesByDepth = completeWindowBytesByDepth
             ?? Array(repeating: completeWindowBytes, count: maximumDepth + 1)
@@ -9014,6 +9055,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             decodePath: .nativeMTP,
             nativeMTPMaximumProposalDepth: maximumDepth,
             nativeMTPCompleteWindowBytesByDepth: bytesByDepth,
+            nativeMTPFamilyAdapter: familyAdapter,
             nativeMTPMaximumActiveRows: maximumActiveRows,
             nativeMTPTupleFence: nativeMTPTupleFence,
             nativeMTPIntegrityProbe: integrityProbe,

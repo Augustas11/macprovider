@@ -67,17 +67,12 @@ struct NativeMTPHardwareE2EFamily: Equatable, Sendable {
     /// Qwen3.5 keeps the placeholder its harness always signed.
     func completeWindowBytesByDepth(maxContextTokens: Int, maxDepth: Int = 1) -> [Int] {
         guard self == .glm5Next else { return [1_048_576, 2_097_152] }
-        let context = max(1, maxContextTokens)
-        let latent = Self.glm5NextStagedLatentLayers * Self.glm5NextLatentBytesPerToken * context
         return (0 ... max(0, maxDepth)).map { depth in
-            latent + (depth + 1) * Self.glm5NextKDALayers * Self.glm5NextKDAStateBytes
+            NativeMTPStagedRoundBytes.bytes(
+                familyAdapter: familyAdapter, contextTokens: maxContextTokens, depth: depth
+            ) ?? Int.max
         }
     }
-
-    static let glm5NextStagedLatentLayers = 12
-    static let glm5NextLatentBytesPerToken = 1_088
-    static let glm5NextKDALayers = 34
-    static let glm5NextKDAStateBytes = 64 * 128 * 128 * 4 + 3 * 24_576 * 2
 
     /// The native active-row bound the family's tuple signs (SPEC-048 R007),
     /// nil when the harness's slot count is used. glm5_next signs 1: at four

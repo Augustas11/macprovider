@@ -5143,6 +5143,7 @@ maxTokens: 1,
             decodePath: .nativeMTP,
             nativeMTPMaximumProposalDepth: challenge.fixedProposalDepth,
             nativeMTPCompleteWindowBytesByDepth: capability.completeWindowBytesByDepth,
+            nativeMTPFamilyAdapter: capability.family,
             nativeMTPTupleFence: fence,
             nativeMTPIntegrityProbe: true
         ))
@@ -5371,6 +5372,7 @@ maxTokens: 1,
                 decodePath: .nativeMTP,
                 nativeMTPMaximumProposalDepth: request.proposalDepth,
                 nativeMTPCompleteWindowBytesByDepth: capability.completeWindowBytesByDepth,
+                nativeMTPFamilyAdapter: capability.family,
                 nativeMTPTupleFence: fence,
                 nativeMTPIntegrityProbe: true
             ))
@@ -9374,6 +9376,7 @@ maxTokens: 1,
             nativeMTPCompleteWindowBytesByDepth: nativeDepth == nil
                 ? []
                 : (currentNativeMTPCapability?.completeWindowBytesByDepth ?? []),
+            nativeMTPFamilyAdapter: nativeDepth == nil ? nil : currentNativeMTPCapability?.family,
             nativeMTPTupleFence: nil,
             nativeMTPIntegrityProbe: nativeDepth != nil
         )
