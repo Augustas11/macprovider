@@ -14814,7 +14814,11 @@ maxTokens: maxTokens,
             // SPEC-018 §3.12: tools, JSON mode and content see only the text
             // after the first `</think>`.
             let reasoning = request.outputTraits.reasoningOpen ? ReasoningOutput.split(filteredText) : nil
-            let parsed = try parseToolCallsIfRequested(reasoning?.answer ?? filteredText, request: request, toolCallPrefill: toolCallPrefill)
+            var answer = reasoning?.answer ?? filteredText
+            if try stripsStrayThinkTags(request) {
+                answer = ReasoningOutput.removingStrayTags(answer, streaming: false)
+            }
+            let parsed = try parseToolCallsIfRequested(answer, request: request, toolCallPrefill: toolCallPrefill)
             var output = ParsedGeneratedOutput(
                 content: parsed.content,
                 toolCalls: parsed.toolCalls,
@@ -15072,6 +15076,14 @@ maxTokens: maxTokens,
     /// else the catalog family of the requested model.
     static func toolGrammar(for request: ChatCompletionRequest) -> ToolCallGrammar? {
         request.outputTraits.toolGrammar ?? ToolCallGrammar.family(modelID: request.model)
+    }
+
+    /// GLM output outside a guaranteed call (#2189): stray think tags in the
+    /// answer are removed (`ReasoningOutput.removingStrayTags`). Guaranteed
+    /// selection keeps its whole-envelope check on the generated text.
+    static func stripsStrayThinkTags(_ request: ChatCompletionRequest) throws -> Bool {
+        guard toolGrammar(for: request) == .glm else { return false }
+        return try !ToolSelectionPolicy.selection(request.promptSource.toolChoice).requiresCall
     }
 
     /// Any json_object or json_schema request, strict or not (SPEC-019 §1a).
@@ -15947,6 +15959,7 @@ struct SerialStreamingTextEmitter {
     private let streamToolsIncrementally: Bool
     private let stopsAfterFirstCompleteToolCall: Bool
     private let reasoningOpen: Bool
+    private let stripsStrayThinkTags: Bool
     private(set) var emittedReasoning = ""
     private var toolStreamer: NativeToolCallStreamEmitter
     private var lastEmittedDecodedText = ""
@@ -15970,6 +15983,7 @@ struct SerialStreamingTextEmitter {
             && !HarmonyResponseParser.isHarmonyModelID(request.model)
         stopsAfterFirstCompleteToolCall = request.stopsAfterFirstCompleteToolCall
         reasoningOpen = request.outputTraits.reasoningOpen
+        stripsStrayThinkTags = (try? ModelRuntime.stripsStrayThinkTags(request)) ?? false
         toolStreamer = NativeToolCallStreamEmitter(
             modelID: request.model,
             grammar: grammar,
@@ -16009,6 +16023,9 @@ struct SerialStreamingTextEmitter {
             }
             guard split.closed else { return .more }
             candidate = (split.answer, candidate.hitStop)
+        }
+        if stripsStrayThinkTags {
+            candidate.text = ReasoningOutput.removingStrayTags(candidate.text, streaming: true)
         }
         let stableText = holdsCleanupPatternPrefixes
             ? Self.cleanupStablePrefix(

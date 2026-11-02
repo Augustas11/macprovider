@@ -43,6 +43,31 @@ enum ReasoningOutput {
         return Split(reasoning: String(text.dropLast(held)), answer: "", closed: false)
     }
 
+    /// GLM answer text with stray think tags removed (#2189). The template
+    /// opens `<think>` in the prompt, so the first `</think>` closes the
+    /// reasoning (`split`); a `<think>` or `</think>` the model writes after
+    /// that is markup, never content. Only the text before the first
+    /// `<tool_call>` is touched: from there the tool parser decides, and call
+    /// arguments stay byte-exact. A streaming prefix also holds back a tail
+    /// that could still become a tag, so the visible text only grows.
+    static func removingStrayTags(_ text: String, streaming: Bool) -> String {
+        let callStart = text.range(of: "<tool_call>")?.lowerBound ?? text.endIndex
+        var head = String(text[..<callStart])
+        guard head.contains("<") else { return text }
+        // Repeated: removing one tag can join the text around it into another.
+        while let tag = [closeTag, openTag].first(where: { head.contains($0) }) {
+            head = head.replacingOccurrences(of: tag, with: "")
+        }
+        if streaming, callStart == text.endIndex,
+           let held = stride(from: min(closeTag.count - 1, head.count), through: 1, by: -1).first(where: { length in
+               let tail = String(head.suffix(length))
+               return closeTag.hasPrefix(tail) || openTag.hasPrefix(tail)
+           }) {
+            head = String(head.dropLast(held))
+        }
+        return head + text[callStart...]
+    }
+
     /// Applies `filter` (stop strings, hold-back) to the post-think text only;
     /// the reasoning keeps just the model stop-token stripping. Returns the
     /// raw shape `reasoning</think>answer` so the caller can split it later.
