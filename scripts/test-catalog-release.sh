@@ -402,6 +402,8 @@ expected_history = {
     # Published by a signed pair that rolled back on a stale plan CB tuple;
     # its release directory name stays taken on Pearl.
     "published-2026-11-01-glm53-flash-abliterated-cb-mtp-v280-r2",
+    # Superseded by the same set with cached turns granted to the abliterated tuple.
+    "published-2026-11-01-glm53-flash-abliterated-cb-mtp-v280-r3",
     current_release_id,
 }
 if set(ledger["releases"]) != expected_history:
