@@ -384,10 +384,16 @@ def set_target_model(args):
         atomic(path, after, mode, uid)
         if not restart_runner(old):
             raise RuntimeError("retargeted runner not stable")
-    except BaseException:
+    except BaseException as failure:
         if digest(path.read_bytes()) == digest(after):
             atomic(path, raw, mode, uid)
-        service("restart")
+        # Same discipline as restore_reservation: a rollback restart that does
+        # not come back stable is started again and named, never left silent.
+        if not restart_runner(main_pid()):
+            service("start")
+            print("buyer-runner retarget failed and the runner did not come back stable on the "
+                  "previous targets; check malibu-buyer-runner", file=sys.stderr)
+            raise RuntimeError("runner not stable after retarget rollback") from failure
         raise
     return {"phase": "retargeted"}
 

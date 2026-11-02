@@ -176,6 +176,14 @@ run_rc 0 "pause before retarget" "$RESERVE" pause-studio
 run_rc 3 "set-target-model refused during a reservation" retarget other/model
 run_rc 0 "restore after retarget refusal" "$RESERVE" restore
 grep -q '"grant-ai/New-Model-4bit"' "$PEARL_RUNNER_TARGETS" || die "restore lost the retargeted model"
+# A retarget whose restart fails rolls the targets back; when the rollback
+# restart fails too, the runner is started again and the failure is named.
+before_sha="$(targets_sha)"
+touch "$T/svc/runner_restart_fail"
+run_rc 1 "set-target-model with failing restarts" retarget other/model
+[ "$(targets_sha)" = "$before_sha" ] || die "failed retarget did not roll the targets back"
+grep -q "did not come back stable" "$T/err" || die "unstable rollback not named"
+rm -f "$T/svc/runner_restart_fail"
 
 # 10. catalog-activate: the ordinary gateway_proof step is blocked without a
 #     prefix and, with one, is a mutate step that runs the probe under the

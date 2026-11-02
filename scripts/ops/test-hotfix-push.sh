@@ -182,6 +182,11 @@ change 'scripts/ops/test-$(touch pwned).sh'
 run 3 "command-substitution path"
 if [ -e "$W/pwned" ] || [ -e pwned ]; then bad "command substitution ran"; else ok; fi
 expect_not_pushed "command-substitution path"
+# A module-root test file is test-only too: go test for the root package.
+change phase7-verify/integration_test.go
+run 0 "root Go test file plan" --dry-run
+if grep -q "go test ./. -count=1" "$tmp/out" "$tmp/err"; then ok; else bad "root Go test file: no root go test in the plan"; fi
+if grep -q "need a PR" "$tmp/err"; then bad "root Go test file refused"; else ok; fi
 change phase4-coordinator/README.md
 run 0 "docs-only change"
 expect_pushed "docs-only change"
