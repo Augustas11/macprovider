@@ -24,7 +24,7 @@ pid (svc/gw_mainpid), start second (svc/gw_started_at), restart count (svc/gw_re
 --config pearl/gateway.yaml; svc/gw_restart_fail makes its restart fail,
 svc/gw_restart_fail_once the next one.
 A unit whose name contains "buyer-runner" is the fake Pearl buyer runner:
-is-active (svc/runner_inactive makes it inactive), show -p MainPID [-p ActiveState]
+is-active (svc/runner_inactive makes it inactive), show -p MainPID [-p ActiveState] or -p InvocationID (one per pid)
 [--value], and restart/start/stop appended to svc/runner-actions; restart gives a
 new pid (svc/runner_pid) and copies the file named in svc/runner_targets_path to
 svc/runner_loaded.json, the targets the restarted runner loaded (one line per
@@ -145,7 +145,10 @@ def runner(args):
         sys.exit(3 if os.path.exists(os.path.join(svc, "runner_inactive")) else 0)
     if args[0] == "show":
         state = "inactive" if os.path.exists(os.path.join(svc, "runner_inactive")) else "active"
-        if "--value" in args:
+        if "InvocationID" in args:
+            # One systemd invocation per runner process: a restart (new pid) is a new invocation.
+            print("%032x" % rpid)
+        elif "--value" in args:
             print(rpid if "MainPID" in args else state)
         else:
             print("MainPID=%d\nActiveState=%s" % (rpid, state))
