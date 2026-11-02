@@ -138,7 +138,7 @@ for value in (
         raise SystemExit(f"candidate Malibu dependency handling is incomplete: {value}")
 if 'if [ -f Package.resolved ]; then' in build:
     raise SystemExit("candidate Malibu may not treat its reviewed lockfile as optional")
-if "retention-days: 1" not in protected or "actions/upload-artifact@043fb46d" not in protected:
+if "retention-days: 1" not in protected or "actions/upload-artifact@cf430e03" not in protected:
     raise SystemExit("private acceptance artifact is not short-lived and action-pinned")
 for secret in (
     "MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM",

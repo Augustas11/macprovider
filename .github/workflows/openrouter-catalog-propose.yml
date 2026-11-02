@@ -95,7 +95,7 @@ jobs:
 
       - name: Retain proposal diagnostics even when the scan fails
         if: ${{ always() && env.PROPOSAL_OUTPUT_DIR != '' }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: openrouter-catalog-proposal
           retention-days: 7

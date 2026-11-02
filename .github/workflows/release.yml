@@ -441,7 +441,7 @@ jobs:
             unsigned-release-inputs/gateway-linux-amd64
 
       - name: Upload unsigned build artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: unsigned-release-${{ steps.release_source.outputs.commit }}
           path: unsigned-release-inputs/

@@ -513,7 +513,7 @@ jobs:
       # metadata binds the ZIP to this Actions run and checked-out source SHA.
       - name: Upload Swift xUnit shard report
         if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: swift-xunit-shard-${{ matrix.shard }}-${{ github.sha }}
           path: phase3-binary/shard-xunit.xml
