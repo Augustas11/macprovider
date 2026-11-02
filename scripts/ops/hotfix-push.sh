@@ -201,29 +201,33 @@ def add(*commands):
 
 # Suite commands are built from repo paths and run by bash -c, so a path that
 # could carry shell syntax (a "a||true/x_test.go" directory, "$(...)") never
-# reaches a command: it is refused before any mapping.
-SAFE_PATH = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/+@-]*")
-OPS_TESTS = [t for t in OPS_TESTS if SAFE_PATH.fullmatch(t.relative_to(root).as_posix())]
-tests = {t: text for t, text in tests.items() if SAFE_PATH.fullmatch(t.relative_to(root).as_posix())}
+# reaches a command: it is refused before any mapping. Every tracked path
+# today fits this set; dotfiles (.gitignore, .gitkeep) do too.
+SAFE_PATH = re.compile(r"[A-Za-z0-9._/+@-]+")
+CANNOT_CARRY = "path has characters a suite command cannot carry"
+for test in OPS_TESTS + list(tests):
+    rel = test.relative_to(root).as_posix()
+    if not SAFE_PATH.fullmatch(rel):
+        refusals.append((rel, "test file name: " + CANNOT_CARRY + "; rename it"))
 
 decode = decode_inputs()
 for path in paths:
-    if not SAFE_PATH.fullmatch(path) or "//" in path or "/." in path:
-        refusals.append((path, "path has characters a suite command cannot carry"))
+    go_test = re.fullmatch(r"(phase4-coordinator|phase5-gateway|phase7-verify)/(?:(.+)/)?[^/]+_test\.go", path)
+    if not go_test and path not in PR_EXCEPT:
+        why = next((w for pat, w in PR_ONLY if fnmatch.fnmatch(path, pat)), None)
+        if why:
+            refusals.append((path, why))
+            continue
+    if not SAFE_PATH.fullmatch(path):
+        refusals.append((path, CANNOT_CARRY))
         continue
     if is_docs(path):
         continue
     # Go test files change no binary (test-only diffs go straight to main);
     # every catalog cut repins currentAutotuneReleaseID in one of them.
-    go_test = re.fullmatch(r"(phase4-coordinator|phase5-gateway|phase7-verify)/(?:(.+)/)?[^/]+_test\.go", path)
     if go_test:
         add(f"(cd {go_test.group(1)} && go test ./{go_test.group(2) or '.'} -count=1)")
         continue
-    if path not in PR_EXCEPT:
-        why = next((w for pat, w in PR_ONLY if fnmatch.fnmatch(path, pat)), None)
-        if why:
-            refusals.append((path, why))
-            continue
     mapped = False
     if path.startswith("scripts/tests/"):
         mapped = True

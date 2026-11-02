@@ -162,6 +162,14 @@ run 3 "SPEC change"
 expect_not_pushed "SPEC change"
 change .github/workflows/ci.yml
 run 3 "workflow change"
+expect_err "CI workflow"
+# Dotfiles carry no shell syntax: they plan like any other path.
+change phase7-verify/testdata/.gitkeep
+run 0 "dotfile plan" --dry-run
+if grep -q "cannot carry\|need a PR" "$tmp/err"; then bad "dotfile refused"; else ok; fi
+change .gitignore
+run 0 "root dotfile plan" --dry-run
+if grep -q "cannot carry\|need a PR" "$tmp/err"; then bad "root dotfile refused"; else ok; fi
 change phase3-binary/Sources/macprovider-cli/Foo.swift
 run 3 "Swift change"
 change phase3-binary/Package.resolved
