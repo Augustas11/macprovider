@@ -306,6 +306,13 @@ review, and architecture review. In Codex sessions, use native Codex
 subagents/auditor lanes. Use `omc ask codex` only as a legacy fallback outside
 Codex contexts that lack native subagents.
 
+Audits that run on the lab provider through Malibu get every row of that
+provider. Before the first lane starts, pause the lab provider's buyer-runner
+target with `scripts/ops/lib/runner-reserve.sh pause-studio`. Keep it paused
+until the last lane has its verdict, then run `restore`. Never let audit
+requests compete with runner traffic: a lane that fails "at capacity" is a
+missed pause, not a model problem.
+
 Gate: 0 CRITICAL, 0 HIGH, and 0 MEDIUM findings across all three lanes. LOW and
 INFO findings may be carried explicitly.
 
