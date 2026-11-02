@@ -150,6 +150,80 @@ final class PagedKVSlidingWindowTests: XCTestCase {
         }
     }
 
+    /// Decode keys reach SDPA in the slot order a keep=0 `RotatingKVCache`
+    /// holds them, through prefill chunks, a short prompt that wraps during
+    /// decode, and a one-token remainder chunk. Each key carries its token
+    /// position, so equal arrays mean equal slot order.
+    func testSlidingWindowPresentationMatchesRotatingCacheSlotOrder() throws {
+        try requireMetal()
+        let window = 8
+        let schedules: [[Int]] = [[10, 5], [3], [12, 1], [8], [2, 2, 2]]
+        Device.withDefaultDevice(.cpu) {
+            for chunks in schedules {
+                let updates = chunks + Array(repeating: 1, count: 3 * window + 3)
+                let rotating = RotatingKVCache(maxSize: window, keep: 0)
+                let paged = makeCache(offset: 0, windowTokens: window)
+                var position = 0
+                for (step, count) in updates.enumerated() {
+                    let keys = Self.positions(position, count)
+                    position += count
+                    let expected = rotating.update(keys: keys, values: keys).0
+                    let presented = paged.update(keys: keys, values: keys).0
+                    XCTAssertEqual(
+                        presented.asArray(Float.self), expected.asArray(Float.self),
+                        "chunks \(chunks), update \(step)"
+                    )
+                }
+            }
+        }
+    }
+
+    /// Lockstep rows at one offset take their own ring layout: each row's
+    /// slot order follows its own last prefill chunk.
+    func testBatchedLockstepDecodeGivesEachRowItsRotatingSlotOrder() throws {
+        try requireMetal()
+        let window = 8
+        Device.withDefaultDevice(.cpu) {
+            let rowChunks: [[Int]] = [[10, 5], [12, 1, 1, 1]]
+            var references: [RotatingKVCache] = []
+            var rows: [PagedKVCache] = []
+            for chunks in rowChunks {
+                let rotating = RotatingKVCache(maxSize: window, keep: 0)
+                let paged = makeCache(offset: 0, windowTokens: window)
+                var position = 0
+                for count in chunks {
+                    let keys = Self.positions(position, count)
+                    position += count
+                    _ = rotating.update(keys: keys, values: keys)
+                    _ = paged.update(keys: keys, values: keys)
+                }
+                references.append(rotating)
+                rows.append(paged)
+            }
+            let batch = PagedKVSharedForwardBackend.batchLayerCacheForTest(rowCaches: rows)
+            var position = 15
+            for step in 0 ..< 2 * window + 3 {
+                let keys = Self.positions(position, 1)
+                position += 1
+                let expected = references.map { $0.update(keys: keys, values: keys).0.asArray(Float.self) }
+                let presented = batch.update(
+                    keys: concatenated([keys, keys], axis: 0),
+                    values: concatenated([keys, keys], axis: 0)
+                ).0
+                for row in 0 ..< 2 {
+                    XCTAssertEqual(
+                        presented[row ..< row + 1].asArray(Float.self), expected[row],
+                        "row \(row), step \(step)"
+                    )
+                }
+            }
+        }
+    }
+
+    private static func positions(_ start: Int, _ count: Int) -> MLXArray {
+        MLXArray((start ..< start + count).map(Float.init), [1, 1, count, 1])
+    }
+
     private func requireMetal() throws {
         guard PagedKVMetallibGate.defaultMetallibExists() else {
             throw XCTSkip("MLX default metallib is unavailable in this test host")

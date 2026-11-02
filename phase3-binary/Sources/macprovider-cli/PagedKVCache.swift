@@ -137,6 +137,10 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
     private(set) var mutationCount = 0
     var offset: Int
     let attentionWindowTokens: Int?
+    /// `offset` right after the last multi-token update (a prefill chunk).
+    /// A sliding-window row presents its decode window in the ring layout
+    /// `RotatingKVCache` holds at the same point (`slidingRingShift`).
+    var slidingRingAnchor = 0
 
     /// Number of times the paged Metal gather kernel actually executed. Proof, for the
     /// parity fixtures, that logical K/V was reconstructed through the real gather rather
@@ -227,6 +231,7 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
         valueBuffer = nextValues
         storedTokens = end
         offset += incomingTokens
+        if incomingTokens > 1 { slidingRingAnchor = offset }
         mutationCount &+= 1
         let mergedKeys = Self.prefix(nextKeys, end)
         let mergedValues = Self.prefix(nextValues, end)
@@ -397,6 +402,7 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
         guard trimmed > 0 else { return 0 }
         offset -= trimmed
         storedTokens = min(storedTokens, offset)
+        slidingRingAnchor = min(slidingRingAnchor, offset)
         // Keep capacity within the blocks the allocator still accounts for
         // (SPEC-039 FR-PKV2): a trim that frees whole blocks copies the kept
         // prefix into a right-sized buffer so the freed memory is released.
@@ -426,6 +432,7 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
             attentionWindowTokens: attentionWindowTokens
         )
         copied.state = state
+        copied.slidingRingAnchor = slidingRingAnchor
         return copied
     }
 
@@ -594,10 +601,42 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
         let end = priorTokens + incomingTokens
         let start = max(0, end - keepPrior - incomingTokens)
         guard start > 0 else { return (keys, values) }
+        let shift = incomingTokens == 1
+            ? Self.slidingRingShift(postUpdateOffset: offset, anchor: slidingRingAnchor, windowSize: attentionWindowTokens)
+            : 0
         return (
-            keys[.ellipsis, start..., 0...],
-            values[.ellipsis, start..., 0...]
+            Self.ringOrdered(keys[.ellipsis, start..., 0...], shift: shift),
+            Self.ringOrdered(values[.ellipsis, start..., 0...], shift: shift)
         )
+    }
+
+    /// Where a keep=0 `RotatingKVCache` of `windowSize` slots holds its window
+    /// after a one-token update, as a right rotation of the temporal window.
+    /// SDPA reduces keys in buffer order, so presenting the same keys in
+    /// temporal order changes the row's floating-point result: GPT-OSS rows
+    /// diverged from serial greedy tokens at a near tie (#2200).
+    ///
+    /// A multi-token update leaves the ring temporal and `anchor` tokens long
+    /// (kept to `windowSize - 1` plus the chunk). The next one-token update
+    /// trims it to the window and writes slot 0; a ring that never held a full
+    /// window first wraps when `offset` passes `windowSize`. From then on the
+    /// newest token sits at slot `(offset - max(anchor, windowSize) - 1) mod
+    /// windowSize`.
+    static func slidingRingShift(postUpdateOffset: Int, anchor: Int, windowSize: Int?) -> Int {
+        guard let windowSize, windowSize > 1 else { return 0 }
+        let base = max(anchor, windowSize)
+        guard postUpdateOffset > base else { return 0 }
+        return (postUpdateOffset - base) % windowSize
+    }
+
+    /// `window` rotated right by `shift` along the sequence axis.
+    static func ringOrdered(_ window: MLXArray, shift: Int) -> MLXArray {
+        let length = window.dim(2)
+        guard shift > 0, shift < length else { return window }
+        return concatenated([
+            window[.ellipsis, (length - shift)..., 0...],
+            window[.ellipsis, ..<(length - shift), 0...],
+        ], axis: 2)
     }
 
     var debugDescription: String {
