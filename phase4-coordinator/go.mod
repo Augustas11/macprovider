@@ -3,7 +3,7 @@ module github.com/augstar/macprovider-coordinator
 go 1.26.9
 
 require (
-	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.0
+	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.1
 	github.com/go-chi/chi/v5 v5.3.2
 	github.com/gobwas/ws v1.4.0
 	github.com/google/uuid v1.6.0
