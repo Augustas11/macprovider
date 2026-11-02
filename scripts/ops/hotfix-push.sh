@@ -203,6 +203,12 @@ decode = decode_inputs()
 for path in paths:
     if is_docs(path):
         continue
+    # Go test files change no binary (test-only diffs go straight to main);
+    # every catalog cut repins currentAutotuneReleaseID in one of them.
+    go_test = re.fullmatch(r"(phase4-coordinator|phase5-gateway|phase7-verify)/(.+)/[^/]+_test\.go", path)
+    if go_test:
+        add(f"(cd {go_test.group(1)} && go test ./{go_test.group(2)} -count=1)")
+        continue
     if path not in PR_EXCEPT:
         why = next((w for pat, w in PR_ONLY if fnmatch.fnmatch(path, pat)), None)
         if why:

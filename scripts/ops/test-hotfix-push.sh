@@ -166,6 +166,12 @@ change phase3-binary/Sources/macprovider-cli/Foo.swift
 run 3 "Swift change"
 change phase3-binary/Package.resolved
 run 3 "pin change"
+# A Go test file (a catalog cut's release-id pin) is not refused; it runs
+# go test for its package.
+change phase4-coordinator/internal/buyer/autotune_feeds_test.go
+run 0 "Go test file plan" --dry-run
+if grep -q "go test ./internal/buyer" "$tmp/out" "$tmp/err"; then ok; else bad "Go test file: no go test in the plan"; fi
+if grep -q "need a PR" "$tmp/err"; then bad "Go test file refused"; else ok; fi
 change phase4-coordinator/README.md
 run 0 "docs-only change"
 expect_pushed "docs-only change"
