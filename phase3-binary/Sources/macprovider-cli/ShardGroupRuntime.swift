@@ -348,6 +348,8 @@ actor ShardGroupRuntime: ModelRuntimeServing {
         let stops: [String]
         /// SPEC-018 §3.12: the rendered prompt leaves a `<think>` open.
         let reasoningOpen: Bool
+        /// SPEC-018 §3.12 v0.3.12: stray think tags leave the answer.
+        let stripsStrayThinkTags: Bool
     }
 
     /// Validate what a shard group serves and render the prompt: text chat with
@@ -383,7 +385,8 @@ actor ShardGroupRuntime: ModelRuntimeServing {
             seed: request.seed.map { UInt64(bitPattern: Int64($0)) })
         return PreparedRequest(
             promptTokens: promptTokens, maxTokens: maxTokens, control: control, stops: request.stop.filter { !$0.isEmpty },
-            reasoningOpen: request.outputTraits.reasoningOpen)
+            reasoningOpen: request.outputTraits.reasoningOpen,
+            stripsStrayThinkTags: (try? ModelRuntime.stripsStrayThinkTags(request)) ?? false)
     }
 
     /// The chat template applied by the model's tokenizer, exactly as the single-Mac
@@ -446,7 +449,7 @@ actor ShardGroupRuntime: ModelRuntimeServing {
 
         var output = ShardStreamingText(
             tokenizer: prompting.tokenizer, stops: prepared.stops, stopFilter: prompting.stopFilter,
-            reasoningOpen: prepared.reasoningOpen)
+            reasoningOpen: prepared.reasoningOpen, stripsStrayThinkTags: prepared.stripsStrayThinkTags)
         var content = ""
         var reasoning = ""
         func deliver(_ released: ShardStreamingText.Released) {
@@ -585,6 +588,8 @@ actor ShardGroupRuntime: ModelRuntimeServing {
 /// With an open `<think>` (SPEC-018 §3.12) the output up to the first
 /// `</think>` is reasoning: stop sequences apply only to the text after it,
 /// whose leading whitespace is dropped, as `ReasoningOutput.split` does.
+/// With `stripsStrayThinkTags`, the answer then loses stray think tags as
+/// `ReasoningOutput.removingStrayTags` removes them on the single-Mac path.
 struct ShardStreamingText {
     struct Released: Equatable {
         var reasoning = ""
@@ -604,14 +609,22 @@ struct ShardStreamingText {
     /// Tokens up to and including the one that completes `</think>`; all of
     /// them when it never closed.
     private(set) var reasoningTokens = 0
+    private let stripsStrayThinkTags: Bool
+    /// Answer text past stop handling, and what of it was released.
+    private var answer = ""
+    private var releasedAnswer = ""
 
-    init(tokenizer: any Tokenizer, stops: [String], stopFilter: StopTokenFilter, reasoningOpen: Bool = false) {
+    init(
+        tokenizer: any Tokenizer, stops: [String], stopFilter: StopTokenFilter, reasoningOpen: Bool = false,
+        stripsStrayThinkTags: Bool = false
+    ) {
         self.detokenizer = NaiveStreamingDetokenizer(tokenizer: tokenizer)
         self.stops = stops
         self.stopFilter = stopFilter
         self.holdBack = max(0, (stops.map(\.count).max() ?? 0) - 1)
         self.inReasoning = reasoningOpen
         self.answerStarted = !reasoningOpen
+        self.stripsStrayThinkTags = stripsStrayThinkTags
     }
 
     /// The text this token releases.
@@ -649,8 +662,18 @@ struct ShardStreamingText {
             guard !text.isEmpty else { return released }
             answerStarted = true
         }
-        released.content = appendAnswer(text)
+        released.content = visible(appendAnswer(text), final: stopped)
         return released
+    }
+
+    /// The content `text` releases once stray think tags are removed.
+    private mutating func visible(_ text: String, final: Bool) -> String {
+        guard stripsStrayThinkTags else { return text }
+        answer += text
+        let current = ReasoningOutput.removingStrayTags(answer, streaming: !final)
+        let delta = ModelRuntime.streamDelta(from: releasedAnswer, to: current)
+        releasedAnswer += delta
+        return delta
     }
 
     private mutating func appendAnswer(_ text: String) -> String {
@@ -675,6 +698,8 @@ struct ShardStreamingText {
             reasoningHeld = ""
         }
         guard !stopped else { return Released() }
-        return Released(reasoning: stopFilter.stripping(from: reasoningHeld, joiner: ControlTextShield.markString), content: held)
+        return Released(
+            reasoning: stopFilter.stripping(from: reasoningHeld, joiner: ControlTextShield.markString),
+            content: visible(held, final: true))
     }
 }

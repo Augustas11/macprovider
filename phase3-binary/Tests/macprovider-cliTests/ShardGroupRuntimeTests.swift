@@ -296,6 +296,43 @@ final class ShardGroupRuntimeTests: XCTestCase {
         XCTAssertEqual(plainOutput.reasoningTokens, 0)
     }
 
+    /// SPEC-018 §3.12 v0.3.12 (#2189): a GLM answer served by a shard group
+    /// loses stray think tags like the single-Mac path, streamed and final,
+    /// with stops still matched on the generated text.
+    func testStrayThinkTagsLeaveTheShardGroupAnswer() throws {
+        let tokenizer = ShardTestTokenizer()
+        func run(_ text: String, strips: Bool) -> ShardStreamingText.Released {
+            var output = ShardStreamingText(
+                tokenizer: tokenizer, stops: ["STOP"], stopFilter: StopTokenFilter(tokens: []), reasoningOpen: true,
+                stripsStrayThinkTags: strips)
+            var total = ShardStreamingText.Released()
+            for token in tokenizer.encode(text: text, addSpecialTokens: false) {
+                let released = output.append(token)
+                total.reasoning += released.reasoning
+                total.content += released.content
+            }
+            let rest = output.finish()
+            total.reasoning += rest.reasoning
+            total.content += rest.content
+            return total
+        }
+        let text = "Plan.</think>First part.</think> Second<think> part."
+        XCTAssertEqual(run(text, strips: true), ShardStreamingText.Released(reasoning: "Plan.", content: "First part. Second part."))
+        XCTAssertEqual(run(text + " STOP tail</think>", strips: true).content, "First part. Second part. ")
+        XCTAssertEqual(run("Plan.</think>a</thi", strips: true).content, "a</thi")
+        XCTAssertEqual(run(text, strips: false).content, "First part.</think> Second<think> part.")
+
+        func gate(_ model: String) throws -> Bool {
+            let request = try ChatCompletionRequest.parse(data: JSONSerialization.data(withJSONObject: [
+                "model": model, "messages": [["role": "user", "content": "x"]],
+            ]))
+            request.outputState.resolve(RequestOutputTraits(toolGrammar: nil, reasoningOpen: true))
+            return try ModelRuntime.stripsStrayThinkTags(request)
+        }
+        XCTAssertTrue(try gate("zai-org/GLM-5.3-Flash"))
+        XCTAssertFalse(try gate("mlx-community/Qwen3-8B-4bit"))
+    }
+
     /// R3-C04: a tokenizer that marks `</think>` special (so it is in the
     /// production stop filter) and decodes it as one piece still ends the
     /// reasoning; another special token is filtered from both sides.
