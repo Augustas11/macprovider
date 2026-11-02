@@ -9,12 +9,12 @@
 #   glm53-2198-window.sh base    BASE_BENCH (GLMBench on fork e06521b9, the
 #        provider pin): 1K/8K/32K/64K with the provider's 512-token prefill
 #        chunk, tokens and top logits dumped; 1K decode kernel profile
-#   glm53-2198-window.sh camp    CAMP_BENCH (GLMBench on the split-HC fork
-#        candidate) on the same cells and profile; tokens and top logits
+#   glm53-2198-window.sh camp    CAMP_BENCH (GLMBench on the campaign fork,
+#        prefill + split-HC) on the same cells and profile; tokens and top logits
 #        compared bitwise with base (needs base's logs in OUT)
 #   glm53-2198-window.sh msb     4-row paged CB aggregate at 1K, provider lab
-#        harness on the pinned fork (HARNESS_PIN) then on the split-HC fork
-#        (HARNESS_HC)
+#        harness on the pinned fork (HARNESS_PIN) then on the campaign fork
+#        (HARNESS_HC: prefill + split-HC)
 #   glm53-2198-window.sh r015    SPEC-048 R015 single-row cells, native MTP
 #        against ordinary, s1 x prompt 1536/4096/32768 x output 128/512, on
 #        HARNESS_PIN under the lab-only exploratory policy POLICY
@@ -213,20 +213,54 @@ leg_camp() {
   leg_begin camp
   local rc=0
   bench_cells camp $CAMP_BENCH camp || rc=$?
-  # Split-HC keeps every value bitwise: same tokens and top logits as base.
-  for ctx in 1024 8192 32768 65536; do
-    local a=$OUT/base-ctx$ctx.log b=$OUT/camp-ctx$ctx.log verdict
-    if [[ ! -s $a || ! -s $b ]] || ! grep -qE '^tokens=' $a || ! grep -qE '^tokens=' $b; then
-      verdict=missing
-    elif diff <(grep -E '^(tokens|top_logits)=' $a) <(grep -E '^(tokens|top_logits)=' $b) > /dev/null; then
-      verdict=identical
-    else
-      verdict=differs
-    fi
-    [[ $verdict == identical ]] || { (( rc == 0 )) && rc=1; }
-    log "parity ctx=$ctx $verdict"
-    echo "{\"cell\": \"parity-ctx$ctx\", \"verdict\": \"$verdict\"}" >> $OUT/camp.cells
-  done
+  # Greedy tokens must match base bitwise at every context. Split-HC is bitwise
+  # but the prefill Sinkhorn and sparse-head GEMM kernels reorder sums, so the
+  # top logits are compared by their largest absolute difference. Prefill time
+  # at 32K and 64K (512-token chunks), camp against base.
+  python3 -I - $OUT >> $OUT/camp.cells <<'PY'
+import json, re, sys
+out = sys.argv[1]
+def text(side, ctx):
+    try:
+        return open(f"{out}/{side}-ctx{ctx}.log", errors="replace").read()
+    except OSError:
+        return ""
+def line(t, key):
+    m = re.search(r"^" + key + r"=(\[.*\])$", t, re.M)
+    return json.loads(m.group(1)) if m else None
+def value(t, key):
+    m = re.search(r"(?:^|\s)" + key + r"=([0-9.]+)", t)
+    return float(m.group(1)) if m else None
+bad = False
+for ctx in (1024, 8192, 32768, 65536):
+    a, b = text("base", ctx), text("camp", ctx)
+    ta, tb = line(a, "tokens"), line(b, "tokens")
+    la, lb = line(a, "top_logits"), line(b, "top_logits")
+    row = {"cell": f"parity-ctx{ctx}"}
+    if ta is None or tb is None:
+        row["tokens"] = "missing"
+    else:
+        row["tokens"] = "identical" if ta == tb else "differs"
+        if ta != tb:
+            row["first_token_mismatch"] = next((i for i, (x, y) in enumerate(zip(ta, tb)) if x != y), min(len(ta), len(tb)))
+    if la is not None and lb is not None and len(la) == len(lb):
+        row["top_logits_bitwise"] = la == lb
+        row["top_logits_max_abs_diff"] = max((abs(x - y) for x, y in zip(la, lb)), default=0.0)
+    bad |= row["tokens"] != "identical"
+    print(json.dumps(row, sort_keys=True))
+    if ctx >= 32768:
+        p = {"cell": f"prefill-ctx{ctx}"}
+        for side, t in (("base", a), ("camp", b)):
+            p[f"{side}_prefill_s"] = value(t, "prefill_s")
+            p[f"{side}_decode_tps"] = value(t, "decode_tps")
+        if p["base_prefill_s"] and p["camp_prefill_s"]:
+            p["prefill_speedup_pct"] = round(100 * (p["base_prefill_s"] / p["camp_prefill_s"] - 1), 2)
+            p["prefill_time_cut_pct"] = round(100 * (1 - p["camp_prefill_s"] / p["base_prefill_s"]), 2)
+        print(json.dumps(p, sort_keys=True))
+sys.exit(1 if bad else 0)
+PY
+  (( $? == 0 )) || { (( rc == 0 )) && rc=1; }
+  grep -E '"(parity|prefill)-ctx' $OUT/camp.cells | while read -r l; do log "$l"; done
   leg_end camp $rc
 }
 
