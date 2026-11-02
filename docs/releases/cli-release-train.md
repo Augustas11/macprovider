@@ -145,12 +145,16 @@ The exploratory goal matrix does not constitute admission qualification.
 
 ## Next CLI release — after 1.8.280 (tracked 2026-11-02)
 
-1.8.280 is live fleet-wide and #2193 is closed. The next cut carries:
+1.8.280 is live fleet-wide and #2193 is closed. The next cut carries the items below. These issues close when their PR merges; the cut and the post-cut activation are tracked here, not on the issues.
 
 | Item | Provider-side change | Status |
 |---|---|---|
 | [#2202](https://github.com/Augustas11/macprovider/pull/2202) | CB for the 32 GB rows (cohort prefill, on-device decode windows, GPT-OSS cache attention); mlx-swift-lm `3.32.3-macprovider.19` | merged (`7f7d6aa98`); the Llama-3.1-8B signed CB entry is added after the cut, bound to its CDHash |
-| [#2151](https://github.com/Augustas11/macprovider/pull/2151) | DeepSeek V4 with qualified CB | parked; joins when its lab gates pass |
+| [#2220](https://github.com/Augustas11/macprovider/pull/2220) | GLM-5.3 family (#2189): GLM tool calls parse after stray `<tool_call>` openers; stray think tags stay out of `content` (SPEC-018 v0.3.12) | draft; live replay and audit pending |
+| [#2221](https://github.com/Augustas11/macprovider/pull/2221) | GLM-5.3-Flash speed (#2198): sparse-attention prefill (+17%, tokens identical), native-MTP staged-bytes reservation; fork pin `.20` | draft; window results pending; native-MTP identity rebind after the cut |
+| [#2222](https://github.com/Augustas11/macprovider/pull/2222) | Qwen 27B native MTP (#2199): depth 2-3 proposals with one native row | draft; window results pending; native-MTP policy after the cut if the depth cells pass |
+| [#2223](https://github.com/Augustas11/macprovider/pull/2223) | CB (#2200): gpt-oss sliding-window keys in ring order (4-row parity 4/4); interleaved msb-throughput | draft; signed CB entries after the cut, bound to its CDHash |
+| [#2151](https://github.com/Augustas11/macprovider/pull/2151) | DeepSeek V4-Flash (#2111 step 1) | resumes after #2189; joins when its lab gates pass |
 | Malibu app (`c27ec1482`, shipped in 1.8.280) | Import of an existing protected-file provider; Return sends in Chat | verify on the lab Mac after the next promotion |
 
 ## Shipped CLI release — 1.8.280 (staged 2026-11-01)
