@@ -215,6 +215,8 @@ export MACPROVIDER_LIVE_LOCK="$tmp/live-ops.lock"
 export MACPROVIDER_OPS_STATE_DIR="$tmp/state"
 export COORDINATOR_URL="http://127.0.0.1:$PORT" GATEWAY_URL="http://127.0.0.1:$PORT"
 export STUDIO_SSH=fake-canary STUDIO_STATUS_PORT="$PORT" PEARL_SSH=fake-pearl
+# No buyer runner feeds the fake canary unless a case says so (lib/runner-reserve.sh).
+export RUNNER_STUDIO_PROVIDER_PREFIX=none
 export PROOF_POLL_SECONDS=0
 export PEARL_COORDINATOR_CONFIG="$tmp/pearl/coordinator.yaml" PEARL_COORDINATOR_OVERLAY="$tmp/pearl/overlay.yaml"
 export FAKE_PEARL="$tmp" PEARL_PROC_ROOT="$tmp/proc" PEARL_INSTALL_ROOT="$tmp/pearl/root"
@@ -1556,6 +1558,42 @@ pearl_config "$OLD $COMPAT" "$META"; pearl_boot; loaded "$CAND"
 run_rc 0 "cli status before the bump" scripts/ops/cli-release.sh status
 expect_next recommendation_bump:mutate
 case "$(next_field command)" in *"_pearl-config --recommend $CAND $COMPAT"*) ok ;; *) bad "bump command: $(next_field command)" ;; esac
+# install_sh_republish comes right after promotion (#2210): the parity alarm
+# compares against the latest published release, so a drifted served script is
+# republished before the bump. Without the republish env it never blocks the
+# bump; that refusal waits until after mirror_latest.
+case " $(step_ids) " in
+  *" promotion install_sh_republish recommendation_bump "*) ok ;;
+  *) bad "install_sh_republish is not right after promotion: $(step_ids)" ;;
+esac
+# The served script comes from its own byte-exact static server (the fake
+# coordinator strips bodies).
+mkdir -p "$tmp/www"
+printf '#!/bin/bash\necho stale\n' > "$tmp/www/install.sh"
+python3 -c 'import functools,http.server,sys
+h = functools.partial(http.server.SimpleHTTPRequestHandler, directory=sys.argv[1])
+h.log_message = lambda *a: None
+s = http.server.HTTPServer(("127.0.0.1", 0), h)
+open(sys.argv[2], "w").write(str(s.server_port))
+s.serve_forever()' "$tmp/www" "$tmp/www.port" &
+www_pid=$!
+for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$tmp/www.port" ] && break; sleep 0.3; done
+WWW="http://127.0.0.1:$(cat "$tmp/www.port")/install.sh"
+INSTALL_SH_URL="$WWW" run_rc 0 "drifted install.sh without the republish env" scripts/ops/cli-release.sh status
+if [ "$(state_of install_sh_republish)" = "pending" ]; then ok; else bad "drifted install.sh not pending: $(state_of install_sh_republish)"; fi
+expect_next recommendation_bump:mutate
+INSTALL_SH_URL="$WWW" INSTALL_SH_REMOTE_PATH=/srv/get/install.sh \
+  run_rc 0 "drifted install.sh with the republish env" scripts/ops/cli-release.sh status
+expect_next install_sh_republish:mutate
+case "$(next_field command)" in *"git show v$CAND:phase3-binary/dist/install.sh"*) ok ;; *) bad "republish command: $(next_field command)" ;; esac
+git -C "$W" show "v$CAND:phase3-binary/dist/install.sh" > "$tmp/www/install.sh"
+INSTALL_SH_URL="$WWW" INSTALL_SH_REMOTE_PATH=/srv/get/install.sh \
+  run_rc 0 "republished install.sh" scripts/ops/cli-release.sh status
+if [ "$(state_of install_sh_republish)" = "done" ]; then ok; else bad "republished install.sh not done: $(state_of install_sh_republish)"; fi
+expect_next recommendation_bump:mutate
+kill "$www_pid" 2>/dev/null || true
+wait "$www_pid" 2>/dev/null || true
+run_rc 0 "cli status before the bump, install.sh unread" scripts/ops/cli-release.sh status
 cp "$tmp/pearl/coordinator.yaml" "$tmp/pearl/before.yaml"
 touch "$tmp/svc/restart_fail"
 MACPROVIDER_OPS_OWNER=t run_rc 1 "a failed restart puts the read bytes back" scripts/ops/cli-release.sh next --run
@@ -1950,6 +1988,42 @@ CATALOG_REQUIRE_NATIVE_MTP_FORWARD=true run_rc 0 "native-MTP proof requires mtp 
 if python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d["native_mtp_forward_required"] is True and d["mtp_forwards_delta"] > 0 and d["cb_shared_forward_calls_delta"] > 0 else 1)' "$tmp/state/catalog-$R/gateway_proof.json"; then ok; else bad "native-MTP proof marker lacks explicit mtp-forward proof"; fi
 CATALOG_REQUIRE_NATIVE_MTP_FORWARD=true run_rc 0 "catalog status accepts the native-MTP proof marker" scripts/ops/catalog-activate.sh status
 if [ "$(state_of gateway_proof)" = "done" ]; then ok; else bad "native-MTP proof marker not accepted"; fi
+# The ordinary proof pauses only the Pearl buyer runner's Studio target around
+# the probe (1.8.280: a canary kept busy by the runner routed native MTP
+# ordinary): --reserve-runner runs only under next --run, waits for the canary
+# to drain, and restores the exact targets after a passing and a failing probe.
+# (test-runner-reserve.sh checks the status step and its downtime.)
+mv "$tmp/state/catalog-$R/gateway_proof.json" "$tmp/proof-keep.json"
+python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["requests_in_flight"]=0; json.dump(d, open(p, "w"))' "$tmp/svc/status.json"
+runner_dir="$(cd "$tmp" && pwd -P)/runner"
+mkdir -p "$runner_dir"
+runner_doc='{"targets": [{"provider_id": "mp-other0001", "model": "m", "slots": 2}, {"provider_id": "mp-studio01abc", "model": "test/model", "slots": 8}]}'
+printf '%s\n' "$runner_doc" > "$runner_dir/targets.json"
+printf '%s\n' "$runner_dir/targets.json" > "$tmp/svc/runner_targets_path"
+runner_env() { RUNNER_STUDIO_PROVIDER_PREFIX=mp-studio01 PEARL_RUNNER_TARGETS="$runner_dir/targets.json" PEARL_RUNNER_RESERVE_DIR="$runner_dir/reserve" "$@"; }
+runner_env run_rc 3 "reserved proof refused outside next --run" scripts/ops/catalog-activate.sh _gateway-proof --reserve-runner
+expect_err "runs only from"
+if [ ! -e "$tmp/svc/runner-actions" ]; then ok; else bad "refused reserved proof touched the runner"; fi
+printf 'move' > "$tmp/svc/mode"
+MACPROVIDER_OPS_ENTRYPOINT=1 MACPROVIDER_OPS_OWNER=test-owner runner_env run_rc 0 "reserved proof passes with the Studio target paused" \
+  scripts/ops/catalog-activate.sh _gateway-proof --reserve-runner
+if [ -f "$tmp/state/catalog-$R/gateway_proof.json" ]; then ok; else bad "reserved proof wrote no marker"; fi
+if [ "$(cat "$runner_dir/targets.json")" = "$runner_doc" ]; then ok; else bad "reserved proof did not restore the runner targets"; fi
+if [ "$(grep -c . "$tmp/svc/runner_loaded.log")" = 2 ] && ! head -n1 "$tmp/svc/runner_loaded.log" | grep -q mp-studio01 &&
+   head -n1 "$tmp/svc/runner_loaded.log" | grep -q mp-other0001 && tail -n1 "$tmp/svc/runner_loaded.log" | grep -q mp-studio01; then ok
+else bad "runner was not paused (Studio only) then restored: $(cat "$tmp/svc/runner_loaded.log")"; fi
+if ! grep -q '^stop$' "$tmp/svc/runner-actions"; then ok; else bad "reserved proof stopped the whole runner"; fi
+rm -f "$tmp/state/catalog-$R/gateway_proof.json"
+printf 'stuck' > "$tmp/svc/mode"
+MACPROVIDER_OPS_ENTRYPOINT=1 MACPROVIDER_OPS_OWNER=test-owner runner_env run_rc 1 "failed reserved proof still restores the runner" \
+  scripts/ops/catalog-activate.sh _gateway-proof --reserve-runner
+expect_err "did not move the target provider"
+if [ "$(cat "$runner_dir/targets.json")" = "$runner_doc" ] && [ ! -e "$runner_dir/reserve/runner-reserve.json" ] &&
+   [ "$(grep -c . "$tmp/svc/runner_loaded.log")" = 4 ]; then ok; else bad "failed reserved proof left the runner paused"; fi
+rm -f "$tmp/svc/runner_targets_path"
+mv "$tmp/proof-keep.json" "$tmp/state/catalog-$R/gateway_proof.json"
+printf 'greedy-mtp' > "$tmp/svc/mode"
+CATALOG_REQUIRE_NATIVE_MTP_FORWARD=true run_rc 0 "catalog status after the reserved proofs" scripts/ops/catalog-activate.sh status
 # SPEC-038 AC-26: no signed cached-turns grant leaves the provider flag alone;
 # a grant needs continuous_batching_cached_turns in the config, loaded by a
 # provider started after the config was written.

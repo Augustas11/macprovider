@@ -23,6 +23,13 @@ A unit whose name contains "gateway" is the fake gateway instead: its own
 pid (svc/gw_mainpid), start second (svc/gw_started_at), restart count (svc/gw_restarts) and /proc entry running
 --config pearl/gateway.yaml; svc/gw_restart_fail makes its restart fail,
 svc/gw_restart_fail_once the next one.
+A unit whose name contains "buyer-runner" is the fake Pearl buyer runner:
+is-active (svc/runner_inactive makes it inactive), show -p MainPID [-p ActiveState]
+[--value], and restart/start/stop appended to svc/runner-actions; restart gives a
+new pid (svc/runner_pid) and copies the file named in svc/runner_targets_path to
+svc/runner_loaded.json, the targets the restarted runner loaded (one line per
+restart in svc/runner_loaded.log)
+(svc/runner_restart_fail makes restart fail, svc/runner_restart_fail_once the next one).
 Anything else exits 1. A file svc/restart_fail makes restart fail;
 svc/restart_fail_once makes the next restart fail (and is removed).
 """
@@ -131,8 +138,41 @@ def buyer_ux_conformance():
     return True, hashlib.sha256(raw).hexdigest()
 
 
+def runner(args):
+    pid_path = os.path.join(svc, "runner_pid")
+    rpid = int(open(pid_path).read()) if os.path.exists(pid_path) else 6262
+    if args[0] == "is-active":
+        sys.exit(3 if os.path.exists(os.path.join(svc, "runner_inactive")) else 0)
+    if args[0] == "show":
+        state = "inactive" if os.path.exists(os.path.join(svc, "runner_inactive")) else "active"
+        if "--value" in args:
+            print(rpid if "MainPID" in args else state)
+        else:
+            print("MainPID=%d\nActiveState=%s" % (rpid, state))
+        return
+    if args[0] not in ("restart", "start", "stop"):
+        sys.exit(1)
+    with open(os.path.join(svc, "runner-actions"), "a") as f:
+        f.write(args[0] + "\n")
+    if args[0] == "restart":
+        if os.path.exists(os.path.join(svc, "runner_restart_fail")):
+            sys.exit(1)
+        if os.path.exists(os.path.join(svc, "runner_restart_fail_once")):
+            os.unlink(os.path.join(svc, "runner_restart_fail_once"))
+            sys.exit(1)
+        open(pid_path, "w").write(str(rpid + 1))
+        src = os.path.join(svc, "runner_targets_path")
+        if os.path.exists(src):
+            loaded = open(open(src).read().strip(), "rb").read()
+            open(os.path.join(svc, "runner_loaded.json"), "wb").write(loaded)
+            with open(os.path.join(svc, "runner_loaded.log"), "ab") as f:
+                f.write(loaded.replace(b"\n", b" ").strip() + b"\n")
+
+
 args = sys.argv[1:]
-if args == ["_init"]:
+if args and any("buyer-runner" in a for a in args):
+    runner(args)
+elif args == ["_init"]:
     mkproc(4242)
     mkgwproc(5252)
 elif gateway_unit(args) and args[:1] == ["show"] and "ExecMainStartTimestamp" in args:

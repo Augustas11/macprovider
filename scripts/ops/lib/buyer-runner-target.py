@@ -3,8 +3,14 @@
 
 Called on Pearl by the Air ops entrypoint under the live-ops lock. The installed
 runner's own parser validates the proposed document without starting traffic.
+
+The reserve-* and set-target-model commands (called through lib/runner-reserve.sh)
+pause one target (the Studio canary) by removing it from targets.json with a
+timestamped backup and a restart, restore exactly that backup, and retarget its
+model. Only one reservation is outstanding at a time; another owner's is refused.
 """
 import argparse
+import datetime
 import hashlib
 import json
 import os
@@ -12,6 +18,7 @@ from pathlib import Path
 import signal
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -25,25 +32,25 @@ def digest(raw):
     return hashlib.sha256(raw).hexdigest()
 
 
-def secure_path(path, exists=True):
+def secure_path(path, exists=True, owner=0):
     path = Path(path)
     if not path.is_absolute() or ".." in path.parts:
         raise ValueError("noncanonical path")
     for parent in reversed(path.parents):
         st = parent.lstat()
-        if not stat.S_ISDIR(st.st_mode) or st.st_uid != 0 or st.st_mode & 0o022:
+        if not stat.S_ISDIR(st.st_mode) or st.st_uid not in (0, owner) or st.st_mode & 0o022:
             raise ValueError("unsafe parent")
     if exists:
         st = path.lstat()
-        if not stat.S_ISREG(st.st_mode) or st.st_uid != 0 or st.st_mode & 0o022 or st.st_nlink != 1:
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != owner or st.st_mode & 0o022 or st.st_nlink != 1:
             raise ValueError("unsafe file")
     elif path.exists() or path.is_symlink():
-        secure_path(path)
+        secure_path(path, owner=owner)
     return path
 
 
-def atomic(path, raw, mode):
-    secure_path(path, exists=False)
+def atomic(path, raw, mode, owner=0):
+    secure_path(path, exists=False, owner=owner)
     fd, tmp = tempfile.mkstemp(prefix=".runner-target-", dir=path.parent)
     try:
         with os.fdopen(fd, "wb") as f:
@@ -133,8 +140,8 @@ def stable(exclude_pid):
     return False
 
 
-def save(path, state):
-    atomic(path, (json.dumps(state) + "\n").encode(), 0o600)
+def save(path, state, owner=0):
+    atomic(path, (json.dumps(state) + "\n").encode(), 0o600, owner)
 
 
 def enrollment_matches(raw, state, provider, model, slots):
@@ -224,19 +231,204 @@ def execute(args):
         raise
 
 
+# --- Studio target reservation (lib/runner-reserve.sh) ----------------------
+
+RESERVE_STATE = "runner-reserve.json"
+
+
+class Refusal(Exception):
+    """A reservation refusal whose message carries no target identity."""
+
+
+def utc_stamp():
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def reserve_paths(args):
+    uid = os.geteuid()
+    path = secure_path(args.path, owner=uid)
+    state_dir = Path(args.state_dir)
+    if not state_dir.exists() and not state_dir.is_symlink():
+        secure_path(state_dir, exists=False, owner=uid)
+        state_dir.mkdir(mode=0o700)
+    st = state_dir.lstat()
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != uid or st.st_mode & 0o022:
+        raise Refusal("unsafe reservation state directory")
+    state_path = secure_path(state_dir / RESERVE_STATE, exists=False, owner=uid)
+    state = json.loads(state_path.read_bytes()) if state_path.exists() else None
+    return uid, path, state_path, state
+
+
+def studio_rows(doc, prefix):
+    if not isinstance(doc, dict) or not isinstance(doc.get("targets"), list):
+        raise Refusal("unsupported target document")
+    rows = [i for i, t in enumerate(doc["targets"])
+            if isinstance(t, dict) and str(t.get("provider_id", "")).startswith(prefix)]
+    if len(rows) != 1:
+        raise Refusal("expected exactly one runner target with the Studio provider prefix, found %d" % len(rows))
+    return rows[0]
+
+
+def render_doc(doc):
+    return (json.dumps(doc, indent=2) + "\n").encode()
+
+
+def validate_if_installed(path, raw):
+    # Only the installed document has the installed parser to check it against.
+    if str(path) == TARGETS:
+        validate(raw)
+
+
+def restart_runner(old_pid):
+    return service("restart") and stable(old_pid)
+
+
+def drop_state(state_path):
+    state_path.unlink()
+    directory = os.open(state_path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
+def restore_reservation(uid, path, state_path, state):
+    current = digest(path.read_bytes())
+    backup = secure_path(state["backup"], owner=uid)
+    before = backup.read_bytes()
+    if digest(before) != state["before_sha256"]:
+        raise Refusal("reservation backup changed; restore by hand from the backup")
+    if current not in (state["before_sha256"], state["after_sha256"]):
+        raise Refusal("runner targets changed during the reservation; refusing to overwrite them")
+    written = current == state["after_sha256"]
+    if written or state["phase"] in ("paused", "restoring"):
+        state["phase"] = "restoring"
+        save(state_path, state, uid)
+        if written:
+            atomic(path, before, state["mode"], uid)
+        if not restart_runner(main_pid()):
+            service("start")
+            raise RuntimeError("restored runner not stable; reservation kept for another restore")
+    drop_state(state_path)
+
+
+def reserve_pause(args):
+    uid, path, state_path, state = reserve_paths(args)
+    raw = path.read_bytes()
+    if state:
+        if state.get("owner") != args.owner:
+            raise Refusal("runner reservation already held by owner %s since %s" % (state.get("owner"), state.get("created_at")))
+        if state.get("phase") == "paused" and digest(raw) == state["after_sha256"]:
+            return {"phase": "paused", "already": True}
+        raise Refusal("an unfinished reservation of this owner is outstanding; run restore first")
+    if not service("is-active"):
+        raise Refusal("buyer runner is not active; nothing to pause")
+    doc = json.loads(raw)
+    del doc["targets"][studio_rows(doc, args.provider_prefix)]
+    after = render_doc(doc)
+    validate_if_installed(path, after)
+    mode = stat.S_IMODE(path.stat().st_mode)
+    backup = path.with_name(path.name + ".bak-runner-reserve-" + utc_stamp())
+    atomic(backup, raw, 0o600, uid)
+    state = {"phase": "prepared", "owner": args.owner, "created_at": utc_stamp(), "backup": str(backup),
+             "before_sha256": digest(raw), "after_sha256": digest(after), "mode": mode}
+    save(state_path, state, uid)
+    try:
+        if digest(path.read_bytes()) != state["before_sha256"]:
+            raise Refusal("runner targets changed while pausing")
+        old = main_pid()
+        atomic(path, after, mode, uid)
+        state["phase"] = "paused"
+        save(state_path, state, uid)
+        if not restart_runner(old):
+            raise RuntimeError("paused runner not stable")
+    except BaseException:
+        restore_reservation(uid, path, state_path, state)
+        raise
+    return {"phase": "paused", "already": False}
+
+
+def reserve_restore(args):
+    uid, path, state_path, state = reserve_paths(args)
+    if not state:
+        return {"phase": "absent"}
+    if state.get("owner") != args.owner:
+        raise Refusal("runner reservation belongs to owner %s since %s" % (state.get("owner"), state.get("created_at")))
+    restore_reservation(uid, path, state_path, state)
+    return {"phase": "restored"}
+
+
+def reserve_status(args):
+    _, _, _, state = reserve_paths(args)
+    if not state:
+        return {"phase": "absent"}
+    return {"phase": state.get("phase"), "owner": state.get("owner"), "created_at": state.get("created_at")}
+
+
+def set_target_model(args):
+    uid, path, state_path, state = reserve_paths(args)
+    if state:
+        raise Refusal("a runner reservation is outstanding (owner %s); restore it first" % state.get("owner"))
+    raw = path.read_bytes()
+    doc = json.loads(raw)
+    row = doc["targets"][studio_rows(doc, args.provider_prefix)]
+    if row.get("model") == args.model:
+        return {"phase": "unchanged"}
+    row["model"] = args.model
+    after = render_doc(doc)
+    validate_if_installed(path, after)
+    mode = stat.S_IMODE(path.stat().st_mode)
+    atomic(path.with_name(path.name + ".bak-runner-model-" + utc_stamp()), raw, 0o600, uid)
+    old = main_pid()
+    try:
+        atomic(path, after, mode, uid)
+        if not restart_runner(old):
+            raise RuntimeError("retargeted runner not stable")
+    except BaseException:
+        if digest(path.read_bytes()) == digest(after):
+            atomic(path, raw, mode, uid)
+        service("restart")
+        raise
+    return {"phase": "retargeted"}
+
+
+RESERVE_COMMANDS = {"reserve-pause": reserve_pause, "reserve-restore": reserve_restore,
+                    "reserve-status": reserve_status, "set-target-model": set_target_model}
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=["status", "enroll", "recover"])
+    parser.add_argument("command", choices=["status", "enroll", "recover"] + sorted(RESERVE_COMMANDS))
     parser.add_argument("--path", required=True)
-    parser.add_argument("--journal", required=True)
+    parser.add_argument("--journal")
     parser.add_argument("--provider-id")
     parser.add_argument("--model")
     parser.add_argument("--slots", type=int)
+    parser.add_argument("--state-dir")
+    parser.add_argument("--provider-prefix")
+    parser.add_argument("--owner")
     args = parser.parse_args()
     def interrupted(signum, frame):
         raise InterruptedError("runner enrollment interrupted")
     for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
         signal.signal(sig, interrupted)
+    if args.command in RESERVE_COMMANDS:
+        try:
+            if not args.state_dir or not args.owner or (
+                    args.command in ("reserve-pause", "set-target-model") and not args.provider_prefix):
+                raise Refusal("missing --state-dir, --owner or --provider-prefix")
+            if args.command == "set-target-model" and not args.model:
+                raise Refusal("missing --model")
+            print(json.dumps(RESERVE_COMMANDS[args.command](args)))
+        except Refusal as exc:
+            print("buyer-runner reservation refused: %s" % exc, file=sys.stderr)
+            raise SystemExit(3)
+        except BaseException as exc:
+            # Never echo target bytes: they hold private provider inventory.
+            raise SystemExit("buyer-runner reservation failed: " + type(exc).__name__)
+        return
+    if not args.journal:
+        raise SystemExit("buyer-runner enrollment failed: --journal is required")
     try:
         execute(args)
     except Exception as exc:

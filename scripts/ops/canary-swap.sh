@@ -8,6 +8,7 @@
 #   scripts/ops/canary-swap.sh check --version V [--tarball PATH]
 #   MACPROVIDER_OPS_OWNER=<label> scripts/ops/canary-swap.sh swap --version V
 #   MACPROVIDER_OPS_OWNER=<label> scripts/ops/canary-swap.sh record-installed --version V
+#   MACPROVIDER_OPS_OWNER=<label> scripts/ops/canary-swap.sh switch-model <catalog-key> [--artifact-path DIR]
 #
 # check (read-only, local): the archive holds only regular, relative members,
 #   and every shipped metallib (mlx.metallib and the SwiftPM bundle's
@@ -43,6 +44,24 @@
 #   check, then records the canary_swap marker only when the canary's installed
 #   macprovider-cli has the verified sha256 and /v1/status reports version V
 #   buyer_serving. Nothing is restarted.
+# switch-model: serve another signed catalog row on the canary (`models switch`
+#   cannot: a catalog key is fit_unknown and two ~175 GB models cannot be warm
+#   swapped). The row comes from this checkout's phase3-binary/dist/static/
+#   autotune-candidates.json; the canary's `macprovider-cli models
+#   verify-artifact <key>` must exit 0 and agree with it (model id, revision,
+#   artifact sha256, catalog release and digest), so the artifact is already
+#   downloaded and verified there. Under the live-ops lock it then backs up
+#   config.yaml and rewrites all nine identity fields (model, model_artifact_path,
+#   model_artifact_sha256, model_catalog_key/_model_id/_revision/_sha256/_version/
+#   _hash) in one atomic write validated by the installed CLI; a config missing
+#   any of them is refused, never appended (lib/canary-switch-model.py). It
+#   kickstarts the provider, waits up to CANARY_READY_TIMEOUT_S for /v1/status
+#   buyer_serving with the new model and sha256, then sets the Pearl buyer
+#   runner's Studio target model to the row's model id (lib/runner-reserve.sh;
+#   RUNNER_STUDIO_PROVIDER_PREFIX, none when no runner feeds the canary). A
+#   timeout restores nothing: it exits 6 naming the config backup and the
+#   switch back. --artifact-path names a verified snapshot outside the known
+#   model roots. Expected downtime is printed first.
 #
 # Env (or ~/.config/macprovider/ops.env): COORDINATOR_URL, STUDIO_SSH (local = this Mac),
 # STUDIO_SSH_KEY, STUDIO_STATUS_PORT, CANARY_RUNNER_STOP_CMD and
@@ -51,7 +70,9 @@
 # CANARY_LAUNCHD_LABEL (default live.malibu.provider), CANARY_CTL_SOCKET
 # (default the canary user's temp dir macprovider-cli/ctl.sock),
 # CANARY_STATUS_TIMEOUT_S (120), CANARY_READY_TIMEOUT_S (1800),
-# CANARY_DRAIN_TIMEOUT_S (600), CANARY_STABLE_S (120), CANARY_POLL_S (5).
+# CANARY_DRAIN_TIMEOUT_S (600), CANARY_STABLE_S (120), CANARY_POLL_S (5);
+# switch-model also: CANARY_CONFIG (default ~/.config/macprovider/config.yaml on
+# the canary), PEARL_SSH and RUNNER_STUDIO_PROVIDER_PREFIX (lib/runner-reserve.sh).
 #
 # Exit codes: 0 ok; 2 usage; 3 refused (nothing changed); 4 refused on the
 # canary before the swap (provider resumed); 5 candidate failed, previous
@@ -62,6 +83,8 @@ OPS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OPS_NAME=canary-swap
 # shellcheck source=lib/common.sh
 . "$OPS_DIR/lib/common.sh"
+# shellcheck source=lib/runner-reserve.sh
+. "$OPS_DIR/lib/runner-reserve.sh"
 
 usage() { sed -n '2,/^set -euo pipefail$/p' "${BASH_SOURCE[0]}" | sed -e '$d' -e 's/^# \{0,1\}//'; }
 
@@ -235,8 +258,123 @@ PAIR_RESULT_PY
   exit 0
 fi
 
+# switch_model KEY [ARTIFACT_PATH]: see "switch-model" above.
+switch_model() {
+  local key="$1" override="${2:-}" feed="$REPO_ROOT/phase3-binary/dist/static/autotune-candidates.json"
+  local label="${CANARY_LAUNCHD_LABEL:-live.malibu.provider}" ready_s="${CANARY_READY_TIMEOUT_S:-1800}" poll_s="${CANARY_POLL_S:-5}"
+  [[ "$key" =~ ^[a-z0-9][a-z0-9._/-]{0,127}$ ]] || refuse "invalid catalog key: $key"
+  [ -z "$override" ] || [[ "$override" =~ ^/[A-Za-z0-9._/\ -]+$ ]] || refuse "--artifact-path must be an absolute plain path"
+  [[ "$label" =~ ^[A-Za-z0-9._-]+$ ]] || refuse "CANARY_LAUNCHD_LABEL is not a plain launchd label"
+  case "$ready_s$poll_s" in *[!0-9]*) refuse "CANARY_*_S values must be whole seconds" ;; esac
+  case "${STUDIO_STATUS_PORT:-}" in ""|*[!0-9]*) refuse "STUDIO_STATUS_PORT must be set and numeric" ;; esac
+  [ -n "${MACPROVIDER_OPS_OWNER:-}" ] || refuse "MACPROVIDER_OPS_OWNER is required for switch-model (live-ops lock owner)"
+  [ -n "${RUNNER_STUDIO_PROVIDER_PREFIX:-}" ] ||
+    refuse "set RUNNER_STUDIO_PROVIDER_PREFIX (the Studio target's provider_id prefix in the Pearl buyer runner targets.json, or none)"
+  runner_reserve_enabled && runner_reserve_check
+  require_studio_ssh
+  python3 -I - "$feed" "$key" > "$OPS_TMP_DIR/switch-row.json" <<'PY' || refuse "no pinned row for $key in phase3-binary/dist/static/autotune-candidates.json"
+import hashlib, json, re, sys
+raw = open(sys.argv[1], "rb").read()
+doc = json.loads(raw)
+row = doc["rows"][sys.argv[2]]
+if not re.fullmatch(r"[0-9a-f]{64}", row.get("model_sha256") or "") or not row.get("model_revision") or not row.get("model_id"):
+    raise SystemExit("unpinned row")
+print(json.dumps({"model_id": row["model_id"], "revision": row["model_revision"], "sha256": row["model_sha256"],
+                  "version": doc["version"], "catalog_hash": hashlib.sha256(raw).hexdigest()}))
+PY
+  local model_id sha
+  model_id="$(json_field "$OPS_TMP_DIR/switch-row.json" 'd["model_id"]')"
+  sha="$(json_field "$OPS_TMP_DIR/switch-row.json" 'd["sha256"]')"
+  [[ "$model_id" =~ ^[A-Za-z0-9._/-]{1,160}$ ]] || refuse "catalog model id of $key is not a plain id"
+  printf '=== EXPECTED DOWNTIME for switch-model %s: the canary provider restarts and loads %s; until it is buyer_serving again (up to %ss, minutes for a large model) its buyers go to other providers of its model or wait. The Pearl buyer runner restarts once to retarget its Studio target; the Pearl coordinator is not restarted. ===\n' \
+    "$key" "$model_id" "$ready_s"
+  "$OPS_DIR/live-lock.sh" acquire "$MACPROVIDER_OPS_OWNER" --purpose "$OPS_NAME:switch-model" --bind-pid >&2 ||
+    refuse "live-ops lock is held by another owner"
+  # shellcheck disable=SC2034  # released by cleanup_ops in lib/common.sh
+  OPS_LOCK_OWNER="$MACPROVIDER_OPS_OWNER"
+  local remote_env cli cfg
+  remote_env="PATH=$(printf '%q' "${CANARY_REMOTE_PATH_PREFIX:+$CANARY_REMOTE_PATH_PREFIX:}")\$PATH; d=$(printf '%q' "${CANARY_INSTALL_DIR:-}"); c=$(printf '%q' "${CANARY_CONFIG:-}");"
+  cli='"${d:-$HOME/macprovider}/macprovider-cli"'
+  cfg='"${c:-$HOME/.config/macprovider/config.yaml}"'
+  local vrc=0
+  studio_ssh "$remote_env $cli models verify-artifact $key --json --config $cfg" > "$OPS_TMP_DIR/switch-verify.json" || vrc=$?
+  [ "$vrc" = 0 ] || refuse "the $key artifact is not present and verified on the canary (models verify-artifact exit $vrc); download and verify it there first"
+  python3 -I - "$OPS_TMP_DIR/switch-verify.json" "$OPS_TMP_DIR/switch-row.json" "$key" "$override" \
+    > "$OPS_TMP_DIR/switch-request.json" 2> "$OPS_TMP_DIR/switch-verify.err" <<'PY' ||
+import json, re, sys
+v, r = (json.load(open(p)) for p in sys.argv[1:3])
+key, override = sys.argv[3], sys.argv[4]
+want = {"verdict": "match", "catalog_key": key, "catalog_model_id": r["model_id"], "pinned_revision": r["revision"],
+        "signed_hash": r["sha256"], "computed_hash": r["sha256"], "catalog_release": r["version"],
+        "catalog_digest": r["catalog_hash"]}
+bad = [k for k, value in want.items() if v.get(k) != value]
+if bad:
+    raise SystemExit("verify-artifact disagrees with this checkout's signed row on: " + ", ".join(bad))
+buyer, local = v.get("buyer_model_key"), v.get("local_path")
+if not isinstance(buyer, str) or not re.fullmatch(r"[A-Za-z0-9._/@+-]{1,160}", buyer):
+    raise SystemExit("verify-artifact names no buyer model key (rate card) for this row")
+if not isinstance(local, str) or not local:
+    raise SystemExit("verify-artifact names no local snapshot")
+values = {"model": buyer, "model_artifact_sha256": r["sha256"], "model_catalog_key": key,
+          "model_catalog_model_id": r["model_id"], "model_catalog_revision": r["revision"],
+          "model_catalog_sha256": r["sha256"], "model_catalog_version": r["version"],
+          "model_catalog_hash": r["catalog_hash"]}
+print(json.dumps({"values": values, "local_path": local, "artifact_path": override, "buyer": buyer}))
+PY
+    refuse "$(tail -n1 "$OPS_TMP_DIR/switch-verify.err")"
+  local buyer request arc=0
+  buyer="$(json_field "$OPS_TMP_DIR/switch-request.json" 'd["buyer"]')"
+  request="$(base64 < "$OPS_TMP_DIR/switch-request.json" | tr -d '\n')"
+  studio_ssh "$remote_env python3 - apply $cfg $cli $request" < "$OPS_LIB_DIR/canary-switch-model.py" \
+    > "$OPS_TMP_DIR/switch-apply.json" || arc=$?
+  case "$arc" in 0) ;; 3) exit 3 ;; *) log "!!! config switch failed on the canary (exit $arc); inspect its config.yaml and any config.yaml.bak-switch-model-* there"; exit 6 ;; esac
+  local backup previous
+  backup="$(json_field "$OPS_TMP_DIR/switch-apply.json" 'd.get("backup")')"
+  previous="$(json_field "$OPS_TMP_DIR/switch-apply.json" 'd["previous_key"]')"
+  served_match() {
+    studio_ssh "$remote_env curl -fsS -m 10 http://127.0.0.1:$STUDIO_STATUS_PORT/v1/status" 2>/dev/null |
+      python3 -c 'import json,sys
+d=json.load(sys.stdin); c=d.get("catalog") or {}
+sys.exit(0 if d.get("network_state")=="buyer_serving" and d.get("model")==sys.argv[1] and sys.argv[2] in (d.get("model_hash"), c.get("artifact_sha256")) else 1)' "$buyer" "$sha"
+  }
+  if [ "$(json_field "$OPS_TMP_DIR/switch-apply.json" 'd["changed"]')" = true ]; then
+    log "config.yaml switched from $previous to $key (backup $backup on the canary)"
+    studio_ssh "$remote_env launchctl kickstart -k gui/\$(id -u)/$label" >&2 ||
+      { log "!!! provider kickstart failed after the config switch; nothing was restored: restart it, or restore $backup"; exit 6; }
+    log "provider restarted; waiting up to ${ready_s}s for buyer_serving on $buyer ($sha)"
+  elif served_match; then
+    log "canary already serves $key ($sha) buyer_serving"
+  else
+    log "config.yaml already names $key; waiting up to ${ready_s}s for buyer_serving on $buyer ($sha)"
+  fi
+  local deadline=$(( $(date +%s) + ready_s ))
+  until served_match; do
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      log "!!! canary not buyer_serving on $key within ${ready_s}s; nothing was restored and the buyer runner was not retargeted. Inspect the provider; to go back run: scripts/ops/canary-swap.sh switch-model $previous${backup:+ (config backup $backup)}"
+      exit 6
+    fi
+    sleep "$poll_s"
+  done
+  log "canary serves $key ($sha) buyer_serving"
+  runner_set_studio_model "$model_id" ||
+    { log "!!! buyer runner Studio target not retargeted to $model_id; rerun: scripts/ops/canary-swap.sh switch-model $key"; exit 6; }
+  log "switch-model $key complete"
+}
+
 CMD="${1:-}"
 [ "$#" -gt 0 ] && shift
+if [ "$CMD" = switch-model ]; then
+  SWITCH_KEY="${1:-}"
+  [ "$#" -gt 0 ] && shift
+  SWITCH_ARTIFACT=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --artifact-path) [ "$#" -ge 2 ] || { usage >&2; exit 2; }; SWITCH_ARTIFACT="$2"; shift 2 ;;
+      *) usage >&2; exit 2 ;;
+    esac
+  done
+  [ -n "$SWITCH_KEY" ] || { usage >&2; exit 2; }
+fi
 V=""
 TARBALL=""
 TARBALL_OVERRIDE=""
@@ -248,7 +386,11 @@ while [ "$#" -gt 0 ]; do
     *) usage >&2; exit 2 ;;
   esac
 done
-case "$CMD" in check|swap|record-installed|recover-air|restore-air) ;; -h|--help) usage; exit 0 ;; *) usage >&2; exit 2 ;; esac
+case "$CMD" in check|swap|record-installed|switch-model|recover-air|restore-air) ;; -h|--help) usage; exit 0 ;; *) usage >&2; exit 2 ;; esac
+if [ "$CMD" = switch-model ]; then
+  switch_model "$SWITCH_KEY" "$SWITCH_ARTIFACT"
+  exit 0
+fi
 if [ "$CMD" = recover-air ] || [ "$CMD" = restore-air ]; then
   [ "${MACPROVIDER_OPS_ENTRYPOINT:-}" = 1 ] && [ "$V" = 1.8.260 ] || refuse "Air recovery runs only through the guarded Air entrypoint"
   [ -n "${AIR_RECOVERY_PROVIDER_SHA256:-}" ] && [ -n "${AIR_RECOVERY_CONFIG:-}" ] && [ -n "${AIR_RECOVERY_BINARY_SHA256:-}" ] || refuse "Air recovery identity is missing"
