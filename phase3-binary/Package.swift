@@ -55,7 +55,7 @@ let package = Package(
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",
-            exact: "1.3.4"
+            exact: "1.3.5"
         ),
         // swift-transformers 1.3.4 resolves swift-jinja 2.4.2 transitively; pin
         // it directly so `import Jinja` (native null tool-schema rendering,
