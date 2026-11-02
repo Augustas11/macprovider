@@ -188,7 +188,9 @@ enum ToolCallParser {
     /// `start` before any `end` opened no call, so the envelope begins at the
     /// last `start` before its `end` and the text before it is prose. GLM
     /// rejects a body that holds `start`, so this only recovers outputs that
-    /// otherwise fail whole.
+    /// otherwise fail whole. A final envelope without `end` is never
+    /// recovered this way: the output may have been cut inside an argument
+    /// that quotes `start`, so it still fails closed.
     private static func parseTaggedCalls(
         _ rawOutput: String,
         start: String,
@@ -202,7 +204,7 @@ enum ToolCallParser {
             var bodyStart = open.upperBound
             let close = rawOutput.range(of: end, range: bodyStart..<rawOutput.endIndex)
             let bodyEnd = close?.lowerBound ?? rawOutput.endIndex
-            if skipsUnclosedStarts, let last = rawOutput.range(of: start, options: .backwards, range: bodyStart..<bodyEnd) {
+            if skipsUnclosedStarts, close != nil, let last = rawOutput.range(of: start, options: .backwards, range: bodyStart..<bodyEnd) {
                 bodyStart = last.upperBound
             }
             let text = String(rawOutput[bodyStart..<bodyEnd])

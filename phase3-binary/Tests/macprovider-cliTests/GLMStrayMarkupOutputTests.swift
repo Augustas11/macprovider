@@ -145,12 +145,28 @@ final class GLMStrayMarkupOutputTests: XCTestCase {
 
     func testStrayOpenerBeforeTheOnlyCallIsProse() {
         let parsed = ToolCallParser.parseToolCalls(
-            rawOutput: "Reading.<tool_call>thinking aloud</think><tool_call>read<arg_key>path</arg_key><arg_value>a.txt</arg_value>",
+            rawOutput: "Reading.<tool_call>thinking aloud</think><tool_call>read<arg_key>path</arg_key><arg_value>a.txt</arg_value></tool_call>",
             grammar: .glm, modelID: Self.model, allowedFunctionNames: ["read"], schemas: nil
         )
-        // The final envelope may end at the end of output; the stray opener does not void it.
         XCTAssertEqual(parsed.toolCalls.map(\.arguments), [#"{"path":"a.txt"}"#])
         XCTAssertEqual(parsed.leadingContent, "Reading.")
+    }
+
+    /// A final envelope without `</tool_call>` is not recovered past a second
+    /// opener: the output may have been cut inside an argument that quotes
+    /// `<tool_call>`, and the call after it was never completed. Nothing runs.
+    func testUnclosedFinalEnvelopeWithSecondOpenerFailsClosed() {
+        for raw in [
+            "Reading.<tool_call>thinking aloud</think><tool_call>read<arg_key>path</arg_key><arg_value>a.txt</arg_value>",
+            "<tool_call>write<arg_key>content</arg_key><arg_value>Call it via <tool_call>write<arg_key>offset</arg_key><arg_value>701</arg_value>",
+            "<tool_call>read<arg_key>path</arg_key><arg_value>a</arg_value></tool_call><tool_call>x<tool_call>read<arg_key>path</arg_key><arg_value>b</arg_value>",
+        ] {
+            let parsed = ToolCallParser.parseToolCalls(
+                rawOutput: raw, grammar: .glm, modelID: Self.model, allowedFunctionNames: ["read", "write"], schemas: nil
+            )
+            XCTAssertTrue(parsed.toolCalls.isEmpty, raw)
+            XCTAssertEqual(parsed.cleanedContent, raw)
+        }
     }
 
     // MARK: - Reasoning markup
