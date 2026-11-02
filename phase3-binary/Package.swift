@@ -66,7 +66,7 @@ let package = Package(
         ),
         .package(
             url: "https://github.com/apple/swift-nio.git",
-            exact: "2.103.0"
+            exact: "2.104.0"
         ),
         .package(
             url: "https://github.com/apple/swift-argument-parser.git",
