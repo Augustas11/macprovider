@@ -15079,10 +15079,13 @@ maxTokens: maxTokens,
     }
 
     /// GLM output outside a guaranteed call (#2189): stray think tags in the
-    /// answer are removed (`ReasoningOutput.removingStrayTags`). Guaranteed
-    /// selection keeps its whole-envelope check on the generated text.
+    /// answer are removed (`ReasoningOutput.removingStrayTags`). Only when the
+    /// prompt left `<think>` open, so the first `</think>` was already split
+    /// off as reasoning; otherwise the tags may delimit the model's own
+    /// reasoning. Guaranteed selection keeps its whole-envelope check on the
+    /// generated text.
     static func stripsStrayThinkTags(_ request: ChatCompletionRequest) throws -> Bool {
-        guard toolGrammar(for: request) == .glm else { return false }
+        guard request.outputTraits.reasoningOpen, toolGrammar(for: request) == .glm else { return false }
         return try !ToolSelectionPolicy.selection(request.promptSource.toolChoice).requiresCall
     }
 

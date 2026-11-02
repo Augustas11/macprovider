@@ -178,6 +178,22 @@ final class GLMStrayMarkupOutputTests: XCTestCase {
         XCTAssertEqual(ReasoningOutput.removingStrayTags("a</thi</think>nk>b", streaming: false), "ab")
     }
 
+    /// A prompt that leaves no `<think>` open (the model writes the pair
+    /// itself): nothing was split off as reasoning, so the tags are not
+    /// stray and the output reaches `content` byte-for-byte, as before #2189.
+    func testThinkTagsAreKeptWhenThePromptLeftNoThinkOpen() throws {
+        let output = "<think>plan</think>Do the task."
+        let request = try readRequest(reasoningOpen: false, tools: false)
+        let parsed = try parse(output, request)
+        XCTAssertNil(parsed.reasoningContent)
+        XCTAssertEqual(parsed.content, output)
+        for ends in chunkings(output) {
+            let streamed = try stream(output, ends: ends, request)
+            XCTAssertEqual(streamed.reasoning, "")
+            XCTAssertEqual(streamed.content, output)
+        }
+    }
+
     /// Text after the first `<tool_call>` is left to the tool parser, so a
     /// call argument that contains a think tag stays byte-exact.
     func testThinkTagInsideCallArgumentIsKept() throws {
