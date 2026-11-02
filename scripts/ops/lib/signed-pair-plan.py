@@ -117,7 +117,14 @@ def admission_entries(release, model_key):
 def existing_names(value):
     if not value:
         return set()
-    raw = Path(value).read_text() if Path(value).is_file() else value.replace(',', '\n')
+    if Path(value).is_file():
+        raw = Path(value).read_text()
+    elif '/' in value:
+        # A path that is not a file (typo, unmounted share) must not pass as a
+        # one-name list: the double-publication check would silently be a no-op.
+        raise Failed(f'--existing-release-ids {value}: no such file')
+    else:
+        raw = value.replace(',', '\n')
     return {Path(line.strip().rstrip('/')).name for line in raw.splitlines() if line.strip()}
 
 

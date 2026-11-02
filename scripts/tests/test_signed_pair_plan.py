@@ -168,6 +168,10 @@ class SignedPairPlanTests(unittest.TestCase):
         self.assertEqual(self.check(plan, existing=tool.existing_names('other-0123456789abcdef')), [])
         with self.assertRaises(tool.Failed):
             self.build(out='again.json', existing_release_ids=str(listing))
+        # A mistyped or unmounted listing path fails closed instead of
+        # becoming the one-name list {"pearl-releases-typo.txt"}.
+        with self.assertRaises(tool.Failed):
+            tool.existing_names(str(self.root / 'pearl-releases-typo.txt'))
         self.assertFalse((self.root / 'again.json').exists())
 
     def test_deadline_outside_arm_window_is_named(self):

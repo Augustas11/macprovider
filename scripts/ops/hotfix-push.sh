@@ -199,8 +199,18 @@ def add(*commands):
             suites.append(command)
 
 
+# Suite commands are built from repo paths and run by bash -c, so a path that
+# could carry shell syntax (a "a||true/x_test.go" directory, "$(...)") never
+# reaches a command: it is refused before any mapping.
+SAFE_PATH = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/+@-]*")
+OPS_TESTS = [t for t in OPS_TESTS if SAFE_PATH.fullmatch(t.relative_to(root).as_posix())]
+tests = {t: text for t, text in tests.items() if SAFE_PATH.fullmatch(t.relative_to(root).as_posix())}
+
 decode = decode_inputs()
 for path in paths:
+    if not SAFE_PATH.fullmatch(path) or "//" in path or "/." in path:
+        refusals.append((path, "path has characters a suite command cannot carry"))
+        continue
     if is_docs(path):
         continue
     # Go test files change no binary (test-only diffs go straight to main);

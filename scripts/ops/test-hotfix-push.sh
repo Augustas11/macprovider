@@ -172,6 +172,16 @@ change phase4-coordinator/internal/buyer/autotune_feeds_test.go
 run 0 "Go test file plan" --dry-run
 if grep -q "go test ./internal/buyer" "$tmp/out" "$tmp/err"; then ok; else bad "Go test file: no go test in the plan"; fi
 if grep -q "need a PR" "$tmp/err"; then bad "Go test file refused"; else ok; fi
+# A path that carries shell syntax never reaches a suite command (it would
+# turn "go test ./a||true" into a suite that runs nothing and passes).
+change 'phase7-verify/a||true/x_test.go'
+run 3 "shell-syntax path"
+expect_err "cannot carry"
+expect_not_pushed "shell-syntax path"
+change 'scripts/ops/test-$(touch pwned).sh'
+run 3 "command-substitution path"
+if [ -e "$W/pwned" ] || [ -e pwned ]; then bad "command substitution ran"; else ok; fi
+expect_not_pushed "command-substitution path"
 change phase4-coordinator/README.md
 run 0 "docs-only change"
 expect_pushed "docs-only change"
