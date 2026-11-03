@@ -112,7 +112,7 @@ enum ToolCallParser {
             do {
                 let calls: [ToolCall]
                 switch grammar {
-                case .glm?: calls = try parseTaggedCalls(rawOutput, start: "<tool_call>", end: "</tool_call>") { try glmCall($0, schemas: schemas) }
+                case .glm?: calls = try parseTaggedCalls(rawOutput, start: "<tool_call>", end: "</tool_call>", skipsUnclosedStarts: true) { try glmCall($0, schemas: schemas) }
                 case .dsml?: calls = try parseDSMLCalls(rawOutput, schemas: schemas)
                 case .lfm2?: calls = try LFMToolCallParser.parse(rawOutput)
                 case .gemma4?: calls = try parseTaggedCalls(rawOutput, start: "<|tool_call>", end: "<tool_call|>") { try GemmaToolCallBridge.call($0, schemas: schemas) }
@@ -183,19 +183,30 @@ enum ToolCallParser {
     /// envelopes is dropped (SPEC-018 §2.4). The final envelope may omit `end`
     /// when the output ends there (the model's end-of-turn token replaced
     /// it), but its body must still parse completely.
+    ///
+    /// `skipsUnclosedStarts` (GLM, #2189): a `start` followed by another
+    /// `start` before any `end` opened no call, so the envelope begins at the
+    /// last `start` before its `end` and the text before it is prose. GLM
+    /// rejects a body that holds `start`, so this only recovers outputs that
+    /// otherwise fail whole. A final envelope without `end` is never
+    /// recovered this way: the output may have been cut inside an argument
+    /// that quotes `start`, so it still fails closed.
     private static func parseTaggedCalls(
         _ rawOutput: String,
         start: String,
         end: String,
+        skipsUnclosedStarts: Bool = false,
         body: (String) throws -> ToolCall
     ) throws -> [ToolCall] {
         var calls: [ToolCall] = []
         var searchFrom = rawOutput.startIndex
         while let open = rawOutput.range(of: start, range: searchFrom..<rawOutput.endIndex) {
-            let cursor = open.lowerBound
-            let bodyStart = rawOutput.index(cursor, offsetBy: start.count)
+            var bodyStart = open.upperBound
             let close = rawOutput.range(of: end, range: bodyStart..<rawOutput.endIndex)
             let bodyEnd = close?.lowerBound ?? rawOutput.endIndex
+            if skipsUnclosedStarts, close != nil, let last = rawOutput.range(of: start, options: .backwards, range: bodyStart..<bodyEnd) {
+                bodyStart = last.upperBound
+            }
             let text = String(rawOutput[bodyStart..<bodyEnd])
             if close == nil, text.contains(start) { throw ParseError.missingEndDelimiter }
             calls.append(try body(text))
