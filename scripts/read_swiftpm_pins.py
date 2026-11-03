@@ -42,12 +42,11 @@ EXPECTED_LOCATIONS = {
 # scripts: the upstream watch imports these names, and a test checks them
 # against the SPEC-048 fork table.
 SPEC048_MLX_SWIFT_LM_FORK = "https://github.com/Augustas11/mlx-swift-lm"
-# GPT-OSS sink attention through batched caches (#2200) on 3.32.3-macprovider.18:
-# the Qwen2-VL token-only forward and Nemotron-H dtype-preserving gated norm
-# (#2201) on 3.32.3-macprovider.12, the LFM-only reference-prefill opt-in on
-# 3.32.3-macprovider.10.15.1. Other model sources are unchanged.
-SPEC048_MLX_SWIFT_LM_TAG = "3.32.3-macprovider.19"
-SPEC048_MLX_SWIFT_LM_REVISION = "e06521b9c17f5836ddf43410ec8ef4c2346c56a4"
+# 3.32.3-macprovider.21 (#2198) on 3.32.3-macprovider.19: GLM-5.3 prefill only
+# (DSA radix-select per chunk, fused mHC Sinkhorn, heads-as-queries sparse
+# attention); decode is .19's. Other model sources are unchanged.
+SPEC048_MLX_SWIFT_LM_TAG = "3.32.3-macprovider.21"
+SPEC048_MLX_SWIFT_LM_REVISION = "ae6aa7826eb2ab276837c950dca6b1aaf9f344e4"
 SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE = "3b339ad6e3b3f44c8121ecff5131c7fd55e075e6"
 SPEC048_MLX_SWIFT_FORK = "https://github.com/Augustas11/mlx-swift"
 SPEC048_MLX_SWIFT_TAG = "0.32.3-macprovider.11"

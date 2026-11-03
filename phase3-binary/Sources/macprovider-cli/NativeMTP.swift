@@ -104,6 +104,38 @@ struct NativeMTPCapability: Sendable, Equatable {
     )
 }
 
+/// SPEC-048 R012: the bytes one row's native round stages, from the row's own
+/// context, for a family whose round copies context-sized state. The signed
+/// `complete_window_bytes_by_depth` is derived from these at one context
+/// length (the live GLM tuple at 65,536 tokens); a row past that context
+/// stages more than the signed value, so the scheduler reserves the larger.
+enum NativeMTPStagedRoundBytes {
+    /// glm5_next_mtp_v1, as the provider stages a round: a copy of every
+    /// sparse layer's latent and pooled keys (11 target layers plus the
+    /// next-N layer, 1,088 bytes per context token each, SPEC-048 MTP-12
+    /// sizing) and one KDA recurrent plus convolution state set (34 layers x
+    /// 4,341,760 bytes) per kept prefix of a depth-d verify (d + 1 sets).
+    static let glm5NextFamilyAdapter = "glm5_next_mtp_v1"
+    static let glm5NextStagedLatentLayers = 12
+    static let glm5NextLatentBytesPerToken = 1_088
+    static let glm5NextKDALayers = 34
+    static let glm5NextKDAStateBytes = 64 * 128 * 128 * 4 + 3 * 24_576 * 2
+
+    /// Staged bytes for `contextTokens` tokens at proposal depth `depth`, nil
+    /// for a family without a context-sized round (its signed value stands)
+    /// or on overflow.
+    static func bytes(familyAdapter: String?, contextTokens: Int, depth: Int) -> Int? {
+        guard familyAdapter == glm5NextFamilyAdapter, depth >= 0 else { return nil }
+        let context = max(1, contextTokens)
+        let perToken = glm5NextStagedLatentLayers * glm5NextLatentBytesPerToken
+        let latent = perToken.multipliedReportingOverflow(by: context)
+        let sets = (depth + 1).multipliedReportingOverflow(by: glm5NextKDALayers * glm5NextKDAStateBytes)
+        guard !latent.overflow, !sets.overflow else { return nil }
+        let total = latent.partialValue.addingReportingOverflow(sets.partialValue)
+        return total.overflow ? nil : total.partialValue
+    }
+}
+
 enum NativeMTPSelectorReason: String, CaseIterable, Sendable {
     case eligible
     case modeOff = "mode_off"
@@ -388,6 +420,9 @@ struct NativeMTPRuntimeAdmission: Sendable, Equatable {
     let maximumNativeActiveRows: Int
     let tupleFence: NativeMTPTupleFence?
     var adaptationConfig: NativeMTPAdaptationConfig? = nil
+    /// The tuple's family adapter, for the row's staged-round bytes
+    /// (`NativeMTPStagedRoundBytes`).
+    var familyAdapter: String? = nil
 
     var usesNativeMTP: Bool {
         effectivePath == .nativeMTP
@@ -460,7 +495,8 @@ struct NativeMTPRuntimeAdmission: Sendable, Equatable {
             completeWindowBytesByDepth: capability.completeWindowBytesByDepth,
             maximumNativeActiveRows: capability.maximumNativeActiveRows,
             tupleFence: nil,
-            adaptationConfig: capability.adaptationConfig
+            adaptationConfig: capability.adaptationConfig,
+            familyAdapter: capability.family
         )
     }
 
@@ -517,7 +553,8 @@ struct NativeMTPRuntimeAdmission: Sendable, Equatable {
             completeWindowBytesByDepth: completeWindowBytesByDepth,
             maximumNativeActiveRows: maximumNativeActiveRows,
             tupleFence: usesNativeMTP ? fence : nil,
-            adaptationConfig: adaptationConfig
+            adaptationConfig: adaptationConfig,
+            familyAdapter: familyAdapter
         )
     }
 }

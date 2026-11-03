@@ -584,6 +584,11 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
     /// from the idempotency fingerprint like other runtime-only native-MTP
     /// selection metadata.
     let nativeMTPCompleteWindowBytesByDepth: [Int]
+    /// Runtime-only: the tuple's family adapter. A round reserves the larger of
+    /// the signed ceiling and the bytes this family stages at the row's own
+    /// context (`NativeMTPStagedRoundBytes`), so a row longer than the context
+    /// the signed ceiling was derived at is never under-reserved.
+    let nativeMTPFamilyAdapter: String?
     /// Runtime-only signed SPEC-048-R007 load bound: while more rows than
     /// this are active, native rows of this tuple verify at depth zero.
     let nativeMTPMaximumActiveRows: Int
@@ -641,6 +646,7 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
         decodePath: DecodePath = .ordinary,
         nativeMTPMaximumProposalDepth: Int = 0,
         nativeMTPCompleteWindowBytesByDepth: [Int] = [],
+        nativeMTPFamilyAdapter: String? = nil,
         nativeMTPMaximumActiveRows: Int = Int.max,
         nativeMTPTupleFence: NativeMTPTupleFence? = nil,
         nativeMTPIntegrityProbe: Bool = false,
@@ -681,6 +687,7 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
         self.decodePath = grammarConstraint == nil ? decodePath : .ordinary
         self.nativeMTPMaximumProposalDepth = max(0, nativeMTPMaximumProposalDepth)
         self.nativeMTPCompleteWindowBytesByDepth = nativeMTPCompleteWindowBytesByDepth
+        self.nativeMTPFamilyAdapter = nativeMTPFamilyAdapter
         self.nativeMTPMaximumActiveRows = max(1, nativeMTPMaximumActiveRows)
         self.nativeMTPTupleFence = self.decodePath == .nativeMTP ? nativeMTPTupleFence : nil
         self.nativeMTPIntegrityProbe = self.decodePath == .nativeMTP && nativeMTPIntegrityProbe
@@ -3706,7 +3713,9 @@ actor ContinuousBatchScheduler {
         0
     }
 
-    private func nativeMTPCompleteWindowBytes(for row: Row, maximumDepth: Int) throws -> Int {
+    /// The round's complete-window reservation at `maximumDepth` for a verify
+    /// that ends at `contextTokens` (committed KV plus the verify width).
+    private func nativeMTPCompleteWindowBytes(for row: Row, maximumDepth: Int, contextTokens: Int) throws -> Int {
         guard maximumDepth >= 0 else {
             throw ContinuousBatchSchedulerError.requestFailed("continuous_batching_native_mtp_round_memory_exhausted")
         }
@@ -3717,7 +3726,16 @@ actor ContinuousBatchScheduler {
         guard bytes > 0 else {
             throw ContinuousBatchSchedulerError.requestFailed("continuous_batching_native_mtp_window_bytes_unavailable")
         }
-        return bytes
+        guard let family = row.request.nativeMTPFamilyAdapter else { return bytes }
+        guard let staged = NativeMTPStagedRoundBytes.bytes(
+            familyAdapter: family, contextTokens: contextTokens, depth: maximumDepth
+        ) else {
+            if family == NativeMTPStagedRoundBytes.glm5NextFamilyAdapter {
+                throw ContinuousBatchSchedulerError.requestFailed("continuous_batching_native_mtp_round_memory_exhausted")
+            }
+            return bytes
+        }
+        return max(bytes, staged)
     }
 
     #if DEBUG || MACPROVIDER_LAB_HARNESS
@@ -4080,7 +4098,9 @@ actor ContinuousBatchScheduler {
                 }
                 let completeWindowBytes: Int
                 do {
-                    completeWindowBytes = try nativeMTPCompleteWindowBytes(for: row, maximumDepth: depth)
+                    completeWindowBytes = try nativeMTPCompleteWindowBytes(
+                        for: row, maximumDepth: depth, contextTokens: target.partialValue
+                    )
                 } catch {
                     reservationFailure = error
                     break

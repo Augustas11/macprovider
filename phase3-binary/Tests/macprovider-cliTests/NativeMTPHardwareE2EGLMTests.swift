@@ -81,6 +81,19 @@ final class NativeMTPHardwareE2EGLMTests: XCTestCase {
         XCTAssertTrue(admits(reserved + floor))
         XCTAssertFalse(admits(reserved + floor - 1))
         XCTAssertFalse(ContinuousBatchScheduler.nativeMTPSystemMemoryHeadroomAdmits(reservedAfter: reserved, sample: nil))
+        // The runtime's staged-round bytes are the same model: the live tuple's
+        // signed ceiling is the 64k-context value, a 32k row stages less and a
+        // 128k row more.
+        for depth in 0 ... 1 {
+            XCTAssertEqual(NativeMTPStagedRoundBytes.bytes(
+                familyAdapter: "glm5_next_mtp_v1", contextTokens: 65_536, depth: depth), window[depth])
+        }
+        XCTAssertEqual(NativeMTPStagedRoundBytes.bytes(
+            familyAdapter: "glm5_next_mtp_v1", contextTokens: 32_768 + 2, depth: 1), 723_084_800)
+        XCTAssertGreaterThan(NativeMTPStagedRoundBytes.bytes(
+            familyAdapter: "glm5_next_mtp_v1", contextTokens: 131_072, depth: 1)!, window[1])
+        XCTAssertNil(NativeMTPStagedRoundBytes.bytes(familyAdapter: "qwen3_5_mtp_v1", contextTokens: 65_536, depth: 1))
+        XCTAssertNil(NativeMTPStagedRoundBytes.bytes(familyAdapter: "glm5_next_mtp_v1", contextTokens: Int.max, depth: 1))
         // Qwen3.5's harness keeps its placeholder window.
         XCTAssertEqual(NativeMTPHardwareE2EFamily.qwen35.completeWindowBytesByDepth(maxContextTokens: 65_536), [1_048_576, 2_097_152])
     }

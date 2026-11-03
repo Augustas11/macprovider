@@ -34,7 +34,7 @@ needs a SPEC revision.
 
 | Fork | Upstream | Tag scheme | Current tag | Revision | Upstream base |
 | --- | --- | --- | --- | --- | --- |
-| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.19` | `e06521b9c17f5836ddf43410ec8ef4c2346c56a4` | `3.32.3` (`3b339ad6…`) |
+| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.21` | `ae6aa7826eb2ab276837c950dca6b1aaf9f344e4` | `3.32.3` (`3b339ad6…`) |
 | `Augustas11/mlx-swift` | `ml-explore/mlx-swift` | `<upstream>-macprovider.<n>` | `0.32.3-macprovider.11` | `c774cb0934c7503bc3fe1c3d1afbe44c728e8891` | `0.32.3` (`19601207…`) |
 | `Augustas11/mlx` (MLX core) | `ml-explore/mlx` | `v<upstream>-macprovider.<n>` | `v0.32.4-macprovider.6` | `51edbb37620aef7c860ab5d7cdb7bf5b14333da2` | `v0.32.4` (`36969c09…`) |
 | `Augustas11/mlx-c` | `ml-explore/mlx-c` | `v<upstream>-macprovider.<n>` | `v0.6.0-macprovider.2` | `2b1ff2b5b5129a6115771da32e1bac3b6b01ab01` | pinned base `ebc88f10…` |
@@ -46,6 +46,16 @@ submodules pin core and C. The C fork's standalone core fetch pins the same
 core revision. Swift 6.3 is the effective minimum for the graph.
 
 ### Current tuple delta
+
+As of 2026-11-03 the LM row is `3.32.3-macprovider.21` (`ae6aa78`), GLM-5.3
+prefill commits on `3.32.3-macprovider.19` (#2198): `ad14e16` selects DSA
+prefill pools with one radix-select kernel per chunk, `7f4afa3` runs the mHC
+Sinkhorn as one kernel per half-layer in prefill, `bf788b9` attends sparse
+prefill queries with one GEMM over their heads, and `ae6aa78` enables both
+routes; `533868b` checks the deferred mHC chain bitwise at D = 4096 and
+`0a5f591` fixes a Prism probe test's type-check. The deferred mHC decode split
+(`c8b1eca`, `b1d8da6`, `8d0d1ed`) is reverted, so decode is `.19`'s. No Swift,
+core or C pin changes.
 
 As of 2026-11-02 the LM row is `3.32.3-macprovider.19`: one GPT-OSS sink-attention commit (#2200) on `3.32.3-macprovider.18`, six model-scoped
 commits on `.12` (#2201): `b649619` gives Qwen2-VL the token-only text forward
