@@ -10,7 +10,8 @@ SWAP="$OPS_DIR/canary-swap.sh"
 die() { printf '[test-canary-swap] FAIL: %s\n' "$*" >&2; exit 1; }
 log() { printf '[test-canary-swap] %s\n' "$*" >&2; }
 
-T="$(mktemp -d "${TMPDIR:-/tmp}/canary-swap-test.XXXXXX")"
+# Linux CI /tmp is 1777; buyer-runner-target.py refuses shared-writable parents.
+T="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/canary-swap-test.XXXXXX")"
 T="$(cd "$T" && pwd -P)"
 SERVER_PID=""
 COORD_PID=""
