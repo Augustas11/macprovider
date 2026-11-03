@@ -165,6 +165,44 @@ class Tests(unittest.TestCase):
     def test_control_ready_positive(self):
         self.e['readiness'](body(self.j,True),self.j['target'],self.j['provider_id_sha256'],True)
 
+    def test_readiness_names_observed_and_expected_value(self):
+        b=body(self.j,True);b['continuous_batching']['policy']['tuple_sha256']='3'*64
+        with self.assertRaises(self.e['Refused']) as raised:
+            self.e['readiness'](b,self.j['target'],self.j['provider_id_sha256'],True)
+        self.assertEqual(str(raised.exception),'CB readiness mismatch: continuous_batching.policy.tuple_sha256: observed '+'3'*64+', expected '+'2'*64)
+
+    def test_readiness_never_echoes_free_form_remote_strings(self):
+        b=body(self.j,True);b['model']='https://secret.example/?token=x y'
+        with self.assertRaises(self.e['Refused']) as raised:
+            self.e['readiness'](b,self.j['target'],self.j['provider_id_sha256'],True)
+        self.assertEqual(str(raised.exception),'served model: observed <str>, expected test-model')
+
+    def test_readiness_deadline_reports_last_failing_check(self):
+        # 2026-11-02 pair5: a stale CB tuple only surfaced as "readiness deadline exceeded".
+        b=body(self.j,True);b['continuous_batching']['policy']['tuple_sha256']='3'*64
+        clock=dict(now=1000.0)
+        def sleep(seconds): clock['now']+=seconds
+        fake=Mock(time=lambda:clock['now'],monotonic=lambda:clock['now'],sleep=sleep)
+        err=io.StringIO()
+        with patch.dict(self.e,time=fake,process_id=Mock(return_value=('1','start')),status=Mock(return_value=b),
+                        signed_binary=Mock(),policy=Mock()), contextlib.redirect_stderr(err):
+            with self.assertRaises(self.e['Refused']) as raised:
+                self.e['stable'](self.j,'target',True,1100.0)
+        self.assertEqual(str(raised.exception),'readiness deadline exceeded; last failing check: CB readiness mismatch: '
+                         'continuous_batching.policy.tuple_sha256: observed '+'3'*64+', expected '+'2'*64)
+        lines=err.getvalue().splitlines()
+        # Fifty failed polls of one unchanged check print once, not every poll.
+        self.assertEqual(len(lines),1)
+        self.assertIn('signed-pair target readiness pending: CB readiness mismatch',lines[0])
+
+    def test_readiness_deadline_pass_semantics_unchanged(self):
+        clock=dict(now=1000.0)
+        def sleep(seconds): clock['now']+=seconds
+        fake=Mock(time=lambda:clock['now'],monotonic=lambda:clock['now'],sleep=sleep)
+        with patch.dict(self.e,time=fake,process_id=Mock(return_value=('1','start')),status=Mock(return_value=body(self.j,True)),
+                        signed_binary=Mock(),policy=Mock()):
+            self.assertEqual(self.e['stable'](self.j,'target',True,2000.0),('1','start'))
+
     def test_mismatched_commit_receipt_refused(self):
         r=dict(transaction_id='test',policy_phase='target_committed',target_release_id='wrong',target_feed_sha256=self.j['target']['feed_sha256'])
         with self.assertRaises(self.e['Refused']): self.e['committed_receipt'](self.j,r)

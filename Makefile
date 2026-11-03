@@ -200,13 +200,16 @@ test-dist-release:
 	bash scripts/ops/test-runbook-commands.sh
 	bash scripts/ops/test-entrypoints.sh
 	bash scripts/ops/test-canary-swap.sh
+	bash scripts/ops/test-runner-reserve.sh
 	bash scripts/ops/test-studio-owner-pin.sh
 	bash scripts/ops/test-studio-owner-pin-provenance.sh
 	bash scripts/ops/test-studio-lab-window-controller.sh
+	bash scripts/ops/test-hotfix-push.sh
 
 # Installer, watchdog, and coordinator/gateway deploy scripts.
 test-dist-deploy:
 	bash scripts/test-install-sh-consumer-health-alarm.sh
+	bash scripts/test-install-sh-parity-grace.sh
 	bash phase3-binary/dist/test/install_python3_clt_guard.test.sh
 	bash phase3-binary/dist/test/install_1286_fresh_mac_e2e.test.sh
 	bash phase3-binary/dist/test/install_config_path_escape.test.sh

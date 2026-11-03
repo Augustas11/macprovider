@@ -184,7 +184,11 @@ python3 scripts/buyer_ux_conformance.py check \
 ```
 
 `run` writes `phase3-binary/catalog/autotune/buyer-ux-conformance.json` and
-exits non-zero if any check failed. The release generator refuses the
+exits non-zero if any check failed. Retryable gateway errors (429/502/503/504,
+`error.retryable`) are retried (`--attempts`, `--retry-budget`); a check still
+retryable is inconclusive and `run` exits 3 without writing. Model-behaviour
+checks take `--samples` (default 3) requests and pass only if every sample
+passes; each check records `samples`, `passed` and the distinct `failures`. The release generator refuses the
 promotion unless the record passes for every capability the model advertises.
 The coordinator reads the same file (`routing.buyer_ux_conformance_path`) and
 stops publishing a capability that failed, so a partial pass still lists the

@@ -286,7 +286,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         _ = try await runProductionSerialOnce(
             container: container, promptTokens: baselinePrompt, timedDecodeTokens: decodeTokens
         ) // warmup
-        for _ in 0..<runs {
+        func runSerialOnce() async throws {
             let serial = try await runProductionSerialOnce(
                 container: container, promptTokens: baselinePrompt, timedDecodeTokens: decodeTokens
             )
@@ -356,7 +356,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         }
 
         _ = try await runEngineOnce(prompts: [baselinePrompt]) // warmup
-        for _ in 0..<runs {
+        func runSingleRowOnce() async throws {
             let r = try await runEngineOnce(prompts: [baselinePrompt])
             try assertHealthy(r, expectedRows: 1, expectedTokens: decodeTokens, label: "\(engine.rawValue)-single-row")
             engineSingleRowTPS.append(r.perRowTokensPerSecond)
@@ -364,7 +364,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         }
 
         _ = try await runEngineOnce(prompts: batchedPrompts) // warmup
-        for _ in 0..<runs {
+        func runBatchedOnce() async throws {
             let r = try await runEngineOnce(prompts: batchedPrompts)
             try assertHealthy(r, expectedRows: rows, expectedTokens: decodeTokens, label: "batched")
             let agg = try msbAggregateThroughput(r.rowSamples)
@@ -384,6 +384,20 @@ struct MSBThroughputCommand: AsyncParsableCommand {
                 schedulerBackendWindowCallsRuns.append(detail.backendWindowCalls)
             }
             peakRSSMB = max(peakRSSMB, memoryRSSMB())
+        }
+        // The three measurements take turns, each run starting one place
+        // later, so neither side of a ratio always meets a cooler GPU. A
+        // fanless M5 lab Mac decoded serial at 25 tok/s when it ran first and
+        // at 17 tok/s warm: that read as a 0.67x paged single-row gap, and
+        // warm runs measured 0.96-1.02x (#2200).
+        for run in 0..<runs {
+            for turn in 0..<3 {
+                switch (run + turn) % 3 {
+                case 0: try await runSerialOnce()
+                case 1: try await runSingleRowOnce()
+                default: try await runBatchedOnce()
+                }
+            }
         }
 
         let serialP50 = decodeBenchPercentileTPS(serialRunTPS, p: 0.5)
