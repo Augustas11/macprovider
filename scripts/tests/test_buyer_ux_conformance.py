@@ -1,7 +1,9 @@
 """Buyer-UX conformance checker against recorded gateway responses (#2107)."""
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
 import json
 import pathlib
 import tempfile
@@ -274,6 +276,176 @@ class BuyerUXConformanceTests(unittest.TestCase):
         self.assertTrue(bux.advertised_capabilities("openai/gpt-oss-20b")["reasoning"])
         deepseek = bux.advertised_capabilities("deepseek/deepseek-v4-flash")
         self.assertEqual((deepseek["tools"], deepseek["tool_choice"], deepseek["reasoning"]), (True, ["auto", "none"], True))
+
+
+class RetryAndSamplingTests(unittest.TestCase):
+    """Capacity noise is never a verdict; a stochastic check is sampled and
+    fails closed with every distinct failure listed."""
+
+    NO_PROVIDER = bux.Response(429, json.dumps({"error": {"type": "rate_limit_exceeded", "code": "no_provider_available",
+                                                          "message": "No provider available", "retryable": True}}).encode())
+
+    def setUp(self):
+        self.now = 0.0
+        self.sleeps = []
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+    def retrying(self, send, attempts=6, budget=300.0):
+        return bux.retrying_transport(send, attempts, budget, sleep=self.sleep, clock=lambda: self.now)
+
+    def flaky(self, failures: int, responses=GOOD):
+        """The GOOD gateway behind `failures` 429s per request (models included)."""
+        inner = transport(responses)
+        seen = {}
+
+        def send(method, path, headers, body):
+            key = json.dumps([path, body], sort_keys=True)
+            seen[key] = seen.get(key, 0) + 1
+            return self.NO_PROVIDER if seen[key] <= failures else inner(method, path, headers, body)
+        return send
+
+    def test_429_then_200_passes(self):
+        result = bux.run_checks(self.retrying(self.flaky(1)), MODEL)
+        self.assertEqual({k for k, v in result["checks"].items() if v["status"] not in (bux.PASS, bux.UNSUPPORTED)}, set())
+        self.assertTrue(result["capabilities"]["reasoning"] and result["capabilities"]["tools"])
+        self.assertTrue(self.sleeps and all(s == bux.RETRY_BASE_DELAY_S for s in self.sleeps))
+
+    def test_persistent_429_is_inconclusive_with_bounded_retries(self):
+        calls = []
+        def always_busy(method, path, headers, body):
+            calls.append(path)
+            return self.NO_PROVIDER
+        send = self.retrying(always_busy, attempts=4)
+        with self.assertRaisesRegex(bux.RetryExhausted, "429 no_provider_available still retryable after 4 attempt"):
+            send("POST", "/chat/completions", {}, {})
+        self.assertEqual((len(calls), self.sleeps), (4, [2.0, 4.0, 8.0]))
+        # The time budget stops retrying before the attempt cap.
+        calls.clear(); self.sleeps.clear()
+        with self.assertRaises(bux.RetryExhausted):
+            self.retrying(always_busy, attempts=6, budget=5.0)("POST", "/chat/completions", {}, {})
+        self.assertEqual((len(calls), self.sleeps), (2, [2.0]))
+
+    def test_retry_after_header_and_unflagged_5xx_are_honoured(self):
+        busy = bux.Response(503, b"upstream busy", {"Retry-After": "7"})
+        responses = iter([busy, chat({"content": "4"}, "stop")])
+        resp = self.retrying(lambda *a: next(responses))("POST", "/chat/completions", {}, {})
+        self.assertEqual((resp.status, self.sleeps), (200, [7.0]))
+
+    def test_non_retryable_error_is_a_verdict_not_retried(self):
+        # The gateway's own retryable=false decides, even on a 502.
+        bad_json = bux.Response(502, json.dumps({"error": {"code": "malformed_json_response", "message": "x", "retryable": False}}).encode())
+        calls = []
+        def send(method, path, headers, body):
+            calls.append(path)
+            return bad_json
+        self.assertIs(self.retrying(send)("POST", "/chat/completions", {}, {}), bad_json)
+        self.assertEqual((len(calls), self.sleeps), (1, []))
+        result = bux.run_checks(self.retrying(transport(dict(GOOD, json=bad_json))), MODEL)
+        self.assertEqual(result["checks"]["json_object"]["status"], bux.FAIL)
+
+    def test_persistent_capacity_on_checks_is_inconclusive_and_run_refuses_the_record(self):
+        inner = transport(GOOD)
+        def send(method, path, headers, body):
+            if path == "/chat/completions" and not body.get("tools"):
+                return self.NO_PROVIDER
+            return inner(method, path, headers, body)
+        result = bux.run_checks(self.retrying(send, attempts=2), MODEL)
+        check = result["checks"]["no_reasoning_leak"]
+        self.assertEqual(check["status"], bux.INCONCLUSIVE)
+        self.assertIn("no_provider_available", check["detail"])
+        self.assertFalse(result["capabilities"]["reasoning"])
+        # The tools checks still decide on their real answers.
+        self.assertEqual(result["checks"]["tools_auto"]["status"], bux.PASS)
+        # A record holding an inconclusive check never validates, and `run`
+        # writes nothing: the file on disk is untouched.
+        with self.assertRaisesRegex(bux.ConformanceError, "pass, fail or unsupported"):
+            bux.validate_record({"model": MODEL, "gateway": "g", "checked_at": "t", "checks": result["checks"],
+                                 "capabilities": result["capabilities"]}, "r")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "records.json"
+            original = json.dumps({"schema_version": bux.SCHEMA, "records": {}, "owed": {"k": {"model": MODEL, "release_id": "r1"}}})
+            path.write_text(original)
+            keyfile = pathlib.Path(tmp) / "key"
+            keyfile.write_text("sk-test")
+            orig_http, orig_retry = bux.http_transport, bux.retrying_transport
+            bux.http_transport = lambda gateway, key: send
+            bux.retrying_transport = lambda t, attempts, budget: orig_retry(t, attempts, budget, sleep=self.sleep,
+                                                                            clock=lambda: self.now)
+            out, err = io.StringIO(), io.StringIO()
+            try:
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    rc = bux.main(["run", "--key-file", str(keyfile), "--model", MODEL, "--catalog-key", "k",
+                                   "--record", str(path), "--attempts", "2"])
+            finally:
+                bux.http_transport, bux.retrying_transport = orig_http, orig_retry
+            self.assertEqual(rc, 3)
+            self.assertEqual(path.read_text(), original)
+            self.assertFalse(json.loads(out.getvalue())["written"])
+            self.assertIn("no record written", err.getvalue())
+
+    def test_reasoning_leak_in_one_of_three_samples_fails_with_every_failure_listed(self):
+        clean = GOOD["plain"]
+        leak = chat({"content": "2+2 is 4.</think>4", "reasoning_content": "x"}, "stop",
+                    {"completion_tokens_details": {"reasoning_tokens": 1}})
+        unsplit = chat({"content": "4"}, "stop")
+        plain = iter([clean, leak, clean])
+        inner = transport(GOOD)
+        def send(method, path, headers, body):
+            if path == "/chat/completions" and (body["messages"][0].get("content") or "").startswith("What is 2+2"):
+                return next(plain)
+            return inner(method, path, headers, body)
+        check = bux.run_checks(send, MODEL)["checks"]["no_reasoning_leak"]
+        self.assertEqual((check["status"], check["samples"], check["passed"]), (bux.FAIL, 3, 2))
+        self.assertEqual(check["failures"], ["reasoning markup in content"])
+        self.assertIn("1/3 samples failed", check["detail"])
+        # Two distinct failure modes across samples both appear.
+        plain = iter([leak, unsplit, clean])
+        result = bux.run_checks(send, MODEL)
+        check = result["checks"]["no_reasoning_leak"]
+        self.assertEqual(check["failures"], ["reasoning markup in content", "reasoning model returned no reasoning_content"])
+        self.assertIn("2/3 samples failed", check["detail"])
+        self.assertFalse(result["capabilities"]["reasoning"])
+        # The failing record is valid and recordable (fail is a verdict).
+        bux.validate_record({"model": MODEL, "gateway": "g", "checked_at": "t", "checks": result["checks"],
+                             "capabilities": result["capabilities"]}, "r")
+
+    def test_all_clean_samples_pass_and_samples_flag_counts(self):
+        calls = []
+        inner = transport(GOOD)
+        def send(method, path, headers, body):
+            calls.append(path)
+            return inner(method, path, headers, body)
+        result = bux.run_checks(send, MODEL, samples=5)
+        check = result["checks"]["no_reasoning_leak"]
+        self.assertEqual((check["status"], check["samples"], check["passed"]), (bux.PASS, 5, 5))
+        self.assertNotIn("failures", check)
+        self.assertEqual(result["checks"]["context_limit_error"]["samples"], 1)
+        self.assertEqual(result["checks"]["tools_required"]["status"], bux.UNSUPPORTED)
+        self.assertEqual(len(calls), 1 + 11 * 5 + 1)
+        self.assertTrue(result["capabilities"]["reasoning"])
+        with self.assertRaises(ValueError):
+            bux.run_checks(send, MODEL, samples=0)
+
+    def test_old_records_without_sampling_fields_still_validate(self):
+        checks = {name: {"status": "pass", "detail": "legacy"} for name in bux.ALL_CHECKS}
+        record = {"model": MODEL, "gateway": "https://api.malibu.tech/v1", "checked_at": "2026-10-22T00:00:00Z",
+                  "checks": checks, "capabilities": bux.capabilities_from_checks(checks)}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "records.json"
+            path.write_text(json.dumps({"schema_version": bux.SCHEMA, "records": {"k": record},
+                                        "owed": {"k": {"model": MODEL, "release_id": "r1"}}}))
+            bux.load_records(path)
+            self.assertEqual(bux.owed_status(path)[0]["state"], "settled")
+            # New optional fields are typed when present.
+            for bad in ({"samples": 0, "passed": 0}, {"samples": 3, "passed": 4}, {"samples": "3", "passed": 3},
+                        {"samples": 3, "passed": 2}, {"failures": "x"}):
+                checks["finish_reason"] = dict({"status": "pass", "detail": "x"}, **bad)
+                path.write_text(json.dumps({"schema_version": bux.SCHEMA, "records": {"k": record}}))
+                with self.assertRaises(bux.ConformanceError, msg=bad):
+                    bux.load_records(path)
 
 
 if __name__ == "__main__":

@@ -105,6 +105,19 @@ def field(body, key):
     return body
 
 
+def shown(value):
+    # Only well-formed scalars are echoed; other remote strings stay private.
+    if value is None or type(value) in (bool, int):
+        return json.dumps(value)
+    if isinstance(value, str) and re.fullmatch(r'[A-Za-z0-9._:/-]{1,128}', value):
+        return value
+    return '<' + type(value).__name__ + '>'
+
+
+def expect(observed, expected, name):
+    require(observed == expected, '%s: observed %s, expected %s' % (name, shown(observed), shown(expected)))
+
+
 def validate(j):
     require(j['schema_version'] == 'macprovider.signed_native_pair.v1', 'journal schema')
     require(re.fullmatch(r'[A-Za-z0-9_-]{1,80}', j['transaction_id']), 'transaction ID')
@@ -221,11 +234,11 @@ def fetch(url):
 def policy(j, identity):
     base = j['coordinator_url']
     metadata = json.loads(fetch(base + '/v1/autotune-release'))
-    require(metadata.get('status') == 'live_verified'
-            and metadata.get('release_id') == identity['catalog_release_id'], 'current release mismatch')
+    expect(metadata.get('status'), 'live_verified', 'current release status')
+    expect(metadata.get('release_id'), identity['catalog_release_id'], 'current release id')
     for endpoint, expected in identity['feed_sha256'].items():
-        require(hashlib.sha256(fetch(base + endpoint)).hexdigest() == expected,
-                'public signed policy bytes mismatch')
+        expect(hashlib.sha256(fetch(base + endpoint)).hexdigest(), expected,
+               'public signed policy bytes ' + endpoint)
     # Reading metadata again prevents accepting a torn publication snapshot.
     require(json.loads(fetch(base + '/v1/autotune-release')) == metadata, 'policy changed during proof')
 
@@ -241,13 +254,16 @@ def paused(body):
 def readiness(body, identity, provider_sha, must_pause):
     if must_pause is None:  # recovery of an untouched incumbent: either state
         must_pause = paused(body)
-    require(body.get('binary_version') == identity['version'] and body.get('model_loaded') is True,
-            'target not loaded')
+    expect(body.get('binary_version'), identity['version'], 'binary_version')
+    require(body.get('model_loaded') is True, 'model_loaded: observed %s, expected true' % shown(body.get('model_loaded')))
     require(hashlib.sha256(str(body.get('provider_id', '')).encode()).hexdigest() == provider_sha,
             'provider identity changed')
-    require(body.get('model') == identity['model'] and body.get('model_hash') == identity['model_hash'], 'served model changed')
-    require(field(body, 'native_mtp.enabled') is True
-            and field(body, 'native_mtp.mode') in ('eligible', 'active'), 'native MTP not active')
+    expect(body.get('model'), identity['model'], 'served model')
+    expect(body.get('model_hash'), identity['model_hash'], 'served model_hash')
+    require(field(body, 'native_mtp.enabled') is True,
+            'native_mtp.enabled: observed %s, expected true' % shown(field(body, 'native_mtp.enabled')))
+    require(field(body, 'native_mtp.mode') in ('eligible', 'active'),
+            'native_mtp.mode: observed %s, expected eligible|active' % shown(field(body, 'native_mtp.mode')))
     for key, value in {'capacity.max_concurrency': 4, 'capacity.max_context_tokens': identity['ordinary_context_tokens'], 'continuous_batching.active': True,
                        'continuous_batching.policy.load_status': 'live_verified',
                        'continuous_batching.policy.authorized': True,
@@ -257,10 +273,12 @@ def readiness(body, identity, provider_sha, must_pause):
                        'continuous_batching.self_check.served_slots': 4,
                        'continuous_batching.self_check_admission_hold.active': False,
                        'continuous_batching.scheduler.slots_total': 4}.items():
-        require(field(body, key) == value, 'CB readiness mismatch: ' + key)
-    require(paused(body) == must_pause, 'operator pause mismatch')
-    require(body.get('requests_in_flight') == 0 if must_pause else
-            body.get('network_state') == 'buyer_serving', 'admission state mismatch')
+        expect(field(body, key), value, 'CB readiness mismatch: ' + key)
+    expect(paused(body), must_pause, 'operator pause mismatch')
+    if must_pause:
+        expect(body.get('requests_in_flight'), 0, 'admission state mismatch: requests_in_flight')
+    else:
+        expect(body.get('network_state'), 'buyer_serving', 'admission state mismatch: network_state')
 
 
 def control(j, frame):
@@ -529,6 +547,7 @@ def stable(j, role, must_pause, deadline, with_capture=False):
     identity = j[role]
     began = None
     held_pid = None
+    last = printed = printed_at = None
     while time.time() < deadline:
         try:
             current = process_id(j)
@@ -543,12 +562,17 @@ def stable(j, role, must_pause, deadline, with_capture=False):
             began = began or time.monotonic()
             if time.monotonic() - began >= j['stable_seconds']:
                 return held_pid
-        except (Refused, OSError, ValueError, subprocess.SubprocessError):
+        except (Refused, OSError, ValueError, subprocess.SubprocessError) as error:
             # Losing an established identity/readiness proof is terminal.
             if began is not None:
                 raise
+            # Only Refused reasons are fixed literals; other errors show a type.
+            last = str(error) if type(error) is Refused else type(error).__name__
+            if last != printed and (printed_at is None or time.monotonic() - printed_at >= 30):
+                print('signed-pair %s readiness pending: %s' % (role, last), file=sys.stderr, flush=True)
+                printed, printed_at = last, time.monotonic()
         time.sleep(2)
-    raise Refused('readiness deadline exceeded')
+    raise Refused('readiness deadline exceeded; last failing check: ' + (last or 'none'))
 
 
 

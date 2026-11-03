@@ -63,7 +63,11 @@
 #  10 gateway_proof           one real buyer request through the gateway that moves the
 #                             target provider's active serving-path counter
 #                             (CB shared_forward_calls when CB is active);
-#                             expires after 24 h
+#                             expires after 24 h. The Pearl buyer runner's Studio
+#                             target (RUNNER_STUDIO_PROVIDER_PREFIX) is paused for the
+#                             probe and restored on every exit (lib/runner-reserve.sh),
+#                             and the probe waits for the canary to drain; the step is
+#                             blocked while that variable is unset (none: no runner)
 #  11 buyer_serving_e2e       evidence (e) an activation recorded as owed (SPEC-023-R017
 #                             5(e)): no connected provider served the newly buyer-serving
 #                             model, so the provider release that first serves it owes a
@@ -84,7 +88,8 @@
 # Env (or ~/.config/macprovider/ops.env): COORDINATOR_URL, GATEWAY_URL,
 # PEARL_SSH (+ PEARL_SSH_IDENTITY/PEARL_SSH_KNOWN_HOSTS for the repo scripts),
 # REMOTE_REVOCATION_DIR, STUDIO_SSH, STUDIO_SSH_KEY, STUDIO_STATUS_PORT,
-# BUYER_TOKEN_FILE, PROBE_MODEL, CATALOG_REQUIRE_NATIVE_MTP_FORWARD=true (native
+# BUYER_TOKEN_FILE, PROBE_MODEL, RUNNER_STUDIO_PROVIDER_PREFIX (+ PEARL_RUNNER_TARGETS,
+# PEARL_RUNNER_RESERVE_DIR, CATALOG_PROOF_DRAIN_S), CATALOG_REQUIRE_NATIVE_MTP_FORWARD=true (native
 # MTP proof) or explicitly false (CB-only live probe), CATALOG_CANARY_* (as
 # catalog-content-release.sh),
 # CATALOG_PRICING_ACK (the reviewed price table's digest), MACPROVIDER_OPS_OWNER (for --run),
@@ -97,6 +102,8 @@ set -euo pipefail
 OPS_NAME=catalog-activate
 # shellcheck source=lib/common.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
+# shellcheck source=lib/runner-reserve.sh
+. "$OPS_LIB_DIR/runner-reserve.sh"
 
 usage() { sed -n '2,/^set -euo pipefail$/p' "${BASH_SOURCE[0]}" | sed -e '$d' -e 's/^# \{0,1\}//'; }
 
@@ -1129,19 +1136,29 @@ ssh \"\$STUDIO_SSH\" 'set -e; c=~/.config/macprovider/config.yaml; cp -p \"\$c\"
     step gateway_proof "done" "$(marker_field "$OPS_SCOPE" gateway_proof 'd.get("evidence")')"
   else
     step gateway_proof pending "$(marker_done "$OPS_SCOPE" gateway_proof && echo 'previous proof older than 24 h or lacks active-path scheduler evidence' || true)"
+    local proof_downtime=""
     if [ "${PROBE_MODEL:-}" = "$QWEN_NATIVE_MODEL" ] && [ "$require_mtp" = true ]; then
       set_next gateway_proof mutate "Adopt Qwen3.6, prove one paid native-MTP request, and restore GLM" \
         "$OPS_DIR/qwen-opencode-e2e.sh _catalog-qwen36-proof"
-      NEXT_DOWNTIME="Studio provider buyer traffic is unavailable during bounded Qwen/GLM restart and model-load windows; Pearl is not restarted"
+      proof_downtime="Studio provider buyer traffic is unavailable during bounded Qwen/GLM restart and model-load windows; Pearl is not restarted"
     elif gateway_expanded_required; then
       set_next gateway_proof mutate "Prove signed GLM sampled/tools/history/reasoning across all three buyer APIs" \
         "scripts/ops/catalog-activate.sh _gateway-proof"
-      NEXT_DOWNTIME="Buyer runner pauses for bounded proof; provider serving, native MTP and continuous batching stay live"
+      proof_downtime="Buyer runner pauses for bounded proof; provider serving, native MTP and continuous batching stay live"
+    elif [ -z "${RUNNER_STUDIO_PROVIDER_PREFIX:-}" ]; then
+      # The runner keeps every canary CB row busy: a probe beside it routes
+      # native MTP ordinary or finds no provider (1.8.280).
+      set_next gateway_proof blocked "Send one real buyer request through the gateway" "" \
+        "RUNNER_STUDIO_PROVIDER_PREFIX is unset: name the Studio target's provider_id prefix in the Pearl buyer runner targets.json (none when no buyer runner feeds the canary) so the probe runs on idle canary capacity"
+    elif runner_reserve_enabled; then
+      set_next gateway_proof mutate "Pause the buyer runner's Studio target, send one real buyer request through the gateway, restore the target" \
+        "scripts/ops/catalog-activate.sh _gateway-proof --reserve-runner"
+      proof_downtime="Pearl buyer runner: its Studio target is paused for the probe (two runner restarts; other targets keep traffic) and restored on every exit; provider serving, native MTP and continuous batching stay live"
     else
       set_next gateway_proof read "Send one real buyer request through the gateway" \
         "scripts/ops/catalog-activate.sh _gateway-proof"
     fi
-    next_meta gateway_proof "AGENTS.md#hard-rules--activation-evidence-and-campaign-discipline"
+    next_meta gateway_proof "AGENTS.md#hard-rules--activation-evidence-and-campaign-discipline" "$proof_downtime"
   fi
 
   # SPEC-023 §16.11 rule 4 before evidence (e): the DeepSeek-V4-Flash window is
@@ -2095,6 +2112,23 @@ gateway_proof() {
   fi
 }
 
+# A runner pause does not drain: the canary finishes the runner's in-flight
+# requests first, so the probe starts on idle CB rows.
+gateway_proof_on_idle_canary() {
+  local deadline n
+  case "${CATALOG_PROOF_DRAIN_S:-600}" in *[!0-9]*) refuse "CATALOG_PROOF_DRAIN_S must be whole seconds" ;; esac
+  deadline=$(( $(date +%s) + ${CATALOG_PROOF_DRAIN_S:-600} ))
+  while :; do
+    read_provider_status "$OPS_TMP_DIR/drain.json"
+    n="$(json_field "$OPS_TMP_DIR/drain.json" 'd["requests_in_flight"]')"
+    [ "$n" != 0 ] || break
+    [ "$(date +%s)" -lt "$deadline" ] ||
+      refuse "canary still reports ${n:-unknown} requests in flight ${CATALOG_PROOF_DRAIN_S:-600}s after the runner pause"
+    sleep "${PROOF_POLL_SECONDS:-2}"
+  done
+  gateway_proof
+}
+
 # pearl_buc_layout: the Pearl layout flags of lib/pearl-cli-config.py for the
 # buyer-UX conformance step (BUC_LAYOUT). Every value reaches a remote shell.
 pearl_buc_layout() {
@@ -2246,7 +2280,13 @@ internal() {
       native_binding_context "$(origin_main_sha)" || refuse "native binding proof is invalid"
       R="$(json_field "$CATALOG_TARGET_DIR/release.json" 'd["release_id"]')"
       OPS_SCOPE="catalog-$R"
-      gateway_proof ;;
+      if [ "${2:-}" = --reserve-runner ]; then
+        [ "${MACPROVIDER_OPS_ENTRYPOINT:-}" = 1 ] && [ -n "${MACPROVIDER_OPS_OWNER:-}" ] ||
+          refuse "_gateway-proof --reserve-runner runs only from '$0 next --run' (live-ops lock, downtime banner)"
+        runner_with_studio_paused gateway_proof_on_idle_canary
+      else
+        gateway_proof
+      fi ;;
     *) usage >&2; exit 2 ;;
   esac
 }

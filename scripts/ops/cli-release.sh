@@ -83,6 +83,12 @@
 #                           v<ver> exists unsigned/untrusted, on another commit, or lightweight
 #   7b promotion            promote-acceptance-candidate.yml (+ env approval); only this step
 #                           sets physical_acceptance_confirmed=true, after 4, 6, 7, 7a and 7a2
+#   7c install_sh_republish  get-channel install.sh == released dist/install.sh; offered
+#                           right after promotion (before 8) so the scheduled parity alarm,
+#                           which compares against the latest published release, does not
+#                           fire while the rest of the train runs (#2210). Missing
+#                           PEARL_SSH/INSTALL_SH_REMOTE_PATH or an unreadable INSTALL_SH_URL
+#                           never blocks 8-9a: that refusal is reported after 9a
 #   8 recommendation_bump   next --run: _pearl-config sets latest_binary_version and
 #                           compatibility_set.target_id, restarts, and checks /healthz
 #                           recommended_binary_version and compatibility_policy_target_id
@@ -95,7 +101,7 @@
 #                           --tag v<ver> --promote-latest (it requires the coordinator to
 #                           advertise the tag and never moves backwards). Needs
 #                           MALIBU_DOWNLOAD_SSH_KEY; GH_TOKEN defaults to the gh login
-#  10 install_sh_republish  get-channel install.sh == released dist/install.sh
+#  10 install_sh_republish  (7c) the refusal it could not act on: env unset or served unreadable
 #  11 install_sh_consumer_health
 #
 # Revoked-build rollback (SPEC-020-R007; runbook VERIFY_DOC "Revoked-build rollback"):
@@ -895,6 +901,28 @@ gh workflow run promote-acceptance-candidate.yml -R $(gh_repo) --ref main \\
     fi
   fi
 
+  # 7c. get-channel install.sh, right after promotion. The scheduled parity
+  # alarm compares the served script with the latest published release, so a
+  # republish left until after the bump and rollout verification fires it
+  # mid-train (#2210). Republishing needs no later step. Only a runnable
+  # republish is offered here; an unset env or an unreadable served script is
+  # reported at step 10 so it never blocks the bump.
+  case "$install_state" in
+    parity) step install_sh_republish "done" "served == v$V dist/install.sh" ;;
+    drift)
+      step install_sh_republish pending "served install.sh differs from v$V"
+      if [ -n "${INSTALL_SH_REMOTE_PATH:-}" ] && [ -n "${PEARL_SSH:-}" ]; then
+        set_next install_sh_republish mutate "Republish the get-channel install.sh from v$V" \
+"ts=\$(date -u +%Y%m%dT%H%M%SZ)
+git show v$V:phase3-binary/dist/install.sh > \"\${TMPDIR:-/tmp}/install.sh.v$V\"
+ssh \"\$PEARL_SSH\" \"cp -p \$INSTALL_SH_REMOTE_PATH \$INSTALL_SH_REMOTE_PATH.bak-\$ts\"
+scp \"\${TMPDIR:-/tmp}/install.sh.v$V\" \"\$PEARL_SSH:/tmp/install.sh.new\"
+ssh \"\$PEARL_SSH\" \"install -o root -g root -m 0755 /tmp/install.sh.new \$INSTALL_SH_REMOTE_PATH && rm -f /tmp/install.sh.new\""
+        next_meta install_sh_republish "$VERIFY_DOC#curl-channel-installsh-republish-mandatory-on-release" "none expected: static file replace on the coordinator host"
+      fi ;;
+    *) step install_sh_republish unknown "needs INSTALL_SH_URL and a published v$V" ;;
+  esac
+
   # 8. recommendation / compatibility target bump: both the advertised version
   # and the applied compatibility_set.target_id must name the release.
   if [ "$L" = "$V" ] && [ "$REG_TARGET_APPLIED" = true ]; then
@@ -971,26 +999,15 @@ gh workflow run verify-live-coordinator-release-rollout.yml -R $(gh_repo) --ref 
         "the mirror latest.json is unreadable (MIRROR_LATEST_URL)" ;;
   esac
 
-  # 10. get-channel install.sh.
+  # 10. what 7c could not act on, reported only once 8-9a are settled.
   case "$install_state" in
-    parity) step install_sh_republish "done" "served == v$V dist/install.sh" ;;
+    parity) ;;
     drift)
-      step install_sh_republish pending "served install.sh differs from v$V"
       if [ -z "${INSTALL_SH_REMOTE_PATH:-}" ] || [ -z "${PEARL_SSH:-}" ]; then
         set_next install_sh_republish blocked "Republish install.sh from v$V" "" \
           "PEARL_SSH and INSTALL_SH_REMOTE_PATH must be set (see scripts/ops/README.md)"
-      else
-        set_next install_sh_republish mutate "Republish the get-channel install.sh from v$V" \
-"ts=\$(date -u +%Y%m%dT%H%M%SZ)
-git show v$V:phase3-binary/dist/install.sh > \"\${TMPDIR:-/tmp}/install.sh.v$V\"
-ssh \"\$PEARL_SSH\" \"cp -p \$INSTALL_SH_REMOTE_PATH \$INSTALL_SH_REMOTE_PATH.bak-\$ts\"
-scp \"\${TMPDIR:-/tmp}/install.sh.v$V\" \"\$PEARL_SSH:/tmp/install.sh.new\"
-ssh \"\$PEARL_SSH\" \"install -o root -g root -m 0755 /tmp/install.sh.new \$INSTALL_SH_REMOTE_PATH && rm -f /tmp/install.sh.new\""
-        next_meta install_sh_republish "$VERIFY_DOC#curl-channel-installsh-republish-mandatory-on-release" "none expected: static file replace on the coordinator host"
-      fi
-      ;;
+      fi ;;
     *)
-      step install_sh_republish unknown "needs INSTALL_SH_URL and a published v$V"
       [ "$published" != true ] || set_next install_sh_republish blocked "Check install.sh parity" "" "INSTALL_SH_URL is unset or unreadable"
       ;;
   esac

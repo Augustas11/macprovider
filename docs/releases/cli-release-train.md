@@ -1530,7 +1530,14 @@ mainland-provider installer handoff.
 11. Curl-channel `https://get.malibu.tech/install.sh`:
    - **On promotion:** republish from the promoted tag (or confirm served
      bytes still match that tag) so `scripts/check-install-sh-parity.sh`
-     against the tag is green. Confirm
+     against the tag is green. `cli-release.sh` offers this
+     (`install_sh_republish`) right after promotion, before the
+     recommendation bump (item 8 onward), because the scheduled parity alarm
+     compares against the latest published release (#2210). The alarm
+     tolerates the previous release's exact bytes for 120 minutes after
+     publication; past that, drift alarms. Without `PEARL_SSH` /
+     `INSTALL_SH_REMOTE_PATH` the train reports the republish as blocked
+     only after `mirror_latest`. Confirm
      `scripts/check-install-sh-consumer-health.sh` is green (#1600 / #1588).
    - **Off-cycle from `main`:** allowed when the public one-liner must
      change before the next CLI promotion (fresh-Mac CLT wall, pagination).

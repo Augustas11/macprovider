@@ -189,6 +189,18 @@ class SignedPairInterfaceTests(unittest.TestCase):
         self.assertEqual(check(now - 10)[:2], (False, False))
         self.assertFalse(check(now + 600)[0])
 
+    def test_plan_generator_endpoints_match_studio_required_feeds(self):
+        # The generator derives exactly the feed set the Studio actor demands.
+        spec = importlib.util.spec_from_file_location('signed_pair_plan', ROOT / 'scripts/ops/lib/signed-pair-plan.py')
+        generator = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(generator)
+        self.actor['validate'](self.plan)
+        self.assertEqual(set(generator.ENDPOINTS), set(self.plan['target']['feed_sha256']))
+        incomplete = json.loads(json.dumps(self.plan))
+        del incomplete['target']['feed_sha256'][generator.ENDPOINTS[-1]]
+        with self.assertRaises(self.actor['Refused']):
+            self.actor['validate'](incomplete)
+
     def test_pending_ack_is_quiet_not_a_traceback(self):
         # 2026-11-01 pair2: the EXIT-trap lock check printed FileNotFoundError.
         state = self.root / 'state'
