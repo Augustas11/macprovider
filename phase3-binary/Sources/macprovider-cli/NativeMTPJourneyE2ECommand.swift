@@ -134,15 +134,19 @@ struct NativeMTPJourneyE2ECommand: AsyncParsableCommand {
             let targetURL = URL(fileURLWithPath: ConfigLoader.expandTilde(root)).appendingPathComponent("target")
             let cache = NativeMTPBenchIdentityCache(persistentURL: identityCachePath.map { URL(fileURLWithPath: ConfigLoader.expandTilde($0)) })
             let target = try cache.identity(directory: targetURL)
+            // As the bench: a separate Qwen3.5 drafter snapshot has its own
+            // identity; an embedded MTP layer (GLM) is the target artifact.
+            let layout = NativeMTPBenchFixtureLayout.resolve(root: URL(fileURLWithPath: ConfigLoader.expandTilde(root)))
+            let mtpDigest = try layout.family.embeddedMTP ? target.digest : cache.identity(directory: layout.mtpDirectory).digest
             let tokenizerSHA = SHA256.hash(data: try Data(contentsOf: targetURL.appendingPathComponent("tokenizer.json")))
                 .map { String(format: "%02x", $0) }.joined()
             let environment = NativeMTPBenchEnvironment.capture(providerCommit: providerCommit)
             try policy.validate(corpus: corpus, environment: environment,
-                                targetSHA256: target.digest, mtpSHA256: target.digest, tokenizerSHA256: tokenizerSHA)
+                                targetSHA256: target.digest, mtpSHA256: mtpDigest, tokenizerSHA256: tokenizerSHA)
             checkedTarget = target
             acceptancePolicy = policy
             preflightDocument = [
-                "target_sha256": target.digest, "mtp_sha256": target.digest, "tokenizer_sha256": tokenizerSHA,
+                "target_sha256": target.digest, "mtp_sha256": mtpDigest, "tokenizer_sha256": tokenizerSHA,
                 "quantization": "4bit", "cache_mode": "paged_kv_mixed",
                 "policy_sha256": policy.digestSHA256,
                 "observed_environment": [

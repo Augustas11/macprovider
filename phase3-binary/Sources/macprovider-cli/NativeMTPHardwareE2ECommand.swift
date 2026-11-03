@@ -1066,6 +1066,10 @@ final class NativeMTPHardwareE2ERunner {
             signerKeyID: keyID,
             affineRepresentation: affineRepresentation
         )
+        // The lab envelope beside the projection: its quantization block is
+        // what the production artifact observer computed for this pair, the
+        // source a signed tuple input copies (never itself a signed input).
+        try sidecarData.write(to: root.appendingPathComponent("native-mtp-lab-admission.json"), options: [.atomic])
         let signature = try signer.signature(for: sidecarData).base64EncodedString()
         let signatureData = Data("""
         {"alg":"ed25519","key_id":"\(keyID)","signature":"\(signature)"}

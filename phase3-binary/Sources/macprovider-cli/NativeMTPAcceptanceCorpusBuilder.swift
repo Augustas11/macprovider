@@ -6,9 +6,13 @@ import MLXLMCommon
 /// message generator as the GLM lab fixture, without allocating model weights
 /// or creating an MLX array. The frozen corpus is checked again at execution.
 enum NativeMTPAcceptanceCorpusBuilder {
+    /// Serving IDs that take this fixed request design: GLM, and the dense
+    /// Qwen3.5-family 27B rows (#2199) unchanged.
+    static let modelIDs: Set<String> = ["zai-org/glm-5.3-flash", "qwen/qwen3.6-27b", "qwen/qwen3.8-27b"]
+
     static func make(targetDirectory: URL, modelID: String) async throws -> Data {
-        guard modelID == "zai-org/glm-5.3-flash" else {
-            throw NativeMTPHardwareE2EError.assertionFailed("acceptance corpus is GLM-specific")
+        guard modelIDs.contains(modelID) else {
+            throw NativeMTPHardwareE2EError.assertionFailed("acceptance corpus has no design for \(modelID)")
         }
         let tokenizer = try await ChatTemplateCompatTokenizerLoader().load(from: targetDirectory)
         var cases: [[String: Any]] = []
