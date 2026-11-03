@@ -10,6 +10,11 @@ promotion to `recommendable`:
   show         print a record
   owed-status  list the keys promoted with their record owed (SPEC-023 §16.11)
 
+`run` retries retryable gateway errors (429/502/503/504 or error.retryable)
+with bounded backoff and refuses to write a record if any check stays
+inconclusive; model-behaviour checks take --samples requests each and pass
+only when every sample passes, listing every distinct failure.
+
 Each check is a pure function of recorded HTTP responses, so the suite is
 unit-tested against recorded responses (scripts/tests/test_buyer_ux_conformance.py)
 and run live only after a release. The record's `capabilities` are what the
@@ -23,6 +28,7 @@ import datetime as _dt
 import json
 import pathlib
 import sys
+import time
 import urllib.error
 import urllib.request
 from typing import Callable
@@ -33,6 +39,21 @@ SCHEMA = "macprovider.buyer-ux-conformance.v1"
 MAX_BODY_BYTES = 4 * 1024 * 1024
 
 PASS, FAIL, UNSUPPORTED = "pass", "fail", "unsupported"
+# Not a verdict: the gateway kept answering with a retryable infrastructure
+# error (capacity, timeout) after the retry budget. It never reaches the record
+# file: `run` refuses to write a record holding one, so capacity noise can
+# neither grant nor remove a capability.
+INCONCLUSIVE = "inconclusive"
+
+# Infrastructure statuses retried when the error body does not say otherwise.
+RETRYABLE_HTTP = frozenset({429, 502, 503, 504})
+DEFAULT_ATTEMPTS = 6
+DEFAULT_RETRY_BUDGET_S = 300.0
+RETRY_BASE_DELAY_S = 2.0
+RETRY_MAX_DELAY_S = 60.0
+DEFAULT_SAMPLES = 3
+# Checks whose result is a single deterministic gateway answer, sampled once.
+SINGLE_SAMPLE_CHECKS = frozenset({"context_limit_error"})
 
 # Capability -> the checks that must pass for the model to advertise it.
 CAPABILITY_CHECKS: dict[str, tuple[str, ...]] = {
@@ -50,6 +71,10 @@ ALL_CHECKS = tuple(c for checks in CAPABILITY_CHECKS.values() for c in checks)
 
 class ConformanceError(Exception):
     pass
+
+
+class RetryExhausted(Exception):
+    """The gateway still answered with a retryable error after the budget."""
 
 
 class Response:
@@ -76,6 +101,59 @@ class Response:
 
 # A transport performs one request: (method, path, headers, body) -> Response.
 Transport = Callable[[str, str, dict, dict | None], Response]
+
+
+def is_retryable(resp: Response) -> bool:
+    """Infrastructure noise, not a model verdict. The gateway's own
+    `error.retryable` decides when present (so a 502 malformed_json_response
+    marked non-retryable stays a verdict); otherwise 429/502/503/504 are."""
+    if resp.status == 200:
+        return False
+    try:
+        error = resp.json().get("error")
+    except (ValueError, UnicodeDecodeError):
+        error = None
+    if isinstance(error, dict) and isinstance(error.get("retryable"), bool):
+        return error["retryable"]
+    return resp.status in RETRYABLE_HTTP
+
+
+def _retry_after(resp: Response) -> float | None:
+    for name, value in resp.headers.items():
+        if name.lower() == "retry-after":
+            try:
+                return max(0.0, float(value))
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def retrying_transport(transport: Transport, attempts: int = DEFAULT_ATTEMPTS,
+                       budget_s: float = DEFAULT_RETRY_BUDGET_S,
+                       sleep: Callable[[float], None] = time.sleep,
+                       clock: Callable[[], float] = time.monotonic) -> Transport:
+    """Retry retryable responses with capped exponential backoff (honouring
+    Retry-After), at most `attempts` requests and `budget_s` seconds per
+    request; raise RetryExhausted if the last answer is still retryable."""
+    if attempts < 1 or budget_s < 0:
+        raise ValueError("attempts must be >= 1 and budget_s >= 0")
+
+    def send(method: str, path: str, headers: dict, body: dict | None) -> Response:
+        start = clock()
+        for attempt in range(1, attempts + 1):
+            resp = transport(method, path, headers, body)
+            if not is_retryable(resp):
+                return resp
+            delay = _retry_after(resp)
+            if delay is None:
+                delay = RETRY_BASE_DELAY_S * 2 ** (attempt - 1)
+            delay = min(delay, RETRY_MAX_DELAY_S)
+            if attempt == attempts or clock() - start + delay > budget_s:
+                break
+            sleep(delay)
+        raise RetryExhausted(f"HTTP {resp.status} {_error_code(resp)} still retryable after "
+                             f"{attempt} attempt(s) in {clock() - start:.0f}s")
+    return send
 
 TOOL = {
     "type": "function",
@@ -343,7 +421,55 @@ def model_entry(transport: Transport, model: str) -> dict:
     raise ConformanceError(f"model {model!r} is not served by the gateway")
 
 
-def run_checks(transport: Transport, model: str) -> dict:
+def _sample(step: Callable[[], tuple[str, str]]) -> tuple[str, str]:
+    try:
+        return step()
+    except RetryExhausted as exc:
+        return INCONCLUSIVE, str(exc)
+    except (ValueError, KeyError, TypeError, ConformanceError) as exc:
+        return FAIL, f"malformed response: {type(exc).__name__}"
+
+
+def combine_samples(results: list[tuple[str, str]]) -> dict:
+    """One check's verdict from its samples, fail-closed: it passes only when
+    every sample passes (a reasoning leak in any sample is a defect); any
+    failing sample fails it, and every distinct failure is listed so a flaky
+    model shows each failure mode. Without a failure, a sample still retryable
+    after its budget makes the check inconclusive. A mode the model does not
+    serve is unsupported only when every sample says so."""
+    statuses = [status for status, _ in results]
+    failures = sorted({detail[:200] for status, detail in results if status == FAIL})
+    inconclusive = sorted({detail[:200] for status, detail in results if status == INCONCLUSIVE})
+    total, passed = len(results), statuses.count(PASS)
+    if FAIL in statuses:
+        status = FAIL
+    elif INCONCLUSIVE in statuses:
+        status = INCONCLUSIVE
+    elif all(s == UNSUPPORTED for s in statuses):
+        status = UNSUPPORTED
+    elif all(s == PASS for s in statuses):
+        status = PASS
+    else:
+        status = FAIL
+        failures = [f"inconsistent samples {sorted(set(statuses))}"]
+    if status in (PASS, UNSUPPORTED):
+        detail = results[0][1]
+    elif status == INCONCLUSIVE:
+        detail = inconclusive[0]
+    elif FAIL not in statuses:
+        detail = failures[0]
+    else:
+        counts = {f: sum(1 for s, d in results if s == FAIL and d[:200] == f) for f in failures}
+        detail = f"{total - passed}/{total} samples failed: " + "; ".join(f"{f} (x{counts[f]})" for f in failures)
+    out = {"status": status, "detail": detail[:200], "samples": total, "passed": passed}
+    if failures and status == FAIL:
+        out["failures"] = failures
+    return out
+
+
+def run_checks(transport: Transport, model: str, samples: int = DEFAULT_SAMPLES) -> dict:
+    if samples < 1:
+        raise ValueError("samples must be >= 1")
     entry = model_entry(transport, model)
     advertised = entry.get("capabilities") or {}
     # Whether reasoning fields must be proven comes from the canonical model
@@ -367,11 +493,8 @@ def run_checks(transport: Transport, model: str) -> dict:
     }
     checks = {}
     for name, step in steps.items():
-        try:
-            status, detail = step()
-        except (ValueError, KeyError, TypeError, ConformanceError) as exc:
-            status, detail = FAIL, f"malformed response: {type(exc).__name__}"
-        checks[name] = {"status": status, "detail": detail[:200]}
+        count = 1 if name in SINGLE_SAMPLE_CHECKS else samples
+        checks[name] = combine_samples([_sample(step) for _ in range(count)])
     return {"model": model, "checks": checks, "capabilities": capabilities_from_checks(checks)}
 
 
@@ -472,6 +595,16 @@ def validate_record(record: object, label: str) -> None:
     for name, result in checks.items():
         if not isinstance(result, dict) or result.get("status") not in (PASS, FAIL, UNSUPPORTED):
             raise ConformanceError(f"{label}.checks[{name!r}].status must be pass, fail or unsupported")
+        # Optional sampling evidence (absent from records taken before it).
+        total, passed = result.get("samples", 1), result.get("passed", 0)
+        if ("samples" in result or "passed" in result) and not (
+                type(total) is int and type(passed) is int and total >= 1 and 0 <= passed <= total):
+            raise ConformanceError(f"{label}.checks[{name!r}] samples/passed must be integers with 0 <= passed <= samples >= 1")
+        if "samples" in result and result["status"] == PASS and passed != total:
+            raise ConformanceError(f"{label}.checks[{name!r}] passes only when every sample passed")
+        failures = result.get("failures", [])
+        if not isinstance(failures, list) or not all(isinstance(f, str) for f in failures):
+            raise ConformanceError(f"{label}.checks[{name!r}].failures must be a list of strings")
     if record["capabilities"] != capabilities_from_checks(checks):
         raise ConformanceError(f"{label}.capabilities must be derived from its checks")
 
@@ -586,8 +719,25 @@ def cmd_run(args: argparse.Namespace) -> int:
     if not args.gateway.startswith("https://"):
         print("--gateway must be an https URL", file=sys.stderr)
         return 2
+    if args.samples < 1 or args.attempts < 1 or args.retry_budget < 0:
+        print("--samples and --attempts must be >= 1 and --retry-budget >= 0", file=sys.stderr)
+        return 2
     key = pathlib.Path(args.key_file).expanduser().read_text(encoding="utf-8").strip()
-    result = run_checks(http_transport(args.gateway, key), args.model)
+    transport = retrying_transport(http_transport(args.gateway, key), args.attempts, args.retry_budget)
+    try:
+        result = run_checks(transport, args.model, args.samples)
+    except RetryExhausted as err:
+        print(f"/models: {err}; no record written", file=sys.stderr)
+        return 3
+    inconclusive = sorted(name for name, check in result["checks"].items() if check["status"] == INCONCLUSIVE)
+    if inconclusive:
+        # Capacity noise is not evidence: keep the record already in force
+        # (or the owed mask) rather than grant or remove anything on it.
+        print(json.dumps({"catalog_key": args.catalog_key, "inconclusive": inconclusive, "written": False,
+                          "checks": result["checks"]}, sort_keys=True))
+        print(f"{len(inconclusive)} check(s) inconclusive (gateway kept answering retryable errors): "
+              f"no record written; re-run when the provider has capacity", file=sys.stderr)
+        return 3
     record = {
         "model": args.model,
         "gateway": args.gateway,
@@ -600,7 +750,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     doc["records"][args.catalog_key] = record
     path.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     failed = [name for name, check in result["checks"].items() if check["status"] == FAIL]
-    print(json.dumps({"catalog_key": args.catalog_key, "capabilities": result["capabilities"], "failed": failed}, sort_keys=True))
+    print(json.dumps({"catalog_key": args.catalog_key, "capabilities": result["capabilities"], "failed": failed,
+                      "written": True}, sort_keys=True))
     return 0 if not failed else 1
 
 
@@ -625,6 +776,12 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--model", required=True, help="the model id as /v1/models lists it")
     run.add_argument("--catalog-key", required=True)
     run.add_argument("--record", default=str(RECORD_PATH))
+    run.add_argument("--samples", type=int, default=DEFAULT_SAMPLES,
+                     help="requests per model-behaviour check; a check passes only if every sample passes")
+    run.add_argument("--attempts", type=int, default=DEFAULT_ATTEMPTS,
+                     help="max requests per sample while the gateway answers a retryable error")
+    run.add_argument("--retry-budget", type=float, default=DEFAULT_RETRY_BUDGET_S,
+                     help="max seconds of retrying per sample before it is inconclusive")
     check = sub.add_parser("check", help="gate: the key's record passes for every advertised capability")
     check.add_argument("--catalog-key", required=True)
     check.add_argument("--model-id", help="served model id; the advertised capabilities are derived from it")

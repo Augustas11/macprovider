@@ -10,7 +10,8 @@ SWAP="$OPS_DIR/canary-swap.sh"
 die() { printf '[test-canary-swap] FAIL: %s\n' "$*" >&2; exit 1; }
 log() { printf '[test-canary-swap] %s\n' "$*" >&2; }
 
-T="$(mktemp -d "${TMPDIR:-/tmp}/canary-swap-test.XXXXXX")"
+# Linux CI /tmp is 1777; buyer-runner-target.py refuses shared-writable parents.
+T="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/canary-swap-test.XXXXXX")"
 T="$(cd "$T" && pwd -P)"
 SERVER_PID=""
 COORD_PID=""
@@ -119,11 +120,21 @@ reset_install() {
 }
 
 # fake launchctl: one job; in "crash" mode the candidate's pid changes on every print.
+# kickstart (switch-model) restarts the job onto the identity in config.yaml.
 cat >"$T/bin/launchctl" <<'SH'
 #!/bin/bash
 s="$FAKE_STATE"
 running() { "$FAKE_INSTALL/macprovider-cli" --version; }
 case "$1" in
+  kickstart)
+    echo $(( $(cat "$s/pid") + 1 )) >"$s/pid"; echo "$*" >>"$s/kicks"
+    python3 - "$HOME/.config/macprovider/config.yaml" >"$s/served.json" <<'PY'
+import json, re, sys
+c = dict(re.findall(r"(?m)^([a-z0-9_]+): *\"?([^\"\n]*)\"?$", open(sys.argv[1]).read()))
+print(json.dumps({"network_state": "buyer_serving", "model": c["model"], "model_hash": c["model_artifact_sha256"],
+                  "catalog": {"catalog_key": c["model_catalog_key"], "artifact_sha256": c["model_catalog_sha256"]}}))
+PY
+    ;;
   bootout) if [[ "$2" == *-watchdog ]]; then rm -f "$s/wd"; else echo unloaded >"$s/job"; fi ;;
   bootstrap)
     if [[ "$3" == *-watchdog.plist ]]; then touch "$s/wd"; exit 0; fi
@@ -153,6 +164,9 @@ s="$FAKE_STATE"
 [ "$(cat "$s/job")" = loaded ] || exit 7
 v="$("$FAKE_INSTALL/macprovider-cli" --version)"
 mode="$(cat "$s/mode" 2>/dev/null || true)"
+# switch: the identity the last kickstart loaded; switchhang: never serves again.
+if [ "$mode" = switch ] && [ -f "$s/served.json" ]; then cat "$s/served.json"; exit 0; fi
+if [ "$mode" = switch ] || [ "$mode" = switchhang ]; then echo '{"network_state":"starting"}'; exit 0; fi
 if [ "$mode" = silent ] && [ "$v" = "$FAKE_CAND" ]; then exit 7; fi
 if [ "$mode" = loadsilent ] && [ "$v" = "$FAKE_CAND" ] &&
    [ $(( $(date +%s) - $(cat "$s/swapped") )) -lt "$(cat "$s/loadsecs")" ]; then exit 7; fi
@@ -371,5 +385,131 @@ rm -rf "$HOME/.macprovider-canary-swap.lock"
 run_rc 3 "half-failed runner stop" env CANARY_RUNNER_STOP_CMD="echo stopped >> '$T/state/runner'; false" "$SWAP" swap --version "$CAND"
 [ "$(tr '\n' ' ' <"$T/state/runner")" = "stopped started " ] || die "half-stopped runner not restarted"
 [ "$(installed)" = "$OLD" ] || die "refused swap changed the payload"
+
+# 7. switch-model: the repo's signed row, verified on the canary by
+#    verify-artifact, rewrites all nine identity fields in one write (backup
+#    kept), kickstarts the provider, waits for buyer_serving on the new sha and
+#    retargets only the Pearl runner's Studio row. A missing artifact, a verify
+#    mismatch or a config missing a field changes nothing; a wait timeout
+#    restores nothing and says so.
+KEY=zai-org/glm-5.3-flash-abliterated
+eval "$(python3 - "$REPO_ROOT/phase3-binary/dist/static/autotune-candidates.json" "$KEY" <<'PY'
+import hashlib, json, sys
+raw = open(sys.argv[1], "rb").read(); d = json.loads(raw); r = d["rows"][sys.argv[2]]
+print("ROW_ID=%s ROW_REV=%s ROW_SHA=%s CAT_VER=%s CAT_HASH=%s" % (r["model_id"], r["model_revision"], r["model_sha256"], d["version"], hashlib.sha256(raw).hexdigest()))
+PY
+)"
+SNAP="$HOME/.cache/huggingface/hub/models--x/snapshots/$ROW_REV"
+CFG="$HOME/.config/macprovider/config.yaml"
+OLD_CFG="# provider config
+model: zai-org/glm-5.3-flash
+max_context_override: 65536
+model_artifact_path: /old/snapshot
+model_artifact_sha256: $(printf 'a%.0s' $(seq 64))
+model_catalog_key: zai-org/glm-5.3-flash
+model_catalog_model_id: Jundot/GLM-5.3-Flash-oQ4e-mtp
+model_catalog_revision: oldrev
+model_catalog_sha256: $(printf 'a%.0s' $(seq 64))
+model_catalog_version: old-version
+model_catalog_hash: $(printf 'b%.0s' $(seq 64))
+native_mtp_mode: auto"
+mkdir -p "$T/pbin" "$T/pearl/svc" "$T/runner"
+# shellcheck disable=SC2016  # the stub's own "$@" must stay literal
+printf '#!/usr/bin/env bash\nexec bash -c "${@: -1}"\n' >"$T/pbin/ssh"
+printf '#!/usr/bin/env bash\nexec python3 %q "$@"\n' "$OPS_DIR/tests/fake_pearl_systemctl.py" >"$T/pbin/systemctl"
+chmod +x "$T/pbin/ssh" "$T/pbin/systemctl"
+printf '%s\n' "$T/runner/targets.json" >"$T/pearl/svc/runner_targets_path"
+switch_reset() {
+  reset_install
+  cat >"$FAKE_INSTALL/macprovider-cli" <<'SH'
+#!/bin/bash
+case "$1 $2" in
+  "--version "*) echo 9.9.1 ;;
+  "models verify-artifact") cat "$FAKE_STATE/verify.json"; exit "$(cat "$FAKE_STATE/verify_rc" 2>/dev/null || echo 0)" ;;
+  "models list") [ ! -f "$FAKE_STATE/list_fail" ] ;;
+  *) exit 2 ;;
+esac
+SH
+  chmod 755 "$FAKE_INSTALL/macprovider-cli"
+  mkdir -p "$SNAP" "$(dirname "$CFG")"
+  printf '%s\n' "$OLD_CFG" >"$CFG"; chmod 600 "$CFG"
+  rm -f "$CFG".bak-switch-model-* "$T/runner"/targets.json* "$T/runner/reserve/runner-reserve.json" "$T/pearl/svc/runner-actions"
+  printf '{"targets": [{"provider_id": "mp-other0001", "model": "m", "slots": 2}, {"provider_id": "mp-studio01abc", "model": "Jundot/GLM-5.3-Flash-oQ4e-mtp", "slots": 8}]}\n' >"$T/runner/targets.json"
+  chmod 644 "$T/runner/targets.json"
+  python3 - "$T/state/verify.json" <<PY
+import json, sys
+json.dump({"schema": "model_artifact_verification.v1", "verdict": "match", "catalog_key": "$KEY",
+           "buyer_model_key": "$KEY", "catalog_model_id": "$ROW_ID", "pinned_revision": "$ROW_REV",
+           "signed_hash": "$ROW_SHA", "computed_hash": "$ROW_SHA", "catalog_release": "$CAT_VER",
+           "catalog_digest": "$CAT_HASH", "local_path": "<hf_cache>/models--x/snapshots/$ROW_REV"}, open(sys.argv[1], "w"))
+PY
+  echo switch >"$T/state/mode"
+}
+switch() {
+  env -u HF_HOME PATH="$T/pbin:$PATH" FAKE_PEARL="$T/pearl" PEARL_SSH=fake-pearl \
+    RUNNER_STUDIO_PROVIDER_PREFIX=mp-studio01 PEARL_RUNNER_TARGETS="$T/runner/targets.json" \
+    PEARL_RUNNER_RESERVE_DIR="$T/runner/reserve" "$SWAP" switch-model "$@"
+}
+cfg_field() { sed -n "s/^$1: //p" "$CFG"; }
+studio_model() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["targets"][1]["model"])' "$T/runner/targets.json"; }
+
+switch_reset
+run_rc 0 "switch-model to a verified signed row" switch "$KEY"
+grep -q "EXPECTED DOWNTIME for switch-model $KEY" "$T/out" || die "switch-model did not state the downtime first"
+for f in "model=$KEY" "model_artifact_path=$SNAP" "model_artifact_sha256=$ROW_SHA" "model_catalog_key=$KEY" \
+         "model_catalog_model_id=$ROW_ID" "model_catalog_revision=$ROW_REV" "model_catalog_sha256=$ROW_SHA" \
+         "model_catalog_version=$CAT_VER" "model_catalog_hash=$CAT_HASH"; do
+  [ "$(cfg_field "${f%%=*}")" = "${f#*=}" ] || die "switch-model wrote ${f%%=*}=$(cfg_field "${f%%=*}"), want ${f#*=}"
+done
+[ "$(cfg_field native_mtp_mode)" = auto ] && [ "$(cfg_field max_context_override)" = 65536 ] && head -n1 "$CFG" | grep -q '^# provider config' ||
+  die "switch-model changed config outside the identity block"
+[ "$(cat "$CFG".bak-switch-model-*)" = "$OLD_CFG" ] || die "no exact config backup"
+[ "$(grep -c kickstart "$T/state/kicks")" = 1 ] || die "provider not kickstarted once"
+[ "$(studio_model)" = "$ROW_ID" ] || die "runner Studio target model not retargeted"
+python3 -c 'import json,sys; t=json.load(open(sys.argv[1]))["targets"]; sys.exit(t[0]!={"provider_id":"mp-other0001","model":"m","slots":2} or t[1]["slots"]!=8)' "$T/runner/targets.json" ||
+  die "runner retarget changed another target"
+[ ! -f "$MACPROVIDER_LIVE_LOCK" ] || die "switch-model kept the live-ops lock"
+run_rc 0 "switch-model again is a no-op" switch "$KEY"
+[ "$(grep -c kickstart "$T/state/kicks")" = 1 ] || die "repeated switch-model restarted the provider"
+grep -q "already serves $KEY" "$T/err" || die "repeated switch-model not reported as already serving"
+
+switch_reset
+echo 3 >"$T/state/verify_rc"
+run_rc 3 "switch-model refuses an artifact missing on the canary" switch "$KEY"
+grep -q "not present and verified on the canary" "$T/err" || die "missing artifact not named"
+[ "$(cat "$CFG")" = "$OLD_CFG" ] && [ ! -f "$T/state/kicks" ] && [ ! -f "$T/pearl/svc/runner-actions" ] ||
+  die "refused switch-model changed the config, provider or runner"
+
+switch_reset
+python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["computed_hash"]="f"*64; d["catalog_digest"]="e"*64; json.dump(d, open(p,"w"))' "$T/state/verify.json"
+run_rc 3 "switch-model refuses a verify-artifact mismatch" switch "$KEY"
+grep -q "disagrees with this checkout's signed row on: computed_hash, catalog_digest" "$T/err" || die "verify mismatch not named"
+[ "$(cat "$CFG")" = "$OLD_CFG" ] && [ ! -f "$T/state/kicks" ] || die "mismatched switch-model changed the config"
+
+switch_reset
+grep -v '^model_catalog_key:' "$CFG" >"$CFG.tmp"; mv "$CFG.tmp" "$CFG"; chmod 600 "$CFG"
+cp "$CFG" "$T/cfg.missing"
+run_rc 3 "switch-model refuses a config missing an identity field" switch "$KEY"
+grep -q "config lacks identity field(s) model_catalog_key" "$T/err" || die "missing field not named"
+cmp -s "$CFG" "$T/cfg.missing" && ! ls "$CFG".bak-switch-model-* >/dev/null 2>&1 && [ ! -f "$T/state/kicks" ] ||
+  die "switch-model appended to or restarted a config missing a field"
+
+switch_reset
+touch "$T/state/list_fail"
+run_rc 3 "switch-model refuses a config the installed CLI rejects" switch "$KEY"
+[ "$(cat "$CFG")" = "$OLD_CFG" ] && [ ! -f "$T/state/kicks" ] || die "rejected config was written"
+
+switch_reset
+echo switchhang >"$T/state/mode"
+run_rc 6 "switch-model wait timeout restores nothing silently" env CANARY_READY_TIMEOUT_S=2 CANARY_POLL_S=1 bash -c '
+  env -u HF_HOME PATH="$0/pbin:$PATH" FAKE_PEARL="$0/pearl" PEARL_SSH=fake-pearl RUNNER_STUDIO_PROVIDER_PREFIX=mp-studio01 \
+    PEARL_RUNNER_TARGETS="$0/runner/targets.json" PEARL_RUNNER_RESERVE_DIR="$0/runner/reserve" "$1" switch-model "$2"' "$T" "$SWAP" "$KEY"
+grep -q "nothing was restored and the buyer runner was not retargeted" "$T/err" || die "timeout did not say nothing was restored"
+grep -q "switch-model zai-org/glm-5.3-flash (config backup " "$T/err" || die "timeout did not name the switch back and backup"
+[ "$(cfg_field model_catalog_key)" = "$KEY" ] || die "timeout silently restored the config"
+[ "$(studio_model)" = Jundot/GLM-5.3-Flash-oQ4e-mtp ] && [ ! -f "$T/pearl/svc/runner-actions" ] || die "timeout retargeted the runner"
+[ ! -f "$MACPROVIDER_LIVE_LOCK" ] || die "timed-out switch-model kept the live-ops lock"
+run_rc 2 "switch-model needs a key" "$SWAP" switch-model
+rm -f "$T/state/mode"
 
 log PASS

@@ -52,15 +52,28 @@ jobs:
           # The curl channel should serve the LATEST published release's
           # install.sh. Comparing against main would false-alarm on install.sh
           # changes that have merged but not yet shipped in a release.
-          latest_tag="$(
+          releases="$(
             gh release list --repo "$GITHUB_REPOSITORY" --limit 50 \
-              --json tagName,isDraft,isPrerelease \
-              --jq '.[] | select(.isDraft==false and .isPrerelease==false) | .tagName' \
-            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1
+              --json tagName,isDraft,isPrerelease,publishedAt \
+              --jq '.[] | select(.isDraft==false and .isPrerelease==false) | [.tagName, .publishedAt] | @tsv' \
+            | grep -E $'^v[0-9]+\\.[0-9]+\\.[0-9]+\t' | sort -V
           )"
+          latest_tag="$(printf '%s\n' "$releases" | tail -1 | cut -f1)"
           [ -n "$latest_tag" ] || { echo "::error::no published vX.Y.Z release tag found"; exit 1; }
           echo "Latest release tag: $latest_tag"
           git checkout "$latest_tag" -- phase3-binary/dist/install.sh
+          # Mid-train grace (#2210): the train republishes install.sh right
+          # after promotion; until then the served script is the previous
+          # release's. check-install-sh-parity.sh accepts exactly that, and
+          # only for INSTALL_SH_TRAIN_GRACE_MINUTES after publication.
+          previous_tag="$(printf '%s\n' "$releases" | tail -2 | head -1 | cut -f1)"
+          if [ -n "$previous_tag" ] && [ "$previous_tag" != "$latest_tag" ] &&
+            git show "$previous_tag:phase3-binary/dist/install.sh" > "$RUNNER_TEMP/install.previous.sh" 2>/dev/null; then
+            export INSTALL_SH_PREVIOUS_FILE="$RUNNER_TEMP/install.previous.sh"
+            INSTALL_SH_LATEST_PUBLISHED_AT="$(printf '%s\n' "$releases" | tail -1 | cut -f2)"
+            export INSTALL_SH_LATEST_PUBLISHED_AT
+            echo "Previous release tag: $previous_tag; $latest_tag published $INSTALL_SH_LATEST_PUBLISHED_AT"
+          fi
           if [ -n "${INSTALL_URL_INPUT:-}" ]; then
             export INSTALL_SH_URL="$INSTALL_URL_INPUT"
           fi

@@ -248,6 +248,65 @@ scripts/ops/live-lock.sh acquire <label> --steal                 # only past the
   directly. It allows them when that marker is set in the environment the
   guard itself runs in.
 
+## Buyer runner reservation (Studio target)
+
+The Pearl buyer runner keeps every CB row of the Studio canary busy, so a
+proof request beside it finds no idle capacity (1.8.280: native MTP routed
+ordinary, `no_provider_available`, CB self-check deferred). `lib/runner-reserve.sh`
+pauses only the Studio target; the runner service is never stopped:
+
+```bash
+MACPROVIDER_OPS_OWNER=<label> scripts/ops/lib/runner-reserve.sh with-studio-paused -- <cmd>
+MACPROVIDER_OPS_OWNER=<label> scripts/ops/lib/runner-reserve.sh pause-studio | restore
+scripts/ops/lib/runner-reserve.sh status
+```
+
+- Pause removes the one row whose `provider_id` starts with
+  `RUNNER_STUDIO_PROVIDER_PREFIX` from `targets.json`, keeps the exact bytes as
+  `targets.json.bak-runner-reserve-<UTC>` next to it, records the reservation
+  under `PEARL_RUNNER_RESERVE_DIR` and restarts the runner (its other targets
+  keep traffic). Restore writes the backup bytes back and restarts once more.
+- `with-studio-paused` restores on every exit of the command, on its failure
+  and on INT/TERM/HUP. `restore` with nothing outstanding changes nothing. A
+  reservation held by another owner is refused, never taken over; a restore
+  that cannot restart the runner keeps the reservation and says so.
+- `catalog-activate.sh` `gateway_proof` (the ordinary one-request proof) runs as
+  a mutate step under the live-ops lock: `_gateway-proof --reserve-runner`
+  pauses the Studio target, waits for the canary's `requests_in_flight` to reach
+  0 (`CATALOG_PROOF_DRAIN_S`, default 600), probes, and restores. The step is
+  blocked while `RUNNER_STUDIO_PROVIDER_PREFIX` is unset.
+- Settings (ops.env): `RUNNER_STUDIO_PROVIDER_PREFIX=<Studio provider_id prefix>`
+  (`none` when no buyer runner feeds the canary), `PEARL_RUNNER_TARGETS`
+  (default `/opt/malibu-buyer-runner/targets.json`), `PEARL_RUNNER_RESERVE_DIR`
+  (default `/var/lib/macprovider-ops`).
+
+## Canary model switch
+
+```bash
+MACPROVIDER_OPS_OWNER=<label> scripts/ops/canary-swap.sh switch-model <catalog-key> [--artifact-path DIR]
+```
+
+Serves another signed catalog row on the canary (`macprovider-cli models
+switch` refuses a catalog key, and two ~175 GB models cannot be warm swapped).
+It prints the expected downtime first: the canary restarts and loads the new
+model; the Pearl buyer runner restarts once; the coordinator is not restarted.
+
+- The row (model id, revision, sha256, catalog version and digest) comes from
+  `phase3-binary/dist/static/autotune-candidates.json` in this checkout. The
+  canary's `models verify-artifact <key> --json` must exit 0 and agree with it,
+  so download and verify the artifact there first.
+- Under the live-ops lock, `lib/canary-switch-model.py` backs up `config.yaml`
+  (`config.yaml.bak-switch-model-<UTC>`) and rewrites all nine identity fields
+  (`model`, `model_artifact_path`, `model_artifact_sha256`, `model_catalog_key`,
+  `model_catalog_model_id`, `model_catalog_revision`, `model_catalog_sha256`,
+  `model_catalog_version`, `model_catalog_hash`) in one atomic write that the
+  installed CLI validates. A config missing any field is refused, not appended.
+- It kickstarts the provider, waits up to `CANARY_READY_TIMEOUT_S` for
+  `/v1/status` `buyer_serving` with the new model and sha256, then sets the
+  runner's Studio target `model` to the row's model id. A timeout restores
+  nothing: it exits 6 and names the backup and the `switch-model <previous key>`
+  that goes back. A rerun once the canary serves the key only retargets the runner.
+
 ## Qwen OpenCode acceptance
 
 `qwen-opencode-e2e.sh` starts only after its private written handoff records
@@ -318,6 +377,27 @@ scratch cleanup are confirmed. A completed offline journey or merged catalog
 change does not replace the attributed paid request and positive MTP-forward
 delta required for live acceptance.
 
+### Signed native pair plan
+
+Generate `CATALOG_SIGNED_PAIR_PLAN` instead of editing a copy by hand.
+`lib/signed-pair-plan.py build --template <previous plan> --model-key <key>
+--previous-window-sha256 <sha> [--local-tarball <target tarball>] --out <plan>`
+derives the target release id, every feed digest, the CB policy and tuple
+digests and the model hash from `phase3-binary/dist/static`, takes the Studio,
+receipt-reader and prior identity from the template, and writes a fresh
+transaction ID, a deadline inside the arm window and mode 0600. A new binary
+version must supply its own identity (`--local-tarball` plus flags); it never
+inherits the template's. Run `lib/signed-pair-plan.py check --plan <plan>
+--expect-model-key <goal model> --existing-release-ids <Pearl releases/ listing>`
+right before `next --run`: it names every failed check (feed and CB tuple
+digests, admission, projection and CB policy coverage, model key, existing
+release directory, deadline, file mode) and runs the root, intent, transport
+and Studio validators the transaction uses. The arm window is 30 to 60
+minutes ahead, so with the default `--deadline-seconds 3300` a plan stays
+usable for 25 minutes after `build`. While the Studio waits for readiness it
+prints the failing check with observed and expected values, and `readiness
+deadline exceeded` names the last one.
+
 ## Local configuration (untracked)
 
 No host, address, user name or key path is committed. Put the targets in
@@ -374,3 +454,25 @@ variable.
 target" and "Active candidate" sections of `docs/releases/cli-release-train.md`
 from GitHub and `/healthz` (plus `MIRROR_LATEST_URL` when set). Paste its
 output over those sections instead of typing status by hand.
+
+## Hotfix pushes to main
+
+`hotfix-push.sh` pushes a small tooling, test or catalog-data fix straight to
+`main` only after the fast suites that cover the touched paths pass (728f0f0b3
+broke `test_native_mtp_admission_sidecar.py` unseen because the main CI run was
+cancelled). It plans from `origin/main..HEAD`, runs the suites, pushes
+`HEAD:main`, and with `--cancel-ci` cancels the main CI run for the pushed SHA.
+
+```bash
+scripts/ops/hotfix-push.sh --dry-run      # paths, refusals and suites only
+scripts/ops/hotfix-push.sh --cancel-ci    # run suites, push, cancel the main run
+```
+
+It refuses a dirty tree (untracked files included), a HEAD that is not a
+fast-forward of `origin/main`, a local `main` that is neither, merge commits,
+and any path AGENTS.md "Git Workflow" sends through a PR: Swift and app code,
+the SwiftPM pins, `dist/install.sh`, Go, `coordinator.yaml`,
+`.github/workflows`, `specs/SPEC-*.md`, `AUTHORITY.json` and
+`CONFORMANCE.json`. Docs (`*.md` outside `specs/`) never need a PR. The
+path-to-suite rules are in the script header; the PR-only list is its `PR_ONLY` table.
+Test: `test-hotfix-push.sh`.

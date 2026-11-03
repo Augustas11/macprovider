@@ -150,6 +150,7 @@ The exploratory goal matrix does not constitute admission qualification.
 | Item | Provider-side change | Status |
 |---|---|---|
 | [#2202](https://github.com/Augustas11/macprovider/pull/2202) | CB for the 32 GB rows (cohort prefill, on-device decode windows, GPT-OSS cache attention); mlx-swift-lm `3.32.3-macprovider.19` | merged (`7f7d6aa98`); the Llama-3.1-8B signed CB entry is added after the cut, bound to its CDHash |
+| [#2207](https://github.com/Augustas11/macprovider/pull/2207) | #2201 rows: Qwen2-VL text prompts no longer crash (1.03-1.14x of reference); Nemotron-3-Nano decode at 0.97-1.10x of mlx-lm (was 0.37x); mlx-swift-lm `3.32.3-macprovider.18` | merged (`f4c01b34c`) after the 1.8.280 cut; ships in this cut |
 | [#2220](https://github.com/Augustas11/macprovider/pull/2220) | GLM-5.3 family (#2189): GLM tool calls parse after stray `<tool_call>` openers; stray think tags stay out of `content` (SPEC-018 v0.3.12) | draft; live replay and audit pending |
 | [#2221](https://github.com/Augustas11/macprovider/pull/2221) | GLM-5.3-Flash speed (#2198): sparse-attention prefill (+17%, tokens identical), native-MTP staged-bytes reservation; fork pin `.20` | draft; window results pending; native-MTP identity rebind after the cut |
 | [#2222](https://github.com/Augustas11/macprovider/pull/2222) | Qwen 27B native MTP (#2199): depth 2-3 proposals with one native row | draft; window results pending; native-MTP policy after the cut if the depth cells pass |
@@ -1529,7 +1530,14 @@ mainland-provider installer handoff.
 11. Curl-channel `https://get.malibu.tech/install.sh`:
    - **On promotion:** republish from the promoted tag (or confirm served
      bytes still match that tag) so `scripts/check-install-sh-parity.sh`
-     against the tag is green. Confirm
+     against the tag is green. `cli-release.sh` offers this
+     (`install_sh_republish`) right after promotion, before the
+     recommendation bump (item 8 onward), because the scheduled parity alarm
+     compares against the latest published release (#2210). The alarm
+     tolerates the previous release's exact bytes for 120 minutes after
+     publication; past that, drift alarms. Without `PEARL_SSH` /
+     `INSTALL_SH_REMOTE_PATH` the train reports the republish as blocked
+     only after `mirror_latest`. Confirm
      `scripts/check-install-sh-consumer-health.sh` is green (#1600 / #1588).
    - **Off-cycle from `main`:** allowed when the public one-liner must
      change before the next CLI promotion (fresh-Mac CLT wall, pagination).
