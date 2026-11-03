@@ -4186,6 +4186,10 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         try cache.prepareMTPPackedVerification(rowMaps: rowMaps)
     }
 
+    static func batchLayerCacheForTest(rowCaches: [PagedKVCache]) -> any KVCache {
+        PagedKVBatchLayerCache(rowCaches: rowCaches)
+    }
+
     static func batchLayerMaskForTest(
         rowCaches: [PagedKVCache],
         n: Int,
@@ -5152,6 +5156,7 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAtt
             length = start + incomingTokenCount
             rowMutationCounts = nil
             batchedOffset = (batchedOffset ?? offset) + incomingTokenCount
+            if incomingTokenCount > 1 { rowCaches.forEach { $0.slidingRingAnchor = length } }
             return presentation(
                 keys: Self.prefix(newKeys, length),
                 values: Self.prefix(newValues, length),
@@ -5165,6 +5170,7 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAtt
             length = incomingKeys.dim(2)
             rowMutationCounts = nil
             batchedOffset = incomingKeys.dim(2)
+            if length > 1 { rowCaches.forEach { $0.slidingRingAnchor = length } }
             return presentation(
                 keys: incomingKeys,
                 values: incomingValues,
@@ -5759,10 +5765,26 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAtt
         let end = priorTokens + incomingTokens
         let start = max(0, end - keepPrior - incomingTokens)
         guard start > 0 else { return (keys, values) }
-        return (
-            keys[.ellipsis, start..., 0...],
-            values[.ellipsis, start..., 0...]
-        )
+        let windowKeys = keys[.ellipsis, start..., 0...]
+        let windowValues = values[.ellipsis, start..., 0...]
+        guard incomingTokens == 1 else { return (windowKeys, windowValues) }
+        // Lockstep rows share `end` but not their last prefill chunk, so each
+        // row takes the ring layout its own serial cache would hold.
+        let shifts = rowCaches.map {
+            PagedKVCache.slidingRingShift(postUpdateOffset: end, anchor: $0.slidingRingAnchor, windowSize: window)
+        }
+        if Set(shifts).count == 1 {
+            return (
+                PagedKVCache.ringOrdered(windowKeys, shift: shifts[0]),
+                PagedKVCache.ringOrdered(windowValues, shift: shifts[0])
+            )
+        }
+        func perRow(_ array: MLXArray) -> MLXArray {
+            concatenated(shifts.enumerated().map { row, shift in
+                PagedKVCache.ringOrdered(array[row ..< row + 1, 0..., 0..., 0...], shift: shift)
+            }, axis: 0)
+        }
+        return (perRow(windowKeys), perRow(windowValues))
     }
 
     private func packFromRows() {
