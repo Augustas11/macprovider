@@ -18,11 +18,14 @@ never as a menu. Analysis and status are fine; decision-shaped menus are not.
 These exist because native MTP and CB sat qualified-but-inactive for a week
 while sessions regenerated evidence instead of deploying. Each is binding.
 
-1. **Done means live.** A task whose goal is "X active" is done only when a
-   live probe shows X serving a real buyer request through the Malibu gateway.
-   Merge is not done. A PR that changes catalog, CB, or native-MTP state must
-   name its deploy command in the body, and the merging session deploys it the
-   same day.
+1. **Done means live; merged work closes its issue.** A goal of "X active" is
+   reached only when a live probe shows X serving a real buyer request through
+   the Malibu gateway. When the work is implemented and merged, close its issue
+   and record the remaining live step (CLI cut, signed policy, coordinator
+   rollout) in `docs/releases/cli-release-train.md` or the coordinator release
+   doc; that doc, not an open issue, tracks it to live. A PR that changes
+   catalog, CB, or native-MTP state must name its deploy command in the body,
+   and the merging session deploys it the same day.
 2. **Reuse evidence; never regenerate it.** Before proposing any benchmark,
    qualification, journey, or evidence capture, list the existing evidence and
    name the decode-path code line that changed since it was produced. No named
@@ -103,9 +106,10 @@ while sessions regenerated evidence instead of deploying. Each is binding.
     - A campaign's PR count is the campaign PR plus at most one ops PR. A
       third PR means stop and write the operator a one-paragraph blocker
       (rule 6).
-    - "Done" for an issue means its stated goal is live (rule 1). Merged
-      tooling, merged harness or a measurement note is not done. Do not
-      close an issue as a "handoff" or as "deferred".
+    - An issue closes when its implementation is merged and its live step
+      is recorded in the release doc (rule 1). Merged tooling, merged
+      harness or a measurement note alone does not close it. Do not close an
+      issue as a "handoff" or as "deferred".
     - Why: between 2026-10-20 and 2026-10-22, about 12 tooling PRs, several
       of them fixes to earlier tooling PRs (#2090–#2094, #2097, #2101–#2105),
       produced no new live capability. #2081 was closed as a "handoff" with
