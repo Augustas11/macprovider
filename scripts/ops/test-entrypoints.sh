@@ -36,7 +36,9 @@ set -euo pipefail
 
 OPS_SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC_REPO="$(cd "$OPS_SRC/../.." && pwd)"
-tmp="$(mktemp -d)"
+# lib/buyer-runner-target.py refuses shared-writable ancestors, so the runner
+# fixtures cannot live under a 1777 /tmp (Linux CI); prefer the job temp dir.
+tmp="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/ops-entrypoints.XXXXXX")"
 server_pid=""
 cleanup() {
   if [ -n "$server_pid" ]; then

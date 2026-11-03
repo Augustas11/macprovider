@@ -10,8 +10,9 @@ RESERVE="$OPS_DIR/lib/runner-reserve.sh"
 die() { printf '[test-runner-reserve] FAIL: %s\n' "$*" >&2; exit 1; }
 log() { printf '[test-runner-reserve] %s\n' "$*" >&2; }
 
-T="$(mktemp -d "${TMPDIR:-/tmp}/runner-reserve-test.XXXXXX")"
-# The helper refuses symlinked or shared-writable ancestors (/var -> /private/var).
+# The helper refuses symlinked or shared-writable ancestors (/var -> /private/var,
+# a 1777 /tmp on Linux CI), so prefer the job temp dir.
+T="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/runner-reserve-test.XXXXXX")"
 T="$(cd "$T" && pwd -P)"
 CHILD=""
 cleanup() {
