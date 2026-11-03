@@ -32,7 +32,7 @@ chmod +x "$tmp/bin/gh"
 export PATH="$tmp/bin:$PATH"
 
 # ---- repo fixture ------------------------------------------------------------
-git init -q --bare "$tmp/origin.git"
+git init -q --bare -b main "$tmp/origin.git"  # HEAD -> main even where init.defaultBranch is master (CI)
 W="$tmp/work"
 git init -q -b main "$W"
 git -C "$W" remote add origin "$tmp/origin.git"
