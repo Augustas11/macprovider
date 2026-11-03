@@ -137,7 +137,8 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
     private(set) var mutationCount = 0
     var offset: Int
     let attentionWindowTokens: Int?
-    /// `offset` right after the last multi-token update (a prefill chunk).
+    /// `offset` right after the last multi-token update (a prefill chunk),
+    /// trim or state restore: the last point the ring was temporal.
     /// A sliding-window row presents its decode window in the ring layout
     /// `RotatingKVCache` holds at the same point (`slidingRingShift`).
     var slidingRingAnchor = 0
@@ -373,6 +374,8 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
             keyBuffer = Self.prefix(keys, keys.dim(2))
             valueBuffer = Self.prefix(values, values.dim(2))
             storedTokens = keys.dim(2)
+            // Adopted K/V are temporal: the ring restarts here, as after a prefill.
+            slidingRingAnchor = offset
             mutationCount &+= 1
         }
     }
@@ -402,7 +405,10 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
         guard trimmed > 0 else { return 0 }
         offset -= trimmed
         storedTokens = min(storedTokens, offset)
-        slidingRingAnchor = min(slidingRingAnchor, offset)
+        // A trim resumes from a prefix: a serial run holds that prefix in
+        // temporal order (`RotatingKVCache` refuses to trim a ring past its
+        // window and linearizes on a forced trim), so the ring restarts here.
+        slidingRingAnchor = offset
         // Keep capacity within the blocks the allocator still accounts for
         // (SPEC-039 FR-PKV2): a trim that frees whole blocks copies the kept
         // prefix into a right-sized buffer so the freed memory is released.

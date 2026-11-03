@@ -220,6 +220,75 @@ final class PagedKVSlidingWindowTests: XCTestCase {
         }
     }
 
+    /// A multi-token update after the ring wrapped (a later prefill chunk or
+    /// a multi-token commit) linearizes the window like `RotatingKVCache`,
+    /// and decode after it follows the new ring.
+    func testMultiTokenUpdateAfterWrapMatchesRotatingCacheSlotOrder() throws {
+        try requireMetal()
+        let window = 8
+        let schedules: [[Int]] = [
+            [10, 5] + Array(repeating: 1, count: 13) + [3],
+            [3] + Array(repeating: 1, count: 12) + [2] + Array(repeating: 1, count: 5) + [9],
+        ]
+        Device.withDefaultDevice(.cpu) {
+            for chunks in schedules {
+                let rotating = RotatingKVCache(maxSize: window, keep: 0)
+                let paged = makeCache(offset: 0, windowTokens: window)
+                var position = 0
+                for (step, count) in (chunks + Array(repeating: 1, count: 2 * window + 3)).enumerated() {
+                    let keys = Self.positions(position, count)
+                    position += count
+                    let expected = rotating.update(keys: keys, values: keys).0
+                    let presented = paged.update(keys: keys, values: keys).0
+                    XCTAssertEqual(
+                        presented.asArray(Float.self), expected.asArray(Float.self),
+                        "chunks \(chunks), update \(step)"
+                    )
+                }
+            }
+        }
+    }
+
+    /// A row that wrapped, was trimmed to a shared prefix and resumes with a
+    /// one-token or multi-token prompt chunk presents the slot order of a
+    /// serial run that prefilled that prefix and continues with the same
+    /// chunks. The serial ring cannot be trimmed once wrapped, so serial
+    /// resume is a cold prefill to the same boundary.
+    func testTrimmedWrappedRowResumesInColdPrefillRingOrder() throws {
+        try requireMetal()
+        let window = 8
+        Device.withDefaultDevice(.cpu) {
+            for (trimTo, suffix) in [(20, [1]), (20, [3]), (19, [1, 1]), (6, [1])] {
+                let paged = makeCache(offset: 0, windowTokens: window)
+                let wrapped = RotatingKVCache(maxSize: window, keep: 0)
+                var position = 0
+                for count in [10, 5] + Array(repeating: 1, count: 13) {
+                    let keys = Self.positions(position, count)
+                    position += count
+                    _ = paged.update(keys: keys, values: keys)
+                    _ = wrapped.update(keys: keys, values: keys)
+                }
+                XCTAssertFalse(wrapped.isTrimmable, "serial ring refuses trim once wrapped")
+                XCTAssertEqual(paged.trim(position - trimTo), position - trimTo)
+
+                let rotating = RotatingKVCache(maxSize: window, keep: 0)
+                let prefix = Self.positions(0, trimTo)
+                _ = rotating.update(keys: prefix, values: prefix)
+                position = trimTo
+                for (step, count) in (suffix + Array(repeating: 1, count: 2 * window + 3)).enumerated() {
+                    let keys = Self.positions(position, count)
+                    position += count
+                    let expected = rotating.update(keys: keys, values: keys).0
+                    let presented = paged.update(keys: keys, values: keys).0
+                    XCTAssertEqual(
+                        presented.asArray(Float.self), expected.asArray(Float.self),
+                        "trim to \(trimTo), suffix \(suffix), update \(step)"
+                    )
+                }
+            }
+        }
+    }
+
     private static func positions(_ start: Int, _ count: Int) -> MLXArray {
         MLXArray((start ..< start + count).map(Float.init), [1, 1, count, 1])
     }
