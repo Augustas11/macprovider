@@ -93,6 +93,12 @@ live_absent() {
 
 lock() {
   live_absent || exit 3
+  # The wrapper holds the lock across both models and restore. Do not create
+  # a second one and do not remove the parent's lock on the way out.
+  if [[ ${WINDOW_LOCK_HELD:-0} == 1 ]]; then
+    mkdir -p "$OUT"
+    return 0
+  fi
   mkdir "$LOCK" 2> /dev/null || { echo "refusing: another window holds $LOCK" >&2; exit 3; }
   LOCKED=1
   mkdir -p "$OUT"
@@ -429,6 +435,7 @@ LOCKED=
 # failed qualify used to leave the lock directory and the next model refused.
 # The qualify arm turns set -e off around that call and exits explicitly.
 unlock() {
+  [[ ${WINDOW_LOCK_HELD:-0} == 1 ]] && return 0
   [[ ${LOCKED:-0} == 1 ]] || return 0
   if rmdir "$LOCK" 2> /dev/null; then
     LOCKED=0
