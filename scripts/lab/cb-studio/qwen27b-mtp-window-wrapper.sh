@@ -58,9 +58,13 @@ if [[ -n ${MODELS:-} ]]; then
 else
   models=(qwen36 qwen38)
 fi
+# LEGS="r005 r015 bank" reruns the legs that have not produced a number.
+# Unset runs every leg.
+typeset -a legs
+legs=(${=LEGS:-})
 for m in $models; do
-  log "qualify $m begin"
-  zsh $L/src/scripts/lab/cb-studio/qwen27b-mtp-window.sh qualify $m >> $W/legs.log 2>&1
+  log "qualify $m begin ${legs:-all legs}"
+  zsh $L/src/scripts/lab/cb-studio/qwen27b-mtp-window.sh qualify $m $legs >> $W/legs.log 2>&1
   rc=$?
   log "qualify $m rc=$rc"
 done
