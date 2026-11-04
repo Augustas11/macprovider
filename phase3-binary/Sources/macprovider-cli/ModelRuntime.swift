@@ -791,6 +791,9 @@ struct PagedKVRuntimeModelCapabilities: Equatable, Sendable {
     /// identity (SPEC-039 FR-PKV12), read from its `config.json`.
     let sparseAttention: PagedKVSparseAttentionLayout?
     let deepseekV4Pool: DeepseekV4PoolLayout?
+    /// The verified block-sparse layout of an allowlisted `minimax_m3`
+    /// identity, read from its `config.json`.
+    let blockSparseAttention: PagedKVBlockSparseAttentionLayout?
     /// Observed on this load; ordinary shared-forward parity is independent.
     var supportsContiguousCacheMaterialization: Bool
 
@@ -802,6 +805,7 @@ struct PagedKVRuntimeModelCapabilities: Equatable, Sendable {
         recurrentStateLayout: PagedKVRecurrentStateLayout = .mambaTwoSlot,
         sparseAttention: PagedKVSparseAttentionLayout? = nil,
         deepseekV4Pool: DeepseekV4PoolLayout? = nil,
+        blockSparseAttention: PagedKVBlockSparseAttentionLayout? = nil,
         supportsContiguousCacheMaterialization: Bool = true
     ) {
         self.modelFamily = modelFamily
@@ -811,19 +815,28 @@ struct PagedKVRuntimeModelCapabilities: Equatable, Sendable {
         self.recurrentStateLayout = recurrentStateLayout
         self.sparseAttention = sparseAttention
         self.deepseekV4Pool = deepseekV4Pool
+        self.blockSparseAttention = blockSparseAttention
         self.supportsContiguousCacheMaterialization = supportsContiguousCacheMaterialization
+    }
+
+    /// Whether the attach probes need a prompt past the indexer's selection
+    /// span (`attachProbePromptTokens`).
+    var hasIndexedSparseAttention: Bool {
+        sparseAttention != nil || blockSparseAttention != nil
     }
 
     /// Prompt tokens of the attach-time parity probes: 513 (the production
     /// 512-token chunk boundary), or for a sparse-attention family
     /// `max(513, index_topk + 2 x block_size_tokens)` so the context exceeds
     /// `index_topk` and the indexer selects over paged pooled keys
-    /// (SPEC-039 FR-PKV12).
+    /// (SPEC-039 FR-PKV12). MiniMax M3 uses its selection span
+    /// (`sparse_block_size x sparse_topk_blocks` tokens) in place of
+    /// `index_topk`, so the indexer selects over paged indexer keys.
     func attachProbePromptTokens(blockSizeTokens: Int) -> Int {
         let base = PagedKVRuntimeParityProbe.sharedForwardParityPromptTokens
-        guard let sparseAttention else { return base }
+        guard let selected = sparseAttention?.indexTopk ?? blockSparseAttention?.selectedTokens else { return base }
         let (twoBlocks, blocksOverflow) = max(0, blockSizeTokens).multipliedReportingOverflow(by: 2)
-        let (span, spanOverflow) = sparseAttention.indexTopk.addingReportingOverflow(twoBlocks)
+        let (span, spanOverflow) = selected.addingReportingOverflow(twoBlocks)
         return blocksOverflow || spanOverflow ? Int.max : max(base, span)
     }
 }
@@ -880,6 +893,39 @@ struct PagedKVSparseAttentionLayout: Equatable, Sendable {
         self.layerTypes = layerTypes
         self.indexTopk = indexTopk
         self.indexKpool = indexKpool
+    }
+}
+
+/// `minimax_m3_vl` text layout from `text_config` (SPEC-039 FR-PKV12): every
+/// decoder layer is a block-sparse attention layer on `pagedIndexedKV`.
+struct PagedKVBlockSparseAttentionLayout: Equatable, Sendable {
+    let layerCount: Int
+    let blockSize: Int
+    let topkBlocks: Int
+
+    /// Keys past which the indexer selects blocks.
+    var selectedTokens: Int {
+        let (value, overflow) = blockSize.multipliedReportingOverflow(by: topkBlocks)
+        return overflow ? Int.max : value
+    }
+
+    var expectedCacheKinds: [PagedKVSharedForwardBackend.CacheKind] {
+        Array(repeating: .pagedIndexedKV, count: layerCount)
+    }
+
+    init?(textConfig: [String: Any]) {
+        guard let layers = textConfig["num_hidden_layers"] as? Int, layers > 0,
+              let sparse = textConfig["sparse_attention_config"] as? [String: Any],
+              sparse["use_sparse_attention"] as? Bool == true,
+              let frequency = sparse["sparse_attention_freq"] as? [Int],
+              frequency.count == layers,
+              frequency.allSatisfy({ $0 == 1 }),
+              let blockSize = sparse["sparse_block_size"] as? Int, blockSize > 0,
+              let topkBlocks = sparse["sparse_topk_blocks"] as? Int, topkBlocks > 0
+        else { return nil }
+        self.layerCount = layers
+        self.blockSize = blockSize
+        self.topkBlocks = topkBlocks
     }
 }
 
@@ -2731,6 +2777,7 @@ actor ModelRuntime: ModelRuntimeServing {
         switch modelFamily {
         case "deepseek_v4": "deepseek-v4-row-pool-parity-v1"
         case "glm5_next": "glm5-next-mla-parity-v1"
+        case "minimax_m3": "minimax-m3-indexed-kv-parity-v1"
         default: "sdpa-parity-v1"
         }
     }
@@ -2820,12 +2867,14 @@ actor ModelRuntime: ModelRuntimeServing {
                   !parity.nonIdentityPermutation
             else { return nil }
         } else {
-            // K/V (or GLM latent/pooled keys) gather twice per layer per forward.
+            // K/V (or GLM latent/pooled keys) gather twice per layer per
+            // forward; MiniMax M3 also gathers its indexer keys.
             guard parity.rowPoolProof == nil,
                   parity.nLayers > 0,
                   parity.nNew > 0,
                   parity.nForwards >= parity.nNew,
-                  parity.gatherKernelCalls == parity.nLayers * parity.nForwards * 2,
+                  parity.gathersPerLayerForward == (modelCapabilities.modelFamily == "minimax_m3" ? 3 : 2),
+                  parity.gatherKernelCalls == parity.nLayers * parity.nForwards * parity.gathersPerLayerForward,
                   parity.maxLogicalBlocks >= 3,
                   parity.nonIdentityPermutation
             else {
@@ -3037,7 +3086,7 @@ actor ModelRuntime: ModelRuntimeServing {
         let encodedProbePrompt = await container.perform { context in
             context.tokenizer.encode(text: Self.pagedKVRuntimeParityProbePrompt, addSpecialTokens: true)
         }
-        let promptTokens = modelCapabilities.sparseAttention == nil
+        let promptTokens = !modelCapabilities.hasIndexedSparseAttention
             ? encodedProbePrompt
             : Self.repeatedProbeTokens(encodedProbePrompt, targetCount: probePromptTokens)
         let parityProbe = await pagedKVRuntimeProber.parity(
@@ -3094,7 +3143,7 @@ actor ModelRuntime: ModelRuntimeServing {
         guard let moeProbe else { return (nil, nil) }
         let p = parityProbe
         PagedKVRuntimeDiagnostics.log(
-            "parity model=\(modelID) established=\(p.established) nLayers=\(p.nLayers) nNew=\(p.nNew) nForwards=\(p.nForwards) gatherKernelCalls=\(p.gatherKernelCalls) expectCalls=\(p.nLayers * p.nForwards * 2) maxLogicalBlocks=\(p.maxLogicalBlocks) nonIdentityPermutation=\(p.nonIdentityPermutation)"
+            "parity model=\(modelID) established=\(p.established) nLayers=\(p.nLayers) nNew=\(p.nNew) nForwards=\(p.nForwards) gatherKernelCalls=\(p.gatherKernelCalls) expectCalls=\(p.nLayers * p.nForwards * p.gathersPerLayerForward) maxLogicalBlocks=\(p.maxLogicalBlocks) nonIdentityPermutation=\(p.nonIdentityPermutation)"
         )
         let m = moeProbe
         PagedKVRuntimeDiagnostics.log(
@@ -3160,8 +3209,13 @@ actor ModelRuntime: ModelRuntimeServing {
             guard let sparse = modelCapabilities.sparseAttention else { return false }
             return cacheKinds == sparse.expectedCacheKinds
         }
+        if modelCapabilities.modelFamily == "minimax_m3" {
+            // One `pagedIndexedKV` cache per decoder layer.
+            guard let layout = modelCapabilities.blockSparseAttention else { return false }
+            return cacheKinds == layout.expectedCacheKinds
+        }
         guard cacheKinds.contains(.pagedAttention),
-              !cacheKinds.contains(where: \.isPagedMLA)
+              !cacheKinds.contains(where: { $0.isPagedMLA || $0.isPagedIndexedKV })
         else { return false }
         if modelCapabilities.modelFamily == "qwen",
            cacheKinds.contains(.recurrentMamba),
@@ -3448,6 +3502,11 @@ maxTokens: 1,
         guard caches.allSatisfy({ String(describing: type(of: $0)) == firstClass }) else {
             return "mixed"
         }
+        // MiniMax M3 sparse layers keep attention K/V plus indexer keys, a
+        // non-stock layout SPEC-039 admits only through the allowlisted,
+        // measured topology: the `mixed` identity (SPEC-023 closes the CB
+        // policy's `cache_class` to `KVCacheSimple` and `mixed`).
+        if first is MiniMaxM3Cache { return "mixed" }
         return firstClass
     }
 
@@ -3504,6 +3563,10 @@ maxTokens: 1,
         // a verified layout; any other `glm5_next` artifact is a `mixed` cache
         // class without one and fails closed.
         if normalizedLabels.contains(where: { $0.contains("glm5next") }) { return "glm5_next" }
+        // MiniMax M3 / M3.1 (`minimax_m3_vl`, text path `minimax_m3`): every
+        // layer block-sparse with a lightning indexer. Only the allowlisted
+        // identity carries a verified layout.
+        if normalizedLabels.contains(where: { $0.contains("minimaxm3") }) { return "minimax_m3" }
         // DeepSeek V4 (`deepseek_v4`, #2111). Exact labels: `deepseek_v41`
         // (V4.1) is a different model and must not match.
         if normalizedLabels.contains("deepseekv4") || normalizedLabels.contains("deepseekv4forcausallm") {
@@ -3543,6 +3606,7 @@ maxTokens: 1,
             "zai-org/glm-5.3-flash": "Glm5NextForConditionalGeneration",
             "zai-org/glm-5.3-flash-abliterated": "Glm5NextForConditionalGeneration",
             "deepseek/deepseek-v4-flash": "DeepseekV4ForCausalLM",
+            "minimaxai/minimax-m3.1-flash": "MiniMaxM3SparseForConditionalGeneration",
         ]
         let configObject = configJSONData.flatMap {
             try? JSONSerialization.jsonObject(with: $0) as? [String: Any]
@@ -3561,6 +3625,19 @@ maxTokens: 1,
             else { return nil }
             return PagedKVSparseAttentionLayout(textConfig: textConfig)
         }()
+        // `minimax_m3` keys on the exact `architectures` array and model type
+        // and carries its verified all-sparse layout.
+        let blockSparseAttention: PagedKVBlockSparseAttentionLayout? = {
+            guard let id = modelID?.lowercased(),
+                  let expectedArchitecture = hybridArchitectureAllowlist[id],
+                  expectedArchitecture == "MiniMaxM3SparseForConditionalGeneration",
+                  let configObject,
+                  configObject["architectures"] as? [String] == [expectedArchitecture],
+                  configObject["model_type"] as? String == "minimax_m3_vl",
+                  let textConfig = configObject["text_config"] as? [String: Any]
+            else { return nil }
+            return PagedKVBlockSparseAttentionLayout(textConfig: textConfig)
+        }()
         let deepseekV4Pool: DeepseekV4PoolLayout? = {
             guard modelID?.lowercased() == "deepseek/deepseek-v4-flash", let configObject,
                   configObject["architectures"] == nil
@@ -3576,6 +3653,7 @@ maxTokens: 1,
             else { return false }
             if expectedArchitecture == "Glm5NextForConditionalGeneration" { return sparseAttention != nil }
             if expectedArchitecture == "DeepseekV4ForCausalLM" { return deepseekV4Pool != nil }
+            if expectedArchitecture == "MiniMaxM3SparseForConditionalGeneration" { return blockSparseAttention != nil }
             return architectures.contains(expectedArchitecture)
         }()
         let lfm25HybridVerified = lfm25HybridDecoderArchitectureVerified(
@@ -3599,7 +3677,8 @@ maxTokens: 1,
             ordinaryHybridOnly: ordinaryHybridOnly,
             recurrentStateLayout: recurrentStateLayout,
             sparseAttention: sparseAttention,
-            deepseekV4Pool: deepseekV4Pool
+            deepseekV4Pool: deepseekV4Pool,
+            blockSparseAttention: blockSparseAttention
         )
     }
 

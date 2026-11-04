@@ -17,6 +17,10 @@ let package = Package(
         )
     ],
     dependencies: [
+        // Tag 3.32.3-macprovider.22 (#2189) on 3.32.3-macprovider.21: MiniMax
+        // M3 text model (`4f96c37`, `3c0a551`, `d755f93`), with each sparse
+        // row keeping its own cache (`7feb4c3`) so a continuous batch matches
+        // a serial forward of that row.
         // Tag 3.32.3-macprovider.21 (#2198) on 3.32.3-macprovider.19 changes
         // GLM-5.3 prefill only: DSA radix-select per prefill chunk, a fused
         // mHC Sinkhorn and heads-as-queries sparse attention. Decode is .19's.
@@ -54,7 +58,7 @@ let package = Package(
         // compatible per-column attention while retaining row-owned caches.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "ae6aa7826eb2ab276837c950dca6b1aaf9f344e4"
+            revision: "7feb4c35f44e2192ba531bb837db4a7b4d15c746"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",

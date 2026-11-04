@@ -584,7 +584,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
     }
 
     private static func msbCacheClass(_ cacheKinds: [PagedKVSharedForwardBackend.CacheKind]) -> String {
-        if isDeepseekV4Pool(cacheKinds) { return "mixed" }
+        if isDeepseekV4Pool(cacheKinds) || cacheKinds.contains(.pagedIndexedKV) { return "mixed" }
         if cacheKinds.contains(.recurrentMamba) { return "mixed" }
         let sliding = cacheKinds.filter(\.hasSlidingWindow)
         guard !sliding.isEmpty else { return "KVCacheSimple" }

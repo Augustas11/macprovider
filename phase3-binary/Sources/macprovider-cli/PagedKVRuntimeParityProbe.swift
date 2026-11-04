@@ -27,6 +27,9 @@ struct PagedKVRuntimeParityProbeResult: Sendable, Equatable {
     /// Model forwards of the paged run: the leading 512-token prompt chunks
     /// plus one per generated token. Every paged layer gathers twice in each.
     let nForwards: Int
+    /// Gathered buffers per paged layer per forward: K and V (or GLM latent
+    /// and pooled keys), plus MiniMax M3's indexer keys.
+    let gathersPerLayerForward: Int
     let gatherKernelCalls: Int
     let maxLogicalBlocks: Int
     let nonIdentityPermutation: Bool
@@ -40,6 +43,7 @@ struct PagedKVRuntimeParityProbeResult: Sendable, Equatable {
         nLayers: Int,
         nNew: Int,
         nForwards: Int? = nil,
+        gathersPerLayerForward: Int = 2,
         gatherKernelCalls: Int,
         maxLogicalBlocks: Int,
         nonIdentityPermutation: Bool,
@@ -50,6 +54,7 @@ struct PagedKVRuntimeParityProbeResult: Sendable, Equatable {
         self.nLayers = nLayers
         self.nNew = nNew
         self.nForwards = nForwards ?? nNew
+        self.gathersPerLayerForward = gathersPerLayerForward
         self.gatherKernelCalls = gatherKernelCalls
         self.maxLogicalBlocks = maxLogicalBlocks
         self.nonIdentityPermutation = nonIdentityPermutation
@@ -212,6 +217,15 @@ enum PagedKVRuntimeParityProbe {
                 let paged = try Self.greedyGenerate(model: model, promptTokens: promptTokens, nNew: nNew) {
                     probeCaches = zip(stockLayout, kinds).map { _, kind in
                         if case .recurrentMamba = kind { return MambaCache() as KVCache }
+                        if case .pagedIndexedKV = kind {
+                            return PagedMiniMaxM3SparseCache(
+                                blockSizeTokens: blockSizeTokens,
+                                maxPhysicalBlocks: maxPhysicalBlocks,
+                                poolEpoch: 1,
+                                binding: binding,
+                                reconstructViaGather: true
+                            ) as KVCache
+                        }
                         if case .pagedMLA(let kpool) = kind {
                             return PagedMLALatentCache(
                                 kpool: kpool,
@@ -252,6 +266,7 @@ enum PagedKVRuntimeParityProbe {
                     nLayers: nLayers,
                     nNew: nNew,
                     nForwards: Self.prefillChunkForwards(promptTokens: promptTokens.count) + nNew,
+                    gathersPerLayerForward: kinds.contains(.pagedIndexedKV) ? 3 : 2,
                     gatherKernelCalls: calls,
                     maxLogicalBlocks: maxBlocks,
                     nonIdentityPermutation: nonIdentity,

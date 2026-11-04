@@ -1,7 +1,11 @@
 # SPEC-039 — Paged KV / paged-attention engine
 
-Version: v0.1.27
-Status: draft (normative design). v0.1.27 adds the FR-PKV12
+Version: v0.1.28
+Status: draft (normative design). v0.1.28 adds the `minimax_m3` paged
+family: a `pagedIndexedKV` cache kind that pages each MiniMax M3
+block-sparse attention layer's keys, values and lightning-indexer keys on one
+block table, and a provisional FR-PKV12 entry for the exact
+`minimaxai/minimax-m3.1-flash` identity. v0.1.27 adds the FR-PKV12
 `zai-org/glm-5.3-flash-abliterated` identity (same `glm5_next` layout as the
 GLM-5.3-Flash entry). v0.1.26 adds the provisional, exact
 LFM2.5 ordinary-hybrid identity below; production attach and
@@ -80,6 +84,16 @@ is `RotatingKVCache` only because the serve path caps KV for memory attaches to
 paged mode (the block pool bounds memory), while a genuine sliding-window model
 stays fail-safe. IMPL lands with this revision.
 Owner: provider runtime / inference engine
+Change log v0.1.28 (2026-11-04): adds the `minimax_m3` family (#2189).
+FR-PKV4 defines the `pagedIndexedKV` layout and its three gathers per layer
+per forward; FR-PKV12 adds the provisional `minimaxai/minimax-m3.1-flash`
+entry (all-sparse `MiniMaxM3SparseForConditionalGeneration`, one
+`pagedIndexedKV` cache per decoder layer, the 8-flattened-token forward
+bound, runtime cache identity `mixed`, first-turn/cache-miss only) and its
+attach-probe span; FR-PKV14 makes 256 the `minimax_m3` default block. The
+parity label is `minimax-m3-indexed-kv-parity-v1`. Refines SPEC-039-R004,
+SPEC-039-R012 and SPEC-039-R014.
+
 Change log v0.1.27 (2026-11-01): FR-PKV12 gains the catalog key
 `zai-org/glm-5.3-flash-abliterated` with `Glm5NextForConditionalGeneration`,
 the catalog model whose verified artifact is
@@ -344,6 +358,7 @@ invariant.
 | Block-table handle | The engine-issued reference a consumer holds for one sequence's block table; the engine allocates the physical blocks, the consumer binds/extends/releases through the handle (FR-PKV2, FR-PKV10). |
 | Broader prefix sharing | Any reuse beyond the same conversation's own blocks: cross-conversation, cross-buyer, cross-account, global content-addressed, or salted-prefix sharing. Not in v0.1. |
 | Paged MLA layout (`pagedMLA(kpool:)`) | The `glm5_next` sparse-attention layer layout (v0.1.17): one paged MLA latent buffer (`[B, 1, T, kv_lora_rank]`, token stride `kv_lora_rank`) plus one paged pooled-indexer-key buffer (one key of `index_head_dim` per `kpool` tokens), both addressed by the sequence's single block table. The not-yet-complete pool window (fewer than `kpool` tokens of indexer keys and gate scores) is row-local auxiliary state, not paged. |
+| Paged indexed-KV layout (`pagedIndexedKV`) | The `minimax_m3` block-sparse attention layer layout (v0.1.28): paged keys and values (`[B, kv_heads, T, head_dim]`) plus one paged single-head lightning-indexer key buffer (`[B, 1, T, sparse_index_dim]`, one key per token), all three addressed by the sequence's single block table. |
 | Sparse-attention family | A family whose attention layers select a top-`index_topk` subset of prior positions through an indexer once the context exceeds `index_topk`, and attend densely below it (v0.1.17: `glm5_next`). |
 | KV offload | Moving KV blocks outside the resident unified-memory pool (SSD, remote memory, or another process). Not in v0.1. |
 
@@ -485,6 +500,20 @@ SPEC-038 FR-CB10 coverage and the SPEC-023 CB policy can never carry a
 `glm5_next` result onto an `sdpa-parity-v1` tuple or the reverse. The Metal
 library SHA-256 and kernel identifier in that runtime identity are unchanged
 by this revision.
+
+**`pagedIndexedKV` (v0.1.28).** The `minimax_m3` keys, values and indexer
+keys use the same registered kernel, `macprovider_paged_kv_gather_v1`, with
+no new kernel and no new kernel identifier. All three gathers run with
+`block_size_tokens` (one indexer key per token, token stride
+`sparse_index_dim`, 128 for the admitted identity) and read the same physical
+block IDs in the same logical order, so the attach-time gather count for a
+`pagedIndexedKV` layer is three per forward. The gathered arrays feed the
+model's own block selection and attention; that path, not the gather, owns
+indexer scores, block top-k, the local block, masking and softmax. Each row
+of a shared forward selects blocks and attends against its own cache, as its
+serial run does; the shared forward batches only the projections and MoE. The
+runtime parity label for a `minimax_m3` tuple is
+`minimax-m3-indexed-kv-parity-v1`.
 
 **Production-throughput boundary.** A gather-every-step path MAY satisfy
 correctness, descriptor, allocator, and fail-safe proof obligations, but it is
@@ -870,6 +899,27 @@ be individually measured before it is added. The v1 allowlist is:
   `architectures[0]`, `model_type` and `text_config.model_type` requirements
   as the entry above, keyed the same way (catalog model id plus exact
   `architectures[0]`). Evidence: `docs/evidence/glm53-abliterated-2026-11-01/`.
+- (v0.1.28, provisional, SPEC-first) the MiniMax M3.1 Flash identity
+  `minimaxai/minimax-m3.1-flash`, with
+  `architectures == ["MiniMaxM3SparseForConditionalGeneration"]` and top-level
+  `model_type` `minimax_m3_vl` in the artifact's `config.json` (block-sparse
+  MoE decoder, served on its text path; the paged path MUST additionally pass
+  cross-row MoE expert-dispatch isolation). `text_config` MUST set
+  `sparse_attention_config.use_sparse_attention` true with
+  `sparse_attention_freq` 1 at every one of its `num_hidden_layers` layers,
+  and positive `sparse_block_size` and `sparse_topk_blocks`. The code entry
+  keys on the exact `architectures` array plus the model id; a path-only
+  alias, another artifact id, a dense layer or a different `architectures`
+  array fails closed. The runtime topology is exactly one `pagedIndexedKV`
+  cache per decoder layer (60 for the admitted layout); the runtime
+  recognizes a `MiniMaxM3SparseCache` as `pagedIndexedKV`. Every shared
+  forward over a `pagedIndexedKV` topology carries at most 8 flattened
+  tokens, as for `pagedMLA` below. The runtime cache identity of this
+  topology is `mixed` (SPEC-023 closes the CB policy's `cache_class` to
+  `KVCacheSimple` and `mixed`). This exception permits evaluation by the real
+  attach-time parity and isolation probes and the automatic FR-CB10
+  self-check; it is not parity evidence, a signed grant or production
+  qualification, and attach fails closed until those gates pass.
 
 
 - (v0.1.25, provisional, SPEC-first) only
@@ -925,7 +975,11 @@ proof prompt MUST instead be at least
 model's `config.json` and the pool's configured block size (2560 for the
 admitted identity at block 256), in the same production chunks: a 513-token
 probe stays below `index_topk`, runs only the indexer's dense bypass, and
-proves nothing about sparse selection over paged pooled keys.
+proves nothing about sparse selection over paged pooled keys. For
+`minimax_m3` (v0.1.28) the span is
+`max(513, sparse_block_size × sparse_topk_blocks + 2 × block_size_tokens)`
+(2560 at block 256): selection starts only past the 2048 keys the top-k
+blocks cover.
 
 Each allowlisted identity requires the exact runtime cache topology measured
 for that identity: Qwen hybrid rows use `MambaCache` on recurrent layers and
@@ -1112,7 +1166,7 @@ least:
 | YAML `paged_kv:` key | Env var | CLI flag | Default | Rule |
 |---|---|---|---|---|
 | `enabled` | `MACPROVIDER_PAGED_KV_ENABLED` | `--paged-kv-enabled` | `false` | bool; invalid ⇒ paged disabled, error logged |
-| `block_size_tokens` | `MACPROVIDER_PAGED_KV_BLOCK_SIZE_TOKENS` | `--paged-kv-block-size-tokens` | IMPL-set (v0.1.19: 256 for `glm5_next`) | positive integer, fixed per pool (FR-PKV2); invalid ⇒ disabled |
+| `block_size_tokens` | `MACPROVIDER_PAGED_KV_BLOCK_SIZE_TOKENS` | `--paged-kv-block-size-tokens` | IMPL-set (v0.1.19: 256 for `glm5_next`; v0.1.28: 256 for `minimax_m3`) | positive integer, fixed per pool (FR-PKV2); invalid ⇒ disabled |
 | `max_physical_blocks` | `MACPROVIDER_PAGED_KV_MAX_PHYSICAL_BLOCKS` | `--paged-kv-max-physical-blocks` | unset ⇒ covers advertised `max_context_tokens` (min 1024) | pool capacity bound (FR-PKV2), or an equivalent `max_pool_bytes`; > 0; invalid ⇒ disabled |
 | `fallback_policy` | `MACPROVIDER_PAGED_KV_FALLBACK_POLICY` | `--paged-kv-fallback-policy` | `permissive` | `permissive` (stock-route) or `strict` (fail preflight) (FR-PKV7); invalid ⇒ disabled |
 
