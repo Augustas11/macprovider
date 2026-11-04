@@ -62,10 +62,15 @@ fi
 # Unset runs every leg.
 typeset -a legs
 legs=(${=LEGS:-})
+worst=0
 for m in $models; do
   log "qualify $m begin ${legs:-all legs}"
   zsh $L/src/scripts/lab/cb-studio/qwen27b-mtp-window.sh qualify $m $legs >> $W/legs.log 2>&1
   rc=$?
   log "qualify $m rc=$rc"
+  if (( rc != 0 && worst == 0 )); then
+    worst=$rc
+  fi
 done
-log "all legs done"
+log "all legs done rc=$worst"
+exit $worst

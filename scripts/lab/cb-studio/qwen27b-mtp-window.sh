@@ -345,15 +345,18 @@ leg_r005() {
 }
 
 leg_r015() {
-  local m=$1 d=$3 rc=0
+  local m=$1 d=$3 rc=0 arc=0 status=MISSING
   cells $HARNESS $HEAD_COMMIT $m $FORMAL/$m-r015-policy.json $d r015 \
     s1-p1536-o128 s1-p1536-o512 s1-p4096-o128 s1-p4096-o512 s2-p1536-o512 s4-p1536-o512 sustained || rc=$?
+  # The analyzer is the formal verdict. A bench that exits 0 can still fail
+  # the policy, and swallowing that exit left the leg green.
   /usr/bin/python3 -I $SRC/scripts/native_mtp_r015_analyze.py $d/r015.jsonl $FORMAL/$m-r015-policy.json \
-    > $d/r015-analysis.json 2> $d/r015-analysis.err || true
+    > $d/r015-analysis.json 2> $d/r015-analysis.err || arc=$?
   /usr/bin/python3 -I $SRC/scripts/native_mtp_r015_analyze.py --format markdown $d/r015.jsonl $FORMAL/$m-r015-policy.json \
     > $d/r015-analysis.md 2>&1 || true
-  log "$m r015 rc=$rc analyzer: $(grep -m3 -iE 'overall|verdict' $d/r015-analysis.md | tr '\n' ' ' | cut -c1-300)"
-  return $rc
+  status=$(/usr/bin/python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1])).get("overall_status","MISSING"))' $d/r015-analysis.json 2>/dev/null || echo MISSING)
+  log "$m r015 bench=$rc analyzer=$arc overall_status=$status"
+  [[ $rc -eq 0 && $arc -eq 0 && $status == PASS ]]
 }
 
 leg_bank() {
@@ -438,8 +441,14 @@ trap 'set +e; stop_serve || true; unlock' EXIT
 case ${1:-} in
   step1)
     lock; harness_ok $BASE_HARNESS
+    # Same zsh 5.9 rule as qualify: a failing command inside cells skips the
+    # EXIT trap and leaves the window lock held.
+    set +e
     cells $BASE_HARNESS $BASE_COMMIT ${2:?model} $POLICIES/$2-step1-d1.json $OUT ${2}-step1-d1 \
-      s1-p1536-o128 s1-p1536-o512 s1-p4096-o128 s1-p4096-o512 ;;
+      s1-p1536-o128 s1-p1536-o512 s1-p4096-o128 s1-p4096-o512
+    rc=$?
+    set -e
+    exit $rc ;;
   prepare) prepare ${2:?model} ;;
   qualify)
     lock; harness_ok $HARNESS
