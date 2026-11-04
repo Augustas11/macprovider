@@ -78,7 +78,7 @@ private struct NativeMTPSignedAcceptanceRunner {
         var rejected: UInt64 = 0
         var terminals = Set<String>()
         var toolBoundary = false
-        var reasoningClose = false
+        var reasoningClose = NativeMTPAcceptanceCorpus.ReasoningCloseFold()
         var nearTiedPositions = 0
         for row in records {
             guard let observed = row["checkpoint_observations"] as? [String: Any] else { throw ValidationError("missing checkpoint observations") }
@@ -95,7 +95,11 @@ private struct NativeMTPSignedAcceptanceRunner {
                 rejected = addedRejected.partialValue
                 terminals.insert(row["native_terminal"] as! String)
                 toolBoundary = toolBoundary || (observed["tool_call_count"] as! Int) > 0
-                reasoningClose = reasoningClose || (observed["reasoning_nonempty"] as! Bool && (observed["content_nonempty"] as! Bool || (observed["tool_call_count"] as! Int) > 0))
+                reasoningClose.observe(
+                    reasoningNonempty: observed["reasoning_nonempty"] as! Bool,
+                    contentNonempty: observed["content_nonempty"] as! Bool,
+                    toolCalls: observed["tool_call_count"] as! Int
+                )
                 nearTiedPositions += values.filter { ($0["ordinary_gap"] as! Double) <= 0.05 }.count
             }
         }
@@ -155,9 +159,10 @@ private struct NativeMTPSignedAcceptanceRunner {
                     rejected += delta.rejectedTokens
                     if let terminal = nativeTerminal { terminals.insert(terminal.rawValue) }
                     toolBoundary = toolBoundary || actual.toolCalls?.isEmpty == false
-                    reasoningClose = reasoningClose || (
-                        actual.reasoningContent?.isEmpty == false
-                        && (!actual.content.isEmpty || actual.toolCalls?.isEmpty == false)
+                    reasoningClose.observe(
+                        reasoningNonempty: actual.reasoningContent?.isEmpty == false,
+                        contentNonempty: !actual.content.isEmpty,
+                        toolCalls: actual.toolCalls?.count ?? 0
                     )
                     nearTiedPositions += comparison.positions.filter { ($0.ordinaryGap ?? .infinity) <= 0.05 }.count
                 }
@@ -178,7 +183,7 @@ private struct NativeMTPSignedAcceptanceRunner {
             "stop_sequence_terminal": terminals.contains(NativeMTPLabNumericalOracle.Terminal.stopSequence.rawValue),
             "max_tokens_terminal": terminals.contains(NativeMTPLabNumericalOracle.Terminal.maxTokens.rawValue),
             "generated_tool_boundary": corpus.expectsNativeToolBoundary ? toolBoundary : true,
-            "generated_reasoning_close": reasoningClose,
+            "generated_reasoning_close": reasoningClose.passed,
             "near_tied_positions": nearTiedPositions > 0,
         ]
         let passed = checks.values.allSatisfy { $0 }

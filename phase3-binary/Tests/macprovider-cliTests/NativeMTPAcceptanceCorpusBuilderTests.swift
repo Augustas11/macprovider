@@ -119,5 +119,54 @@ final class NativeMTPAcceptanceCorpusBuilderTests: XCTestCase {
             XCTAssertTrue(sawSampled)
         }
     }
+
+    func testOpenThinkWithoutAnAnswerFailsReasoningClose() {
+        var fold = NativeMTPAcceptanceCorpus.ReasoningCloseFold()
+        fold.observe(reasoningNonempty: true, contentNonempty: false, toolCalls: 0)
+        XCTAssertFalse(fold.passed)
+        fold.observe(reasoningNonempty: true, contentNonempty: true, toolCalls: 0)
+        XCTAssertTrue(fold.passed)
+    }
+
+    func testThinkingOffContentPassesReasoningCloseWithoutAReasoningChannel() {
+        var fold = NativeMTPAcceptanceCorpus.ReasoningCloseFold()
+        XCTAssertFalse(fold.passed)
+        fold.observe(reasoningNonempty: false, contentNonempty: true, toolCalls: 0)
+        XCTAssertTrue(fold.passed)
+        var toolOnly = NativeMTPAcceptanceCorpus.ReasoningCloseFold()
+        toolOnly.observe(reasoningNonempty: true, contentNonempty: false, toolCalls: 1)
+        XCTAssertTrue(toolOnly.passed)
+    }
+
+    func testThinkingSupportClosesEnableThinkingWhenTheTemplateHasTheToggle() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mtp-thinking-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try """
+        {% if enable_thinking is defined and enable_thinking is false %}<think></think>{% else %}<think>{% endif %}
+        """.write(to: directory.appendingPathComponent("chat_template.jinja"), atomically: true, encoding: .utf8)
+        let thinking = ModelRuntime.thinkingSupport(in: directory)
+        let context = ModelRuntime.templateAdditionalContext(
+            supportsThinkingToggle: thinking.toggle,
+            supportsPreserveThinking: thinking.preserve
+        )
+        XCTAssertEqual(context?["enable_thinking"] as? Bool, false)
+        XCTAssertNil(context?["preserve_thinking"])
+
+        let plain = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mtp-plain-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: plain, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: plain) }
+        try "{% for message in messages %}{{ message.content }}{% endfor %}"
+            .write(to: plain.appendingPathComponent("chat_template.jinja"), atomically: true, encoding: .utf8)
+        let absent = ModelRuntime.thinkingSupport(in: plain)
+        XCTAssertFalse(absent.toggle)
+        XCTAssertFalse(absent.preserve)
+        XCTAssertNil(ModelRuntime.templateAdditionalContext(
+            supportsThinkingToggle: absent.toggle,
+            supportsPreserveThinking: absent.preserve
+        ))
+    }
 }
 #endif

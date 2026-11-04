@@ -734,6 +734,9 @@ final class NativeMTPHardwareE2ERunner {
         // probes production runs at load; a synthesized identity cannot prove
         // MoE dispatch and would hide real attach failures.
         let placeholderProof = sizingProof(modelSHA: targetIdentity.digest, maxContextTokens: maxContextTokens)
+        // Match production serve. Omitting the toggle leaves Qwen's `<think>`
+        // open, so the acceptance budget is spent inside reasoning.
+        let thinking = ModelRuntime.thinkingSupport(in: targetDirectory)
         let probeRuntime = await makeRuntime(
             modelSHA: targetIdentity.digest,
             maxContextTokens: maxContextTokens,
@@ -754,7 +757,9 @@ final class NativeMTPHardwareE2ERunner {
             nativeCapability: nil,
             nativeAdmissionCapability: nil,
             drafterContainer: nil,
-            admissionRecorder: nil
+            admissionRecorder: nil,
+            templateSupportsThinkingToggle: thinking.toggle,
+            templateSupportsPreserveThinking: thinking.preserve
         )
         guard let measurement = await probeRuntime.labMeasurePagedKVRuntime(
             container: targetContainer,
@@ -797,7 +802,9 @@ final class NativeMTPHardwareE2ERunner {
             nativeCapability: nil,
             nativeAdmissionCapability: nil,
             drafterContainer: nil,
-            admissionRecorder: ordinaryAdmissionRecorder
+            admissionRecorder: ordinaryAdmissionRecorder,
+            templateSupportsThinkingToggle: thinking.toggle,
+            templateSupportsPreserveThinking: thinking.preserve
         )
         let native = await makeRuntime(
             modelSHA: targetIdentity.digest,
@@ -812,7 +819,9 @@ final class NativeMTPHardwareE2ERunner {
             nativeCapability: nativeCapability,
             nativeAdmissionCapability: nativeAdmissionCapability,
             drafterContainer: drafterContainer,
-            admissionRecorder: nativeAdmissionRecorder
+            admissionRecorder: nativeAdmissionRecorder,
+            templateSupportsThinkingToggle: thinking.toggle,
+            templateSupportsPreserveThinking: thinking.preserve
         )
         return NativeMTPHardwareRuntimePair(
             ordinary: ordinary,
@@ -835,7 +844,9 @@ final class NativeMTPHardwareE2ERunner {
         nativeCapability: NativeMTPCapability?,
         nativeAdmissionCapability: NativeMTPAdmissionCapability?,
         drafterContainer: MTPDrafterContainer?,
-        admissionRecorder: NativeMTPHardwareAdmissionRecorder?
+        admissionRecorder: NativeMTPHardwareAdmissionRecorder?,
+        templateSupportsThinkingToggle: Bool,
+        templateSupportsPreserveThinking: Bool
     ) async -> ModelRuntime {
         let preparationLane = await ModelRuntime.makeContinuousBatchTextPreparationLane(
             container: targetContainer,
@@ -846,6 +857,8 @@ final class NativeMTPHardwareE2ERunner {
         return ModelRuntime(
             modelID: modelID,
             modelHash: modelSHA,
+            templateSupportsThinkingToggle: templateSupportsThinkingToggle,
+            templateSupportsPreserveThinking: templateSupportsPreserveThinking,
             maxContextTokensOverride: maxContextTokens,
             pagedKVConfig: pagedConfig,
             prefillStepSize: 512,

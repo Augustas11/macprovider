@@ -17,6 +17,7 @@ enum NativeMTPAcceptanceCorpusBuilder {
             throw NativeMTPHardwareE2EError.assertionFailed("acceptance corpus has no design for \(modelID)")
         }
         let tokenizer = try await ChatTemplateCompatTokenizerLoader().load(from: targetDirectory)
+        let thinking = ModelRuntime.thinkingSupport(in: targetDirectory)
         var cases: [[String: Any]] = []
         for stratum in NativeMTPAcceptanceCorpus.Stratum.allCases {
             let target: Int
@@ -34,7 +35,11 @@ enum NativeMTPAcceptanceCorpusBuilder {
                 }
                 let (padding, count) = try await NativeMTPBenchPrompts.fewestReachingSalts(target: target) { padding in
                     let request = try ChatCompletionRequest.parse(data: JSONSerialization.data(withJSONObject: object(padding)))
-                    let input = try ModelRuntime.userInput(for: request)
+                    let input = try ModelRuntime.userInput(
+                        for: request,
+                        templateSupportsThinkingToggle: thinking.toggle,
+                        templateSupportsPreserveThinking: thinking.preserve
+                    )
                     return try tokenizer.applyChatTemplate(
                         messages: DefaultMessageGenerator().generate(from: input),
                         tools: input.tools, additionalContext: input.additionalContext

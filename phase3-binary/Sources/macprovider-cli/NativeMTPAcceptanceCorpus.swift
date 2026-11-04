@@ -40,6 +40,26 @@ struct NativeMTPAcceptanceCorpus: Sendable {
     let digestSHA256: String
     let cases: [Case]
 
+    /// GLM leaves a reasoning channel open and must close it into an answer
+    /// or a tool call. A thinking-off template (Qwen with `enable_thinking`
+    /// false) never opens that channel; the answer has to land in content.
+    /// An open think whose answer stays empty fails both ways.
+    struct ReasoningCloseFold: Equatable {
+        private(set) var sawReasoning = false
+        private(set) var closedIntoAnswerOrTool = false
+        private(set) var sawContent = false
+
+        mutating func observe(reasoningNonempty: Bool, contentNonempty: Bool, toolCalls: Int) {
+            if reasoningNonempty { sawReasoning = true }
+            if contentNonempty { sawContent = true }
+            if reasoningNonempty && (contentNonempty || toolCalls > 0) {
+                closedIntoAnswerOrTool = true
+            }
+        }
+
+        var passed: Bool { sawReasoning ? closedIntoAnswerOrTool : sawContent }
+    }
+
     /// Tool history is native-eligible only on glm5_next. The Qwen sampled-text
     /// corpus has no such case, so R005 cannot require a native tool boundary.
     var expectsNativeToolBoundary: Bool {

@@ -4145,11 +4145,11 @@ maxTokens: 1,
             directory: directory,
             artifactSHA256: self.currentModelHash
         )
-        self.configuredTemplateSupportsThinkingToggle = Self.chatTemplateSupportsThinkingToggle(in: directory)
-        self.currentTemplateSupportsThinkingToggle = self.configuredTemplateSupportsThinkingToggle
-        self.configuredTemplateSupportsPreserveThinking = self.configuredTemplateSupportsThinkingToggle
-            && Self.chatTemplateSupportsPreserveThinking(in: directory)
-        self.currentTemplateSupportsPreserveThinking = self.configuredTemplateSupportsPreserveThinking
+        let thinking = Self.thinkingSupport(in: directory)
+        self.configuredTemplateSupportsThinkingToggle = thinking.toggle
+        self.currentTemplateSupportsThinkingToggle = thinking.toggle
+        self.configuredTemplateSupportsPreserveThinking = thinking.preserve
+        self.currentTemplateSupportsPreserveThinking = thinking.preserve
         self.pagedKVRuntimeCacheClass = runtimeCacheClass
         self.currentPagedKVModelCapabilities = modelCapabilities
         let (parityProbe, moeProbe) = await self.computePagedKVRuntimeProbes(
@@ -13674,6 +13674,15 @@ maxTokens: maxTokens,
 
     static func chatTemplateSupportsPreserveThinking(in directory: URL) -> Bool {
         chatTemplate(in: directory, contains: "preserve_thinking")
+    }
+
+    /// The same pair production load records. Lab runtimes and the acceptance
+    /// corpus tokenizer must use it too: a template that leaves `<think>` open
+    /// when `enable_thinking` is omitted spends the completion budget inside
+    /// the reasoning block.
+    static func thinkingSupport(in directory: URL) -> (toggle: Bool, preserve: Bool) {
+        let toggle = chatTemplateSupportsThinkingToggle(in: directory)
+        return (toggle, toggle && chatTemplateSupportsPreserveThinking(in: directory))
     }
 
     private static func chatTemplate(in directory: URL, contains markerText: String) -> Bool {
