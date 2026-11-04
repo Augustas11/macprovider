@@ -6,8 +6,10 @@ import MLXLMCommon
 /// message generator as the GLM lab fixture, without allocating model weights
 /// or creating an MLX array. The frozen corpus is checked again at execution.
 enum NativeMTPAcceptanceCorpusBuilder {
-    /// Serving IDs that take this fixed request design: GLM, and the dense
-    /// Qwen3.5-family 27B rows (#2199) unchanged.
+    /// GLM keeps tool history and `reasoning_effort`. The Qwen 27B rows use
+    /// the same strata and terminal prompts without those fields: their
+    /// selector admits sampled text only, and a refused field fails R005
+    /// on the first case.
     static let modelIDs: Set<String> = ["zai-org/glm-5.3-flash", "qwen/qwen3.6-27b", "qwen/qwen3.8-27b"]
 
     static func make(targetDirectory: URL, modelID: String) async throws -> Data {
@@ -74,7 +76,10 @@ enum NativeMTPAcceptanceCorpusBuilder {
     }
 
     static func requestObject(modelID: String, index: Int, padding: Int) -> [String: Any] {
-        let tools = index % 3 != 0
+        // Tool turns and reasoning_effort are native-eligible only on
+        // glm5_next. Qwen signs sampled text; those fields select ordinary.
+        let admitsToolAndReasoning = modelID == "zai-org/glm-5.3-flash"
+        let tools = admitsToolAndReasoning && index % 3 != 0
         let sampled = index % 3 != 1
         let stopBoundary = !tools && index % 17 == 0
         let context = "Acceptance fixture \(index). Context:" + String(repeating: " x", count: padding)
@@ -117,7 +122,9 @@ enum NativeMTPAcceptanceCorpusBuilder {
             object["reasoning_effort"] = "high"
         } else if stopBoundary {
             object["stop"] = [";"]
-            object["reasoning_effort"] = "low"
+            if admitsToolAndReasoning {
+                object["reasoning_effort"] = "low"
+            }
         }
         return object
     }

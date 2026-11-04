@@ -422,8 +422,18 @@ validate() {
 }
 
 LOCKED=
-# set -e must not skip the unlock when stop_serve has nothing to stop.
-trap 'stop_serve || true; [[ -n ${LOCKED:-} ]] && { rmdir "$LOCK" 2> /dev/null || true; }' EXIT
+# zsh 5.9 does not run an EXIT trap when set -e aborts inside a function, so a
+# failed qualify used to leave the lock directory and the next model refused.
+# The qualify arm turns set -e off around that call and exits explicitly.
+unlock() {
+  [[ ${LOCKED:-0} == 1 ]] || return 0
+  if rmdir "$LOCK" 2> /dev/null; then
+    LOCKED=0
+  else
+    echo "window lock not removed: $LOCK" >&2
+  fi
+}
+trap 'set +e; stop_serve || true; unlock' EXIT
 
 case ${1:-} in
   step1)
@@ -433,7 +443,11 @@ case ${1:-} in
   prepare) prepare ${2:?model} ;;
   qualify)
     lock; harness_ok $HARNESS
-    qualify ${2:?model} "${@:3}" ;;
+    set +e
+    qualify ${2:?model} "${@:3}"
+    rc=$?
+    set -e
+    exit $rc ;;
   validate) validate ;;
   *) echo "usage: $0 step1|prepare|qualify qwen36|qwen38 [leg...] | validate" >&2; exit 2 ;;
 esac

@@ -40,6 +40,16 @@ struct NativeMTPAcceptanceCorpus: Sendable {
     let digestSHA256: String
     let cases: [Case]
 
+    /// Tool history is native-eligible only on glm5_next. The Qwen sampled-text
+    /// corpus has no such case, so R005 cannot require a native tool boundary.
+    var expectsNativeToolBoundary: Bool {
+        cases.contains { item in
+            item.expectedNative && item.request.messages.contains { message in
+                message.role == .tool || message.toolCalls?.isEmpty == false
+            }
+        }
+    }
+
     static func load(from url: URL) throws -> Self {
         try load(data: Data(contentsOf: url))
     }

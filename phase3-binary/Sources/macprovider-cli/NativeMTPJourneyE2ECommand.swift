@@ -926,6 +926,7 @@ final class NativeMTPJourneyRunner {
                     actual.stopSequence, to: comparison.nativeTerminal)
                 let promptShape = NativeMTPAcceptanceCorpusBuilder.contains(expected.promptTokens, stratum: item.stratum)
                 let path = lastPath(recorder, item.id)
+                let selectorReason = recorder.requestSnapshot().last { $0.requestID == item.id }?.admission.selection.nativeMTPReason
                 let admission = item.expectedNative ? path == .nativeMTP && delta.proposedTokens > 0 : path == .ordinary && delta.proposedTokens == 0
                 let outputParity = same(expected, actual)
                 let passed = promptShape && admission && outputParity && comparison.passed
@@ -948,7 +949,9 @@ final class NativeMTPJourneyRunner {
                     "native_selected_count": comparison.nativeSelectedCount,
                     "checkpoint_observations": [
                         "accepted": delta.acceptedTokens, "rejected": delta.rejectedTokens, "proposed": delta.proposedTokens,
-                        "decode_path": path?.rawValue ?? "unobserved", "tool_call_count": actual.toolCalls?.count ?? 0,
+                        "decode_path": path?.rawValue ?? "unobserved",
+                        "selector_reason": selectorReason?.rawValue ?? "",
+                        "tool_call_count": actual.toolCalls?.count ?? 0,
                         "reasoning_nonempty": actual.reasoningContent?.isEmpty == false, "content_nonempty": !actual.content.isEmpty,
                         "conversation_cache_key_absent": item.request.conversationKey == nil,
                     ],
@@ -978,6 +981,7 @@ final class NativeMTPJourneyRunner {
         }
         _ = await ordinary.installLabNativeMTPNumericalOracle(nil, role: .ordinary)
         _ = await native.installLabNativeMTPNumericalOracle(nil, role: .native)
+        let expectsToolBoundary = corpus.expectsNativeToolBoundary
         let checks: [String: Bool] = [
             "all_cases_passed": records.count == corpus.cases.count && records.allSatisfy { $0["passed"] as? Bool == true },
             "native_positions": positions >= corpus.minimumComparedPositions,
@@ -986,7 +990,7 @@ final class NativeMTPJourneyRunner {
             "eos_terminal": terminals.contains(NativeMTPLabNumericalOracle.Terminal.eos.rawValue),
             "stop_sequence_terminal": terminals.contains(NativeMTPLabNumericalOracle.Terminal.stopSequence.rawValue),
             "max_tokens_terminal": terminals.contains(NativeMTPLabNumericalOracle.Terminal.maxTokens.rawValue),
-            "generated_tool_boundary": toolBoundary,
+            "generated_tool_boundary": expectsToolBoundary ? toolBoundary : true,
             "generated_reasoning_close": reasoningClose,
             "near_tied_positions": nearTiedPositions > 0,
         ]

@@ -83,5 +83,41 @@ final class NativeMTPAcceptanceCorpusBuilderTests: XCTestCase {
             }
         }
     }
+
+    /// Qwen signs sampled text. Tool history and reasoning_effort select
+    /// ordinary, which is what failed acceptance-short-0 in the 2026-11-04 window.
+    func testQwenRequestsStayInsideTheSampledTextSelector() throws {
+        let capability = NativeMTPCapability(
+            admitted: true, revoked: false, revocationStateAvailable: true,
+            supportsCurrentProcessor: true, supportsCurrentStateCache: true,
+            supportsStreaming: true, supportsNonStreaming: true, supportsStopSequences: true,
+            hasQualifiedRowMappedTransactions: true, maximumProposalDepth: 1,
+            maximumPromptTokens: 4096, maximumCompletionTokens: 4096,
+            family: "qwen3_5_mtp_v1", supportsSampling: true
+        )
+        for modelID in ["qwen/qwen3.6-27b", "qwen/qwen3.8-27b"] {
+            var sawStop = false
+            var sawGreedy = false
+            var sawSampled = false
+            for index in 0..<200 {
+                let object = NativeMTPAcceptanceCorpusBuilder.requestObject(
+                    modelID: modelID, index: index, padding: 0
+                )
+                XCTAssertNil(object["reasoning_effort"], "\(modelID) \(index)")
+                XCTAssertNil(object["tools"], "\(modelID) \(index)")
+                let request = try ChatCompletionRequest.parse(data: JSONSerialization.data(withJSONObject: object))
+                XCTAssertFalse(request.messages.contains { $0.role == .tool })
+                XCTAssertEqual(NativeMTPSelector.reason(
+                    request: request, mode: .auto, nativeCapability: capability
+                ), .eligible, "\(modelID) \(index)")
+                sawStop = sawStop || request.stop == [";"]
+                sawGreedy = sawGreedy || (request.temperature == 0 && request.topP == 1)
+                sawSampled = sawSampled || (request.temperature == 1 && request.topP == 0.95)
+            }
+            XCTAssertTrue(sawStop)
+            XCTAssertTrue(sawGreedy)
+            XCTAssertTrue(sawSampled)
+        }
+    }
 }
 #endif
