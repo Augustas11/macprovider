@@ -909,6 +909,24 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         )
     }
 
+    /// The lab journey writes this envelope into the fixture root before load.
+    /// It is auxiliary, like the artifact projection, so the scan must not
+    /// treat it as an unmanifested weight.
+    func testLabAdmissionEnvelopeIsAuxiliary() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        try Data("{}".utf8).write(
+            to: fixture.snapshot.appendingPathComponent("native-mtp-lab-admission.json"))
+
+        XCTAssertNoThrow(try NativeMTPAdmissionSidecar.loadLegacyObjectForTesting(
+            sidecarData: fixture.sidecarData,
+            signatureData: fixture.signature(for: fixture.sidecarData),
+            snapshotRoot: fixture.snapshot,
+            context: fixture.context,
+            trustedKeyring: fixture.trustedKeyring
+        ))
+    }
+
     func testSymlinkDirectoryComponentRejects() throws {
         let fixture = try makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }

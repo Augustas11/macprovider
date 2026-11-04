@@ -422,7 +422,8 @@ validate() {
 }
 
 LOCKED=
-trap 'stop_serve; [[ -n $LOCKED ]] && rmdir $LOCK 2> /dev/null' EXIT
+# set -e must not skip the unlock when stop_serve has nothing to stop.
+trap 'stop_serve || true; [[ -n ${LOCKED:-} ]] && { rmdir "$LOCK" 2> /dev/null || true; }' EXIT
 
 case ${1:-} in
   step1)
