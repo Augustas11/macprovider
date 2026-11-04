@@ -146,7 +146,7 @@ final class NativeMTPAcceptanceCorpusBuilderTests: XCTestCase {
         try """
         {% if enable_thinking is defined and enable_thinking is false %}<think></think>{% else %}<think>{% endif %}
         """.write(to: directory.appendingPathComponent("chat_template.jinja"), atomically: true, encoding: .utf8)
-        let thinking = ModelRuntime.thinkingSupport(in: directory)
+        let thinking = NativeMTPAcceptanceCorpus.thinkingSupport(in: directory)
         let context = ModelRuntime.templateAdditionalContext(
             supportsThinkingToggle: thinking.toggle,
             supportsPreserveThinking: thinking.preserve
@@ -160,7 +160,7 @@ final class NativeMTPAcceptanceCorpusBuilderTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: plain) }
         try "{% for message in messages %}{{ message.content }}{% endfor %}"
             .write(to: plain.appendingPathComponent("chat_template.jinja"), atomically: true, encoding: .utf8)
-        let absent = ModelRuntime.thinkingSupport(in: plain)
+        let absent = NativeMTPAcceptanceCorpus.thinkingSupport(in: plain)
         XCTAssertFalse(absent.toggle)
         XCTAssertFalse(absent.preserve)
         XCTAssertNil(ModelRuntime.templateAdditionalContext(

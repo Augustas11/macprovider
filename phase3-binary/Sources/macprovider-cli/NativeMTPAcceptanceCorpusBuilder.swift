@@ -17,7 +17,7 @@ enum NativeMTPAcceptanceCorpusBuilder {
             throw NativeMTPHardwareE2EError.assertionFailed("acceptance corpus has no design for \(modelID)")
         }
         let tokenizer = try await ChatTemplateCompatTokenizerLoader().load(from: targetDirectory)
-        let thinking = ModelRuntime.thinkingSupport(in: targetDirectory)
+        let thinking = NativeMTPAcceptanceCorpus.thinkingSupport(in: targetDirectory)
         var cases: [[String: Any]] = []
         for stratum in NativeMTPAcceptanceCorpus.Stratum.allCases {
             let target: Int

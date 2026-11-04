@@ -40,6 +40,13 @@ struct NativeMTPAcceptanceCorpus: Sendable {
     let digestSHA256: String
     let cases: [Case]
 
+    /// Same detection production serve records on `ModelRuntime`. Kept here so
+    /// a lab prompt fix does not rewrite the decode-path digest.
+    static func thinkingSupport(in directory: URL) -> (toggle: Bool, preserve: Bool) {
+        let toggle = ModelRuntime.chatTemplateSupportsThinkingToggle(in: directory)
+        return (toggle, toggle && ModelRuntime.chatTemplateSupportsPreserveThinking(in: directory))
+    }
+
     /// GLM leaves a reasoning channel open and must close it into an answer
     /// or a tool call. A thinking-off template (Qwen with `enable_thinking`
     /// false) never opens that channel; the answer has to land in content.

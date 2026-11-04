@@ -736,7 +736,7 @@ final class NativeMTPHardwareE2ERunner {
         let placeholderProof = sizingProof(modelSHA: targetIdentity.digest, maxContextTokens: maxContextTokens)
         // Match production serve. Omitting the toggle leaves Qwen's `<think>`
         // open, so the acceptance budget is spent inside reasoning.
-        let thinking = ModelRuntime.thinkingSupport(in: targetDirectory)
+        let thinking = NativeMTPAcceptanceCorpus.thinkingSupport(in: targetDirectory)
         let probeRuntime = await makeRuntime(
             modelSHA: targetIdentity.digest,
             maxContextTokens: maxContextTokens,
