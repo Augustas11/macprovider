@@ -120,6 +120,33 @@ final class NativeMTPAcceptanceCorpusBuilderTests: XCTestCase {
         }
     }
 
+    func testOneTokenNativeStopIsAdmittedWithoutAProposal() {
+        XCTAssertTrue(NativeMTPAcceptanceCorpus.admissionHolds(
+            expectedNative: true, nativePath: true, ordinaryPath: false,
+            proposedTokens: 0, nativeSelectedCount: 1, terminal: "stopSequence"
+        ))
+        XCTAssertTrue(NativeMTPAcceptanceCorpus.admissionHolds(
+            expectedNative: true, nativePath: true, ordinaryPath: false,
+            proposedTokens: 0, nativeSelectedCount: 1, terminal: "eos"
+        ))
+        XCTAssertFalse(NativeMTPAcceptanceCorpus.admissionHolds(
+            expectedNative: true, nativePath: true, ordinaryPath: false,
+            proposedTokens: 0, nativeSelectedCount: 128, terminal: "maxTokens"
+        ))
+        XCTAssertTrue(NativeMTPAcceptanceCorpus.admissionHolds(
+            expectedNative: true, nativePath: true, ordinaryPath: false,
+            proposedTokens: 40, nativeSelectedCount: 128, terminal: "maxTokens"
+        ))
+        XCTAssertFalse(NativeMTPAcceptanceCorpus.admissionHolds(
+            expectedNative: false, nativePath: false, ordinaryPath: true,
+            proposedTokens: 1, nativeSelectedCount: 1, terminal: "stopSequence"
+        ))
+        XCTAssertTrue(NativeMTPAcceptanceCorpus.admissionHolds(
+            expectedNative: false, nativePath: false, ordinaryPath: true,
+            proposedTokens: 0, nativeSelectedCount: 1, terminal: "stopSequence"
+        ))
+    }
+
     func testOpenThinkWithoutAnAnswerFailsReasoningClose() {
         var fold = NativeMTPAcceptanceCorpus.ReasoningCloseFold()
         fold.observe(reasoningNonempty: true, contentNonempty: false, toolCalls: 0)

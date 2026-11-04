@@ -67,6 +67,25 @@ struct NativeMTPAcceptanceCorpus: Sendable {
         var passed: Bool { sawReasoning ? closedIntoAnswerOrTool : sawContent }
     }
 
+    /// Depth-1 MTP drafts the token after the one just verified, so a
+    /// one-token stop or EOS ends before any proposal. A longer native
+    /// completion still has to draft. An ordinary row never drafts.
+    static func admissionHolds(
+        expectedNative: Bool,
+        nativePath: Bool,
+        ordinaryPath: Bool,
+        proposedTokens: UInt64,
+        nativeSelectedCount: Int,
+        terminal: String?
+    ) -> Bool {
+        if expectedNative {
+            let oneTokenStop = nativeSelectedCount == 1
+                && (terminal == "stopSequence" || terminal == "eos")
+            return nativePath && (proposedTokens > 0 || oneTokenStop)
+        }
+        return ordinaryPath && proposedTokens == 0
+    }
+
     /// Tool history is native-eligible only on glm5_next. The Qwen sampled-text
     /// corpus has no such case, so R005 cannot require a native tool boundary.
     var expectsNativeToolBoundary: Bool {

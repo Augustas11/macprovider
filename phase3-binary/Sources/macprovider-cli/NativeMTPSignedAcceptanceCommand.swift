@@ -119,7 +119,14 @@ private struct NativeMTPSignedAcceptanceRunner {
                 let promptShape = NativeMTPAcceptanceCorpusBuilder.contains(expected.promptTokens, stratum: item.stratum)
                 let path = lastPath(recorder, item.id)
                 let selectorReason = recorder.requestSnapshot().last { $0.requestID == item.id }?.admission.selection.nativeMTPReason
-                let admission = item.expectedNative ? path == .nativeMTP && delta.proposedTokens > 0 : path == .ordinary && delta.proposedTokens == 0
+                let admission = NativeMTPAcceptanceCorpus.admissionHolds(
+                    expectedNative: item.expectedNative,
+                    nativePath: path == .nativeMTP,
+                    ordinaryPath: path == .ordinary,
+                    proposedTokens: delta.proposedTokens,
+                    nativeSelectedCount: comparison.nativeSelectedCount,
+                    terminal: nativeTerminal?.rawValue
+                )
                 let outputParity = same(expected, actual)
                 let passed = promptShape && admission && outputParity && comparison.passed
                     && ordinaryTerminal == nativeTerminal && comparison.retainedVectors == 0
@@ -306,7 +313,14 @@ final class SignedAcceptanceCheckpoint {
             }
             guard let accepted = observations["accepted"] as? UInt64, let rejected = observations["rejected"] as? UInt64,
                   let proposed = observations["proposed"] as? UInt64, accepted <= proposed, rejected == proposed - accepted,
-                  item.expectedNative ? proposed > 0 : proposed == 0,
+                  NativeMTPAcceptanceCorpus.admissionHolds(
+                    expectedNative: item.expectedNative,
+                    nativePath: observations["decode_path"] as? String == "native_mtp",
+                    ordinaryPath: observations["decode_path"] as? String == "ordinary",
+                    proposedTokens: proposed,
+                    nativeSelectedCount: row["native_selected_count"] as? Int ?? 0,
+                    terminal: terminal
+                  ),
                   observations["reasoning_nonempty"] is Bool, observations["content_nonempty"] is Bool else { throw ValidationError("checkpoint aggregate observations") }
         }
         records = rows
