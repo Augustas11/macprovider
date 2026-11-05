@@ -416,8 +416,11 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
         self.allowsRaggedPrefillOffsets = referencePrefillStepSize == nil && allowsRaggedPrefillOffsets
         self.nativeMTPPromptRowsJoinRaggedPrefill = self.allowsRaggedPrefillOffsets
             && nativeMTPPromptRowsJoinRaggedPrefill
+        // A serial-stride row must prefill whole serial chunks: a smaller
+        // per-iteration budget would shrink them and change the partition
+        // the row must match token for token (MiniMax M3 block selection).
         self.maxPrefillTokensPerIteration = max(
-            1,
+            serialPrefillStride && referencePrefillStepSize == nil ? self.maxPromptChunkTokens : 1,
             maxPrefillTokensPerIteration ?? self.maxPromptChunkTokens
         )
         self.drainTimeoutNanoseconds = drainTimeoutNanoseconds
