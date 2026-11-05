@@ -1,6 +1,7 @@
 import CryptoKit
 import Foundation
 import MLX
+import MLXLLM
 import MLXLMCommon
 import MacProviderCore
 
@@ -872,6 +873,18 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         familyAdapter == "qwen3_5_mtp_v1"
     }
 
+    /// Prompt columns this backend's native-MTP drafter prefills, the last
+    /// this many, or nil for the whole prompt. The GLM-5-Next head prefills
+    /// its default window (NoPE attention, so no absolute positions); the
+    /// scheduler skips drafter work on chunks wholly before it.
+    let nativeMTPDrafterPromptWindow: Int?
+
+    static func drafterPromptWindow(familyAdapter: String?) -> Int? {
+        familyAdapter == NativeMTPStagedRoundBytes.glm5NextFamilyAdapter
+            ? GLM5NextMTPDraftModel.defaultPromptWindow
+            : nil
+    }
+
     /// Whether `rows` prompt chunks of `chunkLength` tokens fit one shared
     /// forward under this backend's flattened-token cap.
     func sharedForwardFits(rows: Int, tokensPerRow: Int) -> Bool {
@@ -958,6 +971,9 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         self.container = container
         self.drafterContainer = drafterContainer
         self.nativeMTPPromptRowsJoinRaggedPrefill = Self.supportsNativeMTPPromptRowsInRaggedPrefill(
+            familyAdapter: nativeMTPFamilyAdapter
+        )
+        self.nativeMTPDrafterPromptWindow = Self.drafterPromptWindow(
             familyAdapter: nativeMTPFamilyAdapter
         )
         self.nativeMTPDrafterColumnCap = max(1, nativeMTPDrafterColumnCap)
@@ -2960,7 +2976,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         tokens: [Int],
         hidden: [MLXArray],
         positionDeltas: MLXArray?,
-        targetBonusToken: Int
+        targetBonusToken: Int,
+        startsFresh: Bool = false
     ) throws {
         try requireTargetLockHeld("lab_record_committed_prefix")
         guard labNativeMTPObserverInstalled(), !tokens.isEmpty else { return }
@@ -2969,6 +2986,10 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         }
         eval(hidden)
         lock.lock()
+        if startsFresh {
+            labNativeMTPCommittedPrefixTokens.removeValue(forKey: requestID)
+            labNativeMTPCommittedPrefixHidden.removeValue(forKey: requestID)
+        }
         labNativeMTPCommittedPrefixTokens[requestID, default: []].append(contentsOf: tokens)
         labNativeMTPCommittedPrefixHidden[requestID, default: []].append(contentsOf: hidden)
         labNativeMTPCommittedPrefixTargetBonus[requestID] = targetBonusToken
@@ -3064,8 +3085,18 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             nonSendable: (targetModel, prompt, targetHidden, targetBonus)
         ) { drafterContext, values in
             let (targetModel, prompt, targetHidden, targetBonus) = values
-            guard let drafter = drafterContext.model as? any StatefulMTPDrafterModel else {
+            guard let served = drafterContext.model as? any StatefulMTPDrafterModel else {
                 throw ContinuousBatchSchedulerError.unsupported("native_mtp_stateful_drafter_required")
+            }
+            // The recorded prefix already starts at the drafter's prompt
+            // window, and the live drafter keeps every column committed after
+            // it; replay all of it rather than window it again.
+            let drafter: any StatefulMTPDrafterModel
+            if let windowed = served as? GLM5NextMTPDraftModel {
+                drafter = GLM5NextMTPDraftModel(
+                    windowed.configuration, maximumDepth: windowed.maximumDepth, promptWindow: Int.max)
+            } else {
+                drafter = served
             }
             var state = drafter.makeState(parameters: nil)
             drafter.prepareDrafterState(
@@ -3160,14 +3191,20 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 sampler: sampler
             )
             eval(state.cache.flatMap(\.state) + (state.seedToken.map { [$0] } ?? []))
-            return (state: state, seed: state.seedToken?.asType(.int32).asArray(Int32.self).first.map(Int.init))
+            return (
+                state: state,
+                seed: state.seedToken?.asType(.int32).asArray(Int32.self).first.map(Int.init),
+                promptWindow: (statefulDrafter as? GLM5NextMTPDraftModel)?.promptWindow
+            )
         }
         storeNativeMTPDrafterAdvance(requestIDs: [requestID], states: [prepared.state], seedTokens: [prepared.seed])
         #if DEBUG || MACPROVIDER_LAB_HARNESS
+        // Record only the columns the drafter prefilled (its prompt window).
+        let recordedStart = prepared.promptWindow.map { max(0, prompt.dim(1) - $0) } ?? 0
         try labRecordNativeMTPCommittedPrefix(
             requestID: requestID,
-            tokens: prompt.asArray(Int32.self).map(Int.init),
-            hidden: try Self.labHiddenColumns(targetHidden, count: prompt.dim(1)),
+            tokens: Array(prompt.asArray(Int32.self).map(Int.init).dropFirst(recordedStart)),
+            hidden: Array(try Self.labHiddenColumns(targetHidden, count: prompt.dim(1)).dropFirst(recordedStart)),
             positionDeltas: positionDeltas,
             targetBonusToken: firstBonusToken
         )
@@ -3180,9 +3217,11 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     /// paired with target hidden states `c ..< c+n`, at position `c`, which
     /// is the slice of the single-pass shifted-prompt seeding this chunk
     /// owns. The tail token is the next prompt token for a non-final chunk
-    /// and the sampled first token for the final one. The first chunk starts
-    /// from an empty drafter state; each later chunk must find the state the
-    /// previous chunk left at exactly position `c`.
+    /// and the sampled first token for the final one. With a prompt window
+    /// starting at `w` (`nativeMTPPromptWindowStart`), only columns `>= w`
+    /// are fed, as the windowed single-pass seeding does: the chunk holding
+    /// `w` starts from an empty drafter state, and each later chunk must find
+    /// the state the previous chunk left at exactly position `c - w`.
     private func advanceNativeMTPDrafterOverPromptChunk(
         targetModel: any LanguageModel,
         input: ContinuousBatchPrefillInput,
@@ -3199,12 +3238,20 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         else {
             throw ContinuousBatchSchedulerError.unsupported("native_mtp_invalid_prompt_hidden_state")
         }
+        let windowStart = input.nativeMTPPromptWindowStart
+        guard windowStart >= 0, windowStart < input.promptTokenOffset + chunkCount else {
+            throw ContinuousBatchSchedulerError.unsupported("native_mtp_invalid_prompt_window")
+        }
+        let skipped = Self.nativeMTPPromptChunkSkippedColumns(
+            promptTokenOffset: input.promptTokenOffset,
+            windowStart: windowStart
+        )
         let priorState: MTPDrafterState?
-        if input.promptTokenOffset == 0 {
+        if input.promptTokenOffset <= windowStart {
             priorState = nil
         } else {
             guard let stored = nativeMTPDrafterState(for: input.requestID),
-                  stored.nextPosition == input.promptTokenOffset,
+                  stored.nextPosition == input.promptTokenOffset - windowStart,
                   stored.proposalAppended == 0
             else {
                 throw ContinuousBatchSchedulerError.unsupported("native_mtp_missing_drafter_state")
@@ -3212,8 +3259,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             priorState = stored
         }
         let row = (
-            hidden: targetHidden[0..., ..<chunkCount, 0...],
-            acceptedTokens: Array(input.promptTokens.dropFirst()),
+            hidden: targetHidden[0..., skipped ..< chunkCount, 0...],
+            acceptedTokens: Array(input.promptTokens.dropFirst(skipped + 1)),
             positionDeltas: positionDeltas
         )
         let advanced = try await drafterContainer.perform(
@@ -3253,13 +3300,20 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         #if DEBUG || MACPROVIDER_LAB_HARNESS
         try labRecordNativeMTPCommittedPrefix(
             requestID: input.requestID,
-            tokens: input.promptTokens,
-            hidden: try Self.labHiddenColumns(targetHidden, count: chunkCount),
+            tokens: Array(input.promptTokens.dropFirst(skipped)),
+            hidden: Array(try Self.labHiddenColumns(targetHidden, count: chunkCount).dropFirst(skipped)),
             positionDeltas: positionDeltas,
-            targetBonusToken: tailToken
+            targetBonusToken: tailToken,
+            startsFresh: priorState == nil
         )
         try await labRecomputeNativeMTPDrafterDigest(targetModel: targetModel, requestID: input.requestID)
         #endif
+    }
+
+    /// Leading columns of prompt chunk `[promptTokenOffset, ...)` that lie
+    /// before the drafter's prompt window and are not fed to it.
+    static func nativeMTPPromptChunkSkippedColumns(promptTokenOffset: Int, windowStart: Int) -> Int {
+        max(0, windowStart - promptTokenOffset)
     }
 
     /// Row `row`'s last-position hidden state as a `[1, 1, hidden]` array

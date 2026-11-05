@@ -3080,6 +3080,157 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertEqual(refused.first?.failureCode, "continuous_batching_prefill_failed")
     }
 
+    /// SPEC-048 GLM drafter prompt window: the GLM-5-Next family prefills
+    /// the head's default window; every other family the whole prompt. A
+    /// chunk drops only its columns before the window start.
+    func testNativeMTPPromptWindowSlicingMath() {
+        XCTAssertEqual(
+            PagedKVSharedForwardBackend.drafterPromptWindow(familyAdapter: "glm5_next_mtp_v1"),
+            GLM5NextMTPDraftModel.defaultPromptWindow
+        )
+        XCTAssertEqual(GLM5NextMTPDraftModel.defaultPromptWindow, 4_096)
+        XCTAssertNil(PagedKVSharedForwardBackend.drafterPromptWindow(familyAdapter: "qwen3_5_mtp_v1"))
+        XCTAssertNil(PagedKVSharedForwardBackend.drafterPromptWindow(familyAdapter: nil))
+
+        // 32K prompt, 2048-token chunks: window start 28,672 is a chunk
+        // boundary, so the two flagged chunks feed every column.
+        XCTAssertEqual(
+            PagedKVSharedForwardBackend.nativeMTPPromptChunkSkippedColumns(
+                promptTokenOffset: 28_672, windowStart: 28_672), 0)
+        XCTAssertEqual(
+            PagedKVSharedForwardBackend.nativeMTPPromptChunkSkippedColumns(
+                promptTokenOffset: 30_720, windowStart: 28_672), 0)
+        // 5K prompt: window start 1,024 falls inside the first chunk.
+        XCTAssertEqual(
+            PagedKVSharedForwardBackend.nativeMTPPromptChunkSkippedColumns(
+                promptTokenOffset: 0, windowStart: 1_024), 1_024)
+        XCTAssertEqual(
+            PagedKVSharedForwardBackend.nativeMTPPromptChunkSkippedColumns(
+                promptTokenOffset: 2_048, windowStart: 1_024), 0)
+        // No window: nothing is skipped.
+        XCTAssertEqual(
+            PagedKVSharedForwardBackend.nativeMTPPromptChunkSkippedColumns(
+                promptTokenOffset: 0, windowStart: 0), 0)
+    }
+
+    /// SPEC-048 windowed chunked seeding: with the drafter window starting
+    /// inside a later chunk, the chunks before it skip the drafter, the chunk
+    /// holding the window start seeds a fresh state from its columns past
+    /// it, and the result equals single-pass seeding of the windowed columns
+    /// (prompt `[w, P)` with target hidden `[w, P)` of the whole prompt). A
+    /// later chunk without that state, or a flagged chunk wholly before the
+    /// window, fails closed.
+    func testWindowedChunkedPromptPrefillSeedsTheDrafterLikeWindowedSinglePass() async throws {
+        try requireMetal()
+        let tiny = try Self.tinyQwen35Native()
+        let backend = tiny.backend.base
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 64)
+        let prompt = Self.tinyPrompt(length: 13, salt: 2)
+        let windowStart = 7
+
+        let handle = try await allocator.allocate(conversationKey: "windowed", maxTokens: 32)
+        var outputs: [ContinuousBatchPrefillOutput] = []
+        var offset = 0
+        for size in [5, 5, 3] {
+            let end = offset + size
+            let native = end > windowStart
+            _ = try await allocator.extend(handle, by: size)
+            outputs += try await backend.prefill(rows: [ContinuousBatchPrefillInput(
+                requestID: "windowed",
+                promptTokens: Array(prompt[offset ..< end]),
+                binding: try await allocator.binding(for: handle),
+                promptTokenOffset: offset,
+                committedKVTokenCount: offset,
+                targetKVTokenCount: end,
+                isFinalChunk: end == prompt.count,
+                nativeMTPPromptPrefill: native,
+                nativeMTPNextPromptToken: native && end < prompt.count ? prompt[end] : nil,
+                nativeMTPPromptWindowStart: windowStart
+            )])
+            if end == 5 {
+                // The chunk before the window leaves no drafter state.
+                XCTAssertNil(backend.nativeMTPDrafterSnapshotForTest(requestID: "windowed").state)
+            }
+            offset = end
+        }
+        XCTAssertTrue(outputs.allSatisfy { $0.failureCode == nil }, "\(outputs)")
+        let sampled = try XCTUnwrap(outputs.last?.sampledToken)
+
+        var emit = LMOutput.State()
+        emit[mtpEmitFlagKey] = true
+        let serial = tiny.target(
+            LMInput.Text(tokens: MLXArray(prompt.map(Int32.init)).reshaped(1, prompt.count)),
+            cache: try tiny.target.newCache(parameters: nil),
+            state: emit
+        )
+        let hidden = try XCTUnwrap(serial.state?[mtpLastHiddenStatesKey], "target emitted no hidden")
+        var reference = tiny.drafter.makeState(parameters: nil)
+        tiny.drafter.prepareDrafterState(
+            target: tiny.target,
+            promptTokens: MLXArray(prompt[windowStart...].map(Int32.init)).reshaped(1, prompt.count - windowStart),
+            targetHidden: hidden[0..., windowStart ..< prompt.count, 0...],
+            firstBonus: MLXArray([Int32(sampled)]),
+            positionDeltas: nil,
+            state: &reference,
+            sampler: GenerateParameters(temperature: 0).sampler()
+        )
+        eval(reference.cache.flatMap(\.state) + (reference.seedToken.map { [$0] } ?? []))
+
+        let candidate = backend.nativeMTPDrafterSnapshotForTest(requestID: "windowed")
+        let candidateState = try XCTUnwrap(candidate.state)
+        XCTAssertEqual(candidateState.nextPosition, prompt.count - windowStart)
+        XCTAssertEqual(candidateState.nextPosition, reference.nextPosition)
+        let referenceSeed = try XCTUnwrap(reference.seedToken).item(Int.self)
+        XCTAssertEqual(candidate.seedToken, referenceSeed)
+        XCTAssertEqual(candidate.pendingColumns, 0)
+        XCTAssertEqual(candidateState.cache.count, reference.cache.count)
+        for (lhs, rhs) in zip(candidateState.cache, reference.cache) {
+            XCTAssertEqual(lhs.offset, rhs.offset)
+            for (a, b) in zip(lhs.state, rhs.state) {
+                XCTAssertEqual(a.shape, b.shape)
+                // Paged chunked target forward and packed drafter kernels
+                // against one serial forward and single-pass seeding: values
+                // agree to float32 accumulation order.
+                let maxDifference = abs(a.asType(.float32) - b.asType(.float32)).max().item(Float.self)
+                XCTAssertLessThanOrEqual(maxDifference, 1e-3)
+            }
+        }
+
+        // A chunk past the window start without the previous windowed
+        // chunk's state is refused.
+        let orphan = try await allocator.allocate(conversationKey: "orphan", maxTokens: 32)
+        _ = try await allocator.extend(orphan, by: 13)
+        let refused = try await backend.prefill(rows: [ContinuousBatchPrefillInput(
+            requestID: "orphan",
+            promptTokens: Array(prompt[10 ..< 13]),
+            binding: try await allocator.binding(for: orphan),
+            promptTokenOffset: 10,
+            committedKVTokenCount: 10,
+            targetKVTokenCount: 13,
+            isFinalChunk: true,
+            nativeMTPPromptPrefill: true,
+            nativeMTPPromptWindowStart: windowStart
+        )])
+        XCTAssertEqual(refused.first?.failureCode, "continuous_batching_prefill_failed")
+
+        // A flagged chunk that ends at or before the window start is refused.
+        let early = try await allocator.allocate(conversationKey: "early", maxTokens: 32)
+        _ = try await allocator.extend(early, by: 5)
+        let refusedEarly = try await backend.prefill(rows: [ContinuousBatchPrefillInput(
+            requestID: "early",
+            promptTokens: Array(prompt[0 ..< 5]),
+            binding: try await allocator.binding(for: early),
+            promptTokenOffset: 0,
+            committedKVTokenCount: 0,
+            targetKVTokenCount: 5,
+            isFinalChunk: false,
+            nativeMTPPromptPrefill: true,
+            nativeMTPNextPromptToken: prompt[5],
+            nativeMTPPromptWindowStart: windowStart
+        )])
+        XCTAssertEqual(refusedEarly.first?.failureCode, "continuous_batching_prefill_failed")
+    }
+
     /// Native prompts longer than one prefill chunk are served natively and
     /// emit exactly the ordinary path's greedy tokens at 1.5k, 4k, and 8k.
     func testChunkedNativePromptsKeepGreedyParityWithOrdinaryAtLongLengths() async throws {

@@ -306,6 +306,10 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
     /// alone, or for an explicitly admitted family whose shared target
     /// forward and per-row drafter seeding support different offsets.
     let nativeMTPPromptRowsJoinRaggedPrefill: Bool
+    /// Prompt columns the backend's native-MTP drafter prefills: the last
+    /// this many (SPEC-048, GLM-5-Next head), or nil for the whole prompt.
+    /// Prompt chunks wholly before that window skip drafter work.
+    let nativeMTPDrafterPromptWindow: Int?
     let drainTimeoutNanoseconds: UInt64
     let drainCancellationGraceNanoseconds: UInt64
     let terminalResultLimit: Int
@@ -365,6 +369,7 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
         referencePrefillStepSize: Int? = nil,
         allowsRaggedPrefillOffsets: Bool = false,
         nativeMTPPromptRowsJoinRaggedPrefill: Bool = false,
+        nativeMTPDrafterPromptWindow: Int? = nil,
         drainTimeoutNanoseconds: UInt64 = 30_000_000_000,
         drainCancellationGraceNanoseconds: UInt64 = 5_000_000_000,
         terminalResultLimit: Int? = nil,
@@ -408,6 +413,7 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
         self.allowsRaggedPrefillOffsets = referencePrefillStepSize == nil && allowsRaggedPrefillOffsets
         self.nativeMTPPromptRowsJoinRaggedPrefill = self.allowsRaggedPrefillOffsets
             && nativeMTPPromptRowsJoinRaggedPrefill
+        self.nativeMTPDrafterPromptWindow = nativeMTPDrafterPromptWindow.map { max(1, $0) }
         self.maxPrefillTokensPerIteration = max(
             1,
             maxPrefillTokensPerIteration ?? self.maxPromptChunkTokens
@@ -1109,15 +1115,20 @@ struct ContinuousBatchPrefillInput: Sendable, Equatable {
     let samplerStep: Int
     let grammarConstraint: GrammarConstraintState?
     /// Native MTP drafters such as Qwen require target hidden states for the
-    /// complete prompt. Every prefill chunk of a native row sets this flag so
-    /// the backend advances the row's drafter over the chunk's own hidden
-    /// states; it never replays earlier chunks to synthesize them.
+    /// complete prompt. Every prefill chunk of a native row that reaches the
+    /// drafter's prompt window sets this flag so the backend advances the
+    /// row's drafter over the chunk's own hidden states; it never replays
+    /// earlier chunks to synthesize them.
     let nativeMTPPromptPrefill: Bool
     /// For a native non-final chunk `[c, c+n)`, the prompt token at `c+n`:
     /// the drafter pairs hidden state `c+n-1` with the next token, which for
     /// a non-final chunk is still a prompt token. `nil` on the final chunk,
     /// whose last pair uses the sampled first token.
     let nativeMTPNextPromptToken: Int?
+    /// The first prompt column the row's drafter prefills (SPEC-048): 0 for
+    /// the whole prompt, else the start of the drafter's prompt window. The
+    /// chunk holding it starts a fresh drafter state there.
+    let nativeMTPPromptWindowStart: Int
 
     init(
         requestID: String,
@@ -1134,7 +1145,8 @@ struct ContinuousBatchPrefillInput: Sendable, Equatable {
         samplerStep: Int = 0,
         grammarConstraint: GrammarConstraintState? = nil,
         nativeMTPPromptPrefill: Bool = false,
-        nativeMTPNextPromptToken: Int? = nil
+        nativeMTPNextPromptToken: Int? = nil,
+        nativeMTPPromptWindowStart: Int = 0
     ) {
         self.requestID = requestID
         self.promptTokens = promptTokens
@@ -1151,6 +1163,7 @@ struct ContinuousBatchPrefillInput: Sendable, Equatable {
         self.grammarConstraint = grammarConstraint
         self.nativeMTPPromptPrefill = nativeMTPPromptPrefill
         self.nativeMTPNextPromptToken = nativeMTPNextPromptToken
+        self.nativeMTPPromptWindowStart = nativeMTPPromptWindowStart
     }
 }
 
@@ -5947,6 +5960,14 @@ actor ContinuousBatchScheduler {
             let end = item.end
             let promptTokenCount = row.request.promptTokens.count
             let chunk = Array(row.request.promptTokens[row.prefillCursor..<end])
+            let nativeWindowStart = row.usesNativeMTP
+                ? Self.nativeMTPPromptWindowStart(
+                    promptTokenCount: promptTokenCount,
+                    window: configuration.nativeMTPDrafterPromptWindow,
+                    keepsWholePrompt: row.request.promptSnapshotTokenCount != nil
+                        || row.request.cachedPromptTokens > 0)
+                : 0
+            let nativePromptPrefill = row.usesNativeMTP && end > nativeWindowStart
             do {
                 _ = try await allocator.extend(row.handle, by: chunk.count)
             } catch {
@@ -5975,10 +5996,11 @@ actor ContinuousBatchScheduler {
                         topP: row.request.topP,
                         samplerStep: row.generatedTokens.count,
                         grammarConstraint: row.request.grammarConstraint,
-                        nativeMTPPromptPrefill: row.usesNativeMTP,
-                        nativeMTPNextPromptToken: row.usesNativeMTP && end < promptTokenCount
+                        nativeMTPPromptPrefill: nativePromptPrefill,
+                        nativeMTPNextPromptToken: nativePromptPrefill && end < promptTokenCount
                             ? row.request.promptTokens[end]
-                            : nil
+                            : nil,
+                        nativeMTPPromptWindowStart: nativeWindowStart
                     ),
                     chunk.count
                 ))
@@ -6204,6 +6226,21 @@ actor ContinuousBatchScheduler {
         }
         return Self.nextPrefillBound(
             cursor: row.prefillCursor, promptTokenCount: row.request.promptTokens.count, boundaries: boundaries)
+    }
+
+    /// SPEC-048: the first prompt column a native row's drafter prefills.
+    /// A drafter with a prompt window prefills only the last `window`
+    /// columns, so chunks ending at or before this column skip drafter work.
+    /// A row that resumes from or captures a prompt snapshot keeps the whole
+    /// prompt: that snapshot's head state sits at absolute prompt positions
+    /// (SPEC-048-R009).
+    nonisolated static func nativeMTPPromptWindowStart(
+        promptTokenCount: Int,
+        window: Int?,
+        keepsWholePrompt: Bool
+    ) -> Int {
+        guard let window, !keepsWholePrompt else { return 0 }
+        return max(0, promptTokenCount - window)
     }
 
     nonisolated static func nextPrefillBound(cursor: Int, promptTokenCount: Int, boundaries: [Int]) -> Int {

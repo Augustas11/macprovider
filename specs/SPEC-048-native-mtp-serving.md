@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.70
+**Version:** 0.1.71
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.70",
+  "version": "0.1.71",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -1016,7 +1016,12 @@ the sampled first token as its tail and yields the row's first proposal. A
 prompt that fits one chunk is the single-pass case of the same rule. A
 non-initial chunk MUST find the previous chunk's proposal state at exactly
 position `c`, or the row fails before output; no chunk is replayed to
-synthesize hidden states.
+synthesize hidden states. The GLM-5.3 MTP head prefills only the last 4096
+prompt columns on both the single-chunk and the multi-chunk path: chunks
+ending at or before column `w = P - 4096` of a `P`-token prompt skip it, the
+chunk holding `w` starts fresh proposal state there, and positions count from
+`w`; a row that resumes from or captures a prompt snapshot keeps the whole
+prompt.
 
 A row held at depth zero by the MTP-7 load gate does not run a one-column
 native verification. It shares the ordinary lockstep decode forward, and the
@@ -2218,6 +2223,10 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.71 (2026-11-05)** — MTP-6: the GLM-5.3 MTP head's 4096-column prompt
+  window also applies to chunked continuous-batching prefill; earlier chunks
+  skip the head, the chunk holding the window start seeds fresh state, and a
+  prompt-snapshot row keeps the whole prompt (#2198).
 - **0.1.70 (2026-11-05)** — R003 names mlx-swift-lm `3.32.3-macprovider.23`
   (`93234b64b87368d94081932d103bfdb7ee8e88a7`) on `3.32.3-macprovider.21`
   (#2198): GLM-5.3 MTP head prefills the last 4096 prompt columns (NoPE);

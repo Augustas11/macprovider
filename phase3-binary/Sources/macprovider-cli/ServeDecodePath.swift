@@ -34,6 +34,7 @@ extension ModelRuntime {
         promptChunkCeiling: Int = ContinuousBatchSchedulerConfiguration.defaultPromptChunkTokens,
         allowsRaggedPrefillOffsets: Bool = false,
         nativeMTPPromptRowsJoinRaggedPrefill: Bool = false,
+        nativeMTPDrafterPromptWindow: Int? = nil,
         maxDecodeRowsPerForward: Int = Int.max,
         referencePrefillStepSize: Int? = nil
     ) -> ContinuousBatchSchedulerConfiguration {
@@ -58,6 +59,7 @@ extension ModelRuntime {
             referencePrefillStepSize: referencePrefillStepSize,
             allowsRaggedPrefillOffsets: allowsRaggedPrefillOffsets,
             nativeMTPPromptRowsJoinRaggedPrefill: nativeMTPPromptRowsJoinRaggedPrefill,
+            nativeMTPDrafterPromptWindow: nativeMTPDrafterPromptWindow,
             tokenDeliveryBufferLimit: ContinuousBatchSchedulerConfiguration.productionTokenDeliveryBufferLimit,
             queueWaitTimeoutNanoseconds: Self.queueWaitTimeoutNanoseconds(queueWaitTimeoutMS),
             // The row cap is the served context, not the scheduler's
@@ -248,6 +250,8 @@ extension ModelRuntime {
                     backend: backend,
                     prefillGrouping: prefillGrouping
                 ),
+                nativeMTPDrafterPromptWindow: (backend as? PagedKVSharedForwardBackend)?
+                    .nativeMTPDrafterPromptWindow,
                 maxDecodeRowsPerForward: schedulerDecodeRowBound(configured: maxDecodeRowsPerForward, backend: backend),
                 referencePrefillStepSize: backend is DeepseekV4ContinuousBatchBackend ? 2048 : nil
             ),
