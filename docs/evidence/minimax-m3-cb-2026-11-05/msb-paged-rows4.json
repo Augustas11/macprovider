@@ -1,0 +1,62 @@
+{
+  "aggregateCVPct" : 0.12727952017785063,
+  "aggregateTPSRuns" : [
+    38.806182414949795,
+    38.76793093417497,
+    38.70828920036546
+  ],
+  "aggregateTPSp50" : 38.76793093417497,
+  "aggregateUpliftVsPagedSingleRow" : 1.4865465905935682,
+  "aggregateVsProductionSerial" : 1.3355791644875898,
+  "blockSizeTokens" : 256,
+  "compiled" : false,
+  "decodeTokensPerRow" : 128,
+  "engine" : "paged",
+  "layerCount" : 60,
+  "maxPhysicalBlocks" : 1024,
+  "mlxSwiftLMPin" : "mlxlm-39ccc0ec28f4",
+  "modelID" : "<models>/mlx-community--MiniMax-M3.1-Flash-oQ3e-mtp",
+  "modelTag" : "mlx-community--MiniMax-M3.1-Flash-oQ3e-mtp",
+  "pagedSingleRowCVPct" : 0.9698839245298116,
+  "pagedSingleRowTPSRuns" : [
+    26.156847910053767,
+    26.0791899692126,
+    25.68689367554557
+  ],
+  "pagedSingleRowTPSp50" : 26.0791899692126,
+  "peakPhysFootprintMB" : 192099,
+  "peakRSSMB" : 50632,
+  "perRowFractionOfPagedSingleRow" : 0.37163664764839205,
+  "perRowTPSp50" : 9.691982733543743,
+  "productionSerialCVPct" : 0.1259033821899121,
+  "productionSerialPromptTokens" : 1024,
+  "productionSerialTPSRuns" : [
+    29.053199783471854,
+    28.98103142973943,
+    29.02705580095563
+  ],
+  "productionSerialTPSp50" : 29.02705580095563,
+  "productionSerialTTFTSecondsRuns" : [
+    4.106940984725952,
+    4.099617004394531,
+    4.1129690408706665
+  ],
+  "promptTokenLengths" : [
+    1024,
+    1024,
+    1024,
+    1024
+  ],
+  "promptTokenSHA256" : [
+    "eade5e43bdcb341258091fd061d0c87637b6b3169de0bbf034f1ff053c44e29a",
+    "cc4979eae35234f7221dd21be608c748e0c574eed69de195ac4e7dcde56dd864",
+    "d479f0848ab2fa4a58b4b1b3a3f8dcb65ec589997c6a407fc2575109409e9113",
+    "969bd383f55821ba5577363f946add4b3142c72265a743fe37567ecb3458eae5"
+  ],
+  "promptTokensPerRow" : 1024,
+  "rows" : 4,
+  "runs" : 3,
+  "scenario" : "throughput",
+  "schemaVersion" : 4,
+  "timestamp" : "2026-11-05T07:19:25Z"
+}

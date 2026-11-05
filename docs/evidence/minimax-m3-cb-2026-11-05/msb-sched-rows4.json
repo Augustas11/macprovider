@@ -1,0 +1,138 @@
+{
+  "aggregateCVPct" : 0.04576250049908735,
+  "aggregateTPSRuns" : [
+    38.719529862175726,
+    38.6936685243763,
+    38.727575276001446
+  ],
+  "aggregateTPSp50" : 38.719529862175726,
+  "aggregateUpliftVsPagedSingleRow" : 1.5008730441496425,
+  "aggregateVsProductionSerial" : 1.338399214626729,
+  "blockSizeTokens" : 256,
+  "compiled" : false,
+  "decodeTokensPerRow" : 128,
+  "engine" : "scheduler",
+  "layerCount" : 60,
+  "maxPhysicalBlocks" : 1024,
+  "mlxSwiftLMPin" : "mlxlm-39ccc0ec28f4",
+  "modelID" : "<models>/mlx-community--MiniMax-M3.1-Flash-oQ3e-mtp",
+  "modelTag" : "mlx-community--MiniMax-M3.1-Flash-oQ3e-mtp",
+  "pagedSingleRowCVPct" : 0.12815581929543685,
+  "pagedSingleRowTPSRuns" : [
+    25.745637684678552,
+    25.806732384226393,
+    25.798004710060773
+  ],
+  "pagedSingleRowTPSp50" : 25.798004710060773,
+  "peakPhysFootprintMB" : 189998,
+  "peakRSSMB" : 51165,
+  "perRowFractionOfPagedSingleRow" : 0.3752182610374106,
+  "perRowTPSp50" : 9.679882465543932,
+  "productionSerialCVPct" : 0.10647191803727053,
+  "productionSerialPromptTokens" : 1024,
+  "productionSerialTPSRuns" : [
+    28.929731457571393,
+    28.980578532594784,
+    28.924984599264622
+  ],
+  "productionSerialTPSp50" : 28.929731457571393,
+  "productionSerialTTFTSecondsRuns" : [
+    4.1374640464782715,
+    4.145256996154785,
+    4.135125994682312
+  ],
+  "promptTokenLengths" : [
+    1024,
+    1024,
+    1024,
+    1024
+  ],
+  "promptTokenSHA256" : [
+    "eade5e43bdcb341258091fd061d0c87637b6b3169de0bbf034f1ff053c44e29a",
+    "cc4979eae35234f7221dd21be608c748e0c574eed69de195ac4e7dcde56dd864",
+    "d479f0848ab2fa4a58b4b1b3a3f8dcb65ec589997c6a407fc2575109409e9113",
+    "969bd383f55821ba5577363f946add4b3142c72265a743fe37567ecb3458eae5"
+  ],
+  "promptTokensPerRow" : 1024,
+  "rows" : 4,
+  "runs" : 3,
+  "scenario" : "throughput",
+  "schedulerBackendAggregateTPSRuns" : [
+    38.84894189025548,
+    38.82405279612632,
+    38.85741134953887
+  ],
+  "schedulerBackendWindowCallsRuns" : [
+    8,
+    8,
+    8
+  ],
+  "schedulerBackendWindowSecondsRuns" : [
+    13.179252126,
+    13.187701003,
+    13.176379543
+  ],
+  "schedulerCompletionOffsetSecondsByRowRuns" : [
+    [
+      29.15415894985199,
+      29.154173016548157,
+      29.154175996780396,
+      29.154178023338318
+    ],
+    [
+      29.16167402267456,
+      29.161678910255432,
+      29.1616849899292,
+      29.161685943603516
+    ],
+    [
+      29.15730106830597,
+      29.157307028770447,
+      29.157317996025085,
+      29.15731906890869
+    ]
+  ],
+  "schedulerDecodeLockstepWindow" : 16,
+  "schedulerFirstTokenOffsetSecondsByRowRuns" : [
+    [
+      15.930876970291138,
+      15.930879950523376,
+      15.930881023406982,
+      15.930885910987854
+    ],
+    [
+      15.92954695224762,
+      15.92955195903778,
+      15.929552912712097,
+      15.929557919502258
+    ],
+    [
+      15.93676507472992,
+      15.93677008152008,
+      15.93677008152008,
+      15.936776995658875
+    ]
+  ],
+  "schedulerTTFTSecondsByRowRuns" : [
+    [
+      15.930876970291138,
+      15.930871963500977,
+      15.930867075920105,
+      15.93087089061737
+    ],
+    [
+      15.92954695224762,
+      15.929545044898987,
+      15.929539918899536,
+      15.929542899131775
+    ],
+    [
+      15.93676507472992,
+      15.936763048171997,
+      15.936755061149597,
+      15.936762928962708
+    ]
+  ],
+  "schemaVersion" : 5,
+  "timestamp" : "2026-11-05T07:14:32Z"
+}

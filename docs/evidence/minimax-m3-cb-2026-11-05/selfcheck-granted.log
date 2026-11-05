@@ -1,0 +1,25 @@
+event=batching_unsupported action=serial_routed reason=local_batching_capability_unavailable
+event=continuous_batching_policy action=resolved status=absent_empty_off_fallback entries=0 revocations=0 emergency_off=false
+event=served_slots action=planned rows=4 served=4 reason=owner_pinned configured=4 source=owner policy_ceiling=none
+[paged-kv] moe-isolation first prefill=[30554,490] serial=[30554,490] decodeA=[472] serialA=[472] decodeB=[490] serialB=[490]
+[paged-kv] parity model=minimaxai/minimax-m3.1-flash established=true nLayers=60 nNew=32 nForwards=36 gatherKernelCalls=6480 expectCalls=6480 maxLogicalBlocks=11 nonIdentityPermutation=true
+[paged-kv] batched-isolation model=minimaxai/minimax-m3.1-flash requiresMoE=true proven=true rowsDecoded=2 rowFailures=0 crossRowDivergences=0 challengeDistinguishing=true
+[paged-kv] measure OK: runtime measurement complete, paged-KV attach eligible for model=minimaxai/minimax-m3.1-flash
+[paged-kv] runtime-identity model=minimaxai/minimax-m3.1-flash model_sha256=21188ee28f031b9444e8a250e16aea57ee37a0c2f8d1a24c2ad44686ad744f03 hardware_class=apple-silicon:Apple M3 Ultra:ram-256gb metallib_sha256=589e56e0794dcf6fcebf7f7edbda562404653e606d6ac9bb9bdf7025a608a094 kernel_identifier=macprovider_paged_kv_gather_v1
+event=continuous_batch_decode_row_bound max_decode_rows_per_forward=11
+event=continuous_batch_decode_row_bound max_decode_rows_per_forward=8 device_bound=11 reason=flattened_token_cap
+event=served_slots action=applied slots=4 rows=4 reason=owner_pinned
+event=cb_self_check action=step max_slots=4 rows=4 queue_limit=4 probe_key_boundary=1024 resumed_at=0 remeasure=false model_sha256=21188ee28f031b9444e8a250e16aea57ee37a0c2f8d1a24c2ad44686ad744f03
+event=cb_self_check action=pass slots=2 pass=0 serial_decode_tps=29.6 serial_e2e_tps=16.1 batch_decode_tps=34.4 batch_e2e_tps=17.6 batch_wall_s=5.459 cohort_decode_s=2.731 cohort_decode_tokens=94
+event=cb_self_check action=pass slots=2 pass=1 serial_decode_tps=29.5 serial_e2e_tps=16.0 batch_decode_tps=34.7 batch_e2e_tps=17.7 batch_wall_s=5.426 cohort_decode_s=2.708 cohort_decode_tokens=94
+event=cb_self_check action=pass slots=2 pass=2 serial_decode_tps=29.6 serial_e2e_tps=16.0 batch_decode_tps=34.7 batch_e2e_tps=17.7 batch_wall_s=5.431 cohort_decode_s=2.709 cohort_decode_tokens=94
+event=cb_self_check action=measured slots=2 rung=true conformant=true cohort_decode_tokens=47 divergent_rows=none aggregate_tps=34.7 serial_tps=29.6 gain=1.17
+event=cb_self_check action=pass slots=3 pass=0 serial_decode_tps=29.4 serial_e2e_tps=12.9 batch_decode_tps=37.7 batch_e2e_tps=14.4 batch_wall_s=9.982 cohort_decode_s=3.736 cohort_decode_tokens=141
+event=cb_self_check action=pass slots=3 pass=1 serial_decode_tps=29.3 serial_e2e_tps=12.9 batch_decode_tps=37.7 batch_e2e_tps=14.4 batch_wall_s=9.992 cohort_decode_s=3.739 cohort_decode_tokens=141
+event=cb_self_check action=pass slots=3 pass=2 serial_decode_tps=29.3 serial_e2e_tps=12.9 batch_decode_tps=37.6 batch_e2e_tps=14.4 batch_wall_s=10.001 cohort_decode_s=3.746 cohort_decode_tokens=141
+event=cb_self_check action=measured slots=3 rung=true conformant=true cohort_decode_tokens=47 divergent_rows=none aggregate_tps=37.7 serial_tps=29.3 gain=1.29
+event=cb_self_check action=pass slots=4 pass=0 serial_decode_tps=29.1 serial_e2e_tps=10.5 batch_decode_tps=39.4 batch_e2e_tps=11.7 batch_wall_s=16.402 cohort_decode_s=4.771 cohort_decode_tokens=188
+event=cb_self_check action=pass slots=4 pass=1 serial_decode_tps=29.1 serial_e2e_tps=10.5 batch_decode_tps=39.4 batch_e2e_tps=11.7 batch_wall_s=16.389 cohort_decode_s=4.774 cohort_decode_tokens=188
+event=cb_self_check action=pass slots=4 pass=2 serial_decode_tps=29.1 serial_e2e_tps=10.5 batch_decode_tps=39.3 batch_e2e_tps=11.7 batch_wall_s=16.424 cohort_decode_s=4.782 cohort_decode_tokens=188
+event=cb_self_check action=measured slots=4 rung=true conformant=true cohort_decode_tokens=47 divergent_rows=none aggregate_tps=39.4 serial_tps=29.1 gain=1.36
+event=cb_self_check action=applied source=measured reason=granted slots=4 verified_k=4 model_sha256=21188ee28f031b9444e8a250e16aea57ee37a0c2f8d1a24c2ad44686ad744f03
