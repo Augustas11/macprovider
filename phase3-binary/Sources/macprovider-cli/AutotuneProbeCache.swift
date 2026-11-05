@@ -101,6 +101,21 @@ struct AutotuneProbeCacheStore {
         return benchmark
     }
 
+    /// SPEC-023-R028 planning: every cached probe that is still admitted for
+    /// this Mac, catalog row and binary, whether or not its artifact is on
+    /// disk. The upgrade uses these only to order and skip downloads, never as
+    /// benchmark evidence.
+    func loadIdentityMatched(request: AutotuneRecommendRequest) -> [String: CandidateBenchmark] {
+        var matched: [String: CandidateBenchmark] = [:]
+        for entry in (try? read()) ?? [] where matched[entry.modelKey] == nil {
+            let benchmark = entry.asBenchmark()
+            guard AutotuneRecommendEngine.cachedBenchmarkAdmitted(benchmark, request: request, modelKey: entry.modelKey)
+            else { continue }
+            matched[entry.modelKey] = benchmark
+        }
+        return matched
+    }
+
     /// Hard paid-path vetoes must not survive into the 7-day sidecar: installer
     /// #1269 retries are new processes and would otherwise reuse a cold/thermal
     /// first sample instead of re-measuring.
