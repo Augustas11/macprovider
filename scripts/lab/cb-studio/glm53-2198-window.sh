@@ -35,7 +35,9 @@
 # per-cell results); `all` also writes OUT/all.json and touches OUT/DONE.
 #
 # Env: LAB (~/macprovider-lab-2198), W (~/work-2198), MODEL, FORK,
-#      BASE_BENCH, CAMP_BENCH, HARNESS_PIN, HARNESS_HC, POLICY, FIXTURE, OUT.
+#      BASE_BENCH, CAMP_BENCH, HARNESS_PIN, HARNESS_HC, POLICY, FIXTURE, OUT,
+#      PROVIDER_COMMIT (the commit HARNESS_PIN was built from; must equal
+#      the policy provider_commit).
 set -uo pipefail
 export PATH=/usr/sbin:/opt/homebrew/bin:/usr/bin:/bin
 # The policy names Xcode 17F113; the bench records `xcodebuild -version`.
@@ -55,7 +57,7 @@ SWEEP=${SWEEP:-$LAB/poc/scripts/lab/cb-studio/depth_sweep.py}
 ANALYZE=${ANALYZE:-$LAB/native_mtp_r015_analyze.py}
 OUT=${OUT:-$LAB/window-$(date -u +%Y%m%dT%H%M%SZ)}
 MODEL_ID=zai-org/glm-5.3-flash
-PROVIDER_COMMIT=3240ca12714207c4411c44f0403ff66d76d3bc2e
+PROVIDER_COMMIT=${PROVIDER_COMMIT:-3240ca12714207c4411c44f0403ff66d76d3bc2e}
 RELEASE_METALLIB_SHA256=3d9b4a747758128cc5418e62c5ad8e282a11b0d436423537137e013beaa1261b
 LIVE_PORT=8080
 LIVE_LABEL=live.malibu.provider
