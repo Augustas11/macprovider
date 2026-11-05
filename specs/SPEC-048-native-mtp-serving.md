@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.69
+**Version:** 0.1.70
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.69",
+  "version": "0.1.70",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -506,12 +506,20 @@ The authorized dependency tuple is exact:
 
 | Repository | Fork tag | Revision | Upstream base |
 |---|---|---|---|
-| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.21` | `ae6aa7826eb2ab276837c950dca6b1aaf9f344e4` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
+| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.23` | `93234b64b87368d94081932d103bfdb7ee8e88a7` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
 | `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.11` | `c774cb0934c7503bc3fe1c3d1afbe44c728e8891` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
 | `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.6` | `51edbb37620aef7c860ab5d7cdb7bf5b14333da2` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
 | `https://github.com/Augustas11/mlx-c` | `v0.6.0-macprovider.2` | `2b1ff2b5b5129a6115771da32e1bac3b6b01ab01` | `ml-explore/mlx-c` pinned base (`ebc88f10caa1b625e6b581437a8dea6df8a70085`) |
 
-The mlx-swift-lm row `3.32.3-macprovider.21` is on `3.32.3-macprovider.19`
+The mlx-swift-lm row `3.32.3-macprovider.23` is on `3.32.3-macprovider.21`
+(`ae6aa7826eb2ab276837c950dca6b1aaf9f344e4`) (#2198), at
+`93234b64b87368d94081932d103bfdb7ee8e88a7`, and changes only
+`GLM5NextMTP.prepareDrafterState`: the GLM-5.3 MTP head (NoPE) prefills the
+last 4096 shifted prompt columns instead of all of them, so a prompt within
+4096 tokens drafts exactly as on `.21`. Target prefill and decode are `.21`'s.
+The Swift, core and C rows are unchanged.
+
+The prior mlx-swift-lm row `3.32.3-macprovider.21` is on `3.32.3-macprovider.19`
 (`e06521b9c17f5836ddf43410ec8ef4c2346c56a4`) (#2198), at
 `ae6aa7826eb2ab276837c950dca6b1aaf9f344e4`, and changes only GLM-5.3
 (`glm5_next`) prefill: the DSA indexer selects each prefill chunk's pools with
@@ -2209,6 +2217,11 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.70 (2026-11-05)** — R003 names mlx-swift-lm `3.32.3-macprovider.23`
+  (`93234b64b87368d94081932d103bfdb7ee8e88a7`) on `3.32.3-macprovider.21`
+  (#2198): GLM-5.3 MTP head prefills the last 4096 prompt columns (NoPE);
+  prompts within 4096 unchanged. Other model sources and the Swift, core and C
+  rows are unchanged.
 - **0.1.69 (2026-11-05)** — MTP-15: the R015 decode-throughput gate for a
   native-eligible cell is a corrected 95% lower bound greater than 0 (policy
   `throughput_lower_bound_min` 0.0, strict), replacing the 15% floor (#2198).

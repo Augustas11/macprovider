@@ -17,6 +17,9 @@ let package = Package(
         )
     ],
     dependencies: [
+        // Tag 3.32.3-macprovider.23 (#2198) on 3.32.3-macprovider.21: GLM-5.3
+        // MTP head prefills the last 4096 prompt columns (NoPE); prompts
+        // within 4096 unchanged.
         // Tag 3.32.3-macprovider.21 (#2198) on 3.32.3-macprovider.19 changes
         // GLM-5.3 prefill only: DSA radix-select per prefill chunk, a fused
         // mHC Sinkhorn and heads-as-queries sparse attention. Decode is .19's.
@@ -54,7 +57,7 @@ let package = Package(
         // compatible per-column attention while retaining row-owned caches.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "ae6aa7826eb2ab276837c950dca6b1aaf9f344e4"
+            revision: "93234b64b87368d94081932d103bfdb7ee8e88a7"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",

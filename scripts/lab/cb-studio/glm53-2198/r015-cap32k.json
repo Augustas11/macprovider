@@ -17,7 +17,7 @@
   ],
   "maximum_prompt_tokens": 32768,
   "memory_safety_margin_bytes": 8589934592,
-  "mlx_fork_revision": "ae6aa7826eb2ab276837c950dca6b1aaf9f344e4",
+  "mlx_fork_revision": "93234b64b87368d94081932d103bfdb7ee8e88a7",
   "model_id": "zai-org/glm-5.3-flash",
   "mtp_sha256": "7299b6a71a38490e378e9eb6524c426392aa96e3fd561007e0540134bbef48f9",
   "os_build": "26A434",
