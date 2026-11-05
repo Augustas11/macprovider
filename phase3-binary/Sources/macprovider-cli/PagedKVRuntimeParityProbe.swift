@@ -338,6 +338,7 @@ enum PagedKVRuntimeParityProbe {
             )
 
             let needsRecurrentMembershipProbe = cacheKinds?.contains(.recurrentMamba) == true
+            let usesProductionIteratorReference = Self.usesProductionIteratorReference(cacheKinds: cacheKinds)
             // Hybrids run the first shared decode in the serve path's lockstep
             // window, the multi-step packed recurrent window production serves,
             // then hand row state back across the leave/join transition.
@@ -424,13 +425,13 @@ enum PagedKVRuntimeParityProbe {
                 container: container,
                 prompt: promptA,
                 nNew: serialReferenceCount,
-                useProductionIterator: needsRecurrentMembershipProbe
+                useProductionIterator: usesProductionIteratorReference
             )
             let serialB = try await Self.serialContinuationReferences(
                 container: container,
                 prompt: promptB,
                 nNew: serialReferenceCount,
-                useProductionIterator: needsRecurrentMembershipProbe
+                useProductionIterator: usesProductionIteratorReference
             )
             guard serialA.count == serialReferenceCount,
                   serialB.count == serialReferenceCount
@@ -950,6 +951,18 @@ enum PagedKVRuntimeParityProbe {
     /// would make the tolerance test unsound. Attention-only layouts retain the existing
     /// full-distribution oracle so legitimate batched accumulation near-ties remain
     /// eligible under FR-CB6.
+    /// Whether the isolation probe compares each row against the production
+    /// iterator's tokens instead of a full-prompt recompute. Hybrids need it
+    /// for their recurrent state. A MiniMax M3 (pagedIndexedKV) row's
+    /// incremental decode is not a full-prompt recompute: the mlx-vlm
+    /// reference model itself picks different tokens for the two on the probe
+    /// prompts. Its serial path is the production iterator, so each row must
+    /// equal that token for token, without the recompute's near-tie tolerance.
+    static func usesProductionIteratorReference(cacheKinds: [PagedKVSharedForwardBackend.CacheKind]?) -> Bool {
+        guard let cacheKinds else { return false }
+        return cacheKinds.contains(.recurrentMamba) || cacheKinds.contains(.pagedIndexedKV)
+    }
+
     private static func serialContinuationReferences(
         container: ModelContainer,
         prompt: [Int],

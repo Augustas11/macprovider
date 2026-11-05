@@ -14,6 +14,11 @@ selects blocks for every query in it, so a balanced chunk starting below the
 threshold changed the row's tokens against serial (a 2,100-token prompt
 diverged at its third token). Grouping, budgets and every other family are
 unchanged.
+FR-CB6: the batched-isolation attach probe compares `pagedIndexedKV` rows
+token for token against the production serial iterator, as it already did
+for hybrid rows, instead of a full-prompt recompute. The reference runtime's
+own incremental decode differs from its full recompute on this model, so the
+recompute reference rejected rows that matched serial exactly.
 
 **Change log v0.3.34 (2026-10-27, Related: #2153, Related: #2143):**
 FR-CB2: a GLM resume-boundary chunk may be followed immediately by its row's
@@ -891,7 +896,10 @@ a chunk. This is the row's own chunk for grouping: peers join only at that
 length, as for every family. The scheduler MUST NOT balance this row's
 chunks, because a chunk that crosses the block-selection threshold attends
 through block selection from its first query and its numerics depend on
-where it starts.
+where it starts. The FR-CB6 batched-isolation probe MUST compare this row
+token for token against the production serial iterator, not a full-prompt
+recompute, because block selection makes incremental decode and recompute
+numerically different paths.
 
 **DeepSeek V4 reference prefill (v0.3.29).** A `deepseek_v4` row MUST
 prefill alone with the same reference partition as serial: consume up to 2048
