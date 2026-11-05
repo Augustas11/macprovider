@@ -1948,7 +1948,8 @@ passes the gate only when the corrected lower bound is strictly greater than
 run: policies frozen under an earlier gate set (the 0.1.24 inter-chunk set and
 the 0.1.25 to 0.1.68 set with the 15% floor) are still judged by the gate set
 they were frozen with, so every recorded verdict reproduces unchanged. The
-bench accepts only the current gate set for new runs.
+bench runs a policy frozen with the current set or the 0.1.25 to 0.1.68 set;
+the 0.1.24 inter-chunk set stays refused for new runs.
 
 The campaign MUST also replay a preregistered, privacy-reviewed representative
 post-gateway request-shape sample, preserving real provider-bound conversation
@@ -2228,7 +2229,7 @@ requests.
   TTFT p95 (<= +10%), TPOT p95 (<= 0%), worst-gap, rejection, memory, gated
   non-inferiority and hard gates are unchanged. Policies frozen under earlier
   gate sets keep being judged by those sets, so recorded verdicts reproduce;
-  the bench accepts only the new set for new runs. The decode-only rationale
+  the bench runs policies frozen with the new set or the 0.1.25 set. The decode-only rationale
   no longer claims prefill is the same work on both paths: a native drafter
   that prefills its head over the prompt adds prefill work, which the TTFT
   gate bounds. MTP-16: the on-device self-check requires native strictly

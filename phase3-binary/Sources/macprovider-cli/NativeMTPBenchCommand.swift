@@ -1753,8 +1753,7 @@ struct NativeMTPBenchPolicy {
     private static func requireThresholds(_ thresholds: [String: Any]) throws {
         let expected: [String: Double] = [
             // SPEC-048 0.1.69: the decode-throughput corrected lower bound
-            // must be strictly greater than 0 (0.1.25-0.1.68 froze 0.15,
-            // which a new run no longer accepts).
+            // must be strictly greater than 0 (0.1.25-0.1.68 froze 0.15).
             "throughput_lower_bound_min": 0.0,
             "ttft_p95_upper_bound_max": 0.10,
             // SPEC-048 0.1.25: per-output-token latency and the worst-gap
@@ -1777,8 +1776,13 @@ struct NativeMTPBenchPolicy {
         }
         for (key, value) in expected {
             guard let actual = thresholds[key] as? NSNumber,
-                  CFGetTypeID(actual) != CFBooleanGetTypeID(),
-                  abs(actual.doubleValue - value) < 0.000_000_1 else {
+                  CFGetTypeID(actual) != CFBooleanGetTypeID() else {
+                throw NativeMTPBenchError.invalidPolicy("threshold \(key) mismatch")
+            }
+            // A policy frozen under 0.1.25-0.1.68 keeps its 0.15 floor; the
+            // analyzer judges it by that set, so the bench still runs it.
+            let accepted = key == "throughput_lower_bound_min" ? [value, 0.15] : [value]
+            guard accepted.contains(where: { abs(actual.doubleValue - $0) < 0.000_000_1 }) else {
                 throw NativeMTPBenchError.invalidPolicy("threshold \(key) mismatch")
             }
         }

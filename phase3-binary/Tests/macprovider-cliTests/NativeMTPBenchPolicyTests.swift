@@ -198,13 +198,18 @@ final class NativeMTPBenchPolicyTests: XCTestCase {
         XCTAssertThrowsError(try load(looseGap))
     }
 
-    func testTemplateFreezesPositiveDecodeBoundAndRefusesTheFifteenPercentFloor() throws {
+    func testTemplateFreezesPositiveDecodeBoundAndStillRunsFrozenFloorPolicies() throws {
         let policy = try load(template())
         XCTAssertEqual((policy.thresholds["throughput_lower_bound_min"] as? NSNumber)?.doubleValue, 0.0)
-        // SPEC-048 0.1.25-0.1.68 floor: no longer accepted for a new run.
+        // SPEC-048 0.1.25-0.1.68 floor: a policy frozen with it still loads;
+        // the analyzer judges it by that set.
         var floor = try template()
         var thresholds = try XCTUnwrap(floor["thresholds"] as? [String: Any])
         thresholds["throughput_lower_bound_min"] = 0.15
+        floor["thresholds"] = thresholds
+        XCTAssertNoThrow(try load(floor))
+        // Any other floor is refused.
+        thresholds["throughput_lower_bound_min"] = 0.10
         floor["thresholds"] = thresholds
         XCTAssertThrowsError(try load(floor))
     }
