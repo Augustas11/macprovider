@@ -57,6 +57,23 @@ final class PagedMiniMaxM3CacheTests: XCTestCase {
         XCTAssertEqual(CacheKind.kinds(from: [MiniMaxM3Cache(), MiniMaxM3Cache()]), [.pagedIndexedKV, .pagedIndexedKV])
     }
 
+    /// The serve cap reached the iterator's explicit-cache check, which counts
+    /// every sparse layer's `MiniMaxM3Cache` as not realizing it, so the
+    /// self-check's serial baseline failed on M3.1-Flash (60 sparse layers).
+    func testSerialMiniMaxCacheIteratorParametersPassTheCapacityCheck() throws {
+        let cache: [KVCache] = (0 ..< 60).map { _ in MiniMaxM3Cache() }
+        let capped = KVCacheConfiguration(capacity: try KVCacheConfiguration.Capacity(maxTokens: 65_536))
+        XCTAssertThrowsError(try validateKVCacheCompatibility(cache, configuration: capped)) { error in
+            XCTAssertEqual(error as? KVCacheConfigurationError, .incompatibleCapacity(expected: 65_536, count: 60))
+        }
+        let base = GenerateParameters(maxTokens: 8, maxKVSize: 65_536)
+        XCTAssertNil(ModelRuntime.explicitCacheIteratorParameters(base, cache: cache).maxKVSize)
+        XCTAssertNil(ModelRuntime.serveIteratorParameters(
+            base, forceSimpleKV: false, reusedCache: false, cache: cache
+        ).maxKVSize)
+        XCTAssertEqual(ModelRuntime.explicitCacheIteratorParameters(base, cache: [KVCacheSimple()]).maxKVSize, 65_536)
+    }
+
     func testIndexedForwardsCarryAtMostEightFlattenedTokens() {
         XCTAssertEqual(PagedKVSharedForwardBackend.maxFlattenedTokensPerForward(cacheKinds: [.pagedIndexedKV]), 8)
         XCTAssertTrue(PagedKVSharedForwardBackend.prefillsGroupedRowsAlone(

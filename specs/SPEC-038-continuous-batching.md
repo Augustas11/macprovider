@@ -19,6 +19,10 @@ token for token against the production serial iterator, as it already did
 for hybrid rows, instead of a full-prompt recompute. The reference runtime's
 own incremental decode differs from its full recompute on this model, so the
 recompute reference rejected rows that matched serial exactly.
+FR-CB10: MiniMax M3 sizes its own KV cache, as GLM-5-Next and DeepSeek V4
+do, so its serve parameters carry no `maxKVSize`. Its sparse caches keep the
+whole context for the indexer, and the serve cap made the self-check's serial
+baseline fail with `incompatibleCapacity(expected: 65536, count: 60)`.
 
 **Change log v0.3.34 (2026-10-27, Related: #2153, Related: #2143):**
 FR-CB2: a GLM resume-boundary chunk may be followed immediately by its row's
