@@ -8,7 +8,11 @@ lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-
 
 ## Change log
 
-- **v0.22.39 (2026-11-05, Related: #2154)** — Registers `SPEC-023-R028`
+- **v0.22.39 (2026-11-05, Related: #2154)** — The automatic switch treats
+  the catalog bench gate as hard (manual `--recommend` keeps it advisory).
+  Prefetch fetches the likely winners first under the free-space reserve,
+  records what the run downloaded, and the run removes its unselected
+  downloads. A foreground provider is restarted on every exit. Registers `SPEC-023-R028`
   (§9.4): a stale or missing recommendation re-tunes an existing provider
   over every signed row that fits its Mac, not only the incumbent. The
   provider switches only to a strictly better admitted model under the §4 /
@@ -3089,35 +3093,63 @@ use it.
    is not planned unless it is the incumbent, because prefetch requires an
    exact row match. The run MUST NOT restrict candidates to the incumbent,
    and it ignores `MACPROVIDER_CANDIDATE_MODELS` / `MACPROVIDER_MAX_MODEL_SIZE`.
+   A non-incumbent row whose cached probe on this Mac (same catalog row,
+   binary and hardware identity, within the §9 benchmark age) already fails
+   the step 5 bench gate is not planned, because it can never be switched to.
 2. **Prefetch.** Every planned row is downloaded and hash-verified against
-   its signed row while the incumbent keeps serving. A row whose prefetch
-   fails is dropped with a diagnostic. The incumbent's artifact MUST verify;
-   otherwise the run fails before the provider is stopped.
+   its signed row while the incumbent keeps serving. Rows are fetched in
+   order: the incumbent first, then the rest by estimated §4 ordering score
+   (the row's cached probe TPS on this Mac, else its catalog
+   `min_sustained_tps`), so the likely winners are fetched first. Every
+   download MUST leave the advertised artifact size plus the downloader's
+   5 GiB free-space reserve available on its volumes, or it is refused before
+   any byte is written. A row whose prefetch fails is dropped with a
+   diagnostic, and a snapshot directory the run created for it is removed.
+   The receipt records `downloaded_by_run: true` for each row this run
+   downloaded: no copy of it existed before the run (durable store, Hugging
+   Face snapshot or prefetch staging), and it now sits at its durable
+   content-addressed path. The incumbent's
+   artifact MUST verify; otherwise the run fails before the provider is
+   stopped.
 3. **Drain.** `malibu-cli update` waits until the local provider reports
    zero `requests_in_flight` and zero `requests_queued`, for at most 600
    seconds (the upper bound of `swap_drain_timeout_seconds`). A provider
    that stays busy is not stopped; the run exits and retries on the next
    update. `SPEC-023-R022` residency then stops the provider through its
-   normal SIGTERM drain and restores it at exit. The installer keeps its own
-   cutover stop.
+   normal SIGTERM drain and restores it on every exit: success, failure and
+   interrupt. A foreground provider is restarted too, on the config this run
+   leaves. The installer keeps its own cutover stop.
 4. **Benchmark.** Probes use only the prefetched, verified artifacts, so
    nothing is downloaded while the incumbent is stopped. Each row runs the
    same Stage-1 admission as any recommendation: swap and thermal vetoes,
    the buyer-TTFT ceiling and the cached-evidence binding.
-5. **Decision.** Let S be the engine's selected paid row and I the
-   incumbent. The provider switches to S only when S is not I and one of
-   these holds: I is absent from the signed catalog or not eligible; I is
+5. **Decision.** The catalog bench gate is hard for the automatic switch:
+   a row whose measured sustained TPS is below its `bench_gate.min_sustained_tps`
+   (or not finite), or whose 4k TTFT exceeds `bench_gate.max_4k_ttft_ms`,
+   MUST NOT be switched to. The gate stays advisory for a manual
+   `--recommend`, which still selects and reports such a row. Let I be the
+   incumbent. The challengers are the eligible rows the engine orders ahead
+   of I (every eligible row when I is not eligible), in engine order; rows
+   failing the hard gate are skipped. The provider switches to the first
+   challenger S for which one of these holds: I is absent from the signed catalog or not eligible; I is
    demoted by a §4.1 policy rule (RAM-class onboarding SKU or 8 GB tier
    preference) and S is not; or S's unrounded ordering score (§4) is
    strictly greater than I's. An equal score, or an order settled only by
    the TPS, demand or model-key tiebreakers, keeps I. No margin beyond
    strict greater-than applies. The client has no hysteresis constant, and
    the demand-rank `min_dwell_hours` field is not client selection policy.
+   When no challenger qualifies, I is kept.
 6. **Apply.** On a switch, `ConfigApplier` writes S's row. On a keep, the
    model does not change. When I passed admission in this run, I's own
    benchmarked row is re-applied, as the pre-v0.22.39 re-tune did. When any
    step fails (prefetch of I, drain, benchmark, decision or apply), the run
-   writes no config and the provider is restored on its incumbent.
+   writes no config and the provider is restored on its incumbent. On every
+   exit after prefetch, the run removes each artifact it downloaded
+   (`downloaded_by_run`) except I's and a switch target's. A removal is
+   limited to the row's exact durable content-addressed path under the
+   current signed row and never touches a path a kept row uses; the
+   incumbent's artifact and any copy that existed before the run are never
+   removed.
 7. **Pins.** The upgrade never moves a provider whose config has
    `donor_mode: true`, a `pool_model_id`, or no signed catalog identity
    (`model_catalog_key` and `model_catalog_model_id` both absent). Such a
@@ -3278,7 +3310,16 @@ failed or whose benchmark failed admission keeps the incumbent, and its own
 row is the only config target. A failed incumbent prefetch fails the run.
 `donor_mode`, `pool_model_id` and a config without signed catalog identity
 keep the model. The installer stale re-tune passes `--upgrade` to both the
-prefetch and the apply calls, with no `--candidate-models` allowlist.
+prefetch and the apply calls, with no `--candidate-models` allowlist. A
+challenger measured below its `min_sustained_tps` or above its
+`max_4k_ttft_ms` is never switched to, while manual `--recommend` still
+selects it; when no challenger clears the gate the incumbent is kept.
+Prefetch fetches the incumbent first and then rows by estimated score, a
+download without room for its size plus the free-space reserve is refused
+and leaves no directory, and after the decision only the run's own
+unselected `downloaded_by_run` snapshots are removed. The provider is
+stopped only after it reports idle, and it is restarted after success,
+failure and interrupt.
 
 AC-OMLX-1: A row with `bench_gate.provenance.source == "omlx_seeded"` and `runtime_status == "recommendable"` is rejected by catalog validation.
 

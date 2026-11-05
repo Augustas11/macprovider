@@ -5313,6 +5313,11 @@ struct PrefetchedModelArtifact: Codable, Equatable {
     let candidateRowIdentity: String
     let path: String
     let sha256: String
+    /// SPEC-023-R028: true when this run downloaded the artifact (no copy
+    /// existed before) and it now sits at its durable content-addressed path,
+    /// so the upgrade can remove it exactly if it is not selected.
+    /// Absent in older receipts, which never authorize a removal.
+    var downloadedByRun: Bool? = nil
 
     enum CodingKeys: String, CodingKey {
         case modelKey = "model_key"
@@ -5321,6 +5326,7 @@ struct PrefetchedModelArtifact: Codable, Equatable {
         case candidateRowIdentity = "candidate_row_identity"
         case path
         case sha256
+        case downloadedByRun = "downloaded_by_run"
     }
 }
 
@@ -5423,10 +5429,13 @@ struct AutotuneRecommendationBenchmarker {
     var progress: (String) -> Void = { _ in }
     var probeCache: AutotuneProbeCacheStore? = nil
 
+    /// `modelKeyOrder` sets the download order (rows it omits follow in key
+    /// order). Every download keeps the downloader's free-space reserve.
     func prefetchArtifacts(
         candidateCatalog: CandidateCatalog,
         hardware: AutotuneRecommendHardware,
-        candidateModelIDs: Set<String>
+        candidateModelIDs: Set<String>,
+        modelKeyOrder: [String] = []
     ) async throws -> ArtifactPrefetchOutcomes {
         var matchedModelKeysByID: [String: [String]] = [:]
         for modelKey in candidateCatalog.rows.keys.sorted() {
@@ -5451,7 +5460,10 @@ struct AutotuneRecommendationBenchmarker {
         var artifacts: [PrefetchedModelArtifact] = []
         var diagnostics: [PrefetchDiagnostic] = []
         var matchedModelIDs = Set<String>()
-        for modelKey in candidateCatalog.rows.keys.sorted() {
+        let ordered = modelKeyOrder.filter { candidateCatalog.rows[$0] != nil }
+        let orderedSet = Set(ordered)
+        let modelKeys = ordered + candidateCatalog.rows.keys.sorted().filter { !orderedSet.contains($0) }
+        for modelKey in modelKeys {
             guard let row = candidateCatalog.rows[modelKey], candidateModelIDs.contains(row.modelID) else {
                 continue
             }
@@ -5467,14 +5479,40 @@ struct AutotuneRecommendationBenchmarker {
                     diagnostics.append(PrefetchDiagnostic(modelID: row.modelID, reason: "missing signed artifact identity"))
                     continue
                 }
-                let artifact = try await artifactResolver.prefetchedArtifactPreservingExisting(for: row)
+                // A fresh download lands in the hash-qualified staging
+                // snapshot and is adopted into the durable store. It counts
+                // as this run's only when no copy existed in any location.
+                let staging = row.modelSHA256.map {
+                    artifactResolver.prefetchSnapshotURL(modelID: row.modelID, revision: revision, sha256: $0)
+                        .standardizedFileURL
+                }
+                let durable = row.modelSHA256.flatMap {
+                    try? artifactResolver.durableStore.artifactURL(modelID: row.modelID, revision: revision, sha256: $0)
+                        .standardizedFileURL
+                }
+                let locations = [staging, durable, artifactResolver.snapshotURL(modelID: row.modelID, revision: revision)]
+                var locationInfo = stat()
+                let preexisted = staging == nil || durable == nil
+                    || locations.contains { $0.map { lstat($0.path, &locationInfo) == 0 } ?? false }
+                let artifact: VerifiedModelArtifact
+                do {
+                    artifact = try await artifactResolver.prefetchedArtifactPreservingExisting(for: row)
+                } catch {
+                    // A snapshot this run created that then failed is useless:
+                    // remove it rather than leave it consuming disk.
+                    if !preexisted, let staging {
+                        try? FileManager.default.removeItem(at: staging)
+                    }
+                    throw error
+                }
                 artifacts.append(PrefetchedModelArtifact(
                     modelKey: modelKey,
                     modelID: row.modelID,
                     modelRevision: revision,
                     candidateRowIdentity: rowIdentity,
                     path: artifact.modelArgument,
-                    sha256: artifact.sha256
+                    sha256: artifact.sha256,
+                    downloadedByRun: !preexisted && artifact.modelArgument == durable?.path
                 ))
             } catch let error as AutotuneRecommendError {
                 guard let reason = error.perCandidateSkipReason else { throw error }
