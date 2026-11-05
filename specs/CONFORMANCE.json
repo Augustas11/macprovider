@@ -665,7 +665,7 @@
     {
       "spec_id": "SPEC-023",
       "title": "Installer-Integrated Autotune Recommend",
-      "version": "v0.22.38",
+      "version": "v0.22.39",
       "path": "specs/SPEC-023-installer-autotune-recommend.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -13339,6 +13339,32 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/2127",
         "rationale": "SPEC-023 v0.22.35 adds model-aware readiness budgets for paid-yield probes, prompt child-exit detection, overall-deadline bounds, and signed catalog-key or Hugging Face model_id candidate filters with explicit unmatched-entry errors. Fake-clock readiness and filter regression tests are mapped; conformance remains pending until the next signed CLI release carries the change and released recommendation-path evidence is captured. No model-loading or live-provider run is authorized by the CPU-only regression tests."
+      }
+    },
+    {
+      "requirement_id": "SPEC-023-R028",
+      "spec_id": "SPEC-023",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/AutotuneModelUpgrade.swift:enum AutotuneModelUpgrade",
+        "phase3-binary/Sources/macprovider-cli/AutotuneCommand.swift:private func runModelUpgrade(",
+        "phase3-binary/Sources/macprovider-cli/AutotuneCommand.swift:static func modelUpgradePrefetchReceipt(",
+        "phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift:static func passesPreBenchmarkGates(",
+        "phase3-binary/dist/install.sh:prefetch_upgrade_autotune_model"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneModelUpgradeTests.swift:final class AutotuneModelUpgradeTests",
+        "scripts/test-install-autotune-recommend-config.sh::run_upgrade_prefetch_case",
+        "scripts/test-install-autotune-recommend-config.sh::run_upgrade_prefetch_legacy_cli_case",
+        "scripts/test-install-autotune-recommend-config.sh::run_upgrade_ignores_fresh_bounds_case"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2154",
+        "rationale": "SPEC-023 v0.22.39 registers the stale-recommendation model upgrade: autotune --recommend --upgrade plans every signed row that fits the Mac, prefetches and verifies while the incumbent serves, waits for zero in-flight requests, benchmarks only verified artifacts under R022 residency, and switches only to a strictly better admitted row; donor-mode, pool-model and unsigned-identity configs keep their model. The installer stale re-tune and malibu-cli update call it. CPU-only decision, pin, prefetch-planning, drain and installer-argument tests are mapped; conformance stays pending until a signed CLI release carries the change and a live provider is observed moving to a better catalog row."
       }
     },
     {
