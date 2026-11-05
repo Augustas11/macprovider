@@ -1,0 +1,12 @@
+{
+  "schema": "macprovider.native-mtp-r015-cap-extension.v1",
+  "maximum_prompt_tokens": 32768,
+  "decode_path_change": "eaf5ecfa4 (ContinuousBatchScheduler nativeMTPPromptWindowStart = max(0, P - 4096); PagedKVRuntimeBridge seeds the drafter at the window start) on mlx-swift-lm 93234b64 (GLM5NextMTP.prepareDrafterState prefills the last 4096 prompt columns): window start 0 for every prompt at or below 4096, so the reused cells draft, verify and commit as measured",
+  "prior_policy_sha256": "ed775bdbfe8c420b27ae5a814d5f229d89d4b9ee662c19658e74e3e79ea8c13f",
+  "prior_runs_sha256": "a0acbd83c625f970ef2f3a89fc76ab5315ae61561afe0240447bb708d2768b10",
+  "prior_analysis_sha256": "f607170c08d5ec3293cefd1bb7f122ba1fc5698aaccdb171e3e9f455ed29a4d6",
+  "extension_policy_sha256": "00c3e55310cfefde810ebab55bf498c731f019e7c74aae5beca0cc1e6101e244",
+  "extension_runs_sha256": "7ca9e5a4bde6b16e39effb1abfd55fff1cb0d04eb261c64f4907a81ce29815c4",
+  "provider_commit": "eaf5ecfa49e210b1dbce47d3bb5d4bc6bbb42352",
+  "mlx_fork_revision": "93234b64b87368d94081932d103bfdb7ee8e88a7"
+}
