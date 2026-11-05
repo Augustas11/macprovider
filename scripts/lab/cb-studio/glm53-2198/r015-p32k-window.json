@@ -22,7 +22,7 @@
     32768
   ],
   "proposal_depth": 1,
-  "provider_commit": "094ebecc733028f6e9d4fee6e455b03c019a7560",
+  "provider_commit": "eaf5ecfa49e210b1dbce47d3bb5d4bc6bbb42352",
   "qualified_slots": 4,
   "quantization": "4bit",
   "ram_gb": 256,
