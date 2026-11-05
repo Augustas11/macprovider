@@ -925,6 +925,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
                 ),
                 maxPromptChunkTokens: max(1, maxPromptChunkTokens),
                 referencePrefillStepSize: Self.isDeepseekV4Pool(cacheKinds) ? DeepseekV4Model.prefillStepSize : nil,
+                serialPrefillStride: cacheKinds.contains(.pagedIndexedKV),
                 snapshot: ContinuousBatchSchedulerSnapshot(
                     modelID: descriptor.modelID,
                     modelSHA256: descriptor.modelSHA256,

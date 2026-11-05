@@ -35,7 +35,8 @@ extension ModelRuntime {
         allowsRaggedPrefillOffsets: Bool = false,
         nativeMTPPromptRowsJoinRaggedPrefill: Bool = false,
         maxDecodeRowsPerForward: Int = Int.max,
-        referencePrefillStepSize: Int? = nil
+        referencePrefillStepSize: Int? = nil,
+        serialPrefillStride: Bool = false
     ) -> ContinuousBatchSchedulerConfiguration {
         // The family ceiling is the chunk unless the operator set
         // `prefill_step_size`, which may only lower it (SPEC-038 FR-CB2).
@@ -56,6 +57,7 @@ extension ModelRuntime {
                 ?? ContinuousBatchSchedulerConfiguration.defaultPrefillTokensPerIteration,
             maxPromptChunkTokens: promptChunkTokens,
             referencePrefillStepSize: referencePrefillStepSize,
+            serialPrefillStride: serialPrefillStride,
             allowsRaggedPrefillOffsets: allowsRaggedPrefillOffsets,
             nativeMTPPromptRowsJoinRaggedPrefill: nativeMTPPromptRowsJoinRaggedPrefill,
             tokenDeliveryBufferLimit: ContinuousBatchSchedulerConfiguration.productionTokenDeliveryBufferLimit,
@@ -97,6 +99,14 @@ extension ModelRuntime {
             return ContinuousBatchSchedulerConfiguration.defaultPromptChunkTokens
         }
         return pagedMLAPromptChunkTokens
+    }
+
+    /// MiniMax M3 (`pagedIndexedKV`) rows prefill in the serial path's stride
+    /// so a continuous batch matches a serial run of each row token for token.
+    nonisolated static func schedulerFollowsSerialPrefillStride(
+        backend: (any ContinuousBatchSchedulerBackend)?
+    ) -> Bool {
+        (backend as? PagedKVSharedForwardBackend)?.cacheKinds.contains(.pagedIndexedKV) ?? false
     }
 
     /// Decode steps per hop while a prompt prefills, scaled with the chunk so
@@ -249,7 +259,8 @@ extension ModelRuntime {
                     prefillGrouping: prefillGrouping
                 ),
                 maxDecodeRowsPerForward: schedulerDecodeRowBound(configured: maxDecodeRowsPerForward, backend: backend),
-                referencePrefillStepSize: backend is DeepseekV4ContinuousBatchBackend ? 2048 : nil
+                referencePrefillStepSize: backend is DeepseekV4ContinuousBatchBackend ? 2048 : nil,
+                serialPrefillStride: schedulerFollowsSerialPrefillStride(backend: backend)
             ),
             allocator: allocator,
             backend: backend,
