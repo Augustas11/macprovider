@@ -40,6 +40,62 @@ struct NativeMTPAcceptanceCorpus: Sendable {
     let digestSHA256: String
     let cases: [Case]
 
+    /// Same detection production serve records on `ModelRuntime`. Kept here so
+    /// a lab prompt fix does not rewrite the decode-path digest.
+    static func thinkingSupport(in directory: URL) -> (toggle: Bool, preserve: Bool) {
+        let toggle = ModelRuntime.chatTemplateSupportsThinkingToggle(in: directory)
+        return (toggle, toggle && ModelRuntime.chatTemplateSupportsPreserveThinking(in: directory))
+    }
+
+    /// GLM leaves a reasoning channel open and must close it into an answer
+    /// or a tool call. A thinking-off template (Qwen with `enable_thinking`
+    /// false) never opens that channel; the answer has to land in content.
+    /// An open think whose answer stays empty fails both ways.
+    struct ReasoningCloseFold: Equatable {
+        private(set) var sawReasoning = false
+        private(set) var closedIntoAnswerOrTool = false
+        private(set) var sawContent = false
+
+        mutating func observe(reasoningNonempty: Bool, contentNonempty: Bool, toolCalls: Int) {
+            if reasoningNonempty { sawReasoning = true }
+            if contentNonempty { sawContent = true }
+            if reasoningNonempty && (contentNonempty || toolCalls > 0) {
+                closedIntoAnswerOrTool = true
+            }
+        }
+
+        var passed: Bool { sawReasoning ? closedIntoAnswerOrTool : sawContent }
+    }
+
+    /// Depth-1 MTP drafts the token after the one just verified, so a
+    /// one-token stop or EOS ends before any proposal. A longer native
+    /// completion still has to draft. An ordinary row never drafts.
+    static func admissionHolds(
+        expectedNative: Bool,
+        nativePath: Bool,
+        ordinaryPath: Bool,
+        proposedTokens: UInt64,
+        nativeSelectedCount: Int,
+        terminal: String?
+    ) -> Bool {
+        if expectedNative {
+            let oneTokenStop = nativeSelectedCount == 1
+                && (terminal == "stopSequence" || terminal == "eos")
+            return nativePath && (proposedTokens > 0 || oneTokenStop)
+        }
+        return ordinaryPath && proposedTokens == 0
+    }
+
+    /// Tool history is native-eligible only on glm5_next. The Qwen sampled-text
+    /// corpus has no such case, so R005 cannot require a native tool boundary.
+    var expectsNativeToolBoundary: Bool {
+        cases.contains { item in
+            item.expectedNative && item.request.messages.contains { message in
+                message.role == .tool || message.toolCalls?.isEmpty == false
+            }
+        }
+    }
+
     static func load(from url: URL) throws -> Self {
         try load(data: Data(contentsOf: url))
     }

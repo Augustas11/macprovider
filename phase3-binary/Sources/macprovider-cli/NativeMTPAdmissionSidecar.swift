@@ -509,6 +509,9 @@ enum NativeMTPAdmissionSidecar {
     private static let defaultChallengeBankPath = "native-mtp-selftest-bank.json"
     private static let defaultChallengeBankSignaturePath = "native-mtp-selftest-bank.json.sig"
     private static let defaultArtifactProjectionManifestPath = "native-mtp-artifact-manifest.json"
+    /// Written into the fixture root by the lab journey before `load`. It is
+    /// the quantization envelope a signed tuple copies, not a weight file.
+    private static let labAdmissionEnvelopePath = "native-mtp-lab-admission.json"
     static let artifactProjectionSchemaV1 = "macprovider.native-mtp-artifact-projection.v1"
     static let artifactProjectionSchemaV2 = "macprovider.native-mtp-artifact-projection.v2"
     /// A v2 projection names up to 256 models (one per sidecar entry).
@@ -1003,6 +1006,7 @@ enum NativeMTPAdmissionSidecar {
                 parsed.selfTest.challengeBankPath,
                 parsed.selfTest.signaturePath,
                 defaultArtifactProjectionManifestPath,
+                labAdmissionEnvelopePath,
             ],
             fileManager: fileManager
         )

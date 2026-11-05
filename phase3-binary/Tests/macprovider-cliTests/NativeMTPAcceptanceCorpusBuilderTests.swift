@@ -83,5 +83,117 @@ final class NativeMTPAcceptanceCorpusBuilderTests: XCTestCase {
             }
         }
     }
+
+    /// Qwen signs sampled text. Tool history and reasoning_effort select
+    /// ordinary, which is what failed acceptance-short-0 in the 2026-11-04 window.
+    func testQwenRequestsStayInsideTheSampledTextSelector() throws {
+        let capability = NativeMTPCapability(
+            admitted: true, revoked: false, revocationStateAvailable: true,
+            supportsCurrentProcessor: true, supportsCurrentStateCache: true,
+            supportsStreaming: true, supportsNonStreaming: true, supportsStopSequences: true,
+            hasQualifiedRowMappedTransactions: true, maximumProposalDepth: 1,
+            maximumPromptTokens: 4096, maximumCompletionTokens: 4096,
+            family: "qwen3_5_mtp_v1", supportsSampling: true
+        )
+        for modelID in ["qwen/qwen3.6-27b", "qwen/qwen3.8-27b"] {
+            var sawStop = false
+            var sawGreedy = false
+            var sawSampled = false
+            for index in 0..<200 {
+                let object = NativeMTPAcceptanceCorpusBuilder.requestObject(
+                    modelID: modelID, index: index, padding: 0
+                )
+                XCTAssertNil(object["reasoning_effort"], "\(modelID) \(index)")
+                XCTAssertNil(object["tools"], "\(modelID) \(index)")
+                let request = try ChatCompletionRequest.parse(data: JSONSerialization.data(withJSONObject: object))
+                XCTAssertFalse(request.messages.contains { $0.role == .tool })
+                XCTAssertEqual(NativeMTPSelector.reason(
+                    request: request, mode: .auto, nativeCapability: capability
+                ), .eligible, "\(modelID) \(index)")
+                sawStop = sawStop || request.stop == [";"]
+                sawGreedy = sawGreedy || (request.temperature == 0 && request.topP == 1)
+                sawSampled = sawSampled || (request.temperature == 1 && request.topP == 0.95)
+            }
+            XCTAssertTrue(sawStop)
+            XCTAssertTrue(sawGreedy)
+            XCTAssertTrue(sawSampled)
+        }
+    }
+
+    func testOneTokenNativeStopIsAdmittedWithoutAProposal() {
+        XCTAssertTrue(NativeMTPAcceptanceCorpus.admissionHolds(
+            expectedNative: true, nativePath: true, ordinaryPath: false,
+            proposedTokens: 0, nativeSelectedCount: 1, terminal: "stopSequence"
+        ))
+        XCTAssertTrue(NativeMTPAcceptanceCorpus.admissionHolds(
+            expectedNative: true, nativePath: true, ordinaryPath: false,
+            proposedTokens: 0, nativeSelectedCount: 1, terminal: "eos"
+        ))
+        XCTAssertFalse(NativeMTPAcceptanceCorpus.admissionHolds(
+            expectedNative: true, nativePath: true, ordinaryPath: false,
+            proposedTokens: 0, nativeSelectedCount: 128, terminal: "maxTokens"
+        ))
+        XCTAssertTrue(NativeMTPAcceptanceCorpus.admissionHolds(
+            expectedNative: true, nativePath: true, ordinaryPath: false,
+            proposedTokens: 40, nativeSelectedCount: 128, terminal: "maxTokens"
+        ))
+        XCTAssertFalse(NativeMTPAcceptanceCorpus.admissionHolds(
+            expectedNative: false, nativePath: false, ordinaryPath: true,
+            proposedTokens: 1, nativeSelectedCount: 1, terminal: "stopSequence"
+        ))
+        XCTAssertTrue(NativeMTPAcceptanceCorpus.admissionHolds(
+            expectedNative: false, nativePath: false, ordinaryPath: true,
+            proposedTokens: 0, nativeSelectedCount: 1, terminal: "stopSequence"
+        ))
+    }
+
+    func testOpenThinkWithoutAnAnswerFailsReasoningClose() {
+        var fold = NativeMTPAcceptanceCorpus.ReasoningCloseFold()
+        fold.observe(reasoningNonempty: true, contentNonempty: false, toolCalls: 0)
+        XCTAssertFalse(fold.passed)
+        fold.observe(reasoningNonempty: true, contentNonempty: true, toolCalls: 0)
+        XCTAssertTrue(fold.passed)
+    }
+
+    func testThinkingOffContentPassesReasoningCloseWithoutAReasoningChannel() {
+        var fold = NativeMTPAcceptanceCorpus.ReasoningCloseFold()
+        XCTAssertFalse(fold.passed)
+        fold.observe(reasoningNonempty: false, contentNonempty: true, toolCalls: 0)
+        XCTAssertTrue(fold.passed)
+        var toolOnly = NativeMTPAcceptanceCorpus.ReasoningCloseFold()
+        toolOnly.observe(reasoningNonempty: true, contentNonempty: false, toolCalls: 1)
+        XCTAssertTrue(toolOnly.passed)
+    }
+
+    func testThinkingSupportClosesEnableThinkingWhenTheTemplateHasTheToggle() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mtp-thinking-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try """
+        {% if enable_thinking is defined and enable_thinking is false %}<think></think>{% else %}<think>{% endif %}
+        """.write(to: directory.appendingPathComponent("chat_template.jinja"), atomically: true, encoding: .utf8)
+        let thinking = NativeMTPAcceptanceCorpus.thinkingSupport(in: directory)
+        let context = ModelRuntime.templateAdditionalContext(
+            supportsThinkingToggle: thinking.toggle,
+            supportsPreserveThinking: thinking.preserve
+        )
+        XCTAssertEqual(context?["enable_thinking"] as? Bool, false)
+        XCTAssertNil(context?["preserve_thinking"])
+
+        let plain = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mtp-plain-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: plain, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: plain) }
+        try "{% for message in messages %}{{ message.content }}{% endfor %}"
+            .write(to: plain.appendingPathComponent("chat_template.jinja"), atomically: true, encoding: .utf8)
+        let absent = NativeMTPAcceptanceCorpus.thinkingSupport(in: plain)
+        XCTAssertFalse(absent.toggle)
+        XCTAssertFalse(absent.preserve)
+        XCTAssertNil(ModelRuntime.templateAdditionalContext(
+            supportsThinkingToggle: absent.toggle,
+            supportsPreserveThinking: absent.preserve
+        ))
+    }
 }
 #endif

@@ -78,7 +78,7 @@ private struct NativeMTPSignedAcceptanceRunner {
         var rejected: UInt64 = 0
         var terminals = Set<String>()
         var toolBoundary = false
-        var reasoningClose = false
+        var reasoningClose = NativeMTPAcceptanceCorpus.ReasoningCloseFold()
         var nearTiedPositions = 0
         for row in records {
             guard let observed = row["checkpoint_observations"] as? [String: Any] else { throw ValidationError("missing checkpoint observations") }
@@ -95,7 +95,11 @@ private struct NativeMTPSignedAcceptanceRunner {
                 rejected = addedRejected.partialValue
                 terminals.insert(row["native_terminal"] as! String)
                 toolBoundary = toolBoundary || (observed["tool_call_count"] as! Int) > 0
-                reasoningClose = reasoningClose || (observed["reasoning_nonempty"] as! Bool && (observed["content_nonempty"] as! Bool || (observed["tool_call_count"] as! Int) > 0))
+                reasoningClose.observe(
+                    reasoningNonempty: observed["reasoning_nonempty"] as! Bool,
+                    contentNonempty: observed["content_nonempty"] as! Bool,
+                    toolCalls: observed["tool_call_count"] as! Int
+                )
                 nearTiedPositions += values.filter { ($0["ordinary_gap"] as! Double) <= 0.05 }.count
             }
         }
@@ -114,7 +118,15 @@ private struct NativeMTPSignedAcceptanceRunner {
                     actual.stopSequence, to: comparison.nativeTerminal)
                 let promptShape = NativeMTPAcceptanceCorpusBuilder.contains(expected.promptTokens, stratum: item.stratum)
                 let path = lastPath(recorder, item.id)
-                let admission = item.expectedNative ? path == .nativeMTP && delta.proposedTokens > 0 : path == .ordinary && delta.proposedTokens == 0
+                let selectorReason = recorder.requestSnapshot().last { $0.requestID == item.id }?.admission.selection.nativeMTPReason
+                let admission = NativeMTPAcceptanceCorpus.admissionHolds(
+                    expectedNative: item.expectedNative,
+                    nativePath: path == .nativeMTP,
+                    ordinaryPath: path == .ordinary,
+                    proposedTokens: delta.proposedTokens,
+                    nativeSelectedCount: comparison.nativeSelectedCount,
+                    terminal: nativeTerminal?.rawValue
+                )
                 let outputParity = same(expected, actual)
                 let passed = promptShape && admission && outputParity && comparison.passed
                     && ordinaryTerminal == nativeTerminal && comparison.retainedVectors == 0
@@ -136,7 +148,9 @@ private struct NativeMTPSignedAcceptanceRunner {
                     "native_selected_count": comparison.nativeSelectedCount,
                     "checkpoint_observations": [
                         "accepted": delta.acceptedTokens, "rejected": delta.rejectedTokens, "proposed": delta.proposedTokens,
-                        "decode_path": path?.rawValue ?? "unobserved", "tool_call_count": actual.toolCalls?.count ?? 0,
+                        "decode_path": path?.rawValue ?? "unobserved",
+                        "selector_reason": selectorReason?.rawValue ?? "",
+                        "tool_call_count": actual.toolCalls?.count ?? 0,
                         "reasoning_nonempty": actual.reasoningContent?.isEmpty == false, "content_nonempty": !actual.content.isEmpty,
                         "conversation_cache_key_absent": item.request.conversationKey == nil,
                     ],
@@ -152,9 +166,10 @@ private struct NativeMTPSignedAcceptanceRunner {
                     rejected += delta.rejectedTokens
                     if let terminal = nativeTerminal { terminals.insert(terminal.rawValue) }
                     toolBoundary = toolBoundary || actual.toolCalls?.isEmpty == false
-                    reasoningClose = reasoningClose || (
-                        actual.reasoningContent?.isEmpty == false
-                        && (!actual.content.isEmpty || actual.toolCalls?.isEmpty == false)
+                    reasoningClose.observe(
+                        reasoningNonempty: actual.reasoningContent?.isEmpty == false,
+                        contentNonempty: !actual.content.isEmpty,
+                        toolCalls: actual.toolCalls?.count ?? 0
                     )
                     nearTiedPositions += comparison.positions.filter { ($0.ordinaryGap ?? .infinity) <= 0.05 }.count
                 }
@@ -174,8 +189,8 @@ private struct NativeMTPSignedAcceptanceRunner {
             "eos_terminal": terminals.contains(NativeMTPLabNumericalOracle.Terminal.eos.rawValue),
             "stop_sequence_terminal": terminals.contains(NativeMTPLabNumericalOracle.Terminal.stopSequence.rawValue),
             "max_tokens_terminal": terminals.contains(NativeMTPLabNumericalOracle.Terminal.maxTokens.rawValue),
-            "generated_tool_boundary": toolBoundary,
-            "generated_reasoning_close": reasoningClose,
+            "generated_tool_boundary": corpus.expectsNativeToolBoundary ? toolBoundary : true,
+            "generated_reasoning_close": reasoningClose.passed,
             "near_tied_positions": nearTiedPositions > 0,
         ]
         let passed = checks.values.allSatisfy { $0 }
@@ -298,7 +313,14 @@ final class SignedAcceptanceCheckpoint {
             }
             guard let accepted = observations["accepted"] as? UInt64, let rejected = observations["rejected"] as? UInt64,
                   let proposed = observations["proposed"] as? UInt64, accepted <= proposed, rejected == proposed - accepted,
-                  item.expectedNative ? proposed > 0 : proposed == 0,
+                  NativeMTPAcceptanceCorpus.admissionHolds(
+                    expectedNative: item.expectedNative,
+                    nativePath: observations["decode_path"] as? String == "native_mtp",
+                    ordinaryPath: observations["decode_path"] as? String == "ordinary",
+                    proposedTokens: proposed,
+                    nativeSelectedCount: row["native_selected_count"] as? Int ?? 0,
+                    terminal: terminal
+                  ),
                   observations["reasoning_nonempty"] is Bool, observations["content_nonempty"] is Bool else { throw ValidationError("checkpoint aggregate observations") }
         }
         records = rows

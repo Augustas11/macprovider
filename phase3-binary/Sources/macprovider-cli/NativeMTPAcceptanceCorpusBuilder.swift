@@ -6,11 +6,18 @@ import MLXLMCommon
 /// message generator as the GLM lab fixture, without allocating model weights
 /// or creating an MLX array. The frozen corpus is checked again at execution.
 enum NativeMTPAcceptanceCorpusBuilder {
+    /// GLM keeps tool history and `reasoning_effort`. The Qwen 27B rows use
+    /// the same strata and terminal prompts without those fields: their
+    /// selector admits sampled text only, and a refused field fails R005
+    /// on the first case.
+    static let modelIDs: Set<String> = ["zai-org/glm-5.3-flash", "qwen/qwen3.6-27b", "qwen/qwen3.8-27b"]
+
     static func make(targetDirectory: URL, modelID: String) async throws -> Data {
-        guard modelID == "zai-org/glm-5.3-flash" else {
-            throw NativeMTPHardwareE2EError.assertionFailed("acceptance corpus is GLM-specific")
+        guard modelIDs.contains(modelID) else {
+            throw NativeMTPHardwareE2EError.assertionFailed("acceptance corpus has no design for \(modelID)")
         }
         let tokenizer = try await ChatTemplateCompatTokenizerLoader().load(from: targetDirectory)
+        let thinking = NativeMTPAcceptanceCorpus.thinkingSupport(in: targetDirectory)
         var cases: [[String: Any]] = []
         for stratum in NativeMTPAcceptanceCorpus.Stratum.allCases {
             let target: Int
@@ -28,7 +35,11 @@ enum NativeMTPAcceptanceCorpusBuilder {
                 }
                 let (padding, count) = try await NativeMTPBenchPrompts.fewestReachingSalts(target: target) { padding in
                     let request = try ChatCompletionRequest.parse(data: JSONSerialization.data(withJSONObject: object(padding)))
-                    let input = try ModelRuntime.userInput(for: request)
+                    let input = try ModelRuntime.userInput(
+                        for: request,
+                        templateSupportsThinkingToggle: thinking.toggle,
+                        templateSupportsPreserveThinking: thinking.preserve
+                    )
                     return try tokenizer.applyChatTemplate(
                         messages: DefaultMessageGenerator().generate(from: input),
                         tools: input.tools, additionalContext: input.additionalContext
@@ -70,7 +81,10 @@ enum NativeMTPAcceptanceCorpusBuilder {
     }
 
     static func requestObject(modelID: String, index: Int, padding: Int) -> [String: Any] {
-        let tools = index % 3 != 0
+        // Tool turns and reasoning_effort are native-eligible only on
+        // glm5_next. Qwen signs sampled text; those fields select ordinary.
+        let admitsToolAndReasoning = modelID == "zai-org/glm-5.3-flash"
+        let tools = admitsToolAndReasoning && index % 3 != 0
         let sampled = index % 3 != 1
         let stopBoundary = !tools && index % 17 == 0
         let context = "Acceptance fixture \(index). Context:" + String(repeating: " x", count: padding)
@@ -113,7 +127,9 @@ enum NativeMTPAcceptanceCorpusBuilder {
             object["reasoning_effort"] = "high"
         } else if stopBoundary {
             object["stop"] = [";"]
-            object["reasoning_effort"] = "low"
+            if admitsToolAndReasoning {
+                object["reasoning_effort"] = "low"
+            }
         }
         return object
     }
