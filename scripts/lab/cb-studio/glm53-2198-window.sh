@@ -63,7 +63,7 @@ LIVE_BINARY=$HOME/macprovider/macprovider-cli
 LOCK=$HOME/.glm53-2198-window.lock
 PORT=18095
 R015_FORMAL=0
-R015_CELLS=(s1-p1536-o128 s1-p1536-o512 s1-p4096-o128 s1-p4096-o512 s1-p32768-o128 s1-p32768-o512)
+R015_CELLS=(${=R015_ONLY_CELLS:-s1-p1536-o128 s1-p1536-o512 s1-p4096-o128 s1-p4096-o512 s1-p32768-o128 s1-p32768-o512})
 mkdir -p $OUT
 log() { echo "$(date -u +%FT%TZ) $*" | tee -a $OUT/summary.txt; }
 
