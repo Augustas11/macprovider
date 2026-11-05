@@ -2997,6 +2997,24 @@ struct AutotuneRecommendEngine {
             && Self.cachedBenchmarkAdmitted(benchmark, request: request, modelKey: modelKey)
     }
 
+    /// The §5 paid gates that need no benchmark, the same checks `isEligible`
+    /// applies before it reads the benchmark. Keep the two in step. The
+    /// SPEC-023-R028 upgrade plans its prefetch set with this predicate.
+    static func passesPreBenchmarkGates(
+        candidate: CandidateCatalog.Row,
+        demand: DemandRank.Row,
+        rateCardRow: RateCardProjection.Row?,
+        hardware: AutotuneRecommendHardware
+    ) -> Bool {
+        demand.recommendable
+            && candidate.runtimeStatus == "recommendable"
+            && rateCardRow != nil
+            && candidate.modelRevision != nil
+            && candidate.modelSHA256 != nil
+            && candidate.minRAMGB <= hardware.memoryGB - safetyMarginGB
+            && hardware.bandwidthTier.satisfies(minimum: candidate.minBandwidthTier)
+    }
+
     static func buyerTTFTCeilingExceeded(
         _ benchmark: CandidateBenchmark?,
         request: AutotuneRecommendRequest

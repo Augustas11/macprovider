@@ -4886,6 +4886,19 @@ struct UpdateCommand: AsyncParsableCommand {
             )
         } else {
             try await updater.run(checkOnly: check)
+            // SPEC-023-R028: after a successful update the installed (now
+            // updated) binary runs its own freshness check, because staleness
+            // is bound to the binary version this process no longer matches.
+            // A stale or missing recommendation re-tunes; the upgrade keeps the
+            // current model unless a strictly better one passes admission, so
+            // its failure never fails the update.
+            if !check, let executable = Bundle.main.executableURL {
+                let status = AutotuneModelUpgrade.runAfterUpdate(executable: executable, configPath: nil)
+                if status != 0 {
+                    FileHandle.standardError.write(Data("model_upgrade: re-tune exited with status \(status)\n".utf8))
+                }
+                return
+            }
         }
         if let staleSince = await RecommendationFreshnessChecker(providerID: resolvedConfig?.providerID).staleRecommendationSince() {
             FileHandle.standardError.write(Data("""

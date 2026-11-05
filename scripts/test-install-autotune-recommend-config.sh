@@ -110,6 +110,7 @@ receipt=""
 donor=0
 freshness=0
 command="${1:-}"
+subcommand_arg="${2:-}"
 printf '%s\n' "$*" >> "$FAKE_CLI_LOG"
 prefetch=0
 for arg in "$@"; do
@@ -130,6 +131,14 @@ while [ "$#" -gt 0 ]; do
   fi
   shift || true
 done
+
+if [ "$command" = "autotune" ] && [ "$subcommand_arg" = "--help" ]; then
+  printf 'USAGE: macprovider-cli autotune [--recommend] [--prefetch] [--apply]\n'
+  if [ "${FAKE_CLI_SUPPORTS_UPGRADE:-1}" = "1" ]; then
+    printf '  --upgrade   re-tune a stale recommendation (SPEC-023-R028)\n'
+  fi
+  exit 0
+fi
 
 [ -n "$config" ] || exit 64
 
@@ -221,14 +230,42 @@ run_fresh_donor_reuse_case() {
   [ "$SKIP_PROVIDER_START" -eq 1 ] || die "fresh donor reuse should not auto-start provider"
 }
 
+# SPEC-023-R028: a stale re-tune prefetches the whole signed catalog for the
+# Mac (the staged CLI plans the rows), never an incumbent-only allowlist.
 run_upgrade_prefetch_case() {
   : > "$FAKE_CLI_LOG"
   write_recommendation_config "org/existing-model" "/tmp/macprovider-existing-snapshot"
+  AUTOTUNE_MODEL_UPGRADE=0
   prefetch_upgrade_autotune_model
+  [ "$AUTOTUNE_MODEL_UPGRADE" = "1" ] \
+    || die "upgrade prefetch did not enable the model upgrade re-tune for a staged CLI that supports it"
+  grep -Fq \
+    'autotune --recommend --prefetch --upgrade --prefetch-receipt' \
+    "$FAKE_CLI_LOG" \
+    || die "upgrade prefetch did not run the unpinned --upgrade prefetch"
+  if grep -F -- '--prefetch --candidate-models' "$FAKE_CLI_LOG" >/dev/null; then
+    die "upgrade prefetch still pins --candidate-models to the installed model"
+  fi
+}
+
+# A staged release older than R028 has no --upgrade; keep the incumbent-only
+# prefetch instead of failing the install on an unknown flag.
+run_upgrade_prefetch_legacy_cli_case() {
+  : > "$FAKE_CLI_LOG"
+  write_recommendation_config "org/existing-model" "/tmp/macprovider-existing-snapshot"
+  AUTOTUNE_MODEL_UPGRADE=1
+  export FAKE_CLI_SUPPORTS_UPGRADE=0
+  prefetch_upgrade_autotune_model
+  unset FAKE_CLI_SUPPORTS_UPGRADE
+  [ "$AUTOTUNE_MODEL_UPGRADE" = "0" ] \
+    || die "legacy staged CLI must not get the --upgrade re-tune"
   grep -Fq \
     'autotune --recommend --prefetch --candidate-models namespace/existing-model --prefetch-receipt' \
     "$FAKE_CLI_LOG" \
-    || die "upgrade prefetch did not constrain artifact acquisition to the installed catalog model"
+    || die "legacy staged CLI prefetch did not fall back to the installed catalog model"
+  if grep -F -- '--upgrade' "$FAKE_CLI_LOG" | grep -Fv -- '--help' >/dev/null; then
+    die "legacy staged CLI received --upgrade"
+  fi
 }
 
 run_upgrade_missing_catalog_identity_case() {
@@ -353,17 +390,32 @@ run_upgrade_ignores_fresh_bounds_case() {
   MACPROVIDER_MAX_MODEL_SIZE="8B"
   model="initial/model"
   SKIP_PROVIDER_START=0
+  AUTOTUNE_MODEL_UPGRADE=0
+  run_autotune_recommend_apply
+  apply_line="$(grep -F -- 'autotune --recommend --apply' "$FAKE_CLI_LOG" | tail -n 1)"
+  printf '%s\n' "$apply_line" | grep -Fq -- '--candidate-models namespace/existing-model --prefetch-receipt' \
+    || die "legacy staged CLI upgrade must keep the installed-model allowlist (got: $apply_line)"
+  if printf '%s\n' "$apply_line" | grep -F -- 'mlx-community/Llama-3.2-3B-Instruct-4bit' >/dev/null; then
+    die "upgrade path must not mix MACPROVIDER_CANDIDATE_MODELS into the prefetch allowlist (got: $apply_line)"
+  fi
+
+  : > "$FAKE_CLI_LOG"
+  AUTOTUNE_MODEL_UPGRADE=1
   run_autotune_recommend_apply
   unset MACPROVIDER_CANDIDATE_MODELS
   unset MACPROVIDER_MAX_MODEL_SIZE
   apply_line="$(grep -F -- 'autotune --recommend --apply' "$FAKE_CLI_LOG" | tail -n 1)"
-  printf '%s\n' "$apply_line" | grep -Fq -- '--candidate-models namespace/existing-model' \
-    || die "upgrade path must keep the installed-model allowlist (got: $apply_line)"
-  if printf '%s\n' "$apply_line" | grep -F -- 'mlx-community/Llama-3.2-3B-Instruct-4bit' >/dev/null; then
-    die "upgrade path must not mix MACPROVIDER_CANDIDATE_MODELS into the prefetch allowlist (got: $apply_line)"
+  printf '%s\n' "$apply_line" | grep -Fq -- '--upgrade --prefetch-receipt' \
+    || die "upgrade path must benchmark the whole prefetch receipt with --upgrade (got: $apply_line)"
+  if printf '%s\n' "$apply_line" | grep -F -- '--candidate-models' >/dev/null; then
+    die "upgrade path must not pin --candidate-models (got: $apply_line)"
+  fi
+  if printf '%s\n' "$apply_line" | grep -F -- '--max-model-size' >/dev/null; then
+    die "upgrade path must not mix MACPROVIDER_MAX_MODEL_SIZE into the receipt allowlist (got: $apply_line)"
   fi
 }
 
+run_upgrade_prefetch_legacy_cli_case
 run_upgrade_prefetch_case
 run_upgrade_missing_catalog_identity_case
 run_paid_apply_case
@@ -378,9 +430,9 @@ run_fresh_empty_candidate_cell_case
 run_upgrade_ignores_fresh_bounds_case
 
 grep -Fq \
-  'autotune --recommend --apply --candidate-models namespace/existing-model --prefetch-receipt' \
+  'autotune --recommend --apply --upgrade --prefetch-receipt' \
   "$FAKE_CLI_LOG" \
-  || die "upgrade recommendation did not constrain benchmarking to the prefetched installed model"
+  || die "upgrade recommendation did not run the unpinned --upgrade re-tune over the prefetch receipt"
 
 prefetch_call_line="$(awk '$0 == "      prefetch_upgrade_autotune_model" { print NR; exit }' "$INSTALL_SH")"
 cutover_line="$(awk -v after="$prefetch_call_line" 'NR > after && $0 == "    ensure_port_free 1" { print NR; exit }' "$INSTALL_SH")"

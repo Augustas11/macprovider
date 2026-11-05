@@ -181,6 +181,7 @@ STAGED_PROVIDER_ID_PATH=""
 AUTOTUNE_BENCHMARK_PORT=""
 AUTOTUNE_UPGRADE_CANDIDATE_MODEL_ID=""
 AUTOTUNE_PREFETCH_RECEIPT_PATH=""
+AUTOTUNE_MODEL_UPGRADE=0
 MACPROVIDER_CLI_EXECUTABLE="$INSTALL_DIR/macprovider-cli"
 LIFECYCLE_STAGED_CLI_TRUSTED=0
 LAUNCHD_INSTALLED=0
@@ -1298,7 +1299,7 @@ Environment overrides:
   MACPROVIDER_CANDIDATE_MODELS   comma-separated HuggingFace ids passed to
                                  autotune --recommend --candidate-models on
                                  the fresh path (ignored during an upgrade
-                                 that is already pinned to the installed model)
+                                 re-tune, which plans its own signed rows)
   MACPROVIDER_MAX_MODEL_SIZE     e.g. 8B; passed to autotune --recommend
                                  --max-model-size on the fresh path so the
                                  first paid-yield sweep can skip larger
@@ -11433,8 +11434,8 @@ validate_autotune_candidate_model_id() {
 }
 
 append_fresh_autotune_operator_bounds() {
-  # Upgrade prefetch already pinned --candidate-models to the installed
-  # signed row. Do not mix operator bounds with that receipt allowlist.
+  # A SPEC-023-R028 upgrade benchmarks exactly its prefetch receipt. Do not
+  # mix operator bounds with that receipt allowlist.
   if [ "${#autotune_candidate_args[@]}" -gt 0 ]; then
     return 0
   fi
@@ -11516,10 +11517,19 @@ run_autotune_recommend_apply() {
       && [ -f "$AUTOTUNE_PREFETCH_RECEIPT_PATH" ] \
       && [ ! -L "$AUTOTUNE_PREFETCH_RECEIPT_PATH" ] \
       || die 6 "upgrade benchmark lacks its private prefetch receipt; the staged release will not acquire artifacts after cutover"
-    autotune_candidate_args=(
-      --candidate-models "$upgrade_candidate_model_id"
-      --prefetch-receipt "$AUTOTUNE_PREFETCH_RECEIPT_PATH"
-    )
+    if [ "${AUTOTUNE_MODEL_UPGRADE:-0}" = "1" ]; then
+      # SPEC-023-R028: benchmark every verified receipt row and switch only
+      # to a strictly better admitted model; the incumbent is one of them.
+      autotune_candidate_args=(
+        --upgrade
+        --prefetch-receipt "$AUTOTUNE_PREFETCH_RECEIPT_PATH"
+      )
+    else
+      autotune_candidate_args=(
+        --candidate-models "$upgrade_candidate_model_id"
+        --prefetch-receipt "$AUTOTUNE_PREFETCH_RECEIPT_PATH"
+      )
+    fi
   fi
   append_fresh_autotune_operator_bounds
   # A fresh Mac's very first benchmark can run cold or under thermal throttling
@@ -11643,6 +11653,18 @@ own_macprovider_cli_holds_live_port() {
   return 1
 }
 
+# A staged release older than SPEC-023-R028 has no `autotune --upgrade`; an
+# installer pinned to such a release keeps the incumbent-only re-tune. The help
+# text is captured first so a pipe cannot fail the probe under pipefail.
+staged_cli_supports_model_upgrade() {
+  local help_text
+  help_text="$(run_macprovider_cli_with_amfi_retry autotune --help 2>/dev/null)" || return 1
+  case "$help_text" in
+    *--upgrade*) return 0 ;;
+  esac
+  return 1
+}
+
 prefetch_upgrade_autotune_model() {
   upgrade_candidate_model_id="${AUTOTUNE_UPGRADE_CANDIDATE_MODEL_ID:-}"
   if [ "${REFERRAL_REPLACE_INCUMBENT:-0}" = "1" ] && [ "${FRESH_REFERRAL_BOOTSTRAP:-0}" -eq 1 ]; then
@@ -11674,15 +11696,25 @@ prefetch_upgrade_autotune_model() {
     return 0
   fi
   AUTOTUNE_PREFETCH_RECEIPT_PATH="$staging_dir/autotune-prefetch-receipt.json"
-  log "Prefetching and verifying the installed model's exact signed artifact while the current provider remains available."
-  run_macprovider_cli_with_amfi_retry autotune --recommend --prefetch \
-    --candidate-models "$upgrade_candidate_model_id" \
+  # SPEC-023-R028: prefetch the installed model plus every signed row that fits
+  # this Mac, so a stale re-tune can move to a strictly better model. Rows that
+  # fail prefetch are dropped; the installed model must verify.
+  if staged_cli_supports_model_upgrade; then
+    AUTOTUNE_MODEL_UPGRADE=1
+    upgrade_prefetch_args=(--upgrade)
+    log "Prefetching and verifying the installed model and every signed model that fits this Mac while the current provider remains available."
+  else
+    AUTOTUNE_MODEL_UPGRADE=0
+    upgrade_prefetch_args=(--candidate-models "$upgrade_candidate_model_id")
+    log "The staged release has no model upgrade re-tune; prefetching only the installed model while the current provider remains available."
+  fi
+  run_macprovider_cli_with_amfi_retry autotune --recommend --prefetch "${upgrade_prefetch_args[@]}" \
     --prefetch-receipt "$AUTOTUNE_PREFETCH_RECEIPT_PATH" \
     --config "$CONFIG_PATH" --no-submit-hardware-evidence >/dev/null \
     || die 6 "installed model artifact prefetch failed; the active provider was not stopped"
   [ -f "$AUTOTUNE_PREFETCH_RECEIPT_PATH" ] && [ ! -L "$AUTOTUNE_PREFETCH_RECEIPT_PATH" ] \
     || die 6 "installed model artifact prefetch did not produce a private receipt; the active provider was not stopped"
-  log "Installed model artifact is locally verified; upgrade benchmarking is limited to $upgrade_candidate_model_id."
+  log "Signed model artifacts are locally verified; benchmarking keeps $upgrade_candidate_model_id unless a strictly better model passes admission."
 }
 
 use_fresh_recommendation_if_available() {

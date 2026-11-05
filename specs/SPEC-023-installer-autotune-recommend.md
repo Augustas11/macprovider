@@ -1,6 +1,6 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.22.42
+version: v0.22.43
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-10-02
@@ -8,6 +8,15 @@ lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-
 
 ## Change log
 
+- **v0.22.43 (2026-11-14, Related: #2367, #2154)** — Registers `SPEC-023-R029`
+  (§9.4): a stale or missing recommendation re-tunes an existing provider
+  over every signed row that fits its Mac, not only the incumbent. The
+  provider switches only to a strictly better admitted model under the §4 /
+  §4.1 selection rule. The incumbent keeps serving through prefetch and hash
+  verification. A failure at any step leaves the config and model
+  unchanged. Donor-mode, pool-model and unsigned-identity configs keep their
+  model. The §2 non-goal "does not auto-switch models" is replaced with this
+  rule. The §9 re-run rule and AC-25 now name the upgrade; AC-52 is added.
 - **v0.22.42 (2026-11-13, Related: #2302)** — Adds §3.8 and registers
   `SPEC-023-R028`: each catalog release ships `release.json.sig`, one
   Ed25519 signature over its `release.json`, which binds every feed digest.
@@ -1102,7 +1111,7 @@ lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-
 ## 2. Non-goals
 
 - This SPEC does not solve "will buyers show up." It recommends a model from available market and hardware signals; it does not create market demand.
-- This SPEC does not auto-switch models without operator action. NiceHash QuickMiner-style profit switching is out of scope for v0.1.
+- This SPEC does not do continuous profit switching. A provider changes model only through an explicit recommendation apply or the stale-recommendation upgrade of `SPEC-023-R029` (§9.4). Coordinator SIGHUP, rate-card hot reload and market price changes do not by themselves start a re-tune. NiceHash QuickMiner-style profit switching stays out of scope.
 - This SPEC does not change rate-card content. Wave 1 owns the rate-card rows and prices.
 - This SPEC does not change gateway billing or coordinator settlement. Waves 0a/0b already shipped the money-path settlement and model-key normalization fixes.
 - This SPEC does not add provider-side TPS reputation feedback to the coordinator. That is deferred to v0.2.
@@ -3013,7 +3022,7 @@ validation.
 `autotune --recommend` re-runs or prompts the operator in exactly these v0.4 cases:
 
 1. Manual invocation: `malibu-cli autotune --recommend`.
-2. `malibu-cli update` or installer rerun after install, when the live rate-card version, live demand-rank version, signed candidate-catalog version/hash, binary version, stable hardware identity hash, or benchmark age differs from stored recommendation state.
+2. `malibu-cli update` or installer rerun after install, when the live rate-card version, live demand-rank version, signed candidate-catalog version/hash, binary version, stable hardware identity hash, or benchmark age differs from stored recommendation state. That re-tune is the `SPEC-023-R029` upgrade (§9.4) over every signed row that fits this Mac. It MUST NOT be limited to re-confirming the incumbent model.
 3. Installer rerun when no stored recommendation exists.
 
 v0.4 explicitly does not re-run automatically on coordinator SIGHUP or rate-card hot reload. Coordinator broadcast of recommendation changes is deferred to v0.2 follow-up.
@@ -3187,6 +3196,70 @@ model maximum, memory-safe context, draft cap)`, where:
      memory-safe context can exceed the three-quarters share by the KV of the
      4,000-token floor (item 3) while still fitting physical memory.
 
+### 9.4 Stale-recommendation model upgrade (v0.22.43)
+
+**SPEC-023-R029 — Stale-recommendation model upgrade.**
+When the stored recommendation is stale or missing under §9, an existing
+provider whose config carries a signed catalog identity MUST re-tune over
+the whole signed catalog for its Mac and MUST switch to a strictly better
+admitted model when one exists. `autotune --recommend --upgrade` is the
+single entry point. The installer re-tune and `malibu-cli update` MUST both
+use it.
+
+1. **Candidates.** The run plans the incumbent row plus every signed row
+   that passes the pre-benchmark §5 gates on this Mac: demand
+   `recommendable`, `runtime_status == "recommendable"`, a rate-card row, a
+   pinned revision and SHA-256, `min_ram_gb <= memory_gb - 4`, and the
+   minimum bandwidth tier. A `model_id` shared by more than one signed row
+   is not planned unless it is the incumbent, because prefetch requires an
+   exact row match. The run MUST NOT restrict candidates to the incumbent,
+   and it ignores `MACPROVIDER_CANDIDATE_MODELS` / `MACPROVIDER_MAX_MODEL_SIZE`.
+2. **Prefetch.** Every planned row is downloaded and hash-verified against
+   its signed row while the incumbent keeps serving. A row whose prefetch
+   fails is dropped with a diagnostic. The incumbent's artifact MUST verify;
+   otherwise the run fails before the provider is stopped.
+3. **Drain.** `malibu-cli update` waits until the local provider reports
+   zero `requests_in_flight` and zero `requests_queued`, for at most 600
+   seconds (the upper bound of `swap_drain_timeout_seconds`). A provider
+   that stays busy is not stopped; the run exits and retries on the next
+   update. `SPEC-023-R022` residency then stops the provider through its
+   normal SIGTERM drain and restores it at exit. The installer keeps its own
+   cutover stop.
+4. **Benchmark.** Probes use only the prefetched, verified artifacts, so
+   nothing is downloaded while the incumbent is stopped. Each row runs the
+   same Stage-1 admission as any recommendation: swap and thermal vetoes,
+   the buyer-TTFT ceiling and the cached-evidence binding.
+5. **Decision.** Let S be the engine's selected paid row and I the
+   incumbent. The provider switches to S only when S is not I and one of
+   these holds: I is absent from the signed catalog or not eligible; I is
+   demoted by a §4.1 policy rule (RAM-class onboarding SKU or 8 GB tier
+   preference) and S is not; or S's unrounded ordering score (§4) is
+   strictly greater than I's. An equal score, or an order settled only by
+   the TPS, demand or model-key tiebreakers, keeps I. No margin beyond
+   strict greater-than applies. The client has no hysteresis constant, and
+   the demand-rank `min_dwell_hours` field is not client selection policy.
+6. **Apply.** On a switch, `ConfigApplier` writes S's row. On a keep, the
+   model does not change. When I passed admission in this run, I's own
+   benchmarked row is re-applied, as the pre-v0.22.39 re-tune did. When any
+   step fails (prefetch of I, drain, benchmark, decision or apply), the run
+   writes no config and the provider is restored on its incumbent.
+7. **Pins.** The upgrade never moves a provider whose config has
+   `donor_mode: true`, a `pool_model_id`, or no signed catalog identity
+   (`model_catalog_key` and `model_catalog_model_id` both absent). Such a
+   provider keeps its model. These are the only model pins the CLI has. In
+   every other case the upgrade is on by default.
+8. **Entry points.** `--upgrade --apply` without a receipt runs steps 1–6 in
+   one process. It returns without a change when the recommendation is
+   fresh. `malibu-cli update` invokes it with the installed binary after
+   every successful mutating update, because freshness is bound to that
+   binary's version. The installer splits
+   it: `--upgrade --prefetch --prefetch-receipt <path>` while the incumbent
+   serves, then `--upgrade --apply --prefetch-receipt <path>` after its
+   cutover stop. With a receipt, the benchmark set is exactly the receipt's
+   rows. `--upgrade` cannot be combined with `--candidate-models`,
+   `--check-only`, `--freshness-check`, `--recover-hardware-admission` or
+   the calibration flags. `--donor-mode` requires a receipt.
+
 ## 10. Goodhart mitigations
 
 | ID | Mitigation | SPEC-023 implementation |
@@ -3245,7 +3318,7 @@ AC-23: Applying donor mode for a non-recommendable row does not auto-start or au
 
 AC-24: `malibu-cli status` shows `DONOR MODE` when `donor_mode: true`.
 
-AC-25: `malibu-cli update` and installer rerun compare stored `rate_card_version`, `demand_rank_version`, `candidate_catalog_version/hash`, `binary_version`, `hardware_identity_hash`, and benchmark age with live/current values and prompt re-tune when any changed or expired.
+AC-25 **[amended v0.22.43]**: `malibu-cli update` and installer rerun compare stored `rate_card_version`, `demand_rank_version`, `candidate_catalog_version/hash`, `binary_version`, `hardware_identity_hash`, and benchmark age with live/current values. When any changed or expired, they run the `SPEC-023-R029` upgrade re-tune over every signed row that fits the Mac, not an incumbent-only re-confirmation.
 
 AC-26: `malibu-cli status` emits the stale-recommendation warning in §9 when stored recommendation metadata differs from live metadata.
 
@@ -3321,6 +3394,16 @@ AC-51 (`SPEC-023-R027`, candidate filters): A signed candidate can be selected
 by catalog key or Hugging Face `model_id`. A filter containing unmatched
 entries fails explicitly and names every unmatched entry, even alongside a
 valid key; it does not silently return `no_eligible_model`.
+
+AC-52 (`SPEC-023-R029`, stale-recommendation upgrade): A strictly better
+admitted row (higher unrounded ordering score, or the incumbent demoted by a
+§4.1 policy rule) produces a switch. An equal score, or an incumbent that is
+still the selected row, keeps the incumbent. A better row whose prefetch
+failed or whose benchmark failed admission keeps the incumbent, and its own
+row is the only config target. A failed incumbent prefetch fails the run.
+`donor_mode`, `pool_model_id` and a config without signed catalog identity
+keep the model. The installer stale re-tune passes `--upgrade` to both the
+prefetch and the apply calls, with no `--candidate-models` allowlist.
 
 AC-OMLX-1: A row with `bench_gate.provenance.source == "omlx_seeded"` and `runtime_status == "recommendable"` is rejected by catalog validation.
 

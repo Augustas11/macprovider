@@ -110,6 +110,9 @@ struct AutotuneCommand: AsyncParsableCommand {
     @Flag(help: "With --recommend, emit a recommendation without applying config or updating recommendation state.")
     var checkOnly = false
 
+    @Flag(help: "With --recommend and --apply (or --prefetch --prefetch-receipt), re-tune a stale recommendation over every signed row that fits this Mac and switch only to a strictly better admitted model.")
+    var upgrade = false
+
     @Flag(help: "With --recommend --check-only, emit model_recommendation_check_event.v1 progress frames before the final recommendation JSON.")
     var progressJSON = false
 
@@ -195,6 +198,10 @@ struct AutotuneCommand: AsyncParsableCommand {
             }
             if prefetch {
                 try await runRecommendationPrefetch()
+                return
+            }
+            if upgrade, prefetchReceipt == nil {
+                try await runModelUpgrade(dependencies: dependencies)
                 return
             }
             if checkOnly {
@@ -899,7 +906,7 @@ struct AutotuneCommand: AsyncParsableCommand {
         if prefetch && donorMode {
             throw ValidationError("--prefetch cannot be combined with --donor-mode")
         }
-        if prefetch && candidateModels == nil {
+        if prefetch && candidateModels == nil && !upgrade {
             throw ValidationError("--prefetch requires an explicit --candidate-models allowlist")
         }
         if prefetch && prefetchReceipt == nil {
@@ -911,8 +918,25 @@ struct AutotuneCommand: AsyncParsableCommand {
         if prefetchReceipt != nil && !recommend {
             throw ValidationError("--prefetch-receipt requires --recommend")
         }
-        if prefetchReceipt != nil && apply && candidateModels == nil {
+        if prefetchReceipt != nil && apply && candidateModels == nil && !upgrade {
             throw ValidationError("cache-only --apply requires an explicit --candidate-models allowlist")
+        }
+        if upgrade {
+            guard recommend else {
+                throw ValidationError("--upgrade requires --recommend")
+            }
+            guard apply || prefetch else {
+                throw ValidationError("--upgrade requires --apply or --prefetch")
+            }
+            if candidateModels != nil {
+                throw ValidationError("--upgrade plans its own candidates and cannot be combined with --candidate-models")
+            }
+            if checkOnly || freshnessCheck || recoverHardwareAdmission || calibrateContext || calibrateConcurrency {
+                throw ValidationError("--upgrade cannot be combined with --check-only, --freshness-check, --recover-hardware-admission, or calibration")
+            }
+            if donorMode && prefetchReceipt == nil {
+                throw ValidationError("--upgrade --donor-mode requires --prefetch-receipt")
+            }
         }
         if checkOnly && !recommend {
             throw ValidationError("--check-only requires --recommend")
@@ -1047,7 +1071,7 @@ struct AutotuneCommand: AsyncParsableCommand {
         }
     }
 
-    private func runAutotuneRecommend() async throws {
+    private func runAutotuneRecommend(upgradeReceipt: AutotuneArtifactPrefetchReceipt? = nil) async throws {
         // ARCH-M-1 orphan-child fix: become process-group leader BEFORE
         // spawning any CandidateProviderRunner subprocess. Combined with the
         // cascading signal handler below, this lets the caller (App) send
@@ -1083,22 +1107,46 @@ struct AutotuneCommand: AsyncParsableCommand {
         let identity = HMACIdentity.derive(secret: secret, fingerprint: fingerprint, providerID: resolvedConfig?.providerID)
         let hardware = AutotuneRecommendHardware(fingerprint: fingerprint, hmacIdentity: identity)
         let catalogSHA = AutotuneStaticInputs.candidateCatalogSHA256(bytes: catalog.selectedBytes)
-        let candidateModelFilter = try recommendCandidateModelFilter(catalog: catalog.value)
+        var candidateModelFilter = try recommendCandidateModelFilter(catalog: catalog.value)
+        let receipt: AutotuneArtifactPrefetchReceipt?
+        if let upgradeReceipt {
+            receipt = upgradeReceipt
+        } else if let prefetchReceipt {
+            receipt = try AutotuneArtifactPrefetchReceipt.load(
+                from: URL(fileURLWithPath: ConfigLoader.expandTilde(prefetchReceipt))
+            )
+        } else {
+            receipt = nil
+        }
         let prefetchedArtifacts: [String: PrefetchedModelArtifact]?
-        if let prefetchReceipt {
-            let receiptURL = URL(fileURLWithPath: ConfigLoader.expandTilde(prefetchReceipt))
-            let receipt = try AutotuneArtifactPrefetchReceipt.load(from: receiptURL)
+        if let receipt {
             let validated = try receipt.validatedArtifacts(
                 candidateCatalog: catalog.value,
                 candidateCatalogSHA256: catalogSHA
             )
             let receiptModelIDs = Set(validated.values.map(\.modelID))
+            // SPEC-023-R028: an upgrade benchmarks exactly the receipt's rows.
+            if upgrade {
+                candidateModelFilter = receiptModelIDs
+            }
             guard candidateModelFilter == receiptModelIDs else {
                 throw ValidationError("--candidate-models must exactly match the prefetch receipt")
             }
             prefetchedArtifacts = validated
         } else {
             prefetchedArtifacts = nil
+        }
+        let upgradeIncumbentKey: String?
+        if upgrade {
+            guard receipt != nil else {
+                throw ValidationError("model upgrade requires prefetched, verified artifacts")
+            }
+            upgradeIncumbentKey = AutotuneModelUpgrade.incumbentCatalogKey(config: resolvedConfig, catalog: catalog.value)
+            if upgradeIncumbentKey == nil, !donorMode {
+                throw ValidationError("model upgrade: the configured model has no signed catalog row")
+            }
+        } else {
+            upgradeIncumbentKey = nil
         }
         let now = Date()
         var warnings = Set<AutotuneRecommendWarning>()
@@ -1232,8 +1280,25 @@ struct AutotuneCommand: AsyncParsableCommand {
         if apply, donorMode, result.donorFallbackModel != nil, donorSelected == nil {
             throw ValidationError("selected donor recommendation was not available for config apply")
         }
-        let selectedForConfig = paidSelected ?? donorSelected
-        let applyingDonorFallback = paidSelected == nil && selectedForConfig == donorSelected
+        var selectedForConfig = paidSelected ?? donorSelected
+        var applyingDonorFallback = paidSelected == nil && selectedForConfig == donorSelected
+        if let upgradeIncumbentKey, !donorMode {
+            let decision = AutotuneModelUpgrade.decide(result: result, incumbentKey: upgradeIncumbentKey)
+            selectedForConfig = AutotuneModelUpgrade.configTarget(
+                for: decision,
+                result: result,
+                incumbentKey: upgradeIncumbentKey,
+                benchmarks: request.benchmarks
+            )
+            applyingDonorFallback = false
+            switch decision {
+            case let .switchModel(from, to, reason):
+                FileHandle.standardError.write(Data("model_upgrade: switch from=\(from) to=\(to) reason=\(reason)\n".utf8))
+            case let .keep(reason):
+                let action = selectedForConfig == nil ? "config unchanged" : "re-applying the incumbent row"
+                FileHandle.standardError.write(Data("model_upgrade: keep \(upgradeIncumbentKey) reason=\(reason); \(action)\n".utf8))
+            }
+        }
         var serveConfig: RecommendationCore?
         var configurationApplied = false
         if let selected = selectedForConfig,
@@ -1777,6 +1842,24 @@ struct AutotuneCommand: AsyncParsableCommand {
             throw ValidationError(AutotuneRecommendEngine.paidTrustBlockMessage(warnings))
         }
 
+        if upgrade {
+            guard let prefetchReceipt else {
+                throw ValidationError("--prefetch requires --prefetch-receipt")
+            }
+            let receipt = try await Self.modelUpgradePrefetchReceipt(
+                catalog: catalog,
+                demandRank: inputs.demand.value,
+                rateCard: inputs.rateCard.value,
+                resolvedConfig: resolvedConfig,
+                hardware: hardware
+            )
+            try receipt.write(to: URL(fileURLWithPath: ConfigLoader.expandTilde(prefetchReceipt)))
+            for artifact in receipt.artifacts.sorted(by: { $0.modelID < $1.modelID }) {
+                print("prefetch_verified model=\(artifact.modelID) path=\(artifact.path) sha256=\(artifact.sha256)")
+            }
+            return
+        }
+
         guard let requestedModelIDs = try recommendCandidateModelFilter(catalog: catalog.value), !requestedModelIDs.isEmpty else {
             throw ValidationError("--prefetch requires an explicit --candidate-models allowlist")
         }
@@ -1818,6 +1901,113 @@ struct AutotuneCommand: AsyncParsableCommand {
         for artifact in outcome.artifacts.sorted(by: { $0.modelID < $1.modelID }) {
             print("prefetch_verified model=\(artifact.modelID) path=\(artifact.path) sha256=\(artifact.sha256)")
         }
+    }
+
+    /// SPEC-023-R028 in one process (`malibu-cli update`): freshness, pins,
+    /// prefetch while the incumbent serves, idle wait, then the R022-isolated
+    /// benchmark and guarded apply over the verified artifacts only.
+    private func runModelUpgrade(dependencies: AutotuneRunDependencies) async throws {
+        let resolvedConfig = try? ConfigLoader.load(cli: CLIOverrides(configPath: config))
+        let status = await RecommendationFreshnessChecker(providerID: resolvedConfig?.providerID).status()
+        switch status {
+        case .fresh:
+            print("model_upgrade: recommendation_fresh")
+            return
+        case .trustBlocked:
+            if let failure = Self.recommendationFreshnessFailure(for: status) {
+                FileHandle.standardError.write(Data(failure.diagnostic.utf8))
+                throw failure.exitCode
+            }
+            return
+        case .missing, .stale:
+            break
+        }
+        if let reason = AutotuneModelUpgrade.pinReason(config: resolvedConfig) {
+            print("model_upgrade: skipped reason=\(reason); the current model is kept")
+            return
+        }
+        guard let resolvedConfig else { return }
+
+        let inputs = await AutotuneStaticInputs().loadRecommendationInputs()
+        let warnings = Self.recommendationPrefetchTrustWarnings(
+            demand: inputs.demand,
+            catalog: inputs.candidate,
+            rateCard: inputs.rateCard,
+            artifactFeed: inputs.artifactFeed
+        )
+        if AutotuneRecommendEngine.paidTrustBlocks(warnings) {
+            throw ValidationError(AutotuneRecommendEngine.paidTrustBlockMessage(warnings))
+        }
+        let fingerprint = MachineFingerprinter().sample()
+        let secret = try AutotuneHMACSecretStore(path: AutotuneHMACSecretStore.defaultPath).loadOrCreate()
+        let identity = HMACIdentity.derive(secret: secret, fingerprint: fingerprint, providerID: resolvedConfig.providerID)
+        let receipt = try await Self.modelUpgradePrefetchReceipt(
+            catalog: inputs.candidate,
+            demandRank: inputs.demand.value,
+            rateCard: inputs.rateCard.value,
+            resolvedConfig: resolvedConfig,
+            hardware: AutotuneRecommendHardware(fingerprint: fingerprint, hmacIdentity: identity)
+        )
+        guard await AutotuneModelUpgrade.waitForLocalProviderIdle(port: resolvedConfig.port) else {
+            FileHandle.standardError.write(Data(
+                "model_upgrade: the provider stayed busy for \(AutotuneModelUpgrade.idleWaitCeilingSeconds) s; it was not stopped and the config is unchanged\n".utf8
+            ))
+            throw ExitCode(75)
+        }
+        try await withRecommendLiveServeIsolation(dependencies: dependencies) {
+            try await runAutotuneRecommend(upgradeReceipt: receipt)
+        }
+    }
+
+    /// SPEC-023-R028 steps 1-2: plan the incumbent plus every row that fits
+    /// this Mac (only the incumbent for a pinned config), prefetch and verify
+    /// them while the incumbent serves, and drop rows that fail.
+    static func modelUpgradePrefetchReceipt(
+        catalog: AutotuneStaticSelection<CandidateCatalog>,
+        demandRank: DemandRank,
+        rateCard: RateCardProjection,
+        resolvedConfig: AppConfig?,
+        hardware: AutotuneRecommendHardware
+    ) async throws -> AutotuneArtifactPrefetchReceipt {
+        guard let incumbentKey = AutotuneModelUpgrade.incumbentCatalogKey(config: resolvedConfig, catalog: catalog.value),
+              let incumbentRow = catalog.value.rows[incumbentKey]
+        else {
+            throw ValidationError("model upgrade: the configured model has no signed catalog row")
+        }
+        let modelIDs: Set<String>
+        if let reason = AutotuneModelUpgrade.pinReason(config: resolvedConfig) {
+            FileHandle.standardError.write(Data("model_upgrade: pinned reason=\(reason); re-tuning the incumbent only\n".utf8))
+            modelIDs = [incumbentRow.modelID]
+        } else {
+            modelIDs = AutotuneModelUpgrade.candidateModelIDs(
+                catalog: catalog.value,
+                demandRank: demandRank,
+                rateCard: rateCard,
+                hardware: hardware,
+                incumbentKey: incumbentKey
+            )
+        }
+        FileHandle.standardError.write(Data(
+            "model_upgrade: prefetching \(modelIDs.count) signed candidate(s) while the current provider keeps serving\n".utf8
+        ))
+        let outcome = try await AutotuneRecommendationBenchmarker(
+            artifactResolver: CachedModelArtifactResolver.forConfig(resolvedConfig)
+        ).prefetchArtifacts(
+            candidateCatalog: catalog.value,
+            hardware: hardware,
+            candidateModelIDs: modelIDs
+        )
+        for diagnostic in outcome.diagnostics.sorted(by: { $0.modelID < $1.modelID }) {
+            FileHandle.standardError.write(Data("model_upgrade: dropped \(diagnostic.modelID): \(diagnostic.reason)\n".utf8))
+        }
+        let artifacts = try AutotuneModelUpgrade.verifiedUpgradeArtifacts(outcome, incumbentModelID: incumbentRow.modelID)
+        return AutotuneArtifactPrefetchReceipt(
+            schemaVersion: AutotuneArtifactPrefetchReceipt.currentSchemaVersion,
+            candidateCatalogSHA256: AutotuneStaticInputs.candidateCatalogSHA256(bytes: catalog.selectedBytes),
+            candidateCatalogVersion: catalog.value.version,
+            candidateCatalogPolicyVersion: catalog.value.policyVersion,
+            artifacts: artifacts
+        )
     }
 
     static func recommendationPrefetchTrustWarnings(
