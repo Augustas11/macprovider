@@ -32,7 +32,7 @@
   "slots": [
     1
   ],
-  "sustained_cell_id": "s1-p1536-o512",
+  "sustained_cell_id": "s1-p32768-o512",
   "sustained_seconds": 0,
   "swift_version": "Apple Swift version 6.3.3 (swiftlang-6.3.3.1.3 clang-2100.1.1.101)",
   "target_sha256": "7299b6a71a38490e378e9eb6524c426392aa96e3fd561007e0540134bbef48f9",
