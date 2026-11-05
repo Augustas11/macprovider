@@ -17,6 +17,10 @@ let package = Package(
         )
     ],
     dependencies: [
+        // Tag 3.32.3-macprovider.24 (#2189) on 3.32.3-macprovider.22: The
+        // MiniMax M3.1-Flash checkpoint loads within 256 GB: the gate/up
+        // tensors that load-time fusion replaces are freed as each layer
+        // fuses instead of staying resident beside the fused weights.
         // Tag 3.32.3-macprovider.22 (#2189) on 3.32.3-macprovider.21: MiniMax
         // M3 text model (`4f96c37`, `3c0a551`, `d755f93`), with each sparse
         // row keeping its own cache (`7feb4c3`) so a continuous batch matches
@@ -58,7 +62,7 @@ let package = Package(
         // compatible per-column attention while retaining row-owned caches.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "7feb4c35f44e2192ba531bb837db4a7b4d15c746"
+            revision: "39ccc0ec28f44f08f8b8032a92ebd1b2e438ebf4"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",
