@@ -4,6 +4,7 @@ import io
 import json
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 import scripts.native_mtp_r015_analyze as analyzer
@@ -889,6 +890,183 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
                 self.assertGreater(entry["confidence_level"], 0.95)
         for name in ("mtp_acceptance_rate", "target_forwards_per_committed_token", "mtp_proposed_tokens"):
             self.assertIn(name, reported["native_mtp"])
+
+    # SPEC-048 0.1.72 cap extension: the prior formal 4096-cap matrix plus an
+    # extension run holding only the 32768 cells under the current gate set.
+    EXTENSION_POLICY = {
+        "blocks": 10,
+        "maximum_prompt_tokens": 32768,
+        "prompt_tokens": [32768],
+        "gated_cells": [],
+        "sustained_cell_id": "s1-p32768-o512",
+        "provider_commit": "c" * 40,
+        "mlx_fork_revision": "d" * 40,
+    }
+
+    def _cap_extension_case(self, root, *, extension=None, prior=None, record=None, after=None):
+        prior_dir, extension_dir = root / "prior", root / "extension"
+        prior_dir.mkdir()
+        extension_dir.mkdir()
+        prior_runs, prior_policy = self._write_case(prior_dir, **(prior or {}))
+        prior_analysis = prior_dir / "analysis.json"
+        prior_analysis.write_text(json.dumps(analyzer.analyze(prior_runs, prior_policy), indent=2, sort_keys=True), encoding="utf-8")
+        options = {
+            "exploratory_policy": True,
+            "positive_gates": True,
+            "write_sustained": False,
+            "header_overrides": {"provider_commit": "c" * 40, "mlx_fork_revision": "d" * 40},
+            **(extension or {}),
+        }
+        options["policy_overrides"] = {**self.EXTENSION_POLICY, **options.get("policy_overrides", {})}
+        runs, policy = self._write_case(extension_dir, **options)
+
+        def sha(path):
+            return hashlib.sha256(path.read_bytes()).hexdigest()
+
+        body = {
+            "schema": analyzer.CAP_EXTENSION_SCHEMA,
+            "maximum_prompt_tokens": 32768,
+            "decode_path_change": "test: drafter prompt window starts at P - 4096; zero at or below 4096",
+            "prior_policy_sha256": sha(prior_policy),
+            "prior_runs_sha256": sha(prior_runs),
+            "prior_analysis_sha256": sha(prior_analysis),
+            "extension_policy_sha256": sha(policy),
+            "extension_runs_sha256": sha(runs),
+            "provider_commit": "c" * 40,
+            "mlx_fork_revision": "d" * 40,
+            **(record or {}),
+        }
+        record_path = root / "cap-extension.json"
+        record_path.write_text(json.dumps(body, sort_keys=True), encoding="utf-8")
+        paths = (record_path, runs, policy, prior_policy, prior_runs, prior_analysis)
+        if after:
+            after(*paths)
+        return paths
+
+    def _cap_extension(self, **kwargs):
+        with tempfile.TemporaryDirectory() as tmp:
+            return analyzer.analyze_cap_extension(*self._cap_extension_case(Path(tmp), **kwargs))
+
+    def test_cap_extension_reuses_prior_matrix_and_judges_only_new_cells(self):
+        result = self._cap_extension()
+        self.assertEqual(result["overall_status"], "PASS", result)
+        self.assertEqual(result["prior_maximum_prompt_tokens"], 4096)
+        self.assertEqual(result["maximum_prompt_tokens"], 32768)
+        self.assertEqual(result["prior_gate_set"], analyzer.GATE_SET_AMENDED)
+        self.assertEqual(result["extension_gate_set"], analyzer.GATE_SET_POSITIVE)
+        self.assertEqual(result["reused_cells"], ["s1-p1536-o128", "s1-p1536-o512", "s1-p4096-o128", "s1-p4096-o512", "s2-p1536-o512"])
+        self.assertEqual([cell["cell_id"] for cell in result["extension_cells"]], ["s1-p32768-o128", "s1-p32768-o512"])
+        self.assertEqual(result["combined_holm"]["hypotheses"], 7 * 5)
+        self.assertEqual(result["combined_holm"]["failures"], [])
+        self.assertEqual(result["extension_provider_commit"], "c" * 40)
+
+    def test_cap_extension_cli_prints_one_json_document(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            record, runs, policy, prior_policy, prior_runs, prior_analysis = self._cap_extension_case(Path(tmp))
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = main([str(runs), str(policy), "--cap-extension", str(record), "--prior-policy", str(prior_policy),
+                             "--prior-runs", str(prior_runs), "--prior-analysis", str(prior_analysis)])
+            self.assertEqual(code, 0)
+            self.assertEqual(json.loads(out.getvalue())["overall_status"], "PASS")
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                main([str(runs), str(policy), "--cap-extension", str(record)])
+
+    def test_cap_extension_fails_a_failing_extension_cell(self):
+        result = self._cap_extension(extension={"native_tps": 100.0})
+        self.assertEqual(result["overall_status"], "FAIL")
+        self.assertEqual(result["reason"], "extension_cells_failed")
+        self.assertEqual(result["failing_cells"], ["s1-p32768-o128", "s1-p32768-o512"])
+
+    def test_cap_extension_needs_the_current_gate_set(self):
+        result = self._cap_extension(extension={"positive_gates": False})
+        self.assertEqual(result["reason"], "extension_gate_set_not_current")
+
+    def test_cap_extension_holds_exactly_the_added_cells(self):
+        for overrides, reason in (
+            ({"prompt_tokens": [4096, 32768]}, "extension_prompts_not_exactly:32768"),
+            ({"maximum_prompt_tokens": 16384, "prompt_tokens": [16384]}, "extension_cap_differs_from_record"),
+            ({"gated_cells": ["s2-p1536-o512"]}, "extension_reruns_reused_cells"),
+            ({"sustained_seconds": 1800}, "extension_reruns_reused_cells"),
+            ({"blocks": 9}, "extension_blocks_below_ten"),
+        ):
+            with self.subTest(overrides=overrides):
+                result = self._cap_extension(extension={"policy_overrides": overrides})
+                self.assertEqual(result["overall_status"], "FAIL")
+                self.assertEqual(result["reason"], reason)
+
+    def test_cap_extension_keeps_the_prior_tuple(self):
+        for key, value in (("mtp_sha256", "4" * 64), ("max_native_active_rows", 2), ("ram_gb", 512),
+                           ("arrival_interval_ms", 0), ("temperature", 0.7)):
+            with self.subTest(key=key):
+                result = self._cap_extension(extension={"policy_overrides": {key: value}})
+                self.assertEqual(result["overall_status"], "FAIL")
+                self.assertIn(result["reason"], ("extension_tuple_differs_from_prior", "extension_policy_contract"))
+
+    def test_cap_extension_refuses_a_diagnostic_bypass(self):
+        result = self._cap_extension(extension={"policy_overrides": {"diagnostic_eligibility_bypass": True}})
+        self.assertEqual(result["reason"], "extension_policy_contract")
+        self.assertIn("diagnostic_eligibility_bypass_requires_exploratory", result["violations"])
+        result = self._cap_extension(extension={"header_overrides": {
+            "provider_commit": "c" * 40, "mlx_fork_revision": "d" * 40, "diagnostic_eligibility_bypass": True}})
+        self.assertEqual(result["reason"], "extension_request_profile_not_admission")
+
+    def test_cap_extension_binds_the_measured_build(self):
+        result = self._cap_extension(record={"provider_commit": "e" * 40})
+        self.assertEqual(result["reason"], "extension_build_identity_differs_from_record")
+        result = self._cap_extension(extension={"header_overrides": {"provider_commit": "e" * 40, "mlx_fork_revision": "d" * 40}})
+        self.assertEqual(result["reason"], "extension_analysis_failed")
+        self.assertEqual(result["extension_analysis"]["reason"], "environment_mismatch")
+
+    def test_cap_extension_binds_every_input_by_digest(self):
+        def tamper(record, runs, policy, prior_policy, prior_runs, prior_analysis):
+            with runs.open("a", encoding="utf-8") as handle:
+                handle.write("\n")
+        result = self._cap_extension(after=tamper)
+        self.assertEqual(result["reason"], "record_digest_mismatch")
+        self.assertEqual(result["mismatched"], ["extension_runs_sha256"])
+        result = self._cap_extension(record={"decode_path_change": " "})
+        self.assertEqual(result["reason"], "decode_path_change_not_named")
+        result = self._cap_extension(record={"unchanged": True})
+        self.assertEqual(result["reason"], "record_fields_not_exact")
+
+    def test_cap_extension_needs_a_rederived_formal_prior(self):
+        def edit(record, runs, policy, prior_policy, prior_runs, prior_analysis):
+            body = json.loads(prior_analysis.read_text())
+            body["cells"][0]["status"] = "PASS "
+            prior_analysis.write_text(json.dumps(body))
+            data = json.loads(record.read_text())
+            data["prior_analysis_sha256"] = hashlib.sha256(prior_analysis.read_bytes()).hexdigest()
+            record.write_text(json.dumps(data))
+        self.assertEqual(self._cap_extension(after=edit)["reason"], "prior_analysis_not_rederived")
+        result = self._cap_extension(prior={"exploratory_policy": True, "policy_overrides": {"blocks": 10, "sustained_seconds": 1800}})
+        self.assertEqual(result["reason"], "prior_policy_not_formal")
+        result = self._cap_extension(prior={"native_tps": 100.0})
+        self.assertEqual(result["reason"], "prior_analysis_not_pass")
+        result = self._cap_extension(record={"maximum_prompt_tokens": 4096})
+        self.assertEqual(result["reason"], "cap_not_above_prior")
+
+    def test_cap_extension_holm_is_one_family_across_both_runs(self):
+        # Each run passes Holm alone (25 x 0.0016 and 10 x 0.002 are within
+        # 0.05); as one family of 35 the prior p-values need 35 x 0.0016.
+        real = analyzer.analyze
+
+        def with_p_values(jsonl_path, policy_path, **kwargs):
+            result = real(jsonl_path, policy_path, **kwargs)
+            exploratory = json.loads(Path(policy_path).read_text())["schema"] == analyzer.EXPLORATORY_POLICY_SCHEMA
+            for cell in result["cells"]:
+                for metric in cell["metrics"].values():
+                    metric["p_value"] = 0.002 if exploratory else 0.0016
+            return result
+
+        with unittest.mock.patch.object(analyzer, "analyze", with_p_values):
+            result = self._cap_extension()
+        self.assertEqual(result["overall_status"], "FAIL")
+        self.assertEqual(result["reason"], "combined_holm_failed")
+        # Step-down: once the smallest (prior) p-values miss, every later
+        # hypothesis of the family fails with them.
+        self.assertEqual(len(result["combined_holm"]["failures"]), 35)
+        self.assertEqual({item["run"] for item in result["combined_holm"]["failures"]}, {"prior", "extension"})
 
     _DELETE = object()
 

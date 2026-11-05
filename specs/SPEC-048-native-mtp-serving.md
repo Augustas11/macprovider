@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.71
+**Version:** 0.1.72
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.71",
+  "version": "0.1.72",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -1784,7 +1784,43 @@ advertised `qualified_slots` (2...8), its `max_native_active_rows`
 A slot count above `qualified_slots` is not allowed. The bench refuses, and
 the analyzer fails closed on, a policy whose cells differ from these, so a
 reduced or substituted matrix cannot pass. Exploratory pilot policies are
-exempt and never yield an admission verdict.
+exempt and never yield an admission verdict, except as the extension run of a
+cap-extension record below.
+
+**Cap extension (0.1.72).** A tuple with a passing formal matrix at cap `C0`
+MAY raise its signed `max_prompt_tokens` to `C1 > C0` without rerunning the
+cells that matrix already holds, when the named decode-path change since that
+matrix leaves every prompt at or below `C0` drafting, verifying, and committing
+tokens exactly as measured (MTP-13; AGENTS.md HARD RULE 2). The `C1` matrix is
+the `C0` matrix plus the native-eligible cells at every slot count from 1 to
+the bound, at each prompt stratum of `C1` that `C0` does not have, and at both
+output budgets. Gated cells and the sustained window run at prompt 1536, so
+they are already in the `C0` matrix. A cap-extension record
+(`macprovider.native-mtp-r015-cap-extension.v1`) names the change and binds
+by SHA-256 the prior formal policy, runs, and analysis and the extension
+policy and runs. It also names the extension's provider commit and
+mlx-swift-lm revision. `scripts/native_mtp_r015_analyze.py --cap-extension`
+passes the record only when all of these hold:
+
+- the prior policy is a complete formal matrix, and its committed analysis is
+  exactly the current analyzer's `PASS` on its runs;
+- the extension policy keeps the prior tuple, hardware, methodology, slot
+  counts, output budgets, arrival profile and request profile; holds exactly
+  the added cells, no gated cell and no sustained window; is frozen under the
+  current gate set with at least ten blocks; and meets every other admission
+  policy requirement. It carries the exploratory schema only because the bench
+  refuses a reduced admission matrix. Its run header MUST meet the admission
+  request profile, and its policy, cells and gates are frozen before the run
+  (the header binds the policy SHA-256);
+- every extension cell passes; and
+- Holm, recomputed at the frozen alpha over every gated hypothesis of both runs
+  as one family, passes every hypothesis. Each hypothesis keeps the threshold
+  its own policy froze, so the prior cells keep their recorded gate set.
+
+The signed entry at the raised cap binds `benchmark_policy_sha256` to the
+record and `performance_evidence_sha256` to the cap-extension analysis; the
+other evidence digests stay those of the prior qualification. Extensions do
+not chain: a later raise extends a formal matrix again or runs the full matrix.
 
 **Cell classes.** The frozen `max_native_active_rows` splits the matrix. A
 cell whose slot count is at or below it is *native-eligible*: it carries the
@@ -2223,6 +2259,12 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.72 (2026-11-05)** — MTP-15: cap extension. A formally qualified tuple
+  may raise its signed `max_prompt_tokens` with a cap-extension record: the
+  prior formal matrix (reanalyzed to its committed `PASS`) plus an extension
+  run of exactly the new cap's added native-eligible cells under the current
+  gate set, with Holm recomputed over both runs as one family. Gated cells and
+  the sustained window are not rerun; no gate or threshold changes (#2198).
 - **0.1.71 (2026-11-05)** — MTP-6: the GLM-5.3 MTP head's 4096-column prompt
   window also applies to chunked continuous-batching prefill; earlier chunks
   skip the head, the chunk holding the window start seeds fresh state, and a
