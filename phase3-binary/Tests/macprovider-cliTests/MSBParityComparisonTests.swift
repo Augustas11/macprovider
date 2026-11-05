@@ -97,6 +97,16 @@ final class MSBParityComparisonTests: XCTestCase {
         XCTAssertEqual(decoded.rows?.first?.standaloneTokenCount, 31)
     }
 
+    func testPromptTokenFileNeedsOnePromptPerRow() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("msb-prompts-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try Data(#"{"prompts":[{"name":"a","ids":[1,2,3]},{"name":"b","ids":[4,5]}]}"#.utf8).write(to: url)
+        let set = try MSBThroughputCommand.loadPromptTokenFile(url.path, rows: 2)
+        XCTAssertEqual(set.prompts.map(\.name), ["a", "b"])
+        XCTAssertEqual(set.prompts.map(\.ids.count), [3, 2])
+        XCTAssertThrowsError(try MSBThroughputCommand.loadPromptTokenFile(url.path, rows: 3))
+    }
+
     func testRequestedWindowMustBePositive() {
         for count in [Int.min, -1, 0] {
             let result = msbTemp0ParityMatch(serial: [1], batched: [1], comparedTokens: count)
