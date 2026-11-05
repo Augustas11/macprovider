@@ -1752,7 +1752,10 @@ struct NativeMTPBenchPolicy {
 
     private static func requireThresholds(_ thresholds: [String: Any]) throws {
         let expected: [String: Double] = [
-            "throughput_lower_bound_min": 0.15,
+            // SPEC-048 0.1.69: the decode-throughput corrected lower bound
+            // must be strictly greater than 0 (0.1.25-0.1.68 froze 0.15,
+            // which a new run no longer accepts).
+            "throughput_lower_bound_min": 0.0,
             "ttft_p95_upper_bound_max": 0.10,
             // SPEC-048 0.1.25: per-output-token latency and the worst-gap
             // bound (native p99 chunk gap at most proposal_depth + 1 = 2x

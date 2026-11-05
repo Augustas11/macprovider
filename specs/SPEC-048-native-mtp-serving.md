@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.68
+**Version:** 0.1.69
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.68",
+  "version": "0.1.69",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -1872,8 +1872,10 @@ gates. R015 throughput is decode throughput: a request's completion tokens
 after its first, divided by the interval from its first token to its
 completion. A run's aggregate decode throughput is the sum of every request's
 tokens after its first, divided by the interval from the run's earliest first
-token to its latest completion. Prefill is excluded because it is the same
-work on both paths and is gated separately as TTFT below; prefill-inclusive
+token to its latest completion. Prefill is excluded from this gate because
+the decode-throughput gate judges decode; prefill is not the same work on both
+paths (a native drafter that prefills its head over the prompt adds prefill
+work), and that cost is gated separately as TTFT below. Prefill-inclusive
 (end-to-end) committed throughput MUST still be reported but is not a gate.
 A missing or non-positive decode throughput fails the run closed; evidence
 recorded before the bench emitted it may derive it from recorded per-request
@@ -1881,7 +1883,7 @@ end-to-end throughput, TTFT, completion tokens, and nominal arrival offsets,
 and fails closed when any of those is missing. Using the paired-bootstrap
 corrected 95% confidence interval, the lower bound for aggregate decode
 throughput improvement over the best ordinary baseline
-MUST be at least 15% in each cell at the intended advertised slot count; both
+MUST be greater than 0 in each cell at the intended advertised slot count; both
 paths use that same slot count, and the baseline is the best ordinary
 production-qualified configuration at that count. The corrected upper bound
 for native-MTP p95 TTFT regression MUST be no more than 10%, and the corrected
@@ -1924,8 +1926,21 @@ margin MUST remain within physical RAM, and system-wide available unified
 memory sampled at least once per second MUST retain at least 10% physical-RAM
 headroom throughout the 30-minute
 sustained window. The exact frozen gates cannot be relaxed after results are
-known. A confidence interval merely above zero and upstream `1.8x`, `2x`, or
-`3x` claims are insufficient.
+known. Upstream `1.8x`, `2x`, or `3x` claims are insufficient.
+
+*Gate amendment (0.1.69).* Through 0.1.68 the decode-throughput gate required
+a corrected 95% lower bound of at least 15% (policy
+`throughput_lower_bound_min` 0.15). The 15% figure had no derivation: native
+MTP whose decode throughput beats ordinary continuous batching with a positive
+corrected lower bound serves buyers faster, and the TTFT, TPOT, worst-gap,
+rejection, memory, and hard gates already bound its costs. A policy frozen
+under 0.1.69 or later carries `throughput_lower_bound_min` 0.0, and a cell
+passes the gate only when the corrected lower bound is strictly greater than
+0. Every other threshold is unchanged. This does not reinterpret any earlier
+run: policies frozen under an earlier gate set (the 0.1.24 inter-chunk set and
+the 0.1.25 to 0.1.68 set with the 15% floor) are still judged by the gate set
+they were frozen with, so every recorded verdict reproduces unchanged. The
+bench accepts only the current gate set for new runs.
 
 The campaign MUST also replay a preregistered, privacy-reviewed representative
 post-gateway request-shape sample, preserving real provider-bound conversation
@@ -2016,9 +2031,10 @@ integrity evidence and not a SPEC-031 canary result.
 **(0.1.32)** The self-test reference is on-device: the provider runs the
 challenge prompt through native MTP and through ordinary decode on the same
 paged engine (same kernels, so near-tied logits resolve identically) at
-greedy, requires identical token IDs, and requires the native run to be at
-least 1.15x faster (best of two runs each). The 1.15x bar is the R015
-native-eligible decode-throughput bound; the R015 PASS on the final
+greedy, requires identical token IDs, and requires the native run to be
+strictly faster than the ordinary run (best of two runs each): speedup greater
+than 1.0 from 0.1.69, matching the R015 decode-throughput gate's positive lower
+bound, and at least 1.15x through 0.1.68. The R015 PASS on the final
 mlx-swift-lm 3.32.3 stack is recorded in `docs/research/mlx-swift-lm-3.32.3/`
 (`step3-native-margin.md`, `step3-parity-event.md`, `step45-throughput.md`). Failure disables only that tuple
 on that Mac. The signed challenge record's expected digest is no longer
@@ -2193,6 +2209,17 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.69 (2026-11-05)** — MTP-15: the R015 decode-throughput gate for a
+  native-eligible cell is a corrected 95% lower bound greater than 0 (policy
+  `throughput_lower_bound_min` 0.0, strict), replacing the 15% floor (#2198).
+  TTFT p95 (<= +10%), TPOT p95 (<= 0%), worst-gap, rejection, memory, gated
+  non-inferiority and hard gates are unchanged. Policies frozen under earlier
+  gate sets keep being judged by those sets, so recorded verdicts reproduce;
+  the bench accepts only the new set for new runs. The decode-only rationale
+  no longer claims prefill is the same work on both paths: a native drafter
+  that prefills its head over the prompt adds prefill work, which the TTFT
+  gate bounds. MTP-16: the on-device self-check requires native strictly
+  faster than ordinary (speedup > 1.0) instead of at least 1.15x.
 - **0.1.68 (2026-11-03)** — R003 names mlx-swift-lm `3.32.3-macprovider.21`
   (`ae6aa7826eb2ab276837c950dca6b1aaf9f344e4`) on `3.32.3-macprovider.19`
   (#2198): GLM-5.3 prefill only (DSA radix-select per prefill chunk, fused mHC

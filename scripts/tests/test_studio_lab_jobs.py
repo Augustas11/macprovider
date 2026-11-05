@@ -184,7 +184,7 @@ fi
             "warmup_runs": 1, "blocks": 10, "sustained_seconds": 1800,
             "sustained_cell_id": "s8-p1536-o512",
             "thresholds": {
-                "throughput_lower_bound_min": 0.15,
+                "throughput_lower_bound_min": 0.0,
                 "ttft_p95_upper_bound_max": 0.1,
                 "tpot_p95_upper_bound_max": 0.0,
                 "chunk_gap_p99_upper_bound_max": 1.0,
@@ -297,7 +297,7 @@ fi
             maximum_prompt_tokens=16384, sustained_seconds=0,
             sustained_cell_id="s4-p16384-o128", temperature=0, arrival_interval_ms=250,
             thresholds={
-                "throughput_lower_bound_min": 0.15, "ttft_p95_upper_bound_max": 0.1,
+                "throughput_lower_bound_min": 0.0, "ttft_p95_upper_bound_max": 0.1,
                 "tpot_p95_upper_bound_max": 0.0, "chunk_gap_p99_upper_bound_max": 1.0,
                 "rejection_increase_max_pp": 1.0, "min_available_memory_fraction": 0.1,
                 "bootstrap_draws": 10000, "alpha": 0.05,
@@ -658,6 +658,7 @@ class StudioLabJobsTests(unittest.TestCase):
             ("temperature", 0.1), ("arrival_interval_ms", 0),
             ("laboratory_max_native_active_rows", 4),
             ("thresholds", {**policy["thresholds"], "alpha": 0.1}),
+            ("thresholds", {**policy["thresholds"], "throughput_lower_bound_min": 0.15}),
         ):
             with self.subTest(key=key, value=value):
                 write_json(path, {**policy, key: value})
@@ -990,6 +991,8 @@ class StudioLabJobsTests(unittest.TestCase):
             ("slots", [1, 8], "approved R015 contract"),
             ("laboratory_max_native_active_rows", 8, "override"),
             ("thresholds", {**policy["thresholds"], "alpha": 0.1}, "approved gates"),
+            # SPEC-048 0.1.25-0.1.68 floor: the bench refuses it for new runs.
+            ("thresholds", {**policy["thresholds"], "throughput_lower_bound_min": 0.15}, "approved gates"),
         ):
             changed = dict(policy)
             changed[key] = value

@@ -38,6 +38,29 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
         self.assertEqual(result["overall_status"], "FAIL")
         self.assertIn("throughput", result["cells"][0]["metric_failures"])
 
+    def test_floor_policy_keeps_its_15_percent_floor_and_new_policy_needs_a_positive_bound(self):
+        # SPEC-048 0.1.69: a +14% decode cell fails a policy frozen with the
+        # 0.15 floor exactly as before, and passes a policy frozen with the
+        # positive-lower-bound gate set.
+        floor = self._run_case(native_tps=114.0)
+        self.assertEqual(floor["gate_set"], analyzer.GATE_SET_AMENDED)
+        self.assertEqual(floor["overall_status"], "FAIL")
+        self.assertIn("throughput", floor["cells"][0]["metric_failures"])
+        self.assertEqual(floor["cells"][0]["metrics"]["throughput"]["threshold"], 0.15)
+        positive = self._run_case(native_tps=114.0, positive_gates=True)
+        self.assertEqual(positive["gate_set"], analyzer.GATE_SET_POSITIVE)
+        self.assertEqual(positive["overall_status"], "PASS")
+        throughput = positive["cells"][0]["metrics"]["throughput"]
+        self.assertEqual(throughput["threshold"], 0.0)
+        self.assertGreater(throughput["corrected_lower_bound"], 0.0)
+
+    def test_positive_gate_set_is_strictly_above_zero(self):
+        # A lower bound of exactly zero (native no faster than ordinary) fails.
+        tied = self._run_case(native_tps=100.0, positive_gates=True)
+        self.assertEqual(tied["overall_status"], "FAIL")
+        self.assertIn("throughput", tied["cells"][0]["metric_failures"])
+        self.assertEqual(tied["cells"][0]["metrics"]["throughput"]["corrected_lower_bound"], 0.0)
+
     def test_throughput_gate_uses_decode_not_end_to_end(self):
         # Prefill dilutes end-to-end speedup; the gate reads decode only.
         result = self._run_case(native_tps=105.0, native_decode_tps=135.0)
@@ -962,6 +985,7 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
         order_override=None,
         write_sustained=True,
         legacy_gates=False,
+        positive_gates=False,
     ):
         policy_path = root / "policy.json"
         jsonl_path = root / "runs.jsonl"
@@ -1016,6 +1040,8 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
                 "gated_tpot_p95_upper_bound_max": 0.05,
             },
         }
+        if positive_gates:
+            policy["thresholds"] = {**policy["thresholds"], "throughput_lower_bound_min": 0.0}
         if exploratory_policy:
             policy["blocks"] = 3
             policy["sustained_seconds"] = 0

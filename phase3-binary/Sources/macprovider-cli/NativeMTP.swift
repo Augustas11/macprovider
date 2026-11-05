@@ -572,10 +572,12 @@ private extension ChatCompletionPromptSource {
 
 /// SPEC-048-R016 (v0.1.32) on-device native-MTP qualification: MTP-on greedy
 /// tokens must equal ordinary decode on the same paged engine (same kernels,
-/// so near-tied logits resolve the same way), and MTP must beat ordinary
-/// decode by the SPEC-048-R015 decode-throughput bar.
+/// so near-tied logits resolve the same way), and MTP must be strictly faster
+/// than ordinary decode, as the SPEC-048-R015 (0.1.69) decode-throughput gate
+/// requires a positive lower bound.
 enum NativeMTPOnDeviceSelfCheck {
-    static let minimumSpeedup = 1.15
+    /// Exclusive: the speedup must exceed it.
+    static let minimumSpeedup = 1.0
     static let repetitions = 2
 
     /// Scheduler request ids are durable replay keys (SPEC-038 AC-25): an
@@ -609,7 +611,7 @@ enum NativeMTPOnDeviceSelfCheck {
             return Verdict(passed: false, reason: "no_net_gain", speedup: 0)
         }
         let speedup = ordinarySeconds / mtpSeconds
-        guard speedup >= minimumSpeedup else {
+        guard speedup > minimumSpeedup else {
             return Verdict(passed: false, reason: "no_net_gain", speedup: speedup)
         }
         return Verdict(passed: true, reason: "passed", speedup: speedup)

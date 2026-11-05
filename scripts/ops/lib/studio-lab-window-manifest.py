@@ -377,7 +377,7 @@ def validate_glm_prefill_policy(value: dict) -> None:
     if not isinstance(value.get("provider_commit"), str) or not SHA40.fullmatch(value["provider_commit"]):
         raise Refusal("GLM prefill provider commit is invalid")
     thresholds = {
-        "throughput_lower_bound_min": 0.15, "ttft_p95_upper_bound_max": 0.1,
+        "throughput_lower_bound_min": 0.0, "ttft_p95_upper_bound_max": 0.1,
         "tpot_p95_upper_bound_max": 0.0, "chunk_gap_p99_upper_bound_max": 1.0,
         "rejection_increase_max_pp": 1.0, "min_available_memory_fraction": 0.1,
         "bootstrap_draws": 10000, "alpha": 0.05,
@@ -443,7 +443,7 @@ def validate_qwen_policy(value: dict) -> None:
     if any(value.get(key) != expected for key, expected in exact.items()):
         raise Refusal("Qwen qualification policy is not the approved R015 contract")
     expected_thresholds = {
-        "throughput_lower_bound_min": 0.15,
+        "throughput_lower_bound_min": 0.0,
         "ttft_p95_upper_bound_max": 0.1,
         "tpot_p95_upper_bound_max": 0.0,
         "chunk_gap_p99_upper_bound_max": 1.0,

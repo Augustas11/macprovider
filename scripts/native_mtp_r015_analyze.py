@@ -153,12 +153,15 @@ FIXED_METHODOLOGY = {
     "exclusion_rules": "none",
     "confidence_method": "paired_block_bootstrap_holm_v1",
 }
-# SPEC-048 0.1.25 gate set. The latency gates are per-output-token latency
-# (TPOT) and a worst-chunk-gap bound; the inter-chunk p95 gate of earlier
-# versions compared one native verify step, which carries up to
-# proposal_depth + 1 tokens, against one ordinary token.
+# SPEC-048 0.1.69 gate set, the only one the bench accepts for new runs. The
+# decode-throughput gate passes when the corrected lower bound is strictly
+# greater than 0 (a draw at or below the threshold counts against the gate).
+# The latency gates are per-output-token latency (TPOT) and a worst-chunk-gap
+# bound; the inter-chunk p95 gate of earlier versions compared one native
+# verify step, which carries up to proposal_depth + 1 tokens, against one
+# ordinary token.
 FROZEN_THRESHOLDS = {
-    "throughput_lower_bound_min": 0.15,
+    "throughput_lower_bound_min": 0.0,
     "ttft_p95_upper_bound_max": 0.10,
     "tpot_p95_upper_bound_max": 0.0,
     "chunk_gap_p99_upper_bound_max": 1.0,
@@ -170,6 +173,10 @@ FROZEN_THRESHOLDS = {
     "gated_ttft_p95_upper_bound_max": 0.05,
     "gated_tpot_p95_upper_bound_max": 0.05,
 }
+# The SPEC-048 0.1.25-0.1.68 gate set: the 0.1.69 gates with a 15% decode
+# floor. Policies frozen with it are still judged by it, so every recorded
+# verdict reproduces unchanged; the bench no longer accepts it for new runs.
+FLOOR_THRESHOLDS = {**FROZEN_THRESHOLDS, "throughput_lower_bound_min": 0.15}
 # The SPEC-048 0.1.24-and-earlier gate set. Policies frozen with it are still
 # judged by it, so every recorded verdict reproduces unchanged; the bench no
 # longer accepts it for new runs.
@@ -185,11 +192,19 @@ LEGACY_ITL_THRESHOLDS = {
     "gated_ttft_p95_upper_bound_max": 0.05,
     "gated_itl_p95_upper_bound_max": 0.05,
 }
+GATE_SET_POSITIVE = "tpot_chunk_gap_positive_lb_v3"
 GATE_SET_AMENDED = "tpot_chunk_gap_v2"
 GATE_SET_LEGACY = "inter_chunk_itl_v1"
+TPOT_GATE_SETS = (GATE_SET_POSITIVE, GATE_SET_AMENDED)
 GATE_METRICS = {
+    GATE_SET_POSITIVE: ("throughput", "ttft", "tpot", "chunk_gap_p99", "rejection"),
     GATE_SET_AMENDED: ("throughput", "ttft", "tpot", "chunk_gap_p99", "rejection"),
     GATE_SET_LEGACY: ("throughput", "ttft", "itl", "rejection"),
+}
+_GATE_SET_VALUES = {
+    GATE_SET_POSITIVE: FROZEN_THRESHOLDS,
+    GATE_SET_AMENDED: FLOOR_THRESHOLDS,
+    GATE_SET_LEGACY: LEGACY_ITL_THRESHOLDS,
 }
 
 
@@ -198,15 +213,25 @@ def _gate_set(thresholds: object) -> str | None:
     if not isinstance(thresholds, dict):
         return None
     if set(thresholds) == set(FROZEN_THRESHOLDS):
-        return GATE_SET_AMENDED
+        # The 0.1.25 and 0.1.69 sets share keys; the frozen decode floor picks
+        # one. Any other floor selects the current set and fails as unfrozen.
+        floor = thresholds["throughput_lower_bound_min"]
+        if (
+            isinstance(floor, (int, float))
+            and not isinstance(floor, bool)
+            and math.isfinite(floor)
+            and abs(floor - FLOOR_THRESHOLDS["throughput_lower_bound_min"]) < 1e-7
+        ):
+            return GATE_SET_AMENDED
+        return GATE_SET_POSITIVE
     if set(thresholds) == set(LEGACY_ITL_THRESHOLDS):
         return GATE_SET_LEGACY
     return None
 
 
 def _frozen_values(gate_set: str) -> dict:
-    expected = dict(FROZEN_THRESHOLDS if gate_set == GATE_SET_AMENDED else LEGACY_ITL_THRESHOLDS)
-    # One draw count for both sets (tests lower it on FROZEN_THRESHOLDS).
+    expected = dict(_GATE_SET_VALUES[gate_set])
+    # One draw count for every set (tests lower it on FROZEN_THRESHOLDS).
     expected["bootstrap_draws"] = FROZEN_THRESHOLDS["bootstrap_draws"]
     return expected
 
@@ -1063,12 +1088,12 @@ def analyze(jsonl_path: Path, policy_path: Path, exploratory_amended_gates: bool
             }
         reanalysis_of = gate_set
         thresholds = {
-            **{key: value for key, value in FROZEN_THRESHOLDS.items()},
+            **{key: value for key, value in FLOOR_THRESHOLDS.items()},
             "bootstrap_draws": thresholds["bootstrap_draws"],
             "alpha": thresholds["alpha"],
         }
         gate_set = GATE_SET_AMENDED
-    require_chunk_gaps = gate_set == GATE_SET_AMENDED
+    require_chunk_gaps = gate_set in TPOT_GATE_SETS
 
     def invalid_fields(run: dict) -> list[str]:
         return _invalid_run_fields(run, require_chunk_gaps)
@@ -1078,7 +1103,7 @@ def analyze(jsonl_path: Path, policy_path: Path, exploratory_amended_gates: bool
         not isinstance(thresholds.get(key), (int, float))
         or isinstance(thresholds.get(key), bool)
         or not math.isfinite(thresholds[key])
-        for key in GATED_THRESHOLD_KEYS + ("gated_tpot_p95_upper_bound_max" if gate_set == GATE_SET_AMENDED else "gated_itl_p95_upper_bound_max",)
+        for key in GATED_THRESHOLD_KEYS + ("gated_tpot_p95_upper_bound_max" if gate_set in TPOT_GATE_SETS else "gated_itl_p95_upper_bound_max",)
     ):
         return {
             "schema": "macprovider.native-mtp-r015-analysis.v1",
@@ -1285,7 +1310,7 @@ def analyze(jsonl_path: Path, policy_path: Path, exploratory_amended_gates: bool
                 for _, r in pairs
                 if (value := _optional_ratio(float(r.get("target_forwards", 0)), float(r.get("committed_completion_tokens", 0)))) is not None
             ]),
-            "reported_metrics": _report_metrics(pairs, draws, alpha, base_seed + cell_index * 17 + 101, gate_set == GATE_SET_AMENDED),
+            "reported_metrics": _report_metrics(pairs, draws, alpha, base_seed + cell_index * 17 + 101, gate_set in TPOT_GATE_SETS),
             "peak_phys_footprint_bytes": max([r["peak_phys_footprint_bytes"] for r in hard_gate_runs] or [0]),
             "min_available_memory_fraction": min([float(r["min_available_memory_fraction"]) for r in hard_gate_runs] or [0]),
             "sustained_runs": len(sustained_runs),
@@ -1395,7 +1420,7 @@ def analyze(jsonl_path: Path, policy_path: Path, exploratory_amended_gates: bool
 
 
 def markdown_table(result: dict) -> str:
-    amended = result.get("gate_set") == GATE_SET_AMENDED
+    amended = result.get("gate_set") in TPOT_GATE_SETS
     latency_header = "TPOT p95 UB | Gap p99 UB" if amended else "ITL UB"
     lines = [
         f"| Cell | Status | Blocks | Decode ratio | Decode LB | TTFT UB | {latency_header} | Rejection UB | E2E ratio (info) | Hard failures |",
