@@ -3355,8 +3355,8 @@ actor ModelRuntime: ModelRuntimeServing {
     /// Families served with the process wired limit at Metal's recommended
     /// working set for as long as the model is loaded. DeepSeek V4-Flash
     /// (~167 GB of MXFP4/MXFP8 weights) sits as close to the working set as
-    /// GLM-5.3-Flash.
-    nonisolated static let residentWeightsFamilies: Set<String> = ["glm5_next", "deepseek_v4"]
+    /// GLM-5.3-Flash, and MiniMax M3.1-Flash (~194 GB) closer still.
+    nonisolated static let residentWeightsFamilies: Set<String> = ["glm5_next", "deepseek_v4", "minimax_m3"]
 
     /// A model-lifetime wired-limit ticket at Metal's recommended working set,
     /// the limit mlx-lm's generation paths set. At the default limit (0) no
