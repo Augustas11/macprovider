@@ -668,7 +668,7 @@ class StudioLabJobsTests(unittest.TestCase):
         self.assertEqual(self.fixture.recorded_calls(), [])
 
     def test_glm_prefill_accepts_a_policy_frozen_at_the_old_floor(self):
-        # SPEC-048 0.1.25-0.1.68 froze policies at a 0.15 floor; the bench and
+        # SPEC-048 0.1.25-0.1.70 froze policies at a 0.15 floor; the bench and
         # analyzer still judge them by that set, so the window must accept them.
         expected = {"throughput_lower_bound_min": 0.0, "alpha": 0.05}
         self.assertTrue(jobs.thresholds_match({"throughput_lower_bound_min": 0.15, "alpha": 0.05}, expected))
@@ -1001,7 +1001,7 @@ class StudioLabJobsTests(unittest.TestCase):
             ("slots", [1, 8], "approved R015 contract"),
             ("laboratory_max_native_active_rows", 8, "override"),
             ("thresholds", {**policy["thresholds"], "alpha": 0.1}, "approved gates"),
-            # Only the current 0.0 floor and the frozen 0.1.25-0.1.68 0.15 floor pass.
+            # Only the current 0.0 floor and the frozen 0.1.25-0.1.70 0.15 floor pass.
             ("thresholds", {**policy["thresholds"], "throughput_lower_bound_min": 0.05}, "approved gates"),
         ):
             changed = dict(policy)

@@ -153,7 +153,7 @@ FIXED_METHODOLOGY = {
     "exclusion_rules": "none",
     "confidence_method": "paired_block_bootstrap_holm_v1",
 }
-# SPEC-048 0.1.69 gate set, the only one the bench accepts for new runs. The
+# SPEC-048 0.1.71 gate set, the only one the bench accepts for new runs. The
 # decode-throughput gate passes when the corrected lower bound is strictly
 # greater than 0 (a draw at or below the threshold counts against the gate).
 # The latency gates are per-output-token latency (TPOT) and a worst-chunk-gap
@@ -173,7 +173,7 @@ FROZEN_THRESHOLDS = {
     "gated_ttft_p95_upper_bound_max": 0.05,
     "gated_tpot_p95_upper_bound_max": 0.05,
 }
-# The SPEC-048 0.1.25-0.1.68 gate set: the 0.1.69 gates with a 15% decode
+# The SPEC-048 0.1.25-0.1.70 gate set: the 0.1.71 gates with a 15% decode
 # floor. Policies frozen with it are still judged by it, so every recorded
 # verdict reproduces unchanged; the bench no longer accepts it for new runs.
 FLOOR_THRESHOLDS = {**FROZEN_THRESHOLDS, "throughput_lower_bound_min": 0.15}
@@ -213,7 +213,7 @@ def _gate_set(thresholds: object) -> str | None:
     if not isinstance(thresholds, dict):
         return None
     if set(thresholds) == set(FROZEN_THRESHOLDS):
-        # The 0.1.25 and 0.1.69 sets share keys; the frozen decode floor picks
+        # The 0.1.25 and 0.1.71 sets share keys; the frozen decode floor picks
         # one. Any other floor selects the current set and fails as unfrozen.
         floor = thresholds["throughput_lower_bound_min"]
         if (
@@ -1427,7 +1427,7 @@ CAP_EXTENSION_KEYS = {
     "extension_policy_sha256", "extension_runs_sha256",
     "provider_commit", "mlx_fork_revision",
 }
-# SPEC-048 0.1.72: the tuple, hardware, methodology and matrix axes a cap
+# SPEC-048 0.1.74: the tuple, hardware, methodology and matrix axes a cap
 # extension keeps from the prior formal policy. Only the measured build
 # (provider, fork, OS/toolchain), seed, gate set and prompt strata may differ.
 CAP_EXTENSION_FIXED_KEYS = (
@@ -1448,7 +1448,7 @@ def analyze_cap_extension(
     prior_runs_path: Path,
     prior_analysis_path: Path,
 ) -> dict:
-    """Judge a SPEC-048 0.1.72 cap extension: a formally qualified tuple's
+    """Judge a SPEC-048 0.1.74 cap extension: a formally qualified tuple's
     signed prompt cap rises to the record's cap. The prior formal matrix must
     reanalyze to its committed PASS; the extension run must hold exactly the
     new cap's added native-eligible cells, frozen under the current gate set
@@ -1648,7 +1648,7 @@ def main(argv: list[str] | None = None) -> int:
         "--cap-extension",
         type=Path,
         metavar="RECORD",
-        help="judge a SPEC-048 0.1.72 cap-extension record; jsonl/policy are the extension run "
+        help="judge a SPEC-048 0.1.74 cap-extension record; jsonl/policy are the extension run "
         "and --prior-policy/--prior-runs/--prior-analysis the prior formal qualification.",
     )
     parser.add_argument("--prior-policy", type=Path)

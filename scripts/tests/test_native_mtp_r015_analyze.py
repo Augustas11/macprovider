@@ -40,7 +40,7 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
         self.assertIn("throughput", result["cells"][0]["metric_failures"])
 
     def test_floor_policy_keeps_its_15_percent_floor_and_new_policy_needs_a_positive_bound(self):
-        # SPEC-048 0.1.69: a +14% decode cell fails a policy frozen with the
+        # SPEC-048 0.1.71: a +14% decode cell fails a policy frozen with the
         # 0.15 floor exactly as before, and passes a policy frozen with the
         # positive-lower-bound gate set.
         floor = self._run_case(native_tps=114.0)
@@ -891,7 +891,7 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
         for name in ("mtp_acceptance_rate", "target_forwards_per_committed_token", "mtp_proposed_tokens"):
             self.assertIn(name, reported["native_mtp"])
 
-    # SPEC-048 0.1.72 cap extension: the prior formal 4096-cap matrix plus an
+    # SPEC-048 0.1.74 cap extension: the prior formal 4096-cap matrix plus an
     # extension run holding only the 32768 cells under the current gate set.
     EXTENSION_POLICY = {
         "blocks": 10,

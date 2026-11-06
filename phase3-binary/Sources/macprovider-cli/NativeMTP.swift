@@ -573,7 +573,7 @@ private extension ChatCompletionPromptSource {
 /// SPEC-048-R016 (v0.1.32) on-device native-MTP qualification: MTP-on greedy
 /// tokens must equal ordinary decode on the same paged engine (same kernels,
 /// so near-tied logits resolve the same way), and MTP must be strictly faster
-/// than ordinary decode, as the SPEC-048-R015 (0.1.69) decode-throughput gate
+/// than ordinary decode, as the SPEC-048-R015 (0.1.71) decode-throughput gate
 /// requires a positive lower bound.
 enum NativeMTPOnDeviceSelfCheck {
     /// Exclusive: the speedup must exceed it.

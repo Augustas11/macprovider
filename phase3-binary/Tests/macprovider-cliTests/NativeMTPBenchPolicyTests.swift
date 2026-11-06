@@ -201,7 +201,7 @@ final class NativeMTPBenchPolicyTests: XCTestCase {
     func testTemplateFreezesPositiveDecodeBoundAndStillRunsFrozenFloorPolicies() throws {
         let policy = try load(template())
         XCTAssertEqual((policy.thresholds["throughput_lower_bound_min"] as? NSNumber)?.doubleValue, 0.0)
-        // SPEC-048 0.1.25-0.1.68 floor: a policy frozen with it still loads;
+        // SPEC-048 0.1.25-0.1.70 floor: a policy frozen with it still loads;
         // the analyzer judges it by that set.
         var floor = try template()
         var thresholds = try XCTUnwrap(floor["thresholds"] as? [String: Any])

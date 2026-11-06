@@ -341,8 +341,8 @@ def validate_policy(value: dict) -> None:
         raise Refusal("qualification policy must preserve production bound one")
 
 
-# SPEC-048 0.1.69 lowered the R015 throughput floor from 0.15 to 0.0. A policy
-# frozen under 0.1.25-0.1.68 keeps its 0.15 floor and is still judged by that
+# SPEC-048 0.1.71 lowered the R015 throughput floor from 0.15 to 0.0. A policy
+# frozen under 0.1.25-0.1.70 keeps its 0.15 floor and is still judged by that
 # set (the bench and the analyzer accept it), so the window accepts both.
 FROZEN_THROUGHPUT_FLOORS = (0.0, 0.15)
 

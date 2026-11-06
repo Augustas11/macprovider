@@ -1145,7 +1145,7 @@ final class NativeMTPOnDeviceSelfCheckTests: XCTestCase {
     }
 
     func testAnyStrictGainPasses() {
-        // SPEC-048 0.1.69: a 1.07x gain passes (it failed the old 1.15x bar).
+        // SPEC-048 0.1.71: a 1.07x gain passes (it failed the old 1.15x bar).
         let verdict = NativeMTPOnDeviceSelfCheck.decide(
             mtpTokens: [1, 2, 3], mtpSeconds: 0.75, ordinaryTokens: [1, 2, 3], ordinarySeconds: 0.8
         )

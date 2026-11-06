@@ -2,14 +2,14 @@
 
 Lab window 2026-11-05 on the lab build of `eaf5ecfa49e210b1dbce47d3bb5d4bc6bbb42352`.
 This evidence qualifies the GLM-5.3-Flash native-MTP tuple at a signed
-`max_prompt_tokens` of 32768 through a SPEC-048 0.1.72 cap extension (MTP-15).
+`max_prompt_tokens` of 32768 through a SPEC-048 0.1.74 cap extension (MTP-15).
 It does not rerun the cells the 4096-cap formal matrix already holds.
 
 ## What changed
 
 - `eaf5ecfa4` applies the GLM drafter's 4096-column prompt window to chunked
-  continuous-batching prefill (SPEC-048 0.1.71, MTP-6). Before it, the window
-  from mlx-swift-lm `3.32.3-macprovider.23` (`93234b64`, SPEC-048 0.1.70,
+  continuous-batching prefill (SPEC-048 0.1.73, MTP-6). Before it, the window
+  from mlx-swift-lm `3.32.3-macprovider.23` (`93234b64`, SPEC-048 0.1.72,
   `GLM5NextMTP.prepareDrafterState`) never applied in production: any prompt
   over one 2048-token chunk advanced the drafter over every chunk.
 - The changed decode-path lines are the window start
@@ -24,7 +24,7 @@ It does not rerun the cells the 4096-cap formal matrix already holds.
 Policy `scripts/lab/cb-studio/glm53-2198/r015-p32k-window.json`
 (sha256 `00c3e55310cfefde810ebab55bf498c731f019e7c74aae5beca0cc1e6101e244`):
 one slot, prompt 32768, outputs 128 and 512, 10 blocks, seed 20261102, the
-current SPEC-048 0.1.69 gate set, provider `eaf5ecfa4`, mlx-swift-lm
+current SPEC-048 0.1.71 gate set, provider `eaf5ecfa4`, mlx-swift-lm
 `93234b64b87368d94081932d103bfdb7ee8e88a7`. The target, MTP and tokenizer
 digests, hardware, methodology and request profile equal the prior formal
 policy's.
@@ -57,7 +57,7 @@ The 4096-cap formal R015 qualification of this tuple:
 (`a0acbd83c625f970ef2f3a89fc76ab5315ae61561afe0240447bb708d2768b10`),
 analysis `window-20261019T010258Z/analysis.json`
 (`f607170c08d5ec3293cefd1bb7f122ba1fc5698aaccdb171e3e9f455ed29a4d6`, PASS,
-gate set 0.1.25-0.1.68, which reanalyzes byte-identical today). It supplies
+gate set 0.1.25-0.1.70, which reanalyzes byte-identical today). It supplies
 cells `s1-p1536-o128`, `s1-p1536-o512`, `s1-p4096-o128`, `s1-p4096-o512`, the
 gated cells `s2-p1536-o512` and `s4-p1536-o512`, and the 1800 s sustained
 window on `s4-p1536-o512`. Every one of those cells runs at a prompt of 4096
