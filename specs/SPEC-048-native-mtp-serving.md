@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.74
+**Version:** 0.1.75
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.74",
+  "version": "0.1.75",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -203,9 +203,16 @@ ineligible and `classic_draft_spec` has precedence for requests SPEC-028 admits;
 all other requests use ordinary decode. The two accelerated paths MUST NOT be
 resident/selected simultaneously for one served snapshot.
 
-Native MTP MUST be default-off until every gate in SPEC-048-R014 passes for
-the exact qualified tuple. Absence or rejection of native-MTP capability MUST
-leave ordinary decode available when ordinary decode is otherwise valid.
+The provider native-MTP mode (SPEC-001 `native_mtp_mode`) defaults to `auto`.
+`auto` is not a force flag: the selector MAY choose `native_mtp` only for a
+tuple that passes every gate in SPEC-048-R014 through a signed admission entry
+the provider verified; every other tuple and request decodes ordinarily, so a
+provider with no admitted tuple serves exactly the ordinary path. An explicit
+`off` disables native MTP for the provider and is its kill switch. Absence or
+rejection of native-MTP capability MUST leave ordinary decode available when
+ordinary decode is otherwise valid. Diagnostic and benchmark entry points that
+do not resolve the provider configuration keep `off` (see the SPEC-023/SPEC-032
+ordinary-measurement rule below).
 
 ### MTP-2 — immutable capability and fail-closed artifact binding (SPEC-048-R002)
 
@@ -1297,6 +1304,10 @@ in proposal/verification bookkeeping since reset), and
 R015 result, not a live estimate); `reset_generation` (nonnegative 64-bit
 integer incremented at each reset); and `last_reason` from the closed set
 `active|disabled_by_default|tuple_not_admitted|tuple_revoked|revocation_state_unavailable|request_ineligible|unsupported_cache_state|capacity_unavailable|capacity_above_native_bound|low_acceptance_depth_zero|runtime_failure|warm_swap`.
+`disabled_by_default` is a retained wire token: it reports that the resolved
+mode is `off` (an explicit operator `off`, or a configured classic draft
+model); a provider in the default `auto` mode without an admitted tuple reports
+`tuple_not_admitted`.
 `capacity_above_native_bound` records an R007 load-gate admission downgrade or
 in-flight depth-zero engagement; a gated snapshot with native rows reads
 `mode=degraded_depth_zero`.
@@ -2275,6 +2286,12 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.75 (2026-11-06)** — MTP-1: the provider `native_mtp_mode` defaults
+  to `auto`, so a CLI cut needs no per-provider mode change. Selection is
+  unchanged: native MTP runs only for a tuple a signed R014 admission entry
+  admits, everything else decodes ordinarily, and an explicit `off` disables
+  it. Status `last_reason=disabled_by_default` keeps its wire token and now
+  reports a resolved `off` mode (or a configured classic draft) (#2198).
 - **0.1.74 (2026-11-05)** — MTP-15: cap extension. A formally qualified tuple
   may raise its signed `max_prompt_tokens` with a cap-extension record: the
   prior formal matrix (reanalyzed to its committed `PASS`) plus an extension

@@ -407,7 +407,7 @@ public struct AppConfig: Equatable, Sendable {
             draftModelArtifactSHA256: nil,
             numDraftTokens: 3,
             publishesSpecDecodeTelemetry: false,
-            nativeMTPMode: .off,
+            nativeMTPMode: .auto,
             modelCatalogKey: nil,
             modelCatalogModelID: nil,
             modelCatalogRevision: nil,

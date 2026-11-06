@@ -4,9 +4,17 @@ import XCTest
 @testable import macprovider_cli
 
 final class NativeMTPConfigTests: XCTestCase {
-    func testNativeMTPDefaultsOff() throws {
-        let config = try load()
-        XCTAssertEqual(config.nativeMTPMode, .off)
+    func testNativeMTPDefaultsAuto() throws {
+        XCTAssertEqual(try load().nativeMTPMode, .auto)
+        XCTAssertEqual(AppConfig.defaults().nativeMTPMode, .auto)
+        XCTAssertEqual(try load(yaml: "port: 8080\n").nativeMTPMode, .auto)
+    }
+
+    func testNativeMTPExplicitOffIsHonouredAtEveryLayer() throws {
+        XCTAssertEqual(try load(yaml: "native_mtp_mode: off\n").nativeMTPMode, .off)
+        XCTAssertEqual(try load(yaml: "native_mtp_mode: OFF\n").nativeMTPMode, .off)
+        XCTAssertEqual(try load(environment: ["MACPROVIDER_NATIVE_MTP_MODE": "off"]).nativeMTPMode, .off)
+        XCTAssertEqual(try load(cli: CLIOverrides(nativeMTPMode: "off")).nativeMTPMode, .off)
     }
 
     func testNativeMTPCLIOverridesEnvironmentOverridesYAML() throws {
