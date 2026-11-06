@@ -4,7 +4,7 @@
       "artifact_hash": "7299b6a71a38490e378e9eb6524c426392aa96e3fd561007e0540134bbef48f9",
       "artifact_id": "mlx-oq4e-mtp",
       "batch_evidence_sha256": "fef89c32109269893db2450900140dba4d982f64db165d7514a5f3c6d7ea4d1a",
-      "benchmark_policy_sha256": "ed775bdbfe8c420b27ae5a814d5f229d89d4b9ee662c19658e74e3e79ea8c13f",
+      "benchmark_policy_sha256": "7e333042722d3d0ca8d7f87ff7be30eeb63386e88e58cf043e27b7c6185fcd0e",
       "cache_state_classes": [
         "hybrid_stageable_rewindable"
       ],
@@ -21,7 +21,7 @@
       "hash_algorithm": "macprovider.snapshot-manifest.v1",
       "increase_threshold_ppm": 700000,
       "max_native_active_rows": 1,
-      "max_prompt_tokens": 4096,
+      "max_prompt_tokens": 32768,
       "max_verification_positions_per_committed_milli": 2500,
       "metallib_sha256": "3d9b4a747758128cc5418e62c5ad8e282a11b0d436423537137e013beaa1261b",
       "model_key": "zai-org/glm-5.3-flash",
@@ -37,7 +37,7 @@
         "qualified_slots": 4,
         "runtime_revision": "da8f1932f8e2a46477a1a35663955267bc6fcd04"
       },
-      "performance_evidence_sha256": "f607170c08d5ec3293cefd1bb7f122ba1fc5698aaccdb171e3e9f455ed29a4d6",
+      "performance_evidence_sha256": "dbae94535c24274be65082f51330138e70deab4d9462555abb5ed4ec758e2595",
       "proposal_depth": 1,
       "qualified_slots": 4,
       "quality_evidence_sha256": "f607170c08d5ec3293cefd1bb7f122ba1fc5698aaccdb171e3e9f455ed29a4d6",
