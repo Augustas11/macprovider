@@ -143,9 +143,9 @@ This bootstrap dependency remains unresolved; no qualification exemption,
 stale-evidence rebind or MTP-off deployment is authorized by this train record.
 The exploratory goal matrix does not constitute admission qualification.
 
-## Next CLI release — after 1.8.280 (tracked 2026-11-02)
+## Next CLI release — 1.8.281 (staged 2026-11-06)
 
-1.8.280 is live fleet-wide and #2193 is closed. The next cut carries the items below. An issue closes when its implementation is merged and this table records the remaining live step. A goal the row says is unmet stays open. The cut and the post-cut activation are tracked here.
+1.8.280 is live fleet-wide and #2193 is closed. `binaryVersion` is staged at 1.8.281 (#2237); the checked-in `latest_binary_version` rows name live stable 1.8.280. The cut carries the items below. An issue closes when its implementation is merged and this table records the remaining live step. A goal the row says is unmet stays open. The cut and the post-cut activation are tracked here.
 
 | Item | Provider-side change | Status |
 |---|---|---|
