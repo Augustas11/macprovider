@@ -1136,7 +1136,7 @@
     {
       "spec_id": "SPEC-039",
       "title": "Paged KV / paged-attention engine",
-      "version": "v0.1.28",
+      "version": "v0.1.29",
       "path": "specs/SPEC-039-paged-kv-attention-engine.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -6055,7 +6055,11 @@
         "phase3-binary/Tests/macprovider-cliTests/GLM5NextPagedKVWiringTests.swift:testAbliteratedCatalogIdentityCarriesTheSameSparseLayout",
         "phase3-binary/Tests/macprovider-cliTests/PagedMiniMaxM3CacheTests.swift:testAllowlistedIdentityCarriesTheVerifiedLayout",
         "phase3-binary/Tests/macprovider-cliTests/PagedMiniMaxM3CacheTests.swift:testOtherMiniMaxConfigsFailClosed",
-        "phase3-binary/Tests/macprovider-cliTests/PagedMiniMaxM3CacheTests.swift:testMatchesStockCacheAcrossChunksDecodeAndTrims"
+        "phase3-binary/Tests/macprovider-cliTests/PagedMiniMaxM3CacheTests.swift:testMatchesStockCacheAcrossChunksDecodeAndTrims",
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVGptOssMixedClassTests.swift:testGptOss20BMixedClassRequiresExactIdentityAndLayout",
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVGptOssMixedClassTests.swift:testAttachGateAdmitsGptOssMixedClassAndRefusesOtherMixedClasses",
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVGptOssMixedClassTests.swift:testMeasuredTopologyRequiresTheExactGptOssLayerLayout",
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVGptOssMixedClassTests.swift:testMixedLayoutPagedGatherMatchesSerialCachesAcrossTheWindow"
       ],
       "journeys": [],
       "evidence": [

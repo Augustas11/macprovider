@@ -794,6 +794,9 @@ struct PagedKVRuntimeModelCapabilities: Equatable, Sendable {
     /// The verified block-sparse layout of an allowlisted `minimax_m3`
     /// identity, read from its `config.json`.
     let blockSparseAttention: PagedKVBlockSparseAttentionLayout?
+    /// The verified sliding-window/full-attention layout of an allowlisted
+    /// `gpt_oss` identity, read from its `config.json`.
+    let slidingWindowAttention: PagedKVSlidingWindowAttentionLayout?
     /// Observed on this load; ordinary shared-forward parity is independent.
     var supportsContiguousCacheMaterialization: Bool
 
@@ -806,6 +809,7 @@ struct PagedKVRuntimeModelCapabilities: Equatable, Sendable {
         sparseAttention: PagedKVSparseAttentionLayout? = nil,
         deepseekV4Pool: DeepseekV4PoolLayout? = nil,
         blockSparseAttention: PagedKVBlockSparseAttentionLayout? = nil,
+        slidingWindowAttention: PagedKVSlidingWindowAttentionLayout? = nil,
         supportsContiguousCacheMaterialization: Bool = true
     ) {
         self.modelFamily = modelFamily
@@ -816,6 +820,7 @@ struct PagedKVRuntimeModelCapabilities: Equatable, Sendable {
         self.sparseAttention = sparseAttention
         self.deepseekV4Pool = deepseekV4Pool
         self.blockSparseAttention = blockSparseAttention
+        self.slidingWindowAttention = slidingWindowAttention
         self.supportsContiguousCacheMaterialization = supportsContiguousCacheMaterialization
     }
 
@@ -893,6 +898,44 @@ struct PagedKVSparseAttentionLayout: Equatable, Sendable {
         self.layerTypes = layerTypes
         self.indexTopk = indexTopk
         self.indexKpool = indexKpool
+    }
+}
+
+/// `gpt_oss` per-layer layout from `config.json` (SPEC-039 FR-PKV12 v0.1.29):
+/// `sliding_attention` layers are keep=0 `RotatingKVCache` of `sliding_window`
+/// tokens, `full_attention` layers `KVCacheSimple`. Without `layer_types` the
+/// model alternates sliding/full from layer 0, as mlx-swift-lm's `GPTOSSModel`
+/// builds it.
+struct PagedKVSlidingWindowAttentionLayout: Equatable, Sendable {
+    static let slidingLayerType = "sliding_attention"
+    static let fullLayerType = "full_attention"
+
+    let layerTypes: [String]
+    let windowTokens: Int
+
+    var expectedCacheKinds: [PagedKVSharedForwardBackend.CacheKind] {
+        layerTypes.map { $0 == Self.fullLayerType ? .pagedAttention : .slidingWindow(windowTokens: windowTokens) }
+    }
+
+    init?(config: [String: Any]) {
+        guard let hiddenLayers = config["num_hidden_layers"] as? Int, hiddenLayers > 0,
+              let window = config["sliding_window"] as? Int, window > 0
+        else { return nil }
+        let layerTypes: [String]
+        if let declared = config["layer_types"] {
+            guard let declared = declared as? [String] else { return nil }
+            layerTypes = declared
+        } else {
+            guard hiddenLayers.isMultiple(of: 2) else { return nil }
+            layerTypes = (0..<hiddenLayers).map { $0.isMultiple(of: 2) ? Self.slidingLayerType : Self.fullLayerType }
+        }
+        guard layerTypes.count == hiddenLayers,
+              layerTypes.allSatisfy({ $0 == Self.slidingLayerType || $0 == Self.fullLayerType }),
+              layerTypes.contains(Self.slidingLayerType),
+              layerTypes.contains(Self.fullLayerType)
+        else { return nil }
+        self.layerTypes = layerTypes
+        self.windowTokens = window
     }
 }
 
@@ -3220,17 +3263,19 @@ actor ModelRuntime: ModelRuntimeServing {
             guard let layout = modelCapabilities.blockSparseAttention else { return false }
             return cacheKinds == layout.expectedCacheKinds
         }
+        if modelCapabilities.modelFamily == "gpt_oss" {
+            // One cache per decoder layer in `layer_types` order: keep=0
+            // sliding window of `sliding_window` tokens or full attention
+            // (SPEC-039 FR-PKV12 v0.1.29).
+            guard let layout = modelCapabilities.slidingWindowAttention else { return false }
+            return cacheKinds == layout.expectedCacheKinds
+        }
         guard cacheKinds.contains(.pagedAttention),
               !cacheKinds.contains(where: { $0.isPagedMLA || $0.isPagedIndexedKV })
         else { return false }
         if modelCapabilities.modelFamily == "qwen",
            cacheKinds.contains(.recurrentMamba),
            !cacheKinds.contains(where: \.hasSlidingWindow) {
-            return true
-        }
-        if modelCapabilities.modelFamily == "gpt_oss",
-           cacheKinds.contains(where: \.hasSlidingWindow),
-           !cacheKinds.contains(.recurrentMamba) {
             return true
         }
         return false
@@ -3596,7 +3641,9 @@ maxTokens: 1,
         // across the production 512-token prefill boundary, plus batched row
         // isolation and the campaign leftovers gates. The gpt-oss 120b entry is
         // the separately measured sliding-window/full-attention tuple proven in
-        // #1780; it does not admit the 20b fixture or the gpt_oss family. Non-
+        // #1780; the 20b entry (SPEC-039 v0.1.29) is that same class on its own
+        // exact identity. Both also need the config's exact per-layer layout;
+        // neither admits the gpt_oss family or a path alias. Non-
         // hybrid Qwen models are admitted by the base `KVCacheSimple` allowlist.
         // Adding a future measured mixed identity is one entry here plus the
         // matching SPEC-039 line. The runtime parity/isolation probes still gate
@@ -3604,6 +3651,7 @@ maxTokens: 1,
         // instead of rejected outright as an unproven `mixed` class.
         let hybridArchitectureAllowlist: [String: String] = [
             "openai/gpt-oss-120b": "GptOssForCausalLM",
+            "openai/gpt-oss-20b": "GptOssForCausalLM",
             "qwen/qwen3.5-27b": "Qwen3_5ForConditionalGeneration",
             "qwen/qwen3.5-35b-a3b": "Qwen3_5MoeForConditionalGeneration",
             "qwen/qwen3.6-27b": "Qwen3_5ForConditionalGeneration",
@@ -3644,6 +3692,18 @@ maxTokens: 1,
             else { return nil }
             return PagedKVBlockSparseAttentionLayout(textConfig: textConfig)
         }()
+        // `gpt_oss` keys on the exact `architectures` array and model type and
+        // carries its verified sliding-window/full-attention layer layout.
+        let slidingWindowAttention: PagedKVSlidingWindowAttentionLayout? = {
+            guard let id = modelID?.lowercased(),
+                  let expectedArchitecture = hybridArchitectureAllowlist[id],
+                  expectedArchitecture == "GptOssForCausalLM",
+                  let configObject,
+                  configObject["architectures"] as? [String] == [expectedArchitecture],
+                  configObject["model_type"] as? String == "gpt_oss"
+            else { return nil }
+            return PagedKVSlidingWindowAttentionLayout(config: configObject)
+        }()
         let deepseekV4Pool: DeepseekV4PoolLayout? = {
             guard modelID?.lowercased() == "deepseek/deepseek-v4-flash", let configObject,
                   configObject["architectures"] == nil
@@ -3660,6 +3720,7 @@ maxTokens: 1,
             if expectedArchitecture == "Glm5NextForConditionalGeneration" { return sparseAttention != nil }
             if expectedArchitecture == "DeepseekV4ForCausalLM" { return deepseekV4Pool != nil }
             if expectedArchitecture == "MiniMaxM3SparseForConditionalGeneration" { return blockSparseAttention != nil }
+            if expectedArchitecture == "GptOssForCausalLM" { return slidingWindowAttention != nil }
             return architectures.contains(expectedArchitecture)
         }()
         let lfm25HybridVerified = lfm25HybridDecoderArchitectureVerified(
@@ -3684,7 +3745,8 @@ maxTokens: 1,
             recurrentStateLayout: recurrentStateLayout,
             sparseAttention: sparseAttention,
             deepseekV4Pool: deepseekV4Pool,
-            blockSparseAttention: blockSparseAttention
+            blockSparseAttention: blockSparseAttention,
+            slidingWindowAttention: slidingWindowAttention
         )
     }
 
