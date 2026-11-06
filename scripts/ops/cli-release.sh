@@ -1287,7 +1287,7 @@ PY
           python3 -c '
 import sys
 rid, v = sys.argv[1], sys.argv[2]
-for l in sys.stdin:
+for l in sys.stdin.read().splitlines():
     if rid in l and "carry" in l.lower() and v in l:
         print(l.strip()); break
 ' "$DONE_CARRY" "$V")"
