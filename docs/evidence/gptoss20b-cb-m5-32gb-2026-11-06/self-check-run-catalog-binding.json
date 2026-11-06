@@ -1,0 +1,69 @@
+{
+ "command": [
+  "/usr/bin/sandbox-exec",
+  "-f",
+  "<lab>/lab.sb",
+  "<lab>/bin-final/macprovider-cli",
+  "serve",
+  "--no-join",
+  "--isolate-lifecycle",
+  "--credential-store",
+  "protected_file",
+  "--config",
+  "<lab>/selfcheck-gptoss20b-catalogid/provider.yaml",
+  "--port",
+  "50199",
+  "--max-batch",
+  "4",
+  "--max-context",
+  "8192",
+  "--continuous-batch-queue-limit",
+  "8",
+  "--no-idle-prewarm"
+ ],
+ "elapsed_s": 20.17835307121277,
+ "exit_code": 143,
+ "final_continuous_batching": {
+  "active": false,
+  "cache_class": "mixed",
+  "mode": "off",
+  "paged_kv_decision": "fallback_paged_fallback_quantized",
+  "policy": {
+   "authorization_source": "baked_empty_off",
+   "authorized": false,
+   "cached_turns_authorized": false,
+   "decision_reason": "absent_empty_off_fallback",
+   "emergency_off_override": false,
+   "expires_at": null,
+   "load_status": "absent_empty_off_fallback",
+   "local_proof_result": "failed",
+   "policy_sha256": null,
+   "policy_version": null,
+   "release_id": null,
+   "rollout_mode": "off",
+   "signer_key_id": null,
+   "tuple_sha256": null
+  },
+  "scheduler": {
+   "active_decode_rows": 0,
+   "max_observed_batch_depth": 0,
+   "shared_forward_calls": 0,
+   "slots_free": 0,
+   "slots_total": 0,
+   "waiting_count": 0
+  },
+  "self_check": null,
+  "self_check_admission_hold": {
+   "active": false,
+   "expected_end_at": null,
+   "holds_total": 0,
+   "last_ended_at": null,
+   "last_outcome": null,
+   "last_skip_reason": null,
+   "last_skipped_at": null,
+   "started_at": null
+  },
+  "unsupported_reason": null
+ },
+ "reason": "paged_kv_fallback"
+}
