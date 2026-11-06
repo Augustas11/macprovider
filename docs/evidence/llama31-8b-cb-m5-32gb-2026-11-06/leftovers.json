@@ -1,0 +1,406 @@
+{
+  "command": [
+    "/usr/bin/sandbox-exec",
+    "-f",
+    "<lab>/lab.sb",
+    "<lab>/bin-final/macprovider-cli",
+    "msb-throughput",
+    "--model",
+    "<models>/llama-3.1-8b",
+    "--engine",
+    "scheduler",
+    "--no-compile",
+    "--prompt-tokens",
+    "1536",
+    "--decode-tokens",
+    "256",
+    "--runs",
+    "1",
+    "--mlx-cache-limit-mb",
+    "512",
+    "--stdout-only",
+    "--rows",
+    "4",
+    "--scenario",
+    "leftovers",
+    "--parity-tokens",
+    "256"
+  ],
+  "exit_code": 0,
+  "reports": [
+    {
+      "aggregateCVPct": 0,
+      "aggregateTPSRuns": [],
+      "aggregateTPSp50": 0,
+      "aggregateUpliftVsPagedSingleRow": 0,
+      "aggregateVsProductionSerial": 0,
+      "blockSizeTokens": 16,
+      "compiled": false,
+      "decodeTokensPerRow": 256,
+      "engine": "scheduler",
+      "layerCount": 32,
+      "leftovers": {
+        "isolation": {
+          "cancelledCompletionTokens": 0,
+          "cancelledRequestID": "msb-cancel",
+          "cancelledStatus": "cancelled",
+          "healthyCompletionTokens": 32,
+          "healthyRequestID": "msb-healthy",
+          "healthyStatus": "length",
+          "pass": true
+        },
+        "usagePass": true,
+        "usageRows": [
+          {
+            "cachedPromptTokens": 0,
+            "completionTokens": 0,
+            "emittedTokens": 1,
+            "promptTokens": 1536,
+            "requestID": "msb-cancel",
+            "settlementDisposition": "not_eligible",
+            "terminalStatus": "cancelled"
+          },
+          {
+            "cachedPromptTokens": 0,
+            "completionTokens": 32,
+            "emittedTokens": 32,
+            "promptTokens": 1536,
+            "requestID": "msb-healthy",
+            "settlementDisposition": "eligible_owner",
+            "terminalStatus": "length"
+          }
+        ]
+      },
+      "maxPhysicalBlocks": 1024,
+      "mlxSwiftLMPin": "mlxlm-da8f1932f8e2",
+      "modelID": "<models>/llama-3.1-8b",
+      "modelTag": "model",
+      "pagedSingleRowCVPct": 0,
+      "pagedSingleRowTPSRuns": [],
+      "pagedSingleRowTPSp50": 0,
+      "peakRSSMB": 4536,
+      "perRowFractionOfPagedSingleRow": 0,
+      "perRowTPSp50": 0,
+      "productionSerialCVPct": 0,
+      "productionSerialPromptTokens": 1536,
+      "productionSerialTPSRuns": [],
+      "productionSerialTPSp50": 0,
+      "promptTokenLengths": [
+        1536,
+        1536
+      ],
+      "promptTokenSHA256": [
+        "2b01335568a81b89f89ac9f0b70d8dedfbe5de6d3eb583573540e477ca8d72a0",
+        "f296390919b9e5a9b36d4092ccf7f445d5e0fdbb864e82878feb5532cdda34fe"
+      ],
+      "promptTokensPerRow": 1536,
+      "rows": 2,
+      "runs": 1,
+      "scenario": "isolation",
+      "schemaVersion": 5,
+      "timestamp": "2026-11-06T12:25:47Z"
+    },
+    {
+      "aggregateCVPct": 0,
+      "aggregateTPSRuns": [],
+      "aggregateTPSp50": 0,
+      "aggregateUpliftVsPagedSingleRow": 0,
+      "aggregateVsProductionSerial": 0,
+      "blockSizeTokens": 16,
+      "compiled": false,
+      "decodeTokensPerRow": 256,
+      "engine": "scheduler",
+      "layerCount": 32,
+      "leftovers": {
+        "replay": {
+          "firstDisposition": "eligible_owner",
+          "pass": true,
+          "replayDisposition": "non_settling_replay",
+          "requestID": "msb-replay-owner",
+          "tokensMatch": true
+        },
+        "usagePass": true,
+        "usageRows": [
+          {
+            "cachedPromptTokens": 0,
+            "completionTokens": 32,
+            "emittedTokens": 32,
+            "promptTokens": 1536,
+            "requestID": "msb-replay-owner",
+            "settlementDisposition": "eligible_owner",
+            "terminalStatus": "length"
+          },
+          {
+            "cachedPromptTokens": 0,
+            "completionTokens": 32,
+            "emittedTokens": 32,
+            "promptTokens": 1536,
+            "requestID": "msb-replay-owner",
+            "settlementDisposition": "non_settling_replay",
+            "terminalStatus": "length"
+          }
+        ]
+      },
+      "maxPhysicalBlocks": 1024,
+      "mlxSwiftLMPin": "mlxlm-da8f1932f8e2",
+      "modelID": "<models>/llama-3.1-8b",
+      "modelTag": "model",
+      "pagedSingleRowCVPct": 0,
+      "pagedSingleRowTPSRuns": [],
+      "pagedSingleRowTPSp50": 0,
+      "peakRSSMB": 4537,
+      "perRowFractionOfPagedSingleRow": 0,
+      "perRowTPSp50": 0,
+      "productionSerialCVPct": 0,
+      "productionSerialPromptTokens": 1536,
+      "productionSerialTPSRuns": [],
+      "productionSerialTPSp50": 0,
+      "promptTokenLengths": [
+        1536
+      ],
+      "promptTokenSHA256": [
+        "2b01335568a81b89f89ac9f0b70d8dedfbe5de6d3eb583573540e477ca8d72a0"
+      ],
+      "promptTokensPerRow": 1536,
+      "rows": 1,
+      "runs": 1,
+      "scenario": "replay",
+      "schemaVersion": 5,
+      "timestamp": "2026-11-06T12:25:52Z"
+    },
+    {
+      "aggregateCVPct": 0,
+      "aggregateTPSRuns": [],
+      "aggregateTPSp50": 0,
+      "aggregateUpliftVsPagedSingleRow": 0,
+      "aggregateVsProductionSerial": 0,
+      "blockSizeTokens": 16,
+      "compiled": false,
+      "decodeTokensPerRow": 256,
+      "engine": "scheduler",
+      "layerCount": 32,
+      "leftovers": {
+        "drain": {
+          "activeRowsCompleted": true,
+          "activeSettlements": [
+            "eligible_owner",
+            "eligible_owner"
+          ],
+          "activeStatuses": [
+            "length",
+            "length"
+          ],
+          "pass": true,
+          "permitIssued": true,
+          "permitValid": true,
+          "postDrainRejected": true,
+          "queuedRejected": true
+        },
+        "usagePass": true,
+        "usageRows": [
+          {
+            "cachedPromptTokens": 0,
+            "completionTokens": 0,
+            "emittedTokens": 0,
+            "promptTokens": 0,
+            "requestID": "msb-drain-queued",
+            "settlementDisposition": "not_eligible",
+            "terminalStatus": "rejected"
+          },
+          {
+            "cachedPromptTokens": 0,
+            "completionTokens": 32,
+            "emittedTokens": 32,
+            "promptTokens": 1536,
+            "requestID": "msb-drain-a",
+            "settlementDisposition": "eligible_owner",
+            "terminalStatus": "length"
+          },
+          {
+            "cachedPromptTokens": 0,
+            "completionTokens": 32,
+            "emittedTokens": 32,
+            "promptTokens": 1536,
+            "requestID": "msb-drain-b",
+            "settlementDisposition": "eligible_owner",
+            "terminalStatus": "length"
+          }
+        ]
+      },
+      "maxPhysicalBlocks": 1024,
+      "mlxSwiftLMPin": "mlxlm-da8f1932f8e2",
+      "modelID": "<models>/llama-3.1-8b",
+      "modelTag": "model",
+      "pagedSingleRowCVPct": 0,
+      "pagedSingleRowTPSRuns": [],
+      "pagedSingleRowTPSp50": 0,
+      "peakRSSMB": 4538,
+      "perRowFractionOfPagedSingleRow": 0,
+      "perRowTPSp50": 0,
+      "productionSerialCVPct": 0,
+      "productionSerialPromptTokens": 1536,
+      "productionSerialTPSRuns": [],
+      "productionSerialTPSp50": 0,
+      "promptTokenLengths": [
+        1536,
+        1536,
+        1536
+      ],
+      "promptTokenSHA256": [
+        "2b01335568a81b89f89ac9f0b70d8dedfbe5de6d3eb583573540e477ca8d72a0",
+        "f296390919b9e5a9b36d4092ccf7f445d5e0fdbb864e82878feb5532cdda34fe",
+        "d14b89faae12ff3f4e5bfcb2a5ea137b64a169ec9cf50968c1216dec4ce0d613"
+      ],
+      "promptTokensPerRow": 1536,
+      "rows": 3,
+      "runs": 1,
+      "scenario": "drain",
+      "schemaVersion": 5,
+      "timestamp": "2026-11-06T12:26:02Z"
+    },
+    {
+      "aggregateCVPct": 0,
+      "aggregateTPSRuns": [
+        24.334590323844367
+      ],
+      "aggregateTPSp50": 24.334590323844367,
+      "aggregateUpliftVsPagedSingleRow": 1.3129105949048692,
+      "aggregateVsProductionSerial": 1.2336623001069487,
+      "blockSizeTokens": 16,
+      "compiled": false,
+      "decodeTokensPerRow": 256,
+      "engine": "scheduler",
+      "layerCount": 32,
+      "leftovers": {
+        "parity": {
+          "batchedRowMatches": [
+            true,
+            true,
+            true,
+            true
+          ],
+          "batchedTokenSHA256": "1de500fd97c3a1b1e48f94fe869b1e9ea9b4d01bc6d014ce3cae69c93ec3dada",
+          "comparedTokens": 256,
+          "oneRowMatch": true,
+          "pass": true,
+          "rows": [
+            {
+              "batchedTokenCount": 256,
+              "batchedTokenSHA256": "1de500fd97c3a1b1e48f94fe869b1e9ea9b4d01bc6d014ce3cae69c93ec3dada",
+              "serialTokenCount": 257,
+              "serialTokenSHA256": "1de500fd97c3a1b1e48f94fe869b1e9ea9b4d01bc6d014ce3cae69c93ec3dada",
+              "standaloneTokenCount": 256,
+              "standaloneTokenSHA256": "1de500fd97c3a1b1e48f94fe869b1e9ea9b4d01bc6d014ce3cae69c93ec3dada"
+            },
+            {
+              "batchedTokenCount": 256,
+              "batchedTokenSHA256": "bdb1713d132e34afb7a1d7a7bce4197b2b51e936f503a833db73534f57b39160",
+              "serialTokenCount": 257,
+              "serialTokenSHA256": "bdb1713d132e34afb7a1d7a7bce4197b2b51e936f503a833db73534f57b39160",
+              "standaloneTokenCount": 256,
+              "standaloneTokenSHA256": "bdb1713d132e34afb7a1d7a7bce4197b2b51e936f503a833db73534f57b39160"
+            },
+            {
+              "batchedTokenCount": 256,
+              "batchedTokenSHA256": "4558fb0f89df7c517af248f06c0261072c08d8a3d51954ed4f7e31b08b7e2c7a",
+              "serialTokenCount": 257,
+              "serialTokenSHA256": "4558fb0f89df7c517af248f06c0261072c08d8a3d51954ed4f7e31b08b7e2c7a",
+              "standaloneTokenCount": 256,
+              "standaloneTokenSHA256": "4558fb0f89df7c517af248f06c0261072c08d8a3d51954ed4f7e31b08b7e2c7a"
+            },
+            {
+              "batchedTokenCount": 256,
+              "batchedTokenSHA256": "eb4ed4d5b10a0cbc7f319b6900136cedec3454309ae93da6c63378cba00e543f",
+              "serialTokenCount": 257,
+              "serialTokenSHA256": "eb4ed4d5b10a0cbc7f319b6900136cedec3454309ae93da6c63378cba00e543f",
+              "standaloneTokenCount": 256,
+              "standaloneTokenSHA256": "eb4ed4d5b10a0cbc7f319b6900136cedec3454309ae93da6c63378cba00e543f"
+            }
+          ],
+          "serialTokenSHA256": "1de500fd97c3a1b1e48f94fe869b1e9ea9b4d01bc6d014ce3cae69c93ec3dada",
+          "standaloneRowMatches": [
+            true,
+            true,
+            true,
+            true
+          ]
+        },
+        "usagePass": true,
+        "usageRows": [
+          {
+            "cachedPromptTokens": 0,
+            "completionTokens": 256,
+            "emittedTokens": 256,
+            "promptTokens": 1536,
+            "requestID": "msb-sched-0-99D711A8-DEFA-4627-8A03-0762FDFAE754",
+            "settlementDisposition": "eligible_owner",
+            "terminalStatus": "length"
+          },
+          {
+            "cachedPromptTokens": 0,
+            "completionTokens": 256,
+            "emittedTokens": 256,
+            "promptTokens": 1536,
+            "requestID": "msb-sched-1-CAD7003F-47F5-4A9A-BBD3-65518B8BE76A",
+            "settlementDisposition": "eligible_owner",
+            "terminalStatus": "length"
+          },
+          {
+            "cachedPromptTokens": 0,
+            "completionTokens": 256,
+            "emittedTokens": 256,
+            "promptTokens": 1536,
+            "requestID": "msb-sched-2-4140FB49-FA12-4067-A0A0-7AE441EA951F",
+            "settlementDisposition": "eligible_owner",
+            "terminalStatus": "length"
+          },
+          {
+            "cachedPromptTokens": 0,
+            "completionTokens": 256,
+            "emittedTokens": 256,
+            "promptTokens": 1536,
+            "requestID": "msb-sched-3-51D36CD7-68EF-4547-9206-4425217A0DDE",
+            "settlementDisposition": "eligible_owner",
+            "terminalStatus": "length"
+          }
+        ]
+      },
+      "maxPhysicalBlocks": 1024,
+      "mlxSwiftLMPin": "mlxlm-da8f1932f8e2",
+      "modelID": "<models>/llama-3.1-8b",
+      "modelTag": "model",
+      "pagedSingleRowCVPct": 0,
+      "pagedSingleRowTPSRuns": [
+        18.534841914050972
+      ],
+      "pagedSingleRowTPSp50": 18.534841914050972,
+      "peakRSSMB": 4684,
+      "perRowFractionOfPagedSingleRow": 0.3282276487262173,
+      "perRowTPSp50": 6.083647580961092,
+      "productionSerialCVPct": 0,
+      "productionSerialPromptTokens": 1536,
+      "productionSerialTPSRuns": [
+        19.72548753555552
+      ],
+      "productionSerialTPSp50": 19.72548753555552,
+      "promptTokenLengths": [
+        1536,
+        1536,
+        1536,
+        1536
+      ],
+      "promptTokenSHA256": [
+        "2b01335568a81b89f89ac9f0b70d8dedfbe5de6d3eb583573540e477ca8d72a0",
+        "f296390919b9e5a9b36d4092ccf7f445d5e0fdbb864e82878feb5532cdda34fe",
+        "d14b89faae12ff3f4e5bfcb2a5ea137b64a169ec9cf50968c1216dec4ce0d613",
+        "62917a0cd938260b695390b90989a6b6c6c6ad53be098910d2ec402235275ca4"
+      ],
+      "promptTokensPerRow": 1536,
+      "rows": 4,
+      "runs": 1,
+      "scenario": "parity",
+      "schemaVersion": 5,
+      "timestamp": "2026-11-06T12:31:02Z"
+    }
+  ]
+}
