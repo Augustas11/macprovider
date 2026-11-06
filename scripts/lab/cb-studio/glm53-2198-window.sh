@@ -36,8 +36,8 @@
 #
 # Env: LAB (~/macprovider-lab-2198), W (~/work-2198), MODEL, FORK,
 #      BASE_BENCH, CAMP_BENCH, HARNESS_PIN, HARNESS_HC, POLICY, FIXTURE, OUT,
-#      PROVIDER_COMMIT (the commit HARNESS_PIN was built from; must equal
-#      the policy provider_commit).
+#      PROVIDER_COMMIT (the commit HARNESS_PIN was built from; defaults to the
+#      policy provider_commit, and a different value is refused).
 set -uo pipefail
 export PATH=/usr/sbin:/opt/homebrew/bin:/usr/bin:/bin
 # The policy names Xcode 17F113; the bench records `xcodebuild -version`.
@@ -57,7 +57,7 @@ SWEEP=${SWEEP:-$LAB/poc/scripts/lab/cb-studio/depth_sweep.py}
 ANALYZE=${ANALYZE:-$LAB/native_mtp_r015_analyze.py}
 OUT=${OUT:-$LAB/window-$(date -u +%Y%m%dT%H%M%SZ)}
 MODEL_ID=zai-org/glm-5.3-flash
-PROVIDER_COMMIT=${PROVIDER_COMMIT:-3240ca12714207c4411c44f0403ff66d76d3bc2e}
+PROVIDER_COMMIT=${PROVIDER_COMMIT:-}
 RELEASE_METALLIB_SHA256=3d9b4a747758128cc5418e62c5ad8e282a11b0d436423537137e013beaa1261b
 LIVE_PORT=8080
 LIVE_LABEL=live.malibu.provider
@@ -300,6 +300,16 @@ r015_ready() {
   [[ $(shasum -a 256 $HARNESS_PIN/mlx.metallib | cut -d' ' -f1) == $RELEASE_METALLIB_SHA256 ]] ||
     { log "refusing: $HARNESS_PIN/mlx.metallib is not the signed release metallib"; return 3; }
   [[ -f $POLICY && -d $FIXTURE/target ]] || { log "missing $POLICY or $FIXTURE/target"; return 3; }
+  # The bench stamps PROVIDER_COMMIT into every record; a stale env override
+  # would attribute the measured decode path to the wrong commit.
+  local policy_commit
+  policy_commit=$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1])).get("provider_commit", ""))' $POLICY) ||
+    { log "refusing: cannot read provider_commit from $POLICY"; return 3; }
+  [[ $policy_commit =~ '^[0-9a-f]{40}$' ]] ||
+    { log "refusing: $POLICY has no 40-hex provider_commit"; return 3; }
+  [[ -n $PROVIDER_COMMIT ]] || PROVIDER_COMMIT=$policy_commit
+  [[ $policy_commit == $PROVIDER_COMMIT ]] ||
+    { log "refusing: PROVIDER_COMMIT $PROVIDER_COMMIT is not the policy provider_commit ${policy_commit:-<none>}"; return 3; }
   # A formal policy (SPEC-048 R015 verdict) runs every matrix and gated cell
   # it names, then its sustained cell; an exploratory one runs R015_CELLS.
   local cells

@@ -658,13 +658,23 @@ class StudioLabJobsTests(unittest.TestCase):
             ("temperature", 0.1), ("arrival_interval_ms", 0),
             ("laboratory_max_native_active_rows", 4),
             ("thresholds", {**policy["thresholds"], "alpha": 0.1}),
-            ("thresholds", {**policy["thresholds"], "throughput_lower_bound_min": 0.15}),
+            ("thresholds", {**policy["thresholds"], "throughput_lower_bound_min": 0.05}),
+            ("thresholds", {**policy["thresholds"], "throughput_lower_bound_min": True}),
         ):
             with self.subTest(key=key, value=value):
                 write_json(path, {**policy, key: value})
                 with self.assertRaises(jobs.Refusal):
                     self.fixture.snapshot("glm-prefill")
         self.assertEqual(self.fixture.recorded_calls(), [])
+
+    def test_glm_prefill_accepts_a_policy_frozen_at_the_old_floor(self):
+        # SPEC-048 0.1.25-0.1.68 froze policies at a 0.15 floor; the bench and
+        # analyzer still judge them by that set, so the window must accept them.
+        expected = {"throughput_lower_bound_min": 0.0, "alpha": 0.05}
+        self.assertTrue(jobs.thresholds_match({"throughput_lower_bound_min": 0.15, "alpha": 0.05}, expected))
+        self.assertTrue(jobs.thresholds_match({"throughput_lower_bound_min": 0.0, "alpha": 0.05}, expected))
+        self.assertFalse(jobs.thresholds_match({"throughput_lower_bound_min": 0.15, "alpha": 0.1}, expected))
+        self.assertFalse(jobs.thresholds_match({"throughput_lower_bound_min": 0.15}, expected))
 
     def test_glm_prefill_rejects_rebound_nonfixed_cells(self):
         self.fixture._write_glm_prefill_inputs()
@@ -991,13 +1001,22 @@ class StudioLabJobsTests(unittest.TestCase):
             ("slots", [1, 8], "approved R015 contract"),
             ("laboratory_max_native_active_rows", 8, "override"),
             ("thresholds", {**policy["thresholds"], "alpha": 0.1}, "approved gates"),
-            # SPEC-048 0.1.25-0.1.68 floor: the bench refuses it for new runs.
-            ("thresholds", {**policy["thresholds"], "throughput_lower_bound_min": 0.15}, "approved gates"),
+            # Only the current 0.0 floor and the frozen 0.1.25-0.1.68 0.15 floor pass.
+            ("thresholds", {**policy["thresholds"], "throughput_lower_bound_min": 0.05}, "approved gates"),
         ):
             changed = dict(policy)
             changed[key] = value
             with self.subTest(key=key), self.assertRaisesRegex(jobs.Refusal, message):
                 jobs.validate_qwen_policy(changed)
+
+    def test_qwen_policy_frozen_at_the_old_floor_is_still_accepted(self):
+        # The committed Qwen formal qualification policy is frozen at 0.15; the
+        # bench still runs it, so re-validating that window must not refuse it.
+        self.fixture._write_qwen_inputs()
+        policy = json.loads((self.fixture.source / jobs.POLICY_RELATIVE).read_text())
+        frozen = {**policy, "thresholds": {**policy["thresholds"], "throughput_lower_bound_min": 0.15}}
+        jobs.validate_qwen_policy(frozen)
+        jobs.validate_qwen_policy(policy)
 
     def test_qwen_projection_identity_drift_refuses(self):
         manifest = self.fixture.manifest("qwen-qualification")
