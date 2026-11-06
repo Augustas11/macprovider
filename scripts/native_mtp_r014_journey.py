@@ -617,7 +617,8 @@ class Runner:
         port = int(self.cfg["signed_port"])
         evidence, sub, details = [], {}, {}
 
-        # S0: default config — native MTP off, ordinary serves, CB attaches on the tuple.
+        # S0: default config (native MTP `auto`) with no admission set — native stays
+        # disabled, ordinary serves, CB attaches on the tuple.
         cfg0 = self.write_serve_config("s0-default", port, native_mode=None)
         proc, ready, out, err = self.start_serve("s0-default", self.signed_cli, cfg0, port)
         try:
@@ -627,7 +628,7 @@ class Runner:
                 details["s0.status"] = st
                 nm = st.get("native_mtp") or {}
                 sub["s0.native_mtp_object_present"] = isinstance(nm, dict) and bool(nm)
-                sub["s0.native_mtp_default_off"] = nm.get("enabled") is False and nm.get("mode") == "off"
+                sub["s0.native_mtp_disabled_without_admission"] = nm.get("enabled") is False
                 prompts = [f"Write a numbered list of {n} practical tips for keeping a server room cool." for n in range(3, 11)]
                 results = self.concurrent([chat(p, 96) for p in prompts], port)
                 sub["s0.ordinary_concurrent_8_ok"] = all(r[0] == 200 for r in results)

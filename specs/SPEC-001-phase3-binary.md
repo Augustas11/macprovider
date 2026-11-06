@@ -1,6 +1,13 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.50 (2026-10-31, decode progress for held output)
+**Version:** 1.9.51 (2026-11-06, native-MTP mode defaults to auto)
+
+**Change log v1.9.51 (2026-11-06, Related: #2198):**
+The native-MTP mode (`native_mtp_mode`, `MACPROVIDER_NATIVE_MTP_MODE`,
+`--native-mtp`) defaults to `auto` instead of `off`, so a CLI cut needs no
+per-provider mode change. `auto` still selects native MTP only for a tuple a
+signed SPEC-048-R014 admission entry admits; everything else decodes
+ordinarily. An explicit `off` at any layer disables it.
 
 **Change log v1.9.50 (2026-10-31, Related: #2192):**
 Adds `SPEC-001-R015`. The provider holds a tool call until it is complete, to
@@ -1634,8 +1641,9 @@ Configuration is loaded in this precedence order (highest wins):
 **Native-MTP mode (SPEC-048).** The closed configuration surface is YAML
 `native_mtp_mode`, environment `MACPROVIDER_NATIVE_MTP_MODE`, and CLI
 `--native-mtp`; the ordinary precedence above applies. The only values are
-`off` and `auto`, with default `off`. An absent value resolves silently to the
-default; an explicit empty or invalid value resolves to `off` and emits a local
+`off` and `auto`, with default `auto` (v1.9.51). An absent value resolves
+silently to the default; an explicit `off` at any layer is the provider's
+native-MTP kill switch; an explicit empty or invalid value resolves to `off` and emits a local
 configuration error. `auto` only permits the
 SPEC-048 selector to choose `native_mtp` when every signed-artifact, tuple,
 request, memory, scheduler, and release gate in that spec passes. It is not a

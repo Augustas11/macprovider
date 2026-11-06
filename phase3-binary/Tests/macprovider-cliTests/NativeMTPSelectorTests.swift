@@ -31,6 +31,36 @@ final class NativeMTPSelectorTests: XCTestCase {
         XCTAssertEqual(selection.nativeMTPReason, .modeOff)
     }
 
+    func testProviderDefaultModeWithoutAdmittedCapabilityRoutesOrdinary() throws {
+        let selection = ModelRuntime.decodePath(
+            for: try makeRequest(),
+            draftConfigured: false,
+            draftLoaded: false,
+            numDraftTokens: nil,
+            nativeMTPMode: AppConfig.defaults().nativeMTPMode,
+            nativeMTPCapability: nil
+        )
+
+        XCTAssertEqual(AppConfig.defaults().nativeMTPMode, .auto)
+        XCTAssertEqual(selection.path, .ordinary)
+        XCTAssertEqual(selection.nativeMTPReason, .capabilityMismatch)
+    }
+
+    func testProviderDefaultRuntimeWithoutAdmissionReportsTupleNotAdmitted() async throws {
+        let runtime = ModelRuntime(
+            modelID: "target",
+            maxBatch: 1,
+            nativeMTPMode: AppConfig.defaults().nativeMTPMode,
+            warmSwapEnabled: false,
+            loader: { _ in throw APIError(status: 503, message: "unused", type: "server_error", code: "unused") }
+        )
+
+        let status = await runtime.currentSnapshot().nativeMTPStatus
+        XCTAssertFalse(status.enabled)
+        XCTAssertEqual(status.mode, .off)
+        XCTAssertEqual(status.lastReason, .tupleNotAdmitted)
+    }
+
     func testOrdinaryRequestDoesNotOverwriteStartupRevocationUnavailableStatus() async throws {
         let runtime = ModelRuntime(
             modelID: "target",

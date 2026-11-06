@@ -2,6 +2,9 @@ import Foundation
 
 public enum NativeMTPStatusReason: String, CaseIterable, Sendable, Equatable {
     case active
+    /// Wire token kept for compatibility: the resolved mode is `off` (explicit
+    /// operator kill switch or a configured classic draft). The default mode is
+    /// `auto`; without an admitted tuple it reports `tuple_not_admitted`.
     case disabledByDefault = "disabled_by_default"
     case tupleNotAdmitted = "tuple_not_admitted"
     case tupleRevoked = "tuple_revoked"

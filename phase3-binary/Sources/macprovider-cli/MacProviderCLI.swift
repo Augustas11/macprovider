@@ -338,7 +338,7 @@ struct ServeCommand: AsyncParsableCommand {
     @Flag(name: .customLong("publish-spec-decode-telemetry"), inversion: .prefixedNo, help: "Opt into publishing speculative-decoding performance telemetry after provider software is verified. Default off.")
     var publishSpecDecodeTelemetry: Bool?
 
-    @Option(name: .customLong("native-mtp"), help: "Native multi-token prediction mode: off or auto. Default off. Overrides MACPROVIDER_NATIVE_MTP_MODE and config key native_mtp_mode.")
+    @Option(name: .customLong("native-mtp"), help: "Native multi-token prediction mode: off or auto. Default auto: native MTP is selected only for a tuple a signed admission entry admits; off is the kill switch. Overrides MACPROVIDER_NATIVE_MTP_MODE and config key native_mtp_mode.")
     var nativeMTP: String?
 
     @Option(help: "Coordinator WebSocket URL. Overrides MACPROVIDER_COORDINATOR_URL and config file coordinator_url.")

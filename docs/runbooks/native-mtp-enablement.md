@@ -121,10 +121,10 @@ config load may make the tuple selectable before that promotion.
    transport before checking the updater path from the previous stable.
 2. **Safe final-shape capture, MTP off.** If final serving/replay evidence needs
    the reviewed signed CLI or reviewed coordinator route code in place, deploy
-   only that safe shape with native-MTP still unavailable for selection: keep
-   provider `native_mtp_mode: off`, leave the admission feed paths unset or
-   pointed at a non-selectable staging location, and do not load a production
-   config that can advertise the tuple. This stage may prove isolated loopback,
+   only that safe shape with native-MTP still unavailable for selection: set
+   provider `native_mtp_mode: off` explicitly (the default is `auto`), leave
+   the admission feed paths unset or pointed at a non-selectable staging
+   location, and do not load a production config that can advertise the tuple. This stage may prove isolated loopback,
    final binary behavior, and route shape; it is not activation.
 3. **Release input.** (First admission of a tuple, or the one dual-field
    rebind above. A later cut with an unchanged decode-path digest skips steps
@@ -213,8 +213,10 @@ config load may make the tuple selectable before that promotion.
      keys don't match its binding, and its smoke checks every served member and
      a current revocation slot.
 9. **Turn the tuple on for the provider.** Install the cut on the Studio. This
-   restarts `live.malibu.provider` and needs operator approval. Then set
-   `native_mtp_mode: auto`. The provider fetches the admission set into
+   restarts `live.malibu.provider` and needs operator approval. The mode
+   defaults to `auto` (SPEC-048 0.1.75), so no config change is needed unless
+   the provider config sets `native_mtp_mode: off`; remove that line. The
+   provider fetches the admission set into
    `~/Library/Application Support/macprovider/native-mtp-admission/` and runs
    the local self-test. `GET /v1/status` must show `native_mtp.enabled=true`
    and `mode` of `eligible` or `active`.
