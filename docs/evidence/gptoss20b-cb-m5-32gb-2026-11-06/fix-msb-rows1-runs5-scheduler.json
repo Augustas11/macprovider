@@ -1,0 +1,165 @@
+{
+ "command": [
+  "/usr/bin/sandbox-exec",
+  "-f",
+  "<lab>/lab.sb",
+  "<lab>/bin-final/macprovider-cli",
+  "msb-throughput",
+  "--model",
+  "<models>/gpt-oss-20b",
+  "--engine",
+  "scheduler",
+  "--no-compile",
+  "--prompt-tokens",
+  "1536",
+  "--decode-tokens",
+  "256",
+  "--runs",
+  "5",
+  "--mlx-cache-limit-mb",
+  "512",
+  "--stdout-only",
+  "--rows",
+  "1"
+ ],
+ "exit_code": 0,
+ "reports": [
+  {
+   "aggregateCVPct": 3.588881593144513,
+   "aggregateTPSRuns": [
+    21.33577989446443,
+    19.352861587270983,
+    20.734204676052066,
+    20.48821344891108,
+    20.162169938070544
+   ],
+   "aggregateTPSp50": 20.48821344891108,
+   "aggregateUpliftVsPagedSingleRow": 0.9981561516951815,
+   "aggregateVsProductionSerial": 0.9374859061961447,
+   "blockSizeTokens": 16,
+   "compiled": false,
+   "decodeTokensPerRow": 256,
+   "engine": "scheduler",
+   "layerCount": 24,
+   "maxPhysicalBlocks": 1024,
+   "mlxSwiftLMPin": "mlxlm-da8f1932f8e2",
+   "modelID": "<models>/gpt-oss-20b",
+   "modelTag": "model",
+   "pagedSingleRowCVPct": 1.7499098827545154,
+   "pagedSingleRowTPSRuns": [
+    20.59280247545111,
+    20.52606039056683,
+    20.14858167963665,
+    20.128311799156254,
+    20.995078158940824
+   ],
+   "pagedSingleRowTPSp50": 20.52606039056683,
+   "peakPhysFootprintMB": 13619,
+   "peakRSSMB": 3191,
+   "perRowFractionOfPagedSingleRow": 0.9981561516951815,
+   "perRowTPSp50": 20.48821344891108,
+   "productionSerialCVPct": 1.7179159238433508,
+   "productionSerialPromptTokens": 1536,
+   "productionSerialTPSRuns": [
+    21.335013415926177,
+    21.85442289158473,
+    22.194213528128802,
+    21.38132184788677,
+    21.954823142303926
+   ],
+   "productionSerialTPSp50": 21.85442289158473,
+   "productionSerialTTFTSecondsRuns": [
+    3.7776119709014893,
+    3.766466975212097,
+    3.8840049505233765,
+    3.9102749824523926,
+    3.8508180379867554
+   ],
+   "promptTokenLengths": [
+    1536
+   ],
+   "promptTokenSHA256": [
+    "4e59d0e6a7a1c39973ef4b0a484c069296e8805bb86f437b028d18192823a852"
+   ],
+   "promptTokensPerRow": 1536,
+   "rows": 1,
+   "runs": 5,
+   "scenario": "throughput",
+   "schedulerBackendAggregateTPSRuns": [
+    21.339079469083327,
+    19.35792564509754,
+    20.74076478514447,
+    20.49586851956324,
+    20.171336196389234
+   ],
+   "schedulerBackendWindowCallsRuns": [
+    16,
+    16,
+    16,
+    16,
+    16
+   ],
+   "schedulerBackendWindowSecondsRuns": [
+    11.996768669,
+    13.22455746,
+    12.342842834,
+    12.490322123,
+    12.69127625
+   ],
+   "schedulerCompletionOffsetSecondsByRowRuns": [
+    [
+     15.621425032615662
+    ],
+    [
+     16.947322964668274
+    ],
+    [
+     16.49746298789978
+    ],
+    [
+     16.30996799468994
+    ],
+    [
+     16.51839005947113
+    ]
+   ],
+   "schedulerDecodeLockstepWindow": 16,
+   "schedulerFirstTokenOffsetSecondsByRowRuns": [
+    [
+     3.6228010654449463
+    ],
+    [
+     3.7193050384521484
+    ],
+    [
+     4.150714993476868
+    ],
+    [
+     3.814979076385498
+    ],
+    [
+     3.821344017982483
+    ]
+   ],
+   "schedulerTTFTSecondsByRowRuns": [
+    [
+     3.6228010654449463
+    ],
+    [
+     3.7193050384521484
+    ],
+    [
+     4.150714993476868
+    ],
+    [
+     3.814979076385498
+    ],
+    [
+     3.821344017982483
+    ]
+   ],
+   "schemaVersion": 5,
+   "timestamp": "2026-11-06T14:36:05Z"
+  }
+ ]
+}
