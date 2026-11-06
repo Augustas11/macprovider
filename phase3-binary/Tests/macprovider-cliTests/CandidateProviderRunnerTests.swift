@@ -1,9 +1,27 @@
 import Darwin
 import Foundation
+import MacProviderCore
 import XCTest
 @testable import macprovider_cli
 
 final class CandidateProviderRunnerTests: XCTestCase {
+    /// SPEC-048: autotune measurements force ordinary decode even though the
+    /// provider default is native MTP `auto`.
+    func testCandidateConfigForcesOrdinaryDecode() throws {
+        let root = try CandidateProviderRunner.makeCandidateConfigRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let yaml = try String(
+            contentsOf: root.appendingPathComponent("candidate.yaml"), encoding: .utf8)
+        let config = try ConfigLoader.load(
+            cli: CLIOverrides(),
+            environment: [:],
+            fileExists: { _ in true },
+            readFile: { _ in yaml },
+            resolveCredentials: false
+        )
+        XCTAssertEqual(config.nativeMTPMode, .off)
+    }
+
     func testServeArgumentsIncludeNoJoinAndOptionalKnobs() throws {
         XCTAssertEqual(
             try CandidateProviderRunner.serveArguments(
