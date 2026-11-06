@@ -1,7 +1,10 @@
 # SPEC-039 — Paged KV / paged-attention engine
 
-Version: v0.1.29
-Status: draft (normative design). v0.1.29 defines the `gpt_oss` mixed cache
+Version: v0.1.30
+Status: draft (normative design). v0.1.30 states the `kv_bits` precedence at
+attach: only an explicit operator `kv_bits` reaches the paged-KV gate; the
+model-family KV-quant default applies to serially served requests only.
+v0.1.29 defines the `gpt_oss` mixed cache
 class (keep=0 sliding-window layers and full-attention layers, both paged on
 one block table, decode keys in ring order) with an exact per-layer layout
 check, and adds the provisional FR-PKV12 `openai/gpt-oss-20b` identity so its
@@ -88,6 +91,19 @@ is `RotatingKVCache` only because the serve path caps KV for memory attaches to
 paged mode (the block pool bounds memory), while a genuine sliding-window model
 stays fail-safe. IMPL lands with this revision.
 Owner: provider runtime / inference engine
+Change log v0.1.30 (2026-11-06): FR-PKV5 states which `kv_bits` the attach
+gate sees (#2200). The model-family KV-quant default (T3-03:
+`KVQuantRecommendation`, 8 for `gpt_oss` and `gemma4`) is a serial-path
+default. It applies to requests the provider serves serially, and never
+reaches the paged-KV attach gate, the continuous-batching capability or the
+FR-CB10 self-check's batched rows. An explicit operator `kv_bits` (config,
+environment, CLI or an adopted recommendation) keeps today's meaning: paged
+attach falls back with `paged_fallback_quantized` and every request uses it.
+Before this revision the family default fed the attach gate, so every
+gpt-oss provider fell back with `paged_fallback_quantized` and no FR-CB10
+self-check ran, although the CB policy's `kv_dtype` is fp16. Refines
+SPEC-039-R005.
+
 Change log v0.1.29 (2026-11-06): defines the `gpt_oss` mixed cache class
 (#2200). FR-PKV12 names its topology: one cache per decoder layer in
 `layer_types` order, keep=0 `RotatingKVCache` of `sliding_window` tokens at
@@ -680,6 +696,21 @@ If an operator enables paged KV while `kvBits` is configured before a
 quantized paged path exists, the provider MUST route to the stock contiguous
 path or fail preflight with an observable reason-coded result. Silent
 quantization downgrade is forbidden.
+
+**Family KV-quant default (v0.1.30).** "Configured" above means an explicit
+operator `kv_bits`: config, environment, CLI or an adopted recommendation's
+knob. The model-family default (T3-03, `KVQuantRecommendation`) is not a
+configured value. It applies only to requests the provider serves on the
+serial path; there it takes the place of an unset `kv_bits`, and is
+recomputed for the loaded model after a warm swap. The paged-KV attach gate,
+the continuous-batching capability and the FR-CB10 self-check's batched rows
+MUST see only the explicit value, so a model with a family default and no
+explicit `kv_bits` attaches fp16 paged KV. Its batched rows run fp16 KV (the
+signed CB policy's `kv_dtype`), and its serially served requests keep the
+family default. This is not a silent downgrade: no request had its
+`kv_bits` requested, and each path keeps its own exact reference. The
+FR-CB10 self-check's serial baseline is the serial path as served, family
+default included.
 
 ### FR-PKV6 — provider-local default-off invariants (SPEC-039-R006)
 

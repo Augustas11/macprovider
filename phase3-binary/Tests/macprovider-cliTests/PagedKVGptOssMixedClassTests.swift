@@ -5,6 +5,10 @@ import MLXLMCommon
 @testable import macprovider_cli
 import XCTest
 
+private enum PagedKVGptOssMixedClassTestError: Error {
+    case notExpected
+}
+
 /// SPEC-039 v0.1.29 `gpt_oss` mixed cache class: exact identities, the exact
 /// sliding-window/full-attention layer layout, and paged-vs-contiguous
 /// exactness for rows that cross the sliding window.
@@ -155,6 +159,63 @@ final class PagedKVGptOssMixedClassTests: XCTestCase {
             slidingWindowAttention: admitted.slidingWindowAttention
         )
         XCTAssertFalse(ModelRuntime.measuredMixedPagedKVTopology(exact, modelCapabilities: qwen))
+    }
+
+    /// SPEC-039 FR-PKV5 v0.1.30: the T3-03 family KV-quant default reaches
+    /// only the serial path; the paged-KV gate sees only an explicit kv_bits.
+    func testFamilyKVQuantDefaultReachesOnlyTheSerialPath() async throws {
+        func runtime(_ modelID: String, explicit: Int?) -> ModelRuntime {
+            ModelRuntime(
+                modelID: modelID,
+                kvBitsOverride: explicit,
+                familyKVQuantDefault: true,
+                warmSwapEnabled: false,
+                loader: { _ in throw PagedKVGptOssMixedClassTestError.notExpected }
+            )
+        }
+        func gateReason(explicit: Int?) throws -> PagedKVFallbackReason? {
+            ModelRuntime.pagedKVAttachDecision(
+                config: Self.config, modelID: "openai/gpt-oss-20b", modelHash: Self.modelSHA,
+                tokenizerSHA256: nil, chatTemplateSHA256: nil, kvBitsOverride: explicit,
+                runtimeCacheClass: "mixed",
+                gates: PagedKVGates(
+                    identityAvailable: true, metallibAvailable: false, kernelRegistered: false, parityEstablished: false
+                ),
+                modelCapabilities: try Self.capabilities(Self.gptOSSConfig())
+            ).reason
+        }
+
+        // (a) gpt-oss, no explicit kv_bits: the gate sees nil, serial gets 8.
+        let gptOSS = runtime("openai/gpt-oss-20b", explicit: nil)
+        let gateBits = await gptOSS.kvBitsOverrideForTest()
+        let serialBits = await gptOSS.serialKVBitsForTest()
+        XCTAssertNil(gateBits)
+        XCTAssertEqual(serialBits, 8)
+        XCTAssertEqual(try gateReason(explicit: gateBits), .metallib, "past the quantized check")
+
+        // (b) explicit kv_bits: the gate sees it and falls back quantized;
+        // serial uses the same explicit value.
+        let explicit = runtime("openai/gpt-oss-20b", explicit: 4)
+        let explicitGateBits = await explicit.kvBitsOverrideForTest()
+        let explicitSerialBits = await explicit.serialKVBitsForTest()
+        XCTAssertEqual(explicitGateBits, 4)
+        XCTAssertEqual(explicitSerialBits, 4)
+        XCTAssertEqual(try gateReason(explicit: explicitGateBits), .quantized)
+
+        // (c) a model without a family default is unchanged.
+        let llama = runtime("meta-llama/llama-3.1-8b-instruct", explicit: nil)
+        let llamaGateBits = await llama.kvBitsOverrideForTest()
+        let llamaSerialBits = await llama.serialKVBitsForTest()
+        XCTAssertNil(llamaGateBits)
+        XCTAssertNil(llamaSerialBits)
+        let llamaExplicit = runtime("meta-llama/llama-3.1-8b-instruct", explicit: 8)
+        let llamaExplicitSerial = await llamaExplicit.serialKVBitsForTest()
+        XCTAssertEqual(llamaExplicitSerial, 8)
+
+        // The family default is opt-in per runtime and follows the model id.
+        XCTAssertNil(ModelRuntime.serialKVBits(explicit: nil, familyKVQuantDefault: false, modelID: "openai/gpt-oss-20b"))
+        XCTAssertEqual(ModelRuntime.serialKVBits(explicit: nil, familyKVQuantDefault: true, modelID: "openai/gpt-oss-120b"), 8)
+        XCTAssertNil(ModelRuntime.serialKVBits(explicit: nil, familyKVQuantDefault: true, modelID: nil))
     }
 
     /// One sliding-window layer and one full-attention layer, both paged through

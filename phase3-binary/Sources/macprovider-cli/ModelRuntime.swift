@@ -2306,7 +2306,22 @@ actor ModelRuntime: ModelRuntimeServing {
     // SPEC-013 autoresearch serving knobs. nil kvBits ⇒ no KV
     // quantization (mlx-swift default). maxBatch defaults to 1, the
     // pre-knob behavior; lifting above 1 widens the autotune search.
+    /// Explicit operator (or adoption) `kv_bits`. The only value the paged-KV
+    /// attach gate and continuous-batching capability see.
     private var kvBitsOverride: Int?
+    /// T3-03 family KV-quant default (`KVQuantRecommendation`), serial path only.
+    private let familyKVQuantDefault: Bool
+    /// `kv_bits` of a serially served request: the explicit value, else the
+    /// loaded model's family default (SPEC-039 FR-PKV5 v0.1.30).
+    private var serialKVBits: Int? {
+        Self.serialKVBits(explicit: kvBitsOverride, familyKVQuantDefault: familyKVQuantDefault, modelID: currentModelID)
+    }
+
+    nonisolated static func serialKVBits(explicit: Int?, familyKVQuantDefault: Bool, modelID: String?) -> Int? {
+        if let explicit { return explicit }
+        guard familyKVQuantDefault, let modelID else { return nil }
+        return KVQuantRecommendation.recommendedKVBits(for: modelID)
+    }
     private let prefillStepSize: Int
     /// The CB prompt chunk the operator set through `prefill_step_size`; nil
     /// keeps the backend family's ceiling (SPEC-038 FR-CB2).
@@ -3968,6 +3983,7 @@ maxTokens: 1,
         mlxCacheLimitMB: Int? = nil,
         maxContextTokensOverride: Int? = nil,
         kvBitsOverride: Int? = nil,
+        familyKVQuantDefault: Bool = false,
         pagedKVConfig: PagedKVConfig = .defaults(),
         prefillStepSize: Int = 512,
         prefillStepSizeExplicitlyConfigured: Bool = false,
@@ -4059,6 +4075,7 @@ maxTokens: 1,
         self.speculativeCacheWrapValidated = speculativeCacheWrapValidated
         self.maxContextTokens = maxContextTokensOverride ?? Self.defaultMaxContextTokens()
         self.kvBitsOverride = kvBitsOverride
+        self.familyKVQuantDefault = familyKVQuantDefault
         self.prefillStepSize = max(1, prefillStepSize)
         self.continuousBatchPromptChunkOverride = Self.resolvedContinuousBatchPromptChunkOverride(
             prefillStepSize: prefillStepSize,
@@ -4422,7 +4439,7 @@ maxTokens: 1,
                 draft: draftContainer,
                 numDraftTokens: 1,
                 maxContextTokens: self.maxContextTokens,
-                kvBitsOverride: self.kvBitsOverride,
+                kvBitsOverride: self.serialKVBits,
                 prefillStepSize: self.prefillStepSize,
                 blockingInferenceExecutor: self.blockingInferenceExecutor
             )
@@ -4432,7 +4449,7 @@ maxTokens: 1,
                 targetModelID: modelID,
                 numDraftTokens: numDraftTokens,
                 maxContextTokens: self.maxContextTokens,
-                kvBitsOverride: self.kvBitsOverride,
+                kvBitsOverride: self.serialKVBits,
                 prefillStepSize: self.prefillStepSize,
                 blockingInferenceExecutor: self.blockingInferenceExecutor
             )
@@ -4454,6 +4471,7 @@ maxTokens: 1,
         speculativeCacheWrapValidated: Bool = false,
         maxContextTokensOverride: Int? = nil,
         kvBitsOverride: Int? = nil,
+        familyKVQuantDefault: Bool = false,
         pagedKVConfig: PagedKVConfig = .defaults(),
         prefillStepSize: Int = 512,
         prefillStepSizeExplicitlyConfigured: Bool = false,
@@ -4594,6 +4612,7 @@ maxTokens: 1,
         self.stopTokenFilter = StopTokenFilter(tokens: [])
         self.maxContextTokens = maxContextTokensOverride ?? Self.defaultMaxContextTokens()
         self.kvBitsOverride = kvBitsOverride
+        self.familyKVQuantDefault = familyKVQuantDefault
         self.prefillStepSize = max(1, prefillStepSize)
         self.continuousBatchPromptChunkOverride = Self.resolvedContinuousBatchPromptChunkOverride(
             prefillStepSize: prefillStepSize,
@@ -5903,8 +5922,10 @@ maxTokens: 1,
         let numDraftTokens = numDraftTokens
         let maxContextTokens = adoptionKnobs?.maxContext ?? maxContextTokens
         let kvBitsOverride = adoptionKnobs?.kvBits ?? kvBitsOverride
+        let serialKVBits = Self.serialKVBits(
+            explicit: kvBitsOverride, familyKVQuantDefault: familyKVQuantDefault, modelID: targetModelID)
         let prefillStepSize = prefillStepSize
-        return Task.detached { [weak self, testLoader, drainTimeoutSeconds, providerStatus, configuredDraftModelID, configuredDraftModelLoadPath, numDraftTokens, maxContextTokens, kvBitsOverride, prefillStepSize, targetAuthority, adoptionKnobs] in
+        return Task.detached { [weak self, testLoader, drainTimeoutSeconds, providerStatus, configuredDraftModelID, configuredDraftModelLoadPath, numDraftTokens, maxContextTokens, kvBitsOverride, serialKVBits, prefillStepSize, targetAuthority, adoptionKnobs] in
             guard let self else { return }
             do {
                 let container: ModelContainer?
@@ -5986,7 +6007,7 @@ maxTokens: 1,
                                 draft: draftLoaded.0,
                                 numDraftTokens: 1,
                                 maxContextTokens: maxContextTokens,
-                                kvBitsOverride: kvBitsOverride,
+                                kvBitsOverride: serialKVBits,
                                 prefillStepSize: prefillStepSize,
                                 blockingInferenceExecutor: blockingInferenceExecutor
                             )
@@ -5996,7 +6017,7 @@ maxTokens: 1,
                                 targetModelID: modelID,
                                 numDraftTokens: numDraftTokens,
                                 maxContextTokens: maxContextTokens,
-                                kvBitsOverride: kvBitsOverride,
+                                kvBitsOverride: serialKVBits,
                                 prefillStepSize: prefillStepSize,
                                 blockingInferenceExecutor: blockingInferenceExecutor
                             )
@@ -6370,6 +6391,10 @@ maxTokens: 1,
     // suites can confirm CLI flag values reached the runtime.
     func kvBitsOverrideForTest() -> Int? {
         kvBitsOverride
+    }
+
+    func serialKVBitsForTest() -> Int? {
+        serialKVBits
     }
 
     func pagedKVDecisionForTest() -> PagedKVAttachDecision {
@@ -10089,7 +10114,7 @@ maxTokens: 1,
         }
 
         let maxContextTokens = maxContextTokens
-        let kvBitsOverride = kvBitsOverride
+        let kvBitsOverride = serialKVBits
         let prefillStepSize = prefillStepSize
         let inferenceGate = inferenceGate
         let blockingInferenceExecutor = blockingInferenceExecutor
@@ -10295,7 +10320,7 @@ maxTokens: boundedMaxTokens,
         configureConversationCacheMemoryBudget()
         let coldContext = coldContext(for: request, snapshot: snapshot)
         let kvBitsOverride = Self.effectiveKVBits(
-            configured: kvBitsOverride,
+            configured: serialKVBits,
             conversationKey: request.conversationKey,
             containsImage: request.containsNonTextMessageContentPart,
             serialQuantizedConversation: coldContext?.eligible != true
@@ -11231,7 +11256,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
         configureConversationCacheMemoryBudget()
         let coldContext = coldContext(for: request, snapshot: snapshot)
         let kvBitsOverride = Self.effectiveKVBits(
-            configured: kvBitsOverride,
+            configured: serialKVBits,
             conversationKey: request.conversationKey,
             containsImage: request.containsNonTextMessageContentPart,
             serialQuantizedConversation: coldContext?.eligible != true
@@ -11961,7 +11986,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
     private func seedColdGeometry(into adapter: KVConversationColdTierAdapter) async {
         guard let container = currentContainer, let servedModelID = currentModelID else { return }
         let maxContextTokens = maxContextTokens
-        let kvBitsOverride = kvBitsOverride
+        let kvBitsOverride = serialKVBits
         let prefillStepSize = prefillStepSize
         let blockingInferenceExecutor = blockingInferenceExecutor
         let memoryBudget = conversationCache.memoryBudget
@@ -12202,7 +12227,7 @@ maxTokens: 1,
                 throw ContinuousBatchSchedulerError.requestFailed("self_check_model_unavailable")
             }
             let maxContextTokens = runtime.maxContextTokens
-            let kvBitsOverride = runtime.kvBitsOverride
+            let kvBitsOverride = runtime.serialKVBits
             let prefillStepSize = runtime.prefillStepSize
             let blockingInferenceExecutor = runtime.blockingInferenceExecutor
             var tokens = 0
@@ -12255,7 +12280,7 @@ maxTokens: 1,
         do {
             let start = Date()
             let maxContextTokens = maxContextTokens
-            let kvBitsOverride = kvBitsOverride
+            let kvBitsOverride = serialKVBits
             let prefillStepSize = prefillStepSize
             let blockingInferenceExecutor = blockingInferenceExecutor
             let result: BlockingGenerateResult = try await inferenceGate.withPermit {

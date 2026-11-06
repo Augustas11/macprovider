@@ -2874,10 +2874,6 @@ struct ServeCommand: AsyncParsableCommand {
 
         printResolvedConfiguration(resolved)
 
-        // T3-03: apply family-based KV-quant default when the operator has
-        // not set an explicit override. Explicit config/env/CLI always wins.
-        let effectiveKVBits = resolved.kvBitsOverride
-            ?? KVQuantRecommendation.recommendedKVBits(for: resolved.model ?? "")
         // The coordinator advertises config.modelCatalogModelID as this
         // provider's model_id while inference is served locally under
         // config.model. Accept the advertised catalog id as a serve alias so
@@ -3107,7 +3103,11 @@ struct ServeCommand: AsyncParsableCommand {
                     speculativeCacheWrapValidated: speculativeCacheWrapValidated,
                     mlxCacheLimitMB: resolved.mlxCacheLimitMB,
                     maxContextTokensOverride: resolved.maxContextOverride,
-                    kvBitsOverride: effectiveKVBits,
+                    // T3-03: only an explicit operator kv_bits reaches the
+                    // paged-KV / CB gates; the family KV-quant default applies
+                    // to serially served requests (SPEC-039 FR-PKV5 v0.1.30).
+                    kvBitsOverride: resolved.kvBitsOverride,
+                    familyKVQuantDefault: true,
                     pagedKVConfig: resolved.pagedKV.withFamilyDefaults(modelFamily: localModelFamily ?? "").sizedToCover(
                         contextTokens: ProviderCapacity(maxContextOverride: resolved.maxContextOverride, maxConcurrencyOverride: nil).maxContextTokens
                     ),
