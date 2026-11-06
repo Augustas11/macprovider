@@ -27,6 +27,9 @@ struct PagedKVRuntimeParityProbeResult: Sendable, Equatable {
     /// Model forwards of the paged run: the leading 512-token prompt chunks
     /// plus one per generated token. Every paged layer gathers twice in each.
     let nForwards: Int
+    /// Gathered buffers per paged layer per forward: K and V (or GLM latent
+    /// and pooled keys), plus MiniMax M3's indexer keys.
+    let gathersPerLayerForward: Int
     let gatherKernelCalls: Int
     let maxLogicalBlocks: Int
     let nonIdentityPermutation: Bool
@@ -40,6 +43,7 @@ struct PagedKVRuntimeParityProbeResult: Sendable, Equatable {
         nLayers: Int,
         nNew: Int,
         nForwards: Int? = nil,
+        gathersPerLayerForward: Int = 2,
         gatherKernelCalls: Int,
         maxLogicalBlocks: Int,
         nonIdentityPermutation: Bool,
@@ -50,6 +54,7 @@ struct PagedKVRuntimeParityProbeResult: Sendable, Equatable {
         self.nLayers = nLayers
         self.nNew = nNew
         self.nForwards = nForwards ?? nNew
+        self.gathersPerLayerForward = gathersPerLayerForward
         self.gatherKernelCalls = gatherKernelCalls
         self.maxLogicalBlocks = maxLogicalBlocks
         self.nonIdentityPermutation = nonIdentityPermutation
@@ -212,6 +217,15 @@ enum PagedKVRuntimeParityProbe {
                 let paged = try Self.greedyGenerate(model: model, promptTokens: promptTokens, nNew: nNew) {
                     probeCaches = zip(stockLayout, kinds).map { _, kind in
                         if case .recurrentMamba = kind { return MambaCache() as KVCache }
+                        if case .pagedIndexedKV = kind {
+                            return PagedMiniMaxM3SparseCache(
+                                blockSizeTokens: blockSizeTokens,
+                                maxPhysicalBlocks: maxPhysicalBlocks,
+                                poolEpoch: 1,
+                                binding: binding,
+                                reconstructViaGather: true
+                            ) as KVCache
+                        }
                         if case .pagedMLA(let kpool) = kind {
                             return PagedMLALatentCache(
                                 kpool: kpool,
@@ -252,6 +266,7 @@ enum PagedKVRuntimeParityProbe {
                     nLayers: nLayers,
                     nNew: nNew,
                     nForwards: Self.prefillChunkForwards(promptTokens: promptTokens.count) + nNew,
+                    gathersPerLayerForward: kinds.contains(.pagedIndexedKV) ? 3 : 2,
                     gatherKernelCalls: calls,
                     maxLogicalBlocks: maxBlocks,
                     nonIdentityPermutation: nonIdentity,
@@ -323,6 +338,7 @@ enum PagedKVRuntimeParityProbe {
             )
 
             let needsRecurrentMembershipProbe = cacheKinds?.contains(.recurrentMamba) == true
+            let usesProductionIteratorReference = Self.usesProductionIteratorReference(cacheKinds: cacheKinds)
             // Hybrids run the first shared decode in the serve path's lockstep
             // window, the multi-step packed recurrent window production serves,
             // then hand row state back across the leave/join transition.
@@ -409,13 +425,13 @@ enum PagedKVRuntimeParityProbe {
                 container: container,
                 prompt: promptA,
                 nNew: serialReferenceCount,
-                useProductionIterator: needsRecurrentMembershipProbe
+                useProductionIterator: usesProductionIteratorReference
             )
             let serialB = try await Self.serialContinuationReferences(
                 container: container,
                 prompt: promptB,
                 nNew: serialReferenceCount,
-                useProductionIterator: needsRecurrentMembershipProbe
+                useProductionIterator: usesProductionIteratorReference
             )
             guard serialA.count == serialReferenceCount,
                   serialB.count == serialReferenceCount
@@ -935,6 +951,18 @@ enum PagedKVRuntimeParityProbe {
     /// would make the tolerance test unsound. Attention-only layouts retain the existing
     /// full-distribution oracle so legitimate batched accumulation near-ties remain
     /// eligible under FR-CB6.
+    /// Whether the isolation probe compares each row against the production
+    /// iterator's tokens instead of a full-prompt recompute. Hybrids need it
+    /// for their recurrent state. A MiniMax M3 (pagedIndexedKV) row's
+    /// incremental decode is not a full-prompt recompute: the mlx-vlm
+    /// reference model itself picks different tokens for the two on the probe
+    /// prompts. Its serial path is the production iterator, so each row must
+    /// equal that token for token, without the recompute's near-tie tolerance.
+    static func usesProductionIteratorReference(cacheKinds: [PagedKVSharedForwardBackend.CacheKind]?) -> Bool {
+        guard let cacheKinds else { return false }
+        return cacheKinds.contains(.recurrentMamba) || cacheKinds.contains(.pagedIndexedKV)
+    }
+
     private static func serialContinuationReferences(
         container: ModelContainer,
         prompt: [Int],

@@ -100,6 +100,12 @@ struct MSBThroughputCommand: AsyncParsableCommand {
     )
     var parityTokens: Int = 32
 
+    @Option(
+        name: .customLong("prompt-token-file"),
+        help: "parity scenario: JSON {\"prompts\":[{\"name\":..,\"ids\":[..]}]} of exactly --rows prompts that replace the synthetic ones, so rows can differ in length. Repeat for several cohorts on one load. The report carries each row's tokens."
+    )
+    var promptTokenFiles: [String] = []
+
     @Flag(
         name: .customLong("compile"),
         inversion: .prefixedNo,
@@ -183,6 +189,11 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         }
 
         try validateHardwareRowCount()
+        guard promptTokenFiles.isEmpty || scenario == .parity else {
+            throw ValidationError("--prompt-token-file applies only to --scenario parity")
+        }
+        // Read and check every prompt file before the (long) model load.
+        let promptFileSets = try promptTokenFiles.map { try Self.loadPromptTokenFile($0, rows: rows) }
 
         if let mlxCacheLimitMB, !ModelRuntime.isValidMLXCacheLimitMB(mlxCacheLimitMB) {
             throw ValidationError("--mlx-cache-limit-mb must be in 0...\(ModelRuntime.maximumMLXCacheLimitMB)")
@@ -237,7 +248,13 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             try await runMSB05(modelID: modelID, container: container, layerCount: layerCount)
             return
         case .parity:
-            try await runParity(modelID: modelID, container: container, layerCount: layerCount, cacheKinds: cacheKinds, recurrentStateLayout: recurrentStateLayout)
+            guard !promptFileSets.isEmpty else {
+                try await runParity(modelID: modelID, container: container, layerCount: layerCount, cacheKinds: cacheKinds, recurrentStateLayout: recurrentStateLayout)
+                return
+            }
+            for set in promptFileSets {
+                try await runParity(modelID: modelID, container: container, layerCount: layerCount, cacheKinds: cacheKinds, recurrentStateLayout: recurrentStateLayout, promptSet: set)
+            }
             return
         case .isolation:
             try await runIsolation(modelID: modelID, container: container, layerCount: layerCount, cacheKinds: cacheKinds, recurrentStateLayout: recurrentStateLayout)
@@ -584,7 +601,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
     }
 
     private static func msbCacheClass(_ cacheKinds: [PagedKVSharedForwardBackend.CacheKind]) -> String {
-        if isDeepseekV4Pool(cacheKinds) { return "mixed" }
+        if isDeepseekV4Pool(cacheKinds) || cacheKinds.contains(.pagedIndexedKV) { return "mixed" }
         if cacheKinds.contains(.recurrentMamba) { return "mixed" }
         let sliding = cacheKinds.filter(\.hasSlidingWindow)
         guard !sliding.isEmpty else { return "KVCacheSimple" }
@@ -908,6 +925,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
                 ),
                 maxPromptChunkTokens: max(1, maxPromptChunkTokens),
                 referencePrefillStepSize: Self.isDeepseekV4Pool(cacheKinds) ? DeepseekV4Model.prefillStepSize : nil,
+                serialPrefillStride: cacheKinds.contains(.pagedIndexedKV),
                 snapshot: ContinuousBatchSchedulerSnapshot(
                     modelID: descriptor.modelID,
                     modelSHA256: descriptor.modelSHA256,
@@ -1547,11 +1565,17 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         container: ModelContainer,
         layerCount: Int,
         cacheKinds: [PagedKVSharedForwardBackend.CacheKind],
-        recurrentStateLayout: PagedKVRecurrentStateLayout
+        recurrentStateLayout: PagedKVRecurrentStateLayout,
+        promptSet: MSBPromptTokenSet? = nil
     ) async throws {
         let compared = parityTokens
         let parityPrefillStepSize = ContinuousBatchSchedulerConfiguration.defaultPromptChunkTokens
-        let prompts = try await buildDistinctPrompts(container: container, count: rows, tokens: promptTokens)
+        let prompts: [[Int]]
+        if let promptSet {
+            prompts = promptSet.prompts.map(\.ids)
+        } else {
+            prompts = try await buildDistinctPrompts(container: container, count: rows, tokens: promptTokens)
+        }
         var peakRSSMB = memoryRSSMB()
         var serialRuns: [SerialRunDetail] = []
         for prompt in prompts {
@@ -1617,7 +1641,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             rows: serialRows.enumerated().map { index, serial in
                 let standalone = standaloneRows[index].tokensByRow[0]
                 let batched = index < twoRow.tokensByRow.count ? twoRow.tokensByRow[index] : []
-                return MSBParityRowEvidence(
+                var row = MSBParityRowEvidence(
                     serialTokenCount: serial.count,
                     standaloneTokenCount: standalone.count,
                     batchedTokenCount: batched.count,
@@ -1625,6 +1649,13 @@ struct MSBThroughputCommand: AsyncParsableCommand {
                     standaloneTokenSHA256: msbTokenSequenceSHA256(Array(standalone.prefix(compared))),
                     batchedTokenSHA256: msbTokenSequenceSHA256(Array(batched.prefix(compared)))
                 )
+                if let promptSet {
+                    row.name = promptSet.prompts[index].name
+                    row.serialTokens = Array(serial.prefix(compared))
+                    row.standaloneTokens = Array(standalone.prefix(compared))
+                    row.batchedTokens = Array(batched.prefix(compared))
+                }
+                return row
             },
             pass: batchedMatches.count == serialRows.count
                 && standaloneMatches.allSatisfy(\.match) && batchedMatches.allSatisfy { $0 }
@@ -1634,7 +1665,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             layerCount: layerCount,
             engine: "scheduler",
             rows: rows,
-            promptTokenLengths: Array(repeating: promptTokens, count: rows),
+            promptTokenLengths: prompts.map(\.count),
             serialRunTPS: [serialRuns[0].timedTokensPerSecond],
             engineSingleRowTPS: [standaloneRows[0].batched.perRowTokensPerSecond],
             aggregateRunTPS: [try msbAggregateThroughput(twoRow.batched.rowSamples).aggregateTokensPerSecond],
@@ -2319,6 +2350,16 @@ struct MSBThroughputCommand: AsyncParsableCommand {
     /// Build `count` distinct prompts, each exactly `tokens` tokens. Each prompt
     /// draws from a distinct topical corpus entry so no two rows share a reusable
     /// prefix and their MoE expert routing / greedy continuations differ.
+    /// `--prompt-token-file`: `{"prompts":[{"name":..,"ids":[..]}]}` with
+    /// exactly `rows` prompts of at least two tokens each.
+    static func loadPromptTokenFile(_ path: String, rows: Int) throws -> MSBPromptTokenSet {
+        let set = try JSONDecoder().decode(MSBPromptTokenSet.self, from: Data(contentsOf: URL(fileURLWithPath: path)))
+        guard set.prompts.count == rows, set.prompts.allSatisfy({ $0.ids.count >= 2 }) else {
+            throw ValidationError("--prompt-token-file \(path): needs exactly --rows (\(rows)) prompts of at least 2 tokens")
+        }
+        return set
+    }
+
     private func buildDistinctPrompts(
         container: ModelContainer,
         count: Int,

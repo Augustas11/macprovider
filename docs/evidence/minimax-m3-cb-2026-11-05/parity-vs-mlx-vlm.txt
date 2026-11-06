@@ -1,0 +1,23 @@
+RESTORED
+console.txt
+oracle
+oracle.log
+post-snapshot.txt
+pre-snapshot.txt
+swift
+swift-parity.log
+swift-perf.log
+versions.txt
+watchdog.txt
+wrapper.log
+cohort lengths=[1024, 8192, 1024, 8192] compared=160 pass=True standalone=[True, True, True, True] batched=[True, True, True, True] first_div=None
+  code-1k: serial==batched True standalone==batched True | vs mlx-vlm: 128 compared, first_div=77 ref top2=[4676, 391] margin=0.1250 cb_token=391 cb_is_ref_2nd=True | vs earlier native port: first_div=77
+  code-8k: serial==batched True standalone==batched True | vs mlx-vlm: 128 compared, first_div=None | vs earlier native port: first_div=124
+  doc-1k: serial==batched True standalone==batched True | vs mlx-vlm: 128 compared, first_div=None | vs earlier native port: first_div=None
+  doc-8k: serial==batched True standalone==batched True | vs mlx-vlm: 128 compared, first_div=52 ref top2=[275, 22905] margin=0.0000 cb_token=22905 cb_is_ref_2nd=True | vs earlier native port: first_div=36
+cohort lengths=[2000, 1960, 2100, 1900] compared=160 pass=True standalone=[True, True, True, True] batched=[True, True, True, True] first_div=None
+  code-2000: serial==batched True standalone==batched True
+  doc-1960: serial==batched True standalone==batched True
+  code-2100: serial==batched True standalone==batched True
+  doc-1900: serial==batched True standalone==batched True
+CB exactness PASS

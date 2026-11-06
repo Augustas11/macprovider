@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.68
+**Version:** 0.1.70
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.68",
+  "version": "0.1.70",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -506,12 +506,27 @@ The authorized dependency tuple is exact:
 
 | Repository | Fork tag | Revision | Upstream base |
 |---|---|---|---|
-| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.21` | `ae6aa7826eb2ab276837c950dca6b1aaf9f344e4` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
+| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.24` | `39ccc0ec28f44f08f8b8032a92ebd1b2e438ebf4` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
 | `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.11` | `c774cb0934c7503bc3fe1c3d1afbe44c728e8891` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
 | `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.6` | `51edbb37620aef7c860ab5d7cdb7bf5b14333da2` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
 | `https://github.com/Augustas11/mlx-c` | `v0.6.0-macprovider.2` | `2b1ff2b5b5129a6115771da32e1bac3b6b01ab01` | `ml-explore/mlx-c` pinned base (`ebc88f10caa1b625e6b581437a8dea6df8a70085`) |
 
-The mlx-swift-lm row `3.32.3-macprovider.21` is on `3.32.3-macprovider.19`
+The mlx-swift-lm row `3.32.3-macprovider.24` is on `3.32.3-macprovider.22`
+(`7feb4c35f44e2192ba531bb837db4a7b4d15c746`) (#2189), at
+`39ccc0ec28f44f08f8b8032a92ebd1b2e438ebf4`: the MiniMax M3.1-Flash checkpoint
+loads within 256 GB, because the gate/up tensors that load-time fusion replaces
+are freed as each layer fuses instead of staying resident beside the fused
+weights (`39ccc0e`). The Swift, core and C rows are unchanged.
+
+The prior mlx-swift-lm row `3.32.3-macprovider.22` is on `3.32.3-macprovider.21`
+(`ae6aa7826eb2ab276837c950dca6b1aaf9f344e4`) (#2189), at
+`7feb4c35f44e2192ba531bb837db4a7b4d15c746`: MiniMax M3 text model
+(`4f96c37`), faster sparse decode (`3c0a551`) and one-launch RMS norms
+(`d755f93`), with each sparse row keeping its own cache (`7feb4c3`) so a
+continuous batch matches a serial forward of that row. The Swift, core and C
+rows are unchanged.
+
+The prior mlx-swift-lm row `3.32.3-macprovider.21` is on `3.32.3-macprovider.19`
 (`e06521b9c17f5836ddf43410ec8ef4c2346c56a4`) (#2198), at
 `ae6aa7826eb2ab276837c950dca6b1aaf9f344e4`, and changes only GLM-5.3
 (`glm5_next`) prefill: the DSA indexer selects each prefill chunk's pools with
@@ -2193,6 +2208,17 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.70 (2026-11-05)** — R003 names mlx-swift-lm `3.32.3-macprovider.24`
+  (`39ccc0ec28f44f08f8b8032a92ebd1b2e438ebf4`) on `3.32.3-macprovider.22`
+  (#2189): The MiniMax M3.1-Flash checkpoint loads within 256 GB: the gate/up
+  tensors that load-time fusion replaces are freed as each layer fuses instead
+  of staying resident beside the fused weights. Other model sources and the
+  Swift, core and C rows are unchanged.
+- **0.1.69 (2026-11-04)** — R003 names mlx-swift-lm `3.32.3-macprovider.22`
+  (`7feb4c35f44e2192ba531bb837db4a7b4d15c746`) on `3.32.3-macprovider.21`
+  (#2189): MiniMax M3 text model, with each sparse row keeping its own cache
+  so a continuous batch matches a serial forward of that row. Other model
+  sources and the Swift, core and C rows are unchanged.
 - **0.1.68 (2026-11-03)** — R003 names mlx-swift-lm `3.32.3-macprovider.21`
   (`ae6aa7826eb2ab276837c950dca6b1aaf9f344e4`) on `3.32.3-macprovider.19`
   (#2198): GLM-5.3 prefill only (DSA radix-select per prefill chunk, fused mHC

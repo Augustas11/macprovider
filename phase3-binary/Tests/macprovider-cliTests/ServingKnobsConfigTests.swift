@@ -3015,9 +3015,9 @@ final class ServingKnobsConfigTests: XCTestCase {
         )
     }
 
-    // GLM-5.3-Flash and DeepSeek V4-Flash are served with the wired limit at
-    // the recommended working set (mlx-lm's generation default); every other
-    // family keeps the default.
+    // GLM-5.3-Flash, DeepSeek V4-Flash and MiniMax M3.1-Flash are served with
+    // the wired limit at the recommended working set (mlx-lm's generation
+    // default); every other family keeps the default.
     func testResidentWeightsTicketOnlyForGLM5NextAtRecommendedWorkingSet() {
         let recommended = 239_143_780_352
         let ticket = ModelRuntime.residentWeightsTicket(
@@ -3032,9 +3032,11 @@ final class ServingKnobsConfigTests: XCTestCase {
                 ModelRuntime.residentWeightsTicket(modelFamily: family, recommendedWorkingSetBytes: recommended),
                 family)
         }
-        XCTAssertEqual(
-            ModelRuntime.residentWeightsTicket(modelFamily: "deepseek_v4", recommendedWorkingSetBytes: recommended)?.size,
-            recommended)
+        for family in ["deepseek_v4", "minimax_m3"] {
+            XCTAssertEqual(
+                ModelRuntime.residentWeightsTicket(modelFamily: family, recommendedWorkingSetBytes: recommended)?.size,
+                recommended, family)
+        }
         XCTAssertNil(ModelRuntime.residentWeightsTicket(modelFamily: "glm5_next", recommendedWorkingSetBytes: nil))
         XCTAssertNil(ModelRuntime.residentWeightsTicket(modelFamily: "glm5_next", recommendedWorkingSetBytes: 0))
     }

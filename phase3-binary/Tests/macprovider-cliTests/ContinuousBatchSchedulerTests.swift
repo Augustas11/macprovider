@@ -256,6 +256,67 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertEqual(prefillTokenCounts, [730, 730, 729])
     }
 
+    func testSerialPrefillStrideKeepsTheSerialChunkBoundaries() async throws {
+        let backend = ScriptedBackend(scripts: ["minimax": [101]])
+        let descriptor = Self.descriptor(blockSizeTokens: 32, maxPhysicalBlocks: 128)
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 32, maxPhysicalBlocks: 128)
+        let scheduler = try await makeScheduler(
+            descriptor: descriptor,
+            tuple: Self.tuple(),
+            maxActiveRows: 1,
+            maxPromptChunkTokens: 512,
+            serialPrefillStride: true,
+            backend: backend,
+            allocator: allocator
+        )
+
+        let result = try await scheduler.submit(.init(
+            id: "minimax",
+            conversationKey: "",
+            promptTokens: Array(1...2100),
+            maxOutputTokens: 1,
+            temperature: 0.0,
+            topP: 1.0
+        ))
+
+        // The serial legacy-remainder plan of 2,100 tokens at step 512, not
+        // the balanced 420 x 5 whose last chunk starts below MiniMax M3's
+        // 2,048-token selection threshold.
+        let prefillTokenCounts = await backend.prefillTokenCountsByCall()
+        XCTAssertEqual(result.outputTokens, [101])
+        XCTAssertEqual(prefillTokenCounts, [512, 512, 512, 512, 52])
+    }
+
+    func testSerialPrefillStrideIgnoresASmallerPerIterationBudget() async throws {
+        let backend = ScriptedBackend(scripts: ["minimax": [101]])
+        let descriptor = Self.descriptor(blockSizeTokens: 32, maxPhysicalBlocks: 128)
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 32, maxPhysicalBlocks: 128)
+        let scheduler = try await makeScheduler(
+            descriptor: descriptor,
+            tuple: Self.tuple(),
+            maxActiveRows: 1,
+            maxPromptChunkTokens: 512,
+            maxPrefillTokensPerIteration: 256,
+            serialPrefillStride: true,
+            backend: backend,
+            allocator: allocator
+        )
+
+        let result = try await scheduler.submit(.init(
+            id: "minimax",
+            conversationKey: "",
+            promptTokens: Array(1...2100),
+            maxOutputTokens: 1,
+            temperature: 0.0,
+            topP: 1.0
+        ))
+
+        // An operator budget of 256 must not split the serial 512 stride.
+        let prefillTokenCounts = await backend.prefillTokenCountsByCall()
+        XCTAssertEqual(result.outputTokens, [101])
+        XCTAssertEqual(prefillTokenCounts, [512, 512, 512, 512, 52])
+    }
+
     func testCanonicalSerialToolStopBoundaryIsRetainedForTerminalReplay() async throws {
         let backend = ScriptedBackend(scripts: ["tool-stop": [10, 11, 12, 13]])
         let scheduler = try await makeScheduler(maxActiveRows: 1, backend: backend)
@@ -9195,6 +9256,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         maxPrefillTokensPerIteration: Int? = nil,
         allowsRaggedPrefillOffsets: Bool = false,
         nativeMTPPromptRowsJoinRaggedPrefill: Bool = false,
+        serialPrefillStride: Bool = false,
         prefillGrouping: ContinuousBatchPrefillGroupingRule = .unconstrained,
         nativeMTPRoundByteCapacity: Int? = nil,
         nativeMTPStatusSink: NativeMTPStatusSink? = nil,
@@ -9224,6 +9286,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             prefillGrouping: prefillGrouping,
             maxPrefillTokensPerIteration: maxPrefillTokensPerIteration,
             maxPromptChunkTokens: maxPromptChunkTokens,
+            serialPrefillStride: serialPrefillStride,
             allowsRaggedPrefillOffsets: allowsRaggedPrefillOffsets,
             nativeMTPPromptRowsJoinRaggedPrefill: nativeMTPPromptRowsJoinRaggedPrefill,
             tokenDeliveryBufferLimit: tokenDeliveryBufferLimit,
