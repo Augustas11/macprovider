@@ -25,6 +25,7 @@
     "Sources/macprovider-cli/PagedKVCache.swift",
     "Sources/macprovider-cli/PagedKVRuntimeBridge.swift",
     "Sources/macprovider-cli/PagedMLACache.swift",
+    "Sources/macprovider-cli/PagedMiniMaxM3Cache.swift",
     "Sources/macprovider-cli/ServeDecodePath.swift"
   ],
   "dependencies": [

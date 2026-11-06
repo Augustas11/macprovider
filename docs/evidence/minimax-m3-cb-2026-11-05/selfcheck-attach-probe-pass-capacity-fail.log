@@ -1,0 +1,15 @@
+event=batching_unsupported action=serial_routed reason=local_batching_capability_unavailable
+event=continuous_batching_policy action=resolved status=absent_empty_off_fallback entries=0 revocations=0 emergency_off=false
+event=served_slots action=planned rows=4 served=4 reason=owner_pinned configured=4 source=owner policy_ceiling=none
+[paged-kv] moe-isolation first prefill=[30554,490] serial=[30554,490] decodeA=[472] serialA=[472] decodeB=[490] serialB=[490]
+[paged-kv] parity model=minimaxai/minimax-m3.1-flash established=true nLayers=60 nNew=32 nForwards=36 gatherKernelCalls=6480 expectCalls=6480 maxLogicalBlocks=11 nonIdentityPermutation=true
+[paged-kv] batched-isolation model=minimaxai/minimax-m3.1-flash requiresMoE=true proven=true rowsDecoded=2 rowFailures=0 crossRowDivergences=0 challengeDistinguishing=true
+[paged-kv] measure OK: runtime measurement complete, paged-KV attach eligible for model=minimaxai/minimax-m3.1-flash
+[paged-kv] runtime-identity model=minimaxai/minimax-m3.1-flash model_sha256=21188ee28f031b9444e8a250e16aea57ee37a0c2f8d1a24c2ad44686ad744f03 hardware_class=apple-silicon:Apple M3 Ultra:ram-256gb metallib_sha256=589e56e0794dcf6fcebf7f7edbda562404653e606d6ac9bb9bdf7025a608a094 kernel_identifier=macprovider_paged_kv_gather_v1
+event=continuous_batch_decode_row_bound max_decode_rows_per_forward=11
+event=continuous_batch_decode_row_bound max_decode_rows_per_forward=8 device_bound=11 reason=flattened_token_cap
+event=served_slots action=applied slots=4 rows=4 reason=owner_pinned
+event=cb_self_check action=step max_slots=4 rows=4 queue_limit=4 probe_key_boundary=1024 resumed_at=0 remeasure=false model_sha256=21188ee28f031b9444e8a250e16aea57ee37a0c2f8d1a24c2ad44686ad744f03
+event=cb_self_check action=deferred deferrals=1 retry_in_s=9 reason=step_failed error=incompatibleCapacity(expected: 65536, count: 60)
+event=cb_self_check action=step max_slots=4 rows=4 queue_limit=4 probe_key_boundary=1024 resumed_at=0 remeasure=false model_sha256=21188ee28f031b9444e8a250e16aea57ee37a0c2f8d1a24c2ad44686ad744f03
+event=cb_self_check action=deferred deferrals=2 retry_in_s=19 reason=step_failed error=incompatibleCapacity(expected: 65536, count: 60)

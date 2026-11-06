@@ -295,6 +295,12 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
     let maxPromptChunkTokens: Int
     /// Fixed per-row reference partition, independent of generic token budgets.
     let referencePrefillStepSize: Int?
+    /// Prefill each row in chunks of exactly the chunk limit from its cursor
+    /// (the serial path's legacy-remainder stride) instead of balanced
+    /// chunks. A MiniMax M3 chunk that crosses the block-selection threshold
+    /// selects blocks for every query in it, so where a chunk starts changes
+    /// the row's numerics; the serial stride keeps its partition the serial one.
+    let serialPrefillStride: Bool
     /// Whether one prefill group may hold rows at different prompt offsets
     /// (SPEC-038 FR-CB2 ragged shared prefill). Set only when the backend runs
     /// that shape in one forward (`PagedKVSharedForwardBackend
@@ -367,6 +373,7 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
         maxPrefillTokensPerIteration: Int? = nil,
         maxPromptChunkTokens: Int = 256,
         referencePrefillStepSize: Int? = nil,
+        serialPrefillStride: Bool = false,
         allowsRaggedPrefillOffsets: Bool = false,
         nativeMTPPromptRowsJoinRaggedPrefill: Bool = false,
         nativeMTPDrafterPromptWindow: Int? = nil,
@@ -405,6 +412,7 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
         )
         self.decodeHeadroomTokens = max(0, decodeHeadroomTokens)
         self.referencePrefillStepSize = referencePrefillStepSize.map { max(1, $0) }
+        self.serialPrefillStride = serialPrefillStride
         self.maxPrefillRowsPerIteration = referencePrefillStepSize == nil ? max(1, maxPrefillRowsPerIteration) : 1
         self.prefillGrouping = prefillGrouping
         self.maxPromptChunkTokens = max(1, maxPromptChunkTokens)
@@ -414,8 +422,11 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
         self.nativeMTPPromptRowsJoinRaggedPrefill = self.allowsRaggedPrefillOffsets
             && nativeMTPPromptRowsJoinRaggedPrefill
         self.nativeMTPDrafterPromptWindow = nativeMTPDrafterPromptWindow.map { max(1, $0) }
+        // A serial-stride row must prefill whole serial chunks: a smaller
+        // per-iteration budget would shrink them and change the partition
+        // the row must match token for token (MiniMax M3 block selection).
         self.maxPrefillTokensPerIteration = max(
-            1,
+            serialPrefillStride && referencePrefillStepSize == nil ? self.maxPromptChunkTokens : 1,
             maxPrefillTokensPerIteration ?? self.maxPromptChunkTokens
         )
         self.drainTimeoutNanoseconds = drainTimeoutNanoseconds
@@ -6263,6 +6274,9 @@ actor ContinuousBatchScheduler {
     private func prefillEnd(for row: Row, maxChunkTokens: Int) -> Int {
         if configuration.referencePrefillStepSize != nil {
             return DeepseekV4ContinuousBatchBackend.prefillEnd(offset: row.prefillCursor, promptCount: row.request.promptTokens.count)
+        }
+        if configuration.serialPrefillStride {
+            return min(prefillSpanEnd(for: row), row.prefillCursor + max(1, maxChunkTokens))
         }
         return Self.balancedPrefillChunkEnd(
             cursor: row.prefillCursor, spanEnd: prefillSpanEnd(for: row), maxChunkTokens: maxChunkTokens)

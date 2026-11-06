@@ -77,4 +77,16 @@ final class PagedKVBatchedToleranceTests: XCTestCase {
         let r = reference(top1: 5, top1Logit: 10.0, top2: 9, top2Logit: 9.75, vocab: 128)
         XCTAssertFalse(conformant(9999, r, other: 42))
     }
+
+    /// MiniMax M3 and hybrid rows compare against the production iterator,
+    /// token for token; other paged rows keep the recompute reference with
+    /// its near-tie tolerance.
+    func testIteratorReferenceForIndexedKVAndHybridRowsOnly() {
+        typealias Probe = PagedKVRuntimeParityProbe
+        XCTAssertTrue(Probe.usesProductionIteratorReference(cacheKinds: [.pagedIndexedKV, .pagedIndexedKV]))
+        XCTAssertTrue(Probe.usesProductionIteratorReference(cacheKinds: [.recurrentMamba, .pagedAttention]))
+        XCTAssertFalse(Probe.usesProductionIteratorReference(cacheKinds: [.pagedAttention, .pagedAttention]))
+        XCTAssertFalse(Probe.usesProductionIteratorReference(cacheKinds: [.pagedMLA(kpool: 4)]))
+        XCTAssertFalse(Probe.usesProductionIteratorReference(cacheKinds: nil))
+    }
 }

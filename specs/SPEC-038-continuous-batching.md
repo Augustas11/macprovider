@@ -1,11 +1,29 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.34
+Version: v0.3.35
 Status: draft (normative contract; runtime enablement is default-on per Mac behind the FR-CB10 on-device self-check, v0.3.15)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.3.35 (2026-11-05, MiniMax M3 serial prefill stride, Related: #2189):**
+FR-CB2: a `minimax_m3` row (`pagedIndexedKV`) prefills in the serial path's
+stride, chunks of exactly the prompt chunk limit from its cursor, instead of
+balanced chunks. A chunk that crosses the 2,048-key block-selection threshold
+selects blocks for every query in it, so a balanced chunk starting below the
+threshold changed the row's tokens against serial (a 2,100-token prompt
+diverged at its third token). Grouping, budgets and every other family are
+unchanged.
+FR-CB6: the batched-isolation attach probe compares `pagedIndexedKV` rows
+token for token against the production serial iterator, as it already did
+for hybrid rows, instead of a full-prompt recompute. The reference runtime's
+own incremental decode differs from its full recompute on this model, so the
+recompute reference rejected rows that matched serial exactly.
+FR-CB10: MiniMax M3 sizes its own KV cache, as GLM-5-Next and DeepSeek V4
+do, so its serve parameters carry no `maxKVSize`. Its sparse caches keep the
+whole context for the indexer, and the serve cap made the self-check's serial
+baseline fail with `incompatibleCapacity(expected: 65536, count: 60)`.
+
 **Change log v0.3.34 (2026-10-27, Related: #2153, Related: #2143):**
 FR-CB2: a GLM resume-boundary chunk may be followed immediately by its row's
 next original-shaped chunk in the same bounded prefill turn. The per-forward
@@ -873,6 +891,19 @@ the default (8) at a 512-token chunk, proportionally more at a larger chunk,
 never below the default, and never above the lockstep window. A family's
 ceiling rises only with a same-build measurement of its prefill throughput and
 greedy parity at the new chunk.
+
+**MiniMax M3 serial prefill stride (v0.3.35).** A `minimax_m3` row MUST
+prefill in chunks of exactly the prompt chunk limit from its cursor, the
+serial path's legacy-remainder partition, with only its last chunk shorter;
+a span boundary (FR-CB2 checkpoint, snapshot or resume boundary) still ends
+a chunk. This is the row's own chunk for grouping: peers join only at that
+length, as for every family. The scheduler MUST NOT balance this row's
+chunks, because a chunk that crosses the block-selection threshold attends
+through block selection from its first query and its numerics depend on
+where it starts. The FR-CB6 batched-isolation probe MUST compare this row
+token for token against the production serial iterator, not a full-prompt
+recompute, because block selection makes incremental decode and recompute
+numerically different paths.
 
 **DeepSeek V4 reference prefill (v0.3.29).** A `deepseek_v4` row MUST
 prefill alone with the same reference partition as serial: consume up to 2048

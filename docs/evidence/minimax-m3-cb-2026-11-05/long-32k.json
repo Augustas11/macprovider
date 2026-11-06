@@ -1,0 +1,73 @@
+{
+  "aggregateCVPct" : 0,
+  "aggregateTPSRuns" : [
+    15.165810270321133
+  ],
+  "aggregateTPSp50" : 15.165810270321133,
+  "aggregateUpliftVsPagedSingleRow" : 1.0034041306289667,
+  "aggregateVsProductionSerial" : 0.9374162590192944,
+  "blockSizeTokens" : 256,
+  "compiled" : false,
+  "decodeTokensPerRow" : 128,
+  "engine" : "scheduler",
+  "layerCount" : 60,
+  "maxPhysicalBlocks" : 1024,
+  "mlxSwiftLMPin" : "mlxlm-39ccc0ec28f4",
+  "modelID" : "<models>/mlx-community--MiniMax-M3.1-Flash-oQ3e-mtp",
+  "modelTag" : "mlx-community--MiniMax-M3.1-Flash-oQ3e-mtp",
+  "pagedSingleRowCVPct" : 0,
+  "pagedSingleRowTPSRuns" : [
+    15.114359017851267
+  ],
+  "pagedSingleRowTPSp50" : 15.114359017851267,
+  "peakPhysFootprintMB" : 217788,
+  "peakRSSMB" : 51204,
+  "perRowFractionOfPagedSingleRow" : 1.0034041306289667,
+  "perRowTPSp50" : 15.165810270321133,
+  "productionSerialCVPct" : 0,
+  "productionSerialPromptTokens" : 32768,
+  "productionSerialTPSRuns" : [
+    16.178309395003765
+  ],
+  "productionSerialTPSp50" : 16.178309395003765,
+  "productionSerialTTFTSecondsRuns" : [
+    173.09684705734253
+  ],
+  "promptTokenLengths" : [
+    32768
+  ],
+  "promptTokenSHA256" : [
+    "c72f4bbd7ed2fdc8f79e5e9260bcbedc993a72519b9adea78b027caa03563e74"
+  ],
+  "promptTokensPerRow" : 32768,
+  "rows" : 1,
+  "runs" : 1,
+  "scenario" : "throughput",
+  "schedulerBackendAggregateTPSRuns" : [
+    15.167118315505478
+  ],
+  "schedulerBackendWindowCallsRuns" : [
+    8
+  ],
+  "schedulerBackendWindowSecondsRuns" : [
+    8.439309125
+  ],
+  "schedulerCompletionOffsetSecondsByRowRuns" : [
+    [
+      182.2729870080948
+    ]
+  ],
+  "schedulerDecodeLockstepWindow" : 16,
+  "schedulerFirstTokenOffsetSecondsByRowRuns" : [
+    [
+      173.83294999599457
+    ]
+  ],
+  "schedulerTTFTSecondsByRowRuns" : [
+    [
+      173.83294999599457
+    ]
+  ],
+  "schemaVersion" : 5,
+  "timestamp" : "2026-11-05T08:03:57Z"
+}

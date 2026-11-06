@@ -94,6 +94,31 @@ final class PagedKVRuntimeMixedCacheTests: XCTestCase {
         XCTAssertEqual(ModelRuntime.schedulerDecodeRowBound(configured: 11, backend: nil), 11)
     }
 
+    /// Only a MiniMax M3 (pagedIndexedKV) backend prefills in the serial
+    /// path's stride; every other backend keeps balanced chunks.
+    func testSchedulerFollowsSerialPrefillStrideOnlyForIndexedKVBackends() {
+        let container = ModelContainer(context: ModelContext(
+            configuration: ModelConfiguration(id: "minimaxai/minimax-m3.1-flash"),
+            model: MixedCacheFakeModel(recorder: MixedCacheRecorder(), nextTokenByInput: [:], attentionDType: .float16),
+            processor: MixedCacheUserInputProcessor(),
+            tokenizer: MixedCacheTokenizer()
+        ))
+        func backend(_ kinds: [PagedKVSharedForwardBackend.CacheKind]) -> PagedKVSharedForwardBackend {
+            PagedKVSharedForwardBackend(
+                container: container,
+                blockSizeTokens: 256,
+                maxPhysicalBlocks: 16,
+                poolEpoch: 1,
+                layerCount: kinds.count,
+                cacheKinds: kinds
+            )
+        }
+        XCTAssertTrue(ModelRuntime.schedulerFollowsSerialPrefillStride(backend: backend([.pagedIndexedKV, .pagedIndexedKV])))
+        XCTAssertFalse(ModelRuntime.schedulerFollowsSerialPrefillStride(backend: backend([.pagedAttention, .pagedAttention])))
+        XCTAssertFalse(ModelRuntime.schedulerFollowsSerialPrefillStride(backend: backend([.recurrentMamba, .pagedMLA(kpool: 4)])))
+        XCTAssertFalse(ModelRuntime.schedulerFollowsSerialPrefillStride(backend: nil))
+    }
+
     /// #2100: a glm5_next (pagedMLA) backend takes the 2048-token CB prompt
     /// chunk ceiling; every other backend keeps the 512-token default.
     func testSchedulerPromptChunkCeilingIsPerFamily() {

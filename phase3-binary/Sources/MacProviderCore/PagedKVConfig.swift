@@ -91,7 +91,7 @@ public struct PagedKVConfig: Equatable, Sendable {
         return adjusted
     }
 
-    public static let familyDefaultBlockSizeTokens: [String: Int] = ["glm5_next": 256]
+    public static let familyDefaultBlockSizeTokens: [String: Int] = ["glm5_next": 256, "minimax_m3": 256]
     public static let defaultBlockSizeTokens = 16
     public static let defaultMaxPhysicalBlocks = 1024
     public static let maximumBlockSizeTokens = 4096

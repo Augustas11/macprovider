@@ -17,9 +17,20 @@ let package = Package(
         )
     ],
     dependencies: [
+        // Tag 3.32.3-macprovider.25 (#2198, #2189) on 3.32.3-macprovider.24:
+        // .23's GLM-5.3 MTP head prefill over the last 4096 prompt columns
+        // (`da8f193`, from `93234b6`) on top of .24's MiniMax M3 work.
         // Tag 3.32.3-macprovider.23 (#2198) on 3.32.3-macprovider.21: GLM-5.3
         // MTP head prefills the last 4096 prompt columns (NoPE); prompts
         // within 4096 unchanged.
+        // Tag 3.32.3-macprovider.24 (#2189) on 3.32.3-macprovider.22: The
+        // MiniMax M3.1-Flash checkpoint loads within 256 GB: the gate/up
+        // tensors that load-time fusion replaces are freed as each layer
+        // fuses instead of staying resident beside the fused weights.
+        // Tag 3.32.3-macprovider.22 (#2189) on 3.32.3-macprovider.21: MiniMax
+        // M3 text model (`4f96c37`, `3c0a551`, `d755f93`), with each sparse
+        // row keeping its own cache (`7feb4c3`) so a continuous batch matches
+        // a serial forward of that row.
         // Tag 3.32.3-macprovider.21 (#2198) on 3.32.3-macprovider.19 changes
         // GLM-5.3 prefill only: DSA radix-select per prefill chunk, a fused
         // mHC Sinkhorn and heads-as-queries sparse attention. Decode is .19's.
@@ -57,7 +68,7 @@ let package = Package(
         // compatible per-column attention while retaining row-owned caches.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "93234b64b87368d94081932d103bfdb7ee8e88a7"
+            revision: "da8f1932f8e2a46477a1a35663955267bc6fcd04"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",

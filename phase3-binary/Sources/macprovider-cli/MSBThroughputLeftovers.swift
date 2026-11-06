@@ -89,6 +89,22 @@ struct MSBParityRowEvidence: Codable, Sendable, Equatable {
     let serialTokenSHA256: String
     let standaloneTokenSHA256: String
     let batchedTokenSHA256: String
+    /// `--prompt-token-file` only: the prompt's name and the compared tokens,
+    /// so an external reference (mlx-vlm) can be checked token by token.
+    var name: String? = nil
+    var serialTokens: [Int]? = nil
+    var standaloneTokens: [Int]? = nil
+    var batchedTokens: [Int]? = nil
+}
+
+/// `msb-throughput --prompt-token-file`: fixed prompt token ids per row.
+struct MSBPromptTokenSet: Decodable, Sendable, Equatable {
+    struct Prompt: Decodable, Sendable, Equatable {
+        let name: String
+        let ids: [Int]
+    }
+
+    let prompts: [Prompt]
 }
 
 struct MSBParityEvidence: Codable, Sendable, Equatable {

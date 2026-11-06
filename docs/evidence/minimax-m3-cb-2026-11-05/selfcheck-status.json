@@ -1,0 +1,19 @@
+{
+  "continuous_batching": {
+    "mode": "canary",
+    "active": true,
+    "self_check": {
+      "hardware_class": "apple-silicon:Apple M3 Ultra:ram-256gb",
+      "verified_k": 4,
+      "served_slots": 4,
+      "os_build": "Version 27.0.1 (Build 26A434)",
+      "runtime_build": "39ccc0ec28f44f08f8b8032a92ebd1b2e438ebf4/0.32.3+c774cb0934c7503bc3fe1c3d1afbe44c728e8891+cb-isolation-v1/decode8/verify8+cb-probe-v3/route1024+flat8",
+      "decode_window": 16,
+      "deferrals": 0,
+      "model_sha256": "21188ee28f031b9444e8a250e16aea57ee37a0c2f8d1a24c2ad44686ad744f03",
+      "metallib_sha256": "589e56e0794dcf6fcebf7f7edbda562404653e606d6ac9bb9bdf7025a608a094",
+      "decision": "granted",
+      "kernel_identifier": "macprovider_paged_kv_gather_v1"
+    }
+  }
+}

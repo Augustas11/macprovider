@@ -65,7 +65,10 @@ final class ShardLinkProtectionTests: XCTestCase {
     private func raw(_ key: SymmetricKey) -> Data { key.withUnsafeBytes { Data($0) } }
 
     func testProtectedLinkAuthenticatesBothMembersAndCarriesTaggedFrames() throws {
-        let (accepted, dialed) = try pair(configuration())
+        // A wide missed-heartbeat budget: a slow CI host can delay one 50 ms heartbeat
+        // past the default 4-beat limit, which reports peerDead instead of the idle timeout.
+        let (accepted, dialed) = try pair(ShardLinkConfiguration(
+            groupEpoch: epoch, heartbeatInterval: 0.05, missedHeartbeatLimit: 40, frameProtection: .hmacSHA256))
         defer { accepted.close(); dialed.close() }
         let (responderPeer, initiatorPeer) = authenticate(accepted, dialed)
         XCTAssertEqual(try responderPeer.get(), ShardLinkPeer(memberDeviceID: "mac-a", publicKey: headSigner.publicKeyBase64))
