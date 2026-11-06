@@ -406,6 +406,8 @@ expected_history = {
     "published-2026-11-01-glm53-flash-abliterated-cb-mtp-v280-r3",
     # Superseded by the admission set rebound to CLI 1.8.281 with the GLM-5.3-Flash 32K cap.
     "published-2026-11-02-glm53-flash-abliterated-cached-turns-v280",
+    # Superseded by the same admission set plus the Llama-3.1-8B M5 32 GB CB entry.
+    "published-2026-11-06-glm53-32k-native-mtp-v281",
     current_release_id,
 }
 if set(ledger["releases"]) != expected_history:
