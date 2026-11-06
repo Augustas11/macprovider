@@ -42,12 +42,11 @@ EXPECTED_LOCATIONS = {
 # scripts: the upstream watch imports these names, and a test checks them
 # against the SPEC-048 fork table.
 SPEC048_MLX_SWIFT_LM_FORK = "https://github.com/Augustas11/mlx-swift-lm"
-# 3.32.3-macprovider.24 (#2189) on 3.32.3-macprovider.22: The MiniMax
-# M3.1-Flash checkpoint loads within 256 GB: the gate/up tensors that
-# load-time fusion replaces are freed as each layer fuses instead of staying
-# resident beside the fused weights.
-SPEC048_MLX_SWIFT_LM_TAG = "3.32.3-macprovider.24"
-SPEC048_MLX_SWIFT_LM_REVISION = "39ccc0ec28f44f08f8b8032a92ebd1b2e438ebf4"
+# 3.32.3-macprovider.25 (#2198, #2189) on 3.32.3-macprovider.24: .23's GLM-5.3
+# MTP head prefill over the last 4096 prompt columns (`da8f193`, from `93234b6`)
+# on top of .24's MiniMax M3 work.
+SPEC048_MLX_SWIFT_LM_TAG = "3.32.3-macprovider.25"
+SPEC048_MLX_SWIFT_LM_REVISION = "da8f1932f8e2a46477a1a35663955267bc6fcd04"
 SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE = "3b339ad6e3b3f44c8121ecff5131c7fd55e075e6"
 SPEC048_MLX_SWIFT_FORK = "https://github.com/Augustas11/mlx-swift"
 SPEC048_MLX_SWIFT_TAG = "0.32.3-macprovider.11"

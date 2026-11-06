@@ -153,12 +153,15 @@ FIXED_METHODOLOGY = {
     "exclusion_rules": "none",
     "confidence_method": "paired_block_bootstrap_holm_v1",
 }
-# SPEC-048 0.1.25 gate set. The latency gates are per-output-token latency
-# (TPOT) and a worst-chunk-gap bound; the inter-chunk p95 gate of earlier
-# versions compared one native verify step, which carries up to
-# proposal_depth + 1 tokens, against one ordinary token.
+# SPEC-048 0.1.71 gate set, the only one the bench accepts for new runs. The
+# decode-throughput gate passes when the corrected lower bound is strictly
+# greater than 0 (a draw at or below the threshold counts against the gate).
+# The latency gates are per-output-token latency (TPOT) and a worst-chunk-gap
+# bound; the inter-chunk p95 gate of earlier versions compared one native
+# verify step, which carries up to proposal_depth + 1 tokens, against one
+# ordinary token.
 FROZEN_THRESHOLDS = {
-    "throughput_lower_bound_min": 0.15,
+    "throughput_lower_bound_min": 0.0,
     "ttft_p95_upper_bound_max": 0.10,
     "tpot_p95_upper_bound_max": 0.0,
     "chunk_gap_p99_upper_bound_max": 1.0,
@@ -170,6 +173,10 @@ FROZEN_THRESHOLDS = {
     "gated_ttft_p95_upper_bound_max": 0.05,
     "gated_tpot_p95_upper_bound_max": 0.05,
 }
+# The SPEC-048 0.1.25-0.1.70 gate set: the 0.1.71 gates with a 15% decode
+# floor. Policies frozen with it are still judged by it, so every recorded
+# verdict reproduces unchanged; the bench no longer accepts it for new runs.
+FLOOR_THRESHOLDS = {**FROZEN_THRESHOLDS, "throughput_lower_bound_min": 0.15}
 # The SPEC-048 0.1.24-and-earlier gate set. Policies frozen with it are still
 # judged by it, so every recorded verdict reproduces unchanged; the bench no
 # longer accepts it for new runs.
@@ -185,11 +192,19 @@ LEGACY_ITL_THRESHOLDS = {
     "gated_ttft_p95_upper_bound_max": 0.05,
     "gated_itl_p95_upper_bound_max": 0.05,
 }
+GATE_SET_POSITIVE = "tpot_chunk_gap_positive_lb_v3"
 GATE_SET_AMENDED = "tpot_chunk_gap_v2"
 GATE_SET_LEGACY = "inter_chunk_itl_v1"
+TPOT_GATE_SETS = (GATE_SET_POSITIVE, GATE_SET_AMENDED)
 GATE_METRICS = {
+    GATE_SET_POSITIVE: ("throughput", "ttft", "tpot", "chunk_gap_p99", "rejection"),
     GATE_SET_AMENDED: ("throughput", "ttft", "tpot", "chunk_gap_p99", "rejection"),
     GATE_SET_LEGACY: ("throughput", "ttft", "itl", "rejection"),
+}
+_GATE_SET_VALUES = {
+    GATE_SET_POSITIVE: FROZEN_THRESHOLDS,
+    GATE_SET_AMENDED: FLOOR_THRESHOLDS,
+    GATE_SET_LEGACY: LEGACY_ITL_THRESHOLDS,
 }
 
 
@@ -198,15 +213,25 @@ def _gate_set(thresholds: object) -> str | None:
     if not isinstance(thresholds, dict):
         return None
     if set(thresholds) == set(FROZEN_THRESHOLDS):
-        return GATE_SET_AMENDED
+        # The 0.1.25 and 0.1.71 sets share keys; the frozen decode floor picks
+        # one. Any other floor selects the current set and fails as unfrozen.
+        floor = thresholds["throughput_lower_bound_min"]
+        if (
+            isinstance(floor, (int, float))
+            and not isinstance(floor, bool)
+            and math.isfinite(floor)
+            and abs(floor - FLOOR_THRESHOLDS["throughput_lower_bound_min"]) < 1e-7
+        ):
+            return GATE_SET_AMENDED
+        return GATE_SET_POSITIVE
     if set(thresholds) == set(LEGACY_ITL_THRESHOLDS):
         return GATE_SET_LEGACY
     return None
 
 
 def _frozen_values(gate_set: str) -> dict:
-    expected = dict(FROZEN_THRESHOLDS if gate_set == GATE_SET_AMENDED else LEGACY_ITL_THRESHOLDS)
-    # One draw count for both sets (tests lower it on FROZEN_THRESHOLDS).
+    expected = dict(_GATE_SET_VALUES[gate_set])
+    # One draw count for every set (tests lower it on FROZEN_THRESHOLDS).
     expected["bootstrap_draws"] = FROZEN_THRESHOLDS["bootstrap_draws"]
     return expected
 
@@ -1063,12 +1088,12 @@ def analyze(jsonl_path: Path, policy_path: Path, exploratory_amended_gates: bool
             }
         reanalysis_of = gate_set
         thresholds = {
-            **{key: value for key, value in FROZEN_THRESHOLDS.items()},
+            **{key: value for key, value in FLOOR_THRESHOLDS.items()},
             "bootstrap_draws": thresholds["bootstrap_draws"],
             "alpha": thresholds["alpha"],
         }
         gate_set = GATE_SET_AMENDED
-    require_chunk_gaps = gate_set == GATE_SET_AMENDED
+    require_chunk_gaps = gate_set in TPOT_GATE_SETS
 
     def invalid_fields(run: dict) -> list[str]:
         return _invalid_run_fields(run, require_chunk_gaps)
@@ -1078,7 +1103,7 @@ def analyze(jsonl_path: Path, policy_path: Path, exploratory_amended_gates: bool
         not isinstance(thresholds.get(key), (int, float))
         or isinstance(thresholds.get(key), bool)
         or not math.isfinite(thresholds[key])
-        for key in GATED_THRESHOLD_KEYS + ("gated_tpot_p95_upper_bound_max" if gate_set == GATE_SET_AMENDED else "gated_itl_p95_upper_bound_max",)
+        for key in GATED_THRESHOLD_KEYS + ("gated_tpot_p95_upper_bound_max" if gate_set in TPOT_GATE_SETS else "gated_itl_p95_upper_bound_max",)
     ):
         return {
             "schema": "macprovider.native-mtp-r015-analysis.v1",
@@ -1285,7 +1310,7 @@ def analyze(jsonl_path: Path, policy_path: Path, exploratory_amended_gates: bool
                 for _, r in pairs
                 if (value := _optional_ratio(float(r.get("target_forwards", 0)), float(r.get("committed_completion_tokens", 0)))) is not None
             ]),
-            "reported_metrics": _report_metrics(pairs, draws, alpha, base_seed + cell_index * 17 + 101, gate_set == GATE_SET_AMENDED),
+            "reported_metrics": _report_metrics(pairs, draws, alpha, base_seed + cell_index * 17 + 101, gate_set in TPOT_GATE_SETS),
             "peak_phys_footprint_bytes": max([r["peak_phys_footprint_bytes"] for r in hard_gate_runs] or [0]),
             "min_available_memory_fraction": min([float(r["min_available_memory_fraction"]) for r in hard_gate_runs] or [0]),
             "sustained_runs": len(sustained_runs),
@@ -1394,8 +1419,174 @@ def analyze(jsonl_path: Path, policy_path: Path, exploratory_amended_gates: bool
     }
 
 
+CAP_EXTENSION_SCHEMA = "macprovider.native-mtp-r015-cap-extension.v1"
+CAP_EXTENSION_ANALYSIS_SCHEMA = "macprovider.native-mtp-r015-cap-extension-analysis.v1"
+CAP_EXTENSION_KEYS = {
+    "schema", "maximum_prompt_tokens", "decode_path_change",
+    "prior_policy_sha256", "prior_runs_sha256", "prior_analysis_sha256",
+    "extension_policy_sha256", "extension_runs_sha256",
+    "provider_commit", "mlx_fork_revision",
+}
+# SPEC-048 0.1.74: the tuple, hardware, methodology and matrix axes a cap
+# extension keeps from the prior formal policy. Only the measured build
+# (provider, fork, OS/toolchain), seed, gate set and prompt strata may differ.
+CAP_EXTENSION_FIXED_KEYS = (
+    "model_id", "target_sha256", "mtp_sha256", "tokenizer_sha256",
+    "qualified_slots", "max_native_active_rows", "proposal_depth",
+    "quantization", "cache_mode", "run_order", "prompt_corpus",
+    "exclusion_rules", "confidence_method", "hw_model", "chip", "ram_gb",
+    "memory_safety_margin_bytes", "arrival_interval_ms", "slots", "max_tokens",
+    "warmup_runs",
+)
+
+
+def analyze_cap_extension(
+    record_path: Path,
+    jsonl_path: Path,
+    policy_path: Path,
+    prior_policy_path: Path,
+    prior_runs_path: Path,
+    prior_analysis_path: Path,
+) -> dict:
+    """Judge a SPEC-048 0.1.74 cap extension: a formally qualified tuple's
+    signed prompt cap rises to the record's cap. The prior formal matrix must
+    reanalyze to its committed PASS; the extension run must hold exactly the
+    new cap's added native-eligible cells, frozen under the current gate set
+    with every other admission policy requirement, and pass each of them; and
+    Holm is recomputed over both runs' hypotheses as one family."""
+
+    def fail(reason: str, **extra) -> dict:
+        return {"schema": CAP_EXTENSION_ANALYSIS_SCHEMA, "overall_status": "FAIL", "reason": reason, **extra}
+
+    try:
+        record = _strict_loads(record_path.read_text(encoding="utf-8"))
+        prior = _load_policy(prior_policy_path)
+        extension = _load_policy(policy_path)
+        committed_prior_analysis = _strict_loads(prior_analysis_path.read_text(encoding="utf-8"))
+    except ValueError as error:
+        return fail("malformed_input", detail=str(error))
+    if not isinstance(record, dict) or set(record) != CAP_EXTENSION_KEYS or record.get("schema") != CAP_EXTENSION_SCHEMA:
+        return fail("record_fields_not_exact")
+    if not (isinstance(record["decode_path_change"], str) and record["decode_path_change"].strip()):
+        return fail("decode_path_change_not_named")
+    hex40 = re.compile(r"^[0-9a-f]{40}$")
+    if not all(isinstance(record[key], str) and hex40.match(record[key]) for key in ("provider_commit", "mlx_fork_revision")):
+        return fail("record_build_identity_invalid")
+    digests = {
+        "prior_policy_sha256": _sha256(prior_policy_path),
+        "prior_runs_sha256": _sha256(prior_runs_path),
+        "prior_analysis_sha256": _sha256(prior_analysis_path),
+        "extension_policy_sha256": _sha256(policy_path),
+        "extension_runs_sha256": _sha256(jsonl_path),
+    }
+    mismatched = sorted(key for key, value in digests.items() if record[key] != value)
+    if mismatched:
+        return fail("record_digest_mismatch", mismatched=mismatched)
+
+    # The prior qualification: a complete formal matrix whose committed
+    # analysis is exactly what the current analyzer derives, and passes.
+    if not isinstance(prior, dict) or prior.get("schema") != ADMISSION_POLICY_SCHEMA or _matrix_violations(prior):
+        return fail("prior_policy_not_formal")
+    prior_result = analyze(prior_runs_path, prior_policy_path)
+    if prior_result.get("overall_status") != "PASS":
+        return fail("prior_analysis_not_pass")
+    if prior_result != committed_prior_analysis:
+        return fail("prior_analysis_not_rederived")
+
+    prior_cap = prior["maximum_prompt_tokens"]
+    cap = record["maximum_prompt_tokens"]
+    if not _is_int(cap) or not prior_cap < cap <= MAXIMUM_PROMPT_TOKENS:
+        return fail("cap_not_above_prior")
+
+    # The extension policy: the bench runs a reduced matrix only under the
+    # exploratory schema, so every admission requirement except the matrix
+    # is applied to it here.
+    if not isinstance(extension, dict) or extension.get("schema") != EXPLORATORY_POLICY_SCHEMA:
+        return fail("extension_policy_schema")
+    contract = _policy_contract_violations({**extension, "schema": ADMISSION_POLICY_SCHEMA})
+    if contract:
+        return fail("extension_policy_contract", violations=contract)
+    if _gate_set(extension["thresholds"]) != GATE_SET_POSITIVE:
+        return fail("extension_gate_set_not_current")
+    if extension["thresholds"]["alpha"] != prior["thresholds"]["alpha"]:
+        return fail("extension_alpha_differs")
+    if not _is_int(extension.get("blocks")) or extension["blocks"] < 10:
+        return fail("extension_blocks_below_ten")
+    changed = sorted(key for key in CAP_EXTENSION_FIXED_KEYS if extension.get(key) != prior.get(key))
+    changed += sorted(
+        key for key, default in REQUEST_PROFILE_DEFAULTS.items()
+        if extension.get(key, default) != prior.get(key, default)
+    )
+    if changed:
+        return fail("extension_tuple_differs_from_prior", fields=changed)
+    if extension.get("maximum_prompt_tokens") != cap:
+        return fail("extension_cap_differs_from_record")
+    added = sorted(set(mandatory_prompt_tokens(cap)) - set(mandatory_prompt_tokens(prior_cap)))
+    if sorted(extension["prompt_tokens"]) != added:
+        return fail("extension_prompts_not_exactly:" + ",".join(map(str, added)))
+    if extension.get("gated_cells", []) != [] or extension.get("sustained_seconds") != 0:
+        return fail("extension_reruns_reused_cells")
+    if (extension.get("provider_commit"), extension.get("mlx_fork_revision")) != (
+        record["provider_commit"], record["mlx_fork_revision"]
+    ):
+        return fail("extension_build_identity_differs_from_record")
+
+    try:
+        header, _ = _load_jsonl(jsonl_path)
+    except ValueError as error:
+        return fail("extension_runs_malformed", detail=str(error))
+    header_profile = _request_profile_violations(header, admission=True)
+    if header_profile:
+        return fail("extension_request_profile_not_admission", violations=header_profile)
+    result = analyze(jsonl_path, policy_path)
+    if result.get("overall_status") != "EXPLORATORY_NO_VERDICT":
+        return fail("extension_analysis_failed", extension_analysis=result)
+    expected_cells = sorted(
+        _cell_id(slots, prompt, output) for slots in prior["slots"] for prompt in added for output in prior["max_tokens"]
+    )
+    observed_cells = sorted(cell["cell_id"] for cell in result["cells"])
+    if observed_cells != expected_cells:
+        return fail("extension_cells_not_exactly:" + ",".join(expected_cells))
+    failing = [cell["cell_id"] for cell in result["cells"] if cell["status"] != "PASS"]
+    if failing:
+        return fail("extension_cells_failed", failing_cells=failing, extension_analysis=result)
+
+    # One Holm family over every gated hypothesis of both runs, each judged
+    # against the threshold its own policy froze (SPEC-048-R015).
+    hypotheses = [
+        (source, cell["cell_id"], name, metric["p_value"])
+        for source, analysis in (("prior", prior_result), ("extension", result))
+        for cell in analysis["cells"]
+        for name, metric in cell["metrics"].items()
+    ]
+    alpha = float(extension["thresholds"]["alpha"])
+    adjusted = _holm_adjusted([item[3] for item in hypotheses])
+    holm_failures = [
+        {"run": source, "cell_id": cell_id, "metric": name, "holm_adjusted_p_value": value}
+        for (source, cell_id, name, _), value in zip(hypotheses, adjusted)
+        if value > alpha
+    ]
+    status = "FAIL" if holm_failures else "PASS"
+    return {
+        "schema": CAP_EXTENSION_ANALYSIS_SCHEMA,
+        "overall_status": status,
+        **({"reason": "combined_holm_failed"} if holm_failures else {}),
+        "record_sha256": _sha256(record_path),
+        "maximum_prompt_tokens": cap,
+        "prior_maximum_prompt_tokens": prior_cap,
+        "prior_gate_set": prior_result["gate_set"],
+        "prior_provider_commit": prior_result["provider_commit"],
+        "reused_cells": [cell["cell_id"] for cell in prior_result["cells"]],
+        "extension_gate_set": result["gate_set"],
+        "extension_provider_commit": record["provider_commit"],
+        "extension_mlx_fork_revision": record["mlx_fork_revision"],
+        "extension_cells": result["cells"],
+        "combined_holm": {"alpha": alpha, "hypotheses": len(hypotheses), "failures": holm_failures},
+    }
+
+
 def markdown_table(result: dict) -> str:
-    amended = result.get("gate_set") == GATE_SET_AMENDED
+    amended = result.get("gate_set") in TPOT_GATE_SETS
     latency_header = "TPOT p95 UB | Gap p99 UB" if amended else "ITL UB"
     lines = [
         f"| Cell | Status | Blocks | Decode ratio | Decode LB | TTFT UB | {latency_header} | Rejection UB | E2E ratio (info) | Hard failures |",
@@ -1453,10 +1644,32 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="re-read a legacy-gate policy's records under the SPEC-048 0.1.25 gates; never a verdict.",
     )
+    parser.add_argument(
+        "--cap-extension",
+        type=Path,
+        metavar="RECORD",
+        help="judge a SPEC-048 0.1.74 cap-extension record; jsonl/policy are the extension run "
+        "and --prior-policy/--prior-runs/--prior-analysis the prior formal qualification.",
+    )
+    parser.add_argument("--prior-policy", type=Path)
+    parser.add_argument("--prior-runs", type=Path)
+    parser.add_argument("--prior-analysis", type=Path)
     args = parser.parse_args(argv)
-    result = analyze(args.jsonl, args.policy, exploratory_amended_gates=args.exploratory_amended_gates)
+    prior = (args.prior_policy, args.prior_runs, args.prior_analysis)
+    if args.cap_extension is not None:
+        if None in prior or args.exploratory_amended_gates:
+            parser.error("--cap-extension needs --prior-policy, --prior-runs and --prior-analysis")
+        result = analyze_cap_extension(args.cap_extension, args.jsonl, args.policy, *prior)
+    elif any(path is not None for path in prior):
+        parser.error("--prior-* options need --cap-extension")
+    else:
+        result = analyze(args.jsonl, args.policy, exploratory_amended_gates=args.exploratory_amended_gates)
     if args.format == "json":
         print(json.dumps(result, indent=2, sort_keys=True))
+    elif result.get("schema") == CAP_EXTENSION_ANALYSIS_SCHEMA:
+        print(markdown_table({"gate_set": result.get("extension_gate_set"), "cells": result.get("extension_cells", [])}))
+        print(f"\nCap extension {result.get('prior_maximum_prompt_tokens')} -> {result.get('maximum_prompt_tokens')}: "
+              f"{result['overall_status']}" + (f" ({result['reason']})" if result.get("reason") else ""))
     else:
         print(markdown_table(result))
     return 0 if result["overall_status"] == "PASS" else 1

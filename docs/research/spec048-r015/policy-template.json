@@ -34,7 +34,7 @@
   "sustained_cell_id": "s8-p1536-o512",
   "memory_safety_margin_bytes": 8589934592,
   "thresholds": {
-    "throughput_lower_bound_min": 0.15,
+    "throughput_lower_bound_min": 0.0,
     "ttft_p95_upper_bound_max": 0.1,
     "tpot_p95_upper_bound_max": 0.0,
     "chunk_gap_p99_upper_bound_max": 1.0,

@@ -7368,6 +7368,89 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertFalse(nativeVerifyBatches.isEmpty)
     }
 
+    /// SPEC-048 GLM drafter prompt window: with a 4096-column window and
+    /// 2048-token chunks, only chunks ending past `promptTokenCount - 4096`
+    /// feed the drafter. Without a window every chunk does.
+    func testNativeMTPPromptWindowFlagsOnlyChunksReachingTheWindow() {
+        let window = 4_096
+        let chunk = 2_048
+        func flagged(promptTokenCount: Int, window: Int?, keepsWholePrompt: Bool = false) -> [Bool] {
+            let start = ContinuousBatchScheduler.nativeMTPPromptWindowStart(
+                promptTokenCount: promptTokenCount,
+                window: window,
+                keepsWholePrompt: keepsWholePrompt
+            )
+            return stride(from: 0, to: promptTokenCount, by: chunk).map {
+                min($0 + chunk, promptTokenCount) > start
+            }
+        }
+        XCTAssertEqual(flagged(promptTokenCount: 1_024, window: window), [true])
+        XCTAssertEqual(flagged(promptTokenCount: 4_096, window: window), [true, true])
+        XCTAssertEqual(flagged(promptTokenCount: 5_120, window: window), [true, true, true])
+        XCTAssertEqual(
+            flagged(promptTokenCount: 32_768, window: window),
+            Array(repeating: false, count: 14) + [true, true]
+        )
+        XCTAssertEqual(
+            ContinuousBatchScheduler.nativeMTPPromptWindowStart(
+                promptTokenCount: 32_768, window: window, keepsWholePrompt: false),
+            28_672
+        )
+        XCTAssertEqual(
+            ContinuousBatchScheduler.nativeMTPPromptWindowStart(
+                promptTokenCount: 5_120, window: window, keepsWholePrompt: false),
+            1_024
+        )
+        for count in [1_024, 4_096, 5_120, 32_768] {
+            XCTAssertTrue(flagged(promptTokenCount: count, window: nil).allSatisfy { $0 }, "\(count)")
+            // A snapshot row keeps the whole prompt on the drafter.
+            XCTAssertTrue(
+                flagged(promptTokenCount: count, window: window, keepsWholePrompt: true).allSatisfy { $0 },
+                "\(count)"
+            )
+        }
+    }
+
+    /// The scheduler hands the backend the window start and flags only the
+    /// chunks that reach it; the earlier chunks prefill as ordinary target
+    /// work with no next-prompt-token pairing.
+    func testNativeMTPPromptWindowSkipsDrafterPrefillOnChunksBeforeTheWindow() async throws {
+        for window in [Int?.none, 3] {
+            let backend = ScriptedBackend(
+                scripts: [:],
+                prefillTokens: ["windowed": 4],
+                nativeTargetTopTokens: ["windowed": [5]]
+            )
+            let scheduler = try await makeScheduler(
+                maxActiveRows: 1,
+                maxPromptChunkTokens: 2,
+                nativeMTPDrafterPromptWindow: window,
+                backend: backend
+            )
+            let result = try await scheduler.submit(Self.nativeRequest(
+                id: "windowed",
+                promptTokens: [1, 2, 3, 6, 7, 8, 9],
+                maxOutputTokens: 2,
+                proposals: [5],
+                maximumDepth: 1
+            ))
+
+            XCTAssertEqual(result.outputTokens.count, 2)
+            let prefills = await backend.prefillInputs()
+            XCTAssertEqual(prefills.map(\.promptTokens), [[1, 2], [3, 6], [7, 8], [9]])
+            if window == nil {
+                XCTAssertTrue(prefills.allSatisfy(\.nativeMTPPromptPrefill))
+                XCTAssertEqual(prefills.map(\.nativeMTPNextPromptToken), [3, 7, 9, nil])
+                XCTAssertEqual(prefills.map(\.nativeMTPPromptWindowStart), [0, 0, 0, 0])
+            } else {
+                // Window start 7 - 3 = 4: chunk [4, 6) starts the drafter.
+                XCTAssertEqual(prefills.map(\.nativeMTPPromptPrefill), [false, false, true, true])
+                XCTAssertEqual(prefills.map(\.nativeMTPNextPromptToken), [nil, nil, 9, nil])
+                XCTAssertEqual(prefills.map(\.nativeMTPPromptWindowStart), [4, 4, 4, 4])
+            }
+        }
+    }
+
     func testNativeMTPAppliesTerminalFilterBeforeBonusCandidate() async throws {
         let backend = ScriptedBackend(
             scripts: [:],
@@ -9256,6 +9339,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         maxPrefillTokensPerIteration: Int? = nil,
         allowsRaggedPrefillOffsets: Bool = false,
         nativeMTPPromptRowsJoinRaggedPrefill: Bool = false,
+        nativeMTPDrafterPromptWindow: Int? = nil,
         serialPrefillStride: Bool = false,
         prefillGrouping: ContinuousBatchPrefillGroupingRule = .unconstrained,
         nativeMTPRoundByteCapacity: Int? = nil,
@@ -9289,6 +9373,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             serialPrefillStride: serialPrefillStride,
             allowsRaggedPrefillOffsets: allowsRaggedPrefillOffsets,
             nativeMTPPromptRowsJoinRaggedPrefill: nativeMTPPromptRowsJoinRaggedPrefill,
+            nativeMTPDrafterPromptWindow: nativeMTPDrafterPromptWindow,
             tokenDeliveryBufferLimit: tokenDeliveryBufferLimit,
             tokenDeliveryTimeoutNanoseconds: tokenDeliveryTimeoutNanoseconds,
             queueWaitTimeoutNanoseconds: queueWaitTimeoutNanoseconds,

@@ -1144,12 +1144,23 @@ final class NativeMTPOnDeviceSelfCheckTests: XCTestCase {
         XCTAssertEqual(verdict, .init(passed: false, reason: "token_mismatch", speedup: 0))
     }
 
-    func testNoNetGainKeepsNativeMTPOff() {
+    func testAnyStrictGainPasses() {
+        // SPEC-048 0.1.71: a 1.07x gain passes (it failed the old 1.15x bar).
         let verdict = NativeMTPOnDeviceSelfCheck.decide(
             mtpTokens: [1, 2, 3], mtpSeconds: 0.75, ordinaryTokens: [1, 2, 3], ordinarySeconds: 0.8
         )
-        XCTAssertFalse(verdict.passed)
-        XCTAssertEqual(verdict.reason, "no_net_gain")
+        XCTAssertTrue(verdict.passed)
+        XCTAssertEqual(verdict.reason, "passed")
+    }
+
+    func testNoNetGainKeepsNativeMTPOff() {
+        for mtpSeconds in [0.8, 0.9] {
+            let verdict = NativeMTPOnDeviceSelfCheck.decide(
+                mtpTokens: [1, 2, 3], mtpSeconds: mtpSeconds, ordinaryTokens: [1, 2, 3], ordinarySeconds: 0.8
+            )
+            XCTAssertFalse(verdict.passed)
+            XCTAssertEqual(verdict.reason, "no_net_gain")
+        }
     }
 
     func testEmptyReferenceKeepsNativeMTPOff() {

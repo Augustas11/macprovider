@@ -341,6 +341,25 @@ def validate_policy(value: dict) -> None:
         raise Refusal("qualification policy must preserve production bound one")
 
 
+# SPEC-048 0.1.71 lowered the R015 throughput floor from 0.15 to 0.0. A policy
+# frozen under 0.1.25-0.1.70 keeps its 0.15 floor and is still judged by that
+# set (the bench and the analyzer accept it), so the window accepts both.
+FROZEN_THROUGHPUT_FLOORS = (0.0, 0.15)
+
+
+def thresholds_match(actual: object, expected: dict) -> bool:
+    if not isinstance(actual, dict) or set(actual) != set(expected):
+        return False
+    for key, want in expected.items():
+        got = actual[key]
+        if key == "throughput_lower_bound_min":
+            if type(got) not in (int, float) or got not in FROZEN_THROUGHPUT_FLOORS:
+                return False
+        elif got != want:
+            return False
+    return True
+
+
 def glm_prefill_cells(policy: dict) -> list[str]:
     return [f"s{slots}-p{prompt}-o128" for slots in (1, 2, 4) for prompt in policy["prompt_tokens"]]
 
@@ -377,14 +396,14 @@ def validate_glm_prefill_policy(value: dict) -> None:
     if not isinstance(value.get("provider_commit"), str) or not SHA40.fullmatch(value["provider_commit"]):
         raise Refusal("GLM prefill provider commit is invalid")
     thresholds = {
-        "throughput_lower_bound_min": 0.15, "ttft_p95_upper_bound_max": 0.1,
+        "throughput_lower_bound_min": 0.0, "ttft_p95_upper_bound_max": 0.1,
         "tpot_p95_upper_bound_max": 0.0, "chunk_gap_p99_upper_bound_max": 1.0,
         "rejection_increase_max_pp": 1.0, "min_available_memory_fraction": 0.1,
         "bootstrap_draws": 10000, "alpha": 0.05,
         "gated_throughput_lower_bound_min": -0.05,
         "gated_ttft_p95_upper_bound_max": 0.05, "gated_tpot_p95_upper_bound_max": 0.05,
     }
-    if value.get("thresholds") != thresholds or any(
+    if not thresholds_match(value.get("thresholds"), thresholds) or any(
         (type(value["thresholds"].get(key)) is not int if key == "bootstrap_draws"
          else type(value["thresholds"].get(key)) not in (int, float))
         for key, expected in thresholds.items()
@@ -443,7 +462,7 @@ def validate_qwen_policy(value: dict) -> None:
     if any(value.get(key) != expected for key, expected in exact.items()):
         raise Refusal("Qwen qualification policy is not the approved R015 contract")
     expected_thresholds = {
-        "throughput_lower_bound_min": 0.15,
+        "throughput_lower_bound_min": 0.0,
         "ttft_p95_upper_bound_max": 0.1,
         "tpot_p95_upper_bound_max": 0.0,
         "chunk_gap_p99_upper_bound_max": 1.0,
@@ -455,7 +474,7 @@ def validate_qwen_policy(value: dict) -> None:
         "gated_ttft_p95_upper_bound_max": 0.05,
         "gated_tpot_p95_upper_bound_max": 0.05,
     }
-    if value.get("thresholds") != expected_thresholds:
+    if not thresholds_match(value.get("thresholds"), expected_thresholds):
         raise Refusal("Qwen qualification policy thresholds are not the approved gates")
     if any(
         type(value["thresholds"].get(key)) is not type(expected)

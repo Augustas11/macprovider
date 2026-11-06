@@ -17,6 +17,12 @@ let package = Package(
         )
     ],
     dependencies: [
+        // Tag 3.32.3-macprovider.25 (#2198, #2189) on 3.32.3-macprovider.24:
+        // .23's GLM-5.3 MTP head prefill over the last 4096 prompt columns
+        // (`da8f193`, from `93234b6`) on top of .24's MiniMax M3 work.
+        // Tag 3.32.3-macprovider.23 (#2198) on 3.32.3-macprovider.21: GLM-5.3
+        // MTP head prefills the last 4096 prompt columns (NoPE); prompts
+        // within 4096 unchanged.
         // Tag 3.32.3-macprovider.24 (#2189) on 3.32.3-macprovider.22: The
         // MiniMax M3.1-Flash checkpoint loads within 256 GB: the gate/up
         // tensors that load-time fusion replaces are freed as each layer
@@ -62,7 +68,7 @@ let package = Package(
         // compatible per-column attention while retaining row-owned caches.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "39ccc0ec28f44f08f8b8032a92ebd1b2e438ebf4"
+            revision: "da8f1932f8e2a46477a1a35663955267bc6fcd04"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",

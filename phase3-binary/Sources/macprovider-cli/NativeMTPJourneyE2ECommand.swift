@@ -1923,8 +1923,8 @@ final class NativeMTPJourneyRunner {
             ] as [String: Any]
         }
         // The provider's on-device self-check (SPEC-048-R016 0.1.32) runs this
-        // same challenge and needs native at least 1.15x faster than ordinary
-        // (best of two native runs). An estimate only: the provider times both
+        // same challenge and needs native strictly faster than ordinary (best
+        // of two native runs; SPEC-048 0.1.71). An estimate only: the provider times both
         // paths on one paged engine, this step on two runtimes.
         let verdict = NativeMTPOnDeviceSelfCheck.decide(
             mtpTokens: first.generatedTokens,

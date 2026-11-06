@@ -17,8 +17,9 @@
 #        (HARNESS_HC: prefill + split-HC)
 #   glm53-2198-window.sh r015    SPEC-048 R015 single-row cells, native MTP
 #        against ordinary, s1 x prompt 1536/4096/32768 x output 128/512, on
-#        HARNESS_PIN under the lab-only exploratory policy POLICY
-#        (maximum_prompt_tokens 32768; never a signed entry or verdict)
+#        HARNESS_PIN under POLICY: an exploratory policy (no verdict) or the
+#        formal cap-32768 policy glm53-2198/r015-cap32k.json, which adds its
+#        gated cells and the sustained run and yields the R015 verdict
 #   glm53-2198-window.sh validate   policy, layout and identity checks of
 #        the r015 leg without MLX use; runs beside the live provider
 #   glm53-2198-window.sh omlx    oMLX comparison (not part of `all`)
@@ -34,7 +35,9 @@
 # per-cell results); `all` also writes OUT/all.json and touches OUT/DONE.
 #
 # Env: LAB (~/macprovider-lab-2198), W (~/work-2198), MODEL, FORK,
-#      BASE_BENCH, CAMP_BENCH, HARNESS_PIN, HARNESS_HC, POLICY, FIXTURE, OUT.
+#      BASE_BENCH, CAMP_BENCH, HARNESS_PIN, HARNESS_HC, POLICY, FIXTURE, OUT,
+#      PROVIDER_COMMIT (the commit HARNESS_PIN was built from; defaults to the
+#      policy provider_commit, and a different value is refused).
 set -uo pipefail
 export PATH=/usr/sbin:/opt/homebrew/bin:/usr/bin:/bin
 # The policy names Xcode 17F113; the bench records `xcodebuild -version`.
@@ -54,14 +57,15 @@ SWEEP=${SWEEP:-$LAB/poc/scripts/lab/cb-studio/depth_sweep.py}
 ANALYZE=${ANALYZE:-$LAB/native_mtp_r015_analyze.py}
 OUT=${OUT:-$LAB/window-$(date -u +%Y%m%dT%H%M%SZ)}
 MODEL_ID=zai-org/glm-5.3-flash
-PROVIDER_COMMIT=3240ca12714207c4411c44f0403ff66d76d3bc2e
+PROVIDER_COMMIT=${PROVIDER_COMMIT:-}
 RELEASE_METALLIB_SHA256=3d9b4a747758128cc5418e62c5ad8e282a11b0d436423537137e013beaa1261b
 LIVE_PORT=8080
 LIVE_LABEL=live.malibu.provider
 LIVE_BINARY=$HOME/macprovider/macprovider-cli
 LOCK=$HOME/.glm53-2198-window.lock
 PORT=18095
-R015_CELLS=(s1-p1536-o128 s1-p1536-o512 s1-p4096-o128 s1-p4096-o512 s1-p32768-o128 s1-p32768-o512)
+R015_FORMAL=0
+R015_CELLS=(${=R015_ONLY_CELLS:-s1-p1536-o128 s1-p1536-o512 s1-p4096-o128 s1-p4096-o512 s1-p32768-o128 s1-p32768-o512})
 mkdir -p $OUT
 log() { echo "$(date -u +%FT%TZ) $*" | tee -a $OUT/summary.txt; }
 
@@ -296,8 +300,30 @@ r015_ready() {
   [[ $(shasum -a 256 $HARNESS_PIN/mlx.metallib | cut -d' ' -f1) == $RELEASE_METALLIB_SHA256 ]] ||
     { log "refusing: $HARNESS_PIN/mlx.metallib is not the signed release metallib"; return 3; }
   [[ -f $POLICY && -d $FIXTURE/target ]] || { log "missing $POLICY or $FIXTURE/target"; return 3; }
-  python3 -I -c 'import json,sys; p=json.load(open(sys.argv[1])); sys.exit(0 if p["schema"].endswith("exploratory-policy.v1") else 1)' $POLICY ||
-    { log "refusing: $POLICY is not an exploratory policy"; return 3; }
+  # The bench stamps PROVIDER_COMMIT into every record; a stale env override
+  # would attribute the measured decode path to the wrong commit.
+  local policy_commit
+  policy_commit=$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1])).get("provider_commit", ""))' $POLICY) ||
+    { log "refusing: cannot read provider_commit from $POLICY"; return 3; }
+  [[ $policy_commit =~ '^[0-9a-f]{40}$' ]] ||
+    { log "refusing: $POLICY has no 40-hex provider_commit"; return 3; }
+  [[ -n $PROVIDER_COMMIT ]] || PROVIDER_COMMIT=$policy_commit
+  [[ $policy_commit == $PROVIDER_COMMIT ]] ||
+    { log "refusing: PROVIDER_COMMIT $PROVIDER_COMMIT is not the policy provider_commit ${policy_commit:-<none>}"; return 3; }
+  # A formal policy (SPEC-048 R015 verdict) runs every matrix and gated cell
+  # it names, then its sustained cell; an exploratory one runs R015_CELLS.
+  local cells
+  cells=$(python3 -I -c '
+import json, sys
+p = json.load(open(sys.argv[1]))
+if p["schema"].endswith("exploratory-policy.v1"):
+    sys.exit(0)
+if p["schema"] != "macprovider.native-mtp-r015-policy.v1":
+    sys.exit(1)
+ids = [f"s{s}-p{n}-o{o}" for s in p["slots"] for n in p["prompt_tokens"] for o in p["max_tokens"]]
+print(" ".join(ids + [c for c in p.get("gated_cells", []) if c not in ids]))' $POLICY) ||
+    { log "refusing: $POLICY is neither an exploratory nor a formal R015 policy"; return 3; }
+  if [[ -n $cells ]]; then R015_FORMAL=1; R015_CELLS=(${=cells}); fi
 }
 
 leg_r015() {
@@ -316,9 +342,18 @@ leg_r015() {
       echo "{\"cell\": \"$cell\", \"rc\": $crc, \"log\": \"$OUT/r015-$cell.log\"}" >> $OUT/r015.cells
       (( crc == 0 )) || { rc=$crc; (( crc == 3 || crc == 125 )) && break; }
     done
+    if (( rc == 0 && R015_FORMAL )); then
+      live_absent 2>> $OUT/summary.txt || { log "r015 sustained refused: live provider present"; rc=3; }
+      if (( rc == 0 )); then
+        log "r015 sustained start"
+        watched r015-sustained $OUT/r015-sustained.stdout $OUT/r015-sustained.log \
+          r015_bench --out $OUT/r015-glm53.jsonl --phase sustained || rc=$?
+        log "r015 sustained rc=$rc"
+      fi
+    fi
     if [[ -s $OUT/r015-glm53.jsonl && -f $ANALYZE ]]; then
       python3 -I $ANALYZE $OUT/r015-glm53.jsonl $POLICY > $OUT/r015-analysis.json 2> $OUT/r015-analysis.err
-      log "r015 analysis rc=$? -> $OUT/r015-analysis.json (exploratory: no verdict)"
+      log "r015 analysis rc=$? -> $OUT/r015-analysis.json ($( (( R015_FORMAL )) && echo formal verdict || echo 'exploratory: no verdict'))"
       python3 -I $ANALYZE $OUT/r015-glm53.jsonl $POLICY --format markdown > $OUT/r015-analysis.md 2>> $OUT/r015-analysis.err
     fi
   fi

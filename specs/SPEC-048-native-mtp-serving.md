@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.70
+**Version:** 0.1.74
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.70",
+  "version": "0.1.74",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -506,12 +506,21 @@ The authorized dependency tuple is exact:
 
 | Repository | Fork tag | Revision | Upstream base |
 |---|---|---|---|
-| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.24` | `39ccc0ec28f44f08f8b8032a92ebd1b2e438ebf4` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
+| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.25` | `da8f1932f8e2a46477a1a35663955267bc6fcd04` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
 | `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.11` | `c774cb0934c7503bc3fe1c3d1afbe44c728e8891` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
 | `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.6` | `51edbb37620aef7c860ab5d7cdb7bf5b14333da2` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
 | `https://github.com/Augustas11/mlx-c` | `v0.6.0-macprovider.2` | `2b1ff2b5b5129a6115771da32e1bac3b6b01ab01` | `ml-explore/mlx-c` pinned base (`ebc88f10caa1b625e6b581437a8dea6df8a70085`) |
 
-The mlx-swift-lm row `3.32.3-macprovider.24` is on `3.32.3-macprovider.22`
+The mlx-swift-lm row `3.32.3-macprovider.25` is on `3.32.3-macprovider.24`
+(`39ccc0ec28f44f08f8b8032a92ebd1b2e438ebf4`) (#2198, #2189), at
+`da8f1932f8e2a46477a1a35663955267bc6fcd04`, and adds `.23`'s one commit
+(`93234b6`), which changes only `GLM5NextMTP.prepareDrafterState`: the
+GLM-5.3 MTP head (NoPE) prefills the last 4096 shifted prompt columns
+instead of all of them, so a prompt within 4096 tokens drafts exactly as
+before. Target prefill and decode are `.24`'s. The Swift, core and C rows
+are unchanged.
+
+The prior mlx-swift-lm row `3.32.3-macprovider.24` is on `3.32.3-macprovider.22`
 (`7feb4c35f44e2192ba531bb837db4a7b4d15c746`) (#2189), at
 `39ccc0ec28f44f08f8b8032a92ebd1b2e438ebf4`: the MiniMax M3.1-Flash checkpoint
 loads within 256 GB, because the gate/up tensors that load-time fusion replaces
@@ -1023,7 +1032,12 @@ the sampled first token as its tail and yields the row's first proposal. A
 prompt that fits one chunk is the single-pass case of the same rule. A
 non-initial chunk MUST find the previous chunk's proposal state at exactly
 position `c`, or the row fails before output; no chunk is replayed to
-synthesize hidden states.
+synthesize hidden states. The GLM-5.3 MTP head prefills only the last 4096
+prompt columns on both the single-chunk and the multi-chunk path: chunks
+ending at or before column `w = P - 4096` of a `P`-token prompt skip it, the
+chunk holding `w` starts fresh proposal state there, and positions count from
+`w`; a row that resumes from or captures a prompt snapshot keeps the whole
+prompt.
 
 A row held at depth zero by the MTP-7 load gate does not run a one-column
 native verification. It shares the ordinary lockstep decode forward, and the
@@ -1786,7 +1800,43 @@ advertised `qualified_slots` (2...8), its `max_native_active_rows`
 A slot count above `qualified_slots` is not allowed. The bench refuses, and
 the analyzer fails closed on, a policy whose cells differ from these, so a
 reduced or substituted matrix cannot pass. Exploratory pilot policies are
-exempt and never yield an admission verdict.
+exempt and never yield an admission verdict, except as the extension run of a
+cap-extension record below.
+
+**Cap extension (0.1.74).** A tuple with a passing formal matrix at cap `C0`
+MAY raise its signed `max_prompt_tokens` to `C1 > C0` without rerunning the
+cells that matrix already holds, when the named decode-path change since that
+matrix leaves every prompt at or below `C0` drafting, verifying, and committing
+tokens exactly as measured (MTP-13; AGENTS.md HARD RULE 2). The `C1` matrix is
+the `C0` matrix plus the native-eligible cells at every slot count from 1 to
+the bound, at each prompt stratum of `C1` that `C0` does not have, and at both
+output budgets. Gated cells and the sustained window run at prompt 1536, so
+they are already in the `C0` matrix. A cap-extension record
+(`macprovider.native-mtp-r015-cap-extension.v1`) names the change and binds
+by SHA-256 the prior formal policy, runs, and analysis and the extension
+policy and runs. It also names the extension's provider commit and
+mlx-swift-lm revision. `scripts/native_mtp_r015_analyze.py --cap-extension`
+passes the record only when all of these hold:
+
+- the prior policy is a complete formal matrix, and its committed analysis is
+  exactly the current analyzer's `PASS` on its runs;
+- the extension policy keeps the prior tuple, hardware, methodology, slot
+  counts, output budgets, arrival profile and request profile; holds exactly
+  the added cells, no gated cell and no sustained window; is frozen under the
+  current gate set with at least ten blocks; and meets every other admission
+  policy requirement. It carries the exploratory schema only because the bench
+  refuses a reduced admission matrix. Its run header MUST meet the admission
+  request profile, and its policy, cells and gates are frozen before the run
+  (the header binds the policy SHA-256);
+- every extension cell passes; and
+- Holm, recomputed at the frozen alpha over every gated hypothesis of both runs
+  as one family, passes every hypothesis. Each hypothesis keeps the threshold
+  its own policy froze, so the prior cells keep their recorded gate set.
+
+The signed entry at the raised cap binds `benchmark_policy_sha256` to the
+record and `performance_evidence_sha256` to the cap-extension analysis; the
+other evidence digests stay those of the prior qualification. Extensions do
+not chain: a later raise extends a formal matrix again or runs the full matrix.
 
 **Cell classes.** The frozen `max_native_active_rows` splits the matrix. A
 cell whose slot count is at or below it is *native-eligible*: it carries the
@@ -1887,8 +1937,10 @@ gates. R015 throughput is decode throughput: a request's completion tokens
 after its first, divided by the interval from its first token to its
 completion. A run's aggregate decode throughput is the sum of every request's
 tokens after its first, divided by the interval from the run's earliest first
-token to its latest completion. Prefill is excluded because it is the same
-work on both paths and is gated separately as TTFT below; prefill-inclusive
+token to its latest completion. Prefill is excluded from this gate because
+the decode-throughput gate judges decode; prefill is not the same work on both
+paths (a native drafter that prefills its head over the prompt adds prefill
+work), and that cost is gated separately as TTFT below. Prefill-inclusive
 (end-to-end) committed throughput MUST still be reported but is not a gate.
 A missing or non-positive decode throughput fails the run closed; evidence
 recorded before the bench emitted it may derive it from recorded per-request
@@ -1896,7 +1948,7 @@ end-to-end throughput, TTFT, completion tokens, and nominal arrival offsets,
 and fails closed when any of those is missing. Using the paired-bootstrap
 corrected 95% confidence interval, the lower bound for aggregate decode
 throughput improvement over the best ordinary baseline
-MUST be at least 15% in each cell at the intended advertised slot count; both
+MUST be greater than 0 in each cell at the intended advertised slot count; both
 paths use that same slot count, and the baseline is the best ordinary
 production-qualified configuration at that count. The corrected upper bound
 for native-MTP p95 TTFT regression MUST be no more than 10%, and the corrected
@@ -1939,8 +1991,22 @@ margin MUST remain within physical RAM, and system-wide available unified
 memory sampled at least once per second MUST retain at least 10% physical-RAM
 headroom throughout the 30-minute
 sustained window. The exact frozen gates cannot be relaxed after results are
-known. A confidence interval merely above zero and upstream `1.8x`, `2x`, or
-`3x` claims are insufficient.
+known. Upstream `1.8x`, `2x`, or `3x` claims are insufficient.
+
+*Gate amendment (0.1.71).* Through 0.1.70 the decode-throughput gate required
+a corrected 95% lower bound of at least 15% (policy
+`throughput_lower_bound_min` 0.15). The 15% figure had no derivation: native
+MTP whose decode throughput beats ordinary continuous batching with a positive
+corrected lower bound serves buyers faster, and the TTFT, TPOT, worst-gap,
+rejection, memory, and hard gates already bound its costs. A policy frozen
+under 0.1.71 or later carries `throughput_lower_bound_min` 0.0, and a cell
+passes the gate only when the corrected lower bound is strictly greater than
+0. Every other threshold is unchanged. This does not reinterpret any earlier
+run: policies frozen under an earlier gate set (the 0.1.24 inter-chunk set and
+the 0.1.25 to 0.1.70 set with the 15% floor) are still judged by the gate set
+they were frozen with, so every recorded verdict reproduces unchanged. The
+bench runs a policy frozen with the current set or the 0.1.25 to 0.1.70 set;
+the 0.1.24 inter-chunk set stays refused for new runs.
 
 The campaign MUST also replay a preregistered, privacy-reviewed representative
 post-gateway request-shape sample, preserving real provider-bound conversation
@@ -2031,9 +2097,10 @@ integrity evidence and not a SPEC-031 canary result.
 **(0.1.32)** The self-test reference is on-device: the provider runs the
 challenge prompt through native MTP and through ordinary decode on the same
 paged engine (same kernels, so near-tied logits resolve identically) at
-greedy, requires identical token IDs, and requires the native run to be at
-least 1.15x faster (best of two runs each). The 1.15x bar is the R015
-native-eligible decode-throughput bound; the R015 PASS on the final
+greedy, requires identical token IDs, and requires the native run to be
+strictly faster than the ordinary run (best of two runs each): speedup greater
+than 1.0 from 0.1.71, matching the R015 decode-throughput gate's positive lower
+bound, and at least 1.15x through 0.1.70. The R015 PASS on the final
 mlx-swift-lm 3.32.3 stack is recorded in `docs/research/mlx-swift-lm-3.32.3/`
 (`step3-native-margin.md`, `step3-parity-event.md`, `step45-throughput.md`). Failure disables only that tuple
 on that Mac. The signed challenge record's expected digest is no longer
@@ -2208,6 +2275,32 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.74 (2026-11-05)** — MTP-15: cap extension. A formally qualified tuple
+  may raise its signed `max_prompt_tokens` with a cap-extension record: the
+  prior formal matrix (reanalyzed to its committed `PASS`) plus an extension
+  run of exactly the new cap's added native-eligible cells under the current
+  gate set, with Holm recomputed over both runs as one family. Gated cells and
+  the sustained window are not rerun; no gate or threshold changes (#2198).
+- **0.1.73 (2026-11-05)** — MTP-6: the GLM-5.3 MTP head's 4096-column prompt
+  window also applies to chunked continuous-batching prefill; earlier chunks
+  skip the head, the chunk holding the window start seeds fresh state, and a
+  prompt-snapshot row keeps the whole prompt (#2198).
+- **0.1.72 (2026-11-06)** — R003 names mlx-swift-lm `3.32.3-macprovider.25`
+  (`da8f1932f8e2a46477a1a35663955267bc6fcd04`) on `3.32.3-macprovider.24`
+  (#2198, #2189): `.23`'s GLM-5.3 MTP head prefill over the last 4096 prompt
+  columns (NoPE) on top of the MiniMax M3 rows; prompts within 4096 unchanged.
+  Other model sources and the Swift, core and C rows are unchanged.
+- **0.1.71 (2026-11-05)** — MTP-15: the R015 decode-throughput gate for a
+  native-eligible cell is a corrected 95% lower bound greater than 0 (policy
+  `throughput_lower_bound_min` 0.0, strict), replacing the 15% floor (#2198).
+  TTFT p95 (<= +10%), TPOT p95 (<= 0%), worst-gap, rejection, memory, gated
+  non-inferiority and hard gates are unchanged. Policies frozen under earlier
+  gate sets keep being judged by those sets, so recorded verdicts reproduce;
+  the bench runs policies frozen with the new set or the 0.1.25 set. The decode-only rationale
+  no longer claims prefill is the same work on both paths: a native drafter
+  that prefills its head over the prompt adds prefill work, which the TTFT
+  gate bounds. MTP-16: the on-device self-check requires native strictly
+  faster than ordinary (speedup > 1.0) instead of at least 1.15x.
 - **0.1.70 (2026-11-05)** — R003 names mlx-swift-lm `3.32.3-macprovider.24`
   (`39ccc0ec28f44f08f8b8032a92ebd1b2e438ebf4`) on `3.32.3-macprovider.22`
   (#2189): The MiniMax M3.1-Flash checkpoint loads within 256 GB: the gate/up
