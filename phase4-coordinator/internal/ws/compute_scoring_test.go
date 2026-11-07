@@ -1566,26 +1566,111 @@ func TestComputeScoringReferenceScorerVerifiesProviderWithoutPeer(t *testing.T) 
 	}
 }
 
-// SPEC-036 FR-23/FR-26: with no peer, the reference scorer alone confirms a
-// substitution failure under the ordinary escalation rules.
-func TestComputeScoringReferenceScorerConfirmsFailureWithoutPeer(t *testing.T) {
-	providers := map[string]string{"cheat": "github:2", "ref": "github:9"}
-	h := newScoringHarnessWithReference(t, providers, map[string]bool{"cheat": true}, map[string]bool{"ref": true}, []string{"github:9"})
-	for i := 0; i < 12 && h.state("cheat") != computeintegrity.VerificationFailed; i++ {
+// reviewState reports a key's state and whether it awaits operator review.
+func (h *scoringHarness) reviewState(providerID string) (computeintegrity.VerificationState, bool) {
+	h.engine.mu.Lock()
+	defer h.engine.mu.Unlock()
+	st := h.engine.states[computeScoringKey{providerID, scoringModel}]
+	if st == nil {
+		return "", false
+	}
+	return st.State, st.ReviewPending
+}
+
+// driveToReferenceReview runs a cheater verified only by the reference
+// scorer until its failure awaits operator review.
+func (h *scoringHarness) driveToReferenceReview(providerID string) {
+	h.t.Helper()
+	for i := 0; i < 12; i++ {
+		if _, review := h.reviewState(providerID); review {
+			return
+		}
 		h.round(2 * time.Hour)
-		for j := 0; j < 8 && h.state("cheat") == computeintegrity.VerificationSuspect; j++ {
+		for j := 0; j < 8; j++ {
+			if state, review := h.reviewState(providerID); review || state != computeintegrity.VerificationSuspect {
+				break
+			}
 			h.round(20 * time.Minute)
 		}
 	}
-	if got := h.state("cheat"); got != computeintegrity.VerificationFailed {
-		t.Fatalf("cheater state = %s, want failed on the reference scorer", got)
+	if state, review := h.reviewState(providerID); !review {
+		h.t.Fatalf("%s state = %s, want a reference-only failure under operator review", providerID, state)
 	}
+}
+
+// SPEC-036 FR-23/FR-26: with no peer, a failure the reference scorer alone
+// confirms awaits operator review: no suspension, no hold, visible with
+// reason reference_only_failure. An operator confirmation then applies the
+// ordinary failed consequences.
+func TestComputeScoringReferenceOnlyFailureAwaitsOperatorConfirm(t *testing.T) {
+	providers := map[string]string{"cheat": "github:2", "ref": "github:9"}
+	h := newScoringHarnessWithReference(t, providers, map[string]bool{"cheat": true}, map[string]bool{"ref": true}, []string{"github:9"})
+	h.driveToReferenceReview("cheat")
 	cheat, _ := h.registry.Resolve("cheat", "as-cheat")
+	if cheat.ComputeIntegritySuspended || !cheat.RoutingEligible() {
+		t.Fatal("a reference-only failure must not suspend routing")
+	}
+	if holds := h.holds.snapshot(); len(holds) != 0 {
+		t.Fatalf("a reference-only failure must not hold earnings, got %+v", holds)
+	}
+	code, body := h.admin(http.MethodGet, "/admin/compute-integrity/cheat", "")
+	if code != http.StatusOK {
+		t.Fatalf("status GET code=%d body=%v", code, body)
+	}
+	model := body["scoring"].(map[string]any)["models"].([]any)[0].(map[string]any)
+	if model["state"] != "suspect" || model["reason"] != "reference_only_failure" || model["next_step"] != "operator_review" {
+		t.Fatalf("unexpected review status %v", model)
+	}
+	before := h.dispatched.Load()
+	for i := 0; i < 3; i++ {
+		h.round(2 * time.Hour)
+	}
+	if h.dispatched.Load() != before {
+		t.Fatal("a key under review must not be probed")
+	}
+	if code, _ := h.admin(http.MethodPost, "/admin/compute-integrity/ref/confirm-failure", `{"model_id":"`+scoringModel+`","operator_id":"op","reason":"x"}`); code != http.StatusNotFound {
+		t.Fatalf("confirm of a key without state code=%d", code)
+	}
+	if code, out := h.admin(http.MethodPost, "/admin/compute-integrity/cheat/confirm-failure", `{"model_id":"`+scoringModel+`","operator_id":"op","reason":"substitution reproduced"}`); code != http.StatusOK {
+		t.Fatalf("confirm code=%d body=%v", code, out)
+	}
+	if got := h.state("cheat"); got != computeintegrity.VerificationFailed {
+		t.Fatalf("confirmed state = %s, want failed", got)
+	}
+	cheat, _ = h.registry.Resolve("cheat", "as-cheat")
 	if !cheat.ComputeIntegritySuspended || cheat.RoutingEligible() {
 		t.Fatal("a confirmed failure must suspend routing")
 	}
-	if holds := h.holds.snapshot(); len(holds) != 1 || holds[0].Kind != computeintegrity.HoldKindFailure {
-		t.Fatalf("expected one failure hold, got %+v", holds)
+	if holds := h.holds.snapshot(); len(holds) != 1 || holds[0].Kind != computeintegrity.HoldKindFailure || holds[0].Status != computeintegrity.HoldHeld {
+		t.Fatalf("expected one held failure hold, got %+v", holds)
+	}
+	if code, _ := h.admin(http.MethodPost, "/admin/compute-integrity/cheat/confirm-failure", `{"model_id":"`+scoringModel+`","operator_id":"op","reason":"again"}`); code != http.StatusConflict {
+		t.Fatalf("confirm without a pending review code=%d", code)
+	}
+}
+
+// SPEC-036 FR-26: an operator clear ends a reference-only review; the key is
+// unverified, routable and unheld, and verification resumes.
+func TestComputeScoringReferenceOnlyFailureOperatorClear(t *testing.T) {
+	providers := map[string]string{"cheat": "github:2", "ref": "github:9"}
+	h := newScoringHarnessWithReference(t, providers, map[string]bool{"cheat": true}, map[string]bool{"ref": true}, []string{"github:9"})
+	h.driveToReferenceReview("cheat")
+	if code, out := h.admin(http.MethodPost, "/admin/compute-integrity/cheat/clear", `{"model_id":"`+scoringModel+`","operator_id":"op","reason":"reference runtime fault"}`); code != http.StatusOK {
+		t.Fatalf("clear code=%d body=%v", code, out)
+	}
+	if state, review := h.reviewState("cheat"); state != computeintegrity.VerificationUnverified || review {
+		t.Fatalf("cleared state = %s review=%v", state, review)
+	}
+	cheat, _ := h.registry.Resolve("cheat", "as-cheat")
+	if cheat.ComputeIntegritySuspended || !cheat.RoutingEligible() || len(h.holds.snapshot()) != 0 {
+		t.Fatal("a cleared review leaves the provider routable and unheld")
+	}
+	before := h.dispatched.Load()
+	for i := 0; i < 3; i++ {
+		h.round(2 * time.Hour)
+	}
+	if h.dispatched.Load() == before {
+		t.Fatal("verification must resume after a clear")
 	}
 }
 

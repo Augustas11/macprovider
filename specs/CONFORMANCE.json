@@ -5287,8 +5287,9 @@
         "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringTransitionIsAtomic",
         "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringRestoredStateSurvivesRestartBeforeReconnect",
         "phase4-coordinator/internal/billing/compute_integrity_holds_test.go:TestComputeIntegrityRecoveryCloseNeedsAnOpenRecoveryHold",
-        "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestStateMachineReferenceOnlyConfirmsFailure",
-        "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestStateMachineReferenceOnlyRecovery"
+        "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestStateMachineReferenceOnlyRecovery",
+        "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestStateMachineReferenceOnlyFailureNeedsOperatorReview",
+        "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestStateMachineReferenceOnlyRecoveryFailureNeedsOperatorReview"
       ],
       "journeys": [],
       "evidence": [],
@@ -5373,14 +5374,16 @@
         "phase4-coordinator/internal/config/compute_integrity.go:func validReferenceOperator",
         "phase3-binary/Sources/MacProviderCore/Config.swift:private static func applyYAMLConfig",
         "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:func authInitialMessage",
-        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:private func handle(_ message: URLSessionWebSocketTask.Message)"
+        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:private func handle(_ message: URLSessionWebSocketTask.Message)",
+        "phase4-coordinator/internal/computeintegrity/scoring_state.go:func (k *KeyState) referenceReview",
+        "phase4-coordinator/internal/computeintegrity/scoring_state.go:func (k *KeyState) OperatorConfirmFailure",
+        "phase4-coordinator/internal/ws/compute_scoring_admin.go:func (e *computeScoringEngine) operatorConfirmFailure",
+        "phase4-coordinator/internal/ws/compute_scoring_admin.go:func (s *Server) handleAdminComputeIntegrityAction"
       ],
       "tests": [
         "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestSelectScorersReferenceFallback",
-        "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestStateMachineReferenceOnlyConfirmsFailure",
         "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestStateMachineReferenceOnlyRecovery",
         "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringReferenceScorerVerifiesProviderWithoutPeer",
-        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringReferenceScorerConfirmsFailureWithoutPeer",
         "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringReferenceScorerNeedsConfigAndAnotherOperator",
         "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringPeerPreferredOverReferenceScorer",
         "phase4-coordinator/internal/pool/compute_integrity_suspension_test.go:TestComputeScoreReferenceSessionIsNeverRoutable",
@@ -5388,7 +5391,11 @@
         "phase3-binary/Tests/macprovider-cliTests/ComputeScoreReferenceConfigTests.swift:testRejectsNonBooleanValues",
         "phase3-binary/Tests/macprovider-cliTests/ComputeScoreReferenceConfigTests.swift:testYAMLAndEnvironmentEnable",
         "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testComputeScoreReferenceAdvertisesCapability",
-        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testComputeScoreReferenceRefusesBuyerRequestsAndStillScores"
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testComputeScoreReferenceRefusesBuyerRequestsAndStillScores",
+        "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestStateMachineReferenceOnlyFailureNeedsOperatorReview",
+        "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestStateMachineReferenceOnlyRecoveryFailureNeedsOperatorReview",
+        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringReferenceOnlyFailureAwaitsOperatorConfirm",
+        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringReferenceOnlyFailureOperatorClear"
       ],
       "journeys": [],
       "evidence": [],

@@ -717,24 +717,56 @@ func TestSelectScorersReferenceFallback(t *testing.T) {
 	}
 }
 
-// SPEC-036 FR-23/FR-26: with no peer, a failure may be confirmed by
-// reference scorers alone; one peer operator alone still cannot.
-func TestStateMachineReferenceOnlyConfirmsFailure(t *testing.T) {
+// SPEC-036 FR-23/FR-26: with no peer, reference-only outs confirm a failure
+// for operator review only: nothing is suspended or held until an operator
+// confirms it. One peer operator alone still cannot confirm.
+func TestStateMachineReferenceOnlyFailureNeedsOperatorReview(t *testing.T) {
 	t0 := time.Date(2026, 10, 13, 0, 0, 0, 0, time.UTC)
+	lastIn := t0
 	k := NewKeyState("p", "m", t0)
-	k.Apply(referenceOutcome(outcomeIn(t0, "github:9")))
+	k.Apply(referenceOutcome(outcomeIn(lastIn, "github:9")))
 	if tr := k.Apply(referenceOutcome(outcomeOut(t0.Add(time.Hour), "github:9"))); tr == nil || tr.To != VerificationSuspect {
 		t.Fatalf("expected suspect, got %+v", tr)
 	}
 	k.Apply(referenceOutcome(outcomeOut(t0.Add(2*time.Hour), "github:9")))
 	k.Apply(referenceOutcome(outcomeOut(t0.Add(3*time.Hour), "github:9")))
 	tr := k.Apply(referenceOutcome(outcomeOut(t0.Add(4*time.Hour), "github:9")))
-	if tr == nil || tr.To != VerificationFailed || tr.Reason != ReasonConfirmedFailure || tr.Hold.Kind != HoldActionOpenFailure {
-		t.Fatalf("reference-only outs must confirm a failure, got %+v", tr)
+	if tr == nil || tr.From != VerificationSuspect || tr.To != VerificationSuspect || tr.Reason != ReasonReferenceOnlyFailure || tr.Hold.Kind != HoldActionNone {
+		t.Fatalf("reference-only outs must go to operator review with no hold, got %+v", tr)
+	}
+	if !k.ReviewPending || k.State.RoutingSuspended() || k.NextStep() != "operator_review" {
+		t.Fatalf("review must keep routing and show operator_review: %+v", k)
+	}
+	if tr := k.Apply(referenceOutcome(outcomeOut(t0.Add(5*time.Hour), "github:9"))); tr != nil {
+		t.Fatalf("a key under review takes no measurements, got %+v", tr)
+	}
+	confirmAt := t0.Add(6 * time.Hour)
+	tr = k.OperatorConfirmFailure(confirmAt)
+	if tr == nil || tr.To != VerificationFailed || tr.Reason != ReasonConfirmedFailure || tr.Hold.Kind != HoldActionOpenFailure ||
+		!tr.Hold.Start.Equal(lastIn) || !tr.Hold.End.Equal(confirmAt) || k.ReviewPending {
+		t.Fatalf("operator confirm must apply the failed consequences, got %+v", tr)
+	}
+	if !k.CooldownUntil.Equal(confirmAt.Add(DefaultRecoveryCooldown)) {
+		t.Fatalf("cooldown starts at the confirmation: %v", k.CooldownUntil)
+	}
+	if tr := k.OperatorConfirmFailure(confirmAt); tr != nil {
+		t.Fatalf("confirm needs a pending review, got %+v", tr)
 	}
 
-	// A single peer operator's outs mixed with one reference-only out do not
-	// count as reference-only; they confirm only through two operators.
+	// An operator clear ends a review instead.
+	k = NewKeyState("p", "m", t0)
+	for i := 0; i < 4; i++ {
+		k.Apply(referenceOutcome(outcomeOut(t0.Add(time.Duration(i)*time.Hour), "github:9")))
+	}
+	if !k.ReviewPending {
+		t.Fatal("setup: expected review")
+	}
+	if tr := k.OperatorClear(t0.Add(5 * time.Hour)); tr == nil || tr.To != VerificationUnverified || k.ReviewPending {
+		t.Fatalf("operator clear must end the review, got %+v", tr)
+	}
+
+	// A single peer operator's outs never confirm; one reference out then
+	// makes a two-operator confirmation with the ordinary consequences.
 	k = NewKeyState("p", "m", t0)
 	k.Apply(outcomeOut(t0, "github:2"))
 	for i := 1; i <= 4; i++ {
@@ -742,8 +774,29 @@ func TestStateMachineReferenceOnlyConfirmsFailure(t *testing.T) {
 			t.Fatal("one peer operator must not confirm a failure")
 		}
 	}
-	if tr := k.Apply(referenceOutcome(outcomeOut(t0.Add(6*time.Hour), "github:9"))); tr == nil || tr.To != VerificationFailed {
+	if tr := k.Apply(referenceOutcome(outcomeOut(t0.Add(6*time.Hour), "github:9"))); tr == nil || tr.To != VerificationFailed || tr.Hold.Kind != HoldActionOpenFailure {
 		t.Fatalf("a reference scorer counts as an independent second operator, got %+v", tr)
+	}
+}
+
+// SPEC-036 FR-26: a reference-only failure in recovery also waits for review;
+// a confirmation closes the recovery hold and keeps it held.
+func TestStateMachineReferenceOnlyRecoveryFailureNeedsOperatorReview(t *testing.T) {
+	t0 := time.Date(2026, 10, 13, 0, 0, 0, 0, time.UTC)
+	k := failKey(t, t0)
+	rec := t0.Add(25 * time.Hour)
+	k.Tick(rec)
+	var tr *Transition
+	for i := 0; i < 3; i++ {
+		tr = k.Apply(referenceOutcome(outcomeOut(rec.Add(time.Duration(i+1)*time.Minute), "github:9")))
+	}
+	if tr == nil || tr.To != VerificationRecovering || tr.Reason != ReasonReferenceOnlyFailure || tr.Hold.Kind != HoldActionNone || !k.ReviewPending {
+		t.Fatalf("expected recovering under review, got %+v", tr)
+	}
+	at := rec.Add(time.Hour)
+	tr = k.OperatorConfirmFailure(at)
+	if tr == nil || tr.To != VerificationFailed || tr.Hold.Kind != HoldActionCloseRecovery || !tr.Hold.End.Equal(at) {
+		t.Fatalf("confirm in recovery must close the recovery hold held, got %+v", tr)
 	}
 }
 
@@ -768,5 +821,13 @@ func TestStateMachineReferenceOnlyRecovery(t *testing.T) {
 	var back EscalationEntry
 	if err := json.Unmarshal(raw, &back); err != nil || !back.ReferenceOnly {
 		t.Fatalf("reference_only must persist, got %s", raw)
+	}
+	raw, err = json.Marshal(KeyState{ProviderID: "p", ModelID: "m", State: VerificationSuspect, ReviewPending: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state KeyState
+	if err := json.Unmarshal(raw, &state); err != nil || !state.ReviewPending {
+		t.Fatalf("review_pending must persist, got %s", raw)
 	}
 }

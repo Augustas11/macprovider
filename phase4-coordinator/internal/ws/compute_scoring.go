@@ -798,7 +798,8 @@ func (e *computeScoringEngine) considerProvider(ctx context.Context, p pool.Prov
 			return
 		}
 	}
-	if st.State == computeintegrity.VerificationFailed || e.inFlight[key] {
+	// A key awaiting operator review (FR-26) takes no measurements.
+	if st.State == computeintegrity.VerificationFailed || st.ReviewPending || e.inFlight[key] {
 		e.mu.Unlock()
 		return
 	}
