@@ -1,6 +1,9 @@
 package config
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // ComputeIntegrityConfig is the `compute_integrity` namespace.
 type ComputeIntegrityConfig struct {
@@ -24,6 +27,9 @@ type ComputeIntegrityScoringConfig struct {
 	// FR-20). Empty uses the checked-in public corpus, which is a fallback:
 	// a provider can read it.
 	CorpusPath string `yaml:"corpus_path"`
+	// ReferenceOperators lists the SPEC-036 FR-19 operator keys whose
+	// scorer-only sessions are reference scorers (FR-26). Empty: none.
+	ReferenceOperators []string `yaml:"reference_operators"`
 }
 
 // DefaultComputeIntegrityConfig returns the SPEC-036 FR-20/FR-23 defaults.
@@ -63,5 +69,42 @@ func (c ComputeIntegrityConfig) validate() error {
 	if s.EscalationIntervalSeconds > s.BaseIntervalSeconds {
 		return fmt.Errorf("compute_integrity.scoring.escalation_interval_seconds must not exceed base_interval_seconds")
 	}
+	seen := map[string]struct{}{}
+	for _, op := range s.ReferenceOperators {
+		if !validReferenceOperator(op) {
+			return fmt.Errorf("compute_integrity.scoring.reference_operators entries must be github:<user id> or provider:<provider id>")
+		}
+		if _, dup := seen[op]; dup {
+			return fmt.Errorf("compute_integrity.scoring.reference_operators has a duplicate entry")
+		}
+		seen[op] = struct{}{}
+	}
 	return nil
+}
+
+// validReferenceOperator accepts the two SPEC-036 FR-19 operator key forms.
+func validReferenceOperator(op string) bool {
+	if id, ok := strings.CutPrefix(op, "github:"); ok {
+		if id == "" || len(id) > 20 {
+			return false
+		}
+		for _, r := range id {
+			if r < '0' || r > '9' {
+				return false
+			}
+		}
+		return true
+	}
+	if id, ok := strings.CutPrefix(op, "provider:"); ok {
+		if id == "" || len(id) > 256 {
+			return false
+		}
+		for _, r := range id {
+			if r <= ' ' || r == 0x7f {
+				return false
+			}
+		}
+		return true
+	}
+	return false
 }

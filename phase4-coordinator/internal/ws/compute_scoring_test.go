@@ -176,6 +176,9 @@ type scoringHarness struct {
 	silent     sync.Map
 	short      sync.Map
 	hotJobs    atomic.Int64
+	// referenceDispatched counts verification requests sent to a
+	// scorer-only session; FR-26 allows none.
+	referenceDispatched atomic.Int64
 }
 
 type lockedBuffer struct {
@@ -207,6 +210,13 @@ func (h *scoringHarness) advance(d time.Duration) { h.clock.Add(int64(d)) }
 
 func newScoringHarness(t *testing.T, providers map[string]string, cheaters map[string]bool) *scoringHarness {
 	t.Helper()
+	return newScoringHarnessWithReference(t, providers, cheaters, nil, nil)
+}
+
+// newScoringHarnessWithReference marks the reference providers as scorer-only
+// sessions (FR-26) and configures referenceOperators.
+func newScoringHarnessWithReference(t *testing.T, providers map[string]string, cheaters map[string]bool, reference map[string]bool, referenceOperators []string) *scoringHarness {
+	t.Helper()
 	h := &scoringHarness{t: t, registry: pool.NewRegistry(nil), holds: &fakeHoldStore{}, cheaters: cheaters, logs: &lockedBuffer{}}
 	h.clock.Store(time.Date(2026, 10, 13, 0, 0, 0, 0, time.UTC).UnixNano())
 	cfg := config.Default()
@@ -217,7 +227,7 @@ func newScoringHarness(t *testing.T, providers map[string]string, cheaters map[s
 			ProviderID: id, AssignedID: "as-" + id, ModelID: scoringModel,
 			ModelHash: scoringModelHash, WeightsManifestSHA256: scoringManifest, State: pool.StateReady,
 			SlotsFree: 4, SlotsTotal: 4, MaxContextTokens: 8192, ComputeScoreV1: true,
-			HashStatus: pool.HashStatusVerified,
+			HashStatus: pool.HashStatusVerified, ComputeScoreReference: reference[id],
 		}
 		client, server := net.Pipe()
 		h.conns = append(h.conns, client, server)
@@ -247,11 +257,15 @@ func newScoringHarness(t *testing.T, providers map[string]string, cheaters map[s
 	scfg.EscalationIntervalSeconds = 600
 	scfg.MaxInFlight = 16
 	scfg.ScoreDeadlineSeconds = 5
+	scfg.ReferenceOperators = referenceOperators
 	h.engine, err = h.server.newComputeScoringEngine(context.Background(), ComputeScoringDeps{
 		Config: scfg,
 		Store:  store,
 		Dispatch: func(_ context.Context, d ComputeIntegrityProbeDispatch) (ComputeIntegrityProbeResponse, error) {
 			h.dispatched.Add(1)
+			if reference[d.ProviderID] {
+				h.referenceDispatched.Add(1)
+			}
 			var body map[string]any
 			if err := json.Unmarshal(d.Body, &body); err != nil || body["model"] != scoringModel {
 				return ComputeIntegrityProbeResponse{}, errors.New("bad body")
@@ -1521,4 +1535,124 @@ func TestComputeScoringLongOverdueKeyDroppedLikeStore(t *testing.T) {
 	if kept {
 		t.Fatal("a key overdue past the retention period must be dropped")
 	}
+}
+
+// SPEC-036 FR-26: a provider with no peer of another operator is verified
+// by the reference scorer, which is itself never verified or routed.
+func TestComputeScoringReferenceScorerVerifiesProviderWithoutPeer(t *testing.T) {
+	providers := map[string]string{"solo": "github:1", "ref": "github:9"}
+	h := newScoringHarnessWithReference(t, providers, nil, map[string]bool{"ref": true}, []string{"github:9"})
+	for i := 0; i < 8 && h.state("solo") != computeintegrity.VerificationPassing; i++ {
+		h.round(2 * time.Hour)
+	}
+	if got := h.state("solo"); got != computeintegrity.VerificationPassing {
+		t.Fatalf("solo state = %s, want passing through the reference scorer", got)
+	}
+	if got := h.state("ref"); got != "" {
+		t.Fatalf("a scorer-only session must not be verified, state %s", got)
+	}
+	if n := h.referenceDispatched.Load(); n != 0 {
+		t.Fatalf("a scorer-only session must never receive a verification request, got %d", n)
+	}
+	h.engine.mu.Lock()
+	_, scheduled := h.engine.nextDue[computeScoringKey{"ref", scoringModel}]
+	h.engine.mu.Unlock()
+	if scheduled {
+		t.Fatal("a scorer-only session must not be scheduled for verification")
+	}
+	ref, _ := h.registry.Resolve("ref", "as-ref")
+	if ref.RoutingEligible() || ref.CapacityEligible() {
+		t.Fatal("a scorer-only session must never be routable")
+	}
+}
+
+// SPEC-036 FR-23/FR-26: with no peer, the reference scorer alone confirms a
+// substitution failure under the ordinary escalation rules.
+func TestComputeScoringReferenceScorerConfirmsFailureWithoutPeer(t *testing.T) {
+	providers := map[string]string{"cheat": "github:2", "ref": "github:9"}
+	h := newScoringHarnessWithReference(t, providers, map[string]bool{"cheat": true}, map[string]bool{"ref": true}, []string{"github:9"})
+	for i := 0; i < 12 && h.state("cheat") != computeintegrity.VerificationFailed; i++ {
+		h.round(2 * time.Hour)
+		for j := 0; j < 8 && h.state("cheat") == computeintegrity.VerificationSuspect; j++ {
+			h.round(20 * time.Minute)
+		}
+	}
+	if got := h.state("cheat"); got != computeintegrity.VerificationFailed {
+		t.Fatalf("cheater state = %s, want failed on the reference scorer", got)
+	}
+	cheat, _ := h.registry.Resolve("cheat", "as-cheat")
+	if !cheat.ComputeIntegritySuspended || cheat.RoutingEligible() {
+		t.Fatal("a confirmed failure must suspend routing")
+	}
+	if holds := h.holds.snapshot(); len(holds) != 1 || holds[0].Kind != computeintegrity.HoldKindFailure {
+		t.Fatalf("expected one failure hold, got %+v", holds)
+	}
+}
+
+// SPEC-036 FR-26: a scorer-only session of an operator not configured as a
+// reference operator is never chosen, and a reference scorer never verifies
+// a provider of its own operator.
+func TestComputeScoringReferenceScorerNeedsConfigAndAnotherOperator(t *testing.T) {
+	cases := []struct {
+		name      string
+		providers map[string]string
+		operators []string
+	}{
+		{"unconfigured", map[string]string{"solo": "github:1", "ref": "github:9"}, nil},
+		{"same_operator", map[string]string{"solo": "github:9", "ref": "github:9"}, []string{"github:9"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newScoringHarnessWithReference(t, tc.providers, nil, map[string]bool{"ref": true}, tc.operators)
+			for i := 0; i < 4; i++ {
+				h.round(2 * time.Hour)
+			}
+			if n := h.dispatched.Load(); n != 0 {
+				t.Fatalf("no verification request may be dispatched without an admissible scorer, got %d", n)
+			}
+		})
+	}
+}
+
+// SPEC-036 FR-26: a peer is preferred; while a peer exists the reference
+// scorer only fills a second escalation slot.
+func TestComputeScoringPeerPreferredOverReferenceScorer(t *testing.T) {
+	providers := map[string]string{"solo": "github:1", "peer": "github:2", "ref": "github:9"}
+	h := newScoringHarnessWithReference(t, providers, nil, map[string]bool{"ref": true}, []string{"github:9"})
+	metrics := &countingScoringMetrics{}
+	h.engine.deps.Metrics = metrics
+	for i := 0; i < 6; i++ {
+		h.round(2 * time.Hour)
+	}
+	if h.state("solo") != computeintegrity.VerificationPassing || h.state("peer") != computeintegrity.VerificationPassing {
+		t.Fatalf("both providers must pass: solo=%s peer=%s", h.state("solo"), h.state("peer"))
+	}
+	if metrics.jobs("reference") != 0 || metrics.jobs("peer") == 0 {
+		t.Fatalf("base-cadence jobs must go to peers only: peer=%d reference=%d", metrics.jobs("peer"), metrics.jobs("reference"))
+	}
+}
+
+type countingScoringMetrics struct {
+	mu    sync.Mutex
+	kinds map[string]int
+}
+
+func (m *countingScoringMetrics) IncComputeIntegrityVerification(string)       {}
+func (m *countingScoringMetrics) IncComputeIntegrityInconclusive(string)       {}
+func (m *countingScoringMetrics) IncComputeIntegrityTransition(string, string) {}
+func (m *countingScoringMetrics) IncComputeIntegrityScoringJob(_ string, kind string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.kinds == nil {
+		m.kinds = map[string]int{}
+	}
+	m.kinds[kind]++
+}
+func (m *countingScoringMetrics) SetComputeIntegrityKeys(string, int) {}
+func (m *countingScoringMetrics) SetComputeIntegrityHeldHolds(int)    {}
+
+func (m *countingScoringMetrics) jobs(kind string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.kinds[kind]
 }

@@ -115,11 +115,14 @@ type Transition struct {
 
 // Outcome is one scored verification request: every scorer that answered
 // was in band (InBand), every one was out (OutOfBand), or they split.
+// ReferenceOnly is set when every scorer was a reference scorer, which
+// selection does only when no eligible peer existed (FR-26).
 type Outcome struct {
 	InBand          bool
 	OutOfBand       bool
 	OutReason       OutReason
 	ScorerOperators []string
+	ReferenceOnly   bool
 	At              time.Time
 }
 
@@ -128,6 +131,7 @@ type EscalationEntry struct {
 	Out             bool     `json:"out"`
 	In              bool     `json:"in"`
 	ScorerOperators []string `json:"scorer_operators,omitempty"`
+	ReferenceOnly   bool     `json:"reference_only,omitempty"`
 }
 
 // KeyState is the persisted FR-23 state of one verification key.
@@ -222,7 +226,7 @@ func (k *KeyState) applyBase(o Outcome) *Transition {
 }
 
 func (k *KeyState) recordEscalation(o Outcome) {
-	k.Escalations = append(k.Escalations, EscalationEntry{Out: o.OutOfBand, In: o.InBand, ScorerOperators: append([]string(nil), o.ScorerOperators...)})
+	k.Escalations = append(k.Escalations, EscalationEntry{Out: o.OutOfBand, In: o.InBand, ScorerOperators: append([]string(nil), o.ScorerOperators...), ReferenceOnly: o.ReferenceOnly})
 	if len(k.Escalations) > escalationHistoryRetains {
 		k.Escalations = k.Escalations[len(k.Escalations)-escalationHistoryRetains:]
 	}
@@ -230,24 +234,44 @@ func (k *KeyState) recordEscalation(o Outcome) {
 }
 
 // confirmedFailure applies the FR-23 rule: at least 3 of the last 5 escalation
-// measurements out, scored by at least 2 distinct scorer operators.
+// measurements out, scored by at least 2 distinct scorer operators, or every
+// one of those outs scored by reference scorers alone because no peer was
+// eligible (FR-26).
 func (k *KeyState) confirmedFailure() bool {
 	recent := k.Escalations
 	if len(recent) > escalationWindow {
 		recent = recent[len(recent)-escalationWindow:]
 	}
 	outs := 0
+	referenceOnly := true
 	ops := map[string]struct{}{}
 	for _, e := range recent {
 		if !e.Out {
 			continue
 		}
 		outs++
+		if !e.ReferenceOnly || len(e.ScorerOperators) == 0 {
+			referenceOnly = false
+		}
 		for _, op := range e.ScorerOperators {
 			ops[op] = struct{}{}
 		}
 	}
-	return outs >= escalationOutsToFail && len(ops) >= minDistinctScorerOps
+	return outs >= escalationOutsToFail && (len(ops) >= minDistinctScorerOps || referenceOnly)
+}
+
+// trailingReferenceOnlyIns reports whether the last n escalation
+// measurements are all in and all scored by reference scorers alone.
+func (k *KeyState) trailingReferenceOnlyIns(n int) bool {
+	if len(k.Escalations) < n {
+		return false
+	}
+	for _, e := range k.Escalations[len(k.Escalations)-n:] {
+		if !e.In || !e.ReferenceOnly {
+			return false
+		}
+	}
+	return true
 }
 
 func (k *KeyState) trailingIns() int {
@@ -305,7 +329,8 @@ func (k *KeyState) applyRecovering(o Outcome) *Transition {
 		k.resetEscalation()
 		return k.transition(VerificationFailed, ReasonConfirmedFailure, o.At, HoldAction{Kind: HoldActionCloseRecovery, End: o.At})
 	}
-	if k.InStreak >= recoveryStreakToPass && len(k.StreakScorerOps) >= minDistinctScorerOps {
+	if k.InStreak >= recoveryStreakToPass &&
+		(len(k.StreakScorerOps) >= minDistinctScorerOps || k.trailingReferenceOnlyIns(recoveryStreakToPass)) {
 		k.resetEscalation()
 		k.WindowStart = time.Time{}
 		return k.transition(VerificationPassing, ReasonRecoveryPassed, o.At, HoldAction{Kind: HoldActionReleaseRecovery, End: o.At})

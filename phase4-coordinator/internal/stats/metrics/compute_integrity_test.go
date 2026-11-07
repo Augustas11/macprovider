@@ -17,8 +17,9 @@ func TestComputeIntegrityMetricsUseClosedLabels(t *testing.T) {
 	m.IncComputeIntegrityInconclusive("prompt text here")
 	m.IncComputeIntegrityTransition("passing", "suspect")
 	m.IncComputeIntegrityTransition("passing", "model-x")
-	m.IncComputeIntegrityScoringJob("ok")
-	m.IncComputeIntegrityScoringJob("weird")
+	m.IncComputeIntegrityScoringJob("ok", "reference")
+	m.IncComputeIntegrityScoringJob("weird", "peer")
+	m.IncComputeIntegrityScoringJob("ok", "weird")
 	m.SetComputeIntegrityKeys("failed", 2)
 	m.SetComputeIntegrityKeys("github:1", 9)
 	m.SetComputeIntegrityHeldHolds(3)
@@ -65,6 +66,7 @@ func TestComputeIntegrityMetricsUseClosedLabels(t *testing.T) {
 	for key, want := range map[string]float64{
 		"compute_integrity_verifications_total|in_band":       1,
 		"compute_integrity_transitions_total|passing|suspect": 1,
+		"compute_integrity_scoring_jobs_total|reference|ok":   1,
 		"compute_integrity_keys|failed":                       2,
 		"compute_integrity_held_holds":                        3,
 	} {

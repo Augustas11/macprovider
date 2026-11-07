@@ -3055,6 +3055,7 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 	entry.CatalogMaterialHoldV1 = initial.Tier2Capabilities.CatalogMaterialHoldV1
 	entry.RelayBlindSettlementReceiptV1 = initial.Tier2Capabilities.RelayBlindSettlementReceiptV1
 	entry.ComputeScoreV1 = initial.Tier2Capabilities.ComputeScoreV1
+	entry.ComputeScoreReference = initial.Tier2Capabilities.ComputeScoreReference
 	entry.ShardGroupHeadV1 = initial.Tier2Capabilities.ShardGroupHeadV1
 	entry.ShardMemberV1 = initial.Tier2Capabilities.ShardMemberV1
 	entry.WSMaxMessageBytes = int64(initial.Tier2Capabilities.WSMaxMessageBytes)

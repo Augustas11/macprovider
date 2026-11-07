@@ -80,7 +80,7 @@ func startComputeScoring(
 	if err != nil {
 		logger.Fatal().Err(err).Str("event", "compute_integrity_scoring_start_failed").Msg("compute-integrity scoring not started")
 	}
-	logger.Info().Str("event", "compute_integrity_scoring_started").Bool("enabled", cfg.Enabled).Msg("compute-integrity scoring started")
+	logger.Info().Str("event", "compute_integrity_scoring_started").Bool("enabled", cfg.Enabled).Int("reference_operators", len(cfg.ReferenceOperators)).Msg("compute-integrity scoring started")
 }
 
 var _ providerws.ComputeScoringMetrics = (*statsmetrics.Metrics)(nil)

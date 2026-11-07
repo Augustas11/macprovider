@@ -33,8 +33,8 @@ func newComputeIntegrityMetrics(f promauto.Factory) *computeIntegrityMetrics {
 		}, []string{"from", "to"}),
 		scoringJobs: f.NewCounterVec(prometheus.CounterOpts{
 			Name: "compute_integrity_scoring_jobs_total",
-			Help: "SPEC-036 teacher-forced scoring jobs by closed-set result status.",
-		}, []string{"status"}),
+			Help: "SPEC-036 teacher-forced scoring jobs by closed-set result status and scorer kind.",
+		}, []string{"status", "scorer_kind"}),
 		keys: f.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "compute_integrity_keys",
 			Help: "SPEC-036 verification keys by closed-set state.",
@@ -94,15 +94,21 @@ func (m *Metrics) IncComputeIntegrityTransition(from, to string) {
 	c.transitions.WithLabelValues(from, to).Inc()
 }
 
-// IncComputeIntegrityScoringJob counts one scoring job result.
-func (m *Metrics) IncComputeIntegrityScoringJob(status string) {
+// IncComputeIntegrityScoringJob counts one scoring job result; scorerKind
+// is peer or reference (FR-26).
+func (m *Metrics) IncComputeIntegrityScoringJob(status, scorerKind string) {
 	c := m.ci()
 	if c == nil {
 		return
 	}
+	switch scorerKind {
+	case "peer", "reference":
+	default:
+		return
+	}
 	switch status {
 	case "ok", "unavailable", "invalid", "too_long", "timeout":
-		c.scoringJobs.WithLabelValues(status).Inc()
+		c.scoringJobs.WithLabelValues(status, scorerKind).Inc()
 	}
 }
 

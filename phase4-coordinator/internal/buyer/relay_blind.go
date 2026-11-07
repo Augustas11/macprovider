@@ -549,7 +549,7 @@ func relayBlindBindable(p pool.Provider) bool {
 	// SPEC-036 FR-25: a suspended model binds no relay-blind or privacy work.
 	// SPEC-051-R009: no shard group head or member serves relay-blind or
 	// privacy-class work.
-	return p.ServingCapable() && !p.HandshakeAckPending && !p.ComputeIntegritySuspended && !p.ShardGroupHeadV1 && !p.ShardMemberV1
+	return p.ServingCapable() && !p.HandshakeAckPending && !p.ComputeIntegritySuspended && !p.ShardGroupHeadV1 && !p.ShardMemberV1 && !p.ComputeScoreReference
 }
 
 // relayBlindSessionUsable is the session half of RoutingEligible for a
@@ -1735,7 +1735,7 @@ func (s *Server) handleRelayBlindCapabilities(w http.ResponseWriter, r *http.Req
 	}
 	models := make(map[string]counts)
 	for _, provider := range s.pool.Snapshot() {
-		if !provider.ServingCapable() || !provider.IsWSTunneled() || provider.ComputeIntegritySuspended {
+		if !provider.ServingCapable() || !provider.IsWSTunneled() || provider.ComputeIntegritySuspended || provider.ComputeScoreReference {
 			continue
 		}
 		value := models[provider.ModelID]

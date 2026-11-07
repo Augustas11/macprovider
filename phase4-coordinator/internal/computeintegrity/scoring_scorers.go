@@ -27,6 +27,10 @@ type ScorerCandidate struct {
 	OperatorKey        string
 	Capable            bool // advertised tier2_capabilities.compute_score_v1
 	Ready              bool // connected and ready or busy
+	// Reference marks a reference scorer (FR-26): a scorer-only session of
+	// a configured reference operator. It is chosen only for slots no
+	// eligible peer can fill.
+	Reference bool
 }
 
 // SelectScorers picks up to n scorers for a verified provider: distinct
@@ -34,7 +38,8 @@ type ScorerCandidate struct {
 // operator with many Macs is not chosen more often (FR-21, FR-24). Every
 // scorer has a different operator from the verified provider and from each
 // other. eligible filters out keys in suspect, failed or recovering and
-// scorer-excluded providers.
+// scorer-excluded providers. Peers are drawn first; reference scorers
+// (FR-26) fill only the slots no eligible peer operator can fill.
 func SelectScorers(
 	rng *rand.Rand,
 	verified ScorerCandidate,
@@ -42,7 +47,7 @@ func SelectScorers(
 	n int,
 	eligible func(ScorerCandidate) bool,
 ) []ScorerCandidate {
-	pool := make([]ScorerCandidate, 0, len(candidates))
+	var peers, references []ScorerCandidate
 	for _, c := range candidates {
 		if !c.Capable || !c.Ready ||
 			c.ProviderID == verified.ProviderID ||
@@ -54,11 +59,32 @@ func SelectScorers(
 		if eligible != nil && !eligible(c) {
 			continue
 		}
-		pool = append(pool, c)
+		if c.Reference {
+			references = append(references, c)
+		} else {
+			peers = append(peers, c)
+		}
 	}
+	out := pickByOperator(rng, peers, n, nil)
+	if len(out) < n && len(references) > 0 {
+		used := make(map[string]struct{}, len(out))
+		for _, c := range out {
+			used[c.OperatorKey] = struct{}{}
+		}
+		out = append(out, pickByOperator(rng, references, n-len(out), used)...)
+	}
+	return out
+}
+
+// pickByOperator draws up to n distinct operators of pool uniformly at
+// random, skipping used ones, then one provider of each.
+func pickByOperator(rng *rand.Rand, pool []ScorerCandidate, n int, used map[string]struct{}) []ScorerCandidate {
 	byOperator := map[string][]ScorerCandidate{}
 	var operators []string
 	for _, c := range pool {
+		if _, skip := used[c.OperatorKey]; skip {
+			continue
+		}
 		if _, seen := byOperator[c.OperatorKey]; !seen {
 			operators = append(operators, c.OperatorKey)
 		}
@@ -76,6 +102,17 @@ func SelectScorers(
 		out = append(out, members[rng.Intn(len(members))])
 	}
 	return out
+}
+
+// PeerCount is the number of scorers that are peers, not reference scorers.
+func PeerCount(scorers []ScorerCandidate) int {
+	n := 0
+	for _, c := range scorers {
+		if !c.Reference {
+			n++
+		}
+	}
+	return n
 }
 
 // FR-24 thresholds.
