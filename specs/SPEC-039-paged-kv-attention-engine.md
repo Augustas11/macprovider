@@ -1,7 +1,10 @@
 # SPEC-039 — Paged KV / paged-attention engine
 
-Version: v0.1.30
-Status: draft (normative design). v0.1.30 states the `kv_bits` precedence at
+Version: v0.1.31
+Status: draft (normative design). v0.1.31 removes the `gpt_oss` family from
+the model-family KV-quant default and makes an explicit `kv_bits` for a
+gpt-oss model fail closed: gpt-oss attention sinks have no quantized-KV
+attention path. v0.1.30 states the `kv_bits` precedence at
 attach: only an explicit operator `kv_bits` reaches the paged-KV gate; the
 model-family KV-quant default applies to serially served requests only.
 v0.1.29 defines the `gpt_oss` mixed cache
@@ -91,6 +94,18 @@ is `RotatingKVCache` only because the serve path caps KV for memory attaches to
 paged mode (the block pool bounds memory), while a genuine sliding-window model
 stays fail-safe. IMPL lands with this revision.
 Owner: provider runtime / inference engine
+Change log v0.1.31 (2026-11-07): FR-PKV5 drops `gpt_oss` from the family
+KV-quant default and refuses an explicit `kv_bits` for it (#2201). gpt-oss
+attention uses learned attention sinks. The engine's quantized-KV attention
+(`quantizedScaledDotProductAttention`) takes no sinks, so with `kv_bits` set
+the full-attention layers dropped them and served attention that differs from
+the model's; mlx-lm refuses the same combination. The serial path therefore
+serves gpt-oss with fp16 KV, as mlx-lm does, and an explicit operator or
+adopted `kv_bits` for a gpt-oss model is rejected at serve preflight, at model
+load and at warm swap with reason `kv_bits_attention_sinks_unsupported`,
+rather than downgraded. The `gemma4` default is unchanged. Refines
+SPEC-039-R005.
+
 Change log v0.1.30 (2026-11-06): FR-PKV5 states which `kv_bits` the attach
 gate sees (#2200). The model-family KV-quant default (T3-03:
 `KVQuantRecommendation`, 8 for `gpt_oss` and `gemma4`) is a serial-path
@@ -711,6 +726,19 @@ family default. This is not a silent downgrade: no request had its
 `kv_bits` requested, and each path keeps its own exact reference. The
 FR-CB10 self-check's serial baseline is the serial path as served, family
 default included.
+
+**Families without a quantized-KV path (v0.1.31).** A family whose attention
+the quantized-KV attention path cannot compute exactly has no family default
+and MUST NOT serve with quantized KV. `gpt_oss` is such a family: its
+attention sinks have no quantized-KV attention path. Its family default is
+unset, so it serves fp16 KV on every path. An explicit `kv_bits` for a gpt-oss
+model (config, environment, CLI or an adopted recommendation's knob) MUST fail
+closed with reason `kv_bits_attention_sinks_unsupported`: serve preflight
+rejects it when the configured model is gpt-oss, the model load rejects it,
+and a warm swap or adoption to a gpt-oss target is refused before the runtime
+leaves `ready`. The provider MUST NOT drop the requested `kv_bits` silently,
+and MUST NOT serve quantized KV without the sinks. The family default is 8
+for `gemma4` only.
 
 ### FR-PKV6 — provider-local default-off invariants (SPEC-039-R006)
 

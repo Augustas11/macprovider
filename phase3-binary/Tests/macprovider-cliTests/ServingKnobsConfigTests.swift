@@ -539,6 +539,20 @@ final class ServingKnobsConfigTests: XCTestCase {
         XCTAssertNil(ModelRuntime.applyMLXCacheLimit(megabytes: Int.max), "an overflowing value must not be converted")
     }
 
+    /// SPEC-039 FR-PKV5 v0.1.31: explicit kv_bits for a gpt-oss model fails
+    /// serve preflight; other models and an unset kv_bits pass.
+    func testServingKnobsPreflightRefusesExplicitKVBitsForGptOss() throws {
+        var config = AppConfig.defaults()
+        config.model = "openai/gpt-oss-120b"
+        XCTAssertNoThrow(try ServeCommand.runServingKnobsPreflight(config))
+        config.kvBitsOverride = 8
+        XCTAssertThrowsError(try ServeCommand.runServingKnobsPreflight(config))
+        config.model = "meta-llama/llama-3.1-8b-instruct"
+        XCTAssertNoThrow(try ServeCommand.runServingKnobsPreflight(config))
+        config.modelCatalogModelID = "mlx-community/gpt-oss-20b-MXFP4-Q8"
+        XCTAssertThrowsError(try ServeCommand.runServingKnobsPreflight(config))
+    }
+
     func testMLXCacheLimitPreflightRejectsOutOfRangeWhateverTheBatchingMode() throws {
         for mode in [ContinuousBatchingMode.off, .canary] {
             var config = AppConfig.defaults()

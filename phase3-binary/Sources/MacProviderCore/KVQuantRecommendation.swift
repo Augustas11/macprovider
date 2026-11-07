@@ -6,7 +6,9 @@ import Foundation
 /// (Darkbloom watch clone `BatchScheduler+KVQuantScheme.swift`):
 ///
 /// - `gemma4`: Gemma 4 MoE — K8V8 affine g128, kernel path, validated upstream.
-/// - `gptOSS`: GPT-OSS MoE  — K8V8 affine g64, dequant path, validated upstream.
+/// - `gptOSS`: GPT-OSS MoE — no quantized KV. Its attention sinks have no
+///   quantized-KV attention path in this engine (mlx-lm refuses the same
+///   combination), so it serves fp16 KV and an explicit `kv_bits` is refused.
 /// - `unknown`: No validated scheme; fp16 KV default preserved.
 public enum KVQuantFamily: Equatable, Sendable {
     case gemma4
@@ -23,11 +25,12 @@ public enum KVQuantFamily: Equatable, Sendable {
 /// | Family   | Scheme              | Cache path | Recommended kvBits | KV bytes vs fp16 |
 /// |----------|---------------------|------------|-------------------|------------------|
 /// | Gemma 4  | K8V8 affine g128    | kernel     | 8                 | ~51.6 %          |
-/// | GPT-OSS  | K8V8 affine g64     | dequant    | 8                 | ~53.1 %          |
+/// | GPT-OSS  | refused (sinks)     | —          | nil (fp16)        | 100 %            |
 /// | Others   | not validated       | —          | nil (fp16)        | 100 %            |
 ///
 /// An explicit operator override (`kv_bits` yaml / `MACPROVIDER_KV_BITS` env /
-/// `--kv-bits` CLI) always takes precedence and is **not** modified here.
+/// `--kv-bits` CLI) takes precedence and is **not** modified here, except that
+/// a family in `quantizedKVRefusal(for:)` fails closed (SPEC-039 FR-PKV5).
 public enum KVQuantRecommendation {
 
     /// Classify a model repo identifier into a KV-quant family.
@@ -55,9 +58,20 @@ public enum KVQuantRecommendation {
     /// ```
     public static func recommendedKVBits(for modelID: String) -> Int? {
         switch classify(modelID: modelID) {
-        case .gemma4, .gptOSS:
+        case .gemma4:
             return 8
-        case .unknown:
+        case .gptOSS, .unknown:
+            return nil
+        }
+    }
+
+    /// Reason an explicit `kv_bits` is refused for this model, or nil when it
+    /// may be quantized. Fail closed instead of serving wrong attention.
+    public static func quantizedKVRefusal(for modelID: String) -> String? {
+        switch classify(modelID: modelID) {
+        case .gptOSS:
+            return "kv_bits_attention_sinks_unsupported: gpt-oss attention sinks have no quantized-KV attention path; unset kv_bits for \(modelID)"
+        case .gemma4, .unknown:
             return nil
         }
     }

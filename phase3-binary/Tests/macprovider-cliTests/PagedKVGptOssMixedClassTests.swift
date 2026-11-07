@@ -185,17 +185,24 @@ final class PagedKVGptOssMixedClassTests: XCTestCase {
             ).reason
         }
 
-        // (a) gpt-oss, no explicit kv_bits: the gate sees nil, serial gets 8.
+        // (a) gpt-oss has no family default (v0.1.31): gate and serial see nil.
         let gptOSS = runtime("openai/gpt-oss-20b", explicit: nil)
         let gateBits = await gptOSS.kvBitsOverrideForTest()
         let serialBits = await gptOSS.serialKVBitsForTest()
         XCTAssertNil(gateBits)
-        XCTAssertEqual(serialBits, 8)
+        XCTAssertNil(serialBits)
         XCTAssertEqual(try gateReason(explicit: gateBits), .metallib, "past the quantized check")
+
+        // A family default still reaches only the serial path.
+        let gemma = runtime("mlx-community/gemma-4-26b-a4b-it-4bit", explicit: nil)
+        let gemmaGateBits = await gemma.kvBitsOverrideForTest()
+        let gemmaSerialBits = await gemma.serialKVBitsForTest()
+        XCTAssertNil(gemmaGateBits)
+        XCTAssertEqual(gemmaSerialBits, 8)
 
         // (b) explicit kv_bits: the gate sees it and falls back quantized;
         // serial uses the same explicit value.
-        let explicit = runtime("openai/gpt-oss-20b", explicit: 4)
+        let explicit = runtime("mlx-community/gemma-4-26b-a4b-it-4bit", explicit: 4)
         let explicitGateBits = await explicit.kvBitsOverrideForTest()
         let explicitSerialBits = await explicit.serialKVBitsForTest()
         XCTAssertEqual(explicitGateBits, 4)
@@ -214,8 +221,39 @@ final class PagedKVGptOssMixedClassTests: XCTestCase {
 
         // The family default is opt-in per runtime and follows the model id.
         XCTAssertNil(ModelRuntime.serialKVBits(explicit: nil, familyKVQuantDefault: false, modelID: "openai/gpt-oss-20b"))
-        XCTAssertEqual(ModelRuntime.serialKVBits(explicit: nil, familyKVQuantDefault: true, modelID: "openai/gpt-oss-120b"), 8)
+        XCTAssertNil(ModelRuntime.serialKVBits(explicit: nil, familyKVQuantDefault: true, modelID: "openai/gpt-oss-120b"))
+        XCTAssertEqual(ModelRuntime.serialKVBits(explicit: nil, familyKVQuantDefault: true, modelID: "google/gemma-4-9b-it"), 8)
         XCTAssertNil(ModelRuntime.serialKVBits(explicit: nil, familyKVQuantDefault: true, modelID: nil))
+    }
+
+    /// SPEC-039 FR-PKV5 v0.1.31: an explicit kv_bits for gpt-oss fails closed at
+    /// load and at warm swap, before the runtime changes state.
+    func testExplicitKVBitsForGptOssFailsClosed() async throws {
+        XCTAssertNoThrow(try ModelRuntime.refuseQuantizedKV(explicit: nil, modelIDs: ["openai/gpt-oss-20b"]))
+        XCTAssertNoThrow(try ModelRuntime.refuseQuantizedKV(explicit: 8, modelIDs: ["google/gemma-4-9b-it", nil]))
+        XCTAssertThrowsError(try ModelRuntime.refuseQuantizedKV(explicit: 8, modelIDs: ["/models/gpt-oss-120b-4bit"]))
+
+        do {
+            _ = try await ModelRuntime(modelID: "openai/gpt-oss-20b", kvBitsOverride: 8, warmSwapEnabled: false)
+            XCTFail("explicit kv_bits for gpt-oss must fail the load")
+        } catch let error as ModelRuntimeLoadError {
+            XCTAssertEqual(error.reason?.hasPrefix("kv_bits_attention_sinks_unsupported:"), true)
+        }
+
+        let runtime = ModelRuntime(
+            modelID: "meta-llama/llama-3.1-8b-instruct",
+            kvBitsOverride: 8,
+            warmSwapEnabled: true,
+            loader: { _ in throw PagedKVGptOssMixedClassTestError.notExpected }
+        )
+        do {
+            _ = try await runtime.beginSwap(targetModelID: "openai/gpt-oss-20b")
+            XCTFail("explicit kv_bits for gpt-oss must refuse the swap")
+        } catch let error as ModelRuntimeLoadError {
+            XCTAssertEqual(error.reason?.hasPrefix("kv_bits_attention_sinks_unsupported:"), true)
+        }
+        let snapshot = await runtime.currentSnapshot()
+        XCTAssertEqual(snapshot.state, .ready)
     }
 
     /// One sliding-window layer and one full-attention layer, both paged through
