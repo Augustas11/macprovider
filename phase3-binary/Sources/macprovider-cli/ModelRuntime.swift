@@ -4210,6 +4210,9 @@ maxTokens: 1,
         if let initialCacheLimit {
             FileHandle.standardError.write(Data("mlx_cache_limit_bytes=\(initialCacheLimit)\n".utf8))
         }
+        // SPEC-038 FR-CB2 (v0.3.36): MLX's limit below the working set before
+        // the weights load; re-applied once they are resident.
+        MLXMemoryLimit.apply(stage: "startup", kvBytesPerToken: nil)
         let targetLoadPath = modelLoadPath ?? modelID
         let candidateNativeMTPLoad: NativeMTPRuntimeLoadResult?
         let candidateNativeMTPDisabledReason: NativeMTPStatusReason
@@ -4287,6 +4290,8 @@ maxTokens: 1,
         self.currentContainer = container
         self.residentWeightsTicket = await Self.startResidentWeightsTicket(
             modelFamily: modelCapabilities.modelFamily)
+        MLXMemoryLimit.apply(
+            stage: "model_loaded", kvBytesPerToken: MLXMemoryLimit.kvBytesPerToken(modelDirectory: directory))
 
         let tokenizerConfigURL = directory.appendingPathComponent("tokenizer_config.json")
         if FileManager.default.fileExists(atPath: tokenizerConfigURL.path) {
@@ -7403,6 +7408,11 @@ maxTokens: 1,
             _ = await previous.end()
         }
         residentWeightsTicket = await Self.startResidentWeightsTicket(modelFamily: modelCapabilities.modelFamily)
+        if container != nil {
+            MLXMemoryLimit.apply(
+                stage: "model_swapped",
+                kvBytesPerToken: MLXMemoryLimit.kvBytesPerToken(modelDirectory: try? Self.localModelDirectory(for: modelID)))
+        }
         currentModelID = modelID
         currentModelHash = modelHash
         currentTemplateSupportsThinkingToggle = Self.resolvedTemplateSupportsThinkingToggle(
