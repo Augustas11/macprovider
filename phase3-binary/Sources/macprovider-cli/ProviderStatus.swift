@@ -556,6 +556,38 @@ struct RequestCapacityTransitionSnapshot: Sendable {
     let throughputTPSSinceLast: Double?
 }
 
+/// The fields a coordinator `preflight` ack reads (issue #2246).
+struct ProviderPreflightView: Sendable, Equatable {
+    let status: ProviderHealthState
+    let modelLoaded: Bool
+    let maxContextTokens: Int
+}
+
+/// A lock-protected copy of `ProviderPreflightView` that `ProviderStatus`
+/// republishes on every status, model-loaded or capacity change. The preflight
+/// ack reads it without awaiting the actor, which long-context CB can keep busy
+/// past the coordinator's 2 s preflight timeout.
+final class ProviderPreflightCell: @unchecked Sendable {
+    private let lock = NSLock()
+    private var current: ProviderPreflightView
+
+    init(_ view: ProviderPreflightView) {
+        current = view
+    }
+
+    var value: ProviderPreflightView {
+        lock.lock()
+        defer { lock.unlock() }
+        return current
+    }
+
+    func publish(_ view: ProviderPreflightView) {
+        lock.lock()
+        current = view
+        lock.unlock()
+    }
+}
+
 actor ProviderStatus {
     typealias RequestCapacityChangeHandler = @Sendable (_ transition: RequestCapacityTransitionSnapshot) -> Void
 
@@ -564,9 +596,10 @@ actor ProviderStatus {
     private var modelHash: String?
     private var modelHashAlgorithm: String?
     private var weightsManifestSHA256: String?
-    private var modelLoaded: Bool
-    private var capacity: ProviderCapacity
-    private var status: ProviderHealthState
+    private var modelLoaded: Bool { didSet { publishPreflightView() } }
+    private var capacity: ProviderCapacity { didSet { publishPreflightView() } }
+    private var status: ProviderHealthState { didSet { publishPreflightView() } }
+    nonisolated let preflightCell: ProviderPreflightCell
     private var requestsTotal = 0
     private var requestsToday = 0
     private var tokensTodayDayStart = ProviderStatus.utcCalendar.startOfDay(for: Date())
@@ -652,6 +685,11 @@ actor ProviderStatus {
         self.modelLoaded = modelLoaded
         self.capacity = capacity
         self.status = modelLoaded ? .ready : .unavailable
+        self.preflightCell = ProviderPreflightCell(ProviderPreflightView(
+            status: modelLoaded ? .ready : .unavailable,
+            modelLoaded: modelLoaded,
+            maxContextTokens: capacity.maxContextTokens
+        ))
         self.thermalGate = thermalGate
         self.memoryPressureProvider = memoryPressureProvider
         self.workloadTelemetryProvider = workloadTelemetryProvider
@@ -1448,6 +1486,14 @@ actor ProviderStatus {
         if paused {
             transition(to: .unavailable, reason: "operator_paused")
         }
+    }
+
+    private func publishPreflightView() {
+        preflightCell.publish(ProviderPreflightView(
+            status: status,
+            modelLoaded: modelLoaded,
+            maxContextTokens: capacity.maxContextTokens
+        ))
     }
 
     @discardableResult
