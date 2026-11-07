@@ -1900,13 +1900,16 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     }
 
     private func labCaptureTargetLogits(
-        requestID: String, position: Int, tokenIDs: [Int], logits: MLXArray,
+        requestID: String, position: Int, tokenIDs: [Int], logits makeLogits: @autoclosure () -> MLXArray,
         speculative: Bool = false
     ) {
         lock.lock()
         let binding = labNativeMTPNumericalOracle
         lock.unlock()
+        // The decode loops call this per row per step; the row's logits
+        // slice is built only when an oracle wants it.
         guard let binding, binding.oracle.wantsCapture(requestID: requestID, position: position) else { return }
+        let logits = makeLogits()
         for (offset, token) in tokenIDs.enumerated() {
             let step = position + offset
             guard binding.oracle.wantsCapture(requestID: requestID, position: step) else { break }
@@ -4261,6 +4264,16 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         PagedKVBatchLayerCache(rowCaches: rowCaches)
     }
 
+    /// The window-end row sync `performDecode` runs on a batch layer cache.
+    static func batchLayerSyncRowsForTest(_ cache: any KVCache) {
+        (cache as? PagedKVBatchLayerCache)?.syncRowsFromBatch()
+    }
+
+    /// Ragged one-token decode steps that wrote the batch buffer only.
+    static var batchLayerDeferredRaggedDecodeStepsForTest: Int {
+        PagedKVBatchLayerCache.deferredRaggedDecodeSteps
+    }
+
     static func batchLayerMaskForTest(
         rowCaches: [PagedKVCache],
         n: Int,
@@ -5114,6 +5127,15 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAtt
     /// Live lockstep sequence length. When set, `update` concatenates on the
     /// batch tensors instead of looping per row (required for `MLX.compile()`).
     private var batchedOffset: Int?
+    /// Ragged one-token decode (#2256): each row's live length while the batch
+    /// buffer alone holds the rows' newest tokens, as `batchedOffset` does for
+    /// lockstep rows. Set only while the buffer mirrors every row's history
+    /// (row `r` in `[..<offset_r]`, zero past it); `syncRowsFromBatch` (or any
+    /// path that reads the rows) writes them back first.
+    private var deferredRowOffsets: [Int]?
+    /// Test diagnostics (DEBUG builds count): one-token ragged steps that
+    /// wrote the batch buffer only.
+    nonisolated(unsafe) fileprivate static var deferredRaggedDecodeSteps = 0
 
     init(rowCaches: [PagedKVCache]) {
         self.rowCaches = rowCaches
@@ -5121,7 +5143,7 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAtt
     }
 
     var offset: Int {
-        batchedOffset ?? (rowCaches.map(\.offset).min() ?? 0)
+        batchedOffset ?? deferredRowOffsets?.min() ?? (rowCaches.map(\.offset).min() ?? 0)
     }
 
     var ropeOffset: RoPEOffset {
@@ -5168,6 +5190,11 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAtt
         // Copying those padded tensors back would give every shorter row the
         // batch-max length and fail the next window with
         // `paged_kv_block_table_mismatch` (Studio, 2+ concurrent rows).
+        // Deferred ragged rows write back each row's own prefix instead.
+        if deferredRowOffsets != nil {
+            flushDeferredRows()
+            return
+        }
         guard batchedOffset != nil else { return }
         let state = innerState()
         guard state.count == 2 else { return }
@@ -5181,12 +5208,40 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAtt
             return
         }
         for (rowIndex, cache) in rowCaches.enumerated() {
-            cache.state = [
-                keys[rowIndex ..< rowIndex + 1, 0..., 0..., 0...],
-                values[rowIndex ..< rowIndex + 1, 0..., 0..., 0...]
-            ]
+            Self.adoptWindowEnd(
+                cache,
+                keys: keys[rowIndex ..< rowIndex + 1, 0..., 0..., 0...],
+                values: values[rowIndex ..< rowIndex + 1, 0..., 0..., 0...]
+            )
         }
         batchedOffset = nil
+    }
+
+    /// A row takes back the history this batch decoded for it. The row's
+    /// ring continues: unlike a restored snapshot, nothing re-linearized it,
+    /// so it keeps `slidingRingAnchor` (the state setter would restart the
+    /// ring there, and every later window would present its sliding-window
+    /// keys in another slot order than its serial `RotatingKVCache`, #2256).
+    private static func adoptWindowEnd(_ cache: PagedKVCache, keys: MLXArray, values: MLXArray) {
+        let anchor = cache.slidingRingAnchor
+        cache.state = [keys, values]
+        cache.slidingRingAnchor = anchor
+    }
+
+    /// Writes deferred ragged rows back: row `r` takes `[..<offset_r]` of the
+    /// buffer, which then still mirrors every row.
+    private func flushDeferredRows() {
+        guard let offsets = deferredRowOffsets else { return }
+        deferredRowOffsets = nil
+        guard let keys, let values else { return }
+        for (rowIndex, cache) in rowCaches.enumerated() {
+            Self.adoptWindowEnd(
+                cache,
+                keys: keys[rowIndex ..< rowIndex + 1, 0..., ..<offsets[rowIndex], 0...],
+                values: values[rowIndex ..< rowIndex + 1, 0..., ..<offsets[rowIndex], 0...]
+            )
+        }
+        rowMutationCounts = rowCaches.map(\.mutationCount)
     }
 
     func writebackCompiledInnerState(_ compiledState: [MLXArray], targets: [Int]) throws {
@@ -5266,6 +5321,9 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAtt
                 priorTokens: 0,
                 incomingTokens: incomingKeys.dim(2)
             )
+        }
+        if let updated = updateDeferredRagged(keys: incomingKeys, values: incomingValues) {
+            return updated
         }
         if let updated = updateRaggedInPlace(keys: incomingKeys, values: incomingValues) {
             batchedOffset = nil
@@ -5387,7 +5445,10 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAtt
             return batched()
         }
         let storageMatches = packedRows == nil
-            ? rowCaches.enumerated().allSatisfy({
+            ? deferredRowOffsets.map { live in
+                // Deferred rows live in the buffer this update just wrote.
+                zip(live, offsetsBefore).allSatisfy { $0 == $1 + queryTokens }
+            } ?? rowCaches.enumerated().allSatisfy({
                 $0.element.offset == offsetsBefore[$0.offset] + queryTokens
                     && $0.element.storedTokens == $0.element.offset
             })
@@ -5439,6 +5500,10 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAtt
             loneCallHasArrayMask: sliceSupplied
         )
         let shared = sharedRows.isEmpty ? nil : batched()
+        if let shared, sharedRows.count == extents.count {
+            // Every row's lone route is the padded call's: it is the result.
+            return shared
+        }
         return concatenated(extents.enumerated().map { row, extent in
             if let shared, sharedRows.contains(row) {
                 return shared[row ..< row + 1, 0..., 0..., 0...]
@@ -5532,6 +5597,98 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAtt
         pendingMTPResolutionsByRow = pendingResolutions
         mtpPackedForwardDidUpdate = true
         return (mergedKeys, mergedValues)
+    }
+
+    /// Ragged one-token decode step on the batch buffer alone (#2256). The
+    /// per-row paths cost several kernels per row per layer each step: each
+    /// row cache appends, the buffer is written row by row, and a sliding
+    /// window layer slices, ring-orders and re-concatenates every row's
+    /// window. Here one scatter writes every row's token at its own length
+    /// and, for a sliding window, one gather presents every row's window in
+    /// the slot order its own row cache would (`PagedKVCache.presentation`),
+    /// so attention sees the same tensor. The rows take their history back at
+    /// the window end (`flushDeferredRows`), as lockstep rows do.
+    ///
+    /// Taken only for ragged rows whose buffer mirrors their history, that
+    /// would all accept the token, and (sliding window) whose windows are
+    /// full after it. Anything else flushes and returns nil, so the
+    /// per-row paths keep handling it.
+    private func updateDeferredRagged(keys incomingKeys: MLXArray, values incomingValues: MLXArray) -> (MLXArray, MLXArray)? {
+        func decline() -> (MLXArray, MLXArray)? {
+            flushDeferredRows()
+            return nil
+        }
+        let window = presentationWindowTokens
+        guard incomingKeys.dim(2) == 1,
+              incomingValues.dim(2) == 1,
+              rowCaches.count > 1,
+              batchedOffset == nil,
+              rowCaches.allSatisfy({ !$0.reconstructViaGather && $0.attentionWindowTokens == window })
+        else {
+            return decline()
+        }
+        let starts: [Int]
+        if let deferredRowOffsets {
+            starts = deferredRowOffsets
+        } else {
+            starts = rowCaches.map(\.storedTokens)
+            guard Set(starts).count > 1,
+                  rowCaches.allSatisfy({ $0.storedTokens > 0 && $0.storedTokens == $0.offset })
+            else {
+                return nil
+            }
+        }
+        guard zip(rowCaches, starts).allSatisfy({ cache, start in start < (cache.maxSize ?? Int.max) }),
+              window.map({ window in starts.allSatisfy { $0 >= window - 1 } }) ?? true
+        else {
+            return decline()
+        }
+        if deferredRowOffsets == nil,
+           keys == nil || rowMutationCounts != rowCaches.map(\.mutationCount) || starts.max() != length {
+            // The buffer no longer mirrors the rows (a sliding window layer
+            // kept presented windows, or a row changed elsewhere): rebuild it
+            // from the rows once.
+            packFromRows()
+        }
+        guard let existingKeys = keys,
+              let existingValues = values,
+              deferredRowOffsets != nil || (rowMutationCounts == rowCaches.map(\.mutationCount) && starts.max() == length),
+              Self.canWrite(incomingKeys, into: existingKeys),
+              Self.canWrite(incomingValues, into: existingValues),
+              let newKeys = Self.write(incomingKeys, into: existingKeys, rowStarts: starts, stored: length, maxTokens: maxSize, blockSizeTokens: blockSizeTokens),
+              let newValues = Self.write(incomingValues, into: existingValues, rowStarts: starts, stored: length, maxTokens: maxSize, blockSizeTokens: blockSizeTokens)
+        else {
+            return decline()
+        }
+        let ends = starts.map { $0 + 1 }
+        keys = newKeys
+        values = newValues
+        length = max(length, ends.max() ?? length)
+        rowMutationCounts = nil
+        deferredRowOffsets = ends
+        #if DEBUG
+        Self.deferredRaggedDecodeSteps &+= 1
+        #endif
+        guard let window, window > 0 else {
+            return (Self.prefix(newKeys, length), Self.prefix(newValues, length))
+        }
+        // Row `r` presents keys `[end - window, end)` rotated right by its
+        // ring shift: column `j` holds key `end - window + (j - shift) mod window`.
+        var indices: [Int32] = []
+        indices.reserveCapacity(rowCaches.count * window)
+        for (rowIndex, cache) in rowCaches.enumerated() {
+            let end = ends[rowIndex]
+            let shift = PagedKVCache.slidingRingShift(
+                postUpdateOffset: end,
+                anchor: cache.slidingRingAnchor,
+                windowSize: window
+            )
+            for column in 0 ..< window {
+                indices.append(Int32(end - window + ((column - shift) % window + window) % window))
+            }
+        }
+        let index = MLXArray(indices, [rowCaches.count, 1, window, 1])
+        return (takeAlong(newKeys, index, axis: 2), takeAlong(newValues, index, axis: 2))
     }
 
     /// Ragged per-row step without re-padding the whole batch: each row's
@@ -5631,6 +5788,7 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAtt
         get { innerState() }
         set {
             guard newValue.count == 2 else { return }
+            flushDeferredRows()
             length = newValue[0].dim(2)
             keys = Self.prefix(newValue[0], length)
             values = Self.prefix(newValue[1], newValue[1].dim(2))
@@ -5650,6 +5808,7 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAtt
 
     @discardableResult
     func trim(_ n: Int) -> Int {
+        flushDeferredRows()
         let trimmed = rowCaches.map { $0.trim(n) }.min() ?? 0
         packFromRows()
         return trimmed
@@ -5746,6 +5905,7 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAtt
     }
 
     func prepareMTPPackedVerification(rowMaps: [MTPPackedVerificationRowMap]) throws {
+        flushDeferredRows()
         guard rowMaps.count == rowCaches.count else {
             throw ContinuousBatchSchedulerError.unsupported("native_mtp_packed_cache_row_count_mismatch")
         }
@@ -5790,7 +5950,8 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAtt
     }
 
     func copy() -> any KVCache {
-        PagedKVBatchLayerCache(rowCaches: rowCaches.map { $0.concreteCopy() })
+        flushDeferredRows()
+        return PagedKVBatchLayerCache(rowCaches: rowCaches.map { $0.concreteCopy() })
     }
 
     fileprivate var preUpdateOffsets: [Int] {
@@ -5799,6 +5960,9 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAtt
         }
         if let batchedOffset {
             return Array(repeating: batchedOffset, count: rowCaches.count)
+        }
+        if let deferredRowOffsets {
+            return deferredRowOffsets
         }
         return rowCaches.map(\.offset)
     }
@@ -5877,6 +6041,9 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAtt
     }
 
     private func packFromRows() {
+        // Callers that need deferred rows' tokens flush first; this rebuilds
+        // from the rows as they are.
+        deferredRowOffsets = nil
         let keyArrays = rowCaches.compactMap { cache -> MLXArray? in
             let state = cache.state
             return state.count == 2 ? state[0] : nil
@@ -5961,6 +6128,12 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAtt
             target = concatenated([prefix(buffer, stored), extra], axis: 2)
         }
         guard n > 0 else { return target }
+        if let rowStarts, n == 1, rowStarts.count > 1 {
+            // One token per row: a single scatter instead of one slice
+            // write per row. Pure data movement, so the buffer is the same.
+            let index = MLXArray(rowStarts.map(Int32.init), [rowStarts.count, 1, 1, 1])
+            return putAlong(target, index, values: incoming, axis: 2)
+        }
         if let rowStarts {
             for (rowIndex, start) in rowStarts.enumerated() {
                 target[rowIndex ..< rowIndex + 1, 0..., start ..< start + n, 0...] =
