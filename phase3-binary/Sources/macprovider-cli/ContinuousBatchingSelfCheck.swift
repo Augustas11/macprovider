@@ -747,8 +747,9 @@ enum ContinuousBatchingSelfCheck {
         }
     }
 
-    /// SPEC-038 FR-CB10 item 3 (v0.3.22): stop admitting new requests, let
-    /// the in-flight ones finish (bounded by `drainSeconds`; none is cancelled
+    /// SPEC-038 FR-CB10 item 3 (v0.3.22): hold admission (routing sees no free
+    /// slot; a buyer that still arrives is admitted and ends the hold as a
+    /// yield, v0.3.36), let the in-flight ones finish (bounded by `drainSeconds`; none is cancelled
     /// or dropped), run `check` for at most `checkSeconds`, then re-open
     /// admission. Never starts under a lifecycle lease, an operator pause or a
     /// drain. The hold ends early, as a yield, the moment a lease appears, the
@@ -784,6 +785,7 @@ enum ContinuousBatchingSelfCheck {
         /// Why the hold must end now, or nil while it may continue.
         @Sendable func interruption() async -> String? {
             if Task.isCancelled { return "cancelled" }
+            if await providerStatus.selfCheckAdmissionHoldBuyerArrived() { return "buyer_arrival" }
             if let lease = lifecycleLease() { return "lifecycle_lease_\(lease)" }
             if await !providerStatus.isServingForSelfCheckAdmissionHold() { return "provider_not_serving" }
             if await !stillValid() { return "target_changed" }
