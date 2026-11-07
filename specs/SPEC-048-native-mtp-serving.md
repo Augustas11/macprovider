@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.75
+**Version:** 0.1.76
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.75",
+  "version": "0.1.76",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -471,11 +471,19 @@ Resolution uses descriptor-relative no-follow opens under the verified snapshot
 root and accepts only regular files with expected owner/mode, but direct MLX
 loading from that model-store descriptor is forbidden: an open descriptor fixes
 inode identity, not contents. The loader MUST either hash the exact immutable
-memory buffer MLX consumes or copy through the descriptor into a private
-same-volume staging file created exclusively below a `0700` directory, close
-every write handle, remove write permission, then hash and load only that
-staged inode. Lazy or mapped reads MUST retain the private staged inode until
-model teardown. The loader compares device/inode/size/mtime before and after
+memory buffer MLX consumes or place those bytes in a private same-volume
+staging file created exclusively below a `0700` directory. That file MAY be a
+`clonefile(2)` clone of the validated descriptor (`CLONE_NOFOLLOW`) only when
+that descriptor's mode is already `0400`, so the new inode is created without
+owner write. `fclonefileat` copies the source mode and a later chmod does not
+revoke a descriptor opened in between, so any other mode uses the exclusive
+`0400` byte copy. A byte copy is also the fallback when the volume cannot
+clone (`ENOTSUP`) or the capture tree is on another volume (`EXDEV`); any
+other clone failure rejects the capture. The loader then closes every write
+handle, removes write
+permission, and hashes and loads only that staged inode. The capture-tree
+stamp and digest checks stay as they are. Lazy or mapped reads MUST retain
+the private staged inode until model teardown. The loader compares device/inode/size/mtime before and after
 copy, hash, and load and rejects hardlink escape, symlink/path swap, rename
 replacement, truncation, same-size rewrite, timestamp restoration, or mutation;
 reopening an already validated model-store pathname is forbidden. Race fixtures
@@ -2286,6 +2294,11 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.76 (2026-11-07, Related: #2243)** — MTP-2: the private staging file
+  may be a `clonefile(2)` clone of the validated descriptor when that
+  descriptor is already mode `0400`. Any other mode, `ENOTSUP`, and `EXDEV`
+  use the exclusive `0400` byte copy. Any other clone failure rejects the
+  capture. Stamp and digest checks on the captured tree are unchanged.
 - **0.1.75 (2026-11-06)** — MTP-1: the provider `native_mtp_mode` defaults
   to `auto`, so a CLI cut needs no per-provider mode change. Selection is
   unchanged: native MTP runs only for a tuple a signed R014 admission entry
