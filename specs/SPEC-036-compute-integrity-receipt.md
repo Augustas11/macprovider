@@ -2465,7 +2465,9 @@ as without a restart.
   control a scorer of a different operator for the same model and also be
   drawn for every escalation measurement.
 - No failure is confirmed on one scorer operator's word (FR-23). Reference
-  scorers alone (FR-26) can only send a key to operator review.
+  scorers alone (FR-26) can only send a key to operator review. With no peer,
+  the checks below have no pair to compare, so they cannot run on a
+  reference-only measurement; operator review is the bound there.
 - Scorer agreement is tracked per scorer provider. Split answers are pair
   disagreements and failed known-sequence checks; the double-scored window
   holds pair measurements only. A scorer is **scorer-excluded** when it has at
@@ -2620,6 +2622,20 @@ This bounds a faulty reference Mac: with no peer, there is no pair to
 cross-check it. With a peer available, the two-operator rules apply
 unchanged; a reference scorer may be one of the two operators, and such a
 failure takes the ordinary consequences.
+
+Operator review is the only bound on a faulty reference scorer when no peer
+exists, because the FR-24 checks cannot run without one. A review sets no
+state and opens no hold. Credits that settle while a key is under review stay
+paid, so the operator confirms a real failure before the next weekly
+settlement. Clearing a `recovering` key to `unverified` does not release its
+open recovery hold; the operator releases that hold separately (SPEC-022).
+The coordinator exports the count of keys under review per state.
+
+Rollout and rollback. The coordinator that implements FR-26 deploys before
+any provider enables scorer-only mode. Before the coordinator rolls back
+below FR-26, every scorer-only provider disables scorer-only mode. A
+coordinator older than FR-26 treats a scorer-only session as an ordinary
+provider, so it would be counted in buyer-serving capacity.
 
 Integrity. FR-24 applies to reference scorers without exception. A reference
 scorer that is scorer-excluded is never chosen until an operator clears it.

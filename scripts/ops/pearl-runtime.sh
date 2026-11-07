@@ -946,12 +946,17 @@ vq_internal() {
 
 # ro_local: validate COMPUTE_INTEGRITY_REFERENCE_OPERATORS into RO_SHA,
 # RO_HEX and RO_COUNT, or leave RO_ERR set. A key can name a provider: only
-# the count and digest are ever printed.
+# the count and digest are ever printed. The value "none" removes the overlay
+# key (RO_REMOVE=1, RO_SHA=none).
 ro_local() {
-  RO_SHA=""; RO_HEX=""; RO_COUNT=""; RO_ERR=""
+  RO_SHA=""; RO_HEX=""; RO_COUNT=""; RO_ERR=""; RO_REMOVE=""
   local list="${COMPUTE_INTEGRITY_REFERENCE_OPERATORS:-}" out
   if [ -z "$list" ]; then
-    RO_ERR="COMPUTE_INTEGRITY_REFERENCE_OPERATORS is unset: set it to the Malibu-operated scorer operator keys (github:<user id> or provider:<provider id>, comma-separated)"
+    RO_ERR="COMPUTE_INTEGRITY_REFERENCE_OPERATORS is unset: set it to the Malibu-operated scorer operator keys (github:<user id> or provider:<provider id>, comma-separated), or none to remove them"
+    return
+  fi
+  if [ "$list" = none ]; then
+    RO_REMOVE=1; RO_SHA=none; RO_COUNT=0
     return
   fi
   if ! out="$(python3 -I "$OPS_LIB_DIR/pearl-cli-config.py" validate-reference-operators "$list" 2>&1)"; then
@@ -970,6 +975,10 @@ gather_reference_operators() {
   ro_local
   if [ -n "$RO_ERR" ]; then
     step operators pending "$RO_ERR"
+  elif [ -n "$RO_REMOVE" ]; then
+    step operators "done" "none: remove the overlay key"
+    fact local_reference_operators_sha256 none
+    fact local_reference_operators_count 0
   else
     step operators "done" "$RO_COUNT keys, sha256 ${RO_SHA:0:12}"
     fact local_reference_operators_sha256 "$RO_SHA"
@@ -988,7 +997,7 @@ gather_reference_operators() {
       "ro-facts over ssh failed: $(tail -n 1 "$OPS_TMP_DIR/ro.err" | safe_remote_output | cut -c1-200)"
     return
   fi
-  local sha count valid applied logged
+  local sha count valid applied logged base predates
   sha="$(json_field_str "$facts" 'd["overlay_sha256"]')"
   count="$(json_field_str "$facts" 'd["overlay_count"]')"
   valid="$(json_field_str "$facts" '"absent" if d["overlay_valid"] is None else d["overlay_valid"]')"
@@ -996,14 +1005,36 @@ gather_reference_operators() {
   logged="$(json_field_str "$facts" 'd["logged_count"]')"
   fact pearl_ro_overlay_sha256 "${sha:-none}"
   fact pearl_ro_overlay_count "${count:-absent}"
-  fact pearl_ro_base_count "$(json_field_str "$facts" 'd["base_count"]')"
+  base="$(json_field_str "$facts" 'd["base_count"]')"
+  predates="$(json_field_str "$facts" 'd["predates_reference_operators"]')"
+  fact pearl_ro_base_count "$base"
   fact pearl_ro_config_applied "$applied"
   fact pearl_ro_logged_count "${logged:-none}"
   step pearl_state "done" "overlay reference_operators=${count:-absent} logged=${logged:-none} applied=$applied"
+  # A coordinator that logs no reference_operators count predates FR-26: an
+  # overlay edit would cost a restart it cannot honour, then a rollback.
+  if [ "$predates" = true ]; then
+    step reference_operators blocked "the running coordinator predates SPEC-036 FR-26 (no reference_operators count logged)"
+    set_next reference_operators blocked "Release the Pearl runtime first" "" \
+      "the running coordinator predates SPEC-036 FR-26 and logs no reference_operators count; release the runtime first"
+    return
+  fi
+  if [ -n "$RO_REMOVE" ]; then
+    if [ "$valid" = absent ] && [ "$applied" = true ] && [ "$logged" = "$base" ]; then
+      step reference_operators "done" "the overlay sets no reference operators; $base from the base config are live"
+      set_next "done" "done" "the Pearl overlay sets no compute-integrity reference operators" ""
+      return
+    fi
+    step reference_operators pending ""
+    set_next reference_operators mutate "Remove compute_integrity.scoring.reference_operators from the Pearl overlay, restart once" \
+      "scripts/ops/pearl-runtime.sh _compute-integrity-reference-operators none"
+    next_meta reference_operators "$CI_DOC" "$RO_DOWNTIME"
+    return
+  fi
   if [ "$valid" = false ]; then
     step reference_operators blocked "the overlay's compute_integrity.scoring.reference_operators fails the coordinator's rules"
     set_next reference_operators blocked "Reconcile the Pearl overlay's reference operators" "" \
-      "the Pearl overlay's compute_integrity.scoring.reference_operators fails the coordinator's rules; reconcile it first"
+      "the Pearl overlay's compute_integrity.scoring.reference_operators fails the coordinator's rules; reconcile it first (or remove it with none)"
     return
   fi
   # Done: the overlay holds the list, the running coordinator booted with the
@@ -1026,9 +1057,10 @@ gather_reference_operators() {
   next_meta reference_operators "$CI_DOC" "$RO_DOWNTIME"
 }
 
-# _compute-integrity-reference-operators SHA256: run lib/pearl-cli-config.py
+# _compute-integrity-reference-operators SHA256|none: run lib/pearl-cli-config.py
 # apply-reference-operators under both Pearl locks (next --run only). The list
-# travels hex-encoded, so no key reaches a remote shell as text.
+# travels hex-encoded, so no key reaches a remote shell as text; none removes
+# the overlay key.
 ro_internal() {
   [ "${MACPROVIDER_OPS_ENTRYPOINT:-}" = 1 ] ||
     refuse "_compute-integrity-reference-operators runs only from 'PEARL_RUNTIME_TASK=compute-integrity-reference-operators $0 next --run' (live-ops lock, downtime banner)"
@@ -1037,6 +1069,11 @@ ro_internal() {
   ro_local
   [ -z "$RO_ERR" ] || refuse "$RO_ERR"
   [ "$RO_SHA" = "${1:-}" ] || refuse "the reference operator list changed since status (sha256 ${RO_SHA:0:12}, expected ${1:-?}); run status again"
+  if [ -n "$RO_REMOVE" ]; then
+    pearl_ssh "python3 - apply-reference-operators $PEARL_LAYOUT --ro-remove" \
+      < "$OPS_LIB_DIR/pearl-cli-config.py"
+    return
+  fi
   pearl_ssh "python3 - apply-reference-operators $PEARL_LAYOUT --ro-hex $RO_HEX --ro-sha256 $RO_SHA" \
     < "$OPS_LIB_DIR/pearl-cli-config.py"
 }

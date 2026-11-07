@@ -186,6 +186,37 @@ class VisionQualificationOverlayTest(unittest.TestCase):
             with self.assertRaisesRegex(pcc.Refused, "different routing.vision_qualifications"):
                 vq_plan(text)
 
+    def test_empty_list_is_valid(self):
+        self.assertTrue(pcc.ro_entries_valid([]))
+        self.assertFalse(pcc.ro_entries_valid(["github:x"]))
+        self.assertFalse(pcc.ro_entries_valid("github:1"))
+        self.assertEqual(pcc.ro_entries({"compute_integrity": {"scoring": {"reference_operators": None}}}), [])
+        self.assertIsNone(pcc.ro_entries({"compute_integrity": {"scoring": {}}}))
+
+    def prune(self, text):
+        import yaml
+
+        new = pcc.ro_prune_plan(text, yaml.safe_load(text) or {})
+        return new, (yaml.safe_load(new) or {})
+
+    def test_prune_shapes(self):
+        cases = [
+            ("relay_blind:\n  enabled: true\n", {"relay_blind": {"enabled": True}}),
+            ("compute_integrity:\n  scoring:\n    reference_operators: [github:7]\n    corpus_path: /c.json\n",
+             {"compute_integrity": {"scoring": {"corpus_path": "/c.json"}}}),
+            ("compute_integrity:\n  sample_rate: 0.5\n  scoring:\n    reference_operators:\n    - github:7\n",
+             {"compute_integrity": {"sample_rate": 0.5}}),
+            ("a: 1\ncompute_integrity:  # ci\n  scoring:\n    reference_operators: []\nb: 2\n", {"a": 1, "b": 2}),
+            ("compute_integrity:\n  scoring:\n    reference_operators:\n", {}),
+        ]
+        for text, want in cases:
+            _, got = self.prune(text)
+            self.assertEqual(got, want, text)
+
+    def test_prune_unchanged_when_absent(self):
+        text = "compute_integrity:\n  scoring:\n    corpus_path: /c.json\n"
+        self.assertEqual(self.prune(text)[0], text)
+
     def test_unsafe_overlay_shapes_refused(self):
         for text, why in (("routing: {sticky_enabled: true}\n", "anchor"),
                           ("routing: 3\n", "not a block mapping"),
@@ -670,10 +701,13 @@ class ReferenceOperatorsTest(unittest.TestCase):
 
     def test_key_rules_match_the_coordinator(self):
         self.assertEqual(pcc.ro_validate(list(self.OPS)), self.OPS)
-        self.assertTrue(pcc.ro_valid_key("github:" + "9" * 20))
-        self.assertTrue(pcc.ro_valid_key("provider:" + "p" * 256))
+        self.assertTrue(pcc.ro_valid_key("github:%d" % (2**63 - 1)))
+        self.assertTrue(pcc.ro_valid_key("provider:" + "p" * 64))
+        self.assertTrue(pcc.ro_valid_key("provider:Mp_a.b-9"))
         for bad in (["github:"], ["github:12a"], ["gh:1"], ["provider:"], ["provider:a b"], ["github:1", "github:1"],
-                    ["github:" + "9" * 21], ["provider:" + "p" * 257], ["provider:a\x7f"], [], [7]):
+                    ["github:0"], ["github:007"], ["github:+5"], ["github:-5"], ["github:%d" % 2**63],
+                    ["github:" + "9" * 21], ["provider:" + "p" * 65], ["provider:a/b"], ["provider:a\x7f"],
+                    ["provider:\ud800"], ["github:\ud800"], [], [7]):
             with self.assertRaises(pcc.Refused, msg=bad):
                 pcc.ro_validate(bad)
 
@@ -711,6 +745,37 @@ class ReferenceOperatorsTest(unittest.TestCase):
         text = "compute_integrity:\n  scoring:\n    reference_operators: [github:12345, provider:mp-abc]\n"
         new, _ = self.plan(text)
         self.assertEqual(new, text)
+
+    def test_empty_list_is_valid(self):
+        self.assertTrue(pcc.ro_entries_valid([]))
+        self.assertFalse(pcc.ro_entries_valid(["github:x"]))
+        self.assertFalse(pcc.ro_entries_valid("github:1"))
+        self.assertEqual(pcc.ro_entries({"compute_integrity": {"scoring": {"reference_operators": None}}}), [])
+        self.assertIsNone(pcc.ro_entries({"compute_integrity": {"scoring": {}}}))
+
+    def prune(self, text):
+        import yaml
+
+        new = pcc.ro_prune_plan(text, yaml.safe_load(text) or {})
+        return new, (yaml.safe_load(new) or {})
+
+    def test_prune_shapes(self):
+        cases = [
+            ("relay_blind:\n  enabled: true\n", {"relay_blind": {"enabled": True}}),
+            ("compute_integrity:\n  scoring:\n    reference_operators: [github:7]\n    corpus_path: /c.json\n",
+             {"compute_integrity": {"scoring": {"corpus_path": "/c.json"}}}),
+            ("compute_integrity:\n  sample_rate: 0.5\n  scoring:\n    reference_operators:\n    - github:7\n",
+             {"compute_integrity": {"sample_rate": 0.5}}),
+            ("a: 1\ncompute_integrity:  # ci\n  scoring:\n    reference_operators: []\nb: 2\n", {"a": 1, "b": 2}),
+            ("compute_integrity:\n  scoring:\n    reference_operators:\n", {}),
+        ]
+        for text, want in cases:
+            _, got = self.prune(text)
+            self.assertEqual(got, want, text)
+
+    def test_prune_unchanged_when_absent(self):
+        text = "compute_integrity:\n  scoring:\n    corpus_path: /c.json\n"
+        self.assertEqual(self.prune(text)[0], text)
 
     def test_unsafe_overlay_shapes_refused(self):
         for text in ("{compute_integrity: {scoring: {}}}\n", "compute_integrity: {scoring: {corpus_path: /c}}\n",
