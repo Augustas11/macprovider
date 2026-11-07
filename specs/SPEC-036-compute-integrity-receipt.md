@@ -1,9 +1,20 @@
 # SPEC-036 — Compute-Integrity Receipt Companion
 
-**Status:** v0.2.1-draft
-**Date:** 2026-10-17
+**Status:** v0.3.0-draft
+**Date:** 2026-11-07
 **Depends on:** SPEC-015 v0.4.4, SPEC-022 v0.4.9, SPEC-026 v0.26, SPEC-030 v0.1-draft (Losslessness Probe — shared distribution-snapshot / support-selection / TV-interval / probe-transport primitive)
 **Companion research:** `docs/research/compute-integrity-receipt-2026-07.md`
+
+**Change log v0.3.0 (2026-11-07, issue #1644 — reference scorers):**
+Adds FR-26 (SPEC-036-R026). Until v0.2.1 a key could be verified only when a
+provider of another operator served the same cohort hash; a model served by
+one operator alone was recorded `no_scorer` on every request and never
+verified. A Malibu-operated **reference scorer** — a scorer-only session that
+holds the exact catalog weights and never serves buyers — now scores a key
+when no eligible peer exists. Peers keep priority. FR-21 selection, FR-23
+confirmation and FR-24 integrity apply to reference scorers as to peers; with
+no peer, reference scorers alone may confirm a decision. FR-25 adds a
+`scorer_kind` label to `compute_integrity_scoring_jobs_total`.
 
 **Change log v0.2.1 (2026-10-17, issue #1644 — durable verification schedule):**
 FR-20 due times persist across coordinator restarts. v0.2.0 drew a fresh
@@ -2114,7 +2125,8 @@ A provider is **verifiable** for its served model when its model hash is
 catalog-verified, it reports a weights manifest hash, and it is routing-eligible for
 that model. A
 provider is a **scorer candidate** when it advertised
-`tier2_capabilities.compute_score_v1: true` in its current session.
+`tier2_capabilities.compute_score_v1: true` in its current session. A
+scorer-only session (FR-26) is a scorer candidate only as a reference scorer.
 
 ### FR-20 Verification requests (SPEC-036-R020)
 
@@ -2257,6 +2269,13 @@ that
 Old providers never advertise the capability and are never chosen. A job to
 a scorer carries that scorer's own reported `weights_manifest_sha256`.
 
+Peers come first. The draw above runs over **peers**, the scorer candidates
+that are not reference scorers. Only the slots that eligible peer operators
+cannot fill go to reference scorers (FR-26). Reference scorers meet the same
+rules 1 to 6 and have an operator not already chosen for the measurement. A
+key whose missing peer is only reserved (rule 6) stays due; a reference
+scorer does not take that peer's place.
+
 Wire. The coordinator sends `compute_score_request_v1` over the scorer's
 WebSocket session:
 
@@ -2387,24 +2406,28 @@ Transitions:
   **affected window** opens at the last in-band measurement before it (or at
   the first measurement for the key when there is none).
 - In `suspect` and `recovering`, each escalation request is scored by two
-  scorers of different operators when two exist. A measurement counts only
+  scorers of different operators when two exist. A reference scorer (FR-26)
+  is an independent scorer operator. A measurement counts only
   when every selected scorer returned a valid answer; otherwise it is
   inconclusive. An escalation measurement is **out** when every scorer put it
   out of band, and **in** when every scorer put it in band. Split answers count
   as neither and are recorded for FR-24.
 - `suspect` → `failed` when at least 3 of the last 5 escalation measurements
-  are out and those outs were scored by at least 2 distinct scorer operators.
+  are out and those outs were scored by at least 2 distinct scorer operators,
+  or every one of those outs was scored by reference scorers alone because no
+  eligible peer existed (FR-26).
 - `suspect` → `passing` after 3 consecutive in escalation measurements.
 - `suspect` → `passing` with reason `escalation_inconclusive` after 15
   escalation measurements without a decision.
 - `failed` → `recovering` after `recovery_cooldown` (default 24 h). Routing
   resumes, and a new open hold covers earnings from that moment.
 - `recovering` → `passing` after 5 consecutive in-band measurements scored by
-  at least 2 distinct scorer operators. The recovery hold closes and is
+  at least 2 distinct scorer operators, or by reference scorers alone because
+  no eligible peer existed (FR-26). The recovery hold closes and is
   released automatically; the failure-window hold stays.
 - `recovering` → `failed` on the FR-23 suspect rule applied within
   recovery: 3 out of the last 5 measurements, with 2 or more scorer
-  operators. The recovery hold stays held.
+  operators or reference scorers alone (FR-26). The recovery hold stays held.
 - An operator MAY clear any key to `unverified` (audited, with a reason).
 
 Inconclusive results (`dispatch`, `no_scorer`, `scorer_timeout`,
@@ -2427,7 +2450,9 @@ as without a restart.
 - Random scorer choice across operators bounds collusion: a cheater must
   control a scorer of a different operator for the same model and also be
   drawn for every escalation measurement.
-- No failure is confirmed on one scorer operator's word (FR-23).
+- No failure is confirmed on one peer operator's word (FR-23). Only a
+  reference scorer (FR-26) may confirm one alone, and only for a key with no
+  eligible peer.
 - Scorer agreement is tracked per scorer provider. Split answers are pair
   disagreements and failed known-sequence checks; the double-scored window
   holds pair measurements only. A scorer is **scorer-excluded** when it has at
@@ -2457,6 +2482,9 @@ as without a restart.
   short output that no scorer could score usably counts against no scorer).
   On a known sequence such a short answer also fails the check. Silence is
   not otherwise penalised.
+- Reference scorers (FR-26) get every check above: they are double scored,
+  receive known-sequence checks, rest after silence, and are scorer-excluded
+  under the same rule.
 
 ### FR-25 Consequences, visibility and telemetry (SPEC-036-R025)
 
@@ -2504,8 +2532,9 @@ Telemetry:
 - Counter `compute_integrity_inconclusive_total{reason}` with the FR-23
   inconclusive reasons.
 - Counter `compute_integrity_transitions_total{from,to}` over FR-23 states.
-- Counter `compute_integrity_scoring_jobs_total{status}` over the FR-21
-  result statuses plus `timeout`.
+- Counter `compute_integrity_scoring_jobs_total{status,scorer_kind}` over the
+  FR-21 result statuses plus `timeout`, with `scorer_kind` in `peer`,
+  `reference` (FR-26).
 - Gauge `compute_integrity_keys{state}`.
 - Gauge `compute_integrity_held_holds`.
 
@@ -2519,6 +2548,60 @@ rows not updated for 30 days are deleted. `suspect`, `failed` and
 `recovering` keys are never pruned. Logs MAY name provider and model ids on
 state transitions; they MUST NOT contain prompts, outputs, or scorer token
 data.
+
+### FR-26 Reference scorers (SPEC-036-R026)
+
+A **reference scorer** is a provider session that
+
+1. advertised `tier2_capabilities.compute_score_reference: true` in its
+   current session (a **scorer-only session**), and
+2. has an operator key (FR-19) listed in the coordinator configuration
+   `compute_integrity.scoring.reference_operators`.
+
+`reference_operators` is a list of FR-19 operator keys (`github:<user id>`
+or `provider:<provider id>`), empty by default; a malformed or duplicate
+entry fails coordinator configuration validation. With the list empty no
+session is a reference scorer. This is deployment configuration, like
+`corpus_path`; the kill switch `compute_integrity.scoring.enabled` still stops
+all scheduling.
+
+A scorer-only session:
+
+- MUST NOT be routed buyer traffic. The coordinator excludes it from every
+  buyer path (ordinary, pinned, slot queue, relay-blind and privacy-class
+  binding, and their capability counts) and from buyer-serving capacity,
+  whatever else it reports. Its pool-check `buyer_serving` session-liveness
+  signal is unchanged, so it stays connected. The provider also refuses every
+  `inference_request` while in scorer-only mode, so a coordinator that does
+  not know the capability cannot route it buyer work either.
+- Is never a verified provider: it is not scheduled and gets no FR-20
+  verification requests.
+- Advertises `compute_score_v1`, loads its catalog model, and answers FR-21
+  scoring jobs like any scorer. Its cohort hash is its coordinator-verified
+  catalog model hash, as for every session (FR-19).
+- Is never chosen as a scorer when its operator is not a configured
+  reference operator.
+
+The provider enables scorer-only mode with the strict boolean configuration
+key `compute_score_reference` or the environment variable
+`MACPROVIDER_COMPUTE_SCORE_REFERENCE`; any other value fails configuration
+loading. It is off by default.
+
+Selection. A reference scorer fills only the FR-21 slots that eligible peer
+operators cannot fill. It MUST NOT score a provider of its own operator key;
+no reference scorer verifies its own operator's providers. It shares no
+operator with another scorer of the same measurement.
+
+Decisions. A reference scorer counts as one independent scorer operator in
+FR-23. When every scorer of a measurement was a reference scorer, the
+measurement is **reference-only**; selection makes one only when no eligible
+peer existed. A failure confirms on reference-only outs alone, and recovery
+passes on reference-only ins alone, under the same counts and windows as
+FR-23. With a peer available, the two-operator rules apply unchanged; a
+reference scorer may be one of the two operators.
+
+Integrity. FR-24 applies to reference scorers without exception. A reference
+scorer that is scorer-excluded is never chosen until an operator clears it.
 
 ## 6. Migration
 
@@ -2784,12 +2867,19 @@ Before SPEC-036 can move toward LOCK:
    cohort hash.
 3. The tolerance model rejects a substituted model and accepts honest
    cross-chip pairs, both cold (prior) and warm (learned band).
-4. The FR-23 machine reaches `failed` only with two scorer operators, suspends
+4. The FR-23 machine reaches `failed` only with two scorer operators (or
+   reference scorers alone, FR-26), suspends
    routing for that model only, opens a SPEC-022 R-16 hold for the affected
    window, and recovers through `recovering` with the hold behaviour of FR-23.
 5. An integration test runs an honest fake provider to `passing` and a
    substituted-model fake provider to `failed` through the real coordinator.
 6. Metrics and logs carry closed labels only and no prompt or output text.
+7. A key with no peer of another operator is verified by a configured
+   reference scorer and reaches `passing`, and a substituted model reaches
+   `failed` on the reference scorer alone. A peer is chosen ahead of a
+   reference scorer. A reference scorer never verifies its own operator and
+   an unconfigured scorer-only session is never chosen. A scorer-only session
+   is never routable, never verified, and refuses buyer requests (FR-26).
 
 ## 8. Resolved v0.1 Decisions
 
