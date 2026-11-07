@@ -1,0 +1,81 @@
+{
+ "command": [
+  "/usr/bin/sandbox-exec",
+  "-f",
+  "<lab>/lab.sb",
+  "<lab>/bin-final/macprovider-cli",
+  "serve",
+  "--no-join",
+  "--isolate-lifecycle",
+  "--credential-store",
+  "protected_file",
+  "--config",
+  "<lab>/selfcheck-gptoss20b-fix/provider.yaml",
+  "--port",
+  "50199",
+  "--max-batch",
+  "4",
+  "--max-context",
+  "8192",
+  "--continuous-batch-queue-limit",
+  "8",
+  "--no-idle-prewarm"
+ ],
+ "elapsed_s": 350.5751769542694,
+ "exit_code": 143,
+ "final_continuous_batching": {
+  "active": false,
+  "cache_class": "mixed",
+  "mode": "off",
+  "paged_kv_decision": "attached",
+  "policy": {
+   "authorization_source": "baked_empty_off",
+   "authorized": false,
+   "cached_turns_authorized": false,
+   "decision_reason": "self_check_refused_no_net_gain",
+   "emergency_off_override": false,
+   "expires_at": null,
+   "load_status": "absent_empty_off_fallback",
+   "local_proof_result": "passed",
+   "policy_sha256": null,
+   "policy_version": null,
+   "release_id": null,
+   "rollout_mode": "off",
+   "signer_key_id": null,
+   "tuple_sha256": null
+  },
+  "scheduler": {
+   "active_decode_rows": 0,
+   "max_observed_batch_depth": 4,
+   "shared_forward_calls": 99,
+   "slots_free": 4,
+   "slots_total": 4,
+   "waiting_count": 0
+  },
+  "self_check": {
+   "decision": "no_net_gain",
+   "decode_window": 16,
+   "deferrals": 0,
+   "hardware_class": "apple-silicon:Apple M5:ram-32gb",
+   "kernel_identifier": "macprovider_paged_kv_gather_v1",
+   "metallib_sha256": "3d9b4a747758128cc5418e62c5ad8e282a11b0d436423537137e013beaa1261b",
+   "model_sha256": "f25592861e0b7f4eb8489d9103214f3f0dc4f798bb0e4e0cd817ff2f4191f1b1",
+   "os_build": "Version 27.0.1 (Build 26A434)",
+   "runtime_build": "da8f1932f8e2a46477a1a35663955267bc6fcd04/0.32.3+c774cb0934c7503bc3fe1c3d1afbe44c728e8891+cb-isolation-v1/decode12/verify12+cb-probe-v2/route4096",
+   "served_slots": 4,
+   "verified_k": 4
+  },
+  "self_check_admission_hold": {
+   "active": false,
+   "expected_end_at": null,
+   "holds_total": 0,
+   "last_ended_at": null,
+   "last_outcome": null,
+   "last_skip_reason": null,
+   "last_skipped_at": null,
+   "started_at": null
+  },
+  "unsupported_reason": null
+ },
+ "reason": "decided"
+}

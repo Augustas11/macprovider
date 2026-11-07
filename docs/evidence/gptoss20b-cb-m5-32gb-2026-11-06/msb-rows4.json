@@ -1,0 +1,116 @@
+{
+ "command": [
+  "/usr/bin/sandbox-exec",
+  "-f",
+  "<lab>/lab.sb",
+  "<lab>/bin-final/macprovider-cli",
+  "msb-throughput",
+  "--model",
+  "<models>/gpt-oss-20b",
+  "--engine",
+  "scheduler",
+  "--no-compile",
+  "--prompt-tokens",
+  "1536",
+  "--decode-tokens",
+  "256",
+  "--runs",
+  "1",
+  "--mlx-cache-limit-mb",
+  "512",
+  "--stdout-only",
+  "--rows",
+  "4"
+ ],
+ "exit_code": 0,
+ "reports": [
+  {
+   "aggregateCVPct": 0,
+   "aggregateTPSRuns": [
+    32.88152922951728
+   ],
+   "aggregateTPSp50": 32.88152922951728,
+   "aggregateUpliftVsPagedSingleRow": 1.4009458055370327,
+   "aggregateVsProductionSerial": 1.329045977999096,
+   "blockSizeTokens": 16,
+   "compiled": false,
+   "decodeTokensPerRow": 256,
+   "engine": "scheduler",
+   "layerCount": 24,
+   "maxPhysicalBlocks": 1024,
+   "mlxSwiftLMPin": "mlxlm-da8f1932f8e2",
+   "modelID": "<models>/gpt-oss-20b",
+   "modelTag": "model",
+   "pagedSingleRowCVPct": 0,
+   "pagedSingleRowTPSRuns": [
+    23.47095019633012
+   ],
+   "pagedSingleRowTPSp50": 23.47095019633012,
+   "peakPhysFootprintMB": 15405,
+   "peakRSSMB": 2426,
+   "perRowFractionOfPagedSingleRow": 0.3502364513842582,
+   "perRowTPSp50": 8.22038230737932,
+   "productionSerialCVPct": 0,
+   "productionSerialPromptTokens": 1536,
+   "productionSerialTPSRuns": [
+    24.74070105461742
+   ],
+   "productionSerialTPSp50": 24.74070105461742,
+   "productionSerialTTFTSecondsRuns": [
+    3.2274010181427
+   ],
+   "promptTokenLengths": [
+    1536,
+    1536,
+    1536,
+    1536
+   ],
+   "promptTokenSHA256": [
+    "4e59d0e6a7a1c39973ef4b0a484c069296e8805bb86f437b028d18192823a852",
+    "7752e845ce304601182566f40112d9e19ed66b4988ccb8909acff0b756bf5060",
+    "529026769ac59a72d03a8541b25b3b3bbc4e97a6e9bc4ed14aef468c010382d1",
+    "68c213e899f2d36a0ce056c288fe624c2e9e68ffd9fed551198946977edcca01"
+   ],
+   "promptTokensPerRow": 1536,
+   "rows": 4,
+   "runs": 1,
+   "scenario": "throughput",
+   "schedulerBackendAggregateTPSRuns": [
+    32.887116784443364
+   ],
+   "schedulerBackendWindowCallsRuns": [
+    16
+   ],
+   "schedulerBackendWindowSecondsRuns": [
+    31.136812835
+   ],
+   "schedulerCompletionOffsetSecondsByRowRuns": [
+    [
+     43.36238896846771,
+     43.36245596408844,
+     43.36565291881561,
+     43.362460017204285
+    ]
+   ],
+   "schedulerDecodeLockstepWindow": 16,
+   "schedulerFirstTokenOffsetSecondsByRowRuns": [
+    [
+     12.223549008369446,
+     12.22355592250824,
+     12.223554968833923,
+     12.223554015159607
+    ]
+   ],
+   "schedulerTTFTSecondsByRowRuns": [
+    [
+     12.223549008369446,
+     12.223550915718079,
+     12.223541975021362,
+     12.223538994789124
+    ]
+   ],
+   "schemaVersion": 5,
+   "timestamp": "2026-11-06T13:49:04Z"
+  }
+ ]
+}

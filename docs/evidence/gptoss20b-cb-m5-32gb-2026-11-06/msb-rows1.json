@@ -1,0 +1,101 @@
+{
+ "command": [
+  "/usr/bin/sandbox-exec",
+  "-f",
+  "<lab>/lab.sb",
+  "<lab>/bin-final/macprovider-cli",
+  "msb-throughput",
+  "--model",
+  "<models>/gpt-oss-20b",
+  "--engine",
+  "scheduler",
+  "--no-compile",
+  "--prompt-tokens",
+  "1536",
+  "--decode-tokens",
+  "256",
+  "--runs",
+  "1",
+  "--mlx-cache-limit-mb",
+  "512",
+  "--stdout-only",
+  "--rows",
+  "1"
+ ],
+ "exit_code": 0,
+ "reports": [
+  {
+   "aggregateCVPct": 0,
+   "aggregateTPSRuns": [
+    34.3872443120783
+   ],
+   "aggregateTPSp50": 34.3872443120783,
+   "aggregateUpliftVsPagedSingleRow": 0.995404468089171,
+   "aggregateVsProductionSerial": 0.9394454031045987,
+   "blockSizeTokens": 16,
+   "compiled": false,
+   "decodeTokensPerRow": 256,
+   "engine": "scheduler",
+   "layerCount": 24,
+   "maxPhysicalBlocks": 1024,
+   "mlxSwiftLMPin": "mlxlm-da8f1932f8e2",
+   "modelID": "<models>/gpt-oss-20b",
+   "modelTag": "model",
+   "pagedSingleRowCVPct": 0,
+   "pagedSingleRowTPSRuns": [
+    34.546001564660244
+   ],
+   "pagedSingleRowTPSp50": 34.546001564660244,
+   "peakPhysFootprintMB": 13643,
+   "peakRSSMB": 1979,
+   "perRowFractionOfPagedSingleRow": 0.995404468089171,
+   "perRowTPSp50": 34.3872443120783,
+   "productionSerialCVPct": 0,
+   "productionSerialPromptTokens": 1536,
+   "productionSerialTPSRuns": [
+    36.60377090402304
+   ],
+   "productionSerialTPSp50": 36.60377090402304,
+   "productionSerialTTFTSecondsRuns": [
+    1.98465096950531
+   ],
+   "promptTokenLengths": [
+    1536
+   ],
+   "promptTokenSHA256": [
+    "4e59d0e6a7a1c39973ef4b0a484c069296e8805bb86f437b028d18192823a852"
+   ],
+   "promptTokensPerRow": 1536,
+   "rows": 1,
+   "runs": 1,
+   "scenario": "throughput",
+   "schedulerBackendAggregateTPSRuns": [
+    34.39338842932215
+   ],
+   "schedulerBackendWindowCallsRuns": [
+    16
+   ],
+   "schedulerBackendWindowSecondsRuns": [
+    7.443291042
+   ],
+   "schedulerCompletionOffsetSecondsByRowRuns": [
+    [
+     9.521068930625916
+    ]
+   ],
+   "schedulerDecodeLockstepWindow": 16,
+   "schedulerFirstTokenOffsetSecondsByRowRuns": [
+    [
+     2.0764479637145996
+    ]
+   ],
+   "schedulerTTFTSecondsByRowRuns": [
+    [
+     2.0764479637145996
+    ]
+   ],
+   "schemaVersion": 5,
+   "timestamp": "2026-11-06T13:42:14Z"
+  }
+ ]
+}

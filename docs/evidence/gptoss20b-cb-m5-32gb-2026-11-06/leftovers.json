@@ -1,0 +1,406 @@
+{
+ "command": [
+  "/usr/bin/sandbox-exec",
+  "-f",
+  "<lab>/lab.sb",
+  "<lab>/bin-final/macprovider-cli",
+  "msb-throughput",
+  "--model",
+  "<models>/gpt-oss-20b",
+  "--engine",
+  "scheduler",
+  "--no-compile",
+  "--prompt-tokens",
+  "1536",
+  "--decode-tokens",
+  "256",
+  "--runs",
+  "1",
+  "--mlx-cache-limit-mb",
+  "512",
+  "--stdout-only",
+  "--rows",
+  "4",
+  "--scenario",
+  "leftovers",
+  "--parity-tokens",
+  "256"
+ ],
+ "exit_code": 0,
+ "reports": [
+  {
+   "aggregateCVPct": 0,
+   "aggregateTPSRuns": [],
+   "aggregateTPSp50": 0,
+   "aggregateUpliftVsPagedSingleRow": 0,
+   "aggregateVsProductionSerial": 0,
+   "blockSizeTokens": 16,
+   "compiled": false,
+   "decodeTokensPerRow": 256,
+   "engine": "scheduler",
+   "layerCount": 24,
+   "leftovers": {
+    "isolation": {
+     "cancelledCompletionTokens": 0,
+     "cancelledRequestID": "msb-cancel",
+     "cancelledStatus": "cancelled",
+     "healthyCompletionTokens": 32,
+     "healthyRequestID": "msb-healthy",
+     "healthyStatus": "length",
+     "pass": true
+    },
+    "usagePass": true,
+    "usageRows": [
+     {
+      "cachedPromptTokens": 0,
+      "completionTokens": 0,
+      "emittedTokens": 1,
+      "promptTokens": 1536,
+      "requestID": "msb-cancel",
+      "settlementDisposition": "not_eligible",
+      "terminalStatus": "cancelled"
+     },
+     {
+      "cachedPromptTokens": 0,
+      "completionTokens": 32,
+      "emittedTokens": 32,
+      "promptTokens": 1536,
+      "requestID": "msb-healthy",
+      "settlementDisposition": "eligible_owner",
+      "terminalStatus": "length"
+     }
+    ]
+   },
+   "maxPhysicalBlocks": 1024,
+   "mlxSwiftLMPin": "mlxlm-da8f1932f8e2",
+   "modelID": "<models>/gpt-oss-20b",
+   "modelTag": "model",
+   "pagedSingleRowCVPct": 0,
+   "pagedSingleRowTPSRuns": [],
+   "pagedSingleRowTPSp50": 0,
+   "peakRSSMB": 1305,
+   "perRowFractionOfPagedSingleRow": 0,
+   "perRowTPSp50": 0,
+   "productionSerialCVPct": 0,
+   "productionSerialPromptTokens": 1536,
+   "productionSerialTPSRuns": [],
+   "productionSerialTPSp50": 0,
+   "promptTokenLengths": [
+    1536,
+    1536
+   ],
+   "promptTokenSHA256": [
+    "4e59d0e6a7a1c39973ef4b0a484c069296e8805bb86f437b028d18192823a852",
+    "7752e845ce304601182566f40112d9e19ed66b4988ccb8909acff0b756bf5060"
+   ],
+   "promptTokensPerRow": 1536,
+   "rows": 2,
+   "runs": 1,
+   "scenario": "isolation",
+   "schemaVersion": 5,
+   "timestamp": "2026-11-06T13:49:21Z"
+  },
+  {
+   "aggregateCVPct": 0,
+   "aggregateTPSRuns": [],
+   "aggregateTPSp50": 0,
+   "aggregateUpliftVsPagedSingleRow": 0,
+   "aggregateVsProductionSerial": 0,
+   "blockSizeTokens": 16,
+   "compiled": false,
+   "decodeTokensPerRow": 256,
+   "engine": "scheduler",
+   "layerCount": 24,
+   "leftovers": {
+    "replay": {
+     "firstDisposition": "eligible_owner",
+     "pass": true,
+     "replayDisposition": "non_settling_replay",
+     "requestID": "msb-replay-owner",
+     "tokensMatch": true
+    },
+    "usagePass": true,
+    "usageRows": [
+     {
+      "cachedPromptTokens": 0,
+      "completionTokens": 32,
+      "emittedTokens": 32,
+      "promptTokens": 1536,
+      "requestID": "msb-replay-owner",
+      "settlementDisposition": "eligible_owner",
+      "terminalStatus": "length"
+     },
+     {
+      "cachedPromptTokens": 0,
+      "completionTokens": 32,
+      "emittedTokens": 32,
+      "promptTokens": 1536,
+      "requestID": "msb-replay-owner",
+      "settlementDisposition": "non_settling_replay",
+      "terminalStatus": "length"
+     }
+    ]
+   },
+   "maxPhysicalBlocks": 1024,
+   "mlxSwiftLMPin": "mlxlm-da8f1932f8e2",
+   "modelID": "<models>/gpt-oss-20b",
+   "modelTag": "model",
+   "pagedSingleRowCVPct": 0,
+   "pagedSingleRowTPSRuns": [],
+   "pagedSingleRowTPSp50": 0,
+   "peakRSSMB": 1310,
+   "perRowFractionOfPagedSingleRow": 0,
+   "perRowTPSp50": 0,
+   "productionSerialCVPct": 0,
+   "productionSerialPromptTokens": 1536,
+   "productionSerialTPSRuns": [],
+   "productionSerialTPSp50": 0,
+   "promptTokenLengths": [
+    1536
+   ],
+   "promptTokenSHA256": [
+    "4e59d0e6a7a1c39973ef4b0a484c069296e8805bb86f437b028d18192823a852"
+   ],
+   "promptTokensPerRow": 1536,
+   "rows": 1,
+   "runs": 1,
+   "scenario": "replay",
+   "schemaVersion": 5,
+   "timestamp": "2026-11-06T13:49:27Z"
+  },
+  {
+   "aggregateCVPct": 0,
+   "aggregateTPSRuns": [],
+   "aggregateTPSp50": 0,
+   "aggregateUpliftVsPagedSingleRow": 0,
+   "aggregateVsProductionSerial": 0,
+   "blockSizeTokens": 16,
+   "compiled": false,
+   "decodeTokensPerRow": 256,
+   "engine": "scheduler",
+   "layerCount": 24,
+   "leftovers": {
+    "drain": {
+     "activeRowsCompleted": true,
+     "activeSettlements": [
+      "eligible_owner",
+      "eligible_owner"
+     ],
+     "activeStatuses": [
+      "length",
+      "length"
+     ],
+     "pass": true,
+     "permitIssued": true,
+     "permitValid": true,
+     "postDrainRejected": true,
+     "queuedRejected": true
+    },
+    "usagePass": true,
+    "usageRows": [
+     {
+      "cachedPromptTokens": 0,
+      "completionTokens": 0,
+      "emittedTokens": 0,
+      "promptTokens": 0,
+      "requestID": "msb-drain-queued",
+      "settlementDisposition": "not_eligible",
+      "terminalStatus": "rejected"
+     },
+     {
+      "cachedPromptTokens": 0,
+      "completionTokens": 32,
+      "emittedTokens": 32,
+      "promptTokens": 1536,
+      "requestID": "msb-drain-a",
+      "settlementDisposition": "eligible_owner",
+      "terminalStatus": "length"
+     },
+     {
+      "cachedPromptTokens": 0,
+      "completionTokens": 32,
+      "emittedTokens": 32,
+      "promptTokens": 1536,
+      "requestID": "msb-drain-b",
+      "settlementDisposition": "eligible_owner",
+      "terminalStatus": "length"
+     }
+    ]
+   },
+   "maxPhysicalBlocks": 1024,
+   "mlxSwiftLMPin": "mlxlm-da8f1932f8e2",
+   "modelID": "<models>/gpt-oss-20b",
+   "modelTag": "model",
+   "pagedSingleRowCVPct": 0,
+   "pagedSingleRowTPSRuns": [],
+   "pagedSingleRowTPSp50": 0,
+   "peakRSSMB": 1310,
+   "perRowFractionOfPagedSingleRow": 0,
+   "perRowTPSp50": 0,
+   "productionSerialCVPct": 0,
+   "productionSerialPromptTokens": 1536,
+   "productionSerialTPSRuns": [],
+   "productionSerialTPSp50": 0,
+   "promptTokenLengths": [
+    1536,
+    1536,
+    1536
+   ],
+   "promptTokenSHA256": [
+    "4e59d0e6a7a1c39973ef4b0a484c069296e8805bb86f437b028d18192823a852",
+    "7752e845ce304601182566f40112d9e19ed66b4988ccb8909acff0b756bf5060",
+    "529026769ac59a72d03a8541b25b3b3bbc4e97a6e9bc4ed14aef468c010382d1"
+   ],
+   "promptTokensPerRow": 1536,
+   "rows": 3,
+   "runs": 1,
+   "scenario": "drain",
+   "schemaVersion": 5,
+   "timestamp": "2026-11-06T13:49:36Z"
+  },
+  {
+   "aggregateCVPct": 0,
+   "aggregateTPSRuns": [
+    22.029954963694376
+   ],
+   "aggregateTPSp50": 22.029954963694376,
+   "aggregateUpliftVsPagedSingleRow": 0.9608791619178488,
+   "aggregateVsProductionSerial": 0.9615851579700945,
+   "blockSizeTokens": 16,
+   "compiled": false,
+   "decodeTokensPerRow": 256,
+   "engine": "scheduler",
+   "layerCount": 24,
+   "leftovers": {
+    "parity": {
+     "batchedRowMatches": [
+      true,
+      true,
+      true,
+      true
+     ],
+     "batchedTokenSHA256": "0d059932a80b530cae8847dc5ae886ea9264e994a5698bb63f63d65de839914b",
+     "comparedTokens": 256,
+     "oneRowMatch": true,
+     "pass": true,
+     "rows": [
+      {
+       "batchedTokenCount": 256,
+       "batchedTokenSHA256": "0d059932a80b530cae8847dc5ae886ea9264e994a5698bb63f63d65de839914b",
+       "serialTokenCount": 257,
+       "serialTokenSHA256": "0d059932a80b530cae8847dc5ae886ea9264e994a5698bb63f63d65de839914b",
+       "standaloneTokenCount": 256,
+       "standaloneTokenSHA256": "0d059932a80b530cae8847dc5ae886ea9264e994a5698bb63f63d65de839914b"
+      },
+      {
+       "batchedTokenCount": 256,
+       "batchedTokenSHA256": "5414374112139c16510b99813097b92aa39601fc6fbef5602524c81f00f5feae",
+       "serialTokenCount": 257,
+       "serialTokenSHA256": "5414374112139c16510b99813097b92aa39601fc6fbef5602524c81f00f5feae",
+       "standaloneTokenCount": 256,
+       "standaloneTokenSHA256": "5414374112139c16510b99813097b92aa39601fc6fbef5602524c81f00f5feae"
+      },
+      {
+       "batchedTokenCount": 256,
+       "batchedTokenSHA256": "15b51d4c0b1252759ab6687dc7407b9498d5c19c485125728cea595b69fd024e",
+       "serialTokenCount": 257,
+       "serialTokenSHA256": "15b51d4c0b1252759ab6687dc7407b9498d5c19c485125728cea595b69fd024e",
+       "standaloneTokenCount": 256,
+       "standaloneTokenSHA256": "15b51d4c0b1252759ab6687dc7407b9498d5c19c485125728cea595b69fd024e"
+      },
+      {
+       "batchedTokenCount": 256,
+       "batchedTokenSHA256": "7132b6284a000290c1cd836e1aa4f520d74ef0954760f5a78e343ad542ea093a",
+       "serialTokenCount": 257,
+       "serialTokenSHA256": "7132b6284a000290c1cd836e1aa4f520d74ef0954760f5a78e343ad542ea093a",
+       "standaloneTokenCount": 256,
+       "standaloneTokenSHA256": "7132b6284a000290c1cd836e1aa4f520d74ef0954760f5a78e343ad542ea093a"
+      }
+     ],
+     "serialTokenSHA256": "0d059932a80b530cae8847dc5ae886ea9264e994a5698bb63f63d65de839914b",
+     "standaloneRowMatches": [
+      true,
+      true,
+      true,
+      true
+     ]
+    },
+    "usagePass": true,
+    "usageRows": [
+     {
+      "cachedPromptTokens": 0,
+      "completionTokens": 256,
+      "emittedTokens": 256,
+      "promptTokens": 1536,
+      "requestID": "msb-sched-0-701B8C96-5B29-41BD-BA0A-4E5076D0EBF5",
+      "settlementDisposition": "eligible_owner",
+      "terminalStatus": "length"
+     },
+     {
+      "cachedPromptTokens": 0,
+      "completionTokens": 256,
+      "emittedTokens": 256,
+      "promptTokens": 1536,
+      "requestID": "msb-sched-1-4788A992-B128-450C-A9CB-2D383D008B36",
+      "settlementDisposition": "eligible_owner",
+      "terminalStatus": "length"
+     },
+     {
+      "cachedPromptTokens": 0,
+      "completionTokens": 256,
+      "emittedTokens": 256,
+      "promptTokens": 1536,
+      "requestID": "msb-sched-2-80885FA2-72B1-4036-9E4C-0826102D7FDF",
+      "settlementDisposition": "eligible_owner",
+      "terminalStatus": "length"
+     },
+     {
+      "cachedPromptTokens": 0,
+      "completionTokens": 256,
+      "emittedTokens": 256,
+      "promptTokens": 1536,
+      "requestID": "msb-sched-3-0A34824A-FE9E-4CB5-B9C5-550870999D9C",
+      "settlementDisposition": "eligible_owner",
+      "terminalStatus": "length"
+     }
+    ]
+   },
+   "maxPhysicalBlocks": 1024,
+   "mlxSwiftLMPin": "mlxlm-da8f1932f8e2",
+   "modelID": "<models>/gpt-oss-20b",
+   "modelTag": "model",
+   "pagedSingleRowCVPct": 0,
+   "pagedSingleRowTPSRuns": [
+    22.926873468380872
+   ],
+   "pagedSingleRowTPSp50": 22.926873468380872,
+   "peakRSSMB": 1330,
+   "perRowFractionOfPagedSingleRow": 0.2402197904794622,
+   "perRowTPSp50": 5.507488740923594,
+   "productionSerialCVPct": 0,
+   "productionSerialPromptTokens": 1536,
+   "productionSerialTPSRuns": [
+    22.91004055241409
+   ],
+   "productionSerialTPSp50": 22.91004055241409,
+   "promptTokenLengths": [
+    1536,
+    1536,
+    1536,
+    1536
+   ],
+   "promptTokenSHA256": [
+    "4e59d0e6a7a1c39973ef4b0a484c069296e8805bb86f437b028d18192823a852",
+    "7752e845ce304601182566f40112d9e19ed66b4988ccb8909acff0b756bf5060",
+    "529026769ac59a72d03a8541b25b3b3bbc4e97a6e9bc4ed14aef468c010382d1",
+    "68c213e899f2d36a0ce056c288fe624c2e9e68ffd9fed551198946977edcca01"
+   ],
+   "promptTokensPerRow": 1536,
+   "rows": 4,
+   "runs": 1,
+   "scenario": "parity",
+   "schemaVersion": 5,
+   "timestamp": "2026-11-06T13:54:15Z"
+  }
+ ]
+}

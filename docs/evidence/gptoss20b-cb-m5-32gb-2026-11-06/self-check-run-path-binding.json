@@ -1,0 +1,28 @@
+{
+ "command": [
+  "/usr/bin/sandbox-exec",
+  "-f",
+  "<lab>/lab.sb",
+  "<lab>/bin-final/macprovider-cli",
+  "serve",
+  "--no-join",
+  "--isolate-lifecycle",
+  "--credential-store",
+  "protected_file",
+  "--config",
+  "<lab>/selfcheck-gptoss20b/provider.yaml",
+  "--port",
+  "50199",
+  "--max-batch",
+  "4",
+  "--max-context",
+  "8192",
+  "--continuous-batch-queue-limit",
+  "8",
+  "--no-idle-prewarm"
+ ],
+ "elapsed_s": 1512.2110512256622,
+ "exit_code": 143,
+ "final_continuous_batching": null,
+ "reason": "exited_143"
+}

@@ -142,7 +142,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     }
 
     func testGPTOSS120BMixedArchitectureRequiresExactAllowlistedIdentityAndConfigMetadata() {
-        let gptOSS = Data(#"{"model_type":"gpt_oss","architectures":["GptOssForCausalLM"],"num_experts":128}"#.utf8)
+        let gptOSS = Data(#"{"model_type":"gpt_oss","architectures":["GptOssForCausalLM"],"num_experts":128,"num_hidden_layers":36,"sliding_window":128}"#.utf8)
         let unrelated = Data(#"{"model_type":"gpt_oss","architectures":["AnotherDecoder"]}"#.utf8)
 
         let admitted = ModelRuntime.pagedKVModelCapabilities(
@@ -157,10 +157,6 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
             hybridDecoderArchitectureVerified: admitted.hybridDecoderArchitectureVerified
         ))
 
-        XCTAssertFalse(ModelRuntime.pagedKVModelCapabilities(
-            modelID: "openai/gpt-oss-20b",
-            configJSONData: gptOSS
-        ).hybridDecoderArchitectureVerified)
         XCTAssertFalse(ModelRuntime.pagedKVModelCapabilities(
             modelID: "openai/gpt-oss-120b",
             configJSONData: unrelated
@@ -180,7 +176,11 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         let gptOSSVerified = PagedKVRuntimeModelCapabilities(
             modelFamily: "gpt_oss",
             requiresMoEDispatch: true,
-            hybridDecoderArchitectureVerified: true
+            hybridDecoderArchitectureVerified: true,
+            slidingWindowAttention: PagedKVSlidingWindowAttentionLayout(config: [
+                "num_hidden_layers": 2, "sliding_window": 128,
+                "layer_types": ["sliding_attention", "full_attention"],
+            ])
         )
 
         XCTAssertTrue(ModelRuntime.measuredMixedPagedKVTopology(

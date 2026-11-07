@@ -1,0 +1,12 @@
+{
+ "binary_sha256": "85ae7234c37101cb6239a5d45c291a9a964ae588c6a896c23a2f20400efee2f5",
+ "eight_row_projection": {
+  "available_pressure_bytes": 29205777612.8,
+  "margin_bytes": 3221225472,
+  "peak_bytes": 18616767829.333332
+ },
+ "four_row_ratio": 1.329045977999096,
+ "gate": 1.2,
+ "leftovers_pass": true,
+ "model": "gptoss20b"
+}
