@@ -2852,8 +2852,18 @@ actor CoordinatorClient {
             try await handleAEADRekeyCommit(dict)
         case "inference_request":
             // SPEC-036 FR-26: a scorer-only session refuses buyer work even
-            // if a coordinator routes it some.
-            guard !computeScoreReference, wsTunneledMode, let inferenceRelay else {
+            // if a coordinator routes it some. The NAK names the request so
+            // the coordinator fails it at once instead of waiting it out.
+            if computeScoreReference {
+                let reply = (dict["request_id"] as? String).flatMap(ChatCompletionRequest.normalizedRequestID) ?? type
+                try await sendNAK(
+                    inReplyTo: reply,
+                    code: "unknown_message_type",
+                    message: "Unrecognized message type: '\(type)'"
+                )
+                return
+            }
+            guard wsTunneledMode, let inferenceRelay else {
                 try await sendNAK(
                     inReplyTo: type,
                     code: "unknown_message_type",

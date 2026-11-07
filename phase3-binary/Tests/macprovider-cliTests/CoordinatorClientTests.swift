@@ -1081,7 +1081,7 @@ final class CoordinatorClientTests: XCTestCase {
         let frames = Array(recorded.dropFirst(initialCount))
         let nak = try XCTUnwrap(frames.first)
         XCTAssertEqual(nak["type"] as? String, "nak")
-        XCTAssertEqual(nak["in_reply_to"] as? String, "inference_request")
+        XCTAssertEqual(nak["in_reply_to"] as? String, "buyer-1")
         let error = try XCTUnwrap(nak["error"] as? [String: Any])
         XCTAssertEqual(error["code"] as? String, "unknown_message_type")
         XCTAssertFalse(frames.contains { ($0["type"] as? String)?.hasPrefix("inference_") == true })
