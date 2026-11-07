@@ -6613,6 +6613,12 @@ maxTokens: 1,
         }
     }
 
+    /// How long the oldest request queued for an inference permit has waited
+    /// (behind a self-check probe under an admission hold), or nil.
+    func oldestInferencePermitWaitSeconds() async -> Double? {
+        await inferenceGate.oldestSharedWaiterSeconds()
+    }
+
     /// The operation starts on this actor only after exclusive admission and
     /// identity checks, so it captures no stale container while queued. Awaiting
     /// its native body (including BlockingInferenceExecutor's continuation) keeps

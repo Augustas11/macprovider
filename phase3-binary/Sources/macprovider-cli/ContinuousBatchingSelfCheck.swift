@@ -687,6 +687,12 @@ enum ContinuousBatchingSelfCheck {
     /// is bounded separately); an unfinished ladder resumes at the next idle
     /// window or hold.
     static let admissionHoldCheckSeconds: Double = 300
+    /// SPEC-038 FR-CB10 item 3 (v0.3.36): a buyer admitted during a hold
+    /// waits behind the check's probe; the hold yields once the oldest such
+    /// buyer has waited this long. About twice the ~11 s hold seen on CLI
+    /// 1.8.281, so a short check finishes, and below the 30 s default
+    /// scheduler queue wait.
+    static let selfCheckBuyerWaitYieldSeconds: Double = 20
 
     /// The drain bound for a hold: the configured drain timeout, doubled after
     /// each consecutive drain timeout up to 4x, so long-running requests
@@ -748,8 +754,9 @@ enum ContinuousBatchingSelfCheck {
     }
 
     /// SPEC-038 FR-CB10 item 3 (v0.3.22): hold admission (routing sees no free
-    /// slot; a buyer that still arrives is admitted and ends the hold as a
-    /// yield, v0.3.36), let the in-flight ones finish (bounded by `drainSeconds`; none is cancelled
+    /// slot; a buyer that still arrives is admitted and queues behind the
+    /// check, which yields once `buyerWaitSeconds` reaches
+    /// `buyerWaitYieldSeconds`, v0.3.36), let the in-flight ones finish (bounded by `drainSeconds`; none is cancelled
     /// or dropped), run `check` for at most `checkSeconds`, then re-open
     /// admission. Never starts under a lifecycle lease, an operator pause or a
     /// drain. The hold ends early, as a yield, the moment a lease appears, the
@@ -764,6 +771,8 @@ enum ContinuousBatchingSelfCheck {
         checkSeconds: Double = admissionHoldCheckSeconds,
         lifecycleLease: @escaping @Sendable () -> String?,
         stillValid: @escaping @Sendable () async -> Bool = { true },
+        buyerWaitSeconds: @escaping @Sendable () async -> Double? = { nil },
+        buyerWaitYieldSeconds: Double = selfCheckBuyerWaitYieldSeconds,
         context: String,
         log: @escaping @Sendable (String) -> Void,
         check: @escaping @Sendable () async -> Bool
@@ -782,10 +791,21 @@ enum ContinuousBatchingSelfCheck {
         }
         let startedAt = Date()
         log("event=cb_self_check action=admission_hold_start in_flight=\(await providerStatus.requestsInFlightCount()) drain_timeout_s=\(drainSeconds) \(context)")
+        let buyerWait = AdmissionHoldBuyerWait()
         /// Why the hold must end now, or nil while it may continue.
         @Sendable func interruption() async -> String? {
             if Task.isCancelled { return "cancelled" }
-            if await providerStatus.selfCheckAdmissionHoldBuyerArrived() { return "buyer_arrival" }
+            // v0.3.36: an admitted buyer waits behind the check; the hold
+            // yields only once the oldest one has waited the bound.
+            if let wait = await buyerWaitSeconds() {
+                let bound = wait >= buyerWaitYieldSeconds
+                if buyerWait.begin() || bound {
+                    log("event=cb_self_check action=hold_buyer_waiting wait_s=\(String(format: "%.1f", wait)) bound_s=\(Int(buyerWaitYieldSeconds)) decision=\(bound ? "yield" : "wait")")
+                }
+                if bound { return "buyer_wait_bound" }
+            } else {
+                buyerWait.end()
+            }
             if let lease = lifecycleLease() { return "lifecycle_lease_\(lease)" }
             if await !providerStatus.isServingForSelfCheckAdmissionHold() { return "provider_not_serving" }
             if await !stillValid() { return "target_changed" }
@@ -801,14 +821,16 @@ enum ContinuousBatchingSelfCheck {
         // The hold preempted admitted local work when it began; only buyer
         // work seen during the drain makes a timeout a buyer drain timeout.
         var sawBuyerWork = await providerStatus.requestsInFlightCount() > 0
-        while await providerStatus.hasInferenceWork(), Date() < drainDeadline {
+        // Buyers admitted during the hold are not drained: they queue behind
+        // the check's probe (v0.3.36).
+        while await providerStatus.hasInferenceWorkPredatingSelfCheckAdmissionHold(), Date() < drainDeadline {
             if let reason = await interruption() { return await end(.yielded, reason: reason) }
             try? await Task.sleep(nanoseconds: 50_000_000)
             if await providerStatus.requestsInFlightCount() > 0 { sawBuyerWork = true }
         }
         if await providerStatus.requestsInFlightCount() > 0 { sawBuyerWork = true }
         let timeoutOutcome: AdmissionHoldOutcome = sawBuyerWork ? .drainTimeout : .localDrainTimeout
-        if await providerStatus.hasInferenceWork() { return await end(timeoutOutcome) }
+        if await providerStatus.hasInferenceWorkPredatingSelfCheckAdmissionHold() { return await end(timeoutOutcome) }
         if neededDrain, Date() >= drainDeadline { return await end(timeoutOutcome) }
         // Re-validate after the drain, immediately before any check work.
         if let reason = await interruption() { return await end(.yielded, reason: reason) }
@@ -1315,6 +1337,7 @@ actor ContinuousBatchingSelfCheckDriver {
             ),
             lifecycleLease: lifecycleLease,
             stillValid: { await runtime.continuousBatchingSelfCheckTarget(includeDecided: true) == target },
+            buyerWaitSeconds: { await runtime.oldestInferencePermitWaitSeconds() },
             context: "due_s=\(Int(dueSeconds)) model_sha256=\(target.key.modelSHA256)",
             log: log
         ) {
@@ -1378,7 +1401,9 @@ actor ContinuousBatchingSelfCheckDriver {
             group.addTask { try await body() }
             group.addTask {
                 while !Task.isCancelled {
-                    if await providerStatus.hasInferenceWork() { throw StepError.yielded }
+                    // Under a hold a buyer queues behind the step; the hold's
+                    // buyer-wait bound owns that yield (v0.3.36).
+                    if holdDeadline == nil, await providerStatus.hasInferenceWork() { throw StepError.yielded }
                     let snapshot = await providerStatus.snapshot()
                     if holdDeadline != nil,
                        !(snapshot.status == .ready || snapshot.status == .busy) {
@@ -1896,4 +1921,20 @@ final class AdmissionHoldCheckCompletion: @unchecked Sendable {
 
     func markDone() { lock.lock(); done = true; lock.unlock() }
     var isDone: Bool { lock.lock(); defer { lock.unlock() }; return done }
+}
+
+/// Whether a buyer is currently seen waiting behind a held check, so each
+/// waiting episode is logged once when it starts.
+private final class AdmissionHoldBuyerWait: @unchecked Sendable {
+    private let lock = NSLock()
+    private var waiting = false
+
+    /// Marks a buyer waiting; true when none was waiting before.
+    func begin() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        defer { waiting = true }
+        return !waiting
+    }
+
+    func end() { lock.lock(); waiting = false; lock.unlock() }
 }

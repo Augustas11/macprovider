@@ -8,14 +8,17 @@ Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security /
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
 **Change log v0.3.39 (2026-11-09, FR-CB10 admission hold admits buyer arrivals, Related: #2257):**
 FR-CB10 item 3: a buyer request that arrives during a self-check admission
-hold is admitted and ends the hold as a yield, instead of being refused with
-the retryable `continuous_batching_stream_backpressure` (direct HTTP) or
-`error_queue_full` (relay). On CLI 1.8.281 a provider with no buyer request
-in flight refused four sequential direct requests in about 1 ms each while
-the hold's step ran; on a single-provider model the buyer had nowhere else
-to go. The hold still reports no free slot, so routing keeps sending traffic
-elsewhere while it runs; a cancelled step is deferred as before and never
-becomes a measurement. Local-use requests stay declined for the hold.
+hold is admitted and waits behind the check's probe, instead of being
+refused with the retryable `continuous_batching_stream_backpressure`
+(direct HTTP) or `error_queue_full` (relay). On CLI 1.8.281 a provider with
+no buyer request in flight refused four sequential direct requests in about
+1 ms each while the hold's step ran; on a single-provider model the buyer
+had nowhere else to go. The hold keeps the v0.3.23 guarantee: an arrival
+does not end it, and the drain does not wait for buyers admitted during the
+hold. It yields only once a buyer has waited 20 s
+(`selfCheckBuyerWaitYieldSeconds`, about twice the ~11 s hold measured on
+1.8.281). The hold still reports no free slot, a cancelled step is deferred
+as before, and local-use requests stay declined for the hold.
 
 **Change log v0.3.38 (2026-11-08, MLX memory limit below the GPU working set, Related: #2226, Related: #2249):**
 FR-CB2: native runtime startup MUST set MLX's process memory limit to 90% of
@@ -1688,16 +1691,27 @@ buyer traffic. No extra runtime enable flag is introduced.
    re-measurement of a stored decision keeps waiting for an idle window, and
    an idle Mac runs the check without a hold). Under the hold heartbeats and
    capacity updates report the provider busy with no free slot, so routing
-   sends new requests elsewhere. (v0.3.36) A buyer request that still arrives
-   (a direct HTTP request, a relay request, or one a coordinator that still
-   counts its own forwarded requests routes meanwhile) MUST be admitted and
-   MUST NOT be refused because of the hold, with
+   sends new requests elsewhere. (v0.3.36) A buyer request that still
+   arrives (a direct HTTP request, a relay request, or one a coordinator
+   that still counts its own forwarded requests routes meanwhile) MUST be
+   admitted and MUST NOT be refused because of the hold, with
    `continuous_batching_stream_backpressure`, `error_queue_full` or any other
-   status: its arrival ends the hold as a yield (`reason=buyer_arrival`),
-   whether the hold is draining or checking; the check is cancelled, its
-   cancelled step is deferred and never becomes a measurement, and the
-   request waits for the probe's exclusive residency to retire (below) and
-   is then served. Local use (SPEC-001-R011) stays declined for the hold.
+   status. It waits behind the check's exclusive probe residency (below) and
+   is served when that residency is released; it MUST NOT end the hold by
+   arriving. The drain waits only for work admitted before the hold; a buyer
+   admitted during the hold is not drained. The hold MUST yield
+   (`reason=buyer_wait_bound`) once the longest-waiting buyer has waited
+   `selfCheckBuyerWaitYieldSeconds` (20 s) for inference: about twice the
+   ~11 s hold measured on CLI 1.8.281, so a short check completes and the
+   buyer sees only added time to first token, while a longer check yields
+   and the buyer is served after its cancelled step retires. The bound stays
+   below the 30 s default scheduler queue wait, whose clock starts only once
+   the buyer holds an inference permit, so the wait never times the buyer
+   out. A cancelled step is deferred and never becomes a measurement; a step
+   that completes beside a waiting buyer counts, because the buyer never
+   overlaps probe residency. Each wait decision is logged
+   (`action=hold_buyer_waiting wait_s=... decision=wait|yield`). Local use
+   (SPEC-001-R011) stays declined for the hold.
    The provider MUST let every in-flight
    request finish and MUST NOT cancel or drop one; if they have not finished
    within the drain bound (the configured drain timeout, doubled after each

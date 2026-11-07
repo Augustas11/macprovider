@@ -14,6 +14,7 @@ actor AsyncSemaphore {
         let id: UUID
         let ownership: Ownership
         let continuation: CheckedContinuation<Void, Error>
+        let enqueuedAt = DispatchTime.now().uptimeNanoseconds
     }
 
     /// Free shared permits; negative after lowering the limit below active holders.
@@ -50,6 +51,15 @@ actor AsyncSemaphore {
 
     /// Queued acquisitions, excluding callers that already own the gate.
     func queuedWaiterCount() -> Int { waiters.count }
+
+    /// Seconds the longest-queued shared waiter has waited, or nil when none
+    /// waits. A CB self-check probe waits for exclusive ownership, so this is
+    /// the oldest request queued behind it (SPEC-038 FR-CB10 item 3, v0.3.36).
+    func oldestSharedWaiterSeconds() -> Double? {
+        guard let oldest = waiters.first(where: { $0.ownership == .shared }) else { return nil }
+        let now = DispatchTime.now().uptimeNanoseconds
+        return Double(now > oldest.enqueuedAt ? now - oldest.enqueuedAt : 0) / 1_000_000_000
+    }
 
     /// Permanently prevents admission when native cleanup cannot prove retirement.
     /// Existing holders still own their permits and may finish safely.
