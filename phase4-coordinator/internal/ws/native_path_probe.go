@@ -301,9 +301,12 @@ func (s *Server) handleAdminNativePathProbe(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	cleartext, _ := json.Marshal(outer)
-	frame, err := session.sealNativePathProbeRequest(provider, id, cleartext, profile)
+	var sendErr error
+	_, err = session.sealNativePathProbeRequest(provider, id, cleartext, profile, func(frame []byte) {
+		sendErr = session.send(frame)
+	})
 	if err == nil {
-		err = session.send(frame)
+		err = sendErr
 	}
 	session.rekeyMu.Unlock()
 	if err != nil {
@@ -466,11 +469,16 @@ func (s *Server) handleComputeNativePathProbeResult(providerID, assignedID strin
 	s.consumeNativePathProbeResult(providerID, assignedID, profile, payload)
 }
 
-func (ps *providerSession) sealNativePathProbeRequest(provider pool.Provider, probeID string, cleartextOuterEnvelope []byte, profile string) ([]byte, error) {
+// sealNativePathProbeRequest queues a sealed frame through enqueue before
+// releasing tier2Mu, like sealInferenceRequestFrame (#2245).
+func (ps *providerSession) sealNativePathProbeRequest(provider pool.Provider, probeID string, cleartextOuterEnvelope []byte, profile string, enqueue func([]byte)) ([]byte, error) {
 	ps.tier2Mu.Lock()
 	session := ps.tier2
 	if session == nil {
 		ps.tier2Mu.Unlock()
+		if enqueue != nil {
+			enqueue(cleartextOuterEnvelope)
+		}
 		return cleartextOuterEnvelope, nil
 	}
 	defer ps.tier2Mu.Unlock()
@@ -499,13 +507,20 @@ func (ps *providerSession) sealNativePathProbeRequest(provider pool.Provider, pr
 		return nil, err
 	}
 	session.C2PCounter++
-	return json.Marshal(encryptedLosslessnessRequest{
+	frame, err := json.Marshal(encryptedLosslessnessRequest{
 		Type:      (profile + ".encrypted_request"),
 		RequestID: probeID,
 		Stream:    false,
 		Encrypted: true,
 		Enc:       envelope.Enc,
 	})
+	if err != nil {
+		return nil, err
+	}
+	if enqueue != nil {
+		enqueue(frame)
+	}
+	return frame, nil
 }
 
 func (ps *providerSession) openNativePathProbeResult(provider pool.Provider, probeID string, envelope tier2.AEADEnvelope, profile string) ([]byte, error) {
