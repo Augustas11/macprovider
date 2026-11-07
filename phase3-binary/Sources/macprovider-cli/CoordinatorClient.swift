@@ -6418,11 +6418,19 @@ actor CoordinatorClient {
     // In production the captured socket is non-nil; in unit tests
     // the WS is mocked via sendOverride and the cancellation arrives
     // through the existing cooperative Task.cancel path.
+    //
+    // Issue #2246: only the send is under the timer. Building the payload
+    // awaits runtime, conversation-cache and scheduler state that a
+    // long-context CB commit can hold for seconds; timing that out cancelled
+    // a healthy socket and cut every in-flight stream. A build that never
+    // finishes is left to the heartbeat watchdog, which requests transport
+    // recovery once no heartbeat has succeeded within its tolerance.
     private func sendHeartbeatBounded(resetWindow: Bool) async throws {
+        let built = try await buildHeartbeatPayload(resetWindow: resetWindow)
         let socketRef = webSocket
         try await withThrowingTaskGroup(of: Void.self) { group in
             group.addTask { [weak self] in
-                try await self?.sendHeartbeat(resetWindow: resetWindow)
+                try await self?.sendBuiltHeartbeat(built)
             }
             group.addTask {
                 let nanoseconds = UInt64(Self.heartbeatSendTimeoutSeconds * 1_000_000_000)
@@ -7685,6 +7693,15 @@ actor CoordinatorClient {
     }
 
     private func sendHeartbeat(resetWindow: Bool = true) async throws {
+        try await sendBuiltHeartbeat(buildHeartbeatPayload(resetWindow: resetWindow))
+    }
+
+    /// A finished heartbeat payload handed from the build to the bounded send.
+    private struct BuiltHeartbeat: @unchecked Sendable {
+        let payload: [String: Any]
+    }
+
+    private func buildHeartbeatPayload(resetWindow: Bool) async throws -> BuiltHeartbeat {
         let snapshot = await providerStatus.snapshot(resetWindow: resetWindow)
         let snapshotWireModelID = coordinatorWireModelID(for: snapshot.modelID)
         var payload: [String: Any] = [
@@ -7817,8 +7834,13 @@ actor CoordinatorClient {
         if let heartbeatBeforeSendForTest {
             await heartbeatBeforeSendForTest()
         }
-        // Clamp at send time, after every await above: a pause accepted while
-        // this heartbeat was being built must not be overtaken by a stale
+        return BuiltHeartbeat(payload: payload)
+    }
+
+    private func sendBuiltHeartbeat(_ built: BuiltHeartbeat) async throws {
+        var payload = built.payload
+        // Clamp at send time, after every await of the build: a pause accepted
+        // while this heartbeat was being built must not be overtaken by a stale
         // ready/busy (#1880 audit R2).
         if operatorPaused,
            let status = payload["status"] as? String,
@@ -7830,8 +7852,8 @@ actor CoordinatorClient {
         await sendShardGroupMessages(sessionStarted: false)
     }
 
-    /// Test seam: runs inside sendHeartbeat after the payload is built and
-    /// before the send-time pause clamp.
+    /// Test seam: runs at the end of the heartbeat build, outside the bounded
+    /// send timer and before the send-time pause clamp.
     private var heartbeatBeforeSendForTest: (@Sendable () async -> Void)?
 
     func setHeartbeatBeforeSendForTest(_ hook: (@Sendable () async -> Void)?) {

@@ -5905,6 +5905,60 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertLessThan(elapsedNs, 10 * 1_000_000_000, "bounded send should not block beyond ~5s, got \(elapsedNs)ns")
     }
 
+    // Issue #2246: a heartbeat build that waits 8 s on busy runtime state
+    // (long-context CB) must not trip the 5 s send bound and cancel a healthy
+    // socket; the heartbeat still goes out once built.
+    func testHeartbeatBoundedSlowBuildDoesNotCancelSocket() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(status: status, recorder: recorder)
+        let socket = FakeProviderWebSocketTask(receiveResults: [])
+        await client.setWebSocketForTest(socket)
+        await client.setHeartbeatBeforeSendForTest {
+            try? await Task.sleep(nanoseconds: 8 * 1_000_000_000)
+        }
+
+        try await client.sendHeartbeatBoundedForTest()
+
+        let frames = await recorder.frames
+        XCTAssertEqual(frames.last?["type"] as? String, "heartbeat")
+        XCTAssertEqual(socket.cancelCountSnapshot(), 0)
+    }
+
+    // Issue #2246: with the build out of the timer, a send that hangs still
+    // trips the 5 s bound and cancels the socket so reconnect can run.
+    func testHeartbeatBoundedStalledSendCancelsSocket() async throws {
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(
+            status: status,
+            recorder: CoordinatorFrameRecorder(),
+            sendOverride: { _ in
+                try? await Task.sleep(nanoseconds: 30 * 1_000_000_000)
+            }
+        )
+        let socket = FakeProviderWebSocketTask(receiveResults: [])
+        await client.setWebSocketForTest(socket)
+
+        let start = DispatchTime.now().uptimeNanoseconds
+        do {
+            try await client.sendHeartbeatBoundedForTest()
+            XCTFail("expected CoordinatorHeartbeatSendTimeout")
+        } catch is CoordinatorHeartbeatSendTimeout {
+            // expected
+        }
+        let elapsedNs = DispatchTime.now().uptimeNanoseconds - start
+        XCTAssertLessThan(elapsedNs, 10 * 1_000_000_000)
+        XCTAssertEqual(socket.cancelCountSnapshot(), 1)
+    }
+
     func testHeartbeatWatchdogRequestsReconnectWithoutExitingOrUnloadingModel() async throws {
         let status = ProviderStatus(
             modelID: "model-a", modelLoaded: true,
