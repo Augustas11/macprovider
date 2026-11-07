@@ -406,8 +406,9 @@ class EffectiveDiffTests(unittest.TestCase):
         # onto the deepseek/deepseek-v4-flash row.
         # #2163: the Bonsai 2B candidate cut prices its exact served artifact
         # through a class row without admitting it for recommendation.
-        # #2189: the abliterated GLM-5.3-Flash promotion moves its served
-        # artifact id and z-ai slug onto its own labelled row.
+        # #2189: the abliterated GLM-5.3-Flash build is retired; its catalog
+        # key, served artifact id and z-ai slug move from its removed labelled
+        # row to `default`.
         self.assertEqual(
             cr.load_pricing_move_acks(committed, "committed"),
             {
@@ -417,8 +418,9 @@ class EffectiveDiffTests(unittest.TestCase):
                 ("z-ai/glm-5.3-flash", "default", "zai-org/glm-5.3-flash"),
                 ("TensorFold/DeepSeek-V4-Flash-0731-MXFP4-MLX", "default", "deepseek/deepseek-v4-flash"),
                 ("prism-ml/Ternary-Bonsai-2-2B-mlx-2bit", "default", "prism-ml/ternary-bonsai-2-2b-mlx-2bit"),
-                ("grant-ai/GLM-5.3-Flash-Abliterated-MLX-4bit", "default", "zai-org/glm-5.3-flash-abliterated"),
-                ("z-ai/glm-5.3-flash-abliterated", "default", "zai-org/glm-5.3-flash-abliterated"),
+                ("grant-ai/GLM-5.3-Flash-Abliterated-MLX-4bit", "zai-org/glm-5.3-flash-abliterated", "default"),
+                ("zai-org/glm-5.3-flash-abliterated", "zai-org/glm-5.3-flash-abliterated", "default"),
+                ("z-ai/glm-5.3-flash-abliterated", "zai-org/glm-5.3-flash-abliterated", "default"),
             },
         )
         for bad in (

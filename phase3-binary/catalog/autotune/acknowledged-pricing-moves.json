@@ -34,13 +34,18 @@
     },
     {
       "model": "grant-ai/GLM-5.3-Flash-Abliterated-MLX-4bit",
-      "from_row": "default",
-      "to_row": "zai-org/glm-5.3-flash-abliterated"
+      "from_row": "zai-org/glm-5.3-flash-abliterated",
+      "to_row": "default"
+    },
+    {
+      "model": "zai-org/glm-5.3-flash-abliterated",
+      "from_row": "zai-org/glm-5.3-flash-abliterated",
+      "to_row": "default"
     },
     {
       "model": "z-ai/glm-5.3-flash-abliterated",
-      "from_row": "default",
-      "to_row": "zai-org/glm-5.3-flash-abliterated"
+      "from_row": "zai-org/glm-5.3-flash-abliterated",
+      "to_row": "default"
     }
   ]
 }

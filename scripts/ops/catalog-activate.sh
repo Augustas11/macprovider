@@ -1168,10 +1168,22 @@ ssh \"\$STUDIO_SSH\" 'set -e; c=~/.config/macprovider/config.yaml; cp -p \"\$c\"
 
   # Evidence (e) owed (SPEC-023-R017 5(e)): every ledger entry whose model no
   # buyer_serving_e2e record names yet. A malformed entry is unknown, not done.
-  local owed_scan owed_models="" owed_bad=""
-  owed_scan="$(python3 -I - "$owed_dir" "$OPS_STATE_DIR" <<'PY'
+  # Once the committed release is live, an entry whose model@sha256 is no row
+  # of its candidate feed is retired: no provider serves it from the live
+  # catalog, so no (e) is owed for it.
+  local owed_scan owed_models="" owed_bad="" owed_retired="" live_candidates=""
+  [ "$live_rid" != "$R" ] || live_candidates="$CATALOG_TARGET_DIR/autotune-candidates.json"
+  owed_scan="$(python3 -I - "$owed_dir" "$OPS_STATE_DIR" "$live_candidates" <<'PY'
 import glob, json, os, re, sys
-owed_dir, state = sys.argv[1:3]
+owed_dir, state, live_candidates = sys.argv[1:4]
+# The model@sha256 pairs of the live catalog; None (retire nothing) when the
+# committed release is not live yet or its candidate feed is unreadable.
+catalog = None
+if live_candidates:
+    try:
+        catalog = {(row["model_id"], row["model_sha256"]) for row in json.load(open(live_candidates))["rows"].values()}
+    except Exception:
+        catalog = None
 # A buyer_serving_e2e record proves exactly the model@sha256 pairs it names.
 proved = set()
 for path in glob.glob(os.path.join(state, "catalog-*", "buyer_serving_e2e.json")):
@@ -1180,7 +1192,7 @@ for path in glob.glob(os.path.join(state, "catalog-*", "buyer_serving_e2e.json")
     except Exception:
         continue
     proved |= set(re.findall(r"(?:^|\s)model=(\S+)@([0-9A-Za-z]+)(?=\s|$|[,;])", text))
-open_models, bad = [], []
+open_models, bad, retired = [], [], []
 for path in sorted(glob.glob(os.path.join(owed_dir, "*.json"))):
     try:
         rec = json.load(open(path))
@@ -1190,15 +1202,22 @@ for path in sorted(glob.glob(os.path.join(owed_dir, "*.json"))):
     except Exception:
         bad.append(os.path.basename(path))
         continue
-    if (model, sha) not in proved:
-        open_models.append("%s@%s (owed since %s)" % (model, sha, rel))
+    if (model, sha) in proved:
+        continue
+    if catalog is not None and (model, sha) not in catalog:
+        retired.append("%s@%s" % (model, sha))
+        continue
+    open_models.append("%s@%s (owed since %s)" % (model, sha, rel))
 print("BAD " + " ".join(bad))
 print("OPEN " + ", ".join(open_models))
+print("RETIRED " + ", ".join(retired))
 PY
 )"
   owed_bad="$(printf '%s\n' "$owed_scan" | sed -n 's/^BAD //p')"
   owed_models="$(printf '%s\n' "$owed_scan" | sed -n 's/^OPEN //p')"
+  owed_retired="$(printf '%s\n' "$owed_scan" | sed -n 's/^RETIRED //p')"
   fact buyer_serving_e2e_owed "$owed_models"
+  fact buyer_serving_e2e_retired "$owed_retired"
   if [ -n "$owed_bad" ]; then
     step buyer_serving_e2e blocked "unreadable owed-evidence record(s): $owed_bad"
     set_next buyer_serving_e2e blocked "Read the owed evidence (e) records" "ls -l '$owed_dir'" \

@@ -2184,9 +2184,17 @@ if (cd "$tmp/fakedeploy" && bash -euo pipefail -c "$cmd") >/dev/null 2>&1 && [ "
   python3 -c 'import glob,json,sys; d=json.load(open(glob.glob(sys.argv[1] + "/*.json")[0])); sys.exit(0 if d["release_id"] == sys.argv[2] and d["model_id"] == "mlx-community/Test-VL-2B" else 1)' "$OWED_DIR" "$R"; then ok; else bad "activation command did not record the owed (e)"; fi
 # The owed (e) is a post-activation, operator-recorded step that outlives its release.
 printf '{"release_id":"%s","status":"live_verified","feeds":{"x":{"verified_at":"2026-01-01T00:00:00Z"}}}' "$R" > "$tmp/svc/autotune-release.json"
+# A model the live catalog no longer carries owes no (e): it is retired.
+run_rc 0 "catalog status with (e) owed for a model the live catalog dropped" scripts/ops/catalog-activate.sh status
+if [ "$(state_of buyer_serving_e2e)" = "done" ] && [ "$(fact_of buyer_serving_e2e_retired)" = "mlx-community/Test-VL-2B@abab" ]; then ok; else bad "dropped model (e): $(state_of buyer_serving_e2e) $(fact_of buyer_serving_e2e_retired)"; fi
+# The rest of the owed (e) cases use a row the live catalog carries.
+read -r OWED_M OWED_S <<EOF_ROW
+$(python3 -c 'import json,sys; r=sorted(json.load(open(sys.argv[1]))["rows"].values(), key=lambda r: r["model_id"])[0]; print(r["model_id"], r["model_sha256"])' "$W/phase3-binary/catalog/autotune/autotune-candidates.json")
+EOF_ROW
+python3 -c 'import glob,json,sys; p=glob.glob(sys.argv[1] + "/*.json")[0]; d=json.load(open(p)); d["model_id"], d["sha256"] = sys.argv[2], sys.argv[3]; json.dump(d, open(p, "w"), sort_keys=True)' "$OWED_DIR" "$OWED_M" "$OWED_S"
 run_rc 0 "catalog status with (e) owed after activation" scripts/ops/catalog-activate.sh status
 if [ "$(state_of buyer_serving_e2e)" = owed ]; then ok; else bad "owed (e) state: $(state_of buyer_serving_e2e)"; fi
-case "$(fact_of buyer_serving_e2e_owed)" in "mlx-community/Test-VL-2B@abab (owed since $R)") ok ;; *) bad "owed (e) fact: $(fact_of buyer_serving_e2e_owed)" ;; esac
+case "$(fact_of buyer_serving_e2e_owed)" in "$OWED_M@$OWED_S (owed since $R)") ok ;; *) bad "owed (e) fact: $(fact_of buyer_serving_e2e_owed)" ;; esac
 printf '{"release_id":"newer-release","status":"live_verified","feeds":{"x":{"verified_at":"2026-01-01T00:00:00Z"}}}' > "$tmp/svc/autotune-release.json"
 run_rc 0 "catalog status with (e) owed by an older release" scripts/ops/catalog-activate.sh status
 if [ "$(state_of buyer_serving_e2e)" = owed ]; then ok; else bad "an older release's owed (e) vanished: $(state_of buyer_serving_e2e)"; fi
@@ -2196,10 +2204,10 @@ if [ "$(state_of buyer_serving_e2e)" = blocked ]; then ok; else bad "malformed o
 rm -f "$OWED_DIR/broken.json"
 mkdir -p "$tmp/state/catalog-other"
 # Free text or a longer model id never closes it: only the exact token.
-printf '{"step":"buyer_serving_e2e","evidence":"mlx-community/Test-VL-2B-Pro: model=mlx-community/Test-VL-2B-Pro@abab request ops-e2e-0"}\n' > "$tmp/state/catalog-other/buyer_serving_e2e.json"
+printf '{"step":"buyer_serving_e2e","evidence":"%s-Pro: model=%s-Pro@%s request ops-e2e-0"}\n' "$OWED_M" "$OWED_M" "$OWED_S" > "$tmp/state/catalog-other/buyer_serving_e2e.json"
 run_rc 0 "catalog status with evidence for another model" scripts/ops/catalog-activate.sh status
 if [ "$(state_of buyer_serving_e2e)" = owed ]; then ok; else bad "a substring closed the owed (e): $(state_of buyer_serving_e2e)"; fi
-printf '{"step":"buyer_serving_e2e","evidence":"model=mlx-community/Test-VL-2B@abab request ops-e2e-1 served by the canary session, settlement row at 13500/27000"}\n' > "$tmp/state/catalog-other/buyer_serving_e2e.json"
+printf '{"step":"buyer_serving_e2e","evidence":"model=%s@%s request ops-e2e-1 served by the canary session, settlement row at 13500/27000"}\n' "$OWED_M" "$OWED_S" > "$tmp/state/catalog-other/buyer_serving_e2e.json"
 run_rc 0 "catalog status after the owed (e) is recorded" scripts/ops/catalog-activate.sh status
 if [ "$(state_of buyer_serving_e2e)" != owed ] && [ "$(fact_of buyer_serving_e2e_owed)" = None ]; then ok; else bad "recorded owed (e) still open: $(state_of buyer_serving_e2e) $(fact_of buyer_serving_e2e_owed)"; fi
 rm -rf "$tmp/svc/autotune-release.json" "$OWED_DIR" "$tmp/state/catalog-other" "$CSCOPE"/preflight-*.json
