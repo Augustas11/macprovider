@@ -520,12 +520,21 @@ enum NativeMTPAdmissionSidecar {
     /// most 1024 entries.
     static let maxQuantizationExceptions = 1024
     static let embeddedMTPFamilyAdapter = "glm5_next_mtp_v1"
+    /// SPEC-048-R002 `gemma4_mtp_v1`: the Gemma 4 assistant ships inside the
+    /// target artifact (`model-mtp.safetensors`), so it is `checkpoint_mtp` too.
+    static let gemma4MTPFamilyAdapter = "gemma4_mtp_v1"
 
     /// Implementation ceiling, not a qualification: an increased signed bound
     /// still needs exact parity and R015 qualification at that bound. Existing
-    /// GLM policy remains one; other families retain the generic 1...8 range.
+    /// GLM policy remains one; the Gemma 4 assistant runs one row per drafter
+    /// forward and is bounded to one native row; other families retain the
+    /// generic 1...8 range.
     static func maxNativeActiveRowsBound(familyAdapter: String) -> Int? {
-        familyAdapter == embeddedMTPFamilyAdapter ? 4 : nil
+        switch familyAdapter {
+        case embeddedMTPFamilyAdapter: 4
+        case gemma4MTPFamilyAdapter: 1
+        default: nil
+        }
     }
 
     /// Greedy proposals also support sampled requests: acceptance compares each
@@ -536,10 +545,12 @@ enum NativeMTPAdmissionSidecar {
     }
 
     /// SPEC-048-R002 (0.1.35/0.1.36): the release entry carries no layout, so
-    /// the adapter decides it. Only the GLM-5-Next adapter is embedded; every
-    /// other adapter keeps the separate-artifact layout.
+    /// the adapter decides it. The GLM-5-Next and Gemma 4 adapters are
+    /// embedded; every other adapter keeps the separate-artifact layout.
     static func sourceLayout(forFamilyAdapter familyAdapter: String) -> String {
-        familyAdapter == embeddedMTPFamilyAdapter ? "checkpoint_mtp" : "separate_artifact"
+        [embeddedMTPFamilyAdapter, gemma4MTPFamilyAdapter].contains(familyAdapter)
+            ? "checkpoint_mtp"
+            : "separate_artifact"
     }
     nonisolated(unsafe) static var testingDescriptorCaptureMutationHook: ((String) throws -> Void)?
     nonisolated(unsafe) static var testingExpectedStagingDeviceOverride: dev_t?

@@ -3517,7 +3517,9 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 acceptedTokens: Array(transaction.proposalTokens.prefix(input.committedProposalTokenCount)),
                 finalToken: finalTokenID,
                 positionDeltas: transaction.targetState.positionDeltas,
-                state: state
+                state: state,
+                sharedKV: transaction.targetState.sharedKV,
+                sharedKVOffset: transaction.targetState.queryOffset
             )
         }
         return try await drafterContainer.perform(

@@ -34,7 +34,7 @@ needs a SPEC revision.
 
 | Fork | Upstream | Tag scheme | Current tag | Revision | Upstream base |
 | --- | --- | --- | --- | --- | --- |
-| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.25` | `da8f1932f8e2a46477a1a35663955267bc6fcd04` | `3.32.3` (`3b339ad6…`) |
+| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.30` | `b2a45b03bbef512827a8960ded61591a3b6283d7` | `3.32.3` (`3b339ad6…`) |
 | `Augustas11/mlx-swift` | `ml-explore/mlx-swift` | `<upstream>-macprovider.<n>` | `0.32.3-macprovider.11` | `c774cb0934c7503bc3fe1c3d1afbe44c728e8891` | `0.32.3` (`19601207…`) |
 | `Augustas11/mlx` (MLX core) | `ml-explore/mlx` | `v<upstream>-macprovider.<n>` | `v0.32.4-macprovider.6` | `51edbb37620aef7c860ab5d7cdb7bf5b14333da2` | `v0.32.4` (`36969c09…`) |
 | `Augustas11/mlx-c` | `ml-explore/mlx-c` | `v<upstream>-macprovider.<n>` | `v0.6.0-macprovider.2` | `2b1ff2b5b5129a6115771da32e1bac3b6b01ab01` | pinned base `ebc88f10…` |
@@ -46,6 +46,17 @@ submodules pin core and C. The C fork's standalone core fetch pins the same
 core revision. Swift 6.3 is the effective minimum for the graph.
 
 ### Current tuple delta
+
+As of 2026-11-07 the campaign branch's LM row `3.32.3-macprovider.30` is the
+campaign candidate for #2154 and is not tagged yet. It is one commit
+(`b2a45b0`) on `3.32.3-macprovider.29-sync` (`bf70aa4`), which carries
+`.25` plus the 2026-11-04 upstream sync (#2230: MiniMax M3 fused experts,
+GLM-5-Next quantization-map paths, cache-mask fixes, quantized-KV fused
+prefill, Nemotron 3.5, LFM3). The commit adds the Gemma 4 assistant as a
+packed native-MTP drafter, loads it from the target's
+`model-mtp.safetensors`, and makes the text-only `gemma4_unified` target emit
+the hidden state and last full/sliding K/V the assistant attends over. The
+Swift, core and C rows are unchanged.
 
 As of 2026-11-06 the LM row is `3.32.3-macprovider.25` (`da8f193`), on
 `3.32.3-macprovider.24`: it adds `.23`'s one commit (`93234b6`, #2198), which

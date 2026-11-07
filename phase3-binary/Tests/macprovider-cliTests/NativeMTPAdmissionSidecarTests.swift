@@ -1769,6 +1769,9 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         XCTAssertEqual(try rejectedReleaseEnvelopeError(wide), .invalidValue("$.entries[0].max_native_active_rows"))
         XCTAssertEqual(NativeMTPAdmissionSidecar.maxNativeActiveRowsBound(familyAdapter: "glm5_next_mtp_v1"), 4)
         XCTAssertNil(NativeMTPAdmissionSidecar.maxNativeActiveRowsBound(familyAdapter: "qwen3_5_mtp_v1"))
+        XCTAssertEqual(NativeMTPAdmissionSidecar.maxNativeActiveRowsBound(familyAdapter: "gemma4_mtp_v1"), 1)
+        XCTAssertEqual(NativeMTPAdmissionSidecar.sourceLayout(forFamilyAdapter: "gemma4_mtp_v1"), "checkpoint_mtp")
+        XCTAssertEqual(NativeMTPAdmissionSidecar.sourceLayout(forFamilyAdapter: "qwen3_5_mtp_v1"), "separate_artifact")
     }
 
     func testReleaseEnvelopeRejectsEmbeddedAdapterWithASeparateMTPMember() throws {

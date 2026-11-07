@@ -181,13 +181,94 @@ final class ModelRuntimeSwapTests: XCTestCase {
                                  cacheKinds: [.recurrentMamba, .pagedAttention], drafterPresent: false))
     }
 
+    /// SPEC-048 0.1.76: `gemma4_mtp_v1` pairs only with `checkpoint_mtp`,
+    /// drafts 1...3 tokens from one position whatever its decoder depth, owns
+    /// no drafter cache, and fails closed until `gemma4` attaches to paged KV.
+    func testGemma4NativeMTPAdmissionGate() {
+        let gemma4 = PagedKVRuntimeModelCapabilities(
+            modelFamily: "gemma4", requiresMoEDispatch: false, hybridDecoderArchitectureVerified: false
+        )
+        func supported(
+            _ capability: NativeMTPAdmissionCapability,
+            modelCapabilities: PagedKVRuntimeModelCapabilities? = nil,
+            drafterPresent: Bool = true
+        ) -> Bool {
+            ModelRuntime.nativeMTPAdmissionCapabilitySupportedForTest(
+                capability,
+                canonicalCacheClass: "paged_kv",
+                modelCapabilities: modelCapabilities ?? gemma4,
+                cacheKinds: nil,
+                drafterPresent: drafterPresent
+            )
+        }
+        func capability(
+            sourceLayout: String = "checkpoint_mtp",
+            predictionLayerCount: Int = 4,
+            maxProposalDepth: Int = 1
+        ) -> NativeMTPAdmissionCapability {
+            makeNativeMTPAdmissionCapability(
+                familyAdapter: "gemma4_mtp_v1",
+                sourceLayout: sourceLayout,
+                predictionLayerCount: predictionLayerCount,
+                maxProposalDepth: maxProposalDepth,
+                completeWindowBytesByDepth: Array(repeating: 8, count: maxProposalDepth + 1),
+                stateClass: "stageable_rewindable",
+                maxNativeActiveRows: 1
+            )
+        }
+        XCTAssertFalse(PagedKVAttachGate.recognizedModelFamilies.contains("gemma4"))
+        // Every other check passes, so the paged-KV attach is the only gate.
+        for depth in 1...3 {
+            XCTAssertFalse(supported(capability(maxProposalDepth: depth)))
+        }
+        XCTAssertFalse(supported(capability(sourceLayout: "separate_artifact")))
+        XCTAssertFalse(supported(capability(), modelCapabilities: PagedKVRuntimeModelCapabilities(
+            modelFamily: "qwen", requiresMoEDispatch: false, hybridDecoderArchitectureVerified: false
+        )))
+
+        XCTAssertEqual(ModelRuntime.gemma4NativeMTPMaximumProposalDepth, 3)
+        for depth in 1...3 {
+            XCTAssertTrue(ModelRuntime.nativeMTPProposalDepthSupported(
+                familyAdapter: "gemma4_mtp_v1", predictionLayerCount: 4, maxProposalDepth: depth
+            ))
+        }
+        XCTAssertFalse(ModelRuntime.nativeMTPProposalDepthSupported(
+            familyAdapter: "gemma4_mtp_v1", predictionLayerCount: 4, maxProposalDepth: 0
+        ))
+        XCTAssertFalse(ModelRuntime.nativeMTPProposalDepthSupported(
+            familyAdapter: "gemma4_mtp_v1", predictionLayerCount: 4, maxProposalDepth: 4
+        ))
+        // Qwen and GLM keep one drafted token per prediction layer.
+        XCTAssertTrue(ModelRuntime.nativeMTPProposalDepthSupported(
+            familyAdapter: "glm5_next_mtp_v1", predictionLayerCount: 1, maxProposalDepth: 1
+        ))
+        XCTAssertFalse(ModelRuntime.nativeMTPProposalDepthSupported(
+            familyAdapter: "qwen3_5_mtp_v1", predictionLayerCount: 1, maxProposalDepth: 2
+        ))
+        XCTAssertFalse(ModelRuntime.nativeMTPProposalDepthSupported(
+            familyAdapter: "unknown_mtp_v1", predictionLayerCount: 1, maxProposalDepth: 1
+        ))
+
+        XCTAssertEqual(ModelRuntime.nativeMTPDrafterStateLayerCount(
+            familyAdapter: "gemma4_mtp_v1", predictionLayerCount: 4
+        ), 0)
+        XCTAssertEqual(ModelRuntime.nativeMTPDrafterStateLayerCount(
+            familyAdapter: "glm5_next_mtp_v1", predictionLayerCount: 1
+        ), 1)
+        XCTAssertEqual(ModelRuntime.nativeMTPDrafterStateLayerCount(
+            familyAdapter: "qwen3_5_mtp_v1", predictionLayerCount: 1
+        ), 1)
+    }
+
     func testNativeMTPDrafterSourceFollowsTheAdapter() {
         XCTAssertEqual(ModelRuntime.nativeMTPDrafterSource(familyAdapter: "qwen3_5_mtp_v1"), .separateArtifact)
         XCTAssertEqual(ModelRuntime.nativeMTPDrafterSource(familyAdapter: "glm5_next_mtp_v1"), .targetEmbedded)
+        XCTAssertEqual(ModelRuntime.nativeMTPDrafterSource(familyAdapter: "gemma4_mtp_v1"), .targetEmbeddedAssistant)
         XCTAssertNil(ModelRuntime.nativeMTPDrafterSource(familyAdapter: "qwen3_mtp_v1"))
         XCTAssertEqual(ModelRuntime.nativeMTPSupportedAdapterLayouts, [
             .init(familyAdapter: "qwen3_5_mtp_v1", sourceLayout: "separate_artifact"),
             .init(familyAdapter: "glm5_next_mtp_v1", sourceLayout: "checkpoint_mtp"),
+            .init(familyAdapter: "gemma4_mtp_v1", sourceLayout: "checkpoint_mtp"),
         ])
         // Each adapter's admitted layout is the one the sidecar derives from it.
         for layout in ModelRuntime.nativeMTPSupportedAdapterLayouts {

@@ -1477,7 +1477,7 @@
     {
       "spec_id": "SPEC-048",
       "title": "Native Multi-Token Prediction Serving",
-      "version": "0.1.75",
+      "version": "0.1.76",
       "path": "specs/SPEC-048-native-mtp-serving.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -11865,7 +11865,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1770",
-        "rationale": "SPEC-048 v0.1.74 names LM 3.32.3-macprovider.25 (da8f1932f8e2a46477a1a35663955267bc6fcd04) (#2198, #2189) on 3.32.3-macprovider.24: .23's GLM-5.3 MTP head prefill over the last 4096 prompt columns (NoPE) on top of the MiniMax M3 rows; prompts within 4096 unchanged. Other model sources and the Swift, core and C rows are unchanged."
+        "rationale": "SPEC-048 v0.1.76 names LM 3.32.3-macprovider.30 (b2a45b03bbef512827a8960ded61591a3b6283d7) (#2154) on 3.32.3-macprovider.25: Campaign candidate for #2154 on the upstream sync tag 3.32.3-macprovider.29-sync: the Gemma 4 assistant drafts through the packed native-MTP drafter surface, loads from the target's model-mtp.safetensors, and the text-only gemma4_unified target emits the hidden state and shared K/V it attends over. Prior tuple context: SPEC-048 v0.1.74 names LM 3.32.3-macprovider.25 (da8f1932f8e2a46477a1a35663955267bc6fcd04) (#2198, #2189) on 3.32.3-macprovider.24: .23's GLM-5.3 MTP head prefill over the last 4096 prompt columns (NoPE) on top of the MiniMax M3 rows; prompts within 4096 unchanged. Other model sources and the Swift, core and C rows are unchanged."
       }
     },
     {

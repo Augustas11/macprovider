@@ -13023,7 +13023,10 @@ maxTokens: maxTokens,
                     .count
                 return (context.model.maximumBlockSize, stateLayerCount)
             }
-            guard drafterRuntimeObservation.stateLayerCount == admissionCapability.predictionLayerCount else {
+            guard drafterRuntimeObservation.stateLayerCount == nativeMTPDrafterStateLayerCount(
+                familyAdapter: admissionCapability.familyAdapter,
+                predictionLayerCount: admissionCapability.predictionLayerCount
+            ) else {
                 return reject(reasonCode: "drafter_state_layer_count_mismatch", artifactRole: "mtp")
             }
             guard NativeMTPProposalBounds.fits(
@@ -13560,20 +13563,58 @@ maxTokens: maxTokens,
         /// `mtp[0]` layer, embeddings and lm_head, built from the target's
         /// `config.json` without a second weight load.
         case targetEmbedded
+        /// An assistant shipped inside the target artifact (`checkpoint_mtp`)
+        /// with its own weights: Gemma 4's `model-mtp.safetensors`, loaded
+        /// from the target directory beside the target's own shards.
+        case targetEmbeddedAssistant
     }
 
     /// The (adapter, layout) pairs this provider can serve natively.
     static let nativeMTPSupportedAdapterLayouts: Set<NativeMTPAdapterLayout> = [
         NativeMTPAdapterLayout(familyAdapter: "qwen3_5_mtp_v1", sourceLayout: "separate_artifact"),
         NativeMTPAdapterLayout(familyAdapter: "glm5_next_mtp_v1", sourceLayout: "checkpoint_mtp"),
+        NativeMTPAdapterLayout(familyAdapter: "gemma4_mtp_v1", sourceLayout: "checkpoint_mtp"),
     ]
 
     static func nativeMTPDrafterSource(familyAdapter: String) -> NativeMTPDrafterSource? {
         switch familyAdapter {
         case "qwen3_5_mtp_v1": .separateArtifact
         case "glm5_next_mtp_v1": .targetEmbedded
+        case "gemma4_mtp_v1": .targetEmbeddedAssistant
         default: nil
         }
+    }
+
+    /// Gemma 4 assistant `block_size` 4: one bonus token plus at most three
+    /// drafts from one position (SPEC-048 0.1.76, `gemma4_mtp_v1`).
+    static let gemma4NativeMTPMaximumProposalDepth = 3
+
+    /// Whether the signed proposal depth fits the adapter. Qwen and GLM draft
+    /// one token per prediction layer; the Gemma 4 assistant's
+    /// `prediction_layer_count` is its decoder depth, and it drafts up to its
+    /// block size from one position.
+    static func nativeMTPProposalDepthSupported(
+        familyAdapter: String,
+        predictionLayerCount: Int,
+        maxProposalDepth: Int
+    ) -> Bool {
+        switch nativeMTPDrafterSource(familyAdapter: familyAdapter) {
+        case .targetEmbeddedAssistant:
+            (1...gemma4NativeMTPMaximumProposalDepth).contains(maxProposalDepth)
+        case .separateArtifact, .targetEmbedded:
+            predictionLayerCount == maxProposalDepth
+        case nil:
+            false
+        }
+    }
+
+    /// Cache entries a freshly made drafter state must hold: one per
+    /// prediction layer, except the Gemma 4 assistant, which owns no cache and
+    /// attends over the target's K/V.
+    static func nativeMTPDrafterStateLayerCount(familyAdapter: String, predictionLayerCount: Int) -> Int {
+        nativeMTPDrafterSource(familyAdapter: familyAdapter) == .targetEmbeddedAssistant
+            ? 0
+            : predictionLayerCount
     }
 
     private static func nativeMTPAdmissionCapabilitySupported(
@@ -13588,19 +13629,38 @@ maxTokens: maxTokens,
             sourceLayout: admissionCapability.sourceLayout
         )
         guard nativeMTPSupportedAdapterLayouts.contains(layout),
-              admissionCapability.predictionLayerCount == admissionCapability.maxProposalDepth,
+              nativeMTPProposalDepthSupported(
+                  familyAdapter: layout.familyAdapter,
+                  predictionLayerCount: admissionCapability.predictionLayerCount,
+                  maxProposalDepth: admissionCapability.maxProposalDepth
+              ),
               admissionCapability.cacheClass == canonicalCacheClass,
               admissionCapability.stateClass == nativeMTPExpectedStateClass(modelCapabilities: modelCapabilities),
               drafterPresent
         else { return false }
-        guard nativeMTPDrafterSource(familyAdapter: layout.familyAdapter) == .targetEmbedded else {
+        switch nativeMTPDrafterSource(familyAdapter: layout.familyAdapter) {
+        case .targetEmbedded:
+            return glm5NextNativeMTPTopologySupported(
+                maxProposalDepth: admissionCapability.maxProposalDepth,
+                modelCapabilities: modelCapabilities,
+                cacheKinds: cacheKinds
+            )
+        case .targetEmbeddedAssistant:
+            return gemma4NativeMTPTopologySupported(modelCapabilities: modelCapabilities)
+        case .separateArtifact, nil:
             return true
         }
-        return glm5NextNativeMTPTopologySupported(
-            maxProposalDepth: admissionCapability.maxProposalDepth,
-            modelCapabilities: modelCapabilities,
-            cacheKinds: cacheKinds
-        )
+    }
+
+    /// `gemma4_mtp_v1`: the assistant attends over the target's last
+    /// full-attention and sliding-attention K/V, which packed verification
+    /// hands back per row only from paged K/V. Gemma 4 is not a paged-KV
+    /// family yet (SPEC-039), so this fails closed until it is.
+    private static func gemma4NativeMTPTopologySupported(
+        modelCapabilities: PagedKVRuntimeModelCapabilities
+    ) -> Bool {
+        modelCapabilities.modelFamily == "gemma4"
+            && PagedKVAttachGate.recognizedModelFamilies.contains(modelCapabilities.modelFamily)
     }
 
     /// `glm5_next_mtp_v1` (SPEC-048 MTP-2, SPEC-039 FR-PKV12/FR-PKV15): the
@@ -13652,6 +13712,11 @@ maxTokens: maxTokens,
         switch nativeMTPDrafterSource(familyAdapter: familyAdapter) {
         case .separateArtifact: return true
         case nil: return false
+        case .targetEmbeddedAssistant:
+            guard let directory = try? await targetContainer.modelDirectory else { return false }
+            let isGemma4 = await targetContainer.perform { context in context.model is Gemma4Model }
+            return isGemma4 && FileManager.default.fileExists(
+                atPath: directory.appendingPathComponent(Gemma4AssistantDraftModel.embeddedWeightFileName).path)
         case .targetEmbedded:
             return await targetContainer.perform { context in
                 switch context.model {
@@ -13697,6 +13762,8 @@ maxTokens: maxTokens,
                 configuration: ModelConfiguration(directory: targetDirectory, tokenizerSource: nil, defaultPrompt: ""),
                 model: model
             ))
+        case .targetEmbeddedAssistant:
+            return try Gemma4AssistantDraftModel.loadEmbeddedContainer(targetDirectory: targetDirectory)
         case nil:
             throw NativeMTPDrafterLoadError.unsupportedAdapter(familyAdapter)
         }
