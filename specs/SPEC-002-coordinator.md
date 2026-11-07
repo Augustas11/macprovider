@@ -1,6 +1,23 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.6.29 (2026-10-25, a late or unknown provider frame never closes the provider session)
+**Version:** 1.6.30 (2026-11-07, a revoked release stays connected update-only and the CLI train reloads it with SIGHUP)
+
+**Change log v1.6.30 (2026-11-07, Related: #2247):** `SPEC-002-R004` reload.
+An exact revocation of a connected buyer-serving session marks that session
+update-only in place. The WebSocket stays open, the session is not
+buyer-routable, and no other session is closed. A reload that would reject a
+connected session for any other reason is refused and the running policy
+stays. `latest_binary_version` is published on the same successful SIGHUP, so
+`/healthz` `recommended_binary_version` matches the file the reload applied.
+`required_binary_version` stays startup-only. The CLI train applies
+compatibility, recommendation and revocation edits with SIGHUP plus `/healthz`;
+`privacy_class.release_code_identities` still restarts. The applied-config
+proof is the last `coordinator_config_applied` event whose source is `boot`
+or `sighup`. A rejected reload logs no such event. Readiness for an
+update-only session omits `buyer_serving`, and the open socket receives
+`compatibility_policy_v1` (accepted set, recommended set, live
+`latest_binary_version`, and `compatibility_set_revoked` when the revocation
+is exact) with no new credential.
 
 **Change log v1.6.29 (2026-10-25, Related: #2111):** Registers `SPEC-002-R010`. An encrypted
 `inference_response_end` for a request whose retired entry had expired (5 min)
@@ -5410,9 +5427,10 @@ the provider's updater moves it forward.
 Under a configured policy, the acknowledgement MUST carry
 `compatibility_set_revoked: true` exactly when the session's
 `accepted_compatibility_set_id` is in `revoked_ids`, judged against the same
-policy snapshot that supplies `recommended_compatibility_set_id` (the
-recommended binary version, `latest_binary_version`, is not reloadable and
-comes from the running config); it MUST be
+policy snapshot that supplies `recommended_compatibility_set_id`. The
+recommended binary version on that acknowledgement is the live
+`latest_binary_version`, which a successful SIGHUP publishes together with
+that policy. `compatibility_set_revoked` MUST be
 omitted otherwise, including for a release that is update-only only because it
 is below `required_binary_version`. The recommendation is not required to be
 monotonic: `target_id` and `latest_binary_version` MAY name a release older
@@ -5461,26 +5479,44 @@ policy mode predates this requirement; tooling MAY accept a candidate only when
 that runtime already lists the exact identity, and otherwise MUST direct the
 operator to the coordinator runtime release; it MUST NOT offer a recommendation
 change on such a runtime. Revocation MUST be judged only against the running
-coordinator's policy. While a restart is due, a difference between the live
+coordinator's policy. While a reload is due, a difference between the live
 policy and the on-disk configuration MAY be treated as pending only when it is
 exactly the train's own edit (target moved to the candidate, seed revocations
-added, every live revocation kept); any other difference fails closed. Signed candidate verification and
+added, every live revocation kept); any other difference fails closed. The
+applied configuration is the last `coordinator_config_applied` event of the
+running process whose source is `boot` or `sighup`. A successful SIGHUP that
+applied the whole file logs `sighup`. A rejected reload logs nothing, so the
+previous proof stands. Signed candidate verification and
 canary proof remain required.
 
 A validated SIGHUP reload MUST publish one immutable compatibility policy
 snapshot after fallible reload preparation succeeds; `revoked_ids` and
-`target_id` are reloadable. A rejected reload MUST leave the prior policy
-intact. Before publication, a reload MUST refuse a policy that would reject an
-authenticated connected session for any reason other than an exact
-revocation, so a mistyped repository never disconnects the fleet. A newly
-revoked buyer-serving session MUST become unroutable at once and close, so it
-reconnects as an update-only session; no other session is closed. This guard
-MUST be serialized with admission and policy publication, and an in-flight
-admission MUST recheck the current policy before becoming routable. After
-durable credential mutation, an admission invalidated by reload MUST remain
-held out of routing, deliver its credential-bearing acknowledgement, and then
-close; it MUST NOT strand a minted credential. `latest_binary_version` is not
-made reloadable by this requirement.
+`target_id` are reloadable. The same successful reload MUST publish
+`latest_binary_version`, and `/healthz` `recommended_binary_version` MUST then
+report it. `required_binary_version` remains startup-only.
+`privacy_class.release_code_identities` remains startup-only, and the CLI
+train restarts for that edit. A compatibility, recommendation, or revocation
+edit MUST send SIGHUP and then check `/healthz`. A rejected reload MUST leave
+the prior policy and the prior `latest_binary_version` intact. Before
+publication, a reload MUST refuse a policy that would reject an authenticated
+connected session for any reason other than an exact revocation, so a mistyped
+repository never disconnects the fleet. A newly revoked buyer-serving session
+MUST become unroutable at once and stay connected as an update-only session;
+it MUST NOT close, and no other session is closed. Readiness for that session
+MUST omit `buyer_serving`: a bare false is how an already-shipped provider
+treats an unrecognized not-serving verdict as a reconnect. The same
+publication MUST send `compatibility_policy_v1` on that open socket, carrying
+the accepted set, the recommended set, the live `latest_binary_version`, and
+`compatibility_set_revoked` when the revocation is exact, and it MUST NOT
+include a new credential. A provider NAK of that frame MUST NOT take the
+session off WebSocket routing and MUST NOT close it. This guard MUST be
+serialized with admission and policy publication, and an in-flight admission
+MUST recheck the current policy before becoming routable. After durable
+credential mutation, an admission invalidated by an exact revocation MUST be
+marked update-only, deliver its credential-bearing acknowledgement, and stay
+connected. An admission invalidated for any other reason MUST remain held out
+of routing, deliver its credential-bearing acknowledgement, and then close. A
+reload MUST NOT strand a minted credential.
 
 A rejected v2 initial auth request MUST receive an `auth_response` rejection
 with a stable reason code and an actionable message before the close. The

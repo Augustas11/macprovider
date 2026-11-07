@@ -46,9 +46,14 @@ enum CoordinatorReadinessClient {
     /// `nil`/`false`/`true` literals keep the three-valued `Bool?` reading
     /// (indeterminate / authoritative not-serving / confirmed) that every
     /// existing consumer relies on; only `notServing` can carry a hold.
+    /// `updateOnly` is an exact revocation: the session stays connected and
+    /// is not buyer-routable. It is not `notServing`, because a bare false
+    /// is how an already-shipped provider treats an unrecognized verdict as
+    /// a reconnect.
     enum Readiness: Equatable, Sendable, ExpressibleByBooleanLiteral, ExpressibleByNilLiteral {
         case confirmed
         case notServing(hold: BuyerServingHold?)
+        case updateOnly
         case indeterminate
 
         init(booleanLiteral value: Bool) {
@@ -71,7 +76,7 @@ enum CoordinatorReadinessClient {
         var buyerServing: Bool? {
             switch self {
             case .confirmed: return true
-            case .notServing: return false
+            case .notServing, .updateOnly: return false
             case .indeterminate: return nil
             }
         }
@@ -244,9 +249,17 @@ enum CoordinatorReadinessClient {
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               object["provider_id"] as? String == providerID,
               object["assigned_id"] as? String == assignedID,
-              object["catalog_evidence_source"] as? String == "provider_reported",
-              let buyerServing = object["buyer_serving"] as? Bool
+              object["catalog_evidence_source"] as? String == "provider_reported"
         else {
+            return .indeterminate
+        }
+        // SPEC-002-R004: an exact revocation omits buyer_serving. The mode
+        // is enough; a present buyer_serving must not turn this into the
+        // reconnect verdict.
+        if object["catalog_admission_mode"] as? String == "update_bridge" {
+            return .updateOnly
+        }
+        guard let buyerServing = object["buyer_serving"] as? Bool else {
             return .indeterminate
         }
         guard buyerServing else {

@@ -1970,10 +1970,46 @@ final class ProviderStatusTests: XCTestCase {
         XCTAssertEqual(readiness(try body(serving: true, hold: "model_admission_pending")), .confirmed)
         // The Bool? projection every existing reader uses is unchanged.
         XCTAssertEqual(CoordinatorReadinessClient.Readiness.notServing(hold: .modelAdmissionPending).buyerServing, false)
+        XCTAssertEqual(CoordinatorReadinessClient.Readiness.updateOnly.buyerServing, false)
         XCTAssertEqual(CoordinatorReadinessClient.Readiness.confirmed.buyerServing, true)
         XCTAssertNil(CoordinatorReadinessClient.Readiness.indeterminate.buyerServing)
         XCTAssertEqual(CoordinatorReadinessClient.Readiness(booleanLiteral: false), .notServing(hold: nil))
         XCTAssertEqual(CoordinatorReadinessClient.Readiness(nilLiteral: ()), .indeterminate)
+    }
+
+    func testCoordinatorReadinessUpdateBridgeOmitsBuyerServing() throws {
+        let requestURL = try XCTUnwrap(CoordinatorReadinessClient.readinessURL(
+            coordinatorURL: "wss://coordinator.malibu.tech/v1/ws/provider",
+            providerID: "provider-a",
+            assignedID: "session-a"
+        ))
+        let response = try XCTUnwrap(HTTPURLResponse(
+            url: requestURL,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: nil
+        ))
+        func body(buyerServing: Bool?) throws -> Data {
+            var object: [String: Any] = [
+                "provider_id": "provider-a",
+                "assigned_id": "session-a",
+                "catalog_admission_mode": "update_bridge",
+                "catalog_evidence_source": "provider_reported",
+            ]
+            if let buyerServing { object["buyer_serving"] = buyerServing }
+            return try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+        }
+        func readiness(_ data: Data) -> CoordinatorReadinessClient.Readiness {
+            CoordinatorReadinessClient.readiness(
+                data: data, response: response, requestURL: requestURL, providerID: "provider-a", assignedID: "session-a"
+            )
+        }
+        // SPEC-002-R004: the omitted field is update-only, not indeterminate,
+        // and a present buyer_serving does not change that.
+        XCTAssertEqual(readiness(try body(buyerServing: nil)), .updateOnly)
+        XCTAssertEqual(readiness(try body(buyerServing: false)), .updateOnly)
+        XCTAssertEqual(readiness(try body(buyerServing: true)), .updateOnly)
+        XCTAssertEqual(readiness(try body(buyerServing: nil)).buyerServing, false)
     }
 
     func testCoordinatorReadinessVerdictRequiresExactCatalogEnvelopeForUpdateCommit() throws {

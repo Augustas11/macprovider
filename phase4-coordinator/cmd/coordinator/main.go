@@ -4809,6 +4809,10 @@ func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 conf
 		logger.Error().Err(err).Msg("autotune runtime economics reload rejected")
 		return
 	}
+	if err := wsServer.StartupOnlyReloadDrift(cfg); err != nil {
+		logger.Error().Err(err).Msg("config reload rejected: startup-only field requires a restart")
+		return
+	}
 	warnDeprecatedCompatibilityFields(logger, cfg.Coordinator.CompatibilitySet)
 	compatibilityReload, err := wsServer.BeginCompatibilitySetPolicyReload(cfg.Coordinator.CompatibilitySet)
 	if err != nil {
@@ -4936,7 +4940,12 @@ func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 conf
 	} else if billingSnapshotCommitted {
 		buyerServer.PublishEconomics(cfg.Rewards, billingSnapshotID, cfg.Stats.Rollup.UsdPerMillionCredits, nil)
 	}
-	compatibilityClosed := compatibilityReload.Publish()
+	// Store the recommendation while Begin still holds compatibilitySetMu,
+	// before Publish swaps the policy and unlocks. An ack blocked on that
+	// lock then sees the new policy and the new latest_binary_version
+	// together. A rejected reload returns before this store.
+	wsServer.SetRecommendedBinaryVersion(cfg.CoordinatorAdvertisedVersion.LatestBinaryVersion)
+	compatibilityClosed, compatibilityUpdateOnly := compatibilityReload.Publish()
 	compatibilityPublished = true
 	proofReload := wsServer.SetProofOfWeightsConfig(cfg.ProofOfWeights)
 	wsServer.SetTelemetryDriftEvaluator(telemetryDrift)
@@ -4956,6 +4965,7 @@ func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 conf
 		Int("proof_of_weights_cleared_gate_exclusions", proofReload.ClearedGateExclusions).
 		Int("benchmark_quarantines_cleared", benchmarkQuarantinesCleared).
 		Int("compatibility_policy_sessions_closed", compatibilityClosed).
+		Int("compatibility_policy_sessions_update_only", compatibilityUpdateOnly).
 		Str("compatibility_policy", compatibilityPolicyModeForConfig(cfg.Coordinator.CompatibilitySet)).
 		Int("revoked_compatibility_set_count", len(cfg.Coordinator.CompatibilitySet.RevokedIDs)).
 		Str("config_sha256", configDigests.ConfigSHA256).
@@ -5039,8 +5049,18 @@ func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 conf
 			Int("shard_groups_group_heartbeat_stale_multiple", cfg.ShardGroups.GroupHeartbeatStaleMultiple).
 			Msg("shard_groups config reloaded")
 	}
-	// Every fallible step above returned early on rejection, so reaching here
-	// means this reload's config is the applied one.
+	// latest_binary_version was stored before the compatibility policy
+	// publication above, after every fallible step. A rejected reload
+	// returns before that store, so /healthz keeps the previous release.
+	logger.Info().
+		Str("config_path", configPath).
+		Str("config_sha256", configDigests.ConfigSHA256).
+		Str("overlay_path", configOverlay).
+		Str("overlay_sha256", configDigests.OverlaySHA256).
+		Str("source", "sighup").
+		Str("version", version).
+		Str("event", "coordinator_config_applied").
+		Msg("coordinator config applied")
 	recordAppliedConfig(logger, "sighup", configPath, configOverlay, configDigests, configLoadedAt, buyerServer.AppliedEconomics())
 }
 

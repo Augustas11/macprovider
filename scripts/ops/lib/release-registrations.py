@@ -102,7 +102,11 @@ def invocation_journal(unit):
 
 
 def boot_digests(lines):
-    """config/overlay sha256 the running process applied at boot, or None."""
+    """config/overlay sha256 of the last boot or SIGHUP apply, or None.
+
+    The JSON key stays boot_digests. A successful SIGHUP logs source sighup
+    for the whole file; a rejected reload logs nothing, so a startup-only
+    field that changed still fails closed against the previous proof."""
     found = None
     for line in lines or []:
         if "coordinator_config_applied" not in line:
@@ -111,7 +115,7 @@ def boot_digests(lines):
             event = json.loads(line)
         except ValueError:
             continue
-        if event.get("event") == "coordinator_config_applied" and event.get("source") == "boot":
+        if event.get("event") == "coordinator_config_applied" and event.get("source") in ("boot", "sighup"):
             found = {"config_sha256": event.get("config_sha256", ""), "overlay_sha256": event.get("overlay_sha256", "")}
     return found
 
@@ -352,7 +356,7 @@ def live_policy(f, health_path, applied, compat_id, seed):
     """(mode, live, mismatch, pending): the running coordinator's policy mode
     and (target, revoked) as /healthz reports it, why it cannot be trusted
     ('' when it equals the disk config), and the pending train edit that
-    explains a difference while a restart is due ('' when none).
+    explains a difference while a reload is still due ('' when none).
 
     A difference is a pending edit only when the disk config is not the
     running one AND the disk policy differs from the live one exactly by
@@ -411,9 +415,10 @@ def evaluate(facts_path, version, compat_id, prj, prjsig, health_path="", seed_p
         state = "staged" if (remote, remote_sig) == (local, local_sig) else "mismatch"
     out = {"metadata_state": state, "missing": []}
     miss = out["missing"]
-    # Restart-only fields count only when the bytes on disk are exactly the
-    # bytes the running process booted with (its coordinator_config_applied
-    # event); anything else, including an unreadable journal, fails closed.
+    # The applied proof is the last boot or SIGHUP coordinator_config_applied
+    # event. A successful reload of the whole file counts. A rejected reload
+    # logs nothing, so a startup-only field that changed stays unapplied.
+    # An unreadable journal fails closed.
     boot, disk = f.get("boot_digests"), f.get("disk_digests")
     out["config_applied"] = bool(boot) and boot == disk
     if not out["config_applied"]:
