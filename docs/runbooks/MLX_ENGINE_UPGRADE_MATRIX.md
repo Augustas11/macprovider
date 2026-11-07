@@ -34,7 +34,7 @@ needs a SPEC revision.
 
 | Fork | Upstream | Tag scheme | Current tag | Revision | Upstream base |
 | --- | --- | --- | --- | --- | --- |
-| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.28` | `e121cde27af2d03a6b4556851cf46740a8c0fc21` | `3.32.3` (`3b339ad6…`) |
+| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.30` | `ac96621579a7a2560d33e39e0a8c17076ca3a1ff` | `3.32.3` (`3b339ad6…`) |
 | `Augustas11/mlx-swift` | `ml-explore/mlx-swift` | `<upstream>-macprovider.<n>` | `0.32.3-macprovider.11` | `c774cb0934c7503bc3fe1c3d1afbe44c728e8891` | `0.32.3` (`19601207…`) |
 | `Augustas11/mlx` (MLX core) | `ml-explore/mlx` | `v<upstream>-macprovider.<n>` | `v0.32.4-macprovider.6` | `51edbb37620aef7c860ab5d7cdb7bf5b14333da2` | `v0.32.4` (`36969c09…`) |
 | `Augustas11/mlx-c` | `ml-explore/mlx-c` | `v<upstream>-macprovider.<n>` | `v0.6.0-macprovider.2` | `2b1ff2b5b5129a6115771da32e1bac3b6b01ab01` | pinned base `ebc88f10…` |
@@ -46,6 +46,13 @@ submodules pin core and C. The C fork's standalone core fetch pins the same
 core revision. Swift 6.3 is the effective minimum for the graph.
 
 ### Current tuple delta
+
+As of 2026-11-07 the LM row is `3.32.3-macprovider.30` (`ac96621`), on
+`3.32.3-macprovider.28` (#2230): upstream mlx-swift-lm sync (attention mask
+width after cache trim, quantized-KV prefill, Nemotron 3.5 Lightning/Bolt,
+rotating-cache keep mask, Nemotron-H dtype), LFM3 text model, Mamba2 segsum
+batch-mask fix, GPT-OSS SwiGLU keeps the activation dtype. No Swift, core or C
+pin changes.
 
 As of 2026-11-07 the LM row is `3.32.3-macprovider.28` (`e121cde`), on
 `3.32.3-macprovider.27` (#2201): adds the GPT-OSS SwiGLU fix `e121cde`:

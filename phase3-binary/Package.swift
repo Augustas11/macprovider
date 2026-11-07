@@ -17,6 +17,11 @@ let package = Package(
         )
     ],
     dependencies: [
+        // Tag 3.32.3-macprovider.30 (#2230) on 3.32.3-macprovider.28:
+        // upstream mlx-swift-lm sync (attention mask width after cache trim,
+        // quantized-KV prefill, Nemotron 3.5 Lightning/Bolt, rotating-cache
+        // keep mask, Nemotron-H dtype), LFM3 text model, Mamba2 segsum
+        // batch-mask fix, GPT-OSS SwiGLU keeps the activation dtype.
         // Tag 3.32.3-macprovider.28 (#2201) on 3.32.3-macprovider.27: adds
         // the GPT-OSS SwiGLU fix `e121cde`: plain Float clip bounds keep
         // the activation dtype, so gpt-oss no longer runs a float32 residual
@@ -76,7 +81,7 @@ let package = Package(
         // compatible per-column attention while retaining row-owned caches.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "e121cde27af2d03a6b4556851cf46740a8c0fc21"
+            revision: "ac96621579a7a2560d33e39e0a8c17076ca3a1ff"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",

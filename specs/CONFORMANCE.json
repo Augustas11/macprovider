@@ -1477,7 +1477,7 @@
     {
       "spec_id": "SPEC-048",
       "title": "Native Multi-Token Prediction Serving",
-      "version": "0.1.77",
+      "version": "0.1.78",
       "path": "specs/SPEC-048-native-mtp-serving.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -11865,7 +11865,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1770",
-        "rationale": "SPEC-048 v0.1.77 names LM 3.32.3-macprovider.28 (e121cde27af2d03a6b4556851cf46740a8c0fc21) (#2201) on 3.32.3-macprovider.27: Adds, on top of .27, the GPT-OSS SwiGLU fix: plain Float clip bounds keep the activation dtype, so gpt-oss no longer runs a float32 residual stream that made every affine quantized matmul re-cast its scales and biases each forward. Prior tuple context: SPEC-048 v0.1.76 names LM 3.32.3-macprovider.27 (73df016afa74563653701697f4e16b31a967808a) (#2189) on 3.32.3-macprovider.25: MiniMax M3.1-Flash decode fusions (#2189) and GLM-5-Next Hugging Face quantization keys (#2244). Prior tuple context: SPEC-048 v0.1.74 names LM 3.32.3-macprovider.25 (da8f1932f8e2a46477a1a35663955267bc6fcd04) (#2198, #2189) on 3.32.3-macprovider.24: .23's GLM-5.3 MTP head prefill over the last 4096 prompt columns (NoPE) on top of the MiniMax M3 rows; prompts within 4096 unchanged. Other model sources and the Swift, core and C rows are unchanged."
+        "rationale": "SPEC-048 v0.1.78 names LM 3.32.3-macprovider.30 (ac96621579a7a2560d33e39e0a8c17076ca3a1ff) (#2230) on 3.32.3-macprovider.28: upstream mlx-swift-lm sync (attention mask width after cache trim, quantized-KV prefill, Nemotron 3.5 Lightning/Bolt, rotating-cache keep mask, Nemotron-H dtype), LFM3 text model, Mamba2 segsum batch-mask fix, GPT-OSS SwiGLU keeps the activation dtype. Prior tuple context: SPEC-048 v0.1.77 names LM 3.32.3-macprovider.28 (e121cde27af2d03a6b4556851cf46740a8c0fc21) (#2201) on 3.32.3-macprovider.27: Adds, on top of .27, the GPT-OSS SwiGLU fix: plain Float clip bounds keep the activation dtype, so gpt-oss no longer runs a float32 residual stream that made every affine quantized matmul re-cast its scales and biases each forward. Prior tuple context: SPEC-048 v0.1.76 names LM 3.32.3-macprovider.27 (73df016afa74563653701697f4e16b31a967808a) (#2189) on 3.32.3-macprovider.25: MiniMax M3.1-Flash decode fusions (#2189) and GLM-5-Next Hugging Face quantization keys (#2244). Prior tuple context: SPEC-048 v0.1.74 names LM 3.32.3-macprovider.25 (da8f1932f8e2a46477a1a35663955267bc6fcd04) (#2198, #2189) on 3.32.3-macprovider.24: .23's GLM-5.3 MTP head prefill over the last 4096 prompt columns (NoPE) on top of the MiniMax M3 rows; prompts within 4096 unchanged. Other model sources and the Swift, core and C rows are unchanged."
       }
     },
     {

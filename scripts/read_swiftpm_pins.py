@@ -42,12 +42,13 @@ EXPECTED_LOCATIONS = {
 # scripts: the upstream watch imports these names, and a test checks them
 # against the SPEC-048 fork table.
 SPEC048_MLX_SWIFT_LM_FORK = "https://github.com/Augustas11/mlx-swift-lm"
-# 3.32.3-macprovider.28 (#2201) on 3.32.3-macprovider.27: Adds, on top of .27,
-# the GPT-OSS SwiGLU fix: plain Float clip bounds keep the activation dtype,
-# so gpt-oss no longer runs a float32 residual stream that made every affine
-# quantized matmul re-cast its scales and biases each forward.
-SPEC048_MLX_SWIFT_LM_TAG = "3.32.3-macprovider.28"
-SPEC048_MLX_SWIFT_LM_REVISION = "e121cde27af2d03a6b4556851cf46740a8c0fc21"
+# 3.32.3-macprovider.30 (#2230) on 3.32.3-macprovider.28: upstream
+# mlx-swift-lm sync (attention mask width after cache trim, quantized-KV
+# prefill, Nemotron 3.5 Lightning/Bolt, rotating-cache keep mask, Nemotron-H
+# dtype), LFM3 text model, Mamba2 segsum batch-mask fix, GPT-OSS SwiGLU keeps
+# the activation dtype.
+SPEC048_MLX_SWIFT_LM_TAG = "3.32.3-macprovider.30"
+SPEC048_MLX_SWIFT_LM_REVISION = "ac96621579a7a2560d33e39e0a8c17076ca3a1ff"
 SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE = "3b339ad6e3b3f44c8121ecff5131c7fd55e075e6"
 SPEC048_MLX_SWIFT_FORK = "https://github.com/Augustas11/mlx-swift"
 SPEC048_MLX_SWIFT_TAG = "0.32.3-macprovider.11"
