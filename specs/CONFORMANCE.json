@@ -6059,6 +6059,7 @@
         "phase3-binary/Tests/macprovider-cliTests/PagedKVGptOssMixedClassTests.swift:testGptOss20BMixedClassRequiresExactIdentityAndLayout",
         "phase3-binary/Tests/macprovider-cliTests/PagedKVGptOssMixedClassTests.swift:testAttachGateAdmitsGptOssMixedClassAndRefusesOtherMixedClasses",
         "phase3-binary/Tests/macprovider-cliTests/PagedKVGptOssMixedClassTests.swift:testMeasuredTopologyRequiresTheExactGptOssLayerLayout",
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVGptOssMixedClassTests.swift:testFamilyKVQuantDefaultReachesOnlyTheSerialPath",
         "phase3-binary/Tests/macprovider-cliTests/PagedKVGptOssMixedClassTests.swift:testMixedLayoutPagedGatherMatchesSerialCachesAcrossTheWindow"
       ],
       "journeys": [],
