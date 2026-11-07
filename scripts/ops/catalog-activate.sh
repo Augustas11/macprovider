@@ -1063,10 +1063,11 @@ for i in \$(seq 1 24); do curl -sf -m 5 \"\$COORDINATOR_URL/healthz\" && exit 0;
 # Do not enable native MTP on a model without qualified MTP heads."
       next_meta live_probe "specs/SPEC-038-continuous-batching.md"
     else
-      [ -z "$p_rid" ] || set_next live_probe manual "Turn the tuple on for the provider (native_mtp_mode: auto) and restart it" \
+      [ -z "$p_rid" ] || set_next live_probe manual "Turn the tuple on for the provider (native_mtp_mode defaults to auto) and restart it" \
 "# docs/runbooks/native-mtp-enablement.md step 9 (operator approval: restarts live.malibu.provider)
-# set native_mtp_mode: auto in the provider config, restart, then confirm /v1/status
-# native_mtp.enabled=true, mode eligible|active, continuous_batching.active=true"
+# native_mtp_mode defaults to auto: remove any native_mtp_mode: off line from the provider config,
+# restart, then confirm /v1/status native_mtp.enabled=true, mode eligible|active,
+# continuous_batching.active=true"
       next_meta live_probe "$MTP_DOC#order"
     fi
   fi

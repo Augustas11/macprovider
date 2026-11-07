@@ -1,0 +1,101 @@
+{
+  "command": [
+    "/usr/bin/sandbox-exec",
+    "-f",
+    "<lab>/lab.sb",
+    "<lab>/bin-final/macprovider-cli",
+    "msb-throughput",
+    "--model",
+    "<models>/llama-3.1-8b",
+    "--engine",
+    "scheduler",
+    "--no-compile",
+    "--prompt-tokens",
+    "1536",
+    "--decode-tokens",
+    "256",
+    "--runs",
+    "1",
+    "--mlx-cache-limit-mb",
+    "512",
+    "--stdout-only",
+    "--rows",
+    "1"
+  ],
+  "exit_code": 0,
+  "reports": [
+    {
+      "aggregateCVPct": 0,
+      "aggregateTPSRuns": [
+        17.26057896079753
+      ],
+      "aggregateTPSp50": 17.26057896079753,
+      "aggregateUpliftVsPagedSingleRow": 1.0765675307109028,
+      "aggregateVsProductionSerial": 0.9707170902854915,
+      "blockSizeTokens": 16,
+      "compiled": false,
+      "decodeTokensPerRow": 256,
+      "engine": "scheduler",
+      "layerCount": 32,
+      "maxPhysicalBlocks": 1024,
+      "mlxSwiftLMPin": "mlxlm-da8f1932f8e2",
+      "modelID": "<models>/llama-3.1-8b",
+      "modelTag": "model",
+      "pagedSingleRowCVPct": 0,
+      "pagedSingleRowTPSRuns": [
+        16.03297375074989
+      ],
+      "pagedSingleRowTPSp50": 16.03297375074989,
+      "peakPhysFootprintMB": 5649,
+      "peakRSSMB": 4532,
+      "perRowFractionOfPagedSingleRow": 1.0765675307109028,
+      "perRowTPSp50": 17.26057896079753,
+      "productionSerialCVPct": 0,
+      "productionSerialPromptTokens": 1536,
+      "productionSerialTPSRuns": [
+        17.781266172743628
+      ],
+      "productionSerialTPSp50": 17.781266172743628,
+      "productionSerialTTFTSecondsRuns": [
+        3.317478060722351
+      ],
+      "promptTokenLengths": [
+        1536
+      ],
+      "promptTokenSHA256": [
+        "2b01335568a81b89f89ac9f0b70d8dedfbe5de6d3eb583573540e477ca8d72a0"
+      ],
+      "promptTokensPerRow": 1536,
+      "rows": 1,
+      "runs": 1,
+      "scenario": "throughput",
+      "schedulerBackendAggregateTPSRuns": [
+        17.262757301806396
+      ],
+      "schedulerBackendWindowCallsRuns": [
+        16
+      ],
+      "schedulerBackendWindowSecondsRuns": [
+        14.829612415
+      ],
+      "schedulerCompletionOffsetSecondsByRowRuns": [
+        [
+          18.60701596736908
+        ]
+      ],
+      "schedulerDecodeLockstepWindow": 16,
+      "schedulerFirstTokenOffsetSecondsByRowRuns": [
+        [
+          3.7755320072174072
+        ]
+      ],
+      "schedulerTTFTSecondsByRowRuns": [
+        [
+          3.7755320072174072
+        ]
+      ],
+      "schemaVersion": 5,
+      "timestamp": "2026-11-06T12:17:10Z"
+    }
+  ]
+}

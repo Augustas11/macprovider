@@ -38,6 +38,11 @@ class BumpPinTest(unittest.TestCase):
             (self.root / site).parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(ROOT / site, self.root / site)
         self.old_tag, self.old_rev, self.old_version = current_pin()
+        # The R003 rationale names the spec version of the last pin move, which
+        # trails the spec version when a later revision did not move the pin.
+        self.old_rationale = next(
+            r for r in json.loads((ROOT / bump.CONFORMANCE).read_text())["requirements"]
+            if r["requirement_id"] == "SPEC-048-R003")["gap"]["rationale"]
         major, minor, patch = self.old_version.split(".")
         self.new_version = f"{major}.{minor}.{int(patch) + 1}"
 
@@ -98,7 +103,7 @@ class BumpPinTest(unittest.TestCase):
         self.assertEqual([s["version"] for s in conf["specs"] if s["spec_id"] == "SPEC-048"], [self.new_version])
         rationale = next(r for r in conf["requirements"] if r["requirement_id"] == "SPEC-048-R003")["gap"]["rationale"]
         self.assertTrue(rationale.startswith(f"SPEC-048 v{self.new_version} names LM {NEW_TAG}"), rationale)
-        self.assertIn("Prior tuple context: SPEC-048 v" + self.old_version, rationale)
+        self.assertIn("Prior tuple context: " + self.old_rationale, rationale)
 
     def test_second_bump_chains_from_the_first(self):
         self.assertEqual(self.run_bump("--skip-regenerate")[0], 0)

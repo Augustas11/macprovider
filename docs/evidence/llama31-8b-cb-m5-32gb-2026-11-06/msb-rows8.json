@@ -1,0 +1,136 @@
+{
+  "command": [
+    "/usr/bin/sandbox-exec",
+    "-f",
+    "<lab>/lab.sb",
+    "<lab>/bin-final/macprovider-cli",
+    "msb-throughput",
+    "--model",
+    "<models>/llama-3.1-8b",
+    "--engine",
+    "scheduler",
+    "--no-compile",
+    "--prompt-tokens",
+    "1536",
+    "--decode-tokens",
+    "256",
+    "--runs",
+    "1",
+    "--mlx-cache-limit-mb",
+    "512",
+    "--stdout-only",
+    "--rows",
+    "8"
+  ],
+  "exit_code": 0,
+  "reports": [
+    {
+      "aggregateCVPct": 0,
+      "aggregateTPSRuns": [
+        31.42430958139781
+      ],
+      "aggregateTPSp50": 31.42430958139781,
+      "aggregateUpliftVsPagedSingleRow": 1.702263319475662,
+      "aggregateVsProductionSerial": 1.6092157058717247,
+      "blockSizeTokens": 16,
+      "compiled": false,
+      "decodeTokensPerRow": 256,
+      "engine": "scheduler",
+      "layerCount": 32,
+      "maxPhysicalBlocks": 1024,
+      "mlxSwiftLMPin": "mlxlm-da8f1932f8e2",
+      "modelID": "<models>/llama-3.1-8b",
+      "modelTag": "model",
+      "pagedSingleRowCVPct": 0,
+      "pagedSingleRowTPSRuns": [
+        18.460310588773805
+      ],
+      "pagedSingleRowTPSp50": 18.460310588773805,
+      "peakPhysFootprintMB": 9056,
+      "peakRSSMB": 4826,
+      "perRowFractionOfPagedSingleRow": 0.21278291493445775,
+      "perRowTPSp50": 3.9280386976747264,
+      "productionSerialCVPct": 0,
+      "productionSerialPromptTokens": 1536,
+      "productionSerialTPSRuns": [
+        19.527717425784765
+      ],
+      "productionSerialTPSp50": 19.527717425784765,
+      "productionSerialTTFTSecondsRuns": [
+        3.4066109657287598
+      ],
+      "promptTokenLengths": [
+        1536,
+        1536,
+        1536,
+        1536,
+        1536,
+        1536,
+        1536,
+        1536
+      ],
+      "promptTokenSHA256": [
+        "2b01335568a81b89f89ac9f0b70d8dedfbe5de6d3eb583573540e477ca8d72a0",
+        "f296390919b9e5a9b36d4092ccf7f445d5e0fdbb864e82878feb5532cdda34fe",
+        "d14b89faae12ff3f4e5bfcb2a5ea137b64a169ec9cf50968c1216dec4ce0d613",
+        "62917a0cd938260b695390b90989a6b6c6c6ad53be098910d2ec402235275ca4",
+        "17ca0e69182192d0d392ba81e20096707b81167f3ee56ac08386f8f4a0c0aef4",
+        "be059e8fc30c1c3d19687c87afda72d51fdc2fd1c079961947f24aa8bf00af74",
+        "b878578a9ceae74b53cd2f2c5f92d42b8074d61249ac0866db9f9286bd4d4b14",
+        "af35c5ab5be686828c812e414f78cf5e81ef68d1e5cb450d7240af984386ce98"
+      ],
+      "promptTokensPerRow": 1536,
+      "rows": 8,
+      "runs": 1,
+      "scenario": "throughput",
+      "schedulerBackendAggregateTPSRuns": [
+        36.80562790169278
+      ],
+      "schedulerBackendWindowCallsRuns": [
+        26
+      ],
+      "schedulerBackendWindowSecondsRuns": [
+        55.64366421
+      ],
+      "schedulerCompletionOffsetSecondsByRowRuns": [
+        [
+          76.34966897964478,
+          76.36200296878815,
+          76.38615500926971,
+          82.80813992023468,
+          76.38615989685059,
+          81.44838190078735,
+          82.23362696170807,
+          83.22055196762085
+        ]
+      ],
+      "schedulerDecodeLockstepWindow": 16,
+      "schedulerFirstTokenOffsetSecondsByRowRuns": [
+        [
+          18.048077940940857,
+          18.04809296131134,
+          18.0480819940567,
+          33.000420928001404,
+          18.0480819940567,
+          28.04022490978241,
+          30.360713005065918,
+          35.74013900756836
+        ]
+      ],
+      "schedulerTTFTSecondsByRowRuns": [
+        [
+          18.048077940940857,
+          18.048089027404785,
+          18.048073053359985,
+          33.000409960746765,
+          18.048071026802063,
+          28.040212988853455,
+          30.360700011253357,
+          35.7401260137558
+        ]
+      ],
+      "schemaVersion": 5,
+      "timestamp": "2026-11-06T12:38:22Z"
+    }
+  ]
+}

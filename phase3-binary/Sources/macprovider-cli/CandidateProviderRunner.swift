@@ -515,7 +515,7 @@ final class CandidateProviderRunner {
         return "\(prefix)-\(digest)"
     }
 
-    private static func makeCandidateConfigRoot() throws -> URL {
+    static func makeCandidateConfigRoot() throws -> URL {
         let root = URL(fileURLWithPath: "/tmp", isDirectory: true)
             .appendingPathComponent("macprovider-autotune-config-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
@@ -534,6 +534,9 @@ final class CandidateProviderRunner {
         donor_mode: false
         auto_update_enabled: false
         max_concurrency_override: 1
+        # SPEC-048: autotune measurements force ordinary decode; the
+        # provider default is native MTP `auto`.
+        native_mtp_mode: off
         idle_prewarm:
           enabled: false
         """
