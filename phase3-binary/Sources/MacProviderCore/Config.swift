@@ -279,6 +279,10 @@ public struct AppConfig: Equatable, Sendable {
     public var ctlSocketPath: String?
     public var switchStatePath: String?
     public var donorMode: Bool
+    /// SPEC-036 FR-26 scorer-only mode: the session advertises
+    /// `compute_score_reference`, runs scoring jobs for its loaded catalog
+    /// model and refuses every buyer request.
+    public var computeScoreReference: Bool = false
     public var idlePrewarmEnabled: Bool
     public var idlePrewarmIdleThresholdSeconds: Double
     public var idlePrewarmTickSeconds: Double
@@ -906,6 +910,7 @@ public enum ConfigLoader {
         try assign(&config.ctlSocketPath, from: dict, key: "ctl_socket_path", expected: "string")
         try assign(&config.switchStatePath, from: dict, key: "switch_state_path", expected: "string")
         try assign(&config.donorMode, from: dict, key: "donor_mode", expected: "boolean")
+        try assign(&config.computeScoreReference, from: dict, key: "compute_score_reference", expected: "boolean")
         if let nested = dict["idle_prewarm"] as? [String: Any] {
             try assign(&config.idlePrewarmEnabled, from: nested, key: "enabled", expected: "boolean")
             try assign(&config.idlePrewarmIdleThresholdSeconds, from: nested, key: "idle_threshold_seconds", expected: "number")
@@ -1140,6 +1145,7 @@ public enum ConfigLoader {
         try assign(&config.ctlSocketPath, from: environment, env: "MACPROVIDER_CTL_SOCKET_PATH", expected: "string")
         try assign(&config.switchStatePath, from: environment, env: "MACPROVIDER_SWITCH_STATE_PATH", expected: "string")
         try assign(&config.donorMode, from: environment, env: "MACPROVIDER_DONOR_MODE", expected: "boolean")
+        try assign(&config.computeScoreReference, from: environment, env: "MACPROVIDER_COMPUTE_SCORE_REFERENCE", expected: "boolean")
         try assign(&config.idlePrewarmEnabled, from: environment, env: "MACPROVIDER_IDLE_PREWARM_ENABLED", expected: "boolean")
         try assign(&config.idlePrewarmIdleThresholdSeconds, from: environment, env: "MACPROVIDER_IDLE_PREWARM_IDLE_THRESHOLD_S", expected: "number")
         try assign(&config.idlePrewarmTickSeconds, from: environment, env: "MACPROVIDER_IDLE_PREWARM_TICK_S", expected: "number")

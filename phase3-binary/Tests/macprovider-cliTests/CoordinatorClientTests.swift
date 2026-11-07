@@ -1032,6 +1032,66 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertNil(result["output_text"])
     }
 
+    // MARK: SPEC-036 FR-26 scorer-only reference session
+
+    func testComputeScoreReferenceAdvertisesCapability() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(status: status, recorder: recorder, computeScoreReference: true)
+
+        let auth = await client.authInitialMessage(attempt: Tier2AuthAttempt())
+
+        let caps = try XCTUnwrap(auth["tier2_capabilities"] as? [String: Any])
+        XCTAssertEqual(caps["compute_score_v1"] as? Bool, true)
+        XCTAssertEqual(caps["compute_score_reference"] as? Bool, true)
+    }
+
+    func testComputeScoreReferenceRefusesBuyerRequestsAndStillScores() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(status: status, recorder: recorder, computeScoreExecutor: { request in
+            ComputeScoreProtocol.Result(
+                request: request,
+                status: .ok,
+                promptTokens: 12,
+                scoredTokens: 20,
+                top1Matches: 19,
+                sumLogprob: -4.5
+            )
+        }, computeScoreReference: true)
+        await client.acceptAssignedSessionForTest(assignedID: "assigned-score")
+        let initialCount = await recorder.frames.count
+
+        try await client.handleCoordinatorPayloadForTest([
+            "type": "inference_request",
+            "request_id": "buyer-1",
+            "stream": false,
+            "body": #"{"model":"model-a","messages":[{"role":"user","content":"hi"}]}"#,
+        ])
+
+        let recorded = await recorder.frames
+        let frames = Array(recorded.dropFirst(initialCount))
+        let nak = try XCTUnwrap(frames.first)
+        XCTAssertEqual(nak["type"] as? String, "nak")
+        XCTAssertEqual(nak["in_reply_to"] as? String, "inference_request")
+        let error = try XCTUnwrap(nak["error"] as? [String: Any])
+        XCTAssertEqual(error["code"] as? String, "unknown_message_type")
+        XCTAssertFalse(frames.contains { ($0["type"] as? String)?.hasPrefix("inference_") == true })
+
+        let afterNAK = await recorder.frames.count
+        try await client.handleCoordinatorPayloadForTest(Self.computeScoreRequest())
+        let result = try await waitForFrame(recorder, after: afterNAK, type: "compute_score_result_v1")
+        XCTAssertEqual(result["status"] as? String, "ok")
+    }
+
     func testComputeScoreOnRuntimeWithoutModelIsUnavailable() async throws {
         let recorder = CoordinatorFrameRecorder()
         let status = ProviderStatus(
@@ -7436,6 +7496,8 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertEqual(caps["relay_blind_settlement_receipt_v1"] as? Bool, true)
         // SPEC-036 FR-21: the MLX runtime runs scoring jobs.
         XCTAssertEqual(caps["compute_score_v1"] as? Bool, true)
+        // SPEC-036 FR-26: an ordinary provider is not scorer-only.
+        XCTAssertNil(caps["compute_score_reference"])
         // SPEC-001-R012: the advertised coordinator-to-provider message limit.
         XCTAssertEqual(caps["ws_max_message_bytes"] as? Int, 64 * 1024 * 1024)
     }
@@ -10449,6 +10511,7 @@ final class CoordinatorClientTests: XCTestCase {
         nativeMTPServedBankDigest: CoordinatorClient.NativeMTPServedBankDigest? = nil,
         nativeMTPTupleRestoreHandler: CoordinatorClient.NativeMTPTupleRestoreHandler? = nil,
         computeScoreExecutor: CoordinatorClient.ComputeScoreExecutor? = nil,
+        computeScoreReference: Bool = false,
         catalogEnvelopeRefresher: CoordinatorClient.CatalogEnvelopeRefresher? = nil,
         catalogEnvelopeRefreshMinimumInterval: TimeInterval = 300,
         coordinatorReadiness: CoordinatorClient.CoordinatorReadiness? = nil,
@@ -10491,6 +10554,7 @@ final class CoordinatorClientTests: XCTestCase {
         config.enableWarmSwap = enableWarmSwap
         config.publishesSpecDecodeTelemetry = publishesSpecDecodeTelemetry
         config.losslessnessProbeEnabled = losslessnessProbeEnabled
+        config.computeScoreReference = computeScoreReference
         let runtime: ModelRuntime
         if let modelRuntime {
             runtime = modelRuntime

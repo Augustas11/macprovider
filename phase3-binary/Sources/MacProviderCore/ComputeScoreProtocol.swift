@@ -9,6 +9,8 @@ public enum ComputeScoreProtocol {
     public static let requestType = "compute_score_request_v1"
     public static let resultType = "compute_score_result_v1"
     public static let capability = "compute_score_v1"
+    /// SPEC-036 FR-26: a scorer-only reference session, never routed buyer traffic.
+    public static let referenceCapability = "compute_score_reference"
     public static let version = 1
 
     public static let maxBodyBytes = 64 * 1024

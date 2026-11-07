@@ -795,6 +795,8 @@ actor CoordinatorClient {
     private let nativeMTPTupleRestoreHandler: NativeMTPTupleRestoreHandler
     private let nativeMTPServedBankDigest: NativeMTPServedBankDigest
     private let computeScoreExecutor: ComputeScoreExecutor?
+    /// SPEC-036 FR-26 scorer-only mode: no buyer request is served.
+    private let computeScoreReference: Bool
     private var computeScoreInFlight = false
     private let coordinatorReadiness: CoordinatorReadiness
     /// Isolated lab join only (`--isolate-lifecycle` + protected-file + a
@@ -1165,6 +1167,7 @@ actor CoordinatorClient {
             }
             return try? ModelArtifactVerifier.canonicalArtifactHash(directory: directory)
         }
+        self.computeScoreReference = config.computeScoreReference
         if let computeScoreExecutor {
             self.computeScoreExecutor = computeScoreExecutor
         } else if let runtime = modelRuntime as? ModelRuntime {
@@ -2848,7 +2851,9 @@ actor CoordinatorClient {
         case "aead_rekey_commit":
             try await handleAEADRekeyCommit(dict)
         case "inference_request":
-            guard wsTunneledMode, let inferenceRelay else {
+            // SPEC-036 FR-26: a scorer-only session refuses buyer work even
+            // if a coordinator routes it some.
+            guard !computeScoreReference, wsTunneledMode, let inferenceRelay else {
                 try await sendNAK(
                     inReplyTo: type,
                     code: "unknown_message_type",
@@ -8570,6 +8575,13 @@ actor CoordinatorClient {
         ]
         if await advertisesFleetCacheProtocol() {
             message["fleet_cache_protocol"] = 1
+        }
+        // SPEC-036 FR-26: a scorer-only session says so, so the coordinator
+        // never routes it buyer traffic.
+        if computeScoreReference {
+            var capabilities = message["tier2_capabilities"] as? [String: Any] ?? [:]
+            capabilities[ComputeScoreProtocol.referenceCapability] = true
+            message["tier2_capabilities"] = capabilities
         }
         // SPEC-051-R029: a shard group head or member says so in its capabilities.
         if let participant = modelRuntime as? any ShardGroupCoordinatorParticipant {
