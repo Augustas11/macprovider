@@ -2,7 +2,10 @@ package config
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
+
+	"github.com/augstar/macprovider-coordinator/internal/providerid"
 )
 
 // ComputeIntegrityConfig is the `compute_integrity` namespace.
@@ -82,29 +85,16 @@ func (c ComputeIntegrityConfig) validate() error {
 	return nil
 }
 
-// validReferenceOperator accepts the two SPEC-036 FR-19 operator key forms.
+// validReferenceOperator accepts the two SPEC-036 FR-19 operator key forms
+// exactly as auth.ProviderOperatorKey writes them: github:<positive int64
+// in canonical decimal> or provider:<a valid provider id>.
 func validReferenceOperator(op string) bool {
 	if id, ok := strings.CutPrefix(op, "github:"); ok {
-		if id == "" || len(id) > 20 {
-			return false
-		}
-		for _, r := range id {
-			if r < '0' || r > '9' {
-				return false
-			}
-		}
-		return true
+		n, err := strconv.ParseInt(id, 10, 64)
+		return err == nil && n > 0 && strconv.FormatInt(n, 10) == id
 	}
 	if id, ok := strings.CutPrefix(op, "provider:"); ok {
-		if id == "" || len(id) > 256 {
-			return false
-		}
-		for _, r := range id {
-			if r <= ' ' || r == 0x7f {
-				return false
-			}
-		}
-		return true
+		return providerid.Validate(id) == nil
 	}
 	return false
 }

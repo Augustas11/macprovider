@@ -455,6 +455,22 @@ func TestScoringStoreRoundTrip(t *testing.T) {
 	if _, err := store.LoadKeyStates(ctx); err == nil {
 		t.Fatal("an unknown persisted state must fail the load")
 	}
+	// FR-26: review_pending survives a reload on an escalating key and is
+	// inconsistent on any other state.
+	if _, err := db.Exec(`UPDATE compute_integrity_scoring_keys SET state_json = '{"provider_id":"p","model_id":"m","state":"suspect","review_pending":true}'`); err != nil {
+		t.Fatal(err)
+	}
+	if loaded, err := store.LoadKeyStates(ctx); err != nil || len(loaded) != 1 || !loaded[0].ReviewPending {
+		t.Fatalf("review_pending lost on reload: %v %+v", err, loaded)
+	}
+	for _, state := range []string{"unverified", "passing", "failed"} {
+		if _, err := db.Exec(`UPDATE compute_integrity_scoring_keys SET state_json = '{"provider_id":"p","model_id":"m","state":"` + state + `","review_pending":true}'`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.LoadKeyStates(ctx); err == nil {
+			t.Fatalf("review_pending on %s must fail the load", state)
+		}
+	}
 }
 
 // FR-24: failed known checks count as split answers but never enter the
@@ -730,9 +746,13 @@ func TestStateMachineReferenceOnlyFailureNeedsOperatorReview(t *testing.T) {
 	}
 	k.Apply(referenceOutcome(outcomeOut(t0.Add(2*time.Hour), "github:9")))
 	k.Apply(referenceOutcome(outcomeOut(t0.Add(3*time.Hour), "github:9")))
+	if k.ReviewPending {
+		t.Fatal("review before the confirmation")
+	}
+	// Review is no transition: the state, its Since and the hold stay.
 	tr := k.Apply(referenceOutcome(outcomeOut(t0.Add(4*time.Hour), "github:9")))
-	if tr == nil || tr.From != VerificationSuspect || tr.To != VerificationSuspect || tr.Reason != ReasonReferenceOnlyFailure || tr.Hold.Kind != HoldActionNone {
-		t.Fatalf("reference-only outs must go to operator review with no hold, got %+v", tr)
+	if tr != nil || k.State != VerificationSuspect || k.Reason != ReasonReferenceOnlyFailure || !k.Since.Equal(t0.Add(time.Hour)) {
+		t.Fatalf("reference-only outs must go to operator review with no transition, got %+v state %+v", tr, k)
 	}
 	if !k.ReviewPending || k.State.RoutingSuspended() || k.NextStep() != "operator_review" {
 		t.Fatalf("review must keep routing and show operator_review: %+v", k)
@@ -790,8 +810,8 @@ func TestStateMachineReferenceOnlyRecoveryFailureNeedsOperatorReview(t *testing.
 	for i := 0; i < 3; i++ {
 		tr = k.Apply(referenceOutcome(outcomeOut(rec.Add(time.Duration(i+1)*time.Minute), "github:9")))
 	}
-	if tr == nil || tr.To != VerificationRecovering || tr.Reason != ReasonReferenceOnlyFailure || tr.Hold.Kind != HoldActionNone || !k.ReviewPending {
-		t.Fatalf("expected recovering under review, got %+v", tr)
+	if tr != nil || k.State != VerificationRecovering || k.Reason != ReasonReferenceOnlyFailure || !k.ReviewPending || !k.Since.Equal(rec) {
+		t.Fatalf("expected recovering under review with no transition, got %+v state %+v", tr, k)
 	}
 	at := rec.Add(time.Hour)
 	tr = k.OperatorConfirmFailure(at)

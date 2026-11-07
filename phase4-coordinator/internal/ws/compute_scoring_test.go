@@ -1621,6 +1621,12 @@ func TestComputeScoringReferenceOnlyFailureAwaitsOperatorConfirm(t *testing.T) {
 	if model["state"] != "suspect" || model["reason"] != "reference_only_failure" || model["next_step"] != "operator_review" {
 		t.Fatalf("unexpected review status %v", model)
 	}
+	metrics := &countingScoringMetrics{}
+	h.engine.deps.Metrics = metrics
+	h.engine.publishGauges(context.Background())
+	if metrics.reviewPending("suspect") != 1 || metrics.reviewPending("recovering") != 0 {
+		t.Fatalf("review gauge suspect=%d recovering=%d", metrics.reviewPending("suspect"), metrics.reviewPending("recovering"))
+	}
 	before := h.dispatched.Load()
 	for i := 0; i < 3; i++ {
 		h.round(2 * time.Hour)
@@ -1646,6 +1652,32 @@ func TestComputeScoringReferenceOnlyFailureAwaitsOperatorConfirm(t *testing.T) {
 	}
 	if code, _ := h.admin(http.MethodPost, "/admin/compute-integrity/cheat/confirm-failure", `{"model_id":"`+scoringModel+`","operator_id":"op","reason":"again"}`); code != http.StatusConflict {
 		t.Fatalf("confirm without a pending review code=%d", code)
+	}
+	h.engine.publishGauges(context.Background())
+	if metrics.reviewPending("suspect") != 0 {
+		t.Fatalf("review gauge after confirm = %d", metrics.reviewPending("suspect"))
+	}
+}
+
+// SPEC-036 FR-26: a pending review is durable; a coordinator restart reloads
+// it and the key stays unprobed and unsuspended.
+func TestComputeScoringReferenceReviewSurvivesReload(t *testing.T) {
+	providers := map[string]string{"cheat": "github:2", "ref": "github:9"}
+	h := newScoringHarnessWithReference(t, providers, map[string]bool{"cheat": true}, map[string]bool{"ref": true}, []string{"github:9"})
+	h.driveToReferenceReview("cheat")
+	h.restartScoring()
+	if state, review := h.reviewState("cheat"); state != computeintegrity.VerificationSuspect || !review {
+		t.Fatalf("after reload state=%s review=%v, want suspect under review", state, review)
+	}
+	before := h.dispatched.Load()
+	for i := 0; i < 3; i++ {
+		h.round(2 * time.Hour)
+	}
+	if h.dispatched.Load() != before {
+		t.Fatal("a reloaded key under review must not be probed")
+	}
+	if cheat, _ := h.registry.Resolve("cheat", "as-cheat"); cheat.ComputeIntegritySuspended {
+		t.Fatal("a reloaded review must not suspend routing")
 	}
 }
 
@@ -1717,9 +1749,74 @@ func TestComputeScoringPeerPreferredOverReferenceScorer(t *testing.T) {
 	}
 }
 
+// SPEC-036 FR-26: with one peer and one reference scorer, escalation uses
+// both as its two operators and a confirmed failure takes the ordinary
+// consequences: failed, suspended and held, never operator review.
+func TestComputeScoringEscalationWithOnePeerAndOneReference(t *testing.T) {
+	providers := map[string]string{"cheat": "github:2", "peer": "github:3", "ref": "github:9"}
+	h := newScoringHarnessWithReference(t, providers, map[string]bool{"cheat": true}, map[string]bool{"ref": true}, []string{"github:9"})
+	metrics := &countingScoringMetrics{}
+	h.engine.deps.Metrics = metrics
+	for i := 0; i < 12 && h.state("cheat") != computeintegrity.VerificationFailed; i++ {
+		h.round(2 * time.Hour)
+		for j := 0; j < 8 && h.state("cheat") == computeintegrity.VerificationSuspect; j++ {
+			if _, review := h.reviewState("cheat"); review {
+				t.Fatal("a failure with a peer scorer must not go to operator review")
+			}
+			h.round(20 * time.Minute)
+		}
+	}
+	if state, review := h.reviewState("cheat"); state != computeintegrity.VerificationFailed || review {
+		t.Fatalf("cheater state=%s review=%v, want failed without review", state, review)
+	}
+	cheat, _ := h.registry.Resolve("cheat", "as-cheat")
+	if !cheat.ComputeIntegritySuspended || cheat.RoutingEligible() {
+		t.Fatal("a confirmed failure must suspend routing")
+	}
+	if holds := h.holds.snapshot(); len(holds) != 1 || holds[0].ProviderID != "cheat" || holds[0].Kind != computeintegrity.HoldKindFailure {
+		t.Fatalf("expected one failure hold for the cheater, got %+v", holds)
+	}
+	if metrics.jobs("reference") == 0 || metrics.jobs("peer") == 0 {
+		t.Fatalf("escalation must use the peer and the reference scorer: peer=%d reference=%d", metrics.jobs("peer"), metrics.jobs("reference"))
+	}
+}
+
+// SPEC-036 FR-26: a busy peer is not replaced by a reference scorer; the key
+// stays due and is measured by the peer once it is free.
+func TestComputeScoringBusyPeerKeepsKeyDue(t *testing.T) {
+	providers := map[string]string{"solo": "github:1", "peer": "github:2", "ref": "github:9"}
+	h := newScoringHarnessWithReference(t, providers, nil, map[string]bool{"ref": true}, []string{"github:9"})
+	metrics := &countingScoringMetrics{}
+	h.engine.deps.Metrics = metrics
+	h.round(2 * time.Hour) // schedules first requests
+	h.engine.mu.Lock()
+	h.engine.scorerBusy["peer"] = true
+	h.engine.mu.Unlock()
+	h.round(2 * time.Hour) // solo due; its only peer scorer is busy
+	soloKey := computeScoringKey{"solo", scoringModel}
+	h.engine.mu.Lock()
+	due, scheduled := h.engine.nextDue[soloKey]
+	h.engine.mu.Unlock()
+	if !scheduled || due.After(h.now()) {
+		t.Fatalf("solo rescheduled to %v (scheduled=%v); it must stay due while its peer is busy", due, scheduled)
+	}
+	if n := metrics.jobs("reference"); n != 0 {
+		t.Fatalf("a reference scorer took a busy peer's place: %d jobs", n)
+	}
+	h.engine.mu.Lock()
+	delete(h.engine.scorerBusy, "peer")
+	h.engine.mu.Unlock()
+	peerJobs := metrics.jobs("peer")
+	h.round(time.Second)
+	if metrics.jobs("peer") == peerJobs || metrics.jobs("reference") != 0 {
+		t.Fatalf("solo must be measured by the freed peer: peer=%d->%d reference=%d", peerJobs, metrics.jobs("peer"), metrics.jobs("reference"))
+	}
+}
+
 type countingScoringMetrics struct {
-	mu    sync.Mutex
-	kinds map[string]int
+	mu     sync.Mutex
+	kinds  map[string]int
+	review map[string]int
 }
 
 func (m *countingScoringMetrics) IncComputeIntegrityVerification(string)       {}
@@ -1734,7 +1831,21 @@ func (m *countingScoringMetrics) IncComputeIntegrityScoringJob(_ string, kind st
 	m.kinds[kind]++
 }
 func (m *countingScoringMetrics) SetComputeIntegrityKeys(string, int) {}
-func (m *countingScoringMetrics) SetComputeIntegrityHeldHolds(int)    {}
+func (m *countingScoringMetrics) SetComputeIntegrityReviewPending(state string, n int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.review == nil {
+		m.review = map[string]int{}
+	}
+	m.review[state] = n
+}
+func (m *countingScoringMetrics) SetComputeIntegrityHeldHolds(int) {}
+
+func (m *countingScoringMetrics) reviewPending(state string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.review[state]
+}
 
 func (m *countingScoringMetrics) jobs(kind string) int {
 	m.mu.Lock()

@@ -2246,7 +2246,8 @@ func TestComputeIntegrityReferenceOperatorsValidate(t *testing.T) {
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("valid reference operators rejected: %v", err)
 	}
-	for _, bad := range [][]string{{"github:"}, {"github:12a"}, {"gh:1"}, {"provider:"}, {"provider:a b"}, {"github:1", "github:1"}} {
+	for _, bad := range [][]string{{"github:"}, {"github:12a"}, {"gh:1"}, {"provider:"}, {"provider:a b"}, {"github:1", "github:1"},
+		{"github:0"}, {"github:007"}, {"github:+5"}, {"github:99999999999999999999"}, {"provider:a/b"}, {"provider:" + strings.Repeat("p", 65)}} {
 		cfg.ComputeIntegrity.Scoring.ReferenceOperators = bad
 		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "reference_operators") {
 			t.Fatalf("%v: Validate error=%v, want reference_operators rejection", bad, err)

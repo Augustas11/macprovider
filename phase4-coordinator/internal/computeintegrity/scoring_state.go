@@ -280,10 +280,13 @@ func (k *KeyState) confirmedFailure() (confirmed, referenceOnly bool) {
 }
 
 // referenceReview parks a reference-only failure for operator review (FR-26):
-// the state and its affected window stay, nothing is suspended or held.
-func (k *KeyState) referenceReview(at time.Time) *Transition {
+// the state, its Since and its affected window stay, nothing is suspended or
+// held. It is no transition (the state does not change); the caller persists
+// the flag.
+func (k *KeyState) referenceReview() *Transition {
 	k.ReviewPending = true
-	return k.transition(k.State, ReasonReferenceOnlyFailure, at, HoldAction{})
+	k.Reason = ReasonReferenceOnlyFailure
+	return nil
 }
 
 // trailingReferenceOnlyIns reports whether the last n escalation
@@ -319,7 +322,7 @@ func (k *KeyState) applySuspect(o Outcome) *Transition {
 	confirmed, referenceOnly := k.confirmedFailure()
 	switch {
 	case confirmed && referenceOnly:
-		return k.referenceReview(o.At)
+		return k.referenceReview()
 	case confirmed:
 		k.FailedAt = o.At
 		k.CooldownUntil = o.At.Add(k.cooldown())
@@ -354,7 +357,7 @@ func (k *KeyState) applyRecovering(o Outcome) *Transition {
 	}
 	confirmed, referenceOnly := k.confirmedFailure()
 	if confirmed && referenceOnly {
-		return k.referenceReview(o.At)
+		return k.referenceReview()
 	}
 	if confirmed {
 		k.FailedAt = o.At

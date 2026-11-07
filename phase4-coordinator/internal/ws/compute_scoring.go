@@ -208,6 +208,7 @@ type ComputeScoringMetrics interface {
 	IncComputeIntegrityTransition(from, to string)
 	IncComputeIntegrityScoringJob(status, scorerKind string)
 	SetComputeIntegrityKeys(state string, n int)
+	SetComputeIntegrityReviewPending(state string, n int)
 	SetComputeIntegrityHeldHolds(n int)
 }
 
@@ -1275,8 +1276,20 @@ func (e *computeScoringEngine) decide(ctx context.Context, key computeScoringKey
 		// Memory never runs ahead of the durable state: the measurement is
 		// dropped and the next one retries.
 		*st = before
-	} else if allIn && acceptsHonest {
-		e.tolerance.Accept(tkey, verified.OperatorKey, ms[0].measurement)
+	} else {
+		if st.ReviewPending && !before.ReviewPending {
+			// FR-26 review is no transition; this is its one record.
+			e.s.log.Warn().
+				Str("event", "compute_integrity_review_pending").
+				Str("provider_id", st.ProviderID).
+				Str("model_id", st.ModelID).
+				Str("state", string(st.State)).
+				Str("reason", string(st.Reason)).
+				Msg("compute-integrity reference-only failure awaits operator review")
+		}
+		if allIn && acceptsHonest {
+			e.tolerance.Accept(tkey, verified.OperatorKey, ms[0].measurement)
+		}
 	}
 	e.mu.Unlock()
 
@@ -1535,9 +1548,13 @@ func (e *computeScoringEngine) publishGauges(ctx context.Context) {
 		return
 	}
 	counts := map[computeintegrity.VerificationState]int{}
+	review := map[computeintegrity.VerificationState]int{}
 	e.mu.Lock()
 	for _, st := range e.states {
 		counts[st.State]++
+		if st.ReviewPending {
+			review[st.State]++
+		}
 	}
 	e.mu.Unlock()
 	for _, state := range []computeintegrity.VerificationState{
@@ -1545,6 +1562,9 @@ func (e *computeScoringEngine) publishGauges(ctx context.Context) {
 		computeintegrity.VerificationFailed, computeintegrity.VerificationRecovering,
 	} {
 		e.deps.Metrics.SetComputeIntegrityKeys(string(state), counts[state])
+	}
+	for _, state := range []computeintegrity.VerificationState{computeintegrity.VerificationSuspect, computeintegrity.VerificationRecovering} {
+		e.deps.Metrics.SetComputeIntegrityReviewPending(string(state), review[state])
 	}
 	cctx, cancel := context.WithTimeout(ctx, computeScoreLookupTimeout)
 	defer cancel()

@@ -14,6 +14,7 @@ type computeIntegrityMetrics struct {
 	transitions   *prometheus.CounterVec
 	scoringJobs   *prometheus.CounterVec
 	keys          *prometheus.GaugeVec
+	reviewPending *prometheus.GaugeVec
 	heldHolds     prometheus.Gauge
 }
 
@@ -38,6 +39,10 @@ func newComputeIntegrityMetrics(f promauto.Factory) *computeIntegrityMetrics {
 		keys: f.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "compute_integrity_keys",
 			Help: "SPEC-036 verification keys by closed-set state.",
+		}, []string{"state"}),
+		reviewPending: f.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "compute_integrity_review_pending",
+			Help: "SPEC-036 FR-26 keys awaiting operator review of a reference-only failure, by state (suspect, recovering).",
 		}, []string{"state"}),
 		heldHolds: f.NewGauge(prometheus.GaugeOpts{
 			Name: "compute_integrity_held_holds",
@@ -119,6 +124,16 @@ func (m *Metrics) SetComputeIntegrityKeys(state string, n int) {
 		return
 	}
 	c.keys.WithLabelValues(state).Set(float64(n))
+}
+
+// SetComputeIntegrityReviewPending sets the number of keys in one state
+// (suspect or recovering) awaiting operator review (FR-26).
+func (m *Metrics) SetComputeIntegrityReviewPending(state string, n int) {
+	c := m.ci()
+	if c == nil || (state != "suspect" && state != "recovering") {
+		return
+	}
+	c.reviewPending.WithLabelValues(state).Set(float64(n))
 }
 
 // SetComputeIntegrityHeldHolds sets the number of held holds.
