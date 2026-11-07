@@ -465,9 +465,10 @@ final class ServingKnobsConfigTests: XCTestCase {
 
     func testMLXCacheDefaultUsesExactPhysicalMemoryBoundaryWithoutOverflow() {
         let gib: UInt64 = 1024 * 1024 * 1024
-        for (ram, expected) in [(UInt64(0), nil), (4 * gib, 128), (8 * gib, 256),
-                                (8 * gib + 1, nil), (16 * gib, nil), (256 * gib, nil),
-                                (UInt64.max, nil)] as [(UInt64, Int?)] {
+        // SPEC-038 v0.3.36: every Mac above 8 GiB (and unknown RAM) gets 2048 MiB.
+        for (ram, expected) in [(UInt64(0), 2048), (4 * gib, 128), (8 * gib, 256),
+                                (8 * gib + 1, 2048), (16 * gib, 2048), (256 * gib, 2048),
+                                (UInt64.max, 2048)] as [(UInt64, Int?)] {
             XCTAssertEqual(ModelRuntime.resolvedMLXCacheLimitMB(
                 configured: nil, physicalMemoryBytes: ram), expected, "RAM bytes=\(ram)")
         }

@@ -212,6 +212,9 @@ struct ShardBenchCommand: AsyncParsableCommand {
             try runPlan(directory: directory)
             return
         }
+        // SPEC-038 FR-CB2 (v0.3.36): serve's cache bound and memory limit.
+        MLXMemoryLimit.applyServeLimits(
+            stage: "startup", modelID: model, configuredCacheLimitMB: nil, modelDirectory: directory)
         let tokenizer = try await ChatTemplateCompatTokenizerLoader().load(from: directory)
         let prompts = (0..<concurrency).map { index in
             tokenizer.encode(text: index == 0 ? prompt : "\(prompt) (sequence \(index))", addSpecialTokens: true)
@@ -259,6 +262,8 @@ struct ShardBenchCommand: AsyncParsableCommand {
         let session: ShardBenchSessionReport
         do {
             let stage = ShardBenchStageBox(try await PipelineStageModel.load(directory: directory, layers: layerRange))
+            MLXMemoryLimit.applyServeLimits(
+                stage: "model_loaded", modelID: model, configuredCacheLimitMB: nil, modelDirectory: directory)
             session = try await ShardBenchThread.run { try ShardBenchSession(options: options, stage: stage.stage).run() }
         } catch {
             FileHandle.standardError.write(Data("shard-bench: \(error)\n".utf8))

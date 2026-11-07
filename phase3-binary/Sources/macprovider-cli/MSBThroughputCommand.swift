@@ -137,7 +137,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
 
     @Option(
         name: .customLong("mlx-cache-limit-mb"),
-        help: "Optional MLX freed-buffer cache limit in MiB, applied before model loading. Unset uses physical RAM / 32 on Macs with at most 8 GiB; larger Macs retain MLX defaults."
+        help: "Optional MLX freed-buffer cache limit in MiB, applied before model loading. Unset uses serve's default: physical RAM / 32 on Macs with at most 8 GiB, 2048 MiB on larger Macs."
     )
     var mlxCacheLimitMB: Int?
 
