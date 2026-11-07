@@ -185,3 +185,31 @@ func TestRoutabilitySnapshotFiltersPrivateAdmissionAndSupportedModelOptIn(t *tes
 		t.Fatalf("visible-supported state=%q want unknown", got)
 	}
 }
+
+// SPEC-036 FR-26: a scorer-only session adds no public serving capacity or
+// slots, even though its session is ready and holds slots.
+func TestRoutabilitySnapshotExcludesReferenceScorer(t *testing.T) {
+	now := time.Date(2026, 8, 19, 12, 0, 0, 0, time.UTC)
+	providers := []pool.Provider{
+		{ProviderID: "peer", ModelID: "m", State: pool.StateReady, SlotsFree: 1, SlotsTotal: 2,
+			LastHeartbeatAt: now.Add(-5 * time.Second), ReceiptPubkey: []byte("receipt-peer")},
+		{ProviderID: "ref", ModelID: "m", State: pool.StateReady, SlotsFree: 4, SlotsTotal: 4,
+			LastHeartbeatAt: now.Add(-5 * time.Second), ReceiptPubkey: []byte("receipt-ref"), ComputeScoreReference: true},
+	}
+	p := New(routabilityFakeSource{providers: providers})
+	p.now = func() time.Time { return now }
+	snap := p.RoutabilitySnapshot()
+	if snap.Summary.ProvidersTotal != 1 || snap.Summary.ProvidersServingCapable != 1 {
+		t.Fatalf("summary=%+v want only the peer counted", snap.Summary)
+	}
+	if len(snap.Models) != 1 || snap.Models[0].SlotsTotal != 2 || snap.Models[0].SlotsFree != 1 ||
+		snap.Models[0].ServingCapableProviderCount != 1 {
+		t.Fatalf("models=%+v want the peer's slots only", snap.Models)
+	}
+	if len(snap.Providers) != 1 {
+		t.Fatalf("providers=%+v want the reference session absent", snap.Providers)
+	}
+	if got := newFixed(fakeSrc(providers)).OverviewSnapshot(); got.NodesOnline != 1 {
+		t.Fatalf("overview NodesOnline=%d want 1", got.NodesOnline)
+	}
+}

@@ -455,6 +455,22 @@ func TestScoringStoreRoundTrip(t *testing.T) {
 	if _, err := store.LoadKeyStates(ctx); err == nil {
 		t.Fatal("an unknown persisted state must fail the load")
 	}
+	// FR-26: review_pending survives a reload on an escalating key and is
+	// inconsistent on any other state.
+	if _, err := db.Exec(`UPDATE compute_integrity_scoring_keys SET state_json = '{"provider_id":"p","model_id":"m","state":"suspect","review_pending":true}'`); err != nil {
+		t.Fatal(err)
+	}
+	if loaded, err := store.LoadKeyStates(ctx); err != nil || len(loaded) != 1 || !loaded[0].ReviewPending {
+		t.Fatalf("review_pending lost on reload: %v %+v", err, loaded)
+	}
+	for _, state := range []string{"unverified", "passing", "failed"} {
+		if _, err := db.Exec(`UPDATE compute_integrity_scoring_keys SET state_json = '{"provider_id":"p","model_id":"m","state":"` + state + `","review_pending":true}'`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.LoadKeyStates(ctx); err == nil {
+			t.Fatalf("review_pending on %s must fail the load", state)
+		}
+	}
 }
 
 // FR-24: failed known checks count as split answers but never enter the
@@ -678,5 +694,160 @@ func TestHotClassUsesHardFloorOnlyAndIsNotEscalated(t *testing.T) {
 		if p.Class == SamplingHot {
 			t.Fatal("an escalation probe must never be hot")
 		}
+	}
+}
+
+func referenceOutcome(o Outcome) Outcome {
+	o.ReferenceOnly = true
+	return o
+}
+
+// SPEC-036 FR-26: reference scorers fill only the slots no eligible peer
+// operator can fill, never verify their own operator, and keep the cohort.
+func TestSelectScorersReferenceFallback(t *testing.T) {
+	verified := ScorerCandidate{ProviderID: "v", ModelID: "m", ManifestSHA256: "h", OperatorKey: "github:1"}
+	peer := ScorerCandidate{ProviderID: "peer", ModelID: "m", ManifestSHA256: "h", OperatorKey: "github:2", Capable: true, Ready: true}
+	ref := ScorerCandidate{ProviderID: "ref", ModelID: "m", ManifestSHA256: "h", OperatorKey: "github:9", Capable: true, Ready: true, Reference: true}
+	refSameOp := ScorerCandidate{ProviderID: "ref-self", ModelID: "m", ManifestSHA256: "h", OperatorKey: "github:1", Capable: true, Ready: true, Reference: true}
+	refOtherHash := ScorerCandidate{ProviderID: "ref-hash", ModelID: "m", ManifestSHA256: "x", OperatorKey: "github:8", Capable: true, Ready: true, Reference: true}
+	refPeerOp := ScorerCandidate{ProviderID: "ref-peer-op", ModelID: "m", ManifestSHA256: "h", OperatorKey: "github:2", Capable: true, Ready: true, Reference: true}
+	for seed := int64(0); seed < 50; seed++ {
+		rng := rand.New(rand.NewSource(seed))
+		if got := SelectScorers(rng, verified, []ScorerCandidate{ref, peer}, 1, nil); len(got) != 1 || got[0].ProviderID != "peer" {
+			t.Fatalf("seed %d: a peer must be preferred over a reference scorer, got %+v", seed, got)
+		}
+		got := SelectScorers(rng, verified, []ScorerCandidate{ref, peer, refPeerOp}, 2, nil)
+		if len(got) != 2 || got[0].ProviderID != "peer" || got[1].ProviderID != "ref" || PeerCount(got) != 1 {
+			t.Fatalf("seed %d: a reference scorer of another operator fills the missing slot, got %+v", seed, got)
+		}
+		if got := SelectScorers(rng, verified, []ScorerCandidate{ref}, 1, nil); len(got) != 1 || got[0].ProviderID != "ref" {
+			t.Fatalf("seed %d: with no peer the reference scorer is chosen, got %+v", seed, got)
+		}
+		if got := SelectScorers(rng, verified, []ScorerCandidate{refSameOp, refOtherHash}, 2, nil); len(got) != 0 {
+			t.Fatalf("seed %d: a reference scorer never verifies its own operator or another cohort, got %+v", seed, got)
+		}
+		excluded := func(c ScorerCandidate) bool { return c.ProviderID != "ref" }
+		if got := SelectScorers(rng, verified, []ScorerCandidate{ref}, 1, excluded); len(got) != 0 {
+			t.Fatalf("seed %d: an ineligible reference scorer is not chosen, got %+v", seed, got)
+		}
+	}
+}
+
+// SPEC-036 FR-23/FR-26: with no peer, reference-only outs confirm a failure
+// for operator review only: nothing is suspended or held until an operator
+// confirms it. One peer operator alone still cannot confirm.
+func TestStateMachineReferenceOnlyFailureNeedsOperatorReview(t *testing.T) {
+	t0 := time.Date(2026, 10, 13, 0, 0, 0, 0, time.UTC)
+	lastIn := t0
+	k := NewKeyState("p", "m", t0)
+	k.Apply(referenceOutcome(outcomeIn(lastIn, "github:9")))
+	if tr := k.Apply(referenceOutcome(outcomeOut(t0.Add(time.Hour), "github:9"))); tr == nil || tr.To != VerificationSuspect {
+		t.Fatalf("expected suspect, got %+v", tr)
+	}
+	k.Apply(referenceOutcome(outcomeOut(t0.Add(2*time.Hour), "github:9")))
+	k.Apply(referenceOutcome(outcomeOut(t0.Add(3*time.Hour), "github:9")))
+	if k.ReviewPending {
+		t.Fatal("review before the confirmation")
+	}
+	// Review is no transition: the state, its Since and the hold stay.
+	tr := k.Apply(referenceOutcome(outcomeOut(t0.Add(4*time.Hour), "github:9")))
+	if tr != nil || k.State != VerificationSuspect || k.Reason != ReasonReferenceOnlyFailure || !k.Since.Equal(t0.Add(time.Hour)) {
+		t.Fatalf("reference-only outs must go to operator review with no transition, got %+v state %+v", tr, k)
+	}
+	if !k.ReviewPending || k.State.RoutingSuspended() || k.NextStep() != "operator_review" {
+		t.Fatalf("review must keep routing and show operator_review: %+v", k)
+	}
+	if tr := k.Apply(referenceOutcome(outcomeOut(t0.Add(5*time.Hour), "github:9"))); tr != nil {
+		t.Fatalf("a key under review takes no measurements, got %+v", tr)
+	}
+	confirmAt := t0.Add(6 * time.Hour)
+	tr = k.OperatorConfirmFailure(confirmAt)
+	if tr == nil || tr.To != VerificationFailed || tr.Reason != ReasonConfirmedFailure || tr.Hold.Kind != HoldActionOpenFailure ||
+		!tr.Hold.Start.Equal(lastIn) || !tr.Hold.End.Equal(confirmAt) || k.ReviewPending {
+		t.Fatalf("operator confirm must apply the failed consequences, got %+v", tr)
+	}
+	if !k.CooldownUntil.Equal(confirmAt.Add(DefaultRecoveryCooldown)) {
+		t.Fatalf("cooldown starts at the confirmation: %v", k.CooldownUntil)
+	}
+	if tr := k.OperatorConfirmFailure(confirmAt); tr != nil {
+		t.Fatalf("confirm needs a pending review, got %+v", tr)
+	}
+
+	// An operator clear ends a review instead.
+	k = NewKeyState("p", "m", t0)
+	for i := 0; i < 4; i++ {
+		k.Apply(referenceOutcome(outcomeOut(t0.Add(time.Duration(i)*time.Hour), "github:9")))
+	}
+	if !k.ReviewPending {
+		t.Fatal("setup: expected review")
+	}
+	if tr := k.OperatorClear(t0.Add(5 * time.Hour)); tr == nil || tr.To != VerificationUnverified || k.ReviewPending {
+		t.Fatalf("operator clear must end the review, got %+v", tr)
+	}
+
+	// A single peer operator's outs never confirm; one reference out then
+	// makes a two-operator confirmation with the ordinary consequences.
+	k = NewKeyState("p", "m", t0)
+	k.Apply(outcomeOut(t0, "github:2"))
+	for i := 1; i <= 4; i++ {
+		if tr := k.Apply(outcomeOut(t0.Add(time.Duration(i)*time.Hour), "github:2")); tr != nil && tr.To == VerificationFailed {
+			t.Fatal("one peer operator must not confirm a failure")
+		}
+	}
+	if tr := k.Apply(referenceOutcome(outcomeOut(t0.Add(6*time.Hour), "github:9"))); tr == nil || tr.To != VerificationFailed || tr.Hold.Kind != HoldActionOpenFailure {
+		t.Fatalf("a reference scorer counts as an independent second operator, got %+v", tr)
+	}
+}
+
+// SPEC-036 FR-26: a reference-only failure in recovery also waits for review;
+// a confirmation closes the recovery hold and keeps it held.
+func TestStateMachineReferenceOnlyRecoveryFailureNeedsOperatorReview(t *testing.T) {
+	t0 := time.Date(2026, 10, 13, 0, 0, 0, 0, time.UTC)
+	k := failKey(t, t0)
+	rec := t0.Add(25 * time.Hour)
+	k.Tick(rec)
+	var tr *Transition
+	for i := 0; i < 3; i++ {
+		tr = k.Apply(referenceOutcome(outcomeOut(rec.Add(time.Duration(i+1)*time.Minute), "github:9")))
+	}
+	if tr != nil || k.State != VerificationRecovering || k.Reason != ReasonReferenceOnlyFailure || !k.ReviewPending || !k.Since.Equal(rec) {
+		t.Fatalf("expected recovering under review with no transition, got %+v state %+v", tr, k)
+	}
+	at := rec.Add(time.Hour)
+	tr = k.OperatorConfirmFailure(at)
+	if tr == nil || tr.To != VerificationFailed || tr.Hold.Kind != HoldActionCloseRecovery || !tr.Hold.End.Equal(at) {
+		t.Fatalf("confirm in recovery must close the recovery hold held, got %+v", tr)
+	}
+}
+
+func TestStateMachineReferenceOnlyRecovery(t *testing.T) {
+	t0 := time.Date(2026, 10, 13, 0, 0, 0, 0, time.UTC)
+	k := failKey(t, t0)
+	rec := t0.Add(25 * time.Hour)
+	k.Tick(rec)
+	for i := 0; i < 4; i++ {
+		if tr := k.Apply(referenceOutcome(outcomeIn(rec.Add(time.Duration(i+1)*time.Minute), "github:9"))); tr != nil {
+			t.Fatalf("four ins must not requalify, got %+v", tr)
+		}
+	}
+	tr := k.Apply(referenceOutcome(outcomeIn(rec.Add(5*time.Minute), "github:9")))
+	if tr == nil || tr.To != VerificationPassing || tr.Reason != ReasonRecoveryPassed || tr.Hold.Kind != HoldActionReleaseRecovery {
+		t.Fatalf("five reference-only ins must requalify, got %+v", tr)
+	}
+	raw, err := json.Marshal(EscalationEntry{Out: true, ScorerOperators: []string{"github:9"}, ReferenceOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back EscalationEntry
+	if err := json.Unmarshal(raw, &back); err != nil || !back.ReferenceOnly {
+		t.Fatalf("reference_only must persist, got %s", raw)
+	}
+	raw, err = json.Marshal(KeyState{ProviderID: "p", ModelID: "m", State: VerificationSuspect, ReviewPending: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state KeyState
+	if err := json.Unmarshal(raw, &state); err != nil || !state.ReviewPending {
+		t.Fatalf("review_pending must persist, got %s", raw)
 	}
 }

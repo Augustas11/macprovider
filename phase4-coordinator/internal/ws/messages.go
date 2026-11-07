@@ -178,6 +178,9 @@ type Tier2Caps struct {
 	RelayBlindSettlementReceiptV1 bool `json:"relay_blind_settlement_receipt_v1,omitempty"`
 	// ComputeScoreV1 is the SPEC-036 FR-21 scorer capability.
 	ComputeScoreV1 bool `json:"compute_score_v1,omitempty"`
+	// ComputeScoreReference is the SPEC-036 FR-26 scorer-only session
+	// capability: the session is never routed buyer traffic.
+	ComputeScoreReference bool `json:"compute_score_reference,omitempty"`
 	// ShardGroupHeadV1 and ShardMemberV1 are the SPEC-051-R029 shard group
 	// head and member session capabilities.
 	ShardGroupHeadV1 bool `json:"shard_group_head_v1,omitempty"`

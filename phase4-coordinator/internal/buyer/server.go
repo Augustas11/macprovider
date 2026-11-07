@@ -1184,8 +1184,9 @@ func (s *Server) trustPoolStatusLiveProviders() trustpool.StatusLiveProviderSet 
 	out := make([]trustpool.StatusLiveProvider, 0, len(providers))
 	for _, provider := range providers {
 		out = append(out, trustpool.StatusLiveProvider{
-			ProviderID:     provider.ProviderID,
-			ServingCapable: provider.ServingCapable(),
+			ProviderID: provider.ProviderID,
+			// SPEC-036 FR-26: a scorer-only session is no serving capacity.
+			ServingCapable: provider.ServingCapable() && !provider.ComputeScoreReference,
 			BinaryVersion:  provider.BinaryVersion,
 		})
 	}

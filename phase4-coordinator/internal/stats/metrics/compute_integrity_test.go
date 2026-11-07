@@ -17,11 +17,14 @@ func TestComputeIntegrityMetricsUseClosedLabels(t *testing.T) {
 	m.IncComputeIntegrityInconclusive("prompt text here")
 	m.IncComputeIntegrityTransition("passing", "suspect")
 	m.IncComputeIntegrityTransition("passing", "model-x")
-	m.IncComputeIntegrityScoringJob("ok")
-	m.IncComputeIntegrityScoringJob("weird")
+	m.IncComputeIntegrityScoringJob("ok", "reference")
+	m.IncComputeIntegrityScoringJob("weird", "peer")
+	m.IncComputeIntegrityScoringJob("ok", "weird")
 	m.SetComputeIntegrityKeys("failed", 2)
 	m.SetComputeIntegrityKeys("github:1", 9)
 	m.SetComputeIntegrityHeldHolds(3)
+	m.SetComputeIntegrityReviewPending("suspect", 4)
+	m.SetComputeIntegrityReviewPending("failed", 5)
 	var nilMetrics *Metrics
 	nilMetrics.IncComputeIntegrityVerification("in_band")
 
@@ -57,6 +60,7 @@ func TestComputeIntegrityMetricsUseClosedLabels(t *testing.T) {
 		"compute_integrity_scoring_jobs_total":  1,
 		"compute_integrity_keys":                1,
 		"compute_integrity_held_holds":          1,
+		"compute_integrity_review_pending":      1,
 	} {
 		if series[name] != want {
 			t.Fatalf("%s series=%d want %d (open label leaked or metric missing)", name, series[name], want)
@@ -65,8 +69,10 @@ func TestComputeIntegrityMetricsUseClosedLabels(t *testing.T) {
 	for key, want := range map[string]float64{
 		"compute_integrity_verifications_total|in_band":       1,
 		"compute_integrity_transitions_total|passing|suspect": 1,
+		"compute_integrity_scoring_jobs_total|reference|ok":   1,
 		"compute_integrity_keys|failed":                       2,
 		"compute_integrity_held_holds":                        3,
+		"compute_integrity_review_pending|suspect":            4,
 	} {
 		if values[key] != want {
 			t.Fatalf("%s=%v want %v", key, values[key], want)

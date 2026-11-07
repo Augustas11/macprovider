@@ -2234,3 +2234,30 @@ func TestLedgerRollupAndRequestLogRetentionDefaultsAndValidation(t *testing.T) {
 		t.Fatalf("a longer request_log retention should still pass: %v", err)
 	}
 }
+
+// SPEC-036 FR-26: reference operators default empty and must be valid,
+// distinct FR-19 operator keys.
+func TestComputeIntegrityReferenceOperatorsValidate(t *testing.T) {
+	cfg := validTestConfig()
+	if len(cfg.ComputeIntegrity.Scoring.ReferenceOperators) != 0 {
+		t.Fatal("reference operators must default empty")
+	}
+	cfg.ComputeIntegrity.Scoring.ReferenceOperators = []string{"github:12345", "provider:mp-abc"}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("valid reference operators rejected: %v", err)
+	}
+	for _, bad := range [][]string{{"github:"}, {"github:12a"}, {"gh:1"}, {"provider:"}, {"provider:a b"}, {"github:1", "github:1"},
+		{"github:0"}, {"github:007"}, {"github:+5"}, {"github:99999999999999999999"}, {"provider:a/b"}, {"provider:" + strings.Repeat("p", 65)}} {
+		cfg.ComputeIntegrity.Scoring.ReferenceOperators = bad
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "reference_operators") {
+			t.Fatalf("%v: Validate error=%v, want reference_operators rejection", bad, err)
+		}
+	}
+	var parsed Config
+	if err := yaml.Unmarshal([]byte("compute_integrity:\n  scoring:\n    reference_operators: [\"github:7\"]\n"), &parsed); err != nil {
+		t.Fatal(err)
+	}
+	if got := parsed.ComputeIntegrity.Scoring.ReferenceOperators; len(got) != 1 || got[0] != "github:7" {
+		t.Fatalf("reference_operators did not parse: %v", got)
+	}
+}

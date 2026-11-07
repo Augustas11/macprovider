@@ -241,6 +241,11 @@ type Provider struct {
 	// tier2_capabilities.compute_score_v1: it runs SPEC-036 FR-21 scoring
 	// jobs. Sessions without it are never chosen as scorers.
 	ComputeScoreV1 bool `json:"compute_score_v1,omitempty"`
+	// ComputeScoreReference records that this session advertised
+	// tier2_capabilities.compute_score_reference: a scorer-only session
+	// (SPEC-036 FR-26). It is never routable for buyer traffic and is
+	// chosen as a reference scorer only when its operator is configured.
+	ComputeScoreReference bool `json:"compute_score_reference,omitempty"`
 	// ShardGroupHeadV1 records that this session advertised
 	// tier2_capabilities.shard_group_head_v1: it is a SPEC-051 group head
 	// and routes only while ShardGroupAvailable (SPEC-051-R015/R016).
@@ -831,6 +836,10 @@ func (p Provider) ListingEligible() bool {
 	if p.ShardMemberV1 || (p.ShardGroupHeadV1 && !p.ShardGroupAvailable) {
 		return false
 	}
+	// SPEC-036 FR-26: a scorer-only session serves no buyer path.
+	if p.ComputeScoreReference {
+		return false
+	}
 	return p.shardMemberAdmissible()
 }
 
@@ -871,6 +880,10 @@ func (p Provider) shardMemberAdmissible() bool {
 	// SPEC-036 FR-25: a confirmed compute-integrity failure removes this
 	// provider from routing for the model it serves.
 	if p.ComputeIntegritySuspended {
+		return false
+	}
+	// SPEC-036 FR-26: a scorer-only session is never a group member or head.
+	if p.ComputeScoreReference {
 		return false
 	}
 	if p.AdmissionCeilingExcluded || p.AdmissionEvidenceStale || p.AdmissionSandboxed || p.CatalogRecheckPending || p.HandshakeAckPending {
@@ -919,15 +932,16 @@ func (p Provider) ServingCapable() bool {
 // New buyer-serving verdicts should use ServingCapable so they do not imply
 // that a currently busy provider is immediately RoutingEligible.
 func (p Provider) CapacityEligible() bool {
-	return p.ServingCapable()
+	// SPEC-036 FR-26: a scorer-only session is no buyer-serving capacity.
+	return p.ServingCapable() && !p.ComputeScoreReference
 }
 
 // SlotQueueEligible reports a serving provider that may regain a seat while
 // buyers wait. A safety hold prevents routing, not waiting for recovery.
 func (p Provider) SlotQueueEligible() bool {
 	// SPEC-036 FR-25: a suspended model serves no buyer path, including the
-	// slot queue.
-	if p.ComputeIntegritySuspended {
+	// slot queue; nor does a scorer-only session (FR-26).
+	if p.ComputeIntegritySuspended || p.ComputeScoreReference {
 		return false
 	}
 	return p.ServingCapable() && p.SlotsTotal > 0 && (p.SlotsFree == 0 || p.capacitySafetyHold)

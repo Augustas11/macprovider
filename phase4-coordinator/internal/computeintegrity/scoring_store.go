@@ -129,7 +129,10 @@ func (s *ScoringStore) LoadKeyStates(ctx context.Context) ([]*KeyState, error) {
 		if err := json.Unmarshal([]byte(raw), &k); err != nil {
 			return nil, fmt.Errorf("compute-integrity key state %s/%s: %w", providerID, modelID, err)
 		}
-		if k.ProviderID != providerID || k.ModelID != modelID || !k.State.Known() {
+		// FR-26 review is only ever set on an escalating key (suspect or
+		// recovering); anywhere else the row was not written by this code.
+		reviewOK := !k.ReviewPending || k.State == VerificationSuspect || k.State == VerificationRecovering
+		if k.ProviderID != providerID || k.ModelID != modelID || !k.State.Known() || !reviewOK {
 			return nil, fmt.Errorf("compute-integrity key state %s/%s is inconsistent", providerID, modelID)
 		}
 		out = append(out, &k)

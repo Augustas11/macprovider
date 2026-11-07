@@ -14,6 +14,7 @@ type computeIntegrityMetrics struct {
 	transitions   *prometheus.CounterVec
 	scoringJobs   *prometheus.CounterVec
 	keys          *prometheus.GaugeVec
+	reviewPending *prometheus.GaugeVec
 	heldHolds     prometheus.Gauge
 }
 
@@ -33,11 +34,15 @@ func newComputeIntegrityMetrics(f promauto.Factory) *computeIntegrityMetrics {
 		}, []string{"from", "to"}),
 		scoringJobs: f.NewCounterVec(prometheus.CounterOpts{
 			Name: "compute_integrity_scoring_jobs_total",
-			Help: "SPEC-036 teacher-forced scoring jobs by closed-set result status.",
-		}, []string{"status"}),
+			Help: "SPEC-036 teacher-forced scoring jobs by closed-set result status and scorer kind.",
+		}, []string{"status", "scorer_kind"}),
 		keys: f.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "compute_integrity_keys",
 			Help: "SPEC-036 verification keys by closed-set state.",
+		}, []string{"state"}),
+		reviewPending: f.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "compute_integrity_review_pending",
+			Help: "SPEC-036 FR-26 keys awaiting operator review of a reference-only failure, by state (suspect, recovering).",
 		}, []string{"state"}),
 		heldHolds: f.NewGauge(prometheus.GaugeOpts{
 			Name: "compute_integrity_held_holds",
@@ -94,15 +99,21 @@ func (m *Metrics) IncComputeIntegrityTransition(from, to string) {
 	c.transitions.WithLabelValues(from, to).Inc()
 }
 
-// IncComputeIntegrityScoringJob counts one scoring job result.
-func (m *Metrics) IncComputeIntegrityScoringJob(status string) {
+// IncComputeIntegrityScoringJob counts one scoring job result; scorerKind
+// is peer or reference (FR-26).
+func (m *Metrics) IncComputeIntegrityScoringJob(status, scorerKind string) {
 	c := m.ci()
 	if c == nil {
 		return
 	}
+	switch scorerKind {
+	case "peer", "reference":
+	default:
+		return
+	}
 	switch status {
 	case "ok", "unavailable", "invalid", "too_long", "timeout":
-		c.scoringJobs.WithLabelValues(status).Inc()
+		c.scoringJobs.WithLabelValues(status, scorerKind).Inc()
 	}
 }
 
@@ -113,6 +124,16 @@ func (m *Metrics) SetComputeIntegrityKeys(state string, n int) {
 		return
 	}
 	c.keys.WithLabelValues(state).Set(float64(n))
+}
+
+// SetComputeIntegrityReviewPending sets the number of keys in one state
+// (suspect or recovering) awaiting operator review (FR-26).
+func (m *Metrics) SetComputeIntegrityReviewPending(state string, n int) {
+	c := m.ci()
+	if c == nil || (state != "suspect" && state != "recovering") {
+		return
+	}
+	c.reviewPending.WithLabelValues(state).Set(float64(n))
 }
 
 // SetComputeIntegrityHeldHolds sets the number of held holds.

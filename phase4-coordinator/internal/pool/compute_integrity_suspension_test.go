@@ -51,3 +51,27 @@ func TestComputeIntegritySuspensionIsPerModel(t *testing.T) {
 		t.Fatal("cleared suspension must restore routing")
 	}
 }
+
+// SPEC-036 FR-26: a scorer-only session is never routable for buyer
+// traffic, whatever else it reports.
+func TestComputeScoreReferenceSessionIsNeverRoutable(t *testing.T) {
+	r := NewRegistry(nil)
+	p := quarantineTestProvider()
+	p.ComputeScoreV1 = true
+	p.ComputeScoreReference = true
+	r.Register(p, nil)
+	got, _ := r.Resolve("provider-a", "assigned-a")
+	if got.RoutingEligible() || got.ListingEligible() || got.CapacityEligible() {
+		t.Fatal("a scorer-only session must leave every buyer path")
+	}
+	busy := got
+	busy.SlotsFree = 0
+	if busy.SlotQueueEligible() {
+		t.Fatal("a scorer-only session must not wait in the slot queue")
+	}
+	ordinary := quarantineTestProvider()
+	ordinary.ComputeScoreV1 = true
+	if !ordinary.RoutingEligible() {
+		t.Fatal("setup: the same session without the capability is routable")
+	}
+}

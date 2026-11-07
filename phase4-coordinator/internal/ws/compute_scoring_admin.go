@@ -88,6 +88,33 @@ func (e *computeScoringEngine) operatorClear(ctx context.Context, providerID, mo
 	return true, nil
 }
 
+// errComputeScoringNotInReview is operatorConfirmFailure's answer for a key
+// that is not awaiting operator review.
+var errComputeScoringNotInReview = errors.New("compute-integrity key is not awaiting operator review")
+
+// operatorConfirmFailure applies the operator's confirmation of a
+// reference-only failure (FR-26): the key becomes failed with the ordinary
+// suspension and hold.
+func (e *computeScoringEngine) operatorConfirmFailure(ctx context.Context, providerID, modelID string) (bool, error) {
+	now := e.s.now()
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	st := e.states[computeScoringKey{providerID, modelID}]
+	if st == nil {
+		return false, nil
+	}
+	before := cloneKeyState(st)
+	tr := st.OperatorConfirmFailure(now)
+	if tr == nil {
+		return true, errComputeScoringNotInReview
+	}
+	if !e.applyTransitionLocked(ctx, st, tr, now) {
+		*st = before
+		return true, errors.New("compute-integrity failure confirmation not applied")
+	}
+	return true, nil
+}
+
 // clearScorer removes the durable exclusion first, so memory never runs
 // ahead of what a restart would load.
 // It holds exclusionMu and drops any pending retry, so an exclusion write
@@ -134,6 +161,7 @@ func validOperatorReason(value string) bool {
 // handleAdminComputeIntegrityAction serves
 //
 //	POST /admin/compute-integrity/<provider_id>/clear        {model_id, operator_id, reason}
+//	POST /admin/compute-integrity/<provider_id>/confirm-failure {model_id, operator_id, reason}
 //	POST /admin/compute-integrity/<provider_id>/clear-scorer {operator_id, reason}
 //	POST /admin/compute-integrity/holds/<hold_id>/release    {operator_id, reason}
 func (s *Server) handleAdminComputeIntegrityAction(w http.ResponseWriter, r *http.Request) {
@@ -202,6 +230,26 @@ func (s *Server) handleAdminComputeIntegrityAction(w http.ResponseWriter, r *htt
 		}
 		audit.Str("action", "clear").Str("provider_id", providerID).Str("model_id", action.ModelID).Msg("compute-integrity key cleared")
 		writeJSON(w, http.StatusOK, map[string]any{"provider_id": providerID, "model_id": action.ModelID, "state": string(computeintegrity.VerificationUnverified)})
+	case len(parts) == 2 && parts[1] == "confirm-failure":
+		providerID := parts[0]
+		if config.ValidateProviderID(providerID) != nil || !boundedPrintable(action.ModelID, 1, 256) {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": "invalid provider_id or model_id", "code": "invalid_request"}})
+			return
+		}
+		found, err := e.operatorConfirmFailure(ctx, providerID, action.ModelID)
+		switch {
+		case !found:
+			writeJSON(w, http.StatusNotFound, map[string]any{"error": map[string]any{"message": "no verification state for that model", "code": "compute_integrity_key_not_found"}})
+			return
+		case errors.Is(err, errComputeScoringNotInReview):
+			writeJSON(w, http.StatusConflict, map[string]any{"error": map[string]any{"message": "key is not awaiting operator review", "code": "compute_integrity_key_not_in_review"}})
+			return
+		case err != nil:
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": map[string]any{"message": "confirm failed", "code": "compute_integrity_confirm_failed"}})
+			return
+		}
+		audit.Str("action", "confirm_failure").Str("provider_id", providerID).Str("model_id", action.ModelID).Msg("compute-integrity reference-only failure confirmed")
+		writeJSON(w, http.StatusOK, map[string]any{"provider_id": providerID, "model_id": action.ModelID, "state": string(computeintegrity.VerificationFailed)})
 	case len(parts) == 2 && parts[1] == "clear-scorer":
 		providerID := parts[0]
 		if config.ValidateProviderID(providerID) != nil {

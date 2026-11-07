@@ -1072,7 +1072,7 @@
     {
       "spec_id": "SPEC-036",
       "title": "Compute-Integrity Receipt Companion",
-      "version": "v0.2.1",
+      "version": "v0.3.0",
       "path": "specs/SPEC-036-compute-integrity-receipt.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -5230,7 +5230,8 @@
         "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoreResultFromWrongSessionIsIgnored",
         "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestSelectScorersIsOperatorWeighted",
         "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringBusyScorerIsNotDoubleBooked",
-        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringCohortUsesVerifiedModelHash"
+        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringCohortUsesVerifiedModelHash",
+        "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestSelectScorersReferenceFallback"
       ],
       "journeys": [],
       "evidence": [],
@@ -5285,7 +5286,10 @@
         "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringPartialEscalationIsInconclusive",
         "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringTransitionIsAtomic",
         "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringRestoredStateSurvivesRestartBeforeReconnect",
-        "phase4-coordinator/internal/billing/compute_integrity_holds_test.go:TestComputeIntegrityRecoveryCloseNeedsAnOpenRecoveryHold"
+        "phase4-coordinator/internal/billing/compute_integrity_holds_test.go:TestComputeIntegrityRecoveryCloseNeedsAnOpenRecoveryHold",
+        "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestStateMachineReferenceOnlyRecovery",
+        "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestStateMachineReferenceOnlyFailureNeedsOperatorReview",
+        "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestStateMachineReferenceOnlyRecoveryFailureNeedsOperatorReview"
       ],
       "journeys": [],
       "evidence": [],
@@ -5351,6 +5355,55 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1644",
         "rationale": "SPEC-036 v0.2.0 FR-25. Routing suspension, provider/operator status and closed-label telemetry. Implemented in the #1644 campaign PR. Pending: provider-side hardware validation, the CLI release carrying compute_score_v1, the coordinator deploy, and live probes across the catalog."
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R026",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/computeintegrity/scoring_scorers.go:func SelectScorers",
+        "phase4-coordinator/internal/computeintegrity/scoring_state.go:func (k *KeyState) confirmedFailure",
+        "phase4-coordinator/internal/computeintegrity/scoring_state.go:func (k *KeyState) trailingReferenceOnlyIns",
+        "phase4-coordinator/internal/ws/compute_scoring.go:func (e *computeScoringEngine) scorerAdmissible",
+        "phase4-coordinator/internal/ws/compute_scoring.go:func (e *computeScoringEngine) considerProvider",
+        "phase4-coordinator/internal/pool/provider.go:func (p Provider) ListingEligible",
+        "phase4-coordinator/internal/pool/provider.go:func (p Provider) CapacityEligible",
+        "phase4-coordinator/internal/pool/provider.go:func (p Provider) SlotQueueEligible",
+        "phase4-coordinator/internal/buyer/relay_blind.go:func relayBlindBindable",
+        "phase4-coordinator/internal/config/compute_integrity.go:func validReferenceOperator",
+        "phase3-binary/Sources/MacProviderCore/Config.swift:private static func applyYAMLConfig",
+        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:func authInitialMessage",
+        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:private func handle(_ message: URLSessionWebSocketTask.Message)",
+        "phase4-coordinator/internal/computeintegrity/scoring_state.go:func (k *KeyState) referenceReview",
+        "phase4-coordinator/internal/computeintegrity/scoring_state.go:func (k *KeyState) OperatorConfirmFailure",
+        "phase4-coordinator/internal/ws/compute_scoring_admin.go:func (e *computeScoringEngine) operatorConfirmFailure",
+        "phase4-coordinator/internal/ws/compute_scoring_admin.go:func (s *Server) handleAdminComputeIntegrityAction"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestSelectScorersReferenceFallback",
+        "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestStateMachineReferenceOnlyRecovery",
+        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringReferenceScorerVerifiesProviderWithoutPeer",
+        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringReferenceScorerNeedsConfigAndAnotherOperator",
+        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringPeerPreferredOverReferenceScorer",
+        "phase4-coordinator/internal/pool/compute_integrity_suspension_test.go:TestComputeScoreReferenceSessionIsNeverRoutable",
+        "phase4-coordinator/internal/config/config_test.go:TestComputeIntegrityReferenceOperatorsValidate",
+        "phase3-binary/Tests/macprovider-cliTests/ComputeScoreReferenceConfigTests.swift:testRejectsNonBooleanValues",
+        "phase3-binary/Tests/macprovider-cliTests/ComputeScoreReferenceConfigTests.swift:testYAMLAndEnvironmentEnable",
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testComputeScoreReferenceAdvertisesCapability",
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testComputeScoreReferenceRefusesBuyerRequestsAndStillScores",
+        "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestStateMachineReferenceOnlyFailureNeedsOperatorReview",
+        "phase4-coordinator/internal/computeintegrity/scoring_test.go:TestStateMachineReferenceOnlyRecoveryFailureNeedsOperatorReview",
+        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringReferenceOnlyFailureAwaitsOperatorConfirm",
+        "phase4-coordinator/internal/ws/compute_scoring_test.go:TestComputeScoringReferenceOnlyFailureOperatorClear"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1644",
+        "rationale": "SPEC-036 v0.3.0 FR-26. Reference scorers verify keys with no peer of another operator; a scorer-only session is never routed or verified. Implemented in the #1644 reference-scorer campaign PR. Pending: the CLI release carrying compute_score_reference, the coordinator rollout, a configured reference operator with a reference Mac per catalog cohort, and live verification of single-operator keys."
       }
     },
     {

@@ -87,7 +87,9 @@ def digest(path):
 def compute_scoring_events():
     """What cmd/coordinator/compute_scoring.go logs at start for the
     compute_integrity.scoring of the files on disk (overlay over base).
-    svc/ci_corpus_invalid makes the corpus unusable."""
+    svc/ci_corpus_invalid makes the corpus unusable; svc/ro_not_logged is a
+    coordinator that predates reference_operators (no count in the start
+    event)."""
     import yaml
 
     def scoring(path):
@@ -98,6 +100,15 @@ def compute_scoring_events():
             return {}
 
     s = dict(scoring(cfg), **scoring(ov))
+    events = scoring_events(s)
+    if not os.path.exists(os.path.join(svc, "ro_not_logged")):
+        for e in events:
+            if e["event"] == "compute_integrity_scoring_started":
+                e["reference_operators"] = len(s.get("reference_operators") or [])
+    return events
+
+
+def scoring_events(s):
     if s.get("enabled", True) is False:
         return [{"event": "compute_integrity_scoring_started", "enabled": False}]
     if not s.get("corpus_path"):

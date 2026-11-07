@@ -57,6 +57,10 @@ const (
 	ReasonEscalationInconclusive StateReason = "escalation_inconclusive"
 	ReasonOperatorClear          StateReason = "operator_clear"
 	ReasonCooldownElapsed        StateReason = "cooldown_elapsed"
+	// ReasonReferenceOnlyFailure marks a failure confirmed by reference
+	// scorers alone (FR-26): it waits for an operator decision instead of
+	// suspending routing or holding earnings.
+	ReasonReferenceOnlyFailure StateReason = "reference_only_failure"
 )
 
 // FR-23 thresholds.
@@ -115,11 +119,14 @@ type Transition struct {
 
 // Outcome is one scored verification request: every scorer that answered
 // was in band (InBand), every one was out (OutOfBand), or they split.
+// ReferenceOnly is set when every scorer was a reference scorer, which
+// selection does only when no eligible peer existed (FR-26).
 type Outcome struct {
 	InBand          bool
 	OutOfBand       bool
 	OutReason       OutReason
 	ScorerOperators []string
+	ReferenceOnly   bool
 	At              time.Time
 }
 
@@ -128,27 +135,32 @@ type EscalationEntry struct {
 	Out             bool     `json:"out"`
 	In              bool     `json:"in"`
 	ScorerOperators []string `json:"scorer_operators,omitempty"`
+	ReferenceOnly   bool     `json:"reference_only,omitempty"`
 }
 
 // KeyState is the persisted FR-23 state of one verification key.
 type KeyState struct {
-	ProviderID       string            `json:"provider_id"`
-	ModelID          string            `json:"model_id"`
-	State            VerificationState `json:"state"`
-	Reason           StateReason       `json:"reason,omitempty"`
-	Since            time.Time         `json:"since"`
-	FirstMeasuredAt  time.Time         `json:"first_measured_at,omitempty"`
-	LastInBandAt     time.Time         `json:"last_in_band_at,omitempty"`
-	WindowStart      time.Time         `json:"window_start,omitempty"`
-	InStreak         int               `json:"in_streak"`
-	StreakScorerOps  []string          `json:"streak_scorer_ops,omitempty"`
-	Escalations      []EscalationEntry `json:"escalations,omitempty"`
-	EscalationCount  int               `json:"escalation_count"`
-	FailedAt         time.Time         `json:"failed_at,omitempty"`
-	CooldownUntil    time.Time         `json:"cooldown_until,omitempty"`
-	InBandTotal      int               `json:"in_band_total"`
-	OutOfBandTotal   int               `json:"out_of_band_total"`
-	RecoveryCooldown time.Duration     `json:"-"`
+	ProviderID      string            `json:"provider_id"`
+	ModelID         string            `json:"model_id"`
+	State           VerificationState `json:"state"`
+	Reason          StateReason       `json:"reason,omitempty"`
+	Since           time.Time         `json:"since"`
+	FirstMeasuredAt time.Time         `json:"first_measured_at,omitempty"`
+	LastInBandAt    time.Time         `json:"last_in_band_at,omitempty"`
+	WindowStart     time.Time         `json:"window_start,omitempty"`
+	InStreak        int               `json:"in_streak"`
+	StreakScorerOps []string          `json:"streak_scorer_ops,omitempty"`
+	Escalations     []EscalationEntry `json:"escalations,omitempty"`
+	EscalationCount int               `json:"escalation_count"`
+	FailedAt        time.Time         `json:"failed_at,omitempty"`
+	CooldownUntil   time.Time         `json:"cooldown_until,omitempty"`
+	InBandTotal     int               `json:"in_band_total"`
+	OutOfBandTotal  int               `json:"out_of_band_total"`
+	// ReviewPending is set while a reference-only failure (FR-26) awaits an
+	// operator decision. The key keeps its suspect or recovering state,
+	// takes no measurements, and is neither suspended nor newly held.
+	ReviewPending    bool          `json:"review_pending,omitempty"`
+	RecoveryCooldown time.Duration `json:"-"`
 }
 
 // NewKeyState returns an unverified key.
@@ -179,8 +191,12 @@ func (k *KeyState) resetEscalation() {
 }
 
 // Apply records one outcome. Outcomes for a failed key are ignored: it is not
-// routed and not probed until its cooldown elapses (Tick).
+// routed and not probed until its cooldown elapses (Tick). So are outcomes
+// for a key awaiting operator review (FR-26).
 func (k *KeyState) Apply(o Outcome) *Transition {
+	if k.ReviewPending {
+		return nil
+	}
 	if k.FirstMeasuredAt.IsZero() {
 		k.FirstMeasuredAt = o.At
 	}
@@ -222,7 +238,7 @@ func (k *KeyState) applyBase(o Outcome) *Transition {
 }
 
 func (k *KeyState) recordEscalation(o Outcome) {
-	k.Escalations = append(k.Escalations, EscalationEntry{Out: o.OutOfBand, In: o.InBand, ScorerOperators: append([]string(nil), o.ScorerOperators...)})
+	k.Escalations = append(k.Escalations, EscalationEntry{Out: o.OutOfBand, In: o.InBand, ScorerOperators: append([]string(nil), o.ScorerOperators...), ReferenceOnly: o.ReferenceOnly})
 	if len(k.Escalations) > escalationHistoryRetains {
 		k.Escalations = k.Escalations[len(k.Escalations)-escalationHistoryRetains:]
 	}
@@ -230,24 +246,61 @@ func (k *KeyState) recordEscalation(o Outcome) {
 }
 
 // confirmedFailure applies the FR-23 rule: at least 3 of the last 5 escalation
-// measurements out, scored by at least 2 distinct scorer operators.
-func (k *KeyState) confirmedFailure() bool {
+// measurements out, scored by at least 2 distinct scorer operators, or every
+// one of those outs scored by reference scorers alone because no peer was
+// eligible (FR-26). referenceOnly reports the latter: such a failure goes to
+// operator review instead of failed.
+func (k *KeyState) confirmedFailure() (confirmed, referenceOnly bool) {
 	recent := k.Escalations
 	if len(recent) > escalationWindow {
 		recent = recent[len(recent)-escalationWindow:]
 	}
 	outs := 0
+	referenceOnly = true
 	ops := map[string]struct{}{}
 	for _, e := range recent {
 		if !e.Out {
 			continue
 		}
 		outs++
+		if !e.ReferenceOnly || len(e.ScorerOperators) == 0 {
+			referenceOnly = false
+		}
 		for _, op := range e.ScorerOperators {
 			ops[op] = struct{}{}
 		}
 	}
-	return outs >= escalationOutsToFail && len(ops) >= minDistinctScorerOps
+	if outs < escalationOutsToFail {
+		return false, false
+	}
+	if referenceOnly {
+		return true, true
+	}
+	return len(ops) >= minDistinctScorerOps, false
+}
+
+// referenceReview parks a reference-only failure for operator review (FR-26):
+// the state, its Since and its affected window stay, nothing is suspended or
+// held. It is no transition (the state does not change); the caller persists
+// the flag.
+func (k *KeyState) referenceReview() *Transition {
+	k.ReviewPending = true
+	k.Reason = ReasonReferenceOnlyFailure
+	return nil
+}
+
+// trailingReferenceOnlyIns reports whether the last n escalation
+// measurements are all in and all scored by reference scorers alone.
+func (k *KeyState) trailingReferenceOnlyIns(n int) bool {
+	if len(k.Escalations) < n {
+		return false
+	}
+	for _, e := range k.Escalations[len(k.Escalations)-n:] {
+		if !e.In || !e.ReferenceOnly {
+			return false
+		}
+	}
+	return true
 }
 
 func (k *KeyState) trailingIns() int {
@@ -266,8 +319,11 @@ func (k *KeyState) applySuspect(o Outcome) *Transition {
 	if o.InBand {
 		k.LastInBandAt = o.At
 	}
+	confirmed, referenceOnly := k.confirmedFailure()
 	switch {
-	case k.confirmedFailure():
+	case confirmed && referenceOnly:
+		return k.referenceReview()
+	case confirmed:
 		k.FailedAt = o.At
 		k.CooldownUntil = o.At.Add(k.cooldown())
 		start := k.WindowStart
@@ -299,13 +355,18 @@ func (k *KeyState) applyRecovering(o Outcome) *Transition {
 		k.InStreak = 0
 		k.StreakScorerOps = nil
 	}
-	if k.confirmedFailure() {
+	confirmed, referenceOnly := k.confirmedFailure()
+	if confirmed && referenceOnly {
+		return k.referenceReview()
+	}
+	if confirmed {
 		k.FailedAt = o.At
 		k.CooldownUntil = o.At.Add(k.cooldown())
 		k.resetEscalation()
 		return k.transition(VerificationFailed, ReasonConfirmedFailure, o.At, HoldAction{Kind: HoldActionCloseRecovery, End: o.At})
 	}
-	if k.InStreak >= recoveryStreakToPass && len(k.StreakScorerOps) >= minDistinctScorerOps {
+	if k.InStreak >= recoveryStreakToPass &&
+		(len(k.StreakScorerOps) >= minDistinctScorerOps || k.trailingReferenceOnlyIns(recoveryStreakToPass)) {
 		k.resetEscalation()
 		k.WindowStart = time.Time{}
 		return k.transition(VerificationPassing, ReasonRecoveryPassed, o.At, HoldAction{Kind: HoldActionReleaseRecovery, End: o.At})
@@ -322,9 +383,30 @@ func (k *KeyState) Tick(now time.Time) *Transition {
 	return k.transition(VerificationRecovering, ReasonCooldownElapsed, now, HoldAction{Kind: HoldActionOpenRecovery, Start: now})
 }
 
+// OperatorConfirmFailure is the operator's decision on a reference-only
+// failure (FR-26): the key takes the ordinary failed consequences as of now.
+// A suspect key opens a failure hold over its affected window; a recovering
+// key closes its recovery hold and keeps it held. It returns nil when the key
+// is not awaiting review.
+func (k *KeyState) OperatorConfirmFailure(now time.Time) *Transition {
+	if !k.ReviewPending {
+		return nil
+	}
+	hold := HoldAction{Kind: HoldActionOpenFailure, Start: k.WindowStart, End: now}
+	if k.State == VerificationRecovering {
+		hold = HoldAction{Kind: HoldActionCloseRecovery, End: now}
+	}
+	k.ReviewPending = false
+	k.FailedAt = now
+	k.CooldownUntil = now.Add(k.cooldown())
+	k.resetEscalation()
+	return k.transition(VerificationFailed, ReasonConfirmedFailure, now, hold)
+}
+
 // OperatorClear resets the key to unverified. Holds are untouched: an
 // operator releases them separately (SPEC-022 R-16.4).
 func (k *KeyState) OperatorClear(now time.Time) *Transition {
+	k.ReviewPending = false
 	k.resetEscalation()
 	k.WindowStart = time.Time{}
 	k.LastInBandAt = time.Time{}
@@ -336,6 +418,9 @@ func (k *KeyState) OperatorClear(now time.Time) *Transition {
 
 // NextStep is the closed FR-25 next_step value.
 func (k *KeyState) NextStep() string {
+	if k.ReviewPending {
+		return "operator_review"
+	}
 	switch k.State {
 	case VerificationSuspect:
 		return "escalation_running"

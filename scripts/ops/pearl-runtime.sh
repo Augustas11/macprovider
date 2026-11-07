@@ -135,6 +135,27 @@
 #                       overlay entry the rules reject is blocked.
 #   Env: VISION_QUALIFICATION_FILE and the Pearl layout above.
 #
+# One-time task (PEARL_RUNTIME_TASK=compute-integrity-reference-operators):
+# set the SPEC-036 FR-26 Malibu-operated reference scorers
+# (docs/runbooks/compute-integrity-private-corpus.md):
+#   1 operators         read-only, local: COMPUTE_INTEGRITY_REFERENCE_OPERATORS
+#                       (comma-separated github:<user id> / provider:<provider
+#                       id> keys) passes the coordinator's reference_operators
+#                       rules; only the count and sha256 are printed
+#   2 pearl_state       read-only: the overlay's list (count and digest),
+#                       whether the running coordinator booted with the files
+#                       on disk and how many reference operators it logged
+#   3 reference_operators  under the live-ops lock and both Pearl locks: set
+#                       compute_integrity.scoring.reference_operators to
+#                       exactly the list in the overlay (backup first; keeps
+#                       every other key; replaces a different list), validate,
+#                       one coordinator restart (downtime stated first), then
+#                       require the new process to log that many reference
+#                       operators; otherwise restore the overlay and restart
+#                       again. Done when the overlay holds the list, the
+#                       coordinator booted with it and logged its count.
+#   Env: COMPUTE_INTEGRITY_REFERENCE_OPERATORS and the Pearl layout above.
+#
 # One-time task (PEARL_RUNTIME_TASK=updater-bundle): install the Pearl updater
 # bundle (docs/runbooks/catalog-release-decision-tree.md "Enabling rollout
 # (once)" step 1; ops/runbooks/pearl-release-updater.md) from the RUNNING tag,
@@ -220,6 +241,7 @@ UB_DOWNTIME="none: installs the updater, the Tier-2 enforcement watchdog, the co
 SC_DOC="docs/runbooks/pearl-coordinator-rollout.md#streaming-walls-one-time"
 SC_DOWNTIME="one coordinator restart (about 5-40 seconds: in-flight requests drain, then it starts), then one gateway restart (up to 40 seconds of drain, then it starts); buyer and provider traffic is interrupted for each, and a stream still open when either stops is cut. If a restart or its check fails, the three files are restored and both services restart once more"
 VQ_DOWNTIME="one coordinator restart, about 5-40 seconds (in-flight requests drain, then the coordinator starts); buyer and provider traffic through the coordinator is interrupted for that time. If the post-restart check fails, the overlay is restored and the coordinator restarts once more"
+RO_DOWNTIME="$VQ_DOWNTIME"
 
 # Pearl layout for the coordinator config helper (defaults: production; the
 # same as cli-release.sh _pearl-config).
@@ -922,6 +944,140 @@ vq_internal() {
   fi
 }
 
+# ro_local: validate COMPUTE_INTEGRITY_REFERENCE_OPERATORS into RO_SHA,
+# RO_HEX and RO_COUNT, or leave RO_ERR set. A key can name a provider: only
+# the count and digest are ever printed. The value "none" removes the overlay
+# key (RO_REMOVE=1, RO_SHA=none).
+ro_local() {
+  RO_SHA=""; RO_HEX=""; RO_COUNT=""; RO_ERR=""; RO_REMOVE=""
+  local list="${COMPUTE_INTEGRITY_REFERENCE_OPERATORS:-}" out
+  if [ -z "$list" ]; then
+    RO_ERR="COMPUTE_INTEGRITY_REFERENCE_OPERATORS is unset: set it to the Malibu-operated scorer operator keys (github:<user id> or provider:<provider id>, comma-separated), or none to remove them"
+    return
+  fi
+  if [ "$list" = none ]; then
+    RO_REMOVE=1; RO_SHA=none; RO_COUNT=0
+    return
+  fi
+  if ! out="$(python3 -I "$OPS_LIB_DIR/pearl-cli-config.py" validate-reference-operators "$list" 2>&1)"; then
+    RO_ERR="the reference operator list fails the coordinator's rules: $(printf '%s' "$out" | tail -n 1 | cut -c1-200)"
+    return
+  fi
+  RO_SHA="$(json_field_str "$out" 'd["sha256"]')"
+  RO_HEX="$(json_field_str "$out" 'd["hex"]')"
+  RO_COUNT="$(json_field_str "$out" 'd["count"]')"
+}
+
+gather_reference_operators() {
+  OPS_SCOPE="compute-integrity-reference-operators"
+  NEXT_RUNBOOK="$CI_DOC"
+  pearl_config_layout
+  ro_local
+  if [ -n "$RO_ERR" ]; then
+    step operators pending "$RO_ERR"
+  elif [ -n "$RO_REMOVE" ]; then
+    step operators "done" "none: remove the overlay key"
+    fact local_reference_operators_sha256 none
+    fact local_reference_operators_count 0
+  else
+    step operators "done" "$RO_COUNT keys, sha256 ${RO_SHA:0:12}"
+    fact local_reference_operators_sha256 "$RO_SHA"
+    fact local_reference_operators_count "$RO_COUNT"
+  fi
+  if [ -z "${PEARL_SSH:-}" ]; then
+    step pearl_state blocked "PEARL_SSH is unset"
+    set_next pearl_state blocked "Read the compute-integrity reference operators on Pearl" "" "PEARL_SSH is unset"
+    return
+  fi
+  local facts
+  if ! facts="$(pearl_ssh "python3 - ro-facts $PEARL_LAYOUT" < "$OPS_LIB_DIR/pearl-cli-config.py" 2>"$OPS_TMP_DIR/ro.err")" ||
+    [ -z "$(json_field_str "$facts" 'd["applied"]')" ]; then
+    step pearl_state blocked "cannot read the compute-integrity reference operators on Pearl"
+    set_next pearl_state blocked "Read the compute-integrity reference operators on Pearl" "" \
+      "ro-facts over ssh failed: $(tail -n 1 "$OPS_TMP_DIR/ro.err" | safe_remote_output | cut -c1-200)"
+    return
+  fi
+  local sha count valid applied logged base predates
+  sha="$(json_field_str "$facts" 'd["overlay_sha256"]')"
+  count="$(json_field_str "$facts" 'd["overlay_count"]')"
+  valid="$(json_field_str "$facts" '"absent" if d["overlay_valid"] is None else d["overlay_valid"]')"
+  applied="$(json_field_str "$facts" 'd["applied"]')"
+  logged="$(json_field_str "$facts" 'd["logged_count"]')"
+  fact pearl_ro_overlay_sha256 "${sha:-none}"
+  fact pearl_ro_overlay_count "${count:-absent}"
+  base="$(json_field_str "$facts" 'd["base_count"]')"
+  predates="$(json_field_str "$facts" 'd["predates_reference_operators"]')"
+  fact pearl_ro_base_count "$base"
+  fact pearl_ro_config_applied "$applied"
+  fact pearl_ro_logged_count "${logged:-none}"
+  step pearl_state "done" "overlay reference_operators=${count:-absent} logged=${logged:-none} applied=$applied"
+  # A coordinator that logs no reference_operators count predates FR-26: an
+  # overlay edit would cost a restart it cannot honour, then a rollback.
+  if [ "$predates" = true ]; then
+    step reference_operators blocked "the running coordinator predates SPEC-036 FR-26 (no reference_operators count logged)"
+    set_next reference_operators blocked "Release the Pearl runtime first" "" \
+      "the running coordinator predates SPEC-036 FR-26 and logs no reference_operators count; release the runtime first"
+    return
+  fi
+  if [ -n "$RO_REMOVE" ]; then
+    if [ "$valid" = absent ] && [ "$applied" = true ] && [ "$logged" = "$base" ]; then
+      step reference_operators "done" "the overlay sets no reference operators; $base from the base config are live"
+      set_next "done" "done" "the Pearl overlay sets no compute-integrity reference operators" ""
+      return
+    fi
+    step reference_operators pending ""
+    set_next reference_operators mutate "Remove compute_integrity.scoring.reference_operators from the Pearl overlay, restart once" \
+      "scripts/ops/pearl-runtime.sh _compute-integrity-reference-operators none"
+    next_meta reference_operators "$CI_DOC" "$RO_DOWNTIME"
+    return
+  fi
+  if [ "$valid" = false ]; then
+    step reference_operators blocked "the overlay's compute_integrity.scoring.reference_operators fails the coordinator's rules"
+    set_next reference_operators blocked "Reconcile the Pearl overlay's reference operators" "" \
+      "the Pearl overlay's compute_integrity.scoring.reference_operators fails the coordinator's rules; reconcile it first (or remove it with none)"
+    return
+  fi
+  # Done: the overlay holds the list, the running coordinator booted with the
+  # files on disk and logged that many reference operators. A local list that
+  # is set must be the installed one; unset (another machine) reads Pearl's
+  # state alone.
+  if [ -n "$sha" ] && [ "$applied" = true ] && [ "$logged" = "$count" ] &&
+    { [ -z "${COMPUTE_INTEGRITY_REFERENCE_OPERATORS:-}" ] || [ "$sha" = "$RO_SHA" ]; }; then
+    step reference_operators "done" "$count reference operators are live (sha256 ${sha:0:12})"
+    set_next "done" "done" "compute-integrity scoring uses $count reference operators" ""
+    return
+  fi
+  step reference_operators pending ""
+  if [ -n "$RO_ERR" ]; then
+    set_next operators blocked "Choose the reference operator keys" "" "$RO_ERR"
+    return
+  fi
+  set_next reference_operators mutate "Set compute_integrity.scoring.reference_operators in the Pearl overlay ($RO_COUNT keys, sha256 ${RO_SHA:0:12}), restart once" \
+    "scripts/ops/pearl-runtime.sh _compute-integrity-reference-operators $RO_SHA"
+  next_meta reference_operators "$CI_DOC" "$RO_DOWNTIME"
+}
+
+# _compute-integrity-reference-operators SHA256|none: run lib/pearl-cli-config.py
+# apply-reference-operators under both Pearl locks (next --run only). The list
+# travels hex-encoded, so no key reaches a remote shell as text; none removes
+# the overlay key.
+ro_internal() {
+  [ "${MACPROVIDER_OPS_ENTRYPOINT:-}" = 1 ] ||
+    refuse "_compute-integrity-reference-operators runs only from 'PEARL_RUNTIME_TASK=compute-integrity-reference-operators $0 next --run' (live-ops lock, downtime banner)"
+  require_pearl_ssh
+  pearl_config_layout
+  ro_local
+  [ -z "$RO_ERR" ] || refuse "$RO_ERR"
+  [ "$RO_SHA" = "${1:-}" ] || refuse "the reference operator list changed since status (sha256 ${RO_SHA:0:12}, expected ${1:-?}); run status again"
+  if [ -n "$RO_REMOVE" ]; then
+    pearl_ssh "python3 - apply-reference-operators $PEARL_LAYOUT --ro-remove" \
+      < "$OPS_LIB_DIR/pearl-cli-config.py"
+    return
+  fi
+  pearl_ssh "python3 - apply-reference-operators $PEARL_LAYOUT --ro-hex $RO_HEX --ro-sha256 $RO_SHA" \
+    < "$OPS_LIB_DIR/pearl-cli-config.py"
+}
+
 # stream_ceiling_layout: the Pearl layout of the stream-ceiling task (SC_LAYOUT).
 stream_ceiling_layout() {
   pearl_config_layout
@@ -1224,6 +1380,7 @@ gather() {
       retention-run) gather_retention_run; return ;;
       compute-integrity-enable) gather_compute_integrity; return ;;
       vision-qualification) gather_vision_qualification; return ;;
+      compute-integrity-reference-operators) gather_reference_operators; return ;;
       updater-bundle) gather_updater_bundle; return ;;
       stream-ceiling) gather_stream_ceiling; return ;;
       *) refuse "unknown PEARL_RUNTIME_TASK: $PEARL_RUNTIME_TASK" ;;
@@ -1522,6 +1679,7 @@ internal() {
     _retention-run) retention_run_internal ;;
     _compute-integrity-enable) shift; ci_enable_internal "$@" ;;
     _vision-qualification) shift; vq_internal "$@" ;;
+    _compute-integrity-reference-operators) shift; ro_internal "$@" ;;
     _updater-bundle) shift; ub_internal "$@" ;;
     _stream-ceiling) sc_internal ;;
     *) usage >&2; exit 2 ;;

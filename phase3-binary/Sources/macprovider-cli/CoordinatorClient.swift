@@ -795,6 +795,8 @@ actor CoordinatorClient {
     private let nativeMTPTupleRestoreHandler: NativeMTPTupleRestoreHandler
     private let nativeMTPServedBankDigest: NativeMTPServedBankDigest
     private let computeScoreExecutor: ComputeScoreExecutor?
+    /// SPEC-036 FR-26 scorer-only mode: no buyer request is served.
+    private let computeScoreReference: Bool
     private var computeScoreInFlight = false
     private let coordinatorReadiness: CoordinatorReadiness
     /// Isolated lab join only (`--isolate-lifecycle` + protected-file + a
@@ -1165,6 +1167,7 @@ actor CoordinatorClient {
             }
             return try? ModelArtifactVerifier.canonicalArtifactHash(directory: directory)
         }
+        self.computeScoreReference = config.computeScoreReference
         if let computeScoreExecutor {
             self.computeScoreExecutor = computeScoreExecutor
         } else if let runtime = modelRuntime as? ModelRuntime {
@@ -2848,6 +2851,18 @@ actor CoordinatorClient {
         case "aead_rekey_commit":
             try await handleAEADRekeyCommit(dict)
         case "inference_request":
+            // SPEC-036 FR-26: a scorer-only session refuses buyer work even
+            // if a coordinator routes it some. The NAK names the request so
+            // the coordinator fails it at once instead of waiting it out.
+            if computeScoreReference {
+                let reply = (dict["request_id"] as? String).flatMap(ChatCompletionRequest.normalizedRequestID) ?? type
+                try await sendNAK(
+                    inReplyTo: reply,
+                    code: "unknown_message_type",
+                    message: "Unrecognized message type: '\(type)'"
+                )
+                return
+            }
             guard wsTunneledMode, let inferenceRelay else {
                 try await sendNAK(
                     inReplyTo: type,
@@ -2911,6 +2926,12 @@ actor CoordinatorClient {
         case ComputeScoreProtocol.requestType:
             try await handleComputeScoreRequest(dict)
         case let shardType where ShardGroupWire.inboundTypes.contains(shardType):
+            // SPEC-036 FR-26: a scorer-only session takes no part in a shard group.
+            if computeScoreReference {
+                let reply = (dict["request_id"] as? String).flatMap(ChatCompletionRequest.normalizedRequestID) ?? type
+                try await sendNAK(inReplyTo: reply, code: "unknown_message_type", message: "Unrecognized message type: '\(type)'")
+                return
+            }
             guard let participant = modelRuntime as? any ShardGroupCoordinatorParticipant else {
                 try await sendNAK(inReplyTo: type, code: "unknown_message_type", message: "Unrecognized message type: '\(type)'")
                 return
@@ -8570,6 +8591,13 @@ actor CoordinatorClient {
         ]
         if await advertisesFleetCacheProtocol() {
             message["fleet_cache_protocol"] = 1
+        }
+        // SPEC-036 FR-26: a scorer-only session says so, so the coordinator
+        // never routes it buyer traffic.
+        if computeScoreReference {
+            var capabilities = message["tier2_capabilities"] as? [String: Any] ?? [:]
+            capabilities[ComputeScoreProtocol.referenceCapability] = true
+            message["tier2_capabilities"] = capabilities
         }
         // SPEC-051-R029: a shard group head or member says so in its capabilities.
         if let participant = modelRuntime as? any ShardGroupCoordinatorParticipant {

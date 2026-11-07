@@ -105,3 +105,67 @@ Build a new corpus with a new `--version` and run the same three commands
 with `COMPUTE_INTEGRITY_CORPUS` pointing at it. A different sha256 makes
 `enable` the next step again. It replaces the file, leaves the overlay as it
 is, and restarts once.
+
+## Reference scorers (SPEC-036 FR-26)
+
+The coordinator falls back to Malibu-operated reference scorers when no
+independent peer can score a key. It needs a runtime that has FR-26. When
+the running coordinator logs `compute_integrity_scoring_started` without a
+`reference_operators` count, it is older than FR-26: `status` blocks with
+"release the runtime first", and `next --run` changes nothing and restarts
+nothing. Keep the operator keys private, because a `provider:` key names a
+provider.
+
+Roll out in this order: the coordinator first, then the scorer Macs. Before
+rolling the coordinator back below FR-26, disable `compute_score_reference`
+on every scorer Mac. An older coordinator would treat a scorer Mac as an
+ordinary provider.
+
+```bash
+export COMPUTE_INTEGRITY_REFERENCE_OPERATORS='github:<user id>,provider:<provider id>'
+PEARL_RUNTIME_TASK=compute-integrity-reference-operators scripts/ops/pearl-runtime.sh status
+PEARL_RUNTIME_TASK=compute-integrity-reference-operators scripts/ops/pearl-runtime.sh next
+MACPROVIDER_OPS_OWNER=<session-label> PEARL_RUNTIME_TASK=compute-integrity-reference-operators \
+  scripts/ops/pearl-runtime.sh next --run
+```
+
+Expected downtime: one coordinator restart, about 5–40 seconds, as above.
+
+The list must pass the coordinator's rules. Each key is
+`github:<positive integer up to 2^63-1, no leading zeros>` or
+`provider:<1-64 characters of A-Z a-z 0-9 _ . ->`, with no duplicates and at
+least one key. To remove the overlay key, set
+`COMPUTE_INTEGRITY_REFERENCE_OPERATORS=none` and run the same three
+commands. That removal uses the same backup, validation and single restart.
+It also drops a `scoring` or `compute_integrity` mapping that the removal
+leaves empty. An overlay that already holds an empty or null list is valid,
+and setting a list replaces it. `status` prints only the count and the
+sha256 of the list. `next --run` takes the live-ops lock and both Pearl locks.
+It then:
+
+1. Sets `compute_integrity.scoring.reference_operators` in the overlay to
+   exactly this list. It keeps every other key, including `corpus_path`, and
+   replaces a different list.
+2. Backs up the overlay and validates it with the running coordinator.
+3. Restarts the coordinator once and requires the new process to log
+   `compute_integrity_scoring_started` with that many `reference_operators`.
+
+If any of these fails, it restores the overlay and restarts again. Running it
+again with the same list changes nothing. Each scorer Mac also runs the CLI
+with `compute_score_reference: true`. The coordinator never routes buyer
+requests to it.
+
+### Operator review of reference-only failures
+
+With no independent peer, the FR-24 scorer-integrity checks cannot run. A
+failure that only a reference scorer reports therefore changes no state and
+opens no hold. The key keeps its state and gets `review_pending`. The
+coordinator logs `compute_integrity_review_pending`, and the
+`compute_integrity_review_pending{state}` gauge counts these keys. Operator
+review is the bound. Resolve each one with the `confirm-failure` or `clear`
+admin action.
+
+- Credits that settle while a key is under review stay paid. Confirm a real
+  failure before the next weekly settlement.
+- Clearing a key that is `recovering` does not release its open recovery
+  hold. Release that hold separately.

@@ -22,6 +22,21 @@ waives only the specifically authorized serving-journey export, not qualificatio
 or release-match gates. These catalog/tooling changes are not evidence of a
 coordinator runtime deployment or sampled GLM admission.
 
+## SPEC-036 FR-26 reference scorers — pending runtime inclusion (2026-11-07)
+
+| PR | Issue | Coordinator change | Status |
+|---|---|---|---|
+| [#2248](https://github.com/Augustas11/macprovider/pull/2248) | Related: #1644 | Reference scorer sessions (`compute_score_reference`) are scorer-only: excluded from listing, capacity, slot queue, shard groups, relay-blind/privacy counts and public pool stats. `compute_integrity.scoring.reference_operators` (`github:<id>` / `provider:<id>`) admits operator-designated reference scorers to cross-provider scoring alongside peers. Reference-only failures set `review_pending` (no state change, no hold) instead of auto-confirming; `POST /admin/compute-integrity/<provider_id>/confirm-failure` confirms and `clear` clears (clearing a `recovering` key leaves its recovery hold for the operator to release). New metric label `scorer_kind`, gauge `compute_integrity_review_pending`. Empty `reference_operators` = current behaviour | campaign PR pending merge; Pearl runtime rollout pending |
+
+Deploy order (each step through `scripts/ops/` only):
+
+1. Include the merged FR-26 commit in the next reviewed Pearl runtime: `scripts/ops/pearl-runtime.sh status`, `next`, `next --run`, per [the Pearl rollout runbook](../runbooks/pearl-coordinator-rollout.md). State the expected downtime before applying.
+2. Set the reference operator list: `PEARL_RUNTIME_TASK=compute-integrity-reference-operators COMPUTE_INTEGRITY_REFERENCE_OPERATORS=<keys> scripts/ops/pearl-runtime.sh status`, then `next`, then `next --run` (validated, compare-and-swap, one restart). On a coordinator older than FR-26, `status` blocks with "release the runtime first" and `next --run` changes nothing; `COMPUTE_INTEGRITY_REFERENCE_OPERATORS=none` removes the list. Runbook: [compute-integrity private corpus, "Reference scorers"](../runbooks/compute-integrity-private-corpus.md).
+3. CLI cut carrying scorer-only mode (tracked in [cli-release-train.md](cli-release-train.md)), then enable it on the reference Mac(s).
+4. Live acceptance: a reference scoring result in `compute_integrity_scoring_jobs_total{scorer_kind="reference"}` for a key that previously had `no_scorer`. Confirm any `review_pending` failure before the next weekly settlement (credits settled during review stay paid).
+
+Rollback: disable scorer-only mode on the reference Macs before running a coordinator below FR-26.
+
 ## Coding-agent privacy — pending runtime inclusion (2026-10-26)
 
 | PR | Issue | Coordinator/gateway change | Status |

@@ -938,6 +938,157 @@ done
 unset VISION_QUALIFICATION_FILE
 rm -f "$tmp/svc/restarts" "$tmp/pearl/coordinator.yaml" "$tmp/pearl/overlay.yaml" "$tmp/pearl/overlay.before"
 
+# ==== compute-integrity reference operators (SPEC-036 FR-26, #1644) ===========
+# A key can name a provider: only the count and digest are ever printed.
+ro_no_secret() { if grep -q RO-SECRET "$tmp/out" "$tmp/err"; then bad "$1 printed an operator key"; else ok; fi; }
+ro_sha() { # LIST
+  python3 -I -c 'import hashlib,json,re,sys; print(hashlib.sha256(json.dumps([o for o in re.split(r"[,\s]+", sys.argv[1]) if o], separators=(",", ":")).encode()).hexdigest())' "$1"
+}
+ro_overlay_is() { # JSON of the wanted overlay
+  python3 -I -c 'import json,sys,yaml; sys.exit(0 if yaml.safe_load(open(sys.argv[1])) == json.loads(sys.argv[2]) else 1)' "$tmp/pearl/overlay.yaml" "$1"
+}
+printf 'listen:\n  bind_address: 127.0.0.1\n' > "$tmp/pearl/coordinator.yaml"
+# As on Pearl: the overlay already owns compute_integrity.scoring.
+printf 'relay_blind:\n  enabled: true\ncompute_integrity:\n  scoring:\n    corpus_path: /etc/macprovider/compute-integrity-corpus.json\n' > "$tmp/pearl/overlay.yaml"
+systemctl restart macprovider-coordinator
+rm -f "$tmp/svc/restarts"
+PEARL_RUNTIME_TASK=compute-integrity-reference-operators run_rc 0 "reference operators status without a list" scripts/ops/pearl-runtime.sh status
+expect_next operators:blocked
+if [ "$(fact_of pearl_ro_overlay_count)" = absent ] && [ "$(fact_of pearl_ro_logged_count)" = 0 ]; then ok; else bad "absent list facts: $(fact_of pearl_ro_overlay_count) $(fact_of pearl_ro_logged_count)"; fi
+for c in "github:12a,provider:RO-SECRET-A|github:<user id> or provider:<provider id>" \
+  "provider:RO-SECRET-A,provider:RO-SECRET-A|duplicate entry" "github:123456789012345678901|github:<user id>" \
+  "provider:RO-SECRET-$(printf 'x%.0s' $(seq 260))|provider:<provider id>" "github:1,ssh:RO-SECRET-B|github:<user id>"; do
+  COMPUTE_INTEGRITY_REFERENCE_OPERATORS="${c%%|*}" PEARL_RUNTIME_TASK=compute-integrity-reference-operators run_rc 0 "reference operators refused (${c#*|})" scripts/ops/pearl-runtime.sh status
+  expect_next operators:blocked
+  case "$(next_field reason)" in *"${c#*|}"*) ok ;; *) bad "refused list reason: $(next_field reason)" ;; esac
+  ro_no_secret "a refused list"
+done
+export COMPUTE_INTEGRITY_REFERENCE_OPERATORS="github:4242, provider:RO-SECRET-REF"
+ROSHA="$(ro_sha "$COMPUTE_INTEGRITY_REFERENCE_OPERATORS")"
+PEARL_RUNTIME_TASK=compute-integrity-reference-operators run_rc 0 "reference operators status" scripts/ops/pearl-runtime.sh status
+expect_next reference_operators:mutate
+case "$(next_field command)" in "scripts/ops/pearl-runtime.sh _compute-integrity-reference-operators $ROSHA") ok ;; *) bad "reference operators command: $(next_field command)" ;; esac
+case "$(next_field expected_downtime)" in "one coordinator restart"*) ok ;; *) bad "reference operators downtime: $(next_field expected_downtime)" ;; esac
+case "$(next_field runbook)" in docs/runbooks/compute-integrity-private-corpus.md) ok ;; *) bad "reference operators runbook: $(next_field runbook)" ;; esac
+if [ "$(fact_of local_reference_operators_count)" = 2 ] && [ "$(fact_of local_reference_operators_sha256)" = "$ROSHA" ]; then ok; else bad "local list facts"; fi
+ro_no_secret "reference operators status"
+run_rc 3 "_compute-integrity-reference-operators refuses outside next --run" scripts/ops/pearl-runtime.sh _compute-integrity-reference-operators "$ROSHA"
+MACPROVIDER_OPS_ENTRYPOINT=1 run_rc 3 "a list changed since status is refused" scripts/ops/pearl-runtime.sh _compute-integrity-reference-operators "$(ro_sha github:1)"
+expect_err "changed since status"
+PEARL_RUNTIME_TASK=compute-integrity-reference-operators run_rc 3 "reference operators need an owner" scripts/ops/pearl-runtime.sh next --run
+cp "$tmp/pearl/overlay.yaml" "$tmp/pearl/overlay.before"
+# The running coordinator binary rejects the result: nothing changes, no restart.
+printf '# INVALID\n' >> "$tmp/pearl/coordinator.yaml"
+PEARL_RUNTIME_TASK=compute-integrity-reference-operators MACPROVIDER_OPS_OWNER=t run_rc 3 "reference operators refused by --validate-config" scripts/ops/pearl-runtime.sh next --run
+expect_err "rejects the edited overlay"
+expect_lock_free
+if cmp -s "$tmp/pearl/overlay.yaml" "$tmp/pearl/overlay.before" && [ "$(restarts)" = 0 ]; then ok; else bad "rejected reference operators not left alone (restarts=$(restarts))"; fi
+printf 'listen:\n  bind_address: 127.0.0.1\n' > "$tmp/pearl/coordinator.yaml"
+systemctl restart macprovider-coordinator
+rm -f "$tmp/svc/restarts"
+# A running coordinator that logs no count (older than FR-26): status blocks
+# with "release the runtime first"; next --run edits nothing, restarts nothing.
+: > "$tmp/svc/ro_not_logged"
+systemctl restart macprovider-coordinator
+rm -f "$tmp/svc/restarts"
+PEARL_RUNTIME_TASK=compute-integrity-reference-operators run_rc 0 "reference operators status on an older coordinator" scripts/ops/pearl-runtime.sh status
+expect_next reference_operators:blocked
+case "$(next_field reason)" in *"release the runtime first"*) ok ;; *) bad "older coordinator reason: $(next_field reason)" ;; esac
+PEARL_RUNTIME_TASK=compute-integrity-reference-operators MACPROVIDER_OPS_OWNER=t run_rc 3 "reference operators next --run on an older coordinator" scripts/ops/pearl-runtime.sh next --run
+expect_lock_free
+if cmp -s "$tmp/pearl/overlay.yaml" "$tmp/pearl/overlay.before" && [ "$(restarts)" = 0 ]; then ok; else bad "older coordinator touched (restarts=$(restarts))"; fi
+ro_no_secret "an older coordinator"
+rm -f "$tmp/svc/ro_not_logged" "$tmp/svc/restarts"
+systemctl restart macprovider-coordinator
+rm -f "$tmp/svc/restarts"
+PEARL_RUNTIME_TASK=compute-integrity-reference-operators MACPROVIDER_OPS_OWNER=t run_rc 0 "reference operators install runs" scripts/ops/pearl-runtime.sh next --run
+expect_lock_free
+if grep -q "EXPECTED DOWNTIME for reference_operators: one coordinator restart" "$tmp/out"; then ok; else bad "reference operators downtime not printed first"; fi
+if [ "$(restarts)" = 1 ]; then ok; else bad "reference operators restarts: $(restarts)"; fi
+if ro_overlay_is '{"relay_blind": {"enabled": true}, "compute_integrity": {"scoring": {"corpus_path": "/etc/macprovider/compute-integrity-corpus.json", "reference_operators": ["github:4242", "provider:RO-SECRET-REF"]}}}'; then ok; else bad "reference operators overlay edit: $(cat "$tmp/pearl/overlay.yaml")"; fi
+if find "$PEARL_BACKUP_ROOT" -path '*reference-operators*' -name overlay.yaml | grep -q .; then ok; else bad "no reference operators overlay backup"; fi
+ro_no_secret "reference operators install"
+PEARL_RUNTIME_TASK=compute-integrity-reference-operators run_rc 0 "reference operators status after install" scripts/ops/pearl-runtime.sh status
+expect_next done:done
+if [ "$(fact_of pearl_ro_overlay_sha256)" = "$ROSHA" ] && [ "$(fact_of pearl_ro_logged_count)" = 2 ]; then ok; else bad "installed list facts: $(fact_of pearl_ro_overlay_sha256) $(fact_of pearl_ro_logged_count)"; fi
+COMPUTE_INTEGRITY_REFERENCE_OPERATORS='' PEARL_RUNTIME_TASK=compute-integrity-reference-operators run_rc 0 "reference operators status on another machine" scripts/ops/pearl-runtime.sh status
+expect_next done:done
+rm -f "$tmp/svc/restarts"
+PEARL_RUNTIME_TASK=compute-integrity-reference-operators MACPROVIDER_OPS_OWNER=t run_rc 0 "reference operators install is a no-op once live" scripts/ops/pearl-runtime.sh next --run
+if [ "$(restarts)" = 0 ]; then ok; else bad "a live reference operator list restarted again"; fi
+# The overlay holds the list but the coordinator did not boot with it: one
+# validated restart, no second edit.
+printf '# edited after boot\n' >> "$tmp/pearl/coordinator.yaml"
+PEARL_RUNTIME_TASK=compute-integrity-reference-operators run_rc 0 "reference operators present, not booted" scripts/ops/pearl-runtime.sh status
+expect_next reference_operators:mutate
+PEARL_RUNTIME_TASK=compute-integrity-reference-operators MACPROVIDER_OPS_OWNER=t run_rc 0 "reference operators restart for an unapplied overlay" scripts/ops/pearl-runtime.sh next --run
+if [ "$(restarts)" = 1 ] && [ "$(grep -c reference_operators "$tmp/pearl/overlay.yaml")" = 1 ]; then ok; else bad "unapplied reference operators: restarts=$(restarts)"; fi
+# A new list replaces the installed one in place (block style included).
+printf 'relay_blind:\n  enabled: true\ncompute_integrity:\n  scoring:\n    reference_operators:\n    - github:7\n    - provider:RO-SECRET-OLD\n    corpus_path: /etc/macprovider/compute-integrity-corpus.json\n' > "$tmp/pearl/overlay.yaml"
+systemctl restart macprovider-coordinator
+rm -f "$tmp/svc/restarts"
+PEARL_RUNTIME_TASK=compute-integrity-reference-operators run_rc 0 "reference operators status with a different list" scripts/ops/pearl-runtime.sh status
+expect_next reference_operators:mutate
+PEARL_RUNTIME_TASK=compute-integrity-reference-operators MACPROVIDER_OPS_OWNER=t run_rc 0 "reference operators replacement runs" scripts/ops/pearl-runtime.sh next --run
+if [ "$(restarts)" = 1 ] && ro_overlay_is '{"relay_blind": {"enabled": true}, "compute_integrity": {"scoring": {"corpus_path": "/etc/macprovider/compute-integrity-corpus.json", "reference_operators": ["github:4242", "provider:RO-SECRET-REF"]}}}'; then ok; else bad "reference operators not replaced: $(cat "$tmp/pearl/overlay.yaml")"; fi
+# compute_integrity without scoring, and no compute_integrity at all.
+for ov in 'compute_integrity:\n  sample_rate: 0.5\n' 'relay_blind:\n  enabled: true\n'; do
+  printf "$ov" > "$tmp/pearl/overlay.yaml"
+  want="$(python3 -I -c 'import json,sys,yaml; d=yaml.safe_load(sys.argv[1]) or {}; d.setdefault("compute_integrity", {})["scoring"]={"reference_operators": ["github:4242", "provider:RO-SECRET-REF"]}; print(json.dumps(d))' "$(printf "$ov")")"
+  systemctl restart macprovider-coordinator
+  PEARL_RUNTIME_TASK=compute-integrity-reference-operators MACPROVIDER_OPS_OWNER=t run_rc 0 "reference operators into $(printf "$ov" | head -n 1)" scripts/ops/pearl-runtime.sh next --run
+  if ro_overlay_is "$want"; then ok; else bad "reference operators overlay: $(cat "$tmp/pearl/overlay.yaml")"; fi
+done
+# A live list the coordinator rules reject is blocked, never done.
+printf 'compute_integrity:\n  scoring:\n    reference_operators: ["github:x"]\n' > "$tmp/pearl/overlay.yaml"
+systemctl restart macprovider-coordinator
+PEARL_RUNTIME_TASK=compute-integrity-reference-operators run_rc 0 "invalid live reference operators" scripts/ops/pearl-runtime.sh status
+expect_next reference_operators:blocked
+# An empty (or null) overlay list is valid and is replaced, never blocked.
+for empty in '[]' ''; do
+  printf 'compute_integrity:\n  scoring:\n    corpus_path: /etc/macprovider/compute-integrity-corpus.json\n    reference_operators: %s\n' "$empty" > "$tmp/pearl/overlay.yaml"
+  systemctl restart macprovider-coordinator
+  PEARL_RUNTIME_TASK=compute-integrity-reference-operators run_rc 0 "empty overlay list '$empty' status" scripts/ops/pearl-runtime.sh status
+  expect_next reference_operators:mutate
+  if [ "$(fact_of pearl_ro_overlay_count)" = 0 ]; then ok; else bad "empty overlay count: $(fact_of pearl_ro_overlay_count)"; fi
+  PEARL_RUNTIME_TASK=compute-integrity-reference-operators MACPROVIDER_OPS_OWNER=t run_rc 0 "empty overlay list '$empty' replaced" scripts/ops/pearl-runtime.sh next --run
+  if ro_overlay_is '{"compute_integrity": {"scoring": {"corpus_path": "/etc/macprovider/compute-integrity-corpus.json", "reference_operators": ["github:4242", "provider:RO-SECRET-REF"]}}}'; then ok; else bad "empty overlay list not replaced: $(cat "$tmp/pearl/overlay.yaml")"; fi
+done
+# none removes the key through the same validated restart; other keys stay.
+export COMPUTE_INTEGRITY_REFERENCE_OPERATORS=none
+systemctl restart macprovider-coordinator
+rm -f "$tmp/svc/restarts"
+PEARL_RUNTIME_TASK=compute-integrity-reference-operators run_rc 0 "reference operators removal status" scripts/ops/pearl-runtime.sh status
+expect_next reference_operators:mutate
+case "$(next_field command)" in "scripts/ops/pearl-runtime.sh _compute-integrity-reference-operators none") ok ;; *) bad "removal command: $(next_field command)" ;; esac
+if [ "$(fact_of local_reference_operators_sha256)" = none ] && [ "$(fact_of local_reference_operators_count)" = 0 ]; then ok; else bad "removal local facts"; fi
+cp "$tmp/pearl/overlay.yaml" "$tmp/pearl/overlay.before"
+printf '# INVALID\n' >> "$tmp/pearl/coordinator.yaml"
+PEARL_RUNTIME_TASK=compute-integrity-reference-operators MACPROVIDER_OPS_OWNER=t run_rc 3 "removal refused by --validate-config" scripts/ops/pearl-runtime.sh next --run
+expect_lock_free
+if cmp -s "$tmp/pearl/overlay.yaml" "$tmp/pearl/overlay.before" && [ "$(restarts)" = 0 ]; then ok; else bad "rejected removal not left alone (restarts=$(restarts))"; fi
+printf 'listen:\n  bind_address: 127.0.0.1\n' > "$tmp/pearl/coordinator.yaml"
+systemctl restart macprovider-coordinator
+rm -f "$tmp/svc/restarts"
+PEARL_RUNTIME_TASK=compute-integrity-reference-operators MACPROVIDER_OPS_OWNER=t run_rc 0 "reference operators removal runs" scripts/ops/pearl-runtime.sh next --run
+expect_lock_free
+if [ "$(restarts)" = 1 ] && ro_overlay_is '{"compute_integrity": {"scoring": {"corpus_path": "/etc/macprovider/compute-integrity-corpus.json"}}}'; then ok; else bad "reference operators not removed (restarts=$(restarts)): $(cat "$tmp/pearl/overlay.yaml")"; fi
+PEARL_RUNTIME_TASK=compute-integrity-reference-operators run_rc 0 "reference operators status after removal" scripts/ops/pearl-runtime.sh status
+expect_next done:done
+rm -f "$tmp/svc/restarts"
+PEARL_RUNTIME_TASK=compute-integrity-reference-operators MACPROVIDER_OPS_OWNER=t run_rc 0 "removal is a no-op once live" scripts/ops/pearl-runtime.sh next --run
+if [ "$(restarts)" = 0 ]; then ok; else bad "a done removal restarted again"; fi
+# Removal drops a scoring and compute_integrity mapping it leaves empty, and
+# clears an overlay list the coordinator rules reject.
+printf 'relay_blind:\n  enabled: true\ncompute_integrity:\n  scoring:\n    reference_operators: ["github:x"]\n' > "$tmp/pearl/overlay.yaml"
+systemctl restart macprovider-coordinator
+PEARL_RUNTIME_TASK=compute-integrity-reference-operators run_rc 0 "removal of an invalid list status" scripts/ops/pearl-runtime.sh status
+expect_next reference_operators:mutate
+PEARL_RUNTIME_TASK=compute-integrity-reference-operators MACPROVIDER_OPS_OWNER=t run_rc 0 "removal of an invalid list runs" scripts/ops/pearl-runtime.sh next --run
+if ro_overlay_is '{"relay_blind": {"enabled": true}}'; then ok; else bad "empty mappings not dropped: $(cat "$tmp/pearl/overlay.yaml")"; fi
+unset COMPUTE_INTEGRITY_REFERENCE_OPERATORS
+rm -f "$tmp/svc/restarts" "$tmp/pearl/coordinator.yaml" "$tmp/pearl/overlay.yaml" "$tmp/pearl/overlay.before"
+
 # ==== cli-release: the cut waits for catalog activation =======================
 # The candidate bakes origin/main's catalog release; with Pearl serving another
 # (1.8.262 canary: rate_card_update_required), candidate_cut is blocked and
