@@ -1,11 +1,27 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.36
+Version: v0.3.37
 Status: draft (normative contract; runtime enablement is default-on per Mac behind the FR-CB10 on-device self-check, v0.3.15)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.3.37 (2026-11-07, FR-CB14 MSB-03 makespan aggregate, Related: #2253):**
+FR-CB14: MSB-03's aggregate gate measures end-to-end throughput: decoded
+tokens over the makespan, from the first request's arrival to the last row's
+last token, against the same requests served one after another on the
+production serial path, timed as one back-to-back interval. The old
+decode-interval aggregate (earliest first token to latest last token, over the
+short prompt's serial decode rate) stays in the report as a non-gating field.
+For a prefill-bound model the decode interval contains whatever prefill runs
+after the earliest first token, so serving the short request sooner lowered it
+without changing completion time: on GLM-5.3-Flash msb03 (M3 Ultra) the v0.3.36
+prefill order moved the short row's first token from about 6.0 s to 1.56 s,
+both runs finished all four rows at about 23.3 s, and the decode-interval
+aggregate fell from 0.70x to 0.55x of serial. The 1.2x threshold, the
+short-request TTFT gate (p95 at most 2x its serial baseline) and every
+equal-length scenario's gate and aggregate are unchanged.
+
 **Change log v0.3.36 (2026-11-07, FR-CB2 prefill order, Related: #2253):**
 FR-CB2: the prompt row with the fewest prompt tokens left leads each prefill
 turn; ties keep the round-robin turn order. A row passed over while it stood
@@ -1922,6 +1938,19 @@ Gate A2 performance thresholds (MSB-02 > 1.5x MSB-01, MSB-03 > 1.2x MSB-01,
 at least one Entry 110 multi-slot tier > 1.3x aggregate TG, within the memory
 bound) are the promotion thresholds; failing them triggers profiling or pivot,
 not a shipped number.
+
+**(v0.3.37) MSB-03 aggregate.** MSB-03 mixes prompt lengths, so its rows reach
+decode at different times and the decode interval of one row overlaps other
+rows' prefill. Its aggregate gate MUST therefore be end-to-end: total decoded
+tokens over the batched makespan, from the earliest request arrival to the
+latest row's last token, divided by the same quantity for the same requests
+served one after another on the production serial path, whose makespan is the
+one wall-clock interval from the first serial request's start to the last
+one's last token. The gate passes above 1.2x. The decode-interval aggregate
+(earliest first token to latest last token) MUST still be reported for MSB-03,
+as a non-gating field. The short-request gate is unchanged: the shortest
+prompt's batched TTFT p95 MUST be at most 2x its serial TTFT p95. Equal-length
+scenarios (MSB-02, MSB-04) keep the decode-interval aggregate and their gates.
 
 **MoE throughput risk (gating expectation-setter).** On the live 128-expert /
 8-active MoE (`Qwen3-Coder-30B-A3B`), a batch of 2-4 rows routes to largely
