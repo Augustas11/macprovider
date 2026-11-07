@@ -17,6 +17,11 @@ let package = Package(
         )
     ],
     dependencies: [
+        // Tag 3.32.3-macprovider.28 (#2201) on 3.32.3-macprovider.27: adds
+        // the GPT-OSS SwiGLU fix `e121cde`: plain Float clip bounds keep
+        // the activation dtype, so gpt-oss no longer runs a float32 residual
+        // stream that made every affine quantized matmul re-cast its scales
+        // and biases each forward.
         // Tag 3.32.3-macprovider.27 (#2189) on 3.32.3-macprovider.25: MiniMax
         // M3.1-Flash decode fusions (#2189) and GLM-5-Next Hugging Face
         // quantization keys (#2244).
@@ -71,7 +76,7 @@ let package = Package(
         // compatible per-column attention while retaining row-owned caches.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "73df016afa74563653701697f4e16b31a967808a"
+            revision: "e121cde27af2d03a6b4556851cf46740a8c0fc21"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",

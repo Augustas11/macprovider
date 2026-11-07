@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.76
+**Version:** 0.1.77
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.76",
+  "version": "0.1.77",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -513,12 +513,20 @@ The authorized dependency tuple is exact:
 
 | Repository | Fork tag | Revision | Upstream base |
 |---|---|---|---|
-| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.27` | `73df016afa74563653701697f4e16b31a967808a` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
+| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.28` | `e121cde27af2d03a6b4556851cf46740a8c0fc21` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
 | `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.11` | `c774cb0934c7503bc3fe1c3d1afbe44c728e8891` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
 | `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.6` | `51edbb37620aef7c860ab5d7cdb7bf5b14333da2` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
 | `https://github.com/Augustas11/mlx-c` | `v0.6.0-macprovider.2` | `2b1ff2b5b5129a6115771da32e1bac3b6b01ab01` | `ml-explore/mlx-c` pinned base (`ebc88f10caa1b625e6b581437a8dea6df8a70085`) |
 
-The mlx-swift-lm row `3.32.3-macprovider.27` is on `3.32.3-macprovider.25`
+The mlx-swift-lm row `3.32.3-macprovider.28` is on `3.32.3-macprovider.27`
+(`73df016afa74563653701697f4e16b31a967808a`) (#2201), at
+`e121cde27af2d03a6b4556851cf46740a8c0fc21`: adds the GPT-OSS
+SwiGLU fix: plain Float clip bounds keep the activation dtype, so gpt-oss no
+longer runs a float32 residual stream that made every affine quantized matmul
+re-cast its scales and biases each forward. The Swift, core and C rows are
+unchanged.
+
+The prior mlx-swift-lm row `3.32.3-macprovider.27` is on `3.32.3-macprovider.25`
 (`da8f1932f8e2a46477a1a35663955267bc6fcd04`) (#2189), at
 `73df016afa74563653701697f4e16b31a967808a`: MiniMax M3.1-Flash decode fusions
 (#2189) and GLM-5-Next Hugging Face quantization keys (#2244). The Swift, core
@@ -2292,6 +2300,13 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.77 (2026-11-07)** — R003 names mlx-swift-lm `3.32.3-macprovider.28`
+  (`e121cde27af2d03a6b4556851cf46740a8c0fc21`) on `3.32.3-macprovider.27`
+  (#2201): adds the GPT-OSS SwiGLU fix `e121cde`: plain Float clip
+  bounds keep the activation dtype, so gpt-oss no longer runs a float32
+  residual stream that made every affine quantized matmul re-cast its scales
+  and biases each forward. Other model sources and the Swift, core and C rows
+  are unchanged.
 - **0.1.76 (2026-11-07)** — R003 names mlx-swift-lm `3.32.3-macprovider.27`
   (`73df016afa74563653701697f4e16b31a967808a`) on `3.32.3-macprovider.25`
   (#2189): MiniMax M3.1-Flash decode fusions (#2189) and GLM-5-Next Hugging
