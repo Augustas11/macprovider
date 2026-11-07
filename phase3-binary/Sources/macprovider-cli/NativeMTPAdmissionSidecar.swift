@@ -2621,7 +2621,7 @@ enum NativeMTPAdmissionSidecar {
                     if fileManager.fileExists(atPath: destination.path) {
                         stagedDigest = try hashStagedRegularFileNoFollow(destination, relativePath: artifact.path)
                     } else {
-                        let copiedBytes = try copyRegularFileDescriptorNoClose(
+                        let copiedBytes = try cloneOrCopyRegularFileDescriptorNoClose(
                             from: validated.artifactFD,
                             expected: validated.initialStat,
                             to: destination,
@@ -2719,7 +2719,7 @@ enum NativeMTPAdmissionSidecar {
                     throw NativeMTPAdmissionSidecarError.artifactNotRegularFile("\(relativePath)/\(childRelative)")
                 }
                 defer { close(fd) }
-                let copiedBytes = try copyRegularFileDescriptorNoClose(
+                let copiedBytes = try cloneOrCopyRegularFileDescriptorNoClose(
                     from: fd,
                     expected: entry.info,
                     to: destURL,
@@ -2760,6 +2760,101 @@ enum NativeMTPAdmissionSidecar {
             entries.append((name, info))
         }
         return entries.sorted { $0.name < $1.name }
+    }
+
+    /// Share the validated file's blocks with the capture tree when that
+    /// file is already mode `0400`. `fclonefileat` copies the source mode
+    /// and has no destination-mode flag. A later `fchmodat` does not revoke
+    /// a descriptor opened while the new inode was still owner-writable, so
+    /// any other mode takes the exclusive `0400` byte copy. A byte copy also
+    /// runs when this volume cannot clone (`ENOTSUP`) or the capture tree is
+    /// on another volume (`EXDEV`). Any other `fclonefileat` failure rejects
+    /// the capture. The descriptor is stat'd again before the clone.
+    /// `fclonefileat` clones a directory hierarchy, and the name can be
+    /// swapped for a directory between the walker's stat and `openat`; a
+    /// mismatch throws and does not clone.
+    private static func cloneOrCopyRegularFileDescriptorNoClose(
+        from inputFD: Int32,
+        expected before: stat,
+        to destination: URL,
+        relativePath: String
+    ) throws -> Int64 {
+        guard (before.st_mode & S_IFMT) == S_IFREG, before.st_nlink == 1, before.st_size >= 0 else {
+            throw NativeMTPAdmissionSidecarError.artifactNotRegularFile(relativePath)
+        }
+        guard before.st_size <= maxSingleArtifactBytes else {
+            throw NativeMTPAdmissionSidecarError.artifactTooLarge(relativePath)
+        }
+        var live = stat()
+        guard fstat(inputFD, &live) == 0, sameRegularIdentity(before, live) else {
+            throw NativeMTPAdmissionSidecarError.artifactNotRegularFile(relativePath)
+        }
+        if (before.st_mode & 0o777) != 0o400 {
+            return try copyRegularFileDescriptorNoClose(
+                from: inputFD,
+                expected: before,
+                to: destination,
+                relativePath: relativePath
+            )
+        }
+        let parentFD = open(
+            destination.deletingLastPathComponent().path,
+            O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+        )
+        guard parentFD >= 0 else {
+            throw NativeMTPAdmissionSidecarError.pathRejected(destination.path)
+        }
+        defer { close(parentFD) }
+        let leaf = destination.lastPathComponent
+        // Read the return and errno before the C string is released. Swift
+        // can free a temporary C string on the next statement and clobber errno.
+        let clone: (ok: Bool, err: Int32) = leaf.withCString { name in
+            if fclonefileat(inputFD, parentFD, name, UInt32(CLONE_NOFOLLOW)) == 0 {
+                return (true, 0)
+            }
+            return (false, errno)
+        }
+        if clone.ok {
+            // Do not chmod before this check. A source that was mode 0400 at
+            // the pre-clone stat can be made owner-writable before the kernel
+            // samples the mode, and fchmodat would hide that birth mode while
+            // leaving an already-open writable descriptor.
+            var after = stat()
+            var cloned = stat()
+            let statRC: Int32 = leaf.withCString { name in
+                fstatat(parentFD, name, &cloned, AT_SYMLINK_NOFOLLOW)
+            }
+            let clonedReadOnly = statRC == 0
+                && (cloned.st_mode & S_IFMT) == S_IFREG
+                && (cloned.st_mode & 0o777) == 0o400
+                && cloned.st_nlink == 1
+                && cloned.st_ino != before.st_ino
+                && cloned.st_dev == before.st_dev
+                && cloned.st_size == before.st_size
+            guard fstat(inputFD, &after) == 0,
+                  sameRegularIdentity(before, after),
+                  clonedReadOnly else {
+                _ = leaf.withCString { name in unlinkat(parentFD, name, 0) }
+                throw NativeMTPAdmissionSidecarError.artifactNotRegularFile(relativePath)
+            }
+            guard fsync(parentFD) == 0, lseek(inputFD, 0, SEEK_SET) >= 0 else {
+                throw NativeMTPAdmissionSidecarError.pathRejected(destination.path)
+            }
+            return before.st_size
+        }
+        let cloneErrno = clone.err
+        if cloneErrno == ENOTSUP || cloneErrno == EXDEV {
+            let copied = try copyRegularFileDescriptorNoClose(
+                from: inputFD,
+                expected: before,
+                to: destination,
+                relativePath: relativePath
+            )
+            let message = "native-mtp capture clone fallback path=\(relativePath) errno=\(cloneErrno) bytes=\(copied)\n"
+            _ = message.withCString { fputs($0, stderr) }
+            return copied
+        }
+        throw NativeMTPAdmissionSidecarError.pathRejected(destination.path)
     }
 
     private static func copyRegularFileDescriptorNoClose(

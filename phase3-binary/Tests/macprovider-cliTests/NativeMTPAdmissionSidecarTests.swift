@@ -1,4 +1,5 @@
 import CryptoKit
+import Darwin
 import Foundation
 import XCTest
 @testable import macprovider_cli
@@ -331,6 +332,30 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
             try rejectedCaptureError(fixture.sidecarData, fixture: fixture),
             .pathRejected("captured_artifacts")
         )
+    }
+
+    func testCapturedBytesStayUnchangedWhenSourceIsRewritten() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let source = fixture.snapshot.appendingPathComponent("target.safetensors")
+        // Mode 0400 is what the capture clones. A writable source takes the
+        // exclusive copy, which does not share a clone id.
+        XCTAssertEqual(chmod(source.path, 0o400), 0)
+        let original = try Data(contentsOf: source)
+        let captured = try loadCapturedArtifacts(fixture)
+        defer { _ = captured }
+        let capturedURL = captured.targetURL
+        XCTAssertEqual(try Data(contentsOf: capturedURL), original)
+        if Self.volumeIsAPFS(source.path) {
+            let sourceCloneID = try XCTUnwrap(Self.apfsCloneID(source.path))
+            let capturedCloneID = try XCTUnwrap(Self.apfsCloneID(capturedURL.path))
+            XCTAssertNotEqual(sourceCloneID, 0)
+            XCTAssertEqual(sourceCloneID, capturedCloneID)
+        }
+        XCTAssertEqual(chmod(source.path, 0o644), 0)
+        try Data("rewritten after capture".utf8).write(to: source)
+        XCTAssertEqual(try Data(contentsOf: capturedURL), original)
+        XCTAssertNotEqual(try Data(contentsOf: source), original)
     }
 
     func testRevalidateAfterLoadRejectsStagedMutation() throws {
@@ -2223,6 +2248,38 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
             return .invalidValue("test did not reject")
         } catch let error as NativeMTPAdmissionSidecarError {
             return error
+        }
+    }
+
+    private static func volumeIsAPFS(_ path: String) -> Bool {
+        var info = statfs()
+        guard statfs(path, &info) == 0 else { return false }
+        return withUnsafeBytes(of: info.f_fstypename) { raw in
+            String(cString: raw.bindMemory(to: CChar.self).baseAddress!) == "apfs"
+        }
+    }
+
+    /// `ATTR_CMNEXT_CLONEID` lives in `forkattr` and is returned only when
+    /// `FSOPT_ATTR_CMN_EXTENDED` is set. The buffer is a packed `u_int32_t`
+    /// length followed by the `u_int64_t` id; a Swift struct would insert
+    /// padding and read the wrong bytes.
+    private static func apfsCloneID(_ path: String) -> UInt64? {
+        var list = attrlist()
+        memset(&list, 0, MemoryLayout<attrlist>.size)
+        list.bitmapcount = UInt16(ATTR_BIT_MAP_COUNT)
+        list.forkattr = attrgroup_t(ATTR_CMNEXT_CLONEID)
+        var buffer = [UInt8](repeating: 0, count: 16)
+        let options = UInt32(FSOPT_NOFOLLOW | FSOPT_ATTR_CMN_EXTENDED)
+        let rc = buffer.withUnsafeMutableBytes { raw in
+            getattrlist(path, &list, raw.baseAddress, raw.count, options)
+        }
+        guard rc == 0 else { return nil }
+        let length = buffer.withUnsafeBytes { raw in
+            raw.loadUnaligned(fromByteOffset: 0, as: UInt32.self)
+        }
+        guard length >= 12 else { return nil }
+        return buffer.withUnsafeBytes { raw in
+            raw.loadUnaligned(fromByteOffset: 4, as: UInt64.self)
         }
     }
 
