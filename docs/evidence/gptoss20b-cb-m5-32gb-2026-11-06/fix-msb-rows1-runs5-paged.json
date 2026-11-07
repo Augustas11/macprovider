@@ -1,0 +1,92 @@
+{
+ "command": [
+  "/usr/bin/sandbox-exec",
+  "-f",
+  "<lab>/lab.sb",
+  "<lab>/bin-final/macprovider-cli",
+  "msb-throughput",
+  "--model",
+  "<models>/gpt-oss-20b",
+  "--engine",
+  "paged",
+  "--no-compile",
+  "--prompt-tokens",
+  "1536",
+  "--decode-tokens",
+  "256",
+  "--runs",
+  "5",
+  "--mlx-cache-limit-mb",
+  "512",
+  "--stdout-only",
+  "--rows",
+  "1"
+ ],
+ "exit_code": 0,
+ "reports": [
+  {
+   "aggregateCVPct": 1.0222982729684282,
+   "aggregateTPSRuns": [
+    18.461459572130344,
+    18.81865320862014,
+    18.801484595789166,
+    18.8775928791015,
+    18.966275682564145
+   ],
+   "aggregateTPSp50": 18.81865320862014,
+   "aggregateUpliftVsPagedSingleRow": 1.01270891383515,
+   "aggregateVsProductionSerial": 0.8865972575120299,
+   "blockSizeTokens": 16,
+   "compiled": false,
+   "decodeTokensPerRow": 256,
+   "engine": "paged",
+   "layerCount": 24,
+   "maxPhysicalBlocks": 1024,
+   "mlxSwiftLMPin": "mlxlm-da8f1932f8e2",
+   "modelID": "<models>/gpt-oss-20b",
+   "modelTag": "model",
+   "pagedSingleRowCVPct": 1.0368228643790636,
+   "pagedSingleRowTPSRuns": [
+    18.207402949860832,
+    18.60139186591623,
+    18.58248994506576,
+    18.31692107364979,
+    18.626147033539073
+   ],
+   "pagedSingleRowTPSp50": 18.58248994506576,
+   "peakPhysFootprintMB": 14550,
+   "peakRSSMB": 2746,
+   "perRowFractionOfPagedSingleRow": 1.01270891383515,
+   "perRowTPSp50": 18.81865320862014,
+   "productionSerialCVPct": 8.695054507368972,
+   "productionSerialPromptTokens": 1536,
+   "productionSerialTPSRuns": [
+    17.872077775480538,
+    22.645364262500145,
+    21.225706541692972,
+    20.62400511106594,
+    21.764361910112513
+   ],
+   "productionSerialTPSp50": 21.225706541692972,
+   "productionSerialTTFTSecondsRuns": [
+    4.376636981964111,
+    3.6293740272521973,
+    3.6832069158554077,
+    3.785506010055542,
+    3.8148809671401978
+   ],
+   "promptTokenLengths": [
+    1536
+   ],
+   "promptTokenSHA256": [
+    "4e59d0e6a7a1c39973ef4b0a484c069296e8805bb86f437b028d18192823a852"
+   ],
+   "promptTokensPerRow": 1536,
+   "rows": 1,
+   "runs": 5,
+   "scenario": "throughput",
+   "schemaVersion": 4,
+   "timestamp": "2026-11-06T14:41:26Z"
+  }
+ ]
+}

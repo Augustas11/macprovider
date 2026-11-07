@@ -1,7 +1,14 @@
 # SPEC-039 — Paged KV / paged-attention engine
 
-Version: v0.1.28
-Status: draft (normative design). v0.1.28 adds the `minimax_m3` paged
+Version: v0.1.30
+Status: draft (normative design). v0.1.30 states the `kv_bits` precedence at
+attach: only an explicit operator `kv_bits` reaches the paged-KV gate; the
+model-family KV-quant default applies to serially served requests only.
+v0.1.29 defines the `gpt_oss` mixed cache
+class (keep=0 sliding-window layers and full-attention layers, both paged on
+one block table, decode keys in ring order) with an exact per-layer layout
+check, and adds the provisional FR-PKV12 `openai/gpt-oss-20b` identity so its
+attach probes and FR-CB10 self-check can run. v0.1.28 adds the `minimax_m3` paged
 family: a `pagedIndexedKV` cache kind that pages each MiniMax M3
 block-sparse attention layer's keys, values and lightning-indexer keys on one
 block table, and a provisional FR-PKV12 entry for the exact
@@ -84,6 +91,34 @@ is `RotatingKVCache` only because the serve path caps KV for memory attaches to
 paged mode (the block pool bounds memory), while a genuine sliding-window model
 stays fail-safe. IMPL lands with this revision.
 Owner: provider runtime / inference engine
+Change log v0.1.30 (2026-11-06): FR-PKV5 states which `kv_bits` the attach
+gate sees (#2200). The model-family KV-quant default (T3-03:
+`KVQuantRecommendation`, 8 for `gpt_oss` and `gemma4`) is a serial-path
+default. It applies to requests the provider serves serially, and never
+reaches the paged-KV attach gate, the continuous-batching capability or the
+FR-CB10 self-check's batched rows. An explicit operator `kv_bits` (config,
+environment, CLI or an adopted recommendation) keeps today's meaning: paged
+attach falls back with `paged_fallback_quantized` and every request uses it.
+Before this revision the family default fed the attach gate, so every
+gpt-oss provider fell back with `paged_fallback_quantized` and no FR-CB10
+self-check ran, although the CB policy's `kv_dtype` is fp16. Refines
+SPEC-039-R005.
+
+Change log v0.1.29 (2026-11-06): defines the `gpt_oss` mixed cache class
+(#2200). FR-PKV12 names its topology: one cache per decoder layer in
+`layer_types` order, keep=0 `RotatingKVCache` of `sliding_window` tokens at
+every `sliding_attention` index and `KVCacheSimple` at every `full_attention`
+index (the model's alternating default when `layer_types` is absent). Both
+kinds page on the row's one block table; a sliding-window layer keeps full
+history in paged storage and presents the rotating-equivalent suffix in the
+slot order the serial ring holds (the #2223 ring-order rule). The
+`openai/gpt-oss-120b` entry now also requires this exact layout, and a
+provisional, SPEC-first `openai/gpt-oss-20b` entry with the same class is
+added. FR-PKV4 states the exactness rule for rows that cross the sliding
+window. No new kernel: the class uses `macprovider_paged_kv_gather_v1` and
+the `sdpa-parity-v1` label. Any other `mixed` layout still fails closed with
+`paged_fallback_cache_class`. Refines SPEC-039-R004 and SPEC-039-R012.
+
 Change log v0.1.28 (2026-11-04): adds the `minimax_m3` family (#2189).
 FR-PKV4 defines the `pagedIndexedKV` layout and its three gathers per layer
 per forward; FR-PKV12 adds the provisional `minimaxai/minimax-m3.1-flash`
@@ -568,6 +603,31 @@ fixture did not prove `gpt-oss-120b`. For v0.1.14,
 `gemma4`, `glm4_moe`, `nemotron_h`, and other catalog families remain outside
 the allowlist until they have equivalent FR-PKV4 evidence.
 
+**`gpt_oss` sliding-window/full-attention class (v0.1.29).** For the FR-PKV12
+`gpt_oss` mixed class, the oracle is the stock serial cache of each layer:
+keep=0 `RotatingKVCache` on `sliding_attention` layers and `KVCacheSimple` on
+`full_attention` layers. In addition to the rules above:
+
+1. *Ring order.* A sliding-window layer's paged storage keeps full history,
+   but the keys and values it presents to attention MUST be the
+   rotating-equivalent suffix in the slot order the serial ring holds at the
+   same point: after a multi-token update the window is temporal; each later
+   one-token decode presents it rotated by the ring's write position. SDPA
+   reduces keys in buffer order, so temporal order alone is not exact. Rows
+   decoding in one lockstep batch each take their own rotation; a trim or
+   state restore restarts the ring as the serial cold prefill to that length
+   would.
+2. *Crossing the window.* Exactness MUST hold for rows whose prompt is longer
+   than the window, rows whose prompt is shorter and that cross it during
+   decode, and chunked prefill whose last chunk crosses it. The decode under
+   test MUST run past at least one full ring wrap (`window` decode steps after
+   the crossing).
+3. *Gate.* The attach-time proof below (48 exact greedy tokens after a
+   513-token prompt in production chunks) already starts decode past a
+   128-token window. The local fixture compares presented keys, values and
+   decode attention outputs bit for bit against the serial caches, with the
+   gather on a non-identity block order.
+
 **`glm5_next` latent / pooled-key fixture (v0.1.17, AC-20).** The `glm5_next`
 family's fixture runs the exact admitted artifact (environment-gated, real
 weights) and MUST satisfy all of the following in addition to the rules
@@ -636,6 +696,21 @@ If an operator enables paged KV while `kvBits` is configured before a
 quantized paged path exists, the provider MUST route to the stock contiguous
 path or fail preflight with an observable reason-coded result. Silent
 quantization downgrade is forbidden.
+
+**Family KV-quant default (v0.1.30).** "Configured" above means an explicit
+operator `kv_bits`: config, environment, CLI or an adopted recommendation's
+knob. The model-family default (T3-03, `KVQuantRecommendation`) is not a
+configured value. It applies only to requests the provider serves on the
+serial path; there it takes the place of an unset `kv_bits`, and is
+recomputed for the loaded model after a warm swap. The paged-KV attach gate,
+the continuous-batching capability and the FR-CB10 self-check's batched rows
+MUST see only the explicit value, so a model with a family default and no
+explicit `kv_bits` attaches fp16 paged KV. Its batched rows run fp16 KV (the
+signed CB policy's `kv_dtype`), and its serially served requests keep the
+family default. This is not a silent downgrade: no request had its
+`kv_bits` requested, and each path keeps its own exact reference. The
+FR-CB10 self-check's serial baseline is the serial path as served, family
+default included.
 
 ### FR-PKV6 — provider-local default-off invariants (SPEC-039-R006)
 
@@ -877,6 +952,35 @@ be individually measured before it is added. The v1 allowlist is:
 - `openai/gpt-oss-120b` with `GptOssForCausalLM` in the artifact's
   `config.json` architectures (MoE sliding-window/full-attention decoder; the
   paged path MUST additionally pass cross-row shared-forward isolation).
+  (v0.1.29) The entry also requires the exact `gpt_oss` class layout below.
+- (v0.1.29, provisional, SPEC-first) `openai/gpt-oss-20b`, the catalog model
+  whose verified artifact is `mlx-community/gpt-oss-20b-MXFP4-Q8`, with
+  `architectures == ["GptOssForCausalLM"]` and `model_type` `gpt_oss` in the
+  artifact's `config.json` (MoE sliding-window/full-attention decoder; the
+  paged path MUST additionally pass cross-row MoE expert-dispatch
+  isolation). It uses the `gpt_oss` class below. The code entry keys on the
+  catalog model id plus the exact `architectures` array; a path-only alias,
+  another gpt-oss artifact or a config that does not yield the exact layout
+  fails closed. This exception permits evaluation by the real attach-time
+  parity and isolation probes and the automatic FR-CB10 self-check; it is
+  not parity evidence, a signed grant or production qualification, and
+  attach fails closed until those gates pass.
+
+**`gpt_oss` mixed class (v0.1.29).** The runtime cache identity is `mixed`.
+The topology is exactly one cache per decoder layer, in `layer_types` order:
+keep=0 `RotatingKVCache` with `maxSize == sliding_window` at every
+`sliding_attention` index (`slidingWindow(windowTokens: sliding_window)`) and
+`KVCacheSimple` at every `full_attention` index (`pagedAttention`). When
+`layer_types` is absent the layout is the model's default, sliding at even
+indices and full at odd ones, and `num_hidden_layers` MUST be even.
+`layer_types` MUST have `num_hidden_layers` entries drawn only from those two
+types, with at least one of each, and `sliding_window` MUST be positive. Both
+kinds page on the row's one block table through
+`macprovider_paged_kv_gather_v1`; no other kernel is used. A sliding-window
+layer stores full history and presents the rotating-equivalent suffix in
+serial ring order (FR-PKV4). The parity label is `sdpa-parity-v1`. A
+different count, order, window, a keep>0 sink-token layer, a recurrent layer
+or any other cache kind fails closed with `paged_fallback_cache_class`.
 - (v0.1.17, SPEC-first) the GLM-5.3-Flash identity `zai-org/glm-5.3-flash`
   (catalog key from v0.1.18), the catalog model whose verified artifact is `Jundot/GLM-5.3-Flash-oQ4e-mtp` @
   `36defc5042d92a992a7948e83d6f110b8df69329`, with
@@ -985,7 +1089,8 @@ Each allowlisted identity requires the exact runtime cache topology measured
 for that identity: Qwen hybrid rows use `MambaCache` on recurrent layers and
 `KVCacheSimple` on full-attention layers, while `openai/gpt-oss-120b` uses
 keep=0 `RotatingKVCache` on sliding-window layers and `KVCacheSimple` on
-full-attention layers. The `glm5_next` identity uses exactly one cache per
+full-attention layers in the exact `gpt_oss` class layout above (v0.1.29;
+`openai/gpt-oss-20b` the same). The `glm5_next` identity uses exactly one cache per
 decoder layer in layer order: `MambaCache` at every `linear_attention` index of
 `text_config.layer_types` (34 KDA layers for the admitted artifact) and
 `pagedMLA(kpool: text_config.index_kpool)` at every
@@ -1052,8 +1157,9 @@ unrecognized. Production attach MUST still fail closed with
 allowlist after packaged-runtime parity past the model's window, isolation, and
 leftovers proof. Recognizing `gpt_oss` as a model family (v0.1.2) is
 identity-family only; gpt-oss alternating sliding/full layers remain an
-unallowlisted `mixed` class except for the exact `openai/gpt-oss-120b`
-identity/config pair named above.
+unallowlisted `mixed` class except for the exact `openai/gpt-oss-120b` and
+(v0.1.29) `openai/gpt-oss-20b` identity/config pairs named above, each in the
+exact `gpt_oss` class layout.
 
 **Serve-time memory cap vs. model attention type (v0.1.1 clarification).** The
 runtime `newCache()` class conflates two independent reasons a model presents a
