@@ -1,11 +1,26 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.37
+Version: v0.3.38
 Status: draft (normative contract; runtime enablement is default-on per Mac behind the FR-CB10 on-device self-check, v0.3.15)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.3.38 (2026-11-08, MLX memory limit below the GPU working set, Related: #2226, Related: #2249):**
+FR-CB2: native runtime startup MUST set MLX's process memory limit to 95% of
+Metal's `recommendedMaxWorkingSetSize`, never above 90% of physical RAM, and
+re-apply it once the model is resident. MLX's default,
+`min(1.5 x working set, 0.95 x RAM)`, sits above the working set on every
+Mac, so long prefills and wide batches could ask Metal to keep more bytes
+resident than it can. A model that fits the working set but not the 95% cap
+keeps its resident bytes plus 512 MiB, never more than the working set.
+FR-CB17: prompt admission holds a row whose initial KV would take MLX past
+that limit while other rows run, and admits it once the scheduler is idle.
+FR-CB18: a native-MTP round's complete window must also fit under the limit;
+otherwise its depth steps down, as with the existing R012 headroom bound.
+Neither path turns continuous batching or native MTP off. A model that fits
+keeps its rows and depths.
+
 **Change log v0.3.37 (2026-11-07, FR-CB14 MSB-03 makespan aggregate, Related: #2253):**
 FR-CB14: MSB-03's aggregate gate measures end-to-end throughput: decoded
 tokens over the makespan, from the first request's arrival to the last row's
@@ -819,6 +834,21 @@ the memory floor. It MUST NOT turn continuous batching off or raise signed
 admission ceilings. Native serve, self-test and benchmark loading MUST use
 the same selection; preloaded/test runtimes MUST NOT reset process allocator
 state.
+
+**(v0.3.36) MLX memory limit.** Native serve, self-test and benchmark loading
+MUST set MLX's process memory limit before loading the model and again once it
+is resident (initial load and every warm swap). The limit is
+`min(W - W/20, P - P/10)`, raised to `min(W, R + 512 MiB)` when that is larger.
+`W` is Metal's `recommendedMaxWorkingSetSize`, `P` is physical RAM and `R` is
+MLX's active memory after the load. `W/20` matches MLX's own cache-reclaim
+point (`gc_limit = 0.95 x W`). `P/10` is the SPEC-048-R012 10% free-memory
+floor. The `R` floor keeps a model that fits the working set loadable on small
+Macs. The limit MUST NOT exceed `W`. When Metal reports no working set,
+MLX's default stays. The runtime MUST log the effective limit, `W`, `P`, `R`
+and the model's KV bytes per token at each application
+(`event=mlx_memory_limit`). This is a ceiling on MLX's allocations, not a
+row-cap grant. It MUST NOT turn continuous batching off, lower signed
+admission ceilings or change any row's tokens.
 
 The scheduler MUST keep prompt processing (prefill) and decode as separate
 phases; it MUST NOT combine arbitrary prefill and one-token decode work into
@@ -2148,6 +2178,17 @@ by preemption:
   the whole single-sequence context there makes mid-decode exhaustion
   structurally impossible); a multi-row batch reserves only prompt-plus-headroom,
   so mid-decode block-extension failure remains a real path — see FR-CB5.
+- **(v0.3.36) MLX memory-limit back-pressure (FR-CB2).** Before it reserves
+  blocks, admission MUST check MLX's active memory plus the new row's initial
+  footprint at the model's KV bytes per token. It MUST also add the remaining
+  initial footprint of rows still prefilling. When that total exceeds the
+  FR-CB2 memory limit while another row is admitting, prefilling or decoding,
+  the request MUST be held at the queue head under its FR-CB1 queue-wait
+  bound. It MUST NOT be prefilled beside them. An idle scheduler admits the
+  row, so a model that fits never loses continuous batching. Each deferral
+  and idle admission is reason-coded (`memory_limit_deferred`,
+  `memory_limit_idle_admitted`) and logged with the requested, active,
+  pending and limit bytes. Unknown KV geometry counts as zero bytes per token.
 - **Deterministic request-local failure (FR-CB5).** If an already-admitted
   decode row cannot extend its block table mid-decode, that **row alone** fails
   deterministically through the request-local terminal path and releases its
@@ -2172,6 +2213,12 @@ that mapping. It MUST NOT infer ownership from rectangular `[B, 1]` row order.
 Rows may propose unequal lengths and may accept unequal prefixes; a row with
 depth zero contributes no verification position and remains independently
 runnable on its ordinary one-token target step under the same served snapshot.
+
+**(v0.3.36)** A native-MTP round's complete-window reservation MUST also fit
+under the FR-CB2 MLX memory limit. MLX's active memory plus every outstanding
+round reservation, this one included, MUST NOT exceed the limit. A refused depth steps down exactly as a refused
+SPEC-048-R012 headroom reservation does. The refusal log names
+`reason=mlx_memory_limit` with the MLX active and limit bytes.
 
 The mapping MUST be produced by the scheduler as an engine-issued opaque
 sequence handle plus `row_generation` and `proposal_position`; caller-supplied
@@ -2560,6 +2607,14 @@ hardware-capability run or a static-review obligation. Every
   stream, sampler, stop state, and block table stay intact — no healthy row's
   KV is evicted/recomputed (no preemption), and no settlement receipt is
   emitted for stitched failed+retried output.
+- **AC-24a MLX memory limit (FR-CB2, FR-CB17, FR-CB18, v0.3.36):** the limit
+  computation never exceeds the working set or 90% of RAM, sits 5% below the
+  working set, and keeps a resident model that fits the working set. A row
+  whose initial footprint would pass the limit waits while another row
+  decodes and joins once it finishes, never prefilling beside it. Rows that
+  fit join with no memory diagnostic. A native-MTP round over the limit steps
+  down to depth zero. If depth zero still does not fit, the row fails with
+  `continuous_batching_native_mtp_round_memory_exhausted` before any proposal.
 - **AC-25 API-visible lifecycle semantics (FR-CB1, FR-CB6, FR-CB9, FR-CB13,
   FR-CB15):** through the real HTTP/relay serving surface, not only scheduler
   units, prove queue-full backpressure, caller-bounded waiting beyond the
