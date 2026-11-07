@@ -1,11 +1,22 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.38
+Version: v0.3.39
 Status: draft (normative contract; runtime enablement is default-on per Mac behind the FR-CB10 on-device self-check, v0.3.15)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.3.39 (2026-11-09, FR-CB10 admission hold admits buyer arrivals, Related: #2257):**
+FR-CB10 item 3: a buyer request that arrives during a self-check admission
+hold is admitted and ends the hold as a yield, instead of being refused with
+the retryable `continuous_batching_stream_backpressure` (direct HTTP) or
+`error_queue_full` (relay). On CLI 1.8.281 a provider with no buyer request
+in flight refused four sequential direct requests in about 1 ms each while
+the hold's step ran; on a single-provider model the buyer had nowhere else
+to go. The hold still reports no free slot, so routing keeps sending traffic
+elsewhere while it runs; a cancelled step is deferred as before and never
+becomes a measurement. Local-use requests stay declined for the hold.
+
 **Change log v0.3.38 (2026-11-08, MLX memory limit below the GPU working set, Related: #2226, Related: #2249):**
 FR-CB2: native runtime startup MUST set MLX's process memory limit to 90% of
 Metal's `recommendedMaxWorkingSetSize`, never above 90% of physical RAM, and
@@ -1675,16 +1686,19 @@ buyer traffic. No extra runtime enable flag is introduced.
    holds across Macs that re-key together) while the Mac is not idle MUST run
    under an admission hold, and MUST NOT otherwise hold admission (a
    re-measurement of a stored decision keeps waiting for an idle window, and
-   an idle Mac runs the check without a hold). Under the hold the provider
-   MUST stop admitting new requests: a relay request (a relay-blind one keeps
-   its existing refusal) is refused before admission with `error_queue_full`,
-   the status the coordinator re-routes without a breaker fault, and a direct
-   HTTP request with the retryable `continuous_batching_stream_backpressure`
-   and a `Retry-After` that runs to the hold's bound (no inference runs for
-   either); heartbeats and capacity updates report the provider busy with no
-   free slot. A coordinator that still counts its own forwarded requests may
-   ignore that report until one of them ends; a request it routes meanwhile
-   is refused as above and re-routed. The provider MUST let every in-flight
+   an idle Mac runs the check without a hold). Under the hold heartbeats and
+   capacity updates report the provider busy with no free slot, so routing
+   sends new requests elsewhere. (v0.3.36) A buyer request that still arrives
+   (a direct HTTP request, a relay request, or one a coordinator that still
+   counts its own forwarded requests routes meanwhile) MUST be admitted and
+   MUST NOT be refused because of the hold, with
+   `continuous_batching_stream_backpressure`, `error_queue_full` or any other
+   status: its arrival ends the hold as a yield (`reason=buyer_arrival`),
+   whether the hold is draining or checking; the check is cancelled, its
+   cancelled step is deferred and never becomes a measurement, and the
+   request waits for the probe's exclusive residency to retire (below) and
+   is then served. Local use (SPEC-001-R011) stays declined for the hold.
+   The provider MUST let every in-flight
    request finish and MUST NOT cancel or drop one; if they have not finished
    within the drain bound (the configured drain timeout, doubled after each
    consecutive drain timeout up to 4x) the hold ends without a check. The

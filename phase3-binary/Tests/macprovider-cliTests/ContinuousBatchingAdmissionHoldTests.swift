@@ -34,27 +34,32 @@ final class ContinuousBatchingAdmissionHoldTests: XCTestCase {
         XCTAssertGreaterThan(ContinuousBatchingSelfCheck.admissionHoldCheckSeconds, 60)
     }
 
-    func testHoldRefusesNewRequestsKeepsInFlightOnesAndResumes() async {
+    func testHoldKeepsInFlightRequestsAdmitsArrivalsAndResumes() async {
         let status = makeStatus()
         let inFlight = await status.beginRequestIfAccepting(requestID: "before-hold")
         XCTAssertNotNil(inFlight)
 
         let refusal = await status.beginSelfCheckAdmissionHold()
         XCTAssertNil(refusal)
-        let held = await status.admitRequest(requestID: "during-hold")
-        XCTAssertEqual(held, .selfCheckAdmissionHold)
-        let legacy = await status.beginRequestIfAccepting()
-        XCTAssertNil(legacy)
-        let during = await status.snapshot()
-        XCTAssertEqual(during.status, .busy)
-        XCTAssertEqual(during.slotsFree, 0)
-        XCTAssertEqual(during.requestsInFlight, 1, "the request admitted before the hold keeps running")
-        XCTAssertEqual(during.cbSelfCheckAdmissionHold?.active, true)
+        let held = await status.snapshot()
+        XCTAssertEqual(held.status, .busy)
+        XCTAssertEqual(held.slotsFree, 0, "routing sees no free slot for the hold")
+        XCTAssertEqual(held.requestsInFlight, 1, "the request admitted before the hold keeps running")
+        XCTAssertEqual(held.cbSelfCheckAdmissionHold?.active, true)
+        let noArrival = await status.selfCheckAdmissionHoldBuyerArrived()
+        XCTAssertFalse(noArrival)
+        // #2257 (v0.3.36): an arrival is admitted, never refused for the hold,
+        // and asks the hold to yield.
+        let arrival = await status.admitRequest(requestID: "during-hold")
+        guard case .admitted(let arrivedAt) = arrival else { return XCTFail("arrival refused: \(arrival)") }
+        let arrived = await status.selfCheckAdmissionHoldBuyerArrived()
+        XCTAssertTrue(arrived)
+        await status.finishRequest(startedAt: arrivedAt, completion: nil, failed: false, requestID: "during-hold")
 
         await status.finishRequest(startedAt: inFlight!, completion: nil, failed: false, requestID: "before-hold")
         let drained = await status.snapshot()
         XCTAssertEqual(drained.requestsInFlight, 0)
-        XCTAssertEqual(drained.requestsTotal, 1)
+        XCTAssertEqual(drained.requestsTotal, 2)
         XCTAssertEqual(drained.errorsTotal, 0)
         XCTAssertEqual(drained.status, .busy, "still held after the drain")
 
@@ -65,6 +70,8 @@ final class ContinuousBatchingAdmissionHoldTests: XCTestCase {
         XCTAssertEqual(after.cbSelfCheckAdmissionHold?.active, false)
         XCTAssertEqual(after.cbSelfCheckAdmissionHold?.lastOutcome, "completed")
         XCTAssertEqual(after.cbSelfCheckAdmissionHold?.holdsTotal, 1)
+        let reset = await status.selfCheckAdmissionHoldBuyerArrived()
+        XCTAssertFalse(reset, "the arrival flag ends with the hold")
         let admitted = await status.admitRequest(requestID: "after-hold")
         guard case .admitted = admitted else { return XCTFail("admission did not resume: \(admitted)") }
     }
@@ -124,18 +131,84 @@ final class ContinuousBatchingAdmissionHoldTests: XCTestCase {
             providerStatus: status, drainSeconds: 5, lifecycleLease: { nil }, context: "test", log: { _ in }
         ) {
             let inFlight = await status.requestsInFlightCount()
-            let refused = await status.admitRequest(requestID: "arrived-during-check")
-            observed.set(inFlight: inFlight, refused: refused == .selfCheckAdmissionHold)
+            let snapshot = await status.snapshot()
+            observed.set(inFlight: inFlight, refused: snapshot.slotsFree == 0)
             return true
         }
         XCTAssertEqual(outcome, .completed)
         XCTAssertEqual(observed.inFlight, 0, "the check started only after the in-flight request finished")
-        XCTAssertEqual(observed.refused, true, "admission stays held while the check runs")
+        XCTAssertEqual(observed.refused, true, "routing sees no free slot while the check runs")
         let after = await status.snapshot()
         XCTAssertEqual(after.requestsTotal, 1)
         XCTAssertEqual(after.errorsTotal, 0)
         XCTAssertEqual(after.status, .ready)
         XCTAssertEqual(after.cbSelfCheckAdmissionHold?.lastOutcome, "completed")
+    }
+
+    /// #2257: a buyer arriving while the check's step runs is admitted, not
+    /// refused with backpressure; the step is cancelled and the hold yields.
+    func testBuyerArrivingDuringTheCheckIsAdmittedAndTheHoldYields() async {
+        let status = makeStatus()
+        let lines = LogLines()
+        let checkStarted = LeaseFlag()
+        let cancelled = InFlightObservation()
+        let arrival = Task { () -> ProviderRequestAdmission in
+            while checkStarted.value == nil { try? await Task.sleep(nanoseconds: 10_000_000) }
+            return await status.admitRequest(requestID: "buyer-during-step")
+        }
+        let started = Date()
+        let outcome = await ContinuousBatchingSelfCheck.runUnderAdmissionHold(
+            providerStatus: status, drainSeconds: 5, checkSeconds: 30, lifecycleLease: { nil },
+            context: "test", log: { lines.append($0) }
+        ) {
+            checkStarted.set("step")
+            // A step that runs until it is cancelled (bounded for the test).
+            let stop = Date().addingTimeInterval(3)
+            while !Task.isCancelled, Date() < stop { try? await Task.sleep(nanoseconds: 10_000_000) }
+            cancelled.set(inFlight: 0, refused: Task.isCancelled)
+            return false
+        }
+        let admission = await arrival.value
+        guard case .admitted(let at) = admission else {
+            return XCTFail("a buyer arriving during the step was refused: \(admission)")
+        }
+        XCTAssertEqual(outcome, .yielded)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 2, "the hold yields at the arrival, not at a bound")
+        XCTAssertEqual(cancelled.refused, true, "the step is cancelled, so it never becomes a measurement")
+        XCTAssertTrue(lines.all.contains { $0.contains("action=admission_hold_end outcome=yielded reason=buyer_arrival") })
+        let hold = await status.selfCheckAdmissionHoldStatus()
+        XCTAssertFalse(hold.active)
+        let during = await status.snapshot()
+        XCTAssertEqual(during.requestsInFlight, 1)
+        await status.finishRequest(startedAt: at, completion: nil, failed: false, requestID: "buyer-during-step")
+        let after = await status.snapshot()
+        XCTAssertEqual(after.errorsTotal, 0)
+    }
+
+    /// #2257: an arrival during the drain is admitted too; the hold yields
+    /// without running the check and without counting a drain timeout.
+    func testBuyerArrivingDuringTheDrainIsAdmittedAndTheCheckNeverRuns() async {
+        let status = makeStatus()
+        let first = await status.beginRequestIfAccepting(requestID: "in-flight-at-hold")!
+        let ran = InFlightObservation()
+        let arrival = Task { () -> ProviderRequestAdmission in
+            while await !status.selfCheckAdmissionHoldStatus().active { try? await Task.sleep(nanoseconds: 10_000_000) }
+            return await status.admitRequest(requestID: "buyer-during-drain")
+        }
+        let outcome = await ContinuousBatchingSelfCheck.runUnderAdmissionHold(
+            providerStatus: status, drainSeconds: 2, lifecycleLease: { nil }, context: "test", log: { _ in }
+        ) {
+            ran.set(inFlight: 0, refused: false)
+            return true
+        }
+        let admission = await arrival.value
+        guard case .admitted(let second) = admission else {
+            return XCTFail("a buyer arriving during the drain was refused: \(admission)")
+        }
+        XCTAssertEqual(outcome, .yielded)
+        XCTAssertNil(ran.inFlight, "no check runs beside the admitted buyer")
+        await status.finishRequest(startedAt: second, completion: nil, failed: false, requestID: "buyer-during-drain")
+        await status.finishRequest(startedAt: first, completion: nil, failed: false, requestID: "in-flight-at-hold")
     }
 
     func testDrainTimeoutSkipsTheCheckCancelsNothingAndReopensAdmission() async {

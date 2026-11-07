@@ -628,6 +628,9 @@ actor ProviderStatus {
     private var catalogCompatibilityConfirmed = false
     private var activeRequestIDs = Set<String>()
     private var cbAdmissionHold = ContinuousBatchingAdmissionHoldStatus()
+    /// A buyer request was admitted while the hold was active: the hold
+    /// must yield (SPEC-038 FR-CB10 item 3, v0.3.36).
+    private var cbAdmissionHoldBuyerArrived = false
     private let thermalGate: ThermalGate?
     private let memoryPressureProvider: MemoryPressureProviding
     private let workloadTelemetryProvider: ProviderWorkloadTelemetryProviding
@@ -767,20 +770,26 @@ actor ProviderStatus {
     }
 
     /// `beginRequestIfAccepting`, naming why a request was refused: a pause or
-    /// drain, or the SPEC-038 FR-CB10 self-check admission hold (a retryable
-    /// queue-pressure refusal). The check and the in-flight count move
-    /// together, so a request either counts toward a hold's drain or is refused.
+    /// drain. A buyer request is never refused for the SPEC-038 FR-CB10
+    /// self-check admission hold (v0.3.36): it is admitted and ends the hold
+    /// as a yield, then waits behind the probe's exclusive inference permit.
     func admitRequest(requestID: String? = nil) async -> ProviderRequestAdmission {
         guard !localCreativeHold, status != .draining, status != .unavailable else { return .pausedOrDraining }
-        guard !cbAdmissionHold.active else { return .selfCheckAdmissionHold }
+        if cbAdmissionHold.active { cbAdmissionHoldBuyerArrived = true }
         return .admitted(await beginRequest(requestID: requestID))
+    }
+
+    /// Whether a buyer request was admitted during the active hold.
+    func selfCheckAdmissionHoldBuyerArrived() -> Bool {
+        cbAdmissionHold.active && cbAdmissionHoldBuyerArrived
     }
 
     func requestsInFlightCount() -> Int { requestsInFlight }
 
-    /// SPEC-038 FR-CB10 item 3 (v0.3.22): stop admitting new requests so a due
-    /// self-check can run. In-flight requests are not touched; the caller
-    /// waits for them. Refused (returns the reason) while an operator pause
+    /// SPEC-038 FR-CB10 item 3 (v0.3.22): hold admission so a due self-check
+    /// can run: routing sees no free slot and local use is declined; a buyer
+    /// request that still arrives is admitted and ends the hold (v0.3.36).
+    /// In-flight requests are not touched; the caller waits for them. Refused (returns the reason) while an operator pause
     /// holds, the provider is draining, unavailable or degraded, or a hold is
     /// already active. Routing sees the provider busy with no free slot.
     /// `expectedEndAt` (the drain plus check bound) sets the refusals'
@@ -790,12 +799,13 @@ actor ProviderStatus {
         guard modelLoaded, status == .ready || status == .busy else { return "provider_\(status.rawValue)" }
         guard !cbAdmissionHold.active else { return "already_held" }
         cbAdmissionHold.active = true
+        cbAdmissionHoldBuyerArrived = false
         cbAdmissionHold.startedAt = Date()
         cbAdmissionHold.expectedEndAt = expectedEndAt
         cbAdmissionHold.holdsTotal += 1
-        // SPEC-001-R011: buyers are refused for the hold, so nothing else
-        // would ever preempt local work; preempt it now so the hold drains
-        // within its bound. New local admission is fenced by the hold itself.
+        // SPEC-001-R011: routing sends buyers elsewhere for the hold, so
+        // nothing else would preempt local work; preempt it now so the hold
+        // drains within its bound. New local admission is fenced by the hold itself.
         preemptAdmittedLocalWork()
         await refreshAvailabilityState()
         return nil
@@ -807,6 +817,7 @@ actor ProviderStatus {
     func endSelfCheckAdmissionHold(outcome: String) async {
         guard cbAdmissionHold.active else { return }
         cbAdmissionHold.active = false
+        cbAdmissionHoldBuyerArrived = false
         cbAdmissionHold.startedAt = nil
         cbAdmissionHold.expectedEndAt = nil
         cbAdmissionHold.lastOutcome = outcome

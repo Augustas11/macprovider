@@ -121,7 +121,9 @@ final class InferenceRelayTests: XCTestCase {
     /// SPEC-038 FR-CB10 item 3: a request that arrives during the self-check
     /// admission hold is refused with the status the coordinator re-routes,
     /// before it reaches the runtime; admission re-opens when the hold ends.
-    func testSelfCheckAdmissionHoldRefusesWithTheReroutedQueueFullStatus() async throws {
+    /// #2257 (SPEC-038 v0.3.36): a relay request during the hold is served,
+    /// not refused with `error_queue_full`, and asks the hold to yield.
+    func testSelfCheckAdmissionHoldAdmitsTheRelayRequestAndAsksTheHoldToYield() async throws {
         let status = ProviderStatus(
             modelID: "mlx-community/Test-Model",
             modelLoaded: true,
@@ -142,28 +144,18 @@ final class InferenceRelayTests: XCTestCase {
         try await relay.handleInferenceRequest([
             "type": "inference_request", "request_id": "req-held", "stream": true, "body": body,
         ])
-        let held = try await waitForFrames({ frames in
-            frames.contains { $0["type"] as? String == "inference_response_end" && $0["request_id"] as? String == "req-held" }
-        }, from: { await recorder.frames })
-        let end = try XCTUnwrap(held.first {
-            $0["type"] as? String == "inference_response_end" && $0["request_id"] as? String == "req-held"
-        })
-        XCTAssertEqual(end["status"] as? String, "error_queue_full")
-        XCTAssertEqual(end["chunks_sent"] as? Int, 0)
-        XCTAssertFalse(held.contains { $0["type"] as? String == "inference_response_chunk" })
-        let inFlightDuringHold = await status.requestsInFlightCount()
-        XCTAssertEqual(inFlightDuringHold, 0)
-
-        await status.endSelfCheckAdmissionHold(outcome: "completed")
-        try await relay.handleInferenceRequest([
-            "type": "inference_request", "request_id": "req-after", "stream": true, "body": body,
-        ])
         try await waitUntil {
             await recorder.frames.contains {
-                $0["type"] as? String == "inference_response_chunk" && $0["request_id"] as? String == "req-after"
+                $0["type"] as? String == "inference_response_chunk" && $0["request_id"] as? String == "req-held"
             }
         }
-        try await relay.handleCancelRequest(["type": "cancel_request", "request_id": "req-after", "reason": "test_cleanup"])
+        let frames = await recorder.frames
+        XCTAssertFalse(frames.contains { $0["status"] as? String == "error_queue_full" })
+        let arrived = await status.selfCheckAdmissionHoldBuyerArrived()
+        XCTAssertTrue(arrived, "the arrival asks the hold to yield")
+
+        await status.endSelfCheckAdmissionHold(outcome: "yielded")
+        try await relay.handleCancelRequest(["type": "cancel_request", "request_id": "req-held", "reason": "test_cleanup"])
         let drained = await relay.waitUntilIdle(timeoutSeconds: 2)
         XCTAssertTrue(drained)
     }
