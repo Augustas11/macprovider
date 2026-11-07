@@ -256,7 +256,7 @@ func (k *KeyState) confirmedFailure() (confirmed, referenceOnly bool) {
 		recent = recent[len(recent)-escalationWindow:]
 	}
 	outs := 0
-	referenceOnly := true
+	referenceOnly = true
 	ops := map[string]struct{}{}
 	for _, e := range recent {
 		if !e.Out {
