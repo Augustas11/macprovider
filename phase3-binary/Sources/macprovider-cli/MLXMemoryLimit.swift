@@ -81,6 +81,40 @@ enum MLXMemoryLimit {
         return MLXMemoryAdmissionSample(limitBytes: limit, activeBytes: Memory.activeMemory, kvBytesPerToken: perToken)
     }
 
+    /// SPEC-038 FR-CB2 (v0.3.36): the MLX buffer-cache bound serve applies to
+    /// `modelID` for a configured `mlx_cache_limit_mb` (nil when unset), in
+    /// bytes. Built from the same two functions `ModelRuntime` loads with, so
+    /// commands that load outside it cannot drift from serve. Nil only for an
+    /// out-of-range configured value, which startup rejects first.
+    static func serveCacheLimitBytes(
+        modelID: String?,
+        configuredMB: Int?,
+        physicalMemoryBytes: UInt64 = ProcessInfo.processInfo.physicalMemory
+    ) -> Int? {
+        guard let megabytes = ModelRuntime.resolvedMLXCacheLimitMB(
+                  configured: configuredMB, physicalMemoryBytes: physicalMemoryBytes),
+              ModelRuntime.isValidMLXCacheLimitMB(megabytes)
+        else { return nil }
+        return ModelRuntime.modelScopedMLXCacheLimitBytes(modelID: modelID, baselineBytes: megabytes * 1024 * 1024)
+    }
+
+    /// Serve's MLX cache bound and memory limit for a model loaded outside
+    /// `ModelRuntime` (shard stages, the native-MTP lab runner, shard-bench).
+    /// Call it with `stage: "startup"` before the load and `"model_loaded"` after.
+    @discardableResult
+    static func applyServeLimits(
+        stage: String, modelID: String?, configuredCacheLimitMB: Int?, modelDirectory: URL?
+    ) -> (cacheLimitBytes: Int?, memoryLimitBytes: Int?) {
+        let cache = serveCacheLimitBytes(modelID: modelID, configuredMB: configuredCacheLimitMB)
+        if let cache {
+            Memory.cacheLimit = cache
+            FileHandle.standardError.write(Data("mlx_cache_limit_bytes=\(cache) stage=\(stage)\n".utf8))
+        }
+        let limit = apply(
+            stage: stage, kvBytesPerToken: stage == "startup" ? nil : kvBytesPerToken(modelDirectory: modelDirectory))
+        return (cache, limit)
+    }
+
     /// KV bytes per token from a model directory's `config.json`, nil when
     /// the directory or its attention geometry is unreadable.
     static func kvBytesPerToken(modelDirectory: URL?) -> Int? {

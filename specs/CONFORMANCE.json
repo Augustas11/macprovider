@@ -5481,7 +5481,8 @@
         "phase3-binary/Sources/macprovider-cli/ServeDecodePath.swift:nonisolated static func schedulerPromptChunkCeiling",
         "phase3-binary/Sources/macprovider-cli/DeepseekV4ContinuousBatchBackend.swift:final class DeepseekV4ContinuousBatchBackend",
         "phase3-binary/Sources/MacProviderCore/MLXMemoryBudget.swift:public enum MLXMemoryBudget",
-        "phase3-binary/Sources/macprovider-cli/MLXMemoryLimit.swift:enum MLXMemoryLimit"
+        "phase3-binary/Sources/macprovider-cli/MLXMemoryLimit.swift:enum MLXMemoryLimit",
+        "phase3-binary/Sources/macprovider-cli/MLXMemoryLimit.swift:static func serveCacheLimitBytes"
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testPrefillBatchesCompatibleChunksWithinRowAndTokenBudgets",
@@ -5576,7 +5577,9 @@
         "phase3-binary/Tests/MacProviderCoreTests/MLXMemoryBudgetTests.swift:testLimitNeverExceedsWorkingSetOrNinetyPercentOfRAM",
         "phase3-binary/Tests/MacProviderCoreTests/MLXMemoryBudgetTests.swift:testRaisedWorkingSetIsCappedByTheR012FreeMemoryFloor",
         "phase3-binary/Tests/MacProviderCoreTests/MLXMemoryBudgetTests.swift:testSmallMacFloorKeepsAModelThatFitsTheWorkingSet",
-        "phase3-binary/Tests/MacProviderCoreTests/MLXMemoryBudgetTests.swift:testNoWorkingSetKeepsMLXDefault"
+        "phase3-binary/Tests/MacProviderCoreTests/MLXMemoryBudgetTests.swift:testNoWorkingSetKeepsMLXDefault",
+        "phase3-binary/Tests/macprovider-cliTests/MLXServeLimitsParityTests.swift:testServeCacheLimitIsBoundedWhenTheConfigOmitsIt",
+        "phase3-binary/Tests/macprovider-cliTests/MLXServeLimitsParityTests.swift:testBenchCommandsResolveServesCacheLimitForTheSameConfig"
       ],
       "journeys": [],
       "evidence": [],

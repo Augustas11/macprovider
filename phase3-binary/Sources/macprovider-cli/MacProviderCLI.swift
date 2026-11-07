@@ -2995,6 +2995,11 @@ struct ServeCommand: AsyncParsableCommand {
                 let directory = try ModelRuntime.localModelDirectory(
                     for: startupPreflight.runtimeBinding?.loadPath ?? resolved.modelArtifactPath ?? shardModelID)
                 let verifySHA256 = startupPreflight.runtimeBinding?.loadSHA256 ?? resolved.modelArtifactSHA256
+                // SPEC-038 FR-CB2 (v0.3.36): shard stages load outside
+                // ModelRuntime; they get serve's cache bound and memory limit.
+                MLXMemoryLimit.applyServeLimits(
+                    stage: "startup", modelID: shardModelID,
+                    configuredCacheLimitMB: resolved.mlxCacheLimitMB, modelDirectory: directory)
                 if let head = shardHeadConfig {
                     resolved.maxConcurrencyOverride = head.maxConcurrency
                     modelRuntime = try await ShardGroupServe.headRuntime(
@@ -3013,6 +3018,9 @@ struct ServeCommand: AsyncParsableCommand {
                 } else {
                     throw ValidationError("unreachable shard role")
                 }
+                MLXMemoryLimit.applyServeLimits(
+                    stage: "model_loaded", modelID: shardModelID,
+                    configuredCacheLimitMB: resolved.mlxCacheLimitMB, modelDirectory: directory)
             } else if let loopbackServedRef = resolved.model, let loopback = LoopbackServeSelection.select(loopbackServedRef) {
                 // SPEC-046-R002 / SPEC-010-R007(e) loopback serving (#1569,
                 // #1690 M2): proxy inference to the validated loopback

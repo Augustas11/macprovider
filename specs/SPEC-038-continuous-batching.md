@@ -14,6 +14,14 @@ re-apply it once the model is resident. MLX's default,
 Mac, so long prefills and wide batches could ask Metal to keep more bytes
 resident than it can. A model that fits the working set but not the 90% cap
 keeps its resident bytes plus 512 MiB, never more than the working set.
+FR-CB2: an unset `mlx_cache_limit_mb` on a Mac above 8 GiB now defaults to
+2048 MiB instead of MLX's own default, which reclaims freed buffers only near
+the memory limit. On a 256 GB M3 Ultra, GLM-4.5-Air (56 GB) at a 32K prompt
+through `msb-throughput` peaked at 212 GiB physical footprint with no cache
+bound. A reference runtime on the same cell with a 4 GB cache bound peaked at
+67.5 GB, at the same decode speed (26.6 vs 27.0 tok/s). Every command that
+loads a model outside `serve`, and serve's shard-stage path, applies serve's
+cache bound and memory limit through one shared selection.
 FR-CB17: prompt admission holds a row whose initial KV would take MLX past
 that limit while other rows run, and admits it once the scheduler is idle.
 FR-CB18: a native-MTP round's complete window must also fit under the limit;
@@ -828,12 +836,21 @@ Native runtime startup on Macs with at most 8 GiB physical RAM MUST default
 MLX's freed-buffer allocator cache to physical RAM divided by 32 (256 MiB on
 an 8 GiB Mac), before loading the model. Explicit `mlx_cache_limit_mb` values,
 including zero, override this default and MUST pass the existing range check.
-Larger-memory devices retain their existing default. This is a buffer-reuse
+**(v0.3.36)** Every other Mac, and a Mac whose RAM cannot be read, MUST
+default it to 2048 MiB, so serve never runs with MLX's cache unbounded. MLX's
+own default reclaims freed buffers only near its memory limit. On a 256 GB M3
+Ultra, a 56 GB model at a 32K prompt then peaked at 212 GiB physical
+footprint, while a 4 GB bound held the same cell to 67.5 GB at the same
+decode speed. This is a buffer-reuse
 budget, not an active weights/KV limit, a row-cap grant or permission to bypass
 the memory floor. It MUST NOT turn continuous batching off or raise signed
 admission ceilings. Native serve, self-test and benchmark loading MUST use
 the same selection; preloaded/test runtimes MUST NOT reset process allocator
-state.
+state. **(v0.3.36)** "Benchmark loading" covers every command that loads a
+model outside `serve` and serve's shard-stage path. Each MUST derive its cache
+bound for a given `mlx_cache_limit_mb` setting (unset included) from the same
+selection serve uses, including model-scoped caps, and MUST apply the memory
+limit below.
 
 **(v0.3.36) MLX memory limit.** Native serve, self-test and benchmark loading
 MUST set MLX's process memory limit before loading the model and again once it

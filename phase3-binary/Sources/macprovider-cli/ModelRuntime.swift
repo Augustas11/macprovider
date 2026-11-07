@@ -3310,19 +3310,26 @@ actor ModelRuntime: ModelRuntimeServing {
     /// unified memory, and small enough that the byte conversion cannot overflow.
     nonisolated static let maximumMLXCacheLimitMB = 1_048_576
 
+    /// The cache bound for Macs above 8 GiB when the config sets none: the
+    /// `mlx_cache_limit_mb: 2048` the lab and live serve configs already run.
+    nonisolated static let defaultMLXCacheLimitMB = 2048
+
     nonisolated static func isValidMLXCacheLimitMB(_ megabytes: Int) -> Bool {
         (0 ... maximumMLXCacheLimitMB).contains(megabytes)
     }
 
-    /// Freed-buffer reuse budget for the low-memory tier. Larger Macs retain
-    /// MLX's default until their workload has been qualified with a smaller cap.
-    /// Preserve explicit values (including zero) for normal startup validation.
+    /// Freed-buffer reuse budget when the config sets none: RAM / 32 on the
+    /// low-memory tier, `defaultMLXCacheLimitMB` on every other Mac (SPEC-038
+    /// FR-CB2 v0.3.36). MLX's own default only reclaims freed buffers near its
+    /// memory limit, so an unset cache kept tens of GB of them after long
+    /// prefills. Preserve explicit values (including zero) for normal startup
+    /// validation.
     nonisolated static func resolvedMLXCacheLimitMB(
         configured: Int?, physicalMemoryBytes: UInt64
     ) -> Int? {
         if let configured { return configured }
         guard physicalMemoryBytes > 0, physicalMemoryBytes <= 8 * 1024 * 1024 * 1024 else {
-            return nil
+            return defaultMLXCacheLimitMB
         }
         // Divide before converting: the result is at most 256 MiB.
         return Int(physicalMemoryBytes / (32 * 1024 * 1024))

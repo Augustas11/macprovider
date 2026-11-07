@@ -46,9 +46,9 @@ struct GLMParityCommand: AsyncParsableCommand {
 
     @Option(
         name: .customLong("mlx-cache-limit-mb"),
-        help: "MLX buffer-cache bound, as serve's mlx_cache_limit_mb. Long prefills otherwise keep tens of GB of freed buffers. Default 4096."
+        help: "MLX buffer-cache bound, as serve's mlx_cache_limit_mb. Long prefills otherwise keep tens of GB of freed buffers. Default: serve's default."
     )
-    var mlxCacheLimitMB: Int = 4096
+    var mlxCacheLimitMB: Int?
 
     @Option(help: "Full output path for the JSON result. Default: stdout only.")
     var output: String?
@@ -78,8 +78,12 @@ struct GLMParityCommand: AsyncParsableCommand {
 
     static func runParity(
         modelDir: String, oracle: [String], steps: Int, prefillStepSize: Int,
-        mlxCacheLimitMB: Int, output: String?, mode: Mode
+        mlxCacheLimitMB configuredCacheLimitMB: Int?, output: String?, mode: Mode
     ) async throws {
+        // Serve's selection for the same setting (SPEC-038 FR-CB2).
+        let mlxCacheLimitMB = ModelRuntime.resolvedMLXCacheLimitMB(
+            configured: configuredCacheLimitMB, physicalMemoryBytes: ProcessInfo.processInfo.physicalMemory
+        ) ?? ModelRuntime.defaultMLXCacheLimitMB
         let name = mode.name
         guard steps > 0, prefillStepSize > 0, !oracle.isEmpty,
               ModelRuntime.isValidMLXCacheLimitMB(mlxCacheLimitMB) else {
@@ -352,9 +356,9 @@ struct DSV4ParityCommand: AsyncParsableCommand {
 
     @Option(
         name: .customLong("mlx-cache-limit-mb"),
-        help: "MLX buffer-cache bound, as serve's mlx_cache_limit_mb. Default 4096."
+        help: "MLX buffer-cache bound, as serve's mlx_cache_limit_mb. Default: serve's default."
     )
-    var mlxCacheLimitMB: Int = 4096
+    var mlxCacheLimitMB: Int?
 
     @Option(help: "Full output path for the JSON result. Default: stdout only.")
     var output: String?
