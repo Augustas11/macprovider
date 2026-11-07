@@ -392,7 +392,7 @@ run_rc 3 "half-failed runner stop" env CANARY_RUNNER_STOP_CMD="echo stopped >> '
 #    retargets only the Pearl runner's Studio row. A missing artifact, a verify
 #    mismatch or a config missing a field changes nothing; a wait timeout
 #    restores nothing and says so.
-KEY=zai-org/glm-5.3-flash-abliterated
+KEY=deepseek/deepseek-v4-flash
 eval "$(python3 - "$REPO_ROOT/phase3-binary/dist/static/autotune-candidates.json" "$KEY" <<'PY'
 import hashlib, json, sys
 raw = open(sys.argv[1], "rb").read(); d = json.loads(raw); r = d["rows"][sys.argv[2]]
