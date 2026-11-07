@@ -5,12 +5,21 @@ import XCTest
 final class MLXMemoryBudgetTests: XCTestCase {
     private let gib = 1024 * 1024 * 1024
 
-    func testLimitIsFivePercentBelowWorkingSet() {
+    func testLimitIsTenPercentBelowWorkingSet() {
         // 96 GiB Mac with an 83.5 GB working set (exo-explore/exo#2523).
         let workingSet = 83_500_000_000
         let limit = MLXMemoryBudget.limitBytes(
             recommendedWorkingSetBytes: workingSet, physicalMemoryBytes: UInt64(96 * gib))
-        XCTAssertEqual(limit, workingSet - workingSet / 20)
+        XCTAssertEqual(limit, workingSet - workingSet / 10)
+    }
+
+    func testStudioLimitSitsAtTheObservedFaultSize() {
+        // 256 GB M3 Ultra: working set 239.14 GB; MLX's unset default is
+        // 261.1 GB. GLM-5.3-Flash serving peaks (182-198 GB) stay under it.
+        let limit = MLXMemoryBudget.limitBytes(
+            recommendedWorkingSetBytes: 239_140_000_000, physicalMemoryBytes: UInt64(256 * gib))!
+        XCTAssertEqual(limit, 215_226_000_000)
+        XCTAssertGreaterThan(limit, 198_000_000_000)
     }
 
     func testLimitNeverExceedsWorkingSetOrNinetyPercentOfRAM() {
@@ -31,15 +40,16 @@ final class MLXMemoryBudgetTests: XCTestCase {
     }
 
     func testRaisedWorkingSetIsCappedByTheR012FreeMemoryFloor() {
-        // An operator-raised wired limit can report a working set near RAM.
+        // With 10% headroom on both bounds, RAM binds only when the reported
+        // working set exceeds it (a raised wired limit or a misreport).
         let physical = 128 * gib
         let limit = MLXMemoryBudget.limitBytes(
-            recommendedWorkingSetBytes: 127 * gib, physicalMemoryBytes: UInt64(physical))
+            recommendedWorkingSetBytes: 140 * gib, physicalMemoryBytes: UInt64(physical))
         XCTAssertEqual(limit, physical - physical / 10)
     }
 
     func testSmallMacFloorKeepsAModelThatFitsTheWorkingSet() {
-        // 8 GiB Mac: a 5.2 GiB model sits above the 95% cap but inside the
+        // 8 GiB Mac: a 5.2 GiB model sits above the 90% cap but inside the
         // working set, so the limit rises to resident + 512 MiB.
         let workingSet = 5_726_623_744 // 5.33 GiB
         let resident = 5_583_457_484 // 5.2 GiB
@@ -48,7 +58,7 @@ final class MLXMemoryBudgetTests: XCTestCase {
         XCTAssertEqual(limit, workingSet)
         let smaller = MLXMemoryBudget.limitBytes(
             recommendedWorkingSetBytes: workingSet, physicalMemoryBytes: UInt64(8 * gib), residentBytes: 4 * gib)
-        XCTAssertEqual(smaller, workingSet - workingSet / 20)
+        XCTAssertEqual(smaller, workingSet - workingSet / 10)
     }
 
     func testNoWorkingSetKeepsMLXDefault() {
