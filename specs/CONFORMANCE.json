@@ -5745,9 +5745,10 @@
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingAdmissionHoldTests.swift:testLifecycleLeaseAndPauseSkipTheHold",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingAdmissionHoldTests.swift:testCheckBoundReopensAdmissionWithoutWaitingForTheCheck",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingAdmissionHoldTests.swift:testPauseLeaseOrTargetChangeDuringTheCheckEndsTheHold",
-        "phase3-binary/Tests/macprovider-cliTests/InferenceRelayTests.swift:testSelfCheckAdmissionHoldAdmitsTheRelayRequestAndAsksTheHoldToYield",
-        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingAdmissionHoldTests.swift:testBuyerArrivingDuringTheCheckIsAdmittedAndTheHoldYields",
-        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingAdmissionHoldTests.swift:testBuyerArrivingDuringTheDrainIsAdmittedAndTheCheckNeverRuns"
+        "phase3-binary/Tests/macprovider-cliTests/InferenceRelayTests.swift:testSelfCheckAdmissionHoldAdmitsTheRelayRequest",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingAdmissionHoldTests.swift:testBuyerArrivingDuringAShortCheckWaitsAndTheCheckCompletes",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingAdmissionHoldTests.swift:testBuyerWaitingPastTheBoundYieldsTheHoldAndIsServed",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingAdmissionHoldTests.swift:testBuyerArrivingDuringTheDrainIsAdmittedAndDoesNotBlockTheCheck"
       ],
       "journeys": [],
       "evidence": [],

@@ -893,7 +893,7 @@ final class LocalRequestPriorityTests: XCTestCase {
     }
 
     /// #2257 (SPEC-038 v0.3.36): a buyer HTTP request during the hold is
-    /// served and asks the hold to yield; local use keeps its retryable refusal.
+    /// served; local use keeps its retryable refusal.
     func testSelfCheckHoldServesHTTPBuyersAndRefusesLocalWithRetryAfter() async throws {
         let probe = SlotProbe()
         let runtime = SlotFixtureRuntime(slots: 1, shape: .serial, probe: probe)
@@ -923,8 +923,6 @@ final class LocalRequestPriorityTests: XCTestCase {
         }
         XCTAssertTrue(probe.entered("held-buyer"), "the buyer reached inference under the hold")
         XCTAssertFalse(probe.entered("held-local"), "no local request reaches inference under the hold")
-        let arrived = await status.selfCheckAdmissionHoldBuyerArrived()
-        XCTAssertTrue(arrived, "the buyer asks the hold to yield")
         let snapshot = await status.snapshot(resetWindow: true)
         XCTAssertEqual(snapshot.requestsTotal, 2)
         XCTAssertEqual(snapshot.errorsTotal, 0)

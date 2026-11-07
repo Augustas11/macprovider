@@ -122,8 +122,8 @@ final class InferenceRelayTests: XCTestCase {
     /// admission hold is refused with the status the coordinator re-routes,
     /// before it reaches the runtime; admission re-opens when the hold ends.
     /// #2257 (SPEC-038 v0.3.36): a relay request during the hold is served,
-    /// not refused with `error_queue_full`, and asks the hold to yield.
-    func testSelfCheckAdmissionHoldAdmitsTheRelayRequestAndAsksTheHoldToYield() async throws {
+    /// not refused with `error_queue_full`.
+    func testSelfCheckAdmissionHoldAdmitsTheRelayRequest() async throws {
         let status = ProviderStatus(
             modelID: "mlx-community/Test-Model",
             modelLoaded: true,
@@ -151,8 +151,8 @@ final class InferenceRelayTests: XCTestCase {
         }
         let frames = await recorder.frames
         XCTAssertFalse(frames.contains { $0["status"] as? String == "error_queue_full" })
-        let arrived = await status.selfCheckAdmissionHoldBuyerArrived()
-        XCTAssertTrue(arrived, "the arrival asks the hold to yield")
+        let arrived = await status.selfCheckAdmissionHoldArrivalsInFlight()
+        XCTAssertEqual(arrived, 1, "the relay request counts as a hold arrival")
 
         await status.endSelfCheckAdmissionHold(outcome: "yielded")
         try await relay.handleCancelRequest(["type": "cancel_request", "request_id": "req-held", "reason": "test_cleanup"])
