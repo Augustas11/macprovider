@@ -703,6 +703,9 @@ final class NativeMTPHardwareE2ERunner {
         if family.holdsResidentWeights {
             try require(residentWeights != nil, "\(family.modelFamily) target could not start its resident-weights ticket")
         }
+        // SPEC-038 FR-CB2 (v0.3.36): the same MLX memory limit serve applies.
+        MLXMemoryLimit.apply(
+            stage: "model_loaded", kvBytesPerToken: MLXMemoryLimit.kvBytesPerToken(modelDirectory: targetDirectory))
         let maximumBlockSize = await drafterContainer.perform { context in
             context.model.maximumBlockSize
         }
