@@ -17,6 +17,9 @@ let package = Package(
         )
     ],
     dependencies: [
+        // Tag 3.32.3-macprovider.27 (#2189) on 3.32.3-macprovider.25: MiniMax
+        // M3.1-Flash decode fusions (#2189) and GLM-5-Next Hugging Face
+        // quantization keys (#2244).
         // Tag 3.32.3-macprovider.25 (#2198, #2189) on 3.32.3-macprovider.24:
         // .23's GLM-5.3 MTP head prefill over the last 4096 prompt columns
         // (`da8f193`, from `93234b6`) on top of .24's MiniMax M3 work.
@@ -68,7 +71,7 @@ let package = Package(
         // compatible per-column attention while retaining row-owned caches.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "da8f1932f8e2a46477a1a35663955267bc6fcd04"
+            revision: "73df016afa74563653701697f4e16b31a967808a"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",
