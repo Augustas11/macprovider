@@ -1,11 +1,28 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.35
+Version: v0.3.36
 Status: draft (normative contract; runtime enablement is default-on per Mac behind the FR-CB10 on-device self-check, v0.3.15)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.3.36 (2026-11-07, FR-CB2 prefill order, Related: #2253):**
+FR-CB2: the prompt row with the fewest prompt tokens left leads each prefill
+turn; ties keep the round-robin turn order. A row passed over while it stood
+ahead of the head in that order is charged one bypass turn, and after 8 it
+leads, with other such rows in turn order, until its prompt is done. The idle
+cohort turn (no row decoding) may still take more than the per-iteration
+budget, but only for rows with as many prompt tokens left as the head.
+Mixed-length rows arriving together therefore no longer hold the shortest
+row's first token behind the longer rows' chunks: on GLM-5.3-Flash msb03
+(512/1,024/1,536/2,048), CLI 1.8.281, the 512-token row's TTFT p95 was
+5.99 s against 1.60 s serial (3.8x; gate 2.0x), because its first token
+waited for all four rows' first chunks. Equal-length rows arriving together
+are unchanged: same order, same cohort forwards. Chunk partitions, kernel
+routes, budgets and admission (FR-CB1) are unchanged. The change sits in the
+decode-path manifest (`ContinuousBatchScheduler.swift`), so the decode-path
+digest changes (SPEC-048 R013).
+
 **Change log v0.3.35 (2026-11-05, MiniMax M3 serial prefill stride, Related: #2189):**
 FR-CB2: a `minimax_m3` row (`pagedIndexedKV`) prefills in the serial path's
 stride, chunks of exactly the prompt chunk limit from its cursor, instead of
@@ -874,11 +891,31 @@ each selected row once at turn end, preserving FCFS order. A fixed
 reference-plan backend is unchanged. The scheduler MUST preserve
 FCFS fairness across admitted prompt work: older rows are not bypassed by newer
 compatible rows except when the older row is incompatible with the current
-backend prefill group, cannot be funded by the paged pool, is cancelled, or is
+backend prefill group, cannot be funded by the paged pool, is cancelled, is
+passed over by the prefill order below, or is
 otherwise in a reason-coded fallback/rejection state. A row that cannot join
 one compatible prefill group MUST continue to make progress through a later
 compatible group, a safe serial prefill path, or a client-visible
 backpressure/rejection outcome; starvation is non-conformant.
+
+**(v0.3.36) Prefill order.** Each prefill turn MUST offer the admitted prompt
+rows to group selection in this order: first every aged row, in round-robin
+turn order; then the other rows by fewest prompt tokens left (prompt length
+minus committed prefill cursor), ties in round-robin turn order. The first row
+offered is the group head. A row that stands ahead of the head in round-robin
+turn order and is not selected for the turn MUST be charged one bypass turn;
+a row with 8 bypass turns (`ContinuousBatchPrefillOrder.maxBypassTurns`) is
+aged and MUST stay aged until its prompt is done. An aged row is never charged
+again, so no row is passed over more than 8 times, and an aged row progresses
+at least as fast as round-robin order would let it. When no row decodes, a
+turn MAY take more prompt tokens than the configured per-iteration budget (up
+to `maxPrefillRowsPerIteration` chunks), but a peer whose chunk takes the
+group past the configured budget MUST join only when it has exactly as many
+prompt tokens left as the head: rows that finish together share the turn, and
+no head's first token waits for a peer that cannot finish with it. Chunk
+lengths, partitions, the kernel-route rule, the key-spread cap and the
+native-MTP grouping rules are unchanged; the order decides only which row
+leads and which compatible peers are considered first.
 
 **Per-row chunk limit (v0.3.28).** On the serve path the per-row chunk limit
 is the backend family's prompt chunk ceiling: 2048 tokens for a `glm5_next`
@@ -2383,7 +2420,13 @@ hardware-capability run or a static-review obligation. Every
   target cache and output with its ordinary target baseline, and compare the
   native drafter seed with the standalone hidden-state definition. A
   capacity-downgraded native row MUST retain ordinary depth-zero parity and
-  issue no speculative verification until the gate permits it. Scheduler
+  issue no speculative verification until the gate permits it. (v0.3.36)
+  Scheduler fixtures MUST prove the prefill order: mixed-length rows arriving
+  together prefill shortest first and the shortest alone; equal rows arriving
+  together keep one cohort forward per turn; a row passed over by a stream of
+  shorter rows leads after at most 8 bypass turns and no row is charged more
+  than 8; and the idle cohort turn admits past the configured budget only rows
+  with as many prompt tokens left as the head. Scheduler
   fixtures MUST preserve staggered-arrival FCFS and balanced chunk lengths;
   capability fixtures MUST reject default and non-Qwen adapter cases while
   preserving GLM's serial-cohort behavior.
