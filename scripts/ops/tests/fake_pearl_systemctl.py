@@ -11,10 +11,14 @@ pearl/coordinator.yaml and pearl/overlay.yaml, bin/fake-coordinator.
                                    the config's latest_binary_version; the
                                    config becomes svc/running.yaml
   stop U / start U                 append the action to svc/unit-actions
-  kill --kill-who=main -s HUP U    SIGHUP: append to svc/hups; the buyer-UX conformance
-                                   record file the config names becomes svc/buc_sha
-                                   (unless svc/hup_noop, or svc/buc_legacy: that runtime
-                                   reads the file only at start); svc/hup_bumps_pid
+  kill --kill-who=main -s HUP U    SIGHUP: append to svc/hups. Unless svc/hup_noop or
+                                   svc/buc_legacy, copy the on-disk config to
+                                   svc/running.yaml, refresh /healthz
+                                   recommended_binary_version, append a sighup
+                                   coordinator_config_applied line to boot.txt
+                                   (same pid), and load the buyer-UX record the
+                                   config names into svc/buc_sha. svc/hup_fail
+                                   makes the signal fail. svc/hup_bumps_pid
                                    also gives the unit a new main pid
   restart U also loads that file: svc/buc_sha, or with svc/buc_legacy an
   "unreadable" journal line when the configured file does not load.
@@ -82,6 +86,21 @@ def mkgwproc(p):
 
 def digest(path):
     return hashlib.sha256(open(path, "rb").read()).hexdigest()
+
+
+def apply_sighup_config():
+    """A successful SIGHUP applies the on-disk files without a new pid."""
+    open(os.path.join(svc, "running.yaml"), "w").write(open(cfg).read())
+    latest = re.search(r'^\s*latest_binary_version:\s*"?([0-9.]+)"?\s*$', open(cfg).read(), re.M)
+    health_path = os.path.join(svc, "healthz.json")
+    health = json.load(open(health_path)) if os.path.exists(health_path) else {"status": "ok"}
+    if latest:
+        health["recommended_binary_version"] = latest.group(1)
+    json.dump(health, open(health_path, "w"))
+    with open(os.path.join(svc, "boot.txt"), "a") as journal:
+        journal.write(json.dumps({
+            "config_sha256": digest(cfg), "overlay_sha256": digest(ov),
+            "source": "sighup", "event": "coordinator_config_applied"}) + "\n")
 
 
 def compute_scoring_events():
@@ -233,14 +252,17 @@ elif args[:1] == ["restart"]:
         health["recommended_binary_version"] = m.group(1)
     json.dump(health, open(h, "w"))
 elif args[:1] == ["kill"] and "HUP" in args:
+    if os.path.exists(os.path.join(svc, "hup_fail")):
+        sys.exit(1)
     with open(os.path.join(svc, "hups"), "a") as f:
         f.write("hup\n")
+    if os.path.exists(os.path.join(svc, "hup_bumps_pid")):
+        mkproc(pid() + 1)
     if not os.path.exists(os.path.join(svc, "hup_noop")) and not os.path.exists(os.path.join(svc, "buc_legacy")):
         configured, buc = buyer_ux_conformance()
         if configured and buc is not None:
             open(os.path.join(svc, "buc_sha"), "w").write(buc)
-    if os.path.exists(os.path.join(svc, "hup_bumps_pid")):
-        mkproc(pid() + 1)
+        apply_sighup_config()
 elif args[:1] in (["stop"], ["start"]):
     with open(os.path.join(svc, "unit-actions"), "a") as f:
         f.write(args[0] + "\n")

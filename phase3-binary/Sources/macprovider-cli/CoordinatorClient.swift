@@ -681,6 +681,9 @@ actor CoordinatorClient {
     /// SPEC-020-R007: set only for an accepted session whose ack revoked this
     /// exact build; cleared with the recommendation on every session change.
     private var coordinatorRevocationNotice: CoordinatorRevocationNotice?
+    /// One successful `/healthz` fill for a non-revoked update-only session.
+    /// A failed fetch leaves this false so the next poll retries once.
+    private var updateOnlyHealthzRead = false
     /// SPEC-020-R007: retries the recommendation of a held revoked session once
     /// its per-target cooldown expires; cancelled on every session change.
     private var revokedSessionRetryTask: Task<Void, Never>?
@@ -1299,6 +1302,7 @@ actor CoordinatorClient {
         autoupdateDisabledForSessionReason = nil
         recommendedCompatibilitySetID = nil
         coordinatorRevocationNotice = nil
+        updateOnlyHealthzRead = false
         revokedSessionRetryTask?.cancel()
         revokedSessionRetryTask = nil
         currentCoordinatorRecommendation = nil
@@ -2781,6 +2785,7 @@ actor CoordinatorClient {
         autoupdateDemotionReason = "coordinator_disconnected"
         recommendedCompatibilitySetID = nil
         coordinatorRevocationNotice = nil
+        updateOnlyHealthzRead = false
         revokedSessionRetryTask?.cancel()
         revokedSessionRetryTask = nil
         currentCoordinatorRecommendation = nil
@@ -2908,6 +2913,11 @@ actor CoordinatorClient {
             try await handleNativeMTPCanaryRequest(dict)
         case "native_mtp_tuple_disable_v1":
             try await handleNativeMTPTupleDisable(dict)
+        case "compatibility_policy_v1":
+            // Not acceptCoordinatorSession: a second hello_ack would clear v2
+            // autoupdate trust. A malformed frame is NAK'd here and must not
+            // throw, because a throw tears down the receive loop.
+            await handleCompatibilityPolicy(dict)
         case ComputeScoreProtocol.requestType:
             try await handleComputeScoreRequest(dict)
         case let shardType where ShardGroupWire.inboundTypes.contains(shardType):
@@ -4701,6 +4711,173 @@ actor CoordinatorClient {
         }
     }
 
+    /// SPEC-002-R004: a successful compatibility reload on the open socket.
+    /// This does not accept the session again and does not touch autoupdate
+    /// trust. An unknown field or a malformed value is a NAK; a frame for a
+    /// different set is ignored. Neither throws.
+    private func handleCompatibilityPolicy(_ payload: [String: Any]) async {
+        do {
+            try Self.rejectUnknownFields(payload, allowed: [
+                "type",
+                "compatibility_policy",
+                "accepted_compatibility_set_id",
+                "recommended_compatibility_set_id",
+                "compatibility_set_revoked",
+                "recommended_binary_version",
+            ])
+        } catch {
+            try? await sendNAK(
+                inReplyTo: "compatibility_policy_v1",
+                code: "invalid_message",
+                message: "unrecognized compatibility policy field"
+            )
+            return
+        }
+        guard coordinatorSessionAccepted,
+              let installed = compatibilitySetID,
+              payload["accepted_compatibility_set_id"] as? String == installed
+        else {
+            return
+        }
+        guard payload["compatibility_policy"] as? String == "configured",
+              let recommended = payload["recommended_compatibility_set_id"] as? String,
+              CompatibilitySetManifest.isCanonicalCompatibilitySetID(recommended),
+              let version = payload["recommended_binary_version"] as? String,
+              !version.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            try? await sendNAK(
+                inReplyTo: "compatibility_policy_v1",
+                code: "invalid_message",
+                message: "malformed compatibility policy"
+            )
+            return
+        }
+        let revoked: Bool
+        switch payload["compatibility_set_revoked"] {
+        case nil:
+            revoked = false
+        case let flag as NSNumber where CFGetTypeID(flag) == CFBooleanGetTypeID():
+            revoked = flag.boolValue
+        default:
+            try? await sendNAK(
+                inReplyTo: "compatibility_policy_v1",
+                code: "invalid_message",
+                message: "malformed compatibility_set_revoked"
+            )
+            return
+        }
+        await applyLiveCompatibilityRecommendation(
+            recommendedSetID: recommended,
+            revoked: revoked,
+            version: version
+        )
+    }
+
+    /// Write the live recommendation and report whether the tuple changed.
+    /// The stores run before any await, so a caller that has just checked
+    /// `coordinatorRevocationNotice` cannot lose that check to another frame.
+    private func storeLiveCompatibilityRecommendation(
+        recommendedSetID: String,
+        revoked: Bool,
+        version: String
+    ) -> Bool {
+        guard coordinatorSessionAccepted, let installed = compatibilitySetID else { return false }
+        let previousRecommended = recommendedCompatibilitySetID
+        let previousRevoked = coordinatorRevocationNotice != nil
+        let previousVersion = autoupdateCoordinatorPayload["recommended_binary_version"] as? String
+        recommendedCompatibilitySetID = recommendedSetID
+        if revoked {
+            coordinatorRevocationNotice = CoordinatorRevocationNotice(
+                revokedCompatibilitySetID: installed,
+                recommendedCompatibilitySetID: recommendedSetID
+            )
+        } else {
+            coordinatorRevocationNotice = nil
+        }
+        autoupdateCoordinatorPayload["recommended_binary_version"] = version
+        guard previousRecommended != recommendedSetID || previousRevoked != revoked || previousVersion != version else {
+            return false
+        }
+        coordinatorRecommendationGeneration &+= 1
+        return true
+    }
+
+    /// Write the live recommendation. Bump the generation and start an update
+    /// only when the recommended set, the revocation, or the version changed.
+    /// The revocation notice is set before the updater runs, so a downgrade of
+    /// an older target is eligible on this call.
+    private func applyLiveCompatibilityRecommendation(
+        recommendedSetID: String,
+        revoked: Bool,
+        version: String
+    ) async {
+        guard storeLiveCompatibilityRecommendation(
+            recommendedSetID: recommendedSetID,
+            revoked: revoked,
+            version: version
+        ), let installed = compatibilitySetID else { return }
+        await providerStatus.setCoordinatorSession(connected: true, recommendedBinaryVersion: version)
+        do {
+            try autoupdateMarkerStore.persistCompatibilityAdmission(
+                acceptedCompatibilitySetID: installed,
+                recommendedCompatibilitySetID: recommendedSetID
+            )
+        } catch {
+            // The live fields already moved. A marker miss must not drop the socket.
+        }
+        await runAutoupdateIfEligible(version)
+    }
+
+    /// The policy frame was missed. `/healthz` carries the same recommendation
+    /// the frame would have, without a credential. Returns true once a read
+    /// succeeded or the session already has a revocation notice, so the watch
+    /// does not poll for the life of the socket. A failed read returns false.
+    private func noteUpdateOnlyReadinessFromHealthz() async -> Bool {
+        guard let installed = compatibilitySetID,
+              let url = DoctorRunner.healthzURL(coordinatorURL: coordinatorURL.absoluteString)
+        else {
+            return true
+        }
+        if coordinatorRevocationNotice != nil {
+            return true
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 2
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              let http = response as? HTTPURLResponse,
+              http.url == url,
+              (200 ..< 300).contains(http.statusCode),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let version = object["recommended_binary_version"] as? String,
+              !version.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let target = object["compatibility_policy_target_id"] as? String,
+              CompatibilitySetManifest.isCanonicalCompatibilitySetID(target)
+        else {
+            return false
+        }
+        // The GET is an await. A frame that landed during it owns the notice.
+        // This check and the stores below stay on this turn, with no await
+        // between them, so the health body cannot clear that notice.
+        guard coordinatorRevocationNotice == nil else { return true }
+        let revokedIDs = object["compatibility_policy_revoked_ids"] as? [String] ?? []
+        guard storeLiveCompatibilityRecommendation(
+            recommendedSetID: target,
+            revoked: revokedIDs.contains(installed),
+            version: version
+        ), let accepted = compatibilitySetID else { return true }
+        await providerStatus.setCoordinatorSession(connected: true, recommendedBinaryVersion: version)
+        do {
+            try autoupdateMarkerStore.persistCompatibilityAdmission(
+                acceptedCompatibilitySetID: accepted,
+                recommendedCompatibilitySetID: target
+            )
+        } catch {}
+        await runAutoupdateIfEligible(version)
+        return true
+    }
+
     private func acceptCoordinatorSession(_ payload: [String: Any], reason: String) async throws {
         let compatibilityAdmission: (accepted: String, recommended: String, revoked: Bool)?
         do {
@@ -4832,6 +5009,7 @@ actor CoordinatorClient {
             return
         }
         var buyerServingHeldForAdmission = false
+        var skipAcceptTimeAutoupdate = false
         if lifecycleOperationID != nil, coordinatorRevocationNotice != nil {
             // SPEC-020-R007 / SPEC-002-R004: the coordinator admitted this exact
             // build as revoked, an update-only session it never routes. The
@@ -4900,6 +5078,30 @@ actor CoordinatorClient {
             switch await waitForCoordinatorServingCapabilityOutcome() {
             case .confirmed:
                 break
+            case .updateOnly:
+                // Stay open. A fresh below-floor admission has no revocation
+                // notice and the ack is still the payload, so the updater
+                // below must run: there is no reload frame on this connect.
+                // Skip only when exact revocation, or a frame, already stored
+                // a different recommendation during this accept.
+                buyerServingHeldForAdmission = true
+                let ackVersion = payload["recommended_binary_version"] as? String
+                let liveVersion = autoupdateCoordinatorPayload["recommended_binary_version"] as? String
+                if coordinatorRevocationNotice != nil || liveVersion != ackVersion {
+                    skipAcceptTimeAutoupdate = true
+                }
+                print("Coordinator session accepted update-only: this build is no longer buyer-routable")
+                do {
+                    _ = try recordLifecycleTransition(
+                        to: .locallyReadyConnecting,
+                        reasonCode: Self.revokedUpdateOnlyLifecycleReasonCode,
+                        compatibilitySetID: installedCompatibilitySetID()
+                    )
+                } catch {}
+                await finalizeAdmissionBoundaryAfterServingProof(
+                    successReason: "revoked_update_only_session_held",
+                    servingConfirmed: false
+                )
             case .held(let hold):
                 // SPEC-047-R003(iv): `settlement_capable` is granted only
                 // while THIS live session is bound and hash-verified, and
@@ -4947,10 +5149,16 @@ actor CoordinatorClient {
         // A session that connected before any offer (ordinary catalog
         // readiness) still has to enter the hold when an offer later
         // flips buyer_serving to false. The watch is cheap HTTP.
-        // A revoked update-only session is never buyer-serving; the watch
-        // would close it as an unrecognized not-serving verdict (SPEC-020-R007).
+        // A revoked update-only session is never buyer-serving. The watch
+        // stays up when the notice is not set yet: an omitted buyer_serving
+        // is .updateOnly, and that poll reads /healthz if the policy frame
+        // was missed. A bare not-serving false still reconnects only when
+        // this session has no revocation notice (SPEC-020-R007, SPEC-002-R004).
         if coordinatorRevocationNotice == nil {
             startAdmissionPendingReadinessWatch()
+        }
+        if skipAcceptTimeAutoupdate {
+            return
         }
         if let recommended = payload["recommended_binary_version"] as? String {
             let trust = currentAutoupdateTrustState()
@@ -5707,6 +5915,9 @@ actor CoordinatorClient {
     private enum ServingCapabilityOutcome: Equatable {
         case confirmed
         case unconfirmed
+        /// Exact revocation during accept. The socket stays up. The ack's
+        /// recommendation is stale, so accept does not start an update.
+        case updateOnly
         /// The coordinator holds buyer serving for a closed reason
         /// (`buyer_serving_hold`: a pending BYOM admission, or missing
         /// network catalog material). Authoritative and cleared only by the
@@ -5776,6 +5987,8 @@ actor CoordinatorClient {
             switch await coordinatorReadiness(providerID, assignedProviderID, expected) {
             case .confirmed:
                 return .confirmed
+            case .updateOnly:
+                return .updateOnly
             case .notServing(hold: .some(let hold)):
                 return .held(hold)
             case .notServing(hold: nil), .indeterminate:
@@ -5864,7 +6077,17 @@ actor CoordinatorClient {
             return false
         case .indeterminate:
             return false
+        case .updateOnly:
+            if coordinatorRevocationNotice == nil && !updateOnlyHealthzRead {
+                if await noteUpdateOnlyReadinessFromHealthz() {
+                    updateOnlyHealthzRead = true
+                }
+            }
+            return false
         case .notServing(hold: nil):
+            if coordinatorRevocationNotice != nil {
+                return false
+            }
             activeBuyerServingHold = nil
             _ = try? recordLifecycleTransition(
                 to: .locallyReadyConnecting,

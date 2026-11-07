@@ -2174,6 +2174,7 @@ func TestReloadCoordinatorConfigRejectsUnsafeCompatibilityBeforeOtherReloadState
 	defer tier2.ResetForTest()
 	statePath := useAppliedConfigStatePath(t)
 	startup := config.Default()
+	startup.CoordinatorAdvertisedVersion.LatestBinaryVersion = "1.8.12"
 	startup.Coordinator.CompatibilitySet = config.CompatibilitySetConfig{
 		TargetID: "Augustas11/macprovider:v1.8.12@dddddddddddddddddddddddddddddddddddddddd",
 	}
@@ -2207,6 +2208,7 @@ func TestReloadCoordinatorConfigRejectsUnsafeCompatibilityBeforeOtherReloadState
 
 	next := startup
 	next.Tier2.ObserveEnabled = true
+	next.CoordinatorAdvertisedVersion.LatestBinaryVersion = "1.8.20"
 	// A repository change would reject the connected provider: refused.
 	next.Coordinator.CompatibilitySet = config.CompatibilitySetConfig{
 		TargetID: "Augustas11/other:v1.8.13@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -2220,6 +2222,9 @@ func TestReloadCoordinatorConfigRejectsUnsafeCompatibilityBeforeOtherReloadState
 	afterHealth := fetchReloadCompatibilityHealth(t, server.URL)
 	if !reflect.DeepEqual(afterHealth, beforeHealth) {
 		t.Fatalf("rejected compatibility reload changed health policy: before=%+v after=%+v", beforeHealth, afterHealth)
+	}
+	if afterHealth.RecommendedBinaryVersion != "1.8.12" {
+		t.Fatalf("rejected reload changed recommended_binary_version to %q", afterHealth.RecommendedBinaryVersion)
 	}
 	afterTier2 := fetchReloadTier2Metadata(t, buyerServer)
 	if afterTier2 != beforeTier2 || afterTier2.ModelHash.Active {
@@ -2240,6 +2245,7 @@ func TestReloadCoordinatorConfigRejectsUnsafeCompatibilityBeforeOtherReloadState
 func TestReloadCoordinatorConfigAppliesCompatibilityPolicyAndRejectsInvalid(t *testing.T) {
 	defer tier2.ResetForTest()
 	startup := config.Default()
+	startup.CoordinatorAdvertisedVersion.LatestBinaryVersion = "1.8.12"
 	startup.Coordinator.CompatibilitySet = config.CompatibilitySetConfig{
 		TargetID:    "Augustas11/macprovider:v1.8.12@dddddddddddddddddddddddddddddddddddddddd",
 		AcceptedIDs: []string{"Augustas11/macprovider:v1.8.12@dddddddddddddddddddddddddddddddddddddddd", "Augustas11/macprovider:v1.8.10@eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"},
@@ -2262,25 +2268,29 @@ func TestReloadCoordinatorConfigAppliesCompatibilityPolicyAndRejectsInvalid(t *t
 	defer server.Close()
 
 	next := startup
+	next.CoordinatorAdvertisedVersion.LatestBinaryVersion = "1.8.20"
 	next.Coordinator.CompatibilitySet = config.CompatibilitySetConfig{
 		TargetID:   "Augustas11/macprovider:v1.8.4@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		RevokedIDs: []string{"Augustas11/macprovider:v1.8.12@dddddddddddddddddddddddddddddddddddddddd"},
 	}
 	reloadCoordinatorConfig(writeReloadConfig(t, next), "", startup.Tier2, zerolog.Nop(), wsServer, buyerServer, nil, nil, nil)
-	if provider, ok := registry.Resolve("provider-a", "session-a"); !ok || provider.State != pool.StateUnavailable || provider.RoutingEligible() {
-		t.Fatalf("revoked compatibility session not fenced after reload: ok=%v provider=%+v", ok, provider)
+	provider, ok := registry.Resolve("provider-a", "session-a")
+	if !ok || provider.State != pool.StateReady || provider.CatalogAdmissionMode != "update_bridge" || provider.RoutingEligible() || provider.ServingCapable() {
+		t.Fatalf("revoked compatibility session should stay connected update-only: ok=%v provider=%+v", ok, provider)
 	}
 	health := fetchReloadCompatibilityHealth(t, server.URL)
-	if health.CompatibilityPolicyMode != "repository" || len(health.CompatibilityPolicyRevokedIDs) != 1 {
+	if health.CompatibilityPolicyMode != "repository" || len(health.CompatibilityPolicyRevokedIDs) != 1 || health.RecommendedBinaryVersion != "1.8.20" {
 		t.Fatalf("valid reload healthz compatibility policy = %+v", health)
 	}
 
 	invalid := next
+	invalid.CoordinatorAdvertisedVersion.LatestBinaryVersion = "1.8.21"
 	invalid.Coordinator.CompatibilitySet.RevokedIDs = []string{"Augustas11/macprovider:v1.8=bad"}
 	reloadCoordinatorConfig(writeReloadConfig(t, invalid), "", startup.Tier2, zerolog.Nop(), wsServer, buyerServer, nil, nil, nil)
 	after := fetchReloadCompatibilityHealth(t, server.URL)
 	if after.CompatibilityPolicyMode != health.CompatibilityPolicyMode ||
 		after.CompatibilityPolicyTargetID != health.CompatibilityPolicyTargetID ||
+		after.RecommendedBinaryVersion != health.RecommendedBinaryVersion ||
 		!reflect.DeepEqual(after.CompatibilityPolicyRevokedIDs, health.CompatibilityPolicyRevokedIDs) {
 		t.Fatalf("rejected reload changed compatibility health: before=%+v after=%+v", health, after)
 	}
@@ -2290,6 +2300,7 @@ func fetchReloadCompatibilityHealth(t *testing.T, baseURL string) struct {
 	CompatibilityPolicyMode       string   `json:"compatibility_policy_mode"`
 	CompatibilityPolicyTargetID   string   `json:"compatibility_policy_target_id"`
 	CompatibilityPolicyRevokedIDs []string `json:"compatibility_policy_revoked_ids"`
+	RecommendedBinaryVersion      string   `json:"recommended_binary_version"`
 } {
 	t.Helper()
 	resp, err := http.Get(baseURL + "/healthz")
@@ -2301,6 +2312,7 @@ func fetchReloadCompatibilityHealth(t *testing.T, baseURL string) struct {
 		CompatibilityPolicyMode       string   `json:"compatibility_policy_mode"`
 		CompatibilityPolicyTargetID   string   `json:"compatibility_policy_target_id"`
 		CompatibilityPolicyRevokedIDs []string `json:"compatibility_policy_revoked_ids"`
+		RecommendedBinaryVersion      string   `json:"recommended_binary_version"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		t.Fatalf("decode healthz: %v", err)

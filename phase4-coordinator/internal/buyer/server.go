@@ -1864,25 +1864,33 @@ func (s *Server) handlePoolCheck(w http.ResponseWriter, r *http.Request) {
 		State:      state,
 	}
 	if includeDeploymentEvidence || includeReadinessEvidence {
-		buyerServing, catalogMaterialOnly := s.providerBuyerServingVerdict(p)
-		if catalogMaterialOnly && includeReadinessEvidence && !p.CatalogMaterialHoldV1 {
-			// SPEC-022-R002 R-2.7 compatibility exception: a CLI that did not
-			// advertise catalog_material_hold_v1 drops an unknown hold and
-			// treats a bare false as a websocket reconnect, so it would
-			// reconnect on every poll without ever becoming routable. It keeps
-			// the pre-R-2.7 verdict; routing still excludes the session.
-			// Retire this branch (with the SPEC-022 R-2.7 paragraph) once the
-			// SPEC-020 fleet floor advertises catalog_material_hold_v1.
-			buyerServing = true
-		}
-		response.BuyerServing = &buyerServing
-		if !buyerServing && includeReadinessEvidence {
-			if catalogMaterialOnly {
-				response.BuyerServingHold = buyerServingHoldCatalogMaterialMissing
-			} else {
-				holdCtx, cancel := context.WithTimeout(r.Context(), requestLogWriteTimeout)
-				response.BuyerServingHold = s.byomBuyerServingHold(holdCtx, p)
-				cancel()
+		// SPEC-002-R004: an exact revocation is update-only and not
+		// buyer-routable. The shipped CLI treats buyer_serving=false with no
+		// hold it knows as a websocket reconnect, which would drop the socket
+		// this reload keeps open. Omitting the field is the indeterminate
+		// verdict that CLI already leaves connected. RoutingEligible stays
+		// false because ServingCapable is false for update_bridge.
+		if p.CatalogAdmissionMode != "update_bridge" {
+			buyerServing, catalogMaterialOnly := s.providerBuyerServingVerdict(p)
+			if catalogMaterialOnly && includeReadinessEvidence && !p.CatalogMaterialHoldV1 {
+				// SPEC-022-R002 R-2.7 compatibility exception: a CLI that did not
+				// advertise catalog_material_hold_v1 drops an unknown hold and
+				// treats a bare false as a websocket reconnect, so it would
+				// reconnect on every poll without ever becoming routable. It keeps
+				// the pre-R-2.7 verdict; routing still excludes the session.
+				// Retire this branch (with the SPEC-022 R-2.7 paragraph) once the
+				// SPEC-020 fleet floor advertises catalog_material_hold_v1.
+				buyerServing = true
+			}
+			response.BuyerServing = &buyerServing
+			if !buyerServing && includeReadinessEvidence {
+				if catalogMaterialOnly {
+					response.BuyerServingHold = buyerServingHoldCatalogMaterialMissing
+				} else {
+					holdCtx, cancel := context.WithTimeout(r.Context(), requestLogWriteTimeout)
+					response.BuyerServingHold = s.byomBuyerServingHold(holdCtx, p)
+					cancel()
+				}
 			}
 		}
 		response.CatalogAdmissionMode = p.CatalogAdmissionMode

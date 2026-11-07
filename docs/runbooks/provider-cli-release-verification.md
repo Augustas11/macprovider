@@ -26,7 +26,7 @@ scripts/legacy-compatibility-revocations.py generate --below 1.8.207` (each id
 is the release's signed `compatibility_set_id`, cross-checked against the
 tag's commit) and checked offline by `... check`. After the
 repository-admission runtime ships, `cli-release.sh` step `revocation_seed`
-(`next --run`: `_revoke-seed`, one restart) adds any missing seed id to Pearl's
+(`next --run`: `_revoke-seed`, one SIGHUP) adds any missing seed id to Pearl's
 `revoked_ids` and is done when `/healthz` lists them all. Those releases stay
 connected update-only and auto-update. A seed id that is the current target
 cannot be revoked, so it is deferred (the step is done with a note) and the
@@ -47,13 +47,15 @@ release). It prints the expected downtime first, holds
 the live-ops lock and both Pearl locks, edits `coordinator.yaml` in place with
 an anchored transform, backs it up under `/root/macprovider-backups`,
 validates the new file with the running coordinator's binary, user and exact
-environment, restarts the coordinator (`latest_binary_version` does not
-reload on SIGHUP), waits for `/healthz`, checks that the restarted coordinator logged the on-disk
-config as its boot config, and records the step. `recommendation_bump` is
+environment, sends SIGHUP (providers stay connected; `latest_binary_version`
+and `compatibility_set` both reload), waits for `/healthz`, and records the
+step. The applied-config proof is the running process's last
+`coordinator_config_applied` event with source `boot` or `sighup`.
+`recommendation_bump` is
 complete only when `/healthz` recommends the release AND the applied
 `compatibility_set.target_id` names it. When the requested edit is already on
 disk but the running coordinator never applied it (a run stopped before its
-restart), the step validates and restarts instead of reporting success. Nobody
+SIGHUP), the step validates and reloads instead of reporting success. Nobody
 pastes a restart. Publication or a healthy advertised version alone does not
 prove that the new provider compatibility set is accepted and targeted; the
 `registrations` gate reads the running coordinator's applied config.
@@ -94,8 +96,8 @@ Preconditions:
   did, Macs that installed V refuse P (`target_revoked_or_below_minimum`) and
   only a forward-fix release helps.
 
-Procedure (state the Pearl downtime first: one coordinator restart, a few
-seconds of buyer outage):
+Procedure (state the Pearl downtime first: one SIGHUP, providers stay
+connected, no buyer outage from a coordinator restart):
 
 ```bash
 export CLI_ROLLBACK_TO_ID='<owner/repo>:v<P>@<commit>'       # previous good release
@@ -108,27 +110,27 @@ scripts/ops/cli-release.sh status      # rollback: done
 `next --run` takes the live-ops lock and runs
 `_pearl-config --recommend <P> <P id> --revoke <V id>`: one anchored edit of
 `latest_binary_version`, `compatibility_set.target_id` and `revoked_ids`,
-validated with the running coordinator binary, one restart, then `/healthz`
+validated with the running coordinator binary, one SIGHUP, then `/healthz`
 must recommend P, target P's id and list V's id. `CLI_ROLLBACK_TO_ID` must
 name P's signed release identity: its commit must be the commit of origin tag
 `v<P>`, and the whole id must equal `repository:tag@commit` from P's
 `pearl-release.json`, whose `.sig` is verified with
 `ops/pearl-updater/release-signing-public.pem` (the key the train uses for
 candidates), or the step refuses. If a run stops after the edit but before the
-restart, `status` shows the edit as pending and `next --run` resumes it with
-one validated restart. The step refuses when P is
+SIGHUP, `status` shows the edit as pending and `next --run` resumes it with
+one validated SIGHUP. The step refuses when P is
 not strictly older than V, the ids are from different repositories, P is not a
 published stable release, the live target is neither V nor P, or the live
 policy differs from the applied config; and it is never reported done (nor
 run) on a coordinator without `compatibility_policy_revoked_signal`. `pearl-cli-config.py` refuses to
 revoke the target that remains after the edit, so P can never be revoked.
 
-Expected timing: the edit and restart take about a minute. Connected Macs on V
-are closed by the restart and reconnect within seconds to a minute as
-update-only sessions; each then drains (in-flight requests finish, up to the
-drain timeout), downloads and verifies P, swaps, restarts and proves local
-health. Estimate 2 to 5 minutes per Mac, all in parallel, so the fleet should
-be back on P within about 10 minutes of the restart; long in-flight requests
+Expected timing: the edit and SIGHUP take about a minute. Connected Macs on V
+stay connected and are marked update-only in place; each then drains
+(in-flight requests finish, up to the drain timeout), downloads and verifies
+P, swaps, restarts and proves local health. Estimate 2 to 5 minutes per Mac,
+all in parallel, so the fleet should
+be back on P within about 10 minutes of the SIGHUP; long in-flight requests
 extend the drain. Watch each provider's
 `last_autoupdate_event` for `extra_metadata.update_direction:
 downgrade_from_revoked`, `binary_swap_complete` and then post-start success on
