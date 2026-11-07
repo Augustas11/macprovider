@@ -7,12 +7,12 @@ Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (orig
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
 **Change log v0.3.38 (2026-11-08, MLX memory limit below the GPU working set, Related: #2226, Related: #2249):**
-FR-CB2: native runtime startup MUST set MLX's process memory limit to 95% of
+FR-CB2: native runtime startup MUST set MLX's process memory limit to 90% of
 Metal's `recommendedMaxWorkingSetSize`, never above 90% of physical RAM, and
 re-apply it once the model is resident. MLX's default,
 `min(1.5 x working set, 0.95 x RAM)`, sits above the working set on every
 Mac, so long prefills and wide batches could ask Metal to keep more bytes
-resident than it can. A model that fits the working set but not the 95% cap
+resident than it can. A model that fits the working set but not the 90% cap
 keeps its resident bytes plus 512 MiB, never more than the working set.
 FR-CB17: prompt admission holds a row whose initial KV would take MLX past
 that limit while other rows run, and admits it once the scheduler is idle.
@@ -838,10 +838,16 @@ state.
 **(v0.3.36) MLX memory limit.** Native serve, self-test and benchmark loading
 MUST set MLX's process memory limit before loading the model and again once it
 is resident (initial load and every warm swap). The limit is
-`min(W - W/20, P - P/10)`, raised to `min(W, R + 512 MiB)` when that is larger.
+`min(W - W/10, P - P/10)`, raised to `min(W, R + 512 MiB)` when that is larger.
 `W` is Metal's `recommendedMaxWorkingSetSize`, `P` is physical RAM and `R` is
-MLX's active memory after the load. `W/20` matches MLX's own cache-reclaim
-point (`gc_limit = 0.95 x W`). `P/10` is the SPEC-048-R012 10% free-memory
+MLX's active memory after the load. `W/10` is set by observed faults: on a
+256 GB M3 Ultra (`W` 239.14 GB, MLX's unset default 261.1 GB) the kernel
+logged IOGPU `prepare` faults (`preparedBytes != requiredBytes`) from the
+provider at 198-215 GB prepared, at most 214.67 GB, while GLM-5.3-Flash
+served (#2249). `W - W/10` is 215.2 GB there, at that largest fault size,
+and GLM-5.3-Flash's measured serving peaks (182-198 GB) still fit. A 5%
+headroom (227.2 GB) would leave every observed fault size allowed.
+`P/10` is the SPEC-048-R012 10% free-memory
 floor. The `R` floor keeps a model that fits the working set loadable on small
 Macs. The limit MUST NOT exceed `W`. When Metal reports no working set,
 MLX's default stays. The runtime MUST log the effective limit, `W`, `P`, `R`
@@ -2608,7 +2614,7 @@ hardware-capability run or a static-review obligation. Every
   KV is evicted/recomputed (no preemption), and no settlement receipt is
   emitted for stitched failed+retried output.
 - **AC-24a MLX memory limit (FR-CB2, FR-CB17, FR-CB18, v0.3.36):** the limit
-  computation never exceeds the working set or 90% of RAM, sits 5% below the
+  computation never exceeds the working set or 90% of RAM, sits 10% below the
   working set, and keeps a resident model that fits the working set. A row
   whose initial footprint would pass the limit waits while another row
   decodes and joins once it finishes, never prefilling beside it. Rows that
