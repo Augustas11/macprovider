@@ -1044,6 +1044,49 @@ struct ContinuousBatchPrefillCandidate: Sendable, Equatable {
     /// own offset (native-MTP prompt rows, unless
     /// `nativeMTPPromptRowsJoinRaggedPrefill`).
     let sharesRaggedOffsets: Bool
+    /// Prompt tokens the row still has to prefill. A peer joins the group
+    /// beyond the per-iteration budget only when it has as many left as the
+    /// head (FR-CB2 v0.3.36).
+    var remainingPromptTokens: Int = 0
+}
+
+/// Which prompt row leads the next prefill turn (SPEC-038 FR-CB2 v0.3.36).
+///
+/// The row with the fewest prompt tokens left leads, so a short prompt gets
+/// its first token after its own prefill instead of after every longer
+/// prompt that arrived with it. Ties keep the round-robin turn order. A row
+/// passed over while it stood ahead of the head in that order counts one
+/// bypass turn; after `maxBypassTurns` it is aged and leads, in round-robin
+/// order with other aged rows, until its prompt is done. A long prompt
+/// therefore waits at most `maxBypassTurns` turns longer than it would have.
+enum ContinuousBatchPrefillOrder {
+    static let maxBypassTurns = 8
+
+    struct Candidate: Sendable, Equatable {
+        let requestID: String
+        let remainingPromptTokens: Int
+        let bypassTurns: Int
+    }
+
+    /// `candidates` arrive in round-robin turn order.
+    static func order(_ candidates: [Candidate], maxBypassTurns: Int = maxBypassTurns) -> [String] {
+        candidates.enumerated().sorted { lhs, rhs in
+            let lhsAged = lhs.element.bypassTurns >= maxBypassTurns
+            let rhsAged = rhs.element.bypassTurns >= maxBypassTurns
+            if lhsAged != rhsAged { return lhsAged }
+            if !lhsAged, lhs.element.remainingPromptTokens != rhs.element.remainingPromptTokens {
+                return lhs.element.remainingPromptTokens < rhs.element.remainingPromptTokens
+            }
+            return lhs.offset < rhs.offset
+        }.map(\.element.requestID)
+    }
+
+    /// Rows ahead of this turn's head in round-robin order that the turn did
+    /// not select: each is charged one bypass turn.
+    static func bypassed(roundRobinOrder: [String], head: String, selected: Set<String>) -> [String] {
+        guard let index = roundRobinOrder.firstIndex(of: head) else { return [] }
+        return roundRobinOrder[..<index].filter { !selected.contains($0) }
+    }
 }
 
 struct ContinuousBatchPrefillGroup: Sendable, Equatable {
@@ -1068,25 +1111,31 @@ enum ContinuousBatchPrefillGrouping {
     /// a short remainder can take another kernel route). A peer at another
     /// offset joins only within the key-spread cap. A chunk shorter than
     /// `minimumGroupedChunkTokens` (`ContinuousBatchPrefillGroupingRule`)
-    /// never shares a forward.
+    /// never shares a forward. Rows beyond `tokenBudget`, up to
+    /// `cohortTokenBudget`, join only with as many prompt tokens left as the
+    /// head, so the head's first token never waits for a longer prompt.
     static func select(
         _ candidates: [ContinuousBatchPrefillCandidate],
         maxRows: Int,
         tokenBudget: Int,
+        cohortTokenBudget: Int? = nil,
         minimumGroupedChunkTokens: Int = 1
     ) -> ContinuousBatchPrefillGroup? {
         guard let head = candidates.first, head.naturalChunkTokens > 0 else { return nil }
         let length = head.naturalChunkTokens
-        let rowCap = length >= minimumGroupedChunkTokens
-            ? max(1, min(maxRows, tokenBudget / length))
-            : 1
+        let groups = length >= minimumGroupedChunkTokens
+        let rowCap = groups ? max(1, min(maxRows, tokenBudget / length)) : 1
+        let cohortCap = groups ? max(rowCap, min(maxRows, max(tokenBudget, cohortTokenBudget ?? 0) / length)) : 1
         var ids = [head.requestID]
         var sameOffset = true
         var allRagged = head.sharesRaggedOffsets
         var minOffset = head.promptOffset
         var maxOffset = head.promptOffset
-        for candidate in candidates.dropFirst() where ids.count < rowCap {
+        for candidate in candidates.dropFirst() where ids.count < cohortCap {
             guard candidate.naturalChunkTokens == length else { continue }
+            guard ids.count < rowCap || candidate.remainingPromptTokens == head.remainingPromptTokens else {
+                continue
+            }
             let atHeadOffset = candidate.promptOffset == head.promptOffset
             guard (sameOffset && atHeadOffset) || (allRagged && candidate.sharesRaggedOffsets) else {
                 continue
@@ -2307,6 +2356,9 @@ actor ContinuousBatchScheduler {
         var pendingOutputTokens: [Int]
         var stopCause: ContinuousBatchSchedulerStopCause? = nil
         var prefillCursor: Int
+        /// Prefill turns a row with less prompt left led while this row stood
+        /// ahead of it (`ContinuousBatchPrefillOrder`). Never reset.
+        var prefillBypassTurns = 0
         var snapshot: ContinuousBatchSchedulerSnapshot
         /// Keyed hybrid rows: recurrent state at each reached prompt checkpoint
         /// plus the terminal covered-token checkpoint.
@@ -5906,10 +5958,18 @@ actor ContinuousBatchScheduler {
         }
 
         let turnBudget = prefillTurnTokenBudget()
+        let candidateOrder = prefillCandidateOrder()
         let selected = configuration.allowsRaggedPrefillOffsets
-            ? selectRaggedPrefillGroup(tokenBudget: turnBudget)
-            : selectEqualOffsetPrefillGroup(tokenBudget: turnBudget)
-        guard !selected.isEmpty else { return madeProgress }
+            ? selectRaggedPrefillGroup(order: candidateOrder, tokenBudget: turnBudget)
+            : selectEqualOffsetPrefillGroup(order: candidateOrder, tokenBudget: turnBudget)
+        guard let head = selected.first else { return madeProgress }
+        for id in ContinuousBatchPrefillOrder.bypassed(
+            roundRobinOrder: promptOrder.filter { activePrompt[$0] != nil },
+            head: head.row.request.id,
+            selected: Set(selected.map { $0.row.request.id })
+        ) {
+            activePrompt[id]?.prefillBypassTurns += 1
+        }
 
         // A resume boundary is a numerical partition, not another scheduling
         // turn. Keep each row's numerical chunk intact, but let its row use
@@ -6146,8 +6206,10 @@ actor ContinuousBatchScheduler {
     /// turn stalls nobody, so rows that arrived together prefill in one
     /// shared forward of up to `maxPrefillRowsPerIteration` chunks: their
     /// first tokens and decode windows line up instead of each later row's
-    /// prefill splitting the earlier rows' windows. The first row's TTFT
-    /// grows by at most that many chunks.
+    /// prefill splitting the earlier rows' windows. Only rows with as many
+    /// prompt tokens left as the head use the tokens past the configured
+    /// budget: a row that cannot finish with the head would only delay the
+    /// head's first token (FR-CB2 v0.3.36, #2253 msb03).
     private func prefillTurnTokenBudget() -> Int {
         let budget = configuration.maxPrefillTokensPerIteration
         guard activeDecode.isEmpty, configuration.referencePrefillStepSize == nil else { return budget }
@@ -6157,13 +6219,27 @@ actor ContinuousBatchScheduler {
         return max(budget, min(cohort, ContinuousBatchSchedulerConfiguration.maximumPrefillTokensPerIteration))
     }
 
-    private func selectEqualOffsetPrefillGroup(tokenBudget: Int) -> [(row: Row, end: Int)] {
+    /// Prompt rows in the order this turn offers them to a group
+    /// (`ContinuousBatchPrefillOrder`).
+    private func prefillCandidateOrder() -> [String] {
+        ContinuousBatchPrefillOrder.order(promptOrder.compactMap { id in
+            activePrompt[id].map {
+                ContinuousBatchPrefillOrder.Candidate(
+                    requestID: id,
+                    remainingPromptTokens: $0.request.promptTokens.count - $0.prefillCursor,
+                    bypassTurns: $0.prefillBypassTurns
+                )
+            }
+        })
+    }
+
+    private func selectEqualOffsetPrefillGroup(order: [String], tokenBudget: Int) -> [(row: Row, end: Int)] {
         let chunkLimit = min(configuration.maxPromptChunkTokens, configuration.maxPrefillTokensPerIteration)
         var selected: [(row: Row, end: Int)] = []
         var selectedOffset: Int?
         var selectedChunkCount: Int?
         var selectedTokenCount = 0
-        for id in promptOrder {
+        for id in order {
             guard selected.count < configuration.maxPrefillRowsPerIteration,
                   let row = activePrompt[id]
             else { continue }
@@ -6171,11 +6247,17 @@ actor ContinuousBatchScheduler {
             let end = prefillEnd(for: row, maxChunkTokens: chunkLimit)
             let chunkCount = end - row.prefillCursor
             guard chunkCount > 0 else { continue }
-            if let selectedOffset, let selectedChunkCount {
+            if let selectedOffset, let selectedChunkCount, let head = selected.first?.row {
                 guard row.prefillCursor == selectedOffset,
                       chunkCount == selectedChunkCount,
                       selectedTokenCount + chunkCount <= tokenBudget
                 else { continue }
+                // Past the per-iteration budget (the idle cohort turn), only
+                // a row that finishes its prompt with the head joins.
+                if selectedTokenCount + chunkCount > configuration.maxPrefillTokensPerIteration {
+                    guard row.request.promptTokens.count - row.prefillCursor
+                        == head.request.promptTokens.count - head.prefillCursor else { continue }
+                }
             } else {
                 selectedOffset = row.prefillCursor
                 selectedChunkCount = chunkCount
@@ -6191,11 +6273,11 @@ actor ContinuousBatchScheduler {
 
     /// Rows at any prompt offsets that all prefill the same chunk length in
     /// one shared forward (SPEC-038 FR-CB2 ragged shared prefill).
-    private func selectRaggedPrefillGroup(tokenBudget: Int) -> [(row: Row, end: Int)] {
+    private func selectRaggedPrefillGroup(order: [String], tokenBudget: Int) -> [(row: Row, end: Int)] {
         let chunkLimit = min(configuration.maxPromptChunkTokens, configuration.maxPrefillTokensPerIteration)
         var candidates: [ContinuousBatchPrefillCandidate] = []
         var rowsByID: [String: Row] = [:]
-        for id in promptOrder {
+        for id in order {
             guard rowsByID[id] == nil, let row = activePrompt[id] else { continue }
             let naturalChunk = prefillEnd(for: row, maxChunkTokens: chunkLimit) - row.prefillCursor
             guard naturalChunk > 0 else { continue }
@@ -6208,14 +6290,16 @@ actor ContinuousBatchScheduler {
                 requestID: id,
                 promptOffset: row.prefillCursor,
                 naturalChunkTokens: naturalChunk,
-                sharesRaggedOffsets: !row.usesNativeMTP || configuration.nativeMTPPromptRowsJoinRaggedPrefill
+                sharesRaggedOffsets: !row.usesNativeMTP || configuration.nativeMTPPromptRowsJoinRaggedPrefill,
+                remainingPromptTokens: row.request.promptTokens.count - row.prefillCursor
             ))
             rowsByID[id] = row
         }
         guard let group = ContinuousBatchPrefillGrouping.select(
             candidates,
             maxRows: configuration.maxPrefillRowsPerIteration,
-            tokenBudget: tokenBudget,
+            tokenBudget: min(tokenBudget, configuration.maxPrefillTokensPerIteration),
+            cohortTokenBudget: tokenBudget,
             minimumGroupedChunkTokens: configuration.prefillGrouping.minimumGroupedChunkTokens
         ) else {
             return []
