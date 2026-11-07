@@ -2683,6 +2683,8 @@ actor CoordinatorClient {
         // inbox is bounded by bytes instead: received-but-unhandled messages
         // past the budget end the session (reconnect) rather than grow memory.
         let backlog = CoordinatorInboundBacklog(limitBytes: coordinatorInboundBacklogLimitBytes)
+        let preflightCell = providerStatus.preflightCell
+        let preflightSendOverride = sendOverride
         try await withThrowingTaskGroup(of: Void.self) { group in
             // Receive task: keep the socket drained. Captures `socket` and
             // `continuation` (both Sendable), never `self`, so nothing here
@@ -2692,6 +2694,28 @@ actor CoordinatorClient {
                     while !Task.isCancelled {
                         let message: URLSessionWebSocketTask.Message
                         message = try await socket.receive()
+                        // Issue #2246: answer preflight here, from the status
+                        // snapshot cell, so the ack meets the coordinator's 2 s
+                        // preflight timeout even while the drainer is busy with
+                        // earlier frames or the status actor is held. The ack
+                        // goes out on its own task so a slow send never stalls
+                        // receive().
+                        if let preflight = Self.inboundPreflight(message) {
+                            Self.keepaliveDebug("ws_recv type=preflight fast_path=1")
+                            Task {
+                                let ack = Self.preflightAck(
+                                    requestID: preflight.requestID,
+                                    estimatedTokens: preflight.estimatedTokens,
+                                    view: preflightCell.value
+                                )
+                                if let preflightSendOverride {
+                                    try? await preflightSendOverride(ack)
+                                } else {
+                                    try? await Self.send(ack, to: socket)
+                                }
+                            }
+                            continue
+                        }
                         guard backlog.add(CoordinatorInboundBacklog.byteCount(of: message)) else {
                             Self.keepaliveDebug("ws_inbound_backlog_exceeded limit=\(backlog.limitBytes)")
                             throw CoordinatorInboundBacklogExceeded(limitBytes: backlog.limitBytes)
@@ -4306,6 +4330,10 @@ actor CoordinatorClient {
     // bumps the heartbeat success timestamp via handle().
     func handleForTest(_ message: URLSessionWebSocketTask.Message) async throws {
         try await handle(message)
+    }
+
+    func receiveLoopForTest(_ socket: ProviderWebSocketTask) async throws {
+        try await receiveLoop(socket)
     }
 
     func tier2KeyIDForTest() -> String? {
@@ -6471,47 +6499,67 @@ actor CoordinatorClient {
     }
 
     private func handlePreflight(_ message: [String: Any]) async throws {
-        let requestID = message["request_id"] as? String ?? ""
-        let estimatedTokens = message["estimated_tokens"] as? Int ?? 0
-        let snapshot = await providerStatus.snapshot()
+        try await send(Self.preflightAck(
+            requestID: message["request_id"] as? String ?? "",
+            estimatedTokens: message["estimated_tokens"] as? Int ?? 0,
+            view: providerStatus.preflightCell.value
+        ))
+    }
 
-        if estimatedTokens > snapshot.capacity.maxContextTokens {
-            try await send([
+    /// Issue #2246: the preflight ack is answered from the status actor's
+    /// lock-protected preflight view, never by awaiting the actor or runtime.
+    static func preflightAck(requestID: String, estimatedTokens: Int, view: ProviderPreflightView) -> [String: Any] {
+        if estimatedTokens > view.maxContextTokens {
+            return [
                 "type": "preflight_ack",
                 "request_id": requestID,
                 "accepted": false,
                 "reason": "context_exceeds_capacity",
-                "max_context_tokens": snapshot.capacity.maxContextTokens,
-            ])
-        } else if snapshot.status == .draining {
-            try await send([
+                "max_context_tokens": view.maxContextTokens,
+            ]
+        } else if view.status == .draining {
+            return [
                 "type": "preflight_ack",
                 "request_id": requestID,
                 "accepted": false,
                 "reason": "draining",
-            ])
-        } else if !snapshot.modelLoaded {
-            try await send([
+            ]
+        } else if !view.modelLoaded {
+            return [
                 "type": "preflight_ack",
                 "request_id": requestID,
                 "accepted": false,
                 "reason": "model_not_loaded",
-            ])
-        } else if snapshot.status == .unavailable {
-            try await send([
+            ]
+        } else if view.status == .unavailable {
+            return [
                 "type": "preflight_ack",
                 "request_id": requestID,
                 "accepted": false,
                 "reason": "unhealthy",
-            ])
-        } else {
-            try await send([
-                "type": "preflight_ack",
-                "request_id": requestID,
-                "accepted": true,
-                "estimated_wait_ms": 0,
-            ])
+            ]
         }
+        return [
+            "type": "preflight_ack",
+            "request_id": requestID,
+            "accepted": true,
+            "estimated_wait_ms": 0,
+        ]
+    }
+
+    /// A `preflight` frame's request fields, read in the receive task so the
+    /// ack does not queue behind slower inbound frames. Only short text frames
+    /// are parsed; preflight is a few dozen bytes and inference frames can be
+    /// megabytes.
+    static func inboundPreflight(_ message: URLSessionWebSocketTask.Message) -> (requestID: String, estimatedTokens: Int)? {
+        guard case .string(let text) = message,
+              text.utf8.count <= 4096,
+              text.contains("\"preflight\""),
+              let object = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any],
+              object["type"] as? String == "preflight" else {
+            return nil
+        }
+        return (object["request_id"] as? String ?? "", object["estimated_tokens"] as? Int ?? 0)
     }
 
     func pauseByOperator() async -> ProviderControlCommandResult {
