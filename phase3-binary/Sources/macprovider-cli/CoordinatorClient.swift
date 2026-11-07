@@ -2926,6 +2926,12 @@ actor CoordinatorClient {
         case ComputeScoreProtocol.requestType:
             try await handleComputeScoreRequest(dict)
         case let shardType where ShardGroupWire.inboundTypes.contains(shardType):
+            // SPEC-036 FR-26: a scorer-only session takes no part in a shard group.
+            if computeScoreReference {
+                let reply = (dict["request_id"] as? String).flatMap(ChatCompletionRequest.normalizedRequestID) ?? type
+                try await sendNAK(inReplyTo: reply, code: "unknown_message_type", message: "Unrecognized message type: '\(type)'")
+                return
+            }
             guard let participant = modelRuntime as? any ShardGroupCoordinatorParticipant else {
                 try await sendNAK(inReplyTo: type, code: "unknown_message_type", message: "Unrecognized message type: '\(type)'")
                 return

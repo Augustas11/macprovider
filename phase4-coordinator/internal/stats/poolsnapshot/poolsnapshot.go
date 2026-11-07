@@ -281,7 +281,9 @@ func publicRoutabilityAdmission(prov pool.Provider) bool {
 	if prov.BenchmarkQuarantined || prov.AdmissionCeilingExcluded || prov.AdmissionEvidenceStale || prov.AdmissionSandboxed {
 		return false
 	}
-	return true
+	// SPEC-036 FR-26: a scorer-only session is no public serving capacity or
+	// slots.
+	return !prov.ComputeScoreReference
 }
 
 func publicProviderLess(a, b statsrollup.ProviderRoutability) bool {

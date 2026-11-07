@@ -1086,6 +1086,14 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertEqual(error["code"] as? String, "unknown_message_type")
         XCTAssertFalse(frames.contains { ($0["type"] as? String)?.hasPrefix("inference_") == true })
 
+        let beforeShard = await recorder.frames.count
+        try await client.handleCoordinatorPayloadForTest(["type": "shard_group_status", "group_id": "g-1"])
+        let shardFrames = Array(await recorder.frames.dropFirst(beforeShard))
+        let shardNAK = try XCTUnwrap(shardFrames.first)
+        XCTAssertEqual(shardNAK["type"] as? String, "nak")
+        XCTAssertEqual(shardNAK["in_reply_to"] as? String, "shard_group_status")
+        XCTAssertFalse(shardFrames.contains { ($0["type"] as? String)?.hasPrefix("shard_") == true })
+
         let afterNAK = await recorder.frames.count
         try await client.handleCoordinatorPayloadForTest(Self.computeScoreRequest())
         let result = try await waitForFrame(recorder, after: afterNAK, type: "compute_score_result_v1")

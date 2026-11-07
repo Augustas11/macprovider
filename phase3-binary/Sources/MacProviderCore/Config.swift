@@ -711,7 +711,22 @@ public enum ConfigLoader {
             config.relayBlindEnabled = true
         }
         try validatePrivacyClass(config)
+        try validateComputeScoreReference(config)
         return config
+    }
+
+    /// SPEC-036 FR-26. The scorer-only mode refuses buyer work on the
+    /// WebSocket tunnel; an endpoint (HTTP-forwarding) session would serve it
+    /// through its local endpoint instead, so the combination is refused.
+    private static func validateComputeScoreReference(_ config: AppConfig) throws {
+        guard config.computeScoreReference else { return }
+        if config.endpointURL?.isEmpty == false || config.wsTunneledMode == false {
+            throw ConfigError.invalidValue(
+                key: "compute_score_reference",
+                value: "true",
+                expected: "ws_tunneled_mode true and no endpoint_url"
+            )
+        }
     }
 
     /// SPEC-049-R007 credential boundary. Capture the operator YAML once,

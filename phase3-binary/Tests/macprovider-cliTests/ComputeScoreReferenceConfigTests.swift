@@ -41,6 +41,23 @@ final class ComputeScoreReferenceConfigTests: XCTestCase {
         }
     }
 
+    func testRejectsEndpointAndNonTunneledMode() {
+        for yaml in [
+            "compute_score_reference: true\nendpoint_url: http://127.0.0.1:11434\n",
+            "compute_score_reference: true\nws_tunneled_mode: false\n",
+        ] {
+            XCTAssertThrowsError(try load(yaml: yaml), yaml) { error in
+                XCTAssertTrue(String(describing: error).contains("compute_score_reference"), String(describing: error))
+            }
+        }
+        XCTAssertThrowsError(try load(
+            yaml: "compute_score_reference: true\n",
+            environment: ["MACPROVIDER_ENDPOINT_URL": "http://127.0.0.1:11434"]
+        ))
+        XCTAssertTrue(try load(yaml: "compute_score_reference: true\nws_tunneled_mode: true\n").computeScoreReference)
+        XCTAssertNoThrow(try load(yaml: "endpoint_url: http://127.0.0.1:11434\n"))
+    }
+
     func testCapabilityNames() {
         XCTAssertEqual(ComputeScoreProtocol.capability, "compute_score_v1")
         XCTAssertEqual(ComputeScoreProtocol.referenceCapability, "compute_score_reference")

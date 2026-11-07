@@ -882,6 +882,10 @@ func (p Provider) shardMemberAdmissible() bool {
 	if p.ComputeIntegritySuspended {
 		return false
 	}
+	// SPEC-036 FR-26: a scorer-only session is never a group member or head.
+	if p.ComputeScoreReference {
+		return false
+	}
 	if p.AdmissionCeilingExcluded || p.AdmissionEvidenceStale || p.AdmissionSandboxed || p.CatalogRecheckPending || p.HandshakeAckPending {
 		return false
 	}
