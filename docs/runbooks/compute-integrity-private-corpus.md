@@ -105,3 +105,39 @@ Build a new corpus with a new `--version` and run the same three commands
 with `COMPUTE_INTEGRITY_CORPUS` pointing at it. A different sha256 makes
 `enable` the next step again. It replaces the file, leaves the overlay as it
 is, and restarts once.
+
+## Reference scorers (SPEC-036 FR-26)
+
+The coordinator falls back to Malibu-operated reference scorers when no
+independent peer can score a key. It needs a runtime that has FR-26: an older
+coordinator rejects the key in `--validate-config`, and the task changes
+nothing. Keep the operator keys private, because a `provider:` key names a
+provider.
+
+```bash
+export COMPUTE_INTEGRITY_REFERENCE_OPERATORS='github:<user id>,provider:<provider id>'
+PEARL_RUNTIME_TASK=compute-integrity-reference-operators scripts/ops/pearl-runtime.sh status
+PEARL_RUNTIME_TASK=compute-integrity-reference-operators scripts/ops/pearl-runtime.sh next
+MACPROVIDER_OPS_OWNER=<session-label> PEARL_RUNTIME_TASK=compute-integrity-reference-operators \
+  scripts/ops/pearl-runtime.sh next --run
+```
+
+Expected downtime: one coordinator restart, about 5–40 seconds, as above.
+
+The list must pass the coordinator's rules. Each key is `github:<1-20 digits>`
+or `provider:<1-256 bytes, no whitespace or control characters>`, with no
+duplicates and at least one key. `status` prints only the count and the
+sha256 of the list. `next --run` takes the live-ops lock and both Pearl locks.
+It then:
+
+1. Sets `compute_integrity.scoring.reference_operators` in the overlay to
+   exactly this list. It keeps every other key, including `corpus_path`, and
+   replaces a different list.
+2. Backs up the overlay and validates it with the running coordinator.
+3. Restarts the coordinator once and requires the new process to log
+   `compute_integrity_scoring_started` with that many `reference_operators`.
+
+If any of these fails, it restores the overlay and restarts again. Running it
+again with the same list changes nothing. Each scorer Mac also runs the CLI
+with `compute_score_reference: true`. The coordinator never routes buyer
+requests to it.

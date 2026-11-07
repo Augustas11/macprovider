@@ -61,6 +61,20 @@ link, owned by this user, mode 0600, in a directory no one else can write).
 Locally, `validate-vision-qualification PATH [OUT]` applies
 the rules and prints only the field count and the entry sha256.
 
+Also used by scripts/ops/pearl-runtime.sh
+PEARL_RUNTIME_TASK=compute-integrity-reference-operators (SPEC-036 FR-26):
+  python3 - ro-facts [layout flags]                             read-only facts
+  python3 - apply-reference-operators [layout flags] --ro-hex HEX --ro-sha256 SHA256
+Under the same locks it sets compute_integrity.scoring.reference_operators in
+the overlay to exactly the list (hex of its canonical JSON; the coordinator's
+key rules), keeping every other key, with a reparse proving the edit; backs
+the overlay up, validates with the running coordinator, restarts once and
+requires the new invocation to log that many reference operators; on failure
+it restores the overlay (compare-and-swap) and makes one recovery restart.
+Locally, `validate-reference-operators LIST` applies the key rules to a
+comma- or whitespace-separated list and prints only its count, sha256 and the
+hex apply argument.
+
 Also used by scripts/ops/pearl-runtime.sh PEARL_RUNTIME_TASK=stream-ceiling
 (SPEC-002 FR-P11a C2 twin walls, SPEC-006 §17.7.1):
   python3 - sc-facts [layout flags] --gateway-config PATH --gateway-unit UNIT
@@ -1274,6 +1288,256 @@ def apply_vision_qualification(args):
             os.unlink(args.vq_staged)
 
 
+# --- compute-integrity reference operators (SPEC-036 FR-26, #1644) ------------
+#
+# Used by scripts/ops/pearl-runtime.sh
+# PEARL_RUNTIME_TASK=compute-integrity-reference-operators. An operator key can
+# name a provider, so nothing here prints the keys: only their count and the
+# sha256 of the canonical list.
+
+RO_KEY = "reference_operators"
+
+
+def ro_valid_key(op):
+    """internal/config/compute_integrity.go validReferenceOperator."""
+    if not isinstance(op, str):
+        return False
+    if op.startswith("github:"):
+        uid = op[len("github:"):]
+        return 0 < len(uid) <= 20 and all("0" <= c <= "9" for c in uid)
+    if op.startswith("provider:"):
+        pid = op[len("provider:"):]
+        return 0 < len(pid.encode()) <= 256 and all(ord(c) > 0x20 and ord(c) != 0x7f for c in pid)
+    return False
+
+
+def ro_validate(ops):
+    """The coordinator's compute_integrity.scoring.reference_operators rules,
+    plus at least one key (this task sets the list; it never empties it)."""
+    if not isinstance(ops, list) or not ops:
+        raise Refused("reference_operators must be a non-empty list")
+    for op in ops:
+        if not ro_valid_key(op):
+            raise Refused("reference_operators entries must be github:<user id> or provider:<provider id>")
+    if len(set(ops)) != len(ops):
+        raise Refused("reference_operators has a duplicate entry")
+    return ops
+
+
+def ro_parse_arg(raw):
+    """Comma- or whitespace-separated keys, in order."""
+    return ro_validate([op for op in re.split(r"[,\s]+", raw) if op])
+
+
+def ro_canonical(ops):
+    return json.dumps(ops, separators=(",", ":")).encode()
+
+
+def ro_digest(ops):
+    return hashlib.sha256(ro_canonical(ops)).hexdigest()
+
+
+def ro_entries(doc):
+    """compute_integrity.scoring.reference_operators of one document: None
+    when absent."""
+    s = ci_scoring(doc)
+    if RO_KEY not in s:
+        return None
+    return s[RO_KEY] if isinstance(s[RO_KEY], list) else []
+
+
+def ro_render(ops):
+    # JSON strings are YAML double-quoted scalars; the reparse check proves it.
+    return "%s: [%s]" % (RO_KEY, ", ".join(json.dumps(op) for op in ops))
+
+
+def ro_child(text, start, end, key):
+    """((line_start, value_end) or None, indent) of the one KEY: line among
+    the direct children of the block text[start:end]. A block sequence may sit
+    at the key's own indentation."""
+    sub = text[start:end]
+    lines = list(re.finditer(r"^( *)([^ #\n][^\n]*)$", sub, re.M))
+    if not lines:
+        raise Refused("an empty mapping block in the overlay; reconcile it first")
+    ind = len(lines[0].group(1))
+    hits = [m for m in lines if len(m.group(1)) == ind and re.match(r"^%s:(\s|$)" % re.escape(key), m.group(2))]
+    if not hits:
+        return None, ind
+    if len(hits) != 1:
+        raise Refused("the overlay sets %s twice" % key)
+    m = hits[0]
+    pos = start + m.end() + 1
+    for line in text[pos:end].splitlines(keepends=True):
+        stripped = line.strip()
+        lead = len(line) - len(line.lstrip(" "))
+        if stripped and not stripped.startswith("#") and lead <= ind and not (lead == ind and stripped.startswith("- ")):
+            break
+        pos += len(line)
+    return (start + m.start(), min(pos, end)), ind
+
+
+def ro_overlay_plan(text, overlay, ops):
+    """New overlay text setting compute_integrity.scoring.reference_operators
+    to OPS, or the same text when it already is exactly that. Nothing else in
+    the overlay changes; a reparse proves it."""
+    import yaml
+
+    if text.strip() and not isinstance(yaml.safe_load(text), (dict, type(None))):
+        raise Refused("the overlay is not a YAML mapping")
+    if text.strip().startswith("{"):
+        raise Refused("the overlay is a flow mapping; refusing to edit it")
+    if ro_entries(overlay) == ops:
+        return text
+    if "compute_integrity" not in overlay:
+        sep = "" if not text or text.endswith("\n") else "\n"
+        new = text + sep + "compute_integrity:\n  scoring:\n    %s\n" % ro_render(ops)
+    else:
+        if not text.endswith("\n"):
+            text += "\n"
+        ci_start, ci_end = block(text, r"^compute_integrity:[ \t]*(#.*)?$")
+        span, ind = ro_child(text, ci_start, ci_end, "scoring")
+        if span is None:
+            new = text[:ci_start] + "%sscoring:\n%s  %s\n" % (" " * ind, " " * ind, ro_render(ops)) + text[ci_start:]
+        else:
+            if not re.match(r"^ *scoring:[ \t]*(#.*)?\n", text[span[0]:span[1]]):
+                raise Refused("the overlay's compute_integrity.scoring is not a block mapping; reconcile it first")
+            s_start = text.index("\n", span[0]) + 1
+            if s_start >= span[1]:
+                raise Refused("the overlay's compute_integrity.scoring block is empty")
+            key_span, sind = ro_child(text, s_start, span[1], RO_KEY)
+            line = "%s%s\n" % (" " * sind, ro_render(ops))
+            if key_span is None:
+                new = text[:s_start] + line + text[s_start:]
+            else:
+                new = text[:key_span[0]] + line + text[key_span[1]:]
+    want = copy.deepcopy(overlay)
+    ci = want.get("compute_integrity")
+    if ci is None:
+        want["compute_integrity"] = ci = {}
+    if ci.get("scoring") is None:
+        ci["scoring"] = {}
+    ci["scoring"][RO_KEY] = list(ops)
+    if (yaml.safe_load(new) or {}) != want:
+        raise Refused("the overlay edit did not produce exactly the intended YAML change")
+    return new
+
+
+def ro_journal(unit):
+    """(started, count): whether the running invocation logged
+    compute_integrity_scoring_started, and the reference_operators count it
+    carried (None from a coordinator that predates the setting)."""
+    started, count = False, None
+    for e in invocation_events(unit, ("compute_integrity_scoring_started",)):
+        n = e.get(RO_KEY)
+        started, count = True, n if isinstance(n, int) and not isinstance(n, bool) else None
+    return started, count
+
+
+def ro_journal_count(unit):
+    return ro_journal(unit)[1]
+
+
+def ro_facts(args):
+    # The files read must be the ones the running coordinator was started with.
+    running(args)
+    base, overlay = load_effective(args)
+    entries = ro_entries(overlay)
+    try:
+        valid = None if entries is None else bool(ro_validate(entries))
+    except Refused:
+        valid = False
+    facts = {
+        "overlay_sha256": ro_digest(entries) if valid else None,
+        "overlay_count": None if entries is None else len(entries),
+        "overlay_valid": valid,
+        "base_count": len(ro_entries(base) or []),
+        "applied": applied(args),
+        "logged_count": ro_journal_count(args.unit),
+    }
+    print(json.dumps(facts, sort_keys=True))
+
+
+def ro_live(args, count):
+    """The restarted coordinator logged exactly COUNT reference operators."""
+    deadline = time.monotonic() + 60
+    while True:
+        started, n = ro_journal(args.unit)
+        if n == count:
+            return
+        if n is not None:
+            raise Refused("the restarted coordinator logged %d reference operators, not %d" % (n, count))
+        if started:
+            raise Refused("the restarted coordinator logged no reference_operators count: it predates "
+                          "SPEC-036 FR-26; release the runtime first")
+        if time.monotonic() > deadline:
+            raise Refused("the restarted coordinator did not log compute_integrity_scoring_started within 60 s")
+        time.sleep(1)
+
+
+def apply_reference_operators(args):
+    try:
+        ops = json.loads(bytes.fromhex(args.ro_hex).decode())
+    except (ValueError, UnicodeDecodeError):
+        raise Refused("--ro-hex is not a hex-encoded JSON list")
+    ro_validate(ops)
+    if ro_digest(ops) != args.ro_sha256:
+        raise Refused("the reference operator list differs from the one validated at status")
+    with guard(args):
+        pid, binary, env, uid, gid = running(args)
+        _, overlay = load_effective(args)
+        with open(args.overlay, "rb") as f:
+            original = f.read()
+        new = ro_overlay_plan(original.decode(), overlay, ops).encode()
+        result = {"changed": new != original, "count": len(ops), "sha256": args.ro_sha256}
+        if new == original:
+            # The overlay already holds the list. Done when the running
+            # coordinator booted with these bytes and logged the list;
+            # otherwise a validated restart loads them.
+            if applied(args) and ro_journal_count(args.unit) == len(ops):
+                print(json.dumps(result, sort_keys=True))
+                return
+            check = as_service([binary, "--validate-config", "--config", args.config,
+                                "--config-overlay", args.overlay], env, uid, gid, 120)
+            if check.returncode != 0:
+                raise Refused("the running coordinator binary rejects the on-disk overlay (--validate-config)")
+            try:
+                restart(args, pid)
+                ro_live(args, len(ops))
+            except Exception as exc:
+                recovery_restart(args, "the overlay is unchanged on disk")
+                raise Refused("the restart failed (%s); a recovery restart brought the coordinator back on the "
+                              "unchanged overlay (/healthz answered, boot config verified): run status"
+                              % failure(exc))
+            result["restarted"] = True
+            print(json.dumps(result, sort_keys=True))
+            return
+        stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        os.makedirs(args.backup_root, mode=0o700, exist_ok=True)
+        backup = tempfile.mkdtemp(prefix="%s-reference-operators-" % stamp, dir=args.backup_root)
+        os.chmod(backup, 0o700)
+        shutil.copy2(args.overlay, os.path.join(backup, os.path.basename(args.overlay)))
+        result["backup"] = backup
+        tmp = write_like(args.overlay, new, args.overlay)
+        try:
+            check = as_service([binary, "--validate-config", "--config", args.config,
+                                "--config-overlay", tmp], env, uid, gid, 120)
+            if check.returncode != 0:
+                raise Refused("the running coordinator binary rejects the edited overlay (--validate-config)")
+            # From here the edited bytes may be on disk: any failure restores
+            # the original overlay and proves the recovery restart.
+            try:
+                install(tmp, args.overlay)
+                restart(args, pid)
+                ro_live(args, len(ops))
+            except Exception as exc:
+                vq_rollback(args, original, new, backup, exc)
+        finally:
+            if os.path.lexists(tmp):
+                os.unlink(tmp)
+        result["restarted"] = True
+        print(json.dumps(result, sort_keys=True))
+
+
 # --- buyer-UX conformance records (SPEC-023 §16.11, #2107) --------------------
 #
 # Used by scripts/ops/catalog-activate.sh step buyer_ux_conformance. The record
@@ -1975,6 +2239,20 @@ def main(argv):
             sys.stderr.write("pearl-cli-config: REFUSED: record unreadable (%s)\n" % type(exc).__name__)
             sys.exit(3)
         return
+    if argv[:1] == ["validate-reference-operators"]:
+        # Local, read-only: prints the count, the sha256 and the hex of the
+        # canonical list (the apply argument), never the keys as text.
+        if len(argv) != 2:
+            sys.stderr.write("usage: pearl-cli-config.py validate-reference-operators LIST\n")
+            sys.exit(2)
+        try:
+            ops = ro_parse_arg(argv[1])
+        except Refused as exc:
+            sys.stderr.write("pearl-cli-config: REFUSED: %s\n" % exc)
+            sys.exit(3)
+        print(json.dumps({"count": len(ops), "sha256": ro_digest(ops), "hex": ro_canonical(ops).hex()},
+                         sort_keys=True))
+        return
     if argv[:1] == ["validate-corpus"]:
         # Local, read-only: used by the ops entry point and the corpus generator.
         if len(argv) != 2:
@@ -1992,7 +2270,8 @@ def main(argv):
     p = argparse.ArgumentParser()
     p.add_argument("cmd", choices=["apply", "ci-facts", "apply-compute-integrity", "vq-facts",
                                    "apply-vision-qualification", "buc-facts", "apply-buyer-ux-conformance",
-                                   "sc-facts", "apply-stream-ceiling"])
+                                   "sc-facts", "apply-stream-ceiling", "ro-facts",
+                                   "apply-reference-operators"])
     p.add_argument("--config", required=True)
     p.add_argument("--overlay", required=True)
     p.add_argument("--unit", required=True)
@@ -2014,6 +2293,8 @@ def main(argv):
     p.add_argument("--buc-path", metavar="PATH")
     p.add_argument("--buc-staged", metavar="PATH")
     p.add_argument("--buc-sha256", metavar="SHA256")
+    p.add_argument("--ro-hex", metavar="HEX")
+    p.add_argument("--ro-sha256", metavar="SHA256")
     p.add_argument("--gateway-config", metavar="PATH")
     p.add_argument("--gateway-unit", metavar="UNIT")
     p.add_argument("--gateway-healthz", metavar="URL")
@@ -2032,6 +2313,12 @@ def main(argv):
                 sc_facts(args)
             else:
                 apply_stream_ceiling(args)
+        elif args.cmd == "ro-facts":
+            ro_facts(args)
+        elif args.cmd == "apply-reference-operators":
+            if not re.match(r"^(?:[0-9a-f]{2})+$", args.ro_hex or "") or not LOWER_HEX64.match(args.ro_sha256 or ""):
+                raise Refused("--ro-hex and --ro-sha256 are required")
+            apply_reference_operators(args)
         elif args.cmd == "vq-facts":
             vq_facts(args)
         elif args.cmd == "apply-vision-qualification":
