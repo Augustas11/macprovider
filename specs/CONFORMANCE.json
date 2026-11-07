@@ -1101,7 +1101,7 @@
     {
       "spec_id": "SPEC-038",
       "title": "Continuous batching for concurrent provider inference",
-      "version": "v0.3.35",
+      "version": "v0.3.36",
       "path": "specs/SPEC-038-continuous-batching.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -5478,7 +5478,9 @@
         "phase3-binary/Sources/macprovider-cli/PagedKVRuntimeBridge.swift:private func notePaddedAttentionBypass",
         "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:enum ContinuousBatchDecodeRouteBound",
         "phase3-binary/Sources/macprovider-cli/ServeDecodePath.swift:nonisolated static func schedulerPromptChunkCeiling",
-        "phase3-binary/Sources/macprovider-cli/DeepseekV4ContinuousBatchBackend.swift:final class DeepseekV4ContinuousBatchBackend"
+        "phase3-binary/Sources/macprovider-cli/DeepseekV4ContinuousBatchBackend.swift:final class DeepseekV4ContinuousBatchBackend",
+        "phase3-binary/Sources/MacProviderCore/MLXMemoryBudget.swift:public enum MLXMemoryBudget",
+        "phase3-binary/Sources/macprovider-cli/MLXMemoryLimit.swift:enum MLXMemoryLimit"
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testPrefillBatchesCompatibleChunksWithinRowAndTokenBudgets",
@@ -5561,7 +5563,12 @@
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testGLMPromptChunkKeepsActiveRowsDecodingBetweenChunks",
         "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeMixedCacheTests.swift:testSchedulerPromptChunkCeilingIsPerFamily",
         "phase3-binary/Tests/macprovider-cliTests/ServingKnobsConfigTests.swift:testPrefillStepSizeIsTrackedAsExplicitOnlyWhenConfigured",
-        "phase3-binary/Tests/macprovider-cliTests/DeepseekV4ContinuousBatchTests.swift:final class DeepseekV4ContinuousBatchTests"
+        "phase3-binary/Tests/macprovider-cliTests/DeepseekV4ContinuousBatchTests.swift:final class DeepseekV4ContinuousBatchTests",
+        "phase3-binary/Tests/MacProviderCoreTests/MLXMemoryBudgetTests.swift:testLimitIsFivePercentBelowWorkingSet",
+        "phase3-binary/Tests/MacProviderCoreTests/MLXMemoryBudgetTests.swift:testLimitNeverExceedsWorkingSetOrNinetyPercentOfRAM",
+        "phase3-binary/Tests/MacProviderCoreTests/MLXMemoryBudgetTests.swift:testRaisedWorkingSetIsCappedByTheR012FreeMemoryFloor",
+        "phase3-binary/Tests/MacProviderCoreTests/MLXMemoryBudgetTests.swift:testSmallMacFloorKeepsAModelThatFitsTheWorkingSet",
+        "phase3-binary/Tests/MacProviderCoreTests/MLXMemoryBudgetTests.swift:testNoWorkingSetKeepsMLXDefault"
       ],
       "journeys": [],
       "evidence": [],
@@ -5885,8 +5892,15 @@
       "requirement_id": "SPEC-038-R017",
       "spec_id": "SPEC-038",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:private func mlxMemoryAdmissionRefusal"
+      ],
+      "tests": [
+        "phase3-binary/Tests/MacProviderCoreTests/MLXMemoryBudgetTests.swift:testAdmissionAtTheLimit",
+        "phase3-binary/Tests/MacProviderCoreTests/MLXMemoryBudgetTests.swift:testKVBytesSaturatesAndIgnoresUnknownGeometry",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testMLXMemoryLimitDefersRowWhileOtherRowsRun",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testMLXMemoryLimitAdmitsRowsThatFitWithoutDiagnostics"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
@@ -5900,8 +5914,13 @@
       "requirement_id": "SPEC-038-R018",
       "spec_id": "SPEC-038",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:static func nativeMTPMLXMemoryLimitAdmits"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testMLXMemoryLimitCapsNativeMTPDepthBeforeProposal",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testMLXMemoryLimitRefusesNativeMTPRoundThatCannotFitAtDepthZero"
+      ],
       "journeys": [
         "JOURNEY-NATIVE-MTP-SERVING"
       ],
