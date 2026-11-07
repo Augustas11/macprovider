@@ -17,11 +17,13 @@ let package = Package(
         )
     ],
     dependencies: [
-        // Tag 3.32.3-macprovider.30 (#2154), one commit (`b2a45b0`) on
-        // 3.32.3-macprovider.29-sync (.25 plus the #2230 upstream sync):
+        // Tag 3.32.3-macprovider.30 (#2154), two commits (`b2a45b0`, `e198b9b`)
+        // on 3.32.3-macprovider.29-sync (.25 plus the #2230 upstream sync):
         // the Gemma 4 assistant as a packed native-MTP drafter loaded from
         // the target's model-mtp.safetensors, with gemma4_unified emitting
-        // the hidden state and shared K/V the assistant attends over.
+        // the hidden state and shared K/V the assistant attends over; Gemma 4
+        // layers attend through a cache that owns attention, so batched rows
+        // at different key offsets attend only over their own keys.
         // Tag 3.32.3-macprovider.25 (#2198, #2189) on 3.32.3-macprovider.24:
         // .23's GLM-5.3 MTP head prefill over the last 4096 prompt columns
         // (`da8f193`, from `93234b6`) on top of .24's MiniMax M3 work.
@@ -73,7 +75,7 @@ let package = Package(
         // compatible per-column attention while retaining row-owned caches.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "b2a45b03bbef512827a8960ded61591a3b6283d7"
+            revision: "e198b9b084506c2484d0a708e125c68ad3f89e07"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",

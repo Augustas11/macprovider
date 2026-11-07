@@ -13,7 +13,7 @@
   ],
   "maximum_prompt_tokens": 4096,
   "memory_safety_margin_bytes": 8589934592,
-  "mlx_fork_revision": "b2a45b03bbef512827a8960ded61591a3b6283d7",
+  "mlx_fork_revision": "e198b9b084506c2484d0a708e125c68ad3f89e07",
   "model_id": "google/gemma-4-12b-it",
   "mtp_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
   "os_build": "26A434",
@@ -45,7 +45,7 @@
     "gated_ttft_p95_upper_bound_max": 0.05,
     "min_available_memory_fraction": 0.1,
     "rejection_increase_max_pp": 1.0,
-    "throughput_lower_bound_min": 0.15,
+    "throughput_lower_bound_min": 0.0,
     "tpot_p95_upper_bound_max": 0.0,
     "ttft_p95_upper_bound_max": 0.1
   },

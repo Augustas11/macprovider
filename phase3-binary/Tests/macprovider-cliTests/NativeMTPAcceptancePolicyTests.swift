@@ -46,9 +46,10 @@ final class NativeMTPAcceptancePolicyTests: XCTestCase {
     }
 
     private func validate(_ policy: NativeMTPAcceptancePolicy, corpus: NativeMTPAcceptanceCorpus,
-                          environment: NativeMTPBenchEnvironment? = nil) throws {
+                          environment: NativeMTPBenchEnvironment? = nil, quantization: String = "4bit") throws {
         try policy.validate(corpus: corpus, environment: environment ?? self.environment(),
-                            targetSHA256: artifact, mtpSHA256: artifact, tokenizerSHA256: artifact)
+                            targetSHA256: artifact, mtpSHA256: artifact, tokenizerSHA256: artifact,
+                            quantization: quantization)
     }
 
     func testMatchingPolicyAndOriginalByteDigest() throws {
@@ -137,7 +138,7 @@ final class NativeMTPAcceptancePolicyTests: XCTestCase {
         let corpus = try NativeMTPAcceptanceCorpus.load(data: corpusData())
         let valid = object(corpus: corpus)
         for (field, value) in [("schema", "other"), ("hw_model", "Mac16,9"),
-                               ("quantization", "8bit"), ("cache_mode", "ordinary")] {
+                               ("quantization", "2bit"), ("cache_mode", "ordinary")] {
             var changed = valid
             changed[field] = value
             XCTAssertThrowsError(try load(changed), field)
@@ -156,6 +157,18 @@ final class NativeMTPAcceptancePolicyTests: XCTestCase {
             changed[field] = " "
             XCTAssertThrowsError(try load(changed), field)
         }
+    }
+
+    /// The 8-bit Gemma 4 target freezes its own width; a policy validates only
+    /// against the width the run observed.
+    func testPolicyQuantizationMustMatchTheObservedWidth() throws {
+        let corpus = try NativeMTPAcceptanceCorpus.load(data: corpusData())
+        var eightBit = object(corpus: corpus)
+        eightBit["quantization"] = "8bit"
+        let policy = try load(eightBit)
+        try validate(policy, corpus: corpus, quantization: "8bit")
+        XCTAssertThrowsError(try validate(policy, corpus: corpus, quantization: "4bit"))
+        XCTAssertThrowsError(try validate(try load(object(corpus: corpus)), corpus: corpus, quantization: "8bit"))
     }
 }
 #endif

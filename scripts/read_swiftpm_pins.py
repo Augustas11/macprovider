@@ -46,9 +46,10 @@ SPEC048_MLX_SWIFT_LM_FORK = "https://github.com/Augustas11/mlx-swift-lm"
 # for #2154 on the upstream sync tag 3.32.3-macprovider.29-sync: the Gemma 4
 # assistant drafts through the packed native-MTP drafter surface, loads from
 # the target's model-mtp.safetensors, and the text-only gemma4_unified target
-# emits the hidden state and shared K/V it attends over.
+# emits the hidden state and shared K/V it attends over; Gemma 4 attention
+# goes through a cache that owns attention, so batched rows stay row-safe.
 SPEC048_MLX_SWIFT_LM_TAG = "3.32.3-macprovider.30"
-SPEC048_MLX_SWIFT_LM_REVISION = "b2a45b03bbef512827a8960ded61591a3b6283d7"
+SPEC048_MLX_SWIFT_LM_REVISION = "e198b9b084506c2484d0a708e125c68ad3f89e07"
 SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE = "3b339ad6e3b3f44c8121ecff5131c7fd55e075e6"
 SPEC048_MLX_SWIFT_FORK = "https://github.com/Augustas11/mlx-swift"
 SPEC048_MLX_SWIFT_TAG = "0.32.3-macprovider.11"

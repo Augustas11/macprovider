@@ -1,7 +1,11 @@
 # SPEC-039 — Paged KV / paged-attention engine
 
-Version: v0.1.30
-Status: draft (normative design). v0.1.30 states the `kv_bits` precedence at
+Version: v0.1.31
+Status: draft (normative design). v0.1.31 defines the `gemma4` mixed cache
+class (keep=0 sliding-window layers and full-attention layers from
+`text_config`, both paged on one block table, decode keys in ring order) and
+adds the provisional FR-PKV12 `google/gemma-4-12b-it` identity so its attach
+probes and FR-CB10 self-check can run. v0.1.30 states the `kv_bits` precedence at
 attach: only an explicit operator `kv_bits` reaches the paged-KV gate; the
 model-family KV-quant default applies to serially served requests only.
 v0.1.29 defines the `gpt_oss` mixed cache
@@ -91,6 +95,25 @@ is `RotatingKVCache` only because the serve path caps KV for memory attaches to
 paged mode (the block pool bounds memory), while a genuine sliding-window model
 stays fail-safe. IMPL lands with this revision.
 Owner: provider runtime / inference engine
+Change log v0.1.31 (2026-11-07): defines the `gemma4` mixed cache class
+(#2154). FR-PKV12 adds a provisional, SPEC-first `google/gemma-4-12b-it`
+entry with `architectures == ["Gemma4UnifiedForConditionalGeneration"]` and
+top-level `model_type` `gemma4_unified`. Its topology is read from
+`text_config`: `model_type` `gemma4_unified_text`, an explicit `layer_types`
+array, `num_kv_shared_layers` present and 0, and the `gpt_oss` class rules
+for the per-layer layout (keep=0 `RotatingKVCache` of `sliding_window` tokens
+at every `sliding_attention` index, `KVCacheSimple` at every
+`full_attention` index). The family is dense, so no MoE dispatch proof
+applies. `gemma4` joins the recognized families; every other `gemma4`
+artifact or layout stays an unverified `mixed` class and fails closed with
+`paged_fallback_cache_class`. FR-PKV4 states that the attach proof's prompt
+passes the model's window: `max(513, sliding_window + 2 × block_size_tokens)`
+tokens, so the 128-token `gpt_oss` window keeps 513. The model attends
+through the cache's own attention for every layer whose K/V no KV-shared
+layer and no drafter reads (mlx-swift-lm `e198b9b`), so batched rows at
+different key offsets attend only over their own keys (SPEC-038 FR-CB2). No
+new kernel. Refines SPEC-039-R004 and SPEC-039-R012.
+
 Change log v0.1.30 (2026-11-06): FR-PKV5 states which `kv_bits` the attach
 gate sees (#2200). The model-family KV-quant default (T3-03:
 `KVQuantRecommendation`, 8 for `gpt_oss` and `gemma4`) is a serial-path
@@ -600,7 +623,9 @@ attach-time admission allowlist. For v0.1.2, the first additional admitted
 family was `gpt_oss`, with a fixture over `gpt-oss-20b-MXFP4-Q8`; that 20b
 fixture did not prove `gpt-oss-120b`. For v0.1.14,
 `openai/gpt-oss-120b` adds its own exact-identity packaged-runtime evidence.
-`gemma4`, `glm4_moe`, `nemotron_h`, and other catalog families remain outside
+(v0.1.31) `google/gemma-4-12b-it` enters provisionally under the same rule:
+its attach probes and FR-CB10 self-check are the evidence path. Other `gemma4`
+artifacts, `glm4_moe`, `nemotron_h`, and other catalog families remain outside
 the allowlist until they have equivalent FR-PKV4 evidence.
 
 **`gpt_oss` sliding-window/full-attention class (v0.1.29).** For the FR-PKV12
@@ -627,6 +652,16 @@ keep=0 `RotatingKVCache` on `sliding_attention` layers and `KVCacheSimple` on
    128-token window. The local fixture compares presented keys, values and
    decode attention outputs bit for bit against the serial caches, with the
    gather on a non-identity block order.
+
+**`gemma4` sliding-window/full-attention class (v0.1.31).** The `gemma4`
+mixed class follows the three `gpt_oss` rules above with the same oracle.
+Its 1024-token window is longer than the 513-token proof, so the attach
+proof's prompt is `max(513, sliding_window + 2 × block_size_tokens)` tokens
+and decode starts past the window. The local fixture is a tiny random-weight
+`gemma4_unified` model with the admitted layer kinds: rows whose prompts are
+shorter than, equal to and longer than the window decode together past more
+than one ring wrap, and each row's greedy tokens MUST equal bit for bit the
+same row decoded alone on the paged backend and the stock serial caches.
 
 **`glm5_next` latent / pooled-key fixture (v0.1.17, AC-20).** The `glm5_next`
 family's fixture runs the exact admitted artifact (environment-gated, real
@@ -965,6 +1000,18 @@ be individually measured before it is added. The v1 allowlist is:
   parity and isolation probes and the automatic FR-CB10 self-check; it is
   not parity evidence, a signed grant or production qualification, and
   attach fails closed until those gates pass.
+- (v0.1.31, provisional, SPEC-first) `google/gemma-4-12b-it`, the catalog
+  model whose verified artifact is `Jundot/gemma-4-12B-it-oQ8e-mtp`, with
+  `architectures == ["Gemma4UnifiedForConditionalGeneration"]` and top-level
+  `model_type` `gemma4_unified` in the artifact's `config.json` (dense
+  sliding-window/full-attention decoder; no MoE dispatch proof applies). It
+  uses the `gemma4` class below. The code entry keys on the catalog model id
+  plus the exact `architectures` array; a path-only alias, another Gemma 4
+  artifact or a config that does not yield the exact layout fails closed. The
+  exception has the same scope as the `openai/gpt-oss-20b` one: it permits
+  evaluation by the real attach-time parity and isolation probes and the
+  automatic FR-CB10 self-check, and is not parity evidence, a signed grant or
+  production qualification.
 
 **`gpt_oss` mixed class (v0.1.29).** The runtime cache identity is `mixed`.
 The topology is exactly one cache per decoder layer, in `layer_types` order:
@@ -981,6 +1028,20 @@ layer stores full history and presents the rotating-equivalent suffix in
 serial ring order (FR-PKV4). The parity label is `sdpa-parity-v1`. A
 different count, order, window, a keep>0 sink-token layer, a recurrent layer
 or any other cache kind fails closed with `paged_fallback_cache_class`.
+
+**`gemma4` mixed class (v0.1.31).** The runtime cache identity is `mixed`.
+The layout comes from `text_config`, which MUST have `model_type`
+`gemma4_unified_text`, an explicit `layer_types` array, and
+`num_kv_shared_layers` present and equal to 0, so every decoder layer owns
+one cache (the pinned model builds caches only for layers below
+`num_hidden_layers - num_kv_shared_layers`, and defaults that count to 20).
+Within `text_config`, the `gpt_oss` class rules above set the topology:
+keep=0 `RotatingKVCache` with `maxSize == sliding_window` at every
+`sliding_attention` index and `KVCacheSimple` at every `full_attention`
+index, `layer_types` of `num_hidden_layers` entries with at least one of
+each, and a positive `sliding_window`. The admitted artifact has 48 layers,
+five sliding then one full, repeating, and a 1024-token window. Kernel,
+parity label, ring order and fail-closed cases are the `gpt_oss` class's.
 - (v0.1.17, SPEC-first) the GLM-5.3-Flash identity `zai-org/glm-5.3-flash`
   (catalog key from v0.1.18), the catalog model whose verified artifact is `Jundot/GLM-5.3-Flash-oQ4e-mtp` @
   `36defc5042d92a992a7948e83d6f110b8df69329`, with
@@ -1090,7 +1151,8 @@ for that identity: Qwen hybrid rows use `MambaCache` on recurrent layers and
 `KVCacheSimple` on full-attention layers, while `openai/gpt-oss-120b` uses
 keep=0 `RotatingKVCache` on sliding-window layers and `KVCacheSimple` on
 full-attention layers in the exact `gpt_oss` class layout above (v0.1.29;
-`openai/gpt-oss-20b` the same). The `glm5_next` identity uses exactly one cache per
+`openai/gpt-oss-20b` the same, and (v0.1.31) `google/gemma-4-12b-it` in the
+`gemma4` class layout). The `glm5_next` identity uses exactly one cache per
 decoder layer in layer order: `MambaCache` at every `linear_attention` index of
 `text_config.layer_types` (34 KDA layers for the admitted artifact) and
 `pagedMLA(kpool: text_config.index_kpool)` at every
@@ -1159,7 +1221,9 @@ leftovers proof. Recognizing `gpt_oss` as a model family (v0.1.2) is
 identity-family only; gpt-oss alternating sliding/full layers remain an
 unallowlisted `mixed` class except for the exact `openai/gpt-oss-120b` and
 (v0.1.29) `openai/gpt-oss-20b` identity/config pairs named above, each in the
-exact `gpt_oss` class layout.
+exact `gpt_oss` class layout. Recognizing `gemma4` (v0.1.31) is likewise
+identity-family only: only `google/gemma-4-12b-it` in the exact `gemma4`
+class layout is allowlisted.
 
 **Serve-time memory cap vs. model attention type (v0.1.1 clarification).** The
 runtime `newCache()` class conflates two independent reasons a model presents a
@@ -1377,7 +1441,8 @@ The implementation PR for this SPEC MUST include fixtures that prove:
   paged attach may open. The `openai/gpt-oss-120b` identity has its own
   packaged-runtime 1024-token prefill / 48-token parity plus row
   isolation/replay/drain evidence and is admitted only by exact identity/config
-  pair. Other parsed family labels (`gemma4`, `glm4_moe`, `nemotron_h`, etc.)
+  pair. Other parsed family labels (`gemma4` other than the provisional
+  `google/gemma-4-12b-it` entry, `glm4_moe`, `nemotron_h`, etc.)
   are explicitly non-admitted and fail closed until this
   acceptance criterion is repeated for each family.
 - **AC-4 allocator/block-table correctness:** allocation, free-list reuse,

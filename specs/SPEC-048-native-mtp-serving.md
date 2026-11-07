@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.76
+**Version:** 0.1.77
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.76",
+  "version": "0.1.77",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -461,10 +461,44 @@ and need not equal `mtp_num_hidden_layers`; the provider's packed path
 proposes depth 1. The signed `max_native_active_rows` ceiling is 1. A
 `gemma4_mtp_v1` capability is admitted only when the loaded target is the
 Gemma 4 text model, `model-mtp.safetensors` exists in the target directory,
-and the `gemma4` family attaches to the SPEC-039 paged-KV backend; until that
-attach lands, admission fails closed with `admission_capability_unsupported`
-and the target serves ordinary decode. R004, R012, R014, and R015 apply
-unchanged.
+and the target attaches to the SPEC-039 paged-KV backend as the exact
+`google/gemma-4-12b-it` `gemma4` mixed class (SPEC-039 v0.1.31) with the
+runtime caches in that config layout; otherwise admission fails closed with
+`admission_capability_unsupported` and the target serves ordinary decode.
+The signed `state_class` is `stageable_rewindable`: sliding-window layers
+hold no recurrent state. R004, R012, R014, and R015 apply unchanged.
+
+**Gemma 4 artifact observation (0.1.77).** For `gemma4_mtp_v1` the observer
+reads the target and the assistant as one embedded pair with two formats:
+
+1. *Identity.* `config.json` MUST have top-level `model_type`
+   `gemma4_unified`, `architectures == ["Gemma4UnifiedForConditionalGeneration"]`,
+   `text_config.model_type` `gemma4_unified_text`, and
+   `text_config.mtp_assistant_config` with `model_type`
+   `gemma4_unified_assistant` and `dtype` bfloat16.
+   `text_config.mtp_num_hidden_layers` (1 to 64) is the prediction layer
+   count and MUST equal the assistant's `text_config.num_hidden_layers`.
+2. *Target.* Every `.safetensors` file in the target directory except
+   `model-mtp.safetensors` is a target shard. The config `quantization`
+   object MUST be MLX affine with global `bits` 8 and `group_size` `32`, `64`
+   or `128`, with no per-module overrides and no `false` entries. Every
+   quantized module MUST be packed `U32` at 8 bits with bfloat16 scales and
+   biases. Keys under `embed_audio.`, `embed_vision.`, `vision_embedder.`,
+   `vision_tower.`, `multi_modal_projector.` and `audio_tower.` (after an
+   optional leading `model.`) are discarded, as the pinned loader discards
+   them; a look-alike root without the dot fails closed. Every other key
+   MUST start with `language_model.model.` and MUST NOT carry a namespace
+   the text loader drops silently (`mtp.`, `self_attn.rotary_emb`,
+   `input_max`, `input_min`, `output_max`, `output_min`).
+3. *Assistant.* `model-mtp.safetensors` MUST exist exactly once. Every tensor
+   in it MUST start with `language_model.mtp.`, MUST be bfloat16, and MUST
+   NOT be a `.scales` or `.biases` tensor.
+4. *Representation.* The pair is `mlx_affine_8bit` (target) and `bf16`
+   (MTP). Its representation manifest is the SPEC-023-R024 canonical JCS
+   form `{"mtp":{"dtype":"bfloat16"},"schema":"macprovider.native-mtp-representation.v1","target":{"bits":8,"group_size":G,"overrides":{},"unquantized":[]}}`.
+   Admission requires the signed `block_size_elements` to equal `G`, the
+   signed digest to equal the recomputed one, and both exception arrays to
+   be empty (SPEC-023 v0.22.39).
 
 The observer MUST inspect every `.safetensors` file that the R003-authorized
 mlx-swift-lm loader can consume. At the R003 mlx-swift-lm revision
@@ -538,22 +572,26 @@ The authorized dependency tuple is exact:
 
 | Repository | Fork tag | Revision | Upstream base |
 |---|---|---|---|
-| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.30` | `b2a45b03bbef512827a8960ded61591a3b6283d7` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
+| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.30` | `e198b9b084506c2484d0a708e125c68ad3f89e07` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
 | `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.11` | `c774cb0934c7503bc3fe1c3d1afbe44c728e8891` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
 | `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.6` | `51edbb37620aef7c860ab5d7cdb7bf5b14333da2` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
 | `https://github.com/Augustas11/mlx-c` | `v0.6.0-macprovider.2` | `2b1ff2b5b5129a6115771da32e1bac3b6b01ab01` | `ml-explore/mlx-c` pinned base (`ebc88f10caa1b625e6b581437a8dea6df8a70085`) |
 
 The mlx-swift-lm row `3.32.3-macprovider.30` is on `3.32.3-macprovider.25`
 (`da8f1932f8e2a46477a1a35663955267bc6fcd04`) (#2154), at
-`b2a45b03bbef512827a8960ded61591a3b6283d7`. It is the campaign candidate for #2154 and is not tagged yet. It is one commit
-(`b2a45b0`) on `3.32.3-macprovider.29-sync` (`bf70aa4`), which carries
+`e198b9b084506c2484d0a708e125c68ad3f89e07`. It is the campaign candidate for #2154 and is not tagged yet. It is two commits
+(`b2a45b0`, `e198b9b`) on `3.32.3-macprovider.29-sync` (`bf70aa4`), which carries
 `.25` plus the 2026-11-04 upstream sync (#2230: MiniMax M3 fused experts,
 GLM-5-Next quantization-map paths, cache-mask fixes, quantized-KV fused
-prefill, Nemotron 3.5, LFM3). The commit adds the Gemma 4 assistant as a
+prefill, Nemotron 3.5, LFM3). The first commit adds the Gemma 4 assistant as a
 packed native-MTP drafter, loads it from the target's
 `model-mtp.safetensors`, and makes the text-only `gemma4_unified` target emit
 the hidden state and last full/sliding K/V the assistant attends over. The
-Swift, core and C rows are unchanged.
+second makes every Gemma 4 layer whose K/V no KV-shared layer and no drafter
+reads hand a cache that owns attention (`KVCacheAttentionProtocol`) the
+update and the attention, so batched rows at different key offsets attend
+only over their own keys (SPEC-038 FR-CB2); serial and quantized caches are
+unchanged. The Swift, core and C rows are unchanged.
 The existing Qwen3.6 and GLM-5.3-Flash admitted tuples name `.25`; this row
 changes their decode-path identity, so it lands only with their R014 rebind
 (MTP-13: identity only, no R015 rerun) in the same release.
@@ -2287,7 +2325,7 @@ the journey must include its independent and combined evidence.
 | First Qwen-family MTP artifact | `UNKNOWN` | `@Augustas11` | `#1770` | Legally/provenance-clean immutable model, tokenizer, MTP manifest, and exact hashes. |
 | MLX dependency tuple | `RESOLVED_FOR_TUPLE` | `@Augustas11` | `#1906` | The operator's permanent fork model (MTP-3) replaces the upstream-release requirement. MTP-3 names the exact three-fork tuple; each rebase passes the runbook's per-rebase acceptance gate and a SPEC revision. |
 | GLM-5.3-Flash `glm5_next_mtp_v1` tuple | `DECISION_REQUIRED` | `@Augustas11` | `#2029` | Pending: the `JOURNEY-NATIVE-MTP-SERVING` run on the R003-authorized tagged tuple and the GLM R015 record, which complete the R003 review record. An LFM-only tuple identity change follows MTP-13 and preserves the original measured GLM runtime/source identities. Implemented in the campaign branch: the observer, sidecar parsing, v2 projection reader, SPEC-023 v0.22.27 widths, the fork's MTP-1 drafter and packed verification, and the provider drafter load path, admission gate and paged packed verification. |
-| Gemma 4 12B `gemma4_mtp_v1` tuple | `DECISION_REQUIRED` | `@Augustas11` | `#2154` | Pending: the `gemma4` SPEC-039 paged-KV attach (packed verification and the verify-forward shared K/V need it), the R002 observer for an 8-bit target with a BF16 embedded assistant, the lab harness for a non-hybrid 8-bit family, then the R005 and R015 one-row cells. Implemented in the campaign branch: the fork drafter, embedded-assistant loader and target state emission, the provider adapter gate, drafter load, sidecar ceiling and source layout. |
+| Gemma 4 12B `gemma4_mtp_v1` tuple | `DECISION_REQUIRED` | `@Augustas11` | `#2154` | Pending: the R005 and R015 one-row cells on the lab build. Implemented in the campaign branch: the fork drafter, embedded-assistant loader, target state emission and row-safe batched attention; the provider adapter gate, drafter load, sidecar ceiling and source layout; the `gemma4` SPEC-039 v0.1.31 mixed-class attach; the 0.1.77 R002 observer for the 8-bit target with the bf16 embedded assistant; and the lab harness for a non-hybrid 8-bit family. |
 | First MLX-native MXFP8 artifact | `UNKNOWN` | `@Augustas11` | `#1770` | SPEC-023/SPEC-010 format, fit, quality, license, provenance, and hardware evidence. |
 | Batched-verify numerical parity | `RESOLVED_FOR_TUPLE` | `@Augustas11` | `#1770` | The qmv-to-qmm switch at 12 packed verify tokens cannot occur for the first tuple: `max_native_active_rows` is 1 and depth is 1, so a packed verify is at most 2 tokens, and rows above the bound ride the ordinary forward at depth zero. A tuple whose bound times `proposal_depth + 1` reaches 12 must decide between a bounded drift allowance and kernel-matched verification before it can be signed. |
 | Depth-1 throughput value | `RESOLVED_FOR_TUPLE` | `@Augustas11` | `#1770` | The 2026-10-06 quiet R015 (policy `e24cb7bc…`, amended 0.1.25 gates) passed every cell for the A3B Studio tuple: one-slot decode ratio 1.19-1.28 with corrected lower bounds +18% to +26%, gated s2/s8 cells non-inferior. The value is one-slot only; the R007 bound of 1 keeps native off above it. |
@@ -2327,6 +2365,19 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.77 (2026-11-07)** — R002 defines the `gemma4_mtp_v1` artifact
+  observation: the exact config identity, an MLX affine 8-bit target with
+  bfloat16 scales and no exceptions, the discarded audio/vision namespaces,
+  the bfloat16 assistant under `language_model.mtp.` in
+  `model-mtp.safetensors`, and the mixed representation manifest
+  (SPEC-023 v0.22.39, lockstep). A `gemma4_mtp_v1` capability is admitted
+  only on the exact SPEC-039 v0.1.31 `gemma4` mixed class with the runtime
+  caches in its config layout, with state class `stageable_rewindable`.
+  R003 adds mlx-swift-lm `e198b9b` to the `3.32.3-macprovider.30` candidate:
+  Gemma 4 layers attend through a cache that owns attention, so batched rows
+  attend only over their own keys. The R015 bench and acceptance policies
+  freeze the target's global width per family (`4bit`, or `8bit` for
+  `gemma4_mtp_v1`). R004, R012, R014 and R015 gates are unchanged.
 - **0.1.76 (2026-11-07)** — R003 names mlx-swift-lm `3.32.3-macprovider.30`
   (`b2a45b03bbef512827a8960ded61591a3b6283d7`) on `3.32.3-macprovider.25`
   (#2154), one commit on `3.32.3-macprovider.29-sync`: the Gemma 4 assistant

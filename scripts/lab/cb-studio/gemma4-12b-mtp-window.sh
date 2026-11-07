@@ -41,7 +41,8 @@
 # refuses to start while anything listens on :8080, the live serve process
 # runs, or the live LaunchAgent is loaded; one window runs at a time.
 #
-# Env: LAB (~/macprovider-lab-2154), SRC ($LAB/src, the HEAD_COMMIT tree),
+# Env: LAB (~/macprovider-lab-2154), ROOT ($LAB/fixtures/gemma4, holds target/),
+# SRC ($LAB/src, the HEAD_COMMIT tree),
 # HARNESS, HEAD_COMMIT, TARGET_SHA256 (stamp), OUT, FORMAL ($LAB/formal),
 # STEP_TIMEOUT_S (0: no per-step limit), FROM (1, resume a cell list).
 set -euo pipefail
@@ -59,7 +60,7 @@ LIVE_BINARY=$HOME/macprovider/macprovider-cli
 LOCK=$HOME/.gemma4-mtp-window.lock
 RELEASE_METALLIB_SHA256=3d9b4a747758128cc5418e62c5ad8e282a11b0d436423537137e013beaa1261b
 MODEL_ID=google/gemma-4-12b-it
-ROOT=$LAB/fixtures/gemma4
+ROOT=${ROOT:-$LAB/fixtures/gemma4}
 # SPEC-048 sidecar floor; the gemma4_mtp_v1 native row ceiling is 1.
 QUALIFIED_SLOTS=2
 TEMPLATE=$SRC/scripts/lab/cb-studio/gemma4-12b-mtp/gemma4-step1-d1.json

@@ -25,6 +25,11 @@ struct NativeMTPHardwareE2EFamily: Equatable, Sendable {
     let blockSizeTokens: Int
     /// The paged kind the target's attention layers must use.
     let pagedKind: PagedKVSharedForwardBackend.CacheKind
+    /// The target keeps recurrent (`MambaCache`) layers beside its paged ones.
+    var hasRecurrentLayers = true
+    /// The policies' `quantization` field: the global MLX affine width of the
+    /// target artifact, which the R002 observer checks on the bytes.
+    var quantization = "4bit"
 
     /// The Qwen3.5 fixture's paged block (unchanged from the Qwen-only harness).
     static let qwenBlockSizeTokens = 32
@@ -46,6 +51,24 @@ struct NativeMTPHardwareE2EFamily: Equatable, Sendable {
         blockSizeTokens: PagedKVConfig.familyDefaultBlockSizeTokens["glm5_next"] ?? 256,
         pagedKind: .pagedMLA(kpool: 4)
     )
+
+    /// Gemma 4 12B (`gemma4_mtp_v1`): an MLX affine 8-bit target with the
+    /// embedded bfloat16 assistant, sliding-window and full-attention layers
+    /// paged on one block table (SPEC-039 v0.1.31) and no recurrent layers.
+    /// The block is the Qwen3.5 harness's, which the pool sizing assumes.
+    static let gemma4 = NativeMTPHardwareE2EFamily(
+        modelFamily: "gemma4",
+        familyAdapter: "gemma4_mtp_v1",
+        embeddedMTP: true,
+        blockSizeTokens: qwenBlockSizeTokens,
+        pagedKind: .pagedAttention,
+        hasRecurrentLayers: false,
+        quantization: "8bit"
+    )
+
+    /// The cache/state class the lab tuple signs: `hybrid_` marks recurrent
+    /// state (`ModelRuntime.nativeMTPExpectedStateClass`).
+    var stateClass: String { hasRecurrentLayers ? "hybrid_stageable_rewindable" : "stageable_rewindable" }
 
     /// The lab tuple's `request_feature_profile`: sampled where the family
     /// may sign it (Qwen3.5 and GLM-5-Next, SPEC-048 MTP-2).
@@ -77,7 +100,7 @@ struct NativeMTPHardwareE2EFamily: Equatable, Sendable {
     /// The native active-row bound the family's tuple signs (SPEC-048 R007),
     /// nil when the harness's slot count is used. glm5_next signs 1: at four
     /// rows native MTP decoded at 0.79x ordinary in window A2 (1.27x at one).
-    var signedMaxNativeActiveRows: Int? { self == .glm5Next ? 1 : nil }
+    var signedMaxNativeActiveRows: Int? { self == .glm5Next || self == .gemma4 ? 1 : nil }
     var implementationMaxNativeActiveRows: Int? {
         NativeMTPAdmissionSidecar.maxNativeActiveRowsBound(familyAdapter: familyAdapter)
     }
@@ -109,6 +132,7 @@ struct NativeMTPHardwareE2EFamily: Equatable, Sendable {
         switch ModelRuntime.pagedKVModelCapabilities(modelID: nil, configJSONData: configJSONData).modelFamily {
         case "qwen": .qwen35
         case "glm5_next": .glm5Next
+        case "gemma4": .gemma4
         default: nil
         }
     }
@@ -663,7 +687,8 @@ final class NativeMTPHardwareE2ERunner {
             modelCapabilities.modelFamily == family.modelFamily,
             "expected \(family.modelFamily) model family, got \(modelCapabilities.modelFamily)"
         )
-        try require(modelCapabilities.hybridDecoderArchitectureVerified, "hybrid decoder not verified")
+        // Every harness family is an allowlisted mixed class (SPEC-039 FR-PKV12).
+        try require(modelCapabilities.hybridDecoderArchitectureVerified, "\(family.modelFamily) mixed-class architecture not verified")
         try require(
             ModelRuntime.nativeMTPAdmissionCacheClass(
                 runtimeCacheClass: "mixed",
@@ -723,7 +748,15 @@ final class NativeMTPHardwareE2ERunner {
             }
         }
         try require(cacheKinds.contains(where: family.matchesPagedKind), "\(family.pagedKind) cache not observed")
-        try require(cacheKinds.contains(.recurrentMamba), "recurrent Mamba cache not observed")
+        if family.hasRecurrentLayers {
+            try require(cacheKinds.contains(.recurrentMamba), "recurrent Mamba cache not observed")
+        } else {
+            // A sliding-window/full-attention class: exactly its config layout.
+            try require(
+                cacheKinds == modelCapabilities.slidingWindowAttention?.expectedCacheKinds,
+                "\(family.modelFamily) cache layout does not match its config"
+            )
+        }
 
         let pagedConfig = PagedKVConfig(
             enabled: true,
@@ -1206,7 +1239,7 @@ final class NativeMTPHardwareE2ERunner {
             "decode_path": "native_mtp",
             "mtp_manifest_sha256": manifestSHA,
             "mtp_family_adapter": family.familyAdapter,
-            "mtp_state_class": "hybrid_stageable_rewindable",
+            "mtp_state_class": family.stateClass,
             "mtp_head_count": 1,
             "proposal_depth": proposalDepth,
             "complete_window_bytes_by_depth": family.completeWindowBytesByDepth(maxContextTokens: maxContextTokens, maxDepth: proposalDepth),
@@ -1215,7 +1248,7 @@ final class NativeMTPHardwareE2ERunner {
             "source_commit": Self.providerRevision,
             "reproducible_build_sha256": Self.reproducibleBuildSHA256,
             "live_executable_cdhash": Self.liveExecutableCDHash,
-            "cache_state_classes": ["hybrid_stageable_rewindable"],
+            "cache_state_classes": [family.stateClass],
             "hardware_class": NativeMTPAdmissionSidecar.canonicalHardwareClass(machine.chip),
             "ram_bytes": machine.ramGB * 1_073_741_824,
             "qualified_slots": maxBatch,

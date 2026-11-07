@@ -1,12 +1,20 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.22.38
+version: v0.22.39
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-10-02
 lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-change invariants). CONFORMANCE `depends_on` does not list SPEC-005; the lockstep is recorded in prose only, avoiding a dependency cycle (SPEC-005 likewise does not list SPEC-023 in its `depends_on`).
 
 ## Change log
+
+- **v0.22.39 (2026-11-07, Related: #2154)** — SPEC-023-R024: for the
+  `gemma4_mtp_v1` family adapter only, `mlx_affine` names an MLX affine
+  8-bit target and its unquantized bfloat16 embedded assistant, represented
+  to the runtime as `mlx_affine_8bit` (target) and `bf16` (MTP), with empty
+  exception arrays and a representation manifest whose `mtp` object is the
+  base form. Every other adapter keeps global width 4 for both artifacts.
+  Lockstep with SPEC-048 0.1.77.
 
 - **v0.22.38 (2026-10-27, Related: #2144)** — Qualification uses digest-matched
   LAB evidence, followed by MTP-13 signed identity-only rebind. No collector,
@@ -3774,7 +3782,14 @@ passes the SPEC-048-R012 `1.01x` perplexity, one-point task, 5% fit-error, and
 `scale_layout=per_block`, `block_size_elements` equal to the global group size
 `32`, `64`, or `128`, `alignment_bytes=null`, and `padding_rule=none`. v0.1
 admits only global width `4`, represented to the runtime as
-`mlx_affine_4bit` for both target and MTP. Compressed-tensors FP8, TorchAO
+`mlx_affine_4bit` for both target and MTP, except (v0.22.39) an entry whose
+`mtp_family_adapter` is `gemma4_mtp_v1`: its `mlx_affine` names an MLX affine
+8-bit target with no config overrides or `false` entries and the unquantized
+bfloat16 assistant embedded in the target artifact (SPEC-048-R002),
+represented as `mlx_affine_8bit` (target) and `bf16` (MTP). Its exception
+arrays MUST be empty, and its representation manifest is the form below with
+`"target":{"bits":8,"group_size":G,"overrides":{},"unquantized":[]}` and
+`"mtp":{"dtype":"bfloat16"}`. Compressed-tensors FP8, TorchAO
 FP8, GGUF, a name containing `FP8`, or another microscaling format is invalid.
 
 For `mlx_affine`, `representation_manifest_sha256` is SHA-256 of the UTF-8

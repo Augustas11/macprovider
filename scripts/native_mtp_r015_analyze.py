@@ -145,7 +145,6 @@ def _request_profile_violations(record: dict, *, admission: bool) -> list[str]:
 # admission policy must carry, so the analyzer never judges a policy the bench
 # would refuse.
 FIXED_METHODOLOGY = {
-    "quantization": "4bit",
     "cache_mode": "paged_kv_mixed",
     "proposal_depth": 1,
     "run_order": "seeded_random_counterbalanced",
@@ -153,6 +152,7 @@ FIXED_METHODOLOGY = {
     "exclusion_rules": "none",
     "confidence_method": "paired_block_bootstrap_holm_v1",
 }
+ADMITTED_QUANTIZATIONS = ("4bit", "8bit")
 # SPEC-048 0.1.71 gate set, the only one the bench accepts for new runs. The
 # decode-throughput gate passes when the corrected lower bound is strictly
 # greater than 0 (a draw at or below the threshold counts against the gate).
@@ -247,6 +247,10 @@ def _policy_contract_violations(policy: dict) -> list[str]:
     for key, expected in FIXED_METHODOLOGY.items():
         if policy.get(key) != expected or isinstance(policy.get(key), bool):
             violations.append(f"methodology_not_frozen:{key}")
+    # The target's global MLX affine width; the bench binds it to the fixture
+    # family (8bit only for gemma4_mtp_v1, SPEC-048 0.1.77).
+    if policy.get("quantization") not in ADMITTED_QUANTIZATIONS:
+        violations.append("methodology_not_frozen:quantization")
     # Field types and ranges, mirroring NativeMTPBenchPolicy.load.
     hex64 = re.compile(r"^[0-9a-f]{64}$")
     hex40 = re.compile(r"^[0-9a-f]{40}$")

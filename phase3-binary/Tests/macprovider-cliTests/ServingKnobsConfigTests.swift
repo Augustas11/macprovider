@@ -800,7 +800,11 @@ final class ServingKnobsConfigTests: XCTestCase {
             configJSONData: Data(#"{"model_type":"gemma4","architectures":["Gemma4ForConditionalGeneration"]}"#.utf8)
         )
         XCTAssertEqual(gemma4.modelFamily, "gemma4")
-        XCTAssertFalse(PagedKVAttachGate.recognizedModelFamilies.contains(gemma4.modelFamily))
+        // SPEC-039 v0.1.31 recognizes the family for the exact 12B mixed
+        // class only; this artifact is no verified layout.
+        XCTAssertTrue(PagedKVAttachGate.recognizedModelFamilies.contains(gemma4.modelFamily))
+        XCTAssertFalse(gemma4.hybridDecoderArchitectureVerified)
+        XCTAssertNil(gemma4.slidingWindowAttention)
 
         // DeepSeek V4-Flash has its own row-owned pool bridge. Recognizing
         // the family never admits an unverified raw artifact or layout;

@@ -1587,9 +1587,12 @@ enum NativeMTPAdmissionSidecar {
         guard decreaseThreshold < increaseThreshold else {
             throw NativeMTPAdmissionSidecarError.invalidValue("\(path).increase_threshold_ppm")
         }
+        var quantizationFamilyAdapter: String?
+        if case .string(let adapter)? = object["mtp_family_adapter"] { quantizationFamilyAdapter = adapter }
         let quantization = try parseReleaseQuantization(
             try requireObject(object, "quantization", path: path),
-            path: "\(path).quantization"
+            path: "\(path).quantization",
+            familyAdapter: quantizationFamilyAdapter
         )
         try parseOrdinaryBaseline(
             try requireObject(object, "ordinary_baseline", path: path),
@@ -1655,7 +1658,8 @@ enum NativeMTPAdmissionSidecar {
 
     private static func parseReleaseQuantization(
         _ object: [String: NativeMTPSidecarJSON],
-        path: String
+        path: String,
+        familyAdapter: String? = nil
     ) throws -> Quantization {
         try rejectUnknown(object, allowed: [
             "kind", "packed_data_dtype", "packed_layout", "scale_dtype",
@@ -1714,9 +1718,13 @@ enum NativeMTPAdmissionSidecar {
                   paddingRule == "none" else {
                 throw NativeMTPAdmissionSidecarError.invalidValue(path)
             }
+            // SPEC-048-R002 (0.1.77): a `gemma4_mtp_v1` affine tuple is an
+            // 8-bit target with the unquantized bfloat16 assistant; the
+            // representation digest binds both.
+            let gemma4 = familyAdapter == gemma4MTPFamilyAdapter
             return Quantization(
-                target: "mlx_affine_4bit",
-                mtp: "mlx_affine_4bit",
+                target: gemma4 ? "mlx_affine_8bit" : "mlx_affine_4bit",
+                mtp: gemma4 ? "bf16" : "mlx_affine_4bit",
                 blockSizeElements: blockSize,
                 representationManifestSHA256: representationManifestSHA256,
                 unquantizedExceptions: unquantizedExceptions,

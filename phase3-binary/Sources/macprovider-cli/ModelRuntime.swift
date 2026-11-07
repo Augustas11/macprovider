@@ -836,10 +836,13 @@ struct PagedKVRuntimeModelCapabilities: Equatable, Sendable {
     /// `index_topk` and the indexer selects over paged pooled keys
     /// (SPEC-039 FR-PKV12). MiniMax M3 uses its selection span
     /// (`sparse_block_size x sparse_topk_blocks` tokens) in place of
-    /// `index_topk`, so the indexer selects over paged indexer keys.
+    /// `index_topk`, so the indexer selects over paged indexer keys. A
+    /// sliding-window class uses its window, so decode starts past it
+    /// (gemma-4-12b's 1024-token window; gpt-oss's 128 stays at 513).
     func attachProbePromptTokens(blockSizeTokens: Int) -> Int {
         let base = PagedKVRuntimeParityProbe.sharedForwardParityPromptTokens
-        guard let selected = sparseAttention?.indexTopk ?? blockSparseAttention?.selectedTokens else { return base }
+        guard let selected = sparseAttention?.indexTopk ?? blockSparseAttention?.selectedTokens
+            ?? slidingWindowAttention?.windowTokens else { return base }
         let (twoBlocks, blocksOverflow) = max(0, blockSizeTokens).multipliedReportingOverflow(by: 2)
         let (span, spanOverflow) = selected.addingReportingOverflow(twoBlocks)
         return blocksOverflow || spanOverflow ? Int.max : max(base, span)
@@ -936,6 +939,18 @@ struct PagedKVSlidingWindowAttentionLayout: Equatable, Sendable {
         else { return nil }
         self.layerTypes = layerTypes
         self.windowTokens = window
+    }
+
+    /// `gemma4` text layout from `text_config` (SPEC-039 FR-PKV12 v0.1.31):
+    /// the same two layer types, read only from an explicit `layer_types`
+    /// list. `num_kv_shared_layers` MUST be present and 0: the model omits the
+    /// caches of KV-shared layers, and an absent key defaults to 20.
+    init?(gemma4TextConfig config: [String: Any]) {
+        guard config["model_type"] as? String == "gemma4_unified_text",
+              let kvShared = config["num_kv_shared_layers"] as? Int, kvShared == 0,
+              config["layer_types"] is [String]
+        else { return nil }
+        self.init(config: config)
     }
 }
 
@@ -3278,10 +3293,10 @@ actor ModelRuntime: ModelRuntimeServing {
             guard let layout = modelCapabilities.blockSparseAttention else { return false }
             return cacheKinds == layout.expectedCacheKinds
         }
-        if modelCapabilities.modelFamily == "gpt_oss" {
+        if modelCapabilities.modelFamily == "gpt_oss" || modelCapabilities.modelFamily == "gemma4" {
             // One cache per decoder layer in `layer_types` order: keep=0
             // sliding window of `sliding_window` tokens or full attention
-            // (SPEC-039 FR-PKV12 v0.1.29).
+            // (SPEC-039 FR-PKV12 v0.1.29; `gemma4` v0.1.31).
             guard let layout = modelCapabilities.slidingWindowAttention else { return false }
             return cacheKinds == layout.expectedCacheKinds
         }
@@ -3658,7 +3673,9 @@ maxTokens: 1,
         // the separately measured sliding-window/full-attention tuple proven in
         // #1780; the 20b entry (SPEC-039 v0.1.29) is that same class on its own
         // exact identity. Both also need the config's exact per-layer layout;
-        // neither admits the gpt_oss family or a path alias. Non-
+        // neither admits the gpt_oss family or a path alias. The gemma-4-12b
+        // entry (SPEC-039 v0.1.31) is the same class read from its
+        // `text_config`; it does not admit the gemma4 family. Non-
         // hybrid Qwen models are admitted by the base `KVCacheSimple` allowlist.
         // Adding a future measured mixed identity is one entry here plus the
         // matching SPEC-039 line. The runtime parity/isolation probes still gate
@@ -3667,6 +3684,7 @@ maxTokens: 1,
         let hybridArchitectureAllowlist: [String: String] = [
             "openai/gpt-oss-120b": "GptOssForCausalLM",
             "openai/gpt-oss-20b": "GptOssForCausalLM",
+            "google/gemma-4-12b-it": "Gemma4UnifiedForConditionalGeneration",
             "qwen/qwen3.5-27b": "Qwen3_5ForConditionalGeneration",
             "qwen/qwen3.5-35b-a3b": "Qwen3_5MoeForConditionalGeneration",
             "qwen/qwen3.6-27b": "Qwen3_5ForConditionalGeneration",
@@ -3707,17 +3725,27 @@ maxTokens: 1,
             else { return nil }
             return PagedKVBlockSparseAttentionLayout(textConfig: textConfig)
         }()
-        // `gpt_oss` keys on the exact `architectures` array and model type and
-        // carries its verified sliding-window/full-attention layer layout.
+        // `gpt_oss` and `gemma4` key on the exact `architectures` array and
+        // model type and carry their verified sliding-window/full-attention
+        // layer layout (`gemma4` from `text_config`, SPEC-039 v0.1.31).
         let slidingWindowAttention: PagedKVSlidingWindowAttentionLayout? = {
             guard let id = modelID?.lowercased(),
                   let expectedArchitecture = hybridArchitectureAllowlist[id],
-                  expectedArchitecture == "GptOssForCausalLM",
                   let configObject,
-                  configObject["architectures"] as? [String] == [expectedArchitecture],
-                  configObject["model_type"] as? String == "gpt_oss"
+                  configObject["architectures"] as? [String] == [expectedArchitecture]
             else { return nil }
-            return PagedKVSlidingWindowAttentionLayout(config: configObject)
+            switch expectedArchitecture {
+            case "GptOssForCausalLM":
+                guard configObject["model_type"] as? String == "gpt_oss" else { return nil }
+                return PagedKVSlidingWindowAttentionLayout(config: configObject)
+            case "Gemma4UnifiedForConditionalGeneration":
+                guard configObject["model_type"] as? String == "gemma4_unified",
+                      let textConfig = configObject["text_config"] as? [String: Any]
+                else { return nil }
+                return PagedKVSlidingWindowAttentionLayout(gemma4TextConfig: textConfig)
+            default:
+                return nil
+            }
         }()
         let deepseekV4Pool: DeepseekV4PoolLayout? = {
             guard modelID?.lowercased() == "deepseek/deepseek-v4-flash", let configObject,
@@ -3735,7 +3763,9 @@ maxTokens: 1,
             if expectedArchitecture == "Glm5NextForConditionalGeneration" { return sparseAttention != nil }
             if expectedArchitecture == "DeepseekV4ForCausalLM" { return deepseekV4Pool != nil }
             if expectedArchitecture == "MiniMaxM3SparseForConditionalGeneration" { return blockSparseAttention != nil }
-            if expectedArchitecture == "GptOssForCausalLM" { return slidingWindowAttention != nil }
+            if expectedArchitecture == "GptOssForCausalLM" || expectedArchitecture == "Gemma4UnifiedForConditionalGeneration" {
+                return slidingWindowAttention != nil
+            }
             return architectures.contains(expectedArchitecture)
         }()
         let lfm25HybridVerified = lfm25HybridDecoderArchitectureVerified(
@@ -13524,6 +13554,15 @@ maxTokens: maxTokens,
                 && representation.manifestSHA256 == quantization.representationManifestSHA256
                 && representation.perLayerExceptions == quantization.perLayerExceptions
                 && representation.unquantizedExceptions == quantization.unquantizedExceptions
+        case ("mlx_affine_8bit", "bf16"):
+            // SPEC-048-R002 (0.1.77) `gemma4_mtp_v1`: 8-bit target, bf16 assistant.
+            guard let representation = try? NativeMTPArtifactObserver.embeddedAssistantRepresentation(for: observation) else {
+                return false
+            }
+            return representation.groupSize == quantization.blockSizeElements
+                && representation.manifestSHA256 == quantization.representationManifestSHA256
+                && quantization.perLayerExceptions.isEmpty
+                && quantization.unquantizedExceptions.isEmpty
         case ("bf16", "bf16"):
             guard let representation = try? NativeMTPArtifactObserver.baseRepresentation(for: observation) else {
                 return false
@@ -13646,7 +13685,7 @@ maxTokens: maxTokens,
                 cacheKinds: cacheKinds
             )
         case .targetEmbeddedAssistant:
-            return gemma4NativeMTPTopologySupported(modelCapabilities: modelCapabilities)
+            return gemma4NativeMTPTopologySupported(modelCapabilities: modelCapabilities, cacheKinds: cacheKinds)
         case .separateArtifact, nil:
             return true
         }
@@ -13654,13 +13693,20 @@ maxTokens: maxTokens,
 
     /// `gemma4_mtp_v1`: the assistant attends over the target's last
     /// full-attention and sliding-attention K/V, which packed verification
-    /// hands back per row only from paged K/V. Gemma 4 is not a paged-KV
-    /// family yet (SPEC-039), so this fails closed until it is.
+    /// hands back per row only from paged K/V. The target must be the exact
+    /// SPEC-039 v0.1.31 `gemma4` mixed class, with the runtime caches in its
+    /// config layout.
     private static func gemma4NativeMTPTopologySupported(
-        modelCapabilities: PagedKVRuntimeModelCapabilities
+        modelCapabilities: PagedKVRuntimeModelCapabilities,
+        cacheKinds: [PagedKVSharedForwardBackend.CacheKind]?
     ) -> Bool {
-        modelCapabilities.modelFamily == "gemma4"
-            && PagedKVAttachGate.recognizedModelFamilies.contains(modelCapabilities.modelFamily)
+        guard modelCapabilities.modelFamily == "gemma4",
+              PagedKVAttachGate.recognizedModelFamilies.contains(modelCapabilities.modelFamily),
+              modelCapabilities.hybridDecoderArchitectureVerified,
+              let layout = modelCapabilities.slidingWindowAttention,
+              let cacheKinds
+        else { return false }
+        return cacheKinds == layout.expectedCacheKinds
     }
 
     /// `glm5_next_mtp_v1` (SPEC-048 MTP-2, SPEC-039 FR-PKV12/FR-PKV15): the
@@ -13769,10 +13815,12 @@ maxTokens: maxTokens,
         }
     }
 
+    /// `hybrid_` marks recurrent state; a sliding-window/full-attention
+    /// class (`gemma4`) pages attention K/V only.
     private static func nativeMTPExpectedStateClass(
         modelCapabilities: PagedKVRuntimeModelCapabilities
     ) -> String {
-        modelCapabilities.hybridDecoderArchitectureVerified
+        modelCapabilities.hybridDecoderArchitectureVerified && modelCapabilities.slidingWindowAttention == nil
             ? "hybrid_stageable_rewindable"
             : "stageable_rewindable"
     }

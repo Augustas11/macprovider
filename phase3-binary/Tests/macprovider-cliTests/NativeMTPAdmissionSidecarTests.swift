@@ -1526,6 +1526,47 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         XCTAssertEqual(capability.quantization.perLayerExceptions, ["target/model.layers.0.mlp.gate"])
     }
 
+    /// SPEC-048-R002 (0.1.77): for `gemma4_mtp_v1` the release `mlx_affine`
+    /// kind names an 8-bit target and a bfloat16 assistant; every other
+    /// adapter keeps the 4-bit pair.
+    func testReleaseEnvelopeMapsGemma4MLXAffineToAnEightBitTargetAndBF16Assistant() throws {
+        let digest = String(repeating: "a", count: 64)
+        let fixture = try makeReleaseEnvelopeFixture(
+            prepareSnapshot: { base in try Self.embeddedLayout(base) },
+            entryEdit: { entry in
+                entry["mtp_family_adapter"] = "gemma4_mtp_v1"
+                entry["max_native_active_rows"] = 1
+                entry["quantization"] = [
+                    "kind": "mlx_affine",
+                    "packed_data_dtype": "uint32",
+                    "packed_layout": "mlx_array_native_v1",
+                    "scale_dtype": "bfloat16",
+                    "scale_layout": "per_block",
+                    "block_size_elements": 64,
+                    "alignment_bytes": NSNull(),
+                    "padding_rule": "none",
+                    "unquantized_exceptions": [],
+                    "per_layer_exceptions": [],
+                    "representation_manifest_sha256": digest,
+                ]
+            }
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.base.root) }
+        let capability = try NativeMTPAdmissionSidecar.load(
+            sidecarData: fixture.sidecarData,
+            signatureData: fixture.signatureData,
+            snapshotRoot: fixture.base.snapshot,
+            context: fixture.context,
+            trustedKeyring: fixture.base.trustedKeyring,
+            resolvedArtifactAuthority: fixture.authority
+        )
+        XCTAssertEqual(capability.familyAdapter, "gemma4_mtp_v1")
+        XCTAssertEqual(capability.quantization.target, "mlx_affine_8bit")
+        XCTAssertEqual(capability.quantization.mtp, "bf16")
+        XCTAssertEqual(capability.quantization.blockSizeElements, 64)
+        XCTAssertEqual(capability.quantization.representationManifestSHA256, digest)
+    }
+
     func testReleaseEnvelopeRejectsInvalidMLXAffineExceptionsAndRepresentationFields() throws {
         func affine(_ edit: (inout [String: Any]) -> Void = { _ in }) -> [String: Any] {
             var value: [String: Any] = [

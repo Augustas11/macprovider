@@ -1465,6 +1465,9 @@ struct NativeMTPBenchPolicy {
     /// Exploratory policies relax the R015 minimums for pilots; every record is
     /// stamped `exploratory` and the analyzer refuses an admission verdict.
     let exploratory: Bool
+    /// The target's global MLX affine width (`4bit`, or `8bit` for
+    /// `gemma4_mtp_v1`); `validateFamily` binds it to the fixture family.
+    var quantization = "4bit"
 
     static func load(from url: URL) throws -> NativeMTPBenchPolicy {
         let data = try Data(contentsOf: url)
@@ -1495,7 +1498,7 @@ struct NativeMTPBenchPolicy {
         }
         let thresholds = try dictionary(object, "thresholds")
         try requireThresholds(thresholds)
-        let policy = NativeMTPBenchPolicy(
+        var policy = NativeMTPBenchPolicy(
             slots: try slotCounts(object, "slots"),
             promptTokens: try positiveIntArray(object, "prompt_tokens"),
             maxTokens: try positiveIntArray(object, "max_tokens"),
@@ -1538,12 +1541,15 @@ struct NativeMTPBenchPolicy {
                 : try nonnegativeInt(object, "arrival_interval_ms"),
             exploratory: exploratory
         )
+        policy.quantization = try string(object, "quantization")
+        guard ["4bit", "8bit"].contains(policy.quantization) else {
+            throw NativeMTPBenchError.invalidPolicy("quantization must be 4bit or 8bit")
+        }
         try policy.validateMatrix()
         guard policy.proposalDepth == 1 || (exploratory && policy.proposalDepth == 2) else {
             throw NativeMTPBenchError.invalidPolicy("proposal_depth must equal 1 outside a depth-2 exploratory policy")
         }
         let fixedMethodology: [String: AnyHashable] = [
-            "quantization": "4bit",
             "cache_mode": "paged_kv_mixed",
             "run_order": "seeded_random_counterbalanced",
             "prompt_corpus": "deterministic_synthetic_unique_v2",
@@ -1618,6 +1624,9 @@ struct NativeMTPBenchPolicy {
     /// a family that signs a native active-row bound measures at
     /// most that bound, so either mismatch could only fail after the load.
     func validateFamily(_ family: NativeMTPHardwareE2EFamily) throws {
+        guard quantization == family.quantization else {
+            throw NativeMTPBenchError.invalidPolicy("quantization must equal \(family.quantization) for \(family.familyAdapter)")
+        }
         if proposalDepth == 2 {
             guard family == .glm5Next, let bound = maxNativeActiveRows, bound <= 2 else {
                 throw NativeMTPBenchError.invalidPolicy("depth-2 exploration requires glm5_next and max_native_active_rows at most 2")

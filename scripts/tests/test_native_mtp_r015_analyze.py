@@ -578,6 +578,11 @@ class NativeMTPR015AnalyzeTests(unittest.TestCase):
         self.assertIn("thresholds_key_set_not_frozen", mixed["matrix_violations"])
         method = self._run_case(policy_overrides={"prompt_corpus": "deterministic_synthetic_unique_v1"})
         self.assertIn("methodology_not_frozen:prompt_corpus", method["matrix_violations"])
+        # The 8-bit Gemma 4 target width is admitted; other widths are not.
+        eight_bit = self._run_case(policy_overrides={"quantization": "8bit"})
+        self.assertNotIn("methodology_not_frozen:quantization", eight_bit.get("matrix_violations", []))
+        two_bit = self._run_case(policy_overrides={"quantization": "2bit"})
+        self.assertIn("methodology_not_frozen:quantization", two_bit["matrix_violations"])
         unknown = self._run_case(policy_overrides={"extra": 1})
         self.assertIn("policy_unknown_keys:extra", unknown["matrix_violations"])
 
