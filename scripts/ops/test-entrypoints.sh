@@ -1248,6 +1248,7 @@ loaded() { for v in "$@"; do printf 'relayblind_privacy_release_identity_loaded{
 COMPAT="test/repo:v$CAND@$B"
 META="$tmp/pearl/privacy-release-identities"
 restarts() { cat "$tmp/svc/restarts" 2>/dev/null || echo 0; }
+hups() { [ -f "$tmp/svc/hups" ] && wc -l < "$tmp/svc/hups" | tr -d ' ' || echo 0; }
 
 # One run: the one-time setup (one restart) and the identity staging, under the live lock with the downtime banner.
 pearl_config "$OLD" ""
@@ -1553,12 +1554,12 @@ case " $(step_ids) " in
   *) bad "registrations is not the gate before promotion: $(step_ids)" ;;
 esac
 # The one-time revocation seed is a train step on a repository-mode runtime:
-# missing seed ids are added under the locks with one restart, then verified
-# on /healthz.
+# missing seed ids are added under the locks with one SIGHUP, then verified
+# on /healthz. Providers stay connected.
 NO_SEED=1 pearl_config "$OLD" "$META"; pearl_boot
 run_rc 0 "revocation seed not yet applied" scripts/ops/cli-release.sh status
 expect_next revocation_seed:mutate
-case "$(next_field command):$(next_field expected_downtime)" in "scripts/ops/cli-release.sh _revoke-seed:coordinator restart"*) ok ;; *) bad "seed command: $(next_field command)" ;; esac
+case "$(next_field command):$(next_field expected_downtime)" in "scripts/ops/cli-release.sh _revoke-seed:SIGHUP"*) ok ;; *) bad "seed command: $(next_field command) downtime=$(next_field expected_downtime)" ;; esac
 run_rc 3 "_revoke-seed refuses outside next --run" scripts/ops/cli-release.sh _revoke-seed
 # 2026-10-10: the default --healthz was the buyer listener, whose /healthz has
 # no compatibility policy; the seed was written, restarted, refused, restored.
@@ -1571,11 +1572,11 @@ PEARL_COORDINATOR_HEALTHZ_URL="http://127.0.0.1:$PORT/buyer/healthz" MACPROVIDER
 expect_lock_free
 expect_err "reports no compatibility_policy_mode"
 if cmp -s "$tmp/pearl/coordinator.yaml" "$tmp/pearl/before.yaml" && [ "$(restarts)" = "$before" ]; then ok; else bad "a policy-less /healthz still edited or restarted"; fi
-before="$(restarts)"
+before_hups="$(hups)"; before_restarts="$(restarts)"
 MACPROVIDER_OPS_OWNER=t run_rc 0 "revocation seed applied" scripts/ops/cli-release.sh next --run
 expect_lock_free
 if python3 -c 'import sys,yaml; c=yaml.safe_load(open(sys.argv[1]))["coordinator"]["compatibility_set"]; sys.exit(0 if c["revoked_ids"] == sys.argv[2:] else 1)' \
-  "$tmp/pearl/coordinator.yaml" "$SEED1" "$SEED2" && [ "$(restarts)" = $((before + 1)) ]; then ok; else bad "seed not written as revoked_ids in one restart"; fi
+  "$tmp/pearl/coordinator.yaml" "$SEED1" "$SEED2" && [ "$(hups)" = $((before_hups + 1)) ] && [ "$(restarts)" = "$before_restarts" ]; then ok; else bad "seed not written as revoked_ids in one SIGHUP (hups=$(hups) restarts=$(restarts))"; fi
 run_rc 0 "status after the seed" scripts/ops/cli-release.sh status
 if [ "$(state_of revocation_seed)" = done ]; then ok; else bad "seed not live"; fi
 # A seed id that is the current target is deferred, never a looping refusal:
@@ -1704,8 +1705,8 @@ fixture '{"latest_stable": "v'"$CAND"'", "releases": {"v'"$CAND"'": {"isPrerelea
   "runs": {"acceptance-candidate.yml": [{"databaseId": 111, "status": "completed", "conclusion": "success", "headSha": "'"$B"'", "createdAt": "2026-10-09T00:00:00Z"}]},
   "artifacts": {"111": [{"name": "acceptance-candidate-'"$B"'", "expired": false}]}}'
 # recommendation_bump runs through next --run: target and latest move (the
-# deprecated accepted_ids is left as it is), /healthz must then recommend the
-# release and report the new target.
+# deprecated accepted_ids is left as it is), one SIGHUP, /healthz must then
+# recommend the release and report the new target. Providers stay connected.
 health v9.0.0 "$LIVE"
 pearl_config "$OLD $COMPAT" "$META"; pearl_boot; loaded "$CAND"
 run_rc 0 "cli status before the bump" scripts/ops/cli-release.sh status
@@ -1748,11 +1749,11 @@ kill "$www_pid" 2>/dev/null || true
 wait "$www_pid" 2>/dev/null || true
 run_rc 0 "cli status before the bump, install.sh unread" scripts/ops/cli-release.sh status
 cp "$tmp/pearl/coordinator.yaml" "$tmp/pearl/before.yaml"
-touch "$tmp/svc/restart_fail"
-MACPROVIDER_OPS_OWNER=t run_rc 1 "a failed restart puts the read bytes back" scripts/ops/cli-release.sh next --run
+touch "$tmp/svc/hup_fail"
+MACPROVIDER_OPS_OWNER=t run_rc 3 "a failed reload puts the read bytes back" scripts/ops/cli-release.sh next --run
 expect_lock_free
-rm -f "$tmp/svc/restart_fail"
-if cmp -s "$tmp/pearl/coordinator.yaml" "$tmp/pearl/before.yaml"; then ok; else bad "config not restored after a failed restart"; fi
+rm -f "$tmp/svc/hup_fail"
+if cmp -s "$tmp/pearl/coordinator.yaml" "$tmp/pearl/before.yaml"; then ok; else bad "config not restored after a failed reload"; fi
 MACPROVIDER_OPS_OWNER=t run_rc 0 "recommendation bump" scripts/ops/cli-release.sh next --run
 expect_lock_free
 if python3 -c 'import sys,yaml; d=yaml.safe_load(open(sys.argv[1])); c=d["coordinator"]["compatibility_set"]; sys.exit(0 if c["target_id"] == sys.argv[2] and sys.argv[3] in c["accepted_ids"] and d["coordinator_advertised_version"]["latest_binary_version"] == sys.argv[4] else 1)' \
@@ -1784,7 +1785,7 @@ run_rc 0 "published release with the old target" scripts/ops/cli-release.sh stat
 if [ "$(state_of pearl_accepted_ids)" = "done" ]; then ok; else bad "published release not admitted by policy"; fi
 expect_next recommendation_bump:mutate
 # An on-disk bump the running coordinator never applied is recovered with one
-# validated restart; the bytes stay as they are.
+# validated SIGHUP; the bytes stay as they are.
 python3 - "$tmp/pearl/coordinator.yaml" "$CAND" "$COMPAT" <<'PYCFG'
 import re, sys
 p = sys.argv[1]
@@ -1793,10 +1794,10 @@ s = re.sub(r'latest_binary_version: "[^"]*"', 'latest_binary_version: "%s"' % sy
 open(p, "w").write(re.sub(r'target_id: \S+', 'target_id: %s' % sys.argv[3], s))
 PYCFG
 cp "$tmp/pearl/coordinator.yaml" "$tmp/pearl/before.yaml"
-before="$(restarts)"
-MACPROVIDER_OPS_OWNER=t run_rc 0 "an unapplied on-disk bump is recovered with a restart" scripts/ops/cli-release.sh next --run
+before_hups="$(hups)"; before_restarts="$(restarts)"
+MACPROVIDER_OPS_OWNER=t run_rc 0 "an unapplied on-disk bump is recovered with a SIGHUP" scripts/ops/cli-release.sh next --run
 expect_lock_free
-if [ "$(restarts)" = $((before + 1)) ] && cmp -s "$tmp/pearl/coordinator.yaml" "$tmp/pearl/before.yaml"; then ok; else bad "unapplied bump not recovered by one restart"; fi
+if [ "$(hups)" = $((before_hups + 1)) ] && [ "$(restarts)" = "$before_restarts" ] && cmp -s "$tmp/pearl/coordinator.yaml" "$tmp/pearl/before.yaml"; then ok; else bad "unapplied bump not recovered by one SIGHUP (hups=$(hups) restarts=$(restarts))"; fi
 run_rc 0 "cli status after the recovered bump" scripts/ops/cli-release.sh status
 if [ "$(state_of recommendation_bump)" = "done" ]; then ok; else bad "recovered bump not live"; fi
 # An old runtime that already lists the candidate admits it, but the bump is
@@ -1895,7 +1896,7 @@ unset MALIBU_DOWNLOAD_SSH_KEY MALIBU_DOWNLOAD_VPS_HOST
 
 # ==== cli-release revoked-build rollback (SPEC-020-R007) ======================
 # The candidate is live (target + recommendation). The rollback recommends the
-# previous release and revokes the candidate in one Pearl edit and restart.
+# previous release and revokes the candidate in one Pearl edit and SIGHUP.
 rollback_live() {
   TARGET_ID="$COMPAT" pearl_config "$OLD" "$META"
   python3 - "$tmp/pearl/coordinator.yaml" "$CAND" <<'PYCFG'
@@ -1930,7 +1931,7 @@ export CLI_ROLLBACK_TO_ID="$PREV" CLI_ROLLBACK_REVOKE_ID="$COMPAT"
 run_rc 0 "rollback status" scripts/ops/cli-release.sh status
 expect_next rollback:mutate
 case "$(next_field command)" in "scripts/ops/cli-release.sh _pearl-config --recommend $LIVE $PREV --revoke $COMPAT") ok ;; *) bad "rollback command: $(next_field command)" ;; esac
-case "$(next_field expected_downtime)" in *"coordinator restart"*) ok ;; *) bad "no downtime banner for the rollback" ;; esac
+case "$(next_field expected_downtime)" in *"SIGHUP"*) ok ;; *) bad "no SIGHUP downtime banner for the rollback: $(next_field expected_downtime)" ;; esac
 printf '{"status":"ok","version":"v9.0.0","recommended_binary_version":"%s","uptime_s":100,"_policy":"running","_no_revoked_signal":true}' "$CAND" > "$tmp/svc/healthz.json"
 run_rc 0 "rollback on a runtime without the revocation signal" scripts/ops/cli-release.sh status
 expect_next rollback:blocked
@@ -1971,11 +1972,11 @@ run_rc 0 "rollback to an unpublished release" scripts/ops/cli-release.sh status
 expect_next rollback:blocked
 case "$(next_field reason)" in *"not a published stable release"*) ok ;; *) bad "unpublished rollback reason: $(next_field reason)" ;; esac
 fixture '{"latest_stable": "v'"$CAND"'", "releases": {"v'"$LIVE"'": {"isPrerelease": false, "isDraft": false, "publishedAt": "2026-10-08T00:00:00Z"}}}'
-before="$(restarts)"
+before_hups="$(hups)"; before_restarts="$(restarts)"
 MACPROVIDER_OPS_OWNER=t run_rc 0 "rollback runs" scripts/ops/cli-release.sh next --run
 expect_lock_free
 if python3 -c 'import sys,yaml; d=yaml.safe_load(open(sys.argv[1])); c=d["coordinator"]["compatibility_set"]; sys.exit(0 if c["target_id"] == sys.argv[2] and sys.argv[3] in c["revoked_ids"] and d["coordinator_advertised_version"]["latest_binary_version"] == sys.argv[4] else 1)' \
-  "$tmp/pearl/coordinator.yaml" "$PREV" "$COMPAT" "$LIVE" && [ "$(restarts)" = $((before + 1)) ]; then ok; else bad "rollback did not recommend the previous release and revoke the candidate in one restart"; fi
+  "$tmp/pearl/coordinator.yaml" "$PREV" "$COMPAT" "$LIVE" && [ "$(hups)" = $((before_hups + 1)) ] && [ "$(restarts)" = "$before_restarts" ]; then ok; else bad "rollback did not recommend the previous release and revoke the candidate in one SIGHUP (hups=$(hups) restarts=$(restarts))"; fi
 run_rc 0 "rollback status after the run" scripts/ops/cli-release.sh status
 if [ "$(state_of rollback)" = "done" ]; then ok; else bad "rollback not live"; fi
 expect_next done:done
@@ -1984,7 +1985,7 @@ printf '{"status":"ok","version":"v9.0.0","recommended_binary_version":"%s","upt
 run_rc 0 "completed-looking rollback on a runtime without the signal" scripts/ops/cli-release.sh status
 if [ "$(state_of rollback)" = "blocked" ]; then ok; else bad "rollback reported $(state_of rollback) without the revocation signal"; fi
 expect_next rollback:blocked
-# An interrupted run (edit on disk, restart not done) resumes through next --run.
+# An interrupted run (edit on disk, reload not done) resumes through next --run.
 rollback_live
 python3 - "$tmp/pearl/coordinator.yaml" "$PREV" "$COMPAT" "$LIVE" <<'PYCFG'
 import re, sys
@@ -1997,11 +1998,11 @@ open(p, "w").write(s)
 PYCFG
 run_rc 0 "interrupted rollback status" scripts/ops/cli-release.sh status
 expect_next rollback:mutate
-before="$(restarts)"
+before_hups="$(hups)"; before_restarts="$(restarts)"
 MACPROVIDER_OPS_OWNER=t run_rc 0 "interrupted rollback resumes" scripts/ops/cli-release.sh next --run
 expect_lock_free
 run_rc 0 "rollback status after the resumed run" scripts/ops/cli-release.sh status
-if [ "$(state_of rollback)" = "done" ] && [ "$(restarts)" = $((before + 1)) ]; then ok; else bad "interrupted rollback not resumed by one restart"; fi
+if [ "$(state_of rollback)" = "done" ] && [ "$(hups)" = $((before_hups + 1)) ] && [ "$(restarts)" = "$before_restarts" ]; then ok; else bad "interrupted rollback not resumed by one SIGHUP (hups=$(hups) restarts=$(restarts))"; fi
 unset CLI_ROLLBACK_TO_ID CLI_ROLLBACK_REVOKE_ID
 
 # ==== discovery-renew =========================================================

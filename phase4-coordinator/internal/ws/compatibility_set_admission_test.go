@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"net"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -284,17 +286,17 @@ func TestCompatibilityPolicyReloadDuringAckWindowDeliversAckThenCloses(t *testin
 	if ack.AuthState != string(pool.AuthSelfMinted) {
 		t.Fatalf("auth_state = %q, want %q", ack.AuthState, pool.AuthSelfMinted)
 	}
-	frame, err := gobwas.ReadFrame(conn)
-	if err != nil {
-		t.Fatalf("read close: %v", err)
-	}
-	if frame.Header.OpCode != gobwas.OpClose {
-		t.Fatalf("op = %v, want close", frame.Header.OpCode)
-	}
-	code, reason := gobwas.ParseCloseFrameData(frame.Payload)
-	if code != providerws.CloseInvalidHello || reason != "provider_release_revoked" {
-		t.Fatalf("close = %d %q, want %d provider_release_revoked", code, reason, providerws.CloseInvalidHello)
-	}
+	assertCompatibilityPolicyNotice(t, conn, compatibilityFutureSet, compatibilityTargetSet, true, "")
+	eventually(t, func() bool {
+		provider, ok := h.Registry.Resolve("postmint-provider", ack.AssignedID)
+		return ok &&
+			provider.State == pool.StateReady &&
+			provider.CatalogAdmissionMode == "update_bridge" &&
+			!provider.RoutingEligible() &&
+			!provider.ServingCapable() &&
+			!provider.HandshakeAckPending
+	})
+	assertSocketStaysOpen(t, conn)
 }
 
 func TestCompatibilityPolicyReloadFencesActiveRevokedSession(t *testing.T) {
@@ -331,11 +333,12 @@ func TestCompatibilityPolicyReloadFencesActiveRevokedSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SetCompatibilitySetPolicy error = %v", err)
 	}
-	if closed != 1 {
-		t.Fatalf("closed sessions = %d, want 1", closed)
+	if closed != 0 {
+		t.Fatalf("closed sessions = %d, want 0", closed)
 	}
-	if provider, ok := h.Registry.Resolve("m4-anon", ack.AssignedID); !ok || provider.State != pool.StateUnavailable || !provider.HandshakeAckPending || provider.RoutingEligible() {
-		t.Fatalf("provider should be fenced before close: ok=%v provider=%+v", ok, provider)
+	provider, ok := h.Registry.Resolve("m4-anon", ack.AssignedID)
+	if !ok || provider.State != pool.StateReady || provider.CatalogAdmissionMode != "update_bridge" || provider.HandshakeAckPending || provider.RoutingEligible() || provider.ServingCapable() {
+		t.Fatalf("revoked session should stay connected update-only: ok=%v provider=%+v", ok, provider)
 	}
 	h.Registry.ApplyHeartbeatDetailed("m4-anon", ack.AssignedID, pool.HeartbeatUpdate{
 		Status:           pool.StateBusy,
@@ -344,22 +347,65 @@ func TestCompatibilityPolicyReloadFencesActiveRevokedSession(t *testing.T) {
 		SlotsFree:        1,
 		SlotsTotal:       1,
 	})
-	if provider, ok := h.Registry.Resolve("m4-anon", ack.AssignedID); !ok || provider.RoutingEligible() {
-		t.Fatalf("policy-fenced provider revived after busy heartbeat: ok=%v provider=%+v", ok, provider)
+	if provider, ok := h.Registry.Resolve("m4-anon", ack.AssignedID); !ok || provider.RoutingEligible() || provider.ServingCapable() || provider.CatalogAdmissionMode != "update_bridge" {
+		t.Fatalf("update-only session revived after busy heartbeat: ok=%v provider=%+v", ok, provider)
 	}
-	if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
-		t.Fatalf("set read deadline: %v", err)
+	assertCompatibilityPolicyNotice(t, conn, compatibilityFutureSet, compatibilityTargetSet, true, "1.8.12")
+	assertSocketStaysOpen(t, conn)
+}
+
+func assertCompatibilityPolicyNotice(t *testing.T, conn net.Conn, accepted, recommended string, revoked bool, version string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if err := conn.SetReadDeadline(deadline); err != nil {
+			t.Fatalf("set read deadline: %v", err)
+		}
+		payload, err := wsutil.ReadServerText(conn)
+		if err != nil {
+			t.Fatalf("read compatibility_policy_v1: %v", err)
+		}
+		var frame map[string]any
+		if err := json.Unmarshal(payload, &frame); err != nil {
+			t.Fatalf("decode compatibility_policy_v1: %v", err)
+		}
+		if frame["type"] != "compatibility_policy_v1" {
+			continue
+		}
+		if frame["compatibility_policy"] != "configured" ||
+			frame["accepted_compatibility_set_id"] != accepted ||
+			frame["recommended_compatibility_set_id"] != recommended ||
+			frame["compatibility_set_revoked"] != revoked {
+			t.Fatalf("compatibility_policy_v1 = %+v", frame)
+		}
+		if _, present := frame["assigned_provider_token"]; present {
+			t.Fatalf("compatibility_policy_v1 carried a credential: %+v", frame)
+		}
+		if version != "" && frame["recommended_binary_version"] != version {
+			t.Fatalf("recommended_binary_version = %#v, want %q", frame["recommended_binary_version"], version)
+		}
+		return
 	}
-	frame, err := gobwas.ReadFrame(conn)
-	if err != nil {
-		t.Fatalf("read close frame: %v", err)
-	}
-	if frame.Header.OpCode != gobwas.OpClose {
-		t.Fatalf("op = %v, want close", frame.Header.OpCode)
-	}
-	code, reason := gobwas.ParseCloseFrameData(frame.Payload)
-	if code != providerws.CloseInvalidHello || !strings.HasPrefix(reason, "provider_release_revoked") {
-		t.Fatalf("close = %d %q, want revoked invalid hello", code, reason)
+}
+
+func assertSocketStaysOpen(t *testing.T, conn net.Conn) {
+	t.Helper()
+	deadline := time.Now().Add(400 * time.Millisecond)
+	for {
+		if err := conn.SetReadDeadline(deadline); err != nil {
+			t.Fatalf("set read deadline: %v", err)
+		}
+		frame, err := gobwas.ReadFrame(conn)
+		if err != nil {
+			var ne net.Error
+			if errors.As(err, &ne) && ne.Timeout() {
+				return
+			}
+			t.Fatalf("read while expecting the session to stay open: %v", err)
+		}
+		if frame.Header.OpCode == gobwas.OpClose {
+			t.Fatal("session closed; an exact revocation stays connected update-only")
+		}
 	}
 }
 

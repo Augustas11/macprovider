@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -80,6 +81,10 @@ type Server struct {
 	// catalog-bound session is registered and before its catalog re-check.
 	catalogRecheckPendingHook func()
 	cfg                       config.Config
+	// recommendedBinaryVersion is the live latest_binary_version. A SIGHUP
+	// stores a new value only after every fallible reload step has succeeded,
+	// so a rejected reload keeps advertising the previous release.
+	recommendedBinaryVersion  atomic.Value // string
 	minProviderThroughputBits atomic.Uint64
 
 	// bindingRetries counts in-flight model-admission binding refresh retry
@@ -1331,6 +1336,7 @@ func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger
 		version:                "dev",
 	}
 	s.minProviderThroughputBits.Store(math.Float64bits(cfg.Routing.MinProviderThroughputTPS))
+	s.recommendedBinaryVersion.Store(cfg.CoordinatorAdvertisedVersion.LatestBinaryVersion)
 	s.authAttempts = newAuthAttemptStore(1024)
 	s.bootstrapLimiter = newBootstrapMintLimiter(cfg.Auth)
 	s.admission = NewAdmissionManager(cfg.Admission, s.now)
@@ -1448,29 +1454,84 @@ func (s *Server) BeginCompatibilitySetPolicyReload(policy config.CompatibilitySe
 	return &CompatibilitySetPolicyReload{server: s, policy: policy}, nil
 }
 
-// SetCompatibilitySetPolicy publishes the already-validated SIGHUP policy and
-// immediately fences live sessions that are no longer admitted by it.
+// SetCompatibilitySetPolicy publishes the already-validated SIGHUP policy.
+// An exact revocation stays connected update-only. Any other rejection is
+// fenced and closed.
 func (s *Server) SetCompatibilitySetPolicy(policy config.CompatibilitySetConfig) (int, error) {
 	reload, err := s.BeginCompatibilitySetPolicyReload(policy)
 	if err != nil {
 		return 0, err
 	}
-	return reload.Publish(), nil
+	closed, _ := reload.Publish()
+	return closed, nil
 }
 
-func (r *CompatibilitySetPolicyReload) Publish() int {
+func (r *CompatibilitySetPolicyReload) Publish() (closed, updateOnly int) {
 	if r == nil || r.released {
-		return 0
+		return 0, 0
 	}
 	s := r.server
 	s.compatibilitySet = r.policy
-	closed, pendingCloses := s.closeCompatibilitySetRejectedSessionsLocked(r.policy)
+	closed, updateOnly, pendingCloses := s.closeCompatibilitySetRejectedSessionsLocked(r.policy)
+	notices := s.compatibilityPolicyNoticesLocked()
 	r.released = true
 	s.compatibilitySetMu.Unlock()
 	for _, pending := range pendingCloses {
 		s.closeSession(pending.session, CloseInvalidHello, pending.reason)
 	}
-	return closed
+	// After the unlock: session.send can block on the writer, and the
+	// handshake ack is still pending for an in-flight admission, which
+	// queues this frame behind that ack.
+	for _, notice := range notices {
+		_ = notice.session.send(notice.payload)
+	}
+	return closed, updateOnly
+}
+
+// compatibilityPolicyNotice is the post-reload recommendation on an open
+// socket. It is not a hello_ack: a second hello_ack makes the shipped v2 CLI
+// drop autoupdate eligibility (it treats only type auth_response as v2).
+type compatibilityPolicyNotice struct {
+	session *providerSession
+	payload []byte
+}
+
+func (s *Server) compatibilityPolicyNoticesLocked() []compatibilityPolicyNotice {
+	if s.pool == nil || !s.compatibilitySet.Configured() {
+		return nil
+	}
+	policy := s.compatibilitySet
+	version := s.liveRecommendedBinaryVersion()
+	notices := make([]compatibilityPolicyNotice, 0)
+	for _, provider := range s.pool.Snapshot() {
+		if strings.TrimSpace(provider.CompatibilitySetID) == "" || !s.isProviderTransportConnected(provider) {
+			continue
+		}
+		session, found := s.storedSessionFor(provider.ProviderID, provider.AssignedID)
+		if !found || session == nil {
+			continue
+		}
+		body, err := json.Marshal(struct {
+			Type                          string `json:"type"`
+			CompatibilityPolicy           string `json:"compatibility_policy"`
+			AcceptedCompatibilitySetID    string `json:"accepted_compatibility_set_id"`
+			RecommendedCompatibilitySetID string `json:"recommended_compatibility_set_id"`
+			RecommendedBinaryVersion      string `json:"recommended_binary_version,omitempty"`
+			CompatibilitySetRevoked       bool   `json:"compatibility_set_revoked,omitempty"`
+		}{
+			Type:                          "compatibility_policy_v1",
+			CompatibilityPolicy:           "configured",
+			AcceptedCompatibilitySetID:    provider.CompatibilitySetID,
+			RecommendedCompatibilitySetID: policy.TargetID,
+			RecommendedBinaryVersion:      version,
+			CompatibilitySetRevoked:       policy.IsUpdateOnly(provider.CompatibilitySetID),
+		})
+		if err != nil {
+			continue
+		}
+		notices = append(notices, compatibilityPolicyNotice{session: session, payload: body})
+	}
+	return notices
 }
 
 func (r *CompatibilitySetPolicyReload) Abort() {
@@ -2678,7 +2739,6 @@ func (s *Server) handleV1Conn(conn net.Conn, connectionAuth providerAuth, payloa
 		AssignedID:                entry.AssignedID,
 		HeartbeatIntervalS:        int(s.cfg.HeartbeatInterval().Seconds()),
 		Tier:                      string(entry.Tier),
-		RecommendedBinaryVersion:  s.gatedRecommendedBinaryVersion(hello.CompatibilitySetID),
 		RequiredBinaryVersion:     s.cfg.CoordinatorAdvertisedVersion.RequiredBinaryVersion,
 		AutoupdateDrainExtensions: true,
 		AssignedProviderToken:     assignedProviderToken,
@@ -3304,7 +3364,6 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 		AssignedID:                entry.AssignedID,
 		HeartbeatIntervalS:        int(s.cfg.HeartbeatInterval().Seconds()),
 		Tier:                      string(entry.Tier),
-		RecommendedBinaryVersion:  s.gatedRecommendedBinaryVersion(initial.CompatibilitySetID),
 		RequiredBinaryVersion:     s.cfg.CoordinatorAdvertisedVersion.RequiredBinaryVersion,
 		AutoupdateDrainExtensions: true,
 		AssignedProviderToken:     assignedProviderToken,
@@ -4092,6 +4151,18 @@ func (s *Server) releaseAckedSessionIfCompatibilityAllowed(session *providerSess
 		return true
 	}
 	policy := cloneCompatibilitySetPolicy(s.compatibilitySet)
+	if compatibilitySetExactRevocation(policy, entry.CompatibilitySetID, code) {
+		s.pool.MarkCompatibilityUpdateOnly(entry.ProviderID, entry.AssignedID)
+		s.releaseAckedSession(entry.ProviderID, entry.AssignedID)
+		s.compatibilitySetMu.RUnlock()
+		s.log.Info().
+			Str("provider_id", entry.ProviderID).
+			Str("assigned_id", entry.AssignedID).
+			Str("compatibility_set_id", entry.CompatibilitySetID).
+			Str("compatibility_rejection", code).
+			Msg("provider session marked update-only after credential delivery by reloaded compatibility policy")
+		return true
+	}
 	s.pool.FenceCompatibilityPolicy(entry.ProviderID, entry.AssignedID)
 	s.compatibilitySetMu.RUnlock()
 	s.log.Info().
@@ -4133,15 +4204,29 @@ func compatibilitySetExactRevocation(policy config.CompatibilitySetConfig, id, c
 	return false
 }
 
-func (s *Server) closeCompatibilitySetRejectedSessionsLocked(policy config.CompatibilitySetConfig) (int, []compatibilitySetPendingClose) {
+func (s *Server) closeCompatibilitySetRejectedSessionsLocked(policy config.CompatibilitySetConfig) (int, int, []compatibilitySetPendingClose) {
 	if s.pool == nil {
-		return 0, nil
+		return 0, 0, nil
 	}
 	closed := 0
+	updateOnly := 0
 	pendingCloses := []compatibilitySetPendingClose{}
 	for _, provider := range s.pool.Snapshot() {
 		code := compatibilitySetProviderRejectionLocked(policy, provider.CompatibilitySetID, provider.BinaryVersion, provider.CatalogAdmissionMode)
 		if code == "" {
+			continue
+		}
+		if compatibilitySetExactRevocation(policy, provider.CompatibilitySetID, code) {
+			if s.pool.MarkCompatibilityUpdateOnly(provider.ProviderID, provider.AssignedID) {
+				updateOnly++
+			}
+			s.log.Info().
+				Str("provider_id", provider.ProviderID).
+				Str("assigned_id", provider.AssignedID).
+				Str("compatibility_set_id", provider.CompatibilitySetID).
+				Str("binary_version", provider.BinaryVersion).
+				Str("compatibility_rejection", code).
+				Msg("provider compatibility policy reloaded; session stays connected update-only")
 			continue
 		}
 		wasHandshakeAckPending := provider.HandshakeAckPending
@@ -4162,7 +4247,7 @@ func (s *Server) closeCompatibilitySetRejectedSessionsLocked(policy config.Compa
 		}
 		closed++
 	}
-	return closed, pendingCloses
+	return closed, updateOnly, pendingCloses
 }
 
 // fenceCatalogDivergedSession makes one diverged session unroutable at once,
@@ -4328,7 +4413,15 @@ func (s *Server) populateCompatibilityHelloAck(ack *HelloAck, acceptedID string)
 	if ack == nil {
 		return
 	}
-	policy := s.compatibilitySetPolicy()
+	// Policy and the live recommendation are one snapshot. A SIGHUP stores
+	// the new latest_binary_version while it holds compatibilitySetMu, then
+	// publishes the policy, so a reader of this lock cannot see one without
+	// the other.
+	s.compatibilitySetMu.RLock()
+	policy := cloneCompatibilitySetPolicy(s.compatibilitySet)
+	version := s.gatedRecommendedBinaryVersion(acceptedID)
+	s.compatibilitySetMu.RUnlock()
+	ack.RecommendedBinaryVersion = version
 	if !policy.Configured() {
 		ack.CompatibilityPolicy = "unconfigured"
 		return
@@ -4343,7 +4436,11 @@ func (s *Server) populateCompatibilityAuthResponse(response *AuthResponse, accep
 	if response == nil {
 		return
 	}
-	policy := s.compatibilitySetPolicy()
+	s.compatibilitySetMu.RLock()
+	policy := cloneCompatibilitySetPolicy(s.compatibilitySet)
+	version := s.gatedRecommendedBinaryVersion(acceptedID)
+	s.compatibilitySetMu.RUnlock()
+	response.RecommendedBinaryVersion = version
 	if !policy.Configured() {
 		response.CompatibilityPolicy = "unconfigured"
 		return
@@ -4384,7 +4481,86 @@ func (s *Server) gatedRecommendedBinaryVersion(compatibilitySetID string) string
 	if strings.TrimSpace(compatibilitySetID) == "" {
 		return ""
 	}
+	return s.liveRecommendedBinaryVersion()
+}
+
+func (s *Server) liveRecommendedBinaryVersion() string {
+	if v := s.recommendedBinaryVersion.Load(); v != nil {
+		if version, ok := v.(string); ok {
+			return version
+		}
+	}
 	return s.cfg.CoordinatorAdvertisedVersion.LatestBinaryVersion
+}
+
+// SetRecommendedBinaryVersion publishes latest_binary_version after a SIGHUP
+// reload has passed every fallible step. A rejected reload never calls it.
+func (s *Server) SetRecommendedBinaryVersion(version string) {
+	s.recommendedBinaryVersion.Store(version)
+}
+
+// StartupOnlyReloadDrift reports a SIGHUP that would change a field the
+// running process keeps from boot. required_binary_version, the per-model
+// floors, and privacy_class stay on s.cfg. Logging the new file as applied
+// would make release tooling treat those bytes as live.
+func (s *Server) StartupOnlyReloadDrift(cfg config.Config) error {
+	if s == nil {
+		return nil
+	}
+	live := s.cfg.CoordinatorAdvertisedVersion
+	next := cfg.CoordinatorAdvertisedVersion
+	if live.RequiredBinaryVersion != next.RequiredBinaryVersion {
+		return fmt.Errorf("required_binary_version is startup-only")
+	}
+	if !sameStringMap(live.PerModelRequiredBinaryVersion, next.PerModelRequiredBinaryVersion) {
+		return fmt.Errorf("per_model_required_binary_version is startup-only")
+	}
+	if !privacyClassEqual(s.cfg.PrivacyClass, cfg.PrivacyClass) {
+		return fmt.Errorf("privacy_class is startup-only")
+	}
+	return nil
+}
+
+// privacyClassEqual treats a missing list and an empty list as the same
+// policy. YAML reload parses an omitted list as empty, while the booted
+// value can be nil. A real identity, backend, interval, or path change
+// still rejects the reload.
+func privacyClassEqual(left, right config.PrivacyClassConfig) bool {
+	return left.Enabled == right.Enabled &&
+		sameStringMap(left.ProviderSEPublicKeys, right.ProviderSEPublicKeys) &&
+		sameSlice(left.ApprovedCodeIdentities, right.ApprovedCodeIdentities) &&
+		sameSlice(left.DeniedCodeCDHashes, right.DeniedCodeCDHashes) &&
+		left.ReleaseCodeIdentities == right.ReleaseCodeIdentities &&
+		left.Directory == right.Directory &&
+		sameSlice(left.AllowedSEKeyBackends, right.AllowedSEKeyBackends) &&
+		left.PostureChallengeIntervalSeconds == right.PostureChallengeIntervalSeconds &&
+		left.PostureMaxAgeSeconds == right.PostureMaxAgeSeconds &&
+		left.PostureResponseTimeoutSeconds == right.PostureResponseTimeoutSeconds &&
+		left.QuarantineSeconds == right.QuarantineSeconds
+}
+
+func sameSlice[T any](left, right []T) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if !reflect.DeepEqual(left[i], right[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func sameStringMap(left, right map[string]string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for key, value := range left {
+		if right[key] != value {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Server) reserveProviderAdmission(conn net.Conn, hello Hello, tier pool.Tier) (pool.Tier, bool) {
@@ -7553,7 +7729,7 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		// updates to (SPEC-020-R006), so gating, renaming, or authenticating
 		// it strands those Macs (SPEC-003-R004). Those CLIs still accept the
 		// bytes only through the signed release checks.
-		RecommendedBinaryVersion:      s.cfg.CoordinatorAdvertisedVersion.LatestBinaryVersion,
+		RecommendedBinaryVersion:      s.liveRecommendedBinaryVersion(),
 		RequiredBinaryVersion:         strings.TrimSpace(s.cfg.CoordinatorAdvertisedVersion.RequiredBinaryVersion),
 		TrustAuthorityDegraded:        s.trustAuthorityDegraded.Load(),
 		CompatibilityPolicyMode:       compatibilityPolicyMode,

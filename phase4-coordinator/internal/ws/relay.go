@@ -2467,7 +2467,11 @@ func (s *Server) handleNAK(providerID, assignedID string, payload []byte) {
 		return
 	}
 	session, ok := s.sessionFor(providerID, assignedID)
-	if ok && nak.Error.Code == "unknown_message_type" {
+	// compatibility_policy_v1 is an advisory reload frame. The CLI that
+	// predates it NAKs the type and stays up. That NAK is not a refusal of
+	// WebSocket inference: marking the session HTTP-only would drop buyer
+	// routing for every connected provider on the next SIGHUP.
+	if ok && nak.Error.Code == "unknown_message_type" && nak.InReplyTo != "compatibility_policy_v1" {
 		session.activeMu.Lock()
 		session.httpOnly = true
 		session.activeMu.Unlock()
