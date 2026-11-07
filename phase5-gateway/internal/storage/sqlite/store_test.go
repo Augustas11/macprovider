@@ -1906,3 +1906,17 @@ func TestValidDemandModelIDKnowsGLM53FlashIdentitiesExactly(t *testing.T) {
 		}
 	}
 }
+
+// #2236: the stored allowlist matches the router's for Nemotron 3.5 Lightning.
+func TestValidDemandModelIDKnowsNemotron35LightningIdentitiesExactly(t *testing.T) {
+	for _, model := range []string{"nvidia/nemotron-3.5-lightning-30b-a3b", "mlx-community/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-4bit"} {
+		if !validDemandModelID(model) || sanitizeStoredDemandModelID(model, true) != model {
+			t.Errorf("%q must be a known demand model id", model)
+		}
+	}
+	for _, model := range []string{"nvidia/nemotron-3.5-lightning-30b-a3bx", "mlx-community/nvidia-nemotron-3.5-lightning-30b-a3b-4bit"} {
+		if validDemandModelID(model) {
+			t.Errorf("%q must not be a known demand model id", model)
+		}
+	}
+}

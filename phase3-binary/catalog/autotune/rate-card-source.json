@@ -61,6 +61,11 @@
       "prompt_cache_hit_rate_per_mtok": 20000,
       "prompt_rate_per_mtok": 80000
     },
+    "nemotron-3.5-lightning-30b-a3b": {
+      "completion_rate_per_mtok": 160000,
+      "prompt_cache_hit_rate_per_mtok": 20000,
+      "prompt_rate_per_mtok": 80000
+    },
     "openai/gpt-oss-120b": {
       "completion_rate_per_mtok": 136000,
       "prompt_cache_hit_rate_per_mtok": 17000,
