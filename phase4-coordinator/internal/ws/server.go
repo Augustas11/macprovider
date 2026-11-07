@@ -4618,6 +4618,13 @@ func providerWSReadFailReason(err error) string {
 	if err == nil {
 		return "read_failed"
 	}
+	// A Close frame from the provider is a deliberate peer close, not a read
+	// fault; report its status code so a provider-side close (e.g. 1001
+	// going-away) is not hidden under read_failed.
+	var closed wsutil.ClosedError
+	if errors.As(err, &closed) {
+		return "peer_close_" + strconv.FormatUint(uint64(closed.Code), 10)
+	}
 	msg := err.Error()
 	switch {
 	case errors.Is(err, net.ErrClosed) || strings.Contains(msg, "use of closed network connection"):
