@@ -22,6 +22,20 @@ waives only the specifically authorized serving-journey export, not qualificatio
 or release-match gates. These catalog/tooling changes are not evidence of a
 coordinator runtime deployment or sampled GLM admission.
 
+## C2P frames sealed and queued in sequence order — pending runtime inclusion (2026-11-08)
+
+| PR | Issue | Coordinator change | Status |
+|---|---|---|---|
+| [#2250](https://github.com/Augustas11/macprovider/pull/2250) (`85cc7c465`) | Related: #2245 | Encrypted-leg C2P frames are sealed and queued under one lock, so concurrent dispatches reach the provider in sequence order; a sealed frame that fails to queue (inference, losslessness probe or native-path probe) ends the session with `c2p_frame_not_sent` instead of leaving it a sequence ahead | Merged; not yet in the Pearl runtime |
+
+Deploy: include `85cc7c465` in the next reviewed Pearl runtime through
+`scripts/ops/pearl-runtime.sh status`, `next`, `next --run`, per
+[the Pearl rollout runbook](../runbooks/pearl-coordinator-rollout.md) (state
+the downtime first). Coordinator-only; no CLI cut needed.
+
+Live acceptance: zero `tier2_aead_decrypt_failed` provider closes following
+`aead_rekey_committed` across a day of encrypted-leg traffic.
+
 ## SPEC-036 FR-26 reference scorers — pending runtime inclusion (2026-11-07)
 
 | PR | Issue | Coordinator change | Status |
