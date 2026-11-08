@@ -7950,7 +7950,9 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
 
     private func runTwoNativeRows(
         fits: [String: NativeMTPDraftCostFit],
-        maximumActiveRows: Int
+        maximumActiveRows: Int,
+        firstRowTokens: Int = 24,
+        secondRowTokens: Int = 24
     ) async throws -> (first: [Int], second: [Int], backend: ScriptedBackend) {
         let backend = ScriptedBackend(
             scripts: ["a": Array(100..<140), "b": Array(200..<240)],
@@ -7963,19 +7965,19 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             nativeMTPDraftCostFits: fits,
             backend: backend
         )
-        func request(_ id: String, _ prompt: Int) -> ContinuousBatchSchedulerRequest {
+        func request(_ id: String, _ prompt: Int, _ maxOutputTokens: Int) -> ContinuousBatchSchedulerRequest {
             Self.nativeRequest(
                 id: id,
                 promptTokens: [prompt],
-                maxOutputTokens: 24,
+                maxOutputTokens: maxOutputTokens,
                 proposals: [],
                 maximumDepth: 1,
                 maximumActiveRows: maximumActiveRows,
                 familyAdapter: "test_family"
             )
         }
-        async let first = scheduler.submit(request("a", 10))
-        async let second = scheduler.submit(request("b", 20))
+        async let first = scheduler.submit(request("a", 10, firstRowTokens))
+        async let second = scheduler.submit(request("b", 20, secondRowTokens))
         let results = try await (first, second)
         return (results.0.outputTokens, results.1.outputTokens, backend)
     }
@@ -8009,15 +8011,44 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
     }
 
     /// Signed bound one: the load gate owns every multi-row round, so a cost
-    /// fit changes nothing on the live tuples.
+    /// fit changes nothing on the live tuples. Forward counts and which rows
+    /// share one depend on admission timing, so this compares each row's
+    /// tokens and capture flags, never the forward sequence. The short peer
+    /// leaves the long row alone during the gate's calm window, where only
+    /// the gate holds it: the grant has no entry for one row.
     func testNativeMTPSignedBoundOneNeverReachesTheDraftGrant() async throws {
-        let withFit = try await runTwoNativeRows(fits: Self.denyEveryDraftFit, maximumActiveRows: 1)
-        let withoutFit = try await runTwoNativeRows(fits: [:], maximumActiveRows: 1)
-        XCTAssertEqual(withFit.first, withoutFit.first)
-        XCTAssertEqual(withFit.second, withoutFit.second)
-        let withFitCaptures = await withFit.backend.decodeCaptureFlags()
-        let withoutFitCaptures = await withoutFit.backend.decodeCaptureFlags()
-        XCTAssertEqual(withFitCaptures, withoutFitCaptures)
+        func run(_ fits: [String: NativeMTPDraftCostFit]) async throws -> (
+            tokens: [String: [Int]],
+            flags: [String: Set<Bool>],
+            longRowCaptures: Int,
+            sharedDraftRounds: Int
+        ) {
+            let result = try await runTwoNativeRows(
+                fits: fits, maximumActiveRows: 1, firstRowTokens: 30, secondRowTokens: 4
+            )
+            let captures = await result.backend.decodeCaptureFlags()
+            let proposals = await result.backend.nativeProposalBatches()
+            var flags: [String: Set<Bool>] = [:]
+            for forward in captures {
+                for (id, captured) in forward { flags[id, default: []].insert(captured) }
+            }
+            return (
+                ["a": result.first, "b": result.second],
+                flags,
+                captures.filter { $0["a"] == true }.count,
+                proposals.filter { batch in batch.count == 2 && batch.contains { $0.maximumProposalDepth > 0 } }.count
+            )
+        }
+        let withFit = try await run(Self.denyEveryDraftFit)
+        let withoutFit = try await run([:])
+        XCTAssertEqual(withFit.tokens, withoutFit.tokens)
+        XCTAssertEqual(withFit.flags, withoutFit.flags)
+        XCTAssertEqual(withFit.flags["a"], [true])
+        XCTAssertEqual(withFit.sharedDraftRounds, 0)
+        XCTAssertEqual(withoutFit.sharedDraftRounds, 0)
+        for captures in [withFit.longRowCaptures, withoutFit.longRowCaptures] {
+            XCTAssertGreaterThanOrEqual(captures, ContinuousBatchScheduler.nativeMTPLoadGateReleaseRounds + 1)
+        }
     }
 
     func testNativeMTPLoadGateHoldsDepthZeroAboveBoundAndRestoresWithHysteresis() async throws {
