@@ -22,6 +22,16 @@ waives only the specifically authorized serving-journey export, not qualificatio
 or release-match gates. These catalog/tooling changes are not evidence of a
 coordinator runtime deployment or sampled GLM admission.
 
+## Provider WebSocket read-fail reason names the peer close code — pending runtime inclusion (2026-11-08)
+
+| PR | Issue | Coordinator change | Status |
+|---|---|---|---|
+| [#2258](https://github.com/Augustas11/macprovider/pull/2258) (`13a24a45e`) | Related: #2246 | `providerWSReadFailReason` reports a peer WebSocket close as `peer_close_<code>` (for example `peer_close_1001`) instead of `read_failed` | Merged; not yet in the Pearl runtime. The provider half ships in the next CLI cut |
+
+Deploy: include `13a24a45e` in the next reviewed Pearl runtime through
+`scripts/ops/pearl-runtime.sh status`, `next`, `next --run` (state the
+downtime first). Log-only; no routing or billing change.
+
 ## C2P frames sealed and queued in sequence order — pending runtime inclusion (2026-11-08)
 
 | PR | Issue | Coordinator change | Status |
