@@ -89,8 +89,11 @@ limits:
   # Omitted max_tokens still defaults to max_tokens_per_request. Size a value
   # to what the provider can serve: prompt plus output must fit the served
   # context, or the provider clamps the output and ends with "length".
-  model_max_output_tokens: {}
-  #   zai-org/glm-5.3-flash: 131072
+  # GLM-5.3-Flash: the provider's 262144-token paged-KV pool shared by 4 CB
+  # rows leaves about 65K prompt plus output per row under full load. Pearl
+  # gets this entry from PEARL_RUNTIME_TASK=stream-ceiling (raise-only).
+  model_max_output_tokens:
+    zai-org/glm-5.3-flash: 65536
 
 kill_switch:
   demo_only: false

@@ -36,7 +36,10 @@ cut; the runtime must go before the cut either way.
 
 Order: #2260 merges (or the cut is ready without it) → `scripts/ops/pearl-runtime.sh`
 (`PEARL_RUNTIME_VERSION=v1.8.282`, `status`, `next`, `next --run`; state the
-15–20 min downtime first) → the GLM CLI cut, which then reloads the
+15–20 min downtime first) → `PEARL_RUNTIME_TASK=stream-ceiling
+scripts/ops/pearl-runtime.sh next --run` sets the gateway's GLM-5.3-Flash
+output limit (`limits.model_max_output_tokens`) to 65536 (one gateway
+restart) → the GLM CLI cut, which then reloads the
 compatibility set without a restart.
 Not in this runtime: the #2236 gateway demand-telemetry change (waits on its
 lab memory measurement) and the #2244 / #2236 `coordinator.yaml` rows, which go

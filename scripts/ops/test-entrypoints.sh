@@ -2649,7 +2649,7 @@ case "$(next_field expected_downtime)" in "one coordinator restart"*"then one ga
 case "$(next_field runbook)" in docs/runbooks/pearl-coordinator-rollout.md#streaming-walls-one-time) ok ;; *) bad "stream-ceiling runbook: $(next_field runbook)" ;; esac
 if grep -q '^## Streaming walls (one-time)$' "$SRC_REPO/docs/runbooks/pearl-coordinator-rollout.md"; then ok; else bad "the streaming walls runbook section does not exist"; fi
 if [ "$(fact_of pearl_coordinator_request_timeout_s)" = "900 (base)" ] && [ "$(fact_of pearl_gateway_stream_ceiling_max_seconds)" = 900 ]; then ok; else bad "stream-ceiling facts: $(fact_of pearl_coordinator_request_timeout_s) $(fact_of pearl_gateway_stream_ceiling_max_seconds)"; fi
-case "$(fact_of pearl_stream_ceiling_planned)" in *"routing.request_timeout_s 900->3600 (base)"*"timeouts.non_stream_request_seconds 960->3660"*"timeouts.stream_ceiling_max_seconds 900->3600"*) ok ;; *) bad "stream-ceiling plan: $(fact_of pearl_stream_ceiling_planned)" ;; esac
+case "$(fact_of pearl_stream_ceiling_planned)" in *"routing.request_timeout_s 900->3600 (base)"*"timeouts.non_stream_request_seconds 960->3660"*"timeouts.stream_ceiling_max_seconds 900->3600"*"limits.model_max_output_tokens[zai-org/glm-5.3-flash] absent->65536"*) ok ;; *) bad "stream-ceiling plan: $(fact_of pearl_stream_ceiling_planned)" ;; esac
 run_rc 3 "_stream-ceiling refuses outside next --run" scripts/ops/pearl-runtime.sh _stream-ceiling
 PEARL_RUNTIME_TASK=stream-ceiling run_rc 3 "stream-ceiling needs an owner" scripts/ops/pearl-runtime.sh next --run
 PEARL_GATEWAY_HEALTHZ_URL="http://10.0.0.1:9443/healthz" PEARL_RUNTIME_TASK=stream-ceiling run_rc 3 "non-loopback gateway healthz refused" scripts/ops/pearl-runtime.sh status
@@ -2677,9 +2677,9 @@ expect_lock_free
 if grep -q "EXPECTED DOWNTIME for stream_ceiling: one coordinator restart" "$tmp/out"; then ok; else bad "stream-ceiling downtime not printed first"; fi
 if [ "$(sc_restarts)" = 1/1 ]; then ok; else bad "stream-ceiling restarts: $(sc_restarts)"; fi
 if python3 -c 'import sys,yaml
-c=yaml.safe_load(open(sys.argv[1])); g=yaml.safe_load(open(sys.argv[2]))["timeouts"]
+c=yaml.safe_load(open(sys.argv[1])); gd=yaml.safe_load(open(sys.argv[2])); g=gd["timeouts"]
 ok = c == {"listen": {"bind_address": "127.0.0.1"}, "routing": {"request_timeout_s": 3600}, "provider_http": {"timeout_s": 3600}} and \
-  g == {"coordinator_request_seconds": 300, "coordinator_header_timeout_seconds": 3660, "coordinator_admission_seconds": 120,
+  gd["limits"] == {"model_max_output_tokens": {"zai-org/glm-5.3-flash": 65536}} and g == {"coordinator_request_seconds": 300, "coordinator_header_timeout_seconds": 3660, "coordinator_admission_seconds": 120,
         "stream_ceiling_max_seconds": 3600, "non_stream_request_seconds": 3660, "streaming_idle_ms": 10000}
 sys.exit(0 if ok else 1)' "$tmp/pearl/coordinator.yaml" "$tmp/pearl/gateway.yaml"; then ok; else bad "stream-ceiling edit: $(cat "$tmp/pearl/coordinator.yaml" "$tmp/pearl/gateway.yaml")"; fi
 if grep -q '  # twin wall' "$tmp/pearl/coordinator.yaml" && cmp -s "$tmp/pearl/overlay.yaml" "$tmp/pearl/overlay.yaml.before"; then ok; else bad "stream-ceiling touched more than the walls"; fi
@@ -2698,6 +2698,44 @@ PEARL_RUNTIME_TASK=stream-ceiling MACPROVIDER_OPS_OWNER=t run_rc 0 "stream-ceili
 if [ "$(sc_restarts)" = 0/1 ]; then ok; else bad "unapplied gateway restarts: $(sc_restarts)"; fi
 PEARL_RUNTIME_TASK=stream-ceiling run_rc 0 "stream-ceiling status after the gateway restart" scripts/ops/pearl-runtime.sh status
 sc_expect_done
+# Per-model output limit (SPEC-006 §5.4): sc_glm VALUE|absent rewrites the
+# limits block and boots the gateway with it.
+sc_glm() {
+  python3 -c 'import sys,yaml
+p=sys.argv[1]; d=yaml.safe_load(open(p)); d.pop("limits", None)
+if sys.argv[2] != "absent": d["limits"] = {"max_tokens_per_request": 32768, "model_max_output_tokens": {"zai-org/glm-5.3-flash": int(sys.argv[2])}}
+else: d["limits"] = {"max_tokens_per_request": 32768}
+open(p, "w").write(yaml.safe_dump(d, sort_keys=False))' "$tmp/pearl/gateway.yaml" "$1"
+  while [ "$(date +%s)" -le "$(python3 -c 'import os,sys; print(int(os.stat(sys.argv[1]).st_ctime))' "$tmp/pearl/gateway.yaml")" ]; do sleep 0.2; done
+  systemctl restart macprovider-gateway
+  rm -f "$tmp/svc/restarts" "$tmp/svc/gw_restarts"
+}
+sc_glm_value() { python3 -c 'import sys,yaml; print((yaml.safe_load(open(sys.argv[1]))["limits"].get("model_max_output_tokens") or {}).get("zai-org/glm-5.3-flash", "absent"))' "$tmp/pearl/gateway.yaml"; }
+sc_backups() { find "$PEARL_BACKUP_ROOT" -path '*stream-ceiling*' -name gateway.yaml | wc -l | tr -d ' '; }
+# An operator value above the target is kept: done, no edit, no restart.
+sc_glm 131072
+PEARL_RUNTIME_TASK=stream-ceiling run_rc 0 "stream-ceiling keeps a higher operator output limit" scripts/ops/pearl-runtime.sh status
+sc_expect_done
+PEARL_RUNTIME_TASK=stream-ceiling MACPROVIDER_OPS_OWNER=t run_rc 0 "stream-ceiling no-op on a higher output limit" scripts/ops/pearl-runtime.sh next --run
+if [ "$(sc_restarts)" = 0/0 ] && [ "$(sc_glm_value)" = 131072 ]; then ok; else bad "higher output limit touched: $(sc_glm_value) restarts=$(sc_restarts)"; fi
+# Absent: set to the target with a backup, and only the gateway restarts.
+sc_glm absent
+cp "$tmp/pearl/coordinator.yaml" "$tmp/pearl/coordinator.yaml.before"
+before_backups="$(sc_backups)"
+PEARL_RUNTIME_TASK=stream-ceiling run_rc 0 "stream-ceiling plans an absent output limit" scripts/ops/pearl-runtime.sh status
+expect_next stream_ceiling:mutate
+case "$(fact_of pearl_stream_ceiling_planned)" in "limits.model_max_output_tokens[zai-org/glm-5.3-flash] absent->65536") ok ;; *) bad "output-limit plan: $(fact_of pearl_stream_ceiling_planned)" ;; esac
+PEARL_RUNTIME_TASK=stream-ceiling MACPROVIDER_OPS_OWNER=t run_rc 0 "stream-ceiling sets an absent output limit" scripts/ops/pearl-runtime.sh next --run
+expect_lock_free
+if [ "$(sc_glm_value)" = 65536 ] && [ "$(sc_restarts)" = 0/1 ] && cmp -s "$tmp/pearl/coordinator.yaml" "$tmp/pearl/coordinator.yaml.before"; then ok; else bad "absent output limit: $(sc_glm_value) restarts=$(sc_restarts)"; fi
+if [ "$(sc_backups)" -gt "$before_backups" ]; then ok; else bad "no backup for the output-limit edit"; fi
+PEARL_RUNTIME_TASK=stream-ceiling run_rc 0 "stream-ceiling status after the output limit" scripts/ops/pearl-runtime.sh status
+sc_expect_done
+# Rerun: no change, no restart.
+cp "$tmp/pearl/gateway.yaml" "$tmp/pearl/gateway.yaml.before"
+rm -f "$tmp/svc/restarts" "$tmp/svc/gw_restarts"
+PEARL_RUNTIME_TASK=stream-ceiling MACPROVIDER_OPS_OWNER=t run_rc 0 "stream-ceiling output limit rerun is a no-op" scripts/ops/pearl-runtime.sh next --run
+if [ "$(sc_restarts)" = 0/0 ] && cmp -s "$tmp/pearl/gateway.yaml" "$tmp/pearl/gateway.yaml.before"; then ok; else bad "output limit rerun changed something: restarts=$(sc_restarts)"; fi
 rm -f "$tmp/svc/restarts" "$tmp/svc/gw_restarts" "$tmp/pearl"/*.before
 unset PEARL_GATEWAY_CONFIG PEARL_GATEWAY_HEALTHZ_URL
 
