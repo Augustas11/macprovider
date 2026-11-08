@@ -6198,9 +6198,6 @@ actor ContinuousBatchScheduler {
         return released
     }
 
-    /// Rows at one prompt offset whose own balanced chunks have the head's
-    /// length. Every row keeps the chunk it prefills alone, so grouping never
-    /// changes a row's chunk partition.
     /// Prefill tokens one turn may take. While rows decode, the configured
     /// budget bounds how long a turn stalls them. With no row decoding, a
     /// turn stalls nobody, so rows that arrived together prefill in one
@@ -6233,6 +6230,9 @@ actor ContinuousBatchScheduler {
         })
     }
 
+    /// Rows at one prompt offset whose own balanced chunks have the head's
+    /// length. Every row keeps the chunk it prefills alone, so grouping never
+    /// changes a row's chunk partition.
     private func selectEqualOffsetPrefillGroup(order: [String], tokenBudget: Int) -> [(row: Row, end: Int)] {
         let chunkLimit = min(configuration.maxPromptChunkTokens, configuration.maxPrefillTokensPerIteration)
         var selected: [(row: Row, end: Int)] = []

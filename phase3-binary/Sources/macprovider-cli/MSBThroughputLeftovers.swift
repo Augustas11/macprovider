@@ -215,7 +215,8 @@ func msb03AggregatePass(aggregateVsSerial: Double) -> Bool {
 /// Batched makespan aggregate over serial makespan aggregate. With the same
 /// decoded tokens on both sides this is the serial makespan over the batched
 /// one: serving the short request sooner cannot lower it, a longer batched
-/// makespan always does.
+/// makespan always does. A serial run with no decoded tokens gives 0, which
+/// fails the gate (as `runMSB03` does for its percentile ratio).
 func msb03MakespanVsSerial(
     batched: [MSBAggregateThroughputInput],
     serial: [MSBAggregateThroughputInput]
@@ -225,7 +226,9 @@ func msb03MakespanVsSerial(
     return (
         batchedReport,
         serialReport,
-        batchedReport.aggregateTokensPerSecond / serialReport.aggregateTokensPerSecond
+        serialReport.aggregateTokensPerSecond > 0
+            ? batchedReport.aggregateTokensPerSecond / serialReport.aggregateTokensPerSecond
+            : 0
     )
 }
 

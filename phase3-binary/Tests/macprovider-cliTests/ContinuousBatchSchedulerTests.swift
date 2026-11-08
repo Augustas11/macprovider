@@ -7013,6 +7013,116 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         )
     }
 
+    /// Through the scheduler: a long prompt ahead of a stream of shorter
+    /// ones is passed over (and charged) once per short turn, leads its turn
+    /// after exactly `maxBypassTurns` of them, and then, aged, keeps leading
+    /// until it finishes (SPEC-038 FR-CB1 aging).
+    func testSchedulerAgedLongPromptLeadsAfterAtMostMaxBypassTurns() async throws {
+        let maxBypass = ContinuousBatchPrefillOrder.maxBypassTurns
+        let shortIDs = (0 ..< maxBypass + 4).map { "short-\($0)" }
+        var scripts: [String: [Int]] = ["held": [1], "long": [2]]
+        for id in shortIDs { scripts[id] = [3] }
+        let gate = AsyncGate()
+        let backend = ScriptedBackend(scripts: scripts, prefillGate: gate)
+        let scheduler = try await makeScheduler(
+            descriptor: Self.descriptor(maxPhysicalBlocks: 128),
+            maxActiveRows: shortIDs.count + 2,
+            queueLimit: shortIDs.count + 2,
+            maxPromptChunkTokens: 2,
+            maxPrefillRowsPerIteration: 1,
+            maxPrefillTokensPerIteration: 2,
+            backend: backend,
+            allocator: PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 128)
+        )
+        let held = Task {
+            try await scheduler.submit(.init(id: "held", conversationKey: "", promptTokens: [1], maxOutputTokens: 1))
+        }
+        try await eventually { await backend.prefillCallCount() == 1 }
+        var tasks: [Task<ContinuousBatchSchedulerResult, Error>] = []
+        for (index, (id, length)) in ([("long", 10)] + shortIDs.map { ($0, 2) }).enumerated() {
+            let base = 100 + 20 * index
+            tasks.append(Task {
+                try await scheduler.submit(.init(
+                    id: id, conversationKey: "", promptTokens: Array(base ..< base + length),
+                    maxOutputTokens: 1, temperature: 0.0, topP: 1.0
+                ))
+            })
+            try await eventually { await scheduler.metrics().waitingCount == index + 1 }
+        }
+        await gate.open()
+        _ = try await held.value
+        for task in tasks { _ = try await task.value }
+
+        let order = await backend.prefillOrder().filter { $0 != ["held"] }
+        XCTAssertTrue(order.allSatisfy { $0.count == 1 }, "\(order)")
+        let turns = order.compactMap(\.first)
+        XCTAssertEqual(turns.filter { $0 == "long" }.count, 5, "\(turns)")
+        // "long" is admitted first, so every short turn before its last chunk
+        // passed it over: exactly `maxBypassTurns` of them, though the stream
+        // holds more. Once aged it leads every turn until it finishes.
+        let lastLong = try XCTUnwrap(turns.lastIndex(of: "long"))
+        let firstAgedLong = turns.indices.first { index in
+            turns[..<index].filter { $0 != "long" }.count == maxBypass && turns[index] == "long"
+        }
+        XCTAssertEqual(turns[..<lastLong].filter { $0 != "long" }.count, maxBypass, "\(turns)")
+        let agedRun = try XCTUnwrap(firstAgedLong, "\(turns)")
+        XCTAssertTrue(turns[agedRun ... lastLong].allSatisfy { $0 == "long" }, "\(turns)")
+        XCTAssertEqual(turns.count, shortIDs.count + 5)
+    }
+
+    /// The equal-offset selector (backend without ragged offsets) on an idle
+    /// turn: the group may run past `maxPrefillTokensPerIteration` up to the
+    /// cohort budget, but only rows with as many prompt tokens left as the
+    /// head use those tokens; a row with more left still joins inside the
+    /// configured budget (SPEC-038 FR-CB2, #2253 msb03).
+    func testEqualOffsetIdleCohortAdmitsOnlyRowsFinishingWithTheHeadPastTheBudget() async throws {
+        for (rows, maxRows, expectedFirstGroup) in [
+            // An equal-remaining peer joins past the 8-token budget; the
+            // longer row does not.
+            ([("a", 4), ("d", 4), ("e", 4), ("b", 8)], 4, ["a", "d", "e"]),
+            // The longer row joins inside the budget; a second longer row,
+            // past it, is compared with the head, not with that peer.
+            ([("a", 4), ("b", 8), ("c", 8)], 3, ["a", "b"]),
+        ] {
+            var scripts: [String: [Int]] = ["held": [1]]
+            for (id, _) in rows { scripts[id] = [2] }
+            let gate = AsyncGate()
+            let backend = ScriptedBackend(scripts: scripts, prefillGate: gate)
+            let scheduler = try await makeScheduler(
+                descriptor: Self.descriptor(maxPhysicalBlocks: 64),
+                maxActiveRows: rows.count + 1,
+                queueLimit: rows.count + 1,
+                maxPromptChunkTokens: 4,
+                maxPrefillRowsPerIteration: maxRows,
+                maxPrefillTokensPerIteration: 8,
+                allowsRaggedPrefillOffsets: false,
+                backend: backend,
+                allocator: PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 64)
+            )
+            let held = Task {
+                try await scheduler.submit(.init(id: "held", conversationKey: "", promptTokens: [1], maxOutputTokens: 1))
+            }
+            try await eventually { await backend.prefillCallCount() == 1 }
+            var tasks: [Task<ContinuousBatchSchedulerResult, Error>] = []
+            for (index, (id, length)) in rows.enumerated() {
+                let base = 100 + 20 * index
+                tasks.append(Task {
+                    try await scheduler.submit(.init(
+                        id: id, conversationKey: "", promptTokens: Array(base ..< base + length),
+                        maxOutputTokens: 1, temperature: 0.0, topP: 1.0
+                    ))
+                })
+                try await eventually { await scheduler.metrics().waitingCount == index + 1 }
+            }
+            await gate.open()
+            _ = try await held.value
+            for task in tasks { _ = try await task.value }
+
+            let order = await backend.prefillOrder().filter { $0 != ["held"] }
+            XCTAssertEqual(order.first, expectedFirstGroup, "\(rows)")
+        }
+    }
+
     /// msb03's shape: mixed prompts arrive together, longest first. The
     /// shortest prefills alone first, then each row in order of what it has
     /// left; no row's first token waits for a longer prompt's chunk.

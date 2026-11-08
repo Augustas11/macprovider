@@ -101,6 +101,18 @@ final class MSB03MakespanAggregateTests: XCTestCase {
         XCTAssertTrue(msb03AggregatePass(aggregateVsSerial: fastRatio))
     }
 
+    func testSerialRunWithNoDecodedTokensFailsClosed() throws {
+        let fast = timings([(1.56, 8.0), (4.66, 12.0), (9.3, 16.0), (15.3, 20.0)])
+        let empty = serial.map {
+            MSBAggregateThroughputInput(decodedTokens: 0, decodeStartedAt: $0.decodeStartedAt, decodeEndedAt: $0.decodeEndedAt)
+        }
+        let ratio = try msb03MakespanVsSerial(
+            batched: fast.map { try $0.makespanSample(outputTokens: decodedPerRow + 1) }, serial: empty
+        ).ratio
+        XCTAssertEqual(ratio, 0)
+        XCTAssertFalse(msb03AggregatePass(aggregateVsSerial: ratio))
+    }
+
     func testMakespanSampleRejectsARowThatEndsBeforeItArrives() {
         let row = MSBSchedulerRowTiming(submittedAt: t0, firstTokenAt: t0, completedAt: t0)
         XCTAssertThrowsError(try row.makespanSample(outputTokens: 2))
