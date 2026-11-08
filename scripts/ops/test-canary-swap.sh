@@ -392,11 +392,20 @@ run_rc 3 "half-failed runner stop" env CANARY_RUNNER_STOP_CMD="echo stopped >> '
 #    retargets only the Pearl runner's Studio row. A missing artifact, a verify
 #    mismatch or a config missing a field changes nothing; a wait timeout
 #    restores nothing and says so.
-KEY=deepseek/deepseek-v4-flash
-eval "$(python3 - "$REPO_ROOT/phase3-binary/dist/static/autotune-candidates.json" "$KEY" <<'PY'
-import hashlib, json, sys
-raw = open(sys.argv[1], "rb").read(); d = json.loads(raw); r = d["rows"][sys.argv[2]]
-print("ROW_ID=%s ROW_REV=%s ROW_SHA=%s CAT_VER=%s CAT_HASH=%s" % (r["model_id"], r["model_revision"], r["model_sha256"], d["version"], hashlib.sha256(raw).hexdigest()))
+# The row comes from the feed, so dropping any one model cannot break this
+# section: the first switchable row by key that differs from the config and
+# runner target below, so every rewrite and the retarget are real changes.
+eval "$(python3 - "$REPO_ROOT/phase3-binary/dist/static/autotune-candidates.json" <<'PY'
+import hashlib, json, re, sys
+raw = open(sys.argv[1], "rb").read(); d = json.loads(raw)
+for k, r in sorted(d["rows"].items()):
+    if (k != "zai-org/glm-5.3-flash" and r["model_id"] != "Jundot/GLM-5.3-Flash-oQ4e-mtp"
+            and re.fullmatch(r"[a-z0-9][a-z0-9._/-]*", k) and re.fullmatch(r"[A-Za-z0-9._/-]+", r["model_id"])
+            and re.fullmatch(r"[0-9a-f]{64}", r.get("model_sha256") or "") and re.fullmatch(r"[A-Za-z0-9._-]+", r.get("model_revision") or "")):
+        print("KEY=%s ROW_ID=%s ROW_REV=%s ROW_SHA=%s CAT_VER=%s CAT_HASH=%s" % (k, r["model_id"], r["model_revision"], r["model_sha256"], d["version"], hashlib.sha256(raw).hexdigest()))
+        break
+else:
+    sys.exit("autotune-candidates.json has no switchable pinned row")
 PY
 )"
 SNAP="$HOME/.cache/huggingface/hub/models--x/snapshots/$ROW_REV"
