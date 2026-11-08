@@ -1087,7 +1087,10 @@ func (s *Server) issueLosslessnessProbeRequest(provider pool.Provider, profile L
 	if err != nil {
 		return err
 	}
-	frame, err := session.sealLosslessnessProbeRequest(provider, payload.ProbeID, cleartext)
+	var sendErr error
+	_, err = session.sealLosslessnessProbeRequestFrame(provider, payload.ProbeID, cleartext, func(frame []byte) {
+		sendErr = session.send(frame)
+	})
 	if err != nil {
 		s.losslessnessPending.Delete(losslessnessProbeStoreKey(provider.ProviderID, provider.AssignedID, payload.ProbeID))
 		s.deleteLosslessnessPendingIndexes(pending)
@@ -1096,9 +1099,10 @@ func (s *Server) issueLosslessnessProbeRequest(provider pool.Provider, profile L
 		}
 		return err
 	}
-	if err := session.send(frame); err != nil {
+	if err := sendErr; err != nil {
 		s.losslessnessPending.Delete(losslessnessProbeStoreKey(provider.ProviderID, provider.AssignedID, payload.ProbeID))
 		s.deleteLosslessnessPendingIndexes(pending)
+		s.closeProviderForUnsentC2PFrame(session, provider, "", err)
 		return err
 	}
 	return nil
@@ -1255,10 +1259,19 @@ type encryptedLosslessnessPlaintext struct {
 }
 
 func (ps *providerSession) sealLosslessnessProbeRequest(provider pool.Provider, probeID string, cleartextOuterEnvelope []byte) ([]byte, error) {
+	return ps.sealLosslessnessProbeRequestFrame(provider, probeID, cleartextOuterEnvelope, nil)
+}
+
+// sealLosslessnessProbeRequestFrame queues a sealed frame through enqueue
+// before releasing tier2Mu, like sealInferenceRequestFrame (#2245).
+func (ps *providerSession) sealLosslessnessProbeRequestFrame(provider pool.Provider, probeID string, cleartextOuterEnvelope []byte, enqueue func([]byte)) ([]byte, error) {
 	ps.tier2Mu.Lock()
 	session := ps.tier2
 	if session == nil {
 		ps.tier2Mu.Unlock()
+		if enqueue != nil {
+			enqueue(cleartextOuterEnvelope)
+		}
 		return cleartextOuterEnvelope, nil
 	}
 	defer ps.tier2Mu.Unlock()
@@ -1287,13 +1300,20 @@ func (ps *providerSession) sealLosslessnessProbeRequest(provider pool.Provider, 
 		return nil, err
 	}
 	session.C2PCounter++
-	return json.Marshal(encryptedLosslessnessRequest{
+	frame, err := json.Marshal(encryptedLosslessnessRequest{
 		Type:      losslessnessEncryptedRequestType,
 		RequestID: probeID,
 		Stream:    false,
 		Encrypted: true,
 		Enc:       envelope.Enc,
 	})
+	if err != nil {
+		return nil, err
+	}
+	if enqueue != nil {
+		enqueue(frame)
+	}
+	return frame, nil
 }
 
 func (ps *providerSession) openLosslessnessProbeResult(provider pool.Provider, probeID string, envelope tier2.AEADEnvelope) ([]byte, error) {

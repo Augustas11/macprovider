@@ -622,17 +622,25 @@ func (ps *providerSession) send(payload []byte) error {
 }
 
 func (ps *providerSession) sendProbe(payload []byte, timeout time.Duration) error {
+	if err := ps.probeWriter(timeout); err != nil {
+		return err
+	}
+	return ps.send(payload)
+}
+
+// probeWriter writes a ping and waits for it to reach the socket, when write
+// probes are enabled. Encrypted dispatch runs it before sealing (#2245): a
+// sealed frame must be queued in the same tier2Mu section that assigned its
+// C2P sequence number, never after a wait.
+func (ps *providerSession) probeWriter(timeout time.Duration) error {
 	if timeout <= 0 || !ps.probeWrites {
-		return ps.send(payload)
+		return nil
 	}
 	frame, err := providerWriteProbeFrame()
 	if err != nil {
 		return err
 	}
-	if err := ps.writeProbe(frame, timeout); err != nil {
-		return err
-	}
-	return ps.send(payload)
+	return ps.writeProbe(frame, timeout)
 }
 
 func (ps *providerSession) writeProbe(rawFrame []byte, timeout time.Duration) error {
@@ -1000,6 +1008,15 @@ func (ps *providerSession) sealInferenceRequestWithConversationCache(provider po
 }
 
 func (ps *providerSession) sealInferenceRequestWithFleetCache(provider pool.Provider, requestID string, body []byte, stream bool, settlement *SettlementReceiptMetadata, conversationKey string, conversationCacheOnly bool, fleetCache *FleetCacheGrant, maxOutputTokens *int, relayBlind *RelayBlindDispatchContext) ([]byte, error) {
+	return ps.sealInferenceRequestFrame(provider, requestID, body, stream, settlement, conversationKey, conversationCacheOnly, fleetCache, maxOutputTokens, relayBlind, nil)
+}
+
+// sealInferenceRequestFrame builds the inference_request frame. A non-nil
+// enqueue is called with the frame; for a sealed frame it runs before tier2Mu
+// is released, so C2P sequence order equals write-queue order for every
+// sender sharing the counter (#2245). enqueue must not block: enqueueFrame
+// only takes writeMu and never waits on the network.
+func (ps *providerSession) sealInferenceRequestFrame(provider pool.Provider, requestID string, body []byte, stream bool, settlement *SettlementReceiptMetadata, conversationKey string, conversationCacheOnly bool, fleetCache *FleetCacheGrant, maxOutputTokens *int, relayBlind *RelayBlindDispatchContext, enqueue func([]byte)) ([]byte, error) {
 	conversationKey = strings.TrimSpace(conversationKey)
 	conversationCacheOnly = conversationCacheOnly && conversationKey != ""
 	ps.tier2Mu.Lock()
@@ -1027,6 +1044,9 @@ func (ps *providerSession) sealInferenceRequestWithFleetCache(provider pool.Prov
 		}
 		if ps.maxTextFrameBytes > 0 && int64(len(frame)) > ps.maxTextFrameBytes {
 			return nil, ErrProviderFrameTooLarge
+		}
+		if enqueue != nil {
+			enqueue(frame)
 		}
 		return frame, nil
 	}
@@ -1087,7 +1107,7 @@ func (ps *providerSession) sealInferenceRequestWithFleetCache(provider pool.Prov
 		return nil, err
 	}
 	session.C2PCounter++
-	return json.Marshal(encryptedInferenceRequest{
+	frame, err := json.Marshal(encryptedInferenceRequest{
 		Type:       "inference_request",
 		RequestID:  requestID,
 		Stream:     stream,
@@ -1095,6 +1115,13 @@ func (ps *providerSession) sealInferenceRequestWithFleetCache(provider pool.Prov
 		Enc:        envelope.Enc,
 		Settlement: settlement,
 	})
+	if err != nil {
+		return nil, err
+	}
+	if enqueue != nil {
+		enqueue(frame)
+	}
+	return frame, nil
 }
 
 func relayBlindBodyEncoding(context *RelayBlindDispatchContext) string {
@@ -1944,6 +1971,18 @@ func (s *Server) closeProviderForTier2AEADFailure(session *providerSession, prov
 	s.closeProviderForTier2SessionFailure(session, providerID, assignedID, requestID, "aead_decrypt_failed", ErrRelayAEADFailed)
 }
 
+// closeProviderForUnsentC2PFrame ends a session whose sealed C2P frame was
+// not queued. Sealing spent a C2P sequence number the provider will never
+// see, so every later frame would fail to open; ending the session now is
+// the same handling dispatchInference applies (c2p_frame_not_sent).
+func (s *Server) closeProviderForUnsentC2PFrame(session *providerSession, provider pool.Provider, requestID string, err error) {
+	if errors.Is(err, ErrRelayClosed) {
+		s.handleProviderWriteFailure(session, err)
+		return
+	}
+	s.closeProviderForTier2SessionFailure(session, provider.ProviderID, provider.AssignedID, requestID, "c2p_frame_not_sent", ErrRelayClosed)
+}
+
 func (s *Server) closeProviderForTier2SessionFailure(session *providerSession, providerID, assignedID, requestID, reason string, relayErr error) {
 	tier2.LogEncryptedLegSessionClosed(s.log, providerID, assignedID, requestID, reason)
 	session.failActiveOrAll(requestID, relayErr)
@@ -2006,7 +2045,21 @@ func (s *Server) dispatchInference(ctx context.Context, provider pool.Provider, 
 	if limit, ok := MaxOutputTokensFromContext(ctx); ok {
 		maxOutputTokens = &limit
 	}
-	payload, err := session.sealInferenceRequestWithFleetCache(provider, requestID, body, stream, settlementMetadata, ConversationKeyFromContext(ctx), ConversationCacheOnlyFromContext(ctx), FleetCacheFromContext(ctx), maxOutputTokens, relayContext)
+	// Probe before sealing, then seal and queue in one tier2Mu section, so a
+	// slow probe cannot let a later-sealed frame reach the provider first
+	// (#2245). Nothing is sealed yet if the probe fails.
+	if err := session.probeWriter(providerDispatchWriteProbeTimeout); err != nil {
+		session.removeActive(requestID)
+		session.unmarkTier2RequestDispatched(active.tier2Epoch)
+		if errors.Is(err, ErrRelayClosed) {
+			s.handleProviderWriteFailure(session, err)
+		}
+		return nil, err
+	}
+	var sendErr error
+	_, err = session.sealInferenceRequestFrame(provider, requestID, body, stream, settlementMetadata, ConversationKeyFromContext(ctx), ConversationCacheOnlyFromContext(ctx), FleetCacheFromContext(ctx), maxOutputTokens, relayContext, func(frame []byte) {
+		sendErr = session.send(frame)
+	})
 	if err != nil {
 		if errors.Is(err, errTier2C2PCounterExhausted) {
 			s.closeProviderForTier2SessionFailure(session, provider.ProviderID, provider.AssignedID, requestID, "counter_exhausted", ErrRelayAEADFailed)
@@ -2018,7 +2071,7 @@ func (s *Server) dispatchInference(ctx context.Context, provider pool.Provider, 
 		}
 		return nil, err
 	}
-	if err := session.sendProbe(payload, providerDispatchWriteProbeTimeout); err != nil {
+	if err := sendErr; err != nil {
 		session.removeActive(requestID)
 		if errors.Is(err, ErrRelayClosed) {
 			s.handleProviderWriteFailure(session, err)
