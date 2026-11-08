@@ -305,11 +305,15 @@ func (s *Server) handleAdminNativePathProbe(w http.ResponseWriter, r *http.Reque
 	_, err = session.sealNativePathProbeRequest(provider, id, cleartext, profile, func(frame []byte) {
 		sendErr = session.send(frame)
 	})
-	if err == nil {
+	sealed := err == nil
+	if sealed {
 		err = sendErr
 	}
 	session.rekeyMu.Unlock()
 	if err != nil {
+		if sealed {
+			s.closeProviderForUnsentC2PFrame(session, provider, "", err)
+		}
 		http.Error(w, "dispatch failed", 503)
 		return
 	}

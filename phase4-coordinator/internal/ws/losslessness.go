@@ -1102,6 +1102,7 @@ func (s *Server) issueLosslessnessProbeRequest(provider pool.Provider, profile L
 	if err := sendErr; err != nil {
 		s.losslessnessPending.Delete(losslessnessProbeStoreKey(provider.ProviderID, provider.AssignedID, payload.ProbeID))
 		s.deleteLosslessnessPendingIndexes(pending)
+		s.closeProviderForUnsentC2PFrame(session, provider, "", err)
 		return err
 	}
 	return nil

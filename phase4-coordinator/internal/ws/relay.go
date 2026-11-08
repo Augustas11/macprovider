@@ -1971,6 +1971,18 @@ func (s *Server) closeProviderForTier2AEADFailure(session *providerSession, prov
 	s.closeProviderForTier2SessionFailure(session, providerID, assignedID, requestID, "aead_decrypt_failed", ErrRelayAEADFailed)
 }
 
+// closeProviderForUnsentC2PFrame ends a session whose sealed C2P frame was
+// not queued. Sealing spent a C2P sequence number the provider will never
+// see, so every later frame would fail to open; ending the session now is
+// the same handling dispatchInference applies (c2p_frame_not_sent).
+func (s *Server) closeProviderForUnsentC2PFrame(session *providerSession, provider pool.Provider, requestID string, err error) {
+	if errors.Is(err, ErrRelayClosed) {
+		s.handleProviderWriteFailure(session, err)
+		return
+	}
+	s.closeProviderForTier2SessionFailure(session, provider.ProviderID, provider.AssignedID, requestID, "c2p_frame_not_sent", ErrRelayClosed)
+}
+
 func (s *Server) closeProviderForTier2SessionFailure(session *providerSession, providerID, assignedID, requestID, reason string, relayErr error) {
 	tier2.LogEncryptedLegSessionClosed(s.log, providerID, assignedID, requestID, reason)
 	session.failActiveOrAll(requestID, relayErr)

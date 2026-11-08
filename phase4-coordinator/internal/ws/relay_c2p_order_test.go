@@ -148,3 +148,45 @@ func runConcurrentEncryptedDispatchRound(t *testing.T, dispatches int) error {
 	}
 	return nil
 }
+
+// TestUnsentSealedProbeFrameEndsSession covers the probe senders
+// (losslessness and native-path probes): a sealed frame that fails to queue
+// spent a C2P sequence number, so the session must end rather than let the
+// next dispatch arrive one sequence ahead and fail to open on the provider.
+func TestUnsentSealedProbeFrameEndsSession(t *testing.T) {
+	serverConn, providerConn := net.Pipe()
+	defer func() {
+		_ = providerConn.Close()
+		_ = serverConn.Close()
+	}()
+	provider := &pool.Provider{
+		ProviderID: "p1", AssignedID: "s1", ModelID: "model-a",
+		Tier: pool.TierProvisional, InferencePath: pool.InferencePathWSTunneled,
+		State: pool.StateReady, SlotsFree: 1, SlotsTotal: 1, MaxConcurrency: 1,
+		EncryptedLeg: true,
+	}
+	registry := pool.NewRegistry(nil)
+	registry.Register(provider, serverConn)
+	s := NewServer(config.Default(), registry, zerolog.Nop())
+	awaitStartupSnapshots(t, s)
+	session := newProviderSession("p1", "s1", serverConn, 1)
+	s.sessions.Store(sessionKey("p1", "s1"), session)
+
+	s.closeProviderForUnsentC2PFrame(session, *provider, "", fmt.Errorf("write queue full"))
+
+	if _, ok := s.sessions.Load(sessionKey("p1", "s1")); ok {
+		t.Fatal("session still registered after an unsent sealed frame")
+	}
+	found := false
+	for _, got := range registry.Snapshot() {
+		if got.ProviderID == "p1" && got.AssignedID == "s1" {
+			found = true
+			if got.State != pool.StateUnavailable {
+				t.Fatalf("provider state = %v, want unavailable", got.State)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("provider missing from registry")
+	}
+}
