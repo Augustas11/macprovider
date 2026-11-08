@@ -22,6 +22,23 @@ waives only the specifically authorized serving-journey export, not qualificatio
 or release-match gates. These catalog/tooling changes are not evidence of a
 coordinator runtime deployment or sampled GLM admission.
 
+## Next Pearl runtime v1.8.282 — contents and order (2026-11-08)
+
+Live coordinator and gateway: v1.8.279. The next runtime carries the merged
+#2250 (C2P sequence order), #2258 (coordinator half, `peer_close_<code>`) and
+#2248 (FR-26 reference scorers), and waits for
+[#2252](https://github.com/Augustas11/macprovider/pull/2252) (Related: #2247:
+reload `compatibility_set` on SIGHUP instead of restarting), which is in its
+freeze audit. Shipping the runtime first would cost one outage now and another
+at the next CLI cut, which still restarts the coordinator without #2252.
+
+Order: #2252 merges → `scripts/ops/pearl-runtime.sh` (`PEARL_RUNTIME_VERSION=v1.8.282`,
+`status`, `next`, `next --run`; state the 15–20 min downtime first) → the next
+CLI cut, which then reloads the compatibility set without a restart.
+Not in this runtime: the #2236 gateway demand-telemetry change (waits on its
+lab memory measurement) and the #2244 / #2236 `coordinator.yaml` rows, which go
+through `scripts/ops/catalog-activate.sh`.
+
 ## Provider WebSocket read-fail reason names the peer close code — pending runtime inclusion (2026-11-08)
 
 | PR | Issue | Coordinator change | Status |
