@@ -2339,6 +2339,51 @@ printf '{"release_id":"%s","status":"live_verified","feeds":{"x":{"verified_at":
 # A model the live catalog no longer carries owes no (e): it is retired.
 run_rc 0 "catalog status with (e) owed for a model the live catalog dropped" scripts/ops/catalog-activate.sh status
 if [ "$(state_of buyer_serving_e2e)" = "done" ] && [ "$(fact_of buyer_serving_e2e_retired)" = "mlx-community/Test-VL-2B@abab" ]; then ok; else bad "dropped model (e): $(state_of buyer_serving_e2e) $(fact_of buyer_serving_e2e_retired)"; fi
+# A later release committed but not live: the record stays retired against the
+# feed the coordinator serves, and only a record that has genuinely left it does.
+read -r OWED_OLD OWED_LIVE <<EOF_RID
+$(python3 -c 'import json,sys; rs=json.load(open(sys.argv[1]))["releases"]; o=sorted((k for k in rs if k != sys.argv[2]), key=lambda k: rs[k]["generated_at"]); print(o[0], o[-1])' "$W/phase3-binary/catalog/autotune/release-ledger.json" "$R")
+EOF_RID
+owed_release() { python3 -c 'import glob,json,sys; p=glob.glob(sys.argv[1] + "/*.json")[0]; d=json.load(open(p)); d["release_id"] = sys.argv[2]; json.dump(d, open(p, "w"), sort_keys=True)' "$OWED_DIR" "$1"; }
+# live_feed VERSION DIGEST_OK MODEL SHA: the coordinator serves a feed of one row at release $OWED_LIVE.
+live_feed() {
+  python3 - "$tmp/svc" "$OWED_LIVE" "$@" <<'PYF'
+import hashlib, json, sys
+svc, live, version, digest_ok, model, sha = sys.argv[1:7]
+body = json.dumps({"version": version, "rows": {"k": {"model_id": model, "model_sha256": sha}}}).encode()
+open(f"{svc}/routes/v1_autotune-candidates", "wb").write(body)
+digest = hashlib.sha256(body).hexdigest() if digest_ok == "true" else "0" * 64
+json.dump({"release_id": live, "status": "live_verified",
+           "feeds": {"autotune_candidates": {"sha256": digest, "verified_at": "2026-01-01T00:00:00Z"}}}, open(f"{svc}/autotune-release.json", "w"))
+PYF
+}
+owed_release "$OWED_OLD"
+live_feed "$OWED_LIVE" true other/model 00
+run_rc 0 "catalog status: dropped model while a later release is committed" scripts/ops/catalog-activate.sh status
+if [ "$(state_of buyer_serving_e2e)" != owed ] && [ "$(fact_of buyer_serving_e2e_retired)" = "mlx-community/Test-VL-2B@abab" ] && [ "$(fact_of buyer_serving_e2e_owed)" = None ]; then ok; else bad "retired (e) reopened before the next release went live: $(state_of buyer_serving_e2e) $(fact_of buyer_serving_e2e_owed)"; fi
+# Still a row of the live feed: owed.
+live_feed "$OWED_LIVE" true mlx-community/Test-VL-2B abab
+run_rc 0 "catalog status: live feed still carries the owed model" scripts/ops/catalog-activate.sh status
+if [ "$(state_of buyer_serving_e2e)" = owed ] && [ "$(fact_of buyer_serving_e2e_retired)" = None ]; then ok; else bad "a live row was retired: $(state_of buyer_serving_e2e) $(fact_of buyer_serving_e2e_retired)"; fi
+# A feed that is not provably the live release's retires nothing.
+live_feed "$OWED_LIVE" false other/model 00
+run_rc 0 "catalog status: live feed digest mismatch" scripts/ops/catalog-activate.sh status
+if [ "$(state_of buyer_serving_e2e)" = owed ] && [ "$(fact_of buyer_serving_e2e_retired)" = None ]; then ok; else bad "digest-mismatched feed retired a record: $(state_of buyer_serving_e2e) $(fact_of buyer_serving_e2e_retired)"; fi
+live_feed "$OWED_OLD" true other/model 00
+run_rc 0 "catalog status: live feed from another release" scripts/ops/catalog-activate.sh status
+if [ "$(state_of buyer_serving_e2e)" = owed ] && [ "$(fact_of buyer_serving_e2e_retired)" = None ]; then ok; else bad "another release's feed retired a record: $(state_of buyer_serving_e2e) $(fact_of buyer_serving_e2e_retired)"; fi
+# A release newer than the live one has not shipped (a deploy that failed after
+# recording): its new model is absent from the live feed without being retired.
+owed_release "$R"
+live_feed "$OWED_LIVE" true other/model 00
+run_rc 0 "catalog status: owed record of a release not yet live" scripts/ops/catalog-activate.sh status
+if [ "$(state_of buyer_serving_e2e)" = owed ] && [ "$(fact_of buyer_serving_e2e_retired)" = None ]; then ok; else bad "an unshipped release's record was retired: $(state_of buyer_serving_e2e) $(fact_of buyer_serving_e2e_retired)"; fi
+owed_release not-in-the-ledger
+run_rc 0 "catalog status: owed record of an unknown release" scripts/ops/catalog-activate.sh status
+if [ "$(state_of buyer_serving_e2e)" = owed ] && [ "$(fact_of buyer_serving_e2e_retired)" = None ]; then ok; else bad "an unknown release's record was retired: $(state_of buyer_serving_e2e) $(fact_of buyer_serving_e2e_retired)"; fi
+owed_release "$R"
+rm -f "$tmp/svc/routes/v1_autotune-candidates"
+printf '{"release_id":"%s","status":"live_verified","feeds":{"x":{"verified_at":"2026-01-01T00:00:00Z"}}}' "$R" > "$tmp/svc/autotune-release.json"
 # The rest of the owed (e) cases use a row the live catalog carries.
 read -r OWED_M OWED_S <<EOF_ROW
 $(python3 -c 'import json,sys; r=sorted(json.load(open(sys.argv[1]))["rows"].values(), key=lambda r: r["model_id"])[0]; print(r["model_id"], r["model_sha256"])' "$W/phase3-binary/catalog/autotune/autotune-candidates.json")

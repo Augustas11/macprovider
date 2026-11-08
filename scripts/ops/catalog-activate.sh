@@ -1168,20 +1168,46 @@ ssh \"\$STUDIO_SSH\" 'set -e; c=~/.config/macprovider/config.yaml; cp -p \"\$c\"
 
   # Evidence (e) owed (SPEC-023-R017 5(e)): every ledger entry whose model no
   # buyer_serving_e2e record names yet. A malformed entry is unknown, not done.
-  # Once the committed release is live, an entry whose model@sha256 is no row
-  # of its candidate feed is retired: no provider serves it from the live
-  # catalog, so no (e) is owed for it.
-  local owed_scan owed_models="" owed_bad="" owed_retired="" live_candidates=""
-  [ "$live_rid" != "$R" ] || live_candidates="$CATALOG_TARGET_DIR/autotune-candidates.json"
-  owed_scan="$(python3 -I - "$owed_dir" "$OPS_STATE_DIR" "$live_candidates" <<'PY'
-import glob, json, os, re, sys
-owed_dir, state, live_candidates = sys.argv[1:4]
+  # An entry whose release has reached the live catalog and whose model@sha256
+  # is no row of the live candidate feed is retired: no provider serves it from
+  # the live catalog, so no (e) is owed for it. While a later release is only
+  # committed, "live" is the feed the coordinator serves, bound to its reported
+  # release by version and digest; an entry of a release newer than the live
+  # one may simply not have shipped yet, so it stays owed.
+  local owed_scan owed_models="" owed_bad="" owed_retired="" live_candidates="" live_release=""
+  if [ "$live_rid" = "$R" ]; then
+    live_candidates="$CATALOG_TARGET_DIR/autotune-candidates.json"
+  elif [ -n "$live_rid" ] && [ "$live_status" = live_verified ] &&
+       [ "$(http_get "$base/v1/autotune-candidates" "$OPS_TMP_DIR/live-candidates.json")" = 200 ]; then
+    live_candidates="$OPS_TMP_DIR/live-candidates.json"
+    live_release="$OPS_TMP_DIR/release.json"
+  fi
+  owed_scan="$(python3 -I - "$owed_dir" "$OPS_STATE_DIR" "$live_candidates" "$live_release" "$REPO_ROOT/$AUTOTUNE/release-ledger.json" <<'PY'
+import datetime, glob, hashlib, json, os, re, sys
+owed_dir, state, live_candidates, live_release, ledger_path = sys.argv[1:6]
 # The model@sha256 pairs of the live catalog; None (retire nothing) when the
-# committed release is not live yet or its candidate feed is unreadable.
+# live feed is unreadable or is not provably the live release's.
 catalog = None
+# None when the committed release is live: every record's release has shipped.
+reached_live = None
 if live_candidates:
     try:
-        catalog = {(row["model_id"], row["model_sha256"]) for row in json.load(open(live_candidates))["rows"].values()}
+        raw = open(live_candidates, "rb").read()
+        rows = json.loads(raw)
+        if live_release:
+            status = json.load(open(live_release))
+            live_id = status["release_id"]
+            if rows["version"] != live_id or hashlib.sha256(raw).hexdigest() != status["feeds"]["autotune_candidates"]["sha256"]:
+                raise ValueError("feed is not the live release's")
+            releases = json.load(open(ledger_path))["releases"]
+            stamp = lambda rid: datetime.datetime.strptime(releases[rid]["generated_at"], "%Y-%m-%dT%H:%M:%SZ")
+            live_stamp = stamp(live_id)
+            def reached_live(rid):
+                try:
+                    return rid == live_id or stamp(rid) < live_stamp
+                except Exception:
+                    return False
+        catalog = {(row["model_id"], row["model_sha256"]) for row in rows["rows"].values()}
     except Exception:
         catalog = None
 # A buyer_serving_e2e record proves exactly the model@sha256 pairs it names.
@@ -1204,7 +1230,7 @@ for path in sorted(glob.glob(os.path.join(owed_dir, "*.json"))):
         continue
     if (model, sha) in proved:
         continue
-    if catalog is not None and (model, sha) not in catalog:
+    if catalog is not None and (model, sha) not in catalog and (reached_live is None or reached_live(rel)):
         retired.append("%s@%s" % (model, sha))
         continue
     open_models.append("%s@%s (owed since %s)" % (model, sha, rel))
