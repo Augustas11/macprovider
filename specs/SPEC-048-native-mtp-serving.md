@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.76
+**Version:** 0.1.77
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.76",
+  "version": "0.1.77",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -1146,6 +1146,22 @@ Admission and in-flight behavior are:
   committed target state as for every depth increase.
 - Integrity probes (R016 self-test and coordinator canary) run in isolation and
   are exempt from the in-flight depth gate.
+
+**Shared-round drafting.** Rows verifying in one round advance their drafters
+with one packed forward per draft level, byte-equal to serial per-row drafting
+for the same committed prefix. Where a machine has a draft cost fit for the
+tuple's family, each decode round grants drafts before any proposal work: the
+fit gives the round's base cost and the extra cost per granted row, head step
+included, by active row count, and rows are granted highest observed acceptance
+first (full acceptance until 16 proposals are observed) while the expected
+tokens raise the round's rate. A row granted none rides the ordinary lockstep
+forward at in-path depth zero with its drafter columns buffered, exactly as a
+load-gated row does, and its next granted round catches its drafter up first.
+The fit is a static, integer, per-machine table derived from measured decode
+rounds; no serving-time clock feeds the grant, and a machine or family with no
+fit grants every row. A lone row is always granted, integrity probes are never
+denied, and a grant never changes tokens or selection. A larger signed bound
+requires the R015 cells to be measured with the fit in force.
 
 A bound equal to `qualified_slots` never engages for a runtime that admits at
 most that many rows. The bound is preregistered in the frozen R015 policy and
@@ -2294,6 +2310,15 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.77 (2026-11-08, Related: #2227)** — MTP-7: names shared-round drafting.
+  Rows verifying together already advance through one packed drafter forward
+  per level, byte-equal to serial drafting. New grant-first scheduling prices
+  each row's draft before proposal work from a static per-machine fit (GLM-5.3
+  on the M3 Ultra, from the #2144 multi-row sweep; depth one) and rides denied
+  rows on the ordinary forward with their drafter columns buffered. The signed
+  native-row bound stays 1, so the load gate owns every multi-row round on the
+  current tuples and live behaviour is unchanged until a later R015
+  qualification. No fork tag or dependency change.
 - **0.1.76 (2026-11-07, Related: #2243)** — MTP-2: the private staging file
   may be a `clonefile(2)` clone of the validated descriptor when that
   descriptor is already mode `0400`. Any other mode, `ENOTSUP`, and `EXDEV`
