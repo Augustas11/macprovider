@@ -15254,7 +15254,9 @@ maxTokens: maxTokens,
             schemas: autoToolParameterSchemas(from: request.promptSource.tools)
         )
         guard !parsed.toolCalls.isEmpty else {
-            return (text, [])
+            // GLM (#2259): calls that were all dropped leave only the prose
+            // outside them, never their markup.
+            return (parsed.droppedMalformedCalls ? parsed.cleanedContent ?? "" : text, [])
         }
         // Prose the model wrote before its first call is kept as content.
         let prose = parsed.leadingContent ?? ""
@@ -16522,6 +16524,9 @@ struct NativeToolCallStreamEmitter {
         if suppressesAssistantContent {
             return ""
         }
+        if grammar == .glm {
+            return ToolCallParser.glmStreamableProse(text)
+        }
         if grammar == .llama3 {
             // A bare JSON call has no opening tag: hold prose from the first
             // `{` until the final parse decides (it is flushed if no call).
@@ -16610,7 +16615,9 @@ struct NativeToolCallStreamEmitter {
             candidate = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
             guard candidate.hasSuffix(endDelimiter) else { return }
         } else if grammar != .llama3 {
-            guard let end = candidate.range(of: endDelimiter) else { return }
+            // GLM calls are parsed one by one (#2259): a malformed first call
+            // does not hide a complete one after it.
+            guard let end = candidate.range(of: endDelimiter, options: grammar == .glm ? .backwards : []) else { return }
             candidate = String(candidate[..<end.upperBound])
         }
         let parsed = ToolCallParser.parseToolCalls(
