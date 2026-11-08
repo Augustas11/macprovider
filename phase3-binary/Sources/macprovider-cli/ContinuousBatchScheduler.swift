@@ -318,6 +318,9 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
     /// this many (SPEC-048, GLM-5-Next head), or nil for the whole prompt.
     /// Prompt chunks wholly before that window skip drafter work.
     let nativeMTPDrafterPromptWindow: Int?
+    /// Per-machine draft cost by family adapter for grant-first scheduling
+    /// (SPEC-048-R007). A family absent here drafts on every native row.
+    let nativeMTPDraftCostFits: [String: NativeMTPDraftCostFit]
     let drainTimeoutNanoseconds: UInt64
     let drainCancellationGraceNanoseconds: UInt64
     let terminalResultLimit: Int
@@ -382,6 +385,7 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
         allowsRaggedPrefillOffsets: Bool = false,
         nativeMTPPromptRowsJoinRaggedPrefill: Bool = false,
         nativeMTPDrafterPromptWindow: Int? = nil,
+        nativeMTPDraftCostFits: [String: NativeMTPDraftCostFit] = [:],
         drainTimeoutNanoseconds: UInt64 = 30_000_000_000,
         drainCancellationGraceNanoseconds: UInt64 = 5_000_000_000,
         terminalResultLimit: Int? = nil,
@@ -428,6 +432,7 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
         self.nativeMTPPromptRowsJoinRaggedPrefill = self.allowsRaggedPrefillOffsets
             && nativeMTPPromptRowsJoinRaggedPrefill
         self.nativeMTPDrafterPromptWindow = nativeMTPDrafterPromptWindow.map { max(1, $0) }
+        self.nativeMTPDraftCostFits = nativeMTPDraftCostFits
         // A serial-stride row must prefill whole serial chunks: a smaller
         // per-iteration budget would shrink them and change the partition
         // the row must match token for token (MiniMax M3 block selection).
@@ -5106,6 +5111,30 @@ actor ContinuousBatchScheduler {
     }
     #endif
 
+    private func nativeMTPDraftGrantDeniedIDs(rows: [Row], activeRows: Int) -> Set<String> {
+        guard let family = rows.first?.request.nativeMTPFamilyAdapter,
+              let entry = configuration.nativeMTPDraftCostFits[family]?.entry(activeRows: activeRows)
+        else { return [] }
+        let candidates = rows.filter {
+            !$0.request.nativeMTPIntegrityProbe && nativeMTPMaximumProposalDepth(for: $0) > 0
+        }.map { row in
+            NativeMTPDraftGrantCandidate(
+                requestID: row.request.id,
+                acceptancePPM: NativeMTPDraftGrant.acceptancePPM(
+                    accepted: UInt64(max(0, row.nativeMTPCounters?.acceptedTokens ?? 0)),
+                    rejected: UInt64(max(0, row.nativeMTPCounters?.rejectedTokens ?? 0))
+                )
+            )
+        }
+        let denied = NativeMTPDraftGrant.deniedRequestIDs(
+            candidates: candidates, activeRows: activeRows, entry: entry
+        )
+        if !denied.isEmpty {
+            CBTrace.log(nil, "native_round phase=grant active=\(activeRows) denied=\(denied.sorted().joined(separator: ","))")
+        }
+        return denied
+    }
+
     private func updateNativeMTPLoadGate(nativeRows: [Row]) {
         let bound = nativeRows.map(\.request.nativeMTPMaximumActiveRows).min() ?? Int.max
         let activeRows = activeDecode.count + activePrompt.count
@@ -5148,13 +5177,19 @@ actor ContinuousBatchScheduler {
         // cost, so those rows ride the ordinary lockstep forward instead and
         // the backend keeps their drafter columns for when depth returns.
         // Integrity probes are exempt from the gate and keep verifying.
-        let fusedIDs = Set(allNativeRows.filter { row in
+        var fusedIDs = Set(allNativeRows.filter { row in
             guard !row.request.nativeMTPIntegrityProbe else { return false }
             // DeepInfer confidence scheduling: only this row parks drafting;
             // the row retains native identity and its committed drafter columns.
             return nativeMTPLoadGateEngaged
                 || (row.nativeMTPAdaptation != nil && nativeMTPMaximumProposalDepth(for: row) == 0)
         }.map(\.request.id))
+        // Grant-first: a row granted no verify column joins the same ordinary
+        // forward, so it does no head work until it is granted again.
+        fusedIDs.formUnion(nativeMTPDraftGrantDeniedIDs(
+            rows: allNativeRows.filter { !fusedIDs.contains($0.request.id) },
+            activeRows: rows.count
+        ))
         for row in rows {
             activeDecode[row.request.id]?.nativeMTPFusedOrdinaryDecode = fusedIDs.contains(row.request.id)
         }

@@ -7942,6 +7942,84 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertTrue(captures.contains { $0["short-192"] == true })
     }
 
+    private static let denyEveryDraftFit = [
+        "test_family": NativeMTPDraftCostFit(entries: [
+            .init(rows: 2, baseRoundMicros: 1, extraMicrosPerGrantedRow: 1_000_000)
+        ])
+    ]
+
+    private func runTwoNativeRows(
+        fits: [String: NativeMTPDraftCostFit],
+        maximumActiveRows: Int
+    ) async throws -> (first: [Int], second: [Int], backend: ScriptedBackend) {
+        let backend = ScriptedBackend(
+            scripts: ["a": Array(100..<140), "b": Array(200..<240)],
+            prefillTokens: ["a": 99, "b": 199]
+        )
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 2,
+            tokenDeliveryBufferLimit: 64,
+            maxPrefillRowsPerIteration: 2,
+            nativeMTPDraftCostFits: fits,
+            backend: backend
+        )
+        func request(_ id: String, _ prompt: Int) -> ContinuousBatchSchedulerRequest {
+            Self.nativeRequest(
+                id: id,
+                promptTokens: [prompt],
+                maxOutputTokens: 24,
+                proposals: [],
+                maximumDepth: 1,
+                maximumActiveRows: maximumActiveRows,
+                familyAdapter: "test_family"
+            )
+        }
+        async let first = scheduler.submit(request("a", 10))
+        async let second = scheduler.submit(request("b", 20))
+        let results = try await (first, second)
+        return (results.0.outputTokens, results.1.outputTokens, backend)
+    }
+
+    /// SPEC-048-R007 grant-first: rows the price denies skip proposal and
+    /// verification and ride the ordinary forward, keeping exact tokens.
+    func testNativeMTPGrantDeniedRowsRideOrdinaryForwardWithoutProposalWork() async throws {
+        let run = try await runTwoNativeRows(fits: Self.denyEveryDraftFit, maximumActiveRows: 2)
+        XCTAssertEqual(run.first, [99] + Array(101..<124))
+        XCTAssertEqual(run.second, [199] + Array(201..<224))
+        // A budget-bound tail round may still verify at depth zero; no shared
+        // round proposes a draft.
+        let proposalBatches = await run.backend.nativeProposalBatches()
+        XCTAssertFalse(
+            proposalBatches.contains { batch in batch.count == 2 && batch.contains { $0.maximumProposalDepth > 0 } },
+            "\(proposalBatches)"
+        )
+        let captures = await run.backend.decodeCaptureFlags()
+        XCTAssertTrue(
+            captures.contains { $0["a"] == true && $0["b"] == true },
+            "denied rows never shared the ordinary forward: \(captures)"
+        )
+    }
+
+    func testNativeMTPWithoutACostFitEveryRowStillDrafts() async throws {
+        let run = try await runTwoNativeRows(fits: [:], maximumActiveRows: 2)
+        XCTAssertEqual(run.first, [99] + Array(101..<124))
+        XCTAssertEqual(run.second, [199] + Array(201..<224))
+        let verifyBatches = await run.backend.nativeVerifyBatches()
+        XCTAssertTrue(verifyBatches.contains { Set($0) == ["a", "b"] }, "\(verifyBatches)")
+    }
+
+    /// Signed bound one: the load gate owns every multi-row round, so a cost
+    /// fit changes nothing on the live tuples.
+    func testNativeMTPSignedBoundOneNeverReachesTheDraftGrant() async throws {
+        let withFit = try await runTwoNativeRows(fits: Self.denyEveryDraftFit, maximumActiveRows: 1)
+        let withoutFit = try await runTwoNativeRows(fits: [:], maximumActiveRows: 1)
+        XCTAssertEqual(withFit.first, withoutFit.first)
+        XCTAssertEqual(withFit.second, withoutFit.second)
+        let withFitCaptures = await withFit.backend.decodeCaptureFlags()
+        let withoutFitCaptures = await withoutFit.backend.decodeCaptureFlags()
+        XCTAssertEqual(withFitCaptures, withoutFitCaptures)
+    }
+
     func testNativeMTPLoadGateHoldsDepthZeroAboveBoundAndRestoresWithHysteresis() async throws {
         let backend = ScriptedBackend(
             scripts: ["gated": Array(100..<160), "ordinary": [31, 32, 33, 34]],
@@ -9793,6 +9871,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         allowsRaggedPrefillOffsets: Bool = false,
         nativeMTPPromptRowsJoinRaggedPrefill: Bool = false,
         nativeMTPDrafterPromptWindow: Int? = nil,
+        nativeMTPDraftCostFits: [String: NativeMTPDraftCostFit] = [:],
         serialPrefillStride: Bool = false,
         prefillGrouping: ContinuousBatchPrefillGroupingRule = .unconstrained,
         nativeMTPRoundByteCapacity: Int? = nil,
@@ -9828,6 +9907,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             allowsRaggedPrefillOffsets: allowsRaggedPrefillOffsets,
             nativeMTPPromptRowsJoinRaggedPrefill: nativeMTPPromptRowsJoinRaggedPrefill,
             nativeMTPDrafterPromptWindow: nativeMTPDrafterPromptWindow,
+            nativeMTPDraftCostFits: nativeMTPDraftCostFits,
             tokenDeliveryBufferLimit: tokenDeliveryBufferLimit,
             tokenDeliveryTimeoutNanoseconds: tokenDeliveryTimeoutNanoseconds,
             queueWaitTimeoutNanoseconds: queueWaitTimeoutNanoseconds,

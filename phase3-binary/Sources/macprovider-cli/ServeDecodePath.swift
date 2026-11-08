@@ -62,6 +62,7 @@ extension ModelRuntime {
             allowsRaggedPrefillOffsets: allowsRaggedPrefillOffsets,
             nativeMTPPromptRowsJoinRaggedPrefill: nativeMTPPromptRowsJoinRaggedPrefill,
             nativeMTPDrafterPromptWindow: nativeMTPDrafterPromptWindow,
+            nativeMTPDraftCostFits: NativeMTPDraftCostFit.fits(chip: MSBComputeScoreLab.chipName()),
             tokenDeliveryBufferLimit: ContinuousBatchSchedulerConfiguration.productionTokenDeliveryBufferLimit,
             queueWaitTimeoutNanoseconds: Self.queueWaitTimeoutNanoseconds(queueWaitTimeoutMS),
             // The row cap is the served context, not the scheduler's

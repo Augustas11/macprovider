@@ -534,3 +534,93 @@ struct NativeMTPTupleCircuitBreakerState: Sendable, Equatable {
         )
     }
 }
+
+/// Per-machine price of drafting in a shared round (SPEC-048-R007), in integer
+/// microseconds from decode rounds that machine ran: one round with no drafts
+/// and the added cost of each row that verifies a draft, head step included.
+/// A static fit keeps the grant free of wall-clock input at serving time.
+struct NativeMTPDraftCostFit: Sendable, Equatable {
+    struct Entry: Sendable, Equatable {
+        let rows: Int
+        let baseRoundMicros: UInt64
+        let extraMicrosPerGrantedRow: UInt64
+    }
+
+    /// Ascending by `rows`.
+    let entries: [Entry]
+
+    /// The narrowest entry covering `activeRows`, the widest entry above it,
+    /// and none for one row: a lone row always drafts.
+    func entry(activeRows: Int) -> Entry? {
+        guard activeRows >= 2 else { return nil }
+        return entries.first { $0.rows >= activeRows } ?? entries.last
+    }
+
+    /// Mean of the plain-text and tool-history, greedy and sampled cells of
+    /// the #2144 p1536/o512 multi-row sweep on an M3 Ultra, depth one.
+    private static let m3UltraGLM5Next = NativeMTPDraftCostFit(entries: [
+        Entry(rows: 2, baseRoundMicros: 50_700, extraMicrosPerGrantedRow: 19_400),
+        Entry(rows: 4, baseRoundMicros: 100_100, extraMicrosPerGrantedRow: 27_600),
+    ])
+
+    /// Fits by family adapter for `chip`. A machine or family with no fit
+    /// keeps today's behaviour: every row drafts.
+    static func fits(chip: String) -> [String: NativeMTPDraftCostFit] {
+        chip == "Apple M3 Ultra"
+            ? [NativeMTPStagedRoundBytes.glm5NextFamilyAdapter: m3UltraGLM5Next]
+            : [:]
+    }
+}
+
+struct NativeMTPDraftGrantCandidate: Sendable, Equatable {
+    let requestID: String
+    let acceptancePPM: UInt64
+}
+
+/// Grant-first scheduling for a shared native-MTP round (SPEC-048-R007): each
+/// row's draft is priced before any proposal work, and a row is granted a
+/// verify column only while its expected tokens raise the round's rate.
+enum NativeMTPDraftGrant {
+    /// Rows with fewer observed proposals are priced at full acceptance, so a
+    /// new row gets its chance to draft where the fit allows one.
+    static let minimumObservedProposals: UInt64 = 16
+    static let fullAcceptancePPM: UInt64 = 1_000_000
+
+    static func acceptancePPM(accepted: UInt64, rejected: UInt64) -> UInt64 {
+        let proposed = NativeMTPDepthAdaptationState.saturatingAdd(accepted, rejected)
+        guard proposed >= minimumObservedProposals else { return fullAcceptancePPM }
+        return NativeMTPDepthAdaptationState.scaledRatio(
+            numerator: min(accepted, proposed),
+            denominator: proposed,
+            scale: fullAcceptancePPM
+        )
+    }
+
+    /// Request IDs granted no verify column this round. Highest acceptance is
+    /// granted first and input order breaks ties, so the result is
+    /// deterministic. Adding a row raises the rate when
+    /// `acceptance * roundMicros > expectedTokens * extraMicros`.
+    static func deniedRequestIDs(
+        candidates: [NativeMTPDraftGrantCandidate],
+        activeRows: Int,
+        entry: NativeMTPDraftCostFit.Entry
+    ) -> Set<String> {
+        var expectedTokensPPM = UInt64(max(0, activeRows)) * fullAcceptancePPM
+        var roundMicros = entry.baseRoundMicros
+        var denied = Set<String>()
+        let ranked = candidates.enumerated().sorted {
+            ($0.element.acceptancePPM, $1.offset) > ($1.element.acceptancePPM, $0.offset)
+        }
+        for (_, candidate) in ranked {
+            guard denied.isEmpty,
+                  candidate.acceptancePPM * roundMicros > expectedTokensPPM * entry.extraMicrosPerGrantedRow
+            else {
+                denied.insert(candidate.requestID)
+                continue
+            }
+            expectedTokensPPM += candidate.acceptancePPM
+            roundMicros += entry.extraMicrosPerGrantedRow
+        }
+        return denied
+    }
+}

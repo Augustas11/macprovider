@@ -3364,6 +3364,33 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertEqual(gated.backend.base.retainedRowCountForTest(), 0)
     }
 
+    private static let denyEveryDraftFit = [
+        "qwen3_5_mtp_v1": NativeMTPDraftCostFit(entries: [
+            .init(rows: 2, baseRoundMicros: 1, extraMicrosPerGrantedRow: 1_000_000)
+        ])
+    ]
+
+    private static func tinyNativeRequestWithFamily(
+        _ id: String, _ prompt: [Int], _ maxTokens: Int, temperature: Double
+    ) -> ContinuousBatchSchedulerRequest {
+        let base = tinyNativeRequest(id, prompt, maxTokens, temperature: temperature)
+        return ContinuousBatchSchedulerRequest(
+            id: base.id,
+            conversationKey: base.conversationKey,
+            promptTokens: base.promptTokens,
+            maxOutputTokens: base.maxOutputTokens,
+            samplerSeed: base.samplerSeed,
+            temperature: base.temperature,
+            topP: base.topP,
+            decodePath: base.decodePath,
+            nativeMTPMaximumProposalDepth: base.nativeMTPMaximumProposalDepth,
+            nativeMTPCompleteWindowBytesByDepth: base.nativeMTPCompleteWindowBytesByDepth,
+            nativeMTPFamilyAdapter: "qwen3_5_mtp_v1",
+            nativeMTPMaximumActiveRows: base.nativeMTPMaximumActiveRows,
+            nativeMTPTupleFence: base.nativeMTPTupleFence
+        )
+    }
+
     /// SPEC-048-R007 batched draft pass: rows verifying in one round advance
     /// through one packed drafter forward, and every proposal is byte-equal
     /// to the row's serial single-pass drafter seed.
@@ -3404,6 +3431,61 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
             }
         }
         XCTAssertEqual(native.backend.base.retainedRowCountForTest(), 0)
+    }
+
+    /// SPEC-048-R007 grant-first: a row granted no verify column does no head
+    /// work, buffers its committed columns, and on return drafts byte-equal
+    /// to a row that was never denied.
+    func testGrantDeniedNativeRowBuffersColumnsAndResumesByteEqualDrafts() async throws {
+        try requireMetal()
+        let prompt = Self.tinyPrompt(length: 11, salt: 31)
+        let peerPrompt = Self.tinyPrompt(length: 6, salt: 33)
+        let denied = try Self.tinyQwen35Native()
+        let scheduler = try Self.makeScheduler(
+            maxActiveRows: 2,
+            backend: denied.backend,
+            maxPhysicalBlocks: 64,
+            nativeMTPDraftCostFits: Self.denyEveryDraftFit
+        )
+        let peer = RuntimeBridgeTaskBox()
+        let result = try await scheduler.submit(
+            Self.tinyNativeRequestWithFamily("a", prompt, 40, temperature: 0.8)
+        ) { event in
+            if event.tokenIndex == 3 {
+                peer.start {
+                    try await scheduler.submit(Self.tinyNativeRequestWithFamily("peer", peerPrompt, 6, temperature: 0.8))
+                }
+            }
+        }
+        let peerResult = try await peer.value()
+        XCTAssertEqual(result.terminalStatus, .length, result.errorCode ?? "")
+        XCTAssertEqual(peerResult.terminalStatus, .length, peerResult.errorCode ?? "")
+
+        let ordinary = try Self.tinyQwen35Native()
+        let ordinaryResult = try await Self.makeScheduler(
+            maxActiveRows: 2, backend: ordinary.backend, maxPhysicalBlocks: 64
+        ).submit(Self.tinyNativeRequest("a", prompt, 40, decodePath: .ordinary, temperature: 0.8))
+        XCTAssertEqual(result.generatedTokens, ordinaryResult.generatedTokens)
+
+        let fusedSteps = denied.backend.capturedDecodeStepsByRow()["a"] ?? []
+        XCTAssertFalse(fusedSteps.isEmpty, "the denied row never rode the ordinary forward")
+        let lastFused = try XCTUnwrap(fusedSteps.max())
+        let proposals = denied.backend.proposalsByStep()["a"] ?? [:]
+        let resumed = proposals.filter { $0.key > lastFused }
+        XCTAssertGreaterThanOrEqual(resumed.count, 5, "drafting did not resume: \(proposals)")
+        for (step, proposal) in proposals.sorted(by: { $0.key < $1.key }) {
+            XCTAssertEqual(
+                proposal,
+                [try Self.definitionalDrafterSeed(
+                    target: denied.target,
+                    drafter: denied.drafter,
+                    prompt: prompt,
+                    generated: Array(result.generatedTokens.prefix(step))
+                )],
+                "proposal at step \(step)"
+            )
+        }
+        XCTAssertEqual(denied.backend.base.retainedRowCountForTest(), 0)
     }
 
     /// SPEC-048 R015 gated cells: a native row the load gate holds until it
@@ -5907,6 +5989,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         maxPrefillTokensPerIteration: Int? = nil,
         prefillGrouping: ContinuousBatchPrefillGroupingRule = .unconstrained,
         allowsRaggedPrefillOffsets: Bool = false,
+        nativeMTPDraftCostFits: [String: NativeMTPDraftCostFit] = [:],
         replayAuthority: any ContinuousBatchSchedulerReplayAuthority = RuntimeBridgeReplayAuthority()
     ) throws -> ContinuousBatchScheduler {
         let descriptor = PagedKVDescriptor(
@@ -5948,6 +6031,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
                 maxPrefillTokensPerIteration: maxPrefillTokensPerIteration,
                 maxPromptChunkTokens: maxPromptChunkTokens,
                 allowsRaggedPrefillOffsets: allowsRaggedPrefillOffsets,
+                nativeMTPDraftCostFits: nativeMTPDraftCostFits,
                 snapshot: ContinuousBatchSchedulerSnapshot(
                     modelID: descriptor.modelID,
                     modelSHA256: descriptor.modelSHA256,
