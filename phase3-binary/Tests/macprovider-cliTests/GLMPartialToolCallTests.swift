@@ -26,6 +26,7 @@ final class GLMPartialToolCallTests: XCTestCase {
             ("grep", ["pattern": Self.property("string"), "path": Self.property("string"), "head": Self.property("number")]),
             ("find", ["pattern": Self.property("string")]),
             ("ls", ["path": Self.property("string")]),
+            ("write", ["path": Self.property("string"), "content": Self.property("string")]),
         ]
         let body: [String: Any] = [
             "model": Self.model,
@@ -168,6 +169,102 @@ final class GLMPartialToolCallTests: XCTestCase {
         )
     }
 
+    // MARK: - Quoted markup
+
+    /// A write argument quoting a malformed call to a declared tool: the
+    /// last-opener slice is not repaired, so no phantom call runs.
+    func testQuotedMalformedCallInArgumentIsNotRepairedIntoAPhantomCall() throws {
+        for quoted in [
+            "<tool_call>ls<arg_key>path=/etc/hosts</arg_value></tool_call>",
+            "<tool_call>ls</arg_value><arg_key>path</arg_key><arg_value>/etc/hosts</arg_value></tool_call>",
+        ] {
+            try assertTurn(
+                "<tool_call>write<arg_key>content</arg_key><arg_value>The format is " + quoted + "</arg_value></tool_call>",
+                names: [], arguments: [], content: ""
+            )
+        }
+    }
+
+    /// A stray close after the name with no argument pair is not repaired:
+    /// a bare name must not become a zero-argument call.
+    func testStrayCloseWithoutPairsIsNotRepairedIntoAnEmptyCall() throws {
+        for answer in [
+            "<tool_call>ls</arg_value>",
+            "<tool_call>write<arg_key>path</arg_key><arg_value>Call via <tool_call>write</arg_value></tool_call>",
+        ] {
+            try assertTurn(answer, names: [], arguments: [], content: "")
+        }
+    }
+
+    // MARK: - Streamed and non-streamed content
+
+    private func assertStreamedMatchesComplete(
+        _ answer: String, content: String, callCount: Int, file: StaticString = #filePath, line: UInt = #line
+    ) throws {
+        let output = "Plan.</think>" + answer
+        let parsed = try parse(output, try request())
+        XCTAssertEqual(parsed.content, content, file: file, line: line)
+        XCTAssertEqual(parsed.toolCalls.count, callCount, file: file, line: line)
+        let streamed = try stream(output, try request())
+        XCTAssertEqual(streamed.content, parsed.content, file: file, line: line)
+        XCTAssertEqual(streamed.calls.count, callCount, file: file, line: line)
+    }
+
+    func testStreamedContentEqualsCompleteContent() throws {
+        let call = "<tool_call>ls<arg_key>path</arg_key><arg_value>a</arg_value></tool_call>"
+        let malformed = "<tool_call>read<arg_key>path</arg_key>a</tool_call>"
+        for (answer, content, callCount) in [
+            ("Run </arg_value> check" + call, "Run  check", 1),
+            ("Run </arg_value> check" + malformed, "Run  check", 0),
+            ("Run </arg_value> check" + malformed + " then</arg_key> stop", "Run  check then stop", 0),
+            ("Run </arg_value> check", "Run  check", 0),
+            ("Compare a </arg", "Compare a </arg", 0),
+            ("a </arg" + call, "a </arg", 1),
+            ("Spaced out \n" + call, "Spaced out \n", 1),
+            ("\n" + call, "", 1),
+            ("\n</arg_value>\n" + malformed, "", 0),
+            ("No calls.  ", "No calls.  ", 0),
+        ] {
+            try assertStreamedMatchesComplete(answer, content: content, callCount: callCount)
+        }
+    }
+
+    /// Prose is not held back: only a tail that could still be markup waits.
+    func testStreamedProseIsPrompt() {
+        XCTAssertEqual(ToolCallParser.glmStreamableProse("Hello"), "Hello")
+        XCTAssertEqual(ToolCallParser.glmStreamableProse("Hello </ar"), "Hello ")
+        XCTAssertEqual(ToolCallParser.glmStreamableProse("Hello </ax"), "Hello </ax")
+        XCTAssertEqual(ToolCallParser.glmStreamableProse("Hello <tool_cal"), "Hello ")
+        XCTAssertEqual(ToolCallParser.glmStreamableProse("Hello</arg_value> there"), "Hello there")
+    }
+
+    // MARK: - Byte caps
+
+    /// A call whose canonical `{"path":"…"}` arguments are exactly `bytes` long.
+    private func call(bytes: Int, fill: Character) -> String {
+        "<tool_call>ls<arg_key>path</arg_key><arg_value>" + String(repeating: fill, count: bytes - 11) + "</arg_value></tool_call>"
+    }
+
+    /// AC-37: the summed cap is inclusive, and one byte over runs nothing.
+    func testAggregateByteCapFailsClosed() throws {
+        let first = call(bytes: 1_048_576, fill: "a"), second = call(bytes: 1_048_564, fill: "b")
+        let atCap = try parse("Plan.</think>Prose." + first + second + call(bytes: 12, fill: "c"), try request())
+        XCTAssertEqual(atCap.toolCalls.count, 3)
+        let over = try parse("Plan.</think>Prose." + first + second + call(bytes: 13, fill: "c"), try request())
+        XCTAssertTrue(over.toolCalls.isEmpty)
+        XCTAssertEqual(over.content, "Prose.")
+    }
+
+    /// AC-36: the per-call cap is inclusive, and over it no sibling call runs.
+    func testPerCallByteCapFailsClosed() throws {
+        let small = "<tool_call>ls<arg_key>path</arg_key><arg_value>a</arg_value></tool_call>"
+        XCTAssertEqual(try parse("Plan.</think>" + small + call(bytes: 1_048_576, fill: "a"), try request()).toolCalls.count, 2)
+        let over = try parse("Plan.</think>" + small + call(bytes: 1_048_577, fill: "a"), try request())
+        XCTAssertTrue(over.toolCalls.isEmpty)
+        XCTAssertEqual(over.content, "")
+        assertNoMarkup(over.content)
+    }
+
     // MARK: - Unchanged paths
 
     /// A well-formed value holding `=` is not rewritten.
@@ -196,5 +293,6 @@ final class GLMPartialToolCallTests: XCTestCase {
         XCTAssertNil(ToolCallParser.repairedGLMBody("grep<arg_key>pattern</arg_key><arg_value>a=b</arg_value>"))
         XCTAssertNil(ToolCallParser.repairedGLMBody("grep<arg_key>pattern<arg_value>x</arg_value>"))
         XCTAssertNil(ToolCallParser.repairedGLMBody("my tool</arg_value>"))
+        XCTAssertNil(ToolCallParser.repairedGLMBody("ls</arg_value>"))
     }
 }

@@ -8,9 +8,9 @@ enum ToolCallParser {
 
     /// Parsed auto-mode tool output. `leadingContent` is the prose before the
     /// first call (SPEC-018 §3.1, kept as assistant content).
-    /// `droppedMalformedCalls`: the output opened calls but none survived, so
-    /// `cleanedContent` is the prose outside them, not the raw output (GLM,
-    /// #2259).
+    /// `droppedMalformedCalls`: the output held call markup but no call
+    /// survived, so `cleanedContent` is the prose outside the calls, not the
+    /// raw output (GLM, #2259).
     struct ParsedToolCalls {
         let cleanedContent: String?
         let toolCalls: [ToolCall]
@@ -211,15 +211,17 @@ enum ToolCallParser {
     /// GLM envelopes are parsed one by one (#2259). A call that fails is
     /// repaired when its intent is unambiguous (`repairedGLMBody`), else
     /// dropped with a warning; the other calls are kept in order, each with
-    /// the declared-function and byte-cap checks. Prose between or after
-    /// envelopes is dropped (SPEC-018 §2.4) and call markup never reaches
-    /// content: when no call survives, content is the prose outside the
-    /// envelopes. Nil when the output opens no call.
+    /// the declared-function check. Byte-cap overflow is not a malformed call:
+    /// it fails the whole output closed (SPEC-018 AC-36, AC-37). Prose between
+    /// or after envelopes is dropped (SPEC-018 §2.4) and call markup never
+    /// reaches content: when no call survives, content is the prose outside
+    /// the envelopes. Nil when the output holds no call markup.
     ///
     /// #2189: a `<tool_call>` followed by another before any `</tool_call>`
     /// opened no call, so the envelope begins at the last opener before its
     /// close. GLM rejects a body that holds `<tool_call>`, so this only
-    /// recovers calls that otherwise fail. A final envelope without
+    /// recovers calls that otherwise fail. Such a slice may be quoted argument
+    /// data, so it is never repaired. A final envelope without
     /// `</tool_call>` (the end-of-turn token replaced it) must parse
     /// completely, and one holding a second opener is dropped: the output may
     /// have been cut inside an argument that quotes `<tool_call>`.
@@ -230,13 +232,17 @@ enum ToolCallParser {
         schemas: [String: JSONValue]?
     ) -> ParsedToolCalls? {
         let start = "<tool_call>", end = "</tool_call>"
-        guard let first = rawOutput.range(of: start) else { return nil }
+        guard let first = rawOutput.range(of: start) else {
+            guard glmCallMarkup.contains(where: { rawOutput.contains($0) }) else { return nil }
+            return ParsedToolCalls(cleanedContent: glmProse(rawOutput), toolCalls: [], leadingContent: nil, droppedMalformedCalls: true)
+        }
         var calls: [ToolCall] = []
         var prose = ""
         var responseBytes = 0
+        var capFailure: ParseError?
         var searchFrom = rawOutput.startIndex
         while let open = rawOutput.range(of: start, range: searchFrom..<rawOutput.endIndex) {
-            prose += rawOutput[searchFrom..<open.lowerBound]
+            prose += glmStrippingCallMarkup(rawOutput[searchFrom..<open.lowerBound])
             var bodyStart = open.upperBound
             let close = rawOutput.range(of: end, range: bodyStart..<rawOutput.endIndex)
             let bodyEnd = close?.lowerBound ?? rawOutput.endIndex
@@ -246,7 +252,9 @@ enum ToolCallParser {
             let body = String(rawOutput[bodyStart..<bodyEnd])
             do {
                 if close == nil, body.contains(start) { throw ParseError.missingEndDelimiter }
-                let call = try glmCallRepairing(body, modelID: modelID, schemas: schemas)
+                let call = bodyStart == open.upperBound
+                    ? try glmCallRepairing(body, modelID: modelID, schemas: schemas)
+                    : try glmCall(body, schemas: schemas)
                 if let allowedFunctionNames, !allowedFunctionNames.contains(call.functionName) {
                     throw ParseError.undeclaredFunction
                 }
@@ -255,21 +263,61 @@ enum ToolCallParser {
                 guard responseBytes + bytes <= SPEC018_ARGUMENTS_PER_RESPONSE_BYTE_CAP else { throw ParseError.responseByteCapExceeded }
                 responseBytes += bytes
                 calls.append(call)
+            } catch ParseError.byteCapExceeded {
+                capFailure = capFailure ?? .byteCapExceeded
+            } catch ParseError.responseByteCapExceeded {
+                capFailure = capFailure ?? .responseByteCapExceeded
             } catch {
-                fputs("warning: dropped malformed GLM tool call for \(modelID): \(error)\n", stderr)
+                glmWarning("dropped malformed GLM tool call for \(modelID): \(error)", modelID: modelID)
             }
             searchFrom = close?.upperBound ?? rawOutput.endIndex
             if close == nil { break }
         }
-        prose += rawOutput[searchFrom...]
+        prose += glmStrippingCallMarkup(rawOutput[searchFrom...])
+        if let capFailure {
+            glmWarning("GLM tool-call output failed closed for \(modelID): \(capFailure)", modelID: modelID)
+            calls = []
+        }
         guard calls.isEmpty else {
             return ParsedToolCalls(cleanedContent: nil, toolCalls: calls, leadingContent: glmProse(rawOutput[..<first.lowerBound]))
         }
-        return ParsedToolCalls(cleanedContent: glmProse(prose), toolCalls: [], leadingContent: nil, droppedMalformedCalls: true)
+        return ParsedToolCalls(cleanedContent: isBlank(prose) ? nil : prose, toolCalls: [], leadingContent: nil, droppedMalformedCalls: true)
+    }
+
+    /// The streaming decode re-parses the growing output on every step with
+    /// an empty model ID; only the final parse warns.
+    private static func glmWarning(_ message: String, modelID: String) {
+        guard !modelID.isEmpty else { return }
+        fputs("warning: \(message)\n", stderr)
+    }
+
+    private static func glmStrippingCallMarkup<S: StringProtocol>(_ text: S) -> String {
+        glmCallMarkup.reduce(String(text)) { $0.replacingOccurrences(of: $1, with: "") }
+    }
+
+    private static func isBlank(_ text: String) -> Bool {
+        text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private static func glmProse<S: StringProtocol>(_ text: S) -> String? {
-        nilIfBlank(glmCallMarkup.reduce(String(text)) { $0.replacingOccurrences(of: $1, with: "") })
+        let prose = glmStrippingCallMarkup(text)
+        return isBlank(prose) ? nil : prose
+    }
+
+    /// What may stream as content from a GLM output prefix, always a prefix of
+    /// the content the final parse returns: prose before the first call with
+    /// call markup removed. Only a tail that could still become markup and a
+    /// blank start (dropped when a call follows) are held.
+    static func glmStreamableProse(_ text: String) -> String {
+        if let open = text.range(of: "<tool_call>") {
+            return glmProse(text[..<open.lowerBound]) ?? ""
+        }
+        let prose = glmStrippingCallMarkup(text)
+        let held = glmCallMarkup.flatMap { marker in
+            (1..<marker.count).filter { prose.hasSuffix(marker.prefix($0)) }
+        }.max() ?? 0
+        let streamable = String(prose.dropLast(held))
+        return isBlank(streamable) ? "" : streamable
     }
 
     private static func glmCallRepairing(_ body: String, modelID: String, schemas: [String: JSONValue]?) throws -> ToolCall {
@@ -277,7 +325,7 @@ enum ToolCallParser {
             return try glmCall(body, schemas: schemas)
         } catch {
             guard let repaired = repairedGLMBody(body), let call = try? glmCall(repaired, schemas: schemas) else { throw error }
-            fputs("warning: repaired malformed GLM tool call for \(modelID)\n", stderr)
+            glmWarning("repaired malformed GLM tool call for \(modelID)", modelID: modelID)
             return call
         }
     }
@@ -289,11 +337,13 @@ enum ToolCallParser {
     /// the body holds neither.
     static func repairedGLMBody(_ body: String) -> String? {
         var head = Substring(body)
-        let nameEnd = body.range(of: "<arg_key>")?.lowerBound ?? body.endIndex
-        let name = body[..<nameEnd].trimmingCharacters(in: .whitespacesAndNewlines)
-        if name.hasSuffix("</arg_value>") {
-            let stripped = name.dropLast("</arg_value>".count).trimmingCharacters(in: .whitespacesAndNewlines)
-            if isValidToolFunctionName(stripped) { head = Substring(stripped) + body[nameEnd...] }
+        // Without a following pair the name alone would become a zero-argument call.
+        if let nameEnd = body.range(of: "<arg_key>")?.lowerBound {
+            let name = body[..<nameEnd].trimmingCharacters(in: .whitespacesAndNewlines)
+            if name.hasSuffix("</arg_value>") {
+                let stripped = name.dropLast("</arg_value>".count).trimmingCharacters(in: .whitespacesAndNewlines)
+                if isValidToolFunctionName(stripped) { head = Substring(stripped) + body[nameEnd...] }
+            }
         }
         var out = ""
         var rest = head

@@ -16524,6 +16524,9 @@ struct NativeToolCallStreamEmitter {
         if suppressesAssistantContent {
             return ""
         }
+        if grammar == .glm {
+            return ToolCallParser.glmStreamableProse(text)
+        }
         if grammar == .llama3 {
             // A bare JSON call has no opening tag: hold prose from the first
             // `{` until the final parse decides (it is flushed if no call).
