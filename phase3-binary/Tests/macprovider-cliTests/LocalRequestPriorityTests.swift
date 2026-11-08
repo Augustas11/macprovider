@@ -701,6 +701,28 @@ final class LocalRequestPriorityTests: XCTestCase {
         await status.finishLocalRequest(lease, completion: nil, failed: false)
     }
 
+    /// A buyer admitted during the hold is not drained, so its presence does
+    /// not turn a timeout on local work alone into a buyer drain timeout.
+    func testSelfCheckHoldArrivalDoesNotMakeALocalDrainTimeoutABuyerOne() async throws {
+        let status = makeStatus(slots: 2)
+        let lease = LocalPreemptionLease()
+        guard case .admitted = await status.beginLocalRequest(lease) else { return XCTFail("local not admitted") }
+        let arrival = Task { () -> ProviderRequestAdmission in
+            while await !status.selfCheckAdmissionHoldStatus().active { try? await Task.sleep(nanoseconds: 5_000_000) }
+            return await status.admitRequest(requestID: "arrival")
+        }
+        let outcome = await ContinuousBatchingSelfCheck.runUnderAdmissionHold(
+            providerStatus: status, drainSeconds: 1, lifecycleLease: { nil }, context: "local-test", log: { _ in }
+        ) {
+            XCTFail("self-check must not run beside a local request")
+            return true
+        }
+        XCTAssertEqual(outcome, .localDrainTimeout)
+        guard case .admitted(let at) = await arrival.value else { return XCTFail("arrival refused") }
+        await status.finishRequest(startedAt: at, completion: nil, failed: false, requestID: "arrival")
+        await status.finishLocalRequest(lease, completion: nil, failed: false)
+    }
+
     /// Finding 1: one long local Chat must not turn the self-check hold into
     /// repeated 30 -> 60 -> 120 s buyer refusals. The hold preempts it, drains
     /// within the normal bound, runs the check, and reopens to buyers.

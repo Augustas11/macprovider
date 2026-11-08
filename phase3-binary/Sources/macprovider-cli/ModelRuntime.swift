@@ -6613,10 +6613,15 @@ maxTokens: 1,
         }
     }
 
-    /// How long the oldest request queued for an inference permit has waited
-    /// (behind a self-check probe under an admission hold), or nil.
-    func oldestInferencePermitWaitSeconds() async -> Double? {
-        await inferenceGate.oldestSharedWaiterSeconds()
+    /// How long the longest-waiting buyer has waited behind a self-check
+    /// probe's exclusive inference permit, or nil.
+    func selfCheckBuyerWaitSeconds() async -> Double? {
+        await inferenceGate.oldestBuyerWaitBehindExclusiveSeconds()
+    }
+
+    /// Whether a self-check probe is queued behind requests holding permits.
+    func selfCheckProbeAwaitingResidency() async -> Bool {
+        await inferenceGate.exclusiveAcquisitionQueued()
     }
 
     /// The operation starts on this actor only after exclusive admission and
@@ -7795,7 +7800,7 @@ maxTokens: 1,
         let templateSupportsThinkingToggle = handle.snapshot.templateSupportsThinkingToggle
         let templateSupportsPreserveThinking = handle.snapshot.templateSupportsPreserveThinking
         let selectionModelID = toolSelectionModelID(handle.snapshot)
-        try await inferenceGate.withPermit {
+        try await inferenceGate.withBuyerPermit {
             // A cancelled request (client gone, or local work preempted by a
             // buyer under SPEC-001-R011) releases the gate without preparing.
             try Task.checkCancellation()
@@ -7955,7 +7960,7 @@ maxTokens: 1,
             let templateSupportsThinkingToggle = handle.snapshot.templateSupportsThinkingToggle
             let templateSupportsPreserveThinking = handle.snapshot.templateSupportsPreserveThinking
             let selectionModelID = toolSelectionModelID(handle.snapshot)
-            let inputTokens = try await inferenceGate.withPermit {
+            let inputTokens = try await inferenceGate.withBuyerPermit {
                 try handle.drainCancelled.check()
                 return try await container.perform { context in
                     try handle.drainCancelled.check()
@@ -9044,7 +9049,7 @@ maxTokens: 1,
               !capability.shouldUseSerialPath, case .attached = pagedKVAttachDecision else { return nil }
         let gate = inferenceGate
         return try await Self.withDrainAndClientCancellation(drainCancelled, shouldCancel: shouldCancel) {
-            try await gate.withPermit {
+            try await gate.withBuyerPermit {
                 try Task.checkCancellation()
                 try drainCancelled.check()
                 if shouldCancel() { throw CancellationError() }
@@ -9603,7 +9608,7 @@ maxTokens: 1,
               !capability.shouldUseSerialPath, case .attached = pagedKVAttachDecision else { return nil }
         let gate = inferenceGate
         return try await Self.withDrainAndClientCancellation(drainCancelled, shouldCancel: { shouldCancel() || idleCancellation.isFired }) {
-            try await gate.withPermit {
+            try await gate.withBuyerPermit {
                 try Task.checkCancellation()
                 try drainCancelled.check()
                 if shouldCancel() { throw CancellationError() }
@@ -10365,7 +10370,7 @@ maxTokens: boundedMaxTokens,
         let completion = try await Self.withDrainAndClientCancellation(
             drainCancelled, shouldCancel: { prefillScope.interruptsPrefill(cancelled: shouldCancel()) }
         ) {
-            try await inferenceGate.withPermit {
+            try await inferenceGate.withBuyerPermit {
                 try drainCancelled.check()
                 try Task.checkCancellation()
                 return try await container.perform { context in
@@ -11307,7 +11312,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                     )
                 }
             ) { idleCancellation -> CompletionResult in
-                try await inferenceGate.withPermit { () async throws -> CompletionResult in
+                try await inferenceGate.withBuyerPermit { () async throws -> CompletionResult in
                 try drainCancelled.check()
                 try Task.checkCancellation()
                 return try await container.perform { context in

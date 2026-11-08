@@ -13,6 +13,7 @@ actor AsyncSemaphore {
     private struct Waiter {
         let id: UUID
         let ownership: Ownership
+        let isBuyer: Bool
         let continuation: CheckedContinuation<Void, Error>
         let enqueuedAt = DispatchTime.now().uptimeNanoseconds
     }
@@ -52,13 +53,28 @@ actor AsyncSemaphore {
     /// Queued acquisitions, excluding callers that already own the gate.
     func queuedWaiterCount() -> Int { waiters.count }
 
-    /// Seconds the longest-queued shared waiter has waited, or nil when none
-    /// waits. A CB self-check probe waits for exclusive ownership, so this is
-    /// the oldest request queued behind it (SPEC-038 FR-CB10 item 3, v0.3.36).
-    func oldestSharedWaiterSeconds() -> Double? {
-        guard let oldest = waiters.first(where: { $0.ownership == .shared }) else { return nil }
+    /// Seconds the longest-waiting buyer queued behind exclusive ownership
+    /// (held, or queued ahead of it) has waited, or nil when none has. Buyers
+    /// ahead of a queued exclusive waiter wait on ordinary work, and FIFO order
+    /// means every waiter behind it arrived after it, so `enqueuedAt` never
+    /// predates the exclusive claim (SPEC-038 FR-CB10 item 3, v0.3.37).
+    func oldestBuyerWaitBehindExclusiveSeconds() -> Double? {
+        let start: Int
+        if exclusiveHeld {
+            start = 0
+        } else if let exclusive = waiters.firstIndex(where: { $0.ownership == .exclusive }) {
+            start = exclusive + 1
+        } else {
+            return nil
+        }
+        guard let oldest = waiters[start...].first(where: { $0.isBuyer }) else { return nil }
         let now = DispatchTime.now().uptimeNanoseconds
         return Double(now > oldest.enqueuedAt ? now - oldest.enqueuedAt : 0) / 1_000_000_000
+    }
+
+    /// Whether an exclusive acquisition is queued behind current holders.
+    func exclusiveAcquisitionQueued() -> Bool {
+        waiters.contains { $0.ownership == .exclusive }
     }
 
     /// Permanently prevents admission when native cleanup cannot prove retirement.
@@ -73,20 +89,27 @@ actor AsyncSemaphore {
     }
 
     func withPermit<T>(_ operation: @Sendable () async throws -> T) async throws -> T {
-        try await withOwnership(.shared, operation)
+        try await withOwnership(.shared, isBuyer: false, operation)
+    }
+
+    /// A shared permit for a buyer request, the only wait a CB self-check's
+    /// buyer-wait bound counts.
+    func withBuyerPermit<T>(_ operation: @Sendable () async throws -> T) async throws -> T {
+        try await withOwnership(.shared, isBuyer: true, operation)
     }
 
     /// Drains shared holders, then reserves the gate through the operation's
     /// cleanup. This works even when a probe needs more rows than the shared limit.
     func withExclusivePermit<T>(_ operation: @Sendable () async throws -> T) async throws -> T {
-        try await withOwnership(.exclusive, operation)
+        try await withOwnership(.exclusive, isBuyer: false, operation)
     }
 
     private func withOwnership<T>(
         _ ownership: Ownership,
+        isBuyer: Bool,
         _ operation: @Sendable () async throws -> T
     ) async throws -> T {
-        try await wait(for: ownership)
+        try await wait(for: ownership, isBuyer: isBuyer)
         do {
             // Cancellation can race with a continuation handing off ownership.
             try Task.checkCancellation()
@@ -101,7 +124,7 @@ actor AsyncSemaphore {
         }
     }
 
-    private func wait(for ownership: Ownership) async throws {
+    private func wait(for ownership: Ownership, isBuyer: Bool) async throws {
         if closed { throw AdmissionError.closed }
         try Task.checkCancellation()
         if !exclusiveHeld, waiters.isEmpty {
@@ -124,7 +147,7 @@ actor AsyncSemaphore {
                 if Task.isCancelled {
                     continuation.resume(throwing: CancellationError())
                 } else {
-                    waiters.append(Waiter(id: id, ownership: ownership, continuation: continuation))
+                    waiters.append(Waiter(id: id, ownership: ownership, isBuyer: isBuyer, continuation: continuation))
                 }
             }
         } onCancel: {

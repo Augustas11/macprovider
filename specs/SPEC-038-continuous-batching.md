@@ -7,6 +7,15 @@ Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (orig
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
 **Change log v0.3.39 (2026-11-09, FR-CB10 admission hold admits buyer arrivals, Related: #2257):**
+FR-CB10 item 3: the 20 s buyer-wait bound counts only buyer requests, and
+only the time each waits behind the check's exclusive probe residency (held
+or queued ahead of it). A compute-score job or KV seed, a buyer queued behind
+ordinary work during the drain, or a queue that existed at hold start no
+longer ends the hold. A buyer admitted during the drain may still hold an
+inference permit when the probe queues. That wait is not check time: it does
+not consume the check bound and has its own budget of the hold's drain bound,
+ending as a drain timeout (`reason=residency_wait_bound`).
+
 FR-CB10 item 3: a buyer request that arrives during a self-check admission
 hold is admitted and waits behind the check's probe, instead of being
 refused with the retryable `continuous_batching_stream_backpressure`
@@ -1696,12 +1705,22 @@ buyer traffic. No extra runtime enable flag is introduced.
    that still counts its own forwarded requests routes meanwhile) MUST be
    admitted and MUST NOT be refused because of the hold, with
    `continuous_batching_stream_backpressure`, `error_queue_full` or any other
-   status. It waits behind the check's exclusive probe residency (below) and
-   is served when that residency is released; it MUST NOT end the hold by
-   arriving. The drain waits only for work admitted before the hold; a buyer
-   admitted during the hold is not drained. The hold MUST yield
+   status. A buyer that finds a free inference permit before the probe queues
+   is served at once; otherwise it waits behind the check's exclusive probe
+   residency (below) and is served when that residency is released. It MUST
+   NOT end the hold by arriving. The drain waits only for work admitted before
+   the hold; a buyer admitted during the hold is not drained. (v0.3.37) Time
+   the probe spends queued behind a buyer holding a permit is not check time:
+   it MUST NOT consume the check bound or count as a check-bound yield, and
+   its total per hold is bounded by the hold's drain bound, past which the
+   step is cancelled and the hold ends as a drain timeout
+   (`reason=residency_wait_bound`). The hold MUST yield
    (`reason=buyer_wait_bound`) once the longest-waiting buyer has waited
-   `selfCheckBuyerWaitYieldSeconds` (20 s) for inference: about twice the
+   `selfCheckBuyerWaitYieldSeconds` (20 s) behind that residency, held or
+   queued ahead of the buyer. Only buyer requests count, from no earlier than
+   the probe's claim: a buyer queued behind ordinary work and other users of
+   the inference gate (compute-score jobs, KV seed) MUST NOT end the hold. The
+   bound is about twice the
    ~11 s hold measured on CLI 1.8.281, so a short check completes and the
    buyer sees only added time to first token, while a longer check yields
    and the buyer is served after its cancelled step retires. The bound stays

@@ -774,7 +774,7 @@ actor ProviderStatus {
     /// drain. A buyer request is never refused for the SPEC-038 FR-CB10
     /// self-check admission hold (v0.3.36): it is admitted and waits behind
     /// the probe's exclusive inference permit; the hold yields only once a
-    /// buyer has waited `selfCheckBuyerWaitYieldSeconds`.
+    /// buyer has waited `selfCheckBuyerWaitYieldSeconds` behind that permit.
     func admitRequest(requestID: String? = nil) async -> ProviderRequestAdmission {
         guard !localCreativeHold, status != .draining, status != .unavailable else { return .pausedOrDraining }
         let startedAt = await beginRequest(requestID: requestID)
@@ -787,10 +787,15 @@ actor ProviderStatus {
         cbAdmissionHold.active ? cbAdmissionHoldArrivals.count : 0
     }
 
+    /// Buyer requests in flight that were admitted before the hold.
+    func hasBuyerWorkPredatingSelfCheckAdmissionHold() -> Bool {
+        requestsInFlight > selfCheckAdmissionHoldArrivalsInFlight()
+    }
+
     /// Inference work the hold's drain waits for: everything in flight except
     /// buyers admitted during the hold, which queue behind the check instead.
     func hasInferenceWorkPredatingSelfCheckAdmissionHold() -> Bool {
-        requestsInFlight > selfCheckAdmissionHoldArrivalsInFlight() || !localLeases.isEmpty
+        hasBuyerWorkPredatingSelfCheckAdmissionHold() || !localLeases.isEmpty
     }
 
     func requestsInFlightCount() -> Int { requestsInFlight }

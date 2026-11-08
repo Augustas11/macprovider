@@ -687,9 +687,9 @@ enum ContinuousBatchingSelfCheck {
     /// is bounded separately); an unfinished ladder resumes at the next idle
     /// window or hold.
     static let admissionHoldCheckSeconds: Double = 300
-    /// SPEC-038 FR-CB10 item 3 (v0.3.36): a buyer admitted during a hold
+    /// SPEC-038 FR-CB10 item 3 (v0.3.37): a buyer admitted during a hold
     /// waits behind the check's probe; the hold yields once the oldest such
-    /// buyer has waited this long. About twice the ~11 s hold seen on CLI
+    /// buyer has waited this long behind it. About twice the ~11 s hold seen on CLI
     /// 1.8.281, so a short check finishes, and below the 30 s default
     /// scheduler queue wait.
     static let selfCheckBuyerWaitYieldSeconds: Double = 20
@@ -726,8 +726,9 @@ enum ContinuousBatchingSelfCheck {
         /// The hold did not start: a lifecycle lease, a pause, a drain, or a
         /// provider that is not serving.
         case skipped(reason: String)
-        /// In-flight requests did not finish within the drain timeout; none
-        /// was cancelled and the check did not run.
+        /// In-flight requests did not finish within the drain timeout, before
+        /// the check or while its probe queued for residency behind them; none
+        /// was cancelled and the unfinished step did not run.
         case drainTimeout
         /// SPEC-001-R011: only preempted local work was still unwinding at
         /// the drain bound. The check did not run, and the drain bound does
@@ -758,7 +759,9 @@ enum ContinuousBatchingSelfCheck {
     /// check, which yields once `buyerWaitSeconds` reaches
     /// `buyerWaitYieldSeconds`, v0.3.36), let the in-flight ones finish (bounded by `drainSeconds`; none is cancelled
     /// or dropped), run `check` for at most `checkSeconds`, then re-open
-    /// admission. Never starts under a lifecycle lease, an operator pause or a
+    /// admission. Time the probe spends queued behind buyers holding permits
+    /// (`probeAwaitingResidency`) is not check time: it has its own budget of
+    /// `drainSeconds` and ends as a drain timeout (v0.3.37). Never starts under a lifecycle lease, an operator pause or a
     /// drain. The hold ends early, as a yield, the moment a lease appears, the
     /// provider stops serving (a pause or drain, whose state it keeps), or
     /// `stillValid` fails (the self-check target changed); admission re-opens
@@ -773,6 +776,7 @@ enum ContinuousBatchingSelfCheck {
         stillValid: @escaping @Sendable () async -> Bool = { true },
         buyerWaitSeconds: @escaping @Sendable () async -> Double? = { nil },
         buyerWaitYieldSeconds: Double = selfCheckBuyerWaitYieldSeconds,
+        probeAwaitingResidency: @escaping @Sendable () async -> Bool = { false },
         context: String,
         log: @escaping @Sendable (String) -> Void,
         check: @escaping @Sendable () async -> Bool
@@ -781,7 +785,7 @@ enum ContinuousBatchingSelfCheck {
         var refusal = lifecycleLease().map { "lifecycle_lease_\($0)" }
         if refusal == nil {
             refusal = await providerStatus.beginSelfCheckAdmissionHold(
-                expectedEndAt: Date().addingTimeInterval(drainBound + checkSeconds)
+                expectedEndAt: Date().addingTimeInterval(drainBound * 2 + checkSeconds)
             )
         }
         if let refusal {
@@ -795,8 +799,8 @@ enum ContinuousBatchingSelfCheck {
         /// Why the hold must end now, or nil while it may continue.
         @Sendable func interruption() async -> String? {
             if Task.isCancelled { return "cancelled" }
-            // v0.3.36: an admitted buyer waits behind the check; the hold
-            // yields only once the oldest one has waited the bound.
+            // v0.3.37: a buyer waiting behind the check's residency yields
+            // the hold once the oldest one has waited the bound.
             if let wait = await buyerWaitSeconds() {
                 let bound = wait >= buyerWaitYieldSeconds
                 if buyerWait.begin() || bound {
@@ -819,16 +823,16 @@ enum ContinuousBatchingSelfCheck {
         let drainDeadline = startedAt.addingTimeInterval(drainBound)
         let neededDrain = await providerStatus.hasInferenceWork()
         // The hold preempted admitted local work when it began; only buyer
-        // work seen during the drain makes a timeout a buyer drain timeout.
-        var sawBuyerWork = await providerStatus.requestsInFlightCount() > 0
+        // work predating the hold makes a timeout a buyer drain timeout.
+        var sawBuyerWork = await providerStatus.hasBuyerWorkPredatingSelfCheckAdmissionHold()
         // Buyers admitted during the hold are not drained: they queue behind
         // the check's probe (v0.3.36).
         while await providerStatus.hasInferenceWorkPredatingSelfCheckAdmissionHold(), Date() < drainDeadline {
             if let reason = await interruption() { return await end(.yielded, reason: reason) }
             try? await Task.sleep(nanoseconds: 50_000_000)
-            if await providerStatus.requestsInFlightCount() > 0 { sawBuyerWork = true }
+            if await providerStatus.hasBuyerWorkPredatingSelfCheckAdmissionHold() { sawBuyerWork = true }
         }
-        if await providerStatus.requestsInFlightCount() > 0 { sawBuyerWork = true }
+        if await providerStatus.hasBuyerWorkPredatingSelfCheckAdmissionHold() { sawBuyerWork = true }
         let timeoutOutcome: AdmissionHoldOutcome = sawBuyerWork ? .drainTimeout : .localDrainTimeout
         if await providerStatus.hasInferenceWorkPredatingSelfCheckAdmissionHold() { return await end(timeoutOutcome) }
         if neededDrain, Date() >= drainDeadline { return await end(timeoutOutcome) }
@@ -841,14 +845,28 @@ enum ContinuousBatchingSelfCheck {
             finished.markDone()
             return decided
         }
-        let checkDeadline = Date().addingTimeInterval(checkSeconds)
+        var checkDeadline = Date().addingTimeInterval(checkSeconds)
+        var residencyWait: TimeInterval = 0
+        var lastTick = Date()
         while !finished.isDone {
-            let reason = Date() >= checkDeadline ? "check_bound" : await interruption()
+            // A buyer admitted during the drain may hold a permit when the
+            // probe queues; that wait is a drain, not check time (v0.3.37).
+            let now = Date()
+            if await probeAwaitingResidency() {
+                residencyWait += now.timeIntervalSince(lastTick)
+                checkDeadline.addTimeInterval(now.timeIntervalSince(lastTick))
+            }
+            lastTick = now
+            let reason = residencyWait > drainBound ? "residency_wait_bound"
+                : now >= checkDeadline ? "check_bound" : await interruption()
             if let reason {
                 task.cancel()
                 // Admission re-opens now; the cancelled check is still awaited
                 // so the driver never runs two checks at once.
-                let outcome = await end(reason == "check_bound" ? .checkBound : .yielded, reason: reason)
+                let outcome = await end(
+                    reason == "check_bound" ? .checkBound : reason == "residency_wait_bound" ? .drainTimeout : .yielded,
+                    reason: reason
+                )
                 _ = await task.value
                 return outcome
             }
@@ -1337,7 +1355,8 @@ actor ContinuousBatchingSelfCheckDriver {
             ),
             lifecycleLease: lifecycleLease,
             stillValid: { await runtime.continuousBatchingSelfCheckTarget(includeDecided: true) == target },
-            buyerWaitSeconds: { await runtime.oldestInferencePermitWaitSeconds() },
+            buyerWaitSeconds: { await runtime.selfCheckBuyerWaitSeconds() },
+            probeAwaitingResidency: { await runtime.selfCheckProbeAwaitingResidency() },
             context: "due_s=\(Int(dueSeconds)) model_sha256=\(target.key.modelSHA256)",
             log: log
         ) {
