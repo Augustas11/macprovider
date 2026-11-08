@@ -24,7 +24,13 @@ coordinator runtime deployment or sampled GLM admission.
 
 ## Next Pearl runtime v1.8.282 — contents and order (2026-11-08)
 
-Live coordinator and gateway: v1.8.279. The next runtime carries the merged
+**Live 2026-11-09 07:31 WITA:** coordinator and gateway run v1.8.282, and the
+`stream-ceiling` task set the GLM-5.3-Flash output limit to 65,536. The GLM CLI
+cut is next. Before a runtime apply, stop long-running gateway work such as
+audits: the updater needs zero active reservations for 5 seconds inside its
+90-second drain.
+
+Contents of that runtime (live before: v1.8.279): it carries the merged
 #2250 (C2P sequence order), #2258 (coordinator half, `peer_close_<code>`),
 #2248 (FR-26 reference scorers) and
 [#2252](https://github.com/Augustas11/macprovider/pull/2252) (merged
