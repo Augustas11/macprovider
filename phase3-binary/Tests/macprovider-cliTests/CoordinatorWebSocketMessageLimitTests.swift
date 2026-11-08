@@ -34,6 +34,24 @@ final class CoordinatorWebSocketMessageLimitTests: XCTestCase {
         XCTAssertEqual(CoordinatorInboundBacklog.byteCount(of: .data(Data(count: 3))), 3)
     }
 
+    // #2246: preflight acks on the receive-loop fast path are capped, so a
+    // peer flooding preflight while egress is stalled cannot pile up
+    // unbounded ack tasks; overflow takes the byte-budgeted inbox.
+    func testPreflightFastPathIsCapped() {
+        XCTAssertEqual(coordinatorPreflightFastPathLimit, 16)
+        let inflight = CoordinatorInflightCounter(limit: 2)
+        XCTAssertTrue(inflight.tryAcquire())
+        XCTAssertTrue(inflight.tryAcquire())
+        XCTAssertFalse(inflight.tryAcquire())
+        XCTAssertEqual(inflight.inFlight, 2)
+        inflight.release()
+        XCTAssertTrue(inflight.tryAcquire())
+        inflight.release()
+        inflight.release()
+        inflight.release()
+        XCTAssertEqual(inflight.inFlight, 0)
+    }
+
     // A message larger than Foundation's old 1 MiB default, the size class of
     // the live failure, now arrives intact on a production-configured task.
     func testMessageOverLegacyDefaultIsReceived() async throws {

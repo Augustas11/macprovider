@@ -1,6 +1,18 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.51 (2026-11-06, native-MTP mode defaults to auto)
+**Version:** 1.9.52 (2026-11-07, heartbeat bound covers the send only; preflight ack never waits on runtime)
+
+**Change log v1.9.52 (2026-11-07, Related: #2246):**
+The five-second heartbeat bound in SPEC-001-R001 covers only the WebSocket
+send. Building the heartbeat, which reads runtime, conversation-cache and
+scheduler state, happens before the bound starts, so a long-context CB commit
+that holds that state for seconds no longer makes the provider cancel its own
+session. A build that never finishes is still caught by the 15-second
+heartbeat watchdog. The `preflight_ack` is answered from a lock-protected
+copy of the provider's status, model-loaded state and context capacity, read
+in the WebSocket receive task, so it never waits on the status actor, the
+runtime, or earlier inbound frames. Its fields and rejection reasons are
+unchanged.
 
 **Change log v1.9.51 (2026-11-06, Related: #2198):**
 The native-MTP mode (`native_mtp_mode`, `MACPROVIDER_NATIVE_MTP_MODE`,
@@ -1294,7 +1306,9 @@ session is replaced using the existing authenticated handshake and capped
 exponential backoff. Failed coordinator connection attempts and backoff are
 remote unavailability, not evidence of a locally wedged provider.
 
-The heartbeat send remains bounded at five seconds. At 15 seconds without
+The heartbeat send remains bounded at five seconds. The bound covers the
+WebSocket send only; building the heartbeat payload MUST NOT count against it,
+because a busy runtime is not a failed transport. At 15 seconds without
 heartbeat activity, or on a heartbeat send failure, the provider MUST request
 reconnect by cancelling that session's WebSocket. A separate local recovery
 deadline of 60 seconds starts when reconnect is requested. The hard-fail
@@ -3408,6 +3422,10 @@ coordinator `drain` command.
   "estimated_wait_ms": 0
 }
 ```
+
+The provider MUST answer `preflight` without waiting on runtime work, the
+status actor, or earlier inbound frames: the coordinator stops waiting after
+2 s and treats a late ack as unexpected.
 
 If `accepted` is false, the provider includes a reason and relevant context:
 

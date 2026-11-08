@@ -895,6 +895,114 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertEqual(frames[0]["estimated_wait_ms"] as? Int, 0)
     }
 
+    // Issue #2246: the preflight ack must not wait on the status actor. A
+    // status actor held for 3 s (longer than the coordinator's 2 s preflight
+    // timeout) must not delay the ack, on either the drainer path or the
+    // receive-task fast path.
+    func testPreflightAckDoesNotWaitOnStalledStatusActor() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let telemetry = StallingWorkloadTelemetryProvider()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1),
+            workloadTelemetryProvider: telemetry
+        )
+        let client = try await makeClient(status: status, recorder: recorder)
+        telemetry.stallSeconds.set(3)
+        let stall = Task { _ = await status.snapshot() }
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        let start = DispatchTime.now().uptimeNanoseconds
+        try await client.handleCoordinatorPayloadForTest([
+            "type": "preflight",
+            "request_id": "req-stalled",
+            "estimated_tokens": 30_000,
+        ])
+        let elapsedNs = DispatchTime.now().uptimeNanoseconds - start
+        await stall.value
+
+        XCTAssertLessThan(elapsedNs, 1_000_000_000, "preflight ack waited on the status actor: \(elapsedNs)ns")
+        let frames = await recorder.frames
+        XCTAssertEqual(frames.count, 1)
+        XCTAssertEqual(frames[0]["type"] as? String, "preflight_ack")
+        XCTAssertEqual(frames[0]["request_id"] as? String, "req-stalled")
+        XCTAssertEqual(frames[0]["accepted"] as? Bool, false)
+        XCTAssertEqual(frames[0]["reason"] as? String, "context_exceeds_capacity")
+        XCTAssertEqual(frames[0]["max_context_tokens"] as? Int, 20_000)
+    }
+
+    func testPreflightAckFastPathAnswersFromReceiveTaskWhileStatusActorStalls() async throws {
+        let telemetry = StallingWorkloadTelemetryProvider()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1),
+            workloadTelemetryProvider: telemetry
+        )
+        let client = try await makeClient(
+            status: status,
+            recorder: CoordinatorFrameRecorder(),
+            useDefaultSendOverride: false
+        )
+        await status.setState(.draining, reason: "test_draining")
+        let preflight = #"{"type":"preflight","request_id":"req-fast","estimated_tokens":100}"#
+        let socket = FakeProviderWebSocketTask(receiveResults: [.success(.string(preflight))])
+        telemetry.stallSeconds.set(3)
+        let stall = Task { _ = await status.snapshot() }
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        let start = DispatchTime.now().uptimeNanoseconds
+        try? await client.receiveLoopForTest(socket)
+        var ack: [String: Any]?
+        while ack == nil, DispatchTime.now().uptimeNanoseconds - start < 1_500_000_000 {
+            ack = socket.sentFrames().first { $0["type"] as? String == "preflight_ack" }
+            if ack == nil { try await Task.sleep(nanoseconds: 10_000_000) }
+        }
+        let elapsedNs = DispatchTime.now().uptimeNanoseconds - start
+        await stall.value
+
+        let frame = try XCTUnwrap(ack, "no preflight_ack within 1.5 s while the status actor was stalled")
+        XCTAssertLessThan(elapsedNs, 1_500_000_000)
+        XCTAssertEqual(frame["request_id"] as? String, "req-fast")
+        XCTAssertEqual(frame["accepted"] as? Bool, false)
+        XCTAssertEqual(frame["reason"] as? String, "draining")
+        XCTAssertEqual(socket.sentFrames().filter { $0["type"] as? String == "preflight_ack" }.count, 1)
+    }
+
+    func testPreflightAckReasonsMatchStatus() {
+        func ack(_ view: ProviderPreflightView, tokens: Int = 100) -> [String: Any] {
+            CoordinatorClient.preflightAck(requestID: "r", estimatedTokens: tokens, view: view)
+        }
+        let ready = ProviderPreflightView(status: .ready, modelLoaded: true, maxContextTokens: 1_000)
+        XCTAssertEqual(ack(ready)["accepted"] as? Bool, true)
+        XCTAssertEqual(ack(ready)["estimated_wait_ms"] as? Int, 0)
+        XCTAssertEqual(ack(ProviderPreflightView(status: .busy, modelLoaded: true, maxContextTokens: 1_000))["accepted"] as? Bool, true)
+        XCTAssertEqual(ack(ready, tokens: 1_001)["reason"] as? String, "context_exceeds_capacity")
+        XCTAssertEqual(ack(ready, tokens: 1_001)["max_context_tokens"] as? Int, 1_000)
+        XCTAssertEqual(ack(ProviderPreflightView(status: .draining, modelLoaded: true, maxContextTokens: 1_000))["reason"] as? String, "draining")
+        XCTAssertEqual(ack(ProviderPreflightView(status: .ready, modelLoaded: false, maxContextTokens: 1_000))["reason"] as? String, "model_not_loaded")
+        XCTAssertEqual(ack(ProviderPreflightView(status: .unavailable, modelLoaded: true, maxContextTokens: 1_000))["reason"] as? String, "unhealthy")
+        XCTAssertNil(CoordinatorClient.inboundPreflight(.string(#"{"type":"heartbeat_ack","note":"preflight"}"#)))
+        XCTAssertEqual(CoordinatorClient.inboundPreflight(.string(#"{"type":"preflight","request_id":"x","estimated_tokens":7}"#))?.estimatedTokens, 7)
+    }
+
+    func testPreflightCellTracksStatusChanges() async {
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        XCTAssertEqual(status.preflightCell.value, ProviderPreflightView(status: .ready, modelLoaded: true, maxContextTokens: 20_000))
+        await status.setState(.draining, reason: "test")
+        XCTAssertEqual(status.preflightCell.value.status, .draining)
+        await status.completeTargetSwap(modelID: "model-b", modelHash: nil, maxContextTokens: 8_000)
+        XCTAssertEqual(status.preflightCell.value.maxContextTokens, 8_000)
+        let snapshot = await status.snapshot()
+        XCTAssertEqual(status.preflightCell.value.modelLoaded, snapshot.modelLoaded)
+        XCTAssertEqual(status.preflightCell.value.maxContextTokens, snapshot.capacity.maxContextTokens)
+    }
+
     func testNativeMTPCanaryRequestUsesDedicatedResultCarrier() async throws {
         let recorder = CoordinatorFrameRecorder()
         let status = ProviderStatus(
@@ -5903,6 +6011,60 @@ final class CoordinatorClientTests: XCTestCase {
         // Bound is 5s; allow 1s of slack on busy CI runners. The
         // important guarantee is that we did NOT wait the full 30s.
         XCTAssertLessThan(elapsedNs, 10 * 1_000_000_000, "bounded send should not block beyond ~5s, got \(elapsedNs)ns")
+    }
+
+    // Issue #2246: a heartbeat build that waits 8 s on busy runtime state
+    // (long-context CB) must not trip the 5 s send bound and cancel a healthy
+    // socket; the heartbeat still goes out once built.
+    func testHeartbeatBoundedSlowBuildDoesNotCancelSocket() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(status: status, recorder: recorder)
+        let socket = FakeProviderWebSocketTask(receiveResults: [])
+        await client.setWebSocketForTest(socket)
+        await client.setHeartbeatBeforeSendForTest {
+            try? await Task.sleep(nanoseconds: 8 * 1_000_000_000)
+        }
+
+        try await client.sendHeartbeatBoundedForTest()
+
+        let frames = await recorder.frames
+        XCTAssertEqual(frames.last?["type"] as? String, "heartbeat")
+        XCTAssertEqual(socket.cancelCountSnapshot(), 0)
+    }
+
+    // Issue #2246: with the build out of the timer, a send that hangs still
+    // trips the 5 s bound and cancels the socket so reconnect can run.
+    func testHeartbeatBoundedStalledSendCancelsSocket() async throws {
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(
+            status: status,
+            recorder: CoordinatorFrameRecorder(),
+            sendOverride: { _ in
+                try? await Task.sleep(nanoseconds: 30 * 1_000_000_000)
+            }
+        )
+        let socket = FakeProviderWebSocketTask(receiveResults: [])
+        await client.setWebSocketForTest(socket)
+
+        let start = DispatchTime.now().uptimeNanoseconds
+        do {
+            try await client.sendHeartbeatBoundedForTest()
+            XCTFail("expected CoordinatorHeartbeatSendTimeout")
+        } catch is CoordinatorHeartbeatSendTimeout {
+            // expected
+        }
+        let elapsedNs = DispatchTime.now().uptimeNanoseconds - start
+        XCTAssertLessThan(elapsedNs, 10 * 1_000_000_000)
+        XCTAssertEqual(socket.cancelCountSnapshot(), 1)
     }
 
     func testHeartbeatWatchdogRequestsReconnectWithoutExitingOrUnloadingModel() async throws {
@@ -11562,4 +11724,21 @@ private struct DelayedCreativeFailingBackend: LocalImageBackend {
     }
     func generate(_ request: LocalImageRequest) async throws -> Data { Data() }
     func unload() async {}
+}
+
+/// Blocks the ProviderStatus actor inside snapshot() for `stallSeconds`, the
+/// way a busy runtime holds it under long-context CB (issue #2246).
+private final class StallingWorkloadTelemetryProvider: ProviderWorkloadTelemetryProviding, @unchecked Sendable {
+    let stallSeconds = LockedBox<Double>(0)
+
+    func currentWorkloadTelemetry() -> ProviderWorkloadTelemetry {
+        let seconds = stallSeconds.get()
+        if seconds > 0 { Thread.sleep(forTimeInterval: seconds) }
+        return ProviderWorkloadTelemetry(
+            cpuUtilizationPercent: nil,
+            gpuUtilizationPercent: nil,
+            gpuUtilizationScope: "none",
+            powerSource: .unknown
+        )
+    }
 }

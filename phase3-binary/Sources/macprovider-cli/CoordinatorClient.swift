@@ -79,6 +79,72 @@ struct CoordinatorInboundBacklogExceeded: Error, CustomStringConvertible, Equata
     }
 }
 
+/// Preflight acks the receive loop may have in flight on the fast path at
+/// once. Past this, preflight frames take the ordinary byte-budgeted inbox,
+/// so a peer flooding preflight while egress is stalled cannot pile up
+/// unbounded ack tasks (SPEC-001-R012 still bounds everything else).
+let coordinatorPreflightFastPathLimit = 16
+
+/// Uptime of the last frame the receive task took off the socket. The
+/// receive task stamps it without touching the client actor, so frames it
+/// answers itself (preflight) still count as coordinator liveness.
+final class CoordinatorInboundLiveness: @unchecked Sendable {
+    private let lock = NSLock()
+    private var nanoseconds: UInt64 = 0
+
+    func stamp() {
+        let now = DispatchTime.now().uptimeNanoseconds
+        lock.lock()
+        nanoseconds = now
+        lock.unlock()
+    }
+
+    /// Test seam: backdates the stamp with the heartbeat success.
+    func set(_ value: UInt64) {
+        lock.lock()
+        nanoseconds = value
+        lock.unlock()
+    }
+
+    var lastNanoseconds: UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return nanoseconds
+    }
+}
+
+/// Count of fast-path preflight acks not yet sent.
+final class CoordinatorInflightCounter: @unchecked Sendable {
+    let limit: Int
+    private let lock = NSLock()
+    private var count = 0
+
+    init(limit: Int) {
+        self.limit = limit
+    }
+
+    /// Takes a slot; false when `limit` acks are already in flight.
+    func tryAcquire() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard count < limit else { return false }
+        count += 1
+        return true
+    }
+
+    func release() {
+        lock.lock()
+        defer { lock.unlock() }
+        count = max(0, count - 1)
+    }
+
+    var inFlight: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return count
+    }
+}
+
 /// Byte count of received coordinator messages not yet handled.
 final class CoordinatorInboundBacklog: @unchecked Sendable {
     let limitBytes: Int
@@ -708,6 +774,7 @@ actor CoordinatorClient {
     private var activeBuyerServingHold: CoordinatorReadinessClient.BuyerServingHold?
     private var admissionPendingHoldActive: Bool { activeBuyerServingHold != nil }
     private var lastHeartbeatSuccessNanoseconds: UInt64 = 0
+    private let inboundLiveness = CoordinatorInboundLiveness()
     private let watchdogExitHook: @Sendable (String) -> Void
     private var swapHeartbeatTask: Task<Void, Never>?
     private var sleepAssertion: ProviderSleepAssertion?
@@ -2683,6 +2750,10 @@ actor CoordinatorClient {
         // inbox is bounded by bytes instead: received-but-unhandled messages
         // past the budget end the session (reconnect) rather than grow memory.
         let backlog = CoordinatorInboundBacklog(limitBytes: coordinatorInboundBacklogLimitBytes)
+        let preflightCell = providerStatus.preflightCell
+        let preflightSendOverride = sendOverride
+        let preflightInflight = CoordinatorInflightCounter(limit: coordinatorPreflightFastPathLimit)
+        let inboundLiveness = inboundLiveness
         try await withThrowingTaskGroup(of: Void.self) { group in
             // Receive task: keep the socket drained. Captures `socket` and
             // `continuation` (both Sendable), never `self`, so nothing here
@@ -2692,6 +2763,32 @@ actor CoordinatorClient {
                     while !Task.isCancelled {
                         let message: URLSessionWebSocketTask.Message
                         message = try await socket.receive()
+                        inboundLiveness.stamp()
+                        // Issue #2246: answer preflight here, from the status
+                        // snapshot cell, so the ack meets the coordinator's 2 s
+                        // preflight timeout even while the drainer is busy with
+                        // earlier frames or the status actor is held. The ack
+                        // goes out on its own task so a slow send never stalls
+                        // receive().
+                        if let preflight = Self.inboundPreflight(message),
+                            preflightInflight.tryAcquire()
+                        {
+                            Self.keepaliveDebug("ws_recv type=preflight fast_path=1")
+                            Task {
+                                defer { preflightInflight.release() }
+                                let ack = Self.preflightAck(
+                                    requestID: preflight.requestID,
+                                    estimatedTokens: preflight.estimatedTokens,
+                                    view: preflightCell.value
+                                )
+                                if let preflightSendOverride {
+                                    try? await preflightSendOverride(ack)
+                                } else {
+                                    try? await Self.send(ack, to: socket)
+                                }
+                            }
+                            continue
+                        }
                         guard backlog.add(CoordinatorInboundBacklog.byteCount(of: message)) else {
                             Self.keepaliveDebug("ws_inbound_backlog_exceeded limit=\(backlog.limitBytes)")
                             throw CoordinatorInboundBacklogExceeded(limitBytes: backlog.limitBytes)
@@ -4134,7 +4231,10 @@ actor CoordinatorClient {
 
     func seedLastHeartbeatSuccessForTest(ageNanoseconds: UInt64) {
         let now = DispatchTime.now().uptimeNanoseconds
-        lastHeartbeatSuccessNanoseconds = now > ageNanoseconds ? now - ageNanoseconds : 1
+        let seeded = now > ageNanoseconds ? now - ageNanoseconds : 1
+        lastHeartbeatSuccessNanoseconds = seeded
+        // Staleness means no heartbeat success and no inbound frame since.
+        inboundLiveness.set(seeded)
     }
 
     func cancelHeartbeatWatchdogForTest() {
@@ -4306,6 +4406,10 @@ actor CoordinatorClient {
     // bumps the heartbeat success timestamp via handle().
     func handleForTest(_ message: URLSessionWebSocketTask.Message) async throws {
         try await handle(message)
+    }
+
+    func receiveLoopForTest(_ socket: ProviderWebSocketTask) async throws {
+        try await receiveLoop(socket)
     }
 
     func tier2KeyIDForTest() -> String? {
@@ -6397,8 +6501,11 @@ actor CoordinatorClient {
     }
 
     private func nanosecondsSinceLastHeartbeatSuccess() -> UInt64 {
-        let last = lastHeartbeatSuccessNanoseconds
-        guard last != 0 else { return 0 }
+        // A heartbeat success or any received frame (including preflight the
+        // receive task answers itself) is coordinator liveness.
+        let heartbeat = lastHeartbeatSuccessNanoseconds
+        guard heartbeat != 0 else { return 0 }
+        let last = max(heartbeat, inboundLiveness.lastNanoseconds)
         let now = DispatchTime.now().uptimeNanoseconds
         return now > last ? now - last : 0
     }
@@ -6418,11 +6525,19 @@ actor CoordinatorClient {
     // In production the captured socket is non-nil; in unit tests
     // the WS is mocked via sendOverride and the cancellation arrives
     // through the existing cooperative Task.cancel path.
+    //
+    // Issue #2246: only the send is under the timer. Building the payload
+    // awaits runtime, conversation-cache and scheduler state that a
+    // long-context CB commit can hold for seconds; timing that out cancelled
+    // a healthy socket and cut every in-flight stream. A build that never
+    // finishes is left to the heartbeat watchdog, which requests transport
+    // recovery once no heartbeat has succeeded within its tolerance.
     private func sendHeartbeatBounded(resetWindow: Bool) async throws {
+        let built = try await buildHeartbeatPayload(resetWindow: resetWindow)
         let socketRef = webSocket
         try await withThrowingTaskGroup(of: Void.self) { group in
             group.addTask { [weak self] in
-                try await self?.sendHeartbeat(resetWindow: resetWindow)
+                try await self?.sendBuiltHeartbeat(built)
             }
             group.addTask {
                 let nanoseconds = UInt64(Self.heartbeatSendTimeoutSeconds * 1_000_000_000)
@@ -6463,47 +6578,67 @@ actor CoordinatorClient {
     }
 
     private func handlePreflight(_ message: [String: Any]) async throws {
-        let requestID = message["request_id"] as? String ?? ""
-        let estimatedTokens = message["estimated_tokens"] as? Int ?? 0
-        let snapshot = await providerStatus.snapshot()
+        try await send(Self.preflightAck(
+            requestID: message["request_id"] as? String ?? "",
+            estimatedTokens: message["estimated_tokens"] as? Int ?? 0,
+            view: providerStatus.preflightCell.value
+        ))
+    }
 
-        if estimatedTokens > snapshot.capacity.maxContextTokens {
-            try await send([
+    /// Issue #2246: the preflight ack is answered from the status actor's
+    /// lock-protected preflight view, never by awaiting the actor or runtime.
+    static func preflightAck(requestID: String, estimatedTokens: Int, view: ProviderPreflightView) -> [String: Any] {
+        if estimatedTokens > view.maxContextTokens {
+            return [
                 "type": "preflight_ack",
                 "request_id": requestID,
                 "accepted": false,
                 "reason": "context_exceeds_capacity",
-                "max_context_tokens": snapshot.capacity.maxContextTokens,
-            ])
-        } else if snapshot.status == .draining {
-            try await send([
+                "max_context_tokens": view.maxContextTokens,
+            ]
+        } else if view.status == .draining {
+            return [
                 "type": "preflight_ack",
                 "request_id": requestID,
                 "accepted": false,
                 "reason": "draining",
-            ])
-        } else if !snapshot.modelLoaded {
-            try await send([
+            ]
+        } else if !view.modelLoaded {
+            return [
                 "type": "preflight_ack",
                 "request_id": requestID,
                 "accepted": false,
                 "reason": "model_not_loaded",
-            ])
-        } else if snapshot.status == .unavailable {
-            try await send([
+            ]
+        } else if view.status == .unavailable {
+            return [
                 "type": "preflight_ack",
                 "request_id": requestID,
                 "accepted": false,
                 "reason": "unhealthy",
-            ])
-        } else {
-            try await send([
-                "type": "preflight_ack",
-                "request_id": requestID,
-                "accepted": true,
-                "estimated_wait_ms": 0,
-            ])
+            ]
         }
+        return [
+            "type": "preflight_ack",
+            "request_id": requestID,
+            "accepted": true,
+            "estimated_wait_ms": 0,
+        ]
+    }
+
+    /// A `preflight` frame's request fields, read in the receive task so the
+    /// ack does not queue behind slower inbound frames. Only short text frames
+    /// are parsed; preflight is a few dozen bytes and inference frames can be
+    /// megabytes.
+    static func inboundPreflight(_ message: URLSessionWebSocketTask.Message) -> (requestID: String, estimatedTokens: Int)? {
+        guard case .string(let text) = message,
+              text.utf8.count <= 4096,
+              text.contains("\"preflight\""),
+              let object = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any],
+              object["type"] as? String == "preflight" else {
+            return nil
+        }
+        return (object["request_id"] as? String ?? "", object["estimated_tokens"] as? Int ?? 0)
     }
 
     func pauseByOperator() async -> ProviderControlCommandResult {
@@ -7670,11 +7805,22 @@ actor CoordinatorClient {
     /// (registration, group heartbeat, member hello). Best effort: a failed send
     /// is retried on the next tick, and the session's own keepalive decides its fate.
     private func sendShardGroupMessages(sessionStarted: Bool) async {
-        guard let participant = modelRuntime as? any ShardGroupCoordinatorParticipant else { return }
+        await sendShardGroupObjects(buildShardGroupMessages(sessionStarted: sessionStarted))
+    }
+
+    /// Builds the shard-group messages. This awaits the status and shard
+    /// actors, so heartbeats call it while building, outside the bounded send.
+    private func buildShardGroupMessages(sessionStarted: Bool) async -> [[String: Any]] {
+        guard let participant = modelRuntime as? any ShardGroupCoordinatorParticipant else { return [] }
         let snapshot = await providerStatus.snapshot(resetWindow: false)
         let context = ShardCoordinatorContext(providerID: providerID, wireModelID: coordinatorWireModelID(for: snapshot.modelID))
-        for data in await participant.shardCoordinatorMessages(context: context, sessionStarted: sessionStarted) {
-            guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+        return await participant.shardCoordinatorMessages(context: context, sessionStarted: sessionStarted).compactMap {
+            try? JSONSerialization.jsonObject(with: $0) as? [String: Any]
+        }
+    }
+
+    private func sendShardGroupObjects(_ objects: [[String: Any]]) async {
+        for object in objects {
             do {
                 try await send(object)
             } catch {
@@ -7685,6 +7831,17 @@ actor CoordinatorClient {
     }
 
     private func sendHeartbeat(resetWindow: Bool = true) async throws {
+        try await sendBuiltHeartbeat(buildHeartbeatPayload(resetWindow: resetWindow))
+    }
+
+    /// A finished heartbeat payload handed from the build to the bounded send.
+    private struct BuiltHeartbeat: @unchecked Sendable {
+        let payload: [String: Any]
+        /// Built with the heartbeat so the bounded send awaits only the socket.
+        let shardGroupMessages: [[String: Any]]
+    }
+
+    private func buildHeartbeatPayload(resetWindow: Bool) async throws -> BuiltHeartbeat {
         let snapshot = await providerStatus.snapshot(resetWindow: resetWindow)
         let snapshotWireModelID = coordinatorWireModelID(for: snapshot.modelID)
         var payload: [String: Any] = [
@@ -7814,11 +7971,17 @@ actor CoordinatorClient {
             observedAt: ISO8601DateFormatter().string(from: observedAt),
             validForMS: 90_000
         )
+        let shardGroupMessages = await buildShardGroupMessages(sessionStarted: false)
         if let heartbeatBeforeSendForTest {
             await heartbeatBeforeSendForTest()
         }
-        // Clamp at send time, after every await above: a pause accepted while
-        // this heartbeat was being built must not be overtaken by a stale
+        return BuiltHeartbeat(payload: payload, shardGroupMessages: shardGroupMessages)
+    }
+
+    private func sendBuiltHeartbeat(_ built: BuiltHeartbeat) async throws {
+        var payload = built.payload
+        // Clamp at send time, after every await of the build: a pause accepted
+        // while this heartbeat was being built must not be overtaken by a stale
         // ready/busy (#1880 audit R2).
         if operatorPaused,
            let status = payload["status"] as? String,
@@ -7827,11 +7990,11 @@ actor CoordinatorClient {
         }
         try await send(payload)
         try await sendPrivacyKeyRotationRequestIfDue()
-        await sendShardGroupMessages(sessionStarted: false)
+        await sendShardGroupObjects(built.shardGroupMessages)
     }
 
-    /// Test seam: runs inside sendHeartbeat after the payload is built and
-    /// before the send-time pause clamp.
+    /// Test seam: runs at the end of the heartbeat build, outside the bounded
+    /// send timer and before the send-time pause clamp.
     private var heartbeatBeforeSendForTest: (@Sendable () async -> Void)?
 
     func setHeartbeatBeforeSendForTest(_ hook: (@Sendable () async -> Void)?) {
