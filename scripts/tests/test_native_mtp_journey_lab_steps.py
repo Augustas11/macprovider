@@ -145,7 +145,7 @@ class AdapterTests(unittest.TestCase):
         start = "    private func reserveNativeMTPRoundBytes(_ bytes: Int) throws -> NativeMTPRoundByteReservation {"
         # Integrated release snapshot: refusal logging uses typed intermediate
         # values so Swift can typecheck it without changing reservation bounds.
-        expected_sha256 = 'b3d66b9e004db86433837b5995623a154c10243816fd4c2447b0cb7fc6f1db2b'
+        expected_sha256 = 'e29733f591c3415f7d5f104ea56465751c5b1cbeeb6e09fb781b469636b7f5dd'
         release = changed[changed.index("    #else\n" + start)+len("    #else\n"):]
         self.assertEqual(hashlib.sha256(release[:release.index("    #endif\n")].encode()).hexdigest(), expected_sha256)
 

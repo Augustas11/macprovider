@@ -91,6 +91,8 @@ enum ContinuousBatchSchedulerDiagnostic: String, Sendable, Equatable {
     case localCapabilityMissing = "local_capability_missing"
     case localPreparationFailed = "local_preparation_failed"
     case localExtensionFailed = "local_extension_failed"
+    case memoryLimitDeferred = "memory_limit_deferred"
+    case memoryLimitIdleAdmitted = "memory_limit_idle_admitted"
     case cleanupFailed = "cleanup_failed"
     case poolCapacityRejected = "pool_capacity_rejected"
     case prefillFailed = "prefill_failed"
@@ -360,6 +362,9 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
     let nativeMTPRoundByteCapacity: Int
     let nativeMTPRoundSystemMemoryProbe: NativeMTPRoundSystemMemoryProbe
     let nativeMTPStatusSink: NativeMTPStatusSink?
+    /// SPEC-038 FR-CB2 (v0.3.36): MLX's applied memory limit. Prompt
+    /// admission and native-MTP round reservations stay under it.
+    let mlxMemoryAdmissionProbe: MLXMemoryAdmissionProbe
 
     init(
         descriptor: PagedKVDescriptor,
@@ -400,7 +405,8 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
         maxDecodeRowsPerForward: Int = Int.max,
         nativeMTPRoundByteCapacity: Int? = nil,
         nativeMTPRoundSystemMemoryProbe: NativeMTPRoundSystemMemoryProbe = .system,
-        nativeMTPStatusSink: NativeMTPStatusSink? = nil
+        nativeMTPStatusSink: NativeMTPStatusSink? = nil,
+        mlxMemoryAdmissionProbe: MLXMemoryAdmissionProbe = .system
     ) {
         self.descriptor = descriptor
         self.tuple = tuple
@@ -473,6 +479,7 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
         )
         self.nativeMTPRoundSystemMemoryProbe = nativeMTPRoundSystemMemoryProbe
         self.nativeMTPStatusSink = nativeMTPStatusSink
+        self.mlxMemoryAdmissionProbe = mlxMemoryAdmissionProbe
     }
 
     /// Production serve-path lockstep burst. Join/leave still happens between
@@ -2324,6 +2331,30 @@ actor ContinuousBatchScheduler {
         return "event=batching_rejected code=context_length_exceeded prompt_tokens=\(promptTokens) max_output_tokens=\(maxOutputTokens) cap=\(cap)\n"
     }
 
+    /// Operator log line for a row the MLX memory limit defers or an idle
+    /// scheduler admits past it. Request bytes are KV bytes per token (logged
+    /// by `event=mlx_memory_limit`) times the row's tokens, so a privacy-class
+    /// request (SPEC-049-R010) logs neither its ID nor its requested bytes,
+    /// and the pending-prefill sum is dropped whenever it would be.
+    /// `pendingPrefillBytes` is nil when a privacy-class row is in that sum.
+    static func memoryLimitTelemetryLine(
+        idle: Bool,
+        requestID: String,
+        requestedBytes: Int,
+        activeBytes: Int,
+        pendingPrefillBytes: Int?,
+        limitBytes: Int,
+        provenance: KVIngestProvenance
+    ) -> String {
+        let event = "event=batching_memory_limit_\(idle ? "idle_admitted" : "deferred") "
+        guard provenance.mayPersistRequestDerivedState else {
+            return event + "active_bytes=\(activeBytes) limit_bytes=\(limitBytes)\n"
+        }
+        let pendingField = pendingPrefillBytes.map { "pending_prefill_bytes=\($0) " } ?? ""
+        return event + "request_id=\(requestID) requested_bytes=\(requestedBytes) active_bytes=\(activeBytes) "
+            + pendingField + "limit_bytes=\(limitBytes)\n"
+    }
+
     private struct Waiter {
         let id: UUID
         let continuation: CheckedContinuation<ContinuousBatchSchedulerResult, Error>
@@ -2474,6 +2505,8 @@ actor ContinuousBatchScheduler {
     private var admissionTurnWaiters: [UInt64: CheckedContinuation<Void, Never>] = [:]
     private var requestAdmissionSequences: [String: UInt64] = [:]
     private var admittingRequests: [String: ContinuousBatchSchedulerRequest] = [:]
+    /// The queue head last logged as deferred for MLX's memory limit.
+    private var lastMemoryDeferredRequestID: String?
     private var nativeMTPReservedRoundBytes = 0
     /// Bumped whenever a row applies a token or reaches a terminal result:
     /// the pump's no-progress guard compares it across passes.
@@ -3821,6 +3854,7 @@ actor ContinuousBatchScheduler {
         }
         let (nextReserved, overflow) = nativeMTPReservedRoundBytes.addingReportingOverflow(bytes)
         let sample = configuration.nativeMTPRoundSystemMemoryProbe.sample()
+        let mlxSample = configuration.mlxMemoryAdmissionProbe.sample()
         let effectiveCapacity: Int
         if let context = labJourneyReservationContext, let observer = labJourneyResourceObserver {
             effectiveCapacity = observer.capacity(requestID: context.requestID,
@@ -3828,21 +3862,27 @@ actor ContinuousBatchScheduler {
             observer.record(.init(requestID: context.requestID, generatedTokens: context.generatedTokens,
                 depth: context.depth, bytes: bytes, reservedBefore: nativeMTPReservedRoundBytes,
                 capacity: effectiveCapacity, admitted: !overflow && nextReserved <= effectiveCapacity
-                    && Self.nativeMTPSystemMemoryHeadroomAdmits(reservedAfter: nextReserved, sample: sample)))
+                    && Self.nativeMTPSystemMemoryHeadroomAdmits(reservedAfter: nextReserved, sample: sample)
+                    && Self.nativeMTPMLXMemoryLimitAdmits(reservedAfter: nextReserved, sample: mlxSample)))
         } else { effectiveCapacity = configuration.nativeMTPRoundByteCapacity }
         guard !overflow,
               nextReserved <= effectiveCapacity,
-              Self.nativeMTPSystemMemoryHeadroomAdmits(reservedAfter: nextReserved, sample: sample) else {
+              Self.nativeMTPSystemMemoryHeadroomAdmits(reservedAfter: nextReserved, sample: sample),
+              Self.nativeMTPMLXMemoryLimitAdmits(reservedAfter: nextReserved, sample: mlxSample) else {
             // SPEC-048 R012: say which bound refused, with every number.
             let floor = sample.map { max(1, $0.physicalBytes / 10) }
             let availableText: String = sample.map { String($0.availableBytes) } ?? "unavailable"
             let physicalText: String = sample.map { String($0.physicalBytes) } ?? "unavailable"
             let floorText: String = floor.map { String($0) } ?? "unavailable"
-            let reason: String = overflow ? "overflow" : nextReserved > effectiveCapacity ? "capacity" : "system_headroom"
+            let reason: String = overflow ? "overflow" : nextReserved > effectiveCapacity ? "capacity"
+                : Self.nativeMTPSystemMemoryHeadroomAdmits(reservedAfter: nextReserved, sample: sample)
+                    ? "mlx_memory_limit" : "system_headroom"
             let message: String = [
                 "event=native_mtp_round_reservation_refused requested_bytes=\(bytes) reserved_before_bytes=\(nativeMTPReservedRoundBytes) ",
                 "outstanding_reservations=\(nativeMTPRoundByteReservations.count) capacity_bytes=\(effectiveCapacity) ",
-                "available_bytes=\(availableText) physical_bytes=\(physicalText) floor_bytes=\(floorText) reason=\(reason)\n",
+                "available_bytes=\(availableText) physical_bytes=\(physicalText) floor_bytes=\(floorText) ",
+                "mlx_active_bytes=\(mlxSample.map { String($0.activeBytes) } ?? "unavailable") ",
+                "mlx_limit_bytes=\(mlxSample.map { String($0.limitBytes) } ?? "unavailable") reason=\(reason)\n",
             ].joined()
             try? FileHandle.standardError.write(contentsOf: Data(message.utf8))
             throw ContinuousBatchSchedulerError.requestFailed("continuous_batching_native_mtp_round_memory_exhausted")
@@ -3860,22 +3900,28 @@ actor ContinuousBatchScheduler {
         }
         let (nextReserved, overflow) = nativeMTPReservedRoundBytes.addingReportingOverflow(bytes)
         let sample = configuration.nativeMTPRoundSystemMemoryProbe.sample()
+        let mlxSample = configuration.mlxMemoryAdmissionProbe.sample()
         guard !overflow,
               nextReserved <= configuration.nativeMTPRoundByteCapacity,
-              Self.nativeMTPSystemMemoryHeadroomAdmits(reservedAfter: nextReserved, sample: sample) else {
+              Self.nativeMTPSystemMemoryHeadroomAdmits(reservedAfter: nextReserved, sample: sample),
+              Self.nativeMTPMLXMemoryLimitAdmits(reservedAfter: nextReserved, sample: mlxSample) else {
             // SPEC-048 R012: say which bound refused, with every number.
             let floor = sample.map { max(1, $0.physicalBytes / 10) }
             let availableBytes: String = sample.map { String($0.availableBytes) } ?? "unavailable"
             let physicalBytes: String = sample.map { String($0.physicalBytes) } ?? "unavailable"
             let floorBytes: String = floor.map { String($0) } ?? "unavailable"
             let reason: String = overflow ? "overflow"
-                : nextReserved > configuration.nativeMTPRoundByteCapacity ? "capacity" : "system_headroom"
+                : nextReserved > configuration.nativeMTPRoundByteCapacity ? "capacity"
+                : Self.nativeMTPSystemMemoryHeadroomAdmits(reservedAfter: nextReserved, sample: sample)
+                    ? "mlx_memory_limit" : "system_headroom"
             let message: String = [
                 "event=native_mtp_round_reservation_refused requested_bytes=\(bytes) reserved_before_bytes=\(nativeMTPReservedRoundBytes) ",
                 "outstanding_reservations=\(nativeMTPRoundByteReservations.count) capacity_bytes=\(configuration.nativeMTPRoundByteCapacity) ",
                 "available_bytes=\(availableBytes) ",
                 "physical_bytes=\(physicalBytes) ",
                 "floor_bytes=\(floorBytes) ",
+                "mlx_active_bytes=\(mlxSample.map { String($0.activeBytes) } ?? "unavailable") ",
+                "mlx_limit_bytes=\(mlxSample.map { String($0.limitBytes) } ?? "unavailable") ",
                 "reason=\(reason)\n",
             ].joined()
             try? FileHandle.standardError.write(contentsOf: Data(message.utf8))
@@ -5778,6 +5824,33 @@ actor ContinuousBatchScheduler {
                 await finishQueued(request, status: .cancelled, errorCode: "request_cancelled")
                 continue
             }
+            // SPEC-038 FR-CB2 (v0.3.36): a row whose initial KV would take
+            // MLX past its memory limit waits for running rows to free memory.
+            // An idle scheduler still admits it: MLX's limit then paces its
+            // evaluation, as before, and continuous batching stays on.
+            if !draining, let refusal = mlxMemoryAdmissionRefusal(for: request) {
+                let idle = activeDecode.isEmpty && activePrompt.isEmpty && admittingRequests.isEmpty
+                // A deferred head logs once, not once per pump pass.
+                if idle || lastMemoryDeferredRequestID != request.id {
+                    lastMemoryDeferredRequestID = idle ? nil : request.id
+                    record(idle ? .memoryLimitIdleAdmitted : .memoryLimitDeferred)
+                    let line = Self.memoryLimitTelemetryLine(
+                        idle: idle,
+                        requestID: request.id,
+                        requestedBytes: refusal.requestedBytes,
+                        activeBytes: refusal.sample.activeBytes,
+                        pendingPrefillBytes: refusal.pendingIncludesPrivacyRow ? nil : refusal.pendingBytes,
+                        limitBytes: refusal.sample.limitBytes,
+                        provenance: request.ingestProvenance
+                    )
+                    try? FileHandle.standardError.write(contentsOf: Data(line.utf8))
+                }
+                if !idle {
+                    waiting.insert(request, at: 0)
+                    armQueueWaitTimeout(requestID: request.id)
+                    return madeProgress
+                }
+            }
 
             admittingRequests[request.id] = request
             var admissionHandle: PagedKVBlockTableHandle?
@@ -7001,6 +7074,46 @@ actor ContinuousBatchScheduler {
     private func removePromptRow(_ requestID: String) -> Row? {
         promptOrder.removeAll { $0 == requestID }
         return activePrompt.removeValue(forKey: requestID)
+    }
+
+    /// SPEC-038 FR-CB2 (v0.3.36): the reason `request` may not join now, or
+    /// nil when it fits under MLX's memory limit (or no limit is applied).
+    /// Rows still prefilling have not allocated their KV yet, so their
+    /// remaining initial footprint counts on top of MLX's active memory.
+    private func mlxMemoryAdmissionRefusal(
+        for request: ContinuousBatchSchedulerRequest
+    ) -> (sample: MLXMemoryAdmissionSample, requestedBytes: Int, pendingBytes: Int, pendingIncludesPrivacyRow: Bool)? {
+        guard let sample = configuration.mlxMemoryAdmissionProbe.sample() else { return nil }
+        let perToken = sample.kvBytesPerToken
+        let requestedTokens = ((try? initialReservation(for: request))?.initialCapacityTokens ?? 0)
+            - request.cachedPromptTokens
+        let requested = MLXMemoryBudget.kvBytes(tokens: requestedTokens, bytesPerToken: perToken)
+        var pending = 0
+        var pendingIncludesPrivacyRow = false
+        for row in activePrompt.values {
+            if !row.request.ingestProvenance.mayPersistRequestDerivedState { pendingIncludesPrivacyRow = true }
+            let remaining = row.request.promptTokens.count + configuration.decodeHeadroomTokens - row.prefillCursor
+            let (sum, overflow) = pending.addingReportingOverflow(
+                MLXMemoryBudget.kvBytes(tokens: remaining, bytesPerToken: perToken))
+            pending = overflow ? Int.max : sum
+        }
+        let (total, overflow) = requested.addingReportingOverflow(pending)
+        if MLXMemoryBudget.admits(
+            activeBytes: sample.activeBytes, requestedBytes: overflow ? Int.max : total, limitBytes: sample.limitBytes
+        ) {
+            return nil
+        }
+        return (sample, requested, pending, pendingIncludesPrivacyRow)
+    }
+
+    /// SPEC-038 FR-CB2 (v0.3.36): every outstanding native-MTP round
+    /// reservation, this one included, fits under MLX's memory limit on top
+    /// of its active memory (true when no limit is applied). Rows reserving
+    /// in one round have not allocated yet, so the sum counts, not one window.
+    static func nativeMTPMLXMemoryLimitAdmits(reservedAfter: Int, sample: MLXMemoryAdmissionSample?) -> Bool {
+        guard let sample else { return true }
+        return MLXMemoryBudget.admits(
+            activeBytes: sample.activeBytes, requestedBytes: reservedAfter, limitBytes: sample.limitBytes)
     }
 
     private func initialReservation(for request: ContinuousBatchSchedulerRequest) throws -> (

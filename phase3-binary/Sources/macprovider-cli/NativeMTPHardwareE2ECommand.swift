@@ -331,7 +331,7 @@ final class NativeMTPHardwareE2ERunner {
     /// Applies the family's MLX command-buffer budget for this process, as
     /// `serve` does. Must run before any MLX device use; returns the MB set.
     @discardableResult
-    static func applyServeProcessSetup(rootPath: String, mlxCacheLimitMB: Int? = 2048) -> Int? {
+    static func applyServeProcessSetup(rootPath: String, mlxCacheLimitMB: Int? = nil) -> Int? {
         let root = URL(fileURLWithPath: (rootPath as NSString).expandingTildeInPath, isDirectory: true)
         let family = NativeMTPHardwareE2EFamily.detect(configJSONData: try? Data(
             contentsOf: root.appendingPathComponent("target/config.json")
@@ -341,10 +341,11 @@ final class NativeMTPHardwareE2ERunner {
         if let mb, let family {
             FileHandle.standardError.write(Data("native-mtp-e2e: mlx_max_mb_per_buffer=\(mb) family=\(family.modelFamily)\n".utf8))
         }
-        // The lab and live serve configs bound MLX's buffer cache
-        // (`mlx_cache_limit_mb: 2048`); unbounded, freed round buffers stay
-        // cached and take the memory the native round's free-memory floor reads.
-        if let applied = ModelRuntime.applyMLXCacheLimit(megabytes: mlxCacheLimitMB) {
+        // Serve's buffer-cache bound (SPEC-038 FR-CB2): unbounded, freed round
+        // buffers stay cached and take the memory the native round's
+        // free-memory floor reads.
+        if let applied = MLXMemoryLimit.serveCacheLimitBytes(modelID: nil, configuredMB: mlxCacheLimitMB) {
+            Memory.cacheLimit = applied
             FileHandle.standardError.write(Data("native-mtp-e2e: mlx_cache_limit_bytes=\(applied)\n".utf8))
         }
         return mb
@@ -703,6 +704,9 @@ final class NativeMTPHardwareE2ERunner {
         if family.holdsResidentWeights {
             try require(residentWeights != nil, "\(family.modelFamily) target could not start its resident-weights ticket")
         }
+        // SPEC-038 FR-CB2 (v0.3.36): the same MLX memory limit serve applies.
+        MLXMemoryLimit.apply(
+            stage: "model_loaded", kvBytesPerToken: MLXMemoryLimit.kvBytesPerToken(modelDirectory: targetDirectory))
         let maximumBlockSize = await drafterContainer.perform { context in
             context.model.maximumBlockSize
         }

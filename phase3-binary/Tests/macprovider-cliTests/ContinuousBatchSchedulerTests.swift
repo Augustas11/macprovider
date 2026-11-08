@@ -9522,6 +9522,158 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         )
     }
 
+    /// SPEC-038 FR-CB2 (v0.3.36): a fixed MLX memory-limit reading.
+    private static func mlxMemoryProbe(
+        limitBytes: Int, activeBytes: Int, kvBytesPerToken: Int
+    ) -> MLXMemoryAdmissionProbe {
+        MLXMemoryAdmissionProbe(identity: "test-mlx-\(limitBytes)-\(activeBytes)-\(kvBytesPerToken)") {
+            MLXMemoryAdmissionSample(limitBytes: limitBytes, activeBytes: activeBytes, kvBytesPerToken: kvBytesPerToken)
+        }
+    }
+
+    // MARK: SPEC-038 FR-CB2 (v0.3.36) MLX memory limit
+
+    func testMLXMemoryLimitDefersRowWhileOtherRowsRun() async throws {
+        let decodeGate = AsyncGate()
+        let backend = ScriptedBackend(scripts: ["blocker": [4, 5, 7], "big": [6]], decodeGate: decodeGate)
+        // Initial footprints: blocker 1 + 2 headroom tokens, big 2 + 1 output
+        // tokens; 3 x 10 bytes each, and 100 active + 30 > 125.
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 2,
+            mlxMemoryAdmissionProbe: Self.mlxMemoryProbe(limitBytes: 125, activeBytes: 100, kvBytesPerToken: 10),
+            backend: backend
+        )
+        // The first row is admitted on an idle scheduler even above the limit.
+        let blocker = Task {
+            try await scheduler.submit(.init(id: "blocker", conversationKey: "", promptTokens: [0], maxOutputTokens: 3))
+        }
+        try await eventually { await scheduler.metrics().activeDecodeRows == 1 }
+        let big = Task {
+            try await scheduler.submit(.init(id: "big", conversationKey: "", promptTokens: [1, 2], maxOutputTokens: 1))
+        }
+        try await eventually { await scheduler.metrics().waitingCount == 1 }
+        await decodeGate.open()
+        let blockerResult = try await blocker.value
+        let bigResult = try await big.value
+        XCTAssertEqual(blockerResult.terminalStatus, .length)
+        XCTAssertEqual(bigResult.terminalStatus, .length)
+        XCTAssertEqual(bigResult.outputTokens, [6])
+        // "big" waited while "blocker" decoded, then joined once it finished;
+        // it never prefilled beside it.
+        let diagnostics = await scheduler.metrics().diagnostics
+        XCTAssertEqual(diagnostics.filter { $0 == .memoryLimitDeferred }.count, 1)
+        XCTAssertEqual(diagnostics.filter { $0 == .memoryLimitIdleAdmitted }.count, 2)
+        let decodeBatches = await backend.decodeBatches()
+        XCTAssertFalse(decodeBatches.contains { $0.count > 1 })
+        let prefillOrder = await backend.prefillOrder()
+        XCTAssertEqual(prefillOrder, [["blocker"], ["big"]])
+    }
+
+    func testMLXMemoryLimitAdmitsRowsThatFitWithoutDiagnostics() async throws {
+        let backend = ScriptedBackend(scripts: ["a": [4], "b": [5]])
+        // 100 + (1 + 2) x 10 per row, plus the other row still prefilling: <= 200.
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 2,
+            maxPrefillRowsPerIteration: 2,
+            mlxMemoryAdmissionProbe: Self.mlxMemoryProbe(limitBytes: 200, activeBytes: 100, kvBytesPerToken: 10),
+            backend: backend
+        )
+        async let a = scheduler.submit(.init(id: "a", conversationKey: "", promptTokens: [1], maxOutputTokens: 1))
+        async let b = scheduler.submit(.init(id: "b", conversationKey: "", promptTokens: [2], maxOutputTokens: 1))
+        let results = try await [a, b]
+        XCTAssertEqual(results.map(\.terminalStatus), [.length, .length])
+        let diagnostics = await scheduler.metrics().diagnostics
+        XCTAssertFalse(diagnostics.contains(.memoryLimitDeferred))
+        XCTAssertFalse(diagnostics.contains(.memoryLimitIdleAdmitted))
+    }
+
+    // SPEC-049-R010: requested bytes are KV bytes per token (in the
+    // `event=mlx_memory_limit` line) times the row's tokens, so the on-disk
+    // provider log drops them, with the request ID, for a privacy-class row,
+    // and drops the pending-prefill sum when a privacy-class row is in it.
+    func testMLXMemoryLimitTelemetryOmitsPrivacyRowSizes() {
+        for idle in [false, true] {
+            let event = "event=batching_memory_limit_\(idle ? "idle_admitted" : "deferred") "
+            XCTAssertEqual(
+                ContinuousBatchScheduler.memoryLimitTelemetryLine(
+                    idle: idle, requestID: "req-a", requestedBytes: 640, activeBytes: 100,
+                    pendingPrefillBytes: 32, limitBytes: 700, provenance: .relay
+                ),
+                event + "request_id=req-a requested_bytes=640 active_bytes=100 pending_prefill_bytes=32 limit_bytes=700\n"
+            )
+            XCTAssertEqual(
+                ContinuousBatchScheduler.memoryLimitTelemetryLine(
+                    idle: idle, requestID: "req-a", requestedBytes: 640, activeBytes: 100,
+                    pendingPrefillBytes: nil, limitBytes: 700, provenance: .relay
+                ),
+                event + "request_id=req-a requested_bytes=640 active_bytes=100 limit_bytes=700\n"
+            )
+            let privacy = ContinuousBatchScheduler.memoryLimitTelemetryLine(
+                idle: idle, requestID: "req-p", requestedBytes: 640, activeBytes: 100,
+                pendingPrefillBytes: 32, limitBytes: 700, provenance: .privacy
+            )
+            XCTAssertEqual(privacy, event + "active_bytes=100 limit_bytes=700\n")
+            XCTAssertFalse(privacy.contains("requested_bytes"))
+            XCTAssertFalse(privacy.contains("pending_prefill_bytes"))
+            XCTAssertFalse(privacy.contains("req-p"))
+        }
+    }
+
+    func testMLXMemoryLimitCapsNativeMTPDepthBeforeProposal() async throws {
+        let backend = ScriptedBackend(
+            scripts: [:],
+            prefillTokens: ["mlx-depth": 6],
+            nativeTargetTopTokens: ["mlx-depth": [7]]
+        )
+        // Depth 1 (32 bytes) passes 100 + 32 > 120; depth 0 (8 bytes) fits.
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 1,
+            nativeMTPRoundByteCapacity: 64,
+            mlxMemoryAdmissionProbe: Self.mlxMemoryProbe(limitBytes: 120, activeBytes: 100, kvBytesPerToken: 0),
+            backend: backend
+        )
+        let result = try await scheduler.submit(Self.nativeRequest(
+            id: "mlx-depth",
+            promptTokens: [1],
+            maxOutputTokens: 3,
+            stopTokenSequences: [[7]],
+            proposals: [7],
+            maximumDepth: 1,
+            completeWindowBytesByDepth: [8, 32]
+        ))
+        XCTAssertEqual(result.terminalStatus, .stop)
+        let proposalDepths = await backend.nativeProposalBatches().flatMap { $0.map(\.maximumProposalDepth) }
+        XCTAssertEqual(proposalDepths, [0])
+        let reservedRoundBytes = await scheduler.nativeMTPReservedRoundBytesSnapshot()
+        XCTAssertEqual(reservedRoundBytes, 0)
+    }
+
+    func testMLXMemoryLimitRefusesNativeMTPRoundThatCannotFitAtDepthZero() async throws {
+        let backend = ScriptedBackend(
+            scripts: [:],
+            prefillTokens: ["mlx-full": 6],
+            nativeTargetTopTokens: ["mlx-full": [7]]
+        )
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 1,
+            nativeMTPRoundByteCapacity: 64,
+            mlxMemoryAdmissionProbe: Self.mlxMemoryProbe(limitBytes: 105, activeBytes: 100, kvBytesPerToken: 0),
+            backend: backend
+        )
+        let result = try await scheduler.submit(Self.nativeRequest(
+            id: "mlx-full",
+            promptTokens: [1],
+            maxOutputTokens: 3,
+            proposals: [7],
+            maximumDepth: 1,
+            completeWindowBytesByDepth: [8, 32]
+        ))
+        XCTAssertEqual(result.terminalStatus, .requestFailed)
+        XCTAssertEqual(result.errorCode, "continuous_batching_native_mtp_round_memory_exhausted")
+        let proposalBatches = await backend.nativeProposalBatches()
+        XCTAssertEqual(proposalBatches, [])
+    }
+
     private static func nativeMTPMemoryProbe(
         availableBytes: Int,
         physicalBytes: Int
@@ -9654,6 +9806,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
                 )
             }
         ),
+        mlxMemoryAdmissionProbe: MLXMemoryAdmissionProbe = .init(identity: "test-no-limit") { nil },
         backend: any ContinuousBatchSchedulerBackend,
         allocator: PagedKVBlockAllocator? = nil,
         contiguousCacheBridge: (any ContinuousBatchRetainedCacheBridge)? = nil,
@@ -9688,7 +9841,8 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             maxDecodeRowsPerForward: maxDecodeRowsPerForward,
             nativeMTPRoundByteCapacity: nativeMTPRoundByteCapacity,
             nativeMTPRoundSystemMemoryProbe: nativeMTPRoundSystemMemoryProbe,
-            nativeMTPStatusSink: nativeMTPStatusSink
+            nativeMTPStatusSink: nativeMTPStatusSink,
+            mlxMemoryAdmissionProbe: mlxMemoryAdmissionProbe
         )
         return ContinuousBatchScheduler(
             configuration: config,

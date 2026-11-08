@@ -3310,19 +3310,26 @@ actor ModelRuntime: ModelRuntimeServing {
     /// unified memory, and small enough that the byte conversion cannot overflow.
     nonisolated static let maximumMLXCacheLimitMB = 1_048_576
 
+    /// The cache bound for Macs above 8 GiB when the config sets none: the
+    /// `mlx_cache_limit_mb: 2048` the lab and live serve configs already run.
+    nonisolated static let defaultMLXCacheLimitMB = 2048
+
     nonisolated static func isValidMLXCacheLimitMB(_ megabytes: Int) -> Bool {
         (0 ... maximumMLXCacheLimitMB).contains(megabytes)
     }
 
-    /// Freed-buffer reuse budget for the low-memory tier. Larger Macs retain
-    /// MLX's default until their workload has been qualified with a smaller cap.
-    /// Preserve explicit values (including zero) for normal startup validation.
+    /// Freed-buffer reuse budget when the config sets none: RAM / 32 on the
+    /// low-memory tier, `defaultMLXCacheLimitMB` on every other Mac (SPEC-038
+    /// FR-CB2 v0.3.36). MLX's own default only reclaims freed buffers near its
+    /// memory limit, so an unset cache kept tens of GB of them after long
+    /// prefills. Preserve explicit values (including zero) for normal startup
+    /// validation.
     nonisolated static func resolvedMLXCacheLimitMB(
         configured: Int?, physicalMemoryBytes: UInt64
     ) -> Int? {
         if let configured { return configured }
         guard physicalMemoryBytes > 0, physicalMemoryBytes <= 8 * 1024 * 1024 * 1024 else {
-            return nil
+            return defaultMLXCacheLimitMB
         }
         // Divide before converting: the result is at most 256 MiB.
         return Int(physicalMemoryBytes / (32 * 1024 * 1024))
@@ -4210,6 +4217,9 @@ maxTokens: 1,
         if let initialCacheLimit {
             FileHandle.standardError.write(Data("mlx_cache_limit_bytes=\(initialCacheLimit)\n".utf8))
         }
+        // SPEC-038 FR-CB2 (v0.3.36): MLX's limit below the working set before
+        // the weights load; re-applied once they are resident.
+        MLXMemoryLimit.apply(stage: "startup", kvBytesPerToken: nil)
         let targetLoadPath = modelLoadPath ?? modelID
         let candidateNativeMTPLoad: NativeMTPRuntimeLoadResult?
         let candidateNativeMTPDisabledReason: NativeMTPStatusReason
@@ -4287,6 +4297,8 @@ maxTokens: 1,
         self.currentContainer = container
         self.residentWeightsTicket = await Self.startResidentWeightsTicket(
             modelFamily: modelCapabilities.modelFamily)
+        MLXMemoryLimit.apply(
+            stage: "model_loaded", kvBytesPerToken: MLXMemoryLimit.kvBytesPerToken(modelDirectory: directory))
 
         let tokenizerConfigURL = directory.appendingPathComponent("tokenizer_config.json")
         if FileManager.default.fileExists(atPath: tokenizerConfigURL.path) {
@@ -7403,6 +7415,11 @@ maxTokens: 1,
             _ = await previous.end()
         }
         residentWeightsTicket = await Self.startResidentWeightsTicket(modelFamily: modelCapabilities.modelFamily)
+        if container != nil {
+            MLXMemoryLimit.apply(
+                stage: "model_swapped",
+                kvBytesPerToken: MLXMemoryLimit.kvBytesPerToken(modelDirectory: try? Self.localModelDirectory(for: modelID)))
+        }
         currentModelID = modelID
         currentModelHash = modelHash
         currentTemplateSupportsThinkingToggle = Self.resolvedTemplateSupportsThinkingToggle(
