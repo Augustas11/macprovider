@@ -21,6 +21,20 @@ struct MSBSchedulerRowTiming: Sendable {
             decodeEndedAt: completedAt
         )
     }
+
+    /// The row from its arrival to its last token, so that
+    /// `msbAggregateThroughput` over every row is decoded tokens over the
+    /// cohort's makespan (MSB-03, SPEC-038 FR-CB14 v0.3.37).
+    func makespanSample(outputTokens: Int) throws -> MSBAggregateThroughputInput {
+        guard outputTokens > 0, completedAt > submittedAt else {
+            throw MSBAggregateThroughputError.invalidSample
+        }
+        return MSBAggregateThroughputInput(
+            decodedTokens: outputTokens - 1,
+            decodeStartedAt: submittedAt,
+            decodeEndedAt: completedAt
+        )
+    }
 }
 
 /// FR-CB15 leftover scenarios on top of equal-length MSB-02/04 throughput.
@@ -158,7 +172,17 @@ struct MSB05Evidence: Codable, Sendable, Equatable {
 
 struct MSB03Evidence: Codable, Sendable, Equatable {
     let promptTokenLengths: [Int]
+    /// Decode-interval aggregate (earliest first token to latest last token)
+    /// over the short prompt's serial decode rate. Reported for history;
+    /// not a gate since SPEC-038 v0.3.37.
     let aggregateVsSerial: Double
+    /// The gating aggregate: decoded tokens over the makespan, from the
+    /// first request's arrival to the last row's last token.
+    let makespanAggregateTokensPerSecond: Double
+    /// The same requests served one after another on the production serial
+    /// path: decoded tokens over that whole back-to-back interval.
+    let serialMakespanAggregateTokensPerSecond: Double
+    let makespanVsSerial: Double
     let shortRequestSerialTTFTp95: Double
     let shortRequestBatchedTTFTp95: Double
     let shortRequestTTFTRatio: Double
@@ -182,8 +206,30 @@ func msb03PromptLengths() -> [Int] {
     [512, 1024, 1536, 2048]
 }
 
+/// MSB-03 aggregate gate. Since SPEC-038 v0.3.37 the ratio is the makespan
+/// aggregate against the serial makespan aggregate (`msb03MakespanVsSerial`).
 func msb03AggregatePass(aggregateVsSerial: Double) -> Bool {
     aggregateVsSerial > 1.2
+}
+
+/// Batched makespan aggregate over serial makespan aggregate. With the same
+/// decoded tokens on both sides this is the serial makespan over the batched
+/// one: serving the short request sooner cannot lower it, a longer batched
+/// makespan always does. A serial run with no decoded tokens gives 0, which
+/// fails the gate (as `runMSB03` does for its percentile ratio).
+func msb03MakespanVsSerial(
+    batched: [MSBAggregateThroughputInput],
+    serial: [MSBAggregateThroughputInput]
+) throws -> (batched: MSBAggregateThroughputReport, serial: MSBAggregateThroughputReport, ratio: Double) {
+    let batchedReport = try msbAggregateThroughput(batched)
+    let serialReport = try msbAggregateThroughput(serial)
+    return (
+        batchedReport,
+        serialReport,
+        serialReport.aggregateTokensPerSecond > 0
+            ? batchedReport.aggregateTokensPerSecond / serialReport.aggregateTokensPerSecond
+            : 0
+    )
 }
 
 func msb03ShortRequestTTFTPass(ratio: Double) -> Bool {

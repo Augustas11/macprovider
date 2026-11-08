@@ -1101,7 +1101,7 @@
     {
       "spec_id": "SPEC-038",
       "title": "Continuous batching for concurrent provider inference",
-      "version": "v0.3.35",
+      "version": "v0.3.37",
       "path": "specs/SPEC-038-continuous-batching.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -5458,6 +5458,7 @@
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:runPrefillStep",
         "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:enum ContinuousBatchPrefillGrouping",
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:enum ContinuousBatchPrefillOrder",
         "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:selectRaggedPrefillGroup",
         "phase3-binary/Sources/macprovider-cli/PagedKVRuntimeBridge.swift:prefill",
         "phase3-binary/Sources/macprovider-cli/PagedKVRuntimeBridge.swift:canSharePrefillForward",
@@ -5512,6 +5513,12 @@
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testAFailedPeerInARaggedGroupWithANativeRowFailsAlone",
         "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeBridgeTests.swift:testGroupedPrefillRowsRunAloneOnlyUnderAFlattenedTokenCapBelowTwoGroupedChunks",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testRaggedPrefillGroupingHonoursRowCapAndTokenBudget",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testPrefillOrderLeadsWithTheShortestRemainingPromptAndKeepsTiesInTurnOrder",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testPrefillOrderAgedRowLeadsAndBypassCountsOnlyRowsAheadOfTheHead",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testPrefillOrderBoundsHowLongAShortPromptStreamDelaysALongOne",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testRaggedPrefillGroupingCohortBudgetAdmitsOnlyRowsFinishingWithTheHead",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testMixedPromptsArrivingTogetherPrefillShortestFirstAndAlone",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testEqualPromptsArrivingTogetherStillPrefillAsOneCohort",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testRaggedPrefillGroupingCapsTheKeySpread",
         "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeMixedCacheTests.swift:testCachePackingIncompatibilityFallsBackToIsolatedSerialPrefill",
         "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeMixedCacheTests.swift:testBackendLevelStateDiscardsSharedAttemptAndFallsBackPerRow",
@@ -5829,8 +5836,17 @@
       "requirement_id": "SPEC-038-R014",
       "spec_id": "SPEC-038",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/MSBThroughputLeftovers.swift:func msb03MakespanVsSerial",
+        "phase3-binary/Sources/macprovider-cli/MSBThroughputLeftovers.swift:func makespanSample",
+        "phase3-binary/Sources/macprovider-cli/MSBThroughputCommand.swift:private func runMSB03"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/MSB03MakespanAggregateTests.swift:testServingTheShortRowSoonerKeepsTheMakespanAggregate",
+        "phase3-binary/Tests/macprovider-cliTests/MSB03MakespanAggregateTests.swift:testSerialMakespanIsTheWholeBackToBackInterval",
+        "phase3-binary/Tests/macprovider-cliTests/MSB03MakespanAggregateTests.swift:testALongerBatchedMakespanStillFailsTheGate",
+        "phase3-binary/Tests/macprovider-cliTests/MSB03MakespanAggregateTests.swift:testMakespanSampleRejectsARowThatEndsBeforeItArrives"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {

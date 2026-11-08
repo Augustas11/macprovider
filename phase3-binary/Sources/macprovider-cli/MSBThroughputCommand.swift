@@ -546,6 +546,9 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         let timedTokensPerSecond: Double
         let ttftSeconds: Double
         let generatedTokens: [Int]
+        /// Prefill start to last token: the request's whole serial service.
+        var startedAt = Date()
+        var endedAt = Date()
     }
 
     /// Per-row mutable decode state, mirroring `ContinuousBatchScheduler.Row`.
@@ -1144,7 +1147,9 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         return SerialRunDetail(
             timedTokensPerSecond: Double(max(generationTokens - 1, 0)) / decodeElapsed,
             ttftSeconds: max(ttft, 0),
-            generatedTokens: captured
+            generatedTokens: captured,
+            startedAt: prefillStart,
+            endedAt: endAt
         )
     }
 
@@ -1163,22 +1168,40 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         var peakRSSMB = memoryRSSMB()
         var serialRunTPS: [Double] = []
         var serialShortTTFT: [Double] = []
+        var serialMakespanTPS: [Double] = []
+        var serialMakespanSamples: [MSBAggregateThroughputInput] = []
         _ = try await runProductionSerialOnce(
             container: container, promptTokens: shortPrompt, timedDecodeTokens: decodeTokens
         )
         for _ in 0..<runs {
-            let serial = try await runProductionSerialOnce(
-                container: container, promptTokens: shortPrompt, timedDecodeTokens: decodeTokens
-            )
-            serialRunTPS.append(serial.timedTokensPerSecond)
-            serialShortTTFT.append(serial.ttftSeconds)
-            peakRSSMB = max(peakRSSMB, memoryRSSMB())
+            // The four requests served one after another, short prompt first:
+            // its own run is the short-request serial baseline, and the whole
+            // back-to-back interval is the serial makespan (FR-CB14 v0.3.37).
+            var samples: [MSBAggregateThroughputInput] = []
+            for (index, prompt) in prompts.enumerated() {
+                let serial = try await runProductionSerialOnce(
+                    container: container, promptTokens: prompt, timedDecodeTokens: decodeTokens
+                )
+                if index == 0 {
+                    serialRunTPS.append(serial.timedTokensPerSecond)
+                    serialShortTTFT.append(serial.ttftSeconds)
+                }
+                samples.append(MSBAggregateThroughputInput(
+                    decodedTokens: max(serial.generatedTokens.count - 1, 0),
+                    decodeStartedAt: serial.startedAt,
+                    decodeEndedAt: serial.endedAt
+                ))
+                peakRSSMB = max(peakRSSMB, memoryRSSMB())
+            }
+            serialMakespanTPS.append(try msbAggregateThroughput(samples).aggregateTokensPerSecond)
+            serialMakespanSamples = samples
         }
 
         var engineSingleRowTPS: [Double] = []
         var aggregateRunTPS: [Double] = []
         var perRowRunTPS: [Double] = []
         var shortBatchedTTFT: [Double] = []
+        var makespanRunTPS: [Double] = []
         var usageRows: [MSBUsageRow] = []
         _ = try await runSchedulerDecode(
             container: container,
@@ -1225,6 +1248,13 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             try assertHealthy(batched.batched, expectedRows: lengths.count, expectedTokens: decodeTokens, label: "msb03-ragged")
             let agg = try msbAggregateThroughput(batched.batched.rowSamples)
             aggregateRunTPS.append(agg.aggregateTokensPerSecond)
+            let makespan = try msb03MakespanVsSerial(
+                batched: zip(batched.rowTimings, batched.results).map { timing, result in
+                    try timing.makespanSample(outputTokens: result.generatedTokens.count)
+                },
+                serial: serialMakespanSamples
+            )
+            makespanRunTPS.append(makespan.batched.aggregateTokensPerSecond)
             perRowRunTPS.append(batched.batched.perRowTokensPerSecond)
             if let shortTTFT = batched.firstTokenSecondsByRow.first {
                 shortBatchedTTFT.append(shortTTFT)
@@ -1241,7 +1271,10 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         let batchedTTFTp95 = decodeBenchPercentileTPS(shortBatchedTTFT, p: 0.95)
         let ttftRatio = serialTTFTp95 > 0 ? batchedTTFTp95 / serialTTFTp95 : 0
         let aggregateVsSerial = serialP50 > 0 ? aggregateP50 / serialP50 : 0
-        let aggregatePass = msb03AggregatePass(aggregateVsSerial: aggregateVsSerial)
+        let makespanP50 = decodeBenchPercentileTPS(makespanRunTPS, p: 0.5)
+        let serialMakespanP50 = decodeBenchPercentileTPS(serialMakespanTPS, p: 0.5)
+        let makespanVsSerial = serialMakespanP50 > 0 ? makespanP50 / serialMakespanP50 : 0
+        let aggregatePass = msb03AggregatePass(aggregateVsSerial: makespanVsSerial)
         let ttftPass = msb03ShortRequestTTFTPass(ratio: ttftRatio)
         let usagePass = msbUsageAttributionPass(
             rows: usageRows,
@@ -1251,6 +1284,9 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         let msb03 = MSB03Evidence(
             promptTokenLengths: lengths,
             aggregateVsSerial: aggregateVsSerial,
+            makespanAggregateTokensPerSecond: makespanP50,
+            serialMakespanAggregateTokensPerSecond: serialMakespanP50,
+            makespanVsSerial: makespanVsSerial,
             shortRequestSerialTTFTp95: serialTTFTp95,
             shortRequestBatchedTTFTp95: batchedTTFTp95,
             shortRequestTTFTRatio: ttftRatio,
@@ -1280,7 +1316,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
                 replay: nil,
                 drain: nil
             ),
-            summary: "msb03 aggregate_vs_serial=\(String(format: "%.2fx", aggregateVsSerial)) short_ttft_ratio=\(String(format: "%.2fx", ttftRatio)) pass=\(msb03.pass)",
+            summary: "msb03 makespan_vs_serial=\(String(format: "%.2fx", makespanVsSerial)) decode_interval_aggregate_vs_serial=\(String(format: "%.2fx", aggregateVsSerial)) short_ttft_ratio=\(String(format: "%.2fx", ttftRatio)) pass=\(msb03.pass)",
             fileLabel: "msb03"
         )
     }
