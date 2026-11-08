@@ -358,6 +358,24 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         XCTAssertNotEqual(try Data(contentsOf: source), original)
     }
 
+    func testWritableSourceTakesExclusiveCopyNotClone() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let source = fixture.snapshot.appendingPathComponent("target.safetensors")
+        // Only a 0400 source may be cloned: a clone of an owner-writable
+        // source could change through a descriptor opened before the check.
+        XCTAssertEqual(chmod(source.path, 0o644), 0)
+        let original = try Data(contentsOf: source)
+        let captured = try loadCapturedArtifacts(fixture)
+        defer { _ = captured }
+        let capturedURL = captured.targetURL
+        XCTAssertEqual(try Data(contentsOf: capturedURL), original)
+        guard Self.volumeIsAPFS(source.path) else { throw XCTSkip("clone ids need APFS") }
+        let sourceCloneID = try XCTUnwrap(Self.apfsCloneID(source.path))
+        guard sourceCloneID != 0 else { throw XCTSkip("volume reports no clone id") }
+        XCTAssertNotEqual(try XCTUnwrap(Self.apfsCloneID(capturedURL.path)), sourceCloneID)
+    }
+
     func testRevalidateAfterLoadRejectsStagedMutation() throws {
         let fixture = try makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }

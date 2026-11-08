@@ -2850,7 +2850,8 @@ enum NativeMTPAdmissionSidecar {
                 to: destination,
                 relativePath: relativePath
             )
-            let message = "native-mtp capture clone fallback path=\(relativePath) errno=\(cloneErrno) bytes=\(copied)\n"
+            // Quoted and escaped: manifest and directory names may hold newlines.
+            let message = "event=native_mtp_capture_clone_fallback bytes=\(copied) errno=\(cloneErrno) path=\(String(reflecting: relativePath))\n"
             _ = message.withCString { fputs($0, stderr) }
             return copied
         }
