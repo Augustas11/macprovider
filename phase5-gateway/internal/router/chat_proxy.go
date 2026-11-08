@@ -348,7 +348,17 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	body = rewriteChatRequestToolCallIDs(body)
 	model = chat.Model
 	streamMode = chat.Stream
-	maxTokens := maxAllowed
+	// SPEC-006 §5.4: a per-model output limit replaces the gateway-wide cap
+	// for that model. An omitted max_tokens keeps the gateway-wide default
+	// (or the model limit when lower) so the quota reservation and stream
+	// ceiling stay bounded; the demo cap is never raised.
+	modelMaxOutput := s.cfg.Limits.MaxOutputTokensForModel(chat.Model)
+	maxTokens := min(maxAllowed, modelMaxOutput)
+	if authn.Demo {
+		maxAllowed = maxTokens
+	} else {
+		maxAllowed = modelMaxOutput
+	}
 	if chat.MaxTokens != nil {
 		maxTokens = *chat.MaxTokens
 	}

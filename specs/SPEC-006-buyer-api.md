@@ -1,7 +1,9 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.72 (2026-10-31, decode progress for held tool calls)
+**Version:** 0.9.73 (2026-11-08, per-model output limit)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.6.28, SPEC-003 v0.7, SPEC-004 v0.3.2
+
+**Change log v0.9.73 (2026-11-08, Related: #2260):** Amend §5.4 gateway request caps and §5.3 `/v1/models`. `limits.model_max_output_tokens` maps a model id to an output limit (1..262144) that replaces `limits.max_tokens_per_request` for that model on Chat Completions, Responses (`max_output_tokens`) and `/v1/messages`. Keys match the coordinator's model equivalence (`NormalizeModelKey`), so one entry covers the model's accepted aliases; two keys naming one model are a config error. A model without an entry keeps the gateway-wide cap, so behaviour is unchanged until an operator sets one. An omitted `max_tokens` still resolves to `limits.max_tokens_per_request` (or the model limit when lower), so the default quota reservation and stream ceiling stay bounded; the demo cap is never raised. Each `/v1/models` entry carries `max_output_tokens`, top level and in `capabilities`, equal to the limit chat admission enforces. Relay-blind envelope bounds keep the gateway-wide cap.
 
 **Change log v0.9.72 (2026-10-31, Related: #2192):** Amend SPEC-006-R026. A provider holds a tool call until it is complete (SPEC-018), so a tool-only turn sent no frame for 9-51 s under concurrent prefill and decode-idle cut it. Streaming requests now send `X-MacProvider-Decode-Progress: 1`, and the gateway consumes the coordinator's `: macprovider-decode-progress` comment (SPEC-001-R015): it re-bases an armed decode-idle deadline, never arms one, and is never forwarded. Buyer bytes are unchanged. The decode-idle deadline also allows one shared-provider prefill of the served context: served context tokens / `first_token_prefill_tokens_per_second`, capped by `timeouts.decode_idle_shared_prefill_max_ms` (default 60000; 0 disables it without changing first-token scaling), and never below `streaming_idle_ms`. Missing context metadata takes the cap.
 
@@ -1580,6 +1582,8 @@ may continue using the canonical `id`; alias discovery is additive.
 
 `GET /v1/models` returns public model availability.
 
+(v0.9.73) Each model entry MUST carry `max_output_tokens`, the largest `max_tokens` the gateway admits for that entry's `id` (§5.4: the `limits.model_max_output_tokens` entry, else `limits.max_tokens_per_request`; for a demo caller, never above the demo cap). When the entry carries `capabilities`, the same value MUST also appear as `capabilities.max_output_tokens`.
+
 Authentication:
 
 - SHOULD allow unauthenticated reads for docs and demo discovery.
@@ -2051,6 +2055,7 @@ for unsupported models, roles or endpoints.
 Gateway request caps:
 
 - `max_tokens` MUST be capped at `limits.max_tokens_per_request`, default 32768. The cap bounds generated output tokens only (prompt plus output stays bounded by the provider context window); reasoning models spend part of the budget before the visible answer, so 4096 truncated real work.
+- (v0.9.73) A model with a `limits.model_max_output_tokens` entry MUST be capped at that value instead, on Chat Completions `max_tokens`, Responses `max_output_tokens` and `/v1/messages` `max_tokens` alike. Entry keys MUST match request model ids by the coordinator's model equivalence (`NormalizeModelKey`), so the catalog id, its OpenRouter slug and its served artifact id resolve to one entry; values MUST be 1..262144, and two keys naming one model MUST fail config validation. A model without an entry MUST keep `limits.max_tokens_per_request`. When `max_tokens` is omitted the resolved budget (reservation, forwarded `X-MacProvider-Internal-Max-Output-Tokens`, stream ceiling) MUST stay `limits.max_tokens_per_request`, or the model limit when lower. The quota reservation and the #760 stream ceiling MUST be derived from the accepted `max_tokens`, so a larger accepted value reserves and allows proportionally more, up to `timeouts.stream_ceiling_max_seconds`.
 - Demo `max_tokens` SHOULD be further capped by `demo.max_tokens_per_request`, default 512.
 - Requests exceeding configured caps MUST receive `400` or be clamped only if the clamping behavior is documented. v1 SHOULD reject rather than silently clamp authenticated API requests.
 
@@ -4142,6 +4147,7 @@ quotas:
 limits:
   max_tokens_per_request: 32768
   demo_max_tokens_per_request: 512
+  model_max_output_tokens: {}
   max_feedback_comment_bytes: 2000
   request_body_bytes: 1048576
 
