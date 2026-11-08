@@ -197,6 +197,12 @@ func runCoordinator() (exitCode int) {
 		fmt.Println("config: ok")
 		return
 	}
+	reloadBaseline, err := sighupReloadBaseline(*configPath, *configOverlay, bootConfigDigests)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "config: %v\n", err)
+		os.Exit(1)
+	}
+	reloadStartupOnlyBaseline.Store(&reloadBaseline)
 	autotuneFeeds, err := buyer.LoadAutotuneFeeds(cfg.AutotuneFeeds)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "autotune feeds: %v\n", err)
@@ -4723,6 +4729,12 @@ func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 conf
 	if err != nil {
 		logger.Error().Err(err).Msg("tier2 config reload rejected")
 		return
+	}
+	if baseline := reloadStartupOnlyBaseline.Load(); baseline != nil {
+		if changed := startupOnlyConfigDrift(*baseline, cfg); len(changed) > 0 {
+			logger.Error().Strs("sections", changed).Msg("config reload rejected: startup-only config changed and requires a restart")
+			return
+		}
 	}
 	configLoadedAt := time.Now()
 	// #1268 SIGHUP autotune feed reload: re-parse + verify the signed feed set so

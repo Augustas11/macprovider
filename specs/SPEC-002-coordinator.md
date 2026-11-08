@@ -5485,8 +5485,11 @@ exactly the train's own edit (target moved to the candidate, seed revocations
 added, every live revocation kept); any other difference fails closed. The
 applied configuration is the last `coordinator_config_applied` event of the
 running process whose source is `boot` or `sighup`. A successful SIGHUP that
-applied the whole file logs `sighup`. A rejected reload logs nothing, so the
-previous proof stands. Signed candidate verification and
+applied the whole file logs `sighup`. A SIGHUP reload MUST be rejected when a
+field it does not apply differs from the boot configuration (for example
+`auth.*`, `onboarding.*`, `listen.*` or `storage.db_path`), so a `sighup` event
+never covers an edit that only a restart applies. A rejected reload logs
+nothing, so the previous proof stands. Signed candidate verification and
 canary proof remain required.
 
 A validated SIGHUP reload MUST publish one immutable compatibility policy
