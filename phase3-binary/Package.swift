@@ -17,6 +17,11 @@ let package = Package(
         )
     ],
     dependencies: [
+        // Tag 3.32.3-macprovider.31 (#2234) is .25 plus one commit that pins
+        // mlx-swift 0.32.3-macprovider.13: core 565070fe4 sends every eligible
+        // affine small-M product to qmv_mma from 1 to 16 rows, so the kernel
+        // never depends on the row count, and the metallib ships the
+        // gather_mm_offsets and SDPA VJP kernels that core calls.
         // Tag 3.32.3-macprovider.25 (#2198, #2189) on 3.32.3-macprovider.24:
         // .23's GLM-5.3 MTP head prefill over the last 4096 prompt columns
         // (`da8f193`, from `93234b6`) on top of .24's MiniMax M3 work.
@@ -52,8 +57,8 @@ let package = Package(
         // MTP verification step commits upstream does not carry, and upstream
         // #631 with every Qwen3.5 trace declaring the arrays it reads as
         // compile state) and the GLM-5-Next text model with batched rows. It
-        // resolves the Augustas11/mlx-swift fork (tag 0.32.3-macprovider.11, MLX
-        // core v0.32.4-macprovider.6 and mlx-c v0.6.0-macprovider.2). Core keeps
+        // resolves the Augustas11/mlx-swift fork (tag 0.32.3-macprovider.13, MLX
+        // core 565070fe4 on v0.32.4-macprovider.6 and mlx-c v0.6.0-macprovider.2). Core keeps
         // small-M quantized matmuls on one kernel route so a row decodes the same tokens alone
         // and inside a continuous batch (the startup batched-isolation gate),
         // erases a freed compiled function from every thread's compile cache
@@ -68,7 +73,7 @@ let package = Package(
         // compatible per-column attention while retaining row-owned caches.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "da8f1932f8e2a46477a1a35663955267bc6fcd04"
+            revision: "9f30c01bbce4ee2619aa5a3a2a0a232241fd9df3"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",

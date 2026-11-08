@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.76
+**Version:** 0.1.77
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.76",
+  "version": "0.1.77",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -521,12 +521,24 @@ The authorized dependency tuple is exact:
 
 | Repository | Fork tag | Revision | Upstream base |
 |---|---|---|---|
-| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.25` | `da8f1932f8e2a46477a1a35663955267bc6fcd04` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
-| `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.11` | `c774cb0934c7503bc3fe1c3d1afbe44c728e8891` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
-| `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.6` | `51edbb37620aef7c860ab5d7cdb7bf5b14333da2` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
+| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.31` | `9f30c01bbce4ee2619aa5a3a2a0a232241fd9df3` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
+| `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.13` | `565269220ccc2cc0d2ce149affb98a2f9d9b32ac` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
+| `https://github.com/Augustas11/mlx` | `macprovider/2234-qmv-mma` | `565070fe4b0f95927f7fdd5fcfb537157605037a` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
 | `https://github.com/Augustas11/mlx-c` | `v0.6.0-macprovider.2` | `2b1ff2b5b5129a6115771da32e1bac3b6b01ab01` | `ml-explore/mlx-c` pinned base (`ebc88f10caa1b625e6b581437a8dea6df8a70085`) |
 
-The mlx-swift-lm row `3.32.3-macprovider.25` is on `3.32.3-macprovider.24`
+The mlx-swift-lm row `3.32.3-macprovider.31` is `3.32.3-macprovider.25`
+(`da8f1932f8e2a46477a1a35663955267bc6fcd04`) plus one commit that pins mlx-swift
+`0.32.3-macprovider.13` (#2234); no model source changes. The Swift row is
+`0.32.3-macprovider.11` (`c774cb0934c7503bc3fe1c3d1afbe44c728e8891`) plus the
+qmv_mma core and the metallib sources for `gather_mm_offsets` and the SDPA VJP
+kernel. The core row is the fork branch `macprovider/2234-qmv-mma`, one commit
+on `v0.32.4-macprovider.6` (`51edbb37620aef7c860ab5d7cdb7bf5b14333da2`), and has no
+tag of its own yet. That commit routes every eligible affine small-M product to
+`qmv_mma` from 1 to 16 rows on non-NAX GPUs, using a test that reads no row
+count; NAX GPUs and floating-point modes keep their routes. The C row is
+unchanged.
+
+The prior mlx-swift-lm row `3.32.3-macprovider.25` is on `3.32.3-macprovider.24`
 (`39ccc0ec28f44f08f8b8032a92ebd1b2e438ebf4`) (#2198, #2189), at
 `da8f1932f8e2a46477a1a35663955267bc6fcd04`, and adds `.23`'s one commit
 (`93234b6`), which changes only `GLM5NextMTP.prepareDrafterState`: the
@@ -2294,6 +2306,13 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.77 (2026-11-08, Related: #2234)** — R003 names mlx-swift-lm
+  `3.32.3-macprovider.31` (`9f30c01bbce4ee2619aa5a3a2a0a232241fd9df3`), mlx-swift
+  `0.32.3-macprovider.13` (`565269220ccc2cc0d2ce149affb98a2f9d9b32ac`) and core
+  `565070fe4b0f95927f7fdd5fcfb537157605037a` (branch `macprovider/2234-qmv-mma`): every eligible
+  affine small-M product takes `qmv_mma` from 1 to 16 rows on non-NAX GPUs, and
+  the metallib ships `gather_mm_offsets` and the SDPA VJP kernel. Model sources
+  and the C row are unchanged.
 - **0.1.76 (2026-11-07, Related: #2243)** — MTP-2: the private staging file
   may be a `clonefile(2)` clone of the validated descriptor when that
   descriptor is already mode `0400`. Any other mode, `ENOTSUP`, and `EXDEV`
