@@ -3364,6 +3364,48 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertEqual(gated.backend.base.retainedRowCountForTest(), 0)
     }
 
+    /// SPEC-048-R007 batched draft pass: rows verifying in one round advance
+    /// through one packed drafter forward, and every proposal is byte-equal
+    /// to the row's serial single-pass drafter seed.
+    func testTwoNativeRowsBatchedDraftProposalsEqualSerialDrafting() async throws {
+        try requireMetal()
+        let prompts = ["a": Self.tinyPrompt(length: 11, salt: 21), "b": Self.tinyPrompt(length: 11, salt: 22)]
+        let native = try Self.tinyQwen35Native()
+        let scheduler = try Self.makeScheduler(
+            maxActiveRows: 2,
+            backend: native.backend,
+            maxPhysicalBlocks: 64,
+            maxPrefillRowsPerIteration: 2
+        )
+        async let first = scheduler.submit(Self.tinyNativeRequest("a", prompts["a"]!, 12, temperature: 0.8))
+        async let second = scheduler.submit(Self.tinyNativeRequest("b", prompts["b"]!, 12, temperature: 0.8))
+        let results = try await ["a": first, "b": second]
+
+        var sharedRounds = 0
+        for round in native.backend.finalizedRounds() where Set(round.map(\.requestID)) == ["a", "b"] {
+            sharedRounds += 1
+        }
+        XCTAssertGreaterThan(sharedRounds, 0, "the rows never shared a packed round")
+        for (id, result) in results {
+            XCTAssertEqual(result.terminalStatus, .length, result.errorCode ?? "")
+            let proposals = native.backend.proposalsByStep()[id] ?? [:]
+            XCTAssertFalse(proposals.isEmpty, "row \(id) proposed nothing")
+            for (step, proposal) in proposals.sorted(by: { $0.key < $1.key }) {
+                XCTAssertEqual(
+                    proposal,
+                    [try Self.definitionalDrafterSeed(
+                        target: native.target,
+                        drafter: native.drafter,
+                        prompt: prompts[id]!,
+                        generated: Array(result.generatedTokens.prefix(step))
+                    )],
+                    "row \(id) proposal at step \(step)"
+                )
+            }
+        }
+        XCTAssertEqual(native.backend.base.retainedRowCountForTest(), 0)
+    }
+
     /// SPEC-048 R015 gated cells: a native row the load gate holds until it
     /// finishes never advances its drafter while it rides the ordinary
     /// forward, however many rounds it is held, so the gate adds no drafter
