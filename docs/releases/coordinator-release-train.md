@@ -61,7 +61,7 @@ Deploy order (each step through `scripts/ops/` only):
 
 Rollback: disable scorer-only mode on the reference Macs before running a coordinator below FR-26.
 
-## Coding-agent privacy — pending runtime inclusion (2026-10-26)
+## Coding-agent privacy — in runtime v1.8.279 (2026-10-26; live acceptance below still open)
 
 | PR | Issue | Coordinator/gateway change | Status |
 |---|---|---|---|
@@ -109,7 +109,7 @@ enable the endpoint. Track its signed-release and real paying-buyer acceptance i
 the [CLI release train](cli-release-train.md#next-cli-release--net-changes-vs-18272-tracked-2026-10-26).
 Studio lab acceptance passed, but no live deployment is claimed by this merge.
 
-## Pending runtime inclusion — public privacy disclosures (2026-10-26)
+## Public privacy disclosures — in runtime v1.8.279 (2026-10-26)
 
 | PR | Issue | Coordinator/gateway change | Status |
 |---|---|---|---|
