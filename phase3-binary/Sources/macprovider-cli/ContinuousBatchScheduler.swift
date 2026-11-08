@@ -2331,6 +2331,30 @@ actor ContinuousBatchScheduler {
         return "event=batching_rejected code=context_length_exceeded prompt_tokens=\(promptTokens) max_output_tokens=\(maxOutputTokens) cap=\(cap)\n"
     }
 
+    /// Operator log line for a row the MLX memory limit defers or an idle
+    /// scheduler admits past it. Request bytes are KV bytes per token (logged
+    /// by `event=mlx_memory_limit`) times the row's tokens, so a privacy-class
+    /// request (SPEC-049-R010) logs neither its ID nor its requested bytes,
+    /// and the pending-prefill sum is dropped whenever it would be.
+    /// `pendingPrefillBytes` is nil when a privacy-class row is in that sum.
+    static func memoryLimitTelemetryLine(
+        idle: Bool,
+        requestID: String,
+        requestedBytes: Int,
+        activeBytes: Int,
+        pendingPrefillBytes: Int?,
+        limitBytes: Int,
+        provenance: KVIngestProvenance
+    ) -> String {
+        let event = "event=batching_memory_limit_\(idle ? "idle_admitted" : "deferred") "
+        guard provenance.mayPersistRequestDerivedState else {
+            return event + "active_bytes=\(activeBytes) limit_bytes=\(limitBytes)\n"
+        }
+        let pendingField = pendingPrefillBytes.map { "pending_prefill_bytes=\($0) " } ?? ""
+        return event + "request_id=\(requestID) requested_bytes=\(requestedBytes) active_bytes=\(activeBytes) "
+            + pendingField + "limit_bytes=\(limitBytes)\n"
+    }
+
     private struct Waiter {
         let id: UUID
         let continuation: CheckedContinuation<ContinuousBatchSchedulerResult, Error>
@@ -5810,14 +5834,15 @@ actor ContinuousBatchScheduler {
                 if idle || lastMemoryDeferredRequestID != request.id {
                     lastMemoryDeferredRequestID = idle ? nil : request.id
                     record(idle ? .memoryLimitIdleAdmitted : .memoryLimitDeferred)
-                    // SPEC-049-R010: no request ID for a privacy-class request.
-                    let requestField = request.ingestProvenance.mayPersistRequestDerivedState
-                        ? "request_id=\(request.id) " : ""
-                    let line = [
-                        "event=batching_memory_limit_\(idle ? "idle_admitted" : "deferred") \(requestField)",
-                        "requested_bytes=\(refusal.requestedBytes) active_bytes=\(refusal.sample.activeBytes) ",
-                        "pending_prefill_bytes=\(refusal.pendingBytes) limit_bytes=\(refusal.sample.limitBytes)\n",
-                    ].joined()
+                    let line = Self.memoryLimitTelemetryLine(
+                        idle: idle,
+                        requestID: request.id,
+                        requestedBytes: refusal.requestedBytes,
+                        activeBytes: refusal.sample.activeBytes,
+                        pendingPrefillBytes: refusal.pendingIncludesPrivacyRow ? nil : refusal.pendingBytes,
+                        limitBytes: refusal.sample.limitBytes,
+                        provenance: request.ingestProvenance
+                    )
                     try? FileHandle.standardError.write(contentsOf: Data(line.utf8))
                 }
                 if !idle {
@@ -7057,14 +7082,16 @@ actor ContinuousBatchScheduler {
     /// remaining initial footprint counts on top of MLX's active memory.
     private func mlxMemoryAdmissionRefusal(
         for request: ContinuousBatchSchedulerRequest
-    ) -> (sample: MLXMemoryAdmissionSample, requestedBytes: Int, pendingBytes: Int)? {
+    ) -> (sample: MLXMemoryAdmissionSample, requestedBytes: Int, pendingBytes: Int, pendingIncludesPrivacyRow: Bool)? {
         guard let sample = configuration.mlxMemoryAdmissionProbe.sample() else { return nil }
         let perToken = sample.kvBytesPerToken
         let requestedTokens = ((try? initialReservation(for: request))?.initialCapacityTokens ?? 0)
             - request.cachedPromptTokens
         let requested = MLXMemoryBudget.kvBytes(tokens: requestedTokens, bytesPerToken: perToken)
         var pending = 0
+        var pendingIncludesPrivacyRow = false
         for row in activePrompt.values {
+            if !row.request.ingestProvenance.mayPersistRequestDerivedState { pendingIncludesPrivacyRow = true }
             let remaining = row.request.promptTokens.count + configuration.decodeHeadroomTokens - row.prefillCursor
             let (sum, overflow) = pending.addingReportingOverflow(
                 MLXMemoryBudget.kvBytes(tokens: remaining, bytesPerToken: perToken))
@@ -7076,7 +7103,7 @@ actor ContinuousBatchScheduler {
         ) {
             return nil
         }
-        return (sample, requested, pending)
+        return (sample, requested, pending, pendingIncludesPrivacyRow)
     }
 
     /// SPEC-038 FR-CB2 (v0.3.36): every outstanding native-MTP round

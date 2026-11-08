@@ -9587,6 +9587,38 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertFalse(diagnostics.contains(.memoryLimitIdleAdmitted))
     }
 
+    // SPEC-049-R010: requested bytes are KV bytes per token (in the
+    // `event=mlx_memory_limit` line) times the row's tokens, so the on-disk
+    // provider log drops them, with the request ID, for a privacy-class row,
+    // and drops the pending-prefill sum when a privacy-class row is in it.
+    func testMLXMemoryLimitTelemetryOmitsPrivacyRowSizes() {
+        for idle in [false, true] {
+            let event = "event=batching_memory_limit_\(idle ? "idle_admitted" : "deferred") "
+            XCTAssertEqual(
+                ContinuousBatchScheduler.memoryLimitTelemetryLine(
+                    idle: idle, requestID: "req-a", requestedBytes: 640, activeBytes: 100,
+                    pendingPrefillBytes: 32, limitBytes: 700, provenance: .relay
+                ),
+                event + "request_id=req-a requested_bytes=640 active_bytes=100 pending_prefill_bytes=32 limit_bytes=700\n"
+            )
+            XCTAssertEqual(
+                ContinuousBatchScheduler.memoryLimitTelemetryLine(
+                    idle: idle, requestID: "req-a", requestedBytes: 640, activeBytes: 100,
+                    pendingPrefillBytes: nil, limitBytes: 700, provenance: .relay
+                ),
+                event + "request_id=req-a requested_bytes=640 active_bytes=100 limit_bytes=700\n"
+            )
+            let privacy = ContinuousBatchScheduler.memoryLimitTelemetryLine(
+                idle: idle, requestID: "req-p", requestedBytes: 640, activeBytes: 100,
+                pendingPrefillBytes: 32, limitBytes: 700, provenance: .privacy
+            )
+            XCTAssertEqual(privacy, event + "active_bytes=100 limit_bytes=700\n")
+            XCTAssertFalse(privacy.contains("requested_bytes"))
+            XCTAssertFalse(privacy.contains("pending_prefill_bytes"))
+            XCTAssertFalse(privacy.contains("req-p"))
+        }
+    }
+
     func testMLXMemoryLimitCapsNativeMTPDepthBeforeProposal() async throws {
         let backend = ScriptedBackend(
             scripts: [:],
