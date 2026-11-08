@@ -30,9 +30,11 @@ Live coordinator and gateway: v1.8.279. The next runtime carries the merged
 [#2252](https://github.com/Augustas11/macprovider/pull/2252) (merged
 `e37897126`, Related: #2247: reload `compatibility_set` on SIGHUP instead of
 restarting, and reject a reload that changes startup-only config). It also takes
-#2260 (GLM-5.3-Flash per-model output limit above the gateway-wide 32K
-`max_tokens` cap, advertised on `/v1/models`) if that merges before the GLM CLI
-cut; the runtime must go before the cut either way.
+[#2267](https://github.com/Augustas11/macprovider/pull/2267) (merged `59715cd4b`,
+Related: #2260: GLM-5.3-Flash per-model output limit above the gateway-wide 32K
+`max_tokens` cap, advertised on `/v1/models`). The runtime must go before the
+GLM CLI cut. After the v1.8.282 apply, the live step that sets the limit to
+65,536 is `PEARL_RUNTIME_TASK=stream-ceiling scripts/ops/pearl-runtime.sh next --run`.
 
 Order: #2260 merges (or the cut is ready without it) → `scripts/ops/pearl-runtime.sh`
 (`PEARL_RUNTIME_VERSION=v1.8.282`, `status`, `next`, `next --run`; state the
