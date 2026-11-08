@@ -2151,8 +2151,8 @@ def sc_plan(base, overlay, gateway):
 def sc_output_plan(doc):
     """{model: (old or None, new)} for limits.model_max_output_tokens.
     Raise-only and additive: an entry at or above its target is kept. A map
-    holding other keys but not the target is refused, because an alias key
-    of the same model next to the target fails gateway validation."""
+    holding other keys but not the target is refused, and so is an alias key
+    of the same model beside the target, because that fails gateway validation."""
     limits = doc.get("limits")
     if limits is None:
         limits = {}
@@ -2165,6 +2165,10 @@ def sc_output_plan(doc):
         raise Refused("gateway limits.model_max_output_tokens must be a mapping")
     out = {}
     for model, want in sorted(SC_MODEL_MAX_OUTPUT_TOKENS.items()):
+        tail = model.lower().rsplit("/", 1)[-1]
+        for key in current:
+            if model in current and key != model and str(key).lower().rsplit("/", 1)[-1] == tail:
+                raise Refused("gateway limits.model_max_output_tokens key %s names the same model as %s; reconcile it first" % (key, model))
         if model in current:
             old = sc_int(current[model], "gateway limits.model_max_output_tokens[%s]" % model)
             if old < want:

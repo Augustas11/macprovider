@@ -582,6 +582,8 @@ class StreamCeilingPlanTest(unittest.TestCase):
                          {glm: 65536, "other/x": 5})
         self.assertEqual(pcc.sc_output_plan(yaml.safe_load(lower.replace("32768", "131072"))), {})
         # An alias key of the same model next to the target would fail gateway validation.
+        with self.assertRaises(pcc.Refused):
+            pcc.sc_output_plan(yaml.safe_load("limits:\n  model_max_output_tokens:\n    z-ai/glm-5.3-flash: 1\n    %s: 1\n" % glm))
         with self.assertRaisesRegex(pcc.Refused, "has entries but not"):
             pcc.sc_output_plan(yaml.safe_load("limits:\n  model_max_output_tokens:\n    z-ai/glm-5.3-flash: 1\n"))
 
