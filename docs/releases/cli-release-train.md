@@ -1508,8 +1508,8 @@ mainland-provider installer handoff.
    `compatibility_set_id` is admitted by the live policy (SPEC-002-R004:
    well-formed, from the `target_id` repository, not in `revoked_ids`;
    `/healthz` must equal the applied config) and the on-disk config's
-   sha256 equals the running process's boot `coordinator_config_applied`
-   digests (restart-only fields), `privacy_class.enabled` is true, and the
+   sha256 equals the running process's last `coordinator_config_applied`
+   event with source `boot` or `sighup`, `privacy_class.enabled` is true, and the
    candidate `code_cdhash` is approved either by a `v<ver>.json` that
    verifies and that the coordinator reports as loaded
    (`relayblind_privacy_release_identity_loaded`), or by an unexpired
@@ -1587,7 +1587,7 @@ mainland-provider installer handoff.
   from the `target_id` repository; step `pearl_accepted_ids` only checks that
   the running policy admits the candidate. `accepted_ids` is deprecated and
   ignored. To keep a bad build off buyer traffic, add its exact identity to
-  `compatibility_set.revoked_ids` (SIGHUP-reloadable): it reconnects
+  `compatibility_set.revoked_ids` (SIGHUP-reloadable): it stays connected
   update-only and still receives the recommendation. A foreign-repository or
   malformed set is closed 4001 with its code, and a v2 CLI reports that code
   instead of `Expected auth_challenge v2`.

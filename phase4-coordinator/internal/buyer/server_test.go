@@ -2162,6 +2162,52 @@ func TestPoolCheckReadinessEvidenceIsPublicAndLegacyIsNotBuyerServing(t *testing
 	}
 }
 
+func TestPoolCheckUpdateBridgeOmitsBuyerServing(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	now := time.Now().UTC()
+	provider := &pool.Provider{
+		ProviderID:             "readiness-provider",
+		AssignedID:             "session-1",
+		ModelID:                "model-a",
+		MaxContextTokens:       20000,
+		MaxConcurrency:         1,
+		SlotsFree:              1,
+		SlotsTotal:             1,
+		State:                  pool.StateReady,
+		LastHeartbeatAt:        now,
+		LastActivityAt:         now,
+		ConnectedAt:            now,
+		CatalogAdmissionMode:   "update_bridge",
+		CatalogReleaseID:       "release-current",
+		CatalogPolicyVersion:   "autotune-policy-v1",
+		CandidateCatalogSHA256: strings.Repeat("a", 64),
+		CatalogSignerKeyID:     "signer-v4",
+		CandidateRowIdentity:   strings.Repeat("b", 64),
+	}
+	registry.Register(provider, nil)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0), buyer.WithOperatorKey("operator-secret"))
+	req := httptest.NewRequest(http.MethodGet, "/v1/pool/check?provider_id=readiness-provider&assigned_id=session-1&details=readiness", nil)
+	req.RemoteAddr = "198.51.100.1:12345"
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rr.Code, rr.Body.String())
+	}
+	var response map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if _, present := response["buyer_serving"]; present {
+		t.Fatalf("update_bridge readiness published buyer_serving: %+v", response)
+	}
+	if _, present := response["buyer_serving_hold"]; present {
+		t.Fatalf("update_bridge readiness published buyer_serving_hold: %+v", response)
+	}
+	if response["catalog_admission_mode"] != "update_bridge" || response["catalog_evidence_source"] != "provider_reported" || response["catalog_release_id"] != "release-current" {
+		t.Fatalf("update_bridge readiness = %+v", response)
+	}
+}
+
 func TestPoolCheckReadinessRequiresExactAssignedSession(t *testing.T) {
 	registry := pool.NewRegistry(nil)
 	register(registry, "p1", "session-1", "model-a", pool.StateReady, 20000, 1)

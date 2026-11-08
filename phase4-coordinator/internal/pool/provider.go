@@ -1905,11 +1905,27 @@ func (r *Registry) MarkState(providerID, assignedID string, state State) bool {
 	return true
 }
 
+// MarkCompatibilityUpdateOnly converts a live session to the update-only
+// admission a fresh connect of an exactly revoked release already receives.
+// The WebSocket stays open and State is unchanged. update_bridge is not
+// buyer-routable, so the session stops serving without a disconnect.
+func (r *Registry) MarkCompatibilityUpdateOnly(providerID, assignedID string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p := r.providers[providerID]
+	if p == nil || p.AssignedID != assignedID {
+		return false
+	}
+	p.CatalogAdmissionMode = "update_bridge"
+	return true
+}
+
 // FenceCompatibilityPolicy makes a policy-rejected session immediately
 // unroutable. HandshakeAckPending is reused as the registry route hold: for a
 // pending handshake it preserves credential delivery, and for an already-acked
 // session it prevents provider-originated Busy/Ready updates from reviving buyer
-// routing during the WebSocket close grace window.
+// routing during the WebSocket close grace window. Exact revocations do not
+// use this path; they stay connected via MarkCompatibilityUpdateOnly.
 func (r *Registry) FenceCompatibilityPolicy(providerID, assignedID string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()

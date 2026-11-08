@@ -2781,6 +2781,68 @@ func TestRelayNAKFallbackMarksHTTPForwardingOnly(t *testing.T) {
 	}
 }
 
+func TestRelayNAKOfCompatibilityPolicyStaysWebSocketTunneled(t *testing.T) {
+	serverConn, providerConn := net.Pipe()
+	defer providerConn.Close()
+	defer serverConn.Close()
+
+	registry := pool.NewRegistry(nil)
+	provider := &pool.Provider{ProviderID: "p1", AssignedID: "s1", ModelID: "model-a", Tier: pool.TierProvisional, InferencePath: pool.InferencePathWSTunneled}
+	registry.Register(provider, serverConn)
+	s := NewServer(config.Default(), registry, zerolog.Nop())
+	session := newProviderSession("p1", "s1", serverConn, 4)
+	s.sessions.Store(sessionKey("p1", "s1"), session)
+
+	s.handleNAK("p1", "s1", []byte(`{"type":"nak","in_reply_to":"compatibility_policy_v1","error":{"code":"unknown_message_type","message":"Unrecognized message type: 'compatibility_policy_v1'"}}`))
+	got, ok := registry.Resolve("p1", "")
+	if !ok || got.HTTPForwardingOnly || !got.IsWSTunneled() {
+		t.Fatalf("policy nak provider = %#v ok=%v, want websocket-tunneled", got, ok)
+	}
+	if session.httpOnly {
+		t.Fatal("compatibility_policy_v1 nak marked the session http-only")
+	}
+
+	s.handleNAK("p1", "s1", []byte(`{"type":"nak","in_reply_to":"not_a_policy_frame","error":{"code":"unknown_message_type","message":"mock reject-nak"}}`))
+	got, ok = registry.Resolve("p1", "")
+	if !ok || !got.HTTPForwardingOnly || got.IsWSTunneled() {
+		t.Fatalf("other nak provider = %#v ok=%v, want http-only", got, ok)
+	}
+}
+
+func TestStartupOnlyReloadDrift(t *testing.T) {
+	cfg := config.Default()
+	s := NewServer(cfg, pool.NewRegistry(nil), zerolog.Nop())
+	if err := s.StartupOnlyReloadDrift(cfg); err != nil {
+		t.Fatal(err)
+	}
+	required := cfg
+	required.CoordinatorAdvertisedVersion.RequiredBinaryVersion = "9.9.9"
+	if err := s.StartupOnlyReloadDrift(required); err == nil {
+		t.Fatal("required_binary_version drift was accepted")
+	}
+	recommended := cfg
+	recommended.CoordinatorAdvertisedVersion.LatestBinaryVersion = "9.9.9"
+	if err := s.StartupOnlyReloadDrift(recommended); err != nil {
+		t.Fatalf("latest_binary_version is reloadable: %v", err)
+	}
+	perModel := cfg
+	perModel.CoordinatorAdvertisedVersion.PerModelRequiredBinaryVersion = map[string]string{"model-a": "1.0.0"}
+	if err := s.StartupOnlyReloadDrift(perModel); err == nil {
+		t.Fatal("per_model_required_binary_version drift was accepted")
+	}
+	privacy := cfg
+	privacy.PrivacyClass.Enabled = !cfg.PrivacyClass.Enabled
+	if err := s.StartupOnlyReloadDrift(privacy); err == nil {
+		t.Fatal("privacy_class drift was accepted")
+	}
+	emptyLists := cfg
+	emptyLists.PrivacyClass.ApprovedCodeIdentities = []config.ApprovedCodeIdentity{}
+	emptyLists.PrivacyClass.DeniedCodeCDHashes = []string{}
+	if err := s.StartupOnlyReloadDrift(emptyLists); err != nil {
+		t.Fatalf("nil and empty privacy lists are the same policy: %v", err)
+	}
+}
+
 func newEncryptedRelayHarness(t *testing.T) (*Server, *pool.Provider, net.Conn) {
 	t.Helper()
 	return newEncryptedRelayHarnessWithConfig(t, config.Default(), zerolog.Nop(), time.Now())

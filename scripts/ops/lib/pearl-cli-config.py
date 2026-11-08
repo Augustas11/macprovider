@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Sent over SSH by scripts/ops/cli-release.sh `next --run`: the CLI train's
-Pearl coordinator.yaml edits, with one coordinator restart.
+Pearl coordinator.yaml edits. compatibility_set and latest_binary_version
+reload on SIGHUP; privacy_class.release_code_identities still restarts.
 
   python3 - apply [layout flags] [--privacy-setup DIR KEY KEY_SHA256]
                   [--recommend VERSION TARGET_ID] [--revoke ID ...]
@@ -15,10 +16,12 @@ transaction journal) it:
   3. backs the file up under the backup root (0700);
   4. validates the new bytes with the running coordinator's binary, user and
      exact environment (/proc/<pid>/environ): --validate-config;
-  5. atomically replaces the config, restarts the unit, waits for /healthz and
-     checks the postconditions. On failure, while the file still holds the
-     bytes it wrote, it puts back the bytes it read under the same locks
-     (never a whole-file backup) and restarts again.
+  5. atomically replaces the config, signals the unit, waits for /healthz and
+     checks the postconditions. A compatibility or recommendation edit sends
+     SIGHUP and requires the same main process. A privacy setup restarts.
+     On failure, while the file still holds the bytes it wrote, it puts back
+     the bytes it read under the same locks (never a whole-file backup) and
+     signals again.
 
 Admission needs no per-release edit (SPEC-002-R004): every well-formed
 release identity from compatibility_set.target_id's repository is admitted
@@ -372,8 +375,11 @@ def disk_digests(args):
 
 
 def boot_digests(unit):
-    """config/overlay sha256 the current coordinator invocation logged at boot
-    (event coordinator_config_applied, source boot), or None."""
+    """config/overlay sha256 of the last coordinator_config_applied event this
+    invocation logged with source boot or sighup, or None.
+
+    A successful SIGHUP applies the whole file and logs source sighup. A
+    rejected reload logs nothing, so the previous proof stands."""
     inv = subprocess.run(["systemctl", "show", "-p", "InvocationID", "--value", unit],
                          capture_output=True, text=True, timeout=15).stdout.strip()
     if not re.match(r"^[0-9a-f]{32}$", inv):
@@ -388,7 +394,7 @@ def boot_digests(unit):
             event = json.loads(line)
         except ValueError:
             continue
-        if event.get("event") == "coordinator_config_applied" and event.get("source") == "boot":
+        if event.get("event") == "coordinator_config_applied" and event.get("source") in ("boot", "sighup"):
             found = {"config_sha256": event.get("config_sha256", ""), "overlay_sha256": event.get("overlay_sha256", "")}
     return found
 
@@ -409,6 +415,16 @@ def restart(args, old_pid):
             raise Refused("the restarted coordinator did not log the on-disk config as its boot config")
         time.sleep(1)
     return health
+
+
+def live_and_applied(args, health):
+    """A SIGHUP is live only when /healthz matches the request and the journal
+    shows this invocation applied the on-disk file. check_live is a no-op
+    when the resume carries no --recommend or --revoke, and a rejected reload
+    still answers /healthz."""
+    check_live(args, health)
+    if not applied(args):
+        raise Refused("the coordinator did not log the on-disk config as applied")
 
 
 def check_live(args, health):
@@ -451,6 +467,45 @@ def privacy_preflight(args, env, uid, gid):
         raise Refused("%s must be a directory owned by the updater user and the coordinator group, mode 0750" % metadata_dir)
 
 
+def reload_until(args, old_pid, ready):
+    """SIGHUP the coordinator. The main process must stay old_pid, and
+    ready(health) must succeed within BUC_SIGHUP_WAIT_S. A health mismatch
+    during that window is retried; a changed pid is not."""
+    healthz(args.healthz)
+    if running(args)[0] != old_pid:
+        raise Refused("the coordinator main process changed during the task")
+    if subprocess.run(["systemctl", "kill", "--kill-who=main", "-s", "HUP", args.unit],
+                      capture_output=True, timeout=30).returncode != 0:
+        raise Refused("systemctl kill -s HUP failed")
+    deadline = time.monotonic() + BUC_SIGHUP_WAIT_S
+    last = Refused("the coordinator did not apply the config within %d s of the SIGHUP" % BUC_SIGHUP_WAIT_S)
+    while True:
+        health = healthz(args.healthz)
+        if running(args)[0] != old_pid:
+            raise Refused("the coordinator restarted instead of reloading")
+        try:
+            ready(health)
+            return health
+        except Refused as exc:
+            last = exc
+        if time.monotonic() > deadline:
+            raise last
+        time.sleep(1)
+
+
+def same_policy(health, before):
+    revoked = health.get("compatibility_policy_revoked_ids")
+    if not isinstance(revoked, list):
+        revoked = []
+    before_revoked = before.get("compatibility_policy_revoked_ids")
+    if not isinstance(before_revoked, list):
+        before_revoked = []
+    if health.get("recommended_binary_version") != before.get("recommended_binary_version") \
+            or health.get("compatibility_policy_target_id") != before.get("compatibility_policy_target_id") \
+            or set(revoked) != set(before_revoked):
+        raise Refused("/healthz does not show the restored compatibility policy")
+
+
 def guard(args):
     with open(args.guard, "rb") as f:
         source = f.read()
@@ -478,9 +533,9 @@ def apply(args):
         result = {"changed": new != original, **summary}
         if new == original:
             # Disk already holds the requested state. It is complete only when
-            # the running coordinator booted with exactly these bytes;
-            # otherwise (an earlier run edited and stopped before its
-            # restart, or another edit is pending) validate and restart.
+            # the last boot or SIGHUP applied exactly these bytes and /healthz
+            # matches. Otherwise validate and signal: SIGHUP for a
+            # compatibility or recommendation edit, restart for privacy setup.
             if applied(args):
                 check_live(args, healthz(args.healthz))
                 print(json.dumps(result, sort_keys=True))
@@ -489,8 +544,12 @@ def apply(args):
                                env, uid, gid, 120)
             if check.returncode != 0:
                 raise Refused("the running coordinator binary rejects the on-disk config (--validate-config)")
-            check_live(args, restart(args, pid))
-            result["restarted"] = True
+            if args.privacy_setup:
+                check_live(args, restart(args, pid))
+                result["restarted"] = True
+            else:
+                reload_until(args, pid, lambda health: live_and_applied(args, health))
+                result["reloaded"] = True
             result["recovered_unapplied_config"] = True
             print(json.dumps(result, sort_keys=True))
             return
@@ -501,26 +560,54 @@ def apply(args):
         shutil.copy2(args.config, os.path.join(backup, os.path.basename(args.config)))
         result["backup"] = backup
         tmp = write_like(args.config, new, args.config)
+        installed = False
         try:
             check = as_service([binary, "--validate-config", "--config", tmp, "--config-overlay", args.overlay],
                                env, uid, gid, 120)
             if check.returncode != 0:
                 raise Refused("the running coordinator binary rejects the edited config (--validate-config)")
             install(tmp, args.config)
+            installed = True
         finally:
             if os.path.exists(tmp):
                 os.unlink(tmp)
+        before = None
         try:
-            check_live(args, restart(args, pid))
-        except Exception:
+            before = healthz(args.healthz)
+            if args.privacy_setup:
+                check_live(args, restart(args, pid))
+            else:
+                reload_until(args, pid, lambda health: live_and_applied(args, health))
+        except Exception as exc:
+            if not installed:
+                raise
             with open(args.config, "rb") as f:
-                if f.read() == new:
-                    install(write_like(args.config, original, args.config), args.config)
-                    subprocess.run(["systemctl", "restart", args.unit], timeout=120, capture_output=True)
-                    healthz(args.healthz)
-                    result["restored"] = True
+                changed = f.read() == new
+            if not changed:
+                raise
+            install(write_like(args.config, original, args.config), args.config)
+            if before is None:
+                # The new bytes were installed and nothing was signaled.
+                # Restoring the file puts the process and the disk back together.
+                raise
+            try:
+                if args.privacy_setup:
+                    subprocess.run(["systemctl", "restart", args.unit], check=True, timeout=120, capture_output=True)
+                    same_policy(healthz(args.healthz), before)
+                else:
+                    reload_until(args, pid, lambda health: same_policy(health, before))
+            except Exception as recovery_exc:
+                try:
+                    same_policy(healthz(args.healthz), before)
+                except Exception as still:
+                    raise Refused(
+                        "the reload was refused (%s); the original config is on disk but /healthz was not restored (%s)"
+                        % (exc, still)) from exc
+                raise Refused(
+                    "the reload was refused (%s); the original config is on disk and /healthz matches that snapshot, but recovery failed (%s)"
+                    % (exc, recovery_exc)) from exc
             raise
-        result["restarted"] = True
+        result["restarted" if args.privacy_setup else "reloaded"] = True
         print(json.dumps(result, sort_keys=True))
 
 
