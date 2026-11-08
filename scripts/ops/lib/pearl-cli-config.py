@@ -2034,6 +2034,10 @@ SC_GATEWAY_DEFAULTS = {"coordinator_request_seconds": 300, "coordinator_header_t
                        "coordinator_admission_seconds": 120, "stream_ceiling_floor_seconds": 60,
                        "stream_ceiling_max_seconds": 900, "non_stream_request_seconds": 0}
 SC_GATEWAY_RESERVATION_DEFAULT_HOURS = 24
+# Per-model buyer output limits (SPEC-006 §5.4) the same task raises in
+# gateway.yaml limits.model_max_output_tokens; equal to the tracked
+# gateway.yaml.example map (parity pinned with the walls).
+SC_MODEL_MAX_OUTPUT_TOKENS = {"zai-org/glm-5.3-flash": 65536}
 
 
 def sc_int(value, what):
@@ -2144,6 +2148,77 @@ def sc_plan(base, overlay, gateway):
     return coord, gw
 
 
+def sc_output_plan(doc):
+    """{model: (old or None, new)} for limits.model_max_output_tokens.
+    Raise-only and additive: an entry at or above its target is kept. A map
+    holding other keys but not the target is refused, and so is an alias key
+    of the same model beside the target, because that fails gateway validation."""
+    limits = doc.get("limits")
+    if limits is None:
+        limits = {}
+    if not isinstance(limits, dict):
+        raise Refused("gateway limits must be a mapping")
+    current = limits.get("model_max_output_tokens")
+    if current is None:
+        current = {}
+    if not isinstance(current, dict):
+        raise Refused("gateway limits.model_max_output_tokens must be a mapping")
+    out = {}
+    for model, want in sorted(SC_MODEL_MAX_OUTPUT_TOKENS.items()):
+        tail = model.lower().rsplit("/", 1)[-1]
+        for key in current:
+            if model in current and key != model and str(key).lower().rsplit("/", 1)[-1] == tail:
+                raise Refused("gateway limits.model_max_output_tokens key %s names the same model as %s; reconcile it first" % (key, model))
+        if model in current:
+            old = sc_int(current[model], "gateway limits.model_max_output_tokens[%s]" % model)
+            if old < want:
+                out[model] = (old, want)
+        elif current:
+            raise Refused("gateway limits.model_max_output_tokens has entries but not %s; reconcile it first" % model)
+        else:
+            out[model] = (None, want)
+    return out
+
+
+def sc_output_edit(text, edits):
+    """Set limits.model_max_output_tokens entries, proven by a YAML reparse
+    to change exactly those entries."""
+    import yaml
+
+    expected = copy.deepcopy(yaml.safe_load(text) or {})
+    if "limits" not in expected:
+        text = text + ("" if text.endswith("\n") or not text else "\n") + "limits:\n"
+    start, end = block(text, r"^limits:[ \t]*$")
+    body = text[start:end]
+    found = list(re.finditer(r"^( +)model_max_output_tokens:[ \t]*(\{[ \t]*\}|null|~)?[ \t]*$", body, re.M))
+    raises = {m: v for m, (old, v) in edits.items() if old is not None}
+    adds = {m: v for m, (old, v) in edits.items() if old is None}
+    new = text
+    if adds:
+        if len(found) > 1:
+            raise Refused("expected at most one limits.model_max_output_tokens anchor in gateway.yaml")
+        first = next((l for l in body.splitlines() if l.strip() and not l.strip().startswith("#")), "  ")
+        ind = found[0].group(1) if found else " " * (len(first) - len(first.lstrip(" ")))
+        entries = "".join("%s%s%s: %d\n" % (ind, ind, m, v) for m, v in sorted(adds.items()))
+        if found:
+            m = found[0]
+            body = body[:m.start()] + "%smodel_max_output_tokens:\n%s" % (ind, entries.rstrip("\n")) + body[m.end():]
+        else:
+            body = "%smodel_max_output_tokens:\n%s" % (ind, entries) + body
+        new = text[:start] + body + text[end:]
+    for model, value in sorted(raises.items()):
+        new = set_scalar(new, r"^limits:[ \t]*$", model, value)
+    limits = expected.get("limits") or {}
+    expected["limits"] = limits
+    if limits.get("model_max_output_tokens") is None:
+        limits["model_max_output_tokens"] = {}
+    for model, (_, value) in edits.items():
+        limits["model_max_output_tokens"][model] = value
+    if (yaml.safe_load(new) or {}) != expected:
+        raise Refused("the gateway.yaml edit changed more than limits.model_max_output_tokens")
+    return new
+
+
 def sc_edit(text, header, edits, what):
     """Exact-anchor scalar edits under one top-level block, proven by a YAML
     reparse to change exactly those keys."""
@@ -2159,7 +2234,7 @@ def sc_edit(text, header, edits, what):
     return new
 
 
-def sc_render(base_raw, overlay_raw, gateway_raw, coord, gw):
+def sc_render(base_raw, overlay_raw, gateway_raw, coord, gw, outputs=None):
     """New bytes for coordinator.yaml, the overlay and gateway.yaml."""
     files = {"base": base_raw.decode(), "overlay": overlay_raw.decode()}
     for where in ("base", "overlay"):
@@ -2172,6 +2247,8 @@ def sc_render(base_raw, overlay_raw, gateway_raw, coord, gw):
     gateway = gateway_raw.decode()
     if gw:
         gateway = sc_edit(gateway, "timeouts", {k: v[1] for k, v in gw.items()}, "gateway.yaml")
+    if outputs:
+        gateway = sc_output_edit(gateway, outputs)
     return files["base"].encode(), files["overlay"].encode(), gateway.encode()
 
 
@@ -2215,6 +2292,7 @@ def sc_facts(args):
     walls = sc_coordinator_walls(base, overlay)
     g = sc_gateway_timeouts(gateway)
     coord, gw = sc_plan(base, overlay, gateway)
+    outputs = sc_output_plan(gateway)
     rt, pht = walls[("routing", "request_timeout_s")], walls[("provider_http", "timeout_s")]
     out = {
         "coordinator_request_timeout_s": rt[0],
@@ -2225,7 +2303,9 @@ def sc_facts(args):
         "gateway_non_stream_request_seconds": sc_non_stream(g),
         "gateway_coordinator_header_timeout_seconds": g["coordinator_header_timeout_seconds"],
         "planned_coordinator": sorted("%s.%s %d->%d (%s)" % (s, k, o, n, w) for (s, k), (w, o, n) in coord.items()),
-        "planned_gateway": sorted("timeouts.%s %d->%d" % (k, o, n) for k, (o, n) in gw.items()),
+        "planned_gateway": sorted("timeouts.%s %d->%d" % (k, o, n) for k, (o, n) in gw.items()) +
+                           sorted("limits.model_max_output_tokens[%s] %s->%d" % (m, "absent" if o is None else o, n)
+                                  for m, (o, n) in outputs.items()),
         "c2_violation": sc_c2(rt[0], pht[0], g) or "",
         "coordinator_applied": applied(args),
         "gateway_applied": sc_gateway_applied(args),
@@ -2314,15 +2394,16 @@ def apply_stream_ceiling(args):
         gw_pid = sc_running_gateway(args)
         base_raw, base, overlay_raw, overlay, gateway_raw, gateway = sc_state(args)
         coord, gw = sc_plan(base, overlay, gateway)
-        new_base, new_overlay, new_gateway = sc_render(base_raw, overlay_raw, gateway_raw, coord, gw)
+        outputs = sc_output_plan(gateway)
+        new_base, new_overlay, new_gateway = sc_render(base_raw, overlay_raw, gateway_raw, coord, gw, outputs)
         nb, no, ng = (yaml.safe_load(b) or {} for b in (new_base, new_overlay, new_gateway))
         walls = sc_coordinator_walls(nb, no)
         violation = sc_c2(walls[("routing", "request_timeout_s")][0], walls[("provider_http", "timeout_s")][0],
                           sc_gateway_timeouts(ng))
         if violation:
             raise Refused("the planned walls fail the deploy gate: %s" % violation)
-        result = {"planned_coordinator": len(coord), "planned_gateway": len(gw)}
-        if not coord and not gw:
+        result = {"planned_coordinator": len(coord), "planned_gateway": len(gw) + len(outputs)}
+        if not coord and not gw and not outputs:
             # Disk already holds the walls. Done only when both services
             # booted with these bytes; otherwise restart onto them, the
             # coordinator first.
@@ -2364,11 +2445,15 @@ def apply_stream_ceiling(args):
             # From here edited bytes may be on disk: any failure restores and
             # proves. The coordinator restarts first, so the gateway ceiling
             # is never above the coordinator walls.
+            # A gateway-only edit (an output limit) restarts only the gateway
+            # when the coordinator already booted with its files.
+            restart_coordinator = bool(coord) or not applied(args)
             try:
                 for path, _, _, _ in targets:
                     install(tmps[path], path)
                     del tmps[path]
-                restart(args, pid)
+                if restart_coordinator:
+                    restart(args, pid)
                 sc_restart_gateway(args, gw_pid)
             except Exception as exc:
                 sc_rollback(args, targets, backup, exc)
@@ -2376,7 +2461,7 @@ def apply_stream_ceiling(args):
             for tmp in tmps.values():
                 if os.path.lexists(tmp):
                     os.unlink(tmp)
-        result["restarted"] = ["coordinator", "gateway"]
+        result["restarted"] = ["coordinator", "gateway"] if restart_coordinator else ["gateway"]
         print(json.dumps(result, sort_keys=True))
 
 

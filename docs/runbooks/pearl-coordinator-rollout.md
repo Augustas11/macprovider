@@ -188,6 +188,10 @@ terminal is live. The step edits only these keys and never lowers one:
 | `gateway.yaml` | `timeouts.stream_ceiling_max_seconds` | 3600 |
 | `gateway.yaml` | `timeouts.non_stream_request_seconds` | 3660 (above the coordinator wall, C2) |
 | `gateway.yaml` | `timeouts.coordinator_header_timeout_seconds` | 3660 (covers the non-streaming wall, C2b) |
+| `gateway.yaml` | `limits.model_max_output_tokens` entry `zai-org/glm-5.3-flash` | 65536 (SPEC-006 §5.4; added when absent, raised when lower; an operator map with other keys but no GLM entry is refused) |
+
+When only the output limit changes and the coordinator already booted with its
+files, only the gateway restarts.
 
 It refuses a result that fails the deploy gate's C2/C2b relations, backs the
 three files up under the backup root, validates the coordinator files with the

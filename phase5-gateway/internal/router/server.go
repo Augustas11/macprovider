@@ -433,6 +433,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sanitizeModelsResponse(body, poolID)
+	annotateModelOutputLimits(body, s.cfg.Limits, authn.Demo)
 	disclosure, ok := s.tier1DisclosureForModels(body, r.Context())
 	if !ok {
 		writeError(w, http.StatusBadGateway, "api_error", "tier2_metadata_unavailable", "Coordinator Tier-2 metadata unavailable")
@@ -549,6 +550,28 @@ func sanitizeModelsResponse(body map[string]any, poolID string) {
 		sanitized = append(sanitized, candidate.entry)
 	}
 	body["data"] = sanitized
+}
+
+// annotateModelOutputLimits advertises each entry's effective buyer output
+// limit (SPEC-006 §5.3), the same value chat admission enforces, at top level
+// and inside capabilities so clients can size max_tokens up front.
+func annotateModelOutputLimits(body map[string]any, limits config.LimitsConfig, demo bool) {
+	data, _ := body["data"].([]any)
+	for _, item := range data {
+		entry, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		id, _ := entry["id"].(string)
+		limit := limits.MaxOutputTokensForModel(id)
+		if demo {
+			limit = min(limit, limits.DemoMaxTokensPerRequest)
+		}
+		entry["max_output_tokens"] = limit
+		if capabilities, ok := entry["capabilities"].(map[string]any); ok {
+			capabilities["max_output_tokens"] = limit
+		}
+	}
 }
 
 type sanitizedModelCandidate struct {

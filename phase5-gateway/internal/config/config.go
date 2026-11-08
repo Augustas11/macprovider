@@ -160,6 +160,31 @@ type LimitsConfig struct {
 	MaxFeedbackBodyBytes         int64 `yaml:"max_feedback_body_bytes"`
 	FeedbackRequestsPerIPPerHour int   `yaml:"feedback_requests_per_ip_per_hour"`
 	RequestBodyBytes             int64 `yaml:"request_body_bytes"`
+	// ModelMaxOutputTokens overrides max_tokens_per_request for one model
+	// (SPEC-006 §5.4). Keys match model ids the way coordinator routing
+	// does (ModelKeysEquivalent), so one entry covers a model's aliases.
+	// A model without an entry keeps max_tokens_per_request.
+	ModelMaxOutputTokens map[string]int64 `yaml:"model_max_output_tokens"`
+}
+
+// ModelMaxOutputTokensCeiling bounds limits.model_max_output_tokens values so
+// a typo cannot turn one request into an unbounded quota reservation.
+const ModelMaxOutputTokensCeiling int64 = 262144
+
+// MaxOutputTokensForModel returns the buyer output-token limit for model:
+// its limits.model_max_output_tokens entry, else max_tokens_per_request.
+func (l LimitsConfig) MaxOutputTokensForModel(model string) int64 {
+	if len(l.ModelMaxOutputTokens) > 0 {
+		want := NormalizeModelKey(model)
+		if want != "" {
+			for key, limit := range l.ModelMaxOutputTokens {
+				if NormalizeModelKey(key) == want {
+					return limit
+				}
+			}
+		}
+	}
+	return l.MaxTokensPerRequest
 }
 
 type KillSwitchConfig struct {
@@ -737,6 +762,20 @@ func (c Config) Validate() error {
 	}
 	if c.Limits.MaxTokensPerRequest <= 0 || c.Limits.DemoMaxTokensPerRequest <= 0 || c.Limits.RequestBodyBytes <= 0 {
 		return fmt.Errorf("limits must be positive")
+	}
+	modelOutputKeys := make(map[string]string, len(c.Limits.ModelMaxOutputTokens))
+	for key, limit := range c.Limits.ModelMaxOutputTokens {
+		normalized := NormalizeModelKey(key)
+		if normalized == "" {
+			return fmt.Errorf("limits.model_max_output_tokens keys must be non-empty model ids")
+		}
+		if limit <= 0 || limit > ModelMaxOutputTokensCeiling {
+			return fmt.Errorf("limits.model_max_output_tokens[%q] must be in 1..%d", key, ModelMaxOutputTokensCeiling)
+		}
+		if prior, ok := modelOutputKeys[normalized]; ok {
+			return fmt.Errorf("limits.model_max_output_tokens keys %q and %q name the same model", prior, key)
+		}
+		modelOutputKeys[normalized] = key
 	}
 	if c.Limits.MaxFeedbackCommentBytes <= 0 || c.Limits.MaxFeedbackBodyBytes <= 0 || c.Limits.FeedbackRequestsPerIPPerHour <= 0 {
 		return fmt.Errorf("feedback limits must be positive")

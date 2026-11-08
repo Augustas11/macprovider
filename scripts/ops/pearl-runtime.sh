@@ -198,7 +198,9 @@
 #   2 stream_ceiling    under the live-ops lock and both Pearl locks: raise (never
 #                       lower) the coordinator walls to 3600 in the file that sets
 #                       each, the gateway ceiling to 3600, its non-streaming wall
-#                       to 3660 and its header timeout to cover it; refuse a
+#                       to 3660 and its header timeout to cover it, and set
+#                       limits.model_max_output_tokens zai-org/glm-5.3-flash
+#                       to 65536 (add or raise only); refuse a
 #                       result that fails C2; back the three files up; validate
 #                       the coordinator files with the running coordinator;
 #                       restart the coordinator, then the gateway (downtime
