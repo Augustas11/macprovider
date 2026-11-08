@@ -154,18 +154,20 @@ final class GLMStrayMarkupOutputTests: XCTestCase {
 
     /// A final envelope without `</tool_call>` is not recovered past a second
     /// opener: the output may have been cut inside an argument that quotes
-    /// `<tool_call>`, and the call after it was never completed. Nothing runs.
-    func testUnclosedFinalEnvelopeWithSecondOpenerFailsClosed() {
-        for raw in [
-            "Reading.<tool_call>thinking aloud</think><tool_call>read<arg_key>path</arg_key><arg_value>a.txt</arg_value>",
-            "<tool_call>write<arg_key>content</arg_key><arg_value>Call it via <tool_call>write<arg_key>offset</arg_key><arg_value>701</arg_value>",
-            "<tool_call>read<arg_key>path</arg_key><arg_value>a</arg_value></tool_call><tool_call>x<tool_call>read<arg_key>path</arg_key><arg_value>b</arg_value>",
+    /// `<tool_call>`, and the call after it was never completed. That call
+    /// is dropped, its markup does not reach content (#2259), and complete
+    /// calls before it are kept.
+    func testUnclosedFinalEnvelopeWithSecondOpenerIsDropped() {
+        for (raw, arguments, content) in [
+            ("Reading.<tool_call>thinking aloud</think><tool_call>read<arg_key>path</arg_key><arg_value>a.txt</arg_value>", [String](), "Reading." as String?),
+            ("<tool_call>write<arg_key>content</arg_key><arg_value>Call it via <tool_call>write<arg_key>offset</arg_key><arg_value>701</arg_value>", [], nil),
+            ("<tool_call>read<arg_key>path</arg_key><arg_value>a</arg_value></tool_call><tool_call>x<tool_call>read<arg_key>path</arg_key><arg_value>b</arg_value>", [#"{"path":"a"}"#], nil),
         ] {
             let parsed = ToolCallParser.parseToolCalls(
                 rawOutput: raw, grammar: .glm, modelID: Self.model, allowedFunctionNames: ["read", "write"], schemas: nil
             )
-            XCTAssertTrue(parsed.toolCalls.isEmpty, raw)
-            XCTAssertEqual(parsed.cleanedContent, raw)
+            XCTAssertEqual(parsed.toolCalls.map(\.arguments), arguments, raw)
+            XCTAssertEqual(parsed.cleanedContent, content, raw)
         }
     }
 
@@ -237,17 +239,20 @@ final class GLMStrayMarkupOutputTests: XCTestCase {
         }
     }
 
-    func testMalformedGLMEnvelopesStillFailClosed() {
-        for raw in [
-            "<tool_call>Done.</tool_call>",
-            "<tool_call>read<arg_key>path</arg_key><arg_value>a</arg_value></tool_call><tool_call>more prose",
-            "<tool_call>read<arg_key>path</arg_key><arg_value>a<tool_call>b</arg_value></tool_call>",
+    /// Malformed envelopes never run and never leak markup (#2259); a
+    /// well-formed call beside one is kept.
+    func testMalformedGLMEnvelopesAreDropped() {
+        for (raw, arguments) in [
+            ("<tool_call>Done.</tool_call>", [String]()),
+            ("<tool_call>read<arg_key>path</arg_key><arg_value>a</arg_value></tool_call><tool_call>more prose", [#"{"path":"a"}"#]),
+            ("<tool_call>read<arg_key>path</arg_key><arg_value>a<tool_call>b</arg_value></tool_call>", []),
         ] {
             let parsed = ToolCallParser.parseToolCalls(
                 rawOutput: raw, grammar: .glm, modelID: Self.model, allowedFunctionNames: ["read"], schemas: nil
             )
-            XCTAssertTrue(parsed.toolCalls.isEmpty, raw)
-            XCTAssertEqual(parsed.cleanedContent, raw)
+            XCTAssertEqual(parsed.toolCalls.map(\.arguments), arguments, raw)
+            XCTAssertNil(parsed.cleanedContent, raw)
+            XCTAssertNil(parsed.leadingContent, raw)
         }
     }
 

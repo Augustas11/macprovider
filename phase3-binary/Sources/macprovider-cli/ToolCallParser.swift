@@ -8,10 +8,14 @@ enum ToolCallParser {
 
     /// Parsed auto-mode tool output. `leadingContent` is the prose before the
     /// first call (SPEC-018 §3.1, kept as assistant content).
+    /// `droppedMalformedCalls`: the output opened calls but none survived, so
+    /// `cleanedContent` is the prose outside them, not the raw output (GLM,
+    /// #2259).
     struct ParsedToolCalls {
         let cleanedContent: String?
         let toolCalls: [ToolCall]
         let leadingContent: String?
+        var droppedMalformedCalls = false
     }
 
     /// Family-selected parse, for callers without a loaded template.
@@ -48,7 +52,8 @@ enum ToolCallParser {
         return ParsedToolCalls(
             cleanedContent: parsed.cleanedContent,
             toolCalls: uniqueCappedCalls(parsed.toolCalls),
-            leadingContent: parsed.leadingContent
+            leadingContent: parsed.leadingContent,
+            droppedMalformedCalls: parsed.droppedMalformedCalls
         )
     }
 
@@ -108,11 +113,12 @@ enum ToolCallParser {
                 return ParsedToolCalls(cleanedContent: nil, toolCalls: bare, leadingContent: nil)
             }
             result = parseQwenToolCalls(rawOutput: rawOutput, modelID: modelID, allowedFunctionNames: allowedFunctionNames, schemas: schemas)
-        case .glm?, .gemma4?, .llama3?, .dsml?, .lfm2?:
+        case .glm?:
+            return parseGLMCalls(rawOutput, modelID: modelID, allowedFunctionNames: allowedFunctionNames, schemas: schemas) ?? none
+        case .gemma4?, .llama3?, .dsml?, .lfm2?:
             do {
                 let calls: [ToolCall]
                 switch grammar {
-                case .glm?: calls = try parseTaggedCalls(rawOutput, start: "<tool_call>", end: "</tool_call>", skipsUnclosedStarts: true) { try glmCall($0, schemas: schemas) }
                 case .dsml?: calls = try parseDSMLCalls(rawOutput, schemas: schemas)
                 case .lfm2?: calls = try LFMToolCallParser.parse(rawOutput)
                 case .gemma4?: calls = try parseTaggedCalls(rawOutput, start: "<|tool_call>", end: "<tool_call|>") { try GemmaToolCallBridge.call($0, schemas: schemas) }
@@ -183,37 +189,128 @@ enum ToolCallParser {
     /// envelopes is dropped (SPEC-018 §2.4). The final envelope may omit `end`
     /// when the output ends there (the model's end-of-turn token replaced
     /// it), but its body must still parse completely.
-    ///
-    /// `skipsUnclosedStarts` (GLM, #2189): a `start` followed by another
-    /// `start` before any `end` opened no call, so the envelope begins at the
-    /// last `start` before its `end` and the text before it is prose. GLM
-    /// rejects a body that holds `start`, so this only recovers outputs that
-    /// otherwise fail whole. A final envelope without `end` is never
-    /// recovered this way: the output may have been cut inside an argument
-    /// that quotes `start`, so it still fails closed.
     private static func parseTaggedCalls(
         _ rawOutput: String,
         start: String,
         end: String,
-        skipsUnclosedStarts: Bool = false,
         body: (String) throws -> ToolCall
     ) throws -> [ToolCall] {
         var calls: [ToolCall] = []
         var searchFrom = rawOutput.startIndex
         while let open = rawOutput.range(of: start, range: searchFrom..<rawOutput.endIndex) {
-            var bodyStart = open.upperBound
-            let close = rawOutput.range(of: end, range: bodyStart..<rawOutput.endIndex)
-            let bodyEnd = close?.lowerBound ?? rawOutput.endIndex
-            if skipsUnclosedStarts, close != nil, let last = rawOutput.range(of: start, options: .backwards, range: bodyStart..<bodyEnd) {
-                bodyStart = last.upperBound
-            }
-            let text = String(rawOutput[bodyStart..<bodyEnd])
-            if close == nil, text.contains(start) { throw ParseError.missingEndDelimiter }
-            calls.append(try body(text))
+            let close = rawOutput.range(of: end, range: open.upperBound..<rawOutput.endIndex)
+            calls.append(try body(String(rawOutput[open.upperBound..<(close?.lowerBound ?? rawOutput.endIndex)])))
             guard let close else { break }
             searchFrom = close.upperBound
         }
         return calls
+    }
+
+    private static let glmCallMarkup = ["<tool_call>", "</tool_call>", "<arg_key>", "</arg_key>", "<arg_value>", "</arg_value>"]
+
+    /// GLM envelopes are parsed one by one (#2259). A call that fails is
+    /// repaired when its intent is unambiguous (`repairedGLMBody`), else
+    /// dropped with a warning; the other calls are kept in order, each with
+    /// the declared-function and byte-cap checks. Prose between or after
+    /// envelopes is dropped (SPEC-018 §2.4) and call markup never reaches
+    /// content: when no call survives, content is the prose outside the
+    /// envelopes. Nil when the output opens no call.
+    ///
+    /// #2189: a `<tool_call>` followed by another before any `</tool_call>`
+    /// opened no call, so the envelope begins at the last opener before its
+    /// close. GLM rejects a body that holds `<tool_call>`, so this only
+    /// recovers calls that otherwise fail. A final envelope without
+    /// `</tool_call>` (the end-of-turn token replaced it) must parse
+    /// completely, and one holding a second opener is dropped: the output may
+    /// have been cut inside an argument that quotes `<tool_call>`.
+    private static func parseGLMCalls(
+        _ rawOutput: String,
+        modelID: String,
+        allowedFunctionNames: Set<String>?,
+        schemas: [String: JSONValue]?
+    ) -> ParsedToolCalls? {
+        let start = "<tool_call>", end = "</tool_call>"
+        guard let first = rawOutput.range(of: start) else { return nil }
+        var calls: [ToolCall] = []
+        var prose = ""
+        var responseBytes = 0
+        var searchFrom = rawOutput.startIndex
+        while let open = rawOutput.range(of: start, range: searchFrom..<rawOutput.endIndex) {
+            prose += rawOutput[searchFrom..<open.lowerBound]
+            var bodyStart = open.upperBound
+            let close = rawOutput.range(of: end, range: bodyStart..<rawOutput.endIndex)
+            let bodyEnd = close?.lowerBound ?? rawOutput.endIndex
+            if close != nil, let last = rawOutput.range(of: start, options: .backwards, range: bodyStart..<bodyEnd) {
+                bodyStart = last.upperBound
+            }
+            let body = String(rawOutput[bodyStart..<bodyEnd])
+            do {
+                if close == nil, body.contains(start) { throw ParseError.missingEndDelimiter }
+                let call = try glmCallRepairing(body, modelID: modelID, schemas: schemas)
+                if let allowedFunctionNames, !allowedFunctionNames.contains(call.functionName) {
+                    throw ParseError.undeclaredFunction
+                }
+                let bytes = call.arguments.utf8.count
+                guard bytes <= SPEC018_ARGUMENTS_PER_CALL_BYTE_CAP else { throw ParseError.byteCapExceeded }
+                guard responseBytes + bytes <= SPEC018_ARGUMENTS_PER_RESPONSE_BYTE_CAP else { throw ParseError.responseByteCapExceeded }
+                responseBytes += bytes
+                calls.append(call)
+            } catch {
+                fputs("warning: dropped malformed GLM tool call for \(modelID): \(error)\n", stderr)
+            }
+            searchFrom = close?.upperBound ?? rawOutput.endIndex
+            if close == nil { break }
+        }
+        prose += rawOutput[searchFrom...]
+        guard calls.isEmpty else {
+            return ParsedToolCalls(cleanedContent: nil, toolCalls: calls, leadingContent: glmProse(rawOutput[..<first.lowerBound]))
+        }
+        return ParsedToolCalls(cleanedContent: glmProse(prose), toolCalls: [], leadingContent: nil, droppedMalformedCalls: true)
+    }
+
+    private static func glmProse<S: StringProtocol>(_ text: S) -> String? {
+        nilIfBlank(glmCallMarkup.reduce(String(text)) { $0.replacingOccurrences(of: $1, with: "") })
+    }
+
+    private static func glmCallRepairing(_ body: String, modelID: String, schemas: [String: JSONValue]?) throws -> ToolCall {
+        do {
+            return try glmCall(body, schemas: schemas)
+        } catch {
+            guard let repaired = repairedGLMBody(body), let call = try? glmCall(repaired, schemas: schemas) else { throw error }
+            fputs("warning: repaired malformed GLM tool call for \(modelID)\n", stderr)
+            return call
+        }
+    }
+
+    /// The two GLM malformations seen in buyer traffic whose intent is
+    /// unambiguous (#2259): a stray `</arg_value>` right after the function
+    /// name, and `<arg_key>K=V</arg_value>` (a missing
+    /// `</arg_key><arg_value>`), which becomes `K` with value `V`. Nil when
+    /// the body holds neither.
+    static func repairedGLMBody(_ body: String) -> String? {
+        var head = Substring(body)
+        let nameEnd = body.range(of: "<arg_key>")?.lowerBound ?? body.endIndex
+        let name = body[..<nameEnd].trimmingCharacters(in: .whitespacesAndNewlines)
+        if name.hasSuffix("</arg_value>") {
+            let stripped = name.dropLast("</arg_value>".count).trimmingCharacters(in: .whitespacesAndNewlines)
+            if isValidToolFunctionName(stripped) { head = Substring(stripped) + body[nameEnd...] }
+        }
+        var out = ""
+        var rest = head
+        while let key = rest.range(of: "<arg_key>") {
+            out += rest[..<key.upperBound]
+            rest = rest[key.upperBound...]
+            guard let valueClose = rest.range(of: "</arg_value>") else { continue }
+            if let keyClose = rest.range(of: "</arg_key>"), keyClose.lowerBound < valueClose.lowerBound { continue }
+            let pair = rest[..<valueClose.lowerBound]
+            guard !glmCallMarkup.contains(where: { pair.contains($0) }), let equals = pair.firstIndex(of: "="),
+                  isValidToolParameterName(pair[..<equals].trimmingCharacters(in: .whitespacesAndNewlines))
+            else { continue }
+            out += pair[..<equals] + "</arg_key><arg_value>" + pair[pair.index(after: equals)...] + "</arg_value>"
+            rest = rest[valueClose.upperBound...]
+        }
+        out += rest
+        return out == body ? nil : out
     }
 
     /// GLM `NAME<arg_key>K</arg_key><arg_value>V</arg_value>…`. The template
@@ -1447,6 +1544,7 @@ enum ToolCallParser {
 
     private enum ParseError: Error {
         case missingEndDelimiter
+        case undeclaredFunction
         case invalidUTF8
         case invalidShape
         case invalidArguments
