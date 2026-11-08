@@ -551,7 +551,11 @@ class EvidenceModeBindingTests(unittest.TestCase):
         self.assertIn("MACPROVIDER_CLI_BINARY", str(caught.exception))
 
     def test_non_evidence_mode_keeps_the_local_override(self) -> None:
-        self.assertEqual(driver.build_cli(REPO_ROOT, "/usr/bin/true", False), Path("/usr/bin/true"))
+        # build_cli resolves the override, and on some hosts /usr/bin/true is
+        # a link (GitHub's Ubuntu image points it at gnutrue).
+        self.assertEqual(
+            driver.build_cli(REPO_ROOT, "/usr/bin/true", False), Path("/usr/bin/true").resolve()
+        )
 
     def test_evidence_source_paths_cover_the_executed_surface(self) -> None:
         self.assertEqual(
