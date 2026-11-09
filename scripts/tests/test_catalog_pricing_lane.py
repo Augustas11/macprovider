@@ -422,6 +422,7 @@ class EffectiveDiffTests(unittest.TestCase):
                 ("zai-org/glm-5.3-flash-abliterated", "zai-org/glm-5.3-flash-abliterated", "default"),
                 ("z-ai/glm-5.3-flash-abliterated", "zai-org/glm-5.3-flash-abliterated", "default"),
                 ("Solstice-AI/GLM-5.3-Flash-UNCENSORED-mlx-oQ4e-DFlash2", "default", "zai-org/glm-5.3-flash-uncensored"),
+                ("z-ai/glm-5.3-flash-uncensored", "default", "zai-org/glm-5.3-flash-uncensored"),
             },
         )
         for bad in (
