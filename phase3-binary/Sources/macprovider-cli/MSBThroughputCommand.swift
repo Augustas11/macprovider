@@ -926,6 +926,10 @@ struct MSBThroughputCommand: AsyncParsableCommand {
                     max(1, maxActiveRows),
                     ContinuousBatchSchedulerConfiguration.defaultPrefillRowsPerIteration
                 ),
+                // The serve path's per-turn prompt budget. Left unset it fell
+                // back to one chunk, so the harness prefilled one prompt row per
+                // turn where serve prefills up to four.
+                maxPrefillTokensPerIteration: ContinuousBatchSchedulerConfiguration.defaultPrefillTokensPerIteration,
                 maxPromptChunkTokens: max(1, maxPromptChunkTokens),
                 referencePrefillStepSize: Self.isDeepseekV4Pool(cacheKinds) ? DeepseekV4Model.prefillStepSize : nil,
                 serialPrefillStride: cacheKinds.contains(.pagedIndexedKV),
