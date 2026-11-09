@@ -130,7 +130,7 @@ class ReceiptTests(unittest.TestCase):
                 existing_ranked.add(source_id)
             # Pad the cohort past the documented top 50 with unmapped models;
             # each mapped policy model above takes one of those slots.
-            for index in range(14, 44):
+            for index in range(15, 44):
                 model_id = f"unknown/model-{index}"
                 rankings["data"].append({"date": "2026-08-03", "model_permaslug": model_id, "total_tokens": str(9000 - index)})
                 models["data"].append({"id": model_id, "canonical_slug": model_id, "name": f"Unknown {index}", "pricing": None})
