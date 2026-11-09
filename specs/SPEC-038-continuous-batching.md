@@ -1700,7 +1700,7 @@ buyer traffic. No extra runtime enable flag is introduced.
    re-measurement of a stored decision keeps waiting for an idle window, and
    an idle Mac runs the check without a hold). Under the hold heartbeats and
    capacity updates report the provider busy with no free slot, so routing
-   sends new requests elsewhere. (v0.3.36) A buyer request that still
+   sends new requests elsewhere. (v0.3.39) A buyer request that still
    arrives (a direct HTTP request, a relay request, or one a coordinator
    that still counts its own forwarded requests routes meanwhile) MUST be
    admitted and MUST NOT be refused because of the hold, with
@@ -1709,7 +1709,7 @@ buyer traffic. No extra runtime enable flag is introduced.
    is served at once; otherwise it waits behind the check's exclusive probe
    residency (below) and is served when that residency is released. It MUST
    NOT end the hold by arriving. The drain waits only for work admitted before
-   the hold; a buyer admitted during the hold is not drained. (v0.3.37) Time
+   the hold; a buyer admitted during the hold is not drained. (v0.3.39) Time
    the probe spends queued behind a buyer holding a permit is not check time:
    it MUST NOT consume the check bound or count as a check-bound yield, and
    its total per hold is bounded by the hold's drain bound, past which the

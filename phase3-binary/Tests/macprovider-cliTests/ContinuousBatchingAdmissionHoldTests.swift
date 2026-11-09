@@ -78,6 +78,29 @@ final class ContinuousBatchingAdmissionHoldTests: XCTestCase {
         guard case .admitted = admitted else { return XCTFail("admission did not resume: \(admitted)") }
     }
 
+    func testBuyerAdmittedAsTheHoldStartsDrainsAsPreHoldWork() async {
+        let latch = FirstThermalReadLatch()
+        let status = ProviderStatus(
+            modelID: "m",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 50_000, maxConcurrencyOverride: 4),
+            thermalGate: ThermalGate(isThrottledSuspensionHook: { await latch.pass() })
+        )
+        let admission = Task { await status.beginRequestIfAccepting(requestID: "racing") }
+        await latch.waitUntilSuspended()
+
+        let refusal = await status.beginSelfCheckAdmissionHold()
+        XCTAssertNil(refusal)
+        await latch.release()
+        let admitted = await admission.value
+        XCTAssertNotNil(admitted)
+
+        let arrivals = await status.selfCheckAdmissionHoldArrivalsInFlight()
+        XCTAssertEqual(arrivals, 0, "admission began before the hold")
+        let predates = await status.hasBuyerWorkPredatingSelfCheckAdmissionHold()
+        XCTAssertTrue(predates, "the hold must drain this request before the check")
+    }
+
     func testHoldPublishesBusyWithNoFreeSlotThenReady() async {
         let status = makeStatus()
         let recorder = AdmissionHoldTransitionRecorder()
@@ -681,4 +704,34 @@ private final class LeaseFlag: @unchecked Sendable {
 
     func set(_ value: String) { lock.lock(); stored = value; lock.unlock() }
     var value: String? { lock.lock(); defer { lock.unlock() }; return stored }
+}
+
+/// Suspends the first thermal read until released; later reads pass through.
+private actor FirstThermalReadLatch {
+    private var used = false
+    private var suspended = false
+    private var released = false
+    private var releaseWaiter: CheckedContinuation<Void, Never>?
+    private var suspendedWaiter: CheckedContinuation<Void, Never>?
+
+    func pass() async {
+        guard !used else { return }
+        used = true
+        suspended = true
+        suspendedWaiter?.resume()
+        suspendedWaiter = nil
+        guard !released else { return }
+        await withCheckedContinuation { releaseWaiter = $0 }
+    }
+
+    func waitUntilSuspended() async {
+        guard !suspended else { return }
+        await withCheckedContinuation { suspendedWaiter = $0 }
+    }
+
+    func release() {
+        released = true
+        releaseWaiter?.resume()
+        releaseWaiter = nil
+    }
 }

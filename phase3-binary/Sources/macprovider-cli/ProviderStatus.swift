@@ -777,8 +777,13 @@ actor ProviderStatus {
     /// buyer has waited `selfCheckBuyerWaitYieldSeconds` behind that permit.
     func admitRequest(requestID: String? = nil) async -> ProviderRequestAdmission {
         guard !localCreativeHold, status != .draining, status != .unavailable else { return .pausedOrDraining }
+        // Classified before beginRequest suspends: a hold that starts during
+        // that suspension must still drain this request as pre-hold work.
+        let holdAtArrival = cbAdmissionHold.active ? cbAdmissionHold.holdsTotal : nil
         let startedAt = await beginRequest(requestID: requestID)
-        if cbAdmissionHold.active { cbAdmissionHoldArrivals.append(startedAt) }
+        if cbAdmissionHold.active, cbAdmissionHold.holdsTotal == holdAtArrival {
+            cbAdmissionHoldArrivals.append(startedAt)
+        }
         return .admitted(startedAt)
     }
 
