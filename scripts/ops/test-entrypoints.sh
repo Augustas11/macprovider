@@ -2878,5 +2878,98 @@ expect_next bundle_source:blocked
 case "$(next_field reason)" in *"origin/main changes scripts/lib/coordinator_config_guard.py"*) ok ;; *) bad "drift reason: $(next_field reason)" ;; esac
 rm -f "$tmp/bin/flock"
 
+# ---- canary-swap switch-model: refuse a row the provider would not admit -----
+SW="$tmp/switch"; mkdir -p "$SW/snap"
+SW_FEED="$W/phase3-binary/dist/static/autotune-candidates.json"
+SW_CANDIDATE=prism-ml/ternary-bonsai-2-2b-mlx-2bit SW_RECOMMENDABLE=qwen3-8b
+cat > "$SW/macprovider-cli" <<'FAKECLI'
+#!/usr/bin/env bash
+if [ "$2" = list ]; then sleep "${FAKE_SWITCH_LIST_SLEEP:-0}"; echo "fake list failure" >&2; exit "${FAKE_SWITCH_LIST_RC:-0}"; fi
+exec python3 -I -c '
+import hashlib, json, sys
+raw = open(sys.argv[1], "rb").read(); doc = json.loads(raw); key = sys.argv[2]; row = doc["rows"][key]
+print(json.dumps({"verdict": "match", "catalog_key": key, "catalog_model_id": row["model_id"],
+                  "pinned_revision": row["model_revision"], "signed_hash": row["model_sha256"],
+                  "computed_hash": row["model_sha256"], "catalog_release": doc["version"],
+                  "catalog_digest": hashlib.sha256(raw).hexdigest(), "buyer_model_key": row["model_id"],
+                  "local_path": "<external>/snap"}))' "$FAKE_SWITCH_FEED" "$3"
+FAKECLI
+chmod 755 "$SW/macprovider-cli"
+printf '#!/usr/bin/env bash\necho "$*" >> %q\n' "$SW/launchctl.calls" > "$tmp/bin/launchctl"
+chmod +x "$tmp/bin/launchctl"
+sw_config() { # [EXTRA_LINE]
+  rm -f "$SW"/config.yaml* "$SW/launchctl.calls" "$SW/provider.plist"
+  { for f in model model_artifact_path model_artifact_sha256 model_catalog_key model_catalog_model_id \
+      model_catalog_revision model_catalog_sha256 model_catalog_version model_catalog_hash; do printf '%s: previous\n' "$f"; done
+    [ -z "${1:-}" ] || printf '%s\n' "$1"; } > "$SW/config.yaml"
+  chmod 600 "$SW/config.yaml"
+  cp "$SW/config.yaml" "$SW/before"
+}
+sw() { # WANT DESC KEY (CANARY_READY_TIMEOUT_S=0: an admitted row stops at exit 6 after its restart)
+  FAKE_SWITCH_FEED="$SW_FEED" CANARY_INSTALL_DIR="$SW" CANARY_CONFIG="$SW/config.yaml" CANARY_READY_TIMEOUT_S=0 \
+    CANARY_LAUNCHD_PLIST="$SW/provider.plist" \
+    MACPROVIDER_OPS_OWNER=sw-test run_rc "$1" "$2" scripts/ops/canary-swap.sh switch-model "$3" --artifact-path "$SW/snap"
+  expect_lock_free
+}
+sw_untouched() {
+  if cmp -s "$SW/config.yaml" "$SW/before" && [ -z "$(ls "$SW" | grep bak-switch-model || true)" ] && [ ! -e "$SW/launchctl.calls" ]; then ok
+  else bad "switch-model touched the config or restarted the provider: $1"; fi
+}
+sw_switched() {
+  if grep -qx "model_catalog_key: $2" "$SW/config.yaml" && [ -s "$SW/launchctl.calls" ]; then ok
+  else bad "switch-model did not switch and restart: $1"; fi
+}
+sw_config
+sw 3 "switch-model refuses a non-recommendable row" "$SW_CANDIDATE"
+expect_err "would not admit"
+sw_untouched "non-recommendable row"
+sw_config "donor_mode: false"
+sw 3 "switch-model refuses a non-recommendable row with donor mode off" "$SW_CANDIDATE"
+sw_untouched "donor mode off"
+sw_config "donor_mode: true"
+sw 6 "switch-model admits a non-recommendable row in donor mode" "$SW_CANDIDATE"
+sw_switched "donor mode" "$SW_CANDIDATE"
+sw_config
+sw 6 "switch-model admits a recommendable row" "$SW_RECOMMENDABLE"
+sw_switched "recommendable row" "$SW_RECOMMENDABLE"
+# The already-configured crash-looping row is refused too, not waited on.
+sw_config "donor_mode: true"; sw 6 "switch-model writes the row in donor mode" "$SW_CANDIDATE"
+sed -i.tmp '/^donor_mode:/d' "$SW/config.yaml"; rm -f "$SW/config.yaml.tmp" "$SW/launchctl.calls"; cp "$SW/config.yaml" "$SW/before"
+sw 3 "switch-model refuses a row already configured but not admitted" "$SW_CANDIDATE"
+expect_err "would not admit"
+if cmp -s "$SW/config.yaml" "$SW/before" && [ ! -e "$SW/launchctl.calls" ]; then ok; else bad "already-configured refusal touched the provider"; fi
+# A validation that outlasts its budget is a clean refusal, not a traceback.
+sw_config "donor_mode: true"
+FAKE_SWITCH_LIST_SLEEP=5 CANARY_MODELS_LIST_TIMEOUT_S=1 sw 3 "switch-model refuses when validation times out" "$SW_CANDIDATE"
+expect_err "did not validate the switched config within 1s"
+sw_untouched "validation timeout"
+FAKE_SWITCH_LIST_SLEEP=2 CANARY_MODELS_LIST_TIMEOUT_S=30 sw 6 "switch-model honours a raised validation budget" "$SW_CANDIDATE"
+# The launchd environment wins over config.yaml, as in the provider (Config.swift).
+sw_plist() { python3 -I -c 'import plistlib,sys; plistlib.dump({"EnvironmentVariables":{"MACPROVIDER_DONOR_MODE":sys.argv[2]}},open(sys.argv[1],"wb"))' "$SW/provider.plist" "$1"; }
+sw_config "donor_mode: true"; sw_plist 0
+sw 3 "switch-model refuses when the launchd environment turns donor mode off" "$SW_CANDIDATE"
+expect_err "would not admit"
+sw_untouched "launchd donor off"
+sw_config; sw_plist 1
+sw 6 "switch-model admits when the launchd environment turns donor mode on" "$SW_CANDIDATE"
+sw_switched "launchd donor on" "$SW_CANDIDATE"
+sw_config "donor_mode: true"; printf 'not a plist' > "$SW/provider.plist"
+sw 3 "switch-model refuses an unreadable launchd environment" "$SW_CANDIDATE"
+expect_err "cannot read the provider's launchd environment"
+sw_untouched "unreadable launchd environment"
+# A stale control socket (exit 4) is not a config rejection; any other exit is, and names the CLI's reason.
+sw_config
+FAKE_SWITCH_LIST_RC=4 sw 6 "switch-model proceeds past a stale control socket" "$SW_RECOMMENDABLE"
+sw_switched "stale control socket" "$SW_RECOMMENDABLE"
+sw_config
+FAKE_SWITCH_LIST_RC=2 sw 3 "switch-model refuses a config the CLI rejects" "$SW_RECOMMENDABLE"
+expect_err "exit 2: fake list failure"
+sw_untouched "CLI rejected config"
+sw_config
+CANARY_MODELS_LIST_TIMEOUT_S=soon sw 3 "switch-model refuses a non-numeric validation budget" "$SW_RECOMMENDABLE"
+expect_err "whole seconds"
+sw_untouched "invalid validation budget"
+rm -f "$tmp/bin/launchctl"
+
 printf 'entry points: %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

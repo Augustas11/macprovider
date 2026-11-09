@@ -373,6 +373,25 @@
         "residency_gb": "167",
         "projected_tps": "33"
       }
+    },
+    {
+      "source_model_id": "z-ai/glm-5.3-flash-uncensored",
+      "canonical_model_id": "zai-org/glm-5.3-flash-uncensored",
+      "serving_path": {
+        "verification_status": "verified",
+        "reference": "https://huggingface.co/Solstice-AI/GLM-5.3-Flash-UNCENSORED-mlx-oQ4e-DFlash2"
+      },
+      "license": {
+        "commercial_permitted": true,
+        "source_url": "https://huggingface.co/Solstice-AI/GLM-5.3-Flash-UNCENSORED-mlx-oQ4e-DFlash2",
+        "verification_note": "The pinned artifact's model card (revision bff40d24) declares the MIT license."
+      },
+      "profile": {
+        "kind": "broad_fleet",
+        "active_params_b": "18",
+        "residency_gb": "186",
+        "projected_tps": "40"
+      }
     }
   ],
   "cache_hit_fraction": "0.25",

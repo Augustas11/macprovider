@@ -1,7 +1,7 @@
 {
-  "catalog_id": "macprovider-tier2-model-catalog-2026-11-07-drop-glm53-abliterated-v1",
+  "catalog_id": "macprovider-tier2-model-catalog-2026-11-09-glm53-flash-uncensored-v1",
   "expires_at": "2026-12-25T00:00:00Z",
-  "issued_at": "2026-11-06T23:00:00Z",
+  "issued_at": "2026-11-09T16:00:00Z",
   "models": [
     {
       "artifact_kind": "mlx_weight_file",
@@ -19,6 +19,15 @@
       "min_ram_gb": 234,
       "notes": "Buyer-serving candidate zai-org/glm-5.3-flash (epic #2029 native glm5_next engine); identity from signed SPEC-023 row.",
       "sha256": "7299b6a71a38490e378e9eb6524c426392aa96e3fd561007e0540134bbef48f9",
+      "source": "operator-curated"
+    },
+    {
+      "artifact_kind": "mlx_weight_file",
+      "hash_scope": "macprovider.snapshot-manifest.v1",
+      "model_id": "Solstice-AI/GLM-5.3-Flash-UNCENSORED-mlx-oQ4e-DFlash2",
+      "min_ram_gb": 243,
+      "notes": "Buyer-serving candidate zai-org/glm-5.3-flash-uncensored (#2244 uncensored GLM-5.3-Flash build, native glm5_next engine); identity from signed SPEC-023 row.",
+      "sha256": "242f8fcfd34d4ecfd62180c1767f910bda925216948772126dc98c673d1c8919",
       "source": "operator-curated"
     },
     {
@@ -187,7 +196,7 @@
   "signature": {
     "alg": "Ed25519",
     "key_id": "catalog-key-2026q2",
-    "sig": "RbsTAGrhzUIkDQ2qbdOnNoDFrRLRPY9qXXC7T39CweAnhFkDDjk-BHiUFh4oB8dEwHQTCoGMB3eUyOlMQSfWBQ"
+    "sig": "6Lk_LnZY5HiXPFW8Of-bVBNfmmTFn_Ke9_QW6RIAp8NlaJ8UJSTI8cWXN63iSWii7TEBQYMUvmSSDZDimlUGAw"
   },
   "version": 1
 }
