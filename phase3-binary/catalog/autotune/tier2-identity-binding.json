@@ -1,6 +1,6 @@
 {
-  "autotune_candidates_sha256": "638b939e5c3d0c6dfb71758f1c607a622b447dcb1c5e0014fed675fd5c0b0f8c",
-  "generated_at": "2026-11-06T23:30:00Z",
+  "autotune_candidates_sha256": "65036a8485f5a802aec5d8440b5a19d148ac52279c288a8f42de1de9ce35855a",
+  "generated_at": "2026-11-09T00:00:00Z",
   "models": [
     {
       "catalog_key": "zai-org/glm-5.3-flash",
@@ -143,6 +143,13 @@
       "sha256": "fe25aaa59aeb54f5ce080818b28808286d26283a61200cb1efb377ac7db62262"
     },
     {
+      "catalog_key": "zai-org/glm-5.3-flash-uncensored",
+      "min_ram_gb": 243,
+      "model_id": "Solstice-AI/GLM-5.3-Flash-UNCENSORED-mlx-oQ4e-DFlash2",
+      "model_revision": "bff40d24efb689d33e094083ce4a5d6835601730",
+      "sha256": "242f8fcfd34d4ecfd62180c1767f910bda925216948772126dc98c673d1c8919"
+    },
+    {
       "catalog_key": "deepseek/deepseek-v4-flash",
       "min_ram_gb": 195,
       "model_id": "TensorFold/DeepSeek-V4-Flash-0731-MXFP4-MLX",
@@ -151,6 +158,6 @@
     }
   ],
   "policy_version": "autotune-policy-v1",
-  "release_id": "published-2026-11-07-drop-glm53-abliterated-v281",
+  "release_id": "published-2026-11-09-glm53-flash-uncensored-listed-v281",
   "schema_version": "macprovider.tier2-identity-binding.v1"
 }
