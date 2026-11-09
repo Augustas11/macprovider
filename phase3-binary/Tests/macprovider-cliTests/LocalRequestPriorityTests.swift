@@ -701,6 +701,28 @@ final class LocalRequestPriorityTests: XCTestCase {
         await status.finishLocalRequest(lease, completion: nil, failed: false)
     }
 
+    /// A buyer admitted during the hold is not drained, so its presence does
+    /// not turn a timeout on local work alone into a buyer drain timeout.
+    func testSelfCheckHoldArrivalDoesNotMakeALocalDrainTimeoutABuyerOne() async throws {
+        let status = makeStatus(slots: 2)
+        let lease = LocalPreemptionLease()
+        guard case .admitted = await status.beginLocalRequest(lease) else { return XCTFail("local not admitted") }
+        let arrival = Task { () -> ProviderRequestAdmission in
+            while await !status.selfCheckAdmissionHoldStatus().active { try? await Task.sleep(nanoseconds: 5_000_000) }
+            return await status.admitRequest(requestID: "arrival")
+        }
+        let outcome = await ContinuousBatchingSelfCheck.runUnderAdmissionHold(
+            providerStatus: status, drainSeconds: 1, lifecycleLease: { nil }, context: "local-test", log: { _ in }
+        ) {
+            XCTFail("self-check must not run beside a local request")
+            return true
+        }
+        XCTAssertEqual(outcome, .localDrainTimeout)
+        guard case .admitted(let at) = await arrival.value else { return XCTFail("arrival refused") }
+        await status.finishRequest(startedAt: at, completion: nil, failed: false, requestID: "arrival")
+        await status.finishLocalRequest(lease, completion: nil, failed: false)
+    }
+
     /// Finding 1: one long local Chat must not turn the self-check hold into
     /// repeated 30 -> 60 -> 120 s buyer refusals. The hold preempts it, drains
     /// within the normal bound, runs the check, and reopens to buyers.
@@ -892,22 +914,25 @@ final class LocalRequestPriorityTests: XCTestCase {
         await status.endSelfCheckAdmissionHold(outcome: "completed")
     }
 
-    func testSelfCheckHoldHTTPRefusalsPreserveBuyerAndLocalRetryAfter() async throws {
+    /// #2257 (SPEC-038 v0.3.36): a buyer HTTP request during the hold is
+    /// served; local use keeps its retryable refusal.
+    func testSelfCheckHoldServesHTTPBuyersAndRefusesLocalWithRetryAfter() async throws {
         let probe = SlotProbe()
         let runtime = SlotFixtureRuntime(slots: 1, shape: .serial, probe: probe)
         let status = makeStatus(slots: 1)
         _ = await status.beginSelfCheckAdmissionHold(expectedEndAt: Date().addingTimeInterval(120))
         try await withPriorityHTTPServer(runtime: runtime, status: status) { port in
             for stream in [false, true] {
-                for network in [false, true] {
-                    let result = try await post(port: port, content: "held", stream: stream, network: network)
-                    XCTAssertEqual(result.status, 503, result.body)
-                    XCTAssertEqual(result.errorCode, "continuous_batching_stream_backpressure")
-                    XCTAssertEqual(result.retryable, true)
-                    let retry = try XCTUnwrap(result.retryAfter.flatMap(Int.init))
-                    XCTAssertGreaterThan(retry, 0)
-                    XCTAssertLessThanOrEqual(retry, 120)
-                }
+                let buyer = try await post(port: port, content: "held-buyer", stream: stream, network: true)
+                XCTAssertEqual(buyer.status, 200, buyer.body)
+                XCTAssertNotEqual(buyer.errorCode, "continuous_batching_stream_backpressure")
+                let local = try await post(port: port, content: "held-local", stream: stream, network: false)
+                XCTAssertEqual(local.status, 503, local.body)
+                XCTAssertEqual(local.errorCode, "continuous_batching_stream_backpressure")
+                XCTAssertEqual(local.retryable, true)
+                let retry = try XCTUnwrap(local.retryAfter.flatMap(Int.init))
+                XCTAssertGreaterThan(retry, 0)
+                XCTAssertLessThanOrEqual(retry, 120)
             }
             var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/tokenize")!)
             request.httpMethod = "POST"
@@ -918,12 +943,14 @@ final class LocalRequestPriorityTests: XCTestCase {
             XCTAssertEqual(http.statusCode, 503, String(decoding: body, as: UTF8.self))
             XCTAssertNotNil(http.value(forHTTPHeaderField: "Retry-After"))
         }
-        XCTAssertFalse(probe.entered("held"), "no HTTP request reaches inference under the hold")
+        XCTAssertTrue(probe.entered("held-buyer"), "the buyer reached inference under the hold")
+        XCTAssertFalse(probe.entered("held-local"), "no local request reaches inference under the hold")
         let snapshot = await status.snapshot(resetWindow: true)
-        XCTAssertEqual(snapshot.requestsTotal, 0)
+        XCTAssertEqual(snapshot.requestsTotal, 2)
+        XCTAssertEqual(snapshot.errorsTotal, 0)
         XCTAssertEqual(snapshot.localUsage.requestsDeclined, 3)
         XCTAssertEqual(snapshot.localUsage.requestsInFlight, 0)
-        await status.endSelfCheckAdmissionHold(outcome: "completed")
+        await status.endSelfCheckAdmissionHold(outcome: "yielded")
     }
 
     // MARK: - Helpers
