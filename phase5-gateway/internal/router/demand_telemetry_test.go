@@ -479,6 +479,20 @@ func TestDemandTelemetryKnowsGLM53FlashIdentitiesExactly(t *testing.T) {
 	}
 }
 
+// #2244: the uncensored GLM-5.3-Flash build's identities are recorded exactly.
+func TestDemandTelemetryKnowsGLM53FlashUncensoredIdentitiesExactly(t *testing.T) {
+	for _, model := range []string{"zai-org/glm-5.3-flash-uncensored", "z-ai/glm-5.3-flash-uncensored", "Solstice-AI/GLM-5.3-Flash-UNCENSORED-mlx-oQ4e-DFlash2"} {
+		if got := sanitizeDemandModelID(model); got != model {
+			t.Errorf("sanitizeDemandModelID(%q) = %q, want the model itself", model, got)
+		}
+	}
+	for _, model := range []string{"zai-org/glm-5.3-flash-uncensoredx", "solstice-ai/glm-5.3-flash-uncensored-mlx-oq4e-dflash2"} {
+		if got := sanitizeDemandModelID(model); got != demandUnknownModelID {
+			t.Errorf("sanitizeDemandModelID(%q) = %q, want %q", model, got, demandUnknownModelID)
+		}
+	}
+}
+
 // #2189: the abliterated GLM-5.3-Flash build's catalog key, slug and served
 // artifact id are recorded as themselves, never folded into GLM-5.3-Flash.
 func TestDemandTelemetryKnowsGLM53FlashAbliteratedIdentitiesExactly(t *testing.T) {

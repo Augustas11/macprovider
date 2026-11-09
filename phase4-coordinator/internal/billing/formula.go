@@ -98,6 +98,10 @@ var exactModelKeyAliases = map[string]string{
 	// zai-org/glm-5.3-flash.
 	"z-ai/glm-5.3-flash-abliterated":         "zai-org/glm-5.3-flash-abliterated",
 	"grant-ai/glm-5.3-flash-abliterated-mlx": "zai-org/glm-5.3-flash-abliterated",
+	// The Solstice-AI build of the dealignai uncensored weights is its own
+	// labelled key on the same terms (#2244).
+	"z-ai/glm-5.3-flash-uncensored":                         "zai-org/glm-5.3-flash-uncensored",
+	"solstice-ai/glm-5.3-flash-uncensored-mlx-oq4e-dflash2": "zai-org/glm-5.3-flash-uncensored",
 	// DeepSeek-V4-Flash's served artifact and its upstream release (#2111).
 	"tensorfold/deepseek-v4-flash-0731-mxfp4-mlx": "deepseek/deepseek-v4-flash",
 	"deepseek-ai/deepseek-v4-flash-0731":          "deepseek/deepseek-v4-flash",

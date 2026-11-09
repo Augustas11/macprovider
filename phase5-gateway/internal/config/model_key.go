@@ -29,12 +29,14 @@ func NormalizeModelKey(model string) string {
 }
 
 var exactModelKeyAliases = map[string]string{
-	"z-ai/glm-5.3-flash":                          "zai-org/glm-5.3-flash",
-	"jundot/glm-5.3-flash-oq4e-mtp":               "zai-org/glm-5.3-flash",
-	"z-ai/glm-5.3-flash-abliterated":              "zai-org/glm-5.3-flash-abliterated",
-	"grant-ai/glm-5.3-flash-abliterated-mlx":      "zai-org/glm-5.3-flash-abliterated",
-	"tensorfold/deepseek-v4-flash-0731-mxfp4-mlx": "deepseek/deepseek-v4-flash",
-	"deepseek-ai/deepseek-v4-flash-0731":          "deepseek/deepseek-v4-flash",
+	"z-ai/glm-5.3-flash":                                    "zai-org/glm-5.3-flash",
+	"jundot/glm-5.3-flash-oq4e-mtp":                         "zai-org/glm-5.3-flash",
+	"z-ai/glm-5.3-flash-abliterated":                        "zai-org/glm-5.3-flash-abliterated",
+	"grant-ai/glm-5.3-flash-abliterated-mlx":                "zai-org/glm-5.3-flash-abliterated",
+	"z-ai/glm-5.3-flash-uncensored":                         "zai-org/glm-5.3-flash-uncensored",
+	"solstice-ai/glm-5.3-flash-uncensored-mlx-oq4e-dflash2": "zai-org/glm-5.3-flash-uncensored",
+	"tensorfold/deepseek-v4-flash-0731-mxfp4-mlx":           "deepseek/deepseek-v4-flash",
+	"deepseek-ai/deepseek-v4-flash-0731":                    "deepseek/deepseek-v4-flash",
 }
 
 func normalizeServedModelAlias(namespace, key string) string {
