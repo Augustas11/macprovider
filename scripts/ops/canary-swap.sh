@@ -47,7 +47,10 @@
 # switch-model: serve another signed catalog row on the canary (`models switch`
 #   cannot: a catalog key is fit_unknown and two ~175 GB models cannot be warm
 #   swapped). The row comes from this checkout's phase3-binary/dist/static/
-#   autotune-candidates.json; the canary's `macprovider-cli models
+#   autotune-candidates.json and must be `recommendable`, the only status a
+#   normal provider admits at start, unless the canary's config.yaml sets
+#   donor_mode: true; anything else is refused before config.yaml or the
+#   provider is touched. The canary's `macprovider-cli models
 #   verify-artifact <key>` must exit 0 and agree with it (model id, revision,
 #   artifact sha256, catalog release and digest), so the artifact is already
 #   downloaded and verified there. Under the live-ops lock it then backs up
@@ -72,7 +75,9 @@
 # CANARY_STATUS_TIMEOUT_S (120), CANARY_READY_TIMEOUT_S (1800),
 # CANARY_DRAIN_TIMEOUT_S (600), CANARY_STABLE_S (120), CANARY_POLL_S (5);
 # switch-model also: CANARY_CONFIG (default ~/.config/macprovider/config.yaml on
-# the canary), PEARL_SSH and RUNNER_STUDIO_PROVIDER_PREFIX (lib/runner-reserve.sh).
+# the canary), CANARY_MODELS_LIST_TIMEOUT_S (300, how long the installed CLI may
+# take to validate the switched config; exceeding it refuses and writes nothing),
+# PEARL_SSH and RUNNER_STUDIO_PROVIDER_PREFIX (lib/runner-reserve.sh).
 #
 # Exit codes: 0 ok; 2 usage; 3 refused (nothing changed); 4 refused on the
 # canary before the swap (provider resumed); 5 candidate failed, previous
@@ -262,10 +267,11 @@ fi
 switch_model() {
   local key="$1" override="${2:-}" feed="$REPO_ROOT/phase3-binary/dist/static/autotune-candidates.json"
   local label="${CANARY_LAUNCHD_LABEL:-live.malibu.provider}" ready_s="${CANARY_READY_TIMEOUT_S:-1800}" poll_s="${CANARY_POLL_S:-5}"
+  local validate_s="${CANARY_MODELS_LIST_TIMEOUT_S:-300}"
   [[ "$key" =~ ^[a-z0-9][a-z0-9._/-]{0,127}$ ]] || refuse "invalid catalog key: $key"
   [ -z "$override" ] || [[ "$override" =~ ^/[A-Za-z0-9._/\ -]+$ ]] || refuse "--artifact-path must be an absolute plain path"
   [[ "$label" =~ ^[A-Za-z0-9._-]+$ ]] || refuse "CANARY_LAUNCHD_LABEL is not a plain launchd label"
-  case "$ready_s$poll_s" in *[!0-9]*) refuse "CANARY_*_S values must be whole seconds" ;; esac
+  case "$ready_s$poll_s$validate_s" in *[!0-9]*) refuse "CANARY_*_S values must be whole seconds" ;; esac
   case "${STUDIO_STATUS_PORT:-}" in ""|*[!0-9]*) refuse "STUDIO_STATUS_PORT must be set and numeric" ;; esac
   [ -n "${MACPROVIDER_OPS_OWNER:-}" ] || refuse "MACPROVIDER_OPS_OWNER is required for switch-model (live-ops lock owner)"
   [ -n "${RUNNER_STUDIO_PROVIDER_PREFIX:-}" ] ||
@@ -280,6 +286,7 @@ row = doc["rows"][sys.argv[2]]
 if not re.fullmatch(r"[0-9a-f]{64}", row.get("model_sha256") or "") or not row.get("model_revision") or not row.get("model_id"):
     raise SystemExit("unpinned row")
 print(json.dumps({"model_id": row["model_id"], "revision": row["model_revision"], "sha256": row["model_sha256"],
+                  "runtime_status": row.get("runtime_status"),
                   "version": doc["version"], "catalog_hash": hashlib.sha256(raw).hexdigest()}))
 PY
   local model_id sha
@@ -299,11 +306,11 @@ PY
   local vrc=0
   studio_ssh "$remote_env $cli models verify-artifact $key --json --config $cfg" > "$OPS_TMP_DIR/switch-verify.json" || vrc=$?
   [ "$vrc" = 0 ] || refuse "the $key artifact is not present and verified on the canary (models verify-artifact exit $vrc); download and verify it there first"
-  python3 -I - "$OPS_TMP_DIR/switch-verify.json" "$OPS_TMP_DIR/switch-row.json" "$key" "$override" \
+  python3 -I - "$OPS_TMP_DIR/switch-verify.json" "$OPS_TMP_DIR/switch-row.json" "$key" "$override" "$validate_s" \
     > "$OPS_TMP_DIR/switch-request.json" 2> "$OPS_TMP_DIR/switch-verify.err" <<'PY' ||
 import json, re, sys
 v, r = (json.load(open(p)) for p in sys.argv[1:3])
-key, override = sys.argv[3], sys.argv[4]
+key, override, validate_s = sys.argv[3], sys.argv[4], int(sys.argv[5])
 want = {"verdict": "match", "catalog_key": key, "catalog_model_id": r["model_id"], "pinned_revision": r["revision"],
         "signed_hash": r["sha256"], "computed_hash": r["sha256"], "catalog_release": r["version"],
         "catalog_digest": r["catalog_hash"]}
@@ -319,7 +326,8 @@ values = {"model": buyer, "model_artifact_sha256": r["sha256"], "model_catalog_k
           "model_catalog_model_id": r["model_id"], "model_catalog_revision": r["revision"],
           "model_catalog_sha256": r["sha256"], "model_catalog_version": r["version"],
           "model_catalog_hash": r["catalog_hash"]}
-print(json.dumps({"values": values, "local_path": local, "artifact_path": override, "buyer": buyer}))
+print(json.dumps({"values": values, "local_path": local, "artifact_path": override, "buyer": buyer,
+                  "runtime_status": r["runtime_status"], "validate_timeout_s": validate_s}))
 PY
     refuse "$(tail -n1 "$OPS_TMP_DIR/switch-verify.err")"
   local buyer request arc=0

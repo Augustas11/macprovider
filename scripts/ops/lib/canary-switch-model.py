@@ -3,8 +3,9 @@
 
 Runs on the canary as the provider user, fed on stdin over STUDIO_SSH. The
 caller has already checked the signed catalog row against the repo bytes and
-`models verify-artifact`; this resolves the verified local snapshot path,
-rewrites exactly the nine identity fields under the provider CLI's config lock,
+`models verify-artifact`; this refuses a row the provider would not admit at
+start (not `recommendable`, unless config.yaml sets donor_mode: true), resolves
+the verified local snapshot path, rewrites exactly the nine identity fields under the provider CLI's config lock,
 validates the candidate with the installed CLI, keeps a timestamped backup and
 replaces the config atomically. Every field must already be present once as a
 single-line scalar: a config missing one is refused (never appended), because a
@@ -37,6 +38,12 @@ FIELDS = (
 )
 PLAIN = re.compile(r"^[A-Za-z0-9._/@+-]+$")
 TOP = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*):(?:[ \t](.*))?$")
+# The provider CLI's admission rule (MacProviderCLI.swift) and boolean spellings
+# (Config.swift parseBool): a normal provider starts only on a recommendable row,
+# so writing any other row would crash-loop it on the next restart.
+DONOR_STATUSES = ("candidate", "listed", "recommendable")
+TRUE_VALUES = ("1", "true", "yes", "on")
+DEFAULT_VALIDATE_TIMEOUT_S = 300
 
 
 class Refusal(Exception):
@@ -123,6 +130,17 @@ def render(value):
     return value if PLAIN.fullmatch(value) else json.dumps(value)
 
 
+def require_admitted(request, lines, found):
+    status = request.get("runtime_status")
+    if status == "recommendable":
+        return
+    donor = "donor_mode" in found and (
+        scalar_text(TOP.match(lines[found["donor_mode"]].rstrip("\r\n")).group(2) or "").lower() in TRUE_VALUES)
+    if not donor or status not in DONOR_STATUSES:
+        raise Refusal("catalog row is %s, which this provider would not admit (it serves only a recommendable row "
+                      "unless donor_mode is true); nothing written" % (status or "missing a runtime_status"))
+
+
 def apply(config, cli, request):
     owned_regular(config)
     owned_regular(cli)
@@ -143,6 +161,7 @@ def apply(config, cli, request):
                 raise Refusal("config field %s is not a single-line scalar" % f)
         root_line = lines[found["model_artifact_root"]] if "model_artifact_root" in found else ""
         root_value = scalar_text(TOP.match(root_line.rstrip("\r\n")).group(2) or "") if root_line else ""
+        require_admitted(request, lines, found)
         values = dict(request["values"])
         values["model_artifact_path"] = expand(request["local_path"], request.get("artifact_path") or "", root_value)
         if set(values) != set(FIELDS):
@@ -163,9 +182,14 @@ def apply(config, cli, request):
                 f.write(candidate)
                 f.flush()
                 os.fsync(f.fileno())
-            check = subprocess.run([str(cli), "models", "list", "--json", "--config", tmp],
-                                   stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                   stderr=subprocess.DEVNULL, timeout=60, check=False)
+            timeout_s = request.get("validate_timeout_s", DEFAULT_VALIDATE_TIMEOUT_S)
+            try:
+                check = subprocess.run([str(cli), "models", "list", "--json", "--config", tmp],
+                                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                       stderr=subprocess.DEVNULL, timeout=timeout_s, check=False)
+            except subprocess.TimeoutExpired:
+                raise Refusal("installed CLI did not validate the switched config within %ss (a crash-looping "
+                              "provider can slow it; raise CANARY_MODELS_LIST_TIMEOUT_S); nothing written" % timeout_s)
             if check.returncode != 0:
                 raise Refusal("installed CLI rejected the switched config; nothing written")
             stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
