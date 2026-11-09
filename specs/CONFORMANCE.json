@@ -2575,11 +2575,13 @@
       "state": "pending",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func bonsaiThinkingEnabled",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func chatTemplateSupportsThinkingToggle",
         "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func preparedRequestInput",
         "phase3-binary/Sources/macprovider-cli/ServeDecodePath.swift:static func makeContinuousBatchTextPreparationLane"
       ],
       "tests": [
-        "phase3-binary/Tests/macprovider-cliTests/ModelRuntimePromptContextTests.swift:final class ModelRuntimePromptContextTests"
+        "phase3-binary/Tests/macprovider-cliTests/ModelRuntimePromptContextTests.swift:final class ModelRuntimePromptContextTests",
+        "phase3-binary/Tests/macprovider-cliTests/ChatTemplateMessageTagScanTests.swift:final class ChatTemplateMessageTagScanTests"
       ],
       "journeys": [],
       "evidence": [],

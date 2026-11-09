@@ -13869,8 +13869,17 @@ maxTokens: maxTokens,
 
     /// Detect the thinking toggle from the exact template bytes instead of
     /// inferring it from a model-family name.
+    ///
+    /// SPEC-018-R010: the reviewed Solstice GLM-5.3-Flash template is keyed by
+    /// SHA-256 and left to its own `<think>` default. `chat_template.jinja` is
+    /// the file the tokenizer loader renders; a copy embedded in
+    /// `tokenizer_config.json` does not decide this.
     static func chatTemplateSupportsThinkingToggle(in directory: URL) -> Bool {
-        chatTemplate(in: directory, contains: "enable_thinking")
+        if let bytes = try? Data(contentsOf: directory.appendingPathComponent("chat_template.jinja")),
+           ChatTemplateCompatibility.isMessageTagScanTemplate(bytes) {
+            return false
+        }
+        return chatTemplate(in: directory, contains: "enable_thinking")
     }
 
     static func chatTemplateSupportsPreserveThinking(in directory: URL) -> Bool {
@@ -15447,6 +15456,15 @@ maxTokens: maxTokens,
         // when the buyer uses an alias. Templates without the variable ignore it.
         if let effort = request.templateReasoningEffort(for: toolSelectionModelID ?? request.model) {
             additionalContext = (additionalContext ?? [:]).merging(["reasoning_effort": effort]) { _, new in new }
+        }
+        // SPEC-018-R010: `none` and structured output stay thinking-off on a
+        // GLM template that otherwise opens `<think>` by default. A template
+        // without the variable ignores it.
+        var isStructured = true
+        if case .text = request.responseFormat { isStructured = false }
+        if grammar == .glm, additionalContext?["enable_thinking"] == nil,
+           request.reasoningEffort == "none" || isStructured {
+            additionalContext = (additionalContext ?? [:]).merging(["enable_thinking": false]) { _, new in new }
         }
         // Each native template owns its reasoning-history scope. Preserve
         // assistant reasoning only for the exact families that render it.

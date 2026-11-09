@@ -1,6 +1,7 @@
 import Foundation
 import Jinja
 import XCTest
+@testable import MacProviderCore
 @testable import macprovider_cli
 
 /// SPEC-018 §3.14: message content never selects a reasoning mode through the
@@ -112,5 +113,57 @@ final class ChatTemplateMessageTagScanTests: XCTestCase {
         let line = try XCTUnwrap(ChatTemplateCompatibility.logLine(ChatTemplateCompatibility.rewrite(try source())))
         XCTAssertEqual(line.components(separatedBy: "event=chat_template_compat").count, 2)
         XCTAssertTrue(line.contains("rewrite=numeric_attribute_access,message_tag_scan"))
+    }
+
+    // MARK: SPEC-018-R010 thinking default
+
+    private func artifact(_ template: String) throws -> URL {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        try Data(template.utf8).write(to: directory.appendingPathComponent("chat_template.jinja"))
+        return directory
+    }
+
+    private func solsticeRequest(_ effort: String?, tools: Bool = false, json: Bool = false) throws -> ChatCompletionRequest {
+        var body: [String: Any] = ["model": "zai-org/glm-5.3-flash-uncensored", "messages": [["role": "user", "content": "hi"]], "max_tokens": 16]
+        if let effort { body["reasoning_effort"] = effort }
+        if tools { body["tools"] = [Self.tool] }
+        if json { body["response_format"] = ["type": "json_object"] }
+        return try ChatCompletionRequest.parse(data: JSONSerialization.data(withJSONObject: body))
+    }
+
+    private func renderContext(_ request: ChatCompletionRequest, supportsToggle: Bool) throws -> String {
+        let context = try ModelRuntime.userInput(for: request, templateSupportsThinkingToggle: supportsToggle).additionalContext ?? [:]
+        var values: [String: Value] = ["messages": try Value(any: user("hi")), "add_generation_prompt": .boolean(true)]
+        if let effort = context["reasoning_effort"] as? String { values["reasoning_effort"] = .string(effort) }
+        if let thinking = context["enable_thinking"] as? Bool { values["enable_thinking"] = .boolean(thinking) }
+        return try Template(try rewritten(), with: .init(lstripBlocks: true, trimBlocks: true)).render(values)
+    }
+
+    func testTheReviewedTemplateIsNotAThinkingToggleAndNoOtherTemplateChanges() throws {
+        XCTAssertFalse(ModelRuntime.chatTemplateSupportsThinkingToggle(in: try artifact(try source())))
+        XCTAssertTrue(ModelRuntime.chatTemplateSupportsThinkingToggle(in: try artifact(try source() + " ")),
+                      "One changed byte is not the reviewed template; the key is the SHA-256")
+    }
+
+    func testEveryEffortThatIsNotNoneRendersAnOpenThinkOnTheReviewedTemplate() throws {
+        let toggle = ModelRuntime.chatTemplateSupportsThinkingToggle(in: try artifact(try source()))
+        for effort in [nil, "minimal", "low", "medium", "high", "xhigh", "max"] as [String?] {
+            for tools in [false, true] {
+                let request = try solsticeRequest(effort, tools: tools)
+                XCTAssertNil(try ModelRuntime.userInput(for: request, templateSupportsThinkingToggle: toggle).additionalContext?["enable_thinking"])
+                XCTAssertTrue(try renderContext(request, supportsToggle: toggle).hasSuffix("<|assistant|><think>"), "\(effort ?? "omitted") tools=\(tools)")
+            }
+        }
+    }
+
+    func testNoneAndStructuredOutputStayThinkingOffOnTheReviewedTemplate() throws {
+        let toggle = ModelRuntime.chatTemplateSupportsThinkingToggle(in: try artifact(try source()))
+        for request in [try solsticeRequest("none"), try solsticeRequest("none", tools: true), try solsticeRequest("high", json: true)] {
+            let prompt = try renderContext(request, supportsToggle: toggle)
+            XCTAssertTrue(prompt.hasSuffix("<|assistant|><think></think>"))
+            XCTAssertEqual(prompt, try renderContext(request, supportsToggle: true), "Same bytes as when the toggle was set")
+        }
     }
 }

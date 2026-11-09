@@ -42,6 +42,12 @@ enum ChatTemplateCompatibility {
 
     static let messageTagScanTemplateSHA256 = "1b927d9aaebbc9d98823db0bb746a199123724577f900fd62859b1de810e6d43"
 
+    /// Whether these bytes are the reviewed Solstice template. Its
+    /// `enable_thinking` is not a toggle the provider sets (SPEC-018-R010).
+    static func isMessageTagScanTemplate(_ bytes: Data) -> Bool {
+        SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined() == messageTagScanTemplateSHA256
+    }
+
     static func rewrite(_ template: String) -> Result {
         let scan = removingMessageTagScan(template)
         var result = rewriteNumericAttributes(scan.template ?? template)
@@ -68,8 +74,7 @@ enum ChatTemplateCompatibility {
     }
 
     private static func removingMessageTagScan(_ template: String) -> (template: String?, kept: Bool) {
-        let digest = SHA256.hash(data: Data(template.utf8)).map { String(format: "%02x", $0) }.joined()
-        guard digest == messageTagScanTemplateSHA256 else {
+        guard isMessageTagScanTemplate(Data(template.utf8)) else {
             return (nil, template.contains("PROTIUM-1.0") && template.contains("{REASON:"))
         }
         var text = template
