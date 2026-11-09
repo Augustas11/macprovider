@@ -21,6 +21,7 @@ final class ReasoningEffortTests: XCTestCase {
         let models = [
             "zai-org/glm-5.3-flash", "Jundot/GLM-5.3-Flash-oQ4e-mtp",
             "zai-org/glm-5.3-flash-abliterated", "grant-ai/GLM-5.3-Flash-Abliterated-MLX-4bit",
+            "zai-org/glm-5.3-flash-uncensored", "Solstice-AI/GLM-5.3-Flash-UNCENSORED-mlx-oQ4e-DFlash2",
             "openai/gpt-oss-20b", "mlx-community/gpt-oss-120b-4bit",
             "qwen/qwen3.8-27b", "mlx-community/Qwen3.8-27B-4bit",
         ]

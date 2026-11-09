@@ -669,7 +669,12 @@ class RateCardSourceTest(unittest.TestCase):
             self.assertIsNone(demand[key]["rank"])
         # All recommendable rows remain class-bound; only this explicit staged
         # candidate extends the priced set. Listed rows need no rate_class.
-        self.assertEqual(set(classes), recommendable | staged)
+        # #2244: the uncensored GLM-5.3-Flash build is `listed` but carries the
+        # GLM-5.3-Flash price through its rate class.
+        priced_listed = {"zai-org/glm-5.3-flash-uncensored"}
+        for key in priced_listed:
+            self.assertEqual(CANDIDATE_OBJ["rows"][key]["runtime_status"], "listed")
+        self.assertEqual(set(classes), recommendable | staged | priced_listed)
         source = catalog_release.validate_rate_card_source(RATE_CARD_SOURCE_BYTES)
         expanded = catalog_release.expand_rate_card(source, classes, CANDIDATE_OBJ)
         self.assertEqual(expanded, RATE_CARD_BYTES)

@@ -2336,9 +2336,62 @@ if (cd "$tmp/fakedeploy" && bash -euo pipefail -c "$cmd") >/dev/null 2>&1 && [ "
   python3 -c 'import glob,json,sys; d=json.load(open(glob.glob(sys.argv[1] + "/*.json")[0])); sys.exit(0 if d["release_id"] == sys.argv[2] and d["model_id"] == "mlx-community/Test-VL-2B" else 1)' "$OWED_DIR" "$R"; then ok; else bad "activation command did not record the owed (e)"; fi
 # The owed (e) is a post-activation, operator-recorded step that outlives its release.
 printf '{"release_id":"%s","status":"live_verified","feeds":{"x":{"verified_at":"2026-01-01T00:00:00Z"}}}' "$R" > "$tmp/svc/autotune-release.json"
+# A model the live catalog no longer carries owes no (e): it is retired.
+run_rc 0 "catalog status with (e) owed for a model the live catalog dropped" scripts/ops/catalog-activate.sh status
+if [ "$(state_of buyer_serving_e2e)" = "done" ] && [ "$(fact_of buyer_serving_e2e_retired)" = "mlx-community/Test-VL-2B@abab" ]; then ok; else bad "dropped model (e): $(state_of buyer_serving_e2e) $(fact_of buyer_serving_e2e_retired)"; fi
+# A later release committed but not live: the record stays retired against the
+# feed the coordinator serves, and only a record that has genuinely left it does.
+read -r OWED_OLD OWED_LIVE <<EOF_RID
+$(python3 -c 'import json,sys; rs=json.load(open(sys.argv[1]))["releases"]; o=sorted((k for k in rs if k != sys.argv[2]), key=lambda k: rs[k]["generated_at"]); print(o[0], o[-1])' "$W/phase3-binary/catalog/autotune/release-ledger.json" "$R")
+EOF_RID
+owed_release() { python3 -c 'import glob,json,sys; p=glob.glob(sys.argv[1] + "/*.json")[0]; d=json.load(open(p)); d["release_id"] = sys.argv[2]; json.dump(d, open(p, "w"), sort_keys=True)' "$OWED_DIR" "$1"; }
+# live_feed VERSION DIGEST_OK MODEL SHA: the coordinator serves a feed of one row at release $OWED_LIVE.
+live_feed() {
+  python3 - "$tmp/svc" "$OWED_LIVE" "$@" <<'PYF'
+import hashlib, json, sys
+svc, live, version, digest_ok, model, sha = sys.argv[1:7]
+body = json.dumps({"version": version, "rows": {"k": {"model_id": model, "model_sha256": sha}}}).encode()
+open(f"{svc}/routes/v1_autotune-candidates", "wb").write(body)
+digest = hashlib.sha256(body).hexdigest() if digest_ok == "true" else "0" * 64
+json.dump({"release_id": live, "status": "live_verified",
+           "feeds": {"autotune_candidates": {"sha256": digest, "verified_at": "2026-01-01T00:00:00Z"}}}, open(f"{svc}/autotune-release.json", "w"))
+PYF
+}
+owed_release "$OWED_OLD"
+live_feed "$OWED_LIVE" true other/model 00
+run_rc 0 "catalog status: dropped model while a later release is committed" scripts/ops/catalog-activate.sh status
+if [ "$(state_of buyer_serving_e2e)" != owed ] && [ "$(fact_of buyer_serving_e2e_retired)" = "mlx-community/Test-VL-2B@abab" ] && [ "$(fact_of buyer_serving_e2e_owed)" = None ]; then ok; else bad "retired (e) reopened before the next release went live: $(state_of buyer_serving_e2e) $(fact_of buyer_serving_e2e_owed)"; fi
+# Still a row of the live feed: owed.
+live_feed "$OWED_LIVE" true mlx-community/Test-VL-2B abab
+run_rc 0 "catalog status: live feed still carries the owed model" scripts/ops/catalog-activate.sh status
+if [ "$(state_of buyer_serving_e2e)" = owed ] && [ "$(fact_of buyer_serving_e2e_retired)" = None ]; then ok; else bad "a live row was retired: $(state_of buyer_serving_e2e) $(fact_of buyer_serving_e2e_retired)"; fi
+# A feed that is not provably the live release's retires nothing.
+live_feed "$OWED_LIVE" false other/model 00
+run_rc 0 "catalog status: live feed digest mismatch" scripts/ops/catalog-activate.sh status
+if [ "$(state_of buyer_serving_e2e)" = owed ] && [ "$(fact_of buyer_serving_e2e_retired)" = None ]; then ok; else bad "digest-mismatched feed retired a record: $(state_of buyer_serving_e2e) $(fact_of buyer_serving_e2e_retired)"; fi
+live_feed "$OWED_OLD" true other/model 00
+run_rc 0 "catalog status: live feed from another release" scripts/ops/catalog-activate.sh status
+if [ "$(state_of buyer_serving_e2e)" = owed ] && [ "$(fact_of buyer_serving_e2e_retired)" = None ]; then ok; else bad "another release's feed retired a record: $(state_of buyer_serving_e2e) $(fact_of buyer_serving_e2e_retired)"; fi
+# A release newer than the live one has not shipped (a deploy that failed after
+# recording): its new model is absent from the live feed without being retired.
+owed_release "$R"
+live_feed "$OWED_LIVE" true other/model 00
+run_rc 0 "catalog status: owed record of a release not yet live" scripts/ops/catalog-activate.sh status
+if [ "$(state_of buyer_serving_e2e)" = owed ] && [ "$(fact_of buyer_serving_e2e_retired)" = None ]; then ok; else bad "an unshipped release's record was retired: $(state_of buyer_serving_e2e) $(fact_of buyer_serving_e2e_retired)"; fi
+owed_release not-in-the-ledger
+run_rc 0 "catalog status: owed record of an unknown release" scripts/ops/catalog-activate.sh status
+if [ "$(state_of buyer_serving_e2e)" = owed ] && [ "$(fact_of buyer_serving_e2e_retired)" = None ]; then ok; else bad "an unknown release's record was retired: $(state_of buyer_serving_e2e) $(fact_of buyer_serving_e2e_retired)"; fi
+owed_release "$R"
+rm -f "$tmp/svc/routes/v1_autotune-candidates"
+printf '{"release_id":"%s","status":"live_verified","feeds":{"x":{"verified_at":"2026-01-01T00:00:00Z"}}}' "$R" > "$tmp/svc/autotune-release.json"
+# The rest of the owed (e) cases use a row the live catalog carries.
+read -r OWED_M OWED_S <<EOF_ROW
+$(python3 -c 'import json,sys; r=sorted(json.load(open(sys.argv[1]))["rows"].values(), key=lambda r: r["model_id"])[0]; print(r["model_id"], r["model_sha256"])' "$W/phase3-binary/catalog/autotune/autotune-candidates.json")
+EOF_ROW
+python3 -c 'import glob,json,sys; p=glob.glob(sys.argv[1] + "/*.json")[0]; d=json.load(open(p)); d["model_id"], d["sha256"] = sys.argv[2], sys.argv[3]; json.dump(d, open(p, "w"), sort_keys=True)' "$OWED_DIR" "$OWED_M" "$OWED_S"
 run_rc 0 "catalog status with (e) owed after activation" scripts/ops/catalog-activate.sh status
 if [ "$(state_of buyer_serving_e2e)" = owed ]; then ok; else bad "owed (e) state: $(state_of buyer_serving_e2e)"; fi
-case "$(fact_of buyer_serving_e2e_owed)" in "mlx-community/Test-VL-2B@abab (owed since $R)") ok ;; *) bad "owed (e) fact: $(fact_of buyer_serving_e2e_owed)" ;; esac
+case "$(fact_of buyer_serving_e2e_owed)" in "$OWED_M@$OWED_S (owed since $R)") ok ;; *) bad "owed (e) fact: $(fact_of buyer_serving_e2e_owed)" ;; esac
 printf '{"release_id":"newer-release","status":"live_verified","feeds":{"x":{"verified_at":"2026-01-01T00:00:00Z"}}}' > "$tmp/svc/autotune-release.json"
 run_rc 0 "catalog status with (e) owed by an older release" scripts/ops/catalog-activate.sh status
 if [ "$(state_of buyer_serving_e2e)" = owed ]; then ok; else bad "an older release's owed (e) vanished: $(state_of buyer_serving_e2e)"; fi
@@ -2348,10 +2401,10 @@ if [ "$(state_of buyer_serving_e2e)" = blocked ]; then ok; else bad "malformed o
 rm -f "$OWED_DIR/broken.json"
 mkdir -p "$tmp/state/catalog-other"
 # Free text or a longer model id never closes it: only the exact token.
-printf '{"step":"buyer_serving_e2e","evidence":"mlx-community/Test-VL-2B-Pro: model=mlx-community/Test-VL-2B-Pro@abab request ops-e2e-0"}\n' > "$tmp/state/catalog-other/buyer_serving_e2e.json"
+printf '{"step":"buyer_serving_e2e","evidence":"%s-Pro: model=%s-Pro@%s request ops-e2e-0"}\n' "$OWED_M" "$OWED_M" "$OWED_S" > "$tmp/state/catalog-other/buyer_serving_e2e.json"
 run_rc 0 "catalog status with evidence for another model" scripts/ops/catalog-activate.sh status
 if [ "$(state_of buyer_serving_e2e)" = owed ]; then ok; else bad "a substring closed the owed (e): $(state_of buyer_serving_e2e)"; fi
-printf '{"step":"buyer_serving_e2e","evidence":"model=mlx-community/Test-VL-2B@abab request ops-e2e-1 served by the canary session, settlement row at 13500/27000"}\n' > "$tmp/state/catalog-other/buyer_serving_e2e.json"
+printf '{"step":"buyer_serving_e2e","evidence":"model=%s@%s request ops-e2e-1 served by the canary session, settlement row at 13500/27000"}\n' "$OWED_M" "$OWED_S" > "$tmp/state/catalog-other/buyer_serving_e2e.json"
 run_rc 0 "catalog status after the owed (e) is recorded" scripts/ops/catalog-activate.sh status
 if [ "$(state_of buyer_serving_e2e)" != owed ] && [ "$(fact_of buyer_serving_e2e_owed)" = None ]; then ok; else bad "recorded owed (e) still open: $(state_of buyer_serving_e2e) $(fact_of buyer_serving_e2e_owed)"; fi
 rm -rf "$tmp/svc/autotune-release.json" "$OWED_DIR" "$tmp/state/catalog-other" "$CSCOPE"/preflight-*.json
@@ -2679,7 +2732,7 @@ if [ "$(sc_restarts)" = 1/1 ]; then ok; else bad "stream-ceiling restarts: $(sc_
 if python3 -c 'import sys,yaml
 c=yaml.safe_load(open(sys.argv[1])); gd=yaml.safe_load(open(sys.argv[2])); g=gd["timeouts"]
 ok = c == {"listen": {"bind_address": "127.0.0.1"}, "routing": {"request_timeout_s": 3600}, "provider_http": {"timeout_s": 3600}} and \
-  gd["limits"] == {"model_max_output_tokens": {"zai-org/glm-5.3-flash": 65536}} and g == {"coordinator_request_seconds": 300, "coordinator_header_timeout_seconds": 3660, "coordinator_admission_seconds": 120,
+  gd["limits"] == {"model_max_output_tokens": {"zai-org/glm-5.3-flash": 65536, "zai-org/glm-5.3-flash-uncensored": 65536}} and g == {"coordinator_request_seconds": 300, "coordinator_header_timeout_seconds": 3660, "coordinator_admission_seconds": 120,
         "stream_ceiling_max_seconds": 3600, "non_stream_request_seconds": 3660, "streaming_idle_ms": 10000}
 sys.exit(0 if ok else 1)' "$tmp/pearl/coordinator.yaml" "$tmp/pearl/gateway.yaml"; then ok; else bad "stream-ceiling edit: $(cat "$tmp/pearl/coordinator.yaml" "$tmp/pearl/gateway.yaml")"; fi
 if grep -q '  # twin wall' "$tmp/pearl/coordinator.yaml" && cmp -s "$tmp/pearl/overlay.yaml" "$tmp/pearl/overlay.yaml.before"; then ok; else bad "stream-ceiling touched more than the walls"; fi
@@ -2703,7 +2756,7 @@ sc_expect_done
 sc_glm() {
   python3 -c 'import sys,yaml
 p=sys.argv[1]; d=yaml.safe_load(open(p)); d.pop("limits", None)
-if sys.argv[2] != "absent": d["limits"] = {"max_tokens_per_request": 32768, "model_max_output_tokens": {"zai-org/glm-5.3-flash": int(sys.argv[2])}}
+if sys.argv[2] != "absent": d["limits"] = {"max_tokens_per_request": 32768, "model_max_output_tokens": {"zai-org/glm-5.3-flash": int(sys.argv[2]), "zai-org/glm-5.3-flash-uncensored": int(sys.argv[2])}}
 else: d["limits"] = {"max_tokens_per_request": 32768}
 open(p, "w").write(yaml.safe_dump(d, sort_keys=False))' "$tmp/pearl/gateway.yaml" "$1"
   while [ "$(date +%s)" -le "$(python3 -c 'import os,sys; print(int(os.stat(sys.argv[1]).st_ctime))' "$tmp/pearl/gateway.yaml")" ]; do sleep 0.2; done
@@ -2724,7 +2777,7 @@ cp "$tmp/pearl/coordinator.yaml" "$tmp/pearl/coordinator.yaml.before"
 before_backups="$(sc_backups)"
 PEARL_RUNTIME_TASK=stream-ceiling run_rc 0 "stream-ceiling plans an absent output limit" scripts/ops/pearl-runtime.sh status
 expect_next stream_ceiling:mutate
-case "$(fact_of pearl_stream_ceiling_planned)" in "limits.model_max_output_tokens[zai-org/glm-5.3-flash] absent->65536") ok ;; *) bad "output-limit plan: $(fact_of pearl_stream_ceiling_planned)" ;; esac
+case "$(fact_of pearl_stream_ceiling_planned)" in "limits.model_max_output_tokens[zai-org/glm-5.3-flash-uncensored] absent->65536; limits.model_max_output_tokens[zai-org/glm-5.3-flash] absent->65536") ok ;; *) bad "output-limit plan: $(fact_of pearl_stream_ceiling_planned)" ;; esac
 PEARL_RUNTIME_TASK=stream-ceiling MACPROVIDER_OPS_OWNER=t run_rc 0 "stream-ceiling sets an absent output limit" scripts/ops/pearl-runtime.sh next --run
 expect_lock_free
 if [ "$(sc_glm_value)" = 65536 ] && [ "$(sc_restarts)" = 0/1 ] && cmp -s "$tmp/pearl/coordinator.yaml" "$tmp/pearl/coordinator.yaml.before"; then ok; else bad "absent output limit: $(sc_glm_value) restarts=$(sc_restarts)"; fi

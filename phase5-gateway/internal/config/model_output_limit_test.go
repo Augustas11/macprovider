@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -11,6 +13,7 @@ func TestNormalizeModelKeyMatchesCoordinatorAliases(t *testing.T) {
 	for want, spellings := range map[string][]string{
 		"zai-org/glm-5.3-flash":             {"glm-5.3-flash", "zai-org/glm-5.3-flash", "ZAI-ORG/GLM-5.3-Flash", "z-ai/glm-5.3-flash", "Jundot/GLM-5.3-Flash-oQ4e-mtp"},
 		"zai-org/glm-5.3-flash-abliterated": {"zai-org/glm-5.3-flash-abliterated", "z-ai/glm-5.3-flash-abliterated", "grant-ai/GLM-5.3-Flash-Abliterated-MLX-4bit"},
+		"zai-org/glm-5.3-flash-uncensored":  {"zai-org/glm-5.3-flash-uncensored", "z-ai/glm-5.3-flash-uncensored", "Solstice-AI/GLM-5.3-Flash-UNCENSORED-mlx-oQ4e-DFlash2"},
 		"openai/gpt-oss-20b":                {"openai/gpt-oss-20b", "mlx-community/gpt-oss-20b-MXFP4-Q8"},
 		"deepseek/deepseek-v4-flash":        {"deepseek/deepseek-v4-flash", "TensorFold/DeepSeek-V4-Flash-0731-MXFP4-MLX"},
 	} {
@@ -84,5 +87,30 @@ func TestModelMaxOutputTokensDecodesFromYAML(t *testing.T) {
 	}
 	if got := cfg.Limits.ModelMaxOutputTokens["zai-org/glm-5.3-flash"]; got != 131072 {
 		t.Fatalf("decoded limit=%d want 131072", got)
+	}
+}
+
+func TestShippedOutputLimitsCoverBothGLMFlashModels(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "gateway.yaml.example"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Limits struct {
+			ModelMaxOutputTokens map[string]int64 `yaml:"model_max_output_tokens"`
+		} `yaml:"limits"`
+	}
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	limits := Default().Limits
+	limits.ModelMaxOutputTokens = doc.Limits.ModelMaxOutputTokens
+	for _, model := range []string{
+		"zai-org/glm-5.3-flash", "Jundot/GLM-5.3-Flash-oQ4e-mtp",
+		"zai-org/glm-5.3-flash-uncensored", "Solstice-AI/GLM-5.3-Flash-UNCENSORED-mlx-oQ4e-DFlash2",
+	} {
+		if got := limits.MaxOutputTokensForModel(model); got != 65536 {
+			t.Errorf("MaxOutputTokensForModel(%q)=%d want 65536", model, got)
+		}
 	}
 }

@@ -94,6 +94,7 @@ limits:
   # gets this entry from PEARL_RUNTIME_TASK=stream-ceiling (raise-only).
   model_max_output_tokens:
     zai-org/glm-5.3-flash: 65536
+    zai-org/glm-5.3-flash-uncensored: 65536
 
 kill_switch:
   demo_only: false

@@ -408,6 +408,10 @@ expected_history = {
     "published-2026-11-02-glm53-flash-abliterated-cached-turns-v280",
     # Superseded by the same admission set plus the Llama-3.1-8B M5 32 GB CB entry.
     "published-2026-11-06-glm53-32k-native-mtp-v281",
+    # Superseded by the same catalog without the retired abliterated GLM-5.3-Flash build.
+    "published-2026-11-06-llama31-8b-cb-m5-v281",
+    # Superseded by the same catalog with the uncensored GLM-5.3-Flash build listed.
+    "published-2026-11-07-drop-glm53-abliterated-v281",
     current_release_id,
 }
 if set(ledger["releases"]) != expected_history:
