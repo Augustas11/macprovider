@@ -3957,7 +3957,9 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             let backend = ScriptedBackend(scripts: ["held": [1], "shared": [2]], prefillGate: gate)
             let scheduler = try await makeScheduler(
                 maxActiveRows: 1, queueLimit: 4,
-                queueWaitTimeoutNanoseconds: 100_000_000, backend: backend
+                // Long enough for the duplicate to attach on a loaded runner: if the owner
+                // expires first, the duplicate becomes a new owner and the test cannot finish.
+                queueWaitTimeoutNanoseconds: 2_000_000_000, backend: backend
             )
             let held = Task {
                 try await scheduler.submit(.init(id: "held", conversationKey: "", promptTokens: [1], maxOutputTokens: 1))
@@ -3974,7 +3976,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
                 try await scheduler.submit(request, admissionWaitPolicy: callerBoundedOwner ? .configuredTimeout : .callerBounded)
             }
             try await eventually { await scheduler.metrics().attachedWaiters == 3 }
-            try await Task.sleep(nanoseconds: 200_000_000)
+            try await Task.sleep(nanoseconds: 2_200_000_000)
             if callerBoundedOwner {
                 let stillWaiting = await scheduler.metrics()
                 XCTAssertEqual(stillWaiting.waitingCount, 1)
