@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.76
+**Version:** 0.1.77
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.76",
+  "version": "0.1.77",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -521,12 +521,21 @@ The authorized dependency tuple is exact:
 
 | Repository | Fork tag | Revision | Upstream base |
 |---|---|---|---|
-| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.25` | `da8f1932f8e2a46477a1a35663955267bc6fcd04` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
+| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.32` | `6c27b743bae5dd60eb07954f2819316b22b92094` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
 | `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.11` | `c774cb0934c7503bc3fe1c3d1afbe44c728e8891` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
 | `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.6` | `51edbb37620aef7c860ab5d7cdb7bf5b14333da2` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
 | `https://github.com/Augustas11/mlx-c` | `v0.6.0-macprovider.2` | `2b1ff2b5b5129a6115771da32e1bac3b6b01ab01` | `ml-explore/mlx-c` pinned base (`ebc88f10caa1b625e6b581437a8dea6df8a70085`) |
 
-The mlx-swift-lm row `3.32.3-macprovider.25` is on `3.32.3-macprovider.24`
+The mlx-swift-lm row `3.32.3-macprovider.32` is on `3.32.3-macprovider.25`
+(`da8f1932f8e2a46477a1a35663955267bc6fcd04`) (#2244, #2189), at
+`6c27b743bae5dd60eb07954f2819316b22b92094`: one commit, cherry-picked from
+`73df016af`, that maps a Hugging Face per-layer quantization map to module
+paths in `loadWeights`. It is a load-time sanitizer and a value-identical
+refactor of the `GLM5Next` weight-key rules; decode is unchanged and a map
+keyed by module paths passes through unchanged. The Swift, core and C rows are
+unchanged.
+
+The prior mlx-swift-lm row `3.32.3-macprovider.25` is on `3.32.3-macprovider.24`
 (`39ccc0ec28f44f08f8b8032a92ebd1b2e438ebf4`) (#2198, #2189), at
 `da8f1932f8e2a46477a1a35663955267bc6fcd04`, and adds `.23`'s one commit
 (`93234b6`), which changes only `GLM5NextMTP.prepareDrafterState`: the
@@ -2294,6 +2303,12 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.77 (2026-11-09, Related: #2244)** — R003 names mlx-swift-lm
+  `3.32.3-macprovider.32` (`6c27b743bae5dd60eb07954f2819316b22b92094`) on
+  `3.32.3-macprovider.25`: the per-layer quantization-map loader for
+  checkpoints in the Hugging Face key layout (#2189). Load-time only; no
+  decode line changes. Other model sources and the Swift, core and C rows are
+  unchanged.
 - **0.1.76 (2026-11-07, Related: #2243)** — MTP-2: the private staging file
   may be a `clonefile(2)` clone of the validated descriptor when that
   descriptor is already mode `0400`. Any other mode, `ENOTSUP`, and `EXDEV`
