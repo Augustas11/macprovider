@@ -566,21 +566,28 @@ class StreamCeilingPlanTest(unittest.TestCase):
     def test_output_limit_is_added_raised_and_never_lowered(self):
         import yaml
         glm = "zai-org/glm-5.3-flash"
+        unc = "zai-org/glm-5.3-flash-uncensored"
         absent = "limits:\n  max_tokens_per_request: 32768\n  # keep\nkill_switch:\n  demo_only: false\n"
         for text in (absent, absent.replace("  # keep\n", "  model_max_output_tokens: {}\n"), "timeouts:\n  a: 1\n"):
             plan = pcc.sc_output_plan(yaml.safe_load(text))
-            self.assertEqual(plan, {glm: (None, 65536)})
+            self.assertEqual(plan, {glm: (None, 65536), unc: (None, 65536)})
             new = pcc.sc_output_edit(text, plan)
             doc = yaml.safe_load(new)
-            self.assertEqual(doc["limits"]["model_max_output_tokens"], {glm: 65536})
+            self.assertEqual(doc["limits"]["model_max_output_tokens"], {glm: 65536, unc: 65536})
             self.assertEqual(pcc.sc_output_plan(doc), {})
-        self.assertIn("  # keep\n", pcc.sc_output_edit(absent, {glm: (None, 65536)}))
+        self.assertIn("  # keep\n", pcc.sc_output_edit(absent, {glm: (None, 65536), unc: (None, 65536)}))
         lower = "limits:\n  model_max_output_tokens:\n    %s: 32768\n    other/x: 5\n" % glm
         plan = pcc.sc_output_plan(yaml.safe_load(lower))
-        self.assertEqual(plan, {glm: (32768, 65536)})
+        self.assertEqual(plan, {glm: (32768, 65536), unc: (None, 65536)})
         self.assertEqual(yaml.safe_load(pcc.sc_output_edit(lower, plan))["limits"]["model_max_output_tokens"],
-                         {glm: 65536, "other/x": 5})
-        self.assertEqual(pcc.sc_output_plan(yaml.safe_load(lower.replace("32768", "131072"))), {})
+                         {glm: 65536, unc: 65536, "other/x": 5})
+        self.assertEqual(pcc.sc_output_plan(yaml.safe_load(lower.replace("32768", "131072"))), {unc: (None, 65536)})
+        # The live map holds the first target only: the second is added beside it.
+        live = "limits:\n  model_max_output_tokens:\n    %s: 65536\n  max_tokens_per_request: 32768\n" % glm
+        plan = pcc.sc_output_plan(yaml.safe_load(live))
+        self.assertEqual(plan, {unc: (None, 65536)})
+        self.assertEqual(yaml.safe_load(pcc.sc_output_edit(live, plan))["limits"]["model_max_output_tokens"],
+                         {glm: 65536, unc: 65536})
         # An alias key of the same model next to the target would fail gateway validation.
         with self.assertRaises(pcc.Refused):
             pcc.sc_output_plan(yaml.safe_load("limits:\n  model_max_output_tokens:\n    z-ai/glm-5.3-flash: 1\n    %s: 1\n" % glm))
@@ -713,7 +720,7 @@ class StreamCeilingApplyTest(unittest.TestCase):
         with self.mock.patch.object(pcc, "restart", lambda a, pid: restarts.append("coordinator")), \
                 self.mock.patch.object(pcc, "sc_restart_gateway", lambda a, pid: restarts.append("gateway")):
             pcc.apply_stream_ceiling(self.args)
-            gateway = self.read("gateway").replace(b"  model_max_output_tokens:\n    zai-org/glm-5.3-flash: 65536\n", b"")
+            gateway = self.read("gateway").replace(b"  model_max_output_tokens:\n    zai-org/glm-5.3-flash: 65536\n    zai-org/glm-5.3-flash-uncensored: 65536\n", b"")
             with open(self.paths["gateway"], "wb") as f:
                 f.write(gateway)
             config = self.read("config")

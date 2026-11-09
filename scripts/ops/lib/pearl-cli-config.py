@@ -2037,7 +2037,7 @@ SC_GATEWAY_RESERVATION_DEFAULT_HOURS = 24
 # Per-model buyer output limits (SPEC-006 §5.4) the same task raises in
 # gateway.yaml limits.model_max_output_tokens; equal to the tracked
 # gateway.yaml.example map (parity pinned with the walls).
-SC_MODEL_MAX_OUTPUT_TOKENS = {"zai-org/glm-5.3-flash": 65536}
+SC_MODEL_MAX_OUTPUT_TOKENS = {"zai-org/glm-5.3-flash": 65536, "zai-org/glm-5.3-flash-uncensored": 65536}
 
 
 def sc_int(value, what):
@@ -2151,7 +2151,7 @@ def sc_plan(base, overlay, gateway):
 def sc_output_plan(doc):
     """{model: (old or None, new)} for limits.model_max_output_tokens.
     Raise-only and additive: an entry at or above its target is kept. A map
-    holding other keys but not the target is refused, and so is an alias key
+    holding none of the targets is refused, and so is an alias key
     of the same model beside the target, because that fails gateway validation."""
     limits = doc.get("limits")
     if limits is None:
@@ -2173,7 +2173,7 @@ def sc_output_plan(doc):
             old = sc_int(current[model], "gateway limits.model_max_output_tokens[%s]" % model)
             if old < want:
                 out[model] = (old, want)
-        elif current:
+        elif current and not set(current) & set(SC_MODEL_MAX_OUTPUT_TOKENS):
             raise Refused("gateway limits.model_max_output_tokens has entries but not %s; reconcile it first" % model)
         else:
             out[model] = (None, want)

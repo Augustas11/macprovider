@@ -2732,7 +2732,7 @@ if [ "$(sc_restarts)" = 1/1 ]; then ok; else bad "stream-ceiling restarts: $(sc_
 if python3 -c 'import sys,yaml
 c=yaml.safe_load(open(sys.argv[1])); gd=yaml.safe_load(open(sys.argv[2])); g=gd["timeouts"]
 ok = c == {"listen": {"bind_address": "127.0.0.1"}, "routing": {"request_timeout_s": 3600}, "provider_http": {"timeout_s": 3600}} and \
-  gd["limits"] == {"model_max_output_tokens": {"zai-org/glm-5.3-flash": 65536}} and g == {"coordinator_request_seconds": 300, "coordinator_header_timeout_seconds": 3660, "coordinator_admission_seconds": 120,
+  gd["limits"] == {"model_max_output_tokens": {"zai-org/glm-5.3-flash": 65536, "zai-org/glm-5.3-flash-uncensored": 65536}} and g == {"coordinator_request_seconds": 300, "coordinator_header_timeout_seconds": 3660, "coordinator_admission_seconds": 120,
         "stream_ceiling_max_seconds": 3600, "non_stream_request_seconds": 3660, "streaming_idle_ms": 10000}
 sys.exit(0 if ok else 1)' "$tmp/pearl/coordinator.yaml" "$tmp/pearl/gateway.yaml"; then ok; else bad "stream-ceiling edit: $(cat "$tmp/pearl/coordinator.yaml" "$tmp/pearl/gateway.yaml")"; fi
 if grep -q '  # twin wall' "$tmp/pearl/coordinator.yaml" && cmp -s "$tmp/pearl/overlay.yaml" "$tmp/pearl/overlay.yaml.before"; then ok; else bad "stream-ceiling touched more than the walls"; fi
@@ -2756,7 +2756,7 @@ sc_expect_done
 sc_glm() {
   python3 -c 'import sys,yaml
 p=sys.argv[1]; d=yaml.safe_load(open(p)); d.pop("limits", None)
-if sys.argv[2] != "absent": d["limits"] = {"max_tokens_per_request": 32768, "model_max_output_tokens": {"zai-org/glm-5.3-flash": int(sys.argv[2])}}
+if sys.argv[2] != "absent": d["limits"] = {"max_tokens_per_request": 32768, "model_max_output_tokens": {"zai-org/glm-5.3-flash": int(sys.argv[2]), "zai-org/glm-5.3-flash-uncensored": int(sys.argv[2])}}
 else: d["limits"] = {"max_tokens_per_request": 32768}
 open(p, "w").write(yaml.safe_dump(d, sort_keys=False))' "$tmp/pearl/gateway.yaml" "$1"
   while [ "$(date +%s)" -le "$(python3 -c 'import os,sys; print(int(os.stat(sys.argv[1]).st_ctime))' "$tmp/pearl/gateway.yaml")" ]; do sleep 0.2; done
@@ -2777,7 +2777,7 @@ cp "$tmp/pearl/coordinator.yaml" "$tmp/pearl/coordinator.yaml.before"
 before_backups="$(sc_backups)"
 PEARL_RUNTIME_TASK=stream-ceiling run_rc 0 "stream-ceiling plans an absent output limit" scripts/ops/pearl-runtime.sh status
 expect_next stream_ceiling:mutate
-case "$(fact_of pearl_stream_ceiling_planned)" in "limits.model_max_output_tokens[zai-org/glm-5.3-flash] absent->65536") ok ;; *) bad "output-limit plan: $(fact_of pearl_stream_ceiling_planned)" ;; esac
+case "$(fact_of pearl_stream_ceiling_planned)" in "limits.model_max_output_tokens[zai-org/glm-5.3-flash-uncensored] absent->65536; limits.model_max_output_tokens[zai-org/glm-5.3-flash] absent->65536") ok ;; *) bad "output-limit plan: $(fact_of pearl_stream_ceiling_planned)" ;; esac
 PEARL_RUNTIME_TASK=stream-ceiling MACPROVIDER_OPS_OWNER=t run_rc 0 "stream-ceiling sets an absent output limit" scripts/ops/pearl-runtime.sh next --run
 expect_lock_free
 if [ "$(sc_glm_value)" = 65536 ] && [ "$(sc_restarts)" = 0/1 ] && cmp -s "$tmp/pearl/coordinator.yaml" "$tmp/pearl/coordinator.yaml.before"; then ok; else bad "absent output limit: $(sc_glm_value) restarts=$(sc_restarts)"; fi

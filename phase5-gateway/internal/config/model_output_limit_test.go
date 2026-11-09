@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -85,5 +87,30 @@ func TestModelMaxOutputTokensDecodesFromYAML(t *testing.T) {
 	}
 	if got := cfg.Limits.ModelMaxOutputTokens["zai-org/glm-5.3-flash"]; got != 131072 {
 		t.Fatalf("decoded limit=%d want 131072", got)
+	}
+}
+
+func TestShippedOutputLimitsCoverBothGLMFlashModels(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "gateway.yaml.example"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Limits struct {
+			ModelMaxOutputTokens map[string]int64 `yaml:"model_max_output_tokens"`
+		} `yaml:"limits"`
+	}
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	limits := Default().Limits
+	limits.ModelMaxOutputTokens = doc.Limits.ModelMaxOutputTokens
+	for _, model := range []string{
+		"zai-org/glm-5.3-flash", "Jundot/GLM-5.3-Flash-oQ4e-mtp",
+		"zai-org/glm-5.3-flash-uncensored", "Solstice-AI/GLM-5.3-Flash-UNCENSORED-mlx-oQ4e-DFlash2",
+	} {
+		if got := limits.MaxOutputTokensForModel(model); got != 65536 {
+			t.Errorf("MaxOutputTokensForModel(%q)=%d want 65536", model, got)
+		}
 	}
 }
