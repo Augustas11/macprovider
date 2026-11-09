@@ -3681,6 +3681,7 @@ maxTokens: 1,
             "qwen/qwen3.8-27b": "Qwen3_5ForConditionalGeneration",
             "zai-org/glm-5.3-flash": "Glm5NextForConditionalGeneration",
             "zai-org/glm-5.3-flash-abliterated": "Glm5NextForConditionalGeneration",
+            "zai-org/glm-5.3-flash-uncensored": "Glm5NextForConditionalGeneration",
             "deepseek/deepseek-v4-flash": "DeepseekV4ForCausalLM",
             "minimaxai/minimax-m3.1-flash": "MiniMaxM3SparseForConditionalGeneration",
         ]
