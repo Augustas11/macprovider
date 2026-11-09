@@ -22,6 +22,10 @@ waives only the specifically authorized serving-journey export, not qualificatio
 or release-match gates. These catalog/tooling changes are not evidence of a
 coordinator runtime deployment or sampled GLM admission.
 
+## Pearl runtime v1.8.284 (2026-11-10)
+
+**Live 2026-11-10 06:45 WITA** (tag `v1.8.284` at `9cbdbf3a5`, release run 42713237490). It carries the #2244 aliases that price and limit the uncensored GLM-5.3-Flash served id (`Solstice-AI/GLM-5.3-Flash-UNCENSORED-mlx-oQ4e-DFlash2`) as `zai-org/glm-5.3-flash-uncensored` in the coordinator (`internal/billing/formula.go`) and the gateway (`internal/config/model_key.go`). v1.8.282 lacked them, so it settled that id at the `default` rate and held it to the 32,768 gateway-wide output cap. The apply took about 3 minutes of network down. v1.8.283 is the staged provider CLI identity, not a runtime tag.
+
 ## Next Pearl runtime v1.8.282 — contents and order (2026-11-08)
 
 **Live 2026-11-09 07:31 WITA:** coordinator and gateway run v1.8.282, and the
