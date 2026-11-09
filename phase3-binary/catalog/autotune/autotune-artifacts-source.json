@@ -544,6 +544,31 @@
       },
       "primary_artifact_id": "mlx-oq4e-mtp",
       "rate_class": "class-120b-moe"
+    },
+    "zai-org/glm-5.3-flash-uncensored": {
+      "artifacts": {
+        "mlx-oq4e-uncensored-dflash2": {
+          "allowed_runtime_sources": [
+            "mlx_cache"
+          ],
+          "hash": "242f8fcfd34d4ecfd62180c1767f910bda925216948772126dc98c673d1c8919",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "min_ram_gb": 243,
+          "notes": "Uncensored GLM-5.3-Flash build (#2244, #2189), MIT: weights by dealignai (base_model dealignai/GLM-5.3-Flash-UNCENSORED-FP8), oQ4e mixed-precision conversion published by Solstice-AI. Same glm5_next architecture, layer count and next-N layer as zai-org/glm-5.3-flash; 4-bit g64 base with 5/6/8-bit layers named in the checkpoint's Hugging Face quantization map, so loading needs the mlx-swift-lm 3.32.3-macprovider.27 PerLayerQuantizationSanitizing loader. Token parity on that build, M3 Ultra 256 GB, 2026-11-07: 256/256 at 1K and 8K, 16/16 top-1, against an mlx-vlm glm5_next reference. 4 rows at 1K: 72.0 tok/s aggregate. min_ram_gb = 209 GB measured peak at 8K (4 GiB MLX cache bound) + 4 GB for 4 CB slots of 64k paged state (the zai-org/glm-5.3-flash figure, FR-PKV13) + 26 GB SPEC-048-R012 10% free-memory floor on 256 GB + 4 GB safety margin = 243; the peak was not measured at 64K. Snapshot-manifest hash from the Hugging Face API at the pinned revision with scripts/catalog-hash-sweep.py's algorithm (52 files, including the mmproj and DFlash2 GGUF files the snapshot downloader fetches; the safetensors are 185.7 GB).",
+          "quantization": "oq4e-mixed-4-5-6-8bit-g64",
+          "runtime_format": "mlx_safetensors",
+          "size_bytes": 189249390230,
+          "source_ref": {
+            "kind": "huggingface_revision",
+            "repo_id": "Solstice-AI/GLM-5.3-Flash-UNCENSORED-mlx-oQ4e-DFlash2",
+            "revision": "bff40d24efb689d33e094083ce4a5d6835601730"
+          },
+          "verification_status": "verified",
+          "verified_at": "2026-11-09"
+        }
+      },
+      "primary_artifact_id": "mlx-oq4e-uncensored-dflash2",
+      "rate_class": "class-120b-moe"
     }
   },
   "schema_version": "macprovider.autotune-artifacts-source.v1",
