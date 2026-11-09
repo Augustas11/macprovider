@@ -1,6 +1,6 @@
 # SPEC-018 — Agentic tool calling (provider-side response synthesis)
 
-**Version:** 0.3.13 (2026-11-08, GLM calls parse one envelope at a time and call markup never reaches content; Related: #2259)
+**Version:** 0.3.14 (2026-11-09, request text never selects a reasoning mode through the Solstice GLM-5.3-Flash template; Related: #2244)
 **Depends on:** SPEC-001 v1.6, SPEC-002 v1.5.5, SPEC-006 v0.9, SPEC-008 (Pillar A model-hash trust layer — referenced by §10a), SPEC-011 v0.5 (warm-swap heartbeat `model_hash` — referenced by §10a), SPEC-015 v0.4 (receipts canonical output binding — see AC-17 and §N.5)
 **Status:** **LOCKED** at v0.2.10 by the streaming cleanup-rewrite byte-domain clarification. Previously LOCKED at v0.2.9 by the serial-turn `parallel_tool_calls` amendment (omitted/`false` stop after the first complete valid tool). Previously LOCKED at v0.2.8 by the #1594 OpenRouter-aligned AC-53 amendment (no independent messages[] count cap). Previously LOCKED at v0.2.7 by the Qwen3-Coder function-XML tool-call grammar amendment (documents the `<function=…><parameter=…>` XML body that Qwen3-Coder emits as a Qwen-row §3.1 body-grammar alternative, with OpenAI/MCP name charset; pending IMPL/conformance already landed on branch `fix/qwen3coder-toolcall-parse`); previously LOCKED at v0.2.6 by #784 C2b admission-timeout reconciliation — v0.2.4 spec PR #202 and IMPL PR #209 both landed (multi-turn acceptance, token-incremental streaming, `tool_call_id` validation, 1 MiB/2 MiB byte caps). v0.2.5 adds gpt-oss/OpenAI Harmony response parsing as a pending implementation/conformance gap. codex 4-lane r4 0/0/0; Claude blind-spot r2 0/0/0. SPEC-019 already depends on this as "LOCKED". The former "LOCK CANDIDATE pending PR" line was never flipped after merge. (Resolved gap, 2026-07-14, runbook item 15: AC-45's `X-MacProvider-Streaming-Mode` header — set by the coordinator on streaming `200` responses — was stripped by the public gateway's blanket `X-MacProvider-*` filter, making the "header absent" fail condition live on `api.malibu.tech`. Fixed by adding the header to the SPEC-006 v0.9.9 § 5.4 response-pass-through allowlist and un-stripping it at the gateway, validated against AC-45's closed enum. Chosen over scoping AC-45 to the coordinator surface because buyers hit the gateway, so scoping would have left AC-45's buyer-visible promise unmet. AC-45's normative text is unchanged; this is a documentation reconciliation, not a lock amendment. Residual: the coordinator currently emits the diagnostic only on the streaming success path — non-streaming AC-45 emission is a separate coordinator-side completeness item, out of scope for the gateway-strip fix.)
 
@@ -18,6 +18,7 @@ SPEC-018 is the **provider-side response synthesis contract** for OpenAI-wire to
 
 ## Change log
 
+- **v0.3.14 (2026-11-09, Related: #2244):** §3.14: message content does not select a reasoning mode through the Solstice GLM-5.3-Flash template; the provider removes that exact template's message-tag scan at load.
 - **v0.3.13 (2026-11-08, Related: #2259):** GLM multi-call robustness. §3.1
   `glm` row: each `<tool_call>` envelope parses on its own. Two observed
   malformations are repaired before parsing: a stray `</arg_value>` right after
@@ -1109,6 +1110,12 @@ reference goldens using `scripts/tests/fixtures/dsv4-encoding/token-ids.json`.
 Other model families use their existing tokenizer path.
 
 ### 3.14 Prompt segments and control tokens (v0.3.8)
+
+Message content MUST NOT select a reasoning mode: for the Solstice-AI
+uncensored GLM-5.3-Flash chat template (exact SHA-256 `1b927d9a…`) the provider
+removes the template's message-tag scan at load, keeps message text as sent,
+and leaves the snapshot bytes unchanged; only `reasoning_effort` and the other
+template variables select the mode.
 
 A **control token** of a loaded tokenizer is an added token that is special,
 or that the model's chat template (or, for DeepSeek-V4, the reference

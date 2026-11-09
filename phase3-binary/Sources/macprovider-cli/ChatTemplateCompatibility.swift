@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Hub
 import MLXHuggingFace
@@ -9,7 +10,7 @@ import Tokenizers
 /// identically. The artifact's own template bytes are never changed (they are
 /// part of the hashed snapshot); only the string handed to the renderer is.
 ///
-/// One rewrite exists: numeric attribute access. Jinja2 parses `x.0` as the
+/// The first rewrite is numeric attribute access. Jinja2 parses `x.0` as the
 /// subscript `x[0]` (`Getitem(x, Const(0))`, the same node `x[0]` produces),
 /// while swift-jinja's parser expects an identifier after `.` and throws
 /// "Expected identifier but found number." GLM-5.3-Flash's template uses
@@ -22,13 +23,71 @@ import Tokenizers
 /// literals and float literals (`1.5`) are untouched. A template the pinned
 /// parser already accepts can contain no such access, so this changes nothing
 /// for any template that renders today.
+///
+/// The second removes message-tag scanning from one exact template, the
+/// Solstice-AI uncensored GLM-5.3-Flash build's (SPEC-018 §3.14). That template
+/// reads `[default]`, `[regular]`, `{REASON:`, `[MODE:` and `[L0]`..`[L10]` out of
+/// every message, tool results included, so file contents could switch thinking
+/// off, and it deletes some of those tags from the text. The rewrite is keyed on
+/// the template's SHA-256, never on the model name. The `reasoning_effort`,
+/// `enable_thinking`, `regular` and `mode` template variables keep working.
 enum ChatTemplateCompatibility {
     struct Result: Equatable {
         let template: String
         let numericAttributeRewrites: Int
+        var messageTagScanRemoved = false
+        /// A template of this family whose bytes are not the reviewed ones.
+        var messageTagScanKept = false
     }
 
+    static let messageTagScanTemplateSHA256 = "1b927d9aaebbc9d98823db0bb746a199123724577f900fd62859b1de810e6d43"
+
     static func rewrite(_ template: String) -> Result {
+        let scan = removingMessageTagScan(template)
+        var result = rewriteNumericAttributes(scan.template ?? template)
+        result.messageTagScanRemoved = scan.template != nil
+        result.messageTagScanKept = scan.kept
+        return result
+    }
+
+    /// The single `event=chat_template_compat` line for a loaded template, nil
+    /// when nothing was rewritten and nothing needs a warning.
+    static func logLine(_ result: Result) -> String? {
+        var rewrites: [String] = []
+        if result.numericAttributeRewrites > 0 { rewrites.append("numeric_attribute_access") }
+        if result.messageTagScanRemoved { rewrites.append("message_tag_scan") }
+        var fields = ["event=chat_template_compat"]
+        if !rewrites.isEmpty {
+            fields.append("rewrite=\(rewrites.joined(separator: ","))")
+            fields.append("count=\(result.numericAttributeRewrites)")
+        }
+        if result.messageTagScanKept {
+            fields.append("warning=message_tag_scan_kept reason=template_sha256_mismatch")
+        }
+        return fields.count > 1 ? fields.joined(separator: " ") + "\n" : nil
+    }
+
+    private static func removingMessageTagScan(_ template: String) -> (template: String?, kept: Bool) {
+        let digest = SHA256.hash(data: Data(template.utf8)).map { String(format: "%02x", $0) }.joined()
+        guard digest == messageTagScanTemplateSHA256 else {
+            return (nil, template.contains("PROTIUM-1.0") && template.contains("{REASON:"))
+        }
+        var text = template
+        let spans = [
+            ("{%- for msg in messages %}\n    {%- if msg.content is string and ('[regular]'", "{%- endfor %}\n", ""),
+            ("{%- for msg in messages -%}\n    {%- set txt = msg.content", "{%- endfor -%}\n{%- set target_mode", "{%- set target_mode"),
+            ("{{- t | replace('[regular]', '')", "-}}", "{{- t -}}"),
+        ]
+        for (start, end, replacement) in spans {
+            guard let lower = text.range(of: start),
+                  let upper = text.range(of: end, range: lower.upperBound ..< text.endIndex)
+            else { return (nil, true) }
+            text.replaceSubrange(lower.lowerBound ..< upper.upperBound, with: replacement)
+        }
+        return (text, false)
+    }
+
+    static func rewriteNumericAttributes(_ template: String) -> Result {
         let chars = Array(template)
         var out = String()
         out.reserveCapacity(template.utf8.count + 16)
@@ -148,10 +207,8 @@ struct ChatTemplateCompatTokenizerLoader: MLXLMCommon.TokenizerLoader {
         let tokenizerData = try await config.tokenizerData
         let upstream = try PreTrainedTokenizer(tokenizerConfig: tokenizerConfig, tokenizerData: tokenizerData)
         let renderer = ChatTemplatePromptRenderer(tokenizerConfig: tokenizerConfig)
-        if renderer.numericAttributeRewrites > 0 {
-            FileHandle.standardError.write(Data(
-                "event=chat_template_compat rewrite=numeric_attribute_access count=\(renderer.numericAttributeRewrites)\n".utf8
-            ))
+        if let line = renderer.compatibilityLogLine {
+            FileHandle.standardError.write(Data(line.utf8))
         }
         let encoder = try PromptControlTokenEncoder(
             tokenizerConfig: tokenizerConfig,

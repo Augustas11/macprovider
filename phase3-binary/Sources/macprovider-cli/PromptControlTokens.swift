@@ -685,10 +685,12 @@ final class ChatTemplatePromptRenderer: @unchecked Sendable {
     private let lock = NSLock()
     private var compiled: [String: Jinja.Template] = [:]
     let numericAttributeRewrites: Int
+    let compatibilityLogLine: String?
 
     init(tokenizerConfig: Config) {
         let value: Config = tokenizerConfig.chatTemplate
         var rewrites = 0
+        var logLine: String?
         if let array = value.array() {
             var named: [String: String] = [:]
             for item in array {
@@ -698,11 +700,13 @@ final class ChatTemplatePromptRenderer: @unchecked Sendable {
         } else if let string = value.string() {
             let result = ChatTemplateCompatibility.rewrite(string)
             rewrites = result.numericAttributeRewrites
+            logLine = ChatTemplateCompatibility.logLine(result)
             source = .single(result.template)
         } else {
             source = nil
         }
         numericAttributeRewrites = rewrites
+        compatibilityLogLine = logLine
 
         var context: [String: Jinja.Value] = [:]
         for (key, value) in tokenizerConfig.dictionary(or: [:]) where Self.specialTokenAttributes.contains(key.string) {
