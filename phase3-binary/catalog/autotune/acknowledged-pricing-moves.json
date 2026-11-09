@@ -46,6 +46,11 @@
       "model": "z-ai/glm-5.3-flash-abliterated",
       "from_row": "zai-org/glm-5.3-flash-abliterated",
       "to_row": "default"
+    },
+    {
+      "model": "Solstice-AI/GLM-5.3-Flash-UNCENSORED-mlx-oQ4e-DFlash2",
+      "from_row": "default",
+      "to_row": "zai-org/glm-5.3-flash-uncensored"
     }
   ]
 }
