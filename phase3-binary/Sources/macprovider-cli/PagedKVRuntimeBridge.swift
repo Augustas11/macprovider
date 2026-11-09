@@ -1157,7 +1157,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                                 }
                             }
                         }
-                        self.clearDecodeSession()
+                        self.invalidateDecodeSession(containingAnyOf: inputs.map(\.requestID))
                         CBTrace.log(nil, "prefill_shared rows=\(inputs.count) chunk=\(chunkLength) ragged=\(raggedOffsets)")
                         return inputs.enumerated().map { index, input in
                             drafterFailures.contains(index)
@@ -1182,7 +1182,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                         for input in inputs {
                             self.removeRowState(for: input.requestID)
                         }
-                        self.clearDecodeSession()
+                        self.invalidateDecodeSession(containingAnyOf: inputs.map(\.requestID))
                         return inputs.map {
                             ContinuousBatchPrefillOutput(
                                 requestID: $0.requestID,
@@ -1275,7 +1275,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                     ))
                 }
             }
-            self.clearDecodeSession()
+            self.invalidateDecodeSession(containingAnyOf: inputs.map(\.requestID))
             return outputs
         }
         // Match serial serving: release reusable temporary buffers after a
@@ -4193,9 +4193,18 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     }
 
     private func invalidateDecodeSession(containing requestID: String) {
+        invalidateDecodeSession(containingAnyOf: [requestID])
+    }
+
+    /// Ends the decode session only when one of `requestIDs` rides it. A
+    /// prompt chunk for a row outside the session leaves the decoding rows'
+    /// caches untouched, so their packed batch stays valid; dropping it made
+    /// every decode hop between two prompt chunks repack all decoding rows
+    /// (a full copy of their KV) and then copy it again to grow.
+    private func invalidateDecodeSession(containingAnyOf requestIDs: [String]) {
         lock.lock()
         let session: DecodeSession?
-        if decodeSession?.requestIDs.contains(requestID) == true {
+        if let current = decodeSession, requestIDs.contains(where: current.requestIDs.contains) {
             session = decodeSession
             decodeSession = nil
         } else {
@@ -5897,10 +5906,18 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAtt
             batchedOffset = nil
             return
         }
-        let packedKeys = Self.concatenatePadded(keyArrays, fallback: firstKey)
-        keys = packedKeys
-        values = Self.concatenatePadded(valueArrays, fallback: firstValue)
-        length = packedKeys.dim(2)
+        // Pack with room for the next decode tokens, so the first step after
+        // a rebuild writes in place instead of copying the whole batch again
+        // to grow it. Only `[..<length]` is ever presented.
+        let longest = keyArrays.map { $0.dim(2) }.max() ?? 0
+        let capacity = PagedKVBlockLayout.amortizedGrownCapacity(
+            needed: longest + 1,
+            maxTokens: max(longest, maxSize ?? Int.max),
+            blockSizeTokens: blockSizeTokens
+        )
+        keys = Self.concatenatePadded(keyArrays, fallback: firstKey, paddedTo: capacity)
+        values = Self.concatenatePadded(valueArrays, fallback: firstValue, paddedTo: capacity)
+        length = longest
         rowMutationCounts = rowCaches.map(\.mutationCount)
         // `batchedOffset` asserts every row is at the same length (the
         // lockstep invariant). Setting it to the minimum for ragged rows made
@@ -5931,8 +5948,8 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAtt
             && buffer.dtype == incoming.dtype
     }
 
-    /// Writes `incoming` into the batch buffer in place, growing it like
-    /// `KVCacheSimple` when full. `rowStarts == nil` writes every row at
+    /// Writes `incoming` into the batch buffer in place, growing it by whole
+    /// growth steps like `KVCacheSimple` when full. `rowStarts == nil` writes every row at
     /// `stored` (lockstep); otherwise row `r` lands at `rowStarts[r]`. New
     /// capacity is zero-filled, so rows stay zero past their own length.
     /// Returns nil when `canWrite` fails.
@@ -5949,7 +5966,7 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAtt
         let needed = (rowStarts?.max() ?? stored) + n
         var target = buffer
         if buffer.dim(2) < needed {
-            let capacity = PagedKVBlockLayout.grownCapacity(
+            let capacity = PagedKVBlockLayout.amortizedGrownCapacity(
                 needed: needed,
                 maxTokens: maxTokens ?? Int.max,
                 blockSizeTokens: blockSizeTokens
@@ -5972,7 +5989,9 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAtt
         return target
     }
 
-    private static func concatenatePadded(_ arrays: [MLXArray], fallback: MLXArray) -> MLXArray {
+    /// Rows stacked on the batch axis, each zero-padded on the sequence axis
+    /// to the longest row, or to `paddedTo` when that is longer.
+    private static func concatenatePadded(_ arrays: [MLXArray], fallback: MLXArray, paddedTo: Int = 0) -> MLXArray {
         guard let first = arrays.first,
               arrays.allSatisfy({
                   $0.ndim == 4
@@ -5984,7 +6003,7 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAtt
         else {
             return fallback
         }
-        let maxSequenceLength = arrays.map { $0.dim(2) }.max() ?? 0
+        let maxSequenceLength = max(arrays.map { $0.dim(2) }.max() ?? 0, paddedTo)
         let padded = arrays.map { array -> MLXArray in
             let padTokens = maxSequenceLength - array.dim(2)
             guard padTokens > 0 else { return array }

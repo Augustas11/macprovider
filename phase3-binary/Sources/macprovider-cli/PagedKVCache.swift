@@ -88,6 +88,37 @@ enum PagedKVBlockLayout {
         return max(needed, min(alignedTo, maxTokens))
     }
 
+    /// Tokens a growing attention buffer adds at once, before rounding to
+    /// whole blocks. Same step as `KVCacheSimple` and the upstream
+    /// `BatchKVCache`.
+    static let growthStepTokens = 256
+
+    /// Capacity after growing a decode-path buffer so it fits `needed`
+    /// tokens: `needed` rounded up to whole growth steps (each a whole number
+    /// of allocator blocks), capped at `maxTokens`.
+    ///
+    /// Growing copies the whole stored history into a new buffer. With
+    /// `grownCapacity` that happened every `blockSizeTokens` decode tokens
+    /// (every 16 steps), once per row cache and once per batch buffer per
+    /// layer. On Qwen3-8B with a 16K-token row that is a 2.4 GB copy, plus a
+    /// transient second copy, every 16 tokens. Growing by a step makes it
+    /// every 256 tokens. The extra capacity is at most one step less one
+    /// token per buffer and is never readable: callers present only the
+    /// stored prefix.
+    static func amortizedGrownCapacity(
+        needed: Int,
+        maxTokens: Int,
+        blockSizeTokens: Int
+    ) -> Int {
+        let step = max(1, alignedCapacity(tokens: growthStepTokens, blockSizeTokens: blockSizeTokens))
+        guard needed > 0 else { return 0 }
+        let (rounded, overflow) = ((needed - 1) / step + 1).multipliedReportingOverflow(by: step)
+        guard !overflow else {
+            return grownCapacity(needed: needed, maxTokens: maxTokens, blockSizeTokens: blockSizeTokens)
+        }
+        return max(needed, min(rounded, maxTokens))
+    }
+
     /// `tokens` rounded up to whole blocks of `blockSizeTokens`.
     static func alignedCapacity(tokens: Int, blockSizeTokens: Int) -> Int {
         guard tokens > 0 else { return 0 }
@@ -666,7 +697,8 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
     }
 
     /// Appends `incoming` at `[stored ..< stored + n]` of `buffer`, growing it
-    /// to whole allocator blocks (capped at `maxTokens`). A buffer whose dtype
+    /// by whole growth steps (`amortizedGrownCapacity`, capped at
+    /// `maxTokens`). A buffer whose dtype
     /// or non-sequence dims differ from `incoming` falls back to the old exact
     /// concatenation, so promotion and shape behavior stay unchanged.
     private static func write(
@@ -707,7 +739,7 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
         maxTokens: Int,
         blockSizeTokens: Int
     ) -> MLXArray {
-        let capacity = PagedKVBlockLayout.grownCapacity(needed: needed, maxTokens: maxTokens, blockSizeTokens: blockSizeTokens)
+        let capacity = PagedKVBlockLayout.amortizedGrownCapacity(needed: needed, maxTokens: maxTokens, blockSizeTokens: blockSizeTokens)
         let extra = MLXArray.zeros(
             [incoming.dim(0), incoming.dim(1), capacity - stored, incoming.dim(3)],
             dtype: incoming.dtype
