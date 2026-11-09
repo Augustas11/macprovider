@@ -4,7 +4,8 @@
 Runs on the canary as the provider user, fed on stdin over STUDIO_SSH. The
 caller has already checked the signed catalog row against the repo bytes and
 `models verify-artifact`; this refuses a row the provider would not admit at
-start (not `recommendable`, unless config.yaml sets donor_mode: true), resolves
+start (not `recommendable`, unless donor mode is on: config.yaml donor_mode, with
+MACPROVIDER_DONOR_MODE in the provider's launchd environment winning), resolves
 the verified local snapshot path, rewrites exactly the nine identity fields under the provider CLI's config lock,
 validates the candidate with the installed CLI, keeps a timestamped backup and
 replaces the config atomically. Every field must already be present once as a
@@ -19,6 +20,7 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import plistlib
 import re
 import stat
 import subprocess
@@ -44,6 +46,9 @@ TOP = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*):(?:[ \t](.*))?$")
 DONOR_STATUSES = ("candidate", "listed", "recommendable")
 TRUE_VALUES = ("1", "true", "yes", "on")
 DEFAULT_VALIDATE_TIMEOUT_S = 300
+# `models list` exit 4: the config loaded, only the control socket of a stopped or
+# stale serve did not answer (ModelsSubcommand.swift), so it says nothing about the row.
+MODELS_LIST_SOCKET_EXIT = 4
 
 
 class Refusal(Exception):
@@ -130,12 +135,28 @@ def render(value):
     return value if PLAIN.fullmatch(value) else json.dumps(value)
 
 
+def launchd_donor_override(request):
+    # Config.swift applies MACPROVIDER_DONOR_MODE after the YAML, so it wins.
+    path = request.get("launchd_plist") or Path.home() / "Library/LaunchAgents" / ("%s.plist" % request["launchd_label"])
+    try:
+        with open(path, "rb") as f:
+            environment = plistlib.load(f).get("EnvironmentVariables") or {}
+    except FileNotFoundError:
+        return None
+    except Exception as exc:
+        raise Refusal("cannot read the provider's launchd environment (%s); nothing written" % type(exc).__name__)
+    value = environment.get("MACPROVIDER_DONOR_MODE")
+    return None if value is None else str(value).strip().lower() in TRUE_VALUES
+
+
 def require_admitted(request, lines, found):
     status = request.get("runtime_status")
     if status == "recommendable":
         return
-    donor = "donor_mode" in found and (
-        scalar_text(TOP.match(lines[found["donor_mode"]].rstrip("\r\n")).group(2) or "").lower() in TRUE_VALUES)
+    donor = launchd_donor_override(request)
+    if donor is None:
+        donor = "donor_mode" in found and (
+            scalar_text(TOP.match(lines[found["donor_mode"]].rstrip("\r\n")).group(2) or "").lower() in TRUE_VALUES)
     if not donor or status not in DONOR_STATUSES:
         raise Refusal("catalog row is %s, which this provider would not admit (it serves only a recommendable row "
                       "unless donor_mode is true); nothing written" % (status or "missing a runtime_status"))
@@ -186,12 +207,14 @@ def apply(config, cli, request):
             try:
                 check = subprocess.run([str(cli), "models", "list", "--json", "--config", tmp],
                                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                       stderr=subprocess.DEVNULL, timeout=timeout_s, check=False)
+                                       stderr=subprocess.PIPE, timeout=timeout_s, check=False)
             except subprocess.TimeoutExpired:
                 raise Refusal("installed CLI did not validate the switched config within %ss (a crash-looping "
                               "provider can slow it; raise CANARY_MODELS_LIST_TIMEOUT_S); nothing written" % timeout_s)
-            if check.returncode != 0:
-                raise Refusal("installed CLI rejected the switched config; nothing written")
+            if check.returncode not in (0, MODELS_LIST_SOCKET_EXIT):
+                detail = check.stderr.decode("utf-8", "replace").strip().splitlines()
+                raise Refusal("installed CLI rejected the switched config (exit %s%s); nothing written"
+                              % (check.returncode, ": " + detail[-1] if detail else ""))
             stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
             backup = config.with_name("%s.bak-switch-model-%s" % (config.name, stamp))
             bfd = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)

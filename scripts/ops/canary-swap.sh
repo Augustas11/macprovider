@@ -306,7 +306,7 @@ PY
   local vrc=0
   studio_ssh "$remote_env $cli models verify-artifact $key --json --config $cfg" > "$OPS_TMP_DIR/switch-verify.json" || vrc=$?
   [ "$vrc" = 0 ] || refuse "the $key artifact is not present and verified on the canary (models verify-artifact exit $vrc); download and verify it there first"
-  python3 -I - "$OPS_TMP_DIR/switch-verify.json" "$OPS_TMP_DIR/switch-row.json" "$key" "$override" "$validate_s" \
+  python3 -I - "$OPS_TMP_DIR/switch-verify.json" "$OPS_TMP_DIR/switch-row.json" "$key" "$override" "$validate_s" "$label" "${CANARY_LAUNCHD_PLIST:-}" \
     > "$OPS_TMP_DIR/switch-request.json" 2> "$OPS_TMP_DIR/switch-verify.err" <<'PY' ||
 import json, re, sys
 v, r = (json.load(open(p)) for p in sys.argv[1:3])
@@ -327,7 +327,8 @@ values = {"model": buyer, "model_artifact_sha256": r["sha256"], "model_catalog_k
           "model_catalog_sha256": r["sha256"], "model_catalog_version": r["version"],
           "model_catalog_hash": r["catalog_hash"]}
 print(json.dumps({"values": values, "local_path": local, "artifact_path": override, "buyer": buyer,
-                  "runtime_status": r["runtime_status"], "validate_timeout_s": validate_s}))
+                  "runtime_status": r["runtime_status"], "validate_timeout_s": validate_s,
+                  "launchd_label": sys.argv[6], "launchd_plist": sys.argv[7]}))
 PY
     refuse "$(tail -n1 "$OPS_TMP_DIR/switch-verify.err")"
   local buyer request arc=0
