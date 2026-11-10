@@ -15355,6 +15355,37 @@ maxTokens: maxTokens,
         return ["high", "xhigh", "max"].contains(request.reasoningEffort ?? "")
     }
 
+    /// SPEC-018-R010 (v0.3.16): an explicit buyer effort asks for thinking on
+    /// a template with a thinking switch. Reads the raw buyer effort, never
+    /// `templateReasoningEffort`, which injects `low` for tools and JSON.
+    static func explicitThinkingRequested(_ request: ChatCompletionRequest) throws -> Bool {
+        guard let effort = request.reasoningEffort, effort != "none",
+              case .text = request.responseFormat,
+              !request.containsNonTextMessageContentPart else { return false }
+        return try !ToolSelectionPolicy.selection(request.promptSource.toolChoice).requiresCall
+    }
+
+    /// SPEC-018-R010 (v0.3.16): renders thinking on for an explicit effort
+    /// only when the thinking-on prompt leaves `<think>` open, so §3.12 can
+    /// split the output; otherwise (no opener, or the template rejects the
+    /// render) the request renders thinking off, as without an effort. Every
+    /// serving path prepares through this, so they decide alike.
+    static func renderingRequestedThinking<Rendered>(
+        for request: ChatCompletionRequest,
+        templateSupportsThinkingToggle: Bool,
+        supportsBonsaiThinking: Bool,
+        render: (_ thinking: Bool) async throws -> Rendered,
+        promptTail: (Rendered) -> String
+    ) async throws -> Rendered {
+        if templateSupportsThinkingToggle, !supportsBonsaiThinking,
+           try explicitThinkingRequested(request),
+           let rendered = try? await render(true),
+           ReasoningOutput.promptLeavesThinkOpen(promptTail(rendered)) {
+            return rendered
+        }
+        return try await render(false)
+    }
+
     /// Validate media before processor work, test generation seams or dispatch.
     /// Parsing alone is never an assertion that the loaded model sees images.
     static func validateNativeVisionRequest(
@@ -15401,7 +15432,8 @@ maxTokens: maxTokens,
         templateSupportsPreserveThinking: Bool = false,
         nativeVisionProfile: NativeVisionProfile? = nil,
         toolSelectionModelID: String? = nil,
-        supportsBonsaiThinking: Bool = false
+        supportsBonsaiThinking: Bool = false,
+        requestedThinking: Bool = false
     ) throws -> UserInput {
         if let input = try validateNativeVisionRequest(request, profile: nativeVisionProfile) {
             return try NativeVisionProfile.userInput(from: input)
@@ -15449,7 +15481,7 @@ maxTokens: maxTokens,
         var additionalContext = Self.templateAdditionalContext(
             supportsThinkingToggle: templateSupportsThinkingToggle,
             supportsPreserveThinking: templateSupportsPreserveThinking,
-            enableThinking: Self.bonsaiThinkingEnabled(
+            enableThinking: requestedThinking || Self.bonsaiThinkingEnabled(
                 for: request, supportsBonsaiThinking: supportsBonsaiThinking)
         )
         // SPEC-018 §3.12: normalize against the loaded family, including
@@ -15545,20 +15577,29 @@ maxTokens: maxTokens,
         // Planned first: it validates the selected name before any prompt text.
         let plan = GrammarConstraintState.isRequired(request) ? nil : try toolCallPrefill(for: request, toolSelectionModelID: toolSelectionModelID)
         let grammar = try resolvedToolGrammar(for: request, templateToolFormat: context.configuration.toolCallFormat?.rawValue)
-        let input = try userInput(
+        let supportsBonsaiThinking = isPrismBonsai(context.model)
+        let lmInput: LMInput = try await renderingRequestedThinking(
             for: request,
             templateSupportsThinkingToggle: templateSupportsThinkingToggle,
-            templateSupportsPreserveThinking: templateSupportsPreserveThinking,
-            nativeVisionProfile: nativeVisionProfile,
-            toolSelectionModelID: toolSelectionModelID,
-            supportsBonsaiThinking: isPrismBonsai(context.model)
+            supportsBonsaiThinking: supportsBonsaiThinking,
+            render: { thinking in
+                let input = try userInput(
+                    for: request,
+                    templateSupportsThinkingToggle: templateSupportsThinkingToggle,
+                    templateSupportsPreserveThinking: templateSupportsPreserveThinking,
+                    nativeVisionProfile: nativeVisionProfile,
+                    toolSelectionModelID: toolSelectionModelID,
+                    supportsBonsaiThinking: supportsBonsaiThinking,
+                    requestedThinking: thinking
+                )
+                do {
+                    return try await context.processor.prepare(input: input)
+                } catch {
+                    throw ChatTemplateRequestError.mapping(error)
+                }
+            },
+            promptTail: { context.tokenizer.decode(tokenIds: Array($0.text.tokens.asArray(Int.self).suffix(16))) }
         )
-        let lmInput: LMInput
-        do {
-            lmInput = try await context.processor.prepare(input: input)
-        } catch {
-            throw ChatTemplateRequestError.mapping(error)
-        }
         guard let plan else {
             resolveOutputTraits(for: request, grammar: grammar, promptTokens: lmInput.text.tokens.asArray(Int.self), tokenizer: context.tokenizer)
             return (lmInput, nil)
@@ -15628,19 +15669,27 @@ maxTokens: maxTokens,
     ) async throws -> (tokens: [Int], toolCallPrefill: String?) {
         let plan = GrammarConstraintState.isRequired(request) ? nil : try toolCallPrefill(for: request, toolSelectionModelID: toolSelectionModelID)
         let grammar = try resolvedToolGrammar(for: request, templateToolFormat: templateToolFormat)
-        let input = try userInput(
+        let lmInput: LMInput = try await renderingRequestedThinking(
             for: request,
             templateSupportsThinkingToggle: templateSupportsThinkingToggle,
-            templateSupportsPreserveThinking: templateSupportsPreserveThinking,
-            toolSelectionModelID: toolSelectionModelID,
-            supportsBonsaiThinking: supportsBonsaiThinking
+            supportsBonsaiThinking: supportsBonsaiThinking,
+            render: { thinking in
+                let input = try userInput(
+                    for: request,
+                    templateSupportsThinkingToggle: templateSupportsThinkingToggle,
+                    templateSupportsPreserveThinking: templateSupportsPreserveThinking,
+                    toolSelectionModelID: toolSelectionModelID,
+                    supportsBonsaiThinking: supportsBonsaiThinking,
+                    requestedThinking: thinking
+                )
+                do {
+                    return try await processor.prepare(input: input)
+                } catch {
+                    throw ChatTemplateRequestError.mapping(error)
+                }
+            },
+            promptTail: { tokenizer.decode(tokenIds: Array($0.text.tokens.asArray(Int.self).suffix(16))) }
         )
-        let lmInput: LMInput
-        do {
-            lmInput = try await processor.prepare(input: input)
-        } catch {
-            throw ChatTemplateRequestError.mapping(error)
-        }
         let promptTokens = lmInput.text.tokens.asArray(Int.self)
         guard let plan else {
             resolveOutputTraits(for: request, grammar: grammar, promptTokens: promptTokens, tokenizer: tokenizer)

@@ -75,7 +75,10 @@ var anthropicKnownTopLevelKeys = []string{"model", "max_tokens", "system", "mess
 // substitutes `low` for an omitted effort when tools are declared. `medium`
 // is each catalog reasoning template's default level (GLM-5.3 and DeepSeek-V4
 // fall back to their defaults for it), so enabled budgets below 16384 tokens
-// and adaptive send `medium`; larger budgets send `high`. Disabled is `low`.
+// and adaptive send `medium`; larger budgets send `high`. Disabled is `none`:
+// an explicit `low` turns thinking on for a template with a thinking switch
+// (SPEC-018 v0.3.16), and `none` renders the lowest level where a model
+// cannot disable reasoning.
 func anthropicThinkingToReasoningEffort(raw json.RawMessage) (bool, string, error) {
 	if len(bytes.TrimSpace(raw)) == 0 || anthropicRawIsNull(raw) {
 		return false, "", nil
@@ -94,7 +97,7 @@ func anthropicThinkingToReasoningEffort(raw json.RawMessage) (bool, string, erro
 		}
 		return true, "medium", nil
 	case "disabled":
-		return false, "low", nil
+		return false, "none", nil
 	case "adaptive":
 		return true, "medium", nil
 	default:

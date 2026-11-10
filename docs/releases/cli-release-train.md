@@ -143,6 +143,12 @@ This bootstrap dependency remains unresolved; no qualification exemption,
 stale-evidence rebind or MTP-off deployment is authorized by this train record.
 The exploratory goal matrix does not constitute admission qualification.
 
+## Following CLI release — on-request reasoning (tracked 2026-11-10)
+
+| Item | Provider-side change | Status |
+|---|---|---|
+| [#2275](https://github.com/Augustas11/macprovider/pull/2275) on-request reasoning (Related: #2269) | An explicit buyer `reasoning_effort` turns thinking on for Qwen3.5, Qwen3.6, Qwen3.8 and Nemotron-3 templates where the output splits; omitted effort keeps the byte-identical thinking-off prompt; the local Messages adapter maps `thinking: disabled` to `none` (SPEC-018 v0.3.16, SPEC-001 v1.9.53). Decode-path digest changes to `71a35d0b…` | Order: (1) the Pearl runtime carrying #2274 and #2275 is live first (coordinator release train); (2) the first CLI tag cut after the merge (1.8.285, or 1.8.286 if the runtime takes `v1.8.285`) through `scripts/ops/cli-release.sh status` then `next --run`, not promoted before step (1) is live; (3) the native-MTP identity-only rebind to that CLI for decode-path digest `71a35d0b…` (SPEC-048 MTP-13) through `scripts/ops/catalog-activate.sh status` then `next --run` |
+
 ## Next CLI release — 1.8.283 (staged 2026-11-09)
 
 1.8.281 is live and the fleet recommendation. `binaryVersion` is staged at 1.8.283; tag `v1.8.282` is consumed by the coordinator runtime. The checked-in `latest_binary_version` rows name live stable 1.8.281. The cut carries the items below.
