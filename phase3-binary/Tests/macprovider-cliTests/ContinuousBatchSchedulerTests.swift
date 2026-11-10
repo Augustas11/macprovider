@@ -7144,7 +7144,8 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         let ids = ["running", "4k", "8k", "16k"]
         let lengths = ["running": 1, "4k": 8, "8k": 16, "16k": 32]
         var scripts: [String: [Int]] = ["4k": [2], "8k": [3], "16k": [4]]
-        scripts["running"] = Array(repeating: 1, count: 40)
+        // The running row decodes through every prompt's prefill.
+        scripts["running"] = Array(repeating: 1, count: 80)
         let backend = ScriptedBackend(scripts: scripts)
         let scheduler = try await makeScheduler(
             descriptor: Self.descriptor(maxPhysicalBlocks: 64),
@@ -7163,22 +7164,24 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             Task {
                 try await scheduler.submit(.init(
                     id: id, conversationKey: "", promptTokens: Array(1 ... lengths[id]!),
-                    maxOutputTokens: id == "running" ? 40 : 1
+                    maxOutputTokens: id == "running" ? 80 : 1
                 ))
             }
         }
         for task in tasks { _ = try await task.value }
 
-        // Every forward prefills one row: no prompt halves another's turn.
+        // The head's prompt holds min(tokens left, budget) of each turn, so
+        // a peer shares only the head's last budget of chunks: the 8K row
+        // joins the 4K's last three forwards and never slows its first one.
         let order = await backend.prefillOrder()
         XCTAssertEqual(
             order,
-            [["running"]] + Array(repeating: ["4k"], count: 4) + Array(repeating: ["8k"], count: 8)
+            [["running"], ["4k"]] + Array(repeating: ["4k", "8k"], count: 3) + Array(repeating: ["8k"], count: 5)
                 + Array(repeating: ["16k"], count: 16)
         )
-        // Turns: runs of prefill forwards between decode windows. The turn
-        // budget (4 chunks) goes to one prompt at a time, and decode windows
-        // still interleave.
+        // Turns: runs of prefill forwards between decode windows. While a row
+        // decodes the head gets one forward per turn, so a decode window
+        // follows every chunk (v0.3.42).
         var turns: [[String]] = []
         var current: [String] = []
         for event in await backend.events() {
@@ -7194,8 +7197,8 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertEqual(turns.first, ["running"])
         XCTAssertEqual(
             Array(turns.dropFirst()),
-            [Array(repeating: "4k", count: 4)] + Array(repeating: Array(repeating: "8k", count: 4), count: 2)
-                + Array(repeating: Array(repeating: "16k", count: 4), count: 4),
+            [["4k"]] + Array(repeating: ["4k", "8k"], count: 3) + Array(repeating: ["8k"], count: 5)
+                + Array(repeating: ["16k"], count: 16),
             "\(turns)"
         )
     }

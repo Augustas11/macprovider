@@ -1,11 +1,22 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.41
+Version: v0.3.42
 Status: draft (normative contract; runtime enablement is default-on per Mac behind the FR-CB10 on-device self-check, v0.3.15)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.3.42 (2026-11-10, FR-CB2 one head chunk per turn while rows decode):**
+FR-CB2 prefill packing: while any row is decoding, the head's prompt gets one
+original chunk per turn; the v0.3.41 continuation (the head leading a fresh
+group in the same turn) applies only when no row is decoding. A decode window
+therefore follows every chunk, so a running row waits one chunk, not the whole
+turn budget, per decode window. On an M5, staggered 1K/4K/8K/16K rows under
+v0.3.41 gave running rows 4.2 s per token while a prompt prefilled, against
+1.9 s for upstream mlx-swift-lm PR #771. Head-first ordering, the peer budget
+rule (the head's prompt holds `min(tokens left, budget)`, so a peer shares only
+the head's last budget of chunks) and every chunk partition are unchanged.
+
 **Change log v0.3.41 (2026-11-10, FR-CB2 the head's prompt takes the turn budget first):**
 FR-CB2 prefill packing: the turn's token budget goes to the head's prompt
 first. After each forward the head leads a fresh group with its next

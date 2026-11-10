@@ -1137,8 +1137,8 @@ enum ContinuousBatchPrefillGrouping {
     /// `cohortTokenBudget`, join only with as many prompt tokens left as the
     /// head, so the head's first token never waits for a longer prompt.
     /// (v0.3.41) The head's prompt comes first in the budget: it continues
-    /// with its next chunks in the same turn, so it holds up to
-    /// `min(remaining, tokenBudget)` tokens. A peer with a different number
+    /// with its next chunks in the same turn when no row is decoding, so it
+    /// holds up to `min(remaining, tokenBudget)` tokens. A peer with a different number
     /// of tokens left joins only within what that leaves.
     static func select(
         _ candidates: [ContinuousBatchPrefillCandidate],
@@ -6067,9 +6067,10 @@ actor ContinuousBatchScheduler {
             activePrompt[id]?.prefillBypassTurns += 1
         }
 
-        // The turn budget goes to the head's prompt first (v0.3.41): after
-        // each forward the head's next original chunk leads a new group
-        // while the per-iteration budget has room, and peers get only what
+        // The turn budget goes to the head's prompt first (v0.3.41): with no
+        // row decoding, after each forward the head's next original chunk
+        // leads a new group while the per-iteration budget has room (v0.3.42:
+        // one chunk per turn while rows decode), and peers get only what
         // the head's prompt leaves (`ContinuousBatchPrefillGrouping.select`).
         // Separate forwards keep
         // every row's chunk partition. A resume boundary is a numerical
@@ -6124,9 +6125,12 @@ actor ContinuousBatchScheduler {
             // turn and has a free slot ends the turn instead: it is admitted
             // and ordered (a short prompt leads) at the next turn, not after
             // the head's whole budget.
+            // While rows decode, the head gets one chunk per turn (v0.3.42):
+            // a decode window follows every chunk, so a running row waits one
+            // chunk, not the whole budget, per decode window.
             let headID = head.row.request.id
             let arrivalAwaitsAdmission = !waiting.isEmpty && occupiedSlots < configuration.maxActiveRows
-            if continuation.isEmpty, continuationTokens > 0, !arrivalAwaitsAdmission,
+            if continuation.isEmpty, continuationTokens > 0, !arrivalAwaitsAdmission, activeDecode.isEmpty,
                group.contains(where: { $0.row.request.id == headID }),
                activePrompt[headID] != nil {
                 let order = [headID] + prefillCandidateOrder().filter { $0 != headID }
