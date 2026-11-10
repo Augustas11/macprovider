@@ -436,14 +436,20 @@ final class NativeMTPGLM5NextObservationTests: XCTestCase {
     }
 
     /// Lab-only: observe the real GLM-5.3-Flash artifact's headers (no weights
-    /// are loaded). Set MACPROVIDER_GLM53_ARTIFACT_DIR to the snapshot.
+    /// are loaded). Set MACPROVIDER_GLM53_ARTIFACT_DIR to the snapshot. The
+    /// override count is per artifact: base GLM-5.3-Flash records 554, the
+    /// uncensored Solstice build 543. Set MACPROVIDER_GLM53_EXPECTED_OVERRIDES
+    /// for an artifact other than the base build. The name stays as recorded
+    /// in the v1.8.256 admission evidence.
     func testRealGLM53ArtifactObservesWith554Overrides() throws {
         guard let path = ProcessInfo.processInfo.environment["MACPROVIDER_GLM53_ARTIFACT_DIR"], !path.isEmpty else {
             throw XCTSkip("MACPROVIDER_GLM53_ARTIFACT_DIR not set")
         }
         let pair = try NativeMTPArtifactObserver.observeEmbedded(targetDirectory: URL(fileURLWithPath: path, isDirectory: true))
         let representation = try NativeMTPArtifactObserver.affineRepresentation(for: pair)
-        XCTAssertEqual(representation.perLayerExceptions.count, 554)
+        let expected = ProcessInfo.processInfo.environment["MACPROVIDER_GLM53_EXPECTED_OVERRIDES"]
+            .flatMap(Int.init) ?? 554
+        XCTAssertEqual(representation.perLayerExceptions.count, expected)
         XCTAssertTrue(representation.perLayerExceptions.allSatisfy { $0.hasPrefix("target/") })
         XCTAssertTrue(representation.unquantizedExceptions.isEmpty)
         XCTAssertEqual(representation.groupSize, 64)
