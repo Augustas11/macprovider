@@ -9,7 +9,6 @@
     {
       "spec_id": "SPEC-001",
       "title": "Phase 3 Binary: Mac Provider Inference CLI",
-      "version": "1.9.53",
       "path": "specs/SPEC-001-phase3-binary.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -35,7 +34,6 @@
     {
       "spec_id": "SPEC-002",
       "title": "Phase 4 Coordinator: Mac Provider Request Router",
-      "version": "1.6.30",
       "path": "specs/SPEC-002-coordinator.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -62,7 +60,6 @@
     {
       "spec_id": "SPEC-003",
       "title": "Open Onboarding: Distribution, Lifecycle & Onboarding UX",
-      "version": "0.12.4",
       "path": "specs/SPEC-003-open-onboarding.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -91,7 +88,6 @@
     {
       "spec_id": "SPEC-004",
       "title": "Smart Router",
-      "version": "0.3.6",
       "path": "specs/SPEC-004-smart-router.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -120,7 +116,6 @@
     {
       "spec_id": "SPEC-005",
       "title": "Billing, Settlement, and Provider Rewards",
-      "version": "0.6.25",
       "path": "specs/SPEC-005-billing.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -152,7 +147,6 @@
     {
       "spec_id": "SPEC-006",
       "title": "Buyer API Gateway: Mac Provider's first public buyer surface",
-      "version": "0.9.75",
       "path": "specs/SPEC-006-buyer-api.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -182,7 +176,6 @@
     {
       "spec_id": "SPEC-007",
       "title": "Internal Operator Protocol Explorer",
-      "version": "0.5.2",
       "path": "specs/SPEC-007-explorer.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -206,7 +199,6 @@
     {
       "spec_id": "SPEC-008",
       "title": "Tier-2 Trust Layer",
-      "version": "0.7.2",
       "path": "specs/SPEC-008-tier2.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -235,7 +227,6 @@
     {
       "spec_id": "SPEC-009",
       "title": "MacProvider Console v2",
-      "version": "0.1",
       "path": "specs/SPEC-009-console-v2.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -259,7 +250,6 @@
     {
       "spec_id": "SPEC-010",
       "title": "Provider Model Catalog",
-      "version": "1.17",
       "path": "specs/SPEC-010-model-catalog.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -283,7 +273,6 @@
     {
       "spec_id": "SPEC-011",
       "title": "Operator-Pushed Warm Swap",
-      "version": "0.5",
       "path": "specs/SPEC-011-operator-pushed-warm-swap.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -307,7 +296,6 @@
     {
       "spec_id": "SPEC-012",
       "title": "Coordinator Demand-Pull Model Swap and Buyer Cold-Model Visibility",
-      "version": "0.3",
       "path": "specs/SPEC-012-coordinator-demand-pull.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -341,7 +329,6 @@
     {
       "spec_id": "SPEC-013",
       "title": "`malibu-cli autotune` subcommand",
-      "version": "0.3.1",
       "path": "specs/SPEC-013-cli-autotune.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -371,7 +358,6 @@
     {
       "spec_id": "SPEC-014",
       "title": "Provider Portal (seller-facing web surface)",
-      "version": "0.12",
       "path": "specs/SPEC-014-provider-portal.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -395,7 +381,6 @@
     {
       "spec_id": "SPEC-015",
       "title": "Verifiable inference receipts",
-      "version": "0.4.17",
       "path": "specs/SPEC-015-receipts.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -431,7 +416,6 @@
     {
       "spec_id": "SPEC-016",
       "title": "Provider payout pipeline (USDC on Base)",
-      "version": "0.1.26",
       "path": "specs/SPEC-016-payout-pipeline.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -473,7 +457,6 @@
     {
       "spec_id": "SPEC-017",
       "title": "Network Stats API",
-      "version": "0.2.1",
       "path": "specs/SPEC-017-network-stats-api.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -504,7 +487,6 @@
     {
       "spec_id": "SPEC-018",
       "title": "Agentic tool calling (provider-side response synthesis)",
-      "version": "0.3.16",
       "path": "specs/SPEC-018-agentic-tool-calling.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -535,7 +517,6 @@
     {
       "spec_id": "SPEC-019",
       "title": "Structured output (`response_format: json_schema`)",
-      "version": "0.3.3",
       "path": "specs/SPEC-019-structured-output.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -564,7 +545,6 @@
     {
       "spec_id": "SPEC-020",
       "title": "Provider autoupdate",
-      "version": "v0.1.31",
       "path": "specs/SPEC-020-provider-autoupdate.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -594,7 +574,6 @@
     {
       "spec_id": "SPEC-021",
       "title": "MALIBU rewards emission ledger",
-      "version": "0.5.0",
       "path": "specs/SPEC-021-malibu-emission-ledger.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -627,7 +606,6 @@
     {
       "spec_id": "SPEC-022",
       "title": "Verified model settlement",
-      "version": "v0.4.9",
       "path": "specs/SPEC-022-verified-model-settlement.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -665,7 +643,6 @@
     {
       "spec_id": "SPEC-023",
       "title": "Installer-Integrated Autotune Recommend",
-      "version": "v0.22.38",
       "path": "specs/SPEC-023-installer-autotune-recommend.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -694,7 +671,6 @@
     {
       "spec_id": "SPEC-024",
       "title": "Prefix-cache billing and provider-local cache isolation",
-      "version": "0.2.17",
       "path": "specs/SPEC-024-prefix-cache-billing.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -725,7 +701,6 @@
     {
       "spec_id": "SPEC-025",
       "title": "Native Mac App (signed `.dmg`, native Mac app with menu-bar presence)",
-      "version": "v0.46.0",
       "path": "specs/SPEC-025-native-mac-app.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -752,7 +727,6 @@
     {
       "spec_id": "SPEC-026",
       "title": "Browserless Provider Onboarding (one-click Launch Provider)",
-      "version": "v0.30.1",
       "path": "specs/SPEC-026-browserless-provider-onboarding.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -779,7 +753,6 @@
     {
       "spec_id": "SPEC-027",
       "title": "Provider Proof of Ownership for App-Track Wallet Changes",
-      "version": "v0.1.1",
       "path": "specs/SPEC-027-provider-proof-of-ownership.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -803,7 +776,6 @@
     {
       "spec_id": "SPEC-028",
       "title": "Classic External-Draft MLX Speculative Decoding for Provider Serve",
-      "version": "0.3-draft",
       "path": "specs/SPEC-028-mlx-speculative-decoding.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -833,7 +805,6 @@
     {
       "spec_id": "SPEC-029",
       "title": "Sweep Workload-Class Stratification",
-      "version": "0.1-draft",
       "path": "specs/SPEC-029-sweep-workload-class-stratification.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -861,7 +832,6 @@
     {
       "spec_id": "SPEC-030",
       "title": "Losslessness Probe",
-      "version": "v0.1.1",
       "path": "specs/SPEC-030-losslessness-probe.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -889,7 +859,6 @@
     {
       "spec_id": "SPEC-031",
       "title": "Canary Probe, Degrade & Sanction Lifecycle",
-      "version": "v0.3.9",
       "path": "specs/SPEC-031-canary-degrade-sanctions.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -920,7 +889,6 @@
     {
       "spec_id": "SPEC-032",
       "title": "Autotune Hardware-Evidence Admission Gate, OPoI & Proof-of-Weights Boundary",
-      "version": "v0.3.7",
       "path": "specs/SPEC-032-proof-of-weights-hello-gate.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -955,7 +923,6 @@
     {
       "spec_id": "SPEC-033",
       "title": "Hardware-Evidence Verifier (`hardware-verifier.v2`)",
-      "version": "v0.9.0",
       "path": "specs/SPEC-033-hardware-verifier.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -982,7 +949,6 @@
     {
       "spec_id": "SPEC-034",
       "title": "Referral admission, provider invites, and advocacy rewards",
-      "version": "v0.4.7",
       "path": "specs/SPEC-034-referral-gated-prebeta.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -1012,7 +978,6 @@
     {
       "spec_id": "SPEC-035",
       "title": "Provider connection diagnostics and failure history",
-      "version": "v0.4.4",
       "path": "specs/SPEC-035-provider-connection-diagnostics.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1040,7 +1005,6 @@
     {
       "spec_id": "SPEC-037",
       "title": "KV survival across provider restarts (encrypted provider-local disk tier)",
-      "version": "v0.2.4",
       "path": "specs/SPEC-037-kv-survival-restart.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1072,7 +1036,6 @@
     {
       "spec_id": "SPEC-036",
       "title": "Compute-Integrity Receipt Companion",
-      "version": "v0.3.0",
       "path": "specs/SPEC-036-compute-integrity-receipt.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1101,7 +1064,6 @@
     {
       "spec_id": "SPEC-038",
       "title": "Continuous batching for concurrent provider inference",
-      "version": "v0.3.40",
       "path": "specs/SPEC-038-continuous-batching.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1136,7 +1098,6 @@
     {
       "spec_id": "SPEC-039",
       "title": "Paged KV / paged-attention engine",
-      "version": "v0.1.32",
       "path": "specs/SPEC-039-paged-kv-attention-engine.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1168,7 +1129,6 @@
     {
       "spec_id": "SPEC-040",
       "title": "Wallet-Native Buyer Sessions",
-      "version": "0.1.9",
       "path": "specs/SPEC-040-wallet-native-buyer-sessions.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1205,7 +1165,6 @@
     {
       "spec_id": "SPEC-041",
       "title": "Relay-Blind Request Encryption",
-      "version": "0.7.0",
       "path": "specs/SPEC-041-relay-blind-request-encryption.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1240,7 +1199,6 @@
     {
       "spec_id": "SPEC-042",
       "title": "Pool Control Plane and Trusted-Pool Manifest",
-      "version": "0.0.44",
       "path": "specs/SPEC-042-pool-control-plane.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1282,7 +1240,6 @@
     {
       "spec_id": "SPEC-043",
       "title": "Trusted Pool Creator Onboarding MVP",
-      "version": "0.3.6",
       "path": "specs/SPEC-043-trusted-pool-creator-onboarding.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -1322,7 +1279,6 @@
     {
       "spec_id": "SPEC-044",
       "title": "Malibu Model Catalog Economics",
-      "version": "0.2.12",
       "path": "specs/SPEC-044-malibu-model-catalog-economics.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1360,7 +1316,6 @@
     {
       "spec_id": "SPEC-045",
       "title": "Local Consumer Endpoint Mode",
-      "version": "0.2.0",
       "path": "specs/SPEC-045-local-consumer-endpoint-mode.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1397,7 +1352,6 @@
     {
       "spec_id": "SPEC-046",
       "title": "Provider BYOM Discovery",
-      "version": "0.5.0",
       "path": "specs/SPEC-046-provider-byom-discovery.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1435,7 +1389,6 @@
     {
       "spec_id": "SPEC-047",
       "title": "Network Model Admission",
-      "version": "0.2.9",
       "path": "specs/SPEC-047-network-model-admission.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1477,7 +1430,6 @@
     {
       "spec_id": "SPEC-048",
       "title": "Native Multi-Token Prediction Serving",
-      "version": "0.1.80",
       "path": "specs/SPEC-048-native-mtp-serving.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1523,7 +1475,6 @@
     {
       "spec_id": "SPEC-049",
       "title": "Operator-Constrained Privacy Class",
-      "version": "0.8.0",
       "path": "specs/SPEC-049-operator-constrained-privacy-class.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1560,7 +1511,6 @@
     {
       "spec_id": "SPEC-050",
       "title": "MALIBU Stake Allowance",
-      "version": "0.1.2",
       "path": "specs/SPEC-050-malibu-stake-allowance.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1594,7 +1544,6 @@
     {
       "spec_id": "SPEC-051",
       "title": "Multi-Mac Shard Groups",
-      "version": "0.2.6",
       "path": "specs/SPEC-051-multi-mac-shard-groups.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -12142,7 +12091,7 @@
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/DecodePathIdentityTests.swift:testEmbeddedDigestIsTheManifestDigestOfThisTree",
-        "phase3-binary/Tests/macprovider-cliTests/NativeMTPAdmissionSidecarTests.swift:testDecodePathEntryRefusesAChangedDecodePath",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPAdmissionSidecarTests.swift:testDecodePathEntryAdmitsTheModelWhenTheDecodePathDiffers",
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPAdmissionSidecarTests.swift:testDecodePathEntryStaysValidForANewCLIWithTheSameDecodePath",
         "scripts/tests/test_decode_path_digest.py:DecodePathDigestTests",
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPAdmissionSidecarTests.swift:testProductionLoaderRejectsLegacyObjectSchema",

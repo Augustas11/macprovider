@@ -147,13 +147,14 @@ class NativeMTPAdmissionSidecarTests(unittest.TestCase):
         value["entry"]["metallib_sha256"] = "2" * 64
         return value
 
-    def test_decode_path_entry_needs_a_reader_cli_with_the_same_digest(self):
+    def test_decode_path_entry_needs_a_reader_cli_and_its_digest_is_provenance(self):
         with self.assertRaisesRegex(SidecarError, "provider_decode_path_digest"):
             build(self.decode_path_tuple(), release_input())
         release = release_input()
+        # SPEC-048 0.1.81: a reader CLI with a different digest still publishes.
         release["provider_decode_path_digest"] = "3" * 64
-        with self.assertRaisesRegex(SidecarError, "requalify"):
-            build(self.decode_path_tuple(), release)
+        self.assertEqual(json.loads(build(self.decode_path_tuple(), release))["entries"][0]["decode_path_digest"],
+                         "1" * 64)
         release["provider_decode_path_digest"] = "1" * 64
         entry = json.loads(build(self.decode_path_tuple(), release))["entries"][0]
         # Dual-field: the identity provenance old CLIs require stays present.

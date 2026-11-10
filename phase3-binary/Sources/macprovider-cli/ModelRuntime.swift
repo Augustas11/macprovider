@@ -2406,6 +2406,17 @@ actor ModelRuntime: ModelRuntimeServing {
     /// tuple. Reset to pending on every swap.
     private var continuousBatchingSelfCheck: ContinuousBatchingSelfCheckState = .pending
     private var continuousBatchingSelfCheckReport: ContinuousBatchingSelfCheckReport?
+    /// SPEC-038 AC-26 leg (a) inside the FR-CB10 self-check (v0.3.41): nil
+    /// until it runs for the loaded tuple (a signed `cached_turns_accepted`
+    /// grant then applies provisionally), true when keyed cached turns
+    /// matched cold turns, false when they did not. Reset on every swap.
+    private var continuousBatchingCachedTurnsSelfCheck: Bool?
+    /// Conversation keys of an in-flight leg (a) probe: their cached turns
+    /// enter the scheduler before the result exists, so the probe measures
+    /// the batched resume itself.
+    private var continuousBatchingCachedTurnsProbeKeys: Set<String> = []
+    /// Positive-cached rows of probe keys that entered the scheduler.
+    private var continuousBatchingCachedTurnsProbeBatchedHits = 0
     // Only real native runtimes select this; preloaded/test runtimes leave it nil.
     private(set) var mlxCacheLimitMBForLoading: Int? = nil
     private var mlxCacheLimitBeforeLFM25: Int?
@@ -4864,7 +4875,14 @@ maxTokens: 1,
         let signedPolicyAuthorized = policyLive
             && matchingEntry != nil
             && !continuousBatchingEmergencyOffOverride
-        let locallyAuthorized = signedPolicyAuthorized && descriptorAdmitted
+        // SPEC-038 v0.3.41: a granted FR-CB10 self-check authorizes CB without
+        // a signed positive entry; the signed policy only revokes.
+        let selfCheckGranted: Bool
+        if case .granted = continuousBatchingSelfCheck { selfCheckGranted = true } else { selfCheckGranted = false }
+        let tupleRevoked = requestedTuple.map { continuousBatchingAcceptanceCoverage.isRevoked($0) } ?? false
+        let authorized = !continuousBatchingEmergencyOffOverride && !tupleRevoked
+            && (signedPolicyAuthorized || selfCheckGranted)
+        let locallyAuthorized = authorized && descriptorAdmitted
         let decisionReason: String
         if continuousBatchingEmergencyOffOverride {
             decisionReason = "emergency_off"
@@ -4902,9 +4920,8 @@ maxTokens: 1,
             expiresAt: expiresAt,
             rolloutMode: matchingEntry?.rollout.rawValue ?? ContinuousBatchingMode.off.rawValue,
             tupleSHA256: matchingEntry?.tupleSHA256,
-            authorized: signedPolicyAuthorized,
-            cachedTurnsAuthorized: locallyAuthorized && effectiveContinuousBatchingCachedTurns
-                && matchingEntry?.tuple.cachedTurnsAccepted == true,
+            authorized: authorized,
+            cachedTurnsAuthorized: locallyAuthorized && continuousBatchCachedTurnsAccepted(conversationKey: nil),
             emergencyOffOverride: continuousBatchingEmergencyOffOverride,
             localProofResult: localProofResult,
             decisionReason: decisionReason
@@ -6564,6 +6581,76 @@ maxTokens: 1,
         return selfCheckGeneration == generation
     }
 
+    /// SPEC-038 AC-26 leg (a) result for `expected`, applied only while it is
+    /// still the loaded subject (same fence as `applyContinuousBatchingSelfCheck`).
+    @discardableResult
+    func applyContinuousBatchingCachedTurnsSelfCheck(
+        _ passed: Bool,
+        expected: ContinuousBatchingSelfCheckTarget
+    ) -> Bool {
+        guard continuousBatchingSelfCheckTarget(includeDecided: true) == expected else { return false }
+        continuousBatchingCachedTurnsSelfCheck = passed
+        return true
+    }
+
+    func continuousBatchingCachedTurnsSelfCheckResult() -> Bool? {
+        continuousBatchingCachedTurnsSelfCheck
+    }
+
+    /// SPEC-038 AC-26 leg (a) inside the FR-CB10 self-check (v0.3.41): a keyed
+    /// two-turn conversation through the serving path. The later turn must
+    /// resume the earlier turn's cache inside a CB row (positive cached
+    /// tokens, no serial route) and produce the greedy output of the same turn
+    /// sent cold under a new key. Small and bounded: one ~200-token prompt and
+    /// 16 output tokens per turn. Coordinator-invisible: no receipt, usage or
+    /// billing; both keys are purged afterwards. Nil when cached turns cannot
+    /// batch here at all (operator kill switch, no scheduler, nothing loaded).
+    func runContinuousBatchingCachedTurnsProbe() async throws -> Bool? {
+        guard effectiveContinuousBatchingCachedTurns, continuousBatchScheduler != nil,
+              let modelID = currentModelID, state == .ready
+        else { return nil }
+        let nonce = UUID().uuidString.lowercased()
+        let warmKey = "conv:cb-selfcheck-ac26-\(nonce)-warm"
+        let coldKey = "conv:cb-selfcheck-ac26-\(nonce)-cold"
+        continuousBatchingCachedTurnsProbeKeys.insert(warmKey)
+        let hitsBefore = continuousBatchingCachedTurnsProbeBatchedHits
+        defer { continuousBatchingCachedTurnsProbeKeys.remove(warmKey) }
+        func request(_ messages: [[String: String]], id: String, key: String) throws -> ChatCompletionRequest {
+            let body: [String: Any] = [
+                "model": modelID, "messages": messages, "max_tokens": 16, "temperature": 0, "top_p": 1,
+            ]
+            return try ChatCompletionRequest.parse(data: JSONSerialization.data(withJSONObject: body))
+                .withRequestID("cb-selfcheck-ac26-\(nonce)-\(id)")
+                .withConversationKey(key)
+        }
+        do {
+            let first: [[String: String]] = [
+                ["role": "user", "content": ContinuousBatchingSelfCheck.promptTexts(count: 2)[1]],
+            ]
+            let turn1 = try await complete(request(first, id: "1", key: warmKey))
+            let second = first + [
+                ["role": "assistant", "content": turn1.content],
+                ["role": "user", "content": "Repeat your answer in one short sentence."],
+            ]
+            let warm = try await complete(request(second, id: "2w", key: warmKey))
+            let cold = try await complete(request(second, id: "2c", key: coldKey))
+            await conversationCache.purgeHot(conversationKey: warmKey)
+            await conversationCache.purgeHot(conversationKey: coldKey)
+            let batched = continuousBatchingCachedTurnsProbeBatchedHits > hitsBefore
+            let passed = warm.cachedPromptTokens > 0 && batched && cold.cachedPromptTokens == 0
+                && warm.content == cold.content && warm.reasoningContent == cold.reasoningContent
+                && warm.finishReason == cold.finishReason
+            FileHandle.standardError.write(Data(
+                "event=cb_self_check action=cached_turns_probe result=\(passed ? "passed" : "failed") cached_tokens=\(warm.cachedPromptTokens) batched=\(batched) parity=\(warm.content == cold.content)\n".utf8
+            ))
+            return passed
+        } catch {
+            await conversationCache.purgeHot(conversationKey: warmKey)
+            await conversationCache.purgeHot(conversationKey: coldKey)
+            throw error
+        }
+    }
+
     func setContinuousBatchingSelfCheckReport(_ report: ContinuousBatchingSelfCheckReport?) {
         continuousBatchingSelfCheckReport = report
     }
@@ -7038,6 +7125,37 @@ maxTokens: 1,
         }
     }
 
+    /// SPEC-048-R016 (0.1.81): on an admitted model the on-device verdict
+    /// alone decides whether native MTP serves after this load. The signed
+    /// decode-path binding is provenance and never enters this decision.
+    nonisolated static func nativeMTPSelfCheckServes(
+        verdict: NativeMTPOnDeviceSelfCheck.Verdict,
+        receipt: NativeMTPSelfTestReceipt
+    ) -> Bool {
+        verdict.passed && receipt.actualDecodePath == .nativeMTP && !receipt.fallbackUsed
+    }
+
+    /// SPEC-048 0.1.81 same-architecture variant: the passing self-check's
+    /// output on the signed synthetic challenge prompt, in the self-test bank
+    /// record's shape (`self_check_record` in native-mtp-variants.json). No
+    /// buyer data: the prompt is the signed challenge.
+    nonisolated static func nativeMTPSelfCheckRecordLogLine(_ receipt: NativeMTPSelfTestReceipt) -> String? {
+        let record: [String: Any] = [
+            "expected_token_ids": receipt.generatedTokenIDs,
+            "expected_terminal_reason": receipt.terminalReason.rawValue,
+            "expected_counters": [
+                "accepted": receipt.acceptedTokens,
+                "rejected": receipt.rejectedTokens,
+                "bonus": receipt.bonusTokens,
+                "committed": receipt.committedTokens,
+            ],
+            "expected_committed_state_sha256": receipt.committedStateDigestSHA256,
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys]),
+              let json = String(data: data, encoding: .utf8) else { return nil }
+        return "event=native_mtp_self_check_record challenge_id=\(receipt.challengeID) record=\(json)\n"
+    }
+
     /// Startup and creative restoration share the same on-device admission gate.
     private func qualifyAndPublishNativeMTP(_ nativeMTPLoad: NativeMTPRuntimeLoadResult) async {
         let selfTestReceipt: NativeMTPSelfTestReceipt?
@@ -7084,7 +7202,10 @@ maxTokens: 1,
                 FileHandle.standardError.write(Data(
                     "event=native_mtp_self_check result=\(verdict.reason) speedup=\(String(format: "%.2f", verdict.speedup)) tokens=\(ordinary.tokens.count)\n".utf8
                 ))
-                if let receipt, verdict.passed, receipt.actualDecodePath == .nativeMTP, !receipt.fallbackUsed {
+                if let receipt, Self.nativeMTPSelfCheckServes(verdict: verdict, receipt: receipt) {
+                    if let line = Self.nativeMTPSelfCheckRecordLogLine(receipt) {
+                        FileHandle.standardError.write(Data(line.utf8))
+                    }
                     selfTestReceipt = receipt
                 } else {
                     selfTestReceipt = Self.rejectNativeMTPSelfTest(reasonCode: "selftest_\(verdict.reason)")
@@ -7405,6 +7526,7 @@ maxTokens: 1,
         let swapGeneration = selfCheckGeneration
         continuousBatchingSelfCheck = .pending
         continuousBatchingSelfCheckReport = nil
+        continuousBatchingCachedTurnsSelfCheck = nil
         if let adoptionKnobs {
             maxContextTokens = adoptionKnobs.maxContext
             kvBitsOverride = adoptionKnobs.kvBits
@@ -8900,14 +9022,22 @@ maxTokens: 1,
         return max(1, maxContextTokens - completion.promptTokens)
     }
 
-    private func serialRouteCanaryCachedHitMissingRetainedHandoff(
+    /// SPEC-038 AC-26 (v0.3.41): a positive cached hit the scheduler may not
+    /// resume (no usable handoff, or cached turns not accepted on this
+    /// tuple) re-prefills cold inside a CB row. The hit is dropped and a
+    /// fresh lease taken without the cold tier, so the row reports zero
+    /// cached tokens (no cache discount) and still commits this turn for the
+    /// next one. It never serial-routes: that would take the turn out of the
+    /// batch. `rebeginCold` repeats the caller's `begin` with `cold: nil`.
+    private func coldLeaseIfCachedHitFenced(
         _ lease: ConversationCacheLease?,
         capability: ContinuousBatchingCapability,
         modelHasRecurrentLayers: Bool,
-        hasAttachablePromptSnapshot: Bool = false
-    ) async throws -> Bool {
-        guard let lease,
-              let reason = Self.cachedHitFenceReason(
+        hasAttachablePromptSnapshot: Bool = false,
+        rebeginCold: () async -> ConversationCacheLease?
+    ) async -> ConversationCacheLease? {
+        guard let lease else { return nil }
+        guard let reason = Self.cachedHitFenceReason(
                   mode: capability.mode,
                   cachedPromptTokens: lease.cachedPromptTokens,
                   // SPEC-024-R005: a GLM-5-Next prompt snapshot is the other
@@ -8917,27 +9047,26 @@ maxTokens: 1,
                       modelHasRecurrentLayers: modelHasRecurrentLayers
                   ),
                   cachedTurnsEnabled: effectiveContinuousBatchingCachedTurns,
-                  cachedTurnsAccepted: continuousBatchCachedTurnsAccepted
+                  cachedTurnsAccepted: continuousBatchCachedTurnsAccepted(conversationKey: lease.key)
               )
         else {
-            return false
+            if lease.cachedPromptTokens > 0, continuousBatchingCachedTurnsProbeKeys.contains(lease.key) {
+                continuousBatchingCachedTurnsProbeBatchedHits += 1
+            }
+            return lease
         }
-        // A retained entry (hybrid or not) cannot serve the serial path, so
-        // this discards it and the serial request misses; a serial-format entry
-        // is put back for the serial path to reuse.
-        await conversationCache.abortForSerialFallback(lease)
-        let blocked = ContinuousBatchingCapability(
-            mode: capability.mode,
-            maxActiveRows: capability.maxActiveRows,
-            queueLimit: capability.queueLimit,
-            descriptor: capability.descriptor,
-            unsupportedReason: reason
-        )
-        // Strict `.on` must fail closed with the named reason (FR-CB8). Canary
-        // serial-routes the same AC-26 fence with reason-coded telemetry.
-        try ContinuousBatchingPolicy.validateStrictStartup(blocked)
-        ContinuousBatchingPolicy.logSerialRouteIfNeeded(blocked)
-        return true
+        await conversationCache.abort(lease)
+        FileHandle.standardError.write(Data(
+            "event=continuous_batching_cached_turn action=cold_prefill reason=\(reason.rawValue) cached_tokens=\(lease.cachedPromptTokens)\n".utf8
+        ))
+        guard let cold = await rebeginCold() else { return nil }
+        guard cold.cachedPromptTokens == 0 else {
+            // Another turn of this conversation committed in between: run
+            // this one without a lease rather than resume an unproven hit.
+            await conversationCache.abort(cold)
+            return nil
+        }
+        return cold
     }
 
     static func canaryShouldSerialRouteCachedHitMissingRetainedHandoff(
@@ -9107,7 +9236,7 @@ maxTokens: 1,
             maxContextTokens: maxContextTokens,
             toolSelectionModelID: selectionModelID,
             drainCancelled: drainCancelled,
-            promptSnapshotCachedTurnsAttachable: continuousBatchCachedTurnsAccepted
+            promptSnapshotCachedTurnsAttachable: continuousBatchCachedTurnsAccepted(conversationKey: request.conversationKey)
         )
         let stopTokenFilter = Self.toolAwareStopTokenFilter(rawStopTokenFilter, grammar: Self.toolGrammar(for: request))
         CBTrace.logPreparation(schedulerRequestID, "rt_cb_prepare_end path=complete tokens=\(prepared.promptTokens.count)")
@@ -9143,13 +9272,13 @@ maxTokens: 1,
                 cacheOnlyKey: request.conversationCacheOnly
             )
         )
-        let lease = conversationCacheAllowed
-            ? await conversationCache.begin(
+        func beginLease(cold: ConversationColdContext?) async -> ConversationCacheLease? {
+            await conversationCache.begin(
                 conversationKey: request.conversationKey,
                 incomingTokens: preparedPromptTokenIDs,
                 modelID: request.model,
                 kvBits: batchKVBits,
-                cold: coldContext,
+                cold: cold,
                 allowRetainedPagedKVHandoff: true,
                 fleetGrant: request.fleetCacheGrant,
                 // SPEC-024-R005: a native GLM row reuses a snapshot only with
@@ -9160,7 +9289,8 @@ maxTokens: 1,
                 promptSnapshotResumeBoundaries: prepared.promptSnapshotAttachesToContinuousBatchRow
                     ? prepared.promptResumeBoundaries : nil
             )
-            : nil
+        }
+        var lease = conversationCacheAllowed ? await beginLease(cold: coldContext) : nil
         recordLabNativeMTPConversationCacheBegin(
             request: request,
             surface: "attached_complete",
@@ -9169,14 +9299,14 @@ maxTokens: 1,
             modelHasRecurrentLayers: prepared.modelHasRecurrentLayers
         )
         CBTrace.log(schedulerRequestID, "rt_cb_lease cached=\(lease?.cachedPromptTokens ?? -1)")
-        if conversationCacheAllowed,
-           try await serialRouteCanaryCachedHitMissingRetainedHandoff(
-            lease,
-            capability: capability,
-            modelHasRecurrentLayers: prepared.modelHasRecurrentLayers,
-            hasAttachablePromptSnapshot: Self.leaseHasAttachablePromptSnapshot(lease, prepared: prepared)
-        ) {
-            return nil
+        if conversationCacheAllowed {
+            lease = await coldLeaseIfCachedHitFenced(
+                lease,
+                capability: capability,
+                modelHasRecurrentLayers: prepared.modelHasRecurrentLayers,
+                hasAttachablePromptSnapshot: Self.leaseHasAttachablePromptSnapshot(lease, prepared: prepared),
+                rebeginCold: { await beginLease(cold: nil) }
+            )
         }
         let promptSnapshotCache = Self.continuousBatchPromptSnapshotCache(for: lease, prepared: prepared)
         // SPEC-024 FR-CI2a: a snapshot hit outside R005 serial-routes (AC-26
@@ -9673,7 +9803,7 @@ maxTokens: 1,
             maxContextTokens: maxContextTokens,
             toolSelectionModelID: selectionModelID,
             drainCancelled: drainCancelled,
-            promptSnapshotCachedTurnsAttachable: continuousBatchCachedTurnsAccepted
+            promptSnapshotCachedTurnsAttachable: continuousBatchCachedTurnsAccepted(conversationKey: request.conversationKey)
         )
         let stopTokenFilter = Self.toolAwareStopTokenFilter(rawStopTokenFilter, grammar: Self.toolGrammar(for: request))
         CBTrace.logPreparation(schedulerRequestID, "rt_cb_prepare_end path=stream tokens=\(prepared.promptTokens.count)")
@@ -9718,13 +9848,13 @@ maxTokens: 1,
                 cacheOnlyKey: request.conversationCacheOnly
             )
         )
-        let lease = conversationCacheAllowed
-            ? await conversationCache.begin(
+        func beginLease(cold: ConversationColdContext?) async -> ConversationCacheLease? {
+            await conversationCache.begin(
                 conversationKey: request.conversationKey,
                 incomingTokens: preparedPromptTokenIDs,
                 modelID: request.model,
                 kvBits: batchKVBits,
-                cold: coldContext,
+                cold: cold,
                 allowRetainedPagedKVHandoff: true,
                 fleetGrant: request.fleetCacheGrant,
                 // SPEC-024-R005: a native GLM row reuses a snapshot only with
@@ -9735,7 +9865,8 @@ maxTokens: 1,
                 promptSnapshotResumeBoundaries: prepared.promptSnapshotAttachesToContinuousBatchRow
                     ? prepared.promptResumeBoundaries : nil
             )
-            : nil
+        }
+        var lease = conversationCacheAllowed ? await beginLease(cold: coldContext) : nil
         recordLabNativeMTPConversationCacheBegin(
             request: request,
             surface: "attached_stream",
@@ -9743,14 +9874,14 @@ maxTokens: 1,
             lease: lease,
             modelHasRecurrentLayers: prepared.modelHasRecurrentLayers
         )
-        if conversationCacheAllowed,
-           try await serialRouteCanaryCachedHitMissingRetainedHandoff(
-            lease,
-            capability: capability,
-            modelHasRecurrentLayers: prepared.modelHasRecurrentLayers,
-            hasAttachablePromptSnapshot: Self.leaseHasAttachablePromptSnapshot(lease, prepared: prepared)
-        ) {
-            return nil
+        if conversationCacheAllowed {
+            lease = await coldLeaseIfCachedHitFenced(
+                lease,
+                capability: capability,
+                modelHasRecurrentLayers: prepared.modelHasRecurrentLayers,
+                hasAttachablePromptSnapshot: Self.leaseHasAttachablePromptSnapshot(lease, prepared: prepared),
+                rebeginCold: { await beginLease(cold: nil) }
+            )
         }
         let promptSnapshotCache = Self.continuousBatchPromptSnapshotCache(for: lease, prepared: prepared)
         // SPEC-024 FR-CI2a: a snapshot hit outside R005 serial-routes (AC-26
@@ -13179,11 +13310,7 @@ maxTokens: maxTokens,
                 return ("artifact_observation_invalid", "pair")
             }
         }
-        if let sidecarError = error as? NativeMTPAdmissionSidecarError {
-            // SPEC-048-R013 (0.1.51): a signed decode path this build does not run.
-            if sidecarError == .decodePathMismatch {
-                return ("decode_path_mismatch", "sidecar")
-            }
+        if error is NativeMTPAdmissionSidecarError {
             return ("sidecar_validation_rejected", "sidecar")
         }
         if error is ModelRuntimeLoadError {
@@ -14425,11 +14552,27 @@ maxTokens: maxTokens,
         continuousBatchingCachedTurns && currentPagedKVModelCapabilities.supportsContiguousCacheMaterialization
     }
 
-    private var continuousBatchCachedTurnsAccepted: Bool {
-        effectiveContinuousBatchingCachedTurns
-            && continuousBatchingRequestedTuple().map {
-                continuousBatchingAcceptanceCoverage.coversCachedTurns($0)
-            } == true
+    /// SPEC-038 AC-26 (v0.3.41): the self-check's leg (a) result decides;
+    /// before it runs a signed `cached_turns_accepted` grant applies, and a
+    /// running probe admits its own keys. Revocation always wins.
+    private func continuousBatchCachedTurnsAccepted(conversationKey: String?) -> Bool {
+        guard effectiveContinuousBatchingCachedTurns,
+              let tuple = continuousBatchingRequestedTuple(),
+              !continuousBatchingAcceptanceCoverage.isRevoked(tuple)
+        else { return false }
+        let key = conversationKey?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return Self.cachedTurnsAdmitted(
+            selfCheck: continuousBatchingCachedTurnsSelfCheck,
+            signedGrant: continuousBatchingAcceptanceCoverage.coversCachedTurns(tuple),
+            probeKey: !key.isEmpty && continuousBatchingCachedTurnsProbeKeys.contains(key)
+        )
+    }
+
+    /// SPEC-038 v0.3.44 precedence for a non-revoked tuple with the flag on:
+    /// a running leg (a) probe admits its own key; otherwise the stored leg
+    /// (a) result decides, and only before it exists a signed grant does.
+    nonisolated static func cachedTurnsAdmitted(selfCheck: Bool?, signedGrant: Bool, probeKey: Bool) -> Bool {
+        probeKey || (selfCheck ?? signedGrant)
     }
 
     /// SPEC-024-R005: the lease resumes a GLM-5-Next prompt snapshot a CB row

@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Preflight the provider's exact native-MTP matcher without running the provider.
 
-The release's compatibility manifest binds its packaged catalog release, which
-binds the existing signed admission scope (model, artifact, hardware, RAM and
-slots). That independent scope is deliberately distinct from the proposed tuple
-inputs. Runtime, decode digest and metallib are read from the actual release
-source/payload, never copied from either admission set. Historical discovery is
-used as a signature/hash proof, not as a current update recommendation.
+The bound release's signed payload supplies the trusted catalog keyring that
+verifies the admission signature. SPEC-048 0.1.81: admission is keyed by model
+and artifact and qualified on the device by the MTP-16 self-check, so neither
+the release's runtime identity (runtime revision, decode-path digest,
+metallib) nor the admission scope packaged inside that release gates an entry.
+A new tuple's admission goes live by catalog activation without a CLI cut.
+Historical discovery is used as a signature/hash proof, not as a current
+update recommendation.
 """
 from __future__ import annotations
 
@@ -80,28 +82,18 @@ SCOPE_FIELDS = ('model_key', 'artifact_hash', 'hardware_class', 'ram_bytes', 'qu
 IDENTITY_FIELDS = ('runtime_revision', 'decode_path_digest', 'metallib_sha256')
 
 
-def verify_entries(admission: dict, scope: dict, identity: dict) -> None:
+def verify_entries(admission: dict) -> None:
     entries = admission.get('entries')
-    baseline = scope.get('entries')
     require(isinstance(entries, list) and entries, 'entries', 'nonempty admission set required')
-    require(isinstance(baseline, list) and baseline, 'scope', 'signed release contains no native-MTP scope')
     contexts = set()
     for entry in entries:
         require(isinstance(entry, dict), 'entries', 'entry object required')
-        # Narrow candidates one field at a time so an operator sees the actual
-        # mismatched matcher field, including for multi-model admission sets.
-        candidates = baseline
         for field in SCOPE_FIELDS:
             value = entry.get(field)
             require(type(value) is (int if field in ('ram_bytes', 'qualified_slots') else str), field, 'invalid or missing value')
-            candidates = [row for row in candidates if type(row.get(field)) is type(value) and row.get(field) == value]
-            require(candidates, field, f"{entry.get('model_key', '<unknown>')} differs from signed release scope")
-        for field in IDENTITY_FIELDS:
-            require(isinstance(entry.get(field), str) and entry[field] == identity[field], field,
-                    f"{entry['model_key']} differs from verified release identity")
         # The provider rejects the whole set if two entries select the same
         # runtime context, even when their wider admission sort keys differ.
-        context = tuple(entry[field] for field in SCOPE_FIELDS + IDENTITY_FIELDS)
+        context = tuple(entry.get(field) for field in SCOPE_FIELDS + IDENTITY_FIELDS)
         require(context not in contexts, 'entries', f"{entry['model_key']} has ambiguous matching entries")
         contexts.add(context)
 
@@ -199,10 +191,9 @@ def verify(args: argparse.Namespace) -> None:
     repo = args.repo.resolve()
     release = load_json(args.release_input)
     commit = release['entry']['source_commit']
-    runtime, version = source_identity(repo, commit)
+    _, version = source_identity(repo, commit)
     directory = release_directory(repo, args.state_dir, args.release_dir, version)
-    scope, identity, keys = verify_release(repo, directory, commit, version)
-    identity['runtime_revision'] = runtime
+    _, _, keys = verify_release(repo, directory, commit, version)
     signature = pathlib.Path(str(args.admission) + '.sig')
     if not signature.is_file():
         static = repo / 'phase3-binary/dist/static/native-mtp-admission.json'
@@ -210,7 +201,7 @@ def verify(args: argparse.Namespace) -> None:
         signature = pathlib.Path(str(static) + '.sig')
     catalog = load_module(repo, 'catalog-release')
     verify_admission_signature(catalog, args.admission, signature, keys)
-    verify_entries(load_json(args.admission), scope, identity)
+    verify_entries(load_json(args.admission))
 
 
 def main() -> int:

@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from scripts.check_spec_pr_declaration import BEGIN, END, validate_body
+from scripts.check_spec_pr_declaration import BEGIN, END, derive_declaration, validate_body
 from scripts.tests.test_spec_governance import base_repository, write_repository
 
 
@@ -144,6 +144,48 @@ class SpecPRDeclarationTests(unittest.TestCase):
         self.assertIn("exactly one", "\n".join(validate_body("{}")))
         doubled = declaration() + declaration()
         self.assertIn("exactly one", "\n".join(validate_body(doubled)))
+
+    def test_no_block_needed_when_specs_unchanged(self) -> None:
+        self.assertEqual(
+            [],
+            validate_body("Plain PR body.", changed_paths=["phase4-coordinator/internal/auth/session.go"]),
+        )
+
+    def test_specs_change_without_block_fails_closed(self) -> None:
+        errors = validate_body(
+            "Plain PR body.",
+            changed_paths=["phase4-coordinator/internal/auth/session.go", "specs/SPEC-001-one.md"],
+        )
+        self.assertIn("exactly one", "\n".join(errors))
+
+    def test_unknown_diff_without_block_fails_closed(self) -> None:
+        self.assertIn("exactly one", "\n".join(validate_body("Plain PR body.", changed_paths=[])))
+        self.assertIn("exactly one", "\n".join(validate_body("Plain PR body.")))
+
+    def test_hand_written_block_is_still_validated_when_specs_unchanged(self) -> None:
+        errors = validate_body(
+            declaration(),
+            changed_paths=["phase4-coordinator/internal/auth/session.go"],
+        )
+        self.assertIn("behavior_change none is invalid", "\n".join(errors))
+
+    def test_derived_declaration_maps_paths_to_domains(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = base_repository()
+            requirement = next(
+                item for item in repository["conformance"]["requirements"] if item["requirement_id"] == "SPEC-001-R001"
+            )
+            requirement["implementation"] = ["phase3-binary/Sources/macprovider-cli/Example.swift:func example"]
+            write_repository(root, repository)
+            derived = derive_declaration(
+                root, ["phase3-binary/Sources/macprovider-cli/Example.swift", "README.md"]
+            )
+            self.assertEqual("yes", derived["behavior_change"])
+            self.assertEqual(["SPEC-001"], derived["specs"])
+            self.assertEqual(["SPEC-001-R001"], derived["requirements"])
+            self.assertEqual(["provider-wire-protocol"], derived["authority_domains"])
+            self.assertEqual("none", derive_declaration(root, ["AGENTS.md"])["behavior_change"])
 
     def test_invalid_json_fails(self) -> None:
         body = f"{BEGIN}\n{{not json}}\n{END}\n"

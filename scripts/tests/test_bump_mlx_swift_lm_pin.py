@@ -100,7 +100,7 @@ class BumpPinTest(unittest.TestCase):
         self.assertIn(f"| `https://github.com/Augustas11/mlx-swift-lm.git` | `{NEW_TAG}` | `{NEW_REV}` |", spec)
         self.assertIn(f"The prior mlx-swift-lm row `{self.old_tag}` is ", spec)
         conf = json.loads(self.read(bump.CONFORMANCE))
-        self.assertEqual([s["version"] for s in conf["specs"] if s["spec_id"] == "SPEC-048"], [self.new_version])
+        self.assertNotIn("version", next(s for s in conf["specs"] if s["spec_id"] == "SPEC-048"))
         rationale = next(r for r in conf["requirements"] if r["requirement_id"] == "SPEC-048-R003")["gap"]["rationale"]
         self.assertTrue(rationale.startswith(f"SPEC-048 v{self.new_version} names LM {NEW_TAG}"), rationale)
         self.assertIn("Prior tuple context: " + self.old_rationale, rationale)
@@ -131,8 +131,8 @@ class BumpPinTest(unittest.TestCase):
         self.assertEqual(self.snapshot(), before)
 
     def test_refuses_mismatched_spec_versions(self):
-        conf = self.read(bump.CONFORMANCE).replace(f'"version": "{self.old_version}"', '"version": "0.0.1"', 1)
-        (self.root / bump.CONFORMANCE).write_text(conf)
+        spec = self.read(bump.SPEC).replace(f'  "version": "{self.old_version}",', '  "version": "0.0.1",', 1)
+        (self.root / bump.SPEC).write_text(spec)
         rc, _, err = self.run_bump("--skip-regenerate")
         self.assertEqual(rc, 1)
         self.assertIn("SPEC-048", err)

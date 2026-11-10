@@ -1049,6 +1049,9 @@ struct ContinuousBatchingSelfCheckStore: Sendable {
         var probeAloneOutputs: [[Int]]?
         var probePromptSHA256s: [String]?
         var widthProgress: WidthProgress?
+        /// SPEC-038 AC-26 leg (a) (v0.3.41): keyed cached turns resumed in a
+        /// CB row matched the same turns sent cold. Nil until it runs.
+        var cachedTurnsParity: Bool?
 
         mutating func prepareWidth(slots: Int, prompts: [[Int]], probePrompts: [[Int]]) {
             let promptDigests = prompts.prefix(slots).map(ContinuousBatchingSelfCheck.promptSHA256)
@@ -1078,6 +1081,7 @@ struct ContinuousBatchingSelfCheckStore: Sendable {
             case probeAloneOutputs = "probe_alone_outputs"
             case probePromptSHA256s = "probe_prompt_sha256s"
             case widthProgress = "width_progress"
+            case cachedTurnsParity = "cached_turns_parity"
         }
     }
 
@@ -1298,6 +1302,15 @@ actor ContinuousBatchingSelfCheckDriver {
             if let record, let decision = record.decision {
                 checkDueSince = nil
                 if pending { await apply(decision, target: target, source: "stored") }
+                if case .granted = decision.state {
+                    if let parity = record.cachedTurnsParity {
+                        if await runtime.continuousBatchingCachedTurnsSelfCheckResult() != parity {
+                            await runtime.applyContinuousBatchingCachedTurnsSelfCheck(parity, expected: target)
+                        }
+                    } else if Date() >= nextAttemptAt, await isIdle(), await measureCachedTurns(target) {
+                        continue
+                    }
+                }
                 let bound = ContinuousBatchingSelfCheck.ladderUpperBound(
                     target: target, ownerPinned: ownerPinnedSlots, crashedSlots: record.crashedSlots
                 )
@@ -1380,6 +1393,32 @@ actor ContinuousBatchingSelfCheckDriver {
         admissionHoldDeadline = nil
         let record = store.record(for: target.key)
         return record?.decision != nil && record?.inProgressSlots == nil
+    }
+
+    /// SPEC-038 AC-26 leg (a) (v0.3.41): runs once per self-check key after a
+    /// granted decision, only while idle, and yields to the first request.
+    /// The result is stored with the decision and applied at every load.
+    /// Returns whether a probe ran (decided or deferred).
+    private func measureCachedTurns(_ target: ContinuousBatchingSelfCheckTarget) async -> Bool {
+        let runtime = runtime
+        do {
+            guard let passed = try await yieldingToRequests({ try await runtime.runContinuousBatchingCachedTurnsProbe() })
+            else { return false }
+            guard var record = store.record(for: target.key), record.decision != nil else { return true }
+            record.cachedTurnsParity = passed
+            try save(record)
+            deferrals = 0
+            await runtime.applyContinuousBatchingCachedTurnsSelfCheck(passed, expected: target)
+            log("event=cb_self_check action=cached_turns_decided result=\(passed ? "passed" : "failed") model_sha256=\(target.key.modelSHA256)")
+            return true
+        } catch {
+            deferrals += 1
+            nextAttemptAt = Date().addingTimeInterval(
+                ContinuousBatchingSelfCheck.deferralBackoffSeconds(deferrals: deferrals, base: pollSeconds)
+            )
+            log("event=cb_self_check action=cached_turns_deferred reason=\(Self.deferralReason(error))")
+            return true
+        }
     }
 
     private static func deferralReason(_ error: Error) -> String {

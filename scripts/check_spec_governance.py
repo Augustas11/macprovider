@@ -5616,7 +5616,6 @@ def _validate_conformance_schema(root: Path, conformance: Any, result: Validatio
             {
                 "spec_id",
                 "title",
-                "version",
                 "path",
                 "status",
                 "owner",
@@ -5634,7 +5633,6 @@ def _validate_conformance_schema(root: Path, conformance: Any, result: Validatio
             {
                 "spec_id",
                 "title",
-                "version",
                 "path",
                 "status",
                 "owner",
@@ -5656,7 +5654,6 @@ def _validate_conformance_schema(root: Path, conformance: Any, result: Validatio
         )
         _string(spec.get("spec_id"), SPEC_ID_RE, f"{loc}.spec_id", result)
         _string(spec.get("title"), None, f"{loc}.title", result)
-        _string(spec.get("version"), None, f"{loc}.version", result)
         _string(spec.get("path"), SPEC_PATH_RE, f"{loc}.path", result)
         if spec.get("status") not in LIFECYCLE_STATES:
             result.error(f"{loc}.status", f"invalid lifecycle state {spec.get('status')!r}")
@@ -5840,13 +5837,13 @@ def validate_repository(
                 else:
                     header = _parse_spec_header(path, result)
                     if header is not None:
-                        header_spec_id, title, version = header
+                        # The header is the only version of record; the
+                        # manifests carry none, so a version bump edits one line.
+                        header_spec_id, title, _version = header
                         if spec_id != header_spec_id:
                             result.error(f"{spec_id}.path", f"header spec ID {header_spec_id} does not match manifest spec_id {spec_id}")
                         if spec.get("title") != title:
                             result.error(f"{spec_id}.title", f"does not match SPEC header title {title!r}")
-                        if spec.get("version") != version:
-                            result.error(f"{spec_id}.version", f"does not match SPEC header version {version!r}")
         if spec.get("status") == "deprecated":
             if spec.get("authority_domains"):
                 result.error(spec_id, "deprecated spec must not retain authority domains")

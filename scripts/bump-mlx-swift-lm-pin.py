@@ -22,7 +22,7 @@ Machine sites (rewritten exactly):
   specs/SPEC-048-native-mtp-serving.md   **Version:** (line 3), metadata "version",
                                          the R003 tuple row, a prose paragraph, a
                                          changelog entry (patch version + 1, today)
-  specs/CONFORMANCE.json                 SPEC-048 "version"; SPEC-048-R003 rationale
+  specs/CONFORMANCE.json                 SPEC-048-R003 rationale
 
 Prose it cannot rewrite safely gets a short templated paragraph built from
 --summary (the matrix "As of" paragraph and the SPEC-048 R003 paragraph); a
@@ -204,13 +204,6 @@ def plan(root: pathlib.Path, tag: str, rev: str, summary: str, issue: str, date:
     # CONFORMANCE.json: text edits so the file's formatting is untouched.
     conf_text = read[CONFORMANCE]
     conf = json.loads(conf_text)
-    specs = [s for s in conf.get("specs", []) if s.get("spec_id") == "SPEC-048"]
-    if len(specs) != 1 or specs[0].get("version") != old_version:
-        raise SiteError(f"{CONFORMANCE}: SPEC-048 entry missing or its version is not {old_version}")
-    conf_text = replace_once(
-        conf_text,
-        r'("spec_id": "SPEC-048",\n\s*"title": "[^"\n]*",\n\s*"version": )"' + re.escape(old_version) + '"',
-        lambda m: m.group(1) + json.dumps(new_version), CONFORMANCE)
     reqs = [r for r in conf.get("requirements", []) if r.get("requirement_id") == "SPEC-048-R003"]
     old_rationale = (reqs[0].get("gap") or {}).get("rationale") if len(reqs) == 1 else None
     if not isinstance(old_rationale, str):

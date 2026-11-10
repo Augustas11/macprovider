@@ -24,11 +24,40 @@ import (
 
 const autotuneV4PublicKeyBase64 = "zTKDIdMmKKkO1Cgf5OdTzMOytVqW7U8SGsJ9XrzAltU="
 const autotuneV5PublicKeyBase64 = "vpTgWfvvrnbc1QhdTAxULFisoDU7jQ4mB1yZIHIGjBA="
-const currentAutotuneReleaseID = "published-2026-11-10-ripple-65b-listed-v283"
+
+// committedStaticVersions reads the release id and rate-card version from the
+// committed signed static feeds, so a catalog release needs no test edit. The
+// test still pins that the coordinator serves those exact signed bytes.
+func committedStaticVersions(t *testing.T, staticDir string) (releaseID, rateCardVersion string) {
+	t.Helper()
+	var artifacts struct {
+		ReleaseID string `json:"release_id"`
+	}
+	var rateCard struct {
+		Version string `json:"version"`
+	}
+	for _, f := range []struct {
+		name string
+		dst  any
+	}{{"autotune-artifacts.json", &artifacts}, {"rate-card.json", &rateCard}} {
+		raw, err := os.ReadFile(filepath.Join(staticDir, f.name))
+		if err != nil {
+			t.Fatalf("read %s: %v", f.name, err)
+		}
+		if err := json.Unmarshal(raw, f.dst); err != nil {
+			t.Fatalf("decode %s: %v", f.name, err)
+		}
+	}
+	if artifacts.ReleaseID == "" || rateCard.Version == "" {
+		t.Fatalf("committed static feeds lack release_id=%q or rate-card version=%q", artifacts.ReleaseID, rateCard.Version)
+	}
+	return artifacts.ReleaseID, rateCard.Version
+}
 
 func TestAutotuneFeedsServeLiteralSignedBytes(t *testing.T) {
 	t.Parallel()
 	staticDir := filepath.Join("..", "..", "..", "phase3-binary", "dist", "static")
+	currentAutotuneReleaseID, currentRateCardVersion := committedStaticVersions(t, staticDir)
 	rateCardJSON, err := os.ReadFile(filepath.Join(staticDir, "rate-card.json"))
 	if err != nil {
 		t.Fatalf("read rate-card.json: %v", err)
@@ -91,7 +120,7 @@ func TestAutotuneFeedsServeLiteralSignedBytes(t *testing.T) {
 		if name != "rate_card" && verification.Version != currentAutotuneReleaseID {
 			t.Fatalf("%s version=%q", name, verification.Version)
 		}
-		if name == "rate_card" && verification.Version != "07203de3ba532245f1fa9ae81c06e61cff832876288c3811577287e55c7160b0" {
+		if name == "rate_card" && verification.Version != currentRateCardVersion {
 			t.Fatalf("%s version=%q", name, verification.Version)
 		}
 		if verification.PolicyVersion != "autotune-policy-v1" {
