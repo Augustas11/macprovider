@@ -34,7 +34,7 @@ needs a SPEC revision.
 
 | Fork | Upstream | Tag scheme | Current tag | Revision | Upstream base |
 | --- | --- | --- | --- | --- | --- |
-| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.32` | `6c27b743bae5dd60eb07954f2819316b22b92094` | `3.32.3` (`3b339ad6…`) |
+| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.35` | `c9d8a9324eb9cc98243987b1557a863c253c63b3` | `3.32.3` (`3b339ad6…`) |
 | `Augustas11/mlx-swift` | `ml-explore/mlx-swift` | `<upstream>-macprovider.<n>` | `0.32.3-macprovider.11` | `c774cb0934c7503bc3fe1c3d1afbe44c728e8891` | `0.32.3` (`19601207…`) |
 | `Augustas11/mlx` (MLX core) | `ml-explore/mlx` | `v<upstream>-macprovider.<n>` | `v0.32.4-macprovider.6` | `51edbb37620aef7c860ab5d7cdb7bf5b14333da2` | `v0.32.4` (`36969c09…`) |
 | `Augustas11/mlx-c` | `ml-explore/mlx-c` | `v<upstream>-macprovider.<n>` | `v0.6.0-macprovider.2` | `2b1ff2b5b5129a6115771da32e1bac3b6b01ab01` | pinned base `ebc88f10…` |
@@ -46,6 +46,14 @@ submodules pin core and C. The C fork's standalone core fetch pins the same
 core revision. Swift 6.3 is the effective minimum for the graph.
 
 ### Current tuple delta
+
+As of 2026-11-10 the LM row is `3.32.3-macprovider.35` (`c9d8a93`), on
+`3.32.3-macprovider.32` (#2270): `2911424` adds the `ricursive` text model
+(Ripple-65B Preview) and its registration, and `c9d8a93` sets its prefill
+chunk to 2048 tokens, as mlx-lm does. New model files and one registry line;
+no other model's code and no shared cache, attention or generation code
+changes. No Swift, core or C pin changes. `.33` (GPT-OSS) and `.34` (#2265)
+are other campaigns' tags on `.32`; whichever merges second carries both.
 
 As of 2026-11-09 the LM row is `3.32.3-macprovider.32` (`6c27b74`),
 on `3.32.3-macprovider.25`: its one commit (`6c27b74`, cherry-picked from

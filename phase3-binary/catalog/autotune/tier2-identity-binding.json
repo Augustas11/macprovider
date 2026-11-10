@@ -1,7 +1,14 @@
 {
-  "autotune_candidates_sha256": "3b7d46ad3f67ada6c611cf4f8b94d5fc1269e5f64f847af369d9c90748f1107d",
-  "generated_at": "2026-11-10T07:41:01Z",
+  "autotune_candidates_sha256": "2ab311757935b282f6d6f89003a7c3344b1c2b275ff088144ab162f85237f515",
+  "generated_at": "2026-11-10T08:50:00Z",
   "models": [
+    {
+      "catalog_key": "ricursiveai/ripple-65b-preview",
+      "min_ram_gb": 64,
+      "model_id": "frogggias/Ripple-65B-Preview-MLX-4bit",
+      "model_revision": "4a33b33f043f41a51ae7236edd440d64cfa7cc94",
+      "sha256": "accae85aca4a215288f9062cc60535f70509b593772da21409a485ba9c6725c6"
+    },
     {
       "catalog_key": "zai-org/glm-5.3-flash",
       "min_ram_gb": 234,
@@ -158,6 +165,6 @@
     }
   ],
   "policy_version": "autotune-policy-v1",
-  "release_id": "published-2026-11-10-glm53-flash-uncensored-cached-turns-v283",
+  "release_id": "published-2026-11-10-ripple-65b-listed-v283",
   "schema_version": "macprovider.tier2-identity-binding.v1"
 }

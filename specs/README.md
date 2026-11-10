@@ -62,9 +62,9 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-051 | Multi-Mac Shard Groups | draft | complete | pending: 30 | [SPEC-051-multi-mac-shard-groups.md](SPEC-051-multi-mac-shard-groups.md) |
 <!-- AUTOGEN:spec-index END -->
 
-**Version of record is each spec's own `**Version:**` header, and only that
-header.** Neither this table nor `AUTHORITY.json`/`CONFORMANCE.json` repeats it,
-so a version bump edits one line. Read it with `grep -m1 '^\*\*Version'
+**Version of record is each spec's own `**Version:**` header, not this table.**
+The table now mirrors those headers exactly (CI fails if it drifts), but for a
+compatibility decision still read the spec header — `grep -m1 '^\*\*Version'
 specs/SPEC-NNN-*.md`.
 
 Only **canonical** specs appear above — a file with a `# SPEC-NNN — Title`

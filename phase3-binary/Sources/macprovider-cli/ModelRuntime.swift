@@ -3642,6 +3642,12 @@ maxTokens: 1,
         }
         if normalizedLabels.contains(where: { $0.contains("glm4moe") }) { return "glm4_moe" }
         if normalizedLabels.contains(where: { $0.contains("nemotronh") }) { return "nemotron_h" }
+        // Ricursive (`ricursive`, Ripple-65B Preview, #2270): sliding-window and
+        // full-attention layers on rotating and plain caches. Not a paged-KV
+        // family, so attach fails closed on identity and the model serves serial.
+        if normalizedLabels.contains(where: { $0 == "ricursive" || $0 == "ricursiveforcausallm" }) {
+            return "ricursive"
+        }
         // GLM-5-Next (`glm5_next`, text model `glm5_next_text`): the SPEC-039
         // v0.1.17 KDA/DSA hybrid family. Only the allowlisted identity carries
         // a verified layout; any other `glm5_next` artifact is a `mixed` cache

@@ -667,9 +667,16 @@ class RateCardSourceTest(unittest.TestCase):
             self.assertEqual(CANDIDATE_OBJ["rows"][key]["runtime_status"], "candidate")
             self.assertIs(demand[key]["recommendable"], False)
             self.assertIsNone(demand[key]["rank"])
-        # All recommendable rows remain class-bound; only this explicit staged
-        # candidate extends the priced set. Listed rows need no rate_class.
-        self.assertEqual(set(classes), recommendable | staged)
+        # #2270: Ripple-65B Preview is listed at its declared class rates.
+        listed_priced = {"ricursiveai/ripple-65b-preview"}
+        for key in listed_priced:
+            self.assertEqual(CANDIDATE_OBJ["rows"][key]["runtime_status"], "listed")
+            self.assertIs(demand[key]["recommendable"], False)
+            self.assertIsNone(demand[key]["rank"])
+        # All recommendable rows remain class-bound; only the explicit staged
+        # candidate and the priced listed row extend the priced set. Other
+        # listed rows need no rate_class.
+        self.assertEqual(set(classes), recommendable | staged | listed_priced)
         # #2189: the uncensored build serves serially, so its demand weight
         # stays at the cold-start floor and it never outranks the base row.
         self.assertLess(demand["zai-org/glm-5.3-flash-uncensored"]["demand_weight"],

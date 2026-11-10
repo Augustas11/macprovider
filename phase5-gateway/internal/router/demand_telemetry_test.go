@@ -493,6 +493,21 @@ func TestDemandTelemetryKnowsGLM53FlashUncensoredIdentitiesExactly(t *testing.T)
 	}
 }
 
+// #2270: Ripple-65B Preview's catalog key and served artifact id are recorded
+// exactly.
+func TestDemandTelemetryKnowsRippleIdentitiesExactly(t *testing.T) {
+	for _, model := range []string{"ricursiveai/ripple-65b-preview", "frogggias/Ripple-65B-Preview-MLX-4bit"} {
+		if got := sanitizeDemandModelID(model); got != model {
+			t.Errorf("sanitizeDemandModelID(%q) = %q, want the model itself", model, got)
+		}
+	}
+	for _, model := range []string{"ricursiveai/ripple-65b-previewx", "frogggias/ripple-65b-preview-mlx-4bit"} {
+		if got := sanitizeDemandModelID(model); got != demandUnknownModelID {
+			t.Errorf("sanitizeDemandModelID(%q) = %q, want %q", model, got, demandUnknownModelID)
+		}
+	}
+}
+
 // #2189: the abliterated GLM-5.3-Flash build's catalog key, slug and served
 // artifact id are recorded as themselves, never folded into GLM-5.3-Flash.
 func TestDemandTelemetryKnowsGLM53FlashAbliteratedIdentitiesExactly(t *testing.T) {
