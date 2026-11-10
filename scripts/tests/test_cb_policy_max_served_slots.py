@@ -76,7 +76,9 @@ class MaxServedSlotsGeneratorTest(unittest.TestCase):
     def test_committed_policy_caps_qualified_glm_builds_qwen8_and_llama8b_at_four(self):
         ceilings = {entry["model_key"]: entry.get("max_served_slots") for entry in self.policy["entries"]}
         self.assertEqual(ceilings.pop(GLM_KEY), 4)
-        self.assertEqual(ceilings.pop("zai-org/glm-5.3-flash-abliterated"), 4)
+        # The abliterated GLM-5.3-Flash build is retired: no CB entry remains.
+        self.assertNotIn("zai-org/glm-5.3-flash-abliterated", ceilings)
+        self.assertEqual(ceilings.pop("zai-org/glm-5.3-flash-uncensored"), 4)
         self.assertEqual(ceilings.pop("qwen3-8b"), 4)
         self.assertEqual(ceilings.pop("meta-llama/llama-3.1-8b-instruct"), 4)
         self.assertTrue(ceilings, "committed policy keeps its uncapped entries")

@@ -1,0 +1,6 @@
+bebe98347993c33a42aa574253f93f7b05ee15fd8aef306743c9107d26309de5  <bin>/macprovider-cli
+3d9b4a747758128cc5418e62c5ad8e282a11b0d436423537137e013beaa1261b  <bin>/mlx.metallib
+cdhash 06e8b09ccc79ee9cae9498663d9728c5186b7050
+decode_path_digest 940e25419bb1f7d90ed122e98969874587f7e327376fdb3b0e72fb7dc3e9a95d
+provider_cli_version 1.8.283
+model_dir <models>/Solstice-AI--GLM-5.3-Flash-UNCENSORED-mlx-oQ4e-DFlash2/bff40d24efb689d33e094083ce4a5d6835601730/242f8fcfd34d4ecfd62180c1767f910bda925216948772126dc98c673d1c8919

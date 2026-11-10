@@ -585,6 +585,7 @@ func knownDemandModelID(model string) bool {
 		"z-ai/glm-4.5-air",
 		"zai-org/glm-5.3-flash", "z-ai/glm-5.3-flash",
 		"zai-org/glm-5.3-flash-abliterated", "z-ai/glm-5.3-flash-abliterated",
+		"zai-org/glm-5.3-flash-uncensored", "z-ai/glm-5.3-flash-uncensored",
 		"deepseek/deepseek-v4-flash",
 		"mlx-community/gpt-oss-20b-MXFP4-Q4",
 		"mlx-community/gpt-oss-20b-MXFP4-Q8",
@@ -611,6 +612,7 @@ func knownDemandModelID(model string) bool {
 		"mlx-community/GLM-4.5-Air-4bit",
 		"Jundot/GLM-5.3-Flash-oQ4e-mtp",
 		"grant-ai/GLM-5.3-Flash-Abliterated-MLX-4bit",
+		"Solstice-AI/GLM-5.3-Flash-UNCENSORED-mlx-oQ4e-DFlash2",
 		"TensorFold/DeepSeek-V4-Flash-0731-MXFP4-MLX":
 		return true
 	default:

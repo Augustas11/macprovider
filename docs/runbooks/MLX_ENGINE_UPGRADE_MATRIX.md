@@ -34,7 +34,7 @@ needs a SPEC revision.
 
 | Fork | Upstream | Tag scheme | Current tag | Revision | Upstream base |
 | --- | --- | --- | --- | --- | --- |
-| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.31` | `9f30c01bbce4ee2619aa5a3a2a0a232241fd9df3` | `3.32.3` (`3b339ad6…`) |
+| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.34` | `647b24d1f13ea662cf1c61ebcce18541400015ce` | `3.32.3` (`3b339ad6…`) |
 | `Augustas11/mlx-swift` | `ml-explore/mlx-swift` | `<upstream>-macprovider.<n>` | `0.32.3-macprovider.13` | `565269220ccc2cc0d2ce149affb98a2f9d9b32ac` | `0.32.3` (`19601207…`) |
 | `Augustas11/mlx` (MLX core) | `ml-explore/mlx` | `v<upstream>-macprovider.<n>` | `macprovider/2234-qmv-mma` (no tag yet) | `565070fe4b0f95927f7fdd5fcfb537157605037a` | `v0.32.4` (`36969c09…`) |
 | `Augustas11/mlx-c` | `ml-explore/mlx-c` | `v<upstream>-macprovider.<n>` | `v0.6.0-macprovider.2` | `2b1ff2b5b5129a6115771da32e1bac3b6b01ab01` | pinned base `ebc88f10…` |
@@ -47,13 +47,22 @@ core revision. Swift 6.3 is the effective minimum for the graph.
 
 ### Current tuple delta
 
-As of 2026-11-08 the LM row is `3.32.3-macprovider.31` (`9f30c01`), which is
-`.25` plus one commit that pins mlx-swift `0.32.3-macprovider.13` (`5652692`,
-#2234). Core `565070fe4` (branch `macprovider/2234-qmv-mma`, one commit on
+As of 2026-11-10 the LM row is `3.32.3-macprovider.34` (`647b24d`), which is
+`.32` plus one commit that pins mlx-swift `0.32.3-macprovider.13` (`5652692`,
+#2234); that commit is identical to the one `.31` (`9f30c01`) put on `.25`. Core
+`565070fe4` (branch `macprovider/2234-qmv-mma`, one commit on
 `v0.32.4-macprovider.6`) sends eligible affine small-M products to `qmv_mma`
 from 1 to 16 rows on non-NAX GPUs, with a test that reads no row count. The
 mlx-swift tag also ships the `gather_mm_offsets` and SDPA VJP kernels. The core
 fork still needs its own tag, and the mlx-c standalone core fetch has not moved.
+
+As of 2026-11-09 the LM row was `3.32.3-macprovider.32` (`6c27b74`),
+on `3.32.3-macprovider.25`: its one commit (`6c27b74`, cherry-picked from
+`73df016af`, #2244) maps a Hugging Face per-layer quantization map to module
+paths in `loadWeights`, so the Solstice-AI uncensored GLM-5.3-Flash checkpoint
+loads. The `GLM5Next` change is a load-time sanitizer and a value-identical
+refactor of its weight-key rules; no decode line changes. No Swift, core or C
+pin changes.
 
 As of 2026-11-06 the LM row is `3.32.3-macprovider.25` (`da8f193`), on
 `3.32.3-macprovider.24`: it adds `.23`'s one commit (`93234b6`, #2198), which

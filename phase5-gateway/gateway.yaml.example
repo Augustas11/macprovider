@@ -82,6 +82,19 @@ limits:
   max_feedback_body_bytes: 16384
   feedback_requests_per_ip_per_hour: 10
   request_body_bytes: 1048576
+  # Per-model buyer output limit (max_tokens / max_output_tokens) that
+  # replaces max_tokens_per_request for one model on chat, Responses and
+  # Anthropic messages, and is advertised as max_output_tokens on /v1/models.
+  # Keys match a model id and its routing aliases; values are 1..262144.
+  # Omitted max_tokens still defaults to max_tokens_per_request. Size a value
+  # to what the provider can serve: prompt plus output must fit the served
+  # context, or the provider clamps the output and ends with "length".
+  # GLM-5.3-Flash: the provider's 262144-token paged-KV pool shared by 4 CB
+  # rows leaves about 65K prompt plus output per row under full load. Pearl
+  # gets this entry from PEARL_RUNTIME_TASK=stream-ceiling (raise-only).
+  model_max_output_tokens:
+    zai-org/glm-5.3-flash: 65536
+    zai-org/glm-5.3-flash-uncensored: 65536
 
 kill_switch:
   demo_only: false

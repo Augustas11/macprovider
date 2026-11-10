@@ -17,11 +17,15 @@ let package = Package(
         )
     ],
     dependencies: [
-        // Tag 3.32.3-macprovider.31 (#2234) is .25 plus one commit that pins
+        // Tag 3.32.3-macprovider.34 (#2234) is .32 plus one commit that pins
         // mlx-swift 0.32.3-macprovider.13: core 565070fe4 sends every eligible
         // affine small-M product to qmv_mma from 1 to 16 rows, so the kernel
         // never depends on the row count, and the metallib ships the
         // gather_mm_offsets and SDPA VJP kernels that core calls.
+        // Tag 3.32.3-macprovider.32 (#2244, #2189) on 3.32.3-macprovider.25:
+        // `6c27b74` (from `73df016af`) maps a Hugging Face per-layer
+        // quantization map to module paths at load, so the Solstice-AI
+        // uncensored GLM-5.3-Flash checkpoint loads. Decode is unchanged.
         // Tag 3.32.3-macprovider.25 (#2198, #2189) on 3.32.3-macprovider.24:
         // .23's GLM-5.3 MTP head prefill over the last 4096 prompt columns
         // (`da8f193`, from `93234b6`) on top of .24's MiniMax M3 work.
@@ -73,7 +77,7 @@ let package = Package(
         // compatible per-column attention while retaining row-owned caches.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "9f30c01bbce4ee2619aa5a3a2a0a232241fd9df3"
+            revision: "647b24d1f13ea662cf1c61ebcce18541400015ce"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",

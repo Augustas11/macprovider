@@ -162,6 +162,21 @@ final class GLM5NextPagedKVWiringTests: XCTestCase {
         ).hybridDecoderArchitectureVerified)
     }
 
+    func testUncensoredCatalogIdentityCarriesTheSameSparseLayout() throws {
+        let capabilities = ModelRuntime.pagedKVModelCapabilities(
+            modelID: "zai-org/glm-5.3-flash-uncensored",
+            configJSONData: Self.config()
+        )
+        XCTAssertEqual(capabilities.modelFamily, "glm5_next")
+        XCTAssertTrue(capabilities.requiresMoEDispatch)
+        XCTAssertTrue(capabilities.hybridDecoderArchitectureVerified)
+        XCTAssertEqual(try XCTUnwrap(capabilities.sparseAttention).expectedCacheKinds.count, 45)
+        XCTAssertFalse(ModelRuntime.pagedKVModelCapabilities(
+            modelID: "zai-org/glm-5.3-flash-uncensored",
+            configJSONData: Self.config(modelType: "glm5")
+        ).hybridDecoderArchitectureVerified)
+    }
+
     func testOtherGLM5NextConfigsFailClosed() {
         func verified(_ modelID: String, _ data: Data) -> Bool {
             ModelRuntime.pagedKVModelCapabilities(modelID: modelID, configJSONData: data).hybridDecoderArchitectureVerified

@@ -3681,6 +3681,7 @@ maxTokens: 1,
             "qwen/qwen3.8-27b": "Qwen3_5ForConditionalGeneration",
             "zai-org/glm-5.3-flash": "Glm5NextForConditionalGeneration",
             "zai-org/glm-5.3-flash-abliterated": "Glm5NextForConditionalGeneration",
+            "zai-org/glm-5.3-flash-uncensored": "Glm5NextForConditionalGeneration",
             "deepseek/deepseek-v4-flash": "DeepseekV4ForCausalLM",
             "minimaxai/minimax-m3.1-flash": "MiniMaxM3SparseForConditionalGeneration",
         ]
@@ -6613,6 +6614,17 @@ maxTokens: 1,
         }
     }
 
+    /// How long the longest-waiting buyer has waited behind a self-check
+    /// probe's exclusive inference permit, or nil.
+    func selfCheckBuyerWaitSeconds() async -> Double? {
+        await inferenceGate.oldestBuyerWaitBehindExclusiveSeconds()
+    }
+
+    /// Whether a self-check probe is queued behind requests holding permits.
+    func selfCheckProbeAwaitingResidency() async -> Bool {
+        await inferenceGate.exclusiveAcquisitionQueued()
+    }
+
     /// The operation starts on this actor only after exclusive admission and
     /// identity checks, so it captures no stale container while queued. Awaiting
     /// its native body (including BlockingInferenceExecutor's continuation) keeps
@@ -7789,7 +7801,7 @@ maxTokens: 1,
         let templateSupportsThinkingToggle = handle.snapshot.templateSupportsThinkingToggle
         let templateSupportsPreserveThinking = handle.snapshot.templateSupportsPreserveThinking
         let selectionModelID = toolSelectionModelID(handle.snapshot)
-        try await inferenceGate.withPermit {
+        try await inferenceGate.withBuyerPermit {
             // A cancelled request (client gone, or local work preempted by a
             // buyer under SPEC-001-R011) releases the gate without preparing.
             try Task.checkCancellation()
@@ -7949,7 +7961,7 @@ maxTokens: 1,
             let templateSupportsThinkingToggle = handle.snapshot.templateSupportsThinkingToggle
             let templateSupportsPreserveThinking = handle.snapshot.templateSupportsPreserveThinking
             let selectionModelID = toolSelectionModelID(handle.snapshot)
-            let inputTokens = try await inferenceGate.withPermit {
+            let inputTokens = try await inferenceGate.withBuyerPermit {
                 try handle.drainCancelled.check()
                 return try await container.perform { context in
                     try handle.drainCancelled.check()
@@ -9038,7 +9050,7 @@ maxTokens: 1,
               !capability.shouldUseSerialPath, case .attached = pagedKVAttachDecision else { return nil }
         let gate = inferenceGate
         return try await Self.withDrainAndClientCancellation(drainCancelled, shouldCancel: shouldCancel) {
-            try await gate.withPermit {
+            try await gate.withBuyerPermit {
                 try Task.checkCancellation()
                 try drainCancelled.check()
                 if shouldCancel() { throw CancellationError() }
@@ -9597,7 +9609,7 @@ maxTokens: 1,
               !capability.shouldUseSerialPath, case .attached = pagedKVAttachDecision else { return nil }
         let gate = inferenceGate
         return try await Self.withDrainAndClientCancellation(drainCancelled, shouldCancel: { shouldCancel() || idleCancellation.isFired }) {
-            try await gate.withPermit {
+            try await gate.withBuyerPermit {
                 try Task.checkCancellation()
                 try drainCancelled.check()
                 if shouldCancel() { throw CancellationError() }
@@ -10359,7 +10371,7 @@ maxTokens: boundedMaxTokens,
         let completion = try await Self.withDrainAndClientCancellation(
             drainCancelled, shouldCancel: { prefillScope.interruptsPrefill(cancelled: shouldCancel()) }
         ) {
-            try await inferenceGate.withPermit {
+            try await inferenceGate.withBuyerPermit {
                 try drainCancelled.check()
                 try Task.checkCancellation()
                 return try await container.perform { context in
@@ -11301,7 +11313,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                     )
                 }
             ) { idleCancellation -> CompletionResult in
-                try await inferenceGate.withPermit { () async throws -> CompletionResult in
+                try await inferenceGate.withBuyerPermit { () async throws -> CompletionResult in
                 try drainCancelled.check()
                 try Task.checkCancellation()
                 return try await container.perform { context in
@@ -13857,8 +13869,17 @@ maxTokens: maxTokens,
 
     /// Detect the thinking toggle from the exact template bytes instead of
     /// inferring it from a model-family name.
+    ///
+    /// SPEC-018-R010: the reviewed Solstice GLM-5.3-Flash template is keyed by
+    /// SHA-256 and left to its own `<think>` default. `chat_template.jinja` is
+    /// the file the tokenizer loader renders; a copy embedded in
+    /// `tokenizer_config.json` does not decide this.
     static func chatTemplateSupportsThinkingToggle(in directory: URL) -> Bool {
-        chatTemplate(in: directory, contains: "enable_thinking")
+        if let bytes = try? Data(contentsOf: directory.appendingPathComponent("chat_template.jinja")),
+           ChatTemplateCompatibility.isMessageTagScanTemplate(bytes) {
+            return false
+        }
+        return chatTemplate(in: directory, contains: "enable_thinking")
     }
 
     static func chatTemplateSupportsPreserveThinking(in directory: URL) -> Bool {
@@ -15254,7 +15275,9 @@ maxTokens: maxTokens,
             schemas: autoToolParameterSchemas(from: request.promptSource.tools)
         )
         guard !parsed.toolCalls.isEmpty else {
-            return (text, [])
+            // GLM (#2259): calls that were all dropped leave only the prose
+            // outside them, never their markup.
+            return (parsed.droppedMalformedCalls ? parsed.cleanedContent ?? "" : text, [])
         }
         // Prose the model wrote before its first call is kept as content.
         let prose = parsed.leadingContent ?? ""
@@ -15332,6 +15355,37 @@ maxTokens: maxTokens,
         return ["high", "xhigh", "max"].contains(request.reasoningEffort ?? "")
     }
 
+    /// SPEC-018-R010 (v0.3.16): an explicit buyer effort asks for thinking on
+    /// a template with a thinking switch. Reads the raw buyer effort, never
+    /// `templateReasoningEffort`, which injects `low` for tools and JSON.
+    static func explicitThinkingRequested(_ request: ChatCompletionRequest) throws -> Bool {
+        guard let effort = request.reasoningEffort, effort != "none",
+              case .text = request.responseFormat,
+              !request.containsNonTextMessageContentPart else { return false }
+        return try !ToolSelectionPolicy.selection(request.promptSource.toolChoice).requiresCall
+    }
+
+    /// SPEC-018-R010 (v0.3.16): renders thinking on for an explicit effort
+    /// only when the thinking-on prompt leaves `<think>` open, so §3.12 can
+    /// split the output; otherwise (no opener, or the template rejects the
+    /// render) the request renders thinking off, as without an effort. Every
+    /// serving path prepares through this, so they decide alike.
+    static func renderingRequestedThinking<Rendered>(
+        for request: ChatCompletionRequest,
+        templateSupportsThinkingToggle: Bool,
+        supportsBonsaiThinking: Bool,
+        render: (_ thinking: Bool) async throws -> Rendered,
+        promptTail: (Rendered) -> String
+    ) async throws -> Rendered {
+        if templateSupportsThinkingToggle, !supportsBonsaiThinking,
+           try explicitThinkingRequested(request),
+           let rendered = try? await render(true),
+           ReasoningOutput.promptLeavesThinkOpen(promptTail(rendered)) {
+            return rendered
+        }
+        return try await render(false)
+    }
+
     /// Validate media before processor work, test generation seams or dispatch.
     /// Parsing alone is never an assertion that the loaded model sees images.
     static func validateNativeVisionRequest(
@@ -15378,7 +15432,8 @@ maxTokens: maxTokens,
         templateSupportsPreserveThinking: Bool = false,
         nativeVisionProfile: NativeVisionProfile? = nil,
         toolSelectionModelID: String? = nil,
-        supportsBonsaiThinking: Bool = false
+        supportsBonsaiThinking: Bool = false,
+        requestedThinking: Bool = false
     ) throws -> UserInput {
         if let input = try validateNativeVisionRequest(request, profile: nativeVisionProfile) {
             return try NativeVisionProfile.userInput(from: input)
@@ -15426,13 +15481,22 @@ maxTokens: maxTokens,
         var additionalContext = Self.templateAdditionalContext(
             supportsThinkingToggle: templateSupportsThinkingToggle,
             supportsPreserveThinking: templateSupportsPreserveThinking,
-            enableThinking: Self.bonsaiThinkingEnabled(
+            enableThinking: requestedThinking || Self.bonsaiThinkingEnabled(
                 for: request, supportsBonsaiThinking: supportsBonsaiThinking)
         )
         // SPEC-018 §3.12: normalize against the loaded family, including
         // when the buyer uses an alias. Templates without the variable ignore it.
         if let effort = request.templateReasoningEffort(for: toolSelectionModelID ?? request.model) {
             additionalContext = (additionalContext ?? [:]).merging(["reasoning_effort": effort]) { _, new in new }
+        }
+        // SPEC-018-R010: `none` and structured output stay thinking-off on a
+        // GLM template that otherwise opens `<think>` by default. A template
+        // without the variable ignores it.
+        var isStructured = true
+        if case .text = request.responseFormat { isStructured = false }
+        if grammar == .glm, additionalContext?["enable_thinking"] == nil,
+           request.reasoningEffort == "none" || isStructured {
+            additionalContext = (additionalContext ?? [:]).merging(["enable_thinking": false]) { _, new in new }
         }
         // Each native template owns its reasoning-history scope. Preserve
         // assistant reasoning only for the exact families that render it.
@@ -15513,20 +15577,29 @@ maxTokens: maxTokens,
         // Planned first: it validates the selected name before any prompt text.
         let plan = GrammarConstraintState.isRequired(request) ? nil : try toolCallPrefill(for: request, toolSelectionModelID: toolSelectionModelID)
         let grammar = try resolvedToolGrammar(for: request, templateToolFormat: context.configuration.toolCallFormat?.rawValue)
-        let input = try userInput(
+        let supportsBonsaiThinking = isPrismBonsai(context.model)
+        let lmInput: LMInput = try await renderingRequestedThinking(
             for: request,
             templateSupportsThinkingToggle: templateSupportsThinkingToggle,
-            templateSupportsPreserveThinking: templateSupportsPreserveThinking,
-            nativeVisionProfile: nativeVisionProfile,
-            toolSelectionModelID: toolSelectionModelID,
-            supportsBonsaiThinking: isPrismBonsai(context.model)
+            supportsBonsaiThinking: supportsBonsaiThinking,
+            render: { thinking in
+                let input = try userInput(
+                    for: request,
+                    templateSupportsThinkingToggle: templateSupportsThinkingToggle,
+                    templateSupportsPreserveThinking: templateSupportsPreserveThinking,
+                    nativeVisionProfile: nativeVisionProfile,
+                    toolSelectionModelID: toolSelectionModelID,
+                    supportsBonsaiThinking: supportsBonsaiThinking,
+                    requestedThinking: thinking
+                )
+                do {
+                    return try await context.processor.prepare(input: input)
+                } catch {
+                    throw ChatTemplateRequestError.mapping(error)
+                }
+            },
+            promptTail: { context.tokenizer.decode(tokenIds: Array($0.text.tokens.asArray(Int.self).suffix(16))) }
         )
-        let lmInput: LMInput
-        do {
-            lmInput = try await context.processor.prepare(input: input)
-        } catch {
-            throw ChatTemplateRequestError.mapping(error)
-        }
         guard let plan else {
             resolveOutputTraits(for: request, grammar: grammar, promptTokens: lmInput.text.tokens.asArray(Int.self), tokenizer: context.tokenizer)
             return (lmInput, nil)
@@ -15596,19 +15669,27 @@ maxTokens: maxTokens,
     ) async throws -> (tokens: [Int], toolCallPrefill: String?) {
         let plan = GrammarConstraintState.isRequired(request) ? nil : try toolCallPrefill(for: request, toolSelectionModelID: toolSelectionModelID)
         let grammar = try resolvedToolGrammar(for: request, templateToolFormat: templateToolFormat)
-        let input = try userInput(
+        let lmInput: LMInput = try await renderingRequestedThinking(
             for: request,
             templateSupportsThinkingToggle: templateSupportsThinkingToggle,
-            templateSupportsPreserveThinking: templateSupportsPreserveThinking,
-            toolSelectionModelID: toolSelectionModelID,
-            supportsBonsaiThinking: supportsBonsaiThinking
+            supportsBonsaiThinking: supportsBonsaiThinking,
+            render: { thinking in
+                let input = try userInput(
+                    for: request,
+                    templateSupportsThinkingToggle: templateSupportsThinkingToggle,
+                    templateSupportsPreserveThinking: templateSupportsPreserveThinking,
+                    toolSelectionModelID: toolSelectionModelID,
+                    supportsBonsaiThinking: supportsBonsaiThinking,
+                    requestedThinking: thinking
+                )
+                do {
+                    return try await processor.prepare(input: input)
+                } catch {
+                    throw ChatTemplateRequestError.mapping(error)
+                }
+            },
+            promptTail: { tokenizer.decode(tokenIds: Array($0.text.tokens.asArray(Int.self).suffix(16))) }
         )
-        let lmInput: LMInput
-        do {
-            lmInput = try await processor.prepare(input: input)
-        } catch {
-            throw ChatTemplateRequestError.mapping(error)
-        }
         let promptTokens = lmInput.text.tokens.asArray(Int.self)
         guard let plan else {
             resolveOutputTraits(for: request, grammar: grammar, promptTokens: promptTokens, tokenizer: tokenizer)
@@ -16522,6 +16603,9 @@ struct NativeToolCallStreamEmitter {
         if suppressesAssistantContent {
             return ""
         }
+        if grammar == .glm {
+            return ToolCallParser.glmStreamableProse(text)
+        }
         if grammar == .llama3 {
             // A bare JSON call has no opening tag: hold prose from the first
             // `{` until the final parse decides (it is flushed if no call).
@@ -16610,7 +16694,9 @@ struct NativeToolCallStreamEmitter {
             candidate = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
             guard candidate.hasSuffix(endDelimiter) else { return }
         } else if grammar != .llama3 {
-            guard let end = candidate.range(of: endDelimiter) else { return }
+            // GLM calls are parsed one by one (#2259): a malformed first call
+            // does not hide a complete one after it.
+            guard let end = candidate.range(of: endDelimiter, options: grammar == .glm ? .backwards : []) else { return }
             candidate = String(candidate[..<end.upperBound])
         }
         let parsed = ToolCallParser.parseToolCalls(

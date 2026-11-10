@@ -1,6 +1,6 @@
 # SPEC-018 — Agentic tool calling (provider-side response synthesis)
 
-**Version:** 0.3.12 (2026-11-02, GLM stray `<tool_call>` openers and stray think tags never reach content; Related: #2189)
+**Version:** 0.3.16 (2026-11-10, an explicit `reasoning_effort` turns thinking on for templates with a thinking switch whose output splits; omitted effort unchanged; Related: #2269)
 **Depends on:** SPEC-001 v1.6, SPEC-002 v1.5.5, SPEC-006 v0.9, SPEC-008 (Pillar A model-hash trust layer — referenced by §10a), SPEC-011 v0.5 (warm-swap heartbeat `model_hash` — referenced by §10a), SPEC-015 v0.4 (receipts canonical output binding — see AC-17 and §N.5)
 **Status:** **LOCKED** at v0.2.10 by the streaming cleanup-rewrite byte-domain clarification. Previously LOCKED at v0.2.9 by the serial-turn `parallel_tool_calls` amendment (omitted/`false` stop after the first complete valid tool). Previously LOCKED at v0.2.8 by the #1594 OpenRouter-aligned AC-53 amendment (no independent messages[] count cap). Previously LOCKED at v0.2.7 by the Qwen3-Coder function-XML tool-call grammar amendment (documents the `<function=…><parameter=…>` XML body that Qwen3-Coder emits as a Qwen-row §3.1 body-grammar alternative, with OpenAI/MCP name charset; pending IMPL/conformance already landed on branch `fix/qwen3coder-toolcall-parse`); previously LOCKED at v0.2.6 by #784 C2b admission-timeout reconciliation — v0.2.4 spec PR #202 and IMPL PR #209 both landed (multi-turn acceptance, token-incremental streaming, `tool_call_id` validation, 1 MiB/2 MiB byte caps). v0.2.5 adds gpt-oss/OpenAI Harmony response parsing as a pending implementation/conformance gap. codex 4-lane r4 0/0/0; Claude blind-spot r2 0/0/0. SPEC-019 already depends on this as "LOCKED". The former "LOCK CANDIDATE pending PR" line was never flipped after merge. (Resolved gap, 2026-07-14, runbook item 15: AC-45's `X-MacProvider-Streaming-Mode` header — set by the coordinator on streaming `200` responses — was stripped by the public gateway's blanket `X-MacProvider-*` filter, making the "header absent" fail condition live on `api.malibu.tech`. Fixed by adding the header to the SPEC-006 v0.9.9 § 5.4 response-pass-through allowlist and un-stripping it at the gateway, validated against AC-45's closed enum. Chosen over scoping AC-45 to the coordinator surface because buyers hit the gateway, so scoping would have left AC-45's buyer-visible promise unmet. AC-45's normative text is unchanged; this is a documentation reconciliation, not a lock amendment. Residual: the coordinator currently emits the diagnostic only on the streaming success path — non-streaming AC-45 emission is a separate coordinator-side completeness item, out of scope for the gateway-strip fix.)
 
@@ -18,6 +18,41 @@ SPEC-018 is the **provider-side response synthesis contract** for OpenAI-wire to
 
 ## Change log
 
+- **v0.3.16 (2026-11-10, Related: #2269):** §3.12 and SPEC-018-R010: an
+  explicit `reasoning_effort` other than `none` renders thinking on
+  (`enable_thinking: true`) on a template with a thinking switch, when the
+  request has a text `response_format`, no `required` or named `tool_choice`
+  and text-only messages, and only when the thinking-on prompt leaves `<think>`
+  open so §3.12 splits the output. The decision reads the buyer's raw effort,
+  not the effort normalized for the template (which injects `low` for tools
+  and structured output). Otherwise the request renders thinking off as
+  before: omitted effort, `none`, structured output, guaranteed tool selection,
+  a template whose thinking-on prompt opens no `<think>` (Qwen3-8B, GLM-4.5,
+  Gemma-4) and a thinking-on render the template rejects. Omitted effort keeps
+  its prompt byte-for-byte. The Prism Bonsai opt-in keeps its own rule.
+- **v0.3.15 (2026-11-09, Related: #2244):** §3.12 and SPEC-018-R010: the exact
+  Solstice GLM-5.3-Flash template (SHA-256 `1b927d9a…`) has `enable_thinking`
+  bytes but is not a provider-set toggle. It renders an open `<think>` and
+  `reasoning_effort` selects its mode; `none` and structured output render
+  thinking off, as before this amendment.
+- **v0.3.14 (2026-11-09, Related: #2244):** §3.14: message content does not select a reasoning mode through the Solstice GLM-5.3-Flash template; the provider removes that exact template's message-tag scan at load.
+- **v0.3.13 (2026-11-08, Related: #2259):** GLM multi-call robustness. §3.1
+  `glm` row: each `<tool_call>` envelope parses on its own. Two observed
+  malformations are repaired before parsing: a stray `</arg_value>` right after
+  the function name when an argument pair follows it, and
+  `<arg_key>K=V</arg_value>`. Repair applies only to a
+  body holding no opener but its envelope's own, never to a v0.3.12 last-opener
+  slice, which may be quoted argument data. An envelope that still
+  fails, or names an undeclared function, or fails its schema, is dropped and
+  the other calls in the turn stand. Exceeding a byte cap is not a malformed
+  call: the whole output fails closed with no calls (AC-36, AC-37). Call markup
+  never reaches `content`, streamed or not, and both forms carry the same
+  content; prose outside call spans is kept, and with no surviving call
+  `content` is that prose or null. A truncated final envelope is dropped while the complete
+  calls before it run. The serial stop (`SPEC-018-R004`) looks up to the last
+  `</tool_call>`, so a malformed first call no longer hides a valid one after
+  it. Before, one malformed envelope returned the whole raw output as
+  `content` with no `tool_calls`.
 - **v0.3.12 (2026-11-02, Related: #2189):** GLM output robustness, from
   captured abliterated GLM-5.3-Flash turns. §3.1 `glm` row: a `<tool_call>`
   followed by another `<tool_call>` before any `</tool_call>` opens no call;
@@ -517,7 +552,7 @@ The provider does not receive structured tool calls from the underlying MLX mode
 | Grammar | Selected when | Body grammar | Argument field | Source |
 |---|---|---|---|---|
 | `qwen` | template format `json`, `xml_function` or `qwen3_5`; family fallback `qwen2.5`, `qwen3`, `nemotron-3` | ONE OF: `<tool_call>{...}</tool_call>` JSON body; `<tool_call>name(key=value, ...)</tool_call>` Python-style call; OR the `<function=name><parameter=key>value</parameter></function>` XML body (Qwen3-Coder, Qwen3.5+, Nemotron-3), with or without the enclosing `<tool_call>`. JSON first, then Python-style, then function-XML. v0.3.1: an output made only of `{"name","arguments"}` bodies without tags (optionally inside one `<tools>`…`</tools>` wrapper, or, v0.3.2, a sequence of closed non-empty wrappers), each with exactly those keys, a declared name and an object `arguments`, is a call (Qwen2.5-Coder). v0.3.2, every grammar under `tool_choice` `auto`: an exact repeat (same name, same canonical arguments) within one reply is dropped, and at most 128 calls per reply are kept in generated order. | `arguments` (JSON), keyword args (Python-style), `<parameter=…>` keys (XML, typed per §3.3) | `ToolCallParser.parseQwenToolCalls` |
-| `glm` | template format `glm4`; family fallback `glm-4.5`…`glm-4.7`, `glm-5` | `<tool_call>NAME<arg_key>K</arg_key><arg_value>V</arg_value>…</tool_call>`, one envelope per call; the final envelope may end at the end of output without `</tool_call>` when its pairs are complete. v0.3.12: a `<tool_call>` followed by another `<tool_call>` before any `</tool_call>` opens no call; the envelope starts at the last opener before its close, and the text before it is prose. A final envelope without `</tool_call>` that holds a second opener still fails closed. | `<arg_key>` keys. A value whose declared type is `string` is literal text; any other declared type must be strict JSON of that type; an undeclared value is JSON when it parses, else text. | `ToolCallParser.glmCall` |
+| `glm` | template format `glm4`; family fallback `glm-4.5`…`glm-4.7`, `glm-5` | `<tool_call>NAME<arg_key>K</arg_key><arg_value>V</arg_value>…</tool_call>`, one envelope per call; the final envelope may end at the end of output without `</tool_call>` when its pairs are complete. v0.3.12: a `<tool_call>` followed by another `<tool_call>` before any `</tool_call>` opens no call; the envelope starts at the last opener before its close, and the text before it is prose. A final envelope without `</tool_call>` that holds a second opener still fails closed. v0.3.13: envelopes parse one at a time; a stray `</arg_value>` after the name when an argument pair follows and `<arg_key>K=V</arg_value>` are repaired, except in a last-opener slice; an envelope that still fails, is undeclared or fails its schema is dropped and the rest stand; a byte-cap overflow fails the whole output closed; call markup never reaches `content`, streamed or not. | `<arg_key>` keys. A value whose declared type is `string` is literal text; any other declared type must be strict JSON of that type; an undeclared value is JSON when it parses, else text. | `ToolCallParser.glmCall` |
 | `llama3` | template format `llama3`; family fallback `llama-3.1`, `llama-3.2`, `llama-3.3` | One or more JSON objects `{"name", "parameters"}` ending the output, `;`-separated, optionally after `<|python_tag|>` and before `<|eom_id|>`/`<|eot_id|>`. A JSON object without a string `name` and an object `parameters`/`arguments` is content. | `parameters` (`arguments` accepted) | `ToolCallParser.parseLlama3Calls` |
 | `gemma4` | template format `gemma4`; family fallback `gemma-4` | `<|tool_call>call:NAME{key:value,…}<tool_call|>` with strings as `<|"|>…<|"|>` and brace-form objects/arrays | keys of the brace object; strings `<|"|>`-delimited at any depth; duplicate keys, trailing text, depth over 32 or a declared-type mismatch fail closed | `GemmaToolCallBridge` (bounded dialect parser) |
 | `dsml` | family fallback `deepseek-v4` (the family has no Jinja template; §3.12) | `<｜DSML｜tool_calls>` holding one or more `<｜DSML｜invoke name="NAME">…</｜DSML｜invoke>`, each a list of `<｜DSML｜parameter name="KEY" string="true\|false">VALUE</｜DSML｜parameter>`; several blocks may follow each other; the last block may end at the end of output without its close when its invokes are complete; whitespace between markup is free. | `<｜DSML｜parameter>` names. A declared non-string type must parse strictly as that type under either string flag. Otherwise, `string="true"` values are literal text; `string="false"` values are typed as GLM values. Duplicate names, a flag other than `true`/`false`, an unclosed parameter or invoke, or a declared-type mismatch fail closed. | `ToolCallParser.parseDSMLCalls` |
@@ -1032,17 +1067,54 @@ identities retain their existing mapping; matching a namespace or a distill
 lookalike does not grant this mapping. An unknown family retains pass-through. The loaded model identity takes precedence
 over a buyer alias. DeepSeek-V4 retains its encoder mapping below, including
 `none` selecting chat mode. Qwen thinking-toggle families (including Qwen3.8),
-GLM-4.5, Nemotron-3 and Gemma-4 keep `enable_thinking: false`; templates that
+GLM-4.5, Nemotron-3 and Gemma-4 render `enable_thinking: false` unless the
+v0.3.16 explicit-effort rule below turns thinking on (the
+Solstice GLM-5.3-Flash template is not one of them; see SPEC-018-R010 below); templates that
 do not use `reasoning_effort` ignore it. When a request declares tools and
 omits effort, the provider passes `low`; otherwise the template default applies.
 v0.3.2: when the request carries `response_format` `json_object` or
 `json_schema`, the provider passes `low` whatever the buyer sent, and
-templates with `enable_thinking` render with it `false` (as for every
-request), so the reply starts with the JSON where the template allows it.
+templates with `enable_thinking` render with it `false`, so the reply starts
+with the JSON where the template allows it.
 
-**Bonsai thinking opt-in (v0.3.9, SPEC-018-R010).** The unconditional
-thinking-off rule above is amended only for a loaded native
-`PrismHadamardQwen35` model whose template supports `enable_thinking`.
+**Explicit effort on a thinking switch (v0.3.16, SPEC-018-R010).** On a
+template with a thinking switch (the loaded template contains
+`enable_thinking`, other than the Solstice template below), the provider MUST
+render `enable_thinking: true` exactly when all of these hold:
+
+| Condition | Required value |
+|---|---|
+| buyer `reasoning_effort` (raw, before normalization) | present, not null, not `none` |
+| `response_format` | `text` (absent) |
+| `tool_choice` | absent, `auto` or `none` (any tools declaration otherwise) |
+| messages | text only |
+| thinking-on prompt | renders, and its decoded tail leaves `<think>` open (§3.12) |
+
+Every other request MUST render `enable_thinking: false`, the prompt it
+rendered before v0.3.16. In particular: omitted effort, with or without tools,
+keeps thinking off and the normalized `low` for tools; `none` is off;
+`json_object`/`json_schema` are off whatever effort is sent; `required` and
+named `tool_choice` are off until grammar-constrained generation with
+reasoning is tested. The decision MUST NOT read the normalized template effort,
+which injects `low` for tools and structured output. The provider renders the
+thinking-on prompt first and falls back to the thinking-off prompt when that
+render fails or leaves no `<think>` open, so a family whose output cannot be
+split stays off: Qwen3-8B and GLM-4.5 render no `<think>` opener and Gemma-4
+has a thought channel the provider does not parse. The catalog templates this
+turns on are Qwen3.5, Qwen3.6, Qwen3.8 and Nemotron-3; the normalized effort
+still reaches the template, so Qwen3.8 receives `low`, `medium` or `xhigh`
+(above). Serial and continuous-batching prompt preparation MUST make the same
+decision. The output uses the existing split, stop, usage and receipt rules in
+this section. The Prism Bonsai opt-in below keeps its own rule, and the
+`glm`-grammar rule for the Solstice template is unchanged. Models without a
+switch (GLM-5.3, gpt-oss) cannot disable reasoning: `none` renders their
+lowest level, `low`. A request carrying `reasoning_effort` reaches native MTP
+only where SPEC-048-R004 already admits the key (the GLM-5.3 adapter, whose
+templates have no switch), so this rule changes no MTP-admitted prompt.
+
+**Bonsai thinking opt-in (v0.3.9, SPEC-018-R010).** For a loaded native
+`PrismHadamardQwen35` model whose template supports `enable_thinking`, this
+rule replaces the v0.3.16 explicit-effort rule above.
 An explicit `reasoning_effort` of `high`, `xhigh` or `max` MUST set
 `enable_thinking: true` for a text-only request with `response_format: text`
 and no declared tools. Omitted effort, `none`, `minimal`, `low` and `medium`
@@ -1055,6 +1127,19 @@ preparation MUST produce the same thinking mode. Other model types retain
 the preceding rules. Generated reasoning uses the existing split, stop,
 usage and receipt rules in this section; this opt-in is not quality
 qualification or permission to advertise an unqualified capability.
+
+**Solstice GLM-5.3-Flash thinking default (v0.3.15, SPEC-018-R010).** The
+template whose `chat_template.jinja` has SHA-256
+`1b927d9aaebbc9d98823db0bb746a199123724577f900fd62859b1de810e6d43` is not a
+thinking toggle, although its bytes contain `enable_thinking`: the identity is
+that SHA-256 only, never a model name, and every caller of the detection gets
+the same answer. The provider MUST NOT set `enable_thinking` for it, so the
+generation prompt ends in an open `<think>` and the §3.12 split applies, as for
+GLM-5.3-Flash whose template has no such variable. `reasoning_effort` still
+selects the mode. Two exceptions keep thinking off for any `glm`-grammar
+request on such a template: `reasoning_effort: none` and a structured
+`response_format` render with `enable_thinking: false`, the same prompt as
+before v0.3.15. `minimal` renders as `low` (above) and thinks.
 
 **History reasoning (v0.3.7).** An assistant history message's
 `reasoning_content` (from Chat Completions or a SPEC-006-R025 Responses
@@ -1092,6 +1177,12 @@ reference goldens using `scripts/tests/fixtures/dsv4-encoding/token-ids.json`.
 Other model families use their existing tokenizer path.
 
 ### 3.14 Prompt segments and control tokens (v0.3.8)
+
+Message content MUST NOT select a reasoning mode: for the Solstice-AI
+uncensored GLM-5.3-Flash chat template (exact SHA-256 `1b927d9a…`) the provider
+removes the template's message-tag scan at load, keeps message text as sent,
+and leaves the snapshot bytes unchanged; only `reasoning_effort` and the other
+template variables select the mode.
 
 A **control token** of a loaded tokenizer is an added token that is special,
 or that the model's chat template (or, for DeepSeek-V4, the reference

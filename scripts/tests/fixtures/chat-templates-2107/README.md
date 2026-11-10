@@ -16,6 +16,8 @@ template and to parse the tool calls those templates render (SPEC-018 §3.1,
 | `gemma-4-26b-a4b-it.jinja` | `mlx-community/gemma-4-26b-a4b-it-4bit` | `0d77464eeb233a2da68ebf9d7dc4edaac7db956d` | `chat_template.jinja` |
 | `qwen3-8b.jinja` | `mlx-community/Qwen3-8B-4bit` | `545dc4251c05440727734bcd94334791f6ab0192` | `tokenizer_config.json` `chat_template` |
 | `qwen3-coder-30b-a3b-instruct.jinja` | `mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit` | `6e302ea604ad9ab206367e2c501d1571023e7b6d` | `chat_template.jinja` |
+| `qwen3.5-27b.jinja` | `mlx-community/Qwen3.5-27B-4bit` | `45797d2985a12c55e6473686e9ea91b95e959553` | `chat_template.jinja` (byte-identical to `Qwen3.5-35B-A3B-4bit@1e20fd8d`) |
+| `qwen3.6-27b.jinja` | `mlx-community/Qwen3.6-27B-4bit` | `c000ac2c2057d94be3fa931000c31723aac53282` | `chat_template.jinja` (byte-identical to `Qwen3.6-35B-A3B-4bit@38740b84`) |
 
 Each template remains under its model's license (Llama 3.1 / 3.2 Community
 License, Gemma Terms of Use, NVIDIA Open Model License, Apache-2.0, MIT); the
@@ -24,3 +26,7 @@ files are test inputs only and ship in no binary.
 `ReasoningEffortTests` also renders the effort-aware GLM-5.3, gpt-oss and
 Qwen3.8 templates and verifies the existing thinking switches. gpt-oss is
 Apache-2.0; Qwen3.8 uses the license of its source model.
+
+`ReasoningSwitchTests` renders every catalog template with a thinking switch
+(Qwen3-8B, Qwen3.5, Qwen3.6, Qwen3.8, Nemotron-3, GLM-4.5, Gemma-4) for the
+SPEC-018 v0.3.16 explicit-effort rule. Qwen3.5 and Qwen3.6 are Apache-2.0.

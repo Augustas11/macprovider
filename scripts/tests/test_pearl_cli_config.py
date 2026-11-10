@@ -560,6 +560,39 @@ class StreamCeilingPlanTest(unittest.TestCase):
         self.assertEqual(gateway["coordinator_header_timeout_seconds"], pcc.SC_NON_STREAM_WALL)
         self.assertIn("StreamCeilingMaxSeconds:     3600,",
                       (REPO / "phase5-gateway/internal/config/config.go").read_text())
+        limits = yaml.safe_load((REPO / "phase5-gateway/gateway.yaml.example").read_text())["limits"]
+        self.assertEqual(limits["model_max_output_tokens"], pcc.SC_MODEL_MAX_OUTPUT_TOKENS)
+
+    def test_output_limit_is_added_raised_and_never_lowered(self):
+        import yaml
+        glm = "zai-org/glm-5.3-flash"
+        unc = "zai-org/glm-5.3-flash-uncensored"
+        absent = "limits:\n  max_tokens_per_request: 32768\n  # keep\nkill_switch:\n  demo_only: false\n"
+        for text in (absent, absent.replace("  # keep\n", "  model_max_output_tokens: {}\n"), "timeouts:\n  a: 1\n"):
+            plan = pcc.sc_output_plan(yaml.safe_load(text))
+            self.assertEqual(plan, {glm: (None, 65536), unc: (None, 65536)})
+            new = pcc.sc_output_edit(text, plan)
+            doc = yaml.safe_load(new)
+            self.assertEqual(doc["limits"]["model_max_output_tokens"], {glm: 65536, unc: 65536})
+            self.assertEqual(pcc.sc_output_plan(doc), {})
+        self.assertIn("  # keep\n", pcc.sc_output_edit(absent, {glm: (None, 65536), unc: (None, 65536)}))
+        lower = "limits:\n  model_max_output_tokens:\n    %s: 32768\n    other/x: 5\n" % glm
+        plan = pcc.sc_output_plan(yaml.safe_load(lower))
+        self.assertEqual(plan, {glm: (32768, 65536), unc: (None, 65536)})
+        self.assertEqual(yaml.safe_load(pcc.sc_output_edit(lower, plan))["limits"]["model_max_output_tokens"],
+                         {glm: 65536, unc: 65536, "other/x": 5})
+        self.assertEqual(pcc.sc_output_plan(yaml.safe_load(lower.replace("32768", "131072"))), {unc: (None, 65536)})
+        # The live map holds the first target only: the second is added beside it.
+        live = "limits:\n  model_max_output_tokens:\n    %s: 65536\n  max_tokens_per_request: 32768\n" % glm
+        plan = pcc.sc_output_plan(yaml.safe_load(live))
+        self.assertEqual(plan, {unc: (None, 65536)})
+        self.assertEqual(yaml.safe_load(pcc.sc_output_edit(live, plan))["limits"]["model_max_output_tokens"],
+                         {glm: 65536, unc: 65536})
+        # An alias key of the same model next to the target would fail gateway validation.
+        with self.assertRaises(pcc.Refused):
+            pcc.sc_output_plan(yaml.safe_load("limits:\n  model_max_output_tokens:\n    z-ai/glm-5.3-flash: 1\n    %s: 1\n" % glm))
+        with self.assertRaisesRegex(pcc.Refused, "has entries but not"):
+            pcc.sc_output_plan(yaml.safe_load("limits:\n  model_max_output_tokens:\n    z-ai/glm-5.3-flash: 1\n"))
 
 
 class StreamCeilingApplyTest(unittest.TestCase):
@@ -681,6 +714,21 @@ class StreamCeilingApplyTest(unittest.TestCase):
                 pcc.apply_stream_ceiling(self.args)
         self.assertEqual(self.read("gateway"), foreign)
         self.assertEqual(self.events, [])
+
+    def test_output_limit_alone_restarts_only_the_gateway(self):
+        restarts = []
+        with self.mock.patch.object(pcc, "restart", lambda a, pid: restarts.append("coordinator")), \
+                self.mock.patch.object(pcc, "sc_restart_gateway", lambda a, pid: restarts.append("gateway")):
+            pcc.apply_stream_ceiling(self.args)
+            gateway = self.read("gateway").replace(b"  model_max_output_tokens:\n    zai-org/glm-5.3-flash: 65536\n    zai-org/glm-5.3-flash-uncensored: 65536\n", b"")
+            with open(self.paths["gateway"], "wb") as f:
+                f.write(gateway)
+            config = self.read("config")
+            restarts.clear()
+            pcc.apply_stream_ceiling(self.args)
+        self.assertEqual(restarts, ["gateway"])
+        self.assertEqual(self.read("config"), config)
+        self.assertIn(b"zai-org/glm-5.3-flash: 65536", self.read("gateway"))
 
     def test_walls_already_live_are_done_without_a_restart(self):
         with self.mock.patch.object(pcc, "restart", lambda a, pid: None), \

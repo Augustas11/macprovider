@@ -225,6 +225,25 @@ final class NativeMTPSelectorTests: XCTestCase {
         ), .tools)
     }
 
+    /// SPEC-018 v0.3.16 / SPEC-048-R004: an explicit effort, which can turn
+    /// thinking on for a Qwen thinking switch, never newly reaches native MTP.
+    /// Only the GLM adapter admits the key, and its templates have no switch.
+    func testExplicitReasoningEffortStaysOrdinaryOnAdaptersWithoutReasoningScope() throws {
+        for effort in ChatCompletionRequest.acceptedReasoningEfforts.sorted() {
+            for capability in [admittedCapability(family: "qwen3_5_mtp_v1"),
+                               admittedCapability(supportsSampling: true, family: "qwen3_5_mtp_v1"),
+                               admittedCapability(family: "glm5_next_mtp_v1")] {
+                XCTAssertEqual(NativeMTPSelector.reason(
+                    request: try makeRequest(extra: ["reasoning_effort": effort]), mode: .auto,
+                    nativeCapability: capability
+                ), .unknownRequestField, effort)
+            }
+        }
+        XCTAssertEqual(NativeMTPSelector.reason(
+            request: try makeRequest(), mode: .auto, nativeCapability: admittedCapability(family: "qwen3_5_mtp_v1")
+        ), .eligible, "omitted effort keeps its admitted shape")
+    }
+
     func testGLMGreedyProfileIdentityRebindKeepsPriorShapeScope() throws {
         let tools: [[String: Any]] = [["type": "function", "function": [
             "name": "lookup", "parameters": ["type": "object"],

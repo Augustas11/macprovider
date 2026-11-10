@@ -9,7 +9,7 @@
     {
       "spec_id": "SPEC-001",
       "title": "Phase 3 Binary: Mac Provider Inference CLI",
-      "version": "1.9.52",
+      "version": "1.9.53",
       "path": "specs/SPEC-001-phase3-binary.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -152,7 +152,7 @@
     {
       "spec_id": "SPEC-006",
       "title": "Buyer API Gateway: Mac Provider's first public buyer surface",
-      "version": "0.9.72",
+      "version": "0.9.75",
       "path": "specs/SPEC-006-buyer-api.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -504,7 +504,7 @@
     {
       "spec_id": "SPEC-018",
       "title": "Agentic tool calling (provider-side response synthesis)",
-      "version": "0.3.12",
+      "version": "0.3.16",
       "path": "specs/SPEC-018-agentic-tool-calling.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -1101,7 +1101,7 @@
     {
       "spec_id": "SPEC-038",
       "title": "Continuous batching for concurrent provider inference",
-      "version": "v0.3.38",
+      "version": "v0.3.40",
       "path": "specs/SPEC-038-continuous-batching.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1136,7 +1136,7 @@
     {
       "spec_id": "SPEC-039",
       "title": "Paged KV / paged-attention engine",
-      "version": "v0.1.30",
+      "version": "v0.1.32",
       "path": "specs/SPEC-039-paged-kv-attention-engine.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1477,7 +1477,7 @@
     {
       "spec_id": "SPEC-048",
       "title": "Native Multi-Token Prediction Serving",
-      "version": "0.1.77",
+      "version": "0.1.79",
       "path": "specs/SPEC-048-native-mtp-serving.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -2575,11 +2575,19 @@
       "state": "pending",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func bonsaiThinkingEnabled",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func chatTemplateSupportsThinkingToggle",
         "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func preparedRequestInput",
-        "phase3-binary/Sources/macprovider-cli/ServeDecodePath.swift:static func makeContinuousBatchTextPreparationLane"
+        "phase3-binary/Sources/macprovider-cli/ServeDecodePath.swift:static func makeContinuousBatchTextPreparationLane",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func explicitThinkingRequested",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func renderingRequestedThinking",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func preparedRequestTokens",
+        "phase4-coordinator/internal/buyer/model_capabilities.go:func providerServesOnRequestReasoning"
       ],
       "tests": [
-        "phase3-binary/Tests/macprovider-cliTests/ModelRuntimePromptContextTests.swift:final class ModelRuntimePromptContextTests"
+        "phase3-binary/Tests/macprovider-cliTests/ModelRuntimePromptContextTests.swift:final class ModelRuntimePromptContextTests",
+        "phase3-binary/Tests/macprovider-cliTests/ChatTemplateMessageTagScanTests.swift:final class ChatTemplateMessageTagScanTests",
+        "phase3-binary/Tests/macprovider-cliTests/ReasoningSwitchTests.swift:final class ReasoningSwitchTests",
+        "phase4-coordinator/internal/buyer/reasoning_switch_2269_test.go:func TestOnRequestReasoningCapabilityMatchesWhatIsServed"
       ],
       "journeys": [],
       "evidence": [],
@@ -2587,7 +2595,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/2154",
-        "rationale": "Explicit high/xhigh/max enables thinking for the loaded Prism Bonsai model on text requests without tools. Native/reference quality evaluation, buyer UX acceptance and signed release remain pending."
+        "rationale": "Explicit high/xhigh/max enables thinking for the loaded Prism Bonsai model on text requests without tools. v0.3.16 (#2269): an explicit reasoning_effort other than none enables thinking on any thinking-switch template whose thinking-on prompt leaves <think> open, except structured output and required/named tool_choice; omitted effort is unchanged. Render and parse conformance is tested against the pinned catalog templates. Native/reference quality evaluation, per-family thinking-on measurement, buyer UX acceptance and signed release remain pending."
       }
     },
     {
@@ -5755,7 +5763,7 @@
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSelfCheckTests.swift:testProbeShapeUnavailableRerunsWhenTheShapeFits",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingSelfCheckTests.swift:testStoreIgnoresAFileReadableByOtherUsers",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingAdmissionHoldTests.swift:testHoldIsDueOnlyAfterTheDeferralBoundAndHoldsAreSpacedApart",
-        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingAdmissionHoldTests.swift:testHoldRefusesNewRequestsKeepsInFlightOnesAndResumes",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingAdmissionHoldTests.swift:testHoldKeepsInFlightRequestsAdmitsArrivalsAndResumes",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingAdmissionHoldTests.swift:testHoldNeverStartsUnderAnOperatorPauseOrADrain",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingAdmissionHoldTests.swift:testPauseDuringTheHoldSurvivesTheHoldEnding",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingAdmissionHoldTests.swift:testCheckRunsOnlyAfterInFlightRequestsFinishAndNoneIsDropped",
@@ -5763,7 +5771,10 @@
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingAdmissionHoldTests.swift:testLifecycleLeaseAndPauseSkipTheHold",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingAdmissionHoldTests.swift:testCheckBoundReopensAdmissionWithoutWaitingForTheCheck",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingAdmissionHoldTests.swift:testPauseLeaseOrTargetChangeDuringTheCheckEndsTheHold",
-        "phase3-binary/Tests/macprovider-cliTests/InferenceRelayTests.swift:testSelfCheckAdmissionHoldRefusesWithTheReroutedQueueFullStatus"
+        "phase3-binary/Tests/macprovider-cliTests/InferenceRelayTests.swift:testSelfCheckAdmissionHoldAdmitsTheRelayRequest",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingAdmissionHoldTests.swift:testBuyerArrivingDuringAShortCheckWaitsAndTheCheckCompletes",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingAdmissionHoldTests.swift:testBuyerWaitingPastTheBoundYieldsTheHoldAndIsServed",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchingAdmissionHoldTests.swift:testBuyerArrivingDuringTheDrainIsAdmittedAndDoesNotBlockTheCheck"
       ],
       "journeys": [],
       "evidence": [],
@@ -6145,6 +6156,7 @@
         "phase3-binary/Tests/macprovider-cliTests/PagedKVSlidingWindowTests.swift:testBatchedEqualLengthDecodePastWindowUsesPresentedWindow",
         "phase3-binary/Tests/macprovider-cliTests/DeepseekV4ContinuousBatchTests.swift:final class DeepseekV4ContinuousBatchTests",
         "phase3-binary/Tests/macprovider-cliTests/GLM5NextPagedKVWiringTests.swift:testAbliteratedCatalogIdentityCarriesTheSameSparseLayout",
+        "phase3-binary/Tests/macprovider-cliTests/GLM5NextPagedKVWiringTests.swift:testUncensoredCatalogIdentityCarriesTheSameSparseLayout",
         "phase3-binary/Tests/macprovider-cliTests/PagedMiniMaxM3CacheTests.swift:testAllowlistedIdentityCarriesTheVerifiedLayout",
         "phase3-binary/Tests/macprovider-cliTests/PagedMiniMaxM3CacheTests.swift:testOtherMiniMaxConfigsFailClosed",
         "phase3-binary/Tests/macprovider-cliTests/PagedMiniMaxM3CacheTests.swift:testMatchesStockCacheAcrossChunksDecodeAndTrims",
@@ -11904,7 +11916,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1770",
-        "rationale": "SPEC-048 v0.1.77 names LM 3.32.3-macprovider.31 (9f30c01bbce4ee2619aa5a3a2a0a232241fd9df3), which is 3.32.3-macprovider.25 plus the mlx-swift 0.32.3-macprovider.13 pin (#2234). .25 is on 3.32.3-macprovider.24 (#2198, #2189): .23's GLM-5.3 MTP head prefill over the last 4096 prompt columns (NoPE) on top of the MiniMax M3 rows; prompts within 4096 unchanged. Model sources and the C row are unchanged; the Swift and core rows move to the qmv_mma core."
+        "rationale": "SPEC-048 v0.1.79 names LM 3.32.3-macprovider.34 (647b24d1f13ea662cf1c61ebcce18541400015ce), which is 3.32.3-macprovider.32 plus the mlx-swift 0.32.3-macprovider.13 pin (#2234). .32 is on 3.32.3-macprovider.25 (#2244, #2189): the per-layer quantization-map loader for checkpoints in the Hugging Face key layout; load-time only, no decode line changes. Model sources and the C row are unchanged; the Swift and core rows move to the qmv_mma core."
       }
     },
     {

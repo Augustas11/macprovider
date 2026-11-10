@@ -375,16 +375,16 @@
       }
     },
     {
-      "source_model_id": "z-ai/glm-5.3-flash-abliterated",
-      "canonical_model_id": "zai-org/glm-5.3-flash-abliterated",
+      "source_model_id": "z-ai/glm-5.3-flash-uncensored",
+      "canonical_model_id": "zai-org/glm-5.3-flash-uncensored",
       "serving_path": {
         "verification_status": "verified",
-        "reference": "https://huggingface.co/grant-ai/GLM-5.3-Flash-Abliterated-MLX-4bit"
+        "reference": "https://huggingface.co/Solstice-AI/GLM-5.3-Flash-UNCENSORED-mlx-oQ4e-DFlash2"
       },
       "license": {
         "commercial_permitted": true,
-        "source_url": "https://huggingface.co/grant-ai/GLM-5.3-Flash-Abliterated-MLX-4bit",
-        "verification_note": "The pinned artifact's model card (revision cbf4e8bd) declares the MIT license of its zai-org/GLM-5.3-Flash base."
+        "source_url": "https://huggingface.co/Solstice-AI/GLM-5.3-Flash-UNCENSORED-mlx-oQ4e-DFlash2",
+        "verification_note": "The pinned artifact's model card (revision bff40d24) declares the MIT license."
       },
       "profile": {
         "kind": "broad_fleet",

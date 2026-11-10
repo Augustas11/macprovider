@@ -603,6 +603,8 @@ EXACT_MODEL_KEY_ALIASES = {
     "jundot/glm-5.3-flash-oq4e-mtp": "zai-org/glm-5.3-flash",
     "z-ai/glm-5.3-flash-abliterated": "zai-org/glm-5.3-flash-abliterated",
     "grant-ai/glm-5.3-flash-abliterated-mlx": "zai-org/glm-5.3-flash-abliterated",
+    "z-ai/glm-5.3-flash-uncensored": "zai-org/glm-5.3-flash-uncensored",
+    "solstice-ai/glm-5.3-flash-uncensored-mlx-oq4e-dflash2": "zai-org/glm-5.3-flash-uncensored",
     "tensorfold/deepseek-v4-flash-0731-mxfp4-mlx": "deepseek/deepseek-v4-flash",
     "deepseek-ai/deepseek-v4-flash-0731": "deepseek/deepseek-v4-flash",
 }
@@ -1536,7 +1538,76 @@ def cb_policy_source_entries() -> list[dict]:
                 f"{CB_POLICY_SOURCE_PATH.name}.entries[{index}]: tuple_sha256 is generated, not authored"
             )
         result.append(dict(entry))
+    require_cb_cached_turns_variant_grant(result, CB_POLICY_SOURCE_PATH.name)
+    # The guard's review metadata; the signed entry schema does not carry it.
+    for entry in result:
+        for field in CB_POLICY_SOURCE_ONLY_FIELDS:
+            entry.pop(field, None)
     return result
+
+
+# SPEC-038 v0.3.40 same-architecture variant. backend_family (the artifact's
+# config.json model_type) and cached_turns_donor (the donor's model_key) are
+# authored in the source only.
+CB_POLICY_SOURCE_ONLY_FIELDS = ("backend_family", "cached_turns_donor")
+# Fields an AC-26 grant does not depend on (item 3); every other field is the
+# variant scope.
+CB_VARIANT_IDENTITY_FIELDS = frozenset({
+    "model_id", "model_key", "model_sha256", "tokenizer_sha256", "chat_template_sha256",
+    "cached_turns_accepted", "provenance", *CB_POLICY_SOURCE_ONLY_FIELDS,
+})
+CB_AC26_EVIDENCE_ID = re.compile(r"(?:^|[-_.])ac26(?:[-_.]|$)")
+
+
+def require_cb_cached_turns_variant_grant(entries: list[dict], label: str) -> None:
+    """Refuse a cached-turns grant that neither its own nor a donor's AC-26 proof backs.
+
+    A false entry is always allowed: SPEC-038 runs AC-26 leg (a) with the
+    signed false entry loaded. A true entry cites an AC-26 evidence id in its
+    provenance and names its backend_family. Without cached_turns_donor it is
+    a donor (its own full AC-26 proof). With it, the named donor must be a
+    donor in the same (variant scope, backend_family).
+    """
+    def variant_scope(entry: dict) -> str:
+        return json.dumps(
+            {k: v for k, v in entry.items() if k not in CB_VARIANT_IDENTITY_FIELDS},
+            sort_keys=True,
+        )
+
+    def granted(entry: dict) -> bool:
+        return entry.get("cached_turns_accepted", False) is True
+
+    donors: dict[tuple[str, str], set[str]] = {}
+    for index, entry in enumerate(entries):
+        if not granted(entry):
+            continue
+        entry_label = f"{label}.entries[{index}]"
+        family = entry.get("backend_family")
+        if not isinstance(family, str) or not family:
+            fail(
+                f"{entry_label}: an entry with cached_turns_accepted true must name its "
+                "backend_family (the artifact's config.json model_type)"
+            )
+        provenance = entry.get("provenance")
+        evidence_id = provenance.get("evidence_id") if isinstance(provenance, dict) else None
+        if not isinstance(evidence_id, str) or not CB_AC26_EVIDENCE_ID.search(evidence_id):
+            fail(
+                f"{entry_label}: cached_turns_accepted true needs provenance.evidence_id citing its "
+                "AC-26 evidence (an 'ac26' token); see the Sticky retained-KV proof (AC-26) step of "
+                "docs/runbooks/continuous-batching-enable-gate.md"
+            )
+        if "cached_turns_donor" not in entry:
+            donors.setdefault((variant_scope(entry), family), set()).add(entry.get("model_key"))
+    for index, entry in enumerate(entries):
+        if not granted(entry) or "cached_turns_donor" not in entry:
+            continue
+        donor_key = entry["cached_turns_donor"]
+        if donor_key not in donors.get((variant_scope(entry), entry["backend_family"]), set()):
+            fail(
+                f"{label}.entries[{index}]: {entry.get('model_key')} takes cached_turns_accepted from "
+                f"{donor_key!r}, which is not a granted donor with the same CB tuple fields in backend "
+                f"family {entry['backend_family']} (SPEC-038 v0.3.40 items 1-3)"
+            )
 
 
 CB_POLICY_STRUCTURAL_EXPIRES_AT = "9999-12-31T23:59:59Z"

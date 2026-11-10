@@ -670,6 +670,10 @@ class RateCardSourceTest(unittest.TestCase):
         # All recommendable rows remain class-bound; only this explicit staged
         # candidate extends the priced set. Listed rows need no rate_class.
         self.assertEqual(set(classes), recommendable | staged)
+        # #2189: the uncensored build serves serially, so its demand weight
+        # stays at the cold-start floor and it never outranks the base row.
+        self.assertLess(demand["zai-org/glm-5.3-flash-uncensored"]["demand_weight"],
+                        demand["zai-org/glm-5.3-flash"]["demand_weight"])
         source = catalog_release.validate_rate_card_source(RATE_CARD_SOURCE_BYTES)
         expanded = catalog_release.expand_rate_card(source, classes, CANDIDATE_OBJ)
         self.assertEqual(expanded, RATE_CARD_BYTES)

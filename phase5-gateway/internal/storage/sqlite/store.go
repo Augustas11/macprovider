@@ -3911,6 +3911,7 @@ func validDemandModelID(model string) bool {
 		"z-ai/glm-4.5-air",
 		"zai-org/glm-5.3-flash", "z-ai/glm-5.3-flash",
 		"zai-org/glm-5.3-flash-abliterated", "z-ai/glm-5.3-flash-abliterated",
+		"zai-org/glm-5.3-flash-uncensored", "z-ai/glm-5.3-flash-uncensored",
 		"deepseek/deepseek-v4-flash",
 		"mlx-community/gpt-oss-20b-MXFP4-Q4",
 		"mlx-community/gpt-oss-20b-MXFP4-Q8",
@@ -3937,6 +3938,7 @@ func validDemandModelID(model string) bool {
 		"mlx-community/GLM-4.5-Air-4bit",
 		"Jundot/GLM-5.3-Flash-oQ4e-mtp",
 		"grant-ai/GLM-5.3-Flash-Abliterated-MLX-4bit",
+		"Solstice-AI/GLM-5.3-Flash-UNCENSORED-mlx-oQ4e-DFlash2",
 		"TensorFold/DeepSeek-V4-Flash-0731-MXFP4-MLX":
 		return true
 	default:
@@ -4089,6 +4091,64 @@ func (s *Store) ReapExpiredReservations(ctx context.Context, now time.Time) (int
 		return 0, err
 	}
 	return n, tx.Commit()
+}
+
+// ReleaseOrphanedReservations is the gateway's startup sweep (SPEC-006 §7.2,
+// v0.9.74). It expires every active quota reservation without a settlement
+// hold, and every active concurrency reservation, created in a second before
+// bootedAt's second. The gateway is the only writer of both tables (one
+// systemd unit per database), so a row from before this process started
+// belongs to an exited process whose stream is gone. It must run before the
+// listener starts, so this process has admitted nothing yet.
+//
+// The quota transition is the reaper's ('expired', settled_tokens = 0); only
+// the age test differs. Held rows stay with the SPEC-022 reconciler, and rows
+// bound to a wallet-session reservation stay with the wallet-session
+// recovery, as they do for the reaper. created_at is RFC3339Nano, which only
+// sorts lexically to the second, so the comparison is on whole seconds: a
+// row from bootedAt's own second is kept for the reaper.
+func (s *Store) ReleaseOrphanedReservations(ctx context.Context, bootedAt, now time.Time) (quota, concurrency int64, err error) {
+	if bootedAt.IsZero() {
+		return 0, 0, fmt.Errorf("bootedAt must be non-zero")
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	cutoff := bootedAt.UTC().Format("2006-01-02T15:04:05")
+	tx, err := s.beginImmediate(ctx)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, `
+		UPDATE quota_reservations
+		SET status = 'expired', settled_tokens = 0, settled_at = ?
+		WHERE status = 'active' AND settlement_hold = 0 AND substr(created_at, 1, 19) < ?
+			AND NOT EXISTS (
+				SELECT 1
+				FROM wallet_session_reservations sr
+				WHERE sr.account_id = quota_reservations.account_id
+					AND sr.request_id = quota_reservations.request_id
+			)`,
+		encodeTime(now.UTC()), cutoff)
+	if err != nil {
+		return 0, 0, err
+	}
+	if quota, err = res.RowsAffected(); err != nil {
+		return 0, 0, err
+	}
+	res, err = tx.ExecContext(ctx, `
+		UPDATE concurrency_reservations
+		SET status = 'expired', released_at = ?
+		WHERE status = 'active' AND substr(created_at, 1, 19) < ?`,
+		encodeTime(now.UTC()), cutoff)
+	if err != nil {
+		return 0, 0, err
+	}
+	if concurrency, err = res.RowsAffected(); err != nil {
+		return 0, 0, err
+	}
+	return quota, concurrency, tx.Commit()
 }
 
 // DeleteTerminalQuotaReservations removes quota_reservations rows in a

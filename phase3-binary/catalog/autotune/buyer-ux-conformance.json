@@ -4,9 +4,9 @@
       "model": "TensorFold/DeepSeek-V4-Flash-0731-MXFP4-MLX",
       "release_id": "published-2026-10-23-deepseek-v4-flash-recommendable-v1"
     },
-    "zai-org/glm-5.3-flash-abliterated": {
-      "model": "grant-ai/GLM-5.3-Flash-Abliterated-MLX-4bit",
-      "release_id": "published-2026-10-30-glm53-flash-abliterated-recommendable-v1"
+    "zai-org/glm-5.3-flash-uncensored": {
+      "model": "Solstice-AI/GLM-5.3-Flash-UNCENSORED-mlx-oQ4e-DFlash2",
+      "release_id": "published-2026-11-09-glm53-flash-uncensored-recommendable-v281"
     }
   },
   "records": {
@@ -275,11 +275,11 @@
       "gateway": "https://api.malibu.tech/v1",
       "model": "Jundot/GLM-5.3-Flash-oQ4e-mtp"
     },
-    "zai-org/glm-5.3-flash-abliterated": {
+    "zai-org/glm-5.3-flash-uncensored": {
       "capabilities": {
         "base": true,
         "messages": true,
-        "reasoning": false,
+        "reasoning": true,
         "response_format": true,
         "responses": true,
         "tool_choice": [
@@ -290,59 +290,83 @@
         ],
         "tools": true
       },
-      "checked_at": "2026-11-01T22:37:47Z",
+      "checked_at": "2026-11-09T22:29:35Z",
       "checks": {
         "context_limit_error": {
           "detail": "request_too_large",
+          "passed": 1,
+          "samples": 1,
           "status": "pass"
         },
         "finish_reason": {
           "detail": "length at max_tokens",
+          "passed": 3,
+          "samples": 3,
           "status": "pass"
         },
         "json_object": {
           "detail": "valid JSON object",
+          "passed": 3,
+          "samples": 3,
           "status": "pass"
         },
         "messages_beta_thinking": {
           "detail": "blocks ['thinking', 'text']",
+          "passed": 3,
+          "samples": 3,
           "status": "pass"
         },
         "no_reasoning_leak": {
-          "detail": "reasoning model returned no reasoning_content",
-          "status": "fail"
+          "detail": "content separated from reasoning",
+          "passed": 3,
+          "samples": 3,
+          "status": "pass"
         },
         "responses_function_tool": {
           "detail": "function_call item",
+          "passed": 3,
+          "samples": 3,
           "status": "pass"
         },
         "stop_sequences": {
           "detail": "stopped at the stop sequence",
+          "passed": 3,
+          "samples": 3,
           "status": "pass"
         },
         "stream_tool_deltas": {
           "detail": "2 indexed call(s)",
+          "passed": 3,
+          "samples": 3,
           "status": "pass"
         },
         "tool_round_trip": {
           "detail": "answered from the tool result",
+          "passed": 3,
+          "samples": 3,
           "status": "pass"
         },
         "tools_auto": {
           "detail": "auto",
+          "passed": 3,
+          "samples": 3,
           "status": "pass"
         },
         "tools_named": {
           "detail": "named",
+          "passed": 3,
+          "samples": 3,
           "status": "pass"
         },
         "tools_required": {
           "detail": "required",
+          "passed": 3,
+          "samples": 3,
           "status": "pass"
         }
       },
       "gateway": "https://api.malibu.tech/v1",
-      "model": "grant-ai/GLM-5.3-Flash-Abliterated-MLX-4bit"
+      "model": "Solstice-AI/GLM-5.3-Flash-UNCENSORED-mlx-oQ4e-DFlash2"
     }
   },
   "schema_version": "macprovider.buyer-ux-conformance.v1"

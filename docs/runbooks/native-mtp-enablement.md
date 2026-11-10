@@ -351,6 +351,22 @@ The Qwen entry's bytes are unchanged by the merge. Its
 `native_mtp_admission_tuple_sha256` still changes, because the identity covers
 the whole sidecar.
 
+## Same-architecture variant
+
+SPEC-048 0.1.78 (MTP-13). A variant of an admitted, unrevoked tuple inherits
+R005, the gated cells and the sustained phase when every row holds:
+
+| Check | Variant against donor |
+| --- | --- |
+| Equal | `mtp_family_adapter`, `quantization.kind`, `decode_path_digest`, `metallib_sha256`, `hardware_class`, `proposal_depth`, `mtp_head_count`, `decrease_threshold_ppm`, `increase_threshold_ppm` |
+| At most the donor's | `qualified_slots`, `max_native_active_rows`, `max_prompt_tokens` |
+| Measured on the variant | R012 fit evidence; a self-test bank entry; the native-eligible R015 cells at every slot count from 1 up to its own `max_native_active_rows` (1 unless it measures more), under a frozen policy with the donor's thresholds. For a GLM-5.3-Flash donor (cap 4096, bound 1): `s1-p1536-o128`, `s1-p1536-o512`, `s1-p4096-o128`, `s1-p4096-o512` (`docs/research/spec048-r015/glm53-flash-r015-v2/policy.json`) |
+| Each measured cell | exact token parity in every run; passes the donor's R015 native-eligible improvement gate |
+| Inherited from the donor | R005, the gated cells (GLM-5.3-Flash: `s2-p1536-o512`, `s4-p1536-o512`) and the sustained phase |
+
+Name the donor's `model_key` and the donor evidence inherited in the variant's
+evidence README. Adding the entry then follows "Adding a second model" above.
+
 ## Renewal and revocation slots
 
 The admission sidecar and self-test bank no longer expire on the provider

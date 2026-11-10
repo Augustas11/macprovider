@@ -25,6 +25,7 @@
       "tokenizer_sha256": "eec97aac7c5f9ba9159d4784222300eccf5ff2e6b4aeb193c8c939c912633510"
     },
     {
+      "backend_family": "glm5_next",
       "cache_class": "mixed",
       "cached_turns_accepted": true,
       "chat_template_sha256": "6138d780f0ca0e16e3b174cb9b4d782525e32a2f63255d66e707b4c491a7ac6d",
@@ -50,29 +51,31 @@
       "tokenizer_sha256": "1e9d4f69cfe47ae2d32262646881c81e4a79e58ebb3ac1c8c41477372c1b714d"
     },
     {
+      "backend_family": "glm5_next",
       "cache_class": "mixed",
       "cached_turns_accepted": true,
-      "chat_template_sha256": "5448db3cd78427714c9eda536cce6f7fc59b7edf5b528f67d212aa00195129fd",
+      "cached_turns_donor": "zai-org/glm-5.3-flash",
+      "chat_template_sha256": "4fcb509efcd1c93296c21e44a6a616553ff4cebdb4186d9e80bb77698d0b7824",
       "hardware_class": "apple-silicon:Apple M3 Ultra:ram-256gb",
       "kernel_identifier": "macprovider_paged_kv_gather_v1",
       "kv_dtype": "fp16",
       "max_served_slots": 4,
       "metallib_sha256": "3d9b4a747758128cc5418e62c5ad8e282a11b0d436423537137e013beaa1261b",
-      "model_id": "zai-org/glm-5.3-flash-abliterated",
-      "model_key": "zai-org/glm-5.3-flash-abliterated",
-      "model_sha256": "d47ec628ddfd67813ab9a9439a152e19d5f648ae3f05cfe6b2094eb9fb67fc4c",
+      "model_id": "zai-org/glm-5.3-flash-uncensored",
+      "model_key": "zai-org/glm-5.3-flash-uncensored",
+      "model_sha256": "242f8fcfd34d4ecfd62180c1767f910bda925216948772126dc98c673d1c8919",
       "provenance": {
-        "evidence_id": "glm53-flash-abliterated-ac26-2191-2026-11-02-signed-1.8.280",
-        "live_executable_cdhash": "7bbf5442a08d20b7e374c8df5462ab6d57283391",
-        "package_manifest_sha256": "66a4876ec8888e93f5e1d8621a902893c6432b3c34c11a5825597a06b2c79f5f",
-        "provider_cli_version": "1.8.280",
+        "evidence_id": "glm53-uncensored-ac26-2189-2026-11-10-signed-1.8.283",
+        "live_executable_cdhash": "06e8b09ccc79ee9cae9498663d9728c5186b7050",
+        "package_manifest_sha256": "bebe98347993c33a42aa574253f93f7b05ee15fd8aef306743c9107d26309de5",
+        "provider_cli_version": "1.8.283",
         "source": "release_review",
         "status": "qualified",
-        "studio_campaign_sha256": "423a4cd802bf140c6b4ed78856ff4b1fac9d03b23b028e93efccd3ec9e3d5be5"
+        "studio_campaign_sha256": "2510c358833f9377392a8954226883349de1aaa81dd792fd74663ac20ddd53f0"
       },
       "requires_moe": true,
       "rollout": "canary",
-      "tokenizer_sha256": "1e9d4f69cfe47ae2d32262646881c81e4a79e58ebb3ac1c8c41477372c1b714d"
+      "tokenizer_sha256": "4baf3a707b1fa2d79540fa901b69203efc844c403bc8d2e5145a29c67c300f12"
     },
     {
       "cache_class": "KVCacheSimple",

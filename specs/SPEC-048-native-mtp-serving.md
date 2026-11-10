@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.77
+**Version:** 0.1.79
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.77",
+  "version": "0.1.79",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -521,13 +521,13 @@ The authorized dependency tuple is exact:
 
 | Repository | Fork tag | Revision | Upstream base |
 |---|---|---|---|
-| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.31` | `9f30c01bbce4ee2619aa5a3a2a0a232241fd9df3` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
+| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.34` | `647b24d1f13ea662cf1c61ebcce18541400015ce` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
 | `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.13` | `565269220ccc2cc0d2ce149affb98a2f9d9b32ac` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
 | `https://github.com/Augustas11/mlx` | `macprovider/2234-qmv-mma` | `565070fe4b0f95927f7fdd5fcfb537157605037a` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
 | `https://github.com/Augustas11/mlx-c` | `v0.6.0-macprovider.2` | `2b1ff2b5b5129a6115771da32e1bac3b6b01ab01` | `ml-explore/mlx-c` pinned base (`ebc88f10caa1b625e6b581437a8dea6df8a70085`) |
 
-The mlx-swift-lm row `3.32.3-macprovider.31` is `3.32.3-macprovider.25`
-(`da8f1932f8e2a46477a1a35663955267bc6fcd04`) plus one commit that pins mlx-swift
+The mlx-swift-lm row `3.32.3-macprovider.34` is `3.32.3-macprovider.32`
+(`6c27b743bae5dd60eb07954f2819316b22b92094`) plus one commit that pins mlx-swift
 `0.32.3-macprovider.13` (#2234); no model source changes. The Swift row is
 `0.32.3-macprovider.11` (`c774cb0934c7503bc3fe1c3d1afbe44c728e8891`) plus the
 qmv_mma core and the metallib sources for `gather_mm_offsets` and the SDPA VJP
@@ -536,6 +536,15 @@ on `v0.32.4-macprovider.6` (`51edbb37620aef7c860ab5d7cdb7bf5b14333da2`), and has
 tag of its own yet. That commit routes every eligible affine small-M product to
 `qmv_mma` from 1 to 16 rows on non-NAX GPUs, using a test that reads no row
 count; NAX GPUs and floating-point modes keep their routes. The C row is
+unchanged.
+
+The prior mlx-swift-lm row `3.32.3-macprovider.32` is on `3.32.3-macprovider.25`
+(`da8f1932f8e2a46477a1a35663955267bc6fcd04`) (#2244, #2189), at
+`6c27b743bae5dd60eb07954f2819316b22b92094`: one commit, cherry-picked from
+`73df016af`, that maps a Hugging Face per-layer quantization map to module
+paths in `loadWeights`. It is a load-time sanitizer and a value-identical
+refactor of the `GLM5Next` weight-key rules; decode is unchanged and a map
+keyed by module paths passes through unchanged. The Swift, core and C rows are
 unchanged.
 
 The prior mlx-swift-lm row `3.32.3-macprovider.25` is on `3.32.3-macprovider.24`
@@ -1576,6 +1585,28 @@ listed file is missing or changes without a regenerated digest.
   A changed digest, CLI identity, or Metal-library hash alone is not that
   evidence. A Metal-library change follows the same behavior test and MUST
   have its signed binding updated; it cannot retain a mismatched hash.
+- **Same-architecture variant (0.1.78).** A tuple (the variant) inherits
+  R005, the gated cells and the sustained phase from an admitted, unrevoked
+  tuple (the donor) when all of these hold:
+  1. Equal `mtp_family_adapter`, `quantization.kind`, `decode_path_digest`,
+     `metallib_sha256`, `hardware_class`, `proposal_depth`, `mtp_head_count`,
+     `decrease_threshold_ppm` and `increase_threshold_ppm`.
+  2. The variant's `qualified_slots`, `max_native_active_rows` and
+     `max_prompt_tokens` are each at most the donor's.
+  3. The variant's own R012 fit evidence (its weights differ).
+
+  The variant then needs a self-test bank entry (R016) and its own
+  native-eligible R015 cells (MTP-15) at every slot count from 1 up to its
+  own `max_native_active_rows`, which is 1 unless it measures more cells.
+  For a GLM-5.3-Flash donor with cap 4096 at bound 1, those are
+  `s1-p1536-o128`, `s1-p1536-o512`, `s1-p4096-o128` and `s1-p4096-o512`
+  (`docs/research/spec048-r015/glm53-flash-r015-v2/policy.json`). The donor's
+  gated cells there, `s2-p1536-o512` and `s4-p1536-o512`, are inherited. The
+  cells run under a frozen policy with the donor's thresholds and MUST pass
+  the same R015 native-eligible improvement gate as the donor, with exact
+  token parity in every run. The variant's evidence names the donor's
+  `model_key` and the donor evidence it inherits; the signed entry schema is
+  unchanged.
 - Publishing: the binding is qualification-owned (tuple input). CLIs before
   the reader reject unknown entry keys, so R014 item 10 applies. A
   decode-path entry is published only when the bound release CLI embeds that
@@ -1653,7 +1684,9 @@ For each qualified tuple, production enablement requires all of the following:
    termination, mixed-row, capacity, fairness, and accounting fixtures pass.
 4. Independent MXFP8 qualification passes when the tuple uses MXFP8.
 5. SPEC-038 FR-CB15/Gate A5 and SPEC-039 FR-PKV13 pass for the same tuple, and
-   SPEC-048-R015 passes on every advertised RAM/slot tuple.
+   SPEC-048-R015 passes on every advertised RAM/slot tuple. A
+   same-architecture variant passes R015 by the 0.1.78 variant rule (MTP-13):
+   its own native-eligible cells, the donor's gated cells and sustained phase.
 6. A signed `JOURNEY-NATIVE-MTP-SERVING` result covers every requirement mapped
    to it: `SPEC-023-R024`, `SPEC-030-R021`, `SPEC-031-R033`, `SPEC-036-R018`,
    `SPEC-038-R018`, `SPEC-039-R015`, and `SPEC-048-R001..R013/R015/R016`, for
@@ -2306,13 +2339,29 @@ requests.
 
 ## 9. Changelog and history
 
-- **0.1.77 (2026-11-08, Related: #2234)** — R003 names mlx-swift-lm
-  `3.32.3-macprovider.31` (`9f30c01bbce4ee2619aa5a3a2a0a232241fd9df3`), mlx-swift
+- **0.1.79 (2026-11-10, Related: #2234)** — R003 names mlx-swift-lm
+  `3.32.3-macprovider.34` (`647b24d1f13ea662cf1c61ebcce18541400015ce`), which is
+  `3.32.3-macprovider.32` plus the mlx-swift pin commit, mlx-swift
   `0.32.3-macprovider.13` (`565269220ccc2cc0d2ce149affb98a2f9d9b32ac`) and core
   `565070fe4b0f95927f7fdd5fcfb537157605037a` (branch `macprovider/2234-qmv-mma`): every eligible
   affine small-M product takes `qmv_mma` from 1 to 16 rows on non-NAX GPUs, and
   the metallib ships `gather_mm_offsets` and the SDPA VJP kernel. Model sources
   and the C row are unchanged.
+- **0.1.78 (2026-11-10, Related: #2189)** — MTP-13 and MTP-14 item 5:
+  a same-architecture variant inherits R005, the gated cells and the
+  sustained phase from an admitted donor with the same family adapter,
+  quantization kind, decode-path digest, metallib, hardware class, depth,
+  head count and depth thresholds, at no larger slot, native-row or prompt
+  bound. It needs its own R012 fit evidence, a self-test bank entry and its
+  own native-eligible R015 cells at every slot count up to its own
+  `max_native_active_rows` (1 unless it measures more), passing the donor's
+  R015 improvement gate with exact parity. No runtime or schema change.
+- **0.1.77 (2026-11-09, Related: #2244)** — R003 names mlx-swift-lm
+  `3.32.3-macprovider.32` (`6c27b743bae5dd60eb07954f2819316b22b92094`) on
+  `3.32.3-macprovider.25`: the per-layer quantization-map loader for
+  checkpoints in the Hugging Face key layout (#2189). Load-time only; no
+  decode line changes. Other model sources and the Swift, core and C rows are
+  unchanged.
 - **0.1.76 (2026-11-07, Related: #2243)** — MTP-2: the private staging file
   may be a `clonefile(2)` clone of the validated descriptor when that
   descriptor is already mode `0400`. Any other mode, `ENOTSUP`, and `EXDEV`

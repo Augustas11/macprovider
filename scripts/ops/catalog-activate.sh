@@ -687,6 +687,26 @@ gather() {
     verify_ok=true
   fi
   fact catalog_release_verify "$verify_ok"
+  # SPEC-038 v0.3.40: a false entry beside a granted entry of its backend
+  # family is allowed (AC-26 leg (a) runs with it loaded) but must not be
+  # forgotten. Report it loudly; never refuse.
+  local cb_gap cb_family cb_gaps=""
+  cb_gaps="$(python3 - "$REPO_ROOT/$AUTOTUNE/continuous-batching-policy-source.json" <<'PY' 2>/dev/null || true
+import json, sys
+entries = json.load(open(sys.argv[1])).get("entries", [])
+granted = {e.get("backend_family") for e in entries
+           if e.get("cached_turns_accepted", False) is True and e.get("backend_family")}
+for e in entries:
+    family = e.get("backend_family")
+    if e.get("cached_turns_accepted", False) is not True and family in granted:
+        print(f"{e.get('model_key')}\t{family}")
+PY
+)"
+  while IFS=$'\t' read -r cb_gap cb_family; do
+    [ -n "$cb_gap" ] || continue
+    fact cb_cached_turns_not_granted "$cb_gap (family $cb_family granted)"
+    log "WARNING: CB entry $cb_gap ships cached_turns_accepted:false while family $cb_family is granted; run AC-26 (continuous-batching-enable-gate.md 'Sticky retained-KV proof (AC-26)') in this window and grant in the same release"
+  done <<< "$cb_gaps"
 
   # Live coordinator state.
   local base live_rid="" live_status="" uptime="" verified_min=""
@@ -1168,10 +1188,48 @@ ssh \"\$STUDIO_SSH\" 'set -e; c=~/.config/macprovider/config.yaml; cp -p \"\$c\"
 
   # Evidence (e) owed (SPEC-023-R017 5(e)): every ledger entry whose model no
   # buyer_serving_e2e record names yet. A malformed entry is unknown, not done.
-  local owed_scan owed_models="" owed_bad=""
-  owed_scan="$(python3 -I - "$owed_dir" "$OPS_STATE_DIR" <<'PY'
-import glob, json, os, re, sys
-owed_dir, state = sys.argv[1:3]
+  # An entry whose release has reached the live catalog and whose model@sha256
+  # is no row of the live candidate feed is retired: no provider serves it from
+  # the live catalog, so no (e) is owed for it. While a later release is only
+  # committed, "live" is the feed the coordinator serves, bound to its reported
+  # release by version and digest; an entry of a release newer than the live
+  # one may simply not have shipped yet, so it stays owed.
+  local owed_scan owed_models="" owed_bad="" owed_retired="" live_candidates="" live_release=""
+  if [ "$live_rid" = "$R" ]; then
+    live_candidates="$CATALOG_TARGET_DIR/autotune-candidates.json"
+  elif [ -n "$live_rid" ] && [ "$live_status" = live_verified ] &&
+       [ "$(http_get "$base/v1/autotune-candidates" "$OPS_TMP_DIR/live-candidates.json")" = 200 ]; then
+    live_candidates="$OPS_TMP_DIR/live-candidates.json"
+    live_release="$OPS_TMP_DIR/release.json"
+  fi
+  owed_scan="$(python3 -I - "$owed_dir" "$OPS_STATE_DIR" "$live_candidates" "$live_release" "$REPO_ROOT/$AUTOTUNE/release-ledger.json" <<'PY'
+import datetime, glob, hashlib, json, os, re, sys
+owed_dir, state, live_candidates, live_release, ledger_path = sys.argv[1:6]
+# The model@sha256 pairs of the live catalog; None (retire nothing) when the
+# live feed is unreadable or is not provably the live release's.
+catalog = None
+# None when the committed release is live: every record's release has shipped.
+reached_live = None
+if live_candidates:
+    try:
+        raw = open(live_candidates, "rb").read()
+        rows = json.loads(raw)
+        if live_release:
+            status = json.load(open(live_release))
+            live_id = status["release_id"]
+            if rows["version"] != live_id or hashlib.sha256(raw).hexdigest() != status["feeds"]["autotune_candidates"]["sha256"]:
+                raise ValueError("feed is not the live release's")
+            releases = json.load(open(ledger_path))["releases"]
+            stamp = lambda rid: datetime.datetime.strptime(releases[rid]["generated_at"], "%Y-%m-%dT%H:%M:%SZ")
+            live_stamp = stamp(live_id)
+            def reached_live(rid):
+                try:
+                    return rid == live_id or stamp(rid) < live_stamp
+                except Exception:
+                    return False
+        catalog = {(row["model_id"], row["model_sha256"]) for row in rows["rows"].values()}
+    except Exception:
+        catalog = None
 # A buyer_serving_e2e record proves exactly the model@sha256 pairs it names.
 proved = set()
 for path in glob.glob(os.path.join(state, "catalog-*", "buyer_serving_e2e.json")):
@@ -1180,7 +1238,7 @@ for path in glob.glob(os.path.join(state, "catalog-*", "buyer_serving_e2e.json")
     except Exception:
         continue
     proved |= set(re.findall(r"(?:^|\s)model=(\S+)@([0-9A-Za-z]+)(?=\s|$|[,;])", text))
-open_models, bad = [], []
+open_models, bad, retired = [], [], []
 for path in sorted(glob.glob(os.path.join(owed_dir, "*.json"))):
     try:
         rec = json.load(open(path))
@@ -1190,15 +1248,22 @@ for path in sorted(glob.glob(os.path.join(owed_dir, "*.json"))):
     except Exception:
         bad.append(os.path.basename(path))
         continue
-    if (model, sha) not in proved:
-        open_models.append("%s@%s (owed since %s)" % (model, sha, rel))
+    if (model, sha) in proved:
+        continue
+    if catalog is not None and (model, sha) not in catalog and (reached_live is None or reached_live(rel)):
+        retired.append("%s@%s" % (model, sha))
+        continue
+    open_models.append("%s@%s (owed since %s)" % (model, sha, rel))
 print("BAD " + " ".join(bad))
 print("OPEN " + ", ".join(open_models))
+print("RETIRED " + ", ".join(retired))
 PY
 )"
   owed_bad="$(printf '%s\n' "$owed_scan" | sed -n 's/^BAD //p')"
   owed_models="$(printf '%s\n' "$owed_scan" | sed -n 's/^OPEN //p')"
+  owed_retired="$(printf '%s\n' "$owed_scan" | sed -n 's/^RETIRED //p')"
   fact buyer_serving_e2e_owed "$owed_models"
+  fact buyer_serving_e2e_retired "$owed_retired"
   if [ -n "$owed_bad" ]; then
     step buyer_serving_e2e blocked "unreadable owed-evidence record(s): $owed_bad"
     set_next buyer_serving_e2e blocked "Read the owed evidence (e) records" "ls -l '$owed_dir'" \

@@ -1,11 +1,46 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.38
+Version: v0.3.40
 Status: draft (normative contract; runtime enablement is default-on per Mac behind the FR-CB10 on-device self-check, v0.3.15)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.3.40 (2026-11-10, same-architecture variant cached-turns grant, Related: #2189):**
+FR-CB10 and AC-26: an entry MAY record `cached_turns_accepted: true` on a
+granted donor's AC-26 proof when both name the same `backend_family`, the
+entry names the donor as `cached_turns_donor` and equals it on every field
+except model, tokenizer, template, the grant and provenance, its own attach
+proof and scheduler leftovers passed on its bound binary, and its own AC-26
+leg (a) passed there and is cited in its evidence id. Legs (b) and (c) come
+from the donor; leg (b) only while the variant has no native-MTP admission.
+Catalog generation refuses a `true` entry without that backing and never
+refuses `false`; `catalog-activate.sh status` reports a `false` entry whose
+family is granted. Every other entry and the runtime are unchanged.
+
+**Change log v0.3.39 (2026-11-09, FR-CB10 admission hold admits buyer arrivals, Related: #2257):**
+FR-CB10 item 3: the 20 s buyer-wait bound counts only buyer requests, and
+only the time each waits behind the check's exclusive probe residency (held
+or queued ahead of it). A compute-score job or KV seed, a buyer queued behind
+ordinary work during the drain, or a queue that existed at hold start no
+longer ends the hold. A buyer admitted during the drain may still hold an
+inference permit when the probe queues. That wait is not check time: it does
+not consume the check bound and has its own budget of the hold's drain bound,
+ending as a drain timeout (`reason=residency_wait_bound`).
+
+FR-CB10 item 3: a buyer request that arrives during a self-check admission
+hold is admitted and waits behind the check's probe, instead of being
+refused with the retryable `continuous_batching_stream_backpressure`
+(direct HTTP) or `error_queue_full` (relay). On CLI 1.8.281 a provider with
+no buyer request in flight refused four sequential direct requests in about
+1 ms each while the hold's step ran; on a single-provider model the buyer
+had nowhere else to go. The hold keeps the v0.3.23 guarantee: an arrival
+does not end it, and the drain does not wait for buyers admitted during the
+hold. It yields only once a buyer has waited 20 s
+(`selfCheckBuyerWaitYieldSeconds`, about twice the ~11 s hold measured on
+1.8.281). The hold still reports no free slot, a cancelled step is deferred
+as before, and local-use requests stay declined for the hold.
+
 **Change log v0.3.38 (2026-11-08, MLX memory limit below the GPU working set, Related: #2226, Related: #2249):**
 FR-CB2: native runtime startup MUST set MLX's process memory limit to 90% of
 Metal's `recommendedMaxWorkingSetSize`, never above 90% of physical RAM, and
@@ -1675,16 +1710,40 @@ buyer traffic. No extra runtime enable flag is introduced.
    holds across Macs that re-key together) while the Mac is not idle MUST run
    under an admission hold, and MUST NOT otherwise hold admission (a
    re-measurement of a stored decision keeps waiting for an idle window, and
-   an idle Mac runs the check without a hold). Under the hold the provider
-   MUST stop admitting new requests: a relay request (a relay-blind one keeps
-   its existing refusal) is refused before admission with `error_queue_full`,
-   the status the coordinator re-routes without a breaker fault, and a direct
-   HTTP request with the retryable `continuous_batching_stream_backpressure`
-   and a `Retry-After` that runs to the hold's bound (no inference runs for
-   either); heartbeats and capacity updates report the provider busy with no
-   free slot. A coordinator that still counts its own forwarded requests may
-   ignore that report until one of them ends; a request it routes meanwhile
-   is refused as above and re-routed. The provider MUST let every in-flight
+   an idle Mac runs the check without a hold). Under the hold heartbeats and
+   capacity updates report the provider busy with no free slot, so routing
+   sends new requests elsewhere. (v0.3.39) A buyer request that still
+   arrives (a direct HTTP request, a relay request, or one a coordinator
+   that still counts its own forwarded requests routes meanwhile) MUST be
+   admitted and MUST NOT be refused because of the hold, with
+   `continuous_batching_stream_backpressure`, `error_queue_full` or any other
+   status. A buyer that finds a free inference permit before the probe queues
+   is served at once; otherwise it waits behind the check's exclusive probe
+   residency (below) and is served when that residency is released. It MUST
+   NOT end the hold by arriving. The drain waits only for work admitted before
+   the hold; a buyer admitted during the hold is not drained. (v0.3.39) Time
+   the probe spends queued behind a buyer holding a permit is not check time:
+   it MUST NOT consume the check bound or count as a check-bound yield, and
+   its total per hold is bounded by the hold's drain bound, past which the
+   step is cancelled and the hold ends as a drain timeout
+   (`reason=residency_wait_bound`). The hold MUST yield
+   (`reason=buyer_wait_bound`) once the longest-waiting buyer has waited
+   `selfCheckBuyerWaitYieldSeconds` (20 s) behind that residency, held or
+   queued ahead of the buyer. Only buyer requests count, from no earlier than
+   the probe's claim: a buyer queued behind ordinary work and other users of
+   the inference gate (compute-score jobs, KV seed) MUST NOT end the hold. The
+   bound is about twice the
+   ~11 s hold measured on CLI 1.8.281, so a short check completes and the
+   buyer sees only added time to first token, while a longer check yields
+   and the buyer is served after its cancelled step retires. The bound stays
+   below the 30 s default scheduler queue wait, whose clock starts only once
+   the buyer holds an inference permit, so the wait never times the buyer
+   out. A cancelled step is deferred and never becomes a measurement; a step
+   that completes beside a waiting buyer counts, because the buyer never
+   overlaps probe residency. Each wait decision is logged
+   (`action=hold_buyer_waiting wait_s=... decision=wait|yield`). Local use
+   (SPEC-001-R011) stays declined for the hold.
+   The provider MUST let every in-flight
    request finish and MUST NOT cancel or drop one; if they have not finished
    within the drain bound (the configured drain timeout, doubled after each
    consecutive drain timeout up to 4x) the hold ends without a check. The
@@ -1763,6 +1822,37 @@ configuration load). It is the per-tuple, revision-bound AC-26 grant for
 positive-`cached_prompt_tokens` batching (FR-CB4). An operator MUST NOT set it
 until the AC-26 packaged proof has been recorded on that exact tuple and
 runtime revision. A grant on a different revision MUST NOT carry over.
+
+**(v0.3.40) Same-architecture variant.** An entry MAY record
+`cached_turns_accepted: true` on another entry's AC-26 proof (the donor) when
+all of these hold:
+
+1. The donor's signed entry records `cached_turns_accepted: true` after its
+   own AC-26 proof.
+2. Both artifacts have the same backend family (the `config.json`
+   `model_type`). The CB policy source names it as `backend_family` on both
+   entries, and the variant names the donor's `model_key` as
+   `cached_turns_donor`. Both fields are source-only and are not part of the
+   signed entry.
+3. The entry equals the donor on every field except `model_id`,
+   `model_key`, `model_sha256`, `tokenizer_sha256`, `chat_template_sha256`,
+   `cached_turns_accepted` and `provenance`. The metallib and kernel are
+   therefore the donor's runtime revision.
+4. The entry's own attach proof (`paged_kv_decision=attached`,
+   `local_proof_result=passed`) and scheduler leftovers (isolation, replay,
+   drain, parity) passed on the binary its provenance binds.
+5. AC-26 leg (a) passed on that binary for the entry. Tokenizer and template
+   are the fields allowed to differ, and they set the snapshot boundary.
+   Legs (b) and (c) come from the donor.
+
+The entry's `provenance.evidence_id` MUST cite its own AC-26 leg (a)
+evidence (an `ac26` token). Until that proof passes, the entry stays
+`cached_turns_accepted: false` (or omits it): leg (a) runs with that signed
+entry loaded. Catalog generation refuses a `true` entry that names no
+`backend_family`, whose evidence id cites no AC-26 evidence, or whose
+`cached_turns_donor` is not a donor meeting items 1-3. It never refuses a
+`false` entry; `catalog-activate.sh status` reports one whose family is
+granted.
 
 **(v0.3.18)** The stored self-check result MUST be keyed by the
 row-isolation policy and the device's decode and verify forward bounds, so
@@ -2684,6 +2774,9 @@ hardware-capability run or a static-review obligation. Every
   row's tokens at the same row count, plus their tokens/s, acceptance and
   TTFT against ordinary CB at that row count (SPEC-048 R015 cells); and
   (c) carry correct usage, receipt and settlement fields for every turn.
+  **(v0.3.40)** A same-architecture variant (FR-CB10, v0.3.40 clause) runs
+  only leg (a) on its own tuple; legs (b) and (c) are the donor's. Leg (b)
+  comes from the donor only while the variant has no native-MTP admission.
 
 ## 8. Go/no-go gates
 

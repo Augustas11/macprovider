@@ -47,10 +47,10 @@ func TestRateFor_GLM53FlashResolvesShippedRow(t *testing.T) {
 	}
 }
 
-// #2189: the abliterated GLM-5.3-Flash build bills on its own labelled row at
-// the GLM-5.3-Flash price; none of its spellings falls through to the base
-// GLM-5.3-Flash row or to `default`, and no base spelling reaches it.
-func TestRateFor_GLM53FlashAbliteratedResolvesOwnRow(t *testing.T) {
+// #2189: the abliterated GLM-5.3-Flash build is retired from the catalog and
+// its labelled row is gone. Its spellings still normalize to its own key, so a
+// stray request bills on `default`, never on the base GLM-5.3-Flash row.
+func TestRateFor_GLM53FlashAbliteratedRetiredBillsDefault(t *testing.T) {
 	raw, err := os.ReadFile("../../dist/coordinator.yaml")
 	if err != nil {
 		t.Fatal(err)
@@ -64,12 +64,12 @@ func TestRateFor_GLM53FlashAbliteratedResolvesOwnRow(t *testing.T) {
 		t.Fatal(err)
 	}
 	card := doc.Rewards.RateCard
-	want, ok := card["zai-org/glm-5.3-flash-abliterated"]
-	if !ok {
-		t.Fatal("dist/coordinator.yaml rewards.rate_card lacks zai-org/glm-5.3-flash-abliterated")
+	if _, ok := card["zai-org/glm-5.3-flash-abliterated"]; ok {
+		t.Fatal("dist/coordinator.yaml rewards.rate_card still carries the retired zai-org/glm-5.3-flash-abliterated row")
 	}
-	if base := card["zai-org/glm-5.3-flash"]; want != base {
-		t.Fatalf("abliterated row = %+v, want the zai-org/glm-5.3-flash price %+v", want, base)
+	want, ok := card["default"]
+	if !ok {
+		t.Fatal("dist/coordinator.yaml rewards.rate_card lacks default")
 	}
 	for _, model := range []string{
 		"zai-org/glm-5.3-flash-abliterated",
@@ -81,7 +81,7 @@ func TestRateFor_GLM53FlashAbliteratedResolvesOwnRow(t *testing.T) {
 			t.Fatalf("NormalizeModelKey(%q) = %q, want zai-org/glm-5.3-flash-abliterated", model, key)
 		}
 		if got := RateFor(card, model); got != want {
-			t.Fatalf("RateFor(%q) = %+v, want %+v", model, got, want)
+			t.Fatalf("RateFor(%q) = %+v, want default %+v", model, got, want)
 		}
 	}
 	for _, model := range []string{"zai-org/glm-5.3-flash", "Jundot/GLM-5.3-Flash-oQ4e-mtp"} {

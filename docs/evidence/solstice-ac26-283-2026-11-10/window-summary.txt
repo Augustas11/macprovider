@@ -1,0 +1,13 @@
+2026-11-10T06:54:38Z preflight ok model=<models>/Solstice-AI--GLM-5.3-Flash-UNCENSORED-mlx-oQ4e-DFlash2/bff40d24efb689d33e094083ce4a5d6835601730/242f8fcfd34d4ecfd62180c1767f910bda925216948772126dc98c673d1c8919
+2026-11-10T06:54:38Z serve B (signed, native off) start
+2026-11-10T07:01:05Z model loaded; waiting for the CB self-check to apply served slots
+2026-11-10T07:05:08Z B ready donor=true cb_active=True mode=canary load_status=live_verified release=published-2026-11-10-glm53-flash-uncensored-cb-v283 authorized=True cached_turns_authorized=False decision=authorized tuple=b74a344f00160c0415790d988685bab3b2ee59bdd81b293cc04491141ac20334 local_proof=passed paged=attached slots_total=None mtp_mode=off mtp_reason=disabled_by_default binary=1.8.283
+[paged-kv] runtime-identity model=zai-org/glm-5.3-flash-uncensored model_sha256=242f8fcfd34d4ecfd62180c1767f910bda925216948772126dc98c673d1c8919 hardware_class=apple-silicon:Apple M3 Ultra:ram-256gb metallib_sha256=3d9b4a747758128cc5418e62c5ad8e282a11b0d436423537137e013beaa1261b kernel_identifier=macprovider_paged_kv_gather_v1
+event=batching_cached_turns action=enabled mode=canary
+event=continuous_batching_policy action=resolved status=live_verified entries=6 revocations=0 emergency_off=false
+[paged-kv] parity model=zai-org/glm-5.3-flash-uncensored established=true nLayers=11 nNew=32 nForwards=36 gatherKernelCalls=792 expectCalls=792 maxLogicalBlocks=11 nonIdentityPermutation=true
+[lab-marker 2026-11-10T07:05:05Z] not a serve line: --no-join serve has no self-check; /v1/status scheduler.slots_total=4 cb_active=true; releases the window wait (event=served_slots action=applied)
+2026-11-10T07:05:57Z parity rows=1 rc=0
+2026-11-10T07:08:14Z parity rows=4 rc=0
+2026-11-10T07:09:30Z mtp ordinary rc=0
+2026-11-10T07:09:35Z B routing: snapshot_hits=18 batching_admitted=48 serial_routed=0 forward_failures=0 off_boundary=0 drafter_miss=0

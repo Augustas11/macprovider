@@ -34,27 +34,36 @@ final class ContinuousBatchingAdmissionHoldTests: XCTestCase {
         XCTAssertGreaterThan(ContinuousBatchingSelfCheck.admissionHoldCheckSeconds, 60)
     }
 
-    func testHoldRefusesNewRequestsKeepsInFlightOnesAndResumes() async {
+    func testHoldKeepsInFlightRequestsAdmitsArrivalsAndResumes() async {
         let status = makeStatus()
         let inFlight = await status.beginRequestIfAccepting(requestID: "before-hold")
         XCTAssertNotNil(inFlight)
 
         let refusal = await status.beginSelfCheckAdmissionHold()
         XCTAssertNil(refusal)
-        let held = await status.admitRequest(requestID: "during-hold")
-        XCTAssertEqual(held, .selfCheckAdmissionHold)
-        let legacy = await status.beginRequestIfAccepting()
-        XCTAssertNil(legacy)
-        let during = await status.snapshot()
-        XCTAssertEqual(during.status, .busy)
-        XCTAssertEqual(during.slotsFree, 0)
-        XCTAssertEqual(during.requestsInFlight, 1, "the request admitted before the hold keeps running")
-        XCTAssertEqual(during.cbSelfCheckAdmissionHold?.active, true)
+        let held = await status.snapshot()
+        XCTAssertEqual(held.status, .busy)
+        XCTAssertEqual(held.slotsFree, 0, "routing sees no free slot for the hold")
+        XCTAssertEqual(held.requestsInFlight, 1, "the request admitted before the hold keeps running")
+        XCTAssertEqual(held.cbSelfCheckAdmissionHold?.active, true)
+        let noArrival = await status.selfCheckAdmissionHoldArrivalsInFlight()
+        XCTAssertEqual(noArrival, 0)
+        // #2257 (v0.3.36): an arrival is admitted, never refused for the hold,
+        // and is not part of the hold's drain.
+        let arrival = await status.admitRequest(requestID: "during-hold")
+        guard case .admitted(let arrivedAt) = arrival else { return XCTFail("arrival refused: \(arrival)") }
+        let arrived = await status.selfCheckAdmissionHoldArrivalsInFlight()
+        XCTAssertEqual(arrived, 1)
+        let predating = await status.hasInferenceWorkPredatingSelfCheckAdmissionHold()
+        XCTAssertTrue(predating, "the request admitted before the hold is still drained")
+        await status.finishRequest(startedAt: arrivedAt, completion: nil, failed: false, requestID: "during-hold")
+        let finished = await status.selfCheckAdmissionHoldArrivalsInFlight()
+        XCTAssertEqual(finished, 0)
 
         await status.finishRequest(startedAt: inFlight!, completion: nil, failed: false, requestID: "before-hold")
         let drained = await status.snapshot()
         XCTAssertEqual(drained.requestsInFlight, 0)
-        XCTAssertEqual(drained.requestsTotal, 1)
+        XCTAssertEqual(drained.requestsTotal, 2)
         XCTAssertEqual(drained.errorsTotal, 0)
         XCTAssertEqual(drained.status, .busy, "still held after the drain")
 
@@ -67,6 +76,29 @@ final class ContinuousBatchingAdmissionHoldTests: XCTestCase {
         XCTAssertEqual(after.cbSelfCheckAdmissionHold?.holdsTotal, 1)
         let admitted = await status.admitRequest(requestID: "after-hold")
         guard case .admitted = admitted else { return XCTFail("admission did not resume: \(admitted)") }
+    }
+
+    func testBuyerAdmittedAsTheHoldStartsDrainsAsPreHoldWork() async {
+        let latch = FirstThermalReadLatch()
+        let status = ProviderStatus(
+            modelID: "m",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 50_000, maxConcurrencyOverride: 4),
+            thermalGate: ThermalGate(isThrottledSuspensionHook: { await latch.pass() })
+        )
+        let admission = Task { await status.beginRequestIfAccepting(requestID: "racing") }
+        await latch.waitUntilSuspended()
+
+        let refusal = await status.beginSelfCheckAdmissionHold()
+        XCTAssertNil(refusal)
+        await latch.release()
+        let admitted = await admission.value
+        XCTAssertNotNil(admitted)
+
+        let arrivals = await status.selfCheckAdmissionHoldArrivalsInFlight()
+        XCTAssertEqual(arrivals, 0, "admission began before the hold")
+        let predates = await status.hasBuyerWorkPredatingSelfCheckAdmissionHold()
+        XCTAssertTrue(predates, "the hold must drain this request before the check")
     }
 
     func testHoldPublishesBusyWithNoFreeSlotThenReady() async {
@@ -124,18 +156,282 @@ final class ContinuousBatchingAdmissionHoldTests: XCTestCase {
             providerStatus: status, drainSeconds: 5, lifecycleLease: { nil }, context: "test", log: { _ in }
         ) {
             let inFlight = await status.requestsInFlightCount()
-            let refused = await status.admitRequest(requestID: "arrived-during-check")
-            observed.set(inFlight: inFlight, refused: refused == .selfCheckAdmissionHold)
+            let snapshot = await status.snapshot()
+            observed.set(inFlight: inFlight, refused: snapshot.slotsFree == 0)
             return true
         }
         XCTAssertEqual(outcome, .completed)
         XCTAssertEqual(observed.inFlight, 0, "the check started only after the in-flight request finished")
-        XCTAssertEqual(observed.refused, true, "admission stays held while the check runs")
+        XCTAssertEqual(observed.refused, true, "routing sees no free slot while the check runs")
         let after = await status.snapshot()
         XCTAssertEqual(after.requestsTotal, 1)
         XCTAssertEqual(after.errorsTotal, 0)
         XCTAssertEqual(after.status, .ready)
         XCTAssertEqual(after.cbSelfCheckAdmissionHold?.lastOutcome, "completed")
+    }
+
+    /// #2257 (v0.3.36): a buyer arriving during a short check is admitted
+    /// and waits behind the probe; the check completes and stores its
+    /// result first, then the buyer is served.
+    func testBuyerArrivingDuringAShortCheckWaitsAndTheCheckCompletes() async {
+        let status = makeStatus()
+        let gate = AsyncSemaphore(value: 4)
+        let lines = LogLines()
+        let order = LogLines()
+        let probing = LeaseFlag()
+        let buyer = Task { () -> ProviderRequestAdmission in
+            while probing.value == nil { try? await Task.sleep(nanoseconds: 10_000_000) }
+            let admission = await status.admitRequest(requestID: "buyer-during-check")
+            if case .admitted(let at) = admission {
+                try? await gate.withBuyerPermit { order.append("buyer_served") }
+                await status.finishRequest(startedAt: at, completion: nil, failed: false, requestID: "buyer-during-check")
+            }
+            return admission
+        }
+        let outcome = await ContinuousBatchingSelfCheck.runUnderAdmissionHold(
+            providerStatus: status, drainSeconds: 5, checkSeconds: 30, lifecycleLease: { nil },
+            buyerWaitSeconds: { await gate.oldestBuyerWaitBehindExclusiveSeconds() }, buyerWaitYieldSeconds: 5,
+            context: "test", log: { lines.append($0) }
+        ) {
+            try? await gate.withExclusivePermit {
+                probing.set("probe")
+                let queued = Date().addingTimeInterval(2)
+                while await gate.oldestBuyerWaitBehindExclusiveSeconds() == nil, Date() < queued {
+                    try? await Task.sleep(nanoseconds: 10_000_000)
+                }
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                order.append("measurement_stored")
+            }
+            return true
+        }
+        let admission = await buyer.value
+        guard case .admitted = admission else {
+            return XCTFail("a buyer arriving during the check was refused: \(admission)")
+        }
+        XCTAssertEqual(outcome, .completed, "a short check finishes beside a waiting buyer")
+        XCTAssertEqual(order.all, ["measurement_stored", "buyer_served"])
+        XCTAssertTrue(lines.all.contains { $0.contains("action=hold_buyer_waiting") && $0.contains("decision=wait") })
+        XCTAssertFalse(lines.all.contains { $0.contains("buyer_wait_bound") })
+        let after = await status.snapshot()
+        XCTAssertEqual(after.requestsInFlight, 0)
+        XCTAssertEqual(after.errorsTotal, 0)
+        XCTAssertEqual(after.cbSelfCheckAdmissionHold?.lastOutcome, "completed")
+    }
+
+    /// #2257 (v0.3.36): a buyer arriving during a check longer than the bound
+    /// is admitted; the hold yields at the bound, the cancelled step is
+    /// deferred, and the buyer is served.
+    func testBuyerWaitingPastTheBoundYieldsTheHoldAndIsServed() async {
+        let status = makeStatus()
+        let gate = AsyncSemaphore(value: 4)
+        let lines = LogLines()
+        let order = LogLines()
+        let probing = LeaseFlag()
+        let buyer = Task { () -> ProviderRequestAdmission in
+            while probing.value == nil { try? await Task.sleep(nanoseconds: 10_000_000) }
+            let admission = await status.admitRequest(requestID: "buyer-during-long-check")
+            if case .admitted(let at) = admission {
+                try? await gate.withBuyerPermit { order.append("buyer_served") }
+                await status.finishRequest(startedAt: at, completion: nil, failed: false, requestID: "buyer-during-long-check")
+            }
+            return admission
+        }
+        let started = Date()
+        let outcome = await ContinuousBatchingSelfCheck.runUnderAdmissionHold(
+            providerStatus: status, drainSeconds: 5, checkSeconds: 30, lifecycleLease: { nil },
+            buyerWaitSeconds: { await gate.oldestBuyerWaitBehindExclusiveSeconds() }, buyerWaitYieldSeconds: 0.3,
+            context: "test", log: { lines.append($0) }
+        ) {
+            let cancelled = (try? await gate.withExclusivePermit { () async -> Bool in
+                probing.set("probe")
+                // A step longer than the bound; it stops only when cancelled.
+                let stop = Date().addingTimeInterval(5)
+                while !Task.isCancelled, Date() < stop { try? await Task.sleep(nanoseconds: 10_000_000) }
+                return Task.isCancelled
+            }) ?? true
+            order.append(cancelled ? "step_deferred" : "step_ran_out")
+            return false
+        }
+        let admission = await buyer.value
+        guard case .admitted = admission else {
+            return XCTFail("a buyer arriving during the check was refused: \(admission)")
+        }
+        XCTAssertEqual(outcome, .yielded)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 3, "the hold yields at the buyer-wait bound")
+        XCTAssertEqual(order.all, ["step_deferred", "buyer_served"])
+        XCTAssertTrue(lines.all.contains { $0.contains("action=hold_buyer_waiting") && $0.contains("decision=yield") })
+        XCTAssertTrue(lines.all.contains { $0.contains("action=admission_hold_end outcome=yielded reason=buyer_wait_bound") })
+        let hold = await status.selfCheckAdmissionHoldStatus()
+        XCTAssertFalse(hold.active)
+        let after = await status.snapshot()
+        XCTAssertEqual(after.errorsTotal, 0)
+    }
+
+    /// #2257 (v0.3.36): a buyer arriving during the drain is admitted and is
+    /// not drained: the check starts once the requests that predate the hold
+    /// finish, and the buyer queues behind it.
+    func testBuyerArrivingDuringTheDrainIsAdmittedAndDoesNotBlockTheCheck() async {
+        let status = makeStatus()
+        let first = await status.beginRequestIfAccepting(requestID: "in-flight-at-hold")!
+        let observed = InFlightObservation()
+        let arrival = Task { () -> ProviderRequestAdmission in
+            while await !status.selfCheckAdmissionHoldStatus().active { try? await Task.sleep(nanoseconds: 10_000_000) }
+            return await status.admitRequest(requestID: "buyer-during-drain")
+        }
+        Task {
+            _ = await arrival.value
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            await status.finishRequest(startedAt: first, completion: nil, failed: false, requestID: "in-flight-at-hold")
+        }
+        let outcome = await ContinuousBatchingSelfCheck.runUnderAdmissionHold(
+            providerStatus: status, drainSeconds: 5, lifecycleLease: { nil }, context: "test", log: { _ in }
+        ) {
+            let inFlight = await status.requestsInFlightCount()
+            let arrivals = await status.selfCheckAdmissionHoldArrivalsInFlight()
+            observed.set(inFlight: inFlight, refused: arrivals != 1)
+            return true
+        }
+        let admission = await arrival.value
+        guard case .admitted(let second) = admission else {
+            return XCTFail("a buyer arriving during the drain was refused: \(admission)")
+        }
+        XCTAssertEqual(outcome, .completed, "the drain does not wait for a buyer admitted during the hold")
+        XCTAssertEqual(observed.inFlight, 1, "only the buyer admitted during the hold is in flight at the check")
+        XCTAssertEqual(observed.refused, false)
+        await status.finishRequest(startedAt: second, completion: nil, failed: false, requestID: "buyer-during-drain")
+        let after = await status.snapshot()
+        XCTAssertEqual(after.requestsInFlight, 0)
+        XCTAssertEqual(after.errorsTotal, 0)
+    }
+
+    /// A buyer queued behind ordinary pre-hold work is not waiting on the
+    /// check: the bound must not fire until the probe claims the gate, and
+    /// the check then completes.
+    func testBuyerQueuedBehindPreHoldWorkDoesNotYieldTheHold() async throws {
+        let status = makeStatus(slots: 1)
+        let gate = AsyncSemaphore(value: 1)
+        let lines = LogLines()
+        let requestStart = await status.beginRequestIfAccepting(requestID: "pre-hold")!
+        let release = LeaseFlag()
+        let holding = LeaseFlag()
+        let preHold = Task {
+            try await gate.withBuyerPermit {
+                holding.set("held")
+                while release.value == nil { try await Task.sleep(nanoseconds: 10_000_000) }
+            }
+            await status.finishRequest(startedAt: requestStart, completion: nil, failed: false, requestID: "pre-hold")
+        }
+        while holding.value == nil { try await Task.sleep(nanoseconds: 5_000_000) }
+        let queuedBuyer = Task { try await gate.withBuyerPermit {} }
+        while await gate.queuedWaiterCount() == 0 { try await Task.sleep(nanoseconds: 5_000_000) }
+        Task {
+            try? await Task.sleep(nanoseconds: 800_000_000)
+            release.set("release")
+        }
+        let outcome = await ContinuousBatchingSelfCheck.runUnderAdmissionHold(
+            providerStatus: status, drainSeconds: 5, checkSeconds: 5, lifecycleLease: { nil },
+            buyerWaitSeconds: { await gate.oldestBuyerWaitBehindExclusiveSeconds() }, buyerWaitYieldSeconds: 0.2,
+            probeAwaitingResidency: { await gate.exclusiveAcquisitionQueued() },
+            context: "test", log: { lines.append($0) }
+        ) {
+            (try? await gate.withExclusivePermit { true }) ?? false
+        }
+        try await preHold.value
+        try await queuedBuyer.value
+        XCTAssertEqual(outcome, .completed)
+        XCTAssertFalse(lines.all.contains { $0.contains("buyer_wait_bound") })
+    }
+
+    /// A non-buyer user of the gate (compute-score, KV seed) waiting behind
+    /// the probe past the bound must not cancel the check.
+    func testNonBuyerWaitingBehindTheProbeDoesNotYieldTheHold() async throws {
+        let status = makeStatus()
+        let gate = AsyncSemaphore(value: 4)
+        let lines = LogLines()
+        let probing = LeaseFlag()
+        let scoring = Task {
+            while probing.value == nil { try await Task.sleep(nanoseconds: 5_000_000) }
+            try await gate.withPermit {}
+        }
+        let outcome = await ContinuousBatchingSelfCheck.runUnderAdmissionHold(
+            providerStatus: status, drainSeconds: 5, checkSeconds: 5, lifecycleLease: { nil },
+            buyerWaitSeconds: { await gate.oldestBuyerWaitBehindExclusiveSeconds() }, buyerWaitYieldSeconds: 0.2,
+            probeAwaitingResidency: { await gate.exclusiveAcquisitionQueued() },
+            context: "test", log: { lines.append($0) }
+        ) {
+            (try? await gate.withExclusivePermit { () async -> Bool in
+                probing.set("probe")
+                while await gate.queuedWaiterCount() == 0 { try? await Task.sleep(nanoseconds: 5_000_000) }
+                try? await Task.sleep(nanoseconds: 600_000_000)
+                return true
+            }) ?? false
+        }
+        try await scoring.value
+        XCTAssertEqual(outcome, .completed)
+        XCTAssertFalse(lines.all.contains { $0.contains("hold_buyer_waiting") })
+    }
+
+    /// A buyer admitted during the drain can hold a permit when the probe
+    /// queues; waiting for it does not consume the check bound.
+    func testProbeQueuedBehindADrainArrivalDoesNotBurnTheCheckBound() async throws {
+        let status = makeStatus(slots: 1)
+        let gate = AsyncSemaphore(value: 1)
+        let lines = LogLines()
+        let arrival = Task { () -> Void in
+            while await !status.selfCheckAdmissionHoldStatus().active { try await Task.sleep(nanoseconds: 5_000_000) }
+            guard case .admitted(let at) = await status.admitRequest(requestID: "drain-arrival") else {
+                return XCTFail("arrival refused")
+            }
+            try await gate.withBuyerPermit { try await Task.sleep(nanoseconds: 1_000_000_000) }
+            await status.finishRequest(startedAt: at, completion: nil, failed: false, requestID: "drain-arrival")
+        }
+        let outcome = await ContinuousBatchingSelfCheck.runUnderAdmissionHold(
+            providerStatus: status, drainSeconds: 5, checkSeconds: 0.4, lifecycleLease: { nil },
+            buyerWaitSeconds: { await gate.oldestBuyerWaitBehindExclusiveSeconds() }, buyerWaitYieldSeconds: 20,
+            probeAwaitingResidency: { await gate.exclusiveAcquisitionQueued() },
+            context: "test", log: { lines.append($0) }
+        ) {
+            while await status.selfCheckAdmissionHoldArrivalsInFlight() == 0 { try? await Task.sleep(nanoseconds: 5_000_000) }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+            return (try? await gate.withExclusivePermit { true }) ?? false
+        }
+        try await arrival.value
+        XCTAssertEqual(outcome, .completed)
+        XCTAssertFalse(lines.all.contains { $0.contains("check_bound") })
+    }
+
+    /// The probe's wait behind a holder that outlasts the drain bound ends as
+    /// a drain timeout, never a check-bound yield, and cancels nothing.
+    func testProbeWaitPastTheDrainBoundEndsAsADrainTimeout() async throws {
+        let status = makeStatus(slots: 1)
+        let gate = AsyncSemaphore(value: 1)
+        let lines = LogLines()
+        let release = LeaseFlag()
+        let holding = LeaseFlag()
+        let holder = Task { () -> Bool in
+            while await !status.selfCheckAdmissionHoldStatus().active { try await Task.sleep(nanoseconds: 5_000_000) }
+            guard case .admitted(let at) = await status.admitRequest(requestID: "long-arrival") else { return false }
+            try await gate.withBuyerPermit {
+                holding.set("held")
+                while release.value == nil { try await Task.sleep(nanoseconds: 10_000_000) }
+            }
+            await status.finishRequest(startedAt: at, completion: nil, failed: false, requestID: "long-arrival")
+            return true
+        }
+        let outcome = await ContinuousBatchingSelfCheck.runUnderAdmissionHold(
+            providerStatus: status, drainSeconds: 1, checkSeconds: 30, lifecycleLease: { nil },
+            buyerWaitSeconds: { await gate.oldestBuyerWaitBehindExclusiveSeconds() }, buyerWaitYieldSeconds: 20,
+            probeAwaitingResidency: { await gate.exclusiveAcquisitionQueued() },
+            context: "test", log: { lines.append($0) }
+        ) {
+            while holding.value == nil { try? await Task.sleep(nanoseconds: 5_000_000) }
+            return (try? await gate.withExclusivePermit { true }) ?? false
+        }
+        release.set("release")
+        let served = try await holder.value
+        XCTAssertTrue(served, "the buyer holding the permit is never cancelled")
+        XCTAssertEqual(outcome, .drainTimeout)
+        XCTAssertTrue(lines.all.contains { $0.contains("outcome=drain_timeout reason=residency_wait_bound") })
     }
 
     func testDrainTimeoutSkipsTheCheckCancelsNothingAndReopensAdmission() async {
@@ -408,4 +704,34 @@ private final class LeaseFlag: @unchecked Sendable {
 
     func set(_ value: String) { lock.lock(); stored = value; lock.unlock() }
     var value: String? { lock.lock(); defer { lock.unlock() }; return stored }
+}
+
+/// Suspends the first thermal read until released; later reads pass through.
+private actor FirstThermalReadLatch {
+    private var used = false
+    private var suspended = false
+    private var released = false
+    private var releaseWaiter: CheckedContinuation<Void, Never>?
+    private var suspendedWaiter: CheckedContinuation<Void, Never>?
+
+    func pass() async {
+        guard !used else { return }
+        used = true
+        suspended = true
+        suspendedWaiter?.resume()
+        suspendedWaiter = nil
+        guard !released else { return }
+        await withCheckedContinuation { releaseWaiter = $0 }
+    }
+
+    func waitUntilSuspended() async {
+        guard !suspended else { return }
+        await withCheckedContinuation { suspendedWaiter = $0 }
+    }
+
+    func release() {
+        released = true
+        releaseWaiter?.resume()
+        releaseWaiter = nil
+    }
 }
