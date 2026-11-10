@@ -271,9 +271,11 @@ the local helper in `.git/config`; do not print or persist token values.
 
 Skip this section for docs-only pushes to `main`.
 
-Before `gh pr create`, draft the PR body and validate the governance block when
-the branch changes specs, manifests, product behavior, or any non-governance
-path:
+A PR that does not touch `specs/` needs no governance block: CI derives the
+declaration from the diff (changed paths mapped through `CONFORMANCE.json`
+requirements to `AUTHORITY.json` domains) and prints it. A PR that changes
+`specs/` must carry exactly one `SPEC-GOVERNANCE-DECLARATION-BEGIN` /
+`SPEC-GOVERNANCE-DECLARATION-END` block; validate it before `gh pr create`:
 
 ```bash
 python3 scripts/check_spec_pr_declaration.py \
@@ -282,10 +284,9 @@ python3 scripts/check_spec_pr_declaration.py \
   --head HEAD
 ```
 
-The PR body must contain exactly one `SPEC-GOVERNANCE-DECLARATION-BEGIN` /
-`SPEC-GOVERNANCE-DECLARATION-END` block when the validator requires it. Fill it
-honestly; do not fabricate specs or requirements to satisfy the checker. The
-`spec-index` job in `ci.yml` is part of `ci-required`; treat it red as blocking.
+Fill it honestly; do not fabricate specs or requirements to satisfy the
+checker. The `spec-index` job in `ci.yml` is part of `ci-required`; treat it
+red as blocking. A SPEC's version lives only in its `**Version:**` header.
 
 ## Sensitive Paths
 
