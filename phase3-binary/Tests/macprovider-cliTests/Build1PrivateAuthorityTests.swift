@@ -54,6 +54,12 @@ final class Build1PrivateAuthorityTests: XCTestCase {
            let next = json.range(of: "\"qwen/qwen3-30b-a3b-instruct-2507\":", range: start.upperBound..<json.endIndex) {
             json.removeSubrange(start.lowerBound..<next.lowerBound)
         }
+        // Ripple-65B Preview was staged after this authority's historical
+        // catalog stamp (#2270).
+        if let start = json.range(of: "\"ricursiveai/ripple-65b-preview\":"),
+           let next = json.range(of: "\"z-ai/glm-4.5-air\":", range: start.upperBound..<json.endIndex) {
+            json.removeSubrange(start.lowerBound..<next.lowerBound)
+        }
         // The last rows (GLM-5.3-Flash and its abliterated build, #2189): drop
         // them with the leading comma, keeping the rows object's brace.
         if let start = json.range(of: ",\"zai-org/glm-5.3-flash\":"),
