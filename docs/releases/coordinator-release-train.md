@@ -33,6 +33,21 @@ it merges (`status`, `next`, `next --run`; state the downtime first). The apply
 that installs it still drains under the old binary, so a row orphaned before
 then is cleared only by the first restart of the new gateway.
 
+## On-request reasoning capability and Messages `disabled` to `none` — pending runtime inclusion (2026-11-10)
+
+Related: #2269. The coordinator advertises `capabilities.reasoning` for
+Qwen3.5, Qwen3.6, Qwen3.8 and Nemotron-3 when an eligible native provider runs
+CLI 1.8.285 or later, and the gateway maps `/v1/messages` `thinking: disabled`
+to `reasoning_effort` `none` (was `low`) (SPEC-006 v0.9.75). Live step: the
+next `scripts/ops/pearl-runtime.sh` apply after it merges, together with
+#2268 (`status`, `next`, `next --run`; state the 15-20 min coordinator
+downtime first, per `docs/runbooks/pearl-coordinator-rollout.md`). This
+runtime must be live before the CLI cut that carries #2269 is promoted: a
+provider on that cut turns thinking on for an explicit `low`, so the old
+gateway's `disabled` to `low` mapping would bill thinking the buyer asked to
+drop. If the runtime train takes tag `v1.8.285`, the first CLI is 1.8.286,
+which still meets the 1.8.285 floor.
+
 ## Pearl runtime v1.8.284 (2026-11-10)
 
 **Live 2026-11-10 06:45 WITA** (tag `v1.8.284` at `9cbdbf3a5`, release run 42713237490). It carries the #2244 aliases that price and limit the uncensored GLM-5.3-Flash served id (`Solstice-AI/GLM-5.3-Flash-UNCENSORED-mlx-oQ4e-DFlash2`) as `zai-org/glm-5.3-flash-uncensored` in the coordinator (`internal/billing/formula.go`) and the gateway (`internal/config/model_key.go`). v1.8.282 lacked them, so it settled that id at the `default` rate and held it to the 32,768 gateway-wide output cap. The apply took about 3 minutes of network down. v1.8.283 is the staged provider CLI identity, not a runtime tag.
