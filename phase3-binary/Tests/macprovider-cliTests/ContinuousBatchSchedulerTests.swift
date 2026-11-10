@@ -6972,7 +6972,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertLessThanOrEqual(longLedAt.last ?? .max, 2 * maxBypass + 10)
     }
 
-    /// v0.3.40: only a head admitted after a passed-over row charges it.
+    /// v0.3.41: only a head admitted after a passed-over row charges it.
     func testPrefillBypassChargesOnlyRowsAdmittedBeforeTheHead() {
         let arrival: [String: UInt64] = ["old": 1, "head": 2, "new": 3]
         XCTAssertEqual(
@@ -7035,7 +7035,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         }
 
         // 16K arrives with 14 of the 8K row's chunks left: 8K keeps the lead
-        // for all of them, then 16K runs. Before v0.3.40 the 16K row aged
+        // for all of them, then 16K runs. Before v0.3.41 the 16K row aged
         // after 8 turns and then led until its prompt was done.
         let heads = run([("8k", 16)], arrivals: [(2, "16k", 32)], turns: 48)
         XCTAssertEqual(Array(heads.prefix(16)), Array(repeating: "8k", count: 16))
@@ -7091,7 +7091,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         )
     }
 
-    /// v0.3.41: the head's prompt takes the per-iteration budget first; a
+    /// v0.3.42: the head's prompt takes the per-iteration budget first; a
     /// peer that cannot finish with it joins only with what the head leaves.
     func testRaggedPrefillGroupingGivesTheHeadsPromptTheBudgetFirst() {
         func candidate(_ id: String, offset: Int = 0, remaining: Int) -> ContinuousBatchPrefillCandidate {
@@ -7181,7 +7181,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         )
         // Turns: runs of prefill forwards between decode windows. While a row
         // decodes the head gets one forward per turn, so a decode window
-        // follows every chunk (v0.3.42).
+        // follows every chunk (v0.3.43).
         var turns: [[String]] = []
         var current: [String] = []
         for event in await backend.events() {
