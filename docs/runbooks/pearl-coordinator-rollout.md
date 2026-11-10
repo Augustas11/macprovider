@@ -9,13 +9,15 @@ outage across four incidents. Mechanics of the updater itself are in
 ## Hard rules
 
 1. **State the downtime to the operator before every Pearl mutation.** Do it
-   before you start, never after. A runtime apply has historically meant
-   **15–20 minutes of network down**, unless the short-quiesce updater hotfix
-   (below) is installed. A catalog activation means a coordinator restart of
-   seconds.
+   before you start, never after. With the short-quiesce updater (installed)
+   a runtime apply means **about 1–2 minutes of coordinator/gateway restart**:
+   the v1.8.285 apply had both back within about 90 s, then the updater ran a
+   ~5.5 min rollback-point verification with services up. `pearl-runtime.sh`
+   prints the last measured apply downtime from the updater audit log when it
+   can read it. A catalog activation means a coordinator restart of seconds.
 2. **Never cut a runtime release to ship tooling only.** If the coordinator and
    gateway code is identical to what is live, a new runtime apply buys nothing
-   and costs a full outage. v1.8.218 took the network down for 19 minutes to
+   and still costs a restart. v1.8.218 took the network down for 19 minutes to
    deliver a deploy-script fix. Prefer fixing the tooling so that it does not
    require the running version to change. If a tag really is required, say so
    and quote the downtime first.
