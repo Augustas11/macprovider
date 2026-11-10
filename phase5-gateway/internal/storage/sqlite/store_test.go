@@ -1896,7 +1896,8 @@ func keyHash(s string) [32]byte {
 func TestValidDemandModelIDKnowsGLM53FlashIdentitiesExactly(t *testing.T) {
 	for _, model := range []string{"zai-org/glm-5.3-flash", "z-ai/glm-5.3-flash", "Jundot/GLM-5.3-Flash-oQ4e-mtp",
 		"zai-org/glm-5.3-flash-abliterated", "z-ai/glm-5.3-flash-abliterated", "grant-ai/GLM-5.3-Flash-Abliterated-MLX-4bit",
-		"zai-org/glm-5.3-flash-uncensored", "z-ai/glm-5.3-flash-uncensored", "Solstice-AI/GLM-5.3-Flash-UNCENSORED-mlx-oQ4e-DFlash2"} {
+		"zai-org/glm-5.3-flash-uncensored", "z-ai/glm-5.3-flash-uncensored", "Solstice-AI/GLM-5.3-Flash-UNCENSORED-mlx-oQ4e-DFlash2",
+		"ricursiveai/ripple-65b-preview", "frogggias/Ripple-65B-Preview-MLX-4bit"} {
 		if !validDemandModelID(model) || sanitizeStoredDemandModelID(model, true) != model {
 			t.Errorf("%q must be a known demand model id", model)
 		}

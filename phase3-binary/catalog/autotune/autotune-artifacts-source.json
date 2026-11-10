@@ -495,6 +495,31 @@
       "primary_artifact_id": "mlx-4bit",
       "rate_class": "class-30b-moe"
     },
+    "ricursiveai/ripple-65b-preview": {
+      "artifacts": {
+        "mlx-4bit": {
+          "allowed_runtime_sources": [
+            "mlx_cache"
+          ],
+          "hash": "accae85aca4a215288f9062cc60535f70509b593772da21409a485ba9c6725c6",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "min_ram_gb": 64,
+          "notes": "Ripple-65B Preview (#2270), Apache-2.0: ricursiveAI/Ripple-65B-Preview weights, uniform MLX affine 4-bit (group 64) conversion published by frogggias. Dense 65B, 80 layers (64 sliding-window, 16 full attention), served by the native Swift ricursive engine; the repo's ricursive.py is never executed.",
+          "quantization": "affine-4bit-g64",
+          "runtime_format": "mlx_safetensors",
+          "size_bytes": 36450333007,
+          "source_ref": {
+            "kind": "huggingface_revision",
+            "repo_id": "frogggias/Ripple-65B-Preview-MLX-4bit",
+            "revision": "4a33b33f043f41a51ae7236edd440d64cfa7cc94"
+          },
+          "verification_status": "verified",
+          "verified_at": "2026-11-10"
+        }
+      },
+      "primary_artifact_id": "mlx-4bit",
+      "rate_class": "class-120b-moe"
+    },
     "z-ai/glm-4.5-air": {
       "artifacts": {
         "mlx-4bit": {

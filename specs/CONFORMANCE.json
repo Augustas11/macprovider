@@ -1477,7 +1477,7 @@
     {
       "spec_id": "SPEC-048",
       "title": "Native Multi-Token Prediction Serving",
-      "version": "0.1.78",
+      "version": "0.1.79",
       "path": "specs/SPEC-048-native-mtp-serving.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -11916,7 +11916,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1770",
-        "rationale": "SPEC-048 v0.1.77 names LM 3.32.3-macprovider.32 (6c27b743bae5dd60eb07954f2819316b22b92094) (#2244, #2189) on 3.32.3-macprovider.25: the per-layer quantization-map loader for checkpoints in the Hugging Face key layout; load-time only, no decode line changes. Other model sources and the Swift, core and C rows are unchanged."
+        "rationale": "SPEC-048 v0.1.79 names LM 3.32.3-macprovider.35 (c9d8a9324eb9cc98243987b1557a863c253c63b3) (#2270) on 3.32.3-macprovider.32: the ricursive text model (Ripple-65B Preview) and its prefill chunk; new model files and one registry line, no decode line of any other model changes. The Swift, core and C rows are unchanged."
       }
     },
     {

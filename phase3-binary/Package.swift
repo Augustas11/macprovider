@@ -17,6 +17,10 @@ let package = Package(
         )
     ],
     dependencies: [
+        // Tag 3.32.3-macprovider.35 (#2270) on 3.32.3-macprovider.32: the
+        // `ricursive` text model (Ripple-65B Preview, `2911424`) and its
+        // 2048-token prefill chunk (`c9d8a93`). New model files and one
+        // registry line; no other model's code changes.
         // Tag 3.32.3-macprovider.32 (#2244, #2189) on 3.32.3-macprovider.25:
         // `6c27b74` (from `73df016af`) maps a Hugging Face per-layer
         // quantization map to module paths at load, so the Solstice-AI
@@ -72,7 +76,7 @@ let package = Package(
         // compatible per-column attention while retaining row-owned caches.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "6c27b743bae5dd60eb07954f2819316b22b92094"
+            revision: "c9d8a9324eb9cc98243987b1557a863c253c63b3"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",
