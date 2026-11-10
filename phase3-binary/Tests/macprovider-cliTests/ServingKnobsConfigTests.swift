@@ -1177,6 +1177,19 @@ final class ServingKnobsConfigTests: XCTestCase {
         }
     }
 
+    /// SPEC-038 v0.3.44: the self-check's leg (a) result decides cached
+    /// turns; a signed grant only stands in before it runs, and a failed leg
+    /// (a) overrides a signed grant (the turn re-prefills cold in the batch).
+    func testCachedTurnsSelfCheckResultOverridesTheSignedGrant() {
+        XCTAssertTrue(ModelRuntime.cachedTurnsAdmitted(selfCheck: true, signedGrant: false, probeKey: false))
+        XCTAssertFalse(ModelRuntime.cachedTurnsAdmitted(selfCheck: false, signedGrant: true, probeKey: false))
+        XCTAssertTrue(ModelRuntime.cachedTurnsAdmitted(selfCheck: nil, signedGrant: true, probeKey: false))
+        XCTAssertFalse(ModelRuntime.cachedTurnsAdmitted(selfCheck: nil, signedGrant: false, probeKey: false))
+        // The leg (a) probe's own key resumes before any result exists.
+        XCTAssertTrue(ModelRuntime.cachedTurnsAdmitted(selfCheck: nil, signedGrant: false, probeKey: true))
+        XCTAssertTrue(ModelRuntime.cachedTurnsAdmitted(selfCheck: false, signedGrant: false, probeKey: true))
+    }
+
     func testCachedTurnsAcceptanceIsPerTupleAndRevisionBound() {
         let tuple = Self.continuousBatchingTuple()
         func accepted(metallib: String, grant: Bool) -> ContinuousBatchingAcceptedTuple {
@@ -1278,15 +1291,17 @@ final class ServingKnobsConfigTests: XCTestCase {
         try await allocator.discardRetained(retained)
     }
 
-    func testContinuousBatchingCachedTurnsDefaultsOffAndResolvesCLIOverEnvironmentOverYAML() throws {
-        XCTAssertFalse(AppConfig.defaults().continuousBatchingCachedTurns)
+    /// SPEC-038 v0.3.44: on by default (the self-check's leg (a) decides per
+    /// Mac); `false` stays the operator kill switch at every layer.
+    func testContinuousBatchingCachedTurnsDefaultsOnAndResolvesCLIOverEnvironmentOverYAML() throws {
+        XCTAssertTrue(AppConfig.defaults().continuousBatchingCachedTurns)
         let yaml = try ConfigLoader.load(
             cli: CLIOverrides(),
             environment: [:],
             fileExists: { _ in true },
-            readFile: { _ in "continuous_batching_cached_turns: true\n" }
+            readFile: { _ in "continuous_batching_cached_turns: false\n" }
         )
-        XCTAssertTrue(yaml.continuousBatchingCachedTurns)
+        XCTAssertFalse(yaml.continuousBatchingCachedTurns)
         let environment = try ConfigLoader.load(
             cli: CLIOverrides(),
             environment: ["MACPROVIDER_CONTINUOUS_BATCHING_CACHED_TURNS": "false"],
@@ -1315,6 +1330,7 @@ final class ServingKnobsConfigTests: XCTestCase {
         XCTAssertEqual(try ServeCommand.parse(["--no-continuous-batching-cached-turns"]).continuousBatchingCachedTurns, false)
 
         var config = AppConfig.defaults()
+        config.continuousBatchingCachedTurns = false
         XCTAssertNil(ServeCommand.continuousBatchingCachedTurnsPreflightLine(config))
         config.continuousBatchingCachedTurns = true
         XCTAssertEqual(

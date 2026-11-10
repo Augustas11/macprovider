@@ -5,9 +5,10 @@ The digest names the code that decides which tokens a native-MTP or
 continuous-batching row emits: the decode-path source files listed in
 `phase3-binary/decode-path-manifest.json` plus the pinned mlx-swift and
 mlx-swift-lm revisions (the MLX core, the model families' forward passes and
-the fork's drafters). A signed admission entry that carries
-`decode_path_digest` is valid for every signed CLI release that embeds the same
-digest; a CLI cut that leaves the decode path alone needs no admission step.
+the fork's drafters). From SPEC-048 0.1.81 an admission entry's
+`decode_path_digest` is provenance only: the provider admits by model, logs a
+differing digest and runs the MTP-16 self-check, so no CLI cut needs an
+admission step and catalog activation does not run --publish-gate.
 
 The digest is SHA-256 over the UTF-8 bytes
 

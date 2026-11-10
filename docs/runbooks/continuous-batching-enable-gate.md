@@ -1,10 +1,25 @@
 # Continuous Batching Enable Gate
 
-Continuous batching is **default-off unless an authentic release-bound signed
-policy authorizes the exact runtime tuple**. In a joined production provider,
-manual `continuous_batching_accepted_tuples` entries are ignored. Do not enable
-buyer traffic from CI, a worktree build, a unit-test pass, or a local
-`swift build`.
+> **SPEC-038 v0.3.44 (2026-11-10).** A granted FR-CB10 on-device self-check
+> authorizes continuous batching on each Mac without a signed positive policy
+> entry; the signed policy is revocation-only. The self-check also runs AC-26
+> leg (a), a keyed two-turn cached-prefix parity probe, and stores the result
+> with its decision. Passed: positive-cached turns resume in the batch. Failed
+> or not yet run: they re-prefill cold inside a CB row (`cached_prompt_tokens`
+> 0, `event=continuous_batching_cached_turn action=cold_prefill`) and never
+> serial-route. A signed `cached_turns_accepted: true` is a provisional grant
+> until leg (a) runs; no per-model-hash grant PR or Studio window is needed for
+> a new weight file. Legs (b) and (c) are inherited by backend family. Kill
+> switches: `continuous_batching: off` (emergency), `continuous_batching_cached_turns:
+> false` (cached turns only, default on), and an exact signed revocation
+> (`rollout: off`). The sections below that require a signed positive entry or
+> a recorded grant describe the pre-v0.3.44 gate and are kept as history.
+
+Before v0.3.44: continuous batching was **default-off unless an authentic
+release-bound signed policy authorized the exact runtime tuple**. In a joined
+production provider, manual `continuous_batching_accepted_tuples` entries are
+ignored. Do not enable buyer traffic from CI, a worktree build, a unit-test
+pass, or a local `swift build`.
 
 > **Current gate — 2026-09-30.** The isolated source-built Studio campaign for
 > #1778 proved automatic signed-policy activation and scheduler-admitted HTTP
@@ -27,9 +42,10 @@ auto-prefix / buyer conversation keys on a cache miss:
 - keyless requests may enter the batch after the runtime bridge gate opens;
 - conversation-keyed **first-turn / cache-miss** requests (`cached_prompt_tokens
   = 0`) may enter the batch; a conversation key alone is not a serial-route;
-- keyed requests with **positive** cached-token credit still serial-route
-  until AC-26 packaged sticky/cross-turn proof, even if retained paged KV
-  exists;
+- keyed requests with **positive** cached-token credit resume their cache
+  in the batch only after this Mac's self-check passed AC-26 leg (a); until
+  then they re-prefill cold inside the batch (v0.3.44; before that they
+  serial-routed);
 - #1477 sticky paths remain present as code, not as permission to credit
   sticky cache hits in canary;
 - the SPEC-039 contiguous-cache primitive (FR-PKV10) already landed in
@@ -95,9 +111,9 @@ Stop and roll back to `continuous_batching: off` if any item below is true:
 - the requested tuple is absent from the local SPEC-039 capability descriptor;
 - the first keyless serving-path request admitted by the scheduler does not
   return HTTP 200 / `finish_reason=stop` through the scheduler path;
-- any request with positive `cached_prompt_tokens` enters the batch before
-  AC-26 packaged sticky/cross-turn proof, even if a retained paged-KV
-  handoff exists;
+- any request resumes positive `cached_prompt_tokens` in the batch while
+  this Mac's AC-26 leg (a) result is failed, or serial-routes on a cached
+  hit (v0.3.44: it must re-prefill cold in the batch);
 - any token, stop condition, cancellation, usage field, receipt field, or
   request-log terminal state is attributed to the wrong request;
 - a batch failure and serial retry produce stitched buyer-visible output or a
@@ -126,9 +142,9 @@ only.
 | Production serving path | The batched path that will serve real traffic is identified and measured. If gather-feeds-SDPA is used only as parity scaffold, record the actual shared-forward path; if gather-every-step is used, prove it meets the SPEC-039 overhead ceiling. Also record the FR-PKV13 define-and-record obligations for this tuple: the sizing table apportioning the unified-memory envelope across model weights, per-request activation, and the paged block pool; the minimum model/context envelope the paged path serves that the stock contiguous path cannot (null or negligible is an acceptable honest value); and the overhead ceiling itself. A throughput number measured on a worktree build is scaffold evidence — the ceiling check that gates enable must be re-recorded on the packaged RC. |
 | Keyless scheduler 200 | A local loopback and relay-shaped keyless request with stable request ID enters the scheduler path and returns HTTP 200 / terminal success from batching, not serial fallback and not `continuous_batching_prefill_failed`. |
 | Keyed first-turn scheduler 200 | A Pearl-shaped request with a conversation key, stable request ID, and `cached_prompt_tokens = 0` enters the scheduler (no `serial_routed reason=conversation_key_rollout_unavailable`) and returns HTTP 200. Keyless loopback is not a substitute. |
-| Sticky/cross-turn scope | First-turn keyed traffic may batch. A positive-`cached_prompt_tokens` turn batches only when all three hold: `continuous_batching_cached_turns` is on, the lease carries a usable retained FR-PKV10 handoff (on a hybrid tuple such as Qwen3.6, plus a recurrent checkpoint; on GLM-5.3-Flash, the SPEC-024-R005 prompt snapshot the previous turn's CB row published), and the signed policy entry covering this exact runtime revision records `cached_turns_accepted: true` (SPEC-038 v0.2.9). Otherwise it serial-routes in canary and fails closed in `on`, logging `reason=cached_turns_not_accepted` when only the grant is missing and `reason=sticky_cache_handoff_unavailable` otherwise. |
-| Sticky retained-KV proof (AC-26) | Run this on the packaged build before setting `cached_turns_accepted: true` on its signed policy entry, and record it next to that entry. Drive a sticky/cross-turn request through the gateway/relay path, reattach same-conversation paged KV via FR-PKV10, prove mid-block LCP/trim correctness, and verify usage, billing, receipt, and settlement fields. For a hybrid tuple, include a checkpoint-resumed turn whose `cached_prompt_tokens` equals the checkpoint length. For GLM-5.3-Flash (SPEC-038 v0.3.31), run a multi-turn keyed conversation whose later turns report `cached_prompt_tokens` equal to the previous turn's snapshot length, enter a CB row (no `serial_routed`), match the same turns sent cold under a new key, and include native-MTP rows resumed from a snapshot that keep `native_mtp` and match ordinary CB at the same row count. During the proof run, enable `continuous_batching_cached_turns` (env `MACPROVIDER_CONTINUOUS_BATCHING_CACHED_TURNS`, CLI `--[no-]continuous-batching-cached-turns`, default off) with the grant set on an isolated, non-live provider. On a live provider, turn the flag on only after the grant is recorded for that exact revision; a new metallib or kernel needs a new proof. Serve start prints `event=batching_cached_turns action=enabled mode=...`, or `action=inert` while batching is off. Record that line. |
-| Same-architecture variant (SPEC-038 v0.3.40) | An entry MAY take `cached_turns_accepted: true` from a granted donor entry, with this proof: both name the same `backend_family` (the `config.json` `model_type`) in `continuous-batching-policy-source.json` and the variant names the donor's `model_key` as `cached_turns_donor`; it equals the donor on every field except `model_id`, `model_key`, `model_sha256`, `tokenizer_sha256`, `chat_template_sha256`, the grant and `provenance`; its own attach proof and scheduler leftovers passed on the binary its provenance binds; and its own AC-26 leg (a) (keyed multi-turn: snapshot-boundary cached tokens, CB row, warm equals cold) passed there, run with its signed `false` entry loaded. Its `provenance.evidence_id` cites that leg (a) evidence (an `ac26` token). Legs (b) and (c) come from the donor; leg (b) only while the variant has no native-MTP admission. `catalog-release.py generate` refuses a `true` entry without this backing and never refuses `false`. `catalog-activate.sh status` warns on a `false` entry whose family is granted: run leg (a) in that window and grant in the same release. |
+| Sticky/cross-turn scope | **v0.3.44:** a positive-`cached_prompt_tokens` turn resumes its cache in the batch when the flag is on (default), the lease carries a usable handoff, and this Mac's self-check passed AC-26 leg (a) (`cb-self-check.json` `cached_turns_parity: true`; before leg (a) runs a signed `cached_turns_accepted: true` stands in). Otherwise it re-prefills cold in the batch and logs `event=continuous_batching_cached_turn action=cold_prefill reason=...`; it never serial-routes. Before v0.3.44: first-turn keyed traffic may batch. A positive-`cached_prompt_tokens` turn batches only when all three hold: `continuous_batching_cached_turns` is on, the lease carries a usable retained FR-PKV10 handoff (on a hybrid tuple such as Qwen3.6, plus a recurrent checkpoint; on GLM-5.3-Flash, the SPEC-024-R005 prompt snapshot the previous turn's CB row published), and the signed policy entry covering this exact runtime revision records `cached_turns_accepted: true` (SPEC-038 v0.2.9). Otherwise it serial-routes in canary and fails closed in `on`, logging `reason=cached_turns_not_accepted` when only the grant is missing and `reason=sticky_cache_handoff_unavailable` otherwise. |
+| Sticky retained-KV proof (AC-26) | **v0.3.44:** leg (a) runs on every Mac inside the FR-CB10 self-check after a granted decision (`event=cb_self_check action=cached_turns_probe result=passed|failed`, then `action=cached_turns_decided`); legs (b) and (c) are inherited by backend family. No grant PR or Studio window per weight file. The manual proof below is needed only for a new backend family. Before v0.3.44: run this on the packaged build before setting `cached_turns_accepted: true` on its signed policy entry, and record it next to that entry. Drive a sticky/cross-turn request through the gateway/relay path, reattach same-conversation paged KV via FR-PKV10, prove mid-block LCP/trim correctness, and verify usage, billing, receipt, and settlement fields. For a hybrid tuple, include a checkpoint-resumed turn whose `cached_prompt_tokens` equals the checkpoint length. For GLM-5.3-Flash (SPEC-038 v0.3.31), run a multi-turn keyed conversation whose later turns report `cached_prompt_tokens` equal to the previous turn's snapshot length, enter a CB row (no `serial_routed`), match the same turns sent cold under a new key, and include native-MTP rows resumed from a snapshot that keep `native_mtp` and match ordinary CB at the same row count. During the proof run, enable `continuous_batching_cached_turns` (env `MACPROVIDER_CONTINUOUS_BATCHING_CACHED_TURNS`, CLI `--[no-]continuous-batching-cached-turns`, default off) with the grant set on an isolated, non-live provider. On a live provider, turn the flag on only after the grant is recorded for that exact revision; a new metallib or kernel needs a new proof. Serve start prints `event=batching_cached_turns action=enabled mode=...`, or `action=inert` while batching is off. Record that line. |
+| Same-architecture variant (SPEC-038 v0.3.40) | **v0.3.44:** superseded for serving; the variant's own self-check runs leg (a) on each Mac, so it needs no signed grant. The donor rule below still governs a `true` entry if one is published. An entry MAY take `cached_turns_accepted: true` from a granted donor entry, with this proof: both name the same `backend_family` (the `config.json` `model_type`) in `continuous-batching-policy-source.json` and the variant names the donor's `model_key` as `cached_turns_donor`; it equals the donor on every field except `model_id`, `model_key`, `model_sha256`, `tokenizer_sha256`, `chat_template_sha256`, the grant and `provenance`; its own attach proof and scheduler leftovers passed on the binary its provenance binds; and its own AC-26 leg (a) (keyed multi-turn: snapshot-boundary cached tokens, CB row, warm equals cold) passed there, run with its signed `false` entry loaded. Its `provenance.evidence_id` cites that leg (a) evidence (an `ac26` token). Legs (b) and (c) come from the donor; leg (b) only while the variant has no native-MTP admission. `catalog-release.py generate` refuses a `true` entry without this backing and never refuses `false`. `catalog-activate.sh status` warns on a `false` entry whose family is granted: run leg (a) in that window and grant in the same release. |
 | Durable replay authority | Stable relay request identity is mapped into scheduler replay keys, settlement disposition is propagated through usage/receipt code, and duplicate inference or duplicate settlement is rejected after local terminal-result retention rolls. `ContinuousBatchRuntimeReplayAuthority` is **already durable**: a file-backed claim store in a `0700` directory holding `request_id_sha256` + `fingerprint_sha256` records, wired to the inbound `X-Request-ID`, and #1500 closed that prerequisite. Only the `inMemoryForTests` variant is non-durable, and only it is disqualified. The outstanding gap is packaged proof that reconnect/replay after a terminal result carries the correct settlement disposition through usage/receipt code — not the existence of the authority. |
 | MSB-01..05 | Full harness output for MSB-01 single-stream baseline plus MSB-02, MSB-03, MSB-04, and MSB-05. Aggregate TG is total decoded tokens over common wall-clock, warm-up excluded; per-stream and aggregate TG stay separate. |
 | MoE promotion | Production `moePromotionEvidenceAvailable` is true after [`continuous-batching-moe-activation-2026-09-20.md`](continuous-batching-moe-activation-2026-09-20.md). Descriptor membership still does not promote a MoE tuple by itself. Studio 176 is the live serving canary; fleet CB stays off. Do not set `on`. |

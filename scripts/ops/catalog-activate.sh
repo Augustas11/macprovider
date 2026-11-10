@@ -236,41 +236,6 @@ if type(d) is not int or not now+1800<=d<=now+3600:
 PAIR_DEADLINE
 }
 
-# Read-only candidate-order proof. Call again under transaction custody before
-# publication with the freshly verified prior sidecar, never a cached verdict.
-signed_pair_decode_path_gate() {
-  local plan="$1" prior="$2" recommended="$3" version run_id marker run_json provenance
-  [ -n "$plan" ] && [ -f "$plan" ] && [ -f "$prior" ] &&
-    [ -n "${MACPROVIDER_OPS_OWNER:-}" ] && [ "$(gh_repo)" = Augustas11/macprovider ] || {
-      printf '%s\n' "blocked: signed-pair candidate proof prerequisites missing"; return 0;
-    }
-  provenance="$(json_field "$plan" 'd["target"]["provenance"]')"
-  if [ "$provenance" = reviewed_published_signed_release ]; then
-    python3 "$REPO_ROOT/scripts/decode_path_digest.py" --publish-gate \
-      "$CATALOG_TARGET_INPUT" "$CATALOG_TARGET_DIR/native-mtp-admission.json" "$recommended" 2>&1 ||
-      printf '%s\n' "blocked: decode-path publish gate failed"
-    return 0
-  fi
-  [ "$provenance" = reviewed_signed_acceptance_candidate ] || {
-    printf '%s\n' "blocked: signed-pair target provenance unknown"; return 0;
-  }
-  version="$(json_field "$plan" 'd["target"]["version"]')"
-  run_id="$(json_field "$plan" 'str(d["target"]["candidate_run_id"])')"
-  is_semver "$version" && [[ "$run_id" =~ ^[1-9][0-9]*$ ]] || {
-    printf '%s\n' "blocked: signed-pair candidate identity malformed"; return 0;
-  }
-  marker="$(marker_path "cli-release-$version" signed_byte_verification)"
-  run_json="$OPS_TMP_DIR/signed-pair-candidate-run.json"
-  [ -f "$marker" ] && gh api "repos/Augustas11/macprovider/actions/runs/$run_id" > "$run_json" 2>/dev/null || {
-    printf '%s\n' "blocked: signed-pair verified candidate run unavailable"; return 0;
-  }
-  MACPROVIDER_OPS_ENTRYPOINT=1 python3 "$REPO_ROOT/scripts/decode_path_digest.py" --publish-gate \
-    "$CATALOG_TARGET_INPUT" "$CATALOG_TARGET_DIR/native-mtp-admission.json" "$recommended" \
-    --signed-pair-plan "$plan" --signed-byte-verification "$marker" \
-    --signed-pair-run-json "$run_json" --signed-pair-prior-sidecar "$prior" 2>&1 ||
-    printf '%s\n' "blocked: signed-pair decode-path publish proof failed"
-}
-
 signed_pair_acknowledged() {
   python3 - "$(signed_pair_state_dir)" "$(signed_pair_plan_sha)" <<'PAIR_ACK_CHECK'
 import json,os,pathlib,stat,sys
@@ -374,12 +339,9 @@ signed_pair_internal() {
   got="$(signed_pair_deadline_ok)" || refuse "$got"
   # Re-fetch under live-ops custody. The actor later independently proves the
   # same prior signed bytes under the publication lease before pausing.
-  local prior="$OPS_TMP_DIR/signed-pair-prior-admission.json" health="$OPS_TMP_DIR/signed-pair-health.json" gate
+  local prior="$OPS_TMP_DIR/signed-pair-prior-admission.json" health="$OPS_TMP_DIR/signed-pair-health.json"
   [ "$(http_get "${COORDINATOR_URL%/}/v1/native-mtp-admission" "$prior")" = 200 ] &&
     [ "$(http_get "${COORDINATOR_URL%/}/healthz" "$health")" = 200 ] || refuse "signed pair prior policy is unreadable"
-  gate="$(signed_pair_decode_path_gate "$CATALOG_SIGNED_PAIR_PLAN" "$prior" \
-    "$(json_field "$health" 'd.get("recommended_binary_version") or ""')")"
-  [ "$gate" = ok ] || refuse "signed pair decode-path proof changed before publication"
   CATALOG_SIGNED_PAIR_INTENT_SHA256="$expected" CATALOG_SIGNED_PAIR_STATE_DIR="$(signed_pair_state_dir)" \
     "$REPO_ROOT/scripts/catalog-content-release.sh" --deploy --commit "$commit"
 }
@@ -940,25 +902,9 @@ $owed_writer '$verdict' '$owed_dir' '$R'
 scripts/catalog-content-release.sh --deploy --commit $main_sha ${pricing:+--pricing-diff-sha256 $pricing }--preflight-verdict '$verdict' | tee '$deploy_log'
 $owed_writer '$deploy_log' '$owed_dir' '$R'"
     content_downtime="no coordinator restart: one SIGHUP reloads the release${pricing:+ and the rate card}; the canary provider is drained and restarted onto the release, so the requests it would serve go to other providers of its model or wait for its restart and model load; a failed activation rolls back and can strand adopters for 3-11 min"
-    # SPEC-048-R014 item 10 (0.1.51): decode-path admission entries are
-    # rejected by CLIs before the reader, so they go live only when the bound
-    # release (git-verified digest at its source commit) is the recommended CLI.
-    local dp_gate="ok"
-    if [ "$native_bound" = true ]; then
-      if [ -n "${CATALOG_SIGNED_PAIR_PLAN:-}" ]; then
-        dp_gate="$(signed_pair_decode_path_gate "$CATALOG_SIGNED_PAIR_PLAN" "$OPS_TMP_DIR/adm.json" \
-          "$(json_field "$OPS_TMP_DIR/healthz.json" 'd.get("recommended_binary_version") or ""' 2>/dev/null)")"
-      else
-        dp_gate="$(python3 "$REPO_ROOT/scripts/decode_path_digest.py" --publish-gate \
-          "$CATALOG_TARGET_INPUT" "$CATALOG_TARGET_DIR/native-mtp-admission.json" \
-          "$(json_field "$OPS_TMP_DIR/healthz.json" 'd.get("recommended_binary_version") or ""' 2>/dev/null)" 2>&1 ||
-          echo "blocked: decode-path publish gate failed")"
-      fi
-    fi
-    fact native_mtp_decode_path_publish_gate "$dp_gate"
-    if [ "$dp_gate" != ok ]; then
-      set_next catalog_activation blocked "Activate content release $R" "" "$dp_gate"
-    elif [ -n "${CATALOG_SIGNED_PAIR_PLAN:-}" ] && [ "$fresh" = true ] && [ "$go" = true ] && [ -z "$pricing" ]; then
+    # SPEC-048 0.1.81: the decode-path digest is provenance only, so catalog
+    # activation does not compare it with any release.
+    if [ -n "${CATALOG_SIGNED_PAIR_PLAN:-}" ] && [ "$fresh" = true ] && [ "$go" = true ] && [ -z "$pricing" ]; then
       local pair_sha
       local pair_deadline
       if [ "$head_sha" != "$main_sha" ] || ! pair_sha="$(signed_pair_plan_sha)"; then

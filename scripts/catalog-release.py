@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import base64
 import contextlib
+import copy
 import datetime as _dt
 import hashlib
 import importlib.util
@@ -141,6 +142,9 @@ ARTIFACT_BEARING_FEED_SETS = (ARTIFACT_BOUND_LEDGER_FEEDS, NATIVE_MTP_BOUND_LEDG
 NATIVE_MTP_SIDECAR_GENERATOR_PATH = ROOT / "scripts" / "native_mtp_admission_sidecar.py"
 # Below SPEC-023's 90-day sidecar maximum, so a weekly renewal never lapses.
 NATIVE_MTP_SIDECAR_VALIDITY_DAYS = 89
+# SPEC-048 0.1.81 same-architecture variant declarations (optional source).
+NATIVE_MTP_VARIANTS_PATH = CATALOG_DIR / "native-mtp-variants.json"
+NATIVE_MTP_VARIANTS_SCHEMA = "macprovider.native-mtp-variants.v1"
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 ARTIFACT_ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
@@ -2854,6 +2858,7 @@ def resolve_native_mtp_admission(
         )
     if not tuple_present:
         return None
+    require_native_mtp_variants_current(artifact_obj)
     generator = NATIVE_MTP_SIDECAR_GENERATOR
     try:
         sidecar = generator.build(
@@ -2880,6 +2885,218 @@ def resolve_native_mtp_admission(
         sidecar, manifest_bytes, bank, candidate_obj, artifact_obj, signer_key_id, require_bank_release=True,
     )
     return sidecar, body, manifest_bytes, bank
+
+
+# SPEC-048 0.1.81: the fields a variant declares. Every other tuple field,
+# every evidence digest and every bound comes from the donor's entry.
+NATIVE_MTP_VARIANT_KEYS = {
+    "model_key", "donor_model_key", "artifact_id", "artifact_hash", "tokenizer_sha256",
+    "mtp_manifest_sha256", "projection_artifacts",
+}
+NATIVE_MTP_VARIANT_OPTIONAL_KEYS = {"mtp_artifact_sha256", "self_check_record"}
+NATIVE_MTP_SELF_CHECK_RECORD_KEYS = {
+    "expected_token_ids", "expected_terminal_reason", "expected_counters", "expected_committed_state_sha256",
+}
+# A variant must equal its donor on these tuple-class fields (adapter, quant
+# kind and decode shape); its own entry copies them, so this only guards a
+# hand-edited donor.
+NATIVE_MTP_VARIANT_CLASS_KEYS = (
+    "mtp_family_adapter", "mtp_state_class", "mtp_head_count", "proposal_depth", "cache_state_classes",
+)
+
+
+def _native_mtp_projection_models(manifest: dict, tuple_entries: list[dict]) -> dict:
+    if manifest.get("schema_version") == NATIVE_MTP_SIDECAR_GENERATOR.PROJECTION_V2_SCHEMA:
+        return dict(manifest["models"])
+    keys = {entry["model_key"] for entry in tuple_entries}
+    if len(keys) != 1:
+        fail(f"{NATIVE_MTP_MANIFEST_NAME}: a v1 projection serves exactly one model_key")
+    return {next(iter(keys)): manifest["artifacts"]}
+
+
+def native_mtp_variant_artifact(artifact_obj: dict | None, model_key: str, artifact_id: str) -> dict | None:
+    if artifact_obj is None:
+        return None
+    return ((artifact_obj.get("models") or {}).get(model_key) or {}).get("artifacts", {}).get(artifact_id)
+
+
+def expand_native_mtp_variants(
+    tuple_inputs: list, bank: dict, manifest: dict, variants_obj: dict, artifact_obj: dict | None = None
+) -> tuple[list, dict, dict]:
+    """SPEC-048 0.1.81 same-architecture variant: derive each variant's tuple
+    input, self-test bank entry and projection from its donor. Pure; earlier
+    output for a declared variant is replaced, so the result is a fixpoint."""
+    generator = NATIVE_MTP_SIDECAR_GENERATOR
+    label = NATIVE_MTP_VARIANTS_PATH.name
+    exact_keys(variants_obj, {"schema_version", "variants"}, {"schema_version", "variants"}, label)
+    if variants_obj["schema_version"] != NATIVE_MTP_VARIANTS_SCHEMA:
+        fail(f"{label}: schema_version must be {NATIVE_MTP_VARIANTS_SCHEMA}")
+    variants = variants_obj["variants"]
+    if not isinstance(variants, list) or not variants:
+        fail(f"{label}: variants must be a non-empty list")
+    variant_keys = [v.get("model_key") if isinstance(v, dict) else None for v in variants]
+    if len(set(variant_keys)) != len(variant_keys):
+        fail(f"{label}: duplicate variant model_key")
+    base_inputs = [item for item in tuple_inputs if item["entry"]["model_key"] not in variant_keys]
+    base_bank_entries = [entry for entry in bank["entries"] if entry["model_id"] not in variant_keys]
+    models = {
+        key: artifacts
+        for key, artifacts in _native_mtp_projection_models(manifest, [i["entry"] for i in tuple_inputs]).items()
+        if key not in variant_keys
+    }
+    donors = {item["entry"]["model_key"]: item for item in base_inputs}
+    out_inputs = list(base_inputs)
+    out_bank = list(base_bank_entries)
+    for index, variant in enumerate(variants):
+        vlabel = f"{label} variants[{index}]"
+        if not isinstance(variant, dict):
+            fail(f"{vlabel}: must be an object")
+        exact_keys(
+            variant, NATIVE_MTP_VARIANT_KEYS | NATIVE_MTP_VARIANT_OPTIONAL_KEYS, NATIVE_MTP_VARIANT_KEYS, vlabel
+        )
+        donor_input = donors.get(variant["donor_model_key"])
+        if donor_input is None:
+            fail(f"{vlabel}: donor_model_key {variant['donor_model_key']!r} is not an admitted non-variant tuple")
+        donor = donor_input["entry"]
+        for key in ("artifact_hash", "tokenizer_sha256", "mtp_manifest_sha256", "mtp_artifact_sha256"):
+            if key in variant:
+                generator._str(variant[key], f"{vlabel}.{key}", generator.SHA256)
+        generator._projection_artifacts(variant["projection_artifacts"], f"{vlabel}.projection_artifacts")
+        entry = copy.deepcopy(donor)
+        for key in ("model_key", "artifact_id", "artifact_hash", "tokenizer_sha256", "mtp_manifest_sha256"):
+            entry[key] = variant[key]
+        # SPEC-048 MTP-13: the variant inherits only on the donor's quantization
+        # kind, read from the artifact feed (the tuple's `quantization.kind` is
+        # the donor's own). Its quantization provenance is its own artifact's.
+        own = native_mtp_variant_artifact(artifact_obj, variant["model_key"], variant["artifact_id"])
+        donor_artifact = native_mtp_variant_artifact(artifact_obj, donor["model_key"], donor["artifact_id"])
+        own_kind = own.get("quantization") if own else None
+        donor_kind = donor_artifact.get("quantization") if donor_artifact else None
+        if not isinstance(own_kind, str) or not own_kind.strip():
+            fail(f"{vlabel}: the artifact feed has no quantization kind for the variant artifact "
+                 f"{variant['model_key']!r}/{variant['artifact_id']!r}")
+        if own_kind != donor_kind:
+            fail(f"{vlabel}: quantization kind {own_kind!r} differs from the donor's {donor_kind!r}; "
+                 "it needs its own admission")
+        if own.get("hash") != variant["artifact_hash"] or not HEX64.fullmatch(str(own.get("hash"))):
+            fail(f"{vlabel}: artifact_hash does not match the variant artifact's feed record")
+        entry["quantization"]["representation_manifest_sha256"] = own["hash"]
+        entry["ordinary_baseline"] = {**entry["ordinary_baseline"], "artifact_hash": variant["artifact_hash"]}
+        for key in NATIVE_MTP_VARIANT_CLASS_KEYS:
+            if entry.get(key) != donor.get(key):
+                fail(f"{vlabel}: {key} differs from the donor")
+        out_inputs.append({"schema_version": donor_input["schema_version"], "entry": entry})
+        donor_challenges = [
+            c for c in base_bank_entries
+            if c["model_id"] == donor["model_key"] and c["model_hash"] == donor["artifact_hash"]
+        ]
+        if len(donor_challenges) != 1:
+            fail(f"{vlabel}: the donor needs exactly one self-test bank entry, found {len(donor_challenges)}")
+        challenge = copy.deepcopy(donor_challenges[0])
+        if "mtp_artifact_sha256" in variant:
+            mtp_artifact = variant["mtp_artifact_sha256"]
+        elif challenge["artifact_sha256"] == donor["artifact_hash"]:
+            mtp_artifact = variant["artifact_hash"]
+        else:
+            fail(f"{vlabel}: the donor's drafter is a separate artifact; declare mtp_artifact_sha256")
+        challenge.update({
+            "challenge_id": f"{challenge['challenge_id']}-variant-{sha256(variant['model_key'].encode('utf-8'))[:12]}",
+            "model_id": variant["model_key"],
+            "model_hash": variant["artifact_hash"],
+            "tokenizer_sha256": variant["tokenizer_sha256"],
+            "artifact_sha256": mtp_artifact,
+            "mtp_manifest_sha256": variant["mtp_manifest_sha256"],
+        })
+        # The donor's prompt; the variant's own MTP-16 output when recorded.
+        # Without a record the donor's expectations stand: the provider's
+        # on-device check does not compare them, the R033 canary does.
+        record = variant.get("self_check_record")
+        if record is not None:
+            if not isinstance(record, dict):
+                fail(f"{vlabel}.self_check_record must be an object")
+            exact_keys(record, NATIVE_MTP_SELF_CHECK_RECORD_KEYS, NATIVE_MTP_SELF_CHECK_RECORD_KEYS, f"{vlabel}.self_check_record")
+            tokens = record["expected_token_ids"]
+            if not isinstance(tokens, list) or not all(isinstance(t, int) and not isinstance(t, bool) and t >= 0 for t in tokens):
+                fail(f"{vlabel}.self_check_record.expected_token_ids must be a list of token ids")
+            challenge.update({key: copy.deepcopy(record[key]) for key in NATIVE_MTP_SELF_CHECK_RECORD_KEYS})
+            challenge["expected_token_id_sha256"] = sha256(("[" + ",".join(str(t) for t in tokens) + "]").encode("utf-8"))
+        out_bank.append(challenge)
+        models[variant["model_key"]] = variant["projection_artifacts"]
+    out_bank.sort(key=lambda entry: entry["challenge_id"])
+    ids = [entry["challenge_id"] for entry in out_bank]
+    if len(set(ids)) != len(ids):
+        fail(f"{NATIVE_MTP_BANK_NAME}: duplicate challenge_id after variant expansion")
+    out_inputs.sort(key=lambda item: item["entry"]["model_key"])
+    return out_inputs, {**bank, "entries": out_bank}, json.loads(generator.build_projection(models))
+
+
+def native_mtp_variant_files(artifact_obj: dict | None = None) -> dict[pathlib.Path, bytes] | None:
+    """The committed native-MTP inputs as the variant declarations make them,
+    or None without declarations. The release input re-binds to the new bank
+    and projection bytes."""
+    if not NATIVE_MTP_VARIANTS_PATH.exists():
+        return None
+    variants_obj = strict_json(NATIVE_MTP_VARIANTS_PATH.read_bytes(), NATIVE_MTP_VARIANTS_PATH.name)
+    tuple_value = json.loads(NATIVE_MTP_TUPLE_INPUT_PATH.read_text("utf-8"))
+    tuple_inputs = tuple_value if isinstance(tuple_value, list) else [tuple_value]
+    bank = strict_json((CATALOG_DIR / NATIVE_MTP_BANK_NAME).read_bytes(), NATIVE_MTP_BANK_NAME)
+    manifest = strict_json((CATALOG_DIR / NATIVE_MTP_MANIFEST_NAME).read_bytes(), NATIVE_MTP_MANIFEST_NAME)
+    inputs, bank, manifest = expand_native_mtp_variants(
+        tuple_inputs, bank, manifest, variants_obj, artifact_obj
+    )
+    bank_bytes = canonical_sorted_bytes(bank)
+    manifest_bytes = NATIVE_MTP_SIDECAR_GENERATOR.canonical_bytes(manifest)
+    release = json.loads(NATIVE_MTP_RELEASE_INPUT_PATH.read_text("utf-8"))
+    release["entry"]["challenge_bank_sha256"] = sha256(bank_bytes)
+    release["entry"]["artifact_manifest_sha256"] = sha256(manifest_bytes)
+    return {
+        NATIVE_MTP_TUPLE_INPUT_PATH: (json.dumps(inputs, indent=2, sort_keys=True) + "\n").encode("utf-8"),
+        CATALOG_DIR / NATIVE_MTP_BANK_NAME: bank_bytes,
+        CATALOG_DIR / NATIVE_MTP_MANIFEST_NAME: manifest_bytes,
+        NATIVE_MTP_RELEASE_INPUT_PATH: (json.dumps(release, indent=2, sort_keys=True) + "\n").encode("utf-8"),
+    }
+
+
+def cmd_native_mtp_variants() -> None:
+    artifact_obj = json.loads(ARTIFACT_SOURCE_PATH.read_bytes()) if ARTIFACT_SOURCE_PATH.exists() else None
+    files = native_mtp_variant_files(artifact_obj)
+    if files is None:
+        fail(f"native-mtp-variants: {NATIVE_MTP_VARIANTS_PATH.name} is absent")
+    for path, data in files.items():
+        path.write_bytes(data)
+    print(f"catalog-release: native-MTP variants expanded into {', '.join(sorted(p.name for p in files))}")
+
+
+def require_native_mtp_variants_current(artifact_obj: dict | None) -> None:
+    """generate: the committed inputs equal the variant expansion, and each
+    variant passes the computed R012 weight-size check: its verified artifact
+    is no larger than its donor's, so the donor's fit evidence covers it."""
+    files = native_mtp_variant_files(artifact_obj)
+    if files is None:
+        return
+    for path, data in files.items():
+        if path.read_bytes() != data:
+            fail(f"generate: {path.name} is stale against {NATIVE_MTP_VARIANTS_PATH.name}; run "
+                 "`catalog-release.py native-mtp-variants`")
+    if artifact_obj is None:
+        fail("generate: a native-MTP variant requires the artifact-bound feed set")
+    sizes = {
+        (model_key, artifact_id): artifact.get("size_bytes")
+        for model_key, model in artifact_obj["models"].items()
+        for artifact_id, artifact in model["artifacts"].items()
+    }
+    variants = strict_json(NATIVE_MTP_VARIANTS_PATH.read_bytes(), NATIVE_MTP_VARIANTS_PATH.name)["variants"]
+    donors = {i["entry"]["model_key"]: i["entry"] for i in json.loads(files[NATIVE_MTP_TUPLE_INPUT_PATH])}
+    for variant in variants:
+        donor = donors[variant["donor_model_key"]]
+        own = sizes.get((variant["model_key"], variant["artifact_id"]))
+        donor_size = sizes.get((donor["model_key"], donor["artifact_id"]))
+        if not isinstance(own, int) or not isinstance(donor_size, int):
+            fail(f"generate: native-MTP variant {variant['model_key']!r}: R012 needs measured size_bytes for "
+                 "it and its donor in the artifact feed")
+        if own > donor_size:
+            fail(f"generate: native-MTP variant {variant['model_key']!r}: R012 weight size {own} exceeds its "
+                 f"donor's {donor_size}; it needs its own fit evidence")
 
 
 def verify_native_mtp_bank_signature(directory: pathlib.Path, bank: bytes, body: dict, keys: dict[str, bytes]) -> None:
@@ -4774,17 +4991,16 @@ def fleet_fit_fraction_ppm(fleet_ram: dict, min_ram_gb: int) -> int | None:
 
 def spec017_intake_amendment_landed() -> bool:
     """SPEC-023 §16.7: the buyer-demand signal exists from SPEC-017 v0.2.1.
-    The gate is keyed on the CONFORMANCE index — the version of record —
-    never on a manifest's own claim."""
+    The gate is keyed on the SPEC-017 `**Version:**` header — the version of
+    record — never on a manifest's own claim."""
     try:
-        index = json.loads((ROOT / "specs" / "CONFORMANCE.json").read_text())
-    except (OSError, ValueError):
+        head = (ROOT / "specs" / "SPEC-017-network-stats-api.md").read_text().splitlines()[:15]
+    except OSError:
         return False
-    for spec in index.get("specs", []):
-        if spec.get("spec_id") == "SPEC-017":
-            version = str(spec.get("version", "")).lstrip("v")
-            parts = tuple(int(x) for x in version.split(".") if x.isdigit())
-            return parts >= (0, 2, 1)
+    for line in head:
+        match = re.match(r"\*\*Version:\*\*\s*v?([0-9]+(?:\.[0-9]+)*)", line)
+        if match:
+            return tuple(int(x) for x in match.group(1).split(".")) >= (0, 2, 1)
     return False
 
 
@@ -7475,6 +7691,11 @@ def main() -> int:
     )
     restamp_parser.add_argument("--release-id", required=True)
     restamp_parser.add_argument("--generated-at", required=True)
+    sub.add_parser(
+        "native-mtp-variants",
+        help="SPEC-048 0.1.81: expand native-mtp-variants.json into the committed tuple input, "
+        "self-test bank, projection manifest and release input",
+    )
     generate_parser = sub.add_parser("generate")
     generate_parser.add_argument("--signer-key-id")
     generate_parser.add_argument(
@@ -7778,6 +7999,8 @@ def main() -> int:
             bootstrap(args.release_id, args.generated_at, args.policy_version)
         elif args.command == "restamp":
             restamp(args.release_id, args.generated_at)
+        elif args.command == "native-mtp-variants":
+            cmd_native_mtp_variants()
         elif args.command == "generate":
             market_args = (args.market_rate_proposal, args.market_demand_proposal, args.market_snapshot, args.market_policy)
             if any(value is None for value in market_args):

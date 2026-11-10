@@ -40,7 +40,7 @@ Qwen3.5, Qwen3.6, Qwen3.8 and Nemotron-3 when an eligible native provider runs
 CLI 1.8.285 or later, and the gateway maps `/v1/messages` `thinking: disabled`
 to `reasoning_effort` `none` (was `low`) (SPEC-006 v0.9.75). Live step: the
 next `scripts/ops/pearl-runtime.sh` apply after it merges, together with
-#2268 (`status`, `next`, `next --run`; state the 15-20 min coordinator
+#2268 (`status`, `next`, `next --run`; state the about 1-2 min coordinator
 downtime first, per `docs/runbooks/pearl-coordinator-rollout.md`). This
 runtime must be live before the CLI cut that carries #2269 is promoted: a
 provider on that cut turns thinking on for an explicit `low`, so the old
@@ -74,7 +74,7 @@ GLM CLI cut. After the v1.8.282 apply, the live step that sets the limit to
 
 Order: #2260 merges (or the cut is ready without it) → `scripts/ops/pearl-runtime.sh`
 (`PEARL_RUNTIME_VERSION=v1.8.282`, `status`, `next`, `next --run`; state the
-15–20 min downtime first) → `PEARL_RUNTIME_TASK=stream-ceiling
+about 1-2 min downtime first) → `PEARL_RUNTIME_TASK=stream-ceiling
 scripts/ops/pearl-runtime.sh next --run` sets the gateway's GLM-5.3-Flash
 output limit (`limits.model_max_output_tokens`) to 65536 (one gateway
 restart) → the GLM CLI cut, which then reloads the

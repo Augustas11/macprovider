@@ -32,7 +32,7 @@
 #                       never applied) and after 7 once the new binary is live
 #                       (the new release's own migrations).
 #   5 plan              Pearl preflight + macprovider-pearl-update --plan (read-only)
-#   6 apply             systemd-run updater --apply (15-20 min network down)
+#   6 apply             systemd-run updater --apply (about 1-2 min restart)
 #   7 wait_updater      bounded wait for the updater unit to exit
 #   8 health            coordinator and gateway /healthz report the tag
 #
@@ -231,7 +231,40 @@ ROLLOUT_DOC="docs/runbooks/pearl-coordinator-rollout.md"
 RETENTION_DOC="ops/runbooks/settlement-evidence-retention.md"
 VACUUM_DOWNTIME="coordinator stopped while SQLite rewrites the coordinator, route-snapshot journal, and audit (coordinator-audit.db) database files (full VACUUM): about as long as the updater's pre-apply backup of the same files (ops/runbooks/pearl-release-updater.md), in proportion to their size; buyer and provider traffic through the coordinator is down for that time"
 STATS_MIGRATE_DOWNTIME="none (embedded stats/rewards Postgres migrations apply while the coordinator keeps serving; no restart)"
-APPLY_DOWNTIME="15-20 minutes of network down (runtime apply), unless the short-quiesce updater hotfix is installed"
+APPLY_DOWNTIME="about 1-2 min of coordinator/gateway restart (short-quiesce updater; the updater's rollback-point verification afterwards runs with services up)"
+PEARL_UPDATER_AUDIT="${PEARL_UPDATER_AUDIT:-/var/lib/macprovider-pearl-updater/audit.jsonl}"
+
+# last_apply_downtime: read-only. Prints "<tag>: <N> s" for the newest completed
+# apply in the updater audit log, measured from the gateway stop to the gateway
+# start (the coordinator stops after and starts before the gateway). Prints
+# nothing when the log is unreadable or holds no completed apply.
+last_apply_downtime() {
+  [ -n "${PEARL_SSH:-}" ] || return 0
+  ssh "$PEARL_SSH" "sudo -n tail -n 5000 '$PEARL_UPDATER_AUDIT'" 2>/dev/null | python3 -c '
+import calendar, json, sys, time
+def ts(r):
+    return calendar.timegm(time.strptime(r["ts"], "%Y-%m-%dT%H:%M:%SZ"))
+tag = stop = start = None
+last = None
+for line in sys.stdin:
+    try:
+        r = json.loads(line)
+    except ValueError:
+        continue
+    event, unit = r.get("event"), r.get("unit")
+    if event == "rollout_started":
+        tag, stop, start = r.get("candidate"), None, None
+    elif event == "service_action" and r.get("outcome") == "success" and unit == "macprovider-gateway.service":
+        if r.get("action") == "stop" and stop is None:
+            stop = ts(r)
+        elif r.get("action") == "start" and stop is not None and start is None:
+            start = ts(r)
+    elif event == "rollout_completed" and stop is not None and start is not None:
+        last = f"{tag}: {start - stop} s"
+if last:
+    print(last)
+' 2>/dev/null || true
+}
 RETENTION_RUN_DOWNTIME="none (no restart): the coordinator keeps serving while the run archives and deletes settled evidence in short batches"
 CI_DOC="docs/runbooks/compute-integrity-private-corpus.md"
 # Pearl's journal: a plain coordinator restart stops (draining in-flight
@@ -1642,6 +1675,11 @@ ssh \"\$PEARL_SSH\" '/usr/local/sbin/macprovider-pearl-update --plan --tag $T'"
 $apply_cmd"
       fi
       set_next apply mutate "Apply runtime $T with the signed updater" "$apply_cmd"
+    fi
+    if [ "$NEXT_ID" = apply ]; then
+      local measured
+      measured="$(last_apply_downtime)"
+      [ -z "$measured" ] || APPLY_DOWNTIME="$APPLY_DOWNTIME; last measured apply $measured"
     fi
     next_meta apply "$ROLLOUT_DOC#runtime-apply-signed-updater" "$APPLY_DOWNTIME" apply
   fi

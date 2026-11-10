@@ -129,11 +129,13 @@ def load_governance():
 
 
 def render(specs, metadata, states) -> str:
+    # No Version column: the spec header is the only version of record, so a
+    # version bump edits one line and parallel PRs conflict only there.
     rows = [
-        "| SPEC | Title | Version | Lifecycle | ID migration | Conformance | Link |",
-        "|---|---|---|---|---|---|---|",
+        "| SPEC | Title | Lifecycle | ID migration | Conformance | Link |",
+        "|---|---|---|---|---|---|",
     ]
-    for num, title, version, rel in specs:
+    for num, title, _version, rel in specs:
         spec_id = f"SPEC-{num:03d}"
         record = metadata.get(spec_id, {})
         requirement_states = states.get(spec_id, {})
@@ -141,7 +143,7 @@ def render(specs, metadata, states) -> str:
         if not summary:
             summary = "pending corpus migration"
         rows.append(
-            f"| {spec_id} | {title} | {version} | {record.get('status', 'untracked')} | "
+            f"| {spec_id} | {title} | {record.get('status', 'untracked')} | "
             f"{record.get('requirement_id_migration', 'untracked')} | {summary} | [{rel}]({rel}) |"
         )
     return "\n".join(rows)
