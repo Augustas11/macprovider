@@ -32,6 +32,38 @@ no row failure, no cross-row divergence), and `localProofResult` is `passed` onl
 with the descriptor admitting the tuple. For a `glm5_next` model the isolation probe includes
 cross-row MoE expert-dispatch isolation.
 
+## Scheduler leftovers and msb-throughput (Studio window, 2026-11-10 01:34Z)
+
+The live provider was stopped and drained, and the runner's Studio target was paused. The
+window ran the signed 1.8.283 `macprovider-cli` with the release metallib. Before any leg, a
+preflight checked the binary's sha256, CDHash and decode-path marker, the metallib, and the
+snapshot's template and tokenizer-config blobs, and found no serve, harness or Swift build
+running. The commands are the abliterated and base GLM ones:
+
+- `msb-throughput --engine scheduler --scenario leftovers --rows 4 --prompt-tokens 1024
+  --parity-tokens 48` (`leftovers.json`, four documents; `leftovers-eval.txt`)
+- `msb-throughput --engine paged --block-size-tokens 256 --prompt-tokens 1024
+  --decode-tokens 128 --runs 3 --rows N` for N = 1, 2, 3, 4 (`msb-rows{1,2,3,4}.json`)
+
+| Leftovers scenario | Result |
+| --- | --- |
+| isolation | cancelled row ends `cancelled`, healthy row `length` with 32 tokens; `pass=true` |
+| replay | `eligible_owner` then `non_settling_replay`, tokens match; `pass=true` |
+| drain | queued request rejected, both active rows complete `length`, permit valid, post-drain request rejected; `pass=true` |
+| parity | 48 tokens; standalone and batched rows `[true, true, true, true]`; serial and batched token SHA-256 equal; `pass=true` |
+
+Every document also has `usagePass=true`. The runtime pin in each record is `mlxlm-6c27b743bae5`.
+
+| Rows | Aggregate tok/s p50 | Paged single row | Aggregate / production serial | Abliterated record | Peak footprint |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 40.26 | 40.22 | 0.96 | 0.96 | 181.1 GB |
+| 2 | 57.99 | 40.15 | 1.39 | 1.40 | 181.4 GB |
+| 3 | 60.72 | 40.17 | 1.45 | | 181.8 GB |
+| 4 | 66.31 | 40.18 | 1.58 | 1.58 | 181.7 GB |
+
+`window-summary.txt` is the window's own log and `identity.txt` its binary and model identity.
+Local paths are written as `<models>`, `<bin>` and `<lab>`.
+
 ## Earlier lab evidence (#2244)
 
 - Token parity against an mlx-vlm `glm5_next` reference: 256/256 at 1K and at 8K, 16/16 top-1.
@@ -65,6 +97,6 @@ FR-CB10 self-check, which grants slots only on a measured aggregate gain with ex
 
 ## Not recorded
 
-- The `leftovers` scheduler harness (isolation, replay, drain, 48-token parity) has not run on
-  this model. SPEC-039 v0.1.31 names it for this identity.
-- `msb-throughput` rows 2 and the serve-log probe lines (gather-call counts) are not recorded.
+- The FR-CB10 self-check on the signed binary runs at load once the signed entry exists. It
+  gates the served slots on its own measured gain and parity.
+- No AC-26 cached-turn proof, so `cached_turns_accepted` is `false`.
