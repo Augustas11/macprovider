@@ -102,6 +102,9 @@ var exactModelKeyAliases = map[string]string{
 	// labelled key on the same terms (#2244).
 	"z-ai/glm-5.3-flash-uncensored":                         "zai-org/glm-5.3-flash-uncensored",
 	"solstice-ai/glm-5.3-flash-uncensored-mlx-oq4e-dflash2": "zai-org/glm-5.3-flash-uncensored",
+	// Ripple-65B Preview's served 4-bit artifact (the "-4bit" suffix is
+	// already stripped) bills as its catalog key (#2270).
+	"frogggias/ripple-65b-preview-mlx": "ricursiveai/ripple-65b-preview",
 	// DeepSeek-V4-Flash's served artifact and its upstream release (#2111).
 	"tensorfold/deepseek-v4-flash-0731-mxfp4-mlx": "deepseek/deepseek-v4-flash",
 	"deepseek-ai/deepseek-v4-flash-0731":          "deepseek/deepseek-v4-flash",
