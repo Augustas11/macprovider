@@ -14,6 +14,11 @@ final class GrammarConstraintTests: XCTestCase {
         }
     }
 
+    override class func setUp() {
+        super.setUp()
+        Device.setDefault(device: Device(.cpu))
+    }
+
     private func requireMetal() throws {
         // Under `swift test` Bundle.main is Xcode's xctest runner; MLX loads
         // the metallib colocated with this test bundle's binary.

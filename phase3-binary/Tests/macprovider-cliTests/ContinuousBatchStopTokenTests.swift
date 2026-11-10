@@ -11,6 +11,11 @@ final class ContinuousBatchStopTokenTests: XCTestCase {
         }
     }
 
+    override class func setUp() {
+        super.setUp()
+        Device.setDefault(device: Device(.cpu))
+    }
+
     func testTrailingModelStopIsDroppedOnlyWhenTheRowStoppedOnIt() {
         let stops: Set<Int> = [151645, 151643]
 
