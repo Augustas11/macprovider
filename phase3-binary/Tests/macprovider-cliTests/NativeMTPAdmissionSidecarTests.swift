@@ -1360,6 +1360,19 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         ))
     }
 
+    /// SPEC-048 0.1.81: a passing self-check logs its challenge output in
+    /// the bank record shape a same-architecture variant's entry takes.
+    func testPassingSelfCheckLogsABankReadyRecord() throws {
+        let line = try XCTUnwrap(ModelRuntime.nativeMTPSelfCheckRecordLogLine(onDeviceSelfCheckReceipt(tokens: [11, 12])))
+        XCTAssertTrue(line.hasPrefix("event=native_mtp_self_check_record challenge_id=challenge-1 record="))
+        let json = try XCTUnwrap(line.split(separator: " ", maxSplits: 2).last?.dropFirst("record=".count))
+        let record = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
+        XCTAssertEqual(record["expected_token_ids"] as? [Int], [11, 12])
+        XCTAssertEqual(record["expected_terminal_reason"] as? String, "stop")
+        XCTAssertEqual(record["expected_committed_state_sha256"] as? String, String(repeating: "3", count: 64))
+        XCTAssertEqual((record["expected_counters"] as? [String: Int])?["committed"], 1)
+    }
+
     /// The binding is both fields or neither.
     func testDecodePathBindingRequiresDigestAndMetallibTogether() throws {
         let digestOnly = try makeReleaseEnvelopeFixture(entryEdit: { $0["decode_path_digest"] = DecodePathIdentity.digest })

@@ -7042,6 +7042,27 @@ maxTokens: 1,
         verdict.passed && receipt.actualDecodePath == .nativeMTP && !receipt.fallbackUsed
     }
 
+    /// SPEC-048 0.1.81 same-architecture variant: the passing self-check's
+    /// output on the signed synthetic challenge prompt, in the self-test bank
+    /// record's shape (`self_check_record` in native-mtp-variants.json). No
+    /// buyer data: the prompt is the signed challenge.
+    nonisolated static func nativeMTPSelfCheckRecordLogLine(_ receipt: NativeMTPSelfTestReceipt) -> String? {
+        let record: [String: Any] = [
+            "expected_token_ids": receipt.generatedTokenIDs,
+            "expected_terminal_reason": receipt.terminalReason.rawValue,
+            "expected_counters": [
+                "accepted": receipt.acceptedTokens,
+                "rejected": receipt.rejectedTokens,
+                "bonus": receipt.bonusTokens,
+                "committed": receipt.committedTokens,
+            ],
+            "expected_committed_state_sha256": receipt.committedStateDigestSHA256,
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys]),
+              let json = String(data: data, encoding: .utf8) else { return nil }
+        return "event=native_mtp_self_check_record challenge_id=\(receipt.challengeID) record=\(json)\n"
+    }
+
     /// Startup and creative restoration share the same on-device admission gate.
     private func qualifyAndPublishNativeMTP(_ nativeMTPLoad: NativeMTPRuntimeLoadResult) async {
         let selfTestReceipt: NativeMTPSelfTestReceipt?
@@ -7089,6 +7110,9 @@ maxTokens: 1,
                     "event=native_mtp_self_check result=\(verdict.reason) speedup=\(String(format: "%.2f", verdict.speedup)) tokens=\(ordinary.tokens.count)\n".utf8
                 ))
                 if let receipt, Self.nativeMTPSelfCheckServes(verdict: verdict, receipt: receipt) {
+                    if let line = Self.nativeMTPSelfCheckRecordLogLine(receipt) {
+                        FileHandle.standardError.write(Data(line.utf8))
+                    }
                     selfTestReceipt = receipt
                 } else {
                     selfTestReceipt = Self.rejectNativeMTPSelfTest(reasonCode: "selftest_\(verdict.reason)")

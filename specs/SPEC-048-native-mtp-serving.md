@@ -1540,28 +1540,31 @@ listed file is missing or changes without a regenerated digest.
   evidence. A Metal-library change follows the same behavior test. A
   behavior change that slips through without requalification is caught on
   the device by the MTP-16 self-check at load and by the R033 canary.
-- **Same-architecture variant (0.1.78).** A tuple (the variant) inherits
-  R005, the gated cells and the sustained phase from an admitted, unrevoked
-  tuple (the donor) when all of these hold:
-  1. Equal `mtp_family_adapter`, `quantization.kind`, `decode_path_digest`,
-     `metallib_sha256`, `hardware_class`, `proposal_depth`, `mtp_head_count`,
-     `decrease_threshold_ppm` and `increase_threshold_ppm`.
-  2. The variant's `qualified_slots`, `max_native_active_rows` and
-     `max_prompt_tokens` are each at most the donor's.
-  3. The variant's own R012 fit evidence (its weights differ).
-
-  The variant then needs a self-test bank entry (R016) and its own
-  native-eligible R015 cells (MTP-15) at every slot count from 1 up to its
-  own `max_native_active_rows`, which is 1 unless it measures more cells.
-  For a GLM-5.3-Flash donor with cap 4096 at bound 1, those are
-  `s1-p1536-o128`, `s1-p1536-o512`, `s1-p4096-o128` and `s1-p4096-o512`
-  (`docs/research/spec048-r015/glm53-flash-r015-v2/policy.json`). The donor's
-  gated cells there, `s2-p1536-o512` and `s4-p1536-o512`, are inherited. The
-  cells run under a frozen policy with the donor's thresholds and MUST pass
-  the same R015 native-eligible improvement gate as the donor, with exact
-  token parity in every run. The variant's evidence names the donor's
-  `model_key` and the donor evidence it inherits; the signed entry schema is
-  unchanged.
+- **Same-architecture variant (0.1.78, inherits admission from 0.1.81).** A
+  tuple (the variant: new weights of an admitted model's architecture)
+  inherits the admission of an admitted, unrevoked tuple (the donor),
+  including R005, every R015 cell and the sustained phase, when it matches
+  the donor's `mtp_family_adapter`, `quantization.kind` and tuple class
+  (`mtp_state_class`, `cache_state_classes`, `mtp_head_count`,
+  `proposal_depth`). Its signed entry is the donor's entry with the variant's
+  identity (`model_key`, `artifact_id`, `artifact_hash`, `tokenizer_sha256`,
+  `mtp_manifest_sha256`) and the donor's bounds, thresholds and evidence
+  digests; the signed entry schema is unchanged.
+  1. The variant needs only its MTP-16 on-device pass. It runs at every load
+     like any admitted tuple; a failure serves ordinary decode on that Mac.
+     It needs no R015 cells of its own.
+  2. Its self-test bank entry (R016) is the donor's challenge prompt with the
+     variant's identity. `scripts/catalog-release.py native-mtp-variants`
+     generates the entry, the tuple input and the projection from
+     `native-mtp-variants.json`, and `generate` refuses stale committed
+     inputs. The bank entry's expected output is the variant's own MTP-16
+     output on that prompt (`self_check_record`, logged by the provider as
+     `event=native_mtp_self_check_record` when the check passes); until it
+     is recorded the donor's expected output stands, which the provider's
+     on-device check does not compare and the R033 canary does.
+  3. R012 memory fit is computed: the variant's verified artifact
+     `size_bytes` MUST NOT exceed the donor's, so the donor's fit evidence
+     covers it. A larger variant needs its own fit evidence.
 - Publishing (0.1.81): R014 item 10 governs only what a released CLI can
   parse. The decode-path binding is not tied to the release CLI: an entry is
   published without comparing its `decode_path_digest` to any release, and
@@ -1616,8 +1619,8 @@ For each qualified tuple, production enablement requires all of the following:
 4. Independent MXFP8 qualification passes when the tuple uses MXFP8.
 5. SPEC-038 FR-CB15/Gate A5 and SPEC-039 FR-PKV13 pass for the same tuple, and
    SPEC-048-R015 passes on every advertised RAM/slot tuple. A
-   same-architecture variant passes R015 by the 0.1.78 variant rule (MTP-13):
-   its own native-eligible cells, the donor's gated cells and sustained phase.
+   same-architecture variant inherits its donor's R015 by the MTP-13 variant
+   rule (0.1.81) and needs only its MTP-16 on-device pass.
 6. A signed `JOURNEY-NATIVE-MTP-SERVING` result covers every requirement mapped
    to it: `SPEC-023-R024`, `SPEC-030-R021`, `SPEC-031-R033`, `SPEC-036-R018`,
    `SPEC-038-R018`, `SPEC-039-R015`, and `SPEC-048-R001..R013/R015/R016`, for
@@ -2275,7 +2278,12 @@ requests.
   native MTP off for that load. The identity-only rebind transaction and the
   publishing tie between an entry's digest and the release CLI are removed;
   a CLI cut needs no admission step. CLIs before 0.1.81 still enforce the
-  binding on entries that carry it.
+  binding on entries that carry it. A same-architecture variant (same
+  adapter, quantization kind and tuple class as an admitted donor) inherits
+  the donor's admission and needs only its MTP-16 on-device pass; its bank
+  entry is generated from the donor's prompt by `catalog-release.py
+  native-mtp-variants`, R012 fit is the computed check that its weights are
+  no larger than the donor's, and it no longer needs R015 cells of its own.
 - **0.1.78 (2026-11-10, Related: #2189)** — MTP-13 and MTP-14 item 5:
   a same-architecture variant inherits R005, the gated cells and the
   sustained phase from an admitted donor with the same family adapter,
