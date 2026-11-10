@@ -78,6 +78,7 @@ class MaxServedSlotsGeneratorTest(unittest.TestCase):
         self.assertEqual(ceilings.pop(GLM_KEY), 4)
         # The abliterated GLM-5.3-Flash build is retired: no CB entry remains.
         self.assertNotIn("zai-org/glm-5.3-flash-abliterated", ceilings)
+        self.assertEqual(ceilings.pop("zai-org/glm-5.3-flash-uncensored"), 4)
         self.assertEqual(ceilings.pop("qwen3-8b"), 4)
         self.assertEqual(ceilings.pop("meta-llama/llama-3.1-8b-instruct"), 4)
         self.assertTrue(ceilings, "committed policy keeps its uncapped entries")
