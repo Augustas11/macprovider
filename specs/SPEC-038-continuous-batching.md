@@ -1,11 +1,22 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.39
+Version: v0.3.40
 Status: draft (normative contract; runtime enablement is default-on per Mac behind the FR-CB10 on-device self-check, v0.3.15)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.3.40 (2026-11-10, same-architecture variant cached-turns grant, Related: #2189):**
+FR-CB10 and AC-26: an entry may record `cached_turns_accepted: true` on a
+granted donor's AC-26 proof when both name the same `backend_family`, the
+entry equals the donor on every field except model, tokenizer, template, the
+grant and provenance, its own attach proof and scheduler leftovers passed on
+its bound binary, and its own AC-26 leg (a) passed there. Legs (b) and (c)
+come from the donor. Catalog generation refuses such an entry left at
+`false`. #2276 signed the uncensored GLM-5.3-Flash entry at `false` beside
+the granted base entry, so keyed later turns serial-routed. Every other
+entry and the runtime are unchanged.
+
 **Change log v0.3.39 (2026-11-09, FR-CB10 admission hold admits buyer arrivals, Related: #2257):**
 FR-CB10 item 3: the 20 s buyer-wait bound counts only buyer requests, and
 only the time each waits behind the check's exclusive probe residency (held
@@ -1811,6 +1822,30 @@ positive-`cached_prompt_tokens` batching (FR-CB4). An operator MUST NOT set it
 until the AC-26 packaged proof has been recorded on that exact tuple and
 runtime revision. A grant on a different revision MUST NOT carry over.
 
+**(v0.3.40) Same-architecture variant.** An entry MAY record
+`cached_turns_accepted: true` on another entry's AC-26 proof (the donor) when
+all of these hold:
+
+1. The donor's signed entry records `cached_turns_accepted: true` after its
+   own AC-26 proof.
+2. Both artifacts have the same backend family (the `config.json`
+   `model_type`). The CB policy source names it as `backend_family` on both
+   entries. The field is source-only and is not part of the signed entry.
+3. The entry equals the donor on every field except `model_id`,
+   `model_key`, `model_sha256`, `tokenizer_sha256`, `chat_template_sha256`,
+   `cached_turns_accepted` and `provenance`. The metallib and kernel are
+   therefore the donor's runtime revision.
+4. The entry's own attach proof (`paged_kv_decision=attached`,
+   `local_proof_result=passed`) and scheduler leftovers (isolation, replay,
+   drain, parity) passed on the binary its provenance binds.
+5. AC-26 leg (a) passed on that binary for the entry. Tokenizer and template
+   are the fields allowed to differ, and they set the snapshot boundary.
+   Legs (b) and (c) come from the donor.
+
+The provenance names the entry's own records. Catalog generation refuses an
+entry with `cached_turns_accepted: false` that meets items 2 and 3 for a
+granted donor, or that meets item 3 and names no `backend_family`.
+
 **(v0.3.18)** The stored self-check result MUST be keyed by the
 row-isolation policy and the device's decode and verify forward bounds, so
 a decision measured under other routing re-runs. A grant from before the
@@ -2731,6 +2766,8 @@ hardware-capability run or a static-review obligation. Every
   row's tokens at the same row count, plus their tokens/s, acceptance and
   TTFT against ordinary CB at that row count (SPEC-048 R015 cells); and
   (c) carry correct usage, receipt and settlement fields for every turn.
+  **(v0.3.40)** A same-architecture variant (FR-CB10, v0.3.40 clause) runs
+  only leg (a) on its own tuple; legs (b) and (c) are the donor's.
 
 ## 8. Go/no-go gates
 

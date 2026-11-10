@@ -351,6 +351,21 @@ The Qwen entry's bytes are unchanged by the merge. Its
 `native_mtp_admission_tuple_sha256` still changes, because the identity covers
 the whole sidecar.
 
+## Same-architecture variant
+
+SPEC-048 0.1.78 (MTP-13). A variant of an admitted, unrevoked tuple inherits
+R005, the gated depth-zero cells and the sustained phase when every row holds:
+
+| Check | Variant against donor |
+| --- | --- |
+| Equal | `mtp_family_adapter`, `quantization.kind`, `decode_path_digest`, `metallib_sha256`, `hardware_class`, `proposal_depth`, `mtp_head_count`, `decrease_threshold_ppm`, `increase_threshold_ppm` |
+| At most the donor's | `qualified_slots`, `max_native_active_rows`, `max_prompt_tokens` |
+| Measured on the variant | R012 fit evidence; a self-test bank entry; R015 cells `s1-p1536-o128` and `s1-p4096-o128` under a frozen policy |
+| Each measured cell | exact token parity in every run; acceptance ≥ `decrease_threshold_ppm`; median native/ordinary decode tok/s > 1.0 |
+
+Name the donor's `model_key` and the donor evidence inherited in the variant's
+evidence README. Adding the entry then follows "Adding a second model" above.
+
 ## Renewal and revocation slots
 
 The admission sidecar and self-test bank no longer expire on the provider

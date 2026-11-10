@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.77
+**Version:** 0.1.78
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.77",
+  "version": "0.1.78",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -1573,6 +1573,23 @@ listed file is missing or changes without a regenerated digest.
   A changed digest, CLI identity, or Metal-library hash alone is not that
   evidence. A Metal-library change follows the same behavior test and MUST
   have its signed binding updated; it cannot retain a mismatched hash.
+- **Same-architecture variant (0.1.78).** A tuple (the variant) inherits
+  R005, the gated depth-zero cells and the sustained phase from an admitted,
+  unrevoked tuple (the donor) when all of these hold:
+  1. Equal `mtp_family_adapter`, `quantization.kind`, `decode_path_digest`,
+     `metallib_sha256`, `hardware_class`, `proposal_depth`, `mtp_head_count`,
+     `decrease_threshold_ppm` and `increase_threshold_ppm`.
+  2. The variant's `qualified_slots`, `max_native_active_rows` and
+     `max_prompt_tokens` are each at most the donor's.
+  3. The variant's own R012 fit evidence (its weights differ).
+
+  The variant then needs only a self-test bank entry (R016) and two
+  native-eligible R015 cells, `s1-p1536-o128` and `s1-p4096-o128`, under a
+  frozen policy. Each cell MUST show exact token parity in every run,
+  acceptance at or above `decrease_threshold_ppm`, and a median
+  native/ordinary decode-throughput ratio above 1.0. The variant's evidence
+  names the donor's `model_key` and the donor evidence it inherits; the
+  signed entry schema is unchanged.
 - Publishing: the binding is qualification-owned (tuple input). CLIs before
   the reader reject unknown entry keys, so R014 item 10 applies. A
   decode-path entry is published only when the bound release CLI embeds that
@@ -1650,7 +1667,8 @@ For each qualified tuple, production enablement requires all of the following:
    termination, mixed-row, capacity, fairness, and accounting fixtures pass.
 4. Independent MXFP8 qualification passes when the tuple uses MXFP8.
 5. SPEC-038 FR-CB15/Gate A5 and SPEC-039 FR-PKV13 pass for the same tuple, and
-   SPEC-048-R015 passes on every advertised RAM/slot tuple.
+   SPEC-048-R015 passes on every advertised RAM/slot tuple. A
+   same-architecture variant passes R015 by the 0.1.78 variant rule (MTP-13).
 6. A signed `JOURNEY-NATIVE-MTP-SERVING` result covers every requirement mapped
    to it: `SPEC-023-R024`, `SPEC-030-R021`, `SPEC-031-R033`, `SPEC-036-R018`,
    `SPEC-038-R018`, `SPEC-039-R015`, and `SPEC-048-R001..R013/R015/R016`, for
@@ -2303,6 +2321,15 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.78 (2026-11-10, Related: #2189)** — MTP-13 and MTP-14 item 5:
+  a same-architecture variant inherits R005, the gated depth-zero cells and
+  the sustained phase from an admitted donor with the same family adapter,
+  quantization kind, decode-path digest, metallib, hardware class, depth,
+  head count and depth thresholds, at no larger slot, native-row or prompt
+  bound. It needs its own R012 fit evidence, a self-test bank entry and the
+  `s1-p1536-o128` and `s1-p4096-o128` cells with exact parity, acceptance at
+  or above `decrease_threshold_ppm` and a median native/ordinary ratio above
+  1.0. No runtime or schema change.
 - **0.1.77 (2026-11-09, Related: #2244)** — R003 names mlx-swift-lm
   `3.32.3-macprovider.32` (`6c27b743bae5dd60eb07954f2819316b22b92094`) on
   `3.32.3-macprovider.25`: the per-layer quantization-map loader for
