@@ -82,7 +82,7 @@ struct NativeMTPArtifactObservation: Equatable, Sendable {
     }
 }
 
-struct NativeMTPAffineModuleOverride: Equatable, Sendable {
+struct NativeMTPAffineModuleOverride: Hashable, Sendable {
     let bits: Int
     let groupSize: Int
 }
@@ -202,12 +202,15 @@ enum NativeMTPArtifactObserver {
     ) throws -> NativeMTPArtifactPairObservation {
         let config = try loadConfig(directory: targetDirectory)
         let hiddenLayers = try glm5NextHiddenLayerCount(in: config)
+        // `GLM5NextConfiguration` decodes `text_config.hidden_size` with this
+        // default; only a quantized router gate needs it.
+        let hiddenSize = (config["text_config"] as? [String: Any]).flatMap { intValue($0["hidden_size"]) } ?? 4096
         let observation = try observe(
             directory: targetDirectory,
             config: config,
             layerCount: 1,
             fileManager: fileManager,
-            tensorNamePolicy: .glm5Next(hiddenLayers: hiddenLayers)
+            tensorNamePolicy: .glm5Next(hiddenLayers: hiddenLayers, hiddenSize: hiddenSize)
         )
         return NativeMTPArtifactPairObservation(target: observation, mtp: observation, embedded: true)
     }
@@ -530,10 +533,16 @@ enum NativeMTPArtifactObserver {
         var pairs: [NativeMTPObservedTensorPair] = []
         var pairedBiases: Set<String> = []
         var consumedUnquantized: Set<String> = []
+        let overrideKeysByPath = moduleKeysByLoaderPath(Set(moduleOverrides.keys), policy: policy)
+        let unquantizedKeysByPath = moduleKeysByLoaderPath(representation.permittedUnquantizedModules, policy: policy)
         for tensor in packed.sorted(by: { $0.name < $1.name }) {
-            let declaredUnquantized = representation.unquantizedExceptions(
-                matching: loaderPath(tensor.name, policy: policy)
-            )
+            let tensorLoaderPaths = loaderPaths(tensor, policy: policy)
+            // A `false` entry covers every tensor under the module path it names.
+            var declaredUnquantized: Set<String> = []
+            for (path, keys) in unquantizedKeysByPath
+            where tensorLoaderPaths.contains(where: { $0.hasPrefix(path + ".") }) {
+                declaredUnquantized.formUnion(keys)
+            }
             if !declaredUnquantized.isEmpty {
                 // A `false` entry makes the loader skip quantizing the module;
                 // a packed weight or scale pair under it would then be an
@@ -546,7 +555,7 @@ enum NativeMTPArtifactObserver {
             }
             if isFloatingWeightDType(tensor.dtype),
                !declaredUnquantized.isEmpty
-                || ((isNeverQuantizedFloatingTensor(tensor) || isFamilyFloatingParameter(tensor, policy: policy))
+                || ((isNeverQuantizedFloatingTensor(tensor, policy: policy) || isFamilyFloatingParameter(tensor, policy: policy))
                     && expectedScaleName(for: tensor.name, available: scaleTensors) == nil) {
                 guard let expectedByteCount = checkedMultiply(tensor.elementCount, bytesPerElement(tensor.dtype)),
                       tensor.byteCount == expectedByteCount else {
@@ -568,17 +577,30 @@ enum NativeMTPArtifactObserver {
             // The pinned loader quantizes the module at its post-sanitize path
             // and looks overrides up by that exact path (BaseConfiguration
             // PerLayerQuantization.quantization(layer:)); no other spelling applies.
-            let loaderTensorPath = loaderPath(tensor.name, policy: policy)
-            let tensorModule = loaderTensorPath.hasSuffix(".weight")
-                ? String(loaderTensorPath.dropLast(".weight".count))
-                : nil
-            let overrideMatch = tensorModule.flatMap { module in
-                moduleOverrides[module].map { (module, $0) }
+            // A GLM5Next `kv_b_proj` tensor loads as two modules, which must
+            // resolve to the same override.
+            let tensorModules = tensorLoaderPaths.compactMap { path in
+                path.hasSuffix(".weight") ? String(path.dropLast(".weight".count)) : nil
             }
-            if let (overrideKey, override) = overrideMatch {
+            var moduleOverrideMatches: [NativeMTPAffineModuleOverride?] = []
+            for module in tensorModules {
+                let keys = overrideKeysByPath[module] ?? []
+                let options = Set(keys.compactMap { moduleOverrides[$0] })
+                // Several keys naming one module (per-expert entries) must agree;
+                // the loader would otherwise pick one of them arbitrarily.
+                guard options.count <= 1 else {
+                    throw NativeMTPArtifactObservationError.unsupportedQuantization("\(quantizationName) conflicting module override")
+                }
+                moduleOverrideMatches.append(options.first)
+                consumedOverrides.formUnion(keys)
+            }
+            guard Set(moduleOverrideMatches).count <= 1 else {
+                throw NativeMTPArtifactObservationError.unsupportedQuantization("\(quantizationName) conflicting module override")
+            }
+            let matchedOverride = moduleOverrideMatches.first.flatMap { $0 }
+            if let override = matchedOverride {
                 tensorBits = override.bits
                 tensorGroupSize = override.groupSize
-                consumedOverrides.insert(overrideKey)
             }
             guard let expectedPackedByteCount = checkedMultiply(tensor.elementCount, bytesPerElement(tensor.dtype)),
                   tensor.byteCount == expectedPackedByteCount else {
@@ -591,6 +613,28 @@ enum NativeMTPArtifactObserver {
             guard scale.shape.count == tensor.shape.count,
                   Array(scale.shape.dropLast()) == Array(tensor.shape.dropLast()) else {
                 throw NativeMTPArtifactObservationError.incompatibleSafetensorsHeaders("scale shape prefix for \(tensor.name)")
+            }
+            if case .glm5Next(_, let hiddenSize) = policy,
+               tensorModules.count == 1, tensorModules[0].hasSuffix(".mlp.gate") {
+                // `GLM5NextWeights.dequantizeRouterGates` restores a packed router
+                // gate to float32, reading its width and group size from the
+                // tensor shapes against `hidden_size`, not from the config.
+                let gateColumns = tensor.shape[tensor.shape.count - 1]
+                let scaleColumns = scale.shape[scale.shape.count - 1]
+                guard let gatePackedBits = checkedMultiply(gateColumns, requiredPackedBits),
+                      hiddenSize > 0, scaleColumns > 0,
+                      gatePackedBits % hiddenSize == 0, hiddenSize % scaleColumns == 0 else {
+                    throw NativeMTPArtifactObservationError.incompatibleSafetensorsHeaders("router gate packing for \(tensor.name)")
+                }
+                let gateBits = gatePackedBits / hiddenSize
+                let gateGroupSize = hiddenSize / scaleColumns
+                guard admittedAffineOverrideBits.contains(gateBits),
+                      [32, 64, 128].contains(gateGroupSize),
+                      matchedOverride.map({ $0.bits == gateBits && $0.groupSize == gateGroupSize }) ?? true else {
+                    throw NativeMTPArtifactObservationError.incompatibleSafetensorsHeaders("router gate packing for \(tensor.name)")
+                }
+                tensorBits = gateBits
+                tensorGroupSize = gateGroupSize
             }
             guard let expectedScaleByteCount = checkedMultiply(scale.elementCount, bytesPerElement(scale.dtype)),
                   scale.byteCount == expectedScaleByteCount else {
@@ -717,10 +761,42 @@ enum NativeMTPArtifactObserver {
         case .mtp:
             return name.hasPrefix("mtp.") ? name : "mtp." + name
         case .glm5Next:
-            // Only post-sanitize checkpoints are admitted (validateTensorName),
-            // on which the GLM5Next sanitizer is the identity.
+            // GLM5Next tensors carry their loader keys (`loaderPaths`); the
+            // mapping needs the whole tensor set (expert stacking, conv
+            // concatenation), so it is not a per-name rewrite.
             return name
         }
+    }
+
+    /// The post-sanitize keys a consumed tensor loads as: one for the Qwen
+    /// policies, `SafetensorsTensor.loaderNames` for GLM5Next (two for a
+    /// `kv_b_proj` tensor, none for router-gate scales and biases).
+    private static func loaderPaths(_ tensor: SafetensorsTensor, policy: TensorNamePolicy) -> [String] {
+        if case .glm5Next = policy {
+            return tensor.loaderNames
+        }
+        return [loaderPath(tensor.name, policy: policy)]
+    }
+
+    /// Loader module path -> the config `quantization` keys that apply to it.
+    /// Qwen policies match each key only as the exact module path. GLM5Next
+    /// mirrors `GLM5NextWeights.sanitize(perLayerQuantization:)`: a key stays
+    /// under its own name and is also entered under every module path
+    /// `quantizationModulePaths` gives it.
+    private static func moduleKeysByLoaderPath(
+        _ keys: Set<String>,
+        policy: TensorNamePolicy
+    ) -> [String: Set<String>] {
+        var result: [String: Set<String>] = [:]
+        for key in keys {
+            result[key, default: []].insert(key)
+            if case .glm5Next(let hiddenLayers, _) = policy {
+                for path in glm5NextQuantizationModulePaths(key, hiddenLayers: hiddenLayers) {
+                    result["language_model." + path, default: []].insert(key)
+                }
+            }
+        }
+        return result
     }
 
     private static func mtpPredictionLayerCount(in config: [String: Any]) throws -> Int {
@@ -804,18 +880,11 @@ enum NativeMTPArtifactObserver {
         _ headers: [SafetensorsHeader],
         policy: TensorNamePolicy
     ) throws -> [SafetensorsTensor] {
+        if case .glm5Next(let hiddenLayers, _) = policy {
+            return try glm5NextLoaderConsumedTensors(headers.flatMap(\.tensors), hiddenLayers: hiddenLayers)
+        }
         var consumed: [SafetensorsTensor] = []
         for tensor in headers.flatMap(\.tensors) {
-            if case .glm5Next = policy {
-                // `GLM5NextWeights.textKey` drops exactly these dotted
-                // namespaces; nothing else is filtered.
-                if glm5NextVisionPrefixes.contains(where: { tensor.name.hasPrefix($0) }) {
-                    continue
-                }
-                try validateTensorName(tensor.name, policy: policy)
-                consumed.append(tensor)
-                continue
-            }
             if policy != .mtp, isTargetLoaderDiscarded(tensor.name) {
                 guard tensor.name.hasPrefix("vision_tower.") || tensor.name.hasPrefix("model.visual.") else {
                     throw NativeMTPArtifactObservationError.incompatibleSafetensorsHeaders("target tensor namespace \(tensor.name)")
@@ -837,14 +906,220 @@ enum NativeMTPArtifactObserver {
         case target
         case mtp
         /// SPEC-048-R002 `glm5_next_mtp_v1` embedded checkpoint; carries
-        /// `text_config.num_hidden_layers` for the next-N key check.
-        case glm5Next(hiddenLayers: Int)
+        /// `text_config.num_hidden_layers` for the next-N key mapping and
+        /// `text_config.hidden_size` for a quantized router gate.
+        case glm5Next(hiddenLayers: Int, hiddenSize: Int)
     }
 
     private static let glm5NextVisionPrefixes = ["vision_model.", "vision_tower.", "visual.", "model.visual."]
 
-    /// Names `GLM5NextWeights.sanitize` would rewrite. The observer admits only
-    /// a checkpoint already in the post-sanitize layout (SPEC-048-R002 0.1.36).
+    /// SPEC-048-R002 (0.1.78): the tensors the pinned GLM5Next loader keeps,
+    /// each carrying the post-sanitize keys `GLM5NextWeights.sanitize` gives
+    /// it, so the Hugging Face pre-sanitize layout and the post-sanitize
+    /// layout are validated by the same grammar. Fails closed when two
+    /// checkpoint tensors land on one loader key other than by the loader's
+    /// own stacking or concatenation (the loader would keep one silently),
+    /// on a next-N layer past `num_nextn_predict_layers`, on any loader key
+    /// outside the post-sanitize grammar, and when no tensor loads into
+    /// `language_model.mtp.0.`.
+    private static func glm5NextLoaderConsumedTensors(
+        _ tensors: [SafetensorsTensor],
+        hiddenLayers: Int
+    ) throws -> [SafetensorsTensor] {
+        func reject(_ name: String) -> NativeMTPArtifactObservationError {
+            .incompatibleSafetensorsHeaders("glm5_next tensor namespace \(name)")
+        }
+        var kept: [(tensor: SafetensorsTensor, textKey: String)] = []
+        var textKeys: Set<String> = []
+        for tensor in tensors.sorted(by: { $0.name < $1.name }) {
+            if glm5NextIsExtraNextnLayer(tensor.name, hiddenLayers: hiddenLayers) {
+                throw reject(tensor.name)
+            }
+            // nil: a vision tensor or a next-N `shared_head.head.` /
+            // `embed_tokens.` copy, which the loader drops.
+            guard let textKey = glm5NextTextKey(tensor.name, hiddenLayers: hiddenLayers) else { continue }
+            guard textKeys.insert(textKey).inserted else { throw reject(tensor.name) }
+            kept.append((tensor, textKey))
+        }
+        let loaderNames = glm5NextLoaderNames(textKeys: textKeys)
+        var ownersByLoaderName: [String: [String]] = [:]
+        for (textKey, names) in loaderNames {
+            for name in names { ownersByLoaderName[name, default: []].append(textKey) }
+        }
+        var consumed: [SafetensorsTensor] = []
+        var loadsMTPLayer = false
+        for (tensor, textKey) in kept {
+            let names = loaderNames[textKey] ?? []
+            for name in names {
+                // Only a stacked expert or concatenated conv kernel has several
+                // sources, none of which already carries the loader key.
+                if let owners = ownersByLoaderName[name], owners.count > 1,
+                   owners.contains(where: { "language_model." + $0 == name }) {
+                    throw reject(tensor.name)
+                }
+                try validateGLM5NextTensorName(name, reportedAs: tensor.name, hiddenLayers: hiddenLayers)
+                if name.hasPrefix("language_model.mtp.0.") { loadsMTPLayer = true }
+            }
+            var mapped = tensor
+            mapped.loaderNames = names
+            consumed.append(mapped)
+        }
+        guard loadsMTPLayer else {
+            throw NativeMTPArtifactObservationError.incompatibleSafetensorsHeaders("glm5_next missing mtp.0 layer")
+        }
+        return consumed
+    }
+
+    // MARK: GLM5Next loader key mapping
+    //
+    // A copy of the name rules of `GLM5NextWeights` in the pinned mlx-swift-lm
+    // fork (Libraries/MLXLLM/Models/GLM5Next.swift), which is internal to
+    // MLXLLM. `NativeMTPGLM5NextObservationTests` runs the fork's public
+    // `GLM5NextModel.sanitize(weights:)` and
+    // `sanitize(perLayerQuantization:)` against these functions, so a fork
+    // bump that changes the mapping fails that test. Only
+    // `num_nextn_predict_layers == 1` is admitted, so next-N index 0 is the
+    // only one mapped.
+
+    /// `textKey`, `nextnKey` and `renamedPart` of one checkpoint name: its
+    /// text-model key (`model.*`, `lm_head.*`, `mtp.*`) before stacking, or
+    /// nil when the loader drops it.
+    static func glm5NextTextKey(_ name: String, hiddenLayers: Int) -> String? {
+        if glm5NextVisionPrefixes.contains(where: { name.hasPrefix($0) }) {
+            return nil
+        }
+        var key = name
+        if key.hasPrefix("model.language_model.") {
+            key = "model." + key.dropFirst("model.language_model.".count)
+        } else if key.hasPrefix("language_model.") {
+            key = String(key.dropFirst("language_model.".count))
+        }
+        if key.hasPrefix("model.layers.") {
+            let rest = key.dropFirst("model.layers.".count)
+            if let dot = rest.firstIndex(of: "."), let index = Int(rest[..<dot]), index >= hiddenLayers {
+                guard index - hiddenLayers < 1 else { return nil }
+                let suffix = String(rest[rest.index(after: dot)...])
+                if suffix.hasPrefix("shared_head.head.") || suffix.hasPrefix("embed_tokens.") {
+                    return nil
+                }
+                let fusion = [
+                    ("eh_proj.", "eh_proj."), ("enorm.", "enorm."), ("hnorm.", "hnorm."),
+                    ("shared_head.norm.", "norm."),
+                ]
+                if let match = fusion.first(where: { suffix.hasPrefix($0.0) }) {
+                    key = "mtp.0." + match.1 + String(suffix.dropFirst(match.0.count))
+                } else {
+                    key = "mtp.0.block." + suffix
+                }
+            }
+        }
+        key = key
+            .replacingOccurrences(of: ".hc_attn_", with: ".attn_hc.")
+            .replacingOccurrences(of: ".hc_ffn_", with: ".ffn_hc.")
+        if let part = glm5NextForgetGateParts.first(where: { key.hasSuffix(".self_attn." + $0) }) {
+            key = String(key.dropLast(part.count)) + "forget_gate." + part
+        }
+        return key
+    }
+
+    private static let glm5NextForgetGateParts = [
+        "A_log", "dt_bias",
+        "f_a_proj.weight", "f_a_proj.scales", "f_a_proj.biases",
+        "f_b_proj.weight", "f_b_proj.scales", "f_b_proj.biases",
+    ]
+
+    /// A key `model.layers.<i>.` with `i` past the one admitted next-N layer.
+    /// The loader drops it silently; the observer fails closed instead.
+    private static func glm5NextIsExtraNextnLayer(_ name: String, hiddenLayers: Int) -> Bool {
+        var key = name
+        if key.hasPrefix("model.language_model.") {
+            key = "model." + key.dropFirst("model.language_model.".count)
+        } else if key.hasPrefix("language_model.") {
+            key = String(key.dropFirst("language_model.".count))
+        }
+        guard key.hasPrefix("model.layers.") else { return false }
+        let rest = key.dropFirst("model.layers.".count)
+        guard let dot = rest.firstIndex(of: "."), let index = Int(rest[..<dot]) else { return false }
+        return index - hiddenLayers >= 1
+    }
+
+    /// `renameParts` q/k/v conv concatenation, `stackExperts`, `splitKVB` and
+    /// `dequantizeRouterGates` over the whole set of text keys: each text key
+    /// to its post-sanitize keys under `language_model.`. A router gate's
+    /// scales and biases map to none (folded into the float gate weight). A
+    /// group the loader leaves alone (an incomplete conv triple or expert
+    /// range) keeps its name and then fails the grammar.
+    static func glm5NextLoaderNames(textKeys: Set<String>) -> [String: [String]] {
+        var result: [String: [String]] = [:]
+        for key in textKeys { result[key] = [key] }
+
+        var convParts: [String: Set<String>] = [:]
+        for key in textKeys {
+            for part in ["q", "k", "v"] where key.hasSuffix(".self_attn.\(part)_conv1d.weight") {
+                convParts[String(key.dropLast("\(part)_conv1d.weight".count)), default: []].insert(part)
+            }
+        }
+        for (prefix, parts) in convParts where parts == ["q", "k", "v"] {
+            for part in parts { result[prefix + "\(part)_conv1d.weight"] = [prefix + "conv1d.weight"] }
+        }
+
+        var experts: [String: [Int: String]] = [:]
+        var duplicatedExperts: Set<String> = []
+        for key in textKeys {
+            guard let range = key.range(of: ".mlp.experts.") else { continue }
+            let rest = key[range.upperBound...]
+            guard let dot = rest.firstIndex(of: "."), let expert = Int(rest[..<dot]) else { continue }
+            let target = String(key[..<range.lowerBound]) + ".mlp.switch_mlp." + String(rest[rest.index(after: dot)...])
+            if experts[target, default: [:]].updateValue(key, forKey: expert) != nil {
+                duplicatedExperts.insert(target)
+            }
+        }
+        for (target, members) in experts where !duplicatedExperts.contains(target) {
+            guard members.keys.sorted() == Array(0..<members.count) else { continue }
+            for key in members.values { result[key] = [target] }
+        }
+
+        for key in textKeys where key.hasSuffix(".self_attn.kv_b_proj.weight") {
+            let prefix = String(key.dropLast("kv_b_proj.weight".count))
+            result[key] = [prefix + "embed_q.weight", prefix + "unembed_out.weight"]
+            if textKeys.contains(prefix + "kv_b_proj.scales") {
+                for part in ["scales", "biases"] where textKeys.contains(prefix + "kv_b_proj." + part) {
+                    result[prefix + "kv_b_proj." + part] = [prefix + "embed_q." + part, prefix + "unembed_out." + part]
+                }
+            }
+        }
+
+        for key in textKeys where key.hasSuffix(".mlp.gate.scales") {
+            let prefix = String(key.dropLast("scales".count))
+            guard textKeys.contains(prefix + "weight") else { continue }
+            result[key] = []
+            if textKeys.contains(prefix + "biases") { result[prefix + "biases"] = [] }
+        }
+
+        return result.mapValues { $0.map { "language_model." + $0 } }
+    }
+
+    /// `GLM5NextWeights.quantizationModulePaths`: the text-model module paths
+    /// a config `quantization` key names, by the tensor rules applied to
+    /// `<key>.weight`.
+    static func glm5NextQuantizationModulePaths(_ key: String, hiddenLayers: Int) -> [String] {
+        guard var name = glm5NextTextKey(key + ".weight", hiddenLayers: hiddenLayers) else { return [] }
+        name = String(name.dropLast(".weight".count))
+        if let range = name.range(of: ".mlp.experts.") {
+            let rest = name[range.upperBound...]
+            if let dot = rest.firstIndex(of: "."), Int(rest[..<dot]) != nil {
+                name = String(name[..<range.lowerBound]) + ".mlp.switch_mlp." + String(rest[rest.index(after: dot)...])
+            }
+        }
+        if name.hasSuffix(".self_attn.kv_b_proj") {
+            let prefix = String(name.dropLast("kv_b_proj".count))
+            return [prefix + "embed_q", prefix + "unembed_out"]
+        }
+        return [name]
+    }
+
+    /// Names the GLM5Next loader leaves unmapped only when their group is
+    /// incomplete; on a loader key any of these is a module the model lacks.
     private static let glm5NextSanitizerRewriteMarkers = [
         ".hc_attn_", ".hc_ffn_", ".mlp.experts.", ".kv_b_proj.", ".q_conv1d.", ".k_conv1d.",
         ".v_conv1d.", ".mlp.gate.scales", ".mlp.gate.biases", ".self_attn.A_log",
@@ -860,13 +1135,17 @@ enum NativeMTPArtifactObserver {
 
     private static func isFamilyFloatingParameter(_ tensor: SafetensorsTensor, policy: TensorNamePolicy) -> Bool {
         guard case .glm5Next = policy, isFloatingWeightDType(tensor.dtype) else { return false }
-        return tensor.name == "language_model.mtp.0.eh_proj.weight"
-            || glm5NextFloatingParameterSuffixes.contains(where: { tensor.name.hasSuffix($0) })
+        return tensor.loaderNames.contains { name in
+            name == "language_model.mtp.0.eh_proj.weight"
+                || glm5NextFloatingParameterSuffixes.contains(where: { name.hasSuffix($0) })
+        }
     }
 
-    private static func validateGLM5NextTensorName(_ name: String, hiddenLayers: Int) throws {
+    /// The post-sanitize grammar, checked on a loader key; a rejection names
+    /// the checkpoint tensor (`reported`) it came from.
+    private static func validateGLM5NextTensorName(_ name: String, reportedAs reported: String, hiddenLayers: Int) throws {
         func reject() -> NativeMTPArtifactObservationError {
-            .incompatibleSafetensorsHeaders("glm5_next tensor namespace \(name)")
+            .incompatibleSafetensorsHeaders("glm5_next tensor namespace \(reported)")
         }
         guard !glm5NextSanitizerRewriteMarkers.contains(where: { name.contains($0) }) else { throw reject() }
         if name.hasPrefix("language_model.lm_head.") { return }
@@ -884,8 +1163,8 @@ enum NativeMTPArtifactObserver {
                   let index = Int(rest[..<dot]),
                   String(index) == rest[..<dot],
                   (0..<hiddenLayers).contains(index) else {
-                // A DeepSeek-style next-N key (index >= num_hidden_layers) is
-                // silently remapped into `mtp.*` or dropped by the loader.
+                // The loader maps a next-N index into `mtp.*`, so only a
+                // non-canonical index can reach here.
                 throw reject()
             }
         }
@@ -903,8 +1182,10 @@ enum NativeMTPArtifactObserver {
                   path.hasPrefix("language_model.model.") || path.hasPrefix("language_model.lm_head.") else {
                 throw NativeMTPArtifactObservationError.incompatibleSafetensorsHeaders("target tensor namespace \(name)")
             }
-        case .glm5Next(let hiddenLayers):
-            try validateGLM5NextTensorName(name, hiddenLayers: hiddenLayers)
+        case .glm5Next(let hiddenLayers, _):
+            // GLM5Next names are checked on their loader keys
+            // (glm5NextLoaderConsumedTensors); this is the identity case.
+            try validateGLM5NextTensorName(name, reportedAs: name, hiddenLayers: hiddenLayers)
         case .mtp:
             // The pinned standalone-drafter loader (`qwenMTPSanitizeWeights`,
             // standaloneCheckpoint) matches the exact, case-sensitive `mtp.`
@@ -926,11 +1207,13 @@ enum NativeMTPArtifactObserver {
     /// `A_log`, `dt_bias`) and rank-3 depthwise conv kernels. The discarded
     /// vision tower never reaches this check (loaderConsumedTensors). A rank-2
     /// language-model weight without a scale pair still fails closed unless the
-    /// config declares it unquantized.
-    private static func isNeverQuantizedFloatingTensor(_ tensor: SafetensorsTensor) -> Bool {
+    /// config declares it unquantized. The kernel suffix is read on the loader
+    /// key (a GLM5Next `q_conv1d` part loads as `conv1d`).
+    private static func isNeverQuantizedFloatingTensor(_ tensor: SafetensorsTensor, policy: TensorNamePolicy) -> Bool {
         guard isFloatingWeightDType(tensor.dtype) else { return false }
         if tensor.shape.count == 1 { return true }
-        return tensor.shape.count == 3 && tensor.name.hasSuffix(".conv1d.weight")
+        return tensor.shape.count == 3
+            && loaderPaths(tensor, policy: policy).contains { $0.hasSuffix(".conv1d.weight") }
     }
 
     /// The loader quantizes a module only when `<path>.scales` exists and
@@ -1215,6 +1498,9 @@ enum NativeMTPArtifactObserver {
 
         let elementCount: Int
         let byteCount: Int
+        /// GLM5Next only: the post-sanitize keys the loader gives this tensor
+        /// (glm5NextLoaderConsumedTensors).
+        var loaderNames: [String] = []
     }
 
     private struct RepresentationManifest {
@@ -1222,14 +1508,6 @@ enum NativeMTPArtifactObserver {
         let unpairedScaleExceptions: Set<String>
         let configUnquantizedModules: Set<String>
         let permittedUnquantizedModules: Set<String>
-
-        /// `loaderPath` is the post-sanitize tensor key; a `false` config
-        /// entry names the exact loader module path, as with overrides.
-        func unquantizedExceptions(matching loaderPath: String) -> Set<String> {
-            permittedUnquantizedModules.filter { exception in
-                loaderPath.hasPrefix(exception + ".")
-            }
-        }
     }
 
     private static func bytesPerElement(_ dtype: String) -> Int {
