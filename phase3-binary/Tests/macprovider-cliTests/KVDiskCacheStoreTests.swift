@@ -658,14 +658,30 @@ final class KVDiskCacheStoreTests: XCTestCase {
         _ = try await store.write(snapshot, nowMillis: 1_000_000)
         let index = try await idx(store, key)
 
-        async let a = store.read(rawKey: key, runtime: runtime(index: index, seq: 200), nowMillis: 1_000_100)
-        async let b = store.read(rawKey: key, runtime: runtime(index: index, seq: 200), nowMillis: 1_000_100)
-        let results = try await [a, b]
+        // Hold the first promotion inside its off-actor decode so the contender is
+        // guaranteed to arrive while the slot is claimed. Without the gate, `async let`
+        // does not guarantee overlap: a fast runner finishes the first read before the
+        // second starts and both hit (CI flake, PR #2276 shard 2/4).
+        let entered = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        await store.setPromoteDecodePause { @Sendable in
+            entered.signal()
+            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                DispatchQueue.global().async { release.wait(); cont.resume() }
+            }
+        }
 
-        let hits = results.filter { if case .hit = $0 { return true }; return false }.count
-        let busy = results.filter { if case .miss(.diskMissBusy, _) = $0 { return true }; return false }.count
-        XCTAssertEqual(hits, 1, "exactly one concurrent promotion proceeds")
-        XCTAssertEqual(busy, 1, "the contender returns disk_miss_busy immediately, not queued")
+        async let a = store.read(rawKey: key, runtime: runtime(index: index, seq: 200), nowMillis: 1_000_100)
+        await awaitSemaphore(entered)                      // first promotion holds the slot
+        await store.setPromoteDecodePause(nil)
+        let b = try await store.read(rawKey: key, runtime: runtime(index: index, seq: 200), nowMillis: 1_000_100)
+        release.signal()
+        let first = try await a
+
+        guard case .hit = first else { return XCTFail("the first promotion must proceed, got \(first)") }
+        guard case .miss(.diskMissBusy, _) = b else {
+            return XCTFail("the contender must return disk_miss_busy immediately, not queue; got \(b)")
+        }
     }
 
     /// CRITICAL-2: a snapshot whose key epoch was captured before a purge-all

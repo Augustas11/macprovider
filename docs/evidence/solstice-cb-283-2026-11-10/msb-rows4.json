@@ -1,0 +1,62 @@
+{
+  "aggregateCVPct" : 0.06534252618936948,
+  "aggregateTPSRuns" : [
+    66.3685446614799,
+    66.28387725700442,
+    66.31016326396703
+  ],
+  "aggregateTPSp50" : 66.31016326396703,
+  "aggregateUpliftVsPagedSingleRow" : 1.650135188076431,
+  "aggregateVsProductionSerial" : 1.582890952144772,
+  "blockSizeTokens" : 256,
+  "compiled" : false,
+  "decodeTokensPerRow" : 128,
+  "engine" : "paged",
+  "layerCount" : 11,
+  "maxPhysicalBlocks" : 1024,
+  "mlxSwiftLMPin" : "mlxlm-6c27b743bae5",
+  "modelID" : "<models>\/Solstice-AI--GLM-5.3-Flash-UNCENSORED-mlx-oQ4e-DFlash2\/bff40d24efb689d33e094083ce4a5d6835601730\/242f8fcfd34d4ecfd62180c1767f910bda925216948772126dc98c673d1c8919",
+  "modelTag" : "242f8fcfd34d4ecfd62180c1767f910bda925216948772126dc98c673d1c8919",
+  "pagedSingleRowCVPct" : 0.15650168346146798,
+  "pagedSingleRowTPSRuns" : [
+    40.26289155421157,
+    40.18468531736787,
+    40.13843928821847
+  ],
+  "pagedSingleRowTPSp50" : 40.18468531736787,
+  "peakPhysFootprintMB" : 181723,
+  "peakRSSMB" : 9727,
+  "perRowFractionOfPagedSingleRow" : 0.41253379701910775,
+  "perRowTPSp50" : 16.577540815991757,
+  "productionSerialCVPct" : 0.0017570827380355477,
+  "productionSerialPromptTokens" : 1024,
+  "productionSerialTPSRuns" : [
+    41.891807628389465,
+    41.89087604115469,
+    41.89232900845145
+  ],
+  "productionSerialTPSp50" : 41.891807628389465,
+  "productionSerialTTFTSecondsRuns" : [
+    3.0579079389572144,
+    3.0543569326400757,
+    3.046189069747925
+  ],
+  "promptTokenLengths" : [
+    1024,
+    1024,
+    1024,
+    1024
+  ],
+  "promptTokenSHA256" : [
+    "c2d6e0a41c032e905401737f80cfeaf532576de3aef86f3382067663f683b3dd",
+    "bb27f683b1bd122f66d900e82379da023fe1014bda15ede6d18f4741f834c1ac",
+    "3923e437beaf0f76bb205078aa2ff48ff22f47f09b7c84d8d0d9a2fd9d820620",
+    "4c073ae313b6b2c55fd68f7629d3f6b683d0ebb16feb4e4e90de8b2fb4862067"
+  ],
+  "promptTokensPerRow" : 1024,
+  "rows" : 4,
+  "runs" : 3,
+  "scenario" : "throughput",
+  "schemaVersion" : 4,
+  "timestamp" : "2026-11-10T01:52:13Z"
+}

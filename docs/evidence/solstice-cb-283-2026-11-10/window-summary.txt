@@ -1,0 +1,18 @@
+window start 20261110T013444Z rows_list=[1 2 3 4]
+leg1 leftovers start 01:34:44
+leg1 msb-throughput rc=0
+leg1 documents=4
+leg1 isolation pass=True
+leg1 replay pass=True
+leg1 drain pass=True
+leg1 parity pass=True
+leg1 leftovers PASS
+leg2 msb rows=1 start 01:38:14
+leg2 rows=1 rc=0 aggregateTPSp50=40.25763673968961 pagedSingleRowTPSp50=40.216933909525125 perRowTPSp50=40.25763673968961 productionSerialTPSp50=41.890848257610294 aggregateVsProductionSerial=0.9610126892662294 peakPhysFootprintMB=181050
+leg2 msb rows=2 start 01:41:18
+leg2 rows=2 rc=0 aggregateTPSp50=57.99019881216806 pagedSingleRowTPSp50=40.149140338196126 perRowTPSp50=28.99509940608403 productionSerialTPSp50=41.85860008493803 aggregateVsProductionSerial=1.3853831397728624 peakPhysFootprintMB=181448
+leg2 msb rows=3 start 01:44:37
+leg2 rows=3 rc=0 aggregateTPSp50=60.72095730548566 pagedSingleRowTPSp50=40.165343846764614 perRowTPSp50=20.240319101828554 productionSerialTPSp50=41.86762267375089 aggregateVsProductionSerial=1.450308219758438 peakPhysFootprintMB=181794
+leg2 msb rows=4 start 01:48:17
+leg2 rows=4 rc=0 aggregateTPSp50=66.31016326396703 pagedSingleRowTPSp50=40.18468531736787 perRowTPSp50=16.577540815991757 productionSerialTPSp50=41.891807628389465 aggregateVsProductionSerial=1.582890952144772 peakPhysFootprintMB=181723
+RESULT=PASS evidence=<lab>
