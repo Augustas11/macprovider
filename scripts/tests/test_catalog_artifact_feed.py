@@ -4503,7 +4503,7 @@ class IntakeDecisionManifestTest(unittest.TestCase):
         entry["signals"]["unmatched_model_request_source_sha256"] = catalog_release.sha256(self.stats_bytes)
         entry["signals"]["fleet_fit_source_sha256"] = catalog_release.sha256(self.stats_bytes)
         self.rejects(self.manifest([entry]), "provider_total must equal the emitted counts plus provider_suppressed")
-        # The amendment has landed (CONFORMANCE SPEC-017 >= 0.2.1): the
+        # The amendment has landed (SPEC-017 header >= 0.2.1): the
         # not-landed reason is no longer a valid absence.
         self.assertTrue(catalog_release.spec017_intake_amendment_landed())
         entry = self.admit_entry()

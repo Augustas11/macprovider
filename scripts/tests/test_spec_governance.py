@@ -313,7 +313,6 @@ def base_repository() -> dict[str, object]:
                 {
                     "spec_id": "SPEC-001",
                     "title": "One",
-                    "version": "0.1.0",
                     "path": "specs/SPEC-001-one.md",
                     "status": "draft",
                     "owner": "@owner",
@@ -331,7 +330,6 @@ def base_repository() -> dict[str, object]:
                 {
                     "spec_id": "SPEC-002",
                     "title": "Two",
-                    "version": "0.1.0",
                     "path": "specs/SPEC-002-two.md",
                     "status": "draft",
                     "owner": "@owner",

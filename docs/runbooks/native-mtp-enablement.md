@@ -176,8 +176,8 @@ config load may make the tuple selectable before that promotion.
 8. **Pearl runtime apply and production config load.** After R014 is conformant,
    ship the coordinator routes `/v1/native-mtp-*` if they are not already
    present, then load the production config that makes the tuple selectable. The
-   route apply is a 15-20 minute outage unless the short-quiesce updater is
-   installed. State that to the operator first. If the coordinator code is
+   route apply is about 1-2 minutes of coordinator/gateway restart with the
+   installed short-quiesce updater. State that to the operator first. If the coordinator code is
    unchanged since the safe MTP-off deploy, skip the code apply and only perform
    the config load. Then:
    - add the nginx `location` blocks from

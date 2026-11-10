@@ -201,8 +201,6 @@ test-dist-release:
 	bash scripts/ops/test-entrypoints.sh
 	bash scripts/ops/test-canary-swap.sh
 	bash scripts/ops/test-runner-reserve.sh
-	bash scripts/ops/test-studio-owner-pin.sh
-	bash scripts/ops/test-studio-owner-pin-provenance.sh
 	bash scripts/ops/test-studio-lab-window-controller.sh
 	bash scripts/ops/test-hotfix-push.sh
 

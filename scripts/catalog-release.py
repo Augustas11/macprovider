@@ -4965,17 +4965,16 @@ def fleet_fit_fraction_ppm(fleet_ram: dict, min_ram_gb: int) -> int | None:
 
 def spec017_intake_amendment_landed() -> bool:
     """SPEC-023 §16.7: the buyer-demand signal exists from SPEC-017 v0.2.1.
-    The gate is keyed on the CONFORMANCE index — the version of record —
-    never on a manifest's own claim."""
+    The gate is keyed on the SPEC-017 `**Version:**` header — the version of
+    record — never on a manifest's own claim."""
     try:
-        index = json.loads((ROOT / "specs" / "CONFORMANCE.json").read_text())
-    except (OSError, ValueError):
+        head = (ROOT / "specs" / "SPEC-017-network-stats-api.md").read_text().splitlines()[:15]
+    except OSError:
         return False
-    for spec in index.get("specs", []):
-        if spec.get("spec_id") == "SPEC-017":
-            version = str(spec.get("version", "")).lstrip("v")
-            parts = tuple(int(x) for x in version.split(".") if x.isdigit())
-            return parts >= (0, 2, 1)
+    for line in head:
+        match = re.match(r"\*\*Version:\*\*\s*v?([0-9]+(?:\.[0-9]+)*)", line)
+        if match:
+            return tuple(int(x) for x in match.group(1).split(".")) >= (0, 2, 1)
     return False
 
 
