@@ -853,6 +853,52 @@ with tempfile.TemporaryDirectory() as directory:
     generated_entry = generated_policy_obj["entries"][0]
     if generated_entry["cache_class"] != "mixed" or generated_entry["rollout"] != "canary" or len(generated_entry["tuple_sha256"]) != 64:
         raise SystemExit("curated CB policy source entry was not canonically completed")
+
+    # SPEC-038 v0.3.40: a same-architecture variant of a granted entry may not
+    # ship with cached_turns_accepted false; backend_family stays out of the
+    # signed entry.
+    granted_entry = dict(source_entry, cached_turns_accepted=True, backend_family="glm5_next")
+    variant_entry = dict(
+        source_entry,
+        model_sha256="8" * 64,
+        tokenizer_sha256="9" * 64,
+        chat_template_sha256="a" * 64,
+        backend_family="glm5_next",
+    )
+
+    def write_cb_source(entries):
+        module.CB_POLICY_SOURCE_PATH.write_text(json.dumps({
+            "schema_version": module.CB_POLICY_SOURCE_SCHEMA,
+            "entries": entries,
+        }))
+
+    for label, variant in (
+        ("named family", variant_entry),
+        ("unnamed family", {k: v for k, v in variant_entry.items() if k != "backend_family"}),
+    ):
+        write_cb_source([granted_entry, variant])
+        try:
+            module.cb_policy_source_entries()
+        except module.CatalogError as exc:
+            if "Sticky retained-KV proof (AC-26)" not in str(exc) or "continuous-batching-enable-gate.md" not in str(exc):
+                raise
+        else:
+            raise SystemExit(f"same-family variant without the cached-turns grant was accepted ({label})")
+    write_cb_source([granted_entry, dict(variant_entry, backend_family="llama")])
+    module.cb_policy_source_entries()
+    write_cb_source([granted_entry, dict(variant_entry, hardware_class="apple-silicon:m4-max:ram-128gb")])
+    module.cb_policy_source_entries()
+    write_cb_source([{k: v for k, v in granted_entry.items() if k != "backend_family"}])
+    rejected_unnamed_grant = False
+    try:
+        module.cb_policy_source_entries()
+    except module.CatalogError as exc:
+        rejected_unnamed_grant = "must name its backend_family" in str(exc)
+    if not rejected_unnamed_grant:
+        raise SystemExit("a cached-turns grant without backend_family was accepted")
+    write_cb_source([granted_entry, dict(variant_entry, cached_turns_accepted=True)])
+    if any("backend_family" in entry for entry in module.cb_policy_source_entries()):
+        raise SystemExit("backend_family leaked into the generated CB policy entries")
 module.CB_POLICY_SOURCE_PATH = original_cb_source_path
 
 

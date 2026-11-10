@@ -1538,7 +1538,58 @@ def cb_policy_source_entries() -> list[dict]:
                 f"{CB_POLICY_SOURCE_PATH.name}.entries[{index}]: tuple_sha256 is generated, not authored"
             )
         result.append(dict(entry))
+    require_cb_cached_turns_variant_grant(result, CB_POLICY_SOURCE_PATH.name)
+    # backend_family is review metadata for the guard above; the signed
+    # entry schema does not carry it.
+    for entry in result:
+        entry.pop("backend_family", None)
     return result
+
+
+# SPEC-038 v0.3.40: fields an AC-26 grant does not depend on. Two source
+# entries in one backend family that agree on every other field are
+# same-architecture variants.
+CB_VARIANT_IDENTITY_FIELDS = frozenset({
+    "model_id", "model_key", "model_sha256", "tokenizer_sha256", "chat_template_sha256",
+    "cached_turns_accepted", "provenance", "backend_family",
+})
+
+
+def require_cb_cached_turns_variant_grant(entries: list[dict], label: str) -> None:
+    """Refuse a same-architecture variant left without its family's cached-turns grant."""
+    def variant_scope(entry: dict) -> str:
+        return json.dumps(
+            {k: v for k, v in entry.items() if k not in CB_VARIANT_IDENTITY_FIELDS},
+            sort_keys=True,
+        )
+
+    granted: dict[str, dict] = {}
+    for index, entry in enumerate(entries):
+        if entry.get("cached_turns_accepted") is not True:
+            continue
+        family = entry.get("backend_family")
+        if not isinstance(family, str) or not family:
+            fail(
+                f"{label}.entries[{index}]: an entry with cached_turns_accepted true must name "
+                "its backend_family (the artifact's config.json model_type)"
+            )
+        granted.setdefault(variant_scope(entry), entry)
+    for index, entry in enumerate(entries):
+        if entry.get("cached_turns_accepted") is not False:
+            continue
+        donor = granted.get(variant_scope(entry))
+        if donor is None:
+            continue
+        family = entry.get("backend_family")
+        if family is not None and family != donor["backend_family"]:
+            continue
+        fail(
+            f"{label}.entries[{index}]: {entry.get('model_key')} has cached_turns_accepted false, but "
+            f"{donor.get('model_key')} with the same CB tuple fields is granted in backend family "
+            f"{donor['backend_family']}. Run the Sticky retained-KV proof (AC-26) step of "
+            "docs/runbooks/continuous-batching-enable-gate.md and set it true, or name a different "
+            "backend_family if the architecture differs"
+        )
 
 
 CB_POLICY_STRUCTURAL_EXPIRES_AT = "9999-12-31T23:59:59Z"

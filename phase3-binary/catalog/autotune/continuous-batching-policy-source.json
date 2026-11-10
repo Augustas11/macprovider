@@ -25,6 +25,7 @@
       "tokenizer_sha256": "eec97aac7c5f9ba9159d4784222300eccf5ff2e6b4aeb193c8c939c912633510"
     },
     {
+      "backend_family": "glm5_next",
       "cache_class": "mixed",
       "cached_turns_accepted": true,
       "chat_template_sha256": "6138d780f0ca0e16e3b174cb9b4d782525e32a2f63255d66e707b4c491a7ac6d",
@@ -50,6 +51,7 @@
       "tokenizer_sha256": "1e9d4f69cfe47ae2d32262646881c81e4a79e58ebb3ac1c8c41477372c1b714d"
     },
     {
+      "backend_family": "glm5_next",
       "cache_class": "mixed",
       "cached_turns_accepted": true,
       "chat_template_sha256": "4fcb509efcd1c93296c21e44a6a616553ff4cebdb4186d9e80bb77698d0b7824",
