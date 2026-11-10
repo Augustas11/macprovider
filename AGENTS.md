@@ -29,8 +29,9 @@ while sessions regenerated evidence instead of deploying. Each is binding.
 2. **Reuse evidence; never regenerate it.** Before proposing any benchmark,
    qualification, journey, or evidence capture, list the existing evidence and
    name the decode-path code line that changed since it was produced. No named
-   line, no benchmark. A new CLI cut changes only identity binding (source,
-   SHA-256, CDHash), never the qualification.
+   line, no benchmark. A new CLI cut changes no qualification and needs no
+   catalog rebind: native-MTP and CB admission are not tied to a CLI
+   identity.
 3. **Unclearable gates get flagged once.** If a runbook gate depends on a
    workflow or journey that has never run, report it to the operator in one
    line on first encounter. Do not build evidence around it and do not treat
@@ -305,9 +306,15 @@ before writing code.
 
 ## Audit Gate
 
-Implementation slices are not done until the full fix diff is audited. Run
-three lanes over the complete diff as it will land: code review, security
-review, and architecture review. In Codex sessions, use native Codex
+The gate applies to a diff that touches a Sensitive Path (above) or billing
+and settlement code: `phase4-coordinator/internal/billing/`,
+`phase4-coordinator/internal/payout/` and `phase5-gateway/internal/settlement/`.
+Catalog releases, CLI identity changes, evidence, and spec-text-only PRs need
+no three-lane audit; CI and review cover them.
+
+Implementation slices in scope are not done until the full fix diff is
+audited. Run three lanes over the complete diff as it will land: code review,
+security review, and architecture review. In Codex sessions, use native Codex
 subagents/auditor lanes. Use `omc ask codex` only as a legacy fallback outside
 Codex contexts that lack native subagents.
 
