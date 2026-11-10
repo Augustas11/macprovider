@@ -2,6 +2,7 @@ import Foundation
 import MLX
 import MLXLLM
 import MLXLMCommon
+import MacProviderCore
 import XCTest
 @testable import macprovider_cli
 
