@@ -31,6 +31,7 @@ func main() {
 	checkOnly := flag.Bool("check", false, "load config, migrate storage, then exit")
 	showVersion := flag.Bool("version", false, "print build version and exit")
 	flag.Parse()
+	bootedAt := time.Now().UTC()
 	if *showVersion {
 		fmt.Println(version)
 		return
@@ -138,6 +139,9 @@ func main() {
 			time.Duration(cfg.Settlement.ReconcileRequestTimeoutSeconds)*time.Second,
 		)
 	}
+	// #2268: after journal recovery and before the listener, so this process
+	// has admitted nothing and journaled settlements land first.
+	releaseOrphanedReservations(ctx, store, bootedAt)
 	httpServer := newHTTPServer(cfg.Address(), gatewayRouter.Handler())
 	go func() {
 		slog.Info("gateway listening", "address", cfg.Address())
@@ -371,6 +375,27 @@ func runSettlementReconciler(ctx context.Context, reconciler settlementReconcile
 		case <-ticker.C:
 			reconcile()
 		}
+	}
+}
+
+type orphanedReservationReleaser interface {
+	ReleaseOrphanedReservations(ctx context.Context, bootedAt, now time.Time) (quota, concurrency int64, err error)
+}
+
+// releaseOrphanedReservations expires the active reservations a previous
+// gateway process left behind (SPEC-006 §7.2). A request admitted while that
+// process shut down otherwise stays active until the reaper's 24 h expiry,
+// and the Pearl runtime drain counts it as in-flight the whole time (#2268).
+// A failure is logged, not fatal: the reaper still reclaims the rows.
+func releaseOrphanedReservations(ctx context.Context, store orphanedReservationReleaser, bootedAt time.Time) {
+	quota, concurrency, err := store.ReleaseOrphanedReservations(ctx, bootedAt, time.Now().UTC())
+	if err != nil {
+		slog.Warn("orphaned reservation release failed; the reaper reclaims them at expiry", "error", err)
+		return
+	}
+	if quota > 0 || concurrency > 0 {
+		slog.Info("orphaned reservations from a previous gateway process released",
+			"quota_reservations", quota, "concurrency_reservations", concurrency)
 	}
 }
 

@@ -14,6 +14,7 @@ import (
 	"github.com/augstar/macprovider-gateway/internal/config"
 	"github.com/augstar/macprovider-gateway/internal/router"
 	"github.com/augstar/macprovider-gateway/internal/settlement/journal"
+	"github.com/augstar/macprovider-gateway/internal/storage"
 	"github.com/augstar/macprovider-gateway/internal/storage/sqlite"
 )
 
@@ -348,5 +349,43 @@ func TestCoordinatorClientHasNoBodyTimeout(t *testing.T) {
 	}
 	if !strings.Contains(string(body), "data: ") {
 		t.Fatalf("unexpected body %q", string(body))
+	}
+}
+
+// #2268: the startup sweep is wired to the real store and releases what a
+// previous process left active, so the Pearl drain is not blocked for 24 h.
+func TestReleaseOrphanedReservationsAtStartup(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "gateway.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	bootedAt := time.Now().UTC()
+	created := bootedAt.Add(-time.Minute)
+	if _, err := store.ReserveQuota(ctx, storage.ReservationRequest{
+		AccountID: "acct_restart", RequestID: "req_restart", WindowDate: created.Format("2006-01-02"),
+		RequestedTokens: 10, DailyQuota: 100, CreatedAt: created, ExpiresAt: created.Add(24 * time.Hour),
+	}); err != nil {
+		t.Fatalf("ReserveQuota: %v", err)
+	}
+	if _, err := store.AcquireConcurrency(ctx, storage.ConcurrencyRequest{
+		AccountID: "acct_restart", RequestID: "req_restart", Limit: 4, CreatedAt: created, ExpiresAt: created.Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("AcquireConcurrency: %v", err)
+	}
+
+	releaseOrphanedReservations(ctx, store, bootedAt)
+
+	_, reserved, err := store.DailyUsage(ctx, "acct_restart", created.Format("2006-01-02"))
+	if err != nil {
+		t.Fatalf("DailyUsage: %v", err)
+	}
+	if reserved != 0 {
+		t.Fatalf("reserved=%d after startup sweep, want 0", reserved)
+	}
+	quota, concurrency, err := store.ReleaseOrphanedReservations(ctx, bootedAt, time.Now().UTC())
+	if err != nil || quota != 0 || concurrency != 0 {
+		t.Fatalf("second sweep quota=%d concurrency=%d err=%v, want nothing left", quota, concurrency, err)
 	}
 }
