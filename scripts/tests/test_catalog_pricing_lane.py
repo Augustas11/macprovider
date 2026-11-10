@@ -409,6 +409,8 @@ class EffectiveDiffTests(unittest.TestCase):
         # #2189: the abliterated GLM-5.3-Flash build is retired; its catalog
         # key, served artifact id and z-ai slug move from its removed labelled
         # row to `default`.
+        # #2270: the Ripple-65B listed cut moves its served artifact id onto
+        # the ricursiveai/ripple-65b-preview row.
         self.assertEqual(
             cr.load_pricing_move_acks(committed, "committed"),
             {
@@ -423,6 +425,7 @@ class EffectiveDiffTests(unittest.TestCase):
                 ("z-ai/glm-5.3-flash-abliterated", "zai-org/glm-5.3-flash-abliterated", "default"),
                 ("Solstice-AI/GLM-5.3-Flash-UNCENSORED-mlx-oQ4e-DFlash2", "default", "zai-org/glm-5.3-flash-uncensored"),
                 ("z-ai/glm-5.3-flash-uncensored", "default", "zai-org/glm-5.3-flash-uncensored"),
+                ("frogggias/Ripple-65B-Preview-MLX-4bit", "default", "ricursiveai/ripple-65b-preview"),
             },
         )
         for bad in (
