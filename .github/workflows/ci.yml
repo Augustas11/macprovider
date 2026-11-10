@@ -844,8 +844,9 @@ jobs:
     # it (#1920). Fails a PR when specs/README.md no longer matches the
     # canonical spec headers, when AUTHORITY/CONFORMANCE drift, or when a PR
     # lacks its behavior-change declaration. Regenerate the index with
-    # scripts/gen_spec_index.py and commit when adding/renaming a spec or
-    # bumping a `**Version:**` header.
+    # scripts/gen_spec_index.py and commit when adding or renaming a spec. A
+    # `**Version:**` header bump needs no other edit: the header is the only
+    # version of record.
     steps:
       - name: Checkout
         # Pinned to actions/checkout v6 (df4cb1c0). Re-resolve deliberately
