@@ -54,6 +54,7 @@
       "backend_family": "glm5_next",
       "cache_class": "mixed",
       "cached_turns_accepted": true,
+      "cached_turns_donor": "zai-org/glm-5.3-flash",
       "chat_template_sha256": "4fcb509efcd1c93296c21e44a6a616553ff4cebdb4186d9e80bb77698d0b7824",
       "hardware_class": "apple-silicon:Apple M3 Ultra:ram-256gb",
       "kernel_identifier": "macprovider_paged_kv_gather_v1",

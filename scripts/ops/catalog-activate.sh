@@ -687,6 +687,26 @@ gather() {
     verify_ok=true
   fi
   fact catalog_release_verify "$verify_ok"
+  # SPEC-038 v0.3.40: a false entry beside a granted entry of its backend
+  # family is allowed (AC-26 leg (a) runs with it loaded) but must not be
+  # forgotten. Report it loudly; never refuse.
+  local cb_gap cb_family cb_gaps=""
+  cb_gaps="$(python3 - "$REPO_ROOT/$AUTOTUNE/continuous-batching-policy-source.json" <<'PY' 2>/dev/null || true
+import json, sys
+entries = json.load(open(sys.argv[1])).get("entries", [])
+granted = {e.get("backend_family") for e in entries
+           if e.get("cached_turns_accepted", False) is True and e.get("backend_family")}
+for e in entries:
+    family = e.get("backend_family")
+    if e.get("cached_turns_accepted", False) is not True and family in granted:
+        print(f"{e.get('model_key')}\t{family}")
+PY
+)"
+  while IFS=$'\t' read -r cb_gap cb_family; do
+    [ -n "$cb_gap" ] || continue
+    fact cb_cached_turns_not_granted "$cb_gap (family $cb_family granted)"
+    log "WARNING: CB entry $cb_gap ships cached_turns_accepted:false while family $cb_family is granted; run AC-26 (continuous-batching-enable-gate.md 'Sticky retained-KV proof (AC-26)') in this window and grant in the same release"
+  done <<< "$cb_gaps"
 
   # Live coordinator state.
   local base live_rid="" live_status="" uptime="" verified_min=""

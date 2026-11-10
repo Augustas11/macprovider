@@ -856,16 +856,24 @@ with tempfile.TemporaryDirectory() as directory:
     if generated_entry["cache_class"] != "mixed" or generated_entry["rollout"] != "canary" or len(generated_entry["tuple_sha256"]) != 64:
         raise SystemExit("curated CB policy source entry was not canonically completed")
 
-    # SPEC-038 v0.3.40: a same-architecture variant of a granted entry may not
-    # ship with cached_turns_accepted false; backend_family stays out of the
-    # signed entry.
-    granted_entry = dict(source_entry, cached_turns_accepted=True, backend_family="glm5_next")
-    variant_entry = dict(
+    # SPEC-038 v0.3.40: a false entry is always allowed (AC-26 leg (a) runs
+    # with it loaded). A true entry cites an AC-26 evidence id and names its
+    # backend_family; a variant's cached_turns_donor must be a donor with the
+    # same CB tuple fields in the same family. The source-only fields stay out
+    # of the signed entry.
+    donor_entry = dict(
         source_entry,
+        cached_turns_accepted=True,
+        backend_family="glm5_next",
+        provenance=dict(source_entry["provenance"], evidence_id="glm-ac26-donor-test"),
+    )
+    variant_entry = dict(
+        donor_entry,
         model_sha256="8" * 64,
         tokenizer_sha256="9" * 64,
         chat_template_sha256="a" * 64,
-        backend_family="glm5_next",
+        cached_turns_donor="qwen3-8b",
+        provenance=dict(source_entry["provenance"], evidence_id="glm-variant-ac26-leg-a-test"),
     )
 
     def write_cb_source(entries):
@@ -874,33 +882,39 @@ with tempfile.TemporaryDirectory() as directory:
             "entries": entries,
         }))
 
-    for label, variant in (
-        ("named family", variant_entry),
-        ("unnamed family", {k: v for k, v in variant_entry.items() if k != "backend_family"}),
-    ):
-        write_cb_source([granted_entry, variant])
+    def refused_with(entries, needle):
+        write_cb_source(entries)
         try:
             module.cb_policy_source_entries()
         except module.CatalogError as exc:
-            if "Sticky retained-KV proof (AC-26)" not in str(exc) or "continuous-batching-enable-gate.md" not in str(exc):
-                raise
-        else:
-            raise SystemExit(f"same-family variant without the cached-turns grant was accepted ({label})")
-    write_cb_source([granted_entry, dict(variant_entry, backend_family="llama")])
-    module.cb_policy_source_entries()
-    write_cb_source([granted_entry, dict(variant_entry, hardware_class="apple-silicon:m4-max:ram-128gb")])
-    module.cb_policy_source_entries()
-    write_cb_source([{k: v for k, v in granted_entry.items() if k != "backend_family"}])
-    rejected_unnamed_grant = False
-    try:
-        module.cb_policy_source_entries()
-    except module.CatalogError as exc:
-        rejected_unnamed_grant = "must name its backend_family" in str(exc)
-    if not rejected_unnamed_grant:
-        raise SystemExit("a cached-turns grant without backend_family was accepted")
-    write_cb_source([granted_entry, dict(variant_entry, cached_turns_accepted=True)])
-    if any("backend_family" in entry for entry in module.cb_policy_source_entries()):
-        raise SystemExit("backend_family leaked into the generated CB policy entries")
+            return needle in str(exc)
+        return False
+
+    def without(entry, field):
+        return {k: v for k, v in entry.items() if k != field}
+
+    accepted_cases = (
+        ("variant false", [donor_entry, dict(variant_entry, cached_turns_accepted=False)]),
+        ("variant without the field", [donor_entry, without(variant_entry, "cached_turns_accepted")]),
+        ("false without family", [donor_entry, without(dict(variant_entry, cached_turns_accepted=False), "backend_family")]),
+        ("variant granted by donor", [donor_entry, variant_entry]),
+    )
+    for label, entries in accepted_cases:
+        write_cb_source(entries)
+        generated = module.cb_policy_source_entries()
+        if any(field in entry for entry in generated for field in module.CB_POLICY_SOURCE_ONLY_FIELDS):
+            raise SystemExit(f"source-only CB fields leaked into the generated entries ({label})")
+    refused_cases = (
+        ("donor not granted", [dict(donor_entry, cached_turns_accepted=False), variant_entry], "not a granted donor"),
+        ("other family", [donor_entry, dict(variant_entry, backend_family="llama")], "not a granted donor"),
+        ("other hardware", [donor_entry, dict(variant_entry, hardware_class="apple-silicon:m4-max:ram-128gb")], "not a granted donor"),
+        ("donor is a variant", [donor_entry, variant_entry, dict(variant_entry, model_key="v2", cached_turns_donor="v1")], "not a granted donor"),
+        ("no AC-26 evidence id", [donor_entry, dict(variant_entry, provenance=source_entry["provenance"])], "Sticky retained-KV proof (AC-26)"),
+        ("grant without family", [without(donor_entry, "backend_family")], "must name its backend_family"),
+    )
+    for label, entries, needle in refused_cases:
+        if not refused_with(entries, needle):
+            raise SystemExit(f"unbacked cached-turns grant was accepted ({label})")
 module.CB_POLICY_SOURCE_PATH = original_cb_source_path
 
 
