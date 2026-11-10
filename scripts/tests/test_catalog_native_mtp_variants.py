@@ -47,15 +47,35 @@ def variants(record: dict | None = None, donor: str = DONOR) -> dict:
     return {"schema_version": catalog_release.NATIVE_MTP_VARIANTS_SCHEMA, "variants": [variant]}
 
 
+def feed(variant_kind: object = "oq4e-mixed-4-5-6-8bit-g64", donor_hash: str | None = None) -> dict:
+    """An artifact feed naming the committed donor's artifact and the variant's."""
+    inputs, _, _ = committed()
+    donor = next(i["entry"] for i in inputs if i["entry"]["model_key"] == DONOR)
+    donor_record = {"quantization": "oq4e-mixed-4-5-6-8bit-g64", "hash": donor_hash or donor["artifact_hash"]}
+    variant_record = {"hash": "a" * 64}
+    if variant_kind is not None:
+        variant_record["quantization"] = variant_kind
+    return {"models": {
+        DONOR: {"artifacts": {donor["artifact_id"]: donor_record}},
+        VARIANT: {"artifacts": {"mlx-oq4e-mtp": variant_record}},
+    }}
+
+
+def expand(inputs, bank, manifest, variants_obj, artifact_obj=None):
+    return catalog_release.expand_native_mtp_variants(
+        inputs, bank, manifest, variants_obj, feed() if artifact_obj is None else artifact_obj
+    )
+
+
 class NativeMTPVariantExpansionTests(unittest.TestCase):
     def test_variant_inherits_the_donor_entry_and_prompt(self):
         inputs, bank, manifest = committed()
-        out_inputs, out_bank, out_manifest = catalog_release.expand_native_mtp_variants(
+        out_inputs, out_bank, out_manifest = expand(
             inputs, bank, manifest, variants()
         )
         donor = next(i["entry"] for i in inputs if i["entry"]["model_key"] == DONOR)
         entry = next(i["entry"] for i in out_inputs if i["entry"]["model_key"] == VARIANT)
-        for key in ("mtp_family_adapter", "quantization", "proposal_depth", "qualified_slots",
+        for key in ("mtp_family_adapter", "proposal_depth", "qualified_slots",
                     "max_native_active_rows", "max_prompt_tokens", "performance_evidence_sha256",
                     "fit_evidence_sha256", "hardware_class"):
             self.assertEqual(entry[key], donor[key], key)
@@ -76,8 +96,8 @@ class NativeMTPVariantExpansionTests(unittest.TestCase):
 
     def test_expansion_is_a_fixpoint(self):
         inputs, bank, manifest = committed()
-        once = catalog_release.expand_native_mtp_variants(inputs, bank, manifest, variants())
-        twice = catalog_release.expand_native_mtp_variants(*once, variants())
+        once = expand(inputs, bank, manifest, variants())
+        twice = expand(*once, variants())
         self.assertEqual(once, twice)
 
     def test_self_check_record_sets_the_variant_expectations(self):
@@ -88,7 +108,7 @@ class NativeMTPVariantExpansionTests(unittest.TestCase):
             "expected_counters": {"accepted": 1, "rejected": 0, "bonus": 1, "committed": 2},
             "expected_committed_state_sha256": "d" * 64,
         }
-        _, out_bank, _ = catalog_release.expand_native_mtp_variants(
+        _, out_bank, _ = expand(
             inputs, bank, manifest, variants(copy.deepcopy(record))
         )
         challenge = next(c for c in out_bank["entries"] if c["model_id"] == VARIANT)
@@ -102,7 +122,31 @@ class NativeMTPVariantExpansionTests(unittest.TestCase):
     def test_unknown_donor_is_refused(self):
         inputs, bank, manifest = committed()
         with self.assertRaisesRegex(catalog_release.CatalogError, "donor_model_key"):
-            catalog_release.expand_native_mtp_variants(inputs, bank, manifest, variants(donor="nobody/model"))
+            expand(inputs, bank, manifest, variants(donor="nobody/model"))
+
+    def test_mismatched_quantization_kind_is_refused(self):
+        inputs, bank, manifest = committed()
+        with self.assertRaisesRegex(catalog_release.CatalogError, "quantization kind '4bit' differs"):
+            expand(inputs, bank, manifest, variants(), feed(variant_kind="4bit"))
+
+    def test_missing_quantization_kind_is_refused(self):
+        inputs, bank, manifest = committed()
+        with self.assertRaisesRegex(catalog_release.CatalogError, "no quantization kind"):
+            expand(inputs, bank, manifest, variants(), feed(variant_kind=None))
+        with self.assertRaisesRegex(catalog_release.CatalogError, "no quantization kind"):
+            catalog_release.expand_native_mtp_variants(inputs, bank, manifest, variants(), None)
+
+    def test_variant_gets_its_own_quantization_provenance(self):
+        inputs, bank, manifest = committed()
+        donor = next(i["entry"] for i in inputs if i["entry"]["model_key"] == DONOR)
+        out_inputs, _, _ = expand(inputs, bank, manifest, variants())
+        entry = next(i["entry"] for i in out_inputs if i["entry"]["model_key"] == VARIANT)
+        self.assertEqual(entry["quantization"]["representation_manifest_sha256"], "a" * 64)
+        self.assertNotEqual(
+            entry["quantization"]["representation_manifest_sha256"],
+            donor["quantization"]["representation_manifest_sha256"],
+        )
+        self.assertEqual(entry["quantization"]["kind"], donor["quantization"]["kind"])
 
 
 if __name__ == "__main__":

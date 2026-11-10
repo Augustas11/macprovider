@@ -2913,8 +2913,14 @@ def _native_mtp_projection_models(manifest: dict, tuple_entries: list[dict]) -> 
     return {next(iter(keys)): manifest["artifacts"]}
 
 
+def native_mtp_variant_artifact(artifact_obj: dict | None, model_key: str, artifact_id: str) -> dict | None:
+    if artifact_obj is None:
+        return None
+    return ((artifact_obj.get("models") or {}).get(model_key) or {}).get("artifacts", {}).get(artifact_id)
+
+
 def expand_native_mtp_variants(
-    tuple_inputs: list, bank: dict, manifest: dict, variants_obj: dict
+    tuple_inputs: list, bank: dict, manifest: dict, variants_obj: dict, artifact_obj: dict | None = None
 ) -> tuple[list, dict, dict]:
     """SPEC-048 0.1.81 same-architecture variant: derive each variant's tuple
     input, self-test bank entry and projection from its donor. Pure; earlier
@@ -2958,6 +2964,22 @@ def expand_native_mtp_variants(
         entry = copy.deepcopy(donor)
         for key in ("model_key", "artifact_id", "artifact_hash", "tokenizer_sha256", "mtp_manifest_sha256"):
             entry[key] = variant[key]
+        # SPEC-048 MTP-13: the variant inherits only on the donor's quantization
+        # kind, read from the artifact feed (the tuple's `quantization.kind` is
+        # the donor's own). Its quantization provenance is its own artifact's.
+        own = native_mtp_variant_artifact(artifact_obj, variant["model_key"], variant["artifact_id"])
+        donor_artifact = native_mtp_variant_artifact(artifact_obj, donor["model_key"], donor["artifact_id"])
+        own_kind = own.get("quantization") if own else None
+        donor_kind = donor_artifact.get("quantization") if donor_artifact else None
+        if not isinstance(own_kind, str) or not own_kind.strip():
+            fail(f"{vlabel}: the artifact feed has no quantization kind for the variant artifact "
+                 f"{variant['model_key']!r}/{variant['artifact_id']!r}")
+        if own_kind != donor_kind:
+            fail(f"{vlabel}: quantization kind {own_kind!r} differs from the donor's {donor_kind!r}; "
+                 "it needs its own admission")
+        if own.get("hash") != variant["artifact_hash"] or not HEX64.fullmatch(str(own.get("hash"))):
+            fail(f"{vlabel}: artifact_hash does not match the variant artifact's feed record")
+        entry["quantization"]["representation_manifest_sha256"] = own["hash"]
         entry["ordinary_baseline"] = {**entry["ordinary_baseline"], "artifact_hash": variant["artifact_hash"]}
         for key in NATIVE_MTP_VARIANT_CLASS_KEYS:
             if entry.get(key) != donor.get(key):
@@ -3007,7 +3029,7 @@ def expand_native_mtp_variants(
     return out_inputs, {**bank, "entries": out_bank}, json.loads(generator.build_projection(models))
 
 
-def native_mtp_variant_files() -> dict[pathlib.Path, bytes] | None:
+def native_mtp_variant_files(artifact_obj: dict | None = None) -> dict[pathlib.Path, bytes] | None:
     """The committed native-MTP inputs as the variant declarations make them,
     or None without declarations. The release input re-binds to the new bank
     and projection bytes."""
@@ -3018,7 +3040,9 @@ def native_mtp_variant_files() -> dict[pathlib.Path, bytes] | None:
     tuple_inputs = tuple_value if isinstance(tuple_value, list) else [tuple_value]
     bank = strict_json((CATALOG_DIR / NATIVE_MTP_BANK_NAME).read_bytes(), NATIVE_MTP_BANK_NAME)
     manifest = strict_json((CATALOG_DIR / NATIVE_MTP_MANIFEST_NAME).read_bytes(), NATIVE_MTP_MANIFEST_NAME)
-    inputs, bank, manifest = expand_native_mtp_variants(tuple_inputs, bank, manifest, variants_obj)
+    inputs, bank, manifest = expand_native_mtp_variants(
+        tuple_inputs, bank, manifest, variants_obj, artifact_obj
+    )
     bank_bytes = canonical_sorted_bytes(bank)
     manifest_bytes = NATIVE_MTP_SIDECAR_GENERATOR.canonical_bytes(manifest)
     release = json.loads(NATIVE_MTP_RELEASE_INPUT_PATH.read_text("utf-8"))
@@ -3033,7 +3057,8 @@ def native_mtp_variant_files() -> dict[pathlib.Path, bytes] | None:
 
 
 def cmd_native_mtp_variants() -> None:
-    files = native_mtp_variant_files()
+    artifact_obj = json.loads(ARTIFACT_SOURCE_PATH.read_bytes()) if ARTIFACT_SOURCE_PATH.exists() else None
+    files = native_mtp_variant_files(artifact_obj)
     if files is None:
         fail(f"native-mtp-variants: {NATIVE_MTP_VARIANTS_PATH.name} is absent")
     for path, data in files.items():
@@ -3045,7 +3070,7 @@ def require_native_mtp_variants_current(artifact_obj: dict | None) -> None:
     """generate: the committed inputs equal the variant expansion, and each
     variant passes the computed R012 weight-size check: its verified artifact
     is no larger than its donor's, so the donor's fit evidence covers it."""
-    files = native_mtp_variant_files()
+    files = native_mtp_variant_files(artifact_obj)
     if files is None:
         return
     for path, data in files.items():
