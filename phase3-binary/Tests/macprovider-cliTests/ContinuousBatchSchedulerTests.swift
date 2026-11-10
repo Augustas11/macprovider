@@ -7091,6 +7091,115 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         )
     }
 
+    /// v0.3.41: the head's prompt takes the per-iteration budget first; a
+    /// peer that cannot finish with it joins only with what the head leaves.
+    func testRaggedPrefillGroupingGivesTheHeadsPromptTheBudgetFirst() {
+        func candidate(_ id: String, offset: Int = 0, remaining: Int) -> ContinuousBatchPrefillCandidate {
+            ContinuousBatchPrefillCandidate(
+                requestID: id, promptOffset: offset, naturalChunkTokens: 512, sharesRaggedOffsets: true,
+                remainingPromptTokens: remaining
+            )
+        }
+        // The 8K head holds the whole 2048-token budget: the 16K prompt at the
+        // same offset no longer halves each of its forwards.
+        XCTAssertEqual(
+            ContinuousBatchPrefillGrouping.select(
+                [candidate("8k", remaining: 8_192), candidate("16k", remaining: 16_384)],
+                maxRows: 4, tokenBudget: 2_048
+            )?.requestIDs,
+            ["8k"]
+        )
+        // A head with 1024 tokens left leaves 1024: two peers' chunks fit.
+        XCTAssertEqual(
+            ContinuousBatchPrefillGrouping.select(
+                [
+                    candidate("1k", remaining: 1_024), candidate("8k", remaining: 8_192),
+                    candidate("16k", remaining: 16_384), candidate("32k", remaining: 32_768),
+                ],
+                maxRows: 4, tokenBudget: 2_048
+            )?.requestIDs,
+            ["1k", "8k", "16k"]
+        )
+        // Rows finishing with the head still share its forwards past the
+        // leftover, up to the row cap.
+        XCTAssertEqual(
+            ContinuousBatchPrefillGrouping.select(
+                [
+                    candidate("a", remaining: 8_192), candidate("b", offset: 512, remaining: 8_192),
+                    candidate("long", remaining: 16_384), candidate("c", remaining: 8_192),
+                ],
+                maxRows: 4, tokenBudget: 2_048
+            )?.requestIDs,
+            ["a", "b", "c"]
+        )
+    }
+
+    /// The 4K -> 8K + 16K bench shape through the scheduler, scaled to a
+    /// 2-token chunk and an 8-token budget (512 and 2048 on the M5). A row
+    /// decodes throughout, so each turn holds the per-iteration budget and
+    /// a decode window follows it. Each prompt takes whole turns of its own
+    /// chunks, oldest-led first: the 8K row's first token comes after its
+    /// own 8 chunks, not after 16 forwards it shares with the 16K row.
+    func testBudgetGoesToTheHeadPromptFirstAcrossFourK8K16KArrivals() async throws {
+        let ids = ["running", "4k", "8k", "16k"]
+        let lengths = ["running": 1, "4k": 8, "8k": 16, "16k": 32]
+        var scripts: [String: [Int]] = ["4k": [2], "8k": [3], "16k": [4]]
+        scripts["running"] = Array(repeating: 1, count: 40)
+        let backend = ScriptedBackend(scripts: scripts)
+        let scheduler = try await makeScheduler(
+            descriptor: Self.descriptor(maxPhysicalBlocks: 64),
+            maxActiveRows: 4,
+            maxPromptChunkTokens: 2,
+            maxDecodeStepsWhilePrefilling: 2,
+            maxPrefillRowsPerIteration: 4,
+            maxPrefillTokensPerIteration: 8,
+            allowsRaggedPrefillOffsets: true,
+            backend: backend,
+            allocator: PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 64)
+        )
+        let installed = await scheduler.installLabBatchComposition(ids)
+        XCTAssertTrue(installed)
+        let tasks = ids.map { id in
+            Task {
+                try await scheduler.submit(.init(
+                    id: id, conversationKey: "", promptTokens: Array(1 ... lengths[id]!),
+                    maxOutputTokens: id == "running" ? 40 : 1
+                ))
+            }
+        }
+        for task in tasks { _ = try await task.value }
+
+        // Every forward prefills one row: no prompt halves another's turn.
+        let order = await backend.prefillOrder()
+        XCTAssertEqual(
+            order,
+            [["running"]] + Array(repeating: ["4k"], count: 4) + Array(repeating: ["8k"], count: 8)
+                + Array(repeating: ["16k"], count: 16)
+        )
+        // Turns: runs of prefill forwards between decode windows. The turn
+        // budget (4 chunks) goes to one prompt at a time, and decode windows
+        // still interleave.
+        var turns: [[String]] = []
+        var current: [String] = []
+        for event in await backend.events() {
+            let parts = event.split(separator: ":")
+            if parts.first == "prefill" {
+                current.append(String(parts[1]))
+            } else if parts.first == "decode", !current.isEmpty {
+                turns.append(current)
+                current = []
+            }
+        }
+        if !current.isEmpty { turns.append(current) }
+        XCTAssertEqual(turns.first, ["running"])
+        XCTAssertEqual(
+            Array(turns.dropFirst()),
+            [Array(repeating: "4k", count: 4)] + Array(repeating: Array(repeating: "8k", count: 4), count: 2)
+                + Array(repeating: Array(repeating: "16k", count: 4), count: 4),
+            "\(turns)"
+        )
+    }
+
     /// Through the scheduler: a long prompt ahead of a stream of shorter
     /// ones is passed over (and charged) once per short turn, leads its turn
     /// after exactly `maxBypassTurns` of them, and then, aged, keeps leading

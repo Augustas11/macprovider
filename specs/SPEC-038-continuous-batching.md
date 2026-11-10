@@ -1,11 +1,30 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.40
+Version: v0.3.41
 Status: draft (normative contract; runtime enablement is default-on per Mac behind the FR-CB10 on-device self-check, v0.3.15)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.3.41 (2026-11-10, FR-CB2 the head's prompt takes the turn budget first):**
+FR-CB2 prefill packing: the turn's token budget goes to the head's prompt
+first. After each forward the head leads a fresh group with its next
+original chunk in the same turn while the per-iteration budget has room
+(separate forwards, so no row's chunk partition, chunk length or kernel route
+changes), unless a request arrived during the turn and a slot is free for
+it: then the turn ends so the new request is ordered at the next turn. A peer that
+cannot finish with the head joins its forward only within the budget the
+head's prompt leaves (`min(tokens left, budget)` held for the head). Before,
+an 8K head and a 16K peer at the same offset shared every 512-token forward,
+so on an M5 the staggered 1K/4K/8K/16K run gave the 8K row its first token
+after 16 shared forwards (71-82 s against 39 s for upstream mlx-swift-lm PR
+#771), and the 16K row, once alone, prefilled only 512 tokens per turn. Rows
+with as many tokens left as the head still share its forwards (the cohort
+rule), the prefill order (fewest tokens left first, aging) is unchanged, a
+continuation never spends the idle cohort allowance, and a turn still ends
+with a decode window. A turn's prefill work stays within the configured
+budget except for the existing single boundary extension.
+
 **Change log v0.3.40 (2026-11-10, FR-CB2 bypass charging follows arrival; prefill decode window 2):**
 FR-CB2 prefill order: a passed-over row is charged a bypass turn only when
 the head was admitted after it. Before, a later and longer prompt passed by an
@@ -989,7 +1008,13 @@ conformant with the row's own serial reference.
 Prefill MUST be bounded by a configured per-iteration prefill token budget. A
 single row MUST NOT consume more than its configured per-row chunk limit in one
 forward; each compatible group MUST NOT consume more than the configured token
-budget in one forward. A row ending on a SPEC-024-R005 resume or snapshot
+budget in one forward. (v0.3.41) The turn's budget goes to the head's prompt
+first: after a forward, the head MAY lead a new group with its next
+original-shaped chunk in that same turn while the cumulative prefill work
+stays within the per-iteration budget, never the idle cohort allowance, and
+MUST NOT when a request waits for admission with a free slot; a peer that cannot finish with the head MUST join the
+head's forward only within the budget left after `min(head tokens left,
+budget)`. A row ending on a SPEC-024-R005 resume or snapshot
 boundary MAY run its next original-shaped chunk in that same turn; forwards
 stay separate and there is no intervening decode window or peer prefill. The
 next chunk MUST NOT be shrunk, merged or repartitioned to fit a remaining turn
