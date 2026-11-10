@@ -9,6 +9,14 @@ import XCTest
 /// in the post-sanitize and the Hugging Face pre-sanitize layouts, and
 /// SPEC-023-R024 (v0.22.27) override widths and exception bound.
 final class NativeMTPGLM5NextObservationTests: XCTestCase {
+    // The sanitizer pin test builds MLX arrays; CI runners have no metallib,
+    // so every test here runs on the CPU device.
+    override func invokeTest() {
+        Device.withDefaultDevice(Device(.cpu)) {
+            super.invokeTest()
+        }
+    }
+
     private struct TensorFixture {
         let name: String
         let dtype: String
