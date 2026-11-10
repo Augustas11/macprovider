@@ -1,0 +1,392 @@
+{
+  "aggregateCVPct" : 0,
+  "aggregateTPSRuns" : [
+
+  ],
+  "aggregateTPSp50" : 0,
+  "aggregateUpliftVsPagedSingleRow" : 0,
+  "aggregateVsProductionSerial" : 0,
+  "blockSizeTokens" : 16,
+  "compiled" : false,
+  "decodeTokensPerRow" : 256,
+  "engine" : "scheduler",
+  "layerCount" : 11,
+  "leftovers" : {
+    "isolation" : {
+      "cancelledCompletionTokens" : 0,
+      "cancelledRequestID" : "msb-cancel",
+      "cancelledStatus" : "cancelled",
+      "healthyCompletionTokens" : 32,
+      "healthyRequestID" : "msb-healthy",
+      "healthyStatus" : "length",
+      "pass" : true
+    },
+    "usagePass" : true,
+    "usageRows" : [
+      {
+        "cachedPromptTokens" : 0,
+        "completionTokens" : 0,
+        "emittedTokens" : 1,
+        "promptTokens" : 1024,
+        "requestID" : "msb-cancel",
+        "settlementDisposition" : "not_eligible",
+        "terminalStatus" : "cancelled"
+      },
+      {
+        "cachedPromptTokens" : 0,
+        "completionTokens" : 32,
+        "emittedTokens" : 32,
+        "promptTokens" : 1024,
+        "requestID" : "msb-healthy",
+        "settlementDisposition" : "eligible_owner",
+        "terminalStatus" : "length"
+      }
+    ]
+  },
+  "maxPhysicalBlocks" : 1024,
+  "mlxSwiftLMPin" : "mlxlm-6c27b743bae5",
+  "modelID" : "<models>\/Solstice-AI--GLM-5.3-Flash-UNCENSORED-mlx-oQ4e-DFlash2\/bff40d24efb689d33e094083ce4a5d6835601730\/242f8fcfd34d4ecfd62180c1767f910bda925216948772126dc98c673d1c8919",
+  "modelTag" : "242f8fcfd34d4ecfd62180c1767f910bda925216948772126dc98c673d1c8919",
+  "pagedSingleRowCVPct" : 0,
+  "pagedSingleRowTPSRuns" : [
+
+  ],
+  "pagedSingleRowTPSp50" : 0,
+  "peakRSSMB" : 9513,
+  "perRowFractionOfPagedSingleRow" : 0,
+  "perRowTPSp50" : 0,
+  "productionSerialCVPct" : 0,
+  "productionSerialPromptTokens" : 1024,
+  "productionSerialTPSRuns" : [
+
+  ],
+  "productionSerialTPSp50" : 0,
+  "promptTokenLengths" : [
+    1024,
+    1024
+  ],
+  "promptTokenSHA256" : [
+    "c2d6e0a41c032e905401737f80cfeaf532576de3aef86f3382067663f683b3dd",
+    "bb27f683b1bd122f66d900e82379da023fe1014bda15ede6d18f4741f834c1ac"
+  ],
+  "promptTokensPerRow" : 1024,
+  "rows" : 2,
+  "runs" : 5,
+  "scenario" : "isolation",
+  "schemaVersion" : 5,
+  "timestamp" : "2026-11-10T01:36:42Z"
+}
+{
+  "aggregateCVPct" : 0,
+  "aggregateTPSRuns" : [
+
+  ],
+  "aggregateTPSp50" : 0,
+  "aggregateUpliftVsPagedSingleRow" : 0,
+  "aggregateVsProductionSerial" : 0,
+  "blockSizeTokens" : 16,
+  "compiled" : false,
+  "decodeTokensPerRow" : 256,
+  "engine" : "scheduler",
+  "layerCount" : 11,
+  "leftovers" : {
+    "replay" : {
+      "firstDisposition" : "eligible_owner",
+      "pass" : true,
+      "replayDisposition" : "non_settling_replay",
+      "requestID" : "msb-replay-owner",
+      "tokensMatch" : true
+    },
+    "usagePass" : true,
+    "usageRows" : [
+      {
+        "cachedPromptTokens" : 0,
+        "completionTokens" : 32,
+        "emittedTokens" : 32,
+        "promptTokens" : 1024,
+        "requestID" : "msb-replay-owner",
+        "settlementDisposition" : "eligible_owner",
+        "terminalStatus" : "length"
+      },
+      {
+        "cachedPromptTokens" : 0,
+        "completionTokens" : 32,
+        "emittedTokens" : 32,
+        "promptTokens" : 1024,
+        "requestID" : "msb-replay-owner",
+        "settlementDisposition" : "non_settling_replay",
+        "terminalStatus" : "length"
+      }
+    ]
+  },
+  "maxPhysicalBlocks" : 1024,
+  "mlxSwiftLMPin" : "mlxlm-6c27b743bae5",
+  "modelID" : "<models>\/Solstice-AI--GLM-5.3-Flash-UNCENSORED-mlx-oQ4e-DFlash2\/bff40d24efb689d33e094083ce4a5d6835601730\/242f8fcfd34d4ecfd62180c1767f910bda925216948772126dc98c673d1c8919",
+  "modelTag" : "242f8fcfd34d4ecfd62180c1767f910bda925216948772126dc98c673d1c8919",
+  "pagedSingleRowCVPct" : 0,
+  "pagedSingleRowTPSRuns" : [
+
+  ],
+  "pagedSingleRowTPSp50" : 0,
+  "peakRSSMB" : 9377,
+  "perRowFractionOfPagedSingleRow" : 0,
+  "perRowTPSp50" : 0,
+  "productionSerialCVPct" : 0,
+  "productionSerialPromptTokens" : 1024,
+  "productionSerialTPSRuns" : [
+
+  ],
+  "productionSerialTPSp50" : 0,
+  "promptTokenLengths" : [
+    1024
+  ],
+  "promptTokenSHA256" : [
+    "c2d6e0a41c032e905401737f80cfeaf532576de3aef86f3382067663f683b3dd"
+  ],
+  "promptTokensPerRow" : 1024,
+  "rows" : 1,
+  "runs" : 5,
+  "scenario" : "replay",
+  "schemaVersion" : 5,
+  "timestamp" : "2026-11-10T01:36:46Z"
+}
+{
+  "aggregateCVPct" : 0,
+  "aggregateTPSRuns" : [
+
+  ],
+  "aggregateTPSp50" : 0,
+  "aggregateUpliftVsPagedSingleRow" : 0,
+  "aggregateVsProductionSerial" : 0,
+  "blockSizeTokens" : 16,
+  "compiled" : false,
+  "decodeTokensPerRow" : 256,
+  "engine" : "scheduler",
+  "layerCount" : 11,
+  "leftovers" : {
+    "drain" : {
+      "activeRowsCompleted" : true,
+      "activeSettlements" : [
+        "eligible_owner",
+        "eligible_owner"
+      ],
+      "activeStatuses" : [
+        "length",
+        "length"
+      ],
+      "pass" : true,
+      "permitIssued" : true,
+      "permitValid" : true,
+      "postDrainRejected" : true,
+      "queuedRejected" : true
+    },
+    "usagePass" : true,
+    "usageRows" : [
+      {
+        "cachedPromptTokens" : 0,
+        "completionTokens" : 0,
+        "emittedTokens" : 0,
+        "promptTokens" : 0,
+        "requestID" : "msb-drain-queued",
+        "settlementDisposition" : "not_eligible",
+        "terminalStatus" : "rejected"
+      },
+      {
+        "cachedPromptTokens" : 0,
+        "completionTokens" : 32,
+        "emittedTokens" : 32,
+        "promptTokens" : 1024,
+        "requestID" : "msb-drain-a",
+        "settlementDisposition" : "eligible_owner",
+        "terminalStatus" : "length"
+      },
+      {
+        "cachedPromptTokens" : 0,
+        "completionTokens" : 32,
+        "emittedTokens" : 32,
+        "promptTokens" : 1024,
+        "requestID" : "msb-drain-b",
+        "settlementDisposition" : "eligible_owner",
+        "terminalStatus" : "length"
+      }
+    ]
+  },
+  "maxPhysicalBlocks" : 1024,
+  "mlxSwiftLMPin" : "mlxlm-6c27b743bae5",
+  "modelID" : "<models>\/Solstice-AI--GLM-5.3-Flash-UNCENSORED-mlx-oQ4e-DFlash2\/bff40d24efb689d33e094083ce4a5d6835601730\/242f8fcfd34d4ecfd62180c1767f910bda925216948772126dc98c673d1c8919",
+  "modelTag" : "242f8fcfd34d4ecfd62180c1767f910bda925216948772126dc98c673d1c8919",
+  "pagedSingleRowCVPct" : 0,
+  "pagedSingleRowTPSRuns" : [
+
+  ],
+  "pagedSingleRowTPSp50" : 0,
+  "peakRSSMB" : 9308,
+  "perRowFractionOfPagedSingleRow" : 0,
+  "perRowTPSp50" : 0,
+  "productionSerialCVPct" : 0,
+  "productionSerialPromptTokens" : 1024,
+  "productionSerialTPSRuns" : [
+
+  ],
+  "productionSerialTPSp50" : 0,
+  "promptTokenLengths" : [
+    1024,
+    1024,
+    1024
+  ],
+  "promptTokenSHA256" : [
+    "c2d6e0a41c032e905401737f80cfeaf532576de3aef86f3382067663f683b3dd",
+    "bb27f683b1bd122f66d900e82379da023fe1014bda15ede6d18f4741f834c1ac",
+    "3923e437beaf0f76bb205078aa2ff48ff22f47f09b7c84d8d0d9a2fd9d820620"
+  ],
+  "promptTokensPerRow" : 1024,
+  "rows" : 3,
+  "runs" : 5,
+  "scenario" : "drain",
+  "schemaVersion" : 5,
+  "timestamp" : "2026-11-10T01:36:53Z"
+}
+{
+  "aggregateCVPct" : 0,
+  "aggregateTPSRuns" : [
+    15.090262546603816
+  ],
+  "aggregateTPSp50" : 15.090262546603816,
+  "aggregateUpliftVsPagedSingleRow" : 0.3746713001596686,
+  "aggregateVsProductionSerial" : 0.35976411761558186,
+  "blockSizeTokens" : 16,
+  "compiled" : false,
+  "decodeTokensPerRow" : 256,
+  "engine" : "scheduler",
+  "layerCount" : 11,
+  "leftovers" : {
+    "parity" : {
+      "batchedRowMatches" : [
+        true,
+        true,
+        true,
+        true
+      ],
+      "batchedTokenSHA256" : "724ceece84aed0f41d9603d7c9b0aa914b15e67b86d18097770f83b8cb5811d7",
+      "comparedTokens" : 48,
+      "oneRowMatch" : true,
+      "pass" : true,
+      "rows" : [
+        {
+          "batchedTokenCount" : 48,
+          "batchedTokenSHA256" : "724ceece84aed0f41d9603d7c9b0aa914b15e67b86d18097770f83b8cb5811d7",
+          "serialTokenCount" : 49,
+          "serialTokenSHA256" : "724ceece84aed0f41d9603d7c9b0aa914b15e67b86d18097770f83b8cb5811d7",
+          "standaloneTokenCount" : 48,
+          "standaloneTokenSHA256" : "724ceece84aed0f41d9603d7c9b0aa914b15e67b86d18097770f83b8cb5811d7"
+        },
+        {
+          "batchedTokenCount" : 48,
+          "batchedTokenSHA256" : "c105d57bdcd488cf96dd879406227ccfad175a38e31603780102ae34de3f716c",
+          "serialTokenCount" : 49,
+          "serialTokenSHA256" : "c105d57bdcd488cf96dd879406227ccfad175a38e31603780102ae34de3f716c",
+          "standaloneTokenCount" : 48,
+          "standaloneTokenSHA256" : "c105d57bdcd488cf96dd879406227ccfad175a38e31603780102ae34de3f716c"
+        },
+        {
+          "batchedTokenCount" : 48,
+          "batchedTokenSHA256" : "4cc2de1978926576d213826d726704fc730ebf2af639554fe0f8287dbfa8963c",
+          "serialTokenCount" : 49,
+          "serialTokenSHA256" : "4cc2de1978926576d213826d726704fc730ebf2af639554fe0f8287dbfa8963c",
+          "standaloneTokenCount" : 48,
+          "standaloneTokenSHA256" : "4cc2de1978926576d213826d726704fc730ebf2af639554fe0f8287dbfa8963c"
+        },
+        {
+          "batchedTokenCount" : 48,
+          "batchedTokenSHA256" : "a307455338389fa6f02b3662d5c346abcb5bbf9745395ecf5b47c464a038629f",
+          "serialTokenCount" : 49,
+          "serialTokenSHA256" : "a307455338389fa6f02b3662d5c346abcb5bbf9745395ecf5b47c464a038629f",
+          "standaloneTokenCount" : 48,
+          "standaloneTokenSHA256" : "a307455338389fa6f02b3662d5c346abcb5bbf9745395ecf5b47c464a038629f"
+        }
+      ],
+      "serialTokenSHA256" : "724ceece84aed0f41d9603d7c9b0aa914b15e67b86d18097770f83b8cb5811d7",
+      "standaloneRowMatches" : [
+        true,
+        true,
+        true,
+        true
+      ]
+    },
+    "usagePass" : true,
+    "usageRows" : [
+      {
+        "cachedPromptTokens" : 0,
+        "completionTokens" : 48,
+        "emittedTokens" : 48,
+        "promptTokens" : 1024,
+        "requestID" : "msb-sched-0-8BB4AD71-93AF-4DC3-8E85-BFFAF6DC4019",
+        "settlementDisposition" : "eligible_owner",
+        "terminalStatus" : "length"
+      },
+      {
+        "cachedPromptTokens" : 0,
+        "completionTokens" : 48,
+        "emittedTokens" : 48,
+        "promptTokens" : 1024,
+        "requestID" : "msb-sched-1-B60E2893-CAAD-4E9F-990B-201D6F81DCB6",
+        "settlementDisposition" : "eligible_owner",
+        "terminalStatus" : "length"
+      },
+      {
+        "cachedPromptTokens" : 0,
+        "completionTokens" : 48,
+        "emittedTokens" : 48,
+        "promptTokens" : 1024,
+        "requestID" : "msb-sched-2-91E74D00-13B4-4CD1-8318-B2B0CC21BE48",
+        "settlementDisposition" : "eligible_owner",
+        "terminalStatus" : "length"
+      },
+      {
+        "cachedPromptTokens" : 0,
+        "completionTokens" : 48,
+        "emittedTokens" : 48,
+        "promptTokens" : 1024,
+        "requestID" : "msb-sched-3-F07C6264-FF4E-41CE-B503-A21E5BC46EF7",
+        "settlementDisposition" : "eligible_owner",
+        "terminalStatus" : "length"
+      }
+    ]
+  },
+  "maxPhysicalBlocks" : 1024,
+  "mlxSwiftLMPin" : "mlxlm-6c27b743bae5",
+  "modelID" : "<models>\/Solstice-AI--GLM-5.3-Flash-UNCENSORED-mlx-oQ4e-DFlash2\/bff40d24efb689d33e094083ce4a5d6835601730\/242f8fcfd34d4ecfd62180c1767f910bda925216948772126dc98c673d1c8919",
+  "modelTag" : "242f8fcfd34d4ecfd62180c1767f910bda925216948772126dc98c673d1c8919",
+  "pagedSingleRowCVPct" : 0,
+  "pagedSingleRowTPSRuns" : [
+    40.27600336661229
+  ],
+  "pagedSingleRowTPSp50" : 40.27600336661229,
+  "peakRSSMB" : 9308,
+  "perRowFractionOfPagedSingleRow" : 0.09366782503991715,
+  "perRowTPSp50" : 3.772565636650954,
+  "productionSerialCVPct" : 0,
+  "productionSerialPromptTokens" : 1024,
+  "productionSerialTPSRuns" : [
+    41.94487945773455
+  ],
+  "productionSerialTPSp50" : 41.94487945773455,
+  "promptTokenLengths" : [
+    1024,
+    1024,
+    1024,
+    1024
+  ],
+  "promptTokenSHA256" : [
+    "c2d6e0a41c032e905401737f80cfeaf532576de3aef86f3382067663f683b3dd",
+    "bb27f683b1bd122f66d900e82379da023fe1014bda15ede6d18f4741f834c1ac",
+    "3923e437beaf0f76bb205078aa2ff48ff22f47f09b7c84d8d0d9a2fd9d820620",
+    "4c073ae313b6b2c55fd68f7629d3f6b683d0ebb16feb4e4e90de8b2fb4862067"
+  ],
+  "promptTokensPerRow" : 1024,
+  "rows" : 4,
+  "runs" : 5,
+  "scenario" : "parity",
+  "schemaVersion" : 5,
+  "timestamp" : "2026-11-10T01:38:14Z"
+}
