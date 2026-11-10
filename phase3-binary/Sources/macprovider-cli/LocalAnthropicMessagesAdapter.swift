@@ -161,7 +161,7 @@ final class LocalAnthropicMessagesAdapter {
             switch config["type"] as? String {
             case "enabled": thinking = true; chat["reasoning_effort"] = (Self.number(config["budget_tokens"], integer: true)?.doubleValue ?? 0) >= 16384 ? "high" : "medium"
             case "adaptive": thinking = true; chat["reasoning_effort"] = "medium"
-            case "disabled": chat["reasoning_effort"] = "low"
+            case "disabled": chat["reasoning_effort"] = "none" // SPEC-018 v0.3.16: `low` would think on a thinking switch
             default: throw Self.invalid("thinking.type", "thinking.type must be enabled, disabled or adaptive")
             }
         }

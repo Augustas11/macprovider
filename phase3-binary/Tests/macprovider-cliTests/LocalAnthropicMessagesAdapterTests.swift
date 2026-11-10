@@ -38,7 +38,7 @@ final class LocalAnthropicMessagesAdapterTests: XCTestCase {
         XCTAssertEqual((calls[0]["function"] as! [String: Any])["arguments"] as? String, #"{"q":"x"}"#)
     }
     func testThinkingBudgetGoldenMapping() throws {
-        for (config, effort) in [(["type": "enabled", "budget_tokens": 2048] as [String: Any], "medium"), (["type": "enabled", "budget_tokens": 16384], "high"), (["type": "adaptive"], "medium"), (["type": "disabled"], "low")] {
+        for (config, effort) in [(["type": "enabled", "budget_tokens": 2048] as [String: Any], "medium"), (["type": "enabled", "budget_tokens": 16384], "high"), (["type": "adaptive"], "medium"), (["type": "disabled"], "none")] {
             XCTAssertEqual(try object(adapter(["thinking": config]).chatRequestBody)["reasoning_effort"] as? String, effort)
         }
     }
