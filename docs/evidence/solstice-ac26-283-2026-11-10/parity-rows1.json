@@ -1,0 +1,130 @@
+{
+ "checks": {
+  "row0.turn0.cold_reused_nothing": true,
+  "row0.turn0.warm_equals_cold": true,
+  "row0.turn1.cold_reused_nothing": true,
+  "row0.turn1.warm_equals_cold": true,
+  "row0.turn1.warm_reused_prefix": true,
+  "row0.turn2.cold_reused_nothing": true,
+  "row0.turn2.warm_equals_cold": true,
+  "row0.turn2.warm_reused_prefix": true,
+  "row0.turn3.cold_reused_nothing": true,
+  "row0.turn3.warm_equals_cold": true,
+  "row0.turn3.warm_reused_prefix": true
+ },
+ "failed_checks": [],
+ "passed": true,
+ "rows": 1,
+ "run_id": "ac26sol-065433-parity-r1",
+ "schema": "macprovider.glm53-cb-prefix-cache-lab.v1",
+ "turns": [
+  {
+   "cold": [
+    {
+     "cached_prompt_tokens": 0,
+     "completion_tokens": 128,
+     "content": "",
+     "finish_reason": "length",
+     "prompt_tokens": 1171,
+     "reasoning": "The user asks about how a lighthouse keeper prepares the lamp for the night. This is a general knowledge question, not related to the harbor tide notes. I should answer in plain prose, describing the traditional process of a lighthouse keeper preparing the lamp for the night. This is a historical/traditional practice question.\n\nLet me think about what a lighthouse keeper actually did to prepare the lamp for the night. This is well-documented historical practice, particularly for oil lamps (kerosene/paraffin vapor lamps) used in the era before electrification.\n\nThe typical routine for a lighthouse keeper preparing the lamp for the night",
+     "wall_s": 6.319243374999999
+    }
+   ],
+   "cold_wall_s": 6.319423791,
+   "turn": 0,
+   "warm": [
+    {
+     "cached_prompt_tokens": 0,
+     "completion_tokens": 128,
+     "content": "",
+     "finish_reason": "length",
+     "prompt_tokens": 1171,
+     "reasoning": "The user asks about how a lighthouse keeper prepares the lamp for the night. This is a general knowledge question, not related to the harbor tide notes. I should answer in plain prose, describing the traditional process of a lighthouse keeper preparing the lamp for the night. This is a historical/traditional practice question.\n\nLet me think about what a lighthouse keeper actually did to prepare the lamp for the night. This is well-documented historical practice, particularly for oil lamps (kerosene/paraffin vapor lamps) used in the era before electrification.\n\nThe typical routine for a lighthouse keeper preparing the lamp for the night",
+     "wall_s": 8.143464416
+    }
+   ],
+   "warm_wall_s": 8.143741292
+  },
+  {
+   "cold": [
+    {
+     "cached_prompt_tokens": 0,
+     "completion_tokens": 128,
+     "content": "",
+     "finish_reason": "length",
+     "prompt_tokens": 1196,
+     "reasoning": "The user is asking about what a lighthouse keeper checks after a storm, and why. This is a straightforward informational question about lighthouse keeping duties. The harbor notes about tide tables seem to be context but aren't directly relevant to this question about post-storm checks.\n\nLet me think about what a lighthouse keeper would check after a storm:\n\n1. **The lamp and lens** - Check for damage, cleanliness, alignment. Salt spray and vibration could affect the apparatus.\n\n2. **The glass/panes of the lantern room** - Storm winds carry debris, salt spray coats glass, panes could crack or break. Dirty or",
+     "wall_s": 6.520373709000001
+    }
+   ],
+   "cold_wall_s": 6.520550333999999,
+   "turn": 1,
+   "warm": [
+    {
+     "cached_prompt_tokens": 1169,
+     "completion_tokens": 128,
+     "content": "",
+     "finish_reason": "length",
+     "prompt_tokens": 1196,
+     "reasoning": "The user is asking about what a lighthouse keeper checks after a storm, and why. This is a straightforward informational question about lighthouse keeping duties. The harbor notes about tide tables seem to be context but aren't directly relevant to this question about post-storm checks.\n\nLet me think about what a lighthouse keeper would check after a storm:\n\n1. **The lamp and lens** - Check for damage, cleanliness, alignment. Salt spray and vibration could affect the apparatus.\n\n2. **The glass/panes of the lantern room** - Storm winds carry debris, salt spray coats glass, panes could crack or break. Dirty or",
+     "wall_s": 3.501274458000001
+    }
+   ],
+   "warm_wall_s": 3.501457125
+  },
+  {
+   "cold": [
+    {
+     "cached_prompt_tokens": 0,
+     "completion_tokens": 128,
+     "content": "The tide tables are the quiet backbone of the keeper's day, because the light itself matters most when the water is moving and the harbor is at its most treacherous. With the morning low at 06:12 and the evening high at 18:47, the keeper's schedule bends around",
+     "finish_reason": "length",
+     "prompt_tokens": 1221,
+     "reasoning": "The user asks how tide tables change the keeper's schedule. The harbor notes give specific times: morning low at 06:12 and evening high at 18:47. I should weave those in. Keep it plain prose, harbor-log style, consistent with prior turns. No need for excessive length \u2014 a solid paragraph or two.",
+     "wall_s": 6.713513790999997
+    }
+   ],
+   "cold_wall_s": 6.713687583999999,
+   "turn": 2,
+   "warm": [
+    {
+     "cached_prompt_tokens": 1194,
+     "completion_tokens": 128,
+     "content": "The tide tables are the quiet backbone of the keeper's day, because the light itself matters most when the water is moving and the harbor is at its most treacherous. With the morning low at 06:12 and the evening high at 18:47, the keeper's schedule bends around",
+     "finish_reason": "length",
+     "prompt_tokens": 1221,
+     "reasoning": "The user asks how tide tables change the keeper's schedule. The harbor notes give specific times: morning low at 06:12 and evening high at 18:47. I should weave those in. Keep it plain prose, harbor-log style, consistent with prior turns. No need for excessive length \u2014 a solid paragraph or two.",
+     "wall_s": 3.5004870839999995
+    }
+   ],
+   "warm_wall_s": 3.5006583330000005
+  },
+  {
+   "cold": [
+    {
+     "cached_prompt_tokens": 0,
+     "completion_tokens": 128,
+     "content": "A keeper's week is a circle of small, steady duties repeated against the sea. Each day begins before dawn with cleaning",
+     "finish_reason": "length",
+     "prompt_tokens": 1306,
+     "reasoning": "The user wants a summary of the keeper's week in a short paragraph. This is a creative/roleplay task about a lighthouse keeper. I should weave in the harbor notes about tide tables (morning low 06:12, evening high 18:47) naturally, since those are the persistent context. Keep it a short paragraph, plain prose, no headers or lists. Cover the weekly rhythm: daily lamp work, cleaning, storm checks, tide-driven schedule, log entries, resupply perhaps.",
+     "wall_s": 7.190804207999996
+    }
+   ],
+   "cold_wall_s": 7.1909776669999985,
+   "turn": 3,
+   "warm": [
+    {
+     "cached_prompt_tokens": 1219,
+     "completion_tokens": 128,
+     "content": "A keeper's week is a circle of small, steady duties repeated against the sea. Each day begins before dawn with cleaning",
+     "finish_reason": "length",
+     "prompt_tokens": 1306,
+     "reasoning": "The user wants a summary of the keeper's week in a short paragraph. This is a creative/roleplay task about a lighthouse keeper. I should weave in the harbor notes about tide tables (morning low 06:12, evening high 18:47) naturally, since those are the persistent context. Keep it a short paragraph, plain prose, no headers or lists. Cover the weekly rhythm: daily lamp work, cleaning, storm checks, tide-driven schedule, log entries, resupply perhaps.",
+     "wall_s": 3.8320933339999996
+    }
+   ],
+   "warm_wall_s": 3.8322815000000006
+  }
+ ]
+}

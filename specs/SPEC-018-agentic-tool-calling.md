@@ -1,6 +1,6 @@
 # SPEC-018 — Agentic tool calling (provider-side response synthesis)
 
-**Version:** 0.3.15 (2026-11-09, the Solstice GLM-5.3-Flash template keeps its open `<think>`, thinking off only through `none` and structured output; Related: #2244)
+**Version:** 0.3.16 (2026-11-10, an explicit `reasoning_effort` turns thinking on for templates with a thinking switch whose output splits; omitted effort unchanged; Related: #2269)
 **Depends on:** SPEC-001 v1.6, SPEC-002 v1.5.5, SPEC-006 v0.9, SPEC-008 (Pillar A model-hash trust layer — referenced by §10a), SPEC-011 v0.5 (warm-swap heartbeat `model_hash` — referenced by §10a), SPEC-015 v0.4 (receipts canonical output binding — see AC-17 and §N.5)
 **Status:** **LOCKED** at v0.2.10 by the streaming cleanup-rewrite byte-domain clarification. Previously LOCKED at v0.2.9 by the serial-turn `parallel_tool_calls` amendment (omitted/`false` stop after the first complete valid tool). Previously LOCKED at v0.2.8 by the #1594 OpenRouter-aligned AC-53 amendment (no independent messages[] count cap). Previously LOCKED at v0.2.7 by the Qwen3-Coder function-XML tool-call grammar amendment (documents the `<function=…><parameter=…>` XML body that Qwen3-Coder emits as a Qwen-row §3.1 body-grammar alternative, with OpenAI/MCP name charset; pending IMPL/conformance already landed on branch `fix/qwen3coder-toolcall-parse`); previously LOCKED at v0.2.6 by #784 C2b admission-timeout reconciliation — v0.2.4 spec PR #202 and IMPL PR #209 both landed (multi-turn acceptance, token-incremental streaming, `tool_call_id` validation, 1 MiB/2 MiB byte caps). v0.2.5 adds gpt-oss/OpenAI Harmony response parsing as a pending implementation/conformance gap. codex 4-lane r4 0/0/0; Claude blind-spot r2 0/0/0. SPEC-019 already depends on this as "LOCKED". The former "LOCK CANDIDATE pending PR" line was never flipped after merge. (Resolved gap, 2026-07-14, runbook item 15: AC-45's `X-MacProvider-Streaming-Mode` header — set by the coordinator on streaming `200` responses — was stripped by the public gateway's blanket `X-MacProvider-*` filter, making the "header absent" fail condition live on `api.malibu.tech`. Fixed by adding the header to the SPEC-006 v0.9.9 § 5.4 response-pass-through allowlist and un-stripping it at the gateway, validated against AC-45's closed enum. Chosen over scoping AC-45 to the coordinator surface because buyers hit the gateway, so scoping would have left AC-45's buyer-visible promise unmet. AC-45's normative text is unchanged; this is a documentation reconciliation, not a lock amendment. Residual: the coordinator currently emits the diagnostic only on the streaming success path — non-streaming AC-45 emission is a separate coordinator-side completeness item, out of scope for the gateway-strip fix.)
 
@@ -18,6 +18,18 @@ SPEC-018 is the **provider-side response synthesis contract** for OpenAI-wire to
 
 ## Change log
 
+- **v0.3.16 (2026-11-10, Related: #2269):** §3.12 and SPEC-018-R010: an
+  explicit `reasoning_effort` other than `none` renders thinking on
+  (`enable_thinking: true`) on a template with a thinking switch, when the
+  request has a text `response_format`, no `required` or named `tool_choice`
+  and text-only messages, and only when the thinking-on prompt leaves `<think>`
+  open so §3.12 splits the output. The decision reads the buyer's raw effort,
+  not the effort normalized for the template (which injects `low` for tools
+  and structured output). Otherwise the request renders thinking off as
+  before: omitted effort, `none`, structured output, guaranteed tool selection,
+  a template whose thinking-on prompt opens no `<think>` (Qwen3-8B, GLM-4.5,
+  Gemma-4) and a thinking-on render the template rejects. Omitted effort keeps
+  its prompt byte-for-byte. The Prism Bonsai opt-in keeps its own rule.
 - **v0.3.15 (2026-11-09, Related: #2244):** §3.12 and SPEC-018-R010: the exact
   Solstice GLM-5.3-Flash template (SHA-256 `1b927d9a…`) has `enable_thinking`
   bytes but is not a provider-set toggle. It renders an open `<think>` and
@@ -1055,18 +1067,54 @@ identities retain their existing mapping; matching a namespace or a distill
 lookalike does not grant this mapping. An unknown family retains pass-through. The loaded model identity takes precedence
 over a buyer alias. DeepSeek-V4 retains its encoder mapping below, including
 `none` selecting chat mode. Qwen thinking-toggle families (including Qwen3.8),
-GLM-4.5, Nemotron-3 and Gemma-4 keep `enable_thinking: false` (the
+GLM-4.5, Nemotron-3 and Gemma-4 render `enable_thinking: false` unless the
+v0.3.16 explicit-effort rule below turns thinking on (the
 Solstice GLM-5.3-Flash template is not one of them; see SPEC-018-R010 below); templates that
 do not use `reasoning_effort` ignore it. When a request declares tools and
 omits effort, the provider passes `low`; otherwise the template default applies.
 v0.3.2: when the request carries `response_format` `json_object` or
 `json_schema`, the provider passes `low` whatever the buyer sent, and
-templates with `enable_thinking` render with it `false` (as for every
-request), so the reply starts with the JSON where the template allows it.
+templates with `enable_thinking` render with it `false`, so the reply starts
+with the JSON where the template allows it.
 
-**Bonsai thinking opt-in (v0.3.9, SPEC-018-R010).** The unconditional
-thinking-off rule above is amended only for a loaded native
-`PrismHadamardQwen35` model whose template supports `enable_thinking`.
+**Explicit effort on a thinking switch (v0.3.16, SPEC-018-R010).** On a
+template with a thinking switch (the loaded template contains
+`enable_thinking`, other than the Solstice template below), the provider MUST
+render `enable_thinking: true` exactly when all of these hold:
+
+| Condition | Required value |
+|---|---|
+| buyer `reasoning_effort` (raw, before normalization) | present, not null, not `none` |
+| `response_format` | `text` (absent) |
+| `tool_choice` | absent, `auto` or `none` (any tools declaration otherwise) |
+| messages | text only |
+| thinking-on prompt | renders, and its decoded tail leaves `<think>` open (§3.12) |
+
+Every other request MUST render `enable_thinking: false`, the prompt it
+rendered before v0.3.16. In particular: omitted effort, with or without tools,
+keeps thinking off and the normalized `low` for tools; `none` is off;
+`json_object`/`json_schema` are off whatever effort is sent; `required` and
+named `tool_choice` are off until grammar-constrained generation with
+reasoning is tested. The decision MUST NOT read the normalized template effort,
+which injects `low` for tools and structured output. The provider renders the
+thinking-on prompt first and falls back to the thinking-off prompt when that
+render fails or leaves no `<think>` open, so a family whose output cannot be
+split stays off: Qwen3-8B and GLM-4.5 render no `<think>` opener and Gemma-4
+has a thought channel the provider does not parse. The catalog templates this
+turns on are Qwen3.5, Qwen3.6, Qwen3.8 and Nemotron-3; the normalized effort
+still reaches the template, so Qwen3.8 receives `low`, `medium` or `xhigh`
+(above). Serial and continuous-batching prompt preparation MUST make the same
+decision. The output uses the existing split, stop, usage and receipt rules in
+this section. The Prism Bonsai opt-in below keeps its own rule, and the
+`glm`-grammar rule for the Solstice template is unchanged. Models without a
+switch (GLM-5.3, gpt-oss) cannot disable reasoning: `none` renders their
+lowest level, `low`. A request carrying `reasoning_effort` reaches native MTP
+only where SPEC-048-R004 already admits the key (the GLM-5.3 adapter, whose
+templates have no switch), so this rule changes no MTP-admitted prompt.
+
+**Bonsai thinking opt-in (v0.3.9, SPEC-018-R010).** For a loaded native
+`PrismHadamardQwen35` model whose template supports `enable_thinking`, this
+rule replaces the v0.3.16 explicit-effort rule above.
 An explicit `reasoning_effort` of `high`, `xhigh` or `max` MUST set
 `enable_thinking: true` for a text-only request with `response_format: text`
 and no declared tools. Omitted effort, `none`, `minimal`, `low` and `medium`

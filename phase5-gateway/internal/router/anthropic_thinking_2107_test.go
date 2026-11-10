@@ -122,7 +122,7 @@ func TestAnthropicThinkingNeverMapsEnabledToLow(t *testing.T) {
 		{`{"type":"enabled","budget_tokens":16384}`, true, "high"},
 		{`{"type":"enabled"}`, true, "medium"},
 		{`{"type":"adaptive"}`, true, "medium"},
-		{`{"type":"disabled"}`, false, "low"},
+		{`{"type":"disabled"}`, false, "none"},
 		{``, false, ""},
 		{`null`, false, ""},
 	}

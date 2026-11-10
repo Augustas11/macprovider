@@ -274,6 +274,99 @@
       },
       "gateway": "https://api.malibu.tech/v1",
       "model": "Jundot/GLM-5.3-Flash-oQ4e-mtp"
+    },
+    "zai-org/glm-5.3-flash-uncensored": {
+      "capabilities": {
+        "base": true,
+        "messages": true,
+        "reasoning": true,
+        "response_format": true,
+        "responses": true,
+        "tool_choice": [
+          "auto",
+          "none",
+          "required",
+          "named"
+        ],
+        "tools": true
+      },
+      "checked_at": "2026-11-09T22:29:35Z",
+      "checks": {
+        "context_limit_error": {
+          "detail": "request_too_large",
+          "passed": 1,
+          "samples": 1,
+          "status": "pass"
+        },
+        "finish_reason": {
+          "detail": "length at max_tokens",
+          "passed": 3,
+          "samples": 3,
+          "status": "pass"
+        },
+        "json_object": {
+          "detail": "valid JSON object",
+          "passed": 3,
+          "samples": 3,
+          "status": "pass"
+        },
+        "messages_beta_thinking": {
+          "detail": "blocks ['thinking', 'text']",
+          "passed": 3,
+          "samples": 3,
+          "status": "pass"
+        },
+        "no_reasoning_leak": {
+          "detail": "content separated from reasoning",
+          "passed": 3,
+          "samples": 3,
+          "status": "pass"
+        },
+        "responses_function_tool": {
+          "detail": "function_call item",
+          "passed": 3,
+          "samples": 3,
+          "status": "pass"
+        },
+        "stop_sequences": {
+          "detail": "stopped at the stop sequence",
+          "passed": 3,
+          "samples": 3,
+          "status": "pass"
+        },
+        "stream_tool_deltas": {
+          "detail": "2 indexed call(s)",
+          "passed": 3,
+          "samples": 3,
+          "status": "pass"
+        },
+        "tool_round_trip": {
+          "detail": "answered from the tool result",
+          "passed": 3,
+          "samples": 3,
+          "status": "pass"
+        },
+        "tools_auto": {
+          "detail": "auto",
+          "passed": 3,
+          "samples": 3,
+          "status": "pass"
+        },
+        "tools_named": {
+          "detail": "named",
+          "passed": 3,
+          "samples": 3,
+          "status": "pass"
+        },
+        "tools_required": {
+          "detail": "required",
+          "passed": 3,
+          "samples": 3,
+          "status": "pass"
+        }
+      },
+      "gateway": "https://api.malibu.tech/v1",
+      "model": "Solstice-AI/GLM-5.3-Flash-UNCENSORED-mlx-oQ4e-DFlash2"
     }
   },
   "schema_version": "macprovider.buyer-ux-conformance.v1"

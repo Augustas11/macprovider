@@ -1,0 +1,34 @@
+{
+  "catalog_key": "zai-org/glm-5.3-flash-uncensored",
+  "date": "2026-11-10",
+  "measured_tuple": {
+    "cache_class": "mixed",
+    "hardware_class": "apple-silicon:Apple M3 Ultra:ram-256gb",
+    "kernel_identifier": "macprovider_paged_kv_gather_v1",
+    "metallib_sha256": "3d9b4a747758128cc5418e62c5ad8e282a11b0d436423537137e013beaa1261b"
+  },
+  "model_revision": "bff40d24efb689d33e094083ce4a5d6835601730",
+  "model_sha256": "242f8fcfd34d4ecfd62180c1767f910bda925216948772126dc98c673d1c8919",
+  "provider_cli": {
+    "binary_sha256": "bebe98347993c33a42aa574253f93f7b05ee15fd8aef306743c9107d26309de5",
+    "cdhash": "06e8b09ccc79ee9cae9498663d9728c5186b7050",
+    "compatibility_set_id": "Augustas11/macprovider:v1.8.283@ec252246fbf91fbef8d218213e7bb465c0100771",
+    "decode_path_digest": "940e25419bb1f7d90ed122e98969874587f7e327376fdb3b0e72fb7dc3e9a95d",
+    "release_metallib_sha256": "3d9b4a747758128cc5418e62c5ad8e282a11b0d436423537137e013beaa1261b",
+    "runtime_build": "6c27b743bae5dd60eb07954f2819316b22b92094/0.32.3+c774cb0934c7503bc3fe1c3d1afbe44c728e8891+cb-isolation-v1/decode8/verify8+cb-probe-v3/route1024+flat8",
+    "version": "1.8.283"
+  },
+  "schema": "macprovider.cb-attach-proof-record.v1",
+  "served_model_id": "Solstice-AI/GLM-5.3-Flash-UNCENSORED-mlx-oQ4e-DFlash2",
+  "status_v1": {
+    "continuous_batching": {
+      "cache_class": "mixed",
+      "paged_kv_decision": "attached",
+      "policy": {
+        "authorized": false,
+        "decision_reason": "tuple_identity_mismatch",
+        "local_proof_result": "passed"
+      }
+    }
+  }
+}

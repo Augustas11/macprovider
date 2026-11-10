@@ -29,7 +29,10 @@ import (
 //   - tools and reasoning for a family an older provider did not parse need
 //     a provider at toolGrammarProviderMinVersion or later.
 //   - reasoning: the family's template always opens a reasoning block, so
-//     responses carry reasoning_content and honour reasoning_effort.
+//     responses carry reasoning_content and honour reasoning_effort; or a
+//     native provider at onRequestReasoningProviderMinVersion serves a
+//     thinking-switch family whose output splits, which reasons when the
+//     request sends reasoning_effort (SPEC-018 v0.3.16).
 //   - response_format: every native provider validates json_object and strict
 //     json_schema output (SPEC-019).
 //   - vision: at least one provider passes providerSupportsVision.
@@ -108,6 +111,31 @@ func reasoningFamily(model string) bool {
 	return strings.Contains(id, "glm-5") || strings.Contains(id, "gpt-oss") || strings.Contains(id, "deepseek-v4")
 }
 
+// onRequestReasoningProviderMinVersion is the floor for provider CLIs that
+// turn thinking on for an explicit reasoning_effort (SPEC-018 v0.3.16, #2269):
+// the first CLI tag cut after this merge. If the Pearl runtime train takes
+// v1.8.285 for this coordinator/gateway change, the first such CLI is 1.8.286;
+// both satisfy >= 1.8.285.
+const onRequestReasoningProviderMinVersion = "1.8.285"
+
+// onRequestReasoningFamily reports the thinking-switch families whose
+// thinking-on prompt opens `<think>`, so the provider splits the output.
+// Qwen3-8B and GLM-4.5 open none and Gemma-4 has an unparsed thought
+// channel; those stay thinking off.
+func onRequestReasoningFamily(model string) bool {
+	id := strings.ToLower(model)
+	return strings.Contains(id, "qwen3.5") || strings.Contains(id, "qwen3.6") || strings.Contains(id, "qwen3.8") ||
+		strings.Contains(id, "nemotron-3")
+}
+
+func providerServesOnRequestReasoning(p pool.Provider) bool {
+	if p.ShardGroupHeadV1 || (p.RuntimeSource != "" && p.RuntimeSource != engineClassNative) || !onRequestReasoningFamily(p.ModelID) {
+		return false
+	}
+	cmp, ok := versionfloor.Compare(p.BinaryVersion, onRequestReasoningProviderMinVersion)
+	return ok && cmp >= 0
+}
+
 func mergeModelCapabilities(current *modelCapabilities, p pool.Provider, vision bool) *modelCapabilities {
 	caps := current
 	if caps == nil {
@@ -132,6 +160,9 @@ func mergeModelCapabilities(current *modelCapabilities, p pool.Provider, vision 
 		}
 	}
 	if reasoningFamily(p.ModelID) && (strings.Contains(strings.ToLower(p.ModelID), "gpt-oss") || providerServesToolGrammars(p)) {
+		caps.Reasoning = true
+	}
+	if providerServesOnRequestReasoning(p) {
 		caps.Reasoning = true
 	}
 	// A shard group head refuses response_format
