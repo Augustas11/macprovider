@@ -1,11 +1,28 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.39
+Version: v0.3.40
 Status: draft (normative contract; runtime enablement is default-on per Mac behind the FR-CB10 on-device self-check, v0.3.15)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.3.40 (2026-11-10, FR-CB2 bypass charging follows arrival; prefill decode window 2):**
+FR-CB2 prefill order: a passed-over row is charged a bypass turn only when
+the head was admitted after it. Before, a later and longer prompt passed by an
+earlier, shorter head aged after 8 turns and then led until its own prompt was
+done, holding the earlier prompt's remaining chunks behind it: on an M5,
+staggered 1K/4K/8K/16K prompts (8K admitted 5 s before 16K), the 8K row's
+first token came at 80 s against 44 s for upstream mlx-swift-lm PR #771,
+which finishes one prompt before the next. A stream of later, shorter prompts
+still ages an earlier long prompt after 8 turns, so the starvation bound is
+unchanged; the fewest-tokens-left order, the idle cohort rule and every
+grouping, chunk and kernel-route rule are unchanged. The prefill decode
+window at a chunk of 512 tokens or less is 2 steps (was 8): on the same M5
+run, 2 steps matched PR #771's 16K first token with lower running-row
+latency (1.38 s vs 1.77 s per token). Larger chunks keep 8 steps per 512
+prefilled tokens, so the `glm5_next` 2048-token chunk keeps the full
+lockstep window validated in #2100.
+
 **Change log v0.3.39 (2026-11-09, FR-CB10 admission hold admits buyer arrivals, Related: #2257):**
 FR-CB10 item 3: the 20 s buyer-wait bound counts only buyer requests, and
 only the time each waits behind the check's exclusive probe residency (held
@@ -534,7 +551,8 @@ production) and is capped by each row's remaining output budget.
 - W is 1 whenever a request waits for a free slot or is being admitted, so it
   joins at the next hop boundary.
 - While a prompt is mid-prefill and nothing else waits to join, W is at most
-  the prefill decode window (8 in production). The rule was one token per
+  the prefill decode window (2 in production at the 512-token chunk,
+  v0.3.40). The rule was one token per
   prefill chunk, which left active rows at about 0.6 tok/s behind a long
   prompt on the M3 Ultra, because a 512-token chunk costs about as much as
   30–50 decode steps.
@@ -995,8 +1013,9 @@ rows to group selection in this order: first every aged row, in round-robin
 turn order; then the other rows by fewest prompt tokens left (prompt length
 minus committed prefill cursor), ties in round-robin turn order. The first row
 offered is the group head. A row that stands ahead of the head in round-robin
-turn order and is not selected for the turn MUST be charged one bypass turn;
-a row with 8 bypass turns (`ContinuousBatchPrefillOrder.maxBypassTurns`) is
+turn order, is not selected for the turn and was admitted before the head
+(v0.3.40) MUST be charged one bypass turn; a row passed by a head admitted
+before it is not charged; a row with 8 bypass turns (`ContinuousBatchPrefillOrder.maxBypassTurns`) is
 aged and MUST stay aged until its prompt is done. An aged row is never charged
 again, so no row is passed over more than 8 times, and an aged row progresses
 at least as fast as round-robin order would let it. When no row decodes, a
@@ -1015,9 +1034,9 @@ is the backend family's prompt chunk ceiling: 2048 tokens for a `glm5_next`
 An operator-set `prefill_step_size` MAY lower the limit and MUST NOT raise it
 above the ceiling; when it is unset the limit is the ceiling. The
 per-iteration budget still bounds every chunk. The prefill decode window MUST
-scale with the limit, keeping active rows' decode steps per prefilled token:
-the default (8) at a 512-token chunk, proportionally more at a larger chunk,
-never below the default, and never above the lockstep window. A family's
+scale with the limit: (v0.3.40) the default (2) at a chunk of 512 tokens or
+less; above 512, 8 steps per 512 prefilled tokens (16 at 1024, 32 at 2048),
+never above the lockstep window. A family's
 ceiling rises only with a same-build measurement of its prefill throughput and
 greedy parity at the new chunk.
 

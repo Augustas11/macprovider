@@ -126,6 +126,85 @@ final class PagedKVDecodeSessionStorageTests: XCTestCase {
         try Self.assertRows(rows, equal: references, "after leaving")
     }
 
+    /// A row joining a session: packing the new batch one layer at a time and
+    /// dropping each replaced layer right after keeps the peak near the new
+    /// batch alone. Packing every layer lazily held the old batch, the joining
+    /// row's own K/V and the new batch together. The rows keep exact K/V.
+    func testLayerByLayerSessionReplacementFreesTheOldBatchAndJoiningRowCopy() throws {
+        try requireMetal()
+        let layers = 8
+        let heads = 8
+        let dim = 64
+        let lengths = [512, 1_024, 2_048]
+        let joiningLength = 4_096
+        let previousCacheLimit = Memory.cacheLimit
+        Memory.cacheLimit = 0
+        defer { Memory.cacheLimit = previousCacheLimit }
+
+        func setUp(_ salt: Int) -> (old: [any KVCache], rows: [[PagedKVCache]], references: [[PagedKVCache]]) {
+            MLXRandom.seed(UInt64(2300 + salt))
+            var old: [any KVCache] = []
+            var rows: [[PagedKVCache]] = []
+            var references: [[PagedKVCache]] = []
+            for _ in 0 ..< layers {
+                let layerRows = (lengths + [joiningLength]).map { _ in Self.rowCache() }
+                let layerReferences = (lengths + [joiningLength]).map { _ in Self.rowCache() }
+                for (index, length) in (lengths + [joiningLength]).enumerated() {
+                    let keys = MLXRandom.normal([1, heads, length, dim]).asType(.float16)
+                    let values = MLXRandom.normal([1, heads, length, dim]).asType(.float16)
+                    _ = layerRows[index].update(keys: keys, values: values)
+                    _ = layerReferences[index].update(keys: keys, values: values)
+                }
+                eval(layerRows.flatMap(\.state), layerReferences.flatMap(\.state))
+                let batch = PagedKVSharedForwardBackend.batchLayerCacheForTest(
+                    rowCaches: Array(layerRows.prefix(lengths.count)), attachRows: true
+                )
+                PagedKVSharedForwardBackend.materializeBatchForTest(batch)
+                old.append(batch)
+                rows.append(layerRows)
+                references.append(layerReferences)
+            }
+            return (old, rows, references)
+        }
+
+        func join(layerByLayer: Bool) throws -> Int {
+            var (old, rows, references) = setUp(layerByLayer ? 1 : 0)
+            Memory.clearCache()
+            Memory.peakMemory = 0
+            let base = Memory.activeMemory
+            var joined: [any KVCache] = []
+            for layer in 0 ..< layers {
+                joined.append(PagedKVSharedForwardBackend.batchLayerCacheForTest(rowCaches: rows[layer], attachRows: true))
+                if layerByLayer {
+                    PagedKVSharedForwardBackend.materializeBatchForTest(joined[layer])
+                    PagedKVSharedForwardBackend.releaseBatchForTest(old[layer])
+                }
+            }
+            if !layerByLayer {
+                old.forEach(PagedKVSharedForwardBackend.detachBatchRowsForTest)
+                joined.forEach(PagedKVSharedForwardBackend.materializeBatchForTest)
+            }
+            old.removeAll()
+            let peak = Memory.peakMemory - base
+            for layer in 0 ..< layers {
+                XCTAssertTrue(rows[layer].allSatisfy { !$0.holdsOwnKVBuffers }, "layer \(layer)")
+                try Self.assertRows(rows[layer], equal: references[layer], "layer \(layer)")
+            }
+            joined.removeAll()
+            rows.removeAll()
+            references.removeAll()
+            return peak
+        }
+
+        let lazyPeak = try join(layerByLayer: false)
+        let layerPeak = try join(layerByLayer: true)
+        // Per layer: old batch 3 x 2048 tokens, joining row 4096, new batch
+        // 4 x (4096 + growth) tokens, fp16.
+        let tokenBytes = heads * dim * 2 * 2
+        let oldAndJoining = layers * (3 * 2_048 + joiningLength) * tokenBytes
+        XCTAssertLessThan(layerPeak, lazyPeak - oldAndJoining / 2, "lazy \(lazyPeak) layer-by-layer \(layerPeak)")
+    }
+
     // MARK: - Backend decode sessions
 
     /// Mixed-length rows (one past the 512-token chunk) decode in shared

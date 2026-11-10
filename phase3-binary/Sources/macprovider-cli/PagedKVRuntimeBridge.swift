@@ -2550,8 +2550,20 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 attachRows: !cacheKinds.contains(.recurrentMamba)
             )
             // Packing re-attached the rows that ride on; rows that left with
-            // the old session get their own K/V back.
-            previous?.batchedCaches.forEach { $0.releaseRows() }
+            // the old session get their own K/V back. Build the new batch one
+            // layer at a time and drop each replaced layer as soon as its
+            // successor is packed: evaluated lazily at the first forward,
+            // every layer of the old batch, the joining rows' own K/V and the
+            // new batch were resident together (a 16K row joining 1K/4K/8K
+            // rows: an estimated 6 GB on top of the new 9 GB batch).
+            let replaced = previous?.batchedCaches ?? []
+            for index in batchedCaches.indices {
+                batchedCaches[index].materializePacked()
+                if replaced.indices.contains(index) {
+                    replaced[index].releaseRowsAndBuffers()
+                }
+            }
+            if previous != nil { storeDecodeSession(nil) }
             session = DecodeSession(
                 requestIDs: requestIDs,
                 batchedCaches: batchedCaches,
@@ -4292,6 +4304,16 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         (cache as? PagedKVBatchLayerCache)?.detachRows()
     }
 
+    /// A decode session replacing `cache` evaluates its successor layer and
+    /// then this (`PagedKVSharedLayerBatch.releaseRowsAndBuffers`).
+    static func releaseBatchForTest(_ cache: any KVCache) {
+        (cache as? PagedKVBatchLayerCache)?.detachRowsAndRelease()
+    }
+
+    static func materializeBatchForTest(_ cache: any KVCache) {
+        (cache as? PagedKVBatchLayerCache)?.materialize()
+    }
+
     /// A decode window end on a `batchLayerCacheForTest` batch.
     static func syncBatchRowsForTest(_ cache: any KVCache) {
         (cache as? PagedKVBatchLayerCache)?.syncRowsFromBatch()
@@ -4878,6 +4900,20 @@ private struct PagedKVSharedLayerBatch {
         }
     }
 
+    /// `releaseRows` for a batch that is being replaced, also dropping its
+    /// buffers so a replaced layer frees as soon as nothing reads it.
+    func releaseRowsAndBuffers() {
+        if let cache = cache as? PagedKVBatchLayerCache {
+            cache.detachRowsAndRelease()
+        } else {
+            syncRowsFromBatchClosure()
+        }
+    }
+
+    func materializePacked() {
+        (cache as? PagedKVBatchLayerCache)?.materialize()
+    }
+
     func writebackCompiledInnerState(_ compiledState: [MLXArray], targets: [Int]) throws {
         try writebackCompiledInnerStateClosure(compiledState, targets)
     }
@@ -5197,6 +5233,25 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAtt
         for cache in rowCaches where cache.isAttached(to: storage) {
             cache.detachFromBatch()
         }
+    }
+
+    /// Evaluates the packed batch buffers now, so the arrays they were packed
+    /// from (an older batch's buffers, joining rows' own K/V) can be freed
+    /// layer by layer instead of all staying resident until the first forward.
+    func materialize() {
+        guard let keys, let values else { return }
+        eval(keys, values)
+    }
+
+    /// `detachRows`, then drops this batch's buffers. Rows that left get a
+    /// lazy copy of their history first, which keeps only what they need.
+    func detachRowsAndRelease() {
+        detachRows()
+        keys = nil
+        values = nil
+        length = 0
+        rowMutationCounts = nil
+        batchedOffset = nil
     }
 
     var offset: Int {

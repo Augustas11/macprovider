@@ -1091,10 +1091,23 @@ enum ContinuousBatchPrefillOrder {
     }
 
     /// Rows ahead of this turn's head in round-robin order that the turn did
-    /// not select: each is charged one bypass turn.
-    static func bypassed(roundRobinOrder: [String], head: String, selected: Set<String>) -> [String] {
+    /// not select and that arrived before the head (lower `arrival`
+    /// sequence): each is charged one bypass turn. A row passed by an
+    /// earlier-arrived head is not charged, so a later, longer prompt never
+    /// ages past an earlier one and takes the lead from it mid-prefill. A row
+    /// without a known sequence is charged.
+    static func bypassed(
+        roundRobinOrder: [String],
+        head: String,
+        selected: Set<String>,
+        arrival: [String: UInt64] = [:]
+    ) -> [String] {
         guard let index = roundRobinOrder.firstIndex(of: head) else { return [] }
-        return roundRobinOrder[..<index].filter { !selected.contains($0) }
+        return roundRobinOrder[..<index].filter { id in
+            guard !selected.contains(id) else { return false }
+            guard let rowArrival = arrival[id], let headArrival = arrival[head] else { return true }
+            return rowArrival < headArrival
+        }
     }
 }
 
@@ -6041,7 +6054,8 @@ actor ContinuousBatchScheduler {
         for id in ContinuousBatchPrefillOrder.bypassed(
             roundRobinOrder: promptOrder.filter { activePrompt[$0] != nil },
             head: head.row.request.id,
-            selected: Set(selected.map { $0.row.request.id })
+            selected: Set(selected.map { $0.row.request.id }),
+            arrival: requestAdmissionSequences
         ) {
             activePrompt[id]?.prefillBypassTurns += 1
         }

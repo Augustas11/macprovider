@@ -6972,6 +6972,82 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertLessThanOrEqual(longLedAt.last ?? .max, 2 * maxBypass + 10)
     }
 
+    /// v0.3.40: only a head admitted after a passed-over row charges it.
+    func testPrefillBypassChargesOnlyRowsAdmittedBeforeTheHead() {
+        let arrival: [String: UInt64] = ["old": 1, "head": 2, "new": 3]
+        XCTAssertEqual(
+            ContinuousBatchPrefillOrder.bypassed(
+                roundRobinOrder: ["new", "old", "head"], head: "head", selected: ["head"], arrival: arrival
+            ),
+            ["old"]
+        )
+        // A row without a known admission sequence is still charged.
+        XCTAssertEqual(
+            ContinuousBatchPrefillOrder.bypassed(
+                roundRobinOrder: ["unknown", "head"], head: "head", selected: ["head"], arrival: arrival
+            ),
+            ["unknown"]
+        )
+    }
+
+    /// The prefill turns of an earlier 8K prompt and a later 16K prompt
+    /// (512-token chunks, one row per turn while rows decode): the earlier
+    /// prompt finishes every chunk before the later one leads, and a stream
+    /// of later, shorter prompts still ages an earlier long prompt.
+    func testEarlierPromptFinishesBeforeALaterLongerPromptAgesPastIt() {
+        typealias Candidate = ContinuousBatchPrefillOrder.Candidate
+        func run(
+            _ initial: [(id: String, chunks: Int)],
+            arrivals: [(turn: Int, id: String, chunks: Int)] = [],
+            turns: Int
+        ) -> [String] {
+            var remaining: [String: Int] = [:]
+            var bypass: [String: Int] = [:]
+            var arrival: [String: UInt64] = [:]
+            var roundRobin: [String] = []
+            var sequence: UInt64 = 0
+            func admit(_ id: String, _ chunks: Int) {
+                remaining[id] = chunks
+                bypass[id] = 0
+                arrival[id] = sequence
+                sequence += 1
+                roundRobin.append(id)
+            }
+            initial.forEach { admit($0.id, $0.chunks) }
+            var heads: [String] = []
+            for turn in 0 ..< turns where !roundRobin.isEmpty {
+                arrivals.filter { $0.turn == turn }.forEach { admit($0.id, $0.chunks) }
+                let order = ContinuousBatchPrefillOrder.order(roundRobin.map {
+                    Candidate(requestID: $0, remainingPromptTokens: remaining[$0]! * 512, bypassTurns: bypass[$0]!)
+                })
+                let head = order[0]
+                for id in ContinuousBatchPrefillOrder.bypassed(
+                    roundRobinOrder: roundRobin, head: head, selected: [head], arrival: arrival
+                ) {
+                    bypass[id, default: 0] += 1
+                }
+                heads.append(head)
+                remaining[head]! -= 1
+                roundRobin.removeAll { $0 == head }
+                if remaining[head]! > 0 { roundRobin.append(head) }
+            }
+            return heads
+        }
+
+        // 16K arrives with 14 of the 8K row's chunks left: 8K keeps the lead
+        // for all of them, then 16K runs. Before v0.3.40 the 16K row aged
+        // after 8 turns and then led until its prompt was done.
+        let heads = run([("8k", 16)], arrivals: [(2, "16k", 32)], turns: 48)
+        XCTAssertEqual(Array(heads.prefix(16)), Array(repeating: "8k", count: 16))
+        XCTAssertEqual(Array(heads.dropFirst(16)), Array(repeating: "16k", count: 32))
+        // 16K admitted first: the shorter, later 8K leads, and 16K, passed by
+        // a later head, ages and leads after `maxBypassTurns` turns.
+        let aged = run([("16k", 32), ("8k", 16)], turns: 48)
+        let maxBypass = ContinuousBatchPrefillOrder.maxBypassTurns
+        XCTAssertEqual(Array(aged.prefix(maxBypass)), Array(repeating: "8k", count: maxBypass))
+        XCTAssertEqual(aged[maxBypass], "16k")
+    }
+
     func testRaggedPrefillGroupingCohortBudgetAdmitsOnlyRowsFinishingWithTheHead() {
         let candidates = [
             ContinuousBatchPrefillCandidate(
