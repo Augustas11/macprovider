@@ -9,14 +9,6 @@ import XCTest
 /// in the post-sanitize and the Hugging Face pre-sanitize layouts, and
 /// SPEC-023-R024 (v0.22.27) override widths and exception bound.
 final class NativeMTPGLM5NextObservationTests: XCTestCase {
-    // The sanitizer pin test builds MLX arrays; CI runners have no metallib,
-    // so every test here runs on the CPU device.
-    override func invokeTest() {
-        Device.withDefaultDevice(Device(.cpu)) {
-            super.invokeTest()
-        }
-    }
-
     private struct TensorFixture {
         let name: String
         let dtype: String
@@ -353,6 +345,10 @@ final class NativeMTPGLM5NextObservationTests: XCTestCase {
     /// module paths `sanitize(perLayerQuantization:)` adds, must equal the
     /// observer's. A fork bump that changes the mapping fails here.
     func testLoaderKeyMappingMatchesThePinnedGLM5NextSanitizer() throws {
+        // Builds MLX arrays; CI runners have no metallib.
+        guard PagedKVMetallibGate.defaultMetallibExists() else {
+            throw XCTSkip("MLX default metallib is unavailable in this test host")
+        }
         let model = GLM5NextModel(try ConversationPromptSnapshotTests.tinyGLMConfiguration())
         let hiddenLayers = 6
         func floats(_ shape: [Int]) -> MLXArray { MLXArray.zeros(shape, dtype: .bfloat16) }
