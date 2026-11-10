@@ -296,6 +296,23 @@ final class NativeMTPGLM5NextObservationTests: XCTestCase {
         }
     }
 
+    func testHuggingFaceLayoutIgnoresVisionTowerOverridesButRejectsUnmatchedTextOnes() throws {
+        var overrides = Self.hfOverrides
+        overrides["model.visual.merger.proj"] = ["bits": 8, "group_size": 64]
+        try withDirectory(config: hfConfig(overrides: overrides), tensors: hfTensors()) { directory in
+            XCTAssertNoThrow(try NativeMTPArtifactObserver.observeEmbedded(targetDirectory: directory))
+        }
+        overrides["model.language_model.layers.0.self_attn.nonexistent_proj"] = ["bits": 8, "group_size": 64]
+        try withDirectory(config: hfConfig(overrides: overrides), tensors: hfTensors()) { directory in
+            XCTAssertThrowsError(try NativeMTPArtifactObserver.observeEmbedded(targetDirectory: directory)) { error in
+                XCTAssertEqual(
+                    error as? NativeMTPArtifactObservationError,
+                    .unsupportedQuantization("mlx_affine_4bit unmatched module override")
+                )
+            }
+        }
+    }
+
     func testHuggingFaceLayoutRejectsPerExpertOverridesThatDisagree() throws {
         var overrides = Self.hfOverrides
         overrides["model.language_model.layers.0.mlp.experts.1.up_proj"] = ["bits": 6, "group_size": 64]
@@ -392,6 +409,15 @@ final class NativeMTPGLM5NextObservationTests: XCTestCase {
             "model.language_model.layers.6.self_attn.o_proj",
             "language_model.model.layers.0.self_attn.o_proj",
             "model.visual.merger.proj",
+            "model.language_model.layers.0.self_attn.q_conv1d",
+            "model.language_model.layers.0.self_attn.k_conv1d",
+            "model.language_model.layers.0.self_attn.v_conv1d",
+            "model.language_model.layers.4.mlp.gate",
+            "model.language_model.layers.4.mlp.shared_experts.up_proj",
+            "model.language_model.layers.0.self_attn.forget_gate.f_a_proj",
+            "model.visual.blocks.0.attn.qkv",
+            "visual.merger.proj",
+            "vision_tower.blocks.0.mlp",
         ]
         let perLayer = BaseConfiguration.PerLayerQuantization(
             quantization: BaseConfiguration.Quantization(groupSize: 64, bits: 4),
@@ -407,6 +433,12 @@ final class NativeMTPGLM5NextObservationTests: XCTestCase {
             }
         }
         XCTAssertEqual(observedPaths, sanitizedPaths)
+        for key in quantizationKeys where NativeMTPArtifactObserver.glm5NextIsVisionQuantizationKey(key) {
+            XCTAssertEqual(
+                NativeMTPArtifactObserver.glm5NextQuantizationModulePaths(key, hiddenLayers: hiddenLayers), []
+            )
+        }
+        XCTAssertEqual(quantizationKeys.filter(NativeMTPArtifactObserver.glm5NextIsVisionQuantizationKey).count, 4)
     }
 
     /// A separate-artifact pair records target and MTP overrides under their

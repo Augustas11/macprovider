@@ -700,7 +700,13 @@ enum NativeMTPArtifactObserver {
         }
         // An override that names no packed tensor is unmanifested metadata;
         // accepting it would let config drift silently change quantization.
-        guard consumedOverrides == Set(moduleOverrides.keys) else {
+        // GLM5Next: the text path drops the vision tower, so an override that
+        // names a vision-tower module is ignored, as the loader ignores it.
+        var ignoredOverrides: Set<String> = []
+        if case .glm5Next = policy {
+            ignoredOverrides = Set(moduleOverrides.keys.filter(glm5NextIsVisionQuantizationKey))
+        }
+        guard consumedOverrides.union(ignoredOverrides) == Set(moduleOverrides.keys) else {
             throw NativeMTPArtifactObservationError.unsupportedQuantization("\(quantizationName) unmatched module override")
         }
         guard consumedUnquantized == representation.permittedUnquantizedModules else {
@@ -972,6 +978,10 @@ enum NativeMTPArtifactObserver {
 
     // MARK: GLM5Next loader key mapping
     //
+    // This copy must move together with the mlx-swift-lm pin: a pin bump
+    // re-derives these rules from the fork, and
+    // `testLoaderKeyMappingMatchesThePinnedGLM5NextSanitizer` is its guard.
+    //
     // A copy of the name rules of `GLM5NextWeights` in the pinned mlx-swift-lm
     // fork (Libraries/MLXLLM/Models/GLM5Next.swift), which is internal to
     // MLXLLM. `NativeMTPGLM5NextObservationTests` runs the fork's public
@@ -1020,6 +1030,11 @@ enum NativeMTPArtifactObserver {
             key = String(key.dropLast(part.count)) + "forget_gate." + part
         }
         return key
+    }
+
+    /// A config `quantization` key naming a vision-tower module.
+    static func glm5NextIsVisionQuantizationKey(_ key: String) -> Bool {
+        glm5NextVisionPrefixes.contains(where: { (key + ".weight").hasPrefix($0) })
     }
 
     private static let glm5NextForgetGateParts = [
