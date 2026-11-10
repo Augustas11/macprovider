@@ -129,6 +129,14 @@ enum PagedKVBlockLayout {
     }
 }
 
+/// The `[B, H, capacity, D]` K/V buffers of one decode-session batch layer.
+/// Row caches attached to it (`PagedKVCache.attachToBatch`) read their K/V
+/// from their row of these buffers instead of keeping their own copy.
+final class PagedKVBatchStorage {
+    var keys: MLXArray?
+    var values: MLXArray?
+}
+
 /// Compile-time `KVCache` seam for the future installed paged runtime bridge.
 ///
 /// Production `ModelRuntime` attempts measured observation and instantiates this
@@ -159,6 +167,12 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
     /// the whole history, which made batched decode O(context) per step.
     private var keyBuffer: MLXArray?
     private var valueBuffer: MLXArray?
+    /// Set while this row rides a decode-session batch that holds its K/V:
+    /// the row's K/V is row `row` of `storage`, and `keyBuffer`/`valueBuffer`
+    /// are nil, so the row's history is stored once, not once in the row and
+    /// again in the padded batch. Any write to the row first copies its K/V
+    /// back out (`detachFromBatch`).
+    private var batchSlot: (storage: PagedKVBatchStorage, row: Int)?
     /// Logical tokens held in the buffers. Tracks what the old block list held,
     /// which can be less than `offset` when the cache starts at a nonzero
     /// `initialOffset` with no stored K/V.
@@ -236,7 +250,73 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
     var maxSize: Int? { maxResidentTokens }
 
     /// Allocated sequence capacity of the backing buffers (>= `storedTokens`).
-    var bufferCapacityTokens: Int { keyBuffer?.dim(2) ?? 0 }
+    var bufferCapacityTokens: Int { keyStore?.dim(2) ?? 0 }
+
+    /// Whether the row holds K/V buffers of its own (false while attached).
+    var holdsOwnKVBuffers: Bool { keyBuffer != nil || valueBuffer != nil }
+
+    /// Whether this row's K/V lives in `storage` (see `batchSlot`).
+    func isAttached(to storage: PagedKVBatchStorage) -> Bool {
+        batchSlot?.storage === storage
+    }
+
+    /// The row's backing buffers: its own, or its row of the batch it rides.
+    private var keyStore: MLXArray? {
+        guard let batchSlot else { return keyBuffer }
+        return batchSlot.storage.keys.map { $0[batchSlot.row ..< batchSlot.row + 1, 0..., 0..., 0...] }
+    }
+
+    private var valueStore: MLXArray? {
+        guard let batchSlot else { return valueBuffer }
+        return batchSlot.storage.values.map { $0[batchSlot.row ..< batchSlot.row + 1, 0..., 0..., 0...] }
+    }
+
+    /// Hands this row's K/V to row `row` of `storage`, which must already
+    /// hold the row's first `storedTokens` tokens, and drops the row's own
+    /// buffers. Stored K/V is unchanged, so `mutationCount` is too.
+    func attachToBatch(_ storage: PagedKVBatchStorage, row: Int) {
+        batchSlot = (storage, row)
+        keyBuffer = nil
+        valueBuffer = nil
+    }
+
+    /// Copies the row's K/V out of the batch it rides into fresh buffers of
+    /// its own (never views, so the batch buffers can be freed). No-op for a
+    /// row that is not attached.
+    func detachFromBatch() {
+        guard batchSlot != nil else { return }
+        let keys = keyStore
+        let values = valueStore
+        batchSlot = nil
+        guard storedTokens > 0, let keys, let values else { return }
+        let capacity = PagedKVBlockLayout.alignedCapacity(tokens: storedTokens, blockSizeTokens: blockSizeTokens)
+        keyBuffer = Self.resized(keys, stored: storedTokens, capacity: capacity)
+        valueBuffer = Self.resized(values, stored: storedTokens, capacity: capacity)
+    }
+
+    /// The capacity guard `update` applies to `incomingTokens` new tokens.
+    func canAppend(_ incomingTokens: Int) -> Bool {
+        let (projectedOffset, overflow) = offset.addingReportingOverflow(incomingTokens)
+        return !overflow && projectedOffset <= maxResidentTokens
+    }
+
+    /// Bookkeeping of `update` for an attached row whose batch already wrote
+    /// the `incomingTokens` new tokens into its row of the batch buffers.
+    func advanceInBatch(_ incomingTokens: Int) {
+        storedTokens += incomingTokens
+        offset += incomingTokens
+        if incomingTokens > 1 { slidingRingAnchor = offset }
+        mutationCount &+= 1
+    }
+
+    /// Bookkeeping of a `state` restore to the batch's first `tokens` tokens
+    /// for an attached row (a lockstep batch syncing its rows).
+    func adoptBatchLength(_ tokens: Int) {
+        offset = tokens
+        storedTokens = tokens
+        slidingRingAnchor = offset
+        mutationCount &+= 1
+    }
 
     func innerState() -> [MLXArray] {
         state
@@ -254,6 +334,7 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
         guard incomingTokens == values.dim(2) else { return (keys, values) }
         let (projectedOffset, offsetOverflow) = offset.addingReportingOverflow(incomingTokens)
         guard !offsetOverflow, projectedOffset <= maxResidentTokens else { return (keys, values) }
+        detachFromBatch()
 
         let start = storedTokens
         let end = start + incomingTokens
@@ -385,10 +466,10 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
 
     var state: [MLXArray] {
         get {
-            guard storedTokens > 0, let keyBuffer, let valueBuffer else {
+            guard storedTokens > 0, let keyStore, let valueStore else {
                 return []
             }
-            return [Self.prefix(keyBuffer, storedTokens), Self.prefix(valueBuffer, storedTokens)]
+            return [Self.prefix(keyStore, storedTokens), Self.prefix(valueStore, storedTokens)]
         }
         set {
             // Controlled handling (inert seam): ignore malformed state assignments rather
@@ -398,6 +479,8 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
             let keys = newValue[0]
             let values = newValue[1]
             guard keys.ndim == 4, values.ndim == 4, keys.dim(2) == values.dim(2) else { return }
+            // The adopted K/V replaces the row's history, so nothing is copied out.
+            batchSlot = nil
             offset = keys.dim(2)
             // Adopt as exact-capacity buffers without copying data. Wrap in new
             // slice objects: after a `trim` frees capacity, `update` writes in
@@ -434,6 +517,7 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
     func trim(_ n: Int) -> Int {
         let trimmed = min(offset, max(n, 0))
         guard trimmed > 0 else { return 0 }
+        detachFromBatch()
         offset -= trimmed
         storedTokens = min(storedTokens, offset)
         // A trim resumes from a prefix: a serial run holds that prefix in
@@ -495,8 +579,8 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
     func validateContiguousMaterializationLayout() throws {
         let blockCount = PagedKVBlockLayout.blockCount(tokens: storedTokens, blockSizeTokens: blockSizeTokens)
         guard blockCount > 0,
-              let keyBuffer,
-              let valueBuffer,
+              let keyBuffer = keyStore,
+              let valueBuffer = valueStore,
               keyBuffer.ndim >= 3,
               valueBuffer.ndim >= 3,
               Self.firstBlockShape(keyBuffer, storedTokens: storedTokens, blockSizeTokens: blockSizeTokens)
@@ -504,7 +588,7 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
               keyBuffer.dtype == valueBuffer.dtype
         else {
             #if DEBUG || MACPROVIDER_LAB_HARNESS
-            CBTrace.log(nil, "cache_record_invalid_layer blocks=\(blockCount) stored=\(storedTokens) key_shape=\(keyBuffer?.shape.description ?? "nil") value_shape=\(valueBuffer?.shape.description ?? "nil") key_dtype=\(keyBuffer.map { String(describing: $0.dtype) } ?? "nil") value_dtype=\(valueBuffer.map { String(describing: $0.dtype) } ?? "nil")")
+            CBTrace.log(nil, "cache_record_invalid_layer blocks=\(blockCount) stored=\(storedTokens) key_shape=\(keyStore?.shape.description ?? "nil") value_shape=\(valueStore?.shape.description ?? "nil") key_dtype=\(keyStore.map { String(describing: $0.dtype) } ?? "nil") value_dtype=\(valueStore.map { String(describing: $0.dtype) } ?? "nil")")
             #endif
             throw PagedKVContiguousCacheBridgeError.invalidLayerState
         }
@@ -522,8 +606,8 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
         layerIndex: Int,
         table: PagedKVBlockTable
     ) throws -> PagedKVRuntimePhysicalLayerBlocks {
-        let keyBlocks = blockViews(keyBuffer)
-        let valueBlocks = blockViews(valueBuffer)
+        let keyBlocks = blockViews(keyStore)
+        let valueBlocks = blockViews(valueStore)
         guard offset == table.logicalTokenCount,
               table.blockSizeTokens == blockSizeTokens,
               keyBlocks.count == valueBlocks.count,

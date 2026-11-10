@@ -2540,8 +2540,18 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         if let existing = session, existing.requestIDs == requestIDs {
             batchedCaches = existing.batchedCaches
         } else {
-            session?.batchedCaches.forEach { $0.syncRowsFromBatch() }
-            batchedCaches = try makeBatchedCaches(from: rowStates.map(\.caches))
+            let previous = session
+            previous?.batchedCaches.forEach { $0.syncRowsFromBatch() }
+            // While rows ride the session, its batch buffers are their only
+            // K/V. Hybrid (recurrent) sessions are rebuilt every window, so
+            // their rows keep their own K/V.
+            batchedCaches = try makeBatchedCaches(
+                from: rowStates.map(\.caches),
+                attachRows: !cacheKinds.contains(.recurrentMamba)
+            )
+            // Packing re-attached the rows that ride on; rows that left with
+            // the old session get their own K/V back.
+            previous?.batchedCaches.forEach { $0.releaseRows() }
             session = DecodeSession(
                 requestIDs: requestIDs,
                 batchedCaches: batchedCaches,
@@ -4189,7 +4199,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         let session = decodeSession
         decodeSession = nil
         lock.unlock()
-        session?.batchedCaches.forEach { $0.syncRowsFromBatch() }
+        session?.batchedCaches.forEach { $0.releaseRows() }
     }
 
     private func invalidateDecodeSession(containing requestID: String) {
@@ -4211,7 +4221,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             session = nil
         }
         lock.unlock()
-        session?.batchedCaches.forEach { $0.syncRowsFromBatch() }
+        session?.batchedCaches.forEach { $0.releaseRows() }
     }
 
     /// A row's stored drafter state, next proposal, and buffered depth-zero
@@ -4242,6 +4252,12 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         return rows.count
     }
 
+    /// Whether any paged attention layer of a retained row keeps K/V buffers
+    /// of its own; nil for an unknown row.
+    func rowHoldsOwnKVForTest(requestID: String) -> Bool? {
+        existingRowState(for: requestID)?.caches.contains { ($0 as? PagedKVCache)?.holdsOwnKVBuffers == true }
+    }
+
     func installRowStateForTest(
         caches: [KVCache],
         requestID: String,
@@ -4266,8 +4282,19 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         try cache.prepareMTPPackedVerification(rowMaps: rowMaps)
     }
 
-    static func batchLayerCacheForTest(rowCaches: [PagedKVCache]) -> any KVCache {
-        PagedKVBatchLayerCache(rowCaches: rowCaches)
+    static func batchLayerCacheForTest(rowCaches: [PagedKVCache], attachRows: Bool = false) -> any KVCache {
+        PagedKVBatchLayerCache(rowCaches: rowCaches, attachRows: attachRows)
+    }
+
+    /// Ends a `batchLayerCacheForTest` batch for its rows, as a decode
+    /// session does when it ends.
+    static func detachBatchRowsForTest(_ cache: any KVCache) {
+        (cache as? PagedKVBatchLayerCache)?.detachRows()
+    }
+
+    /// A decode window end on a `batchLayerCacheForTest` batch.
+    static func syncBatchRowsForTest(_ cache: any KVCache) {
+        (cache as? PagedKVBatchLayerCache)?.syncRowsFromBatch()
     }
 
     static func batchLayerMaskForTest(
@@ -4576,7 +4603,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     private func makeBatchedCaches(
         from rowCaches: [[KVCache]],
         nativeMTP: Bool = false,
-        raggedPrefill: Bool = false
+        raggedPrefill: Bool = false,
+        attachRows: Bool = false
     ) throws -> [PagedKVSharedLayerBatch] {
         guard let layerCount = rowCaches.first?.count,
               rowCaches.allSatisfy({ $0.count == layerCount }),
@@ -4595,7 +4623,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 }
                 let cache = raggedPrefill
                     ? PagedKVRaggedPrefillBatchLayerCache(rowCaches: rows)
-                    : PagedKVBatchLayerCache(rowCaches: rows)
+                    : PagedKVBatchLayerCache(rowCaches: rows, attachRows: attachRows)
                 return PagedKVSharedLayerBatch(
                     cache: cache,
                     validateBatchStateClosure: {},
@@ -4838,6 +4866,16 @@ private struct PagedKVSharedLayerBatch {
 
     func syncRowsFromBatch() {
         syncRowsFromBatchClosure()
+    }
+
+    /// Syncs the rows and, for a batch its rows ride (decode sessions), gives
+    /// each row still attached to it its own K/V back.
+    func releaseRows() {
+        if let cache = cache as? PagedKVBatchLayerCache {
+            cache.detachRows()
+        } else {
+            syncRowsFromBatchClosure()
+        }
     }
 
     func writebackCompiledInnerState(_ compiledState: [MLXArray], targets: [Int]) throws {
@@ -5113,8 +5151,21 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAtt
     /// `[B, H, capacity, D]` batch buffers; only `[..<length]` is logical. Rows
     /// shorter than `length` are zero past their own stored tokens, exactly
     /// the padding `concatenatePadded` produced.
-    private var keys: MLXArray?
-    private var values: MLXArray?
+    private let storage = PagedKVBatchStorage()
+    private var keys: MLXArray? {
+        get { storage.keys }
+        set { storage.keys = newValue }
+    }
+    private var values: MLXArray? {
+        get { storage.values }
+        set { storage.values = newValue }
+    }
+    /// Decode-session batches hand each row's K/V to the batch buffers
+    /// (`PagedKVCache.attachToBatch`) while the rows ride it, so a row's
+    /// history is not held twice: once in its own cache and again, padded,
+    /// in the batch. Rows get their own copy back when they leave
+    /// (`detachRows`) or are next written outside the batch.
+    private let attachesRows: Bool
     private var length = 0
     /// Each row's `mutationCount` right after this batch last wrote it. The
     /// in-place ragged path is used only while every row still matches, so a
@@ -5124,9 +5175,28 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAtt
     /// batch tensors instead of looping per row (required for `MLX.compile()`).
     private var batchedOffset: Int?
 
-    init(rowCaches: [PagedKVCache]) {
+    /// `attachRows` (decode sessions) attaches rows that hold full, unwindowed
+    /// history; sliding-window rows take the per-row update path, where an
+    /// attached row would copy its history out every step.
+    init(rowCaches: [PagedKVCache], attachRows: Bool = false) {
         self.rowCaches = rowCaches
+        self.attachesRows = attachRows
+            && rowCaches.allSatisfy { !$0.reconstructViaGather && $0.attentionWindowTokens == nil }
         packFromRows()
+    }
+
+    private var rowsAttached: Bool {
+        attachesRows && rowCaches.allSatisfy { $0.isAttached(to: storage) }
+    }
+
+    /// Ends this batch for its rows: syncs them, then gives every row still
+    /// attached to it its own copy of its K/V. A row already re-attached to a
+    /// newer batch keeps that batch's storage.
+    func detachRows() {
+        syncRowsFromBatch()
+        for cache in rowCaches where cache.isAttached(to: storage) {
+            cache.detachFromBatch()
+        }
     }
 
     var offset: Int {
@@ -5178,6 +5248,13 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAtt
         // batch-max length and fail the next window with
         // `paged_kv_block_table_mismatch` (Studio, 2+ concurrent rows).
         guard batchedOffset != nil else { return }
+        if rowsAttached {
+            // The rows already read their K/V from the batch buffers; only
+            // their lengths move, as the `state` restore below would set them.
+            rowCaches.forEach { $0.adoptBatchLength(length) }
+            batchedOffset = nil
+            return
+        }
         let state = innerState()
         guard state.count == 2 else { return }
         let keys = state[0]
@@ -5568,6 +5645,22 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAtt
         let starts = rowCaches.map(\.storedTokens)
         guard starts.max() == length else { return nil }
         let n = incomingKeys.dim(2)
+        if rowsAttached {
+            // The batch buffers are the rows' only K/V: write them, then move
+            // each row's length as its own `update` would have.
+            guard rowCaches.allSatisfy({ $0.canAppend(n) }),
+                  let newKeys = Self.write(incomingKeys, into: existingKeys, rowStarts: starts, stored: length, maxTokens: maxSize, blockSizeTokens: blockSizeTokens),
+                  let newValues = Self.write(incomingValues, into: existingValues, rowStarts: starts, stored: length, maxTokens: maxSize, blockSizeTokens: blockSizeTokens)
+            else {
+                return nil
+            }
+            keys = newKeys
+            values = newValues
+            rowCaches.forEach { $0.advanceInBatch(n) }
+            length = (starts.map { $0 + n }.max()) ?? length
+            rowMutationCounts = rowCaches.map(\.mutationCount)
+            return (Self.prefix(newKeys, length), Self.prefix(newValues, length))
+        }
         for (rowIndex, cache) in rowCaches.enumerated() {
             let before = cache.mutationCount
             _ = cache.update(
@@ -5927,6 +6020,18 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAtt
         // concurrent greedy rows diverged from serial or emitted EOS first.
         let offsets = rowCaches.map(\.offset)
         batchedOffset = Set(offsets).count == 1 ? offsets.first : nil
+        // Rows whose stored K/V the packed buffers now hold in full drop
+        // their own copy (a row with `storedTokens < offset` keeps it).
+        // `concatenatePadded` falls back to one row's array when rows differ
+        // in shape or dtype; those rows keep their own K/V.
+        if attachesRows,
+           keys?.dim(0) == rowCaches.count,
+           values?.dim(0) == rowCaches.count,
+           rowCaches.allSatisfy({ $0.storedTokens == $0.offset }) {
+            for (rowIndex, cache) in rowCaches.enumerated() {
+                cache.attachToBatch(storage, row: rowIndex)
+            }
+        }
     }
 
     /// Always a new slice; see `PagedKVCache.prefix` (in-place slice writes).

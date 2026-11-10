@@ -486,11 +486,13 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
     /// hops (FR-CB5); a queued row forces the scheduler back to one token.
     static let defaultDecodeLockstepWindow = 16
 
-    /// Production decode tokens per hop while a prompt prefills. On the M3
-    /// Ultra a 512-token Qwen3.6 chunk is about 1.7 s and a 4-row decode step
-    /// about 60 ms, so 8 steps give active rows about 4 tok/s instead of about
-    /// 0.6 behind a long prompt, for about 25% slower prefill.
-    static let defaultDecodeStepsWhilePrefilling = 8
+    /// Production decode tokens per hop while a 512-token prompt chunk
+    /// prefills. Mixed-length rows (1K/4K/8K/16K, staggered) on an M5: 2 steps
+    /// per chunk gave the 16K row the same TTFT as upstream mlx-swift-lm
+    /// PR #771 with lower running-row latency (1.38 s vs 1.77 s per token).
+    /// Each decode step taken between chunks delays the prompt's first token.
+    /// Larger chunks scale in `ModelRuntime.decodeStepsWhilePrefilling`.
+    static let defaultDecodeStepsWhilePrefilling = 2
     static let defaultDecodeHeadroomTokens = 128
     static let defaultPrefillRowsPerIteration = 4
     // Prefill per-iteration token budget when the operator sets no

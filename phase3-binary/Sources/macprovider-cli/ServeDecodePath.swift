@@ -111,13 +111,20 @@ extension ModelRuntime {
         (backend as? PagedKVSharedForwardBackend)?.cacheKinds.contains(.pagedIndexedKV) ?? false
     }
 
-    /// Decode steps per hop while a prompt prefills, scaled with the chunk so
-    /// active rows keep their decode steps per prefilled token: 8 at the
-    /// 512-token chunk, 32 at 2048, which the scheduler caps at the lockstep
-    /// window (16). Never below the default for a smaller chunk.
+    /// Decode steps per 512 prompt tokens for chunks above the default chunk:
+    /// the `glm5_next` 2048-token chunk keeps the full lockstep window between
+    /// chunks that #2100 validated on the Studio.
+    private static let largeChunkDecodeStepsPerDefaultChunk = 8
+
+    /// Decode steps per hop while a prompt prefills: the default (2) at or
+    /// below the 512-token chunk; larger chunks scale with the chunk, 16 at
+    /// 1024 and 32 at 2048, which the scheduler caps at the lockstep window
+    /// (16).
     nonisolated static func decodeStepsWhilePrefilling(promptChunkTokens: Int) -> Int {
         let steps = ContinuousBatchSchedulerConfiguration.defaultDecodeStepsWhilePrefilling
-        return max(steps, steps * promptChunkTokens / ContinuousBatchSchedulerConfiguration.defaultPromptChunkTokens)
+        let chunk = ContinuousBatchSchedulerConfiguration.defaultPromptChunkTokens
+        guard promptChunkTokens > chunk else { return steps }
+        return max(steps, largeChunkDecodeStepsPerDefaultChunk * promptChunkTokens / chunk)
     }
 
     /// The decode row bound every scheduler is built with: the configured

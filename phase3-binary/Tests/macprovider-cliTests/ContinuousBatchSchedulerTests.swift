@@ -6285,9 +6285,9 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertEqual(glm, 2_048)
         // (prefill_step_size, family ceiling, chunk, decode steps while prefilling)
         let cases: [(Int?, Int, Int, Int)] = [
-            (nil, 512, 512, 8), (512, 512, 512, 8), (4_096, 512, 512, 8), (256, 512, 256, 8),
+            (nil, 512, 512, 2), (512, 512, 512, 2), (4_096, 512, 512, 2), (256, 512, 256, 2),
             (nil, glm, 2_048, 32), (4_096, glm, 2_048, 32), (1_024, glm, 1_024, 16),
-            (512, glm, 512, 8), (256, glm, 256, 8),
+            (512, glm, 512, 2), (256, glm, 256, 2),
         ]
         for (step, ceiling, chunk, steps) in cases {
             let configuration = ModelRuntime.productionContinuousBatchSchedulerConfiguration(
