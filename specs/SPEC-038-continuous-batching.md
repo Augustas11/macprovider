@@ -1,11 +1,25 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.40
+Version: v0.3.44
 Status: draft (normative contract; runtime enablement is default-on per Mac behind the FR-CB10 on-device self-check, v0.3.15)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.3.44 (2026-11-10, release UX: self-check authorizes CB and cached turns, Related: #2281):**
+FR-CB10: a granted self-check authorizes CB without a signed positive entry;
+the signed policy is revocation-only (as v0.3.15 stated), and `/v1/status`
+reports `authorized` from the self-check too. Item 7: AC-26 leg (a), a keyed
+two-turn cached-prefix parity probe through the serving path, runs inside the
+self-check after a granted decision and is stored with it. Passed: cached
+turns resume in the batch. Failed or not yet proven: a positive-cached turn
+re-prefills cold inside a CB row (`cached_prompt_tokens` 0) and never
+serial-routes or leaves the batch; strict `on` no longer fails it. A signed
+`cached_turns_accepted` grant is provisional until leg (a) runs. Legs (b) and
+(c) are inherited by backend family. `continuous_batching_cached_turns`
+defaults on and stays the operator kill switch; emergency off and exact
+revocation are unchanged.
+
 **Change log v0.3.40 (2026-11-10, same-architecture variant cached-turns grant, Related: #2189):**
 FR-CB10 and AC-26: an entry MAY record `cached_turns_accepted: true` on a
 granted donor's AC-26 proof when both name the same `backend_family`, the
@@ -1351,11 +1365,13 @@ checkpoint for a hybrid row with no eligible prompt checkpoint and a covered
 terminal length at or above the SPEC-024 LCP threshold.
 Keyless, cancelled and failed rows MUST commit nothing and MUST release every
 block and snapshot they hold. A later turn with positive
-`cached_prompt_tokens` still serial-routes until AC-26.
+`cached_prompt_tokens` resumes its cache only under AC-26; otherwise it
+re-prefills cold inside the batch (v0.3.44).
 
-**Opt-in cached turns (v0.2.8).** A positive-`cached_prompt_tokens` turn MAY
-enter the scheduler only when the provider flag
-`continuous_batching_cached_turns` is on (default off) AND its lease carries a
+**Cached turns (v0.2.8; default on from v0.3.44).** A positive-`cached_prompt_tokens` turn MAY
+resume its cache in the scheduler only when the provider flag
+`continuous_batching_cached_turns` is on (default on; `false` is the
+operator kill switch) AND its lease carries a
 usable retained handoff. A usable handoff is a retained FR-PKV10 paged-KV
 sequence and, for a hybrid model, the recurrent checkpoint the lease resumes
 from; **(v0.3.31)** or, for GLM-5-Next, a SPEC-024-R005 prompt snapshot at
@@ -1363,12 +1379,19 @@ exactly the cached length, which the row installs (sparse latent and pooled
 keys at the snapshot length, recurrent state, and on a native-MTP row the MTP
 head state) before prefill resumes at that length. A snapshot that does not
 match the row's cache layout fails admission closed. The row never writes
-into the stored snapshot's buffers. **(v0.2.9)** It additionally requires AC-26 acceptance for the tuple:
-the FR-CB10 accepted-tuple entry covering the requested runtime tuple MUST
-record `cached_turns_accepted: true`. Any other positive-cached turn MUST keep
-the AC-26 fence: canary serial-routes and `on` fails closed (FR-CB8), with
-reason `cached_turns_not_accepted` when only the acceptance grant is missing
-and `sticky_cache_handoff_unavailable` otherwise. With the flag off, behaviour MUST be identical to v0.2.7 for every
+into the stored snapshot's buffers. **(v0.3.44)** It additionally requires AC-26 acceptance for the tuple
+on this Mac: the FR-CB10 self-check's leg (a) result for the loaded tuple
+(FR-CB10 item 7). Until leg (a) has run, a signed `cached_turns_accepted:
+true` on the accepted-tuple entry covering the requested runtime tuple is a
+provisional grant; a leg (a) result replaces it either way, and an exact
+revocation always wins. Any other positive-cached turn is fenced: the
+provider drops the hit, takes a fresh lease without the cold tier, and the
+turn re-prefills cold inside a CB row with `cached_prompt_tokens` 0 (no cache
+discount) and commits its own cache for the next turn. It MUST NOT
+serial-route, and strict `on` MUST NOT fail it. The provider logs
+`event=continuous_batching_cached_turn action=cold_prefill` with reason
+`cached_turns_not_accepted` when only acceptance is missing and
+`sticky_cache_handoff_unavailable` otherwise. With the flag off, behaviour MUST be identical to v0.2.7 for every
 model. With the flag on, for a hybrid model:
 - A conversation-keyed row that reached at least one checkpoint MUST, at a
   normal terminal, retain its paged attention KV through FR-PKV10 together with
@@ -1818,10 +1841,25 @@ divergence; the check is defence in depth.
 
 **(v0.2.9)** An accepted-tuple entry MAY carry `cached_turns_accepted`
 (boolean, default false; any non-boolean value MUST be rejected at
-configuration load). It is the per-tuple, revision-bound AC-26 grant for
-positive-`cached_prompt_tokens` batching (FR-CB4). An operator MUST NOT set it
-until the AC-26 packaged proof has been recorded on that exact tuple and
-runtime revision. A grant on a different revision MUST NOT carry over.
+configuration load). **(v0.3.44)** It is only a provisional grant for
+positive-`cached_prompt_tokens` batching (FR-CB4) until this Mac's self-check
+runs leg (a) (item 7 below), and neither a positive entry nor the grant is
+required: a granted self-check authorizes CB, and leg (a) authorizes cached
+turns. The signed policy is revocation-only for both.
+
+**(v0.3.44) Item 7: AC-26 leg (a) inside the self-check.** After a granted
+decision, while the provider is idle, the self-check runs leg (a) once per
+self-check key through the serving path: a keyed two-turn conversation (one
+prompt of about 200 tokens, 16 greedy output tokens per turn) whose later
+turn MUST resume the earlier turn's cache inside a CB row (positive
+`cached_prompt_tokens`, no serial route) and MUST produce the same output as
+the same turn sent cold under a new key. Both keys are coordinator-invisible
+(no receipt, usage or billing) and purged afterwards. The result is stored
+with the decision and applied at every load of that key. Passed: cached turns
+resume in the batch. Failed: they re-prefill cold inside the batch (FR-CB4).
+Legs (b) and (c) are inherited by backend family from the granted proof
+(below). The kill switch `continuous_batching_cached_turns: false`, the
+emergency `continuous_batching: off` and exact revocation are unchanged.
 
 **(v0.3.40) Same-architecture variant.** An entry MAY record
 `cached_turns_accepted: true` on another entry's AC-26 proof (the donor) when
@@ -2777,6 +2815,12 @@ hardware-capability run or a static-review obligation. Every
   **(v0.3.40)** A same-architecture variant (FR-CB10, v0.3.40 clause) runs
   only leg (a) on its own tuple; legs (b) and (c) are the donor's. Leg (b)
   comes from the donor only while the variant has no native-MTP admission.
+  **(v0.3.44)** Every Mac runs leg (a) itself inside the FR-CB10 self-check
+  (item 7) for each loaded tuple, and that result, not a signed grant,
+  admits positive-cached turns. Legs (b) and (c) are inherited by backend
+  family: they exercise code shared by every artifact of a family (native-MTP
+  resume and the usage, receipt and settlement fields), not the weights. A
+  failed leg (a) never serial-routes; the turn re-prefills cold in the batch.
 
 ## 8. Go/no-go gates
 
