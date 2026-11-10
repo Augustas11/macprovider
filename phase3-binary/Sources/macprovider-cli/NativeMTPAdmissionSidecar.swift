@@ -458,9 +458,6 @@ enum NativeMTPAdmissionSidecarError: Error, Equatable, CustomStringConvertible {
     case artifactDigestMismatch(String)
     case liveTupleMismatch(String)
     case signatureInvalid(String)
-    /// SPEC-048-R013 (0.1.51): the model's signed entries bind a decode path
-    /// (digest, runtime revision, metallib, hardware) this build does not run.
-    case decodePathMismatch
 
     var description: String {
         switch self {
@@ -480,7 +477,6 @@ enum NativeMTPAdmissionSidecarError: Error, Equatable, CustomStringConvertible {
         case .artifactDigestMismatch(let name): return "artifact digest mismatch: \(name)"
         case .liveTupleMismatch(let field): return "live tuple mismatch: \(field)"
         case .signatureInvalid(let reason): return "signature invalid: \(reason)"
-        case .decodePathMismatch: return "decode path mismatch"
         }
     }
 }
@@ -739,10 +735,9 @@ enum NativeMTPAdmissionSidecar {
         let challengeBankSHA256: String
         let evidenceArtifactSHA256: [String]
         let quantization: Quantization
-        /// SPEC-048-R013 (0.1.51): optional together. An entry that carries
-        /// them is valid for any signed CLI whose embedded decode-path digest,
-        /// runtime revision, Metal library, hardware, RAM and slot count match;
-        /// an entry without them keeps the 0.1.32 model-keyed rule.
+        /// SPEC-048-R013 (0.1.51, provenance only from 0.1.81): optional
+        /// together. An entry matching this build on them is preferred; a
+        /// mismatch falls back to the model-keyed rule and never refuses.
         var decodePathDigest: String? = nil
         var metallibSHA256: String? = nil
 
@@ -771,9 +766,10 @@ enum NativeMTPAdmissionSidecar {
                 && qualifiedSlots == context.slotCount
         }
 
-        /// SPEC-048-R013 (0.1.51): the CLI version, source commit, build
-        /// digest and CDHash never enter this match; release trust stays with
-        /// SPEC-023 signed-release admission and exact revocation.
+        /// SPEC-048-R013 (0.1.81): a preference only. The CLI version, source
+        /// commit, build digest and CDHash never enter this match; release
+        /// trust stays with SPEC-023 signed-release admission and exact
+        /// revocation.
         func matchesDecodePath(context: RuntimeContext) -> Bool {
             guard let decodePathDigest, let metallibSHA256 else { return false }
             return matches(context: context)
@@ -1309,11 +1305,11 @@ enum NativeMTPAdmissionSidecar {
         var entryModelKeys: Set<String> = []
         var selected: (entry: NativeMTPAdmissionReleaseEntry, raw: NativeMTPSidecarJSON)?
         var modelKeyed: (entry: NativeMTPAdmissionReleaseEntry, raw: NativeMTPSidecarJSON)?
-        // SPEC-048-R013 (0.1.51): once any entry for this model binds a decode
-        // path, only an exact decode-path match admits it (no model-keyed
-        // fallback), so a changed decode path fails closed.
+        // SPEC-048-R013 (0.1.81): admission is keyed by model and adapter. A
+        // decode-path binding is provenance: an entry matching this build on
+        // it is preferred, and a mismatch falls back to the model-keyed entry.
+        // The MTP-16 on-device self-check at load decides whether to serve.
         var decodePathSelected: (entry: NativeMTPAdmissionReleaseEntry, raw: NativeMTPSidecarJSON)?
-        var modelBindsDecodePath = false
         for (index, rawEntry) in rawEntries.enumerated() {
             guard case .object(let entryObject) = rawEntry else {
                 throw NativeMTPAdmissionSidecarError.wrongType("$.entries[\(index)]")
@@ -1325,17 +1321,12 @@ enum NativeMTPAdmissionSidecar {
             }
             lastSortKey = sortKey
             entryModelKeys.insert(entry.modelKey)
-            if entry.decodePathDigest != nil {
-                if entry.matchesModel(context: context) {
-                    modelBindsDecodePath = true
+            if entry.matchesDecodePath(context: context) {
+                guard decodePathSelected == nil else {
+                    throw NativeMTPAdmissionSidecarError.invalidValue("$.entries")
                 }
-                if entry.matchesDecodePath(context: context) {
-                    guard decodePathSelected == nil else {
-                        throw NativeMTPAdmissionSidecarError.invalidValue("$.entries")
-                    }
-                    decodePathSelected = (entry, rawEntry)
-                }
-            } else if entry.matches(context: context) {
+                decodePathSelected = (entry, rawEntry)
+            } else if entry.decodePathDigest == nil, entry.matches(context: context) {
                 guard selected == nil else {
                     throw NativeMTPAdmissionSidecarError.invalidValue("$.entries")
                 }
@@ -1344,12 +1335,13 @@ enum NativeMTPAdmissionSidecar {
                 modelKeyed = (entry, rawEntry)
             }
         }
-        let legacySelected = selected ?? modelKeyed
-        if modelBindsDecodePath, decodePathSelected == nil {
-            throw NativeMTPAdmissionSidecarError.decodePathMismatch
-        }
-        guard let selected = modelBindsDecodePath ? decodePathSelected : legacySelected else {
+        guard let selected = decodePathSelected ?? selected ?? modelKeyed else {
             throw NativeMTPAdmissionSidecarError.liveTupleMismatch("$.entries")
+        }
+        if selected.entry.decodePathDigest != nil, !selected.entry.matchesDecodePath(context: context) {
+            FileHandle.standardError.write(Data(
+                "event=native_mtp_admission decode_path=provenance_differs model_id=\(selected.entry.modelKey)\n".utf8
+            ))
         }
         guard let resolvedArtifactAuthority else {
             throw NativeMTPAdmissionSidecarError.missingField("$.artifact_authority")

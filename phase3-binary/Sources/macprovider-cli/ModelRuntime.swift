@@ -7032,6 +7032,16 @@ maxTokens: 1,
         }
     }
 
+    /// SPEC-048-R016 (0.1.81): on an admitted model the on-device verdict
+    /// alone decides whether native MTP serves after this load. The signed
+    /// decode-path binding is provenance and never enters this decision.
+    nonisolated static func nativeMTPSelfCheckServes(
+        verdict: NativeMTPOnDeviceSelfCheck.Verdict,
+        receipt: NativeMTPSelfTestReceipt
+    ) -> Bool {
+        verdict.passed && receipt.actualDecodePath == .nativeMTP && !receipt.fallbackUsed
+    }
+
     /// Startup and creative restoration share the same on-device admission gate.
     private func qualifyAndPublishNativeMTP(_ nativeMTPLoad: NativeMTPRuntimeLoadResult) async {
         let selfTestReceipt: NativeMTPSelfTestReceipt?
@@ -7078,7 +7088,7 @@ maxTokens: 1,
                 FileHandle.standardError.write(Data(
                     "event=native_mtp_self_check result=\(verdict.reason) speedup=\(String(format: "%.2f", verdict.speedup)) tokens=\(ordinary.tokens.count)\n".utf8
                 ))
-                if let receipt, verdict.passed, receipt.actualDecodePath == .nativeMTP, !receipt.fallbackUsed {
+                if let receipt, Self.nativeMTPSelfCheckServes(verdict: verdict, receipt: receipt) {
                     selfTestReceipt = receipt
                 } else {
                     selfTestReceipt = Self.rejectNativeMTPSelfTest(reasonCode: "selftest_\(verdict.reason)")
@@ -13173,11 +13183,7 @@ maxTokens: maxTokens,
                 return ("artifact_observation_invalid", "pair")
             }
         }
-        if let sidecarError = error as? NativeMTPAdmissionSidecarError {
-            // SPEC-048-R013 (0.1.51): a signed decode path this build does not run.
-            if sidecarError == .decodePathMismatch {
-                return ("decode_path_mismatch", "sidecar")
-            }
+        if error is NativeMTPAdmissionSidecarError {
             return ("sidecar_validation_rejected", "sidecar")
         }
         if error is ModelRuntimeLoadError {
