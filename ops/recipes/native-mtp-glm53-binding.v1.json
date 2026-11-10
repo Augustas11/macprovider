@@ -35,11 +35,11 @@
     "ops/recipes/native-mtp-glm53-lab-source-equivalence.v1.json": "e55765b281afa7eb68cc211eed941b3254effb2cd668ddd17ce4eb6c3a064cb6",
     "phase3-binary/catalog/autotune/autotune-artifacts-source.json": "b644714c8035135e11daa5249904d3a8855adeb35fdc8647e010a9898b460527",
     "phase3-binary/catalog/autotune/continuous-batching-policy-source.json": "100a86cba82fd6be4e086b86616c08ea4a839cfc9677ee957006de7419d018ef",
-    "phase3-binary/catalog/autotune/native-mtp-admission-release.json": "802f75dc78e0ccd7ab083cf6e4f1a0378c31fc49ea8c846e7751ec87b2b40b4f",
+    "phase3-binary/catalog/autotune/native-mtp-admission-release.json": "e9bbdceba61d5527626e1e1b57cd5b4565be11da2bacbe6735ab75a952119ee2",
     "phase3-binary/catalog/autotune/native-mtp-admission-tuple.json": "64d2901105a3e4cc89bff9d6dfe11aebb46e455440f9b49bf9c041e1ba3c126a",
     "phase3-binary/catalog/autotune/native-mtp-artifact-manifest.json": "92a047c3caac2910ca117218affd02d6215eab8d022bbf1a9654869f16b851b6",
-    "phase3-binary/catalog/autotune/native-mtp-selftest-bank.json": "6d7a597f7433550520a6082d9b0a4a2a151c6a99aeec8ff7038f56659ba74a29",
-    "phase3-binary/catalog/autotune/rate-card-source.json": "aa8ccec367f48fa5d64a763b80b0f3f15e62de1e61ff5949f9c162b115f2b849",
+    "phase3-binary/catalog/autotune/native-mtp-selftest-bank.json": "8f17cc8c20d4e04332de3f3da759fb1889fc9a6f796ad8be89b7471dbe46c172",
+    "phase3-binary/catalog/autotune/rate-card-source.json": "8382b884b328c793664f61d47e9b7faa044e22046d6892f5ca2518b781068fbb",
     "phase3-binary/catalog/autotune/trusted-keys.json": "da1ca2cb3788ee4e63982808bb90223ae0040ec150cb6fa6e9af04e52c773de6"
   }
 }

@@ -416,6 +416,8 @@ expected_history = {
     "published-2026-11-09-glm53-flash-uncensored-listed-v281",
     # Superseded by the uncensored GLM-5.3-Flash CB entry and the 1.8.283 native-MTP rebind.
     "published-2026-11-09-glm53-flash-uncensored-recommendable-v281",
+    # Superseded by the same set with cached turns granted to the uncensored tuple.
+    "published-2026-11-10-glm53-flash-uncensored-cb-v283",
     current_release_id,
 }
 if set(ledger["releases"]) != expected_history:
