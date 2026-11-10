@@ -1,7 +1,7 @@
 {
-  "catalog_id": "macprovider-tier2-model-catalog-2026-11-09-glm53-flash-uncensored-v1",
+  "catalog_id": "macprovider-tier2-model-catalog-2026-11-10-ripple-65b-v1",
   "expires_at": "2026-12-25T00:00:00Z",
-  "issued_at": "2026-11-09T16:00:00Z",
+  "issued_at": "2026-11-10T08:50:00Z",
   "models": [
     {
       "artifact_kind": "mlx_weight_file",
@@ -28,6 +28,15 @@
       "min_ram_gb": 243,
       "notes": "Buyer-serving candidate zai-org/glm-5.3-flash-uncensored (#2244 uncensored GLM-5.3-Flash build, native glm5_next engine); identity from signed SPEC-023 row.",
       "sha256": "242f8fcfd34d4ecfd62180c1767f910bda925216948772126dc98c673d1c8919",
+      "source": "operator-curated"
+    },
+    {
+      "artifact_kind": "mlx_weight_file",
+      "hash_scope": "macprovider.snapshot-manifest.v1",
+      "model_id": "frogggias/Ripple-65B-Preview-MLX-4bit",
+      "min_ram_gb": 64,
+      "notes": "Buyer-serving candidate ricursiveai/ripple-65b-preview (#2270 Ripple-65B Preview, native ricursive engine, listed); identity from signed SPEC-023 row.",
+      "sha256": "accae85aca4a215288f9062cc60535f70509b593772da21409a485ba9c6725c6",
       "source": "operator-curated"
     },
     {
@@ -196,7 +205,7 @@
   "signature": {
     "alg": "Ed25519",
     "key_id": "catalog-key-2026q2",
-    "sig": "6Lk_LnZY5HiXPFW8Of-bVBNfmmTFn_Ke9_QW6RIAp8NlaJ8UJSTI8cWXN63iSWii7TEBQYMUvmSSDZDimlUGAw"
+    "sig": "2OkaHo1_chi-_r_E7-koU3WVEf8VxuQuoZp8eLVspT-bPCzxRS0FANk8CVATZb0TQjnQHoiTeFVWb2hGbhQ9Cw"
   },
   "version": 1
 }

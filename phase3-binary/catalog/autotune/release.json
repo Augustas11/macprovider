@@ -37,10 +37,10 @@
       "version": "07203de3ba532245f1fa9ae81c06e61cff832876288c3811577287e55c7160b0"
     },
     "tier2-catalog.json": {
-      "bytes": 8733,
-      "sha256": "705c280f43df7f8a4fcb631e8fa08ff3118aebb3d3b3ec9a67dec03a41b7fe7b",
+      "bytes": 9203,
+      "sha256": "ee871b648677113e063fa455bda812fe575df1898d1f896d47c693ab13b714cf",
       "signer_key_id": "tier2-coordinator-key:707a860299e6a37f",
-      "version": "macprovider-tier2-model-catalog-2026-11-09-glm53-flash-uncensored-v1"
+      "version": "macprovider-tier2-model-catalog-2026-11-10-ripple-65b-v1"
     }
   },
   "generated_at": "2026-11-10T08:50:00Z",
