@@ -91,8 +91,15 @@ final class ModelRuntimePromptContextTests: XCTestCase {
                 for: request, context: ordinaryContext, templateSupportsThinkingToggle: true,
                 templateSupportsPreserveThinking: false,
                 toolSelectionModelID: "prism-ml/Ternary-Bonsai-2-4B-mlx-2bit")
-            XCTAssertEqual(ordinary.text.tokens.asArray(Int.self), disabled,
-                           "A model name must not opt an ordinary Qwen model into Bonsai thinking")
+            // A model name never opts into the Bonsai rule; an ordinary Qwen
+            // model follows the explicit-effort rule (SPEC-018 v0.3.16).
+            let ordinaryTokens = ordinary.text.tokens.asArray(Int.self)
+            if effort == nil || effort == "none" {
+                XCTAssertEqual(ordinaryTokens, disabled)
+            } else {
+                XCTAssertTrue(ReasoningOutput.promptLeavesThinkOpen(
+                    tokenizer.decode(tokenIds: Array(ordinaryTokens.suffix(16)))), effort ?? "omitted")
+            }
             if ["high", "xhigh", "max"].contains(effort ?? "") {
                 XCTAssertTrue(ReasoningOutput.promptLeavesThinkOpen(tokenizer.decode(tokenIds: Array(tokens.suffix(16)))))
                 XCTAssertNotEqual(tokens, disabled)
