@@ -13,11 +13,6 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         }
     }
 
-    override class func setUp() {
-        super.setUp()
-        Device.setDefault(device: Device(.cpu))
-    }
-
     func testLabBatchCompositionWaitsForEveryRowAndUsesDeclaredOrder() async throws {
         let backend = ScriptedBackend(scripts: ["first": [11], "second": [22]])
         let scheduler = try await makeScheduler(

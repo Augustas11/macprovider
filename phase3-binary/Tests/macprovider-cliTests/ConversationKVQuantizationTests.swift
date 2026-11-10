@@ -18,11 +18,6 @@ final class ConversationKVQuantizationTests: XCTestCase {
         }
     }
 
-    override class func setUp() {
-        super.setUp()
-        Device.setDefault(device: Device(.cpu))
-    }
-
     func testSerialConversationKeepsConfiguredKVBitsUnlessColdTierOrImage() {
         XCTAssertEqual(ModelRuntime.effectiveKVBits(
             configured: 8, conversationKey: "conv:buyer-1", serialQuantizedConversation: true), 8)

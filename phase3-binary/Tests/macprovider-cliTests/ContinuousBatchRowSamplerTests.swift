@@ -12,12 +12,6 @@ final class ContinuousBatchRowSamplerTests: XCTestCase {
         }
     }
 
-    override class func setUp() {
-        super.setUp()
-        // Construct directly: Device.cpu resolves Swift's stream defaults first.
-        Device.setDefault(device: Device(.cpu))
-    }
-
     // MARK: - Pure seed derivation (no Metal)
 
     func testRequestSeedIsStablePerRequestIDAndDistinctAcrossIDs() {

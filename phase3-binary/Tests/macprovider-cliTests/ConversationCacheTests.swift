@@ -13,11 +13,6 @@ final class ConversationCacheTests: XCTestCase {
         }
     }
 
-    override class func setUp() {
-        super.setUp()
-        Device.setDefault(device: Device(.cpu))
-    }
-
     func testCountersAccumulateHitsMissesAndPreserveModelsAfterPurge() async throws {
         let cache = makeConversationCacheForTest()
         let tokens = int32Range(0..<64)
