@@ -1,0 +1,6 @@
+leg1 documents=4
+leg1 isolation pass=True
+leg1 replay pass=True
+leg1 drain pass=True
+leg1 parity pass=True
+leg1 leftovers PASS

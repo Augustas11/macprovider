@@ -1,7 +1,10 @@
 # SPEC-039 — Paged KV / paged-attention engine
 
-Version: v0.1.31
-Status: draft (normative design). v0.1.31 adds the provisional FR-PKV12
+Version: v0.1.32
+Status: draft (normative design). v0.1.32 records the attach, isolation,
+scheduler-leftovers and msb-throughput evidence for the FR-PKV12
+`zai-org/glm-5.3-flash-uncensored` identity on the signed CLI 1.8.283, which a signed CB
+policy entry now names. v0.1.31 adds the provisional FR-PKV12
 `zai-org/glm-5.3-flash-uncensored` identity. v0.1.30 states the `kv_bits` precedence at
 attach: only an explicit operator `kv_bits` reaches the paged-KV gate; the
 model-family KV-quant default applies to serially served requests only.
@@ -92,6 +95,18 @@ is `RotatingKVCache` only because the serve path caps KV for memory attaches to
 paged mode (the block pool bounds memory), while a genuine sliding-window model
 stays fail-safe. IMPL lands with this revision.
 Owner: provider runtime / inference engine
+Change log v0.1.32 (2026-11-10): the FR-PKV12 `zai-org/glm-5.3-flash-uncensored`
+entry is no longer provisional. Its evidence is recorded under
+`docs/evidence/solstice-cb-283-2026-11-10/`, all on the signed provider CLI 1.8.283
+(CDHash `06e8b09c…`, release metallib `3d9b4a74…`). On the canary serve,
+`paged_kv_decision=attached` with `local_proof_result=passed`, so the load-time paged
+parity probe and the batched-isolation gate, which includes MoE expert-dispatch isolation,
+passed. A Studio window recorded the scheduler leftovers (isolation, replay, drain and
+48-token parity, all pass) and paged msb-throughput at rows 1 to 4 (aggregate 0.96x, 1.39x,
+1.45x and 1.58x production serial; peak footprint 181.8 GB). A signed CB policy entry names
+this identity with `max_served_slots` 4 and rollout `canary`; the FR-CB10 self-check still
+gates the served slots. No code change. Refines SPEC-039-R012.
+
 Change log v0.1.31 (2026-11-09): FR-PKV12 gains the provisional catalog key
 `zai-org/glm-5.3-flash-uncensored` with `Glm5NextForConditionalGeneration`,
 the catalog model whose verified artifact is
@@ -1018,15 +1033,14 @@ or any other cache kind fails closed with `paged_fallback_cache_class`.
   `architectures[0]`, `model_type` and `text_config.model_type` requirements
   as the entry above, keyed the same way (catalog model id plus exact
   `architectures[0]`). Evidence: `docs/evidence/glm53-abliterated-2026-11-01/`.
-- (v0.1.31, provisional, SPEC-first) the uncensored GLM-5.3-Flash identity
+- (v0.1.31; evidence v0.1.32) the uncensored GLM-5.3-Flash identity
   `zai-org/glm-5.3-flash-uncensored`, the catalog model whose verified
   artifact is `Solstice-AI/GLM-5.3-Flash-UNCENSORED-mlx-oQ4e-DFlash2` @
   `bff40d24efb689d33e094083ce4a5d6835601730`, with the same
   `architectures[0]`, `model_type` and `text_config.model_type` requirements
-  and the same keying. Its attach proof, MoE expert-dispatch isolation and
-  scheduler leftovers are recorded under `docs/evidence/` before any signed CB
-  policy entry names it; until then the probes gate attach and it serves
-  serial.
+  and the same keying. Evidence: `docs/evidence/solstice-cb-283-2026-11-10/`
+  (attach proof, MoE expert-dispatch isolation, scheduler leftovers and
+  msb-throughput on the signed CLI 1.8.283). A signed CB policy entry names it.
 - (v0.1.28, provisional, SPEC-first) the MiniMax M3.1 Flash identity
   `minimaxai/minimax-m3.1-flash`, with
   `architectures == ["MiniMaxM3SparseForConditionalGeneration"]` and top-level

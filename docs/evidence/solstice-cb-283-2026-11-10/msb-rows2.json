@@ -1,0 +1,58 @@
+{
+  "aggregateCVPct" : 0.11122251255435311,
+  "aggregateTPSRuns" : [
+    57.99019881216806,
+    57.89329840136987,
+    58.01542008927608
+  ],
+  "aggregateTPSp50" : 57.99019881216806,
+  "aggregateUpliftVsPagedSingleRow" : 1.444369625941872,
+  "aggregateVsProductionSerial" : 1.3853831397728624,
+  "blockSizeTokens" : 256,
+  "compiled" : false,
+  "decodeTokensPerRow" : 128,
+  "engine" : "paged",
+  "layerCount" : 11,
+  "maxPhysicalBlocks" : 1024,
+  "mlxSwiftLMPin" : "mlxlm-6c27b743bae5",
+  "modelID" : "<models>\/Solstice-AI--GLM-5.3-Flash-UNCENSORED-mlx-oQ4e-DFlash2\/bff40d24efb689d33e094083ce4a5d6835601730\/242f8fcfd34d4ecfd62180c1767f910bda925216948772126dc98c673d1c8919",
+  "modelTag" : "242f8fcfd34d4ecfd62180c1767f910bda925216948772126dc98c673d1c8919",
+  "pagedSingleRowCVPct" : 0.13322518404140488,
+  "pagedSingleRowTPSRuns" : [
+    40.149140338196126,
+    40.172402144614644,
+    40.070386488211305
+  ],
+  "pagedSingleRowTPSp50" : 40.149140338196126,
+  "peakPhysFootprintMB" : 181448,
+  "peakRSSMB" : 10100,
+  "perRowFractionOfPagedSingleRow" : 0.722184812970936,
+  "perRowTPSp50" : 28.99509940608403,
+  "productionSerialCVPct" : 0.13828556849398438,
+  "productionSerialPromptTokens" : 1024,
+  "productionSerialTPSRuns" : [
+    41.81346399509146,
+    41.92837817025859,
+    41.85860008493803
+  ],
+  "productionSerialTPSp50" : 41.85860008493803,
+  "productionSerialTTFTSecondsRuns" : [
+    3.04850697517395,
+    3.046422004699707,
+    3.049862027168274
+  ],
+  "promptTokenLengths" : [
+    1024,
+    1024
+  ],
+  "promptTokenSHA256" : [
+    "c2d6e0a41c032e905401737f80cfeaf532576de3aef86f3382067663f683b3dd",
+    "bb27f683b1bd122f66d900e82379da023fe1014bda15ede6d18f4741f834c1ac"
+  ],
+  "promptTokensPerRow" : 1024,
+  "rows" : 2,
+  "runs" : 3,
+  "scenario" : "throughput",
+  "schemaVersion" : 4,
+  "timestamp" : "2026-11-10T01:44:37Z"
+}

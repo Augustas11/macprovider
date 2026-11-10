@@ -414,6 +414,8 @@ expected_history = {
     "published-2026-11-07-drop-glm53-abliterated-v281",
     # Superseded by the uncensored GLM-5.3-Flash promotion to recommendable.
     "published-2026-11-09-glm53-flash-uncensored-listed-v281",
+    # Superseded by the uncensored GLM-5.3-Flash CB entry and the 1.8.283 native-MTP rebind.
+    "published-2026-11-09-glm53-flash-uncensored-recommendable-v281",
     current_release_id,
 }
 if set(ledger["releases"]) != expected_history:
