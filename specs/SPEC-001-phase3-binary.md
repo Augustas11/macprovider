@@ -1,6 +1,12 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.52 (2026-11-07, heartbeat bound covers the send only; preflight ack never waits on runtime)
+**Version:** 1.9.53 (2026-11-10, local Messages `thinking: disabled` maps to `reasoning_effort: none`)
+
+**Change log v1.9.53 (2026-11-10, Related: #2269):** The local Messages
+translation maps `thinking: disabled` to `reasoning_effort` `none` (was `low`),
+as the gateway does (SPEC-006 v0.9.74). Under SPEC-018 v0.3.16 an explicit
+`low` turns thinking on for a template with a thinking switch; `none` keeps it
+off, and renders `low` where a model cannot disable reasoning.
 
 **Change log v1.9.52 (2026-11-07, Related: #2246):**
 The five-second heartbeat bound in SPEC-001-R001 covers only the WebSocket
@@ -2487,7 +2493,7 @@ setting `ANTHROPIC_BASE_URL` alone does not establish local classification.
 Messages translation MUST preserve supported system text blocks, assistant
 `tool_use` and user `tool_result` history with call/result pairing, declared tools
 and tool choice, `max_tokens`, and `stop_sequences`. `thinking` maps to the
-SPEC-018 reasoning effort: disabled to `low`, enabled/adaptive to `medium`, and
+SPEC-018 reasoning effort: disabled to `none`, enabled/adaptive to `medium`, and
 an enabled budget of at least 16,384 tokens to `high`. Unsupported controls and
 media MUST fail explicitly before generation, never disappear silently.
 Nonstreaming replies MUST use Anthropic message content blocks, usage and stop

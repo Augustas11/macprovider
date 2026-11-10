@@ -9,7 +9,7 @@
     {
       "spec_id": "SPEC-001",
       "title": "Phase 3 Binary: Mac Provider Inference CLI",
-      "version": "1.9.52",
+      "version": "1.9.53",
       "path": "specs/SPEC-001-phase3-binary.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -152,7 +152,7 @@
     {
       "spec_id": "SPEC-006",
       "title": "Buyer API Gateway: Mac Provider's first public buyer surface",
-      "version": "0.9.73",
+      "version": "0.9.74",
       "path": "specs/SPEC-006-buyer-api.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -504,7 +504,7 @@
     {
       "spec_id": "SPEC-018",
       "title": "Agentic tool calling (provider-side response synthesis)",
-      "version": "0.3.15",
+      "version": "0.3.16",
       "path": "specs/SPEC-018-agentic-tool-calling.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -2577,11 +2577,17 @@
         "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func bonsaiThinkingEnabled",
         "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func chatTemplateSupportsThinkingToggle",
         "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func preparedRequestInput",
-        "phase3-binary/Sources/macprovider-cli/ServeDecodePath.swift:static func makeContinuousBatchTextPreparationLane"
+        "phase3-binary/Sources/macprovider-cli/ServeDecodePath.swift:static func makeContinuousBatchTextPreparationLane",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func explicitThinkingRequested",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func renderingRequestedThinking",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func preparedRequestTokens",
+        "phase4-coordinator/internal/buyer/model_capabilities.go:func providerServesOnRequestReasoning"
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/ModelRuntimePromptContextTests.swift:final class ModelRuntimePromptContextTests",
-        "phase3-binary/Tests/macprovider-cliTests/ChatTemplateMessageTagScanTests.swift:final class ChatTemplateMessageTagScanTests"
+        "phase3-binary/Tests/macprovider-cliTests/ChatTemplateMessageTagScanTests.swift:final class ChatTemplateMessageTagScanTests",
+        "phase3-binary/Tests/macprovider-cliTests/ReasoningSwitchTests.swift:final class ReasoningSwitchTests",
+        "phase4-coordinator/internal/buyer/reasoning_switch_2269_test.go:func TestOnRequestReasoningCapabilityMatchesWhatIsServed"
       ],
       "journeys": [],
       "evidence": [],
@@ -2589,7 +2595,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/2154",
-        "rationale": "Explicit high/xhigh/max enables thinking for the loaded Prism Bonsai model on text requests without tools. Native/reference quality evaluation, buyer UX acceptance and signed release remain pending."
+        "rationale": "Explicit high/xhigh/max enables thinking for the loaded Prism Bonsai model on text requests without tools. v0.3.16 (#2269): an explicit reasoning_effort other than none enables thinking on any thinking-switch template whose thinking-on prompt leaves <think> open, except structured output and required/named tool_choice; omitted effort is unchanged. Render and parse conformance is tested against the pinned catalog templates. Native/reference quality evaluation, per-family thinking-on measurement, buyer UX acceptance and signed release remain pending."
       }
     },
     {
