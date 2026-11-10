@@ -111,9 +111,11 @@ func reasoningFamily(model string) bool {
 	return strings.Contains(id, "glm-5") || strings.Contains(id, "gpt-oss") || strings.Contains(id, "deepseek-v4")
 }
 
-// onRequestReasoningProviderMinVersion is the first provider CLI that turns
-// thinking on for an explicit reasoning_effort (SPEC-018 v0.3.16, #2269).
-// Tag 1.8.284 is the coordinator runtime's, so the next CLI is 1.8.285.
+// onRequestReasoningProviderMinVersion is the floor for provider CLIs that
+// turn thinking on for an explicit reasoning_effort (SPEC-018 v0.3.16, #2269):
+// the first CLI tag cut after this merge. If the Pearl runtime train takes
+// v1.8.285 for this coordinator/gateway change, the first such CLI is 1.8.286;
+// both satisfy >= 1.8.285.
 const onRequestReasoningProviderMinVersion = "1.8.285"
 
 // onRequestReasoningFamily reports the thinking-switch families whose
