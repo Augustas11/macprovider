@@ -1,0 +1,65 @@
+{
+  "cached_prompt_tokens_rule": "every warm turn t>=1 reports the previous warm turn's prompt_tokens minus 2 (the generation prompt)",
+  "catalog_key": "zai-org/glm-5.3-flash-uncensored",
+  "date": "2026-11-10",
+  "legs": {
+    "ordinary_cached_turns": {
+      "file": "mtp-ordinary.json",
+      "sha256": "e267d18ddf672ae7f4eedb42d0e02c856108eac2824cc939397e47dbf5f8b68c",
+      "turns": 4,
+      "warm_equals_cold_turns": 4
+    },
+    "parity_rows1": {
+      "checks_passed": 11,
+      "checks_total": 11,
+      "file": "parity-rows1.json",
+      "sha256": "1f1a693ffecc5fa1601664b17601ed9ad380961e3275ce6fccb62a5c6b67347a"
+    },
+    "parity_rows4": {
+      "checks_passed": 44,
+      "checks_total": 44,
+      "file": "parity-rows4.json",
+      "sha256": "25b9667ab4c1c8b75b773c56448b6706cfb100da5d24441ef7c0d733deb20652"
+    }
+  },
+  "native_mtp_rows_resumed_from_snapshot": "not_run_no_native_mtp_admission_for_this_tuple",
+  "proof": "SPEC-038 AC-26 (v0.3.31 GLM-5-Next legs a and c)",
+  "provider_cli": {
+    "binary_sha256": "bebe98347993c33a42aa574253f93f7b05ee15fd8aef306743c9107d26309de5",
+    "cdhash": "06e8b09ccc79ee9cae9498663d9728c5186b7050",
+    "decode_path_digest": "940e25419bb1f7d90ed122e98969874587f7e327376fdb3b0e72fb7dc3e9a95d",
+    "version": "1.8.283"
+  },
+  "result": "pass",
+  "routing_after_ready": {
+    "batching_admitted": 48,
+    "drafter_miss": 0,
+    "forward_failures": 0,
+    "off_boundary": 0,
+    "serial_routed": 0,
+    "snapshot_hits": 18
+  },
+  "serve_start_line": "event=batching_cached_turns action=enabled mode=canary",
+  "signed_policy_at_load": {
+    "authorized": true,
+    "cached_turns_authorized": false,
+    "decision_reason": "authorized",
+    "load_status": "live_verified",
+    "local_proof_result": "passed",
+    "paged_kv_decision": "attached",
+    "release_id": "published-2026-11-10-glm53-flash-uncensored-cb-v283",
+    "tuple_sha256": "b74a344f00160c0415790d988685bab3b2ee59bdd81b293cc04491141ac20334"
+  },
+  "tuple": {
+    "cache_class": "mixed",
+    "chat_template_sha256": "4fcb509efcd1c93296c21e44a6a616553ff4cebdb4186d9e80bb77698d0b7824",
+    "hardware_class": "apple-silicon:Apple M3 Ultra:ram-256gb",
+    "kernel_identifier": "macprovider_paged_kv_gather_v1",
+    "kv_dtype": "fp16",
+    "metallib_sha256": "3d9b4a747758128cc5418e62c5ad8e282a11b0d436423537137e013beaa1261b",
+    "model_revision": "bff40d24efb689d33e094083ce4a5d6835601730",
+    "model_sha256": "242f8fcfd34d4ecfd62180c1767f910bda925216948772126dc98c673d1c8919",
+    "requires_moe": true,
+    "tokenizer_sha256": "4baf3a707b1fa2d79540fa901b69203efc844c403bc8d2e5145a29c67c300f12"
+  }
+}

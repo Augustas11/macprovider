@@ -1,0 +1,335 @@
+{
+ "label": "ordinary",
+ "run_id": "ac26sol-065433",
+ "schema": "ac26-2143-mtp-leg.v1",
+ "turns": [
+  {
+   "cold": {
+    "acceptance": null,
+    "cached_prompt_tokens": 0,
+    "completion_tokens": 256,
+    "content": "",
+    "counters_delta": {
+     "accepted_tokens": 0,
+     "bonus_tokens": 0,
+     "cb_shared_forward_calls": 16,
+     "committed_tokens": 0,
+     "mtp_forwards": 0,
+     "preoutput_fallbacks": 0,
+     "proposed_tokens": 0,
+     "rejected_tokens": 0,
+     "target_forwards": 0
+    },
+    "decode_tok_s": 26.680562793121418,
+    "finish_reason": "length",
+    "generated_tokens": 256,
+    "generation_ms": 9595,
+    "mtp_enabled": false,
+    "mtp_last_reason": "disabled_by_default",
+    "prompt_tokens": 1171,
+    "reasoning": "The user asks about how a lighthouse keeper prepares the lamp for the night. This is a general knowledge question, not related to the harbor tide notes. I should answer in plain prose, describing the traditional process of a lighthouse keeper preparing the lamp for the night. This is a historical/traditional practice question.\n\nLet me think about what a lighthouse keeper actually did to prepare the lamp for the night. This is well-documented historical practice, particularly for oil lamps (kerosene/paraffin vapor lamps) used in the era before electrification.\n\nThe typical routine for a lighthouse keeper preparing the lamp for the night:\n\n1. **Daytime maintenance first**: During the day, the keeper would clean the lens and lantern glass, polish the brass, clean the lamp, refill fuel reservoirs, trim wicks, and check the clockwork rotation mechanism.\n\n2. **Evening preparation (before sunset)**:\n   - Fill the lamp's oil reservoir (fountain) with kerosene/paraffin\n   - Check fuel lines and the vaporizer (for incandescent vapor lamps like the Dal\u00e9n light or the Hood vapor lamp)\n   - For wick lamps: trim the wicks evenly, remove charred portions\n   - Pump",
+    "ttft_s": 3.1189169999999997,
+    "usage": {
+     "cached_prompt_tokens": 0,
+     "completion_tokens": 256,
+     "completion_tokens_details": {
+      "reasoning_tokens": 256
+     },
+     "macprovider_generated_completion_tokens": 256,
+     "macprovider_generation_ms": 9595,
+     "macprovider_model_hash_observed": "242f8fcfd34d4ecfd62180c1767f910bda925216948772126dc98c673d1c8919",
+     "prompt_tokens": 1171,
+     "total_tokens": 1427
+    },
+    "wall_s": 9.616634749999998
+   },
+   "turn": 0,
+   "warm": {
+    "acceptance": null,
+    "cached_prompt_tokens": 0,
+    "completion_tokens": 256,
+    "content": "",
+    "counters_delta": {
+     "accepted_tokens": 0,
+     "bonus_tokens": 0,
+     "cb_shared_forward_calls": 16,
+     "committed_tokens": 0,
+     "mtp_forwards": 0,
+     "preoutput_fallbacks": 0,
+     "proposed_tokens": 0,
+     "rejected_tokens": 0,
+     "target_forwards": 0
+    },
+    "decode_tok_s": 26.733500417710943,
+    "finish_reason": "length",
+    "generated_tokens": 256,
+    "generation_ms": 9576,
+    "mtp_enabled": false,
+    "mtp_last_reason": "disabled_by_default",
+    "prompt_tokens": 1171,
+    "reasoning": "The user asks about how a lighthouse keeper prepares the lamp for the night. This is a general knowledge question, not related to the harbor tide notes. I should answer in plain prose, describing the traditional process of a lighthouse keeper preparing the lamp for the night. This is a historical/traditional practice question.\n\nLet me think about what a lighthouse keeper actually did to prepare the lamp for the night. This is well-documented historical practice, particularly for oil lamps (kerosene/paraffin vapor lamps) used in the era before electrification.\n\nThe typical routine for a lighthouse keeper preparing the lamp for the night:\n\n1. **Daytime maintenance first**: During the day, the keeper would clean the lens and lantern glass, polish the brass, clean the lamp, refill fuel reservoirs, trim wicks, and check the clockwork rotation mechanism.\n\n2. **Evening preparation (before sunset)**:\n   - Fill the lamp's oil reservoir (fountain) with kerosene/paraffin\n   - Check fuel lines and the vaporizer (for incandescent vapor lamps like the Dal\u00e9n light or the Hood vapor lamp)\n   - For wick lamps: trim the wicks evenly, remove charred portions\n   - Pump",
+    "ttft_s": 3.088906042,
+    "usage": {
+     "cached_prompt_tokens": 0,
+     "completion_tokens": 256,
+     "completion_tokens_details": {
+      "reasoning_tokens": 256
+     },
+     "macprovider_generated_completion_tokens": 256,
+     "macprovider_generation_ms": 9576,
+     "macprovider_model_hash_observed": "242f8fcfd34d4ecfd62180c1767f910bda925216948772126dc98c673d1c8919",
+     "prompt_tokens": 1171,
+     "total_tokens": 1427
+    },
+    "wall_s": 9.586615625
+   },
+   "warm_equals_cold": true
+  },
+  {
+   "cold": {
+    "acceptance": null,
+    "cached_prompt_tokens": 0,
+    "completion_tokens": 256,
+    "content": "",
+    "counters_delta": {
+     "accepted_tokens": 0,
+     "bonus_tokens": 0,
+     "cb_shared_forward_calls": 16,
+     "committed_tokens": 0,
+     "mtp_forwards": 0,
+     "preoutput_fallbacks": 0,
+     "proposed_tokens": 0,
+     "rejected_tokens": 0,
+     "target_forwards": 0
+    },
+    "decode_tok_s": 26.15447486718431,
+    "finish_reason": "length",
+    "generated_tokens": 256,
+    "generation_ms": 9788,
+    "mtp_enabled": false,
+    "mtp_last_reason": "disabled_by_default",
+    "prompt_tokens": 1196,
+    "reasoning": "The user is asking about what a lighthouse keeper checks after a storm, and why. This is a straightforward informational question about lighthouse keeping duties. The harbor notes about tide tables seem to be context but aren't directly relevant to this question about post-storm checks.\n\nLet me think about what a lighthouse keeper would check after a storm:\n\n1. **The lamp and lens** - Check for damage, cleanliness, alignment. Salt spray and vibration could affect the apparatus.\n\n2. **The glass/panes of the lantern room** - Storm winds carry debris, salt spray coats glass, panes could crack or break. Dirty or broken glass reduces light visibility.\n\n3. **The structure itself** - Cracks in walls, loose masonry, roof damage, water ingress. The tower's integrity is paramount.\n\n4. **The stairs and railings** - For safety of the keeper moving up and down.\n\n5. **The fog signal equipment** - If applicable, ensure it's operational since fog often follows storms.\n\n6. **The light mechanism/rotation** - Clockwork mechanisms could be affected by moisture or vibration.\n\n7. **Fuel/oil supply** - Check for contamination or spills.\n\n8. **The mooring/landing/dock area** - If",
+    "ttft_s": 3.318270415999997,
+    "usage": {
+     "cached_prompt_tokens": 0,
+     "completion_tokens": 256,
+     "completion_tokens_details": {
+      "reasoning_tokens": 256
+     },
+     "macprovider_generated_completion_tokens": 256,
+     "macprovider_generation_ms": 9788,
+     "macprovider_model_hash_observed": "242f8fcfd34d4ecfd62180c1767f910bda925216948772126dc98c673d1c8919",
+     "prompt_tokens": 1196,
+     "total_tokens": 1452
+    },
+    "wall_s": 9.813450415999998
+   },
+   "turn": 1,
+   "warm": {
+    "acceptance": null,
+    "cached_prompt_tokens": 1169,
+    "completion_tokens": 256,
+    "content": "",
+    "counters_delta": {
+     "accepted_tokens": 0,
+     "bonus_tokens": 0,
+     "cb_shared_forward_calls": 16,
+     "committed_tokens": 0,
+     "mtp_forwards": 0,
+     "preoutput_fallbacks": 0,
+     "proposed_tokens": 0,
+     "rejected_tokens": 0,
+     "target_forwards": 0
+    },
+    "decode_tok_s": 37.83624002364765,
+    "finish_reason": "length",
+    "generated_tokens": 256,
+    "generation_ms": 6766,
+    "mtp_enabled": false,
+    "mtp_last_reason": "disabled_by_default",
+    "prompt_tokens": 1196,
+    "reasoning": "The user is asking about what a lighthouse keeper checks after a storm, and why. This is a straightforward informational question about lighthouse keeping duties. The harbor notes about tide tables seem to be context but aren't directly relevant to this question about post-storm checks.\n\nLet me think about what a lighthouse keeper would check after a storm:\n\n1. **The lamp and lens** - Check for damage, cleanliness, alignment. Salt spray and vibration could affect the apparatus.\n\n2. **The glass/panes of the lantern room** - Storm winds carry debris, salt spray coats glass, panes could crack or break. Dirty or broken glass reduces light visibility.\n\n3. **The structure itself** - Cracks in walls, loose masonry, roof damage, water ingress. The tower's integrity is paramount.\n\n4. **The stairs and railings** - For safety of the keeper moving up and down.\n\n5. **The fog signal equipment** - If applicable, ensure it's operational since fog often follows storms.\n\n6. **The light mechanism/rotation** - Clockwork mechanisms could be affected by moisture or vibration.\n\n7. **Fuel/oil supply** - Check for contamination or spills.\n\n8. **The mooring/landing/dock area** - If",
+    "ttft_s": 0.2977394999999987,
+    "usage": {
+     "cached_prompt_tokens": 1169,
+     "completion_tokens": 256,
+     "completion_tokens_details": {
+      "reasoning_tokens": 256
+     },
+     "macprovider_generated_completion_tokens": 256,
+     "macprovider_generation_ms": 6766,
+     "macprovider_model_hash_observed": "242f8fcfd34d4ecfd62180c1767f910bda925216948772126dc98c673d1c8919",
+     "prompt_tokens": 1196,
+     "total_tokens": 1452
+    },
+    "wall_s": 6.790780625
+   },
+   "warm_equals_cold": true
+  },
+  {
+   "cold": {
+    "acceptance": null,
+    "cached_prompt_tokens": 0,
+    "completion_tokens": 256,
+    "content": "The tide tables are the quiet backbone of the keeper's day, because the light itself matters most when the water is moving and the harbor is at its most treacherous. With the morning low at 06:12 and the evening high at 18:47, the keeper's schedule bends around those two moments rather than the clock alone.\n\nThe morning low at 06:12 means the keeper is up well before it \u2014 often by 04:30 or 05:00 \u2014 so the lamp is extinguished only after first light, and the low-water inspection can follow. Low tide exposes the base of the tower, the landing steps, and any rocks or shoal marks nearby, so the keeper walks the waterline then, checking for storm damage or shifted stones that would be hidden at high water. It is also the safest time to clear weed and debris from around the foundation.\n\nThe evening high at 18:47 shapes",
+    "counters_delta": {
+     "accepted_tokens": 0,
+     "bonus_tokens": 0,
+     "cb_shared_forward_calls": 16,
+     "committed_tokens": 0,
+     "mtp_forwards": 0,
+     "preoutput_fallbacks": 0,
+     "proposed_tokens": 0,
+     "rejected_tokens": 0,
+     "target_forwards": 0
+    },
+    "decode_tok_s": 25.659015736193243,
+    "finish_reason": "length",
+    "generated_tokens": 256,
+    "generation_ms": 9977,
+    "mtp_enabled": false,
+    "mtp_last_reason": "disabled_by_default",
+    "prompt_tokens": 1221,
+    "reasoning": "The user asks how tide tables change the keeper's schedule. The harbor notes give specific times: morning low at 06:12 and evening high at 18:47. I should weave those in. Keep it plain prose, harbor-log style, consistent with prior turns. No need for excessive length \u2014 a solid paragraph or two.",
+    "ttft_s": 3.5004904170000017,
+    "usage": {
+     "cached_prompt_tokens": 0,
+     "completion_tokens": 256,
+     "completion_tokens_details": {
+      "reasoning_tokens": 68
+     },
+     "macprovider_generated_completion_tokens": 256,
+     "macprovider_generation_ms": 9977,
+     "macprovider_model_hash_observed": "242f8fcfd34d4ecfd62180c1767f910bda925216948772126dc98c673d1c8919",
+     "prompt_tokens": 1221,
+     "total_tokens": 1477
+    },
+    "wall_s": 10.001832457999996
+   },
+   "turn": 2,
+   "warm": {
+    "acceptance": null,
+    "cached_prompt_tokens": 1194,
+    "completion_tokens": 256,
+    "content": "The tide tables are the quiet backbone of the keeper's day, because the light itself matters most when the water is moving and the harbor is at its most treacherous. With the morning low at 06:12 and the evening high at 18:47, the keeper's schedule bends around those two moments rather than the clock alone.\n\nThe morning low at 06:12 means the keeper is up well before it \u2014 often by 04:30 or 05:00 \u2014 so the lamp is extinguished only after first light, and the low-water inspection can follow. Low tide exposes the base of the tower, the landing steps, and any rocks or shoal marks nearby, so the keeper walks the waterline then, checking for storm damage or shifted stones that would be hidden at high water. It is also the safest time to clear weed and debris from around the foundation.\n\nThe evening high at 18:47 shapes",
+    "counters_delta": {
+     "accepted_tokens": 0,
+     "bonus_tokens": 0,
+     "cb_shared_forward_calls": 16,
+     "committed_tokens": 0,
+     "mtp_forwards": 0,
+     "preoutput_fallbacks": 0,
+     "proposed_tokens": 0,
+     "rejected_tokens": 0,
+     "target_forwards": 0
+    },
+    "decode_tok_s": 37.85302380600325,
+    "finish_reason": "length",
+    "generated_tokens": 256,
+    "generation_ms": 6763,
+    "mtp_enabled": false,
+    "mtp_last_reason": "disabled_by_default",
+    "prompt_tokens": 1221,
+    "reasoning": "The user asks how tide tables change the keeper's schedule. The harbor notes give specific times: morning low at 06:12 and evening high at 18:47. I should weave those in. Keep it plain prose, harbor-log style, consistent with prior turns. No need for excessive length \u2014 a solid paragraph or two.",
+    "ttft_s": 0.2948773330000023,
+    "usage": {
+     "cached_prompt_tokens": 1194,
+     "completion_tokens": 256,
+     "completion_tokens_details": {
+      "reasoning_tokens": 68
+     },
+     "macprovider_generated_completion_tokens": 256,
+     "macprovider_generation_ms": 6763,
+     "macprovider_model_hash_observed": "242f8fcfd34d4ecfd62180c1767f910bda925216948772126dc98c673d1c8919",
+     "prompt_tokens": 1221,
+     "total_tokens": 1477
+    },
+    "wall_s": 6.790361750000002
+   },
+   "warm_equals_cold": true
+  },
+  {
+   "cold": {
+    "acceptance": null,
+    "cached_prompt_tokens": 0,
+    "completion_tokens": 256,
+    "content": "The keeper",
+    "counters_delta": {
+     "accepted_tokens": 0,
+     "bonus_tokens": 0,
+     "cb_shared_forward_calls": 16,
+     "committed_tokens": 0,
+     "mtp_forwards": 0,
+     "preoutput_fallbacks": 0,
+     "proposed_tokens": 0,
+     "rejected_tokens": 0,
+     "target_forwards": 0
+    },
+    "decode_tok_s": 23.73887240356083,
+    "finish_reason": "length",
+    "generated_tokens": 256,
+    "generation_ms": 10784,
+    "mtp_enabled": false,
+    "mtp_last_reason": "disabled_by_default",
+    "prompt_tokens": 1434,
+    "reasoning": "The user wants a summary of the keeper's week in a short paragraph. This is a harbor log context with tide tables (morning low 06:12, evening high 18:47). Previous turns covered lamp preparation, post-storm checks, and how tide tables shape the daily schedule. Now I need to zoom out to the weekly rhythm.\n\nA keeper's week: daily routine (lighting at dusk, extinguishing at dawn, cleaning, log entries), plus weekly tasks \u2014 winding the clockwork mechanism (if the lens rotates by clockwork, weights need rewinding regularly, often daily or every few days), polishing the lens, trimming wicks, checking oil stores, delivering or receiving supplies (often weekly boat), writing the weekly log summary, checking spare parts, testing fog signal if applicable, and the tide-dependent inspections at low water.\n\nI should weave in the tide times naturally since the harbor notes emphasize them \u2014 the low at 06:12 governs morning waterline inspections, the high at 18:47 means the light must be ready before evening. Weekly rhythm: heavier maintenance on calmer days, supply boat, log submission.\n\nKeep it a short paragraph as requested. Plain prose, no lists. Maybe 5-8 sentences.",
+    "ttft_s": 4.329556333000006,
+    "usage": {
+     "cached_prompt_tokens": 0,
+     "completion_tokens": 256,
+     "completion_tokens_details": {
+      "reasoning_tokens": 254
+     },
+     "macprovider_generated_completion_tokens": 256,
+     "macprovider_generation_ms": 10784,
+     "macprovider_model_hash_observed": "242f8fcfd34d4ecfd62180c1767f910bda925216948772126dc98c673d1c8919",
+     "prompt_tokens": 1434,
+     "total_tokens": 1690
+    },
+    "wall_s": 10.811410208000005
+   },
+   "turn": 3,
+   "warm": {
+    "acceptance": null,
+    "cached_prompt_tokens": 1219,
+    "completion_tokens": 256,
+    "content": "The keeper",
+    "counters_delta": {
+     "accepted_tokens": 0,
+     "bonus_tokens": 0,
+     "cb_shared_forward_calls": 16,
+     "committed_tokens": 0,
+     "mtp_forwards": 0,
+     "preoutput_fallbacks": 0,
+     "proposed_tokens": 0,
+     "rejected_tokens": 0,
+     "target_forwards": 0
+    },
+    "decode_tok_s": 34.63203463203463,
+    "finish_reason": "length",
+    "generated_tokens": 256,
+    "generation_ms": 7392,
+    "mtp_enabled": false,
+    "mtp_last_reason": "disabled_by_default",
+    "prompt_tokens": 1434,
+    "reasoning": "The user wants a summary of the keeper's week in a short paragraph. This is a harbor log context with tide tables (morning low 06:12, evening high 18:47). Previous turns covered lamp preparation, post-storm checks, and how tide tables shape the daily schedule. Now I need to zoom out to the weekly rhythm.\n\nA keeper's week: daily routine (lighting at dusk, extinguishing at dawn, cleaning, log entries), plus weekly tasks \u2014 winding the clockwork mechanism (if the lens rotates by clockwork, weights need rewinding regularly, often daily or every few days), polishing the lens, trimming wicks, checking oil stores, delivering or receiving supplies (often weekly boat), writing the weekly log summary, checking spare parts, testing fog signal if applicable, and the tide-dependent inspections at low water.\n\nI should weave in the tide times naturally since the harbor notes emphasize them \u2014 the low at 06:12 governs morning waterline inspections, the high at 18:47 means the light must be ready before evening. Weekly rhythm: heavier maintenance on calmer days, supply boat, log submission.\n\nKeep it a short paragraph as requested. Plain prose, no lists. Maybe 5-8 sentences.",
+    "ttft_s": 0.9415925409999986,
+    "usage": {
+     "cached_prompt_tokens": 1219,
+     "completion_tokens": 256,
+     "completion_tokens_details": {
+      "reasoning_tokens": 254
+     },
+     "macprovider_generated_completion_tokens": 256,
+     "macprovider_generation_ms": 7392,
+     "macprovider_model_hash_observed": "242f8fcfd34d4ecfd62180c1767f910bda925216948772126dc98c673d1c8919",
+     "prompt_tokens": 1434,
+     "total_tokens": 1690
+    },
+    "wall_s": 7.426241707999999
+   },
+   "warm_equals_cold": true
+  }
+ ]
+}

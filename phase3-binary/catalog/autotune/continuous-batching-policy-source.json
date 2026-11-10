@@ -51,7 +51,7 @@
     },
     {
       "cache_class": "mixed",
-      "cached_turns_accepted": false,
+      "cached_turns_accepted": true,
       "chat_template_sha256": "4fcb509efcd1c93296c21e44a6a616553ff4cebdb4186d9e80bb77698d0b7824",
       "hardware_class": "apple-silicon:Apple M3 Ultra:ram-256gb",
       "kernel_identifier": "macprovider_paged_kv_gather_v1",
@@ -62,13 +62,13 @@
       "model_key": "zai-org/glm-5.3-flash-uncensored",
       "model_sha256": "242f8fcfd34d4ecfd62180c1767f910bda925216948772126dc98c673d1c8919",
       "provenance": {
-        "evidence_id": "glm53-uncensored-242f8fcf-cb-attach-2026-11-10-signed-1.8.283",
+        "evidence_id": "glm53-uncensored-ac26-2189-2026-11-10-signed-1.8.283",
         "live_executable_cdhash": "06e8b09ccc79ee9cae9498663d9728c5186b7050",
         "package_manifest_sha256": "bebe98347993c33a42aa574253f93f7b05ee15fd8aef306743c9107d26309de5",
         "provider_cli_version": "1.8.283",
         "source": "release_review",
         "status": "qualified",
-        "studio_campaign_sha256": "4850be8de2489d036ed1ac24958495db9155b27e9afde9e80e57da879fe61f74"
+        "studio_campaign_sha256": "2510c358833f9377392a8954226883349de1aaa81dd792fd74663ac20ddd53f0"
       },
       "requires_moe": true,
       "rollout": "canary",
