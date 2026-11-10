@@ -4,7 +4,7 @@
 
 **Change log v1.9.53 (2026-11-10, Related: #2269):** The local Messages
 translation maps `thinking: disabled` to `reasoning_effort` `none` (was `low`),
-as the gateway does (SPEC-006 v0.9.74). Under SPEC-018 v0.3.16 an explicit
+as the gateway does (SPEC-006 v0.9.75). Under SPEC-018 v0.3.16 an explicit
 `low` turns thinking on for a template with a thinking switch; `none` keeps it
 off, and renders `low` where a model cannot disable reasoning.
 

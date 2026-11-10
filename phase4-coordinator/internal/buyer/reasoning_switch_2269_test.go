@@ -7,7 +7,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 )
 
-// SPEC-018 v0.3.16 / SPEC-006 v0.9.74 (#2269): /v1/models advertises
+// SPEC-018 v0.3.16 / SPEC-006 v0.9.75 (#2269): /v1/models advertises
 // reasoning for a thinking-switch family only when an eligible provider
 // renders thinking on for an explicit reasoning_effort and splits its output.
 func TestOnRequestReasoningCapabilityMatchesWhatIsServed(t *testing.T) {
