@@ -913,7 +913,7 @@ enum NativeMTPArtifactObserver {
 
     private static let glm5NextVisionPrefixes = ["vision_model.", "vision_tower.", "visual.", "model.visual."]
 
-    /// SPEC-048-R002 (0.1.78): the tensors the pinned GLM5Next loader keeps,
+    /// SPEC-048-R002 (0.1.80): the tensors the pinned GLM5Next loader keeps,
     /// each carrying the post-sanitize keys `GLM5NextWeights.sanitize` gives
     /// it, so the Hugging Face pre-sanitize layout and the post-sanitize
     /// layout are validated by the same grammar. Fails closed when two

@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.79
+**Version:** 0.1.80
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.79",
+  "version": "0.1.80",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -332,39 +332,62 @@ do not apply to this adapter; these do:
   No second copy of the next-N layer is captured, fetched, or loaded, and
   admitting native MTP leaves the target `artifact_hash` unchanged. A
   projection whose `mtp` path or digest differs from `target`'s fails closed.
-- *Tensor grammar.* The MTP namespace is exactly `language_model.mtp.0.`
-  (prediction layer 0). Every other consumed key is under
+- *Tensor grammar.* The grammar applies to each tensor's loader key, the
+  post-sanitize key the pinned loader gives it (0.1.80; see *Loader key
+  mapping*). The MTP namespace is exactly `language_model.mtp.0.`
+  (prediction layer 0). Every other loader key is under
   `language_model.model.` or `language_model.lm_head.`. The observer fails
-  closed on `language_model.mtp.<n>.` with `n != 0`; on a bare `mtp.` or
-  `model.mtp.` key; on any `model.language_model.` key (an alternative layout
-  the loader would merge into the same module paths); and on a DeepSeek-style
-  next-N key `language_model.model.layers.<i>.` with
-  `i >= text_config.num_hidden_layers`, which the loader would silently remap
-  into `mtp.*` or drop, including its `shared_head.head.` and `embed_tokens.`
-  keys.
+  closed on a loader key `language_model.mtp.<n>.` with `n != 0` or under
+  `language_model.mtp.0.shared_head.` / `language_model.mtp.0.embed_tokens.`;
+  on a next-N layer past the one admitted (a checkpoint key
+  `model.layers.<i>.`, under any of the namespaces below, with
+  `i > text_config.num_hidden_layers`), which the loader would silently drop;
+  on two checkpoint tensors that land on one loader key other than by the
+  loader's own expert stacking or q/k/v concatenation (for example
+  `model.language_model.norm.weight` beside `language_model.model.norm.weight`,
+  of which the loader would keep one); and when no tensor loads under
+  `language_model.mtp.0.`.
 - *Vision.* The pinned `GLM5NextWeights` loader drops keys beginning with
   `vision_model.`, `vision_tower.`, `visual.`, or `model.visual.`. The
   observer drops exactly those dotted namespaces and no others. The text-only
   boundary of §8 applies: no image-input buyer path is admitted.
-- *Post-sanitize layout only (0.1.36).* The pinned `GLM5NextWeights.sanitize`
-  rewrites raw Hugging Face names (`.hc_attn_` / `.hc_ffn_` renames, the
-  forget-gate move under `forget_gate.`, per-projection `q_conv1d` /
-  `k_conv1d` / `v_conv1d` concatenation, `.mlp.experts.<e>.` stacking into
-  `.mlp.switch_mlp.`, the `kv_b_proj` split into `embed_q` and `unembed_out`,
-  and router-gate dequantization when `.mlp.gate.scales` exists). The
-  observer admits only a checkpoint already in the post-sanitize layout, on
-  which that mapping is the identity, so tensor names, override keys, and
-  `false` keys are the loader's module paths as written. Any tensor name the
-  sanitizer would rewrite fails closed: one containing `.hc_attn_`,
-  `.hc_ffn_`, `.mlp.experts.`, `.kv_b_proj.`, `.q_conv1d.`, `.k_conv1d.`,
-  `.v_conv1d.`, `.mlp.gate.scales`, `.mlp.gate.biases`, or a forget-gate part
-  (`A_log`, `dt_bias`, `f_a_proj`, `f_b_proj`) directly under `.self_attn.`.
-  The admitted artifact is in this layout.
+- *Loader key mapping (0.1.79).* The observer admits the post-sanitize layout
+  and the Hugging Face pre-sanitize layout, and validates both after the same
+  name mapping the pinned `GLM5NextWeights.sanitize` applies:
+  `model.language_model.` becomes `model.` and a leading `language_model.` is
+  removed (then `language_model.` is prefixed back); the next-N layer stored
+  as `model.layers.<num_hidden_layers>.` becomes `mtp.0.` (`eh_proj`, `enorm`,
+  `hnorm`, `shared_head.norm` to `norm`, everything else under `block.`),
+  dropping its `shared_head.head.` and `embed_tokens.` copies; `.hc_attn_` /
+  `.hc_ffn_` become `.attn_hc.` / `.ffn_hc.`; forget-gate parts (`A_log`,
+  `dt_bias`, `f_a_proj`, `f_b_proj`) under `.self_attn.` move under
+  `forget_gate.`; a complete `q_conv1d` / `k_conv1d` / `v_conv1d` triple
+  becomes `conv1d`; `.mlp.experts.<e>.` with experts numbered `0..<n` stacks
+  into `.mlp.switch_mlp.`; `kv_b_proj` splits into `embed_q` and
+  `unembed_out`; and a router gate with `.mlp.gate.scales` is dequantized,
+  its width and group size read from its shapes against
+  `text_config.hidden_size` (default 4096). Raw checkpoint tensors still
+  pair with their own `.scales` / `.biases`. Config override and `false`
+  keys resolve as `sanitize(perLayerQuantization:)` resolves them: each key
+  applies under its own name and under every module path the same rules give
+  `<key>.weight`. All keys that reach one module (per-expert entries) must
+  carry the same width and group size, and a `kv_b_proj` tensor's two modules
+  must resolve alike, or the artifact fails closed. Overrides are recorded
+  under their config keys as written. A name the loader leaves unmapped (an
+  incomplete conv triple or expert range, `kv_b_proj` or `.mlp.gate`
+  scales without the weight) fails closed: its loader key contains
+  `.hc_attn_`, `.hc_ffn_`, `.mlp.experts.`, `.kv_b_proj.`, `.q_conv1d.`,
+  `.k_conv1d.`, `.v_conv1d.`, `.mlp.gate.scales`, `.mlp.gate.biases`, or a
+  forget-gate part directly under `.self_attn.`. The observer's copy of these
+  rules is pinned to the fork by a test that runs the fork's public
+  `GLM5NextModel.sanitize(weights:)` and `sanitize(perLayerQuantization:)`
+  on the same names. From 0.1.36 to 0.1.77 only the post-sanitize layout was
+  admitted.
 - *Floating parameters.* The loader quantizes a module only when its
   `<path>.scales` tensor exists. Besides rank-1 tensors and rank-3
   `conv1d.weight` kernels, the observer admits exactly these unpaired
-  floating tensors, which the model holds as plain parameters or unquantized
-  layers: `.attn_hc.fn`, `.ffn_hc.fn`, `.mlp.gate.weight`,
+  floating tensors (by loader key), which the model holds as plain
+  parameters or unquantized layers: `.attn_hc.fn`, `.ffn_hc.fn`, `.mlp.gate.weight`,
   `.indexer.index_kpool_compress_ape`, `.indexer.index_kpool_compress_gate`,
   and `language_model.mtp.0.eh_proj.weight`. Any other rank-2 floating weight
   without a scale pair fails closed unless the config declares it `false`.
@@ -2335,6 +2358,14 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.80 (2026-11-10, Related: #2277)** — R002: the native-MTP artifact
+  observer normalizes the Hugging Face pre-sanitize GLM5Next layout
+  (`model.language_model.*`, per-expert weights, next-N layer at
+  `num_hidden_layers`) with the pinned `GLM5NextWeights.sanitize` name
+  mapping and validates the post-sanitize grammar on the resulting loader
+  keys. Collisions, an extra next-N layer, a missing `mtp.0` layer and
+  disagreeing per-expert overrides fail closed. The observer is not a
+  decode-path manifest input, so the decode-path digest is unchanged.
 - **0.1.79 (2026-11-10, Related: #2270)** — R003 names mlx-swift-lm
   `3.32.3-macprovider.35` (`c9d8a9324eb9cc98243987b1557a863c253c63b3`) on
   `3.32.3-macprovider.32`: the `ricursive` text model (Ripple-65B Preview) and

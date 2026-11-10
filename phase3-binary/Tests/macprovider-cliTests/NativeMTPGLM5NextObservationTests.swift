@@ -5,7 +5,7 @@ import MLXLMCommon
 import XCTest
 @testable import macprovider_cli
 
-/// SPEC-048-R002 (0.1.35/0.1.36/0.1.78) `glm5_next_mtp_v1` embedded checkpoint
+/// SPEC-048-R002 (0.1.35/0.1.36/0.1.80) `glm5_next_mtp_v1` embedded checkpoint
 /// in the post-sanitize and the Hugging Face pre-sanitize layouts, and
 /// SPEC-023-R024 (v0.22.27) override widths and exception bound.
 final class NativeMTPGLM5NextObservationTests: XCTestCase {
@@ -184,7 +184,7 @@ final class NativeMTPGLM5NextObservationTests: XCTestCase {
         }
     }
 
-    // MARK: Hugging Face pre-sanitize layout (0.1.78)
+    // MARK: Hugging Face pre-sanitize layout (0.1.80)
 
     private static let hfOverrides: [String: [String: Any]] = [
         "lm_head": ["bits": 8, "group_size": 64],
