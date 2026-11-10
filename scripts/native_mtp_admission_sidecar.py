@@ -107,11 +107,11 @@ ENTRY_KEYS = {
     "benchmark_policy_sha256", "challenge_bank_sha256", *EVIDENCE_KEYS,
     "quantization", "ordinary_baseline",
 }
-# SPEC-048-R013 (0.1.51): optional together. Qualification-owned (tuple
-# input): the decode path the tuple qualified on. A CLI that embeds the same
-# digest serves the entry without a new admission (scripts/decode_path_digest.py).
-# CLIs before the decode-path reader reject unknown entry keys, so these are
-# published only once the bound release CLI embeds a digest (R014 item 10).
+# SPEC-048-R013 (0.1.51, provenance only from 0.1.81): optional together.
+# Qualification-owned (tuple input): the decode path the tuple qualified on.
+# The provider admits by model and logs a differing digest; it never refuses
+# on it. CLIs before the decode-path reader reject unknown entry keys, so these
+# are published only once the bound release CLI embeds a digest (R014 item 10).
 DECODE_PATH_KEYS = ("decode_path_digest", "metallib_sha256")
 QUANTIZATION_KEYS = {
     "kind", "packed_data_dtype", "packed_layout", "scale_dtype", "scale_layout",
@@ -395,10 +395,10 @@ def build(tuple_input: dict | list, release_input: dict) -> bytes:
     if isinstance(release_input, dict) and "provider_decode_path_digest" in release_input:
         release_keys.add("provider_decode_path_digest")
     release_input = _exact_keys(release_input, release_keys, "$release")
-    # SPEC-048-R013 (0.1.51): the digest embedded in the bound release CLI
-    # (`decode_path_digest.py --binary`). A decode-path entry is published only
-    # when the bound CLI embeds that same digest: the CLI then reads the field,
-    # and its decode path is the one the tuple qualified on.
+    # SPEC-048-R014 item 10: the digest embedded in the bound release CLI
+    # (`decode_path_digest.py --binary`). Its presence shows that CLI parses
+    # decode-path entries. From 0.1.81 the entry's digest is provenance and
+    # need not equal it.
     provider_digest = release_input.get("provider_decode_path_digest")
     if provider_digest is not None:
         _str(provider_digest, "$release.provider_decode_path_digest", SHA256)
@@ -409,9 +409,6 @@ def build(tuple_input: dict | list, release_input: dict) -> bytes:
             fail(f"$tuple[{index}].entry.decode_path_digest",
                  "needs $release.provider_decode_path_digest: publish a decode-path entry only once "
                  "the bound release CLI embeds a decode-path digest (SPEC-048-R014 item 10)")
-        if fixed["decode_path_digest"] != provider_digest:
-            fail(f"$tuple[{index}].entry.decode_path_digest",
-                 "differs from the bound release CLI's decode path; requalify (AGENTS.md rule 2)")
     if release_input["schema_version"] != RELEASE_INPUT_SCHEMA:
         fail("$release.schema_version", f"must be {RELEASE_INPUT_SCHEMA}")
     release_entry = _exact_keys(release_input["entry"], set(RELEASE_ENTRY_KEYS), "$release.entry")

@@ -67,8 +67,9 @@ requires genuine R005 and formal R015 matrix/sustained results from the
 digest-matched LAB build, hosted negative tests and the complete freeze audit.
 The LAB archive retains its measured source and executable SHA-256/CDHash
 (when present), plus the embedded decode-path digest in `qualification/source.json`.
-The final signed cut uses the MTP-13 identity-only rebind; no measurements are
-repeated after that cut and no fresh signed predecessor is a qualification gate.
+The final signed cut needs no rebind (SPEC-048 0.1.81: identity is provenance);
+no measurements are repeated after that cut and no fresh signed predecessor is
+a qualification gate.
 Final tagging and live recommendation remain required for the sampled phase.
 
 The helper accepts the closed input schema enforced by
@@ -111,9 +112,10 @@ gateway request with unchanged accounting and settlement.
 
 ## Order
 
-Each step depends on the one before it. The first admission of a tuple comes
-after the cut that qualified it, because the sidecar records that CLI's
-identity as provenance and, from SPEC-048 0.1.51, its decode-path digest.
+Each step depends on the one before it. This order is for the first
+native-MTP enablement on a coordinator. The sidecar records a CLI's identity
+and decode-path digest as provenance only (SPEC-048 0.1.81): neither gates
+admission, so a later tuple or a later CLI cut never waits on the other.
 SPEC-048-R014 is promoted only by the signed release journey, so no production
 config load may make the tuple selectable before that promotion.
 
@@ -126,9 +128,8 @@ config load may make the tuple selectable before that promotion.
    the admission feed paths unset or pointed at a non-selectable staging
    location, and do not load a production config that can advertise the tuple. This stage may prove isolated loopback,
    final binary behavior, and route shape; it is not activation.
-3. **Release input.** (First admission of a tuple, or the one dual-field
-   rebind above. A later cut with an unchanged decode-path digest skips steps
-   3 to 7.) Read the published tarball's code identity:
+3. **Release input.** (First admission of a tuple. A later CLI cut skips
+   steps 3 to 7.) Read the published tarball's code identity:
    `scripts/provider-code-identity.py --tarball <tar> --binary-version <v>`.
    Fill `phase3-binary/catalog/autotune/native-mtp-admission-release.json`:
    - `release_id` is the catalog release you are about to cut;
@@ -221,75 +222,45 @@ config load may make the tuple selectable before that promotion.
    the local self-test. `GET /v1/status` must show `native_mtp.enabled=true`
    and `mode` of `eligible` or `active`.
 
-## Later CLI cuts: no admission step unless the decode path changed
+## Later CLI cuts: no admission step
 
-From SPEC-048 0.1.51 an admission entry binds the decode path, not the CLI
-binary. The CB policy never bound the CLI either: a CB policy entry matches the
-model, tokenizer, chat template, hardware, metallib and kernel, and its CLI
+From SPEC-048 0.1.81 native-MTP admission is keyed by model and artifact. The
+decode-path digest, metallib, runtime revision, CLI version and CDHash in an
+entry are provenance. The CB policy never bound the CLI either: its CLI
 version and CDHash are provenance (SPEC-023 v0.22.13). So a CLI cut needs no
-identity-only rebind of the CB policy or of native-MTP admission.
+rebind of the CB policy or of native-MTP admission, and no requalification for
+identity alone.
 
-For every cut, read `scripts/ops/cli-release.sh status`, fact
-`native_mtp_admission_decode_path`. It compares the committed
-`native-mtp-admission.json` with the tree's digest, and
-`python3 scripts/decode_path_digest.py --admission-status <sidecar>` prints
-the same value:
+What decides serving on each Mac is the MTP-16 on-device self-check, which
+runs at every model load, and the coordinator's R033 canary. A failing
+self-check serves ordinary decode for that load. A provider whose build differs
+from an entry's recorded digest logs
+`event=native_mtp_admission decode_path=provenance_differs` and still runs the
+self-check.
 
-- `match`: every entry binds this tree's source decode path. The provider
-  also binds the Metal library. So confirm that the candidate canary's CB
-  self-check `metallib_sha256` (`canary_smoke --probe`, `/v1/status`) equals
-  the entries' `metallib_sha256`. If both match, the new CLI keeps native MTP
-  with the published admission and needs no admission step. A different
-  metallib is a decode-path change: requalify.
-- `mismatch`: a file in `phase3-binary/decode-path-manifest.json` or an
-  mlx-swift / mlx-swift-lm pin changed since qualification. The new CLI refuses
-  native MTP (`decode_path_mismatch`) and serves ordinary decode. Requalify the
-  tuple on the new decode path (AGENTS.md rule 2). This is not an identity
-  rebind.
-- `legacy`: the entries predate 0.1.51 and carry no digest. Every CLI keeps the
-  model-keyed rule. Do the one final dual-field rebind below, once.
-
-To read the digest a signed binary embeds, run
-`python3 scripts/decode_path_digest.py --binary <macprovider-cli>`. A running
+`scripts/ops/cli-release.sh status` reports fact
+`native_mtp_admission_decode_path` (`match`, `legacy` or `mismatch`) as
+provenance; it never gates the cut. Requalify only when a changed decode-path
+line alters how the tuple drafts, verifies or commits tokens (AGENTS.md rule
+2). To read the digest a signed binary embeds, run
+`python3 scripts/decode_path_digest.py --binary <macprovider-cli>`; a running
 provider reports it as `/v1/status` `build_identity.decode_path_digest`.
 
-### The one final dual-field rebind
-
-CLIs before 0.1.51 (1.8.258–1.8.260 included) reject unknown entry keys, so
-SPEC-048-R014 item 10 orders this rebind:
-
-1. Cut the CLI that carries the decode-path reader, and wait until it is the
-   released CLI.
-2. Confirm that its decode path is the qualified one. Name every decode-path
-   line that changed since the tuple's evidence (AGENTS.md rule 2). If one
-   changed, requalify first.
-3. Add `decode_path_digest` (from `decode_path_digest.py --binary` on the
-   signed binary) and `metallib_sha256` (the release `mlx.metallib`, which the
-   CB self-check reports) to each tuple input. Set the release input's
-   `provider_decode_path_digest` to the same digest, and keep the identity
-   fields as provenance. The generator refuses a tuple digest that differs
-   from `provider_decode_path_digest`.
-4. Publish through `scripts/ops/catalog-activate.sh` as usual. Its
-   `native_mtp_decode_path_publish_gate` blocks activation in three cases:
-   - `provider_decode_path_digest` is not the digest compiled at the release
-     input's `source_commit` (a match also proves that the bound CLI reads the
-     fields);
-   - the release tag `v<binaryVersion>` does not name that commit;
-   - the live coordinator does not yet recommend that release or a later one.
+CLIs before 0.1.51 (1.8.258-1.8.260) reject unknown entry keys. The sidecar
+generator therefore still requires the release input's
+`provider_decode_path_digest` when an entry carries `decode_path_digest`: its
+presence shows the bound CLI parses the field (SPEC-048-R014 item 10). The two
+digests need not be equal.
 
 Before any fresh native-bound activation step, `catalog-activate.sh status`
 reports `native_mtp_release_match_gate` and the `native_mtp_release_match`
-step. The verifier checks every signed entry against the verified signed
-release payload and compatibility manifest: model key, artifact hash, runtime
-revision from the source commit's `Package.resolved`, hardware class, RAM bytes,
-qualified slots, embedded decode digest and payload metallib hash. A mismatch
-names its field and blocks `next --run`, including an already-live release or
-a signed binary/policy pair; the check runs again under live-ops custody before
-publication. Interrupted-operation recovery remains available.
-
-After this, a provider on a pre-0.1.51 CLI rejects the admission set and serves
-ordinary decode until it updates. From then on, cuts with an unchanged digest
-need no admission step.
+step. The verifier checks the bound signed release payload and compatibility
+manifest, verifies the admission signature against that release's trusted
+keyring, and checks that every entry has well-formed scope fields and selects a
+unique runtime context. Admission scope packaged inside a CLI release and the
+release's runtime identity do not gate activation, so a new tuple's admission
+goes live by catalog activation without a CLI cut. A failure names its field
+and blocks `next --run`. Interrupted-operation recovery remains available.
 
 ## Activating a later native-bound release
 
