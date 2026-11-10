@@ -54,15 +54,14 @@ SPEC048_MLX_SWIFT_TAG = "0.32.3-macprovider.13"
 # submodule on the core fork below.
 SPEC048_MLX_SWIFT_REVISION = "565269220ccc2cc0d2ce149affb98a2f9d9b32ac"
 SPEC048_MLX_SWIFT_UPSTREAM_BASE = "19601207e9a0de51e03ee6ec0c3c5f3784275075"
-# Fork branch macprovider/2234-qmv-mma, one commit on tag v0.32.4-macprovider.6
-# (upstream MLX v0.32.4); the core has no tag of its own yet: the reviewed
-# Source/Cmlx/mlx gitlink of SPEC048_MLX_SWIFT_REVISION. Package.resolved does
+# Fork tag v0.32.4-macprovider.7, one commit on v0.32.4-macprovider.6
+# (upstream MLX v0.32.4): the reviewed Source/Cmlx/mlx gitlink of SPEC048_MLX_SWIFT_REVISION. Package.resolved does
 # not carry it, so read_production_pins cannot check it; the production gate
 # for the core revision is MLXCoreStreamPropagationTests
 # (testResolvedCoreIsTheReviewedForkRevision), which compares the resolved
 # mlx-swift gitlink and core HEAD with this value in CI.
 SPEC048_MLX_CORE_FORK = "https://github.com/Augustas11/mlx"
-SPEC048_MLX_CORE_TAG = "macprovider/2234-qmv-mma"
+SPEC048_MLX_CORE_TAG = "v0.32.4-macprovider.7"
 SPEC048_MLX_CORE_REVISION = "565070fe4b0f95927f7fdd5fcfb537157605037a"
 SPEC048_MLX_CORE_UPSTREAM_BASE = "36969c094354086e15d2a327a9c50feb20b9cf11"
 # The separate C symbol preserves the existing quantized-matmul ABI.

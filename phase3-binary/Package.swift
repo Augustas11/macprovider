@@ -62,7 +62,7 @@ let package = Package(
         // #631 with every Qwen3.5 trace declaring the arrays it reads as
         // compile state) and the GLM-5-Next text model with batched rows. It
         // resolves the Augustas11/mlx-swift fork (tag 0.32.3-macprovider.13, MLX
-        // core 565070fe4 on v0.32.4-macprovider.6 and mlx-c v0.6.0-macprovider.2). Core keeps
+        // core v0.32.4-macprovider.7 (565070fe4) and mlx-c v0.6.0-macprovider.2). Core keeps
         // small-M quantized matmuls on one kernel route so a row decodes the same tokens alone
         // and inside a continuous batch (the startup batched-isolation gate),
         // erases a freed compiled function from every thread's compile cache

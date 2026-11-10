@@ -523,7 +523,7 @@ The authorized dependency tuple is exact:
 |---|---|---|---|
 | `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.34` | `647b24d1f13ea662cf1c61ebcce18541400015ce` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
 | `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.13` | `565269220ccc2cc0d2ce149affb98a2f9d9b32ac` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
-| `https://github.com/Augustas11/mlx` | `macprovider/2234-qmv-mma` | `565070fe4b0f95927f7fdd5fcfb537157605037a` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
+| `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.7` | `565070fe4b0f95927f7fdd5fcfb537157605037a` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
 | `https://github.com/Augustas11/mlx-c` | `v0.6.0-macprovider.2` | `2b1ff2b5b5129a6115771da32e1bac3b6b01ab01` | `ml-explore/mlx-c` pinned base (`ebc88f10caa1b625e6b581437a8dea6df8a70085`) |
 
 The mlx-swift-lm row `3.32.3-macprovider.34` is `3.32.3-macprovider.32`
@@ -531,9 +531,8 @@ The mlx-swift-lm row `3.32.3-macprovider.34` is `3.32.3-macprovider.32`
 `0.32.3-macprovider.13` (#2234); no model source changes. The Swift row is
 `0.32.3-macprovider.11` (`c774cb0934c7503bc3fe1c3d1afbe44c728e8891`) plus the
 qmv_mma core and the metallib sources for `gather_mm_offsets` and the SDPA VJP
-kernel. The core row is the fork branch `macprovider/2234-qmv-mma`, one commit
-on `v0.32.4-macprovider.6` (`51edbb37620aef7c860ab5d7cdb7bf5b14333da2`), and has no
-tag of its own yet. That commit routes every eligible affine small-M product to
+kernel. The core row is the fork tag `v0.32.4-macprovider.7`, one commit on
+`v0.32.4-macprovider.6` (`51edbb37620aef7c860ab5d7cdb7bf5b14333da2`). That commit routes every eligible affine small-M product to
 `qmv_mma` from 1 to 16 rows on non-NAX GPUs, using a test that reads no row
 count; NAX GPUs and floating-point modes keep their routes. The C row is
 unchanged.
@@ -2343,7 +2342,7 @@ requests.
   `3.32.3-macprovider.34` (`647b24d1f13ea662cf1c61ebcce18541400015ce`), which is
   `3.32.3-macprovider.32` plus the mlx-swift pin commit, mlx-swift
   `0.32.3-macprovider.13` (`565269220ccc2cc0d2ce149affb98a2f9d9b32ac`) and core
-  `565070fe4b0f95927f7fdd5fcfb537157605037a` (branch `macprovider/2234-qmv-mma`): every eligible
+  `v0.32.4-macprovider.7` (`565070fe4b0f95927f7fdd5fcfb537157605037a`): every eligible
   affine small-M product takes `qmv_mma` from 1 to 16 rows on non-NAX GPUs, and
   the metallib ships `gather_mm_offsets` and the SDPA VJP kernel. Model sources
   and the C row are unchanged.
