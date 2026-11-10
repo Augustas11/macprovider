@@ -3,14 +3,14 @@
   "entry": {
     "artifact_manifest_sha256": "92a047c3caac2910ca117218affd02d6215eab8d022bbf1a9654869f16b851b6",
     "challenge_bank_sha256": "52b46c9fd77dc9ece94d74d3f734bafd17b246e6756b4b3e3ed3fafa62b0079b",
-    "live_executable_cdhash": "2eb43b9d94ad9999caf161e15e1322a7989bbe2a",
-    "provider_revision": "8898508c1f74b98c09a3d7e992d070cef0ffcf0f",
-    "reproducible_build_sha256": "a54ac19b7a165ef5386417e1b5b5cefe50b419f57db355b22f1c593cb9608132",
-    "source_commit": "8898508c1f74b98c09a3d7e992d070cef0ffcf0f"
+    "live_executable_cdhash": "06e8b09ccc79ee9cae9498663d9728c5186b7050",
+    "provider_revision": "ec252246fbf91fbef8d218213e7bb465c0100771",
+    "reproducible_build_sha256": "bebe98347993c33a42aa574253f93f7b05ee15fd8aef306743c9107d26309de5",
+    "source_commit": "ec252246fbf91fbef8d218213e7bb465c0100771"
   },
   "expires_at": "2027-02-06T16:00:00Z",
   "issued_at": "2026-11-09T16:00:00Z",
-  "provider_decode_path_digest": "dbadff54f38923c3fbcbe8858135788b2b2d731eaea5af61c81e3ae7899db21d",
+  "provider_decode_path_digest": "940e25419bb1f7d90ed122e98969874587f7e327376fdb3b0e72fb7dc3e9a95d",
   "release_id": "published-2026-11-09-glm53-flash-uncensored-recommendable-v281",
   "revocation_signer_key_id": "streamvc-autotune-static-v4",
   "schema_version": "macprovider.native-mtp-admission-release-input.v1",
