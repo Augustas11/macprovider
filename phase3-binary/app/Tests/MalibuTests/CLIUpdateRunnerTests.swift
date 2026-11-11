@@ -12,25 +12,6 @@ final class CLIUpdateRunnerTests: XCTestCase {
         XCTAssertFalse(CLIUpdateRunner.mayRelaunch(runningVersion: "1.8.280", installedVersion: "unknown"))
     }
 
-    func testLegacyCLIUsesPinnedCompleteInstaller() throws {
-        XCTAssertEqual(
-            try CLIUpdateRunner.strategy(
-                installedVersion: "1.8.30",
-                compatibilitySetID: nil,
-                bundledAppVersion: "1.8.40"
-            ),
-            .pinnedInstaller(version: "v1.8.40")
-        )
-        XCTAssertEqual(
-            try CLIUpdateRunner.strategy(
-                installedVersion: "v1.8.32",
-                compatibilitySetID: "legacy-placeholder",
-                bundledAppVersion: "v1.8.40"
-            ),
-            .pinnedInstaller(version: "v1.8.40")
-        )
-    }
-
     func testCompatibilityAwareCLIKeepsInstalledUpdater() throws {
         XCTAssertEqual(
             try CLIUpdateRunner.strategy(
@@ -53,22 +34,8 @@ final class CLIUpdateRunnerTests: XCTestCase {
         )
     }
 
-    func testMissingCompatibilityIdentityRepairsThroughPinnedInstaller() throws {
-        XCTAssertEqual(
-            try CLIUpdateRunner.strategy(
-                installedVersion: "1.8.38",
-                compatibilitySetID: "  ",
-                bundledAppVersion: "1.8.40"
-            ),
-            .pinnedInstaller(version: "v1.8.40")
-        )
-    }
-
-    func testLegacyRepairRequiresExactBridgeAppVersion() throws {
-        // Any bundle version other than the current pin target disarms the
-        // bridge — including the previous release's target (1.8.39), which must
-        // no longer arm 1.8.40's repair.
-        for appVersion in [nil, "1.8.38", "1.8.39", "1.8.41", "not-a-version"] as [String?] {
+    func testLegacyCLIRepairIsRefused() throws {
+        for appVersion in [nil, "1.8.38", "1.8.39", "1.8.40", "1.8.41", "not-a-version"] as [String?] {
             XCTAssertThrowsError(
                 try CLIUpdateRunner.strategy(
                     installedVersion: "1.8.30",
@@ -193,23 +160,6 @@ final class CLIUpdateRunnerTests: XCTestCase {
         XCTAssertEqual(environment["LC_ALL"], "C")
     }
 
-    func testSelectedLegacyStrategyInvokesOnlyPinnedInstallerAndReadiness() async throws {
-        let recorder = CLIUpdateInvocationRecorder()
-        try await CLIUpdateRunner.runStrategyForTest(
-            strategy: .pinnedInstaller(version: "v1.8.40"),
-            installedUpdate: { await recorder.recordInstalledUpdate() },
-            pinnedInstall: { version in await recorder.recordPinnedInstall(version) },
-            readinessCheck: {
-                await recorder.recordReadiness()
-                return true
-            }
-        )
-        let result = await recorder.snapshot()
-        XCTAssertEqual(result.installedUpdates, 0)
-        XCTAssertEqual(result.pinnedVersions, ["v1.8.40"])
-        XCTAssertEqual(result.readinessChecks, 1)
-    }
-
     func testNonzeroRollbackMarkerIsExposedDistinctly() async throws {
         do {
             try await CLIUpdateRunner.runForTest(
@@ -290,7 +240,6 @@ final class CLIUpdateRunnerTests: XCTestCase {
             bundledAppVersion: "1.8.92",
             runningApp: running,
             installedUpdate: { recorder.recordInstalledUpdate() },
-            pinnedInstall: { version in recorder.recordPinnedInstall(version) },
             readinessCheck: {
                 recorder.recordReadiness()
                 return true
@@ -309,7 +258,6 @@ final class CLIUpdateRunnerTests: XCTestCase {
 
         let result = recorder.snapshot()
         XCTAssertEqual(result.installedUpdates, 1)
-        XCTAssertEqual(result.pinnedVersions, [])
         XCTAssertEqual(result.readinessChecks, 1)
         XCTAssertEqual(result.proofStrategies, [.installedCompatibilityCLI])
         XCTAssertEqual(result.proofSnapshots, [running])
@@ -344,7 +292,6 @@ final class CLIUpdateRunnerTests: XCTestCase {
                 bundledAppVersion: "1.8.92",
                 runningApp: running,
                 installedUpdate: {},
-                pinnedInstall: { _ in XCTFail("installed strategy should not call pinned installer") },
                 readinessCheck: { true },
                 expectedAppIdentityAfterUpdate: { _, _ in
                     .init(
@@ -721,32 +668,9 @@ final class CLIUpdateRunnerTests: XCTestCase {
     }
 }
 
-private actor CLIUpdateInvocationRecorder {
-    private var installedUpdates = 0
-    private var pinnedVersions: [String] = []
-    private var readinessChecks = 0
-
-    func recordInstalledUpdate() {
-        installedUpdates += 1
-    }
-
-    func recordPinnedInstall(_ version: String) {
-        pinnedVersions.append(version)
-    }
-
-    func recordReadiness() {
-        readinessChecks += 1
-    }
-
-    func snapshot() -> (installedUpdates: Int, pinnedVersions: [String], readinessChecks: Int) {
-        (installedUpdates, pinnedVersions, readinessChecks)
-    }
-}
-
 private final class CLIUpdateRunRecorder: @unchecked Sendable {
     private let lock = NSLock()
     private var installedUpdates = 0
-    private var pinnedVersions: [String] = []
     private var readinessChecks = 0
     private var proofStrategies: [CLIUpdateRunner.Strategy] = []
     private var proofSnapshots: [CLIUpdateRunner.RunningAppSnapshot?] = []
@@ -755,10 +679,6 @@ private final class CLIUpdateRunRecorder: @unchecked Sendable {
 
     func recordInstalledUpdate() {
         lock.withLock { installedUpdates += 1 }
-    }
-
-    func recordPinnedInstall(_ version: String) {
-        lock.withLock { pinnedVersions.append(version) }
     }
 
     func recordReadiness() {
@@ -785,7 +705,6 @@ private final class CLIUpdateRunRecorder: @unchecked Sendable {
 
     func snapshot() -> (
         installedUpdates: Int,
-        pinnedVersions: [String],
         readinessChecks: Int,
         proofStrategies: [CLIUpdateRunner.Strategy],
         proofSnapshots: [CLIUpdateRunner.RunningAppSnapshot?],
@@ -795,7 +714,6 @@ private final class CLIUpdateRunRecorder: @unchecked Sendable {
         lock.withLock {
             (
                 installedUpdates,
-                pinnedVersions,
                 readinessChecks,
                 proofStrategies,
                 proofSnapshots,

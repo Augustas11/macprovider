@@ -4,17 +4,13 @@ import Foundation
 import Security
 
 enum CLIUpdateRunner {
-    // Legacy repair pins exactly the CLI version this app shipped as. The
-    // 1.8.40 arming is a cohort-bound recovery exception (Decision Entry 160)
-    // for the stranded 1.8.30/1.8.32/1.8.39 test cohort. Later releases MUST
-    // leave this constant unchanged — the exact-match interlock in
-    // `strategy(...)` then disarms the bridge automatically — unless a new
-    // decision entry authorizes re-arming with release-specific proof.
+    // Malibu v1.8.40 was the only release that could repair a provider CLI
+    // that predates the compatibility-set updater (Decision Entry 160). Later
+    // releases refuse that repair and name this version in the error.
     static let legacyBootstrapTarget = "1.8.40"
 
     enum Strategy: Equatable {
         case installedCompatibilityCLI
-        case pinnedInstaller(version: String)
     }
 
     struct RunningAppSnapshot: Equatable {
@@ -140,11 +136,7 @@ enum CLIUpdateRunner {
         guard ProviderCLIVersion.compare(normalizedInstalled, legacyBootstrapTarget) != .descending else {
             throw Error.legacyBootstrapWouldDowngrade(installedVersion: normalizedInstalled)
         }
-        guard let bundledAppVersion,
-              ProviderCLIVersion.strictNormalize(bundledAppVersion) == legacyBootstrapTarget else {
-            throw Error.legacyBootstrapUnavailable(appVersion: bundledAppVersion)
-        }
-        return .pinnedInstaller(version: "v\(legacyBootstrapTarget)")
+        throw Error.legacyBootstrapUnavailable(appVersion: bundledAppVersion)
     }
 
     static func run(
@@ -172,15 +164,6 @@ enum CLIUpdateRunner {
                     onLogLine: onLogLine
                 )
             },
-            pinnedInstall: { version in
-                await onLogLine(
-                    "[Malibu] Repairing the complete provider installation with signed \(version)."
-                )
-                try await CLIInstallRunner.run(
-                    pinnedVersion: version,
-                    onLogLine: onLogLine
-                )
-            },
             readinessCheck: { await waitForBuyerServing() },
             expectedAppIdentityAfterUpdate: { strategy, runningApp in
                 try CLIUpdateRunner.expectedAppIdentityAfterUpdate(
@@ -205,7 +188,6 @@ enum CLIUpdateRunner {
         bundledAppVersion: String?,
         runningApp: RunningAppSnapshot?,
         installedUpdate: @escaping @Sendable () async throws -> Void,
-        pinnedInstall: @escaping @Sendable (String) async throws -> Void,
         readinessCheck: @escaping @Sendable () async -> Bool,
         expectedAppIdentityAfterUpdate: @escaping @Sendable (Strategy, RunningAppSnapshot?) throws -> ExpectedAppIdentity?,
         isUpdaterOwnedInstall: @escaping @Sendable (URL) -> Bool = { _ in true },
@@ -221,7 +203,6 @@ enum CLIUpdateRunner {
         try await runStrategyForTest(
             strategy: selectedStrategy,
             installedUpdate: installedUpdate,
-            pinnedInstall: pinnedInstall,
             readinessCheck: readinessCheck
         )
         let expectedAppIdentity = try expectedAppIdentityAfterUpdate(
@@ -249,14 +230,11 @@ enum CLIUpdateRunner {
     static func runStrategyForTest(
         strategy: Strategy,
         installedUpdate: @escaping @Sendable () async throws -> Void,
-        pinnedInstall: @escaping @Sendable (String) async throws -> Void,
         readinessCheck: @escaping @Sendable () async -> Bool
     ) async throws {
         switch strategy {
         case .installedCompatibilityCLI:
             try await installedUpdate()
-        case let .pinnedInstaller(version):
-            try await pinnedInstall(version)
         }
         guard await readinessCheck() else {
             throw Error.readinessFailed

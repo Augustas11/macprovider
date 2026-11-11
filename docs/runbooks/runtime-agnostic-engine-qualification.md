@@ -35,8 +35,7 @@ artifact drift, missing samples or endpoint restrictions.
 
 ## Ollama positive checks
 
-Run the hidden operator-only `msb-ollama-loopback --capability-aware` command
-against an isolated loopback runtime on the designated Studio. Record the
+Measure an isolated loopback runtime on the designated Studio. Record the
 source commit, CLI/runtime binary digests, runtime version, model manifest and
 exact GGUF digest. The existing model resolver must verify that digest before
 and after measurement. Filesystem identity is not cryptographic proof of the
