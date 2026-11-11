@@ -260,6 +260,15 @@ func TestSaturatingAndClampHelpers(t *testing.T) {
 	if got := saturatingAddInt64(1, 100, 100); got != 100 {
 		t.Errorf("int64 overflow=%d", got)
 	}
+	if got := saturatingAddInt64(5, 0, 100); got != 5 {
+		t.Errorf("int64 zero add=%d", got)
+	}
+	if got := saturatingAddInt64(40, 60, 100); got != 100 {
+		t.Errorf("int64 exact boundary=%d", got)
+	}
+	if got := saturatingAddInt(4, 6, 10); got != 10 {
+		t.Errorf("int exact boundary=%d", got)
+	}
 	if got := saturatingAddInt64(1, 2, 100); got != 3 {
 		t.Errorf("int64 add=%d", got)
 	}
