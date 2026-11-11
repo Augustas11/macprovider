@@ -465,12 +465,3 @@ func validateTuple(tuple Tuple) error {
 	}
 	return nil
 }
-
-func isRequiredTupleKey(key string) bool {
-	for _, required := range requiredTupleKeys {
-		if key == required {
-			return true
-		}
-	}
-	return false
-}

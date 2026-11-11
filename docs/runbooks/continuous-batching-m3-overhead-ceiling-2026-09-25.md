@@ -3,7 +3,7 @@
 - **Build:** `campaign/1646-remaining` at `23429b7d`, binary `95d9b943cee6c7cd`.
 - **Hardware and model:** Mac Studio M3 Ultra 256 GB, `mlx-community/Qwen3.6-27B-4bit`.
 - **Harness:** `macprovider-cli msb-throughput` (`--runs 2`, 128 decode tokens), with the live provider paused.
-- **Data:** [`data/cb-m3-ceiling-2026-09-25/`](data/cb-m3-ceiling-2026-09-25/).
+- **Data:** `data/cb-m3-ceiling-2026-09-25/` (raw data lives in the private archive).
 
 ## Gate
 SPEC-039 FR-PKV13 requires a recorded overhead ceiling for the paged serving path. The #1646 acceptance values:

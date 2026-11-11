@@ -27,7 +27,6 @@ type Runner struct {
 	cfg      Config
 	snap     SnapshotProvider
 	logger   zerolog.Logger
-	stopOnce sync.Once
 	wg       sync.WaitGroup
 	metrics  *metrics.Metrics // optional; nil → no metric emit
 	tickGate TickGate         // optional; nil → every scheduled tick runs

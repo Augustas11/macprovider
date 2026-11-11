@@ -2399,12 +2399,6 @@ func postAdminSignedLifecycle(t *testing.T, store *trustpool.Store, h http.Handl
 	return postAdminSignedLifecycleBody(t, h, operatorKey, root.poolID, body, "", want)
 }
 
-func postAdminSignedLifecycleWithTarget(t *testing.T, store *trustpool.Store, h http.Handler, operatorKey string, root rootFixture, operationID, lifecycle, targetProviderID, reason string, corrupt bool, want int) *httptest.ResponseRecorder {
-	t.Helper()
-	body := signedLifecycleRequestBodyWithTarget(t, store, root, operationID, lifecycle, targetProviderID, reason, corrupt)
-	return postAdminSignedLifecycleBody(t, h, operatorKey, root.poolID, body, "", want)
-}
-
 func signedLifecycleRequestBody(t *testing.T, store *trustpool.Store, root rootFixture, operationID, lifecycle, reason string, corrupt bool) map[string]any {
 	t.Helper()
 	return signedLifecycleRequestBodyWithTarget(t, store, root, operationID, lifecycle, "", reason, corrupt)

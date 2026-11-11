@@ -777,19 +777,18 @@ func getHardwareTrustOperator(t *testing.T, url, token string) *http.Response {
 }
 
 type fakeHardwareTrustAdminStore struct {
-	requestCalled  bool
-	pendingID      string
-	jobID          int64
-	requestedBy    string
-	expiresAt      *time.Time
-	reason         string
-	incidentID     string
-	requestErr     error
-	requestProvID  string
-	requestHash    string
-	requestChip    string
-	requestMemGB   int
-	requestRetProv string
+	requestCalled bool
+	pendingID     string
+	jobID         int64
+	requestedBy   string
+	expiresAt     *time.Time
+	reason        string
+	incidentID    string
+	requestErr    error
+	requestProvID string
+	requestHash   string
+	requestChip   string
+	requestMemGB  int
 
 	approveCalled          bool
 	approvedBy             string

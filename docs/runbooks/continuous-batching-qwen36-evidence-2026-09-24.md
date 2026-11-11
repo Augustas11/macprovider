@@ -7,7 +7,7 @@ build is a lab Swift release built on the box (`--no-join`, isolated config and
 credential root). As with M3, the ceiling check has to be re-recorded on the
 packaged RC before it gates an enable.
 
-Raw data: [`data/cb-qwen36-2026-09-24/`](data/cb-qwen36-2026-09-24/).
+Raw data: `data/cb-qwen36-2026-09-24/` (raw data lives in the private archive).
 
 ## Tuple
 

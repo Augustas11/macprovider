@@ -16,7 +16,7 @@ Sanitized: token counts and tokens/sec only.
 - **Hardware tuple:** Mac Studio M3 Ultra, 256 GB unified memory, macOS 26.4.1, AC power
 - **Workload:** 1024 prompt tokens/row, 128 timed decode tokens/row, temperature 0, distinct topical prompt per row, 1 warmup + 3 timed runs, decode-only wall-clock
 
-JSON artifacts: [`data/cb-throughput-2026-09-20-contiguous/`](data/cb-throughput-2026-09-20-contiguous/).
+JSON artifacts: `data/cb-throughput-2026-09-20-contiguous/` (raw data lives in the private archive).
 
 ## Result: batching scales on this machine
 

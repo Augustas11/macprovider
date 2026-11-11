@@ -17,7 +17,7 @@ Prefill still writes per-row `PagedKVCache`. Timed decode packs that KV into sto
 - **Live serve:** v1.8.170 `live.malibu.provider` stayed up on port 8080 for the whole run
 - **Workload:** 1024 prompt tokens/row, 128 timed decode tokens/row, temperature 0, 1 warmup + 3 timed runs
 
-JSON artifacts: [`data/cb-throughput-2026-09-20-scheduler-compiled/`](data/cb-throughput-2026-09-20-scheduler-compiled/).
+JSON artifacts: `data/cb-throughput-2026-09-20-scheduler-compiled/` (raw data lives in the private archive).
 
 ## Result: the scheduler backend now scales on the production MoE tuple
 

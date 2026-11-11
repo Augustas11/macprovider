@@ -17,7 +17,7 @@ Buyer `continuous_batching` stays **off**. Live v1.8.170 slots stay at 4. Do not
 - **Live serve:** v1.8.170 `live.malibu.provider` stayed up on port 8080 for the whole run (pid 83717)
 - **Workload:** 1024 prompt tokens/row, 128 timed decode tokens/row, temperature 0, 1 warmup + 3 timed runs
 
-JSON artifacts: [`data/cb-throughput-2026-09-20-scheduler-window/`](data/cb-throughput-2026-09-20-scheduler-window/). Local artifact paths in the raw harness output were replaced with the catalog model id before check-in.
+JSON artifacts: `data/cb-throughput-2026-09-20-scheduler-window/` (raw data lives in the private archive). Local artifact paths in the raw harness output were replaced with the catalog model id before check-in.
 
 ## Result: the serve-path scheduler now scales on the production MoE tuple
 

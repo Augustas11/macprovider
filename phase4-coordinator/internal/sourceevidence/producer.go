@@ -497,10 +497,6 @@ func parseRegistryMillis(value string) (time.Time, error) {
 	return time.Parse("2006-01-02T15:04:05.000Z", value)
 }
 
-func loadJSONFileBounded(path string, maxBytes int64) (any, error) {
-	return loadStrictJSONFileBounded(path, maxBytes)
-}
-
 func sha256Hex(b []byte) string {
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])

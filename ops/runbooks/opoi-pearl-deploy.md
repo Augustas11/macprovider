@@ -35,26 +35,8 @@ guarded `deploy-pearl-vps.sh` path, not this retired overlay runbook.
 
 ## 2. Quick deploy (scripted)
 
-From a clean checkout of the exact coordinator release tag:
-
-```bash
-git checkout vX.Y.Z
-cd phase4-coordinator
-bash scripts/build-linux.sh
-bash dist/deploy-opoi-v0-pearl.sh
-```
-
-Dry run:
-
-```bash
-DRY_RUN=1 bash dist/deploy-opoi-v0-pearl.sh
-```
-
-With providers connected (drain will run):
-
-```bash
-FORCE_RESTART=1 bash dist/deploy-opoi-v0-pearl.sh
-```
+Retired. The coordinator-only deploy script was removed; use the signed
+backend-pair updater.
 
 ---
 

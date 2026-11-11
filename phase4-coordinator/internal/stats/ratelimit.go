@@ -48,10 +48,6 @@ type bucketEntry struct {
 	lastSeen     time.Time
 }
 
-func newLimiter() *limiter {
-	return newLimiterWithBounds(100000, 15*time.Minute)
-}
-
 func newLimiterWithBounds(maxBuckets int, idleTTL time.Duration) *limiter {
 	if maxBuckets <= 0 {
 		maxBuckets = 100000
@@ -89,12 +85,6 @@ func (l *limiter) allow(key string, now time.Time, limit int) bool {
 	}
 	b.count++
 	return true
-}
-
-func (l *limiter) sweep(now time.Time) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.sweepLocked(now)
 }
 
 func (l *limiter) sweepLocked(now time.Time) {

@@ -674,6 +674,30 @@ func validWalletSessionTestConfig() Config {
 	return cfg
 }
 
+// auth.email_magic_link_enabled was parsed but never read; live gateway.yaml
+// files that still set it must load unchanged.
+func TestLoadIgnoresRetiredEmailMagicLinkKey(t *testing.T) {
+	original, err := yaml.Marshal(validTestConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseline, err := Load(writeTempConfig(t, string(original)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents := strings.Replace(string(original), "auth:\n", "auth:\n    email_magic_link_enabled: true\n", 1)
+	if contents == string(original) {
+		t.Fatal("auth mapping missing from fixture")
+	}
+	got, err := Load(writeTempConfig(t, contents))
+	if err != nil {
+		t.Fatalf("retired email_magic_link_enabled must be ignored: %v", err)
+	}
+	if !reflect.DeepEqual(got, baseline) {
+		t.Fatal("retired email_magic_link_enabled changed the loaded config")
+	}
+}
+
 func writeTempConfig(t *testing.T, contents string) string {
 	t.Helper()
 	path := t.TempDir() + "/gateway.yaml"

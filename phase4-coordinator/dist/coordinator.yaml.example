@@ -160,7 +160,6 @@ auth:
 
 storage:
   db_path: "/var/lib/macprovider/coordinator.db"
-  snapshot_interval_s: 300
   # SPEC-005 §2.1b: 14 days; must exceed settlement.nightly_reconcile_window_days.
   request_log_retention_days: 14
   # Defaults are true for backward compatibility. Set false to defer DELETE
@@ -507,10 +506,8 @@ coordinator_advertised_version:
 providers:
   - provider_id: "m4-anon"
     endpoint_url: "https://m4.malibu.tech"
-    display_name: "M4 partner (Qwen 7B)"
   - provider_id: "m1-anon"
     endpoint_url: "https://m1.malibu.tech"
-    display_name: "M1 partner (Llama 3.2 3B)"
 
 # SPEC-016 v0.1.21 §6.5 — payout pipeline (USDC on Base).
 #

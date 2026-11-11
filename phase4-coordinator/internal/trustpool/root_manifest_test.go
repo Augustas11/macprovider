@@ -475,11 +475,6 @@ func signedManifestExtendingWithPolicyCoreMutation(t *testing.T, op string, ts t
 	return e
 }
 
-func manifestSnapshot(t *testing.T, version uint64, root rootFixture) (string, string) {
-	t.Helper()
-	return manifestSnapshotWithPolicyCoreMutation(t, version, root, nil)
-}
-
 func manifestSnapshotWithPolicyCoreMutation(t *testing.T, version uint64, root rootFixture, mutate func(*poolmanifest.PolicyCore)) (string, string) {
 	t.Helper()
 	authEntry := poolmanifest.AuthorityLogEntry{

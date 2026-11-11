@@ -57,8 +57,6 @@ const (
 	CloseReasonParametersChanged  = "parameters_changed"
 	CloseReasonEligibilityChanged = "eligibility_changed"
 
-	eligibilityPolicyIDBytes = 16
-
 	// Configuration maxima (SPEC-017 §5.2b.7): operationally safe ceilings
 	// so K × P and the cap arithmetic stay bounded.
 	MaxKeyBuckets          = 4096

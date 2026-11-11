@@ -4,7 +4,7 @@ Harness: `msb-throughput --scenario leftovers|msb03|msb05` on the compiled
 scheduler path (`decodeLockstepWindow`). Buyer `continuous_batching` stayed
 **off**. Live v1.8.170 slots stayed at 4. Do not canary 170.
 
-JSON: [`data/cb-frcb15-leftovers-2026-09-20/`](data/cb-frcb15-leftovers-2026-09-20/).
+JSON: `data/cb-frcb15-leftovers-2026-09-20/` (raw data lives in the private archive).
 Local artifact paths were replaced with the catalog model id before check-in.
 
 MoE promotion review (flag stays false):

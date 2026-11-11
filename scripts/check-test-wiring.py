@@ -26,19 +26,9 @@ SKIP_DIRS = {".git", "node_modules", ".build"}
 # listed file that disappears, or that becomes wired, fails the check so the
 # list cannot go stale.
 UNWIRED = {
-    "phase4-coordinator/dist/test/canary_text_vnode_proof_test.py": (
-        "obsolete: it extracts an inline proof from deploy-pearl-vps.sh that the "
-        "script no longer contains (ValueError: substring not found)"
-    ),
     "phase4-coordinator/internal/payout/testdata/eip712_js/test_digest.mjs": (
         "fixture generator: needs the ethers npm package; the Go payout tests "
         "check its committed output"
-    ),
-    "scripts/test-mlx-runtime-smoke.py": (
-        "hardware smoke: starts a real macprovider-cli and loads models on a Mac"
-    ),
-    "scripts/test-phase3-tool-profiles.py": (
-        "hardware probe: drives an isolated --no-join provider on the Studio"
     ),
     "scripts/tests/test-malibu-handoff-studio.py": (
         "Studio GUI acceptance: runs only on the designated Studio console user"

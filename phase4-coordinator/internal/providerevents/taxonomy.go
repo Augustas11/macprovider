@@ -200,12 +200,6 @@ func LooksLikeCredential(s string) bool {
 	return secretLike.MatchString(trimmed)
 }
 
-// KnownFailureReason reports whether reason is in the closed taxonomy.
-func KnownFailureReason(reason string) bool {
-	_, ok := knownReasons[reason]
-	return ok
-}
-
 // KnownKind reports whether kind is in the closed taxonomy.
 func KnownKind(kind string) bool {
 	_, ok := knownKinds[kind]
