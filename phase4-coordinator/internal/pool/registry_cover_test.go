@@ -112,8 +112,12 @@ func TestRegistrySessionGuardedMutators(t *testing.T) {
 	if !r2.FenceCompatibilityPolicy("provider-a", "assigned-a") {
 		t.Fatal("fence failed")
 	}
-	if g, _ := r2.Resolve("provider-a", "assigned-a"); g.RoutingEligible() {
+	g, _ := r2.Resolve("provider-a", "assigned-a")
+	if g.RoutingEligible() {
 		t.Fatal("fenced session must be unroutable")
+	}
+	if g.State != StateUnavailable || !g.HandshakeAckPending {
+		t.Fatalf("fence must set unavailable + ack pending: state=%v ack=%v", g.State, g.HandshakeAckPending)
 	}
 }
 
