@@ -6,7 +6,7 @@ This is the mandatory correctness-first matrix for any change to `mlx-swift-lm`,
 
 1. Resolve production only from the immutable fork tags in [Fork model](#fork-model), each pinned by full revision. Never resolve production from a branch, a version range, or a moved tag.
 2. Record exact before/after versions and revisions for `mlx-swift-lm`, `mlx-swift`, `swift-transformers`, and `swift-jinja`.
-3. Keep `swift-transformers` unchanged during the MLX engine migration; evaluate it separately under #966.
+3. Keep `swift-transformers` unchanged during the MLX engine migration; evaluate it separately under #966. Exception: a new model that needs a newer `swift-transformers` may bundle the move with its fork pin when the #966 token-exact gate passes over every served tokenizer (as #2231 did for 1.4.0).
 4. Build, test, resolve, candidate, and release jobs that compile `phase3-binary` or Malibu.app run only on the protected build toolchain: Xcode 26.6 (17F113) at `/Applications/Xcode_26.6.app`, Swift 6.3.3, macOS SDK 26.5, on the `macos-26` / `macos-26-intel` images. It replaced Xcode 16.4 / Swift 6.1 in the reviewed release-toolchain migration that landed with the mlx-swift-lm 3.32.3 dependency upgrade (`mlx-swift 0.32.3` declares `swift-tools-version: 6.3`; Related: #1906, #700). The protected `macos-15-intel` signers stay on the pinned signer toolchain (Xcode 16.4) for the sealed OpenSSL bottle and never compile the package. Any further toolchain move needs its own reviewed migration and release-runner proof.
 5. Correctness, token accounting, cache ownership, and artifact parity gate throughput. No performance waiver may override a red correctness row.
 
@@ -556,3 +556,12 @@ recorded in `audits/2026-09-04-swift-transformers-134/GATE.md`: token-exact for
 all byte-level/BPE catalog families (Qwen, Llama, GPT-OSS); Gemma carries five
 intended Unicode corrections (invalidate Gemma Unicode-heavy KV caches);
 Nemotron is newly loadable. `mlx-swift-lm` / `mlx-swift` were frozen throughout.
+
+`swift-transformers` moved `1.3.5 → 1.4.0` with the LFM3 fork pin (#2231,
+2026-11-11), because LFM3 needs BPE `ignore_merges` and code-point regex
+splits. The #966 gate ran over all 26 served tokenizers (552 corpus rows):
+1.4.0 matches HF `tokenizers` on every row. Token IDs that changed from 1.3.5
+all moved onto the reference: DeepSeek-V4-Flash code and special-token rows,
+one Gemma 4 half-width kana row, and the LFM2.5 and LFM3 code rows. Decode
+cleanup now round-trips exactly for Llama, Gemma 4 and LFM3. On Swift 6.1+
+toolchains the 1.4.0 manifest pins yyjson `0.13.0` (was `0.12.0`).
