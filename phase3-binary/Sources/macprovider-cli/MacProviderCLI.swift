@@ -723,6 +723,12 @@ struct ServeCommand: AsyncParsableCommand {
             ).utf8))
             throw ExitCode(2)
         }
+        if resolved.kvBitsOverride != nil,
+           let refusal = [resolved.model, resolved.modelCatalogModelID, resolved.modelArtifactPath]
+               .compactMap({ $0 }).lazy.compactMap(KVQuantRecommendation.quantizedKVRefusal(for:)).first {
+            FileHandle.standardError.write(Data("--kv-bits refused: \(refusal)\n".utf8))
+            throw ExitCode(2)
+        }
         if let maxContext = resolved.maxContextOverride, maxContext < 1 {
             FileHandle.standardError.write(Data((
                 "--max-context \(maxContext) must be >= 1\n"

@@ -2317,6 +2317,17 @@ actor ModelRuntime: ModelRuntimeServing {
         Self.serialKVBits(explicit: kvBitsOverride, familyKVQuantDefault: familyKVQuantDefault, modelID: currentModelID)
     }
 
+    /// SPEC-039 FR-PKV5 v0.1.33: an explicit `kv_bits` for a family whose
+    /// attention has no quantized-KV path fails the load instead of serving it.
+    nonisolated static func refuseQuantizedKV(explicit: Int?, modelIDs: [String?]) throws {
+        guard explicit != nil else { return }
+        for case let modelID? in modelIDs {
+            if let refusal = KVQuantRecommendation.quantizedKVRefusal(for: modelID) {
+                throw ModelRuntimeLoadError(target: modelID, reason: refusal)
+            }
+        }
+    }
+
     nonisolated static func serialKVBits(explicit: Int?, familyKVQuantDefault: Bool, modelID: String?) -> Int? {
         if let explicit { return explicit }
         guard familyKVQuantDefault, let modelID else { return nil }
@@ -4221,6 +4232,7 @@ maxTokens: 1,
             }
             return
         }
+        try Self.refuseQuantizedKV(explicit: kvBitsOverride, modelIDs: [modelID, modelLoadPath, catalogModelIDAlias])
 
         // One setup boundary for serve, self-test and native benchmark callers.
         // A nil-model or preloaded test runtime must not initialize Metal.
@@ -5949,6 +5961,7 @@ maxTokens: 1,
         } else if adoptionTransactionID != nil {
             throw ModelRuntimeAdoptionError.transactionNotPrepared
         }
+        try Self.refuseQuantizedKV(explicit: adoptionKnobs?.kvBits ?? kvBitsOverride, modelIDs: [targetModelID])
         let targetAuthority = targetAuthority(for: targetModelID)
         if testLoader == nil {
             guard targetAuthority != nil else {
