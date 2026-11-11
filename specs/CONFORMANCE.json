@@ -11870,7 +11870,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1770",
-        "rationale": "SPEC-048 v0.1.85 names LM 3.32.3-macprovider.40 (a7374a810bc5d5b5079ce998e61609ecf7e44acd): 3.32.3-macprovider.38 plus the LiquidAI LFM3 text model (#2231); .38 is 3.32.3-macprovider.35 (#2270, the ricursive text model and its prefill chunk) plus the mlx-swift 0.32.3-macprovider.13 pin (#2234) and GLM-5-Next projecting 1...8 decode tokens with one kernel (#2265). The Swift and core rows move to the qmv_mma core; the C row is unchanged."
+        "rationale": "SPEC-048 v0.1.86 names LM 3.32.3-macprovider.42 (e0cac0711d20996a40aa1c1ca5a9705e9e8635c7): 3.32.3-macprovider.40 (the LiquidAI LFM3 text model, #2231) plus the GPT-OSS SwiGLU bf16 clip and a lab-only gpt-oss per-layer dump (#2254, #2255); .40 is 3.32.3-macprovider.38 plus the LiquidAI LFM3 text model (#2231); .38 is 3.32.3-macprovider.35 (#2270, the ricursive text model and its prefill chunk) plus the mlx-swift 0.32.3-macprovider.13 pin (#2234) and GLM-5-Next projecting 1...8 decode tokens with one kernel (#2265). The Swift and core rows move to the qmv_mma core; the C row is unchanged."
       }
     },
     {
