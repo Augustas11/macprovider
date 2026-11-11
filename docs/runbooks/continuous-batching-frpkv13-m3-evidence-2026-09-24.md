@@ -7,7 +7,7 @@ must meet, and record the sizing table and the servable-envelope delta. This
 is lab-build evidence (Swift release built on the box, `--no-join`); the gate
 requires the ceiling check to be re-recorded on the packaged RC.
 
-Raw data: [`data/cb-frpkv13-m3-2026-09-24/`](data/cb-frpkv13-m3-2026-09-24/).
+Raw data: `data/cb-frpkv13-m3-2026-09-24/` (raw data lives in the private archive).
 
 ## Tuple
 
