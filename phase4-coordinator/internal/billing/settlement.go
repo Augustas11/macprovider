@@ -390,21 +390,6 @@ func NextMondayUTC(t time.Time) time.Time {
 	return day.AddDate(0, 0, days)
 }
 
-func nullIntFromRow(row *sql.Row) (int64, error) {
-	var n sql.NullInt64
-	if err := row.Scan(&n); err != nil {
-		return 0, err
-	}
-	if !n.Valid {
-		return 0, nil
-	}
-	return n.Int64, nil
-}
-
-func idempotencyKey(providerID string, start, end time.Time) string {
-	return fmt.Sprintf("%s|%s|%s", providerID, sqliteTimeText(start), sqliteTimeText(end))
-}
-
 func logBillingJobError(job string, err error, windowStart, windowEnd time.Time) {
 	if err == nil {
 		return

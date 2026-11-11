@@ -13,10 +13,6 @@ import (
 	"golang.org/x/text/unicode/norm"
 )
 
-func settlementOutputFromChatResponse(body []byte, terminalState string) (*billing.SettlementOutput, bool) {
-	return settlementOutputFromChatResponseAt(body, terminalState, time.Now().UTC().UnixMilli())
-}
-
 func settlementOutputFromChatResponseAt(body []byte, terminalState string, terminalStateTSUnixMS int64) (*billing.SettlementOutput, bool) {
 	if hasDuplicateJSONKeys(body) {
 		return nil, false

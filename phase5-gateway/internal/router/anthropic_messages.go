@@ -1956,13 +1956,6 @@ func anthropicRawIsNull(raw json.RawMessage) bool {
 	return bytes.Equal(bytes.TrimSpace(raw), []byte("null"))
 }
 
-func firstNonNilMapValue(m map[string]any, key string, fallback any) any {
-	if v, ok := m[key]; ok && v != nil {
-		return v
-	}
-	return fallback
-}
-
 type anthropicToolCallDelta struct {
 	index     int
 	id        string

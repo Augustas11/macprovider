@@ -1890,10 +1890,6 @@ SELECT event_type, account_scope_hash, attempted_received_at_unix_ms,
 	return eventType, accountScopeHash, state, attemptedReceivedAtUnixMS, eventTime, true, nil
 }
 
-func settlementReceiptAuditPayload(state SettlementReceiptState, checks *SettlementVerificationChecks, verdict bool, attemptedReceivedAtUnixMS int64) (string, error) {
-	return settlementReceiptAuditPayloadForAccountHash(redactedAccountScopeHash(state.AccountScope), state, checks, verdict, attemptedReceivedAtUnixMS, 0)
-}
-
 // settlementReceiptAuditPayloadForAccountHash builds the audit-database
 // payload of one outbox event (SPEC-022 R-11.1, SPEC-015 §11). An ingested
 // event names the attempt and the receipt; the verdict event of the same

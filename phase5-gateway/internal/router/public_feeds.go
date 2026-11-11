@@ -76,15 +76,6 @@ type publicFeedFetch struct {
 	gatewayErr   bool
 }
 
-func isPublicFeedPath(path string) bool {
-	switch path {
-	case publicRateCardPath, publicRateCardSigPath, publicStatsPath, publicStatsRoutabilityPath, publicStatsModelsPath, publicStatsProvidersPath, "/v1/network-stats":
-		return true
-	default:
-		return false
-	}
-}
-
 func isPublicStatsPath(path string) bool {
 	switch path {
 	case publicStatsPath, publicStatsRoutabilityPath, publicStatsModelsPath, publicStatsProvidersPath, "/v1/network-stats":

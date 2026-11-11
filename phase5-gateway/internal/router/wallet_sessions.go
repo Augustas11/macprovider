@@ -5,7 +5,6 @@ import (
 	"crypto/ed25519"
 	"crypto/hmac"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -1222,12 +1221,4 @@ func (s *Server) writeWalletAdmissionError(w http.ResponseWriter, err error, dec
 	default:
 		writeError(w, http.StatusInternalServerError, "server_error", "wallet_session_admission_failed", "Wallet-session admission failed")
 	}
-}
-
-func decodeBase64URLHash(value string) []byte {
-	decoded, err := base64.RawURLEncoding.DecodeString(value)
-	if err != nil {
-		return nil
-	}
-	return decoded
 }
