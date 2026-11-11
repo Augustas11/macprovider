@@ -268,6 +268,10 @@ func TestClientIPExportedAndFallbacks(t *testing.T) {
 	if got := rightmostUntrustedXFF("1.1.1.1, [2001:db8::1]:443", trusted); got != "2001:db8::1" {
 		t.Fatalf("ipv6 xff got %s", got)
 	}
+	// Bare bracketed IPv6 hop with no port.
+	if got := rightmostUntrustedXFF("1.1.1.1, [2001:db8::2]", trusted); got != "2001:db8::2" {
+		t.Fatalf("bare bracketed ipv6 xff got %s", got)
+	}
 	// RemoteAddr without port.
 	if got := clientIP(mk("203.0.113.9", "", ""), trusted); got != "203.0.113.9" {
 		t.Fatalf("no-port got %s", got)
