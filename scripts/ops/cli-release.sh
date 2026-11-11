@@ -13,6 +13,13 @@
 # docs/runbooks/provider-cli-release-verification.md):
 #   1 version_alignment     checked-in latest_binary_version rows == live stable,
 #                           binaryVersion on main > live stable
+#   0 version_staging       after a train is complete and main carries provider-side
+#                           changes since the published tag: next --run (_stage-version)
+#                           opens the version-only staging PR (binaryVersion = next unused
+#                           tag above live stable and every origin tag, Pearl runtime tags
+#                           included; the three rows = live stable) from a fresh sibling
+#                           worktree. Refused while a staging PR is open or when main
+#                           already carries that version; it never merges
 #   2 candidate_cut         acceptance-candidate.yml on the exact origin/main SHA,
 #                           promotion_ready=true, strict_post_migration; blocked until
 #                           origin/main's catalog release is the one Pearl serves
@@ -60,11 +67,9 @@
 #                           or when the running coordinator does not hold the registrations of 7a);
 #                           a served model with no entry in the candidate's signed CB policy
 #                           passes with CB off (serial by design), policy live_verified
-#   7 e2e_gate              in-scope e2e green on the candidate (Promotion gate item 3):
-#                           `next --done e2e_gate --run-id N [--run-id M ...]` (each a successful
-#                           promote-signed-*-journey run whose head SHA, title or log names the
-#                           candidate SHA or tag) or `--carry-forward ID` (a carry-forward record
-#                           in docs/releases/cli-release-train.md naming the candidate version)
+#   7 native_mtp_postcut    only while NATIVE_MTP_POSTCUT_EVIDENCE names staged post-cut
+#                           native-MTP evidence: next --run uploads it and records the
+#                           successful signed serving journey run that names the candidate
 #   7a registrations        read-only gate over PEARL_SSH, on every status (it also gates 8 and
 #                           9): the running coordinator admits the candidate compatibility_set_id
 #                           as in step 5 (on-disk config sha256 == the last boot or
@@ -78,13 +83,16 @@
 #                           tag counts only if its exact remote object verifies; refused when
 #                           v<ver> exists unsigned/untrusted, on another commit, or lightweight
 #   7b promotion            promote-acceptance-candidate.yml (+ env approval); only this step
-#                           sets physical_acceptance_confirmed=true, after 4, 6, 7, 7a and 7a2
+#                           sets physical_acceptance_confirmed=true, after 4, 6, 6a, 7a and 7a2
 #   7c install_sh_republish  get-channel install.sh == released dist/install.sh; offered
 #                           right after promotion (before 8) so the scheduled parity alarm,
 #                           which compares against the latest published release, does not
-#                           fire while the rest of the train runs (#2210). Missing
-#                           PEARL_SSH/INSTALL_SH_REMOTE_PATH or an unreadable INSTALL_SH_URL
-#                           never blocks 8-9a: that refusal is reported after 9a
+#                           fire while the rest of the train runs (#2210). next --run
+#                           (_install-sh-republish): back up the served file, install
+#                           v<ver>:phase3-binary/dist/install.sh over PEARL_SSH and read back
+#                           its sha256. Missing PEARL_SSH/INSTALL_SH_REMOTE_PATH or an
+#                           unreadable INSTALL_SH_URL never blocks 8-9a: that refusal is
+#                           reported after 9a
 #   8 recommendation_bump   next --run: _pearl-config sets latest_binary_version and
 #                           compatibility_set.target_id, sends SIGHUP, and checks /healthz
 #                           recommended_binary_version and compatibility_policy_target_id.
@@ -95,11 +103,14 @@
 #                           then verify-live-coordinator-release-rollout.yml
 #  9a mirror_latest        the China release mirror's advisory releases/latest.json names the
 #                           recommended tag; next --run: scripts/publish-release-mirror.sh
-#                           --tag v<ver> --promote-latest (it requires the coordinator to
-#                           advertise the tag and never moves backwards). Needs
-#                           MALIBU_DOWNLOAD_SSH_KEY; GH_TOKEN defaults to the gh login
+#                           --tag v<ver> --latest-only (the promotion workflow already
+#                           mirrored the assets; it checks Pearl holds them byte-identically,
+#                           requires the coordinator to advertise the tag and never moves
+#                           backwards). Needs MALIBU_DOWNLOAD_SSH_KEY; GH_TOKEN defaults to
+#                           the gh login
 #  10 install_sh_republish  (7c) the refusal it could not act on: env unset or served unreadable
-#  11 install_sh_consumer_health
+#                           (install.sh consumer health is the scheduled
+#                           install-sh-consumer-health-alarm.yml, not a train step)
 #
 # Revoked-build rollback (SPEC-020-R007; runbook VERIFY_DOC "Revoked-build rollback"):
 #   CLI_ROLLBACK_TO_ID=<previous good compatibility_set_id> \
@@ -110,7 +121,8 @@
 #
 # Env (or ~/.config/macprovider/ops.env): COORDINATOR_URL, INSTALL_SH_URL,
 # MALIBU_DOWNLOAD_SSH_KEY (mirror_latest; MIRROR_LATEST_URL overrides the served pointer),
-# PEARL_SSH, INSTALL_SH_REMOTE_PATH, MACPROVIDER_OPS_OWNER (for --run).
+# PEARL_SSH, INSTALL_SH_REMOTE_PATH (PEARL_INSTALL_SH_OWNER/GROUP, default root),
+# MACPROVIDER_OPS_OWNER (for --run).
 # Pearl paths default to the production layout: PEARL_COORDINATOR_CONFIG,
 # PEARL_COORDINATOR_OVERLAY, PEARL_COORDINATOR_UNIT, PEARL_COORDINATOR_METRICS_URL,
 # PEARL_RELEASE_IDENTITY_OWNER, PEARL_RELEASE_IDENTITY_GROUP.
@@ -120,7 +132,7 @@ OPS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 OPS_NAME=cli-release
 # Free-text --done is refused for these; see structured_done.
-STRUCTURED_STEPS="canary_smoke e2e_gate"
+STRUCTURED_STEPS="canary_smoke"
 # shellcheck source=lib/common.sh
 . "$OPS_DIR/lib/common.sh"
 
@@ -137,6 +149,8 @@ PEARL_COORDINATOR_UNIT="${PEARL_COORDINATOR_UNIT:-macprovider-coordinator}"
 PEARL_COORDINATOR_METRICS_URL="${PEARL_COORDINATOR_METRICS_URL:-http://127.0.0.1:8444/metrics}"
 PEARL_RELEASE_IDENTITY_OWNER="${PEARL_RELEASE_IDENTITY_OWNER:-root}"
 PEARL_RELEASE_IDENTITY_GROUP="${PEARL_RELEASE_IDENTITY_GROUP:-macprovider}"
+PEARL_INSTALL_SH_OWNER="${PEARL_INSTALL_SH_OWNER:-root}"
+PEARL_INSTALL_SH_GROUP="${PEARL_INSTALL_SH_GROUP:-root}"
 
 # registrations_remote ARGS...: run lib/release-registrations.py on Pearl
 # (the script travels on stdin). Every argument must be shell-safe.
@@ -551,6 +565,38 @@ decide_rollback() {
   fi
 }
 
+# stage_next STEP REASON: offer _stage-version as STEP, or block on an open
+# staging PR (one campaign, one PR).
+stage_next() {
+  local open
+  if ! open="$(open_staging_prs)"; then
+    set_next "$1" blocked "List open pull requests" "gh pr list -R $(gh_repo) --state open" \
+      "gh pr list failed, so an open version staging PR cannot be ruled out; check gh auth"
+  elif [ -n "$open" ]; then
+    set_next "$1" blocked "Merge the open version staging PR" "" "a version staging PR is already open: $open"
+  else
+    set_next "$1" mutate "Open the version-only staging PR for the next provider CLI" \
+      "scripts/ops/cli-release.sh _stage-version" "$2"
+  fi
+}
+
+# open_staging_prs: URLs of open PRs titled "Stage provider CLI ..."; fails
+# when gh does, so a failed listing never reads as "none open".
+open_staging_prs() {
+  local out
+  out="$(gh pr list -R "$(gh_repo)" --state open --search "Stage provider CLI in:title" \
+    --json title,url --jq '.[] | select(.title | startswith("Stage provider CLI")) | .url' 2>/dev/null)" ||
+    return 1
+  printf '%s' "$out" | tr '\n' ' ' | sed 's/ $//'
+}
+
+# stage_pr_command VERSION: the gh pr create call _stage-version makes, for an
+# operator to run by hand when the branch is pushed but no PR was opened.
+stage_pr_command() {
+  printf 'gh pr create -R %s --base main --head release/stage-cli-%s --title "Stage provider CLI %s" --body "Version-only staging for provider CLI %s (scripts/ops/cli-release.sh version_staging)."' \
+    "$(gh_repo)" "$1" "$1" "$1"
+}
+
 decide() {
   local main_sha="$1" head_sha="$2" V="$3" A="$4" L="$5" published="$6" active_id="$7" active_status="$8"
   local ok_id="$9" ok_sha="${10}" artifact_state="${11}" promote_active="${12}" verify_ok="${13}"
@@ -578,9 +624,7 @@ bash scripts/release-staged-version-policy.sh v$V" \
       "release-staged-version-policy.sh derives the previous stable from these rows; they must name live stable $L"
   elif [ "$(semver_cmp "$V" "$L")" != "1" ]; then
     step version_alignment pending "binaryVersion $V is not above live $L"
-    set_next version_alignment manual "Bump binaryVersion above $L in a version-only PR" \
-      "# edit phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift: static let binaryVersion" \
-      "A promotion_ready candidate must carry its final version in the accepted bytes"
+    stage_next version_alignment "A promotion_ready candidate must carry its final version in the accepted bytes"
   else
     step version_alignment "done" "binaryVersion $V > live $L == checked-in $A"
   fi
@@ -752,7 +796,8 @@ scripts/ops/cli-release.sh _stage-privacy-identity $V"
     set_next canary_smoke manual "Exact signed-candidate install/join smoke on the canary Mac" \
 "# docs/releases/cli-release-train.md Promotion gate item 5 (operator approval: restarts the live provider)
 # Swap the verified bytes from $OPS_STATE_DIR/$OPS_SCOPE/ onto the canary (checks every shipped
-# metallib's MLX kernels first; a crash loop or a silent /v1/status restores the backup and resumes):
+# metallib's MLX kernels first; a crash loop, or /v1/status silent for 120 s after the candidate
+# reported its model loaded, restores the backup and resumes: exit 5; exit 6 needs the operator):
 MACPROVIDER_OPS_OWNER=<session-label> $OPS_DIR/canary-swap.sh swap --version $V
 # Then confirm: macprovider-cli --version == $V; joins via compatibility set $compat_id;
 #   operator pause survives coordinator drain; one bounded buyer request is served.
@@ -778,19 +823,24 @@ MACPROVIDER_OPS_OWNER=<session-label> $OPS_DIR/canary-swap.sh swap --version $V
     step canary_self_check pending ""
   fi
 
-  # 7. in-scope e2e on the candidate (Promotion gate item 3).
-  if [ "$published" = true ] || marker_candidate_matches e2e_gate "$ok_sha"; then
-    step e2e_gate "done" "$(marker_field "$OPS_SCOPE" e2e_gate 'd.get("evidence")')"
+  # 7. native-MTP post-cut evidence transport: offered only while the
+  # operator stages post-cut evidence (NATIVE_MTP_POSTCUT_EVIDENCE); done
+  # once a real successful signed serving journey names the candidate.
+  if marker_candidate_matches native_mtp_postcut "$ok_sha"; then
+    step native_mtp_postcut "done" "$(marker_field "$OPS_SCOPE" native_mtp_postcut 'd.get("evidence")')"
+  elif [ "$published" = true ]; then
+    :
   elif [ -n "${NATIVE_MTP_POSTCUT_EVIDENCE:-}" ]; then
     local postcut_state postcut_status
     if ! postcut_state="$(python3 "$REPO_ROOT/scripts/native_mtp_postcut_upload.py" status \
         --root "$REPO_ROOT" --evidence "$NATIVE_MTP_POSTCUT_EVIDENCE" \
         --candidate-marker "$(marker_path "$OPS_SCOPE" signed_byte_verification)" \
         --state-dir "$OPS_STATE_DIR/$OPS_SCOPE/native-mtp-postcut" 2>"$OPS_TMP_DIR/postcut.err")"; then
+      step native_mtp_postcut blocked "post-cut intent or run provenance invalid"
       set_next native_mtp_postcut blocked "Verify public-safe post-cut evidence transport" "" "post-cut intent or authenticated run provenance is invalid"
     else
       postcut_status="$(printf '%s' "$postcut_state" | python3 -c 'import json,sys;print(json.load(sys.stdin)["status"])')"
-      step e2e_gate pending "post-cut transport: $postcut_status"
+      step native_mtp_postcut pending "post-cut transport: $postcut_status"
       case "$postcut_status" in
         absent|staged|success)
           set_next native_mtp_postcut mutate "Upload public-safe native-MTP evidence or record its successful signed journey" \
@@ -800,13 +850,6 @@ MACPROVIDER_OPS_OWNER=<session-label> $OPS_DIR/canary-swap.sh swap --version $V
         *) set_next native_mtp_postcut blocked "Inspect the failed native-MTP signed journey" "" "the immutable transport intent cannot be replaced" ;;
       esac
     fi
-  else
-    step e2e_gate pending ""
-    set_next e2e_gate manual "Record the in-scope e2e evidence for candidate $ok_sha" \
-"# docs/releases/cli-release-train.md Promotion gate item 3: in-scope e2e green on this candidate,
-# or an explicit carry-forward record. Record checkable evidence only:
-#   $0 next --done e2e_gate --run-id <signed journey run id> [--run-id <id> ...]
-#   $0 next --done e2e_gate --carry-forward <record id in docs/releases/cli-release-train.md>"
   fi
 
   # 7a. registrations: every coordinator-side registration of the candidate
@@ -865,10 +908,9 @@ MACPROVIDER_OPS_OWNER=<session-label> $OPS_DIR/canary-swap.sh swap --version $V
       set_next promotion blocked "Promote v$V" "" "production-release group busy: $prod_active"
     elif ! marker_run_matches signed_byte_verification "$ok_id" ||
       ! marker_canary_probe_matches "$ok_sha" || ! canary_self_check_confirmed "$ok_sha" ||
-      ! marker_candidate_matches e2e_gate "$ok_sha" ||
       ! registrations_live || [ "$tag_state" != on_candidate ]; then
       set_next promotion blocked "Promote v$V" "" \
-        "physical_acceptance_confirmed=true needs verified bytes, canary smoke (and its CB re-check decided), e2e evidence, live Pearl registrations and the signed v$V tag for $ok_sha"
+        "physical_acceptance_confirmed=true needs verified bytes, canary smoke (and its CB re-check decided), live Pearl registrations and the signed v$V tag for $ok_sha"
     else
       set_next promotion mutate "Promote acceptance run $ok_id to the public v$V release" \
 "scripts/ops/cli-release.sh _check-registrations $V
@@ -890,11 +932,7 @@ gh workflow run promote-acceptance-candidate.yml -R $(gh_repo) --ref main \\
       step install_sh_republish pending "served install.sh differs from v$V"
       if [ -n "${INSTALL_SH_REMOTE_PATH:-}" ] && [ -n "${PEARL_SSH:-}" ]; then
         set_next install_sh_republish mutate "Republish the get-channel install.sh from v$V" \
-"ts=\$(date -u +%Y%m%dT%H%M%SZ)
-git show v$V:phase3-binary/dist/install.sh > \"\${TMPDIR:-/tmp}/install.sh.v$V\"
-ssh \"\$PEARL_SSH\" \"cp -p \$INSTALL_SH_REMOTE_PATH \$INSTALL_SH_REMOTE_PATH.bak-\$ts\"
-scp \"\${TMPDIR:-/tmp}/install.sh.v$V\" \"\$PEARL_SSH:/tmp/install.sh.new\"
-ssh \"\$PEARL_SSH\" \"install -o root -g root -m 0755 /tmp/install.sh.new \$INSTALL_SH_REMOTE_PATH && rm -f /tmp/install.sh.new\""
+          "scripts/ops/cli-release.sh _install-sh-republish $V"
         next_meta install_sh_republish "$VERIFY_DOC#curl-channel-installsh-republish-mandatory-on-release" "none expected: static file replace on the coordinator host"
       fi ;;
     *) step install_sh_republish unknown "needs INSTALL_SH_URL and a published v$V" ;;
@@ -967,7 +1005,7 @@ gh workflow run verify-live-coordinator-release-rollout.yml -R $(gh_repo) --ref 
       else
         set_next mirror_latest mutate "Point the release mirror latest.json at v$V" \
 "GH_TOKEN=\"\${GH_TOKEN:-\$(gh auth token -u Augustas11)}\" \\
-  bash scripts/publish-release-mirror.sh --tag v$V --promote-latest"
+  bash scripts/publish-release-mirror.sh --tag v$V --latest-only"
         next_meta mirror_latest "$VERIFY_DOC#release-mirror-byte-identity-downloadmalibutech-1737" "none expected: static file replace on the mirror host"
       fi ;;
     *)
@@ -989,14 +1027,20 @@ gh workflow run verify-live-coordinator-release-rollout.yml -R $(gh_repo) --ref 
       ;;
   esac
 
-  # 11. consumer health (read-only).
-  if marker_done "$OPS_SCOPE" install_sh_consumer_health; then
-    step install_sh_consumer_health "done" ""
-  else
-    step install_sh_consumer_health pending ""
-    set_next install_sh_consumer_health read "Check that the served installer resolves an installable release" \
-      "INSTALL_SH_RELEASE_TAG=v$V bash scripts/check-install-sh-consumer-health.sh"
-    next_meta install_sh_consumer_health "$VERIFY_DOC" "" install_sh_consumer_health
+  # 0 (next cut). The train is complete: stage the next version when main
+  # carries provider-side changes since v$V (the catalog rides its own train).
+  if [ "$published" = true ]; then
+    local diff_rc=0
+    git -C "$REPO_ROOT" diff --quiet "v$V" "$main_sha" -- phase3-binary ':(exclude)phase3-binary/catalog' \
+      2>/dev/null || diff_rc=$?
+    case "$diff_rc" in
+      0) step version_staging "done" "no provider-side change on main since v$V" ;;
+      1) step version_staging pending "provider-side changes on main since v$V"
+         stage_next version_staging "main carries provider-side changes since v$V" ;;
+      *) step version_staging unknown "cannot diff v$V against origin/main $main_sha"
+         set_next version_staging blocked "Fetch origin" "git fetch origin --tags" \
+           "origin/main $main_sha or tag v$V is not in the local clone, so provider-side changes since v$V are unknown" ;;
+    esac
   fi
 
   set_next "done" "done" "v$V train complete" ""
@@ -1097,24 +1141,17 @@ PY
   printf '%s' "$info" | python3 -c 'import json,sys; d=json.load(sys.stdin); d["candidate_named_by"]=sys.argv[1]; print(json.dumps(d))' "$named"
 }
 
-# structured_done STEP: record canary_smoke / e2e_gate from checkable evidence
-# (DONE_RUN_IDS, DONE_CARRY, DONE_PROBE set by ops_main).
+# structured_done STEP: record canary_smoke from checkable evidence
+# (DONE_PROBE set by ops_main).
 structured_done() {
   local step_id="$1" V sha compat
   V="${OPS_SCOPE#cli-release-}"
   sha="$(marker_field "$OPS_SCOPE" signed_byte_verification 'd.get("candidate_sha")')"
   compat="$(marker_field "$OPS_SCOPE" signed_byte_verification 'd.get("compatibility_set_id")')"
   is_sha40 "$sha" || refuse "verify the candidate bytes first; no verified candidate SHA is recorded"
-  local runs_json="[]" id ev
-  for id in $DONE_RUN_IDS; do
-    id="${id##*/runs/}"; id="${id%%/*}"
-    ev="$(check_journey_run "$id" "$sha" "$V")"
-    runs_json="$(python3 -c 'import json,sys; a=json.loads(sys.argv[1]); a.append(json.loads(sys.argv[2])); print(json.dumps(a))' "$runs_json" "$ev")"
-  done
   case "$step_id" in
     canary_smoke)
       if [ "$DONE_PROBE" = 1 ]; then
-        [ -n "$DONE_RUN_IDS$DONE_CARRY" ] && refuse "use one kind of evidence"
         # The canary runs the verified bytes only when scripts/ops/canary-swap.sh
         # put them there (it checks the kernels, binds the tarball to the signed
         # checksums and records this marker).
@@ -1250,32 +1287,8 @@ PY
           refuse "canary gateway proof failed after status validation: $gateway_proof"
         mark_done "$OPS_SCOPE" canary_smoke "status probe + gateway proof: $probe" \
           "$(python3 -c 'import json,sys; print(json.dumps({"candidate_sha": sys.argv[1], "kind": "status_probe_gateway_proof", "probe": json.loads(sys.argv[2]), "gateway_proof_sha256": __import__("hashlib").sha256(sys.argv[3].encode()).hexdigest()}))' "$sha" "$probe" "$gateway_proof")"
-      elif [ -n "$DONE_RUN_IDS" ] && [ -z "$DONE_CARRY" ]; then
-        refuse "canary_smoke requires --probe so continuous-batching activation is read from the upgraded provider status"
       else
-        refuse "canary_smoke needs --probe; free text and run IDs are not activation evidence"
-      fi ;;
-    e2e_gate)
-      [ "$DONE_PROBE" = 0 ] || refuse "--probe is not evidence for e2e_gate"
-      if [ -n "$DONE_CARRY" ] && [ -z "$DONE_RUN_IDS" ]; then
-        [[ "$DONE_CARRY" =~ ^[A-Za-z0-9._:#/-]{3,80}$ ]] || refuse "carry-forward id has unexpected characters"
-        local line
-        line="$(git -C "$REPO_ROOT" show "origin/main:docs/releases/cli-release-train.md" |
-          python3 -c '
-import sys
-rid, v = sys.argv[1], sys.argv[2]
-for l in sys.stdin.read().splitlines():
-    if rid in l and "carry" in l.lower() and v in l:
-        print(l.strip()); break
-' "$DONE_CARRY" "$V")"
-        [ -n "$line" ] || refuse "no line in origin/main:docs/releases/cli-release-train.md names carry-forward '$DONE_CARRY' for $V"
-        mark_done "$OPS_SCOPE" e2e_gate "carry-forward $DONE_CARRY" \
-          "$(python3 -c 'import hashlib,json,sys; print(json.dumps({"candidate_sha": sys.argv[1], "kind": "carry_forward", "record_id": sys.argv[2], "record_line_sha256": hashlib.sha256(sys.argv[3].encode()).hexdigest()}))' "$sha" "$DONE_CARRY" "$line")"
-      elif [ -n "$DONE_RUN_IDS" ] && [ -z "$DONE_CARRY" ]; then
-        mark_done "$OPS_SCOPE" e2e_gate "journey runs: $DONE_RUN_IDS" \
-          "$(python3 -c 'import json,sys; print(json.dumps({"candidate_sha": sys.argv[1], "kind": "runs", "runs": json.loads(sys.argv[2])}))' "$sha" "$runs_json")"
-      else
-        refuse "e2e_gate needs --run-id <id> ... or --carry-forward <id>; free text is not evidence"
+        refuse "canary_smoke requires --probe; free text is not activation evidence"
       fi ;;
     *) refuse "no structured evidence defined for $step_id" ;;
   esac
@@ -1584,8 +1597,8 @@ PY
   log "staged v$V.json and v$V.json.sig in $dir on Pearl; the coordinator approves them within one challenge interval"
 }
 
-# One guarded transport action; e2e remains gated on a real successful signed
-# journey run, never on an upload acknowledgement or a dispatch request.
+# One guarded transport action; the step is done only on a real successful
+# signed journey run, never on an upload acknowledgement or a dispatch request.
 native_mtp_postcut() {
   local V="$1" result status run_id sha evidence
   is_semver "$V" || refuse "invalid post-cut candidate version"
@@ -1601,11 +1614,152 @@ native_mtp_postcut() {
   if [ "$status" = success ]; then
     run_id="$(printf '%s' "$result" | python3 -c 'import json,sys;print(json.load(sys.stdin)["run_id"])')"
     evidence="$(check_journey_run "$run_id" "$sha" "$V")"
-    mark_done "$OPS_SCOPE" e2e_gate "post-cut signed serving journey $run_id" \
+    mark_done "$OPS_SCOPE" native_mtp_postcut "post-cut signed serving journey $run_id" \
       "$(python3 -c 'import json,sys;print(json.dumps({"candidate_sha":sys.argv[1],"kind":"runs","runs":[json.loads(sys.argv[2])]}))' "$sha" "$evidence")"
   else
-    log "post-cut transport $status; e2e remains pending"
+    log "post-cut transport $status; the post-cut journey remains pending"
   fi
+}
+
+# _install-sh-republish VERSION (step install_sh_republish, next --run only):
+# back up the get-channel install.sh on Pearl, install v<ver>'s
+# phase3-binary/dist/install.sh in its place (bytes over PEARL_SSH stdin; the
+# local tag must name the commit origin's tag names), refuse unless the
+# installed file's sha256 read back equals the release's, then run the
+# read-only consumer health check against the served installer.
+install_sh_republish() {
+  local V="${1-}" src sha ts out a local_tag remote_tag
+  is_semver "$V" || die "usage: _install-sh-republish VERSION"
+  [ "${MACPROVIDER_OPS_ENTRYPOINT:-}" = 1 ] ||
+    refuse "_install-sh-republish runs only from '$0 next --run' (live-ops lock)"
+  require_pearl_ssh
+  for a in "${INSTALL_SH_REMOTE_PATH:-}" "$PEARL_INSTALL_SH_OWNER" "$PEARL_INSTALL_SH_GROUP"; do
+    [[ "$a" =~ ^[A-Za-z0-9_./-]+$ ]] && [[ "$a" != *..* ]] || refuse "unsafe or unset republish target: '$a'"
+  done
+  [[ "$INSTALL_SH_REMOTE_PATH" == /* ]] || refuse "INSTALL_SH_REMOTE_PATH must be absolute"
+  local_tag="$(git -C "$REPO_ROOT" rev-parse -q --verify "refs/tags/v$V^{commit}" 2>/dev/null || true)"
+  # ls-remote lists an annotated tag twice; the peeled (^{}) line is its commit.
+  remote_tag="$(git -C "$REPO_ROOT" ls-remote origin "refs/tags/v$V" "refs/tags/v$V^{}" 2>/dev/null |
+    awk '{ if ($2 ~ /\^\{\}$/) peeled = $1; else plain = $1 } END { print (peeled != "" ? peeled : plain) }')" ||
+    refuse "cannot read tag v$V from origin"
+  is_sha40 "$remote_tag" || refuse "origin has no tag v$V"
+  [ "$local_tag" = "$remote_tag" ] ||
+    refuse "local tag v$V is ${local_tag:-missing}, origin's is $remote_tag; run git fetch origin --force tag v$V"
+  src="$OPS_TMP_DIR/install.sh.v$V"
+  git -C "$REPO_ROOT" show "$remote_tag:phase3-binary/dist/install.sh" > "$src" 2>/dev/null ||
+    refuse "v$V:phase3-binary/dist/install.sh is not readable; fetch tag v$V"
+  sha="$(shasum -a 256 "$src" | awk '{print $1}')"
+  ts="$(date -u +%Y%m%dT%H%M%SZ)"
+  out="$(pearl_ssh "set -eu
+dst='$INSTALL_SH_REMOTE_PATH'
+tmp=\$(mktemp \"\${dst%/*}/.install.sh.new.XXXXXX\")
+trap 'rm -f \"\$tmp\"' EXIT
+cat > \"\$tmp\"
+chown '$PEARL_INSTALL_SH_OWNER:$PEARL_INSTALL_SH_GROUP' \"\$tmp\"
+chmod 0755 \"\$tmp\"
+[ ! -e \"\$dst\" ] || cp -p \"\$dst\" \"\$dst.bak-$ts\"
+# rename(2) in one directory: a fetch sees the old file or the new one, never a gap.
+mv -f \"\$tmp\" \"\$dst\"
+{ sha256sum \"\$dst\" 2>/dev/null || shasum -a 256 \"\$dst\"; } | awk '{print \$1}'" < "$src")" ||
+    refuse "republishing install.sh over PEARL_SSH failed"
+  [ "$out" = "$sha" ] ||
+    refuse "read-back sha256 of $INSTALL_SH_REMOTE_PATH is ${out:-unreadable}, not v$V's $sha"
+  log "republished install.sh from v$V ($sha); backup $INSTALL_SH_REMOTE_PATH.bak-$ts"
+  # install_sh_consumer_health is not a train step; check the served installer now.
+  INSTALL_SH_RELEASE_TAG="v$V" bash "$REPO_ROOT/scripts/check-install-sh-consumer-health.sh" >&2 ||
+    refuse "install.sh from v$V is installed but scripts/check-install-sh-consumer-health.sh fails; restore $INSTALL_SH_REMOTE_PATH.bak-$ts if it does not recover"
+  log "install.sh consumer health is green for v$V"
+}
+
+# _stage-version (step version_staging, next --run only): open the
+# version-only staging PR for the next cut. The version is the next patch
+# above live stable and every v-tag on origin (Pearl runtime tags share the
+# namespace); the three latest_binary_version rows name live stable, as
+# version_alignment and release-staged-version-policy.sh require. It works in
+# a fresh sibling worktree, pushes one branch, opens one PR and never merges.
+# Cleanup for a _stage-version failure before its push: the worktree and the
+# local branch go; after the push only the worktree goes.
+STAGE_WT=""; STAGE_BRANCH=""
+stage_cleanup() {
+  if [ -n "$STAGE_WT" ]; then
+    git -C "$REPO_ROOT" worktree remove --force "$STAGE_WT" >/dev/null 2>&1 || true
+    STAGE_WT=""
+  fi
+  if [ -n "$STAGE_BRANCH" ]; then
+    git -C "$REPO_ROOT" branch -D "$STAGE_BRANCH" >/dev/null 2>&1 || true
+    STAGE_BRANCH=""
+  fi
+}
+
+stage_version() {
+  local main_sha cur L max_tag base N branch wt url
+  [ "${MACPROVIDER_OPS_ENTRYPOINT:-}" = 1 ] || refuse "_stage-version runs only from '$0 next --run' (live-ops lock)"
+  main_sha="$(remote_main_sha)"
+  is_sha40 "$main_sha" || refuse "cannot read origin/main as origin serves it now"
+  cur="$(binary_version_at "$main_sha")"
+  is_semver "$cur" || refuse "cannot read binaryVersion at origin/main"
+  fetch_coordinator_health || refuse "live coordinator /healthz unreadable; the staged rows must name live stable"
+  L="$(json_field "$OPS_TMP_DIR/healthz.json" 'd["recommended_binary_version"]')"
+  is_semver "$L" || refuse "live recommended_binary_version '$L' is not a version"
+  max_tag="$(git -C "$REPO_ROOT" ls-remote --tags origin 'v*' 2>/dev/null |
+    sed -nE 's#.*refs/tags/v([0-9]+\.[0-9]+\.[0-9]+)$#\1#p' | sort -t. -k1,1n -k2,2n -k3,3n | tail -n1)"
+  base="$L"
+  if is_semver "$max_tag" && [ "$(semver_cmp "$max_tag" "$base")" = 1 ]; then base="$max_tag"; fi
+  N="${base%.*}.$((${base##*.} + 1))"
+  [ "$(semver_cmp "$cur" "$N")" = -1 ] ||
+    refuse "origin/main already carries binaryVersion $cur (the next unused version is $N); nothing to stage"
+  url="$(open_staging_prs)" || refuse "gh pr list failed; cannot rule out an open version staging PR"
+  [ -z "$url" ] || refuse "a version staging PR is already open: $url"
+  branch="release/stage-cli-$N"
+  [ -z "$(git -C "$REPO_ROOT" ls-remote --heads origin "refs/heads/$branch" 2>/dev/null)" ] ||
+    refuse "branch $branch already exists on origin and no staging PR is open; open it with: $(stage_pr_command "$N")"
+  wt="$(dirname "$REPO_ROOT")/macprovider-stage-cli-$N"
+  [ ! -e "$wt" ] || refuse "$wt already exists"
+  git -C "$REPO_ROOT" show-ref -q --verify "refs/heads/$branch" &&
+    refuse "local branch $branch already exists; delete it (git branch -D $branch) and rerun"
+  trap 'stage_cleanup; cleanup_ops' EXIT
+  git -C "$REPO_ROOT" worktree add -q -b "$branch" "$wt" "$main_sha" ||
+    refuse "cannot create worktree $wt on branch $branch"
+  STAGE_WT="$wt"; STAGE_BRANCH="$branch"
+  python3 - "$wt" "$N" "$L" <<'PY' || refuse "version edit failed in $wt"
+import pathlib, re, sys
+root, n, live = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+def sub(rel, pattern, value):
+    path = root / rel
+    text, count = re.subn(pattern, lambda m: m.group(1) + value + m.group(2), path.read_text(), flags=re.M)
+    if count != 1:
+        sys.exit("%s: expected exactly one match, found %d" % (rel, count))
+    path.write_text(text)
+sub("phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift", r'^(\s*static let binaryVersion\s*=\s*")[^"]+(")', n)
+for rel in ("phase4-coordinator/dist/coordinator.yaml", "phase4-coordinator/coordinator.yaml.example",
+            "phase4-coordinator/dist/coordinator.yaml.example"):
+    sub(rel, r'^(\s*latest_binary_version:\s*")[^"]+(")', live)
+PY
+  bash "$wt/scripts/release-staged-version-policy.sh" "v$N" >/dev/null ||
+    refuse "the staged tree fails release-staged-version-policy.sh v$N ($wt)"
+  git -C "$wt" commit -q -a -F - <<EOF || refuse "commit failed in $wt"
+Stage provider CLI $N
+
+Version-only staging for the next provider CLI cut: binaryVersion $cur -> $N;
+the three checked-in latest_binary_version rows name live stable $L.
+EOF
+  git -C "$wt" push -q origin "refs/heads/$branch" || refuse "pushing $branch failed"
+  STAGE_BRANCH=""
+  cat > "$OPS_TMP_DIR/stage-pr-body.md" <<EOF
+Version-only staging for the next provider CLI cut, prepared by scripts/ops/cli-release.sh (step version_staging).
+
+- binaryVersion: $cur -> $N (next unused tag above live stable $L and the highest origin v-tag ${max_tag:-none}; Pearl runtime tags share the namespace)
+- latest_binary_version rows in the three coordinator configs: live stable $L
+- bash scripts/release-staged-version-policy.sh v$N passes on this tree
+
+No catalog, CB or native-MTP state changes; merging deploys nothing. After the merge the train's next step is candidate_cut.
+EOF
+  url="$(gh pr create -R "$(gh_repo)" --base main --head "$branch" --title "Stage provider CLI $N" \
+    --body-file "$OPS_TMP_DIR/stage-pr-body.md")" ||
+    refuse "gh pr create failed; branch $branch is pushed. Open the PR with: $(stage_pr_command "$N")"
+  stage_cleanup
+  log "opened version staging PR for $N: $url"
+  printf '%s\n' "$url"
 }
 
 internal() {
@@ -1619,6 +1773,8 @@ internal() {
     _check-registrations) shift; check_registrations "$@" ;;
     _check-privacy-rejections) shift; check_privacy_rejections "$@" ;;
     _check-canary-self-check) shift; check_canary_self_check "$@" ;;
+    _install-sh-republish) shift; install_sh_republish "$@" ;;
+    _stage-version) shift; stage_version "$@" ;;
     *) usage >&2; exit 2 ;;
   esac
 }

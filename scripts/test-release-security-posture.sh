@@ -561,8 +561,21 @@ for requirement in (
         raise SystemExit(
             f"provider package build must contain the exact Intel-to-arm64 cross-build guard: {requirement}"
         )
+# The one architecture override: arm64-only, opted into by the caller and
+# refused unless the package host itself is arm64 (Swift macro host tools).
+ARM64_ONLY_GUARD = (
+    '  arm64)\n'
+    '    [ "$(uname -m)" = arm64 ] || {\n'
+    '      echo "FATAL: MACPROVIDER_PACKAGE_BUILD_ARCH=arm64 needs an arm64 package host (Swift macro host tools)" >&2\n'
+    '      exit 1\n'
+    '    }\n'
+    '    XCODEBUILD_ARCH_SETTINGS=("ARCHS=arm64")\n'
+)
+if package_script.count(ARM64_ONLY_GUARD) != 1 or package_script.count("ARCHS=") != 1:
+    raise SystemExit("provider package build may override ARCHS only through the arm64-host-guarded opt-in")
+if 'case "${MACPROVIDER_PACKAGE_BUILD_ARCH:-}" in\n  "") ;;\n' not in package_script:
+    raise SystemExit("provider package build must default to the generic destination without an ARCHS override")
 for forbidden in (
-    "ARCHS=",
     "ONLY_ACTIVE_ARCH=",
     "-arch arm64",
 ):

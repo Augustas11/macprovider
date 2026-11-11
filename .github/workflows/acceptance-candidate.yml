@@ -193,7 +193,10 @@ jobs:
         run: |
           set -euo pipefail
           cd candidate/phase3-binary/dist
+          # arm64 runner: compile only the shipped arm64 slice (package.sh
+          # still requires the result to be exactly arm64).
           CATALOG_RELEASE_REQUIRE_SEALED_GO_VERIFIER=1 \
+            MACPROVIDER_PACKAGE_BUILD_ARCH=arm64 \
             MACPROVIDER_PROVIDER_ADMISSION_POLICY="$PROVIDER_ADMISSION_POLICY" \
             ./package.sh "$TAG"
 
