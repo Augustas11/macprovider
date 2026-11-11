@@ -267,7 +267,8 @@ python3 scripts/provider-code-identity.py --emit-approved-identity \
      `verify_live_rollout` step dispatches
      `verify-live-coordinator-release-rollout.yml`. That workflow
      requires the exact post-publication gate before publishing the
-     append-only discovery transport.
+     append-only discovery transport. It holds no secrets and waits on no
+     environment approval: the live coordinator gate decides.
 7. Verify the Malibu artifact against the standalone provider tarball:
 
 ```bash

@@ -22,7 +22,8 @@ jobs:
   verify:
     name: Verify public release, Pearl recommendation, and discovery rollout
     runs-on: macos-15-intel
-    environment: production-release
+    # No environment: this job uses only github.token, and the live
+    # coordinator gate below, not an approval, decides publication.
     permissions:
       contents: write
     outputs:
