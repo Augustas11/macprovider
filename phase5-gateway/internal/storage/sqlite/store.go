@@ -3939,6 +3939,7 @@ func validDemandModelID(model string) bool {
 		"ricursiveai/ripple-65b-preview",
 		"liquidai/lfm3-1.7b",
 		"minimaxai/minimax-m3.1-flash",
+		"minimax/minimax-m3.1-flash",
 		"deepseek/deepseek-v4-flash",
 		"mlx-community/gpt-oss-20b-MXFP4-Q4",
 		"mlx-community/gpt-oss-20b-MXFP4-Q8",

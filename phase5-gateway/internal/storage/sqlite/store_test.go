@@ -1899,7 +1899,7 @@ func TestValidDemandModelIDKnowsGLM53FlashIdentitiesExactly(t *testing.T) {
 		"zai-org/glm-5.3-flash-uncensored", "z-ai/glm-5.3-flash-uncensored", "Solstice-AI/GLM-5.3-Flash-UNCENSORED-mlx-oQ4e-DFlash2",
 		"ricursiveai/ripple-65b-preview", "frogggias/Ripple-65B-Preview-MLX-4bit",
 		"liquidai/lfm3-1.7b", "LiquidAI/LFM3-1.7B-MLX-4bit", "LiquidAI/LFM3-1.7B-MLX-8bit",
-		"minimaxai/minimax-m3.1-flash", "mlx-community/MiniMax-M3.1-Flash-oQ3e-mtp"} {
+		"minimaxai/minimax-m3.1-flash", "minimax/minimax-m3.1-flash", "mlx-community/MiniMax-M3.1-Flash-oQ3e-mtp"} {
 		if !validDemandModelID(model) || sanitizeStoredDemandModelID(model, true) != model {
 			t.Errorf("%q must be a known demand model id", model)
 		}
