@@ -29,10 +29,12 @@
 #                   and never to an older tag than the one currently served.
 # --stage-only DIR  download, verify, and lay the tree out under DIR without
 #                   uploading (dry run and tests).
-# --latest-only     --promote-latest without re-mirroring: the promotion workflow
-#                   already mirrored /releases/<tag>/. Pearl must already serve
-#                   exactly GitHub's asset set and digests and this updater index;
-#                   otherwise it refuses and the full command above is needed.
+# --latest-only     --promote-latest without re-mirroring when the promotion
+#                   workflow already mirrored /releases/<tag>/: when Pearl already
+#                   holds exactly GitHub's asset set and digests, the updater index
+#                   and the pinned bootstrap python, only latest.json is uploaded.
+#                   Otherwise (that workflow step is continue-on-error) it falls
+#                   back to the full --promote-latest path in the same run.
 #
 # Env:
 #   GITHUB_REPOSITORY          must be Augustas11/macprovider (default)
@@ -62,7 +64,7 @@ while [[ $# -gt 0 ]]; do
     --promote-latest) PROMOTE_LATEST=1 ;;
     --stage-only) STAGE_ONLY="${2:-}"; shift ;;
     --latest-only) PROMOTE_LATEST=1; LATEST_ONLY=1 ;;
-    -h|--help) sed -n '2,44p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    -h|--help) sed -n '2,47p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) printf '[publish-release-mirror] unknown argument: %s\n' "$1" >&2; exit 2 ;;
   esac
   shift
@@ -167,9 +169,82 @@ PY
   fi
 fi
 
+PEARL_OPEN=0
+open_pearl() {
+  [[ "$PEARL_OPEN" == 0 ]] || return 0
+  : "${MALIBU_DOWNLOAD_SSH_KEY:?required to publish: set to the Pearl root deploy key path}"
+  SSH_KEY="$MALIBU_DOWNLOAD_SSH_KEY"
+  VPS_USER="${MALIBU_DOWNLOAD_VPS_USER:-root}"
+  VPS_HOST="${MALIBU_DOWNLOAD_VPS_HOST:?set MALIBU_DOWNLOAD_VPS_HOST to the Pearl VPS address; see scripts/ops/README.md}"
+  WEBROOT="${MALIBU_DOWNLOAD_WEBROOT:-/var/www/malibu-download}"
+  export SSH_KEY VPS_USER VPS_HOST SCRIPT_DIR
+  [[ "$VPS_USER" == root ]] || die "Pearl publication requires the root SSH account"
+  [[ "$WEBROOT" =~ ^/[A-Za-z0-9._/-]+$ && "$WEBROOT" != *'/../'* && "$WEBROOT" != */.. ]] || die "unsafe webroot"
+  [[ -f "$SSH_KEY" && ! -L "$SSH_KEY" ]] || die "SSH key missing or symlinked: $SSH_KEY"
+  # shellcheck disable=SC1091
+  source "$SCRIPT_DIR/malibu-download-ssh.sh"
+  PEARL_OPEN=1
+}
+
+# The pinned bootstrap interpreter (install.sh BOOTSTRAP_PYTHON_*), read before
+# any download so --latest-only can require it on Pearl.
+read -r python_asset python_url python_sha < <(python3 - "$INSTALL_SH" <<'PY'
+import re
+import sys
+
+text = open(sys.argv[1], encoding="utf-8").read()
+def value(name):
+    match = re.search(rf'^{name}="([^"$]*)"$', text, re.M)
+    if match is None:
+        raise SystemExit(f"install.sh has no literal {name}")
+    return match.group(1)
+release = value("BOOTSTRAP_PYTHON_RELEASE")
+asset = value("BOOTSTRAP_PYTHON_ASSET")
+sha = value("BOOTSTRAP_PYTHON_SHA256")
+if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,199}", asset) or not re.fullmatch(r"[0-9a-f]{64}", sha):
+    raise SystemExit("install.sh python pin is malformed")
+if not re.fullmatch(r"[0-9]{8}", release):
+    raise SystemExit("install.sh python release is malformed")
+url = f"https://github.com/astral-sh/python-build-standalone/releases/download/{release}/{asset}"
+print(asset, url, sha)
+PY
+) || die "cannot read the pinned bootstrap python from $INSTALL_SH"
+
+# --latest-only: move only the pointer when Pearl already holds the tag
+# byte-identically (GitHub's digests), its updater index and the pinned python.
+# The promotion workflow's mirror step is continue-on-error, so anything less
+# falls back to the full --promote-latest path below; that path still refuses
+# to patch an existing /releases/<tag>/ whose bytes differ.
+if [[ "$LATEST_ONLY" == 1 ]]; then
+  open_pearl
+  probe_specs=""
+  while IFS=$'\t' read -r name digest _size; do
+    probe_specs+=" '$name:$digest'"
+  done < "$manifest"
+  # Names and digests were validated above; remote variables expand on Pearl.
+  mirror_probe="$(malibu_download_ssh "set -eu
+    target='$WEBROOT/releases/$TAG'
+    sum() { sha256sum \"\$1\" | awk '{print \$1}'; }
+    [ -d \"\$target\" ] || { echo \"\$target is missing\"; exit 0; }
+    count=0
+    for spec in$probe_specs; do
+      count=\$((count + 1))
+      f=\"\$target/\${spec%%:*}\"
+      [ -f \"\$f\" ] && [ \"\$(sum \"\$f\")\" = \"\${spec#*:}\" ] || { echo \"\$f is missing or differs\"; exit 0; }
+    done
+    [ \"\$(find \"\$target\" -mindepth 1 | wc -l)\" -eq \"\$count\" ] || { echo \"\$target holds other files\"; exit 0; }
+    [ -f '$WEBROOT/releases/index/$TAG.json' ] || { echo 'the updater index is missing'; exit 0; }
+    py='$WEBROOT/python/$python_asset'
+    [ -f \"\$py\" ] && [ \"\$(sum \"\$py\")\" = '$python_sha' ] || { echo 'the pinned bootstrap python is missing or differs'; exit 0; }
+    echo complete")" || die "cannot inspect the Pearl mirror for $TAG"
+  if [[ "$mirror_probe" != complete ]]; then
+    log "Pearl mirror of $TAG is incomplete ($mirror_probe); running the full --promote-latest path"
+    LATEST_ONLY=0
+  fi
+fi
+
 release_dir="$out/releases/$TAG"
 index_path="$out/releases/index/$TAG.json"
-python_asset=""; python_sha=""
 if [[ "$LATEST_ONLY" == 0 ]]; then
 # --- 2. Download every asset and prove byte identity ------------------------
 files_dir="$work/download"
@@ -237,27 +312,6 @@ PY
 # The pinned bootstrap interpreter (install.sh BOOTSTRAP_PYTHON_*). Mirrored with
 # every release so a new pin is served before the installer carrying it ships.
 if [[ "$LATEST_ONLY" == 0 ]]; then
-read -r python_asset python_url python_sha < <(python3 - "$INSTALL_SH" <<'PY'
-import re
-import sys
-
-text = open(sys.argv[1], encoding="utf-8").read()
-def value(name):
-    match = re.search(rf'^{name}="([^"$]*)"$', text, re.M)
-    if match is None:
-        raise SystemExit(f"install.sh has no literal {name}")
-    return match.group(1)
-release = value("BOOTSTRAP_PYTHON_RELEASE")
-asset = value("BOOTSTRAP_PYTHON_ASSET")
-sha = value("BOOTSTRAP_PYTHON_SHA256")
-if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,199}", asset) or not re.fullmatch(r"[0-9a-f]{64}", sha):
-    raise SystemExit("install.sh python pin is malformed")
-if not re.fullmatch(r"[0-9]{8}", release):
-    raise SystemExit("install.sh python release is malformed")
-url = f"https://github.com/astral-sh/python-build-standalone/releases/download/{release}/{asset}"
-print(asset, url, sha)
-PY
-) || die "cannot read the pinned bootstrap python from $INSTALL_SH"
 mkdir -p "$out/python"
 curl -fsSL --proto '=https' --connect-timeout 15 --retry 3 --retry-connrefused --max-time 900 \
   -o "$out/python/$python_asset" -- "$python_url" || die "cannot download $python_url"
@@ -276,18 +330,7 @@ if [[ -n "$STAGE_ONLY" ]]; then
 fi
 
 # --- 5. Upload to Pearl -------------------------------------------------------
-: "${MALIBU_DOWNLOAD_SSH_KEY:?required to publish: set to the Pearl root deploy key path}"
-SSH_KEY="$MALIBU_DOWNLOAD_SSH_KEY"
-VPS_USER="${MALIBU_DOWNLOAD_VPS_USER:-root}"
-VPS_HOST="${MALIBU_DOWNLOAD_VPS_HOST:?set MALIBU_DOWNLOAD_VPS_HOST to the Pearl VPS address; see scripts/ops/README.md}"
-WEBROOT="${MALIBU_DOWNLOAD_WEBROOT:-/var/www/malibu-download}"
-export SSH_KEY VPS_USER VPS_HOST SCRIPT_DIR
-[[ "$VPS_USER" == root ]] || die "Pearl publication requires the root SSH account"
-[[ "$WEBROOT" =~ ^/[A-Za-z0-9._/-]+$ && "$WEBROOT" != *'/../'* && "$WEBROOT" != */.. ]] || die "unsafe webroot"
-[[ -f "$SSH_KEY" && ! -L "$SSH_KEY" ]] || die "SSH key missing or symlinked: $SSH_KEY"
-
-# shellcheck disable=SC1091
-source "$SCRIPT_DIR/malibu-download-ssh.sh"
+open_pearl
 
 # Remote variables must expand on Pearl, not in this local shell.
 # shellcheck disable=SC2016
@@ -373,7 +416,7 @@ malibu_download_ssh "set -euo pipefail
     mv -f -- \"\$webroot/releases/index/.\$tag.json.new\" \"\$webroot/releases/index/\$tag.json\"
   fi
   if [ \"\$latest_only\" = 1 ]; then
-    :
+    check \"\$webroot/python/\$python_asset\" \"\$python_sha\"
   elif ! check \"\$stage/.python-\$python_asset\" \"\$python_sha\"; then
     exit 1
   elif [ -e \"\$webroot/python/\$python_asset\" ]; then
@@ -416,8 +459,8 @@ if [[ "$LATEST_ONLY" == 0 ]]; then
     name="$(basename "$path")"
     verify_served "$MIRROR_ORIGIN/releases/$TAG/$name" "$(sha256_file "$path")"
   done
-  verify_served "$MIRROR_ORIGIN/python/$python_asset" "$python_sha"
 fi
+verify_served "$MIRROR_ORIGIN/python/$python_asset" "$python_sha"
 verify_served "$MIRROR_ORIGIN/releases/index/$TAG.json" "$index_sha"
 [[ -z "$latest_sha" ]] || verify_served "$MIRROR_ORIGIN/releases/latest.json" "$latest_sha"
 log "ok: $MIRROR_ORIGIN/releases/$TAG/ serves every GitHub asset byte-identically$([[ -z "$latest_sha" ]] || printf '; latest.json -> %s' "$TAG")"

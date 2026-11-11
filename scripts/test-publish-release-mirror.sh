@@ -310,14 +310,33 @@ rm -f "$WEBROOT/releases/latest.json"
 MOCK_NO_DOWNLOAD=1 run_upload --latest-only >/dev/null || fail "--latest-only on a mirrored tag failed"
 [ "$(cat "$WEBROOT/releases/latest.json")" = '{"tag_name": "v1.8.200"}' ] || fail "--latest-only did not publish latest.json"
 ok "latest-only-moves-pointer-without-download"
+# The promotion workflow's mirror step is continue-on-error: an unmirrored tag
+# falls back to the full --promote-latest path in the same run.
 rm -f "$WEBROOT/releases/latest.json"
 mv "$WEBROOT/releases/$TAG" "$UP/held-release"
-if MOCK_NO_DOWNLOAD=1 run_upload --latest-only >/dev/null 2>&1; then fail "--latest-only accepted an unmirrored tag"; fi
-[ ! -e "$WEBROOT/releases/latest.json" ] || fail "--latest-only moved the pointer to an unmirrored tag"
-mv "$UP/held-release" "$WEBROOT/releases/$TAG"
-ok "latest-only-refuses-unmirrored-tag"
+if MOCK_NO_DOWNLOAD=1 run_upload --latest-only >/dev/null 2>&1; then fail "--latest-only skipped the download for an unmirrored tag"; fi
+[ ! -e "$WEBROOT/releases/latest.json" ] || fail "a failed fallback moved the pointer"
+run_upload --latest-only > "$UP/fallback.log" 2>&1 || fail "--latest-only did not fall back for an unmirrored tag: $(tail -n 3 "$UP/fallback.log")"
+grep -q 'running the full --promote-latest path' "$UP/fallback.log" || fail "fallback not reported"
+for asset in "$FIXTURE/assets"/*; do
+  cmp -s "$asset" "$WEBROOT/releases/$TAG/$(basename "$asset")" || fail "fallback did not mirror $(basename "$asset")"
+done
+[ "$(cat "$WEBROOT/releases/latest.json")" = '{"tag_name": "v1.8.200"}' ] || fail "fallback did not publish latest.json"
+rm -rf "$UP/held-release"
+ok "latest-only-falls-back-for-unmirrored-tag"
+# The pinned bootstrap python is part of a complete mirror.
+rm -f "$WEBROOT/releases/latest.json"
+PYFILE="$WEBROOT/python/cpython-3.12.14+20260901-aarch64-apple-darwin-install_only_stripped.tar.gz"
+rm -f "$PYFILE"
+run_upload --latest-only > "$UP/fallback.log" 2>&1 || fail "--latest-only without the python failed: $(tail -n 3 "$UP/fallback.log")"
+grep -q 'bootstrap python is missing' "$UP/fallback.log" || fail "missing python not reported"
+cmp -s "$PY_BYTES" "$PYFILE" || fail "fallback did not restore the pinned python"
+ok "latest-only-requires-pinned-python"
+# A partial tag directory falls back, and the full path refuses to patch it.
+rm -f "$WEBROOT/releases/latest.json"
 rm "$WEBROOT/releases/$TAG/release.json"
-if MOCK_NO_DOWNLOAD=1 run_upload --latest-only >/dev/null 2>&1; then fail "--latest-only accepted a partial mirror"; fi
+if run_upload --latest-only > "$UP/fallback.log" 2>&1; then fail "--latest-only accepted a partial mirror"; fi
+grep -q 'releases are immutable' "$UP/fallback.log" || fail "partial mirror not refused as immutable: $(tail -n 3 "$UP/fallback.log")"
 [ ! -e "$WEBROOT/releases/latest.json" ] || fail "--latest-only moved the pointer to a partial mirror"
 cp "$FIXTURE/assets/release.json" "$WEBROOT/releases/$TAG/release.json"
 ok "latest-only-refuses-partial-mirror"
@@ -332,7 +351,7 @@ if run_upload >/dev/null 2>&1; then fail "a differing published release must not
 grep -q changed "$WEBROOT/releases/$TAG/checksums.txt" || fail "immutable release was modified"
 ok "upload-refuses-to-patch-published-release"
 rm -f "$WEBROOT/releases/latest.json"
-if MOCK_NO_DOWNLOAD=1 run_upload --latest-only >/dev/null 2>&1; then fail "--latest-only accepted a mirror whose bytes differ"; fi
+if run_upload --latest-only >/dev/null 2>&1; then fail "--latest-only accepted a mirror whose bytes differ"; fi
 [ ! -e "$WEBROOT/releases/latest.json" ] || fail "--latest-only moved the pointer to differing bytes"
 ok "latest-only-refuses-differing-bytes"
 
