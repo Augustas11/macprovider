@@ -1,7 +1,7 @@
 {
-  "catalog_id": "macprovider-tier2-model-catalog-2026-11-11-lfm3-1.7b-v1",
+  "catalog_id": "macprovider-tier2-model-catalog-2026-11-11-bonsai2b-v1",
   "expires_at": "2026-12-25T00:00:00Z",
-  "issued_at": "2026-11-11T07:00:00Z",
+  "issued_at": "2026-11-11T12:20:45Z",
   "models": [
     {
       "artifact_kind": "mlx_weight_file",
@@ -46,6 +46,15 @@
       "min_ram_gb": 3,
       "notes": "Buyer-serving candidate liquidai/lfm3-1.7b (#2231 LFM3 1.7B for 8 GB Macs, native lfm3 engine, listed); identity from signed SPEC-023 row.",
       "sha256": "e6ef055b17601b009ea1a476c8a3c0bbab734ea82825d9cd23d8a63a90d9c8ea",
+      "source": "operator-curated"
+    },
+    {
+      "artifact_kind": "mlx_weight_file",
+      "hash_scope": "macprovider.snapshot-manifest.v1",
+      "model_id": "prism-ml/Ternary-Bonsai-2-2B-mlx-2bit",
+      "min_ram_gb": 3,
+      "notes": "Buyer-serving candidate prism-ml/ternary-bonsai-2-2b-mlx-2bit (#2154 Ternary-Bonsai-2 2B, native Prism loader, listed); identity from signed SPEC-023 row.",
+      "sha256": "fe25aaa59aeb54f5ce080818b28808286d26283a61200cb1efb377ac7db62262",
       "source": "operator-curated"
     },
     {
@@ -214,7 +223,7 @@
   "signature": {
     "alg": "Ed25519",
     "key_id": "catalog-key-2026q2",
-    "sig": "UVtU038Np25dBZiJnX16tKDwQnV5ukq_tDOi13v3bwxvwxTFEQJJS-Ob-a3YHHaoDFTIx9bEmsBcvvXYYXMHBg"
+    "sig": "vtHQiXfyTZCc_QxuV4pTLDvahc025DLCt4vjwzFjiL2hqUIRPcpfsna1P2N6fCZrME2PUko6q3TTLJAxJn6tDg"
   },
   "version": 1
 }

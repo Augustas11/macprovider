@@ -37,10 +37,10 @@
       "version": "7905e142a1a158c308fcd074ab3d791fa7b507b83182020b06a578967d0e634b"
     },
     "tier2-catalog.json": {
-      "bytes": 9661,
-      "sha256": "291412985c2f31cdcbc374c82241a3c69e876c6e94ac68738c7319012c4cb7f9",
+      "bytes": 10145,
+      "sha256": "b80a10e381c8a29a66cbd6b9e6f2a24c4885fe9e90aeefd69c8966be09766cfe",
       "signer_key_id": "tier2-coordinator-key:707a860299e6a37f",
-      "version": "macprovider-tier2-model-catalog-2026-11-11-lfm3-1.7b-v1"
+      "version": "macprovider-tier2-model-catalog-2026-11-11-bonsai2b-v1"
     }
   },
   "generated_at": "2026-11-11T12:20:45Z",
