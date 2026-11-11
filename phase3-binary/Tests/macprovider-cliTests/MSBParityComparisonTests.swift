@@ -1,5 +1,6 @@
 import XCTest
 import ArgumentParser
+import MacProviderCore
 @testable import macprovider_cli
 
 final class MSBParityComparisonTests: XCTestCase {
@@ -44,6 +45,17 @@ final class MSBParityComparisonTests: XCTestCase {
         let three = try MSBThroughputCommand.parse(["--rows", "3"])
         XCTAssertNoThrow(try three.validateHardwareRowCount(physicalMemoryBytes: eightGiB))
         XCTAssertNoThrow(try four.validateHardwareRowCount(physicalMemoryBytes: eightGiB + 1))
+    }
+
+    func testUnsetBlockPoolMatchesServeAndFitsFourEightKRows() throws {
+        let unset = try MSBThroughputCommand.parse([])
+        let serve = PagedKVConfig().sizedToCover(contextTokens: ProviderCapacity.defaultContextTokensForCurrentHost())
+        XCTAssertEqual(unset.maxPhysicalBlocks, serve.maxPhysicalBlocks)
+        XCTAssertGreaterThanOrEqual(unset.maxPhysicalBlocks, PagedKVConfig.defaultMaxPhysicalBlocks)
+        if ProviderCapacity.defaultContextTokensForCurrentHost() >= 4 * (8_192 + 256) {
+            XCTAssertGreaterThanOrEqual(unset.maxPhysicalBlocks * unset.blockSizeTokens, 4 * (8_192 + 256))
+        }
+        XCTAssertEqual(try MSBThroughputCommand.parse(["--max-physical-blocks", "7"]).maxPhysicalBlocks, 7)
     }
 
     func testOptionalMLXCacheLimitParsing() throws {
