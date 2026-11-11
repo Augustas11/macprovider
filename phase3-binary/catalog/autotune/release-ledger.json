@@ -8772,10 +8772,10 @@
           "version": "1bfc5d1db7621b3b2e980d462af9fbe2280e25c3250216ab149065455226ba9f"
         },
         "tier2-catalog.json": {
-          "bytes": 10145,
-          "sha256": "b80a10e381c8a29a66cbd6b9e6f2a24c4885fe9e90aeefd69c8966be09766cfe",
+          "bytes": 10641,
+          "sha256": "20ffecd15e24e53e50031c4440a7d3447667c9126eca46ad02816217b8bf4b12",
           "signer_key_id": "tier2-coordinator-key:707a860299e6a37f",
-          "version": "macprovider-tier2-model-catalog-2026-11-11-bonsai2b-v1"
+          "version": "macprovider-tier2-model-catalog-2026-11-11-minimax-m3.1-flash-v1"
         }
       },
       "generated_at": "2026-11-11T18:40:00Z",
