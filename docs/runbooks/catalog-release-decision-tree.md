@@ -196,7 +196,9 @@ scripts/catalog-content-release.sh --deploy --commit <same sha>
 `window_override`), `canary_token_operator_key`, and `canary_reachable`. A
 release that changes rate-card rows adds `pricing_release`,
 `pricing_host_state`, `pricing_effective_diff`, and `pricing_gate`, and its
-verdict carries a `pricing` object (`null` otherwise).
+verdict carries a `pricing` object (`null` otherwise). A pricing-only release
+also adds `pricing_only`, its three canary checks pass as "not required", and
+`pricing_only` is `true` in the verdict ([Pricing corrections](#pricing-corrections-operator-procedure)).
 `--deploy` runs the same preflight in the same invocation. It proceeds only on
 GO, and it re-runs coverage and config identity under the Pearl lease before
 mutating anything.
@@ -223,6 +225,7 @@ mutating anything.
   digests.
 - **(c)** The canary restarts onto the release, and the coordinator admits it
   on the new release id and candidate sha with catalog source `coordinator`.
+  Skipped for a pricing-only release.
 - **(d)** For the watch window, no `catalog_incompatible` rejection appears
   after the SIGHUP for a `(release id, candidate sha)` key that the
   pre-activation validation admitted, and catalog-unavailable does not
@@ -269,6 +272,21 @@ one SIGHUP applies them together.
 Needs the enabling coordinator runtime release (the one that carries #1693)
 live on Pearl, with its recovery helper, units, and guard-bearing writers
 installed. Without it, `pricing_host_state` is NO_GO.
+
+**Pricing-only releases need no canary.** A pricing release is pricing-only
+when `catalog-release.py pricing-only-check` passes against the live release:
+the only content drift is `rate-card.json` (same `feed_continuity_drift` rule
+as the freshness renewal), the row key set is unchanged, every other
+rate-card field is unchanged, and only the three credit rates of existing rows
+moved. Providers never bill; the coordinator applies the card. So preflight
+records `pricing_only` and marks `canary_config`,
+`canary_token_operator_key` and `canary_reachable` "not required", deploy
+skips evidence (c), and the canary is never contacted. The verdict carries
+`"pricing_only": true`. The lane derives this itself, again under the lease.
+`CATALOG_CANARY_AUTH_TOKEN` (the coordinator operator key) is still needed:
+window coverage and evidence (d) read `/poolz` with it. Any other drift (row
+added or removed, `provider_share_bps`, `global_multiplier_ppm`, another feed)
+keeps every canary gate.
 
 ### Enabling rollout (once)
 
@@ -438,6 +456,8 @@ scripts/catalog-content-release.sh --deploy --commit <same sha> \
 - Under the lease every pricing check reruns. Any moved digest (live yaml,
   overlay, applied record, diff) stops the deploy with nothing mutated: rerun
   preflight.
+- A pricing-only release must still be pricing-only under the lease, or the
+  deploy stops with nothing mutated.
 - Then the lane writes the journal (`/opt/macprovider/.pricing-txn`), installs
   the candidate yaml, swaps `current` and the window, sends one SIGHUP, and
   collects evidence. Any failure rolls yaml, `current`, and the window back
