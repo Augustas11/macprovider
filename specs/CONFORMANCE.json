@@ -11870,7 +11870,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1770",
-        "rationale": "SPEC-048 v0.1.79 names LM 3.32.3-macprovider.35 (c9d8a9324eb9cc98243987b1557a863c253c63b3) (#2270) on 3.32.3-macprovider.32: the ricursive text model (Ripple-65B Preview) and its prefill chunk; new model files and one registry line, no decode line of any other model changes. The Swift, core and C rows are unchanged."
+        "rationale": "SPEC-048 v0.1.83 names LM 3.32.3-macprovider.38 (dab7764e1b082f1b5bf411a1f3282ef2830204e7): 3.32.3-macprovider.35 (#2270, the ricursive text model and its prefill chunk) plus the mlx-swift 0.32.3-macprovider.13 pin (#2234) and GLM-5-Next projecting 1...8 decode tokens with one kernel (#2265). The Swift and core rows move to the qmv_mma core; the C row is unchanged."
       }
     },
     {
