@@ -34,9 +34,9 @@ needs a SPEC revision.
 
 | Fork | Upstream | Tag scheme | Current tag | Revision | Upstream base |
 | --- | --- | --- | --- | --- | --- |
-| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.44` | `ce950bf2840453b7e320fbb0a3b6eee7c7283658` | `3.32.3` (`3b339ad6…`) |
-| `Augustas11/mlx-swift` | `ml-explore/mlx-swift` | `<upstream>-macprovider.<n>` | `0.32.3-macprovider.13` | `565269220ccc2cc0d2ce149affb98a2f9d9b32ac` | `0.32.3` (`19601207…`) |
-| `Augustas11/mlx` (MLX core) | `ml-explore/mlx` | `v<upstream>-macprovider.<n>` | `v0.32.4-macprovider.7` | `565070fe4b0f95927f7fdd5fcfb537157605037a` | `v0.32.4` (`36969c09…`) |
+| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.47` | `bfc88b9c8f745a13f3cce145101f13dc3dc95e8c` | `3.32.3` (`3b339ad6…`) |
+| `Augustas11/mlx-swift` | `ml-explore/mlx-swift` | `<upstream>-macprovider.<n>` | `0.32.3-macprovider.18` | `8f0ac45bc7483b59b1776a8405fa13944e559e06` | `0.32.3` (`19601207…`) |
+| `Augustas11/mlx` (MLX core) | `ml-explore/mlx` | `v<upstream>-macprovider.<n>` | `v0.32.4-macprovider.10` | `26ac615332af3eedc4def073947efb13b0a3e66d` | `v0.32.4` (`36969c09…`) |
 | `Augustas11/mlx-c` | `ml-explore/mlx-c` | `v<upstream>-macprovider.<n>` | `v0.6.0-macprovider.2` | `2b1ff2b5b5129a6115771da32e1bac3b6b01ab01` | pinned base `ebc88f10…` |
 
 Tags are immutable: a change is a new `<n>`, never a moved tag. Each link pins
@@ -47,8 +47,13 @@ core revision. Swift 6.3 is the effective minimum for the graph.
 
 ### Current tuple delta
 
-As of 2026-11-12 (#2189, #2284) the LM row is `3.32.3-macprovider.44`
-(`ce950bf`), which is `.43` plus four exact MiniMax M3 decode fusions and the
+As of 2026-11-12 (#2256) the LM row is `3.32.3-macprovider.47` (`bfc88b9`), which
+is `.44` (`ce950bf`, MiniMax M3) plus the mlx-swift `0.32.3-macprovider.18` pin. mlx-swift `.18` (`8f0ac45`) is
+`.13` with the core gitlink on `v0.32.4-macprovider.10` (`26ac61533`), three commits on
+`.7`: every small-M affine product whose `K` is not a multiple of 128 (gpt-oss,
+`K = 2880`) goes through `qmv_wide` for every row count on gen 15 and 16 GPUs,
+one row included (other shapes and gen 17 keep their routes), so a batched row keeps its serial result while up
+to five rows share one read of the weights. `.44` (`ce950bf`, #2189, #2284) is `.43` plus four exact MiniMax M3 decode fusions and the
 seeded fused-norm test, all in MiniMax M3 files. `.43` (`6f36fb8`, #2230)
 is `.42` plus the Mamba2 segsum batch-mask fix and upstream #728 (cache-list masks
 sized from the live rows), #703 (quantized-KV prefill through the fused SDPA kernel),

@@ -1,8 +1,8 @@
 {
   "macosx_deployment_target": "14.0",
   "metal_version": 310,
-  "mlx_core_commit": "565070fe4b0f95927f7fdd5fcfb537157605037a",
-  "mlx_swift_revision": "565269220ccc2cc0d2ce149affb98a2f9d9b32ac",
+  "mlx_core_commit": "26ac615332af3eedc4def073947efb13b0a3e66d",
+  "mlx_swift_revision": "8f0ac45bc7483b59b1776a8405fa13944e559e06",
   "schema": "macprovider.mlx-metallib-required-kernels.v1",
   "units": {
     "arg_reduce": [
