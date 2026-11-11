@@ -2520,6 +2520,9 @@ actor ContinuousBatchScheduler {
     /// enters `waiting` so a re-queued admission attempt keeps the original
     /// clock instead of restarting it.
     private var queueWaitDeadlines: [String: UInt64] = [:]
+    /// Requests re-queued because pool or MLX memory was full. They wait on
+    /// a saturated resource, so their admission clock never restarts.
+    private var resourceDeferredRequests: Set<String> = []
     private var queueWaitTimeoutTasks: [String: Task<Void, Never>] = [:]
     private var pendingBindingChecks = 0
     private var pendingBindingTokenCount = 0
@@ -3327,6 +3330,22 @@ actor ContinuousBatchScheduler {
     private func endQueueWait(requestID: String) {
         queueWaitTimeoutTasks.removeValue(forKey: requestID)?.cancel()
         queueWaitDeadlines.removeValue(forKey: requestID)
+        resourceDeferredRequests.remove(requestID)
+    }
+
+    /// A queued request with a free slot of its own waits only for earlier
+    /// rows' prefill to finish, which is progress rather than a saturated
+    /// batch: a long prompt ahead of it must not turn its wait into a
+    /// `.queueWaitTimedOut`. Rows deferred on pool or memory capacity,
+    /// self-check cohorts and rows over the served limit keep the bound.
+    private func queuedOnlyBehindPrefill(_ requestID: String) -> Bool {
+        guard !resourceDeferredRequests.contains(requestID),
+              !activePrompt.isEmpty || !admittingRequests.isEmpty,
+              selfCheckRowsOccupied == 0,
+              let index = waiting.firstIndex(where: { $0.id == requestID }),
+              !waiting[index].selfCheckProbe else { return false }
+        let limit = min(configuration.maxActiveRows, buyerRowLimit ?? configuration.maxActiveRows)
+        return occupiedSlots + index < limit
     }
 
     /// Bounded admission wait expiry. The request never reached a slot, so it
@@ -3349,6 +3368,10 @@ actor ContinuousBatchScheduler {
         guard let deadline = queueWaitDeadlines[requestID],
               (atUptimeNanoseconds ?? DispatchTime.now().uptimeNanoseconds) >= deadline,
               let index = waiting.firstIndex(where: { $0.id == requestID }) else { return }
+        if queuedOnlyBehindPrefill(requestID) {
+            beginQueueWait(requestID: requestID)
+            return
+        }
         let request = waiting.remove(at: index)
         endQueueWait(requestID: requestID)
         record(.queueWaitTimedOut)
@@ -5940,6 +5963,7 @@ actor ContinuousBatchScheduler {
                 }
                 if !idle {
                     waiting.insert(request, at: 0)
+                    resourceDeferredRequests.insert(request.id)
                     armQueueWaitTimeout(requestID: request.id)
                     return madeProgress
                 }
@@ -6083,6 +6107,7 @@ actor ContinuousBatchScheduler {
                     )
                 } else {
                     waiting.insert(request, at: 0)
+                    resourceDeferredRequests.insert(request.id)
                     armQueueWaitTimeout(requestID: request.id)
                     return madeProgress
                 }

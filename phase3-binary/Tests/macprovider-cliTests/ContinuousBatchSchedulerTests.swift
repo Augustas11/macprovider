@@ -4592,6 +4592,46 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertEqual(prefills, 1, "`late` must never reach prefill")
     }
 
+    // SPEC-038 AC-25: a request with a free slot of its own that waits only
+    // while an earlier row's long prefill runs is not behind a saturated
+    // batch. Its admission clock restarts instead of expiring, and it runs
+    // once that prefill finishes.
+    func testAC25WaitBehindLongPrefillWithFreeSlotDoesNotExpire() async throws {
+        let gate = AsyncGate()
+        let backend = ScriptedBackend(
+            scripts: ["long": [1], "next": [2]],
+            prefillGate: gate
+        )
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 2,
+            queueLimit: 4,
+            queueWaitTimeoutNanoseconds: 150_000_000,
+            backend: backend
+        )
+        let long = Task {
+            try await scheduler.submit(.init(id: "long", conversationKey: "", promptTokens: [1, 11], maxOutputTokens: 1))
+        }
+        try await eventually { await backend.prefillCallCount() == 1 }
+        let next = Task {
+            try await scheduler.submit(.init(id: "next", conversationKey: "", promptTokens: [2, 22], maxOutputTokens: 1))
+        }
+        try await eventually { await scheduler.metrics().waitingCount == 1 }
+
+        // Several timeout periods pass while `long` is still prefilling.
+        try await Task.sleep(nanoseconds: 600_000_000)
+        let waiting = await scheduler.metrics()
+        XCTAssertEqual(waiting.waitingCount, 1)
+        XCTAssertFalse(waiting.diagnostics.contains(.queueWaitTimedOut))
+
+        await gate.open()
+        let longResult = try await long.value
+        let nextResult = try await next.value
+        XCTAssertEqual(longResult.outputTokens, [1])
+        XCTAssertEqual(nextResult.outputTokens, [2])
+        let after = await scheduler.metrics()
+        XCTAssertFalse(after.diagnostics.contains(.queueWaitTimedOut))
+    }
+
     // SPEC-049-R010: a privacy-class request through continuous batching
     // writes nothing under the replay-claim store, while its replay claim
     // still guards re-execution in this process. Ordinary requests keep the

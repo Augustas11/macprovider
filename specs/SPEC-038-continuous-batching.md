@@ -7,6 +7,9 @@ Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (orig
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
 **Change log v0.3.48 (2026-11-12, DeepSeek V4 encoder identity and campaign gate, Related: #2111):**
+The timed queue-wait deadline restarts while a request with a free slot
+waits only on another row's prefill (FR-CB1), so long DeepSeek V4 prompts
+admitted one after another do not expire the rows behind them.
 DeepSeek V4's chat-template identity binds the real reference encoder bytes
 ported by its built-in renderer, rather than an absent Jinja template. The
 signed policy schema and exact tuple matching remain unchanged. FR-CB14 adds
@@ -917,7 +920,13 @@ scheduler's diagnostic queue deadline elapsed, and MUST NOT retry rejected
 CB work through serial inference. The configured scheduler queue-wait timeout
 (default 30 seconds) remains available to diagnostics and explicitly timed
 scheduler callers; caller-bounded admission changes no wire field or receipt
-semantics.
+semantics. (v0.3.48) That timed deadline bounds a wait behind a saturated
+batch, not behind progress: while a queued request has a free slot of its
+own (within the served limit, no self-check rows resident) and waits only
+because an earlier row is still admitting or prefilling, its deadline
+restarts instead of expiring, so a long prompt ahead of it never turns the
+wait into `continuous_batching_queue_wait_timeout`. A request re-queued on
+pool capacity or the FR-CB2 memory limit keeps its absolute deadline.
 
 Admission MUST be gated by **paged-block-pool availability, not slot count
 alone.** A request MUST NOT be admitted to prefill/decode unless the SPEC-039
