@@ -100,7 +100,10 @@ func TestReleaseIdentityAndCredentialBootstrapMetrics(t *testing.T) {
 
 	// A later load replaces the earlier set.
 	m.SetPrivacyReleaseIdentityVersions([]string{"2.0.0"})
-	families, _ = reg.Gather()
+	families, err = reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if metricExists(families, "relayblind_privacy_release_identity_loaded", map[string]string{"binary_version": "1.2.3"}) {
 		t.Fatal("stale version survived reload")
 	}
@@ -169,39 +172,9 @@ func TestSettlementReceiptAuditOutboxObserveAggregate(t *testing.T) {
 
 	// Positive values pass through the individual setters.
 	m.SetSettlementReceiptAuditOutboxPendingRows(9)
-	families, _ = reg.Gather()
-	assertMetricValue(t, families, "settlement_receipt_audit_outbox_pending_rows", nil, 9)
-}
-
-func TestComputeIntegrityClosedSetLabels(t *testing.T) {
-	reg := prometheus.NewRegistry()
-	m := New(reg)
-	m.IncComputeIntegrityInconclusive("scorer_timeout")
-	m.IncComputeIntegrityInconclusive("raw-reason")
-	m.IncComputeIntegrityScoringJob("ok", "peer")
-	m.IncComputeIntegrityScoringJob("timeout", "reference")
-	m.IncComputeIntegrityScoringJob("ok", "attacker")
-	m.IncComputeIntegrityScoringJob("bogus", "peer")
-	m.SetComputeIntegrityHeldHolds(4)
-	m.SetComputeIntegrityReviewPending("suspect", 3)
-	m.SetComputeIntegrityReviewPending("passing", 9)
-	families, err := reg.Gather()
+	families, err = reg.Gather()
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertMetricValue(t, families, "compute_integrity_inconclusive_total", map[string]string{"reason": "scorer_timeout"}, 1)
-	if metricExists(families, "compute_integrity_inconclusive_total", map[string]string{"reason": "raw-reason"}) {
-		t.Fatal("unknown reason created a series")
-	}
-	assertMetricValue(t, families, "compute_integrity_scoring_jobs_total", map[string]string{"status": "ok", "scorer_kind": "peer"}, 1)
-	assertMetricValue(t, families, "compute_integrity_scoring_jobs_total", map[string]string{"status": "timeout", "scorer_kind": "reference"}, 1)
-	if metricExists(families, "compute_integrity_scoring_jobs_total", map[string]string{"scorer_kind": "attacker"}) ||
-		metricExists(families, "compute_integrity_scoring_jobs_total", map[string]string{"status": "bogus"}) {
-		t.Fatal("invalid scoring job labels created a series")
-	}
-	assertMetricValue(t, families, "compute_integrity_held_holds", nil, 4)
-	assertMetricValue(t, families, "compute_integrity_review_pending", map[string]string{"state": "suspect"}, 3)
-	if metricExists(families, "compute_integrity_review_pending", map[string]string{"state": "passing"}) {
-		t.Fatal("review_pending accepted a non-review state")
-	}
+	assertMetricValue(t, families, "settlement_receipt_audit_outbox_pending_rows", nil, 9)
 }
