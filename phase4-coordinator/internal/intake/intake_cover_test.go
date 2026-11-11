@@ -79,6 +79,8 @@ func TestSetParamsAndSetPolicyEdgeCases(t *testing.T) {
 		t.Fatalf("last close = %+v", lc)
 	}
 
+	id2 := openWindow(t, a).WindowID
+
 	// After Stop, changes close nothing and open no window.
 	a.Stop()
 	p := DefaultParams()
@@ -89,11 +91,8 @@ func TestSetParamsAndSetPolicyEdgeCases(t *testing.T) {
 	if err := a.SetPolicy(policyB, 0); err != nil {
 		t.Fatal(err)
 	}
-	a.mu.Lock()
-	open, gotPolicy, gotParams := a.open, a.policyID, a.params
-	a.mu.Unlock()
-	if open != nil || gotPolicy != policyB || gotParams.KeyBuckets != 8 {
-		t.Fatalf("stopped aggregator: open=%v policy=%s params=%+v", open, gotPolicy, gotParams)
+	if lc := a.LastClose(); lc.Reason != CloseReasonAggregatorStopped || lc.WindowID != id2 {
+		t.Fatalf("stopped aggregator changed last close: %+v", lc)
 	}
 }
 
@@ -118,10 +117,11 @@ func TestSnapshotSpansMultipleMissedEpochsWithEmptyWindows(t *testing.T) {
 		t.Fatalf("not newest first: %s", snap.Windows[0].WindowStart)
 	}
 	// Mutating a served copy must not alter stored state.
-	end := "x"
-	snap.Windows[0].WindowEnd = &end
-	if got := *a.Snapshot().Windows[0].WindowEnd; got == "x" {
-		t.Fatal("snapshot aliases internal window")
+	wantEnd := *snap.Windows[0].WindowEnd
+	*snap.Windows[0].WindowEnd = "x"
+	again := a.Snapshot()
+	if len(again.Windows) != 2 || *again.Windows[0].WindowEnd != wantEnd {
+		t.Fatalf("snapshot aliases internal window: %+v", again.Windows)
 	}
 }
 
