@@ -588,6 +588,8 @@ func knownDemandModelID(model string) bool {
 		"zai-org/glm-5.3-flash-uncensored", "z-ai/glm-5.3-flash-uncensored",
 		"ricursiveai/ripple-65b-preview",
 		"liquidai/lfm3-1.7b",
+		"minimaxai/minimax-m3.1-flash",
+		"minimax/minimax-m3.1-flash",
 		"deepseek/deepseek-v4-flash",
 		"mlx-community/gpt-oss-20b-MXFP4-Q4",
 		"mlx-community/gpt-oss-20b-MXFP4-Q8",
@@ -618,6 +620,7 @@ func knownDemandModelID(model string) bool {
 		"frogggias/Ripple-65B-Preview-MLX-4bit",
 		"LiquidAI/LFM3-1.7B-MLX-4bit",
 		"LiquidAI/LFM3-1.7B-MLX-8bit",
+		"mlx-community/MiniMax-M3.1-Flash-oQ3e-mtp",
 		"TensorFold/DeepSeek-V4-Flash-0731-MXFP4-MLX":
 		return true
 	default:

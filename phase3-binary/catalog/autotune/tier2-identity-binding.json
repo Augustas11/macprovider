@@ -1,6 +1,6 @@
 {
-  "autotune_candidates_sha256": "f693204650fe67099d43507f72358398f24ce1cb0d582f861f75dc18c5cae5f0",
-  "generated_at": "2026-11-11T12:20:45Z",
+  "autotune_candidates_sha256": "ce077a30df3e9ae3006d7827f6a8f8a15deb3638c315a1b6cfd2e121fe7415a2",
+  "generated_at": "2026-11-11T18:40:00Z",
   "models": [
     {
       "catalog_key": "ricursiveai/ripple-65b-preview",
@@ -64,6 +64,13 @@
       "model_id": "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit",
       "model_revision": "241a666dad6cb93c8ff213d39a7f34a36bf26db4",
       "sha256": "67b26d6b1c50dc8836ab3705b06276a43c74c8f66247f9b112e232b58abbd99f"
+    },
+    {
+      "catalog_key": "minimaxai/minimax-m3.1-flash",
+      "min_ram_gb": 230,
+      "model_id": "mlx-community/MiniMax-M3.1-Flash-oQ3e-mtp",
+      "model_revision": "b1084ba666329d5eefc9771aa358837305f3d840",
+      "sha256": "21188ee28f031b9444e8a250e16aea57ee37a0c2f8d1a24c2ad44686ad744f03"
     },
     {
       "catalog_key": "nvidia/nemotron-3-nano-30b-a3b",
@@ -172,6 +179,6 @@
     }
   ],
   "policy_version": "autotune-policy-v1",
-  "release_id": "published-2026-11-11-bonsai2b-listed-v283",
+  "release_id": "published-2026-11-11-minimax-m3.1-flash-listed-v283",
   "schema_version": "macprovider.tier2-identity-binding.v1"
 }
