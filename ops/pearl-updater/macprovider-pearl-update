@@ -4408,7 +4408,9 @@ class Updater:
                 path.unlink()
                 # systemd keeps the loaded drop-in until a reload succeeds.
                 self.buyer_hold_dropin_reload_pending = True
-            if self.buyer_hold_dropin_reload_pending:
+            # systemd's own state covers an updater killed between the unlink
+            # and the reload.
+            if self.buyer_hold_dropin_reload_pending or self.buyer_hold_dropin_loaded():
                 self._daemon_reload()
                 self.buyer_hold_dropin_reload_pending = False
         except Exception as exc:
@@ -4419,6 +4421,15 @@ class Updater:
             with contextlib.suppress(Exception):
                 self.audit("gateway_buyer_hold_dropin", "removed", stage=stage)
         return True
+
+    def buyer_hold_dropin_loaded(self) -> bool:
+        """Does systemd still have the drop-in loaded for the gateway unit?
+        An unreadable answer counts as loaded, so the reload runs."""
+        try:
+            listed = self._service_properties("macprovider-gateway.service", ("DropInPaths",)).get("DropInPaths", "")
+        except Exception:
+            return True
+        return str(self.buyer_hold_dropin) in listed.split()
 
     def require_buyer_hold_dropin_removed(self, stage: str) -> None:
         if not self.remove_buyer_hold_dropin(stage):
@@ -6929,25 +6940,37 @@ class Updater:
 
     def verify_held_window(self, stage: str) -> bool:
         """True when no buyer can have reached the gateway since its held
-        start: it reports the hold now and is either the same systemd
-        invocation or a restart the drop-in started held. Otherwise (a
-        candidate that ignored the hold, a restart without the drop-in, an
-        unreadable gateway) audit and raise the critical alert, so the
-        operator reconciles the window's rows."""
+        start: the held start never completed, or the gateway reports the
+        hold and is the same systemd invocation or a restart the drop-in
+        started held, or it is unreadable but every start since ran held.
+        Otherwise (a candidate that reports no hold, an unreadable gateway
+        that restarted without the drop-in) audit and raise the critical
+        alert, so the operator reconciles the window's rows."""
         recorded = self.journal.get("held_gateway_identity") if self.journal is not None else None
+        if not isinstance(recorded, dict):
+            # The held start never returned (the candidate failed to start):
+            # the gateway never served in this window.
+            return True
         try:
             current: dict[str, str] | None = self.gateway_unit_identity()
         except Exception:
             current = None
+        readable = True
         try:
-            holding = self.gateway_buyer_hold_state(wait=False) is True
+            state = self.gateway_buyer_hold_state(wait=False)
         except Exception:
-            holding = False
-        same = isinstance(recorded, dict) and current == recorded
-        if holding and same:
+            readable, state = False, None
+        dropin = _path_entry_exists(self.buyer_hold_dropin)
+        same = current == recorded
+        if state is True and same:
             return True
-        if holding and _path_entry_exists(self.buyer_hold_dropin):
+        if state is True and dropin:
             self.audit("gateway_held_window", "restarted_held", stage=stage, recorded=recorded, current=current)
+            return True
+        if not readable and (same or dropin):
+            # A down or crash-looping gateway: every start in the window ran
+            # held (same invocation, or restarts under the drop-in).
+            self.audit("gateway_held_window", "unreadable_held", stage=stage, recorded=recorded, current=current)
             return True
         held_since = self.journal.get("held_since") if self.journal is not None else None
         with contextlib.suppress(Exception):
@@ -7562,7 +7585,7 @@ class Updater:
             self._journal_transition("success_state_removed", pending_action=None)
         _fsync_directory(self.state_root)
 
-    def restore_backend_runtime(self, identity: RuntimeIdentity) -> None:
+    def restore_backend_runtime(self, identity: RuntimeIdentity, gateway_gate: Callable[[], None] | None = None) -> None:
         if self.service_active("macprovider-gateway.service"):
             self.systemctl("stop", "macprovider-gateway.service")
             self.assert_unit_quiescent("macprovider-gateway.service")
@@ -7585,6 +7608,8 @@ class Updater:
         if self.previous_services.get("macprovider-gateway.service"):
             if not self.previous_services.get("macprovider-coordinator.service"):
                 raise UpdateError("cannot restore gateway without its previously active coordinator")
+            if gateway_gate is not None:
+                gateway_gate()
             if not self.service_active("macprovider-gateway.service"):
                 self.systemctl("start", "macprovider-gateway.service")
             self.wait_for(
@@ -7601,9 +7626,9 @@ class Updater:
             self.systemctl("stop", "macprovider-gateway.service")
             self.assert_unit_quiescent("macprovider-gateway.service")
 
-    def _restore_backend_services(self, tx: Path) -> None:
+    def _restore_backend_services(self, tx: Path, gateway_gate: Callable[[], None] | None = None) -> None:
         previous_runtime = self._transaction_json(tx, "previous-runtime.json")
-        self.restore_backend_runtime(RuntimeIdentity(**previous_runtime))
+        self.restore_backend_runtime(RuntimeIdentity(**previous_runtime), gateway_gate=gateway_gate)
 
     def _prove_rollback_serving(self, tx: Path) -> None:
         previous_runtime = self._transaction_json(tx, "previous-runtime.json")
@@ -7747,8 +7772,12 @@ class Updater:
         self.remove_buyer_hold_dropin("rollback")
 
     def _restore_backend_services_open(self, tx: Path) -> None:
-        self.require_buyer_hold_dropin_removed("rollback")
-        self._restore_backend_services(tx)
+        # Only the gateway start waits on the drop-in removal; the coordinator
+        # starts regardless so providers reconnect.
+        if self.remove_buyer_hold_dropin("rollback"):
+            self._restore_backend_services(tx)
+        else:
+            self._restore_backend_services(tx, gateway_gate=lambda: self.require_buyer_hold_dropin_removed("rollback"))
 
     def restore_previous_services(self) -> None:
         if set(self.previous_versions) != {"coordinator", "gateway"}:

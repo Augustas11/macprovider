@@ -168,6 +168,8 @@ class PearlUpdaterTests(unittest.TestCase):
         # The gateway authorization probe makes a real request; tests of it
         # call the unbound method.
         self.updater.probe_gateway_buyer_hold_authorization = mock.Mock()
+        # systemd's loaded drop-ins; tests of it call the unbound method.
+        self.updater.buyer_hold_dropin_loaded = mock.Mock(return_value=False)
 
     def tearDown(self):
         self.temp.cleanup()
@@ -9543,15 +9545,18 @@ class PearlUpdaterTests(unittest.TestCase):
         self._install_dropin()
         # The drop-in is removed but systemd cannot reload, so it still has
         # the start-held setting loaded: the failure is audited, retried
-        # before the previous gateway starts, and that start is refused.
+        # before the previous gateway starts, and that start is refused. The
+        # coordinator still starts, so providers reconnect.
         self.updater._daemon_reload = mock.Mock(side_effect=updater_module.UpdateError("reload failed"))
-        self.updater._restore_backend_services = mock.Mock()
+        self.updater.previous_services = {"macprovider-coordinator.service": True, "macprovider-gateway.service": True}
+        self.updater.wait_for = mock.Mock()
 
         with self.assertRaisesRegex(updater_module.UpdateError, "the gateway would start held"):
             self.updater.restore_transaction()
 
-        self.updater._restore_backend_services.assert_not_called()
-        self.assertEqual(self.updater._daemon_reload.call_count, 2)
+        starts = [call.args[1] for call in self.updater.systemctl.call_args_list if call.args[0] == "start"]
+        self.assertEqual(starts, ["macprovider-coordinator.service"])
+        self.assertEqual(self.updater._daemon_reload.call_count, 3)
         self.updater.audit.assert_any_call(
             "gateway_buyer_hold_dropin", "remove_failed", stage="rollback", reason="reload failed"
         )
@@ -9560,6 +9565,81 @@ class PearlUpdaterTests(unittest.TestCase):
         self.updater._daemon_reload = mock.Mock()
         self.assertTrue(self.updater.remove_buyer_hold_dropin("rollback"))
         self.updater._daemon_reload.assert_called_once_with()
+
+    def test_a_drop_in_systemd_still_has_loaded_is_reloaded_by_a_new_process(self):
+        # An updater killed after the unlink and before the reload: the file
+        # is gone and the new process has no memory of it, but systemd still
+        # lists the drop-in for the gateway unit.
+        listed = {"DropInPaths": f"/etc/systemd/system/macprovider-gateway.service.d/50-gate.conf {self.updater.buyer_hold_dropin}"}
+        self.updater._service_properties = mock.Mock(return_value=listed)
+        self.updater._daemon_reload = mock.Mock()
+        self.updater.buyer_hold_dropin_loaded = lambda: updater_module.Updater.buyer_hold_dropin_loaded(self.updater)
+
+        self.assertTrue(self.updater.remove_buyer_hold_dropin("reconcile"))
+        self.updater._daemon_reload.assert_called_once_with()
+        self.updater._service_properties.assert_called_with("macprovider-gateway.service", ("DropInPaths",))
+
+        # Not listed: no reload. Unreadable: reload.
+        self.updater._daemon_reload.reset_mock()
+        listed["DropInPaths"] = "/etc/systemd/system/macprovider-gateway.service.d/50-gate.conf"
+        self.assertTrue(self.updater.remove_buyer_hold_dropin("reconcile"))
+        self.updater._daemon_reload.assert_not_called()
+        self.updater._service_properties = mock.Mock(side_effect=updater_module.UpdateError("show failed"))
+        self.assertTrue(self.updater.remove_buyer_hold_dropin("reconcile"))
+        self.updater._daemon_reload.assert_called_once_with()
+
+    def test_failed_held_start_rolls_back_without_a_held_window_alert(self):
+        tx, database = self._hold_rollback_fixture()
+        self._armed_journal(updater_module.DATABASE_RESTORE_ALLOWED, tx)
+        self.updater._daemon_reload = mock.Mock()
+        self.updater.systemctl = mock.Mock(
+            side_effect=lambda action, unit: (_ for _ in ()).throw(updater_module.UpdateError("start failed"))
+            if action == "start" else None
+        )
+        with self.assertRaisesRegex(updater_module.UpdateError, "start failed"):
+            self.updater.start_gateway_buyer_held()
+        self.assertTrue(self.updater.journal["gateway_held"])
+        self.assertNotIn("held_gateway_identity", self.updater.journal)
+        self.updater.systemctl = mock.Mock()
+        self.updater.gateway_unit_identity = mock.Mock(side_effect=updater_module.UpdateError("no unit"))
+        self.updater.gateway_buyer_hold_state = mock.Mock(side_effect=updater_module.UpdateError("refused"))
+
+        self.updater.restore_transaction()
+
+        self.assertEqual(database.read_text(), "pre-cutover-copy")
+        self.updater.raise_critical_alert.assert_not_called()
+        events = [call.args[0] for call in self.updater.audit.call_args_list]
+        self.assertNotIn("gateway_held_window_broken", events)
+        self.assertNotIn("database_rollback_held_window_broken", events)
+
+    def test_crash_looping_held_gateway_rolls_back_without_an_alert(self):
+        tx, database = self._hold_rollback_fixture()
+        self._held_window_journal(tx)
+        self._install_dropin()
+        # systemd restarted it (new invocation, more restarts) under the
+        # drop-in, and it is down now.
+        self.updater.gateway_unit_identity = mock.Mock(return_value={"invocation_id": "b" * 32, "restarts": "4"})
+        self.updater.gateway_buyer_hold_state = mock.Mock(side_effect=updater_module.UpdateError("connection refused"))
+
+        self.updater.restore_transaction()
+
+        self.assertEqual(database.read_text(), "pre-cutover-copy")
+        self.updater.raise_critical_alert.assert_not_called()
+
+    def test_unreadable_gateway_that_restarted_without_the_drop_in_alerts(self):
+        tx, database = self._hold_rollback_fixture()
+        self._held_window_journal(tx)
+        self.updater.gateway_unit_identity = mock.Mock(return_value={"invocation_id": "b" * 32, "restarts": "1"})
+        self.updater.gateway_buyer_hold_state = mock.Mock(side_effect=updater_module.UpdateError("connection refused"))
+
+        self.updater.restore_transaction()
+
+        self.assertEqual(database.read_text(), "pre-cutover-copy")
+        self.updater.raise_critical_alert.assert_any_call(
+            updater_module.ROLLBACK_POINT_REFUSED_ALERT,
+            transaction=str(tx),
+            reason="gateway held window broken at rollback",
+        )
 
     def _held_window_journal(self, tx):
         self._armed_journal(updater_module.DATABASE_RESTORE_ALLOWED, tx)
