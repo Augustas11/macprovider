@@ -42,6 +42,9 @@ EXPECTED_LOCATIONS = {
 # scripts: the upstream watch imports these names, and a test checks them
 # against the SPEC-048 fork table.
 SPEC048_MLX_SWIFT_LM_FORK = "https://github.com/Augustas11/mlx-swift-lm"
+# 3.32.3-macprovider.44 (#2189, #2284) is .43 (#2230) plus four exact MiniMax M3
+# decode fusions and the seeded fused-norm test (MiniMaxM3.swift and its tests
+# only).
 # 3.32.3-macprovider.43 (#2230) is .42 plus the Mamba2 segsum batch-mask fix
 # and upstream #728, #703, #712, #747 and #754 (#740 left out).
 # 3.32.3-macprovider.42 (#2254, #2255) is .40 plus the GPT-OSS SwiGLU bf16
@@ -53,8 +56,8 @@ SPEC048_MLX_SWIFT_LM_FORK = "https://github.com/Augustas11/mlx-swift-lm"
 # decode tokens with one kernel. .35 (#2270) on .32 adds the `ricursive` text
 # model (Ripple-65B Preview) and its prefill chunk. .32 (#2244, #2189) on .25
 # maps a Hugging Face per-layer quantization map to module paths at load.
-SPEC048_MLX_SWIFT_LM_TAG = "3.32.3-macprovider.43"
-SPEC048_MLX_SWIFT_LM_REVISION = "6f36fb83d9398816455b5868e4f97d62d1c809e2"
+SPEC048_MLX_SWIFT_LM_TAG = "3.32.3-macprovider.44"
+SPEC048_MLX_SWIFT_LM_REVISION = "ce950bf2840453b7e320fbb0a3b6eee7c7283658"
 SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE = "3b339ad6e3b3f44c8121ecff5131c7fd55e075e6"
 SPEC048_MLX_SWIFT_FORK = "https://github.com/Augustas11/mlx-swift"
 SPEC048_MLX_SWIFT_TAG = "0.32.3-macprovider.13"
