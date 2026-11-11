@@ -55,20 +55,31 @@ func TestNewRejectsBadProvenance(t *testing.T) {
 func TestNewRejectsMalformedMembers(t *testing.T) {
 	t.Parallel()
 	ok := Member{ModelKey: "m", ModelID: "x", ArtifactID: "a", HashAlgorithm: modelidentity.GGUFFileV1, Hash: hex('2')}
-	cases := map[string]func(*Member){
-		"short hash":      func(m *Member) { m.Hash = "12" },
-		"uppercase hash":  func(m *Member) { m.Hash = strings.ToUpper(hex('c')) },
-		"non-hex hash":    func(m *Member) { m.Hash = strings.Repeat("g", 64) },
-		"no model key":    func(m *Member) { m.ModelKey = "" },
-		"no artifact id":  func(m *Member) { m.ArtifactID = "" },
-		"padded model id": func(m *Member) { m.ModelID = " x" },
+	cases := map[string]struct {
+		mutate func(*Member)
+		want   string
+	}{
+		"short hash":      {func(m *Member) { m.Hash = "12" }, "lowercase sha256"},
+		"uppercase hash":  {func(m *Member) { m.Hash = strings.ToUpper(hex('c')) }, "lowercase sha256"},
+		"non-hex hash":    {func(m *Member) { m.Hash = strings.Repeat("g", 64) }, "lowercase sha256"},
+		"no model key":    {func(m *Member) { m.ModelKey = "" }, "without model key"},
+		"no artifact id":  {func(m *Member) { m.ArtifactID = "" }, "without model key"},
+		"no model id":     {func(m *Member) { m.ModelID = "" }, "without model key"},
+		"padded model id": {func(m *Member) { m.ModelID = " x" }, "normalized"},
+		"bad algorithm":   {func(m *Member) { m.HashAlgorithm = "md5" }, "wire pair"},
 	}
-	for name, mutate := range cases {
+	for name, c := range cases {
 		m := ok
-		mutate(&m)
-		if _, err := New(provenance(), []Member{m}); err == nil {
-			t.Errorf("%s: expected error", name)
+		c.mutate(&m)
+		_, err := New(provenance(), []Member{m})
+		if err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: want error containing %q, got %v", name, c.want, err)
 		}
+	}
+	dup := ok
+	dup.ModelKey, dup.ArtifactID = "n", "b"
+	if _, err := New(provenance(), []Member{ok, dup}); err == nil || !strings.Contains(err.Error(), "appears under") {
+		t.Errorf("duplicate pair: got %v", err)
 	}
 	if _, err := New(provenance(), []Member{ok}); err != nil {
 		t.Fatalf("baseline member must be accepted: %v", err)
