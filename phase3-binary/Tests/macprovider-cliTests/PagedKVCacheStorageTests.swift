@@ -32,6 +32,29 @@ final class PagedKVCacheStorageTests: XCTestCase {
         XCTAssertEqual(PagedKVBlockLayout.alignedCapacity(tokens: 33, blockSizeTokens: 16), 48)
     }
 
+    func testAmortizedGrowthIsWholeStepsOfWholeBlocksCappedAtMaxResident() {
+        XCTAssertEqual(PagedKVBlockLayout.amortizedGrownCapacity(needed: 0, maxTokens: 10_000, blockSizeTokens: 16), 0)
+        XCTAssertEqual(PagedKVBlockLayout.amortizedGrownCapacity(needed: 1, maxTokens: 10_000, blockSizeTokens: 16), 256)
+        XCTAssertEqual(PagedKVBlockLayout.amortizedGrownCapacity(needed: 256, maxTokens: 10_000, blockSizeTokens: 16), 256)
+        XCTAssertEqual(PagedKVBlockLayout.amortizedGrownCapacity(needed: 257, maxTokens: 10_000, blockSizeTokens: 16), 512)
+        // A step is a whole number of blocks: 256 rounds up to 288 for 48-token blocks.
+        XCTAssertEqual(PagedKVBlockLayout.amortizedGrownCapacity(needed: 289, maxTokens: 10_000, blockSizeTokens: 48), 576)
+        XCTAssertEqual(PagedKVBlockLayout.amortizedGrownCapacity(needed: 60, maxTokens: 62, blockSizeTokens: 16), 62)
+        XCTAssertEqual(PagedKVBlockLayout.amortizedGrownCapacity(needed: 70, maxTokens: 64, blockSizeTokens: 16), 70)
+        XCTAssertEqual(
+            PagedKVBlockLayout.amortizedGrownCapacity(needed: Int.max - 5, maxTokens: Int.max, blockSizeTokens: 16),
+            Int.max - 5)
+        // Single-token decode grows once per step, not once per block.
+        var capacity = 0
+        var growths = 0
+        for stored in 0 ..< 4096 where capacity < stored + 1 {
+            capacity = PagedKVBlockLayout.amortizedGrownCapacity(needed: stored + 1, maxTokens: 4096, blockSizeTokens: 16)
+            growths += 1
+            XCTAssertLessThanOrEqual(capacity - (stored + 1), PagedKVBlockLayout.growthStepTokens - 1)
+        }
+        XCTAssertEqual(growths, 16)
+    }
+
     /// SPEC-039 FR-PKV2: physical capacity never exceeds the whole blocks the
     /// allocator accounts for the stored tokens, at any length.
     func testSingleTokenGrowthStaysWithinAccountedBlocksAndAlwaysFits() {
@@ -82,7 +105,7 @@ final class PagedKVCacheStorageTests: XCTestCase {
         XCTAssertEqual(cache.storedTokens, token)
         XCTAssertEqual(Self.bytes(cache.state[0]), Self.bytes(referenceKeys!))
         XCTAssertEqual(Self.bytes(cache.state[1]), Self.bytes(referenceValues!))
-        XCTAssertEqual(cache.bufferCapacityTokens, (token + 3) / 4 * 4)
+        XCTAssertEqual(cache.bufferCapacityTokens, (token + 255) / 256 * 256)
         XCTAssertEqual(cache.debugDescription, "PagedKVCache(offset=\(token), blockSizeTokens=4, blocks=\((token + 3) / 4))")
     }
 
@@ -108,7 +131,7 @@ final class PagedKVCacheStorageTests: XCTestCase {
         for index in 0 ..< 10 {
             _ = cache.update(keys: history[.ellipsis, index ..< index + 1, 0...], values: history[.ellipsis, index ..< index + 1, 0...])
         }
-        XCTAssertEqual(cache.bufferCapacityTokens, 12)
+        XCTAssertEqual(cache.bufferCapacityTokens, 256)
         XCTAssertEqual(cache.trim(3), 3)
         XCTAssertEqual(cache.offset, 7)
         // The freed block is released (SPEC-039 FR-PKV2 accounting).
@@ -125,7 +148,7 @@ final class PagedKVCacheStorageTests: XCTestCase {
         XCTAssertEqual(Self.bytes(outKeys), Self.bytes(expected))
         XCTAssertEqual(Self.bytes(cache.state[0]), Self.bytes(expected))
         XCTAssertEqual(cache.offset, 9)
-        XCTAssertEqual(cache.bufferCapacityTokens, 12)
+        XCTAssertEqual(cache.bufferCapacityTokens, 256)
 
         XCTAssertEqual(cache.trim(50), 9)
         XCTAssertEqual(cache.offset, 0)
