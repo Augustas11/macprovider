@@ -186,18 +186,29 @@ func TestVerifyArchiveFileRejectsMissingAndWrongFormat(t *testing.T) {
 	if _, err := VerifyArchiveFile(filepath.Join(dir, "missing.tar")); err == nil {
 		t.Fatal("missing archive verified")
 	}
-	path := filepath.Join(dir, "a.tar")
-	if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
-		t.Fatal(err)
+	write := func(format string) string {
+		t.Helper()
+		w, err := verifiedarchive.NewWriter(dir, "test", format, time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC), "2026-01-01")
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, path, err := w.Finish()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return path
 	}
-	if err := os.WriteFile(path+verifiedarchive.ManifestSuffix, []byte(`{"format":"other-format"}`), 0o600); err != nil {
-		t.Fatal(err)
+	good := write(auditArchiveFormat)
+	if m, err := VerifyArchiveFile(good); err != nil || m.Format != auditArchiveFormat {
+		t.Fatalf("valid archive: manifest=%+v err=%v", m, err)
 	}
-	_, err := VerifyArchiveFile(path)
+	// Structurally valid archive whose only defect is the format label.
+	other := write("other-format")
+	_, err := VerifyArchiveFile(other)
 	if err == nil {
-		t.Fatal("wrong-format manifest verified")
+		t.Fatal("wrong-format archive verified")
 	}
-	if !errors.Is(err, verifiedarchive.ErrInvalid) && !strings.Contains(err.Error(), "format") {
+	if !errors.Is(err, verifiedarchive.ErrInvalid) || !strings.Contains(err.Error(), "manifest format") {
 		t.Fatalf("err = %v", err)
 	}
 }
