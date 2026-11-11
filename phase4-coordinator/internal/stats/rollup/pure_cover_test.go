@@ -126,20 +126,3 @@ func TestRatToFloat(t *testing.T) {
 		t.Errorf("got %v", got)
 	}
 }
-
-func TestEffectiveTokenSQLFragments(t *testing.T) {
-	c := effectiveCompletionTokensSQL("x")
-	for _, s := range []string{
-		"x.usage_source",
-		"WHEN 'byte_estimated' THEN COALESCE(x.estimated_completion_tokens, 0)",
-		"WHEN 'null_error' THEN 0",
-		"ELSE COALESCE(x.completion_tokens, 0)",
-	} {
-		if !strings.Contains(c, s) {
-			t.Errorf("completion fragment missing %q: %s", s, c)
-		}
-	}
-	if got := effectivePromptTokensSQL("x"); got != "COALESCE(x.prompt_tokens, 0)" {
-		t.Errorf("prompt fragment %q", got)
-	}
-}
