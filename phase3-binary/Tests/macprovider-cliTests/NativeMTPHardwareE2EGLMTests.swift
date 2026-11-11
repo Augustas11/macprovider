@@ -51,11 +51,13 @@ final class NativeMTPHardwareE2EGLMTests: XCTestCase {
         )
         XCTAssertNotNil(ModelRuntime.residentWeightsTicket(
             modelFamily: NativeMTPHardwareE2EFamily.glm5Next.modelFamily,
-            recommendedWorkingSetBytes: 239 * 1_073_741_824
+            recommendedWorkingSetBytes: 239 * 1_073_741_824,
+            residentBytes: 172 * 1_073_741_824
         ))
         XCTAssertNil(ModelRuntime.residentWeightsTicket(
             modelFamily: NativeMTPHardwareE2EFamily.qwen35.modelFamily,
-            recommendedWorkingSetBytes: 239 * 1_073_741_824
+            recommendedWorkingSetBytes: 239 * 1_073_741_824,
+            residentBytes: 172 * 1_073_741_824
         ))
     }
 
