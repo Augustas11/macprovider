@@ -426,11 +426,13 @@ holds only GitHub assets, including one named `release.json`), and re-downloads 
    another tag, and `next --run` executes `bash scripts/publish-release-mirror.sh
    --tag vX.Y.Z --latest-only` under the live-ops lock (it needs
    `MALIBU_DOWNLOAD_SSH_KEY` in the ops env and refuses without it). The
-   promotion workflow already mirrored the assets, so `--latest-only` uploads
-   only the pointer: it refuses unless Pearl already serves exactly GitHub's
-   asset set and digests for the tag (then rerun step 1 with
-   `--promote-latest`), unless `coordinator.malibu.tech/healthz` already
-   advertises the tag, and never moves `latest.json` backwards.
+   promotion workflow normally mirrored the assets, so `--latest-only` uploads
+   only the pointer when Pearl already holds exactly GitHub's asset set and
+   digests for the tag, its updater index and the pinned bootstrap python.
+   Otherwise (that workflow step is continue-on-error) it runs the full
+   `--promote-latest` path in the same run. It refuses unless
+   `coordinator.malibu.tech/healthz` already advertises the tag, and never
+   moves `latest.json` backwards.
 
 A published `/releases/<tag>/` is immutable: a rerun is a no-op when the bytes
 match and an error otherwise. Do not edit it in place; cut a new release.

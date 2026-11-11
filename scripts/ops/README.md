@@ -161,19 +161,24 @@ scripts/ops/live-lock.sh acquire <label> --steal                 # only past the
   release mirror's advisory `releases/latest.json` on the recommended tag. It is
   done when the served `tag_name` equals `v<ver>`; `next --run` runs
   `scripts/publish-release-mirror.sh --tag v<ver> --latest-only`: the promotion
-  workflow already mirrored the assets, so it only checks that Pearl serves
-  GitHub's exact asset set and moves the pointer. It refuses a tag the
+  workflow normally mirrored the assets, so when Pearl already holds GitHub's
+  exact asset set, the updater index and the pinned bootstrap python it moves
+  only the pointer; otherwise (that workflow step is continue-on-error) it runs
+  the full `--promote-latest` path in the same run. It refuses a tag the
   coordinator does not advertise and never moves the pointer backwards. It is blocked until `MALIBU_DOWNLOAD_SSH_KEY` is set; `GH_TOKEN`
   defaults to the repo's `gh` login. Runbook:
   `docs/runbooks/provider-cli-release-verification.md#release-mirror-byte-identity-downloadmalibutech-1737`.
 - `cli-release.sh` step `install_sh_republish`, right after `promotion`, is
   runnable: `next --run` (`_install-sh-republish`) backs up the served
-  `install.sh` at `INSTALL_SH_REMOTE_PATH` over `PEARL_SSH`, installs the
-  release's `phase3-binary/dist/install.sh` (owner `PEARL_INSTALL_SH_OWNER` /
-  `PEARL_INSTALL_SH_GROUP`, default root, mode 0755) and refuses unless the
-  installed file's SHA-256 read back equals the release's. Consumer health is
-  not a train step: the scheduled `install-sh-consumer-health-alarm.yml`
-  covers it.
+  `install.sh` at `INSTALL_SH_REMOTE_PATH` over `PEARL_SSH` and renames the
+  release's `phase3-binary/dist/install.sh` into place from a sibling temp
+  file (owner `PEARL_INSTALL_SH_OWNER` / `PEARL_INSTALL_SH_GROUP`, default
+  root, mode 0755). It refuses unless the local tag `v<ver>` names the commit
+  origin's tag names, and unless the installed file's SHA-256 read back equals
+  the release's; it then runs the read-only
+  `scripts/check-install-sh-consumer-health.sh` and fails the step if that
+  fails. Consumer health is not a separate train step; the scheduled
+  `install-sh-consumer-health-alarm.yml` still runs.
 - `cli-release.sh` step `version_staging` opens the next cut's version-only
   staging PR once a train is complete and `main` carries provider-side
   changes (outside `phase3-binary/catalog/`) since the published tag; the
@@ -184,8 +189,12 @@ scripts/ops/live-lock.sh acquire <label> --steal                 # only past the
   `latest_binary_version` rows to live stable in a fresh sibling worktree,
   checks the tree with `release-staged-version-policy.sh`, pushes
   `release/stage-cli-<ver>` and opens the PR "Stage provider CLI <ver>". It
-  refuses while such a PR is open or when `main` already carries the version,
-  and it never merges.
+  refuses while such a PR is open, when `gh pr list` fails, or when `main`
+  already carries the version, and it never merges. A failure before the push
+  removes its worktree and local branch; if `gh pr create` fails after the
+  push, the refusal prints the exact `gh pr create` command to run. When
+  origin/main or the published tag is not in the local clone the step is
+  blocked on `git fetch origin --tags`.
 - Steps the operator owns are `manual`: an environment approval click or a
   provider restart. `next` prints the
   documented command and `next --run` refuses. When the step is done, record

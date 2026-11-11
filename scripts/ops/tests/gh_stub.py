@@ -13,6 +13,7 @@ Fixture keys:
   releases:    {tag: release object}       (gh release view TAG)
   latest_stable: tag                       (gh release list --exclude-pre-releases)
   prs:         [pr objects]                (gh pr list: the open PRs)
+  pr_list_fail: true                       (gh pr list exits 1)
 `gh pr create` appends {"argv", "body"} to $GH_STUB_DIR/pr-create.jsonl and
 prints https://github.com/test/repo/pull/<n>; it fails when the fixture sets
 pr_create_fail.
@@ -81,6 +82,8 @@ if pos[:1] == ["api"]:
         emit(fx["run"][m.group(1)])
     sys.exit(1)
 if pos[:2] == ["pr", "list"]:
+    if fx.get("pr_list_fail"):
+        sys.exit(1)
     emit(fx.get("prs", []))
 if pos[:2] == ["pr", "create"]:
     if fx.get("pr_create_fail"):

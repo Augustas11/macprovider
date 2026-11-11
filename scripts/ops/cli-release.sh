@@ -569,8 +569,10 @@ decide_rollback() {
 # staging PR (one campaign, one PR).
 stage_next() {
   local open
-  open="$(open_staging_prs)"
-  if [ -n "$open" ]; then
+  if ! open="$(open_staging_prs)"; then
+    set_next "$1" blocked "List open pull requests" "gh pr list -R $(gh_repo) --state open" \
+      "gh pr list failed, so an open version staging PR cannot be ruled out; check gh auth"
+  elif [ -n "$open" ]; then
     set_next "$1" blocked "Merge the open version staging PR" "" "a version staging PR is already open: $open"
   else
     set_next "$1" mutate "Open the version-only staging PR for the next provider CLI" \
@@ -578,11 +580,21 @@ stage_next() {
   fi
 }
 
-# open_staging_prs: URLs of open PRs titled "Stage provider CLI ...".
+# open_staging_prs: URLs of open PRs titled "Stage provider CLI ..."; fails
+# when gh does, so a failed listing never reads as "none open".
 open_staging_prs() {
-  gh pr list -R "$(gh_repo)" --state open --search "Stage provider CLI in:title" \
-    --json title,url --jq '.[] | select(.title | startswith("Stage provider CLI")) | .url' 2>/dev/null |
-    tr '\n' ' ' | sed 's/ $//'
+  local out
+  out="$(gh pr list -R "$(gh_repo)" --state open --search "Stage provider CLI in:title" \
+    --json title,url --jq '.[] | select(.title | startswith("Stage provider CLI")) | .url' 2>/dev/null)" ||
+    return 1
+  printf '%s' "$out" | tr '\n' ' ' | sed 's/ $//'
+}
+
+# stage_pr_command VERSION: the gh pr create call _stage-version makes, for an
+# operator to run by hand when the branch is pushed but no PR was opened.
+stage_pr_command() {
+  printf 'gh pr create -R %s --base main --head release/stage-cli-%s --title "Stage provider CLI %s" --body "Version-only staging for provider CLI %s (scripts/ops/cli-release.sh version_staging)."' \
+    "$(gh_repo)" "$1" "$1" "$1"
 }
 
 decide() {
@@ -1025,7 +1037,9 @@ gh workflow run verify-live-coordinator-release-rollout.yml -R $(gh_repo) --ref 
       0) step version_staging "done" "no provider-side change on main since v$V" ;;
       1) step version_staging pending "provider-side changes on main since v$V"
          stage_next version_staging "main carries provider-side changes since v$V" ;;
-      *) step version_staging unknown "cannot diff v$V against origin/main (fetch the tag)" ;;
+      *) step version_staging unknown "cannot diff v$V against origin/main $main_sha"
+         set_next version_staging blocked "Fetch origin" "git fetch origin --tags" \
+           "origin/main $main_sha or tag v$V is not in the local clone, so provider-side changes since v$V are unknown" ;;
     esac
   fi
 
@@ -1609,10 +1623,12 @@ native_mtp_postcut() {
 
 # _install-sh-republish VERSION (step install_sh_republish, next --run only):
 # back up the get-channel install.sh on Pearl, install v<ver>'s
-# phase3-binary/dist/install.sh in its place (bytes over PEARL_SSH stdin) and
-# refuse unless the installed file's sha256 read back equals the release's.
+# phase3-binary/dist/install.sh in its place (bytes over PEARL_SSH stdin; the
+# local tag must name the commit origin's tag names), refuse unless the
+# installed file's sha256 read back equals the release's, then run the
+# read-only consumer health check against the served installer.
 install_sh_republish() {
-  local V="${1-}" src sha ts out a
+  local V="${1-}" src sha ts out a local_tag remote_tag
   is_semver "$V" || die "usage: _install-sh-republish VERSION"
   [ "${MACPROVIDER_OPS_ENTRYPOINT:-}" = 1 ] ||
     refuse "_install-sh-republish runs only from '$0 next --run' (live-ops lock)"
@@ -1621,8 +1637,16 @@ install_sh_republish() {
     [[ "$a" =~ ^[A-Za-z0-9_./-]+$ ]] && [[ "$a" != *..* ]] || refuse "unsafe or unset republish target: '$a'"
   done
   [[ "$INSTALL_SH_REMOTE_PATH" == /* ]] || refuse "INSTALL_SH_REMOTE_PATH must be absolute"
+  local_tag="$(git -C "$REPO_ROOT" rev-parse -q --verify "refs/tags/v$V^{commit}" 2>/dev/null || true)"
+  # ls-remote lists an annotated tag twice; the peeled (^{}) line is its commit.
+  remote_tag="$(git -C "$REPO_ROOT" ls-remote origin "refs/tags/v$V" "refs/tags/v$V^{}" 2>/dev/null |
+    awk '{ if ($2 ~ /\^\{\}$/) peeled = $1; else plain = $1 } END { print (peeled != "" ? peeled : plain) }')" ||
+    refuse "cannot read tag v$V from origin"
+  is_sha40 "$remote_tag" || refuse "origin has no tag v$V"
+  [ "$local_tag" = "$remote_tag" ] ||
+    refuse "local tag v$V is ${local_tag:-missing}, origin's is $remote_tag; run git fetch origin --force tag v$V"
   src="$OPS_TMP_DIR/install.sh.v$V"
-  git -C "$REPO_ROOT" show "v$V:phase3-binary/dist/install.sh" > "$src" 2>/dev/null ||
+  git -C "$REPO_ROOT" show "$remote_tag:phase3-binary/dist/install.sh" > "$src" 2>/dev/null ||
     refuse "v$V:phase3-binary/dist/install.sh is not readable; fetch tag v$V"
   sha="$(shasum -a 256 "$src" | awk '{print $1}')"
   ts="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -1631,13 +1655,20 @@ dst='$INSTALL_SH_REMOTE_PATH'
 tmp=\$(mktemp \"\${dst%/*}/.install.sh.new.XXXXXX\")
 trap 'rm -f \"\$tmp\"' EXIT
 cat > \"\$tmp\"
+chown '$PEARL_INSTALL_SH_OWNER:$PEARL_INSTALL_SH_GROUP' \"\$tmp\"
+chmod 0755 \"\$tmp\"
 [ ! -e \"\$dst\" ] || cp -p \"\$dst\" \"\$dst.bak-$ts\"
-install -o '$PEARL_INSTALL_SH_OWNER' -g '$PEARL_INSTALL_SH_GROUP' -m 0755 \"\$tmp\" \"\$dst\"
+# rename(2) in one directory: a fetch sees the old file or the new one, never a gap.
+mv -f \"\$tmp\" \"\$dst\"
 { sha256sum \"\$dst\" 2>/dev/null || shasum -a 256 \"\$dst\"; } | awk '{print \$1}'" < "$src")" ||
     refuse "republishing install.sh over PEARL_SSH failed"
   [ "$out" = "$sha" ] ||
     refuse "read-back sha256 of $INSTALL_SH_REMOTE_PATH is ${out:-unreadable}, not v$V's $sha"
   log "republished install.sh from v$V ($sha); backup $INSTALL_SH_REMOTE_PATH.bak-$ts"
+  # install_sh_consumer_health is not a train step; check the served installer now.
+  INSTALL_SH_RELEASE_TAG="v$V" bash "$REPO_ROOT/scripts/check-install-sh-consumer-health.sh" >&2 ||
+    refuse "install.sh from v$V is installed but scripts/check-install-sh-consumer-health.sh fails; restore $INSTALL_SH_REMOTE_PATH.bak-$ts if it does not recover"
+  log "install.sh consumer health is green for v$V"
 }
 
 # _stage-version (step version_staging, next --run only): open the
@@ -1646,6 +1677,20 @@ install -o '$PEARL_INSTALL_SH_OWNER' -g '$PEARL_INSTALL_SH_GROUP' -m 0755 \"\$tm
 # namespace); the three latest_binary_version rows name live stable, as
 # version_alignment and release-staged-version-policy.sh require. It works in
 # a fresh sibling worktree, pushes one branch, opens one PR and never merges.
+# Cleanup for a _stage-version failure before its push: the worktree and the
+# local branch go; after the push only the worktree goes.
+STAGE_WT=""; STAGE_BRANCH=""
+stage_cleanup() {
+  if [ -n "$STAGE_WT" ]; then
+    git -C "$REPO_ROOT" worktree remove --force "$STAGE_WT" >/dev/null 2>&1 || true
+    STAGE_WT=""
+  fi
+  if [ -n "$STAGE_BRANCH" ]; then
+    git -C "$REPO_ROOT" branch -D "$STAGE_BRANCH" >/dev/null 2>&1 || true
+    STAGE_BRANCH=""
+  fi
+}
+
 stage_version() {
   local main_sha cur L max_tag base N branch wt url
   [ "${MACPROVIDER_OPS_ENTRYPOINT:-}" = 1 ] || refuse "_stage-version runs only from '$0 next --run' (live-ops lock)"
@@ -1663,15 +1708,19 @@ stage_version() {
   N="${base%.*}.$((${base##*.} + 1))"
   [ "$(semver_cmp "$cur" "$N")" = -1 ] ||
     refuse "origin/main already carries binaryVersion $cur (the next unused version is $N); nothing to stage"
-  url="$(open_staging_prs)"
+  url="$(open_staging_prs)" || refuse "gh pr list failed; cannot rule out an open version staging PR"
   [ -z "$url" ] || refuse "a version staging PR is already open: $url"
   branch="release/stage-cli-$N"
   [ -z "$(git -C "$REPO_ROOT" ls-remote --heads origin "refs/heads/$branch" 2>/dev/null)" ] ||
-    refuse "branch $branch already exists on origin"
+    refuse "branch $branch already exists on origin and no staging PR is open; open it with: $(stage_pr_command "$N")"
   wt="$(dirname "$REPO_ROOT")/macprovider-stage-cli-$N"
   [ ! -e "$wt" ] || refuse "$wt already exists"
+  git -C "$REPO_ROOT" show-ref -q --verify "refs/heads/$branch" &&
+    refuse "local branch $branch already exists; delete it (git branch -D $branch) and rerun"
+  trap 'stage_cleanup; cleanup_ops' EXIT
   git -C "$REPO_ROOT" worktree add -q -b "$branch" "$wt" "$main_sha" ||
     refuse "cannot create worktree $wt on branch $branch"
+  STAGE_WT="$wt"; STAGE_BRANCH="$branch"
   python3 - "$wt" "$N" "$L" <<'PY' || refuse "version edit failed in $wt"
 import pathlib, re, sys
 root, n, live = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
@@ -1695,6 +1744,7 @@ Version-only staging for the next provider CLI cut: binaryVersion $cur -> $N;
 the three checked-in latest_binary_version rows name live stable $L.
 EOF
   git -C "$wt" push -q origin "refs/heads/$branch" || refuse "pushing $branch failed"
+  STAGE_BRANCH=""
   cat > "$OPS_TMP_DIR/stage-pr-body.md" <<EOF
 Version-only staging for the next provider CLI cut, prepared by scripts/ops/cli-release.sh (step version_staging).
 
@@ -1705,8 +1755,9 @@ Version-only staging for the next provider CLI cut, prepared by scripts/ops/cli-
 No catalog, CB or native-MTP state changes; merging deploys nothing. After the merge the train's next step is candidate_cut.
 EOF
   url="$(gh pr create -R "$(gh_repo)" --base main --head "$branch" --title "Stage provider CLI $N" \
-    --body-file "$OPS_TMP_DIR/stage-pr-body.md")" || refuse "gh pr create failed; branch $branch is pushed"
-  git -C "$REPO_ROOT" worktree remove "$wt" 2>/dev/null || log "worktree $wt left in place"
+    --body-file "$OPS_TMP_DIR/stage-pr-body.md")" ||
+    refuse "gh pr create failed; branch $branch is pushed. Open the PR with: $(stage_pr_command "$N")"
+  stage_cleanup
   log "opened version staging PR for $N: $url"
   printf '%s\n' "$url"
 }

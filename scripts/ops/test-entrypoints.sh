@@ -108,6 +108,15 @@ printf 'token=%s key=%s\n' "${GH_TOKEN:-}" "${MALIBU_DOWNLOAD_SSH_KEY:-}" > "$FA
 printf '{"tag_name": "%s"}\n' "$2" > "$FAKE_PEARL/svc/mirror-latest.json"
 FAKEMIRROR
 chmod +x "$W/scripts/publish-release-mirror.sh"
+# Stand-in for the read-only install.sh consumer health gate _install-sh-republish
+# runs last: records the release tag it was given.
+cat > "$W/scripts/check-install-sh-consumer-health.sh" <<'FAKEHEALTH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "${INSTALL_SH_RELEASE_TAG:-}" >> "$FAKE_PEARL/svc/consumer-health-tags"
+[ -z "${FAKE_CONSUMER_HEALTH_FAIL:-}" ] || { echo "ALARM: fake consumer surface down" >&2; exit 1; }
+FAKEHEALTH
+chmod +x "$W/scripts/check-install-sh-consumer-health.sh"
 # Catalog orchestration uses a verified-release double, not a fake signed CLI.
 # Real signature/payload/matcher verification belongs to
 # scripts/tests/test_native_mtp_release_match.py. Keep this stub inside W only;
@@ -147,7 +156,7 @@ if verdict not in ('ok', 'blocked: fixture signed release mismatch'):
 print(verdict)
 sys.exit(0 if verdict == 'ok' else 1)
 FAKEMATCH
-git -C "$W" -c user.name=t -c user.email=t@example.invalid add -A scripts/ops scripts/publish-release-mirror.sh scripts/native_mtp_release_match.py docs/releases/cli-release-train.md \
+git -C "$W" -c user.name=t -c user.email=t@example.invalid add -A scripts/ops scripts/publish-release-mirror.sh scripts/check-install-sh-consumer-health.sh scripts/native_mtp_release_match.py docs/releases/cli-release-train.md \
   ops/pearl-updater/release-signing-public.pem phase4-coordinator/dist/compatibility-revoked-ids.txt
 git -C "$W" -c user.name=t -c user.email=t@example.invalid commit -q -m "test: working-tree ops scripts"
 git -C "$W" -c user.name=t -c user.email=t@example.invalid tag -a v9.0.0 -m "live runtime"
@@ -1660,7 +1669,25 @@ INSTALL_SH_URL="$WWW" INSTALL_SH_REMOTE_PATH="$tmp/www/install.sh" PEARL_INSTALL
   MACPROVIDER_OPS_OWNER=t run_rc 3 "a failed install on Pearl is refused" scripts/ops/cli-release.sh next --run
 expect_lock_free
 if grep -q stale "$tmp/www/install.sh"; then ok; else bad "a failed republish changed the served install.sh"; fi
-rm -f "$tmp/www/install.sh.bak-"*
+cp "$tmp/www/install.sh" "$tmp/install.stale.sh"
+# A local tag that is not origin's is never published.
+TAGGED="$(git -C "$W" rev-parse "v$CAND^{commit}")"
+git -C "$W" -c user.name=t -c user.email=t@example.invalid tag -f -a "v$CAND" -m "local only" "$TAGGED~1" >/dev/null
+MACPROVIDER_OPS_ENTRYPOINT=1 INSTALL_SH_URL="$WWW" INSTALL_SH_REMOTE_PATH="$tmp/www/install.sh" \
+  run_rc 3 "a local tag that differs from origin's is refused" scripts/ops/cli-release.sh _install-sh-republish "$CAND"
+expect_err "origin's is $TAGGED"
+if cmp -s "$tmp/www/install.sh" "$tmp/install.stale.sh"; then ok; else bad "a mismatched local tag changed the served install.sh"; fi
+git -C "$W" fetch -q origin --force "refs/tags/v$CAND:refs/tags/v$CAND"
+if [ "$(git -C "$W" rev-parse "v$CAND^{commit}")" = "$TAGGED" ]; then ok; else bad "local tag v$CAND not restored"; fi
+# The consumer health gate runs after the install and fails the step.
+rm -f "$tmp/svc/consumer-health-tags"
+INSTALL_SH_URL="$WWW" INSTALL_SH_REMOTE_PATH="$tmp/www/install.sh" MACPROVIDER_OPS_OWNER=t FAKE_CONSUMER_HEALTH_FAIL=1 \
+  run_rc 3 "a failing consumer health check fails the republish" scripts/ops/cli-release.sh next --run
+expect_lock_free
+expect_err "check-install-sh-consumer-health.sh fails"
+if [ "$(cat "$tmp/svc/consumer-health-tags" 2>/dev/null)" = "v$CAND" ]; then ok; else bad "consumer health not run for v$CAND"; fi
+cp "$tmp/install.stale.sh" "$tmp/www/install.sh"
+rm -f "$tmp/www/install.sh.bak-"* "$tmp/svc/consumer-health-tags"
 INSTALL_SH_URL="$WWW" INSTALL_SH_REMOTE_PATH="$tmp/www/install.sh" MACPROVIDER_OPS_OWNER=t \
   run_rc 0 "install_sh_republish runs through next --run" scripts/ops/cli-release.sh next --run
 expect_lock_free
@@ -1670,6 +1697,12 @@ if cmp -s "$tmp/www/install.sh" "$tmp/install.release.sh"; then ok; else bad "se
 bak="$(ls "$tmp/www/install.sh.bak-"* 2>/dev/null | head -n1)"
 if [ -n "$bak" ] && grep -q stale "$bak"; then ok; else bad "the served install.sh was not backed up"; fi
 if [ -z "$(ls -A "$tmp/www" | grep '^\.install\.sh\.new')" ]; then ok; else bad "the republish left its temp file"; fi
+# Installed by rename with the owner and mode set on the temp file first.
+if [ "$(python3 -c 'import os,pwd,sys; s=os.stat(sys.argv[1]); print("%o %s" % (s.st_mode & 0o7777, pwd.getpwuid(s.st_uid).pw_name))' "$tmp/www/install.sh")" = "755 $(id -un)" ]; then ok
+else bad "served install.sh mode/owner: $(ls -l "$tmp/www/install.sh")"; fi
+if grep -qF 'mv -f \"\$tmp\" \"\$dst\"' "$W/scripts/ops/cli-release.sh"; then ok; else bad "install.sh is not renamed into place"; fi
+expect_err "consumer health is green for v$CAND"
+if [ "$(cat "$tmp/svc/consumer-health-tags" 2>/dev/null)" = "v$CAND" ]; then ok; else bad "consumer health not run after the republish"; fi
 INSTALL_SH_URL="$WWW" INSTALL_SH_REMOTE_PATH="$tmp/www/install.sh" \
   run_rc 0 "republished install.sh" scripts/ops/cli-release.sh status
 if [ "$(state_of install_sh_republish)" = "done" ]; then ok; else bad "republished install.sh not done: $(state_of install_sh_republish)"; fi
@@ -1853,7 +1886,9 @@ s.serve_forever()' "$tmp/www2" "$tmp/www2.port" &
 www2_pid=$!
 for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$tmp/www2.port" ] && break; sleep 0.3; done
 export INSTALL_SH_URL="http://127.0.0.1:$(cat "$tmp/www2.port")/install.sh"
-set_prs() { python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d["prs"]=json.loads(sys.argv[2]); json.dump(d,open(sys.argv[1],"w"))' "$tmp/gh/fixture.json" "$1"; }
+set_fx() { python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d[sys.argv[2]]=json.loads(sys.argv[3]); json.dump(d,open(sys.argv[1],"w"))' "$tmp/gh/fixture.json" "$1" "$2"; }
+set_prs() { set_fx prs "$1"; }
+SB="release/stage-cli-$SV"
 STAGE_BASE="$(git -C "$W" rev-parse HEAD)"
 run_rc 0 "train complete without a provider-side change" scripts/ops/cli-release.sh status
 if [ "$(state_of version_staging)" = done ]; then ok; else bad "version_staging without a change: $(state_of version_staging) $(note_of version_staging)"; fi
@@ -1869,10 +1904,40 @@ git -C "$W" add phase3-binary/ops-stage-probe.txt
 git -C "$W" -c user.name=t -c user.email=t@example.invalid commit -q -m "test: provider-side change"
 git -C "$W" push -q origin HEAD:refs/heads/main
 STAGE_MAIN="$(git -C "$W" rev-parse HEAD)"
+# origin/main or the tag missing from the clone (git diff exits 128) blocks
+# instead of reporting the train complete.
+mkdir -p "$tmp/gitshim"
+cat > "$tmp/gitshim/git" <<GITSHIM
+#!/usr/bin/env bash
+case " \$* " in *" diff --quiet "*":(exclude)phase3-binary/catalog"*) exit 128 ;; esac
+exec $(command -v git) "\$@"
+GITSHIM
+chmod +x "$tmp/gitshim/git"
+PATH="$tmp/gitshim:$PATH" run_rc 0 "origin/main not in the local clone" scripts/ops/cli-release.sh status
+expect_next version_staging:blocked
+case "$(next_field command)" in "git fetch origin --tags") ok ;; *) bad "version_staging fetch command: $(next_field command)" ;; esac
 run_rc 0 "train complete with a provider-side change on main" scripts/ops/cli-release.sh status
 if [ "$(state_of version_staging)" = pending ]; then ok; else bad "version_staging not pending: $(state_of version_staging)"; fi
 expect_next version_staging:mutate
 case "$(next_field command)" in "scripts/ops/cli-release.sh _stage-version") ok ;; *) bad "staging command: $(next_field command)" ;; esac
+# A failed gh pr list never reads as "no staging PR open".
+set_fx pr_list_fail true
+run_rc 0 "gh pr list fails" scripts/ops/cli-release.sh status
+expect_next version_staging:blocked
+case "$(next_field reason)" in *"gh pr list failed"*) ok ;; *) bad "staging gh failure reason: $(next_field reason)" ;; esac
+MACPROVIDER_OPS_ENTRYPOINT=1 run_rc 3 "_stage-version refuses when gh pr list fails" scripts/ops/cli-release.sh _stage-version
+expect_err "gh pr list failed"
+set_fx pr_list_fail false
+# A failure before the push removes the worktree and the local branch.
+printf '#!/bin/sh\nexit 1\n' > "$tmp/origin.git/hooks/pre-receive"
+chmod +x "$tmp/origin.git/hooks/pre-receive"
+MACPROVIDER_OPS_OWNER=t run_rc 3 "a rejected staging push is refused" scripts/ops/cli-release.sh next --run
+expect_lock_free
+expect_err "pushing $SB failed"
+if [ ! -e "$tmp/macprovider-stage-cli-$SV" ]; then ok; else bad "a failed staging run left its worktree"; fi
+if ! git -C "$W" show-ref -q --verify "refs/heads/$SB"; then ok; else bad "a failed staging run left branch $SB"; fi
+rm -f "$tmp/origin.git/hooks/pre-receive"
+git -C "$W" worktree prune
 run_rc 3 "_stage-version refuses outside next --run" scripts/ops/cli-release.sh _stage-version
 set_prs '[{"title": "Stage provider CLI '"$SV"'", "url": "https://github.com/test/repo/pull/7"}]'
 run_rc 0 "an open staging PR blocks a second one" scripts/ops/cli-release.sh status
@@ -1885,7 +1950,6 @@ rm -f "$tmp/gh/pr-create.jsonl"
 MACPROVIDER_OPS_OWNER=t run_rc 0 "version_staging opens the staging PR through next --run" scripts/ops/cli-release.sh next --run
 expect_lock_free
 expect_err "opened version staging PR for $SV"
-SB="release/stage-cli-$SV"
 if git -C "$tmp/origin.git" show "$SB:phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift" |
   grep "^ *static let binaryVersion = \"$SV\"" >/dev/null; then ok; else bad "staging branch binaryVersion is not $SV"; fi
 for f in phase4-coordinator/dist/coordinator.yaml phase4-coordinator/coordinator.yaml.example phase4-coordinator/dist/coordinator.yaml.example; do
@@ -1910,7 +1974,17 @@ assert not re.search(r"(?i)\b(close[sd]?|fix(e[sd])?|resolve[sd]?)\b\s*#\d", bod
 PYPR
 then ok; else bad "gh pr create call"; fi
 MACPROVIDER_OPS_ENTRYPOINT=1 run_rc 3 "_stage-version refuses an existing staging branch" scripts/ops/cli-release.sh _stage-version
-expect_err "already exists on origin"
+expect_err "already exists on origin and no staging PR is open; open it with: gh pr create -R test/repo --base main --head $SB"
+# gh pr create failing after the push names the exact command to run.
+git -C "$W" push -q origin ":refs/heads/$SB"
+git -C "$W" branch -q -D "$SB"
+set_fx pr_create_fail true
+MACPROVIDER_OPS_OWNER=t run_rc 3 "gh pr create fails after the push" scripts/ops/cli-release.sh next --run
+expect_lock_free
+expect_err "Open the PR with: gh pr create -R test/repo --base main --head $SB --title \"Stage provider CLI $SV\""
+if [ -n "$(git -C "$tmp/origin.git" for-each-ref "refs/heads/$SB")" ]; then ok; else bad "branch $SB not pushed before gh pr create"; fi
+if [ ! -e "$tmp/macprovider-stage-cli-$SV" ]; then ok; else bad "gh pr create failure left the worktree"; fi
+set_fx pr_create_fail false
 python3 - "$W/phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift" "$SV" <<'PYV'
 import re, sys
 p = sys.argv[1]
