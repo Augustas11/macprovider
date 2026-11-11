@@ -6531,6 +6531,10 @@ final class AutotuneRecommendTests: XCTestCase {
             revision: "0d77464eeb233a2da68ebf9d7dc4edaac7db956d",
             json: #"{"text_config":{"max_position_embeddings":262144,"num_hidden_layers":30,"hidden_size":2816,"num_attention_heads":16,"num_key_value_heads":8,"head_dim":256,"layer_types":["sliding_attention","sliding_attention","sliding_attention","sliding_attention","sliding_attention","full_attention","sliding_attention","sliding_attention","sliding_attention","sliding_attention","sliding_attention","full_attention","sliding_attention","sliding_attention","sliding_attention","sliding_attention","sliding_attention","full_attention","sliding_attention","sliding_attention","sliding_attention","sliding_attention","sliding_attention","full_attention","sliding_attention","sliding_attention","sliding_attention","sliding_attention","sliding_attention","full_attention"]}}"#
         ),
+        "liquidai/lfm3-1.7b": (
+            revision: "91f34088d6946482cbcae11b85d4657093618c34",
+            json: #"{"max_position_embeddings":262144,"num_hidden_layers":24,"hidden_size":2048,"num_attention_heads":16,"num_key_value_heads":4,"head_dim":128,"layer_types":["conv","conv","full_attention","conv","sliding_attention","conv","full_attention","conv","sliding_attention","conv","full_attention","conv","sliding_attention","conv","full_attention","conv","sliding_attention","conv","full_attention","conv","sliding_attention","conv","full_attention","conv"]}"#
+        ),
         "meta-llama/llama-3.1-8b-instruct": (
             revision: "241a666dad6cb93c8ff213d39a7f34a36bf26db4",
             json: #"{"max_position_embeddings":131072,"num_hidden_layers":32,"hidden_size":4096,"num_attention_heads":32,"num_key_value_heads":8}"#

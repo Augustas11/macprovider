@@ -50,6 +50,31 @@
       "primary_artifact_id": "mlx-4bit",
       "rate_class": "class-30b-moe"
     },
+    "liquidai/lfm3-1.7b": {
+      "artifacts": {
+        "mlx-4bit": {
+          "allowed_runtime_sources": [
+            "mlx_cache"
+          ],
+          "hash": "e6ef055b17601b009ea1a476c8a3c0bbab734ea82825d9cd23d8a63a90d9c8ea",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "min_ram_gb": 3,
+          "notes": "LFM3 1.7B (#2231): official LiquidAI MLX affine 4-bit (group 64) build, 14 files. Hybrid short-conv / sliding-window (256) / full-attention model served by the native Swift lfm3 engine; the repo configuration_lfm3.py, lfm3_conv.py and modeling_lfm3.py are never executed. Measured peak footprint 2.26 GB at 32K context on an 8 GB M1. License: LFM Open License v1.0 (lfm1.0), the same terms as LFM2.5: commercial use only by legal entities under USD 10M annual revenue; the LFM2.5 revenue review trigger applies.",
+          "quantization": "affine-4bit-g64",
+          "runtime_format": "mlx_safetensors",
+          "size_bytes": 991133347,
+          "source_ref": {
+            "kind": "huggingface_revision",
+            "repo_id": "LiquidAI/LFM3-1.7B-MLX-4bit",
+            "revision": "91f34088d6946482cbcae11b85d4657093618c34"
+          },
+          "verification_status": "verified",
+          "verified_at": "2026-11-11"
+        }
+      },
+      "primary_artifact_id": "mlx-4bit",
+      "rate_class": "class-3b"
+    },
     "meta-llama/llama-3.1-8b-instruct": {
       "artifacts": {
         "mlx-4bit": {

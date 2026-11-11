@@ -811,6 +811,14 @@ final class ServingKnobsConfigTests: XCTestCase {
         XCTAssertEqual(ripple.modelFamily, "ricursive")
         XCTAssertFalse(PagedKVAttachGate.recognizedModelFamilies.contains(ripple.modelFamily))
 
+        // LFM3 1.7B (#2231) is labelled, and is not a paged-KV family.
+        let lfm3 = ModelRuntime.pagedKVModelCapabilities(
+            modelID: "LiquidAI/LFM3-1.7B-MLX-4bit",
+            configJSONData: Data(#"{"model_type":"lfm3","architectures":["Lfm3ForCausalLM"]}"#.utf8)
+        )
+        XCTAssertEqual(lfm3.modelFamily, "lfm3")
+        XCTAssertFalse(PagedKVAttachGate.recognizedModelFamilies.contains(lfm3.modelFamily))
+
         // DeepSeek V4-Flash has its own row-owned pool bridge. Recognizing
         // the family never admits an unverified raw artifact or layout;
         // V4.1 (`deepseek_v41`) is a different model.
@@ -3052,7 +3060,7 @@ final class ServingKnobsConfigTests: XCTestCase {
         XCTAssertEqual(
             ticket?.policy.canAdmit(baseline: recommended, activeSizes: [recommended], newSize: recommended),
             true, "admission must never suspend a model load")
-        for family in ["qwen", "llama", "gpt_oss", "gemma4", "glm4_moe", "nemotron_h", "ricursive", "unknown"] {
+        for family in ["qwen", "llama", "gpt_oss", "gemma4", "glm4_moe", "nemotron_h", "ricursive", "lfm3", "unknown"] {
             XCTAssertNil(
                 ModelRuntime.residentWeightsTicket(modelFamily: family, recommendedWorkingSetBytes: recommended),
                 family)
@@ -3074,7 +3082,7 @@ final class ServingKnobsConfigTests: XCTestCase {
         XCTAssertEqual(ModelRuntime.commandBufferBudgetMB(modelFamily: "glm5_next", configured: ""), 65536)
         XCTAssertNil(ModelRuntime.commandBufferBudgetMB(modelFamily: "glm5_next", configured: "40"))
         XCTAssertEqual(ModelRuntime.commandBufferBudgetMB(modelFamily: "deepseek_v4", configured: nil), 65536)
-        for family in ["qwen", "llama", "gpt_oss", "gemma4", "glm4_moe", "nemotron_h", "ricursive", "unknown"] {
+        for family in ["qwen", "llama", "gpt_oss", "gemma4", "glm4_moe", "nemotron_h", "ricursive", "lfm3", "unknown"] {
             XCTAssertNil(ModelRuntime.commandBufferBudgetMB(modelFamily: family, configured: nil), family)
         }
     }

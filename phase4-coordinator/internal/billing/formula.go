@@ -105,6 +105,9 @@ var exactModelKeyAliases = map[string]string{
 	// Ripple-65B Preview's served 4-bit artifact (the "-4bit" suffix is
 	// already stripped) bills as its catalog key (#2270).
 	"frogggias/ripple-65b-preview-mlx": "ricursiveai/ripple-65b-preview",
+	// LFM3 1.7B's official MLX artifacts (the "-4bit"/"-8bit" suffix is
+	// already stripped) bill as its catalog key (#2231).
+	"liquidai/lfm3-1.7b-mlx": "liquidai/lfm3-1.7b",
 	// DeepSeek-V4-Flash's served artifact and its upstream release (#2111).
 	"tensorfold/deepseek-v4-flash-0731-mxfp4-mlx": "deepseek/deepseek-v4-flash",
 	"deepseek-ai/deepseek-v4-flash-0731":          "deepseek/deepseek-v4-flash",

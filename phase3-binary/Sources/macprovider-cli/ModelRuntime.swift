@@ -3648,6 +3648,12 @@ maxTokens: 1,
         if normalizedLabels.contains(where: { $0 == "ricursive" || $0 == "ricursiveforcausallm" }) {
             return "ricursive"
         }
+        // LiquidAI LFM3 (`lfm3`, #2231): short-conv, sliding-window (256) and
+        // full-attention layers. Not a paged-KV family, so attach fails closed
+        // on identity and the model serves serial.
+        if normalizedLabels.contains(where: { $0 == "lfm3" || $0 == "lfm3forcausallm" }) {
+            return "lfm3"
+        }
         // GLM-5-Next (`glm5_next`, text model `glm5_next_text`): the SPEC-039
         // v0.1.17 KDA/DSA hybrid family. Only the allowlisted identity carries
         // a verified layout; any other `glm5_next` artifact is a `mixed` cache
