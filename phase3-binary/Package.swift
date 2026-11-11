@@ -17,10 +17,15 @@ let package = Package(
         )
     ],
     dependencies: [
-        // Tag 3.32.3-macprovider.35 (#2270) on 3.32.3-macprovider.32: the
-        // `ricursive` text model (Ripple-65B Preview, `2911424`) and its
-        // 2048-token prefill chunk (`c9d8a93`). New model files and one
-        // registry line; no other model's code changes.
+        // Tag 3.32.3-macprovider.38 (#2265) is .35 plus two commits: the
+        // mlx-swift 0.32.3-macprovider.13 pin (#2234) and GLM-5-Next projecting
+        // 1...8 decode tokens with one kernel, so its rows stay bitwise when
+        // MLX itself takes qmv_mma (GPUs without NAX). mlx-swift .13 pins core
+        // 565070fe4, which sends every eligible affine small-M product to
+        // qmv_mma from 1 to 16 rows, so the kernel never depends on the row
+        // count, and its metallib ships the gather_mm_offsets and SDPA VJP
+        // kernels that core calls. .35 (#2270) on .32 adds the `ricursive`
+        // text model (Ripple-65B Preview) and its 2048-token prefill chunk.
         // Tag 3.32.3-macprovider.32 (#2244, #2189) on 3.32.3-macprovider.25:
         // `6c27b74` (from `73df016af`) maps a Hugging Face per-layer
         // quantization map to module paths at load, so the Solstice-AI
@@ -60,8 +65,8 @@ let package = Package(
         // MTP verification step commits upstream does not carry, and upstream
         // #631 with every Qwen3.5 trace declaring the arrays it reads as
         // compile state) and the GLM-5-Next text model with batched rows. It
-        // resolves the Augustas11/mlx-swift fork (tag 0.32.3-macprovider.11, MLX
-        // core v0.32.4-macprovider.6 and mlx-c v0.6.0-macprovider.2). Core keeps
+        // resolves the Augustas11/mlx-swift fork (tag 0.32.3-macprovider.13, MLX
+        // core v0.32.4-macprovider.7 (565070fe4) and mlx-c v0.6.0-macprovider.2). Core keeps
         // small-M quantized matmuls on one kernel route so a row decodes the same tokens alone
         // and inside a continuous batch (the startup batched-isolation gate),
         // erases a freed compiled function from every thread's compile cache
@@ -76,7 +81,7 @@ let package = Package(
         // compatible per-column attention while retaining row-owned caches.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "c9d8a9324eb9cc98243987b1557a863c253c63b3"
+            revision: "dab7764e1b082f1b5bf411a1f3282ef2830204e7"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",
