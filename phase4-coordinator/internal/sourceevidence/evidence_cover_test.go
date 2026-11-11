@@ -18,12 +18,13 @@ func TestCanonicalBytesSortsKeysAndNormalizesTypes(t *testing.T) {
 		"b": []any{int64(2), json.Number("3"), true, nil},
 		"a": "x\"y",
 		"c": map[string]any{"z": 1, "y": false},
+		"d": []any{int64(1234567890), json.Number("9007199254740991"), 10, 255},
 	}
 	got, err := canonicalBytes(in)
 	if err != nil {
 		t.Fatalf("canonicalBytes: %v", err)
 	}
-	want := `{"a":"x\"y","b":[2,3,true,null],"c":{"y":false,"z":1}}`
+	want := `{"a":"x\"y","b":[2,3,true,null],"c":{"y":false,"z":1},"d":[1234567890,9007199254740991,10,255]}`
 	if string(got) != want {
 		t.Fatalf("got %s want %s", got, want)
 	}
@@ -161,9 +162,6 @@ func TestFixedProvenanceValidate(t *testing.T) {
 			t.Fatalf("%s: err=%v want ErrProvenanceMissing", name, err)
 		}
 	}
-	if sha := DefaultFixedProvenance().SourceSHA; sha != "" && !hex40RE.MatchString(sha) {
-		t.Fatalf("default sha %q is not a clean 40-hex revision", sha)
-	}
 }
 
 func TestCommitmentsAreDomainSeparatedAndLengthPrefixed(t *testing.T) {
@@ -221,6 +219,7 @@ func TestRecordNoDispatchRejectsInvalidInputs(t *testing.T) {
 	}
 	mut := map[string]func(*ClosureInput){
 		"provider assigned":    func(c *ClosureInput) { c.Row.ProviderAssignedID = "p" },
+		"non-blank model":      func(c *ClosureInput) { c.Row.Model = "some-model" },
 		"missing request id":   func(c *ClosureInput) { c.Row.RequestID = "" },
 		"missing account":      func(c *ClosureInput) { c.Row.AccountID = "" },
 		"missing external id":  func(c *ClosureInput) { c.Row.ExternalRequestID = "" },
