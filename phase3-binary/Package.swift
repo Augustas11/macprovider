@@ -17,6 +17,14 @@ let package = Package(
         )
     ],
     dependencies: [
+        // Tag 3.32.3-macprovider.43 (#2230) is .42 plus seven commits: the
+        // Mamba2 segsum batch-mask fix and its test, upstream #728 (cache-list
+        // attention masks sized from the live rows), #703 (quantized-KV prefill
+        // blocks of 64+ query tokens through the fused SDPA kernel), #712/#754
+        // (Nemotron 3.5 text models, Mamba activations in the input dtype) and
+        // #747 (rotating-cache keep mask for multi-token blocks). Upstream #740
+        // (MLXFast gated delta) is left out: its chunked prefill breaks the
+        // serial-versus-batched parity paged KV needs on Qwen3.6.
         // Tag 3.32.3-macprovider.42 (#2254, #2255) is .40 plus two GPT-OSS
         // commits: `3490b04` clips the GPT-OSS SwiGLU with plain Float bounds,
         // so bf16 activations stay bf16 instead of promoting to f32, and
@@ -93,7 +101,7 @@ let package = Package(
         // compatible per-column attention while retaining row-owned caches.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "e0cac0711d20996a40aa1c1ca5a9705e9e8635c7"
+            revision: "6f36fb83d9398816455b5868e4f97d62d1c809e2"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",
