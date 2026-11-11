@@ -89,6 +89,7 @@ func TestReaderAggregatesPerProviderWithinLastHour(t *testing.T) {
 	ins("p1", "idle_prewarm_skipped", "busy", recent)
 	ins("p1", "idle_prewarm_skipped", "thermal", recent)
 	ins("p1", "idle_prewarm_skipped", nil, recent)
+	ins("p1", "idle_prewarm_started", "busy", recent)             // non-skip event with a reason must not count as a skip
 	ins("p1", "idle_prewarm_started", nil, now.Add(-2*time.Hour)) // too old
 	ins("p1", "idle_prewarm_skipped", "old", now.Add(-2*time.Hour))
 	ins("p2", "idle_prewarm_started", nil, recent) // other provider
@@ -98,7 +99,7 @@ func TestReaderAggregatesPerProviderWithinLastHour(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.EventsLast1h["idle_prewarm_started"] != 2 || got.EventsLast1h["idle_prewarm_skipped"] != 4 || len(got.EventsLast1h) != 2 {
+	if got.EventsLast1h["idle_prewarm_started"] != 3 || got.EventsLast1h["idle_prewarm_skipped"] != 4 || len(got.EventsLast1h) != 2 {
 		t.Fatalf("events = %v", got.EventsLast1h)
 	}
 	if len(got.SkipsByReasonLast1h) != 2 || got.SkipsByReasonLast1h["busy"] != 2 || got.SkipsByReasonLast1h["thermal"] != 1 {
