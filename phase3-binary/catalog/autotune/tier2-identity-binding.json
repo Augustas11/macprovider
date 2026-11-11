@@ -1,6 +1,6 @@
 {
-  "autotune_candidates_sha256": "fe180dedd45918712e20d9d20f36a72e3b5bcd64945f01662bd2012cdccda243",
-  "generated_at": "2026-11-11T07:00:00Z",
+  "autotune_candidates_sha256": "f693204650fe67099d43507f72358398f24ce1cb0d582f861f75dc18c5cae5f0",
+  "generated_at": "2026-11-11T12:20:45Z",
   "models": [
     {
       "catalog_key": "ricursiveai/ripple-65b-preview",
@@ -172,6 +172,6 @@
     }
   ],
   "policy_version": "autotune-policy-v1",
-  "release_id": "published-2026-11-11-lfm3-1.7b-listed-v283",
+  "release_id": "published-2026-11-11-bonsai2b-listed-v283",
   "schema_version": "macprovider.tier2-identity-binding.v1"
 }
