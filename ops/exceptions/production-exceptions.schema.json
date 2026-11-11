@@ -84,7 +84,6 @@
         "owner",
         "issue",
         "created_at",
-        "expires_at",
         "scope",
         "removal_condition",
         "rollback_command",
@@ -189,26 +188,7 @@
             "minLength": 1
           }
         }
-      },
-      "allOf": [
-        {
-          "if": {
-            "properties": {
-              "expires_at": {
-                "type": "null"
-              }
-            },
-            "required": [
-              "expires_at"
-            ]
-          },
-          "then": {
-            "required": [
-              "expiry_unknown_reason"
-            ]
-          }
-        }
-      ]
+      }
     },
     "open_question": {
       "type": "object",
