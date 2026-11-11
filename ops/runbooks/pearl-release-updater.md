@@ -548,7 +548,9 @@ fresh GET. It unconditionally stops `canary-buyer.timer` and
 `canary-buyer.service`, both archive-rotation units, and both stats billing
 mirror units and proves them inactive with no queued systemd job,
 derives the exact SQLite paths from the trusted effective running coordinator
-and gateway configurations, binds those paths into the durable journal, drains
+and gateway configurations, binds those paths into the durable journal, turns
+on the gateway buyer hold (see [Buyer hold](#buyer-hold-and-the-database-rollback-rule);
+a gateway without it drains under traffic as before), drains
 gateway quota/concurrency reservations from that same captured gateway database
 to a steady zero, stops gateway
 then coordinator, and proves both inactive. Only after that full writer and
@@ -749,6 +751,60 @@ audited and never fails the committed rollout. A pruned transaction can no
 longer pass `validate_transaction`; only the active transaction is ever
 restored automatically.
 
+## Buyer hold and the database rollback rule
+
+A database restore replaces the live coordinator and gateway databases with the
+pre-cutover copies. Any row a real buyer wrote after the cutover (ledger,
+billing, reservation, request log) would be lost. The updater therefore never
+restores a database that real buyer traffic may have written.
+
+**Buyer hold.** The gateway has an in-memory hold (SPEC-006-R027). While it is
+on, new requests on buyer routes get `503` with `Retry-After: 30` and code
+`public_api_paused`; in-flight streams finish; `/healthz`, `/v1/status`,
+`/metrics` and `/admin/*` still answer; requests that present the buyer canary's
+API key (admitted by its sha256, read from the canary token file) still pass.
+`POST /admin/buyer-hold` with the operator key and
+`{"active": true|false, "admit_api_key_sha256": "<hex>"}` toggles it, and
+`/healthz` reports it as `buyer_hold`. A process restart always starts open,
+except the one candidate start the updater supervises: it sets
+`MACPROVIDER_GATEWAY_START_BUYER_HOLD=1` with `systemctl set-environment` just
+for that start and unsets it as soon as the start returns.
+
+**Drain.** Before the drain poll the updater turns the hold on, so the
+reservation count reaches a steady zero under constant traffic. A gateway that
+answers the hold endpoint with 404 (older than the hold) drains under traffic
+as before (`gateway_buyer_hold` `unsupported`). If the drain fails, the hold is
+released before the pre-armed restore.
+
+**Decision after start.** When the transaction took a database copy, the
+updater records the live schema digests under quiesce
+(`pre_install_database_schemas` in the journal) and starts the candidate gateway
+held. After both services report the candidate version it compares the live
+schema digests with that record and journals the rule (`database_restore`,
+audit `database_restore_decision`) before any real buyer can pass:
+
+- Schemas unchanged: `forbidden`. The hold is released and traffic opens as
+  before. A later failure rolls back binaries, configuration, catalog and state,
+  and keeps the live databases (`database_rollback` `skipped`, reason `live
+  databases kept`). If their schema no longer matches the record at rollback,
+  the updater audits `database_rollback_schema_drift` and starts the
+  rollback-point-refused alert; it still keeps them.
+- Schemas changed, or not comparable: `allowed`. Real buyers stay held while
+  serving recovery, the provider canary and the buyer canary run. A failure
+  then restores the databases as before (with the restore-time `quick_check`):
+  only canary rows and provider-side state from the window are lost, and
+  providers re-register on reconnect. The hold is released after the commit
+  point (`gateway_buyer_hold` `released`, stage `committed`); if the endpoint
+  fails, the updater restarts the gateway, which starts open.
+- The started gateway does not report the hold: `forbidden`, because buyers may
+  already be writing.
+
+Crash reconciliation follows the journaled rule. It also clears the start
+variable, and after a successful reconcile it releases the hold. A
+`--reconcile` run with no journal (the apply unit's `ExecStopPost` after a crash
+between the commit and the hold release) releases the hold too, since no
+restore is pending.
+
 ## Automatic rollback
 
 Any install, restart, semantic-health, provider-recovery, public-TLS, or buyer
@@ -764,7 +820,9 @@ restores the previous
 binaries/configuration, runs `PRAGMA quick_check` on every pre-rollout
 database copy, and only when all pass removes SQLite WAL/SHM sidecars, restores
 the copies, and durably removes any database that the candidate created when it
-was absent before rollout. If any copy fails the check, no database is touched
+was absent before rollout, unless the journaled rule is `forbidden`
+([Buyer hold](#buyer-hold-and-the-database-rollback-rule)), in which case no
+database is touched. If any copy fails the check, no database is touched
 (see [Database snapshots](#database-snapshots)). A transaction that skipped the
 database snapshot restores binaries, configuration, and state only. It starts the prior
 coordinator and proves its exact captured health version before starting and

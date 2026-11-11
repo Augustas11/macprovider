@@ -7394,7 +7394,7 @@ func TestPanicRecoveryReturnsAnthropicEnvelopeForMessages(t *testing.T) {
 func TestHealthzReturnsOK(t *testing.T) {
 	h, _, _, _ := newTestHarness(t, fakeOAuth{}, WithHTTPClient(noopClient()))
 	resp := assertStatus(t, h, http.MethodGet, "/healthz", "", "", "", http.StatusOK)
-	var body map[string]string
+	var body map[string]any
 	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
 		t.Fatalf("health json: %v", err)
 	}
@@ -7413,7 +7413,7 @@ func TestHealthzReportsInjectedVersion(t *testing.T) {
 	_, store, _, cfg := newTestHarness(t, fakeOAuth{}, WithHTTPClient(noopClient()))
 	h := New(cfg, store, fakeOAuth{}, WithNow(fixedNow), WithHTTPClient(noopClient()), WithVersion("v1.3.0-7-gabcdef0")).Handler()
 	resp := assertStatus(t, h, http.MethodGet, "/healthz", "", "", "", http.StatusOK)
-	var body map[string]string
+	var body map[string]any
 	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
 		t.Fatalf("health json: %v", err)
 	}
@@ -7434,7 +7434,7 @@ func TestHealthzReturns503WhenDBUnreachable(t *testing.T) {
 	_, store, _, cfg := newTestHarness(t, fakeOAuth{}, WithHTTPClient(noopClient()))
 	h := New(cfg, failingPingStore{Store: store}, fakeOAuth{}, WithNow(fixedNow), WithHTTPClient(noopClient())).Handler()
 	resp := assertStatus(t, h, http.MethodGet, "/healthz", "", "", "", http.StatusServiceUnavailable)
-	var body map[string]string
+	var body map[string]any
 	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
 		t.Fatalf("health json: %v", err)
 	}
@@ -7594,7 +7594,7 @@ var gatewayEmittedErrorCodes = []string{
 	"stake_identity_lookup_failed", "stake_upstream_error", "demo_stake_forbidden", "wallet_session_stake_forbidden",
 	"demo_concurrency_exceeded", "demo_paused", "demo_receipt_forbidden", "demo_session_check_failed",
 	"demo_session_rate_limited", "demo_session_record_failed", "demo_token_issuance_failed",
-	"docs_missing", "docs_render_failed", "duplicate_request_id",
+	"docs_missing", "docs_render_failed", "duplicate_request_id", "invalid_buyer_hold",
 	"privacy_class_disabled", "privacy_class_downgrade_rejected", "privacy_class_posture_stale", "privacy_class_unavailable", "privacy_class_unconfirmed",
 	"privacy_missing", "privacy_render_failed",
 	"feedback_limit_check_failed", "feedback_rate_limited", "feedback_store_failed",

@@ -237,6 +237,19 @@ CANARY_AUTHORITY_FILE_MODES = {
     Path("/etc/systemd/system/canary-buyer.timer"): 0o644,
 }
 CANARY_BUYER_TOKEN = Path("/etc/macprovider/canary-buyer.token")
+# Rollout buyer hold on the local gateway (SPEC-006-R027): in memory only,
+# toggled with the operator key. The start variable is set in the systemd
+# manager environment only around the one gateway start this updater
+# supervises, so the candidate gateway comes up held.
+GATEWAY_LOCAL_HEALTHZ_URL = "http://127.0.0.1:9443/healthz"
+GATEWAY_BUYER_HOLD_URL = "http://127.0.0.1:9443/admin/buyer-hold"
+GATEWAY_BUYER_HOLD_START_ENV = "MACPROVIDER_GATEWAY_START_BUYER_HOLD"
+# Journaled rollback rule for the live databases. "allowed": no real buyer
+# request can have written them since the snapshot. "forbidden": one may
+# have, so a rollback keeps them.
+DATABASE_RESTORE_ALLOWED = "allowed"
+DATABASE_RESTORE_FORBIDDEN = "forbidden"
+DATABASE_RESTORE_DECISIONS = (DATABASE_RESTORE_ALLOWED, DATABASE_RESTORE_FORBIDDEN)
 CANARY_HEARTBEAT_URL = Path("/etc/macprovider/canary-buyer.heartbeat")
 CANARY_OPERATOR_TOKEN = Path("/etc/macprovider/canary-buyer.operator-token")
 CANARY_EXPECTED_FLEET = Path("/etc/macprovider/canary-buyer.expected-fleet.json")
@@ -1077,6 +1090,11 @@ class Updater:
         self.reconciling = False
         self.live_mutation_started = False
         self._sqlite_binary: str | None = None
+        # Rollback rule for the live databases (journaled as database_restore).
+        self.database_restore: str | None = None
+        self.pre_install_database_schemas: dict[str, str] | None = None
+        # The candidate changed a schema: real buyers stay held until commit.
+        self.buyer_hold_until_commit = False
 
     def run_command(
         self,
@@ -4274,19 +4292,103 @@ class Updater:
             raise UpdateError("could not prove gateway in-flight reservation count")
         return int(value)
 
+    def gateway_buyer_hold_request(self, active: bool, *, admit_canary: bool = False) -> bool:
+        """Set the local gateway's buyer hold. False when the running gateway
+        has no hold endpoint (HTTP 404: a gateway older than the hold)."""
+        payload: dict[str, object] = {"active": active}
+        if admit_canary:
+            payload["admit_api_key_sha256"] = hashlib.sha256(self._buyer_token().encode("utf-8")).hexdigest()
+        request = urllib.request.Request(
+            GATEWAY_BUYER_HOLD_URL,
+            data=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+            headers={
+                "Authorization": "Bearer " + self.coordinator_operator_token(),
+                "Content-Type": "application/json",
+                "User-Agent": "macprovider-pearl-updater/1",
+            },
+            method="POST",
+        )
+        try:
+            with _credential_safe_opener().open(request, timeout=self.config.request_timeout_s) as response:
+                status = response.status
+                data = response.read(64 * 1024 + 1)
+        except urllib.error.HTTPError as exc:
+            with contextlib.suppress(Exception):
+                exc.close()
+            if exc.code == 404:
+                return False
+            raise UpdateError(f"gateway buyer hold request returned HTTP {exc.code}") from exc
+        except (OSError, urllib.error.URLError, http.client.HTTPException) as exc:
+            raise UpdateError(f"gateway buyer hold request failed: {exc}") from exc
+        try:
+            answer = json.loads(data) if status == 200 and len(data) <= 64 * 1024 else None
+        except ValueError:
+            answer = None
+        hold = answer.get("buyer_hold") if isinstance(answer, dict) else None
+        if not isinstance(hold, dict) or answer.get("ok") is not True or hold.get("active") is not active:
+            raise UpdateError("gateway buyer hold request was not applied")
+        return True
+
+    def gateway_buyer_hold_reported(self) -> bool | None:
+        """The hold state the local gateway reports; None when it reports none."""
+        value = self.get_json(GATEWAY_LOCAL_HEALTHZ_URL).get("buyer_hold")
+        return value if type(value) is bool else None
+
+    def clear_gateway_hold_start_environment(self) -> None:
+        result = self.run_command(
+            ["systemctl", "unset-environment", GATEWAY_BUYER_HOLD_START_ENV],
+            check=False,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            raise UpdateError(f"could not clear {GATEWAY_BUYER_HOLD_START_ENV}: {result.stderr.strip()}")
+
+    def release_buyer_hold_best_effort(self, stage: str) -> None:
+        """Reconcile: no rollback is pending any more, so buyers may pass. A
+        gateway that is down, older or unreachable is left as it is (a
+        restart always starts open)."""
+        try:
+            self.clear_gateway_hold_start_environment()
+        except Exception as exc:
+            with contextlib.suppress(Exception):
+                self.audit("gateway_buyer_hold_start_environment", "failed", stage=stage, reason=str(exc))
+        try:
+            released = self.gateway_buyer_hold_request(False)
+        except Exception as exc:
+            with contextlib.suppress(Exception):
+                self.audit("gateway_buyer_hold", "release_failed", stage=stage, reason=str(exc))
+            return
+        with contextlib.suppress(Exception):
+            self.audit("gateway_buyer_hold", "released" if released else "unsupported", stage=stage)
+
     def drain_gateway(self) -> None:
-        deadline = time.monotonic() + self.config.gateway_drain_timeout_s
-        zero_since: float | None = None
-        while time.monotonic() < deadline:
-            count = self.gateway_reservations()
-            if count == 0:
-                zero_since = zero_since or time.monotonic()
-                if time.monotonic() - zero_since >= self.config.gateway_drain_steady_s:
-                    return
-            else:
-                zero_since = None
-            self.sleep(1)
-        raise UpdateError("gateway drain timeout; active reservations remain")
+        # Hold new buyer requests so the drain converges under steady traffic.
+        # A gateway without the hold drains under traffic as before.
+        held = False
+        try:
+            held = self.gateway_buyer_hold_request(True)
+        except Exception as exc:
+            with contextlib.suppress(Exception):
+                self.audit("gateway_buyer_hold", "failed", stage="drain", reason=str(exc))
+        else:
+            self.audit("gateway_buyer_hold", "held" if held else "unsupported", stage="drain")
+        try:
+            deadline = time.monotonic() + self.config.gateway_drain_timeout_s
+            zero_since: float | None = None
+            while time.monotonic() < deadline:
+                count = self.gateway_reservations()
+                if count == 0:
+                    zero_since = zero_since or time.monotonic()
+                    if time.monotonic() - zero_since >= self.config.gateway_drain_steady_s:
+                        return
+                else:
+                    zero_since = None
+                self.sleep(1)
+            raise UpdateError("gateway drain timeout; active reservations remain")
+        except BaseException:
+            if held:
+                self.release_buyer_hold_best_effort("drain_failed")
+            raise
 
     def capture_rollout_state(self) -> None:
         self.capture_database_paths()
@@ -4924,11 +5026,23 @@ class Updater:
         for directory in (config_dir, db_dir, tx, transactions_root, self.state_root):
             _fsync_directory(directory)
         self.transaction = tx
+        restore_fields: dict[str, object] = {}
+        if manifest:
+            # Traffic is quiesced: these are the schemas the previous binaries
+            # read. verify_rollout compares the started candidate against them.
+            self.pre_install_database_schemas = self.live_database_schema_digests()
+            self.database_restore = DATABASE_RESTORE_ALLOWED
+            restore_fields = {
+                "database_restore": DATABASE_RESTORE_ALLOWED,
+                "database_restore_reason": "snapshot taken with buyer traffic quiesced",
+                "pre_install_database_schemas": self.pre_install_database_schemas,
+            }
         self._journal_transition(
             "snapshot_ready",
             transaction=str(tx),
             rollback_armed=False,
             live_mutation_started=False,
+            **restore_fields,
         )
         return tx
 
@@ -6672,6 +6786,120 @@ class Updater:
         if release.catalog is None and self.config.buyer_canary_mode not in BUYER_CANARY_MODES:
             raise UpdateError("runtime-only Pearl release requires an explicit buyer canary mode")
 
+    def _database_restore_decision(self) -> str | None:
+        if self.journal is not None:
+            value = self.journal.get("database_restore")
+            return value if isinstance(value, str) else None
+        return self.database_restore
+
+    def _set_database_restore(self, release: Release, decision: str, reason: str) -> None:
+        # Journaled before buyers can pass, so a crash reconciles by this rule.
+        self.database_restore = decision
+        self._journal_transition(
+            "database_restore_decided",
+            database_restore=decision,
+            database_restore_reason=reason,
+        )
+        self.audit(
+            "database_restore_decision",
+            "keep_live_databases" if decision == DATABASE_RESTORE_FORBIDDEN else "restore_allowed",
+            candidate=release.tag,
+            transaction=str(self.transaction),
+            reason=reason,
+        )
+
+    def start_gateway_buyer_held(self) -> None:
+        unit = "macprovider-gateway.service"
+        self._journal_transition("gateway_held_start_pending")
+        result = self.run_command(
+            ["systemctl", "set-environment", f"{GATEWAY_BUYER_HOLD_START_ENV}=1"],
+            check=False,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            raise UpdateError(f"could not set {GATEWAY_BUYER_HOLD_START_ENV}: {result.stderr.strip()}")
+        try:
+            self.systemctl("start", unit)
+        finally:
+            # systemd copies the manager environment when it spawns the
+            # process, so later starts of the gateway begin open.
+            self.clear_gateway_hold_start_environment()
+        self._journal_transition("gateway_held_started")
+
+    def release_gateway_buyer_hold(self) -> None:
+        if not self.gateway_buyer_hold_request(False) or self.gateway_buyer_hold_reported() is not False:
+            raise UpdateError("the gateway did not release the buyer hold")
+
+    def decide_database_restore(self, release: Release) -> None:
+        """After the candidate pair started: keep the live databases on any
+        later rollback unless the candidate changed a schema and real buyers
+        are held until every serving gate has passed."""
+        try:
+            reported = self.gateway_buyer_hold_reported()
+        except Exception:
+            reported = None
+        if reported is not True:
+            self._set_database_restore(
+                release,
+                DATABASE_RESTORE_FORBIDDEN,
+                "the started gateway does not report the buyer hold, so buyer requests may have reached it",
+            )
+            # Traffic is open from here on; a hold the health read missed must
+            # not outlive this decision.
+            with contextlib.suppress(Exception):
+                self.gateway_buyer_hold_request(False)
+            return
+        try:
+            self._buyer_token()
+            admit_canary = True
+        except UpdateError:
+            admit_canary = False
+        if not self.gateway_buyer_hold_request(True, admit_canary=admit_canary):
+            raise UpdateError("the started gateway reports the buyer hold but has no hold endpoint")
+        current = self.live_database_schema_digests()
+        if self.pre_install_database_schemas is None and self.journal is not None:
+            recorded = self.journal.get("pre_install_database_schemas")
+            self.pre_install_database_schemas = recorded if isinstance(recorded, dict) else None
+        if current is not None and current == self.pre_install_database_schemas:
+            self._set_database_restore(
+                release,
+                DATABASE_RESTORE_FORBIDDEN,
+                "the candidate kept every live database schema",
+            )
+            self.release_gateway_buyer_hold()
+            self.audit("gateway_buyer_hold", "released", stage="schema_unchanged", candidate=release.tag)
+            return
+        reason = (
+            "the candidate changed a live database schema"
+            if current is not None and self.pre_install_database_schemas is not None
+            else "the live database schemas could not be compared"
+        )
+        self._set_database_restore(
+            release,
+            DATABASE_RESTORE_ALLOWED,
+            reason + "; real buyers stay held until the release commits",
+        )
+        self.buyer_hold_until_commit = True
+        self.audit("gateway_buyer_hold", "held", stage="schema_changed", candidate=release.tag, canary_admitted=admit_canary)
+
+    def release_buyer_hold_after_commit(self, release: Release) -> None:
+        """The release committed: open the gateway. If the hold endpoint
+        fails, restart the gateway, which always starts open."""
+        try:
+            self.release_gateway_buyer_hold()
+            self.audit("gateway_buyer_hold", "released", stage="committed", candidate=release.tag)
+            return
+        except Exception as exc:
+            self.audit("gateway_buyer_hold", "release_failed", stage="committed", reason=str(exc))
+        unit = "macprovider-gateway.service"
+        self.systemctl("stop", unit)
+        self.assert_unit_quiescent(unit)
+        self.systemctl("start", unit)
+        self.wait_for("gateway health/version", self.config.service_health_timeout_s, lambda: self.local_gateway_ready(release))
+        if self.gateway_buyer_hold_reported() is not False:
+            raise UpdateError("the restarted gateway still reports the buyer hold")
+        self.audit("gateway_buyer_hold", "released_by_restart", stage="committed", candidate=release.tag)
+
     def verify_rollout(self, release: Release) -> None:
         self.verify_runtime_only_buyer_canary_policy(release)
         self.systemctl("start", "macprovider-coordinator.service")
@@ -6684,7 +6912,17 @@ class Updater:
         if release.catalog is not None:
             self.assert_effective_tier2_catalog_path()
         self.ensure_coordinator_request_log_indexes()
-        self.systemctl("start", "macprovider-gateway.service")
+        # While a database restore is still possible, real buyers must not
+        # reach the candidate before the schema decision below.
+        start_held = (
+            self.rollback_armed
+            and not self.reconciling
+            and self._database_restore_decision() == DATABASE_RESTORE_ALLOWED
+        )
+        if start_held:
+            self.start_gateway_buyer_held()
+        else:
+            self.systemctl("start", "macprovider-gateway.service")
         self.wait_for(
             "gateway systemd active state",
             self.config.service_health_timeout_s,
@@ -6692,6 +6930,8 @@ class Updater:
         )
         self.wait_for("gateway health/version", self.config.service_health_timeout_s, lambda: self.local_gateway_ready(release))
         self.verify_live_runtime_binding(release)
+        if start_held:
+            self.decide_database_restore(release)
         self.restore_auxiliary_services()
         if release.catalog is None:
             self.prove_serving_recovery(
@@ -7088,6 +7328,24 @@ class Updater:
         manifest = self._transaction_json(tx, "database-manifest.json")
         if not manifest:
             self.audit("database_rollback", "skipped", transaction=str(tx), reason="no database snapshot was taken")
+            return
+        if self._database_restore_decision() == DATABASE_RESTORE_FORBIDDEN:
+            # Real buyer rows may be in the live databases: never restore over
+            # them. Binaries, configuration and catalog still roll back.
+            reason = self.journal.get("database_restore_reason") if self.journal is not None else None
+            self.audit(
+                "database_rollback",
+                "skipped",
+                transaction=str(tx),
+                reason="live databases kept: " + (reason if isinstance(reason, str) else "buyer traffic reached them"),
+            )
+            recorded = self.journal.get("pre_install_database_schemas") if self.journal is not None else None
+            if not isinstance(recorded, dict):
+                recorded = self.pre_install_database_schemas
+            current = self.live_database_schema_digests()
+            if current is None or current != recorded:
+                self.audit("database_rollback_schema_drift", "failed", transaction=str(tx))
+                self.raise_critical_alert(ROLLBACK_POINT_REFUSED_ALERT, transaction=str(tx))
             return
         # The copy was taken under quiesce but checked only after the network
         # came back, so check it before it can replace a live database. A copy
@@ -7623,6 +7881,11 @@ class Updater:
                 raise UpdateError(f"rollout failed: {exc}; {'; '.join(details)}") from exc
             self._clear_journal()
             raise
+        if self.buyer_hold_until_commit:
+            # Committed: nothing can restore over buyer rows any more. A crash
+            # before this line leaves no journal; --reconcile then releases.
+            self.buyer_hold_until_commit = False
+            self.release_buyer_hold_after_commit(release)
         # Committed. The rollback-point check and snapshot pruning run from
         # main() after the updater and config locks are released (#1793), so a
         # long quick_check never stalls config transactions.
@@ -7815,7 +8078,24 @@ class Updater:
             if rollback_in_progress and success_persisted:
                 raise UpdateError("phase journal cannot mark rollback and rollout success simultaneously")
             self.live_mutation_started = live_mutation_started
+            database_restore = payload.get("database_restore")
+            if database_restore is not None and database_restore not in DATABASE_RESTORE_DECISIONS:
+                raise UpdateError("phase journal database restore decision is invalid")
+            pre_install = payload.get("pre_install_database_schemas")
+            if pre_install is not None and (
+                not isinstance(pre_install, dict)
+                or any(
+                    not isinstance(path, str) or not isinstance(digest, str) or not SHA256_RE.fullmatch(digest)
+                    for path, digest in pre_install.items()
+                )
+            ):
+                raise UpdateError("phase journal pre-install database schemas are invalid")
+            self.database_restore = database_restore
+            self.pre_install_database_schemas = pre_install
             self._journal_transition("reconciliation_started", boot_id=current_boot_id)
+            # A gateway start this updater supervised may have been cut short.
+            with contextlib.suppress(Exception):
+                self.clear_gateway_hold_start_environment()
             if success_persisted:
                 self.reconcile_committed_success(payload)
                 self.rollback_armed = False
@@ -7836,6 +8116,8 @@ class Updater:
             )
             self.audit("rollout_reconciliation", "success", recovered_phase=recovered_phase)
             self._clear_journal()
+            # Nothing restores over the live databases any more.
+            self.release_buyer_hold_best_effort("reconcile")
         except Exception as exc:
             with contextlib.suppress(Exception):
                 self.audit("rollout_reconciliation", "failed", reason=str(exc))
@@ -8006,8 +8288,12 @@ def _run_locked(args: argparse.Namespace, updater: "Updater", testing: bool, loc
                 )
         if (args.prove_current or args.prove_hash_enforced) and updater._load_journal() is not None:
             raise UpdateError("proof modes refuse an active phase journal; run --reconcile first")
-        updater.reconcile()
+        reconciled = updater.reconcile()
         if args.reconcile:
+            if not reconciled:
+                # No rollout journal: no restore is pending, so a hold an
+                # interrupted committed rollout left behind is released.
+                updater.release_buyer_hold_best_effort("reconcile_without_journal")
             return 0
         updater.validate_policy_inputs(args.config)
         try:

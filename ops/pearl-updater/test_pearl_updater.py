@@ -21,6 +21,7 @@ import unittest
 import uuid
 from pathlib import Path
 from unittest import mock
+import urllib.error as urllib_error
 
 
 SCRIPT = Path(__file__).with_name("macprovider-pearl-update")
@@ -7556,10 +7557,14 @@ class PearlUpdaterTests(unittest.TestCase):
 
         tx = self.updater.snapshot(release)
 
-        self.assertEqual(len(self.sqlite_calls), 1)
-        self.assertTrue(self.sqlite_calls[0][-1].startswith(".backup"))
+        # One copy; the only other call is the read-only schema read the
+        # rollback rule compares the started candidate against.
+        copies = [call for call in self.sqlite_calls if "sqlite_master" not in call[-1]]
+        self.assertEqual(len(copies), 1)
+        self.assertTrue(copies[0][-1].startswith(".backup"))
+        self.assertTrue(all("mode=ro" in call[-2] for call in self.sqlite_calls if "sqlite_master" in call[-1]))
         # The copy waits out a lock the stopped coordinator is still releasing.
-        call = self.sqlite_calls[0]
+        call = copies[0]
         self.assertEqual(call[call.index("-cmd") + 1], ".timeout 60000")
         self.assertFalse(any("check" in call[-1] for call in self.sqlite_calls))
         manifest = json.loads((tx / "database-manifest.json").read_text())
@@ -9004,6 +9009,390 @@ class PearlUpdaterTests(unittest.TestCase):
             )
             self.assertEqual(dropin.read_text(), updater_module.TRANSACTION_GATE_DROPIN_TEXT)
 
+    # ---- Rollout buyer hold and the database rollback rule (SPEC-006-R027) ----
+
+    PRE_SCHEMAS = {"/srv/gateway.db": "a" * 64, "/srv/coordinator.db": "b" * 64}
+
+    def _hold_rollback_fixture(self):
+        """A transaction whose rollback would replace live.sqlite with its
+        pre-cutover copy, and the mocks restore_transaction needs."""
+        install = self.root / "opt"
+        install.mkdir(exist_ok=True)
+        tx = self.root / "state" / "transactions" / "1-v1.8.27"
+        (tx / "databases").mkdir(parents=True)
+        (tx / "configurations").mkdir()
+        database = self.root / "live.sqlite"
+        database.write_text("buyer-rows-written-after-cutover")
+        (tx / "databases" / "0.sqlite").write_text("pre-cutover-copy")
+        (self.root / "state" / "current-release.json").write_text('{"version":"1.8.27"}\n')
+        (tx / "previous-current-release.json").write_text('{"version":"1.8.26"}\n')
+        (tx / "state-manifest.json").write_text('{"existed":true}\n')
+        for name in ("coordinator", "gateway"):
+            (install / name).write_text("new-" + name)
+            (tx / name).write_text("old-" + name)
+        (tx / "configuration-manifest.json").write_text("[]\n")
+        database_stat = database.stat()
+        (tx / "database-manifest.json").write_text(
+            json.dumps(
+                [
+                    {
+                        "source": str(database),
+                        "existed": True,
+                        "snapshot": "0.sqlite",
+                        "uid": database_stat.st_uid,
+                        "gid": database_stat.st_gid,
+                        "mode": 0o600,
+                    }
+                ]
+            )
+            + "\n"
+        )
+        (tx / "previous-runtime.json").write_text(
+            '{"coordinator_version":"old-c","gateway_version":"old-g","advertised_version":"1.8.26"}\n'
+        )
+        for path in [tx, *tx.rglob("*")]:
+            path.chmod(0o700 if path.is_dir() else 0o600)
+        self.updater.state_root.chmod(0o700)
+        self.updater.transaction = tx
+        self.updater.previous_services = {}
+        self.updater.previous_auxiliary_units = {unit: False for unit in updater_module.AUXILIARY_UNITS}
+        self.updater.atomic_install = lambda source, destination: shutil.copy2(source, destination)
+        self.updater.systemctl = mock.Mock()
+        self.updater.service_active = mock.Mock(return_value=False)
+        self.updater.assert_unit_quiescent = mock.Mock()
+        self.updater.validate_transaction = mock.Mock()
+        self.updater._restore_catalog = mock.Mock()
+        self.updater._prove_rollback_serving = mock.Mock()
+        self.updater.sqlite_quick_check = mock.Mock(return_value=(True, ["ok"]))
+        self.updater.raise_critical_alert = mock.Mock(return_value=True)
+        self.updater.audit = mock.Mock()
+        return tx, database
+
+    def _armed_journal(self, decision, tx):
+        self.updater.state_root.mkdir(mode=0o700, exist_ok=True)
+        self.updater.journal = {
+            "schema_version": updater_module.JOURNAL_SCHEMA_VERSION,
+            "transaction_id": "1" * 64,
+            "boot_id": self.boot_id.read_text().strip(),
+            "phase": "snapshot_ready",
+            "transaction": str(tx),
+            "rollback_armed": True,
+            "rollback_in_progress": False,
+            "rollback_completed_steps": [],
+            "live_mutation_started": True,
+            "success_persisted": False,
+            "previous_services": {},
+            "previous_auxiliary_units": {unit: False for unit in updater_module.AUXILIARY_UNITS},
+            "previous_versions": {},
+            "database_paths": [],
+            "deadman_previous_paused": False,
+            "deadman_restore_required": False,
+            "database_restore": decision,
+            "database_restore_reason": "snapshot taken with buyer traffic quiesced",
+            "pre_install_database_schemas": dict(self.PRE_SCHEMAS),
+        }
+
+    def _hold_decision_mocks(self, *, reported=True, current=None):
+        calls = []
+
+        def hold(active, *, admit_canary=False):
+            calls.append((active, admit_canary))
+            return True
+
+        self.updater.gateway_buyer_hold_request = mock.Mock(side_effect=hold)
+        self.updater.gateway_buyer_hold_reported = mock.Mock(
+            side_effect=lambda: reported if not calls or calls[-1][0] else False
+        )
+        self.updater._buyer_token = mock.Mock(return_value="canary-token")
+        self.updater.live_database_schema_digests = mock.Mock(return_value=current)
+        return calls
+
+    def test_schema_unchanged_late_failure_keeps_live_databases(self):
+        tx, database = self._hold_rollback_fixture()
+        self._armed_journal(updater_module.DATABASE_RESTORE_ALLOWED, tx)
+        self.updater.pre_install_database_schemas = dict(self.PRE_SCHEMAS)
+        calls = self._hold_decision_mocks(current=dict(self.PRE_SCHEMAS))
+        release = mock.Mock(tag="v1.8.27")
+
+        self.updater.decide_database_restore(release)
+
+        # Canary admitted while held, then the hold released for real buyers,
+        # and the keep-databases rule journaled before that release.
+        self.assertEqual(calls, [(True, True), (False, False)])
+        self.assertFalse(self.updater.buyer_hold_until_commit)
+        journal = json.loads(self.updater.journal_path.read_text())
+        self.assertEqual(journal["database_restore"], updater_module.DATABASE_RESTORE_FORBIDDEN)
+        self.assertIn("kept every live database schema", journal["database_restore_reason"])
+        self.updater.audit.assert_any_call(
+            "database_restore_decision",
+            "keep_live_databases",
+            candidate="v1.8.27",
+            transaction=str(tx),
+            reason="the candidate kept every live database schema",
+        )
+
+        # A serving gate fails after real buyers wrote rows: binaries roll back,
+        # the live database stays.
+        self.updater.restore_transaction()
+
+        self.assertEqual(database.read_text(), "buyer-rows-written-after-cutover")
+        self.assertEqual((self.updater.install_root / "gateway").read_text(), "old-gateway")
+        self.updater.sqlite_quick_check.assert_not_called()
+        self.updater.raise_critical_alert.assert_not_called()
+        skipped = [
+            call for call in self.updater.audit.call_args_list
+            if call.args[:2] == ("database_rollback", "skipped")
+        ]
+        self.assertEqual(len(skipped), 1)
+        self.assertIn("live databases kept", skipped[0].kwargs["reason"])
+
+    def test_kept_databases_alert_when_their_schema_drifted(self):
+        tx, database = self._hold_rollback_fixture()
+        self._armed_journal(updater_module.DATABASE_RESTORE_FORBIDDEN, tx)
+        self.updater.live_database_schema_digests = mock.Mock(return_value={"/srv/gateway.db": "c" * 64})
+
+        self.updater._restore_databases(tx)
+
+        self.assertEqual(database.read_text(), "buyer-rows-written-after-cutover")
+        self.updater.raise_critical_alert.assert_called_once_with(
+            updater_module.ROLLBACK_POINT_REFUSED_ALERT, transaction=str(tx)
+        )
+
+    def test_schema_changed_path_holds_buyers_and_restores_databases(self):
+        tx, database = self._hold_rollback_fixture()
+        self._armed_journal(updater_module.DATABASE_RESTORE_ALLOWED, tx)
+        self.updater.pre_install_database_schemas = dict(self.PRE_SCHEMAS)
+        changed = dict(self.PRE_SCHEMAS, **{"/srv/gateway.db": "c" * 64})
+        calls = self._hold_decision_mocks(current=changed)
+
+        self.updater.decide_database_restore(mock.Mock(tag="v1.8.27"))
+
+        # Only the canary is admitted; real buyers stay held.
+        self.assertEqual(calls, [(True, True)])
+        self.assertTrue(self.updater.buyer_hold_until_commit)
+        journal = json.loads(self.updater.journal_path.read_text())
+        self.assertEqual(journal["database_restore"], updater_module.DATABASE_RESTORE_ALLOWED)
+        self.assertIn("changed a live database schema", journal["database_restore_reason"])
+
+        # A gate fails while held: only canary rows exist, so the full restore runs.
+        self.updater.restore_transaction()
+
+        self.assertEqual(database.read_text(), "pre-cutover-copy")
+        self.updater.sqlite_quick_check.assert_called_once_with(tx / "databases" / "0.sqlite")
+
+    def test_unreadable_schemas_hold_buyers_like_a_schema_change(self):
+        tx, _database = self._hold_rollback_fixture()
+        self._armed_journal(updater_module.DATABASE_RESTORE_ALLOWED, tx)
+        self.updater.pre_install_database_schemas = None
+        self.updater.journal["pre_install_database_schemas"] = None
+        calls = self._hold_decision_mocks(current=dict(self.PRE_SCHEMAS))
+
+        self.updater.decide_database_restore(mock.Mock(tag="v1.8.27"))
+
+        self.assertEqual(calls, [(True, True)])
+        self.assertTrue(self.updater.buyer_hold_until_commit)
+        self.assertEqual(self.updater.journal["database_restore"], updater_module.DATABASE_RESTORE_ALLOWED)
+
+    def test_held_buyers_are_released_only_after_the_commit_point(self):
+        release = self.verify()
+        order = []
+        self.updater.verify_buyer_canary_rollout_posture = mock.Mock()
+        self.updater.capture_rollout_state = mock.Mock()
+        self.updater.enter_deadman_maintenance = mock.Mock()
+        self.updater.stop_for_rollout = mock.Mock()
+        self.updater.snapshot = mock.Mock()
+        self.updater.install_release = mock.Mock()
+
+        def verify(_release):
+            self.updater.buyer_hold_until_commit = True
+            order.append("gates_passed_held")
+
+        self.updater.verify_rollout = mock.Mock(side_effect=verify)
+        self.updater.persist_success = mock.Mock(side_effect=lambda *_args: order.append("commit"))
+        self.updater.restore_deadman_monitoring = mock.Mock()
+
+        def release_hold(_release):
+            self.assertFalse(self.updater.journal_path.exists())
+            order.append("release")
+
+        self.updater.release_buyer_hold_after_commit = mock.Mock(side_effect=release_hold)
+
+        self.updater.apply(release, updater_module.SemVer.parse("1.8.26"))
+
+        self.assertEqual(order, ["gates_passed_held", "commit", "release"])
+        self.assertFalse(self.updater.buyer_hold_until_commit)
+
+    def test_failed_hold_release_after_commit_restarts_the_gateway(self):
+        release = mock.Mock(tag="v1.8.27")
+        self.updater.audit = mock.Mock()
+        self.updater.gateway_buyer_hold_request = mock.Mock(side_effect=updater_module.UpdateError("refused"))
+        self.updater.gateway_buyer_hold_reported = mock.Mock(return_value=False)
+        self.updater.systemctl = mock.Mock()
+        self.updater.assert_unit_quiescent = mock.Mock()
+        self.updater.local_gateway_ready = mock.Mock(return_value=True)
+        self.updater.wait_for = lambda _description, _timeout, check: self.assertTrue(check())
+
+        self.updater.release_buyer_hold_after_commit(release)
+
+        self.assertEqual(
+            self.updater.systemctl.call_args_list,
+            [mock.call("stop", "macprovider-gateway.service"), mock.call("start", "macprovider-gateway.service")],
+        )
+        self.updater.audit.assert_any_call(
+            "gateway_buyer_hold", "released_by_restart", stage="committed", candidate="v1.8.27"
+        )
+
+    def test_crash_reconcile_follows_the_journaled_database_rule(self):
+        for decision, expected in (
+            (updater_module.DATABASE_RESTORE_FORBIDDEN, "buyer-rows-written-after-cutover"),
+            (updater_module.DATABASE_RESTORE_ALLOWED, "pre-cutover-copy"),
+        ):
+            with self.subTest(decision=decision):
+                self.tearDown()
+                self.setUp()
+                tx, database = self._hold_rollback_fixture()
+                self._armed_journal(decision, tx)
+                payload = dict(self.updater.journal, phase="database_restore_decided")
+                self.updater.journal = None
+                self.updater.journal_path.write_text(json.dumps(payload) + "\n")
+                self.updater.journal_path.chmod(0o600)
+                self.updater.live_database_schema_digests = mock.Mock(return_value=dict(self.PRE_SCHEMAS))
+                self.updater.clear_gateway_hold_start_environment = mock.Mock()
+                self.updater.gateway_buyer_hold_request = mock.Mock(return_value=True)
+
+                self.assertTrue(self.updater.reconcile())
+
+                self.assertEqual(database.read_text(), expected)
+                self.assertEqual((self.updater.install_root / "gateway").read_text(), "old-gateway")
+                self.assertFalse(self.updater.journal_path.exists())
+                # The start variable is cleared and the hold released once no
+                # restore is pending any more.
+                self.updater.clear_gateway_hold_start_environment.assert_called()
+                self.updater.gateway_buyer_hold_request.assert_called_once_with(False)
+
+    def test_reconcile_rejects_an_invalid_database_restore_decision(self):
+        tx, _database = self._hold_rollback_fixture()
+        self._armed_journal("maybe", tx)
+        payload = dict(self.updater.journal)
+        self.updater.journal = None
+        self.updater.journal_path.write_text(json.dumps(payload) + "\n")
+        self.updater.journal_path.chmod(0o600)
+        self.updater.restore_transaction = mock.Mock()
+
+        with self.assertRaisesRegex(updater_module.UpdateError, "database restore decision is invalid"):
+            self.updater.reconcile()
+        self.updater.restore_transaction.assert_not_called()
+
+    def test_old_gateway_without_hold_drains_as_before(self):
+        self.updater.audit = mock.Mock()
+        self.updater.gateway_buyer_hold_request = mock.Mock(return_value=False)
+        counts = iter([2, 1, 0, 0, 0, 0])
+        self.updater.gateway_reservations = mock.Mock(side_effect=lambda: next(counts))
+        self.updater.config = dataclasses.replace(self.updater.config, gateway_drain_steady_s=0)
+
+        self.updater.drain_gateway()
+
+        self.updater.gateway_buyer_hold_request.assert_called_once_with(True)
+        self.updater.audit.assert_any_call("gateway_buyer_hold", "unsupported", stage="drain")
+
+    def test_drain_holds_buyers_and_releases_the_hold_when_it_times_out(self):
+        self.updater.audit = mock.Mock()
+        self.updater.gateway_buyer_hold_request = mock.Mock(return_value=True)
+        self.updater.clear_gateway_hold_start_environment = mock.Mock()
+        self.updater.gateway_reservations = mock.Mock(return_value=1)
+        self.updater.config = dataclasses.replace(self.updater.config, gateway_drain_timeout_s=0)
+
+        with self.assertRaisesRegex(updater_module.UpdateError, "gateway drain timeout"):
+            self.updater.drain_gateway()
+
+        self.assertEqual(
+            self.updater.gateway_buyer_hold_request.call_args_list,
+            [mock.call(True), mock.call(False)],
+        )
+
+    def test_hold_request_treats_http_404_as_an_old_gateway(self):
+        self.updater.coordinator_operator_token = mock.Mock(return_value="operator-token")
+        opener = mock.Mock()
+        opener.open.side_effect = urllib_error.HTTPError(
+            updater_module.GATEWAY_BUYER_HOLD_URL, 404, "Not Found", {}, io.BytesIO(b"")
+        )
+        with mock.patch.object(updater_module, "_credential_safe_opener", return_value=opener):
+            self.assertFalse(self.updater.gateway_buyer_hold_request(True))
+        opener.open.side_effect = urllib_error.HTTPError(
+            updater_module.GATEWAY_BUYER_HOLD_URL, 401, "Unauthorized", {}, io.BytesIO(b"")
+        )
+        with mock.patch.object(updater_module, "_credential_safe_opener", return_value=opener):
+            with self.assertRaisesRegex(updater_module.UpdateError, "HTTP 401"):
+                self.updater.gateway_buyer_hold_request(True)
+        request = opener.open.call_args.args[0]
+        self.assertEqual(request.get_header("Authorization"), "Bearer operator-token")
+        self.assertEqual(json.loads(request.data), {"active": True})
+
+    def test_candidate_gateway_without_hold_keeps_the_databases(self):
+        tx, _database = self._hold_rollback_fixture()
+        self._armed_journal(updater_module.DATABASE_RESTORE_ALLOWED, tx)
+        calls = self._hold_decision_mocks(reported=None, current=dict(self.PRE_SCHEMAS))
+
+        self.updater.decide_database_restore(mock.Mock(tag="v1.8.27"))
+
+        self.assertEqual(self.updater.journal["database_restore"], updater_module.DATABASE_RESTORE_FORBIDDEN)
+        self.assertFalse(self.updater.buyer_hold_until_commit)
+        self.assertEqual(calls, [(False, False)])
+
+    def test_gateway_held_start_sets_and_always_clears_the_start_variable(self):
+        commands = []
+
+        def run(argv, *, check=True, timeout, env=None, input_text=None):
+            commands.append(list(argv))
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        self.updater.run_command = run
+        self.updater.systemctl = mock.Mock(side_effect=updater_module.UpdateError("start failed"))
+
+        with self.assertRaisesRegex(updater_module.UpdateError, "start failed"):
+            self.updater.start_gateway_buyer_held()
+
+        self.assertEqual(
+            commands,
+            [
+                ["systemctl", "set-environment", updater_module.GATEWAY_BUYER_HOLD_START_ENV + "=1"],
+                ["systemctl", "unset-environment", updater_module.GATEWAY_BUYER_HOLD_START_ENV],
+            ],
+        )
+
+    def test_rollout_starts_the_gateway_held_while_a_database_restore_is_possible(self):
+        release = self.verify()
+        order = []
+        self.updater.rollback_armed = True
+        self.updater.database_restore = updater_module.DATABASE_RESTORE_ALLOWED
+        self.updater.systemctl = mock.Mock(side_effect=lambda action, unit: order.append((action, unit)))
+        self.updater.start_gateway_buyer_held = mock.Mock(side_effect=lambda: order.append("held_start"))
+        self.updater.service_active = mock.Mock(return_value=True)
+        self.updater.local_coordinator_ready = mock.Mock(return_value=True)
+        self.updater.local_gateway_ready = mock.Mock(return_value=True)
+        self.updater.assert_effective_tier2_catalog_path = mock.Mock()
+        self.updater.ensure_coordinator_request_log_indexes = mock.Mock()
+        self.updater.verify_live_runtime_binding = mock.Mock()
+        self.updater.decide_database_restore = mock.Mock(side_effect=lambda _release: order.append("decide"))
+        self.updater.restore_auxiliary_services = mock.Mock(
+            side_effect=lambda: (_ for _ in ()).throw(updater_module.UpdateError("stop here"))
+        )
+        self.updater.wait_for = lambda _description, _timeout, check: self.assertTrue(check())
+
+        with self.assertRaisesRegex(updater_module.UpdateError, "stop here"):
+            self.updater.verify_rollout(release)
+
+        self.assertEqual(order, [("start", "macprovider-coordinator.service"), "held_start", "decide"])
+
+        # Without a pending restore (no snapshot, or reconciliation) it starts as before.
+        order.clear()
+        self.updater.database_restore = None
+        with self.assertRaisesRegex(updater_module.UpdateError, "stop here"):
+            self.updater.verify_rollout(release)
+        self.assertEqual(
+            order,
+            [("start", "macprovider-coordinator.service"), ("start", "macprovider-gateway.service")],
+        )
 
 class CatalogCanaryProofMismatchTests(unittest.TestCase):
     """catalog-canary-proof.py names each failing status field, never identities."""

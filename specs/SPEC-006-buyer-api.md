@@ -1,7 +1,9 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.75 (2026-11-10, on-request reasoning capability)
+**Version:** 0.9.76 (2026-11-11, rollout buyer hold)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.6.28, SPEC-003 v0.7, SPEC-004 v0.3.2
+
+**Change log v0.9.76 (2026-11-11):** Add SPEC-006-R027, the rollout buyer hold: an in-memory, operator-toggled gateway mode that answers new buyer requests with `503` `public_api_paused` and `Retry-After: 30`, lets in-flight requests finish, admits the rollout buyer canary by the sha256 of its API key, and is reported in `/healthz` as `buyer_hold`. §2.7 points to it.
 
 **Change log v0.9.75 (2026-11-10, Related: #2269):** Amend §5.3 `/v1/models` `capabilities.reasoning`. Besides the families whose template always reasons (GLM-5, gpt-oss, DeepSeek-V4; provider CLI 1.8.262 or later, gpt-oss at any version), `reasoning` is true for Qwen3.5, Qwen3.6, Qwen3.8 and Nemotron-3 when an eligible native provider runs CLI 1.8.285 or later. That floor is the first CLI tag cut after this change, which renders thinking on for an explicit `reasoning_effort` (SPEC-018 v0.3.16 §3.12); if the Pearl runtime train takes v1.8.285 for this coordinator/gateway change, the first such CLI is 1.8.286, which still satisfies the floor. For these families `reasoning` means reasoning on request: a request without `reasoning_effort` (or with `none`) still answers without thinking. Qwen3-8B, GLM-4.5 and Gemma-4 stay `reasoning: false`, as the provider cannot split their thinking output. A buyer-UX conformance record still caps the capability (SPEC-023 §16.11). Amend §5.4a `/v1/messages` `thinking`: `disabled` maps to `reasoning_effort` `none` (was `low`), because an explicit `low` now turns thinking on for a template with a thinking switch. On GLM-5.3 and gpt-oss `none` renders as `low`, the same prompt as before; on DeepSeek-V4 and the Solstice GLM-5.3-Flash template `none` selects their thinking-off prompt. Enabled and adaptive are unchanged.
 
@@ -979,6 +981,8 @@ Two operator-controlled flags, both stored in `gateway.yaml` (or runtime via a `
 - `kill_switch.all_public_api` -- when true, ALL public API requests return 503 with a friendly "beta paused" message. Used for capacity-burst Tier 3 and incident response.
 
 Both flags MUST be togglable without restarting the gateway.
+
+A third, runtime-only switch, the rollout buyer hold, is specified in SPEC-006-R027. It is never stored in `gateway.yaml`.
 
 ### 2.8 Capacity-burst protection
 
@@ -5359,3 +5363,34 @@ still applies from the first byte of the request, and a buyer can extend its
 own first-token wait only by sending a longer prompt, which the request-body
 cap (§17.1) and its prompt billing already bound. Example: `first_token`
 300 s and a 131k-token prompt give 1611 s.
+
+## SPEC-006-R027 — Rollout buyer hold
+
+A runtime rollout restores the pre-cutover databases when it fails. Rows a
+real buyer wrote after the cutover must never be inside that window, so the
+updater needs to keep real buyers out while it can still restore, and to drain
+in-flight work under steady traffic.
+
+The gateway MUST keep a buyer hold in process memory only. It MUST be off when
+the process starts, unless the process environment sets
+`MACPROVIDER_GATEWAY_START_BUYER_HOLD=1`; the Pearl updater sets that variable
+only for the one gateway start it supervises.
+
+`POST /admin/buyer-hold` MUST require the operator key, exactly like
+`/admin/kill-switch`. Body: `{"active": true|false, "admit_api_key_sha256":
+"<64 hex>"}`. The admitted hash is valid only with `"active": true` and is
+cleared when the hold is turned off. Any other body is `400`
+`invalid_buyer_hold`.
+
+While the hold is on, every request except `/admin/*`, `/v1/status`, `/healthz`
+and `/metrics` MUST be answered `503` with `Retry-After: 30` and the endpoint's
+error envelope with `type: "server_error"`, `code: "public_api_paused"`,
+`retryable: true`, unless its `Authorization: Bearer` token hashes (sha256) to
+the admitted value. The check runs when a request arrives, so requests already
+in flight, streams included, MUST run to completion.
+
+`/healthz` MUST report the state as the boolean `buyer_hold`.
+
+Bound: the hold never outlives the process. A rollout that dies leaves it on at
+most until the next gateway restart or the updater's reconcile, which releases
+it once no database restore is pending.

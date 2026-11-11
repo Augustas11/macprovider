@@ -252,6 +252,7 @@ func newGatewayRouter(
 		router.WithVersion(version),
 		router.WithReadStore(readStore),
 		router.WithSettlementJournal(settlementJournal),
+		router.WithBuyerHoldAtStart(os.Getenv(router.BuyerHoldStartEnv) == "1"),
 	)
 }
 
