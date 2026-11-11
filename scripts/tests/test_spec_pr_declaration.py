@@ -151,14 +151,14 @@ class SpecPRDeclarationTests(unittest.TestCase):
             validate_body("Plain PR body.", changed_paths=["phase4-coordinator/internal/auth/session.go"]),
         )
 
-    def test_specs_change_without_block_fails_closed(self) -> None:
+    def test_specs_change_without_block_is_reported(self) -> None:
         errors = validate_body(
             "Plain PR body.",
             changed_paths=["phase4-coordinator/internal/auth/session.go", "specs/SPEC-001-one.md"],
         )
         self.assertIn("exactly one", "\n".join(errors))
 
-    def test_unknown_diff_without_block_fails_closed(self) -> None:
+    def test_unknown_diff_without_block_is_reported(self) -> None:
         self.assertIn("exactly one", "\n".join(validate_body("Plain PR body.", changed_paths=[])))
         self.assertIn("exactly one", "\n".join(validate_body("Plain PR body.")))
 
@@ -284,6 +284,88 @@ class SpecPRDeclarationTests(unittest.TestCase):
                 text=True,
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    def _specs_pr(self, root: Path) -> tuple[str, str]:
+        """Commit a specs/ change on top of the base repository; return base, head."""
+        write_repository(root, base_repository())
+        base = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+        (root / "specs" / "PROCESS.md").write_text("governance\n", encoding="utf-8")
+        product = root / "phase4-coordinator" / "internal" / "auth" / "session.go"
+        product.parent.mkdir(parents=True, exist_ok=True)
+        product.write_text("package auth\n", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+        subprocess.run(["git", "commit", "-qm", "specs change"], cwd=root, check=True)
+        head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+        return base, head
+
+    def _run_cli(self, root: Path, body: str, base: str, head: str) -> subprocess.CompletedProcess[str]:
+        event = root.parent / f"{root.name}-event.json"
+        event.write_text(json.dumps({"pull_request": {"body": body}}), encoding="utf-8")
+        return subprocess.run(
+            [
+                "python3",
+                str(Path(__file__).resolve().parents[1] / "check_spec_pr_declaration.py"),
+                "--event",
+                str(event),
+                "--base",
+                base,
+                "--head",
+                head,
+                "--root",
+                str(root),
+            ],
+            cwd=Path(__file__).resolve().parents[2],
+            capture_output=True,
+            text=True,
+        )
+
+    def test_cli_specs_change_without_block_derives_and_passes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "repo"
+            root.mkdir()
+            base, head = self._specs_pr(root)
+            completed = self._run_cli(root, "Plain PR body.", base, head)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertIn("::warning::SPEC governance declaration missing or malformed", completed.stdout)
+            self.assertIn("SPEC governance declaration derived from the diff:", completed.stdout)
+            self.assertIn('"derived_from": "git-diff"', completed.stdout)
+
+    def test_cli_malformed_block_derives_and_passes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "repo"
+            root.mkdir()
+            base, head = self._specs_pr(root)
+            completed = self._run_cli(root, f"{BEGIN}\n{{not json}}\n{END}\n", base, head)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertIn("missing or malformed", completed.stdout)
+            self.assertIn("declaration JSON is invalid", completed.stdout)
+            self.assertIn('"derived_from": "git-diff"', completed.stdout)
+
+    def test_cli_contradicting_block_is_reported_not_blocking(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "repo"
+            root.mkdir()
+            base, head = self._specs_pr(root)
+            completed = self._run_cli(root, declaration(contract_change="yes"), base, head)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertIn("::warning::SPEC governance declaration contradicts the diff", completed.stdout)
+            self.assertIn("behavior_change none is invalid for non-governance path", completed.stdout)
+            self.assertIn('"behavior_change": "yes"', completed.stdout)
+
+    def test_cli_matching_block_passes_cleanly(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "repo"
+            root.mkdir()
+            write_repository(root, base_repository())
+            base = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+            (root / "specs" / "PROCESS.md").write_text("governance\n", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-qm", "governance change"], cwd=root, check=True)
+            head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+            completed = self._run_cli(root, declaration(), base, head)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertIn("SPEC governance PR declaration passed", completed.stdout)
+            self.assertNotIn("::warning::", completed.stdout)
 
 
 if __name__ == "__main__":

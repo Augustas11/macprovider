@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Require a structured SPEC governance declaration on pull requests."""
+"""Report the structured SPEC governance declaration on pull requests.
+
+The declaration is informational and never blocks a merge: a PR without a
+block, or with a malformed one, gets a declaration derived from the diff; a
+block that contradicts the diff is reported as a warning. The blocking SPEC
+gate is scripts/check_spec_governance.py.
+"""
 
 from __future__ import annotations
 
@@ -318,15 +324,26 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     errors = validate_body(body, root, changed)
-    if errors:
-        for error in errors:
-            print(f"error: {error}", file=sys.stderr)
-        return 1
-    if BEGIN not in body and END not in body:
-        print("SPEC governance declaration derived from the diff (specs/ unchanged):")
-        print(json.dumps(derive_declaration(root, changed), indent=2))
+    has_block = BEGIN in body or END in body
+    if not errors and has_block:
+        print("SPEC governance PR declaration passed")
         return 0
-    print("SPEC governance PR declaration passed")
+    derived = json.dumps(derive_declaration(root, changed), indent=2)
+    if not errors:
+        print("SPEC governance declaration derived from the diff (specs/ unchanged):")
+        print(derived)
+        return 0
+    # Non-blocking: report what is wrong as GitHub warning annotations, print
+    # the declaration the diff implies, and pass.
+    declaration, _ = _extract_declaration(body) if has_block else (None, [])
+    if declaration is None:
+        print("::warning::SPEC governance declaration missing or malformed; using the one derived from the diff")
+    else:
+        print("::warning::SPEC governance declaration contradicts the diff (reported, not blocking)")
+    for error in errors:
+        print(f"::warning::declaration: {error}")
+    print("SPEC governance declaration derived from the diff:")
+    print(derived)
     return 0
 
 

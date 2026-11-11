@@ -26,6 +26,9 @@ jobs:
     outputs:
       swift: ${{ steps.filter.outputs.swift }}
       code: ${{ steps.filter.outputs.code }}
+      dist: ${{ steps.filter.outputs.dist }}
+      catalog: ${{ steps.filter.outputs.catalog }}
+      ops: ${{ steps.filter.outputs.ops }}
     steps:
       - name: Checkout
         # Pinned to actions/checkout v6 (df4cb1c0). Re-resolve deliberately
@@ -38,7 +41,7 @@ jobs:
       - name: Self-test the path detector
         # Runs the detector's regression suite here so a broken detector fails
         # THIS job; ci-required requires `changes` to succeed, so a regression
-        # blocks merge instead of silently mis-gating the macOS jobs.
+        # blocks merge instead of silently mis-gating the gated jobs.
         shell: bash
         run: bash scripts/tests/test-ci-detect-changed-paths.sh
 
@@ -98,7 +101,9 @@ jobs:
     name: phase4-coordinator (go test -race, advisory)
     runs-on: ubuntu-latest
     # Advisory: not in ci-required. Race-detector timing makes some suites
-    # flaky; failures here are triaged and fixed in batches (#1996).
+    # flaky; failures here are triaged and fixed in batches (#1996). It gates
+    # nothing, so it runs on pushes to main only, not on pull requests.
+    if: ${{ github.event_name == 'push' }}
     continue-on-error: true
     timeout-minutes: 45
     steps:
@@ -119,7 +124,8 @@ jobs:
   coordinator-billing-race:
     name: phase4-coordinator billing (go test -race, advisory)
     runs-on: ubuntu-latest
-    # Advisory: not in ci-required (#1996).
+    # Advisory: not in ci-required (#1996). Pushes to main only.
+    if: ${{ github.event_name == 'push' }}
     continue-on-error: true
     timeout-minutes: 26
     steps:
@@ -205,33 +211,9 @@ jobs:
       - name: go test phase7-verify
         run: cd phase7-verify && go test ./... -race -count=1
 
-  phase7-verify-integration:
-    name: phase7-verify integration (fixtures)
-    runs-on: ubuntu-latest
-    timeout-minutes: 2
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-
-      - name: Assert dependency allowlist (only golang.org/x/text permitted, per SPEC-015 v0.2 §10.3 NFC normalization exception)
-        run: |
-          DISALLOWED=$(grep -v '^golang\.org/x/text \|^golang\.org/x/text/' phase7-verify/go.sum | grep -v '^$' || true)
-          if [ -n "$DISALLOWED" ]; then
-            echo "phase7-verify/go.sum contains entries outside the allowlist:"
-            echo "$DISALLOWED"
-            exit 1
-          fi
-
-      - name: Set up Go
-        # Pinned to actions/setup-go v7.0.0. Re-resolve deliberately.
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
-        with:
-          go-version-file: phase7-verify/go.mod
-          cache-dependency-path: phase7-verify/go.sum
-
       - name: Run fixture integration test
+        # Folded in from the former phase7-verify-integration job, which
+        # repeated the dependency allowlist step above.
         run: cd phase7-verify && go test -race -count=1 -tags=integration -timeout 60s .
 
   coordinator-lint:
@@ -247,11 +229,21 @@ jobs:
     # `golangci-lint run` invoked here MUST NOT include the
     # fixture; the fixture lives under `testdata/` which Go's
     # toolchain excludes by convention.
+    #
+    # Also carries the SPEC-014 v0.2 Phase 2E gate (the former
+    # spec-014-v0-2-gate job): the provider portal bundle guard here plus the
+    # live pairing scenarios (./spec_014_v0_2_pairing), which the required
+    # `integration (cross-service)` job's `go test -race -count=1 -timeout 5m
+    # ./...` already covers with the same flags (#1920).
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+      - name: Verify Node runtime for portal probe
+        run: node --version
+      - name: Run provider portal bundle guard (SPEC-014 v0.2 gate)
+        run: bash frontdoor/provider-portal/check-bundle.sh
       - name: Set up Go
         # Pinned to actions/setup-go v7.0.0. Re-resolve deliberately.
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
@@ -363,34 +355,6 @@ jobs:
         # provider + log pumps).
         run: go test -race -count=1 -timeout 5m ./...
 
-  spec-014-v0-2-gate:
-    name: spec-014-v0-2-gate
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    # SPEC-014 v0.2 Phase 2E gate: keep the GitHub-auth pairing surface
-    # deployable only when the portal bundle guard (here) and live pairing
-    # integration scenarios (integration job) both pass. The workflow already
-    # runs on every PR and main push; this job is intentionally present for
-    # all runs so branch protection can require a stable job name.
-    steps:
-      - name: Checkout
-        # Pinned to actions/checkout v6 (df4cb1c0). Re-resolve deliberately
-        # when upgrading the action rather than trusting a mutable tag.
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-
-      - name: Verify Node runtime for portal probe
-        run: node --version
-
-      - name: Run provider portal bundle guard
-        run: bash frontdoor/provider-portal/check-bundle.sh
-
-      # The SPEC-014 v0.2 pairing scenarios (./spec_014_v0_2_pairing) run in
-      # the required `integration (cross-service)` job, whose
-      # `go test -race -count=1 -timeout 5m ./...` already covers that package
-      # with the same flags (#1920).
-
   dist-tooling:
     name: deploy tooling (check-deploy-config gate) ${{ matrix.shard }}
     runs-on: ubuntu-latest
@@ -399,11 +363,18 @@ jobs:
     # Makefile) and reports its own failures; ci-required sees the matrix as
     # one result that fails if any shard fails. The slowest shard (catalog
     # content release) takes about 12 minutes.
+    #
+    # Each shard is path-gated by the `changes` detector: catalog by its
+    # `catalog` output, ops by `ops`, the rest by `dist`. Only an explicit
+    # 'false' skips a shard's steps (the shard then reports success); any other
+    # value runs it. If the detector job fails, this job is skipped and
+    # ci-required fails, so a broken detector cannot drop these suites.
     timeout-minutes: 25
+    needs: changes
     strategy:
       fail-fast: false
       matrix:
-        shard: [catalog, python, release, deploy]
+        shard: [catalog, python1, python2, release, ops, deploy]
     # Guards the fail-closed C2 pre-deploy gate
     # (phase4-coordinator/dist/check-deploy-config.sh), also invoked by
     # phase5-gateway/dist/deploy-pearl-vps.sh, among the deploy and release
@@ -412,7 +383,31 @@ jobs:
     # shard installs the pinned toolchain even though none builds a service
     # binary.
     steps:
+      - name: Path gate for shard ${{ matrix.shard }}
+        id: gate
+        shell: bash
+        env:
+          SHARD: ${{ matrix.shard }}
+          DIST_GATE: ${{ needs.changes.outputs.dist }}
+          CATALOG_GATE: ${{ needs.changes.outputs.catalog }}
+          OPS_GATE: ${{ needs.changes.outputs.ops }}
+        run: |
+          set -euo pipefail
+          case "$SHARD" in
+            catalog) gate="$CATALOG_GATE" ;;
+            ops) gate="$OPS_GATE" ;;
+            *) gate="$DIST_GATE" ;;
+          esac
+          # Fail open: only an explicit false skips the shard.
+          if [ "$gate" = "false" ]; then run=false; else run=true; fi
+          echo "shard=$SHARD gate=$gate run=$run"
+          if [ "$run" = "false" ]; then
+            echo "make test-dist-$SHARD skipped by the path detector (no path this shard reads changed)"
+          fi
+          echo "run=$run" >>"$GITHUB_OUTPUT"
+
       - name: Checkout
+        if: ${{ steps.gate.outputs.run == 'true' }}
         # Pinned to actions/checkout v6 (df4cb1c0). Re-resolve deliberately
         # when upgrading the action rather than trusting a mutable tag.
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -421,12 +416,14 @@ jobs:
           fetch-depth: 0
 
       - name: Set up Go for the Tier-2 signature verifier
+        if: ${{ steps.gate.outputs.run == 'true' }}
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
           go-version-file: phase4-coordinator/go.mod
           cache: false
 
       - name: Seal the Tier-2 verifier toolchain
+        if: ${{ steps.gate.outputs.run == 'true' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -439,6 +436,7 @@ jobs:
           sudo test -x /private/var/macprovider-go-verifier/bin/go
 
       - name: make test-dist-${{ matrix.shard }}
+        if: ${{ steps.gate.outputs.run == 'true' }}
         run: make test-dist-${{ matrix.shard }}
 
   swift-test-shard:
@@ -523,13 +521,16 @@ jobs:
 
   swift-journeys:
     # Hermetic BYOM journeys and Sparkle key checks, split out of the old
-    # single Swift job (#1920).
-    name: phase3-binary (BYOM journeys, Sparkle)
+    # single Swift job (#1920), plus the Swift tampered-receipt settlement
+    # test (the former swift-settlement job). The job runs when either gate is
+    # true; the BYOM/Sparkle steps follow the swift gate and the settlement
+    # steps follow the code gate, so each keeps its own path condition.
+    name: phase3-binary (BYOM journeys, Sparkle, settlement)
     # Runner label is per job; the macOS/Xcode bump is a one-line edit here.
     runs-on: macos-26
-    timeout-minutes: 35
+    timeout-minutes: 45
     needs: changes
-    if: ${{ needs.changes.outputs.swift == 'true' }}
+    if: ${{ needs.changes.outputs.swift == 'true' || needs.changes.outputs.code == 'true' }}
     steps:
       - name: Checkout
         # Pinned to actions/checkout v6 (df4cb1c0). Re-resolve deliberately
@@ -554,9 +555,11 @@ jobs:
           echo "hash=$(xcodebuild -version | shasum -a 256 | cut -c1-16)" >> "$GITHUB_OUTPUT"
 
       - name: Verify one-time Malibu Sparkle generator integration
+        if: ${{ needs.changes.outputs.swift == 'true' }}
         run: bash scripts/test-malibu-sparkle-generator-integration.sh
 
       - name: Verify Sparkle 2.6.4 target key continuity
+        if: ${{ needs.changes.outputs.swift == 'true' }}
         run: bash scripts/test-malibu-sparkle-validator-integration.sh
 
       - name: Restore SwiftPM cache
@@ -575,6 +578,7 @@ jobs:
         # admission surface end to end. It was manual-only and silently
         # regressed; gate it here so canSubmit/dry-run drift fails a required
         # check. Builds macprovider-cli on top of the restored SwiftPM cache.
+        if: ${{ needs.changes.outputs.swift == 'true' }}
         run: make test-byom-e2e
 
       - name: Run BYOM discovery-journey driver and evidence pipeline (hermetic)
@@ -583,38 +587,11 @@ jobs:
         # manifest and the governance step/requirement/observation tables (or the
         # fail-closed redaction scan) fails a required check instead of surfacing
         # during an operator signing session.
+        if: ${{ needs.changes.outputs.swift == 'true' }}
         run: make test-byom-discovery-journey
 
-  swift-settlement:
-    name: settlement (Swift tampered receipt)
-    runs-on: macos-26
-    timeout-minutes: 35
-    needs: changes
-    # Go verifier/gateway and integration-only changes need this gate too.
-    if: ${{ needs.changes.outputs.code == 'true' }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-
-      - name: Select Xcode
-        id: xcode
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo xcode-select -s /Applications/Xcode_26.6.app/Contents/Developer
-          echo "hash=$(xcodebuild -version | shasum -a 256 | cut -c1-16)" >> "$GITHUB_OUTPUT"
-
-      - name: Restore SwiftPM cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
-        with:
-          path: phase3-binary/.build
-          key: spm-${{ runner.os }}-xcode-${{ steps.xcode.outputs.hash }}-${{ hashFiles('phase3-binary/Package.resolved', 'phase3-binary/Package.swift') }}
-          restore-keys: |
-            spm-${{ runner.os }}-xcode-${{ steps.xcode.outputs.hash }}-
-
       - name: Set up Go for Swift settlement integration
+        if: ${{ needs.changes.outputs.code == 'true' }}
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
           go-version-file: test/integration/go.mod
@@ -622,7 +599,10 @@ jobs:
 
       - name: Verify present tampered Swift settlement receipts are quarantined
         # The Linux integration job skips the real Swift relay fixture.
-        # This deterministic local stack does not load model weights.
+        # This deterministic local stack does not load model weights. Go
+        # verifier/gateway and integration-only changes need this test too,
+        # so it follows the code gate, not the swift gate.
+        if: ${{ needs.changes.outputs.code == 'true' }}
         working-directory: test/integration
         run: go test -race -count=1 -timeout 10m -run '^TestRelayBlindEnforceSettlesSwiftReceipts$' .
 
@@ -703,7 +683,7 @@ jobs:
           set -euo pipefail
           failed=0
           for pair in "swift test shards=$SHARD_RESULT" \
-                      "BYOM journeys, Sparkle=$JOURNEYS_RESULT" \
+                      "BYOM journeys, Sparkle, settlement=$JOURNEYS_RESULT" \
                       "Malibu app tests, recovery=$APP_RESULT"; do
             echo "$pair"
             if [ "${pair##*=}" != "success" ]; then
@@ -840,13 +820,14 @@ jobs:
     name: spec-index
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    needs: changes
     # Folded in from the standalone spec-index workflow so ci-required gates
     # it (#1920). Fails a PR when specs/README.md no longer matches the
-    # canonical spec headers, when AUTHORITY/CONFORMANCE drift, or when a PR
-    # lacks its behavior-change declaration. Regenerate the index with
-    # scripts/gen_spec_index.py and commit when adding or renaming a spec. A
-    # `**Version:**` header bump needs no other edit: the header is the only
-    # version of record.
+    # canonical spec headers or when AUTHORITY/CONFORMANCE drift. Regenerate
+    # the index with scripts/gen_spec_index.py and commit when adding or
+    # renaming a spec. A `**Version:**` header bump needs no other edit: the
+    # header is the only version of record. The behavior-change declaration is
+    # derived from the diff and reported, never blocking.
     steps:
       - name: Checkout
         # Pinned to actions/checkout v6 (df4cb1c0). Re-resolve deliberately
@@ -862,10 +843,19 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Validate authority and conformance against the real corpus
+      # Sub-second checks first so a stale index or a clutter file fails fast.
+      - name: Verify specs/README.md index is up to date
+        run: python3 scripts/gen_spec_index.py --check
+
+      - name: Verify specs/ root is canonical-only (no re-accumulated clutter)
+        run: python3 scripts/gen_spec_index.py --lint
+
+      - name: Report the behavior-change declaration (derived when absent)
+        if: github.event_name == 'pull_request'
         env:
-          BASE_REF: ${{ github.event.pull_request.base.sha || github.event.before }}
-        run: python3 scripts/check_spec_governance.py --base-ref "$BASE_REF"
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python3 scripts/check_spec_pr_declaration.py --event "$GITHUB_EVENT_PATH" --base "$BASE_SHA" --head "$HEAD_SHA"
 
       - name: Release ledger keeps every published row and tombstone
         # The ledger is append-only: a PR may add rows but never delete one.
@@ -887,21 +877,18 @@ jobs:
           print(f"release ledger is a superset of {sys.argv[1]}")
           PY
 
-      - name: Verify specs/README.md index is up to date
-        run: python3 scripts/gen_spec_index.py --check
-
-      - name: Verify specs/ root is canonical-only (no re-accumulated clutter)
-        run: python3 scripts/gen_spec_index.py --lint
+      - name: Validate authority and conformance against the real corpus
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: python3 scripts/check_spec_governance.py --base-ref "$BASE_REF"
 
       - name: Prove governance validator rejects seeded drift
+        # These modules also run in the dist-tooling python1/python2 shards
+        # (scripts/ci-python-test-shard.py), which run whenever the detector's
+        # `dist` output is not 'false'. Run them here only when those shards
+        # skip, so governance tests still run on every change set.
+        if: ${{ needs.changes.outputs.dist == 'false' }}
         run: python3 -m unittest -v scripts.tests.test_spec_governance scripts.tests.test_spec_pr_declaration scripts.tests.test_byom_contract_lock scripts.tests.test_buyer_paid_path_journey_result scripts.tests.test_trusted_pool_external_runtime_journey_result scripts.tests.test_trusted_pool_model_journey_result scripts.tests.test_local_consumer_endpoint_evidence_capture scripts.tests.test_local_consumer_endpoint_journey_result
-
-      - name: Require explicit behavior-change declaration
-        if: github.event_name == 'pull_request'
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: python3 scripts/check_spec_pr_declaration.py --event "$GITHUB_EVENT_PATH" --base "$BASE_SHA" --head "$HEAD_SHA"
 
   ci-required:
     name: ci-required
@@ -915,13 +902,11 @@ jobs:
       - coordinator-nginx-integration
       - gateway
       - phase7-verify
-      - phase7-verify-integration
       - integration
-      - spec-014-v0-2-gate
       - dist-tooling
       - swift-tests
+      - swift-journeys
       - swift-package-lock
-      - swift-settlement
       - spec-015-acceptance
       - spec-index
     if: always()
@@ -938,13 +923,11 @@ jobs:
           NGINX_INTEGRATION_RESULT: ${{ needs.coordinator-nginx-integration.result }}
           GATEWAY_RESULT: ${{ needs.gateway.result }}
           PHASE7_VERIFY_RESULT: ${{ needs.phase7-verify.result }}
-          PHASE7_VERIFY_INTEGRATION_RESULT: ${{ needs.phase7-verify-integration.result }}
           INTEGRATION_RESULT: ${{ needs.integration.result }}
-          SPEC_014_RESULT: ${{ needs.spec-014-v0-2-gate.result }}
           DIST_TOOLING_RESULT: ${{ needs.dist-tooling.result }}
           SWIFT_TESTS_RESULT: ${{ needs.swift-tests.result }}
+          SWIFT_JOURNEYS_RESULT: ${{ needs.swift-journeys.result }}
           SWIFT_PACKAGE_LOCK_RESULT: ${{ needs.swift-package-lock.result }}
-          SWIFT_SETTLEMENT_RESULT: ${{ needs.swift-settlement.result }}
           SPEC_015_RESULT: ${{ needs.spec-015-acceptance.result }}
           SPEC_INDEX_RESULT: ${{ needs.spec-index.result }}
         run: |
@@ -985,6 +968,13 @@ jobs:
             esac
           }
 
+          # swift-journeys runs when the swift or the code gate is true.
+          case "$SWIFT_GATE/$CODE_GATE" in
+            true/true|true/false|false/true) JOURNEYS_GATE=true ;;
+            false/false) JOURNEYS_GATE=false ;;
+            *) JOURNEYS_GATE="malformed:$SWIFT_GATE/$CODE_GATE" ;;
+          esac
+
           require_success "detect changed paths" "$CHANGES_RESULT"
           require_success "phase4-coordinator (go vet + test)" "$COORDINATOR_RESULT"
           require_success "phase4-coordinator (golangci-lint depguard AC-16)" "$COORDINATOR_LINT_RESULT"
@@ -992,14 +982,14 @@ jobs:
           require_success "phase4-coordinator (nginx Step 4.B behavior smoke)" "$NGINX_INTEGRATION_RESULT"
           require_success "phase5-gateway (go vet + test)" "$GATEWAY_RESULT"
           require_success "phase7-verify (go vet + test)" "$PHASE7_VERIFY_RESULT"
-          require_success "phase7-verify integration (fixtures)" "$PHASE7_VERIFY_INTEGRATION_RESULT"
           require_success "integration (cross-service)" "$INTEGRATION_RESULT"
-          require_success "spec-014-v0-2-gate" "$SPEC_014_RESULT"
+          # Each dist shard skips its own steps on an explicit detector false
+          # and then reports success, so the matrix must always succeed.
           require_success "deploy tooling (check-deploy-config gate), all shards" "$DIST_TOOLING_RESULT"
           require_success "spec-index" "$SPEC_INDEX_RESULT"
           allow_skip "phase3-binary (swift test)" "$SWIFT_TESTS_RESULT" "$SWIFT_GATE"
           allow_skip "phase3-binary (locked SwiftPM resolve)" "$SWIFT_PACKAGE_LOCK_RESULT" "$SWIFT_GATE"
-          allow_skip "settlement (Swift tampered receipt)" "$SWIFT_SETTLEMENT_RESULT" "$CODE_GATE"
+          allow_skip "phase3-binary (BYOM journeys, Sparkle, settlement)" "$SWIFT_JOURNEYS_RESULT" "$JOURNEYS_GATE"
           allow_skip "spec-015-acceptance" "$SPEC_015_RESULT" "$CODE_GATE"
 
           exit "$failed"
