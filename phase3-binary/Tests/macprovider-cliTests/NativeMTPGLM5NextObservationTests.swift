@@ -1,8 +1,13 @@
 import Foundation
+import MLX
+import MLXLLM
+import MLXLMCommon
+import MacProviderCore
 import XCTest
 @testable import macprovider_cli
 
-/// SPEC-048-R002 (0.1.35/0.1.36) `glm5_next_mtp_v1` embedded checkpoint and
+/// SPEC-048-R002 (0.1.35/0.1.36/0.1.82) `glm5_next_mtp_v1` embedded checkpoint
+/// in the post-sanitize and the Hugging Face pre-sanitize layouts, and
 /// SPEC-023-R024 (v0.22.27) override widths and exception bound.
 final class NativeMTPGLM5NextObservationTests: XCTestCase {
     private struct TensorFixture {
@@ -122,20 +127,26 @@ final class NativeMTPGLM5NextObservationTests: XCTestCase {
         }
     }
 
-    func testEmbeddedObservationRejectsNamesTheLoaderWouldRewriteOrDrop() throws {
+    /// Names that collide with a post-sanitize key, that the loader would drop
+    /// silently, or that it leaves unmapped (a module the model lacks).
+    func testEmbeddedObservationRejectsCollidingDroppedOrUnmappedNames() throws {
         let rejected: [TensorFixture] = [
             TensorFixture(name: "language_model.mtp.1.block.input_layernorm.weight", dtype: "BF16", shape: [64]),
-            TensorFixture(name: "mtp.0.enorm.weight", dtype: "BF16", shape: [64]),
+            // Same loader key as `language_model.model.norm.weight`.
             TensorFixture(name: "model.language_model.norm.weight", dtype: "BF16", shape: [64]),
-            // A DeepSeek-style next-N layer at index num_hidden_layers.
-            TensorFixture(name: "language_model.model.layers.1.input_layernorm.weight", dtype: "BF16", shape: [64]),
+            // A second next-N layer (index num_hidden_layers + 1).
+            TensorFixture(name: "language_model.model.layers.2.input_layernorm.weight", dtype: "BF16", shape: [64]),
             TensorFixture(name: "language_model.mtp.0.shared_head.norm.weight", dtype: "BF16", shape: [64]),
+            // Same loader key as `...layers.0.attn_hc.fn`.
             TensorFixture(name: "language_model.model.layers.0.hc_attn_fn", dtype: "F32", shape: [24, 64]),
-            TensorFixture(name: "language_model.model.layers.0.self_attn.kv_b_proj.weight", dtype: "BF16", shape: [8, 64]),
+            // No `kv_b_proj.weight`, so the loader leaves it unsplit.
+            TensorFixture(name: "language_model.model.layers.0.self_attn.kv_b_proj.scales", dtype: "BF16", shape: [8, 1]),
+            // No k/v parts, so the loader leaves it unconcatenated.
             TensorFixture(name: "language_model.model.layers.0.self_attn.q_conv1d.weight", dtype: "BF16", shape: [4, 4, 1]),
-            TensorFixture(name: "language_model.model.layers.0.self_attn.A_log", dtype: "F32", shape: [4]),
-            TensorFixture(name: "language_model.model.layers.0.mlp.experts.0.down_proj.weight", dtype: "BF16", shape: [8, 64]),
+            // Experts not numbered from 0, so the loader leaves them unstacked.
+            TensorFixture(name: "language_model.model.layers.0.mlp.experts.1.down_proj.weight", dtype: "BF16", shape: [8, 64]),
             TensorFixture(name: "vision_tower_extra.weight", dtype: "BF16", shape: [8]),
+            // Same loader key as `language_model.lm_head.weight`.
             TensorFixture(name: "lm_head.weight", dtype: "BF16", shape: [8, 64]),
         ]
         for tensor in rejected {
@@ -174,6 +185,267 @@ final class NativeMTPGLM5NextObservationTests: XCTestCase {
         }
     }
 
+    // MARK: Hugging Face pre-sanitize layout (0.1.82)
+
+    private static let hfOverrides: [String: [String: Any]] = [
+        "lm_head": ["bits": 8, "group_size": 64],
+        "model.language_model.embed_tokens": ["bits": 8, "group_size": 64],
+        "model.language_model.layers.0.mlp.experts.0.up_proj": ["bits": 8, "group_size": 64],
+        "model.language_model.layers.0.mlp.experts.1.up_proj": ["bits": 8, "group_size": 64],
+        "model.language_model.layers.0.self_attn.kv_b_proj": ["bits": 5, "group_size": 64],
+        // The next-N layer's attention, stored as layer num_hidden_layers.
+        "model.language_model.layers.1.self_attn.o_proj": ["bits": 6, "group_size": 64],
+    ]
+
+    /// The same model as `baseTensors` in the layout the Hugging Face
+    /// checkpoint ships: `model.language_model.*`, per-expert weights, raw
+    /// `hc_*` / forget-gate / conv / `kv_b_proj` names, a quantized router
+    /// gate and the next-N layer at index `num_hidden_layers`.
+    private func hfTensors() -> [TensorFixture] {
+        quantized("lm_head", bits: 8)
+            + quantized("model.language_model.embed_tokens", bits: 8)
+            + quantized("model.language_model.layers.0.mlp.experts.0.up_proj", bits: 8)
+            + quantized("model.language_model.layers.0.mlp.experts.1.up_proj", bits: 8)
+            + quantized("model.language_model.layers.0.mlp.experts.0.down_proj", bits: 4)
+            + quantized("model.language_model.layers.0.mlp.experts.1.down_proj", bits: 4)
+            + quantized("model.language_model.layers.0.self_attn.kv_b_proj", bits: 5)
+            // 4 experts x hidden_size 64 at 4 bits, one group of 64.
+            + quantized("model.language_model.layers.0.mlp.gate", bits: 4)
+            + quantized("model.language_model.layers.1.self_attn.o_proj", bits: 6)
+            + [
+                TensorFixture(name: "model.language_model.norm.weight", dtype: "BF16", shape: [64]),
+                TensorFixture(name: "model.language_model.layers.0.input_layernorm.weight", dtype: "BF16", shape: [64]),
+                TensorFixture(name: "model.language_model.layers.0.hc_attn_fn", dtype: "F32", shape: [24, 64]),
+                TensorFixture(name: "model.language_model.layers.0.self_attn.A_log", dtype: "F32", shape: [4]),
+                TensorFixture(name: "model.language_model.layers.0.self_attn.q_conv1d.weight", dtype: "BF16", shape: [4, 4, 1]),
+                TensorFixture(name: "model.language_model.layers.0.self_attn.k_conv1d.weight", dtype: "BF16", shape: [4, 4, 1]),
+                TensorFixture(name: "model.language_model.layers.0.self_attn.v_conv1d.weight", dtype: "BF16", shape: [4, 4, 1]),
+                TensorFixture(name: "model.language_model.layers.1.eh_proj.weight", dtype: "BF16", shape: [64, 128]),
+                TensorFixture(name: "model.language_model.layers.1.enorm.weight", dtype: "BF16", shape: [64]),
+                TensorFixture(name: "model.language_model.layers.1.shared_head.norm.weight", dtype: "BF16", shape: [64]),
+                // Next-N copies of the head and embedding the loader drops.
+                TensorFixture(name: "model.language_model.layers.1.shared_head.head.weight", dtype: "BF16", shape: [8, 64]),
+                TensorFixture(name: "model.language_model.layers.1.embed_tokens.weight", dtype: "BF16", shape: [8, 64]),
+                TensorFixture(name: "model.visual.merger.proj.weight", dtype: "BF16", shape: [8, 8]),
+            ]
+    }
+
+    private func hfConfig(overrides: [String: [String: Any]] = NativeMTPGLM5NextObservationTests.hfOverrides) -> [String: Any] {
+        config(overrides: overrides) { config in
+            var text = config["text_config"] as! [String: Any]
+            text["hidden_size"] = 64
+            config["text_config"] = text
+        }
+    }
+
+    func testEmbeddedObservationAcceptsTheHuggingFacePreSanitizeLayout() throws {
+        try withDirectory(config: hfConfig(), tensors: hfTensors()) { directory in
+            let pair = try NativeMTPArtifactObserver.observeEmbedded(targetDirectory: directory)
+            XCTAssertTrue(pair.embedded)
+            XCTAssertEqual(pair.target.format, .mlxAffine4(bits: 4, groupSize: 64))
+            let byName = Dictionary(uniqueKeysWithValues: pair.target.tensorPairs.map { ($0.weightName, $0) })
+            // Per-expert overrides resolve through the stacked switch_mlp module.
+            XCTAssertEqual(byName["model.language_model.layers.0.mlp.experts.1.up_proj.weight"]?.bitsPerValue, 8)
+            XCTAssertEqual(byName["model.language_model.layers.0.mlp.experts.1.down_proj.weight"]?.bitsPerValue, 4)
+            // `kv_b_proj` resolves through embed_q / unembed_out.
+            XCTAssertEqual(byName["model.language_model.layers.0.self_attn.kv_b_proj.weight"]?.bitsPerValue, 5)
+            XCTAssertEqual(byName["model.language_model.layers.0.self_attn.kv_b_proj.weight"]?.logicalInputColumns, 64)
+            // The router gate's width comes from its shapes against hidden_size.
+            XCTAssertEqual(byName["model.language_model.layers.0.mlp.gate.weight"]?.bitsPerValue, 4)
+            XCTAssertEqual(byName["model.language_model.layers.0.mlp.gate.weight"]?.groupSize, 64)
+            // The next-N layer loads as mtp.0.block.
+            XCTAssertEqual(byName["model.language_model.layers.1.self_attn.o_proj.weight"]?.bitsPerValue, 6)
+
+            let representation = try NativeMTPArtifactObserver.affineRepresentation(for: pair)
+            // Overrides are recorded under their config keys, as signed.
+            XCTAssertEqual(
+                representation.perLayerExceptions,
+                Self.hfOverrides.keys.map { "target/\($0)" }.sorted()
+            )
+            XCTAssertTrue(representation.unquantizedExceptions.isEmpty)
+        }
+    }
+
+    func testHuggingFaceLayoutRejectsForeignCollidingAndUnmappedNames() throws {
+        let cases: [(tensors: [TensorFixture], reported: String)] = [
+            // A namespace no layout maps under language_model.model / lm_head / mtp.0.
+            (hfTensors() + [TensorFixture(name: "transformer.h.0.attn.weight", dtype: "BF16", shape: [64])],
+             "transformer.h.0.attn.weight"),
+            // A second next-N layer.
+            (hfTensors() + [TensorFixture(name: "model.language_model.layers.2.input_layernorm.weight", dtype: "BF16", shape: [64])],
+             "model.language_model.layers.2.input_layernorm.weight"),
+            // Both layouts for one tensor: the loader would keep one silently.
+            (hfTensors() + [TensorFixture(name: "language_model.model.norm.weight", dtype: "BF16", shape: [64])],
+             "model.language_model.norm.weight"),
+            // Stacking the existing switch_mlp key over per-expert weights.
+            (hfTensors() + [TensorFixture(name: "model.language_model.layers.0.mlp.switch_mlp.down_proj.weight", dtype: "BF16", shape: [2, 4, 64])],
+             "model.language_model.layers.0.mlp.experts.0.down_proj.weight"),
+            // Expert 0 missing: the loader leaves expert 1 unstacked.
+            (hfTensors().filter { !$0.name.contains(".mlp.experts.0.down_proj.") },
+             "model.language_model.layers.0.mlp.experts.1.down_proj.biases"),
+        ]
+        for (tensors, reported) in cases {
+            try withDirectory(config: hfConfig(), tensors: tensors) { directory in
+                XCTAssertThrowsError(try NativeMTPArtifactObserver.observeEmbedded(targetDirectory: directory), reported) { error in
+                    XCTAssertEqual(
+                        error as? NativeMTPArtifactObservationError,
+                        .incompatibleSafetensorsHeaders("glm5_next tensor namespace \(reported)"),
+                        reported
+                    )
+                }
+            }
+        }
+    }
+
+    func testHuggingFaceLayoutIgnoresVisionTowerOverridesButRejectsUnmatchedTextOnes() throws {
+        var overrides = Self.hfOverrides
+        overrides["model.visual.merger.proj"] = ["bits": 8, "group_size": 64]
+        try withDirectory(config: hfConfig(overrides: overrides), tensors: hfTensors()) { directory in
+            XCTAssertNoThrow(try NativeMTPArtifactObserver.observeEmbedded(targetDirectory: directory))
+        }
+        overrides["model.language_model.layers.0.self_attn.nonexistent_proj"] = ["bits": 8, "group_size": 64]
+        try withDirectory(config: hfConfig(overrides: overrides), tensors: hfTensors()) { directory in
+            XCTAssertThrowsError(try NativeMTPArtifactObserver.observeEmbedded(targetDirectory: directory)) { error in
+                XCTAssertEqual(
+                    error as? NativeMTPArtifactObservationError,
+                    .unsupportedQuantization("mlx_affine_4bit unmatched module override")
+                )
+            }
+        }
+    }
+
+    func testHuggingFaceLayoutRejectsPerExpertOverridesThatDisagree() throws {
+        var overrides = Self.hfOverrides
+        overrides["model.language_model.layers.0.mlp.experts.1.up_proj"] = ["bits": 6, "group_size": 64]
+        try withDirectory(config: hfConfig(overrides: overrides), tensors: hfTensors()) { directory in
+            XCTAssertThrowsError(try NativeMTPArtifactObserver.observeEmbedded(targetDirectory: directory)) { error in
+                XCTAssertEqual(
+                    error as? NativeMTPArtifactObservationError,
+                    .unsupportedQuantization("mlx_affine_4bit conflicting module override")
+                )
+            }
+        }
+    }
+
+    func testEmbeddedObservationRejectsACheckpointWithoutTheMTPLayer() throws {
+        var overrides = Self.overrides
+        overrides["language_model.mtp.0.block.self_attn.embed_q"] = nil
+        let tensors = baseTensors().filter { !$0.name.hasPrefix("language_model.mtp.") }
+        try withDirectory(config: config(overrides: overrides), tensors: tensors) { directory in
+            XCTAssertThrowsError(try NativeMTPArtifactObserver.observeEmbedded(targetDirectory: directory)) { error in
+                XCTAssertEqual(
+                    error as? NativeMTPArtifactObservationError,
+                    .incompatibleSafetensorsHeaders("glm5_next missing mtp.0 layer")
+                )
+            }
+        }
+    }
+
+    /// Pins the observer's copy of the GLM5Next name rules to the pinned
+    /// fork: the keys `GLM5NextModel.sanitize(weights:)` produces, and the
+    /// module paths `sanitize(perLayerQuantization:)` adds, must equal the
+    /// observer's. A fork bump that changes the mapping fails here.
+    func testLoaderKeyMappingMatchesThePinnedGLM5NextSanitizer() throws {
+        // Builds MLX arrays; CI runners have no metallib.
+        guard PagedKVMetallibGate.defaultMetallibExists() else {
+            throw XCTSkip("MLX default metallib is unavailable in this test host")
+        }
+        let model = GLM5NextModel(try ConversationPromptSnapshotTests.tinyGLMConfiguration())
+        let hiddenLayers = 6
+        func floats(_ shape: [Int]) -> MLXArray { MLXArray.zeros(shape, dtype: .bfloat16) }
+
+        var weights: [String: MLXArray] = [
+            "model.language_model.embed_tokens.weight": floats([64, 64]),
+            "model.language_model.norm.weight": floats([64]),
+            "lm_head.weight": floats([64, 64]),
+            "model.visual.merger.proj.weight": floats([8, 8]),
+            "model.language_model.layers.0.input_layernorm.weight": floats([64]),
+            "model.language_model.layers.0.hc_attn_fn": floats([24, 64]),
+            "model.language_model.layers.0.hc_ffn_base": floats([24]),
+            "model.language_model.layers.0.self_attn.A_log": floats([2]),
+            "model.language_model.layers.0.self_attn.dt_bias": floats([64]),
+            "model.language_model.layers.0.self_attn.f_a_proj.weight": floats([8, 64]),
+            "model.language_model.layers.0.self_attn.q_conv1d.weight": floats([4, 4, 1]),
+            "model.language_model.layers.0.self_attn.k_conv1d.weight": floats([4, 4, 1]),
+            "model.language_model.layers.0.self_attn.v_conv1d.weight": floats([4, 4, 1]),
+            // An incomplete conv triple stays as written.
+            "model.language_model.layers.1.self_attn.q_conv1d.weight": floats([4, 4, 1]),
+            // [heads * (qk_nope + v), kv_lora_rank]
+            "model.language_model.layers.3.self_attn.kv_b_proj.weight": floats([128, 32]),
+            // A quantized router gate: [experts, hidden_size * 4 / 32].
+            "model.language_model.layers.4.mlp.gate.weight": MLXArray.zeros([4, 8], dtype: .uint32),
+            "model.language_model.layers.4.mlp.gate.scales": floats([4, 1]),
+            "model.language_model.layers.4.mlp.gate.biases": floats([4, 1]),
+            // Experts not numbered from 0 stay unstacked.
+            "model.language_model.layers.5.mlp.experts.1.up_proj.weight": floats([8, 8]),
+            // The next-N layer (index num_hidden_layers) and a second one.
+            "model.language_model.layers.6.eh_proj.weight": floats([64, 128]),
+            "model.language_model.layers.6.enorm.weight": floats([64]),
+            "model.language_model.layers.6.hnorm.weight": floats([64]),
+            "model.language_model.layers.6.shared_head.norm.weight": floats([64]),
+            "model.language_model.layers.6.shared_head.head.weight": floats([64, 64]),
+            "model.language_model.layers.6.embed_tokens.weight": floats([64, 64]),
+            "model.language_model.layers.6.input_layernorm.weight": floats([64]),
+            "model.language_model.layers.7.input_layernorm.weight": floats([64]),
+        ]
+        for expert in 0..<4 {
+            weights["model.language_model.layers.4.mlp.experts.\(expert).gate_proj.weight"] = floats([8, 8])
+        }
+        for expert in 0..<2 {
+            weights["model.language_model.layers.6.mlp.experts.\(expert).down_proj.weight"] = floats([8, 8])
+        }
+
+        let sanitized = Set(model.sanitize(weights: weights).keys)
+        let textKeys = Set(weights.keys.compactMap {
+            NativeMTPArtifactObserver.glm5NextTextKey($0, hiddenLayers: hiddenLayers)
+        })
+        let observed = Set(NativeMTPArtifactObserver.glm5NextLoaderNames(textKeys: textKeys).values.joined())
+        XCTAssertEqual(observed, sanitized)
+
+        let quantizationKeys = [
+            "lm_head",
+            "model.language_model.embed_tokens",
+            "model.language_model.layers.0.self_attn.f_a_proj",
+            "model.language_model.layers.3.self_attn.kv_b_proj",
+            "model.language_model.layers.4.mlp.experts.2.gate_proj",
+            "model.language_model.layers.6.eh_proj",
+            "model.language_model.layers.6.shared_head.norm",
+            "model.language_model.layers.6.shared_head.head",
+            "model.language_model.layers.6.self_attn.o_proj",
+            "language_model.model.layers.0.self_attn.o_proj",
+            "model.visual.merger.proj",
+            "model.language_model.layers.0.self_attn.q_conv1d",
+            "model.language_model.layers.0.self_attn.k_conv1d",
+            "model.language_model.layers.0.self_attn.v_conv1d",
+            "model.language_model.layers.4.mlp.gate",
+            "model.language_model.layers.4.mlp.shared_experts.up_proj",
+            "model.language_model.layers.0.self_attn.forget_gate.f_a_proj",
+            "model.visual.blocks.0.attn.qkv",
+            "visual.merger.proj",
+            "vision_tower.blocks.0.mlp",
+        ]
+        let perLayer = BaseConfiguration.PerLayerQuantization(
+            quantization: BaseConfiguration.Quantization(groupSize: 64, bits: 4),
+            perLayerQuantization: Dictionary(
+                uniqueKeysWithValues: quantizationKeys.map { ($0, BaseConfiguration.QuantizationOption.skip) }
+            )
+        )
+        let sanitizedPaths = Set(model.sanitize(perLayerQuantization: perLayer).perLayerQuantization.keys)
+        var observedPaths = Set(quantizationKeys)
+        for key in quantizationKeys {
+            for path in NativeMTPArtifactObserver.glm5NextQuantizationModulePaths(key, hiddenLayers: hiddenLayers) {
+                observedPaths.insert("language_model." + path)
+            }
+        }
+        XCTAssertEqual(observedPaths, sanitizedPaths)
+        for key in quantizationKeys where NativeMTPArtifactObserver.glm5NextIsVisionQuantizationKey(key) {
+            XCTAssertEqual(
+                NativeMTPArtifactObserver.glm5NextQuantizationModulePaths(key, hiddenLayers: hiddenLayers), []
+            )
+        }
+        XCTAssertEqual(quantizationKeys.filter(NativeMTPArtifactObserver.glm5NextIsVisionQuantizationKey).count, 4)
+    }
+
     /// A separate-artifact pair records target and MTP overrides under their
     /// own prefixes; up to 1024 entries are admitted (SPEC-023 v0.22.27).
     func testAffineRepresentationAdmitsUpTo1024Exceptions() throws {
@@ -201,14 +473,20 @@ final class NativeMTPGLM5NextObservationTests: XCTestCase {
     }
 
     /// Lab-only: observe the real GLM-5.3-Flash artifact's headers (no weights
-    /// are loaded). Set MACPROVIDER_GLM53_ARTIFACT_DIR to the snapshot.
+    /// are loaded). Set MACPROVIDER_GLM53_ARTIFACT_DIR to the snapshot. The
+    /// override count is per artifact: base GLM-5.3-Flash records 554, the
+    /// uncensored Solstice build 543. Set MACPROVIDER_GLM53_EXPECTED_OVERRIDES
+    /// for an artifact other than the base build. The name stays as recorded
+    /// in the v1.8.256 admission evidence.
     func testRealGLM53ArtifactObservesWith554Overrides() throws {
         guard let path = ProcessInfo.processInfo.environment["MACPROVIDER_GLM53_ARTIFACT_DIR"], !path.isEmpty else {
             throw XCTSkip("MACPROVIDER_GLM53_ARTIFACT_DIR not set")
         }
         let pair = try NativeMTPArtifactObserver.observeEmbedded(targetDirectory: URL(fileURLWithPath: path, isDirectory: true))
         let representation = try NativeMTPArtifactObserver.affineRepresentation(for: pair)
-        XCTAssertEqual(representation.perLayerExceptions.count, 554)
+        let expected = ProcessInfo.processInfo.environment["MACPROVIDER_GLM53_EXPECTED_OVERRIDES"]
+            .flatMap(Int.init) ?? 554
+        XCTAssertEqual(representation.perLayerExceptions.count, expected)
         XCTAssertTrue(representation.perLayerExceptions.allSatisfy { $0.hasPrefix("target/") })
         XCTAssertTrue(representation.unquantizedExceptions.isEmpty)
         XCTAssertEqual(representation.groupSize, 64)

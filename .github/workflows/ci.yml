@@ -844,8 +844,9 @@ jobs:
     # it (#1920). Fails a PR when specs/README.md no longer matches the
     # canonical spec headers, when AUTHORITY/CONFORMANCE drift, or when a PR
     # lacks its behavior-change declaration. Regenerate the index with
-    # scripts/gen_spec_index.py and commit when adding/renaming a spec or
-    # bumping a `**Version:**` header.
+    # scripts/gen_spec_index.py and commit when adding or renaming a spec. A
+    # `**Version:**` header bump needs no other edit: the header is the only
+    # version of record.
     steps:
       - name: Checkout
         # Pinned to actions/checkout v6 (df4cb1c0). Re-resolve deliberately
@@ -865,6 +866,26 @@ jobs:
         env:
           BASE_REF: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: python3 scripts/check_spec_governance.py --base-ref "$BASE_REF"
+
+      - name: Release ledger keeps every published row and tombstone
+        # The ledger is append-only: a PR may add rows but never delete one.
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          python3 - "$BASE_REF" <<'PY'
+          import json, subprocess, sys
+          path = "phase3-binary/catalog/autotune/release-ledger.json"
+          base = json.loads(subprocess.run(
+              ["git", "show", f"{sys.argv[1]}:{path}"], check=True, capture_output=True
+          ).stdout)
+          with open(path, encoding="utf-8") as fh:
+              head = json.load(fh)
+          for section in ("releases", "tombstones"):
+              missing = sorted(set(base.get(section, {})) - set(head.get(section, {})))
+              if missing:
+                  sys.exit(f"release ledger removed {section}: {missing}")
+          print(f"release ledger is a superset of {sys.argv[1]}")
+          PY
 
       - name: Verify specs/README.md index is up to date
         run: python3 scripts/gen_spec_index.py --check

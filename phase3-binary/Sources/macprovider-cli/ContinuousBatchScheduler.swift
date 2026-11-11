@@ -1136,7 +1136,7 @@ enum ContinuousBatchPrefillGrouping {
     /// never shares a forward. Rows beyond `tokenBudget`, up to
     /// `cohortTokenBudget`, join only with as many prompt tokens left as the
     /// head, so the head's first token never waits for a longer prompt.
-    /// (v0.3.42) The head's prompt comes first in the budget: it continues
+    /// (v0.3.46) The head's prompt comes first in the budget: it continues
     /// with its next chunks in the same turn when no row is decoding, so it
     /// holds up to `min(remaining, tokenBudget)` tokens. A peer with a different number
     /// of tokens left joins only within what that leaves.
@@ -6067,9 +6067,9 @@ actor ContinuousBatchScheduler {
             activePrompt[id]?.prefillBypassTurns += 1
         }
 
-        // The turn budget goes to the head's prompt first (v0.3.42): with no
+        // The turn budget goes to the head's prompt first (v0.3.46): with no
         // row decoding, after each forward the head's next original chunk
-        // leads a new group while the per-iteration budget has room (v0.3.43:
+        // leads a new group while the per-iteration budget has room (v0.3.47:
         // one chunk per turn while rows decode), and peers get only what
         // the head's prompt leaves (`ContinuousBatchPrefillGrouping.select`).
         // Separate forwards keep
@@ -6125,7 +6125,7 @@ actor ContinuousBatchScheduler {
             // turn and has a free slot ends the turn instead: it is admitted
             // and ordered (a short prompt leads) at the next turn, not after
             // the head's whole budget.
-            // While rows decode, the head gets one chunk per turn (v0.3.43):
+            // While rows decode, the head gets one chunk per turn (v0.3.47):
             // a decode window follows every chunk, so a running row waits one
             // chunk, not the whole budget, per decode window.
             let headID = head.row.request.id
@@ -6387,7 +6387,7 @@ actor ContinuousBatchScheduler {
                 // A row that finishes its prompt with the head joins up to
                 // the turn budget (the idle cohort turn). Any other row joins
                 // only within the per-iteration budget the head's own prompt
-                // leaves this turn (v0.3.42).
+                // leaves this turn (v0.3.46).
                 let finishesWithHead = row.request.promptTokens.count - row.prefillCursor
                     == head.request.promptTokens.count - head.prefillCursor
                 if !finishesWithHead {

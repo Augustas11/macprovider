@@ -5,7 +5,7 @@
 # bash 3.2 compatible (stock macOS /bin/bash).
 #
 # Payload swap of the live provider to a verified candidate tarball, or the
-# narrowly-scoped Studio owner-pin transaction staged by studio-owner-pin.sh:
+# narrowly-scoped Studio owner-pin transaction (remove-/restore-owner-pin):
 # pause and drain, back up the install dir, replace the payload, restart, then
 # watch (the installed watchdog stays booted out until the candidate, or the
 # restored version, is buyer_serving). A provider process restart (crash loop),

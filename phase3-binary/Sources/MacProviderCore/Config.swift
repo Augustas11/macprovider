@@ -341,8 +341,10 @@ public struct AppConfig: Equatable, Sendable {
     public var continuousBatchPrefillTokensPerIteration: Int?
     // SPEC-038 AC-26: let positive-cached follow-up turns that carry a usable
     // retained paged-KV handoff (plus a recurrent checkpoint on hybrid models)
-    // batch instead of serial-routing. Default off; inert while
-    // `continuous_batching` is off. Triple-exposed: yaml key
+    // resume their cache in a CB row. Default on (v0.3.41): the FR-CB10
+    // self-check's leg (a) decides per Mac, and a turn it does not admit
+    // re-prefills cold in the batch. `false` is the operator kill switch;
+    // inert while `continuous_batching` is off. Triple-exposed: yaml key
     // `continuous_batching_cached_turns`, env
     // `MACPROVIDER_CONTINUOUS_BATCHING_CACHED_TURNS`, CLI
     // `--[no-]continuous-batching-cached-turns`.
@@ -465,7 +467,7 @@ public struct AppConfig: Equatable, Sendable {
             continuousBatchQueueLimit: nil,
             continuousBatchQueueWaitTimeoutMS: nil,
             continuousBatchPrefillTokensPerIteration: nil,
-            continuousBatchingCachedTurns: false,
+            continuousBatchingCachedTurns: true,
             mlxCacheLimitMB: nil,
             continuousBatchingAcceptedTuples: [],
             kvDiskCache: .defaults(),
