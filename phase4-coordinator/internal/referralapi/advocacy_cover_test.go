@@ -134,8 +134,8 @@ func TestAdvocacyChallengeProviderLimiterBlocks(t *testing.T) {
 	h.ProviderLimiter.Allow("challenge:p1")
 	w := httptest.NewRecorder()
 	h.HandleChallenge(w, bearerRequest(http.MethodPost, "/x", ""))
-	if w.Code != http.StatusTooManyRequests {
-		t.Fatalf("code=%d", w.Code)
+	if w.Code != http.StatusTooManyRequests || w.Header().Get("Retry-After") != "60" || !strings.Contains(w.Body.String(), "rate_limited") {
+		t.Fatalf("code=%d retry=%q body=%s", w.Code, w.Header().Get("Retry-After"), w.Body.String())
 	}
 }
 
@@ -368,9 +368,11 @@ func TestDecodeBoundedJSONRejectsOversizeAndTrailingValues(t *testing.T) {
 	}{
 		"ok":       {`{"a":"x"}`, true},
 		"oversize": {`{"a":"` + strings.Repeat("x", 40) + `"}`, false},
-		"trailing": {`{"a":"x"}{"a":"y"}`, false},
-		"unknown":  {`{"b":1}`, false},
-		"garbage":  {`nope`, false},
+		// first max+1 bytes are valid JSON; only the explicit size check rejects it
+		"oversize padded": {`{"a":"x"}` + strings.Repeat(" ", 40), false},
+		"trailing":        {`{"a":"x"}{"a":"y"}`, false},
+		"unknown":         {`{"b":1}`, false},
+		"garbage":         {`nope`, false},
 	} {
 		var dst req
 		err := decodeBoundedJSON(httptest.NewRequest(http.MethodPost, "/", strings.NewReader(tc.body)), &dst, 30)
@@ -454,6 +456,12 @@ func TestShareURLDigestRequiresCanonicalJoinBase(t *testing.T) {
 	}
 	if _, err := ShareURLDigest(url1, "https://other.example/j"); err == nil {
 		t.Fatal("non-canonical join base accepted")
+	}
+	// share URL and base agree with each other but are not the canonical base
+	for _, base := range []string{"https://other.example/j", "https://malibu.tech/j/", "http://malibu.tech/j"} {
+		if _, err := ShareURLDigest(fragmentShareURL(base, "MAL1-X", ch), base); err == nil {
+			t.Fatalf("non-canonical join base %q accepted", base)
+		}
 	}
 	if _, err := ShareURLDigest("https://malibu.tech/j#/MAL1-X?c=short", "https://malibu.tech/j"); err == nil {
 		t.Fatal("bad challenge accepted")
