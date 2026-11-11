@@ -10,8 +10,14 @@ import XCTest
 /// position, so equal arrays mean equal slot order: every row must present
 /// exactly what its own serial cache (`RotatingKVCache` for a sliding window,
 /// its plain history otherwise) holds, in lockstep and ragged batches alike.
-/// Everything runs on the CPU device, so no metallib is needed.
+/// Everything runs on the CPU device; without a metallib (CI) the process
+/// default is pinned to the CPU, as in the other CPU suites.
 final class PagedKVBatchDecodeWindowTests: XCTestCase {
+    override class func setUp() {
+        super.setUp()
+        MLXTestDevice.pinProcessCPUDefaultWithoutMetallib()
+    }
+
     func testLockstepWindowsKeepEachRowsRotatingSlotOrderAcrossSync() throws {
         try runSlidingWindows(rowChunks: [[10, 5], [12, 1, 1, 1]], window: 8, windows: 4, stepsPerWindow: 5)
     }
