@@ -2,19 +2,19 @@
   "feeds": {
     "autotune-artifacts.json": {
       "bytes": 21743,
-      "sha256": "a693e72dba3e520df6d5b98cd08b024d6b01cbf5db2e16b71047c5422918eb50",
+      "sha256": "be48f7dfb10315602133d44926f5880d15ac77cd379ab2b879c0fe15a57230be",
       "signer_key_id": "streamvc-autotune-static-v4",
       "version": "published-2026-11-11-minimax-m3.1-flash-listed-v283"
     },
     "autotune-candidates.json": {
-      "bytes": 25882,
-      "sha256": "7a5e5a535d762e0db63683f250af4d0b1675f20e7768cf092d182be9cd408de5",
+      "bytes": 26398,
+      "sha256": "ce077a30df3e9ae3006d7827f6a8f8a15deb3638c315a1b6cfd2e121fe7415a2",
       "signer_key_id": "streamvc-autotune-static-v4",
       "version": "published-2026-11-11-minimax-m3.1-flash-listed-v283"
     },
     "continuous-batching-policy.json": {
       "bytes": 7300,
-      "sha256": "8aa663cb5a661f0f2bf8b5eafaefc1ce3929f08bc5fc668b62c6e968a1c35cd9",
+      "sha256": "b2d1f46c755b742a95502a62b1b8b6a94174b6eeef38a8fe3fe7743af368c0c7",
       "signer_key_id": "streamvc-autotune-static-v4",
       "version": "published-2026-11-11-minimax-m3.1-flash-listed-v283"
     },
