@@ -1,6 +1,7 @@
 package stats
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -118,15 +119,15 @@ func TestOverviewAndRoutabilityStaleFor503(t *testing.T) {
 }
 
 func TestDecodeReasonCounts(t *testing.T) {
-	if got := decodeReasonCounts(nil); got == nil || len(got) != 0 {
-		t.Fatalf("empty -> %#v", got)
+	if b, _ := json.Marshal(decodeReasonCounts(nil)); string(b) != "{}" {
+		t.Fatalf("empty serializes as %s, want {}", b)
 	}
 	got := decodeReasonCounts([]byte(`{"busy":3,"cold":1}`))
 	if got["busy"] != 3 || got["cold"] != 1 || len(got) != 2 {
 		t.Fatalf("got %#v", got)
 	}
-	if got := decodeReasonCounts([]byte(`not json`)); got == nil || len(got) != 0 {
-		t.Fatalf("malformed -> %#v", got)
+	if b, _ := json.Marshal(decodeReasonCounts([]byte(`not json`))); string(b) != "{}" {
+		t.Fatalf("malformed serializes as %s, want {}", b)
 	}
 }
 
