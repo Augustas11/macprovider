@@ -1,40 +1,40 @@
 {
   "feeds": {
     "autotune-artifacts.json": {
-      "bytes": 18878,
-      "sha256": "506363d6758842cede57c1af5a71aab39ca847ff52b8e81afd29f94fb35839d9",
+      "bytes": 18880,
+      "sha256": "2d9e2beac20728aa748a92b5648852c1c292aa13cdda811a2f942720adead7c7",
       "signer_key_id": "streamvc-autotune-static-v4",
-      "version": "published-2026-11-10-ripple-65b-listed-v283"
+      "version": "published-2026-11-11-openrouter-reprice-v283"
     },
     "autotune-candidates.json": {
-      "bytes": 22760,
-      "sha256": "2ab311757935b282f6d6f89003a7c3344b1c2b275ff088144ab162f85237f515",
+      "bytes": 22761,
+      "sha256": "ae62d1a6b89ba7b9c26072b9a0386d563d15a0f4eacc079ec825d26f214dd3a7",
       "signer_key_id": "streamvc-autotune-static-v4",
-      "version": "published-2026-11-10-ripple-65b-listed-v283"
+      "version": "published-2026-11-11-openrouter-reprice-v283"
     },
     "continuous-batching-policy.json": {
-      "bytes": 7292,
-      "sha256": "e4e9834d0f734417d7f206448427c0e39abaa916990a93a1364353ab6431a7f5",
+      "bytes": 7293,
+      "sha256": "c99e88056cfab87acf517d575bac450328019658bae4b434ac808f60857f066f",
       "signer_key_id": "streamvc-autotune-static-v4",
-      "version": "published-2026-11-10-ripple-65b-listed-v283"
+      "version": "published-2026-11-11-openrouter-reprice-v283"
     },
     "demand-rank.json": {
-      "bytes": 2671,
-      "sha256": "152b5a76e35afd9dbebd7841149d6dd3570abfb88f132cf09588f4ccaa285838",
+      "bytes": 2672,
+      "sha256": "998482d1574563c8fa1de2c22ed78b6e6d47cb15e9c6485612ad4bc984456f8a",
       "signer_key_id": "streamvc-autotune-static-v4",
-      "version": "published-2026-11-10-ripple-65b-listed-v283"
+      "version": "published-2026-11-11-openrouter-reprice-v283"
     },
     "native-mtp-admission.json": {
-      "bytes": 45675,
-      "sha256": "6393449c420c909ea90211ed41d79f6c592b29c20296952dee4867ad54e11204",
+      "bytes": 45676,
+      "sha256": "f826f7f16980684ef506cb72833631aed34aeae6524e181c4588fe88510ea804",
       "signer_key_id": "streamvc-autotune-static-v4",
-      "version": "published-2026-11-10-ripple-65b-listed-v283"
+      "version": "published-2026-11-11-openrouter-reprice-v283"
     },
     "rate-card.json": {
-      "bytes": 4837,
-      "sha256": "5e26ccc85c618042ed08c24049298f8b6f68c47b0466edbc43d9f51c5d37a8ee",
+      "bytes": 4835,
+      "sha256": "76649fd30d6adc9989995d7d9fbe2a59ce4bf624e08a3b5a87dd20f588e06b51",
       "signer_key_id": "streamvc-autotune-static-v4",
-      "version": "07203de3ba532245f1fa9ae81c06e61cff832876288c3811577287e55c7160b0"
+      "version": "e43ae996886c6fe06c6b9dc52fd9f93954c77f9e52c31ab25da44a7b4d0a368e"
     },
     "tier2-catalog.json": {
       "bytes": 9203,
@@ -43,8 +43,8 @@
       "version": "macprovider-tier2-model-catalog-2026-11-10-ripple-65b-v1"
     }
   },
-  "generated_at": "2026-11-10T08:50:00Z",
+  "generated_at": "2026-11-11T04:00:00Z",
   "policy_version": "autotune-policy-v1",
-  "release_id": "published-2026-11-10-ripple-65b-listed-v283",
+  "release_id": "published-2026-11-11-openrouter-reprice-v283",
   "schema_version": "macprovider.autotune-release.v1"
 }

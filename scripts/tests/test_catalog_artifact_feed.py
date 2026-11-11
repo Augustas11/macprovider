@@ -2382,6 +2382,15 @@ class IntakeDecisionTest(unittest.TestCase):
 
 
 HISTORICAL_CB_POLICY_EXPIRES_AT = "2026-12-25T00:00:00Z"
+# Rows a pricing release repriced after activation, at the rates the
+# pre-activation release published. The rewind puts them back.
+PRE_ACTIVATION_REPRICED_ROWS = {
+    # published-2026-11-11-openrouter-reprice-v283 (OpenRouter median - 20%)
+    "qwen3.5-27b": {"prompt_rate_per_mtok": 208000, "prompt_cache_hit_rate_per_mtok": 52000, "completion_rate_per_mtok": 1728000},
+    "qwen3.5-35b-a3b": {"prompt_rate_per_mtok": 130000, "prompt_cache_hit_rate_per_mtok": 32500, "completion_rate_per_mtok": 1000000},
+    "qwen3.6-35b-a3b": {"prompt_rate_per_mtok": 148800, "prompt_cache_hit_rate_per_mtok": 37200, "completion_rate_per_mtok": 800000},
+    "qwen3.8-27b": {"prompt_rate_per_mtok": 192000, "prompt_cache_hit_rate_per_mtok": 48000, "completion_rate_per_mtok": 2000000},
+}
 
 
 class HermeticRelease:
@@ -2533,6 +2542,7 @@ class HermeticRelease:
             demand_path.write_bytes(catalog_release.canonical_bytes(demand))
             self.strip_tier2_models(admitted_model_ids)
             self.strip_promoted_rate_rows(admitted)
+        self.restore_pre_activation_rates()
         self.bump(release_id, generated_at)
 
         def restamp(name: str, **fields) -> bytes:
@@ -2583,6 +2593,30 @@ class HermeticRelease:
         tier2 = json.loads(path.read_text())
         tier2["models"] = [m for m in tier2["models"] if m["model_id"] not in model_ids]
         path.write_text(json.dumps(tier2, indent=2) + "\n")
+
+    def restore_pre_activation_rates(self) -> None:
+        """Put back the rates of rows repriced by a pricing release after
+        activation (PRE_ACTIVATION_REPRICED_ROWS) in the rate-card source, the
+        published card and the coordinator rewards rows."""
+        source_path = self.catalog / "rate-card-source.json"
+        source = json.loads(source_path.read_text())
+        card_path = self.catalog / "rate-card.json"
+        card = json.loads(card_path.read_text())
+        yaml_path = self.root / "coordinator.yaml"
+        yaml_text = yaml_path.read_text()
+        for key, rates in PRE_ACTIVATION_REPRICED_ROWS.items():
+            source["rows"][key].update(rates)
+            card["rows"][key].update(rates)
+            block = re.search(rf"(?m)^    {re.escape(key)}:.*\n((?:      .*\n)+)", yaml_text)
+            body = block.group(1)
+            for field, value in rates.items():
+                credits = field.replace("_rate_per_mtok", "_credits_per_mtok")
+                body = re.sub(rf"(?m)^(      {credits}: )\d+", rf"\g<1>{value}", body)
+            yaml_text = yaml_text[:block.start(1)] + body + yaml_text[block.end(1):]
+        source_path.write_text(json.dumps(source, indent=2, sort_keys=True) + "\n")
+        card["version"] = catalog_release.rate_card_projection_hash(card)
+        card_path.write_bytes(catalog_release.canonical_bytes(card))
+        yaml_path.write_text(yaml_text)
 
     def strip_promoted_rate_rows(self, admitted: set[str]) -> None:
         """Drop the rate rows an admission introduced: the rows keyed by the

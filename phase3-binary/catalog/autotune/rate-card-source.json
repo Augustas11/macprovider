@@ -21,7 +21,7 @@
       "prompt_rate_per_mtok": 13500
     }
   },
-  "generated_at": "2026-11-10T08:50:00Z",
+  "generated_at": "2026-11-11T04:00:00Z",
   "global_multiplier_ppm": 1000000,
   "policy_version": "autotune-policy-v1",
   "provider_share_bps": 9000,
@@ -102,14 +102,14 @@
       "prompt_rate_per_mtok": 117500
     },
     "qwen3.5-27b": {
-      "completion_rate_per_mtok": 1728000,
-      "prompt_cache_hit_rate_per_mtok": 52000,
-      "prompt_rate_per_mtok": 208000
+      "completion_rate_per_mtok": 1600000,
+      "prompt_cache_hit_rate_per_mtok": 50000,
+      "prompt_rate_per_mtok": 200000
     },
     "qwen3.5-35b-a3b": {
-      "completion_rate_per_mtok": 1000000,
-      "prompt_cache_hit_rate_per_mtok": 32500,
-      "prompt_rate_per_mtok": 130000
+      "completion_rate_per_mtok": 800000,
+      "prompt_cache_hit_rate_per_mtok": 30000,
+      "prompt_rate_per_mtok": 120000
     },
     "qwen3.6-27b": {
       "completion_rate_per_mtok": 2160000,
@@ -117,14 +117,14 @@
       "prompt_rate_per_mtok": 240000
     },
     "qwen3.6-35b-a3b": {
-      "completion_rate_per_mtok": 800000,
-      "prompt_cache_hit_rate_per_mtok": 37200,
-      "prompt_rate_per_mtok": 148800
+      "completion_rate_per_mtok": 720000,
+      "prompt_cache_hit_rate_per_mtok": 20000,
+      "prompt_rate_per_mtok": 80000
     },
     "qwen3.8-27b": {
-      "completion_rate_per_mtok": 2000000,
-      "prompt_cache_hit_rate_per_mtok": 48000,
-      "prompt_rate_per_mtok": 192000
+      "completion_rate_per_mtok": 1584000,
+      "prompt_cache_hit_rate_per_mtok": 30000,
+      "prompt_rate_per_mtok": 120000
     },
     "z-ai/glm-4.5-air": {
       "completion_rate_per_mtok": 688000,
