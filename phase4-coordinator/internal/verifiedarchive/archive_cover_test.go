@@ -39,31 +39,42 @@ const (
 func TestStreamRejectsMalformedContent(t *testing.T) {
 	row := func(r string) string { return `{"kind":"row","request_id":"g","table":"t","row":` + r + `}` }
 	trailer := `{"kind":"trailer","request_count":1,"row_counts":{"t":1}}`
-	cases := map[string][]string{
-		"unknown kind":        {hdr, `{"kind":"zzz"}`},
-		"bad json":            {hdr, `{not json`},
-		"duplicate header":    {hdr, hdr},
-		"wrong format":        {`{"kind":"header","format":"x"}`},
-		"request no header":   {req},
-		"empty request id":    {hdr, `{"kind":"request"}`},
-		"duplicate request":   {hdr, req, req},
-		"row without group":   {hdr, row(`{"a":1}`)},
-		"row wrong request":   {hdr, req, `{"kind":"row","request_id":"h","table":"t","row":{"a":1}}`},
-		"row unknown table":   {hdr, req, `{"kind":"row","request_id":"g","table":"u","row":{"a":1}}`},
-		"row nil":             {hdr, req, `{"kind":"row","request_id":"g","table":"t"}`},
-		"row bad object":      {hdr, req, row(`{"a":{"x":1}}`)},
-		"row bad blob":        {hdr, req, row(`{"a":{"blob_base64":"!!"}}`)},
-		"row blob extra key":  {hdr, req, row(`{"a":{"blob_base64":"AA==","y":1}}`)},
-		"row unsupported val": {hdr, req, row(`{"a":true}`)},
-		"data after trailer":  {hdr, req, row(`{"a":1}`), trailer, hdr},
-		"missing trailer":     {hdr, req},
+	// Every case that can reach the trailer carries a valid one and the manifest
+	// below matches it, so only the targeted defect can make the archive invalid.
+	cases := []struct {
+		name  string
+		lines []string
+		want  string
+	}{
+		{"unknown kind", []string{hdr, req, row(`{"a":1}`), `{"kind":"zzz"}`, trailer}, "unknown line kind"},
+		{"bad json", []string{hdr, req, row(`{"a":1}`), `{not json`, trailer}, "parse line"},
+		{"duplicate header", []string{hdr, hdr, req, row(`{"a":1}`), trailer}, "bad header"},
+		{"wrong format", []string{`{"kind":"header","format":"x"}`, req, row(`{"a":1}`), trailer}, "bad header"},
+		{"request no header", []string{req, row(`{"a":1}`), trailer}, "request before header"},
+		{"empty request id", []string{hdr, `{"kind":"request"}`, row(`{"a":1}`), trailer}, "request before header"},
+		{"duplicate request", []string{hdr, req, req, row(`{"a":1}`), trailer}, "duplicate request"},
+		{"row without group", []string{hdr, row(`{"a":1}`), req, trailer}, "unknown request or table"},
+		{"row wrong request", []string{hdr, req, `{"kind":"row","request_id":"h","table":"t","row":{"a":1}}`, trailer}, "unknown request or table"},
+		{"row unknown table", []string{hdr, req, `{"kind":"row","request_id":"g","table":"u","row":{"a":1}}`, trailer}, "unknown request or table"},
+		{"row nil", []string{hdr, req, `{"kind":"row","request_id":"g","table":"t"}`, trailer}, "unknown request or table"},
+		{"row bad object", []string{hdr, req, row(`{"a":{"x":1}}`), trailer}, "unsupported object"},
+		{"row bad blob", []string{hdr, req, row(`{"a":{"blob_base64":"!!"}}`), trailer}, "row value"},
+		{"row blob extra key", []string{hdr, req, row(`{"a":{"blob_base64":"AA==","y":1}}`), trailer}, "unsupported object"},
+		{"row unsupported val", []string{hdr, req, row(`{"a":true}`), trailer}, "unsupported value"},
+		{"data after trailer", []string{hdr, req, row(`{"a":1}`), trailer, hdr}, "data after trailer"},
+		{"missing trailer", []string{hdr, req, row(`{"a":1}`)}, "missing header or trailer"},
 	}
-	for name, lines := range cases {
-		t.Run(name, func(t *testing.T) {
-			path, m := craft(t, lines, map[string]int64{"t": 1}, 1)
+	// Sanity: the same shape without a defect is accepted.
+	path, m := craft(t, []string{hdr, req, row(`{"a":1}`), trailer}, map[string]int64{"t": 1}, 1)
+	if err := Stream(path, m, known, func(Group) error { return nil }); err != nil {
+		t.Fatalf("baseline archive: %v", err)
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path, m := craft(t, tc.lines, map[string]int64{"t": 1}, 1)
 			err := Stream(path, m, known, func(Group) error { return nil })
-			if !errors.Is(err, ErrInvalid) {
-				t.Fatalf("err = %v, want ErrInvalid", err)
+			if !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want ErrInvalid containing %q", err, tc.want)
 			}
 		})
 	}
