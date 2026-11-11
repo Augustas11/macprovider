@@ -34,7 +34,7 @@ needs a SPEC revision.
 
 | Fork | Upstream | Tag scheme | Current tag | Revision | Upstream base |
 | --- | --- | --- | --- | --- | --- |
-| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.37` | `aea3da145b448542088efd73ab77a2cf54038e53` | `3.32.3` (`3b339ad6…`) |
+| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.38` | `dab7764e1b082f1b5bf411a1f3282ef2830204e7` | `3.32.3` (`3b339ad6…`) |
 | `Augustas11/mlx-swift` | `ml-explore/mlx-swift` | `<upstream>-macprovider.<n>` | `0.32.3-macprovider.13` | `565269220ccc2cc0d2ce149affb98a2f9d9b32ac` | `0.32.3` (`19601207…`) |
 | `Augustas11/mlx` (MLX core) | `ml-explore/mlx` | `v<upstream>-macprovider.<n>` | `v0.32.4-macprovider.7` | `565070fe4b0f95927f7fdd5fcfb537157605037a` | `v0.32.4` (`36969c09…`) |
 | `Augustas11/mlx-c` | `ml-explore/mlx-c` | `v<upstream>-macprovider.<n>` | `v0.6.0-macprovider.2` | `2b1ff2b5b5129a6115771da32e1bac3b6b01ab01` | pinned base `ebc88f10…` |
@@ -47,20 +47,29 @@ core revision. Swift 6.3 is the effective minimum for the graph.
 
 ### Current tuple delta
 
-As of 2026-11-11 the LM row is `3.32.3-macprovider.37` (`aea3da1`), which is
-`.34` plus one commit (#2265): every GLM-5-Next projection of 1 to 8 decode or
-verification tokens takes `glm5NextQMVBatch`. The GLM decode kernels reduce in
-`qmv_fast` order and were bitwise to MLX only while MLX took `qmv` for a row; on
-GPUs without NAX MLX now takes `qmv_mma`, so a token projected alone (MLX) and
-with others (the GLM kernel) differed on the M3 Ultra (CB rows and packed MTP
-verification off their serial decode). `.34` (`647b24d`) is
-`.32` plus one commit that pins mlx-swift `0.32.3-macprovider.13` (`5652692`,
-#2234); that commit is identical to the one `.31` (`9f30c01`) put on `.25`. Core
+As of 2026-11-11 the LM row is `3.32.3-macprovider.38` (`dab7764`), which is
+`.35` plus two commits. The first pins mlx-swift `0.32.3-macprovider.13`
+(`5652692`, #2234); it is the same diff `.34` (`647b24d`) and `.31` (`9f30c01`)
+put on `.32` and `.25`. The second (#2265) sends every GLM-5-Next projection of
+1 to 8 decode or verification tokens to `glm5NextQMVBatch`. The GLM decode
+kernels reduce in `qmv_fast` order and were bitwise to MLX only while MLX took
+`qmv` for a row; on GPUs without NAX MLX now takes `qmv_mma`, so a token
+projected alone (MLX) and with others (the GLM kernel) differed on the M3 Ultra
+(CB rows and packed MTP verification off their serial decode). Core
 `565070fe4` (tag `v0.32.4-macprovider.7`, one commit on
 `v0.32.4-macprovider.6`) sends eligible affine small-M products to `qmv_mma`
 from 1 to 16 rows on non-NAX GPUs, with a test that reads no row count. The
 mlx-swift tag also ships the `gather_mm_offsets` and SDPA VJP kernels. The
-mlx-c standalone core fetch still names `51edbb3`.
+mlx-c standalone core fetch still names `51edbb3`. `.37` (`aea3da1`) is the
+same two commits on `.32`, without `.35`.
+
+As of 2026-11-10 the LM row was `3.32.3-macprovider.35` (`c9d8a93`), on
+`3.32.3-macprovider.32` (#2270): `2911424` adds the `ricursive` text model
+(Ripple-65B Preview) and its registration, and `c9d8a93` sets its prefill
+chunk to 2048 tokens, as mlx-lm does. New model files and one registry line;
+no other model's code and no shared cache, attention or generation code
+changes. No Swift, core or C pin changes. `.33` (GPT-OSS) and `.34` (#2265)
+are other campaigns' tags on `.32`; whichever merges second carries both.
 
 As of 2026-11-09 the LM row was `3.32.3-macprovider.32` (`6c27b74`),
 on `3.32.3-macprovider.25`: its one commit (`6c27b74`, cherry-picked from

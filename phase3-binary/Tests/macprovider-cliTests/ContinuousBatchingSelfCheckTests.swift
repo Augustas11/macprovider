@@ -392,6 +392,30 @@ final class ContinuousBatchingSelfCheckTests: XCTestCase {
         XCTAssertEqual(store.decision(for: key)?.slots, 4)
     }
 
+    /// SPEC-038 v0.3.44: the AC-26 leg (a) result is stored with the
+    /// decision; a record written before it existed reads as not yet run.
+    func testCachedTurnsParityIsStoredWithTheDecision() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cb-self-check-ac26-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = ContinuousBatchingSelfCheckStore(url: directory.appendingPathComponent(ContinuousBatchingSelfCheckStore.fileName))
+        let key = ContinuousBatchingSelfCheckKey(modelSHA256: "m", metallibSHA256: "x", kernelIdentifier: "k", hardwareClass: "h", osBuild: "o", runtimeBuild: "r", decodeWindow: 16)
+        var record = ContinuousBatchingSelfCheckStore.Record(
+            key: key, decision: .init(slots: 4, reason: "granted", verifiedSlots: 4), serialTPS: 1,
+            measurements: [], aloneOutputs: [], inProgressSlots: nil, decidedAt: "2026-11-10T00:00:00Z"
+        )
+        try store.store(record)
+        XCTAssertNil(store.record(for: key)?.cachedTurnsParity)
+        record.cachedTurnsParity = false
+        try store.store(record)
+        XCTAssertEqual(store.record(for: key)?.cachedTurnsParity, false)
+        record.cachedTurnsParity = true
+        try store.store(record)
+        XCTAssertEqual(store.record(for: key)?.cachedTurnsParity, true)
+        XCTAssertEqual(store.decision(for: key)?.slots, 4)
+    }
+
     func testDeferralsBackOffToAtMostFifteenMinutes() {
         XCTAssertEqual(ContinuousBatchingSelfCheck.deferralBackoffSeconds(deferrals: 0, base: 5), 0)
         XCTAssertEqual(ContinuousBatchingSelfCheck.deferralBackoffSeconds(deferrals: 1, base: 5), 10)

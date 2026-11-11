@@ -447,7 +447,7 @@ struct ServeCommand: AsyncParsableCommand {
     @Option(help: "Continuous-batching prefill per-iteration token budget (across compatible rows). Default 2048. It caps how many concurrent prompt rows share one prefill forward; single-stream prefill is bounded by the per-row prefill_step_size, not this budget. Overrides MACPROVIDER_CONTINUOUS_BATCH_PREFILL_TOKENS_PER_ITERATION and config key continuous_batch_prefill_tokens_per_iteration.")
     var continuousBatchPrefillTokensPerIteration: Int?
 
-    @Flag(name: .customLong("continuous-batching-cached-turns"), inversion: .prefixedNo, help: "Let a positive-cached follow-up turn with a usable retained paged-KV handoff (plus a recurrent checkpoint on hybrid models) batch instead of serial-routing. Default off. Inert while continuous batching is off. Overrides MACPROVIDER_CONTINUOUS_BATCHING_CACHED_TURNS and config key continuous_batching_cached_turns.")
+    @Flag(name: .customLong("continuous-batching-cached-turns"), inversion: .prefixedNo, help: "Let a positive-cached follow-up turn with a usable retained paged-KV handoff (plus a recurrent checkpoint on hybrid models) resume its cache in a batch row once this Mac's self-check proves it. Default on; --no- turns it off. Inert while continuous batching is off. Overrides MACPROVIDER_CONTINUOUS_BATCHING_CACHED_TURNS and config key continuous_batching_cached_turns.")
     var continuousBatchingCachedTurns: Bool?
 
     // SPEC-037 FR-KVP11 — encrypted KV survival disk-tier CLI flags (MEDIUM-5). Each is

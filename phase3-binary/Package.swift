@@ -17,14 +17,15 @@ let package = Package(
         )
     ],
     dependencies: [
-        // Tag 3.32.3-macprovider.37 (#2265) is .34 plus one commit: GLM-5-Next
-        // projects 1...8 decode tokens with one kernel, so its rows stay
-        // bitwise when MLX itself takes qmv_mma (GPUs without NAX).
-        // Tag 3.32.3-macprovider.34 (#2234) is .32 plus one commit that pins
-        // mlx-swift 0.32.3-macprovider.13: core 565070fe4 sends every eligible
-        // affine small-M product to qmv_mma from 1 to 16 rows, so the kernel
-        // never depends on the row count, and the metallib ships the
-        // gather_mm_offsets and SDPA VJP kernels that core calls.
+        // Tag 3.32.3-macprovider.38 (#2265) is .35 plus two commits: the
+        // mlx-swift 0.32.3-macprovider.13 pin (#2234) and GLM-5-Next projecting
+        // 1...8 decode tokens with one kernel, so its rows stay bitwise when
+        // MLX itself takes qmv_mma (GPUs without NAX). mlx-swift .13 pins core
+        // 565070fe4, which sends every eligible affine small-M product to
+        // qmv_mma from 1 to 16 rows, so the kernel never depends on the row
+        // count, and its metallib ships the gather_mm_offsets and SDPA VJP
+        // kernels that core calls. .35 (#2270) on .32 adds the `ricursive`
+        // text model (Ripple-65B Preview) and its 2048-token prefill chunk.
         // Tag 3.32.3-macprovider.32 (#2244, #2189) on 3.32.3-macprovider.25:
         // `6c27b74` (from `73df016af`) maps a Hugging Face per-layer
         // quantization map to module paths at load, so the Solstice-AI
@@ -80,7 +81,7 @@ let package = Package(
         // compatible per-column attention while retaining row-owned caches.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "aea3da145b448542088efd73ab77a2cf54038e53"
+            revision: "dab7764e1b082f1b5bf411a1f3282ef2830204e7"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",

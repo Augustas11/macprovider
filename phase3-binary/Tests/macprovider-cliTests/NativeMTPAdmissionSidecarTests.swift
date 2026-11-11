@@ -1215,10 +1215,11 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         XCTAssertEqual(capability.spec023LiveExecutableCDHash, String(repeating: "7", count: 40))
     }
 
-    /// A changed decode-path file changes the embedded digest; the signed
-    /// entry no longer matches and native MTP is refused (fail closed, no
-    /// model-keyed fallback). So does any other bound decode-path input.
-    func testDecodePathEntryRefusesAChangedDecodePath() throws {
+    /// SPEC-048-R013 (0.1.81): the binding is provenance. A changed
+    /// decode-path digest, Metal library, runtime revision, hardware, RAM or
+    /// slot count still admits the model by the model-keyed rule; the MTP-16
+    /// self-check at load decides whether native MTP serves.
+    func testDecodePathEntryAdmitsTheModelWhenTheDecodePathDiffers() throws {
         let fixture = try makeReleaseEnvelopeFixture(entryEdit: { entry in
             entry["decode_path_digest"] = DecodePathIdentity.digest
             entry["metallib_sha256"] = Self.decodePathMetallib
@@ -1235,21 +1236,30 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
             decodePathContext(fixture.context, slotCount: 4),
         ]
         for context in changed {
-            XCTAssertEqual(
-                try rejectedReleaseEnvelopeError(fixture, context: context),
-                .decodePathMismatch
-            )
+            XCTAssertEqual(try loadRelease(fixture, context: context).modelID, fixture.context.modelID)
         }
+        let otherModel = NativeMTPAdmissionSidecar.RuntimeContext(
+            modelID: "other/model",
+            modelRevision: fixture.context.modelRevision,
+            upstreamMLXSwiftLMRevision: fixture.context.upstreamMLXSwiftLMRevision,
+            hardwareChip: fixture.context.hardwareChip,
+            ramGB: fixture.context.ramGB,
+            osVersion: fixture.context.osVersion,
+            slotCount: fixture.context.slotCount,
+            revokedTupleSHA256: [],
+            decodePathDigest: DecodePathIdentity.digest,
+            metallibSHA256: Self.decodePathMetallib
+        )
         XCTAssertEqual(
-            ModelRuntime.nativeMTPServePathRejection(for: NativeMTPAdmissionSidecarError.decodePathMismatch).reasonCode,
-            "decode_path_mismatch"
+            try rejectedReleaseEnvelopeError(fixture, context: otherModel),
+            .liveTupleMismatch("$.entries")
         )
     }
 
-    /// A bound entry for the model suppresses every legacy fallback: with a
-    /// selectable old-format entry beside it, a changed decode path is still
-    /// refused, and a matching decode path selects the bound entry.
-    func testDecodePathEntrySuppressesLegacyFallbackForTheModel() throws {
+    /// An entry matching this build's decode path is preferred over an
+    /// old-format entry for the same model; with the decode path changed, the
+    /// first entry for the model is used instead of refusing.
+    func testDecodePathEntryIsPreferredAndFallsBackToTheModelKeyedEntry() throws {
         let fixture = try makeReleaseEnvelopeFixture(
             entryEdit: { entry in
                 entry["decode_path_digest"] = DecodePathIdentity.digest
@@ -1265,18 +1275,102 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         )
         defer { try? FileManager.default.removeItem(at: fixture.base.root) }
 
+        XCTAssertEqual(try loadRelease(fixture, context: decodePathContext(fixture.context)).qualifiedSlots, 8)
         XCTAssertEqual(
-            try rejectedReleaseEnvelopeError(
+            try loadRelease(
                 fixture,
                 context: decodePathContext(fixture.context, decodePathDigest: String(repeating: "e", count: 64))
-            ),
-            .decodePathMismatch
+            ).qualifiedSlots,
+            4
         )
-        XCTAssertEqual(
-            try rejectedReleaseEnvelopeError(fixture, context: decodePathContext(fixture.context, slotCount: 4)),
-            .decodePathMismatch
+        XCTAssertEqual(try loadRelease(fixture, context: decodePathContext(fixture.context, slotCount: 4)).qualifiedSlots, 4)
+    }
+
+    private func onDeviceSelfCheckReceipt(tokens: [Int]) -> NativeMTPSelfTestReceipt {
+        NativeMTPSelfTestReceipt(
+            version: NativeMTPSelfTestRunner.capability,
+            tupleSHA256: String(repeating: "1", count: 64),
+            challengeID: "challenge-1",
+            challengeBankSHA256: String(repeating: "2", count: 64),
+            servedSnapshotGeneration: 1,
+            proposalDepth: 1,
+            maxCompletionTokens: 8,
+            promptTokenIDs: [1, 2, 3],
+            generatedTokenIDs: tokens,
+            terminalReason: .stop,
+            acceptedTokens: 2,
+            rejectedTokens: 0,
+            bonusTokens: 1,
+            committedTokens: tokens.count - 1,
+            committedStateDigestSHA256: String(repeating: "3", count: 64),
+            actualDecodePath: .nativeMTP,
+            fallbackUsed: false
         )
-        XCTAssertEqual(try loadRelease(fixture, context: decodePathContext(fixture.context)).qualifiedSlots, 8)
+    }
+
+    /// SPEC-048 0.1.81: a decode-path digest that differs from the signed
+    /// entry still admits the model, and a passing MTP-16 on-device
+    /// self-check then serves native MTP.
+    func testDigestMismatchWithPassingSelfCheckServesNative() throws {
+        let fixture = try makeReleaseEnvelopeFixture(entryEdit: { entry in
+            entry["decode_path_digest"] = DecodePathIdentity.digest
+            entry["metallib_sha256"] = Self.decodePathMetallib
+        })
+        defer { try? FileManager.default.removeItem(at: fixture.base.root) }
+        let admitted = try loadRelease(
+            fixture,
+            context: decodePathContext(fixture.context, decodePathDigest: String(repeating: "e", count: 64))
+        )
+        XCTAssertEqual(admitted.modelID, fixture.context.modelID)
+
+        let tokens = [11, 12, 13, 14]
+        let verdict = NativeMTPOnDeviceSelfCheck.decide(
+            mtpTokens: tokens, mtpSeconds: 0.5, ordinaryTokens: tokens, ordinarySeconds: 1.0
+        )
+        XCTAssertTrue(ModelRuntime.nativeMTPSelfCheckServes(
+            verdict: verdict, receipt: onDeviceSelfCheckReceipt(tokens: tokens)
+        ))
+    }
+
+    /// The same admitted model with a failing self-check (token mismatch or
+    /// no net gain) falls back to ordinary decode for that load.
+    func testDigestMismatchWithFailingSelfCheckFallsBackToOrdinary() throws {
+        let fixture = try makeReleaseEnvelopeFixture(entryEdit: { entry in
+            entry["decode_path_digest"] = DecodePathIdentity.digest
+            entry["metallib_sha256"] = Self.decodePathMetallib
+        })
+        defer { try? FileManager.default.removeItem(at: fixture.base.root) }
+        _ = try loadRelease(
+            fixture,
+            context: decodePathContext(fixture.context, decodePathDigest: String(repeating: "e", count: 64))
+        )
+
+        let tokens = [11, 12, 13, 14]
+        let mismatch = NativeMTPOnDeviceSelfCheck.decide(
+            mtpTokens: [11, 12, 99, 14], mtpSeconds: 0.5, ordinaryTokens: tokens, ordinarySeconds: 1.0
+        )
+        XCTAssertFalse(ModelRuntime.nativeMTPSelfCheckServes(
+            verdict: mismatch, receipt: onDeviceSelfCheckReceipt(tokens: [11, 12, 99, 14])
+        ))
+        let slower = NativeMTPOnDeviceSelfCheck.decide(
+            mtpTokens: tokens, mtpSeconds: 1.5, ordinaryTokens: tokens, ordinarySeconds: 1.0
+        )
+        XCTAssertFalse(ModelRuntime.nativeMTPSelfCheckServes(
+            verdict: slower, receipt: onDeviceSelfCheckReceipt(tokens: tokens)
+        ))
+    }
+
+    /// SPEC-048 0.1.81: a passing self-check logs its challenge output in
+    /// the bank record shape a same-architecture variant's entry takes.
+    func testPassingSelfCheckLogsABankReadyRecord() throws {
+        let line = try XCTUnwrap(ModelRuntime.nativeMTPSelfCheckRecordLogLine(onDeviceSelfCheckReceipt(tokens: [11, 12])))
+        XCTAssertTrue(line.hasPrefix("event=native_mtp_self_check_record challenge_id=challenge-1 record="))
+        let json = try XCTUnwrap(line.split(separator: " ", maxSplits: 2).last?.dropFirst("record=".count))
+        let record = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
+        XCTAssertEqual(record["expected_token_ids"] as? [Int], [11, 12])
+        XCTAssertEqual(record["expected_terminal_reason"] as? String, "stop")
+        XCTAssertEqual(record["expected_committed_state_sha256"] as? String, String(repeating: "3", count: 64))
+        XCTAssertEqual((record["expected_counters"] as? [String: Int])?["committed"], 1)
     }
 
     /// The binding is both fields or neither.

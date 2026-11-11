@@ -1,6 +1,6 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.22.38
+version: v0.22.40
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-10-02
@@ -8,6 +8,10 @@ lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-
 
 ## Change log
 
+- **v0.22.40 (2026-11-10, Related: #2281)** — §12.5 `decode_path_digest`
+  and `metallib_sha256` are recorded provenance only (SPEC-048 0.1.81): an
+  exact match is preferred, a mismatch falls back to the model-keyed entry
+  and never refuses native MTP. R017 drops the identity-only rebind phase.
 - **v0.22.38 (2026-10-27, Related: #2144)** — Qualification uses digest-matched
   LAB evidence, followed by MTP-13 signed identity-only rebind. No collector,
   representative replay or fresh signed predecessor is added as a prerequisite.
@@ -2106,20 +2110,11 @@ app release, through the operator-local catalog-content lane
    exclusions MUST remain unchanged. Unknown inputs, undeclared substitutions,
    extra bundle members or nonreproducible bytes yield `unverified-commit`.
 
-   Assembly has exactly two publication phases. First, the guarded signed
-   acceptance-candidate transaction in SPEC-048-R013 MAY perform only an
-   identity-only rebind of already-qualified one-row, depth-one greedy tuples,
-   preserving their prior request-feature scope and qualification evidence.
-   The protected acceptance run, signature-verified envelope and signed-byte
-   record MUST bind the exact reviewed source, binary SHA-256, CDHash,
-   embedded decode-path digest and other required runtime identities. Second,
-   an expanded GLM sampled profile MAY be assembled and published only after
-   the final signed CLI tag and fleet-recommendation gate in SPEC-048-R013,
-   genuine SPEC-048-R005 token/state correctness evidence, and passing
-   formal SPEC-048-R015 qualification from a digest-matched LAB build. An
-   identity-only recipe MUST NOT add
-   sampled, tools or reasoning eligibility or increase row/depth bounds.
-   The expanded phase does not require an identity-only candidate parent.
+   (v0.22.40) There is no identity-only rebind phase: SPEC-048 0.1.81 makes
+   the decode-path binding provenance only, so a CLI cut publishes no native
+   binding. An expanded GLM sampled profile MAY be assembled and published
+   only after genuine SPEC-048-R005 token/state correctness evidence and
+   passing formal SPEC-048-R015 qualification.
    When no such parent exists, the predecessor release MUST be byte-equal to
    the committed signed predecessor at the frozen reviewed source, including
    its complete feed inventory; the committed predecessor ledger is retained.
@@ -3718,7 +3713,7 @@ unsigned JSON integers and never floats.
 | `source_commit` | full lowercase SHA-1 Git object id, exactly 40 hex characters (a SHA-256 object-format repository needs a consumer amendment first) |
 | `reproducible_build_sha256` | `sha256` |
 | `live_executable_cdhash` | exact lowercase 40-hex Mach-O CodeDirectory CDHash of the signed executable that qualified this tuple; recorded provenance only (v0.22.13) |
-| `decode_path_digest`, `metallib_sha256` | optional, both or neither (v0.22.30): `sha256` of the SPEC-048-R013 decode-path manifest digest and of the Metal library the tuple qualified on. When present, the entry is selected only on an exact decode-path match (with `runtime_revision`, `hardware_class`, `ram_bytes`, `qualified_slots`) and no other entry for the model is a fallback |
+| `decode_path_digest`, `metallib_sha256` | optional, both or neither (v0.22.30): `sha256` of the SPEC-048-R013 decode-path manifest digest and of the Metal library the tuple qualified on. Recorded provenance only (v0.22.40, SPEC-048 0.1.81): an entry matching this Mac on them (with `runtime_revision`, `hardware_class`, `ram_bytes`, `qualified_slots`) is preferred, otherwise the model-keyed entry is used; a mismatch never refuses native MTP. The SPEC-048-R016 on-device self-check decides |
 | `cache_state_classes` | sorted unique array `1..16`; every element is an `mtp_state_class` value (`stageable_rewindable` or `hybrid_stageable_rewindable`) and the array MUST contain the entry's `mtp_state_class`, which the runtime matches against the loaded model |
 | `hardware_class` | lowercase ASCII matching `^[a-z0-9][a-z0-9-]{0,63}$`, the canonical form of the host chip name |
 | `ram_bytes` | exact physical RAM integer `> 0`, not a minimum |

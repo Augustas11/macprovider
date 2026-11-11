@@ -42,12 +42,13 @@ EXPECTED_LOCATIONS = {
 # scripts: the upstream watch imports these names, and a test checks them
 # against the SPEC-048 fork table.
 SPEC048_MLX_SWIFT_LM_FORK = "https://github.com/Augustas11/mlx-swift-lm"
-# 3.32.3-macprovider.37 (#2265) is .34 (`647b24d`) plus one commit: GLM-5-Next
-# projects 1...8 decode tokens with one kernel. .34 (#2234) is .32 (`6c27b74`)
-# plus one commit that pins mlx-swift 0.32.3-macprovider.13. .32 (#2244, #2189)
-# on .25 maps a Hugging Face per-layer quantization map to module paths at load.
-SPEC048_MLX_SWIFT_LM_TAG = "3.32.3-macprovider.37"
-SPEC048_MLX_SWIFT_LM_REVISION = "aea3da145b448542088efd73ab77a2cf54038e53"
+# 3.32.3-macprovider.38 (#2265) is .35 (`c9d8a93`) plus two commits: the
+# mlx-swift 0.32.3-macprovider.13 pin (#2234) and GLM-5-Next projecting 1...8
+# decode tokens with one kernel. .35 (#2270) on .32 adds the `ricursive` text
+# model (Ripple-65B Preview) and its prefill chunk. .32 (#2244, #2189) on .25
+# maps a Hugging Face per-layer quantization map to module paths at load.
+SPEC048_MLX_SWIFT_LM_TAG = "3.32.3-macprovider.38"
+SPEC048_MLX_SWIFT_LM_REVISION = "dab7764e1b082f1b5bf411a1f3282ef2830204e7"
 SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE = "3b339ad6e3b3f44c8121ecff5131c7fd55e075e6"
 SPEC048_MLX_SWIFT_FORK = "https://github.com/Augustas11/mlx-swift"
 SPEC048_MLX_SWIFT_TAG = "0.32.3-macprovider.13"

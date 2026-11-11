@@ -139,11 +139,64 @@ def _manifest_ids(root: Path) -> tuple[set[str], set[str], set[str]]:
     return specs, requirements, domains
 
 
+def _touches_specs(changed: list[str]) -> bool:
+    return any(path.startswith("specs/") for path in changed)
+
+
+def derive_declaration(root: Path, changed: list[str]) -> dict[str, Any]:
+    """Build the declaration a PR that leaves specs/ alone would have written.
+
+    A changed path maps to every CONFORMANCE requirement whose implementation or
+    tests entry names that file, then to the requirement's spec, then to the
+    AUTHORITY.json domains that spec owns. The result is informational: it is
+    printed in CI so reviewers see the touched contract surface without anyone
+    hand-writing it.
+    """
+    result = ValidationResult()
+    conformance = _load_json(root / "specs" / "CONFORMANCE.json", result)
+    authority = _load_json(root / "specs" / "AUTHORITY.json", result)
+    if not isinstance(conformance, dict):
+        conformance = {}
+    if not isinstance(authority, dict):
+        authority = {}
+    changed_set = set(changed)
+    requirements: set[str] = set()
+    specs: set[str] = set()
+    for item in conformance.get("requirements", []):
+        if not isinstance(item, dict):
+            continue
+        refs = [ref for key in ("implementation", "tests") for ref in item.get(key) or [] if isinstance(ref, str)]
+        if any(ref.split(":", 1)[0] in changed_set for ref in refs):
+            if isinstance(item.get("requirement_id"), str):
+                requirements.add(item["requirement_id"])
+            if isinstance(item.get("spec_id"), str):
+                specs.add(item["spec_id"])
+    domains = {
+        item["id"]
+        for item in authority.get("domains", [])
+        if isinstance(item, dict) and isinstance(item.get("id"), str) and item.get("owner_spec") in specs
+    }
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "derived_from": "git-diff",
+        "behavior_change": "none" if all(_governance_only(path) for path in changed) else "yes",
+        "contract_change": "none",
+        "specs": sorted(specs),
+        "requirements": sorted(requirements),
+        "authority_domains": sorted(domains),
+    }
+
+
 def validate_body(
     body: str,
     root: Path | None = None,
     changed_paths: list[str] | None = None,
 ) -> list[str]:
+    # A PR that leaves specs/ alone needs no hand-written block: CI derives the
+    # declaration from the diff. Only a known, non-empty diff qualifies, so an
+    # unknown diff or any specs/ change still fails closed without a block.
+    if BEGIN not in body and END not in body and changed_paths and not _touches_specs(changed_paths):
+        return []
     declaration, errors = _extract_declaration(body)
     if declaration is None:
         return errors
@@ -269,6 +322,10 @@ def main(argv: list[str] | None = None) -> int:
         for error in errors:
             print(f"error: {error}", file=sys.stderr)
         return 1
+    if BEGIN not in body and END not in body:
+        print("SPEC governance declaration derived from the diff (specs/ unchanged):")
+        print(json.dumps(derive_declaration(root, changed), indent=2))
+        return 0
     print("SPEC governance PR declaration passed")
     return 0
 

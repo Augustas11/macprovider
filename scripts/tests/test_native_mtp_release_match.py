@@ -24,52 +24,37 @@ class ReleaseMatchTests(unittest.TestCase):
             qualified_slots=4, runtime_revision='b' * 40,
             decode_path_digest='c' * 64, metallib_sha256='d' * 64)
         self.admission = {'entries': [self.entry]}
-        # An independent packaged admission scope may contain historical runtime
-        # identity; those fields must never override the actual binary's identity.
-        self.scope = copy.deepcopy(self.admission)
-        self.scope['entries'][0]['runtime_revision'] = 'e' * 40
-        self.scope['entries'][0]['decode_path_digest'] = 'f' * 64
-        self.scope['entries'][0]['metallib_sha256'] = '0' * 64
+        self.scope = {'entries': []}
         self.identity = {field: self.entry[field] for field in MATCH.IDENTITY_FIELDS}
 
-    def test_matches_actual_release_identity_and_independent_packaged_scope(self):
-        MATCH.verify_entries(self.admission, self.scope, self.identity)
-
-    def test_each_provider_match_field_refuses_and_names_mismatch(self):
-        # Explicitly cover every predicate in matches + matchesDecodePath.
-        changes = dict(model_key='other/model', artifact_hash='0' * 64,
-            runtime_revision='0' * 40, hardware_class='apple-m4-max',
-            ram_bytes=128 * 1024**3, qualified_slots=8,
-            decode_path_digest='0' * 64, metallib_sha256='0' * 64)
-        for field, wrong in changes.items():
+    def test_signed_entries_need_no_packaged_scope_or_release_identity(self):
+        # SPEC-048 0.1.81: a new tuple's admission activates without a CLI cut,
+        # and a CLI cut with a different runtime identity needs no rebind.
+        MATCH.verify_entries(self.admission)
+        for field, wrong in dict(runtime_revision='0' * 40, decode_path_digest='0' * 64,
+                                 metallib_sha256='0' * 64).items():
             with self.subTest(field=field):
                 admission = copy.deepcopy(self.admission)
                 admission['entries'][0][field] = wrong
+                MATCH.verify_entries(admission)
+
+    def test_missing_scope_field_refuses_and_names_it(self):
+        for field in MATCH.SCOPE_FIELDS:
+            with self.subTest(field=field):
+                admission = copy.deepcopy(self.admission)
+                del admission['entries'][0][field]
                 with self.assertRaisesRegex(MATCH.MatchError, field):
-                    MATCH.verify_entries(admission, self.scope, self.identity)
-
-    def test_checks_every_entry_in_multimodel_set(self):
-        second = dict(self.entry, model_key='qwen/test', qualified_slots=8)
-        self.scope['entries'].append(copy.deepcopy(second))
-        self.admission['entries'].append(dict(second, runtime_revision='0' * 40))
-        with self.assertRaisesRegex(MATCH.MatchError, 'runtime_revision.*qwen/test'):
-            MATCH.verify_entries(self.admission, self.scope, self.identity)
-
-    def test_cannot_mix_scope_fields_from_different_signed_entries(self):
-        self.scope['entries'].append(dict(self.entry, model_key='other', qualified_slots=8))
-        self.entry['qualified_slots'] = 8
-        with self.assertRaisesRegex(MATCH.MatchError, 'qualified_slots'):
-            MATCH.verify_entries(self.admission, self.scope, self.identity)
+                    MATCH.verify_entries(admission)
 
     def test_duplicate_matching_context_rejected_even_with_distinct_sort_keys(self):
         self.admission['entries'].append(dict(self.entry, artifact_id='other', proposal_depth=2))
         with self.assertRaisesRegex(MATCH.MatchError, 'entries.*ambiguous'):
-            MATCH.verify_entries(self.admission, self.scope, self.identity)
+            MATCH.verify_entries(self.admission)
 
-    def test_empty_or_missing_scope_fails_closed(self):
-        for admission, scope in [({}, self.scope), ({'entries': []}, self.scope), (self.admission, {})]:
+    def test_empty_admission_fails_closed(self):
+        for admission in ({}, {'entries': []}, {'entries': ['x']}):
             with self.subTest(admission=admission), self.assertRaises(MATCH.MatchError):
-                MATCH.verify_entries(admission, scope, self.identity)
+                MATCH.verify_entries(admission)
 
     def test_integer_fields_do_not_accept_booleans_or_strings(self):
         for field in ('ram_bytes', 'qualified_slots'):
@@ -78,7 +63,7 @@ class ReleaseMatchTests(unittest.TestCase):
                     admission = copy.deepcopy(self.admission)
                     admission['entries'][0][field] = value
                     with self.assertRaisesRegex(MATCH.MatchError, field):
-                        MATCH.verify_entries(admission, self.scope, self.identity)
+                        MATCH.verify_entries(admission)
 
     def test_source_identity_reads_package_pin_at_release_commit(self):
         commit = 'a' * 40
