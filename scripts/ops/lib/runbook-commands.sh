@@ -15,6 +15,7 @@ RB_CATALOG_RESTORE|docs/runbooks/pearl-coordinator-rollout.md|Run, with an autom
 RB_NATIVE_AUTOTUNE_KEYS|docs/runbooks/native-mtp-enablement.md|## Order|1
 RB_NATIVE_POOL_CANARY|docs/runbooks/native-mtp-enablement.md|## Order|2"
 
+# pearl-runtime.sh step apply runs the preflight, then RB_PEARL_APPLY.
 RB_PEARL_PREFLIGHT='ssh <pearl-ssh> '"'"'df -h /; du -sh /var/lib/macprovider-pearl-updater/transactions;
   systemctl list-units --all "mp-update*" --no-legend; pgrep -af "pearl-update|deploy-pearl";
   curl -s <coordinator-url>/healthz; readlink /opt/macprovider/autotune/current'"'"''

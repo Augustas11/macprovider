@@ -186,7 +186,7 @@ chmod +x "$tmp/bin/gh" "$tmp/bin/ssh" "$tmp/bin/systemctl" "$tmp/bin/journalctl"
 # Pearl's sudo (the ssh stub already runs as the test user) and the installed
 # coordinator binary for stats-migrate: state in $tmp/pearl/stats-state
 # ("<migration> pending|applied" lines); apply marks all applied.
-printf '#!/usr/bin/env bash\nexec "$@"\n' > "$tmp/bin/sudo"
+printf '#!/usr/bin/env bash\n[ "${1:-}" != -n ] || shift\nexec "$@"\n' > "$tmp/bin/sudo"
 chmod +x "$tmp/bin/sudo"
 mkdir -p "$tmp/pearl/etc"
 printf '000_base applied\n031_attested_hardware applied\n' > "$tmp/pearl/stats-state"
@@ -358,24 +358,75 @@ case "$(next_field command)" in *"--sql \$d/app-attest-recorder-bootstrap.sql --
 rm -f "$tmp/bin/psql"
 
 # stats_migrate (#1984): the signed updater never applies stats migrations, so a
-# pending one under the installed binary is applied before app_attest_recorder,
-# and one of the new binary is applied before health is reported done.
+# pending one under the installed binary is applied by the apply step before
+# the updater starts, and one of the new binary by the health step (or on its
+# own once the release is otherwise live).
 pending_state() { printf '000_base applied\n031_attested_hardware pending\n' > "$tmp/pearl/stats-state"; }
 applied_state() { printf '000_base applied\n031_attested_hardware applied\n' > "$tmp/pearl/stats-state"; }
 : > "$tmp/pearl/stats-calls"
 pending_state
 PEARL_RUNTIME_VERSION=v9.0.1 run_rc 0 "status with a pending stats migration" scripts/ops/pearl-runtime.sh status
-expect_next stats_migrate:mutate
+expect_next app_attest_recorder:mutate
 if [ "$(state_of stats_migrate)" = pending ]; then ok; else bad "stats_migrate state: $(state_of stats_migrate)"; fi
 if [ "$(fact_of stats_migrations_pending)" = 031_attested_hardware ]; then ok; else bad "pending fact: $(fact_of stats_migrations_pending)"; fi
-case "$(next_field expected_downtime)" in none*) ok ;; *) bad "stats downtime: $(next_field expected_downtime)" ;; esac
-case "$(next_field runbook)" in *pearl-coordinator-rollout.md#stats-migrations) ok ;; *) bad "stats runbook: $(next_field runbook)" ;; esac
-case "$(next_field command)" in *adminpw*|*postgres://admin*) bad "stats command carries a DSN" ;; *) ok ;; esac
 if grep -q 'admin-dsn' "$tmp/pearl/stats-calls"; then bad "the DSN was passed in argv"; else ok; fi
 # A read failure blocks and never echoes the DSN.
 FAKE_STATS_CHECK_FAIL=1 PEARL_RUNTIME_VERSION=v9.0.1 run_rc 0 "status with an unreadable stats state" scripts/ops/pearl-runtime.sh status
 expect_next stats_migrate:blocked
 case "$(next_field reason)" in *adminpw*) bad "check failure leaked the DSN" ;; *REDACTED*) ok ;; *) bad "check failure reason: $(next_field reason)" ;; esac
+# With the recorder in place the apply is next (no separate plan step): it runs
+# the preflight, the disk check, the pending stats migrations, then the updater.
+# shellcheck disable=SC2016  # the stub's own "$@" must stay literal
+printf '#!/usr/bin/env bash\nfor a in "$@"; do [ "$a" = -f ] && exit 0; done\ncat >/dev/null\necho t\n' > "$tmp/bin/psql"
+chmod +x "$tmp/bin/psql"
+# The preflight renders only with an https COORDINATOR_URL; this curl serves it
+# from the plain-http fake so /healthz stays readable.
+mkdir -p "$tmp/https-bin"
+# shellcheck disable=SC2016  # the stub's own "$@" must stay literal
+printf '#!/usr/bin/env bash\nexec %q "${@//https:/http:}"\n' "$(command -v curl)" > "$tmp/https-bin/curl"
+chmod +x "$tmp/https-bin/curl"
+PATH="$tmp/https-bin:$PATH" COORDINATOR_URL="https://127.0.0.1:$PORT" PEARL_RUNTIME_VERSION=v9.0.1 run_rc 0 "status with the apply next and a pending stats migration" scripts/ops/pearl-runtime.sh status
+expect_next apply:mutate
+apply_cmd="$(next_field command)"
+case "$apply_cmd" in *"du -sh /var/lib/macprovider-pearl-updater/transactions"*) ok ;; *) bad "apply lacks the preflight" ;; esac
+case "$apply_cmd" in *"largest database snapshot"*) ok ;; *) bad "apply lacks the disk check" ;; esac
+case "$apply_cmd" in *"sudo bash -s -- $PEARL_COORDINATOR_ENV $PEARL_COORDINATOR_BIN apply"*"--apply --tag v9.0.1"*) ok ;; *) bad "apply does not run the stats migrations before the updater" ;; esac
+case "$apply_cmd" in *--plan*|*"flock -n"*) bad "apply still carries the plan step" ;; *) ok ;; esac
+case "$apply_cmd" in *adminpw*|*postgres://admin*) bad "apply command carries a DSN" ;; *) ok ;; esac
+case "$(next_field expected_downtime)" in "about 1-2 min"*) ok ;; *) bad "apply downtime: $(next_field expected_downtime)" ;; esac
+if python3 -c 'import json,sys; ids=[s["id"] for s in json.load(open(sys.argv[1]))["steps"]]; sys.exit(0 if "plan" not in ids and "wait_updater" not in ids else 1)' "$tmp/out"; then ok; else bad "plan or wait_updater is still a step"; fi
+applied_state
+PATH="$tmp/https-bin:$PATH" COORDINATOR_URL="https://127.0.0.1:$PORT" PEARL_RUNTIME_VERSION=v9.0.1 run_rc 0 "status with the apply next and no pending stats migration" scripts/ops/pearl-runtime.sh status
+expect_next apply:mutate
+case "$(next_field command)" in *"sudo bash -s --"*) bad "apply runs stats migrations with none pending" ;; *) ok ;; esac
+# Between the apply and the end of the updater unit the check is skipped (the
+# binary is being swapped); health is next and waits for the unit itself.
+pending_state
+mkdir -p "$MACPROVIDER_OPS_STATE_DIR/pearl-runtime-v9.0.1"
+printf '{"step":"apply","recorded_at":"2026-10-09T00:00:00Z"}\n' > "$MACPROVIDER_OPS_STATE_DIR/pearl-runtime-v9.0.1/apply.json"
+PEARL_RUNTIME_VERSION=v9.0.1 run_rc 0 "status while the updater runs" scripts/ops/pearl-runtime.sh status
+if [ "$(state_of stats_migrate)" = pending ]; then ok; else bad "stats_migrate while the updater runs: $(state_of stats_migrate)"; fi
+expect_next health:mutate
+health_cmd="$(next_field command)"
+case "$health_cmd" in *"is-active --quiet mp-update-9.0.1"*"buyer_hold"*"sudo bash -s -- $PEARL_COORDINATOR_ENV $PEARL_COORDINATOR_BIN apply"*"_apply-downtime v9.0.1"*) ok ;; *) bad "health command order: $health_cmd" ;; esac
+case "$(next_field expected_downtime)" in none*) ok ;; *) bad "health downtime: $(next_field expected_downtime)" ;; esac
+# The release-train line comes from the updater audit log.
+printf '%s\n' '{"ts":"2026-11-11T01:00:00Z","event":"rollout_started","candidate":"v9.0.1"}' \
+  '{"ts":"2026-11-11T01:00:10Z","event":"service_action","outcome":"success","unit":"macprovider-gateway.service","action":"stop"}' \
+  '{"ts":"2026-11-11T01:01:25Z","event":"service_action","outcome":"success","unit":"macprovider-gateway.service","action":"start"}' \
+  '{"ts":"2026-11-11T01:07:00Z","event":"rollout_completed"}' > "$tmp/pearl/audit.jsonl"
+PEARL_UPDATER_AUDIT="$tmp/pearl/audit.jsonl" run_rc 0 "apply downtime line" scripts/ops/pearl-runtime.sh _apply-downtime v9.0.1
+if grep -q 'Release train line: Pearl runtime v9.0.1 applied; measured apply downtime 75 s' "$tmp/out"; then ok; else bad "downtime line: $(cat "$tmp/out")"; fi
+PEARL_UPDATER_AUDIT="$tmp/pearl/audit.jsonl" run_rc 0 "apply downtime line for another tag" scripts/ops/pearl-runtime.sh _apply-downtime v9.0.2
+if grep -q 'apply downtime not measured' "$tmp/out"; then ok; else bad "unmeasured downtime line: $(cat "$tmp/out")"; fi
+rm -f "$tmp/bin/psql"
+# New binary live (v9.0.1) with a pending migration: not done until applied.
+health v9.0.1 $LIVE
+PEARL_RUNTIME_VERSION=v9.0.1 run_rc 0 "status with the new binary live and a pending migration" scripts/ops/pearl-runtime.sh status
+expect_next stats_migrate:mutate
+case "$(next_field expected_downtime)" in none*) ok ;; *) bad "stats downtime: $(next_field expected_downtime)" ;; esac
+case "$(next_field runbook)" in *pearl-coordinator-rollout.md#stats-migrations) ok ;; *) bad "stats runbook: $(next_field runbook)" ;; esac
+case "$(next_field command)" in *adminpw*|*postgres://admin*) bad "stats command carries a DSN" ;; *) ok ;; esac
 # A failed apply leaves the step pending and hands the lock back.
 FAKE_STATS_APPLY_FAIL=1 PEARL_RUNTIME_VERSION=v9.0.1 MACPROVIDER_OPS_OWNER=t run_rc 1 "failed stats apply" scripts/ops/pearl-runtime.sh next --run
 expect_lock_free
@@ -389,24 +440,10 @@ pending_state
 FAKE_STATS_NOISE=1 PEARL_RUNTIME_VERSION=v9.0.1 MACPROVIDER_OPS_OWNER=t run_rc 0 "stats apply with noisy output" scripts/ops/pearl-runtime.sh next --run
 if grep -Eq 'leakpw|sec ret' "$tmp/out" "$tmp/err"; then bad "noisy DSN leaked"; else ok; fi
 if grep -q 'password=REDACTED' "$tmp/out" && ! grep -q "$(printf '\033')" "$tmp/out"; then ok; else bad "noisy output not cleaned"; fi
-PEARL_RUNTIME_VERSION=v9.0.1 run_rc 0 "status after the stats apply" scripts/ops/pearl-runtime.sh status
-if [ "$(state_of stats_migrate)" = done ]; then ok; else bad "stats_migrate state after apply: $(state_of stats_migrate)"; fi
-expect_next app_attest_recorder:mutate
-# Between the apply and the end of the updater unit the check is skipped (the
-# binary is being swapped).
-pending_state
-mkdir -p "$MACPROVIDER_OPS_STATE_DIR/pearl-runtime-v9.0.1"
-printf '{"step":"apply","recorded_at":"2026-10-09T00:00:00Z"}\n' > "$MACPROVIDER_OPS_STATE_DIR/pearl-runtime-v9.0.1/apply.json"
-PEARL_RUNTIME_VERSION=v9.0.1 run_rc 0 "status while the updater runs" scripts/ops/pearl-runtime.sh status
-if [ "$(state_of stats_migrate)" = pending ]; then ok; else bad "stats_migrate while the updater runs: $(state_of stats_migrate)"; fi
-case "$(next_field id)" in stats_migrate) bad "stats migrate offered during the apply window" ;; *) ok ;; esac
-# New binary live (v9.0.1) with a pending migration: not done until applied.
-health v9.0.1 $LIVE
-PEARL_RUNTIME_VERSION=v9.0.1 run_rc 0 "status with the new binary live and a pending migration" scripts/ops/pearl-runtime.sh status
-expect_next stats_migrate:mutate
 applied_state
 PEARL_RUNTIME_VERSION=v9.0.1 run_rc 0 "status with the new binary live" scripts/ops/pearl-runtime.sh status
 expect_next done:done
+if [ "$(state_of stats_migrate)" = done ]; then ok; else bad "stats_migrate state after apply: $(state_of stats_migrate)"; fi
 # Unknown is not "nothing pending": without ssh the live release is not done.
 PEARL_SSH= PEARL_RUNTIME_VERSION=v9.0.1 run_rc 0 "status with the new binary live and no ssh" scripts/ops/pearl-runtime.sh status
 expect_next stats_migrate:blocked
@@ -417,7 +454,7 @@ expect_next health:blocked
 case "$(next_field reason)" in *"gateway version unknown"*) ok ;; *) bad "unknown gateway reason: $(next_field reason)" ;; esac
 if [ "$(state_of code_changed)" = done ]; then ok; else bad "code_changed with the coordinator live: $(state_of code_changed)"; fi
 GATEWAY_URL="http://127.0.0.1:1" PEARL_RUNTIME_VERSION=v9.0.1 run_rc 0 "status with the coordinator live and the gateway down" scripts/ops/pearl-runtime.sh status
-expect_next health:read
+expect_next health:mutate
 case "$(next_field reason)" in *"gateway unhealthy"*) ok ;; *) bad "unhealthy gateway reason: $(next_field reason)" ;; esac
 if grep -q "code identical\|identical to live" "$tmp/out" "$tmp/err"; then bad "status still claims identical code"; else ok; fi
 rm -rf "$MACPROVIDER_OPS_STATE_DIR/pearl-runtime-v9.0.1"

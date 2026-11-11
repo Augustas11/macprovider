@@ -60,7 +60,7 @@ The coordinator records App Attest verifications through the
 case on Pearl. A full deploy (`deploy-pearl-vps.sh`) refuses without it.
 Provision it once, before the first runtime apply that carries the App Attest
 endpoints. `scripts/ops/pearl-runtime.sh` shows this as step
-`app_attest_recorder`, before the plan, and runs it with `next --run`. The step
+`app_attest_recorder`, before the apply, and runs it with `next --run`. The step
 itself restarts nothing and causes no downtime; the apply's coordinator restart
 loads the new variable.
 
@@ -139,6 +139,24 @@ ssh pearl 'systemd-run --unit=mp-update-<ver> -p Environment=PYTHONDONTWRITEBYTE
   live DB for diagnostics either: it restarts on every write and never
   finishes.
 
+### With `pearl-runtime.sh`
+
+`scripts/ops/pearl-runtime.sh` runs the rollout in two Pearl steps:
+
+- **`apply`** runs the preflight above, checks that the updater's
+  transactions directory has more free space than the largest database
+  snapshot it keeps, applies any stats migrations already pending (below), then
+  starts the updater unit. There is no separate plan step: the updater
+  validates the signed release and takes its own locks before it changes
+  anything.
+- **`health`** waits (bounded by `UPDATER_WAIT_MAX_S`, default 2700 s) for the
+  updater unit to exit and shows its result, requires the coordinator and
+  gateway `/healthz` to report the tag and the gateway to report no
+  `buyer_hold`, applies the new binary's stats migrations, then prints the
+  measured apply downtime from the updater audit log as one line. Paste that
+  line into `docs/releases/coordinator-release-train.md`; the script commits
+  nothing.
+
 ## Stats migrations
 
 The signed updater never runs `coordinator stats-migrate`
@@ -147,14 +165,16 @@ migration that ships in a runtime release therefore stays pending until
 someone applies it. `scripts/ops/pearl-runtime.sh` shows this as step
 `stats_migrate`. It runs `stats-migrate --check` on Pearl with the installed
 coordinator binary and is pending when any line of the output ends in
-`pending`. A binary knows only the migrations it embeds, so the step is
-checked at two points:
+`pending`. A binary knows only the migrations it embeds, so they are applied at
+two points, neither a stop of its own:
 
-- **Before `app_attest_recorder`, while no apply has run.** The installed
-  binary may carry migrations an earlier release shipped and nobody applied.
-- **After `wait_updater`, before health is reported done.** The new binary is
-  live and its own migrations are now known. A release is not done while they
-  are pending.
+- **In the `apply` step, while no apply has run.** The installed binary may
+  carry migrations an earlier release shipped and nobody applied. The apply
+  step applies them before it starts the updater.
+- **In the `health` step.** It waits for the updater unit, checks both
+  `/healthz`, then applies the new binary's own migrations. A release is not
+  done while they are pending; if they are still pending once the release is
+  otherwise live, `stats_migrate` is offered as a step on its own.
 
 Between the apply and the end of the updater unit the check is skipped, because
 the binary is being replaced.
