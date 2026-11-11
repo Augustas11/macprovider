@@ -335,11 +335,14 @@ func TestExtractDeviceAttestationCertsErrorsAndEncodings(t *testing.T) {
 	if _, err := extractDeviceAttestationCerts(42); err == nil {
 		t.Fatal("unexpected type must error")
 	}
-	der := []byte{0xfb, 0xff, 0xfe}
-	for name, enc := range map[string]*base64.Encoding{"url": base64.URLEncoding, "rawurl": base64.RawURLEncoding, "raw": base64.RawStdEncoding} {
-		got, err := decodeBase64Cert(" " + enc.EncodeToString(der) + " ")
-		if err != nil || !bytes.Equal(got, der) {
-			t.Errorf("%s: got %x err=%v", name, got, err)
+	// 1- and 2-byte payloads need padding in the padded encodings, so the
+	// unpadded raw variants are only decodable by the raw decoders.
+	for _, der := range [][]byte{{0xfb}, {0xfb, 0xff}} {
+		for name, enc := range map[string]*base64.Encoding{"std": base64.StdEncoding, "url": base64.URLEncoding, "rawstd": base64.RawStdEncoding, "rawurl": base64.RawURLEncoding} {
+			got, err := decodeBase64Cert(" " + enc.EncodeToString(der) + " ")
+			if err != nil || !bytes.Equal(got, der) {
+				t.Errorf("%s %x: got %x err=%v", name, der, got, err)
+			}
 		}
 	}
 	// Opaque non-cert DER passes through as a single-element chain.
