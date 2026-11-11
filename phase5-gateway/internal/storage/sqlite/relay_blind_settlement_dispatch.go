@@ -37,6 +37,10 @@ func (s *Store) ensureRelayBlindSettlementDispatchColumns(ctx context.Context) e
 		}
 		existing[name] = true
 	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
 	if err := rows.Close(); err != nil {
 		return err
 	}

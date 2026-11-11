@@ -30,6 +30,10 @@ func (s *Store) ensureQuotaReservationFundingSource(ctx context.Context) error {
 			found = true
 		}
 	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
 	if err := rows.Close(); err != nil {
 		return err
 	}

@@ -346,6 +346,10 @@ func (s *Store) ensureDemandEventsObservationColumns(ctx context.Context) error 
 		}
 		existing[name] = true
 	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
 	if err := rows.Close(); err != nil {
 		return err
 	}
@@ -399,6 +403,10 @@ func (s *Store) ensureDemandEventsPrivacyBuckets(ctx context.Context) error {
 				failureReason:  cleanFailure,
 			})
 		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
 	}
 	if err := rows.Close(); err != nil {
 		return err
@@ -518,6 +526,10 @@ func (s *Store) ensureRelayBlindAccountingColumns(ctx context.Context) error {
 			}
 			existing[name] = true
 		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return err
+		}
 		if err := rows.Close(); err != nil {
 			return err
 		}
@@ -568,6 +580,10 @@ func (s *Store) ensureSettlementReconcileBacklogColumns(ctx context.Context) err
 			return err
 		}
 		existing[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
 	}
 	if err := rows.Close(); err != nil {
 		return err
@@ -798,6 +814,10 @@ func (s *Store) ensureUsageEventsCompositePK(ctx context.Context) error {
 			pkCols = append(pkCols, col{name: name, pk: pk})
 		}
 	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
 	if err := rows.Close(); err != nil {
 		return err
 	}
@@ -910,6 +930,10 @@ func (s *Store) ensureDemoUsageEventsCompositePK(ctx context.Context) error {
 		if pk > 0 {
 			pkCols = append(pkCols, col{name: name, pk: pk})
 		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
 	}
 	if err := rows.Close(); err != nil {
 		return err
