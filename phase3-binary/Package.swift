@@ -17,6 +17,13 @@ let package = Package(
         )
     ],
     dependencies: [
+        // Tag 3.32.3-macprovider.40 (#2231) is .38 plus three commits: the
+        // LiquidAI LFM3 text model (`lfm3`, upstream ml-explore/mlx-swift-lm
+        // #750) and its registry entry, the #756 hardening (config and
+        // tokenizer validation, padded conv rows masked) and the integration
+        // project's swift-transformers 1.4.0 requirement. New model files, a
+        // registry line and a default no-op `validate(tokenizer:)`; no other
+        // model's code and no shared cache, attention or generation code.
         // Tag 3.32.3-macprovider.38 (#2265) is .35 plus two commits: the
         // mlx-swift 0.32.3-macprovider.13 pin (#2234) and GLM-5-Next projecting
         // 1...8 decode tokens with one kernel, so its rows stay bitwise when
@@ -81,11 +88,11 @@ let package = Package(
         // compatible per-column attention while retaining row-owned caches.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "dab7764e1b082f1b5bf411a1f3282ef2830204e7"
+            revision: "a7374a810bc5d5b5079ce998e61609ecf7e44acd"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",
-            exact: "1.3.5"
+            exact: "1.4.0"
         ),
         // swift-transformers 1.3.4 resolves swift-jinja 2.4.2 transitively; pin
         // it directly so `import Jinja` (native null tool-schema rendering,
