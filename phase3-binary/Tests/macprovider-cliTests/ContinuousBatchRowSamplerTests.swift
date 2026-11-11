@@ -75,6 +75,19 @@ final class ContinuousBatchRowSamplerTests: XCTestCase {
         XCTAssertEqual(tokens, [1, 2])
     }
 
+    /// The decode window reads sampled tokens as `UInt32`, so the host read
+    /// adds no device op behind the step in flight (#2256). Both sampler
+    /// branches must keep returning uint32.
+    func testSampledTokensAreUInt32ForGreedyAndSeededRows() throws {
+        try requireMetal()
+        let logits = MLXArray([0.1, 3.0, 0.2, -1.0, 2.0, 5.0] as [Float]).reshaped([2, 3])
+        let greedy = ContinuousBatchRowSampler.sample(logits: logits, rows: [row(0), row(0)])
+        XCTAssertEqual(greedy.dtype, .uint32)
+        XCTAssertEqual(greedy.asArray(UInt32.self).map(Int.init), [1, 2])
+        let mixed = ContinuousBatchRowSampler.sample(logits: logits, rows: [row(0), row(0.7, seed: 3)])
+        XCTAssertEqual(mixed.dtype, .uint32)
+    }
+
     func testUnconstrainedSamplingPreservesLogitsAndLogProbabilities() throws {
         try requireMetal()
         Device.withDefaultDevice(.cpu) {

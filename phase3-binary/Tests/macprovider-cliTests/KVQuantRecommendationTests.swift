@@ -44,8 +44,16 @@ final class KVQuantRecommendationTests: XCTestCase {
         XCTAssertEqual(KVQuantRecommendation.recommendedKVBits(for: "mlx-community/gemma-4-26b-a4b-it-4bit"), 8)
     }
 
-    func testGPTOSSReturnsEightBits() {
-        XCTAssertEqual(KVQuantRecommendation.recommendedKVBits(for: "mlx-community/gpt-oss-20b-MXFP4-Q8"), 8)
+    /// SPEC-039 FR-PKV5 v0.1.33: gpt-oss attention sinks have no quantized-KV
+    /// path, so the family has no KV-quant default and refuses explicit kv_bits.
+    func testGPTOSSHasNoDefaultAndRefusesQuantizedKV() {
+        for modelID in ["mlx-community/gpt-oss-20b-MXFP4-Q8", "openai/gpt-oss-120b", "mlx-community/gpt-oss-120b-4bit"] {
+            XCTAssertNil(KVQuantRecommendation.recommendedKVBits(for: modelID), modelID)
+            let refusal = KVQuantRecommendation.quantizedKVRefusal(for: modelID)
+            XCTAssertEqual(refusal?.hasPrefix("kv_bits_attention_sinks_unsupported:"), true, modelID)
+        }
+        XCTAssertNil(KVQuantRecommendation.quantizedKVRefusal(for: "mlx-community/gemma-4-26b-a4b-it-4bit"))
+        XCTAssertNil(KVQuantRecommendation.quantizedKVRefusal(for: "mlx-community/Qwen3-32B-4bit"))
     }
 
     func testUnvalidatedModelsReturnNil() {

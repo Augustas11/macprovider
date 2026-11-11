@@ -67,9 +67,9 @@ scrape leftover from the restored line on the same log; buyer-visible
 `cached_prompt_tokens=0` on all 30 miss samples.
 
 Redacted cycle records:
-[`data/kvs01a-2026-09-20/gate-samples.redacted.json`](data/kvs01a-2026-09-20/gate-samples.redacted.json).
+`data/kvs01a-2026-09-20/gate-samples.redacted.json` (raw data lives in the private archive).
 Driver transcript (hashes only):
-[`data/kvs01a-2026-09-20/gate.out`](data/kvs01a-2026-09-20/gate.out).
+`data/kvs01a-2026-09-20/gate.out` (raw data lives in the private archive).
 
 ## Purge primitive (same lab namespace)
 

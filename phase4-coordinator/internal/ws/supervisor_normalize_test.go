@@ -8,7 +8,6 @@ import (
 )
 
 const testBootUUID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
-const testInstUUID = "11111111-1111-1111-1111-111111111111"
 
 func baseWire() supervisorEventWire {
 	return supervisorEventWire{

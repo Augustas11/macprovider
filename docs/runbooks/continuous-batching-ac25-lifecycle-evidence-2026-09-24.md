@@ -2,7 +2,7 @@
 
 Phase B of [`continuous-batching-ac25-m2-plan.md`](continuous-batching-ac25-m2-plan.md)
 (M2 of #1646). Lane I only; see "Lane L" below for why the live lane was not run.
-Raw, sanitized JSON: [`data/cb-ac25-m2-2026-09-24/`](data/cb-ac25-m2-2026-09-24/)
+Raw, sanitized JSON: `data/cb-ac25-m2-2026-09-24/` (raw data lives in the private archive)
 (final pass at the top level, the confirming second pass under `rerun/`).
 
 **Headline: the batched serve path produces wrong output and occasionally

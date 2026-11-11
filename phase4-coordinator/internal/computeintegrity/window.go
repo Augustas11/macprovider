@@ -193,20 +193,6 @@ func (s *Store) RecordAbusiveInconclusive(key ComputeIntegrityKey, atMs int64, l
 	}
 }
 
-// RecordOnboardingFailure records an onboarding-failure event (FR-11); two failures
-// in 24h move the key to blocked:manual_review_required in enforce mode.
-func (s *Store) RecordOnboardingFailure(key ComputeIntegrityKey, atMs int64, origin AdjudicationOrigin) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	ov := s.overlay(key.Overlay())
-	ov.onboardingFailures = pruneWindow(append(ov.onboardingFailures, atMs), atMs, day)
-	if len(ov.onboardingFailures) >= 2 && ov.canEnterProviderBlock() {
-		ov.enterBlock(StateBlockedManualReview, origin, atMs) // enterBlock records the origin.
-	} else {
-		ov.origin = strongerOrigin(ov.origin, origin) // just record the strongest risk origin.
-	}
-}
-
 const day = int64(24 * 3600 * 1000)
 
 func pruneWindow(times []int64, now, window int64) []int64 {

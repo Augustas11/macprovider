@@ -174,10 +174,6 @@ func (s *Server) runRewardsTrustTierReconciliationSweep() {
 	s.rewardsTrustStoreFailures = 0
 }
 
-func (s *Server) trustedRoutingCustodyEligible(ctx context.Context, providerID string) bool {
-	return s.trustedRoutingCustodyEligibleWithProof(ctx, providerID, false)
-}
-
 func (s *Server) trustedRoutingCustodyEligibleWithProof(ctx context.Context, providerID string, durableIdentityVerified bool) bool {
 	if ctx == nil {
 		ctx = context.Background()

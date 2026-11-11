@@ -540,6 +540,20 @@ final class ServingKnobsConfigTests: XCTestCase {
         XCTAssertNil(ModelRuntime.applyMLXCacheLimit(megabytes: Int.max), "an overflowing value must not be converted")
     }
 
+    /// SPEC-039 FR-PKV5 v0.1.33: explicit kv_bits for a gpt-oss model fails
+    /// serve preflight; other models and an unset kv_bits pass.
+    func testServingKnobsPreflightRefusesExplicitKVBitsForGptOss() throws {
+        var config = AppConfig.defaults()
+        config.model = "openai/gpt-oss-120b"
+        XCTAssertNoThrow(try ServeCommand.runServingKnobsPreflight(config))
+        config.kvBitsOverride = 8
+        XCTAssertThrowsError(try ServeCommand.runServingKnobsPreflight(config))
+        config.model = "meta-llama/llama-3.1-8b-instruct"
+        XCTAssertNoThrow(try ServeCommand.runServingKnobsPreflight(config))
+        config.modelCatalogModelID = "mlx-community/gpt-oss-20b-MXFP4-Q8"
+        XCTAssertThrowsError(try ServeCommand.runServingKnobsPreflight(config))
+    }
+
     func testMLXCacheLimitPreflightRejectsOutOfRangeWhateverTheBatchingMode() throws {
         for mode in [ContinuousBatchingMode.off, .canary] {
             var config = AppConfig.defaults()
@@ -3049,29 +3063,40 @@ final class ServingKnobsConfigTests: XCTestCase {
     }
 
     // GLM-5.3-Flash, DeepSeek V4-Flash and MiniMax M3.1-Flash are served with
-    // the wired limit at the recommended working set (mlx-lm's generation
-    // default); every other family keeps the default.
-    func testResidentWeightsTicketOnlyForGLM5NextAtRecommendedWorkingSet() {
+    // the wired limit at the resident weights' size, capped at the recommended
+    // working set; every other family keeps the default (#2249).
+    func testResidentWeightsTicketSizedToResidentWeightsForResidentFamilies() {
         let recommended = 239_143_780_352
+        let weights = 184_730_671_328
         let ticket = ModelRuntime.residentWeightsTicket(
-            modelFamily: "glm5_next", recommendedWorkingSetBytes: recommended)
-        XCTAssertEqual(ticket?.size, recommended)
-        XCTAssertEqual(ticket?.policy.limit(baseline: 0, activeSizes: [recommended]), recommended)
+            modelFamily: "glm5_next", recommendedWorkingSetBytes: recommended, residentBytes: weights)
+        XCTAssertEqual(ticket?.size, weights, "temporaries must not fit under the wired limit")
+        XCTAssertEqual(ticket?.policy.limit(baseline: 0, activeSizes: [weights]), weights)
         XCTAssertEqual(
-            ticket?.policy.canAdmit(baseline: recommended, activeSizes: [recommended], newSize: recommended),
+            ticket?.policy.canAdmit(baseline: weights, activeSizes: [weights], newSize: weights),
             true, "admission must never suspend a model load")
+        XCTAssertEqual(
+            ModelRuntime.residentWeightsTicket(
+                modelFamily: "glm5_next", recommendedWorkingSetBytes: recommended, residentBytes: recommended + 1)?.size,
+            recommended, "MLX rejects a wired limit above the working set")
         for family in ["qwen", "llama", "gpt_oss", "gemma4", "glm4_moe", "nemotron_h", "ricursive", "lfm3", "unknown"] {
             XCTAssertNil(
-                ModelRuntime.residentWeightsTicket(modelFamily: family, recommendedWorkingSetBytes: recommended),
+                ModelRuntime.residentWeightsTicket(
+                    modelFamily: family, recommendedWorkingSetBytes: recommended, residentBytes: weights),
                 family)
         }
         for family in ["deepseek_v4", "minimax_m3"] {
             XCTAssertEqual(
-                ModelRuntime.residentWeightsTicket(modelFamily: family, recommendedWorkingSetBytes: recommended)?.size,
-                recommended, family)
+                ModelRuntime.residentWeightsTicket(
+                    modelFamily: family, recommendedWorkingSetBytes: recommended, residentBytes: weights)?.size,
+                weights, family)
         }
-        XCTAssertNil(ModelRuntime.residentWeightsTicket(modelFamily: "glm5_next", recommendedWorkingSetBytes: nil))
-        XCTAssertNil(ModelRuntime.residentWeightsTicket(modelFamily: "glm5_next", recommendedWorkingSetBytes: 0))
+        XCTAssertNil(ModelRuntime.residentWeightsTicket(
+            modelFamily: "glm5_next", recommendedWorkingSetBytes: nil, residentBytes: weights))
+        XCTAssertNil(ModelRuntime.residentWeightsTicket(
+            modelFamily: "glm5_next", recommendedWorkingSetBytes: 0, residentBytes: weights))
+        XCTAssertNil(ModelRuntime.residentWeightsTicket(
+            modelFamily: "glm5_next", recommendedWorkingSetBytes: recommended, residentBytes: 0))
     }
 
     // glm5_next decode commits command buffers by MLX's op limit, not its

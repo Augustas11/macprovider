@@ -232,7 +232,6 @@ auth:
 
 storage:
   db_path: "coordinator.db"
-  snapshot_interval_s: 300
   # SPEC-005 §2.1b: 14 days; must exceed settlement.nightly_reconcile_window_days.
   request_log_retention_days: 14
 
@@ -322,7 +321,5 @@ endpoints:
 providers:
   - provider_id: "m4-anon"
     endpoint_url: "https://m4.malibu.tech"
-    display_name: "M4 partner (Qwen 7B)"
   - provider_id: "m1-anon"
     endpoint_url: "https://m1.malibu.tech"
-    display_name: "M1 partner (Llama 3B)"

@@ -10,7 +10,7 @@ Before this work, no Qwen3.6 follow-up turn reused its cache on either path.
 - **Batched path:** under `canary`, keyed first turns batch. A batched hybrid
   row retained nothing, so every follow-up was a `cold_start` miss. Round 1 of
   this e2e confirmed this:
-  [`e2e-round1-batched-first-turns-retain-nothing.json`](data/cb-m4-hybrid-2026-09-24/e2e-round1-batched-first-turns-retain-nothing.json).
+  `data/cb-m4-hybrid-2026-09-24/e2e-round1-batched-first-turns-retain-nothing.json` (raw data lives in the private archive).
 
 Every turn re-prefilled the whole conversation.
 

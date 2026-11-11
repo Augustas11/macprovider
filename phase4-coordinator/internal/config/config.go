@@ -1466,8 +1466,7 @@ type GitHubOAuthConfig struct {
 }
 
 type StorageConfig struct {
-	DBPath            string `yaml:"db_path"`
-	SnapshotIntervalS int    `yaml:"snapshot_interval_s"`
+	DBPath string `yaml:"db_path"`
 	// RequestLogRetentionDays bounds request_log (default 14, SPEC-005
 	// §2.1b); it must exceed the nightly reconcile window. Rows a D1a
 	// wholesale statement reads are folded into per-day usage aggregates
@@ -1910,11 +1909,8 @@ type ExplorerConfig struct {
 	GatewayBaseURL                string `yaml:"gateway_base_url"`
 	GatewayTimeoutMs              int    `yaml:"gateway_timeout_ms"`
 	QueryTimeoutMs                int    `yaml:"query_timeout_ms"`
-	PollMinIntervalSeconds        int    `yaml:"poll_min_interval_seconds"`
 	ActivityMaxWindowDays         int    `yaml:"activity_max_window_days"`
 	ActivityDefaultWindowHours    int    `yaml:"activity_default_window_hours"`
-	BuyersMaxWindowDays           int    `yaml:"buyers_max_window_days"`
-	BuyersDefaultWindowHours      int    `yaml:"buyers_default_window_hours"`
 	LedgerMaxWindowDays           int    `yaml:"ledger_max_window_days"`
 	LedgerDefaultWindowHours      int    `yaml:"ledger_default_window_hours"`
 	SessionsMaxWindowDays         int    `yaml:"sessions_max_window_days"`
@@ -1927,7 +1923,6 @@ type ExplorerConfig struct {
 type ProviderConfig struct {
 	ProviderID  string `yaml:"provider_id"`
 	EndpointURL string `yaml:"endpoint_url"`
-	DisplayName string `yaml:"display_name"`
 }
 
 func Default() Config {
@@ -2092,7 +2087,6 @@ func Default() Config {
 		},
 		Storage: StorageConfig{
 			DBPath:                   "coordinator.db",
-			SnapshotIntervalS:        300,
 			RequestLogRetentionDays:  14,
 			RequestLogPruneOnStartup: true,
 			AuditLogPruneOnStartup:   true,
@@ -2222,11 +2216,8 @@ func Default() Config {
 			BindPath:                      "/admin/explorer/",
 			GatewayTimeoutMs:              1500,
 			QueryTimeoutMs:                3000,
-			PollMinIntervalSeconds:        5,
 			ActivityMaxWindowDays:         7,
 			ActivityDefaultWindowHours:    24,
-			BuyersMaxWindowDays:           31,
-			BuyersDefaultWindowHours:      168,
 			LedgerMaxWindowDays:           31,
 			LedgerDefaultWindowHours:      168,
 			SessionsMaxWindowDays:         7,
@@ -4440,9 +4431,6 @@ func (c Config) validateExplorer() error {
 	if err := validateExplorerWindow("explorer.activity", c.Explorer.ActivityMaxWindowDays, c.Explorer.ActivityDefaultWindowHours, 1, 31); err != nil {
 		return err
 	}
-	if err := validateExplorerWindow("explorer.buyers", c.Explorer.BuyersMaxWindowDays, c.Explorer.BuyersDefaultWindowHours, 1, 31); err != nil {
-		return err
-	}
 	if err := validateExplorerWindow("explorer.ledger", c.Explorer.LedgerMaxWindowDays, c.Explorer.LedgerDefaultWindowHours, 1, 31); err != nil {
 		return err
 	}
@@ -4457,9 +4445,6 @@ func (c Config) validateExplorer() error {
 	}
 	if c.Explorer.QueryTimeoutMs < 100 || c.Explorer.QueryTimeoutMs > 5000 {
 		return fmt.Errorf("explorer.query_timeout_ms must be between 100 and 5000")
-	}
-	if c.Explorer.PollMinIntervalSeconds < 1 || c.Explorer.PollMinIntervalSeconds > 60 {
-		return fmt.Errorf("explorer.poll_min_interval_seconds must be between 1 and 60")
 	}
 	if c.Explorer.RequestsPerMinuteCap < 1 || c.Explorer.RequestsPerMinuteCap > 60 {
 		return fmt.Errorf("explorer.requests_per_minute_cap must be between 1 and 60")

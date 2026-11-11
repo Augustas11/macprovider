@@ -78,15 +78,14 @@ type StorageConfig struct {
 }
 
 type AuthConfig struct {
-	KeyPrefix             string               `yaml:"key_prefix"`
-	KeyHash               string               `yaml:"key_hash"`
-	KeyHashSecret         string               `yaml:"key_hash_secret"`
-	GitHubOAuthEnabled    bool                 `yaml:"github_oauth_enabled"`
-	EmailMagicLinkEnabled bool                 `yaml:"email_magic_link_enabled"`
-	OAuth                 OAuthConfig          `yaml:"oauth"`
-	Demo                  DemoConfig           `yaml:"demo"`
-	WalletSessions        WalletSessionsConfig `yaml:"wallet_sessions"`
-	WholesaleAccountIDs   []string             `yaml:"wholesale_account_ids"`
+	KeyPrefix           string               `yaml:"key_prefix"`
+	KeyHash             string               `yaml:"key_hash"`
+	KeyHashSecret       string               `yaml:"key_hash_secret"`
+	GitHubOAuthEnabled  bool                 `yaml:"github_oauth_enabled"`
+	OAuth               OAuthConfig          `yaml:"oauth"`
+	Demo                DemoConfig           `yaml:"demo"`
+	WalletSessions      WalletSessionsConfig `yaml:"wallet_sessions"`
+	WholesaleAccountIDs []string             `yaml:"wholesale_account_ids"`
 }
 
 type WalletSessionsConfig struct {
@@ -405,10 +404,9 @@ func Default() Config {
 		},
 		Storage: StorageConfig{Driver: "sqlite", DBPath: "gateway.db"},
 		Auth: AuthConfig{
-			KeyPrefix:             "mp_",
-			KeyHash:               "hmac_sha256",
-			GitHubOAuthEnabled:    true,
-			EmailMagicLinkEnabled: false,
+			KeyPrefix:          "mp_",
+			KeyHash:            "hmac_sha256",
+			GitHubOAuthEnabled: true,
 			OAuth: OAuthConfig{StateMaxPerIP: 20, CallbackAllowlist: []string{
 				"https://api.malibu.tech/auth/github/callback",
 			}, GitHub: GitHubOAuthConfig{

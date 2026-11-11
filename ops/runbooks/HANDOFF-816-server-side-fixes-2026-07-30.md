@@ -25,14 +25,13 @@ Issue **#816** documents why a large/slow single-slot provider (Qwen3-Coder-30B)
 - **Not memory:** a clean 150-token 30B decode at 12k did **zero swap-outs** (`Swapouts` unchanged), decode finished cleanly. Not capacity-bound.
 - **Provider:** inference dispatched via `Task.detached` on the cooperative pool — `phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:779`; heartbeat is a cooperative `Task` — `phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:246–250` (Issue #189 comment explicitly names *"cooperative-task starvation"*, mitigated only by a respawn watchdog).
 - A legitimate ~7s decode (`decode_ms=6797`) hogs the pool far longer than the ~**1500 ms** heartbeat window → heartbeat goes stale.
-- Coordinator staleness threshold hint: `phase4-coordinator/tools/mockprovider/main.go:298` ("coordinator only warns on stale (>1.5x) gaps").
 - Observed: coordinator `provider heartbeat stale gap=1551..2528 threshold=1500` during decode; gateway `deadline_phase=decode_idle decode_ms=0 flush_ms=10003` → "Provider timed out during streaming"; buyer effect `503 no_provider_available`.
 
 ## Fix #2 — coordinator: in-flight = liveness
 **Goal:** the coordinator must not drop a provider from the routable set (or mark it degraded/unavailable) for a stale heartbeat **while it has ≥1 active in-flight request on a slot**. A provider mid-inference is alive.
 **Where to look** (grep `phase4-coordinator`): heartbeat-staleness detection + the routing candidate filter that excludes stale/unready providers (`heartbeat`, `stale`, `routing_decision`, `candidate_count_before_filters`, provider readiness/eviction state). The coordinator already receives `slots_free`/`slots_total` in heartbeats — reconcile with active-request tracking.
 **Design:** while the provider has an active/assigned request (`slots_busy > 0`), suppress stale-heartbeat eviction; optionally scale the threshold by the model's expected per-token latency. **Keep genuine dead-provider detection intact** — an *idle* provider with a stale heartbeat should still be evicted.
-**Tests:** provider with in-flight request + stale heartbeat stays routable; idle provider + stale heartbeat gets evicted. Use `tools/mockprovider` for an integration test.
+**Tests:** provider with in-flight request + stale heartbeat stays routable; idle provider + stale heartbeat gets evicted.
 **Acceptance:** no eviction / no `no_provider` for a provider that is actively decoding.
 
 ## Fix #3 — gateway: adaptive decode_idle

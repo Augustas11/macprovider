@@ -40,7 +40,7 @@ struct MacProviderCLI: AsyncParsableCommand {
         commandName: "malibu-cli",
         abstract: "OpenAI-compatible Malibu (Mac Provider) inference CLI.",
         version: CoordinatorClient.binaryVersion,
-        subcommands: [ServeCommand.self, SelfTestCommand.self, StatusCommand.self, ProviderCommand.self, ClaimCommand.self, CreatorCommand.self, RestartCommand.self, UpdateCommand.self, UninstallCommand.self, ModelsCommand.self, AutotuneCommand.self, BootstrapAuthCommand.self, RotateKeyCommand.self, CredentialsCommand.self, LifecycleStateCommand.self, RecoverUpdateCommand.self, LifecycleLeaseCommand.self, Spec028CanaryCommand.self, Spec028BenchmarkCommand.self, LegacySpec028CanaryCommand.self, LegacySpec028BenchmarkCommand.self, DecodeBenchCommand.self, NativeMTPQualificationCommand.self] + labSubcommands() + [MSBThroughputCommand.self, MSBLoopbackCommand.self, MSBOllamaLoopbackCommand.self, MSBPerplexityCommand.self, MSBComputeScoreCommand.self, EnrollCommand.self, ReleasePayloadPreflightCommand.self, KVCacheCommand.self, DoctorCommand.self, PayoutAddressCommand.self, ConsumeCommand.self, RelayBlindKeyCommand.self] + fixtureSubcommands() + [PrivacyClassCommand.self, AppAttestCommand.self],
+        subcommands: [ServeCommand.self, SelfTestCommand.self, StatusCommand.self, ProviderCommand.self, ClaimCommand.self, CreatorCommand.self, RestartCommand.self, UpdateCommand.self, UninstallCommand.self, ModelsCommand.self, AutotuneCommand.self, BootstrapAuthCommand.self, RotateKeyCommand.self, CredentialsCommand.self, LifecycleStateCommand.self, RecoverUpdateCommand.self, LifecycleLeaseCommand.self, Spec028CanaryCommand.self, Spec028BenchmarkCommand.self, LegacySpec028CanaryCommand.self, LegacySpec028BenchmarkCommand.self, DecodeBenchCommand.self, NativeMTPQualificationCommand.self] + labSubcommands() + [MSBThroughputCommand.self, MSBLoopbackCommand.self, MSBComputeScoreCommand.self, EnrollCommand.self, ReleasePayloadPreflightCommand.self, KVCacheCommand.self, DoctorCommand.self, PayoutAddressCommand.self, ConsumeCommand.self, RelayBlindKeyCommand.self] + fixtureSubcommands() + [PrivacyClassCommand.self, AppAttestCommand.self],
         defaultSubcommand: ServeCommand.self
     )
 
@@ -721,6 +721,12 @@ struct ServeCommand: AsyncParsableCommand {
             FileHandle.standardError.write(Data((
                 "--kv-bits \(kvBits) invalid; must be 4 or 8\n"
             ).utf8))
+            throw ExitCode(2)
+        }
+        if resolved.kvBitsOverride != nil,
+           let refusal = [resolved.model, resolved.modelCatalogModelID, resolved.modelArtifactPath]
+               .compactMap({ $0 }).lazy.compactMap(KVQuantRecommendation.quantizedKVRefusal(for:)).first {
+            FileHandle.standardError.write(Data("--kv-bits refused: \(refusal)\n".utf8))
             throw ExitCode(2)
         }
         if let maxContext = resolved.maxContextOverride, maxContext < 1 {

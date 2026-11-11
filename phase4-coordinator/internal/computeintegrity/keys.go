@@ -172,21 +172,6 @@ func (k ComputeIntegrityKey) Threshold() ThresholdKey {
 	}
 }
 
-// Threshold projects a WindowKey to its ThresholdKey given the covered
-// hardware_runtime_class (the per-key policy invariant that the WindowKey omits, FR-8).
-func (w WindowKey) Threshold(hardwareRuntimeClass string) ThresholdKey {
-	return ThresholdKey{
-		ModelID:              w.ModelID,
-		TargetModelHash:      w.TargetModelHash,
-		TokenizerIdentity:    w.TokenizerIdentity,
-		SamplerStage:         w.SamplerStage,
-		SamplingProfile:      w.SamplingProfile,
-		CorpusVersion:        w.CorpusVersion,
-		ThresholdVersion:     w.ThresholdVersion,
-		HardwareRuntimeClass: hardwareRuntimeClass,
-	}
-}
-
 // SwapLaunderingScope projects an OverlayKey to the (stable_provider_identity,
 // model_id) swap-laundering overlay scope, which spans all artifacts for that
 // provider/model (FR-12).

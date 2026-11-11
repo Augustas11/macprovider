@@ -1344,7 +1344,6 @@ func TestCredentialBootstrapRejectsBearerPinnedAndBoundDifferentKey(t *testing.T
 			cfg.Providers = []config.ProviderConfig{{
 				ProviderID:  providerID,
 				EndpointURL: "https://m4.malibu.tech",
-				DisplayName: "M4 test provider",
 			}}
 		})
 		pub, _, err := ed25519.GenerateKey(nil)

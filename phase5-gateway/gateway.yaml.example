@@ -37,7 +37,6 @@ auth:
   key_hash: hmac_sha256
   key_hash_secret: env:MACPROVIDER_KEY_HASH_SECRET
   github_oauth_enabled: true
-  email_magic_link_enabled: false
   oauth:
     state_max_per_ip: 20
     callback_allowlist:

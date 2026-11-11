@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.85
+**Version:** 0.1.86
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.85",
+  "version": "0.1.86",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -544,12 +544,17 @@ The authorized dependency tuple is exact:
 
 | Repository | Fork tag | Revision | Upstream base |
 |---|---|---|---|
-| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.40` | `a7374a810bc5d5b5079ce998e61609ecf7e44acd` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
+| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.42` | `e0cac0711d20996a40aa1c1ca5a9705e9e8635c7` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
 | `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.13` | `565269220ccc2cc0d2ce149affb98a2f9d9b32ac` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
 | `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.7` | `565070fe4b0f95927f7fdd5fcfb537157605037a` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
 | `https://github.com/Augustas11/mlx-c` | `v0.6.0-macprovider.2` | `2b1ff2b5b5129a6115771da32e1bac3b6b01ab01` | `ml-explore/mlx-c` pinned base (`ebc88f10caa1b625e6b581437a8dea6df8a70085`) |
 
-The mlx-swift-lm row `3.32.3-macprovider.40` is `3.32.3-macprovider.38`
+The mlx-swift-lm row `3.32.3-macprovider.42` is `3.32.3-macprovider.40`
+(`a7374a810bc5d5b5079ce998e61609ecf7e44acd`) plus two GPT-OSS commits (#2254,
+#2255): the GPT-OSS SwiGLU clips with plain Float bounds, so the bf16 activation
+stream no longer promotes to f32, and a lab-only gpt-oss per-layer dump that is off
+unless `MLX_LM_GPTOSS_LAYER_DUMP` is set. Both change `GPTOSS.swift` and its tests
+only. `3.32.3-macprovider.40` is `3.32.3-macprovider.38`
 (`dab7764e1b082f1b5bf411a1f3282ef2830204e7`) plus three commits (#2231). They add
 the LiquidAI LFM3 text model (`lfm3`, upstream `ml-explore/mlx-swift-lm` #750)
 and its registry entry, the upstream #756 hardening (config validation, padded
@@ -2321,6 +2326,11 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.86 (2026-11-11, Related: #2254, #2255)** — R003 names mlx-swift-lm
+  `3.32.3-macprovider.42` (`e0cac0711d20996a40aa1c1ca5a9705e9e8635c7`), which is
+  `3.32.3-macprovider.40` plus the GPT-OSS SwiGLU bf16 clip and a lab-only gpt-oss
+  per-layer dump (off by default). Only GPT-OSS files change. The Swift, core and C
+  rows are unchanged.
 - **0.1.85 (2026-11-11, Related: #2231)** — R003 names mlx-swift-lm
   `3.32.3-macprovider.40` (`a7374a810bc5d5b5079ce998e61609ecf7e44acd`), which is
   `3.32.3-macprovider.38` plus the LiquidAI LFM3 text model, its registry entry

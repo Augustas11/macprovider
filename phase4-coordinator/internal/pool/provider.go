@@ -1040,7 +1040,6 @@ type Registry struct {
 	recoveryHolds           map[string]recoveryHold
 	canarySanctions         map[string]canarySanction
 	lastBreakerRecoveries   map[string]time.Time
-	maxProvider             int
 	hashVerifier            HeartbeatHashVerifier
 	modelIdentityVerifier   ModelIdentityVerifier
 	modelIdentityResolver   ModelIdentityResolver
@@ -3038,8 +3037,8 @@ func (r *Registry) Count() int {
 // the SPEC-008 v0.3 §5.5 five-state enum. Injected into Registry via
 // WithHeartbeatHashVerifier so the pool package stays decoupled from the
 // tier2 catalog package; post-M3-8d DI, the production wiring at
-// internal/ws/server.go binds the *tier2.Catalog instance passed via
-// ws.WithCatalog (default: tier2.Default()) so SIGHUP reload through
+// internal/ws/server.go binds the server's *tier2.Catalog
+// (default: tier2.Default()) so SIGHUP reload through
 // tier2.ConfigureDefaultStrict swaps the underlying state atomically.
 type HeartbeatHashVerifier func(modelID, reportedHash string) HashStatus
 
