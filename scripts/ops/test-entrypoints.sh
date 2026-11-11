@@ -410,6 +410,16 @@ expect_next done:done
 # Unknown is not "nothing pending": without ssh the live release is not done.
 PEARL_SSH= PEARL_RUNTIME_VERSION=v9.0.1 run_rc 0 "status with the new binary live and no ssh" scripts/ops/pearl-runtime.sh status
 expect_next stats_migrate:blocked
+# Coordinator on the target, gateway version unknown or unhealthy: report that
+# and route to health, never "code identical ... cut a runtime release".
+GATEWAY_URL= PEARL_RUNTIME_VERSION=v9.0.1 run_rc 0 "status with the coordinator live and no GATEWAY_URL" scripts/ops/pearl-runtime.sh status
+expect_next health:blocked
+case "$(next_field reason)" in *"gateway version unknown"*) ok ;; *) bad "unknown gateway reason: $(next_field reason)" ;; esac
+if [ "$(state_of code_changed)" = done ]; then ok; else bad "code_changed with the coordinator live: $(state_of code_changed)"; fi
+GATEWAY_URL="http://127.0.0.1:1" PEARL_RUNTIME_VERSION=v9.0.1 run_rc 0 "status with the coordinator live and the gateway down" scripts/ops/pearl-runtime.sh status
+expect_next health:read
+case "$(next_field reason)" in *"gateway unhealthy"*) ok ;; *) bad "unhealthy gateway reason: $(next_field reason)" ;; esac
+if grep -q "code identical\|identical to live" "$tmp/out" "$tmp/err"; then bad "status still claims identical code"; else ok; fi
 rm -rf "$MACPROVIDER_OPS_STATE_DIR/pearl-runtime-v9.0.1"
 health v9.0.0 $LIVE
 

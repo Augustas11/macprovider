@@ -1504,6 +1504,33 @@ EOF
     set_next "done" "done" "$T is live" ""
     return
   fi
+  # Coordinator already on the target but the gateway is not proven on it:
+  # comparing the tag with itself would claim "code identical". Report the
+  # gateway state and route to the health step.
+  if [ -n "$T" ] && [ "$T" = "$live" ]; then
+    local s gw_why
+    if [ -z "$(gateway_url)" ]; then
+      gw_why="gateway version unknown: GATEWAY_URL is unset"
+    elif [ -z "$gw_live" ]; then
+      gw_why="gateway unhealthy: $(gateway_url)/healthz did not answer 200 with a version"
+    else
+      gw_why="gateway reports $gw_live, not $T"
+    fi
+    fact gateway_state "$gw_why"
+    for s in code_changed signed_tag dispatch env_approval plan apply wait_updater; do step "$s" "done" "coordinator reports $T"; done
+    stats_migrate_step
+    step health pending "$gw_why"
+    if [ -z "$(gateway_url)" ]; then
+      set_next health blocked "Check coordinator and gateway health report $T" "" "$gw_why"
+    else
+      set_next health read "Check coordinator and gateway health report $T" \
+"curl -sf \"\$COORDINATOR_URL/healthz\"; echo
+curl -sf \"\$GATEWAY_URL/healthz\"; echo
+curl -sf \"\$COORDINATOR_URL/healthz\" | grep -q '\"version\":\"$T\"'
+curl -sf \"\$GATEWAY_URL/healthz\" | grep -q '\"version\":\"$T\"'" "$gw_why"
+    fi
+    return
+  fi
   case "$changed" in
     true) step code_changed "done" "$ref changes shipped coordinator/gateway code vs live $live" ;;
     false)
