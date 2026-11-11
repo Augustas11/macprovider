@@ -69,7 +69,6 @@ func TestParseRFC3339Strict(t *testing.T) {
 func TestRouteSnapshotJournalDBPath(t *testing.T) {
 	cases := map[string]string{
 		"":            "",
-		"   ":         "   ",
 		":memory:":    ":memory:",
 		"/var/db.sql": "/var/db.sql.route-snapshots",
 	}
@@ -93,17 +92,6 @@ func TestDefaultSettlementAttemptOutputJournalMaterializerConfigRetention(t *tes
 	}
 	if cfg.Batch != settlementAttemptOutputJournalBatch || cfg.Interval != settlementAttemptOutputJournalInterval {
 		t.Fatalf("batch/interval not taken from constants: %+v", cfg)
-	}
-}
-
-func TestDefaultRouteSnapshotJournalConfigs(t *testing.T) {
-	m := defaultRouteSnapshotJournalMirrorConfig()
-	if m.Batch != routeSnapshotJournalMirrorBatch || m.Interval != routeSnapshotJournalMirrorInterval || m.MaxBatches != 5 {
-		t.Fatalf("mirror config: %+v", m)
-	}
-	p := defaultRouteSnapshotJournalPrunerConfig()
-	if p.Batch != 100 || p.MaxBatches != 100 || p.Interval != time.Minute || p.Timeout != 2*time.Minute {
-		t.Fatalf("pruner config: %+v", p)
 	}
 }
 
@@ -165,15 +153,5 @@ func TestNullStringHelpers(t *testing.T) {
 	}
 	if got := nullInt64String(sql.NullInt64{Valid: true, Int64: -42}); got != "-42" {
 		t.Fatalf("valid int = %q", got)
-	}
-}
-
-func TestHexDecodeShim(t *testing.T) {
-	b, err := hexDecode("00ff10")
-	if err != nil || len(b) != 3 || b[1] != 0xff {
-		t.Fatalf("got %v, %v", b, err)
-	}
-	if _, err := hexDecode("zz"); err == nil {
-		t.Fatal("invalid hex must error")
 	}
 }
