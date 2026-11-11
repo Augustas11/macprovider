@@ -610,6 +610,7 @@ EXACT_MODEL_KEY_ALIASES = {
     "z-ai/glm-5.3-flash-uncensored": "zai-org/glm-5.3-flash-uncensored",
     "solstice-ai/glm-5.3-flash-uncensored-mlx-oq4e-dflash2": "zai-org/glm-5.3-flash-uncensored",
     "frogggias/ripple-65b-preview-mlx": "ricursiveai/ripple-65b-preview",
+    "liquidai/lfm3-1.7b-mlx": "liquidai/lfm3-1.7b",
     "tensorfold/deepseek-v4-flash-0731-mxfp4-mlx": "deepseek/deepseek-v4-flash",
     "deepseek-ai/deepseek-v4-flash-0731": "deepseek/deepseek-v4-flash",
 }

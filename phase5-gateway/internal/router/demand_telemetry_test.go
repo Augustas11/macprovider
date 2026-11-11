@@ -508,6 +508,20 @@ func TestDemandTelemetryKnowsRippleIdentitiesExactly(t *testing.T) {
 	}
 }
 
+// #2231: LFM3 1.7B's catalog key and served artifact ids are recorded exactly.
+func TestDemandTelemetryKnowsLFM3IdentitiesExactly(t *testing.T) {
+	for _, model := range []string{"liquidai/lfm3-1.7b", "LiquidAI/LFM3-1.7B-MLX-4bit", "LiquidAI/LFM3-1.7B-MLX-8bit"} {
+		if got := sanitizeDemandModelID(model); got != model {
+			t.Errorf("sanitizeDemandModelID(%q) = %q, want the model itself", model, got)
+		}
+	}
+	for _, model := range []string{"liquidai/lfm3-1.7bx", "liquidai/lfm3-1.7b-mlx-4bit"} {
+		if got := sanitizeDemandModelID(model); got != demandUnknownModelID {
+			t.Errorf("sanitizeDemandModelID(%q) = %q, want %q", model, got, demandUnknownModelID)
+		}
+	}
+}
+
 // #2189: the abliterated GLM-5.3-Flash build's catalog key, slug and served
 // artifact id are recorded as themselves, never folded into GLM-5.3-Flash.
 func TestDemandTelemetryKnowsGLM53FlashAbliteratedIdentitiesExactly(t *testing.T) {
