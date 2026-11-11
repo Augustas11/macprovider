@@ -16,6 +16,7 @@ func TestNormalizeModelKeyMatchesCoordinatorAliases(t *testing.T) {
 		"zai-org/glm-5.3-flash-uncensored":  {"zai-org/glm-5.3-flash-uncensored", "z-ai/glm-5.3-flash-uncensored", "Solstice-AI/GLM-5.3-Flash-UNCENSORED-mlx-oQ4e-DFlash2"},
 		"ricursiveai/ripple-65b-preview":    {"ricursiveai/ripple-65b-preview", "ricursiveAI/Ripple-65B-Preview", "frogggias/Ripple-65B-Preview-MLX-4bit"},
 		"liquidai/lfm3-1.7b":                {"liquidai/lfm3-1.7b", "LiquidAI/LFM3-1.7B", "LiquidAI/LFM3-1.7B-MLX-4bit", "LiquidAI/LFM3-1.7B-MLX-8bit"},
+		"minimaxai/minimax-m3.1-flash":      {"minimaxai/minimax-m3.1-flash", "MiniMaxAI/MiniMax-M3.1-Flash", "minimax/minimax-m3.1-flash", "mlx-community/MiniMax-M3.1-Flash-oQ3e-mtp"},
 		"openai/gpt-oss-20b":                {"openai/gpt-oss-20b", "mlx-community/gpt-oss-20b-MXFP4-Q8"},
 		"deepseek/deepseek-v4-flash":        {"deepseek/deepseek-v4-flash", "TensorFold/DeepSeek-V4-Flash-0731-MXFP4-MLX"},
 	} {

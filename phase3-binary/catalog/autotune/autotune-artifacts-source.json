@@ -145,6 +145,31 @@
       "primary_artifact_id": "mlx-4bit",
       "rate_class": "class-3b"
     },
+    "minimaxai/minimax-m3.1-flash": {
+      "artifacts": {
+        "mlx-oq3e": {
+          "allowed_runtime_sources": [
+            "mlx_cache"
+          ],
+          "hash": "21188ee28f031b9444e8a250e16aea57ee37a0c2f8d1a24c2ad44686ad744f03",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "min_ram_gb": 230,
+          "notes": "MiniMax M3.1-Flash (#2189): oMLX oQ3e mixed-precision build of MiniMaxAI/MiniMax-M3.1-Flash (428B total, 23B active MoE, MiniMax Sparse Attention), served text-only by the native Swift minimax_m3 engine; the vision encoder and the bundled dspark/ draft are not loaded, and configuration_minimax_m3_vl.py, image_processor.py, processing_minimax.py and video_processor.py are never executed. Routed experts affine 3-bit g64; MXFP8 shared experts, indexer and part of attention; 3.631 bits/weight. min_ram_gb = 199.5 GB measured native peak at 32K on the real weights (1 row, M3 Ultra 256 GB) + 26 GB SPEC-048-R012 10% free-memory floor on 256 GB + 4 GB safety margin = 230. Snapshot-manifest hash recomputed from the HF tree API at the pinned revision (scripts/catalog-hash-sweep.py, 65 files); the lab weights match it file for file. License: MiniMax Community License: commercial use requires the attribution \"Built with MiniMax M3.1-Flash\" on a related website, UI or documentation, and a one-time notice to MiniMax (prior written authorization above USD 20M yearly revenue); its appendix lists prohibited uses.",
+          "quantization": "oq3e-affine3-g64-mxfp8-mixed",
+          "runtime_format": "mlx_safetensors",
+          "size_bytes": 196186901756,
+          "source_ref": {
+            "kind": "huggingface_revision",
+            "repo_id": "mlx-community/MiniMax-M3.1-Flash-oQ3e-mtp",
+            "revision": "b1084ba666329d5eefc9771aa358837305f3d840"
+          },
+          "verification_status": "verified",
+          "verified_at": "2026-11-12"
+        }
+      },
+      "primary_artifact_id": "mlx-oq3e",
+      "rate_class": "class-120b-moe"
+    },
     "mlx-community/qwen2-vl-2b-instruct-4bit": {
       "artifacts": {
         "mlx-4bit": {

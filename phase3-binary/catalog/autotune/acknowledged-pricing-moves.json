@@ -71,6 +71,11 @@
       "model": "LiquidAI/LFM3-1.7B-MLX-8bit",
       "from_row": "default",
       "to_row": "liquidai/lfm3-1.7b"
+    },
+    {
+      "model": "mlx-community/MiniMax-M3.1-Flash-oQ3e-mtp",
+      "from_row": "default",
+      "to_row": "minimaxai/minimax-m3.1-flash"
     }
   ]
 }
