@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.89
+**Version:** 0.1.90
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.89",
+  "version": "0.1.90",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -585,12 +585,15 @@ The authorized dependency tuple is exact:
 
 | Repository | Fork tag | Revision | Upstream base |
 |---|---|---|---|
-| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.47` | `bfc88b9c8f745a13f3cce145101f13dc3dc95e8c` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
+| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.48` | `e246b8fd6ed35c6b1ab969c927222c06f759ec82` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
 | `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.18` | `8f0ac45bc7483b59b1776a8405fa13944e559e06` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
 | `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.10` | `26ac615332af3eedc4def073947efb13b0a3e66d` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
 | `https://github.com/Augustas11/mlx-c` | `v0.6.0-macprovider.2` | `2b1ff2b5b5129a6115771da32e1bac3b6b01ab01` | `ml-explore/mlx-c` pinned base (`ebc88f10caa1b625e6b581437a8dea6df8a70085`) |
 
-The mlx-swift-lm row `3.32.3-macprovider.47` is `3.32.3-macprovider.44`
+The mlx-swift-lm row `3.32.3-macprovider.48` is `3.32.3-macprovider.47`
+(`bfc88b9c8f745a13f3cce145101f13dc3dc95e8c`) plus the campaign #2111 DeepSeek V4
+commits; the DeepSeek-only hyper-connection options default off, so other
+families keep `.47` arithmetic. `3.32.3-macprovider.47` is `3.32.3-macprovider.44`
 (`ce950bf2840453b7e320fbb0a3b6eee7c7283658`, MiniMax) plus one commit (#2256) that pins
 mlx-swift `0.32.3-macprovider.18`. The Swift row is `0.32.3-macprovider.13`
 (`565269220ccc2cc0d2ce149affb98a2f9d9b32ac`) with the core gitlink moved to
@@ -751,13 +754,14 @@ four-row scheduler gain of 26.43%. These are ordinary-serving observations,
 not signed production admission. GLM/Qwen exact-output engine-matrix checks
 remain required on the designated Studio.
 
-The mlx-swift-lm row is `3.32.3-macprovider.40` (`0bfe53460168edf69e1696f9b1b11f3a1c7c3d0f`): tag
-`3.32.3-macprovider.38` plus the campaign #2111 DeepSeek V4 commits (reference
+The mlx-swift-lm row is `3.32.3-macprovider.48` (`e246b8fd6ed35c6b1ab969c927222c06f759ec82`): tag
+`3.32.3-macprovider.47` plus the campaign #2111 DeepSeek V4 commits (reference
 arithmetic `.10.16.7`, embedded DSpark drafter, shared MXFP8 multi-row projection
-tiles and last-position-only serving prefill logits), cherry-picked without
-change to any DeepSeek source. Its only shared-code edits are DeepSeek-only
-hyper-connection options that default off, so GLM-5-Next keeps `.38`'s
-arithmetic and decode kernels. The mlx-swift, MLX core and mlx-c rows are `.38`'s.
+tiles, last-position-only serving prefill logits, and decode selection and
+attention kernels that replay the graph's steel GEMM order so a row decodes the
+same tokens alone and batched). Its only shared-code edits are DeepSeek-only
+hyper-connection options that default off, so other families keep `.47`'s
+arithmetic and decode kernels. The mlx-swift, MLX core and mlx-c rows are `.47`'s.
 
 DeepSeek now preserves the QAT-off reference's norm, rotary, hyper-connection,
 router and indexer arithmetic. Its serial and continuous-batch prefill use
@@ -2535,6 +2539,17 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.90 (2026-11-12, Related: #2111)** — R003 names mlx-swift-lm
+  `3.32.3-macprovider.48` (`e246b8fd6ed35c6b1ab969c927222c06f759ec82`), which is
+  `3.32.3-macprovider.47` plus the DeepSeek V4 campaign commits: reference norm,
+  rotary, hyper-connection, router and indexer arithmetic; whole reference prefill
+  chunks bounded at 32768 tokens; packed DSpark verification for at most eight
+  positions; ordinary multi-row decode sharing packed per-layer arithmetic; shared
+  MXFP8 projection tiles; serving prefill computing only last-position logits; and
+  decode selection and attention kernels that replay the graph's arithmetic and give
+  a row the same result alone or batched. R015 adopts the >=1.8x four-row
+  own-serial DeepSeek CB gate in SPEC-038 FR-CB14. The Swift, core and C rows are
+  unchanged. No signed admission changes.
 - **0.1.89 (2026-11-12, Related: #2256, #2255)** — R003 names mlx-swift-lm
   `3.32.3-macprovider.47` (`bfc88b9c8f745a13f3cce145101f13dc3dc95e8c`), which is
   `3.32.3-macprovider.44` plus the mlx-swift pin commit, mlx-swift

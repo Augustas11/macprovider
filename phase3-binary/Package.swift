@@ -17,6 +17,13 @@ let package = Package(
         )
     ],
     dependencies: [
+        // Tag 3.32.3-macprovider.48 (#2111) is .47 plus the DeepSeek V4
+        // campaign commits: DeepSeek's reference norm, rotary, hyper-connection,
+        // router and indexer arithmetic, the DSpark drafter, shared MXFP8
+        // multi-row projection tiles, last-position-only serving prefill logits
+        // and row-invariant decode selection and attention kernels that serial
+        // and batched rows share. Other families keep .47 arithmetic; the
+        // DeepSeek-only hyper-connection options default off.
         // Tag 3.32.3-macprovider.47 (#2256) is .44 (MiniMax) plus one commit: the
         // mlx-swift 0.32.3-macprovider.18 pin. mlx-swift .18 is .13 with the
         // MLX core gitlink on v0.32.4-macprovider.10 (26ac61533), which sends
@@ -117,7 +124,7 @@ let package = Package(
         // compatible per-column attention while retaining row-owned caches.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "bfc88b9c8f745a13f3cce145101f13dc3dc95e8c"
+            revision: "e246b8fd6ed35c6b1ab969c927222c06f759ec82"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",
