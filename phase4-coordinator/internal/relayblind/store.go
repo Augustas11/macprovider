@@ -171,17 +171,6 @@ func OpenStore(path string) (*Store, error) {
 	return s, nil
 }
 
-func NewStore(db *sql.DB) (*Store, error) {
-	if db == nil {
-		return nil, ErrStoreUnavailable
-	}
-	s := &Store{db: db}
-	if err := s.migrate(context.Background()); err != nil {
-		return nil, err
-	}
-	return s, nil
-}
-
 func (s *Store) Close() error {
 	if s == nil || s.db == nil {
 		return nil
@@ -938,10 +927,7 @@ func digestText(value string) string {
 	return base64.RawURLEncoding.EncodeToString(sum[:])
 }
 func BindingDigest(value string) string { return digestText(value) }
-func ConstantTimeAuthorizationDigest(authorization, digest string) bool {
-	return subtle.ConstantTimeCompare([]byte(digestText(authorization)), []byte(digest)) == 1
-}
-func lenDecoded(value string) int { b, _ := base64.RawURLEncoding.DecodeString(value); return len(b) }
+func lenDecoded(value string) int       { b, _ := base64.RawURLEncoding.DecodeString(value); return len(b) }
 func boolInt(v bool) int {
 	if v {
 		return 1

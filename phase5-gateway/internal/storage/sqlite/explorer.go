@@ -935,11 +935,6 @@ func decodeListID(raw string) (string, error) {
 	return string(b), nil
 }
 
-func encodeListCursor(ts time.Time, id string) string {
-	b, _ := json.Marshal(listCursor{TS: encodeTime(ts), ID: id})
-	return base64.RawURLEncoding.EncodeToString(b)
-}
-
 // encodeListCursorWithAccount is the post-issue-#196 cursor encoder.
 // AccountID is the third tiebreaker so pagination over usage_events
 // is total across the composite (account_id, request_id) PK.

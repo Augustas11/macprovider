@@ -250,12 +250,6 @@ func runRevoke(args ...string) (int, string, string) {
 	return code, stdout.String(), stderr.String()
 }
 
-func runList(args ...string) (int, string, string) {
-	var stdout, stderr bytes.Buffer
-	code := runPartnerKeysList(args, &stdout, &stderr)
-	return code, stdout.String(), stderr.String()
-}
-
 // extractRawTokenLine returns the raw token line printed on
 // stdout. Final adversarial audit (ARCH r2 HIGH 1) rewrote
 // AC-17's stdout contract: stdout is now exactly one raw-token

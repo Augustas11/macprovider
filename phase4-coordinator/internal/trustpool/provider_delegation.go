@@ -394,14 +394,6 @@ func SignProviderPoolDelegationRevocation(privateKey ed25519.PrivateKey, signed 
 	return base64.StdEncoding.EncodeToString(sig), nil
 }
 
-func providerOwnerPublicKeyBase64(publicKey ed25519.PublicKey) string {
-	return base64.StdEncoding.EncodeToString(publicKey)
-}
-
-func providerDelegationManifestDigestHex(digest []byte) string {
-	return hex.EncodeToString(digest)
-}
-
 // ParseProviderOwnerPublicKeys decodes configured provider_id -> base64 Ed25519
 // public keys for SPEC-003 owner binding on ProviderPoolDelegationV1 events.
 func ParseProviderOwnerPublicKeys(raw map[string]string) (map[string][]byte, error) {
@@ -421,18 +413,4 @@ func ParseProviderOwnerPublicKeys(raw map[string]string) (map[string][]byte, err
 		out[providerID] = append([]byte(nil), pub...)
 	}
 	return out, nil
-}
-
-// ProviderOwnerPublicKeyLookup returns an AdminDeps resolver backed by parsed keys.
-func ProviderOwnerPublicKeyLookup(keys map[string][]byte) func(providerID string) ([]byte, bool) {
-	if len(keys) == 0 {
-		return nil
-	}
-	return func(providerID string) ([]byte, bool) {
-		key, ok := keys[providerID]
-		if !ok || len(key) != ed25519.PublicKeySize {
-			return nil, false
-		}
-		return append([]byte(nil), key...), true
-	}
 }

@@ -516,14 +516,3 @@ func hkdfExpand(prk, info []byte, length int) []byte {
 	}
 	return out[:length]
 }
-
-func randomBytes(n int, reader io.Reader) ([]byte, error) {
-	if reader == nil {
-		reader = rand.Reader
-	}
-	b := make([]byte, n)
-	if _, err := io.ReadFull(reader, b); err != nil {
-		return nil, err
-	}
-	return b, nil
-}

@@ -125,21 +125,6 @@ func NewCatalog() *Catalog {
 	return &Catalog{}
 }
 
-// FixedPoolHeartbeatVerifier returns a pool.RegistryOption that wires c's
-// VerifyProviderHash as the registry's HeartbeatHashVerifier. Lives in
-// tier2 (not pool) because pool cannot import tier2 without a cycle.
-// Equivalent to pool.WithHeartbeatHashVerifier(c.VerifyProviderHash).
-//
-// Semantics: this captures the *Catalog pointer eagerly. SIGHUP reload swaps
-// the package-singleton via ConfigureDefaultStrict, but a verifier wired
-// against an explicit *Catalog instance keeps pointing at that instance even
-// after a global swap. Correct for tests passing isolated catalogs; for
-// production callers that want late-binding to the current singleton, capture
-// tier2.Default() per invocation rather than passing it once.
-func FixedPoolHeartbeatVerifier(c *Catalog) pool.RegistryOption {
-	return pool.WithHeartbeatHashVerifier(c.VerifyProviderHash)
-}
-
 var (
 	defaultCatalog atomic.Pointer[Catalog]
 
@@ -569,18 +554,13 @@ func (c *Catalog) CatalogBytes() []byte {
 // Pre-M3-8d code, including buyer.Server, cmd/coordinator/main.go, and tests
 // that have not been migrated to explicit *Catalog DI, calls these. They are
 // thin wrappers around the package-singleton; both styles compose because the
-// shims share the same Catalog with anything wired via ws.WithCatalog(Default()).
+// shims share the same Catalog as tier2.Default().
 
 func Configure(cfg config.Tier2Config, logger zerolog.Logger) error {
 	return Default().Configure(cfg, logger)
 }
 
-func ConfigureStrict(cfg config.Tier2Config, logger zerolog.Logger) error {
-	return Default().ConfigureStrict(cfg, logger)
-}
-
 func Active() bool                   { return Default().Active() }
-func Configured() bool               { return Default().Configured() }
 func LoadFailed() bool               { return Default().LoadFailed() }
 func CatalogUnavailable() bool       { return Default().CatalogUnavailable() }
 func Catalogued(modelID string) bool { return Default().Catalogued(modelID) }
@@ -589,7 +569,6 @@ func VerifyProviderHash(modelID, reportedHash string) pool.HashStatus {
 }
 func ExpectedHashPrefix(modelID string) string { return Default().ExpectedHashPrefix(modelID) }
 func CatalogID() string                        { return Default().CatalogID() }
-func CatalogBytes() []byte                     { return Default().CatalogBytes() }
 func CatalogSnapshot() (string, []byte, bool)  { return Default().CatalogSnapshot() }
 func SnapshotMaterial(modelID, reportedHash string) (RouteSnapshotMaterial, bool) {
 	return Default().RouteSnapshotMaterial(modelID, reportedHash)
@@ -598,7 +577,7 @@ func SnapshotMaterial(modelID, reportedHash string) (RouteSnapshotMaterial, bool
 // ResetForTest swaps in a fresh package-singleton Catalog.
 //
 // Deprecated: prefer constructing a local *Catalog via NewCatalog() and
-// passing it to dependent constructors via ws.WithCatalog. Retained for
+// passing it to dependent constructors. Retained for
 // legacy tests (cmd/coordinator/main_test.go, internal/buyer/server_test.go)
 // that still drive the package-level shim API.
 func ResetForTest() {

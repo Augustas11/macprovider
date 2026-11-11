@@ -154,10 +154,6 @@ func BuildPublicStatusDocument(ctx context.Context, store *Store, poolID string,
 	return buildPublicStatusDocument(ctx, store, nil, poolID, generatedAt, nil)
 }
 
-func BuildPublicStatusDocumentWithRegistry(ctx context.Context, store *Store, registry *Registry, poolID string, generatedAt time.Time) (StatusDocument, bool, error) {
-	return buildPublicStatusDocument(ctx, store, registry, poolID, generatedAt, nil)
-}
-
 func BuildPublicStatusDocumentWithLiveProviders(ctx context.Context, store *Store, registry *Registry, poolID string, generatedAt time.Time, live StatusLiveProviderSet) (StatusDocument, bool, error) {
 	return buildPublicStatusDocument(ctx, store, registry, poolID, generatedAt, &live)
 }

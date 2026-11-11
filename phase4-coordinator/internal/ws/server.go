@@ -613,16 +613,6 @@ func WithPrivacyAuthority(authority *relayblind.PrivacyAuthority) Option {
 	return func(s *Server) { s.privacyAuthority = authority }
 }
 
-// WithCatalog injects a specific tier2.Catalog instance for this server.
-// Default (nil/unset) is tier2.Default(), the package singleton, so production
-// wiring needs no change. Tests can pass an isolated *tier2.Catalog so they
-// no longer race against tier2.ResetForTest. M3-8d (audit TEST-4).
-func WithCatalog(c *tier2.Catalog) Option {
-	return func(s *Server) {
-		s.catalog = c
-	}
-}
-
 // WithAutotuneCatalog wires the verified release used for provider catalog
 // compatibility and acknowledgement independently of the optional evidence
 // gate.
@@ -906,22 +896,6 @@ func resolveProviderCatalogIn(provider pool.Provider, cur *autotune.Catalog, com
 		return cur, cur, true, true
 	}
 	return nil, cur, false, false
-}
-
-// WithAutotuneCatalogEnforcement configures strict admission or an explicitly
-// deadline-bounded fleet bridge for metadata-free providers. Config validation
-// requires a future deadline no more than 24 hours away whenever enforced is
-// false.
-// WithArtifactIdentityIndex installs the SPEC-010 v1.7 R007 expected-identity
-// set. It MUST be built from the same loaded feeds as the current autotune
-// catalog: the index is bound to that catalog's digest and resolves nothing
-// for a provider admitted against any other release.
-func WithArtifactIdentityIndex(index *artifactidentity.Index) Option {
-	return func(s *Server) {
-		if index != nil {
-			s.artifactIdentitySets.sets = map[string]*artifactidentity.Index{index.Provenance().CandidateCatalogSHA256: index}
-		}
-	}
 }
 
 // WithArtifactIdentitySets installs the boot-time identity sets (one per
@@ -1224,14 +1198,6 @@ func WithCanarySanctionStore(store CanarySanctionStore) Option {
 	}
 }
 
-func WithNativeMTPCanaryStateStore(store NativeMTPCanaryStateStore) Option {
-	return func(s *Server) {
-		if store != nil {
-			s.nativeMTPCanaryStore = store
-		}
-	}
-}
-
 func WithNativeMTPCanaryJitter(fn func(time.Duration) time.Duration) Option {
 	return func(s *Server) {
 		if fn != nil {
@@ -1368,7 +1334,7 @@ func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger
 	}
 	if registry != nil {
 		// M3-8d: route the heartbeat verifier through s.catalogRef() so a
-		// caller that overrides the catalog via WithCatalog (and the
+		// caller that overrides the catalog via s.catalog (and the
 		// SIGHUP swap of tier2.Default()) is honored on every heartbeat
 		// rather than frozen at NewServer time.
 		pool.WithModelIdentityResolver(func(req pool.ModelIdentityRequest) pool.ModelIdentityVerdict {
@@ -1652,7 +1618,7 @@ func (s *Server) runAutotuneCatalogBridgeDeadline() {
 }
 
 // catalogRef returns the *tier2.Catalog this server reads through. Returns
-// the explicit override set by WithCatalog when present; otherwise the
+// the explicit s.catalog override when present; otherwise the
 // package singleton via tier2.Default(). Safe under SIGHUP reload because
 // tier2.Default() is an atomic.Pointer load.
 func (s *Server) catalogRef() *tier2.Catalog {
@@ -4014,11 +3980,6 @@ func (s *Server) checkAutotuneHelloGateWithCatalog(conn net.Conn, hello Hello, c
 	}, true
 }
 
-func (s *Server) catalogAdmission(hello Hello) (string, bool) {
-	catalog, compatible := s.autotuneCatalogSnapshot()
-	return s.catalogAdmissionWithCatalog(hello, catalog, compatible)
-}
-
 // catalogAdmissionWithCatalog is the snapshot-free core so a single admission
 // can pin one (current, compatible) generation and reuse it for the expected
 // model hash and the hello gate — a SIGHUP swap mid-admission must not classify
@@ -6233,17 +6194,6 @@ func (s *Server) canaryColdStartActive(provider pool.Provider) bool {
 		return false
 	}
 	return true
-}
-
-func (s *Server) buildCanaryBody(modelID string, maxTokens int) ([]byte, string, error) {
-	challenges, _ := s.cfg.Pool.CanaryChallengesForModel(modelID)
-	body, expected, _, err := buildCanaryBodyFromBank(modelID, maxTokens, challenges)
-	return body, expected, err
-}
-
-func buildCanaryBody(modelID string, maxTokens int, challenges []config.CanaryChallengeConfig) ([]byte, string, error) {
-	body, expected, _, err := buildCanaryBodyFromBank(modelID, maxTokens, challenges)
-	return body, expected, err
 }
 
 func buildCanaryBodyFromRandom(modelID string, maxTokens int, challenges []config.CanaryChallengeConfig, random []byte) ([]byte, string, error) {
