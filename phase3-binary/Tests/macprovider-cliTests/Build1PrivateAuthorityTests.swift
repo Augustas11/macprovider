@@ -45,6 +45,12 @@ final class Build1PrivateAuthorityTests: XCTestCase {
            let next = json.range(of: "\"google-gemma-4-26b-a4b-it\":", range: start.upperBound..<json.endIndex) {
             json.removeSubrange(start.lowerBound..<next.lowerBound)
         }
+        // LFM3 1.7B was staged after this authority's historical catalog
+        // stamp (#2231).
+        if let start = json.range(of: "\"liquidai/lfm3-1.7b\":"),
+           let next = json.range(of: "\"meta-llama/llama-3.1-8b-instruct\":", range: start.upperBound..<json.endIndex) {
+            json.removeSubrange(start.lowerBound..<next.lowerBound)
+        }
         if let start = json.range(of: "\"mlx-community/qwen2-vl-2b-instruct-4bit\":"),
            let next = json.range(of: "\"nvidia/nemotron-3-nano-30b-a3b\":", range: start.upperBound..<json.endIndex) {
             json.removeSubrange(start.lowerBound..<next.lowerBound)

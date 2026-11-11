@@ -448,31 +448,28 @@ ops_main() {
       ;;
     next)
       local run=0 done_step="" evidence=""
-      DONE_RUN_IDS=""; DONE_CARRY=""; DONE_PROBE=0
+      DONE_PROBE=0
       while [ $# -gt 0 ]; do
         case "$1" in
           --run) run=1 ;;
           --done) done_step="${2:-}"; shift ;;
           --evidence) evidence="${2:-}"; shift ;;
-          --run-id) DONE_RUN_IDS="$DONE_RUN_IDS ${2:-}"; shift ;;
-          --carry-forward) DONE_CARRY="${2:-}"; shift ;;
           --probe) DONE_PROBE=1 ;;
           *) die "unknown next option: $1" ;;
         esac
         shift
       done
-      DONE_RUN_IDS="${DONE_RUN_IDS# }"
       gather
       if [ -n "$done_step" ]; then
         [ "$done_step" = "$NEXT_ID" ] || refuse "can only record the current next step ($NEXT_ID), not $done_step"
         [ "$NEXT_KIND" = "manual" ] || refuse "only operator-owned (manual) steps are recorded by hand; $NEXT_ID is $NEXT_KIND"
         if [[ " ${STRUCTURED_STEPS:-} " == *" $done_step "* ]]; then
-          [ -z "$evidence" ] || refuse "$done_step does not accept free-text --evidence; use --run-id, --carry-forward or --probe"
+          [ -z "$evidence" ] || refuse "$done_step does not accept free-text --evidence; use --probe"
           structured_done "$done_step"
           return 0
         fi
-        [ -z "$DONE_RUN_IDS$DONE_CARRY" ] && [ "$DONE_PROBE" = 0 ] ||
-          refuse "--run-id/--carry-forward/--probe apply only to: ${STRUCTURED_STEPS:-none}"
+        [ "$DONE_PROBE" = 0 ] ||
+          refuse "--probe applies only to: ${STRUCTURED_STEPS:-none}"
         [ -n "$evidence" ] || refuse "--evidence is required"
         mark_done "$OPS_SCOPE" "$done_step" "$evidence"
         log "recorded $done_step as done in $(marker_path "$OPS_SCOPE" "$done_step")"

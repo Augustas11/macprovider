@@ -220,7 +220,7 @@ type forwardState struct {
 	// dailyKey is the UTC YYYY-MM-DD bucket snapshot captured ONCE at
 	// request start (handleChatCompletions, derived from startedAt
 	// for atomic snapshot at the UTC-midnight boundary) and reused by
-	// every retry attempt's seedForRequest derivation. This preserves
+	// every retry attempt's seedForRequestWithKey derivation. This preserves
 	// FR-SR-17 reproducibility for requests that span UTC midnight:
 	// the daily-key component of (request_id, daily_key) → seed stays
 	// sticky to the request, not to wall-clock time at the per-attempt

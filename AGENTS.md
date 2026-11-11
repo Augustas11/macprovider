@@ -272,22 +272,14 @@ the local helper in `.git/config`; do not print or persist token values.
 
 Skip this section for docs-only pushes to `main`.
 
-A PR that does not touch `specs/` needs no governance block: CI derives the
-declaration from the diff (changed paths mapped through `CONFORMANCE.json`
-requirements to `AUTHORITY.json` domains) and prints it. A PR that changes
-`specs/` must carry exactly one `SPEC-GOVERNANCE-DECLARATION-BEGIN` /
-`SPEC-GOVERNANCE-DECLARATION-END` block; validate it before `gh pr create`:
-
-```bash
-python3 scripts/check_spec_pr_declaration.py \
-  --event /tmp/pr-event.json \
-  --base origin/main \
-  --head HEAD
-```
-
-Fill it honestly; do not fabricate specs or requirements to satisfy the
-checker. The `spec-index` job in `ci.yml` is part of `ci-required`; treat it
-red as blocking. A SPEC's version lives only in its `**Version:**` header.
+No PR needs a hand-written governance block. CI derives the declaration from
+the diff (changed paths mapped through `CONFORMANCE.json` requirements to
+`AUTHORITY.json` domains) and prints it; a missing, malformed, or
+diff-contradicting `SPEC-GOVERNANCE-DECLARATION-BEGIN` /
+`SPEC-GOVERNANCE-DECLARATION-END` block is a warning, never a failure. The
+`spec-index` job in `ci.yml` is part of `ci-required`: its corpus check
+(`scripts/check_spec_governance.py`) and index checks stay blocking, so treat
+it red as blocking. A SPEC's version lives only in its `**Version:**` header.
 
 ## Sensitive Paths
 
@@ -314,9 +306,8 @@ no three-lane audit; CI and review cover them.
 
 Implementation slices in scope are not done until the full fix diff is
 audited. Run three lanes over the complete diff as it will land: code review,
-security review, and architecture review. In Codex sessions, use native Codex
-subagents/auditor lanes. Use `omc ask codex` only as a legacy fallback outside
-Codex contexts that lack native subagents.
+security review, and architecture review. The three lanes run as the coding
+agent's own subagents.
 
 Audits that run on the lab provider through Malibu get every row of that
 provider. Before the first lane starts, pause the lab provider's buyer-runner

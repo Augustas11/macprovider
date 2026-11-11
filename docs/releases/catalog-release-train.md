@@ -1,5 +1,9 @@
 # Catalog Release Train — signed SPEC-023 catalog content
 
+> **Current state:** the history below ends at 2026-09-30 and is not rewritten.
+> Live catalog and activation steps since then are recorded in
+> `docs/releases/cli-release-train.md`; read that file for what is live now.
+
 **This file tracks signed catalog-content and pricing rollouts.** It is the
 release-train companion to `docs/releases/cli-release-train.md` and
 `docs/releases/coordinator-release-train.md`; the operational lane selection

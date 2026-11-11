@@ -9,8 +9,8 @@ not add steps of its own:
 | `cli-release.sh` | provider CLI candidate, promotion, fleet recommendation | `docs/releases/cli-release-train.md`, `docs/runbooks/provider-cli-release-verification.md` |
 | `discovery-renew.sh` | signed release-discovery freshness renewal | `.github/workflows/renew-release-discovery-head.yml` |
 | `catalog-activate.sh` | catalog, CB policy and native-MTP activation; buyer-UX conformance records (step `buyer_ux_conformance`: origin/main's record file installed on Pearl, `routing.buyer_ux_conformance_path` added in place under both Pearl locks, one SIGHUP, or one restart on a runtime that reads the file only at start) | `docs/runbooks/native-mtp-enablement.md`, `docs/runbooks/catalog-release-decision-tree.md`, `docs/runbooks/pearl-coordinator-rollout.md` |
-| `pearl-runtime.sh` | coordinator and gateway runtime release; pending stats migrations (`stats_migrate`: checked before the apply and before health, applied under the live-ops lock, no downtime); one-time retention `auto_vacuum` conversion (`PEARL_RUNTIME_TASK=retention-vacuum-conversion`); one on-demand retention run (`PEARL_RUNTIME_TASK=retention-run`, no restart); compute-integrity private corpus install (`PEARL_RUNTIME_TASK=compute-integrity-enable`, one restart); compute-integrity reference scorers in the Pearl overlay (`PEARL_RUNTIME_TASK=compute-integrity-reference-operators`, `COMPUTE_INTEGRITY_REFERENCE_OPERATORS`, one restart); operator-reviewed native-vision qualification install into the Pearl overlay (`PEARL_RUNTIME_TASK=vision-qualification`, `VISION_QUALIFICATION_FILE`, one restart as the boot-state proof; SIGHUP also applies the list); Pearl updater bundle install from the running tag (`PEARL_RUNTIME_TASK=updater-bundle`, both Pearl locks, no restart); one-time raise of the streaming walls Pearl preserves live (`PEARL_RUNTIME_TASK=stream-ceiling`: coordinator `request_timeout_s`/`provider_http.timeout_s` and gateway ceiling 3600 s, non-streaming wall 3660 s; raise-only, one coordinator then one gateway restart) | `docs/runbooks/pearl-coordinator-rollout.md`, `ops/runbooks/settlement-evidence-retention.md`, `docs/runbooks/compute-integrity-private-corpus.md`, `docs/runbooks/native-vision-acceptance.md`, `docs/runbooks/catalog-release-decision-tree.md` (Enabling rollout) |
-| `canary-swap.sh` | CLI candidate onto the canary provider: `check` (MLX kernels in every shipped metallib, verified binary, baked `catalog-release/` equal to the catalog Pearl serves at `COORDINATOR_URL`) then `swap` (pause, drain, back up, payload-only swap, resume; the watchdog stays booted out until the candidate, or the restored version, is buyer_serving; a crash loop, or `/v1/status` silent for 120 s after the model loaded, restores the backup and resumes; silence while the model loads is bounded only by the 1800 s ready timeout) | `docs/releases/cli-release-train.md` (Promotion gate item 5) |
+| `pearl-runtime.sh` | coordinator and gateway runtime release; runtime train `apply` (preflight, disk check against the live databases with WAL plus max(10%, 5 GB), pending stats migrations, updater; states about 1-2 min when the candidate keeps the installed database schema fingerprint, otherwise buyers held with 503 up to about 25 min) then `health` (waits for the updater, checks both `/healthz` and the buyer hold, applies the new binary's stats migrations, prints the measured apply and buyer-visible downtime as a release-train line); `release_buyer_hold` first whenever the gateway reports `buyer_hold` with no updater unit active (runs the updater's `--reconcile`, then requires no hold); pending stats migrations (`stats_migrate`: read before the apply and applied inside `apply` and `health`, offered on their own only once the release is otherwise live; live-ops lock, no downtime); one-time retention `auto_vacuum` conversion (`PEARL_RUNTIME_TASK=retention-vacuum-conversion`); one on-demand retention run (`PEARL_RUNTIME_TASK=retention-run`, no restart); compute-integrity private corpus install (`PEARL_RUNTIME_TASK=compute-integrity-enable`, one restart); compute-integrity reference scorers in the Pearl overlay (`PEARL_RUNTIME_TASK=compute-integrity-reference-operators`, `COMPUTE_INTEGRITY_REFERENCE_OPERATORS`, one restart); operator-reviewed native-vision qualification install into the Pearl overlay (`PEARL_RUNTIME_TASK=vision-qualification`, `VISION_QUALIFICATION_FILE`, one restart as the boot-state proof; SIGHUP also applies the list); Pearl updater bundle install from the running tag (`PEARL_RUNTIME_TASK=updater-bundle`, both Pearl locks, no restart); one-time raise of the streaming walls Pearl preserves live (`PEARL_RUNTIME_TASK=stream-ceiling`: coordinator `request_timeout_s`/`provider_http.timeout_s` and gateway ceiling 3600 s, non-streaming wall 3660 s; raise-only, one coordinator then one gateway restart) | `docs/runbooks/pearl-coordinator-rollout.md`, `ops/runbooks/settlement-evidence-retention.md`, `docs/runbooks/compute-integrity-private-corpus.md`, `docs/runbooks/native-vision-acceptance.md`, `docs/runbooks/catalog-release-decision-tree.md` (Enabling rollout) |
+| `canary-swap.sh` | CLI candidate onto the canary provider: `check` (MLX kernels in every shipped metallib, verified binary, baked `catalog-release/` equal to the catalog Pearl serves at `COORDINATOR_URL`) then `swap` (pause, drain, back up, payload-only swap, resume; the watchdog stays booted out until the candidate, or the restored version, is buyer_serving; a crash loop, or `/v1/status` silent for 120 s counted only from when the candidate reported its model loaded, restores the backup and resumes (exit 5); silence while the model loads is bounded only by the 1800 s ready timeout; exit 6 means that recovery did not complete and the operator must restore the canary) | `docs/releases/cli-release-train.md` (Promotion gate item 5) |
 | `qwen-opencode-e2e.sh` | version-bound, same-provider live-gateway acceptance for the two qualified Qwen models; restores the incumbent from a secret-free crash journal | this README (`Qwen OpenCode acceptance`) |
 | `studio-lab-window.sh` | bounded offline Studio diagnostic, profiler-only or full-matrix qualification job with fixed reviewed arguments and immutable-input completion identity; published-provider authentication, journal-first pause/drain, exact process/watchdog restoration and durable controller-loss recovery while the buyer runner remains active | `docs/runbooks/studio-lab-window.md` |
 | `studio-lab-handoff.py` | recovery-only restoration of the retained `paused_live_unloaded` Studio handoff from an explicit private all-cells-complete, root-armed, hash-pinned manifest; verifies the original signed provider for 120 seconds before it starts only the stopped buyer runner, and retains both handoff and campaign lock | private handoff record |
@@ -29,7 +29,6 @@ scripts/ops/<train>.sh next          # the exact command for the next step
 MACPROVIDER_OPS_OWNER=<session-label> scripts/ops/<train>.sh next --run
 scripts/ops/<train>.sh next --done <step> --evidence '<proof>'   # operator-owned steps only
 scripts/ops/cli-release.sh next --done canary_smoke --probe      # structured evidence only
-scripts/ops/cli-release.sh next --done e2e_gate --run-id <id> | --carry-forward <record-id>
 scripts/ops/live-lock.sh release <session-label>                 # hand back when done
 scripts/ops/live-lock.sh acquire <label> --steal                 # only past the holder's TTL
 ```
@@ -46,14 +45,18 @@ scripts/ops/live-lock.sh acquire <label> --steal                 # only past the
   step runs: `next --run` releases it on every exit (success, failure,
   refusal, SIGINT/SIGTERM/SIGHUP), so the next step, run by any owner, is not
   blocked. A step that runs asynchronously (the Pearl `apply` updater unit)
-  is covered by the read-only `wait_updater` step, not by the lock. The lock
+  is covered by the `health` step, which waits for the unit before anything
+  else, not by the lock. The lock
   is pid-bound (`--bind-pid`): if the process that took it dies without
   releasing (SIGKILL, crash), the next `acquire` on the same host takes it
   over and logs the holder. Locks taken by hand keep TTL and `--steal` only.
-- `catalog-activate.sh` refuses the preflight and the activation while the
-  canary provider reports `lifecycle.state` `paused_by_operator`: the custody
-  proof needs it `buyer_serving`, and the activation restarts it, which a
-  pause outlives. A NO_GO names its failing checks. A pricing release runs
+- `catalog-activate.sh` refuses the activation while the canary provider
+  reports `lifecycle.state` `paused_by_operator` or its status is unreadable:
+  the custody proof needs it `buyer_serving`, and the activation restarts it,
+  which a pause outlives. The read-only preflight is offered anyway, with the
+  pause as a note. A pricing-only release (verdict `pricing_only: true`: only
+  credit rates of existing rate-card rows moved) needs no canary and
+  activates while it is paused or down. A NO_GO names its failing checks. A pricing release runs
   only with `CATALOG_PRICING_ACK` set to the verdict's `pricing_diff_sha256`
   after the operator reviewed the price table. A release whose newly
   buyer-serving model no connected provider serves activates with evidence
@@ -158,19 +161,50 @@ scripts/ops/live-lock.sh acquire <label> --steal                 # only past the
 - `cli-release.sh` step `mirror_latest`, after `verify_live_rollout`, keeps the
   release mirror's advisory `releases/latest.json` on the recommended tag. It is
   done when the served `tag_name` equals `v<ver>`; `next --run` runs
-  `scripts/publish-release-mirror.sh --tag v<ver> --promote-latest`, which itself
-  refuses a tag the coordinator does not advertise and never moves the pointer
-  backwards. It is blocked until `MALIBU_DOWNLOAD_SSH_KEY` is set; `GH_TOKEN`
+  `scripts/publish-release-mirror.sh --tag v<ver> --latest-only`: the promotion
+  workflow normally mirrored the assets, so when Pearl already holds GitHub's
+  exact asset set, the updater index and the pinned bootstrap python it moves
+  only the pointer; otherwise (that workflow step is continue-on-error) it runs
+  the full `--promote-latest` path in the same run. It refuses a tag the
+  coordinator does not advertise and never moves the pointer backwards. It is blocked until `MALIBU_DOWNLOAD_SSH_KEY` is set; `GH_TOKEN`
   defaults to the repo's `gh` login. Runbook:
   `docs/runbooks/provider-cli-release-verification.md#release-mirror-byte-identity-downloadmalibutech-1737`.
+- `cli-release.sh` step `install_sh_republish`, right after `promotion`, is
+  runnable: `next --run` (`_install-sh-republish`) backs up the served
+  `install.sh` at `INSTALL_SH_REMOTE_PATH` over `PEARL_SSH` and renames the
+  release's `phase3-binary/dist/install.sh` into place from a sibling temp
+  file (owner `PEARL_INSTALL_SH_OWNER` / `PEARL_INSTALL_SH_GROUP`, default
+  root, mode 0755). It refuses unless the local tag `v<ver>` names the commit
+  origin's tag names, and unless the installed file's SHA-256 read back equals
+  the release's; it then runs the read-only
+  `scripts/check-install-sh-consumer-health.sh` and fails the step if that
+  fails. Consumer health is not a separate train step; the scheduled
+  `install-sh-consumer-health-alarm.yml` still runs.
+- `cli-release.sh` step `version_staging` opens the next cut's version-only
+  staging PR once a train is complete and `main` carries provider-side
+  changes (outside `phase3-binary/catalog/`) since the published tag; the
+  same command is offered at `version_alignment` when `binaryVersion` is not
+  above live stable. `next --run` (`_stage-version`) takes the next patch
+  above live stable and every `v*` tag on origin (Pearl runtime tags share
+  the namespace), sets `binaryVersion` to it and the three
+  `latest_binary_version` rows to live stable in a fresh sibling worktree,
+  checks the tree with `release-staged-version-policy.sh`, pushes
+  `release/stage-cli-<ver>` and opens the PR "Stage provider CLI <ver>". It
+  refuses while such a PR is open, when `gh pr list` fails, or when `main`
+  already carries the version, and it never merges. A failure before the push
+  removes its worktree and local branch; if `gh pr create` fails after the
+  push, the refusal prints the exact `gh pr create` command to run. When
+  origin/main or the published tag is not in the local clone the step is
+  blocked on `git fetch origin --tags`.
 - Steps the operator owns are `manual`: an environment approval click or a
   provider restart. `next` prints the
   documented command and `next --run` refuses. When the step is done, record
-  it with `next --done`. `canary_smoke` and `e2e_gate` refuse free text: they
-  take a canary status probe the script reads itself, signed journey run ids
-  that the script checks with `gh`, or a carry-forward record in
-  `docs/releases/cli-release-train.md`. Promotion sets
-  `physical_acceptance_confirmed=true` only after both. A few other steps
+  it with `next --done`. `canary_smoke` refuses free text: it takes a canary
+  status probe the script reads itself. Promotion sets
+  `physical_acceptance_confirmed=true` only after it. There is no separate
+  per-cut e2e step: the canary probe's paid gateway request is the cut's
+  end-to-end check, and a change that needs more is qualified on its lab
+  build in its PR window. A few other steps
   leave no trace that can be read live, such as the signed-byte verification
   and the gateway proof (which must move the target provider's counters and
   expires after 24 h). Their completion is kept under
@@ -365,6 +399,7 @@ PEARL_COORDINATOR_OVERLAY=/etc/macprovider/coordinator.pearl-overlays.yaml
 PEARL_COORDINATOR_UNIT=macprovider-coordinator
 PEARL_COORDINATOR_ENV=/etc/macprovider/coordinator.env     # pearl-runtime.sh recorder and stats_migrate
 PEARL_COORDINATOR_BIN=/opt/macprovider/coordinator         # pearl-runtime.sh stats_migrate
+PEARL_UPDATER_STATE_ROOT=/var/lib/macprovider-pearl-updater # pearl-runtime.sh schema-change and audit reads
 PEARL_COORDINATOR_METRICS_URL=http://127.0.0.1:8444/metrics
 PEARL_RELEASE_IDENTITY_OWNER=root PEARL_RELEASE_IDENTITY_GROUP=macprovider
 PEARL_INSTALL_ROOT=/opt/macprovider PEARL_BACKUP_ROOT=/root/macprovider-backups
@@ -384,8 +419,9 @@ variable.
 
 `release-train-status.sh` prints the "Current published release and fleet
 target" and "Active candidate" sections of `docs/releases/cli-release-train.md`
-from GitHub and `/healthz` (plus `MIRROR_LATEST_URL` when set). Paste its
-output over those sections instead of typing status by hand.
+as Markdown from GitHub and the public `/healthz` (plus `MIRROR_LATEST_URL`
+when set). It needs no ssh. Paste its output over those sections instead of
+typing status by hand.
 
 ## Hotfix pushes to main
 

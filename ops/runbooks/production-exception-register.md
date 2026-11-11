@@ -22,16 +22,18 @@ Add an entry before using any production security, safety, rollout, catalog,
 auth, canary, referral, or recovery exception. Emergency exceptions use this
 same register; there is no side channel.
 
-Extend an entry only with fresh owner, issue, scope, expiry, rollback, and
-evidence. If the expiry is not known from reviewed evidence, use
-`expires_at: null` and `expiry_unknown_reason`; do not invent a date. Do not
-silently move `expires_at` later on the same ID — create a new reviewed ID or
-supply `--previous-register` evidence in gates that compare revisions.
+Extend an entry only with fresh owner, issue, scope, rollback, and evidence.
+An exception stays registered until its `removal_condition` is met; it has no
+calendar deadline. `expires_at` and `expiry_unknown_reason` are optional,
+informational fields: no checker mode treats a missing, null, past, or moved
+`expires_at` as an error or a deploy/promotion blocker (AGENTS.md rule 10).
 
-Remove or expire an entry only after the strict policy is restored and the
-`post_removal_validation` evidence exists. Use `status: "expired"` for elapsed
-deadlines that still need physical cleanup, and `status: "removed"` only when
-the exception authority is gone and validation passed. When marking `removed`,
+Remove an entry only after the strict policy is restored and the
+`post_removal_validation` evidence exists. `status: "expired"` is a manual
+marker for a row that still needs physical cleanup; the same ID must not go
+back to `active`/`planned` (create a new reviewed ID instead). Use
+`status: "removed"` only when the exception authority is gone and validation
+passed. When marking `removed`,
 also append the ID to
 `ops/exceptions/removed-exception-tombstones.json` (required by the checker).
 
@@ -50,8 +52,7 @@ Promote mode rejects those rows. Default deploy mode warns.
 
 Exception IDs must be unique. The checker rejects duplicates, ownerless /
 placeholder owners, environment mismatches, heuristic scope-widening phrases,
-active rows past `expires_at`, removed rows without tombstones, and resurrection
-of tombstoned IDs.
+removed rows without tombstones, and resurrection of tombstoned IDs.
 
 ## 2. How to Edit and Validate the Register
 
@@ -104,17 +105,19 @@ Hard-fail (even with enforcement off):
 - ownerless or placeholder owners
 - environment mismatch; heuristic global-widening scope phrases without an
   explicit "must not widen" bound
-- `status=active` with `expires_at <= now` (fail-closed clock expiry)
 - `status=removed` without a tombstone
 - tombstone resurrection
 - tombstone deletions vs `--base-tombstones` when that base is supplied
+- same-ID `expired` -> `active`/`planned` reactivation when
+  `--previous-register` is supplied
 
 Warn only (default-safe):
 
-- `status=expired`
-- active rows with `expires_at=null`
-- approaching expiry (within 72h)
 - `blocks_stable_promotion=true`
+
+Never a finding in any mode: `expires_at` missing, null, past, approaching, or
+moved later. The `report` subcommand still shows an informational
+`clock_state` for rows that carry `expires_at`.
 
 ### Enforced deploy
 
@@ -132,9 +135,10 @@ Promotes the warn-class findings above to hard-fail.
 Before draft creation and again before undraft publication, the promote
 workflow re-runs `scripts/gate-production-exceptions-promote.sh`. The helper
 fetches `origin/main`, walks first-parent commits that touched the exception
-register or tombstone ledger (path-scoped), reconstructs earliest-expiry
-previous authority and a union tombstone base, then fail-closes on tombstone
-deletions and expiry self-extensions even after unrelated successors. The
+register or tombstone ledger (path-scoped), reconstructs previous authority
+(any historical `status: "expired"` per ID) and a union tombstone base, then
+fail-closes on tombstone deletions and same-ID expired reactivation even after
+unrelated successors. The
 publish step binds `EXCEPTION_AUTHORITY_SHA`, re-gates immediately before the
 irreversible `draft=false` PATCH, and aborts if that SHA moved.
 
@@ -142,11 +146,9 @@ irreversible `draft=false` PATCH, and aborts if that SHA moved.
 bash scripts/gate-production-exceptions-promote.sh
 ```
 
-Promote rejects expired, unbounded-active, approaching-expiry (72h),
-`blocks_stable_promotion=true` (active/planned/expired), ownerless,
-scope-mismatched, missing-tombstone, resurrected, and tombstone-deletion rows.
-This intentionally blocks public promotion while #615 inventory remains
-blocking/unbounded/expired.
+Promote rejects `blocks_stable_promotion=true` (active/planned/expired),
+ownerless, scope-mismatched, missing-tombstone, resurrected, expired-reactivated,
+and tombstone-deletion rows. No calendar date blocks a promotion.
 
 ## 5. Anti-Resurrection (config sync / rollback)
 
@@ -225,8 +227,7 @@ ssh pearl 'sudo grep -A20 "^referrals:" /opt/macprovider/coordinator.yaml; sudo 
 
 Record only names, booleans, timestamps, counts, issue links, and redacted
 artifact identifiers. If live Pearl confirmation is required but unavailable,
-leave the relevant `open_questions` item pending. Do not invent `expires_at`
-values without that evidence.
+leave the relevant `open_questions` item pending.
 
 ## 7. Relationship to Entry 172
 
@@ -234,11 +235,8 @@ The Entry 172 activation checklist lives at
 [`ops/runbooks/entry-172-referral-activation.md`](./entry-172-referral-activation.md).
 The corresponding register row is `exc-entry172-air-referral-activation`.
 
-Entry 172 is currently `status: expired` after the first fresh referred-provider
-journey PASS. Stable promotion rejects that row until Pearl referral flags are
-rolled off, `post_removal_validation` passes, and the row moves to `removed`
-(with a tombstone). Do not re-enable flags without complete #613 evidence or a
-new reviewed decision.
+Entry 172 is `status: removed` with a tombstone. Do not re-enable referral
+flags without complete #613 evidence or a new reviewed decision.
 
 ## 8. What Is Enforced vs Still Open
 
@@ -246,8 +244,8 @@ new reviewed decision.
 | --- | --- |
 | 1–2 Machine-readable register + required fields | Landed (#663) + stdlib schema-parity checker |
 | 3 Operator-visible inventory without secrets | Landed as CLI/JSON report for **registered** rows; authenticated coordinator health API still open |
-| 4 Deploy + stable-promotion rejection | Landed for **registered-row** policy (deploy default-safe; promote fail-closed on expired/unbounded/blocking/72h). Unregistered live Pearl exceptions still open |
-| 5 Fail-closed expiry / pre-deadline alerts | Landed for register clock + promote 72h window; silent self-extension blocked when `--previous-register` is supplied (promote does). No Pearl expiry daemon |
+| 4 Deploy + stable-promotion rejection | Landed for **registered-row** policy (deploy default-safe; promote fail-closed on `blocks_stable_promotion`). Unregistered live Pearl exceptions still open |
+| 5 Fail-closed expiry / pre-deadline alerts | Withdrawn: AGENTS.md rule 10 forbids calendar expiry on live features and their ops tooling. `expires_at` is informational; rows leave the register through `removal_condition` + tombstone |
 | 6 Anti-resurrection on sync/restore | Landed as required tombstones + `sync-check` + unit/CLI tests. Not yet hooked into every Pearl sync/rollback path |
 | 7 Removal evidence on physical providers | Still open |
 | 8 Emergency exceptions use same mechanism | Register+gates cover emergencies once registered; completeness proof still open |

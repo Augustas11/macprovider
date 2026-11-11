@@ -20,7 +20,7 @@ final class ConversationKVQuantizationTests: XCTestCase {
 
     override class func setUp() {
         super.setUp()
-        Device.setDefault(device: Device(.cpu))
+        MLXTestDevice.pinProcessCPUDefaultWithoutMetallib()
     }
 
     func testSerialConversationKeepsConfiguredKVBitsUnlessColdTierOrImage() {

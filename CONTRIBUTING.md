@@ -78,9 +78,10 @@ python3 scripts/check_spec_governance.py --base-ref origin/main
 - One branch and one pull request per task. Keep the diff focused.
 - Write `Related: #N` for issues the PR does not fully complete; only use a
   closing keyword when the PR finishes the issue.
-- Fill in the SPEC governance declaration from the
-  [pull request template](.github/PULL_REQUEST_TEMPLATE.md). CI validates it
-  with:
+- The SPEC governance declaration from the
+  [pull request template](.github/PULL_REQUEST_TEMPLATE.md) is optional. CI
+  derives one from the diff and reports a missing, malformed, or
+  contradicting block as a warning, never a failure. Check it locally with:
 
   ```bash
   python3 scripts/check_spec_pr_declaration.py \

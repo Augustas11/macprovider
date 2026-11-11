@@ -1,6 +1,6 @@
 {
-  "autotune_candidates_sha256": "2ab311757935b282f6d6f89003a7c3344b1c2b275ff088144ab162f85237f515",
-  "generated_at": "2026-11-10T08:50:00Z",
+  "autotune_candidates_sha256": "fe180dedd45918712e20d9d20f36a72e3b5bcd64945f01662bd2012cdccda243",
+  "generated_at": "2026-11-11T07:00:00Z",
   "models": [
     {
       "catalog_key": "ricursiveai/ripple-65b-preview",
@@ -15,6 +15,13 @@
       "model_id": "Jundot/GLM-5.3-Flash-oQ4e-mtp",
       "model_revision": "36defc5042d92a992a7948e83d6f110b8df69329",
       "sha256": "7299b6a71a38490e378e9eb6524c426392aa96e3fd561007e0540134bbef48f9"
+    },
+    {
+      "catalog_key": "liquidai/lfm3-1.7b",
+      "min_ram_gb": 3,
+      "model_id": "LiquidAI/LFM3-1.7B-MLX-4bit",
+      "model_revision": "91f34088d6946482cbcae11b85d4657093618c34",
+      "sha256": "e6ef055b17601b009ea1a476c8a3c0bbab734ea82825d9cd23d8a63a90d9c8ea"
     },
     {
       "catalog_key": "google-gemma-4-26b-a4b-it",
@@ -165,6 +172,6 @@
     }
   ],
   "policy_version": "autotune-policy-v1",
-  "release_id": "published-2026-11-10-ripple-65b-listed-v283",
+  "release_id": "published-2026-11-11-lfm3-1.7b-listed-v283",
   "schema_version": "macprovider.tier2-identity-binding.v1"
 }

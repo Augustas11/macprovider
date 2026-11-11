@@ -11870,7 +11870,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1770",
-        "rationale": "SPEC-048 v0.1.83 names LM 3.32.3-macprovider.38 (dab7764e1b082f1b5bf411a1f3282ef2830204e7): 3.32.3-macprovider.35 (#2270, the ricursive text model and its prefill chunk) plus the mlx-swift 0.32.3-macprovider.13 pin (#2234) and GLM-5-Next projecting 1...8 decode tokens with one kernel (#2265). The Swift and core rows move to the qmv_mma core; the C row is unchanged."
+        "rationale": "SPEC-048 v0.1.85 names LM 3.32.3-macprovider.40 (a7374a810bc5d5b5079ce998e61609ecf7e44acd): 3.32.3-macprovider.38 plus the LiquidAI LFM3 text model (#2231); .38 is 3.32.3-macprovider.35 (#2270, the ricursive text model and its prefill chunk) plus the mlx-swift 0.32.3-macprovider.13 pin (#2234) and GLM-5-Next projecting 1...8 decode tokens with one kernel (#2265). The Swift and core rows move to the qmv_mma core; the C row is unchanged."
       }
     },
     {
@@ -14778,6 +14778,34 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/2107",
         "rationale": "Keepalives for every streaming buyer and the prompt-sized first-token budget (default 100 tok/s, needs no Pearl config change) are implemented with config and handler tests; live once the gateway runtime release reaches Pearl and a long-prompt agent turn is observed through api.malibu.tech."
+      }
+    },
+    {
+      "requirement_id": "SPEC-006-R027",
+      "spec_id": "SPEC-006",
+      "state": "pending",
+      "implementation": [
+        "phase5-gateway/internal/router/buyer_hold.go:func (s *Server) buyerHeld",
+        "phase5-gateway/internal/router/buyer_hold.go:func (s *Server) handleBuyerHold",
+        "phase5-gateway/internal/router/buyer_hold.go:func WithBuyerHoldAtStart",
+        "phase5-gateway/cmd/gateway/main.go:func newGatewayRouter"
+      ],
+      "tests": [
+        "phase5-gateway/internal/router/buyer_hold_test.go:func TestBuyerHoldRefusesNewBuyerRequestsWith503AndRetryAfter",
+        "phase5-gateway/internal/router/buyer_hold_test.go:func TestBuyerHoldAdmitsOnlyTheCanaryKey",
+        "phase5-gateway/internal/router/buyer_hold_test.go:func TestBuyerHoldRequiresOperatorAuth",
+        "phase5-gateway/internal/router/buyer_hold_test.go:func TestBuyerHoldIsOffAfterRestart",
+        "phase5-gateway/internal/router/buyer_hold_test.go:func TestBuyerHoldLetsInFlightStreamFinish",
+        "phase5-gateway/internal/router/buyer_hold_test.go:func TestBuyerHoldReadNeedsTheOperatorKeyAndChangesNothing",
+        "phase5-gateway/cmd/gateway/main_test.go:func TestGatewayRouterStartsHeldFromTheEnvironment"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2296",
+        "rationale": "Implemented with handler tests and used by the Pearl updater's drain and database rollback rule (ops/runbooks/pearl-release-updater.md); live once a gateway runtime release with the hold reaches Pearl and the next runtime apply audits gateway_buyer_hold."
       }
     },
     {

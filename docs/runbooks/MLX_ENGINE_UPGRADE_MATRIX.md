@@ -6,7 +6,7 @@ This is the mandatory correctness-first matrix for any change to `mlx-swift-lm`,
 
 1. Resolve production only from the immutable fork tags in [Fork model](#fork-model), each pinned by full revision. Never resolve production from a branch, a version range, or a moved tag.
 2. Record exact before/after versions and revisions for `mlx-swift-lm`, `mlx-swift`, `swift-transformers`, and `swift-jinja`.
-3. Keep `swift-transformers` unchanged during the MLX engine migration; evaluate it separately under #966.
+3. Keep `swift-transformers` unchanged during the MLX engine migration; evaluate it separately under #966. Exception: a new model that needs a newer `swift-transformers` may bundle the move with its fork pin when the #966 token-exact gate passes over every served tokenizer (as #2231 did for 1.4.0).
 4. Build, test, resolve, candidate, and release jobs that compile `phase3-binary` or Malibu.app run only on the protected build toolchain: Xcode 26.6 (17F113) at `/Applications/Xcode_26.6.app`, Swift 6.3.3, macOS SDK 26.5, on the `macos-26` / `macos-26-intel` images. It replaced Xcode 16.4 / Swift 6.1 in the reviewed release-toolchain migration that landed with the mlx-swift-lm 3.32.3 dependency upgrade (`mlx-swift 0.32.3` declares `swift-tools-version: 6.3`; Related: #1906, #700). The protected `macos-15-intel` signers stay on the pinned signer toolchain (Xcode 16.4) for the sealed OpenSSL bottle and never compile the package. Any further toolchain move needs its own reviewed migration and release-runner proof.
 5. Correctness, token accounting, cache ownership, and artifact parity gate throughput. No performance waiver may override a red correctness row.
 
@@ -34,7 +34,7 @@ needs a SPEC revision.
 
 | Fork | Upstream | Tag scheme | Current tag | Revision | Upstream base |
 | --- | --- | --- | --- | --- | --- |
-| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.38` | `dab7764e1b082f1b5bf411a1f3282ef2830204e7` | `3.32.3` (`3b339ad6…`) |
+| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.40` | `a7374a810bc5d5b5079ce998e61609ecf7e44acd` | `3.32.3` (`3b339ad6…`) |
 | `Augustas11/mlx-swift` | `ml-explore/mlx-swift` | `<upstream>-macprovider.<n>` | `0.32.3-macprovider.13` | `565269220ccc2cc0d2ce149affb98a2f9d9b32ac` | `0.32.3` (`19601207…`) |
 | `Augustas11/mlx` (MLX core) | `ml-explore/mlx` | `v<upstream>-macprovider.<n>` | `v0.32.4-macprovider.7` | `565070fe4b0f95927f7fdd5fcfb537157605037a` | `v0.32.4` (`36969c09…`) |
 | `Augustas11/mlx-c` | `ml-explore/mlx-c` | `v<upstream>-macprovider.<n>` | `v0.6.0-macprovider.2` | `2b1ff2b5b5129a6115771da32e1bac3b6b01ab01` | pinned base `ebc88f10…` |
@@ -47,7 +47,12 @@ core revision. Swift 6.3 is the effective minimum for the graph.
 
 ### Current tuple delta
 
-As of 2026-11-11 the LM row is `3.32.3-macprovider.38` (`dab7764`), which is
+As of 2026-11-11 (#2231) the LM row is `3.32.3-macprovider.40` (`a7374a8`),
+which is `.38` plus the LiquidAI LFM3 text model (`lfm3`, upstream #750), its
+registry entry and the #756 validation hardening. The same change moves
+`swift-transformers` `1.3.5 → 1.4.0` (first release carrying
+huggingface/swift-transformers#397 and #398, which LFM3's tokenizer needs) under
+the token-exact round-trip gate over every served tokenizer. `.38` (`dab7764`) is
 `.35` plus two commits. The first pins mlx-swift `0.32.3-macprovider.13`
 (`5652692`, #2234); it is the same diff `.34` (`647b24d`) and `.31` (`9f30c01`)
 put on `.32` and `.25`. The second (#2265) sends every GLM-5-Next projection of
@@ -551,3 +556,12 @@ recorded in `audits/2026-09-04-swift-transformers-134/GATE.md`: token-exact for
 all byte-level/BPE catalog families (Qwen, Llama, GPT-OSS); Gemma carries five
 intended Unicode corrections (invalidate Gemma Unicode-heavy KV caches);
 Nemotron is newly loadable. `mlx-swift-lm` / `mlx-swift` were frozen throughout.
+
+`swift-transformers` moved `1.3.5 → 1.4.0` with the LFM3 fork pin (#2231,
+2026-11-11), because LFM3 needs BPE `ignore_merges` and code-point regex
+splits. The #966 gate ran over all 26 served tokenizers (552 corpus rows):
+1.4.0 matches HF `tokenizers` on every row. Token IDs that changed from 1.3.5
+all moved onto the reference: DeepSeek-V4-Flash code and special-token rows,
+one Gemma 4 half-width kana row, and the LFM2.5 and LFM3 code rows. Decode
+cleanup now round-trips exactly for Llama, Gemma 4 and LFM3. On Swift 6.1+
+toolchains the 1.4.0 manifest pins yyjson `0.13.0` (was `0.12.0`).

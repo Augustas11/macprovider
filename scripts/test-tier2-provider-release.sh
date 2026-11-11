@@ -218,6 +218,17 @@ cat >"$WORKDIR/xcrun" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 if [ "${1:-}" = "stapler" ] && [ "${2:-}" = "validate" ]; then
+  # STAPLER_FAILURES: a file holding how many calls fail with
+  # STAPLER_MESSAGE before validation passes.
+  if [ -n "${STAPLER_FAILURES:-}" ]; then
+    left="$(cat "$STAPLER_FAILURES")"
+    printf '%s\n' "$((left + 0))" >>"$STAPLER_FAILURES.calls"
+    if [ "$left" -gt 0 ]; then
+      printf '%s\n' "$((left - 1))" >"$STAPLER_FAILURES"
+      printf '%s\n' "$STAPLER_MESSAGE" >&2
+      exit 65
+    fi
+  fi
   exit 0
 fi
 exit 2
@@ -440,5 +451,40 @@ if PATH="$WORKDIR:$PATH" \
   die "invalid DOWNLOAD_ATTEMPTS unexpectedly passed"
 fi
 assert_contains "$WORKDIR/bad-attempts.err" "DOWNLOAD_ATTEMPTS must be a positive integer"
+
+# Stapler validation: a network error is retried with backoff; a definitive
+# result fails on the first answer.
+run_stapler_case() { # NAME FAILURES MESSAGE [ENV...]
+  local name="$1" failures="$2" message="$3"
+  shift 3
+  printf '%s\n' "$failures" >"$WORKDIR/$name.failures"
+  rm -f "$WORKDIR/$name.failures.calls"
+  env PATH="$WORKDIR:$PATH" \
+    CURL_BIN="$WORKDIR/curl" \
+    RELEASE_FIXTURE_DIR="$app_fixture" \
+    MACPROVIDER_CHECKSUM_PUBLIC_KEY_PEM="$PUBLIC_KEY_PEM" \
+    RELEASE_TAG=v1.2.6 \
+    DOWNLOAD_RETRY_SLEEP=0 \
+    STAPLER_FAILURES="$WORKDIR/$name.failures" \
+    STAPLER_MESSAGE="$message" \
+    "$@" \
+    "$VERIFIER" >"$WORKDIR/$name.out" 2>"$WORKDIR/$name.err"
+}
+network_error="Could not validate ticket for x: Error Domain=NSURLErrorDomain Code=-1005 \"The network connection was lost.\""
+run_stapler_case stapler-network 2 "$network_error" ||
+  die "stapler validation did not recover from a transient network error"
+assert_contains "$WORKDIR/stapler-network.err" "could not reach Apple, retrying"
+assert_contains "$WORKDIR/stapler-network.err" "Malibu.app DMG stapler validation passed"
+if run_stapler_case stapler-definitive 1 "x does not have a ticket stapled to it."; then
+  die "a missing stapled ticket unexpectedly passed"
+fi
+[ "$(wc -l <"$WORKDIR/stapler-definitive.failures.calls" | tr -d ' ')" = 1 ] ||
+  die "a definitive stapler failure was retried"
+assert_contains "$WORKDIR/stapler-definitive.err" "stapler validation failed"
+if run_stapler_case stapler-exhausted 9 "$network_error" NOTARY_ATTEMPTS=3; then
+  die "stapler validation passed while Apple stayed unreachable"
+fi
+[ "$(wc -l <"$WORKDIR/stapler-exhausted.failures.calls" | tr -d ' ')" = 3 ] ||
+  die "stapler network retries are not bounded by NOTARY_ATTEMPTS"
 
 log "ok"

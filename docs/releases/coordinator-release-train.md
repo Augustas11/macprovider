@@ -22,6 +22,25 @@ waives only the specifically authorized serving-journey export, not qualificatio
 or release-match gates. These catalog/tooling changes are not evidence of a
 coordinator runtime deployment or sampled GLM admission.
 
+## Rollback keeps buyer rows: gateway buyer hold and schema-aware rollback — pending runtime inclusion (2026-11-11)
+
+Related: #2296. The gateway gains an in-memory buyer hold (503 with
+`Retry-After` for new buyer requests; the ops canary is admitted) and the
+updater decides by database schema whether a failed rollout keeps the live
+databases (schema unchanged) or holds buyers until every serving gate passes
+and may restore (schema changed or unknown). SPEC-006-R027 is pending until the
+live step below is done.
+
+Live step, in this order:
+
+1. Cut and apply the next runtime release through
+   `scripts/ops/pearl-runtime.sh` (`status`, then `next --run`). This first
+   apply still runs under the previously installed updater, so it has the old
+   rollback behaviour.
+2. Install the updater bundle from the new tag
+   (`PEARL_RUNTIME_TASK=updater-bundle`). From the next apply on, the new
+   rollback rule and the stated buyer-visible downtime are in effect.
+
 ## Gateway releases orphaned reservations at startup — pending runtime inclusion (2026-11-10)
 
 Related: #2268. The gateway now expires, before it listens, the active quota
@@ -483,6 +502,8 @@ The canary Mac mp-26592d… now runs signed CLI candidate v1.8.195, whose payloa
 
 ### Recent coordinator releases
 
+This table stops at v1.8.259. Later releases (for example v1.8.284 and v1.8.285) are recorded in the dated entries above it.
+
 | Tag | Commit | Head PR |
 |---|---|---|
 | v1.8.259 | `e80adfc6b` | #2064 CB `max_served_slots` feed validator, #2065 origin marker and buyer-safe ownership routing — **live** 2026-10-19 23:07Z, about 2 min of gateway/coordinator 502 during the apply |
@@ -662,7 +683,7 @@ Merged, waiting for this train:
 
 ## Earlier plan: net changes vs v1.8.236 (shipped in v1.8.237 / v1.8.239 / v1.8.241)
 
-One runtime train, applied **after** the next CLI release (#1944's deploy order puts the CLI first). Expected downtime: one signed-updater apply (15–20 min worst case, about 3 min with the short-quiesce updater).
+One runtime train, applied **after** the next CLI release (#1944's deploy order puts the CLI first). Expected downtime: one signed-updater apply. Measured with the short-quiesce updater: about 1.5 to 3 min of gateway/coordinator restart (v1.8.259 about 2 min 38 s to public health, v1.8.284 about 3 min, v1.8.285 about 90 s; see the entries above and `docs/runbooks/pearl-coordinator-rollout.md`). The older 15-20 min figure came from the pre-short-quiesce v1.8.216-v1.8.218 rollouts and does not apply to the current updater.
 
 Merged, waiting for this train:
 - [x] Shipped in **v1.8.237** (live 2026-10-10 07:05Z): #1942 coordinator log level (#1940 closed after the live check), #1945 BYOM catalog graduation, the #1943 on-call key digest in the coordinator environment.
@@ -911,15 +932,17 @@ while the binary is dated 2026-09-23.
 1. All in-scope rows above are `merged`; no row you need is `in progress`.
 2. Pick the next unused `v1.8.N` (check both trains), create a signed tag on
    the `main` tip, and dispatch `pearl-runtime-release.yml` once.
-3. Apply with the full deploy scripts from a clean checkout of the tag, not a
-   binary swap, whenever `dist/`, units, nginx, or the verifier bundle changed
-   since the last full deploy.
+3. Apply through `scripts/ops/pearl-runtime.sh`: run `status`, then `next`, then
+   `next --run` one documented step at a time, from reviewed `origin/main`
+   (AGENTS.md rule 8). State the expected downtime first. Steps, preflight and
+   rollback: `docs/runbooks/pearl-coordinator-rollout.md`. Do not call the
+   deploy scripts or the updater directly.
 4. Verify:
    - `/healthz` on coordinator and gateway reports the tag;
    - the deploy's catalog step logged `equivalent`, `descends`, or an
      intentional override;
    - the retained window still holds the immediate predecessor;
-   - `verify-live-coordinator-release-rollout` passes.
+   - `scripts/ops/pearl-runtime.sh status` reports the release live with no pending step.
    - if the release includes #1936, the short-chat usage, charged prompt, and
      verified receipt pass the prompt-headroom check above.
    - if the release includes #1769, the warm-turn buyer usage and matching

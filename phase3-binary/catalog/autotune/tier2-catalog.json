@@ -1,7 +1,7 @@
 {
-  "catalog_id": "macprovider-tier2-model-catalog-2026-11-10-ripple-65b-v1",
+  "catalog_id": "macprovider-tier2-model-catalog-2026-11-11-lfm3-1.7b-v1",
   "expires_at": "2026-12-25T00:00:00Z",
-  "issued_at": "2026-11-10T08:50:00Z",
+  "issued_at": "2026-11-11T07:00:00Z",
   "models": [
     {
       "artifact_kind": "mlx_weight_file",
@@ -37,6 +37,15 @@
       "min_ram_gb": 64,
       "notes": "Buyer-serving candidate ricursiveai/ripple-65b-preview (#2270 Ripple-65B Preview, native ricursive engine, listed); identity from signed SPEC-023 row.",
       "sha256": "accae85aca4a215288f9062cc60535f70509b593772da21409a485ba9c6725c6",
+      "source": "operator-curated"
+    },
+    {
+      "artifact_kind": "mlx_weight_file",
+      "hash_scope": "macprovider.snapshot-manifest.v1",
+      "model_id": "LiquidAI/LFM3-1.7B-MLX-4bit",
+      "min_ram_gb": 3,
+      "notes": "Buyer-serving candidate liquidai/lfm3-1.7b (#2231 LFM3 1.7B for 8 GB Macs, native lfm3 engine, listed); identity from signed SPEC-023 row.",
+      "sha256": "e6ef055b17601b009ea1a476c8a3c0bbab734ea82825d9cd23d8a63a90d9c8ea",
       "source": "operator-curated"
     },
     {
@@ -205,7 +214,7 @@
   "signature": {
     "alg": "Ed25519",
     "key_id": "catalog-key-2026q2",
-    "sig": "2OkaHo1_chi-_r_E7-koU3WVEf8VxuQuoZp8eLVspT-bPCzxRS0FANk8CVATZb0TQjnQHoiTeFVWb2hGbhQ9Cw"
+    "sig": "UVtU038Np25dBZiJnX16tKDwQnV5ukq_tDOi13v3bwxvwxTFEQJJS-Ob-a3YHHaoDFTIx9bEmsBcvvXYYXMHBg"
   },
   "version": 1
 }

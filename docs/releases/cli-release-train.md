@@ -60,17 +60,12 @@ cutting that candidate does not publish the embedded gateway pages.
 
 ## Current published release and fleet target
 
-Verified 2026-10-25 against GitHub release/tag metadata, the release train
-(`scripts/ops/cli-release.sh status`: `v1.8.272 train complete`) and live coordinator health:
-
-| Field | Value |
-|---|---|
-| GitHub provider release | [v1.8.272](https://github.com/Augustas11/macprovider/releases/tag/v1.8.272), promoted 2026-10-25 (promotion run 40152407985) |
-| Signed compatibility-set id | `Augustas11/macprovider:v1.8.272@28c06242701de711454f65b4bfb34375d31803c7` |
-| Pearl runtime / recommended provider | `v1.8.271` / `1.8.272` (recommendation bump 2026-10-25) |
-| Release mirror / installer | `latest.json` → v1.8.272; `get.malibu.tech/install.sh` parity with v1.8.272, consumer health OK |
-| Catalog | `published-2026-10-25-glm53-qwen36-native-mtp-v272` (#2141), activated 2026-10-25 02:49–03:12Z; `native_mtp_admission_decode_path` `match` (`4d04a3f3…`) |
-| Consumed identities | Provider and runtime tags through **v1.8.272** are consumed (v1.8.271 is a Pearl runtime tag). The next provider CLI takes the next unused tag; refresh both trains and remote tags first. |
+This section is generated, never typed: run `scripts/ops/release-train-status.sh`
+(read-only; GitHub release metadata through `gh`, the public coordinator
+`/healthz`, and `MIRROR_LATEST_URL` when set; no ssh) and paste its Markdown
+output over this section in a docs-only push. The hand-written table that
+stood here was last verified on 2026-10-25 and went stale, so it was removed.
+For the live train state run `scripts/ops/cli-release.sh status`.
 
 ## Next CLI release — net changes vs 1.8.272 (tracked 2026-10-26)
 
@@ -152,6 +147,8 @@ The exploratory goal matrix does not constitute admission qualification.
 | [#2283](https://github.com/Augustas11/macprovider/pull/2283) native-MTP observer for the GLM5Next HF layout (Related: #2277) | The native-MTP artifact observer validates GLM5Next names after the loader's key mapping, so the uncensored GLM-5.3-Flash build (HF pre-sanitize layout) is admitted. Expected overrides are per artifact, and vision-tower quantization overrides are ignored (SPEC-048 0.1.82). Lab result: s1 native vs ordinary CB 1.053x / 1.009x committed tok/s, about 79% acceptance, 0 parity mismatches, bank 3/3 | Merged 2026-11-11 as `5862a1258`. Live step: the next CLI cut through `scripts/ops/cli-release.sh status` then `next --run`. Under #2282 there is no rebind: after the cut, the variant inherits the base GLM-5.3-Flash admission and serves native MTP once its MTP-16 on-device self-check passes |
 | [#2282](https://github.com/Augustas11/macprovider/pull/2282) release UX (Related: #2281) | Native-MTP admission is keyed by model and adapter; a differing decode-path digest is provenance only, and the MTP-16 on-device self-check plus the R033 canary decide serving (SPEC-048 0.1.81). A same-architecture variant inherits its donor's admission, with a quantization-kind match required. CB: a granted FR-CB10 self-check authorizes CB without a signed positive entry, and the signed policy is revocation-only. The AC-26 leg (a) parity probe runs inside the self-check; cached turns are on by default and re-prefill cold inside CB until the probe passes (SPEC-038 0.3.44). Rebind and scope gates are removed from `catalog-activate.sh` and `cli-release.sh` | Merged 2026-11-11 06:05 WITA. No live step at merge. The next CLI cut through `scripts/ops/cli-release.sh status` then `next --run` carries the provider half. From that cut on, the identity-only rebind steps in the rows above are not needed: #2275 step (3) and #2279 step (4) drop out |
 | [#2265](https://github.com/Augustas11/macprovider/pull/2265) MLX core sync: batch-invariant small-M quantized matmul (Related: #2234) | The fork MLX core routes eligible 1–16-row quantized products to `qmv_mma` on non-NAX chips, and GLM-5-Next decode/verify projections for 1–8 tokens go through one kernel, so a row decodes bitwise the same alone and batched (mlx-swift-lm `3.32.3-macprovider.38`, SPEC-048 0.1.83). Lab result on the M3 Ultra lab build: GLM-5.3-Flash CB exact at 1/2/4/8 rows (8 rows diverged before), aggregate 40.3/57.0/66.7/63.8 tok/s, unchanged; isolation pass; R015 PASS 10/10 every cell, s1 native vs ordinary CB 1.10–1.24x decode, 0 parity mismatches | Merged 2026-11-11 as `c843502e3`. Live step: the next CLI cut through `scripts/ops/cli-release.sh status` then `next --run`. Under #2282 there is no rebind; GLM native MTP keeps serving after its MTP-16 on-device self-check passes on the cut |
+| [#2287](https://github.com/Augustas11/macprovider/pull/2287) OpenRouter reprice (Related: #2286) | None (catalog only). Rows-only pricing release `published-2026-11-11-openrouter-reprice-v283`: `qwen3.8-27b` 0.12 / 1.584, `qwen3.5-27b` 0.20 / 1.60, `qwen3.5-35b-a3b` 0.12 / 0.80, `qwen3.6-35b-a3b` 0.08 / 0.72 ($/Mtok in / out; OpenRouter provider median minus 20%, cache hit 25% of prompt); signed with `streamvc-autotune-static-v4` against `published-2026-11-10-ripple-65b-listed-v283` | Merged as `182897a59`. (1) signed in the PR; (2) **live 2026-11-11 14:41 WITA**: `published-2026-11-11-openrouter-reprice-v283` `live_verified` through `catalog-activate.sh next --run` (price table digest `c0071cf7…`, 12 served names, four Qwen rows only; pricing journal finalized). First pricing-only activation: content drift vs live was the rate card alone, so no canary custody proof and no canary restart (the Studio was in the #2266 lab window); one SIGHUP, no coordinator restart. No CLI cut |
+| [#2231](https://github.com/Augustas11/macprovider/issues/2231) LFM3 1.7B for 8 GB Macs | mlx-swift-lm `3.32.3-macprovider.40` (`a7374a81`, on `.38`): the native `lfm3` engine (upstream mlx-swift-lm #750 plus config/tokenizer validation and padded conv-row masking; no other model's code changes) and swift-transformers 1.4.0 (BPE `ignore_merges` and code-point regex splits; token-exact against HF `tokenizers` on every served tokenizer, 552 corpus rows); `lfm3` model label in ModelRuntime (serial: not a paged-KV family); `liquidai/lfm3-1.7b` billing and routing aliases for the served `LiquidAI/LFM3-1.7B-MLX-4bit` artifact. Decode-path digest changes to `052e7668…` (pin and ModelRuntime). Catalog release `published-2026-11-11-lfm3-1.7b-listed-v283` staged: a `listed` row at `class-3b` class rates, `min_ram_gb` 3, bandwidth tier C; Tier-2 pin `macprovider-tier2-model-catalog-2026-11-11-lfm3-1.7b-v1` (signed `catalog-key-2026q2`); release signed with `streamvc-autotune-static-v4` against `published-2026-11-11-openrouter-reprice-v283`. Lab result on an M1 8 GB Air: 256/256 greedy and 16/16 top-1 parity vs mlx-vlm 0.7.12 at 1K/4K/8K (4-bit and 8-bit); 4-bit decode 11.9 / 14.2 tok/s and TTFT 8.7 / 21.8 s at 0.9K / 3.6K input; 2.26 GB peak at 32K | Order: (1) signed in the PR; (2) merge, then `scripts/ops/catalog-activate.sh status` then `next --run` (pricing path: one new class row, coordinator `rewards.rate_card` in parity); (3) the next CLI cut through `scripts/ops/cli-release.sh status` then `next --run` bakes the engine and the row. (4) after the cut, an 8 GB lab Mac on that CLI loads `LiquidAI/LFM3-1.7B-MLX-4bit`, and a strict-pinned buyer request through the Malibu gateway is the live probe; (5) the next catalog release promotes `liquidai/lfm3-1.7b` from `listed` to `recommendable` (a `promote_recommendable` intake entry, demand-rank `recommendable: true`, buyer-UX conformance record or `conformance_owed`), since SPEC-023 AC-CAT-21 forbids promotion in the release that first lists a key. Live = step (4) probe served. Under #2282 there is no rebind. `.41` (#2230) is another tag on `.38`; whichever merges second moves to a tag carrying both and re-runs LFM3 1K/4K/8K greedy and top-1 parity on it (`.41` changes `MLXLMCommon/KVCache.swift` mask code LFM3 decodes through) |
 
 ## Next CLI release — 1.8.283 (staged 2026-11-09)
 
@@ -1483,12 +1480,14 @@ mainland-provider installer handoff.
    `candidate_cut` blocked, with NEXT `scripts/ops/catalog-activate.sh status`,
    until Pearl's `/v1/autotune-release` reports the committed `release_id`.
    Do **not** reuse `v1.8.163` / `v1.8.164` / `v1.8.167` / `v1.8.168`.
-3. In-scope e2e green on that candidate, or an explicit carry-forward record
-   under the rule above. For 1.8.217, the fused A3B MoE ordinary path (#1832)
-   is in scope with its Studio qualification at `7d55924eb`; native MTP
-   remains default-off and out of scope. Earlier signed
-   candidate evidence may carry forward only where the table and track record
-   explicitly permit it.
+3. No separate per-cut e2e record. The exact-candidate canary probe (item 5:
+   status probe plus one provider-attributed paid gateway request) is the
+   cut's end-to-end check. A decode-path change is qualified on its lab build
+   in its own PR window before it merges, not at the cut. `cli-release.sh`
+   has no `e2e_gate` step: every cut from 1.8.230 to 1.8.283 passed it with a
+   carry-forward line in this file. The optional `native_mtp_postcut` step
+   still runs when `NATIVE_MTP_POSTCUT_EVIDENCE` stages post-cut native-MTP
+   evidence.
 4. Privacy code identity registered on Pearl before any canary or fleet
    provider runs the candidate: `scripts/ops/cli-release.sh` step
    `privacy_release_identity` copies the verified candidate
@@ -1513,7 +1512,10 @@ mainland-provider installer handoff.
    Silence while the model loads is not a failure: GLM-5.3-Flash keeps
    `/v1/status` silent for 7-13 minutes while it loads, so with the same
    provider pid alive the load is bounded only by `CANARY_READY_TIMEOUT_S`
-   (1800 s). No timeout override is needed. Verify the installed CLI advertises
+   (1800 s). No timeout override is needed. The automatic restore is not
+   guaranteed: exit 5 means the candidate failed and the previous version is
+   back and buyer_serving; exit 6 means recovery did not complete and the
+   operator must restore the canary by hand. Verify the installed CLI advertises
    1.8.217, joins through Pearl's exact compatibility set, preserves operator
    pause through coordinator drain, and serves a bounded request. Do not touch
    the designated Studio until the operator releases its current session lock.
@@ -1572,15 +1574,17 @@ mainland-provider installer handoff.
 11. Curl-channel `https://get.malibu.tech/install.sh`:
    - **On promotion:** republish from the promoted tag (or confirm served
      bytes still match that tag) so `scripts/check-install-sh-parity.sh`
-     against the tag is green. `cli-release.sh` offers this
-     (`install_sh_republish`) right after promotion, before the
+     against the tag is green. `cli-release.sh` runs this
+     (`install_sh_republish`, `next --run`: backup, install over `PEARL_SSH`,
+     SHA-256 read-back) right after promotion, before the
      recommendation bump (item 8 onward), because the scheduled parity alarm
      compares against the latest published release (#2210). The alarm
      tolerates the previous release's exact bytes for 120 minutes after
      publication; past that, drift alarms. Without `PEARL_SSH` /
      `INSTALL_SH_REMOTE_PATH` the train reports the republish as blocked
-     only after `mirror_latest`. Confirm
-     `scripts/check-install-sh-consumer-health.sh` is green (#1600 / #1588).
+     only after `mirror_latest`. Consumer health is the scheduled
+     `install-sh-consumer-health-alarm.yml` (#1600 / #1588), not a train
+     step.
    - **Off-cycle from `main`:** allowed when the public one-liner must
      change before the next CLI promotion (fresh-Mac CLT wall, pagination).
      Record date + SHA-256 in this file. Expect the parity alarm vs the

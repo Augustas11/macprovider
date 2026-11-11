@@ -668,7 +668,8 @@ class RateCardSourceTest(unittest.TestCase):
             self.assertIs(demand[key]["recommendable"], False)
             self.assertIsNone(demand[key]["rank"])
         # #2270: Ripple-65B Preview is listed at its declared class rates.
-        listed_priced = {"ricursiveai/ripple-65b-preview"}
+        # #2231: LFM3 1.7B is listed at its declared class rates.
+        listed_priced = {"ricursiveai/ripple-65b-preview", "liquidai/lfm3-1.7b"}
         for key in listed_priced:
             self.assertEqual(CANDIDATE_OBJ["rows"][key]["runtime_status"], "listed")
             self.assertIs(demand[key]["recommendable"], False)
@@ -2382,6 +2383,15 @@ class IntakeDecisionTest(unittest.TestCase):
 
 
 HISTORICAL_CB_POLICY_EXPIRES_AT = "2026-12-25T00:00:00Z"
+# Rows a pricing release repriced after activation, at the rates the
+# pre-activation release published. The rewind puts them back.
+PRE_ACTIVATION_REPRICED_ROWS = {
+    # published-2026-11-11-openrouter-reprice-v283 (OpenRouter median - 20%)
+    "qwen3.5-27b": {"prompt_rate_per_mtok": 208000, "prompt_cache_hit_rate_per_mtok": 52000, "completion_rate_per_mtok": 1728000},
+    "qwen3.5-35b-a3b": {"prompt_rate_per_mtok": 130000, "prompt_cache_hit_rate_per_mtok": 32500, "completion_rate_per_mtok": 1000000},
+    "qwen3.6-35b-a3b": {"prompt_rate_per_mtok": 148800, "prompt_cache_hit_rate_per_mtok": 37200, "completion_rate_per_mtok": 800000},
+    "qwen3.8-27b": {"prompt_rate_per_mtok": 192000, "prompt_cache_hit_rate_per_mtok": 48000, "completion_rate_per_mtok": 2000000},
+}
 
 
 class HermeticRelease:
@@ -2533,6 +2543,7 @@ class HermeticRelease:
             demand_path.write_bytes(catalog_release.canonical_bytes(demand))
             self.strip_tier2_models(admitted_model_ids)
             self.strip_promoted_rate_rows(admitted)
+        self.restore_pre_activation_rates()
         self.bump(release_id, generated_at)
 
         def restamp(name: str, **fields) -> bytes:
@@ -2583,6 +2594,30 @@ class HermeticRelease:
         tier2 = json.loads(path.read_text())
         tier2["models"] = [m for m in tier2["models"] if m["model_id"] not in model_ids]
         path.write_text(json.dumps(tier2, indent=2) + "\n")
+
+    def restore_pre_activation_rates(self) -> None:
+        """Put back the rates of rows repriced by a pricing release after
+        activation (PRE_ACTIVATION_REPRICED_ROWS) in the rate-card source, the
+        published card and the coordinator rewards rows."""
+        source_path = self.catalog / "rate-card-source.json"
+        source = json.loads(source_path.read_text())
+        card_path = self.catalog / "rate-card.json"
+        card = json.loads(card_path.read_text())
+        yaml_path = self.root / "coordinator.yaml"
+        yaml_text = yaml_path.read_text()
+        for key, rates in PRE_ACTIVATION_REPRICED_ROWS.items():
+            source["rows"][key].update(rates)
+            card["rows"][key].update(rates)
+            block = re.search(rf"(?m)^    {re.escape(key)}:.*\n((?:      .*\n)+)", yaml_text)
+            body = block.group(1)
+            for field, value in rates.items():
+                credits = field.replace("_rate_per_mtok", "_credits_per_mtok")
+                body = re.sub(rf"(?m)^(      {credits}: )\d+", rf"\g<1>{value}", body)
+            yaml_text = yaml_text[:block.start(1)] + body + yaml_text[block.end(1):]
+        source_path.write_text(json.dumps(source, indent=2, sort_keys=True) + "\n")
+        card["version"] = catalog_release.rate_card_projection_hash(card)
+        card_path.write_bytes(catalog_release.canonical_bytes(card))
+        yaml_path.write_text(yaml_text)
 
     def strip_promoted_rate_rows(self, admitted: set[str]) -> None:
         """Drop the rate rows an admission introduced: the rows keyed by the
@@ -3678,6 +3713,109 @@ class RenewalFlowTest(unittest.TestCase):
                 catalog_release.cmd_continuity_check(incoming, live)
             self.assertIn("trusted-keys.json", str(caught.exception))
             self.assertIn("catalog-content lane", str(caught.exception))
+
+    def test_continuity_ignores_cb_tuple_sha256_but_flags_an_entry_change(self):
+        """A CB entry's `tuple_sha256` hashes the release stamps, so every
+        re-stamp changes it; it is release-derived and must not read as drift.
+        Any other entry field moving is content drift."""
+        with self.harness() as harness:
+            harness.measure_sizes()
+            live = harness.stage(harness.root / "live")
+            incoming = harness.stage(harness.root / "incoming")
+            name = catalog_release.CB_POLICY_FEED_NAME
+            entry = {"model_key": "qwen3-8b", "max_batch": 4, "tuple_sha256": "a" * 64}
+            for directory in (live, incoming):
+                obj = json.loads((directory / name).read_text())
+                obj["entries"] = [dict(entry)]
+                (directory / name).write_bytes(catalog_release.canonical_bytes(obj))
+            obj = json.loads((incoming / name).read_text())
+            obj.update(release_id="restamped-v2", generated_at=self.NOW, expires_at="2027-01-01T00:00:00Z",
+                       candidate_catalog_sha256="0" * 64)
+            obj["entries"][0]["tuple_sha256"] = "b" * 64
+            (incoming / name).write_bytes(catalog_release.canonical_bytes(obj))
+            self.assertEqual(catalog_release.feed_continuity_drift(incoming, live), [])
+
+            obj["entries"][0]["max_batch"] = 8
+            (incoming / name).write_bytes(catalog_release.canonical_bytes(obj))
+            self.assertEqual(catalog_release.feed_continuity_drift(incoming, live), [name])
+
+    def test_pricing_only_check_accepts_only_credit_rate_moves_of_existing_rows(self):
+        """`pricing-only-check` lets the catalog-content lane skip the canary:
+        it passes only when the credit rates of existing rate-card rows are the
+        sole content drift vs live."""
+        name = catalog_release.RATE_CARD_FEED_NAME
+        with self.harness() as harness:
+            harness.measure_sizes()
+            live = harness.stage(harness.root / "live")
+            incoming = harness.stage(harness.root / "incoming")
+            original = (incoming / name).read_bytes()
+
+            def card(mutate) -> None:
+                obj = json.loads(original)
+                obj.update(version="restamped-v2", generated_at=self.NOW)
+                mutate(obj)
+                (incoming / name).write_bytes(catalog_release.canonical_bytes(obj))
+
+            def refused(fragment: str) -> None:
+                with self.assertRaises(catalog_release.CatalogError) as caught:
+                    catalog_release.cmd_pricing_only_check(incoming, live)
+                self.assertIn(fragment, str(caught.exception))
+
+            # No content drift at all is not a pricing release.
+            refused("none")
+
+            def reprice(obj):
+                row = obj["rows"]["default"]
+                row["prompt_rate_per_mtok"] += 1
+                row["prompt_cache_hit_rate_per_mtok"] += 1
+                row["completion_rate_per_mtok"] += 1
+
+            card(reprice)
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                catalog_release.cmd_pricing_only_check(incoming, live)
+            self.assertIn("1 existing rate-card row(s)", out.getvalue())
+
+            def add_row(obj):
+                reprice(obj)
+                obj["rows"]["brand-new-model"] = dict(obj["rows"]["default"])
+
+            card(add_row)
+            refused("row set changed")
+
+            def drop_row(obj):
+                reprice(obj)
+                obj["rows"].pop(next(k for k in obj["rows"] if k != "default"))
+
+            card(drop_row)
+            refused("row set changed")
+
+            def share(obj):
+                reprice(obj)
+                obj["rows"]["default"]["provider_share_bps"] -= 1
+
+            card(share)
+            refused("provider_share_bps")
+
+            def multiplier(obj):
+                obj["rows"]["default"]["global_multiplier_ppm"] += 1
+
+            card(multiplier)
+            refused("global_multiplier_ppm")
+
+            def usd(obj):
+                reprice(obj)
+                obj["usd_per_million_credits"] = 2.0
+
+            card(usd)
+            refused("usd_per_million_credits")
+
+            # A rate move plus drift in any other feed is a full content release.
+            card(reprice)
+            demand = json.loads((incoming / "demand-rank.json").read_text())
+            demand["policy_version"] = "autotune-policy-v999"
+            (incoming / "demand-rank.json").write_bytes(catalog_release.canonical_bytes(demand))
+            refused("demand-rank.json")
 
     def test_restamping_the_generated_rate_card_instead_of_its_source_aborts(self):
         """The regression this replaced. `rate-card.json` is MATERIALISED from

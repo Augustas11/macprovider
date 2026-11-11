@@ -16,7 +16,7 @@ The rollback is a flag flip. The schema additions are forward-compatible and rem
 - Phase 2E integration gate is green locally and in CI:
   - `bash frontdoor/provider-portal/check-bundle.sh`
   - `make test-integration`
-  - GitHub Actions job `spec-014-v0-2-gate`
+  - GitHub Actions job `phase4-coordinator (golangci-lint depguard AC-16)` (its provider portal bundle guard step; formerly `spec-014-v0-2-gate`)
 - No deployment enables GitHub OAuth until the coordinator, binary/CLI, and portal bundle are all shipped.
 - Confirm `specs/` has no local diff. SPEC-014 v0.2 is locked.
 
@@ -175,7 +175,7 @@ Declare the gate passed only after:
 
 - Local `make test-integration` is green.
 - Local `bash frontdoor/provider-portal/check-bundle.sh` is green.
-- CI job `spec-014-v0-2-gate` is green.
+- CI job `phase4-coordinator (golangci-lint depguard AC-16)`, which runs the portal bundle guard, is green.
 - Phase 2E implementation audit has zero critical, high, or medium findings.
 - The smoke test in Step 6 passes against a real Mac install.
 

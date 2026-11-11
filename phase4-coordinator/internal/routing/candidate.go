@@ -13,7 +13,7 @@
 // Phase D added BalancedScores (FR-SR-8 normative formula) +
 // Decision / LogRoutingDecision / CandidateLogEntry (SPEC-004 §7
 // routing-decision log surface with legacy aliases preserved for
-// pre-Phase-D consumers); server.go's logRoutingDecisionFull
+// pre-Phase-D consumers); server.go's logRoutingDecisionFullWithCache
 // delegates here.
 // Phase A added the sticky/ sub-package (Map / Lookup / Update /
 // PurgeAccount / InvalidateClass); server.go's stickyLookup /

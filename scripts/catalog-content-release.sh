@@ -19,7 +19,8 @@
 #   scripts/catalog-content-release.sh --help
 #
 # --preflight prints exactly ONE JSON verdict on stdout
-#   {"go": bool, "checks": [{"name", "ok", "detail"}], "pricing": {...}|null};
+#   {"go": bool, "checks": [{"name", "ok", "detail"}], "pricing": {...}|null,
+#    "pricing_only": bool};
 #   progress goes to stderr.
 # --deploy runs the same preflight in the same invocation (its JSON verdict
 #   line is printed to stdout among the step logs), requires GO, then
@@ -40,7 +41,10 @@
 # stdout) reuses its pinned name set, so a name that left the 30-day window
 # since does not invalidate the acknowledgement. The journal lives at
 # /opt/macprovider/.pricing-txn; any failure after it exists rolls yaml,
-# current and window back together.
+# current and window back together. A pricing-only release (only the credit
+# rates of existing rate-card rows moved, `catalog-release.py
+# pricing-only-check`) needs no canary: its canary checks are not required and
+# evidence (c) is skipped.
 # --host-check (read-only, #1693 enabling rollout) proves Pearl is ready for a
 #   pricing release at <sha> without needing one: the commit is on origin/main
 #   and is this tooling, no lock or journal is held, the on-disk config is the
@@ -286,6 +290,12 @@ CONFIG_DISK_SHA=""
 OVERLAY_DISK_SHA=""
 # #1693 pricing state (PRICING=1 when the release changes rate-card rows).
 PRICING=0
+# PRICING_ONLY=1 when the only content drift vs live is the credit rates of
+# existing rate-card rows (`catalog-release.py pricing-only-check`). Always
+# derived here from the assembled and live releases, never from the caller's
+# environment. Providers never bill (the coordinator applies the card), so
+# such a release needs no canary custody proof and no canary restart.
+PRICING_ONLY=0
 PRICING_DIR=""
 COMMIT_BLOCK_SHA=""
 ACK_MOVES_SHA=""
@@ -522,7 +532,7 @@ failed_checks() { awk -F '\t' '$2 != 1 {print $1}' "$CHECKS"; }
 check_ok() { awk -F '\t' -v n="$1" '$1 == n && $2 == 1 {found=1} END {exit found ? 0 : 1}' "$CHECKS"; }
 
 emit_verdict() {
-  python3 - "$CHECKS" "${PRICING_DIR:-}" "$E2E_OWED" <<'PY'
+  python3 - "$CHECKS" "${PRICING_DIR:-}" "$E2E_OWED" "$PRICING_ONLY" <<'PY'
 import json, os, sys
 checks = []
 for line in open(sys.argv[1], encoding="utf-8"):
@@ -534,7 +544,7 @@ if sys.argv[2] and os.path.exists(os.path.join(sys.argv[2], "verdict-pricing.jso
 # Evidence (e) owed after activation: model ids and served hashes only.
 owed = json.load(open(sys.argv[3]))["models"] if os.path.exists(sys.argv[3]) else []
 print(json.dumps({"go": bool(checks) and all(c["ok"] for c in checks), "checks": checks, "pricing": pricing,
-                  "buyer_serving_e2e_owed": owed},
+                  "pricing_only": sys.argv[4] == "1", "buyer_serving_e2e_owed": owed},
                  sort_keys=True, ensure_ascii=True))
 PY
 }
@@ -888,6 +898,33 @@ print("1 " + blk if changed else "0 -")' "$WORK/gate.json" 2>&1)" || { record pr
     { record pricing_release 0 "the commit's rate_card block digest differs from the content gate's"; return 1; }
   ACK_MOVES_SHA="$(sha256_file "$PRICING_DIR/ack.json")"
   record pricing_release 1 "rate-card rows change vs live; commit rate_card block $COMMIT_BLOCK_SHA"
+  pricing_only_detect
+}
+
+# A pricing release whose only content drift vs live is the credit rates of
+# existing rate-card rows is pricing-only. On a refusal it stays a normal
+# pricing release (canary gates apply) and nothing is recorded.
+pricing_only_detect() {
+  PRICING_ONLY=0
+  [ "$PRICING" = 1 ] || return 0
+  if python3 -I "$SCRIPT_DIR/catalog-release.py" pricing-only-check --incoming "$REL" --live "$LIVE" \
+      >"$WORK/pricing-only.out" 2>"$WORK/pricing-only.err"; then
+    PRICING_ONLY=1
+    record pricing_only 1 "content drift vs live is rate-card rows only; canary custody and restart not required"
+  else
+    log "pricing: not pricing-only ($(tail -n 1 "$WORK/pricing-only.err" 2>/dev/null)); canary gates apply"
+  fi
+}
+
+# Pricing-only: the canary checks are recorded as not required (replacing any
+# failure pf_canary_config recorded before the release was classified).
+pricing_only_waive_canary() {
+  local name
+  awk -F '\t' '$1 != "canary_config" && $1 != "canary_token_operator_key" && $1 != "canary_reachable"' "$CHECKS" >"$CHECKS.tmp" &&
+    mv "$CHECKS.tmp" "$CHECKS"
+  for name in canary_config canary_token_operator_key canary_reachable; do
+    record "$name" 1 "not required: pricing-only release"
+  done
 }
 
 # #1693 L2 host state, read-only, as root on Pearl: no foreign recovery state,
@@ -1763,13 +1800,16 @@ run_preflight() {
           pf_pricing_host || true
           if check_ok pricing_host_state && check_ok config_applied; then
             pf_dry_load && pf_pricing_gate || true
-            check_ok coordinator_dry_load && check_ok canary_config && pf_coverage || true
+            # /poolz reads with the operator bearer, not the canary host.
+            check_ok coordinator_dry_load && { [ "$PRICING_ONLY" = 1 ] || check_ok canary_config; } && pf_coverage || true
           fi
         else
           pf_dry_load && check_ok canary_config && pf_coverage || true
         fi
       fi
-      if check_ok canary_config; then
+      if [ "$PRICING_ONLY" = 1 ]; then
+        pricing_only_waive_canary
+      elif check_ok canary_config; then
         pf_operator_key || true
         check_ok rollback_preconditions && pf_canary || true
       fi
@@ -1777,9 +1817,11 @@ run_preflight() {
   fi
   # Every named check must have run and passed.
   local name
-  local required="commit tooling_matches_commit release_assembled canary_config pearl_reachable pearl_locks_free
+  local canary_required="canary_config canary_token_operator_key canary_reachable"
+  [ "$PRICING_ONLY" != 1 ] || canary_required=""
+  local required="commit tooling_matches_commit release_assembled pearl_reachable pearl_locks_free
       pricing_txn_absent rollback_preconditions content_gate buyer_serving_e2e coordinator_dry_load
-      window_coverage config_applied artifact_feed_config canary_token_operator_key canary_reachable"
+      window_coverage config_applied artifact_feed_config $canary_required"
   [ "$PRICING" != 1 ] || required="$required pricing_release pricing_host_state pricing_effective_diff pricing_gate"
   for name in $required; do
     grep -q "^$name	" "$CHECKS" || record "$name" 0 "not run: an earlier check failed"
@@ -2097,7 +2139,11 @@ ccr_evidence() {
   ev_a_served_bytes || return 1
   ev_b_journal || return 1
   CCR_PASSED_AB=1
-  ev_c_canary || { [ -n "$SIGNED_PAIR_PLAN" ] || plan_retention; return 1; }
+  if [ "$PRICING_ONLY" = 1 ]; then
+    log "evidence (c): skipped, pricing-only release (only rate-card credit rates moved; providers never bill, the canary is not touched)"
+  else
+    ev_c_canary || { [ -n "$SIGNED_PAIR_PLAN" ] || plan_retention; return 1; }
+  fi
   ev_d_watch || return 1
   ev_pricing_state || return 1
   return 0
@@ -2370,6 +2416,11 @@ aa_read_live_targets
 [ "$CURRENT_TARGET" = "$PREFLIGHT_CURRENT" ] && [ "$ORIG_PREVIOUS_TARGET_B64" = "$PREFLIGHT_WINDOW_B64" ] ||
   fatal "live targets moved between preflight and the lease; re-run"
 aa_refuse_existing_release
+# Pricing-only is re-derived under the lease from the same live target (proved
+# unchanged above); a flip means the preflight's canary decision is stale.
+_pf_pricing_only="$PRICING_ONLY"
+pricing_only_detect
+[ "$PRICING_ONLY" = "$_pf_pricing_only" ] || fatal "pricing-only classification changed between preflight and the lease; re-run"
 # Stale pricing-journal temp dirs of dead processes are removed at the start
 # of every lane run, under the lock set.
 aa_lease_sh "[ ! -f '$PRICING_HELPER' ] || python3 -I '$PRICING_HELPER' cleanup-tmp" >&3 2>&1 || fatal "cannot clean stale pricing journal temp dirs"

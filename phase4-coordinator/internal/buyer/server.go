@@ -4042,7 +4042,7 @@ func (s *Server) forwardHTTPSequence(
 // flagged as a 5×-duplicated block inside handleChatCompletions. This
 // sub-PR (M2-1a) is a pure mechanical extraction with zero behaviour
 // diff — the caller is still responsible for the per-site suffix
-// (updating excluded, emitting logRoutingDecision, and any loop-control
+// (updating excluded, emitting logRoutingDecisionWithCache, and any loop-control
 // continue/break) because those vary across callsites. Sub-PRs 1b and 1c
 // unify the three transport loops into a single failover skeleton.
 //
@@ -6727,11 +6727,6 @@ func (v *streamToolCallFinalValidator) rewriteLine(line []byte) ([]byte, error) 
 	return append(out, newline...), nil
 }
 
-func (v *streamToolCallFinalValidator) observeBlock(block string) error {
-	_, err := v.rewriteAndObserve(block)
-	return err
-}
-
 func (v *streamToolCallFinalValidator) observeToolCall(raw json.RawMessage) error {
 	var call struct {
 		Index    *int            `json:"index"`
@@ -9199,7 +9194,7 @@ func (s *Server) SetSlotQueueConfig(maxPendingPerProvider int, deadline, pollInt
 // pre-T2 inline 4-branch comparator moved into routing in #266 T2;
 // #266 T3c surfaces the balanced-score cache via the returned map so
 // downstream consumers (applySticky / applyRandomTiebreak via
-// inEpsilonCohort / logRoutingDecisionFull) can reuse it instead of
+// inEpsilonCohort / logRoutingDecisionFullWithCache) can reuse it instead of
 // recomputing the FR-SR-8 normative formula O(N) times per request.
 //
 // Returns nil for non-balanced objectives — the cache is meaningless
@@ -9391,28 +9386,6 @@ func (s *Server) inEpsilonCohort(top, candidate pool.Provider, objective string,
 	return routing.InEpsilonCohort(top, candidate, routing.Objective(objective), s.tiebreakEpsilon, weights, scoreFn)
 }
 
-// seedForRequest derives the FR-SR-17 reproducibility seed from
-// requestID + a daily key bucket per SPEC-004 §7 / BUILD prompt
-// Phase D log-block contract:
-//
-//	"random_seed: per-request seed derivable from request_id +
-//	 daily key, NEVER from time.Now() alone"
-//
-// The daily key bucket is the current UTC date (YYYY-MM-DD), which
-// makes the seed:
-//  1. Deterministically reproducible across the same UTC day for
-//     the same requestID (audit replay possible within that
-//     window), AND
-//  2. Rotated daily so the seed space does not leak provider-
-//     selection patterns across days.
-//
-// dailyKeyFn is injectable for tests; production callers go through
-// the variadic-free seedForRequest wrapper which uses
-// defaultDailyKey (UTC date).
-func seedForRequest(requestID string) int64 {
-	return seedForRequestWithKey(requestID, defaultDailyKey())
-}
-
 func defaultDailyKey() string {
 	return time.Now().UTC().Format("2006-01-02")
 }
@@ -9485,19 +9458,8 @@ func routeKeyedFilterCounts(counts map[routing.RejectionReason]int) map[string]i
 	return out
 }
 
-// logRoutingDecisionFull is the post-Phase-D / FULL-IMPL fix-pass
-// surface: like logRoutingDecision but additionally threads the
-// real pre-filter pool size and per-reason rejection counts into
-// the SPEC-004 §7 routing-decision log. The sticky-path / retry-
-// path callers that don't have a FilterResult continue to use
-// logRoutingDecision (which delegates here with 0 / nil for the
-// new fields, matching the pre-Phase-D shape).
-func (s *Server) logRoutingDecisionFull(requestID string, preFilterCount int, filteredCounts map[string]int, candidates []pool.Provider, objective string, seed int64, draw float64, reason, chosen string) {
-	s.logRoutingDecisionFullWithCache(requestID, preFilterCount, filteredCounts, candidates, objective, seed, draw, reason, chosen, nil)
-}
-
-// logRoutingDecisionFullWithCache is the cache-aware
-// logRoutingDecisionFull. Issue #266 T3c: callers in the main-
+// logRoutingDecisionFullWithCache emits the SPEC-004 §7 routing
+// decision log. Issue #266 T3c: callers in the main-
 // selection path pass the balanced-score cache surfaced from
 // sortCandidates so the SPEC-004 §7 candidate_set values reuse the
 // already-computed map instead of recomputing KeyedBalancedScores
@@ -9546,11 +9508,7 @@ func (s *Server) logRoutingDecisionFullWithCache(requestID string, preFilterCoun
 	})
 }
 
-func (s *Server) logRoutingDecision(requestID string, candidates []pool.Provider, objective string, seed int64, draw float64, reason, chosen string) {
-	s.logRoutingDecisionFull(requestID, 0, nil, candidates, objective, seed, draw, reason, chosen)
-}
-
-// logRoutingDecisionWithCache is the cache-aware logRoutingDecision —
+// logRoutingDecisionWithCache is the short-form routing decision log —
 // the sticky-path log emitters (hit / outside-epsilon / miss) thread
 // the balanced-score cache through it so the FR-SR-8 normative
 // formula doesn't recompute at every sticky log emission under

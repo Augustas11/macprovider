@@ -418,7 +418,7 @@ type transportCallbacks struct {
 	)
 
 	// afterAdvance runs after a successful advanceToNextProvider call.
-	// HTTP + streaming emit logRoutingDecision and return false.
+	// HTTP + streaming emit logRoutingDecisionWithCache and return false.
 	// WS-non-streaming inspects state.provider.IsWSTunneled() and
 	// returns true when the new provider is NOT WS (signals
 	// fallthrough). Optional — the core skips it when nil (all current

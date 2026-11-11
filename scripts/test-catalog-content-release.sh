@@ -96,6 +96,7 @@ done
 host="$1"; shift
 cmd="$*"
 if [ "$host" = canary.test ]; then
+  printf '%s\n' "${cmd%%$'\n'*}" >>"$CCR_TEST_CTL/canary-ssh.log"
   export HOME="$CCR_CANARY_HOME"
   case "$cmd" in
     "python3 -"*) sed -e "s#/usr/sbin/lsof#lsof#g" | bash -c "$cmd" ;;
@@ -639,7 +640,8 @@ def main():
             print("catalog-release: ERROR: serving closure: 1 recommendable rate-carded model(s) have no matching Tier-2", file=sys.stderr)
             sys.exit(1)
         sys.exit(0)
-    if cmd in ("buyer-serving-set", "splice-coordinator-rate-card", "extract-coordinator-rate-card-block", "pricing-effective-diff"):
+    if cmd in ("buyer-serving-set", "splice-coordinator-rate-card", "extract-coordinator-rate-card-block", "pricing-effective-diff",
+               "pricing-only-check"):
         sys.argv[0] = os.environ["CCR_REAL_CR"]
         runpy.run_path(os.environ["CCR_REAL_CR"], run_name="__main__")
     def check_index(path, want_path, stage):
@@ -899,6 +901,12 @@ git -C "$R" reset -q --hard "$COMMIT"
 BADBLOCK_COMMIT="$(price_commit "card without the yaml block" badblock)"
 git -C "$R" reset -q --hard "$COMMIT"
 MOVE_COMMIT="$(price_commit "added row" move)"
+git -C "$R" reset -q --hard "$LIVE_COMMIT"
+# Pricing-only: the live content re-stamped to test-new-v1 with only credit
+# rates moved (COMMIT's candidate row-hash change makes PRICE_COMMIT a full
+# content release, which keeps the canary gates).
+retarget "$R/phase3-binary/catalog/autotune" test-new-v1 none
+PRICE_ONLY_COMMIT="$(price_commit "pricing only" price)"
 git -C "$R" reset -q --hard "$COMMIT"
 
 # ---------------------------------------------------------------------------
@@ -1675,6 +1683,43 @@ runc "$PRICE_COMMIT" --deploy --pricing-diff-sha256 "$PDIFF"
 [ "$RC" -eq 0 ] && grep -q 'ALERT (informational, not rolled back)' "$T/out" || fail "an unconverged gateway must alert only (rc=$RC): $(tail -n 10 "$T/out")"
 case "$(readlink "$A_ROOT/current")" in releases/test-new-v1-*) ;; *) fail "gateway alert must not roll back" ;; esac
 note "ok: gateway not converged -> alert only"
+
+# Pricing-only (only credit rates of existing rows moved): GO and deployed with
+# the canary unconfigured; the canary is never contacted and evidence (c) is
+# skipped. A pricing release with other content drift still needs the canary.
+no_canary_env() { export CATALOG_CANARY_PROVIDER_ID="" CATALOG_CANARY_SSH_TARGET=""; }
+setup_env; no_canary_env
+runc "$PRICE_ONLY_COMMIT" --preflight
+[ "$RC" -eq 0 ] || fail "pricing-only preflight GO expected with the canary unset (rc=$RC): $(cat "$T/out") $(tail -n 20 "$T/err")"
+python3 - "$T/out" <<'PY' || fail "pricing-only verdict shape: $(cat "$T/out")"
+import json, sys
+v = json.loads(open(sys.argv[1]).read())
+c = {x["name"]: x for x in v["checks"]}
+assert v["go"] is True and v["pricing_only"] is True, (v["go"], v["pricing_only"])
+assert c["pricing_only"]["ok"], c["pricing_only"]
+for name in ("canary_config", "canary_token_operator_key", "canary_reachable"):
+    assert c[name]["ok"] and c[name]["detail"] == "not required: pricing-only release", c[name]
+assert c["window_coverage"]["ok"], c["window_coverage"]
+assert [x["name"] for x in v["checks"]].count("canary_config") == 1
+PY
+PODIFF="$(pricing_field pricing_diff_sha256)"
+runc "$PRICE_ONLY_COMMIT" --deploy --pricing-diff-sha256 "$PODIFF"
+[ "$RC" -eq 0 ] || fail "pricing-only deploy with the canary unset (rc=$RC): $(tail -n 40 "$T/out") $(tail -n 20 "$T/err")"
+grep -q 'evidence (c): skipped, pricing-only release' "$T/out" || fail "pricing-only deploy must skip evidence (c): $(grep evidence "$T/out")"
+case "$(readlink "$A_ROOT/current")" in releases/test-new-v1-*) ;; *) fail "pricing-only deploy did not activate the release" ;; esac
+[ ! -e "$CCR_TEST_CTL/canary-ssh.log" ] && [ ! -e "$CCR_TEST_CTL/canary-cli.log" ] ||
+  fail "a pricing-only release must not touch the canary: $(cat "$CCR_TEST_CTL/canary-ssh.log" "$CCR_TEST_CTL/canary-cli.log" 2>/dev/null)"
+[ ! -e "$CCR_FAKE/opt/macprovider/.pricing-txn" ] || fail "pricing-only deploy must finalize the journal"
+note "ok: pricing-only release: preflight GO and deploy with the canary unset, evidence (c) skipped, canary untouched"
+
+setup_env; no_canary_env
+runc "$PRICE_COMMIT" --preflight
+[ "$RC" -eq 3 ] || fail "a pricing release with other content drift must need the canary (rc=$RC): $(cat "$T/out")"
+[ "$(verdict_check canary_config)" = false ] || fail "canary_config must fail for a non-pricing-only release: $(cat "$T/out")"
+python3 -c 'import json,sys;v=json.loads(open(sys.argv[1]).read());assert v["pricing_only"] is False and not any(c["name"]=="pricing_only" for c in v["checks"])' "$T/out" ||
+  fail "a pricing release with other content drift must not be pricing-only: $(cat "$T/out")"
+prior_pair "non-pricing-only pricing release without the canary"
+note "ok: a pricing release with other content drift keeps the canary gates"
 
 # Marking the journal verified fails: the run does NOT succeed, the journal
 # stays in `verifying` (no in-lane rollback), and --recover-pricing-txn rolls

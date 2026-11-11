@@ -31,9 +31,11 @@ var (
 )
 
 type Server struct {
-	cfg     config.Config
-	cfgPath string
-	store   Store
+	cfg config.Config
+	// buyerHold is the in-memory rollout buyer hold (SPEC-006-R027).
+	buyerHold buyerHoldState
+	cfgPath   string
+	store     Store
 	// readOnlyStore, when non-nil, backs GET-only handlers (explorer +
 	// /v1/usage). M2-4 / PERF-4: the primary `store` is capped at
 	// MaxOpenConns=1 to serialize BEGIN IMMEDIATE writes; a slow explorer
@@ -286,6 +288,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/metrics", s.handleMetrics)
 	mux.HandleFunc("/admin/feedback-summary", s.handleFeedbackSummary)
 	mux.HandleFunc("/admin/kill-switch", s.handleKillSwitch)
+	mux.HandleFunc("/admin/buyer-hold", s.handleBuyerHold)
 	mux.HandleFunc("/admin/capacity-signal", s.handleCapacitySignal)
 	mux.HandleFunc("/admin/capacity-tier/evaluate", s.handleCapacityEvaluate)
 	mux.HandleFunc("/admin/settlement/reconcile", s.handleSettlementReconcile)
@@ -344,6 +347,10 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 				return
 			}
 			writeError(w, http.StatusServiceUnavailable, "server_error", "public_api_paused", "Mac Provider beta is paused while capacity catches up. Please retry later.")
+			return
+		}
+		if s.buyerHeld(r) {
+			s.writeBuyerHeld(w, r)
 			return
 		}
 		ctx := context.WithValue(r.Context(), requestIDKey{}, requestID)
@@ -952,10 +959,10 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), time.Second)
 	defer cancel()
 	if err := s.store.Ping(ctx); err != nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "unavailable", "version": s.version})
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "unavailable", "version": s.version, "buyer_hold": s.buyerHoldActive()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "version": s.version})
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "version": s.version, "buyer_hold": s.buyerHoldActive()})
 }
 
 func (s *Server) handleNotFound(w http.ResponseWriter, r *http.Request) {
@@ -1622,6 +1629,7 @@ var gatewayRetryableByCode = map[string]bool{
 // code must be explicitly triaged into one set or the other rather than
 // silently defaulting to false.
 var gatewayPermanentCodes = map[string]bool{
+	"invalid_buyer_hold":      true,
 	"context_length_exceeded": true,
 	"method_not_allowed":      true, "invalid_window": true, "invalid_kill_switch": true,
 	"invalid_kill_switch_version": true, "invalid_capacity_signal": true,

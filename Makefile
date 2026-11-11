@@ -6,7 +6,8 @@
 # targets below to preserve parallel jobs and failure isolation.
 
 .PHONY: test test-coordinator test-coordinator-billing-race test-coordinator test-coordinator-race-integration test-gateway test-integration test-dist test-relay-blind-parity \
-        test-dist-catalog test-dist-python test-dist-release test-dist-deploy \
+        test-dist-catalog test-dist-python test-dist-python1 test-dist-python2 \
+        test-dist-release test-dist-ops test-dist-deploy \
         test-byom-e2e test-byom-discovery-journey test-openai-wire test-local-chat-app-core \
         vet vet-coordinator vet-gateway \
         lint-coordinator \
@@ -99,8 +100,10 @@ test-integration:
 # failures (#1920). `make test-dist` is the union for local use. Guards the
 # fail-closed pre-deploy gate in phase4-coordinator/dist/check-deploy-config.sh,
 # among others. check_nginx_stats_test.sh is not here: CI runs it in its own
-# docker-backed job (coordinator-nginx-integration).
-TEST_DIST_SHARDS := catalog python release deploy
+# docker-backed job (coordinator-nginx-integration). CI path-gates each shard
+# with scripts/ci-detect-changed-paths.sh (dist, catalog, ops outputs).
+TEST_DIST_SHARDS := catalog python1 python2 release ops deploy
+PYTHON_TEST_SHARDS := 2
 
 test-dist: $(addprefix test-dist-,$(TEST_DIST_SHARDS))
 
@@ -115,15 +118,25 @@ test-dist-catalog:
 	python3 scripts/catalog-pricing-preflight.py
 	bash scripts/test-autotune-gate-matrix.sh
 
-# Every scripts/tests/test_*.py module via discovery, the ops Python suites,
-# and the check that no test file is left unwired.
-test-dist-python:
+# Every scripts/tests/test_*.py module, split into two shards CI runs in
+# parallel. scripts/ci-python-test-shard.py runs the same discovery as
+# `unittest discover -s scripts/tests -t . -p 'test_*.py'` and assigns each
+# module to a shard by a stable hash of its name, so a new module needs no
+# wiring. Plus the ops Python suites and the check that no test file is left
+# unwired. `make test-dist-python` runs both shards.
+test-dist-python: test-dist-python1 test-dist-python2
+
+test-dist-python1:
 	python3 scripts/check-test-wiring.py
-	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -t . -p 'test_*.py'
+	PYTHONDONTWRITEBYTECODE=1 python3 scripts/ci-python-test-shard.py --shard 1 --total $(PYTHON_TEST_SHARDS)
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v ops/pearl-updater/test_pearl_updater.py
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v ops/pearl-updater/test_tier2_enforcement_watchdog.py
+
+test-dist-python2:
+	PYTHONDONTWRITEBYTECODE=1 python3 scripts/ci-python-test-shard.py --shard 2 --total $(PYTHON_TEST_SHARDS)
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v ops/pearl/config/test_pearl_config_reconcile.py
 	PYTHONDONTWRITEBYTECODE=1 python3 test/e2e/aead-rekey-oneshot/test_aead_rekey_oneshot.py
+	PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-macprovider-monitor-hardware-trust.py
 
 # Release, discovery, signed-journey workflow, alarm, Tier-2 and ops tooling.
 test-dist-release:
@@ -193,8 +206,15 @@ test-dist-release:
 	bash ops/pearl-updater/test_transaction_gate_systemd.sh
 	node --test test/e2e/canary-buyer/probe.test.mjs test/e2e/canary-buyer/safety.test.mjs
 	node --test frontdoor/provider-portal/mining-health.test.mjs
+	node --test frontdoor/provider-portal/github-mode-auth.test.mjs
 	bash test/e2e/canary-buyer/run-canary.test.sh
 	bash scripts/test-relay-blind-parity.sh
+
+# scripts/ops entry-point suites (ops guard, live lock, runbook commands, the
+# release/catalog/Pearl entry points, canary swap, runner reserve, Studio lab
+# window and handoff, hotfix push). Split from release: test-entrypoints.sh
+# alone runs about nine minutes.
+test-dist-ops:
 	bash scripts/ops/test-ops-guard.sh
 	bash scripts/ops/test-live-lock.sh
 	bash scripts/ops/test-runbook-commands.sh
@@ -202,6 +222,7 @@ test-dist-release:
 	bash scripts/ops/test-canary-swap.sh
 	bash scripts/ops/test-runner-reserve.sh
 	bash scripts/ops/test-studio-lab-window-controller.sh
+	PYTHONDONTWRITEBYTECODE=1 python3 scripts/ops/test-studio-lab-handoff.py
 	bash scripts/ops/test-hotfix-push.sh
 
 # Installer, watchdog, and coordinator/gateway deploy scripts.
@@ -217,6 +238,7 @@ test-dist-deploy:
 	bash -n phase4-coordinator/dist/deploy-opoi-v0-pearl.sh
 	bash -n phase5-gateway/dist/deploy-pearl-vps.sh
 	bash phase4-coordinator/dist/test/check_deploy_config_test.sh
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest phase4-coordinator/dist/test/c2c_runtime_proof_test.py
 	bash phase4-coordinator/dist/test/c2_timer_config_migration_test.sh
 	bash phase4-coordinator/dist/test/autotune_rate_card_config_migration_test.sh
 	bash phase4-coordinator/dist/test/coord_deploy_c2_precheck.test.sh

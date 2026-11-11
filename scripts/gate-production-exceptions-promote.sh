@@ -4,8 +4,9 @@
 # Durability: walks ALL first-parent commits that touched the exception
 # register or tombstone ledger (path-scoped, uncapped). For each such commit:
 #   - union all tombstone IDs ever present (anti-deletion)
-#   - reconstruct previous expires_at as the earliest active/planned/expired
-#     expiry per ID (anti self-extension / expired reactivation)
+#   - carry any historical status=expired onto the previous row per ID
+#     (anti same-ID expired reactivation)
+# No calendar date gates promotion: expires_at is informational only.
 #
 # Authority binding: prints EXCEPTION_AUTHORITY_SHA=<origin/main> so callers
 # can refuse undraft if main moved after the gate. Optional
@@ -97,7 +98,7 @@ if not isinstance(current_tombs, dict):
     )
 
 base_tombs = pe.union_tombstone_docs(history_tombs)
-previous = pe.earliest_expiry_previous_register(current_register, history_regs)
+previous = pe.history_previous_register(current_register, history_regs)
 
 (work / "production-exceptions.json").write_text(
     json.dumps(current_register, indent=2) + "\n", encoding="utf-8"

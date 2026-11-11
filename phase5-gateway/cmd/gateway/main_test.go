@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -387,5 +388,48 @@ func TestReleaseOrphanedReservationsAtStartup(t *testing.T) {
 	quota, concurrency, err := store.ReleaseOrphanedReservations(ctx, bootedAt, time.Now().UTC())
 	if err != nil || quota != 0 || concurrency != 0 {
 		t.Fatalf("second sweep quota=%d concurrency=%d err=%v, want nothing left", quota, concurrency, err)
+	}
+}
+
+// TestGatewayRouterStartsHeldFromTheEnvironment: the Pearl updater starts a
+// candidate gateway held through MACPROVIDER_GATEWAY_START_BUYER_HOLD=1 (a
+// systemd runtime drop-in). The production assembly must read it, and only
+// the exact value "1" may start held (SPEC-006-R027).
+func TestGatewayRouterStartsHeldFromTheEnvironment(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		held  bool
+	}{{"1", true}, {"", false}, {"0", false}, {"true", false}} {
+		t.Run("value="+tc.value, func(t *testing.T) {
+			t.Setenv(router.BuyerHoldStartEnv, tc.value)
+			dir := t.TempDir()
+			cfg := config.Default()
+			cfg.Auth.KeyHashSecret = "test-key-hash-secret"
+			cfg.Auth.Demo.SigningSecret = "test-demo-secret"
+			cfg.Storage.DBPath = filepath.Join(dir, "gateway.db")
+			store, err := sqlite.Open(context.Background(), cfg.Storage.DBPath)
+			if err != nil {
+				t.Fatalf("sqlite.Open: %v", err)
+			}
+			defer store.Close()
+			settlementJournal, err := openSettlementJournal(cfg)
+			if err != nil {
+				t.Fatalf("openSettlementJournal: %v", err)
+			}
+			defer settlementJournal.Close()
+
+			handler := newGatewayRouter(cfg, store, store, nil, http.DefaultClient, settlementJournal).Handler()
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+			var body struct {
+				BuyerHold *bool `json:"buyer_hold"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || body.BuyerHold == nil {
+				t.Fatalf("/healthz lacks buyer_hold: status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			if *body.BuyerHold != tc.held {
+				t.Fatalf("%s=%q: buyer_hold=%v want %v", router.BuyerHoldStartEnv, tc.value, *body.BuyerHold, tc.held)
+			}
+		})
 	}
 }

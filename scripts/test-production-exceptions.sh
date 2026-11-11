@@ -124,10 +124,9 @@ python3 scripts/check-production-exceptions.py \
   gate --mode=deploy --no-enforce \
   || fail "default-safe deploy gate failed unexpectedly"
 
-# Promote mode must fail closed on an unbounded/expired blocks_stable_promotion
-# exception. Use a synthetic fixture so this negative test is self-contained and
-# does not depend on the committed register carrying debt — the committed
-# register is expected to be clean once resolved exceptions are tombstoned.
+# Promote mode must fail closed on a blocks_stable_promotion=true exception.
+# Use a synthetic fixture so this negative test is self-contained and does not
+# depend on the committed register carrying debt.
 neg="$(mktemp -d "${TMPDIR:-/tmp}/exception-neg.XXXXXX")"
 python3 - "$neg" <<'PY'
 import json, pathlib, sys
@@ -143,7 +142,7 @@ doc = {
     "status": "active",
     "environment": "pearl-production",
     "component": "other",
-    "policy_delta": "synthetic unbounded blocks_stable_promotion exception",
+    "policy_delta": "synthetic blocks_stable_promotion exception",
     "authority_surface": "test",
     "reason": "negative promote-gate test",
     "owner": "test",
@@ -176,9 +175,63 @@ if python3 scripts/check-production-exceptions.py \
   --now 2026-07-22T12:00:00Z \
   gate --mode=promote; then
   rm -rf "$neg"
-  fail "promote gate unexpectedly passed on an unbounded blocks_stable_promotion exception"
+  fail "promote gate unexpectedly passed on a blocks_stable_promotion exception"
 fi
 rm -rf "$neg"
+
+# Regression: no calendar date blocks a deploy or a promotion. An active,
+# non-blocking exception whose informational expires_at is in the past must
+# pass promote mode and enforced deploy mode.
+past="$(mktemp -d "${TMPDIR:-/tmp}/exception-past.XXXXXX")"
+python3 - "$past" <<'PY'
+import json, pathlib, sys
+work = pathlib.Path(sys.argv[1])
+doc = {
+  "$schema": "./production-exceptions.schema.json",
+  "schema_version": "macprovider-production-exceptions-v1",
+  "updated_at": "2026-07-22T00:00:00Z",
+  "updated_by": "test",
+  "environment": "pearl-production",
+  "exceptions": [{
+    "id": "exc-past-expiry",
+    "status": "active",
+    "environment": "pearl-production",
+    "component": "other",
+    "policy_delta": "synthetic active exception with a past expires_at",
+    "authority_surface": "test",
+    "reason": "past-expiry regression test",
+    "owner": "ops/test",
+    "issue": "https://github.com/Augustas11/macprovider/issues/615",
+    "created_at": "2020-01-01T00:00:00Z",
+    "expires_at": "2020-06-01T00:00:00Z",
+    "scope": "test; must not widen",
+    "removal_condition": "test",
+    "rollback_command": "echo",
+    "post_removal_validation": "echo",
+    "evidence": ["https://github.com/Augustas11/macprovider/issues/615"],
+    "blocks_stable_promotion": False,
+  }],
+  "open_questions": [],
+}
+tombs = {
+  "schema_version": "macprovider-removed-exception-tombstones-v1",
+  "updated_at": "2026-07-22T00:00:00Z",
+  "updated_by": "test",
+  "environment": "pearl-production",
+  "tombstones": [],
+}
+(work / "reg.json").write_text(json.dumps(doc))
+(work / "tombs.json").write_text(json.dumps(tombs))
+PY
+for gate_args in "--mode=promote" "--mode=deploy --enforce" "--mode=deploy --no-enforce"; do
+  # shellcheck disable=SC2086
+  python3 scripts/check-production-exceptions.py \
+    --register "$past/reg.json" \
+    --tombstones "$past/tombs.json" \
+    gate $gate_args \
+    || { rm -rf "$past"; fail "past expires_at blocked gate $gate_args"; }
+done
+rm -rf "$past"
 
 # Deploy tooling must invoke the exception gate.
 grep -qF 'check-production-exceptions.py' \
@@ -242,9 +295,9 @@ PY
 grep -qF 'EXCEPTION_AUTHORITY_SHA=' \
   scripts/gate-production-exceptions-promote.sh \
   || fail "promote helper missing EXCEPTION_AUTHORITY_SHA bind"
-grep -qF 'earliest_expiry_previous_register' \
+grep -qF 'history_previous_register' \
   scripts/gate-production-exceptions-promote.sh \
-  || fail "promote helper missing earliest-expiry history reconstruction"
+  || fail "promote helper missing history reconstruction"
 grep -qF -- '--first-parent' \
   scripts/gate-production-exceptions-promote.sh \
   || fail "promote helper must walk first-parent history"
@@ -399,20 +452,19 @@ regs = [show(rev, "ops/exceptions/production-exceptions.json") for rev in revers
 tomb_docs = [show(rev, "ops/exceptions/removed-exception-tombstones.json") for rev in reversed(revs)]
 current = show(tip, "ops/exceptions/production-exceptions.json")
 current_tombs = show(tip, "ops/exceptions/removed-exception-tombstones.json")
-previous = pe.earliest_expiry_previous_register(current, regs)
+previous = pe.history_previous_register(current, regs)
 base = pe.union_tombstone_docs(tomb_docs)
 result = pe.validate_register(
     current,
-    now=pe.parse_rfc3339("2026-07-22T12:00:00Z"),
     tombstones=current_tombs,
     previous_doc=previous,
     base_tombstones=base,
 )
 codes = {f.code for f in result.errors}
-if "expiry_self_extension" not in codes:
-    raise SystemExit(f"missing expiry_self_extension in {codes}")
-if "tombstone_deleted" not in codes:
-    raise SystemExit(f"missing tombstone_deleted in {codes}")
+# A later expires_at is informational and must not fail; the tombstone
+# deletion must still be caught from main~2 authority.
+if codes != {"tombstone_deleted"}:
+    raise SystemExit(f"expected only tombstone_deleted, got {codes}")
 print("ok: path-scoped history keeps main~2 authority after unrelated+merge fan-out")
 PY
 rm -rf "$hist"

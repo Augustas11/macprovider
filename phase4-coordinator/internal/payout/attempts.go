@@ -307,26 +307,6 @@ SELECT 1, abandoned_at_utc, confirmed_at_utc,
 	return fmt.Errorf("CASPersistSignedTx: 0 rows affected with no disambiguation match — possible concurrent UPDATE")
 }
 
-// StampBroadcastAtTx stamps broadcast_at_utc on the row inside
-// an open BEGIN IMMEDIATE tx — used by the §4.3 step 6
-// post-COMMIT broadcast path and by the §4.6 cancel-row CAS path.
-func StampBroadcastAtTx(ctx context.Context, conn *sql.Conn, payoutID int64, attemptSeq int, nowUTC string) (int64, error) {
-	res, err := conn.ExecContext(ctx, `
-UPDATE payout_attempts
-   SET broadcast_at_utc = ?,
-       updated_at_utc   = ?
- WHERE payout_id = ?
-   AND attempt_seq = ?
-   AND broadcast_at_utc IS NULL
-   AND confirmed_at_utc IS NULL
-   AND abandoned_at_utc IS NULL`,
-		nowUTC, nowUTC, payoutID, attemptSeq)
-	if err != nil {
-		return 0, err
-	}
-	return res.RowsAffected()
-}
-
 // StampBroadcastAt is the non-tx variant for the §4.3 step 6 path
 // where the broadcast happens AFTER COMMIT — no concurrent writer
 // can flip the row to abandoned in the gap because the lease

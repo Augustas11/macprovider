@@ -61,6 +61,16 @@
       "model": "frogggias/Ripple-65B-Preview-MLX-4bit",
       "from_row": "default",
       "to_row": "ricursiveai/ripple-65b-preview"
+    },
+    {
+      "model": "LiquidAI/LFM3-1.7B-MLX-4bit",
+      "from_row": "default",
+      "to_row": "liquidai/lfm3-1.7b"
+    },
+    {
+      "model": "LiquidAI/LFM3-1.7B-MLX-8bit",
+      "from_row": "default",
+      "to_row": "liquidai/lfm3-1.7b"
     }
   ]
 }

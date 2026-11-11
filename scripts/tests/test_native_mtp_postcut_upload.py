@@ -191,10 +191,11 @@ log() { :; }
                 self.assertEqual(result.returncode,0,result.stderr)
                 self.assertEqual(trace.read_text().splitlines() if trace.exists() else [],['checked','marked'] if status=='success' else [])
 
-    def test_cli_e2e_preserves_normal_manual_path_and_real_run_check(self):
+    def test_cli_postcut_step_is_optional_and_needs_a_real_run_check(self):
         text=(SCRIPTS/'ops/cli-release.sh').read_text()
         self.assertIn('elif [ -n "${NATIVE_MTP_POSTCUT_EVIDENCE:-}" ]; then',text)
-        self.assertIn('set_next e2e_gate manual',text)
+        self.assertNotIn('e2e_gate',text)
+        self.assertIn('marker_candidate_matches native_mtp_postcut "$ok_sha"',text)
         start=text.index('native_mtp_postcut() {');body=text[start:text.index('\n}',start)]
         self.assertLess(body.index('check_journey_run'),body.index('mark_done'))
         self.assertIn('if [ "$status" = success ]; then',body)

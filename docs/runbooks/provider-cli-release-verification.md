@@ -267,7 +267,8 @@ python3 scripts/provider-code-identity.py --emit-approved-identity \
      `verify_live_rollout` step dispatches
      `verify-live-coordinator-release-rollout.yml`. That workflow
      requires the exact post-publication gate before publishing the
-     append-only discovery transport.
+     append-only discovery transport. It holds no secrets and waits on no
+     environment approval: the live coordinator gate decides.
 7. Verify the Malibu artifact against the standalone provider tarball:
 
 ```bash
@@ -340,7 +341,12 @@ On every release that changes `phase3-binary/dist/install.sh`, after immutable
 publication:
 
 1. Back up the current served file, then copy the released `dist/install.sh`
-   into the webroot (preserve `root:root 0755`):
+   into the webroot (preserve `root:root 0755`). The CLI release train does
+   this itself: `scripts/ops/cli-release.sh` step `install_sh_republish`
+   (`next --run`, live-ops lock) backs up the served file over `PEARL_SSH`,
+   installs `v<ver>:phase3-binary/dist/install.sh` at
+   `INSTALL_SH_REMOTE_PATH` and refuses unless the installed file's SHA-256
+   read back equals the release's. By hand, the equivalent is:
 
    ```bash
    ts=$(date -u +%Y%m%dT%H%M%SZ)
@@ -418,10 +424,15 @@ holds only GitHub assets, including one named `release.json`), and re-downloads 
    advisory pointer. The CLI release train does it: `scripts/ops/cli-release.sh`
    step `mirror_latest` is pending while the served `releases/latest.json` names
    another tag, and `next --run` executes `bash scripts/publish-release-mirror.sh
-   --tag vX.Y.Z --promote-latest` under the live-ops lock (it needs
-   `MALIBU_DOWNLOAD_SSH_KEY` in the ops env and refuses without it). The script
-   refuses unless `coordinator.malibu.tech/healthz` already advertises the tag,
-   and never moves `latest.json` backwards.
+   --tag vX.Y.Z --latest-only` under the live-ops lock (it needs
+   `MALIBU_DOWNLOAD_SSH_KEY` in the ops env and refuses without it). The
+   promotion workflow normally mirrored the assets, so `--latest-only` uploads
+   only the pointer when Pearl already holds exactly GitHub's asset set and
+   digests for the tag, its updater index and the pinned bootstrap python.
+   Otherwise (that workflow step is continue-on-error) it runs the full
+   `--promote-latest` path in the same run. It refuses unless
+   `coordinator.malibu.tech/healthz` already advertises the tag, and never
+   moves `latest.json` backwards.
 
 A published `/releases/<tag>/` is immutable: a rerun is a no-op when the bytes
 match and an error otherwise. Do not edit it in place; cut a new release.
