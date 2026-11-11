@@ -4042,7 +4042,7 @@ func (s *Server) forwardHTTPSequence(
 // flagged as a 5×-duplicated block inside handleChatCompletions. This
 // sub-PR (M2-1a) is a pure mechanical extraction with zero behaviour
 // diff — the caller is still responsible for the per-site suffix
-// (updating excluded, emitting logRoutingDecision, and any loop-control
+// (updating excluded, emitting logRoutingDecisionWithCache, and any loop-control
 // continue/break) because those vary across callsites. Sub-PRs 1b and 1c
 // unify the three transport loops into a single failover skeleton.
 //
@@ -9194,7 +9194,7 @@ func (s *Server) SetSlotQueueConfig(maxPendingPerProvider int, deadline, pollInt
 // pre-T2 inline 4-branch comparator moved into routing in #266 T2;
 // #266 T3c surfaces the balanced-score cache via the returned map so
 // downstream consumers (applySticky / applyRandomTiebreak via
-// inEpsilonCohort / logRoutingDecisionFull) can reuse it instead of
+// inEpsilonCohort / logRoutingDecisionFullWithCache) can reuse it instead of
 // recomputing the FR-SR-8 normative formula O(N) times per request.
 //
 // Returns nil for non-balanced objectives — the cache is meaningless
@@ -9458,8 +9458,8 @@ func routeKeyedFilterCounts(counts map[routing.RejectionReason]int) map[string]i
 	return out
 }
 
-// logRoutingDecisionFullWithCache is the cache-aware
-// logRoutingDecisionFull. Issue #266 T3c: callers in the main-
+// logRoutingDecisionFullWithCache emits the SPEC-004 §7 routing
+// decision log. Issue #266 T3c: callers in the main-
 // selection path pass the balanced-score cache surfaced from
 // sortCandidates so the SPEC-004 §7 candidate_set values reuse the
 // already-computed map instead of recomputing KeyedBalancedScores
@@ -9508,7 +9508,7 @@ func (s *Server) logRoutingDecisionFullWithCache(requestID string, preFilterCoun
 	})
 }
 
-// logRoutingDecisionWithCache is the cache-aware logRoutingDecision —
+// logRoutingDecisionWithCache is the short-form routing decision log —
 // the sticky-path log emitters (hit / outside-epsilon / miss) thread
 // the balanced-score cache through it so the FR-SR-8 normative
 // formula doesn't recompute at every sticky log emission under
