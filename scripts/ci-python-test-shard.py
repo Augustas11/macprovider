@@ -80,6 +80,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     mine = [module for module, shard in assignment.items() if shard == args.shard]
+    if not mine:
+        # Plain discover fails when it runs no tests; an empty shard must too.
+        print(f"[python-shard] shard {args.shard}/{args.total} has no modules", file=sys.stderr)
+        return 1
     suite = unittest.TestSuite(groups[module] for module in mine)
     print(
         f"[python-shard] shard {args.shard}/{args.total}: {len(mine)} of {len(groups)} modules, "

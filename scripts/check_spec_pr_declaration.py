@@ -3,8 +3,9 @@
 
 The declaration is informational and never blocks a merge: a PR without a
 block, or with a malformed one, gets a declaration derived from the diff; a
-block that contradicts the diff is reported as a warning. The blocking SPEC
-gate is scripts/check_spec_governance.py.
+block that contradicts the diff is reported as a warning. It fails closed
+(exit 1) only when the diff itself cannot be computed (git diff error). The
+blocking SPEC gate is scripts/check_spec_governance.py.
 """
 
 from __future__ import annotations

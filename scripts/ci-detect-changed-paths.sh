@@ -29,6 +29,8 @@
 #     is in an area that shard is known not to read. Any other path, including
 #     a new top-level directory, runs it. test-ci-detect-changed-paths.sh scans
 #     the shard sources for repo paths they read and fails if one is exempt.
+#   * A deleted path (a rename is a delete plus an add) never skips a dist,
+#     catalog or ops shard: a test may require the file to exist.
 set -euo pipefail
 
 base="${1:-}"
@@ -69,13 +71,23 @@ docs_read() {
   return 1
 }
 
+# Root Markdown files that a non-doc file names (tests use AGENTS.md as the
+# repo-root marker; the onboarding check requires README.md). The self-test
+# derives this set by scanning the repo and fails when one is missing here.
+root_md_read() {
+  case "$1" in
+    AGENTS.md|CLAUDE.md|README.md|SECURITY.md) return 0 ;;
+  esac
+  return 1
+}
+
 # True when the path cannot change a Linux dist shard: root Markdown and the
 # docs/ pages no test reads.
 dist_exempt() {
   case "$1" in
     docs/*) docs_read "$1" && return 1; return 0 ;;
     */*) return 1 ;;
-    *.md) return 0 ;;
+    *.md) root_md_read "$1" && return 1; return 0 ;;
   esac
   return 1
 }
@@ -128,15 +140,17 @@ ops_exempt() {
 }
 
 classify() {
-  # Reads NUL-delimited pathnames on stdin; sets the gates and counters.
-  local f
+  # Reads NUL-delimited `git diff --name-status -z` records (status, path)
+  # on stdin; sets the gates and counters.
+  local f status deleted
   swift=false
   code=false
   dist=false
   catalog=false
   ops=false
-  while IFS= read -r -d '' f; do
+  while IFS= read -r -d '' status && IFS= read -r -d '' f; do
     [ -n "$f" ] || continue
+    case "$status" in D*) deleted=1 ;; *) deleted=0 ;; esac
     total=$((total + 1))
     case "$f" in
       # phase3-binary sources; the build/xcodegen/sparkle scripts the Swift
@@ -187,9 +201,9 @@ classify() {
       *.md) : ;;
       *) code=true; matched_code=$((matched_code + 1)) ;;
     esac
-    if ! dist_exempt "$f"; then dist=true; matched_dist=$((matched_dist + 1)); fi
-    if ! catalog_exempt "$f"; then catalog=true; matched_catalog=$((matched_catalog + 1)); fi
-    if ! ops_exempt "$f"; then ops=true; matched_ops=$((matched_ops + 1)); fi
+    if [ "$deleted" = 1 ] || ! dist_exempt "$f"; then dist=true; matched_dist=$((matched_dist + 1)); fi
+    if [ "$deleted" = 1 ] || ! catalog_exempt "$f"; then catalog=true; matched_catalog=$((matched_catalog + 1)); fi
+    if [ "$deleted" = 1 ] || ! ops_exempt "$f"; then ops=true; matched_ops=$((matched_ops + 1)); fi
   done
 }
 
@@ -198,7 +212,7 @@ if [ -n "$base" ] && [ -n "$head" ] && [ "$base" != "$zero" ] \
    && git cat-file -e "${head}^{commit}" 2>/dev/null; then
   tmp="$(mktemp)"
   # NUL-delimited output cannot be held in a shell variable; stream via file.
-  if git diff --no-renames -z --name-only "$base" "$head" >"$tmp" 2>/dev/null; then
+  if git diff --no-renames -z --name-status "$base" "$head" >"$tmp" 2>/dev/null; then
     classify <"$tmp"
     resolved=yes
   else

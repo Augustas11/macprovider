@@ -5,7 +5,7 @@
 without CI running them, and several had rotted. Python modules under
 scripts/tests/test_*.py run through scripts/ci-python-test-shard.py, which
 discovers them and splits them into PYTHON_TEST_SHARDS shards, so this checks
-that the Makefile runs every shard. Every other test file (shell suites under
+that the Makefile and the ci.yml dist-tooling matrix run every shard. Every other test file (shell suites under
 dist/test, scripts/test-*.sh, scripts/test-*.py, scripts/**/test-*.py,
 scripts/ops/test-*.sh, ops/ suites, dist/test Python, and Node *.test.mjs /
 test_*.mjs files) must be named by the Makefile, a workflow, or a test file
@@ -75,16 +75,28 @@ def code_lines(text: str) -> str:
     return "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
 
 
-def python_shard_errors(makefile: str) -> list[str]:
+def python_shard_errors(makefile: str, ci_workflow: str) -> list[str]:
     match = re.search(r"^PYTHON_TEST_SHARDS\s*:=\s*(\d+)\s*$", makefile, re.MULTILINE)
     if not match or int(match.group(1)) < 1:
         return ["Makefile must set PYTHON_TEST_SHARDS to a positive shard count"]
     total = int(match.group(1))
-    return [
+    errors = [
         f"Makefile no longer runs `{SHARD_RUNNER.format(shard=shard)}`"
         for shard in range(1, total + 1)
         if SHARD_RUNNER.format(shard=shard) not in makefile
     ]
+    # Each python shard is a make target CI runs only if the dist-tooling
+    # matrix lists it, so the matrix and the Makefile must name the same set.
+    want = {f"python{shard}" for shard in range(1, total + 1)}
+    dist_shards = re.search(r"^TEST_DIST_SHARDS\s*:=(.*)$", makefile, re.MULTILINE)
+    in_make = {s for s in (dist_shards.group(1).split() if dist_shards else []) if s.startswith("python")}
+    matrix = re.search(r"^  dist-tooling:\n(?:.*\n)*?        shard: \[([^\]]*)\]", ci_workflow, re.MULTILINE)
+    in_matrix = {s.strip() for s in (matrix.group(1).split(",") if matrix else []) if s.strip().startswith("python")}
+    if in_make != want:
+        errors.append(f"TEST_DIST_SHARDS python shards {sorted(in_make)} != {sorted(want)} (PYTHON_TEST_SHARDS={total})")
+    if in_matrix != want:
+        errors.append(f"ci.yml dist-tooling matrix python shards {sorted(in_matrix)} != {sorted(want)} (PYTHON_TEST_SHARDS={total})")
+    return errors
 
 
 def main() -> int:
@@ -93,7 +105,8 @@ def main() -> int:
         code_lines(p.read_text(encoding="utf-8"))
         for p in sorted((ROOT / ".github" / "workflows").glob("*.yml"))
     ]
-    errors = python_shard_errors(makefile)
+    ci_workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    errors = python_shard_errors(makefile, ci_workflow)
 
     pending = candidates()
     wired: set[str] = set()

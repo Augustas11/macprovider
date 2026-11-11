@@ -84,9 +84,9 @@ setup_swift_only() {
 assert_detect "Swift-only PR" setup_swift_only true true
 
 setup_docs_only() {
-  mkdir -p docs; echo a >README.md; echo b >docs/guide.md
+  mkdir -p docs; echo a >CHANGES.md; echo b >docs/guide.md
   commit_all base >/dev/null; git rev-parse HEAD
-  echo a2 >README.md; echo b2 >docs/guide.md; commit_all change >/dev/null
+  echo a2 >CHANGES.md; echo b2 >docs/guide.md; commit_all change >/dev/null
 }
 assert_detect "docs-only PR (skip both)" setup_docs_only false false \
   "dist=false catalog=false ops=false"
@@ -241,8 +241,33 @@ assert_one_path() {
 # runbooks are read by the ops and release suites, so they run them.
 assert_one_path "unread docs page (skip dist shards)" docs/operations/x.md false false \
   "dist=false catalog=false ops=false"
-assert_one_path "root README (skip dist shards)" README.md false false \
+assert_one_path "unread root markdown (skip dist shards)" NOTES-UNREAD.md false false \
   "dist=false catalog=false ops=false"
+assert_one_path "root README modified (run dist shards)" README.md false false \
+  "dist=true catalog=true ops=true"
+
+# A deletion or rename never skips a dist shard: tests may need the file.
+setup_readme_deleted() {
+  echo a >README.md; mkdir -p docs; echo b >docs/unread.md
+  commit_all base >/dev/null; git rev-parse HEAD
+  git rm -q README.md docs/unread.md; commit_all delete >/dev/null
+}
+assert_detect "README.md deleted (run dist shards)" setup_readme_deleted false false \
+  "dist=true catalog=true ops=true"
+setup_agents_renamed() {
+  echo a >AGENTS.md
+  commit_all base >/dev/null; git rev-parse HEAD
+  git mv AGENTS.md AGENT-GUIDE.md; commit_all rename >/dev/null
+}
+assert_detect "AGENTS.md renamed (run dist shards)" setup_agents_renamed false false \
+  "dist=true catalog=true ops=true"
+setup_unread_docs_deleted() {
+  mkdir -p docs/operations; echo a >docs/operations/x.md
+  commit_all base >/dev/null; git rev-parse HEAD
+  git rm -q docs/operations/x.md; commit_all delete >/dev/null
+}
+assert_detect "unread docs page deleted (run dist)" setup_unread_docs_deleted false false \
+  "dist=true catalog=true ops=true"
 assert_one_path "release train (run dist shards)" docs/releases/cli-release-train.md false false \
   "dist=true catalog=true ops=true"
 assert_one_path "runbook (run dist shards)" docs/runbooks/x.md false false \
@@ -332,7 +357,29 @@ shard_read_paths() {
     done
 }
 
+# Every root Markdown file a non-doc file names (not as the tail of a longer
+# path such as phase7-verify/README.md) must run the dist shards.
+root_md_read_paths() {
+  local root f
+  root="$(cd "$SCRIPT_DIR/.." && pwd)"
+  for f in "$root"/*.md; do
+    f="$(basename "$f")"
+    if git -C "$root" grep -qIE "(^|[^A-Za-z0-9_./-])${f%.md}[.]md" -- \
+        ':!docs' ':!*.md' ':!scripts/ci-detect-changed-paths.sh' \
+        ':!scripts/tests/test-ci-detect-changed-paths.sh'; then
+      echo "$f"
+    fi
+  done
+}
+
 scan_list="${TMPDIR:-/tmp}/dist-read-paths.$$"
+root_md_read_paths >"$scan_list"
+grep -qx AGENTS.md "$scan_list" || { echo "FAIL | root markdown scan did not find AGENTS.md"; fail=1; }
+while IFS= read -r read_path; do
+  [ -n "$read_path" ] || continue
+  assert_one_path "root markdown read $read_path" "$read_path" false false \
+    "dist=true catalog=true ops=true"
+done <"$scan_list"
 docs_read_paths >"$scan_list"
 [ -s "$scan_list" ] || { echo "FAIL | docs reference scan found nothing"; fail=1; }
 while IFS= read -r read_path; do
