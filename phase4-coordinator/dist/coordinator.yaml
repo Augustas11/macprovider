@@ -432,6 +432,10 @@ rewards:
       prompt_credits_per_mtok: 13500
       prompt_cache_hit_credits_per_mtok: 3375
       completion_credits_per_mtok: 27000
+    liquidai/lfm3-1.7b:                      # #2231 LFM3 1.7B listed row (8 GB Macs) — class-3b parity, no row override
+      prompt_credits_per_mtok: 13500         # $0.0135/M
+      prompt_cache_hit_credits_per_mtok: 3375 # $0.003375/M prefix-cache hit
+      completion_credits_per_mtok: 27000     # $0.027/M
     qwen2.5-coder-32b-instruct:              # v3 expansion — M-Max/Ultra only per Entry 92 admission gate
       prompt_credits_per_mtok: 425000        # $0.425/M
       prompt_cache_hit_credits_per_mtok: 106250 # $0.10625/M prefix-cache hit
