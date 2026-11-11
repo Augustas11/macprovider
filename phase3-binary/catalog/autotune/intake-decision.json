@@ -3,11 +3,11 @@
     {
       "action": "admit_listed",
       "admission_clause": "coldstart_slot",
-      "as_of": "2026-11-11T07:00:00Z",
+      "as_of": "2026-11-11T12:20:45Z",
       "coldstart_slot_used": true,
       "fit_clause": "tier_target",
       "listed_since": null,
-      "model_key": "liquidai/lfm3-1.7b",
+      "model_key": "prism-ml/ternary-bonsai-2-2b-mlx-2bit",
       "observation_window_end": null,
       "observation_window_start": null,
       "operator_decision": "admitted",
@@ -15,7 +15,7 @@
       "promotion": null,
       "signals": {
         "demand_rank_absent_reason": "unranked",
-        "demand_rank_source_sha256": "11f1185f19d12b8e3c9df8b85f0c55bd028d5a39bd3381cc5578c726520cd0cc",
+        "demand_rank_source_sha256": "656115ca7491ceefc96befd12a0be6d33089e05494e3bbeb32c231fc75fcb075",
         "distinct_provider_offer_absent_reason": "source_unavailable",
         "distinct_provider_offer_count": null,
         "distinct_provider_offer_source_sha256": null,
@@ -38,8 +38,8 @@
       }
     }
   ],
-  "generated_at": "2026-11-11T07:00:00Z",
-  "release_id": "published-2026-11-11-lfm3-1.7b-listed-v283",
+  "generated_at": "2026-11-11T12:20:45Z",
+  "release_id": "published-2026-11-11-bonsai2b-listed-v283",
   "schema_version": "macprovider.intake-decision.v1",
   "thresholds": {
     "INTAKE_BUYER_REQUEST_FLOOR": 250,
