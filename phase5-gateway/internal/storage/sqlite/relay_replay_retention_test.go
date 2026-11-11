@@ -114,7 +114,7 @@ func TestRelayReplayRetentionAllFractionalPrecisions(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer rows.Close()
+			defer func() { _ = rows.Close() }()
 			retained := make(map[string]bool)
 			for rows.Next() {
 				var id string
@@ -142,7 +142,7 @@ func TestRelayReplayRetentionUsesExpiryIndex(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	indexed := false
 	for rows.Next() {
 		var id, parent, unused int
@@ -170,7 +170,7 @@ func TestRelayReplayRetentionSurvivesReopen(t *testing.T) {
 	boundary := fixedTime().Add(time.Minute)
 	replay := retentionReplay("persisted", boundary.Add(time.Nanosecond).In(time.FixedZone("offset", -5*60*60)))
 	if err := store.RecordRelayBlindReplay(ctx, replay); err != nil {
-		store.Close()
+		_ = store.Close()
 		t.Fatal(err)
 	}
 	if err := store.Close(); err != nil {
@@ -180,7 +180,7 @@ func TestRelayReplayRetentionSurvivesReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer reopened.Close()
+	defer func() { _ = reopened.Close() }()
 	replay.CreatedAt = boundary
 	if seen, err := reopened.RelayBlindReplaySeen(ctx, replay); err != nil || !seen {
 		t.Fatalf("live persisted replay seen=%v err=%v", seen, err)

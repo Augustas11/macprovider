@@ -46,7 +46,7 @@ func TestMain(m *testing.M) {
 		fmt.Fprintf(os.Stderr, "tempdir: %v\n", err)
 		os.Exit(1)
 	}
-	defer os.RemoveAll(tmpRoot)
+	defer func() { _ = os.RemoveAll(tmpRoot) }()
 	coordinatorBin = filepath.Join(tmpRoot, "coordinator")
 	buildErr = buildCoordinator(coordinatorBin)
 	os.Exit(m.Run())
@@ -348,21 +348,21 @@ func dialProvider(t *testing.T, providerURL, providerID string) (net.Conn, map[s
 	}
 	b, err := json.Marshal(providerHello(providerID))
 	if err != nil {
-		conn.Close()
+		_ = conn.Close()
 		t.Fatalf("marshal hello: %v", err)
 	}
 	if err := wsutil.WriteClientText(conn, b); err != nil {
-		conn.Close()
+		_ = conn.Close()
 		t.Fatalf("write hello: %v", err)
 	}
 	payload, _, err := wsutil.ReadServerData(conn)
 	if err != nil {
-		conn.Close()
+		_ = conn.Close()
 		t.Fatalf("read hello_ack: %v", err)
 	}
 	var ack map[string]any
 	if err := json.Unmarshal(payload, &ack); err != nil {
-		conn.Close()
+		_ = conn.Close()
 		t.Fatalf("decode hello_ack: %v payload=%s", err, string(payload))
 	}
 	return conn, ack
@@ -474,7 +474,7 @@ func postBindWithHeader(t *testing.T, c *http.Client, baseURL, body string) (int
 	if err != nil {
 		t.Fatalf("post bind: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	b, _ := io.ReadAll(resp.Body)
 	return resp.StatusCode, b, resp.Header
 }
@@ -488,7 +488,7 @@ func waitForHTTP(t *testing.T, rawURL string) {
 	for time.Now().Before(deadline) {
 		resp, err := http.Get(rawURL)
 		if err == nil {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			if resp.StatusCode < 500 {
 				return
 			}
@@ -504,7 +504,7 @@ func allocatePort(t *testing.T) int {
 	if err != nil {
 		t.Fatalf("allocate port: %v", err)
 	}
-	defer l.Close()
+	defer func() { _ = l.Close() }()
 	return l.Addr().(*net.TCPAddr).Port
 }
 

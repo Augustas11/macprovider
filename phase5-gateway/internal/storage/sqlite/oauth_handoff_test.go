@@ -142,7 +142,7 @@ func TestOAuthHandoffDatabaseContainsNoReusableSecret(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	createAccount(t, store, "acct_handoff")
 	token, err := auth.StateToken()
 	if err != nil {

@@ -55,7 +55,7 @@ func TestRelayBlindSettlementDispatchRecordedOnceAndLoaded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	held, err := store.ListSettlementHeldReservations(ctx, 10)
 	if err != nil {
 		t.Fatal(err)
@@ -85,7 +85,7 @@ func TestRelayBlindSettlementDispatchMigrationRefusesV17Gateway(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	var version int64
 	if err := store.db.QueryRowContext(ctx, `SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version < 18 {
 		t.Fatalf("schema version=%d err=%v, want at least 18", version, err)

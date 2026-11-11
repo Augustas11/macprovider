@@ -72,7 +72,7 @@ func ReadIdentityPin(path string) (IdentityPin, error) {
 	if err != nil {
 		return IdentityPin{}, fmt.Errorf("%w: open pin file", ErrInvalidPin)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	after, err := file.Stat()
 	if err != nil || !os.SameFile(before, after) || !securePinPathInfo(after, false) || after.Size() > maxIdentityPinBytes {
 		return IdentityPin{}, fmt.Errorf("%w: pin file changed", ErrInvalidPin)

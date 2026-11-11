@@ -223,7 +223,7 @@ func (c *Cache) readEntries() ([]*Entry, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open cache: %w", err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 0, 64*1024), maxCacheLineBytes)

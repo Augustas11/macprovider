@@ -235,7 +235,7 @@ func TestTrustedPoolSelfServeCreatorJourney(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	var credited int64
 	for {
 		var outcome sql.NullString
@@ -308,7 +308,7 @@ func seedSelfServeCreatorAccount(t *testing.T, s *scenario, accountID string, gi
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if _, err := db.Exec(`INSERT INTO accounts(account_id, status, quota_class, concurrency_class, created_at) VALUES(?, 'active', 'default', 'default', ?)`, accountID, now); err != nil {
 		t.Fatalf("seed creator account: %v", err)
@@ -338,7 +338,7 @@ func seedProviderOwnershipClaim(t *testing.T, s *scenario, providerID string, gi
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	if _, err := db.Exec(`INSERT INTO github_identities(github_user_id, github_login) VALUES(?, ?)`, githubUserID, "selfserve-creator"); err != nil {
 		t.Fatalf("seed github identity: %v", err)
 	}

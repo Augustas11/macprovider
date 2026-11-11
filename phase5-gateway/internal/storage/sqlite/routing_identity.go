@@ -13,7 +13,7 @@ func (s *Store) RoutingGitHubIdentities(ctx context.Context, accountID string) (
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var ids []int64
 	for rows.Next() {
 		var raw string

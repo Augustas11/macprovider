@@ -99,16 +99,16 @@ func TestBuyerEvidenceClassifierPressureEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer journal.Close()
+	defer func() { _ = journal.Close() }()
 	conn, err := journal.Conn(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	if _, err := conn.ExecContext(context.Background(), "BEGIN IMMEDIATE"); err != nil {
 		t.Fatal(err)
 	}
-	defer conn.ExecContext(context.Background(), "ROLLBACK")
+	defer func() { _, _ = conn.ExecContext(context.Background(), "ROLLBACK") }()
 	const pressureID = "16800000-0000-4000-8000-000000000002"
 	status, _, body := s.chatRequest(map[string]string{"X-Request-ID": pressureID},
 		fmt.Sprintf(`{"model":%q,"max_tokens":32,"stream":false,"messages":[{"role":"user","content":"evidence pressure"}]}`, settlementFixtureModelID))

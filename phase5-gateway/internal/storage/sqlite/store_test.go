@@ -74,7 +74,7 @@ func TestMigrateAndAuthCRUD(t *testing.T) {
 
 func TestOpenAppliesSQLitePragmasViaDSN(t *testing.T) {
 	store := newTestStore(t)
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	ctx := context.Background()
 	for _, tc := range []struct {
 		query string
@@ -467,7 +467,7 @@ func TestDemandEventsV16MigrationAddsObservationColumns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open migrated v16 DB: %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	columns := demandEventColumns(t, store)
 	for _, required := range []string{"requested_prompt_tokens", "requested_output_tokens", "requested_total_tokens", "reasoning_tokens", "queue_latency_ms", "time_to_first_token_ms", "provider_prefill_ms", "provider_decode_ms", "output_tps_millitokens"} {
@@ -495,7 +495,7 @@ func demandEventColumns(t *testing.T, store *Store) map[string]bool {
 	if err != nil {
 		t.Fatalf("PRAGMA table_info(demand_events): %v", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	columns := map[string]bool{}
 	for rows.Next() {
 		var cid int
@@ -1301,7 +1301,7 @@ func TestOpenReadOnlyServesReadsButNotWrites(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer primary.Close()
+	defer func() { _ = primary.Close() }()
 	if err := primary.CreateAccount(ctx, storage.Account{
 		AccountID: "acct_ro_test", Status: "active", QuotaClass: "default", ConcurrencyClass: "default", CreatedAt: fixedTime(),
 	}); err != nil {
@@ -1312,7 +1312,7 @@ func TestOpenReadOnlyServesReadsButNotWrites(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenReadOnly: %v", err)
 	}
-	defer readStore.Close()
+	defer func() { _ = readStore.Close() }()
 
 	// Reads work.
 	used, reserved, err := readStore.DailyUsage(ctx, "acct_ro_test", "2026-05-29")

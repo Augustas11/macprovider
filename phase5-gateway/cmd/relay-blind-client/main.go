@@ -381,7 +381,7 @@ func run(ctx context.Context, opts options, stdin io.Reader, stdout, stderr io.W
 		}
 		return fmt.Errorf("encrypted request failed: %w", err)
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	if opts.privacyClass {
 		if err := copyPrivacyResponse(response, envelope.Stream, responseKeys, envelopeDigest, envelope.KID, envelope.RequestID, envelope.Model, reservation.InputTokenUpperBound, reservation.MaxOutputTokens, opts.pool, assurance, stdout); err != nil {
 			return err
@@ -389,16 +389,16 @@ func run(ctx context.Context, opts options, stdin io.Reader, stdout, stderr io.W
 		zeroResponseKeys(&responseKeys)
 		writePrivacySuccess(stderr, pin.Fingerprint, reservation, assurance)
 		if useDirectory {
-			fmt.Fprintf(stderr, "identity_pin_source: signed_directory directory_key_id=%s\n", relayblind.PublicKeyFingerprint(directoryKey))
+			_, _ = fmt.Fprintf(stderr, "identity_pin_source: signed_directory directory_key_id=%s\n", relayblind.PublicKeyFingerprint(directoryKey))
 		} else {
-			fmt.Fprintf(stderr, "identity_pin_source: identity_pin_file\n")
+			_, _ = fmt.Fprintf(stderr, "identity_pin_source: identity_pin_file\n")
 		}
 		return nil
 	}
 	if err := copyVerifiedResponse(response, opts.stream, stdout); err != nil {
 		return err
 	}
-	fmt.Fprintf(stderr, "relay-blind satisfied; identity fingerprint=%s\nscope: %s\nverified_model_settlement: unavailable_for_relay_blind_request\nusage_settlement: standard_usage_settlement_and_clear_cap_enforcement_still_apply\n", pin.Fingerprint, requestScope)
+	_, _ = fmt.Fprintf(stderr, "relay-blind satisfied; identity fingerprint=%s\nscope: %s\nverified_model_settlement: unavailable_for_relay_blind_request\nusage_settlement: standard_usage_settlement_and_clear_cap_enforcement_still_apply\n", pin.Fingerprint, requestScope)
 	return nil
 }
 
@@ -873,20 +873,20 @@ func privacyDisclosureAgrees(raw json.RawMessage, pool, assurance string) error 
 
 func writePrivacySuccess(stderr io.Writer, fingerprint string, reservation relayblind.ReservationResponse, assurance string) {
 	scope, _, _, residual := privacyLabelStrings(assurance, "")
-	fmt.Fprintf(stderr, "privacy class satisfied; identity fingerprint=%s\nprivacy_class: %s\nassurance: %s\nscope: %s\n", fingerprint, relayblind.PrivacyClassV1, assurance, scope)
+	_, _ = fmt.Fprintf(stderr, "privacy class satisfied; identity fingerprint=%s\nprivacy_class: %s\nassurance: %s\nscope: %s\n", fingerprint, relayblind.PrivacyClassV1, assurance, scope)
 	for _, risk := range residual {
-		fmt.Fprintf(stderr, "residual_risks: %s\n", risk)
+		_, _ = fmt.Fprintf(stderr, "residual_risks: %s\n", risk)
 	}
 	if reservation.PoolID != "" {
-		fmt.Fprintf(stderr, "pool_id: %s\npool_manifest_version: %d\npool_manifest_core_digest: %s\npool_scope: %s\n", reservation.PoolID, reservation.PoolManifestVersion, reservation.PoolManifestCoreDigest, privacyPoolScope)
+		_, _ = fmt.Fprintf(stderr, "pool_id: %s\npool_manifest_version: %d\npool_manifest_core_digest: %s\npool_scope: %s\n", reservation.PoolID, reservation.PoolManifestVersion, reservation.PoolManifestCoreDigest, privacyPoolScope)
 		for _, item := range privacyPoolOperatorSees {
-			fmt.Fprintf(stderr, "pool_operator_sees: %s\n", item)
+			_, _ = fmt.Fprintf(stderr, "pool_operator_sees: %s\n", item)
 		}
 		for _, item := range privacyPoolOperatorDoesNotSee {
-			fmt.Fprintf(stderr, "pool_operator_does_not_see: %s\n", item)
+			_, _ = fmt.Fprintf(stderr, "pool_operator_does_not_see: %s\n", item)
 		}
 	}
-	fmt.Fprintf(stderr, "verified_model_settlement: unavailable_for_relay_blind_request\nusage_settlement: standard_usage_settlement_and_clear_cap_enforcement_still_apply\n")
+	_, _ = fmt.Fprintf(stderr, "verified_model_settlement: unavailable_for_relay_blind_request\nusage_settlement: standard_usage_settlement_and_clear_cap_enforcement_still_apply\n")
 }
 
 func privacyDoNotResubmit(reason string) error {
@@ -934,7 +934,7 @@ func doJSON(ctx context.Context, base *url.URL, path, bearer, sessionID string, 
 	if err != nil {
 		return nil, err
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	raw, err := io.ReadAll(io.LimitReader(response.Body, relayblind.MaxEncryptedRequestBytes+1))
 	if err != nil {
 		return nil, err
@@ -1005,7 +1005,7 @@ func fetchPrivacyDirectory(ctx context.Context, base *url.URL, bearer string, pu
 	if err != nil {
 		return relayblind.IdentityDirectory{}, errors.New("directory request failed")
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	raw, err := io.ReadAll(io.LimitReader(response.Body, relayblind.MaxIdentityDirectoryBytes+1))
 	if err != nil || len(raw) > relayblind.MaxIdentityDirectoryBytes {
 		return relayblind.IdentityDirectory{}, errors.New("directory response unreadable or too large")
@@ -1107,7 +1107,7 @@ func readInnerRequest(path string, stdin io.Reader) ([]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("open input: %w", err)
 		}
-		defer file.Close()
+		defer func() { _ = file.Close() }()
 		reader = file
 	}
 	raw, err := io.ReadAll(io.LimitReader(reader, relayblind.MaxEncryptedRequestBytes+1))

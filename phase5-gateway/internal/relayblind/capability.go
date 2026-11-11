@@ -122,7 +122,7 @@ func strictSubsetSchema(raw json.RawMessage, root bool, depth int) bool {
 	}
 	allowed := map[string]bool{"type": true, "properties": true, "required": true, "items": true, "enum": true, "const": true, "additionalProperties": true, "title": true, "description": true, "minimum": true, "maximum": true, "multipleOf": true}
 	for key, value := range node {
-		if !allowed[key] && !(root && key == "$schema") {
+		if !allowed[key] && (!root || key != "$schema") {
 			return false
 		}
 		// The provider (Swift) rejects an explicit null structural keyword

@@ -360,7 +360,7 @@ func TestInternalBearerWrongTokenRejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("do: %v", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("wrong-token /internal/routing status=%d want 401", resp.StatusCode)
 	}
@@ -382,7 +382,7 @@ func TestInternalBearerNoAuthRejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("do: %v", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("no-auth /internal/routing status=%d want 401", resp.StatusCode)
 	}
@@ -410,7 +410,7 @@ func TestInternalBearerServiceTokenAccepted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("do: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	// 200 means the auth gate accepted us. 401/403 would mean the
 	// service token was rejected — which is the bug we are guarding
 	// against. 5xx is also a failure shape (the endpoint shouldn't
@@ -441,7 +441,7 @@ func TestInternalBearerOperatorKeyRejectedPostCutover(t *testing.T) {
 	if err != nil {
 		t.Fatalf("do: %v", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("operator-key /internal/routing got status=%d want 401 (post-cutover reject)", resp.StatusCode)
 	}

@@ -199,22 +199,22 @@ func renderWarningsToStderr(w io.Writer, warnings []verify.Warning) {
 	for _, warning := range warnings {
 		switch warning.Kind {
 		case "non_default_coordinator":
-			fmt.Fprintf(w, "warning: non-default coordinator %s\n", fieldString(warning.Fields, "coordinator_host"))
+			_, _ = fmt.Fprintf(w, "warning: non-default coordinator %s\n", fieldString(warning.Fields, "coordinator_host"))
 		case "explicit_vs_live_divergence":
-			fmt.Fprintf(w, "warning: explicit --pubkey differs from coordinator-published pubkey %s at %s\n",
+			_, _ = fmt.Fprintf(w, "warning: explicit --pubkey differs from coordinator-published pubkey %s at %s\n",
 				fieldString(warning.Fields, "live_pubkey"),
 				fieldString(warning.Fields, "coordinator_host"),
 			)
 		case "live_check_skipped":
-			fmt.Fprintf(w, "warning: live divergence check skipped (%s)\n", fieldString(warning.Fields, "reason"))
+			_, _ = fmt.Fprintf(w, "warning: live divergence check skipped (%s)\n", fieldString(warning.Fields, "reason"))
 		case "clock_skew":
-			fmt.Fprintf(w, "warning: clock skew (receipt unix_ts=%s, system_time=%s, delta=%ss)\n",
+			_, _ = fmt.Fprintf(w, "warning: clock skew (receipt unix_ts=%s, system_time=%s, delta=%ss)\n",
 				fieldIntString(warning.Fields, "unix_ts"),
 				fieldIntString(warning.Fields, "system_time"),
 				fieldIntString(warning.Fields, "delta_seconds"),
 			)
 		default:
-			fmt.Fprintf(w, "warning: %s\n", warning.Kind)
+			_, _ = fmt.Fprintf(w, "warning: %s\n", warning.Kind)
 		}
 	}
 }

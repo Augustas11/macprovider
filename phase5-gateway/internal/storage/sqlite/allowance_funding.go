@@ -37,7 +37,7 @@ func (s *Store) ensureQuotaReservationFundingSource(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	if !found {
 		if _, err := tx.ExecContext(ctx, `ALTER TABLE quota_reservations ADD COLUMN funding_source TEXT NOT NULL DEFAULT 'quota' CHECK (funding_source IN ('quota', 'allowance'))`); err != nil {
 			return fmt.Errorf("add quota_reservations.funding_source: %w", err)

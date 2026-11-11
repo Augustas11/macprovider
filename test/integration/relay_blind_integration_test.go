@@ -173,7 +173,7 @@ func TestRelayBlindConcurrentEnvelopeAdmitsAtMostOnce(t *testing.T) {
 				return
 			}
 			body, readErr := io.ReadAll(resp.Body)
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			if readErr != nil {
 				results <- result{err: readErr}
 				return
@@ -338,12 +338,13 @@ func runRelayBlindSwiftProviderInterrupted(t *testing.T, fault string) {
 		t.Fatalf("quota_reservations=%d, want exactly one for interrupted envelope", got)
 	}
 	wantSettledTokens := int64(0)
-	if fault == "disconnect_after_first_chunk" || fault == "process_crash_after_first_chunk" {
+	switch fault {
+	case "disconnect_after_first_chunk", "process_crash_after_first_chunk":
 		// The provider terminal frame is lost, so the gateway cannot use the
 		// encrypted stream's terminal usage and conservatively charges the known
 		// validated input plus the clear output cap exactly once.
 		wantSettledTokens = 5 + 32
-	} else if fault == "buyer_cancel_after_first_chunk" {
+	case "buyer_cancel_after_first_chunk":
 		// The trusted validation preframe established the input count before the
 		// buyer canceled; no terminal completion count was delivered.
 		wantSettledTokens = 5
@@ -626,7 +627,7 @@ func countGatewayQuotaStatus(t *testing.T, databasePath, status string) int {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	var count int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM quota_reservations WHERE status = ?`, status).Scan(&count); err != nil {
 		t.Fatal(err)
@@ -646,7 +647,7 @@ func waitLatestQuotaTerminal(t *testing.T, databasePath string, timeout time.Dur
 		var settled int64
 		var hold int
 		err = db.QueryRow(`SELECT status, settled_tokens, settlement_hold FROM quota_reservations ORDER BY created_at DESC LIMIT 1`).Scan(&status, &settled, &hold)
-		db.Close()
+		_ = db.Close()
 		if err == nil && status != "active" && hold == 0 {
 			return status, settled, hold
 		}
@@ -751,7 +752,7 @@ func countSQLiteRows(t *testing.T, path, table string) int {
 	if err != nil {
 		t.Fatalf("open sqlite %s: %v", path, err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	var count int
 	if err := db.QueryRow("SELECT COUNT(*) FROM " + table).Scan(&count); err != nil {
 		t.Fatalf("count %s: %v", table, err)

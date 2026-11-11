@@ -274,7 +274,7 @@ func TestPricingLaneJ3J4J5RejectedReloadsKeepPriorEconomics(t *testing.T) {
 			t.Fatal(err)
 		}
 		if f, err := os.Open(cardPath); err == nil {
-			f.Close()
+			_ = f.Close()
 			t.Fatalf("chmod 000 did not make the card unreadable (running as root?)")
 		}
 		ok, logs := p.sighup(rejectMarkersAll...)
@@ -298,7 +298,7 @@ func TestPricingLaneJ3J4J5RejectedReloadsKeepPriorEconomics(t *testing.T) {
 		p.installPricing(yamlB, cardBRaw) // a valid, parity-matching pair
 		before, snaps := p.applied(), len(p.snapshots())
 		db := p.openCoordDB()
-		defer db.Close()
+		defer func() { _ = db.Close() }()
 		conn, err := db.Conn(t.Context())
 		if err != nil {
 			t.Fatal(err)

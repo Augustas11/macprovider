@@ -14,7 +14,7 @@ func TestSpec014V02CoordinatorGitHubRoutes404WhenFlagOff(t *testing.T) {
 	if err != nil {
 		t.Fatalf("github start flag-off request: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("flag-off /v1/auth/github/start status=%d want 404", resp.StatusCode)
 	}

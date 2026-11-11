@@ -122,7 +122,7 @@ func TestTrustedPoolModelJourney(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	var snapshotJSON string
 	if err := db.QueryRow(`SELECT route_snapshot_json FROM settlement_route_snapshots WHERE pool_id = ? ORDER BY id DESC LIMIT 1`, poolID).Scan(&snapshotJSON); err != nil {
 		t.Fatalf("pool route snapshot: %v", err)
@@ -397,7 +397,7 @@ func submitModelAdmissionOffer(t *testing.T, coordProvURL, providerToken, provid
 	if err != nil {
 		t.Fatalf("offer: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("offer status=%d body=%s", resp.StatusCode, respBody)

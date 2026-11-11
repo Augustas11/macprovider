@@ -6,7 +6,6 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -41,37 +40,48 @@ var reservedMarkerRE = regexp.MustCompile(`(?m)^\s*(?:[*-]\s+)?(FORWARD-COMPAT|R
 // for a future SPEC revision).
 func TestReasonEnumBijection(t *testing.T) {
 	fset := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fset, ".", func(fi fs.FileInfo) bool {
-		return !strings.HasSuffix(fi.Name(), "_test.go")
-	}, parser.ParseComments)
+	entries, err := os.ReadDir(".")
 	if err != nil {
 		t.Fatalf("parse verify package: %v", err)
 	}
-	pkg, ok := pkgs["verify"]
-	if !ok {
+	files := map[string]*ast.File{}
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, name, nil, parser.ParseComments)
+		if err != nil {
+			t.Fatalf("parse verify package: %v", err)
+		}
+		if file.Name.Name == "verify" {
+			files[name] = file
+		}
+	}
+	if len(files) == 0 {
 		t.Fatalf("verify package not found in current directory")
 	}
 	schemaBytes, err := os.ReadFile(filepath.Join("..", "..", "schemas", "output.schema.json"))
 	if err != nil {
 		t.Fatalf("read output schema: %v", err)
 	}
-	if err := checkReasonEnumBijection(pkg, schemaBytes); err != nil {
+	if err := checkReasonEnumBijection(files, schemaBytes); err != nil {
 		t.Fatalf("bijection check failed: %v", err)
 	}
 }
 
-// checkReasonEnumBijection is the testable core. It walks pkg's AST for
+// checkReasonEnumBijection is the testable core. It walks the files' AST for
 // reasonXxx string constants, checks each non-reserved constant is referenced
 // in non-test source, and enforces a 1:1 mapping with the schema's reason
 // enum. Returns the first violation encountered, or nil on success.
-func checkReasonEnumBijection(pkg *ast.Package, schemaBytes []byte) error {
+func checkReasonEnumBijection(files map[string]*ast.File, schemaBytes []byte) error {
 	type reasonDecl struct {
 		value    string
 		reserved bool
 		declPos  token.Pos
 	}
 	declared := map[string]*reasonDecl{}
-	for _, file := range pkg.Files {
+	for _, file := range files {
 		for _, decl := range file.Decls {
 			gen, ok := decl.(*ast.GenDecl)
 			if !ok || gen.Tok != token.CONST {
@@ -111,7 +121,7 @@ func checkReasonEnumBijection(pkg *ast.Package, schemaBytes []byte) error {
 	}
 
 	refCount := map[string]int{}
-	for _, file := range pkg.Files {
+	for _, file := range files {
 		ast.Inspect(file, func(n ast.Node) bool {
 			ident, ok := n.(*ast.Ident)
 			if !ok {
@@ -404,8 +414,7 @@ var _ = []string{reasonA, reasonB, reasonC}
 			if err != nil {
 				t.Fatalf("parse synthetic source: %v", err)
 			}
-			pkg := &ast.Package{Name: "verify", Files: map[string]*ast.File{"fake.go": file}}
-			err = checkReasonEnumBijection(pkg, tc.schema)
+			err = checkReasonEnumBijection(map[string]*ast.File{"fake.go": file}, tc.schema)
 			if tc.wantErrFrag == "" {
 				if err != nil {
 					t.Fatalf("expected nil error, got %v", err)

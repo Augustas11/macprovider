@@ -82,7 +82,7 @@ func TestPutAtomicWriteFailureKeepsOldFile(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		defer os.Remove(tmp.Name())
+		defer func() { _ = os.Remove(tmp.Name()) }()
 		if _, err := tmp.Write(data[:len(data)/2]); err != nil {
 			_ = tmp.Close()
 			return err

@@ -110,7 +110,7 @@ func TestMain(m *testing.M) {
 		fmt.Fprintf(os.Stderr, "tempdir: %v\n", err)
 		os.Exit(1)
 	}
-	defer os.RemoveAll(tmpRoot)
+	defer func() { _ = os.RemoveAll(tmpRoot) }()
 
 	repoRoot, err := findRepoRoot()
 	if err != nil {
@@ -277,7 +277,6 @@ type scenario struct {
 	fakeProv               *fakeProvider
 	procWG                 sync.WaitGroup
 	modelHash              string
-	rateCardPath           string
 	rateCardSHA256         string
 	rateCardVersion        string
 	autotuneCatalogVersion string
@@ -1265,7 +1264,7 @@ func (s *scenario) seedGatewayAccountAndKey() string {
 	if err != nil {
 		s.t.Fatalf("open gateway db for seed: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 
 	if _, err := db.Exec(
@@ -1358,7 +1357,7 @@ func (s *scenario) stopCoordinator() {
 			s.coordCmd = nil
 			return
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		time.Sleep(50 * time.Millisecond)
 	}
 	s.t.Fatal("coordinator healthz still reachable after stop")
@@ -1434,7 +1433,7 @@ func (s *scenario) stopGateway() {
 			s.gatewayCmd = nil
 			return
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		time.Sleep(50 * time.Millisecond)
 	}
 	s.t.Fatal("gateway healthz still reachable after stop")
@@ -1584,7 +1583,7 @@ func (s *scenario) waitForHealth(url string) {
 	for time.Now().Before(deadline) {
 		resp, err := http.Get(url)
 		if err == nil {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
 				return
 			}
@@ -1629,7 +1628,7 @@ func (s *scenario) waitForProviderReady(providerID string) {
 				} `json:"pool"`
 			}
 			decodeErr := json.NewDecoder(resp.Body).Decode(&poolz)
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			if resp.StatusCode == http.StatusOK && decodeErr == nil {
 				for _, p := range poolz.Pool {
 					if p.ProviderID == providerID && p.State == "ready" && p.SlotsFree > 0 && (!needsReceiptKey || p.ReceiptPubkey != nil) {
@@ -1666,7 +1665,7 @@ func (s *scenario) jsonRequest(method, path string, headers map[string]string, b
 	if err != nil {
 		s.t.Fatalf("%s %s: %v", method, path, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	respBody, _ := io.ReadAll(resp.Body)
 	return resp.StatusCode, resp.Header, respBody
 }
@@ -2575,7 +2574,7 @@ func (p *fakeProvider) runWS(ctx context.Context) {
 		p.t.Errorf("fake provider WS dial failed within deadline")
 		return
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	endpointURL := fmt.Sprintf("http://127.0.0.1:%d", p.httpPort)
 	if p.receiptEnabled || p.settlementEnabled {
@@ -2884,7 +2883,7 @@ func (s *scenario) readLatestUsageEvent() (usageEventRow, bool) {
 	if err != nil {
 		s.t.Fatalf("open gateway db: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	var row usageEventRow
 	err = db.QueryRow(
 		`SELECT account_id, request_id, prompt_tokens, completion_tokens, total_tokens, outcome, token_source
@@ -2907,7 +2906,7 @@ func (s *scenario) readUsageEvent(requestID string) (usageEventRow, bool) {
 	if err != nil {
 		s.t.Fatalf("open gateway db: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	var row usageEventRow
 	err = db.QueryRow(
 		`SELECT account_id, request_id, prompt_tokens, completion_tokens, total_tokens, outcome, token_source
@@ -2929,7 +2928,7 @@ func (s *scenario) readQuotaReservation(requestID string) (quotaReservationRow, 
 	if err != nil {
 		s.t.Fatalf("open gateway db: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	var row quotaReservationRow
 	err = db.QueryRow(
 		`SELECT account_id, request_id, reserved_tokens, settled_tokens, status, settlement_hold
@@ -2958,7 +2957,7 @@ func (s *scenario) readLatestRequestLog() (requestLogRow, bool) {
 	if err != nil {
 		s.t.Fatalf("open coord db: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	var row requestLogRow
 	err = db.QueryRow(`SELECT provider_assigned_id, model, status, total_tokens, stream
 		FROM request_log ORDER BY id DESC LIMIT 1`).
@@ -2978,7 +2977,7 @@ func (s *scenario) readSettlementReceiptVerdicts() []settlementReceiptVerdictRow
 	if err != nil {
 		s.t.Fatalf("open coord db: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	rows, err := db.Query(`
 SELECT request_id, attempt_n, provider_id, receipt_present, receipt_version,
        receipt_result, settlement_outcome, reason, closed, model_hash,
@@ -2989,7 +2988,7 @@ SELECT request_id, attempt_n, provider_id, receipt_present, receipt_version,
 	if err != nil {
 		s.t.Fatalf("query settlement_receipt_verdicts: %v", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var verdicts []settlementReceiptVerdictRow
 	for rows.Next() {
 		var row settlementReceiptVerdictRow
@@ -3046,7 +3045,7 @@ func (s *scenario) readLedgerCredits() []ledgerCreditRow {
 	if err != nil {
 		s.t.Fatalf("open coord db: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	rows, err := db.Query(`
 SELECT id, request_id, attempt_n, provider_id, status, stream,
        prompt_tokens, charged_prompt_tokens, cached_prompt_tokens, completion_tokens,
@@ -3058,7 +3057,7 @@ SELECT id, request_id, attempt_n, provider_id, status, stream,
 	if err != nil {
 		s.t.Fatalf("query ledger_request_credits: %v", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var credits []ledgerCreditRow
 	for rows.Next() {
 		var row ledgerCreditRow
@@ -3098,7 +3097,7 @@ func (s *scenario) payoutReadyCount() int {
 	if err != nil {
 		s.t.Fatalf("open coord db: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	var count int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM ledger_payout_ready`).Scan(&count); err != nil {
 		s.t.Fatalf("query ledger_payout_ready: %v", err)
@@ -3112,7 +3111,7 @@ func (s *scenario) settledQuotaTokens() int64 {
 	if err != nil {
 		s.t.Fatalf("open gateway db: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	var total int64
 	if err := db.QueryRow(
 		`SELECT COALESCE(SUM(settled_tokens), 0) FROM quota_reservations WHERE account_id = ? AND status = 'settled'`,
@@ -3137,7 +3136,7 @@ func (s *scenario) gatewayRequest(method, path string, extraHeaders map[string]s
 	if err != nil {
 		s.t.Fatalf("%s %s: %v", method, path, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, _ := io.ReadAll(resp.Body)
 	return resp.StatusCode, resp.Header, body
 }

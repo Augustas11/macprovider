@@ -227,13 +227,13 @@ func TestGatewayRouterCarriesSettlementJournal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sqlite.Open: %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	settlementJournal, err := openSettlementJournal(cfg)
 	if err != nil {
 		t.Fatalf("openSettlementJournal: %v", err)
 	}
-	defer settlementJournal.Close()
+	defer func() { _ = settlementJournal.Close() }()
 	if got := settlementJournal.Dir(); got != filepath.Join(dir, "settlement-journal") {
 		t.Fatalf("journal dir=%q want the sqlite sibling", got)
 	}
@@ -337,7 +337,7 @@ func TestCoordinatorClientHasNoBodyTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("coordinator request failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(resp.Body)
 	elapsed := time.Since(start)
 	if err != nil {
@@ -360,7 +360,7 @@ func TestReleaseOrphanedReservationsAtStartup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	bootedAt := time.Now().UTC()
 	created := bootedAt.Add(-time.Minute)
 	if _, err := store.ReserveQuota(ctx, storage.ReservationRequest{

@@ -54,11 +54,8 @@ func startStakePostgres(t *testing.T) *stakePostgres {
 	t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", name).Run() })
 	pg := &stakePostgres{t: t, container: name}
 	deadline := time.Now().Add(90 * time.Second)
-	for {
+	for exec.Command("docker", "exec", name, "pg_isready", "-h", "127.0.0.1", "-U", "postgres", "-d", "stake").Run() != nil {
 		// TCP readiness: the image's init server listens on the socket only.
-		if exec.Command("docker", "exec", name, "pg_isready", "-h", "127.0.0.1", "-U", "postgres", "-d", "stake").Run() == nil {
-			break
-		}
 		if time.Now().After(deadline) {
 			t.Fatal("postgres did not become ready")
 		}
@@ -103,7 +100,7 @@ func seedStake(s *scenario, pg *stakePostgres, providerID string, lockedMALIBU i
 	if err != nil {
 		s.t.Fatal(err)
 	}
-	defer coord.Close()
+	defer func() { _ = coord.Close() }()
 	for _, stmt := range []string{
 		fmt.Sprintf(`INSERT OR IGNORE INTO github_identities (github_user_id, github_login) VALUES (%d, 'staker')`, stakeGitHubUserID),
 		fmt.Sprintf(`INSERT INTO provider_ownership (provider_id, github_user_id) VALUES ('%s', %d)`, providerID, stakeGitHubUserID),
@@ -116,7 +113,7 @@ func seedStake(s *scenario, pg *stakePostgres, providerID string, lockedMALIBU i
 	if err != nil {
 		s.t.Fatal(err)
 	}
-	defer gw.Close()
+	defer func() { _ = gw.Close() }()
 	if _, err := gw.Exec(`INSERT INTO account_identities (account_id, provider, provider_user_id, created_at) VALUES (?, 'github', ?, ?)`,
 		s.accountID, fmt.Sprint(stakeGitHubUserID), time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 		s.t.Fatalf("seed gateway identity: %v", err)
@@ -147,7 +144,7 @@ func (s *scenario) allowanceSplit(externalRequestID string) (allowanceSplit, boo
 	if err != nil {
 		s.t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	var sp allowanceSplit
 	err = db.QueryRow(`SELECT funding, SUM(gross_credits), SUM(allowance_credits), SUM(paid_credits) FROM allowance_request_splits
         WHERE account_id = ? AND external_request_id = ? GROUP BY funding`, s.accountID, externalRequestID).Scan(&sp.funding, &sp.gross, &sp.allowance, &sp.paid)
@@ -166,7 +163,7 @@ func (s *scenario) providerCreditsFor(externalRequestID string) int64 {
 	if err != nil {
 		s.t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	var credits int64
 	if err := db.QueryRow(`SELECT COALESCE(SUM(provider_credits), 0) FROM ledger_request_credits
         WHERE request_id IN (SELECT request_id FROM request_log WHERE account_id = ? AND external_request_id = ?)`,
@@ -182,7 +179,7 @@ func (s *scenario) quotaFundingSource(requestID string) string {
 	if err != nil {
 		s.t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	var source string
 	if err := db.QueryRow(`SELECT funding_source FROM quota_reservations WHERE account_id = ? AND request_id = ?`, s.accountID, requestID).Scan(&source); err != nil {
 		s.t.Fatalf("quota funding source for %s: %v", requestID, err)
@@ -196,7 +193,7 @@ func (s *scenario) paidQuotaUsed() int64 {
 	if err != nil {
 		s.t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	var used int64
 	if err := db.QueryRow(`SELECT COALESCE(SUM(total_tokens), 0) FROM usage_events ue WHERE account_id = ?
         AND NOT EXISTS (SELECT 1 FROM quota_reservations qr WHERE qr.account_id = ue.account_id AND qr.request_id = ue.request_id AND qr.funding_source = 'allowance')`,

@@ -74,7 +74,7 @@ func TestPricingLaneJ2LoadAcrossSwitchRace(t *testing.T) {
 					r.err = err.Error()
 				} else {
 					out, _ := io.ReadAll(resp.Body)
-					resp.Body.Close()
+					_ = resp.Body.Close()
 					r.status = resp.StatusCode
 					if resp.StatusCode != http.StatusOK || !strings.Contains(string(out), "[DONE]") {
 						r.err = fmt.Sprintf("status=%d body=%.300s", resp.StatusCode, out)
@@ -107,7 +107,7 @@ func TestPricingLaneJ2LoadAcrossSwitchRace(t *testing.T) {
 				samplerEr.Store(err.Error())
 				return
 			}
-			defer db.Close()
+			defer func() { _ = db.Close() }()
 			readCard := func() string {
 				status, b, err := feedGET(client, p.coordBuyerURL+"/v1/rate-card")
 				if err != nil {
@@ -134,8 +134,8 @@ func TestPricingLaneJ2LoadAcrossSwitchRace(t *testing.T) {
 					samplerEr.Store("sampler request: " + err.Error())
 					return
 				}
-				io.Copy(io.Discard, resp.Body)
-				resp.Body.Close()
+				_, _ = io.Copy(io.Discard, resp.Body)
+				_ = resp.Body.Close()
 				if resp.StatusCode != http.StatusOK {
 					samplerEr.Store(fmt.Sprintf("sampler request status %d", resp.StatusCode))
 					return
@@ -299,7 +299,7 @@ func feedGET(client *http.Client, url string) (int, []byte, error) {
 	if err != nil {
 		return 0, nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	b, err := io.ReadAll(resp.Body)
 	return resp.StatusCode, b, err
 }

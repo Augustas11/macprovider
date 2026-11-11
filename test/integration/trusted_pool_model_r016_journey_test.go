@@ -140,7 +140,7 @@ func runR016PoolModelJourney(t *testing.T, attested bool) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	if !attested {
 		// Not bound, not selected, never credited pool_operator_attested.
@@ -309,7 +309,7 @@ func TestTrustedPoolModelR016AttestationInLaterCore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	bound := func() (string, string) {
 		var state, reason string
 		_ = db.QueryRow(`SELECT state, reason_code FROM model_admission_events WHERE provider_id = ? ORDER BY id DESC LIMIT 1`, j.providerID).Scan(&state, &reason)
@@ -411,7 +411,7 @@ func TestTrustedPoolModelR016WindowOnlyRotationKeepsMember(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	body := `{"model":"` + j.poolModelID + `","messages":[{"role":"user","content":"hello after rotation"}]}`
 	deadline := time.Now().Add(20 * time.Second)
 	for {

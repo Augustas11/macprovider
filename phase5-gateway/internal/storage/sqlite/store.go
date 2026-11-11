@@ -410,7 +410,7 @@ func (s *Store) ensureDemandEventsPrivacyBuckets(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.ExecContext(ctx, `DROP TRIGGER IF EXISTS demand_events_no_update`); err != nil {
 		return fmt.Errorf("drop demand_events update trigger for privacy scrub: %w", err)
 	}
@@ -456,7 +456,7 @@ func (s *Store) ensureUsageEventsPoolOperatorAttestedSource(ctx context.Context)
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	const columns = `request_id, account_id, demo_identity, window_date,
 			 prompt_tokens, completion_tokens, total_tokens,
 			 token_source, outcome, requested_privacy_mode, effective_privacy_outcome,
@@ -597,7 +597,7 @@ func (s *Store) ensureOAuthStateExpiresAtColumn(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	hasExpiresAt := false
 	for rows.Next() {
 		var cid int
@@ -660,7 +660,7 @@ func (s *Store) checkSchemaVersionGateAt(ctx context.Context, maxKnown int64) er
 		return nil
 	}
 	if current.Int64 > maxKnown {
-		return fmt.Errorf("gateway DB schema_migrations.version=%d exceeds this binary's max-known version %d — refusing to open (issue #196 rollback safety). Restore from pre-deploy snapshot.",
+		return fmt.Errorf("gateway DB schema_migrations.version=%d exceeds this binary's max-known version %d — refusing to open (issue #196 rollback safety). Restore from pre-deploy snapshot",
 			current.Int64, maxKnown)
 	}
 	return nil
@@ -675,7 +675,7 @@ func (s *Store) ensureOAuthStateActionColumn(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	hasAction := false
 	for rows.Next() {
 		var cid int
@@ -705,7 +705,7 @@ func (s *Store) ensureOAuthStateReturnToColumn(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	hasReturnTo := false
 	for rows.Next() {
 		var cid int
@@ -809,7 +809,7 @@ func (s *Store) ensureUsageEventsCompositePK(ctx context.Context) error {
 	}
 	// Anything other than the legacy single-column (request_id) PK is
 	// an unrecognized shape — bail loudly rather than corrupt data.
-	if !(len(pkCols) == 1 && pkCols[0].name == "request_id") {
+	if len(pkCols) != 1 || pkCols[0].name != "request_id" {
 		return fmt.Errorf("usage_events PK shape unrecognized: %+v", pkCols)
 	}
 	// Rebuild. PRAGMA foreign_keys is OFF for the duration so the
@@ -825,7 +825,7 @@ func (s *Store) ensureUsageEventsCompositePK(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	// Sequence: legacy → legacy_old (rename), then create the
 	// canonical usage_events with the new PK using its REAL name
 	// from the start. This keeps sqlite_master.sql for usage_events
@@ -920,7 +920,7 @@ func (s *Store) ensureDemoUsageEventsCompositePK(ctx context.Context) error {
 			(pkCols[0].name == "request_id" && pkCols[1].name == "demo_token_hash")) {
 		return nil
 	}
-	if !(len(pkCols) == 1 && pkCols[0].name == "request_id") {
+	if len(pkCols) != 1 || pkCols[0].name != "request_id" {
 		return fmt.Errorf("demo_usage_events PK shape unrecognized: %+v", pkCols)
 	}
 	if _, err := s.db.ExecContext(ctx, `PRAGMA foreign_keys = OFF`); err != nil {
@@ -933,7 +933,7 @@ func (s *Store) ensureDemoUsageEventsCompositePK(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.ExecContext(ctx, `ALTER TABLE demo_usage_events RENAME TO demo_usage_events_legacy`); err != nil {
 		return fmt.Errorf("rename legacy demo_usage_events aside: %w", err)
 	}
@@ -987,7 +987,7 @@ func (s *Store) ensureUsageEventsCoordinatorObservedSource(ctx context.Context) 
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.ExecContext(ctx, `ALTER TABLE usage_events RENAME TO usage_events_legacy`); err != nil {
 		return fmt.Errorf("rename usage_events for coordinator_observed migration: %w", err)
 	}
@@ -1024,7 +1024,7 @@ func (s *Store) ensureQuotaSettlementHoldColumn(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	hasSettlementHold := false
 	for rows.Next() {
 		var cid int
@@ -1049,7 +1049,7 @@ func (s *Store) ensureQuotaSettlementHoldColumn(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.ExecContext(ctx, `ALTER TABLE quota_reservations ADD COLUMN settlement_hold INTEGER NOT NULL DEFAULT 0 CHECK (settlement_hold IN (0, 1))`); err != nil {
 		return fmt.Errorf("add quota_reservations.settlement_hold: %w", err)
 	}
@@ -1066,7 +1066,7 @@ func (s *Store) ensureWalletSessionRequestMapModelIDColumn(ctx context.Context) 
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	hasModelID := false
 	for rows.Next() {
 		var cid int
@@ -1099,7 +1099,7 @@ func (s *Store) ensureWalletSessionReplayDispatchColumns(ctx context.Context) er
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	existing := map[string]struct{}{}
 	for rows.Next() {
 		var cid int
@@ -1172,7 +1172,7 @@ func (s *Store) ensureQuotaReservationStaleHeldStatus(ctx context.Context) error
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.ExecContext(ctx, `ALTER TABLE quota_reservations RENAME TO quota_reservations_legacy`); err != nil {
 		return fmt.Errorf("rename quota_reservations for stale_held migration: %w", err)
 	}
@@ -1322,7 +1322,7 @@ func (s *Store) ListAPIKeys(ctx context.Context, accountID string) ([]storage.AP
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var keys []storage.APIKeySummary
 	for rows.Next() {
 		var key storage.APIKeySummary
@@ -2168,7 +2168,7 @@ func (s *Store) ListSettlementHeldReservations(ctx context.Context, limit int) (
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	out := make([]storage.ActiveReservation, 0, limit)
 	for rows.Next() {
 		reservation, err := scanSettlementHeldReservation(rows)
@@ -2221,7 +2221,7 @@ func (s *Store) ListDueSettlementHeldReservations(ctx context.Context, limit int
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	out := make([]storage.ActiveReservation, 0, limit)
 	for rows.Next() {
 		reservation, err := scanSettlementHeldReservation(rows)
@@ -2280,7 +2280,7 @@ func (s *Store) ListSettlementHeldReservationsForDrain(ctx context.Context, acco
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	out := make([]storage.ActiveReservation, 0, limit)
 	for rows.Next() {
 		var reservation storage.ActiveReservation
@@ -2656,7 +2656,7 @@ func (s *Store) ListWalletSessions(ctx context.Context, accountID string) ([]sto
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var sessions []storage.WalletSession
 	for rows.Next() {
 		session, err := scanWalletSession(rows)
@@ -2756,7 +2756,7 @@ func (s *Store) ListWalletSessionUsageDetails(ctx context.Context, accountID, se
 	if err != nil {
 		return nil, "", err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	details := make([]storage.WalletSessionUsageDetail, 0, limit)
 	var nextCursor string
 	for rows.Next() {
@@ -3108,7 +3108,7 @@ func retainedRelayBlindReplaySeenTx(ctx context.Context, tx *immediateTx, replay
 	if err != nil {
 		return false, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	seen := false
 	for rows.Next() {
 		var rawExpiry string
@@ -3273,7 +3273,7 @@ func (s *Store) HoldStaleWalletSessionDispatchArms(ctx context.Context, before, 
 	if err != nil {
 		return 0, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	type staleArm struct {
 		accountID string
 		sessionID string
@@ -3816,7 +3816,7 @@ func (s *Store) DemandSummary(ctx context.Context, query storage.DemandSummaryQu
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []storage.DemandSummaryRow
 	for rows.Next() {
 		var row storage.DemandSummaryRow
@@ -3865,7 +3865,7 @@ func (s *Store) DemandRouteSummary(ctx context.Context, query storage.DemandSumm
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []storage.DemandRouteSummaryRow
 	for rows.Next() {
 		var row storage.DemandRouteSummaryRow
@@ -4219,7 +4219,7 @@ func (s *Store) ListFeedbackEventsSinceLimit(ctx context.Context, since time.Tim
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var events []storage.FeedbackSummaryEvent
 	for rows.Next() {
 		var event storage.FeedbackSummaryEvent
@@ -4257,7 +4257,7 @@ func (s *Store) LatestCapacitySignals(ctx context.Context) ([]storage.CapacitySi
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []storage.CapacitySignalEvent
 	for rows.Next() {
 		var event storage.CapacitySignalEvent
@@ -4723,7 +4723,7 @@ func refundClaimedWalletAdmissionsTx(ctx context.Context, tx *immediateTx, accou
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var requestIDs []string
 	for rows.Next() {
 		var requestID string
@@ -4873,10 +4873,11 @@ func transitionWalletSessionReservationTx(ctx context.Context, tx *immediateTx, 
 	whenText := encodeTime(when.UTC())
 	quotaStatus := "refunded"
 	settlementHold := 0
-	if status == "held" || status == "quarantined" {
+	switch status {
+	case "held", "quarantined":
 		quotaStatus = "active"
 		settlementHold = 1
-	} else if status == "stale_held" {
+	case "stale_held":
 		quotaStatus = "stale_held"
 		settlementHold = 1
 	}

@@ -52,7 +52,7 @@ func TestPricingLaneJ8WholesaleEdges(t *testing.T) {
 	after := effB.Add(time.Millisecond)
 
 	db := p.openCoordDB()
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	type plant struct {
 		account, requestID, model string
 		attemptN                  sql.NullInt64

@@ -42,7 +42,7 @@ func TestOpenUpgradesSchema14SettlementReconcileAttempts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open schema-14 database: %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	for _, column := range []string{"attempt_count", "next_attempt_after", "operator_review", "operator_review_reason"} {
 		var n int
 		if err := store.db.QueryRowContext(ctx,

@@ -61,7 +61,7 @@ func TestPricingLaneBugWholesaleConflictErrorIsNamed(t *testing.T) {
 	snaps := p.snapshots()
 	snapA, snapB := snaps[0], snaps[len(snaps)-1]
 	db := p.openCoordDB()
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	ts := time.Now().UTC().Format(time.RFC3339Nano)
 	for i := 0; i < 2; i++ {
 		if _, err := db.Exec(`INSERT INTO request_log (ts_utc, request_id, account_id, model, provider_assigned_id, prompt_tokens, completion_tokens, total_tokens, latency_ms, routing_ms, status, stream, attempt_n)

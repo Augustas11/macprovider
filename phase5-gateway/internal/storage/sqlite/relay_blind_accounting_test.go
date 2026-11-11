@@ -261,7 +261,7 @@ func TestRelayBlindSettlementAtMostOnceAcrossConcurrencyAndRestart(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	if err := store.SettleReservation(ctx, settlement); !errors.Is(err, storage.ErrReservationTerminal) {
 		t.Fatalf("post-restart settlement error=%v", err)
 	}
@@ -365,7 +365,7 @@ func TestWalletRelayBlindDispatchArmDurablyHoldsQuotaAcrossRestart(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	held, err := store.ListSettlementHeldReservations(ctx, 10)
 	if err != nil {
 		t.Fatal(err)
@@ -412,7 +412,7 @@ func TestRelayBlindAPIPredispatchHoldSurvivesRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	held, err := store.ListSettlementHeldReservations(ctx, 10)
 	if err != nil {
 		t.Fatal(err)

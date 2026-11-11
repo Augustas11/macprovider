@@ -91,7 +91,7 @@ func Run(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, get
 func run(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, getenv func(string) string, cfg runConfig) (exit int) {
 	defer func() {
 		if recover() != nil {
-			fmt.Fprintln(stderr, "internal error")
+			_, _ = fmt.Fprintln(stderr, "internal error")
 			exit = exitSoftware
 		}
 	}()
@@ -112,7 +112,7 @@ func run(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, get
 		return exitValid
 	}
 	if opts.version {
-		fmt.Fprintf(stdout, "macprovider-verify %s (verifies up to SPEC-015 v%s)\n", version.BinaryVersion, version.MaxSPECVersion)
+		_, _ = fmt.Fprintf(stdout, "macprovider-verify %s (verifies up to SPEC-015 v%s)\n", version.BinaryVersion, version.MaxSPECVersion)
 		return exitValid
 	}
 
@@ -136,7 +136,7 @@ func run(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, get
 		renderWarningsToStderr(stderr, result.Warnings)
 	}
 	if opts.explain && !opts.quiet && result.Result == "valid" {
-		fmt.Fprintln(stderr, explainText)
+		_, _ = fmt.Fprintln(stderr, explainText)
 	}
 	return exitForResult(result)
 }
@@ -431,7 +431,7 @@ func singleMatchProviderIDFromCache(c *cache.Cache, coordinatorHost string, pubk
 	if errors.Is(err, os.ErrNotExist) || err != nil {
 		return "", nil
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	matches := map[string]bool{}
 	scanner := bufio.NewScanner(file)
@@ -532,33 +532,33 @@ func writeErr(stderr io.Writer, quiet bool, err error) {
 	if quiet || err == nil {
 		return
 	}
-	fmt.Fprintln(stderr, err)
+	_, _ = fmt.Fprintln(stderr, err)
 }
 
 func printUsage(w io.Writer) {
-	fmt.Fprintln(w, "Usage: macprovider-verify [flags]")
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Flags:")
-	fmt.Fprintln(w, "  --version              print version")
-	fmt.Fprintln(w, "  --help                 print this usage")
-	fmt.Fprintln(w, "  --bundle <path|->      verify a receipt bundle JSON file, or stdin with -")
-	fmt.Fprintln(w, "  --receipt <value>      verify an X-MacProvider-Receipt header value")
-	fmt.Fprintln(w, "  --prompt-hash <hex>    expected canonical prompt SHA-256 hex")
-	fmt.Fprintln(w, "  --output-hash <hex>    expected canonical output SHA-256 hex")
-	fmt.Fprintln(w, "  --pubkey <base64>      explicit base64 ed25519 public key")
-	fmt.Fprintln(w, "  --provider-id <id>     provider identifier for resolver lookup")
-	fmt.Fprintln(w, "  --json                 emit one-line JSON output")
-	fmt.Fprintln(w, "  --offline              disable live coordinator fetches")
-	fmt.Fprintln(w, "  --quiet                suppress stderr diagnostics and warnings")
-	fmt.Fprintln(w, "  --coordinator <host>   coordinator host for /v1/receipt-keys")
-	fmt.Fprintln(w, "  --explain              print SPEC-015 trust-boundary explanation after valid results")
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "SPEC-015 v0.3 catalog flags (§M.3.1 / §M.3.1.2):")
-	fmt.Fprintln(w, "  --catalog <path>             local signed catalog file (mutually exclusive with --catalog-url)")
-	fmt.Fprintln(w, "  --catalog-url <url>          URL to fetch signed catalog (incompatible with --offline)")
-	fmt.Fprintln(w, "  --catalog-pubkey <b64url>    base64url-unpadded ed25519 catalog signing pubkey (43 ASCII chars)")
-	fmt.Fprintln(w, "  --catalog-pubkey-url <url>   URL to fetch the catalog signing pubkey (incompatible with --offline)")
-	fmt.Fprintln(w, "  --require-model-hash         fail-closed (exit 1) when receipt model_hash is null (§M.3.1.2)")
+	_, _ = fmt.Fprintln(w, "Usage: macprovider-verify [flags]")
+	_, _ = fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w, "Flags:")
+	_, _ = fmt.Fprintln(w, "  --version              print version")
+	_, _ = fmt.Fprintln(w, "  --help                 print this usage")
+	_, _ = fmt.Fprintln(w, "  --bundle <path|->      verify a receipt bundle JSON file, or stdin with -")
+	_, _ = fmt.Fprintln(w, "  --receipt <value>      verify an X-MacProvider-Receipt header value")
+	_, _ = fmt.Fprintln(w, "  --prompt-hash <hex>    expected canonical prompt SHA-256 hex")
+	_, _ = fmt.Fprintln(w, "  --output-hash <hex>    expected canonical output SHA-256 hex")
+	_, _ = fmt.Fprintln(w, "  --pubkey <base64>      explicit base64 ed25519 public key")
+	_, _ = fmt.Fprintln(w, "  --provider-id <id>     provider identifier for resolver lookup")
+	_, _ = fmt.Fprintln(w, "  --json                 emit one-line JSON output")
+	_, _ = fmt.Fprintln(w, "  --offline              disable live coordinator fetches")
+	_, _ = fmt.Fprintln(w, "  --quiet                suppress stderr diagnostics and warnings")
+	_, _ = fmt.Fprintln(w, "  --coordinator <host>   coordinator host for /v1/receipt-keys")
+	_, _ = fmt.Fprintln(w, "  --explain              print SPEC-015 trust-boundary explanation after valid results")
+	_, _ = fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w, "SPEC-015 v0.3 catalog flags (§M.3.1 / §M.3.1.2):")
+	_, _ = fmt.Fprintln(w, "  --catalog <path>             local signed catalog file (mutually exclusive with --catalog-url)")
+	_, _ = fmt.Fprintln(w, "  --catalog-url <url>          URL to fetch signed catalog (incompatible with --offline)")
+	_, _ = fmt.Fprintln(w, "  --catalog-pubkey <b64url>    base64url-unpadded ed25519 catalog signing pubkey (43 ASCII chars)")
+	_, _ = fmt.Fprintln(w, "  --catalog-pubkey-url <url>   URL to fetch the catalog signing pubkey (incompatible with --offline)")
+	_, _ = fmt.Fprintln(w, "  --require-model-hash         fail-closed (exit 1) when receipt model_hash is null (§M.3.1.2)")
 }
 
 const explainText = `A ` + "`valid`" + ` result from ` + "`macprovider verify`" + ` proves **exactly this**:

@@ -827,7 +827,7 @@ func TestWalletReservationFinalizeHoldQuarantineAndStaleHeldTransitions(t *testi
 	if err != nil {
 		t.Fatalf("query wallet reservations: %v", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		var requestID, status string
 		if err := rows.Scan(&requestID, &status); err != nil {

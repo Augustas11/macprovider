@@ -38,7 +38,7 @@ func TestDemoUsageEventsCrossDemoCollisionInsertsBothRows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var got []struct {
 		hash   string
 		tokens int64
@@ -131,7 +131,7 @@ func TestDemoUsageEventsCompositePKUpgradeFromLegacyPK(t *testing.T) {
 
 	// Composite PK installed.
 	pkCols := readPKColumns(t, store, "demo_usage_events")
-	if !(len(pkCols) == 2 && pkCols[0] == "demo_token_hash" && pkCols[1] == "request_id") {
+	if len(pkCols) != 2 || pkCols[0] != "demo_token_hash" || pkCols[1] != "request_id" {
 		t.Fatalf("post-migration PK = %v, want [demo_token_hash request_id]", pkCols)
 	}
 
@@ -253,7 +253,7 @@ func readDemoUsageEventsMaster(t *testing.T, store *Store) map[string]string {
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	out := map[string]string{}
 	for rows.Next() {
 		var name, sqlText string

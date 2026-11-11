@@ -42,7 +42,7 @@ func TestSwiftRFC8785JCSTestCases(t *testing.T) {
 			want string
 		}{
 			{"zero", 0.0, "0"},
-			{"negativeZero", -0.0, "0"},
+			{"negativeZero", math.Copysign(0, -1), "0"},
 			{"one", 1.0, "1"},
 			{"onePointOne", 1.1, "1.1"},
 			{"oneEMinusSeven", 1e-7, "1e-7"},

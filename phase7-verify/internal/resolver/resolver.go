@@ -281,7 +281,7 @@ func fetchLive(providerID string, target coordinatorTarget, client *http.Client)
 		}
 		return ResolverResponse{}, fmt.Errorf("%w: %v", ErrFetchFailed, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	switch {
 	case resp.StatusCode == http.StatusOK:

@@ -65,7 +65,7 @@ func TestDrainHTTPServerFinishesInFlightRequests(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	if _, err := io.WriteString(conn, "GET / HTTP/1.1\r\nHost: x\r\n\r\n"); err != nil {
 		t.Fatal(err)
 	}

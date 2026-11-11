@@ -245,7 +245,7 @@ func (s *Store) ExplorerListSessions(ctx context.Context, q storage.ExplorerSess
 	if err != nil {
 		return storage.ExplorerSessionList{}, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	out := storage.ExplorerSessionList{Partial: false, Error: nil}
 	for rows.Next() {
 		item, err := scanUsage(rows)
@@ -405,7 +405,7 @@ func (s *Store) explorerAccountIDsForRequestForensic(ctx context.Context, reques
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []string
 	for rows.Next() {
 		var a string
@@ -449,7 +449,7 @@ func (s *Store) explorerAccountIDsForRequest(ctx context.Context, requestID stri
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []string
 	for rows.Next() {
 		var a string
@@ -510,7 +510,7 @@ func (s *Store) ExplorerActivity(ctx context.Context, q storage.ExplorerActivity
 	if err != nil {
 		return storage.ExplorerActivityList{}, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	out := storage.ExplorerActivityList{Partial: false, Error: nil}
 	for rows.Next() {
 		var created, eventType, sourceID, requestID, accountID, keyID, status string
@@ -644,7 +644,7 @@ func (s *Store) explorerIdentities(ctx context.Context, accountID string) ([]sto
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []storage.ExplorerIdentity
 	for rows.Next() {
 		var item storage.ExplorerIdentity
@@ -667,7 +667,7 @@ func (s *Store) explorerAPIKeys(ctx context.Context, accountID string) ([]storag
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []storage.ExplorerAPIKey
 	for rows.Next() {
 		var item storage.ExplorerAPIKey
@@ -713,7 +713,7 @@ func (s *Store) explorerUsageEvents(ctx context.Context, accountID, requestID st
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []storage.ExplorerUsageEvent
 	for rows.Next() {
 		item, err := scanUsage(rows)
@@ -737,7 +737,7 @@ func (s *Store) explorerQuotaReservations(ctx context.Context, accountID, reques
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []storage.ExplorerQuotaReservation
 	for rows.Next() {
 		var item storage.ExplorerQuotaReservation
@@ -765,7 +765,7 @@ func (s *Store) explorerConcurrencyReservations(ctx context.Context, accountID, 
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []storage.ExplorerConcurrencyReservation
 	for rows.Next() {
 		var item storage.ExplorerConcurrencyReservation
@@ -793,7 +793,7 @@ func (s *Store) explorerFeedbackEvents(ctx context.Context, accountID, requestID
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []storage.ExplorerFeedbackEvent
 	for rows.Next() {
 		var item storage.ExplorerFeedbackEvent
@@ -819,7 +819,7 @@ func (s *Store) explorerAuditEvents(ctx context.Context, accountID, requestID st
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []storage.ExplorerAuditEvent
 	for rows.Next() {
 		var item storage.ExplorerAuditEvent
@@ -933,11 +933,6 @@ func decodeListID(raw string) (string, error) {
 		return "", storage.ErrBadCursor
 	}
 	return string(b), nil
-}
-
-func encodeListCursor(ts time.Time, id string) string {
-	b, _ := json.Marshal(listCursor{TS: encodeTime(ts), ID: id})
-	return base64.RawURLEncoding.EncodeToString(b)
 }
 
 // encodeListCursorWithAccount is the post-issue-#196 cursor encoder.

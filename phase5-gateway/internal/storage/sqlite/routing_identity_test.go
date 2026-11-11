@@ -20,7 +20,7 @@ func TestRoutingGitHubIdentitiesReadOnlyDuringHeldWriter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer primary.Close()
+	defer func() { _ = primary.Close() }()
 	createAccount(t, primary, "acct")
 	if err := primary.AddAccountIdentity(ctx, storage.AccountIdentity{AccountID: "acct", Provider: "github", ProviderUserID: "7", CreatedAt: fixedTime()}); err != nil {
 		t.Fatal(err)
@@ -29,14 +29,14 @@ func TestRoutingGitHubIdentitiesReadOnlyDuringHeldWriter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 
 	conn, err := primary.db.Conn(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
-	defer conn.ExecContext(context.Background(), `ROLLBACK`)
+	defer func() { _ = conn.Close() }()
+	defer func() { _, _ = conn.ExecContext(context.Background(), `ROLLBACK`) }()
 	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
 		t.Fatal(err)
 	}

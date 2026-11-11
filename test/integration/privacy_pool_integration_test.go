@@ -156,7 +156,7 @@ func TestPrivacyClassPoolMemberEnrolledIsServedAndSettles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	// SPEC-049-R032 item 6: the pool labels are on the relay-blind route
 	// snapshot and the verdict row, and the request log names the pool.
 	var snapshotPool, snapshotJSON string

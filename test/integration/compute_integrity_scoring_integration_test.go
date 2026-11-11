@@ -52,7 +52,7 @@ func (s *scenario) computeIntegrityStatus(providerID string) ciStatus {
 	if err != nil {
 		s.t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
 		s.t.Fatalf("compute-integrity status %s: %d %s", providerID, resp.StatusCode, body)
@@ -146,7 +146,7 @@ func TestComputeIntegrityScoringHonestPassesSubstitutedFails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	// Verification requests are ordinary paid attempts: each writes the same
 	// ledger credit row a buyer request writes for the verified provider
 	// (this harness's rate card prices the model at zero credits).

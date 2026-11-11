@@ -428,7 +428,7 @@ func (p *pricingLane) seedExtraAccount() pricingAccount {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	accountID := "acct_" + randHex(t, 8)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if _, err := db.Exec(`INSERT INTO accounts(account_id, status, quota_class, concurrency_class, created_at) VALUES(?, 'active', 'default', 'default', ?)`, accountID, now); err != nil {
@@ -602,7 +602,7 @@ func rawGET(t *testing.T, url, bearer string) (int, http.Header, []byte) {
 	if err != nil {
 		t.Fatalf("GET %s: %v", url, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, _ := io.ReadAll(resp.Body)
 	return resp.StatusCode, resp.Header, body
 }
@@ -726,7 +726,7 @@ func (p *pricingLane) pricedCredits() []pricedCredit {
 	t := p.t
 	t.Helper()
 	db := p.openCoordDB()
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	rows, err := db.Query(`
 SELECT c.id, c.request_id, c.attempt_n, c.model,
        c.prompt_rate_per_mtok, c.completion_rate_per_mtok, c.global_multiplier_ppm, c.provider_share_bps,
@@ -740,7 +740,7 @@ SELECT c.id, c.request_id, c.attempt_n, c.model,
 	if err != nil {
 		t.Fatalf("query priced credits: %v", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []pricedCredit
 	seen := map[int64]bool{}
 	for rows.Next() {
@@ -789,12 +789,12 @@ func (p *pricingLane) snapshots() []configSnapshot {
 	t := p.t
 	t.Helper()
 	db := p.openCoordDB()
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	rows, err := db.Query(`SELECT id, effective_at_utc, rate_card_json FROM ledger_config_snapshots ORDER BY id`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []configSnapshot
 	for rows.Next() {
 		var s configSnapshot
@@ -972,7 +972,7 @@ func (p *pricingLane) chatAs(apiKey, requestID string, stream bool) (int, []byte
 	if err != nil {
 		return 0, []byte(err.Error())
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	out, _ := io.ReadAll(resp.Body)
 	return resp.StatusCode, out
 }
@@ -1011,7 +1011,7 @@ func (p *pricingLane) waitCreditFor(externalID string, timeout time.Duration) st
 	t := p.t
 	t.Helper()
 	db := p.openCoordDB()
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		var rid string
@@ -1035,12 +1035,12 @@ func (p *pricingLane) creditRatesFor(requestID string) []pricingEntry {
 	t := p.t
 	t.Helper()
 	db := p.openCoordDB()
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	rows, err := db.Query(`SELECT prompt_rate_per_mtok, completion_rate_per_mtok FROM ledger_request_credits WHERE request_id = ?`, requestID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []pricingEntry
 	for rows.Next() {
 		var e pricingEntry
@@ -1057,7 +1057,7 @@ func (p *pricingLane) requestLogAccount(requestID string) string {
 	t := p.t
 	t.Helper()
 	db := p.openCoordDB()
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	var acct sql.NullString
 	if err := db.QueryRow(`SELECT account_id FROM request_log WHERE request_id = ? LIMIT 1`, requestID).Scan(&acct); err != nil {
 		t.Fatalf("request_log account for %s: %v", requestID, err)
@@ -1088,7 +1088,7 @@ func (p *pricingLane) generateWholesale(accountID string) wholesaleStatement {
 	if err != nil {
 		t.Fatalf("wholesale POST: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	raw, _ := io.ReadAll(resp.Body)
 	out := wholesaleStatement{status: resp.StatusCode, raw: raw}
 	_ = json.Unmarshal(raw, &out.stmt)

@@ -259,12 +259,12 @@ func (s *scenario) readSettlementVerdictAudits() []string {
 	if err != nil {
 		s.t.Fatalf("open settlement receipt audit db: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	rows, err := db.Query(`SELECT payload_json FROM audit_log WHERE event_type = 'settlement_receipt_verdict' ORDER BY id ASC`)
 	if err != nil {
 		s.t.Fatalf("query settlement verdict audits: %v", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var payloads []string
 	for rows.Next() {
 		var payload string
@@ -285,7 +285,7 @@ func (s *scenario) payableCreditCount(requestID string) int {
 	if err != nil {
 		s.t.Fatalf("open coord db: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	var count int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM spec022_payable_request_credits WHERE request_id = ?`, requestID).Scan(&count); err != nil {
 		s.t.Fatalf("query spec022_payable_request_credits: %v", err)

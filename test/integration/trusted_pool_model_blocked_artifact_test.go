@@ -175,7 +175,7 @@ func TestTrustedPoolModelBlockedArtifactIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	deadline := time.Now().Add(20 * time.Second)
 	for {
 		var state, reason string

@@ -21,7 +21,7 @@ func (s *Store) ensureRelayBlindSettlementDispatchColumns(ctx context.Context) e
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	rows, err := tx.QueryContext(ctx, `PRAGMA table_info(quota_reservations)`)
 	if err != nil {
 		return err

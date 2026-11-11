@@ -2,15 +2,14 @@ package relayblind
 
 import (
 	"bytes"
+	"crypto/ecdh"
 	"crypto/ed25519"
-	"crypto/elliptic"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math/big"
 	"time"
 )
 
@@ -74,9 +73,7 @@ func DecodeSEPublicKey(encoded string) ([]byte, error) {
 	if err != nil || len(decoded) != 64 || base64.StdEncoding.EncodeToString(decoded) != encoded {
 		return nil, ErrInvalidPrivacy
 	}
-	x := new(big.Int).SetBytes(decoded[:32])
-	y := new(big.Int).SetBytes(decoded[32:])
-	if !elliptic.P256().IsOnCurve(x, y) {
+	if _, err := ecdh.P256().NewPublicKey(append([]byte{4}, decoded...)); err != nil {
 		return nil, ErrInvalidPrivacy
 	}
 	return decoded, nil

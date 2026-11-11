@@ -147,7 +147,7 @@ func (s *scenario) openCoordDB() *sql.DB {
 func (s *scenario) plantIdentityFallback(ts time.Time) {
 	s.t.Helper()
 	db := s.openCoordDB()
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	var snapshotID int64
 	if err := db.QueryRow(`SELECT id FROM ledger_config_snapshots ORDER BY id DESC LIMIT 1`).Scan(&snapshotID); err != nil {
 		s.t.Fatalf("config snapshot: %v", err)
@@ -178,7 +178,7 @@ INSERT INTO ledger_provider_identity_snapshots (
 func (s *scenario) plantOrphanCredit(ts time.Time) {
 	s.t.Helper()
 	db := s.openCoordDB()
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	stamp := ts.UTC().Format(time.RFC3339Nano)
 	if _, err := db.Exec(`
 INSERT INTO ledger_request_credits (
@@ -196,7 +196,7 @@ INSERT INTO ledger_request_credits (
 func (s *scenario) creditCount(requestID string, quarantined bool) int {
 	s.t.Helper()
 	db := s.openCoordDB()
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	flag := 0
 	if quarantined {
 		flag = 1
@@ -213,7 +213,7 @@ SELECT COUNT(*) FROM ledger_request_credits
 func (s *scenario) recoverySource(requestID string) string {
 	s.t.Helper()
 	db := s.openCoordDB()
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	var source string
 	if err := db.QueryRow(`
 SELECT recovery_source FROM ledger_request_credits
@@ -226,7 +226,7 @@ SELECT recovery_source FROM ledger_request_credits
 func (s *scenario) quarantinedCount(requestID, reason string) int {
 	s.t.Helper()
 	db := s.openCoordDB()
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	var count int
 	if err := db.QueryRow(`
 SELECT COUNT(*) FROM ledger_request_credits
@@ -239,7 +239,7 @@ SELECT COUNT(*) FROM ledger_request_credits
 func (s *scenario) startupScanCount() int {
 	s.t.Helper()
 	db := s.openCoordDB()
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	var count int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM ledger_reconciliation_runs WHERE run_type = 'startup_scan'`).Scan(&count); err != nil {
 		s.t.Fatalf("startup_scan count: %v", err)
@@ -268,7 +268,7 @@ func (s *scenario) waitForStartupScanFinished(before int, timeout time.Duration)
 func (s *scenario) latestStartupScan() startupScanRow {
 	s.t.Helper()
 	db := s.openCoordDB()
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	var row startupScanRow
 	if err := db.QueryRow(`
 SELECT status, missing_credit_rows_created, orphan_credit_rows_quarantined

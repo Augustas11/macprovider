@@ -19,7 +19,7 @@ func TestSpec014V02FullPairingHandoff(t *testing.T) {
 	db := openDB(t, coord.dbPath)
 	providerID := "spec014-provider-" + randHex(t, 4)
 	conn, ack := dialProvider(t, coord.providerURL, providerID)
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	assignedToken, _ := ack["assigned_provider_token"].(string)
 	pairOT, _ := ack["pair_ot"].(string)
@@ -147,7 +147,7 @@ func getProviders(t *testing.T, c *http.Client, baseURL string) (int, []byte) {
 	if err != nil {
 		t.Fatalf("get providers: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, _ := io.ReadAll(resp.Body)
 	return resp.StatusCode, body
 }

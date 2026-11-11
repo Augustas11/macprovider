@@ -581,7 +581,7 @@ func decodeClosedFields(raw []byte, dst any, fields []string, nullable map[strin
 	if _, err := dec.Token(); err != nil {
 		return ErrInvalidJSON
 	}
-	if _, sawOptional := seen[optional]; len(seen) != len(want) && !(optional != "" && !sawOptional && len(seen) == len(want)-1) {
+	if _, sawOptional := seen[optional]; len(seen) != len(want) && (optional == "" || sawOptional || len(seen) != len(want)-1) {
 		return ErrInvalidJSON
 	}
 	if tok, err := dec.Token(); err != io.EOF || tok != nil {

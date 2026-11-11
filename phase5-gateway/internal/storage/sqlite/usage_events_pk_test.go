@@ -58,7 +58,7 @@ func TestUsageEventsCrossAccountCollisionInsertsBothRows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var got []struct {
 		acct   string
 		tokens int64
@@ -239,12 +239,12 @@ func TestUsageEventsCompositePKUpgradeFromLegacyPK(t *testing.T) {
 	for rows.Next() {
 		var n string
 		if err := rows.Scan(&n); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			t.Fatalf("scan index name: %v", err)
 		}
 		idxNames = append(idxNames, n)
 	}
-	rows.Close()
+	_ = rows.Close()
 	wantIdx := map[string]bool{"idx_usage_account_date": true, "idx_usage_created_at": true}
 	for _, n := range idxNames {
 		delete(wantIdx, n)
@@ -418,7 +418,7 @@ func TestUsageEventsCompositePKAndSchemaV2CommitAtomically(t *testing.T) {
 
 	// Composite PK installed.
 	pkCols := readPKColumns(t, store, "usage_events")
-	if !(len(pkCols) == 2 && pkCols[0] == "account_id" && pkCols[1] == "request_id") {
+	if len(pkCols) != 2 || pkCols[0] != "account_id" || pkCols[1] != "request_id" {
 		t.Fatalf("post-migration PK = %v, want composite [account_id request_id]", pkCols)
 	}
 	// And v2 stamp present.
@@ -591,7 +591,7 @@ func readUsageEventsMaster(t *testing.T, store *Store) map[string]string {
 	if err != nil {
 		t.Fatalf("query sqlite_master: %v", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	out := map[string]string{}
 	for rows.Next() {
 		var name, sqlText string
@@ -609,7 +609,7 @@ func readPKColumns(t *testing.T, store *Store, table string) []string {
 	if err != nil {
 		t.Fatalf("PRAGMA table_info: %v", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	type colInfo struct {
 		name string
 		pk   int

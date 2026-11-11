@@ -51,7 +51,7 @@ func TestExplorerDetailHelpers_UnscopedUsesIndex(t *testing.T) {
 			if err != nil {
 				t.Fatalf("EXPLAIN: %v", err)
 			}
-			defer rows.Close()
+			defer func() { _ = rows.Close() }()
 			var plan strings.Builder
 			for rows.Next() {
 				var id, parent, notused int

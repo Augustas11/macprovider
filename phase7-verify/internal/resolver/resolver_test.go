@@ -29,7 +29,9 @@ const providerID = "m1-anon"
 var fixedNow = time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)
 
 func TestMain(m *testing.M) {
-	os.Setenv(allowPrivateCoordinatorEnv, "1")
+	if err := os.Setenv(allowPrivateCoordinatorEnv, "1"); err != nil {
+		panic(err)
+	}
 	os.Exit(m.Run())
 }
 

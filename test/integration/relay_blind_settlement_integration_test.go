@@ -152,7 +152,7 @@ func (st *relayBlindSettlementStack) relayBlindSnapshotCount() int {
 	if err != nil {
 		return -1
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	var count int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM settlement_route_snapshot_journal WHERE paid_entrypoint = ? AND prompt_hash_basis = 'relay_blind_envelope_digest_v1'`,
 		relayBlindSettlementEntrypoint).Scan(&count); err != nil {
@@ -243,7 +243,7 @@ func (st *relayBlindSettlementStack) latestGatewayReservation(t *testing.T, n in
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	var count int
 	var requestID string
 	if err := db.QueryRow(`SELECT COUNT(*) FROM quota_reservations WHERE account_id = ?`, st.s.accountID).Scan(&count); err != nil {
@@ -296,7 +296,7 @@ func verifiedWorkCount(t *testing.T, s *scenario) int {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	var count int
 	// The predicate every verified-work consumer uses (rewards unlock,
 	// referral serving, provider receipt summaries).
@@ -430,12 +430,12 @@ func assertSQLiteTableLacks(t *testing.T, path, table string, needles []string) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	rows, err := db.Query(`SELECT * FROM ` + table)
 	if err != nil {
 		t.Fatalf("scan %s: %v", table, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	columns, _ := rows.Columns()
 	scanned := 0
 	for rows.Next() {
