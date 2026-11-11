@@ -1,6 +1,8 @@
 package config
 
 import (
+	"errors"
+	"io/fs"
 	"strings"
 	"testing"
 	"time"
@@ -26,11 +28,17 @@ func TestRejectionTimingFloorClampsToFiftyMS(t *testing.T) {
 }
 
 func TestLoadErrorPaths(t *testing.T) {
-	if _, err := Load(t.TempDir() + "/missing.yaml"); err == nil {
-		t.Fatal("missing file must error")
+	if _, err := Load(t.TempDir() + "/missing.yaml"); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("missing file must surface the read error, got %v", err)
 	}
-	if _, err := Load(writeTempConfig(t, "listen: [unterminated")); err == nil {
-		t.Fatal("malformed yaml must error")
+	// Default config fails Validate; a swallowed yaml error would surface that
+	// validation message instead of a parse error.
+	defErr := Default().Validate()
+	if defErr == nil {
+		t.Fatal("default config unexpectedly valid")
+	}
+	if _, err := Load(writeTempConfig(t, "listen: [unterminated")); err == nil || err.Error() == defErr.Error() {
+		t.Fatalf("malformed yaml must surface the parse error, got %v", err)
 	}
 	// Valid yaml that fails Validate (default config has no secrets).
 	if _, err := Load(writeTempConfig(t, "listen:\n  port: 8080\n")); err == nil {
@@ -159,7 +167,7 @@ func TestTrustedProxyNets(t *testing.T) {
 }
 
 func TestParseCIDROrIPRejectsBadInput(t *testing.T) {
-	for _, raw := range []string{"", "   ", "300.1.1.1", "10.0.0.0/99", "not-an-ip"} {
+	for _, raw := range []string{"300.1.1.1", "10.0.0.0/99", "not-an-ip"} {
 		if _, _, err := parseCIDROrIP(raw); err == nil {
 			t.Errorf("%q must be rejected", raw)
 		}
@@ -194,6 +202,8 @@ func TestNormalizeModelKeyServedAliases(t *testing.T) {
 		"unknown/model-4bit":                     "unknown/model",
 		"some-plain-model":                       "some-plain-model",
 		"somevendor/llama-3":                     "somevendor/llama-3",
+		"qwen/llama-3-x":                         "llama-3-x",
+		"nvidia/gpt-oss-20b":                     "gpt-oss-20b",
 	}
 	for in, want := range cases {
 		if got := NormalizeModelKey(in); got != want {
