@@ -17,6 +17,11 @@ let package = Package(
         )
     ],
     dependencies: [
+        // Tag 3.32.3-macprovider.42 (#2254, #2255) is .40 plus two GPT-OSS
+        // commits: `3490b04` clips the GPT-OSS SwiGLU with plain Float bounds,
+        // so bf16 activations stay bf16 instead of promoting to f32, and
+        // `e0cac07` adds a lab-only gpt-oss per-layer dump, off unless
+        // MLX_LM_GPTOSS_LAYER_DUMP is set. GPTOSS.swift and its tests only.
         // Tag 3.32.3-macprovider.40 (#2231) is .38 plus three commits: the
         // LiquidAI LFM3 text model (`lfm3`, upstream ml-explore/mlx-swift-lm
         // #750) and its registry entry, the #756 hardening (config and
@@ -88,7 +93,7 @@ let package = Package(
         // compatible per-column attention while retaining row-owned caches.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "a7374a810bc5d5b5079ce998e61609ecf7e44acd"
+            revision: "e0cac0711d20996a40aa1c1ca5a9705e9e8635c7"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",

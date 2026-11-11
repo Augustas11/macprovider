@@ -34,7 +34,7 @@ needs a SPEC revision.
 
 | Fork | Upstream | Tag scheme | Current tag | Revision | Upstream base |
 | --- | --- | --- | --- | --- | --- |
-| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.40` | `a7374a810bc5d5b5079ce998e61609ecf7e44acd` | `3.32.3` (`3b339ad6…`) |
+| `Augustas11/mlx-swift-lm` | `ml-explore/mlx-swift-lm` | `<upstream>-macprovider.<n>` | `3.32.3-macprovider.42` | `e0cac0711d20996a40aa1c1ca5a9705e9e8635c7` | `3.32.3` (`3b339ad6…`) |
 | `Augustas11/mlx-swift` | `ml-explore/mlx-swift` | `<upstream>-macprovider.<n>` | `0.32.3-macprovider.13` | `565269220ccc2cc0d2ce149affb98a2f9d9b32ac` | `0.32.3` (`19601207…`) |
 | `Augustas11/mlx` (MLX core) | `ml-explore/mlx` | `v<upstream>-macprovider.<n>` | `v0.32.4-macprovider.7` | `565070fe4b0f95927f7fdd5fcfb537157605037a` | `v0.32.4` (`36969c09…`) |
 | `Augustas11/mlx-c` | `ml-explore/mlx-c` | `v<upstream>-macprovider.<n>` | `v0.6.0-macprovider.2` | `2b1ff2b5b5129a6115771da32e1bac3b6b01ab01` | pinned base `ebc88f10…` |
@@ -47,8 +47,11 @@ core revision. Swift 6.3 is the effective minimum for the graph.
 
 ### Current tuple delta
 
-As of 2026-11-11 (#2231) the LM row is `3.32.3-macprovider.40` (`a7374a8`),
-which is `.38` plus the LiquidAI LFM3 text model (`lfm3`, upstream #750), its
+As of 2026-11-11 (#2254, #2255) the LM row is `3.32.3-macprovider.42` (`e0cac07`),
+which is `.40` plus two GPT-OSS commits: the SwiGLU clips with plain Float bounds
+so the bf16 stream stays bf16, and a lab-only per-layer dump, off unless
+`MLX_LM_GPTOSS_LAYER_DUMP` is set (GPTOSS.swift and its tests only). `.40`
+(`a7374a8`, #2231) is `.38` plus the LiquidAI LFM3 text model (`lfm3`, upstream #750), its
 registry entry and the #756 validation hardening. The same change moves
 `swift-transformers` `1.3.5 → 1.4.0` (first release carrying
 huggingface/swift-transformers#397 and #398, which LFM3's tokenizer needs) under
