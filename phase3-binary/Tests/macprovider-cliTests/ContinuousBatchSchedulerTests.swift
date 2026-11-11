@@ -6267,6 +6267,24 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertFalse(whilePrefilling.contains { $0.steps > 3 })
     }
 
+    /// #2280: at the production 512-token chunk a running row takes 8 decode
+    /// steps between a prompt's chunks. 2 steps left running rows at about
+    /// 308 ms per token on Qwen3-8B while a long prompt prefilled.
+    func testProductionPrefillDecodeWindowGivesRunningRowsEightStepsPerChunk() async throws {
+        let steps = ContinuousBatchSchedulerConfiguration.defaultDecodeStepsWhilePrefilling
+        XCTAssertEqual(steps, 8)
+        XCTAssertEqual(
+            ModelRuntime.decodeStepsWhilePrefilling(
+                promptChunkTokens: ContinuousBatchSchedulerConfiguration.defaultPromptChunkTokens
+            ),
+            8
+        )
+        let windows = try await decodeWindowsWhileAPromptPrefills(maxDecodeStepsWhilePrefilling: steps)
+        let whilePrefilling = windows.dropFirst().prefix { !$0.ids.contains("long") }
+        XCTAssertEqual(whilePrefilling.first?.steps, 8)
+        XCTAssertFalse(whilePrefilling.contains { $0.steps > 8 })
+    }
+
     /// The strict alternation the window replaces: one decode token per chunk.
     func testOneStepWhilePrefillingKeepsStrictAlternation() async throws {
         let windows = try await decodeWindowsWhileAPromptPrefills(maxDecodeStepsWhilePrefilling: 1)
@@ -6285,9 +6303,9 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertEqual(glm, 2_048)
         // (prefill_step_size, family ceiling, chunk, decode steps while prefilling)
         let cases: [(Int?, Int, Int, Int)] = [
-            (nil, 512, 512, 2), (512, 512, 512, 2), (4_096, 512, 512, 2), (256, 512, 256, 2),
+            (nil, 512, 512, 8), (512, 512, 512, 8), (4_096, 512, 512, 8), (256, 512, 256, 8),
             (nil, glm, 2_048, 32), (4_096, glm, 2_048, 32), (1_024, glm, 1_024, 16),
-            (512, glm, 512, 2), (256, glm, 256, 2),
+            (512, glm, 512, 8), (256, glm, 256, 8),
         ]
         for (step, ceiling, chunk, steps) in cases {
             let configuration = ModelRuntime.productionContinuousBatchSchedulerConfiguration(

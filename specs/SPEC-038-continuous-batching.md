@@ -36,7 +36,7 @@ continuation never spends the idle cohort allowance, and a turn still ends
 with a decode window. A turn's prefill work stays within the configured
 budget except for the existing single boundary extension.
 
-**Change log v0.3.45 (2026-11-10, FR-CB2 bypass charging follows arrival; prefill decode window 2):**
+**Change log v0.3.45 (2026-11-10, FR-CB2 bypass charging follows arrival):**
 FR-CB2 prefill order: a passed-over row is charged a bypass turn only when
 the head was admitted after it. Before, a later and longer prompt passed by an
 earlier, shorter head aged after 8 turns and then led until its own prompt was
@@ -47,11 +47,9 @@ which finishes one prompt before the next. A stream of later, shorter prompts
 still ages an earlier long prompt after 8 turns, so the starvation bound is
 unchanged; the fewest-tokens-left order, the idle cohort rule and every
 grouping, chunk and kernel-route rule are unchanged. The prefill decode
-window at a chunk of 512 tokens or less is 2 steps (was 8): on the same M5
-run, 2 steps matched PR #771's 16K first token with lower running-row
-latency (1.38 s vs 1.77 s per token). Larger chunks keep 8 steps per 512
-prefilled tokens, so the `glm5_next` 2048-token chunk keeps the full
-lockstep window validated in #2100.
+window stays 8 steps per 512 prefilled tokens: on the M3 Ultra, staggered
+1K/5K/10K/20K Qwen3-8B rows at 2 steps gave running rows 308 ms per token
+while a prompt prefilled, against 100 ms at 8.
 
 **Change log v0.3.44 (2026-11-10, release UX: self-check authorizes CB and cached turns, Related: #2281):**
 FR-CB10: a granted self-check authorizes CB without a signed positive entry;
@@ -607,8 +605,7 @@ production) and is capped by each row's remaining output budget.
 - W is 1 whenever a request waits for a free slot or is being admitted, so it
   joins at the next hop boundary.
 - While a prompt is mid-prefill and nothing else waits to join, W is at most
-  the prefill decode window (2 in production at the 512-token chunk,
-  v0.3.45). The rule was one token per
+  the prefill decode window (8 in production). The rule was one token per
   prefill chunk, which left active rows at about 0.6 tok/s behind a long
   prompt on the M3 Ultra, because a 512-token chunk costs about as much as
   30–50 decode steps.
@@ -1096,9 +1093,9 @@ is the backend family's prompt chunk ceiling: 2048 tokens for a `glm5_next`
 An operator-set `prefill_step_size` MAY lower the limit and MUST NOT raise it
 above the ceiling; when it is unset the limit is the ceiling. The
 per-iteration budget still bounds every chunk. The prefill decode window MUST
-scale with the limit: (v0.3.45) the default (2) at a chunk of 512 tokens or
-less; above 512, 8 steps per 512 prefilled tokens (16 at 1024, 32 at 2048),
-never above the lockstep window. A family's
+scale with the limit, keeping active rows' decode steps per prefilled token:
+the default (8) at a 512-token chunk, proportionally more at a larger chunk,
+never below the default, and never above the lockstep window. A family's
 ceiling rises only with a same-build measurement of its prefill throughput and
 greedy parity at the new chunk.
 
