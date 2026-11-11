@@ -413,6 +413,8 @@ class EffectiveDiffTests(unittest.TestCase):
         # the ricursiveai/ripple-65b-preview row.
         # #2231: the LFM3 1.7B listed cut moves both official LFM3 MLX builds
         # onto the liquidai/lfm3-1.7b row.
+        # #2189: the MiniMax M3.1-Flash listed cut moves its served oQ3e
+        # artifact onto the minimaxai/minimax-m3.1-flash row.
         self.assertEqual(
             cr.load_pricing_move_acks(committed, "committed"),
             {
@@ -430,6 +432,7 @@ class EffectiveDiffTests(unittest.TestCase):
                 ("frogggias/Ripple-65B-Preview-MLX-4bit", "default", "ricursiveai/ripple-65b-preview"),
                 ("LiquidAI/LFM3-1.7B-MLX-4bit", "default", "liquidai/lfm3-1.7b"),
                 ("LiquidAI/LFM3-1.7B-MLX-8bit", "default", "liquidai/lfm3-1.7b"),
+                ("mlx-community/MiniMax-M3.1-Flash-oQ3e-mtp", "default", "minimaxai/minimax-m3.1-flash"),
             },
         )
         for bad in (

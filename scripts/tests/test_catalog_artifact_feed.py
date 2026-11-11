@@ -668,10 +668,12 @@ class RateCardSourceTest(unittest.TestCase):
         # #2231: LFM3 1.7B is listed at its declared class rates.
         # #2154: Ternary-Bonsai-2 2B is listed at class-3b; listing does not
         # admit it for recommendation.
+        # #2189: MiniMax M3.1-Flash is listed at class-120b-moe.
         listed_priced = {
             "ricursiveai/ripple-65b-preview",
             "liquidai/lfm3-1.7b",
             "prism-ml/ternary-bonsai-2-2b-mlx-2bit",
+            "minimaxai/minimax-m3.1-flash",
         }
         for key in listed_priced:
             self.assertEqual(CANDIDATE_OBJ["rows"][key]["runtime_status"], "listed")

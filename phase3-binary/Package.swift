@@ -17,6 +17,13 @@ let package = Package(
         )
     ],
     dependencies: [
+        // Tag 3.32.3-macprovider.44 (#2189, #2284) is .43 (#2230) plus five MiniMax M3
+        // commits in MiniMaxM3.swift and its tests: the float32 router reads
+        // the one-launch norm's float32 copy, a one-launch clamped SwiGLU on
+        // the fused gate/up gather, the shared expert's and dense MLPs'
+        // gate/up fused at load, and a one-launch expert combine, each
+        // bitwise the path it replaces, per row; plus the seeded fused-norm
+        // test. No other model's code and no shared code.
         // Tag 3.32.3-macprovider.43 (#2230) is .42 plus seven commits: the
         // Mamba2 segsum batch-mask fix and its test, upstream #728 (cache-list
         // attention masks sized from the live rows), #703 (quantized-KV prefill
@@ -101,7 +108,7 @@ let package = Package(
         // compatible per-column attention while retaining row-owned caches.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "6f36fb83d9398816455b5868e4f97d62d1c809e2"
+            revision: "ce950bf2840453b7e320fbb0a3b6eee7c7283658"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",
