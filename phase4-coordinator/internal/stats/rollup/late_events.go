@@ -97,35 +97,6 @@ func detectLateEvents(ctx context.Context, db *sql.DB, cfg Config, window string
 	return nil
 }
 
-// recordLateEvent INSERTs a single row into `stats_late_events`.
-// Kept as a helper for any operator-tool or future v0.2
-// incremental path that needs to record a synthetic late event
-// outside the OLTP-scan path above.
-func recordLateEvent(ctx context.Context, db sqlExecer, providerID string, eventUnixTs int64, deltaUSD, deltaTokens sql.NullInt64, sourceRow string) error {
-	const q = `
-        INSERT INTO stats_late_events (
-            event_unix_ts, provider_id,
-            delta_usd, delta_tokens, source_billing_row
-        ) VALUES ($1, $2, $3, $4, $5)
-    `
-	_, err := db.ExecContext(ctx, q,
-		eventUnixTs, providerID,
-		nullDecimal(deltaUSD), deltaTokens,
-		sourceRow,
-	)
-	if err != nil {
-		return fmt.Errorf("late_event insert: %w", err)
-	}
-	return nil
-}
-
-func nullDecimal(v sql.NullInt64) any {
-	if !v.Valid {
-		return nil
-	}
-	return v.Int64
-}
-
 // lateEventBoundary returns the cutoff unix-second below which
 // an OLTP row is considered "late" for the rollup (older than
 // `now - lookback`).

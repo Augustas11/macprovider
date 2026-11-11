@@ -10,7 +10,7 @@ the serial path's own sampler (`GenerateParameters(temperature:topP:).sampler()`
 on its own logits, seeded from its request ID and step (SPEC-038 v0.2.6 FR-CB6,
 AC-6b).
 
-Raw data: [`data/cb-sampling-2026-09-24/`](data/cb-sampling-2026-09-24/).
+Raw data: `data/cb-sampling-2026-09-24/` (raw data lives in the private archive).
 
 ## Setup
 

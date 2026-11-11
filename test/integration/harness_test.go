@@ -277,7 +277,6 @@ type scenario struct {
 	fakeProv               *fakeProvider
 	procWG                 sync.WaitGroup
 	modelHash              string
-	rateCardPath           string
 	rateCardSHA256         string
 	rateCardVersion        string
 	autotuneCatalogVersion string

@@ -234,11 +234,8 @@ explorer:
   gateway_base_url: ""           # set to gateway internal URL to enable buyer panels
   gateway_timeout_ms: 1500
   query_timeout_ms: 3000
-  poll_min_interval_seconds: 5
   activity_max_window_days: 7
   activity_default_window_hours: 24
-  buyers_max_window_days: 31
-  buyers_default_window_hours: 168
   ledger_max_window_days: 31
   ledger_default_window_hours: 168
   sessions_max_window_days: 7
@@ -300,7 +297,6 @@ onboarding:
 
 storage:
   db_path: "/var/lib/macprovider/coordinator.db"
-  snapshot_interval_s: 300
   # SPEC-005 §2.1b: 14 days; must exceed settlement.nightly_reconcile_window_days.
   request_log_retention_days: 14
   # Defaults are true for backward compatibility. Set false to defer DELETE
@@ -535,7 +531,6 @@ tier2:
 providers:
   - provider_id: "mac"
     endpoint_url: ""
-    display_name: "Pearl Mac provider"
 
 # Auto-update recommendation surface (2026-07-03 — added post-#332 to unblock air5 v1.7.0 -> v1.7.9)
 #

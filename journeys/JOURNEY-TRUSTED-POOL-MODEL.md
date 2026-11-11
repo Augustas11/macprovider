@@ -118,8 +118,7 @@ Two coordinator facts the journey reflects rather than requires otherwise:
 - A price change is substantive: the delegated member's binding is revoked
   (`pool_membership_revoked`), and re-delegation alone does not rebind. The
   member re-delegates and resubmits its offer, which binds
-  (`pool_manifest_bound`) under the `price_change` terms
-  (`test/e2e-1816/vm/s5-rotation.sh` `reoffer_5`).
+  (`pool_manifest_bound`) under the `price_change` terms.
 - The captured `pool/current/manifest-accepted.json` is the pool's current
   manifest. Its snapshot carries every accepted policy, so `verify-manifest`
   proves the complete, contiguous, chained history 1..current from it alone

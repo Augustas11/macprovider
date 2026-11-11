@@ -769,13 +769,6 @@ func DecodeIdentityPubkey(s string) ([]byte, error) {
 	return b, nil
 }
 
-// IsAppTrackProviderID returns true if the given provider_id is
-// App-track (starts with "p_"). Cross-track auth policy in
-// provider_auth_policy uses this to tag the row's `kind` column.
-func IsAppTrackProviderID(providerID string) bool {
-	return strings.HasPrefix(providerID, "p_")
-}
-
 func readBoundedBody(w http.ResponseWriter, r *http.Request, max int64) ([]byte, error) {
 	r.Body = http.MaxBytesReader(w, r.Body, max+1)
 	body, err := io.ReadAll(r.Body)

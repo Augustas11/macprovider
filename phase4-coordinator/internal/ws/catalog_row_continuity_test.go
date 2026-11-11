@@ -119,11 +119,10 @@ func TestCatalogRowContinuityFailsClosed(t *testing.T) {
 	}
 
 	type fixture struct {
-		name     string
-		active   *autotune.Catalog
-		loaded   func(t *testing.T) []*autotune.Catalog
-		hello    func(t *testing.T) map[string]any
-		mutateHi func(map[string]any)
+		name   string
+		active *autotune.Catalog
+		loaded func(t *testing.T) []*autotune.Catalog
+		hello  func(t *testing.T) map[string]any
 	}
 	baked := func(t *testing.T, edits ...[2]string) *autotune.Catalog {
 		return rowContinuityCatalog(t, current, "published-2026-09-02-baked-v1", edits...)

@@ -1091,13 +1091,6 @@ func (s *Store) CreatorApproval(ctx context.Context, creatorAccountID string) (C
 	return creatorApprovalFromQueryer(ctx, s.db, strings.TrimSpace(creatorAccountID))
 }
 
-func (s *Store) creatorApprovals(ctx context.Context) (map[string]CreatorApproval, error) {
-	if s == nil || s.db == nil {
-		return nil, ErrStoreClosed
-	}
-	return creatorApprovalsFromQueryer(ctx, s.db)
-}
-
 func verifyManifestAcceptanceStateFromQueryer(ctx context.Context, q eventQueryer) error {
 	events, err := eventsFromQueryer(ctx, q)
 	if err != nil {
@@ -1233,13 +1226,6 @@ func (s *Store) ReviewedDistributionArtifactHistory(ctx context.Context, poolID 
 		return nil, ErrStoreClosed
 	}
 	return reviewedDistributionArtifactHistoryFromQueryer(ctx, s.db, strings.TrimSpace(poolID))
-}
-
-func (s *Store) reviewedDistributionArtifacts(ctx context.Context) (map[string]ReviewedDistributionArtifact, error) {
-	if s == nil || s.db == nil {
-		return nil, ErrStoreClosed
-	}
-	return reviewedDistributionArtifactsFromQueryer(ctx, s.db)
 }
 
 func (s *Store) UpsertPublicAnnouncementApproval(ctx context.Context, approval PublicAnnouncementApproval) (PublicAnnouncementApproval, error) {
@@ -1395,13 +1381,6 @@ func (s *Store) PublicAnnouncementHistory(ctx context.Context, poolID string) ([
 		return nil, ErrStoreClosed
 	}
 	return publicAnnouncementHistoryFromQueryer(ctx, s.db, strings.TrimSpace(poolID))
-}
-
-func (s *Store) publicAnnouncementApprovals(ctx context.Context) (map[string]PublicAnnouncementApproval, error) {
-	if s == nil || s.db == nil {
-		return nil, ErrStoreClosed
-	}
-	return publicAnnouncementApprovalsFromQueryer(ctx, s.db)
 }
 
 func operationIDExists(ctx context.Context, q eventQueryer, operationID string) (bool, error) {
@@ -1848,84 +1827,6 @@ func (s *Store) ensureColumn(ctx context.Context, table, column, decl string) er
 	}
 	_, err = s.db.ExecContext(ctx, `ALTER TABLE `+table+` ADD COLUMN `+column+` `+decl)
 	return err
-}
-
-// appendEventUnchecked appends an idempotent control-plane event after only
-// per-event validation. Production control-plane callers must use
-// AppendValidatedEvent so a mutation cannot poison future boot replay.
-func (s *Store) appendEventUnchecked(ctx context.Context, e DurableEvent) error {
-	if s == nil || s.db == nil {
-		return ErrStoreClosed
-	}
-	if hasSignedControlProof(e) {
-		return ErrSignedControlProofPath
-	}
-	e.TimestampUTC = e.TimestampUTC.UTC()
-	if err := validateEvent(e); err != nil {
-		return err
-	}
-	payload, err := json.Marshal(e)
-	if err != nil {
-		return err
-	}
-	var existing string
-	err = s.db.QueryRowContext(ctx, `SELECT payload_json FROM trustpool_events WHERE operation_id = ?`, e.OperationID).Scan(&existing)
-	switch {
-	case err == nil && existing == string(payload):
-		return nil
-	case err == nil:
-		return ErrConflictingOperationID
-	case !errors.Is(err, sql.ErrNoRows):
-		return err
-	}
-	_, err = s.db.ExecContext(ctx, `
-INSERT INTO trustpool_events (
-	    operation_id, ts_utc, event_type, pool_id, creator_account_id, approval_record_id, provider_id,
-	    buyer_account_id, lifecycle, min_binary_version, manifest_version,
-	    manifest_core_digest, root_issuer_key_id, root_issuer_public_key_fingerprint,
-	    launch_environment, current_approval_version, reason, payload_json
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		e.OperationID,
-		e.TimestampUTC.Format(time.RFC3339Nano),
-		e.EventType,
-		e.PoolID,
-		nullString(e.CreatorAccountID),
-		nullString(e.ApprovalRecordID),
-		nullString(e.ProviderID),
-		nullString(e.BuyerAccountID),
-		nullString(e.Lifecycle),
-		nullString(e.MinBinaryVersion),
-		e.ManifestVersion,
-		nullString(e.ManifestCoreDigest),
-		nullString(e.RootIssuerKeyID),
-		nullString(e.RootIssuerPublicKeyFingerprint),
-		nullString(e.LaunchEnvironment),
-		nullString(e.CurrentApprovalVersion),
-		nullString(e.Reason),
-		string(payload),
-	)
-	if err != nil {
-		if replayErr := s.classifyDuplicate(ctx, e.OperationID, string(payload)); replayErr == nil || errors.Is(replayErr, ErrConflictingOperationID) {
-			return replayErr
-		}
-		return err
-	}
-	return nil
-}
-
-func (s *Store) classifyDuplicate(ctx context.Context, operationID, payload string) error {
-	var existing string
-	err := s.db.QueryRowContext(ctx, `SELECT payload_json FROM trustpool_events WHERE operation_id = ?`, operationID).Scan(&existing)
-	if errors.Is(err, sql.ErrNoRows) {
-		return err
-	}
-	if err != nil {
-		return err
-	}
-	if existing == payload {
-		return nil
-	}
-	return ErrConflictingOperationID
 }
 
 func (s *Store) Events(ctx context.Context) ([]DurableEvent, error) {

@@ -124,49 +124,6 @@ func (s *Store) LeaderboardProvider(ctx context.Context, window, providerID stri
 	return &r, nil
 }
 
-// LeaderboardTotals returns the per-window aggregate counters.
-// `active_accounts` = number of rows in the leaderboard table
-// (one row per authenticated provider with activity in the
-// window). `tokens` / `jobs` are SUM aggregates over the same
-// rows. `earnings_*` totals are computed but the handler
-// projection layer decides whether to expose them (partner
-// projection only per §5.2 + AC-6).
-type LeaderboardTotals struct {
-	ActiveAccounts int64
-	Tokens         int64
-	Jobs           int64
-	EarningsUSD    string
-	EarningsWork   string
-	EarningsReward string
-	GeneratedAt    time.Time
-}
-
-func (s *Store) LeaderboardTotals(ctx context.Context, window string) (*LeaderboardTotals, error) {
-	table, ok := leaderboardTable(window)
-	if !ok {
-		return nil, fmt.Errorf("leaderboard totals: unknown window %q", window)
-	}
-	q := fmt.Sprintf(`
-        SELECT COUNT(*)::BIGINT AS active_accounts,
-               COALESCE(SUM(tokens), 0)::BIGINT AS tokens,
-               COALESCE(SUM(jobs), 0)::BIGINT AS jobs,
-               COALESCE(SUM(earnings_usd), 0)::NUMERIC(18,2) AS earnings_usd,
-               COALESCE(SUM(earnings_work_usd), 0)::NUMERIC(18,2) AS earnings_work_usd,
-               COALESCE(SUM(earnings_rewards_usd), 0)::NUMERIC(18,2) AS earnings_rewards_usd,
-               COALESCE(MAX(generated_at), 'epoch'::TIMESTAMPTZ) AS generated_at
-          FROM %s
-    `, table)
-	var t LeaderboardTotals
-	if err := s.db.QueryRowContext(ctx, q).Scan(
-		&t.ActiveAccounts, &t.Tokens, &t.Jobs,
-		&t.EarningsUSD, &t.EarningsWork, &t.EarningsReward,
-		&t.GeneratedAt,
-	); err != nil {
-		return nil, fmt.Errorf("leaderboard totals select: %w", err)
-	}
-	return &t, nil
-}
-
 // RewardsPopulated reads the §9.1a-derived boolean Step 2
 // pre-computed into `stats_rewards_populated` for the given
 // window. Returns FALSE on no row (the empty-ledger semantic

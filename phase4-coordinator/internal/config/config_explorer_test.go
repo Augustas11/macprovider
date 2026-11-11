@@ -18,11 +18,10 @@ func TestAC01_ExplorerDefaults(t *testing.T) {
 	if ex.GatewayTimeoutMs != 1500 || ex.QueryTimeoutMs != 3000 {
 		t.Fatalf("unexpected explorer timeouts: %+v", ex)
 	}
-	if ex.PollMinIntervalSeconds != 5 || ex.RequestsPerMinuteCap != 60 {
+	if ex.RequestsPerMinuteCap != 60 {
 		t.Fatalf("unexpected explorer polling defaults: %+v", ex)
 	}
 	if ex.ActivityMaxWindowDays != 7 || ex.ActivityDefaultWindowHours != 24 ||
-		ex.BuyersMaxWindowDays != 31 || ex.BuyersDefaultWindowHours != 168 ||
 		ex.LedgerMaxWindowDays != 31 || ex.LedgerDefaultWindowHours != 168 ||
 		ex.SessionsMaxWindowDays != 7 || ex.SessionsDefaultWindowHours != 24 ||
 		ex.SettlementsMaxWindowDays != 180 || ex.SettlementsDefaultWindowHours != 720 {
@@ -62,10 +61,6 @@ func TestAC02_ExplorerValidation(t *testing.T) {
 		"query timeout high": {
 			mutate: func(cfg *Config) { cfg.Explorer.QueryTimeoutMs = 30001 },
 			want:   "explorer.query_timeout_ms",
-		},
-		"poll interval high": {
-			mutate: func(cfg *Config) { cfg.Explorer.PollMinIntervalSeconds = 61 },
-			want:   "explorer.poll_min_interval_seconds",
 		},
 		"rpm cap high": {
 			mutate: func(cfg *Config) { cfg.Explorer.RequestsPerMinuteCap = 601 },

@@ -52,7 +52,7 @@ run (`coordinator_connected=true`).
   `restore_bytes=788041108` `restore_ms=666`
   `staging_peak_bytes=854265104` (~815 MiB) `commit_latency_ms=477`
 
-Driver transcript: [`data/kvs01b-2026-09-21/smoke.out`](data/kvs01b-2026-09-21/smoke.out).
+Driver transcript: `data/kvs01b-2026-09-21/smoke.out` (raw data lives in the private archive).
 
 ## 30-cycle gate (correctness + `--perf-gate`)
 
@@ -98,9 +98,9 @@ restored line on the same log; buyer-visible `cached_prompt_tokens=0` on
 all 30 miss samples.
 
 Redacted cycle records:
-[`data/kvs01b-2026-09-21/gate-samples.redacted.json`](data/kvs01b-2026-09-21/gate-samples.redacted.json).
+`data/kvs01b-2026-09-21/gate-samples.redacted.json` (raw data lives in the private archive).
 Driver transcript (hashes only):
-[`data/kvs01b-2026-09-21/gate.out`](data/kvs01b-2026-09-21/gate.out).
+`data/kvs01b-2026-09-21/gate.out` (raw data lives in the private archive).
 
 ## Enable consequence
 

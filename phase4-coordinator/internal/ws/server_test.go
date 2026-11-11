@@ -4129,7 +4129,6 @@ func newProviderHarnessWithOptionsAndLogger(t *testing.T, validator providerws.T
 		{
 			ProviderID:  "m4-anon",
 			EndpointURL: "https://m4.malibu.tech",
-			DisplayName: "M4 test provider",
 		},
 	}
 	for _, opt := range opts {

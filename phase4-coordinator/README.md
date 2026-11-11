@@ -17,16 +17,6 @@ By default the coordinator binds two ports on `127.0.0.1`:
 - `provider_port: 8444` — WebSocket `/ws/provider` for provider Macs, plus operator endpoints (`/poolz`, `/admin/*`, `/ledger/*`) guarded by the operator key.
 - `buyer_port: 8443` — buyer-facing HTTP (`/v1/chat/completions`, `/v1/models`). In production this is reached only through the gateway over loopback.
 
-## Using `mockprovider`
-
-`tools/mockprovider/main.go` is a standalone in-process mock of a Phase 3 provider binary. It connects to the coordinator over WS, behaves like a Tier-1 provider, and serves a local OpenAI-compatible HTTP endpoint the coordinator proxies to. Used by `scripts/run-local-pool.sh` and the AC-2/3/6 shell tests:
-
-```sh
-go run ./tools/mockprovider -coordinator ws://127.0.0.1:8444/ws/provider -provider-id mock-1
-```
-
-`scripts/run-local-pool.sh` brings up the coordinator plus one or more mockproviders against a temp SQLite DB and is the fastest path to a working local routing setup.
-
 ## Critical Test Sets
 
 ```sh
@@ -72,4 +62,3 @@ Deployment is operator-driven. See `dist/deploy-pearl-vps.sh` for the scripted p
 | `internal/auth/` | Provider-token store, operator-key validation |
 | `internal/tier2/` | Tier-2 trust disclosure (encrypted leg, attestation, behavioral safety) |
 | `internal/explorer/` | Read-only explorer UI handlers |
-| `tools/mockprovider/` | Standalone WS-speaking provider mock for local + CI |

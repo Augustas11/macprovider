@@ -45,7 +45,7 @@ That made each step O(context).
 
 ## After (`3a91f1bc`, binary `e45d3a983cb77ef6`)
 
-Data: [`data/cb-perf-2026-09-25/after-o1/`](data/cb-perf-2026-09-25/after-o1/).
+Data: `data/cb-perf-2026-09-25/after-o1/` (raw data lives in the private archive).
 
 ### Steady-state batched decode
 
@@ -95,7 +95,7 @@ The remaining gap to 100 tok/s is prefill scheduling, not decode.
 
 This measures aggregate decode for N rows, with no scheduler, HTTP or prefill
 involved. Runs used 128 decode tokens. Data:
-[`data/cb-perf-2026-09-25/msb-scale/`](data/cb-perf-2026-09-25/msb-scale/).
+`data/cb-perf-2026-09-25/msb-scale/` (raw data lives in the private archive).
 
 | Rows | Stock MLX contiguous KV, L=32 | Stock MLX, L=1.5k | Our paged engine, L=32 | Our paged engine, L=1.5k |
 | --- | --- | --- | --- | --- |
@@ -137,7 +137,7 @@ The levers that move it:
 
 Production v1.8.192 measures about 20.5 tok/s single-stream decode, while the
 campaign serve measures 36.4. Data:
-[`data/cb-perf-2026-09-25/process-type/`](data/cb-perf-2026-09-25/process-type/).
+`data/cb-perf-2026-09-25/process-type/` (raw data lives in the private archive).
 
 | Process | Priority | Decode tok/s (768 tokens, serial) |
 | --- | --- | --- |
@@ -169,7 +169,8 @@ signed compatibility-set template that auto-update renders.
 Binary `39733dde7e3dc378`: in-place KV with allocator-block growth, the decode
 window while prefilling, and no prefill logits. The live `:8080` provider was
 paused for the whole run. Data:
-[`data/cb-perf-2026-09-25/clean-final/`](data/cb-perf-2026-09-25/clean-final/).
+[`data/cb-perf-2026-09-25/clean-final/matrix.jsonl`](data/cb-perf-2026-09-25/clean-final/matrix.jsonl);
+the rest of the run's raw data lives in the private archive.
 
 Before this run, lab figures taken while live served traffic at `Standard`
 priority were depressed by GPU sharing (for example, 1.5k × 4 measured 40.5

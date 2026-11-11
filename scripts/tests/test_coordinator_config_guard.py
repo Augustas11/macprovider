@@ -155,10 +155,6 @@ S3_OWNED = {
     "scripts/ops/lib/runbook-commands.sh",
     "scripts/lib/autotune-activate.sh",
 }
-RETIRED = {
-    "phase4-coordinator/dist/deploy-malibu-emission-pearl.sh",
-    "phase4-coordinator/dist/deploy-opoi-v0-pearl.sh",
-}
 NOT_WRITERS = {
     "scripts/lib/coordinator-config-guard.sh": "the guard itself",
     "scripts/lib/coordinator_config_guard.py": "the guard itself",
@@ -217,7 +213,7 @@ def read_manifest() -> list[tuple[str, str]]:
 
 class WriterInventoryTests(unittest.TestCase):
     def test_every_live_config_writer_is_classified(self):
-        classified = set(GUARDED) | S3_OWNED | RETIRED | set(NOT_WRITERS)
+        classified = set(GUARDED) | S3_OWNED | set(NOT_WRITERS)
         unclassified = [path for path in live_writer_candidates() if path not in classified]
         self.assertEqual(
             unclassified,
@@ -261,18 +257,6 @@ class WriterInventoryTests(unittest.TestCase):
         self.assertNotIn("os.replace", text)
         self.assertNotRegex(text, r"(cp|mv|install)\s[^\n]*\$q_remote_config")
 
-    def test_retired_deploys_refuse_live_execution(self):
-        for relative in sorted(RETIRED):
-            with self.subTest(path=relative):
-                result = subprocess.run(
-                    ["bash", str(REPO / relative)],
-                    env={**os.environ, "DRY_RUN": "0"},
-                    text=True,
-                    capture_output=True,
-                )
-                self.assertEqual(result.returncode, 5, result.stderr)
-                self.assertIn("this coordinator-only Pearl deploy authority is retired", result.stderr)
-
     def test_retired_observe_helper_refuses_apply(self):
         result = subprocess.run(
             ["bash", str(REPO / "scripts/activate-tier2-observe.sh"), "--apply"],
@@ -283,7 +267,7 @@ class WriterInventoryTests(unittest.TestCase):
         self.assertIn("--apply is retired", result.stderr)
 
     def test_classified_paths_exist(self):
-        for relative in [*GUARDED, *S3_OWNED, *RETIRED, *NOT_WRITERS]:
+        for relative in [*GUARDED, *S3_OWNED, *NOT_WRITERS]:
             with self.subTest(path=relative):
                 self.assertTrue((REPO / relative).is_file())
 

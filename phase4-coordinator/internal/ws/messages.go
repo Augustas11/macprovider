@@ -7,7 +7,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io"
 	"math"
 	"strconv"
 	"strings"
@@ -1458,29 +1457,6 @@ func parsePrivacyKeyRecords(raw map[string]json.RawMessage, out *[]relayblind.Pr
 	return "", nil
 }
 
-func ParsePrivacyPostureResponse(payload []byte) (PrivacyPostureResponse, error) {
-	if len(payload) == 0 || len(payload) > relayblind.MaxPrivacyPostureResponseBytes {
-		return PrivacyPostureResponse{}, fmt.Errorf("privacy posture response exceeds %d bytes", relayblind.MaxPrivacyPostureResponseBytes)
-	}
-	dec := json.NewDecoder(bytes.NewReader(payload))
-	dec.DisallowUnknownFields()
-	var response PrivacyPostureResponse
-	if err := dec.Decode(&response); err != nil {
-		return PrivacyPostureResponse{}, err
-	}
-	if err := dec.Decode(&struct{}{}); err != io.EOF {
-		return PrivacyPostureResponse{}, fmt.Errorf("privacy posture response has trailing data")
-	}
-	if response.Type != "privacy_posture_response" || response.Version != 1 {
-		return PrivacyPostureResponse{}, fmt.Errorf("privacy posture response type")
-	}
-	trimmed := bytes.TrimSpace(response.Statement)
-	if len(trimmed) == 0 || trimmed[0] != '{' || response.SESignature == "" || response.IdentitySignature == "" {
-		return PrivacyPostureResponse{}, fmt.Errorf("privacy posture response fields")
-	}
-	return response, nil
-}
-
 // parseOptionalCompatibilitySetID extracts the field without changing legacy
 // parsing behavior when the coordinator policy is unconfigured. Configured
 // admission performs the required syntax and length validation in Server,
@@ -1559,15 +1535,6 @@ func containsControlChar(s string) bool {
 		}
 	}
 	return false
-}
-
-func isLowerHex(s string) bool {
-	for _, r := range s {
-		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
-			return false
-		}
-	}
-	return s != ""
 }
 
 func requireInt(raw map[string]json.RawMessage, field string, out *int) *fieldError {
@@ -2367,17 +2334,6 @@ var nativeMTPCanaryResultFields = map[string]struct{}{
 	"nonce": {}, "native_mtp_runtime_tuple_sha256": {}, "expected_token_id_sha256": {}, "actual_token_id_sha256": {},
 	"terminal_reason": {}, "counters": {}, "committed_state_sha256": {}, "actual_decode_path": {},
 	"fallback_used": {}, "runtime_tuple": {}, "diagnostic": {},
-}
-
-var nativeMTPRuntimeTupleFields = map[string]struct{}{
-	"model_id": {}, "model_hash": {}, "model_hash_algorithm": {}, "tokenizer_digest": {},
-	"provider_revision": {}, "runtime_revision": {},
-	"artifact_digest": {}, "manifest_digest": {}, "sidecar_digest": {}, "provider_binary_sha256": {},
-	"runtime_cdhash": {}, "cache_namespace": {}, "state_digest": {}, "proposal_depth": {},
-}
-
-var nativeMTPCanaryCountersFields = map[string]struct{}{
-	"accepted": {}, "rejected": {}, "bonus": {}, "committed": {},
 }
 
 var nativeMTPTupleOfferFields = map[string]struct{}{

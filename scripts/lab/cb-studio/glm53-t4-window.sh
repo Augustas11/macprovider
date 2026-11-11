@@ -24,8 +24,7 @@
 #        The serve runs `--no-join --no-idle-prewarm` WITHOUT
 #        `--autotune-candidate`: an autotune child skips the served-slots plan
 #        (MacProviderCLI `if !autotuneCandidate, ...` before AutoServedSlots),
-#        so the FR-CB10 self-check driver would never start (also recorded in
-#        1971-selfcheck/studio-selfcheck-validation.sh).
+#        so the FR-CB10 self-check driver would never start.
 #     3. msb-throughput, paged engine, rows 1, 2 and 4 at block 256.
 #     4. (`run-leftovers`, not in the default legs) SPEC-039 FR-PKV12
 #        replay and drain record for this identity: msb-throughput
@@ -88,7 +87,7 @@ prepare() {
   (cd $PKG && nice -n 10 swift build --build-tests)
   # Serve refuses to start when the installed compatibility set names another
   # provider_cli version, so the lab serve binary carries the live version
-  # (LIVE_INSTALL_DIR, as in 1971-selfcheck/build-lab-binaries.sh). Lab copy
+  # (LIVE_INSTALL_DIR). Lab copy
   # only; the source is restored after the build.
   local src=$PKG/Sources/macprovider-cli/CoordinatorClient.swift
   if [[ -n ${LIVE_INSTALL_DIR:-} ]]; then

@@ -1604,10 +1604,6 @@ func (r *Registry) providerAllowedByCreatorCeilingLocked(creatorID, providerID s
 	return allowedByCreatorCeilingLocked(r.providerCeilings, creatorID, providerID)
 }
 
-func (r *Registry) providerDelegatedByCreatorCeilingLocked(creatorID, providerID string) bool {
-	return allowedByCreatorCeilingLocked(r.delegatedCeilings, creatorID, providerID)
-}
-
 func (r *Registry) buyerAllowedByCreatorCeilingLocked(creatorID, buyerAccountID string) bool {
 	return allowedByCreatorCeilingLocked(r.buyerCeilings, creatorID, buyerAccountID)
 }
