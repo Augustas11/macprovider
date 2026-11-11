@@ -162,8 +162,15 @@ evidence and default-route unit checks do not substitute for those cells.
 Every rebase replays these stacks and drops any patch upstream now carries
 (record which, and why it is equivalent).
 
-mlx-swift-lm (`3.32.3..c8be0f61`, tag `3.32.3-macprovider.10.5`, branch
-`campaign/2111-dsv4-cb`): tag `3.32.3-macprovider.10.4` (`676a62a4`) plus
+mlx-swift-lm (`3.32.3..abb56e45`, tag `3.32.3-macprovider.10.16.7`, branch
+`codex/2151-fidelity-resume`): tag `3.32.3-macprovider.10.5` (`c8be0f61`)
+plus main’s GLM packed projections, Prism/Bonsai loader and LFM expert-order
+correction from `3.32.3-macprovider.10.15.1`, together with DeepSeek-V4 fidelity to DeepSeek's reference and embedded DSpark with
+exact packed-prefix verification. The current successor also corrects
+reference norm, rotary, hyper-connection, router and indexer arithmetic; it
+retains shared MXFP8 projection tiles across two to eight DeepSeek vectors.
+Throughput qualification remains separate. 10.5 is tag
+`3.32.3-macprovider.10.4` (`676a62a4`) plus
 shared attention/compressor/indexer work, per-row rotary offsets, keys-only
 windows and geometric pool storage. 10.4 is `3.32.3-macprovider.10.3` (`baec1724`,
 `dsv4/2111-port`) plus row-owned DeepSeek-V4 batched decode and incomplete
@@ -194,6 +201,8 @@ pending real-weight native four-row throughput gate and campaign freeze audit.
 | DeepSeek-V4 CB (#2111) | `362659f`, `676a62a` | `DeepseekV4Model.decodeBatch(_:rowCaches:)`: 1...8 ragged decode rows share projections/MoE and keep independent window/pool/indexer caches; per-row 2048+final-token prefill unchanged. Correct incomplete multi-token pool continuation; CPU tiny exactness, join/leave/reordering and boundary regressions. No native-MTP adapter or signed policy activation. |
 
 | DeepSeek-V4 CB performance (#2111) | `c8be0f6` | Shared compressor/indexer projections and rotary offsets; one batched attention body for homogeneous rows, two for mixed dense/sparse rows to preserve exact arithmetic; keys-only windows and geometric row-owned pool storage. CPU exact 1/2/4/8-row fixtures pass; GPU parity and throughput remain pending. |
+| DeepSeek-V4 reference fidelity (#2111) | `a4fd218`, `a985f94`, `7285658`, `28db1cf`, `9b5108b`, `012a2c6`, `72f8345`, `19b2c2b`, `790b4fd`, `c14b360`, `c9baca4` | `deepseek_v4` follows DeepSeek's `inference/model.py`/`kernel.py`: ratio-4 overlap state carried in `DeepseekV4PoolCache` (state, metaState, `copy()`), exact indexer top-k by default (HISA only by explicit config; prefill scores tiled under a 512 MiB workspace), float32 router (gate weight widened in sanitize), attention over each query's reference-ordered key list (window in temporal order, then the ratio-128 entries or the indexer's top-k by descending score) in the kernel's 64-key blocks with a running max and bf16 weights before the value product (query tiles for long chunks; explicit-config HISA does not batch: `batchesExactly`), compressor, expert SwiGLU/combine and head logits (`deepseekV4LinearF32`, a bf16-weight float32 GEMV kernel for up to 8 GPU rows). Tiny-fixture oracle regenerated from a port of the reference (`make_oracle.py`), within 7.6e-4 log-probability on the CPU; fixture `tid2eid` made duplicate-free. Full-model parity and throughput pending a Studio window. |
+| DeepSeek-V4 CB/DSpark (#2111) | `cddd1e2`, `7c361cb`, `48fdc4b`, `098c339`, `0c0e58f` | Retains the three embedded draft stages, batches target verification projections/MoE across at most eight ragged positions, ranks cumulative confidence deterministically, and commits exact cache prefixes including ratio-4 overlap. Tests cover every rollback prefix and independent/packed rows. Swift test execution, token parity, throughput, acceptance, TTFT and peak memory remain pending hardware. |
 
 `784f021` (Swift 6.1 tools version) is reverted by `e81dd7c`; drop both on the
 next rebase.
