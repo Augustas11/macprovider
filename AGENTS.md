@@ -314,9 +314,8 @@ no three-lane audit; CI and review cover them.
 
 Implementation slices in scope are not done until the full fix diff is
 audited. Run three lanes over the complete diff as it will land: code review,
-security review, and architecture review. In Codex sessions, use native Codex
-subagents/auditor lanes. Use `omc ask codex` only as a legacy fallback outside
-Codex contexts that lack native subagents.
+security review, and architecture review. The three lanes run as the coding
+agent's own subagents.
 
 Audits that run on the lab provider through Malibu get every row of that
 provider. Before the first lane starts, pause the lab provider's buyer-runner

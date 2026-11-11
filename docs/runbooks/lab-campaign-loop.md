@@ -38,7 +38,7 @@ for that e2e, proven on a locally built CLI before anyone waits on GitHub.
    branch.
 5. If it fails: change code, rebuild locally, re-run. Push commits to the
    draft PR. Do not merge. Do not cut a signed CLI. Do not Pearl-apply.
-6. Three-lane `omc ask codex` audits run **once**, on the freeze diff, after
+6. Three-lane audits (code, security, architecture; the agent's own subagents) run **once**, on the freeze diff, after
    the lab e2e PASSes. Not per commit. Not on an incomplete slice.
 7. Mark the PR ready only when the campaign checklist in the PR body is green.
    CI green is not the merge gate.
