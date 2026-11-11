@@ -4632,6 +4632,45 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertFalse(after.diagnostics.contains(.queueWaitTimedOut))
     }
 
+    // SPEC-038 AC-25: a long prefill keeps the scheduler busy, so the
+    // expiry of the request behind it often runs only after that prefill,
+    // on the pass that admits it, while the row ahead decodes. The request
+    // still has a free slot of its own and waited only on that prefill, so
+    // its clock restarts there too and it runs instead of timing out.
+    func testAC25OverdueFreeSlotRequestBehindPrefillIsAdmittedWhileTheRowAheadDecodes() async throws {
+        let gate = AsyncGate()
+        let backend = ScriptedBackend(
+            scripts: ["long": [1, 1, 1, 1], "next": [2]],
+            prefillGate: gate
+        )
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 2,
+            queueLimit: 4,
+            queueWaitTimeoutNanoseconds: 150_000_000,
+            backend: backend
+        )
+        let long = Task {
+            try await scheduler.submit(.init(id: "long", conversationKey: "", promptTokens: [1, 11], maxOutputTokens: 4))
+        }
+        try await eventually { await backend.prefillCallCount() == 1 }
+        let next = Task {
+            try await scheduler.submit(.init(id: "next", conversationKey: "", promptTokens: [2, 22], maxOutputTokens: 1))
+        }
+        try await eventually { await scheduler.metrics().waitingCount == 1 }
+
+        // The timer never runs during the prefill, so `next` reaches the
+        // admission pass overdue, with `long` decoding.
+        await scheduler.cancelQueueWaitTimerForTest(requestID: "next")
+        try await Task.sleep(nanoseconds: 300_000_000)
+        await gate.open()
+        let longResult = try await long.value
+        let nextResult = try await next.value
+        XCTAssertEqual(longResult.outputTokens, [1, 1, 1, 1])
+        XCTAssertEqual(nextResult.outputTokens, [2])
+        let after = await scheduler.metrics()
+        XCTAssertFalse(after.diagnostics.contains(.queueWaitTimedOut))
+    }
+
     // SPEC-049-R010: a privacy-class request through continuous batching
     // writes nothing under the replay-claim store, while its replay claim
     // still guards re-execution in this process. Ordinary requests keep the

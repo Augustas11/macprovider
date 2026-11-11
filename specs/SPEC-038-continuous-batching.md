@@ -925,8 +925,12 @@ batch, not behind progress: while a queued request has a free slot of its
 own (within the served limit, no self-check rows resident) and waits only
 because an earlier row is still admitting or prefilling, its deadline
 restarts instead of expiring, so a long prompt ahead of it never turns the
-wait into `continuous_batching_queue_wait_timeout`. A request re-queued on
-pool capacity or the FR-CB2 memory limit keeps its absolute deadline.
+wait into `continuous_batching_queue_wait_timeout`. The same holds when the
+expiry is evaluated after that prefill, while the row ahead decodes: a long
+prefill keeps the scheduler busy, so the request often reaches the admission
+pass already past its deadline. A request re-queued on pool capacity or the
+FR-CB2 memory limit keeps its absolute deadline, and so does one queued
+while the scheduler has no admitting, prefilling or decoding row.
 
 Admission MUST be gated by **paged-block-pool availability, not slot count
 alone.** A request MUST NOT be admitted to prefill/decode unless the SPEC-039

@@ -3336,11 +3336,15 @@ actor ContinuousBatchScheduler {
     /// A queued request with a free slot of its own waits only for earlier
     /// rows' prefill to finish, which is progress rather than a saturated
     /// batch: a long prompt ahead of it must not turn its wait into a
-    /// `.queueWaitTimedOut`. Rows deferred on pool or memory capacity,
-    /// self-check cohorts and rows over the served limit keep the bound.
+    /// `.queueWaitTimedOut`. That holds after the prefill too: a long prefill
+    /// keeps the actor busy, so the expiry often runs only once the row ahead
+    /// has moved on to decode, on the pass that admits this request. Rows
+    /// deferred on pool or memory capacity, self-check cohorts and rows over
+    /// the served limit keep the bound, as does a request queued on an idle
+    /// scheduler.
     private func queuedOnlyBehindPrefill(_ requestID: String) -> Bool {
         guard !resourceDeferredRequests.contains(requestID),
-              !activePrompt.isEmpty || !admittingRequests.isEmpty,
+              !activePrompt.isEmpty || !admittingRequests.isEmpty || !activeDecode.isEmpty,
               selfCheckRowsOccupied == 0,
               let index = waiting.firstIndex(where: { $0.id == requestID }),
               !waiting[index].selfCheckProbe else { return false }
