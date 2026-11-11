@@ -40,15 +40,24 @@ func TestCanonicalJSONStringEscapingAndNormalization(t *testing.T) {
 	}
 
 	decomposed := "é" // NFC -> U+00E9
-	nfc, _ := CanonicalJSON(decomposed)
+	nfc, err := CanonicalJSON(decomposed)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if string(nfc) != "\"é\"" {
 		t.Fatalf("NFC not applied: %q", nfc)
 	}
-	raw, _ := CanonicalJSONRawStrings(decomposed)
+	raw, err := CanonicalJSONRawStrings(decomposed)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if string(raw) != "\""+decomposed+"\"" {
 		t.Fatalf("raw mode must not normalize: %q", raw)
 	}
-	rs, _ := CanonicalJSON(RawJSONString(decomposed))
+	rs, err := CanonicalJSON(RawJSONString(decomposed))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if string(rs) != "\""+decomposed+"\"" {
 		t.Fatalf("RawJSONString must not normalize: %q", rs)
 	}
@@ -104,6 +113,8 @@ func TestCanonicalJSONNumber(t *testing.T) {
 		"0":                    "0",
 		"-12":                  "-12",
 		"9223372036854775807":  "9223372036854775807",
+		"9007199254740993":     "9007199254740993",
+		"-9223372036854775808": "-9223372036854775808",
 		"1.0":                  "1",
 		"1e3":                  "1000",
 		"-2.50":                "-2.5",
