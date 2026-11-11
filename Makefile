@@ -145,6 +145,7 @@ test-dist-release:
 	node --test scripts/tests/test_malibu_qwen_system.mjs
 	bash scripts/test-production-exceptions.sh
 	bash phase5-gateway/dist/test/gateway_deploy_inflight.test.sh
+	bash test/e2e-1690/tools/no-credential-argv.test.sh
 	bash scripts/test-coordinator-advertised-version-test.sh
 	bash scripts/test-cli-se-entitlements.sh
 	bash scripts/test-malibu-independent-release.sh
