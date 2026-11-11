@@ -7,7 +7,7 @@
 #
 # Covers: pearl-runtime refusal on an unknown code comparison and on unsafe
 # versions, the clean-origin/main precondition, the re-decision after taking
-# the lock; cli-release structured evidence for canary_smoke and e2e_gate and
+# the lock; cli-release structured evidence for canary_smoke and
 # the gated promotion; the runnable Pearl config steps (one-time privacy setup,
 # the recommendation bump, pricing-journal / validation / restart-failure
 # refusals) and repository admission (SPEC-002-R004: exact revocation, an old
@@ -30,7 +30,9 @@
 # staging cleanup, idempotence, drift, a tag whose writers differ from
 # origin/main, a lightweight tag); the stream-ceiling walls (raise-only edit,
 # --validate-config refusal, gateway-restart rollback of all three files,
-# idempotence, a gateway that did not boot with its file).
+# idempotence, a gateway that did not boot with its file); cli-release's
+# runnable install.sh republish and version staging PR, and the
+# release-train-status Markdown.
 # Usage: bash scripts/ops/test-entrypoints.sh
 set -euo pipefail
 
@@ -86,8 +88,6 @@ git -C "$W" add phase3-binary/Package.resolved
 rm -rf "$W/scripts/ops"
 cp -R "$OPS_SRC" "$W/scripts/ops"
 find "$W/scripts/ops" -name '__pycache__' -prune -exec rm -rf {} +
-printf '\n| Carry-forward CF-OPS-TEST | %s carry-forward of the unchanged decode qualification |\n' "$CAND" \
-  >> "$W/docs/releases/cli-release-train.md"
 # A throwaway release signing key stands in for the pinned one.
 mkdir -p "$tmp/keys"
 openssl ecparam -name prime256v1 -genkey -noout -out "$tmp/keys/release.key" 2>/dev/null
@@ -1264,11 +1264,13 @@ expect_err "self_check.served_slots 0 < 1"
 status_doc $CAND true false false live_verified failed attached '{"decision":"single_row","served_slots":1}'
 run_rc 3 "single-row canary with a failed local proof" scripts/ops/cli-release.sh next --done canary_smoke --probe
 expect_err "local_proof_result 'failed' != 'passed'"
-run_rc 3 "canary run id refused" scripts/ops/cli-release.sh next --done canary_smoke --run-id 555
-expect_err "requires --probe"
+run_rc 1 "canary run id refused" scripts/ops/cli-release.sh next --done canary_smoke --run-id 555
+expect_err "unknown next option: --run-id"
+run_rc 3 "canary free text refused" scripts/ops/cli-release.sh next --done canary_smoke --evidence "looks fine"
+expect_err "use --probe"
 printf '{"step":"canary_smoke","candidate_sha":"%s","kind":"status_probe","evidence":"old status-only marker"}
 ' "$B" > "$SCOPE/canary_smoke.json"
-run_rc 0 "old status-only canary marker does not unlock e2e" scripts/ops/cli-release.sh status
+run_rc 0 "old status-only canary marker does not unlock promotion" scripts/ops/cli-release.sh status
 expect_next canary_smoke:manual
 rm -f "$SCOPE/canary_smoke.json"
 printf 'test-buyer-token\n' > "$tmp/token"
@@ -1343,7 +1345,7 @@ MACPROVIDER_OPS_STATE_DIR="$tmp/state-recheck" run_rc 0 "re-check gate passes on
   scripts/ops/cli-release.sh _check-canary-self-check "$CAND"
 if [ -f "$tmp/state-recheck/cli-release-$CAND/canary_self_check.json" ]; then ok; else bad "canary_self_check not recorded"; fi
 MACPROVIDER_OPS_STATE_DIR="$tmp/state-recheck" run_rc 0 "cli status after the re-check is confirmed" scripts/ops/cli-release.sh status
-expect_next e2e_gate:manual
+expect_next release_tag:mutate
 status_doc $CAND true true false absent_fallback none attached "$(sc kept_prior_grant_no_net_gain 1)"; status_hold false
 MACPROVIDER_OPS_STATE_DIR="$tmp/state-recheck" run_rc 0 "re-check gate passes a kept prior grant at one slot" \
   scripts/ops/cli-release.sh _check-canary-self-check "$CAND"
@@ -1353,7 +1355,7 @@ MACPROVIDER_OPS_STATE_DIR="$tmp/state-recheck" run_rc 3 "re-check gate refuses a
 # A re-recorded canary_smoke (another key) invalidates the earlier confirmation.
 smoke_edit() { python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); exec(sys.argv[2]); json.dump(d,open(p,"w"))' "$tmp/state-recheck/cli-release-$CAND/canary_smoke.json" "$1"; }
 MACPROVIDER_OPS_STATE_DIR="$tmp/state-recheck" run_rc 0 "cli status with the confirmation in place" scripts/ops/cli-release.sh status
-expect_next e2e_gate:manual
+expect_next release_tag:mutate
 smoke_edit 'd["probe"]["self_check_key"]["runtime_build"] = "r3"'
 MACPROVIDER_OPS_STATE_DIR="$tmp/state-recheck" run_rc 0 "cli status after canary_smoke was re-recorded" scripts/ops/cli-release.sh status
 expect_next canary_self_check:read
@@ -1397,7 +1399,7 @@ MACPROVIDER_OPS_STATE_DIR="$tmp/state-serial" run_rc 0 "canary probe accepts a m
 if python3 -c 'import json,sys; p=json.load(open(sys.argv[1]))["probe"]; sys.exit(0 if p["cb_serial_no_policy_entry"] is True and p["continuous_batching_active"] is False and p["model"] == "deepseek/deepseek-v4-flash" else 1)' \
   "$tmp/state-serial/cli-release-$CAND/canary_smoke.json"; then ok; else bad "serial canary not recorded in the canary_smoke marker"; fi
 MACPROVIDER_OPS_STATE_DIR="$tmp/state-serial" run_rc 0 "cli status after a serial canary" scripts/ops/cli-release.sh status
-expect_next e2e_gate:manual
+expect_next release_tag:mutate
 rm -rf "$tmp/state-serial"
 status_doc $CAND true true false absent_fallback none attached '{"decision":"granted","served_slots":8}'
 run_rc 0 "canary probe on the candidate" scripts/ops/cli-release.sh next --done canary_smoke --probe
@@ -1405,17 +1407,6 @@ STUDIO_SSH=unreachable-host run_rc 0 "rollout gate is a no-op for a canary recor
   scripts/ops/cli-release.sh _check-canary-self-check "$CAND"
 rm -f "$tmp/svc/journal.txt"
 run_rc 0 "cli status after canary" scripts/ops/cli-release.sh status
-expect_next e2e_gate:manual
-run_rc 3 "free-text e2e evidence refused" scripts/ops/cli-release.sh next --done e2e_gate --evidence "all green"
-run_rc 3 "failed journey run refused" scripts/ops/cli-release.sh next --done e2e_gate --run-id 222
-run_rc 3 "run that does not name the candidate refused" scripts/ops/cli-release.sh next --done e2e_gate --run-id 333
-expect_err "does not name candidate"
-run_rc 3 "non-journey workflow run refused" scripts/ops/cli-release.sh next --done e2e_gate --run-id 444
-run_rc 3 "unknown carry-forward refused" scripts/ops/cli-release.sh next --done e2e_gate --carry-forward CF-NOPE
-cp -R "$tmp/state" "$tmp/state-cf"
-MACPROVIDER_OPS_STATE_DIR="$tmp/state-cf" run_rc 0 "documented carry-forward accepted" scripts/ops/cli-release.sh next --done e2e_gate --carry-forward CF-OPS-TEST
-run_rc 0 "journey run naming the candidate accepted" scripts/ops/cli-release.sh next --done e2e_gate --run-id "https://github.com/test/repo/actions/runs/555"
-run_rc 0 "cli status after e2e" scripts/ops/cli-release.sh status
 expect_next release_tag:mutate
 if [ "$(state_of release_tag)" = "pending" ]; then ok; else bad "absent tag not pending"; fi
 # The operator's git signing key: a throwaway SSH key trusted for verify-tag.
@@ -1471,7 +1462,7 @@ case "$(next_field command)" in "scripts/ops/cli-release.sh _check-registrations
 MACPROVIDER_RELEASE_TAG_ALLOWED_SIGNERS="$tmp/keys/absent" run_rc 0 "cli status without a signer allowlist" scripts/ops/cli-release.sh status
 if [ "$(state_of release_tag)" != "done" ]; then ok; else bad "tag accepted without an explicit signer allowlist"; fi
 case " $(step_ids) " in
-  *" e2e_gate registrations release_tag promotion "*) ok ;;
+  *" canary_self_check registrations release_tag promotion "*) ok ;;
   *) bad "registrations is not the gate before promotion: $(step_ids)" ;;
 esac
 # The one-time revocation seed is a train step on a repository-mode runtime:
@@ -1616,9 +1607,7 @@ case "$(note_of registrations)" in *"booted with"*) ok ;; *) bad "unapplied on-d
 pearl_config "$OLD" "$META"; pearl_boot
 run_rc 0 "cli status after the recovery" scripts/ops/cli-release.sh status
 expect_next promotion:mutate
-rm -f "$SCOPE/e2e_gate.json"
-run_rc 0 "cli status without e2e" scripts/ops/cli-release.sh status
-expect_next e2e_gate:manual
+case " $(step_ids) " in *" e2e_gate "*) bad "e2e_gate is still a train step" ;; *) ok ;; esac
 
 # After the bump: registrations are re-checked, the lifetime rejection count is
 # reported only, and the dispatch is gated on rejections inside a window.
@@ -1657,12 +1646,31 @@ WWW="http://127.0.0.1:$(cat "$tmp/www.port")/install.sh"
 INSTALL_SH_URL="$WWW" run_rc 0 "drifted install.sh without the republish env" scripts/ops/cli-release.sh status
 if [ "$(state_of install_sh_republish)" = "pending" ]; then ok; else bad "drifted install.sh not pending: $(state_of install_sh_republish)"; fi
 expect_next recommendation_bump:mutate
-INSTALL_SH_URL="$WWW" INSTALL_SH_REMOTE_PATH=/srv/get/install.sh \
+# The republish runs through next --run: backup, install over PEARL_SSH (the
+# ssh stub runs it here, so the served file is the static server's), read-back.
+PEARL_INSTALL_SH_OWNER="$(id -un)" PEARL_INSTALL_SH_GROUP="$(id -gn)"
+export PEARL_INSTALL_SH_OWNER PEARL_INSTALL_SH_GROUP
+INSTALL_SH_URL="$WWW" INSTALL_SH_REMOTE_PATH="$tmp/www/install.sh" \
   run_rc 0 "drifted install.sh with the republish env" scripts/ops/cli-release.sh status
 expect_next install_sh_republish:mutate
-case "$(next_field command)" in *"git show v$CAND:phase3-binary/dist/install.sh"*) ok ;; *) bad "republish command: $(next_field command)" ;; esac
-git -C "$W" show "v$CAND:phase3-binary/dist/install.sh" > "$tmp/www/install.sh"
-INSTALL_SH_URL="$WWW" INSTALL_SH_REMOTE_PATH=/srv/get/install.sh \
+case "$(next_field command)" in "scripts/ops/cli-release.sh _install-sh-republish $CAND") ok ;; *) bad "republish command: $(next_field command)" ;; esac
+INSTALL_SH_REMOTE_PATH="$tmp/www/install.sh" run_rc 3 "_install-sh-republish refuses outside next --run" \
+  scripts/ops/cli-release.sh _install-sh-republish "$CAND"
+INSTALL_SH_URL="$WWW" INSTALL_SH_REMOTE_PATH="$tmp/www/install.sh" PEARL_INSTALL_SH_OWNER=no-such-ops-test-user \
+  MACPROVIDER_OPS_OWNER=t run_rc 3 "a failed install on Pearl is refused" scripts/ops/cli-release.sh next --run
+expect_lock_free
+if grep -q stale "$tmp/www/install.sh"; then ok; else bad "a failed republish changed the served install.sh"; fi
+rm -f "$tmp/www/install.sh.bak-"*
+INSTALL_SH_URL="$WWW" INSTALL_SH_REMOTE_PATH="$tmp/www/install.sh" MACPROVIDER_OPS_OWNER=t \
+  run_rc 0 "install_sh_republish runs through next --run" scripts/ops/cli-release.sh next --run
+expect_lock_free
+expect_err "republished install.sh from v$CAND"
+git -C "$W" show "v$CAND:phase3-binary/dist/install.sh" > "$tmp/install.release.sh"
+if cmp -s "$tmp/www/install.sh" "$tmp/install.release.sh"; then ok; else bad "served install.sh is not v$CAND's"; fi
+bak="$(ls "$tmp/www/install.sh.bak-"* 2>/dev/null | head -n1)"
+if [ -n "$bak" ] && grep -q stale "$bak"; then ok; else bad "the served install.sh was not backed up"; fi
+if [ -z "$(ls -A "$tmp/www" | grep '^\.install\.sh\.new')" ]; then ok; else bad "the republish left its temp file"; fi
+INSTALL_SH_URL="$WWW" INSTALL_SH_REMOTE_PATH="$tmp/www/install.sh" \
   run_rc 0 "republished install.sh" scripts/ops/cli-release.sh status
 if [ "$(state_of install_sh_republish)" = "done" ]; then ok; else bad "republished install.sh not done: $(state_of install_sh_republish)"; fi
 expect_next recommendation_bump:mutate
@@ -1801,19 +1809,125 @@ export MALIBU_DOWNLOAD_VPS_HOST="mirror.invalid"
 run_rc 0 "mirror latest.json lags, key and host set" scripts/ops/cli-release.sh status
 expect_next mirror_latest:mutate
 case "$(next_field command)" in
-  *"scripts/publish-release-mirror.sh --tag v$CAND --promote-latest"*) ok ;; *) bad "mirror command: $(next_field command)" ;;
+  *"scripts/publish-release-mirror.sh --tag v$CAND --latest-only"*) ok ;; *) bad "mirror command: $(next_field command)" ;;
 esac
 case "$(next_field command)" in *stub-gh-token*) bad "the token leaked into the printed command" ;; *) ok ;; esac
 FAKE_MIRROR_FAIL=1 MACPROVIDER_OPS_OWNER=t run_rc 1 "a failing mirror publish is not recorded" scripts/ops/cli-release.sh next --run
 expect_lock_free
 MACPROVIDER_OPS_OWNER=t run_rc 0 "mirror_latest promotes through next --run" scripts/ops/cli-release.sh next --run
 expect_lock_free
-if [ "$(cat "$tmp/svc/mirror-args")" = "--tag v$CAND --promote-latest" ]; then ok; else bad "mirror script args: $(cat "$tmp/svc/mirror-args")"; fi
+if [ "$(cat "$tmp/svc/mirror-args")" = "--tag v$CAND --latest-only" ]; then ok; else bad "mirror script args: $(cat "$tmp/svc/mirror-args")"; fi
 if [ "$(cat "$tmp/svc/mirror-env")" = "token=stub-gh-token key=$tmp/mirror-key" ]; then ok; else bad "mirror script env lacks the token or key"; fi
 run_rc 0 "mirror latest.json matches" scripts/ops/cli-release.sh status
 if [ "$(state_of mirror_latest)" = "done" ]; then ok; else bad "mirror_latest not done once latest.json matches"; fi
 if [ "$(next_field id)" != "mirror_latest" ]; then ok; else bad "mirror_latest still next after it matches"; fi
 unset MALIBU_DOWNLOAD_SSH_KEY MALIBU_DOWNLOAD_VPS_HOST
+
+# ==== release-train-status ====================================================
+# The train doc's "Current published release" section is generated from gh
+# and the public /healthz; no ssh.
+PEARL_SSH= STUDIO_SSH= run_rc 0 "release-train-status renders the section without ssh" scripts/ops/release-train-status.sh
+if grep -qx '## Current published release and fleet target' "$tmp/out" &&
+  grep -qF "[v$CAND](https://github.com/test/repo/releases/tag/v$CAND)" "$tmp/out" &&
+  grep -qF "/ \`$CAND\`" "$tmp/out" && grep -qF 'do not edit by hand' "$tmp/out"; then ok
+else bad "release-train-status Markdown: $(head -n 12 "$tmp/out")"; fi
+
+# ==== version_staging =========================================================
+# Once a train is complete and main carries provider-side changes (outside the
+# catalog) since the published tag, next --run opens the version-only staging
+# PR: the next patch above live stable and every origin v-tag (the runtime
+# tags pushed above share the namespace), the three rows at live stable. It
+# never merges.
+SV="$(git -C "$tmp/origin.git" tag -l 'v*' | sed -nE 's/^v([0-9]+\.[0-9]+\.[0-9]+)$/\1/p' |
+  sort -t. -k1,1n -k2,2n -k3,3n | tail -n1)"
+SV="${SV%.*}.$((${SV##*.} + 1))"
+case "$SV" in 9.*) ok ;; *) bad "expected the runtime tags above live stable, next version is $SV" ;; esac
+mkdir -p "$tmp/www2"
+git -C "$W" show "v$CAND:phase3-binary/dist/install.sh" > "$tmp/www2/install.sh"
+python3 -c 'import functools,http.server,sys
+h = functools.partial(http.server.SimpleHTTPRequestHandler, directory=sys.argv[1])
+h.log_message = lambda *a: None
+s = http.server.HTTPServer(("127.0.0.1", 0), h)
+open(sys.argv[2], "w").write(str(s.server_port))
+s.serve_forever()' "$tmp/www2" "$tmp/www2.port" &
+www2_pid=$!
+for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$tmp/www2.port" ] && break; sleep 0.3; done
+export INSTALL_SH_URL="http://127.0.0.1:$(cat "$tmp/www2.port")/install.sh"
+set_prs() { python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d["prs"]=json.loads(sys.argv[2]); json.dump(d,open(sys.argv[1],"w"))' "$tmp/gh/fixture.json" "$1"; }
+STAGE_BASE="$(git -C "$W" rev-parse HEAD)"
+run_rc 0 "train complete without a provider-side change" scripts/ops/cli-release.sh status
+if [ "$(state_of version_staging)" = done ]; then ok; else bad "version_staging without a change: $(state_of version_staging) $(note_of version_staging)"; fi
+expect_next done:done
+printf 'probe\n' > "$W/phase3-binary/catalog/ops-stage-probe.txt"
+git -C "$W" add phase3-binary/catalog/ops-stage-probe.txt
+git -C "$W" -c user.name=t -c user.email=t@example.invalid commit -q -m "test: catalog-only change"
+git -C "$W" push -q origin HEAD:refs/heads/main
+run_rc 0 "a catalog-only change stages nothing" scripts/ops/cli-release.sh status
+expect_next done:done
+printf 'probe\n' > "$W/phase3-binary/ops-stage-probe.txt"
+git -C "$W" add phase3-binary/ops-stage-probe.txt
+git -C "$W" -c user.name=t -c user.email=t@example.invalid commit -q -m "test: provider-side change"
+git -C "$W" push -q origin HEAD:refs/heads/main
+STAGE_MAIN="$(git -C "$W" rev-parse HEAD)"
+run_rc 0 "train complete with a provider-side change on main" scripts/ops/cli-release.sh status
+if [ "$(state_of version_staging)" = pending ]; then ok; else bad "version_staging not pending: $(state_of version_staging)"; fi
+expect_next version_staging:mutate
+case "$(next_field command)" in "scripts/ops/cli-release.sh _stage-version") ok ;; *) bad "staging command: $(next_field command)" ;; esac
+run_rc 3 "_stage-version refuses outside next --run" scripts/ops/cli-release.sh _stage-version
+set_prs '[{"title": "Stage provider CLI '"$SV"'", "url": "https://github.com/test/repo/pull/7"}]'
+run_rc 0 "an open staging PR blocks a second one" scripts/ops/cli-release.sh status
+expect_next version_staging:blocked
+case "$(next_field reason)" in *"pull/7"*) ok ;; *) bad "staging block reason: $(next_field reason)" ;; esac
+MACPROVIDER_OPS_ENTRYPOINT=1 run_rc 3 "_stage-version refuses while a staging PR is open" scripts/ops/cli-release.sh _stage-version
+expect_err "already open"
+set_prs '[{"title": "Catalog: something else", "url": "https://github.com/test/repo/pull/8"}]'
+rm -f "$tmp/gh/pr-create.jsonl"
+MACPROVIDER_OPS_OWNER=t run_rc 0 "version_staging opens the staging PR through next --run" scripts/ops/cli-release.sh next --run
+expect_lock_free
+expect_err "opened version staging PR for $SV"
+SB="release/stage-cli-$SV"
+if git -C "$tmp/origin.git" show "$SB:phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift" |
+  grep "^ *static let binaryVersion = \"$SV\"" >/dev/null; then ok; else bad "staging branch binaryVersion is not $SV"; fi
+for f in phase4-coordinator/dist/coordinator.yaml phase4-coordinator/coordinator.yaml.example phase4-coordinator/dist/coordinator.yaml.example; do
+  if [ "$(git -C "$tmp/origin.git" show "$SB:$f" | grep -c "^ *latest_binary_version: \"$CAND\"")" = 1 ]; then ok; else bad "$f row is not live stable $CAND"; fi
+done
+if [ -z "$(git -C "$tmp/origin.git" diff --name-only "$STAGE_MAIN" "$SB" | grep -v -e '^phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift$' -e '^phase4-coordinator/dist/coordinator.yaml$' -e '^phase4-coordinator/coordinator.yaml.example$' -e '^phase4-coordinator/dist/coordinator.yaml.example$')" ] &&
+  [ "$(git -C "$tmp/origin.git" rev-parse "$SB~1")" = "$STAGE_MAIN" ]; then ok; else bad "staging branch is not one version-only commit on main"; fi
+if [ "$(git -C "$tmp/origin.git" rev-parse refs/heads/main)" = "$STAGE_MAIN" ]; then ok; else bad "version staging moved main"; fi
+if [ ! -e "$tmp/macprovider-stage-cli-$SV" ]; then ok; else bad "staging worktree left behind"; fi
+if python3 - "$tmp/gh/pr-create.jsonl" "$SV" <<'PYPR'
+import json, re, sys
+sv = sys.argv[2]
+rows = [json.loads(line) for line in open(sys.argv[1])]
+assert len(rows) == 1, rows
+argv, body = rows[0]["argv"], rows[0]["body"]
+def val(flag):
+    return argv[argv.index(flag) + 1]
+assert val("--title") == "Stage provider CLI " + sv, argv
+assert val("--base") == "main" and val("--head") == "release/stage-cli-" + sv, argv
+assert sv in body and "merge" not in " ".join(argv), body
+assert not re.search(r"(?i)\b(close[sd]?|fix(e[sd])?|resolve[sd]?)\b\s*#\d", body), body
+PYPR
+then ok; else bad "gh pr create call"; fi
+MACPROVIDER_OPS_ENTRYPOINT=1 run_rc 3 "_stage-version refuses an existing staging branch" scripts/ops/cli-release.sh _stage-version
+expect_err "already exists on origin"
+python3 - "$W/phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift" "$SV" <<'PYV'
+import re, sys
+p = sys.argv[1]
+t = open(p).read()
+open(p, "w").write(re.sub(r'(static let binaryVersion = ")[^"]+(")', r'\g<1>' + sys.argv[2] + r'\g<2>', t, count=1))
+PYV
+git -C "$W" -c user.name=t -c user.email=t@example.invalid commit -q -am "test: main carries $SV"
+git -C "$W" push -q origin HEAD:refs/heads/main
+MACPROVIDER_OPS_ENTRYPOINT=1 run_rc 3 "_stage-version refuses when main already carries the version" scripts/ops/cli-release.sh _stage-version
+expect_err "already carries binaryVersion $SV"
+git -C "$W" reset -q --hard "$STAGE_BASE"
+git -C "$W" push -q --force origin HEAD:refs/heads/main ":refs/heads/$SB"
+git -C "$W" branch -q -D "$SB"
+git -C "$W" fetch -q --prune origin
+kill "$www2_pid" 2>/dev/null || true
+wait "$www2_pid" 2>/dev/null || true
+unset INSTALL_SH_URL
 
 # ==== cli-release revoked-build rollback (SPEC-020-R007) ======================
 # The candidate is live (target + recommendation). The rollback recommends the

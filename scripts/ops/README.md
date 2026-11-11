@@ -10,7 +10,7 @@ not add steps of its own:
 | `discovery-renew.sh` | signed release-discovery freshness renewal | `.github/workflows/renew-release-discovery-head.yml` |
 | `catalog-activate.sh` | catalog, CB policy and native-MTP activation; buyer-UX conformance records (step `buyer_ux_conformance`: origin/main's record file installed on Pearl, `routing.buyer_ux_conformance_path` added in place under both Pearl locks, one SIGHUP, or one restart on a runtime that reads the file only at start) | `docs/runbooks/native-mtp-enablement.md`, `docs/runbooks/catalog-release-decision-tree.md`, `docs/runbooks/pearl-coordinator-rollout.md` |
 | `pearl-runtime.sh` | coordinator and gateway runtime release; pending stats migrations (`stats_migrate`: checked before the apply and before health, applied under the live-ops lock, no downtime); one-time retention `auto_vacuum` conversion (`PEARL_RUNTIME_TASK=retention-vacuum-conversion`); one on-demand retention run (`PEARL_RUNTIME_TASK=retention-run`, no restart); compute-integrity private corpus install (`PEARL_RUNTIME_TASK=compute-integrity-enable`, one restart); compute-integrity reference scorers in the Pearl overlay (`PEARL_RUNTIME_TASK=compute-integrity-reference-operators`, `COMPUTE_INTEGRITY_REFERENCE_OPERATORS`, one restart); operator-reviewed native-vision qualification install into the Pearl overlay (`PEARL_RUNTIME_TASK=vision-qualification`, `VISION_QUALIFICATION_FILE`, one restart as the boot-state proof; SIGHUP also applies the list); Pearl updater bundle install from the running tag (`PEARL_RUNTIME_TASK=updater-bundle`, both Pearl locks, no restart); one-time raise of the streaming walls Pearl preserves live (`PEARL_RUNTIME_TASK=stream-ceiling`: coordinator `request_timeout_s`/`provider_http.timeout_s` and gateway ceiling 3600 s, non-streaming wall 3660 s; raise-only, one coordinator then one gateway restart) | `docs/runbooks/pearl-coordinator-rollout.md`, `ops/runbooks/settlement-evidence-retention.md`, `docs/runbooks/compute-integrity-private-corpus.md`, `docs/runbooks/native-vision-acceptance.md`, `docs/runbooks/catalog-release-decision-tree.md` (Enabling rollout) |
-| `canary-swap.sh` | CLI candidate onto the canary provider: `check` (MLX kernels in every shipped metallib, verified binary, baked `catalog-release/` equal to the catalog Pearl serves at `COORDINATOR_URL`) then `swap` (pause, drain, back up, payload-only swap, resume; the watchdog stays booted out until the candidate, or the restored version, is buyer_serving; a crash loop, or `/v1/status` silent for 120 s after the model loaded, restores the backup and resumes; silence while the model loads is bounded only by the 1800 s ready timeout) | `docs/releases/cli-release-train.md` (Promotion gate item 5) |
+| `canary-swap.sh` | CLI candidate onto the canary provider: `check` (MLX kernels in every shipped metallib, verified binary, baked `catalog-release/` equal to the catalog Pearl serves at `COORDINATOR_URL`) then `swap` (pause, drain, back up, payload-only swap, resume; the watchdog stays booted out until the candidate, or the restored version, is buyer_serving; a crash loop, or `/v1/status` silent for 120 s counted only from when the candidate reported its model loaded, restores the backup and resumes (exit 5); silence while the model loads is bounded only by the 1800 s ready timeout; exit 6 means that recovery did not complete and the operator must restore the canary) | `docs/releases/cli-release-train.md` (Promotion gate item 5) |
 | `qwen-opencode-e2e.sh` | version-bound, same-provider live-gateway acceptance for the two qualified Qwen models; restores the incumbent from a secret-free crash journal | this README (`Qwen OpenCode acceptance`) |
 | `studio-lab-window.sh` | bounded offline Studio diagnostic, profiler-only or full-matrix qualification job with fixed reviewed arguments and immutable-input completion identity; published-provider authentication, journal-first pause/drain, exact process/watchdog restoration and durable controller-loss recovery while the buyer runner remains active | `docs/runbooks/studio-lab-window.md` |
 | `studio-lab-handoff.py` | recovery-only restoration of the retained `paused_live_unloaded` Studio handoff from an explicit private all-cells-complete, root-armed, hash-pinned manifest; verifies the original signed provider for 120 seconds before it starts only the stopped buyer runner, and retains both handoff and campaign lock | private handoff record |
@@ -29,7 +29,6 @@ scripts/ops/<train>.sh next          # the exact command for the next step
 MACPROVIDER_OPS_OWNER=<session-label> scripts/ops/<train>.sh next --run
 scripts/ops/<train>.sh next --done <step> --evidence '<proof>'   # operator-owned steps only
 scripts/ops/cli-release.sh next --done canary_smoke --probe      # structured evidence only
-scripts/ops/cli-release.sh next --done e2e_gate --run-id <id> | --carry-forward <record-id>
 scripts/ops/live-lock.sh release <session-label>                 # hand back when done
 scripts/ops/live-lock.sh acquire <label> --steal                 # only past the holder's TTL
 ```
@@ -161,19 +160,41 @@ scripts/ops/live-lock.sh acquire <label> --steal                 # only past the
 - `cli-release.sh` step `mirror_latest`, after `verify_live_rollout`, keeps the
   release mirror's advisory `releases/latest.json` on the recommended tag. It is
   done when the served `tag_name` equals `v<ver>`; `next --run` runs
-  `scripts/publish-release-mirror.sh --tag v<ver> --promote-latest`, which itself
-  refuses a tag the coordinator does not advertise and never moves the pointer
-  backwards. It is blocked until `MALIBU_DOWNLOAD_SSH_KEY` is set; `GH_TOKEN`
+  `scripts/publish-release-mirror.sh --tag v<ver> --latest-only`: the promotion
+  workflow already mirrored the assets, so it only checks that Pearl serves
+  GitHub's exact asset set and moves the pointer. It refuses a tag the
+  coordinator does not advertise and never moves the pointer backwards. It is blocked until `MALIBU_DOWNLOAD_SSH_KEY` is set; `GH_TOKEN`
   defaults to the repo's `gh` login. Runbook:
   `docs/runbooks/provider-cli-release-verification.md#release-mirror-byte-identity-downloadmalibutech-1737`.
+- `cli-release.sh` step `install_sh_republish`, right after `promotion`, is
+  runnable: `next --run` (`_install-sh-republish`) backs up the served
+  `install.sh` at `INSTALL_SH_REMOTE_PATH` over `PEARL_SSH`, installs the
+  release's `phase3-binary/dist/install.sh` (owner `PEARL_INSTALL_SH_OWNER` /
+  `PEARL_INSTALL_SH_GROUP`, default root, mode 0755) and refuses unless the
+  installed file's SHA-256 read back equals the release's. Consumer health is
+  not a train step: the scheduled `install-sh-consumer-health-alarm.yml`
+  covers it.
+- `cli-release.sh` step `version_staging` opens the next cut's version-only
+  staging PR once a train is complete and `main` carries provider-side
+  changes (outside `phase3-binary/catalog/`) since the published tag; the
+  same command is offered at `version_alignment` when `binaryVersion` is not
+  above live stable. `next --run` (`_stage-version`) takes the next patch
+  above live stable and every `v*` tag on origin (Pearl runtime tags share
+  the namespace), sets `binaryVersion` to it and the three
+  `latest_binary_version` rows to live stable in a fresh sibling worktree,
+  checks the tree with `release-staged-version-policy.sh`, pushes
+  `release/stage-cli-<ver>` and opens the PR "Stage provider CLI <ver>". It
+  refuses while such a PR is open or when `main` already carries the version,
+  and it never merges.
 - Steps the operator owns are `manual`: an environment approval click or a
   provider restart. `next` prints the
   documented command and `next --run` refuses. When the step is done, record
-  it with `next --done`. `canary_smoke` and `e2e_gate` refuse free text: they
-  take a canary status probe the script reads itself, signed journey run ids
-  that the script checks with `gh`, or a carry-forward record in
-  `docs/releases/cli-release-train.md`. Promotion sets
-  `physical_acceptance_confirmed=true` only after both. A few other steps
+  it with `next --done`. `canary_smoke` refuses free text: it takes a canary
+  status probe the script reads itself. Promotion sets
+  `physical_acceptance_confirmed=true` only after it. There is no separate
+  per-cut e2e step: the canary probe's paid gateway request is the cut's
+  end-to-end check, and a change that needs more is qualified on its lab
+  build in its PR window. A few other steps
   leave no trace that can be read live, such as the signed-byte verification
   and the gateway proof (which must move the target provider's counters and
   expires after 24 h). Their completion is kept under
@@ -387,8 +408,9 @@ variable.
 
 `release-train-status.sh` prints the "Current published release and fleet
 target" and "Active candidate" sections of `docs/releases/cli-release-train.md`
-from GitHub and `/healthz` (plus `MIRROR_LATEST_URL` when set). Paste its
-output over those sections instead of typing status by hand.
+as Markdown from GitHub and the public `/healthz` (plus `MIRROR_LATEST_URL`
+when set). It needs no ssh. Paste its output over those sections instead of
+typing status by hand.
 
 ## Hotfix pushes to main
 

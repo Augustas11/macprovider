@@ -395,6 +395,8 @@ def classify(word, raw, args, names, ctx):
             ctx["message"] = True
     elif word == "cli-release.sh" and args[:1] in (["_pearl-config"], ["_revoke-seed"]):
         raise Blocked("direct Pearl coordinator config edit and restart", route(CLI))
+    elif word == "cli-release.sh" and args[:1] == ["_install-sh-republish"]:
+        raise Blocked("direct get-channel install.sh republish on Pearl", route(CLI))
     elif word == "catalog-activate.sh" and args[:1] == ["_buyer-ux-conformance"]:
         raise Blocked("direct Pearl coordinator config edit and SIGHUP or restart", route(CAT))
     elif word == "pearl-runtime.sh" and args[:1] == ["_stream-ceiling"]:

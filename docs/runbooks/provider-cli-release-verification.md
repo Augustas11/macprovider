@@ -341,7 +341,12 @@ On every release that changes `phase3-binary/dist/install.sh`, after immutable
 publication:
 
 1. Back up the current served file, then copy the released `dist/install.sh`
-   into the webroot (preserve `root:root 0755`):
+   into the webroot (preserve `root:root 0755`). The CLI release train does
+   this itself: `scripts/ops/cli-release.sh` step `install_sh_republish`
+   (`next --run`, live-ops lock) backs up the served file over `PEARL_SSH`,
+   installs `v<ver>:phase3-binary/dist/install.sh` at
+   `INSTALL_SH_REMOTE_PATH` and refuses unless the installed file's SHA-256
+   read back equals the release's. By hand, the equivalent is:
 
    ```bash
    ts=$(date -u +%Y%m%dT%H%M%SZ)
@@ -419,10 +424,13 @@ holds only GitHub assets, including one named `release.json`), and re-downloads 
    advisory pointer. The CLI release train does it: `scripts/ops/cli-release.sh`
    step `mirror_latest` is pending while the served `releases/latest.json` names
    another tag, and `next --run` executes `bash scripts/publish-release-mirror.sh
-   --tag vX.Y.Z --promote-latest` under the live-ops lock (it needs
-   `MALIBU_DOWNLOAD_SSH_KEY` in the ops env and refuses without it). The script
-   refuses unless `coordinator.malibu.tech/healthz` already advertises the tag,
-   and never moves `latest.json` backwards.
+   --tag vX.Y.Z --latest-only` under the live-ops lock (it needs
+   `MALIBU_DOWNLOAD_SSH_KEY` in the ops env and refuses without it). The
+   promotion workflow already mirrored the assets, so `--latest-only` uploads
+   only the pointer: it refuses unless Pearl already serves exactly GitHub's
+   asset set and digests for the tag (then rerun step 1 with
+   `--promote-latest`), unless `coordinator.malibu.tech/healthz` already
+   advertises the tag, and never moves `latest.json` backwards.
 
 A published `/releases/<tag>/` is immutable: a rerun is a no-op when the bytes
 match and an error otherwise. Do not edit it in place; cut a new release.

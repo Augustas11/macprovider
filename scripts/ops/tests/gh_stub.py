@@ -12,6 +12,10 @@ Fixture keys:
   artifacts:   {id: [artifact objects]}    (gh api .../runs/ID/artifacts)
   releases:    {tag: release object}       (gh release view TAG)
   latest_stable: tag                       (gh release list --exclude-pre-releases)
+  prs:         [pr objects]                (gh pr list: the open PRs)
+`gh pr create` appends {"argv", "body"} to $GH_STUB_DIR/pr-create.jsonl and
+prints https://github.com/test/repo/pull/<n>; it fails when the fixture sets
+pr_create_fail.
 Release assets for `gh release download TAG -p NAME... -D DIR` are copied
 from $GH_STUB_DIR/downloads/TAG/NAME (exact names only).
 """
@@ -76,6 +80,18 @@ if pos[:1] == ["api"]:
     if m and m.group(1) in fx.get("run", {}):
         emit(fx["run"][m.group(1)])
     sys.exit(1)
+if pos[:2] == ["pr", "list"]:
+    emit(fx.get("prs", []))
+if pos[:2] == ["pr", "create"]:
+    if fx.get("pr_create_fail"):
+        sys.exit(1)
+    body_file = opt("--body-file")
+    body = sys.stdin.read() if body_file == "-" else open(body_file).read() if body_file else ""
+    log = os.path.join(stub_dir, "pr-create.jsonl")
+    with open(log, "a") as handle:
+        handle.write(json.dumps({"argv": argv, "body": body}) + "\n")
+    print("https://github.com/test/repo/pull/%d" % (9000 + sum(1 for _ in open(log))))
+    sys.exit(0)
 if pos[:2] == ["release", "list"]:
     tag = fx.get("latest_stable")
     emit([{"tagName": tag}] if tag else [])
