@@ -212,10 +212,12 @@ func (p *privacyStack) pinPath(t *testing.T) string {
 		"identity_public_key": p.fixture.descriptor.IdentityPublicKey,
 		"fingerprint":         p.fixture.descriptor.KeyRecord["identity_fingerprint"],
 		"models":              []string{defaultFakeModelID},
-		"endpoint_families":   []string{"chat_completions"},
-		"not_before_unix":     p.fixture.descriptor.KeyRecord["not_before_unix"],
-		"expires_at_unix":     p.fixture.descriptor.KeyRecord["expires_at_unix"],
-		"revoked":             false,
+		// The ephemeral privacy runtime signs all three families; a pin must
+		// cover every family in the key record it verifies.
+		"endpoint_families": []string{"chat_completions", "messages", "responses"},
+		"not_before_unix":   p.fixture.descriptor.KeyRecord["not_before_unix"],
+		"expires_at_unix":   p.fixture.descriptor.KeyRecord["expires_at_unix"],
+		"revoked":           false,
 	}
 	raw, err := json.Marshal(pin)
 	if err != nil {
