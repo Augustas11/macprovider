@@ -51,30 +51,8 @@ After first deploy with `MALIBU_EMISSION_WRITER_PASSWORD` set, rotate the passwo
 
 ## 2. Quick deploy (scripted)
 
-```bash
-git checkout vX.Y.Z
-cd phase4-coordinator
-bash scripts/build-linux.sh
-bash dist/deploy-malibu-emission-pearl.sh
-```
-
-Dry run:
-
-```bash
-DRY_RUN=1 bash dist/deploy-malibu-emission-pearl.sh
-```
-
-With providers connected:
-
-```bash
-FORCE_RESTART=1 bash dist/deploy-malibu-emission-pearl.sh
-```
-
-Migrations already applied:
-
-```bash
-SKIP_MIGRATE=1 bash dist/deploy-malibu-emission-pearl.sh
-```
+Retired. The coordinator-only deploy script was removed; use the signed
+backend-pair updater.
 
 ---
 
@@ -107,7 +85,8 @@ python3 dist/merge-yaml-overlay.py coordinator.opoi-v0-staging.yaml coordinator.
 scp /tmp/coordinator.pearl-overlays.yaml pearl:/etc/macprovider/
 ```
 
-Install systemd drop-in from `dist/systemd/malibu-emission.conf.example`.
+`dist/macprovider-coordinator.service` already passes
+`--config-overlay /etc/macprovider/coordinator.pearl-overlays.yaml`.
 
 ### 3.4 Validate + restart
 

@@ -57,17 +57,6 @@ chmod 755 \
   "$TEST_ROOT/ops/pearl-updater/macprovider-tier2-enforcement-watchdog" \
   "$TEST_ROOT/ops/pearl-updater/macprovider-pearl-update-gate"
 
-for deploy_script in \
-  "$REPO_ROOT/phase4-coordinator/dist/deploy-malibu-emission-pearl.sh" \
-  "$REPO_ROOT/phase4-coordinator/dist/deploy-opoi-v0-pearl.sh"; do
-  if DRY_RUN=0 bash "$deploy_script" >"$TMP_ROOT/retired.out" 2>"$TMP_ROOT/retired.err"; then
-    fail "expected retired coordinator-only Pearl deploy to refuse live execution"
-  fi
-  assert_contains "$TMP_ROOT/retired.err" \
-    "this coordinator-only Pearl deploy authority is retired"
-  assert_contains "$TMP_ROOT/retired.err" "Use the signed backend-pair updater"
-done
-
 cat >"$TEST_ROOT/scripts/verify-tier2-live.sh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail

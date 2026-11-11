@@ -233,8 +233,6 @@ test-dist-deploy:
 	bash phase3-binary/dist/test/install_config_path_escape.test.sh
 	bash phase3-binary/dist/test/install_stapler_validate.test.sh
 	bash -n phase4-coordinator/dist/deploy-pearl-vps.sh
-	bash -n phase4-coordinator/dist/deploy-malibu-emission-pearl.sh
-	bash -n phase4-coordinator/dist/deploy-opoi-v0-pearl.sh
 	bash -n phase5-gateway/dist/deploy-pearl-vps.sh
 	bash phase4-coordinator/dist/test/check_deploy_config_test.sh
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest phase4-coordinator/dist/test/c2c_runtime_proof_test.py
