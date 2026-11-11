@@ -21,6 +21,7 @@
 # Usage:
 #   scripts/publish-release-mirror.sh --tag vX.Y.Z [--promote-latest]
 #   scripts/publish-release-mirror.sh --tag vX.Y.Z [--promote-latest] --stage-only DIR
+#   scripts/publish-release-mirror.sh --tag vX.Y.Z --latest-only
 #
 # --promote-latest  also point /releases/latest.json at <tag>. Allowed only for a
 #                   stable release that the live coordinator already advertises as
@@ -28,6 +29,10 @@
 #                   and never to an older tag than the one currently served.
 # --stage-only DIR  download, verify, and lay the tree out under DIR without
 #                   uploading (dry run and tests).
+# --latest-only     --promote-latest without re-mirroring: the promotion workflow
+#                   already mirrored /releases/<tag>/. Pearl must already serve
+#                   exactly GitHub's asset set and digests and this updater index;
+#                   otherwise it refuses and the full command above is needed.
 #
 # Env:
 #   GITHUB_REPOSITORY          must be Augustas11/macprovider (default)
@@ -49,13 +54,15 @@ INSTALL_SH="$REPO_ROOT/phase3-binary/dist/install.sh"
 
 TAG=""
 PROMOTE_LATEST=0
+LATEST_ONLY=0
 STAGE_ONLY=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --tag) TAG="${2:-}"; shift ;;
     --promote-latest) PROMOTE_LATEST=1 ;;
     --stage-only) STAGE_ONLY="${2:-}"; shift ;;
-    -h|--help) sed -n '2,39p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    --latest-only) PROMOTE_LATEST=1; LATEST_ONLY=1 ;;
+    -h|--help) sed -n '2,44p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) printf '[publish-release-mirror] unknown argument: %s\n' "$1" >&2; exit 2 ;;
   esac
   shift
@@ -66,6 +73,8 @@ log() { printf '[publish-release-mirror] %s\n' "$*"; }
 
 [[ "$TAG" =~ ^v(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})$ ]] ||
   { printf '[publish-release-mirror] --tag must be a canonical vMAJOR.MINOR.PATCH\n' >&2; exit 2; }
+[[ "$LATEST_ONLY" == 0 || -z "$STAGE_ONLY" ]] ||
+  { printf '[publish-release-mirror] --latest-only uploads only the pointer; it cannot be combined with --stage-only\n' >&2; exit 2; }
 repo="${GITHUB_REPOSITORY:-$MIRROR_REPOSITORY}"
 [[ "$repo" == "$MIRROR_REPOSITORY" ]] || die "the release mirror carries only $MIRROR_REPOSITORY releases"
 command -v gh >/dev/null 2>&1 || die "gh is required"
@@ -158,6 +167,10 @@ PY
   fi
 fi
 
+release_dir="$out/releases/$TAG"
+index_path="$out/releases/index/$TAG.json"
+python_asset=""; python_sha=""
+if [[ "$LATEST_ONLY" == 0 ]]; then
 # --- 2. Download every asset and prove byte identity ------------------------
 files_dir="$work/download"
 mkdir -p "$files_dir"
@@ -192,16 +205,16 @@ PY
 log "verified $(wc -l < "$manifest" | tr -d ' ') assets of $TAG against GitHub's sha256 digests"
 
 # --- 3. Lay out the mirror tree ----------------------------------------------
-release_dir="$out/releases/$TAG"
 mkdir -p "$release_dir"
 while IFS=$'\t' read -r name _digest _size; do
   cp -p "$files_dir/$name" "$release_dir/$name"
 done < "$manifest"
+fi
 # The updater index lives outside the tag directory: a GitHub release may carry
 # an asset of any name (v1.8.123 ships the autotune feed as release.json), so
-# /releases/<tag>/ holds only byte-identical GitHub assets.
+# /releases/<tag>/ holds only byte-identical GitHub assets. It is built from the
+# GitHub manifest alone, so --latest-only can require the served copy.
 mkdir -p "$out/releases/index"
-index_path="$out/releases/index/$TAG.json"
 python3 - "$manifest" "$TAG" "$prerelease" "$MIRROR_ORIGIN" "$index_path" <<'PY'
 import json
 import sys
@@ -223,6 +236,7 @@ PY
 
 # The pinned bootstrap interpreter (install.sh BOOTSTRAP_PYTHON_*). Mirrored with
 # every release so a new pin is served before the installer carrying it ships.
+if [[ "$LATEST_ONLY" == 0 ]]; then
 read -r python_asset python_url python_sha < <(python3 - "$INSTALL_SH" <<'PY'
 import re
 import sys
@@ -249,6 +263,7 @@ curl -fsSL --proto '=https' --connect-timeout 15 --retry 3 --retry-connrefused -
   -o "$out/python/$python_asset" -- "$python_url" || die "cannot download $python_url"
 [[ "$(sha256_file "$out/python/$python_asset")" == "$python_sha" ]] ||
   die "$python_asset does not match the install.sh SHA-256 pin"
+fi
 
 # --- 4. latest.json (promotion only; gated above) ----------------------------
 if [[ "$PROMOTE_LATEST" == 1 ]]; then
@@ -289,14 +304,21 @@ remote_stage="$(malibu_download_ssh 'set -eu
 # Every name below matched ^[A-Za-z0-9][A-Za-z0-9._+-]*$ (validated above), so
 # the single-quoted interpolation into the remote shell cannot inject.
 release_specs=""
-for path in "$release_dir"/*; do
-  name="$(basename "$path")"
-  malibu_download_scp "$path" "$VPS_USER@$VPS_HOST:$remote_stage/$name" >/dev/null
-  release_specs+=" '$name:$(sha256_file "$path")'"
-done
+if [[ "$LATEST_ONLY" == 1 ]]; then
+  # Expected bytes are GitHub's digests; nothing but the pointer is uploaded.
+  while IFS=$'\t' read -r name digest _size; do
+    release_specs+=" '$name:$digest'"
+  done < "$manifest"
+else
+  for path in "$release_dir"/*; do
+    name="$(basename "$path")"
+    malibu_download_scp "$path" "$VPS_USER@$VPS_HOST:$remote_stage/$name" >/dev/null
+    release_specs+=" '$name:$(sha256_file "$path")'"
+  done
+  malibu_download_scp "$out/python/$python_asset" "$VPS_USER@$VPS_HOST:$remote_stage/.python-$python_asset" >/dev/null
+fi
 malibu_download_scp "$index_path" "$VPS_USER@$VPS_HOST:$remote_stage/.index.json" >/dev/null
 index_sha="$(sha256_file "$index_path")"
-malibu_download_scp "$out/python/$python_asset" "$VPS_USER@$VPS_HOST:$remote_stage/.python-$python_asset" >/dev/null
 latest_sha=""
 if [[ -f "$out/releases/latest.json" ]]; then
   malibu_download_scp "$out/releases/latest.json" "$VPS_USER@$VPS_HOST:$remote_stage/.latest.json" >/dev/null
@@ -313,16 +335,20 @@ malibu_download_ssh "set -euo pipefail
   python_sha='$python_sha'
   latest_sha='$latest_sha'
   index_sha='$index_sha'
+  latest_only='$LATEST_ONLY'
   check() { [ \"\$(sha256sum \"\$1\" | awk '{print \$1}')\" = \"\$2\" ] || { echo \"sha256 mismatch: \$1\" >&2; exit 1; }; }
   [ -d \"\$webroot\" ] || { echo \"missing webroot \$webroot\" >&2; exit 1; }
   install -d -o root -g root -m 0755 \"\$webroot/releases\" \"\$webroot/releases/index\" \"\$webroot/python\"
   count=0
   for spec in$release_specs; do
     name=\"\${spec%%:*}\"
-    check \"\$stage/\$name\" \"\${spec#*:}\"
+    [ \"\$latest_only\" = 1 ] || check \"\$stage/\$name\" \"\${spec#*:}\"
     count=\$((count + 1))
   done
   target=\"\$webroot/releases/\$tag\"
+  if [ \"\$latest_only\" = 1 ]; then
+    [ -d \"\$target\" ] && [ -f \"\$webroot/releases/index/\$tag.json\" ] || { echo \"\$target is not mirrored yet; run scripts/publish-release-mirror.sh --tag \$tag --promote-latest\" >&2; exit 1; }
+  fi
   if [ -e \"\$target\" ]; then
     [ \"\$(find \"\$target\" -mindepth 1 | wc -l)\" -eq \"\$count\" ] || { echo \"\$target exists with a different file set; releases are immutable\" >&2; exit 1; }
     for spec in$release_specs; do
@@ -346,8 +372,11 @@ malibu_download_ssh "set -euo pipefail
     install -o root -g root -m 0644 \"\$stage/.index.json\" \"\$webroot/releases/index/.\$tag.json.new\"
     mv -f -- \"\$webroot/releases/index/.\$tag.json.new\" \"\$webroot/releases/index/\$tag.json\"
   fi
-  check \"\$stage/.python-\$python_asset\" \"\$python_sha\"
-  if [ -e \"\$webroot/python/\$python_asset\" ]; then
+  if [ \"\$latest_only\" = 1 ]; then
+    :
+  elif ! check \"\$stage/.python-\$python_asset\" \"\$python_sha\"; then
+    exit 1
+  elif [ -e \"\$webroot/python/\$python_asset\" ]; then
     check \"\$webroot/python/\$python_asset\" \"\$python_sha\"
   else
     install -o root -g root -m 0644 \"\$stage/.python-\$python_asset\" \"\$webroot/python/.\$python_asset.new\"
@@ -382,11 +411,13 @@ verify_served() {
   done
   die "served $url is ${got:-<fetch failed>}, expected $expected"
 }
-for path in "$release_dir"/*; do
-  name="$(basename "$path")"
-  verify_served "$MIRROR_ORIGIN/releases/$TAG/$name" "$(sha256_file "$path")"
-done
+if [[ "$LATEST_ONLY" == 0 ]]; then
+  for path in "$release_dir"/*; do
+    name="$(basename "$path")"
+    verify_served "$MIRROR_ORIGIN/releases/$TAG/$name" "$(sha256_file "$path")"
+  done
+  verify_served "$MIRROR_ORIGIN/python/$python_asset" "$python_sha"
+fi
 verify_served "$MIRROR_ORIGIN/releases/index/$TAG.json" "$index_sha"
-verify_served "$MIRROR_ORIGIN/python/$python_asset" "$python_sha"
 [[ -z "$latest_sha" ]] || verify_served "$MIRROR_ORIGIN/releases/latest.json" "$latest_sha"
 log "ok: $MIRROR_ORIGIN/releases/$TAG/ serves every GitHub asset byte-identically$([[ -z "$latest_sha" ]] || printf '; latest.json -> %s' "$TAG")"

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Hermetic tests for scripts/publish-release-mirror.sh (issue #1737): the
 # updater index contract, byte identity against GitHub's asset digests, the
-# immutable and unsafe-name guards, and --promote-latest gating. gh, curl, ssh,
+# immutable and unsafe-name guards, --promote-latest gating and the
+# pointer-only --latest-only upload. gh, curl, ssh,
 # and scp are PATH stubs; nothing touches the network or Pearl.
 set -euo pipefail
 
@@ -72,6 +73,7 @@ case "\$1 \$2" in
     cat "$FIXTURE/release.json"
     ;;
   "release download")
+    if [ -n "\${MOCK_NO_DOWNLOAD:-}" ]; then echo "asset download in --latest-only" >&2; exit 97; fi
     dir=""
     while [ \$# -gt 0 ]; do [ "\$1" = "--dir" ] && dir="\$2"; shift; done
     cp "$FIXTURE/assets/"* "\$dir"/
@@ -302,9 +304,36 @@ ok "upload-publishes-tree"
 run_upload >/dev/null || fail "identical republish must be a no-op success"
 ok "upload-idempotent"
 
+# 9 — --latest-only: pointer only, after the promotion workflow mirrored the
+# tag. No asset download; Pearl must already hold GitHub's exact asset set.
+rm -f "$WEBROOT/releases/latest.json"
+MOCK_NO_DOWNLOAD=1 run_upload --latest-only >/dev/null || fail "--latest-only on a mirrored tag failed"
+[ "$(cat "$WEBROOT/releases/latest.json")" = '{"tag_name": "v1.8.200"}' ] || fail "--latest-only did not publish latest.json"
+ok "latest-only-moves-pointer-without-download"
+rm -f "$WEBROOT/releases/latest.json"
+mv "$WEBROOT/releases/$TAG" "$UP/held-release"
+if MOCK_NO_DOWNLOAD=1 run_upload --latest-only >/dev/null 2>&1; then fail "--latest-only accepted an unmirrored tag"; fi
+[ ! -e "$WEBROOT/releases/latest.json" ] || fail "--latest-only moved the pointer to an unmirrored tag"
+mv "$UP/held-release" "$WEBROOT/releases/$TAG"
+ok "latest-only-refuses-unmirrored-tag"
+rm "$WEBROOT/releases/$TAG/release.json"
+if MOCK_NO_DOWNLOAD=1 run_upload --latest-only >/dev/null 2>&1; then fail "--latest-only accepted a partial mirror"; fi
+[ ! -e "$WEBROOT/releases/latest.json" ] || fail "--latest-only moved the pointer to a partial mirror"
+cp "$FIXTURE/assets/release.json" "$WEBROOT/releases/$TAG/release.json"
+ok "latest-only-refuses-partial-mirror"
+rc=0
+PATH="$BIN:$PATH" bash "$FAKE_ROOT/scripts/publish-release-mirror.sh" --tag "$TAG" --latest-only --stage-only "$TMP/out16" >/dev/null 2>&1 || rc=$?
+[ "$rc" -eq 2 ] || fail "--latest-only with --stage-only must be a usage error (got $rc)"
+ok "latest-only-stage-only-usage-error"
+MOCK_NO_DOWNLOAD=1 run_upload --latest-only >/dev/null || fail "--latest-only after restoring the mirror failed"
+
 printf 'changed\n' >> "$WEBROOT/releases/$TAG/checksums.txt"
 if run_upload >/dev/null 2>&1; then fail "a differing published release must not be overwritten"; fi
 grep -q changed "$WEBROOT/releases/$TAG/checksums.txt" || fail "immutable release was modified"
 ok "upload-refuses-to-patch-published-release"
+rm -f "$WEBROOT/releases/latest.json"
+if MOCK_NO_DOWNLOAD=1 run_upload --latest-only >/dev/null 2>&1; then fail "--latest-only accepted a mirror whose bytes differ"; fi
+[ ! -e "$WEBROOT/releases/latest.json" ] || fail "--latest-only moved the pointer to differing bytes"
+ok "latest-only-refuses-differing-bytes"
 
 printf '[test-publish-release-mirror] all %d checks passed\n' "$pass"
