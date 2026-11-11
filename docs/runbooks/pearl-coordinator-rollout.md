@@ -9,12 +9,21 @@ outage across four incidents. Mechanics of the updater itself are in
 ## Hard rules
 
 1. **State the downtime to the operator before every Pearl mutation.** Do it
-   before you start, never after. With the short-quiesce updater (installed)
-   a runtime apply means **about 1–2 minutes of coordinator/gateway restart**:
-   the v1.8.285 apply had both back within about 90 s, then the updater ran a
-   ~5.5 min rollback-point verification with services up. `pearl-runtime.sh`
-   prints the last measured apply downtime from the updater audit log when it
-   can read it. A catalog activation means a coordinator restart of seconds.
+   before you start, never after. The figure depends on whether the candidate
+   changes the database schema. `pearl-runtime.sh` compares the candidate's
+   `database_schema_fingerprint` (its `pearl-release.json`) with the one in
+   Pearl's `current-release.json`, both read-only:
+   - **Same fingerprint: about 1–2 minutes of coordinator/gateway restart.**
+     The v1.8.285 apply had both back within about 90 s, then the updater ran a
+     ~5.5 min rollback-point verification with services up.
+   - **Different or unknown: buyers held with 503 until all serving gates
+     pass, up to about 25 minutes.** The updater keeps the gateway's buyer hold
+     on until the release commits, so a rollback can still restore the
+     databases (SPEC-006-R027).
+
+   `pearl-runtime.sh` also prints the last measured apply downtime from the
+   updater audit log when it can read it. A catalog activation means a
+   coordinator restart of seconds.
 2. **Never cut a runtime release to ship tooling only.** If the coordinator and
    gateway code is identical to what is live, a new runtime apply buys nothing
    and still costs a restart. v1.8.218 took the network down for 19 minutes to
@@ -143,19 +152,64 @@ ssh pearl 'systemd-run --unit=mp-update-<ver> -p Environment=PYTHONDONTWRITEBYTE
 
 `scripts/ops/pearl-runtime.sh` runs the rollout in two Pearl steps:
 
-- **`apply`** runs the preflight above, checks that the updater's
-  transactions directory has more free space than the largest database
-  snapshot it keeps, applies any stats migrations already pending (below), then
-  starts the updater unit. There is no separate plan step: the updater
-  validates the signed release and takes its own locks before it changes
-  anything.
-- **`health`** waits (bounded by `UPDATER_WAIT_MAX_S`, default 2700 s) for the
-  updater unit to exit and shows its result, requires the coordinator and
-  gateway `/healthz` to report the tag and the gateway to report no
-  `buyer_hold`, applies the new binary's stats migrations, then prints the
-  measured apply downtime from the updater audit log as one line. Paste that
-  line into `docs/releases/coordinator-release-train.md`; the script commits
-  nothing.
+- **`apply`** runs the preflight above. It then checks that the updater's
+  transactions directory has free space for the live databases and their WAL
+  files (paths from `current-release.json`), plus a margin of 10% or 5 GB,
+  whichever is larger. Without that record, the largest snapshot it keeps is
+  the size estimate. It then applies any stats migrations already pending
+  (below) and starts the updater unit. There is no separate plan step: the
+  updater validates the signed release and takes its own locks before it
+  changes anything. The stated downtime follows hard rule 1.
+- **`health`** waits for the updater unit to exit and shows its result. The
+  wait is bounded by `UPDATER_WAIT_MAX_S` (default 2700 s). The step requires
+  the coordinator and gateway `/healthz` to report the tag and the gateway to
+  report no `buyer_hold`, then applies the new binary's stats migrations. It
+  prints one line with two measured figures from the updater audit log:
+  - the apply downtime, from gateway stop to gateway start;
+  - the buyer-visible downtime, from the drain's buyer hold to its release.
+
+  Paste that line into `docs/releases/coordinator-release-train.md`; the
+  script commits nothing.
+- **`release_buyer_hold`** comes before every other step when the gateway
+  `/healthz` reports `buyer_hold: true` and no updater unit (`mp-update-*`,
+  `macprovider-pearl-updater.service`,
+  `macprovider-pearl-updater-reconcile.service`) is active. See below.
+
+### Release a stuck buyer hold
+
+The hold has no timer. A rollout interrupted while buyers were held leaves the
+gateway answering buyer routes with 503. That happens when the updater is
+killed, or when its `--reconcile` fails or cannot reach the gateway.
+`pearl-runtime.sh` then offers `release_buyer_hold` as the next step.
+
+The step runs `sudo /usr/local/sbin/macprovider-pearl-update --reconcile` on
+Pearl. The reconcile works through the interrupted transaction. It commits a
+transaction that reached its commit point, or rolls it back following the
+journaled database rule. It removes the start-held drop-in and releases the
+hold. The step then requires the gateway `/healthz` to report no hold.
+
+The step adds no downtime of its own: it ends a buyer outage. A rollback it
+completes restarts the coordinator and gateway on the previous release. If the
+hold persists, read the updater audit log (`gateway_buyer_hold*` and
+`gateway_held_window*` events) before anything else.
+
+### Rollout order for the buyer hold
+
+The first apply of a release that carries the buyer hold runs under the
+updater already installed on Pearl. That updater predates the hold and knows
+nothing of it, so that apply behaves like every earlier one. Install the
+`updater-bundle` (`PEARL_RUNTIME_TASK=updater-bundle`) after that apply, from
+the running tag. From then on every apply holds buyers.
+
+Other orders are harmless:
+
+- **Bundle before the gateway carries the hold.** The new updater finds no
+  hold endpoint (HTTP 404) and no `buyer_hold` key on `/healthz`. It records
+  the decision to keep the live databases and drains as before.
+- **Bundle never installed.** Applies keep the old behaviour.
+- **Previous gateway after a rollback.** When the previous release has no
+  hold, it starts open, because the drop-in is removed before the previous
+  binaries start.
 
 ## Stats migrations
 

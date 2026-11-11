@@ -385,15 +385,31 @@ mkdir -p "$tmp/https-bin"
 # shellcheck disable=SC2016  # the stub's own "$@" must stay literal
 printf '#!/usr/bin/env bash\nexec %q "${@//https:/http:}"\n' "$(command -v curl)" > "$tmp/https-bin/curl"
 chmod +x "$tmp/https-bin/curl"
+# The stated downtime follows the candidate's database schema fingerprint
+# against Pearl's installed-release record (both read-only).
+export PEARL_UPDATER_STATE_ROOT="$tmp/pearl/updater-state"
+mkdir -p "$PEARL_UPDATER_STATE_ROOT" "$tmp/gh/downloads/v9.0.1"
+FP_A="$(printf 'a%.0s' $(seq 64))" FP_B="$(printf 'b%.0s' $(seq 64))"
+printf '{"database_schema_fingerprint":"%s"}\n' "$FP_A" > "$PEARL_UPDATER_STATE_ROOT/current-release.json"
+printf '{"database_schema_fingerprint":"%s"}\n' "$FP_A" > "$tmp/gh/downloads/v9.0.1/pearl-release.json"
 PATH="$tmp/https-bin:$PATH" COORDINATOR_URL="https://127.0.0.1:$PORT" PEARL_RUNTIME_VERSION=v9.0.1 run_rc 0 "status with the apply next and a pending stats migration" scripts/ops/pearl-runtime.sh status
 expect_next apply:mutate
 apply_cmd="$(next_field command)"
 case "$apply_cmd" in *"du -sh /var/lib/macprovider-pearl-updater/transactions"*) ok ;; *) bad "apply lacks the preflight" ;; esac
-case "$apply_cmd" in *"largest database snapshot"*) ok ;; *) bad "apply lacks the disk check" ;; esac
+case "$apply_cmd" in *"live databases with WAL"*"margin = max(need // 10, 5 * 1024 ** 3)"*) ok ;; *) bad "apply lacks the disk check" ;; esac
+if [ "$(fact_of apply_schema_change)" = False ]; then ok; else bad "schema change fact: $(fact_of apply_schema_change)"; fi
 case "$apply_cmd" in *"sudo bash -s -- $PEARL_COORDINATOR_ENV $PEARL_COORDINATOR_BIN apply"*"--apply --tag v9.0.1"*) ok ;; *) bad "apply does not run the stats migrations before the updater" ;; esac
 case "$apply_cmd" in *--plan*|*"flock -n"*) bad "apply still carries the plan step" ;; *) ok ;; esac
 case "$apply_cmd" in *adminpw*|*postgres://admin*) bad "apply command carries a DSN" ;; *) ok ;; esac
 case "$(next_field expected_downtime)" in "about 1-2 min"*) ok ;; *) bad "apply downtime: $(next_field expected_downtime)" ;; esac
+printf '{"database_schema_fingerprint":"%s"}\n' "$FP_B" > "$tmp/gh/downloads/v9.0.1/pearl-release.json"
+PATH="$tmp/https-bin:$PATH" COORDINATOR_URL="https://127.0.0.1:$PORT" PEARL_RUNTIME_VERSION=v9.0.1 run_rc 0 "status with a schema-changing apply next" scripts/ops/pearl-runtime.sh status
+if [ "$(fact_of apply_schema_change)" = True ]; then ok; else bad "schema change fact: $(fact_of apply_schema_change)"; fi
+case "$(next_field expected_downtime)" in "buyers held with 503 until all serving gates pass, up to about 25 min"*) ok ;; *) bad "schema-change downtime: $(next_field expected_downtime)" ;; esac
+rm -rf "$tmp/gh/downloads/v9.0.1"
+PATH="$tmp/https-bin:$PATH" COORDINATOR_URL="https://127.0.0.1:$PORT" PEARL_RUNTIME_VERSION=v9.0.1 run_rc 0 "status with an unknown schema change" scripts/ops/pearl-runtime.sh status
+if [ "$(fact_of apply_schema_change)" = unknown ]; then ok; else bad "unknown schema fact: $(fact_of apply_schema_change)"; fi
+case "$(next_field expected_downtime)" in "buyers held with 503"*) ok ;; *) bad "unknown schema downtime: $(next_field expected_downtime)" ;; esac
 if python3 -c 'import json,sys; ids=[s["id"] for s in json.load(open(sys.argv[1]))["steps"]]; sys.exit(0 if "plan" not in ids and "wait_updater" not in ids else 1)' "$tmp/out"; then ok; else bad "plan or wait_updater is still a step"; fi
 applied_state
 PATH="$tmp/https-bin:$PATH" COORDINATOR_URL="https://127.0.0.1:$PORT" PEARL_RUNTIME_VERSION=v9.0.1 run_rc 0 "status with the apply next and no pending stats migration" scripts/ops/pearl-runtime.sh status
@@ -416,7 +432,17 @@ printf '%s\n' '{"ts":"2026-11-11T01:00:00Z","event":"rollout_started","candidate
   '{"ts":"2026-11-11T01:01:25Z","event":"service_action","outcome":"success","unit":"macprovider-gateway.service","action":"start"}' \
   '{"ts":"2026-11-11T01:07:00Z","event":"rollout_completed"}' > "$tmp/pearl/audit.jsonl"
 PEARL_UPDATER_AUDIT="$tmp/pearl/audit.jsonl" run_rc 0 "apply downtime line" scripts/ops/pearl-runtime.sh _apply-downtime v9.0.1
-if grep -q 'Release train line: Pearl runtime v9.0.1 applied; measured apply downtime 75 s' "$tmp/out"; then ok; else bad "downtime line: $(cat "$tmp/out")"; fi
+if grep -q 'Release train line: Pearl runtime v9.0.1 applied; measured apply downtime 75 s (gateway stop to gateway start), buyer-visible downtime 75 s' "$tmp/out"; then ok; else bad "downtime line: $(cat "$tmp/out")"; fi
+# A held rollout: buyers see 503 from the drain hold to the release after commit.
+printf '%s\n' '{"ts":"2026-11-11T02:00:00Z","event":"rollout_started","candidate":"v9.0.1"}' \
+  '{"ts":"2026-11-11T02:00:05Z","event":"gateway_buyer_hold","outcome":"held","stage":"drain"}' \
+  '{"ts":"2026-11-11T02:00:10Z","event":"service_action","outcome":"success","unit":"macprovider-gateway.service","action":"stop"}' \
+  '{"ts":"2026-11-11T02:01:20Z","event":"gateway_buyer_hold_dropin","outcome":"installed"}' \
+  '{"ts":"2026-11-11T02:01:25Z","event":"service_action","outcome":"success","unit":"macprovider-gateway.service","action":"start"}' \
+  '{"ts":"2026-11-11T02:20:00Z","event":"rollout_completed"}' \
+  '{"ts":"2026-11-11T02:20:05Z","event":"gateway_buyer_hold","outcome":"released","stage":"committed"}' >> "$tmp/pearl/audit.jsonl"
+PEARL_UPDATER_AUDIT="$tmp/pearl/audit.jsonl" run_rc 0 "held apply downtime line" scripts/ops/pearl-runtime.sh _apply-downtime v9.0.1
+if grep -q 'measured apply downtime 75 s (gateway stop to gateway start), buyer-visible downtime 1195 s (buyer hold to release)' "$tmp/out"; then ok; else bad "held downtime line: $(cat "$tmp/out")"; fi
 PEARL_UPDATER_AUDIT="$tmp/pearl/audit.jsonl" run_rc 0 "apply downtime line for another tag" scripts/ops/pearl-runtime.sh _apply-downtime v9.0.2
 if grep -q 'apply downtime not measured' "$tmp/out"; then ok; else bad "unmeasured downtime line: $(cat "$tmp/out")"; fi
 rm -f "$tmp/bin/psql"
@@ -458,6 +484,41 @@ expect_next health:mutate
 case "$(next_field reason)" in *"gateway unhealthy"*) ok ;; *) bad "unhealthy gateway reason: $(next_field reason)" ;; esac
 if grep -q "code identical\|identical to live" "$tmp/out" "$tmp/err"; then bad "status still claims identical code"; else ok; fi
 rm -rf "$MACPROVIDER_OPS_STATE_DIR/pearl-runtime-v9.0.1"
+
+# A gateway left holding buyers with no updater running (interrupted rollout):
+# release_buyer_hold comes first and runs the updater's --reconcile.
+printf '{"status":"ok","version":"v9.0.0","recommended_binary_version":"%s","uptime_s":100,"_policy":"running","buyer_hold":true}' "$LIVE" > "$tmp/svc/healthz.json"
+printf 'mp-update-9.0.1.service loaded active running mp-update-9.0.1\n' > "$tmp/svc/updater_units"
+PEARL_RUNTIME_VERSION=v9.0.1 run_rc 0 "status while a running updater holds buyers" scripts/ops/pearl-runtime.sh status
+case "$(next_field id)" in release_buyer_hold) bad "release offered while the updater runs" ;; *) ok ;; esac
+if [ "$(state_of release_buyer_hold)" = done ]; then ok; else bad "release step with a running updater: $(state_of release_buyer_hold)"; fi
+rm -f "$tmp/svc/updater_units"
+touch "$tmp/svc/list_units_fail"
+PEARL_RUNTIME_VERSION=v9.0.1 run_rc 0 "status with held buyers and unreadable updater units" scripts/ops/pearl-runtime.sh status
+expect_next release_buyer_hold:blocked
+rm -f "$tmp/svc/list_units_fail"
+PEARL_UPDATER_BIN="$tmp/pearl/fake-updater" PEARL_RUNTIME_VERSION=v9.0.1 run_rc 0 "status with buyers held and no updater" scripts/ops/pearl-runtime.sh status
+expect_next release_buyer_hold:mutate
+case "$(next_field command)" in *"sudo $tmp/pearl/fake-updater --reconcile"*"still holds buyers"*) ok ;; *) bad "release command: $(next_field command)" ;; esac
+case "$(next_field expected_downtime)" in "none added"*) ok ;; *) bad "release downtime: $(next_field expected_downtime)" ;; esac
+case "$(next_field runbook)" in *pearl-coordinator-rollout.md#release-a-stuck-buyer-hold) ok ;; *) bad "release runbook: $(next_field runbook)" ;; esac
+# A reconcile that leaves the hold fails the step.
+# shellcheck disable=SC2016  # the fake's own "$*" and $FAKE_PEARL must stay literal
+printf '#!/usr/bin/env bash\necho "$*" >> "$FAKE_PEARL/pearl/updater-calls"\n' > "$tmp/pearl/fake-updater"
+chmod +x "$tmp/pearl/fake-updater"
+PEARL_UPDATER_BIN="$tmp/pearl/fake-updater" PEARL_RUNTIME_VERSION=v9.0.1 MACPROVIDER_OPS_OWNER=t run_rc 1 "reconcile that leaves the hold" scripts/ops/pearl-runtime.sh next --run
+expect_lock_free
+expect_err "still holds buyers after --reconcile"
+# The reconcile releases the hold.
+# shellcheck disable=SC2016  # the fake's own "$*" and $FAKE_PEARL must stay literal
+printf '#!/usr/bin/env bash\necho "$*" >> "$FAKE_PEARL/pearl/updater-calls"\nsed -i.bak "s/,\\"buyer_hold\\":true//" "$FAKE_PEARL/svc/healthz.json"\n' > "$tmp/pearl/fake-updater"
+PEARL_UPDATER_BIN="$tmp/pearl/fake-updater" PEARL_RUNTIME_VERSION=v9.0.1 MACPROVIDER_OPS_OWNER=t run_rc 0 "reconcile releases the hold" scripts/ops/pearl-runtime.sh next --run
+expect_lock_free
+if [ "$(sort -u "$tmp/pearl/updater-calls")" = "--reconcile" ]; then ok; else bad "updater calls: $(cat "$tmp/pearl/updater-calls")"; fi
+PEARL_RUNTIME_VERSION=v9.0.1 run_rc 0 "status after the hold release" scripts/ops/pearl-runtime.sh status
+case "$(next_field id)" in release_buyer_hold) bad "release still offered" ;; *) ok ;; esac
+case "$(fact_of gateway_buyer_hold)" in True) bad "hold fact after release: True" ;; *) ok ;; esac
+rm -f "$tmp/pearl/fake-updater" "$tmp/pearl/updater-calls"
 health v9.0.0 $LIVE
 
 # ==== pearl-runtime: one-time auto_vacuum conversion (#1979) ==================
