@@ -52,15 +52,17 @@ Walk the list top to bottom and stop at the first match. It follows
      ancestor of `origin/main`, and that commit carries the release ledger and
      `not-buyer-serving.json`.
 4. **Only dates and signatures changed** (candidate/demand/rate-card
-   `version` + `generated_at`): **freshness-only renewal**. Weekly and
-   automatic (Wednesday 16:00 UTC, `docs/runbooks/autotune-feed-renewal.md`).
-   Do nothing by hand. The content lane refuses these with
+   `version` + `generated_at`): **freshness-only renewal**. There is no
+   weekly schedule: `renew-release-discovery-head.yml` is dispatch-only (#1938,
+   #1944), and current CLIs accept a head past its `expires_at`. An operator
+   renews on demand when older CLIs must rediscover a target
+   (`docs/runbooks/autotune-feed-renewal.md`). The content lane refuses these with
    `lane=freshness-or-noop`. A renewal never carries a price change: rate-card
    drift vs live fails the renewal and names the pricing path or the runtime
    lane (`SPEC-023-R016`).
 5. **Only the Tier-2 `issued_at`/`expires_at` (and its signature,
    `catalog_id`, `version`) changed**: **Tier-2 expiry renewal**. Merge the
-   re-signed `tier2-catalog.json` to `main`. The next Wednesday renewal copies
+   re-signed `tier2-catalog.json` to `main`. The next renewal copies
    it from `main` and its continuity check strips the Tier-2 signing envelope,
    so an expiry-only re-sign passes as freshness. Any Tier-2 model-entry change
    is content (item 3).
@@ -83,7 +85,7 @@ Walk the list top to bottom and stop at the first match. It follows
      check: never run one while a journal exists.
 
 A merged content PR **must be deployed through the content lane before the
-next Wednesday renewal**. The renewal copies catalog files from `main`, detects
+next renewal**. The renewal copies catalog files from `main`, detects
 the content drift against live, and fails (`content drift vs live feed`). The
 feed then ages toward the 30-day expiry until someone ships the content.
 
@@ -472,7 +474,7 @@ scripts/catalog-content-release.sh --deploy --commit <same sha> \
 
 **After rolling back a pricing PR** (exit 4, or a recovered journal), `main`
 still carries the reviewed-but-not-live rate card. Revert the pricing PR on
-`main` (or re-ship it) before the next Wednesday renewal or content release:
+`main` (or re-ship it) before the next renewal or content release:
 otherwise renewal fails `content drift vs live feed in rate-card.json` and any
 content release cut from `main` silently becomes a pricing release.
 

@@ -3,20 +3,23 @@
 
 Dependency-free (stdlib only). Validates ops/exceptions/production-exceptions.json
 against the committed schema's structural rules, enforces unique IDs / ownership /
-expiry fail-closed behavior, emits an operator report without secrets, and gates
-deploy / stable-promotion when configured.
+tombstone history, emits an operator report without secrets, and gates deploy /
+stable-promotion when configured.
+
+`expires_at` is optional and informational. No calendar date is a validation
+error or a deploy/promotion blocker in any mode (AGENTS.md rule 10: no expiry
+or automatic withdrawal on live features or their ops tooling).
 
 Default-safe deploy behavior (MACPROVIDER_EXCEPTION_ENFORCEMENT unset/0):
   - Hard-fail: malformed register, duplicate IDs, ownerless rows, scope/environment
-    mismatch, active rows past expires_at, resurrection of tombstoned IDs,
-    removed rows without tombstones, tombstone deletions vs a provided base.
-  - Warn only: status=expired rows, active rows with expires_at=null,
-    approaching-expiry alerts, blocks_stable_promotion=true rows.
+    mismatch, resurrection of tombstoned IDs, same-ID expired->active
+    reactivation, removed rows without tombstones, tombstone deletions vs a
+    provided base.
+  - Warn only: blocks_stable_promotion=true rows.
 
 Enforcement (MACPROVIDER_EXCEPTION_ENFORCEMENT=1) or --mode=promote:
-  - All hard-fails above, plus status=expired, active null-expiry,
-    approaching-expiry (within alert window), and blocks_stable_promotion=true
-    for active/planned/expired rows become hard-fails.
+  - All hard-fails above, plus blocks_stable_promotion=true for
+    active/planned/expired rows becomes a hard-fail.
 
 These gates enforce registered-row policy only. They do not discover unregistered
 live Pearl/config/DB exceptions; that remains an open #615 item.
@@ -123,7 +126,6 @@ EXCEPTION_KEYS = frozenset(REQUIRED_EXCEPTION_FIELDS := (
     "owner",
     "issue",
     "created_at",
-    "expires_at",
     "scope",
     "removal_condition",
     "rollback_command",
@@ -131,6 +133,8 @@ EXCEPTION_KEYS = frozenset(REQUIRED_EXCEPTION_FIELDS := (
     "blocks_stable_promotion",
     "evidence",
 )) | {
+    # Optional informational expiry fields; never enforced against the clock.
+    "expires_at",
     "expiry_unknown_reason",
     # Optional #608 progress notes — durable clearance tracking, not free-form
     # arbitrary keys. Present as arrays of non-empty strings when used.
@@ -295,14 +299,11 @@ def _scope_ok(entry: dict[str, Any], register_env: str) -> str | None:
 def validate_register(
     doc: dict[str, Any],
     *,
-    now: datetime | None = None,
     tombstones: dict[str, Any] | None = None,
-    alert_hours: int = DEFAULT_ALERT_HOURS,
     previous_doc: dict[str, Any] | None = None,
     base_tombstones: dict[str, Any] | None = None,
 ) -> ValidationResult:
     result = ValidationResult()
-    now = now or datetime.now(timezone.utc)
     if not isinstance(doc, dict):
         result.error("register_type", "register root must be an object")
         return result
@@ -416,6 +417,11 @@ def validate_register(
                 result.error("created_at", "created_at must be RFC3339Z or null", exc_id)
 
         expires_at = entry.get("expires_at")
+        if expires_at is not None:
+            try:
+                parse_rfc3339(expires_at)
+            except (TypeError, ValueError):
+                result.error("expires_at", "expires_at must be RFC3339Z or null", exc_id)
         expiry_unknown = entry.get("expiry_unknown_reason")
         if "expiry_unknown_reason" in entry and (
             not isinstance(expiry_unknown, str) or not expiry_unknown.strip()
@@ -423,46 +429,6 @@ def validate_register(
             result.error(
                 "expiry_unknown",
                 "expiry_unknown_reason must be a non-empty string when present",
-                exc_id,
-            )
-        if expires_at is None:
-            if not isinstance(expiry_unknown, str) or not expiry_unknown.strip():
-                result.error(
-                    "expiry_unknown",
-                    "expires_at is null but expiry_unknown_reason is missing",
-                    exc_id,
-                )
-            if entry.get("status") == "active":
-                result.warn(
-                    "unbounded_active",
-                    "active exception has expires_at=null; set a bounded expiry from evidence",
-                    exc_id,
-                )
-        else:
-            try:
-                expiry = parse_rfc3339(expires_at)
-            except (TypeError, ValueError):
-                result.error("expires_at", "expires_at must be RFC3339Z or null", exc_id)
-            else:
-                if entry.get("status") == "active" and expiry <= now:
-                    result.error(
-                        "expired_active",
-                        f"active exception is past expires_at={expires_at} (fail-closed)",
-                        exc_id,
-                    )
-                elif entry.get("status") == "active" and expiry <= now + timedelta(
-                    hours=alert_hours
-                ):
-                    result.warn(
-                        "expiry_soon",
-                        f"active exception expires at {expires_at} (within {alert_hours}h)",
-                        exc_id,
-                    )
-
-        if entry.get("status") == "expired":
-            result.warn(
-                "status_expired",
-                "exception is marked expired; stable promotion and enforced deploy must reject it",
                 exc_id,
             )
 
@@ -555,7 +521,6 @@ def validate_register(
 
     if previous_doc is not None:
         check_anti_resurrection(previous_doc, doc, tombstone_ids, result)
-        check_expiry_self_extension(previous_doc, doc, result)
         check_expired_reactivation(previous_doc, doc, result)
 
     return result.dedupe()
@@ -647,44 +612,9 @@ def check_anti_resurrection(
             )
 
 
-def check_expiry_self_extension(
-    previous_doc: dict[str, Any],
-    next_doc: dict[str, Any],
-    result: ValidationResult,
-) -> None:
-    """Reject silent expires_at extensions when a previous register is supplied."""
-    prev_by_id = {
-        entry["id"]: entry
-        for entry in previous_doc.get("exceptions", [])
-        if isinstance(entry, dict) and isinstance(entry.get("id"), str)
-    }
-    for entry in next_doc.get("exceptions", []):
-        if not isinstance(entry, dict) or not isinstance(entry.get("id"), str):
-            continue
-        prev = prev_by_id.get(entry["id"])
-        if prev is None:
-            continue
-        prev_exp = prev.get("expires_at")
-        next_exp = entry.get("expires_at")
-        if not isinstance(prev_exp, str) or not isinstance(next_exp, str):
-            continue
-        try:
-            prev_dt = parse_rfc3339(prev_exp)
-            next_dt = parse_rfc3339(next_exp)
-        except ValueError:
-            continue
-        if next_dt > prev_dt and entry.get("status") in {"active", "planned"}:
-            result.error(
-                "expiry_self_extension",
-                f"expires_at moved later from {prev_exp} to {next_exp} without a new exception id",
-                entry["id"],
-            )
-
-
 def validate_stale_register(
     doc: dict[str, Any],
     result: ValidationResult,
-    now: datetime | None = None,
 ) -> None:
     """Structural validation for a stale/backup register before sync simulation.
 
@@ -698,7 +628,6 @@ def validate_stale_register(
     # findings that cannot apply to pre-tombstone backups.
     historical = validate_register(
         doc,
-        now=now,
         tombstones={
             "schema_version": TOMBSTONE_SCHEMA_VERSION,
             "updated_at": "1970-01-01T00:00:00Z",
@@ -722,12 +651,11 @@ def simulate_config_sync_restore(
     current_doc: dict[str, Any],
     stale_authoritative_doc: dict[str, Any],
     tombstones: dict[str, Any],
-    now: datetime | None = None,
 ) -> ValidationResult:
     """Model a sync/rollback that re-applies stale authoritative exception rows."""
     result = ValidationResult()
-    result.extend(validate_register(current_doc, now=now, tombstones=tombstones))
-    validate_stale_register(stale_authoritative_doc, result, now=now)
+    result.extend(validate_register(current_doc, tombstones=tombstones))
+    validate_stale_register(stale_authoritative_doc, result)
     if result.errors:
         # Malformed current/stale/tombstones already fail closed; do not pretend OK.
         return result.dedupe()
@@ -810,18 +738,17 @@ def union_tombstone_docs(history: Iterable[dict[str, Any] | None]) -> dict[str, 
     }
 
 
-def earliest_expiry_previous_register(
+def history_previous_register(
     current: dict[str, Any],
     history: Iterable[dict[str, Any] | None],
 ) -> dict[str, Any]:
-    """Rebuild previous register with the earliest parseable expires_at per ID.
+    """Rebuild the previous register from history for reactivation checks.
 
-    Includes active/planned/expired historical rows. Any historical `expired`
-    observation for an ID is restored onto the previous row when the tip is
-    active/planned, so active→expired→active reactivation cannot erase the
-    expired intermediate state by selecting an earlier equal-dated active row.
+    Any historical `expired` observation for an ID is restored onto the
+    previous row when the tip is active/planned, so active->expired->active
+    reactivation of the same ID cannot erase the expired intermediate state.
+    Dates are not consulted: expires_at is informational only.
     """
-    earliest: dict[str, tuple[datetime, str]] = {}
     saw_expired: set[str] = set()
     for doc in history:
         if not isinstance(doc, dict):
@@ -830,35 +757,18 @@ def earliest_expiry_previous_register(
         if not isinstance(rows, list):
             continue
         for entry in rows:
-            if not isinstance(entry, dict):
-                continue
-            exc_id = entry.get("id")
-            expires = entry.get("expires_at")
-            status = entry.get("status")
-            if not isinstance(exc_id, str) or status not in {"active", "planned", "expired"}:
-                continue
-            if status == "expired":
-                saw_expired.add(exc_id)
-            if not isinstance(expires, str):
-                continue
-            try:
-                exp_dt = parse_rfc3339(expires)
-            except ValueError:
-                continue
-            prev = earliest.get(exc_id)
-            if prev is None or exp_dt < prev[0]:
-                earliest[exc_id] = (exp_dt, expires)
+            if (
+                isinstance(entry, dict)
+                and isinstance(entry.get("id"), str)
+                and entry.get("status") == "expired"
+            ):
+                saw_expired.add(entry["id"])
 
     previous = deepcopy(current)
     for entry in previous.get("exceptions", []):
         if not isinstance(entry, dict):
             continue
-        exc_id = entry.get("id")
-        if not isinstance(exc_id, str):
-            continue
-        if exc_id in earliest:
-            entry["expires_at"] = earliest[exc_id][1]
-        if exc_id in saw_expired and entry.get("status") in {"active", "planned"}:
+        if entry.get("id") in saw_expired and entry.get("status") in {"active", "planned"}:
             entry["status"] = "expired"
     return previous
 
@@ -1003,14 +913,8 @@ def apply_gate_policy(result: ValidationResult, mode: str, enforce: bool) -> Val
     """Apply deploy/promote policy on top of structural validation findings."""
     if mode == "validate" and not enforce:
         return result
-    promote_codes = {
-        "status_expired",
-        "unbounded_active",
-        "expiry_soon",
-        "blocks_stable_promotion",
-    }
     if mode == "promote" or enforce:
-        return promote_warns_to_errors(result, promote_codes)
+        return promote_warns_to_errors(result, {"blocks_stable_promotion"})
     return result
 
 
@@ -1031,14 +935,11 @@ def _load_pair(args: argparse.Namespace) -> tuple[Path, dict[str, Any], dict[str
 
 def cmd_validate(args: argparse.Namespace) -> int:
     _root, doc, tombstones = _load_pair(args)
-    now = parse_rfc3339(args.now) if args.now else datetime.now(timezone.utc)
     base = load_json(Path(args.base_tombstones)) if args.base_tombstones else None
     previous = load_json(Path(args.previous_register)) if args.previous_register else None
     result = validate_register(
         doc,
-        now=now,
         tombstones=tombstones,
-        alert_hours=args.alert_hours,
         previous_doc=previous,
         base_tombstones=base,
     )
@@ -1057,7 +958,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
 def cmd_report(args: argparse.Namespace) -> int:
     _root, doc, tombstones = _load_pair(args)
     now = parse_rfc3339(args.now) if args.now else datetime.now(timezone.utc)
-    result = validate_register(doc, now=now, tombstones=tombstones, alert_hours=args.alert_hours)
+    result = validate_register(doc, tombstones=tombstones)
     report = build_health_report(
         doc,
         now=now,
@@ -1100,7 +1001,6 @@ def cmd_report(args: argparse.Namespace) -> int:
 
 def cmd_gate(args: argparse.Namespace) -> int:
     _root, doc, tombstones = _load_pair(args)
-    now = parse_rfc3339(args.now) if args.now else datetime.now(timezone.utc)
     if args.enforce and args.no_enforce:
         print("cannot combine --enforce and --no-enforce", file=sys.stderr)
         return 2
@@ -1114,9 +1014,7 @@ def cmd_gate(args: argparse.Namespace) -> int:
     previous = load_json(Path(args.previous_register)) if args.previous_register else None
     result = validate_register(
         doc,
-        now=now,
         tombstones=tombstones,
-        alert_hours=args.alert_hours,
         previous_doc=previous,
         base_tombstones=base,
     )
@@ -1144,11 +1042,10 @@ def cmd_sync_check(args: argparse.Namespace) -> int:
     root = Path(args.root) if args.root else repo_root_from_here()
     current = load_json(Path(args.current))
     stale = load_json(Path(args.stale))
-    now = parse_rfc3339(args.now) if args.now else datetime.now(timezone.utc)
     tombstones = load_json(
         Path(args.tombstones) if args.tombstones else default_tombstone_path(root)
     )
-    result = simulate_config_sync_restore(current, stale, tombstones, now=now)
+    result = simulate_config_sync_restore(current, stale, tombstones)
     for finding in result.findings:
         print(finding.format(), file=sys.stderr if finding.severity == "error" else sys.stdout)
     if result.errors:
@@ -1174,14 +1071,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--previous-register",
-        help="Previous register for anti-resurrection and expiry self-extension checks",
+        help="Previous register for anti-resurrection and expired-reactivation checks",
     )
-    parser.add_argument("--now", help="RFC3339Z clock override for deterministic tests")
+    parser.add_argument(
+        "--now",
+        help="RFC3339Z clock override for the report's informational clock_state",
+    )
     parser.add_argument(
         "--alert-hours",
         type=int,
         default=DEFAULT_ALERT_HOURS,
-        help=f"Approaching-expiry alert window (default {DEFAULT_ALERT_HOURS})",
+        help=(
+            "Report-only expiring_soon window for informational expires_at "
+            f"(default {DEFAULT_ALERT_HOURS}); never gates"
+        ),
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -1197,7 +1100,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--mode",
         choices=("deploy", "promote", "validate"),
         default="deploy",
-        help="deploy=default-safe; promote=fail-closed on expired/unbounded/blocking",
+        help="deploy=default-safe; promote=fail-closed on blocks_stable_promotion rows",
     )
     p_gate.add_argument(
         "--enforce",
