@@ -240,7 +240,7 @@ var spec015ACs = []acceptanceCriterion{
 		Summary:  "response content byte flip surfaces invalid result with output_hash_mismatch reason",
 		SpecStep: "SPEC-015 §14 AC-19",
 		Commands: []string{"cd phase7-verify && go test -tags=integration -count=1 -timeout 120s -run TestReceiptBundleFixturesEndToEnd ."},
-		CIJobs:   []string{"phase7-verify integration (fixtures)", "phase7-verify (go vet + test)"},
+		CIJobs:   []string{"phase7-verify (go vet + test)"},
 		Evidence: []evidenceAnchor{
 			{"phase7-verify/internal/verify/verify_test.go", "AC-19 response content flip reports output hash mismatch"},
 			{"phase7-verify/testdata/invalid_tampered_output.bundle.json", "bundle_version"},
@@ -251,7 +251,7 @@ var spec015ACs = []acceptanceCriterion{
 		Summary:  "request content byte flip surfaces invalid result with prompt_hash_mismatch reason",
 		SpecStep: "SPEC-015 §14 AC-20",
 		Commands: []string{"cd phase7-verify && go test -tags=integration -count=1 -timeout 120s -run TestReceiptBundleFixturesEndToEnd ."},
-		CIJobs:   []string{"phase7-verify integration (fixtures)", "phase7-verify (go vet + test)"},
+		CIJobs:   []string{"phase7-verify (go vet + test)"},
 		Evidence: []evidenceAnchor{
 			{"phase7-verify/internal/verify/verify_test.go", "AC-20 request content flip reports prompt hash mismatch"},
 			{"phase7-verify/testdata/invalid_tampered_prompt.bundle.json", "bundle_version"},
@@ -262,7 +262,7 @@ var spec015ACs = []acceptanceCriterion{
 		Summary:  "receipt tuple byte mutation surfaces signature_verify_failed before any hash-level check",
 		SpecStep: "SPEC-015 §14 AC-21",
 		Commands: []string{"cd phase7-verify && go test ./internal/verify/... -race -count=1 -run TestVerifyAcceptanceAC18ThroughAC23"},
-		CIJobs:   []string{"phase7-verify (go vet + test)", "phase7-verify integration (fixtures)"},
+		CIJobs:   []string{"phase7-verify (go vet + test)"},
 		Evidence: []evidenceAnchor{
 			{"phase7-verify/internal/verify/verify_test.go", "AC-21 tuple byte mutation fails signature before hash checks"},
 			{"phase7-verify/testdata/invalid_tampered_unix_ts.bundle.json", "bundle_version"},
@@ -293,7 +293,7 @@ var spec015ACs = []acceptanceCriterion{
 		Summary:  "JSON mode output validates against schemas/output.schema.json for every result variant",
 		SpecStep: "SPEC-015 §14 AC-24",
 		Commands: []string{"cd phase7-verify && go test ./internal/cli/... -race -count=1 -run TestSchema", "cd phase7-verify && go test -tags=integration -count=1 -timeout 120s -run TestReceiptBundleFixturesEndToEnd ."},
-		CIJobs:   []string{"phase7-verify (go vet + test)", "phase7-verify integration (fixtures)"},
+		CIJobs:   []string{"phase7-verify (go vet + test)"},
 		Evidence: []evidenceAnchor{
 			{"phase7-verify/internal/cli/output_test.go", "TestSchemaValidationValid"},
 			{"phase7-verify/schemas/output.schema.json", "additionalProperties"},
@@ -314,7 +314,7 @@ var spec015ACs = []acceptanceCriterion{
 		Summary:  "stale cache entry with fetched_at older than 7 days triggers a live fetch on the next verification",
 		SpecStep: "SPEC-015 §14 AC-26",
 		Commands: []string{"cd phase7-verify && go test ./internal/verify/... -race -count=1 -run TestVerifyAC26"},
-		CIJobs:   []string{"phase7-verify (go vet + test)", "phase7-verify integration (fixtures)"},
+		CIJobs:   []string{"phase7-verify (go vet + test)"},
 		Evidence: []evidenceAnchor{
 			{"phase7-verify/internal/verify/verify_test.go", "TestVerifyAC26StaleCacheTriggersLiveFetch"},
 			{"phase7-verify/internal/verify/verify_test.go", "TestVerifyAC26StaleCacheLiveFailureIsInconclusive"},
@@ -325,7 +325,7 @@ var spec015ACs = []acceptanceCriterion{
 		Summary:  "receipt signed by previous key inside the rotation grace window verifies valid; outside the window verifies invalid",
 		SpecStep: "SPEC-015 §14 AC-27",
 		Commands: []string{"cd phase7-verify && go test ./internal/verify/... -race -count=1 -run TestVerifyAC27"},
-		CIJobs:   []string{"phase7-verify (go vet + test)", "phase7-verify integration (fixtures)"},
+		CIJobs:   []string{"phase7-verify (go vet + test)"},
 		Evidence: []evidenceAnchor{
 			{"phase7-verify/internal/verify/verify_test.go", "TestVerifyAC27PreviousKeyGraceWindow"},
 			{"phase7-verify/testdata/valid_prev_key_in_grace.bundle.json", "bundle_version"},

@@ -17,7 +17,8 @@
 ## SPEC governance declaration
 
 <!--
-Fill in the JSON below; CI validates it with scripts/check_spec_pr_declaration.py.
+Optional. CI derives this from the diff and reports, without failing, a missing,
+malformed, or contradicting block (scripts/check_spec_pr_declaration.py).
 - behavior_change / contract_change: "none" or "yes". contract_change is "yes" when
   a canonical specs/SPEC-NNN-*.md, specs/AUTHORITY.json, or specs/CONFORMANCE.json changes.
 - behavior_change "none" is valid only when every changed path is governance-only.
