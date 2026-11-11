@@ -92,6 +92,21 @@ func TestDecodeStrictNullAndDuplicateNested(t *testing.T) {
 	if _, err := ParseHeartbeat([]byte(dup)); err == nil {
 		t.Error("nested duplicate key accepted")
 	}
+	// A duplicate key in the sole object of an array is refused, however the
+	// array is nested.
+	for _, raw := range []string{
+		`[{"a":1,"a":2}]`,
+		`{"x":[{"a":1,"a":2}],"y":1}`,
+		`[[{"a":1,"a":2}]]`,
+		`{"x":[{"a":1,"a":[1]}]}`,
+	} {
+		if err := rejectDuplicateKeys([]byte(raw)); err == nil {
+			t.Errorf("duplicate key accepted in %s", raw)
+		}
+	}
+	if err := rejectDuplicateKeys([]byte(`{"x":[{"a":1},{"a":2}]}`)); err != nil {
+		t.Errorf("same key in sibling array objects refused: %v", err)
+	}
 	// A null scalar field is a missing field.
 	nul := strings.Replace(good, `"interface_type":"thunderbolt"`, `"interface_type":null`, 1)
 	if _, err := ParseHeartbeat([]byte(nul)); err == nil {
