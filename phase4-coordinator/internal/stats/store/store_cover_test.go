@@ -100,12 +100,26 @@ func fixed(r fakeResult) func(string) fakeResult { return func(string) fakeResul
 
 var t0 = time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 
+// norm collapses whitespace so SQL assertions do not depend on layout.
+func norm(q string) string { return strings.Join(strings.Fields(q), " ") }
+
+func mustContainSQL(t *testing.T, q string, frags ...string) {
+	t.Helper()
+	n := norm(q)
+	for _, f := range frags {
+		if !strings.Contains(n, f) {
+			t.Errorf("query missing %q: %s", f, n)
+		}
+	}
+}
+
 func TestActivePartnerOriginsDedupesAndSkipsEmpty(t *testing.T) {
-	s, _ := newFake(t, fixed(fakeResult{
+	s, f := newFake(t, fixed(fakeResult{
 		cols: []string{"allowed_origins"},
 		rows: [][]driver.Value{
 			{"{https://a.example,https://b.example}"},
-			{"{https://a.example}"},
+			{`{https://a.example,""}`},
+			{`{""}`},
 			{"{}"},
 		},
 	}))
@@ -117,6 +131,7 @@ func TestActivePartnerOriginsDedupesAndSkipsEmpty(t *testing.T) {
 	if strings.Join(got, ",") != "https://a.example,https://b.example" {
 		t.Fatalf("got %v", got)
 	}
+	mustContainSQL(t, f.calls[0].query, "FROM partner_keys", "WHERE revoked_at IS NULL")
 }
 
 func TestActivePartnerOriginsQueryError(t *testing.T) {
@@ -171,6 +186,8 @@ func TestLeaderboardMapsRowsAndPicksTableAndOrder(t *testing.T) {
 	if !strings.Contains(q, "FROM stats_leaderboard_7d lb") || !strings.Contains(q, "ORDER BY lb.rank_tokens ASC") {
 		t.Fatalf("query did not select 7d/rank_tokens: %s", q)
 	}
+	mustContainSQL(t, q, "LEFT JOIN provider_visibility pv ON pv.provider_id = lb.provider_id",
+		"ORDER BY lb.rank_tokens ASC, lb.provider_id ASC")
 	if f.calls[0].args[0] != int64(25) {
 		t.Fatalf("limit arg=%v", f.calls[0].args[0])
 	}
@@ -257,16 +274,20 @@ func TestComponentGeneratedAt(t *testing.T) {
 
 func TestComponentsHealthMapsNullableColumns(t *testing.T) {
 	ctx := context.Background()
+	t1 := t0.Add(time.Hour)
 	s, _ := newFake(t, fixed(fakeResult{
 		cols: []string{"c", "g", "ok", "ee", "em"},
 		rows: [][]driver.Value{
-			{"a", t0, t0, nil, nil},
-			{"b", t0, t0, t0, "bad"},
+			{"a", t0, t1, nil, nil},
+			{"b", t0, t1, t0, "bad"},
 		},
 	}))
 	got, err := s.ComponentsHealth(ctx)
 	if err != nil || len(got) != 2 {
 		t.Fatalf("got=%v err=%v", got, err)
+	}
+	if !got[0].GeneratedAt.Equal(t0) || !got[0].LastOkAt.Equal(t1) || !got[1].GeneratedAt.Equal(t0) || !got[1].LastOkAt.Equal(t1) {
+		t.Fatalf("generated_at/last_ok_at mapping: %+v", got)
 	}
 	if got[0].LastErrorAt.Valid || got[0].LastErrorMessage.Valid {
 		t.Fatalf("a should have null error: %+v", got[0])
@@ -357,6 +378,7 @@ func TestProviderIdlePrewarmAggregatesAndUsesOneHourCutoff(t *testing.T) {
 	if len(f.calls) != 2 {
 		t.Fatalf("calls=%d", len(f.calls))
 	}
+	mustContainSQL(t, f.calls[1].query, "event = 'idle_prewarm_skipped'", "GROUP BY reason")
 	for _, c := range f.calls {
 		if c.args[0] != "prov-1" {
 			t.Fatalf("provider arg=%v", c.args[0])
@@ -388,21 +410,24 @@ func TestProviderIdlePrewarmErrorsPerQuery(t *testing.T) {
 
 func TestTimeseriesQueries(t *testing.T) {
 	ctx := context.Background()
-	s, _ := newFake(t, fixed(fakeResult{cols: []string{"b", "r"}, rows: [][]driver.Value{{t0, int64(5)}}}))
+	s, f := newFake(t, fixed(fakeResult{cols: []string{"b", "r"}, rows: [][]driver.Value{{t0, int64(5)}}}))
 	rpm, err := s.RpmTimeseries(ctx)
 	if err != nil || len(rpm) != 1 || rpm[0].Value != 5 || !rpm[0].Bucket.Equal(t0) {
 		t.Fatalf("rpm=%+v err=%v", rpm, err)
 	}
-	s, _ = newFake(t, fixed(fakeResult{cols: []string{"b", "i", "o"}, rows: [][]driver.Value{{t0, int64(6), int64(7)}}}))
+	mustContainSQL(t, f.calls[0].query, "ORDER BY bucket_start")
+	s, f = newFake(t, fixed(fakeResult{cols: []string{"b", "i", "o"}, rows: [][]driver.Value{{t0, int64(6), int64(7)}}}))
 	tpm, err := s.TpmTimeseries(ctx)
 	if err != nil || len(tpm) != 1 || tpm[0].InTok != 6 || tpm[0].OutTok != 7 || tpm[0].Value != 0 {
 		t.Fatalf("tpm=%+v err=%v", tpm, err)
 	}
-	s, _ = newFake(t, fixed(fakeResult{cols: []string{"b", "r", "i", "o"}, rows: [][]driver.Value{{t0, int64(5), int64(6), int64(7)}}}))
+	mustContainSQL(t, f.calls[0].query, "ORDER BY bucket_start")
+	s, f = newFake(t, fixed(fakeResult{cols: []string{"b", "r", "i", "o"}, rows: [][]driver.Value{{t0, int64(5), int64(6), int64(7)}}}))
 	d, err := s.DailyTimeseries(ctx)
 	if err != nil || len(d) != 1 || d[0].Value != 5 || d[0].InTok != 6 || d[0].OutTok != 7 {
 		t.Fatalf("daily=%+v err=%v", d, err)
 	}
+	mustContainSQL(t, f.calls[0].query, "ORDER BY day_start")
 	s, _ = newFake(t, fixed(fakeResult{err: errors.New("x")}))
 	if _, err := s.RpmTimeseries(ctx); err == nil {
 		t.Fatal("rpm err")
