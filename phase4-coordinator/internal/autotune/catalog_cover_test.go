@@ -156,6 +156,10 @@ func TestRowIdentityRejectsMalformedPolicy(t *testing.T) {
 		if c.PolicyEquivalent("k", c, "k") {
 			t.Errorf("%s: malformed policy must not be equivalent", extra)
 		}
+		good := mustCatalog(t, coverCatalogJSON(`{"k":{`+base+`}}`))
+		if good.PolicyEquivalent("k", c, "k") || c.PolicyEquivalent("k", good, "k") {
+			t.Errorf("%s: malformed policy on either side must not be equivalent", extra)
+		}
 	}
 }
 
