@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/ecdh"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -19,11 +20,12 @@ func directoryTestKey(seed byte) ed25519.PrivateKey {
 
 func directoryTestSEKey(t *testing.T, seed byte) string {
 	t.Helper()
-	priv, err := ecdh.P256().NewPrivateKey(bytes.Repeat([]byte{seed}, 32))
-	if err != nil {
-		t.Fatalf("NewPrivateKey: %v", err)
-	}
-	raw := priv.PublicKey().Bytes()[1:]
+	curve := elliptic.P256()
+	d := bytes.Repeat([]byte{seed}, 32)
+	x, y := curve.ScalarBaseMult(d)
+	raw := make([]byte, 64)
+	x.FillBytes(raw[:32])
+	y.FillBytes(raw[32:])
 	return base64.StdEncoding.EncodeToString(raw)
 }
 
