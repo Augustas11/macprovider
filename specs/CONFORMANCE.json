@@ -11811,7 +11811,12 @@
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPArtifactObservationTests.swift:testAffineFourRejectsUnpairedMismatchedAndPaddedHeaders",
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPArtifactObservationTests.swift:testUnquantizedObservationRejectsMissingFloat32AndGarbageDType",
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPGLM5NextObservationTests.swift:testEmbeddedObservationAcceptsAPostSanitizeCheckpointWithFiveSixEightBitOverrides",
-        "phase3-binary/Tests/macprovider-cliTests/NativeMTPGLM5NextObservationTests.swift:testEmbeddedObservationRejectsNamesTheLoaderWouldRewriteOrDrop",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPGLM5NextObservationTests.swift:testEmbeddedObservationRejectsCollidingDroppedOrUnmappedNames",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPGLM5NextObservationTests.swift:testEmbeddedObservationAcceptsTheHuggingFacePreSanitizeLayout",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPGLM5NextObservationTests.swift:testHuggingFaceLayoutRejectsForeignCollidingAndUnmappedNames",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPGLM5NextObservationTests.swift:testHuggingFaceLayoutRejectsPerExpertOverridesThatDisagree",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPGLM5NextObservationTests.swift:testEmbeddedObservationRejectsACheckpointWithoutTheMTPLayer",
+        "phase3-binary/Tests/macprovider-cliTests/NativeMTPGLM5NextObservationTests.swift:testLoaderKeyMappingMatchesThePinnedGLM5NextSanitizer",
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPAdmissionSidecarTests.swift:testReleaseEnvelopeAcceptsEmbeddedCheckpointMTPAndCapturesTheTargetOnce",
         "phase3-binary/Tests/macprovider-cliTests/NativeMTPAdmissionSidecarTests.swift:testMultiModelSidecarReadsTheV2ProjectionByModelKey"
       ],
