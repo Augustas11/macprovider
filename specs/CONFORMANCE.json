@@ -11916,7 +11916,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1770",
-        "rationale": "SPEC-048 v0.1.79 names LM 3.32.3-macprovider.34 (647b24d1f13ea662cf1c61ebcce18541400015ce), which is 3.32.3-macprovider.32 plus the mlx-swift 0.32.3-macprovider.13 pin (#2234). .32 is on 3.32.3-macprovider.25 (#2244, #2189): the per-layer quantization-map loader for checkpoints in the Hugging Face key layout; load-time only, no decode line changes. Model sources and the C row are unchanged; the Swift and core rows move to the qmv_mma core."
+        "rationale": "SPEC-048 v0.1.79 names LM 3.32.3-macprovider.37 (aea3da145b448542088efd73ab77a2cf54038e53): 3.32.3-macprovider.32 plus the mlx-swift 0.32.3-macprovider.13 pin (#2234) and GLM-5-Next projecting 1...8 decode tokens with one kernel (#2265). .32 is on 3.32.3-macprovider.25 (#2244, #2189): the per-layer quantization-map loader for checkpoints in the Hugging Face key layout; load-time only, no decode line changes. Model sources and the C row are unchanged; the Swift and core rows move to the qmv_mma core."
       }
     },
     {

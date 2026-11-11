@@ -42,11 +42,12 @@ EXPECTED_LOCATIONS = {
 # scripts: the upstream watch imports these names, and a test checks them
 # against the SPEC-048 fork table.
 SPEC048_MLX_SWIFT_LM_FORK = "https://github.com/Augustas11/mlx-swift-lm"
-# 3.32.3-macprovider.34 (#2234) is .32 (`6c27b74`) plus one commit that pins
-# mlx-swift 0.32.3-macprovider.13. .32 (#2244, #2189) on .25 maps a Hugging
-# Face per-layer quantization map to module paths at load; decode is unchanged.
-SPEC048_MLX_SWIFT_LM_TAG = "3.32.3-macprovider.34"
-SPEC048_MLX_SWIFT_LM_REVISION = "647b24d1f13ea662cf1c61ebcce18541400015ce"
+# 3.32.3-macprovider.37 (#2265) is .34 (`647b24d`) plus one commit: GLM-5-Next
+# projects 1...8 decode tokens with one kernel. .34 (#2234) is .32 (`6c27b74`)
+# plus one commit that pins mlx-swift 0.32.3-macprovider.13. .32 (#2244, #2189)
+# on .25 maps a Hugging Face per-layer quantization map to module paths at load.
+SPEC048_MLX_SWIFT_LM_TAG = "3.32.3-macprovider.37"
+SPEC048_MLX_SWIFT_LM_REVISION = "aea3da145b448542088efd73ab77a2cf54038e53"
 SPEC048_MLX_SWIFT_LM_UPSTREAM_BASE = "3b339ad6e3b3f44c8121ecff5131c7fd55e075e6"
 SPEC048_MLX_SWIFT_FORK = "https://github.com/Augustas11/mlx-swift"
 SPEC048_MLX_SWIFT_TAG = "0.32.3-macprovider.13"

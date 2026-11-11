@@ -521,14 +521,19 @@ The authorized dependency tuple is exact:
 
 | Repository | Fork tag | Revision | Upstream base |
 |---|---|---|---|
-| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.34` | `647b24d1f13ea662cf1c61ebcce18541400015ce` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
+| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.37` | `aea3da145b448542088efd73ab77a2cf54038e53` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
 | `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.13` | `565269220ccc2cc0d2ce149affb98a2f9d9b32ac` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
 | `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.7` | `565070fe4b0f95927f7fdd5fcfb537157605037a` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
 | `https://github.com/Augustas11/mlx-c` | `v0.6.0-macprovider.2` | `2b1ff2b5b5129a6115771da32e1bac3b6b01ab01` | `ml-explore/mlx-c` pinned base (`ebc88f10caa1b625e6b581437a8dea6df8a70085`) |
 
-The mlx-swift-lm row `3.32.3-macprovider.34` is `3.32.3-macprovider.32`
-(`6c27b743bae5dd60eb07954f2819316b22b92094`) plus one commit that pins mlx-swift
-`0.32.3-macprovider.13` (#2234); no model source changes. The Swift row is
+The mlx-swift-lm row `3.32.3-macprovider.37` is `3.32.3-macprovider.32`
+(`6c27b743bae5dd60eb07954f2819316b22b92094`) plus two commits. The first pins
+mlx-swift `0.32.3-macprovider.13` (#2234). The second (#2265) sends every
+GLM-5-Next projection of 1 to 8 decode or verification tokens to the
+`glm5NextQMVBatch` kernel, whose rows reduce in `qmv_fast` order like the other
+GLM decode kernels, so a token's projection no longer depends on how many tokens
+share the call or on the small-M kernel MLX picks. Before it, one token went to
+MLX, which on GPUs without NAX now takes `qmv_mma`. The Swift row is
 `0.32.3-macprovider.11` (`c774cb0934c7503bc3fe1c3d1afbe44c728e8891`) plus the
 qmv_mma core and the metallib sources for `gather_mm_offsets` and the SDPA VJP
 kernel. The core row is the fork tag `v0.32.4-macprovider.7`, one commit on
@@ -2338,14 +2343,16 @@ requests.
 
 ## 9. Changelog and history
 
-- **0.1.79 (2026-11-10, Related: #2234)** — R003 names mlx-swift-lm
-  `3.32.3-macprovider.34` (`647b24d1f13ea662cf1c61ebcce18541400015ce`), which is
-  `3.32.3-macprovider.32` plus the mlx-swift pin commit, mlx-swift
+- **0.1.79 (2026-11-11, Related: #2234, #2265)** — R003 names mlx-swift-lm
+  `3.32.3-macprovider.37` (`aea3da145b448542088efd73ab77a2cf54038e53`), which is
+  `3.32.3-macprovider.32` plus the mlx-swift pin commit and the GLM-5-Next
+  one-kernel decode projection, mlx-swift
   `0.32.3-macprovider.13` (`565269220ccc2cc0d2ce149affb98a2f9d9b32ac`) and core
   `v0.32.4-macprovider.7` (`565070fe4b0f95927f7fdd5fcfb537157605037a`): every eligible
   affine small-M product takes `qmv_mma` from 1 to 16 rows on non-NAX GPUs, and
-  the metallib ships `gather_mm_offsets` and the SDPA VJP kernel. Model sources
-  and the C row are unchanged.
+  the metallib ships `gather_mm_offsets` and the SDPA VJP kernel. GLM-5-Next
+  projects 1 to 8 decode tokens with its own `qmv_fast`-order kernel. The C row
+  is unchanged.
 - **0.1.78 (2026-11-10, Related: #2189)** — MTP-13 and MTP-14 item 5:
   a same-architecture variant inherits R005, the gated cells and the
   sustained phase from an admitted donor with the same family adapter,
