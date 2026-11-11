@@ -5765,11 +5765,13 @@ private class PagedKVBatchLayerCache: MTPPackedVerificationCache, KVCacheSinkAtt
             return nil
         }
         let window = presentationWindowTokens
-        // Attached rows (#2280) already keep their K/V only in this buffer:
-        // `updateRaggedInPlace` writes the token once and moves their lengths,
-        // while a deferred flush would hand each row a view of the buffer and
-        // detach it.
-        guard !rowsAttached,
+        // Decode-session batches that attach rows (#2280) keep the rows' K/V
+        // only in this buffer: `updateRaggedInPlace` writes the token once and
+        // moves their lengths, while a deferred step would leave attached rows
+        // behind their batch until a flush, and the flush would hand each row a
+        // view of the buffer and detach it. That holds after an outside write
+        // detached some rows too, so this checks the batch, not each row.
+        guard !attachesRows,
               incomingKeys.dim(2) == 1,
               incomingValues.dim(2) == 1,
               rowCaches.count > 1,
