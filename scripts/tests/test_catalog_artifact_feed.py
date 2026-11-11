@@ -631,16 +631,19 @@ class Bonsai2BCandidateStagingTest(unittest.TestCase):
         self.assertIn("12457.35 ms", row["bench_gate"]["provenance"]["notes"])
         self.assertFalse(any("bonsai" in key and "4b" in key for key in CANDIDATE_OBJ["rows"]))
 
-    def test_staging_has_no_demand_or_admission_transition(self):
-        self.assertEqual(CANDIDATE_OBJ["rows"][self.KEY]["runtime_status"], "candidate")
+    def test_listing_is_not_recommendation(self):
+        # #2154: listed (coldstart_slot, 8 GB tier target), never recommendable
+        # in the release that lists it, so the 8 GB preference stays inactive.
+        self.assertEqual(CANDIDATE_OBJ["rows"][self.KEY]["runtime_status"], "listed")
         demand = catalog_release.validate_demand(DEMAND_BYTES)["rows"][self.KEY]
         self.assertEqual(demand, {"demand_weight": 0, "min_provider_target": 0,
                                   "rank": None, "recommendable": False})
         current = catalog_release.candidate_admission_tiers(CANDIDATE_OBJ)
         previous = dict(current)
-        previous.pop(self.KEY)
-        self.assertEqual(catalog_release.intake_transitions(previous, current), [])
-        catalog_release.require_intake_decision(CANDIDATE_OBJ, previous, None, activation=False)
+        previous[self.KEY] = catalog_release.CANDIDATE_ADMISSION_TIER["candidate"]
+        self.assertEqual(len(catalog_release.intake_transitions(previous, current)), 1)
+        with self.assertRaises(catalog_release.CatalogError):
+            catalog_release.require_intake_decision(CANDIDATE_OBJ, previous, None, activation=False)
 
 
 class RateCardSourceTest(unittest.TestCase):
@@ -660,24 +663,23 @@ class RateCardSourceTest(unittest.TestCase):
             key for key, row in CANDIDATE_OBJ["rows"].items()
             if row["runtime_status"] == "recommendable"
         }
-        # Pricing a staged artifact does not admit it for recommendation.
-        staged = {"prism-ml/ternary-bonsai-2-2b-mlx-2bit"}
         demand = catalog_release.validate_demand(DEMAND_BYTES)["rows"]
-        for key in staged:
-            self.assertEqual(CANDIDATE_OBJ["rows"][key]["runtime_status"], "candidate")
-            self.assertIs(demand[key]["recommendable"], False)
-            self.assertIsNone(demand[key]["rank"])
         # #2270: Ripple-65B Preview is listed at its declared class rates.
         # #2231: LFM3 1.7B is listed at its declared class rates.
-        listed_priced = {"ricursiveai/ripple-65b-preview", "liquidai/lfm3-1.7b"}
+        # #2154: Ternary-Bonsai-2 2B is listed at class-3b; listing does not
+        # admit it for recommendation.
+        listed_priced = {
+            "ricursiveai/ripple-65b-preview",
+            "liquidai/lfm3-1.7b",
+            "prism-ml/ternary-bonsai-2-2b-mlx-2bit",
+        }
         for key in listed_priced:
             self.assertEqual(CANDIDATE_OBJ["rows"][key]["runtime_status"], "listed")
             self.assertIs(demand[key]["recommendable"], False)
             self.assertIsNone(demand[key]["rank"])
-        # All recommendable rows remain class-bound; only the explicit staged
-        # candidate and the priced listed row extend the priced set. Other
-        # listed rows need no rate_class.
-        self.assertEqual(set(classes), recommendable | staged | listed_priced)
+        # All recommendable rows remain class-bound; only the priced listed
+        # rows extend the priced set. Other listed rows need no rate_class.
+        self.assertEqual(set(classes), recommendable | listed_priced)
         # #2189: the uncensored build serves serially, so its demand weight
         # stays at the cold-start floor and it never outranks the base row.
         self.assertLess(demand["zai-org/glm-5.3-flash-uncensored"]["demand_weight"],
