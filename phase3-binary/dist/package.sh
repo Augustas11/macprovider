@@ -97,6 +97,26 @@ BUILD_LOG="$PACKAGE_WORK_DIR/package-build.log"
 # package-declared Swift settings from dependencies and breaks the build.
 # Release defines neither DEBUG nor MACPROVIDER_LAB_HARNESS; lab builds add
 # the harness define only through `swift build -Xswiftc`.
+# MACPROVIDER_PACKAGE_BUILD_ARCH=arm64 (the arm64 acceptance-candidate runner)
+# compiles only the shipped arm64 slice. Only an arm64 host may set it: there
+# the Swift macro host tools are arm64 as well. On an Intel host a global
+# architecture override makes those host tools unbuildable, so the default
+# builds the generic destination and the step below thins it to arm64.
+XCODEBUILD_ARCH_SETTINGS=()
+case "${MACPROVIDER_PACKAGE_BUILD_ARCH:-}" in
+  "") ;;
+  arm64)
+    [ "$(uname -m)" = arm64 ] || {
+      echo "FATAL: MACPROVIDER_PACKAGE_BUILD_ARCH=arm64 needs an arm64 package host (Swift macro host tools)" >&2
+      exit 1
+    }
+    XCODEBUILD_ARCH_SETTINGS=("ARCHS=arm64")
+    ;;
+  *)
+    echo "FATAL: unsupported MACPROVIDER_PACKAGE_BUILD_ARCH ${MACPROVIDER_PACKAGE_BUILD_ARCH}" >&2
+    exit 1
+    ;;
+esac
 if ! xcodebuild -scheme macprovider-cli \
                 -configuration Release \
                 -destination 'generic/platform=macOS' \
@@ -104,6 +124,7 @@ if ! xcodebuild -scheme macprovider-cli \
                 -onlyUsePackageVersionsFromResolvedFile \
                 -skipPackagePluginValidation \
                 -skipMacroValidation \
+                ${XCODEBUILD_ARCH_SETTINGS[@]+"${XCODEBUILD_ARCH_SETTINGS[@]}"} \
                 clean build >"$BUILD_LOG" 2>&1; then
   tail -200 "$BUILD_LOG" >&2
   rm -f "$BUILD_LOG"

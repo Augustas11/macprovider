@@ -60,17 +60,12 @@ cutting that candidate does not publish the embedded gateway pages.
 
 ## Current published release and fleet target
 
-Verified 2026-10-25 against GitHub release/tag metadata, the release train
-(`scripts/ops/cli-release.sh status`: `v1.8.272 train complete`) and live coordinator health:
-
-| Field | Value |
-|---|---|
-| GitHub provider release | [v1.8.272](https://github.com/Augustas11/macprovider/releases/tag/v1.8.272), promoted 2026-10-25 (promotion run 40152407985) |
-| Signed compatibility-set id | `Augustas11/macprovider:v1.8.272@28c06242701de711454f65b4bfb34375d31803c7` |
-| Pearl runtime / recommended provider | `v1.8.271` / `1.8.272` (recommendation bump 2026-10-25) |
-| Release mirror / installer | `latest.json` → v1.8.272; `get.malibu.tech/install.sh` parity with v1.8.272, consumer health OK |
-| Catalog | `published-2026-10-25-glm53-qwen36-native-mtp-v272` (#2141), activated 2026-10-25 02:49–03:12Z; `native_mtp_admission_decode_path` `match` (`4d04a3f3…`) |
-| Consumed identities | Provider and runtime tags through **v1.8.272** are consumed (v1.8.271 is a Pearl runtime tag). The next provider CLI takes the next unused tag; refresh both trains and remote tags first. |
+This section is generated, never typed: run `scripts/ops/release-train-status.sh`
+(read-only; GitHub release metadata through `gh`, the public coordinator
+`/healthz`, and `MIRROR_LATEST_URL` when set; no ssh) and paste its Markdown
+output over this section in a docs-only push. The hand-written table that
+stood here was last verified on 2026-10-25 and went stale, so it was removed.
+For the live train state run `scripts/ops/cli-release.sh status`.
 
 ## Next CLI release — net changes vs 1.8.272 (tracked 2026-10-26)
 
@@ -1486,12 +1481,14 @@ mainland-provider installer handoff.
    `candidate_cut` blocked, with NEXT `scripts/ops/catalog-activate.sh status`,
    until Pearl's `/v1/autotune-release` reports the committed `release_id`.
    Do **not** reuse `v1.8.163` / `v1.8.164` / `v1.8.167` / `v1.8.168`.
-3. In-scope e2e green on that candidate, or an explicit carry-forward record
-   under the rule above. For 1.8.217, the fused A3B MoE ordinary path (#1832)
-   is in scope with its Studio qualification at `7d55924eb`; native MTP
-   remains default-off and out of scope. Earlier signed
-   candidate evidence may carry forward only where the table and track record
-   explicitly permit it.
+3. No separate per-cut e2e record. The exact-candidate canary probe (item 5:
+   status probe plus one provider-attributed paid gateway request) is the
+   cut's end-to-end check. A decode-path change is qualified on its lab build
+   in its own PR window before it merges, not at the cut. `cli-release.sh`
+   has no `e2e_gate` step: every cut from 1.8.230 to 1.8.283 passed it with a
+   carry-forward line in this file. The optional `native_mtp_postcut` step
+   still runs when `NATIVE_MTP_POSTCUT_EVIDENCE` stages post-cut native-MTP
+   evidence.
 4. Privacy code identity registered on Pearl before any canary or fleet
    provider runs the candidate: `scripts/ops/cli-release.sh` step
    `privacy_release_identity` copies the verified candidate
@@ -1516,7 +1513,10 @@ mainland-provider installer handoff.
    Silence while the model loads is not a failure: GLM-5.3-Flash keeps
    `/v1/status` silent for 7-13 minutes while it loads, so with the same
    provider pid alive the load is bounded only by `CANARY_READY_TIMEOUT_S`
-   (1800 s). No timeout override is needed. Verify the installed CLI advertises
+   (1800 s). No timeout override is needed. The automatic restore is not
+   guaranteed: exit 5 means the candidate failed and the previous version is
+   back and buyer_serving; exit 6 means recovery did not complete and the
+   operator must restore the canary by hand. Verify the installed CLI advertises
    1.8.217, joins through Pearl's exact compatibility set, preserves operator
    pause through coordinator drain, and serves a bounded request. Do not touch
    the designated Studio until the operator releases its current session lock.
@@ -1575,15 +1575,17 @@ mainland-provider installer handoff.
 11. Curl-channel `https://get.malibu.tech/install.sh`:
    - **On promotion:** republish from the promoted tag (or confirm served
      bytes still match that tag) so `scripts/check-install-sh-parity.sh`
-     against the tag is green. `cli-release.sh` offers this
-     (`install_sh_republish`) right after promotion, before the
+     against the tag is green. `cli-release.sh` runs this
+     (`install_sh_republish`, `next --run`: backup, install over `PEARL_SSH`,
+     SHA-256 read-back) right after promotion, before the
      recommendation bump (item 8 onward), because the scheduled parity alarm
      compares against the latest published release (#2210). The alarm
      tolerates the previous release's exact bytes for 120 minutes after
      publication; past that, drift alarms. Without `PEARL_SSH` /
      `INSTALL_SH_REMOTE_PATH` the train reports the republish as blocked
-     only after `mirror_latest`. Confirm
-     `scripts/check-install-sh-consumer-health.sh` is green (#1600 / #1588).
+     only after `mirror_latest`. Consumer health is the scheduled
+     `install-sh-consumer-health-alarm.yml` (#1600 / #1588), not a train
+     step.
    - **Off-cycle from `main`:** allowed when the public one-liner must
      change before the next CLI promotion (fresh-Mac CLT wall, pagination).
      Record date + SHA-256 in this file. Expect the parity alarm vs the

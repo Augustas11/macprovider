@@ -1402,6 +1402,7 @@ expect_descendant_failure baked-native-dropped-served "serves /v1/native-mtp-adm
 
 python3 - "$workflow" "$promotion_workflow" "$rollout_workflow" <<'PY'
 import pathlib
+import re
 import sys
 
 def require_stable_gate(
@@ -1485,8 +1486,10 @@ def require_rollout(workflow_path):
     workflow = pathlib.Path(workflow_path).read_text(encoding="utf-8")
     if "workflow_dispatch:" not in workflow:
         raise SystemExit("post-publication rollout proof must be manually dispatchable")
-    if "environment: production-release" not in workflow:
-        raise SystemExit("post-publication rollout proof must use the production environment")
+    # It holds no secrets (github.token only), so no approval environment:
+    # the live coordinator gate decides publication.
+    if re.search(r"(?m)^\s+environment:", workflow):
+        raise SystemExit("post-publication rollout proof must not wait on an approval environment")
     if "concurrency:" not in workflow or "group: production-release" not in workflow:
         raise SystemExit("post-publication rollout proof must share the production serialization")
     if "contents: write" not in workflow or "secrets." in workflow:

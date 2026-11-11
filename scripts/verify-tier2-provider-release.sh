@@ -17,6 +17,7 @@ PROVIDER_VERSION_OVERRIDE="${PROVIDER_VERSION:-}"
 KEEP_DOWNLOADS="${KEEP_DOWNLOADS:-0}"
 DOWNLOAD_ATTEMPTS="${DOWNLOAD_ATTEMPTS:-1}"
 DOWNLOAD_RETRY_SLEEP="${DOWNLOAD_RETRY_SLEEP:-5}"
+NOTARY_ATTEMPTS="${NOTARY_ATTEMPTS:-4}"
 PROVIDER_RUNTIME_MODE="${PROVIDER_RUNTIME_MODE:-execute}"
 PROVIDER_EXPECTED_ARCHES="${PROVIDER_EXPECTED_ARCHES:-}"
 PROVIDER_LIPO_BIN="${PROVIDER_LIPO_BIN:-}"
@@ -49,6 +50,9 @@ Environment:
   KEEP_DOWNLOADS=1                    keep downloaded artifacts and print path
   DOWNLOAD_ATTEMPTS                    default: 1
   DOWNLOAD_RETRY_SLEEP                 seconds between attempts; default: 5
+  NOTARY_ATTEMPTS                      stapler validation attempts on a network
+                                       error only (backoff doubles from
+                                       DOWNLOAD_RETRY_SLEEP); default: 4
   PROVIDER_RUNTIME_MODE                execute (default) or structural
   PROVIDER_EXPECTED_ARCHES             required in structural mode
   PROVIDER_LIPO_BIN                    absolute lipo path when validating arches
@@ -392,6 +396,10 @@ esac
 case "$DOWNLOAD_RETRY_SLEEP" in
   ''|*[!0-9]*) die "DOWNLOAD_RETRY_SLEEP must be a non-negative integer" ;;
 esac
+case "$NOTARY_ATTEMPTS" in
+  ''|*[!0-9]*) die "NOTARY_ATTEMPTS must be a positive integer" ;;
+esac
+[ "$NOTARY_ATTEMPTS" -ge 1 ] || die "NOTARY_ATTEMPTS must be >= 1"
 case "$PROVIDER_RUNTIME_MODE" in
   execute) ;;
   structural)
@@ -426,6 +434,28 @@ download_file() {
     log "download failed for $label, retrying in ${DOWNLOAD_RETRY_SLEEP}s (attempt $attempt/$DOWNLOAD_ATTEMPTS)"
     sleep "$DOWNLOAD_RETRY_SLEEP"
     attempt=$((attempt + 1))
+  done
+}
+
+# stapler_validate PATH LABEL: `xcrun stapler validate`, retried with backoff
+# only while Apple's ticket service is unreachable. That network error is not a
+# result; any other failure (no ticket, invalid ticket) fails at once.
+stapler_validate() {
+  local path="$1" label="$2" attempt=1 delay="$DOWNLOAD_RETRY_SLEEP" out rc
+  while :; do
+    rc=0
+    out="$(xcrun stapler validate "$path" 2>&1)" || rc=$?
+    [ -z "$out" ] || printf '%s\n' "$out" >&2
+    [ "$rc" -ne 0 ] || return 0
+    if [ "$attempt" -lt "$NOTARY_ATTEMPTS" ] && printf '%s\n' "$out" | grep -Eqi \
+      'NSURLErrorDomain|network connection was lost|request timed out|appears to be offline|could not connect to the server|hostname could not be found'; then
+      log "$label stapler validation could not reach Apple, retrying in ${delay}s (attempt $attempt/$NOTARY_ATTEMPTS)"
+      sleep "$delay"
+      delay=$((delay * 2))
+      attempt=$((attempt + 1))
+      continue
+    fi
+    return 1
   done
 }
 
@@ -482,7 +512,7 @@ if [ -n "$pkg_expected_sha" ]; then
     log "provider package Gatekeeper assessment passed"
   fi
   if command -v xcrun >/dev/null 2>&1; then
-    xcrun stapler validate "$pkg_path" || die "provider package stapler validation failed"
+    stapler_validate "$pkg_path" "provider package" || die "provider package stapler validation failed"
     log "provider package stapler validation passed"
   fi
 
@@ -589,7 +619,7 @@ print(version + " " + build)
   verify_mlx_kernels "Malibu.app" "$app_path/Contents/MacOS"
   codesign --verify --strict --deep --verbose=2 "$app_path" || die "Malibu.app code signature verification failed"
   log "Malibu.app code signature verified"
-  xcrun stapler validate "$app_dmg_path" || die "Malibu.app DMG stapler validation failed"
+  stapler_validate "$app_dmg_path" "Malibu.app DMG" || die "Malibu.app DMG stapler validation failed"
   log "Malibu.app DMG stapler validation passed"
   spctl -a -vvv -t open "$app_dmg_path" || spctl -a -vvv -t exec "$app_path" || die "Malibu.app failed Gatekeeper assessment"
   log "Malibu.app Gatekeeper assessment passed"
