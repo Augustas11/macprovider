@@ -15,16 +15,19 @@ import (
 // fakeDB is a minimal in-memory database/sql driver that records what Apply
 // executes, so the runner's control flow can be tested without Postgres.
 type fakeDB struct {
-	applied   map[int]string // committed schema_migrations_spec017 rows
-	bodies    []string       // migration bodies executed, in order
-	commits   int
-	rollbacks int
-	failBody  string // exec error when a statement contains this text
-	failQuery bool   // fail the applied-versions SELECT
-	failLock  bool   // fail pg_advisory_lock
-	failBegin bool
-	unlocked  bool
-	pending   map[int]string
+	applied    map[int]string // committed schema_migrations_spec017 rows
+	bodies     []string       // migration bodies executed, in order
+	commits    int
+	rollbacks  int
+	failBody   string // exec error when a statement contains this text
+	failQuery  bool   // fail the applied-versions SELECT
+	failLock   bool   // fail pg_advisory_lock
+	failBegin  bool
+	unlocked   bool
+	failCommit bool
+	lockKey    any // argument passed to pg_advisory_lock
+	unlockKey  any // argument passed to pg_advisory_unlock
+	pending    map[int]string
 }
 
 type fakeDriver struct{ db *fakeDB }
@@ -49,8 +52,10 @@ func (c *fakeConn) ExecContext(_ context.Context, q string, args []driver.NamedV
 		if c.db.failLock {
 			return nil, errors.New("lock boom")
 		}
+		c.db.lockKey = args[0].Value
 	case strings.Contains(q, "pg_advisory_unlock"):
 		c.db.unlocked = true
+		c.db.unlockKey = args[0].Value
 	case strings.Contains(q, "INSERT INTO schema_migrations_spec017"):
 		if c.db.failBody == "INSERT" {
 			return nil, errors.New("insert boom")
@@ -79,6 +84,9 @@ func (c *fakeConn) QueryContext(_ context.Context, q string, _ []driver.NamedVal
 type fakeTx struct{ db *fakeDB }
 
 func (t *fakeTx) Commit() error {
+	if t.db.failCommit {
+		return errors.New("commit boom")
+	}
 	t.db.commits++
 	for v, n := range t.db.pending {
 		t.db.applied[v] = n
@@ -142,6 +150,25 @@ func TestApplyRunsAllMigrationsInOrderAndRecordsThem(t *testing.T) {
 	}
 	if !f.unlocked {
 		t.Fatal("advisory lock was not released")
+	}
+	if f.lockKey != advisoryLockKey || f.unlockKey != advisoryLockKey {
+		t.Fatalf("lock key=%v unlock key=%v, want both %d", f.lockKey, f.unlockKey, advisoryLockKey)
+	}
+}
+
+func TestApplyCommitFailureIsWrappedAndNotRecorded(t *testing.T) {
+	all, err := All()
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := &fakeDB{failCommit: true}
+	err = Apply(context.Background(), openFake(t, f))
+	want := fmt.Sprintf("migration %03d_%s: commit", all[0].Version, all[0].Name)
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("err=%v, want containing %q", err, want)
+	}
+	if len(f.applied) != 0 {
+		t.Fatalf("applied=%d, want 0", len(f.applied))
 	}
 }
 
