@@ -207,19 +207,19 @@ providers:
 `)
 	t.Setenv(dsnEnvName, "")
 	t.Setenv(trustDSNEnvName, "")
-	if err := run(context.Background(), options{configPath: t.TempDir() + "/nope.yaml"}); err == nil {
-		t.Fatal("missing config accepted")
+	if err := run(context.Background(), options{configPath: t.TempDir() + "/nope.yaml"}); err == nil || !strings.Contains(err.Error(), "nope.yaml") {
+		t.Fatalf("missing config: %v", err)
 	}
 	err := run(context.Background(), options{configPath: good, requireChips: "other chip", dryRun: true})
-	if err == nil {
-		t.Fatal("missing required chip accepted")
+	if err == nil || !strings.Contains(err.Error(), "other chip") {
+		t.Fatalf("missing required chip: %v", err)
 	}
 	bad := writeTempConfig(t, "chips: {}\nproviders:\n  mac: {chip_normalized: x, chip: y}\n")
 	if err := run(context.Background(), options{configPath: bad, dryRun: true}); err == nil || !strings.Contains(err.Error(), "at least one chip") {
 		t.Fatalf("invalid inventory: %v", err)
 	}
 	err = run(context.Background(), options{configPath: good})
-	if err == nil || !strings.Contains(err.Error(), "postgres dsn is required") {
+	if err == nil || !strings.Contains(err.Error(), "via --dsn or") {
 		t.Fatalf("no dsn: %v", err)
 	}
 	var out strings.Builder
