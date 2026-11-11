@@ -6287,8 +6287,24 @@ def feed_continuity_drift(incoming: pathlib.Path, live: pathlib.Path) -> list[st
         RATE_CARD_FEED_NAME: ("version", "generated_at"),
         CB_POLICY_FEED_NAME: ("release_id", "generated_at", "expires_at", "candidate_catalog_sha256"),
     }
+    def cb_content(path: pathlib.Path) -> str:
+        # Each CB entry's `tuple_sha256` hashes the release stamps (release_id,
+        # generated_at, expires_at, candidate digest, signer) with the entry, so
+        # it changes on every re-stamp. It is release-derived; `verify`
+        # recomputes it against the new stamps.
+        obj = strict_json(path.read_bytes(), str(path))
+        for field in renewal_fields[CB_POLICY_FEED_NAME]:
+            obj.pop(field, None)
+        for entry in obj.get("entries", []):
+            if isinstance(entry, dict):
+                entry.pop("tuple_sha256", None)
+        return json.dumps(obj, sort_keys=True)
+
     for name in RENEWAL_CONTINUITY_FEEDS:
-        if stripped(incoming / name, renewal_fields[name]) != stripped(live / name, renewal_fields[name]):
+        if name == CB_POLICY_FEED_NAME:
+            if cb_content(incoming / name) != cb_content(live / name):
+                drift.append(name)
+        elif stripped(incoming / name, renewal_fields[name]) != stripped(live / name, renewal_fields[name]):
             drift.append(name)
     incoming_feed = incoming / ARTIFACT_FEED_NAME
     live_feed = live / ARTIFACT_FEED_NAME
@@ -6348,6 +6364,54 @@ def cmd_continuity_check(incoming: pathlib.Path, live: pathlib.Path) -> None:
             " not freshness renewal"
         )
     print("continuity-check: dates-only delta confirmed")
+
+
+RATE_CARD_CREDIT_FIELDS = ("prompt_rate_per_mtok", "prompt_cache_hit_rate_per_mtok", "completion_rate_per_mtok")
+
+
+def cmd_pricing_only_check(incoming: pathlib.Path, live: pathlib.Path) -> None:
+    """Pricing-only guard for the catalog-content lane.
+
+    Passes only when the staged release differs from the live one in the three
+    credit rates of existing rate-card rows: every other feed is continuous
+    (`feed_continuity_drift`), the row key set is identical, every non-stamp
+    top-level rate-card field is equal, and each row's non-rate fields are
+    unchanged. Providers never bill — the coordinator applies the rate card —
+    so such a release needs no canary custody proof or canary restart.
+    """
+    drift = feed_continuity_drift(incoming, live)
+    if drift != [RATE_CARD_FEED_NAME]:
+        fail("pricing-only-check: content drift vs live is " + (", ".join(drift) if drift else "none") + ", not rate-card.json alone")
+    new = strict_json((incoming / RATE_CARD_FEED_NAME).read_bytes(), "incoming rate-card")
+    old = strict_json((live / RATE_CARD_FEED_NAME).read_bytes(), "live rate-card")
+    if not isinstance(new, dict) or not isinstance(old, dict):
+        fail("pricing-only-check: rate-card must be an object")
+    stamps = ("version", "generated_at", "rows")
+    new_top = {k: v for k, v in new.items() if k not in stamps}
+    old_top = {k: v for k, v in old.items() if k not in stamps}
+    if new_top != old_top:
+        changed = sorted(k for k in set(new_top) | set(old_top) if new_top.get(k) != old_top.get(k))
+        fail("pricing-only-check: rate-card top-level field(s) changed: " + ", ".join(changed))
+    new_rows, old_rows = new.get("rows"), old.get("rows")
+    if not isinstance(new_rows, dict) or not isinstance(old_rows, dict):
+        fail("pricing-only-check: rate-card rows must be an object")
+    if set(new_rows) != set(old_rows):
+        added = sorted(set(new_rows) - set(old_rows))
+        removed = sorted(set(old_rows) - set(new_rows))
+        fail(f"pricing-only-check: rate-card row set changed (added {added}, removed {removed})")
+    moved = 0
+    for key in sorted(new_rows):
+        a, b = new_rows[key], old_rows[key]
+        if not isinstance(a, dict) or not isinstance(b, dict):
+            fail(f"pricing-only-check: rate-card row {key} must be an object")
+        rest_a = {k: v for k, v in a.items() if k not in RATE_CARD_CREDIT_FIELDS}
+        rest_b = {k: v for k, v in b.items() if k not in RATE_CARD_CREDIT_FIELDS}
+        if rest_a != rest_b:
+            changed = sorted(k for k in set(rest_a) | set(rest_b) if rest_a.get(k) != rest_b.get(k))
+            fail(f"pricing-only-check: rate-card row {key} non-rate field(s) changed: " + ", ".join(changed))
+        if a != b:
+            moved += 1
+    print(f"pricing-only-check: only credit rates of {moved} existing rate-card row(s) changed")
 
 
 # #1688 A2: `compare-live` decides whether a runtime deploy may touch the live
@@ -7774,6 +7838,15 @@ def main() -> int:
     )
     continuity_parser.add_argument("--incoming", type=pathlib.Path, required=True)
     continuity_parser.add_argument("--live", type=pathlib.Path, required=True)
+    pricing_only_parser = sub.add_parser(
+        "pricing-only-check",
+        help=(
+            "catalog-content guard: fail unless the staged release differs from the live release "
+            "only in the credit rates of existing rate-card rows (no canary needed)"
+        ),
+    )
+    pricing_only_parser.add_argument("--incoming", type=pathlib.Path, required=True)
+    pricing_only_parser.add_argument("--live", type=pathlib.Path, required=True)
     compare_parser = sub.add_parser(
         "compare-live",
         help=(
@@ -8016,6 +8089,8 @@ def main() -> int:
             cmd_intake_pool_proven_value(args.release_id, args.model_key, args.intake_audit_dir, args.artifact_hash)
         elif args.command == "continuity-check":
             cmd_continuity_check(args.incoming, args.live)
+        elif args.command == "pricing-only-check":
+            cmd_pricing_only_check(args.incoming, args.live)
         elif args.command == "compare-live":
             return cmd_compare_live(args.incoming, args.live, args.ledger, args.tier2_content_index)
         elif args.command == "tier2-content-index":

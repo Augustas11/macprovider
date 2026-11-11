@@ -829,7 +829,7 @@ $RB_NATIVE_POOL_CANARY"
 
   gather_buyer_ux_conformance
 
-  local verdict="$OPS_STATE_DIR/$OPS_SCOPE/preflight-$main_sha.json" fresh=false go="" pricing="" lane_detail="" failed="" owed_pf=""
+  local verdict="$OPS_STATE_DIR/$OPS_SCOPE/preflight-$main_sha.json" fresh=false go="" pricing="" pricing_only=false lane_detail="" failed="" owed_pf=""
   # Owed evidence (e) outlives the release that deferred it: one ledger entry
   # per owed model, open until a buyer_serving_e2e record names that model.
   local owed_dir="$OPS_STATE_DIR/catalog-owed-e2e" deploy_log="$OPS_STATE_DIR/$OPS_SCOPE/deploy-$main_sha.log"
@@ -837,6 +837,9 @@ $RB_NATIVE_POOL_CANARY"
     fresh=true
     go="$(json_field "$verdict" 'd["go"]')"
     pricing="$(json_field "$verdict" '(d.get("pricing") or {}).get("pricing_diff_sha256")')"
+    # Pricing-only (only rate-card credit rates moved): the lane needs no canary.
+    pricing_only="$(json_field "$verdict" 'd.get("pricing_only") is True and bool((d.get("pricing") or {}).get("pricing_diff_sha256"))')"
+    [ "$pricing_only" = true ] || pricing_only=false
     lane_detail="$(json_field "$verdict" 'next((c["detail"] for c in d["checks"] if c["name"] == "content_gate" and not c["ok"]), "")')"
     failed="$(json_field "$verdict" '"; ".join("%s: %s" % (c["name"], c["detail"][:200]) for c in d["checks"] if not c["ok"] and not c["detail"].startswith("not run:"))')"
     owed_pf="$(json_field "$verdict" '", ".join(m["model_id"] for m in d.get("buyer_serving_e2e_owed") or [])')"
@@ -859,14 +862,18 @@ $RB_NATIVE_POOL_CANARY"
       if [ "$head_sha" != "$main_sha" ]; then
         set_next catalog_preflight blocked "Preflight the content release" "" \
           "run from a clean worktree whose HEAD is origin/main ($main_sha); tooling must match the commit"
-      elif [ "$p_paused" = true ] || [ "$p_status_ok" = false ]; then
-        set_next catalog_preflight blocked "Preflight content release $R" "" "$paused_why"
       else
+        # Read-only, so offered even with the canary down: a release that needs
+        # the canary records its own canary failures; a pricing-only one does not.
+        local pf_note=""
+        if [ "$p_paused" = true ] || [ "$p_status_ok" = false ]; then
+          pf_note="note: $paused_why (a pricing-only release does not need the canary)"
+        fi
         set_next catalog_preflight read "Preflight content release $R at $main_sha (no mutation)" \
 "mkdir -p '$OPS_STATE_DIR/$OPS_SCOPE'
 scripts/catalog-content-release.sh --preflight --commit $main_sha > '$verdict.tmp' || true
 mv '$verdict.tmp' '$verdict'
-python3 -m json.tool '$verdict'"
+python3 -m json.tool '$verdict'" "$pf_note"
         next_meta catalog_preflight "$TREE_DOC#run"
       fi
     fi
@@ -902,6 +909,8 @@ $owed_writer '$verdict' '$owed_dir' '$R'
 scripts/catalog-content-release.sh --deploy --commit $main_sha ${pricing:+--pricing-diff-sha256 $pricing }--preflight-verdict '$verdict' | tee '$deploy_log'
 $owed_writer '$deploy_log' '$owed_dir' '$R'"
     content_downtime="no coordinator restart: one SIGHUP reloads the release${pricing:+ and the rate card}; the canary provider is drained and restarted onto the release, so the requests it would serve go to other providers of its model or wait for its restart and model load; a failed activation rolls back and can strand adopters for 3-11 min"
+    [ "$pricing_only" != true ] ||
+      content_downtime="no coordinator restart: one SIGHUP reloads the release and the rate card; the canary provider is not touched (pricing-only release); a failed activation rolls back and can strand adopters for 3-11 min"
     # SPEC-048 0.1.81: the decode-path digest is provenance only, so catalog
     # activation does not compare it with any release.
     if [ -n "${CATALOG_SIGNED_PAIR_PLAN:-}" ] && [ "$fresh" = true ] && [ "$go" = true ] && [ -z "$pricing" ]; then
@@ -917,7 +926,7 @@ $owed_writer '$deploy_log' '$owed_dir' '$R'"
           "$OPS_DIR/catalog-activate.sh _signed-native-pair $main_sha $pair_sha"
         next_meta signed_native_pair "$MTP_DOC" "provider pause/drain, one released-binary restart and model load, then 120-second stability; independent exact-pair recovery is armed first; content publication uses one coordinator SIGHUP"
       fi
-    elif [ "$fresh" = true ] && { [ "$p_paused" = true ] || [ "$p_status_ok" = false ]; } &&
+    elif [ "$fresh" = true ] && [ "$pricing_only" != true ] && { [ "$p_paused" = true ] || [ "$p_status_ok" = false ]; } &&
       { [ "$go" = true ] || printf '%s' "$lane_detail" | grep -q 'lane='; }; then
       set_next catalog_activation blocked "Activate content release $R" "" "$paused_why"
     elif [ "$fresh" = true ] && [ "$go" = true ] && [ -z "$pricing" ]; then

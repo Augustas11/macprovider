@@ -50,10 +50,13 @@ scripts/ops/live-lock.sh acquire <label> --steal                 # only past the
   is pid-bound (`--bind-pid`): if the process that took it dies without
   releasing (SIGKILL, crash), the next `acquire` on the same host takes it
   over and logs the holder. Locks taken by hand keep TTL and `--steal` only.
-- `catalog-activate.sh` refuses the preflight and the activation while the
-  canary provider reports `lifecycle.state` `paused_by_operator`: the custody
-  proof needs it `buyer_serving`, and the activation restarts it, which a
-  pause outlives. A NO_GO names its failing checks. A pricing release runs
+- `catalog-activate.sh` refuses the activation while the canary provider
+  reports `lifecycle.state` `paused_by_operator` or its status is unreadable:
+  the custody proof needs it `buyer_serving`, and the activation restarts it,
+  which a pause outlives. The read-only preflight is offered anyway, with the
+  pause as a note. A pricing-only release (verdict `pricing_only: true`: only
+  credit rates of existing rate-card rows moved) needs no canary and
+  activates while it is paused or down. A NO_GO names its failing checks. A pricing release runs
   only with `CATALOG_PRICING_ACK` set to the verdict's `pricing_diff_sha256`
   after the operator reviewed the price table. A release whose newly
   buyer-serving model no connected provider serves activates with evidence

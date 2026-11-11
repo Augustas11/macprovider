@@ -2159,17 +2159,18 @@ rm -f "$tmp/svc/autotune-release.json"
 status_paused() {
   python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["lifecycle"]={"state": sys.argv[2]}; d["network_state"]="live_verified"; json.dump(d, open(p, "w"))' "$tmp/svc/status.json" "$1"
 }
-# verdict GO PRICING_DIGEST FAILED_CHECK OWED_MODEL: a fresh preflight verdict.
+# verdict GO PRICING_DIGEST FAILED_CHECK OWED_MODEL [PRICING_ONLY]: a fresh preflight verdict.
 verdict() {
   python3 - "$CSCOPE/preflight-$MAIN_SHA.json" "$@" <<'PY'
 import json, sys
 path, go, digest, failed, owed = sys.argv[1:6]
+pricing_only = sys.argv[6:7] == ["true"]
 checks = [{"name": "content_gate", "ok": True, "detail": "lane catalog-content"}]
 if failed:
     checks.append({"name": failed, "ok": False, "detail": "canary custody proof on the live release failed: network_state=live_verified (want buyer_serving), the provider is operator-paused"})
     checks.append({"name": "coordinator_dry_load", "ok": False, "detail": "not run: an earlier check failed"})
 json.dump({"go": go == "true", "checks": checks,
-           "pricing": {"pricing_diff_sha256": digest} if digest else None,
+           "pricing": {"pricing_diff_sha256": digest} if digest else None, "pricing_only": pricing_only,
            "buyer_serving_e2e_owed": [{"model_id": owed, "sha256": "abab"}] if owed else []},
           open(path, "w"), sort_keys=True)
 PY
@@ -2180,8 +2181,9 @@ status_paused paused_by_operator
 rm -f "$CSCOPE"/preflight-*.json
 run_rc 0 "catalog status with the canary operator-paused" scripts/ops/catalog-activate.sh status
 if [ "$(fact_of provider_lifecycle_state)" = paused_by_operator ]; then ok; else bad "lifecycle fact: $(fact_of provider_lifecycle_state)"; fi
+# The preflight is read-only: offered while paused, with the pause as a note.
 case "$(next_field id):$(next_field kind)" in
-  catalog_preflight:blocked) case "$(next_field reason)" in *operator-paused*) ok ;; *) bad "paused preflight reason: $(next_field reason)" ;; esac ;;
+  catalog_preflight:read) case "$(next_field reason)" in "note: "*operator-paused*) ok ;; *) bad "paused preflight note: $(next_field reason)" ;; esac ;;
   catalog_verify:*) ok ;;  # the fixture's catalog does not verify here; the pause is checked below
   *) bad "paused preflight next: $(next_field id):$(next_field kind)" ;;
 esac
@@ -2203,8 +2205,24 @@ run_rc 0 "catalog status with the canary status unreadable" scripts/ops/catalog-
 if [ "$(next_field id)" = catalog_activation ]; then
   case "$(next_field kind):$(next_field reason)" in blocked:*"status is unreadable"*) ok ;; *) bad "unreadable status activation: $(next_field kind) $(next_field reason)" ;; esac
 fi
-status_doc $CAND true
 DIGEST="$(printf 'cd%.0s' $(seq 1 32))"
+# Pricing-only (only rate-card credit rates moved): offered with the canary
+# status unreadable; the canary is not touched. A pricing release that is not
+# pricing-only still blocks on the canary.
+verdict true "$DIGEST" "" "" true
+CATALOG_PRICING_ACK="$DIGEST" run_rc 0 "catalog status with a pricing-only verdict and the canary unreadable" scripts/ops/catalog-activate.sh status
+if [ "$(next_field id)" = catalog_activation ]; then
+  expect_next catalog_activation:mutate
+  case "$(next_field expected_downtime)" in *"canary provider is not touched"*) ok ;; *) bad "pricing-only downtime: $(next_field expected_downtime)" ;; esac
+else
+  bad "pricing-only activation not offered with the canary unreadable: next is $(next_field id) ($(next_field reason))"
+fi
+verdict true "$DIGEST" "" "" false
+CATALOG_PRICING_ACK="$DIGEST" run_rc 0 "catalog status with a non-pricing-only pricing verdict and the canary unreadable" scripts/ops/catalog-activate.sh status
+if [ "$(next_field id)" = catalog_activation ]; then
+  case "$(next_field kind):$(next_field reason)" in blocked:*"status is unreadable"*) ok ;; *) bad "non-pricing-only activation with the canary unreadable: $(next_field kind) $(next_field reason)" ;; esac
+fi
+status_doc $CAND true
 verdict true "$DIGEST" "" "mlx-community/Test-VL-2B"
 run_rc 0 "catalog status with a pricing GO verdict, no ack" scripts/ops/catalog-activate.sh status
 case "$(python3 -c 'import json,sys; print(next(s["note"] for s in json.load(open(sys.argv[1]))["steps"] if s["id"] == "catalog_activation"))' "$tmp/out")" in
