@@ -21,9 +21,9 @@ import XCTest
 /// target and head state and produce the same greedy tokens, and the stored
 /// snapshot must not change.
 final class GLM5NextCBPromptSnapshotTests: XCTestCase {
-    /// GPU-only kernels: other classes set a CPU default device for the whole
-    /// process (`Device.setDefault`), so pin the GPU here. Without a metallib
-    /// no GPU stream is created (MLX aborts); every test then skips.
+    /// GPU-only kernels: pin the GPU so no CPU default can route them to the
+    /// CPU. Without a metallib no GPU stream is created (MLX aborts); every
+    /// test then skips.
     override func invokeTest() {
         guard Self.metallibAvailable else { return super.invokeTest() }
         Device.withDefaultDevice(Device(.gpu)) {

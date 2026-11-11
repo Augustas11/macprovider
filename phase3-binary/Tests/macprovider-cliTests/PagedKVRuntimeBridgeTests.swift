@@ -78,9 +78,9 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertNil(forwards.first?.incomingRotaryDelta)
     }
 
-    // CPU-only scheduler fixtures change the process-wide default device. Pin
-    // this Metal-backed class for each invocation so test order cannot route
-    // GPU-only model kernels to the CPU. Explicit CPU scopes below still win.
+    // Pin this Metal-backed class to the GPU for each invocation so no CPU
+    // default can route GPU-only model kernels to the CPU. Explicit CPU scopes
+    // below still win.
     override func invokeTest() {
         guard Self.metallibAvailable else { return super.invokeTest() }
         Device.withDefaultDevice(Device(.gpu)) {

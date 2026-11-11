@@ -15,7 +15,7 @@ final class ConversationCacheTests: XCTestCase {
 
     override class func setUp() {
         super.setUp()
-        Device.setDefault(device: Device(.cpu))
+        MLXTestDevice.pinProcessCPUDefaultWithoutMetallib()
     }
 
     func testCountersAccumulateHitsMissesAndPreserveModelsAfterPurge() async throws {

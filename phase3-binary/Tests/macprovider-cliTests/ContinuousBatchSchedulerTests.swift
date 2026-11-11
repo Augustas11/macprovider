@@ -15,7 +15,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
 
     override class func setUp() {
         super.setUp()
-        Device.setDefault(device: Device(.cpu))
+        MLXTestDevice.pinProcessCPUDefaultWithoutMetallib()
     }
 
     func testLabBatchCompositionWaitsForEveryRowAndUsesDeclaredOrder() async throws {
