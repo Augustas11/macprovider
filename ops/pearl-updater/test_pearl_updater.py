@@ -164,6 +164,10 @@ class PearlUpdaterTests(unittest.TestCase):
         )
         self.updater.candidate_executions = []
         self.updater.candidate_invocations = []
+        self.updater.buyer_hold_dropin = self.root / "run-systemd" / "macprovider-gateway.service.d" / "60-hold.conf"
+        # The gateway authorization probe makes a real request; tests of it
+        # call the unbound method.
+        self.updater.probe_gateway_buyer_hold_authorization = mock.Mock()
 
     def tearDown(self):
         self.temp.cleanup()
@@ -9100,25 +9104,32 @@ class PearlUpdaterTests(unittest.TestCase):
             return True
 
         self.updater.gateway_buyer_hold_request = mock.Mock(side_effect=hold)
-        self.updater.gateway_buyer_hold_reported = mock.Mock(
-            side_effect=lambda: reported if not calls or calls[-1][0] else False
+        self.updater.gateway_buyer_hold_state = mock.Mock(
+            side_effect=lambda **_kw: reported if not calls or calls[-1][0] else False
         )
         self.updater._buyer_token = mock.Mock(return_value="canary-token")
         self.updater.live_database_schema_digests = mock.Mock(return_value=current)
+        self.updater._daemon_reload = mock.Mock()
         return calls
+
+    def _install_dropin(self):
+        self.updater.buyer_hold_dropin.parent.mkdir(parents=True, exist_ok=True)
+        self.updater.buyer_hold_dropin.write_text(updater_module.BUYER_HOLD_DROPIN_TEXT)
 
     def test_schema_unchanged_late_failure_keeps_live_databases(self):
         tx, database = self._hold_rollback_fixture()
         self._armed_journal(updater_module.DATABASE_RESTORE_ALLOWED, tx)
         self.updater.pre_install_database_schemas = dict(self.PRE_SCHEMAS)
         calls = self._hold_decision_mocks(current=dict(self.PRE_SCHEMAS))
+        self._install_dropin()
         release = mock.Mock(tag="v1.8.27")
 
         self.updater.decide_database_restore(release)
 
         # Canary admitted while held, then the hold released for real buyers,
-        # and the keep-databases rule journaled before that release.
+        # the keep-databases rule journaled first and the drop-in removed.
         self.assertEqual(calls, [(True, True), (False, False)])
+        self.assertFalse(self.updater.buyer_hold_dropin.exists())
         self.assertFalse(self.updater.buyer_hold_until_commit)
         journal = json.loads(self.updater.journal_path.read_text())
         self.assertEqual(journal["database_restore"], updater_module.DATABASE_RESTORE_FORBIDDEN)
@@ -9164,21 +9175,30 @@ class PearlUpdaterTests(unittest.TestCase):
         self.updater.pre_install_database_schemas = dict(self.PRE_SCHEMAS)
         changed = dict(self.PRE_SCHEMAS, **{"/srv/gateway.db": "c" * 64})
         calls = self._hold_decision_mocks(current=changed)
+        self._install_dropin()
 
         self.updater.decide_database_restore(mock.Mock(tag="v1.8.27"))
 
-        # Only the canary is admitted; real buyers stay held.
+        # Only the canary is admitted; real buyers stay held, and every start
+        # of the gateway stays held while the drop-in is in place.
         self.assertEqual(calls, [(True, True)])
         self.assertTrue(self.updater.buyer_hold_until_commit)
+        self.assertEqual(self.updater.buyer_hold_dropin.read_text(), updater_module.BUYER_HOLD_DROPIN_TEXT)
         journal = json.loads(self.updater.journal_path.read_text())
         self.assertEqual(journal["database_restore"], updater_module.DATABASE_RESTORE_ALLOWED)
         self.assertIn("changed a live database schema", journal["database_restore_reason"])
 
-        # A gate fails while held: only canary rows exist, so the full restore runs.
+        # A gate fails while held: only canary rows exist, so the full restore
+        # runs, and the drop-in is gone before the previous gateway starts.
+        starts = []
+        self.updater._restore_backend_services = mock.Mock(
+            side_effect=lambda _tx: starts.append(self.updater.buyer_hold_dropin.exists())
+        )
         self.updater.restore_transaction()
 
         self.assertEqual(database.read_text(), "pre-cutover-copy")
         self.updater.sqlite_quick_check.assert_called_once_with(tx / "databases" / "0.sqlite")
+        self.assertEqual(starts, [False])
 
     def test_unreadable_schemas_hold_buyers_like_a_schema_change(self):
         tx, _database = self._hold_rollback_fixture()
@@ -9192,6 +9212,56 @@ class PearlUpdaterTests(unittest.TestCase):
         self.assertEqual(calls, [(True, True)])
         self.assertTrue(self.updater.buyer_hold_until_commit)
         self.assertEqual(self.updater.journal["database_restore"], updater_module.DATABASE_RESTORE_ALLOWED)
+
+    def test_unreadable_gateway_health_never_opens_buyers_during_the_decision(self):
+        # 503 and a timeout are not "the gateway has no hold": the read is
+        # retried, then the decision raises with the full restore still allowed.
+        for failure in (
+            urllib_error.HTTPError(updater_module.GATEWAY_LOCAL_HEALTHZ_URL, 503, "Unavailable", {}, io.BytesIO(b"{}")),
+            TimeoutError("timed out"),
+        ):
+            with self.subTest(failure=type(failure).__name__):
+                self.tearDown()
+                self.setUp()
+                tx, _database = self._hold_rollback_fixture()
+                self._armed_journal(updater_module.DATABASE_RESTORE_ALLOWED, tx)
+                self.updater.config = dataclasses.replace(self.updater.config, service_health_timeout_s=1)
+                self.updater.get_json = mock.Mock(side_effect=failure)
+                self.updater.gateway_buyer_hold_request = mock.Mock()
+                self._install_dropin()
+
+                with self.assertRaisesRegex(updater_module.UpdateError, "gateway buyer hold state"):
+                    self.updater.decide_database_restore(mock.Mock(tag="v1.8.27"))
+
+                self.assertGreater(self.updater.get_json.call_count, 1)
+                self.updater.gateway_buyer_hold_request.assert_not_called()
+                self.assertEqual(self.updater.journal["database_restore"], updater_module.DATABASE_RESTORE_ALLOWED)
+                self.assertTrue(self.updater.buyer_hold_dropin.exists())
+
+    def test_gateway_started_held_but_reporting_no_hold_rolls_back_with_restore(self):
+        tx, _database = self._hold_rollback_fixture()
+        self._armed_journal(updater_module.DATABASE_RESTORE_ALLOWED, tx)
+        self.updater.get_json = mock.Mock(return_value={"status": "ok", "buyer_hold": False})
+        self.updater.gateway_buyer_hold_request = mock.Mock()
+
+        for check in (self.updater.confirm_gateway_held_start, self.updater.decide_database_restore):
+            with self.assertRaisesRegex(updater_module.UpdateError, "started held but reports no buyer hold"):
+                check(mock.Mock(tag="v1.8.27"))
+        self.updater.gateway_buyer_hold_request.assert_not_called()
+        self.assertEqual(self.updater.journal["database_restore"], updater_module.DATABASE_RESTORE_ALLOWED)
+
+    def test_candidate_gateway_without_hold_is_detected_right_after_its_start(self):
+        tx, _database = self._hold_rollback_fixture()
+        self._armed_journal(updater_module.DATABASE_RESTORE_ALLOWED, tx)
+        self._install_dropin()
+        self.updater._daemon_reload = mock.Mock()
+        # A 200 health answer without the buyer_hold key: older than the hold.
+        self.updater.get_json = mock.Mock(return_value={"status": "ok", "version": "v1.8.20"})
+
+        self.assertFalse(self.updater.confirm_gateway_held_start(mock.Mock(tag="v1.8.20")))
+
+        self.assertEqual(self.updater.journal["database_restore"], updater_module.DATABASE_RESTORE_FORBIDDEN)
+        self.assertFalse(self.updater.buyer_hold_dropin.exists())
 
     def test_held_buyers_are_released_only_after_the_commit_point(self):
         release = self.verify()
@@ -9208,6 +9278,7 @@ class PearlUpdaterTests(unittest.TestCase):
             order.append("gates_passed_held")
 
         self.updater.verify_rollout = mock.Mock(side_effect=verify)
+        self.updater.verify_held_window = mock.Mock(side_effect=lambda stage: order.append("window_" + stage) or True)
         self.updater.persist_success = mock.Mock(side_effect=lambda *_args: order.append("commit"))
         self.updater.restore_deadman_monitoring = mock.Mock()
 
@@ -9219,28 +9290,51 @@ class PearlUpdaterTests(unittest.TestCase):
 
         self.updater.apply(release, updater_module.SemVer.parse("1.8.26"))
 
-        self.assertEqual(order, ["gates_passed_held", "commit", "release"])
+        self.assertEqual(order, ["gates_passed_held", "window_commit", "commit", "release"])
         self.assertFalse(self.updater.buyer_hold_until_commit)
 
-    def test_failed_hold_release_after_commit_restarts_the_gateway(self):
+    def test_failed_hold_release_after_commit_retries_then_restarts_the_gateway_open(self):
         release = mock.Mock(tag="v1.8.27")
+        self._install_dropin()
+        self.updater._daemon_reload = mock.Mock()
         self.updater.audit = mock.Mock()
         self.updater.gateway_buyer_hold_request = mock.Mock(side_effect=updater_module.UpdateError("refused"))
-        self.updater.gateway_buyer_hold_reported = mock.Mock(return_value=False)
-        self.updater.systemctl = mock.Mock()
+        starts = []
+        self.updater.gateway_buyer_hold_state = mock.Mock(return_value=False)
+        self.updater.systemctl = mock.Mock(
+            side_effect=lambda action, unit: starts.append((action, self.updater.buyer_hold_dropin.exists()))
+        )
         self.updater.assert_unit_quiescent = mock.Mock()
         self.updater.local_gateway_ready = mock.Mock(return_value=True)
         self.updater.wait_for = lambda _description, _timeout, check: self.assertTrue(check())
 
         self.updater.release_buyer_hold_after_commit(release)
 
-        self.assertEqual(
-            self.updater.systemctl.call_args_list,
-            [mock.call("stop", "macprovider-gateway.service"), mock.call("start", "macprovider-gateway.service")],
-        )
+        self.assertEqual(self.updater.gateway_buyer_hold_request.call_count, 3)
+        # The drop-in is gone before the restart, so the gateway starts open.
+        self.assertEqual(starts, [("stop", False), ("start", False)])
         self.updater.audit.assert_any_call(
             "gateway_buyer_hold", "released_by_restart", stage="committed", candidate="v1.8.27"
         )
+
+    def test_hold_release_after_commit_retries_before_any_restart(self):
+        self.updater.audit = mock.Mock()
+        answers = iter([updater_module.UpdateError("busy"), True])
+
+        def request(_active):
+            answer = next(answers)
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+
+        self.updater.gateway_buyer_hold_request = mock.Mock(side_effect=request)
+        self.updater.gateway_buyer_hold_state = mock.Mock(return_value=False)
+        self.updater.systemctl = mock.Mock()
+
+        self.updater.release_buyer_hold_after_commit(mock.Mock(tag="v1.8.27"))
+
+        self.updater.systemctl.assert_not_called()
+        self.updater.audit.assert_any_call("gateway_buyer_hold", "released", stage="committed", candidate="v1.8.27")
 
     def test_crash_reconcile_follows_the_journaled_database_rule(self):
         for decision, expected in (
@@ -9257,7 +9351,8 @@ class PearlUpdaterTests(unittest.TestCase):
                 self.updater.journal_path.write_text(json.dumps(payload) + "\n")
                 self.updater.journal_path.chmod(0o600)
                 self.updater.live_database_schema_digests = mock.Mock(return_value=dict(self.PRE_SCHEMAS))
-                self.updater.clear_gateway_hold_start_environment = mock.Mock()
+                self._install_dropin()
+                self.updater._daemon_reload = mock.Mock()
                 self.updater.gateway_buyer_hold_request = mock.Mock(return_value=True)
 
                 self.assertTrue(self.updater.reconcile())
@@ -9265,9 +9360,9 @@ class PearlUpdaterTests(unittest.TestCase):
                 self.assertEqual(database.read_text(), expected)
                 self.assertEqual((self.updater.install_root / "gateway").read_text(), "old-gateway")
                 self.assertFalse(self.updater.journal_path.exists())
-                # The start variable is cleared and the hold released once no
+                # The drop-in is removed and the hold released once no
                 # restore is pending any more.
-                self.updater.clear_gateway_hold_start_environment.assert_called()
+                self.assertFalse(self.updater.buyer_hold_dropin.exists())
                 self.updater.gateway_buyer_hold_request.assert_called_once_with(False)
 
     def test_reconcile_rejects_an_invalid_database_restore_decision(self):
@@ -9298,7 +9393,6 @@ class PearlUpdaterTests(unittest.TestCase):
     def test_drain_holds_buyers_and_releases_the_hold_when_it_times_out(self):
         self.updater.audit = mock.Mock()
         self.updater.gateway_buyer_hold_request = mock.Mock(return_value=True)
-        self.updater.clear_gateway_hold_start_environment = mock.Mock()
         self.updater.gateway_reservations = mock.Mock(return_value=1)
         self.updater.config = dataclasses.replace(self.updater.config, gateway_drain_timeout_s=0)
 
@@ -9324,9 +9418,82 @@ class PearlUpdaterTests(unittest.TestCase):
         with mock.patch.object(updater_module, "_credential_safe_opener", return_value=opener):
             with self.assertRaisesRegex(updater_module.UpdateError, "HTTP 401"):
                 self.updater.gateway_buyer_hold_request(True)
-        request = opener.open.call_args.args[0]
-        self.assertEqual(request.get_header("Authorization"), "Bearer operator-token")
-        self.assertEqual(json.loads(request.data), {"active": True})
+
+    def test_hold_request_sends_the_real_body_to_the_gateway(self):
+        import http.server
+        import threading
+
+        seen = []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = self.rfile.read(int(self.headers["Content-Length"]))
+                seen.append((self.path, self.headers.get("Authorization"), self.headers.get("Content-Type"), json.loads(body)))
+                answer = json.dumps({"ok": True, "buyer_hold": {"active": True, "canary_admitted": True}}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(answer)))
+                self.end_headers()
+                self.wfile.write(answer)
+
+            def log_message(self, *_args):
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        self.updater.coordinator_operator_token = mock.Mock(return_value="operator-token")
+        self.updater._buyer_token = mock.Mock(return_value="canary-token")
+        url = f"http://127.0.0.1:{server.server_port}/admin/buyer-hold"
+        with mock.patch.object(updater_module, "GATEWAY_BUYER_HOLD_URL", url):
+            self.assertTrue(self.updater.gateway_buyer_hold_request(True, admit_canary=True))
+
+        self.assertEqual(
+            seen,
+            [
+                (
+                    "/admin/buyer-hold",
+                    "Bearer operator-token",
+                    "application/json",
+                    {"active": True, "admit_api_key_sha256": hashlib.sha256(b"canary-token").hexdigest()},
+                )
+            ],
+        )
+
+    def test_operator_key_is_proven_on_the_gateway_before_anything_stops(self):
+        self.updater.coordinator_operator_token = mock.Mock(return_value="operator-token")
+        self.updater.audit = mock.Mock()
+        opener = mock.Mock()
+        for code in (401, 403):
+            opener.open.side_effect = urllib_error.HTTPError(
+                updater_module.GATEWAY_BUYER_HOLD_URL, code, "Denied", {}, io.BytesIO(b"")
+            )
+            with mock.patch.object(updater_module, "_credential_safe_opener", return_value=opener):
+                with self.assertRaisesRegex(updater_module.UpdateError, "coordinator.operator_key must equal"):
+                    updater_module.Updater.probe_gateway_buyer_hold_authorization(self.updater)
+            request = opener.open.call_args.args[0]
+            self.assertEqual(request.get_method(), "GET")
+            self.assertIsNone(request.data)
+        opener.open.side_effect = urllib_error.HTTPError(
+            updater_module.GATEWAY_BUYER_HOLD_URL, 404, "Not Found", {}, io.BytesIO(b"")
+        )
+        with mock.patch.object(updater_module, "_credential_safe_opener", return_value=opener):
+            updater_module.Updater.probe_gateway_buyer_hold_authorization(self.updater)
+        self.updater.audit.assert_any_call("gateway_buyer_hold_authorization", "unsupported")
+
+        # The probe runs before the rollout reads or stops anything else.
+        self.updater.capture_database_paths = mock.Mock()
+        self.updater.probe_gateway_buyer_hold_authorization = mock.Mock(
+            side_effect=updater_module.UpdateError("rejected")
+        )
+        self.updater.get_json = mock.Mock()
+        self.updater.systemctl = mock.Mock()
+        with self.assertRaisesRegex(updater_module.UpdateError, "rejected"):
+            self.updater.capture_rollout_state()
+        self.updater.get_json.assert_not_called()
+        self.updater.systemctl.assert_not_called()
 
     def test_candidate_gateway_without_hold_keeps_the_databases(self):
         tx, _database = self._hold_rollback_fixture()
@@ -9337,28 +9504,141 @@ class PearlUpdaterTests(unittest.TestCase):
 
         self.assertEqual(self.updater.journal["database_restore"], updater_module.DATABASE_RESTORE_FORBIDDEN)
         self.assertFalse(self.updater.buyer_hold_until_commit)
-        self.assertEqual(calls, [(False, False)])
+        self.assertEqual(calls, [])
 
-    def test_gateway_held_start_sets_and_always_clears_the_start_variable(self):
+    def test_held_start_installs_a_drop_in_that_keeps_every_start_held(self):
+        tx, _database = self._hold_rollback_fixture()
+        self._armed_journal(updater_module.DATABASE_RESTORE_ALLOWED, tx)
         commands = []
 
         def run(argv, *, check=True, timeout, env=None, input_text=None):
             commands.append(list(argv))
+            if argv[:2] == ["systemctl", "show"]:
+                return subprocess.CompletedProcess(argv, 0, "InvocationID=" + "a" * 32 + "\nNRestarts=0\n", "")
             return subprocess.CompletedProcess(argv, 0, "", "")
 
         self.updater.run_command = run
-        self.updater.systemctl = mock.Mock(side_effect=updater_module.UpdateError("start failed"))
-
-        with self.assertRaisesRegex(updater_module.UpdateError, "start failed"):
-            self.updater.start_gateway_buyer_held()
-
-        self.assertEqual(
-            commands,
-            [
-                ["systemctl", "set-environment", updater_module.GATEWAY_BUYER_HOLD_START_ENV + "=1"],
-                ["systemctl", "unset-environment", updater_module.GATEWAY_BUYER_HOLD_START_ENV],
-            ],
+        starts = []
+        self.updater.systemctl = mock.Mock(
+            side_effect=lambda action, unit: starts.append((action, unit, self.updater.buyer_hold_dropin.read_text()))
         )
+
+        self.updater.start_gateway_buyer_held()
+
+        # The setting persists in a runtime drop-in for every later start
+        # (systemd restart, archive rotation) until commit, rollback or reconcile.
+        self.assertEqual(
+            starts,
+            [("start", "macprovider-gateway.service", f"[Service]\nEnvironment={updater_module.GATEWAY_BUYER_HOLD_START_ENV}=1\n")],
+        )
+        self.assertIn(["systemctl", "daemon-reload"], commands)
+        self.assertTrue(self.updater.buyer_hold_dropin.exists())
+        self.assertEqual(self.updater.journal["held_gateway_identity"], {"invocation_id": "a" * 32, "restarts": "0"})
+        self.assertTrue(self.updater.journal["gateway_held"])
+
+    def test_rollback_refuses_to_start_the_previous_gateway_while_the_drop_in_stays(self):
+        tx, _database = self._hold_rollback_fixture()
+        self._armed_journal(updater_module.DATABASE_RESTORE_FORBIDDEN, tx)
+        self.updater.live_database_schema_digests = mock.Mock(return_value=dict(self.PRE_SCHEMAS))
+        self._install_dropin()
+        # The drop-in is removed but systemd cannot reload, so it still has
+        # the start-held setting loaded: the failure is audited, retried
+        # before the previous gateway starts, and that start is refused.
+        self.updater._daemon_reload = mock.Mock(side_effect=updater_module.UpdateError("reload failed"))
+        self.updater._restore_backend_services = mock.Mock()
+
+        with self.assertRaisesRegex(updater_module.UpdateError, "the gateway would start held"):
+            self.updater.restore_transaction()
+
+        self.updater._restore_backend_services.assert_not_called()
+        self.assertEqual(self.updater._daemon_reload.call_count, 2)
+        self.updater.audit.assert_any_call(
+            "gateway_buyer_hold_dropin", "remove_failed", stage="rollback", reason="reload failed"
+        )
+
+        # Once the reload works, the retry clears it.
+        self.updater._daemon_reload = mock.Mock()
+        self.assertTrue(self.updater.remove_buyer_hold_dropin("rollback"))
+        self.updater._daemon_reload.assert_called_once_with()
+
+    def _held_window_journal(self, tx):
+        self._armed_journal(updater_module.DATABASE_RESTORE_ALLOWED, tx)
+        self.updater.journal["gateway_held"] = True
+        self.updater.journal["held_gateway_identity"] = {"invocation_id": "a" * 32, "restarts": "0"}
+        self.updater.journal["held_since"] = "2026-11-11T01:00:00Z"
+        self.updater.live_database_schema_digests = mock.Mock(return_value=dict(self.PRE_SCHEMAS))
+        self.updater._daemon_reload = mock.Mock()
+
+    def test_held_window_is_checked_before_the_restore(self):
+        identity_same = {"invocation_id": "a" * 32, "restarts": "0"}
+        identity_new = {"invocation_id": "b" * 32, "restarts": "1"}
+        for name, identity, holding, dropin, broken in (
+            ("same invocation, held", identity_same, True, True, False),
+            ("restarted by the drop-in, held", identity_new, True, True, False),
+            ("restarted without the drop-in", identity_new, False, False, True),
+            ("candidate ignored the hold", identity_same, None, True, True),
+        ):
+            with self.subTest(name):
+                self.tearDown()
+                self.setUp()
+                tx, database = self._hold_rollback_fixture()
+                self._held_window_journal(tx)
+                if dropin:
+                    self._install_dropin()
+                self.updater.gateway_unit_identity = mock.Mock(return_value=identity)
+                self.updater.gateway_buyer_hold_state = mock.Mock(return_value=holding)
+
+                self.updater.restore_transaction()
+
+                # The restore runs either way (the changed schema needs it); a
+                # broken window is never silent.
+                self.assertEqual(database.read_text(), "pre-cutover-copy")
+                events = [call.args[0] for call in self.updater.audit.call_args_list]
+                if broken:
+                    self.assertIn("gateway_held_window_broken", events)
+                    self.assertIn("database_rollback_held_window_broken", events)
+                    self.updater.raise_critical_alert.assert_any_call(
+                        updater_module.ROLLBACK_POINT_REFUSED_ALERT,
+                        transaction=str(tx),
+                        reason="gateway held window broken at rollback",
+                    )
+                else:
+                    self.assertNotIn("gateway_held_window_broken", events)
+                    self.updater.raise_critical_alert.assert_not_called()
+
+    def test_crash_after_a_held_start_the_candidate_ignored_alerts_on_reconcile(self):
+        tx, database = self._hold_rollback_fixture()
+        self._held_window_journal(tx)
+        payload = dict(self.updater.journal, phase="gateway_held_started")
+        self.updater.journal = None
+        self.updater.journal_path.write_text(json.dumps(payload) + "\n")
+        self.updater.journal_path.chmod(0o600)
+        self._install_dropin()
+        self.updater.gateway_unit_identity = mock.Mock(return_value={"invocation_id": "a" * 32, "restarts": "0"})
+        # The candidate ignored the start-held setting: no buyer_hold key.
+        self.updater.gateway_buyer_hold_state = mock.Mock(return_value=None)
+        self.updater.gateway_buyer_hold_request = mock.Mock(return_value=False)
+
+        self.assertTrue(self.updater.reconcile())
+
+        self.assertEqual(database.read_text(), "pre-cutover-copy")
+        events = [call.args[0] for call in self.updater.audit.call_args_list]
+        self.assertIn("gateway_held_window_broken", events)
+        self.updater.raise_critical_alert.assert_called()
+        self.assertFalse(self.updater.buyer_hold_dropin.exists())
+
+    def test_reconcile_rejects_an_invalid_held_gateway_identity(self):
+        tx, _database = self._hold_rollback_fixture()
+        self._held_window_journal(tx)
+        payload = dict(self.updater.journal, held_gateway_identity="nope")
+        self.updater.journal = None
+        self.updater.journal_path.write_text(json.dumps(payload) + "\n")
+        self.updater.journal_path.chmod(0o600)
+        self.updater.restore_transaction = mock.Mock()
+
+        with self.assertRaisesRegex(updater_module.UpdateError, "held gateway identity is invalid"):
+            self.updater.reconcile()
+        self.updater.restore_transaction.assert_not_called()
 
     def test_rollout_starts_the_gateway_held_while_a_database_restore_is_possible(self):
         release = self.verify()
@@ -9367,12 +9647,13 @@ class PearlUpdaterTests(unittest.TestCase):
         self.updater.database_restore = updater_module.DATABASE_RESTORE_ALLOWED
         self.updater.systemctl = mock.Mock(side_effect=lambda action, unit: order.append((action, unit)))
         self.updater.start_gateway_buyer_held = mock.Mock(side_effect=lambda: order.append("held_start"))
+        self.updater.confirm_gateway_held_start = mock.Mock(side_effect=lambda _release: order.append("confirm") or True)
         self.updater.service_active = mock.Mock(return_value=True)
         self.updater.local_coordinator_ready = mock.Mock(return_value=True)
         self.updater.local_gateway_ready = mock.Mock(return_value=True)
         self.updater.assert_effective_tier2_catalog_path = mock.Mock()
         self.updater.ensure_coordinator_request_log_indexes = mock.Mock()
-        self.updater.verify_live_runtime_binding = mock.Mock()
+        self.updater.verify_live_runtime_binding = mock.Mock(side_effect=lambda _release: order.append("binding"))
         self.updater.decide_database_restore = mock.Mock(side_effect=lambda _release: order.append("decide"))
         self.updater.restore_auxiliary_services = mock.Mock(
             side_effect=lambda: (_ for _ in ()).throw(updater_module.UpdateError("stop here"))
@@ -9382,7 +9663,17 @@ class PearlUpdaterTests(unittest.TestCase):
         with self.assertRaisesRegex(updater_module.UpdateError, "stop here"):
             self.updater.verify_rollout(release)
 
-        self.assertEqual(order, [("start", "macprovider-coordinator.service"), "held_start", "decide"])
+        self.assertEqual(
+            order,
+            [("start", "macprovider-coordinator.service"), "held_start", "confirm", "binding", "decide"],
+        )
+
+        # A candidate without the hold is not decided on (already journaled forbidden).
+        order.clear()
+        self.updater.confirm_gateway_held_start = mock.Mock(side_effect=lambda _release: order.append("confirm") and False)
+        with self.assertRaisesRegex(updater_module.UpdateError, "stop here"):
+            self.updater.verify_rollout(release)
+        self.assertNotIn("decide", order)
 
         # Without a pending restore (no snapshot, or reconciliation) it starts as before.
         order.clear()
@@ -9391,8 +9682,9 @@ class PearlUpdaterTests(unittest.TestCase):
             self.updater.verify_rollout(release)
         self.assertEqual(
             order,
-            [("start", "macprovider-coordinator.service"), ("start", "macprovider-gateway.service")],
+            [("start", "macprovider-coordinator.service"), ("start", "macprovider-gateway.service"), "binding"],
         )
+
 
 class CatalogCanaryProofMismatchTests(unittest.TestCase):
     """catalog-canary-proof.py names each failing status field, never identities."""

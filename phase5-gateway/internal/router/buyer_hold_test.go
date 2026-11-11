@@ -148,15 +148,46 @@ func TestBuyerHoldRequiresOperatorAuth(t *testing.T) {
 			t.Fatalf("body %s status = %d, want 400", body, rec.Code)
 		}
 	}
-	req := httptest.NewRequest(http.MethodGet, "/admin/buyer-hold", nil)
+	req := httptest.NewRequest(http.MethodPut, "/admin/buyer-hold", strings.NewReader(`{"active":true}`))
 	req.Header.Set("Authorization", "Bearer "+cfg.Coordinator.OperatorKey)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusMethodNotAllowed {
-		t.Fatalf("GET status = %d, want 405", rec.Code)
+		t.Fatalf("PUT status = %d, want 405", rec.Code)
 	}
 	if healthzBuyerHold(t, h) {
 		t.Fatal("a rejected request changed the hold")
+	}
+}
+
+func TestBuyerHoldReadNeedsTheOperatorKeyAndChangesNothing(t *testing.T) {
+	h, _, _, cfg := newTestHarness(t, nil)
+	get := func(token string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/admin/buyer-hold", nil)
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+	for _, token := range []string{"", "not-the-operator-key"} {
+		if rec := get(token); rec.Code != http.StatusUnauthorized {
+			t.Fatalf("GET with token %q status = %d, want 401", token, rec.Code)
+		}
+	}
+	rec := get(cfg.Coordinator.OperatorKey)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"active":false`) {
+		t.Fatalf("GET status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	sum := sha256.Sum256([]byte("canary"))
+	postBuyerHold(t, h, cfg.Coordinator.OperatorKey, `{"active":true,"admit_api_key_sha256":"`+hex.EncodeToString(sum[:])+`"}`)
+	rec = get(cfg.Coordinator.OperatorKey)
+	if !strings.Contains(rec.Body.String(), `"active":true`) || !strings.Contains(rec.Body.String(), `"canary_admitted":true`) {
+		t.Fatalf("GET while held body=%s", rec.Body.String())
+	}
+	if !healthzBuyerHold(t, h) {
+		t.Fatal("a read changed the hold")
 	}
 }
 

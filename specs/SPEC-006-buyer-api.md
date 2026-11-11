@@ -3,7 +3,7 @@
 **Version:** 0.9.76 (2026-11-11, rollout buyer hold)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.6.28, SPEC-003 v0.7, SPEC-004 v0.3.2
 
-**Change log v0.9.76 (2026-11-11):** Add SPEC-006-R027, the rollout buyer hold: an in-memory, operator-toggled gateway mode that answers new buyer requests with `503` `public_api_paused` and `Retry-After: 30`, lets in-flight requests finish, admits the rollout buyer canary by the sha256 of its API key, and is reported in `/healthz` as `buyer_hold`. §2.7 points to it.
+**Change log v0.9.76 (2026-11-11):** Add SPEC-006-R027, the rollout buyer hold: an in-memory, operator-toggled gateway mode that answers new buyer requests with `503` `public_api_paused` and `Retry-After: 30`, lets in-flight requests finish, admits the rollout buyer canary by the sha256 of its API key, is read with an operator-key `GET /admin/buyer-hold`, and is reported in `/healthz` as `buyer_hold`. Starts held while the updater's runtime drop-in sets the start variable; no timer. §2.7 points to it.
 
 **Change log v0.9.75 (2026-11-10, Related: #2269):** Amend §5.3 `/v1/models` `capabilities.reasoning`. Besides the families whose template always reasons (GLM-5, gpt-oss, DeepSeek-V4; provider CLI 1.8.262 or later, gpt-oss at any version), `reasoning` is true for Qwen3.5, Qwen3.6, Qwen3.8 and Nemotron-3 when an eligible native provider runs CLI 1.8.285 or later. That floor is the first CLI tag cut after this change, which renders thinking on for an explicit `reasoning_effort` (SPEC-018 v0.3.16 §3.12); if the Pearl runtime train takes v1.8.285 for this coordinator/gateway change, the first such CLI is 1.8.286, which still satisfies the floor. For these families `reasoning` means reasoning on request: a request without `reasoning_effort` (or with `none`) still answers without thinking. Qwen3-8B, GLM-4.5 and Gemma-4 stay `reasoning: false`, as the provider cannot split their thinking output. A buyer-UX conformance record still caps the capability (SPEC-023 §16.11). Amend §5.4a `/v1/messages` `thinking`: `disabled` maps to `reasoning_effort` `none` (was `low`), because an explicit `low` now turns thinking on for a template with a thinking switch. On GLM-5.3 and gpt-oss `none` renders as `low`, the same prompt as before; on DeepSeek-V4 and the Solstice GLM-5.3-Flash template `none` selects their thinking-off prompt. Enabled and adaptive are unchanged.
 
@@ -5373,14 +5373,20 @@ in-flight work under steady traffic.
 
 The gateway MUST keep a buyer hold in process memory only. It MUST be off when
 the process starts, unless the process environment sets
-`MACPROVIDER_GATEWAY_START_BUYER_HOLD=1`; the Pearl updater sets that variable
-only for the one gateway start it supervises.
+`MACPROVIDER_GATEWAY_START_BUYER_HOLD=1`. The Pearl updater sets that variable
+in a runtime systemd drop-in for the gateway unit while a database restore is
+still possible, so every gateway start in that window (a systemd restart
+included) starts held. It removes the drop-in at the commit point, at rollback
+before the previous binaries start, and in its reconcile.
 
 `POST /admin/buyer-hold` MUST require the operator key, exactly like
 `/admin/kill-switch`. Body: `{"active": true|false, "admit_api_key_sha256":
 "<64 hex>"}`. The admitted hash is valid only with `"active": true` and is
 cleared when the hold is turned off. Any other body is `400`
-`invalid_buyer_hold`.
+`invalid_buyer_hold`. `GET /admin/buyer-hold` with the operator key MUST report
+`{"ok": true, "buyer_hold": {"active": bool, "canary_admitted": bool}}` and
+change nothing; the updater uses it to prove the operator key before it stops
+anything.
 
 While the hold is on, every request except `/admin/*`, `/v1/status`, `/healthz`
 and `/metrics` MUST be answered `503` with `Retry-After: 30` and the endpoint's
@@ -5391,6 +5397,18 @@ in flight, streams included, MUST run to completion.
 
 `/healthz` MUST report the state as the boolean `buyer_hold`.
 
-Bound: the hold never outlives the process. A rollout that dies leaves it on at
-most until the next gateway restart or the updater's reconcile, which releases
-it once no database restore is pending.
+Bound: the hold has no timer. While the drop-in exists, a gateway restart
+starts held again, so a rollout that dies leaves buyers held until one of
+these happens:
+
+- the updater's reconcile (the apply unit's `ExecStopPost`, or the
+  `release_buyer_hold` step of `scripts/ops/pearl-runtime.sh`) finishes or
+  rolls back the transaction and releases the hold;
+- a gateway restart after the drop-in is gone;
+- a reboot, which clears the runtime drop-in.
+
+When the candidate keeps the live database schema, the updater releases the
+hold as soon as the candidate starts and journals that the live databases are
+kept. A later rollback then keeps row-level data the candidate wrote (ledger,
+billing, reservation, request log). The previous binary reads it, because the
+schema is unchanged.

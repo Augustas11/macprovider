@@ -12,9 +12,9 @@ import (
 )
 
 // BuyerHoldStartEnv, when "1" in the process environment, starts the gateway
-// with the buyer hold on. The Pearl updater sets it only for the one gateway
-// start it supervises and unsets it right after, so any later restart starts
-// open (SPEC-006-R027).
+// with the buyer hold on. The Pearl updater sets it in a runtime unit drop-in
+// while a database restore is still possible, so a restart in that window also
+// starts held, and removes it at commit, rollback or reconcile (SPEC-006-R027).
 const BuyerHoldStartEnv = "MACPROVIDER_GATEWAY_START_BUYER_HOLD"
 
 // buyerHoldState is the rollout buyer hold (SPEC-006-R027). While active the
@@ -83,15 +83,27 @@ func (s *Server) writeBuyerHeld(w http.ResponseWriter, r *http.Request) {
 	writeError(w, http.StatusServiceUnavailable, "server_error", "public_api_paused", message)
 }
 
-// handleBuyerHold turns the rollout buyer hold on or off. Operator key only.
-// Body: {"active": bool, "admit_api_key_sha256": "<64 hex>"}; the admitted
-// hash applies only while active and is cleared when the hold is turned off.
+// handleBuyerHold reads (GET) or turns on or off (POST) the rollout buyer
+// hold. Operator key only; the updater's GET proves the key before it stops
+// anything. POST body: {"active": bool, "admit_api_key_sha256": "<64 hex>"};
+// the admitted hash applies only while active and is cleared when the hold is
+// turned off.
 func (s *Server) handleBuyerHold(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
+	if r.Method != http.MethodPost && r.Method != http.MethodGet {
 		writeError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method_not_allowed", "Method not allowed")
 		return
 	}
 	if !s.operatorAuthorized(w, r) {
+		return
+	}
+	if r.Method == http.MethodGet {
+		s.buyerHold.mu.RLock()
+		active, hasAdmit := s.buyerHold.active, s.buyerHold.hasAdmit
+		s.buyerHold.mu.RUnlock()
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":         true,
+			"buyer_hold": map[string]any{"active": active, "canary_admitted": active && hasAdmit},
+		})
 		return
 	}
 	var req struct {

@@ -764,11 +764,40 @@ on, new requests on buyer routes get `503` with `Retry-After: 30` and code
 `/metrics` and `/admin/*` still answer; requests that present the buyer canary's
 API key (admitted by its sha256, read from the canary token file) still pass.
 `POST /admin/buyer-hold` with the operator key and
-`{"active": true|false, "admit_api_key_sha256": "<hex>"}` toggles it, and
-`/healthz` reports it as `buyer_hold`. A process restart always starts open,
-except the one candidate start the updater supervises: it sets
-`MACPROVIDER_GATEWAY_START_BUYER_HOLD=1` with `systemctl set-environment` just
-for that start and unsets it as soon as the start returns.
+`{"active": true|false, "admit_api_key_sha256": "<hex>"}` toggles it.
+`GET /admin/buyer-hold` with the operator key reads it and changes nothing.
+`/healthz` reports it as `buyer_hold`. The hold has no timer; recovery is
+`--reconcile` (below).
+
+Before it stops anything, the updater reads `GET /admin/buyer-hold` with the
+coordinator operator key. A 401 or 403 fails the apply with a clear message:
+the gateway's `coordinator.operator_key` must equal the coordinator operator
+key. A 404 means a gateway older than the hold, and the apply proceeds.
+
+**Start-held drop-in.** A gateway started while a database restore is possible
+must start held, including a systemd `Restart=on-failure` or the archive
+rotation's restart in that window. The updater writes the runtime drop-in
+`/run/systemd/system/macprovider-gateway.service.d/60-macprovider-buyer-hold.conf`
+(`Environment=MACPROVIDER_GATEWAY_START_BUYER_HOLD=1`), runs
+`systemctl daemon-reload`, and starts the candidate gateway. It journals the
+gateway's `InvocationID` and `NRestarts` (`held_gateway_identity`) and the
+time (`held_since`).
+
+The drop-in is removed in these cases:
+
+- when the schema is unchanged;
+- at the commit point;
+- at rollback, before the previous binaries start (that start is refused
+  while the drop-in or its loaded state remains);
+- in `--reconcile`.
+
+A removal or reload failure is audited (`gateway_buyer_hold_dropin`
+`remove_failed`) and retried before any later gateway start. The drop-in sits
+under `/run`, so a reboot drops it too.
+
+Right after the candidate starts, the updater reads `/healthz`. A 200 body
+without the `buyer_hold` key means a candidate without the hold. It journals
+`forbidden` at once and removes the drop-in.
 
 **Drain.** Before the drain poll the updater turns the hold on, so the
 reservation count reaches a steady zero under constant traffic. A gateway that
@@ -796,14 +825,34 @@ audit `database_restore_decision`) before any real buyer can pass:
   providers re-register on reconnect. The hold is released after the commit
   point (`gateway_buyer_hold` `released`, stage `committed`); if the endpoint
   fails, the updater restarts the gateway, which starts open.
-- The started gateway does not report the hold: `forbidden`, because buyers may
-  already be writing.
+- The started gateway has no hold (a 200 `/healthz` without the key):
+  `forbidden`, because buyers may already be writing.
+- `/healthz` unreadable (failed, 503 or timed out) after the bounded retry, or
+  a gateway started held that reports `false`: the decision raises while the
+  journal still says `allowed`, so the rollback restores the databases.
 
-Crash reconciliation follows the journaled rule. It also clears the start
-variable, and after a successful reconcile it releases the hold. A
-`--reconcile` run with no journal (the apply unit's `ExecStopPost` after a crash
-between the commit and the hold release) releases the hold too, since no
-restore is pending.
+**Keep-databases trade.** On the `forbidden` path a rollback keeps the live
+databases. Row-level data the candidate wrote (ledger, billing, reservation,
+request log) is kept. The previous binary reads it, because the schema did not
+change. This is the price of opening buyers early.
+
+**Held-window re-check.** Before the commit point, and before any database
+restore, the updater re-reads the gateway identity and its hold. The window is
+intact when the gateway reports the hold and either keeps the journaled
+identity, or restarted with the drop-in in place (audit `gateway_held_window`
+`restarted_held`). Otherwise it audits `gateway_held_window_broken` with the
+recorded and current identity and starts the rollback-point-refused alert. A
+restore that still runs then also audits
+`database_rollback_held_window_broken`.
+
+Crash reconciliation follows the journaled rule. It removes the drop-in, and
+after a successful reconcile it releases the hold. A `--reconcile` run with no
+journal releases the hold too, since no restore is pending. That run is either
+the apply unit's `ExecStopPost` after a crash between the commit and the hold
+release, or the `release_buyer_hold` step of `scripts/ops/pearl-runtime.sh`.
+After the commit, the release is tried three times. If it still fails, the
+updater removes the drop-in and restarts the gateway, which then starts open
+(`released_by_restart`).
 
 ## Automatic rollback
 

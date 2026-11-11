@@ -14795,14 +14795,16 @@
         "phase5-gateway/internal/router/buyer_hold_test.go:func TestBuyerHoldAdmitsOnlyTheCanaryKey",
         "phase5-gateway/internal/router/buyer_hold_test.go:func TestBuyerHoldRequiresOperatorAuth",
         "phase5-gateway/internal/router/buyer_hold_test.go:func TestBuyerHoldIsOffAfterRestart",
-        "phase5-gateway/internal/router/buyer_hold_test.go:func TestBuyerHoldLetsInFlightStreamFinish"
+        "phase5-gateway/internal/router/buyer_hold_test.go:func TestBuyerHoldLetsInFlightStreamFinish",
+        "phase5-gateway/internal/router/buyer_hold_test.go:func TestBuyerHoldReadNeedsTheOperatorKeyAndChangesNothing",
+        "phase5-gateway/cmd/gateway/main_test.go:func TestGatewayRouterStartsHeldFromTheEnvironment"
       ],
       "journeys": [],
       "evidence": [],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/2268",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2296",
         "rationale": "Implemented with handler tests and used by the Pearl updater's drain and database rollback rule (ops/runbooks/pearl-release-updater.md); live once a gateway runtime release with the hold reaches Pearl and the next runtime apply audits gateway_buyer_hold."
       }
     },
