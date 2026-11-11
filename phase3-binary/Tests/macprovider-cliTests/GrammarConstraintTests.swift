@@ -16,7 +16,7 @@ final class GrammarConstraintTests: XCTestCase {
 
     override class func setUp() {
         super.setUp()
-        Device.setDefault(device: Device(.cpu))
+        MLXTestDevice.pinProcessCPUDefaultWithoutMetallib()
     }
 
     private func requireMetal() throws {
