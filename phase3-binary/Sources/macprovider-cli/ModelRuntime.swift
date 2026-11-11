@@ -3453,31 +3453,51 @@ actor ModelRuntime: ModelRuntimeServing {
     /// GLM-5.3-Flash, and MiniMax M3.1-Flash (~194 GB) closer still.
     nonisolated static let residentWeightsFamilies: Set<String> = ["glm5_next", "deepseek_v4", "minimax_m3"]
 
-    /// A model-lifetime wired-limit ticket at Metal's recommended working set,
-    /// the limit mlx-lm's generation paths set. At the default limit (0) no
-    /// buffer joins MLX's residency sets, and a model this close to the working
-    /// set (GLM-5.3-Flash: ~185 GB of 239 GB on a 256 GB M3 Ultra) pays a
-    /// multi-second residency cost on every forward: 0.38 tok/s decode, while a
-    /// 30 GB cut of the same model decodes at 75 tok/s. A fixed policy always
-    /// admits, so starting the ticket never suspends a load. Nil for other
-    /// families and when Metal reports no working set.
+    /// A model-lifetime wired-limit ticket sized to the loaded weights. At the
+    /// default limit (0) no buffer joins MLX's residency sets, and a model this
+    /// close to the working set (GLM-5.3-Flash: ~185 GB of 239 GB on a 256 GB
+    /// M3 Ultra) pays a multi-second residency cost on every forward: 0.38
+    /// tok/s decode, while a 30 GB cut of the same model decodes at 75 tok/s.
+    ///
+    /// The limit is the resident bytes after load, never the whole working
+    /// set (#2249). MLX adds every new buffer that fits under the limit to a
+    /// residency set and commits the set on each such allocation and free.
+    /// With the limit at the working set every serving temporary fit, so the
+    /// sets were recommitted thousands of times a minute while command buffers
+    /// were in flight; the IOGPU driver logged `preparedBytes !=
+    /// requiredBytes` (some with underflowed values) on those submissions,
+    /// and only on these families. At the weights' size temporaries stay out
+    /// of the sets and the sets stop changing after load. Capped at the
+    /// working set, which MLX rejects exceeding. A fixed policy always admits,
+    /// so starting the ticket never suspends a load. Nil for other families
+    /// and when Metal reports no working set or nothing is resident.
     nonisolated static func residentWeightsTicket(
         modelFamily: String,
-        recommendedWorkingSetBytes: Int?
+        recommendedWorkingSetBytes: Int?,
+        residentBytes: Int
     ) -> WiredMemoryTicket? {
         guard residentWeightsFamilies.contains(modelFamily),
-              let bytes = recommendedWorkingSetBytes, bytes > 0
+              let workingSet = recommendedWorkingSetBytes, workingSet > 0, residentBytes > 0
         else { return nil }
+        let bytes = min(workingSet, residentBytes)
         return WiredMemoryTicket(
             size: bytes, policy: MLXLMCommon.WiredFixedPolicy(limit: bytes), kind: .active)
     }
 
+    /// Starts the resident-weights ticket for a model that has just loaded.
+    /// The buffer cache is dropped first so the residency sets take the live
+    /// weights and nothing that is about to be reused as a temporary.
     nonisolated static func startResidentWeightsTicket(modelFamily: String) async -> WiredMemoryTicket? {
+        guard residentWeightsFamilies.contains(modelFamily) else { return nil }
+        Memory.clearCache()
         guard let ticket = residentWeightsTicket(
             modelFamily: modelFamily,
-            recommendedWorkingSetBytes: GPU.maxRecommendedWorkingSetBytes()
+            recommendedWorkingSetBytes: GPU.maxRecommendedWorkingSetBytes(),
+            residentBytes: Memory.activeMemory
         ) else { return nil }
-        _ = await ticket.start()
+        let applied = await ticket.start()
+        FileHandle.standardError.write(Data(
+            "event=resident_weights_wired_limit family=\(modelFamily) limit_bytes=\(applied) ticket_bytes=\(ticket.size)\n".utf8))
         return ticket
     }
 
