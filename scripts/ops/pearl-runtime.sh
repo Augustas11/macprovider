@@ -27,14 +27,33 @@
 #   stats_migrate       pending stats/rewards Postgres migrations of the coordinator
 #                       binary installed on Pearl (`stats-migrate --check` lists
 #                       them; no downtime). The signed updater never applies
-#                       them. Checked at two points: before 4a while no apply has
-#                       run (migrations shipped by an earlier release that were
-#                       never applied) and after 7 once the new binary is live
-#                       (the new release's own migrations).
-#   5 plan              Pearl preflight + macprovider-pearl-update --plan (read-only)
-#   6 apply             systemd-run updater --apply (about 1-2 min restart)
-#   7 wait_updater      bounded wait for the updater unit to exit
-#   8 health            coordinator and gateway /healthz report the tag
+#                       them. Read before 5 while no apply has run (migrations an
+#                       earlier release shipped and nobody applied; 5 applies
+#                       them first) and applied by 6 once the new binary is live
+#                       (the new release's own migrations). A live release with
+#                       migrations still pending offers this step on its own.
+#   release_buyer_hold  offered first whenever the gateway /healthz reports
+#                       buyer_hold true and no updater unit is active on Pearl
+#                       (an interrupted rollout left buyers held): runs the
+#                       updater's --reconcile, which finishes or rolls back the
+#                       interrupted transaction, removes the start-held drop-in
+#                       and releases the hold, then requires /healthz to report
+#                       no hold
+#   5 apply             Pearl preflight, disk check for the database snapshot,
+#                       pending stats migrations, then systemd-run updater
+#                       --apply. The updater validates the release and takes
+#                       its own locks. Stated downtime: about 1-2 min when the
+#                       candidate's database schema fingerprint equals the
+#                       installed release's (read-only: the release's
+#                       pearl-release.json and Pearl's current-release.json);
+#                       otherwise or when unknown, buyers held with 503 until
+#                       every serving gate passes, up to about 25 min
+#   6 health            bounded wait for the updater unit, coordinator and
+#                       gateway /healthz report the tag with no buyer hold, the
+#                       new binary's stats migrations, then the measured apply
+#                       downtime (gateway stop to start) and buyer-visible
+#                       downtime (buyer hold to release) as a line for
+#                       docs/releases/coordinator-release-train.md
 #
 # One-time task (PEARL_RUNTIME_TASK=retention-vacuum-conversion), outside the
 # release train: convert the coordinator database files to
@@ -215,12 +234,14 @@
 # Env (or ~/.config/macprovider/ops.env): COORDINATOR_URL, GATEWAY_URL,
 # PEARL_SSH, PEARL_RUNTIME_VERSION, UPDATER_WAIT_MAX_S (default 2700),
 # PEARL_COORDINATOR_ENV (default /etc/macprovider/coordinator.env),
-# PEARL_COORDINATOR_BIN (default /opt/macprovider/coordinator), MACPROVIDER_OPS_OWNER (for --run).
+# PEARL_COORDINATOR_BIN (default /opt/macprovider/coordinator),
+# PEARL_UPDATER_STATE_ROOT (default /var/lib/macprovider-pearl-updater),
+# PEARL_UPDATER_BIN, MACPROVIDER_OPS_OWNER (for --run).
 set -euo pipefail
 # shellcheck source-path=SCRIPTDIR disable=SC2034  # OPS_NAME/NEXT_* are read by lib/common.sh
 
 OPS_NAME=pearl-runtime
-# Every runnable step here touches Pearl (even --plan runs as root there).
+# Every runnable step here touches Pearl.
 OPS_REQUIRE_CLEAN_FOR_ALL=1
 # shellcheck source=lib/common.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
@@ -231,40 +252,127 @@ ROLLOUT_DOC="docs/runbooks/pearl-coordinator-rollout.md"
 RETENTION_DOC="ops/runbooks/settlement-evidence-retention.md"
 VACUUM_DOWNTIME="coordinator stopped while SQLite rewrites the coordinator, route-snapshot journal, and audit (coordinator-audit.db) database files (full VACUUM): about as long as the updater's pre-apply backup of the same files (ops/runbooks/pearl-release-updater.md), in proportion to their size; buyer and provider traffic through the coordinator is down for that time"
 STATS_MIGRATE_DOWNTIME="none (embedded stats/rewards Postgres migrations apply while the coordinator keeps serving; no restart)"
-APPLY_DOWNTIME="about 1-2 min of coordinator/gateway restart (short-quiesce updater; the updater's rollback-point verification afterwards runs with services up)"
-PEARL_UPDATER_AUDIT="${PEARL_UPDATER_AUDIT:-/var/lib/macprovider-pearl-updater/audit.jsonl}"
+APPLY_DOWNTIME_SHORT="about 1-2 min of coordinator/gateway restart (the candidate keeps the installed database schema fingerprint, so buyers are released as soon as the new gateway is up; the updater's rollback-point verification afterwards runs with services up)"
+APPLY_DOWNTIME_HELD="buyers held with 503 until all serving gates pass, up to about 25 min (the candidate changes the database schema fingerprint, or that is unknown: the updater keeps buyers held until the release commits so a rollback can restore the databases)"
+APPLY_DOWNTIME="$APPLY_DOWNTIME_HELD"
+PEARL_UPDATER_STATE_ROOT="${PEARL_UPDATER_STATE_ROOT:-/var/lib/macprovider-pearl-updater}"
+PEARL_UPDATER_AUDIT="${PEARL_UPDATER_AUDIT:-$PEARL_UPDATER_STATE_ROOT/audit.jsonl}"
 
 # last_apply_downtime: read-only. Prints "<tag>: <N> s" for the newest completed
 # apply in the updater audit log, measured from the gateway stop to the gateway
-# start (the coordinator stops after and starts before the gateway). Prints
-# nothing when the log is unreadable or holds no completed apply.
+# start (the coordinator stops after and starts before the gateway), then
+# "; buyers <M> s": the buyer-visible window from the drain's buyer hold (or the
+# gateway stop when the old gateway had no hold) to its release
+# (released/released_by_restart), or to the gateway start when the new gateway
+# did not start held, or to rollout completion. Prints nothing when the log is
+# unreadable or holds no completed apply.
 last_apply_downtime() {
   [ -n "${PEARL_SSH:-}" ] || return 0
   ssh "$PEARL_SSH" "sudo -n tail -n 5000 '$PEARL_UPDATER_AUDIT'" 2>/dev/null | python3 -c '
 import calendar, json, sys, time
 def ts(r):
     return calendar.timegm(time.strptime(r["ts"], "%Y-%m-%dT%H:%M:%SZ"))
-tag = stop = start = None
+tag = stop = start = held = released = None
+started_held = False
 last = None
 for line in sys.stdin:
     try:
         r = json.loads(line)
     except ValueError:
         continue
-    event, unit = r.get("event"), r.get("unit")
+    event, unit, outcome = r.get("event"), r.get("unit"), r.get("outcome")
     if event == "rollout_started":
-        tag, stop, start = r.get("candidate"), None, None
-    elif event == "service_action" and r.get("outcome") == "success" and unit == "macprovider-gateway.service":
+        tag, stop, start, held, released, started_held = r.get("candidate"), None, None, None, None, False
+    elif event == "gateway_buyer_hold" and outcome == "held" and r.get("stage") == "drain" and held is None:
+        held = ts(r)
+    elif event == "gateway_buyer_hold_dropin" and outcome == "installed":
+        started_held = True
+    elif event == "gateway_buyer_hold" and outcome in ("released", "released_by_restart") and start is not None and released is None:
+        released = ts(r)
+    elif event == "service_action" and outcome == "success" and unit == "macprovider-gateway.service":
         if r.get("action") == "stop" and stop is None:
             stop = ts(r)
         elif r.get("action") == "start" and stop is not None and start is None:
             start = ts(r)
     elif event == "rollout_completed" and stop is not None and start is not None:
-        last = f"{tag}: {start - stop} s"
+        begin = held if held is not None else stop
+        end = released if released is not None else (ts(r) if started_held else start)
+        last = f"{tag}: {start - stop} s; buyers {end - begin} s"
 if last:
     print(last)
 ' 2>/dev/null || true
 }
+
+# apply_schema_change TAG: read-only. "true" when the candidate's database
+# schema fingerprint (the release's pearl-release.json) differs from the one
+# Pearl's installed-release record carries: the updater then snapshots the
+# databases and holds buyers until every serving gate passes. "false" when they
+# are equal, "unknown" when either cannot be read.
+apply_schema_change() {
+  local t="$1" d cand live
+  d="$OPS_TMP_DIR/schema-$t"
+  rm -rf "$d"; mkdir -p "$d"
+  gh release download "$t" -R "$(gh_repo)" -p pearl-release.json -D "$d" >/dev/null 2>&1 || { echo unknown; return 0; }
+  cand="$(json_field "$d/pearl-release.json" 'd["database_schema_fingerprint"]')"
+  ssh "$PEARL_SSH" "sudo -n cat '$PEARL_UPDATER_STATE_ROOT/current-release.json'" > "$d/current.json" 2>/dev/null || { echo unknown; return 0; }
+  live="$(json_field "$d/current.json" 'd["database_schema_fingerprint"]')"
+  if ! [[ "$cand" =~ ^[0-9a-f]{64}$ && "$live" =~ ^[0-9a-f]{64}$ ]]; then echo unknown
+  elif [ "$cand" = "$live" ]; then echo false
+  else echo true
+  fi
+}
+
+# Disk check run before the apply: the updater snapshots every live database
+# into its transactions directory, so the free space there must exceed the live
+# databases with their WAL (paths from the installed-release record) plus a
+# margin of max(10%, 5 GB). Without that record the largest snapshot it still
+# keeps is the size estimate.
+read -r -d '' APPLY_DISK_GATE <<'GATE' || true
+ssh "$PEARL_SSH" 'sudo -n python3 -I - /var/lib/macprovider-pearl-updater' <<'DISK'
+import json, os, shutil, sys
+root = sys.argv[1]
+tx = os.path.join(root, "transactions")
+need, basis = 0, "live databases with WAL"
+try:
+    paths = sorted(json.load(open(os.path.join(root, "current-release.json")))["database_schemas"])
+except (OSError, ValueError, KeyError, TypeError):
+    paths = []
+for path in paths:
+    for name in (path, path + "-wal"):
+        try:
+            need += os.stat(name).st_size
+        except FileNotFoundError:
+            pass
+if not paths:
+    basis = "largest database snapshot"
+    for entry in os.listdir(tx) if os.path.isdir(tx) else []:
+        size = 0
+        for top, _dirs, files in os.walk(os.path.join(tx, entry, "databases")):
+            size += sum(os.lstat(os.path.join(top, f)).st_size for f in files)
+        need = max(need, size)
+margin = max(need // 10, 5 * 1024 ** 3)
+avail = shutil.disk_usage(tx if os.path.isdir(tx) else root).free
+print(f"disk: {avail} bytes free under {tx}; {basis} {need} bytes; margin {margin} bytes")
+if avail < need + margin:
+    sys.exit("not enough free disk for the database snapshot")
+DISK
+GATE
+
+# _apply-downtime TAG: the measured downtime of the newest completed apply as one
+# line to paste into docs/releases/coordinator-release-train.md. Read-only.
+apply_downtime_internal() {
+  local tag="${1:-}" measured
+  [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || refuse "_apply-downtime needs the runtime tag (vX.Y.Z)"
+  measured="$(last_apply_downtime)"
+  case "$measured" in
+    "$tag: "*"; buyers "*)
+      local rest="${measured#"$tag: "}"
+      printf 'Release train line: Pearl runtime %s applied; measured apply downtime %s (gateway stop to gateway start), buyer-visible downtime %s (buyer hold to release), updater audit log.\n' \
+        "$tag" "${rest%%; buyers *}" "${rest##*; buyers }" ;;
+    *) printf 'Release train line: Pearl runtime %s applied; apply downtime not measured (the updater audit log has no completed apply of %s).\n' "$tag" "$tag" ;;
+  esac
+}
+
 RETENTION_RUN_DOWNTIME="none (no restart): the coordinator keeps serving while the run archives and deletes settled evidence in short batches"
 CI_DOC="docs/runbooks/compute-integrity-private-corpus.md"
 # Pearl's journal: a plain coordinator restart stops (draining in-flight
@@ -308,15 +416,17 @@ pearl_sqlite_read() {
 
 # stats_migrate: pending stats migrations. The signed updater never runs stats-migrate
 # (ops/runbooks/pearl-release-updater.md), and a migration is only known to the
-# binary that embeds it. One probe, two call sites in gather:
-#   - before app_attest_recorder, while no apply has run for this tag: the
-#     installed binary may carry migrations an earlier release shipped and
-#     nobody applied;
-#   - after wait_updater, once the new binary is live: its own migrations.
-# Calling it between the apply and the end of the updater unit would race the
-# binary swap, so that window is skipped. The probe reads live state, so it is
-# idempotent and needs no completion marker.
+# binary that embeds it. One probe, read at two points in gather:
+#   - before the apply, while no apply has run for this tag: the installed
+#     binary may carry migrations an earlier release shipped and nobody
+#     applied; the apply step applies them before the updater starts;
+#   - once the new binary is live: its own migrations, applied by the health
+#     step (or offered on their own when the release is otherwise done).
+# Reading it between the apply and the end of the updater unit would race the
+# binary swap, so that window is skipped; the health step waits for the unit
+# first. The probe reads live state, so it is idempotent and needs no marker.
 STATS_RECORDED=0
+STATS_PENDING=""
 # Case-insensitive postgres(ql):// URLs and libpq password=... pairs.
 read -r -d '' REDACT_SED <<'SED' || true
 s#[Pp][Oo][Ss][Tt][Gg][Rr][Ee][Ss]([Qq][Ll])?://[^[:space:]]*#postgres://REDACTED#g;s#([Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]|[Pp][Ww][Dd])[[:space:]]*=[[:space:]]*("[^"]*"|'[^']*'|[^[:space:]]+)#\1=REDACTED#g
@@ -376,9 +486,24 @@ REMOTE_TAIL
   printf '%s\nread -r -d %s sedx <<%s || true\n%s\nSED\n%s\n' "$head" "''" "'SED'" "$REDACT_SED" "$tail"
 }
 
+# The command that applies the stats migrations on Pearl and fails if any is
+# still pending afterwards.
+stats_migrate_apply_cmd() {
+  local env="${PEARL_COORDINATOR_ENV:-/etc/macprovider/coordinator.env}" bin="${PEARL_COORDINATOR_BIN:-/opt/macprovider/coordinator}"
+  [[ "$env" =~ ^/[A-Za-z0-9._/-]+$ ]] || refuse "PEARL_COORDINATOR_ENV must be an absolute path"
+  [[ "$bin" =~ ^/[A-Za-z0-9._/-]+$ ]] || refuse "PEARL_COORDINATOR_BIN must be an absolute path"
+  printf '%s\n' "ssh \"\$PEARL_SSH\" 'sudo bash -s -- $env $bin apply' <<'REMOTE'
+$(stats_migrate_remote_script)
+REMOTE"
+}
+
+# stats_migrate_step [report]: with "report", pending migrations are recorded
+# in STATS_PENDING for the step that applies them and not offered as a step of
+# their own; an unreadable state still blocks.
 stats_migrate_step() {
   [ "$STATS_RECORDED" = 0 ] || return 0
   STATS_RECORDED=1
+  local mode="${1:-}"
   local env="${PEARL_COORDINATOR_ENV:-/etc/macprovider/coordinator.env}" bin="${PEARL_COORDINATOR_BIN:-/opt/macprovider/coordinator}"
   [[ "$env" =~ ^/[A-Za-z0-9._/-]+$ ]] || refuse "PEARL_COORDINATOR_ENV must be an absolute path"
   [[ "$bin" =~ ^/[A-Za-z0-9._/-]+$ ]] || refuse "PEARL_COORDINATOR_BIN must be an absolute path"
@@ -405,12 +530,15 @@ stats_migrate_step() {
     step stats_migrate "done" "no pending stats migrations"
     return
   fi
+  STATS_PENDING="$pending"
+  if [ "$mode" = report ]; then
+    step stats_migrate pending "pending: $pending (applied by the next apply or health step)"
+    return
+  fi
   step stats_migrate pending "pending: $pending"
   [ -z "$NEXT_ID" ] || return 0
   set_next stats_migrate mutate "Apply pending stats migrations on Pearl: $pending (no downtime)" \
-"ssh \"\$PEARL_SSH\" 'sudo bash -s -- $env $bin apply' <<'REMOTE'
-$body
-REMOTE" "the installed coordinator binary reports pending stats migrations; the signed updater does not apply them"
+    "$(stats_migrate_apply_cmd)" "the installed coordinator binary reports pending stats migrations; the signed updater does not apply them"
   next_meta stats_migrate "$ROLLOUT_DOC#stats-migrations" "$STATS_MIGRATE_DOWNTIME"
 }
 
@@ -1407,8 +1535,69 @@ ub_internal() {
     "$(python3 -I -c 'import json,sys; print(json.dumps({"tag": sys.argv[1], "commit": sys.argv[2]}))' "$UB_TAG" "$UB_COMMIT")"
 }
 
+# set_health_next TAG [REASON]: step 6. Waits (bounded) for the updater unit,
+# shows its result, requires both /healthz to report TAG and the gateway to hold
+# no buyers, applies the live binary's stats migrations, and prints the measured
+# apply downtime for the release train. Runs under the live-ops lock because the
+# migrations write.
+set_health_next() {
+  local t="$1" why="${2:-}" unit="mp-update-${1#v}"
+  if [ -z "${PEARL_SSH:-}" ] || [ -z "$(gateway_url)" ]; then
+    set_next health blocked "Wait for the updater, check health and apply stats migrations for $t" "" \
+      "${why:+$why; }PEARL_SSH and GATEWAY_URL are both needed"
+    return
+  fi
+  set_next health mutate "Wait for the updater, check health and apply stats migrations for $t" \
+"deadline=\$((\$(date +%s) + \${UPDATER_WAIT_MAX_S:-2700}))
+while ssh \"\$PEARL_SSH\" 'systemctl is-active --quiet $unit'; do
+  [ \"\$(date +%s)\" -lt \"\$deadline\" ] || { echo 'updater still running at the deadline; inspect, do not retry' >&2; exit 1; }
+  sleep 30
+done
+ssh \"\$PEARL_SSH\" 'systemctl show $unit -p Result -p ExecMainStatus --no-pager || true; journalctl -u $unit -n 40 --no-pager || true'
+curl -sf \"\$COORDINATOR_URL/healthz\"; echo
+curl -sf \"\$GATEWAY_URL/healthz\"; echo
+curl -sf \"\$COORDINATOR_URL/healthz\" | grep -q '\"version\":\"$t\"'
+curl -sf \"\$GATEWAY_URL/healthz\" | grep -q '\"version\":\"$t\"'
+if curl -s \"\$GATEWAY_URL/healthz\" | grep -Eq '\"buyer_hold\" *: *true'; then echo 'the gateway still holds buyers' >&2; exit 1; fi
+$(stats_migrate_apply_cmd)
+scripts/ops/pearl-runtime.sh _apply-downtime $t" "$why"
+  next_meta health "$ROLLOUT_DOC#runtime-apply-signed-updater" "$STATS_MIGRATE_DOWNTIME"
+}
+
+# release_buyer_hold_step: the gateway reports buyer_hold true. A running
+# updater unit owns the hold (its held window); with none active the hold was
+# left by an interrupted rollout and the updater's --reconcile releases it.
+release_buyer_hold_step() {
+  local units rc=0
+  if [ -z "${PEARL_SSH:-}" ]; then
+    step release_buyer_hold blocked "the gateway holds buyers"
+    set_next release_buyer_hold blocked "Release the gateway buyer hold" "" "the gateway holds buyers and PEARL_SSH is unset"
+    return
+  fi
+  units="$(ssh "$PEARL_SSH" "systemctl list-units --state=active,activating --no-legend --plain 'mp-update-*' macprovider-pearl-updater.service macprovider-pearl-updater-reconcile.service" 2>/dev/null)" || rc=$?
+  if [ "$rc" != 0 ]; then
+    step release_buyer_hold blocked "the gateway holds buyers; updater units unreadable"
+    set_next release_buyer_hold blocked "Release the gateway buyer hold" "" \
+      "the gateway holds buyers and the updater units on Pearl cannot be listed (rc=$rc)"
+    return
+  fi
+  if [ -n "$(printf '%s' "$units" | tr -d '[:space:]')" ]; then
+    fact gateway_buyer_hold_owner "$(printf '%s' "$units" | awk '{print $1}' | tr '\n' ' ' | sed 's/ $//')"
+    step release_buyer_hold "done" "the hold belongs to a running updater unit"
+    return
+  fi
+  step release_buyer_hold pending "the gateway holds buyers and no updater unit is active"
+  set_next release_buyer_hold mutate "Release the gateway buyer hold left by an interrupted rollout (updater --reconcile)" \
+"ssh \"\$PEARL_SSH\" 'sudo $PEARL_UPDATER_BIN --reconcile'
+if curl -s \"\$GATEWAY_URL/healthz\" | grep -Eq '\"buyer_hold\" *: *true'; then echo 'the gateway still holds buyers after --reconcile; read the updater audit log' >&2; exit 1; fi
+curl -s \"\$GATEWAY_URL/healthz\"; echo"
+  next_meta release_buyer_hold "$ROLLOUT_DOC#release-a-stuck-buyer-hold" \
+    "none added: ends a buyer outage (buyers get 503 until it runs); a reconcile that rolls back an interrupted transaction restarts the coordinator and gateway on the previous release"
+}
+
 gather() {
   STATS_RECORDED=0
+  STATS_PENDING=""
   if [ -n "${PEARL_RUNTIME_TASK:-}" ]; then
     case "$PEARL_RUNTIME_TASK" in
       retention-vacuum-conversion) gather_retention_vacuum; return ;;
@@ -1440,6 +1629,10 @@ gather() {
   fi
   fact live_coordinator_version "$live"
   fact live_gateway_version "$gw_live"
+  # A held gateway answers /healthz with buyer_hold true (200 or 503).
+  local gw_hold=""
+  [ -z "$(gateway_url)" ] || gw_hold="$(json_field "$OPS_TMP_DIR/gw.json" 'd.get("buyer_hold")')"
+  fact gateway_buyer_hold "${gw_hold:-unknown}"
   local max_tag
   max_tag="$(max_remote_tag)"
   fact highest_remote_tag "v$max_tag"
@@ -1464,6 +1657,13 @@ EOF
   fi
   fact target_version "$T"
   NEXT_RUNBOOK="$ROLLOUT_DOC"
+
+  # Buyers held with no updater running: an interrupted rollout. Releasing them
+  # comes before every other step.
+  if [ "$gw_hold" = true ]; then
+    release_buyer_hold_step
+    [ "$NEXT_ID" != release_buyer_hold ] || return 0
+  fi
 
   if [ -z "$live" ]; then
     set_next live_state blocked "Read the live coordinator version" "" "COORDINATOR_URL is unset or /healthz is unreadable"
@@ -1497,11 +1697,30 @@ EOF
   fact code_changed_vs_live "$changed"
   if [ -n "$T" ] && [ "$T" = "$live" ] && [ "$gw_live" = "$T" ]; then
     local s
-    for s in code_changed signed_tag dispatch env_approval plan apply wait_updater; do step "$s" "done" ""; done
+    for s in code_changed signed_tag dispatch env_approval apply; do step "$s" "done" ""; done
     step health "done" "coordinator and gateway report $T"
     # Live is not done while the live binary's own migrations are pending.
     stats_migrate_step
     set_next "done" "done" "$T is live" ""
+    return
+  fi
+  # Coordinator already on the target but the gateway is not proven on it:
+  # comparing the tag with itself would claim "code identical". Report the
+  # gateway state and route to the health step.
+  if [ -n "$T" ] && [ "$T" = "$live" ]; then
+    local s gw_why
+    if [ -z "$(gateway_url)" ]; then
+      gw_why="gateway version unknown: GATEWAY_URL is unset"
+    elif [ -z "$gw_live" ]; then
+      gw_why="gateway unhealthy: $(gateway_url)/healthz did not answer 200 with a version"
+    else
+      gw_why="gateway reports $gw_live, not $T"
+    fi
+    fact gateway_state "$gw_why"
+    for s in code_changed signed_tag dispatch env_approval apply; do step "$s" "done" "coordinator reports $T"; done
+    stats_migrate_step report
+    step health pending "$gw_why"
+    set_health_next "$T" "$gw_why"
     return
   fi
   case "$changed" in
@@ -1552,7 +1771,7 @@ git push origin refs/tags/$T"
 
   # A recorded apply whose updater unit failed while the live version stayed
   # behind was rolled back by the updater: forget the marker so the apply is
-  # offered again (step 6 resets the failed transient unit, which blocks
+  # offered again (step 5 resets the failed transient unit, which blocks
   # systemd-run). Done first so every later step sees the true apply state.
   local apply_rolled_back=false
   if [ "$live" != "$T" ] && [ -n "${PEARL_SSH:-}" ] &&
@@ -1596,9 +1815,10 @@ git push origin refs/tags/$T"
       fi ;;
   esac
 
-  # stats_migrate, pre-apply. Migrations already pending under the installed binary.
+  # stats_migrate, pre-apply. Migrations already pending under the installed
+  # binary; the apply step applies them before the updater starts.
   if [ "$live" != "$T" ] && ! marker_done "$OPS_SCOPE" apply; then
-    stats_migrate_step
+    stats_migrate_step report
   fi
 
   # 4a. one-time recorder provisioning (SPEC-033 §2.7). Read-only check on
@@ -1632,33 +1852,9 @@ git push origin refs/tags/$T"
     esac
   fi
 
-  # 5. preflight + plan (read-only on Pearl).
-  local plan_fresh=false
-  if marker_done "$OPS_SCOPE" plan &&
-    [ -n "$(find "$(marker_path "$OPS_SCOPE" plan)" -mmin -120 2>/dev/null)" ]; then
-    plan_fresh=true
-  fi
-  if marker_done "$OPS_SCOPE" apply; then
-    step plan "done" ""
-  elif [ "$plan_fresh" = true ]; then
-    step plan "done" "plan within the last 2 h"
-  else
-    step plan pending ""
-    if [ -z "${PEARL_SSH:-}" ]; then
-      set_next plan blocked "Preflight and plan on Pearl" "" "PEARL_SSH is unset"
-    elif [ -z "$NEXT_ID" ]; then
-      # Rendered only when this is the next step; a render failure aborts gather.
-      local preflight_cmd
-      preflight_cmd="$(render_runbook "$RB_PEARL_PREFLIGHT")"
-      set_next plan read "Pearl preflight and updater --plan for $T (read-only)" \
-"$preflight_cmd
-ssh \"\$PEARL_SSH\" 'for l in /run/lock/macprovider-pearl-updater.lock /opt/macprovider/.coordinator-deploy.lock; do flock -n \$l true || { echo \"lock busy: \$l\" >&2; exit 1; }; done'
-ssh \"\$PEARL_SSH\" '/usr/local/sbin/macprovider-pearl-update --plan --tag $T'"
-      next_meta plan "$ROLLOUT_DOC#preflight-every-time" "" plan
-    fi
-  fi
-
-  # 6. apply (a rolled-back apply was detected above, before the pre-apply stats check).
+  # 5. apply: preflight, disk check, pending stats migrations, then the signed
+  # updater (it validates the release and takes its own locks). A rolled-back
+  # apply was detected above, before the pre-apply stats check.
   if marker_done "$OPS_SCOPE" apply; then
     step apply "done" "$(marker_field "$OPS_SCOPE" apply 'd.get("recorded_at")')"
   else
@@ -1667,51 +1863,42 @@ ssh \"\$PEARL_SSH\" '/usr/local/sbin/macprovider-pearl-update --plan --tag $T'"
     else
       step apply pending ""
     fi
-    if [ -z "$NEXT_ID" ]; then
-      local apply_cmd
+    if [ -z "${PEARL_SSH:-}" ]; then
+      set_next apply blocked "Apply runtime $T with the signed updater" "" "PEARL_SSH is unset"
+    elif [ -z "$NEXT_ID" ]; then
+      # Rendered only when this is the next step; a render failure aborts gather.
+      local apply_cmd preflight_cmd stats_cmd=""
+      preflight_cmd="$(render_runbook "$RB_PEARL_PREFLIGHT")"
       apply_cmd="$(render_runbook "$RB_PEARL_APPLY" "${T#v}")"
       if [ "$apply_rolled_back" = true ]; then
         apply_cmd="ssh \"\$PEARL_SSH\" 'systemctl reset-failed mp-update-${T#v}'
 $apply_cmd"
       fi
-      set_next apply mutate "Apply runtime $T with the signed updater" "$apply_cmd"
+      [ -z "$STATS_PENDING" ] || stats_cmd="$(stats_migrate_apply_cmd)
+"
+      set_next apply mutate "Apply runtime $T with the signed updater${STATS_PENDING:+ (stats migrations first: $STATS_PENDING)}" \
+"$preflight_cmd
+$APPLY_DISK_GATE
+$stats_cmd$apply_cmd"
     fi
     if [ "$NEXT_ID" = apply ]; then
-      local measured
+      local measured schema_change
+      schema_change="$(apply_schema_change "$T")"
+      fact apply_schema_change "$schema_change"
+      [ "$schema_change" != false ] || APPLY_DOWNTIME="$APPLY_DOWNTIME_SHORT"
       measured="$(last_apply_downtime)"
       [ -z "$measured" ] || APPLY_DOWNTIME="$APPLY_DOWNTIME; last measured apply $measured"
     fi
     next_meta apply "$ROLLOUT_DOC#runtime-apply-signed-updater" "$APPLY_DOWNTIME" apply
   fi
 
-  # 7. bounded wait for the transient updater unit.
-  if [ "$live" = "$T" ]; then
-    step wait_updater "done" "coordinator reports $T"
-  else
-    step wait_updater pending ""
-    set_next wait_updater read "Wait (bounded) for updater unit mp-update-${T#v} to exit" \
-"deadline=\$((\$(date +%s) + \${UPDATER_WAIT_MAX_S:-2700}))
-while ssh \"\$PEARL_SSH\" 'systemctl is-active --quiet mp-update-${T#v}'; do
-  [ \"\$(date +%s)\" -lt \"\$deadline\" ] || { echo 'updater still running at the deadline; inspect, do not retry' >&2; exit 1; }
-  sleep 30
-done
-ssh \"\$PEARL_SSH\" 'systemctl show mp-update-${T#v} -p Result -p ExecMainStatus --no-pager || true; journalctl -u mp-update-${T#v} -n 40 --no-pager || true'"
-  fi
+  # The new binary's stats migrations are read once it is live; the health
+  # step waits for the updater unit and applies them.
+  [ "$STATS_RECORDED" = 1 ] || step stats_migrate pending "applied by the health step once the new binary is live"
 
-  # stats_migrate, post-apply. Migrations of the binary that is now live (before health is reported).
-  if [ "$live" = "$T" ]; then
-    stats_migrate_step
-  elif [ "$STATS_RECORDED" = 0 ]; then
-    step stats_migrate pending "checked once the new binary is live"
-  fi
-
-  # 8. health.
+  # 6. health.
   step health pending "coordinator=$live gateway=$gw_live"
-  set_next health read "Check coordinator and gateway health report $T" \
-"curl -sf \"\$COORDINATOR_URL/healthz\"; echo
-curl -sf \"\$GATEWAY_URL/healthz\"; echo
-curl -sf \"\$COORDINATOR_URL/healthz\" | grep -q '\"version\":\"$T\"'
-curl -sf \"\$GATEWAY_URL/healthz\" | grep -q '\"version\":\"$T\"'"
+  set_health_next "$T"
 }
 
 internal() {
@@ -1722,6 +1909,7 @@ internal() {
     _compute-integrity-reference-operators) shift; ro_internal "$@" ;;
     _updater-bundle) shift; ub_internal "$@" ;;
     _stream-ceiling) sc_internal ;;
+    _apply-downtime) shift; apply_downtime_internal "$@" ;;
     *) usage >&2; exit 2 ;;
   esac
 }

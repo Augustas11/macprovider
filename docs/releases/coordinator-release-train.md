@@ -22,6 +22,25 @@ waives only the specifically authorized serving-journey export, not qualificatio
 or release-match gates. These catalog/tooling changes are not evidence of a
 coordinator runtime deployment or sampled GLM admission.
 
+## Rollback keeps buyer rows: gateway buyer hold and schema-aware rollback — pending runtime inclusion (2026-11-11)
+
+Related: #2296. The gateway gains an in-memory buyer hold (503 with
+`Retry-After` for new buyer requests; the ops canary is admitted) and the
+updater decides by database schema whether a failed rollout keeps the live
+databases (schema unchanged) or holds buyers until every serving gate passes
+and may restore (schema changed or unknown). SPEC-006-R027 is pending until the
+live step below is done.
+
+Live step, in this order:
+
+1. Cut and apply the next runtime release through
+   `scripts/ops/pearl-runtime.sh` (`status`, then `next --run`). This first
+   apply still runs under the previously installed updater, so it has the old
+   rollback behaviour.
+2. Install the updater bundle from the new tag
+   (`PEARL_RUNTIME_TASK=updater-bundle`). From the next apply on, the new
+   rollback rule and the stated buyer-visible downtime are in effect.
+
 ## Gateway releases orphaned reservations at startup — pending runtime inclusion (2026-11-10)
 
 Related: #2268. The gateway now expires, before it listens, the active quota

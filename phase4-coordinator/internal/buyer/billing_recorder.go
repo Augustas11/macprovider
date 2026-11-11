@@ -1262,19 +1262,6 @@ func (b *billingRecorder) logProviderRow(
 	return b.recordRow(provider.AssignedID, provider.ProviderID, provider.RuntimeSource, status, promptTok, nil, completionTok, errMsg, errCode, retried, nil, billing.FaultNone, nil)
 }
 
-// logProviderRowWithEstimate mirrors the pre-refactor
-// `logProviderRowWithEstimate` closure.
-func (b *billingRecorder) logProviderRowWithEstimate(
-	provider pool.Provider,
-	status int,
-	promptTok, completionTok *int64,
-	errMsg, errCode string,
-	retried int,
-	estimatedCompTokens *int64,
-) error {
-	return b.recordRow(provider.AssignedID, provider.ProviderID, provider.RuntimeSource, status, promptTok, nil, completionTok, errMsg, errCode, retried, estimatedCompTokens, billing.FaultNone, nil)
-}
-
 func (b *billingRecorder) logProviderRowWithEstimateAndOutput(
 	provider pool.Provider,
 	status int,

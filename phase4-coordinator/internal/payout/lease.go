@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -351,12 +350,3 @@ func tokenPrefix(s string) string {
 	}
 	return s[:8]
 }
-
-// canonicalAddressForCompare lowers an address; lease.go does not
-// own EIP-55 — addresses.go is canonical for that. This is just
-// a defensive normalisation if the lease ever wants to compare
-// host names case-insensitively (currently not used; defensive
-// hook for the audit lane).
-func canonicalAddressForCompare(s string) string { return strings.ToLower(s) }
-
-var _ = canonicalAddressForCompare // keep symbol live for forward use
