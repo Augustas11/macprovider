@@ -14781,6 +14781,34 @@
       }
     },
     {
+      "requirement_id": "SPEC-006-R027",
+      "spec_id": "SPEC-006",
+      "state": "pending",
+      "implementation": [
+        "phase5-gateway/internal/router/buyer_hold.go:func (s *Server) buyerHeld",
+        "phase5-gateway/internal/router/buyer_hold.go:func (s *Server) handleBuyerHold",
+        "phase5-gateway/internal/router/buyer_hold.go:func WithBuyerHoldAtStart",
+        "phase5-gateway/cmd/gateway/main.go:func newGatewayRouter"
+      ],
+      "tests": [
+        "phase5-gateway/internal/router/buyer_hold_test.go:func TestBuyerHoldRefusesNewBuyerRequestsWith503AndRetryAfter",
+        "phase5-gateway/internal/router/buyer_hold_test.go:func TestBuyerHoldAdmitsOnlyTheCanaryKey",
+        "phase5-gateway/internal/router/buyer_hold_test.go:func TestBuyerHoldRequiresOperatorAuth",
+        "phase5-gateway/internal/router/buyer_hold_test.go:func TestBuyerHoldIsOffAfterRestart",
+        "phase5-gateway/internal/router/buyer_hold_test.go:func TestBuyerHoldLetsInFlightStreamFinish",
+        "phase5-gateway/internal/router/buyer_hold_test.go:func TestBuyerHoldReadNeedsTheOperatorKeyAndChangesNothing",
+        "phase5-gateway/cmd/gateway/main_test.go:func TestGatewayRouterStartsHeldFromTheEnvironment"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/2296",
+        "rationale": "Implemented with handler tests and used by the Pearl updater's drain and database rollback rule (ops/runbooks/pearl-release-updater.md); live once a gateway runtime release with the hold reaches Pearl and the next runtime apply audits gateway_buyer_hold."
+      }
+    },
+    {
       "requirement_id": "SPEC-051-R001",
       "spec_id": "SPEC-051",
       "state": "pending",

@@ -22,6 +22,8 @@ pearl/coordinator.yaml and pearl/overlay.yaml, bin/fake-coordinator.
                                    also gives the unit a new main pid
   restart U also loads that file: svc/buc_sha, or with svc/buc_legacy an
   "unreadable" journal line when the configured file does not load.
+  list-units ...                   svc/updater_units as the active updater units
+                                   (svc/list_units_fail makes it fail)
   _init                            create the first /proc entries
 A unit whose name contains "gateway" is the fake gateway instead: its own
 pid (svc/gw_mainpid), start second (svc/gw_started_at), restart count (svc/gw_restarts) and /proc entry running
@@ -274,6 +276,14 @@ elif args[:1] == ["kill"] and "HUP" in args:
         if configured and buc is not None:
             open(os.path.join(svc, "buc_sha"), "w").write(buc)
         apply_sighup_config()
+elif args[:1] == ["list-units"]:
+    # Active updater units: the lines of svc/updater_units (none when absent);
+    # svc/list_units_fail makes the call fail.
+    if os.path.exists(os.path.join(svc, "list_units_fail")):
+        sys.exit(1)
+    path = os.path.join(svc, "updater_units")
+    if os.path.exists(path):
+        sys.stdout.write(open(path).read())
 elif args[:1] in (["stop"], ["start"]):
     with open(os.path.join(svc, "unit-actions"), "a") as f:
         f.write(args[0] + "\n")

@@ -1,7 +1,6 @@
 package payout
 
 import (
-	"bytes"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -327,15 +326,6 @@ func RecoverTxSender(signedTxBytes []byte) (string, error) {
 	copy(sig[1:33], r[:])
 	copy(sig[33:65], s[:])
 	return ecrecover(digest[:], sig)
-}
-
-// USDCTransferLogTopic returns the constant keccak256 topic for
-// ERC-20 Transfer events. Test surface only — internal callers
-// use transferEventTopic directly.
-func USDCTransferLogTopic() []byte {
-	cpy := make([]byte, len(transferEventTopic))
-	copy(cpy, transferEventTopic)
-	return cpy
 }
 
 // PadAddressTopic returns the 32-byte left-padded address form
@@ -671,9 +661,4 @@ func addressEqualFold(a, b string) bool {
 		return false
 	}
 	return an == bn
-}
-
-// bytesEqual is a thin wrapper used in tests + verification.
-func bytesEqual(a, b []byte) bool {
-	return bytes.Equal(a, b)
 }
