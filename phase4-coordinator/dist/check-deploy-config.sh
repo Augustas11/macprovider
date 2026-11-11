@@ -1026,9 +1026,9 @@ fi
 echo "config-drift check passed"
 
 # #615 production exception register gate (default-safe).
-# Hard-fails malformed/ownerless/scope-mismatched/clock-expired-active rows and
-# tombstone resurrection. status=expired and unbounded active rows warn unless
-# MACPROVIDER_EXCEPTION_ENFORCEMENT=1. See ops/runbooks/production-exception-register.md.
+# Hard-fails malformed/ownerless/scope-mismatched rows and tombstone
+# resurrection. No calendar date gates a deploy: expires_at is informational.
+# See ops/runbooks/production-exception-register.md.
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
 REPO_ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd -P)"
 EXCEPTION_CHECK="$REPO_ROOT/scripts/check-production-exceptions.py"

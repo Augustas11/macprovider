@@ -51,7 +51,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Reject expired or invalid production exceptions
+      - name: Reject invalid or promotion-blocking production exceptions
         shell: bash
         run: |
           set -euo pipefail
