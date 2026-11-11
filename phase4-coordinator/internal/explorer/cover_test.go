@@ -192,6 +192,13 @@ func TestExplorerHandlerErrorPaths(t *testing.T) {
 		resp := requestExplorer(t, h, http.MethodGet, p, "operator-key")
 		if resp.Code != want {
 			t.Errorf("%s: status=%d want %d body=%s", p, resp.Code, want, resp.Body.String())
+			continue
+		}
+		if ct := resp.Header().Get("Content-Type"); ct != "application/json" {
+			t.Errorf("%s: content-type=%q want application/json", p, ct)
+		}
+		if !strings.Contains(resp.Body.String(), `"error"`) || !strings.Contains(resp.Body.String(), `"code"`) {
+			t.Errorf("%s: body is not a structured error: %s", p, resp.Body.String())
 		}
 	}
 }
