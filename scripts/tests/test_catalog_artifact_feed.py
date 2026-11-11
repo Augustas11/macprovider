@@ -668,7 +668,8 @@ class RateCardSourceTest(unittest.TestCase):
             self.assertIs(demand[key]["recommendable"], False)
             self.assertIsNone(demand[key]["rank"])
         # #2270: Ripple-65B Preview is listed at its declared class rates.
-        listed_priced = {"ricursiveai/ripple-65b-preview"}
+        # #2231: LFM3 1.7B is listed at its declared class rates.
+        listed_priced = {"ricursiveai/ripple-65b-preview", "liquidai/lfm3-1.7b"}
         for key in listed_priced:
             self.assertEqual(CANDIDATE_OBJ["rows"][key]["runtime_status"], "listed")
             self.assertIs(demand[key]["recommendable"], False)
