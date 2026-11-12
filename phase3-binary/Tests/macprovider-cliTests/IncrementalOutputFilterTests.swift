@@ -377,29 +377,117 @@ final class IncrementalOutputFilterTests: XCTestCase {
 
     func testSerialToolStopMatchesReferenceOnRandomStreams() {
         var rng = SeededGenerator(state: 2_317_317)
-        let model = "mlx-community/Qwen3-8B-4bit"
-        let call = ["<tool", "_call>", "\n{\"name\": \"lookup\", ", "\"arguments\": {\"q\": \"x\"}}", "\n</tool_call>"]
-        for streamIndex in 0..<24 {
-            let stops = requestStopSets[streamIndex % requestStopSets.count]
-            let reasoningOpen = streamIndex % 3 == 0
-            var stream = randomStream(&rng, count: 200)
-            if reasoningOpen { stream.insert("</think>", at: Int.random(in: 0..<stream.count, using: &rng)) }
-            stream.insert(contentsOf: call, at: Int.random(in: 0..<stream.count, using: &rng))
-            var reference = NativeToolCallStreamEmitter(modelID: model, allowedFunctionNames: ["lookup"], schemas: nil)
-            var incremental = NativeToolCallStreamEmitter(modelID: model, allowedFunctionNames: ["lookup"], schemas: nil)
-            let filter = ModelRuntime.IncrementalStreamFilter(
-                stopTokenFilter: stopTokens, requestStops: stops, reasoningOpen: reasoningOpen)
-            var stopText = IncrementalToolStopText(observer: incremental)
-            var text = ""
-            for (step, piece) in stream.enumerated() {
-                text += piece
-                let expected = ModelRuntime.observeSerialToolStop(
-                    &reference, decoded: text, stopTokenFilter: stopTokens, requestStops: stops, reasoningOpen: reasoningOpen)
-                let actual = ModelRuntime.observeSerialToolStop(
-                    &incremental, decoded: text, filter: filter, stopText: &stopText, reasoningOpen: reasoningOpen)
-                XCTAssertEqual(actual, expected, "stream \(streamIndex) step \(step)")
-                if expected { break }
+        let dsml = DeepseekV4Encoding.dsmlToken
+        let glmCall = ["<tool_call>", "lookup", "<arg_key>", "q", "</arg_key>", "<arg_value>", "x", "</arg_value>", "</tool_call>"]
+        // #2259: a malformed first call does not hide a complete one after it.
+        let glmMalformedFirst = ["<tool_call>", "lookup<arg_key>q</arg_key>", "</tool_call>", " then "] + glmCall
+        let cases: [(model: String, grammar: ToolCallGrammar, call: [String])] = [
+            ("mlx-community/Qwen3-8B-4bit", .qwen, ["<tool", "_call>", "\n{\"name\": \"lookup\", ", "\"arguments\": {\"q\": \"x\"}}", "\n</tool_call>"]),
+            ("zai-org/GLM-5.3", .glm, glmCall),
+            ("zai-org/GLM-5.3", .glm, glmMalformedFirst),
+            ("mlx-community/gemma-4-12b-it-4bit", .gemma4, ["<|tool_call>", "call:lookup", "{q:<|\"|>x<|\"|>}", "<tool_call|>"]),
+            ("LiquidAI/LFM2-8B-A1B-MLX-4bit", .lfm2, ["<|tool_call_start|>", "[lookup(q=\"x\")]", "<|tool_call_end|>"]),
+            ("mlx-community/DeepSeek-V4-Flash-4bit", .dsml,
+             ["<\(dsml)tool_calls>", "\n<\(dsml)invoke name=\"lookup\">", "\n<\(dsml)parameter name=\"q\" string=\"true\">x</\(dsml)parameter>",
+              "\n</\(dsml)invoke>", "\n</\(dsml)tool_calls>"]),
+            ("mlx-community/Llama-3.3-70B-Instruct-4bit", .llama3, ["<|python_tag|>", "{\"name\": \"lookup\", ", "\"parameters\": {\"q\": \"x\"}}"]),
+        ]
+        for testCase in cases {
+            var stops = 0
+            for streamIndex in 0..<12 {
+                let requestStops = requestStopSets[streamIndex % requestStopSets.count]
+                let reasoningOpen = streamIndex % 3 == 0
+                var stream = randomStream(&rng, count: 200) + ["<div>", "\n  <a href=\"x\">", "</a>", "</div>"]
+                stream.shuffle(using: &rng)
+                if reasoningOpen { stream.insert("</think>", at: Int.random(in: 0..<stream.count, using: &rng)) }
+                stream.insert(contentsOf: testCase.call, at: Int.random(in: 0..<stream.count, using: &rng))
+                var reference = NativeToolCallStreamEmitter(modelID: testCase.model, grammar: testCase.grammar, allowedFunctionNames: ["lookup"])
+                var incremental = NativeToolCallStreamEmitter(modelID: testCase.model, grammar: testCase.grammar, allowedFunctionNames: ["lookup"])
+                let filter = ModelRuntime.IncrementalStreamFilter(
+                    stopTokenFilter: stopTokens, requestStops: requestStops, reasoningOpen: reasoningOpen)
+                var stopText = IncrementalToolStopText(observer: incremental)
+                var text = ""
+                for (step, piece) in stream.enumerated() {
+                    text += piece
+                    let expected = ModelRuntime.observeSerialToolStop(
+                        &reference, decoded: text, stopTokenFilter: stopTokens, requestStops: requestStops, reasoningOpen: reasoningOpen)
+                    let actual = ModelRuntime.observeSerialToolStop(
+                        &incremental, decoded: text, filter: filter, stopText: &stopText, reasoningOpen: reasoningOpen)
+                    guard actual == expected else {
+                        return XCTFail("\(testCase.grammar) stream \(streamIndex) step \(step)")
+                    }
+                    if expected {
+                        stops += 1
+                        break
+                    }
+                }
             }
+            // The streams do reach the stop (a call outside the reasoning).
+            XCTAssertGreaterThan(stops, 0, "\(testCase.grammar)")
+        }
+    }
+
+    /// A long GLM call body on a reasoning row through the serial tool
+    /// stop: the cut search and the end-delimiter search read a bounded
+    /// amount per step.
+    func testSerialToolStopWorkPerStepIsBoundedOnALongGLMBody() {
+        func perStep(bodyBytes: Int) -> Double {
+            var observer = NativeToolCallStreamEmitter(modelID: "zai-org/GLM-5.3", grammar: .glm, allowedFunctionNames: ["read"])
+            let filter = ModelRuntime.IncrementalStreamFilter(stopTokenFilter: stopTokens, requestStops: [], reasoningOpen: true)
+            var stopText = IncrementalToolStopText(observer: observer)
+            var text = String(repeating: "thinking. ", count: 50) + "</think>" + String(repeating: "Reading now. ", count: 40)
+                + "<tool_call>read<arg_key>path</arg_key><arg_value>"
+            let unit = "<div class=\"row\">\n  <a href=\"/x\">link</a> if a < b\n</div>\n"
+            var steps = 0
+            while text.utf8.count < bodyBytes {
+                text += unit
+                steps += 1
+                XCTAssertFalse(ModelRuntime.observeSerialToolStop(
+                    &observer, decoded: text, filter: filter, stopText: &stopText, reasoningOpen: true))
+            }
+            return Double(stopText.scannedUTF8 + observer.incrementalScannedUTF8) / Double(steps)
+        }
+        let short = perStep(bodyBytes: 100_000)
+        let long = perStep(bodyBytes: 400_000)
+        XCTAssertLessThan(long, 512)
+        XCTAssertLessThan(long, short * 1.25 + 16)
+    }
+
+    /// Marker-free text full of `<` (indented HTML, XML) commits: work per
+    /// step stays bounded, for the emitter's tool text and the tool stop.
+    func testDenseMarkupWithoutMarkersCommits() {
+        let units = [
+            "  <div class=\"card\">\n    <a href=\"/p\">post</a>\n  </div>\n",
+            "<?xml version=\"1.0\"?>\n<config>\n  <item key=\"a\" value=\"1\"/>\n</config>\n",
+        ]
+        for unit in units {
+            for qwenBareCalls in [false, true] {
+                func perStep(bytes: Int) -> (Double, Int) {
+                    let markers = NativeToolCallStreamEmitter(
+                        modelID: "m", grammar: qwenBareCalls ? .qwen : .glm, allowedFunctionNames: ["read"]).markerTexts
+                    var toolText = IncrementalToolText(markers: markers, bracesMatter: false, qwenBareCalls: qwenBareCalls)
+                    var text = "Here is the page:\n"
+                    var steps = 0
+                    while text.utf8.count < bytes {
+                        text += unit
+                        steps += 1
+                        _ = toolText.reduce(text)
+                    }
+                    return (Double(toolText.scannedUTF8) / Double(steps), toolText.maxUncommittedUTF8)
+                }
+                let short = perStep(bytes: 100_000)
+                let long = perStep(bytes: 400_000)
+                XCTAssertLessThan(long.0, 2_048, unit)
+                XCTAssertLessThan(long.0, short.0 * 1.25 + 16, unit)
+                XCTAssertLessThan(long.1, ModelRuntime.incrementalTailReportUTF8, unit)
+            }
+            var stray = IncrementalStrayTagRemoval()
+            var text = "Here is the page:\n"
+            while text.utf8.count < 100_000 {
+                text += unit
+                _ = stray.removingStrayTags(text)
+            }
+            XCTAssertLessThan(stray.maxUncommittedUTF8, ModelRuntime.incrementalTailReportUTF8, unit)
         }
     }
 
@@ -538,7 +626,7 @@ final class IncrementalOutputFilterTests: XCTestCase {
     func testGLMMarkupBeforeAJoinerHoldsTheCut() {
         var toolText = IncrementalToolText(
             markers: NativeToolCallStreamEmitter(modelID: "zai-org/GLM-5.3", grammar: .glm, allowedFunctionNames: ["read"]).markerTexts,
-            bracesMatter: false)
+            bracesMatter: false, qwenBareCalls: false)
         let text = "Hi <arg_key>\u{200D} there " + String(repeating: "x", count: 110)
         var view = String.UnicodeScalarView()
         for scalar in text.unicodeScalars {
@@ -554,6 +642,14 @@ final class IncrementalOutputFilterTests: XCTestCase {
         for grammar in ToolCallGrammar.allCases {
             let markers = NativeToolCallStreamEmitter(modelID: "m", grammar: grammar, allowedFunctionNames: []).markerTexts
             XCTAssertLessThan(markers.map(\.unicodeScalars.count).max() ?? 0, IncrementalToolText.markerFreeTail, "\(grammar)")
+            // The cut rule compares marker scalars: no other text may match
+            // a marker canonically (no decomposition, no K ; ` singletons).
+            for marker in markers + [ReasoningOutput.openTag, ReasoningOutput.closeTag] {
+                XCTAssertEqual(Array(marker.decomposedStringWithCanonicalMapping.unicodeScalars), Array(marker.unicodeScalars), marker)
+                XCTAssertEqual(Array(marker.precomposedStringWithCanonicalMapping.unicodeScalars), Array(marker.unicodeScalars), marker)
+                XCTAssertFalse(marker.unicodeScalars.contains { "K;`".unicodeScalars.contains($0) }, marker)
+                XCTAssertTrue(marker.hasPrefix("<"), marker)
+            }
         }
         XCTAssertTrue(Set(ToolCallParser.glmCallMarkup).isSubset(of: NativeToolCallStreamEmitter(
             modelID: "m", grammar: .glm, allowedFunctionNames: []).markerTexts))
@@ -589,6 +685,7 @@ final class IncrementalOutputFilterTests: XCTestCase {
             "a", "b", " ", "\n", ".", "<", ">", "/", "|", "\u{200D}", "\u{200C}", "\u{0600}", "\u{113D1}", "\u{AD}", "\u{301}",
             "\u{FE0F}", "\u{1F3FD}", "👍", "가", "\u{1100}", "\u{1161}", "\u{0915}", "\u{094D}", "🇺", "\r",
             "<think>", "</think>", "</th", "ink>", "<tool_call>", "<|eot_id|>", "<|eo", "t_id|>", "STOP", "word ", "prose here ",
+            "<div>", "</div>", "</", "<a ", "href=\"x\">", "<?xml", " version=\"1.0\"?>", "\n  <item/>", "<th", "<tool", "<|", "< ",
         ]
         var mismatches = 0
         for stream in 0..<30 {
@@ -620,5 +717,25 @@ final class IncrementalOutputFilterTests: XCTestCase {
             }
         }
         XCTAssertEqual(mismatches, 0)
+    }
+
+    /// A held-back tail (the text shrinking by a scalar, then growing
+    /// again) keeps the delimiter scan's recorded matches: no restart.
+    func testDelimiterScanKeepsItsStateWhenTheTextShrinksByAScalar() {
+        for last in [false, true] {
+            var scan = IncrementalDelimiterScan(needle: "</tool_call>", last: last)
+            let head = "<tool_call>read<arg_key>p</arg_key><arg_value>"
+            var text = head + "v</arg_value></tool_call>"
+            for step in 0..<300 {
+                text += step % 50 == 0 ? "</tool_call>" : "x日"
+                for candidate in [String(text.unicodeScalars.dropLast()), text] {
+                    let found = scan.find(in: candidate, origin: 0)
+                    let reference = candidate.range(of: "</tool_call>", options: last ? .backwards : [])
+                    XCTAssertEqual(found?.lower, reference.map { candidate.utf8.distance(from: candidate.utf8.startIndex, to: $0.lowerBound) })
+                    XCTAssertEqual(found?.upper, reference.map { candidate.utf8.distance(from: candidate.utf8.startIndex, to: $0.upperBound) })
+                }
+            }
+            XCTAssertEqual(scan.restartCount, 0, "last \(last)")
+        }
     }
 }

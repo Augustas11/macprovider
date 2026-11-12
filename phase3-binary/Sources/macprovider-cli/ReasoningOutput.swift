@@ -58,7 +58,7 @@ enum ReasoningOutput {
     /// that could still become a tag, so the visible text only grows.
     /// Incremental twin for streaming: `IncrementalStrayTagRemoval`.
     static func removingStrayTags(_ text: String, streaming: Bool) -> String {
-        let callStart = text.range(of: "<tool_call>")?.lowerBound ?? text.endIndex
+        let callStart = text.range(of: ToolCallParser.toolCallOpen)?.lowerBound ?? text.endIndex
         var head = String(text[..<callStart])
         guard head.unicodeScalars.contains("<") else { return text }
         head = removingTags(head)

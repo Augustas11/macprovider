@@ -16743,7 +16743,9 @@ struct SerialStreamingTextEmitter {
         self.holdsCleanupPatternPrefixes = holdsCleanupPatternPrefixes
         self.holdsCleanupDecoderPendingPrefixes = holdsCleanupDecoderPendingPrefixes
         self.heldProgress = heldProgress
-        toolText = IncrementalToolText(markers: toolStreamer.markerTexts, bracesMatter: toolStreamer.bareBracesMayOpenCall)
+        toolText = IncrementalToolText(
+            markers: toolStreamer.markerTexts, bracesMatter: toolStreamer.bareBracesMayOpenCall,
+            qwenBareCalls: toolStreamer.bareQwenCallsMayOpen)
     }
 
     /// One decoded prefix of the generation (`streamingSafePrefix` of every
@@ -17057,7 +17059,7 @@ struct NativeToolCallStreamEmitter {
         self.incremental = grammar == .qwen
         switch grammar {
         case .llama3?:
-            startDelimiter = "<|python_tag|>"
+            startDelimiter = ToolCallParser.pythonTag
             endDelimiter = "<|eom_id|>"
             argumentKey = "parameters"
         case .gemma4?:
@@ -17073,7 +17075,7 @@ struct NativeToolCallStreamEmitter {
             endDelimiter = DeepseekV4Encoding.toolCallsEnd
             argumentKey = "arguments"
         default:
-            startDelimiter = "<tool_call>"
+            startDelimiter = ToolCallParser.toolCallOpen
             endDelimiter = "</tool_call>"
             argumentKey = "arguments"
         }
@@ -17095,17 +17097,14 @@ struct NativeToolCallStreamEmitter {
     /// Every marker the visible-prefix and observe paths search for, for
     /// `IncrementalToolText` (a superset is safe).
     var markerTexts: [String] {
-        [startDelimiter, endDelimiter, "<|python_tag|>", "<function=", "</function>", ToolCallParser.qwenBareWrapperOpen]
+        [startDelimiter, endDelimiter, ToolCallParser.pythonTag, ToolCallParser.functionOpen, ToolCallParser.functionClose,
+         ToolCallParser.qwenBareWrapperOpen]
             + ToolCallParser.glmCallMarkup
     }
 
-    /// A text whose lead (after whitespace) may open a call: a Qwen bare-call
-    /// lead (`mayOpenQwenBareCalls`) or any other `<`. `IncrementalToolText`
-    /// keeps such a text whole.
-    static func leadMayOpenCall(_ text: String) -> Bool {
-        let lead = text.drop(while: { $0.isWhitespace })
-        return !lead.isEmpty && (lead.hasPrefix("<") || mayOpenQwenBareCalls(text))
-    }
+    /// Qwen rows hold an output that opens like a bare call
+    /// (`mayOpenQwenBareCalls`).
+    var bareQwenCallsMayOpen: Bool { grammar == .qwen }
 
     /// Llama 3 calls are bare JSON: a `{` may open one.
     var bareBracesMayOpenCall: Bool { grammar == .llama3 }
@@ -17145,10 +17144,10 @@ struct NativeToolCallStreamEmitter {
         if let start = text.range(of: startDelimiter) {
             return String(text[..<start.lowerBound])
         }
-        if allowsFunctionXML, let start = text.range(of: "<function=") {
+        if allowsFunctionXML, let start = text.range(of: ToolCallParser.functionOpen) {
             return String(text[..<start.lowerBound])
         }
-        return Self.stripIncompleteOpenDelimiter(from: text, delimiter: startDelimiter, extra: allowsFunctionXML ? "<function=" : nil)
+        return Self.stripIncompleteOpenDelimiter(from: text, delimiter: startDelimiter, extra: allowsFunctionXML ? ToolCallParser.functionOpen : nil)
     }
 
     mutating func observe(_ text: String) -> [StreamChunk] {
@@ -17178,18 +17177,18 @@ struct NativeToolCallStreamEmitter {
             let bodyEnd = text.range(of: endDelimiter, range: afterStart..<text.endIndex)?.lowerBound ?? text.endIndex
             let body = String(text[afterStart..<bodyEnd])
             var isClosed = text.range(of: endDelimiter, range: afterStart..<text.endIndex) != nil
-            if allowsFunctionXML, body.contains("<function=") {
+            if allowsFunctionXML, body.contains(ToolCallParser.functionOpen) {
                 // Outer </tool_call> is not a valid XML close; wait for </function>.
-                return observeNemotronXML(body: body, isClosed: body.contains("</function>"))
+                return observeNemotronXML(body: body, isClosed: body.contains(ToolCallParser.functionClose))
             }
             if !isClosed, ToolCallParser.firstCompleteJSONObject(in: body) != nil {
                 isClosed = true
             }
             return observeJSONToolCall(body: body, isClosed: isClosed)
         }
-        if allowsFunctionXML, text.contains("<function=") {
+        if allowsFunctionXML, text.contains(ToolCallParser.functionOpen) {
             sawToolDelimiter = true
-            let isClosed = text.contains("</function>")
+            let isClosed = text.contains(ToolCallParser.functionClose)
             return observeNemotronXML(body: text, isClosed: isClosed)
         }
         return []

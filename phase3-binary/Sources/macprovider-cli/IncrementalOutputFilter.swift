@@ -576,6 +576,26 @@ enum IncrementalEmitterText {
         return index(text, utf8Offset: offset)
     }
 
+    /// True when a `<` among the last `window` scalars before `end` starts a
+    /// run through `end` that is a prefix of one of `markers` (scalar
+    /// strings no other text matches canonically, see the tests): a marker
+    /// could still complete across `end`. Any other `<` (HTML, XML, a
+    /// comparison) cannot.
+    static func endsInsideMarker(_ scalars: [Unicode.Scalar], before end: Int, window: Int, markers: [[Unicode.Scalar]]) -> Bool {
+        var start = end - 1
+        while start >= max(0, end - window) {
+            defer { start -= 1 }
+            guard scalars[start] == "<" else { continue }
+            let run = end - start
+            for marker in markers where marker.count >= run {
+                var matched = 0
+                while matched < run, scalars[start + matched] == marker[matched] { matched += 1 }
+                if matched == run { return true }
+            }
+        }
+        return false
+    }
+
     /// The last scalar boundary at or before `offset` (and at or after
     /// `floor`) where a grapheme break falls whatever surrounds it, so a
     /// search started there sees the Characters a search of the whole text
@@ -686,7 +706,10 @@ struct IncrementalDelimiterScan {
 
     /// UTF-8 offsets in `text`.
     mutating func find(in text: String, origin: Int) -> (lower: Int, upper: Int)? {
-        let verified = min(previous.utf8.count, settled + margin)
+        // Recorded occurrences and the scalar after each lie before
+        // `settled + needle + 8`, which stays below the end by about a
+        // needle length: a text that shrinks by a held-back tail keeps them.
+        let verified = min(previous.utf8.count, settled + needle.utf8.count + 8)
         if origin != self.origin
             || (self.origin >= 0 && !ModelRuntime.IncrementalStreamFilter.sharesPrefix(previous, text, utf8Count: verified)) {
             if self.origin >= 0 { restartCount += 1 }
@@ -742,6 +765,15 @@ struct IncrementalReasoningSplit {
         }
         return ReasoningOutput.Split(reasoning: ReasoningOutput.withoutPartialCloseTag(text), answer: "", closed: false)
     }
+
+    /// `splitStreamingPrefix(text).answer` when closed, else nil, without
+    /// copying the reasoning (the tool-stop path reads only the answer).
+    mutating func closedAnswer(_ text: String) -> Substring? {
+        var text = text
+        text.makeContiguousUTF8()
+        guard let range = close.find(in: text) else { return nil }
+        return text[range.upperBound...].drop(while: { $0.isWhitespace })
+    }
 }
 
 /// Incremental twin of `ReasoningOutput.removingStrayTags(_:streaming: true)`.
@@ -750,16 +782,19 @@ struct IncrementalReasoningSplit {
 /// whatever the order (neither tag overlaps itself or the other), so the
 /// committed head's result is kept and only the text after it is processed.
 /// A cut is committed where both neighbouring scalars always break graphemes
-/// and the committed result has no `<` in its last 16 Characters: no tag can
-/// then span the cut.
+/// and neither the raw text nor the committed result ends in the start of a
+/// tag (`endsInsideMarker`): no tag can then span the cut.
 struct IncrementalStrayTagRemoval {
-    private var call = IncrementalFirstMatch(needle: "<tool_call>")
+    private var call = IncrementalFirstMatch(needle: ToolCallParser.toolCallOpen)
     private var previous = ""
     private var cut = 0
     private var committed = ""
     private var restarts = 0
     /// At least twice the longest tag's Characters (see the tests).
     static let tagFreeTail = 16
+    /// What may not span a cut: the think tags, and the call start the
+    /// whole-text function stops at.
+    static let tags = [ReasoningOutput.openTag, ReasoningOutput.closeTag, ToolCallParser.toolCallOpen].map { Array($0.unicodeScalars) }
 
     var restartCount: Int { restarts + call.restartCount }
     /// The longest uncommitted text before a call, in UTF-8 bytes.
@@ -804,7 +839,7 @@ struct IncrementalStrayTagRemoval {
         while index > 0, attempts < 64 {
             defer { index -= 1; attempts += 1 }
             guard ModelRuntime.IncrementalStreamFilter.breaksBetween(scalars[index - 1], scalars[index]),
-                  !scalars[max(0, index - Self.tagFreeTail)..<index].contains("<")
+                  !IncrementalEmitterText.endsInsideMarker(scalars, before: index, window: Self.tagFreeTail, markers: Self.tags)
             else { continue }
             // One whole-segment pass per call: a cut that fails here waits
             // for the next call.
@@ -812,8 +847,12 @@ struct IncrementalStrayTagRemoval {
             view.append(contentsOf: scalars[..<index])
             let segment = String(view)
             let processed = ReasoningOutput.removingTags(segment)
-            let joined = String(committed.suffix(Self.tagFreeTail)) + processed
-            guard !joined.suffix(Self.tagFreeTail).unicodeScalars.contains("<") else { return }
+            // After removals the committed result's end may not hold the
+            // start of a tag either.
+            let joined = Array((String(committed.suffix(Self.tagFreeTail)) + processed).suffix(Self.tagFreeTail).unicodeScalars)
+            guard !IncrementalEmitterText.endsInsideMarker(joined, before: joined.count, window: joined.count, markers: Self.tags) else {
+                return
+            }
             committed += processed
             cut += segment.utf8.count
             return
@@ -829,43 +868,51 @@ struct IncrementalToolStopText {
     private var toolText: IncrementalToolText
 
     init(observer: NativeToolCallStreamEmitter) {
-        toolText = IncrementalToolText(markers: observer.markerTexts, bracesMatter: observer.bareBracesMayOpenCall)
+        toolText = IncrementalToolText(
+            markers: observer.markerTexts, bracesMatter: observer.bareBracesMayOpenCall, qwenBareCalls: observer.bareQwenCallsMayOpen)
     }
 
     var restartCount: Int { reasoningSplit.restartCount + toolText.restartCount }
     var maxUncommittedUTF8: Int { toolText.maxUncommittedUTF8 }
+    /// Bytes the tool-text cut search read (test hook).
+    var scannedUTF8: Int { toolText.scannedUTF8 }
 
     /// Nil while the reasoning is open: a call inside it is not a call
     /// (SPEC-018 §3.12).
     mutating func observedText(_ text: String, reasoningOpen: Bool) -> String? {
         var text = text
         if reasoningOpen {
-            let split = reasoningSplit.splitStreamingPrefix(text)
-            guard split.closed else { return nil }
-            text = split.answer
+            guard let answer = reasoningSplit.closedAnswer(text) else { return nil }
+            text = String(answer)
         }
         return toolText.reduce(text).reduced
     }
 }
 
 /// What the tool-call stream emitter sees of the streamed text (#2317). The
-/// committed prose before `cut` holds no tool marker, no `<` in its last 24
-/// scalars, no `{` for Llama 3, and starts (after whitespace) with neither
-/// `{` nor `<`. `visibleContentPrefix` and `observe` then give on
-/// `x + rest` (x: the committed text's last scalar, a non-blank Character
-/// that always breaks graphemes) what they give on the whole text, minus the
-/// committed text before x. Above the response byte cap the whole text is
-/// used (`llama3CallStart` reads its length).
+/// committed prose before `cut` holds no tool marker, no `<` within 24
+/// scalars of the cut whose run to the cut is the start of a marker, no `{`
+/// for Llama 3, and on Qwen rows does not open like a bare call.
+/// `visibleContentPrefix` and `observe` then give on `x + rest` (x: the
+/// committed text's last scalar, a non-blank Character that always breaks
+/// graphemes and is neither `<` nor `{`) what they give on the whole text,
+/// minus the committed text before x. Above the response byte cap the whole
+/// text is used (`llama3CallStart` reads its length).
 struct IncrementalToolText {
     private let markers: [String]
+    private let markerScalars: [[Unicode.Scalar]]
     private let bracesMatter: Bool
+    private let qwenBareCalls: Bool
     private var previous = ""
     private var cut = 0
     /// No cut is possible while the text's first `frozenThrough` bytes stay
-    /// as they are: its lead may open a call, or a marker or (Llama 3) a `{`
-    /// lies before every later cut. Skips the per-step cut search over a
-    /// tool-call body.
+    /// as they are: its lead may open a Qwen bare call, or a marker or
+    /// (Llama 3) a `{` lies before every later cut. Skips the per-step cut
+    /// search over a tool-call body.
     private var frozenThrough: Int?
+    /// The text's first `markerFreeThrough` bytes hold no marker (a
+    /// negative marker search, not repeated while they stay as they are).
+    private var markerFreeThrough = 0
     private(set) var restartCount = 0
     /// UTF-8 bytes the cut search read, summed over calls (test hook).
     private(set) var scannedUTF8 = 0
@@ -874,9 +921,11 @@ struct IncrementalToolText {
     /// Longer than every marker's scalars (see the tests).
     static let markerFreeTail = 24
 
-    init(markers: [String], bracesMatter: Bool) {
+    init(markers: [String], bracesMatter: Bool, qwenBareCalls: Bool) {
         self.markers = markers
+        markerScalars = markers.map { Array($0.unicodeScalars) }
         self.bracesMatter = bracesMatter
+        self.qwenBareCalls = qwenBareCalls
     }
 
     /// `kept + reduced` is `text`; the streamer gets `reduced`.
@@ -887,9 +936,13 @@ struct IncrementalToolText {
             restartCount += 1
             cut = 0
             frozenThrough = nil
+            markerFreeThrough = 0
         }
         if let frozen = frozenThrough, !ModelRuntime.IncrementalStreamFilter.sharesPrefix(previous, text, utf8Count: frozen) {
             frozenThrough = nil
+        }
+        if markerFreeThrough > cut, !ModelRuntime.IncrementalStreamFilter.sharesPrefix(previous, text, utf8Count: markerFreeThrough) {
+            markerFreeThrough = cut
         }
         previous = text
         maxUncommittedUTF8 = max(maxUncommittedUTF8, text.utf8.count - cut)
@@ -908,19 +961,32 @@ struct IncrementalToolText {
     /// The streamer finds markers with `range(of:)` and the GLM markup
     /// stripping removes them with `replacingOccurrences`; either may match
     /// where a Character-wise `contains` does not (`<arg_key>` before
-    /// U+200D), so a segment counts as marker-free only for both.
+    /// U+200D), so text counts as marker-free only for both.
     private func containsMarker(_ text: String) -> Bool {
         markers.contains { text.range(of: $0) != nil || text.replacingOccurrences(of: $0, with: "") != text }
+    }
+
+    /// `containsMarker(head)` for a prefix `head` of the text after the cut,
+    /// searching only past the part already known to be marker-free (from a
+    /// grapheme break far enough back that no marker can straddle it).
+    private mutating func headContainsMarker(_ head: String) -> Bool {
+        let known = markerFreeThrough - cut
+        let longest = markers.map(\.utf8.count).max() ?? 0
+        let from = IncrementalEmitterText.breakIndex(head, atOrBefore: known - 2 * longest - 16, floor: head.startIndex)
+        let searched = String(head[from...])
+        scannedUTF8 += searched.utf8.count
+        if containsMarker(searched) { return true }
+        markerFreeThrough = max(markerFreeThrough, cut + head.utf8.count)
+        return false
     }
 
     private mutating func commitIfPossible(_ tail: String) {
         let hold = IncrementalEmitterText.margin
         if cut == 0 {
-            // The whole text's lead decides the Qwen bare-call hold; any
-            // other lead `<` may open a call.
+            // On Qwen rows the whole text's lead decides the bare-call hold.
             let lead = tail.drop(while: { $0.isWhitespace })
             if lead.isEmpty { return }
-            if NativeToolCallStreamEmitter.leadMayOpenCall(tail) {
+            if qwenBareCalls, NativeToolCallStreamEmitter.mayOpenQwenBareCalls(tail) {
                 frozenThrough = tail.utf8.distance(from: tail.utf8.startIndex, to: lead.startIndex) + 1
                 return
             }
@@ -938,14 +1004,14 @@ struct IncrementalToolText {
             guard !last.properties.isWhitespace, last != "<", last != "{",
                   ModelRuntime.IncrementalStreamFilter.breaksAround(last),
                   ModelRuntime.IncrementalStreamFilter.breaksBetween(last, scalars[index]),
-                  !scalars[max(0, index - Self.markerFreeTail)..<index].contains("<")
+                  !IncrementalEmitterText.endsInsideMarker(scalars, before: index, window: Self.markerFreeTail, markers: markerScalars)
             else { continue }
-            // One whole-segment pass per call: a marker in it holds every
-            // later cut too.
+            // One marker search per call: a marker in the segment holds
+            // every later cut too.
             var view = String.UnicodeScalarView()
             view.append(contentsOf: scalars[..<index])
             let segment = String(view)
-            guard !containsMarker(segment) else {
+            guard !headContainsMarker(segment) else {
                 frozenThrough = cut + segment.utf8.count
                 return
             }
@@ -954,13 +1020,13 @@ struct IncrementalToolText {
         }
         // A marker before every cut tried here holds every later cut too
         // (later cuts lie further on), as in a tool-call body whose `<` are
-        // too dense for any cut to reach the marker check.
+        // too dense for any cut to reach the marker search.
         let firstTried = min(scalars.count - hold, brace ?? scalars.count) - 64
         if firstTried > 0 {
             var view = String.UnicodeScalarView()
             view.append(contentsOf: scalars[..<firstTried])
             let head = String(view)
-            if containsMarker(head) {
+            if headContainsMarker(head) {
                 frozenThrough = cut + head.utf8.count
                 return
             }

@@ -351,4 +351,49 @@ final class IncrementalOutputFilterEmitterTests: XCTestCase {
         XCTAssertLessThan(long, 512)
         XCTAssertLessThan(long, short * 1.25 + 16)
     }
+
+    // MARK: - Dense markup
+
+    private let htmlMarkup = ["<div>", "</div>", "</", "<a ", "href=\"x\">", "<?xml", " version=\"1.0\"?>", "\n  <item/>", "<", " < ", "<th", "<tool", "<arg"]
+
+    /// HTML/XML-heavy streams (`<` everywhere, no markers until the call)
+    /// on GLM and Qwen tool rows.
+    func testHTMLAndXMLRowsMatchReference() throws {
+        try assertEmitterDifferential(
+            request(model: "grant-ai/GLM-5.3-Flash-Abliterated-MLX-4bit", grammar: .glm, reasoningOpen: true, tool: "read",
+                    parallelToolCalls: false),
+            seed: 4_2330, streams: 12, length: 500, markup: htmlMarkup + ["\u{200D}", "\u{0600}", "<think>", "</think>"],
+            insert: [["</think>"], glmCall])
+        for reasoningOpen in [false, true] {
+            try assertEmitterDifferential(
+                request(model: "mlx-community/Qwen3-8B-4bit", grammar: .qwen, reasoningOpen: reasoningOpen, tool: "lookup"),
+                seed: reasoningOpen ? 4_2332 : 4_2331, streams: 12, length: 500, markup: htmlMarkup + ["\u{200D}", "<tools>"],
+                insert: reasoningOpen ? [["</think>"], qwenCall] : [qwenCall])
+        }
+    }
+
+    /// 100 KB and 400 KB of indented HTML on a GLM tools row: the tool-text
+    /// cut search reads a bounded amount per step.
+    func testIndentedHTMLWorkPerStepIsBounded() throws {
+        let request = try request(
+            model: "grant-ai/GLM-5.3-Flash-Abliterated-MLX-4bit", grammar: .glm, reasoningOpen: true, tool: "read")
+        let unit = "  <section>\n    <h2 id=\"t\">Title</h2>\n    <p>Body &lt; text</p>\n  </section>\n"
+        func perStep(bytes: Int) -> Double {
+            var emitter = SerialStreamingTextEmitter(request: request)
+            let accumulator = StructuredStreamingContentAccumulator(enabled: false)
+            let idle = StructuredStreamingIdleState(enabled: false)
+            var text = "plan.</think>Here is the page:\n"
+            var steps = 0
+            while text.utf8.count < bytes {
+                text += unit
+                steps += 1
+                _ = emitter.step(candidate: (text, false), structuredAccumulator: accumulator, idleState: idle, onChunk: { _ in })
+            }
+            return Double(emitter.incrementalToolScannedUTF8) / Double(steps)
+        }
+        let short = perStep(bytes: 100_000)
+        let long = perStep(bytes: 400_000)
+        XCTAssertLessThan(long, 2_048)
+        XCTAssertLessThan(long, short * 1.25 + 16)
+    }
 }
