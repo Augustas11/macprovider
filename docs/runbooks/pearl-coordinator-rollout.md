@@ -293,8 +293,11 @@ takes seconds.
 ### Before running
 
 1. **nginx.** The live `coordinator.malibu.tech` vhost needs locations for
-   every feed the release binds: `/v1/catalog-artifacts(.sig)` and
-   `/v1/continuous-batching-policy(.sig)`. Pearl nginx lags the repo, so diff
+   every feed the release binds: `/v1/catalog-artifacts(.sig)`,
+   `/v1/continuous-batching-policy(.sig)` and, from the runtime that serves
+   the signed release manifest (SPEC-023 §3.8), `/v1/catalog-release(.sig)`.
+   Without the manifest routes CLIs fall back to the per-feed signatures, so a
+   missing block does not break serving. Pearl nginx lags the repo, so diff
    the live file and add only the missing blocks. Then run `nginx -t` and
    reload. Never run the **gateway** `deploy-pearl-vps.sh`.
 2. **coordinator.yaml autotune keys.** Add them under both locks, after

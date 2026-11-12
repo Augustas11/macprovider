@@ -6726,6 +6726,47 @@ def cmd_compare_live(
     return COMPARE_LIVE_EXIT_REGRESSION if result["verdict"] == "regression" else 0
 
 
+def cmd_same_envelope(staged: pathlib.Path, existing: pathlib.Path) -> None:
+    """Deploy guard: is the existing immutable release envelope the staged one?
+
+    The envelope directory name hashes every file except release.json.sig
+    (SPEC-023 §3.8), so one name can hold the same release with or without the
+    manifest signature. Every other file must match byte for byte and the
+    file sets must agree. A signature present on both sides must be identical;
+    a signature present on one side only must verify over that side's
+    release.json, which is then byte-identical to the other side's.
+    """
+    def regular_files(directory: pathlib.Path) -> dict[str, pathlib.Path]:
+        if directory.is_symlink() or not directory.is_dir():
+            fail(f"same-envelope: {directory} is not a directory")
+        files: dict[str, pathlib.Path] = {}
+        for child in directory.iterdir():
+            if child.is_symlink() or not child.is_file():
+                fail(f"same-envelope: {child} is not a regular file")
+            files[child.name] = child
+        return files
+
+    staged_files, existing_files = regular_files(staged), regular_files(existing)
+    sig = MANIFEST_SIGNATURE_NAME
+    staged_names, existing_names = set(staged_files) - {sig}, set(existing_files) - {sig}
+    if staged_names != existing_names:
+        fail(
+            "same-envelope: file sets differ "
+            f"(staged only: {sorted(staged_names - existing_names)}, existing only: {sorted(existing_names - staged_names)})"
+        )
+    for name in sorted(staged_names):
+        if staged_files[name].read_bytes() != existing_files[name].read_bytes():
+            fail(f"same-envelope: {name} differs")
+    if sig in staged_files and sig in existing_files:
+        if staged_files[sig].read_bytes() != existing_files[sig].read_bytes():
+            fail(f"same-envelope: {sig} differs")
+    elif sig in staged_files or sig in existing_files:
+        side, directory = ("staged", staged) if sig in staged_files else ("existing", existing)
+        key_id = verify_release_manifest_sidecar(directory / "release.json", keyring(directory / "trusted-keys.json"))
+        print(f"same-envelope: only the {side} envelope carries {sig} (key_id={key_id}); it verifies over the identical release.json")
+    print(f"same-envelope: {existing} holds the staged release")
+
+
 # #1688 C3: serving closure, deny-by-default. A recommendable candidate row that
 # also carries a rate-card row is something buyers can be routed to and billed
 # for, so its served model MUST be pinned by Tier-2 to the same hash unless it
@@ -7924,6 +7965,15 @@ def main() -> int:
         type=pathlib.Path,
         help="tier2-content-index output: proves a Tier-2 freshness re-sign of any ledger row from git history",
     )
+    same_envelope_parser = sub.add_parser(
+        "same-envelope",
+        help=(
+            "deploy guard: exit 0 when --existing holds the --staged release envelope byte for byte, "
+            "allowing release.json.sig on one side only when it verifies over the identical release.json"
+        ),
+    )
+    same_envelope_parser.add_argument("--staged", type=pathlib.Path, required=True)
+    same_envelope_parser.add_argument("--existing", type=pathlib.Path, required=True)
     t2_index_parser = sub.add_parser(
         "tier2-content-index",
         help=(
@@ -8153,6 +8203,8 @@ def main() -> int:
             cmd_pricing_only_check(args.incoming, args.live)
         elif args.command == "compare-live":
             return cmd_compare_live(args.incoming, args.live, args.ledger, args.tier2_content_index)
+        elif args.command == "same-envelope":
+            cmd_same_envelope(args.staged, args.existing)
         elif args.command == "tier2-content-index":
             cmd_tier2_content_index(args.repo, args.rev, args.ledger)
         elif args.command == "emit-coordinator-rate-card":

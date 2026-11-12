@@ -253,6 +253,7 @@ test-dist-deploy:
 	bash phase4-coordinator/dist/test/check_deploy_static_feed_access.test.sh
 	bash phase4-coordinator/dist/test/deploy_catalog_verifier_closure.test.sh
 	bash phase4-coordinator/dist/test/deploy_catalog_compare_live.test.sh
+	bash phase4-coordinator/dist/test/deploy_catalog_signed_envelope.test.sh
 	bash phase4-coordinator/dist/test/deploy_catalog_window_coverage.test.sh
 	bash phase4-coordinator/dist/test/coord_deploy_restart_readiness.test.sh
 	bash phase4-coordinator/dist/test/coordinator_deploy_recovery.test.sh
