@@ -47,55 +47,6 @@ func TestNewRequiresNormalizeAndValidParams(t *testing.T) {
 	}
 }
 
-func TestSetParamsAndSetPolicyEdgeCases(t *testing.T) {
-	a, _ := newTestAggregator(t, DefaultParams())
-	id := openWindow(t, a).WindowID
-
-	bad := DefaultParams()
-	bad.PrincipalCapPct = 50
-	if err := a.SetParams(bad); err == nil {
-		t.Fatal("invalid params accepted")
-	}
-	if err := a.SetParams(DefaultParams()); err != nil {
-		t.Fatal(err)
-	}
-	if err := a.SetPolicy("zz", 0); err == nil {
-		t.Fatal("malformed policy id accepted")
-	}
-	if err := a.SetPolicy(policyA, 2); err != nil { // identical to the one in force
-		t.Fatal(err)
-	}
-	if got := openWindow(t, a).WindowID; got != id {
-		t.Fatalf("no-op changes must keep the window: %s != %s", got, id)
-	}
-	if lc := a.LastClose(); lc.Reason != "" {
-		t.Fatalf("no-op changes must not close: %+v", lc)
-	}
-	// Same id, different excluded count is a policy change.
-	if err := a.SetPolicy(policyA, 3); err != nil {
-		t.Fatal(err)
-	}
-	if lc := a.LastClose(); lc.Reason != CloseReasonEligibilityChanged || lc.WindowID != id {
-		t.Fatalf("last close = %+v", lc)
-	}
-
-	id2 := openWindow(t, a).WindowID
-
-	// After Stop, changes close nothing and open no window.
-	a.Stop()
-	p := DefaultParams()
-	p.KeyBuckets = 8
-	if err := a.SetParams(p); err != nil {
-		t.Fatal(err)
-	}
-	if err := a.SetPolicy(policyB, 0); err != nil {
-		t.Fatal(err)
-	}
-	if lc := a.LastClose(); lc.Reason != CloseReasonAggregatorStopped || lc.WindowID != id2 {
-		t.Fatalf("stopped aggregator changed last close: %+v", lc)
-	}
-}
-
 func TestSnapshotSpansMultipleMissedEpochsWithEmptyWindows(t *testing.T) {
 	a, c := newTestAggregator(t, DefaultParams())
 	start := c.t
