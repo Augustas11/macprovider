@@ -287,6 +287,121 @@ A record that fails cannot land while the promoting release's
 the gate. Fix the serving path and run the suite again, or cut a release that
 moves the key back to `listed`. Until then the model keeps the base set.
 
+### 2b. MiniMax M3.1-Flash post-cut checks (#2189)
+
+Run these once the promoted CLI cut and the catalog activation list
+`minimaxai/minimax-m3.1-flash` and a 256 GB provider serves it through the
+gateway. #2189 closes when both checks pass. The served id is
+`mlx-community/MiniMax-M3.1-Flash-oQ3e-mtp`. The gateway alias
+`minimax/minimax-m3.1-flash` resolves to the same row, but conformance
+records are indexed by the served id.
+
+**Known gaps (as of `745d82fb3`). They decide the outcome, so read them
+before running anything.** The served template (byte-identical to
+`MiniMaxAI/MiniMax-M3.1-Flash`) uses its own markers, and no layer handles
+them:
+
+- Reasoning is wrapped in `<mm:think>…</mm:think>`, with adaptive thinking.
+  `ReasoningOutput.swift` splits only on `<think>`, so reasoning comes back
+  inside `content`. The suite's leak check, `_leaks_reasoning` in
+  `scripts/buyer_ux_conformance.py`, also matches only `<think>`. It would
+  pass a leaking reply.
+- Tool calls use `]<]minimax[>[<tool_call>` / `<invoke name=…>`. Neither
+  `ToolCallGrammar.family` (Swift) nor `toolGrammarFamily` (coordinator, the
+  suite) has a MiniMax family. `ToolCallGrammar.fromTemplateFormat` has no
+  case for the fork's `minimax_m2` format, and that format's signature
+  (`<minimax:tool_call>`) does not match this template anyway. So tools are
+  not advertised, and the coordinator returns `tools_unsupported_for_model`.
+
+As a result, the derived advertised set is `response_format`, `messages` and
+`responses` without tools or reasoning. `json_object` fails whenever the model
+chooses to think, because the reply then starts with `<mm:think>`.
+
+**Preflight (one request, before the suite).** It checks the id is listed,
+the request is served and what the reply carries:
+
+```bash
+KEY=~/.config/macprovider/buyer-api-key
+M=mlx-community/MiniMax-M3.1-Flash-oQ3e-mtp
+curl -sS -K <(printf 'header = "Authorization: Bearer %s"\n' "$(cat $KEY)") \
+  https://api.malibu.tech/v1/models | python3 -c 'import json,sys; print([m["id"] for m in json.load(sys.stdin)["data"] if "minimax" in m["id"].lower()])'
+curl -sS -K <(printf 'header = "Authorization: Bearer %s"\n' "$(cat $KEY)") \
+  -H 'Content-Type: application/json' https://api.malibu.tech/v1/chat/completions \
+  -d "{\"model\":\"$M\",\"temperature\":1.0,\"top_p\":0.95,\"reasoning_effort\":\"high\",\"max_tokens\":2048,\"messages\":[{\"role\":\"user\",\"content\":\"What is 17*23? Answer with the number.\"}]}" \
+  | python3 -c 'import json,sys; r=json.load(sys.stdin); m=r["choices"][0]["message"]; c=m.get("content") or ""; print({"model":r.get("model"),"finish":r["choices"][0]["finish_reason"],"mm_think_in_content":"mm:think>" in c,"reasoning_content_chars":len(m.get("reasoning_content") or ""),"usage":r.get("usage")})'
+```
+
+Pass: the id is listed; `finish` is `stop`; `mm_think_in_content` is false;
+the answer is 391. If `mm_think_in_content` is true, the reasoning gap above
+is live. Fix it in a provider PR before the suite and the quality run.
+Neither can pass on leaking output.
+
+**Check 1: #2107 buyer-API conformance.** This is the §2a suite against the
+served id (`run` exits 0 = all checks pass, 1 = a check failed, 3 =
+inconclusive, no record written):
+
+```bash
+python3 scripts/buyer_ux_conformance.py run \
+  --key-file ~/.config/macprovider/buyer-api-key \
+  --model mlx-community/MiniMax-M3.1-Flash-oQ3e-mtp \
+  --catalog-key minimaxai/minimax-m3.1-flash
+python3 scripts/buyer_ux_conformance.py check \
+  --catalog-key minimaxai/minimax-m3.1-flash \
+  --model-id mlx-community/MiniMax-M3.1-Flash-oQ3e-mtp
+```
+
+If the key was promoted with `conformance_owed`, also run
+`python3 scripts/buyer_ux_conformance.py owed-status` (state `settled`). Commit
+the record to `origin/main`, then follow §2a: `catalog-activate.sh status` and
+`next --run` (step `buyer_ux_conformance`).
+
+**Check 2: quality against MiniMax's published results.** The vendor table
+covers the official weights only (the card says third-party quantizations may
+differ). It gives the M3.1-Flash column below. Its recommended sampling is
+`temperature=1.0`, `top_p=0.95`, and `reasoning_effort` takes `low`, `medium`,
+`high`, `xhigh` or `max`. The card does not say which effort, token budget or
+sample count produced each score.
+
+| Benchmark | Vendor | Setting the card names | Runnable here |
+|---|---|---|---|
+| HLE (without tools) | 43.4 | text-only subset, 2,158 questions | candidate, see below |
+| Terminal Bench 4.0 | 38.1 | Codex 0.149.1 | no: needs tools |
+| DeepSWE v1.1 | 73.7 | mini-SWE-agent 2.4.5, 512K | no: tools, 512K context |
+| BankerToolBench | 76.2 | OpenCode 1.17.18, MiniMax-M2.7 judge | no: tools, vendor judge |
+| PostTrain / NL2Repo / SWE Refactor / CyberGym | 39.3 / 61.2 / 23.0 / 82.2 | Claude Code, 200K–1M | no: tools, context |
+| Automation-Bench, LOCA-Bench 256K, Agents' Last Exam, OSWorld 2.0 | 62.8 / 60.3 / 29.6 / 61.7 | official harnesses | no: tools, context or computer use |
+| BabyVision, CharXiv RQ, GDP.pdf AA | 91.0 / 82.5 / 20.8 | vision or third-party score | no: the row serves text only |
+
+HLE text-only is the only published score that needs no tools, no vision and
+no long context. Pass bar: **42.4** (43.4 minus 1.0 absolute point).
+Tolerance source: no earlier catalog gate ran against vendor-published results
+(GLM-5.3-Flash and DeepSeek-V4-Flash went live on parity and serving
+gates; LFM2.5 used the repo's own coding workload). The only codified
+task-score tolerance is SPEC-048's MXFP8 quality bound: a preregistered task
+score may drop by at most one absolute percentage point. At n = 2,158 and
+p ≈ 0.43, one standard error is about 1.07 points, so this bar sits inside
+sampling noise for a single pass.
+
+Run settings: the gateway path above, `temperature=1.0` and `top_p=0.95`,
+no tools, and the served template unchanged (no system-prompt or prefill edits).
+Use the same `reasoning_effort` on every question; the effort is unpublished,
+so record the value used next to the score.
+
+**Missing tooling for check 2.** The repo has no eval harness for any vendor
+benchmark: `scripts/` has no HLE runner, dataset loader or judge client. The
+only quality workload is `scripts/revenue_benchmark/coding_agent_workload_v1.json`
+(not a vendor benchmark). Running HLE needs all three:
+
+1. the gated `cais/hle` dataset, accepted on Hugging Face by the operator;
+2. a runner that sends each text-only question through the gateway with the
+   settings above and stores the raw replies;
+3. a judge to score free-form answers. HLE's official scorer uses an OpenAI
+   judge model, and the card does not name the judge MiniMax used.
+
+None of these exist in the repo. Adding them means new dependencies or a new
+tool, which needs the operator's approval (AGENTS.md "Setup And Build").
+Until then, check 2 cannot run.
+
 ## 3. Write `intake-decision.json`
 
 `phase3-binary/catalog/autotune/intake-decision.json`, schema
