@@ -22,7 +22,17 @@ waives only the specifically authorized serving-journey export, not qualificatio
 or release-match gates. These catalog/tooling changes are not evidence of a
 coordinator runtime deployment or sampled GLM admission.
 
-## Rollback keeps buyer rows: gateway buyer hold and schema-aware rollback — pending runtime inclusion (2026-11-11)
+## Pearl runtime v1.8.286 (2026-11-12)
+
+Applied 2026-11-12 06:55 UTC through `scripts/ops/pearl-runtime.sh`
+(release run 43170001669). The coordinator and gateway report v1.8.286 and
+`/healthz` is ok. The updater bundle from v1.8.286 is installed
+(`PEARL_RUNTIME_TASK=updater-bundle`), which completes both live steps of
+#2296 below. From the next apply on, the gateway buyer hold and the
+schema-aware rollback are in effect. #2314's canonical JSON int64 boundary
+fix is live in the coordinator.
+
+## Rollback keeps buyer rows: gateway buyer hold and schema-aware rollback — live in v1.8.286 (2026-11-11)
 
 Related: #2296. The gateway gains an in-memory buyer hold (503 with
 `Retry-After` for new buyer requests; the ops canary is admitted) and the
@@ -679,7 +689,7 @@ open until hardware and authorized signed-candidate live acceptance pass.
 ## Next coordinator release — tag unassigned, net changes vs v1.8.241
 
 Merged, waiting for this train:
-- [ ] #2314 (Related: #2312) canonical JSON: whole numbers at or above 2^63 no longer overflow to 2^63−1; exact int64 guard in coordinator `jcs` and `computeintegrity` and in the `phase7-verify` canonicalizer (merge `e2e9f0be3`). Live step: the next coordinator runtime update through `scripts/ops/pearl-runtime.sh status` then `next --run`; the verifier change ships with the next phase7-verify build. In-range output is unchanged, so no stored digest changes.
+- [x] #2314 (Related: #2312) — live in runtime v1.8.286 (2026-11-12); canonical JSON: whole numbers at or above 2^63 no longer overflow to 2^63−1; exact int64 guard in coordinator `jcs` and `computeintegrity` and in the `phase7-verify` canonicalizer (merge `e2e9f0be3`). Live step: the next coordinator runtime update through `scripts/ops/pearl-runtime.sh status` then `next --run`; the verifier change ships with the next phase7-verify build. In-range output is unchanged, so no stored digest changes.
 - [ ] #1983 privacy reject reasons (SPEC-049-R030) and in-band identity key rotation (R031), coordinator and gateway side.
 
 ## Earlier plan: net changes vs v1.8.236 (shipped in v1.8.237 / v1.8.239 / v1.8.241)
