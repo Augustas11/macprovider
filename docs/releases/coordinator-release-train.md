@@ -679,6 +679,7 @@ open until hardware and authorized signed-candidate live acceptance pass.
 ## Next coordinator release — tag unassigned, net changes vs v1.8.241
 
 Merged, waiting for this train:
+- [ ] #2314 (Related: #2312) canonical JSON: whole numbers at or above 2^63 no longer overflow to 2^63−1; exact int64 guard in coordinator `jcs` and `computeintegrity` and in the `phase7-verify` canonicalizer (merge `e2e9f0be3`). Live step: the next coordinator runtime update through `scripts/ops/pearl-runtime.sh status` then `next --run`; the verifier change ships with the next phase7-verify build. In-range output is unchanged, so no stored digest changes.
 - [ ] #1983 privacy reject reasons (SPEC-049-R030) and in-band identity key rotation (R031), coordinator and gateway side.
 
 ## Earlier plan: net changes vs v1.8.236 (shipped in v1.8.237 / v1.8.239 / v1.8.241)
