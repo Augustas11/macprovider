@@ -123,9 +123,11 @@ final class ShardGroupEngineTests: XCTestCase {
         options.expectedStages = 3
         let engine = ShardGroupEngine(stage: stages[0], options: options)
         try engine.start(links: links[0])
-        let deadline = Date().addingTimeInterval(5)
+        // Wait for every relayed report the assertions read, including stage 1's
+        // view of the head link; on a slow runner it can trail the 1->2 report.
+        let deadline = Date().addingTimeInterval(10)
         var health = engine.status.links
-        while Date() < deadline, health?.reported(from: 1, to: 2) == nil || (health?.upstream?.samples ?? 0) < 3 || (health?.downstream.samples ?? 0) < 3 {
+        while Date() < deadline, health?.reported(from: 1, to: 2) == nil || health?.reported(from: 0, to: 1) == nil || (health?.upstream?.samples ?? 0) < 3 || (health?.downstream.samples ?? 0) < 3 {
             Thread.sleep(forTimeInterval: 0.05)
             health = engine.status.links
         }
