@@ -25,6 +25,7 @@ func TestOnRequestReasoningCapabilityMatchesWhatIsServed(t *testing.T) {
 		"mlx-community/Qwen3.5-27B-4bit", "mlx-community/Qwen3.5-35B-A3B-4bit",
 		"mlx-community/Qwen3.6-27B-4bit", "mlx-community/Qwen3.6-35B-A3B-4bit",
 		"mlx-community/Qwen3.8-27B-4bit", "mlx-community/NVIDIA-Nemotron-3-Nano-30B-A3B-4bit",
+		"mlx-community/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-4bit",
 	} {
 		p := pool.Provider{ModelID: model, BinaryVersion: onRequestReasoningProviderMinVersion}
 		if !reasons(p) {
