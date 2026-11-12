@@ -227,6 +227,81 @@ final class IncrementalOutputFilterTests: XCTestCase {
         }
     }
 
+    /// Feeds `text` one scalar per step and compares with the reference.
+    private func assertScalarSteps(
+        _ text: String, filter stopTokenFilter: StopTokenFilter, stops: [String], reasoningOpen: Bool,
+        _ label: String, file: StaticString = #filePath, line: UInt = #line
+    ) {
+        let filter = ModelRuntime.IncrementalStreamFilter(stopTokenFilter: stopTokenFilter, requestStops: stops, reasoningOpen: reasoningOpen)
+        var view = String.UnicodeScalarView()
+        for (step, scalar) in text.unicodeScalars.enumerated() {
+            view.append(scalar)
+            let prefix = String(view)
+            let expected = ModelRuntime.streamingSafePrefix(
+                prefix, stopTokenFilter: stopTokenFilter, requestStops: stops, reasoningOpen: reasoningOpen)
+            let actual = filter.update(prefix)
+            guard actual.text == expected.text, actual.hitStop == expected.hitStop else {
+                return XCTFail("\(label) reasoningOpen \(reasoningOpen) step \(step)", file: file, line: line)
+            }
+        }
+    }
+
+    /// Every scalar `breaksAround` admits breaks from its neighbours in
+    /// this runtime, between neighbours that break on both sides: a newer
+    /// Unicode version's Prepend, Extend or SpacingMark scalar fails here.
+    func testBreaksAroundAgreesWithTheRuntimeGraphemeBreaks() {
+        let lefts = ["a", " ", "\n", "中", "\u{0915}", "\u{0915}\u{094D}\u{0915}", "\u{1F600}", "\u{1F600}\u{200D}\u{1F600}", "é"]
+        let rights = ["a", " ", "\r", "中", "\u{0915}", "\u{1F600}", "ab"]
+        var admitted = 0
+        for value in UInt32(0x80)...0x10FFFF {
+            guard let scalar = Unicode.Scalar(value), ModelRuntime.IncrementalStreamFilter.breaksAround(scalar) else { continue }
+            admitted += 1
+            var view = String.UnicodeScalarView()
+            view.append(scalar)
+            let middle = String(view)
+            for left in lefts {
+                for right in rights where (left + middle + right).count != left.count + 1 + right.count {
+                    return XCTFail("U+\(String(value, radix: 16, uppercase: true)) joins \(left.debugDescription) or \(right.debugDescription)")
+                }
+            }
+        }
+        XCTAssertGreaterThan(admitted, 100_000)
+        // Hangul beside ASCII: GB6–GB8 join Hangul only to Hangul.
+        for hangul in ["가", "\u{1100}", "\u{1161}", "\u{11A8}", "각"] {
+            for ascii in [" ", ".", "a", "\n"] {
+                XCTAssertEqual((hangul + ascii + hangul).count, 3)
+                XCTAssertTrue(ModelRuntime.IncrementalStreamFilter.breaksBetween(hangul.unicodeScalars.last!, ascii.unicodeScalars.first!))
+                XCTAssertTrue(ModelRuntime.IncrementalStreamFilter.breaksBetween(ascii.unicodeScalars.first!, hangul.unicodeScalars.first!))
+            }
+        }
+        XCTAssertFalse(ModelRuntime.IncrementalStreamFilter.breaksBetween("\u{1100}", "\u{1161}"))
+        XCTAssertFalse(ModelRuntime.IncrementalStreamFilter.breaksBetween("\r", "\n"))
+    }
+
+    /// U+113D1 (Unicode 16 Prepend) joins the stop token's `<` into one
+    /// Character, so the reference keeps the token; a frozen Prepend table
+    /// let the incremental filter cut there and strip it.
+    func testNewerUnicodePrependScalarBlocksTheCut() {
+        let text = String(repeating: "a", count: 63) + "\u{113D1}<|im_end|>" + String(repeating: "b", count: 100)
+        let filter = StopTokenFilter(tokens: ["<|im_end|>"])
+        for reasoningOpen in [false, true] {
+            assertScalarSteps(text, filter: filter, stops: ["STOP"], reasoningOpen: reasoningOpen, "U+113D1")
+        }
+    }
+
+    /// A token whose canonical decomposition is longer than its own scalars
+    /// (8 × U+1F82, 4 scalars each in NFD) must not span a cut.
+    func testCutMarginCoversTheCanonicalDecomposition() {
+        let token = "ᾂᾂᾂᾂᾂᾂᾂᾂab"
+        let filter = StopTokenFilter(tokens: ["<|im_end|>", token])
+        let decomposed = token.decomposedStringWithCanonicalMapping
+        XCTAssertEqual(decomposed.unicodeScalars.count, 34)
+        for count in 0...130 {
+            let text = "<|im_" + String(repeating: "w", count: count) + decomposed + "end|>" + String(repeating: "q", count: 200)
+            assertScalarSteps(text, filter: filter, stops: [], reasoningOpen: false, "N=\(count)")
+        }
+    }
+
     // MARK: - Decoder
 
     /// A local decoder in the shape of the Hugging Face ones: byte pieces
@@ -269,7 +344,9 @@ final class IncrementalOutputFilterTests: XCTestCase {
             defer {
                 // The window advances: far fewer tokens decoded than whole decodes.
                 XCTAssertLessThan(decoder.decodedTokenCount, wholeDecodedTokens / 4, "stream \(streamIndex)")
-                XCTAssertLessThan(decoder.fallbackCount, 40, "stream \(streamIndex)")
+                // A whole-list decode is the exception, not a per-step cost:
+                // these streams take none (one is allowed per stream).
+                XCTAssertLessThanOrEqual(decoder.fallbackCount, 1, "stream \(streamIndex)")
             }
             for step in 0..<400 {
                 // One to three tokens per event, as batched rows deliver them.
@@ -345,6 +422,24 @@ final class IncrementalOutputFilterTests: XCTestCase {
             }
             return (Double(filter.scannedUTF8) / Double(count), Double(decoder.decodedTokenCount) / Double(count))
         }
+        // Korean prose commits at its spaces: every ASCII scalar here sits
+        // between two Hangul syllables.
+        func koreanWork(pieces count: Int) -> Double {
+            var rng = SeededGenerator(state: 9_2318)
+            let filter = ModelRuntime.IncrementalStreamFilter(
+                stopTokenFilter: stopTokens, requestStops: ["END"], reasoningOpen: false)
+            let words = [" 안녕하세요", " 반갑습니다", " 오늘은", " 날씨가", " 좋네요"]
+            var text = "가"
+            for _ in 0..<count {
+                text += words.randomElement(using: &rng)!
+                XCTAssertFalse(filter.update(text).hitStop)
+            }
+            return Double(filter.scannedUTF8) / Double(count)
+        }
+        let koreanShort = koreanWork(pieces: 2_000)
+        let koreanLong = koreanWork(pieces: 20_000)
+        XCTAssertLessThan(koreanLong, 3_000)
+        XCTAssertLessThan(koreanLong, koreanShort * 1.25)
         for reasoningOpen in [false, true] {
             let short = work(pieces: 2_000, reasoningOpen: reasoningOpen)
             let long = work(pieces: 20_000, reasoningOpen: reasoningOpen)
@@ -355,5 +450,29 @@ final class IncrementalOutputFilterTests: XCTestCase {
             XCTAssertLessThan(long.decodePerStep, 200, "reasoningOpen \(reasoningOpen)")
             XCTAssertLessThan(long.decodePerStep, short.decodePerStep * 1.25, "reasoningOpen \(reasoningOpen)")
         }
+    }
+
+    /// 200 back-to-back special tokens under a 256-token filter: no cut is
+    /// safe there, and the cut search is one token-position pass per step,
+    /// not one strip per candidate cut.
+    func testBackToBackSpecialTokensCostOneCutPassPerStep() {
+        let tokens = (0..<250).map { "<|reserved_special_token_\($0)|>" }
+            + ["<|begin_of_text|>", "<|end_of_text|>", "<|eot_id|>", "<|eom_id|>", "<|python_tag|>", "<|finetune_right_pad_id|>"]
+        let filter = StopTokenFilter(tokens: tokens)
+        let incremental = ModelRuntime.IncrementalStreamFilter(stopTokenFilter: filter, requestStops: [], reasoningOpen: false)
+        var text = ""
+        var wholeText = 0
+        for step in 0..<200 {
+            text += "<|reserved_special_token_5|>"
+            wholeText += text.utf8.count
+            let expected = ModelRuntime.streamingSafePrefix(text, stopTokenFilter: filter, requestStops: [], reasoningOpen: false)
+            let actual = incremental.update(text)
+            guard actual.text == expected.text, actual.hitStop == expected.hitStop else {
+                return XCTFail("step \(step)")
+            }
+        }
+        // The uncommitted tail once, plus one bounded region per step; 64
+        // whole-region strips per step would add about 8 KB each.
+        XCTAssertLessThan(incremental.scannedUTF8, wholeText + 200 * 1_024)
     }
 }

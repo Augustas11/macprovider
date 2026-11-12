@@ -14,6 +14,7 @@
     "Sources/macprovider-cli/DeepseekV4ContinuousBatchBackend.swift",
     "Sources/macprovider-cli/DeepseekV4RuntimeParityProbe.swift",
     "Sources/macprovider-cli/GrammarConstraintState.swift",
+    "Sources/macprovider-cli/IncrementalOutputFilter.swift",
     "Sources/macprovider-cli/KVConversationColdTierAdapter.swift",
     "Sources/macprovider-cli/KVDiskCacheFormat.swift",
     "Sources/macprovider-cli/KVDiskCacheStore.swift",

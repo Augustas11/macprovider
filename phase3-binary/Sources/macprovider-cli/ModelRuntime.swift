@@ -8321,7 +8321,7 @@ maxTokens: 1,
             decode: @escaping ([Int]) -> String,
             makeIncremental: @escaping () -> IncrementalTextDecoder,
             cleanUpTokenizationSpaces: Bool = false,
-            decodeLookbackScalars: Int = WindowedTextDecoder.minimumLookbackScalars
+            decodeLookbackScalars: Int
         ) {
             self.decode = decode
             self.makeIncremental = makeIncremental
@@ -8347,7 +8347,9 @@ maxTokens: 1,
                     )
                     return IncrementalTextDecoder(appendToken: box.append)
                 },
-                cleanUpTokenizationSpaces: cleanUpTokenizationSpaces
+                cleanUpTokenizationSpaces: cleanUpTokenizationSpaces,
+                // No control-text shield on this per-piece decoder.
+                decodeLookbackScalars: WindowedTextDecoder.lookbackScalars(controlTextLength: 0)
             )
         }
 
@@ -8699,6 +8701,11 @@ maxTokens: 1,
         ) throws {
             lock.lock()
             defer { lock.unlock() }
+            ModelRuntime.logIncrementalOutputFallbacks(
+                path: "cb_stream",
+                decodeFallbacks: windowedDecoder?.fallbackCount ?? 0,
+                filterRestarts: (outputFilter?.restartCount ?? 0) + emitter.incrementalRestartCount
+            )
             try emitter.finish(
                 finalText: finalText,
                 parsed: parsed,
@@ -8752,6 +8759,11 @@ maxTokens: 1,
         private var stopTokenCountValue: Int?
         private let incrementalDecoder: IncrementalTextDecoder
         private var outputFilter: IncrementalStreamFilter?
+
+        deinit {
+            ModelRuntime.logIncrementalOutputFallbacks(
+                path: "cb_tool_stop", decodeFallbacks: 0, filterRestarts: outputFilter?.restartCount ?? 0)
+        }
 
         init(request: ChatCompletionRequest, incrementalDecoder: IncrementalTextDecoder) {
             guaranteedSelection = (try? ToolSelectionPolicy.selection(request.promptSource.toolChoice).requiresCall) == true
@@ -8896,6 +8908,11 @@ maxTokens: 1,
         init(decoder: IncrementalTextDecoder, filter: IncrementalStreamFilter) {
             self.decoder = decoder
             self.filter = filter
+        }
+
+        deinit {
+            ModelRuntime.logIncrementalOutputFallbacks(
+                path: "cb_reasoning_stop", decodeFallbacks: 0, filterRestarts: filter.restartCount)
         }
 
         func appendHitsStop(_ token: Int) -> Bool {
@@ -10833,6 +10850,9 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                 }
                             )
                             let serialToolDecoder = WindowedTextDecoder(tokenizer: generationContext.tokenizer)
+                            let labDecoder = WindowedTextDecoder(tokenizer: generationContext.tokenizer)
+                            let labFilter = IncrementalStreamFilter(
+                                stopTokenFilter: stopTokenFilter, requestStops: request.stop, mode: .outputFilters)
                             let serialToolFilter = IncrementalStreamFilter(
                                 stopTokenFilter: stopTokenFilter,
                                 requestStops: request.stop,
@@ -10870,10 +10890,9 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                             outputCount = try Self.labSerialVisibleCommitCount(
                                                 modelID: request.model,
                                                 generatedTokenIDs: tokens,
-                                                decodedText: generationContext.tokenizer.decode(tokenIds: tokens),
+                                                decoded: labDecoder.update(cumulativeTokens: tokens),
                                                 emittedText: nil,
-                                                stopTokenFilter: stopTokenFilter,
-                                                requestStops: request.stop
+                                                filter: labFilter
                                             )
                                             } catch let error as APIError {
                                                 labSerialHookError = error
@@ -10906,6 +10925,13 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                     return disposition
                                 })
                             }
+                            Self.logIncrementalOutputFallbacks(
+                                path: "serial",
+                                decodeFallbacks: requestStopObserver.incrementalFallbacks.decode
+                                    + serialToolDecoder.fallbackCount + labDecoder.fallbackCount,
+                                filterRestarts: requestStopObserver.incrementalFallbacks.filter
+                                    + serialToolFilter.restartCount + labFilter.restartCount
+                            )
                             try drainCancelled.check()
                             try Task.checkCancellation()
                             if let labSerialHookError {
@@ -11864,6 +11890,8 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                 ? .outputFilters
                                 : .streamingSafePrefix(reasoningOpen: request.outputTraits.reasoningOpen)
                         )
+                        let labFilter = IncrementalStreamFilter(
+                            stopTokenFilter: stopTokenFilter, requestStops: request.stop, mode: .outputFilters)
                         let result: BlockingGenerateResult = try await blockingInferenceExecutor.run { inferenceCancellation in
                             BlockingGenerateResult(generate(input: iteratorInput, context: generationContext, iterator: iterator) { tokens in
                                 let disposition: GenerateDisposition = {
@@ -11929,10 +11957,9 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                             outputCount = try Self.labSerialVisibleCommitCount(
                                                 modelID: request.model,
                                                 generatedTokenIDs: tokens,
-                                                decodedText: decoded,
+                                                decoded: decodedOutput,
                                                 emittedText: textEmitter.emittedContent,
-                                                stopTokenFilter: stopTokenFilter,
-                                                requestStops: request.stop
+                                                filter: labFilter
                                             )
                                         } catch let error as APIError {
                                             labSerialHookError = error
@@ -11969,6 +11996,12 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                         // probe can divide total decoded tokens by this window
                         // even when the reasoning channel is silent in SSE.
                         let decodeEndedAt = Date()
+                        Self.logIncrementalOutputFallbacks(
+                            path: "serial_stream",
+                            decodeFallbacks: streamDecoder.fallbackCount,
+                            filterRestarts: streamFilter.restartCount + labFilter.restartCount
+                                + textEmitter.incrementalRestartCount
+                        )
                         let generationMS = decodeTimer.durationMilliseconds(until: decodeEndedAt)
                         try drainCancelled.check()
                         try Task.checkCancellation()
@@ -14487,12 +14520,22 @@ maxTokens: maxTokens,
         }
     }
 
+    /// Incremental twin: `IncrementalStreamFilter` (`.outputFilters`), for
+    /// callers that filter a growing text after every token.
     static func applyOutputFilters(
         _ text: String,
         stopTokenFilter: StopTokenFilter,
         requestStops: [String]
     ) -> (text: String, hitStop: Bool) {
         let stripped = stopTokenFilter.stripping(from: text, joiner: ControlTextShield.markString)
+        if let earliestStop = earliestRequestStop(in: stripped, requestStops: requestStops) {
+            return (String(stripped[..<earliestStop]), true)
+        }
+        return (stripped, false)
+    }
+
+    /// Where the first request stop starts in stop-token-stripped text.
+    static func earliestRequestStop(in stripped: String, requestStops: [String]) -> String.Index? {
         var earliestStop: String.Index?
         for stop in requestStops where !stop.isEmpty {
             if let range = stripped.range(of: stop) {
@@ -14501,10 +14544,14 @@ maxTokens: maxTokens,
                 }
             }
         }
-        if let earliestStop {
-            return (String(stripped[..<earliestStop]), true)
-        }
-        return (stripped, false)
+        return earliestStop
+    }
+
+    /// `text` without its longest suffix that could still grow into one of
+    /// `candidates`.
+    static func withoutStopCandidatePrefixTail(_ text: String, candidates: [String]) -> String {
+        let holdback = longestSuffixPrefixLength(in: text, candidates: candidates)
+        return holdback > 0 ? String(text.dropLast(holdback)) : text
     }
 
     struct LabSerialDecodeHooks: Sendable {
@@ -14583,11 +14630,40 @@ maxTokens: maxTokens,
         guard !HarmonyResponseParser.isHarmonyModelID(modelID) else {
             throw labSerialDecodeHookUnsupported("harmony_visible_prefix_accounting")
         }
-        let filtered = applyOutputFilters(
-            decodedText,
-            stopTokenFilter: stopTokenFilter,
-            requestStops: requestStops
+        return try labSerialVisibleCommitCount(
+            generatedTokenIDs: generatedTokenIDs,
+            decodedText: decodedText,
+            filtered: applyOutputFilters(decodedText, stopTokenFilter: stopTokenFilter, requestStops: requestStops),
+            emittedText: emittedText
         )
+    }
+
+    /// Incremental twin (#2317): `filter` is an `.outputFilters` filter over
+    /// the same decoded text, updated here.
+    static func labSerialVisibleCommitCount(
+        modelID: String,
+        generatedTokenIDs: [Int],
+        decoded: WindowedTextDecoder.Output,
+        emittedText: String?,
+        filter: IncrementalStreamFilter
+    ) throws -> Int {
+        guard !HarmonyResponseParser.isHarmonyModelID(modelID) else {
+            throw labSerialDecodeHookUnsupported("harmony_visible_prefix_accounting")
+        }
+        return try labSerialVisibleCommitCount(
+            generatedTokenIDs: generatedTokenIDs,
+            decodedText: decoded.text,
+            filtered: filter.update(decoded.text, unchangedPrefixUTF8: decoded.unchangedPrefixUTF8),
+            emittedText: emittedText
+        )
+    }
+
+    private static func labSerialVisibleCommitCount(
+        generatedTokenIDs: [Int],
+        decodedText: String,
+        filtered: (text: String, hitStop: Bool),
+        emittedText: String?
+    ) throws -> Int {
         guard !filtered.hitStop, filtered.text == decodedText else {
             throw labSerialDecodeHookUnsupported("filtered_visible_prefix_accounting")
         }
@@ -15103,6 +15179,7 @@ maxTokens: maxTokens,
         return decode(Array(prefixTokens)).utf8.count
     }
 
+    /// Incremental twin: `IncrementalStreamFilter` (`.streamingSafePrefix`).
     static func streamingSafePrefix(
         _ text: String,
         stopTokenFilter: StopTokenFilter,
@@ -15129,9 +15206,7 @@ maxTokens: maxTokens,
         }
 
         let candidates = stopTokenFilter.tokens + requestStops.filter { !$0.isEmpty }
-        let holdback = longestSuffixPrefixLength(in: filtered.text, candidates: candidates)
-        let safe = holdback > 0 ? String(filtered.text.dropLast(holdback)) : filtered.text
-        return (withoutIncompleteUTF8Tail(safe), false)
+        return (withoutIncompleteUTF8Tail(withoutStopCandidatePrefixTail(filtered.text, candidates: candidates)), false)
     }
 
     struct SerialDecodeRequestStopObserver {
@@ -15155,7 +15230,7 @@ maxTokens: maxTokens,
             reasoningOpen: Bool = false,
             allowedFunctionNames: Set<String>? = nil,
             decode: @escaping ([Int]) -> String,
-            decodeLookbackScalars: Int = WindowedTextDecoder.minimumLookbackScalars,
+            decodeLookbackScalars: Int,
             decodeFinalToken: ((Int) -> String?)? = nil
         ) {
             self.enabled = requestStops.contains { !$0.isEmpty }
@@ -15206,6 +15281,10 @@ maxTokens: maxTokens,
             harmonyParser = parser
             return try ModelRuntime.harmonyStreamingHitStop(from: parsed, filter: outputFilter)
         }
+
+        var incrementalFallbacks: (decode: Int, filter: Int) {
+            (windowedDecoder.fallbackCount, outputFilter.restartCount)
+        }
     }
 
     /// #1690 E2E-F13: a decode of a token prefix that ends inside a
@@ -15226,12 +15305,15 @@ maxTokens: maxTokens,
     /// dropped Character eat scalars. Empty when `current` does not extend
     /// `emitted` (never a lossy or out-of-order fragment).
     static func streamDelta(from emitted: String, to current: String) -> String {
-        let emittedScalars = emitted.unicodeScalars
-        let currentScalars = current.unicodeScalars
-        guard currentScalars.starts(with: emittedScalars) else { return "" }
-        var appended = String.UnicodeScalarView()
-        appended.append(contentsOf: currentScalars.dropFirst(emittedScalars.count))
-        return String(appended)
+        // UTF-8 is prefix-free on scalar boundaries: a byte prefix is a
+        // scalar prefix and the reverse.
+        utf8Extension(of: emitted, to: current) ?? ""
+    }
+
+    /// `current` after `prefix` when `current` starts with its bytes.
+    static func utf8Extension(of prefix: String, to current: String) -> String? {
+        guard IncrementalStreamFilter.sharesPrefix(prefix, current, utf8Count: prefix.utf8.count) else { return nil }
+        return String(current[current.utf8.index(current.utf8.startIndex, offsetBy: prefix.utf8.count)...])
     }
 
     /// A decode may rewrite an already-visible space during tokenizer cleanup.
@@ -15270,7 +15352,7 @@ maxTokens: maxTokens,
         return delta
     }
 
-    static func longestSuffixPrefixLength(in text: String, candidates: [String]) -> Int {
+    private static func longestSuffixPrefixLength(in text: String, candidates: [String]) -> Int {
         guard !text.isEmpty, !candidates.isEmpty else { return 0 }
         let maxLength = min(text.count, candidates.map(\.count).max() ?? 0)
         guard maxLength > 0 else { return 0 }
@@ -15373,17 +15455,21 @@ maxTokens: maxTokens,
         )
     }
 
-    /// `harmonyParsedOutput(from:…, countCompletionTokens: false).hitStop`
+    /// Incremental twin of `harmonyParsedOutput(from:…, countCompletionTokens: false).hitStop`
     /// with the final channel filtered incrementally (#2317). `filter` is an
     /// `.outputFilters` filter for the same stop inputs.
     static func harmonyStreamingHitStop(
         from parsed: HarmonyResponseParser.ParseResult,
         filter: IncrementalStreamFilter
     ) throws -> Bool {
+        try requireHarmonyParsed(parsed)
+        return filter.update(parsed.content ?? "").hitStop
+    }
+
+    private static func requireHarmonyParsed(_ parsed: HarmonyResponseParser.ParseResult) throws {
         guard parsed.status != .malformed, parsed.status != .notApplicable else {
             throw harmonyResponseError(for: parsed.failure)
         }
-        return filter.update(parsed.content ?? "").hitStop
     }
 
     private static func harmonyParsedOutput(
@@ -15396,9 +15482,7 @@ maxTokens: maxTokens,
         generatedCompletionTokens: Int = 0,
         uniqueCalls: Bool = false
     ) throws -> ParsedGeneratedOutput {
-        guard parsed.status != .malformed, parsed.status != .notApplicable else {
-            throw harmonyResponseError(for: parsed.failure)
-        }
+        try requireHarmonyParsed(parsed)
         let filteredVisible = applyOutputFilters(
             parsed.content ?? "",
             stopTokenFilter: stopTokenFilter,
@@ -16590,6 +16674,24 @@ struct SerialStreamingTextEmitter {
     private let holdsCleanupDecoderPendingPrefixes: Bool
     /// SPEC-001-R015: progress while a tool call is held whole.
     private let heldProgress: HeldOutputProgress
+    /// #2317: the reasoning split, stray-tag removal and tool-streamer input
+    /// over the text after a committed point. `usesReferenceText` runs the
+    /// whole-text functions instead (the differential tests' reference).
+    private var reasoningSplit = IncrementalReasoningSplit()
+    private var strayTagRemoval = IncrementalStrayTagRemoval()
+    private var toolText: IncrementalToolText
+    private var usesReferenceText = false
+
+    var incrementalRestartCount: Int {
+        reasoningSplit.restartCount + strayTagRemoval.restartCount + toolText.restartCount
+    }
+
+    /// This emitter on the whole-text functions (tests).
+    func usingReferenceText() -> Self {
+        var copy = self
+        copy.usesReferenceText = true
+        return copy
+    }
 
     init(
         request: ChatCompletionRequest,
@@ -16612,6 +16714,7 @@ struct SerialStreamingTextEmitter {
         self.holdsCleanupPatternPrefixes = holdsCleanupPatternPrefixes
         self.holdsCleanupDecoderPendingPrefixes = holdsCleanupDecoderPendingPrefixes
         self.heldProgress = heldProgress
+        toolText = IncrementalToolText(markers: toolStreamer.markerTexts, bracesMatter: grammar == .llama3)
     }
 
     /// One decoded prefix of the generation (`streamingSafePrefix` of every
@@ -16627,7 +16730,9 @@ struct SerialStreamingTextEmitter {
         if reasoningOpen {
             // SPEC-018 §3.12: reasoning streams as `reasoning_content`; only
             // the text after `</think>` reaches content, tools and JSON mode.
-            let split = ReasoningOutput.splitStreamingPrefix(candidate.text)
+            let split = usesReferenceText
+                ? ReasoningOutput.splitStreamingPrefix(candidate.text)
+                : reasoningSplit.splitStreamingPrefix(candidate.text)
             // An unclosed prefix holds back cleanup-rewritable text and an
             // incomplete UTF-8 tail, as content does.
             let reasoning = split.closed
@@ -16644,7 +16749,9 @@ struct SerialStreamingTextEmitter {
             candidate = (split.answer, candidate.hitStop)
         }
         if stripsStrayThinkTags {
-            candidate.text = ReasoningOutput.removingStrayTags(candidate.text, streaming: true)
+            candidate.text = usesReferenceText
+                ? ReasoningOutput.removingStrayTags(candidate.text, streaming: true)
+                : strayTagRemoval.removingStrayTags(candidate.text)
         }
         let stableText = holdsCleanupPatternPrefixes
             ? Self.cleanupStablePrefix(
@@ -16657,8 +16764,19 @@ struct SerialStreamingTextEmitter {
             // suppression as soon as a call opens, but cleanup holdback may have
             // deferred the separator immediately before that delimiter.
             // Prose precedes the call deltas that the same text opens.
-            let visibleContent = toolStreamer.visibleContentPrefix(of: stableText)
-            let toolEvents = toolStreamer.observe(stableText)
+            let visibleContent: String
+            let toolEvents: [StreamChunk]
+            if usesReferenceText {
+                visibleContent = toolStreamer.visibleContentPrefix(of: stableText)
+                toolEvents = toolStreamer.observe(stableText)
+            } else {
+                // Every non-empty visible prefix of the whole text starts with
+                // the kept prose; of the reduced text, with its first scalar.
+                let split = toolText.reduce(stableText)
+                let partial = toolStreamer.visibleContentPrefix(of: split.reduced)
+                visibleContent = partial.isEmpty ? "" : String(split.kept) + partial
+                toolEvents = toolStreamer.observe(split.reduced)
+            }
             defer { toolEvents.forEach(onChunk) }
             emittedVisible = emittedVisible || !toolEvents.isEmpty
             if !visibleContent.isEmpty || !toolStreamer.suppressesAssistantContent {
@@ -16805,6 +16923,10 @@ struct SerialStreamingTextEmitter {
     }
 
     private mutating func delta(to current: String) -> String {
+        // The usual step only appends: one byte comparison, no scalar walk.
+        if let appended = ModelRuntime.utf8Extension(of: lastEmittedDecodedText, to: current) {
+            return appended
+        }
         let delta = ModelRuntime.streamDeltaAfterCleanupRewrite(
             from: lastEmittedDecodedText,
             to: current
@@ -16933,6 +17055,13 @@ struct NativeToolCallStreamEmitter {
     }
 
     var suppressesAssistantContent: Bool { enabled && (opened || sawToolDelimiter) }
+
+    /// Every marker the visible-prefix and observe paths search for, for
+    /// `IncrementalToolText` (a superset is safe).
+    var markerTexts: [String] {
+        [startDelimiter, endDelimiter, "<|python_tag|>", "<function=", "</function>", "<tools>", "<tool_call>",
+         "</tool_call>", "<arg_key>", "</arg_key>", "<arg_value>", "</arg_value>"]
+    }
 
     /// True once a declared tool has parser-valid, within-cap arguments (complete
     /// JSON object or closed function-XML). Wrapper-close, prefixes, and cap

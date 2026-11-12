@@ -8,6 +8,14 @@ import MLXLMCommon
 /// text, and the differential tests in `IncrementalOutputFilterTests` check
 /// it piece by piece.
 extension ModelRuntime {
+    /// One line per row whose incremental decode or filter fell back to
+    /// whole-text work (#2317); silent when neither did.
+    static func logIncrementalOutputFallbacks(path: String, decodeFallbacks: Int, filterRestarts: Int) {
+        guard decodeFallbacks > 0 || filterRestarts > 0 else { return }
+        FileHandle.standardError.write(Data(
+            "event=incremental_output_fallback path=\(path) decode_fallbacks=\(decodeFallbacks) filter_restarts=\(filterRestarts)\n".utf8))
+    }
+
     /// Detokenizes a growing token list with the tokenizer's own whole-list
     /// `decode`, but over a bounded window: the text of the tokens before the
     /// window is kept, and each step decodes only a lookback segment plus the
@@ -28,12 +36,14 @@ extension ModelRuntime {
             let unchangedPrefixUTF8: Int
         }
 
-        static let minimumLookbackScalars = 64
+        /// At least 64 scalars, and twice the longest control text the
+        /// tokenizer's shield marks (0 without one).
+        static func lookbackScalars(controlTextLength: Int) -> Int {
+            max(64, 2 * controlTextLength + 8)
+        }
 
-        /// A lookback that covers the tokenizer's longest control text twice.
         static func lookbackScalars(for tokenizer: any MLXLMCommon.Tokenizer) -> Int {
-            let control = ControlTokenTable.of(tokenizer)?.matcher.maxLength ?? 0
-            return max(minimumLookbackScalars, 2 * control + 8)
+            lookbackScalars(controlTextLength: ControlTokenTable.of(tokenizer)?.matcher.maxLength ?? 0)
         }
 
         private let decode: ([Int]) -> String
@@ -54,7 +64,7 @@ extension ModelRuntime {
         /// Tokens decoded through `decode`, summed over calls (test hook).
         private(set) var decodedTokenCount = 0
 
-        init(decode: @escaping ([Int]) -> String, lookbackScalars: Int = WindowedTextDecoder.minimumLookbackScalars) {
+        init(decode: @escaping ([Int]) -> String, lookbackScalars: Int) {
             self.decode = decode
             self.lookbackScalars = max(1, lookbackScalars)
         }
@@ -152,12 +162,13 @@ extension ModelRuntime {
     ///
     /// Committed: a raw prefix up to a cut, its stop-token-stripped text, and
     /// the last few Characters of both. A cut is placed only where
-    /// - both neighbouring scalars always form a grapheme break whatever
-    ///   surrounds them (so Character, Foundation and canonical-equivalence
-    ///   matching agree on either side), and are not CR LF;
+    /// - a grapheme break falls between the neighbouring scalars whatever
+    ///   surrounds them (`breaksBetween`, so Character, Foundation and
+    ///   canonical-equivalence matching agree on either side);
     /// - no stop-token occurrence (overlapping ones included) covers either
     ///   neighbouring scalar;
-    /// - at least twice the longest token's scalars (plus `</think>`) of raw
+    /// - at least twice the longest token's scalars in its canonical
+    ///   decomposition (plus `</think>`) of raw
     ///   text follow, so no later token can complete a stop token across it.
     /// Stripping then splits at the cut (the joiner decisions on either side
     /// see a non-empty neighbour in both texts), so the stripped text is the
@@ -276,6 +287,7 @@ extension ModelRuntime {
         }
 
         static func sharesPrefix(_ lhs: String, _ rhs: String, utf8Count count: Int) -> Bool {
+            guard count > 0 else { return true }
             guard lhs.utf8.count >= count, rhs.utf8.count >= count else { return false }
             if let equal = lhs.utf8.withContiguousStorageIfAvailable({ left in
                 rhs.utf8.withContiguousStorageIfAvailable { right in
@@ -334,7 +346,11 @@ extension ModelRuntime {
                 let longestCandidate = candidates.map(\.count).max() ?? 0
                 strippedOverlapCount = requestStops.isEmpty && !holdback ? 0 : longestCandidate + 4
                 rawOverlapCount = watchesCloseTag ? ReasoningOutput.closeTag.count + 4 : 0
-                let longestToken = filter.tokens.map(\.unicodeScalars.count).max() ?? 0
+                // Matching is by canonical equivalence: an occurrence can be
+                // as long as the token's full decomposition.
+                let longestToken = filter.tokens.map {
+                    max($0.unicodeScalars.count, $0.decomposedStringWithCanonicalMapping.unicodeScalars.count)
+                }.max() ?? 0
                 tokenMargin = 2 * longestToken + 4
                 rawHoldback = tokenMargin + (watchesCloseTag ? ReasoningOutput.closeTag.unicodeScalars.count : 0) + 8
             }
@@ -353,19 +369,12 @@ extension ModelRuntime {
                 let strippedTail = filter.stripping(from: tail, joiner: ControlTextShield.markString)
                 let window = committedOverlap + strippedTail
                 counter.value += tail.utf8.count + window.utf8.count
-                var earliest: String.Index?
-                for stop in requestStops {
-                    if let range = window.range(of: stop), earliest == nil || range.lowerBound < earliest! {
-                        earliest = range.lowerBound
-                    }
-                }
-                if let earliest {
+                if let earliest = ModelRuntime.earliestRequestStop(in: window, requestStops: requestStops) {
                     return Result(text: committedFixed + window[..<earliest], hitStop: true, closeEnd: nil)
                 }
                 let text: String
                 if holdback {
-                    let held = ModelRuntime.longestSuffixPrefixLength(in: window, candidates: candidates)
-                    let safe = held > 0 ? String(window.dropLast(held)) : window
+                    let safe = ModelRuntime.withoutStopCandidatePrefixTail(window, candidates: candidates)
                     let trimmed = ModelRuntime.withoutIncompleteUTF8Tail(safe)
                     text = trimmed.isEmpty && !committedFixed.isEmpty
                         ? ModelRuntime.withoutIncompleteUTF8Tail(committedFixed + safe)
@@ -396,47 +405,68 @@ extension ModelRuntime {
                 return committed + filter.stripping(from: segment, joiner: ControlTextShield.markString)
             }
 
+            /// The highest cut among the last `cutAttempts` positions before
+            /// the holdback that `breaksBetween` its neighbours and that no
+            /// stop-token occurrence (overlapping ones included, touching
+            /// ones too) covers. One token-position pass over the candidate
+            /// region plus the margin on both sides.
             private func commitIfPossible(_ tail: String) {
                 let scalars = Array(tail.unicodeScalars)
                 guard scalars.count >= rawHoldback + Self.commitChunk else { return }
-                var index = scalars.count - rawHoldback
-                var attempts = 0
-                while index >= tokenMargin, attempts < Self.cutAttempts {
-                    if isSafeCut(scalars, at: index) {
+                let highest = scalars.count - rawHoldback
+                let lowest = max(tokenMargin, highest - Self.cutAttempts + 1)
+                guard highest >= lowest else { return }
+                var covered = [Bool](repeating: false, count: highest - lowest + 1)
+                if !filter.tokens.isEmpty {
+                    let regionStart = lowest - tokenMargin
+                    let regionEnd = min(scalars.count, highest + tokenMargin)
+                    var view = String.UnicodeScalarView()
+                    view.append(contentsOf: scalars[regionStart..<regionEnd])
+                    let around = String(view)
+                    counter.value += around.utf8.count
+                    let occurrences = filter.occurrenceUTF8Ranges(in: around)
+                    if !occurrences.isEmpty {
+                        // UTF-8 offset of each region scalar, and of its end.
+                        var starts: [Int] = []
+                        starts.reserveCapacity(regionEnd - regionStart + 1)
+                        var offset = 0
+                        for scalar in scalars[regionStart..<regionEnd] {
+                            starts.append(offset)
+                            offset += UTF8.width(scalar)
+                        }
+                        starts.append(offset)
+                        for occurrence in occurrences {
+                            // Scalars [first, end) of the occurrence: cuts
+                            // first...end touch it.
+                            let first = Self.lowerBound(starts, occurrence.lowerBound) + regionStart
+                            let end = Self.lowerBound(starts, occurrence.upperBound) + regionStart
+                            let from = max(first, lowest)
+                            let to = min(end, highest)
+                            if from <= to {
+                                for index in from...to { covered[index - lowest] = true }
+                            }
+                        }
+                    }
+                }
+                var index = highest
+                while index >= lowest {
+                    if !covered[index - lowest],
+                       IncrementalStreamFilter.breaksBetween(scalars[index - 1], scalars[index]) {
                         commit(scalars, at: index)
                         return
                     }
                     index -= 1
-                    attempts += 1
                 }
             }
 
-            private func isSafeCut(_ scalars: [Unicode.Scalar], at index: Int) -> Bool {
-                let before = scalars[index - 1]
-                let after = scalars[index]
-                guard IncrementalStreamFilter.breaksAround(before), IncrementalStreamFilter.breaksAround(after),
-                      !(before == "\r" && after == "\n")
-                else { return false }
-                guard !filter.tokens.isEmpty else { return true }
-                var view = String.UnicodeScalarView()
-                view.append(contentsOf: scalars[(index - tokenMargin)..<min(scalars.count, index + tokenMargin)])
-                let around = String(view)
-                counter.value += around.utf8.count
-                if filter.stripping(from: around, joiner: ControlTextShield.markString) == around { return true }
-                // Some token occurs nearby: the cut is still safe when no
-                // occurrence (overlapping ones included) covers either scalar.
-                let scalarsView = around.unicodeScalars
-                let cutIndex = scalarsView.index(scalarsView.startIndex, offsetBy: tokenMargin)
-                let beforeIndex = scalarsView.index(before: cutIndex)
-                for token in filter.tokens {
-                    var from = around.startIndex
-                    while from < around.endIndex, let range = around.range(of: token, range: from..<around.endIndex) {
-                        counter.value += token.utf8.count
-                        if range.lowerBound <= cutIndex, range.upperBound > beforeIndex { return false }
-                        from = around.unicodeScalars.index(after: range.lowerBound)
-                    }
+            private static func lowerBound(_ sorted: [Int], _ value: Int) -> Int {
+                var low = 0
+                var high = sorted.count
+                while low < high {
+                    let middle = (low + high) / 2
+                    if sorted[middle] < value { low = middle + 1 } else { high = middle }
                 }
-                return true
+                return low
             }
 
             private func commit(_ scalars: [Unicode.Scalar], at index: Int) {
@@ -457,9 +487,11 @@ extension ModelRuntime {
 
         /// True when a grapheme break falls before and after `scalar` in
         /// every context (Unicode grapheme cluster rules GB3–GB13), CR LF
-        /// aside: ASCII, and scalars of property Other that are not Hangul,
-        /// regional indicators, emoji modifiers or listed Prepend /
-        /// SpacingMark / Extend letters. Conservative: false only delays a cut.
+        /// aside. Marks, format and control scalars, Hangul and regional
+        /// indicators are excluded by property; Prepend, Extend and
+        /// SpacingMark come from the running Swift runtime's own grapheme
+        /// breaking, so the check follows its Unicode version. Conservative:
+        /// false only delays a cut.
         static func breaksAround(_ scalar: Unicode.Scalar) -> Bool {
             let value = scalar.value
             if value < 0x80 { return true }
@@ -470,16 +502,276 @@ extension ModelRuntime {
             default:
                 break
             }
-            switch value {
-            case 0x1100...0x11FF, 0xA960...0xA97F, 0xAC00...0xD7FF: return false // Hangul
-            case 0x1F1E6...0x1F1FF: return false // regional indicators
-            case 0x1F3FB...0x1F3FF, 0xFF9E, 0xFF9F: return false // Extend
-            case 0x0E33, 0x0EB3: return false // SpacingMark
-            case 0x0D4E, 0x111C2, 0x111C3, 0x1193F, 0x11941, 0x11A3A, 0x11A84...0x11A89, 0x11D46, 0x11F02:
-                return false // Prepend
-            default:
-                return true
+            if isHangul(scalar) { return false }
+            if (0x1F1E6...0x1F1FF).contains(value) { return false } // regional indicators
+            return breaksBesideASCII(scalar)
+        }
+
+        /// True when a grapheme break falls between `before` and `after`
+        /// whatever surrounds them. Beyond two `breaksAround` scalars (not
+        /// CR LF): Hangul next to ASCII, since GB6–GB8 join Hangul only to
+        /// Hangul, so Korean prose commits at its spaces and punctuation.
+        static func breaksBetween(_ before: Unicode.Scalar, _ after: Unicode.Scalar) -> Bool {
+            if before == "\r", after == "\n" { return false }
+            if breaksAround(before), breaksAround(after) { return true }
+            if before.isASCII, isHangul(after) { return breaksBesideASCII(after) }
+            if after.isASCII, isHangul(before) { return breaksBesideASCII(before) }
+            return false
+        }
+
+        private static func isHangul(_ scalar: Unicode.Scalar) -> Bool {
+            switch scalar.value {
+            case 0x1100...0x11FF, 0xA960...0xA97F, 0xAC00...0xD7FF: return true
+            default: return false
             }
+        }
+
+        /// Prepend joins what follows; Extend, ZWJ and SpacingMark join what
+        /// precedes.
+        private static func breaksBesideASCII(_ scalar: Unicode.Scalar) -> Bool {
+            var view = String.UnicodeScalarView()
+            view.append(scalar)
+            let alone = String(view)
+            return (alone + "a").count == 2 && ("a" + alone).count == 2
+        }
+    }
+}
+
+// MARK: - Emitter text steps (#2317)
+
+/// Shared by the emitter's incremental steps below. Each keeps work per call
+/// bounded by the text after a committed point plus a margin; the committed
+/// bytes are re-verified with one `memcmp`, and a text that changed inside
+/// them restarts the step from the first byte (counted in `restartCount`).
+enum IncrementalEmitterText {
+    /// Committed points stay this many bytes behind the end, so an input that
+    /// shrinks by a held-back tail does not restart the step.
+    static let margin = 64
+
+    static func index(_ text: String, utf8Offset offset: Int) -> String.Index {
+        text.utf8.index(text.utf8.startIndex, offsetBy: offset)
+    }
+
+    static func offset(_ text: String, _ index: String.Index) -> Int {
+        text.utf8.distance(from: text.utf8.startIndex, to: index)
+    }
+
+    /// The scalar boundary at or before `offset`.
+    static func scalarIndex(_ text: String, atOrBefore offset: Int) -> String.Index {
+        var offset = max(0, min(offset, text.utf8.count))
+        let utf8 = text.utf8
+        while offset > 0, utf8[utf8.index(utf8.startIndex, offsetBy: offset)] & 0xC0 == 0x80 {
+            offset -= 1
+        }
+        return index(text, utf8Offset: offset)
+    }
+}
+
+/// The first occurrence of `needle` in a growing text, as
+/// `text.range(of: needle)` finds it. `needle` must start with an ASCII
+/// scalar that always begins a grapheme (`<`), so a search started at any
+/// scalar boundary finds the same first occurrence.
+struct IncrementalFirstMatch {
+    let needle: String
+    private var previous = ""
+    private var found: (lower: Int, upper: Int)?
+    /// No occurrence starts before this UTF-8 offset of `previous`.
+    private var scanned = 0
+    private(set) var restartCount = 0
+
+    init(needle: String) { self.needle = needle }
+
+    mutating func find(in text: String) -> Range<String.Index>? {
+        // An occurrence ending at the scanned bound also reads the scalar
+        // after it.
+        let verified = found?.upper ?? (scanned > 0 ? scanned + needle.utf8.count + 8 : 0)
+        if verified > 0, !ModelRuntime.IncrementalStreamFilter.sharesPrefix(previous, text, utf8Count: verified) {
+            restartCount += 1
+            found = nil
+            scanned = 0
+        }
+        previous = text
+        if let found {
+            let upper = IncrementalEmitterText.index(text, utf8Offset: found.upper)
+            // A combining scalar after the match would change its last
+            // Character; search again from the start.
+            if upper == text.endIndex
+                || ModelRuntime.IncrementalStreamFilter.breaksBetween(
+                    text.unicodeScalars[text.unicodeScalars.index(before: upper)], text.unicodeScalars[upper]) {
+                return IncrementalEmitterText.index(text, utf8Offset: found.lower)..<upper
+            }
+            self.found = nil
+            scanned = 0
+        }
+        let start = IncrementalEmitterText.scalarIndex(text, atOrBefore: scanned)
+        if let range = text.range(of: needle, range: start..<text.endIndex) {
+            found = (IncrementalEmitterText.offset(text, range.lowerBound), IncrementalEmitterText.offset(text, range.upperBound))
+            return range
+        }
+        scanned = max(scanned, text.utf8.count - needle.utf8.count - IncrementalEmitterText.margin)
+        return nil
+    }
+}
+
+/// Incremental twin of `ReasoningOutput.splitStreamingPrefix`.
+struct IncrementalReasoningSplit {
+    private var close = IncrementalFirstMatch(needle: ReasoningOutput.closeTag)
+
+    var restartCount: Int { close.restartCount }
+
+    mutating func splitStreamingPrefix(_ text: String) -> ReasoningOutput.Split {
+        var text = text
+        text.makeContiguousUTF8()
+        if let range = close.find(in: text) {
+            let answer = text[range.upperBound...].drop(while: { $0.isWhitespace })
+            return ReasoningOutput.Split(reasoning: String(text[..<range.lowerBound]), answer: String(answer), closed: true)
+        }
+        return ReasoningOutput.Split(reasoning: ReasoningOutput.withoutPartialCloseTag(text), answer: "", closed: false)
+    }
+}
+
+/// Incremental twin of `ReasoningOutput.removingStrayTags(_:streaming: true)`.
+///
+/// Removing every `<think>` and `</think>` until none is left has one result
+/// whatever the order (neither tag overlaps itself or the other), so the
+/// committed head's result is kept and only the text after it is processed.
+/// A cut is committed where both neighbouring scalars always break graphemes
+/// and the committed result has no `<` in its last 16 Characters: no tag can
+/// then span the cut.
+struct IncrementalStrayTagRemoval {
+    private var call = IncrementalFirstMatch(needle: "<tool_call>")
+    private var previous = ""
+    private var cut = 0
+    private var committed = ""
+    private var restarts = 0
+    private static let tagFreeTail = 16
+
+    var restartCount: Int { restarts + call.restartCount }
+
+    mutating func removingStrayTags(_ input: String) -> String {
+        var text = input
+        text.makeContiguousUTF8()
+        if cut > 0, !ModelRuntime.IncrementalStreamFilter.sharesPrefix(previous, text, utf8Count: cut) {
+            restarts += 1
+            cut = 0
+            committed = ""
+        }
+        previous = text
+        let callRange = call.find(in: text)
+        let callStart = callRange?.lowerBound ?? text.endIndex
+        if IncrementalEmitterText.offset(text, callStart) < cut {
+            restarts += 1
+            cut = 0
+            committed = ""
+        }
+        let tail = String(text[IncrementalEmitterText.index(text, utf8Offset: cut)..<callStart])
+        let processed = ReasoningOutput.removingTags(tail)
+        var head = committed + processed
+        if callRange == nil {
+            // A held tail starts with `<`, which the committed text's last
+            // Characters never hold, so it lies in the processed tail.
+            let held = ReasoningOutput.partialTagLength(processed)
+            if held > 0 { head = String(head.dropLast(held)) }
+            commitIfPossible(tail)
+        }
+        return head + text[callStart...]
+    }
+
+    private mutating func commitIfPossible(_ tail: String) {
+        let scalars = Array(tail.unicodeScalars)
+        let hold = IncrementalEmitterText.margin
+        guard scalars.count >= 2 * hold else { return }
+        var index = scalars.count - hold
+        var attempts = 0
+        while index > 0, attempts < 64 {
+            defer { index -= 1; attempts += 1 }
+            guard ModelRuntime.IncrementalStreamFilter.breaksBetween(scalars[index - 1], scalars[index]),
+                  !scalars[max(0, index - Self.tagFreeTail)..<index].contains("<")
+            else { continue }
+            // One whole-segment pass per call: a cut that fails here waits
+            // for the next call.
+            var view = String.UnicodeScalarView()
+            view.append(contentsOf: scalars[..<index])
+            let segment = String(view)
+            let processed = ReasoningOutput.removingTags(segment)
+            let joined = String(committed.suffix(Self.tagFreeTail)) + processed
+            guard !joined.suffix(Self.tagFreeTail).contains("<") else { return }
+            committed += processed
+            cut += segment.utf8.count
+            return
+        }
+    }
+}
+
+/// What the tool-call stream emitter sees of the streamed text (#2317). The
+/// committed prose before `cut` holds no tool marker, no `<` in its last 24
+/// scalars, no `{` for Llama 3, and starts (after whitespace) with neither
+/// `{` nor `<`. `visibleContentPrefix` and `observe` then give on
+/// `x + rest` (x: the committed text's last scalar, a non-blank Character
+/// that always breaks graphemes) what they give on the whole text, minus the
+/// committed text before x. Above the response byte cap the whole text is
+/// used (`llama3CallStart` reads its length).
+struct IncrementalToolText {
+    private let markers: [String]
+    private let bracesMatter: Bool
+    private var previous = ""
+    private var cut = 0
+    private(set) var restartCount = 0
+    private static let markerFreeTail = 24
+
+    init(markers: [String], bracesMatter: Bool) {
+        self.markers = markers
+        self.bracesMatter = bracesMatter
+    }
+
+    /// `kept + reduced` is `text`; the streamer gets `reduced`.
+    mutating func reduce(_ input: String) -> (kept: Substring, reduced: String) {
+        var text = input
+        text.makeContiguousUTF8()
+        if cut > 0, !ModelRuntime.IncrementalStreamFilter.sharesPrefix(previous, text, utf8Count: cut) {
+            restartCount += 1
+            cut = 0
+        }
+        previous = text
+        guard text.utf8.count <= ToolCallParser.SPEC018_ARGUMENTS_PER_RESPONSE_BYTE_CAP else {
+            return (text[text.startIndex..<text.startIndex], text)
+        }
+        let cutIndex = IncrementalEmitterText.index(text, utf8Offset: cut)
+        let reducedStart = cut > 0 ? text.unicodeScalars.index(before: cutIndex) : cutIndex
+        let result = (text[..<reducedStart], String(text[reducedStart...]))
+        commitIfPossible(String(text[cutIndex...]))
+        return result
+    }
+
+    private mutating func commitIfPossible(_ tail: String) {
+        let scalars = Array(tail.unicodeScalars)
+        let hold = IncrementalEmitterText.margin
+        guard scalars.count >= 2 * hold else { return }
+        if cut == 0 {
+            // The whole text's lead decides the Qwen bare-call hold.
+            let lead = tail.drop(while: { $0.isWhitespace })
+            guard !lead.isEmpty, !lead.hasPrefix("{"), !lead.hasPrefix("<") else { return }
+        }
+        // Llama 3: no cut past the first `{`.
+        let braceLimit = bracesMatter ? (scalars.firstIndex(of: "{") ?? scalars.count) : scalars.count
+        var index = min(scalars.count - hold, braceLimit)
+        var attempts = 0
+        while index > 0, attempts < 64 {
+            defer { index -= 1; attempts += 1 }
+            let last = scalars[index - 1]
+            guard !last.properties.isWhitespace, last != "<", last != "{",
+                  ModelRuntime.IncrementalStreamFilter.breaksAround(last),
+                  ModelRuntime.IncrementalStreamFilter.breaksBetween(last, scalars[index]),
+                  !scalars[max(0, index - Self.markerFreeTail)..<index].contains("<")
+            else { continue }
+            // One whole-segment pass per call: a marker in it waits for the
+            // next call.
+            var view = String.UnicodeScalarView()
+            view.append(contentsOf: scalars[..<index])
+            let segment = String(view)
+            guard !markers.contains(where: { segment.contains($0) }) else { return }
+            cut += segment.utf8.count
+            return
         }
     }
 }

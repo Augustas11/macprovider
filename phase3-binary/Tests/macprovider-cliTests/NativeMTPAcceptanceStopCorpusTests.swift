@@ -77,7 +77,8 @@ final class NativeMTPAcceptanceStopCorpusTests: XCTestCase {
             var observer = ModelRuntime.SerialDecodeRequestStopObserver(
                 modelID: request.model, stopTokenFilter: StopTokenFilter(tokens: []),
                 requestStops: request.stop, reasoningOpen: request.outputTraits.reasoningOpen,
-                decode: decode
+                decode: decode,
+                decodeLookbackScalars: 64
             )
             var generated: [Int] = []
             var stopped = false

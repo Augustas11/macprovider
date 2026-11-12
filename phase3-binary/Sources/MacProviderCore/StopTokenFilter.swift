@@ -76,6 +76,40 @@ public struct StopTokenFilter: Sendable {
         } ?? true
     }
 
+    /// UTF-8 offset ranges of the stop-token occurrences in `text`,
+    /// overlapping ones included, in one pass for callers that test many
+    /// positions of one text. Byte-exact tokens come from a byte scan, which
+    /// also reports an occurrence a Character match would reject (a combining
+    /// mark after it): a superset, never missing one the string search finds.
+    public func occurrenceUTF8Ranges(in text: String) -> [Range<Int>] {
+        if tokens.isEmpty { return [] }
+        var contiguous = text
+        contiguous.makeContiguousUTF8()
+        var ranges: [Range<Int>] = []
+        for token in slowTokens {
+            var from = contiguous.startIndex
+            while from < contiguous.endIndex, let range = contiguous.range(of: token, range: from..<contiguous.endIndex) {
+                let lower = contiguous.utf8.distance(from: contiguous.utf8.startIndex, to: range.lowerBound)
+                ranges.append(lower..<(lower + contiguous.utf8.distance(from: range.lowerBound, to: range.upperBound)))
+                from = contiguous.unicodeScalars.index(after: range.lowerBound)
+            }
+        }
+        guard !byteTokens.isEmpty else { return ranges }
+        contiguous.utf8.withContiguousStorageIfAvailable { bytes in
+            let count = bytes.count
+            for index in 0..<count where firstBytes[Int(bytes[index])] {
+                for token in byteTokens where token.count <= count - index && token[0] == bytes[index] {
+                    var offset = 1
+                    while offset < token.count, bytes[index + offset] == token[offset] {
+                        offset += 1
+                    }
+                    if offset == token.count { ranges.append(index..<(index + token.count)) }
+                }
+            }
+        }
+        return ranges
+    }
+
     public func stripping(from text: String) -> String {
         stripping(from: text, joiner: "")
     }
