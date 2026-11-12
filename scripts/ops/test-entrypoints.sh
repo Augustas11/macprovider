@@ -156,7 +156,7 @@ if verdict not in ('ok', 'blocked: fixture signed release mismatch'):
 print(verdict)
 sys.exit(0 if verdict == 'ok' else 1)
 FAKEMATCH
-git -C "$W" -c user.name=t -c user.email=t@example.invalid add -A scripts/ops scripts/publish-release-mirror.sh scripts/check-install-sh-consumer-health.sh scripts/native_mtp_release_match.py docs/releases/cli-release-train.md \
+git -C "$W" -c user.name=t -c user.email=t@example.invalid add -A scripts/ops scripts/publish-release-mirror.sh scripts/check-install-sh-consumer-health.sh scripts/native_mtp_release_match.py docs/releases/cli-release-train.md phase3-binary/Package.resolved \
   ops/pearl-updater/release-signing-public.pem phase4-coordinator/dist/compatibility-revoked-ids.txt
 git -C "$W" -c user.name=t -c user.email=t@example.invalid commit -q -m "test: working-tree ops scripts"
 git -C "$W" -c user.name=t -c user.email=t@example.invalid tag -a v9.0.0 -m "live runtime"

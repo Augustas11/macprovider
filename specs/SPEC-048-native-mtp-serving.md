@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.89
+**Version:** 0.1.90
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.89",
+  "version": "0.1.90",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -446,6 +446,47 @@ do not apply to this adapter; these do:
   bound to the signed sidecar, R015, and the qualification evidence like
   every native tuple.
 
+**DeepSeek V4 DSpark adapter (0.1.59).** The additional allowed pair is
+`(deepseek_v4_dspark_v1, checkpoint_mtp)`. It names the target-embedded
+0731 DSpark block drafter, not the legacy `num_nextn_predict_layers` field.
+The observer MUST require `model_type = deepseek_v4`, architecture
+`DeepseekV4ForCausalLM`, three `mtp.0..2` stages, `compress_ratios` of target
+layer count plus three ending in zero, `dspark_block_size = 5`, the last
+three target layer IDs as `dspark_target_layer_ids`, an in-vocabulary
+`dspark_noise_token_id`, and `dspark_markov_rank = 256`. The three target
+captures are means over hyper-connection copies, without recomputing the
+prompt. Stage 0 projects their concatenation; all stages share the target
+embedding/head and hold committed context in their own 128-token windows.
+
+`mtp_head_count` / `prediction_layer_count` is **3 stages**; it is independent
+of the signed `proposal_depth` / `max_proposal_depth` in `1...5`. The latter
+bounds proposals, excluding the anchor. The Markov head remains greedy.
+The confidence head schedules a prefix's verification length; it MUST NOT
+change target logits, acceptance, committed tokens, or termination. A shorter
+verified prefix is exact greedy acceptance against ordinary target decode.
+The scheduler MUST retain every row's identity when row depths differ.
+
+The adapter is greedy-profile-only. Its reader and generator support the
+generic `1...8` native-active-row range so lab qualification can exercise
+multiple rows. The selected signed bound MUST be justified by the actual
+R015 cells; the existing `qualified_slots >= 2`, signed CB-policy, scheduler
+support, and R007 ordinary fallback gates remain mandatory. This
+reader support creates no signed admission or CB-policy entry. An activation
+MUST append a model entry to the existing multi-entry sidecar and projection,
+preserving the Qwen and GLM entries; it MUST NOT replace either entry.
+
+The embedded observer accepts the checkpoint's expert and hyper-connection
+spellings only through the fork's deterministic sanitizer mapping. Its
+representation manifest names **post-sanitize module paths**: per-expert
+`ffn.experts.E.w1/w2/w3` maps to `ffn.switch_mlp.gate_proj/down_proj/up_proj`,
+and `hc_attn_*` / `hc_ffn_*` maps to `attn_hc.*` / `ffn_hc.*`. It MUST reject
+unknown target/stage indices, absent or unpaired scales, incompatible packing,
+and unmatched effective quantization overrides. Known vendor config aliases
+(`model.layers.*`, `model.embed_tokens`, `lm_head`, `mtp.N.block.*`) never
+participate in the loader's exact-path lookup; the observer ignores them only
+when their values match the corresponding effective canonical entry. The
+mixed format is specified in R012.
+
 **Multi-model projection manifest (0.1.35).** When one admission sidecar
 carries entries for more than one `model_key`, the release's single
 `native-mtp-artifact-manifest.json` is
@@ -544,12 +585,15 @@ The authorized dependency tuple is exact:
 
 | Repository | Fork tag | Revision | Upstream base |
 |---|---|---|---|
-| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.47` | `bfc88b9c8f745a13f3cce145101f13dc3dc95e8c` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
+| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.48` | `e246b8fd6ed35c6b1ab969c927222c06f759ec82` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
 | `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.18` | `8f0ac45bc7483b59b1776a8405fa13944e559e06` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
 | `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.10` | `26ac615332af3eedc4def073947efb13b0a3e66d` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
 | `https://github.com/Augustas11/mlx-c` | `v0.6.0-macprovider.2` | `2b1ff2b5b5129a6115771da32e1bac3b6b01ab01` | `ml-explore/mlx-c` pinned base (`ebc88f10caa1b625e6b581437a8dea6df8a70085`) |
 
-The mlx-swift-lm row `3.32.3-macprovider.47` is `3.32.3-macprovider.44`
+The mlx-swift-lm row `3.32.3-macprovider.48` is `3.32.3-macprovider.47`
+(`bfc88b9c8f745a13f3cce145101f13dc3dc95e8c`) plus the campaign #2111 DeepSeek V4
+commits; the DeepSeek-only hyper-connection options default off, so other
+families keep `.47` arithmetic. `3.32.3-macprovider.47` is `3.32.3-macprovider.44`
 (`ce950bf2840453b7e320fbb0a3b6eee7c7283658`, MiniMax) plus one commit (#2256) that pins
 mlx-swift `0.32.3-macprovider.18`. The Swift row is `0.32.3-macprovider.13`
 (`565269220ccc2cc0d2ce149affb98a2f9d9b32ac`) with the core gitlink moved to
@@ -710,6 +754,53 @@ four-row scheduler gain of 26.43%. These are ordinary-serving observations,
 not signed production admission. GLM/Qwen exact-output engine-matrix checks
 remain required on the designated Studio.
 
+The mlx-swift-lm row is `3.32.3-macprovider.48` (`e246b8fd6ed35c6b1ab969c927222c06f759ec82`): tag
+`3.32.3-macprovider.47` plus the campaign #2111 DeepSeek V4 commits (reference
+arithmetic `.10.16.7`, embedded DSpark drafter, shared MXFP8 multi-row projection
+tiles, last-position-only serving prefill logits, and decode selection and
+attention kernels that replay the graph's steel GEMM order so a row decodes the
+same tokens alone and batched). Its only shared-code edits are DeepSeek-only
+hyper-connection options that default off, so other families keep `.47`'s
+arithmetic and decode kernels. The mlx-swift, MLX core and mlx-c rows are `.47`'s.
+
+DeepSeek now preserves the QAT-off reference's norm, rotary, hyper-connection,
+router and indexer arithmetic. Its serial and continuous-batch prefill use
+whole chunks bounded at 32768 tokens, including the full final chunk; serial
+prepare returns that final forward's logits. Prompt snapshots retain only
+whole reference chunks strictly before the final chunk. A cold prompt of at
+most 32768 tokens therefore has no interior prompt snapshot or final-token
+split. The 8192-token Window 1a comparison against the unchanged reference
+passes with exact captured hidden states across all 43 layers. DeepSeek's
+public DSpark verifier selects packed verification for at most eight total
+positions; real-artifact prefix, hidden-state, rollback and continuation
+exactness checks pass on `.10.16.4` (`9bb7ab139e438f5d80b045fd5e97ab6b24d72164`).
+The `.10.16.5` successor retains that GPU packed body byte-identically and
+uses the scalar reference fallback on CPU, where packed reduction order can
+differ. The `.10.16.6` successor corrects short prefill-tail dispatch and uses
+canonical per-query attention, BF16-dequantized MXFP8 grouped output products
+and per-token HC graph arithmetic. Those choices preserve ordinary M1 rounding
+for each CB and packed position. Final-source Window 1a passes with all 43
+captured hidden states exact, and real-artifact public packed-prefix/state/
+rollback/continuation checks pass. Three-context parity and native qualification
+remain separately gated.
+The `.10.16.7` successor shares canonical packed per-layer arithmetic with
+ordinary multi-row one-token decode, disabling only verification-only prefix
+snapshots on that serving path. Quantized projections and experts stay batched;
+scalar forward, full prefill and other model-family defaults keep their paths.
+The actual captured-prefix four-row replay has exact ordinary/scalar/packed
+logits, hidden states and caches at widths one and two; the small four-row
+pool-boundary GPU regression also passes.
+Ordinary DeepSeek CB remains batched. These fidelity
+and packed exactness proofs do not establish native DSpark depth/R015
+performance qualification, which remains pending.
+
+The saved qmv four-row CB result is 1.8722x own serial with exact 256-token
+parity, satisfying R015's >=1.8x gate amended by the supervisor on 2026-10-30.
+That historical result retains its measured `.10.16.3` identity and is reused
+without four-row remeasurement. Focused cross-family regressions, the provider
+build, the remaining Window 1/2 cells and final campaign gates remain required.
+This tuple does not publish admission or widen any signed policy.
+
 For previously qualified Qwen/GLM MTP tuples, MTP-13 governs reuse when review
 establishes that their draft/verify/commit behavior, artifacts, request profile,
 hardware and serving bounds are unchanged. A dependency identity change alone
@@ -719,7 +810,7 @@ remain unchanged; a changed runtime/digest binding is provenance only
 (MTP-13, 0.1.81) and needs no reuse record. Immutable tags MUST
 exist and resolve to the exact row revisions before a production build.
 
-The parent is the immutable combined fork tag `3.32.3-macprovider.10.15`
+The LFM parent itself derives from the immutable combined fork tag `3.32.3-macprovider.10.15`
 (commit `3905a1b0499f0f38c0f94a008034a0362b9e3dca`, branch `campaign/2144-native-mtp`). It preserves
 both the GLM candidate `3.32.3-macprovider.10.13` (`b128c37f…`) and the Prism
 loader `3.32.3-macprovider.10.14` (`9b2766ee…`), each based on
@@ -752,7 +843,9 @@ qualification.
 
 `3.32.3-macprovider.10.5` consists of `3.32.3-macprovider.10.4` (`676a62a4…`) plus batched DeepSeek-V4 attention,
 compressor/indexer projections and per-row rotary offsets, keys-only windows
-and geometric pool storage (0.1.55, Related: #2111). The prior tag adds
+and geometric pool storage (0.1.55, Related: #2111). The DeepSeek branch then
+adds fidelity to DeepSeek's reference (0.1.59), carried into the combined tag.
+The 10.4 tag adds
 row-owned continuous batching to the serial DeepSeek-V4 port on the epic
 #2029 tag `3.32.3-macprovider.10.1` (`87dc5159…`, `glm53/tuple-0324`).
 `phase3-binary/Package.resolved` resolves the new revision exactly.
@@ -760,6 +853,14 @@ row-owned continuous batching to the serial DeepSeek-V4 port on the epic
 A production build MUST NOT resolve an untagged mlx-swift-lm revision;
 `scripts/check-upstream-throughput-blockers.sh` verifies that the row's tag
 resolves to the row's revision on the fork.
+
+The 10.9.2 tag adds the embedded three-stage DSpark drafter, exact ragged
+verification, deterministic confidence scheduling and exact cache-prefix
+commit/abort. Proposal depth remains independent of the three-stage count.
+The 10.9.3 tag adds shared fused sparse attention without changing the
+reference arithmetic contract. This tuple change does not publish a signed
+admission entry or qualify its performance; those require the authorized
+hardware cells.
 
 Each link pins the next by full revision: `phase3-binary/Package.swift` pins
 the mlx-swift-lm fork, that fork's manifest pins the mlx-swift fork, and the
@@ -825,6 +926,27 @@ Authorized surface:
   are not paged K/V and do not add a native-MTP adapter or admission. The
   provider's signed CB policy remains deployment state, with exact token
   parity and measured campaign gain required before activation.
+- mlx-swift-lm fork, DeepSeek-V4 reference fidelity (0.1.59, Related: #2111):
+  `deepseek_v4` follows DeepSeek's `inference/model.py` and `kernel.py` where
+  mlx-vlm's port diverged. `DeepseekV4PoolCache` carries the last completed
+  ratio-4 window's first-half kv and gate (float32) across calls, in its
+  state, metaState and `copy()`, so pooled entries no longer depend on how a
+  prompt is split into calls. The indexer selects the exact top
+  `min(index_topk, P)` by default (HISA only when a config sets
+  `index_block` and `index_keep`), its prefill scores tiled under a fixed
+  workspace. Router logits, the compressor (projections, buffers, `ape`,
+  softmax, sum), attention scores, max, normalizer and accumulation with
+  float32 sinks, the expert SwiGLU (routing weight applied before `w2`) and
+  combine with the shared expert, and the head logits are float32. Attention
+  walks each query's key list as DeepSeek's kernel receives it (the window in
+  temporal order, then the visible ratio-128 entries or the indexer's top-k
+  by descending score) in 64-key blocks with a running max, rounding the
+  unnormalized weights to bf16 before the value product. A configuration
+  with an explicit HISA indexer is not batch-exact: `batchesExactly` is
+  false, `decodeBatch` refuses it and the provider serves it serially. The float32 linear reads bf16 weights directly
+  for up to 8 GPU rows, so no float32 weight copy stays resident. The reference's QAT
+  simulations stay out. Other families' decode paths are unchanged; the tag
+  changes the decode-path digest, so admitted tuples rebind identity-only.
 - mlx-swift fork: the core submodule moved to the MLX core fork, and the
   compiled-function erase documented for the per-thread cache. No API change.
 - mlx-swift-lm fork, GLM-5-Next (0.1.35, epic #2029; batched rows 0.1.37;
@@ -993,7 +1115,10 @@ serial-tool output observer detects the first complete call. Required/named
 tools and any active grammar mask remain ordinary. The GLM greedy profile keeps
 its prior plain-text scope, including its no-tools/history/reasoning boundary,
 until a signed sampled profile is selected; a new binary alone does not widen
-that profile. Other adapters retain their no-tools/history/reasoning boundary.
+that profile. For DeepSeek V4 only, documented `reasoning_effort` and
+thinking-mode selection may change prompt bytes before prefill without changing
+decode eligibility; DeepSeek retains its no-tools/tool-choice/tool-call-history
+boundary. Other adapters retain their no-tools/history/reasoning boundary.
 Unknown chat-template kwargs remain ordinary. GLM uses the same rendered prompt,
 row-position target sampler and
 ordinary output parser as non-native decode, following oMLX
@@ -1143,6 +1268,20 @@ verification ran on rolled-back state. A rejected round's own record does not
 count. Depth-zero rows retain only committed target state; when depth
 increases, proposal state is recomputed from the current committed target
 hidden state rather than reused from a stale speculative tail.
+
+For `deepseek_v4_dspark_v1`, verification MUST step attention, compressor,
+indexer and pool updates in ordinary token order. A target transaction MUST
+restore every rejected suffix exactly, including the ratio-4 overlap KV/gate
+state, ratio-128 remainder and the indexer pool. A rotating window MUST use
+snapshot-and-replay of the retained prefix, since trimming cannot recover
+entries evicted by tentative positions. Pool snapshots MUST preserve pooled
+length, remainder, buffer references and overlap state; commit retains exactly
+the anchor plus accepted proposals. The drafter's context receives only that
+committed prefix, so tentative block keys never enter committed drafter state.
+The proof obligation is bit-equal target cache state and next-token logits
+against serial ordinary decode at every acceptance count, across ratio-4,
+ratio-128 and the indexer's dense/sparse threshold. DeepInfer's approximate
+SWA bounded replay is **not adopted**: it conflicts with this exactness rule.
 
 Proposal state for the prompt is seeded during prefill, one chunk at a time.
 For prompt chunk `[c, c+n)` the target emits hidden states `c ..< c+n` and the
@@ -1479,6 +1618,28 @@ the exact terminal error; no partial completion is represented as success.
 
 ### MTP-12 — independent MLX quantization qualification (SPEC-048-R012)
 
+The vendor-native DeepSeek V4 artifact uses `mlx_mxfp4_mxfp8`: packed
+`uint32` weights, `uint8` E8M0 block scales, group size 32, native MLX layout,
+no padding or alignment exception. Routed expert switch projections are MXFP4;
+attention/output projections, shared experts, indexer `wq_b`, and DSpark
+`main_proj` are MXFP8. Head and embedding remain floating; compressor, router,
+hyper-connection and Markov/confidence parameters retain their declared
+floating representation. The observer MUST validate each weight/scale pair's
+dtype, shape, byte span, packing density and block count, and bind each exact
+per-module override and floating exception in the representation manifest.
+The manifest has one `target` object containing kind, global MXFP4 mode
+(bits 4, group32), effective overrides and floating modules; its `mtp` object is `{ "shared_with_target": true }`, preventing a
+second weight allocation. The additional drafter tensors occupy 10.88 GB
+(about 10.13 GiB); fit accounting MUST include those bytes, three per-row
+128-token drafter caches, exact target transaction state and verify workspace.
+
+This is a bit-exact re-containering of the vendor checkpoint, not a new
+quantization campaign. Existing reference oracles may be reused only where
+the named decode-path lines have not changed. R015 parity, acceptance,
+throughput, TTFT and peak-memory cells for the combined tuple remain pending
+hardware proof; loader support alone qualifies no artifact. The independently
+unqualified generic `mlx_mxfp8` path remains closed.
+
 An MXFP8 artifact used with native MTP MUST first be admitted independently by
 SPEC-023/SPEC-010 as an MLX-native artifact for the exact runtime revision.
 `mlx_mxfp8` MUST identify the loaded tensor representation, including packed
@@ -1809,6 +1970,18 @@ benchmark policy. R015 reruns require the named changed decode-path line and
 existing evidence specified by MTP-13.
 
 ### MTP-15 — preregistered Studio and tier benchmark gate (SPEC-048-R015)
+
+For DeepSeek V4 DSpark, the next hardware proof includes the campaign's
+existing fidelity Window 1/2 cells, CB throughput and exact parity at 1/2/4/8
+rows (the SPEC-038 FR-CB14 same-build, same-window four-row >=1.8x serial
+gate, with strict MSB-02 >1.5x and MSB-04 two-row >1.3x floors), and
+ordinary-versus-native depth cells on the 12 frozen natural requests at block
+sizes 2/3/4/6 (proposal depths 1/2/3/5), one and four rows, plus 8k/32k
+contexts. Every native cell reports token parity, output tokens/s, acceptance,
+TTFT and peak memory. Natural-request geometric stratum means need at least
+1.15x ordinary throughput for the selected depth; long repeated-code prompts
+are diagnostic, not the deciding metric. No signed tuple or CB-policy entry
+is created until the corresponding existing admission gates pass.
 
 Before collecting admission measurements, the campaign MUST freeze a policy
 record containing exact hardware/SoC/RAM, OS, Xcode/Swift, provider and MLX
@@ -2366,6 +2539,17 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.90 (2026-11-12, Related: #2111)** — R003 names mlx-swift-lm
+  `3.32.3-macprovider.48` (`e246b8fd6ed35c6b1ab969c927222c06f759ec82`), which is
+  `3.32.3-macprovider.47` plus the DeepSeek V4 campaign commits: reference norm,
+  rotary, hyper-connection, router and indexer arithmetic; whole reference prefill
+  chunks bounded at 32768 tokens; packed DSpark verification for at most eight
+  positions; ordinary multi-row decode sharing packed per-layer arithmetic; shared
+  MXFP8 projection tiles; serving prefill computing only last-position logits; and
+  decode selection and attention kernels that replay the graph's arithmetic and give
+  a row the same result alone or batched. R015 adopts the >=1.8x four-row
+  own-serial DeepSeek CB gate in SPEC-038 FR-CB14. The Swift, core and C rows are
+  unchanged. No signed admission changes.
 - **0.1.89 (2026-11-12, Related: #2256, #2255)** — R003 names mlx-swift-lm
   `3.32.3-macprovider.47` (`bfc88b9c8f745a13f3cce145101f13dc3dc95e8c`), which is
   `3.32.3-macprovider.44` plus the mlx-swift pin commit, mlx-swift
@@ -2570,6 +2754,27 @@ requests.
   baseline; unproven custom-kernel experiments are excluded. The mlx-swift and
   MLX core pins stay unchanged. Catalog admission, 8 GB fit, vendor quality,
   signed serving policy and journey qualification remain separate gates.
+
+- **0.1.64 DeepSeek branch history (2026-10-27)** — R015 adopts the supervisor's DeepSeek CB gate:
+  four-row aggregate decode >=2.0x same-build serial in the same Studio
+  window, exact parity at 1/2/4/8 rows and the strict FR-CB14 floors. The
+  67.44 tokens/s mlx-vlm result is a reference, not an absolute pass line.
+
+- **0.1.59 DeepSeek branch history (2026-10-26)** — Adds the DeepSeek V4 DSpark embedded block
+  adapter, confidence-scheduled exact greedy verification, exact pool/overlap
+  rollback and rotating-window replay, mixed vendor-native MX representation
+  checks, and the pending CB/DSpark hardware cells. No signed policy or
+  admission entry is created before hardware proof.
+- **0.1.58 DeepSeek branch history (2026-10-26)** — R003: pins `3.32.3-macprovider.10.9`
+  (`c9baca40…`) on `c8be0f61…`: DeepSeek-V4 follows DeepSeek's reference
+  (carried ratio-4 overlap state, exact indexer top-k, float32 router,
+  attention in the kernel's ordered 64-key blocks with bf16 weights and
+  float32 sinks, compressor, experts and head); explicitly configured HISA
+  does not batch. The tiny fixture's oracle now comes from a port of the
+  reference and matches within 7.6e-4 log-probability on the CPU; the full-model teacher-forced diff, full-model
+  oracles and the throughput cost of the float32 paths remain pending a
+  Studio window. GLM-5.3 and Qwen decode code is unchanged.
+
 - **0.1.57 (2026-10-25)** — R009 (MTP-9): a native-MTP GLM-5-Next row reuses
   a SPEC-024-R005 prompt snapshot together with the MTP head state taken at
   it, on its own CB row, and stays native; any other snapshot is a miss for

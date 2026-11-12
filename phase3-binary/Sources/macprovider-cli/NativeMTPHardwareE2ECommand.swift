@@ -47,6 +47,19 @@ struct NativeMTPHardwareE2EFamily: Equatable, Sendable {
         pagedKind: .pagedMLA(kpool: 4)
     )
 
+    static let deepseekV4 = NativeMTPHardwareE2EFamily(
+        modelFamily: "deepseek_v4",
+        familyAdapter: "deepseek_v4_dspark_v1",
+        embeddedMTP: true,
+        blockSizeTokens: 32,
+        pagedKind: .deepseekV4Pool(ratio: 4, windowTokens: 128)
+    )
+
+    var maximumProposalDepth: Int { self == .deepseekV4 ? 5 : (self == .glm5Next ? 2 : 1) }
+    var predictionLayerCount: Int { self == .deepseekV4 ? 3 : 1 }
+    var stateClass: String { self == .deepseekV4 ? "stageable_rewindable" : "hybrid_stageable_rewindable" }
+    var quantizationLabel: String { self == .deepseekV4 ? "mlx_mxfp4_mxfp8" : "4bit" }
+
     /// The lab tuple's `request_feature_profile`: sampled where the family
     /// may sign it (Qwen3.5 and GLM-5-Next, SPEC-048 MTP-2).
     var requestFeatureProfile: String {
@@ -66,6 +79,19 @@ struct NativeMTPHardwareE2EFamily: Equatable, Sendable {
     /// 4,341,760 bytes) per kept prefix of a depth-d verify (d + 1 sets).
     /// Qwen3.5 keeps the placeholder its harness always signed.
     func completeWindowBytesByDepth(maxContextTokens: Int, maxDepth: Int = 1) -> [Int] {
+        if self == .deepseekV4 {
+            let context = max(1, maxContextTokens)
+            // Snapshot/replay retains target windows, both compressed pools,
+            // float32 remainder/overlap buffers, and every verified hidden column.
+            let windows = 43 * 128 * 512 * 2
+            let pools = 21 * ((context + 3) / 4) * (512 + 128) * 2
+                + 20 * ((context + 127) / 128) * 512 * 2
+            let pending = 21 * 4 * 4 * (1024 + 256) * 4 + 20 * 128 * 512 * 4 * 2
+            return (0 ... max(0, maxDepth)).map { depth in
+                (depth + 1) * (windows + pools + pending + 43 * 4096 * 4 * 2)
+                    + 3 * 128 * 512 * 2
+            }
+        }
         guard self == .glm5Next else { return [1_048_576, 2_097_152] }
         return (0 ... max(0, maxDepth)).map { depth in
             NativeMTPStagedRoundBytes.bytes(
@@ -100,7 +126,7 @@ struct NativeMTPHardwareE2EFamily: Equatable, Sendable {
 
     func matchesPagedKind(_ kind: PagedKVSharedForwardBackend.CacheKind) -> Bool {
         switch (pagedKind, kind) {
-        case (.pagedAttention, .pagedAttention), (.pagedMLA, .pagedMLA): true
+        case (.pagedAttention, .pagedAttention), (.pagedMLA, .pagedMLA), (.deepseekV4Pool, .deepseekV4Pool): true
         default: false
         }
     }
@@ -109,6 +135,7 @@ struct NativeMTPHardwareE2EFamily: Equatable, Sendable {
         switch ModelRuntime.pagedKVModelCapabilities(modelID: nil, configJSONData: configJSONData).modelFamily {
         case "qwen": .qwen35
         case "glm5_next": .glm5Next
+        case "deepseek_v4": .deepseekV4
         default: nil
         }
     }
@@ -158,6 +185,9 @@ struct NativeMTPHardwareE2ECommand: AsyncParsableCommand {
     )
     var throughputTokens: Int = 0
 
+    @Option(name: .customLong("proposal-depth"), help: "Frozen proposal depth; DSpark permits 1...5. Default 1.")
+    var proposalDepth: Int = 1
+
     func run() async throws {
         let environment = ProcessInfo.processInfo.environment
         guard environment["MACPROVIDER_NATIVE_MTP_E2E"] == "1" else {
@@ -177,7 +207,7 @@ struct NativeMTPHardwareE2ECommand: AsyncParsableCommand {
         NativeMTPHardwareE2ERunner.applyServeProcessSetup(rootPath: rootPath)
         // Unconditional: a pass line from any other host is not lab evidence.
         try NativeMTPHardwareE2ERunner.requireStudioHost()
-        guard maxBatch >= 1, sizingPromptTokens >= 1, sizingOutputTokens >= 1 else {
+        guard maxBatch >= 1, sizingPromptTokens >= 1, sizingOutputTokens >= 1, (1...5).contains(proposalDepth) else {
             throw ValidationError("--max-batch, --sizing-prompt-tokens, and --sizing-output-tokens must be >=1")
         }
         guard (0...4096).contains(throughputTokens) else {
@@ -192,6 +222,7 @@ struct NativeMTPHardwareE2ECommand: AsyncParsableCommand {
             rootPath: rootPath,
             modelID: modelID,
             maxBatch: maxBatch,
+            proposalDepth: proposalDepth,
             maxPhysicalBlocks: maxPhysicalBlocks,
             verifyServePath: environment["MACPROVIDER_NATIVE_MTP_E2E_SERVE_PATH"] == "1",
             throughputTokens: throughputTokens
@@ -218,6 +249,28 @@ struct NativeMTPHardwareSignedAdmission {
     let resolvedArtifactAuthority: NativeMTPResolvedArtifactAuthority
 }
 
+/// One campaign owns weights only. Runtime/KV/backend state never enters this slot.
+actor NativeMTPBenchResident<Value: Sendable> {
+    private var identity: String?
+    private var loaded: Task<Value, Error>?
+
+    func value(identity requested: String, load: @escaping @Sendable () async throws -> Value) async throws -> Value {
+        guard identity == nil || identity == requested else {
+            throw NativeMTPHardwareE2EError.assertionFailed("resident target identity changed")
+        }
+        if let loaded { return try await loaded.value }
+        identity = requested
+        let task = Task { try await load() }
+        loaded = task
+        return try await task.value
+    }
+}
+
+struct NativeMTPBenchResidentWeights: @unchecked Sendable {
+    let container: ModelContainer
+    let ticket: WiredMemoryTicket
+}
+
 struct NativeMTPHardwareRuntimePair: @unchecked Sendable {
     let ordinary: ModelRuntime
     let native: ModelRuntime
@@ -237,6 +290,45 @@ struct NativeMTPHardwareRuntimeFixture: @unchecked Sendable {
     let runtimes: NativeMTPHardwareRuntimePair
     let ordinaryAdmissionRecorder: NativeMTPHardwareAdmissionRecorder?
     let nativeAdmissionRecorder: NativeMTPHardwareAdmissionRecorder?
+    var dsparkRoundRecorder: NativeMTPDSparkRoundRecorder? = nil
+}
+
+final class NativeMTPDSparkRoundRecorder: @unchecked Sendable {
+    struct Round: Sendable {
+        let requestID: String
+        let proposed: Int
+        let accepted: Int
+    }
+    private let lock = NSLock()
+    private var rounds: [Round] = []
+
+    func record(requestID: String, proposed: Int, accepted: Int) {
+        lock.lock()
+        rounds.append(.init(requestID: requestID, proposed: proposed, accepted: accepted))
+        lock.unlock()
+    }
+
+    func metrics(requestIDs: Set<String>, maximumDepth: Int) -> [String: Any] {
+        lock.lock()
+        let selected = rounds.filter { requestIDs.contains($0.requestID) }
+        lock.unlock()
+        var drafted = Array(repeating: 0, count: maximumDepth)
+        var accepted = Array(repeating: 0, count: maximumDepth)
+        var proposedHistogram = Array(repeating: 0, count: maximumDepth + 1)
+        var acceptedHistogram = Array(repeating: 0, count: maximumDepth + 1)
+        for round in selected {
+            proposedHistogram[min(maximumDepth, max(0, round.proposed))] += 1
+            acceptedHistogram[min(maximumDepth, max(0, round.accepted))] += 1
+            for position in 0..<maximumDepth {
+                if round.proposed > position { drafted[position] += 1 }
+                if round.accepted > position { accepted[position] += 1 }
+            }
+        }
+        return ["mtp_drafted_by_position": drafted, "mtp_accepted_by_position": accepted,
+            "mtp_proposal_depth_histogram": proposedHistogram,
+            "mtp_accepted_prefix_histogram": acceptedHistogram,
+            "mtp_resolved_rounds": selected.count]
+    }
 }
 
 final class NativeMTPHardwareE2ERunner {
@@ -253,14 +345,17 @@ final class NativeMTPHardwareE2ERunner {
     private let modelID: String
     private let maxBatch: Int
     private let maxNativeActiveRows: Int
-    private let proposalDepth: Int
+    let proposalDepth: Int
     private let maxPromptTokens: Int
     private let maxPhysicalBlocks: Int
     private let signedJourneyInputs: String?
     private let verifyServePath: Bool
     /// Lab throughput phase completion tokens per row; 0 skips it.
     private let throughputTokens: Int
+    private let dsparkRoundRecorder = NativeMTPDSparkRoundRecorder()
     private let diagnosticEligibilityBypass: Bool
+    private let labCBInputs: NativeMTPLabCBInputs?
+    private let residentTarget: NativeMTPBenchResident<NativeMTPBenchResidentWeights>?
     /// Detected from `target/config.json`; Qwen3.5 when unreadable, so an
     /// unrecognized target fails the family check in the fixture load.
     let family: NativeMTPHardwareE2EFamily
@@ -288,7 +383,9 @@ final class NativeMTPHardwareE2ERunner {
         verifyServePath: Bool = false,
         throughputTokens: Int = 0,
         diagnosticEligibilityBypass: Bool = false,
-        signedJourneyInputs: String? = nil
+        signedJourneyInputs: String? = nil,
+        labCBInputs: NativeMTPLabCBInputs? = nil,
+        residentTarget: NativeMTPBenchResident<NativeMTPBenchResidentWeights>? = nil
     ) {
         root = URL(fileURLWithPath: (rootPath as NSString).expandingTildeInPath, isDirectory: true)
             .standardizedFileURL
@@ -301,6 +398,8 @@ final class NativeMTPHardwareE2ERunner {
         self.verifyServePath = verifyServePath
         self.throughputTokens = throughputTokens
         self.diagnosticEligibilityBypass = diagnosticEligibilityBypass
+        self.labCBInputs = labCBInputs
+        self.residentTarget = residentTarget
         let family = NativeMTPHardwareE2EFamily.detect(configJSONData: try? Data(
             contentsOf: root.appendingPathComponent("target/config.json")
         )) ?? .qwen35
@@ -470,7 +569,7 @@ final class NativeMTPHardwareE2ERunner {
             String(decoding: try JSONSerialization.data(withJSONObject: $0, options: [.sortedKeys]), as: UTF8.self)
         } ?? "null"
         let json = """
-        {"schema":"macprovider.native-mtp-hardware-e2e-result.v1","status":"pass","evidence_class":"correctness_only","model_id":"\(modelID)","model_family":"\(family.modelFamily)","family_adapter":"\(family.familyAdapter)","target_sha256":"\(targetIdentity.digest)","mtp_sha256":"\(mtpIdentity.digest)","admissions":\(totalAdmissions),"max_observed_batch_depth":\(maxDepth),"serve_path_verified":\(verifyServePath),"parity_proposed":\(parityCounters.proposedTokens),"parity_accepted":\(parityCounters.acceptedTokens),"parity_rejected":\(parityCounters.rejectedTokens),"lab_throughput":\(labThroughputJSON)}
+        {"schema":"macprovider.native-mtp-hardware-e2e-result.v1","status":"pass","evidence_class":"correctness_only","model_id":"\(modelID)","model_family":"\(family.modelFamily)","family_adapter":"\(family.familyAdapter)","proposal_depth":\(proposalDepth),"target_sha256":"\(targetIdentity.digest)","mtp_sha256":"\(mtpIdentity.digest)","admissions":\(totalAdmissions),"max_observed_batch_depth":\(maxDepth),"serve_path_verified":\(verifyServePath),"parity_proposed":\(parityCounters.proposedTokens),"parity_accepted":\(parityCounters.acceptedTokens),"parity_rejected":\(parityCounters.rejectedTokens),"lab_throughput":\(labThroughputJSON)}
         """
         return NativeMTPHardwareE2EReport(
             targetSHA256: targetIdentity.digest,
@@ -493,6 +592,7 @@ final class NativeMTPHardwareE2ERunner {
         guard NativeMTPQualificationScope.permitsFixtureHooks else { throw NativeMTPHardwareE2EError.assertionFailed("isolated qualification scope required") }
         let targetDirectory = root.appendingPathComponent("target", isDirectory: true)
         let mtpDirectory = self.mtpDirectory
+        try require((1...family.maximumProposalDepth).contains(proposalDepth), "proposal depth exceeds family bound")
         try requireDirectory(targetDirectory)
         try requireDirectory(mtpDirectory)
 
@@ -504,6 +604,22 @@ final class NativeMTPHardwareE2ERunner {
         let tokenizerSHA = try sha256(of: root.appendingPathComponent("target/tokenizer.json"))
         let manifestSHA = try sha256(of: mtpDirectory.appendingPathComponent("config.json"))
         let machine = MachineFingerprinter().sample()
+        try NativeMTPLabCBInputs.requireInputs(labCBInputs, deepseek: family == .deepseekV4)
+        let tokenizerHashes = ModelRuntime.tokenizerIdentityHashes(in: targetDirectory)
+        var cbPolicy: ContinuousBatchingPolicyLoadResult?
+        if family == .deepseekV4, let labCBInputs {
+            guard let metallibSHA = ModelRuntime.nativeMTPRuntimeMetallibSHA256() else {
+                throw NativeMTPHardwareE2EError.assertionFailed("lab CB runtime metallib identity unavailable")
+            }
+            let tuple = ContinuousBatchingRequestedTuple(
+                modelID: modelID, modelSHA256: targetIdentity.digest,
+                tokenizerSHA256: tokenizerHashes.config, chatTemplateSHA256: tokenizerHashes.template,
+                cacheClass: "mixed", kvDType: .fp16, requiresMoE: true,
+                hardwareClass: "apple-silicon:\(machine.chip):ram-\(machine.ramGB)gb",
+                metallibSHA256: metallibSHA, kernelIdentifier: PagedKVAttachGate.deepseekV4RowPoolBridgeIdentifier,
+                parityLabel: "deepseek-v4-row-pool-parity-v1", poolEpoch: 1)
+            cbPolicy = try await labCBInputs.load(tuple: tuple, slots: maxBatch)
+        }
         let signedAdmission: NativeMTPHardwareSignedAdmission
         if let signedJourneyInputs {
             try require(!diagnosticEligibilityBypass && !verifyServePath,
@@ -564,7 +680,8 @@ final class NativeMTPHardwareE2ERunner {
             servePathLoad: servePathLoad,
             maxContextTokens: maxContextTokens,
             ordinaryAdmissionRecorder: ordinaryAdmissionRecorder,
-            nativeAdmissionRecorder: nativeAdmissionRecorder
+            nativeAdmissionRecorder: nativeAdmissionRecorder,
+            labCBPolicy: cbPolicy
         )
         return NativeMTPHardwareRuntimeFixture(
             targetIdentity: targetIdentity,
@@ -575,7 +692,8 @@ final class NativeMTPHardwareE2ERunner {
             admission: admission,
             runtimes: runtimes,
             ordinaryAdmissionRecorder: ordinaryAdmissionRecorder,
-            nativeAdmissionRecorder: nativeAdmissionRecorder
+            nativeAdmissionRecorder: nativeAdmissionRecorder,
+            dsparkRoundRecorder: family == .deepseekV4 ? dsparkRoundRecorder : nil
         )
     }
 
@@ -622,14 +740,19 @@ final class NativeMTPHardwareE2ERunner {
         servePathLoad: ModelRuntime.NativeMTPHardwareE2EServePathLoad? = nil,
         maxContextTokens: Int,
         ordinaryAdmissionRecorder: NativeMTPHardwareAdmissionRecorder?,
-        nativeAdmissionRecorder: NativeMTPHardwareAdmissionRecorder?
+        nativeAdmissionRecorder: NativeMTPHardwareAdmissionRecorder?,
+        labCBPolicy: ContinuousBatchingPolicyLoadResult? = nil
     ) async throws -> NativeMTPHardwareRuntimePair {
         guard NativeMTPQualificationScope.permitsFixtureHooks else { throw NativeMTPHardwareE2EError.assertionFailed("isolated qualification scope required") }
         let targetDirectory = root.appendingPathComponent("target", isDirectory: true)
+        let tokenizerHashes = ModelRuntime.tokenizerIdentityHashes(in: targetDirectory)
+        if family == .deepseekV4, labCBPolicy == nil {
+            throw NativeMTPHardwareE2EError.assertionFailed("DeepSeek fixture requires verified lab CB policy before model load")
+        }
         let mtpDirectory = self.mtpDirectory
         try requireDirectory(targetDirectory)
         try requireDirectory(mtpDirectory)
-        if diagnosticEligibilityBypass {
+        if diagnosticEligibilityBypass || residentTarget != nil {
             try require(targetIdentity.directory == targetDirectory.standardizedFileURL.resolvingSymlinksInPath()
                 && targetIdentity.isCurrent(), "target identity changed during diagnostic load")
             try require(mtpIdentity.directory == mtpDirectory.standardizedFileURL.resolvingSymlinksInPath()
@@ -664,7 +787,9 @@ final class NativeMTPHardwareE2ERunner {
             modelCapabilities.modelFamily == family.modelFamily,
             "expected \(family.modelFamily) model family, got \(modelCapabilities.modelFamily)"
         )
-        try require(modelCapabilities.hybridDecoderArchitectureVerified, "hybrid decoder not verified")
+        if family != .deepseekV4 {
+            try require(modelCapabilities.hybridDecoderArchitectureVerified, "hybrid decoder not verified")
+        }
         try require(
             ModelRuntime.nativeMTPAdmissionCacheClass(
                 runtimeCacheClass: "mixed",
@@ -679,10 +804,26 @@ final class NativeMTPHardwareE2ERunner {
             targetContainer = servePathLoad.targetContainer
             drafterContainer = servePathLoad.drafterContainer
         } else {
-            targetContainer = try await LLMModelFactory.shared.loadContainer(
-                from: targetDirectory,
-                using: ChatTemplateCompatTokenizerLoader()
-            )
+            if let residentTarget {
+                #if DEBUG || MACPROVIDER_LAB_HARNESS
+                try require(family == .deepseekV4 && NativeMTPQualificationScope.permitsFixtureHooks,
+                    "resident campaign requires isolated DeepSeek lab scope")
+                let weights = try await residentTarget.value(identity: targetDirectory.path + ":" + targetIdentity.digest) {
+                    let container = try await LLMModelFactory.shared.loadContainer(
+                        from: targetDirectory, using: ChatTemplateCompatTokenizerLoader())
+                    guard let ticket = await ModelRuntime.startResidentWeightsTicket(modelFamily: "deepseek_v4") else {
+                        throw NativeMTPHardwareE2EError.assertionFailed("resident campaign weights ticket unavailable")
+                    }
+                    return NativeMTPBenchResidentWeights(container: container, ticket: ticket)
+                }
+                targetContainer = weights.container
+                #else
+                throw NativeMTPHardwareE2EError.assertionFailed("resident campaign requires lab build")
+                #endif
+            } else {
+                targetContainer = try await LLMModelFactory.shared.loadContainer(
+                    from: targetDirectory, using: ChatTemplateCompatTokenizerLoader())
+            }
             let drafterPresent = await ModelRuntime.nativeMTPDrafterPresent(
                 familyAdapter: family.familyAdapter,
                 targetContainer: targetContainer
@@ -692,15 +833,23 @@ final class NativeMTPHardwareE2ERunner {
                 familyAdapter: family.familyAdapter,
                 targetDirectory: targetDirectory,
                 drafterDirectory: mtpDirectory,
-                tokenizerLoader: ChatTemplateCompatTokenizerLoader()
+                tokenizerLoader: ChatTemplateCompatTokenizerLoader(),
+                maximumProposalDepth: proposalDepth
             )
         }
         // One target is loaded and shared by the ordinary and native
         // runtimes (the embedded drafter is parameterless); keep it resident
         // as serve does.
-        let residentWeights = family.holdsResidentWeights
-            ? await ModelRuntime.startResidentWeightsTicket(modelFamily: family.modelFamily)
-            : nil
+        let residentWeights: WiredMemoryTicket?
+        if let residentTarget {
+            let weights = try await residentTarget.value(identity: targetDirectory.path + ":" + targetIdentity.digest) {
+                throw NativeMTPHardwareE2EError.assertionFailed("resident target was not loaded")
+            }
+            residentWeights = weights.ticket
+        } else {
+            residentWeights = family.holdsResidentWeights
+                ? await ModelRuntime.startResidentWeightsTicket(modelFamily: family.modelFamily) : nil
+        }
         if family.holdsResidentWeights {
             try require(residentWeights != nil, "\(family.modelFamily) target could not start its resident-weights ticket")
         }
@@ -727,7 +876,9 @@ final class NativeMTPHardwareE2ERunner {
             }
         }
         try require(cacheKinds.contains(where: family.matchesPagedKind), "\(family.pagedKind) cache not observed")
-        try require(cacheKinds.contains(.recurrentMamba), "recurrent Mamba cache not observed")
+        if family != .deepseekV4 {
+            try require(cacheKinds.contains(.recurrentMamba), "recurrent Mamba cache not observed")
+        }
 
         let pagedConfig = PagedKVConfig(
             enabled: true,
@@ -743,6 +894,7 @@ final class NativeMTPHardwareE2ERunner {
         let thinking = NativeMTPAcceptanceCorpus.thinkingSupport(in: targetDirectory)
         let probeRuntime = await makeRuntime(
             modelSHA: targetIdentity.digest,
+            tokenizerHashes: tokenizerHashes, labCBPolicy: labCBPolicy,
             maxContextTokens: maxContextTokens,
             pagedConfig: pagedConfig,
             proof: placeholderProof,
@@ -750,14 +902,7 @@ final class NativeMTPHardwareE2ERunner {
             modelCapabilities: modelCapabilities,
             prefillGrouping: prefillGrouping,
             targetContainer: targetContainer,
-            backend: PagedKVSharedForwardBackend(
-                container: targetContainer,
-                blockSizeTokens: family.blockSizeTokens,
-                maxPhysicalBlocks: maxPhysicalBlocks,
-                poolEpoch: 1,
-                layerCount: cacheKinds.count,
-                cacheKinds: cacheKinds
-            ),
+            backend: makeBackend(container: targetContainer, cacheKinds: cacheKinds),
             nativeCapability: nil,
             nativeAdmissionCapability: nil,
             drafterContainer: nil,
@@ -775,26 +920,12 @@ final class NativeMTPHardwareE2ERunner {
         }
         let proof = measurement.hardwareSizingProof
         let observed = measurement.observedRuntimeIdentity
-        let ordinaryBackend = PagedKVSharedForwardBackend(
-            container: targetContainer,
-            blockSizeTokens: family.blockSizeTokens,
-            maxPhysicalBlocks: maxPhysicalBlocks,
-            poolEpoch: 1,
-            layerCount: cacheKinds.count,
-            cacheKinds: cacheKinds
-        )
-        let nativeBackend = PagedKVSharedForwardBackend(
-            container: targetContainer,
-            blockSizeTokens: family.blockSizeTokens,
-            maxPhysicalBlocks: maxPhysicalBlocks,
-            poolEpoch: 1,
-            layerCount: cacheKinds.count,
-            cacheKinds: cacheKinds,
-            drafterContainer: drafterContainer,
-            nativeMTPFamilyAdapter: nativeAdmissionCapability.familyAdapter
-        )
+        let ordinaryBackend = makeBackend(container: targetContainer, cacheKinds: cacheKinds)
+        let nativeBackend = makeBackend(container: targetContainer, cacheKinds: cacheKinds,
+            drafterContainer: drafterContainer, familyAdapter: nativeAdmissionCapability.familyAdapter)
         let ordinary = await makeRuntime(
             modelSHA: targetIdentity.digest,
+            tokenizerHashes: tokenizerHashes, labCBPolicy: labCBPolicy,
             maxContextTokens: maxContextTokens,
             pagedConfig: pagedConfig,
             proof: proof,
@@ -812,6 +943,7 @@ final class NativeMTPHardwareE2ERunner {
         )
         let native = await makeRuntime(
             modelSHA: targetIdentity.digest,
+            tokenizerHashes: tokenizerHashes, labCBPolicy: labCBPolicy,
             maxContextTokens: maxContextTokens,
             pagedConfig: pagedConfig,
             proof: proof,
@@ -827,6 +959,13 @@ final class NativeMTPHardwareE2ERunner {
             templateSupportsThinkingToggle: thinking.toggle,
             templateSupportsPreserveThinking: thinking.preserve
         )
+        if family == .deepseekV4 {
+            for runtime in [ordinary, native] {
+                let snapshot = await runtime.currentSnapshot()
+                try require(snapshot.continuousBatching?.active == true,
+                    "verified lab CB tuple not active before first native benchmark request")
+            }
+        }
         return NativeMTPHardwareRuntimePair(
             ordinary: ordinary,
             native: native,
@@ -835,8 +974,35 @@ final class NativeMTPHardwareE2ERunner {
         )
     }
 
+    private func makeBackend(
+        container: ModelContainer,
+        cacheKinds: [PagedKVSharedForwardBackend.CacheKind],
+        drafterContainer: MTPDrafterContainer? = nil,
+        familyAdapter: String? = nil
+    ) -> any ContinuousBatchSchedulerBackend {
+        if family == .deepseekV4 {
+            let backend = DeepseekV4ContinuousBatchBackend(container: container,
+                nativeMTPDrafterContainer: drafterContainer)
+            #if DEBUG || MACPROVIDER_LAB_HARNESS
+            if drafterContainer != nil {
+                let recorder = dsparkRoundRecorder
+                backend.installLabRoundObserver { requestID, proposed, accepted in
+                    recorder.record(requestID: requestID, proposed: proposed, accepted: accepted)
+                }
+            }
+            #endif
+            return backend
+        }
+        return PagedKVSharedForwardBackend(container: container,
+            blockSizeTokens: family.blockSizeTokens, maxPhysicalBlocks: maxPhysicalBlocks,
+            poolEpoch: 1, layerCount: cacheKinds.count, cacheKinds: cacheKinds,
+            drafterContainer: drafterContainer, nativeMTPFamilyAdapter: familyAdapter)
+    }
+
     private func makeRuntime(
         modelSHA: String,
+        tokenizerHashes: (config: String?, template: String?),
+        labCBPolicy: ContinuousBatchingPolicyLoadResult?,
         maxContextTokens: Int,
         pagedConfig: PagedKVConfig,
         proof: PagedKVHardwareSizingProof,
@@ -844,7 +1010,7 @@ final class NativeMTPHardwareE2ERunner {
         modelCapabilities: PagedKVRuntimeModelCapabilities,
         prefillGrouping: ContinuousBatchPrefillGroupingRule,
         targetContainer: ModelContainer,
-        backend: PagedKVSharedForwardBackend,
+        backend: any ContinuousBatchSchedulerBackend,
         nativeCapability: NativeMTPCapability?,
         nativeAdmissionCapability: NativeMTPAdmissionCapability?,
         drafterContainer: MTPDrafterContainer?,
@@ -856,19 +1022,32 @@ final class NativeMTPHardwareE2ERunner {
             container: targetContainer,
             admissionCapability: nativeAdmissionCapability,
             nativeVisionProfile: nil,
-            cacheKinds: backend.cacheKinds
+            cacheKinds: await ModelRuntime.pagedKVCacheKinds(container: targetContainer)
         )
+        // DeepSeek prefills one row at a time. The frozen long-context cohort
+        // must wait for earlier rows without changing the production deadline.
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        let queueWaitTimeoutMS: Int? = family == .deepseekV4
+            ? ContinuousBatchSchedulerConfiguration.maximumQueueWaitTimeoutMS : nil
+        #else
+        let queueWaitTimeoutMS: Int? = nil
+        #endif
         return ModelRuntime(
             modelID: modelID,
             modelHash: modelSHA,
             templateSupportsThinkingToggle: templateSupportsThinkingToggle,
             templateSupportsPreserveThinking: templateSupportsPreserveThinking,
+            tokenizerConfigSHA256: tokenizerHashes.config,
+            chatTemplateSHA256: tokenizerHashes.template,
             maxContextTokensOverride: maxContextTokens,
             pagedKVConfig: pagedConfig,
-            prefillStepSize: 512,
+            prefillStepSize: family == .deepseekV4 ? 2048 : 512,
             maxBatch: maxBatch,
             continuousBatchingMode: .on,
+            continuousBatchQueueWaitTimeoutMS: queueWaitTimeoutMS,
             continuousBatchingCachedTurns: continuousBatchingCachedTurns,
+            continuousBatchingPolicyLoadResult: labCBPolicy ?? ContinuousBatchingPolicyLoadResult(
+                selection: .emptyOff, status: .absentFallback, policySHA256: nil, signerKeyID: nil),
             continuousBatchingDurableReplayAuthorityAvailable: true,
             nativeMTPMode: nativeCapability == nil ? .off : .auto,
             nativeMTPCapability: nativeCapability,
@@ -1039,7 +1218,12 @@ final class NativeMTPHardwareE2ERunner {
         let artifactObservation = try observeArtifacts(
             targetDirectory: root.appendingPathComponent("target", isDirectory: true)
         )
-        let affineRepresentation = try NativeMTPArtifactObserver.affineRepresentation(for: artifactObservation)
+        let affineRepresentation: NativeMTPAffineRepresentation
+        if family == .deepseekV4 {
+            affineRepresentation = try NativeMTPArtifactObserver.mixedMXRepresentation(for: artifactObservation)
+        } else {
+            affineRepresentation = try NativeMTPArtifactObserver.affineRepresentation(for: artifactObservation)
+        }
         let tokenizerSHA = try sha256(of: root.appendingPathComponent("target/tokenizer.json"))
         let manifestSHA = try sha256(of: mtpDirectory.appendingPathComponent("config.json"))
         let signer = Curve25519.Signing.PrivateKey()
@@ -1162,7 +1346,7 @@ final class NativeMTPHardwareE2ERunner {
                 "mtp_manifest_sha256": manifestSHA,
                 "prompt_token_ids": [1, 2, 3],
                 "max_completion_tokens": 8,
-                "fixed_proposal_depth": 1,
+                "fixed_proposal_depth": proposalDepth,
                 "expected_token_ids": expectedTokenIDs,
                 "expected_token_id_sha256": NativeMTPSelfTest.tokenDigest(expectedTokenIDs),
                 "expected_terminal_reason": "length",
@@ -1210,8 +1394,8 @@ final class NativeMTPHardwareE2ERunner {
             "decode_path": "native_mtp",
             "mtp_manifest_sha256": manifestSHA,
             "mtp_family_adapter": family.familyAdapter,
-            "mtp_state_class": "hybrid_stageable_rewindable",
-            "mtp_head_count": 1,
+            "mtp_state_class": family.stateClass,
+            "mtp_head_count": family.predictionLayerCount,
             "proposal_depth": proposalDepth,
             "complete_window_bytes_by_depth": family.completeWindowBytesByDepth(maxContextTokens: maxContextTokens, maxDepth: proposalDepth),
             "runtime_revision": Self.upstreamRevision,
@@ -1219,7 +1403,7 @@ final class NativeMTPHardwareE2ERunner {
             "source_commit": Self.providerRevision,
             "reproducible_build_sha256": Self.reproducibleBuildSHA256,
             "live_executable_cdhash": Self.liveExecutableCDHash,
-            "cache_state_classes": ["hybrid_stageable_rewindable"],
+            "cache_state_classes": [family.stateClass],
             "hardware_class": NativeMTPAdmissionSidecar.canonicalHardwareClass(machine.chip),
             "ram_bytes": machine.ramGB * 1_073_741_824,
             "qualified_slots": maxBatch,
@@ -1243,10 +1427,10 @@ final class NativeMTPHardwareE2ERunner {
             "performance_evidence_sha256": String(repeating: "3", count: 64),
             "security_negative_evidence_sha256": String(repeating: "3", count: 64),
             "quantization": [
-                "kind": "mlx_affine",
+                "kind": family == .deepseekV4 ? "mlx_mxfp4_mxfp8" : "mlx_affine",
                 "packed_data_dtype": "uint32",
                 "packed_layout": "mlx_array_native_v1",
-                "scale_dtype": "bfloat16",
+                "scale_dtype": family == .deepseekV4 ? "uint8" : "bfloat16",
                 "scale_layout": "per_block",
                 "block_size_elements": affineRepresentation.groupSize,
                 "alignment_bytes": NSNull(),

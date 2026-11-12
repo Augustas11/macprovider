@@ -181,13 +181,44 @@ final class ModelRuntimeSwapTests: XCTestCase {
                                  cacheKinds: [.recurrentMamba, .pagedAttention], drafterPresent: false))
     }
 
+    func testDeepseekDSparkAdmissionSeparatesStageCountFromProposalDepth() throws {
+        let layout = try XCTUnwrap(DeepseekV4PoolLayout(config: [
+            "model_type": "deepseek_v4", "num_hidden_layers": 3,
+            "compress_ratios": [0, 4, 128, 0, 0, 0], "sliding_window": 128,
+        ]))
+        let capabilities = PagedKVRuntimeModelCapabilities(
+            modelFamily: "deepseek_v4", requiresMoEDispatch: true,
+            deepseekV4Pool: layout
+        )
+        func supported(depth: Int, stages: Int = 3, present: Bool = true,
+                       kinds: [PagedKVSharedForwardBackend.CacheKind]? = nil) -> Bool {
+            ModelRuntime.nativeMTPAdmissionCapabilitySupportedForTest(
+                makeNativeMTPAdmissionCapability(
+                    familyAdapter: "deepseek_v4_dspark_v1", sourceLayout: "checkpoint_mtp",
+                    predictionLayerCount: stages, maxProposalDepth: depth,
+                    stateClass: "stageable_rewindable"
+                ),
+                canonicalCacheClass: "paged_kv", modelCapabilities: capabilities,
+                cacheKinds: kinds ?? layout.expectedCacheKinds, drafterPresent: present
+            )
+        }
+        for depth in 1...5 { XCTAssertTrue(supported(depth: depth)) }
+        XCTAssertFalse(supported(depth: 0))
+        XCTAssertFalse(supported(depth: 6))
+        XCTAssertFalse(supported(depth: 2, stages: 2))
+        XCTAssertFalse(supported(depth: 2, present: false))
+        XCTAssertFalse(supported(depth: 2, kinds: [.pagedAttention]))
+    }
+
     func testNativeMTPDrafterSourceFollowsTheAdapter() {
         XCTAssertEqual(ModelRuntime.nativeMTPDrafterSource(familyAdapter: "qwen3_5_mtp_v1"), .separateArtifact)
         XCTAssertEqual(ModelRuntime.nativeMTPDrafterSource(familyAdapter: "glm5_next_mtp_v1"), .targetEmbedded)
+        XCTAssertEqual(ModelRuntime.nativeMTPDrafterSource(familyAdapter: "deepseek_v4_dspark_v1"), .targetEmbedded)
         XCTAssertNil(ModelRuntime.nativeMTPDrafterSource(familyAdapter: "qwen3_mtp_v1"))
         XCTAssertEqual(ModelRuntime.nativeMTPSupportedAdapterLayouts, [
             .init(familyAdapter: "qwen3_5_mtp_v1", sourceLayout: "separate_artifact"),
             .init(familyAdapter: "glm5_next_mtp_v1", sourceLayout: "checkpoint_mtp"),
+            .init(familyAdapter: "deepseek_v4_dspark_v1", sourceLayout: "checkpoint_mtp"),
         ])
         // Each adapter's admitted layout is the one the sidecar derives from it.
         for layout in ModelRuntime.nativeMTPSupportedAdapterLayouts {

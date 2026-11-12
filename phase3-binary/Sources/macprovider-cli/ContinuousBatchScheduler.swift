@@ -2520,6 +2520,9 @@ actor ContinuousBatchScheduler {
     /// enters `waiting` so a re-queued admission attempt keeps the original
     /// clock instead of restarting it.
     private var queueWaitDeadlines: [String: UInt64] = [:]
+    /// Requests re-queued because pool or MLX memory was full. They wait on
+    /// a saturated resource, so their admission clock never restarts.
+    private var resourceDeferredRequests: Set<String> = []
     private var queueWaitTimeoutTasks: [String: Task<Void, Never>] = [:]
     private var pendingBindingChecks = 0
     private var pendingBindingTokenCount = 0
@@ -2577,6 +2580,13 @@ actor ContinuousBatchScheduler {
     /// request order before submitting a batch; the pump stays stopped until
     /// every named row is queued, then consumes them in that order.
     private var labBatchComposition: [String]?
+    private struct LabNativeMTPProbeGroup {
+        let id = UUID()
+        var pending: Set<String>
+        var running: Set<String> = []
+        var depth: Int?
+    }
+    private var labNativeMTPProbeGroup: LabNativeMTPProbeGroup?
     #endif
     #if !DEBUG && !MACPROVIDER_LAB_HARNESS
     private var labNativeMTPLoadGateRecorder: NativeMTPLoadGateRecorder?
@@ -2990,8 +3000,11 @@ actor ContinuousBatchScheduler {
     }
 
     func isQuiescentForNativeMTPProbe() -> Bool {
+        !nativeMTPIntegrityProbeInFlight && nativeMTPProbeWorkIsQuiescent()
+    }
+
+    private func nativeMTPProbeWorkIsQuiescent() -> Bool {
         !cleanupFailedClosed
-            && !nativeMTPIntegrityProbeInFlight
             && pendingBindingChecks == 0
             && waiting.isEmpty
             && admittingRequests.isEmpty
@@ -3008,6 +3021,33 @@ actor ContinuousBatchScheduler {
     func submitNativeMTPIntegrityProbe(
         _ request: ContinuousBatchSchedulerRequest
     ) async throws -> ContinuousBatchSchedulerResult {
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        if var group = labNativeMTPProbeGroup {
+            guard request.nativeMTPIntegrityProbe, request.decodePath == .nativeMTP,
+                  request.nativeMTPMaximumProposalDepth > 0,
+                  group.pending.contains(request.id),
+                  group.depth == nil || group.depth == request.nativeMTPMaximumProposalDepth else {
+                throw ContinuousBatchSchedulerError.backpressure
+            }
+            group.pending.remove(request.id)
+            group.running.insert(request.id)
+            group.depth = request.nativeMTPMaximumProposalDepth
+            labNativeMTPProbeGroup = group
+            do {
+                let result = try await submit(request)
+                await finishLabNativeMTPProbe(requestID: request.id)
+                return result
+            } catch {
+                // A missing row would leave the composition fence waiting forever.
+                // Cancel peers before releasing the group-owned exclusion barrier.
+                labBatchComposition = nil
+                labNativeMTPProbeGroup?.pending.removeAll()
+                for id in labNativeMTPProbeGroup?.running ?? [] { cancel(requestID: id) }
+                await finishLabNativeMTPProbe(requestID: request.id)
+                throw error
+            }
+        }
+        #endif
         guard request.nativeMTPIntegrityProbe,
               request.decodePath == .nativeMTP,
               isQuiescentForNativeMTPProbe() else {
@@ -3290,6 +3330,26 @@ actor ContinuousBatchScheduler {
     private func endQueueWait(requestID: String) {
         queueWaitTimeoutTasks.removeValue(forKey: requestID)?.cancel()
         queueWaitDeadlines.removeValue(forKey: requestID)
+        resourceDeferredRequests.remove(requestID)
+    }
+
+    /// A queued request with a free slot of its own waits only for earlier
+    /// rows' prefill to finish, which is progress rather than a saturated
+    /// batch: a long prompt ahead of it must not turn its wait into a
+    /// `.queueWaitTimedOut`. That holds after the prefill too: a long prefill
+    /// keeps the actor busy, so the expiry often runs only once the row ahead
+    /// has moved on to decode, on the pass that admits this request. Rows
+    /// deferred on pool or memory capacity, self-check cohorts and rows over
+    /// the served limit keep the bound, as does a request queued on an idle
+    /// scheduler.
+    private func queuedOnlyBehindPrefill(_ requestID: String) -> Bool {
+        guard !resourceDeferredRequests.contains(requestID),
+              !activePrompt.isEmpty || !admittingRequests.isEmpty || !activeDecode.isEmpty,
+              selfCheckRowsOccupied == 0,
+              let index = waiting.firstIndex(where: { $0.id == requestID }),
+              !waiting[index].selfCheckProbe else { return false }
+        let limit = min(configuration.maxActiveRows, buyerRowLimit ?? configuration.maxActiveRows)
+        return occupiedSlots + index < limit
     }
 
     /// Bounded admission wait expiry. The request never reached a slot, so it
@@ -3301,7 +3361,7 @@ actor ContinuousBatchScheduler {
     /// wake directly: it happens only when the timeout task reaches the actor
     /// in the same turn the pump pulls the request into admission, which
     /// cannot be forced from outside the actor.
-    func expireQueueWait(requestID: String) async {
+    func expireQueueWait(requestID: String, atUptimeNanoseconds: UInt64? = nil) async {
         // A timeout task can reach here after `suspendQueueWaitTimeout`
         // cancelled it: cancellation does not unschedule a task that already
         // woke. Do not touch `queueWaitDeadlines` until the request is
@@ -3310,8 +3370,12 @@ actor ContinuousBatchScheduler {
         // deadline, and a `capacityExceeded` bounce would then re-arm with no
         // deadline at all — the unbounded wait this bound exists to remove.
         guard let deadline = queueWaitDeadlines[requestID],
-              DispatchTime.now().uptimeNanoseconds >= deadline,
+              (atUptimeNanoseconds ?? DispatchTime.now().uptimeNanoseconds) >= deadline,
               let index = waiting.firstIndex(where: { $0.id == requestID }) else { return }
+        if queuedOnlyBehindPrefill(requestID) {
+            beginQueueWait(requestID: requestID)
+            return
+        }
         let request = waiting.remove(at: index)
         endQueueWait(requestID: requestID)
         record(.queueWaitTimedOut)
@@ -5116,16 +5180,49 @@ actor ContinuousBatchScheduler {
 
     /// Lab-only: hold the pump until every named request is queued, then order
     /// those rows exactly as supplied. Only an idle scheduler may install it.
-    func installLabBatchComposition(_ requestIDs: [String]?) -> Bool {
+    func installLabBatchComposition(
+        _ requestIDs: [String]?, nativeIntegrityProbes: Bool = false
+    ) -> Bool {
         guard waiting.isEmpty, activePrompt.isEmpty, activeDecode.isEmpty,
-              admittingRequests.isEmpty, !pumpRunning else { return false }
+              admittingRequests.isEmpty, !pumpRunning,
+              pendingBindingChecks == 0,
+              labNativeMTPProbeGroup?.running.isEmpty ?? true else { return false }
         guard let requestIDs else {
             labBatchComposition = nil
+            if labNativeMTPProbeGroup != nil {
+                guard nativeMTPProbeWorkIsQuiescent() else { return false }
+                labNativeMTPProbeGroup = nil
+                nativeMTPIntegrityProbeInFlight = false
+            }
             return true
         }
-        guard !requestIDs.isEmpty, Set(requestIDs).count == requestIDs.count else { return false }
+        guard !requestIDs.isEmpty, Set(requestIDs).count == requestIDs.count,
+              labNativeMTPProbeGroup == nil else { return false }
+        if nativeIntegrityProbes {
+            guard requestIDs.count > 1,
+                  requestIDs.count <= configuration.maxActiveRows,
+                  requestIDs.count <= configuration.queueLimit,
+                  isQuiescentForNativeMTPProbe() else { return false }
+            labNativeMTPProbeGroup = .init(pending: Set(requestIDs))
+            nativeMTPIntegrityProbeInFlight = true
+        }
         labBatchComposition = requestIDs
         return true
+    }
+
+    private func finishLabNativeMTPProbe(requestID: String) async {
+        labNativeMTPProbeGroup?.running.remove(requestID)
+        if let group = labNativeMTPProbeGroup, group.pending.isEmpty, group.running.isEmpty {
+            // Cancellation can return before its row/cache retirement finishes.
+            // Keep buyers excluded until those scheduler-owned resources retire.
+            while !cleanupFailedClosed && !nativeMTPProbeWorkIsQuiescent() {
+                await Task.yield()
+                guard labNativeMTPProbeGroup?.id == group.id else { return }
+            }
+            guard labNativeMTPProbeGroup?.id == group.id else { return }
+            labNativeMTPProbeGroup = nil
+            nativeMTPIntegrityProbeInFlight = false
+        }
     }
     #endif
 
@@ -5870,6 +5967,7 @@ actor ContinuousBatchScheduler {
                 }
                 if !idle {
                     waiting.insert(request, at: 0)
+                    resourceDeferredRequests.insert(request.id)
                     armQueueWaitTimeout(requestID: request.id)
                     return madeProgress
                 }
@@ -6013,6 +6111,7 @@ actor ContinuousBatchScheduler {
                     )
                 } else {
                     waiting.insert(request, at: 0)
+                    resourceDeferredRequests.insert(request.id)
                     armQueueWaitTimeout(requestID: request.id)
                     return madeProgress
                 }

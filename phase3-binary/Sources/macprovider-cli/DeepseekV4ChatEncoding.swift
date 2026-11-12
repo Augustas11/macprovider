@@ -15,6 +15,7 @@ import Tokenizers
 /// line; the golden tests compare its output byte for byte with the Python
 /// reference.
 enum DeepseekV4Encoding {
+    static let referenceEncoderSHA256 = "abc0d26120250dda0ae077dc64aa28836026e61e970854aaeb792445e6a0dde6"
     static let bosToken = "<｜begin▁of▁sentence｜>"
     static let eosToken = "<｜end▁of▁sentence｜>"
     static let thinkingStartToken = "<think>"

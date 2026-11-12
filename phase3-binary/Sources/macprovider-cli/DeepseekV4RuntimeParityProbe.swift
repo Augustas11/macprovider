@@ -106,8 +106,7 @@ enum DeepseekV4RuntimeParityProbe {
         let first: Int
     }
 
-    /// Keep exactly the reference partition: 2048-token chunks of all but
-    /// the final prompt token, followed by that token alone.
+    /// Keep the same bounded full-context partition as serial preparation.
     private static func prefill(
         id: String, prompt: [Int], count: Int,
         backend: DeepseekV4ContinuousBatchBackend, allocator: PagedKVBlockAllocator
@@ -118,7 +117,7 @@ enum DeepseekV4RuntimeParityProbe {
         var offset = 0
         var first: Int?
         while offset < prompt.count {
-            let end = offset == prompt.count - 1 ? prompt.count : min(offset + 2048, prompt.count - 1)
+            let end = DeepseekV4ContinuousBatchBackend.prefillEnd(offset: offset, promptCount: prompt.count)
             _ = try await allocator.extend(handle, by: end - offset)
             let binding = try await allocator.binding(for: handle)
             let outputs = try await backend.prefill(rows: [ContinuousBatchPrefillInput(
@@ -170,23 +169,26 @@ enum DeepseekV4RuntimeParityProbe {
     private static func serialTokens(model: any LanguageModel, prompt: [Int], count: Int) throws -> [Int] {
         let caches = try model.newCache(parameters: nil)
         var offset = 0
-        while offset < prompt.count - 1 {
+        var finalLogits: MLXArray?
+        while offset < prompt.count {
             try Task.checkCancellation()
-            let end = min(offset + 2048, prompt.count - 1)
-            _ = model(MLXArray(prompt[offset..<end].map(Int32.init)).reshaped([1, end - offset]), cache: caches)
+            let end = DeepseekV4ContinuousBatchBackend.prefillEnd(offset: offset, promptCount: prompt.count)
+            finalLogits = model(MLXArray(prompt[offset..<end].map(Int32.init)).reshaped([1, end - offset]), cache: caches)
             eval(caches.flatMap(\.state))
             offset = end
         }
-        var current = prompt[prompt.count - 1]
+        guard var logits = finalLogits else { throw ProbeError.invalidResult }
         var tokens: [Int] = []
-        for _ in 0..<count {
+        while tokens.count < count {
             try Task.checkCancellation()
-            let logits = model(MLXArray([Int32(current)]).reshaped([1, 1]), cache: caches)
             let vocab = logits.dim(logits.ndim - 1)
             let flat = logits.reshaped([-1, vocab])
-            current = Int(argMax(flat[flat.dim(0) - 1], axis: -1).item(Int32.self))
+            let current = Int(argMax(flat[flat.dim(0) - 1], axis: -1).item(Int32.self))
             eval(caches.flatMap(\.state))
             tokens.append(current)
+            if tokens.count < count {
+                logits = model(MLXArray([Int32(current)]).reshaped([1, 1]), cache: caches)
+            }
         }
         return tokens
     }

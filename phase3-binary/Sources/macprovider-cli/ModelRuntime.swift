@@ -4534,6 +4534,8 @@ maxTokens: 1,
         templateSupportsThinkingToggle: Bool = false,
         templateSupportsPreserveThinking: Bool = false,
         weightsManifestSHA256: String? = nil,
+        tokenizerConfigSHA256: String? = nil,
+        chatTemplateSHA256: String? = nil,
         draftModelID: String? = nil,
         numDraftTokens: Int = 3,
         speculativeCacheWrapValidated: Bool = false,
@@ -4656,8 +4658,8 @@ maxTokens: 1,
         self.currentModelHash = modelHash
         self.currentModelHashAlgorithm = modelHashAlgorithm
         self.currentWeightsManifestSHA256 = weightsManifestSHA256
-        self.currentTokenizerConfigSHA256 = nil
-        self.currentChatTemplateSHA256 = nil
+        self.currentTokenizerConfigSHA256 = tokenizerConfigSHA256
+        self.currentChatTemplateSHA256 = chatTemplateSHA256
         self.configuredTemplateSupportsThinkingToggle = templateSupportsThinkingToggle
         self.currentTemplateSupportsThinkingToggle = templateSupportsThinkingToggle
         self.configuredTemplateSupportsPreserveThinking = templateSupportsThinkingToggle
@@ -4722,8 +4724,8 @@ maxTokens: 1,
             config: pagedKVConfig,
             modelID: modelID,
             modelHash: modelHash,
-            tokenizerSHA256: nil,
-            chatTemplateSHA256: nil,
+            tokenizerSHA256: tokenizerConfigSHA256,
+            chatTemplateSHA256: chatTemplateSHA256,
             kvBitsOverride: kvBitsOverride,
             runtimeCacheClass: pagedKVRuntimeCacheClass,
             modelCapabilities: resolvedPagedKVModelCapabilities,
@@ -4735,8 +4737,8 @@ maxTokens: 1,
             decision: self.pagedKVAttachDecision,
             modelID: modelID,
             modelSHA256: modelHash,
-            tokenizerSHA256: nil,
-            chatTemplateSHA256: nil,
+            tokenizerSHA256: tokenizerConfigSHA256,
+            chatTemplateSHA256: chatTemplateSHA256,
             kvBitsOverride: kvBitsOverride,
             runtimeCacheClass: pagedKVRuntimeCacheClass,
             modelCapabilities: resolvedPagedKVModelCapabilities,
@@ -7160,6 +7162,9 @@ maxTokens: 1,
         container: ModelContainer
     ) async -> [PagedKVSharedForwardBackend.CacheKind]? {
         await container.perform { context in
+            // A DeepSeek V4 config with an explicit HISA indexer is not
+            // batch-exact (fork 3.32.3-macprovider.10.9): it serves serially.
+            if let deepseek = context.model as? DeepseekV4Model, !deepseek.batchesExactly { return nil }
             return try? Self.pagedKVCacheKinds(model: context.model)
         }
     }
@@ -9657,9 +9662,13 @@ maxTokens: 1,
 
     /// Lab-only journey hook: freeze one exact batch composition before any
     /// prefill/decode work starts. Returns false unless the scheduler is idle.
-    func installLabBatchComposition(_ requestIDs: [String]?) async -> Bool {
+    func installLabBatchComposition(
+        _ requestIDs: [String]?, nativeIntegrityProbes: Bool = false
+    ) async -> Bool {
         guard let continuousBatchScheduler else { return false }
-        return await continuousBatchScheduler.installLabBatchComposition(requestIDs)
+        return await continuousBatchScheduler.installLabBatchComposition(
+            requestIDs, nativeIntegrityProbes: nativeIntegrityProbes
+        )
     }
 
     /// Lab-only JOURNEY-NATIVE-MTP-SERVING step-10 hook: publish a new
@@ -10740,6 +10749,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                     referenceStepSize: lfmReferenceStep
                                         ?? (generationContext.model is DeepseekV4Model ? DeepseekV4Model.prefillStepSize : nil)
                                         ?? (ownsQuantizedConversationCache ? prefillStepSize : nil),
+                                    leaveFinalReferenceChunk: generationContext.model is DeepseekV4Model,
                                     isCancelled: { Task.isCancelled || shouldCancel() || drainCancelled.isFired }
                                 ) { range in
                                     let chunk = LMInput.Text(tokens: MLXArray(Array(promptTokenIds[range])))
@@ -11751,6 +11761,7 @@ maxTokens: Self.labSerialEffectiveMaxTokens(
                                 referenceStepSize: lfmReferenceStep
                                     ?? (generationContext.model is DeepseekV4Model ? DeepseekV4Model.prefillStepSize : nil)
                                     ?? (ownsQuantizedConversationCache ? prefillStepSize : nil),
+                                leaveFinalReferenceChunk: generationContext.model is DeepseekV4Model,
                                 isCancelled: { Task.isCancelled || shouldCancel() || drainCancelled.isFired }
                             ) { range in
                                 let chunk = LMInput.Text(tokens: MLXArray(Array(promptTokenIds[range])))
@@ -13218,7 +13229,8 @@ maxTokens: maxTokens,
                 familyAdapter: admissionCapability.familyAdapter,
                 targetDirectory: capturedArtifacts.targetURL,
                 drafterDirectory: drafterDirectory,
-                tokenizerLoader: capturedTokenizerLoader
+                tokenizerLoader: capturedTokenizerLoader,
+                maximumProposalDepth: admissionCapability.maxProposalDepth
             )
             try capturedArtifacts.revalidateAfterLoad()
             let drafterRuntimeObservation = await drafterContainer.perform { context -> (maximumBlockSize: Int?, stateLayerCount: Int?) in
@@ -13722,6 +13734,14 @@ maxTokens: maxTokens,
                 && representation.manifestSHA256 == quantization.representationManifestSHA256
                 && representation.perLayerExceptions == quantization.perLayerExceptions
                 && representation.unquantizedExceptions == quantization.unquantizedExceptions
+        case ("mlx_mxfp4_mxfp8", "mlx_mxfp4_mxfp8"):
+            guard admissionCapability.familyAdapter == "deepseek_v4_dspark_v1",
+                  let representation = try? NativeMTPArtifactObserver.mixedMXRepresentation(for: observation)
+            else { return false }
+            return representation.groupSize == quantization.blockSizeElements
+                && representation.manifestSHA256 == quantization.representationManifestSHA256
+                && representation.perLayerExceptions == quantization.perLayerExceptions
+                && representation.unquantizedExceptions == quantization.unquantizedExceptions
         case ("bf16", "bf16"):
             guard let representation = try? NativeMTPArtifactObserver.baseRepresentation(for: observation) else {
                 return false
@@ -13767,12 +13787,13 @@ maxTokens: maxTokens,
     static let nativeMTPSupportedAdapterLayouts: Set<NativeMTPAdapterLayout> = [
         NativeMTPAdapterLayout(familyAdapter: "qwen3_5_mtp_v1", sourceLayout: "separate_artifact"),
         NativeMTPAdapterLayout(familyAdapter: "glm5_next_mtp_v1", sourceLayout: "checkpoint_mtp"),
+        NativeMTPAdapterLayout(familyAdapter: "deepseek_v4_dspark_v1", sourceLayout: "checkpoint_mtp"),
     ]
 
     static func nativeMTPDrafterSource(familyAdapter: String) -> NativeMTPDrafterSource? {
         switch familyAdapter {
         case "qwen3_5_mtp_v1": .separateArtifact
-        case "glm5_next_mtp_v1": .targetEmbedded
+        case "glm5_next_mtp_v1", "deepseek_v4_dspark_v1": .targetEmbedded
         default: nil
         }
     }
@@ -13789,13 +13810,21 @@ maxTokens: maxTokens,
             sourceLayout: admissionCapability.sourceLayout
         )
         guard nativeMTPSupportedAdapterLayouts.contains(layout),
-              admissionCapability.predictionLayerCount == admissionCapability.maxProposalDepth,
+              (admissionCapability.familyAdapter == "deepseek_v4_dspark_v1"
+                ? admissionCapability.predictionLayerCount == 3
+                : admissionCapability.predictionLayerCount == admissionCapability.maxProposalDepth),
               admissionCapability.cacheClass == canonicalCacheClass,
               admissionCapability.stateClass == nativeMTPExpectedStateClass(modelCapabilities: modelCapabilities),
               drafterPresent
         else { return false }
         guard nativeMTPDrafterSource(familyAdapter: layout.familyAdapter) == .targetEmbedded else {
             return true
+        }
+        if layout.familyAdapter == "deepseek_v4_dspark_v1" {
+            return deepseekV4NativeMTPTopologySupported(
+                maxProposalDepth: admissionCapability.maxProposalDepth,
+                modelCapabilities: modelCapabilities, cacheKinds: cacheKinds
+            )
         }
         return glm5NextNativeMTPTopologySupported(
             maxProposalDepth: admissionCapability.maxProposalDepth,
@@ -13823,6 +13852,21 @@ maxTokens: maxTokens,
               cap == PagedKVSharedForwardBackend.pagedMLAMaxFlattenedTokensPerForward,
               maxProposalDepth >= 1,
               maxProposalDepth + 1 <= cap
+        else { return false }
+        return true
+    }
+
+    /// DSpark stages own private window caches; target windows and compressed
+    /// pools are committed by the row-owned backend, never paged KV trimming.
+    private static func deepseekV4NativeMTPTopologySupported(
+        maxProposalDepth: Int,
+        modelCapabilities: PagedKVRuntimeModelCapabilities,
+        cacheKinds: [PagedKVSharedForwardBackend.CacheKind]?
+    ) -> Bool {
+        guard modelCapabilities.modelFamily == "deepseek_v4",
+              let layout = modelCapabilities.deepseekV4Pool,
+              cacheKinds == layout.expectedCacheKinds,
+              (1...5).contains(maxProposalDepth)
         else { return false }
         return true
     }
@@ -13858,6 +13902,7 @@ maxTokens: maxTokens,
                 switch context.model {
                 case let model as GLM5NextModel: model.languageModel.hasMTPWeights
                 case let model as GLM5NextTextModel: model.hasMTPWeights
+                case let model as DeepseekV4Model: model.hasMTPWeights
                 default: false
                 }
             }
@@ -13873,7 +13918,8 @@ maxTokens: maxTokens,
         familyAdapter: String,
         targetDirectory: URL,
         drafterDirectory: URL,
-        tokenizerLoader: any TokenizerLoader
+        tokenizerLoader: any TokenizerLoader,
+        maximumProposalDepth: Int? = nil
     ) async throws -> MTPDrafterContainer {
         switch nativeMTPDrafterSource(familyAdapter: familyAdapter) {
         case .separateArtifact:
@@ -13884,16 +13930,26 @@ maxTokens: maxTokens,
             )
         case .targetEmbedded:
             await GLM5NextMTPRegistration.register()
+            await DeepseekV4DSparkRegistration.register()
             let configData = try Data(contentsOf: targetDirectory.appendingPathComponent("config.json"))
             guard let object = try JSONSerialization.jsonObject(with: configData) as? [String: Any],
                   let modelType = object["model_type"] as? String
             else {
                 throw NativeMTPDrafterLoadError.unsupportedAdapter(familyAdapter)
             }
-            let model = try await MTPDrafterTypeRegistry.shared.createModel(
-                configuration: configData,
-                modelType: modelType
-            )
+            let model: any MTPDrafterModel
+            if familyAdapter == "deepseek_v4_dspark_v1" {
+                let depth = maximumProposalDepth ?? 5
+                guard modelType == "deepseek_v4", (1...5).contains(depth) else {
+                    throw NativeMTPDrafterLoadError.unsupportedAdapter(familyAdapter)
+                }
+                let configuration = try JSONDecoder().decode(DeepseekV4Configuration.self, from: configData)
+                model = DeepseekV4DSparkDraftModel(configuration, maximumDepth: depth)
+            } else {
+                model = try await MTPDrafterTypeRegistry.shared.createModel(
+                    configuration: configData, modelType: modelType
+                )
+            }
             return MTPDrafterContainer(context: MTPDrafterContext(
                 configuration: ModelConfiguration(directory: targetDirectory, tokenizerSource: nil, defaultPrompt: ""),
                 model: model
@@ -14171,7 +14227,8 @@ maxTokens: maxTokens,
     ///   `tokenizer.json` (whichever are present). Nil when neither exists.
     /// - template hash: SHA-256 over a dedicated chat-template file if present, else
     ///   over the `chat_template` field inside `tokenizer_config.json`. Nil when no
-    ///   chat template is discoverable.
+    ///   chat template is discoverable. DeepSeek V4 binds its real reference
+    ///   encoder bytes instead, after checking the renderer's supported revision.
     static func tokenizerIdentityHashes(in directory: URL) -> (config: String?, template: String?) {
         let fm = FileManager.default
         func bytes(_ name: String) -> Data? {
@@ -14193,6 +14250,16 @@ maxTokens: maxTokens,
             }
         }
         let configHash = configAny ? hex(configData) : nil
+
+        if let config = bytes("config.json"),
+           let object = try? JSONSerialization.jsonObject(with: config) as? [String: Any],
+           object["model_type"] as? String == "deepseek_v4" {
+            let name = "encoding/encoding_dsv4.py"
+            guard let encoder = bytes(name), hex(encoder) == DeepseekV4Encoding.referenceEncoderSHA256 else {
+                return (configHash, nil)
+            }
+            return (configHash, hex(Data((name + "\u{0}").utf8) + encoder))
+        }
 
         var templateData: Data?
         for name in ["chat_template.jinja", "chat_template.json", "chat_template.txt"] {
@@ -14906,25 +14973,27 @@ maxTokens: maxTokens,
     /// SPEC-001-R011: prefills `[start, tokenCount)` in `stepSize` chunks,
     /// checking `isCancelled` before each chunk, and leaves the final
     /// (at most `stepSize`) tokens for the TokenIterator, exactly as its own
-    /// prefill would. With a model reference step, leave only the final token
-    /// and use that fixed step instead of the configured chunk size. Returns
+    /// prefill would. LFM retains its final-token reference plan. DeepSeek
+    /// leaves its whole final reference chunk for prepare, which owns the
+    /// logits-producing forward. Returns
     /// the index the iterator continues from.
     static func cancellableLocalPrefill(
         tokenCount: Int,
         from start: Int,
         stepSize: Int,
         referenceStepSize: Int? = nil,
+        leaveFinalReferenceChunk: Bool = false,
         isCancelled: () -> Bool,
         prefill: (Range<Int>) throws -> Void
     ) throws -> Int {
         let step = max(1, referenceStepSize ?? stepSize)
-        // DeepSeek-V4's ratio-4 pools depend on forward-call boundaries. Match
-        // its prepare/oracle plan even when local preemption prefills first.
-        let remainder = referenceStepSize == nil ? step : 1
+        // Full-context DeepSeek prefill must not discard the final chunk's
+        // logits or replace that forward with a single-token remainder.
+        let remainder = referenceStepSize == nil || leaveFinalReferenceChunk ? step : 1
         var cursor = max(0, start)
         while tokenCount - cursor > remainder {
             if isCancelled() { throw CancellationError() }
-            let count = min(step, tokenCount - cursor - 1)
+            let count = leaveFinalReferenceChunk ? step : min(step, tokenCount - cursor - 1)
             try prefill(cursor ..< cursor + count)
             cursor += count
         }
@@ -15207,6 +15276,11 @@ maxTokens: maxTokens,
         globalHitStop: Bool = false,
         toolCallPrefill: String?
     ) throws -> ParsedGeneratedOutput {
+        #if MACPROVIDER_LAB_HARNESS
+        if case .complete = mode {
+            try LabOutputTokenCapture.record(request: request, tokenIDs: generatedTokenIDs)
+        }
+        #endif
         guard HarmonyResponseParser.isHarmonyModelID(request.model) else {
             if try ToolSelectionPolicy.selection(request.promptSource.toolChoice).requiresCall,
                case .complete(let finishReason) = mode, finishReason == "length" {

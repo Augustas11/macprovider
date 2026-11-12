@@ -149,9 +149,19 @@ struct MSBThroughputCommand: AsyncParsableCommand {
 
     @Option(
         name: .customLong("max-physical-blocks"),
-        help: "Paged-KV physical block pool budget (shared across all rows). Defaults to the production PagedKVConfig value."
+        help: "Paged-KV physical block pool budget (shared across all rows). Defaults to the production serve pool: the PagedKVConfig default sized to cover this host's default context."
     )
-    var maxPhysicalBlocks: Int = PagedKVConfig.defaultMaxPhysicalBlocks
+    var maxPhysicalBlocksOverride: Int?
+
+    /// Serve sizes an unset pool to cover the advertised context (64 GB+: 200K
+    /// tokens), so the harness does the same. The bare 1024-block default holds
+    /// 16,384 tokens, which admits one 8K row at a time and turns a multi-row
+    /// cell into serial decode.
+    var maxPhysicalBlocks: Int {
+        maxPhysicalBlocksOverride ?? PagedKVConfig(blockSizeTokens: blockSizeTokens)
+            .sizedToCover(contextTokens: ProviderCapacity.defaultContextTokensForCurrentHost())
+            .maxPhysicalBlocks
+    }
 
     @Flag(name: .customLong("stdout-only"), help: "Print JSON to stdout only; do not write a file.")
     var stdoutOnly: Bool = false

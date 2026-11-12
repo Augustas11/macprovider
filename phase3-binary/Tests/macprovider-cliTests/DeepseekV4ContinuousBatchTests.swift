@@ -57,9 +57,10 @@ final class DeepseekV4ContinuousBatchTests: XCTestCase {
         }
     }
 
-    func testDeepseekV4ReferencePrefillLeavesFinalTokenAlone() {
-        for (count, expected) in [(1, [1]), (1024, [1023, 1]), (2048, [2047, 1]),
-                                  (2049, [2048, 1]), (4096, [2048, 2047, 1]), (4097, [2048, 2048, 1])] {
+    func testDeepseekV4ReferencePrefillKeepsFullFinalChunk() {
+        for (count, expected) in [(1, [1]), (1024, [1024]), (2048, [2048]),
+                                  (8192, [8192]), (32768, [32768]), (32769, [32768, 1]),
+                                  (65536, [32768, 32768]), (65537, [32768, 32768, 1])] {
             var cursor = 0
             var chunks: [Int] = []
             while cursor < count {

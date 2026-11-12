@@ -183,6 +183,72 @@ final class GrammarConstraintTests: XCTestCase {
         try state.validate()
     }
 
+    func testRegisteredByteLevelSpecialPiecesUseLiteralBytes() async throws {
+        let tokenizer = try await registeredPieceTokenizer()
+        let metadata = registeredPieceMetadata()
+        let pieces = try GrammarConstraintState.vocabulary(
+            data: JSONSerialization.data(withJSONObject: metadata), tokenizer: tokenizer)
+        for (id, text) in [0: "<｜begin▁of▁sentence｜>", 1: "<｜end▁of▁sentence｜>", 2: "<｜▁pad▁｜>"] {
+            XCTAssertEqual(pieces[id], Array(text.utf8))
+        }
+        XCTAssertEqual(pieces[3], [32]) // Ordinary ByteLevel decoding is unchanged.
+        XCTAssertEqual(pieces[4], Array("<|separate|>".utf8))
+    }
+
+    func testUnregisteredInvalidByteLevelPieceStillFails() async throws {
+        let tokenizer = try await registeredPieceTokenizer()
+        var metadata = registeredPieceMetadata()
+        metadata["added_tokens"] = [["id": 4, "content": "<|separate|>", "special": true]]
+        XCTAssertThrowsError(try GrammarConstraintState.vocabulary(
+            data: JSONSerialization.data(withJSONObject: metadata), tokenizer: tokenizer)) {
+            XCTAssertEqual(($0 as? APIError)?.code, "unsupported_output_grammar")
+        }
+    }
+
+    func testConflictingAddedPieceMappingsFailClosed() async throws {
+        let tokenizer = try await registeredPieceTokenizer()
+        let conflicts: [[String: Any]] = [
+            ["id": 0, "content": "different"], // Base ID, different content.
+            ["id": 5, "content": "<｜begin▁of▁sentence｜>"], // Base content, different ID.
+            ["id": 4, "content": "different"], // Added ID, different content.
+            ["id": 5, "content": "<|separate|>"], // Added content, different ID.
+        ]
+        for (index, conflict) in conflicts.enumerated() {
+            var metadata = registeredPieceMetadata()
+            var added = try XCTUnwrap(metadata["added_tokens"] as? [[String: Any]])
+            if index < 2 { added.removeAll { $0["id"] as? Int == 0 } }
+            added.append(conflict)
+            metadata["added_tokens"] = added
+            XCTAssertThrowsError(try GrammarConstraintState.vocabulary(
+                data: JSONSerialization.data(withJSONObject: metadata), tokenizer: tokenizer)) {
+                XCTAssertEqual(($0 as? APIError)?.code, "unsupported_output_grammar")
+            }
+        }
+    }
+
+    private func registeredPieceMetadata() -> [String: Any] {
+        ["model": ["type": "BPE", "vocab": ["<｜begin▁of▁sentence｜>": 0,
+            "<｜end▁of▁sentence｜>": 1, "<｜▁pad▁｜>": 2, "Ġ": 3], "merges": []] as [String: Any],
+         "decoder": ["type": "ByteLevel"],
+         "added_tokens": [
+            ["id": 0, "content": "<｜begin▁of▁sentence｜>", "special": true],
+            ["id": 1, "content": "<｜end▁of▁sentence｜>", "special": true],
+            ["id": 2, "content": "<｜▁pad▁｜>", "special": true],
+            ["id": 4, "content": "<|separate|>", "special": true],
+         ]]
+    }
+
+    private func registeredPieceTokenizer() async throws -> GrammarVocabularyFixtureTokenizer {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("grammar-added-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try JSONSerialization.data(withJSONObject: registeredPieceMetadata())
+            .write(to: directory.appendingPathComponent("tokenizer.json"))
+        try Data(#"{"tokenizer_class":"GPT2Tokenizer","eos_token":"<｜end▁of▁sentence｜>","bos_token":"<｜begin▁of▁sentence｜>","unk_token":"<｜▁pad▁｜>"}"#.utf8)
+            .write(to: directory.appendingPathComponent("tokenizer_config.json"))
+        return GrammarVocabularyFixtureTokenizer(base: try await AutoTokenizer.from(modelFolder: directory))
+    }
+
     func testHarmonyKnownSpecialIDsParseAnAcceptedFrame() throws {
         let pieces: [Int: String] = [200006: "<|start|>", 200005: "<|channel|>", 200008: "<|message|>",
                                     200002: "<|return|>", 1000: "assistant", 1001: "final", 1002: "ok"]
