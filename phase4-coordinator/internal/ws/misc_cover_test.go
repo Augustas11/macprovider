@@ -109,7 +109,7 @@ func TestAllowAnonymousEventCapsPerWindow(t *testing.T) {
 		t.Fatal("event over cap must be denied")
 	}
 	// Window expiry resets the counter.
-	s.anonymousEventWindow = time.Now().UTC().Add(-2 * time.Minute)
+	s.anonymousEventWindow = time.Now().UTC().Add(-24 * time.Hour)
 	if !s.allowAnonymousEvent() {
 		t.Fatal("new window must allow")
 	}
@@ -175,7 +175,12 @@ func TestParseRelayBlindKeyRecordsEdges(t *testing.T) {
 		}
 	}
 	tooMany := `{"relay_blind_key_records":[` + strings.Repeat("{},", relayblind.MaxModelCount) + `{}]}`
-	if field, err := parseRelayBlindKeyRecords(raw(tooMany), new([]relayblind.KeyRecord)); field != "relay_blind_key_records" || err == nil {
+	if field, err := parseRelayBlindKeyRecords(raw(tooMany), new([]relayblind.KeyRecord)); field != "relay_blind_key_records" || err == nil || !strings.Contains(err.Error(), "at most") {
 		t.Errorf("too many: field=%q err=%v", field, err)
+	}
+	// Exactly at the cap must get past the count check (and fail later on the empty record contents).
+	atCap := `{"relay_blind_key_records":[` + strings.Repeat("{},", relayblind.MaxModelCount-1) + `{}]}`
+	if _, err := parseRelayBlindKeyRecords(raw(atCap), new([]relayblind.KeyRecord)); err == nil || strings.Contains(err.Error(), "at most") {
+		t.Errorf("at cap must not trip the count check: %v", err)
 	}
 }
