@@ -13424,7 +13424,7 @@
       "state": "pending",
       "implementation": [
         "scripts/catalog-release.py:def verify_release_manifest_signature",
-        "scripts/resign-autotune-static.sh",
+        "scripts/resign-autotune-static.sh:sign_one \"$manifest_json\" \"$manifest_sig\"",
         "scripts/catalog-content-release.sh:pf_assemble",
         "phase4-coordinator/internal/buyer/release_manifest_feed.go:func loadReleaseManifest",
         "phase3-binary/Sources/macprovider-cli/CatalogReleaseManifest.swift:struct CatalogReleaseManifest",
@@ -13432,8 +13432,8 @@
         "phase3-binary/Sources/macprovider-cli/ContinuousBatchingSignedPolicy.swift:static func verifyAuthenticated"
       ],
       "tests": [
-        "scripts/test-catalog-release.sh",
-        "scripts/tests/test_native_binding_ops.py::test_assembly_carries_the_committed_release_manifest_signature",
+        "scripts/test-catalog-release.sh:PASS: release manifest signature is verified against the static-feed signer",
+        "scripts/tests/test_native_binding_ops.py::NativeBindingOpsTests",
         "phase4-coordinator/internal/buyer/release_manifest_feed_test.go::TestReleaseManifestServedWhenSignedAndBindingServedFeeds",
         "phase4-coordinator/internal/buyer/release_manifest_feed_test.go::TestReleaseManifestFailsClosed",
         "phase3-binary/Tests/macprovider-cliTests/CatalogReleaseManifestTests.swift:final class CatalogReleaseManifestTests",
