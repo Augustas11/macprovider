@@ -2559,6 +2559,7 @@ func TestProviderAuthV2ReceiptRotationMovesPriorPubkeyToPrevious(t *testing.T) {
 	newPubkey := bytes.Repeat([]byte{0x32}, 32)
 	oldConn := authV2ProviderWithReceiptKey(t, h.HTTP.URL, oldPubkey)
 	defer oldConn.Close()
+	waitReceiptPubkeyCommitted(t, h.HTTP.URL, oldPubkey)
 
 	rotatedAt := clock.Now().Add(100 * time.Second)
 	clock.Set(rotatedAt)
@@ -2608,6 +2609,7 @@ func TestProviderAuthV2ReceiptRotationDetectedAuditEvent(t *testing.T) {
 	newPubkey := bytes.Repeat([]byte{0x72}, 32)
 	oldConn := authV2ProviderWithReceiptKey(t, h.HTTP.URL, oldPubkey)
 	defer oldConn.Close()
+	waitReceiptPubkeyCommitted(t, h.HTTP.URL, oldPubkey)
 
 	rotatedAt := clock.Now().Add(100 * time.Second)
 	clock.Set(rotatedAt)
@@ -2700,6 +2702,7 @@ func TestProviderAuthV2ReceiptKeyOmissionClearsLiveReceiptTrustState(t *testing.
 	newPubkey := bytes.Repeat([]byte{0x72}, 32)
 	oldConn := authV2ProviderWithReceiptKey(t, h.HTTP.URL, oldPubkey)
 	defer oldConn.Close()
+	waitReceiptPubkeyCommitted(t, h.HTTP.URL, oldPubkey)
 
 	rotatedAt := clock.Now().Add(100 * time.Second)
 	clock.Set(rotatedAt)
@@ -2843,12 +2846,20 @@ func TestProviderAuthV2ReceiptRotationPurgesPreviousAfterGraceWindow(t *testing.
 	firstConn := authV2ProviderWithReceiptKey(t, h.HTTP.URL, oldPubkey)
 	defer firstConn.Close()
 
+	// The old key is only committed once the server processes the first
+	// connection's post-auth state_update. Rotating before that sees a pending,
+	// uncommitted key and is rejected with receipt_rotation_grace_active.
+	var got poolzResponse
+	eventually(t, func() bool {
+		got = fetchPoolz(t, h.HTTP.URL)
+		return len(got.Pool) == 1 && got.Pool[0].ReceiptPubkey != nil && *got.Pool[0].ReceiptPubkey == base64.StdEncoding.EncodeToString(oldPubkey)
+	})
+
 	rotatedAt := clock.Now().Add(100 * time.Second)
 	clock.Set(rotatedAt)
 	rotatedConn := authV2ProviderWithReceiptKey(t, h.HTTP.URL, newPubkey)
 	defer rotatedConn.Close()
 
-	var got poolzResponse
 	eventually(t, func() bool {
 		got = fetchPoolz(t, h.HTTP.URL)
 		return len(got.Pool) == 1 && got.Pool[0].ReceiptPubkey != nil && *got.Pool[0].ReceiptPubkey == base64.StdEncoding.EncodeToString(newPubkey) && got.Pool[0].ReceiptPubkeyPrev != nil
@@ -4456,9 +4467,29 @@ func authV2ProviderWithReceiptKey(t *testing.T, serverURL string, receiptPubkey 
 	conn, response := authV2ProviderWithReceiptKeyExpectResponse(t, serverURL, receiptPubkey)
 	if response.Status != "accepted" {
 		conn.Close()
-		t.Fatalf("auth_response = %+v", response)
+		t.Fatalf("auth_response = %+v error = %s", response, authResponseErrorText(response))
 	}
 	return conn
+}
+
+// waitReceiptPubkeyCommitted waits until the server has processed the
+// connection's post-auth state_update and committed its receipt key. A
+// rotation started before that sees a pending key and is rejected with
+// receipt_rotation_grace_active.
+func waitReceiptPubkeyCommitted(t *testing.T, serverURL string, pubkey []byte) {
+	t.Helper()
+	want := base64.StdEncoding.EncodeToString(pubkey)
+	eventually(t, func() bool {
+		got := fetchPoolz(t, serverURL)
+		return len(got.Pool) == 1 && got.Pool[0].ReceiptPubkey != nil && *got.Pool[0].ReceiptPubkey == want
+	})
+}
+
+func authResponseErrorText(response providerws.AuthResponse) string {
+	if response.Error == nil {
+		return "<nil>"
+	}
+	return fmt.Sprintf("code=%q message=%q", response.Error.Code, response.Error.Message)
 }
 
 func authV2ProviderWithReceiptKeyExpectResponse(t *testing.T, serverURL string, receiptPubkey []byte) (net.Conn, providerws.AuthResponse) {
