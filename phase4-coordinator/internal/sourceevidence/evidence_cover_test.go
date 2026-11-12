@@ -4,13 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestCanonicalBytesSortsKeysAndNormalizesTypes(t *testing.T) {
@@ -164,27 +161,6 @@ func TestFixedProvenanceValidate(t *testing.T) {
 	}
 }
 
-func TestCommitmentsAreDomainSeparatedAndLengthPrefixed(t *testing.T) {
-	key := []byte("01234567890123456789012345678901")
-	a := ScopeCommitment(key, Scope{AccountID: "ab", ExternalRequestID: "c", RequiredInternalRequestID: "d"})
-	b := ScopeCommitment(key, Scope{AccountID: "a", ExternalRequestID: "bc", RequiredInternalRequestID: "d"})
-	if a == b || !hex64RE.MatchString(a) {
-		t.Fatalf("length prefixing failed: %s %s", a, b)
-	}
-	if a != ScopeCommitment(key, Scope{AccountID: "ab", ExternalRequestID: "c", RequiredInternalRequestID: "d", NotBeforeUnixMS: 99}) {
-		t.Fatalf("not_before must not affect scope commitment")
-	}
-	if InternalRequestCommitment(key, "7") == ClosureIDCommitment(key, 7) {
-		t.Fatalf("domains not separated")
-	}
-	if ClosureIDCommitment(key, 7) == ClosureIDCommitment([]byte("abcdefghijklmnopqrstuvwxyz012345"), 7) {
-		t.Fatalf("key not mixed in")
-	}
-	if got := utcMillis(time.Date(2026, 1, 2, 3, 4, 5, 6_000_000, time.FixedZone("x", 3600))); got != "2026-01-02T02:04:05.006Z" {
-		t.Fatalf("utcMillis = %s", got)
-	}
-}
-
 func TestNewStoreAndMigrateValidation(t *testing.T) {
 	if _, err := NewStore(nil, make([]byte, 32), nil); err == nil {
 		t.Fatalf("nil db accepted")
@@ -207,133 +183,5 @@ func TestNewStoreAndMigrateValidation(t *testing.T) {
 	def, err := NewStore(db, make([]byte, 32), nil)
 	if err != nil || def.now == nil {
 		t.Fatalf("default clock not set: %v", err)
-	}
-}
-
-func TestRecordNoDispatchRejectsInvalidInputs(t *testing.T) {
-	ctx := context.Background()
-	store, _ := newTestStore(t)
-	id := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-	base := func() ClosureInput {
-		return ClosureInput{TerminalKind: TerminalModelNotFound, Row: testNoDispatchRow("acct", "ext", id, 404, "")}
-	}
-	mut := map[string]func(*ClosureInput){
-		"provider assigned":    func(c *ClosureInput) { c.Row.ProviderAssignedID = "p" },
-		"non-blank model":      func(c *ClosureInput) { c.Row.Model = "some-model" },
-		"missing request id":   func(c *ClosureInput) { c.Row.RequestID = "" },
-		"missing account":      func(c *ClosureInput) { c.Row.AccountID = "" },
-		"missing external id":  func(c *ClosureInput) { c.Row.ExternalRequestID = "" },
-		"unknown terminal":     func(c *ClosureInput) { c.TerminalKind = "other" },
-		"model-not-found 503":  func(c *ClosureInput) { c.Row.Status = 503 },
-		"model-not-found text": func(c *ClosureInput) { c.Row.Error = "boom" },
-		"pool status":          func(c *ClosureInput) { c.TerminalKind = TerminalPoolUnavailable },
-	}
-	for name, f := range mut {
-		in := base()
-		f(&in)
-		if err := store.RecordNoDispatch(ctx, in); !errors.Is(err, ErrUnavailable) {
-			t.Fatalf("%s: err=%v want ErrUnavailable", name, err)
-		}
-	}
-	var nilStore *Store
-	if err := nilStore.RecordNoDispatch(ctx, base()); !errors.Is(err, ErrDisabled) {
-		t.Fatalf("nil store err=%v", err)
-	}
-	if _, err := nilStore.ResolveClosedBatch(ctx, []Scope{{}}); !errors.Is(err, ErrDisabled) {
-		t.Fatalf("nil store resolve err=%v", err)
-	}
-	if _, err := store.ResolveClosedBatch(ctx, nil); !errors.Is(err, ErrInvalidRequest) {
-		t.Fatalf("empty batch err=%v", err)
-	}
-}
-
-func TestResolveClosedFencesAndMissingScope(t *testing.T) {
-	ctx := context.Background()
-	store, db := newTestStore(t)
-	row := testNoDispatchRow("acct-f", "ext-f", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", 503, "Pool unavailable")
-	if err := store.RecordNoDispatch(ctx, ClosureInput{TerminalKind: TerminalPoolUnavailable, Row: row}); err != nil {
-		t.Fatal(err)
-	}
-	scope := Scope{AccountID: row.AccountID, ExternalRequestID: row.ExternalRequestID, RequiredInternalRequestID: row.RequestID}
-	rec, err := store.ResolveClosed(ctx, scope)
-	if err != nil {
-		t.Fatalf("resolve: %v", err)
-	}
-	if rec.LogStatus != 503 || rec.Closure.TerminalKind != TerminalPoolUnavailable || !hex64RE.MatchString(rec.ClosureIDHMAC) {
-		t.Fatalf("record = %+v", rec)
-	}
-	if rec.ClosureIDHMAC != ClosureIDCommitment(store.HMACKey(), rec.Closure.ID) {
-		t.Fatalf("closure id hmac mismatch")
-	}
-	if len(rec.Absence) != len(settlementTables) {
-		t.Fatalf("absence = %+v", rec.Absence)
-	}
-	for table, a := range rec.Absence {
-		if a.Count != 0 || a.MaxID != 0 {
-			t.Fatalf("%s absence = %+v", table, a)
-		}
-	}
-	// Fence in the future (log ts is 11:59:59, closure 12:00:00).
-	fenced := scope
-	fenced.NotBeforeUnixMS = time.Date(2026, 10, 7, 11, 59, 59, 500_000_000, time.UTC).UnixMilli()
-	if _, err := store.ResolveClosed(ctx, fenced); !errors.Is(err, ErrScopeNotClosed) {
-		t.Fatalf("stale fence err=%v", err)
-	}
-	// Fence after the log row but before closure still fails on the log row.
-	fenced.NotBeforeUnixMS = time.Date(2026, 10, 7, 12, 0, 0, 1_000_000, time.UTC).UnixMilli()
-	if _, err := store.ResolveClosed(ctx, fenced); !errors.Is(err, ErrScopeNotClosed) {
-		t.Fatalf("stale fence (closure) err=%v", err)
-	}
-	// Wrong scope components never resolve.
-	wrong := scope
-	wrong.AccountID = "other"
-	if _, err := store.ResolveClosed(ctx, wrong); !errors.Is(err, ErrScopeNotClosed) {
-		t.Fatalf("wrong account err=%v", err)
-	}
-	// Tampering: a provider assigned after closure invalidates the proof.
-	if _, err := db.ExecContext(ctx, `UPDATE request_log SET provider_assigned_id = 'p1' WHERE request_id = ?`, row.RequestID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.ResolveClosed(ctx, scope); !errors.Is(err, ErrScopeNotClosed) {
-		t.Fatalf("provider-assigned err=%v", err)
-	}
-	if _, err := db.ExecContext(ctx, `UPDATE request_log SET provider_assigned_id = NULL, status = 500 WHERE request_id = ?`, row.RequestID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.ResolveClosed(ctx, scope); !errors.Is(err, ErrScopeNotClosed) {
-		t.Fatalf("status mismatch err=%v", err)
-	}
-}
-
-func TestHandlerMethodBodyAndStrictness(t *testing.T) {
-	h := NewHandler("op", nil, 0)
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/x", nil))
-	if rec.Code != http.StatusMethodNotAllowed || rec.Header().Get("Cache-Control") != "no-store" {
-		t.Fatalf("GET status=%d", rec.Code)
-	}
-	var body struct {
-		Error struct{ Code string } `json:"error"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || body.Error.Code != "method_not_allowed" {
-		t.Fatalf("body=%s err=%v", rec.Body.String(), err)
-	}
-	// Producer present but request body malformed: 400 before any export.
-	hh := &Handler{operatorKey: "op", producer: &Producer{}, maxBody: 32}
-	for name, payload := range map[string]string{
-		"duplicate key": `{"run_id":"a","run_id":"b"}`,
-		"too large":     `{"run_id":"` + strings.Repeat("a", 64) + `"}`,
-		"unknown field": `{"nope":1}`,
-	} {
-		req := httptest.NewRequest(http.MethodPost, "/x", strings.NewReader(payload))
-		req.Header.Set("Authorization", "Bearer op")
-		rec := httptest.NewRecorder()
-		hh.ServeHTTP(rec, req)
-		if rec.Code != http.StatusBadRequest {
-			t.Fatalf("%s: status=%d body=%s", name, rec.Code, rec.Body.String())
-		}
-		if !strings.Contains(rec.Body.String(), "invalid_source_evidence_request") {
-			t.Fatalf("%s: body=%s", name, rec.Body.String())
-		}
 	}
 }

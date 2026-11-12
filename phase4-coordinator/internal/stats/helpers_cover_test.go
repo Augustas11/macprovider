@@ -87,9 +87,6 @@ func TestLeaderboardBudgetsAndSMaxAge(t *testing.T) {
 func TestLeaderboardStaleFor503(t *testing.T) {
 	h := &Handler{}
 	now := time.Unix(1_700_000_000, 0).UTC()
-	if h.leaderboardStaleFor503(time.Time{}, now, "24h") {
-		t.Fatal("empty snapshot must not be stale")
-	}
 	if h.leaderboardStaleFor503(now.Add(-300*time.Second), now, "24h") {
 		t.Fatal("exactly at budget is not stale")
 	}

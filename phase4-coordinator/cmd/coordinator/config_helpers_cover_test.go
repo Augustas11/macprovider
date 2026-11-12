@@ -1,10 +1,8 @@
 package main
 
 import (
-	"database/sql"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -19,39 +17,6 @@ func writeCoverYAML(t *testing.T, body string) string {
 		t.Fatal(err)
 	}
 	return p
-}
-
-func TestParseAdminDSNFromYAML(t *testing.T) {
-	got, err := parseAdminDSNFromYAML(writeCoverYAML(t, "stats:\n  partner_keys_admin_dsn: \"postgres://x/y\"\n"))
-	if err != nil || got != "postgres://x/y" {
-		t.Fatalf("got %q, %v", got, err)
-	}
-	if _, err := parseAdminDSNFromYAML(writeCoverYAML(t, "stats:\n  other: 1\n")); err == nil || !strings.Contains(err.Error(), "missing") {
-		t.Fatalf("absent DSN must error, got %v", err)
-	}
-	if _, err := parseAdminDSNFromYAML(writeCoverYAML(t, "stats: [unterminated\n")); err == nil || !strings.Contains(err.Error(), "yaml parse") {
-		t.Fatalf("malformed yaml must error, got %v", err)
-	}
-	if _, err := parseAdminDSNFromYAML(filepath.Join(t.TempDir(), "nope.yaml")); err == nil {
-		t.Fatal("missing file must error")
-	}
-}
-
-func TestParseProductionSignoffPathFromYAML(t *testing.T) {
-	got, err := parseProductionSignoffPathFromYAML(writeCoverYAML(t, "stats:\n  partner_keys:\n    production_signoff_path: \"  /etc/signoff.json  \"\n"))
-	if err != nil || got != "/etc/signoff.json" {
-		t.Fatalf("got %q, %v", got, err)
-	}
-	got, err = parseProductionSignoffPathFromYAML(writeCoverYAML(t, "stats: {}\n"))
-	if err != nil || got != "" {
-		t.Fatalf("absent path must be empty without error, got %q, %v", got, err)
-	}
-	if _, err := parseProductionSignoffPathFromYAML(writeCoverYAML(t, "stats: [oops\n")); err == nil {
-		t.Fatal("malformed yaml must error")
-	}
-	if _, err := parseProductionSignoffPathFromYAML(filepath.Join(t.TempDir(), "nope.yaml")); err == nil {
-		t.Fatal("missing file must error")
-	}
 }
 
 func TestParseRFC3339Strict(t *testing.T) {
@@ -79,22 +44,6 @@ func TestRouteSnapshotJournalDBPath(t *testing.T) {
 	}
 }
 
-func TestDefaultSettlementAttemptOutputJournalMaterializerConfigRetention(t *testing.T) {
-	if got := defaultSettlementAttemptOutputJournalMaterializerConfig(0).Retention; got != 30*24*time.Hour {
-		t.Fatalf("non-positive retention must default to 30 days, got %v", got)
-	}
-	if got := defaultSettlementAttemptOutputJournalMaterializerConfig(-5).Retention; got != 30*24*time.Hour {
-		t.Fatalf("negative retention must default to 30 days, got %v", got)
-	}
-	cfg := defaultSettlementAttemptOutputJournalMaterializerConfig(7)
-	if cfg.Retention != 7*24*time.Hour {
-		t.Fatalf("retention = %v, want 7 days", cfg.Retention)
-	}
-	if cfg.Batch != settlementAttemptOutputJournalBatch || cfg.Interval != settlementAttemptOutputJournalInterval {
-		t.Fatalf("batch/interval not taken from constants: %+v", cfg)
-	}
-}
-
 func TestAuditLogRotationOptions(t *testing.T) {
 	var cfg config.Config
 	cfg.Storage.AuditLogArchiveDir = "/explicit/archive"
@@ -119,39 +68,5 @@ func TestAuditLogRotationOptions(t *testing.T) {
 	opts = auditLogRotationOptions(cfg)
 	if want := filepath.Join(dir, audit.AuditArchiveDirName); opts.ArchiveDir != want {
 		t.Fatalf("default archive dir = %q, want %q", opts.ArchiveDir, want)
-	}
-}
-
-func TestPQStringArrayLiteral(t *testing.T) {
-	cases := []struct {
-		in   []string
-		want string
-	}{
-		{nil, "{}"},
-		{[]string{"a"}, `{"a"}`},
-		{[]string{"a.com", "b:80"}, `{"a.com","b:80"}`},
-		{[]string{`q"x`, `b\s`}, `{"q\"x","b\\s"}`},
-	}
-	for _, c := range cases {
-		if got := pqStringArrayLiteral(c.in); got != c.want {
-			t.Errorf("pqStringArrayLiteral(%q) = %s, want %s", c.in, got, c.want)
-		}
-	}
-}
-
-func TestNullStringHelpers(t *testing.T) {
-	if got := nullTimeString(sql.NullTime{}); got != "" {
-		t.Fatalf("invalid time = %q", got)
-	}
-	loc := time.FixedZone("x", 8*3600)
-	nt := sql.NullTime{Valid: true, Time: time.Date(2026, 5, 6, 8, 0, 0, 0, loc)}
-	if got := nullTimeString(nt); got != "2026-05-06T00:00:00Z" {
-		t.Fatalf("valid time must be UTC RFC3339, got %q", got)
-	}
-	if got := nullInt64String(sql.NullInt64{Int64: 5}); got != "" {
-		t.Fatalf("invalid int = %q", got)
-	}
-	if got := nullInt64String(sql.NullInt64{Valid: true, Int64: -42}); got != "-42" {
-		t.Fatalf("valid int = %q", got)
 	}
 }

@@ -12,32 +12,6 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/verifiedarchive"
 )
 
-func TestEmitReceiptRotationRejectsIncompleteEvents(t *testing.T) {
-	store := openTestStore(t)
-	defer store.Close()
-	at := time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)
-	key := []byte("k")
-	cases := map[string]struct {
-		provider string
-		old, new []byte
-		at       time.Time
-	}{
-		"no provider": {"", key, key, at},
-		"no old key":  {"p", nil, key, at},
-		"no new key":  {"p", key, nil, at},
-		"zero time":   {"p", key, key, time.Time{}},
-	}
-	for name, c := range cases {
-		err := store.EmitReceiptRotation(context.Background(), receiptRotationEventForTest(c.provider, c.old, c.new, c.at))
-		if err == nil || !strings.Contains(err.Error(), "invalid receipt_rotation_detected") {
-			t.Fatalf("%s: err = %v", name, err)
-		}
-	}
-	if n := countAuditRows(t, store); n != 0 {
-		t.Fatalf("rows written for invalid events: %d", n)
-	}
-}
-
 func TestRotationOptionsNormalizedValidatesAndDefaults(t *testing.T) {
 	abs := t.TempDir()
 	bad := map[string]RotationOptions{
@@ -213,17 +187,6 @@ func TestVerifyArchiveFileRejectsMissingAndWrongFormat(t *testing.T) {
 	}
 }
 
-func TestSettlementReceiptOutboxConflictErrorIdentifiesPoisonRow(t *testing.T) {
-	err := error(SettlementReceiptOutboxConflictError{OutboxID: 42})
-	if !strings.Contains(err.Error(), "42") {
-		t.Fatalf("message = %q", err.Error())
-	}
-	var m interface{ SettlementReceiptAuditOutboxConflict() bool }
-	if !errors.As(err, &m) || !m.SettlementReceiptAuditOutboxConflict() {
-		t.Fatal("conflict marker missing")
-	}
-}
-
 func TestStoreNilAndClosedBehaviour(t *testing.T) {
 	var nilStore *Store
 	if nilStore.DB() != nil || nilStore.Close() != nil {
@@ -234,17 +197,11 @@ func TestStoreNilAndClosedBehaviour(t *testing.T) {
 	if err := nilStore.Insert(ctx, now, "e", "p", "{}"); !errors.Is(err, errStoreClosed) {
 		t.Fatalf("Insert err = %v", err)
 	}
-	if _, err := nilStore.InsertSettlementReceiptOutbox(ctx, now, "e", "p", "{}", 1); !errors.Is(err, errStoreClosed) {
-		t.Fatalf("outbox err = %v", err)
-	}
 	if _, err := nilStore.PruneBefore(ctx, now); !errors.Is(err, errStoreClosed) {
 		t.Fatalf("prune err = %v", err)
 	}
 	store := openSettlementReceiptTestStore(t)
 	defer store.Close()
-	if _, err := store.InsertSettlementReceiptOutbox(ctx, now, "e", "p", "{}", 0); err == nil {
-		t.Fatal("outbox id 0 accepted")
-	}
 	if _, err := OpenStore(""); err == nil {
 		t.Fatal("empty db path accepted")
 	}

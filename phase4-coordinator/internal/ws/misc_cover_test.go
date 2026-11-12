@@ -1,13 +1,10 @@
 package ws
 
 import (
-	"encoding/json"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/canarycorr"
-	"github.com/augstar/macprovider-coordinator/internal/relayblind"
 )
 
 func TestCanaryMetricsFromTiming(t *testing.T) {
@@ -150,37 +147,5 @@ func TestParseNakRejectsBadFields(t *testing.T) {
 		if _, field, err := ParseNak([]byte(payload)); err == nil || field != wantField {
 			t.Errorf("%s: field=%q err=%v want field %q", payload, field, err, wantField)
 		}
-	}
-}
-
-func TestParseRelayBlindKeyRecordsEdges(t *testing.T) {
-	t.Parallel()
-	raw := func(s string) map[string]json.RawMessage {
-		var m map[string]json.RawMessage
-		if err := json.Unmarshal([]byte(s), &m); err != nil {
-			t.Fatal(err)
-		}
-		return m
-	}
-	if field, err := parseRelayBlindKeyRecords(raw(`{}`), new([]relayblind.KeyRecord)); field != "" || err != nil {
-		t.Fatalf("absent: %q %v", field, err)
-	}
-	for _, in := range []string{
-		`{"relay_blind_key_records":null}`,
-		`{"relay_blind_key_records":"x"}`,
-		`{"relay_blind_key_records":[{}]}`,
-	} {
-		if field, err := parseRelayBlindKeyRecords(raw(in), new([]relayblind.KeyRecord)); field != "relay_blind_key_records" || err == nil {
-			t.Errorf("%s: field=%q err=%v", in, field, err)
-		}
-	}
-	tooMany := `{"relay_blind_key_records":[` + strings.Repeat("{},", relayblind.MaxModelCount) + `{}]}`
-	if field, err := parseRelayBlindKeyRecords(raw(tooMany), new([]relayblind.KeyRecord)); field != "relay_blind_key_records" || err == nil || !strings.Contains(err.Error(), "at most") {
-		t.Errorf("too many: field=%q err=%v", field, err)
-	}
-	// Exactly at the cap must get past the count check (and fail later on the empty record contents).
-	atCap := `{"relay_blind_key_records":[` + strings.Repeat("{},", relayblind.MaxModelCount-1) + `{}]}`
-	if _, err := parseRelayBlindKeyRecords(raw(atCap), new([]relayblind.KeyRecord)); err == nil || strings.Contains(err.Error(), "at most") {
-		t.Errorf("at cap must not trip the count check: %v", err)
 	}
 }

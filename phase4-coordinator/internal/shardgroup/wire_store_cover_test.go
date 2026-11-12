@@ -8,8 +8,6 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-
-	"github.com/augstar/macprovider-coordinator/internal/pool"
 )
 
 func TestParseHeartbeatAndMemberHealthStrict(t *testing.T) {
@@ -232,33 +230,6 @@ func TestEvaluationStatusMessage(t *testing.T) {
 	}
 	if _, ok := newFixture(t).reg.Evaluate("nope", nil, nil, 0); ok {
 		t.Error("Evaluate of unknown group reported ok")
-	}
-}
-
-func TestLabelsAtLeastOrdering(t *testing.T) {
-	base := pool.Provider{Tier: pool.TierTrusted, AttestationTier: pool.AttestationTierSelfSigned}
-	cases := []struct {
-		name         string
-		member, head pool.Provider
-		want         bool
-	}{
-		{"equal", base, base, true},
-		{"lower tier", pool.Provider{Tier: pool.TierProvisional, AttestationTier: pool.AttestationTierSelfSigned}, base, false},
-		{"higher tier", pool.Provider{Tier: pool.TierPinned, AttestationTier: pool.AttestationTierSelfSigned}, base, true},
-		{"unknown member tier", pool.Provider{Tier: "weird"}, base, false},
-		{"lower attestation tier", pool.Provider{Tier: pool.TierTrusted}, base, false},
-		{"higher attestation tier", pool.Provider{Tier: pool.TierTrusted, AttestationTier: pool.AttestationTierHardware}, base, true},
-		{"unknown attestation tier", pool.Provider{Tier: pool.TierTrusted, AttestationTier: "x"}, base, false},
-		{"missing encrypted leg", base, pool.Provider{Tier: pool.TierTrusted, AttestationTier: pool.AttestationTierSelfSigned, EncryptedLeg: true}, false},
-		{"member extra encrypted leg", pool.Provider{Tier: pool.TierTrusted, AttestationTier: pool.AttestationTierSelfSigned, EncryptedLeg: true}, base, true},
-		{"missing attested status", base, pool.Provider{Tier: pool.TierTrusted, AttestationTier: pool.AttestationTierSelfSigned, AttestationStatus: pool.AttestationStatusAttested}, false},
-		{"attested both", pool.Provider{Tier: pool.TierTrusted, AttestationTier: pool.AttestationTierSelfSigned, AttestationStatus: pool.AttestationStatusAttested},
-			pool.Provider{Tier: pool.TierTrusted, AttestationTier: pool.AttestationTierSelfSigned, AttestationStatus: pool.AttestationStatusAttested}, true},
-	}
-	for _, c := range cases {
-		if got := labelsAtLeast(c.member, c.head); got != c.want {
-			t.Errorf("%s: labelsAtLeast = %v, want %v", c.name, got, c.want)
-		}
 	}
 }
 

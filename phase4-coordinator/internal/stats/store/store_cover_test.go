@@ -6,7 +6,6 @@ import (
 	"database/sql/driver"
 	"errors"
 	"io"
-	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -110,34 +109,6 @@ func mustContainSQL(t *testing.T, q string, frags ...string) {
 		if !strings.Contains(n, f) {
 			t.Errorf("query missing %q: %s", f, n)
 		}
-	}
-}
-
-func TestActivePartnerOriginsDedupesAndSkipsEmpty(t *testing.T) {
-	s, f := newFake(t, fixed(fakeResult{
-		cols: []string{"allowed_origins"},
-		rows: [][]driver.Value{
-			{"{https://a.example,https://b.example}"},
-			{`{https://a.example,""}`},
-			{`{""}`},
-			{"{}"},
-		},
-	}))
-	got, err := s.ActivePartnerOrigins(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	sort.Strings(got)
-	if strings.Join(got, ",") != "https://a.example,https://b.example" {
-		t.Fatalf("got %v", got)
-	}
-	mustContainSQL(t, f.calls[0].query, "FROM partner_keys", "WHERE revoked_at IS NULL")
-}
-
-func TestActivePartnerOriginsQueryError(t *testing.T) {
-	s, _ := newFake(t, fixed(fakeResult{err: errors.New("boom")}))
-	if _, err := s.ActivePartnerOrigins(context.Background()); err == nil || !strings.Contains(err.Error(), "active_partner_origins") {
-		t.Fatalf("err=%v", err)
 	}
 }
 

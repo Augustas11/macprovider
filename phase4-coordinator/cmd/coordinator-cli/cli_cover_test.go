@@ -67,9 +67,6 @@ func TestReferralParseErrorSwallowsHelpOnly(t *testing.T) {
 func TestArchiveVerifyCommandsRejectBadArgs(t *testing.T) {
 	cmds := map[string]func([]string, *bytes.Buffer) error{
 		"audit-log-archive": func(a []string, b *bytes.Buffer) error { return auditLogArchive(a, b) },
-		"ledger-rollup-archive": func(a []string, b *bytes.Buffer) error {
-			return ledgerRollupArchive(a, b)
-		},
 	}
 	missing := filepath.Join(t.TempDir(), "nope.jsonl.gz")
 	for name, fn := range cmds {

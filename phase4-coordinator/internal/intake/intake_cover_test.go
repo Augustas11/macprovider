@@ -1,6 +1,7 @@
 package intake
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -167,18 +168,7 @@ func TestValidateAtRejectsFutureWindows(t *testing.T) {
 func fleetJSON(start, end string) string {
 	var cls []string
 	for _, f := range FleetRAMClassFloors {
-		cls = append(cls, `{"ram_gb_floor":`+itoa(f)+`,"provider_count":null,"suppressed":true}`)
+		cls = append(cls, `{"ram_gb_floor":`+strconv.Itoa(f)+`,"provider_count":null,"suppressed":true}`)
 	}
 	return `{"window_start":"` + start + `","window_end":"` + end + `","k_anonymity_min":3,"provider_total":0,"provider_suppressed":0,"classes":[` + strings.Join(cls, ",") + `]}`
-}
-
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	s := ""
-	for ; n > 0; n /= 10 {
-		s = string(rune('0'+n%10)) + s
-	}
-	return s
 }
