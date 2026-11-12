@@ -6555,6 +6555,10 @@ final class AutotuneRecommendTests: XCTestCase {
             revision: "832f602eba5d22436c258c1462bdedc5afddb42b",
             json: #"{"max_position_embeddings":262144,"num_hidden_layers":52,"hidden_size":2688,"num_attention_heads":32,"num_key_value_heads":2,"head_dim":128}"#
         ),
+        "nvidia/nemotron-3.5-lightning-30b-a3b": (
+            revision: "55ac8c89261109b36c04371cd3f479a4594208c8",
+            json: #"{"max_position_embeddings":262144,"num_hidden_layers":52,"hidden_size":2688,"num_attention_heads":32,"num_key_value_heads":2,"head_dim":128}"#
+        ),
         "openai/gpt-oss-120b": (
             revision: "08e7899579b5dd5e0364e4bcd32578134072e22d",
             json: #"{"max_position_embeddings":131072,"num_hidden_layers":36,"hidden_size":2880,"num_attention_heads":64,"num_key_value_heads":8,"head_dim":64,"layer_types":["sliding_attention","full_attention","sliding_attention","full_attention","sliding_attention","full_attention","sliding_attention","full_attention","sliding_attention","full_attention","sliding_attention","full_attention","sliding_attention","full_attention","sliding_attention","full_attention","sliding_attention","full_attention","sliding_attention","full_attention","sliding_attention","full_attention","sliding_attention","full_attention","sliding_attention","full_attention","sliding_attention","full_attention","sliding_attention","full_attention","sliding_attention","full_attention","sliding_attention","full_attention","sliding_attention","full_attention"]}"#

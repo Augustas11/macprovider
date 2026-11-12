@@ -415,6 +415,8 @@ class EffectiveDiffTests(unittest.TestCase):
         # onto the liquidai/lfm3-1.7b row.
         # #2189: the MiniMax M3.1-Flash listed cut moves its served oQ3e
         # artifact onto the minimaxai/minimax-m3.1-flash row.
+        # #2236: the Nemotron 3.5 Lightning listed cut moves its served 4-bit
+        # artifact and its nvidia/ served id onto the nemotron-3.5-lightning-30b-a3b row.
         self.assertEqual(
             cr.load_pricing_move_acks(committed, "committed"),
             {
@@ -433,6 +435,8 @@ class EffectiveDiffTests(unittest.TestCase):
                 ("LiquidAI/LFM3-1.7B-MLX-4bit", "default", "liquidai/lfm3-1.7b"),
                 ("LiquidAI/LFM3-1.7B-MLX-8bit", "default", "liquidai/lfm3-1.7b"),
                 ("mlx-community/MiniMax-M3.1-Flash-oQ3e-mtp", "default", "minimaxai/minimax-m3.1-flash"),
+                ("mlx-community/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-4bit", "default", "nemotron-3.5-lightning-30b-a3b"),
+                ("nvidia/nemotron-3.5-lightning-30b-a3b", "default", "nemotron-3.5-lightning-30b-a3b"),
             },
         )
         for bad in (

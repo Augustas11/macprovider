@@ -31,6 +31,7 @@ final class CatalogToolGrammarTests: XCTestCase {
         Family(name: "Llama-3.1", template: "chat-templates-2107/llama-3.1-8b-instruct.jinja", grammar: .llama3, callStart: "{\"name\"", callEnd: "}}"),
         Family(name: "Llama-3.2", template: "chat-templates-2107/llama-3.2-3b-instruct.jinja", grammar: .llama3, callStart: "{\"name\"", callEnd: "}}"),
         Family(name: "Nemotron-3", template: "chat-templates-2107/nemotron-3-nano-30b-a3b.jinja", grammar: .qwen, callStart: "<tool_call>", callEnd: "</tool_call>"),
+        Family(name: "Nemotron-3.5-Lightning", template: "chat-templates-2107/nemotron-3.5-lightning-30b-a3b.jinja", grammar: .qwen, callStart: "<tool_call>", callEnd: "</tool_call>"),
         Family(name: "Gemma-4", template: "chat-templates-2107/gemma-4-26b-a4b-it.jinja", grammar: .gemma4, callStart: "<|tool_call>", callEnd: "<tool_call|>"),
         Family(name: "Qwen3-8B", template: "chat-templates-2107/qwen3-8b.jinja", grammar: .qwen, callStart: "<tool_call>", callEnd: "</tool_call>"),
         Family(name: "Qwen3-Coder", template: "chat-templates-2107/qwen3-coder-30b-a3b-instruct.jinja", grammar: .qwen, callStart: "<tool_call>", callEnd: "</tool_call>"),
@@ -166,6 +167,8 @@ final class CatalogToolGrammarTests: XCTestCase {
         XCTAssertEqual(ToolCallGrammar.resolved(templateFormat: nil, modelID: "grant-ai/GLM-5.3-Flash-Abliterated-MLX-4bit"), .glm)
         XCTAssertEqual(ToolCallGrammar.resolved(templateFormat: nil, modelID: "zai-org/glm-5.3-flash-uncensored"), .glm)
         XCTAssertEqual(ToolCallGrammar.resolved(templateFormat: nil, modelID: "Solstice-AI/GLM-5.3-Flash-UNCENSORED-mlx-oQ4e-DFlash2"), .glm)
+        XCTAssertEqual(ToolCallGrammar.resolved(templateFormat: nil, modelID: "nvidia/nemotron-3.5-lightning-30b-a3b"), .qwen)
+        XCTAssertEqual(ToolCallGrammar.resolved(templateFormat: nil, modelID: "mlx-community/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-4bit"), .qwen)
         XCTAssertNil(ToolCallGrammar.resolved(templateFormat: "json", modelID: "mlx-community/Qwen2-VL-2B-Instruct-4bit"))
     }
 

@@ -1,6 +1,6 @@
 {
-  "autotune_candidates_sha256": "ce077a30df3e9ae3006d7827f6a8f8a15deb3638c315a1b6cfd2e121fe7415a2",
-  "generated_at": "2026-11-11T18:40:00Z",
+  "autotune_candidates_sha256": "8f92a60904606cce8121ebc98bd64430d66b05828fe31c34a6743b648c0c31ce",
+  "generated_at": "2026-11-12T00:50:00Z",
   "models": [
     {
       "catalog_key": "ricursiveai/ripple-65b-preview",
@@ -78,6 +78,13 @@
       "model_id": "mlx-community/NVIDIA-Nemotron-3-Nano-30B-A3B-4bit",
       "model_revision": "832f602eba5d22436c258c1462bdedc5afddb42b",
       "sha256": "1bc78f214f9a042eaeb290b1fa4cb29915df1028f79d8479266349166c40a71f"
+    },
+    {
+      "catalog_key": "nvidia/nemotron-3.5-lightning-30b-a3b",
+      "min_ram_gb": 32,
+      "model_id": "mlx-community/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-4bit",
+      "model_revision": "55ac8c89261109b36c04371cd3f479a4594208c8",
+      "sha256": "3d22f18d4be885e61b47be7b3c2125be4dc97016412efd3ecd635cc08e24c9ca"
     },
     {
       "catalog_key": "mlx-community/qwen2-vl-2b-instruct-4bit",
@@ -179,6 +186,6 @@
     }
   ],
   "policy_version": "autotune-policy-v1",
-  "release_id": "published-2026-11-11-minimax-m3.1-flash-listed-v283",
+  "release_id": "published-2026-11-12-nemotron-3.5-lightning-listed-v283",
   "schema_version": "macprovider.tier2-identity-binding.v1"
 }
