@@ -416,8 +416,10 @@ func jcsUint64(value uint64) jcs.Value {
 func isIntegralFloat64(value float64) bool {
 	return !math.IsNaN(value) &&
 		!math.IsInf(value, 0) &&
-		value >= float64(math.MinInt64) &&
-		value <= float64(math.MaxInt64) &&
+		// Half-open [-2^63, 2^63): float64(math.MaxInt64) rounds up to 2^63,
+		// and int64(2^63) overflows (implementation-defined).
+		value >= -0x1p63 &&
+		value < 0x1p63 &&
 		math.Trunc(value) == value
 }
 
