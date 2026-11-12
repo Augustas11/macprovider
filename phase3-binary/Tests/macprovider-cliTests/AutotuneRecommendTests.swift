@@ -6543,6 +6543,10 @@ final class AutotuneRecommendTests: XCTestCase {
             revision: "7f0dc925e0d0afb0322d96f9255cfddf2ba5636e",
             json: #"{"max_position_embeddings":131072,"num_hidden_layers":28,"hidden_size":3072,"num_attention_heads":24,"num_key_value_heads":8,"head_dim":128}"#
         ),
+        "minimaxai/minimax-m3.1-flash": (
+            revision: "b1084ba666329d5eefc9771aa358837305f3d840",
+            json: #"{"text_config":{"max_position_embeddings":1048576,"num_hidden_layers":60,"hidden_size":6144,"num_attention_heads":64,"num_key_value_heads":4,"head_dim":128}}"#
+        ),
         "mlx-community/qwen2-vl-2b-instruct-4bit": (
             revision: "01af461cdb9574acc09084a0ef94e216e142b085",
             json: #"{"max_position_embeddings":32768,"num_hidden_layers":28,"hidden_size":1536,"num_attention_heads":12,"num_key_value_heads":2}"#

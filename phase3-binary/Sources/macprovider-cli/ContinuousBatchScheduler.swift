@@ -486,10 +486,13 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
     /// hops (FR-CB5); a queued row forces the scheduler back to one token.
     static let defaultDecodeLockstepWindow = 16
 
-    /// Production decode tokens per hop while a prompt prefills. On the M3
-    /// Ultra a 512-token Qwen3.6 chunk is about 1.7 s and a 4-row decode step
-    /// about 60 ms, so 8 steps give active rows about 4 tok/s instead of about
-    /// 0.6 behind a long prompt, for about 25% slower prefill.
+    /// Production decode tokens per hop while a 512-token prompt chunk
+    /// prefills. On the M3 Ultra a 512-token Qwen3.6 chunk is about 1.7 s and
+    /// a 4-row decode step about 60 ms, so 8 steps give active rows about
+    /// 4 tok/s instead of about 0.6 behind a long prompt. Staggered
+    /// 1K/5K/10K/20K Qwen3-8B rows on the M3 Ultra: 2 steps gave running rows
+    /// 308 ms per token while a prompt prefilled, against 100 ms at 8.
+    /// Larger chunks scale in `ModelRuntime.decodeStepsWhilePrefilling`.
     static let defaultDecodeStepsWhilePrefilling = 8
     static let defaultDecodeHeadroomTokens = 128
     static let defaultPrefillRowsPerIteration = 4
@@ -1089,10 +1092,23 @@ enum ContinuousBatchPrefillOrder {
     }
 
     /// Rows ahead of this turn's head in round-robin order that the turn did
-    /// not select: each is charged one bypass turn.
-    static func bypassed(roundRobinOrder: [String], head: String, selected: Set<String>) -> [String] {
+    /// not select and that arrived before the head (lower `arrival`
+    /// sequence): each is charged one bypass turn. A row passed by an
+    /// earlier-arrived head is not charged, so a later, longer prompt never
+    /// ages past an earlier one and takes the lead from it mid-prefill. A row
+    /// without a known sequence is charged.
+    static func bypassed(
+        roundRobinOrder: [String],
+        head: String,
+        selected: Set<String>,
+        arrival: [String: UInt64] = [:]
+    ) -> [String] {
         guard let index = roundRobinOrder.firstIndex(of: head) else { return [] }
-        return roundRobinOrder[..<index].filter { !selected.contains($0) }
+        return roundRobinOrder[..<index].filter { id in
+            guard !selected.contains(id) else { return false }
+            guard let rowArrival = arrival[id], let headArrival = arrival[head] else { return true }
+            return rowArrival < headArrival
+        }
     }
 }
 
@@ -1121,6 +1137,10 @@ enum ContinuousBatchPrefillGrouping {
     /// never shares a forward. Rows beyond `tokenBudget`, up to
     /// `cohortTokenBudget`, join only with as many prompt tokens left as the
     /// head, so the head's first token never waits for a longer prompt.
+    /// (v0.3.46) The head's prompt comes first in the budget: it continues
+    /// with its next chunks in the same turn when no row is decoding, so it
+    /// holds up to `min(remaining, tokenBudget)` tokens. A peer with a different number
+    /// of tokens left joins only within what that leaves.
     static func select(
         _ candidates: [ContinuousBatchPrefillCandidate],
         maxRows: Int,
@@ -1138,9 +1158,11 @@ enum ContinuousBatchPrefillGrouping {
         var allRagged = head.sharesRaggedOffsets
         var minOffset = head.promptOffset
         var maxOffset = head.promptOffset
+        var leftoverTokens = tokenBudget - min(max(head.remainingPromptTokens, length), tokenBudget)
         for candidate in candidates.dropFirst() where ids.count < cohortCap {
             guard candidate.naturalChunkTokens == length else { continue }
-            guard ids.count < rowCap || candidate.remainingPromptTokens == head.remainingPromptTokens else {
+            let finishesWithHead = candidate.remainingPromptTokens == head.remainingPromptTokens
+            guard finishesWithHead || (ids.count < rowCap && length <= leftoverTokens) else {
                 continue
             }
             let atHeadOffset = candidate.promptOffset == head.promptOffset
@@ -1153,6 +1175,7 @@ enum ContinuousBatchPrefillGrouping {
                 continue
             }
             ids.append(candidate.requestID)
+            if !finishesWithHead { leftoverTokens -= length }
             sameOffset = sameOffset && atHeadOffset
             allRagged = allRagged && candidate.sharesRaggedOffsets
             minOffset = groupMin
@@ -6039,24 +6062,36 @@ actor ContinuousBatchScheduler {
         for id in ContinuousBatchPrefillOrder.bypassed(
             roundRobinOrder: promptOrder.filter { activePrompt[$0] != nil },
             head: head.row.request.id,
-            selected: Set(selected.map { $0.row.request.id })
+            selected: Set(selected.map { $0.row.request.id }),
+            arrival: requestAdmissionSequences
         ) {
             activePrompt[id]?.prefillBypassTurns += 1
         }
 
-        // A resume boundary is a numerical partition, not another scheduling
-        // turn. Keep each row's numerical chunk intact, but let its row use
-        // the rest of this turn's token budget before rotating or decoding.
-        // A boundary may extend the turn by one original group (at most one
-        // extra iteration budget); then yield. Never shrink a chunk to fit:
-        // that would change the GLM cold/warm kernel route (SPEC-024-R005).
+        // The turn budget goes to the head's prompt first (v0.3.46): with no
+        // row decoding, after each forward the head's next original chunk
+        // leads a new group while the per-iteration budget has room (v0.3.47:
+        // one chunk per turn while rows decode), and peers get only what
+        // the head's prompt leaves (`ContinuousBatchPrefillGrouping.select`).
+        // Separate forwards keep
+        // every row's chunk partition. A resume boundary is a numerical
+        // partition, not another scheduling turn: a boundary may extend the
+        // turn by one original group (at most one extra iteration budget);
+        // then yield. Never shrink a chunk to fit: that would change the GLM
+        // cold/warm kernel route (SPEC-024-R005).
         var group = selected
         var remainingTokens = turnBudget
+        // Continuation off a boundary spends only the per-iteration budget,
+        // never the idle cohort allowance, so an idle turn still yields to a
+        // new short prompt after one budget's worth of work.
+        var continuationTokens = min(turnBudget, configuration.maxPrefillTokensPerIteration)
+        var turnRows = selected.map { $0.row.request.id }
         while !group.isEmpty {
             let consumed = group.reduce(0) { $0 + $1.end - $1.row.prefillCursor }
             let progressed = await runPrefillGroup(group)
             madeProgress = madeProgress || progressed
             remainingTokens -= consumed
+            continuationTokens -= consumed
             guard progressed, remainingTokens >= 0, !draining,
                   configuration.referencePrefillStepSize == nil,
                   !backendCancellationPending, !cleanupFailedClosed else { break }
@@ -6085,11 +6120,35 @@ actor ContinuousBatchScheduler {
                 continuation.append((row, end))
                 availableTokens -= tokens
             }
+            // Off a boundary, the head's next chunk leads a fresh group under
+            // the unspent per-iteration budget, with what the head's prompt
+            // leaves going to its peers. A request that arrived during the
+            // turn and has a free slot ends the turn instead: it is admitted
+            // and ordered (a short prompt leads) at the next turn, not after
+            // the head's whole budget.
+            // While rows decode, the head gets one chunk per turn (v0.3.47):
+            // a decode window follows every chunk, so a running row waits one
+            // chunk, not the whole budget, per decode window.
+            let headID = head.row.request.id
+            let arrivalAwaitsAdmission = !waiting.isEmpty && occupiedSlots < configuration.maxActiveRows
+            if continuation.isEmpty, continuationTokens > 0, !arrivalAwaitsAdmission, activeDecode.isEmpty,
+               group.contains(where: { $0.row.request.id == headID }),
+               activePrompt[headID] != nil {
+                let order = [headID] + prefillCandidateOrder().filter { $0 != headID }
+                let next = configuration.allowsRaggedPrefillOffsets
+                    ? selectRaggedPrefillGroup(order: order, tokenBudget: continuationTokens)
+                    : selectEqualOffsetPrefillGroup(order: order, tokenBudget: continuationTokens)
+                if next.first?.row.request.id == headID,
+                   next.reduce(0, { $0 + $1.end - $1.row.prefillCursor }) <= continuationTokens {
+                    continuation = next
+                    turnRows += next.map { $0.row.request.id }.filter { !turnRows.contains($0) }
+                }
+            }
             group = continuation
         }
         // Rotate each row once for the whole bounded turn, including its
         // boundary continuation. Other prompt rows retain their FCFS order.
-        for id in selected.map({ $0.row.request.id }) where activePrompt[id] != nil {
+        for id in turnRows where activePrompt[id] != nil {
             promptOrder.removeAll { $0 == id }
             promptOrder.append(id)
         }
@@ -6312,6 +6371,7 @@ actor ContinuousBatchScheduler {
         var selectedOffset: Int?
         var selectedChunkCount: Int?
         var selectedTokenCount = 0
+        var leftoverTokens = 0
         for id in order {
             guard selected.count < configuration.maxPrefillRowsPerIteration,
                   let row = activePrompt[id]
@@ -6325,15 +6385,23 @@ actor ContinuousBatchScheduler {
                       chunkCount == selectedChunkCount,
                       selectedTokenCount + chunkCount <= tokenBudget
                 else { continue }
-                // Past the per-iteration budget (the idle cohort turn), only
-                // a row that finishes its prompt with the head joins.
-                if selectedTokenCount + chunkCount > configuration.maxPrefillTokensPerIteration {
-                    guard row.request.promptTokens.count - row.prefillCursor
-                        == head.request.promptTokens.count - head.prefillCursor else { continue }
+                // A row that finishes its prompt with the head joins up to
+                // the turn budget (the idle cohort turn). Any other row joins
+                // only within the per-iteration budget the head's own prompt
+                // leaves this turn (v0.3.46).
+                let finishesWithHead = row.request.promptTokens.count - row.prefillCursor
+                    == head.request.promptTokens.count - head.prefillCursor
+                if !finishesWithHead {
+                    guard selectedTokenCount + chunkCount <= configuration.maxPrefillTokensPerIteration,
+                          chunkCount <= leftoverTokens else { continue }
+                    leftoverTokens -= chunkCount
                 }
             } else {
                 selectedOffset = row.prefillCursor
                 selectedChunkCount = chunkCount
+                let perIteration = min(tokenBudget, configuration.maxPrefillTokensPerIteration)
+                leftoverTokens = perIteration
+                    - min(max(row.request.promptTokens.count - row.prefillCursor, chunkCount), perIteration)
             }
             selected.append((row, end))
             selectedTokenCount += chunkCount

@@ -1,11 +1,56 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.44
+Version: v0.3.47
 Status: draft (normative contract; runtime enablement is default-on per Mac behind the FR-CB10 on-device self-check, v0.3.15)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.3.47 (2026-11-10, FR-CB2 one head chunk per turn while rows decode):**
+FR-CB2 prefill packing: while any row is decoding, the head's prompt gets one
+original chunk per turn; the v0.3.46 continuation (the head leading a fresh
+group in the same turn) applies only when no row is decoding. A decode window
+therefore follows every chunk, so a running row waits one chunk, not the whole
+turn budget, per decode window. On an M5, staggered 1K/4K/8K/16K rows under
+v0.3.46 gave running rows 4.2 s per token while a prompt prefilled, against
+1.9 s for upstream mlx-swift-lm PR #771. Head-first ordering, the peer budget
+rule (the head's prompt holds `min(tokens left, budget)`, so a peer shares only
+the head's last budget of chunks) and every chunk partition are unchanged.
+
+**Change log v0.3.46 (2026-11-10, FR-CB2 the head's prompt takes the turn budget first):**
+FR-CB2 prefill packing: the turn's token budget goes to the head's prompt
+first. After each forward the head leads a fresh group with its next
+original chunk in the same turn while the per-iteration budget has room
+(separate forwards, so no row's chunk partition, chunk length or kernel route
+changes), unless a request arrived during the turn and a slot is free for
+it: then the turn ends so the new request is ordered at the next turn. A peer that
+cannot finish with the head joins its forward only within the budget the
+head's prompt leaves (`min(tokens left, budget)` held for the head). Before,
+an 8K head and a 16K peer at the same offset shared every 512-token forward,
+so on an M5 the staggered 1K/4K/8K/16K run gave the 8K row its first token
+after 16 shared forwards (71-82 s against 39 s for upstream mlx-swift-lm PR
+#771), and the 16K row, once alone, prefilled only 512 tokens per turn. Rows
+with as many tokens left as the head still share its forwards (the cohort
+rule), the prefill order (fewest tokens left first, aging) is unchanged, a
+continuation never spends the idle cohort allowance, and a turn still ends
+with a decode window. A turn's prefill work stays within the configured
+budget except for the existing single boundary extension.
+
+**Change log v0.3.45 (2026-11-10, FR-CB2 bypass charging follows arrival):**
+FR-CB2 prefill order: a passed-over row is charged a bypass turn only when
+the head was admitted after it. Before, a later and longer prompt passed by an
+earlier, shorter head aged after 8 turns and then led until its own prompt was
+done, holding the earlier prompt's remaining chunks behind it: on an M5,
+staggered 1K/4K/8K/16K prompts (8K admitted 5 s before 16K), the 8K row's
+first token came at 80 s against 44 s for upstream mlx-swift-lm PR #771,
+which finishes one prompt before the next. A stream of later, shorter prompts
+still ages an earlier long prompt after 8 turns, so the starvation bound is
+unchanged; the fewest-tokens-left order, the idle cohort rule and every
+grouping, chunk and kernel-route rule are unchanged. The prefill decode
+window stays 8 steps per 512 prefilled tokens: on the M3 Ultra, staggered
+1K/5K/10K/20K Qwen3-8B rows at 2 steps gave running rows 308 ms per token
+while a prompt prefilled, against 100 ms at 8.
+
 **Change log v0.3.44 (2026-11-10, release UX: self-check authorizes CB and cached turns, Related: #2281):**
 FR-CB10: a granted self-check authorizes CB without a signed positive entry;
 the signed policy is revocation-only (as v0.3.15 stated), and `/v1/status`
@@ -997,7 +1042,13 @@ conformant with the row's own serial reference.
 Prefill MUST be bounded by a configured per-iteration prefill token budget. A
 single row MUST NOT consume more than its configured per-row chunk limit in one
 forward; each compatible group MUST NOT consume more than the configured token
-budget in one forward. A row ending on a SPEC-024-R005 resume or snapshot
+budget in one forward. (v0.3.46) The turn's budget goes to the head's prompt
+first: after a forward, the head MAY lead a new group with its next
+original-shaped chunk in that same turn while the cumulative prefill work
+stays within the per-iteration budget, never the idle cohort allowance, and
+MUST NOT when a request waits for admission with a free slot; a peer that cannot finish with the head MUST join the
+head's forward only within the budget left after `min(head tokens left,
+budget)`. A row ending on a SPEC-024-R005 resume or snapshot
 boundary MAY run its next original-shaped chunk in that same turn; forwards
 stay separate and there is no intervening decode window or peer prefill. The
 next chunk MUST NOT be shrunk, merged or repartitioned to fit a remaining turn
@@ -1021,8 +1072,9 @@ rows to group selection in this order: first every aged row, in round-robin
 turn order; then the other rows by fewest prompt tokens left (prompt length
 minus committed prefill cursor), ties in round-robin turn order. The first row
 offered is the group head. A row that stands ahead of the head in round-robin
-turn order and is not selected for the turn MUST be charged one bypass turn;
-a row with 8 bypass turns (`ContinuousBatchPrefillOrder.maxBypassTurns`) is
+turn order, is not selected for the turn and was admitted before the head
+(v0.3.45) MUST be charged one bypass turn; a row passed by a head admitted
+before it is not charged; a row with 8 bypass turns (`ContinuousBatchPrefillOrder.maxBypassTurns`) is
 aged and MUST stay aged until its prompt is done. An aged row is never charged
 again, so no row is passed over more than 8 times, and an aged row progresses
 at least as fast as round-robin order would let it. When no row decodes, a

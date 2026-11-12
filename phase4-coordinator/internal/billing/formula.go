@@ -108,6 +108,10 @@ var exactModelKeyAliases = map[string]string{
 	// LFM3 1.7B's official MLX artifacts (the "-4bit"/"-8bit" suffix is
 	// already stripped) bill as its catalog key (#2231).
 	"liquidai/lfm3-1.7b-mlx": "liquidai/lfm3-1.7b",
+	// MiniMax M3.1-Flash's served oQ3e artifact (namespace already stripped)
+	// and its OpenRouter-style slug bill as its catalog key (#2189).
+	"minimax-m3.1-flash-oq3e-mtp": "minimaxai/minimax-m3.1-flash",
+	"minimax/minimax-m3.1-flash":  "minimaxai/minimax-m3.1-flash",
 	// DeepSeek-V4-Flash's served artifact and its upstream release (#2111).
 	"tensorfold/deepseek-v4-flash-0731-mxfp4-mlx": "deepseek/deepseek-v4-flash",
 	"deepseek-ai/deepseek-v4-flash-0731":          "deepseek/deepseek-v4-flash",

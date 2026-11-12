@@ -15,7 +15,10 @@ import XCTest
 final class PagedKVBatchDecodeWindowTests: XCTestCase {
     override func setUpWithError() throws {
         try super.setUpWithError()
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
+        // The test bundle's metallib counts too: under `swift test`,
+        // `Bundle.main` is Xcode's xctest runner, so the main-bundle check alone
+        // skipped this suite on every host.
+        guard MLXTestDevice.metallibAvailable else {
             throw XCTSkip("MLX default metallib is unavailable in this test host")
         }
     }

@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.87
+**Version:** 0.1.88
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.87",
+  "version": "0.1.88",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -544,12 +544,25 @@ The authorized dependency tuple is exact:
 
 | Repository | Fork tag | Revision | Upstream base |
 |---|---|---|---|
-| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.43` | `6f36fb83d9398816455b5868e4f97d62d1c809e2` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
+| `https://github.com/Augustas11/mlx-swift-lm.git` | `3.32.3-macprovider.44` | `ce950bf2840453b7e320fbb0a3b6eee7c7283658` | `ml-explore/mlx-swift-lm` `3.32.3` (`3b339ad6e3b3f44c8121ecff5131c7fd55e075e6`) |
 | `https://github.com/Augustas11/mlx-swift` | `0.32.3-macprovider.13` | `565269220ccc2cc0d2ce149affb98a2f9d9b32ac` | `ml-explore/mlx-swift` `0.32.3` (`19601207e9a0de51e03ee6ec0c3c5f3784275075`) |
 | `https://github.com/Augustas11/mlx` | `v0.32.4-macprovider.7` | `565070fe4b0f95927f7fdd5fcfb537157605037a` | `ml-explore/mlx` `v0.32.4` (`36969c094354086e15d2a327a9c50feb20b9cf11`) |
 | `https://github.com/Augustas11/mlx-c` | `v0.6.0-macprovider.2` | `2b1ff2b5b5129a6115771da32e1bac3b6b01ab01` | `ml-explore/mlx-c` pinned base (`ebc88f10caa1b625e6b581437a8dea6df8a70085`) |
 
-The mlx-swift-lm row `3.32.3-macprovider.43` is `3.32.3-macprovider.42`
+The mlx-swift-lm row `3.32.3-macprovider.44` is `3.32.3-macprovider.43`
+(`6f36fb83d9398816455b5868e4f97d62d1c809e2`, #2230) plus five MiniMax M3 commits (#2189, #2284), all in
+`Libraries/MLXLLM/Models/MiniMaxM3.swift` and its tests. The float32 router reads
+the float32 copy the one-launch post-attention norm writes; the routed experts'
+clamped SwiGLU runs as one kernel on the fused gate/up gather; the shared
+expert's and dense MLPs' quantized gate/up pairs are fused at load, except where
+the doubled width would change MLX's kernel choice or for NVFP4; and the expert
+combine runs as one kernel that replays the compiled combine's float32 products
+and bf16 roundings in ascending expert order. Each is bitwise the path it
+replaces, per row, so batched rows keep their serial result. The fifth commit
+seeds the fused-norm test. No other model's code and no shared code changes.
+The Swift, core and C rows are unchanged.
+
+The prior mlx-swift-lm row `3.32.3-macprovider.43` is `3.32.3-macprovider.42`
 (`e0cac0711d20996a40aa1c1ca5a9705e9e8635c7`) plus seven commits (#2230): the Mamba2
 `segsum` batch-mask fix and its test, and upstream `ml-explore/mlx-swift-lm` #728
 (cache-list attention masks sized from the live rows), #703 (quantized-KV prefill
@@ -2335,6 +2348,12 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.88 (2026-11-12, Related: #2189, #2284)** — R003 names mlx-swift-lm
+  `3.32.3-macprovider.44` (`ce950bf2840453b7e320fbb0a3b6eee7c7283658`), which is
+  `3.32.3-macprovider.43` (#2230) plus four exact MiniMax M3 decode fusions (float32
+  router copy, one-launch SwiGLU, fused shared and dense gate/up, one-launch
+  expert combine) and the seeded fused-norm test. The Swift, core and C rows are
+  unchanged.
 - **0.1.87 (2026-11-11, Related: #2230)** — R003 names mlx-swift-lm
   `3.32.3-macprovider.43` (`6f36fb83d9398816455b5868e4f97d62d1c809e2`), which is
   `3.32.3-macprovider.42` plus the Mamba2 segsum batch-mask fix and upstream #728,

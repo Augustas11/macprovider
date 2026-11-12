@@ -294,7 +294,7 @@ final class PagedKVSlidingWindowTests: XCTestCase {
     }
 
     private func requireMetal() throws {
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
+        guard MLXTestDevice.metallibAvailable else {
             throw XCTSkip("MLX default metallib is unavailable in this test host")
         }
     }

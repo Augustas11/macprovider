@@ -6267,6 +6267,24 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertFalse(whilePrefilling.contains { $0.steps > 3 })
     }
 
+    /// #2280: at the production 512-token chunk a running row takes 8 decode
+    /// steps between a prompt's chunks. 2 steps left running rows at about
+    /// 308 ms per token on Qwen3-8B while a long prompt prefilled.
+    func testProductionPrefillDecodeWindowGivesRunningRowsEightStepsPerChunk() async throws {
+        let steps = ContinuousBatchSchedulerConfiguration.defaultDecodeStepsWhilePrefilling
+        XCTAssertEqual(steps, 8)
+        XCTAssertEqual(
+            ModelRuntime.decodeStepsWhilePrefilling(
+                promptChunkTokens: ContinuousBatchSchedulerConfiguration.defaultPromptChunkTokens
+            ),
+            8
+        )
+        let windows = try await decodeWindowsWhileAPromptPrefills(maxDecodeStepsWhilePrefilling: steps)
+        let whilePrefilling = windows.dropFirst().prefix { !$0.ids.contains("long") }
+        XCTAssertEqual(whilePrefilling.first?.steps, 8)
+        XCTAssertFalse(whilePrefilling.contains { $0.steps > 8 })
+    }
+
     /// The strict alternation the window replaces: one decode token per chunk.
     func testOneStepWhilePrefillingKeepsStrictAlternation() async throws {
         let windows = try await decodeWindowsWhileAPromptPrefills(maxDecodeStepsWhilePrefilling: 1)
@@ -6972,6 +6990,82 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertLessThanOrEqual(longLedAt.last ?? .max, 2 * maxBypass + 10)
     }
 
+    /// v0.3.45: only a head admitted after a passed-over row charges it.
+    func testPrefillBypassChargesOnlyRowsAdmittedBeforeTheHead() {
+        let arrival: [String: UInt64] = ["old": 1, "head": 2, "new": 3]
+        XCTAssertEqual(
+            ContinuousBatchPrefillOrder.bypassed(
+                roundRobinOrder: ["new", "old", "head"], head: "head", selected: ["head"], arrival: arrival
+            ),
+            ["old"]
+        )
+        // A row without a known admission sequence is still charged.
+        XCTAssertEqual(
+            ContinuousBatchPrefillOrder.bypassed(
+                roundRobinOrder: ["unknown", "head"], head: "head", selected: ["head"], arrival: arrival
+            ),
+            ["unknown"]
+        )
+    }
+
+    /// The prefill turns of an earlier 8K prompt and a later 16K prompt
+    /// (512-token chunks, one row per turn while rows decode): the earlier
+    /// prompt finishes every chunk before the later one leads, and a stream
+    /// of later, shorter prompts still ages an earlier long prompt.
+    func testEarlierPromptFinishesBeforeALaterLongerPromptAgesPastIt() {
+        typealias Candidate = ContinuousBatchPrefillOrder.Candidate
+        func run(
+            _ initial: [(id: String, chunks: Int)],
+            arrivals: [(turn: Int, id: String, chunks: Int)] = [],
+            turns: Int
+        ) -> [String] {
+            var remaining: [String: Int] = [:]
+            var bypass: [String: Int] = [:]
+            var arrival: [String: UInt64] = [:]
+            var roundRobin: [String] = []
+            var sequence: UInt64 = 0
+            func admit(_ id: String, _ chunks: Int) {
+                remaining[id] = chunks
+                bypass[id] = 0
+                arrival[id] = sequence
+                sequence += 1
+                roundRobin.append(id)
+            }
+            initial.forEach { admit($0.id, $0.chunks) }
+            var heads: [String] = []
+            for turn in 0 ..< turns where !roundRobin.isEmpty {
+                arrivals.filter { $0.turn == turn }.forEach { admit($0.id, $0.chunks) }
+                let order = ContinuousBatchPrefillOrder.order(roundRobin.map {
+                    Candidate(requestID: $0, remainingPromptTokens: remaining[$0]! * 512, bypassTurns: bypass[$0]!)
+                })
+                let head = order[0]
+                for id in ContinuousBatchPrefillOrder.bypassed(
+                    roundRobinOrder: roundRobin, head: head, selected: [head], arrival: arrival
+                ) {
+                    bypass[id, default: 0] += 1
+                }
+                heads.append(head)
+                remaining[head]! -= 1
+                roundRobin.removeAll { $0 == head }
+                if remaining[head]! > 0 { roundRobin.append(head) }
+            }
+            return heads
+        }
+
+        // 16K arrives with 14 of the 8K row's chunks left: 8K keeps the lead
+        // for all of them, then 16K runs. Before v0.3.45 the 16K row aged
+        // after 8 turns and then led until its prompt was done.
+        let heads = run([("8k", 16)], arrivals: [(2, "16k", 32)], turns: 48)
+        XCTAssertEqual(Array(heads.prefix(16)), Array(repeating: "8k", count: 16))
+        XCTAssertEqual(Array(heads.dropFirst(16)), Array(repeating: "16k", count: 32))
+        // 16K admitted first: the shorter, later 8K leads, and 16K, passed by
+        // a later head, ages and leads after `maxBypassTurns` turns.
+        let aged = run([("16k", 32), ("8k", 16)], turns: 48)
+        let maxBypass = ContinuousBatchPrefillOrder.maxBypassTurns
+        XCTAssertEqual(Array(aged.prefix(maxBypass)), Array(repeating: "8k", count: maxBypass))
+        XCTAssertEqual(aged[maxBypass], "16k")
+    }
+
     func testRaggedPrefillGroupingCohortBudgetAdmitsOnlyRowsFinishingWithTheHead() {
         let candidates = [
             ContinuousBatchPrefillCandidate(
@@ -7012,6 +7106,118 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
                 minimumGroupedChunkTokens: 1_024
             )?.requestIDs,
             ["a"]
+        )
+    }
+
+    /// v0.3.46: the head's prompt takes the per-iteration budget first; a
+    /// peer that cannot finish with it joins only with what the head leaves.
+    func testRaggedPrefillGroupingGivesTheHeadsPromptTheBudgetFirst() {
+        func candidate(_ id: String, offset: Int = 0, remaining: Int) -> ContinuousBatchPrefillCandidate {
+            ContinuousBatchPrefillCandidate(
+                requestID: id, promptOffset: offset, naturalChunkTokens: 512, sharesRaggedOffsets: true,
+                remainingPromptTokens: remaining
+            )
+        }
+        // The 8K head holds the whole 2048-token budget: the 16K prompt at the
+        // same offset no longer halves each of its forwards.
+        XCTAssertEqual(
+            ContinuousBatchPrefillGrouping.select(
+                [candidate("8k", remaining: 8_192), candidate("16k", remaining: 16_384)],
+                maxRows: 4, tokenBudget: 2_048
+            )?.requestIDs,
+            ["8k"]
+        )
+        // A head with 1024 tokens left leaves 1024: two peers' chunks fit.
+        XCTAssertEqual(
+            ContinuousBatchPrefillGrouping.select(
+                [
+                    candidate("1k", remaining: 1_024), candidate("8k", remaining: 8_192),
+                    candidate("16k", remaining: 16_384), candidate("32k", remaining: 32_768),
+                ],
+                maxRows: 4, tokenBudget: 2_048
+            )?.requestIDs,
+            ["1k", "8k", "16k"]
+        )
+        // Rows finishing with the head still share its forwards past the
+        // leftover, up to the row cap.
+        XCTAssertEqual(
+            ContinuousBatchPrefillGrouping.select(
+                [
+                    candidate("a", remaining: 8_192), candidate("b", offset: 512, remaining: 8_192),
+                    candidate("long", remaining: 16_384), candidate("c", remaining: 8_192),
+                ],
+                maxRows: 4, tokenBudget: 2_048
+            )?.requestIDs,
+            ["a", "b", "c"]
+        )
+    }
+
+    /// The 4K -> 8K + 16K bench shape through the scheduler, scaled to a
+    /// 2-token chunk and an 8-token budget (512 and 2048 on the M5). A row
+    /// decodes throughout, so each turn holds the per-iteration budget and
+    /// a decode window follows it. Each prompt takes whole turns of its own
+    /// chunks, oldest-led first: the 8K row's first token comes after its
+    /// own 8 chunks, not after 16 forwards it shares with the 16K row.
+    func testBudgetGoesToTheHeadPromptFirstAcrossFourK8K16KArrivals() async throws {
+        let ids = ["running", "4k", "8k", "16k"]
+        let lengths = ["running": 1, "4k": 8, "8k": 16, "16k": 32]
+        var scripts: [String: [Int]] = ["4k": [2], "8k": [3], "16k": [4]]
+        // The running row decodes through every prompt's prefill.
+        scripts["running"] = Array(repeating: 1, count: 80)
+        let backend = ScriptedBackend(scripts: scripts)
+        let scheduler = try await makeScheduler(
+            descriptor: Self.descriptor(maxPhysicalBlocks: 64),
+            maxActiveRows: 4,
+            maxPromptChunkTokens: 2,
+            maxDecodeStepsWhilePrefilling: 2,
+            maxPrefillRowsPerIteration: 4,
+            maxPrefillTokensPerIteration: 8,
+            allowsRaggedPrefillOffsets: true,
+            backend: backend,
+            allocator: PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 64)
+        )
+        let installed = await scheduler.installLabBatchComposition(ids)
+        XCTAssertTrue(installed)
+        let tasks = ids.map { id in
+            Task {
+                try await scheduler.submit(.init(
+                    id: id, conversationKey: "", promptTokens: Array(1 ... lengths[id]!),
+                    maxOutputTokens: id == "running" ? 80 : 1
+                ))
+            }
+        }
+        for task in tasks { _ = try await task.value }
+
+        // The head's prompt holds min(tokens left, budget) of each turn, so
+        // a peer shares only the head's last budget of chunks: the 8K row
+        // joins the 4K's last three forwards and never slows its first one.
+        let order = await backend.prefillOrder()
+        XCTAssertEqual(
+            order,
+            [["running"], ["4k"]] + Array(repeating: ["4k", "8k"], count: 3) + Array(repeating: ["8k"], count: 5)
+                + Array(repeating: ["16k"], count: 16)
+        )
+        // Turns: runs of prefill forwards between decode windows. While a row
+        // decodes the head gets one forward per turn, so a decode window
+        // follows every chunk (v0.3.47).
+        var turns: [[String]] = []
+        var current: [String] = []
+        for event in await backend.events() {
+            let parts = event.split(separator: ":")
+            if parts.first == "prefill" {
+                current.append(String(parts[1]))
+            } else if parts.first == "decode", !current.isEmpty {
+                turns.append(current)
+                current = []
+            }
+        }
+        if !current.isEmpty { turns.append(current) }
+        XCTAssertEqual(turns.first, ["running"])
+        XCTAssertEqual(
+            Array(turns.dropFirst()),
+            [["4k"]] + Array(repeating: ["4k", "8k"], count: 3) + Array(repeating: ["8k"], count: 5)
+                + Array(repeating: ["16k"], count: 16),
+            "\(turns)"
         )
     }
 
