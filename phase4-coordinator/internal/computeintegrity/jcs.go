@@ -141,7 +141,11 @@ func canonicalJSONNumber(raw string) (string, error) {
 	if err != nil || math.IsInf(f, 0) || math.IsNaN(f) {
 		return "", fmt.Errorf("invalid JSON number %q", raw)
 	}
-	if f == math.Trunc(f) && f >= math.MinInt64 && f <= math.MaxInt64 {
+	// float64(math.MaxInt64) rounds up to 2^63, so an inclusive MaxInt64 bound
+	// would admit 2^63 and int64(f) would overflow (implementation-defined, so
+	// the bytes could differ by architecture). The half-open [-2^63, 2^63)
+	// range is exact; integral values outside it use RFC 8785 double form.
+	if f == math.Trunc(f) && f >= -0x1p63 && f < 0x1p63 {
 		return strconv.FormatInt(int64(f), 10), nil
 	}
 	return canonicalDouble(f)
