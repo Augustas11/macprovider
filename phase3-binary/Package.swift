@@ -17,6 +17,15 @@ let package = Package(
         )
     ],
     dependencies: [
+        // Tag 3.32.3-macprovider.47 (#2256) is .44 (MiniMax) plus one commit: the
+        // mlx-swift 0.32.3-macprovider.18 pin. mlx-swift .18 is .13 with the
+        // MLX core gitlink on v0.32.4-macprovider.10 (26ac61533), which sends
+        // every small-M affine product whose K is not a multiple of 128
+        // (gpt-oss, K = 2880) to qmv_wide for every row count on gen 15 and 16
+        // GPUs, one row included; other shapes and gen 17 keep their routes.
+        // qmv_wide reduces each vector in an order the vector tile does not
+        // change, so a row keeps its serial result while up to 5 rows share one
+        // read of the weights.
         // Tag 3.32.3-macprovider.44 (#2189, #2284) is .43 (#2230) plus five MiniMax M3
         // commits in MiniMaxM3.swift and its tests: the float32 router reads
         // the one-launch norm's float32 copy, a one-launch clamped SwiGLU on
@@ -92,8 +101,8 @@ let package = Package(
         // MTP verification step commits upstream does not carry, and upstream
         // #631 with every Qwen3.5 trace declaring the arrays it reads as
         // compile state) and the GLM-5-Next text model with batched rows. It
-        // resolves the Augustas11/mlx-swift fork (tag 0.32.3-macprovider.13, MLX
-        // core v0.32.4-macprovider.7 (565070fe4) and mlx-c v0.6.0-macprovider.2). Core keeps
+        // resolves the Augustas11/mlx-swift fork (tag 0.32.3-macprovider.18, MLX
+        // core v0.32.4-macprovider.10 (26ac61533) and mlx-c v0.6.0-macprovider.2). Core keeps
         // small-M quantized matmuls on one kernel route so a row decodes the same tokens alone
         // and inside a continuous batch (the startup batched-isolation gate),
         // erases a freed compiled function from every thread's compile cache
@@ -108,7 +117,7 @@ let package = Package(
         // compatible per-column attention while retaining row-owned caches.
         .package(
             url: "https://github.com/Augustas11/mlx-swift-lm.git",
-            revision: "ce950bf2840453b7e320fbb0a3b6eee7c7283658"
+            revision: "bfc88b9c8f745a13f3cce145101f13dc3dc95e8c"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",
