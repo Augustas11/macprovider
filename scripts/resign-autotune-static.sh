@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Sign the generated SPEC-023 feed bytes with a trusted Ed25519 release key.
+# Sign the generated SPEC-023 feed bytes and their release.json manifest with a
+# trusted Ed25519 release key.
 
 set -euo pipefail
 
@@ -220,5 +221,15 @@ fi
 # release's own ledger row from the rebinding history, so the post-sign rebind
 # neither demands a previous release nor rejects its own bindings.
 python3 "$REPO_ROOT/scripts/catalog-release.py" "${GENERATE_ARGS[@]}"
+
+# SPEC-023 §3.8: one signature over the final release.json, which binds every
+# feed digest above. Signed after the rebind so it covers the exact bytes
+# published; the per-feed sidecars stay until pre-manifest CLIs are gone.
+manifest_json="$CATALOG_DIR/release.json"
+manifest_sig="$TMP_DIR/release.json.sig"
+sign_one "$manifest_json" "$manifest_sig"
+verify_one "$manifest_json" "$manifest_sig"
+install -m 0644 "$manifest_sig" "$CATALOG_DIR/release.json.sig.new"
+mv "$CATALOG_DIR/release.json.sig.new" "$CATALOG_DIR/release.json.sig"
 python3 "$REPO_ROOT/scripts/catalog-release.py" verify
 printf '[resign-autotune-static] Signed and verified release with key_id=%s\n' "$KEY_ID"

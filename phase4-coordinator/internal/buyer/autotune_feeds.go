@@ -92,6 +92,11 @@ type AutotuneFeeds struct {
 	// NativeMTP is the optional SPEC-023 §12.5 admission set of this release
 	// and its revocation slot directory.
 	NativeMTP NativeMTPFeeds
+	// ReleaseManifest* are the release's signed release.json and its
+	// release.json.sig (SPEC-023 §3.8), served at /v1/catalog-release (+ .sig).
+	// Empty for a release cut before §3.8; the routes then answer 404.
+	ReleaseManifestJSON []byte
+	ReleaseManifestSig  []byte
 	// SourceConfig is the exact feed configuration these feeds were loaded
 	// from (paths, previous-release target, keyring), so a publication that
 	// needs the retained previous releases resolves them from the SAME
@@ -230,8 +235,34 @@ func LoadAutotuneFeeds(cfg config.AutotuneFeedsConfig) (AutotuneFeeds, error) {
 	if err != nil {
 		return AutotuneFeeds{}, err
 	}
+	served := []servedReleaseFeed{}
+	for _, feed := range []struct {
+		name   string
+		loaded loadedAutotuneFeed
+	}{
+		{"autotune-candidates.json", candidates},
+		{"demand-rank.json", demand},
+		{"rate-card.json", rateCard},
+		{"continuous-batching-policy.json", cbPolicy},
+		{"autotune-artifacts.json", artifacts},
+	} {
+		if feed.loaded.enabled() {
+			served = append(served, servedReleaseFeed{name: feed.name, body: feed.loaded.jsonBytes, signer: feed.loaded.verification.KeyID})
+		}
+	}
+	if nativeMTP.admissionEnabled() {
+		// loadNativeMTPFeeds already proved the admission signer is the
+		// candidate catalog signer.
+		served = append(served, servedReleaseFeed{name: "native-mtp-admission.json", body: nativeMTP.AdmissionJSON, signer: candidates.verification.KeyID})
+	}
+	manifestJSON, manifestSig, err := loadReleaseManifest(cfg, keyring, candidates, served)
+	if err != nil {
+		return AutotuneFeeds{}, err
+	}
 	return AutotuneFeeds{
 		NativeMTP:                            nativeMTP,
+		ReleaseManifestJSON:                  manifestJSON,
+		ReleaseManifestSig:                   manifestSig,
 		RateCardJSON:                         rateCard.jsonBytes,
 		RateCardSig:                          rateCard.sigBytes,
 		RateCardVerification:                 rateCard.verification,
@@ -1285,6 +1316,8 @@ func cloneAutotuneFeeds(feeds AutotuneFeeds) AutotuneFeeds {
 	feeds.CatalogArtifactsSig = append([]byte(nil), feeds.CatalogArtifactsSig...)
 	feeds.ContinuousBatchingPolicyJSON = append([]byte(nil), feeds.ContinuousBatchingPolicyJSON...)
 	feeds.ContinuousBatchingPolicySig = append([]byte(nil), feeds.ContinuousBatchingPolicySig...)
+	feeds.ReleaseManifestJSON = append([]byte(nil), feeds.ReleaseManifestJSON...)
+	feeds.ReleaseManifestSig = append([]byte(nil), feeds.ReleaseManifestSig...)
 	if feeds.CandidateRowStatuses != nil {
 		feeds.CandidateRowStatuses = maps.Clone(feeds.CandidateRowStatuses)
 	}

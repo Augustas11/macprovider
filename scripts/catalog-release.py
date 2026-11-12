@@ -75,6 +75,11 @@ SWIFT_GENERATED = ROOT / "phase3-binary" / "Sources" / "macprovider-cli" / "Auto
 GO_REJECTED_RELEASES_GENERATED = ROOT / "phase4-coordinator" / "internal" / "autotune" / "rejected_release_ids.generated.go"
 KEYS_PATH = CATALOG_DIR / "trusted-keys.json"
 MANIFEST_PATH = CATALOG_DIR / "release.json"
+# SPEC-023 §3.8 (R028): one detached signature over the exact release.json
+# bytes. Per-feed sidecars keep shipping beside it until CLIs that predate the
+# manifest have left the fleet.
+MANIFEST_SIGNATURE_NAME = "release.json.sig"
+MANIFEST_SIGNATURE_PATH = CATALOG_DIR / MANIFEST_SIGNATURE_NAME
 LEDGER_PATH = CATALOG_DIR / "release-ledger.json"
 TIER2_BINDING_PATH = CATALOG_DIR / "tier2-identity-binding.json"
 TIER2_BINDING_SCHEMA = "macprovider.tier2-identity-binding.v1"
@@ -673,6 +678,43 @@ def parse_sidecar(data: bytes, label: str) -> tuple[str, bytes]:
     if len(signature) != 64:
         fail(f"{label}: Ed25519 signature must be 64 bytes")
     return value["key_id"], signature
+
+
+def verify_release_manifest_signature(
+    manifest_bytes: bytes, sidecar_bytes: bytes, keys: dict[str, bytes], label: str = MANIFEST_SIGNATURE_NAME,
+) -> str:
+    """SPEC-023 §3.8: authenticate release.json by its detached signature.
+
+    The signer is the release's static-feed key: every bound feed except the
+    Tier-2 catalog (signed by its own Tier-2 key) must name the same
+    `signer_key_id` as the sidecar, so one signature stands for every feed
+    digest the manifest binds. Returns the signing key ID.
+    """
+    manifest_obj = strict_json(manifest_bytes, "release.json")
+    key_id, signature = parse_sidecar(sidecar_bytes, label)
+    public_key = keys.get(key_id)
+    if public_key is None:
+        fail(f"{label}: unknown or retired key_id {key_id}")
+    feeds = manifest_obj.get("feeds")
+    if not isinstance(feeds, dict) or "autotune-candidates.json" not in feeds:
+        fail(f"{label}: release.json binds no candidate catalog")
+    for name, entry in sorted(feeds.items()):
+        if name == TIER2_CATALOG_FEED_NAME:
+            continue
+        signer = entry.get("signer_key_id") if isinstance(entry, dict) else None
+        if signer != key_id:
+            fail(f"{label}: signed by {key_id!r} but release.json binds {name} to signer {signer!r}")
+    verify_ed25519(public_key, signature, manifest_bytes, label)
+    return key_id
+
+
+def verify_release_manifest_sidecar(manifest_path: pathlib.Path, keys: dict[str, bytes]) -> str | None:
+    """Verify `<dir>/release.json.sig` when present; None for a release cut
+    before SPEC-023 §3.8, which carries only the per-feed sidecars."""
+    sidecar_path = manifest_path.with_name(MANIFEST_SIGNATURE_NAME)
+    if not sidecar_path.exists():
+        return None
+    return verify_release_manifest_signature(manifest_path.read_bytes(), sidecar_path.read_bytes(), keys)
 
 
 def root_trusted_executable(candidate: str) -> bool:
@@ -5806,6 +5848,10 @@ def generate(
         (STATIC_DIR / NATIVE_MTP_MANIFEST_NAME).write_bytes(native_mtp_manifest)
         (STATIC_DIR / NATIVE_MTP_BANK_NAME).write_bytes(native_mtp_bank)
     SWIFT_GENERATED.write_text(swift_text)
+    # A manifest signature covers exact bytes: a regenerated release.json that
+    # differs drops the stale signature until the signing step re-signs it.
+    if MANIFEST_SIGNATURE_PATH.exists() and (not MANIFEST_PATH.exists() or MANIFEST_PATH.read_bytes() != manifest_bytes):
+        MANIFEST_SIGNATURE_PATH.unlink()
     MANIFEST_PATH.write_bytes(manifest_bytes)
     LEDGER_PATH.write_bytes(next_ledger)
     TIER2_BINDING_PATH.write_bytes(binding_bytes)
@@ -6116,6 +6162,14 @@ def verify(previous_release_dir: pathlib.Path | None = None, intake_audit_dir: p
         if public_key is None:
             fail(f"{sidecar_path.name}: unknown or retired key_id {key_id}")
         verify_ed25519(public_key, signature, body, sidecar_path.name)
+    manifest_signer = verify_release_manifest_sidecar(MANIFEST_PATH, keys)
+    if manifest_signer is None:
+        print(
+            f"verify: NOTICE: release {candidate_obj['version']} carries no {MANIFEST_SIGNATURE_NAME} "
+            "(cut before SPEC-023 §3.8); its feeds are authenticated by their per-feed sidecars only"
+        )
+    else:
+        print(f"verified release manifest signature key_id={manifest_signer}")
     print(
         f"verified catalog release {candidate_obj['version']} "
         f"candidate={sha256(candidate)} demand={sha256(demand)} rate_card={sha256(rate_card)} "
@@ -6201,6 +6255,9 @@ def verify_directory(
         if public_key is None:
             fail(f"{sidecar_path.name}: unknown or retired key_id {key_id}")
         verify_ed25519(public_key, signature, body, sidecar_path.name)
+    manifest_signer = verify_release_manifest_sidecar(directory / "release.json", keys)
+    if manifest_signer is not None:
+        print(f"verified release manifest signature key_id={manifest_signer}")
     binding_path = directory / "tier2-identity-binding.json"
     if binding_path.exists():
         validate_tier2_identity_binding(binding_path.read_bytes(), candidate, candidate_obj)
@@ -6853,7 +6910,7 @@ _CONTENT_GATE_STATIC_FILES = tuple(
     for name in ("autotune-candidates.json", "demand-rank.json", RATE_CARD_FEED_NAME, ARTIFACT_FEED_NAME)
     for suffix in ("", ".sig")
 )
-_CONTENT_GATE_CATALOG_FILES = ("release.json", "trusted-keys.json", TIER2_CATALOG_FEED_NAME)
+_CONTENT_GATE_CATALOG_FILES = ("release.json", "release.json.sig", "trusted-keys.json", TIER2_CATALOG_FEED_NAME)
 
 
 def _content_gate_committed_path(name: str) -> str:

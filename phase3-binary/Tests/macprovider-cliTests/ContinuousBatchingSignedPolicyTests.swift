@@ -503,6 +503,58 @@ final class ContinuousBatchingSignedPolicyTests: XCTestCase {
         XCTAssertFalse(absent.selection.acceptanceCoverage.covers(fixture.requestedTuple))
     }
 
+    /// SPEC-023 §3.8: a verified release manifest that binds the policy bytes
+    /// authenticates them without the per-feed sidecar; a manifest that binds
+    /// other bytes is an integrity failure even when a valid sidecar exists.
+    func testLoaderUsesVerifiedReleaseManifestInsteadOfSidecar() async throws {
+        let fixture = try makeFixture()
+        let baseURL = URL(string: "https://example.invalid")!
+        func manifest(binding policy: Data) throws -> (Data, Data) {
+            let entry: (Data) -> [String: Any] = { body in
+                ["bytes": body.count, "sha256": CatalogReleaseManifest.sha256Hex(body),
+                 "signer_key_id": fixture.keyID, "version": "published-2026-09-30-cb-test"]
+            }
+            let root: [String: Any] = [
+                "feeds": [
+                    "autotune-candidates.json": entry(fixture.catalog.selectedBytes),
+                    "continuous-batching-policy.json": entry(policy),
+                ],
+                "generated_at": "2026-09-30T00:00:00Z",
+                "policy_version": "autotune-policy-v1",
+                "release_id": "published-2026-09-30-cb-test",
+                "schema_version": CatalogReleaseManifest.schemaVersion,
+            ]
+            let data = try JSONSerialization.data(withJSONObject: root, options: [.sortedKeys])
+            return (data, signatureData(payload: data, signer: fixture.signer, keyID: fixture.keyID))
+        }
+        for (boundPolicy, expected) in [(fixture.policyData, ContinuousBatchingPolicyLoadStatus.liveVerified),
+                                        (Data("other policy bytes".utf8), .integrityFailureFallback)] {
+            let (manifestData, manifestSignature) = try manifest(binding: boundPolicy)
+            let inputs = AutotuneStaticInputs(
+                fetch: { url in
+                    switch url.path {
+                    case "/v1/continuous-batching-policy": return fixture.policyData
+                    case "/v1/catalog-release": return manifestData
+                    case "/v1/catalog-release.sig": return manifestSignature
+                    case "/v1/continuous-batching-policy.sig":
+                        // Valid, but must not rescue a manifest mismatch nor be needed.
+                        if expected == .liveVerified { throw URLError(.fileDoesNotExist) }
+                        return fixture.signatureData
+                    default: throw URLError(.fileDoesNotExist)
+                    }
+                },
+                trustedPublicKeys: fixture.trustedKeyring.publicKeysByKeyID,
+                now: { fixture.now }
+            )
+            let result = await inputs.loadContinuousBatchingPolicy(candidateCatalog: fixture.catalog, baseURL: baseURL)
+            XCTAssertEqual(result.status, expected)
+            if expected == .liveVerified {
+                XCTAssertEqual(result.signerKeyID, fixture.keyID)
+                XCTAssertTrue(result.selection.acceptanceCoverage.covers(fixture.requestedTuple))
+            }
+        }
+    }
+
     private struct Fixture {
         let now: Date
         let signer: Curve25519.Signing.PrivateKey

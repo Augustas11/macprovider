@@ -1941,6 +1941,9 @@ struct AutotuneStaticInputs {
     var trustedPublicKeys: [String: String]
     var verifySignature: ((Data, Data) -> Bool)?
     var now: () -> Date
+    /// SPEC-023 §3.8: the verified release manifest, fetched once per load
+    /// and shared by copies of these inputs.
+    var releaseManifests = CatalogReleaseManifestSource()
 
     init(
         fetch: @escaping (URL) async throws -> Data = { url in
@@ -2052,7 +2055,6 @@ struct AutotuneStaticInputs {
         baseURL: URL
     ) async -> AutotuneStaticSelection<QualifiedArtifactFeed?> {
         let feedURL = Self.staticFeedURL(baseURL: baseURL, name: "catalog-artifacts")
-        let sigURL = Self.staticFeedURL(baseURL: baseURL, name: "catalog-artifacts.sig")
         let feedBytes: Data
         do {
             feedBytes = try await fetch(feedURL)
@@ -2066,21 +2068,7 @@ struct AutotuneStaticInputs {
             )
         }
 
-        let sigBytes: Data
-        do {
-            sigBytes = try await fetch(sigURL)
-        } catch {
-            return AutotuneStaticSelection(
-                value: nil,
-                selectedBytes: feedBytes,
-                warnings: [.catalogArtifactFeedIntegrityFailure],
-                usedFallback: false,
-                signerKeyID: nil
-            )
-        }
-
-        guard let sidecar = parsedSidecar(sigBytes),
-              signatureIsValid(jsonBytes: feedBytes, sidecarBytes: sigBytes, sidecar: sidecar)
+        guard let signerKeyID = await authenticatedSigner(name: "catalog-artifacts", body: feedBytes, baseURL: baseURL)
         else {
             return AutotuneStaticSelection(
                 value: nil,
@@ -2100,7 +2088,7 @@ struct AutotuneStaticInputs {
                 selectedBytes: feedBytes,
                 warnings: [.catalogArtifactFeedIntegrityFailure],
                 usedFallback: false,
-                signerKeyID: sidecar.keyID
+                signerKeyID: signerKeyID
             )
         }
 
@@ -2110,7 +2098,7 @@ struct AutotuneStaticInputs {
             qualified = try Self.qualifyArtifactFeed(
                 feed: feed,
                 bytes: feedBytes,
-                signerKeyID: sidecar.keyID,
+                signerKeyID: signerKeyID,
                 catalog: candidate.value,
                 candidateBytes: candidate.selectedBytes,
                 candidateSignerKeyID: candidate.signerKeyID
@@ -2131,7 +2119,7 @@ struct AutotuneStaticInputs {
             selectedBytes: feedBytes,
             warnings: warnings,
             usedFallback: false,
-            signerKeyID: sidecar.keyID
+            signerKeyID: signerKeyID
         )
     }
 
@@ -2178,21 +2166,7 @@ struct AutotuneStaticInputs {
             )
         }
 
-        let sigBytes: Data
-        do {
-            let sigURL = Self.staticFeedURL(baseURL: StaticFeedOrigin.base, name: "\(name).sig")
-            sigBytes = try await fetch(sigURL)
-        } catch {
-            return AutotuneStaticSelection(
-                value: bakedValue,
-                selectedBytes: bakedBytes,
-                warnings: [fallbackWarning, integrityWarning],
-                usedFallback: true,
-                signerKeyID: Self.bakedCatalogSignerKeyID
-            )
-        }
-
-        guard let sidecar = parsedSidecar(sigBytes), signatureIsValid(jsonBytes: jsonBytes, sidecarBytes: sigBytes, sidecar: sidecar)
+        guard let signerKeyID = await authenticatedSigner(name: name, body: jsonBytes, baseURL: StaticFeedOrigin.base)
         else {
             return AutotuneStaticSelection(
                 value: bakedValue,
@@ -2226,7 +2200,7 @@ struct AutotuneStaticInputs {
             )
         }
         let current = now()
-        guard (fetchedGeneratedAt >= bakedGeneratedAt || allowOlderFetchedBytes(jsonBytes, sidecar.keyID)),
+        guard (fetchedGeneratedAt >= bakedGeneratedAt || allowOlderFetchedBytes(jsonBytes, signerKeyID)),
               fetchedGeneratedAt <= current.addingTimeInterval(10 * 60)
         else {
             return AutotuneStaticSelection(
@@ -2241,7 +2215,29 @@ struct AutotuneStaticInputs {
         if current.timeIntervalSince(fetchedGeneratedAt) >= 14 * 24 * 3600 {
             warnings.insert(staleWarning)
         }
-        return AutotuneStaticSelection(value: value, selectedBytes: jsonBytes, warnings: warnings, usedFallback: false, signerKeyID: sidecar.keyID)
+        return AutotuneStaticSelection(value: value, selectedBytes: jsonBytes, warnings: warnings, usedFallback: false, signerKeyID: signerKeyID)
+    }
+
+    /// The signer that authenticates a fetched feed body, or nil when it is
+    /// not authenticated. A verified release manifest (SPEC-023 §3.8) that
+    /// binds the feed decides by digest; otherwise the per-feed sidecar is
+    /// fetched and verified (§3.5 steps 2-4).
+    func authenticatedSigner(name: String, body: Data, baseURL: URL) async -> String? {
+        switch await checkReleaseManifest(routeName: name, body: body, baseURL: baseURL) {
+        case .authenticated(let signerKeyID):
+            return signerKeyID
+        case .mismatch:
+            return nil
+        case .unavailable:
+            break
+        }
+        guard let sigBytes = try? await fetch(Self.staticFeedURL(baseURL: baseURL, name: "\(name).sig")),
+              let sidecar = parsedSidecar(sigBytes),
+              signatureIsValid(jsonBytes: body, sidecarBytes: sigBytes, sidecar: sidecar)
+        else {
+            return nil
+        }
+        return sidecar.keyID
     }
 
     private struct SignatureSidecar {

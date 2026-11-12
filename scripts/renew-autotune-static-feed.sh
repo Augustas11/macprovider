@@ -245,6 +245,9 @@ done
 for f in autotune-candidates.json.sig demand-rank.json.sig rate-card.json.sig continuous-batching-policy.json.sig; do
   install -m 0644 "$STATIC_DIR/$f" "$RELEASE_STAGE/$f"
 done
+# SPEC-023 §3.8: resign-autotune-static.sh signed release.json above.
+[ -f "$CAT_DIR/release.json.sig" ] || fatal "the signing step did not produce release.json.sig"
+install -m 0644 "$CAT_DIR/release.json.sig" "$RELEASE_STAGE/release.json.sig"
 # SPEC-023 §3.7.8 Stage A: the freshly generated release.json is the ONLY
 # authority on whether this release is artifact-bound. Bound → the feed and
 # its sidecar are staged (both required); unbound → neither may exist, or the

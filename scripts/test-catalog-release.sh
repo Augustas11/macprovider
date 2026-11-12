@@ -452,6 +452,86 @@ stage_release
 printf ' {}' >> "$TMP/release/demand-rank.json"
 expect_rejected "trailing JSON"
 
+# SPEC-023 §3.8 (R028): a release.json.sig beside the manifest is verified;
+# a forged or foreign-key manifest signature fails the release directory.
+stage_release
+python3 - "$TMP/release/release.json.sig" <<'PY'
+import base64, json, pathlib, sys
+pathlib.Path(sys.argv[1]).write_text(json.dumps({
+    "key_id": "streamvc-autotune-static-v4", "alg": "ed25519",
+    "signature": base64.b64encode(b"\x01" * 64).decode(),
+}))
+PY
+expect_rejected "forged release manifest signature"
+
+stage_release
+python3 - "$TMP/release/release.json.sig" <<'PY'
+import base64, json, pathlib, sys
+pathlib.Path(sys.argv[1]).write_text(json.dumps({
+    "key_id": "streamvc-autotune-static-unknown", "alg": "ed25519",
+    "signature": base64.b64encode(b"\x01" * 64).decode(),
+}))
+PY
+expect_rejected "release manifest signature from an unknown key"
+
+stage_release
+printf '{"key_id":"streamvc-autotune-static-v4","alg":"ed25519"}' > "$TMP/release/release.json.sig"
+expect_rejected "malformed release manifest signature"
+
+# Positive and binding cases with a throwaway Ed25519 test key (never a
+# release key): the verifier accepts exactly the signed manifest bytes from
+# the key every static feed entry names.
+python3 - "$VERIFY" "$CANONICAL" <<'PY'
+import importlib.util, json, pathlib, subprocess, sys, tempfile
+spec = importlib.util.spec_from_file_location("catalog_release", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+manifest = (pathlib.Path(sys.argv[2]) / "release.json").read_bytes()
+openssl = module.openssl_executable()
+
+def rejected(label, operation):
+    try:
+        operation()
+    except module.CatalogError:
+        return
+    raise SystemExit(f"{label} was accepted")
+
+with tempfile.TemporaryDirectory() as tmp:
+    tmp = pathlib.Path(tmp)
+    def keypair(name):
+        pem = tmp / f"{name}.pem"
+        subprocess.run([openssl, "genpkey", "-algorithm", "ed25519", "-out", str(pem)], check=True, capture_output=True)
+        der = subprocess.run([openssl, "pkey", "-in", str(pem), "-pubout", "-outform", "DER"], check=True, capture_output=True).stdout
+        return pem, der[-32:]
+    def sidecar(pem, key_id, body):
+        msg = tmp / "message.bin"
+        msg.write_bytes(body)
+        sig = subprocess.run([openssl, "pkeyutl", "-sign", "-inkey", str(pem), "-rawin", "-in", str(msg)],
+                             check=True, capture_output=True).stdout
+        import base64
+        return json.dumps({"key_id": key_id, "alg": "ed25519", "signature": base64.b64encode(sig).decode()}).encode()
+    signer = json.loads(manifest)["feeds"]["autotune-candidates.json"]["signer_key_id"]
+    pem, public = keypair("feed")
+    other_pem, other_public = keypair("other")
+    keys = {signer: public, "test-other-key": other_public}
+    good = sidecar(pem, signer, manifest)
+    assert module.verify_release_manifest_signature(manifest, good, keys) == signer
+    rejected("manifest signature over different bytes",
+             lambda: module.verify_release_manifest_signature(manifest.replace(b'"bytes":', b'"bytes": ', 1), good, keys))
+    rejected("manifest signed by a key no feed entry names",
+             lambda: module.verify_release_manifest_signature(manifest, sidecar(other_pem, "test-other-key", manifest), keys))
+    rejected("manifest signature from a retired or unknown key",
+             lambda: module.verify_release_manifest_signature(manifest, good, {"test-other-key": other_public}))
+    # Every static feed entry must name the manifest signer; Tier-2 keeps its own.
+    obj = json.loads(manifest)
+    assert obj["feeds"]["tier2-catalog.json"]["signer_key_id"] != signer
+    obj["feeds"]["demand-rank.json"]["signer_key_id"] = "test-other-key"
+    mixed = json.dumps(obj, sort_keys=True, indent=2).encode()
+    rejected("manifest binding a feed to a different signer",
+             lambda: module.verify_release_manifest_signature(mixed, sidecar(pem, signer, mixed), keys))
+print("PASS: release manifest signature is verified against the static-feed signer")
+PY
+
 # #608 Partial: Tier-2 identity binding derived from the autotune release.
 python3 - "$VERIFY" "$CANONICAL" <<'PY'
 import importlib.util

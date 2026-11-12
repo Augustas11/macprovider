@@ -1,6 +1,6 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.22.41
+version: v0.22.42
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-10-02
@@ -8,6 +8,14 @@ lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-
 
 ## Change log
 
+- **v0.22.42 (2026-11-13, Related: #2302)** — Adds §3.8 and registers
+  `SPEC-023-R028`: each catalog release ships `release.json.sig`, one
+  Ed25519 signature over its `release.json`, which binds every feed digest.
+  The coordinator verifies it against the feeds it serves and publishes it
+  at `/v1/catalog-release` (+ `.sig`). A CLI that implements this revision
+  authenticates a bound feed by its digest and skips that feed's sidecar.
+  Per-feed sidecars keep shipping until CLIs that predate the manifest have
+  left the fleet; removing them is a later revision.
 - **v0.22.41 (2026-11-11, Related: #2111)** — R024 admits the
   `mlx_mxfp4_mxfp8` vendor-native DeepSeek representation, with uint32 packed
   weights, uint8 E8M0 scales and group32 blocks, subject to SPEC-048's exact
@@ -2410,6 +2418,100 @@ continuity, and every `SPEC-023-R017` rule not amended here apply unchanged.
 Every refusal, override, recovery, and rollback MUST leave an audit record
 naming the release ids, the effective-diff digest, and the reason. Nothing in
 this requirement lets the lane sign, re-sign, or edit a feed on the host.
+
+### 3.8 Signed release manifest (SPEC-023-R028, v0.22.41)
+
+**SPEC-023-R028:** Every catalog release MUST carry one signature over its
+`release.json`. A consumer that implements this revision MUST authenticate
+a feed that the verified manifest binds by the feed's digest. It MUST fall
+back to the per-feed sidecar only when no verified manifest binds that feed.
+
+1. **Artifact.** `release.json.sig` is a detached sidecar in exactly the
+   §3.5 rule 2 shape. It holds an Ed25519 signature over the exact bytes of
+   the release's `release.json` (§3.7.8). Its `key_id` MUST equal the
+   `signer_key_id` that `release.json` binds for `autotune-candidates.json`.
+   Every bound feed other than `tier2-catalog.json` MUST name that same
+   `signer_key_id`. `tier2-catalog.json` keeps its own Tier-2 signer and its
+   own verification; the manifest binds only its digest.
+2. **Signing and generation.** The signing step signs `release.json` after
+   the generator's final rebind, so the signature covers the published
+   bytes. When a `generate` run changes the `release.json` bytes, it removes
+   the stale `release.json.sig`. The generator's `verify` and
+   `verify-directory` verify `release.json.sig` when it is present. An
+   unknown or retired key, a failed signature, or a feed entry bound to a
+   different signer fails the release closed. `verify` reports a release
+   without the sidecar, because releases cut before this revision have none.
+3. **Release directory and transport.** `release.json.sig` sits beside
+   `release.json` in the release directory. The catalog-content lane
+   (§3.7.9) and the static-feed renewal copy it from the reviewed commit,
+   and the reviewed-commit byte proof covers it. The coordinator reads both
+   files from the directory that holds the configured candidate feed. It
+   serves `release.json` at `/v1/catalog-release` and the sidecar at
+   `/v1/catalog-release.sig`. When the sidecar is present, the coordinator
+   MUST, before serving any feed:
+   - verify it under the static-feed keyring;
+   - require that its signer is the candidate catalog's signer;
+   - require that `release_id` and `policy_version` equal the candidate
+     catalog's;
+   - require that every feed it serves (candidate catalog, demand rank, rate
+     card, CB policy, artifact feed, native-MTP admission sidecar) is bound
+     with the served `sha256`, `bytes` and sidecar signer.
+
+   Any mismatch fails startup or SIGHUP reload closed. When the sidecar is
+   absent, both routes answer 404 and every feed is served exactly as
+   before. A release installed by a path that does not yet carry the
+   sidecar (for example a provider-release asset set fixed by §3.7.8 Stage
+   A) serves no manifest; consumers then use the per-feed sidecars.
+4. **Consumer verification.** A CLI that implements this revision fetches
+   `/v1/catalog-release` and `/v1/catalog-release.sig` once per load from
+   the same origin as the feeds. It verifies them under §3.5 rules 2-4 with
+   the same release-pinned keyring and parses the manifest as a closed
+   document: exactly `feeds`, `generated_at`, `policy_version`,
+   `release_id` and `schema_version`, and each feed exactly `bytes`,
+   `sha256`, `signer_key_id` and `version`.
+   - The covered feeds are the candidate catalog, demand rank, rate card,
+     artifact feed and CB policy.
+   - When the verified manifest binds a feed body with equal `sha256` and
+     `bytes`, the body is authenticated. Its signer is the entry's
+     `signer_key_id`, and its per-feed sidecar is not fetched.
+   - When the manifest binds the feed to other bytes, the feed fails exactly
+     as a per-feed signature failure does: same warning class, same
+     fallback. Before deciding, the consumer refetches a cached manifest
+     once, because the release may have rolled over between fetches.
+   - When the manifest or its sidecar is missing, malformed or unverified,
+     or does not bind the feed, the consumer verifies that feed by its
+     per-feed sidecar as §3.5, §3.7 and §12.6 define.
+   - Every non-signature check is unchanged: schema, policy version,
+     timestamps, §3.5 rule 11 pairing, §3.7.2 signer equality, §3.7.5
+     consistency and the §12.6 policy rules.
+   - The native-MTP admission sidecar and its signed challenge bank keep
+     their §12.5 signatures.
+5. **Per-feed sidecars stay.** Until no connected CLI predates this
+   revision, every release MUST keep shipping every per-feed sidecar, and
+   the coordinator MUST keep serving them. A CLI that cannot fetch the CB
+   policy signature turns CB off (§12.6). Removing the per-feed sidecars, so
+   a release carries exactly one signature, is a later revision. That
+   revision is made only after the lowest connected CLI version implements
+   this one.
+6. **Compatibility-set manifest.** `release.json.sig` MUST NOT join the
+   provider payload's exact nine-name `components.catalog.files` map, for
+   the §3.7.8 Stage A reason.
+
+AC-CAT-29 (`SPEC-023-R028`, signed release manifest): The generator's
+`verify-directory` rejects a release directory whose `release.json.sig` is
+forged, is from an unknown key, or is malformed. The manifest verifier
+accepts a test-key signature over the exact manifest bytes. It rejects other
+bytes, a key that no static feed entry names, an untrusted key, and a static
+feed bound to another signer. The coordinator serves the signed manifest
+and its sidecar byte-for-byte and answers 404 without the sidecar. It fails
+closed on: a bad signature; an unknown key; a trusted key that is not the
+candidate signer; a served feed whose digest differs or is unbound; a
+static feed bound to another signer; another release; an unknown field; and
+a sidecar without a manifest. The CLI authenticates a bound feed from a
+verified manifest without fetching its sidecar. It treats a bound digest
+mismatch as an integrity failure. It falls back to the per-feed sidecar
+when the manifest is absent or unverified, and refetches a stale cached
+manifest once.
 
 ## 4. Formula (updated v0.12.0)
 
