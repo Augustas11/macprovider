@@ -1,7 +1,7 @@
 {
-  "catalog_id": "macprovider-tier2-model-catalog-2026-11-11-minimax-m3.1-flash-v1",
+  "catalog_id": "macprovider-tier2-model-catalog-2026-11-12-nemotron-3.5-lightning-v1",
   "expires_at": "2026-12-25T00:00:00Z",
-  "issued_at": "2026-11-11T18:40:00Z",
+  "issued_at": "2026-11-12T00:50:00Z",
   "models": [
     {
       "artifact_kind": "mlx_weight_file",
@@ -64,6 +64,15 @@
       "min_ram_gb": 230,
       "notes": "Buyer-serving candidate minimaxai/minimax-m3.1-flash (#2189 MiniMax M3.1-Flash, native minimax_m3 engine, listed); identity from signed SPEC-023 row.",
       "sha256": "21188ee28f031b9444e8a250e16aea57ee37a0c2f8d1a24c2ad44686ad744f03",
+      "source": "operator-curated"
+    },
+    {
+      "artifact_kind": "mlx_weight_file",
+      "hash_scope": "macprovider.snapshot-manifest.v1",
+      "model_id": "mlx-community/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-4bit",
+      "min_ram_gb": 32,
+      "notes": "Buyer-serving candidate nvidia/nemotron-3.5-lightning-30b-a3b (#2236 Nemotron 3.5 Lightning 30B-A3B, native nemotron_h engine, listed); identity from signed SPEC-023 row.",
+      "sha256": "3d22f18d4be885e61b47be7b3c2125be4dc97016412efd3ecd635cc08e24c9ca",
       "source": "operator-curated"
     },
     {
@@ -232,7 +241,7 @@
   "signature": {
     "alg": "Ed25519",
     "key_id": "catalog-key-2026q2",
-    "sig": "KMKDsJCxCsIFBzQOk43tMVahfoj_OFHdlDj1nogUMwBMAApmqR81KAo81vPSLd0gbYIQTeuA-MPdDJ-w-8SEBw"
+    "sig": "cl9LEwKhvguF0h5IfEualPtr8vtycjYJZg5-dOMzvuPmUxG4RG-qKWScXLhcPKjGxxXK3TIn_APDUtM1E1D4BA"
   },
   "version": 1
 }

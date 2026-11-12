@@ -220,6 +220,31 @@
       "primary_artifact_id": "mlx-4bit",
       "rate_class": "class-30b-moe"
     },
+    "nvidia/nemotron-3.5-lightning-30b-a3b": {
+      "artifacts": {
+        "mlx-4bit": {
+          "allowed_runtime_sources": [
+            "mlx_cache"
+          ],
+          "hash": "3d22f18d4be885e61b47be7b3c2125be4dc97016412efd3ecd635cc08e24c9ca",
+          "hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "min_ram_gb": 32,
+          "notes": "Nemotron 3.5 Lightning 30B-A3B (#2236), OpenMDW-1.1, base nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16; nemotron_h (hybrid Mamba-2 + MoE, 52 layers) like nvidia/nemotron-3-nano-30b-a3b, with its layer stack in layers_block_type, served by the native Swift nemotron_h engine on mlx-swift-lm 3.32.3-macprovider.43 or later (Nemotron 3.5 config support and the Mamba2 segsum batch-mask fix, #2304). 4-bit affine g64. min_ram_gb = 31.6 GB measured native peak at 8K on the real weights (1 row, M3 Ultra 256 GB, unbounded MLX cache), rounded up to 32, the nvidia/nemotron-3-nano-30b-a3b row's value; 21.4 GB at 1K and 24.2 GB with 4 rows at 1K. Snapshot-manifest hash recomputed from the HF tree API at the pinned revision (scripts/catalog-hash-sweep.py, 12 files, 17792584702 bytes); the same code reproduces the Nano row's signed hash.",
+          "quantization": "4bit",
+          "runtime_format": "mlx_safetensors",
+          "size_bytes": 17792584702,
+          "source_ref": {
+            "kind": "huggingface_revision",
+            "repo_id": "mlx-community/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-4bit",
+            "revision": "55ac8c89261109b36c04371cd3f479a4594208c8"
+          },
+          "verification_status": "verified",
+          "verified_at": "2026-11-12"
+        }
+      },
+      "primary_artifact_id": "mlx-4bit",
+      "rate_class": "class-30b-moe"
+    },
     "openai/gpt-oss-120b": {
       "artifacts": {
         "mlx-4bit": {
