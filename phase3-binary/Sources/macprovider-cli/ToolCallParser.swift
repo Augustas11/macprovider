@@ -206,7 +206,7 @@ enum ToolCallParser {
         return calls
     }
 
-    private static let glmCallMarkup = ["<tool_call>", "</tool_call>", "<arg_key>", "</arg_key>", "<arg_value>", "</arg_value>"]
+    static let glmCallMarkup = ["<tool_call>", "</tool_call>", "<arg_key>", "</arg_key>", "<arg_value>", "</arg_value>"]
 
     /// GLM envelopes are parsed one by one (#2259). A call that fails is
     /// repaired when its intent is unambiguous (`repairedGLMBody`), else

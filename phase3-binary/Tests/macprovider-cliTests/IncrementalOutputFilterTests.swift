@@ -389,13 +389,14 @@ final class IncrementalOutputFilterTests: XCTestCase {
             var incremental = NativeToolCallStreamEmitter(modelID: model, allowedFunctionNames: ["lookup"], schemas: nil)
             let filter = ModelRuntime.IncrementalStreamFilter(
                 stopTokenFilter: stopTokens, requestStops: stops, reasoningOpen: reasoningOpen)
+            var stopText = IncrementalToolStopText(observer: incremental)
             var text = ""
             for (step, piece) in stream.enumerated() {
                 text += piece
                 let expected = ModelRuntime.observeSerialToolStop(
                     &reference, decoded: text, stopTokenFilter: stopTokens, requestStops: stops, reasoningOpen: reasoningOpen)
                 let actual = ModelRuntime.observeSerialToolStop(
-                    &incremental, decoded: text, filter: filter, reasoningOpen: reasoningOpen)
+                    &incremental, decoded: text, filter: filter, stopText: &stopText, reasoningOpen: reasoningOpen)
                 XCTAssertEqual(actual, expected, "stream \(streamIndex) step \(step)")
                 if expected { break }
             }
@@ -474,5 +475,150 @@ final class IncrementalOutputFilterTests: XCTestCase {
         // The uncommitted tail once, plus one bounded region per step; 64
         // whole-region strips per step would add about 8 KB each.
         XCTAssertLessThan(incremental.scannedUTF8, wholeText + 200 * 1_024)
+    }
+
+    // MARK: - Round 2 regressions
+
+    /// Feeds `text` one scalar per step to both split functions.
+    private func assertSplitScalarSteps(_ text: String, file: StaticString = #filePath, line: UInt = #line) {
+        var split = IncrementalReasoningSplit()
+        var view = String.UnicodeScalarView()
+        for (step, scalar) in text.unicodeScalars.enumerated() {
+            view.append(scalar)
+            let prefix = String(view)
+            guard split.splitStreamingPrefix(prefix) == ReasoningOutput.splitStreamingPrefix(prefix) else {
+                return XCTFail("split step \(step)", file: file, line: line)
+            }
+        }
+    }
+
+    private func assertStrayScalarSteps(_ text: String, file: StaticString = #filePath, line: UInt = #line) {
+        var removal = IncrementalStrayTagRemoval()
+        var view = String.UnicodeScalarView()
+        for (step, scalar) in text.unicodeScalars.enumerated() {
+            view.append(scalar)
+            let prefix = String(view)
+            guard removal.removingStrayTags(prefix) == ReasoningOutput.removingStrayTags(prefix, streaming: true) else {
+                return XCTFail("stray step \(step)", file: file, line: line)
+            }
+        }
+    }
+
+    /// `<` after a Prepend scalar (U+0600, U+113D1) is not a grapheme start:
+    /// the whole-text search does not match a tag there, so a search may not
+    /// resume between them.
+    func testSearchesResumeOnlyAtGraphemeBreaks() {
+        for prepend in ["\u{0600}", "\u{113D1}"] {
+            assertSplitScalarSteps(String(repeating: "a", count: 100) + prepend + "</think>" + String(repeating: "b", count: 64) + "c")
+            assertStrayScalarSteps(String(repeating: "a", count: 100) + prepend + "<tool_call><think>" + String(repeating: "b", count: 57) + "c")
+            for reasoningOpen in [false, true] {
+                assertScalarSteps("abc" + prepend + "</think>answer", filter: stopTokens, stops: ["STOPHERE"],
+                                  reasoningOpen: reasoningOpen, "prepend \(prepend.unicodeScalars.first!.value)")
+            }
+        }
+        // A match followed by a soft hyphen or a combining mark: the cached
+        // hit is checked between breaks, not dropped for a rescan from 0.
+        for joiner in ["\u{AD}", "\u{301}", "\u{200D}"] {
+            assertSplitScalarSteps("x" + "</think>" + joiner + String(repeating: "y", count: 200))
+            assertSplitScalarSteps(String(repeating: "w", count: 150) + "</think>" + joiner + "z" + "</think>" + "q")
+        }
+    }
+
+    /// `removingTags` removes until removal changes nothing: a tag followed
+    /// by U+200D (which a Character-wise `contains` misses) goes too, so
+    /// the result does not depend on which other tags the text holds.
+    func testTagRemovalIsLocal() {
+        XCTAssertEqual(ReasoningOutput.removingTags("a</think>\u{200D}b"), ReasoningOutput.removingTags("a</think>\u{200D}b<think>"))
+        assertStrayScalarSteps("</think>\u{200D}" + String(repeating: "a", count: 200) + " </think>")
+        assertStrayScalarSteps("Hello <think>\u{200D}" + String(repeating: "word ", count: 40) + "<think>tail zzzzzzzzzz")
+    }
+
+    /// GLM markup that a Character-wise search misses (`<arg_key>` before
+    /// U+200D) but the markup stripping removes must hold the tool-text cut.
+    func testGLMMarkupBeforeAJoinerHoldsTheCut() {
+        var toolText = IncrementalToolText(
+            markers: NativeToolCallStreamEmitter(modelID: "zai-org/GLM-5.3", grammar: .glm, allowedFunctionNames: ["read"]).markerTexts,
+            bracesMatter: false)
+        let text = "Hi <arg_key>\u{200D} there " + String(repeating: "x", count: 110)
+        var view = String.UnicodeScalarView()
+        for scalar in text.unicodeScalars {
+            view.append(scalar)
+            let reduced = toolText.reduce(String(view))
+            XCTAssertFalse(reduced.kept.unicodeScalars.contains("<"))
+        }
+        XCTAssertEqual(toolText.reduce(text).kept, "")
+    }
+
+    /// The incremental windows assume short markers and tags.
+    func testMarkersAndTagsFitTheTextWindows() {
+        for grammar in ToolCallGrammar.allCases {
+            let markers = NativeToolCallStreamEmitter(modelID: "m", grammar: grammar, allowedFunctionNames: []).markerTexts
+            XCTAssertLessThan(markers.map(\.unicodeScalars.count).max() ?? 0, IncrementalToolText.markerFreeTail, "\(grammar)")
+        }
+        XCTAssertTrue(Set(ToolCallParser.glmCallMarkup).isSubset(of: NativeToolCallStreamEmitter(
+            modelID: "m", grammar: .glm, allowedFunctionNames: []).markerTexts))
+        for tag in [ReasoningOutput.openTag, ReasoningOutput.closeTag] {
+            XCTAssertLessThanOrEqual(tag.count * 2, IncrementalStrayTagRemoval.tagFreeTail)
+        }
+    }
+
+    /// Dense stop tokens never commit: the row reports its uncommitted tail.
+    func testDenseStopTokensReportTheUncommittedTail() {
+        let filter = ModelRuntime.IncrementalStreamFilter(stopTokenFilter: stopTokens, requestStops: [], reasoningOpen: false)
+        var text = ""
+        for _ in 0..<600 {
+            text += "<|eot_id|>"
+            _ = filter.update(text)
+        }
+        XCTAssertGreaterThan(filter.maxUncommittedUTF8, ModelRuntime.incrementalTailReportUTF8)
+        var stray = IncrementalStrayTagRemoval()
+        text = ""
+        for _ in 0..<600 {
+            text += "<think>"
+            _ = stray.removingStrayTags(text)
+        }
+        XCTAssertGreaterThan(stray.maxUncommittedUTF8, ModelRuntime.incrementalTailReportUTF8)
+    }
+
+    /// Random streams over an alphabet with ZWJ, Prepend, format and
+    /// combining scalars, tags and stop tokens: the three filter modes and
+    /// the split and stray-tag twins against their references.
+    func testFuzzWithJoinersAndPrependScalars() {
+        var rng = SeededGenerator(state: 2_317_2)
+        let alphabet = [
+            "a", "b", " ", "\n", ".", "<", ">", "/", "|", "\u{200D}", "\u{200C}", "\u{0600}", "\u{113D1}", "\u{AD}", "\u{301}",
+            "\u{FE0F}", "\u{1F3FD}", "👍", "가", "\u{1100}", "\u{1161}", "\u{0915}", "\u{094D}", "🇺", "\r",
+            "<think>", "</think>", "</th", "ink>", "<tool_call>", "<|eot_id|>", "<|eo", "t_id|>", "STOP", "word ", "prose here ",
+        ]
+        var mismatches = 0
+        for stream in 0..<30 {
+            let stops = stream % 2 == 0 ? ["STOP"] : []
+            let modes: [ModelRuntime.IncrementalStreamFilter.Mode] = [
+                .outputFilters, .streamingSafePrefix(reasoningOpen: false), .streamingSafePrefix(reasoningOpen: true),
+            ]
+            let filters = modes.map { ModelRuntime.IncrementalStreamFilter(stopTokenFilter: stopTokens, requestStops: stops, mode: $0) }
+            var split = IncrementalReasoningSplit()
+            var stray = IncrementalStrayTagRemoval()
+            var text = ""
+            for _ in 0..<500 {
+                // Mostly prose so the twins commit.
+                text += Int.random(in: 0..<3, using: &rng) == 0
+                    ? alphabet.randomElement(using: &rng)! : ["word ", "prose here ", "ok. "].randomElement(using: &rng)!
+                for (mode, filter) in zip(modes, filters) {
+                    let expected: (text: String, hitStop: Bool)
+                    switch mode {
+                    case .streamingSafePrefix(let reasoningOpen):
+                        expected = ModelRuntime.streamingSafePrefix(text, stopTokenFilter: stopTokens, requestStops: stops, reasoningOpen: reasoningOpen)
+                    case .outputFilters:
+                        expected = ModelRuntime.applyOutputFilters(text, stopTokenFilter: stopTokens, requestStops: stops)
+                    }
+                    let actual = filter.update(text)
+                    if actual.text != expected.text || actual.hitStop != expected.hitStop { mismatches += 1 }
+                }
+                if split.splitStreamingPrefix(text) != ReasoningOutput.splitStreamingPrefix(text) { mismatches += 1 }
+                if stray.removingStrayTags(text) != ReasoningOutput.removingStrayTags(text, streaming: true) { mismatches += 1 }
+            }
+        }
+        XCTAssertEqual(mismatches, 0)
     }
 }

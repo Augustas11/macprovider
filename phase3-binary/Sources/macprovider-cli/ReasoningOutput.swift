@@ -60,7 +60,7 @@ enum ReasoningOutput {
     static func removingStrayTags(_ text: String, streaming: Bool) -> String {
         let callStart = text.range(of: "<tool_call>")?.lowerBound ?? text.endIndex
         var head = String(text[..<callStart])
-        guard head.contains("<") else { return text }
+        guard head.unicodeScalars.contains("<") else { return text }
         head = removingTags(head)
         if streaming, callStart == text.endIndex {
             let held = partialTagLength(head)
@@ -70,13 +70,17 @@ enum ReasoningOutput {
     }
 
     /// Every `<think>` and `</think>` removed, repeatedly: removing one tag
-    /// can join the text around it into another.
+    /// can join the text around it into another. Removal alone decides when
+    /// to stop (a Character-wise `contains` would miss a tag Foundation
+    /// removes, such as one followed by U+200D), so the result depends only
+    /// on the text, not on which tag a check saw first.
     static func removingTags(_ text: String) -> String {
         var text = text
-        while let tag = [closeTag, openTag].first(where: { text.contains($0) }) {
-            text = text.replacingOccurrences(of: tag, with: "")
+        while true {
+            let next = text.replacingOccurrences(of: closeTag, with: "").replacingOccurrences(of: openTag, with: "")
+            if next == text { return text }
+            text = next
         }
-        return text
     }
 
     /// The longest suffix of `text` that could still become a think tag.
