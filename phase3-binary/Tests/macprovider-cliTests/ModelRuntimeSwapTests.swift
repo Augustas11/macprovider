@@ -1532,7 +1532,8 @@ final class ModelRuntimeSwapTests: XCTestCase {
             modelID: "mlx-community/Qwen3-32B-4bit",
             stopTokenFilter: StopTokenFilter(tokens: []),
             requestStops: ["STOP"],
-            decode: { tokenIDs in tokenIDs.map { decoded[$0] ?? "" }.joined() }
+            decode: { tokenIDs in tokenIDs.map { decoded[$0] ?? "" }.joined() },
+            decodeLookbackScalars: 64
         )
 
         var stoppedTokens: [Int] = []
@@ -1590,7 +1591,8 @@ final class ModelRuntimeSwapTests: XCTestCase {
             modelID: "mlx-community/Qwen3-32B-4bit",
             stopTokenFilter: StopTokenFilter(tokens: []),
             requestStops: ["🙂", "βSTOP"],
-            decode: decode
+            decode: decode,
+            decodeLookbackScalars: 64
         )
         XCTAssertFalse(try emojiObserver.observe(generatedTokenIDs: [1]))
         XCTAssertTrue(try emojiObserver.observe(generatedTokenIDs: [1, 2]))
@@ -1599,7 +1601,8 @@ final class ModelRuntimeSwapTests: XCTestCase {
             modelID: "mlx-community/Qwen3-32B-4bit",
             stopTokenFilter: StopTokenFilter(tokens: []),
             requestStops: ["🙂", "βSTOP"],
-            decode: decode
+            decode: decode,
+            decodeLookbackScalars: 64
         )
         XCTAssertFalse(try betaObserver.observe(generatedTokenIDs: [4, 5, 6]))
         XCTAssertTrue(try betaObserver.observe(generatedTokenIDs: [4, 5, 6, 7]))
@@ -1614,7 +1617,8 @@ final class ModelRuntimeSwapTests: XCTestCase {
             decode: { tokenIDs in
                 decodeCalls += 1
                 return tokenIDs.map(String.init).joined()
-            }
+            },
+            decodeLookbackScalars: 64
         )
 
         XCTAssertFalse(try observer.observe(generatedTokenIDs: [1, 2, 3]))

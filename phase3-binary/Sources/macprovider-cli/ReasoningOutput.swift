@@ -31,16 +31,22 @@ enum ReasoningOutput {
 
     /// Splits a streaming prefix. An unclosed reasoning prefix holds back a
     /// suffix that could still become `</think>`.
+    /// Incremental twin: `IncrementalReasoningSplit`.
     static func splitStreamingPrefix(_ text: String) -> Split {
         let split = split(text)
         guard !split.closed else { return split }
+        return Split(reasoning: withoutPartialCloseTag(text), answer: "", closed: false)
+    }
+
+    /// `text` without a suffix that could still become `</think>`.
+    static func withoutPartialCloseTag(_ text: String) -> String {
         var held = 0
-        for length in stride(from: min(closeTag.count - 1, text.count), through: 1, by: -1)
+        for length in stride(from: text.prefix(closeTag.count - 1).count, through: 1, by: -1)
         where text.hasSuffix(String(closeTag.prefix(length))) {
             held = length
             break
         }
-        return Split(reasoning: String(text.dropLast(held)), answer: "", closed: false)
+        return String(text.dropLast(held))
     }
 
     /// GLM answer text with stray think tags removed (#2189). The template
@@ -50,22 +56,39 @@ enum ReasoningOutput {
     /// `<tool_call>` is touched: from there the tool parser decides, and call
     /// arguments stay byte-exact. A streaming prefix also holds back a tail
     /// that could still become a tag, so the visible text only grows.
+    /// Incremental twin for streaming: `IncrementalStrayTagRemoval`.
     static func removingStrayTags(_ text: String, streaming: Bool) -> String {
-        let callStart = text.range(of: "<tool_call>")?.lowerBound ?? text.endIndex
+        let callStart = text.range(of: ToolCallParser.toolCallOpen)?.lowerBound ?? text.endIndex
         var head = String(text[..<callStart])
-        guard head.contains("<") else { return text }
-        // Repeated: removing one tag can join the text around it into another.
-        while let tag = [closeTag, openTag].first(where: { head.contains($0) }) {
-            head = head.replacingOccurrences(of: tag, with: "")
-        }
-        if streaming, callStart == text.endIndex,
-           let held = stride(from: min(closeTag.count - 1, head.count), through: 1, by: -1).first(where: { length in
-               let tail = String(head.suffix(length))
-               return closeTag.hasPrefix(tail) || openTag.hasPrefix(tail)
-           }) {
-            head = String(head.dropLast(held))
+        guard head.unicodeScalars.contains("<") else { return text }
+        head = removingTags(head)
+        if streaming, callStart == text.endIndex {
+            let held = partialTagLength(head)
+            if held > 0 { head = String(head.dropLast(held)) }
         }
         return head + text[callStart...]
+    }
+
+    /// Every `<think>` and `</think>` removed, repeatedly: removing one tag
+    /// can join the text around it into another. Removal alone decides when
+    /// to stop (a Character-wise `contains` would miss a tag Foundation
+    /// removes, such as one followed by U+200D), so the result depends only
+    /// on the text, not on which tag a check saw first.
+    static func removingTags(_ text: String) -> String {
+        var text = text
+        while true {
+            let next = text.replacingOccurrences(of: closeTag, with: "").replacingOccurrences(of: openTag, with: "")
+            if next == text { return text }
+            text = next
+        }
+    }
+
+    /// The longest suffix of `text` that could still become a think tag.
+    static func partialTagLength(_ text: String) -> Int {
+        stride(from: text.prefix(closeTag.count - 1).count, through: 1, by: -1).first(where: { length in
+            let tail = String(text.suffix(length))
+            return closeTag.hasPrefix(tail) || openTag.hasPrefix(tail)
+        }) ?? 0
     }
 
     /// Applies `filter` (stop strings, hold-back) to the post-think text only;

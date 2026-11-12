@@ -1605,7 +1605,8 @@ final class HarmonyResponseParserTests: XCTestCase {
             modelID: "openai/gpt-oss-120b",
             stopTokenFilter: StopTokenFilter(tokens: []),
             requestStops: ["STOP"],
-            decode: decode
+            decode: decode,
+            decodeLookbackScalars: 64
         )
 
         var stoppedTokens: [Int] = []
@@ -1659,7 +1660,8 @@ final class HarmonyResponseParserTests: XCTestCase {
             modelID: "openai/gpt-oss-120b",
             stopTokenFilter: StopTokenFilter(tokens: []),
             requestStops: ["STOP"],
-            decode: decode
+            decode: decode,
+            decodeLookbackScalars: 64
         )
 
         XCTAssertFalse(try observer.observe(generatedTokenIDs: Array(ids.prefix(5))))
@@ -1706,7 +1708,8 @@ final class HarmonyResponseParserTests: XCTestCase {
             modelID: "openai/gpt-oss-20b",
             stopTokenFilter: StopTokenFilter(tokens: []),
             requestStops: ["7"],
-            decode: decode
+            decode: decode,
+            decodeLookbackScalars: 64
         )
         var stoppedTokens: [Int] = []
         for tokenID in ids {
@@ -1795,7 +1798,8 @@ final class HarmonyResponseParserTests: XCTestCase {
             decode: { tokenIDs in
                 decodeCalls += 1
                 return self.decode(tokenIDs)
-            }
+            },
+            decodeLookbackScalars: 64
         )
 
         XCTAssertFalse(try observer.observe(generatedTokenIDs: ids))

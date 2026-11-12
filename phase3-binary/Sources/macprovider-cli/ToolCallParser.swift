@@ -206,7 +206,14 @@ enum ToolCallParser {
         return calls
     }
 
-    private static let glmCallMarkup = ["<tool_call>", "</tool_call>", "<arg_key>", "</arg_key>", "<arg_value>", "</arg_value>"]
+    /// Tool-call markers shared by the parser and the streaming emitter
+    /// (#2317: the incremental steps hold their cuts against these).
+    static let toolCallOpen = "<tool_call>"
+    static let pythonTag = "<|python_tag|>"
+    static let functionOpen = "<function="
+    static let functionClose = "</function>"
+
+    static let glmCallMarkup = [toolCallOpen, "</tool_call>", "<arg_key>", "</arg_key>", "<arg_value>", "</arg_value>"]
 
     /// GLM envelopes are parsed one by one (#2259). A call that fails is
     /// repaired when its intent is unambiguous (`repairedGLMBody`), else
@@ -309,7 +316,7 @@ enum ToolCallParser {
     /// call markup removed. Only a tail that could still become markup and a
     /// blank start (dropped when a call follows) are held.
     static func glmStreamableProse(_ text: String) -> String {
-        if let open = text.range(of: "<tool_call>") {
+        if let open = text.range(of: toolCallOpen) {
             return glmProse(text[..<open.lowerBound]) ?? ""
         }
         let prose = glmStrippingCallMarkup(text)
@@ -556,7 +563,7 @@ enum ToolCallParser {
     /// openings are scanned, at most `llama3MaxCallCandidates` of them, and
     /// only within the response byte cap, so detection stays linear.
     static func llama3CallStart(in rawOutput: String) -> String.Index? {
-        if let tag = rawOutput.range(of: "<|python_tag|>") { return tag.lowerBound }
+        if let tag = rawOutput.range(of: pythonTag) { return tag.lowerBound }
         guard rawOutput.utf8.count <= SPEC018_ARGUMENTS_PER_RESPONSE_BYTE_CAP else { return nil }
         var searchFrom = rawOutput.startIndex
         var candidates = 0

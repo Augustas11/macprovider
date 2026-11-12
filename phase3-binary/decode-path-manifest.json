@@ -5,6 +5,7 @@
     "Sources/MacProviderCore/GrammarTemplates.swift",
     "Sources/MacProviderCore/GrammarTokenTable.swift",
     "Sources/MacProviderCore/PagedKVEngine.swift",
+    "Sources/MacProviderCore/StopTokenFilter.swift",
     "Sources/MacProviderCore/ToolCallGrammar.swift",
     "Sources/macprovider-cli/CompiledDecode.swift",
     "Sources/macprovider-cli/ContinuousBatchRowSampler.swift",
@@ -14,6 +15,7 @@
     "Sources/macprovider-cli/DeepseekV4ContinuousBatchBackend.swift",
     "Sources/macprovider-cli/DeepseekV4RuntimeParityProbe.swift",
     "Sources/macprovider-cli/GrammarConstraintState.swift",
+    "Sources/macprovider-cli/IncrementalOutputFilter.swift",
     "Sources/macprovider-cli/KVConversationColdTierAdapter.swift",
     "Sources/macprovider-cli/KVDiskCacheFormat.swift",
     "Sources/macprovider-cli/KVDiskCacheStore.swift",
@@ -26,6 +28,7 @@
     "Sources/macprovider-cli/PagedKVRuntimeBridge.swift",
     "Sources/macprovider-cli/PagedMLACache.swift",
     "Sources/macprovider-cli/PagedMiniMaxM3Cache.swift",
+    "Sources/macprovider-cli/ReasoningOutput.swift",
     "Sources/macprovider-cli/ServeDecodePath.swift"
   ],
   "dependencies": [
