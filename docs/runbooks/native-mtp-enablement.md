@@ -50,43 +50,12 @@ An observation is not an ordinary control, and offline projection remains
 `PENDING_REAL_LAB_REPLAY`. SPEC-048 R015's existing representative, mixed-load
 and promotion gates still apply.
 
-## Post-cut native binding assembly
+## After a CLI cut
 
-A CLI cut fixes binary SHA-256, CDHash and shipped Metal identity after the
-campaign source is merged. Use only the committed
-`ops/recipes/native-mtp-glm53-binding.v1.json` to derive those bindings without
-another source change. Arbitrary local catalog directories remain refused.
-
-Keep input records and bundles outside the checkout in operator-controlled
-storage. The helper verifies the exact merged source, authenticated signed
-candidate assets and existing trusted signing key. It cannot establish
-qualification from a caller-supplied success flag. Its first phase retains the
-already-qualified greedy request scope, one native row, depth one and all four
-CB slots. The later sampled phase preserves that signed CLI and additionally
-requires genuine R005 and formal R015 matrix/sustained results from the
-digest-matched LAB build, hosted negative tests and the complete freeze audit.
-The LAB archive retains its measured source and executable SHA-256/CDHash
-(when present), plus the embedded decode-path digest in `qualification/source.json`.
-The final signed cut needs no rebind (SPEC-048 0.1.81: identity is provenance);
-no measurements are repeated after that cut and no fresh signed predecessor is
-a qualification gate.
-Final tagging and live recommendation remain required for the sampled phase.
-
-The helper accepts the closed input schema enforced by
-`native_mtp_binding_bundle.py`; use `derive --help` for its required paths.
-`derive` materializes feed bytes for the matched-pair intent to pin, and returns
-`DERIVED_UNSEALED`; it grants no activation authority. After the exact intent
-and signed-byte records are included, `seal` signs the inventory and rederives
-all feeds. `verify` repeats derivation and validates every referenced proof:
-
-```bash
-python3 scripts/native_mtp_binding_bundle.py verify \
-  --bundle "$binding_bundle" --repo "$PWD" --commit "$campaign_source" \
-  --recipe ops/recipes/native-mtp-glm53-binding.v1.json
-```
-
-Set `CATALOG_NATIVE_BINDING_BUNDLE` in the private ops environment and use the
-existing entry point in order:
+A CLI's binary SHA-256, CDHash and decode-path digest are provenance only
+(SPEC-048 0.1.81, #2282), so a CLI cut needs no rebind, no binding bundle and
+no matched binary/policy transaction. A new or changed admission goes live
+through ordinary catalog activation:
 
 ```bash
 scripts/ops/catalog-activate.sh status
@@ -94,21 +63,11 @@ scripts/ops/catalog-activate.sh next
 scripts/ops/catalog-activate.sh next --run
 ```
 
-For the first phase, also provide the exact private `CATALOG_SIGNED_PAIR_PLAN`.
-Generate it with `scripts/ops/lib/signed-pair-plan.py build` and run its `check`
-right before `next --run` (`scripts/ops/README.md`, Signed native pair plan).
-The matched transaction arms independent recovery before pausing, retains the
-prior signed binary and policy, and uses a terminal acknowledgement before
-releasing custody. Reconciliation takes priority over candidate freshness.
-Never substitute a generic provider restart for this pair transaction.
-
-The content train freezes the bundle, revalidates it under its publication
-lease, and ships only the flat verified release feeds. Its derived ledger is
-subject to the existing predecessor, exclusion, Tier-2 history, pricing,
-coverage, coordinator dry-load, custody, rollback and exact-byte gates.
-Signing a bundle does not bypass any of them. The second phase still uses the
-ordinary final-tag/recommendation publish gate and requires a real attributed
-gateway request with unchanged accounting and settlement.
+The signed binary/policy pair transaction, the binding-bundle activation
+context and the provider `cached_turns` config step existed only for CLIs that
+predate #2282 and were removed from `catalog-activate.sh` (#2302). The gateway
+proof is still a real attributed buyer request with unchanged accounting and
+settlement.
 
 ## Order
 

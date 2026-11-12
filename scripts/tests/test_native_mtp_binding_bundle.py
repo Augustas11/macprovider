@@ -29,6 +29,13 @@ class CommittedRecipeTests(unittest.TestCase):
             with self.subTest(path=relative):
                 self.assertEqual(m.digest(self.repo / relative), expected)
 
+    def test_release_restamped_inputs_are_not_pinned(self):
+        # catalog-release.py restamp/generate rewrites these on every catalog
+        # release; pinning them would force a re-pin commit for a pricing change.
+        catalog = "phase3-binary/catalog/autotune/"
+        for name in ("rate-card-source.json", "native-mtp-admission-release.json", "native-mtp-selftest-bank.json"):
+            self.assertNotIn(catalog + name, self.recipe["source_inputs"])
+
     def test_required_security_cases_exist_and_policy_bounds_stay_one(self):
         test_root = self.repo / "phase3-binary/Tests/macprovider-cliTests"
         for case in self.recipe["security_required_cases"]:

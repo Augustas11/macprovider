@@ -4,7 +4,6 @@ import importlib.util
 import sys
 import dataclasses
 import os
-import shutil
 import subprocess
 import tempfile
 import unittest
@@ -75,21 +74,19 @@ print(json.dumps(dict(release_dir=str(b/'release'),ledger_path=str(b/'derived/re
         return subprocess.run(['bash', '-c', code], env=dict(os.environ, **(env or {})),
                               text=True, capture_output=True, timeout=8)
 
-    def assemble(self, bundle=True, env=None):
+    def assemble(self, env=None):
         work = self.root / 'work'
         code = '''set -eu
 WORK="$TEST_ROOT/work"; REL="$WORK/release"; COMMIT="$TEST_COMMIT"
 REPO_ROOT="$TEST_REPO"; SCRIPT_DIR="$TEST_TOOLS"
-NATIVE_BINDING_BUNDLE="$TEST_BUNDLE"; NATIVE_BINDING_RECIPE="$TEST_RECIPE"
-NATIVE_BINDING_PROOF=""; NATIVE_BINDING_GATE_ARGS=()
 record() { printf '%s %s\\n' "$1" "$2"; }
 release_identity() { REL_ID=test; REL_BOUND=unbound; }
 release_dirname() { echo test-release; }
 '''
         code += function(CONTENT, 'pf_assemble')
-        code += '\npf_assemble\nprintf "REL=%s\\n" "$REL"\nprintf "ARG=%s\\n" ${NATIVE_BINDING_GATE_ARGS[@]+"${NATIVE_BINDING_GATE_ARGS[@]}"}\n'
+        code += '\npf_assemble\nprintf "REL=%s\\n" "$REL"\n'
         values = dict(TEST_ROOT=str(self.root), TEST_REPO=str(self.repo), TEST_COMMIT=self.commit,
-                      TEST_TOOLS=str(self.tools), TEST_BUNDLE=str(self.bundle) if bundle else '', TEST_RECIPE=RECIPE)
+                      TEST_TOOLS=str(self.tools))
         values.update(env or {})
         return self.shell(code, values), work
 
@@ -108,48 +105,24 @@ release_dirname() { echo test-release; }
         finally:
             sys.modules.pop(spec.name, None)
 
-    def test_bundle_is_frozen_before_verification_and_derived_ledger_is_used(self):
-        original = self.bundle / 'release/demand-rank.json'
-        result, work = self.assemble(env={'MUTATE_ORIGINAL': str(original)})
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(original.read_text(), 'changed-after-freeze')
-        frozen = work / 'binding/caller-bundle'
-        self.assertEqual((frozen / 'release/demand-rank.json').read_text(), 'derived-demand')
-        self.assertEqual((work / 'gate/release-ledger.json').read_text(), 'derived-ledger')
-        self.assertEqual((work / 'gate/not-buyer-serving.json').read_text(), 'committed-not-buyer-serving.json')
-        self.assertIn('ARG=' + str(frozen), result.stdout)
-        self.assertIn('REL=' + str(frozen / 'release'), result.stdout)
-
-    def test_legacy_path_assembles_git_bytes_and_ledger(self):
-        result, work = self.assemble(bundle=False)
+    def test_assembly_uses_committed_git_bytes_and_ledger(self):
+        result, work = self.assemble()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual((work / 'release/demand-rank.json').read_text(), 'committed-demand-rank.json')
         self.assertEqual((work / 'gate/release-ledger.json').read_text(), 'committed-release-ledger.json')
         self.assertFalse((work / 'binding').exists())
-        self.assertNotIn('ARG=--native-binding', result.stdout)
+        # A release cut before SPEC-023 §3.8 carries no manifest signature.
+        self.assertFalse((work / 'release/release.json.sig').exists())
 
-    def test_bundle_proof_failure_stops_assembly(self):
-        result, _ = self.assemble(env={'REJECT_PROOF': '1'})
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn('release_assembled 0', result.stdout)
-
-    def test_symlink_member_is_rejected_before_verification(self):
-        (self.bundle / 'escape').symlink_to(self.repo)
-        result, _ = self.assemble()
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn('nonregular bundle member', result.stderr)
-
-    def test_unknown_recipe_is_rejected(self):
-        result, _ = self.assemble(env={'TEST_RECIPE': 'arbitrary.json'})
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn('release_assembled 0', result.stdout)
-
-    def test_both_content_gates_receive_frozen_bundle_arguments(self):
-        for name in ['pf_content_gate', 'pf_pricing_gate']:
-            text = function(CONTENT, name)
-            self.assertIn('"${NATIVE_BINDING_GATE_ARGS[@]}"', text)
-            self.assertIn('--commit "$COMMIT"', text)
-            self.assertIn('--tier2-coordinator-config', text)
+    def test_assembly_carries_the_committed_release_manifest_signature(self):
+        sig = self.repo / 'phase3-binary/catalog/autotune/release.json.sig'
+        sig.write_text('committed-release.json.sig')
+        for args in [('add', '.'), ('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'manifest sig')]:
+            subprocess.run(['git', '-C', str(self.repo), *args], check=True, capture_output=True)
+        self.commit = subprocess.check_output(['git', '-C', str(self.repo), 'rev-parse', 'HEAD'], text=True).strip()
+        result, work = self.assemble()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((work / 'release/release.json.sig').read_text(), 'committed-release.json.sig')
 
     def test_legacy_gates_run_under_macos_bash_nounset_with_zero_optional_args(self):
         work = self.root / 'gate-work'
@@ -159,7 +132,7 @@ release_dirname() { echo test-release; }
         for name in ['pf_content_gate', 'pf_pricing_gate']:
             with self.subTest(name=name):
                 log = work / (name + '.json')
-                code = 'set -eu\nWORK="$TEST_WORK"; SCRIPT_DIR="$TEST_TOOLS"; REL=release; LIVE=live; COMMIT=abc; LIVE_ID=old; NATIVE_BINDING_GATE_ARGS=(); PRICING_DIR="$TEST_WORK"; PRICING_DIFF_SHA=diff; COMMIT_BLOCK_SHA=block; PRIOR_RATE_SHA=x; PRIOR_SIGNED_SHA=x; PRIOR_SNAPSHOT_ID=1; CONFIG_DISK_SHA=x; OVERLAY_DISK_SHA=x; ACK_MOVES_SHA=x\n'
+                code = 'set -eu\nWORK="$TEST_WORK"; SCRIPT_DIR="$TEST_TOOLS"; REL=release; LIVE=live; COMMIT=abc; LIVE_ID=old; PRICING_DIR="$TEST_WORK"; PRICING_DIFF_SHA=diff; COMMIT_BLOCK_SHA=block; PRIOR_RATE_SHA=x; PRIOR_SIGNED_SHA=x; PRIOR_SNAPSHOT_ID=1; CONFIG_DISK_SHA=x; OVERLAY_DISK_SHA=x; ACK_MOVES_SHA=x\n'
                 code += 'record() { :; }; pf_pricing_detect() { :; }\n'
                 code += function(CONTENT, name) + '\n' + name + '\n'
                 result = self.shell(code, dict(TEST_WORK=str(work), TEST_TOOLS=str(self.tools), ARG_LOG=str(log)))
@@ -168,43 +141,6 @@ release_dirname() { echo test-release; }
                 self.assertNotIn('', args)
                 self.assertNotIn('--native-binding-bundle', args)
                 self.assertEqual(args[:7], ['content-gate', '--release', 'release', '--live', 'live', '--commit', 'abc'])
-
-    def test_ops_context_uses_verified_release_and_input_and_legacy_resets(self):
-        code = '''set -eu
-REPO_ROOT="$TEST_ROOT"; AUTOTUNE=catalog; OPS_TMP_DIR="$TEST_ROOT"
-NATIVE_BINDING_RECIPE="$TEST_RECIPE"; CATALOG_NATIVE_BINDING_BUNDLE="$TEST_BUNDLE"
-fact() { :; }
-json_field() { python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));print(eval(sys.argv[2]))' "$1" "$2"; }
-'''
-        # Isolated fake CLI boundary: no live or remote command is reachable.
-        shutil.copytree(self.tools, self.root / 'scripts')
-        code += function(OPS, 'native_binding_context')
-        code += '\nnative_binding_context abc\nprintf "%s\\n" "$CATALOG_TARGET_DIR" "$CATALOG_TARGET_INPUT"\nunset CATALOG_NATIVE_BINDING_BUNDLE\nnative_binding_context abc\nprintf "%s\\n" "$CATALOG_TARGET_DIR" "$CATALOG_TARGET_INPUT"\n'
-        result = self.shell(code, dict(TEST_ROOT=str(self.root), TEST_RECIPE=RECIPE, TEST_BUNDLE=str(self.bundle)))
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.splitlines(), [str(self.bundle / 'release'), str(self.bundle / 'derived/native-mtp-admission-release.json'), str(self.root / 'catalog'), str(self.root / 'catalog/native-mtp-admission-release.json')])
-
-    def test_ops_context_reports_waiver_only_after_full_verification(self):
-        shutil.copytree(self.tools, self.root / 'scripts')
-        code = """set -eu
-REPO_ROOT="$TEST_ROOT"; AUTOTUNE=catalog; OPS_TMP_DIR="$TEST_ROOT"
-NATIVE_BINDING_RECIPE="$TEST_RECIPE"; CATALOG_NATIVE_BINDING_BUNDLE="$TEST_BUNDLE"
-fact() { printf '%s: %s\n' "$1" "$2"; }
-json_field() { python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));print(eval(sys.argv[2]))' "$1" "$2"; }
-"""
-        code += function(OPS, 'native_binding_context') + '\nnative_binding_context publication\n'
-        log = self.root / 'verify-args.json'
-        env = dict(TEST_ROOT=str(self.root), TEST_RECIPE=RECIPE,
-                   TEST_BUNDLE=str(self.bundle), SERVING_JOURNEY='waived (operator, 2026-10-29)',
-                   VERIFY_ARGS=str(log))
-        result = self.shell(code, env)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('serving_journey: waived (operator, 2026-10-29)', result.stdout)
-        args = json.loads(log.read_text())
-        self.assertEqual(args[args.index('--commit') + 1], 'publication')
-        result = self.shell(code, dict(env, REJECT_PROOF='1'))
-        self.assertNotEqual(result.returncode, 0)
-        self.assertNotIn('serving_journey:', result.stdout)
 
     def test_catalog_revalidates_waiver_after_full_bundle_verification(self):
         from scripts.tests.test_catalog_compare_live import cr
@@ -237,11 +173,6 @@ json_field() { python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));print(
             cr._verify_native_binding_bundle(
                 self.bundle, repo=self.repo, commit=self.commit, recipe_path=RECIPE)
         module.validate_journey_waiver.assert_not_called()
-
-    def test_signed_pair_reverifies_bundle_before_publish_dispatch(self):
-        text = function(OPS, 'signed_pair_internal')
-        self.assertLess(text.index('native_binding_context "$commit"'), text.index('catalog-content-release.sh'))
-        self.assertIn('--deploy --commit "$commit"', text)
 
     def release_match_preflight(self, bound='true', verdict='ok', exit_code=0, run=False):
         tools = self.root / 'matcher-repo/scripts'
@@ -310,41 +241,11 @@ acquire_live_lock_for_step() { echo LOCK_REACHED >&2; exit 90; }
         self.assertIn('release is not native-bound', result.stdout)
         self.assertFalse((self.root / 'matcher-args.json').exists())
 
-    def test_native_release_match_is_before_fresh_steps_and_rechecks_signed_pair(self):
+    def test_native_release_match_is_before_fresh_steps(self):
         gather = function(OPS, 'gather')
         gate = gather.index('native_mtp_release_preflight "$native_bound" || return 0')
         self.assertLess(gate, gather.index('set_next revocation_slots mutate'))
         self.assertLess(gate, gather.index('if [ "$live_rid" = "$R" ]; then'))
-        self.assertLess(gate, gather.index('set_next signed_native_pair mutate'))
-        # Recovery intentionally precedes candidate validation.
-        self.assertLess(gather.index('set_next signed_native_pair_reconcile mutate'), gate)
-        pair = function(OPS, 'signed_pair_internal')
-        self.assertLess(pair.index('native_mtp_release_preflight true'),
-                        pair.index('catalog-content-release.sh'))
-
-    def test_final_byte_manifest_accepts_verified_derived_bundle(self):
-        result, work = self.assemble()
-        self.assertEqual(result.returncode, 0, result.stderr)
-        text = CONTENT.read_text()
-        start = text.index('if [ -n "$NATIVE_BINDING_BUNDLE" ]; then', text.index('# Both assembly paths freeze'))
-        end = text.index('\nIFS= read -r -d', start)
-        code = 'set -eu\nWORK="$TEST_WORK"; REL="$TEST_RELEASE"; REPO_ROOT="$TEST_REPO"; COMMIT="$TEST_COMMIT"\n'
-        code += 'SCRIPT_DIR="$TEST_TOOLS"; NATIVE_BINDING_BUNDLE="$TEST_BUNDLE"; NATIVE_BINDING_RECIPE="$TEST_RECIPE"; NATIVE_BINDING_PROOF="$WORK/native-binding-proof.json"\nfatal() { echo "$*" >&2; exit 61; }\n'
-        code += text[start:end]
-        result = self.shell(code, dict(TEST_WORK=str(work), TEST_RELEASE=str(work / 'binding/caller-bundle/release'), TEST_REPO=str(self.repo), TEST_COMMIT=self.commit, TEST_TOOLS=str(self.tools), TEST_BUNDLE=str(work / 'binding/caller-bundle'), TEST_RECIPE=RECIPE))
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertTrue((work / 'release-bytes.sha256').exists())
-        env = dict(TEST_WORK=str(work), TEST_RELEASE=str(work / 'binding/caller-bundle/release'), TEST_REPO=str(self.repo), TEST_COMMIT=self.commit, TEST_TOOLS=str(self.tools), TEST_BUNDLE=str(work / 'binding/caller-bundle'), TEST_RECIPE=RECIPE)
-        (work / 'gate/release-ledger.json').write_text('changed-under-lease')
-        result = self.shell(code, env)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn('ledger changed', result.stderr)
-        (work / 'gate/release-ledger.json').write_text('derived-ledger')
-        proof = work / 'native-binding-proof.json'
-        proof.write_text(proof.read_text() + ' ')
-        result = self.shell(code, env)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn('receipt changed', result.stderr)
 
 
 if __name__ == '__main__':
