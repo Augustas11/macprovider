@@ -35,13 +35,13 @@ struct CatalogReleaseManifest: Equatable {
     static let tier2FeedName = "tier2-catalog.json"
 
     /// Served route name (`/v1/<name>`) to the name `release.json` binds.
+    /// The native-MTP admission feed is not here: it keeps its §12.5 sidecar.
     static let boundFeedNames: [String: String] = [
         "autotune-candidates": "autotune-candidates.json",
         "demand-rank": "demand-rank.json",
         "rate-card": "rate-card.json",
         "continuous-batching-policy": "continuous-batching-policy.json",
         "catalog-artifacts": "autotune-artifacts.json",
-        "native-mtp-admission": "native-mtp-admission.json",
     ]
 
     let releaseID: String
@@ -190,8 +190,10 @@ extension AutotuneStaticInputs {
     }
 
     func fetchReleaseManifest(baseURL: URL) async -> CatalogReleaseManifest? {
-        guard let manifestData = try? await fetch(Self.staticFeedURL(baseURL: baseURL, name: CatalogReleaseManifest.routeName)),
-              let signatureData = try? await fetch(Self.staticFeedURL(baseURL: baseURL, name: CatalogReleaseManifest.routeName + ".sig"))
+        let manifestURL = Self.staticFeedURL(baseURL: baseURL, name: CatalogReleaseManifest.routeName)
+        let signatureURL = Self.staticFeedURL(baseURL: baseURL, name: CatalogReleaseManifest.routeName + ".sig")
+        guard let manifestData = try? await fetchReleaseManifestMember(manifestURL, maxBytes: CatalogReleaseManifest.maxManifestBytes),
+              let signatureData = try? await fetchReleaseManifestMember(signatureURL, maxBytes: CatalogReleaseManifest.maxSignatureBytes)
         else {
             return nil
         }
@@ -200,6 +202,26 @@ extension AutotuneStaticInputs {
             signatureData: signatureData,
             trustedPublicKeys: trustedPublicKeys
         )
+    }
+
+    /// Streams one manifest member under a hard byte cap. Any failure,
+    /// including an oversized body, leaves the manifest unverified.
+    private func fetchReleaseManifestMember(_ url: URL, maxBytes: Int) async throws -> Data {
+        guard let streaming = releaseManifestFetch else {
+            let data = try await fetch(url)
+            guard data.count <= maxBytes else { throw NativeMTPAdmissionFeed.FetchError.oversized(url.lastPathComponent) }
+            return data
+        }
+        var response = try await streaming(url, maxBytes)
+        for _ in 0..<Self.rateLimitRetries where response.statusCode == 429 {
+            try await Task.sleep(nanoseconds: Self.rateLimitRetryNanoseconds)
+            response = try await streaming(url, maxBytes)
+        }
+        guard !response.redirected, response.statusCode == 200 else {
+            throw NativeMTPAdmissionFeed.FetchError.invalidHTTPStatus(response.statusCode)
+        }
+        guard response.body.count <= maxBytes else { throw NativeMTPAdmissionFeed.FetchError.oversized(url.lastPathComponent) }
+        return response.body
     }
 
     func checkReleaseManifest(routeName: String, body: Data, baseURL: URL) async -> ReleaseManifestCheck {

@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/augstar/macprovider-coordinator/internal/billing"
 	"io"
@@ -134,7 +135,14 @@ func (f AutotuneFeeds) autotuneCandidatesEnabled() bool {
 // closed unless every required feed pair is present, each literal JSON body has
 // a valid signature from cfg.PublicKeys, and every body passes the locked feed
 // schema.
-func LoadAutotuneFeeds(cfg config.AutotuneFeedsConfig) (AutotuneFeeds, error) {
+//
+// A rejected signed release manifest (SPEC-023 §3.8) fails the load with a
+// *ReleaseManifestError unless DropRejectedReleaseManifest is passed.
+func LoadAutotuneFeeds(cfg config.AutotuneFeedsConfig, opts ...AutotuneFeedsLoadOption) (AutotuneFeeds, error) {
+	var loadOpts autotuneFeedsLoadOptions
+	for _, opt := range opts {
+		opt(&loadOpts)
+	}
 	keyring, err := cfg.DecodePublicKeyring()
 	if err != nil {
 		return AutotuneFeeds{}, err
@@ -257,7 +265,14 @@ func LoadAutotuneFeeds(cfg config.AutotuneFeedsConfig) (AutotuneFeeds, error) {
 	}
 	manifestJSON, manifestSig, err := loadReleaseManifest(cfg, keyring, candidates, served)
 	if err != nil {
-		return AutotuneFeeds{}, err
+		var rejected *ReleaseManifestError
+		if !loadOpts.dropRejectedReleaseManifest || !errors.As(err, &rejected) {
+			return AutotuneFeeds{}, err
+		}
+		if loadOpts.onDroppedReleaseManifest != nil {
+			loadOpts.onDroppedReleaseManifest(rejected)
+		}
+		manifestJSON, manifestSig = nil, nil
 	}
 	return AutotuneFeeds{
 		NativeMTP:                            nativeMTP,
@@ -1425,6 +1440,10 @@ func (s *Server) handleAutotuneRelease(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) serveAutotuneFeedBytes(w http.ResponseWriter, r *http.Request, body []byte, enabled bool) {
+	s.serveAutotuneFeedBytesWithCacheControl(w, r, body, enabled, "public, max-age=300")
+}
+
+func (s *Server) serveAutotuneFeedBytesWithCacheControl(w http.ResponseWriter, r *http.Request, body []byte, enabled bool, cacheControl string) {
 	if !s.allowReceiptKeys(r) {
 		w.Header().Set("Retry-After", "1")
 		writeError(w, http.StatusTooManyRequests, "rate_limited", "Autotune feed endpoint rate limit exceeded")
@@ -1435,7 +1454,7 @@ func (s *Server) serveAutotuneFeedBytes(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Cache-Control", "public, max-age=300")
+	w.Header().Set("Cache-Control", cacheControl)
 	if _, err := w.Write(body); err != nil {
 		s.log.Warn().Err(err).Msg("write autotune feed response failed")
 	}

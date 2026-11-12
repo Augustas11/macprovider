@@ -1937,7 +1937,14 @@ struct AutotuneStaticInputs {
     static let transitionMissingProvenanceCandidateSHA256 = "776182f6230eff098345b188322dba0c7fce47a6da46447432991ffdc37eabda"
     static let transitionDemandRankSHA256 = "27cdfc12a43b78db32710926ee16699aadce0c4ddd9d8282baca2532f780c5e2"
 
-    var fetch: (URL) async throws -> Data
+    var fetch: (URL) async throws -> Data {
+        // A replaced feed fetch carries the release manifest too.
+        didSet { releaseManifestFetch = nil }
+    }
+    /// SPEC-023 §3.8: the streaming, size-capped, cache-bypassing fetch for
+    /// `/v1/catalog-release` (+ `.sig`). Set only with the default `fetch`;
+    /// nil routes the manifest through `fetch`.
+    var releaseManifestFetch: NativeMTPAdmissionFeed.Fetcher?
     var trustedPublicKeys: [String: String]
     var verifySignature: ((Data, Data) -> Bool)?
     var now: () -> Date
@@ -1946,14 +1953,20 @@ struct AutotuneStaticInputs {
     var releaseManifests = CatalogReleaseManifestSource()
 
     init(
-        fetch: @escaping (URL) async throws -> Data = { url in
-            try await AutotuneStaticInputs.fetchHonoringRateLimit(url)
-        },
+        fetch: ((URL) async throws -> Data)? = nil,
         trustedPublicKeys: [String: String] = Self.defaultTrustedPublicKeys,
         verifySignature: ((Data, Data) -> Bool)? = nil,
         now: @escaping () -> Date = Date.init
     ) {
-        self.fetch = fetch
+        if let fetch {
+            self.fetch = fetch
+            self.releaseManifestFetch = nil
+        } else {
+            self.fetch = { url in try await AutotuneStaticInputs.fetchHonoringRateLimit(url) }
+            self.releaseManifestFetch = { url, maxBytes in
+                try await NativeMTPAdmissionFeed.defaultFetch(url: url, maxBytes: maxBytes)
+            }
+        }
         self.trustedPublicKeys = trustedPublicKeys
         self.verifySignature = verifySignature
         self.now = now

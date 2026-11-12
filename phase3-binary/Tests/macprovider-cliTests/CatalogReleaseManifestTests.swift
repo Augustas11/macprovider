@@ -55,6 +55,7 @@ final class CatalogReleaseManifestTests: XCTestCase {
         XCTAssertEqual(first, keyID)
         XCTAssertEqual(second, keyID)
         XCTAssertFalse(recorder.paths.contains { $0.hasSuffix(".json.sig") || $0 == "/v1/demand-rank.sig" })
+        XCTAssertFalse(recorder.paths.contains("/v1/autotune-candidates.sig"), "a manifest-bound feed skips its sidecar")
         XCTAssertEqual(recorder.paths.filter { $0 == "/v1/catalog-release" }.count, 1, "one manifest fetch per load")
     }
 
@@ -94,6 +95,56 @@ final class CatalogReleaseManifestTests: XCTestCase {
         XCTAssertNil(signerKeyID)
     }
 
+    func testNativeMTPAdmissionFeedIsNotManifestBound() throws {
+        XCTAssertNil(CatalogReleaseManifest.boundFeedNames["native-mtp-admission"])
+        XCTAssertFalse(CatalogReleaseManifest.boundFeedNames.values.contains("native-mtp-admission.json"))
+    }
+
+    func testOversizedManifestIsRejectedAndFallsBackToSidecar() async throws {
+        let signer = Curve25519.Signing.PrivateKey()
+        let (manifest, signature) = try signedManifest(signer: signer, trailingPadding: CatalogReleaseManifest.maxManifestBytes)
+        XCTAssertGreaterThan(manifest.count, CatalogReleaseManifest.maxManifestBytes)
+        // Well signed, so the size cap alone refuses it.
+        let recorder = FetchRecorder(routes: [
+            "/v1/catalog-release": manifest,
+            "/v1/catalog-release.sig": signature,
+            "/v1/demand-rank.sig": sidecar(for: demand, signer: signer),
+        ])
+        let inputs = AutotuneStaticInputs(fetch: recorder.fetch, trustedPublicKeys: keyring(signer))
+        let signerKeyID = await inputs.authenticatedSigner(name: "demand-rank", body: demand, baseURL: baseURL)
+        XCTAssertEqual(signerKeyID, keyID)
+        XCTAssertTrue(recorder.paths.contains("/v1/demand-rank.sig"), "an oversized manifest leaves feeds on their sidecars")
+    }
+
+    func testStreamingManifestFetchIsCappedAndOversizedBodyIsRejected() async throws {
+        let signer = Curve25519.Signing.PrivateKey()
+        let (manifest, signature) = try signedManifest(signer: signer)
+        let (oversized, oversizedSignature) = try signedManifest(signer: signer, trailingPadding: CatalogReleaseManifest.maxManifestBytes)
+        let caps = CapRecorder()
+        for (body, sig, expected) in [(manifest, signature, keyID as String?), (oversized, oversizedSignature, nil)] {
+            let recorder = FetchRecorder(routes: [:])
+            var inputs = AutotuneStaticInputs(fetch: recorder.fetch, trustedPublicKeys: keyring(signer))
+            inputs.releaseManifestFetch = { url, maxBytes in
+                caps.record(url.path, maxBytes)
+                let payload = url.path.hasSuffix(".sig") ? sig : body
+                return NativeMTPAdmissionFeed.FetchResponse(statusCode: 200, body: payload, redirected: false)
+            }
+            let signerKeyID = await inputs.authenticatedSigner(name: "demand-rank", body: demand, baseURL: baseURL)
+            XCTAssertEqual(signerKeyID, expected)
+            XCTAssertFalse(recorder.paths.contains("/v1/catalog-release"), "the streaming fetch carries the manifest")
+        }
+        XCTAssertEqual(caps.caps["/v1/catalog-release"], CatalogReleaseManifest.maxManifestBytes)
+        XCTAssertEqual(caps.caps["/v1/catalog-release.sig"], CatalogReleaseManifest.maxSignatureBytes)
+    }
+
+    func testDefaultInputsStreamTheManifestUntilFetchIsReplaced() {
+        var inputs = AutotuneStaticInputs()
+        XCTAssertNotNil(inputs.releaseManifestFetch)
+        inputs.fetch = { _ in throw URLError(.notConnectedToInternet) }
+        XCTAssertNil(inputs.releaseManifestFetch)
+        XCTAssertNil(AutotuneStaticInputs(fetch: { _ in Data() }).releaseManifestFetch)
+    }
+
     func testCachedManifestIsRefetchedOnceAfterARelease() async throws {
         let signer = Curve25519.Signing.PrivateKey()
         let (oldManifest, oldSignature) = try signedManifest(signer: signer)
@@ -131,7 +182,8 @@ final class CatalogReleaseManifestTests: XCTestCase {
         signer: Curve25519.Signing.PrivateKey,
         demandBody: Data? = nil,
         demandSigner: String? = nil,
-        extraField: Bool = false
+        extraField: Bool = false,
+        trailingPadding: Int = 0
     ) throws -> (Data, Data) {
         var root: [String: Any] = [
             "feeds": [
@@ -150,8 +202,27 @@ final class CatalogReleaseManifestTests: XCTestCase {
         if extraField {
             root["extra"] = true
         }
-        let manifest = try JSONSerialization.data(withJSONObject: root, options: [.sortedKeys])
+        var manifest = try JSONSerialization.data(withJSONObject: root, options: [.sortedKeys])
+        manifest.append(Data(repeating: UInt8(ascii: " "), count: trailingPadding))
         return (manifest, sidecar(for: manifest, signer: signer))
+    }
+}
+
+/// Records the byte cap the streaming manifest fetch was given per path.
+private final class CapRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: [String: Int] = [:]
+
+    var caps: [String: Int] {
+        lock.lock()
+        defer { lock.unlock() }
+        return recorded
+    }
+
+    func record(_ path: String, _ maxBytes: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        recorded[path] = maxBytes
     }
 }
 

@@ -2454,11 +2454,16 @@ back to the per-feed sidecar only when no verified manifest binds that feed.
    - require that `release_id` and `policy_version` equal the candidate
      catalog's;
    - require that every feed it serves (candidate catalog, demand rank, rate
-     card, CB policy, artifact feed, native-MTP admission sidecar) is bound
+     card, CB policy, artifact feed, native-MTP admission feed body) is bound
      with the served `sha256`, `bytes` and sidecar signer.
 
-   Any mismatch fails startup or SIGHUP reload closed. When the sidecar is
-   absent, both routes answer 404 and every feed is served exactly as
+   Any mismatch, a malformed manifest or a key outside the closed key sets
+   (with `bytes` an integer) fails the release dry-load
+   (`--validate-autotune-release`) and the SIGHUP reload closed. At
+   startup the coordinator logs the rejection as an error and treats the
+   manifest as absent, so a bad manifest alone never keeps it down; every
+   other feed error still fails startup. Both routes are served with
+   `Cache-Control: no-cache`. When the sidecar is absent, both routes answer 404 and every feed is served exactly as
    before. A release installed by a path that does not yet carry the
    sidecar (for example a provider-release asset set fixed by §3.7.8 Stage
    A) serves no manifest; consumers then use the per-feed sidecars.
@@ -2506,8 +2511,10 @@ feed bound to another signer. The coordinator serves the signed manifest
 and its sidecar byte-for-byte and answers 404 without the sidecar. It fails
 closed on: a bad signature; an unknown key; a trusted key that is not the
 candidate signer; a served feed whose digest differs or is unbound; a
-static feed bound to another signer; another release; an unknown field; and
-a sidecar without a manifest. The CLI authenticates a bound feed from a
+static feed bound to another signer; another release; an unknown or missing
+key; a non-integer `bytes`; and a sidecar without a manifest. At startup it
+drops a rejected manifest, serves every feed and answers 404 on both
+routes; the dry-load and SIGHUP reload still reject it. The CLI authenticates a bound feed from a
 verified manifest without fetching its sidecar. It treats a bound digest
 mismatch as an integrity failure. It falls back to the per-feed sidecar
 when the manifest is absent or unverified, and refetches a stale cached

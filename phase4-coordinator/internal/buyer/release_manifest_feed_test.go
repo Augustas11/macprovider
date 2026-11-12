@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -113,6 +114,11 @@ func TestReleaseManifestServedWhenSignedAndBindingServedFeeds(t *testing.T) {
 	if rr := serveFeed(t, feeds, "/v1/catalog-release.sig"); rr.Code != http.StatusOK || rr.Body.String() != string(sig) {
 		t.Fatalf("/v1/catalog-release.sig status=%d body mismatch", rr.Code)
 	}
+	for _, path := range []string{"/v1/catalog-release", "/v1/catalog-release.sig"} {
+		if got := serveFeed(t, feeds, path).Header().Get("Cache-Control"); got != "no-cache" {
+			t.Fatalf("%s Cache-Control=%q want no-cache", path, got)
+		}
+	}
 	// Per-feed sidecars keep being served beside the manifest.
 	if rr := serveFeed(t, feeds, "/v1/autotune-candidates.sig"); rr.Code != http.StatusOK {
 		t.Fatalf("/v1/autotune-candidates.sig status=%d", rr.Code)
@@ -212,6 +218,54 @@ func TestReleaseManifestFailsClosed(t *testing.T) {
 			},
 			want: "schema",
 		},
+		"unknown feed entry key": {
+			mutate: func(t *testing.T, f releaseManifestFixture) {
+				m := f.manifest(t)
+				m["feeds"].(map[string]any)["demand-rank.json"].(map[string]any)["extra"] = "x"
+				f.write(t, m, "test-key", f.privateKey)
+			},
+			want: `unknown key "extra"`,
+		},
+		"missing top-level key": {
+			mutate: func(t *testing.T, f releaseManifestFixture) {
+				m := f.manifest(t)
+				delete(m, "generated_at")
+				f.write(t, m, "test-key", f.privateKey)
+			},
+			want: `missing key "generated_at"`,
+		},
+		"missing feed entry key": {
+			mutate: func(t *testing.T, f releaseManifestFixture) {
+				m := f.manifest(t)
+				delete(m["feeds"].(map[string]any)["rate-card.json"].(map[string]any), "version")
+				f.write(t, m, "test-key", f.privateKey)
+			},
+			want: `missing key "version"`,
+		},
+		"fractional bytes": {
+			mutate: func(t *testing.T, f releaseManifestFixture) {
+				m := f.manifest(t)
+				m["feeds"].(map[string]any)["tier2-catalog.json"].(map[string]any)["bytes"] = json.Number("10.0")
+				f.write(t, m, "test-key", f.privateKey)
+			},
+			want: "bytes must be a positive integer",
+		},
+		"exponent bytes": {
+			mutate: func(t *testing.T, f releaseManifestFixture) {
+				m := f.manifest(t)
+				m["feeds"].(map[string]any)["tier2-catalog.json"].(map[string]any)["bytes"] = json.Number("1e1")
+				f.write(t, m, "test-key", f.privateKey)
+			},
+			want: "bytes must be a positive integer",
+		},
+		"string bytes": {
+			mutate: func(t *testing.T, f releaseManifestFixture) {
+				m := f.manifest(t)
+				m["feeds"].(map[string]any)["tier2-catalog.json"].(map[string]any)["bytes"] = "10"
+				f.write(t, m, "test-key", f.privateKey)
+			},
+			want: "bytes must be a number",
+		},
 		"signature without manifest": {
 			mutate: func(t *testing.T, f releaseManifestFixture) {
 				f.write(t, f.manifest(t), "test-key", f.privateKey)
@@ -229,6 +283,20 @@ func TestReleaseManifestFailsClosed(t *testing.T) {
 			_, err := buyer.LoadAutotuneFeeds(f.cfg)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("LoadAutotuneFeeds error=%v, want %q", err, tc.want)
+			}
+			var rejected *buyer.ReleaseManifestError
+			if !errors.As(err, &rejected) {
+				t.Fatalf("LoadAutotuneFeeds error=%v is not a *buyer.ReleaseManifestError", err)
+			}
+			// The boot-only option drops the rejected manifest and keeps
+			// every feed served.
+			var dropped *buyer.ReleaseManifestError
+			feeds, err := buyer.LoadAutotuneFeeds(f.cfg, buyer.DropRejectedReleaseManifest(func(e *buyer.ReleaseManifestError) { dropped = e }))
+			if err != nil || dropped == nil || len(feeds.ReleaseManifestJSON) != 0 || len(feeds.AutotuneCandidatesJSON) == 0 {
+				t.Fatalf("drop option: err=%v dropped=%v manifest=%d", err, dropped, len(feeds.ReleaseManifestJSON))
+			}
+			if rr := serveFeed(t, feeds, "/v1/catalog-release"); rr.Code != http.StatusNotFound {
+				t.Fatalf("/v1/catalog-release status=%d want 404 after drop", rr.Code)
 			}
 		})
 	}
