@@ -551,3 +551,18 @@ func TestDemandTelemetryKnowsMiniMaxM3IdentitiesExactly(t *testing.T) {
 		}
 	}
 }
+
+// #2236: the Nemotron 3.5 Lightning catalog key and served artifact id are
+// recorded as themselves, never folded into Nemotron 3 Nano.
+func TestDemandTelemetryKnowsNemotron35LightningIdentitiesExactly(t *testing.T) {
+	for _, model := range []string{"nvidia/nemotron-3.5-lightning-30b-a3b", "mlx-community/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-4bit"} {
+		if got := sanitizeDemandModelID(model); got != model {
+			t.Errorf("sanitizeDemandModelID(%q) = %q, want the model itself", model, got)
+		}
+	}
+	for _, model := range []string{"nvidia/nemotron-3.5-lightning-30b-a3bx", "mlx-community/nvidia-nemotron-3.5-lightning-30b-a3b-4bit"} {
+		if got := sanitizeDemandModelID(model); got != demandUnknownModelID {
+			t.Errorf("sanitizeDemandModelID(%q) = %q, want %q", model, got, demandUnknownModelID)
+		}
+	}
+}

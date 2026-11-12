@@ -669,11 +669,14 @@ class RateCardSourceTest(unittest.TestCase):
         # #2154: Ternary-Bonsai-2 2B is listed at class-3b; listing does not
         # admit it for recommendation.
         # #2189: MiniMax M3.1-Flash is listed at class-120b-moe.
+        # #2236: Nemotron 3.5 Lightning 30B-A3B is listed on its own
+        # class-30b-moe row at the Nemotron 3 Nano price.
         listed_priced = {
             "ricursiveai/ripple-65b-preview",
             "liquidai/lfm3-1.7b",
             "prism-ml/ternary-bonsai-2-2b-mlx-2bit",
             "minimaxai/minimax-m3.1-flash",
+            "nvidia/nemotron-3.5-lightning-30b-a3b",
         }
         for key in listed_priced:
             self.assertEqual(CANDIDATE_OBJ["rows"][key]["runtime_status"], "listed")
